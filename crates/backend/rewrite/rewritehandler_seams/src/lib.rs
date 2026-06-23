@@ -2,7 +2,7 @@
 //! (`rewrite/rewriteHandler.c`): the rule rewriter portalcmds runs over the
 //! analyzed cursor query.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::portalcmds::Query;
 
 seam_core::seam!(

@@ -8,12 +8,12 @@
 #![allow(non_snake_case)]
 
 use types_core::{RepOriginId, TimestampTz, XLogRecPtr};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `replorigin_redo(record)` (origin.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn replorigin_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
+    pub fn replorigin_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -21,7 +21,7 @@ seam_core::seam!(
     /// record the remote LSN the current session's replication origin has
     /// reached, so streaming can restart from the right place after a crash.
     /// Plain backend-local write; infallible.
-    pub fn set_replorigin_session_origin_lsn(lsn: types_core::XLogRecPtr)
+    pub fn set_replorigin_session_origin_lsn(lsn: ::types_core::XLogRecPtr)
 );
 
 seam_core::seam!(
@@ -57,7 +57,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `replorigin_session_origin_timestamp = ts` (origin.c global): write-back
     /// of the derived commit timestamp. Pure write of backend-local state.
-    pub fn set_replorigin_session_timestamp(ts: types_core::TimestampTz)
+    pub fn set_replorigin_session_timestamp(ts: ::types_core::TimestampTz)
 );
 
 seam_core::seam!(
@@ -80,9 +80,9 @@ seam_core::seam!(
     /// otherwise. `Err` includes OOM from the copy.
     pub fn replorigin_by_oid<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        roident: types_core::primitive::RepOriginId,
+        roident: ::types_core::primitive::RepOriginId,
         missing_ok: bool,
-    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> ::types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(
@@ -96,14 +96,14 @@ seam_core::seam!(
     /// `ReplicationOriginShmemSize()` (ipci.c `CalculateShmemSize` accumulator) —
     /// shared-memory bytes this subsystem needs. Infallible in C, so the seam
     /// returns a bare `Size`.
-    pub fn replication_origin_shmem_size() -> types_core::Size
+    pub fn replication_origin_shmem_size() -> ::types_core::Size
 );
 
 seam_core::seam!(
     /// `ReplicationOriginShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
     /// this subsystem's shared-memory structures. `Err` carries the C
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn replication_origin_shmem_init() -> types_error::PgResult<()>
+    pub fn replication_origin_shmem_init() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

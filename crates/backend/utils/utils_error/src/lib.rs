@@ -120,7 +120,7 @@ pub use types_error::{ErrorLevel, PgError, PgResult, SoftErrorContext, SqlState}
 /// storage variables and hooks into the GUC tables' typed slots.
 pub fn init_seams() {
     use guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
-    use types_error::PGErrorVerbosity;
+    use ::types_error::PGErrorVerbosity;
 
     error_seams::ereport::set(stack::ThrowErrorData);
     error_seams::sqlstate_for_file_access::set(errno::sqlstate_for_file_access);

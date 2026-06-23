@@ -16,12 +16,12 @@
 
 use mcx::{Mcx, PgVec};
 
-use utils_error::ereport;
-use types_core::primitive::BlockNumber;
+use ::utils_error::ereport;
+use ::types_core::primitive::BlockNumber;
 use types_error::{PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
-use rel::Relation;
-use types_scan::sdir::ForwardScanDirection;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_scan::sdir::ForwardScanDirection;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use heapam as heapam;
 use execExpr_seams as expr_seam;
@@ -29,8 +29,8 @@ use execTuples_seams as slot_seam;
 use execUtils_seams as exec_util_seam;
 use bufmgr_seams as bufmgr_seam;
 
-use types_tableam::amapi::IndexUniqueCheck;
-use types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::amapi::IndexUniqueCheck;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
 
 use crate::build_scan::{
     form_index_datum, heap_tuple_is_heap_only, offset_number_is_valid, offset_root, rel_name,
@@ -60,7 +60,7 @@ fn itemptr_decode(encoded: i64) -> ItemPointerData {
     tid
 }
 
-use table_tableam_seams::ValidateScanCounters;
+use ::table_tableam_seams::ValidateScanCounters;
 
 /// `heapam_index_validate_scan(heapRelation, indexRelation, indexInfo, snapshot,
 /// state)` (heapam_handler.c). `get_next_index_tid` pulls the next encoded TID
@@ -73,7 +73,7 @@ pub fn heapam_index_validate_scan<'mcx>(
     heap_relation: &Relation<'mcx>,
     index_relation: &Relation<'mcx>,
     index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
-    snapshot: types_tableam::tableam::Snapshot,
+    snapshot: ::types_tableam::tableam::Snapshot,
     counters: &mut ValidateScanCounters,
     get_next_index_tid: &mut dyn FnMut() -> PgResult<Option<i64>>,
 ) -> PgResult<()> {
@@ -89,7 +89,7 @@ pub fn heapam_index_validate_scan<'mcx>(
     // A plain heap-tuple slot holds NO buffer pin (the scanned tuple is copied
     // into it via ExecStoreHeapTuple below). Using a buffer-pinning slot here
     // leaks one heap-page pin per validated tuple ("resource was not closed").
-    let tupdesc = Some(mcx::alloc_in(mcx, heap_relation.rd_att.clone_in(mcx)?)?);
+    let tupdesc = Some(::mcx::alloc_in(mcx, heap_relation.rd_att.clone_in(mcx)?)?);
     let slot_data = slot_seam::make_single_tuple_table_slot::call(
         mcx,
         tupdesc,
@@ -110,12 +110,12 @@ pub fn heapam_index_validate_scan<'mcx>(
 
     // FormIndexDatum's "first time through" expression-state setup, hoisted out
     // of the per-tuple loop (mirrors build_scan).
-    let mut expr_states: PgVec<'mcx, mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>> =
+    let mut expr_states: PgVec<'mcx, ::mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>> =
         if let Some(exprs) = index_info.ii_Expressions.as_ref() {
             let exprs: Vec<nodes::primnodes::Expr> = exprs.iter().cloned().collect();
             expr_seam::exec_prepare_expr_list::call(&exprs, &mut estate)?
         } else {
-            mcx::vec_with_capacity_in(mcx, 0)?
+            ::mcx::vec_with_capacity_in(mcx, 0)?
         };
 
     // Prepare for scan of the base relation.  We need just those tuples
@@ -128,7 +128,7 @@ pub fn heapam_index_validate_scan<'mcx>(
         heap_relation,
         snapshot.clone(),
         0,
-        mcx::vec_with_capacity_in(mcx, 0)?,
+        ::mcx::vec_with_capacity_in(mcx, 0)?,
         true,
         false,
     )?;
@@ -336,7 +336,7 @@ pub fn provider_index_validate_scan<'mcx>(
     table_rel: &Relation<'mcx>,
     index_rel: &Relation<'mcx>,
     index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
-    snapshot: types_tableam::tableam::Snapshot,
+    snapshot: ::types_tableam::tableam::Snapshot,
     counters: &mut ValidateScanCounters,
     get_next_index_tid: &mut dyn FnMut() -> PgResult<Option<i64>>,
 ) -> PgResult<()> {

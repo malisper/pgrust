@@ -139,8 +139,8 @@ pub fn init_seams() {
     // `AuxiliaryPidGetProc` resolve a pid to here. The backend scan crosses into
     // procarray (`backend_pid_get_proc_role`, installed by procarray); the
     // auxiliary scan is `proc_lifecycle::AuxiliaryPidGetProc`, owned here.
-    mcxtfuncs_seams::pid_get_proc::set(|pid| {
-        use mcxtfuncs_seams::McxtSignalTarget;
+    ::mcxtfuncs_seams::pid_get_proc::set(|pid| {
+        use ::mcxtfuncs_seams::McxtSignalTarget;
         let proc_number = procarray_seams::backend_pid_get_proc_role::call(pid)
             .map(|(_role_id, procno)| procno)
             .or_else(|| proc_lifecycle::AuxiliaryPidGetProc(pid));

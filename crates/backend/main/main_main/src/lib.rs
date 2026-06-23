@@ -14,7 +14,7 @@
 //! This port models the same flow as [`pg_main`], driving the startup sequence
 //! and the dispatch switch. The actual C-ABI `extern "C" fn main` binary entry
 //! is a thin shell over this and is not part of this library crate; it owns the
-//! top-level [`mcx::MemoryContext`] passed in here (created right after the C
+//! top-level [`::mcx::MemoryContext`] passed in here (created right after the C
 //! `MemoryContextInit`).
 //!
 //! `progname` (a process global in C) is threaded as a parameter to the
@@ -24,16 +24,16 @@
 
 use std::cell::Cell;
 
-use common_exec_seams::set_pglocale_pgservice;
-use common_path_seams::get_progname;
-use postmaster_seams::postmaster_main;
+use ::common_exec_seams::set_pglocale_pgservice;
+use ::common_path_seams::get_progname;
+use ::postmaster_seams::postmaster_main;
 use postgres_seams::{postgres_single_user_main, set_stack_base};
-use pg_locale_seams::LcCategory;
-use mcxt_seams::memory_context_init;
-use username_seams::get_user_name_or_exit;
-use mcx::Mcx;
-use types_error::PgResult;
-use types_startup::DispatchOption;
+use ::pg_locale_seams::LcCategory;
+use ::mcxt_seams::memory_context_init;
+use ::username_seams::get_user_name_or_exit;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::types_startup::DispatchOption;
 
 mod help;
 mod locale;
@@ -281,7 +281,7 @@ fn install_ereport_panic_hook() {
         // SQL ERROR, so the backtrace is noise — stay quiet. Any other payload is
         // a genuine programming error and still prints.
         let _ = EREPORT_PANIC_PREFIX;
-        let is_handled_ereport = info.payload().downcast_ref::<types_error::PgError>().is_some()
+        let is_handled_ereport = info.payload().downcast_ref::<::types_error::PgError>().is_some()
             || info.payload().downcast_ref::<String>().is_some()
             || info.payload().downcast_ref::<&str>().is_some();
         if is_handled_ereport && std::env::var_os("PGRUST_PANIC_VERBOSE").is_none() {
@@ -310,8 +310,8 @@ fn check_root(progname: &str) -> PgResult<()> {
     // SAFETY: geteuid/getuid never fail and have no preconditions.
     let euid = unsafe { libc::geteuid() };
     if euid == 0 {
-        return Err(types_error::PgError::new(
-            types_error::FATAL,
+        return Err(::types_error::PgError::new(
+            ::types_error::FATAL,
             "\"root\" execution of the PostgreSQL server is not permitted.\n\
              The server must be started under an unprivileged user ID to prevent\n\
              possible system security compromise.  See the documentation for\n\
@@ -326,8 +326,8 @@ fn check_root(progname: &str) -> PgResult<()> {
     // SAFETY: getuid never fails.
     let uid = unsafe { libc::getuid() };
     if uid != euid {
-        return Err(types_error::PgError::new(
-            types_error::FATAL,
+        return Err(::types_error::PgError::new(
+            ::types_error::FATAL,
             format!("{progname}: real and effective user IDs must match"),
         ));
     }
@@ -353,7 +353,7 @@ pub fn init_seams() {
     main_seams::parse_dispatch_option::set(parse_dispatch_option);
     // `progname` (main.c global): read-only accessor served from the process
     // globals home, where `pg_main` stores it after `get_progname(argv[0])`.
-    postgres_seams::progname::set(init_small::globals::progname);
+    ::postgres_seams::progname::set(init_small::globals::progname);
 }
 
 #[cfg(test)]

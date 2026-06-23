@@ -7,10 +7,10 @@
 
 use core::marker::PhantomData;
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
 use types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
-use types_rangetypes::RangeTypeP;
+use ::types_rangetypes::RangeTypeP;
 
 use crate::range_bounds_compare::{
     range_adjacent_internal, range_cmp_bounds, range_overlaps_internal,

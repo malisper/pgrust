@@ -4,7 +4,7 @@
 //! The complete set of C functions this module provides, ported 1:1:
 //!
 //!   * `ginhandler`           — assemble the unified [`IndexAmRoutine`]
-//!   * `initGinState`         — fill a [`gin::GinState`] describing the index
+//!   * `initGinState`         — fill a [`::gin::GinState`] describing the index
 //!   * `gintuple_get_attrnum` — column number of a stored entry
 //!   * `gintuple_get_key`     — stored datum + null category
 //!   * `GinNewBuffer`         — allocate a fresh page (FSM recycle / extend)
@@ -58,43 +58,43 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use common_reloptions::{
     build_reloptions, relopt_kind, RelOptParseElt, RELOPT_KIND_GIN, RELOPT_TYPE_BOOL,
     RELOPT_TYPE_INT,
 };
 use page::{PageGetPageSize, PageInit, PageRef};
-use utils_error::ereport;
-use types_error::error::{ERRCODE_UNDEFINED_FUNCTION, ERROR};
+use ::utils_error::ereport;
+use ::types_error::error::{ERRCODE_UNDEFINED_FUNCTION, ERROR};
 use types_error::{PgError, PgResult};
 
 use ginutil_seams as sx;
 use indexam_seams as indexam;
 use relcache_seams as relcache;
 
-use types_core::primitive::{AttrNumber, OffsetNumber, Oid};
+use ::types_core::primitive::{AttrNumber, OffsetNumber, Oid};
 use types_core::{InvalidOid, OidIsValid, BLCKSZ};
-use types_tuple::heaptuple::DEFAULT_COLLATION_OID;
+use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 use gin::{
     GinMetaPageData, GinNullCategory, GinOptions, GinPageOpaqueData, GinState, GinStatsData,
     GIN_CAT_EMPTY_ITEM, GIN_CAT_NORM_KEY, GIN_CAT_NULL_ITEM, GIN_CAT_NULL_KEY, GIN_COMPARE_PROC,
     GIN_COMPARE_PARTIAL_PROC, GIN_CONSISTENT_PROC, GIN_CURRENT_VERSION, GIN_EXTRACTQUERY_PROC,
     GIN_EXTRACTVALUE_PROC, GIN_META, GIN_OPTIONS_PROC, GIN_TRICONSISTENT_PROC, GINNProcs,
 };
-use rel::Relation;
-use types_storage::storage::Buffer;
-use types_core::primitive::InvalidBlockNumber;
-use types_tuple::heaptuple::FIRST_OFFSET_NUMBER as FirstOffsetNumber;
-use types_tableam::amapi::{
+use ::rel::Relation;
+use ::types_storage::storage::Buffer;
+use ::types_core::primitive::InvalidBlockNumber;
+use ::types_tuple::heaptuple::FIRST_OFFSET_NUMBER as FirstOffsetNumber;
+use ::types_tableam::amapi::{
     AmCostEstimate, IndexAmRoutine, IndexBuildResult, IndexPath, IndexUniqueCheck,
     OpFamilyMember, PlannerInfo, TIDBitmap, T_IndexAmRoutine,
 };
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
-use types_tuple::heaptuple::Datum;
-use types_scan::scankey::ScanKeyData;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use ::types_tuple::heaptuple::Datum;
+use ::types_scan::scankey::ScanKeyData;
 
 #[cfg(test)]
 mod tests;
@@ -104,7 +104,7 @@ mod tests;
 // ===========================================================================
 
 /// `GIN_METAPAGE_BLKNO` (ginblock.h:52) — re-exported from the carrier crate.
-pub use gin::GIN_METAPAGE_BLKNO;
+pub use ::gin::GIN_METAPAGE_BLKNO;
 
 /// `VACUUM_OPTION_PARALLEL_BULKDEL` (commands/vacuum.h): `1 << 0`.
 const VACUUM_OPTION_PARALLEL_BULKDEL: u8 = 1 << 0;
@@ -202,14 +202,14 @@ fn gin_options_bytes<'a, 'mcx>(index: &'a Relation<'mcx>) -> Option<&'a [u8]> {
 /// `FunctionCall2Coll` through the canonical-`Datum` fmgr dispatch — not an
 /// opclass `internal`-out-param support proc.
 fn gin_compare_entries_impl<'mcx>(
-    flinfo: &types_core::fmgr::FmgrInfo,
+    flinfo: &::types_core::fmgr::FmgrInfo,
     collation: Oid,
     a: Datum<'mcx>,
     b: Datum<'mcx>,
 ) -> PgResult<i32> {
     // The result is an `int4` by-value Datum; a transient context suffices for
     // the call frame (the comparator allocates nothing that outlives it).
-    let scratch = mcx::MemoryContext::new("ginCompareEntries");
+    let scratch = ::mcx::MemoryContext::new("ginCompareEntries");
     let res = fmgr_seams::function_call2_coll_datum::call(
         scratch.mcx(),
         flinfo.fn_oid,
@@ -226,7 +226,7 @@ fn gin_compare_entries_impl<'mcx>(
 fn gin_relation_get_descr_impl<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     Ok(Some(relcache::relation_get_descr::call(mcx, index)?))
 }
 
@@ -235,8 +235,8 @@ fn gin_relation_get_descr_impl<'mcx>(
 fn gin_relation_get_relation_name_impl<'mcx>(
     mcx: Mcx<'mcx>,
     index: &Relation<'mcx>,
-) -> PgResult<mcx::PgString<'mcx>> {
-    mcx::PgString::from_str_in(index.rd_rel.relname.as_str(), mcx)
+) -> PgResult<::mcx::PgString<'mcx>> {
+    ::mcx::PgString::from_str_in(index.rd_rel.relname.as_str(), mcx)
 }
 
 /// `lookup_type_cache(atttypid, TYPECACHE_CMP_PROC_FINFO)->cmp_proc_finfo`
@@ -248,11 +248,11 @@ fn gin_relation_get_relation_name_impl<'mcx>(
 fn gin_lookup_cmp_proc_finfo_impl<'mcx>(
     mcx: Mcx<'mcx>,
     atttypid: Oid,
-) -> PgResult<types_core::fmgr::FmgrInfo> {
+) -> PgResult<::types_core::fmgr::FmgrInfo> {
     let cmp_oid =
         typcache_seams::lookup_element_cmp_proc::call(atttypid)?;
     if !OidIsValid(cmp_oid) {
-        return Ok(types_core::fmgr::FmgrInfo::default());
+        return Ok(::types_core::fmgr::FmgrInfo::default());
     }
     fmgr_seams::fmgr_info::call(mcx, cmp_oid)
 }
@@ -265,7 +265,7 @@ fn gin_index_getattr_impl<'mcx>(
     mcx: Mcx<'mcx>,
     tuple: &[u8],
     attnum: u16,
-    tupdesc: &types_tuple::heaptuple::TupleDesc<'mcx>,
+    tupdesc: &::types_tuple::heaptuple::TupleDesc<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     let td = tupdesc
         .as_ref()
@@ -290,7 +290,7 @@ fn index_info_find_data_offset(t_info: u16) -> usize {
     const INDEX_NULL_MASK: u16 = 0x8000;
     const SIZEOF_INDEX_TUPLE_DATA: usize = 8;
     const SIZEOF_INDEX_ATTRIBUTE_BITMAP_DATA: usize =
-        (types_core::INDEX_MAX_KEYS as usize + 7) / 8;
+        (::types_core::INDEX_MAX_KEYS as usize + 7) / 8;
     let raw = if (t_info & INDEX_NULL_MASK) == 0 {
         SIZEOF_INDEX_TUPLE_DATA
     } else {
@@ -461,7 +461,7 @@ fn gininsert_am<'mcx>(
     index_relation: &Relation<'mcx>,
     values: &[Datum<'mcx>],
     isnull: &[bool],
-    heap_tid: &types_tuple::heaptuple::ItemPointerData,
+    heap_tid: &::types_tuple::heaptuple::ItemPointerData,
     heap_relation: &Relation<'mcx>,
     check_unique: IndexUniqueCheck,
     index_unchanged: bool,
@@ -573,7 +573,7 @@ pub fn initGinState<'mcx>(index: &Relation<'mcx>, mcx: Mcx<'mcx>) -> PgResult<Gi
                 2,
                 attr.attcollation,
             )?;
-            state.tupdesc[i] = Some(mcx::alloc_in(mcx, td)?);
+            state.tupdesc[i] = Some(::mcx::alloc_in(mcx, td)?);
         }
 
         let attnum = (i + 1) as AttrNumber;
@@ -1215,7 +1215,7 @@ fn datum_get_uint16(d: &Datum<'_>) -> u16 {
 }
 
 /// `origTupdesc->natts`.
-fn tupdesc_natts(td: &types_tuple::heaptuple::TupleDesc<'_>) -> usize {
+fn tupdesc_natts(td: &::types_tuple::heaptuple::TupleDesc<'_>) -> usize {
     td.as_ref()
         .map(|t| t.natts as usize)
         .unwrap_or(0)
@@ -1223,9 +1223,9 @@ fn tupdesc_natts(td: &types_tuple::heaptuple::TupleDesc<'_>) -> usize {
 
 /// `TupleDescAttr(origTupdesc, i)`.
 fn tupdesc_attr<'a>(
-    td: &'a types_tuple::heaptuple::TupleDesc<'_>,
+    td: &'a ::types_tuple::heaptuple::TupleDesc<'_>,
     i: usize,
-) -> &'a types_tuple::heaptuple::FormData_pg_attribute {
+) -> &'a ::types_tuple::heaptuple::FormData_pg_attribute {
     td.as_ref()
         .expect("GIN index descriptor is NULL")
         .attr(i)
@@ -1236,12 +1236,12 @@ fn tupdesc_attr<'a>(
 /// `None` (a NULL descriptor) copies to `None`.
 fn clone_tupdesc<'mcx>(
     mcx: Mcx<'mcx>,
-    td: &types_tuple::heaptuple::TupleDesc<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    td: &::types_tuple::heaptuple::TupleDesc<'mcx>,
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     match td.as_ref() {
         Some(t) => {
             let copy = tupdesc::CreateTupleDescCopy(mcx, t)?;
-            Ok(Some(mcx::alloc_in(mcx, copy)?))
+            Ok(Some(::mcx::alloc_in(mcx, copy)?))
         }
         None => Ok(None),
     }

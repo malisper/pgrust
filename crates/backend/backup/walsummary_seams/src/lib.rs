@@ -5,11 +5,11 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_blkreftable::BlockRefTableReader;
+use ::types_blkreftable::BlockRefTableReader;
 use types_core::{TimeLineID, XLogRecPtr};
-use types_error::PgResult;
-use types_storage::file::File;
-use types_walsummarizer::WalSummaryFile;
+use ::types_error::PgResult;
+use ::types_storage::file::File;
+use ::types_walsummarizer::WalSummaryFile;
 
 seam_core::seam!(
     /// `GetWalSummaries(tli, start_lsn, end_lsn)` (walsummary.c) — return the

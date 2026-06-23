@@ -25,12 +25,12 @@
 //! `bytea` body and `enum_range`'s array image cross on the by-ref `Varlena`
 //! lane.
 
-use mcx::MemoryContext;
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::mcx::MemoryContext;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_core::primitive::Oid;
-use types_core::TransactionId;
+use ::types_core::primitive::Oid;
+use ::types_core::TransactionId;
 
 use snapmgr as snapmgr;
 use fmgr_core as fmgr_core;
@@ -116,7 +116,7 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
 fn ret_send(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
     const VARHDRSZ: usize = 4;
     let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
     image.extend_from_slice(&payload);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
@@ -167,7 +167,7 @@ fn fc_enum_recv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<
     let enumtypoid = arg_oid(fcinfo, 1);
     let xmin = transaction_xmin();
     let m = scratch_mcx();
-    let mut data = mcx::PgVec::new_in(m.mcx());
+    let mut data = ::mcx::PgVec::new_in(m.mcx());
     data.extend_from_slice(&src);
     let mut buf = stringinfo::StringInfo::from_vec(data);
     let oid = crate::enum_recv(&mut buf, enumtypoid, xmin)?;

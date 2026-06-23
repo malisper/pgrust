@@ -19,8 +19,8 @@
 #![allow(non_upper_case_globals)]
 
 use mcx::{alloc_in, Mcx, PgBox};
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 use types_error::{
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
 };
@@ -35,7 +35,7 @@ use types_partition::{
     PartitionKeyData, PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::helpers::here;
 
@@ -104,7 +104,7 @@ pub fn transformPartitionBound<'mcx>(
     let parent = common_relation::relation_open(
         mcx,
         parent_relid,
-        types_storage::lock::NoLock,
+        ::types_storage::lock::NoLock,
     )?;
     let key = partcache::RelationGetPartitionKey(mcx, &parent)?
         .ok_or_else(|| {
@@ -121,7 +121,7 @@ pub fn transformPartitionBound<'mcx>(
     if spec.is_default {
         // Hash partitioning does not support a default partition.
         if strategy == PARTITION_STRATEGY_HASH {
-            parent.close(types_storage::lock::NoLock)?;
+            parent.close(::types_storage::lock::NoLock)?;
             return ereport(ERROR)
                 .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                 .errmsg("a hash-partitioned table may not have a default partition")
@@ -131,14 +131,14 @@ pub fn transformPartitionBound<'mcx>(
 
         // Assign the parent's strategy to the default partition bound spec.
         result_spec.strategy = strategy;
-        parent.close(types_storage::lock::NoLock)?;
+        parent.close(::types_storage::lock::NoLock)?;
         return Ok(alloc_in(mcx, Node::mk_partition_bound_spec(mcx, result_spec)?)?);
     }
 
     if strategy == PARTITION_STRATEGY_HASH {
         {
             if spec.strategy != PARTITION_STRATEGY_HASH {
-                parent.close(types_storage::lock::NoLock)?;
+                parent.close(::types_storage::lock::NoLock)?;
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("invalid bound specification for a hash partition")
@@ -148,7 +148,7 @@ pub fn transformPartitionBound<'mcx>(
             }
 
             if spec.modulus <= 0 {
-                parent.close(types_storage::lock::NoLock)?;
+                parent.close(::types_storage::lock::NoLock)?;
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("modulus for hash partition must be an integer value greater than zero")
@@ -159,7 +159,7 @@ pub fn transformPartitionBound<'mcx>(
             debug_assert!(spec.remainder >= 0);
 
             if spec.remainder >= spec.modulus {
-                parent.close(types_storage::lock::NoLock)?;
+                parent.close(::types_storage::lock::NoLock)?;
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("remainder for hash partition must be less than modulus")
@@ -170,7 +170,7 @@ pub fn transformPartitionBound<'mcx>(
     } else if strategy == PARTITION_STRATEGY_LIST {
         {
             if spec.strategy != PARTITION_STRATEGY_LIST {
-                parent.close(types_storage::lock::NoLock)?;
+                parent.close(::types_storage::lock::NoLock)?;
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("invalid bound specification for a list partition")
@@ -185,8 +185,8 @@ pub fn transformPartitionBound<'mcx>(
             let coltypmod = get_partition_col_typmod(&key, 0);
             let partcollation = get_partition_col_collation(&key, 0);
 
-            let mut new_listdatums: mcx::PgVec<'mcx, NodePtr<'mcx>> =
-                mcx::vec_with_capacity_in(mcx, spec.listdatums.len())?;
+            let mut new_listdatums: ::mcx::PgVec<'mcx, NodePtr<'mcx>> =
+                ::mcx::vec_with_capacity_in(mcx, spec.listdatums.len())?;
 
             for cell in spec.listdatums.iter() {
                 let value = transformPartitionBoundValue(
@@ -220,7 +220,7 @@ pub fn transformPartitionBound<'mcx>(
     } else if strategy == PARTITION_STRATEGY_RANGE {
         {
             if spec.strategy != PARTITION_STRATEGY_RANGE {
-                parent.close(types_storage::lock::NoLock)?;
+                parent.close(::types_storage::lock::NoLock)?;
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("invalid bound specification for a range partition")
@@ -230,7 +230,7 @@ pub fn transformPartitionBound<'mcx>(
             }
 
             if spec.lowerdatums.len() != partnatts {
-                parent.close(types_storage::lock::NoLock)?;
+                parent.close(::types_storage::lock::NoLock)?;
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("FROM must specify exactly one value per partitioning column")
@@ -238,7 +238,7 @@ pub fn transformPartitionBound<'mcx>(
                     .map(|()| unreachable!());
             }
             if spec.upperdatums.len() != partnatts {
-                parent.close(types_storage::lock::NoLock)?;
+                parent.close(::types_storage::lock::NoLock)?;
                 return ereport(ERROR)
                     .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("TO must specify exactly one value per partitioning column")
@@ -253,14 +253,14 @@ pub fn transformPartitionBound<'mcx>(
                 transformPartitionRangeBounds(mcx, pstate, &spec.upperdatums, parent_relid, &key)?;
         }
     } else {
-        parent.close(types_storage::lock::NoLock)?;
+        parent.close(::types_storage::lock::NoLock)?;
         return ereport(ERROR)
             .errmsg_internal(format!("unexpected partition strategy: {}", strategy as i32))
             .finish(here("transformPartitionBound"))
             .map(|()| unreachable!());
     }
 
-    parent.close(types_storage::lock::NoLock)?;
+    parent.close(::types_storage::lock::NoLock)?;
     Ok(alloc_in(mcx, Node::mk_partition_bound_spec(mcx, result_spec)?)?)
 }
 
@@ -273,8 +273,8 @@ fn transformPartitionRangeBounds<'mcx>(
     blist: &[NodePtr<'mcx>],
     parent_relid: Oid,
     key: &PartitionKeyData<'_>,
-) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut result: mcx::PgVec<'mcx, NodePtr<'mcx>> = mcx::vec_with_capacity_in(mcx, blist.len())?;
+) -> PgResult<::mcx::PgVec<'mcx, NodePtr<'mcx>>> {
+    let mut result: ::mcx::PgVec<'mcx, NodePtr<'mcx>> = ::mcx::vec_with_capacity_in(mcx, blist.len())?;
 
     for (i, lc) in blist.iter().enumerate() {
         let expr_node: &Node = lc;
@@ -554,13 +554,13 @@ pub fn define_relation_partbound<'mcx>(
     spec_node: &Node<'mcx>,
     query_string: Option<&str>,
 ) -> PgResult<()> {
-    use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock};
+    use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock};
 
     // parent = table_open(parentId, NoLock); /* already have strong lock */
     let parent = common_relation::relation_open(mcx, parent_oid, NoLock)?;
 
     // The parent must be partitioned.
-    if parent.rd_rel.relkind != types_tuple::access::RELKIND_PARTITIONED_TABLE {
+    if parent.rd_rel.relkind != ::types_tuple::access::RELKIND_PARTITIONED_TABLE {
         let pname = parent.rd_rel.relname.as_str().to_string();
         parent.close(NoLock)?;
         return ereport(ERROR)
@@ -575,7 +575,7 @@ pub fn define_relation_partbound<'mcx>(
         partdesc::RelationGetPartitionDesc(mcx, &parent, true)?;
     let default_part_oid =
         partdesc::get_default_oid_from_partdesc(Some(&parent_partdesc));
-    let default_rel = if types_core::primitive::OidIsValid(default_part_oid) {
+    let default_rel = if ::types_core::primitive::OidIsValid(default_part_oid) {
         Some(common_relation::relation_open(
             mcx,
             default_part_oid,
@@ -588,7 +588,7 @@ pub fn define_relation_partbound<'mcx>(
     // pstate = make_parsestate(NULL); pstate->p_sourcetext = queryString;
     let mut pstate = small1::make_parsestate(mcx, None)?;
     if let Some(qs) = query_string {
-        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(qs, mcx)?);
+        pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(qs, mcx)?);
     }
 
     // Add an nsitem for `rel` so transformExpr can report errors with context.
@@ -659,8 +659,8 @@ pub(crate) fn check_default_partition_contents<'mcx, 's>(
     default_rel: &rel::Relation<'mcx>,
     new_spec: &PartitionBoundSpec<'s>,
 ) -> PgResult<()> {
-    use types_storage::lock::{AccessExclusiveLock, NoLock};
-    use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+    use ::types_storage::lock::{AccessExclusiveLock, NoLock};
+    use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
     // new_part_constraints = (new_spec->strategy == LIST)
     //     ? get_qual_for_list(parent, new_spec)
@@ -688,7 +688,7 @@ pub(crate) fn check_default_partition_contents<'mcx, 's>(
         )?;
 
     // def_part_constraints = get_proposed_default_constraint(new_part_constraints);
-    let mut new_part_vec: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut new_part_vec: ::mcx::PgVec<'mcx, Node<'mcx>> = ::mcx::PgVec::new_in(mcx);
     for n in new_part_constraints.into_iter() {
         new_part_vec.push(n);
     }
@@ -712,7 +712,7 @@ pub(crate) fn check_default_partition_contents<'mcx, 's>(
     // scanning the default partition.
     if crate::at_attach::PartConstraintImpliedByRelConstraint(mcx, default_rel, &def_part_constraints)?
     {
-        utils_error::ereport(types_error::DEBUG1)
+        ::utils_error::ereport(::types_error::DEBUG1)
             .errmsg_internal(format!(
                 "updated partition constraint for default partition \"{}\" is implied by existing constraints",
                 default_rel.name()
@@ -754,7 +754,7 @@ pub(crate) fn check_default_partition_contents<'mcx, 's>(
             // ANDed constraint; we map the implicit-AND list — equivalent for the
             // map, which is per-Var. The mapped list feeds the per-partition
             // implication check and scan.)
-            let mut def_copy: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+            let mut def_copy: ::mcx::PgVec<'mcx, Node<'mcx>> = ::mcx::PgVec::new_in(mcx);
             for n in def_part_constraints.iter() {
                 def_copy.push(n.clone_in(mcx)?);
             }
@@ -774,7 +774,7 @@ pub(crate) fn check_default_partition_contents<'mcx, 's>(
                 &part_rel,
                 &def_part_constraints,
             )? {
-                utils_error::ereport(types_error::DEBUG1)
+                ::utils_error::ereport(::types_error::DEBUG1)
                     .errmsg_internal(format!(
                         "updated partition constraint for default partition \"{}\" is implied by existing constraints",
                         part_rel.name()
@@ -815,13 +815,13 @@ fn check_default_partition_contents_one<'mcx>(
     part_rel: &rel::Relation<'mcx>,
     part_constraint: &[Node<'mcx>],
 ) -> PgResult<()> {
-    use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_RELATION};
+    use ::types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_RELATION};
 
     // Only RELKIND_RELATION relations (leaf partitions) need to be scanned.
     if part_rel.rd_rel.relkind != RELKIND_RELATION {
         if part_rel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
-            utils_error::ereport(types_error::WARNING)
-                .errcode(types_error::ERRCODE_CHECK_VIOLATION)
+            ::utils_error::ereport(::types_error::WARNING)
+                .errcode(::types_error::ERRCODE_CHECK_VIOLATION)
                 .errmsg(format!(
                     "skipped scanning foreign table \"{}\" which is a partition of default partition \"{}\"",
                     part_rel.name(),
@@ -875,8 +875,8 @@ pub fn define_relation_clone_partition_objects<'mcx>(
     relation_id: Oid,
     inherit_oids: &[Oid],
 ) -> PgResult<()> {
-    use types_core::primitive::InvalidOid;
-    use types_storage::lock::{AccessShareLock, NoLock};
+    use ::types_core::primitive::InvalidOid;
+    use ::types_storage::lock::{AccessShareLock, NoLock};
 
     let parent_oid = inherit_oids[0];
     let parent = common_relation::relation_open(mcx, parent_oid, NoLock)?;
@@ -925,7 +925,7 @@ pub fn define_relation_clone_partition_objects<'mcx>(
             // if (rel->rd_rel->relkind == RELKIND_FOREIGN_TABLE) — a foreign
             // table cannot carry a unique index; a non-unique parent index is
             // simply not cloned into the foreign partition.
-            if rel.rd_rel.relkind == types_tuple::access::RELKIND_FOREIGN_TABLE {
+            if rel.rd_rel.relkind == ::types_tuple::access::RELKIND_FOREIGN_TABLE {
                 let is_unique = idx_rel
                     .rd_index
                     .as_ref()
@@ -937,7 +937,7 @@ pub fn define_relation_clone_partition_objects<'mcx>(
                     rel.close(NoLock)?;
                     parent.close(NoLock)?;
                     return ereport(ERROR)
-                        .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                        .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                         .errmsg(format!(
                             "cannot create foreign partition of partitioned table \"{parent_name}\""
                         ))
@@ -1003,8 +1003,8 @@ pub fn define_relation_clone_partition_objects<'mcx>(
         if has_triggers {
             crate::at_attach::CloneRowTriggersToPartition(mcx, &parent, &rel)?;
         }
-        let mut throwaway_wqueue: mcx::PgVec<'mcx, crate::at_phase::AlteredTableInfo<'mcx>> =
-            mcx::PgVec::new_in(mcx);
+        let mut throwaway_wqueue: ::mcx::PgVec<'mcx, crate::at_phase::AlteredTableInfo<'mcx>> =
+            ::mcx::PgVec::new_in(mcx);
         crate::at_fk::CloneForeignKeyConstraints(mcx, &mut throwaway_wqueue, &parent, &rel)?;
         rel.close(NoLock)?;
     }

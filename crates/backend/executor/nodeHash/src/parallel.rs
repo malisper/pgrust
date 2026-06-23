@@ -15,9 +15,9 @@
 //! (`dsa_pointer_atomic_compare_exchange`) is this unit's own logic over the
 //! resolved `pg_atomic_uint64` word, mirroring C.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{Size, uint32};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use execparallel::{dsa_pointer_is_valid, DsaPointer, INVALID_DSA_POINTER};
 use ::nodes::nodehash::{
     HashChunkIdx, HashJoinState, HashJoinTableData, HashTupleIdx, HashTupleRef, ParallelHashGrowth,
@@ -121,8 +121,8 @@ fn estimate_parallel_hash_join_batch(nparticipants: i32) -> Size {
 // batch header. `ParallelHashJoinBatchOuter` is another MAXALIGN(sts_estimate)
 // past that. These return DSA-resolved addresses (the sts owner wraps them).
 #[inline]
-fn parallel_hash_join_batch_inner(batch_addr: usize) -> execparallel::SharedTuplestoreHandle {
-    execparallel::SharedTuplestoreHandle(
+fn parallel_hash_join_batch_inner(batch_addr: usize) -> ::execparallel::SharedTuplestoreHandle {
+    ::execparallel::SharedTuplestoreHandle(
         batch_addr + MAXALIGN(core::mem::size_of::<ParallelHashJoinBatch>()),
     )
 }
@@ -131,8 +131,8 @@ fn parallel_hash_join_batch_inner(batch_addr: usize) -> execparallel::SharedTupl
 fn parallel_hash_join_batch_outer(
     batch_addr: usize,
     nparticipants: i32,
-) -> execparallel::SharedTuplestoreHandle {
-    execparallel::SharedTuplestoreHandle(
+) -> ::execparallel::SharedTuplestoreHandle {
+    ::execparallel::SharedTuplestoreHandle(
         batch_addr
             + MAXALIGN(core::mem::size_of::<ParallelHashJoinBatch>())
             + MAXALIGN(sts::sts_estimate::call(nparticipants)),
@@ -149,7 +149,7 @@ fn parallel_hash_join_batch_outer(
 // ===========================================================================
 
 #[inline]
-fn dsa_get_addr(area: execparallel::DsaAreaHandle, dp: DsaPointer) -> usize {
+fn dsa_get_addr(area: ::execparallel::DsaAreaHandle, dp: DsaPointer) -> usize {
     dsa::dsa_get_address::call(area, dp).0
 }
 
@@ -288,7 +288,7 @@ fn mintuple_t_len(mintuple_addr: usize) -> usize {
 //   t_len:u32 @0, mt_padding[6] @4, t_infomask2:u16 @10, t_infomask:u16 @12,
 //   t_hoff:u8 @14. The match flag is HEAP_TUPLE_HAS_MATCH in t_infomask2.
 const MT_OFF_INFOMASK2: usize = 10;
-use types_tuple::heaptuple::HEAP_TUPLE_HAS_MATCH;
+use ::types_tuple::heaptuple::HEAP_TUPLE_HAS_MATCH;
 
 /// `HeapTupleHeaderClearMatch(HJTUPLE_MINTUPLE(...))` over the on-DSA image —
 /// the htup_details.h inline accessor (`t_infomask2 &= ~HEAP_TUPLE_HAS_MATCH`),
@@ -770,7 +770,7 @@ pub fn ExecParallelHashRepartitionRest<'mcx>(
     let pworker = transam_parallel::parallel_worker_number();
 
     // old_inner_tuples = palloc0_array(SharedTuplestoreAccessor *, old_nbatch);
-    let mut old_inner_tuples: alloc_vec::Vec<Option<execparallel::SharedTuplestoreAccessorHandle>> =
+    let mut old_inner_tuples: alloc_vec::Vec<Option<::execparallel::SharedTuplestoreAccessorHandle>> =
         alloc_vec::Vec::new();
     old_inner_tuples.resize(old_nbatch as usize, None);
 
@@ -1356,7 +1356,7 @@ pub fn ExecParallelHashJoinSetUpBatches<'mcx>(
 
     // Allocate this backend's accessor array (in mcx, the spill context).
     hashtable.nbatch = nbatch;
-    let mut accessors = mcx::vec_with_capacity_in(mcx, nbatch as usize)?;
+    let mut accessors = ::mcx::vec_with_capacity_in(mcx, nbatch as usize)?;
     for i in 0..nbatch {
         let shared_addr = nth_batch_addr(batches_base, i, nparticipants);
         let shared_dp = batches_dp + (estimate_parallel_hash_join_batch(nparticipants) * i as usize) as u64;
@@ -1466,7 +1466,7 @@ pub fn ExecParallelHashEnsureBatchAccessors<'mcx>(
     hashtable.nbatch = pstate_nbatch;
     let batches_base = dsa_get_addr(area, batches_dp);
 
-    let mut accessors = mcx::vec_with_capacity_in(mcx, pstate_nbatch as usize)?;
+    let mut accessors = ::mcx::vec_with_capacity_in(mcx, pstate_nbatch as usize)?;
     for i in 0..pstate_nbatch {
         let shared_addr = nth_batch_addr(batches_base, i, nparticipants);
         let shared_dp =
@@ -1946,10 +1946,10 @@ fn exec_hash_get_bucket_and_batch(
 #[inline]
 fn pstate_fileset_handle(
     hashtable: &HashJoinTableData<'_>,
-) -> execparallel::SharedFileSetHandle {
+) -> ::execparallel::SharedFileSetHandle {
     let pstate = pstate_mut(hashtable);
-    let addr = (&pstate.fileset as *const types_storage::fileset::SharedFileSet) as usize;
-    execparallel::SharedFileSetHandle(addr)
+    let addr = (&pstate.fileset as *const ::types_storage::fileset::SharedFileSet) as usize;
+    ::execparallel::SharedFileSetHandle(addr)
 }
 
 /// `MyProcNumber` — the caller's real per-backend PGPROC slot index, passed to
@@ -1959,7 +1959,7 @@ fn pstate_fileset_handle(
 /// workers) — `LWLockAcquire` panics ("cannot wait without a PGPROC structure")
 /// if it has to queue with an invalid proc number on a contended pstate lock.
 #[inline]
-fn current_proc_number() -> types_core::ProcNumber {
+fn current_proc_number() -> ::types_core::ProcNumber {
     init_small_seams::my_proc_number::call()
 }
 
@@ -1969,7 +1969,7 @@ fn current_proc_number() -> types_core::ProcNumber {
 /// carries, so we hand it the byte slice directly.
 #[inline]
 fn sts_puttuple_raw(
-    accessor: execparallel::SharedTuplestoreAccessorHandle,
+    accessor: ::execparallel::SharedTuplestoreAccessorHandle,
     hashvalue: uint32,
     mintuple_addr: usize,
     t_len: usize,
@@ -1994,8 +1994,8 @@ const SHARED_TUPLESTORE_SINGLE_PASS: i32 = 0x01;
 fn new_accessor<'mcx>(
     mcx: Mcx<'mcx>,
     shared: DsaPointer,
-    inner: Option<execparallel::SharedTuplestoreAccessorHandle>,
-    outer: Option<execparallel::SharedTuplestoreAccessorHandle>,
+    inner: Option<::execparallel::SharedTuplestoreAccessorHandle>,
+    outer: Option<::execparallel::SharedTuplestoreAccessorHandle>,
 ) -> PgResult<::nodes::nodehash::ParallelHashJoinBatchAccessor<'mcx>> {
     Ok(::nodes::nodehash::ParallelHashJoinBatchAccessor {
         shared,
@@ -2018,15 +2018,15 @@ fn new_accessor<'mcx>(
 #[inline]
 fn box_accessor<'mcx>(
     mcx: Mcx<'mcx>,
-    h: Option<execparallel::SharedTuplestoreAccessorHandle>,
-) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::nodehash::SharedTuplestoreAccessor>>> {
+    h: Option<::execparallel::SharedTuplestoreAccessorHandle>,
+) -> PgResult<Option<::mcx::PgBox<'mcx, ::nodes::nodehash::SharedTuplestoreAccessor>>> {
     match h {
         None => Ok(None),
         Some(handle) => {
             let acc = ::nodes::nodehash::SharedTuplestoreAccessor(
                 ::nodes::Opaque(Some(Box::new(handle))),
             );
-            Ok(Some(mcx::alloc_in(mcx, acc)?))
+            Ok(Some(::mcx::alloc_in(mcx, acc)?))
         }
     }
 }
@@ -2035,12 +2035,12 @@ fn box_accessor<'mcx>(
 /// canonical accessor field (the inverse of [`box_accessor`]).
 #[inline]
 fn accessor_handle(
-    a: &Option<mcx::PgBox<'_, ::nodes::nodehash::SharedTuplestoreAccessor>>,
-) -> Option<execparallel::SharedTuplestoreAccessorHandle> {
+    a: &Option<::mcx::PgBox<'_, ::nodes::nodehash::SharedTuplestoreAccessor>>,
+) -> Option<::execparallel::SharedTuplestoreAccessorHandle> {
     a.as_ref().and_then(|b| {
         b.0 .0
             .as_ref()
-            .and_then(|any| any.downcast_ref::<execparallel::SharedTuplestoreAccessorHandle>())
+            .and_then(|any| any.downcast_ref::<::execparallel::SharedTuplestoreAccessorHandle>())
             .copied()
     })
 }
@@ -2087,12 +2087,12 @@ fn dsa_pointer_atomic_write(buckets_addr: usize, i: i32, val: DsaPointer) {
 fn mintuple_from_dsa<'mcx>(
     mcx: Mcx<'mcx>,
     mintuple_addr: usize,
-) -> PgResult<types_tuple::heaptuple::FormedMinimalTuple<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::FormedMinimalTuple<'mcx>> {
     // First word is t_len, which bounds the whole flat image.
     let t_len = unsafe { core::ptr::read_unaligned(mintuple_addr as *const u32) } as usize;
     let blob = unsafe { core::slice::from_raw_parts(mintuple_addr as *const u8, t_len) };
-    use heaptuple::flat::MinimalTupleFlatError;
-    match heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
+    use ::heaptuple::flat::MinimalTupleFlatError;
+    match ::heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
         Ok(mtup) => Ok(mtup),
         Err(MinimalTupleFlatError::Pg(err)) => Err(err),
         Err(other) => panic!("minimal_tuple_from_flat on a DSA image failed: {other:?}"),

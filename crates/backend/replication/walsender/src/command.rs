@@ -344,8 +344,8 @@ pub fn IdentifySystem() {
 /// is held shared, exactly as in C.
 pub fn ReadReplicationSlot(cmd: crate::core::ReadReplicationSlotCmd) -> types_error::PgResult<()> {
     use crate::core::{INT8OID, InvalidOid, InvalidXLogRecPtr, TEXTOID};
-    use types_storage::storage::REPLICATION_SLOT_CONTROL_LOCK;
-    use types_storage::LWLockMode;
+    use ::types_storage::storage::REPLICATION_SLOT_CONTROL_LOCK;
+    use ::types_storage::LWLockMode;
 
     const READ_REPLICATION_SLOT_COLS: usize = 3;
 

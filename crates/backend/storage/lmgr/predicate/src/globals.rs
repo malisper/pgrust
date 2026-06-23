@@ -6,9 +6,9 @@
 
 use core::cell::Cell;
 
-use lwlock::main_lock_ref;
-use types_storage::LWLock;
-use types_core::primitive::ProcNumber;
+use ::lwlock::main_lock_ref;
+use ::types_storage::LWLock;
+use ::types_core::primitive::ProcNumber;
 use types_storage::{
     PREDICATELOCK_MANAGER_LWLOCK_OFFSET, SERIALIZABLE_FINISHED_LIST_LOCK,
     SERIALIZABLE_PREDICATE_LIST_LOCK, SERIALIZABLE_XACT_HASH_LOCK, SERIAL_CONTROL_LOCK,
@@ -73,7 +73,7 @@ pub fn my_proc_pid() -> i32 {
 }
 
 #[inline]
-pub fn my_proc_vxid() -> types_core::VirtualTransactionId {
+pub fn my_proc_vxid() -> ::types_core::VirtualTransactionId {
     lmgr_proc_seams::my_proc_vxid::call()
 }
 
@@ -93,7 +93,7 @@ pub fn proc_wait_for_signal_safe_snapshot() -> types_error::PgResult<()> {
 /// `WAIT_EVENT_SAFE_SNAPSHOT` (wait_event.h, IPC class) — re-exported from the
 /// canonical `types-pgstat` definition (`PG_WAIT_IPC + 51`, the 0-based IPC
 /// index of `SAFE_SNAPSHOT` in `wait_event_names.txt`).
-pub use types_pgstat::wait_event::WAIT_EVENT_SAFE_SNAPSHOT;
+pub use ::types_pgstat::wait_event::WAIT_EVENT_SAFE_SNAPSHOT;
 
 #[inline]
 pub fn recovery_in_progress() -> bool {
@@ -116,12 +116,12 @@ pub fn is_sub_transaction() -> bool {
 }
 
 #[inline]
-pub fn transaction_id_is_current_transaction_id(xid: types_core::TransactionId) -> bool {
+pub fn transaction_id_is_current_transaction_id(xid: ::types_core::TransactionId) -> bool {
     transam_xact_seams::transaction_id_is_current_transaction_id::call(xid)
 }
 
 #[inline]
-pub fn get_top_transaction_id_if_any() -> types_core::TransactionId {
+pub fn get_top_transaction_id_if_any() -> ::types_core::TransactionId {
     transam_xact_seams::get_top_transaction_id_if_any::call()
 }
 
@@ -137,8 +137,8 @@ pub fn get_snapshot_data() -> types_error::PgResult<snapshot::SnapshotData> {
 
 #[inline]
 pub fn proc_array_install_imported_xmin(
-    xmin: types_core::TransactionId,
-    sourcevxid: types_core::VirtualTransactionId,
+    xmin: ::types_core::TransactionId,
+    sourcevxid: ::types_core::VirtualTransactionId,
 ) -> types_error::PgResult<bool> {
     procarray_seams::proc_array_install_imported_xmin::call(xmin, sourcevxid)
 }
@@ -159,7 +159,7 @@ pub fn xact_read_only() -> bool {
 }
 
 #[inline]
-pub fn read_next_transaction_id() -> types_core::TransactionId {
+pub fn read_next_transaction_id() -> ::types_core::TransactionId {
     varsup_seams::read_next_transaction_id::call()
 }
 

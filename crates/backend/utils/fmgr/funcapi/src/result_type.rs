@@ -5,17 +5,17 @@
 //! `internal_get_result_type` is the workhorse the public entrypoints funnel
 //! into.
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, InvalidOid};
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, InvalidOid};
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERROR};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::{ResolvedResultType, TypeFuncClass};
 use ::nodes::nodes::Node;
 use ::nodes::funcapi::ReturnSetInfo;
-use types_tuple::heaptuple::{TupleDesc, RECORDOID};
+use ::types_tuple::heaptuple::{TupleDesc, RECORDOID};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::polymorphic::{get_type_func_class, resolve_polymorphic_tupdesc, CallExpr};
 use crate::proc_info::build_function_result_tupdesc_t;
@@ -169,7 +169,7 @@ pub fn get_expr_result_type<'mcx>(
             // if (resultTypeId) *resultTypeId = rexpr->row_typeid;
             out.result_type_id = Some(rexpr.row_typeid);
             // if (resultTupleDesc) *resultTupleDesc = BlessTupleDesc(tupdesc);
-            let td = Some(mcx::alloc_in(mcx, tupdesc)?);
+            let td = Some(::mcx::alloc_in(mcx, tupdesc)?);
             out.result_tuple_desc =
                 execTuples_seams::bless_tuple_desc::call(mcx, td)?;
             out.class = Some(TypeFuncClass::Composite);
@@ -199,7 +199,7 @@ pub fn get_expr_result_type<'mcx>(
                 FormedTuple, HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId,
             };
             let formed: FormedTuple<'mcx> = match &c.constvalue {
-                types_tuple::Datum::Composite(t) => t.clone_in(mcx)?,
+                ::types_tuple::Datum::Composite(t) => t.clone_in(mcx)?,
                 d => FormedTuple::from_datum_image(mcx, d.as_ref_bytes())?,
             };
             let header = formed
@@ -388,7 +388,7 @@ pub fn internal_get_result_type<'mcx>(
                     // The owned frame holds expectedDesc inline; copy it into the
                     // caller's Mcx to hand back an owned descriptor (C aliases the
                     // caller's pointer, which an owned value cannot express).
-                    out.result_tuple_desc = Some(mcx::alloc_in(mcx, expected.clone_in(mcx)?)?);
+                    out.result_tuple_desc = Some(::mcx::alloc_in(mcx, expected.clone_in(mcx)?)?);
                     // Assume no polymorphic columns here, either.
                 }
             }
@@ -446,7 +446,7 @@ pub fn get_expr_result_tupdesc<'mcx>(
 
         if expr_type_id != RECORDOID {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!(
                     "type {} is not composite",
                     format_type_seams::format_type_be_str::call(expr_type_id)?
@@ -454,7 +454,7 @@ pub fn get_expr_result_tupdesc<'mcx>(
                 .into_error());
         } else {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg("record type has not been registered".to_string())
                 .into_error());
         }

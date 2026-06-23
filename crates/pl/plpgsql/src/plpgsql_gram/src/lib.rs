@@ -5,7 +5,7 @@
 //! statements are overwhelmingly keyword-led and the grammar relies on
 //! hand-coded token-pushback (`plpgsql_push_back_token`) and direct `yylex()`
 //! calls inside many actions, it translates cleanly into a recursive-descent
-//! parser that pulls tokens from the [`plpgsql_scanner::PlpgsqlScanner`].
+//! parser that pulls tokens from the [`::plpgsql_scanner::PlpgsqlScanner`].
 //!
 //! The parser builds the owned [`plpgsql`] AST (`PLpgSQL_stmt_block` is
 //! the top-level result). Each grammar production maps to a method on
@@ -40,8 +40,8 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plpgsql_scanner::plpgsql_scanner_init;
-    use mcx::MemoryContext;
+    use ::plpgsql_scanner::plpgsql_scanner_init;
+    use ::mcx::MemoryContext;
 
     /// The public parse entry exists and the grammar drives the scanner up to
     /// the first compiler callback. A complete parse of `BEGIN RETURN 1; END`

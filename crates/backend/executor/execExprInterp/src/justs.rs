@@ -18,14 +18,14 @@
 //! and panics loudly until `execTuples` lands. `slot_getattr(slot, attnum)`
 //! therefore maps to: deform via the seam, then take attribute `attnum - 1`.
 
-use execTuples_seams::slot_getallattrs_by_id;
-use fmgr_seams::function_call_invoke_datum;
+use ::execTuples_seams::slot_getallattrs_by_id;
+use ::fmgr_seams::function_call_invoke_datum;
 // The canonical unified value type (Datum-unification keystone) — what the
 // interpreter eval entry points return, and what the keystone-owned
 // const/init step-payload values carry.
 use types_tuple::heaptuple::Datum;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 /// `DatumGetUInt32(hashop->d.hashdatum.fn_addr(fcinfo))` for a single hash-key
 /// argument — the by-reference-capable hash call the `ExecJust*Hash*Var` fast
@@ -71,7 +71,7 @@ fn hashdatum_fn_and_coll(step: &ExprEvalStepData, who: &str) -> (Oid, Oid) {
             let collation = fcinfo_data
                 .as_ref()
                 .map(|f| f.fncollation)
-                .unwrap_or(types_core::primitive::InvalidOid);
+                .unwrap_or(::types_core::primitive::InvalidOid);
             (fn_oid, collation)
         }
         _ => panic!("{who}: step is not an EEOP_HASHDATUM_*"),

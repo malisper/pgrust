@@ -4,8 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly (mirror-PG-and-panic for an unported callee).
 
-use types_core::geo::{Point, SpgKey};
-use types_error::PgResult;
+use ::types_core::geo::{Point, SpgKey};
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `spg_key_orderbys_distances(Datum key, bool isLeaf, ScanKey orderbys, int norderbys)`

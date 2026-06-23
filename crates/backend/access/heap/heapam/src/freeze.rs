@@ -15,25 +15,25 @@
 //!
 //! Ported 1:1 from PostgreSQL 18.3.
 
-use mcx::Mcx;
-use types_core::primitive::{MultiXactId, TransactionId};
-use types_core::xact::{FrozenTransactionId, InvalidTransactionId};
+use ::mcx::Mcx;
+use ::types_core::primitive::{MultiXactId, TransactionId};
+use ::types_core::xact::{FrozenTransactionId, InvalidTransactionId};
 use types_error::{PgError, PgResult};
-use types_storage::Buffer;
-use types_tuple::heaptuple::{
+use ::types_storage::Buffer;
+use ::types_tuple::heaptuple::{
     HeapTupleField3, HeapTupleFields, HeapTupleHeaderChoice, HeapTupleHeaderData, HEAP_HOT_UPDATED,
     HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_MOVED_OFF, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
     HEAP_XMAX_IS_MULTI, HEAP_XMIN_FROZEN,
 };
-use types_vacuum::vacuum::VacuumCutoffs;
-use xlog_records::multixact::{MultiXactMember, MultiXactStatus};
+use ::types_vacuum::vacuum::VacuumCutoffs;
+use ::xlog_records::multixact::{MultiXactMember, MultiXactStatus};
 
-use heapam_visibility::htup::{
+use ::heapam_visibility::htup::{
     HeapTupleHeaderGetRawXmax, HeapTupleHeaderGetXmin, HeapTupleHeaderGetXvac,
     HeapTupleHeaderXminInvalid, HEAP_LOCKED_UPGRADED, HEAP_XMAX_IS_LOCKED_ONLY,
 };
-use types_tuple::heaptuple::HeapTupleHeaderXminCommitted;
-use heapam_visibility::HeapTupleHeaderGetUpdateXid;
+use ::types_tuple::heaptuple::HeapTupleHeaderXminCommitted;
+use ::heapam_visibility::HeapTupleHeaderGetUpdateXid;
 use transam::{
     TransactionIdFollows, TransactionIdIsNormal, TransactionIdIsValid, TransactionIdPrecedes,
     TransactionIdPrecedesOrEquals,
@@ -51,13 +51,13 @@ use procarray_seams as procarray_seam;
 // not yet hoisted into the shared types crates).
 // ===========================================================================
 
-use heapam_visibility::htup::HEAP_LOCK_MASK;
+use ::heapam_visibility::htup::HEAP_LOCK_MASK;
 
 /// `HEAP_XMAX_BITS` (htup_details.h).
 const HEAP_XMAX_BITS: u16 =
     HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID | HEAP_XMAX_IS_MULTI | HEAP_LOCK_MASK | HEAP_XMAX_LOCK_ONLY;
 
-use types_tuple::heaptuple::HEAP_XMAX_LOCK_ONLY;
+use ::types_tuple::heaptuple::HEAP_XMAX_LOCK_ONLY;
 
 /// `XLH_FREEZE_XVAC` (heapam_xlog.h).
 const XLH_FREEZE_XVAC: u8 = 0x02;
@@ -881,8 +881,8 @@ pub fn heap_pre_freeze_checks<'mcx>(
 
             // Deliberately avoid relying on tuple hint bits here.
             if frz.checkflags & HEAP_FREEZE_CHECK_XMIN_COMMITTED != 0 {
-                let xmin = types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(&htup);
-                debug_assert!(!heapam_visibility::htup::HeapTupleHeaderXminFrozen(&htup));
+                let xmin = ::types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(&htup);
+                debug_assert!(!::heapam_visibility::htup::HeapTupleHeaderXminFrozen(&htup));
                 if !transaction_id_did_commit(xmin)? {
                     return Err(PgError::error(format_args_internal(&[
                         "uncommitted xmin ",
@@ -974,8 +974,8 @@ fn format_args_internal(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
-    use types_tuple::heaptuple::{
+    use ::mcx::MemoryContext;
+    use ::types_tuple::heaptuple::{
         BlockIdData, HeapTupleHeaderData, ItemPointerData, HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID,
     };
 
@@ -1000,7 +1000,7 @@ mod tests {
             t_infomask2: 0,
             t_infomask: infomask,
             t_hoff: 23,
-            t_bits: mcx::PgVec::new_in(mcx),
+            t_bits: ::mcx::PgVec::new_in(mcx),
         }
     }
 
@@ -1188,13 +1188,13 @@ mod tests {
             t_infomask2: 0x0102,
             t_infomask: HEAP_XMIN_COMMITTED,
             t_hoff: 24,
-            t_bits: mcx::PgVec::new_in(ctx.mcx()),
+            t_bits: ::mcx::PgVec::new_in(ctx.mcx()),
         };
         src.write_on_page(&mut item).unwrap();
         let back = HeapTupleHeaderData::read_on_page(ctx.mcx(), &item).unwrap();
         assert_eq!(HeapTupleHeaderGetRawXmax(&back), 0x3333_4444);
         assert_eq!(
-            types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(&back),
+            ::types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(&back),
             0x1111_2222
         );
         assert_eq!(back.t_ctid.ip_blkid.block_number(), 0x000A_BBCC);
@@ -1226,7 +1226,7 @@ mod tests {
             t_infomask2: 0,
             t_infomask: HEAP_MOVED,
             t_hoff: 23,
-            t_bits: mcx::PgVec::new_in(ctx.mcx()),
+            t_bits: ::mcx::PgVec::new_in(ctx.mcx()),
         };
         src.write_on_page(&mut item).unwrap();
         let back = HeapTupleHeaderData::read_on_page(ctx.mcx(), &item).unwrap();

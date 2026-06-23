@@ -14,9 +14,9 @@ use mcx::{Mcx, PgVec};
 use types_core::{
     InvalidLocalTransactionId, InvalidOid, InvalidTransactionId, Oid, ProcNumber, TransactionId,
 };
-use types_core::xact::TransactionIdIsValid;
+use ::types_core::xact::TransactionIdIsValid;
 use types_error::{PgResult, WARNING};
-use types_storage::storage::PROC_IS_AUTOVACUUM;
+use ::types_storage::storage::PROC_IS_AUTOVACUUM;
 use types_storage::{LWLockMode, ProcSignalReason, VirtualTransactionId};
 
 use subtrans_seams as subtrans;
@@ -27,9 +27,9 @@ use transam_xlog_seams as xlog;
 use procsignal_seams as procsignal;
 use lwlock_seams as lwlock;
 use lmgr_proc_seams as proc;
-use utils_error::elog;
+use ::utils_error::elog;
 use miscinit_seams as miscinit;
-use init_small::globals;
+use ::init_small::globals;
 use pgsleep_seams as pgsleep;
 use snapmgr_pc_seams as snapmgr;
 
@@ -396,7 +396,7 @@ pub fn GetCurrentVirtualXIDs<'mcx>(
 ) -> PgResult<PgVec<'mcx, VirtualTransactionId>> {
     // allocate what's certainly enough result space (maxProcs).
     let max_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().maxProcs);
-    let mut vxids = mcx::vec_with_capacity_in(mcx, max_procs.max(0) as usize)?;
+    let mut vxids = ::mcx::vec_with_capacity_in(mcx, max_procs.max(0) as usize)?;
 
     let my_database_id = globals::MyDatabaseId();
 
@@ -828,8 +828,8 @@ pub fn TerminateOtherDBBackends<'mcx>(mcx: Mcx<'mcx>, database_id: Oid) -> PgRes
         let dbname = dbcommands_seams::get_database_name::call(mcx, database_id)?
             .map(|s| s.as_str().to_string())
             .unwrap_or_default();
-        return utils_error::ereport(types_error::ERROR)
-            .errcode(types_error::ERRCODE_OBJECT_IN_USE)
+        return ::utils_error::ereport(::types_error::ERROR)
+            .errcode(::types_error::ERRCODE_OBJECT_IN_USE)
             .errmsg(format!(
                 "database \"{dbname}\" is being used by prepared transactions"
             ))
@@ -838,7 +838,7 @@ pub fn TerminateOtherDBBackends<'mcx>(mcx: Mcx<'mcx>, database_id: Oid) -> PgRes
                 format!("There are {nprepared} prepared transactions using the database."),
                 nprepared as u64,
             )
-            .finish(types_error::ErrorLocation::new(
+            .finish(::types_error::ErrorLocation::new(
                 "src/backend/storage/ipc/procarray.c",
                 3886,
                 "TerminateOtherDBBackends",
@@ -907,11 +907,11 @@ fn has_privs_of_role(member: Oid, role: Oid) -> PgResult<bool> {
 /// `ereport(ERROR, errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 /// errmsg("permission denied to terminate process"), errdetail(...))`.
 fn permission_denied_to_terminate(detail: &str) -> PgResult<()> {
-    utils_error::ereport(types_error::ERROR)
-        .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+    ::utils_error::ereport(::types_error::ERROR)
+        .errcode(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
         .errmsg("permission denied to terminate process")
         .errdetail(detail.to_string())
-        .finish(types_error::ErrorLocation::new(
+        .finish(::types_error::ErrorLocation::new(
             "src/backend/storage/ipc/procarray.c",
             3917,
             "TerminateOtherDBBackends",

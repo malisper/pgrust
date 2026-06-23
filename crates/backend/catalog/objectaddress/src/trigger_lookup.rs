@@ -9,9 +9,9 @@
 //! `tgname` columns. Mirrors [`crate::rewrite_lookup`].
 
 use mcx::{Mcx, PgString};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use types_storage::lock::AccessShareLock;
+use ::types_storage::lock::AccessShareLock;
 
 use crate::consts::{
     Anum_pg_trigger_oid, Anum_pg_trigger_tgname, Anum_pg_trigger_tgrelid, TriggerRelationId,

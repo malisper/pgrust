@@ -20,9 +20,9 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-use mcx::PgVec;
-use types_core::primitive::{InvalidOid, Oid};
-use datum::datum::Datum;
+use ::mcx::PgVec;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::datum::datum::Datum;
 use pathnodes::{NodeId, RelId};
 
 /// `DEFAULT_INEQ_SEL` (selfuncs.h) — `0.3333333333333333`.

@@ -4,8 +4,8 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgString};
-use types_core::primitive::{ForkNumber, Oid, ProcNumber, RelFileNumber};
-use types_error::PgResult;
+use ::types_core::primitive::{ForkNumber, Oid, ProcNumber, RelFileNumber};
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `GetDatabasePath(dbOid, spcOid)` (relpath.c): build the filesystem path

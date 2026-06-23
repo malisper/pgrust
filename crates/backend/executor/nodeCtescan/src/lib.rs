@@ -44,8 +44,8 @@ use execTuples_seams as execTuples;
 use execUtils_seams as execUtils;
 use execExpr_seams as execExpr;
 
-use mcx::PgBox;
-use types_error::PgResult;
+use ::mcx::PgBox;
+use ::types_error::PgResult;
 use ::nodes::executor::{TupleSlotKind, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use ::nodes::nodectescan::{CteScan, CteScanState};
 use nodes::{EStateData, ScanDirectionIsForward, SlotId};
@@ -262,7 +262,7 @@ pub fn ExecInitCteScan<'mcx>(
     // model — they live in the per-CTE `EState.es_cte_shared[cteParam]` entry
     // (see `CteSharedState`), created/cleared by the leader-resolution and
     // tuplestore seams. The node only records its `cteParam` identity.
-    let mut scanstate = mcx::alloc_in(mcx, CteScanState::new_in(mcx))?;
+    let mut scanstate = ::mcx::alloc_in(mcx, CteScanState::new_in(mcx))?;
     scanstate.ss.ps.plan = Some(node);
     scanstate.ss.ps.ExecProcNode = Some(exec_cte_scan_node);
     scanstate.eflags = eflags;
@@ -354,7 +354,7 @@ fn init_scan_tuple_slot_from_cte<'mcx>(
         .expect("ExecInitCteScan: es_subplanstates[ctePlanId-1] present");
     let tupdesc: types_tuple::heaptuple::TupleDesc<'mcx> =
         match execTuples::exec_get_result_type::call(cteplanstate.ps_head()) {
-            Some(d) => Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
+            Some(d) => Some(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
             None => None,
         };
 

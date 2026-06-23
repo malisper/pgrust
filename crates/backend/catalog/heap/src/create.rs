@@ -12,26 +12,26 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use utils_error::{elog, ereport};
-use mcx::Mcx;
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-use types_catalog::pg_attribute::PgAttributeInsertRow;
-use types_catalog::pg_class::PgClassInsertRow;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid, RelFileNumber, TransactionId};
+use ::mcx::Mcx;
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_attribute::PgAttributeInsertRow;
+use ::types_catalog::pg_class::PgClassInsertRow;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid, RelFileNumber, TransactionId};
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_DUPLICATE_TABLE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERROR,
 };
 use ::nodes::parsenodes::ObjectType;
 use ::nodes::primnodes::OnCommitAction;
-use rel::Relation;
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
-use lsyscache::relation::get_relname_relid;
-use types_tuple::access::{
+use ::rel::Relation;
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
+use ::lsyscache::relation::get_relname_relid;
+use ::types_tuple::access::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_TOASTVALUE, RELKIND_VIEW,
 };
-use types_tuple::heaptuple::{TupleDescData, DEFAULT_COLLATION_OID, RECORDOID};
+use ::types_tuple::heaptuple::{TupleDescData, DEFAULT_COLLATION_OID, RECORDOID};
 
 use crate::{
     heap_create, namestrcpy, sys_att, AccessMethodRelationId, AttributeRelationId,
@@ -145,7 +145,7 @@ pub fn InsertPgClassTuple<'mcx>(
 /// just before `InsertPgClassTuple`. Defined in the seams crate (so the
 /// cross-unit `InsertPgClassTuple` seam can name it without an owner
 /// dependency); re-exported here for the owner-internal callers.
-pub use heap_seams::PgClassWriteFields;
+pub use ::heap_seams::PgClassWriteFields;
 
 /* --------------------------------
  *		AddNewRelationTuple
@@ -247,8 +247,8 @@ pub fn AddNewRelationType(
     new_row_type: Oid,
     new_array_type: Oid,
 ) -> PgResult<ObjectAddress> {
-    use pg_type::TypeCreate;
-    use types_catalog::pg_type::TypeCreateParams;
+    use ::pg_type::TypeCreate;
+    use ::types_catalog::pg_type::TypeCreateParams;
 
     TypeCreate(TypeCreateParams {
         new_type_oid: new_row_type, /* optional predetermined OID */
@@ -492,7 +492,7 @@ pub fn heap_create_with_catalog<'mcx>(
     let old_type_oid =
         syscache_seams::get_type_oid::call(relname, relnamespace)?;
     if OidIsValid(old_type_oid)
-        && !pg_type::moveArrayTypeName(old_type_oid, relname, relnamespace)?
+        && !::pg_type::moveArrayTypeName(old_type_oid, relname, relnamespace)?
     {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_DUPLICATE_OBJECT)
@@ -581,7 +581,7 @@ pub fn heap_create_with_catalog<'mcx>(
     /*
      * Determine the relation's initial permissions.
      */
-    let relacl: Option<types_tuple::heaptuple::Datum<'mcx>> = if use_user_acl {
+    let relacl: Option<::types_tuple::heaptuple::Datum<'mcx>> = if use_user_acl {
         match relkind {
             x if x == RELKIND_RELATION
                 || x == RELKIND_VIEW
@@ -608,7 +608,7 @@ pub fn heap_create_with_catalog<'mcx>(
         None
     };
     let relacl_bytes: Option<&[u8]> = match &relacl {
-        Some(types_tuple::heaptuple::Datum::ByRef(b)) => Some(&b[..]),
+        Some(::types_tuple::heaptuple::Datum::ByRef(b)) => Some(&b[..]),
         _ => None,
     };
 
@@ -674,10 +674,10 @@ pub fn heap_create_with_catalog<'mcx>(
         new_type_oid = new_type_addr.objectId;
 
         /* Now create the array type. */
-        let relarrayname = pg_type::makeArrayTypeName(relname, relnamespace)?;
+        let relarrayname = ::pg_type::makeArrayTypeName(relname, relnamespace)?;
 
-        use pg_type::TypeCreate;
-        use types_catalog::pg_type::TypeCreateParams;
+        use ::pg_type::TypeCreate;
+        use ::types_catalog::pg_type::TypeCreateParams;
         TypeCreate(TypeCreateParams {
             new_type_oid: new_array_oid, /* force the type's OID to this */
             type_name: relarrayname,
@@ -819,7 +819,7 @@ pub fn heap_create_with_catalog<'mcx>(
         let mut cooked: alloc::vec::Vec<::nodes::nodes::NodePtr<'mcx>> =
             alloc::vec::Vec::with_capacity(cooked_constraints.len());
         for c in cooked_constraints.iter() {
-            cooked.push(mcx::alloc_in(mcx, (**c).clone_in(mcx)?)?);
+            cooked.push(::mcx::alloc_in(mcx, (**c).clone_in(mcx)?)?);
         }
         crate::constraints::StoreConstraints(mcx, &new_rel_desc, &cooked, is_internal)?;
     }

@@ -15,8 +15,8 @@ use std::sync::Once;
 use super::*;
 use pg_locale_seams as locale_seam;
 use mbutils_seams as mb_seam;
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use locale::{CollProvider, PgLocale, PgLocaleStruct};
 
 static INIT: Once = Once::new();
@@ -58,11 +58,11 @@ fn install_seams() {
 }
 
 fn new_c_locale(mcx: Mcx<'_>, _collid: Oid) -> PgResult<PgLocale<'_>> {
-    mcx::alloc_in(mcx, c_locale_struct())
+    ::mcx::alloc_in(mcx, c_locale_struct())
 }
 
-fn ctx() -> mcx::MemoryContext {
-    mcx::MemoryContext::new("test")
+fn ctx() -> ::mcx::MemoryContext {
+    ::mcx::MemoryContext::new("test")
 }
 
 const NULL: Locale<'static> = None;

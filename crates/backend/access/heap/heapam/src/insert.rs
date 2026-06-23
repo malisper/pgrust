@@ -25,22 +25,22 @@
 //! writeback all preserved. Its pure page-count helper
 //! [`heap_multi_insert_pages`] is ported and tested here.
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, OffsetNumber, Size, TransactionId};
-use types_core::xact::CommandId;
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Size, TransactionId};
+use ::types_core::xact::CommandId;
 use types_error::{PgResult, ERRCODE_INVALID_TRANSACTION_STATE, ERROR};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use rel::{Relation, RelationData};
 use types_storage::{Buffer, InvalidBuffer};
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::{
     HeapTupleField3, HeapTupleHeaderChoice, HeapTupleHeaderData, HEAP2_XACT_MASK, HEAP_COMBOCID,
     HEAP_HASEXTERNAL, HEAP_XACT_MASK, HEAP_XMAX_INVALID, HEAP_XMIN_FROZEN,
 };
 
-use heaptuple::heap_tuple_to_disk_image;
+use ::heaptuple::heap_tuple_to_disk_image;
 use hio::{RelationGetBufferForTuple, RelationPutHeapTuple};
-use heaptoast::heap_toast_insert_or_update;
+use ::heaptoast::heap_toast_insert_or_update;
 
 use vacuumlazy_seams as page_seam;
 use transam_xact_seams as xact_seam;
@@ -51,15 +51,15 @@ use predicate_seams as predicate_seam;
 use pgstat_seams as pgstat_seam;
 use relcache_seams as relcache_seam;
 
-use types_storage::bufpage::SizeofHeapTupleHeader;
-use wal::wal::XLOG_INCLUDE_ORIGIN;
-use wal::xloginsert::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
+use ::types_storage::bufpage::SizeofHeapTupleHeader;
+use ::wal::wal::XLOG_INCLUDE_ORIGIN;
+use ::wal::xloginsert::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
-use rmgrdesc_next::heapdesc::{
+use ::rmgrdesc_next::heapdesc::{
     XLOG_HEAP2_MULTI_INSERT, XLOG_HEAP_INIT_PAGE, XLOG_HEAP_INSERT,
 };
-use wal::wal::{RM_HEAP2_ID, RM_HEAP_ID};
-use xlog_records::heapam_xlog::{
+use ::wal::wal::{RM_HEAP2_ID, RM_HEAP_ID};
+use ::xlog_records::heapam_xlog::{
     xl_heap_header, xl_heap_insert, xl_heap_multi_insert, xl_multi_insert_tuple, SizeOfHeapHeader,
     SizeOfHeapInsert, SizeOfHeapMultiInsert, XLH_INSERT_ALL_FROZEN_SET,
     XLH_INSERT_ALL_VISIBLE_CLEARED, XLH_INSERT_CONTAINS_NEW_TUPLE, XLH_INSERT_IS_SPECULATIVE,
@@ -96,7 +96,7 @@ const VISIBILITYMAP_ALL_VISIBLE: u8 = 0x01;
 const VISIBILITYMAP_ALL_FROZEN: u8 = 0x02;
 
 /// `FirstOffsetNumber` (storage/off.h).
-const FirstOffsetNumber: OffsetNumber = types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
+const FirstOffsetNumber: OffsetNumber = ::types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
 
 // ===========================================================================
 // heap_prepare_insert — stamp the header + toast (heapam.c, static).
@@ -161,7 +161,7 @@ fn heap_prepare_insert<'mcx>(
         Ok(None)
     } else if HeapTupleHasExternal(tup)
         || tup.tuple.t_len as usize
-            > heaptoast::TOAST_TUPLE_THRESHOLD
+            > ::heaptoast::TOAST_TUPLE_THRESHOLD
     {
         Ok(heap_toast_insert_or_update(mcx, relation, tup, None, options)?)
     } else {
@@ -197,7 +197,7 @@ pub fn heap_insert<'mcx>(
     debug_assert!(
         {
             let hdr = tup.tuple.t_data.as_ref().expect("heap_insert: no header");
-            (types_tuple::heaptuple::HeapTupleHeaderGetNatts(hdr) as i32)
+            (::types_tuple::heaptuple::HeapTupleHeaderGetNatts(hdr) as i32)
                 <= RelationGetNumberOfAttributes(relation)
         }
     );
@@ -242,7 +242,7 @@ pub fn heap_insert<'mcx>(
     predicate_seam::check_for_serializable_conflict_in::call(
         relation.rd_id,
         None,
-        types_core::primitive::InvalidBlockNumber,
+        ::types_core::primitive::InvalidBlockNumber,
     )?;
 
     /* NO EREPORT(ERROR) from here till changes are logged */
@@ -413,9 +413,9 @@ pub fn heap_multi_insert_pages(
     ntuples: usize,
     save_free_space: Size,
 ) -> i32 {
-    use types_core::primitive::BLCKSZ;
-    let page_header = types_storage::bufpage::SizeOfPageHeaderData;
-    let item_id = core::mem::size_of::<types_storage::bufpage::ItemIdData>();
+    use ::types_core::primitive::BLCKSZ;
+    let page_header = ::types_storage::bufpage::SizeOfPageHeaderData;
+    let item_id = core::mem::size_of::<::types_storage::bufpage::ItemIdData>();
 
     let mut page_avail: usize = BLCKSZ - page_header - save_free_space;
     let mut npages: i32 = 1;
@@ -455,11 +455,11 @@ pub fn heap_multi_insert_pages(
 pub fn heap_multi_insert<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &Relation<'_>,
-    tuples: mcx::PgVec<'mcx, FormedTuple<'mcx>>,
+    tuples: ::mcx::PgVec<'mcx, FormedTuple<'mcx>>,
     cid: CommandId,
     options: i32,
     mut bistate: Option<&mut crate::BulkInsertState>,
-) -> PgResult<mcx::PgVec<'mcx, FormedTuple<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, FormedTuple<'mcx>>> {
     let xid = xact_seam::get_current_transaction_id::call()?;
     let ntuples = tuples.len();
     let mut vmbuffer: Buffer = InvalidBuffer;
@@ -521,7 +521,7 @@ pub fn heap_multi_insert<'mcx>(
     predicate_seam::check_for_serializable_conflict_in::call(
         relation.rd_id,
         None,
-        types_core::primitive::InvalidBlockNumber,
+        ::types_core::primitive::InvalidBlockNumber,
     )?;
 
     let mut ndone: usize = 0;
@@ -729,7 +729,7 @@ pub fn heap_multi_insert<'mcx>(
             }
             // totaldatalen = scratchptr - tupledata;
             let totaldatalen = scratch.len() - tupledata_off;
-            debug_assert!(scratch.len() < types_core::primitive::BLCKSZ);
+            debug_assert!(scratch.len() < ::types_core::primitive::BLCKSZ);
 
             if need_tuple_data {
                 flags |= XLH_INSERT_CONTAINS_NEW_TUPLE;
@@ -794,7 +794,7 @@ pub fn heap_multi_insert<'mcx>(
             page_seam::visibilitymap_set::call(relation, types_vacuum::vacuumlazy::VmSetArgs {
                 heap_blk: bufmgr_seams::buffer_get_block_number::call(buffer),
                 heap_buf: buffer,
-                rec_ptr: types_core::InvalidXLogRecPtr,
+                rec_ptr: ::types_core::InvalidXLogRecPtr,
                 vm_buf: vmbuffer,
                 cutoff_xid: 0, /* InvalidTransactionId */
                 flags: VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN,
@@ -822,7 +822,7 @@ pub fn heap_multi_insert<'mcx>(
     predicate_seam::check_for_serializable_conflict_in::call(
         relation.rd_id,
         None,
-        types_core::primitive::InvalidBlockNumber,
+        ::types_core::primitive::InvalidBlockNumber,
     )?;
 
     /*
@@ -850,7 +850,7 @@ pub fn heap_multi_insert<'mcx>(
     );
 
     // Return the stamped heaptuples (toasted copy or caller's tuple), in order.
-    let mut out: mcx::PgVec<'mcx, FormedTuple<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut out: ::mcx::PgVec<'mcx, FormedTuple<'mcx>> = ::mcx::PgVec::new_in(mcx);
     out.reserve(heaptuples.len());
     for t in heaptuples {
         out.push(t);
@@ -942,7 +942,7 @@ fn shortalign(len: usize) -> usize {
 /// arm plus the user-catalog-table option carried on the relcache copy.)
 fn relation_is_accessible_in_logical_decoding(relation: &RelationData<'_>) -> bool {
     let wal = transam_xlog_seams::wal_level::call();
-    let xlog_logical_info_active = wal >= wal::WalLevel::Logical;
+    let xlog_logical_info_active = wal >= ::wal::WalLevel::Logical;
     let used_as_catalog_table = relation_is_used_as_catalog_table(relation);
     xlog_logical_info_active
         && relcache_seam::relation_needs_wal::call(relation)
@@ -953,7 +953,7 @@ fn relation_is_accessible_in_logical_decoding(relation: &RelationData<'_>) -> bo
 /// && RelationNeedsWAL(relation) && !IsCatalogRelation(relation)`.
 fn relation_is_logically_logged(relation: &RelationData<'_>) -> bool {
     let wal = transam_xlog_seams::wal_level::call();
-    let xlog_logical_info_active = wal >= wal::WalLevel::Logical;
+    let xlog_logical_info_active = wal >= ::wal::WalLevel::Logical;
     xlog_logical_info_active
         && relcache_seam::relation_needs_wal::call(relation)
         && !catalog_seam::is_catalog_relation::call(relation)
@@ -987,7 +987,7 @@ fn visibilitymap_clear(
 /// directly callable (no dependency cycle).
 fn cache_invalidate_heap_tuple(
     relation: &RelationData<'_>,
-    tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    tuple: &::types_tuple::heaptuple::HeapTupleData<'_>,
     data: &[u8],
 ) -> PgResult<()> {
     inval::cache_invalidate::CacheInvalidateHeapTuple(
@@ -999,12 +999,12 @@ fn cache_invalidate_heap_tuple(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
-    use types_tuple::heaptuple::{
+    use ::mcx::MemoryContext;
+    use ::types_tuple::heaptuple::{
         BlockIdData, HeapTupleData, HeapTupleField3, HeapTupleFields, HeapTupleHeaderChoice,
         HeapTupleHeaderData, ItemPointerData,
     };
-    use xlog_records::heapam_xlog::{
+    use ::xlog_records::heapam_xlog::{
         xl_heap_header, xl_heap_insert, SizeOfHeapHeader, SizeOfHeapInsert,
     };
 
@@ -1057,7 +1057,7 @@ mod tests {
             t_infomask2: 0,
             t_infomask: HEAP_COMBOCID,
             t_hoff: 24,
-            t_bits: mcx::PgVec::new_in(mcx),
+            t_bits: ::mcx::PgVec::new_in(mcx),
         };
 
         HeapTupleHeaderSetXmin(&mut hdr, 42);
@@ -1101,10 +1101,10 @@ mod tests {
                 t_infomask2: 0,
                 t_infomask: 0,
                 t_hoff: 24,
-                t_bits: mcx::PgVec::new_in(mcx),
+                t_bits: ::mcx::PgVec::new_in(mcx),
             };
             FormedTuple {
-                tuple: mcx::alloc_in(mcx,
+                tuple: ::mcx::alloc_in(mcx,
                     HeapTupleData {
                         t_len: len,
                         t_self: ItemPointerData {
@@ -1112,11 +1112,11 @@ mod tests {
                             ip_posid: 0,
                         },
                         t_tableOid: 0,
-                        t_data: Some(mcx::alloc_in(mcx, hdr).unwrap()),
+                        t_data: Some(::mcx::alloc_in(mcx, hdr).unwrap()),
                     },
                 )
                 .unwrap(),
-                data: mcx::PgVec::new_in(mcx),
+                data: ::mcx::PgVec::new_in(mcx),
             }
         };
 

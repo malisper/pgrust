@@ -9,9 +9,9 @@
 //! header workaround as a fake opaque type.
 
 use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use types_tuple::heaptuple::TupleDesc;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::TupleDesc;
 
 use crate::funcapi::Tuplestorestate;
 

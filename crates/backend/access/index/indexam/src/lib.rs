@@ -2,7 +2,7 @@
 //! access-method dispatch layer (the `index_*` interface routines).
 //!
 //! The dispatch model mirrors `backend-access-table-tableam`: an index
-//! relation's `rd_indam` is an [`types_tableam::IndexAmRoutine`] vtable whose
+//! relation's `rd_indam` is an [`::types_tableam::IndexAmRoutine`] vtable whose
 //! callbacks (`am*`) the per-AM implementation (nbtree / hash / gist / gin /
 //! spgist / brin) installs; this layer reads the property flags
 //! (`ampredlocks`, `amsupport`, `amoptsprocnum`) and invokes the callbacks
@@ -10,7 +10,7 @@
 //! `RELATION_CHECKS` (the reindex guard) and `CHECK_REL_PROCEDURE` /
 //! `CHECK_SCAN_PROCEDURE` (the missing-callback error) are this layer's logic.
 //!
-//! The open index/heap relation crosses as a [`rel::Relation`] handle.
+//! The open index/heap relation crosses as a [`::rel::Relation`] handle.
 //! `IndexScanDescData` is the generic scan descriptor (the AM extends it via
 //! `opaque`); the AM allocates it in `ambeginscan`. `IndexScanEnd` is the
 //! `Drop` of the owned `Box<IndexScanDescData>`. The table-AM heap-fetch
@@ -24,33 +24,33 @@
 
 use std::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 // The canonical unified value type (Datum-unification). The tableam contracts
 // this layer forwards to — the `aminsert` vtable `values: &[Datum<'_>]`, the
 // `IndexScanDesc.xs_orderbyvals` slots, and the opclass-options word forwarded
 // verbatim to the reloptions seam — all carry it.
-use types_tuple::heaptuple::Datum as DatumV;
+use ::types_tuple::heaptuple::Datum as DatumV;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR,
     ERRCODE_WRONG_OBJECT_TYPE};
-use rel::Relation;
-use types_scan::sdir::ScanDirection;
-use types_scan::scankey::ScanKeyData;
-use snapshot::snapshot::{IsMVCCSnapshot, SnapshotData};
-use types_storage::lock::{LOCKMODE, NoLock};
-use types_tableam::amapi::{IndexAmRoutine, IndexUniqueCheck, TIDBitmap};
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::genam::{
+use ::rel::Relation;
+use ::types_scan::sdir::ScanDirection;
+use ::types_scan::scankey::ScanKeyData;
+use ::snapshot::snapshot::{IsMVCCSnapshot, SnapshotData};
+use ::types_storage::lock::{LOCKMODE, NoLock};
+use ::types_tableam::amapi::{IndexAmRoutine, IndexUniqueCheck, TIDBitmap};
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::genam::{
     IndexBulkDeleteResult, IndexOrderByDistance, IndexScanInstrumentation, IndexVacuumInfo,
     SharedIndexScanInstrumentation,
 };
-use types_tableam::relscan::{
+use ::types_tableam::relscan::{
     IndexScanDesc, IndexScanDescData, ParallelIndexScanDescData, ParallelIndexScanDescHandle,
     PARALLEL_INDEX_SCAN_DESC_HEADER_SIZE,
 };
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, RegProcedure};
-use types_tuple::access::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, RegProcedure};
+use ::types_tuple::access::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use table_tableam as tableam;
 use index_seams as catalog_index;
@@ -152,7 +152,7 @@ fn seam_vac_index_bulk_delete(
     istat: Option<IndexBulkDeleteResult>,
     dead_items: types_vacuum::vacuumlazy::TidStore,
 ) -> PgResult<IndexBulkDeleteResult> {
-    let cx = mcx::MemoryContext::new("index_bulk_delete");
+    let cx = ::mcx::MemoryContext::new("index_bulk_delete");
     let mcx = cx.mcx();
     let info = build_genam_ivinfo(mcx, &ivinfo)?;
     let res = index_bulk_delete(mcx, &info, istat, Some(dead_items.id))?;
@@ -165,7 +165,7 @@ fn seam_vac_index_vacuum_cleanup(
     ivinfo: types_vacuum::vacuumparallel::IndexVacuumInfo,
     istat: Option<IndexBulkDeleteResult>,
 ) -> PgResult<Option<IndexBulkDeleteResult>> {
-    let cx = mcx::MemoryContext::new("index_vacuum_cleanup");
+    let cx = ::mcx::MemoryContext::new("index_vacuum_cleanup");
     let mcx = cx.mcx();
     let info = build_genam_ivinfo(mcx, &ivinfo)?;
     index_vacuum_cleanup(mcx, &info, istat)
@@ -192,7 +192,7 @@ fn seam_analyze_index_vacuum_cleanup<'mcx>(
     message_level: i32,
     num_heap_tuples: f64,
 ) -> PgResult<()> {
-    let cx = mcx::MemoryContext::new("index_vacuum_cleanup_analyze");
+    let cx = ::mcx::MemoryContext::new("index_vacuum_cleanup_analyze");
     let mcx = cx.mcx();
     let index_rel = index_open(mcx, index.rd_id, NoLock)?;
     let heap_rel =
@@ -385,7 +385,7 @@ fn seam_index_getnext_slot<'mcx>(
 
 /// `index_getbitmap` seam wrapper. The seam carries the concrete
 /// `tidbitmap::TIDBitmap`; the C-faithful impl forwards the payload-erased
-/// `types_tableam::amapi::TIDBitmap` to the AM. Round-trip the concrete bitmap
+/// `::types_tableam::amapi::TIDBitmap` to the AM. Round-trip the concrete bitmap
 /// through the erased carrier.
 fn seam_index_getbitmap<'mcx>(
     mcx: Mcx<'mcx>,
@@ -636,7 +636,7 @@ pub fn index_insert<'mcx>(
         predicate::check_for_serializable_conflict_in::call(
             index_relation.rd_id,
             None,
-            types_core::primitive::InvalidBlockNumber,
+            ::types_core::primitive::InvalidBlockNumber,
         )?;
     }
 
@@ -1043,11 +1043,11 @@ pub fn index_beginscan_parallel<'mcx>(
 ) -> PgResult<IndexScanDesc<'mcx>> {
     // Assert(RelFileLocatorEquals(heaprel->rd_locator, pscan->ps_locator)) and
     // Assert(RelFileLocatorEquals(indexrel->rd_locator, pscan->ps_indexlocator)).
-    debug_assert!(types_storage::RelFileLocatorEquals(
+    debug_assert!(::types_storage::RelFileLocatorEquals(
         &heaprel.rd_locator,
         &pscan.ps_locator()
     ));
-    debug_assert!(types_storage::RelFileLocatorEquals(
+    debug_assert!(::types_storage::RelFileLocatorEquals(
         &indexrel.rd_locator,
         &pscan.ps_indexlocator()
     ));
@@ -1245,10 +1245,10 @@ pub fn get_actual_variable_endpoint<'mcx>(
     typ_len: i16,
     typ_byval: bool,
 ) -> PgResult<Option<DatumV<'mcx>>> {
-    use types_scan::scankey::{InvalidStrategy, ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL};
-    use snapshot::snapshot::SnapshotType;
+    use ::types_scan::scankey::{InvalidStrategy, ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL};
+    use ::snapshot::snapshot::SnapshotType;
     use types_storage::{Buffer, InvalidBuffer};
-    use types_core::primitive::{BlockNumber, InvalidBlockNumber};
+    use ::types_core::primitive::{BlockNumber, InvalidBlockNumber};
 
     const VISITED_PAGES_LIMIT: i32 = 100;
 
@@ -1539,7 +1539,7 @@ pub fn index_store_float8_orderby_distances(
         let idx = i as usize;
         let typ = order_by_types[idx];
         let d = distances.map(|ds| ds[idx]);
-        if typ == types_tuple::heaptuple::FLOAT8OID {
+        if typ == ::types_tuple::heaptuple::FLOAT8OID {
             // USE_FLOAT8_BYVAL is defined on all supported 64-bit platforms, so
             // the C `#ifndef USE_FLOAT8_BYVAL` pfree branch is compiled out;
             // the owned descriptor's Datum slots hold no allocation either.
@@ -1552,7 +1552,7 @@ pub fn index_store_float8_orderby_distances(
             }
             scan.xs_orderbyvals[idx] = DatumV::null();
             scan.xs_orderbynulls[idx] = true;
-        } else if typ == types_tuple::heaptuple::FLOAT4OID {
+        } else if typ == ::types_tuple::heaptuple::FLOAT4OID {
             // convert distance function's result to ORDER BY type
             if let Some(d) = d {
                 if !d.isnull {

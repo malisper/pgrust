@@ -13,15 +13,15 @@
 //! its `init_seams()`; until then a call panics loudly. The serial scan path
 //! never invokes them.
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use rel::Relation;
-use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
     /// `brinbuild(heap, index, indexInfo)` (brin.c): the `ambuild` callback —
@@ -138,6 +138,6 @@ seam_core::seam!(
     /// non-hypothetical-index branch. `Err` carries its `ereport(ERROR)` surface.
     pub fn brin_get_stats<'mcx>(
         mcx: Mcx<'mcx>,
-        indexoid: types_core::primitive::Oid,
+        indexoid: ::types_core::primitive::Oid,
     ) -> PgResult<brin::BrinStatsData>
 );

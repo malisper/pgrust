@@ -15,7 +15,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROTOCOL_VIOLATION,
 };
-use types_numeric::var::{NumericSign, NumericVar};
+use ::types_numeric::var::{NumericSign, NumericVar};
 use types_numeric::{
     numeric_digit_at, numeric_digits, numeric_is_nan, numeric_is_ninf, numeric_is_pinf,
     numeric_is_special, numeric_ndigits, numeric_sign, numeric_weight, NumericDigit, DEC_DIGITS,
@@ -386,13 +386,13 @@ pub fn numeric_in_safe<'mcx>(
     mcx: Mcx<'mcx>,
     s: &str,
     typmod: i32,
-    mut escontext: Option<&mut types_error::SoftErrorContext>,
+    mut escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // Route a soft-eligible `Err` either into the sink (Ok(None)) or out as a
     // hard `Err`, mirroring C's `ereturn(escontext, (Datum) 0, ...)`.
     macro_rules! soft {
         ($err:expr) => {
-            match types_error::ereturn(escontext.as_deref_mut(), (), $err) {
+            match ::types_error::ereturn(escontext.as_deref_mut(), (), $err) {
                 Ok(()) => return Ok(None),
                 Err(e) => return Err(e),
             }

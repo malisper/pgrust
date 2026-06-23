@@ -59,8 +59,8 @@ impl BitmapOr<'_> {
 
     /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
     /// allocates.
-    pub fn clone_in<'b>(&self, mcx: mcx::Mcx<'b>) -> types_error::PgResult<BitmapOr<'b>> {
-        let mut bitmapplans = mcx::vec_with_capacity_in(mcx, self.bitmapplans.len())?;
+    pub fn clone_in<'b>(&self, mcx: ::mcx::Mcx<'b>) -> types_error::PgResult<BitmapOr<'b>> {
+        let mut bitmapplans = ::mcx::vec_with_capacity_in(mcx, self.bitmapplans.len())?;
         for child in self.bitmapplans.iter() {
             bitmapplans.push(child.clone_in(mcx)?);
         }

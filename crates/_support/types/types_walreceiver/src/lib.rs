@@ -171,7 +171,7 @@ pub struct WalRcvData {
 impl Default for WalRcvData {
     fn default() -> Self {
         WalRcvData {
-            procno: types_core::INVALID_PROC_NUMBER,
+            procno: ::types_core::INVALID_PROC_NUMBER,
             pid: 0,
             walRcvState: WalRcvState::WALRCV_STOPPED,
             receiveStart: 0,

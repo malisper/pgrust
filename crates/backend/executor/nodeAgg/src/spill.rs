@@ -2,13 +2,13 @@
 //! decision to spill, per-batch spill files (logtape), metrics, batch
 //! creation and reading, and the reset of all spill state.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
 use nodes::{EStateData, SlotId};
 
 use crate::aggstate::{AggStateData, HashAggBatch, HashAggSpill};
-use sort_storage_seams::LogicalTapeSet;
+use ::sort_storage_seams::LogicalTapeSet;
 
 use hyperloglog as hll;
 use nodeHash_seams as nodeHash_seams;
@@ -155,7 +155,7 @@ pub fn hash_agg_enter_spill_mode<'mcx>(
         aggstate.hash_tapeset = Some(tapeset);
 
         let num_hashes = aggstate.num_hashes;
-        let mut spills = mcx::vec_with_capacity_in::<HashAggSpill>(mcx, num_hashes as usize)?;
+        let mut spills = ::mcx::vec_with_capacity_in::<HashAggSpill>(mcx, num_hashes as usize)?;
         for _ in 0..num_hashes {
             spills.push(HashAggSpill::default());
         }
@@ -320,7 +320,7 @@ pub fn hashagg_batch_new<'mcx>(
     input_card: f64,
     used_bits: i32,
     mcx: Mcx<'mcx>,
-) -> PgResult<mcx::PgBox<'mcx, HashAggBatch>> {
+) -> PgResult<::mcx::PgBox<'mcx, HashAggBatch>> {
     let batch = HashAggBatch {
         setno,
         used_bits,
@@ -328,7 +328,7 @@ pub fn hashagg_batch_new<'mcx>(
         input_tuples,
         input_card,
     };
-    mcx::alloc_in(mcx, batch)
+    ::mcx::alloc_in(mcx, batch)
 }
 
 /// `hashagg_batch_read(batch, &hashp)` — read the next spilled minimal tuple
@@ -338,7 +338,7 @@ pub fn hashagg_batch_read<'mcx>(
     tapeset: &mut LogicalTapeSet<'mcx>,
     batch: &mut HashAggBatch,
     mcx: Mcx<'mcx>,
-) -> PgResult<Option<(mcx::PgVec<'mcx, u8>, u32)>> {
+) -> PgResult<Option<(::mcx::PgVec<'mcx, u8>, u32)>> {
     let tape = batch
         .input_tape
         .expect("hashagg_batch_read: batch has no input tape");
@@ -350,7 +350,7 @@ pub fn hashagg_batch_read<'mcx>(
         return Ok(None);
     }
     if nread != core::mem::size_of::<u32>() {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "unexpected EOF for tape {tape}: requested {} bytes, read {} bytes",
             core::mem::size_of::<u32>(),
             nread
@@ -362,7 +362,7 @@ pub fn hashagg_batch_read<'mcx>(
     let mut tlen_buf = [0u8; 4];
     let nread = tape_seams::logical_tape_read::call(tapeset, tape, &mut tlen_buf)?;
     if nread != core::mem::size_of::<u32>() {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "unexpected EOF for tape {tape}: requested {} bytes, read {} bytes",
             core::mem::size_of::<u32>(),
             nread
@@ -371,7 +371,7 @@ pub fn hashagg_batch_read<'mcx>(
     let t_len = u32::from_ne_bytes(tlen_buf) as usize;
 
     // palloc(t_len); the leading uint32 is t_len itself, then read the rest.
-    let mut tuple = mcx::vec_with_capacity_in::<u8>(mcx, t_len)?;
+    let mut tuple = ::mcx::vec_with_capacity_in::<u8>(mcx, t_len)?;
     tuple.extend_from_slice(&tlen_buf);
     tuple.resize(t_len, 0);
 
@@ -379,7 +379,7 @@ pub fn hashagg_batch_read<'mcx>(
     let nread =
         tape_seams::logical_tape_read::call(tapeset, tape, &mut tuple[core::mem::size_of::<u32>()..])?;
     if nread != rest {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "unexpected EOF for tape {tape}: requested {rest} bytes, read {nread} bytes"
         )));
     }
@@ -403,12 +403,12 @@ pub fn hashagg_spill_init<'mcx>(
 
     // (USE_INJECTION_POINTS single-partition override omitted — test facility.)
 
-    let mut partitions = mcx::vec_with_capacity_in::<Option<usize>>(mcx, npartitions as usize)?;
-    let mut ntuples = mcx::vec_with_capacity_in::<i64>(mcx, npartitions as usize)?;
+    let mut partitions = ::mcx::vec_with_capacity_in::<Option<usize>>(mcx, npartitions as usize)?;
+    let mut ntuples = ::mcx::vec_with_capacity_in::<i64>(mcx, npartitions as usize)?;
     // C: spill->hll_card = palloc0(sizeof(hyperLogLogState) * npartitions) — an
     // array of estimator state held by value, one per partition.
     let mut hll_card =
-        mcx::vec_with_capacity_in::<::nodes::nodeagg::HyperLogLog<'mcx>>(mcx, npartitions as usize)?;
+        ::mcx::vec_with_capacity_in::<::nodes::nodeagg::HyperLogLog<'mcx>>(mcx, npartitions as usize)?;
     for _ in 0..npartitions {
         ntuples.push(0);
         partitions.push(None);
@@ -576,10 +576,10 @@ pub fn hashagg_spill_tuple<'mcx>(
 /// Map a `minimal_tuple_to_flat` structural error into a `PgError`.
 pub(crate) fn flat_err(
     e: heaptuple::flat::MinimalTupleFlatError,
-) -> types_error::PgError {
+) -> ::types_error::PgError {
     match e {
         heaptuple::flat::MinimalTupleFlatError::Pg(err) => err,
-        other => types_error::PgError::error(format!(
+        other => ::types_error::PgError::error(format!(
             "hashagg spill: malformed minimal tuple: {other:?}"
         )),
     }
@@ -649,10 +649,10 @@ pub fn hashagg_spill_finish<'mcx>(
 
         let batches = aggstate
             .hash_batches
-            .get_or_insert_with(|| mcx::PgVec::new_in(mcx));
+            .get_or_insert_with(|| ::mcx::PgVec::new_in(mcx));
         batches
             .try_reserve(1)
-            .map_err(|_| mcx.oom(core::mem::size_of::<mcx::PgBox<'mcx, HashAggBatch>>()))?;
+            .map_err(|_| mcx.oom(core::mem::size_of::<::mcx::PgBox<'mcx, HashAggBatch>>()))?;
         batches.push(new_batch);
         aggstate.hash_batches_used += 1;
     }

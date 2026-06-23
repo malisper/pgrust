@@ -12,7 +12,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::parse::parse_format;
 use crate::tables::*;

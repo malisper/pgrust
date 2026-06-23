@@ -9,8 +9,8 @@ use super::*;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use mcx::{slice_in, MemoryContext, Mcx, PgString};
-use wal::rmgr::XLogReaderState;
-use wal::wal::{DecodedXLogRecord, XLogRecord};
+use ::wal::rmgr::XLogReaderState;
+use ::wal::wal::{DecodedXLogRecord, XLogRecord};
 
 const TS: &str = "<ts>";
 

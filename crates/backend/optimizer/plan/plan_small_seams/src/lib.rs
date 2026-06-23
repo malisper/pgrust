@@ -20,7 +20,7 @@
 extern crate alloc;
 
 use ::nodes::rawnodes::FromExpr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{JoinlistNode, PlannerInfo};
 
 seam_core::seam!(

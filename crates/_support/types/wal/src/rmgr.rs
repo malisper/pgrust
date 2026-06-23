@@ -19,7 +19,7 @@ use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::{
     uint32, BlockNumber, TimeLineID, XLogRecPtr, XLogSegNo, MAXPGPATH,
 };
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::wal::DecodedXLogRecord;
 
@@ -335,7 +335,7 @@ pub struct XLogReaderState<'mcx> {
 /// `logical.c` (its owner) and `decode.c` (whose `rm_decode` callbacks receive
 /// it) name the same rich struct. Re-exported here so `RmDecode` and the rmgr
 /// table can name it without `types-wal` itself defining a divergent shape.
-pub use types_logical::LogicalDecodingContext;
+pub use ::types_logical::LogicalDecodingContext;
 
 /// `XLogRecordBuffer` (replication/decode.h) — the unit of WAL data handed
 /// to the `rm_decode` callbacks. Complete: the C struct has exactly these
@@ -355,7 +355,7 @@ pub struct XLogRecordBuffer {
     pub endptr: XLogRecPtr,
     /// `XLogReaderState *record` — the reader positioned on the record being
     /// decoded (decode.c only reads through it).
-    pub record: types_logical::XLogReaderHandle,
+    pub record: ::types_logical::XLogReaderHandle,
 }
 
 // ---------------------------------------------------------------------------

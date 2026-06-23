@@ -44,7 +44,7 @@
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     ACCESS_METHOD_OPERATOR_RELATION_ID as AccessMethodOperatorRelationId,
     ACCESS_METHOD_PROCEDURE_RELATION_ID as AccessMethodProcedureRelationId,
     ACCESS_METHOD_RELATION_ID as AccessMethodRelationId,
@@ -78,7 +78,7 @@ use types_catalog::catalog::{
     TYPE_RELATION_ID as TypeRelationId, USER_MAPPING_RELATION_ID as UserMappingRelationId,
     Anum_pg_init_privs_classoid, Anum_pg_init_privs_objoid, Anum_pg_init_privs_objsubid,
 };
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     Anum_pg_depend_classid, Anum_pg_depend_deptype, Anum_pg_depend_objid, Anum_pg_depend_objsubid,
     Anum_pg_depend_refclassid, Anum_pg_depend_refobjid, Anum_pg_depend_refobjsubid,
     DependDependerIndexId, DependReferenceIndexId, DependencyType, FormData_pg_depend,
@@ -88,26 +88,26 @@ use types_catalog::catalog_dependency::{
     DEPFLAG_INTERNAL, DEPFLAG_IS_PART, DEPFLAG_NORMAL, DEPFLAG_ORIGINAL, DEPFLAG_PARTITION,
     DEPFLAG_REVERSE, DEPFLAG_SUBOBJECT, DEPEND_RELATION_ID,
 };
-use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
-use types_core::primitive::{AttrNumber, InvalidOid, Oid};
+use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::{
     PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, DEBUG2, ERROR, NOTICE,
 };
 use ::nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT};
 use rel::{Relation, RelationData};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{
     AccessExclusiveLock, RowExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE,
 };
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
 use utils_error::{ereport, elog};
-use types_error::ErrorLocation;
+use ::types_error::ErrorLocation;
 
 // Outward owner seams.
 use transam_xact_seams as xact_seams;
@@ -762,7 +762,7 @@ fn recheck_pg_depend(depRel: &RelationData<'_>, row: &DependRow) -> PgResult<boo
 fn elog_unrecognized_dependency_type(
     deptype: i8,
     object: &ObjectAddress,
-) -> PgResult<types_error::PgError> {
+) -> PgResult<::types_error::PgError> {
     Ok(elog(
         ERROR,
         format!(
@@ -817,7 +817,7 @@ fn reportDependentObjects(
     }
 
     if behavior == DROP_CASCADE
-        && !utils_error::message_level_is_interesting(msglevel)
+        && !::utils_error::message_level_is_interesting(msglevel)
     {
         return Ok(());
     }

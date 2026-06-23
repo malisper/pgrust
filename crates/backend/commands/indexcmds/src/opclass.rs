@@ -12,30 +12,30 @@ use alloc::string::String;
 use mcx::{Mcx, MemoryContext};
 
 use types_amapi::{CompareType, COMPARE_CONTAINED_BY, COMPARE_EQ, COMPARE_OVERLAP};
-use types_core::fmgr::F_OIDEQ;
-use types_core::primitive::Oid;
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::primitive::Oid;
 use types_core::{InvalidOid, OidIsValid};
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::NodePtr;
-use types_scan::scankey::{BTEqualStrategyNumber, InvalidStrategy, ScanKeyData, StrategyNumber};
-use types_storage::lock::AccessShareLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, InvalidStrategy, ScanKeyData, StrategyNumber};
+use ::types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::Datum;
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 
-use utils_error::ereport;
-use types_error::ERROR;
+use ::utils_error::ereport;
+use ::types_error::ERROR;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
-use index_amapi::IndexAmTranslateCompareType;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
+use ::index_amapi::IndexAmTranslateCompareType;
 use genam_seams as genam_seams;
 use table::{table_close, table_open};
 use catalog_namespace::{
     DeconstructQualifiedName, LookupExplicitNamespace, NameListToString, OpclassnameGetOpcid,
 };
 use coerce::{IsBinaryCoercible, IsPreferredType, TypeCategory};
-use types_catalog::opclasscmds_catalog::{
+use ::types_catalog::opclasscmds_catalog::{
     Anum_pg_opclass_oid, Anum_pg_opclass_opcdefault, Anum_pg_opclass_opcintype,
     Anum_pg_opclass_opcmethod, OpclassAmNameNspIndexId, OperatorClassRelationId,
 };
@@ -160,7 +160,7 @@ pub fn ResolveOpClass<'mcx>(
         let op_class_id = lsyscache::get_default_opclass::call(attr_type, access_method_id)?;
         if !OidIsValid(op_class_id) {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
                 .errmsg(format!(
                     "data type {} has no default operator class for access method \"{}\"",
                     formattype_seam::format_type_be_owned::call(attr_type)?,
@@ -192,7 +192,7 @@ pub fn ResolveOpClass<'mcx>(
         let op_class_id = OpclassnameGetOpcid(mcx, access_method_id, &opcname)?;
         if !OidIsValid(op_class_id) {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
                 .errmsg(format!(
                     "operator class \"{opcname}\" does not exist for access method \"{access_method_name}\""
                 ))
@@ -207,7 +207,7 @@ pub fn ResolveOpClass<'mcx>(
         Some(form) if OidIsValid(op_class_id) => form,
         _ => {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
                 .errmsg(format!(
                     "operator class \"{}\" does not exist for access method \"{}\"",
                     NameListToString(mcx, &names)?.as_str(),
@@ -222,7 +222,7 @@ pub fn ResolveOpClass<'mcx>(
     // accept binary compatibility.
     if !IsBinaryCoercible(attr_type, op_input_type)? {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+            .errcode(::types_error::ERRCODE_DATATYPE_MISMATCH)
             .errmsg(format!(
                 "operator class \"{}\" does not accept data type {}",
                 NameListToString(mcx, &names)?.as_str(),
@@ -298,7 +298,7 @@ fn compare_type_error(
     opfamily: Oid,
     amid: Oid,
     translate: bool,
-) -> PgResult<utils_error::PgError> {
+) -> PgResult<::utils_error::PgError> {
     let typ = formattype_seam::format_type_be_owned::call(opcintype)?;
     let msg = if cmptype == COMPARE_EQ {
         format!("could not identify an equality operator for type {typ}")
@@ -322,7 +322,7 @@ fn compare_type_error(
         )
     };
     Ok(ereport(ERROR)
-        .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+        .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
         .errmsg(msg)
         .errdetail(detail)
         .into_error())

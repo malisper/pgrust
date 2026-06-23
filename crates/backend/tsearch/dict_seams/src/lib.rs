@@ -30,11 +30,11 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use define_seams::DefElemArg;
+use ::define_seams::DefElemArg;
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use tsearch::{
     DictSimple, DictSyn, DictThesaurus, OwnedTSLexeme, TSLexeme, ThesaurusSubState,
 };

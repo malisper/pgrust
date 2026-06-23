@@ -9,7 +9,7 @@
 //! via `GetNewOidWithIndex`, forms the heap tuple against the catalog's
 //! descriptor, and runs `CatalogTupleInsert`.
 
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 
 // ---------------------------------------------------------------------------
 // pg_opfamily

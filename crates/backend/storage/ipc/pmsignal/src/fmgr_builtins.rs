@@ -12,7 +12,7 @@
 //! All four cores return `PgResult<bool>`; an `Err` is raised through the one
 //! dispatch point every builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------

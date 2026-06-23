@@ -6,7 +6,7 @@
 
 use std::any::Any;
 
-use types_core::Oid;
+use ::types_core::Oid;
 // Datum-unification migration note: the two shim uses that remain here are the
 // *irreducible fmgr-ABI edge*, deliberately left on the bare-word newtype per the
 // Datum-redesign plan (Phase 2 "chief lifetime-ripple gate", deferred to the
@@ -23,7 +23,7 @@ use types_core::Oid;
 // Every other (genuine-value) Datum use in this crate — the `FmgrArg`/`FmgrOut`
 // boundary value arms — has moved onto canonical `types_tuple::Datum<'mcx>`.
 use datum::{Datum, NullableDatum};
-use types_error::SoftErrorContext;
+use ::types_error::SoftErrorContext;
 
 use crate::boundary::RefPayload;
 
@@ -60,7 +60,7 @@ pub type PGFunction = Option<fn(&mut FunctionCallInfoBaseData) -> Datum>;
 /// so bodies migrate one crate at a time without a flag day. See
 /// `docs/proposals/panic-to-result-migration.md`.
 pub type PgFnNative =
-    fn(&mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum>;
+    fn(&mut FunctionCallInfoBaseData) -> ::types_error::PgResult<Datum>;
 
 /// Handler-private user-data for `FmgrInfo.fn_extra` (an untyped "extra space
 /// for use by handler" pointer in `fmgr.h`).
@@ -100,7 +100,7 @@ pub enum FnExpr {
 /// types out of the node's struct fields (`FuncExpr.funcresulttype`,
 /// `exprType((Node*) list_nth(args, n))`, …). For a faithful polymorphic-type
 /// resolution the carrier therefore holds the real expression node, carried
-/// *erased* ([`types_core::fmgr::FnExprErased`]) so `types-fmgr` (a leaf on
+/// *erased* ([`::types_core::fmgr::FnExprErased`]) so `types-fmgr` (a leaf on
 /// `types-core`) need not name the `types-nodes` `Expr`. The fmgr owner (which
 /// depends on `types-nodes`) downcasts it back and routes the field reads
 /// through the `nodeFuncs` seams. `node == None` is the legacy tag-only carrier
@@ -112,7 +112,7 @@ pub struct ExternalFnExpr {
     pub tag: u32,
     /// The erased field-bearing call-expression node (`fmgr_info_set_expr`'s
     /// `Node *`), `None` when only the tag is known.
-    pub node: Option<types_core::fmgr::FnExprErased>,
+    pub node: Option<::types_core::fmgr::FnExprErased>,
 }
 
 impl core::fmt::Debug for ExternalFnExpr {

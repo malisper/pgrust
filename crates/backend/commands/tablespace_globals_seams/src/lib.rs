@@ -9,9 +9,9 @@
 
 #![allow(non_snake_case)]
 
-use seam_core::seam;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::seam_core::seam;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 /* --- src/port path helpers (src/port/path.c) --- */
 

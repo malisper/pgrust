@@ -72,22 +72,22 @@ use alloc::format;
 use alloc::string::String;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
-use rel::Relation;
+use ::rel::Relation;
 use types_tuple::heaptuple::Datum;
 
 use types_nbtree::{BTArrayKeyInfo, BTScanOpaqueData, BTORDER_PROC, BTMaxStrategyNumber};
-use types_scan::scankey::{
+use ::types_scan::scankey::{
     ScanKeyData, StrategyNumber, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber,
     BTGreaterStrategyNumber, BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy,
     SK_ISNULL, SK_ROW_HEADER, SK_ROW_MEMBER, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
 
-use fmgr_seams::function_call2_coll_datum;
+use ::fmgr_seams::function_call2_coll_datum;
 // `deconstruct_array` lives in the arrayfuncs seams crate; `get_typlenbyvalalign`
 // and the opfamily lookups live in the lsyscache seams crate.
-use arrayfuncs_seams::deconstruct_array_values_bytes;
+use ::arrayfuncs_seams::deconstruct_array_values_bytes;
 use indexam_seams as indexam;
 use compare_seams as nbtcompare;
 use skipsupport_seams as skipsupport;
@@ -121,7 +121,7 @@ const SK_BT_REQFWD: i32 = 0x00010000;
 /// `SK_BT_REQBKWD` — required to continue a backward scan.
 const SK_BT_REQBKWD: i32 = 0x00020000;
 /// `SK_BT_SKIP` — re-exported from types-scan (skip array marker).
-const SK_BT_SKIP: i32 = types_scan::scankey::SK_BT_SKIP;
+const SK_BT_SKIP: i32 = ::types_scan::scankey::SK_BT_SKIP;
 
 /// `INDOPTION_DESC` (`catalog/pg_index.h`): index column is in DESC order.
 const INDOPTION_DESC: i16 = 0x0001;
@@ -342,7 +342,7 @@ fn prepare_skip_support(
     opfamily: Oid,
     opcintype: Oid,
     reverse: bool,
-) -> PgResult<Option<(u64, types_nbtree::BTSkipSupport<'static>)>> {
+) -> PgResult<Option<(u64, ::types_nbtree::BTSkipSupport<'static>)>> {
     let sksup =
         match skipsupport::prepare_skip_support_from_opclass::call(opfamily, opcintype, reverse)? {
             Some(s) => s,
@@ -354,7 +354,7 @@ fn prepare_skip_support(
     // 1-based attribute number directly. The boundary `low_elem` / `high_elem`
     // come back as bare-word fmgr `Datum`s (the trivial skip-support types are
     // all pass-by-value); bridge them into the canonical by-value `Datum`.
-    let data = types_nbtree::BTSkipSupport {
+    let data = ::types_nbtree::BTSkipSupport {
         low_elem: word_to_datum(sksup.low_elem),
         high_elem: word_to_datum(sksup.high_elem),
         increment: sksup.increment,
@@ -888,7 +888,7 @@ fn _bt_fix_scankey_strategy<'mcx>(
                 subkey.sk_strategy = bt_commute_strategy_number(subkey.sk_strategy);
             }
             subkey.sk_flags |= addflags;
-            if (subkey.sk_flags & types_scan::scankey::SK_ROW_END) != 0 {
+            if (subkey.sk_flags & ::types_scan::scankey::SK_ROW_END) != 0 {
                 break;
             }
         }
@@ -940,7 +940,7 @@ fn _bt_mark_scankey_required(skey: &mut ScanKeyData) -> PgResult<()> {
                 break; // wrong direction, so not required
             }
             subkey.sk_flags |= addflags;
-            if (subkey.sk_flags & types_scan::scankey::SK_ROW_END) != 0 {
+            if (subkey.sk_flags & ::types_scan::scankey::SK_ROW_END) != 0 {
                 break;
             }
             attno += 1;
@@ -1215,7 +1215,7 @@ fn _bt_saoparray_shrink<'mcx>(
             *rel.rd_opcintype.allocator(),
             orderproc_handle,
             false,
-            types_scan::sdir::ScanDirection::NoMovementScanDirection,
+            ::types_scan::sdir::ScanDirection::NoMovementScanDirection,
             &skey_argument,
             false,
             arr,
@@ -1620,7 +1620,7 @@ fn _bt_unmark_keys<'mcx>(
                 for subkey in subkeys.iter_mut() {
                     debug_assert!((subkey.sk_flags & SK_ROW_MEMBER) != 0);
                     subkey.sk_flags &= !(SK_BT_REQFWD | SK_BT_REQBKWD);
-                    if (subkey.sk_flags & types_scan::scankey::SK_ROW_END) != 0 {
+                    if (subkey.sk_flags & ::types_scan::scankey::SK_ROW_END) != 0 {
                         break;
                     }
                 }
@@ -1761,7 +1761,7 @@ pub fn _bt_preprocess_array_keys<'mcx>(
                 cur.sk_strategy = BTEqualStrategyNumber;
                 cur.sk_subtype = InvalidOid;
                 cur.sk_collation = collation;
-                cur.sk_func = types_core::fmgr::FmgrInfo::empty();
+                cur.sk_func = ::types_core::fmgr::FmgrInfo::empty();
                 cur.sk_func.fn_oid = cmp_proc;
                 cur.sk_argument = Datum::null();
             }
@@ -2014,9 +2014,9 @@ pub fn _bt_preprocess_array_keys<'mcx>(
 /// `'mcx`. Both sentinels are by-value on the only call path; a by-ref sentinel
 /// would carry owned bytes into `'mcx`.
 fn relocate_sksup<'mcx>(
-    s: types_nbtree::BTSkipSupport<'static>,
-) -> PgResult<types_nbtree::BTSkipSupport<'mcx>> {
-    Ok(types_nbtree::BTSkipSupport {
+    s: ::types_nbtree::BTSkipSupport<'static>,
+) -> PgResult<::types_nbtree::BTSkipSupport<'mcx>> {
+    Ok(::types_nbtree::BTSkipSupport {
         low_elem: relocate_datum(s.low_elem)?,
         high_elem: relocate_datum(s.high_elem)?,
         increment: s.increment,
@@ -2617,7 +2617,7 @@ mod tests {
 
     #[test]
     fn reorder_array_cmp_by_scan_key() {
-        let root = mcx::MemoryContext::new("nbtpp-test");
+        let root = ::mcx::MemoryContext::new("nbtpp-test");
         let mcx = root.mcx();
         let mut a = BTArrayKeyInfo::new_in(mcx);
         let mut b = BTArrayKeyInfo::new_in(mcx);

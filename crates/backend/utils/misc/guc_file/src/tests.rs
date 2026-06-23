@@ -7,9 +7,9 @@
 //! since seams are process-global `OnceLock`s).
 
 use super::*;
-use conffiles_seams::ConfFilesInDir;
+use ::conffiles_seams::ConfFilesInDir;
 use std::sync::Once;
-use types_error::WARNING;
+use ::types_error::WARNING;
 
 static INSTALL_CONFFILES: Once = Once::new();
 

@@ -12,8 +12,8 @@
 //! `types-nodes`-local types and therefore cannot move down.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 // Re-export the unified base, the four superstructures, the SlotData enum, the
 // per-kind ops carrier, and the slot flag constants from their owning leaf
@@ -32,7 +32,7 @@ pub struct AttInMetadata<'mcx> {
     /// `TupleDesc tupdesc` — full tuple descriptor.
     pub tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
     /// `FmgrInfo *attinfuncs` — array of attribute type input function info.
-    pub attinfuncs: PgVec<'mcx, types_core::fmgr::FmgrInfo>,
+    pub attinfuncs: PgVec<'mcx, ::types_core::fmgr::FmgrInfo>,
     /// `Oid *attioparams` — array of attribute type I/O parameter OIDs.
     pub attioparams: PgVec<'mcx, Oid>,
     /// `int32 *atttypmods` — array of attribute typmod values.

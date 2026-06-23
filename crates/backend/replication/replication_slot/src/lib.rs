@@ -29,7 +29,7 @@ use std::cell::UnsafeCell;
 use std::sync::OnceLock;
 
 use utils_error::{ereport, elog};
-use types_core::init::BackendType;
+use ::types_core::init::BackendType;
 use types_core::{
     Oid, Size, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo, InvalidOid, NAMEDATALEN,
 };
@@ -40,7 +40,7 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NAME_TOO_LONG, ERRCODE_OBJECT_IN_USE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT,
 };
-use types_error::ErrorLocation;
+use ::types_error::ErrorLocation;
 use replication_slot_2::{
     slot_is_logical, slot_is_physical, ReplicationSlotHandle, ReplicationSlotInvalidationCause,
     ReplicationSlotOnDisk, ReplicationSlotPersistency, ReplicationSlotPersistentData,
@@ -50,11 +50,11 @@ use types_storage::{
     LWLockMode, REPLICATION_SLOT_ALLOCATION_LOCK, REPLICATION_SLOT_CONTROL_LOCK,
     ProcSignalReason,
 };
-use types_tuple::heaptuple::NameData;
-use condvar::ConditionVariable;
+use ::types_tuple::heaptuple::NameData;
+use ::condvar::ConditionVariable;
 
 use transam::{TransactionIdPrecedes, TransactionIdPrecedesOrEquals};
-use s_lock::Spinlock;
+use ::s_lock::Spinlock;
 
 // Foreign-subsystem seams.
 use transam_xlog_seams as xlog;
@@ -68,7 +68,7 @@ use lwlock_seams as lwlock;
 use pgstat_replslot_seams as pgstat_replslot;
 use waitevent_seams as waitevent;
 use miscinit_seams as miscinit;
-use types_pgstat::wait_event;
+use ::types_pgstat::wait_event;
 
 #[cfg(test)]
 mod tests;
@@ -148,7 +148,7 @@ pub struct ReplicationSlot {
     /// data surviving shutdowns and crashes.
     pub data: ReplicationSlotPersistentData,
     /// is somebody performing io on this slot?
-    pub io_in_progress_lock: types_storage::LWLock,
+    pub io_in_progress_lock: ::types_storage::LWLock,
     /// Condition variable signaled when active_pid changes.
     pub active_cv: ConditionVariable,
     /// catalog xmin advance candidate (logical only).
@@ -175,7 +175,7 @@ impl ReplicationSlot {
             effective_xmin: 0,
             effective_catalog_xmin: 0,
             data: ReplicationSlotPersistentData::default(),
-            io_in_progress_lock: types_storage::LWLock::default(),
+            io_in_progress_lock: ::types_storage::LWLock::default(),
             active_cv: ConditionVariable::new(),
             candidate_catalog_xmin: 0,
             candidate_xmin_lsn: 0,
@@ -319,10 +319,10 @@ fn unlock_control() -> PgResult<()> {
 // ---------------------------------------------------------------------------
 
 fn spin_acquire(slot: &ReplicationSlot) {
-    s_lock::s_lock_macro(&slot.mutex, Some(SLOT_C), 0, None);
+    ::s_lock::s_lock_macro(&slot.mutex, Some(SLOT_C), 0, None);
 }
 fn spin_release(slot: &ReplicationSlot) {
-    s_lock::s_unlock(&slot.mutex);
+    ::s_lock::s_unlock(&slot.mutex);
 }
 
 // ---------------------------------------------------------------------------
@@ -607,7 +607,7 @@ pub fn ReplicationSlotsShmemInit() {
             let mut slot = ReplicationSlot::new_zeroed();
             lwlock::lwlock_initialize::call(
                 &mut slot.io_in_progress_lock,
-                types_storage::LWTRANCHE_REPLICATION_SLOT_IO,
+                ::types_storage::LWTRANCHE_REPLICATION_SLOT_IO,
             );
             v.push(SlotCell {
                 inner: UnsafeCell::new(slot),
@@ -622,19 +622,19 @@ pub fn ReplicationSlotsShmemInit() {
 /// `void ReplicationSlotInitialize(void)` (slot.c:239).
 pub fn ReplicationSlotInitialize() -> PgResult<()> {
     // The `before_shmem_exit` seam carries its opaque callback token as the
-    // canonical unified `types_tuple::Datum<'static>` (the machine word the C
+    // canonical unified `::types_tuple::Datum<'static>` (the machine word the C
     // `Datum arg` carries, pinned to `'static` and stored by value in the
     // registration list). This crate's own logic constructs/reads no scalars,
     // so there is nothing else to migrate; the token here is `(Datum) 0` in C,
     // i.e. `Datum::null()`.
     dsm_core_seams::before_shmem_exit::call(
         replication_slot_shmem_exit_cb,
-        types_tuple::Datum::null(),
+        ::types_tuple::Datum::null(),
     )
 }
 
 /// `static void ReplicationSlotShmemExit(int code, Datum arg)` (slot.c:248).
-fn replication_slot_shmem_exit_cb(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
+fn replication_slot_shmem_exit_cb(_code: i32, _arg: ::types_tuple::Datum<'static>) -> PgResult<()> {
     if my_replication_slot().is_some() {
         ReplicationSlotRelease()?;
     }
@@ -1985,7 +1985,7 @@ fn InvalidatePossiblyObsoleteSlot(
                     let _ = procsignal::send_proc_signal::call(
                         active_pid,
                         ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_LOGICALSLOT,
-                        types_core::INVALID_PROC_NUMBER,
+                        ::types_core::INVALID_PROC_NUMBER,
                     );
                 } else {
                     // SAFETY: kill(2) with a known pid and SIGTERM.
@@ -3313,8 +3313,8 @@ pub fn init_seams() {
     // storage above (mirroring C's `conf->variable` pointer). They are read
     // directly from the GUC slot (not the ControlFile).
     {
-        use guc_tables::vars;
-        use guc_tables::GucVarAccessors;
+        use ::guc_tables::vars;
+        use ::guc_tables::GucVarAccessors;
         vars::max_replication_slots.install(GucVarAccessors {
             get: max_replication_slots,
             set: max_replication_slots_set,

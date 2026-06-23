@@ -13,11 +13,11 @@ use core::any::Any;
 use alloc::boxed::Box;
 use std::collections::HashMap;
 
-use types_pgstat::pgstat_internal::{
+use ::types_pgstat::pgstat_internal::{
     PgStat_HashKey, PgStat_ShmemControl, PgStat_Snapshot, PgStatShared_Common,
     PgStatShared_HashEntry,
 };
-use types_storage::ilist::{dlist_head, dlist_node};
+use ::types_storage::ilist::{dlist_head, dlist_node};
 use types_storage::{DsaArea, DshashTable};
 
 /// `PgStat_EntryRef` (`utils/pgstat_internal.h`) — a backend-local reference to

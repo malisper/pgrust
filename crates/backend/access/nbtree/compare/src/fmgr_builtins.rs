@@ -22,7 +22,7 @@
 //! (mirroring the `oidvector` family deferral in `oid.c`'s fmgr layer). Its value
 //! core remains in-crate for that owner to call.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------

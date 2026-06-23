@@ -6,9 +6,9 @@
 //! (`set_cte_pathlist`/`set_worktable_pathlist` are in [`crate::subquery`] —
 //! they resolve a CTE by name out of the unported Query subtree.)
 
-use types_core::primitive::Index;
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::Index;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId};
 
 use pathnode_seams as pathnode;

@@ -1,9 +1,9 @@
 //! `optimizer/util/joininfo.c` — joininfo list manipulation.
 
-use nodes_core::makefuncs::make_bool_const;
-use types_error::PgResult;
+use ::nodes_core::makefuncs::make_bool_const;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId, Relids, RinfoId};
 
 use crate::bms;

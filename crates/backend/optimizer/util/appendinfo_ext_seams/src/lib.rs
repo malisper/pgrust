@@ -14,10 +14,10 @@
 
 extern crate alloc;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
-use pathnodes::PlannerInfo;
+use ::pathnodes::PlannerInfo;
 
 seam_core::seam!(
     /// `GetFdwRoutineForRelation(target_relation, false)->AddForeignUpdateTargets

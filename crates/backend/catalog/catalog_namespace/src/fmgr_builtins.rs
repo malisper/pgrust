@@ -13,10 +13,10 @@
 //! versions produce via `PG_RETURN_NULL()` when the object has vanished from
 //! the catalog mid-call); that maps onto `fcinfo->isnull` here.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

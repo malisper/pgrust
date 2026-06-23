@@ -24,23 +24,23 @@
 //!
 //! External pieces reached through seams: shmem placement (`shmem-seams`), the
 //! `DSMRegistryLock` (`lwlock-seams`, built-in offset
-//! `types_storage::DSM_REGISTRY_LOCK`), the DSA substrate (`dsa-seams`), and the
+//! `::types_storage::DSM_REGISTRY_LOCK`), the DSA substrate (`dsa-seams`), and the
 //! dshash substrate (`dshash-seams`). The DSM **segment** lifecycle is the
 //! ported `backend-storage-ipc-dsm-core` crate, called directly.
 
 use core::cell::Cell;
 
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use types_error::{PgResult, ERROR};
-use types_core::Size;
+use ::types_core::Size;
 use types_storage::{
     dsa_handle, dshash_table_handle, DshashKeyKind, DshashParameters, DSM_HANDLE_INVALID,
     DSM_REGISTRY_LOCK, INVALID_DSA_POINTER, LW_EXCLUSIVE, LWTRANCHE_DSM_REGISTRY_DSA,
     LWTRANCHE_DSM_REGISTRY_HASH,
 };
 
-use dsm_core::dsm::{
+use ::dsm_core::dsm::{
     dsm_attach, dsm_create, dsm_find_mapping, dsm_pin_mapping, dsm_pin_segment,
     dsm_segment_address, dsm_segment_handle, DsmSegment,
 };
@@ -97,7 +97,7 @@ pub struct DSMRegistryEntry {
     /// `char name[64]` — the dshash key.
     pub name: [core::ffi::c_char; DSM_REGISTRY_ENTRY_NAME_LEN],
     /// `dsm_handle handle`.
-    pub handle: types_storage::dsm_handle,
+    pub handle: ::types_storage::dsm_handle,
     /// `size_t size`.
     pub size: Size,
 }
@@ -130,9 +130,9 @@ thread_local! {
     /// memory (placed by `ShmemInitStruct`).
     static DSM_REGISTRY_CTX: Cell<*mut DSMRegistryCtxStruct> = const { Cell::new(core::ptr::null_mut()) };
     /// `static dsa_area *dsm_registry_dsa`.
-    static DSM_REGISTRY_DSA: Cell<*mut types_storage::DsaArea> = const { Cell::new(core::ptr::null_mut()) };
+    static DSM_REGISTRY_DSA: Cell<*mut ::types_storage::DsaArea> = const { Cell::new(core::ptr::null_mut()) };
     /// `static dshash_table *dsm_registry_table`.
-    static DSM_REGISTRY_TABLE: Cell<*mut types_storage::DshashTable> = const { Cell::new(core::ptr::null_mut()) };
+    static DSM_REGISTRY_TABLE: Cell<*mut ::types_storage::DshashTable> = const { Cell::new(core::ptr::null_mut()) };
 }
 
 fn registry_ctx() -> *mut DSMRegistryCtxStruct {

@@ -13,7 +13,7 @@
 //! returning NULL. The adapter mirrors that NULL-decision before calling the
 //! core.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `PG_ARGISNULL(i)`.

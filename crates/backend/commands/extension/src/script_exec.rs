@@ -11,14 +11,14 @@
 //! SQLSTATE / messages.
 
 use mcx::{Mcx, MemoryContext};
-use types_core::primitive::Oid;
-use types_core::InvalidOid;
+use ::types_core::primitive::Oid;
+use ::types_core::InvalidOid;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERROR,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::T_TransactionStmt;
@@ -120,7 +120,7 @@ pub fn execute_sql_string(sql: &str, _filename: &str) -> PgResult<()> {
     // must outlive the parse trees, so it is interned into the arena first.
     let arena = MemoryContext::new("execute_sql_string");
     let mcx = arena.mcx();
-    let sql_owned = mcx::PgString::from_str_in(sql, mcx)?;
+    let sql_owned = ::mcx::PgString::from_str_in(sql, mcx)?;
     let sql_ref: &str = sql_owned.as_str();
 
     // Parse the SQL string into a list of raw parse trees.
@@ -229,7 +229,7 @@ fn run_executor(
     // ExecutorStart(qdesc, 0);
     execMain::ExecutorStart(&mut qdesc, 0)?;
     // ExecutorRun(qdesc, ForwardScanDirection, 0); (count==0 ⇒ all rows)
-    execMain::ExecutorRun(&mut qdesc, types_scan::sdir::ForwardScanDirection, 0)?;
+    execMain::ExecutorRun(&mut qdesc, ::types_scan::sdir::ForwardScanDirection, 0)?;
     // ExecutorFinish(qdesc);
     execMain::ExecutorFinish(&mut qdesc)?;
     // ExecutorEnd(qdesc);
@@ -310,7 +310,7 @@ pub fn execute_extension_script(
         save_userid = uid;
         save_sec_context = sec;
         miscinit::SetUserIdAndSecContext(
-            types_core::catalog::BOOTSTRAP_SUPERUSERID,
+            ::types_core::catalog::BOOTSTRAP_SUPERUSERID,
             save_sec_context | SECURITY_LOCAL_USERID_CHANGE,
         );
     }
@@ -336,7 +336,7 @@ pub fn execute_extension_script(
             miscinit::GetUserId(),
             misc_guc::GUC_ACTION_SAVE,
             true,
-            types_error::error::ErrorLevel(0),
+            ::types_error::error::ErrorLevel(0),
             false,
         )?;
     }
@@ -349,10 +349,10 @@ pub fn execute_extension_script(
             Some("warning"),
             types_guc::PGC_SUSET,
             types_guc::PGC_S_SESSION,
-            types_core::catalog::BOOTSTRAP_SUPERUSERID,
+            ::types_core::catalog::BOOTSTRAP_SUPERUSERID,
             misc_guc::GUC_ACTION_SAVE,
             true,
-            types_error::error::ErrorLevel(0),
+            ::types_error::error::ErrorLevel(0),
             false,
         )?;
     }
@@ -368,7 +368,7 @@ pub fn execute_extension_script(
             miscinit::GetUserId(),
             misc_guc::GUC_ACTION_SAVE,
             true,
-            types_error::error::ErrorLevel(0),
+            ::types_error::error::ErrorLevel(0),
             false,
         )?;
     }
@@ -399,7 +399,7 @@ pub fn execute_extension_script(
         miscinit::GetUserId(),
         misc_guc::GUC_ACTION_SAVE,
         true,
-        types_error::error::ErrorLevel(0),
+        ::types_error::error::ErrorLevel(0),
         false,
     )?;
 
@@ -449,7 +449,7 @@ const SECURITY_LOCAL_USERID_CHANGE: i32 = 0x0001;
 /// the enum's integer code.
 fn guc_below_warning(name: &str) -> bool {
     match misc_guc::live::get_enum(name) {
-        Some(v) => v < types_error::WARNING.0,
+        Some(v) => v < ::types_error::WARNING.0,
         // Absent ⇒ treat as not-below (the C reads a live int; a missing GUC is a
         // wiring bug, but we conservatively skip the override).
         None => false,
@@ -634,14 +634,14 @@ pub fn ApplyExtensionUpdates(
     is_create: bool,
 ) -> PgResult<()> {
     use heaptuple::{heap_copytuple, heap_deform_tuple, heap_modify_tuple};
-    use scankey::ScanKeyInit;
+    use ::scankey::ScanKeyInit;
     use dependency_seams as dependency_seams;
-    use indexing::keystone::CatalogTupleUpdate;
+    use ::indexing::keystone::CatalogTupleUpdate;
     use objectaccess_seams as objectaccess_seams;
-    use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-    use types_catalog::pg_extension as cat;
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    use types_storage::lock::RowExclusiveLock;
+    use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+    use ::types_catalog::pg_extension as cat;
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_storage::lock::RowExclusiveLock;
     use types_tuple::heaptuple::Datum;
 
     use genam_seams as genam_seams;
@@ -660,9 +660,9 @@ pub fn ApplyExtensionUpdates(
         let mut key = ScanKeyData::empty();
         ScanKeyInit(
             &mut key,
-            cat::Anum_pg_extension_oid as types_core::AttrNumber,
+            cat::Anum_pg_extension_oid as ::types_core::AttrNumber,
             BTEqualStrategyNumber,
-            types_core::fmgr::F_OIDEQ,
+            ::types_core::fmgr::F_OIDEQ,
             Datum::from_oid(extension_oid),
         )?;
         let mut ext_scan = genam_seams::systable_beginscan::call(

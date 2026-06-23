@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
-// Every fallible function returns the shared `types_error::PgResult`
+// Every fallible function returns the shared `::types_error::PgResult`
 // (== `Result<_, PgError>`), the project-wide error contract.
 #![allow(clippy::result_large_err)]
 
@@ -51,7 +51,7 @@ use utility_seams as utility_seams;
 use snapmgr_pc_seams as snapmgr_pc_seams;
 use snapmgr_seams as snapmgr_seams;
 
-use types_core::xact::{TransactionIdIsNormal, TransactionIdIsValid};
+use ::types_core::xact::{TransactionIdIsNormal, TransactionIdIsValid};
 use types_core::{FullTransactionId, InvalidFullTransactionId, TransactionId};
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_BINARY_REPRESENTATION,

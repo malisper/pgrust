@@ -15,17 +15,17 @@
 //! same closure-across-layers technique the index-build callback uses), so the
 //! `read_stream_next_buffer(stream, NULL)` of C is the closure call here.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr_seam;
 use execTuples_seams as slot_seam;
-use types_core::primitive::OffsetNumber;
-use types_core::TransactionId;
-use types_error::PgResult;
-use types_slot::SlotData;
-use types_storage::buf::{Buffer, BufferIsValid, InvalidBuffer};
-use types_tableam::relscan::TableScanDescData;
-use types_tuple::heaptuple::FormedTuple;
+use ::types_core::primitive::OffsetNumber;
+use ::types_core::TransactionId;
+use ::types_error::PgResult;
+use ::types_slot::SlotData;
+use ::types_storage::buf::{Buffer, BufferIsValid, InvalidBuffer};
+use ::types_tableam::relscan::TableScanDescData;
+use ::types_tuple::heaptuple::FormedTuple;
 
 use heapam as heapam;
 use heapam_visibility as visibility;
@@ -38,7 +38,7 @@ use page::{
 const BUFFER_LOCK_SHARE: i32 = 1;
 
 /// `FirstOffsetNumber` (off.h).
-const FIRST_OFFSET_NUMBER: OffsetNumber = types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
+const FIRST_OFFSET_NUMBER: OffsetNumber = ::types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
 
 /// `heapam_scan_analyze_next_block(scan, stream)` (heapam_handler.c).
 ///
@@ -184,10 +184,10 @@ pub fn heapam_scan_analyze_next_tuple<'mcx>(
 /// decision + live/dead counter increments, faithfully matching the C `switch`
 /// in `heapam_scan_analyze_next_tuple`.
 fn classify_analyze_result(
-    htsv: snapshot::snapshot::HTSV_Result,
+    htsv: ::snapshot::snapshot::HTSV_Result,
     targtuple: &FormedTuple<'_>,
 ) -> PgResult<AnalyzeDecision> {
-    use snapshot::snapshot::HTSV_Result::*;
+    use ::snapshot::snapshot::HTSV_Result::*;
 
     let hdr = targtuple
         .tuple

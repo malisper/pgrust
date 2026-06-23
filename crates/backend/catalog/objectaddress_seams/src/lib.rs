@@ -7,13 +7,13 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgString};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::parsenodes::ObjectType;
-use parsenodes::Node;
-use rel::Relation;
-use types_storage::lock::LOCKMODE;
+use ::parsenodes::Node;
+use ::rel::Relation;
+use ::types_storage::lock::LOCKMODE;
 
 /// `get_object_address(objtype, object, &relation, lockmode, missing_ok)`
 /// (objectaddress.c) result: the resolved [`ObjectAddress`] plus, for the
@@ -65,7 +65,7 @@ seam_core::seam!(
     /// `relation` is the open relation alias for relation-member objects, else
     /// `None`.
     pub fn check_object_ownership<'mcx>(
-        roleid: types_core::Oid,
+        roleid: ::types_core::Oid,
         objtype: ObjectType,
         address: ObjectAddress,
         object: &Node,
@@ -137,7 +137,7 @@ seam_core::seam!(
     pub fn event_trigger_describe_dropped_object<'mcx>(
         mcx: Mcx<'mcx>,
         object: &ObjectAddress,
-    ) -> PgResult<types_catalog::pg_event_trigger::SqlDropObjectInfo>
+    ) -> PgResult<::types_catalog::pg_event_trigger::SqlDropObjectInfo>
 );
 
 seam_core::seam!(

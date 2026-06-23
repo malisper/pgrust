@@ -11,7 +11,7 @@
 //!
 //! Caching is relcache-owned: C stores `rd_partkey`/`rd_partcheck` on the
 //! relcache entry (under child contexts of `CacheMemoryContext`, preserved
-//! across rebuilds). The owned-model handle [`rel::RelationData`] is a
+//! across rebuilds). The owned-model handle [`::rel::RelationData`] is a
 //! read-only copy, so the cache get/set goes through the relcache owner's
 //! seams (keyed by `rd_id`); the build logic between them is partcache's.
 //! Every genuinely external operation — the `pg_partitioned_table` /
@@ -25,9 +25,9 @@
 #![allow(non_snake_case)]
 
 use mcx::{slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{Oid, OidIsValid};
+use ::types_core::primitive::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION};
-use hash::HASHEXTENDED_PROC;
+use ::hash::HASHEXTENDED_PROC;
 use ::nodes::nodes::Node;
 use ::nodes::partition::{
     PartitionKeyData as NodesPartitionKeyData, PartitionStrategy as NodesPartitionStrategy,
@@ -38,8 +38,8 @@ use types_partition::{
     PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
 };
 use rel::{Relation, RelationData};
-use types_storage::lock::{AccessShareLock, NoLock};
-use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use ::types_storage::lock::{AccessShareLock, NoLock};
+use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
 use common_relation_seams as relation_seam;
 use partition_seams as partition_seam;
@@ -148,7 +148,7 @@ fn RelationBuildPartitionKey<'mcx>(mcx: Mcx<'mcx>, relation: &RelationData<'_>) 
     let mut parttypbyval = pg_zeroed::<bool>(mcx, npk)?;
     let mut parttypalign = pg_zeroed::<i8>(mcx, npk)?;
     let mut parttypcoll = pg_zeroed::<Oid>(mcx, npk)?;
-    let mut partsupfunc: PgVec<types_core::fmgr::FmgrInfo> = vec_with_capacity_in(mcx, npk)?;
+    let mut partsupfunc: PgVec<::types_core::fmgr::FmgrInfo> = vec_with_capacity_in(mcx, npk)?;
 
     // procnum = (strategy == HASH) ? HASHEXTENDED_PROC : BTORDER_PROC;
     let procnum: i16 = if strategy == PARTITION_STRATEGY_HASH {
@@ -217,7 +217,7 @@ fn RelationBuildPartitionKey<'mcx>(mcx: Mcx<'mcx>, relation: &RelationData<'_>) 
         // The owned FmgrInfo carries only the OID (re-resolved at call time);
         // preserve C's eager lookup-failure surface via fmgr_info_check.
         fmgr_seam::fmgr_info_check::call(funcid)?;
-        partsupfunc.push(types_core::fmgr::FmgrInfo { fn_oid: funcid, ..Default::default() });
+        partsupfunc.push(::types_core::fmgr::FmgrInfo { fn_oid: funcid, ..Default::default() });
 
         // key->partcollation[i] = collation->values[i];
         partcollation[i] = collation[i];
@@ -356,7 +356,7 @@ pub fn get_partition_qual_relid<'mcx>(
             // result = linitial(and_args); — the sole element (len == 1 here).
             let only = and_args.into_iter().next();
             result = match only {
-                Some(node) => Some(mcx::alloc_in(mcx, node)?),
+                Some(node) => Some(::mcx::alloc_in(mcx, node)?),
                 None => None,
             };
         }
@@ -487,7 +487,7 @@ fn clone_node_list<'mcx>(
 /// built key into an `mcx` box (C: the relcache's `rd_partkeycxt`-owned key).
 ///
 /// The two surfaces also carry distinct `PartitionKeyData` definitions: the
-/// build algorithm uses `types_partition::PartitionKeyData` (its `strategy` is
+/// build algorithm uses `::types_partition::PartitionKeyData` (its `strategy` is
 /// the on-disk `char`/`i8`), while the seam contract and its executor consumers
 /// use `::nodes::partition::PartitionKeyData` (its `strategy` is the
 /// `PartitionStrategy` enum). Every other field is the same type, so the shim
@@ -516,7 +516,7 @@ fn relation_get_partition_key_seam<'mcx>(
                 parttypalign: key.parttypalign,
                 parttypcoll: key.parttypcoll,
             };
-            Ok(Some(mcx::alloc_in(mcx, converted)?))
+            Ok(Some(::mcx::alloc_in(mcx, converted)?))
         }
         None => Ok(None),
     }

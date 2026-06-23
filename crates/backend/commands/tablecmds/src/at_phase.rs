@@ -35,13 +35,13 @@
 
 use mcx::{Mcx, PgVec};
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
-use types_acl::ACLCHECK_NOT_OWNER;
+use ::types_acl::ACLCHECK_NOT_OWNER;
 use ::nodes::ddlnodes::{AlterTableCmd, AlterTableStmt, AlterTableType};
 use ::nodes::ddlnodes::AlterTableType::*;
 use ::nodes::nodes::{Node, NodePtr};
@@ -49,30 +49,30 @@ use ::nodes::parsenodes::{
     ObjectType, OBJECT_FOREIGN_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_SEQUENCE, OBJECT_TYPE,
     OBJECT_VIEW,
 };
-use rel::Relation;
-use types_storage::lock::{
+use ::rel::Relation;
+use ::types_storage::lock::{
     LOCKMODE, AccessExclusiveLock, AccessShareLock, NoLock, RowShareLock, ShareRowExclusiveLock,
     ShareUpdateExclusiveLock,
 };
-use types_tuple::access::{
+use ::types_tuple::access::{
     RangeVar as AccessRangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX,
     RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
     RELKIND_SEQUENCE, RELKIND_VIEW, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
     RELPERSISTENCE_UNLOGGED,
 };
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 
-use common_relation::relation_open;
-use tupdesc::CreateTupleDescCopyConstr;
-use transam_xact::CommandCounterIncrement;
+use ::common_relation::relation_open;
+use ::tupdesc::CreateTupleDescCopyConstr;
+use ::transam_xact::CommandCounterIncrement;
 use aclchk_seams as aclchk_seam;
-use catalog_catalog::IsSystemRelation;
+use ::catalog_catalog::IsSystemRelation;
 use objectaccess_seams as objaccess_seam;
 use objectaddress_seams as objaddr_seam;
 use pg_class_seams as pgclass_seam;
 use pg_inherits_seams as inherits_seam;
 use heapam_seams as heapam_seam;
-use miscinit::GetUserId;
+use ::miscinit::GetUserId;
 
 use tablecmds_seams as seam;
 
@@ -217,8 +217,8 @@ pub struct AlteredTableInfo<'mcx> {
     pub changedConstraintDefs: PgVec<'mcx, NodePtr<'mcx>>, /* string definitions of same */
     pub changedIndexOids: PgVec<'mcx, Oid>,     /* OIDs of indexes to rebuild */
     pub changedIndexDefs: PgVec<'mcx, NodePtr<'mcx>>, /* string definitions of same */
-    pub replicaIdentityIndex: Option<mcx::PgString<'mcx>>, /* index to reset as REPLICA IDENTITY */
-    pub clusterOnIndex: Option<mcx::PgString<'mcx>>, /* index to use for CLUSTER */
+    pub replicaIdentityIndex: Option<::mcx::PgString<'mcx>>, /* index to reset as REPLICA IDENTITY */
+    pub clusterOnIndex: Option<::mcx::PgString<'mcx>>, /* index to use for CLUSTER */
     pub changedStatisticsOids: PgVec<'mcx, Oid>, /* OIDs of statistics to rebuild */
     pub changedStatisticsDefs: PgVec<'mcx, NodePtr<'mcx>>, /* statistics definitions */
 }
@@ -232,7 +232,7 @@ pub struct NewColumnValue<'mcx> {
 
 /// `NewConstraint` (tablecmds.c) — phase-3 added-constraint descriptor.
 pub struct NewConstraint<'mcx> {
-    pub name: Option<mcx::PgString<'mcx>>,
+    pub name: Option<::mcx::PgString<'mcx>>,
     pub contype: i32,
     pub refrelid: Oid,
     pub refindid: Oid,
@@ -438,7 +438,7 @@ pub(crate) fn RangeVarCallbackForAlterRelation<'mcx>(
         && seam::is_system_class_relid::call(relid, relkind, info.relnamespace)?
     {
         return utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errcode(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
                 "permission denied: \"{}\" is a system catalog",
                 rv.relname
@@ -473,7 +473,7 @@ pub(crate) fn RangeVarCallbackForAlterRelation<'mcx>(
     // Don't allow ALTER TABLE on composite types — use ALTER TYPE instead.
     if reltype != OBJECT_TYPE && relkind == RELKIND_COMPOSITE_TYPE {
         return utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg(format!("\"{}\" is a composite type", rv.relname))
             .errhint("Use ALTER TYPE instead.")
             .finish(here("RangeVarCallbackForAlterRelation"));
@@ -486,7 +486,7 @@ pub(crate) fn RangeVarCallbackForAlterRelation<'mcx>(
 /// the relkind/objtype mismatch checks in `RangeVarCallbackForAlterRelation`.
 fn wrong_object_type(relname: &str, suffix: &str) -> PgResult<()> {
     utils_error::ereport(ERROR)
-        .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+        .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
         .errmsg(format!("\"{relname}\" {suffix}"))
         .finish(here("RangeVarCallbackForAlterRelation"))
 }
@@ -1081,10 +1081,10 @@ pub(crate) fn ATPrepCmd<'mcx>(
             //   ereport(ERROR, "cannot change inheritance of typed table").
             let reloftype =
                 syscache_seams::search_relation_reloftype::call(rel.rd_id)?
-                    .unwrap_or(types_core::InvalidOid);
-            if reloftype != types_core::InvalidOid {
+                    .unwrap_or(::types_core::InvalidOid);
+            if reloftype != ::types_core::InvalidOid {
                 return utils_error::ereport(ERROR)
-                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                     .errmsg("cannot change inheritance of typed table".to_string())
                     .finish(here("ATPrepCmd"));
             }
@@ -1092,7 +1092,7 @@ pub(crate) fn ATPrepCmd<'mcx>(
             //   ereport(ERROR, "cannot change inheritance of a partition").
             if rel.rd_rel.relispartition {
                 return utils_error::ereport(ERROR)
-                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                     .errmsg("cannot change inheritance of a partition".to_string())
                     .finish(here("ATPrepCmd"));
             }
@@ -1100,7 +1100,7 @@ pub(crate) fn ATPrepCmd<'mcx>(
             //   ereport(ERROR, "cannot change inheritance of partitioned table").
             if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
                 return utils_error::ereport(ERROR)
-                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                     .errmsg("cannot change inheritance of partitioned table".to_string())
                     .finish(here("ATPrepCmd"));
             }
@@ -1216,7 +1216,7 @@ pub(crate) fn ATPrepCmd<'mcx>(
 
     // Add the subcommand to the appropriate list for phase 2.
     // tab->subcmds[pass] = lappend(tab->subcmds[pass], cmd);
-    let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?;
+    let node = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?;
     wqueue[tab_idx].subcmds[pass as usize].push(node);
 
     Ok(())
@@ -1346,7 +1346,7 @@ fn ATExecCmd<'mcx>(
     // leave it Invalid, and `EventTriggerCollectAlterTableSubcmd` is still
     // called with it below.
     #[allow(unused_assignments)]
-    let mut _address: ObjectAddress = types_catalog::catalog_dependency::InvalidObjectAddress;
+    let mut _address: ObjectAddress = ::types_catalog::catalog_dependency::InvalidObjectAddress;
 
     // rel = tab->rel;
     let rel = wqueue[ti]
@@ -1477,7 +1477,7 @@ fn ATExecCmd<'mcx>(
             // children), so we re-open `rel` by relid into an owned carrier rather
             // than borrowing it out of wqueue[ti].
             let relid = wqueue[ti].relid;
-            let owned_rel = common_relation::relation_open(mcx, relid, NoLock)?;
+            let owned_rel = ::common_relation::relation_open(mcx, relid, NoLock)?;
             let cmd_owned = cmd.clone_in(mcx)?;
             let recurse = cmd.recurse;
             _address = crate::at_coladd::ATExecAddColumn(
@@ -1502,7 +1502,7 @@ fn ATExecCmd<'mcx>(
             // ATParseTransformCmd needs &mut wqueue, so re-open `rel` by relid
             // into an owned carrier rather than borrowing it out of wqueue[ti].
             let relid = wqueue[ti].relid;
-            let owned_rel = common_relation::relation_open(mcx, relid, NoLock)?;
+            let owned_rel = ::common_relation::relation_open(mcx, relid, NoLock)?;
             let cmd2 = crate::at_coladd::ATParseTransformCmd(
                 mcx,
                 wqueue,
@@ -1541,7 +1541,7 @@ fn ATExecCmd<'mcx>(
             // address = ATExecSetIdentity(rel, cmd->name, cmd->def, lockmode,
             //     cmd->recurse, false);
             let relid = wqueue[ti].relid;
-            let owned_rel = common_relation::relation_open(mcx, relid, NoLock)?;
+            let owned_rel = ::common_relation::relation_open(mcx, relid, NoLock)?;
             let cmd2 = crate::at_coladd::ATParseTransformCmd(
                 mcx,
                 wqueue,
@@ -1640,7 +1640,7 @@ fn ATExecCmd<'mcx>(
             // so it needs &mut wqueue; re-open `rel` by relid into an owned
             // carrier rather than borrowing it out of wqueue[ti].
             let relid = wqueue[ti].relid;
-            let owned_rel = common_relation::relation_open(mcx, relid, NoLock)?;
+            let owned_rel = ::common_relation::relation_open(mcx, relid, NoLock)?;
             let colname = cmd
                 .name
                 .as_ref()
@@ -1739,7 +1739,7 @@ fn ATExecCmd<'mcx>(
                 .def
                 .as_deref()
                 .expect("AT_ReAddStatistics: cmd.def is NULL");
-            let stmt = mcx::alloc_in(mcx, def.clone_in(mcx)?)?;
+            let stmt = ::mcx::alloc_in(mcx, def.clone_in(mcx)?)?;
             _address =
                 utility_out_seams::create_statistics_rebuild::call(mcx, stmt)?;
         }
@@ -2056,7 +2056,7 @@ fn ATExecCmd<'mcx>(
             //                            skip_system, cmd->recurse, lockmode)
             // (tablecmds.c:5558-5602). The fires_when char + skip_system flag +
             // trigger-name-vs-NULL depend on the subcommand variant.
-            use types_catalog::pg_trigger::{
+            use ::types_catalog::pg_trigger::{
                 TRIGGER_DISABLED, TRIGGER_FIRES_ALWAYS, TRIGGER_FIRES_ON_ORIGIN,
                 TRIGGER_FIRES_ON_REPLICA,
             };
@@ -2097,10 +2097,10 @@ fn ATExecCmd<'mcx>(
             // (tablecmds.c:5607-5623). The fires_when char depends on the
             // subcommand variant.
             let fires_when = match cmd.subtype {
-                AT_EnableRule => types_catalog::pg_rewrite::RULE_FIRES_ON_ORIGIN,
-                AT_EnableAlwaysRule => types_catalog::pg_rewrite::RULE_FIRES_ALWAYS,
-                AT_EnableReplicaRule => types_catalog::pg_rewrite::RULE_FIRES_ON_REPLICA,
-                AT_DisableRule => types_catalog::pg_rewrite::RULE_DISABLED,
+                AT_EnableRule => ::types_catalog::pg_rewrite::RULE_FIRES_ON_ORIGIN,
+                AT_EnableAlwaysRule => ::types_catalog::pg_rewrite::RULE_FIRES_ALWAYS,
+                AT_EnableReplicaRule => ::types_catalog::pg_rewrite::RULE_FIRES_ON_REPLICA,
+                AT_DisableRule => ::types_catalog::pg_rewrite::RULE_DISABLED,
                 _ => unreachable!(),
             };
             let rulename = cmd
@@ -2285,7 +2285,7 @@ fn ATRewriteTables<'mcx>(
         // another table's column.
         if !wqueue[ti].newvals.is_empty() || wqueue[ti].rewrite > 0 {
             let relid = wqueue[ti].relid;
-            let rel = common_relation::relation_open(mcx, relid, NoLock)?;
+            let rel = ::common_relation::relation_open(mcx, relid, NoLock)?;
             crate::at_altertype::find_composite_type_dependencies(
                 mcx,
                 rel.rd_rel.reltype,
@@ -2933,7 +2933,7 @@ pub(crate) fn ATSimplePermissions(
         match alter_table_type_to_string(cmdtype) {
             Some(action_str) => {
                 return utils_error::ereport(ERROR)
-                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                     .errmsg(format!(
                         "ALTER action {action_str} cannot be performed on relation \"{}\"",
                         rel.name()
@@ -2956,7 +2956,7 @@ pub(crate) fn ATSimplePermissions(
     if !aclchk_seam::object_ownercheck::call(RelationRelationId, rel.rd_id, GetUserId())? {
         let objtype = objaddr_seam::get_relkind_objtype::call(rel.rd_rel.relkind);
         aclchk_seam::aclcheck_error::call(
-            types_acl::acl::ACLCHECK_NOT_OWNER,
+            ::types_acl::acl::ACLCHECK_NOT_OWNER,
             objtype,
             Some(rel.name().to_string()),
         )?;
@@ -2967,7 +2967,7 @@ pub(crate) fn ATSimplePermissions(
         && IsSystemRelation(rel)
     {
         return utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errcode(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
                 "permission denied: \"{}\" is a system catalog",
                 rel.name()
@@ -3033,7 +3033,7 @@ pub(crate) fn find_typed_table_dependencies<'mcx>(
     // the whole list.
     if !oids.is_empty() && behavior == ::nodes::parsenodes::DropBehavior::Restrict {
         return utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST)
+            .errcode(::types_error::ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST)
             .errmsg(format!(
                 "cannot alter type \"{type_name}\" because it is the type of a typed table"
             ))

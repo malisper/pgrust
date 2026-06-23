@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Once;
-use snapshot::snapshot::{SnapshotData, SnapshotType};
+use ::snapshot::snapshot::{SnapshotData, SnapshotType};
 
 fn fx(v: u64) -> FullTransactionId {
     FullTransactionId { value: v }

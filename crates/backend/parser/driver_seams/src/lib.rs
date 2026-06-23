@@ -15,7 +15,7 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use parsenodes::{RawParseMode, TypeName};
 
 seam_core::seam!(

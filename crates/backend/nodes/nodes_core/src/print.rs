@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn format_node_dump_breaks_at_whitespace() {
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
         // Short input: one line, trailing newline appended.
         let f = format_node_dump(mcx, "{QUERY :foo 1}").unwrap();
@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn pretty_format_indents_braces() {
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
         // A nested node string indents children by INDENTSTOP (3) per level and
         // breaks before `{`/`:` and after `)`.
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn pretty_format_empty() {
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
         let f = pretty_format_node_dump(mcx, "").unwrap();
         assert_eq!(f.as_str(), "");

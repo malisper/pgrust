@@ -19,10 +19,10 @@
 //!
 //! ## Carrier decision (S4)
 //!
-//! The live in-memory summary ([`brin::MinmaxMultiRanges`]) is kept in
+//! The live in-memory summary ([`::brin::MinmaxMultiRanges`]) is kept in
 //! `column.bv_mem_value` across `add_value` calls (C's `bv_mem_value` Datum of
 //! an expanded object). The per-attribute procinfo cache
-//! ([`brin::MinmaxMultiOpaque`]) lives in `bd_info[..].oi_opaque`; each
+//! ([`::brin::MinmaxMultiOpaque`]) lives in `bd_info[..].oi_opaque`; each
 //! cached `FmgrInfo` is reduced to the resolved function's `Oid` (the BRIN
 //! fmgr-call seam re-resolves by OID). cmp/strategy and distance calls dispatch
 //! by OID through `function_call2_coll_datum` (the canonical-`Datum` lane that
@@ -41,16 +41,16 @@ use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use brin::{
     BrinDesc, BrinMemValue, BrinOpcInfo, BrinValues, MinmaxMultiOpaque, OpaqueOpcInfo,
 };
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::error::{
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
 };
-use types_error::PgResult;
-use types_scan::scankey::ScanKeyData;
-use types_storage::bufpage::MaxHeapTuplesPerPage;
+use ::types_error::PgResult;
+use ::types_scan::scankey::ScanKeyData;
+use ::types_storage::bufpage::MaxHeapTuplesPerPage;
 use types_tuple::heaptuple::Datum;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use indexam_seams as indexam;
 use arrayfuncs_seams as arrayfuncs;
@@ -284,7 +284,7 @@ pub fn brin_minmax_multi_opcinfo<'mcx>(
     let mut oi_typcache: PgVec<'mcx, _> = vec_with_capacity_in(mcx, 1)?;
     oi_typcache.push(tce);
 
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         BrinOpcInfo {
             oi_nstored: 1,
@@ -426,7 +426,7 @@ pub fn brin_minmax_multi_consistent<'mcx>(
 
         for key in keys.iter() {
             // NULL keys are handled and filtered-out in bringetbitmap
-            debug_assert!((key.sk_flags & types_scan::scankey::SK_ISNULL) == 0);
+            debug_assert!((key.sk_flags & ::types_scan::scankey::SK_ISNULL) == 0);
 
             let attno = key.sk_attno;
             let subtype = key.sk_subtype;
@@ -493,7 +493,7 @@ pub fn brin_minmax_multi_consistent<'mcx>(
 
         for key in keys.iter() {
             // we've already dealt with NULL keys at the beginning
-            if (key.sk_flags & types_scan::scankey::SK_ISNULL) != 0 {
+            if (key.sk_flags & ::types_scan::scankey::SK_ISNULL) != 0 {
                 continue;
             }
 
@@ -673,7 +673,7 @@ pub fn brin_minmax_multi_options() -> MinMaxMultiOptions {
 }
 
 /// `pg_proc.dat` OID of the `brin_minmax_multi_options` opclass-options proc.
-pub const F_BRIN_MINMAX_MULTI_OPTIONS: types_core::primitive::Oid = 4620;
+pub const F_BRIN_MINMAX_MULTI_OPTIONS: ::types_core::primitive::Oid = 4620;
 
 /// `sizeof(MinMaxMultiOptions)`: `int32 vl_len_` then `int valuesPerRange` —
 /// 8 bytes, `valuesPerRange` at offset 4.
@@ -704,7 +704,7 @@ pub fn brin_minmax_multi_fill_local_reloptions(relopts: &mut types_reloptions::l
 /// ... PG_RETURN_VOID()`. The `local_relopts` rides the fmgr `internal` lane;
 /// fill it in place and return void.
 pub fn fc_brin_minmax_multi_options(
-    fcinfo: &mut fmgr::FunctionCallInfoBaseData,
+    fcinfo: &mut ::fmgr::FunctionCallInfoBaseData,
 ) -> PgResult<datum::Datum> {
     let relopts = fcinfo
         .ref_arg_mut(0)
@@ -795,7 +795,7 @@ pub fn brin_minmax_multi_summary_send(summary: alloc::vec::Vec<u8>) -> alloc::ve
 /// `ereport(ERROR, errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cannot accept
 /// a value of type %s", "brin_minmax_multi_summary"))`
 /// (brin_minmax_multi.c:2982 / :3124).
-fn cannot_accept_value() -> types_error::PgError {
+fn cannot_accept_value() -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(format!(
@@ -807,7 +807,7 @@ fn cannot_accept_value() -> types_error::PgError {
 
 /// `elog(ERROR, "invalid strategy number %d", ...)` — the `elog`-default
 /// SQLSTATE is `ERRCODE_INTERNAL_ERROR`.
-fn invalid_strategy(strategy: i32) -> types_error::PgError {
+fn invalid_strategy(strategy: i32) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INTERNAL_ERROR)
         .errmsg_internal(format!("invalid strategy number {strategy}"))

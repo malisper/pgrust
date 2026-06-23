@@ -21,7 +21,7 @@
 
 use plancat_ext_seams as px;
 use relcache_seams as sx;
-use types_core::primitive::{BlockNumber, Oid};
+use ::types_core::primitive::{BlockNumber, Oid};
 use types_error::{PgError, PgResult};
 
 use crate::core_entry_store::{self, RelationClose, RelationIdGetRelation, with_relation};
@@ -44,7 +44,7 @@ fn with_index_open<R>(
     read: impl FnOnce() -> PgResult<R>,
 ) -> PgResult<R> {
     let built = RelationIdGetRelation(indexoid)?;
-    if built == types_core::InvalidOid {
+    if built == ::types_core::InvalidOid {
         return Err(PgError::error(format!(
             "could not open index with OID {indexoid}"
         )));
@@ -94,7 +94,7 @@ fn get_replident_index_info(index_oid: Oid) -> PgResult<sx::ReplidentIndexInfo> 
         // `rd_index` flags + key-column vector off the owned entry.
         let (is_index, indrelid, indisunique, indisexclusion, indimmediate, key_columns, has_expr) =
             with_relation(index_oid, |rd| match rd.rd_index.as_ref() {
-                None => (false, types_core::InvalidOid, false, false, false, Vec::new(), false),
+                None => (false, ::types_core::InvalidOid, false, false, false, Vec::new(), false),
                 Some(index) => {
                     let nkey = index.indnkeyatts as usize;
                     let key_columns = index
@@ -110,7 +110,7 @@ fn get_replident_index_info(index_oid: Oid) -> PgResult<sx::ReplidentIndexInfo> 
                     let has_expr = index
                         .indkey
                         .iter()
-                        .any(|&k| k == types_core::primitive::InvalidAttrNumber);
+                        .any(|&k| k == ::types_core::primitive::InvalidAttrNumber);
                     (
                         true,
                         index.indrelid,
@@ -190,7 +190,7 @@ fn get_infer_index_info(
                     index
                         .indkey
                         .iter()
-                        .map(|&k| k as types_core::primitive::AttrNumber)
+                        .map(|&k| k as ::types_core::primitive::AttrNumber)
                         .collect::<Vec<_>>(),
                 ))
             })?
@@ -233,18 +233,18 @@ fn infer_collation_opclass_match(
     use ::nodes::primnodes::Expr;
 
     // No collation/opclass specified -> no exact match needed.
-    if elem.infercollid == types_core::InvalidOid && elem.inferopclass == types_core::InvalidOid {
+    if elem.infercollid == ::types_core::InvalidOid && elem.inferopclass == ::types_core::InvalidOid {
         return Ok(true);
     }
 
     // Lookup opfamily and input type for the specified opclass (if any).
-    let (inferopfamily, inferopcinputtype) = if elem.inferopclass != types_core::InvalidOid {
+    let (inferopfamily, inferopcinputtype) = if elem.inferopclass != ::types_core::InvalidOid {
         (
             lsyscache_seams::get_opclass_family::call(elem.inferopclass)?,
             lsyscache_seams::get_opclass_input_type::call(elem.inferopclass)?,
         )
     } else {
-        (types_core::InvalidOid, types_core::InvalidOid)
+        (::types_core::InvalidOid, ::types_core::InvalidOid)
     };
 
     // Open the index (pin), read its per-attribute catalog data + run the match
@@ -276,9 +276,9 @@ fn infer_collation_opclass_match(
 
         let mut nplain = 0usize; // # plain attrs observed (C: nplain).
         for natt in 1..=natts {
-            let opfamily = *opfamilies.get(natt - 1).unwrap_or(&types_core::InvalidOid);
-            let opcinputtype = *opcintypes.get(natt - 1).unwrap_or(&types_core::InvalidOid);
-            let collation = *collations.get(natt - 1).unwrap_or(&types_core::InvalidOid);
+            let opfamily = *opfamilies.get(natt - 1).unwrap_or(&::types_core::InvalidOid);
+            let opcinputtype = *opcintypes.get(natt - 1).unwrap_or(&::types_core::InvalidOid);
+            let collation = *collations.get(natt - 1).unwrap_or(&::types_core::InvalidOid);
             let attno = *indkeys.get(natt - 1).unwrap_or(&0);
 
             if attno != 0 {
@@ -286,13 +286,13 @@ fn infer_collation_opclass_match(
             }
 
             // Attribute needed to match opclass, but didn't.
-            if elem.inferopclass != types_core::InvalidOid
+            if elem.inferopclass != ::types_core::InvalidOid
                 && (inferopfamily != opfamily || inferopcinputtype != opcinputtype)
             {
                 continue;
             }
             // Attribute needed to match collation, but didn't.
-            if elem.infercollid != types_core::InvalidOid && elem.infercollid != collation {
+            if elem.infercollid != ::types_core::InvalidOid && elem.infercollid != collation {
                 continue;
             }
 
@@ -392,7 +392,7 @@ fn relation_has_stored_generated_columns(relid: Oid) -> PgResult<bool> {
 /// attcollation)`, in attno order — the `IS NOT NULL` NullTest data
 /// `get_relation_constraints` builds: per-column `att->attnullability ==
 /// ATTNULLABLE_VALID && !att->attisdropped`.
-fn not_null_attnums(relid: Oid) -> PgResult<Vec<(types_core::primitive::AttrNumber, Oid, i32, Oid)>> {
+fn not_null_attnums(relid: Oid) -> PgResult<Vec<(::types_core::primitive::AttrNumber, Oid, i32, Oid)>> {
     with_relation(relid, |rd| {
         let mut out = Vec::new();
         for att in rd.rd_att.attrs.iter() {
@@ -734,7 +734,7 @@ fn index_number_of_blocks(indexoid: Oid) -> PgResult<BlockNumber> {
         smgr_seams::smgrnblocks::call(
             locator,
             backend,
-            types_core::primitive::MAIN_FORKNUM,
+            ::types_core::primitive::MAIN_FORKNUM,
         )
     })
 }

@@ -26,15 +26,15 @@
 //! per-owner accessors panic; `InitProcess`/`ProcKill` thread through them
 //! exactly where the C reaches into `ProcGlobal`.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{
     InvalidLocalTransactionId, InvalidOid, InvalidTransactionId, ProcNumber, XidStatus,
     INVALID_PROC_NUMBER,
 };
-use types_tuple::Datum;
-use types_error::PgResult;
-use types_storage::lock::LOCKMASK;
-use types_storage::storage::{
+use ::types_tuple::Datum;
+use ::types_error::PgResult;
+use ::types_storage::lock::LOCKMASK;
+use ::types_storage::storage::{
     LW_WS_NOT_WAITING, PGPROC, PROC_IS_AUTOVACUUM, PROC_WAIT_STATUS_OK,
 };
 
@@ -83,7 +83,7 @@ fn init_my_proc_common(proc: &mut PGPROC, procno: ProcNumber, regular: bool) {
     crate::proc_shmem::lw_wait_mode_write(procno, 0);
     crate::proc_shmem::lw_wait_link_write(
         procno,
-        types_storage::proclist_node { next: 0, prev: 0 },
+        ::types_storage::proclist_node { next: 0, prev: 0 },
     );
     proc.waitLock = None;
     proc.waitProcLock = None;
@@ -319,7 +319,7 @@ pub fn InitAuxiliaryProcess(_mcx: Mcx<'_>) -> PgResult<()> {
         crate::proc_shmem::lw_wait_mode_write(aux_procno, 0);
         crate::proc_shmem::lw_wait_link_write(
             aux_procno,
-            types_storage::proclist_node { next: 0, prev: 0 },
+            ::types_storage::proclist_node { next: 0, prev: 0 },
         );
         proc.waitLock = None;
         proc.waitProcLock = None;
@@ -473,7 +473,7 @@ pub fn ProcKill(_code: i32, _arg: Datum<'static>) -> PgResult<()> {
 /// auxiliary-process `PGPROC` slot.
 pub fn AuxiliaryProcKill(_code: i32, arg: Datum<'static>) -> PgResult<()> {
     let proctype = arg.as_i32();
-    debug_assert!(proctype >= 0 && proctype < types_storage::storage::NUM_AUXILIARY_PROCS);
+    debug_assert!(proctype >= 0 && proctype < ::types_storage::storage::NUM_AUXILIARY_PROCS);
 
     let my_procno = seam::my_proc_number();
 
@@ -526,7 +526,7 @@ pub fn AuxiliaryPidGetProc(pid: i32) -> Option<ProcNumber> {
     }
 
     let mut index = 0;
-    while index < types_storage::storage::NUM_AUXILIARY_PROCS {
+    while index < ::types_storage::storage::NUM_AUXILIARY_PROCS {
         let procno = seam::auxiliary_proc_procno(index);
         if seam::proc_pid(procno) == pid {
             return Some(procno);

@@ -5,7 +5,7 @@
 //! list as these typed rows (the value rendered to text plus its inferred node
 //! kind) rather than a node-tree pointer.
 
-use mcx::PgString;
+use ::mcx::PgString;
 
 /// The `buildDefItem`-inferred node kind of a deserialized option value, so the
 /// consumer can rebuild a `DefElem` arg of the right `nodeTag` (e.g.

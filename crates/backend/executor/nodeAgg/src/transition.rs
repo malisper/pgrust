@@ -3,7 +3,7 @@
 //! feed sorted input through the transition function.
 
 use mcx::{alloc_in, Mcx};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use crate::aggstate::{AggStateData, AggStatePerGroupData, AggStatePerTransData};
 use ::nodes::EStateData;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
@@ -171,7 +171,7 @@ pub fn initialize_aggregate<'mcx>(
 /// number has to be specified from further up.
 pub fn initialize_aggregates<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
-    pergroups: &mut [Option<mcx::PgVec<'mcx, AggStatePerGroupData<'mcx>>>],
+    pergroups: &mut [Option<::mcx::PgVec<'mcx, AggStatePerGroupData<'mcx>>>],
     num_reset: i32,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
@@ -1405,7 +1405,7 @@ fn fcinfo_set_arg<'mcx>(
 /// type whose `Drop` *uncharges* its backing context, so a plain `slot = value`
 /// runs `Drop` on the previous by-ref datum and dereferences a context that the
 /// loop's `tmpcontext` reset already tore down — a use-after-free (EXC_BAD_ACCESS
-/// in `mcx::uncharge`). Mirror C: replace the word and `forget` the old datum so
+/// in `::mcx::uncharge`). Mirror C: replace the word and `forget` the old datum so
 /// the context owns the lifetime, exactly as C never frees `args[1]` here.
 #[inline]
 fn store_distinct_value<'mcx>(

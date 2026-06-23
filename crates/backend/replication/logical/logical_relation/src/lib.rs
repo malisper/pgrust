@@ -33,28 +33,28 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::{
+use ::types_core::primitive::{
     AttrNumber, InvalidOid, Oid, OidIsValid, XLogRecPtr,
 };
-use types_storage::lock::LOCKMODE;
+use ::types_storage::lock::LOCKMODE;
 use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 
 use ::nodes::Bitmapset;
-use rel::Relation;
-use types_tuple::attmap::AttrMap;
+use ::rel::Relation;
+use ::types_tuple::attmap::AttrMap;
 
 use proto::{LogicalRepRelation, LogicalRepRelId};
 
 // Merged dependencies (called directly).
-use nodes_core::bitmapset as bms;
-use nodes_core::makefuncs::make_range_var;
+use ::nodes_core::bitmapset as bms;
+use ::nodes_core::makefuncs::make_range_var;
 use table::{table_close, table_open, try_table_open};
 use indexam::{index_close, index_open};
-use relcache::derived::{
+use ::relcache::derived::{
     IndexAttrBitmapKind, RelationGetIndexAttrBitmap, RelationGetIndexList,
     RelationGetPrimaryKeyIndex, RelationGetReplicaIndex,
 };
-use lsyscache::opclass::get_opclass_family;
+use ::lsyscache::opclass::get_opclass_family;
 
 // Outward seams into not-yet-ported owners.
 use next_seams as next_sx;
@@ -185,7 +185,7 @@ fn cache_mcx() -> Mcx<'static> {
 /// Copy a `&str` (the C `char *` payload) into a fresh `PgVec<u8>` in `mcx`,
 /// mirroring `pstrdup` for the bytes the protocol stored.
 fn pstrdup_bytes<'m>(mcx: Mcx<'m>, src: &[u8]) -> PgResult<PgVec<'m, u8>> {
-    mcx::slice_in(mcx, src)
+    ::mcx::slice_in(mcx, src)
 }
 
 /// Copy a `LogicalRepRelation` into the cache arena (`pstrdup` of names,
@@ -202,8 +202,8 @@ fn copy_remoterel<'m>(
     let relname = pstrdup_bytes(mcx, src.relname.as_slice())?;
 
     let mut attnames: PgVec<'m, PgVec<'m, u8>> =
-        mcx::vec_with_capacity_in(mcx, natts as usize)?;
-    let mut atttyps: PgVec<'m, Oid> = mcx::vec_with_capacity_in(mcx, natts as usize)?;
+        ::mcx::vec_with_capacity_in(mcx, natts as usize)?;
+    let mut atttyps: PgVec<'m, Oid> = ::mcx::vec_with_capacity_in(mcx, natts as usize)?;
     for i in 0..natts as usize {
         attnames.push(pstrdup_bytes(mcx, src.attnames[i].as_slice())?);
         atttyps.push(src.atttyps[i]);
@@ -228,7 +228,7 @@ fn copy_remoterel<'m>(
 /// `memcpy(attnums)` "hard way" in `logicalrep_partition_open`).
 fn copy_attrmap<'m>(mcx: Mcx<'m>, src: &AttrMap<'_>) -> PgResult<AttrMap<'m>> {
     Ok(AttrMap {
-        attnums: mcx::slice_in(mcx, src.attnums.as_slice())?,
+        attnums: ::mcx::slice_in(mcx, src.attnums.as_slice())?,
     })
 }
 

@@ -15,15 +15,15 @@
 use std::cell::RefCell;
 
 use utils_error::{ereport, PgResult};
-use types_error::ERROR;
+use ::types_error::ERROR;
 
 use dynahash::{hash_create, hash_search};
-use hash::hsearch::{HASHACTION, HASHCTL, HASH_BLOBS, HASH_ELEM, HTAB};
+use ::hash::hsearch::{HASHACTION, HASHCTL, HASH_BLOBS, HASH_ELEM, HTAB};
 
-use mcx::MemoryContext;
-use types_core::primitive::{Oid, RegProcedure};
+use ::mcx::MemoryContext;
+use ::types_core::primitive::{Oid, RegProcedure};
 use types_core::{InvalidOid, InvalidSubTransactionId, TopSubTransactionId};
-use wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
+use ::wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
 
 use amapi_seams as amapi_seam;
 use genam_seams as genam_seam;
@@ -320,7 +320,7 @@ pub fn RelationInitIndexAccessInfo(rd: &mut RelationData) -> PgResult<()> {
     if amsupport > 0 {
         let nsupport = indnatts * amsupport as i32;
         rd.rd_support = vec![InvalidOid; nsupport as usize];
-        rd.rd_supportinfo = (0..nsupport).map(|_| types_core::fmgr::FmgrInfo::default()).collect();
+        rd.rd_supportinfo = (0..nsupport).map(|_| ::types_core::fmgr::FmgrInfo::default()).collect();
     } else {
         rd.rd_support = Vec::new();
         rd.rd_supportinfo = Vec::new();

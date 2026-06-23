@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, NodeId, PlannerInfo};
 

@@ -27,11 +27,11 @@ use crate::{
 };
 
 /// `addr`/`mask` views of an `HbaLine` for the IP matchers.
-fn addr_view(h: &HbaLine) -> net::SockAddr {
-    net::SockAddr { addr: h.addr, salen: h.addrlen as u32 }
+fn addr_view(h: &HbaLine) -> ::net::SockAddr {
+    ::net::SockAddr { addr: h.addr, salen: h.addrlen as u32 }
 }
-fn mask_view(h: &HbaLine) -> net::SockAddr {
-    net::SockAddr { addr: h.mask, salen: h.masklen as u32 }
+fn mask_view(h: &HbaLine) -> ::net::SockAddr {
+    ::net::SockAddr { addr: h.mask, salen: h.masklen as u32 }
 }
 
 /// `static void check_hba(hbaPort *port)` (hba.c:2530). Scan the pre-parsed hba
@@ -166,7 +166,7 @@ pub fn load_hba() -> PgResult<bool> {
         report_plain(
             LOG,
             "load_hba",
-            types_error::ERRCODE_CONFIG_FILE_ERROR,
+            ::types_error::ERRCODE_CONFIG_FILE_ERROR,
             format!("configuration file \"{hba_file_name}\" contains no entries"),
         )?;
         ok = false;
@@ -261,7 +261,7 @@ pub fn check_usermap(
         report_plain(
             LOG,
             "check_usermap",
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("provided user name ({pg}) and authenticated user name ({su}) do not match"),
         )?;
         return Ok(STATUS_ERROR);
@@ -293,7 +293,7 @@ pub fn check_usermap(
         report_plain(
             LOG,
             "check_usermap",
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("no match in usermap \"{um}\" for user \"{pg}\" authenticated as \"{su}\""),
         )?;
     }
@@ -328,7 +328,7 @@ pub(crate) fn ident_file_name() -> String {
 /// `ClientAuthentication` (auth.c:390); the caller already holds the port (taken
 /// out of the `MyProcPort` cell by `client_authentication`'s `with_my_proc_port`
 /// frame), so a re-entrant ambient `MyProcPort` read here would observe it unset.
-pub(crate) fn hba_getauthmethod_entry(port: &mut net::Port) -> PgResult<()> {
+pub(crate) fn hba_getauthmethod_entry(port: &mut ::net::Port) -> PgResult<()> {
     hba_getauthmethod(port)
 }
 
@@ -378,4 +378,4 @@ pub(crate) fn maybe_initialize_system_user() -> PgResult<()> {
 
 // Keep DEBUG3 referenced (the C view-fill / include tokenizer uses it; the
 // loaders use LOG, but DEBUG3 is the documented sibling level).
-const _: types_error::ErrorLevel = DEBUG3;
+const _: ::types_error::ErrorLevel = DEBUG3;

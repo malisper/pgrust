@@ -6,9 +6,9 @@ use crate::recombination::init_tour;
 use crate::{Chromosome, Gene, GeqoPrivateData};
 use alloc::vec;
 use alloc::vec::Vec;
-use pathnodes::PlannerInfo;
-use pathnodes::planner_run::PlannerRun;
-use types_core::primitive::Cost;
+use ::pathnodes::PlannerInfo;
+use ::pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::Cost;
 
 /// `DBL_MAX` (`<float.h>`) — the sentinel `geqo_eval` returns for an invalid
 /// join order.

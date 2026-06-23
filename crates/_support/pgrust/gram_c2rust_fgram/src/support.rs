@@ -15,13 +15,13 @@
 //!     PostgreSQL, which resets the whole context after parsing);
 //!   * the `make*` node constructors (faithful transcriptions of `makefuncs.c`);
 //!   * the `List` helpers (`lappend`/`lcons`/`list_concat`/`list_make*_impl`/…)
-//!     implemented over `pg_ffi_fgram::List`'s public API;
+//!     implemented over `::pg_ffi_fgram::List`'s public API;
 //!   * the value-node makers (`makeInteger`/`makeFloat`/`makeBoolean`/`makeString`);
 //!   * C-ABI `errstart`/`errfinish`/… shims that turn `ereport(ERROR, …)` (and a
 //!     grammar syntax error via `scanner_yyerror`) into a catchable panic, which
 //!     [`raw_parser`] converts back into the C contract of returning `NIL`;
 //!   * the `base_yylex` bridge over the repo's tested scanner
-//!     (`backend-parser-scan::core_yylex` + `backend-parser-driver_fgram::BaseLexer`).
+//!     (`backend-parser-scan::core_yylex` + `backend-parser-::driver_fgram::BaseLexer`).
 
 use core::ffi::{c_char, c_int, c_void};
 
@@ -33,9 +33,9 @@ use backend_nodes_types::primnodes::*;
 use backend_nodes_types::Alias;
 use pg_ffi_fgram::{BitString, Boolean, Float, Integer, List, ListCell, Node, StringNode};
 
-use driver_fgram::BaseLexer;
+use ::driver_fgram::BaseLexer;
 use scan_fgram::{tokens, CoreYYSTYPE, Scanner, ScannerSettings, Token, Utf8UnicodeSeam};
-use pg_ffi_fgram::spi::RawParseMode;
+use ::pg_ffi_fgram::spi::RawParseMode;
 
 use crate::gram::{
     self, base_yy_extra_type, base_yyparse, core_YYSTYPE, parser_init, A_Expr_Kind, BoolExprType,
@@ -568,7 +568,7 @@ unsafe fn record_yyerror(message: &str, lloc: c_int, yyscanner: gram::core_yysca
     CUR_ERRMSG.with(|m| *m.borrow_mut() = full);
     CUR_ERRSTATE.with(|s| *s.borrow_mut() = *b"42601");
     CUR_ERRPOS.with(|p| {
-        *p.borrow_mut() = driver_fgram::scanner_errposition(lloc as c_int, buf)
+        *p.borrow_mut() = ::driver_fgram::scanner_errposition(lloc as c_int, buf)
     });
 }
 
@@ -669,7 +669,7 @@ unsafe fn new_node(size: usize, tag: gram::NodeTag) -> *mut Node {
 }
 
 // ===========================================================================
-// List helpers (list.c) over pg_ffi_fgram::List's public API.
+// List helpers (list.c) over ::pg_ffi_fgram::List's public API.
 // ===========================================================================
 
 const LIST_HEADER_OVERHEAD_CELLS: usize = 3; // List::header_overhead_cells() == 3
@@ -1439,7 +1439,7 @@ unsafe fn run_inner() -> *mut c_void {
 /// `mode_token[]` (parser.c:58) -- initial lookahead token for non-default
 /// parse modes.
 fn mode_token(mode: RawParseMode) -> Option<i32> {
-    use pg_ffi_fgram::spi::*;
+    use ::pg_ffi_fgram::spi::*;
     match mode {
         m if m == RAW_PARSE_DEFAULT => None,
         m if m == RAW_PARSE_TYPE_NAME => Some(tokens::MODE_TYPE_NAME),

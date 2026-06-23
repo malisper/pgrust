@@ -25,15 +25,15 @@
 
 use core::any::Any;
 
-use adt_numeric::convert::{make_result, set_var_from_num};
-use adt_numeric::kernel_var::{add_var, cmp_var, const_one};
+use ::adt_numeric::convert::{make_result, set_var_from_num};
+use ::adt_numeric::kernel_var::{add_var, cmp_var, const_one};
 use mcx::{Mcx, PgBox};
-use types_core::Oid;
-use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
+use ::types_core::Oid;
+use ::types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
 use types_error::{PgError, PgResult};
 use ::nodes::execexpr::ExprDoneCond;
 use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
-use types_numeric::var::{NumericSign, NumericVar};
+use ::types_numeric::var::{NumericSign, NumericVar};
 use types_numeric::{numeric_is_nan, numeric_is_special};
 use types_tuple::heaptuple::Datum;
 
@@ -94,7 +94,7 @@ impl OwnedNumericVal {
         // Reserve one leading carry-slack digit (`headroom = 1`), mirroring
         // `set_var_from_num`/`alloc_var`.
         let ndigits = self.digits.len();
-        let mut digits = mcx::vec_with_capacity_in::<i16>(mcx, ndigits + 1)
+        let mut digits = ::mcx::vec_with_capacity_in::<i16>(mcx, ndigits + 1)
             .map_err(|_| mcx.oom(ndigits + 1))?;
         digits.resize(ndigits + 1, 0);
         for (i, &d) in self.digits.iter().enumerate() {
@@ -130,7 +130,7 @@ struct SeriesNumericFctx {
 /// Erase a `'static` cross-call state value into the `FuncCallContext.user_fctx`
 /// carrier (C: `funcctx->user_fctx = palloc(...)`).
 fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
-    let boxed = mcx::alloc_in(mcx, v).expect("alloc user_fctx");
+    let boxed = ::mcx::alloc_in(mcx, v).expect("alloc user_fctx");
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn Any` vtable.
@@ -153,7 +153,7 @@ fn arg_numeric_image(fcinfo: &FunctionCallInfoBaseData<'_>, index: usize) -> Vec
 /// 4-byte-header varlena, crossing verbatim on the by-ref lane (like `unnest`'s
 /// by-ref element).
 fn numeric_image_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum<'mcx>> {
-    let mut buf = mcx::PgVec::new_in(mcx);
+    let mut buf = ::mcx::PgVec::new_in(mcx);
     buf.try_reserve(image.len())
         .map_err(|_| mcx.oom(image.len()))?;
     buf.extend_from_slice(image);

@@ -31,9 +31,9 @@ use rangetypes_seams as range_seams;
 use lsyscache_seams as lsyscache_seams;
 use fmgr_core::{get_fn_expr_argtype, get_fn_expr_rettype};
 use mcx::{Mcx, MemoryContext};
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::Oid;
-use datum::Datum;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::Oid;
+use ::datum::Datum;
 use types_error::{PgError, PgResult};
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative, RefPayload};
 use types_rangetypes::{MultirangeTypeP, RangeTypeP};
@@ -60,8 +60,8 @@ unsafe fn varsize_4b(ptr: *const u8) -> usize {
 /// dereferences.
 fn mr_bytes_to_arg_word<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum> {
     use core::alloc::Layout;
-    use mcx::Allocator;
-    mcx::check_alloc_size(image.len())?;
+    use ::mcx::Allocator;
+    ::mcx::check_alloc_size(image.len())?;
     let layout =
         Layout::from_size_align(image.len().max(1), 8).expect("valid MultirangeType image layout");
     let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;
@@ -1118,7 +1118,7 @@ fn builtin(
 ///   `internal` (`VacAttrStats`/`PlannerInfo`/`GISTENTRY`) executor-owned scratch
 ///   struct, not expressible on the by-ref boundary.
 pub fn register_multirangetypes_builtins() {
-    fmgr_core::register_builtins_native([
+    ::fmgr_core::register_builtins_native([
         // I/O: cstring/internal/bytea <-> anymultirange.
         builtin(4231, "multirange_in", 3, true, false, fc_multirange_in),
         builtin(4232, "multirange_out", 1, true, false, fc_multirange_out),
@@ -1232,7 +1232,7 @@ pub fn register_multirangetypes_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datum::NullableDatum;
+    use ::datum::NullableDatum;
 
     const TEST_MR_OID: u32 = 4451; // pg_type int4multirange
     const TEST_RANGE_OID: u32 = 3904; // pg_type int4range
@@ -1329,7 +1329,7 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let native = fmgr_core::native_builtin(oid).expect("builtin registered native");
+        let native = ::fmgr_core::native_builtin(oid).expect("builtin registered native");
         native(&mut fcinfo).expect("cmp ok").as_bool()
     }
 
@@ -1344,7 +1344,7 @@ mod tests {
             Some(RefPayload::Varlena(a.to_vec())),
             Some(RefPayload::Varlena(b.to_vec())),
         ];
-        let native = fmgr_core::native_builtin(oid).expect("builtin registered native");
+        let native = ::fmgr_core::native_builtin(oid).expect("builtin registered native");
         native(&mut fcinfo).expect("cmp ok").as_i32()
     }
 
@@ -1353,7 +1353,7 @@ mod tests {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
         fcinfo.args = vec![NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(a.to_vec()))];
-        let native = fmgr_core::native_builtin(oid).expect("builtin registered native");
+        let native = ::fmgr_core::native_builtin(oid).expect("builtin registered native");
         native(&mut fcinfo).expect("pred ok").as_bool()
     }
 
@@ -1374,7 +1374,7 @@ mod tests {
             4270, 4271, 4272, 4228,
         ] {
             assert!(
-                fmgr_core::fmgr_isbuiltin(oid).is_some(),
+                ::fmgr_core::fmgr_isbuiltin(oid).is_some(),
                 "multirange builtin {oid} should be registered"
             );
         }

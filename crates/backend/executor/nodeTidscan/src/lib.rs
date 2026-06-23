@@ -23,13 +23,13 @@
 #![allow(clippy::result_large_err)]
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::Index;
+use ::types_core::primitive::Index;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execnodes::EStateData;
 use ::nodes::nodeindexscan::TidScan;
 use ::nodes::primnodes::Expr;
 use ::nodes::SlotId;
-use types_tuple::heaptuple::{ItemPointerData, SelfItemPointerAttributeNumber};
+use ::types_tuple::heaptuple::{ItemPointerData, SelfItemPointerAttributeNumber};
 
 use table_tableam as tableam;
 use execCurrent_seams as execCurrent;
@@ -43,7 +43,7 @@ use arrayfuncs_seams as arrayfuncs;
 
 /// `TIDOID` — the OID of the `tid` type (pg_type.h). Used to deconstruct the
 /// `tid[]` array of a `ctid = ANY (array)` qual.
-pub const TIDOID: types_core::Oid = 27;
+pub const TIDOID: ::types_core::Oid = 27;
 
 /// This crate reaches outward only through per-owner seam crates, so it
 /// declares no seams of its own and installs nothing.
@@ -58,9 +58,9 @@ pub fn init_seams() {}
 /// flat object). `deconstruct_tid_array` takes that byte image and detoasts it,
 /// exactly the lane the `text[]` deconstructors use. A by-value carrier here
 /// would be a contract violation (a `tid[]` array is never pass-by-value).
-fn array_datum_bytes<'a>(d: &'a types_tuple::Datum<'_>) -> PgResult<&'a [u8]> {
+fn array_datum_bytes<'a>(d: &'a ::types_tuple::Datum<'_>) -> PgResult<&'a [u8]> {
     match d {
-        types_tuple::Datum::ByRef(bytes) => Ok(&bytes[..]),
+        ::types_tuple::Datum::ByRef(bytes) => Ok(&bytes[..]),
         _ => Err(elog_internal(
             "tid[] array value is not a by-reference array image",
         )),
@@ -813,7 +813,7 @@ pub fn ExecInitTidScan<'mcx>(
 ) -> PgResult<PgBox<'mcx, TidScanState<'mcx>>> {
     // create state structure (makeNode(TidScanState))
     let mcx = estate.es_query_cxt;
-    let mut tidstate = mcx::alloc_in(mcx, TidScanState::new_in(mcx))?;
+    let mut tidstate = ::mcx::alloc_in(mcx, TidScanState::new_in(mcx))?;
 
     // tidstate->ss.ps.plan = (Plan *) node;  The plan back-link aliases the
     // caller's read-only plan node (the opaque `Node` for this TidScan), so the
@@ -852,7 +852,7 @@ pub fn ExecInitTidScan<'mcx>(
             .as_ref()
             .expect("ExecInitTidScan: scan relation not opened");
         let tts_ops = tableam::table_slot_callbacks(rel);
-        let tupdesc = Some(mcx::alloc_in(mcx, rel.rd_att.clone_in(mcx)?)?);
+        let tupdesc = Some(::mcx::alloc_in(mcx, rel.rd_att.clone_in(mcx)?)?);
         (tupdesc, tts_ops)
     };
     execTuples::exec_init_scan_tuple_slot::call(estate, &mut tidstate.ss, tupdesc, tts_ops)?;

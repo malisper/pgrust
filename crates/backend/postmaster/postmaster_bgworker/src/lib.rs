@@ -33,9 +33,9 @@
 use std::cell::RefCell;
 use std::sync::Mutex;
 
-use utils_error::emit_error_report_for;
-use error_seams::ereport;
-use types_error::ErrorLocation;
+use ::utils_error::emit_error_report_for;
+use ::error_seams::ereport;
+use ::types_error::ErrorLocation;
 use types_bgworker::{
     BackgroundWorker, BackgroundWorkerHandle, BgWorkerStartTime, BgwHandleStatus,
     RegisteredBgWorker, BGWORKER_BACKEND_DATABASE_CONNECTION, BGWORKER_BYPASS_ALLOWCONN,
@@ -48,9 +48,9 @@ use types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     FATAL, LOG,
 };
-use types_pgstat::wait_event::{WAIT_EVENT_BGWORKER_SHUTDOWN, WAIT_EVENT_BGWORKER_STARTUP};
-use types_startup::StartupData;
-use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
+use ::types_pgstat::wait_event::{WAIT_EVENT_BGWORKER_SHUTDOWN, WAIT_EVENT_BGWORKER_STARTUP};
+use ::types_startup::StartupData;
+use ::types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
 
 #[cfg(test)]
 mod tests;
@@ -514,7 +514,7 @@ pub fn BackgroundWorkerStateChange(allow_new_workers: bool) -> PgResult<()> {
         {
             ereport::call(
                 PgError::new(LOG, "out of memory".to_string())
-                    .with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
+                    .with_sqlstate(::types_error::ERRCODE_OUT_OF_MEMORY)
                     .with_message_id("out of memory")
                     .with_error_location(loc(356, "BackgroundWorkerStateChange")),
             )?;
@@ -662,11 +662,11 @@ pub fn set_rw_pid(rw_index: usize, pid: pid_t) {
     BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].as_mut().unwrap().rw_pid = pid);
 }
 /// `rw->rw_crashed_at`.
-pub fn rw_crashed_at(rw_index: usize) -> types_core::TimestampTz {
+pub fn rw_crashed_at(rw_index: usize) -> ::types_core::TimestampTz {
     BACKGROUND_WORKER_LIST.with(|l| l.borrow()[rw_index].as_ref().unwrap().rw_crashed_at)
 }
 /// `rw->rw_crashed_at = ts`.
-pub fn set_rw_crashed_at(rw_index: usize, ts: types_core::TimestampTz) {
+pub fn set_rw_crashed_at(rw_index: usize, ts: ::types_core::TimestampTz) {
     BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut()[rw_index].as_mut().unwrap().rw_crashed_at = ts);
 }
 /// `rw->rw_terminate`.
@@ -936,7 +936,7 @@ pub fn ResetBackgroundWorkerCrashTimes() -> PgResult<()> {
 /// propagates as `Err`. A valid `bgw_type` is defaulted from `bgw_name`.
 fn SanityCheckBackgroundWorker(
     worker: &mut BackgroundWorker,
-    elevel: types_error::ErrorLevel,
+    elevel: ::types_error::ErrorLevel,
 ) -> PgResult<bool> {
     // BGWORKER_SHMEM_ACCESS is a required flag.
     if (worker.bgw_flags & BGWORKER_SHMEM_ACCESS) == 0 {
@@ -1034,7 +1034,7 @@ pub fn bgworker_die(bgw_type: &[u8]) -> PgResult<()> {
             cstr_lossy(bgw_type)
         ),
     )
-    .with_sqlstate(types_error::ERRCODE_ADMIN_SHUTDOWN)
+    .with_sqlstate(::types_error::ERRCODE_ADMIN_SHUTDOWN)
     .with_error_location(loc(734, "bgworker_die")))
 }
 
@@ -1081,8 +1081,8 @@ fn float_exception_handler_wrapper(signo: i32) {
 /// BGWORKER_BACKEND_DATABASE_CONNECTION`). The SIGQUIT handler was already set up
 /// by InitPostmasterChild.
 fn install_bgworker_signal_handlers(db_connection: bool) {
-    use port_pqsignal::pqsignal_be;
-    use signal::SigHandler;
+    use ::port_pqsignal::pqsignal_be;
+    use ::signal::SigHandler;
 
     if db_connection {
         // SIGINT is used to signal canceling the current action.
@@ -1152,7 +1152,7 @@ pub fn BackgroundWorkerMain(startup_data: &StartupData) -> ! {
 
     // MyBackendType = B_BG_WORKER;
     init_small_seams::set_my_backend_type::call(
-        types_core::init::BackendType::BgWorker,
+        ::types_core::init::BackendType::BgWorker,
     );
 
     // init_ps_display(worker->bgw_name);
@@ -1269,8 +1269,8 @@ pub fn BackgroundWorkerInitializeConnection(
 /// `BackgroundWorkerInitializeConnectionByOid(dboid, useroid, flags)` — connect
 /// a background worker to a database by OID using the role `useroid`.
 pub fn BackgroundWorkerInitializeConnectionByOid(
-    dboid: types_core::Oid,
-    useroid: types_core::Oid,
+    dboid: ::types_core::Oid,
+    useroid: ::types_core::Oid,
     flags: u32,
 ) -> PgResult<()> {
     let worker = my_bgworker_entry();
@@ -1443,7 +1443,7 @@ pub fn RegisterBackgroundWorker(worker: &BackgroundWorker) -> PgResult<()> {
     if let Err(_e) = BACKGROUND_WORKER_LIST.with(|l| l.borrow_mut().try_reserve(1)) {
         ereport::call(
             PgError::new(LOG, "out of memory".to_string())
-                .with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
+                .with_sqlstate(::types_error::ERRCODE_OUT_OF_MEMORY)
                 .with_message_id("out of memory")
                 .with_error_location(loc(1021, "RegisterBackgroundWorker")),
         )?;
@@ -1496,7 +1496,7 @@ pub fn RegisterDynamicBackgroundWorker(
     // unused-slot search; the guard's Drop is C's LWLockReleaseAll abort path.
     let guard = lwlock_seams::lwlock_acquire_main::call(
         BACKGROUND_WORKER_LWLOCK_OFFSET,
-        types_storage::LWLockMode::LW_EXCLUSIVE,
+        ::types_storage::LWLockMode::LW_EXCLUSIVE,
     )?;
 
     let mut slotno = 0;
@@ -1512,7 +1512,7 @@ pub fn RegisterDynamicBackgroundWorker(
         {
             debug_assert!(
                 d.parallel_register_count().wrapping_sub(d.parallel_terminate_count())
-                    <= types_bgworker::MAX_PARALLEL_WORKER_LIMIT as uint32
+                    <= ::types_bgworker::MAX_PARALLEL_WORKER_LIMIT as uint32
             );
             drop(data);
             guard.release()?;
@@ -1580,7 +1580,7 @@ pub fn GetBackgroundWorkerPid(handle: &BackgroundWorkerHandle) -> (BgwHandleStat
     // C's LWLockReleaseAll abort path.
     let guard = lwlock_seams::lwlock_acquire_main::call(
         BACKGROUND_WORKER_LWLOCK_OFFSET,
-        types_storage::LWLockMode::LW_SHARED,
+        ::types_storage::LWLockMode::LW_SHARED,
     )
     .expect("BackgroundWorkerLock shared acquire cannot fail");
 
@@ -1702,7 +1702,7 @@ pub fn TerminateBackgroundWorker(handle: &BackgroundWorkerHandle) -> PgResult<()
     // generation check / terminate store; Drop is C's LWLockReleaseAll path.
     let guard = lwlock_seams::lwlock_acquire_main::call(
         BACKGROUND_WORKER_LWLOCK_OFFSET,
-        types_storage::LWLockMode::LW_EXCLUSIVE,
+        ::types_storage::LWLockMode::LW_EXCLUSIVE,
     )?;
 
     // Only act if the generation matches (guards against slot reuse).
@@ -1818,7 +1818,7 @@ pub fn GetBackgroundWorkerTypeByPid(pid: pid_t) -> Option<String> {
     // guard is held across the slot scan; Drop is C's LWLockReleaseAll path.
     let guard = lwlock_seams::lwlock_acquire_main::call(
         BACKGROUND_WORKER_LWLOCK_OFFSET,
-        types_storage::LWLockMode::LW_SHARED,
+        ::types_storage::LWLockMode::LW_SHARED,
     )
     .expect("BackgroundWorkerLock shared acquire cannot fail");
 
@@ -2112,15 +2112,15 @@ fn register_dynamic_parallel_worker_seam(
         let mut name = std::string::String::new();
         use std::fmt::Write as _;
         let _ = write!(name, "parallel worker for PID {}", my_pid);
-        types_bgworker::snprintf_cstr(&mut worker.bgw_name, &name);
+        ::types_bgworker::snprintf_cstr(&mut worker.bgw_name, &name);
     }
-    types_bgworker::snprintf_cstr(&mut worker.bgw_type, "parallel worker");
+    ::types_bgworker::snprintf_cstr(&mut worker.bgw_type, "parallel worker");
     worker.bgw_flags =
         BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION | BGWORKER_CLASS_PARALLEL;
     worker.bgw_start_time = BgWorkerStartTime::ConsistentState;
     worker.bgw_restart_time = BGW_NEVER_RESTART;
-    types_bgworker::snprintf_cstr(&mut worker.bgw_library_name, "postgres");
-    types_bgworker::snprintf_cstr(&mut worker.bgw_function_name, "ParallelWorkerMain");
+    ::types_bgworker::snprintf_cstr(&mut worker.bgw_library_name, "postgres");
+    ::types_bgworker::snprintf_cstr(&mut worker.bgw_function_name, "ParallelWorkerMain");
     // bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg)): the 32-bit DSM
     // handle in the by-value Datum machine word (types-bgworker stores it as
     // `usize`).

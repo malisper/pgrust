@@ -68,18 +68,18 @@ use alloc::string::{String, ToString};
 use dbcommands_seams as inward;
 use pg_database_seams as dbcat;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgString};
-use types_catalog::pg_database::{
+use ::types_catalog::pg_database::{
     DatabaseRelationId, FormPgDatabase, DATCONNLIMIT_INVALID_DB,
 };
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     ErrorLocation, PgResult, DEBUG1, ERRCODE_UNDEFINED_DATABASE, ERROR, PANIC, WARNING,
 };
-use types_storage::lock::{AccessExclusiveLock, LOCKMODE, NoLock};
-use types_storage::storage::ProcSignalBarrierType;
-use wal::rmgr::XLogReaderState;
+use ::types_storage::lock::{AccessExclusiveLock, LOCKMODE, NoLock};
+use ::types_storage::storage::ProcSignalBarrierType;
+use ::wal::rmgr::XLogReaderState;
 
 // ---------------------------------------------------------------------------
 // Resource-manager opcode bits (commands/dbcommands_xlog.h) for dbase_redo.
@@ -212,7 +212,7 @@ pub fn get_database_oid(dbname: &str, missing_ok: bool) -> PgResult<Oid> {
     // way (the read seam does the table_open + systable scan + close). The
     // inward seam takes no `Mcx`, so the lookup runs in a transient context;
     // only the `Oid` (Copy) escapes it.
-    let ctx = mcx::MemoryContext::new("get_database_oid");
+    let ctx = ::mcx::MemoryContext::new("get_database_oid");
     let oid = match dbcat::get_database_tuple_by_name::call(ctx.mcx(), dbname)? {
         Some(form) => form.oid,
         None => InvalidOid,
@@ -345,7 +345,7 @@ pub fn dbase_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
     let data = decoded.data();
 
     if info == XLOG_DBASE_CREATE_FILE_COPY {
-        let xlrec = wal::rmgrdesc::xl_dbase_create_file_copy_rec::from_bytes(data)
+        let xlrec = ::wal::rmgrdesc::xl_dbase_create_file_copy_rec::from_bytes(data)
             .expect("dbase_redo: short xl_dbase_create_file_copy_rec");
 
         let src_path =
@@ -393,7 +393,7 @@ pub fn dbase_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
         // Copy this subdirectory to the new location (no subdirectories).
         copydir::copydir(&src_path, &dst_path, false)?;
     } else if info == XLOG_DBASE_CREATE_WAL_LOG {
-        let xlrec = wal::rmgrdesc::xl_dbase_create_wal_log_rec::from_bytes(data)
+        let xlrec = ::wal::rmgrdesc::xl_dbase_create_wal_log_rec::from_bytes(data)
             .expect("dbase_redo: short xl_dbase_create_wal_log_rec");
 
         let dbpath = relpath::GetDatabasePath(xlrec.db_id(), xlrec.tablespace_id());
@@ -415,7 +415,7 @@ pub fn dbase_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
             true,
         )?;
     } else if info == XLOG_DBASE_DROP {
-        let xlrec = wal::rmgrdesc::xl_dbase_drop_rec::from_bytes(data)
+        let xlrec = ::wal::rmgrdesc::xl_dbase_drop_rec::from_bytes(data)
             .expect("dbase_redo: short xl_dbase_drop_rec");
         let db_id = xlrec.db_id();
 
@@ -512,8 +512,8 @@ pub(crate) fn get_parent_directory(path: &str) -> String {
 fn rename_database_seam(
     oldname: &str,
     newname: &str,
-) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
-    let ctx = mcx::MemoryContext::new("RenameDatabase");
+) -> PgResult<::types_catalog::catalog_dependency::ObjectAddress> {
+    let ctx = ::mcx::MemoryContext::new("RenameDatabase");
     heavy::RenameDatabase(ctx.mcx(), oldname, newname)
 }
 
@@ -521,8 +521,8 @@ fn rename_database_seam(
 fn alter_database_owner_seam(
     dbname: &str,
     new_owner_id: Oid,
-) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
-    let ctx = mcx::MemoryContext::new("AlterDatabaseOwner");
+) -> PgResult<::types_catalog::catalog_dependency::ObjectAddress> {
+    let ctx = ::mcx::MemoryContext::new("AlterDatabaseOwner");
     heavy::AlterDatabaseOwner(ctx.mcx(), dbname, new_owner_id)
 }
 
@@ -560,7 +560,7 @@ pub fn init_seams() {
     //     projection runs in a short-lived scratch context; a cache miss yields
     //     the empty string (the C `char *` NULL). ---
     vacuumlazy_seams::get_database_name::set(|dboid| {
-        let ctx = mcx::MemoryContext::new("vac_get_database_name");
+        let ctx = ::mcx::MemoryContext::new("vac_get_database_name");
         let name = match get_database_name(ctx.mcx(), dboid)? {
             Some(name) => name.to_string(),
             None => String::new(),
@@ -574,11 +574,11 @@ pub fn init_seams() {
     // always resolves while a backend is attached).
     xml_libxml_seams::get_database_name::set(|| {
         let dbid = tablespace_globals_seams::MyDatabaseId::call()?;
-        let ctx = mcx::MemoryContext::new("xml_get_database_name");
+        let ctx = ::mcx::MemoryContext::new("xml_get_database_name");
         let name: String = match get_database_name(ctx.mcx(), dbid)? {
             Some(name) => name.to_string(),
             None => {
-                return Err(types_error::PgError::error(alloc::format!(
+                return Err(::types_error::PgError::error(alloc::format!(
                     "cache lookup failed for database {dbid}"
                 )))
             }
@@ -590,7 +590,7 @@ pub fn init_seams() {
     // this repo homes the function in dbcommands/heavy.rs, so install it here.
     collationcmds_seams::check_encoding_locale_matches::set(
         |encoding, collate, ctype| {
-            let scratch = mcx::MemoryContext::new("check_encoding_locale_matches");
+            let scratch = ::mcx::MemoryContext::new("check_encoding_locale_matches");
             heavy::check_encoding_locale_matches(scratch.mcx(), encoding, collate, ctype)
         },
     );
@@ -606,7 +606,7 @@ pub fn init_seams() {
     {
         use user_seams as u;
         u::have_createdb_privilege::set(|| {
-            let scratch = mcx::MemoryContext::new("user.c have_createdb_privilege seam");
+            let scratch = ::mcx::MemoryContext::new("user.c have_createdb_privilege seam");
             have_createdb_privilege(scratch.mcx())
         });
         u::get_database_oid::set(|dbname, missing_ok| get_database_oid(&dbname, missing_ok));

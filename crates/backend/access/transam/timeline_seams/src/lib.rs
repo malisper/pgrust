@@ -12,8 +12,8 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::{TimeLineID, XLogRecPtr};
-use types_error::PgResult;
-use wal::TimeLineHistoryEntry;
+use ::types_error::PgResult;
+use ::wal::TimeLineHistoryEntry;
 
 seam_core::seam!(
     /// `readTimeLineHistory(targetTLI)` (timeline.c) — read and parse the

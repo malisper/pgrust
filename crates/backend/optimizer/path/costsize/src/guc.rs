@@ -9,8 +9,8 @@
 //! engine drives. Consumers (allpaths.c `create_tidscan_paths`,
 //! joinrels.c `join_enable_flags`, ...) read them via `vars::enable_*.read()`.
 
-use guc_tables::vars;
-use guc_tables::GucVarAccessors;
+use ::guc_tables::vars;
+use ::guc_tables::GucVarAccessors;
 
 macro_rules! enable_guc {
     ($cell:ident, $get:ident, $set:ident, $default:expr) => {

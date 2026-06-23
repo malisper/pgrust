@@ -8,7 +8,7 @@
 #![allow(unused_doc_comments)]
 use execparallel::{DsaAreaHandle, DsmSegmentHandle, DsaPointer, SerializeCursor, Size};
 use types_storage::{dsa_handle, DsaArea};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 // --- Parallel-executor in-place DSA seams (consumer: backend-utils-mmgr-dsa parallel path) ---
 

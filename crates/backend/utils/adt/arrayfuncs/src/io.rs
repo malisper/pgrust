@@ -26,8 +26,8 @@ use alloc::vec::Vec;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use array::{ArrayElementDatum, ArrayElementIoData, ArrayIoFuncSelector};
-use types_core::Oid;
-use datum::datum::Datum;
+use ::types_core::Oid;
+use ::datum::datum::Datum;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_BINARY_REPRESENTATION,
@@ -1735,13 +1735,13 @@ fn send_byte<'mcx>(mcx: Mcx<'mcx>, buf: &mut PgVec<'mcx, u8>, b: u8) -> PgResult
 
 /// `sizeof(Datum)` on this build (C transmits the raw Datum array for by-value
 /// element types via `memcpy`, so the on-wire element width must match).
-const DATUM_WIDTH: usize = core::mem::size_of::<datum::datum::Datum>();
+const DATUM_WIDTH: usize = core::mem::size_of::<::datum::datum::Datum>();
 
 /// Serialize an `ArrayBuildState` into the `bytea` payload bytes (varlena header
 /// added by the caller's `ret_bytea`). Mirrors `array_agg_serialize`.
 pub fn array_agg_serialize_state<'mcx>(
     mcx: Mcx<'mcx>,
-    state: &datum::array_build::ArrayBuildState,
+    state: &::datum::array_build::ArrayBuildState,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let mut buf: PgVec<'mcx, u8> = PgVec::new_in(mcx);
     let nelems = state.nelems as usize;
@@ -1812,7 +1812,7 @@ pub fn array_agg_serialize_state<'mcx>(
 pub fn array_agg_deserialize_state(
     mcx: Mcx<'_>,
     body: &[u8],
-) -> PgResult<datum::array_build::ArrayBuildState> {
+) -> PgResult<::datum::array_build::ArrayBuildState> {
     let mut msg = MsgReader::new(body);
 
     // element_type.
@@ -1844,7 +1844,7 @@ pub fn array_agg_deserialize_state(
             let mut word_bytes = [0u8; 8];
             word_bytes[..DATUM_WIDTH].copy_from_slice(raw);
             let word = u64::from_ne_bytes(word_bytes) as usize;
-            state.dvalues.push(datum::datum::Datum::from_usize(word));
+            state.dvalues.push(::datum::datum::Datum::from_usize(word));
             state.dnulls.push(dnulls[i]);
         }
     } else {
@@ -1862,7 +1862,7 @@ pub fn array_agg_deserialize_state(
         }
         for i in 0..nelems_usize {
             if dnulls[i] {
-                state.dvalues.push(datum::datum::Datum::null());
+                state.dvalues.push(::datum::datum::Datum::null());
                 state.dnulls.push(true);
                 continue;
             }
@@ -1889,7 +1889,7 @@ pub fn array_agg_deserialize_state(
             let len = byref_element_len(ptr, state.typlen as i32);
             let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
             let copy: alloc::boxed::Box<[u8]> = bytes.to_vec().into_boxed_slice();
-            let dword = datum::datum::Datum::from_usize(copy.as_ptr() as usize);
+            let dword = ::datum::datum::Datum::from_usize(copy.as_ptr() as usize);
             state.byref_storage.push(copy);
             state.dvalues.push(dword);
             state.dnulls.push(false);
@@ -1919,7 +1919,7 @@ const ARR_DIMS_BYTES: usize = (MAX_DIM as usize) * 4;
 /// `array_agg_array_serialize`.
 pub fn array_agg_array_serialize_state<'mcx>(
     mcx: Mcx<'mcx>,
-    state: &datum::array_build::ArrayBuildStateArr,
+    state: &::datum::array_build::ArrayBuildStateArr,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let mut buf: PgVec<'mcx, u8> = PgVec::new_in(mcx);
     let nbytes = state.nbytes as usize;
@@ -1970,14 +1970,14 @@ pub fn array_agg_array_serialize_state<'mcx>(
 pub fn array_agg_array_deserialize_state(
     _mcx: Mcx<'_>,
     body: &[u8],
-) -> PgResult<datum::array_build::ArrayBuildStateArr> {
+) -> PgResult<::datum::array_build::ArrayBuildStateArr> {
     let mut msg = MsgReader::new(body);
 
     let element_type = msg.get_int(4)? as Oid;
     let array_type = msg.get_int(4)? as Oid;
     let nbytes = msg.get_int(4)? as i32;
 
-    let mut result = datum::array_build::ArrayBuildStateArr {
+    let mut result = ::datum::array_build::ArrayBuildStateArr {
         data: alloc::vec::Vec::new(),
         nullbitmap: None,
         nbytes: 0,

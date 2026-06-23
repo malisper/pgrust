@@ -49,12 +49,12 @@ use types_error::{
     ERRCODE_UNDEFINED_SCHEMA, ERROR, WARNING,
 };
 
-use types_acl::acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, AclResult};
-use types_catalog::catalog::{
+use ::types_acl::acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, AclResult};
+use ::types_catalog::catalog::{
     DATABASE_RELATION_ID, NAMESPACE_RELATION_ID, RELATION_RELATION_ID,
 };
-use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
-use types_catalog::pg_publication::{
+use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
+use ::types_catalog::pg_publication::{
     Anum_pg_publication_namespace_oid, Anum_pg_publication_oid, Anum_pg_publication_pubdelete,
     Anum_pg_publication_pubgencols, Anum_pg_publication_pubinsert, Anum_pg_publication_pubname,
     Anum_pg_publication_puballtables, Anum_pg_publication_pubowner, Anum_pg_publication_pubtruncate,
@@ -64,8 +64,8 @@ use types_catalog::pg_publication::{
     PublicationNamespaceRelationId, PublicationObjectIndexId, PublicationPartOpt,
     PublicationRelObjectIndexId, PublicationRelRelationId, PublicationRelationId,
 };
-use types_core::catalog::FirstNormalObjectId;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, ParseLoc};
+use ::types_core::catalog::FirstNormalObjectId;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, ParseLoc};
 use ::nodes::ddlnodes::{
     AlterPublicationStmt, CreatePublicationStmt, DefElem, PublicationObjSpec, PublicationTable,
     AP_AddObjects, AP_DropObjects, AP_SetObjects, PUBLICATIONOBJ_TABLE,
@@ -75,37 +75,37 @@ use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::{DROP_CASCADE, ObjectType};
 use ::nodes::parsestmt::{ParseExprKind, ParseState};
 use ::nodes::primnodes::Expr;
-use types_storage::lock::{
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock,
 };
-use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
-use scankey::ScanKeyInit;
-use transam_xact::CommandCounterIncrement;
+use ::scankey::ScanKeyInit;
+use ::transam_xact::CommandCounterIncrement;
 use aclchk::{object_aclcheck, object_ownercheck};
-use catalog_catalog::GetNewOidWithIndex;
-use dependency::performDeletion;
-use indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
+use ::catalog_catalog::GetNewOidWithIndex;
+use ::dependency::performDeletion;
+use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 use pg_shdepend::{changeDependencyOnOwner, recordDependencyOnOwner};
-use define_seams::DefElemArg;
-use nodes_core::nodefuncs::check_functions_in_node;
-use nodes_core::node_walker::expression_tree_walker;
-use equalfuncs::equal_node;
-use name::namein;
-use inval::cache_invalidate::{
+use ::define_seams::DefElemArg;
+use ::nodes_core::nodefuncs::check_functions_in_node;
+use ::nodes_core::node_walker::expression_tree_walker;
+use ::equalfuncs::equal_node;
+use ::name::namein;
+use ::inval::cache_invalidate::{
     CacheInvalidateRelSync, CacheInvalidateRelSyncAll, CacheInvalidateRelcacheAll,
     CacheInvalidateRelcacheByRelid,
 };
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr};
-use miscinit::GetUserId;
-use pgstrcasecmp::pg_strcasecmp;
+use ::miscinit::GetUserId;
+use ::pgstrcasecmp::pg_strcasecmp;
 
-use cache::syscache::SysCacheKey;
-use datum::Datum as KeyDatum;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_syscache::syscache_ids::{PUBLICATIONOID, PUBLICATIONRELMAP};
+use ::cache::syscache::SysCacheKey;
+use ::datum::Datum as KeyDatum;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_syscache::syscache_ids::{PUBLICATIONOID, PUBLICATIONRELMAP};
 
 // Cross-subsystem externals reached through their owners' -seams crates.
 use genam_seams as genam;
@@ -209,7 +209,7 @@ fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>>
     const VARHDRSZ: usize = 4;
     let payload = s.as_bytes();
     let total = VARHDRSZ + payload.len();
-    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     let vl_len: u32 = (total as u32) << 2;
     buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
@@ -225,8 +225,8 @@ fn name_str(bytes: &[u8]) -> &str {
 
 /// `namein(s)` image — a `NAMEDATALEN`-byte NUL-padded `NameData` Datum.
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
-    use types_core::fmgr::NAMEDATALEN;
-    let mut image: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
+    use ::types_core::fmgr::NAMEDATALEN;
+    let mut image: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
     let src = s.as_bytes();
     let take = core::cmp::min(src.len(), (NAMEDATALEN as usize) - 1);
     for &b in &src[..take] {
@@ -246,7 +246,7 @@ fn oid_cache_key(value: Oid) -> SysCacheKey<'static> {
 /// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, F_OIDEQ,
 /// ObjectIdGetDatum(value))`.
 fn oid_key<'mcx>(attno: i32, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
-    use types_core::fmgr::F_OIDEQ;
+    use ::types_core::fmgr::F_OIDEQ;
     let mut key = ScanKeyData::empty();
     ScanKeyInit(
         &mut key,
@@ -332,9 +332,9 @@ fn clone_columns<'mcx>(
     mcx: Mcx<'mcx>,
     src: &[PgBox<'mcx, Node<'mcx>>],
 ) -> PgResult<PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>> {
-    let mut out: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> = mcx::vec_with_capacity_in(mcx, src.len())?;
+    let mut out: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> = ::mcx::vec_with_capacity_in(mcx, src.len())?;
     for c in src {
-        out.push(mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
+        out.push(::mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
     }
     Ok(out)
 }
@@ -435,7 +435,7 @@ fn defel_name_list_to_string(names: &[::nodes::nodes::NodePtr<'_>]) -> PgResult<
 
 /// `defGetString(def)` (define.c).
 fn defGetString(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<String> {
-    let s = define_seams::def_get_string::call(
+    let s = ::define_seams::def_get_string::call(
         mcx,
         defel.defname.as_deref().unwrap_or("").to_string(),
         defel_arg(defel)?,
@@ -445,7 +445,7 @@ fn defGetString(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<String> {
 
 /// `defGetBoolean(def)` (define.c).
 fn defGetBoolean(defel: &DefElem) -> PgResult<bool> {
-    define_seams::def_get_boolean::call(
+    ::define_seams::def_get_boolean::call(
         defel.defname.as_deref().unwrap_or("").to_string(),
         defel_arg(defel)?,
     )
@@ -633,7 +633,7 @@ fn ObjectsInPublicationToOids<'mcx>(
             PUBLICATIONOBJ_TABLE => {
                 /* *rels = lappend(*rels, pubobj->pubtable) */
                 if let Some(t) = &pubobj.pubtable {
-                    rels.push(mcx::alloc_in(mcx, t.clone_in(mcx)?)?);
+                    rels.push(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?);
                 }
             }
             PUBLICATIONOBJ_TABLES_IN_SCHEMA => {
@@ -869,13 +869,13 @@ pub fn pub_contains_invalid_column<'mcx>(
         let attgenerated = tupdesc_attgenerated(relation, attnum);
 
         if !has_columns {
-            if attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_STORED as i8
+            if attgenerated == ::types_tuple::access::ATTRIBUTE_GENERATED_STORED as i8
                 && pubgencols_type != PUBLISH_GENCOLS_STORED
             {
                 invalid_gen_col = true;
                 break;
             }
-            if attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL as i8 {
+            if attgenerated == ::types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL as i8 {
                 invalid_gen_col = true;
                 break;
             }
@@ -1196,7 +1196,7 @@ fn TransformPubWhereClauses<'mcx>(
 
         /* Re-wrap the transformed Expr as a walkable Node for storage. */
         let wherenode: Option<PgBox<'mcx, Node<'mcx>>> = match whereclause {
-            Some(expr) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?),
+            Some(expr) => Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?),
             None => None,
         };
 
@@ -1287,10 +1287,10 @@ fn pubtable_rangevar<'a, 'mcx>(
 }
 
 /// Bridge the parser-model `RangeVar<'mcx>` to the `table_open` substrate's
-/// `types_tuple::access::RangeVar` (the relation-open layer predates the node
+/// `::types_tuple::access::RangeVar` (the relation-open layer predates the node
 /// model and carries the plain owned struct).
-fn to_access_rangevar(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn to_access_rangevar(rv: &::nodes::rawnodes::RangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.to_string()),
         schemaname: rv.schemaname.as_deref().map(|s| s.to_string()),
         relname: rv.relname.as_deref().unwrap_or("").to_string(),
@@ -1327,7 +1327,7 @@ fn OpenTableList<'mcx>(
 
         /* The walkable Node row filter (parser raw expr). */
         let resolved_where: Option<PgBox<'mcx, Node<'mcx>>> = match &t.where_clause {
-            Some(w) => Some(mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
+            Some(w) => Some(::mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
             None => None,
         };
 
@@ -1427,7 +1427,7 @@ fn OpenTableList<'mcx>(
                 /* find_all_inheritors already got lock */
                 let crel = table::table_open(mcx, childrelid, NoLock)?;
                 let cwhere: Option<PgBox<'mcx, Node<'mcx>>> = match &t.where_clause {
-                    Some(w) => Some(mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
+                    Some(w) => Some(::mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
                     None => None,
                 };
                 rels.push(PublicationRelInfo {
@@ -1979,7 +1979,7 @@ fn AlterPublicationOptions<'mcx>(
         } else {
             relids = Vec::new();
             for &root in root_relids.iter() {
-                let base: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+                let base: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
                 let got = pubcat::GetPubPartitionOptionRelations::call(
                     mcx,
                     base,
@@ -2145,7 +2145,7 @@ fn AlterPublicationTables<'mcx>(
                 delrels.push(PublicationRelInfo {
                     relation: oldrel,
                     whereClause: None,
-                    columns: mcx::vec_with_capacity_in(mcx, 0)?,
+                    columns: ::mcx::vec_with_capacity_in(mcx, 0)?,
                 });
             }
         }
@@ -2457,7 +2457,7 @@ pub fn RemovePublicationRelById<'mcx>(mcx: Mcx<'mcx>, proid: Oid) -> PgResult<()
      * Invalidate relcache so that publication info is rebuilt.  For partitioned
      * tables, invalidate all partitions in the hierarchies.
      */
-    let base: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let base: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let relids =
         pubcat::GetPubPartitionOptionRelations::call(mcx, base, PublicationPartOpt::All, prrelid)?;
     let relids_v: Vec<Oid> = relids.iter().copied().collect();
@@ -2790,7 +2790,7 @@ fn publication_rel_map_oid<'mcx>(mcx: Mcx<'mcx>, relid: Oid, pubid: Oid) -> PgRe
 /// `GetSysCacheOid2(PUBLICATIONNAMESPACEMAP, ..., schemaid, pubid)` — the
 /// pg_publication_namespace OID for (schemaid, pubid), or InvalidOid.
 fn publication_namespace_map_oid<'mcx>(mcx: Mcx<'mcx>, schemaid: Oid, pubid: Oid) -> PgResult<Oid> {
-    use types_syscache::syscache_ids::PUBLICATIONNAMESPACEMAP;
+    use ::types_syscache::syscache_ids::PUBLICATIONNAMESPACEMAP;
     let tup = SearchSysCache2(
         mcx,
         PUBLICATIONNAMESPACEMAP,
@@ -2846,7 +2846,7 @@ fn relation_has_generated_stored<'mcx>(relation: &rel::Relation<'mcx>) -> bool {
     let desc = &relation.rd_att;
     for i in 0..(desc.natts as usize) {
         let att = desc.attr(i);
-        if !att.attisdropped && att.attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_STORED as i8 {
+        if !att.attisdropped && att.attgenerated == ::types_tuple::access::ATTRIBUTE_GENERATED_STORED as i8 {
             return true;
         }
     }
@@ -2858,7 +2858,7 @@ fn relation_has_generated_virtual<'mcx>(relation: &rel::Relation<'mcx>) -> bool 
     let desc = &relation.rd_att;
     for i in 0..(desc.natts as usize) {
         let att = desc.attr(i);
-        if !att.attisdropped && att.attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL as i8
+        if !att.attisdropped && att.attgenerated == ::types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL as i8
         {
             return true;
         }
@@ -2875,7 +2875,7 @@ fn bitmapset_members(bms: Option<&::nodes::bitmapset::Bitmapset<'_>>) -> Vec<i32
     let mut out = Vec::new();
     let mut i = -1;
     loop {
-        i = nodes_core::bitmapset::bms_next_member(bms, i);
+        i = ::nodes_core::bitmapset::bms_next_member(bms, i);
         if i < 0 {
             break;
         }
@@ -2918,8 +2918,8 @@ fn check_for_interrupts() -> PgResult<()> {
 }
 
 /// `ereport` location helper for `publicationcmds.c`.
-fn errloc(funcname: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new(
+fn errloc(funcname: &'static str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new(
         "../src/backend/commands/publicationcmds.c",
         0,
         funcname,

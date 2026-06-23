@@ -51,14 +51,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{Oid, TimestampTz};
 // Canonical migration-target value type (the `Datum<'mcx>` enum). The SRF value
 // layer builds these via the `from_*` / `null` codec methods; they are lowered
 // to the still-shim-typed `datum::Datum` only at the audited seam edges
 // (`materialized_srf_putvalues` / `construct_array_builtin`), whose owning units
 // have not yet advanced their contract off the bare-word newtype.
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_PSTATEMENT,
     ERRCODE_INVALID_PSTATEMENT_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_PSTATEMENT,
@@ -69,7 +69,7 @@ use ::nodes::nodes::{CmdType, Node};
 use ::nodes::primnodes::Expr;
 use ::nodes::EStateData;
 use ::nodes::executor::EXEC_FLAG_WITH_NO_DATA;
-use types_explain::ExplainState;
+use ::types_explain::ExplainState;
 use ::nodes::params::ParamListInfo;
 use ::nodes::parsestmt::{
     CachedPlanHandle, CachedPlanSourceHandle, CommandTag, DestReceiverHandle,
@@ -266,7 +266,7 @@ pub fn PrepareQuery<'mcx>(
     //   if (nargs) { argtypes = palloc_array(Oid, nargs);
     //       foreach(l, stmt->argtypes) argtypes[i++] = typenameTypeId(pstate, tn); }
     let nargs = stmt.argtypes.len();
-    let mut argtypes: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, nargs)?;
+    let mut argtypes: ::mcx::PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, nargs)?;
     if nargs != 0 {
         for tn in stmt.argtypes.iter() {
             // C: typenameTypeId(pstate, tn). The grammar carries each argtype as
@@ -333,7 +333,7 @@ pub fn ExecuteQuery<'mcx>(
 ) -> PgResult<()> {
     // ParamListInfo paramLI = NULL; EState *estate = NULL;
     let mut param_li: ParamListInfo = None;
-    let mut estate: Option<mcx::PgBox<'mcx, EStateData<'mcx>>> = None;
+    let mut estate: Option<::mcx::PgBox<'mcx, EStateData<'mcx>>> = None;
     let eflags: i32;
     let count: i64;
 
@@ -395,7 +395,7 @@ pub fn ExecuteQuery<'mcx>(
         query_string.as_str(),
         command_tag.0,
         plan_list.as_slice(),
-        portal::CachedPlanHandle(cplan.0),
+        ::portal::CachedPlanHandle(cplan.0),
     )?;
 
     // For CREATE TABLE ... AS EXECUTE, verify the statement produces tuples
@@ -460,7 +460,7 @@ fn EvaluateParams<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
     pstmt: &PreparedStatement,
-    params: &[mcx::PgBox<'mcx, Node<'mcx>>],
+    params: &[::mcx::PgBox<'mcx, Node<'mcx>>],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<ParamListInfo> {
     // Oid *param_types = pstmt->plansource->param_types;
@@ -502,7 +502,7 @@ fn EvaluateParams<'mcx>(
         .as_ref()
         .map(|s| s.as_str())
         .unwrap_or("");
-    let mut params_work: mcx::PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, num_params as usize)?;
+    let mut params_work: ::mcx::PgVec<'mcx, Expr<'mcx>> = ::mcx::vec_with_capacity_in(mcx, num_params as usize)?;
     let mut i: i32 = 0;
     while i < num_params {
         let expected_type_id = param_types[i as usize];
@@ -674,7 +674,7 @@ pub fn FetchPreparedStatement(
 pub fn FetchPreparedStatementResultDesc<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &PreparedStatement,
-) -> PgResult<Option<types_tuple::heaptuple::TupleDescData<'mcx>>> {
+) -> PgResult<Option<::types_tuple::heaptuple::TupleDescData<'mcx>>> {
     // Assert(stmt->plansource->fixed_result);
     debug_assert!(plancache_seam::plansource_fixed_result::call(stmt.plansource)?);
 
@@ -699,14 +699,14 @@ pub fn FetchPreparedStatementResultDesc<'mcx>(
 pub fn ExecuteStmtResultDesc<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &ExecuteStmt<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     let name: &str = stmt.name.as_ref().map(|s| s.as_str()).unwrap_or("");
     let entry = match FetchPreparedStatement(name, false)? {
         Some(e) => e,
         None => return Ok(None),
     };
     match FetchPreparedStatementResultDesc(mcx, &entry)? {
-        Some(desc) => Ok(Some(mcx::alloc_in(mcx, desc)?)),
+        Some(desc) => Ok(Some(::mcx::alloc_in(mcx, desc)?)),
         None => Ok(None),
     }
 }
@@ -741,7 +741,7 @@ pub fn ExecuteStmtHasResult<'mcx>(stmt: &ExecuteStmt<'mcx>) -> PgResult<bool> {
 pub fn FetchPreparedStatementTargetList<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &PreparedStatement,
-) -> PgResult<mcx::PgVec<'mcx, Node<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, Node<'mcx>>> {
     // tlist = CachedPlanGetTargetList(stmt->plansource, NULL);
     // return copyObject(tlist);  — the seam returns an owned independent copy.
     plancache_seam::cached_plan_get_target_list::call(mcx, stmt.plansource)
@@ -831,7 +831,7 @@ pub fn ExplainExecuteQuery<'mcx>(
 ) -> PgResult<()> {
     // ParamListInfo paramLI = NULL; EState *estate = NULL;
     let mut param_li: ParamListInfo = None;
-    let mut estate: Option<mcx::PgBox<'mcx, EStateData<'mcx>>> = None;
+    let mut estate: Option<::mcx::PgBox<'mcx, EStateData<'mcx>>> = None;
 
     // if (es->memory) { create+switch planner ctx } if (es->buffers) snapshot
     // pgBufferUsage; INSTR_TIME_SET_CURRENT(planstart);
@@ -868,7 +868,7 @@ pub fn ExplainExecuteQuery<'mcx>(
         // positions), so a throwaway pstate carrying just the source text
         // matches C's `pstate_params`.
         let mut pstate_params = ParseState::new(mcx)?;
-        pstate_params.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+        pstate_params.p_sourcetext = Some(::mcx::PgString::from_str_in(source_text, mcx)?);
         let mut es_state = execexpr_seam::create_executor_state::call(mcx)?;
         es_state.es_param_list_info = params;
         param_li =
@@ -1021,8 +1021,8 @@ pub fn pg_prepared_statement<'mcx>(
                     // result_types = palloc_array(Oid, natts);
                     // for i in 0..natts: result_types[i] = TupleDescAttr(desc, i)->atttypid;
                     let natts = desc.attrs.len();
-                    let mut result_types: mcx::PgVec<'mcx, Oid> =
-                        mcx::vec_with_capacity_in(mcx, natts)?;
+                    let mut result_types: ::mcx::PgVec<'mcx, Oid> =
+                        ::mcx::vec_with_capacity_in(mcx, natts)?;
                     for i in 0..natts {
                         result_types.push(desc.attr(i).atttypid);
                     }
@@ -1065,8 +1065,8 @@ fn build_regtype_array<'mcx>(mcx: Mcx<'mcx>, param_types: &[Oid]) -> PgResult<Da
     // lowered to the still-shim-typed `construct_array_builtin` contract at this
     // audited array-build edge (arrayfuncs has not advanced off the bare-word
     // newtype).
-    let mut tmp_ary: mcx::PgVec<'mcx, datum::Datum> =
-        mcx::vec_with_capacity_in(mcx, param_types.len())?;
+    let mut tmp_ary: ::mcx::PgVec<'mcx, datum::Datum> =
+        ::mcx::vec_with_capacity_in(mcx, param_types.len())?;
     for &t in param_types {
         tmp_ary.push(datum::Datum::from_usize(Datum::from_oid(t).as_usize()));
     }
@@ -1098,7 +1098,7 @@ fn make_raw_stmt<'mcx>(
     stmt_len: i32,
 ) -> PgResult<RawStmt<'mcx>> {
     Ok(RawStmt {
-        stmt: mcx::alloc_in(mcx, query.clone_in(mcx)?)?,
+        stmt: ::mcx::alloc_in(mcx, query.clone_in(mcx)?)?,
         stmt_location,
         stmt_len,
     })
@@ -1110,7 +1110,7 @@ fn make_raw_stmt<'mcx>(
 // ===========================================================================
 
 use ::nodes::nodes::Node as DispatchNode;
-use portal::QueryCompletion;
+use ::portal::QueryCompletion;
 
 /// `case T_PrepareStmt: PrepareQuery(pstate, stmt, stmt_location, stmt_len)`
 /// (utility.c). The dispatch carries the parse tree as `&Node`; extract the
@@ -1194,7 +1194,7 @@ fn execute_stmt_has_result_arm<'mcx>(stmt: &DispatchNode<'mcx>) -> bool {
 fn execute_stmt_result_desc_arm<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &DispatchNode<'mcx>,
-) -> types_tuple::heaptuple::TupleDesc<'mcx> {
+) -> ::types_tuple::heaptuple::TupleDesc<'mcx> {
     let s = stmt.expect_executestmt();
     ExecuteStmtResultDesc(mcx, s).expect("ExecuteStmtResultDesc failed")
 }

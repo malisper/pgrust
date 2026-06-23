@@ -16,10 +16,10 @@
 //! protocol, not the one-shot fmgr boundary). All registered builtins are
 //! `proisstrict => 't'` and not retset.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

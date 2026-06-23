@@ -9,11 +9,11 @@
 //! `BTStackData`), and the downlink byte-math helpers
 //! (`BTreeTupleGetDownLink` / `BTreeTupleGetTopParent`, nbtree.h inline).
 
-use types_core::primitive::{BlockNumber, OffsetNumber};
+use ::types_core::primitive::{BlockNumber, OffsetNumber};
 use types_error::{PgError, PgResult};
-use types_error::error::ERRCODE_INDEX_CORRUPTED;
+use ::types_error::error::ERRCODE_INDEX_CORRUPTED;
 use types_nbtree::{BTScanInsert, P_HIKEY, P_NONE};
-use types_tuple::heaptuple::{IndexTuple, IndexTupleData, IndexTupleSize};
+use ::types_tuple::heaptuple::{IndexTuple, IndexTupleData, IndexTupleSize};
 
 use nbtree_core_seams as nbtcore;
 
@@ -37,7 +37,7 @@ fn offset_number_next(offset: OffsetNumber) -> OffsetNumber {
 /// `(bool) ((offsetNumber != InvalidOffsetNumber) && (offsetNumber <= MaxOffsetNumber))`.
 #[inline]
 fn offset_number_is_valid(offset: OffsetNumber) -> bool {
-    offset != types_tuple::heaptuple::INVALID_OFFSET_NUMBER
+    offset != ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER
         && offset <= types_storage::bufpage::MaxOffsetNumber
 }
 
@@ -45,7 +45,7 @@ fn offset_number_is_valid(offset: OffsetNumber) -> bool {
 /// `((bool) (blockNumber != InvalidBlockNumber))`.
 #[inline]
 fn block_number_is_valid(blkno: BlockNumber) -> bool {
-    blkno != types_core::primitive::InvalidBlockNumber
+    blkno != ::types_core::primitive::InvalidBlockNumber
 }
 
 /// `LSN_FORMAT_ARGS(lsn)` rendered as C's `%X/%X`.
@@ -185,7 +185,7 @@ pub fn bt_child_highkey_check<'mcx>(
         // Did we traverse the whole tree level and this is check for pages to the
         // right of rightmost downlink?
         if blkno == P_NONE && downlink == P_NONE {
-            state.prevrightlink = types_core::primitive::InvalidBlockNumber;
+            state.prevrightlink = ::types_core::primitive::InvalidBlockNumber;
             state.previncompletesplit = false;
             return Ok(());
         }
@@ -644,7 +644,7 @@ pub fn bt_recheck_sibling_links<'mcx>(
             // Right sibling points back to leftcurrent: index is corrupt. Pretend
             // we read a distinct page with an invalid btpo_prev.
             newtargetbuf = None;
-            btpo_prev_from_target = types_core::primitive::InvalidBlockNumber;
+            btpo_prev_from_target = ::types_core::primitive::InvalidBlockNumber;
         }
 
         if let Some(buf) = newtargetbuf {
@@ -704,7 +704,7 @@ pub fn bt_rootdescend<'mcx>(
                 .expect("bt_rootdescend: itup must be set");
             maxalign(IndexTupleSize(h))
         };
-        let mut insertstate = types_nbtree::BTInsertStateData {
+        let mut insertstate = ::types_nbtree::BTInsertStateData {
             itup: index_tuple_box(mcx, &itup_bytes)?,
             itemsz,
             itup_key: key.clone(),
@@ -736,7 +736,7 @@ pub fn bt_rootdescend<'mcx>(
 
 /// `MAXALIGN(len)` (c.h): round up to `MAXIMUM_ALIGNOF` (8).
 #[inline]
-fn maxalign(len: types_core::Size) -> types_core::Size {
+fn maxalign(len: ::types_core::Size) -> ::types_core::Size {
     (len + 7) & !7
 }
 

@@ -5,9 +5,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::Oid;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::PgStat_Kind;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::PgStat_Kind;
 
 seam_core::seam!(
     /// `pgstat_drop_entry(kind, dboid, objid)` (`pgstat_shmem.c`) — release

@@ -18,7 +18,7 @@
 //! Idiomatic surface: plain `i32`/`i64`, owned values.  No raw pointers,
 //! `extern "C"`, `c_int`, or `libc`.
 
-use types_core::pg_time_t;
+use ::types_core::pg_time_t;
 use types_datetime::{
     DATETIME_MIN_JULIAN, DATE_END_JULIAN, JULIAN_MAXMONTH, JULIAN_MAXYEAR, JULIAN_MINMONTH,
     JULIAN_MINYEAR, MINS_PER_HOUR, POSTGRES_EPOCH_JDATE, SECS_PER_DAY, SECS_PER_MINUTE,

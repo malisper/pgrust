@@ -6,7 +6,7 @@
 use crate::wal::RelFileLocator;
 use alloc::string::String;
 use alloc::vec::Vec;
-use types_core::xact::XlXactStatsItem;
+use ::types_core::xact::XlXactStatsItem;
 use types_core::{Oid, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
 
 /// Replication-origin metadata carried on a commit/abort record, matching

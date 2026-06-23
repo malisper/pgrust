@@ -7,7 +7,7 @@
 //! and optional LZ4 seams stay behind loud panics and are not driven here.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::Once;
 
 const VARATT_4B_C_TAG: u8 = 0x02;
@@ -35,7 +35,7 @@ fn install_seams() {
             Ok(Some(n))
         });
         pglz_seam::pglz_maximum_compressed_size::set(|_rawsize, total| total);
-        toast_seam::indirect_pointer::set(|mcx, _attr| mcx::slice_in(mcx, &indirect_inner()));
+        toast_seam::indirect_pointer::set(|mcx, _attr| ::mcx::slice_in(mcx, &indirect_inner()));
     });
 }
 

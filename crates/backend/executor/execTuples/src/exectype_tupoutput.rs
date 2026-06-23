@@ -13,13 +13,13 @@
 //! `DestReceiver` virtual dispatch (`rStartup`/`receiveSlot`/`rShutdown`,
 //! tcop/dest.h) are reached through their owners' seams.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, TargetEntry};
 use ::nodes::tuptable::{AttInMetadata, SlotData, TupOutputState};
 // The canonical value enum; `Datum` is its transitional alias.
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::{HeapTuple, TupleDesc, TupleDescData, RECORDOID};
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::{HeapTuple, TupleDesc, TupleDescData, RECORDOID};
 
 use tupdesc::{
     CreateTemplateTupleDesc, TupleDescInitEntry, TupleDescInitEntryCollation,
@@ -134,7 +134,7 @@ fn ExecTypeFromTLInternal<'mcx>(
         cur_resno += 1;
     }
 
-    Ok(Some(mcx::alloc_in(mcx, type_info)?))
+    Ok(Some(::mcx::alloc_in(mcx, type_info)?))
 }
 
 /// `ExecTypeFromExprList(exprList)` (execTuples.c): build a tuple descriptor
@@ -154,7 +154,7 @@ pub fn ExecTypeFromExprList<'mcx>(
         cur_resno += 1;
     }
 
-    Ok(Some(mcx::alloc_in(mcx, type_info)?))
+    Ok(Some(::mcx::alloc_in(mcx, type_info)?))
 }
 
 /// `ExecTypeSetColNames(typeInfo, namesList)` (execTuples.c): apply column
@@ -190,7 +190,7 @@ pub fn ExecTypeSetColNames<'mcx>(
 /// `namestrcpy(&att->attname, src)` (`utils/adt/name.c`): zero the fixed-size
 /// `NameData` buffer, then copy at most `NAMEDATALEN - 1` bytes, always leaving
 /// a NUL terminator.
-fn namestrcpy(dst: &mut types_tuple::heaptuple::NameData, src: &str) {
+fn namestrcpy(dst: &mut ::types_tuple::heaptuple::NameData, src: &str) {
     dst.data.fill(0);
     let bytes = src.as_bytes();
     let len = bytes.len().min(types_core::NAMEDATALEN as usize - 1);
@@ -226,10 +226,10 @@ pub fn TupleDescGetAttInMetadata<'mcx>(
     let tupdesc = BlessTupleDesc(mcx, tupdesc)?;
 
     // Gather info needed later to call the "in" function for each attribute.
-    let mut attinfuncs: mcx::PgVec<'mcx, types_core::fmgr::FmgrInfo> =
-        mcx::PgVec::new_in(mcx);
-    let mut attioparams: mcx::PgVec<'mcx, types_core::primitive::Oid> = mcx::PgVec::new_in(mcx);
-    let mut atttypmods: mcx::PgVec<'mcx, i32> = mcx::PgVec::new_in(mcx);
+    let mut attinfuncs: ::mcx::PgVec<'mcx, types_core::fmgr::FmgrInfo> =
+        ::mcx::PgVec::new_in(mcx);
+    let mut attioparams: ::mcx::PgVec<'mcx, types_core::primitive::Oid> = ::mcx::PgVec::new_in(mcx);
+    let mut atttypmods: ::mcx::PgVec<'mcx, i32> = ::mcx::PgVec::new_in(mcx);
 
     let td = tupdesc
         .as_deref()
@@ -304,7 +304,7 @@ pub fn BuildTupleFromCStrings<'mcx>(
 
     // Form a tuple.
     let formed = heaptuple::heap_form_tuple(mcx, tupdesc, &dvalues, &nulls)
-        .map_err(|e| types_error::PgError::error(format!("heap_form_tuple failed: {e:?}")))?;
+        .map_err(|e| ::types_error::PgError::error(format!("heap_form_tuple failed: {e:?}")))?;
 
     Ok(Some(formed.tuple))
 }
@@ -338,7 +338,7 @@ pub fn begin_tup_output_tupdesc<'mcx>(
     // owned model gives the slot its own copy and keeps the original for the
     // startup notification.
     let slot_desc: TupleDesc<'mcx> = match tupdesc.as_deref() {
-        Some(td) => Some(mcx::alloc_in(mcx, td.clone_in(mcx)?)?),
+        Some(td) => Some(::mcx::alloc_in(mcx, td.clone_in(mcx)?)?),
         None => None,
     };
     let slot = crate::exec_init_slots::MakeSingleTupleTableSlot(mcx, slot_desc, tts_ops)?;
@@ -534,10 +534,10 @@ pub fn deform_record_datum<'mcx>(
         .tuple
         .t_data
         .as_ref()
-        .ok_or_else(|| types_error::PgError::error("deform_record_datum: record has no header"))?;
+        .ok_or_else(|| ::types_error::PgError::error("deform_record_datum: record has no header"))?;
     // tupType = HeapTupleHeaderGetTypeId(td); tupTypmod = HeapTupleHeaderGetTypMod(td).
-    let tup_type = types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
-    let tup_typmod = types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+    let tup_type = ::types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+    let tup_typmod = ::types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
 
     // retdesc = lookup_rowtype_tupdesc(tupType, tupTypmod).
     let retdesc = typcache_seams::lookup_rowtype_tupdesc::call(

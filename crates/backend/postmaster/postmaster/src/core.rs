@@ -14,11 +14,11 @@
 //! underlying slab; `PMChild` is `Copy`, so the postmaster's singleton globals
 //! hold the value just as the C globals hold a `PMChild *`).
 
-use pmchild::PMChild;
-use waiteventset_seams::WaitEventSet;
-pub use types_core::init::BackendType;
-use types_core::pgsocket;
-use types_core::primitive::TimestampTz;
+use ::pmchild::PMChild;
+use ::waiteventset_seams::WaitEventSet;
+pub use ::types_core::init::BackendType;
+use ::types_core::pgsocket;
+use ::types_core::primitive::TimestampTz;
 
 // ---------------------------------------------------------------------------
 // BackendType aliases — C's `B_*` enumerators map to our `BackendType::*`.
@@ -48,7 +48,7 @@ pub const B_LOGGER: BackendType = BackendType::Logger;
 // ---------------------------------------------------------------------------
 
 /// `BACKEND_NUM_TYPES` — number of distinct [`BackendType`] values.
-pub const BACKEND_NUM_TYPES: u32 = types_core::init::BACKEND_NUM_TYPES as u32;
+pub const BACKEND_NUM_TYPES: u32 = ::types_core::init::BACKEND_NUM_TYPES as u32;
 
 // C: StaticAssertDecl(BACKEND_NUM_TYPES < 32, "too many backend types for uint32");
 const _: () = assert!(BACKEND_NUM_TYPES < 32, "too many backend types for uint32");
@@ -419,6 +419,6 @@ pub fn reset_for_test() {
 }
 
 /// Re-export for convenience inside the crate.
-pub use types_core::primitive::TimestampTz as Timestamp;
+pub use ::types_core::primitive::TimestampTz as Timestamp;
 #[allow(unused_imports)]
 use TimestampTz as _Timestamp;

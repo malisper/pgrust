@@ -26,9 +26,9 @@ use mcx::{MemoryContext, Mcx};
 use types_error::{PgError, PgResult, ERROR};
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::{CachedPlanHandle as SeamCachedPlanHandle, PlpgsqlExprParseState};
-use parsenodes::RawParseMode;
+use ::parsenodes::RawParseMode;
 use portal::{CachedPlanHandle as PortalCachedPlanHandle, FetchDirection, Portal};
-use types_resowner::ResourceOwner;
+use ::types_resowner::ResourceOwner;
 
 use crate::dest_spi::{create_spi_dest_receiver, take_spi_raw_result, RawCol};
 use crate::eval::EvalParamValue;
@@ -133,7 +133,7 @@ fn open_internal(
         // GetCommandTagName(...)). The cmdtag name table is not a dependency
         // here; a non-tuple-returning plan as a cursor is the only case.
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_CURSOR_DEFINITION)
+            .errcode(::types_error::ERRCODE_INVALID_CURSOR_DEFINITION)
             .errmsg("cannot open non-SELECT query as cursor")
             .into_error());
     }
@@ -154,9 +154,9 @@ fn open_internal(
     let cplan = plancache::GetCachedPlan(source, param_li.clone(), ResourceOwner::NULL, None)?;
     let stmt_list = plancache_seams::cached_plan_stmt_list::call(mcx, SeamCachedPlanHandle(cplan))?;
     // plansource->commandTag — for a cursor (tuple-returning) plan this is
-    // CMDTAG_SELECT. `portal::CommandTag` is the bare i32; unwrap the
+    // CMDTAG_SELECT. `::portal::CommandTag` is the bare i32; unwrap the
     // newtype the seam returns.
-    let command_tag: portal::CommandTag =
+    let command_tag: ::portal::CommandTag =
         plancache_seams::plansource_command_tag::call(source_h)?.0;
 
     // Inspect the (single) statement for the scroll decision and the read-only
@@ -243,7 +243,7 @@ fn open_internal(
     // Assert(portal->strategy != PORTAL_MULTI_QUERY).
     debug_assert_ne!(
         portal.borrow().strategy,
-        portal::PORTAL_MULTI_QUERY
+        ::portal::PORTAL_MULTI_QUERY
     );
 
     let name = portal.borrow().name.clone();
@@ -357,7 +357,7 @@ pub fn spi_cursor_close_by_name(name: &str) -> PgResult<()> {
 /// Copy `s` into the arena and return a `&'mcx str`.
 fn leak_str_in<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<&'mcx str> {
     let bytes = s.as_bytes();
-    let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+    let mut v: ::mcx::PgVec<'mcx, u8> = ::mcx::PgVec::new_in(mcx);
     v.try_reserve(bytes.len()).map_err(|_| mcx.oom(bytes.len()))?;
     v.extend_from_slice(bytes);
     let leaked: &'mcx [u8] = allocator_api2::boxed::Box::leak(v.into_boxed_slice());

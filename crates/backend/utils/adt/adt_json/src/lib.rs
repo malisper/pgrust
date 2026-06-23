@@ -12,9 +12,9 @@
 //! # Buffer model
 //!
 //! `json.c` builds results in a `StringInfo` allocated in the current memory
-//! context. The faithful analog here is a [`mcx::PgVec`]`<u8>` (the
+//! context. The faithful analog here is a [`::mcx::PgVec`]`<u8>` (the
 //! context-charged byte spine, == `StringInfoData.data`); the per-call
-//! [`mcx::Mcx`] is its allocator. Every `appendStringInfo*` becomes a fallible
+//! [`::mcx::Mcx`] is its allocator. Every `appendStringInfo*` becomes a fallible
 //! append against that spine, surfacing OOM / over-`MaxAllocSize` as a
 //! recoverable [`PgError`] rather than aborting.
 //!
@@ -44,8 +44,8 @@ pub mod fmgr_builtins;
 use alloc::string::String;
 
 use mcx::{Mcx, PgString, PgVec, MAX_ALLOC_SIZE};
-use types_core::Oid;
-// The canonical unified value type (`types_tuple::Datum<'mcx>`, the ByVal/ByRef
+use ::types_core::Oid;
+// The canonical unified value type (`::types_tuple::Datum<'mcx>`, the ByVal/ByRef
 // enum — the faithful idiomatic substitute for C's `Datum`).
 //
 // `json.c` is a pure value *relay*: every value it touches arrives already
@@ -64,14 +64,14 @@ use types_core::Oid;
 // bare-word `datum_*` `_v` seam variants). The lone codec read (`DatumGetBool`)
 // is the canonical `Datum::as_bool` accessor. The bare-word
 // `datum::Datum(usize)` shim is no longer referenced internally.
-use types_tuple::Datum;
-use types_error::error::{
+use ::types_tuple::Datum;
+use ::types_error::error::{
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
 use types_error::{PgError, PgResult, SoftErrorContext};
 use types_json::{JsonParseErrorType, JsonTokenType, JsonTypeCategory};
-use types_tuple::heaptuple::{DATEOID, TIMESTAMPOID, TIMESTAMPTZOID};
+use ::types_tuple::heaptuple::{DATEOID, TIMESTAMPOID, TIMESTAMPTZOID};
 
 use jsonapi_seams as jsonapi;
 use hashfn_seams as hashfn;
@@ -155,20 +155,20 @@ pub fn json_in<'mcx>(
         jsonapi::errsave_error::call(result, json, false, escontext)?;
         return Ok(None);
     }
-    Ok(Some(mcx::slice_in(mcx, json)?))
+    Ok(Some(::mcx::slice_in(mcx, json)?))
 }
 
 /// C: `json_out(PG_FUNCTION_ARGS)` (json.c:125) — a `json` value is its own
 /// text, so output is the (detoasted) content bytes verbatim.
 pub fn json_out<'mcx>(mcx: Mcx<'mcx>, json: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, json)
+    ::mcx::slice_in(mcx, json)
 }
 
 /// C: `json_send(PG_FUNCTION_ARGS)` (json.c:137) — binary send is the text
 /// bytes wrapped by `pq_begintypsend`/`pq_endtypsend`. We return the body the
 /// wire layer frames; the body is the value's content bytes.
 pub fn json_send<'mcx>(mcx: Mcx<'mcx>, json: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, json)
+    ::mcx::slice_in(mcx, json)
 }
 
 /// C: `json_recv(PG_FUNCTION_ARGS)` (json.c:151) — read the message text and
@@ -180,7 +180,7 @@ pub fn json_recv<'mcx>(mcx: Mcx<'mcx>, str: &[u8]) -> PgResult<PgVec<'mcx, u8>> 
         // pg_parse_json_or_ereport never returns on failure.
         return Err(unreached_soft_error());
     }
-    mcx::slice_in(mcx, str)
+    ::mcx::slice_in(mcx, str)
 }
 
 // ===========================================================================
@@ -327,7 +327,7 @@ pub fn JsonEncodeDateTime<'mcx>(
 ) -> PgResult<String> {
     // The actual datetime field-conversion owner (`timestamp.c`) is unported;
     // its `json_encode_datetime` seam now carries the canonical
-    // `types_tuple::Datum<'mcx>` (by reference), so forward the value unchanged.
+    // `::types_tuple::Datum<'mcx>` (by reference), so forward the value unchanged.
     timestamp_seams::json_encode_datetime::call(value, typid, tzp)
 }
 
@@ -1259,7 +1259,7 @@ pub fn json_build_object<'mcx>(
 
 /// C: `json_build_object_noargs(PG_FUNCTION_ARGS)` (json.c:1337).
 pub fn json_build_object_noargs<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, b"{}")
+    ::mcx::slice_in(mcx, b"{}")
 }
 
 /// C: `json_build_array_worker(int nargs, const Datum *args, const bool *nulls,
@@ -1306,7 +1306,7 @@ pub fn json_build_array<'mcx>(
 
 /// C: `json_build_array_noargs(PG_FUNCTION_ARGS)` (json.c:1393).
 pub fn json_build_array_noargs<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, b"[]")
+    ::mcx::slice_in(mcx, b"[]")
 }
 
 // ===========================================================================
@@ -1327,7 +1327,7 @@ pub fn json_object<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     match ndims {
         0 => {
-            return mcx::slice_in(mcx, b"{}");
+            return ::mcx::slice_in(mcx, b"{}");
         }
         1 => {
             if dims[0] % 2 != 0 {
@@ -1392,7 +1392,7 @@ pub fn json_object_two_arg<'mcx>(
     }
 
     if nkdims == 0 {
-        return mcx::slice_in(mcx, b"{}");
+        return ::mcx::slice_in(mcx, b"{}");
     }
 
     let key_count = key_datums.len();

@@ -8,8 +8,8 @@
 extern crate std;
 
 use super::*;
-use mcx::MemoryContext;
-use stringinfo::StringInfo;
+use ::mcx::MemoryContext;
+use ::stringinfo::StringInfo;
 
 use std::sync::Once;
 
@@ -81,7 +81,7 @@ fn recv_dummies_say_cannot_accept_with_sqlstate() {
         (pg_ddl_command_recv, "pg_ddl_command"),
     ];
     for (f, typname) in cases {
-        let mut buf = StringInfo::from_vec(mcx::slice_in(mcx, b"").unwrap());
+        let mut buf = StringInfo::from_vec(::mcx::slice_in(mcx, b"").unwrap());
         let err = f(&mut buf).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_FEATURE_NOT_SUPPORTED);
         assert_eq!(
@@ -152,7 +152,7 @@ fn cstring_recv_reads_remaining_message_text() {
     install_mb_mocks();
     let cx = MemoryContext::new("t");
     let mcx = cx.mcx();
-    let mut buf = StringInfo::from_vec(mcx::slice_in(mcx, b"hello").unwrap());
+    let mut buf = StringInfo::from_vec(::mcx::slice_in(mcx, b"hello").unwrap());
     let out = cstring_recv(mcx, &mut buf).unwrap();
     assert_eq!(&out[..], b"hello");
 }
@@ -174,7 +174,7 @@ fn void_in_recv_are_null() {
     let cx = MemoryContext::new("t");
     let mcx = cx.mcx();
     assert_eq!(void_in("anything").unwrap(), Datum::null());
-    let mut buf = StringInfo::from_vec(mcx::slice_in(mcx, b"").unwrap());
+    let mut buf = StringInfo::from_vec(::mcx::slice_in(mcx, b"").unwrap());
     assert_eq!(void_recv(&mut buf).unwrap(), Datum::null());
 }
 

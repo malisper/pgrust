@@ -5,8 +5,8 @@
 //! (`miscinit.c`, `acl.c`, `guc.c`), and direct dependencies on those units
 //! would cycle, so the calls go through the owners' seam crates.
 
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use types_core::{Oid, UserContext, SECURITY_RESTRICTED_OPERATION, USER_CONTEXT_NO_NEST_LEVEL};
 use types_error::{ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
 

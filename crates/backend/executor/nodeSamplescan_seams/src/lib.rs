@@ -16,9 +16,9 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use types_core::primitive::uint32;
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::types_core::primitive::uint32;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use ::nodes::execnodes::EStateData;
 use samplescan::{SampleScan, SampleScanState};
 

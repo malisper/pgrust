@@ -20,8 +20,8 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_core::ProcNumber;
-use types_error::PgResult;
+use ::types_core::ProcNumber;
+use ::types_error::PgResult;
 
 /// One emitted `pg_get_aios()` row (`PG_GET_AIOS_COLS = 15` columns). Field
 /// order matches the C `values[]`/`nulls[]` column indices exactly. A `None`

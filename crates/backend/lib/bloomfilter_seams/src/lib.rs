@@ -25,7 +25,7 @@
 
 #![allow(non_camel_case_types)]
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// `bloom_filter` (`lib/bloomfilter.h`) — a space-efficient Bloom filter.
 ///

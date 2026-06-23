@@ -5,7 +5,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_datetime::YmdDate;
+use ::types_datetime::YmdDate;
 
 seam_core::seam!(
     /// `date2isoweek(year, mon, mday)` (isoweek.c): ISO 8601 week number.

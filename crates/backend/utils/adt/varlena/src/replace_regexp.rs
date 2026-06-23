@@ -15,7 +15,7 @@ use regex_core_seams as regex_core;
 use regexp_seams as regexp;
 use mbutils_seams as mb;
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_REGULAR_EXPRESSION};
 use regex::{RegMatch, RegexecResult, REG_NOSUB};
 
@@ -41,7 +41,7 @@ pub fn replace_text_regexp<'mcx>(
 
     // C: StringInfoData buf; initStringInfo(&buf). The carrier is the
     // header-less payload, so the buffer is a plain byte vector charged to mcx.
-    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut buf: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     // C: regmatch_t pmatch[10]; main match plus \1 .. \9.
     let mut pmatch = [RegMatch::UNSET; 10];

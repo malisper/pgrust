@@ -40,8 +40,8 @@
 //! `pg_get_catalog_foreign_keys`, `pg_tablespace_databases`) are not part of
 //! this lane's row list — they need the SRF tuplestore boundary.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::{AttrNumber, Oid};
@@ -90,8 +90,8 @@ fn arg_text_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
     // `SHORT_VARLENA_PACKING` is on. No-op while the flag is off (4-byte stored).
     match image.first() {
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
-        Some(_) if image.len() >= datum::varlena::VARHDRSZ => {
-            &image[datum::varlena::VARHDRSZ..]
+        Some(_) if image.len() >= ::datum::varlena::VARHDRSZ => {
+            &image[::datum::varlena::VARHDRSZ..]
         }
         _ => &[],
     }
@@ -135,9 +135,9 @@ fn ret_void() -> Datum {
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     // cstring_to_text: prepend the 4-byte varlena header (header-ful image).
-    let mut img = Vec::with_capacity(datum::varlena::VARHDRSZ + bytes.len());
-    img.extend_from_slice(&datum::varlena::set_varsize_4b(
-        datum::varlena::VARHDRSZ + bytes.len(),
+    let mut img = Vec::with_capacity(::datum::varlena::VARHDRSZ + bytes.len());
+    img.extend_from_slice(&::datum::varlena::set_varsize_4b(
+        ::datum::varlena::VARHDRSZ + bytes.len(),
     ));
     img.extend_from_slice(&bytes);
     fcinfo.set_ref_result(RefPayload::Varlena(img));

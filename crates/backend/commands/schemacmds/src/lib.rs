@@ -17,24 +17,24 @@
 //! `checkMembershipInCurrentExtension` are reused directly from the ported
 //! foundation crates.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use utils_error::ereport;
-use types_acl::acl::{ACL_CREATE, ACLCHECK_NOT_OWNER, ACLCHECK_OK};
-use types_catalog::catalog::{DATABASE_RELATION_ID, NAMESPACE_RELATION_ID};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_core::init::SECURITY_LOCAL_USERID_CHANGE;
-use types_error::pg_error::{ErrorLocation, PgError};
+use ::utils_error::ereport;
+use ::types_acl::acl::{ACL_CREATE, ACLCHECK_NOT_OWNER, ACLCHECK_OK};
+use ::types_catalog::catalog::{DATABASE_RELATION_ID, NAMESPACE_RELATION_ID};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_core::init::SECURITY_LOCAL_USERID_CHANGE;
+use ::types_error::pg_error::{ErrorLocation, PgError};
 use types_error::{PgResult, ERRCODE_DUPLICATE_SCHEMA, ERRCODE_RESERVED_NAME, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE};
 use ::nodes::nodes::Node;
 use ::nodes::ddlnodes::CreateSchemaStmt;
 use ::nodes::parsenodes::{OBJECT_DATABASE, OBJECT_SCHEMA};
 
-use catalog_catalog::IsReservedName;
-use catalog_namespace::get_namespace_oid;
-use pg_depend::checkMembershipInCurrentExtension;
-use pg_namespace::NamespaceCreate;
+use ::catalog_catalog::IsReservedName;
+use ::catalog_namespace::get_namespace_oid;
+use ::pg_depend::checkMembershipInCurrentExtension;
+use ::pg_namespace::NamespaceCreate;
 
 use aclchk_seams as aclchk;
 use indexing_seams as indexing;
@@ -85,7 +85,7 @@ fn invalid_object_address() -> ObjectAddress {
 /// raises; this returns its `Err`.
 fn aclcheck_error_database(
     mcx: Mcx<'_>,
-    aclresult: types_acl::acl::AclResult,
+    aclresult: ::types_acl::acl::AclResult,
 ) -> PgResult<()> {
     let dbname = dbcommands::get_database_name::call(mcx, init_small::my_database_id::call())?
         .map(|s| s.as_str().to_string());
@@ -227,7 +227,7 @@ pub fn CreateSchemaCommand<'mcx>(
      * char *nsp = namespace_search_path;
      * while (scanner_isspace(*nsp)) nsp++;
      */
-    let nsp_full = catalog_namespace::namespace_search_path();
+    let nsp_full = ::catalog_namespace::namespace_search_path();
     let nsp = nsp_full.trim_start_matches(scanner_isspace);
 
     /* if (*nsp != '\0') appendStringInfo(&pathbuf, ", %s", nsp); */
@@ -521,7 +521,7 @@ fn stmt_authrole<'mcx>(
             Some(rs) => Ok(Some(::nodes::parsenodes::RoleSpec {
                 roletype: rs.roletype,
                 rolename: match &rs.rolename {
-                    Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
+                    Some(s) => Some(::mcx::PgString::from_str_in(s.as_str(), mcx)?),
                     None => None,
                 },
             })),
@@ -560,7 +560,7 @@ fn create_schema_command_seam<'mcx>(
 /// dispatch seam in `backend-tcop-utility-out-seams`.
 pub fn init_seams() {
     schemacmds_seams::alter_schema_owner_oid::set(|schema_oid, new_owner_id| {
-        let ctx = mcx::MemoryContext::new("alter_schema_owner_oid");
+        let ctx = ::mcx::MemoryContext::new("alter_schema_owner_oid");
         AlterSchemaOwner_oid(ctx.mcx(), schema_oid, new_owner_id)
     });
     utility_out_seams::create_schema_command::set(create_schema_command_seam);

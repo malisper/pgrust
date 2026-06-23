@@ -24,12 +24,12 @@
 
 use core::cmp::{max, min, Ordering};
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{
     PgError, PgResult, ERRCODE_DIVISION_BY_ZERO, ERRCODE_INVALID_ARGUMENT_FOR_LOG,
     ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
-use types_numeric::var::{NumericSign, NumericVar};
+use ::types_numeric::var::{NumericSign, NumericVar};
 use types_numeric::{
     DEC_DIGITS, NBASE, NUMERIC_MAX_DISPLAY_SCALE, NUMERIC_MAX_RESULT_SCALE,
     NUMERIC_MIN_DISPLAY_SCALE, NUMERIC_MIN_SIG_DIGITS, NUMERIC_WEIGHT_MAX,

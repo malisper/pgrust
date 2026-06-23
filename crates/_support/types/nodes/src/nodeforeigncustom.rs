@@ -6,8 +6,8 @@
 use alloc::string::String;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{Index, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{Index, Oid};
+use ::types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
 use crate::execnodes::{Opaque, PlanStateData, RriId, ScanStateData};
@@ -456,7 +456,7 @@ impl CustomScan<'_> {
             None => None,
         };
         let custom_relids = match &self.custom_relids {
-            Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+            Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
             None => None,
         };
         Ok(CustomScan {

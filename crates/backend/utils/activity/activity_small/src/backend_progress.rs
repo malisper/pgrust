@@ -11,16 +11,16 @@
 
 use core::sync::atomic::{fence, AtomicU32, Ordering};
 
-use transam_parallel::is_parallel_worker;
+use ::transam_parallel::is_parallel_worker;
 use pqformat::{pq_beginmessage, pq_endmessage, pq_sendint32, pq_sendint64};
 use status_seams::{my_be_entry_present, track_activities, with_my_beentry};
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{int64, InvalidOid, Oid};
-use types_error::PgResult;
-use types_pgstat::backend_progress::ProgressCommandType;
-use types_pgstat::backend_status::PgBackendStatus;
+use ::types_error::PgResult;
+use ::types_pgstat::backend_progress::ProgressCommandType;
+use ::types_pgstat::backend_status::PgBackendStatus;
 
-pub use types_pgstat::backend_progress::PGSTAT_NUM_PROGRESS_PARAM;
+pub use ::types_pgstat::backend_progress::PGSTAT_NUM_PROGRESS_PARAM;
 
 /// `PqMsg_Progress` — `'P'` (`libpq/protocol.h`).
 pub const PQ_MSG_PROGRESS: u8 = b'P';
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn parallel_incr_param_sends_message_in_worker() {
         with_flags(true, true, true, || {
-            let ctx = mcx::MemoryContext::new("test");
+            let ctx = ::mcx::MemoryContext::new("test");
             pgstat_progress_parallel_incr_param(ctx.mcx(), 2, 99).unwrap();
             with_fixture(|e| {
                 assert_eq!(e.sent.get(), Some((2, 99)));
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn parallel_incr_param_updates_directly_in_leader() {
         with_flags(true, true, false, || {
-            let ctx = mcx::MemoryContext::new("test");
+            let ctx = ::mcx::MemoryContext::new("test");
             pgstat_progress_parallel_incr_param(ctx.mcx(), 2, 99).unwrap();
             with_fixture(|e| {
                 assert_eq!(e.beentry.borrow().st_progress_param[2], 99);

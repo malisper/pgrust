@@ -10,7 +10,7 @@
 //! tablespace.c's exact `errno == ENOENT`/`EEXIST` branching.
 
 use tblspc_fs_seams::{StatKind, StatResult};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::vfd_core;
 

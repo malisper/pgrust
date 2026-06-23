@@ -11,7 +11,7 @@ use super::*;
 use std::cell::RefCell;
 use std::sync::Once;
 
-use types_core::fmgr::FMGR_ABI_EXTRA;
+use ::types_core::fmgr::FMGR_ABI_EXTRA;
 
 thread_local! {
     /// Files the `pg_file_exists` test seam reports as existing.

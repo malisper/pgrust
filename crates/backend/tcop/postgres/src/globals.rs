@@ -10,9 +10,9 @@
 
 use std::cell::Cell;
 
-use types_dest::dest::CommandDest;
-use types_storage::ProcSignalReason;
-use types_storage::storage::NUM_PROCSIGNALS;
+use ::types_dest::dest::CommandDest;
+use ::types_storage::ProcSignalReason;
+use ::types_storage::storage::NUM_PROCSIGNALS;
 
 thread_local! {
     /// `const char *debug_query_string;` (postgres.c:88) — the client-supplied

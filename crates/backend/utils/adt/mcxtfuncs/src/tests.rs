@@ -14,7 +14,7 @@ use seam::{
     MemoryContextType,
 };
 use std::sync::{Mutex, Once};
-use types_core::ProcNumber;
+use ::types_core::ProcNumber;
 
 #[derive(Clone)]
 struct FakeContext {

@@ -2,8 +2,8 @@
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{Cost, Selectivity};
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::{Cost, Selectivity};
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     IndexPath, NodeId, ParamPathInfo, Path, PathId, PathNode, PlannerInfo, RelId, RinfoId,
 };
@@ -86,7 +86,7 @@ pub fn cost_seqscan(root: &mut PlannerInfo, path_id: PathId, rel: RelId) {
 
 /// `cost_samplescan` — fills a sample-scan `Path` (by `PathId`).
 pub fn cost_samplescan<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     rel: RelId,
@@ -1050,9 +1050,9 @@ fn pathtarget_cost(root: &PlannerInfo, path_id: PathId, who: &str) -> (Cost, Cos
 fn get_restriction_qual_cost_ext(
     root: &PlannerInfo,
     _rel: RelId,
-    baserestrictcost: pathnodes::QualCost,
+    baserestrictcost: ::pathnodes::QualCost,
     param_info: Option<&ParamPathInfo>,
-) -> pathnodes::QualCost {
+) -> ::pathnodes::QualCost {
     if let Some(pi) = param_info {
         let nodes = rinfo_clause_nodes(root, &pi.ppi_clauses);
         let mut qpqual_cost = cost_qual_eval(root, &nodes);
@@ -1108,6 +1108,6 @@ fn node_kind(root: &PlannerInfo, node: NodeId) -> NodeKind {
 }
 
 #[allow(unused_imports)]
-use pathnodes::IndexPath as _IndexPath;
+use ::pathnodes::IndexPath as _IndexPath;
 #[allow(unused_imports)]
 use Path as _Path;

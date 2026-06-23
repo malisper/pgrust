@@ -14,10 +14,10 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::lock::LOCKMODE;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::lock::LOCKMODE;
 
 /// `BTCallbackState` (verify_nbtree.c) — the per-check flags the nbtree
 /// verifier threads through `amcheck_lock_relation_and_check`'s opaque

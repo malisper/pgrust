@@ -1,15 +1,15 @@
 //! Range operator vocabulary and entry point: `rangetypes_selfuncs.c`.
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::{Oid, OidIsValid, Selectivity};
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::{Oid, OidIsValid, Selectivity};
 // The bare-word newtype: the still-shim-typed sinks (`RangeBound.val` and the
 // `DatumGetRangeTypeP` / `range_serialize` seams owned by the not-yet-migrated
 // rangetypes crates) carry the raw `Datum` machine word.
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo};
 use types_rangetypes::{RangeBound, RangeTypeP};
 use types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
@@ -17,8 +17,8 @@ use types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL}
 use rangetypes_seams::{
     datum_get_range_type_p_value, range_deserialize, range_get_typcache, range_serialize,
 };
-use selfuncs_seams::get_restriction_variable;
-use lsyscache_seams::get_commutator;
+use ::selfuncs_seams::get_restriction_variable;
+use ::lsyscache_seams::get_commutator;
 
 use crate::{
     calc_hist_prologue, calc_hist_selectivity_contained, calc_hist_selectivity_contains,

@@ -11,8 +11,8 @@ use utils_error::{elog, PgResult};
 use types_error::{DEBUG3, WARNING};
 
 use types_core::{bits32, MultiXactId, Oid, TransactionId};
-use types_reloptions::AutoVacOpts;
-use types_vacuum::vacuum::{
+use ::types_reloptions::AutoVacOpts;
+use ::types_vacuum::vacuum::{
     VacOptValue, VacuumParams, VACOPT_ANALYZE, VACOPT_PROCESS_MAIN, VACOPT_SKIP_DATABASE_STATS,
     VACOPT_SKIP_LOCKED, VACOPT_VACUUM,
 };
@@ -132,7 +132,7 @@ pub fn table_recheck_autovac(
             multixact_freeze_table_age,
             is_wraparound: wraparound,
             log_min_duration,
-            toast_parent: types_core::InvalidOid,
+            toast_parent: ::types_core::InvalidOid,
             /*
              * Later, in vacuum_rel(), we check reloptions for any
              * vacuum_max_eager_freeze_failure_rate override.

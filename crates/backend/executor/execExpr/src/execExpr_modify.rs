@@ -46,8 +46,8 @@
 //! (mirror-PG-and-panic).
 
 use mcx::{Mcx, PgBox};
-use types_core::primitive::Index;
-use types_error::PgResult;
+use ::types_core::primitive::Index;
+use ::types_error::PgResult;
 use ::nodes::execexpr::{ExprState, ProjectionInfo};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, TargetEntry};
@@ -354,13 +354,13 @@ pub fn exec_init_with_check_options<'mcx>(
     // ri_WithCheckOptionExprs holds non-optional ExprStates — matching the fact
     // that every WCO the rewriter emits has a qual).
     let mcx = estate.es_query_cxt;
-    let mut wco_exprs: mcx::PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> =
-        mcx::PgVec::new_in(mcx);
-    let mut stored_wcos: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut wco_exprs: ::mcx::PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> =
+        ::mcx::PgVec::new_in(mcx);
+    let mut stored_wcos: ::mcx::PgVec<'mcx, Node<'mcx>> = ::mcx::PgVec::new_in(mcx);
 
     for wco_node in wco_list.iter() {
         let wco = wco_node.as_withcheckoption().ok_or_else(|| {
-            types_error::PgError::error(
+            ::types_error::PgError::error(
                 "ExecInitModifyTable: WITH CHECK OPTION list element is not a \
                  WithCheckOption node",
             )
@@ -401,7 +401,7 @@ pub fn exec_init_with_check_options<'mcx>(
                     estate,
                 )?
                 .ok_or_else(|| {
-                    types_error::PgError::error(
+                    ::types_error::PgError::error(
                         "ExecInitModifyTable: failed to compile always-true WCO ExprState",
                     )
                 })?;
@@ -476,8 +476,8 @@ pub fn exec_build_returning_projection<'mcx>(
     execExpr_core::drain_found_subplan_ids(mcx, &mut mtstate.ps, &mut proj.pi_state)?;
 
     // resultRelInfo->ri_returningList = rlist;
-    let mut stored_list: mcx::PgVec<'mcx, TargetEntry<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, rlist.len())?;
+    let mut stored_list: ::mcx::PgVec<'mcx, TargetEntry<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, rlist.len())?;
     for tle in rlist {
         stored_list.push(tle.clone_in(mcx)?);
     }

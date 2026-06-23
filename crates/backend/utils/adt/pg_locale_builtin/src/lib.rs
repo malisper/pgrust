@@ -12,7 +12,7 @@
 //! database encoding (`GetDatabaseEncoding()`), reached through mbutils' seam.
 //!
 //! The flag core (`pg_locale_struct` minus its provider `info` union) is the
-//! trimmed [`locale::PgLocaleStruct`]; the `info.builtin.casemap_full`
+//! trimmed [`::locale::PgLocaleStruct`]; the `info.builtin.casemap_full`
 //! flag travels alongside it in [`PgLocaleBuiltinResult`] so the permanent-cache
 //! owner can store it in its `LocaleInfo::Builtin` arm. The case-mapping and
 //! regex predicate seams are keyed by `collid` / `casemap_full`, re-resolving the
@@ -23,10 +23,10 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{Oid, PgWChar};
-use types_error::PgResult;
+use ::types_core::primitive::{Oid, PgWChar};
+use ::types_error::PgResult;
 use locale::{CollProvider, PgLocaleStruct};
-use types_tuple::heaptuple::DEFAULT_COLLATION_OID;
+use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 
 use unicode_case::{
     unicode_lowercase_simple, unicode_strfold, unicode_strlower, unicode_strtitle,
@@ -40,7 +40,7 @@ use unicode_category::{
 use collationcmds_seams as cc;
 use pg_locale_builtin_seams::{self as seams, PgLocaleBuiltinResult};
 use pg_locale_catalog_seams as catalog;
-use pg_locale_seams::RegexWcClass;
+use ::pg_locale_seams::RegexWcClass;
 use init_small_seams as init_small;
 use mbutils_seams as mb;
 
@@ -87,7 +87,7 @@ pub fn create_pg_locale_builtin<'mcx>(
     cc::builtin_validate_locale::call(mcx, mb::get_database_encoding::call(), &locstr)?;
 
     let casemap_full = locstr == PG_UNICODE_FAST_LOCALE;
-    let view = mcx::alloc_in(
+    let view = ::mcx::alloc_in(
         mcx,
         PgLocaleStruct {
             provider: CollProvider::Builtin,
@@ -109,7 +109,7 @@ pub fn get_collation_actual_version_builtin<'mcx>(
     collcollate: &str,
 ) -> PgResult<PgVec<'mcx, u8>> {
     if collcollate == "C" || collcollate == "C.UTF-8" || collcollate == PG_UNICODE_FAST_LOCALE {
-        mcx::slice_in(mcx, b"1".as_slice())
+        ::mcx::slice_in(mcx, b"1".as_slice())
     } else {
         Err(invalid_locale_name(collcollate))
     }
@@ -127,7 +127,7 @@ fn casemap_full_for(collid: Oid) -> PgResult<bool> {
 /// `srclen`-bounded input; the slice already bounds it.
 fn src_str(src: &[u8]) -> PgResult<&str> {
     let bounded = src.split(|b| *b == 0).next().unwrap_or(src);
-    core::str::from_utf8(bounded).map_err(|e| types_error::PgError::error(format!("{e}")))
+    core::str::from_utf8(bounded).map_err(|e| ::types_error::PgError::error(format!("{e}")))
 }
 
 /// `strlower_builtin` (`pg_locale_builtin.c:80`): `unicode_strlower(...,
@@ -230,29 +230,29 @@ pub fn regex_wc_tolower_builtin(c: PgWChar) -> PgWChar {
 }
 
 /// C: `elog(ERROR, "cache lookup failed for collation %u", collid)`.
-fn cache_lookup_failed_for_collation(collid: Oid) -> types_error::PgError {
-    types_error::PgError::error(format!("cache lookup failed for collation {collid}"))
+fn cache_lookup_failed_for_collation(collid: Oid) -> ::types_error::PgError {
+    ::types_error::PgError::error(format!("cache lookup failed for collation {collid}"))
 }
 
 /// C: `elog(ERROR, "cache lookup failed for database %u", MyDatabaseId)`.
-fn cache_lookup_failed_for_database(dboid: Oid) -> types_error::PgError {
-    types_error::PgError::error(format!("cache lookup failed for database {dboid}"))
+fn cache_lookup_failed_for_database(dboid: Oid) -> ::types_error::PgError {
+    ::types_error::PgError::error(format!("cache lookup failed for database {dboid}"))
 }
 
 /// C: `SysCacheGetAttrNotNull` -> `elog(ERROR, "unexpected null value in system
 /// cache %d column %d")` when the NOT-NULL `colllocale`/`datlocale` attribute is
 /// NULL. Effectively unreachable: a builtin-provider row always records it.
-fn attr_not_null() -> types_error::PgError {
-    types_error::PgError::error("unexpected null value in system cache")
+fn attr_not_null() -> ::types_error::PgError {
+    ::types_error::PgError::error("unexpected null value in system cache")
 }
 
 /// `ereport(ERROR, errcode(ERRCODE_WRONG_OBJECT_TYPE), errmsg("invalid locale
 /// name \"%s\" for builtin provider", ...))` (`pg_locale_builtin.c:186`).
-fn invalid_locale_name(locale: &str) -> types_error::PgError {
-    types_error::PgError::error(format!(
+fn invalid_locale_name(locale: &str) -> ::types_error::PgError {
+    ::types_error::PgError::error(format!(
         "invalid locale name \"{locale}\" for builtin provider"
     ))
-    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+    .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
 }
 
 /// Install every seam in `backend-utils-adt-pg-locale-builtin-seams`.

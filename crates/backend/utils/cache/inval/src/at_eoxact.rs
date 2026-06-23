@@ -5,11 +5,11 @@
 //! `inplaceGetInvalidationMessages`, `ProcessCommittedInvalidationMessages`,
 //! and `LogLogicalInvalidations`).
 
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use types_storage::SharedInvalidationMessage;
-use wal::wal::RM_XACT_ID;
-use wal::xact::XLOG_XACT_INVALIDATIONS;
+use ::types_storage::SharedInvalidationMessage;
+use ::wal::wal::RM_XACT_ID;
+use ::wal::xact::XLOG_XACT_INVALIDATIONS;
 
 use transam_xact_seams as xact_seams;
 use transam_xlog_seams as xlog_seams;
@@ -529,7 +529,7 @@ pub fn LogLogicalInvalidations() -> PgResult<()> {
 /// `XLogRegisterData` would copy from the dense array).
 fn si_msgs_bytes(msgs: &[SharedInvalidationMessage]) -> PgResult<Vec<u8>> {
     let mut buf = Vec::new();
-    buf.try_reserve(msgs.len() * types_storage::sinval::SHARED_INVALIDATION_MESSAGE_SIZE)
+    buf.try_reserve(msgs.len() * ::types_storage::sinval::SHARED_INVALIDATION_MESSAGE_SIZE)
         .map_err(|_| oom())?;
     for msg in msgs {
         buf.extend_from_slice(&msg.to_wire_bytes());

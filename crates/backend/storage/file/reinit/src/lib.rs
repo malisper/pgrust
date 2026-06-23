@@ -42,15 +42,15 @@
 
 use std::collections::TryReserveError;
 
-use copydir::copy_file;
-use fd::allocated_desc::{AllocateDir, FreeDir, ReadDir};
-use fd::sync_cleanup::fsync_fname;
+use ::copydir::copy_file;
+use ::fd::allocated_desc::{AllocateDir, FreeDir, ReadDir};
+use ::fd::sync_cleanup::fsync_fname;
 use utils_error::{ereport, errno::sqlstate_for_file_access, elog};
-use types_core::primitive::{
+use ::types_core::primitive::{
     ForkNumber, RelFileNumber, FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM,
 };
 use types_error::{PgError, PgResult, DEBUG2, ERRCODE_OUT_OF_MEMORY, ERROR, LOG};
-use types_storage::file::{PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY};
+use ::types_storage::file::{PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY};
 
 /// `ResetUnloggedRelationsOp` (reinit.h) — the bitmask of passes to run.
 pub type ResetUnloggedRelationsOp = i32;
@@ -440,7 +440,7 @@ fn parse_u32(text: &str) -> Option<u32> {
 fn io_error(message: String, error: &std::io::Error) -> PgError {
     let errno = error
         .raw_os_error()
-        .unwrap_or(utils_error::errno::EIO);
+        .unwrap_or(::utils_error::errno::EIO);
     ereport(ERROR)
         .errcode(sqlstate_for_file_access(errno))
         .with_saved_errno(errno)

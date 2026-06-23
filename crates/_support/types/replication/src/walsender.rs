@@ -8,7 +8,7 @@
 
 #![allow(non_camel_case_types)]
 
-use types_core::primitive::{pid_t, TimestampTz, XLogRecPtr};
+use ::types_core::primitive::{pid_t, TimestampTz, XLogRecPtr};
 use types_datetime::{Interval, TimeOffset};
 
 /// `typedef enum WalSndState` (`replication/walsender.h`).

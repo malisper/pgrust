@@ -45,10 +45,10 @@ pub mod registry;
 pub mod shmem;
 mod wire;
 
-use types_pgstat::activity_pgstat::{
+use ::types_pgstat::activity_pgstat::{
     PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BGWRITER, PGSTAT_KIND_CHECKPOINTER,
 };
-use types_pgstat::pgstat_internal::PgStat_KindInfo;
+use ::types_pgstat::pgstat_internal::PgStat_KindInfo;
 
 use kind_info::KindInfoBuilder;
 
@@ -90,8 +90,8 @@ fn fixed_kind_info(
 /// bgwriter / archiver / checkpointer (owned by `backend-utils-activity-small`)
 /// as the proof of shape. The `init_shmem_cb` / `reset_all_cb` / `snapshot_cb`
 /// adapters project the kind's field out of the owner
-/// [`PgStat_ShmemControl`](types_pgstat::pgstat_internal::PgStat_ShmemControl) /
-/// [`PgStat_Snapshot`](types_pgstat::pgstat_internal::PgStat_Snapshot) and call
+/// [`PgStat_ShmemControl`](::types_pgstat::pgstat_internal::PgStat_ShmemControl) /
+/// [`PgStat_Snapshot`](::types_pgstat::pgstat_internal::PgStat_Snapshot) and call
 /// the typed `*_cb` in `backend-utils-activity-small`.
 pub fn init_seams() {
     register_fixed_kinds();
@@ -109,14 +109,14 @@ pub fn init_seams() {
 /// [`init_seams`] so tests can drive registration without sealing the table or
 /// installing the production seams.
 fn register_fixed_kinds() {
-    use activity_small::pgstat_archiver as archiver;
-    use activity_small::pgstat_bgwriter as bgwriter;
-    use activity_small::pgstat_checkpointer as checkpointer;
+    use ::activity_small::pgstat_archiver as archiver;
+    use ::activity_small::pgstat_bgwriter as bgwriter;
+    use ::activity_small::pgstat_checkpointer as checkpointer;
     use crate::kind_info;
-    use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
+    use ::types_pgstat::backend_utils_activity_pgstat_bgwriter::{
         PgStatShared_BgWriter, PgStat_BgWriterStats,
     };
-    use types_pgstat::pgstat_internal::{PgStatShared_Archiver, PgStatShared_Checkpointer};
+    use ::types_pgstat::pgstat_internal::{PgStatShared_Archiver, PgStatShared_Checkpointer};
 
     // [PGSTAT_KIND_BGWRITER]
     registry::register(
@@ -151,7 +151,7 @@ fn register_fixed_kinds() {
                 "archiver",
                 core::mem::size_of::<PgStatShared_Archiver>(),
                 core::mem::size_of::<
-                    types_pgstat::activity_pgstat::PgStat_ArchiverStats,
+                    ::types_pgstat::activity_pgstat::PgStat_ArchiverStats,
                 >(),
                 false,
                 true,
@@ -162,7 +162,7 @@ fn register_fixed_kinds() {
         .snapshot_cb(|shmem, snap| archiver::pgstat_archiver_snapshot_cb(shmem, snap))
         .read_fixed_cb(|ctl, bytes| {
             ctl.archiver.stats = kind_info::pgstat_deserialize_pod::<
-                types_pgstat::activity_pgstat::PgStat_ArchiverStats,
+                ::types_pgstat::activity_pgstat::PgStat_ArchiverStats,
             >(bytes);
             Ok(())
         })
@@ -177,7 +177,7 @@ fn register_fixed_kinds() {
                 "checkpointer",
                 core::mem::size_of::<PgStatShared_Checkpointer>(),
                 core::mem::size_of::<
-                    types_pgstat::activity_pgstat::PgStat_CheckpointerStats,
+                    ::types_pgstat::activity_pgstat::PgStat_CheckpointerStats,
                 >(),
                 false,
                 true,
@@ -190,7 +190,7 @@ fn register_fixed_kinds() {
         .snapshot_cb(|shmem, snap| checkpointer::pgstat_checkpointer_snapshot_cb(shmem, snap))
         .read_fixed_cb(|ctl, bytes| {
             ctl.checkpointer.stats = kind_info::pgstat_deserialize_pod::<
-                types_pgstat::activity_pgstat::PgStat_CheckpointerStats,
+                ::types_pgstat::activity_pgstat::PgStat_CheckpointerStats,
             >(bytes);
             Ok(())
         })

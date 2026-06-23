@@ -20,16 +20,16 @@
 #![allow(non_snake_case)]
 #![allow(clippy::needless_range_loop)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
-use types_sortsupport::SortSupportData;
+use ::types_sortsupport::SortSupportData;
 use statistics::{SortItem, StatsBuildData};
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
-use parse_oper::get_sort_group_operators;
+use ::parse_oper::get_sort_group_operators;
 use sortsupport_seams::{apply_sort_comparator, prepare_sort_support_from_ordering_op};
-use lsyscache_seams::get_typlen;
+use ::lsyscache_seams::get_typlen;
 use detoast_seams::{pg_detoast_datum_packed, toast_raw_datum_size};
 
 use statistics_core_seams as seams;
@@ -639,7 +639,7 @@ fn statext_mcv_build<'mcx>(
     data: &StatsBuildData<'mcx>,
     totalrows: f64,
     stattarget: i32,
-) -> PgResult<Option<statistics::MCVList<'mcx>>> {
+) -> PgResult<Option<::statistics::MCVList<'mcx>>> {
     use statistics::{MCVItem, MCVList, STATS_MCV_MAGIC, STATS_MCV_TYPE_BASIC};
 
     let mcx = data_mcx(data);
@@ -688,7 +688,7 @@ fn statext_mcv_build<'mcx>(
         r#type: STATS_MCV_TYPE_BASIC,
         nitems: nitems as u32,
         ndimensions: numattrs as AttrNumber,
-        types: [Oid::from(0u32); statistics::STATS_MAX_DIMENSIONS],
+        types: [Oid::from(0u32); ::statistics::STATS_MAX_DIMENSIONS],
         items: Vec::with_capacity(nitems),
     };
 
@@ -775,7 +775,7 @@ fn mcv_value_to_serialized_bytes<'mcx>(
     value: &Datum<'mcx>,
     typlen: i16,
     typbyval: bool,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     let out: Vec<u8> = if typbyval {
         // store_att_byval into a local word, then copy the typlen significant
         // bytes (native-endian, matching store_att_byval/fetch_att).
@@ -806,7 +806,7 @@ fn mcv_value_to_serialized_bytes<'mcx>(
         return Err(PgError::error(format!("unexpected typlen {typlen} in MCV value codec")));
     };
 
-    let mut pv = mcx::PgVec::new_in(mcx);
+    let mut pv = ::mcx::PgVec::new_in(mcx);
     pv.try_reserve(out.len()).map_err(|_| mcx.oom(out.len()))?;
     for b in out {
         pv.push(b);

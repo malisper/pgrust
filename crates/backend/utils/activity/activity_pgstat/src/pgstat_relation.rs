@@ -7,7 +7,7 @@
 //! `pgstat_unlink_relation`) remains seam-and-panic until the rest of
 //! `pgstat_relation.c` lands.
 
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_TOASTVALUE,
 };

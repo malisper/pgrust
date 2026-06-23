@@ -9,7 +9,7 @@
 //! bounds-checked; well-formed PostgreSQL datums behave bit-identically to the
 //! C macros on little-endian targets.
 
-use tsearch::tsearch::{WordEntry, WordEntryPos, DATAHDRSIZE};
+use ::tsearch::tsearch::{WordEntry, WordEntryPos, DATAHDRSIZE};
 
 /// `VARHDRSZ` — size of the 4-byte varlena header.
 pub const VARHDRSZ: usize = 4;

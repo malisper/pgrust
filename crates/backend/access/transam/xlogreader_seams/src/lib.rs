@@ -6,7 +6,7 @@
 //! until then a call panics loudly.
 //!
 //! Every record/queue seam takes the reader explicitly (`XLogReaderState`, the
-//! trimmed shared shape in `wal::rmgr`) — the reader is a function
+//! trimmed shared shape in `::wal::rmgr`) — the reader is a function
 //! parameter in C, never ambient state. The reader's
 //! `ReadRecPtr`/`EndRecPtr`/`record` fields are public on the shared struct and
 //! need no seam.
@@ -16,7 +16,7 @@
 //! reader's decode buffer (it is the reader's decode-queue tail until the
 //! prefetcher drops its reference), so Rust cannot hold the borrow across
 //! further reader calls. `xlog_read_ahead` therefore returns the `Copy`
-//! header facts ([`wal::ReadAheadRecordInfo`]) and the
+//! header facts ([`::wal::ReadAheadRecordInfo`]) and the
 //! `read_ahead_record_*` seams re-read the same record — the reader's
 //! decode-queue tail — through a fresh borrow.
 
@@ -26,15 +26,15 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use types_core::primitive::{BlockNumber, ForkNumber, RepOriginId, TransactionId};
+use ::types_core::primitive::{BlockNumber, ForkNumber, RepOriginId, TransactionId};
 use types_core::{Buffer, TimeLineID, XLogRecPtr, XLogSegNo};
-use types_error::PgResult;
-use types_storage::RelFileLocator;
-use wal::rmgr::{XLogReaderRoutine, XLogReaderState};
+use ::types_error::PgResult;
+use ::types_storage::RelFileLocator;
+use ::wal::rmgr::{XLogReaderRoutine, XLogReaderState};
 use wal::{DecodedBkpBlock, ReadAheadRecordInfo};
 use types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
 use types_walsummarizer::{BlockTag, ReadRecordResult};
-use types_walsummarizer::XLogReaderHandle as SummarizerXLogReaderHandle;
+use ::types_walsummarizer::XLogReaderHandle as SummarizerXLogReaderHandle;
 
 seam_core::seam!(
     /// `XLogReaderHasQueuedRecordOrError(reader)` (xlogreader.h inline) —
@@ -432,7 +432,7 @@ seam_core::seam!(
 // ===========================================================================
 // Record-field accessors consumed by `access/transam/xlogrecovery.c` during
 // WAL replay, keyed by the recovery crate's decoded-record handle
-// (`wal::xlogrecovery_carriers::RecordRef`). These mirror the
+// (`::wal::xlogrecovery_carriers::RecordRef`). These mirror the
 // `XLogRecGetRmid` / `XLogRecGetInfo` / `XLogRecGetTotalLen` macros over the
 // recovery driver's current `XLogReaderState *`. Declared here (the xlogreader
 // owns the decoded record) but NOT installed: the recovery crate stays
@@ -444,7 +444,7 @@ seam_core::seam!(
     /// `XLogRecGetRmid(record)` — the resource-manager id of the record the
     /// recovery driver is currently replaying.
     pub fn xlog_rec_rmid(
-        record: wal::xlogrecovery_carriers::RecordRef,
+        record: ::wal::xlogrecovery_carriers::RecordRef,
     ) -> u8
 );
 
@@ -452,7 +452,7 @@ seam_core::seam!(
     /// `XLogRecGetInfo(record)` — the `xl_info` byte of the record the recovery
     /// driver is currently replaying.
     pub fn xlog_rec_info(
-        record: wal::xlogrecovery_carriers::RecordRef,
+        record: ::wal::xlogrecovery_carriers::RecordRef,
     ) -> u8
 );
 
@@ -460,7 +460,7 @@ seam_core::seam!(
     /// `XLogRecGetTotalLen(record)` — the total on-disk length of the record the
     /// recovery driver is currently replaying.
     pub fn xlog_rec_total_len(
-        record: wal::xlogrecovery_carriers::RecordRef,
+        record: ::wal::xlogrecovery_carriers::RecordRef,
     ) -> u32
 );
 

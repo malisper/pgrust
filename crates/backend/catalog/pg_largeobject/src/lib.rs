@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
-// Every fallible function returns the shared `types_error::PgResult`, the
+// Every fallible function returns the shared `::types_error::PgResult`, the
 // project-wide error contract; we accept the large-`Err` lint crate-wide.
 #![allow(clippy::result_large_err)]
 // The C declares locals up top and assigns later; keep that decl-then-assign
@@ -36,7 +36,7 @@
 //! ## Seam crossings
 //!
 //! The relation is opened directly through
-//! `backend-access-table-table::table_open`, returning the owned `Relation`
+//! `backend-access-table-::table::table_open`, returning the owned `Relation`
 //! handle (mirrors the merged `pg_namespace`/`pg_depend` ports). `GetUserId`
 //! crosses `backend-utils-init-miscinit-seams`; `get_user_default_acl` /
 //! `recordDependencyOnNewAcl` cross `backend-catalog-aclchk-seams`;
@@ -61,30 +61,30 @@
 
 use std::rc::Rc;
 
-use mcx::MemoryContext;
-use types_catalog::catalog::{
+use ::mcx::MemoryContext;
+use ::types_catalog::catalog::{
     ANUM_PG_LARGEOBJECT_LOID, ANUM_PG_LARGEOBJECT_METADATA_OID, LARGE_OBJECT_LOID_PN_INDEX_ID,
     LARGE_OBJECT_METADATA_OID_INDEX_ID, LARGE_OBJECT_METADATA_RELATION_ID, LARGE_OBJECT_RELATION_ID,
 };
-use types_core::fmgr::F_OIDEQ;
-use types_core::primitive::{AttrNumber, Oid, OidIsValid};
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::primitive::{AttrNumber, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use snapshot::SnapshotData;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::snapshot::SnapshotData;
 use types_tuple::heaptuple::Datum;
 
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
-use table::table_open;
+use ::table::table_open;
 use aclchk_seams::{get_user_default_acl, record_dependency_on_new_acl};
-use catalog_catalog::GetNewOidWithIndex;
+use ::catalog_catalog::GetNewOidWithIndex;
 use indexing_seams::{
     catalog_tuple_delete, catalog_tuple_insert_pg_largeobject_metadata,
 };
-use utils_error::ereport;
-use miscinit_seams::get_user_id;
+use ::utils_error::ereport;
+use ::miscinit_seams::get_user_id;
 use ::nodes::parsenodes::ObjectType;
-use types_storage::lock::{AccessShareLock, RowExclusiveLock};
+use ::types_storage::lock::{AccessShareLock, RowExclusiveLock};
 
 /* ===========================================================================
  * Catalog OID / Anum aliases, spelled as the C `...RelationId` /
@@ -157,7 +157,7 @@ pub fn LargeObjectCreate(loid: Oid) -> PgResult<Oid> {
         )?;
     }
     ownerId = get_user_id::call();
-    let lomacl = get_user_default_acl::call(mcx, ObjectType::Largeobject, ownerId, types_core::primitive::InvalidOid)?;
+    let lomacl = get_user_default_acl::call(mcx, ObjectType::Largeobject, ownerId, ::types_core::primitive::InvalidOid)?;
     let lomacl_bytes: Option<&[u8]> = match &lomacl {
         Some(types_tuple::heaptuple::Datum::ByRef(b)) => Some(&b[..]),
         _ => None,
@@ -375,9 +375,9 @@ fn arr_maxalign(len: usize) -> usize {
 /// well-formed 1-D no-nulls `aclitem` array; a 0-dimension image yields the
 /// empty vector. (Mirrors the syscache ACL projection's `decode_acl`.)
 fn decode_acl<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     raw: &[u8],
-) -> PgResult<mcx::PgVec<'mcx, types_acl::AclItem>> {
+) -> PgResult<::mcx::PgVec<'mcx, types_acl::AclItem>> {
     let arr = detoast_seams::detoast_attr::call(mcx, raw)?;
     let ndim = arr_read_i32(&arr, 4);
     let dataoffset = arr_read_i32(&arr, 8);
@@ -392,11 +392,11 @@ fn decode_acl<'mcx>(
         0
     };
     let n = if ndim >= 1 { dim0.max(0) as usize } else { 0 };
-    let mut items: mcx::PgVec<'mcx, types_acl::AclItem> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut items: ::mcx::PgVec<'mcx, types_acl::AclItem> = ::mcx::vec_with_capacity_in(mcx, n)?;
     for i in 0..n {
         let off = data_off + i * SIZEOF_ACLITEM;
         let b = arr.get(off..off + SIZEOF_ACLITEM).ok_or_else(|| {
-            types_error::PgError::error("largeobject ACL projection: truncated aclitem array data")
+            ::types_error::PgError::error("largeobject ACL projection: truncated aclitem array data")
         })?;
         // AclItem { ai_grantee: Oid, ai_grantor: Oid, ai_privs: AclMode (u64) }.
         let ai_grantee = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
@@ -420,10 +420,10 @@ fn decode_acl<'mcx>(
 /// `acldefault`). `Ok(None)` for a missing object (caller raises). `snapshot ==
 /// None` is the C `NULL`.
 pub fn largeobject_owner_acl<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     lobj_oid: Oid,
     snapshot: Option<Rc<SnapshotData>>,
-) -> PgResult<Option<(Oid, Option<mcx::PgVec<'mcx, types_acl::AclItem>>)>> {
+) -> PgResult<Option<(Oid, Option<::mcx::PgVec<'mcx, types_acl::AclItem>>)>> {
     // pg_lo_meta = table_open(LargeObjectMetadataRelationId, AccessShareLock);
     let pg_lo_meta = table_open(mcx, LargeObjectMetadataRelationId, AccessShareLock)?;
 
@@ -462,7 +462,7 @@ pub fn largeobject_owner_acl<'mcx>(
 
     let (owner_val, owner_null) = &cols[(Anum_pg_largeobject_metadata_lomowner - 1) as usize];
     if *owner_null {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "pg_largeobject_metadata.lomowner is null",
         ));
     }
@@ -473,7 +473,7 @@ pub fn largeobject_owner_acl<'mcx>(
         | Datum::Composite(_)
         | Datum::Expanded(_)
         | Datum::Internal(_) => {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "pg_largeobject_metadata.lomowner is by-reference",
             ))
         }
@@ -490,7 +490,7 @@ pub fn largeobject_owner_acl<'mcx>(
             | Datum::Composite(_)
             | Datum::Expanded(_)
             | Datum::Internal(_) => {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "pg_largeobject_metadata.lomacl is by-value",
                 ))
             }

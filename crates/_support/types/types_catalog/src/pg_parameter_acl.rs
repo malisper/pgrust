@@ -11,7 +11,7 @@
 //!   [CATALOG_VARLEN] parname (text, FORCE_NOT_NULL), paracl (aclitem[],
 //!   `_null_` default).
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 // ---------------------------------------------------------------------------
 // Relation / index OIDs (catalog/pg_parameter_acl_d.h).

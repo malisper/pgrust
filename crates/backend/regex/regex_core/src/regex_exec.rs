@@ -39,7 +39,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use crate::regex_consts::{
     latype_is_ahead, latype_is_pos, DUPINF, REG_ASSERT, REG_ESPACE, REG_ETOOBIG, REG_EXACT,

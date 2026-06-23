@@ -9,8 +9,8 @@ use brin::{
     BT_INFO_OFFSET,
 };
 use types_core::{BlockNumber, Size};
-use types_error::PgResult;
-use types_tuple::heaptuple::{
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::{
     CompactAttribute, FormData_pg_attribute, NameData, TupleDescData, TYPALIGN_CHAR,
     TYPALIGN_DOUBLE, TYPALIGN_INT, TYPALIGN_SHORT,
 };
@@ -266,7 +266,7 @@ pub fn brtuple_disk_tupdesc<'mcx>(
         }
     }
 
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         TupleDescData {
             natts: total as i32,

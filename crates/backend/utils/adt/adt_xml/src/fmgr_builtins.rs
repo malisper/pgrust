@@ -16,8 +16,8 @@
 //! result types (the `xml` varlena type, `xmltype` constructors, XMLTABLE
 //! table-function plumbing, etc.) are out of scope for this lane.
 
-use datum::Datum;
-use types_error::PgResult;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ fn arg_text_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
     // front-truncate it by 3 bytes (`<value>` -> `lue>`). No-op while OFF.
     match image.first() {
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
-        _ => &image[datum::varlena::VARHDRSZ..],
+        _ => &image[::datum::varlena::VARHDRSZ..],
     }
 }
 
@@ -83,19 +83,19 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     // cstring_to_text: prepend the 4-byte varlena header (header-ful image).
-    let mut img = Vec::with_capacity(datum::varlena::VARHDRSZ + bytes.len());
-    img.extend_from_slice(&datum::varlena::set_varsize_4b(
-        datum::varlena::VARHDRSZ + bytes.len(),
+    let mut img = Vec::with_capacity(::datum::varlena::VARHDRSZ + bytes.len());
+    img.extend_from_slice(&::datum::varlena::set_varsize_4b(
+        ::datum::varlena::VARHDRSZ + bytes.len(),
     ));
     img.extend_from_slice(&bytes);
-    fcinfo.set_ref_result(fmgr::RefPayload::Varlena(img));
+    fcinfo.set_ref_result(::fmgr::RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 
 /// `PG_RETURN_CSTRING(s)` — a by-ref cstring result word.
 #[inline]
 fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(fmgr::RefPayload::Cstring(
+    fcinfo.set_ref_result(::fmgr::RefPayload::Cstring(
         String::from_utf8_lossy(&s).into_owned(),
     ));
     Datum::from_usize(0)
@@ -186,8 +186,8 @@ fn arg_name_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .ref_arg(i)
         .expect("xml fn: name arg missing from by-ref lane");
     let bytes: &[u8] = match payload {
-        fmgr::RefPayload::Varlena(b) => b.as_slice(),
-        fmgr::RefPayload::Cstring(s) => s.as_bytes(),
+        ::fmgr::RefPayload::Varlena(b) => b.as_slice(),
+        ::fmgr::RefPayload::Cstring(s) => s.as_bytes(),
         other => panic!("xml fn: name arg has unexpected by-ref payload {other:?}"),
     };
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
@@ -255,7 +255,7 @@ fn fc_xpath(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let items = crate::xpath_fmgr(xpath_expr, data, namespaces)?;
     let image =
         arrayfuncs_seams::construct_xml_array_bytes::call(&items)?;
-    fcinfo.set_ref_result(fmgr::RefPayload::Varlena(image));
+    fcinfo.set_ref_result(::fmgr::RefPayload::Varlena(image));
     Ok(Datum::from_usize(0))
 }
 

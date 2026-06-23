@@ -11,10 +11,10 @@
 
 use mcx::{Mcx, PgString};
 use types_core::{InvalidOid, Oid};
-use types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::catalog_dependency::ObjectAddress;
 use types_error::{PgResult, ERROR};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::consts::*;
 
@@ -50,7 +50,7 @@ fn oid_is_valid(oid: Oid) -> bool {
 }
 
 /// `elog(ERROR, fmt, ...)` rendered as an owned internal error.
-fn elog_error(msg: String) -> types_error::PgError {
+fn elog_error(msg: String) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg).into_error()
 }
 
@@ -1178,7 +1178,7 @@ fn get_user_name_from_id_opt<'mcx>(
 }
 
 /// Copy a `PgVec<PgString>` (a `format_*_parts` out-list) into owned `String`s.
-fn pgvec_to_strings(v: &mcx::PgVec<'_, PgString<'_>>) -> Vec<String> {
+fn pgvec_to_strings(v: &::mcx::PgVec<'_, PgString<'_>>) -> Vec<String> {
     v.iter().map(|s| s.as_str().to_string()).collect()
 }
 

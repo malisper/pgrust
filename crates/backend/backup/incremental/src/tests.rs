@@ -4,7 +4,7 @@
 //! so they are exercised via the workspace integration tests, not here.
 
 use super::*;
-use types_catalog::catalog::DEFAULTTABLESPACE_OID;
+use ::types_catalog::catalog::DEFAULTTABLESPACE_OID;
 
 const BLCKSZ_U: usize = 8192;
 

@@ -10,14 +10,14 @@
 
 use super::*;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::Once;
 
-// The canonical unified value type (`types_tuple::Datum<'mcx>`) is the
+// The canonical unified value type (`::types_tuple::Datum<'mcx>`) is the
 // seam-contract currency these tests feed into the `output_function_call` /
 // aggregate / build relay paths, matching the migrated crate body. The fixtures
 // construct scalar by-value Datums via the canonical `from_*` codec API.
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
 use types_json::{JsonParseErrorType as PErr, JsonTokenType as Tok, JsonTypeCategory as Cat};
 

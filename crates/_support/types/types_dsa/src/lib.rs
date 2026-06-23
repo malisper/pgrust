@@ -10,7 +10,7 @@
 
 #![no_std]
 
-use types_core::Size;
+use ::types_core::Size;
 
 /// `dsa_pointer` (`utils/dsa.h`) — an address relative to a DSA area, valid in
 /// any backend attached to that area. `SIZEOF_DSA_POINTER == 8` on 64-bit

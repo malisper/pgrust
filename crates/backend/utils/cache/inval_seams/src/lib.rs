@@ -6,17 +6,17 @@
 
 use mcx::{Mcx, PgVec};
 use cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
-use types_core::Oid;
+use ::types_core::Oid;
 // Datum-unification: the cache-invalidation callback `arg` is a plain machine
 // word that C passes as `(Datum) 0` and hands back to the callback verbatim; it
 // carries no deformed value. It therefore stays the audited bare-word
-// `datum::Datum` (aliased `ScalarWord`, matching the `types-cache`
+// `::datum::Datum` (aliased `ScalarWord`, matching the `types-cache`
 // `SyscacheCallbackFunction` / `RelcacheCallbackFunction` contract these seams
 // store), NOT the canonical `types_tuple::Datum<'mcx>` enum.
-use datum::Datum as ScalarWord;
-use types_error::PgResult;
-use types_storage::SharedInvalidationMessage;
-use types_syscache::SysCacheIdentifier;
+use ::datum::Datum as ScalarWord;
+use ::types_error::PgResult;
+use ::types_storage::SharedInvalidationMessage;
+use ::types_syscache::SysCacheIdentifier;
 
 seam_core::seam!(
     /// `CacheRegisterSyscacheCallback(cacheid, func, arg)` (inval.c):
@@ -178,7 +178,7 @@ seam_core::seam!(
     /// we just changed (e.g. a fork extension). Used by `vm_extend` /
     /// `fsm_extend`. `Err` carries its `ereport(ERROR)`s.
     pub fn cache_invalidate_smgr(
-        rlocator: types_storage::RelFileLocatorBackend,
+        rlocator: ::types_storage::RelFileLocatorBackend,
     ) -> PgResult<()>
 );
 

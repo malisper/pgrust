@@ -22,10 +22,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::{Const, Expr, NullTestType, AND_EXPR, NOT_EXPR, OR_EXPR};
-use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{
     JoinType, NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, StatisticExtInfo,
 };
@@ -41,7 +41,7 @@ use fmgr_seams as fmgr;
 
 use mcv as mcv;
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 use crate::estimate::{clamp_probability, strip_relabel};
 

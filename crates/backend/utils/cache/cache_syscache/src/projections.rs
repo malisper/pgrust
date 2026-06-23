@@ -3,15 +3,15 @@
 //! extraction + field projection, copied into the caller's `mcx`.
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
-use cache::SysCacheKey;
-use types_core::Oid;
+use ::cache::SysCacheKey;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
-use types_tuple::heaptuple::{Datum, FormedTuple};
-// `datum::Datum` (the bare-word shim) survives only at the unmigrated
+use ::hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+// `::datum::Datum` (the bare-word shim) survives only at the unmigrated
 // cross-crate contract edge `SysCacheKey::Value`'s search-key word (C:
 // `Datum key1..key4`), audited `types-cache` vocabulary not in this batch.
-use datum::Datum as KeyDatum;
+use ::datum::Datum as KeyDatum;
 
 use crate::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SearchSysCache2, SearchSysCache3,
@@ -41,29 +41,29 @@ use statistics::{
 };
 use lsyscache_seams as lsyscache_seams;
 use clauses_seams as clauses_seams;
-use types_core::AttrNumber;
+use ::types_core::AttrNumber;
 use fmgr::{LangInfo, ProcInfo, ProcLanguage, ProcResultInfo};
 use arrayfuncs_seams as arrayfuncs_seams;
 use amutils_seams as amutils_seams;
 use guc_seams as guc_seams;
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, WARNING};
-use types_core::primitive::OidIsValid;
-use types_tuple::heaptuple::{HeapTupleHeaderGetRawXmin, HeapTupleHeaderGetXmin,
+use ::types_core::primitive::OidIsValid;
+use ::types_tuple::heaptuple::{HeapTupleHeaderGetRawXmin, HeapTupleHeaderGetXmin,
     HeapTupleHeaderXminCommitted};
-use types_catalog::pg_enum::{Anum_pg_enum_enumlabel, Anum_pg_enum_enumtypid, Anum_pg_enum_oid,
+use ::types_catalog::pg_enum::{Anum_pg_enum_enumlabel, Anum_pg_enum_enumtypid, Anum_pg_enum_oid,
     EnumTupleData};
 use syscache_seams::{
     AmopOpidRow, PgClassExtra, PgClassFullForm, PgIndexFlags, PgOperatorForm, PgProcForm,
     PgRangeFields,
 };
 use crate::PARTRELID;
-use cache::typcache::PgRangeRow;
-use cache::AuthIdRow;
+use ::cache::typcache::PgRangeRow;
+use ::cache::AuthIdRow;
 use types_tuple::tupdesc::PgTypeInfo;
-use syscache_seams::CastRow;
-use cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
-use types_namespace::OperRow;
+use ::syscache_seams::CastRow;
+use ::cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
+use ::types_namespace::OperRow;
 use types_namespace::{
     CharArrayDatum, FuncProcAttrs, OidArrayDatum, ProcCompileRow, ProcRow, TextArrayDatum,
 };
@@ -72,7 +72,7 @@ use varlena_seams as varlena_seams;
 use prepagg_seams as prepagg_seams;
 use parse_agg_seams as parse_agg_seams;
 use fmgr_seams as fmgr_seams;
-use types_catalog::pg_aggregate::{
+use ::types_catalog::pg_aggregate::{
     AggFormData, AggRow, Anum_pg_aggregate_aggcombinefn, Anum_pg_aggregate_aggdeserialfn,
     Anum_pg_aggregate_aggfinalextra, Anum_pg_aggregate_aggfinalfn, Anum_pg_aggregate_aggfinalmodify,
     Anum_pg_aggregate_aggfnoid, Anum_pg_aggregate_agginitval,
@@ -82,7 +82,7 @@ use types_catalog::pg_aggregate::{
     Anum_pg_aggregate_aggserialfn, Anum_pg_aggregate_aggsortop,
     Anum_pg_aggregate_aggtransfn, Anum_pg_aggregate_aggtransspace, Anum_pg_aggregate_aggtranstype,
 };
-use types_catalog::pg_language::FormData_pg_language;
+use ::types_catalog::pg_language::FormData_pg_language;
 use ::nodes::nodes::NodePtr;
 use ::nodes::primnodes::Expr;
 
@@ -709,7 +709,7 @@ pub(crate) fn oper_input_types(opno: Oid) -> PgResult<Option<(Oid, Oid)>> {
 /// `Err` on a cache miss (caller always holds a valid funcid).
 pub(crate) fn proc_cost_rows(
     funcid: Oid,
-) -> PgResult<syscache_seams::ProcCostRows> {
+) -> PgResult<::syscache_seams::ProcCostRows> {
     let scratch = MemoryContext::new("syscache proc_cost_rows projection");
     let mcx = scratch.mcx();
     let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(funcid)))?;
@@ -719,7 +719,7 @@ pub(crate) fn proc_cost_rows(
             funcid
         )));
     };
-    let row = syscache_seams::ProcCostRows {
+    let row = ::syscache_seams::ProcCostRows {
         procost: getattr_f32(mcx, PROCOID, &tup, Anum_pg_proc_procost)?,
         prorows: getattr_f32(mcx, PROCOID, &tup, Anum_pg_proc_prorows)?,
         proretset: getattr_bool(mcx, PROCOID, &tup, Anum_pg_proc_proretset)?,
@@ -1038,12 +1038,12 @@ pub(crate) fn open_partrel_tuple<'mcx>(
         // expr = stringToNode(TextDatumGetCString(partexprs)); castNode(List, ...).
         let s = varlena_seams::text_to_cstring_v::call(mcx, &partexprs_val)?;
         let node = nodes_read_seams::string_to_node::call(mcx, s.as_str())?;
-        let elems = mcx::PgBox::into_inner(node).into_list().ok_or_else(|| {
+        let elems = ::mcx::PgBox::into_inner(node).into_list().ok_or_else(|| {
             PgError::error("open_partrel_tuple: partexprs stringToNode did not yield a List")
         })?;
         partexprs = vec_with_capacity_in(mcx, elems.len())?;
         for el in elems.into_iter() {
-            let expr = mcx::PgBox::into_inner(el).into_expr().ok_or_else(|| {
+            let expr = ::mcx::PgBox::into_inner(el).into_expr().ok_or_else(|| {
                 PgError::error("open_partrel_tuple: partexprs element is not an Expr")
             })?;
             partexprs.push(expr);
@@ -1092,7 +1092,7 @@ pub(crate) fn proc_argdefaults<'mcx>(
     // castNode(List, stringToNode(str)).
     let node = nodes_read_seams::string_to_node::call(mcx, s.as_str())?;
     ReleaseSysCache(tup);
-    match mcx::PgBox::into_inner(node).into_list() {
+    match ::mcx::PgBox::into_inner(node).into_list() {
         Some(elems) => Ok(elems),
         None => Err(PgError::error(
             "proargdefaults: stringToNode did not yield a List",
@@ -1114,7 +1114,7 @@ fn getattr_option_bytes<'mcx>(
         return Ok(None);
     }
     match &value {
-        Datum::ByRef(b) => Ok(Some(mcx::slice_in(mcx, &b[..])?)),
+        Datum::ByRef(b) => Ok(Some(::mcx::slice_in(mcx, &b[..])?)),
         Datum::ByVal(_)
         | Datum::Cstring(_)
         | Datum::Composite(_)
@@ -1419,7 +1419,7 @@ const Anum_pg_attribute_attstattarget: i32 = 21;
 pub(crate) fn pg_attribute_form(
     relid: Oid,
     attnum: i16,
-) -> PgResult<Option<types_tuple::heaptuple::FormData_pg_attribute>> {
+) -> PgResult<Option<::types_tuple::heaptuple::FormData_pg_attribute>> {
     // GETSTRUCT projects the fixed-width part by value, so the tuple copy lives
     // in a scratch context dropped before returning.
     let scratch = MemoryContext::new("pg_attribute_form projection");
@@ -1433,9 +1433,9 @@ pub(crate) fn pg_attribute_form(
     let Some(tup) = tuple else {
         return Ok(None);
     };
-    let form = types_tuple::heaptuple::FormData_pg_attribute {
+    let form = ::types_tuple::heaptuple::FormData_pg_attribute {
         attrelid: getattr_oid(mcx, ATTNUM, &tup, Anum_pg_attribute_attrelid)?,
-        attname: types_tuple::heaptuple::NameData {
+        attname: ::types_tuple::heaptuple::NameData {
             data: getattr_namedata(mcx, ATTNUM, &tup, Anum_pg_attribute_attname)?,
         },
         atttypid: getattr_oid(mcx, ATTNUM, &tup, Anum_pg_attribute_atttypid)?,
@@ -1638,7 +1638,7 @@ pub(crate) fn get_agg_catalog_info<'mcx>(
             // can dedup by-ref init values too. Mirrors the C `Datum initValue`
             // carrier, where the by-ref word is a pointer the planner only feeds
             // to `datumIsEqual`.
-            use types_tuple::heaptuple::Datum as TupleDatum;
+            use ::types_tuple::heaptuple::Datum as TupleDatum;
             match &init {
                 TupleDatum::ByVal(w) => (KeyDatum::from_usize(*w), false, None),
                 _ => {
@@ -1851,7 +1851,7 @@ const UNUSED_KEY: SysCacheKey<'static> = SysCacheKey::Value(KeyDatum::null());
  * pg_constraint projections for backend-catalog-pg-constraint
  * ------------------------------------------------------------------------- */
 
-use types_catalog::pg_constraint::{
+use ::types_catalog::pg_constraint::{
     ConKeyArray, ConstraintFormCopy, FkArrayProjection, FormData_pg_constraint, OidArray,
     Anum_pg_constraint_conname,
     Anum_pg_constraint_connamespace, Anum_pg_constraint_contype, Anum_pg_constraint_condeferrable,
@@ -1864,7 +1864,7 @@ use types_catalog::pg_constraint::{
     Anum_pg_constraint_conppeqop, Anum_pg_constraint_conffeqop, Anum_pg_constraint_confdelsetcols,
     Anum_pg_constraint_conexclop, Anum_pg_constraint_conbin, PgConstraintDefInfo,
 };
-use types_tuple::heaptuple::{INT2OID, OIDOID};
+use ::types_tuple::heaptuple::{INT2OID, OIDOID};
 use detoast_seams as detoast_seams;
 
 /// `Anum_pg_constraint_oid` (`catalog/pg_constraint.h`).
@@ -1962,7 +1962,7 @@ fn getattr_name_bytes<'mcx>(
         }
     };
     let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
-    mcx::slice_in(mcx, &bytes[..len])
+    ::mcx::slice_in(mcx, &bytes[..len])
 }
 
 /// `RelationSupportsSysCache(relid)` (syscache.c).
@@ -2900,7 +2900,7 @@ pub(crate) fn fetch_function_defaults<'mcx>(
     let nodes = proc_argdefaults(mcx, funcid)?;
     let mut out: std::vec::Vec<Expr<'mcx>> = std::vec::Vec::with_capacity(nodes.len());
     for node in nodes {
-        let expr = mcx::PgBox::into_inner(node).into_expr().ok_or_else(|| {
+        let expr = ::mcx::PgBox::into_inner(node).into_expr().ok_or_else(|| {
             PgError::error("fetch_function_defaults: proargdefaults element is not an expression")
         })?;
         out.push(expr);
@@ -3333,8 +3333,8 @@ fn project_proc_row<'mcx>(
 pub(crate) fn search_pg_functiondef_info<'mcx>(
     mcx: Mcx<'mcx>,
     funcid: Oid,
-) -> PgResult<Option<types_catalog::pg_proc::PgFunctiondefInfo>> {
-    use types_catalog::pg_proc::ProcFormFields;
+) -> PgResult<Option<::types_catalog::pg_proc::PgFunctiondefInfo>> {
+    use ::types_catalog::pg_proc::ProcFormFields;
     // Attribute numbers (1-based, pg_proc.h column order). Spelled inline as the
     // module already carries i32 consts for the form columns project_proc_row
     // reads; the remaining columns are named here.
@@ -3408,7 +3408,7 @@ pub(crate) fn search_pg_functiondef_info<'mcx>(
 
     ReleaseSysCache(tup);
 
-    Ok(Some(types_catalog::pg_proc::PgFunctiondefInfo {
+    Ok(Some(::types_catalog::pg_proc::PgFunctiondefInfo {
         form,
         proconfig,
         prosqlbody,
@@ -3466,16 +3466,16 @@ pub(crate) fn search_type_attr_info(oidtypeid: Oid) -> PgResult<Option<PgTypeInf
 /// the caller raises its own `cache lookup failed for type %u` `elog(ERROR)`.
 pub(crate) fn pg_type_form(
     typid: Oid,
-) -> PgResult<Option<types_tuple::pg_type::FormData_pg_type>> {
+) -> PgResult<Option<::types_tuple::pg_type::FormData_pg_type>> {
     let scratch = MemoryContext::new("pg_type_form projection");
     let mcx = scratch.mcx();
     let tuple = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(typid)))?;
     let Some(tup) = tuple else {
         return Ok(None);
     };
-    let form = types_tuple::pg_type::FormData_pg_type {
+    let form = ::types_tuple::pg_type::FormData_pg_type {
         oid: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_oid)?,
-        typname: types_tuple::heaptuple::NameData {
+        typname: ::types_tuple::heaptuple::NameData {
             data: getattr_namedata(mcx, TYPEOID, &tup, Anum_pg_type_typname)?,
         },
         typnamespace: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typnamespace)?,
@@ -3822,8 +3822,8 @@ pub(crate) fn rule_tuple_by_relname<'mcx>(
     mcx: Mcx<'mcx>,
     ev_class: Oid,
     rulename: &str,
-) -> PgResult<Option<(FormedTuple<'mcx>, types_catalog::pg_rewrite::FormData_pg_rewrite)>> {
-    use types_catalog::pg_rewrite::{
+) -> PgResult<Option<(FormedTuple<'mcx>, ::types_catalog::pg_rewrite::FormData_pg_rewrite)>> {
+    use ::types_catalog::pg_rewrite::{
         Anum_pg_rewrite_ev_class, Anum_pg_rewrite_ev_enabled, Anum_pg_rewrite_ev_type,
         Anum_pg_rewrite_is_instead, Anum_pg_rewrite_oid, Anum_pg_rewrite_rulename,
         FormData_pg_rewrite,
@@ -3932,7 +3932,7 @@ pub(crate) fn pg_index_has_predicate(index_oid: Oid) -> PgResult<Option<bool>> {
 /// the single sys-cache fetch the C performs. `Ok(None)` on a cache miss.
 pub(crate) fn pg_index_tid_and_hasexprs(
     index_oid: Oid,
-) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, bool)>> {
+) -> PgResult<Option<(::types_tuple::heaptuple::ItemPointerData, bool)>> {
     let scratch = MemoryContext::new("syscache index_drop tid/indexprs projection");
     let mcx = scratch.mcx();
     let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
@@ -4228,7 +4228,7 @@ pub(crate) fn pg_index_indclass<'mcx>(
 pub(crate) fn search_pg_index_info<'mcx>(
     mcx: Mcx<'mcx>,
     index_oid: Oid,
-) -> PgResult<Option<cache::PgIndexInfo<'mcx>>> {
+) -> PgResult<Option<::cache::PgIndexInfo<'mcx>>> {
     let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
     let Some(tup) = tuple else {
         return Ok(None);
@@ -4297,7 +4297,7 @@ pub(crate) fn search_pg_index_info<'mcx>(
     let indoption = arrayfuncs_seams::int2vector_to_i16s_bytes::call(mcx, &indoption_bytes)?;
 
     ReleaseSysCache(tup);
-    Ok(Some(cache::PgIndexInfo {
+    Ok(Some(::cache::PgIndexInfo {
         indexrelid,
         indrelid,
         indnatts,
@@ -4329,7 +4329,7 @@ pub(crate) fn amutils_index_relation(
 ) -> PgResult<Option<amutils_seams::IndexRelationInfo>> {
     // The fixed-width Form_pg_class fields amutils reads are scalar — a throwaway
     // context suffices for the catcache marshal (the projected struct is Copy).
-    let ctx = mcx::MemoryContext::new("amutils_index_relation");
+    let ctx = ::mcx::MemoryContext::new("amutils_index_relation");
     let mcx = ctx.mcx();
     let tuple = SearchSysCache1(mcx, RELOID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
     let Some(tup) = tuple else {
@@ -4351,7 +4351,7 @@ pub(crate) fn amutils_index_relation(
 pub(crate) fn amutils_index_form(
     index_oid: Oid,
 ) -> PgResult<Option<amutils_seams::IndexFormInfo>> {
-    let ctx = mcx::MemoryContext::new("amutils_index_form");
+    let ctx = ::mcx::MemoryContext::new("amutils_index_form");
     let mcx = ctx.mcx();
     let tuple = SearchSysCache1(mcx, INDEXRELID, SysCacheKey::Value(KeyDatum::from_oid(index_oid)))?;
     let Some(tup) = tuple else {
@@ -4407,7 +4407,7 @@ pub(crate) fn collation_qualified_name<'mcx>(
     let collname = getattr_name_bytes(mcx, COLLOID, &tup, Anum_pg_collation_collname)?;
     ReleaseSysCache(tup);
     let nspname = match lsyscache_seams::get_namespace_name::call(mcx, collnamespace)? {
-        Some(s) => mcx::slice_in(mcx, s.as_str().as_bytes())?,
+        Some(s) => ::mcx::slice_in(mcx, s.as_str().as_bytes())?,
         None => return Ok(None),
     };
     Ok(Some((nspname, collname)))
@@ -4530,7 +4530,7 @@ pub(crate) fn search_syscache_class<'mcx>(
 pub(crate) fn search_syscache_copy_pg_class<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
-) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgClassForm)>> {
+) -> PgResult<Option<(::types_tuple::heaptuple::ItemPointerData, types_cluster::PgClassForm)>> {
     const Anum_pg_class_relam: i32 = 7;
     const Anum_pg_class_relallfrozen: i32 = 13;
     const Anum_pg_class_relispartition: i32 = 28;
@@ -4573,7 +4573,7 @@ pub(crate) fn search_syscache_copy_pg_class<'mcx>(
 pub(crate) fn search_syscache_copy_pg_index<'mcx>(
     mcx: Mcx<'mcx>,
     index_oid: Oid,
-) -> PgResult<Option<(types_tuple::heaptuple::ItemPointerData, types_cluster::PgIndexForm)>> {
+) -> PgResult<Option<(::types_tuple::heaptuple::ItemPointerData, types_cluster::PgIndexForm)>> {
     // `catalog/pg_index.h` attribute numbers (1-based), matching the field
     // order consumed by `catalog_tuple_update_pg_index`.
     const Anum_pg_index_indisprimary: i32 = 7;
@@ -4613,8 +4613,8 @@ pub(crate) fn search_syscache_copy_pg_index<'mcx>(
  * `Ok(None)`.
  * ======================================================================== */
 
-use types_acl::AclItem;
-use cache::syscache::{ClassOwnerAcl, NamespaceOwnerAcl, ObjectOwnerAcl, TypeOwnerAcl};
+use ::types_acl::AclItem;
+use ::cache::syscache::{ClassOwnerAcl, NamespaceOwnerAcl, ObjectOwnerAcl, TypeOwnerAcl};
 
 // `catalog/pg_namespace.h` attribute numbers.
 const Anum_pg_namespace_nspowner: i32 = 3;
@@ -5170,7 +5170,7 @@ pub(crate) fn pg_statistic_stadistinct(stats_tuple: types_selfuncs::StatsTuple) 
 /// slot metadata (`stakindN` / `staopN` / `stacollN`) for `get_attstatsslot`.
 pub(crate) fn pg_statistic_slot_meta(
     stats_tuple: types_selfuncs::StatsTuple,
-) -> PgResult<syscache_seams::PgStatisticSlotMeta> {
+) -> PgResult<::syscache_seams::PgStatisticSlotMeta> {
     use syscache_seams::{PgStatisticSlotMeta, STATISTIC_NUM_SLOTS};
     let holder = stats_holder(stats_tuple);
     let scratch = MemoryContext::new("pg_statistic slot meta");
@@ -5208,7 +5208,7 @@ pub(crate) fn pg_statistic_slot_meta(
 pub(crate) fn syscache_get_attr_not_null_statistic(
     stats_tuple: types_selfuncs::StatsTuple,
     attnum: AttrNumber,
-) -> PgResult<types_tuple::Datum<'static>> {
+) -> PgResult<::types_tuple::Datum<'static>> {
     let holder = stats_holder(stats_tuple);
     // The detoast/copy the caller performs (DatumGetArrayTypePCopy) needs the
     // array bytes to outlive this call's scratch arena, so deform into the
@@ -5243,7 +5243,7 @@ pub(crate) fn pg_statistic_stawidth(
     relid: Oid,
     attnum: AttrNumber,
 ) -> PgResult<Option<i32>> {
-    use statistics::Anum_pg_statistic_stawidth;
+    use ::statistics::Anum_pg_statistic_stawidth;
     let scratch = MemoryContext::new("pg_statistic stawidth projection");
     let mcx = scratch.mcx();
     let tuple = SearchSysCache3(
@@ -5477,7 +5477,7 @@ pub(crate) fn namespaceoid_exists(nsp_oid: Oid) -> PgResult<bool> {
 pub(crate) fn search_syscache1_tid(
     cache_id: i32,
     key: Oid,
-) -> PgResult<Option<types_tuple::heaptuple::ItemPointerData>> {
+) -> PgResult<Option<::types_tuple::heaptuple::ItemPointerData>> {
     let scratch = MemoryContext::new("search_syscache1_tid probe");
     let tup = SearchSysCache1(scratch.mcx(), cache_id, SysCacheKey::Value(KeyDatum::from_oid(key)))?;
     Ok(tup.map(|t| t.tuple.t_self))
@@ -5999,7 +5999,7 @@ fn namespace_and_name1<'mcx>(
     key: Oid,
     nsp_attno: i32,
     name_attno: i32,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     let tuple = SearchSysCache1(mcx, cache_id, SysCacheKey::Value(KeyDatum::from_oid(key)))?;
     let Some(tup) = tuple else {
         return Ok(None);
@@ -6007,69 +6007,69 @@ fn namespace_and_name1<'mcx>(
     let namespace = getattr_oid(mcx, cache_id, &tup, nsp_attno)?;
     let name = getattr_name(mcx, cache_id, &tup, name_attno)?;
     ReleaseSysCache(tup);
-    Ok(Some(types_namespace::CatalogObjectName { namespace, name }))
+    Ok(Some(::types_namespace::CatalogObjectName { namespace, name }))
 }
 
 pub(crate) fn relation_namespace_and_name<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     namespace_and_name1(mcx, RELOID, relid, Anum_pg_class_relnamespace_b2, Anum_pg_class_relname_b2)
 }
 
 pub(crate) fn type_namespace_and_name<'mcx>(
     mcx: Mcx<'mcx>,
     typid: Oid,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     namespace_and_name1(mcx, TYPEOID, typid, Anum_pg_type_typnamespace_b2, Anum_pg_type_typname_b2)
 }
 
 pub(crate) fn collation_namespace_and_name<'mcx>(
     mcx: Mcx<'mcx>,
     collid: Oid,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     namespace_and_name1(mcx, COLLOID, collid, Anum_pg_collation_collnamespace_b2, Anum_pg_collation_collname_b2)
 }
 
 pub(crate) fn conversion_namespace_and_name<'mcx>(
     mcx: Mcx<'mcx>,
     conid: Oid,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     namespace_and_name1(mcx, CONVOID, conid, Anum_pg_conversion_connamespace_b2, Anum_pg_conversion_conname_b2)
 }
 
 pub(crate) fn statext_namespace_and_name<'mcx>(
     mcx: Mcx<'mcx>,
     stxid: Oid,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     namespace_and_name1(mcx, STATEXTOID, stxid, Anum_pg_statistic_ext_stxnamespace_b2, Anum_pg_statistic_ext_stxname_b2)
 }
 
 pub(crate) fn ts_parser_namespace_and_name<'mcx>(
     mcx: Mcx<'mcx>,
     prsid: Oid,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     namespace_and_name1(mcx, TSPARSEROID, prsid, Anum_pg_ts_parser_prsnamespace_b2, Anum_pg_ts_parser_prsname_b2)
 }
 
 pub(crate) fn ts_dict_namespace_and_name<'mcx>(
     mcx: Mcx<'mcx>,
     dictid: Oid,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     namespace_and_name1(mcx, TSDICTOID, dictid, Anum_pg_ts_dict_dictnamespace_b2, Anum_pg_ts_dict_dictname_b2)
 }
 
 pub(crate) fn ts_template_namespace_and_name<'mcx>(
     mcx: Mcx<'mcx>,
     tmplid: Oid,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     namespace_and_name1(mcx, TSTEMPLATEOID, tmplid, Anum_pg_ts_template_tmplnamespace_b2, Anum_pg_ts_template_tmplname_b2)
 }
 
 pub(crate) fn ts_config_namespace_and_name<'mcx>(
     mcx: Mcx<'mcx>,
     cfgid: Oid,
-) -> PgResult<Option<types_namespace::CatalogObjectName<'mcx>>> {
+) -> PgResult<Option<::types_namespace::CatalogObjectName<'mcx>>> {
     namespace_and_name1(mcx, TSCONFIGOID, cfgid, Anum_pg_ts_config_cfgnamespace_b2, Anum_pg_ts_config_cfgname_b2)
 }
 
@@ -6718,18 +6718,18 @@ pub(crate) fn collation_name<'mcx>(
 /// transient `FormedTuple` in `mcx` so the column deform can run.
 fn formed_for_inval<'mcx>(
     mcx: Mcx<'mcx>,
-    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple: &::types_tuple::HeapTupleData<'_>,
     tuple_data: &[u8],
 ) -> PgResult<FormedTuple<'mcx>> {
     Ok(FormedTuple {
-        tuple: mcx::alloc_in(mcx, tuple.clone_in(mcx)?)?,
-        data: mcx::slice_in(mcx, tuple_data)?,
+        tuple: ::mcx::alloc_in(mcx, tuple.clone_in(mcx)?)?,
+        data: ::mcx::slice_in(mcx, tuple_data)?,
     })
 }
 
 /// `((Form_pg_class) GETSTRUCT(tuple))` projected to `{ oid, relisshared }`.
 pub(crate) fn pg_class_shape(
-    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple: &::types_tuple::HeapTupleData<'_>,
     tuple_data: &[u8],
 ) -> types_storage::PgClassShape {
     const Anum_pg_class_oid: i32 = 1;
@@ -6746,7 +6746,7 @@ pub(crate) fn pg_class_shape(
 
 /// `((Form_pg_attribute) GETSTRUCT(tuple))->attrelid`.
 pub(crate) fn pg_attribute_attrelid(
-    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple: &::types_tuple::HeapTupleData<'_>,
     tuple_data: &[u8],
 ) -> Oid {
     let scratch = MemoryContext::new("inval pg_attribute_attrelid");
@@ -6760,7 +6760,7 @@ pub(crate) fn pg_attribute_attrelid(
 
 /// `((Form_pg_index) GETSTRUCT(tuple))->indexrelid`.
 pub(crate) fn pg_index_indexrelid(
-    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple: &::types_tuple::HeapTupleData<'_>,
     tuple_data: &[u8],
 ) -> Oid {
     let scratch = MemoryContext::new("inval pg_index_indexrelid");
@@ -6775,10 +6775,10 @@ pub(crate) fn pg_index_indexrelid(
 /// The FK target table of a `pg_constraint` tuple: `confrelid` when
 /// `contype == CONSTRAINT_FOREIGN`, else `None`.
 pub(crate) fn pg_constraint_fk_target(
-    tuple: &types_tuple::HeapTupleData<'_>,
+    tuple: &::types_tuple::HeapTupleData<'_>,
     tuple_data: &[u8],
 ) -> Option<Oid> {
-    use types_catalog::pg_constraint::{
+    use ::types_catalog::pg_constraint::{
         Anum_pg_constraint_confrelid, Anum_pg_constraint_contype, CONSTRAINT_FOREIGN,
     };
     let scratch = MemoryContext::new("inval pg_constraint_fk_target");
@@ -6830,7 +6830,7 @@ pub(crate) fn search_am_by_name<'mcx>(
 
 pub(crate) fn auth_members_of_member(
     memberid: Oid,
-) -> PgResult<Vec<cache::AuthMembersRow>> {
+) -> PgResult<Vec<::cache::AuthMembersRow>> {
     // pg_auth_members attnos: roleid=2, member=3, admin_option=5,
     // inherit_option=6, set_option=7 (pg_auth_members.h).
     const Anum_pg_auth_members_roleid_b2: i32 = 2;
@@ -6842,7 +6842,7 @@ pub(crate) fn auth_members_of_member(
     let list = SearchSysCacheList1(mcx, AUTHMEMMEMROLE, SysCacheKey::Value(KeyDatum::from_oid(memberid)))?;
     let mut rows = Vec::with_capacity(list.len());
     for tup in list.iter() {
-        rows.push(cache::AuthMembersRow {
+        rows.push(::cache::AuthMembersRow {
             roleid: getattr_oid(mcx, AUTHMEMMEMROLE, tup, Anum_pg_auth_members_roleid_b2)?,
             admin_option: getattr_bool(mcx, AUTHMEMMEMROLE, tup, Anum_pg_auth_members_admin_option_b2)?,
             inherit_option: getattr_bool(mcx, AUTHMEMMEMROLE, tup, Anum_pg_auth_members_inherit_option_b2)?,
@@ -6865,8 +6865,8 @@ const Anum_pg_auth_members_set_option: i32 = 7;
 fn project_authmem_full<'mcx>(
     mcx: Mcx<'mcx>,
     tup: &FormedTuple<'_>,
-) -> PgResult<cache::AuthMembersFullRow> {
-    Ok(cache::AuthMembersFullRow {
+) -> PgResult<::cache::AuthMembersFullRow> {
+    Ok(::cache::AuthMembersFullRow {
         oid: getattr_oid(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_oid)?,
         roleid: getattr_oid(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_roleid)?,
         member: getattr_oid(mcx, AUTHMEMROLEMEM, tup, Anum_pg_auth_members_member)?,
@@ -6884,7 +6884,7 @@ pub(crate) fn lookup_authmem_by_keys<'mcx>(
     roleid: Oid,
     member: Oid,
     grantor: Oid,
-) -> PgResult<Option<cache::AuthMembersFullRow>> {
+) -> PgResult<Option<::cache::AuthMembersFullRow>> {
     let tuple = SearchSysCache3(
         mcx,
         AUTHMEMROLEMEM,
@@ -6905,7 +6905,7 @@ pub(crate) fn lookup_authmem_by_keys<'mcx>(
 pub(crate) fn lookup_authmem_list_by_role<'mcx>(
     mcx: Mcx<'mcx>,
     roleid: Oid,
-) -> PgResult<Vec<cache::AuthMembersFullRow>> {
+) -> PgResult<Vec<::cache::AuthMembersFullRow>> {
     let list = SearchSysCacheList1(mcx, AUTHMEMROLEMEM, SysCacheKey::Value(KeyDatum::from_oid(roleid)))?;
     let mut rows = Vec::with_capacity(list.len());
     for tup in list.iter() {
@@ -6934,14 +6934,14 @@ const Anum_pg_sequence_seqcycle: i32 = 8;
 /// on a cache miss (the caller raises `cache lookup failed for sequence %u`).
 pub(crate) fn search_seqrelid(
     seqid: Oid,
-) -> PgResult<Option<types_catalog::pg_sequence::FormData_pg_sequence>> {
+) -> PgResult<Option<::types_catalog::pg_sequence::FormData_pg_sequence>> {
     let scratch = MemoryContext::new("syscache pg_sequence projection");
     let mcx = scratch.mcx();
     let tuple = SearchSysCache1(mcx, SEQRELID, SysCacheKey::Value(KeyDatum::from_oid(seqid)))?;
     let Some(tup) = tuple else {
         return Ok(None);
     };
-    let form = types_catalog::pg_sequence::FormData_pg_sequence {
+    let form = ::types_catalog::pg_sequence::FormData_pg_sequence {
         seqrelid: getattr_oid(mcx, SEQRELID, &tup, Anum_pg_sequence_seqrelid)?,
         seqtypid: getattr_oid(mcx, SEQRELID, &tup, Anum_pg_sequence_seqtypid)?,
         seqstart: getattr_i64(mcx, SEQRELID, &tup, Anum_pg_sequence_seqstart)?,
@@ -6966,7 +6966,7 @@ const Anum_pg_type_typdefault: i32 = 31;
 pub(crate) fn pg_type_default<'mcx>(
     mcx: Mcx<'mcx>,
     typid: Oid,
-) -> PgResult<Option<syscache_seams::PgTypeDefault>> {
+) -> PgResult<Option<::syscache_seams::PgTypeDefault>> {
     let tuple = SearchSysCache1(mcx, TYPEOID, SysCacheKey::Value(KeyDatum::from_oid(typid)))?;
     let Some(tup) = tuple else {
         return Ok(None);
@@ -6975,7 +6975,7 @@ pub(crate) fn pg_type_default<'mcx>(
     let typelem = getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typelem)?;
     // getTypeIOParam(typeTuple): array types use their element type, else self.
     let typioparam = if OidIsValid(typelem) { typelem } else { oid };
-    let row = syscache_seams::PgTypeDefault {
+    let row = ::syscache_seams::PgTypeDefault {
         typdefaultbin: getattr_option_text(mcx, TYPEOID, &tup, Anum_pg_type_typdefaultbin)?,
         typdefault: getattr_option_text(mcx, TYPEOID, &tup, Anum_pg_type_typdefault)?,
         typinput: getattr_oid(mcx, TYPEOID, &tup, Anum_pg_type_typinput)?,
@@ -6995,7 +6995,7 @@ pub(crate) fn pg_type_default<'mcx>(
 pub(crate) fn search_pg_proc_fastpath<'mcx>(
     mcx: Mcx<'mcx>,
     func_id: Oid,
-) -> PgResult<Option<types_namespace::FastpathProcRow<'mcx>>> {
+) -> PgResult<Option<::types_namespace::FastpathProcRow<'mcx>>> {
     let tuple = SearchSysCache1(mcx, PROCOID, SysCacheKey::Value(KeyDatum::from_oid(func_id)))?;
     let Some(tup) = tuple else {
         return Ok(None);
@@ -7027,7 +7027,7 @@ pub(crate) fn search_pg_proc_fastpath<'mcx>(
         proargtypes.push(t);
     }
 
-    let row = types_namespace::FastpathProcRow {
+    let row = ::types_namespace::FastpathProcRow {
         prokind,
         proretset,
         pronargs,

@@ -32,7 +32,7 @@ use procarray_seams as procarray_seams;
 use predicate_seams as predicate_seams;
 use lmgr_proc_seams as proc_seams;
 use cache_syscache::{RelationHasSysCache, RelationInvalidatesSnapshotsOnly};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use init_small_seams as misc_seams;
 use types_core::{
     CommandId, FirstNormalTransactionId, InvalidOid, InvalidTransactionId, Oid, ProcNumber, Size,
@@ -44,7 +44,7 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERROR, LOG, WARNING,
 };
 use snapshot::{SnapshotData, SnapshotType};
-use types_storage::VirtualTransactionId;
+use ::types_storage::VirtualTransactionId;
 
 mod state;
 

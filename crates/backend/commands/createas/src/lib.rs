@@ -25,7 +25,7 @@
 //!    `'mcx`.
 //!  * `state` — a raw pointer to the `'mcx`-bound [`IntoRelStateData`] that
 //!    `intorel_startup` allocates in the threaded query arena (via
-//!    [`mcx::leak_in`], so it lives for the query, exactly like the C `palloc`)
+//!    [`::mcx::leak_in`], so it lives for the query, exactly like the C `palloc`)
 //!    and binds for the duration of the run. `intorel_receive`/`_shutdown`
 //!    recover it. This mirrors `copyto.c`'s `DR_copy.cstate` raw-pointer alias,
 //!    except the backing store is the receiver's own arena allocation rather
@@ -35,12 +35,12 @@ extern crate alloc;
 
 use core::cell::RefCell;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgBox, PgVec};
-use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
-use types_core::primitive::{InvalidOid, Oid};
-use types_core::xact::CommandId;
-use types_dest::CommandDest;
+use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_core::xact::CommandId;
+use ::types_dest::CommandDest;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INDETERMINATE_COLLATION, ERRCODE_SYNTAX_ERROR, ERROR, NOTICE,
@@ -50,19 +50,19 @@ use ::nodes::nodes::{CmdType, Node};
 use ::nodes::params::ParamListInfo;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
-use portal::QueryCompletion;
-use rel::Relation;
-use types_storage::lock::{AccessExclusiveLock, NoLock};
-use types_tableam::tableam::BulkInsertStateData;
-use types_tuple::access::RangeVar as AccessRangeVar;
-use types_tuple::heaptuple::TupleDescData;
+use ::portal::QueryCompletion;
+use ::rel::Relation;
+use ::types_storage::lock::{AccessExclusiveLock, NoLock};
+use ::types_tableam::tableam::BulkInsertStateData;
+use ::types_tuple::access::RangeVar as AccessRangeVar;
+use ::types_tuple::heaptuple::TupleDescData;
 
 /// `RelationRelationId` (`catalog/pg_class.h`) — OID of `pg_class`.
-const RELATION_RELATION_ID: Oid = types_core::catalog::RELATION_RELATION_ID;
+const RELATION_RELATION_ID: Oid = ::types_core::catalog::RELATION_RELATION_ID;
 
 /// `RELKIND_RELATION` / `RELKIND_MATVIEW` (`catalog/pg_class.h`).
-const RELKIND_RELATION: u8 = types_tuple::access::RELKIND_RELATION;
-const RELKIND_MATVIEW: u8 = types_tuple::access::RELKIND_MATVIEW;
+const RELKIND_RELATION: u8 = ::types_tuple::access::RELKIND_RELATION;
+const RELKIND_MATVIEW: u8 = ::types_tuple::access::RELKIND_MATVIEW;
 
 /// `EXEC_FLAG_WITH_NO_DATA` (`executor/executor.h`).
 const EXEC_FLAG_WITH_NO_DATA: i32 = 0x0040;
@@ -166,7 +166,7 @@ fn receiver_set_reladdr(token: u64, addr: ObjectAddress) {
 /// (`CreateIntoRelDestReceiver`) has no per-query arena, so the driver
 /// (`ExecCreateTableAs` / `ExecuteQuery`) that owns the run threads `into` here.
 fn receiver_setup_run<'mcx>(token: u64, mcx: Mcx<'mcx>, into: IntoClause<'mcx>) -> PgResult<()> {
-    let state = mcx::leak_in(mcx::alloc_in(
+    let state = ::mcx::leak_in(::mcx::alloc_in(
         mcx,
         IntoRelStateData {
             into,
@@ -321,7 +321,7 @@ fn create_ctas_nodata<'mcx>(
      * name list was specified in CREATE TABLE AS, override the column names in
      * the query.  (Too few column names are OK, too many are not.)
      */
-    let mut attr_list: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut attr_list: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let mut lc = into.colNames.iter();
 
     for tle in query.targetList.iter() {
@@ -344,7 +344,7 @@ fn create_ctas_nodata<'mcx>(
             };
 
             let col = build_coldef_checked(mcx, colname, info.typid, info.typmod, info.collation)?;
-            attr_list.push(mcx::alloc_in(mcx, col)?);
+            attr_list.push(::mcx::alloc_in(mcx, col)?);
         }
     }
 
@@ -503,11 +503,11 @@ pub fn ExecCreateTableAs<'mcx>(
     Ok((address, qc))
 }
 
-/// Convert the crate's `portal::QueryCompletion` to the matview seam's
+/// Convert the crate's `::portal::QueryCompletion` to the matview seam's
 /// `types_matview::QueryCompletion` (same `{commandTag, nprocessed}` shape).
 fn to_matview_qc(qc: QueryCompletion) -> types_matview::QueryCompletion {
     types_matview::QueryCompletion {
-        commandTag: types_core::cmdtag::CommandTag(qc.commandTag),
+        commandTag: ::types_core::cmdtag::CommandTag(qc.commandTag),
         nprocessed: qc.nprocessed,
     }
 }
@@ -689,7 +689,7 @@ fn intorel_startup<'mcx>(
      * column name list was specified in CREATE TABLE AS, override the column
      * names derived from the query.
      */
-    let mut attr_list: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut attr_list: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let mut lc = into.colNames.iter();
 
     for attnum in 0..typeinfo.natts as usize {
@@ -712,7 +712,7 @@ fn intorel_startup<'mcx>(
             attribute.atttypmod,
             attribute.attcollation,
         )?;
-        attr_list.push(mcx::alloc_in(mcx, col)?);
+        attr_list.push(::mcx::alloc_in(mcx, col)?);
     }
 
     if lc.next().is_some() {
@@ -767,7 +767,7 @@ fn intorel_startup<'mcx>(
      * inserts as there are no tuples to insert.
      */
     let bistate = if !into.skipData {
-        Some(mcx::alloc_in(mcx, heapam::GetBulkInsertState()?)?)
+        Some(::mcx::alloc_in(mcx, heapam::GetBulkInsertState()?)?)
     } else {
         None
     };

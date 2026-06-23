@@ -28,10 +28,10 @@
 //! like `backend-utils-adt-varlena`'s `cstring_to_text_with_len`), a `varbit`
 //! *value* is carried as [`VarBit`] = `{ bit_len, data }`, where `data` is the
 //! header-less `VARBITS` payload (`PgVec<'mcx, u8>` charged to the caller's
-//! [`mcx::Mcx`]). Functions that only *read* a value take [`VarBitRef`]
+//! [`::mcx::Mcx`]). Functions that only *read* a value take [`VarBitRef`]
 //! (`{ bit_len, data: &[u8] }`), the detoasted payload the fmgr glue produces.
 //!
-//! `*send` returns a full [`datum::Bytea`] image (header + payload), built
+//! `*send` returns a full [`::datum::Bytea`] image (header + payload), built
 //! through `pq_begintypsend`/`pq_endtypsend`.
 //!
 //! # The fmgr / `Datum` boundary
@@ -48,7 +48,7 @@ use alloc::format;
 use alloc::string::String;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use datum::Bytea;
+use ::datum::Bytea;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
     ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_PARAMETER_VALUE,
@@ -56,7 +56,7 @@ use types_error::{
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_STRING_DATA_LENGTH_MISMATCH,
     ERRCODE_STRING_DATA_RIGHT_TRUNCATION, ERRCODE_SUBSTRING_ERROR,
 };
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 use pqformat as pq;
 use mbutils_seams as mb;
@@ -597,7 +597,7 @@ pub fn bit<'mcx>(
     if len <= 0 || len > VARBITMAXLEN || len == arg.varbitlen() {
         return Ok(VarBit {
             bit_len: arg.bit_len,
-            data: mcx::slice_in(mcx, arg.data)?,
+            data: ::mcx::slice_in(mcx, arg.data)?,
         });
     }
 
@@ -636,7 +636,7 @@ pub fn varbit<'mcx>(
     if len <= 0 || len >= arg.varbitlen() {
         return Ok(VarBit {
             bit_len: arg.bit_len,
-            data: mcx::slice_in(mcx, arg.data)?,
+            data: ::mcx::slice_in(mcx, arg.data)?,
         });
     }
 
@@ -1454,7 +1454,7 @@ pub fn bitsetbit<'mcx>(
         );
     }
 
-    let mut data = mcx::slice_in(mcx, arg1.data)?;
+    let mut data = ::mcx::slice_in(mcx, arg1.data)?;
 
     let byte_no = (n / BITS_PER_BYTE) as usize;
     let bit_no = BITS_PER_BYTE - 1 - (n % BITS_PER_BYTE);

@@ -25,12 +25,12 @@
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
-use opclass::AMOP_SEARCH;
+use ::opclass::AMOP_SEARCH;
 
 // The opclass-form / member-row mirror types carried across the syscache seams
 // live in `types-hash` (shared by every AM validator); re-export so callers and
 // tests can name them through this crate as well.
-pub use hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
+pub use ::hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 
 use amvalidate_seams as amvalidate_seams;
 use format_type_seams as format_type_seams;

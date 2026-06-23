@@ -23,35 +23,35 @@
 //! The lock-wait primitives are reached through the same honest seams as
 //! `heap_delete` (the heapam LOCK family + multixact.c).
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, MultiXactId, OffsetNumber, Oid, Size, TransactionId};
-use types_core::xact::{CommandId, InvalidCommandId};
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, MultiXactId, OffsetNumber, Oid, Size, TransactionId};
+use ::types_core::xact::{CommandId, InvalidCommandId};
 use types_error::{
     PgResult, ERRCODE_INVALID_TRANSACTION_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
-use utils_error::ereport;
-use types_tuple::heaptuple::Datum;
+use ::utils_error::ereport;
+use ::types_tuple::heaptuple::Datum;
 use rel::{Relation, RelationData};
-use types_storage::lock::XLTW_Oper;
+use ::types_storage::lock::XLTW_Oper;
 use types_storage::{Buffer, InvalidBuffer};
-use types_tableam::tableam::{
+use ::types_tableam::tableam::{
     LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
 };
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleField3, HeapTupleHeaderData, ItemPointerData,
     FirstLowInvalidHeapAttributeNumber, TableOidAttributeNumber, HEAP2_XACT_MASK, HEAP_COMBOCID,
     HEAP_HASEXTERNAL, HEAP_HOT_UPDATED, HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_ONLY_TUPLE,
     HEAP_UPDATED, HEAP_XACT_MASK, HEAP_XMAX_INVALID, HEAP_XMAX_KEYSHR_LOCK, HEAP_XMAX_LOCK_ONLY,
 };
-use xlog_records::multixact::MultiXactStatus;
+use ::xlog_records::multixact::MultiXactStatus;
 
 use page::{
     ItemPointerEquals, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid,
     PageClearAllVisible, PageGetItem, PageGetItemId, PageMut, PageRef, PageSetFull, PageSetPrunable,
 };
 
-use heapam_visibility::htup::{
+use ::heapam_visibility::htup::{
     HeapTupleHeaderGetRawXmax, HEAP_LOCKED_UPGRADED, HEAP_LOCK_MASK, HEAP_XMAX_IS_LOCKED_ONLY,
 };
 use heapam_visibility::{
@@ -64,7 +64,7 @@ use crate::delete::{compute_new_xmax_infomask, ExtractReplicaIdentity};
 use crate::{compute_infobits, xmax_infomask_changed, GetMultiXactIdHintBits, UpdateXmaxHintBits};
 
 use heapam_seams as heapam_seam;
-use heaptoast::heap_toast_insert_or_update;
+use ::heaptoast::heap_toast_insert_or_update;
 use hio::{RelationGetBufferForTuple, RelationPutHeapTuple};
 use hio_seams as hio_seam;
 use vacuumlazy_seams as page_seam;
@@ -77,19 +77,19 @@ use bufmgr_seams as bufmgr_seam;
 use predicate_seams as predicate_seam;
 use pgstat_seams as pgstat_seam;
 use relcache_seams as relcache_seam;
-use relcache_seams::IndexAttrBitmapKind;
+use ::relcache_seams::IndexAttrBitmapKind;
 use combocid_seams as combocid_seam;
 
 use heaptuple::{heap_deform_tuple, heap_getsysattr, heap_tuple_to_disk_image};
 use ::nodes::Bitmapset;
-use types_storage::bufpage::SizeofHeapTupleHeader;
-use wal::wal::{RM_HEAP_ID, XLOG_INCLUDE_ORIGIN};
-use wal::xloginsert::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
+use ::types_storage::bufpage::SizeofHeapTupleHeader;
+use ::wal::wal::{RM_HEAP_ID, XLOG_INCLUDE_ORIGIN};
+use ::wal::xloginsert::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};
 
-use rmgrdesc_next::heapdesc::{
+use ::rmgrdesc_next::heapdesc::{
     XLOG_HEAP_HOT_UPDATE, XLOG_HEAP_INIT_PAGE, XLOG_HEAP_LOCK, XLOG_HEAP_UPDATE,
 };
-use xlog_records::heapam_xlog::{
+use ::xlog_records::heapam_xlog::{
     xl_heap_header, xl_heap_lock, xl_heap_update, SizeOfHeapHeader, SizeOfHeapLock,
     SizeOfHeapUpdate, XLH_LOCK_ALL_FROZEN_CLEARED, XLH_UPDATE_CONTAINS_NEW_TUPLE,
     XLH_UPDATE_CONTAINS_OLD_KEY, XLH_UPDATE_CONTAINS_OLD_TUPLE,
@@ -118,17 +118,17 @@ const REPLICA_IDENTITY_FULL: u8 = b'f';
 const InvalidTransactionId: TransactionId = 0;
 
 /// `FirstOffsetNumber` (storage/off.h).
-const FirstOffsetNumber: OffsetNumber = types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
+const FirstOffsetNumber: OffsetNumber = ::types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
 
 /// `HEAP_XMAX_BITS` (htup_details.h).
-const HEAP_XMAX_BITS: u16 = types_tuple::heaptuple::HEAP_XMAX_COMMITTED
+const HEAP_XMAX_BITS: u16 = ::types_tuple::heaptuple::HEAP_XMAX_COMMITTED
     | HEAP_XMAX_INVALID
-    | types_tuple::heaptuple::HEAP_XMAX_IS_MULTI
+    | ::types_tuple::heaptuple::HEAP_XMAX_IS_MULTI
     | HEAP_LOCK_MASK
     | HEAP_XMAX_LOCK_ONLY;
 
 /// `TOAST_TUPLE_THRESHOLD` (access/heaptoast.h).
-const TOAST_TUPLE_THRESHOLD: usize = heaptoast::TOAST_TUPLE_THRESHOLD;
+const TOAST_TUPLE_THRESHOLD: usize = ::heaptoast::TOAST_TUPLE_THRESHOLD;
 
 // ===========================================================================
 // heap_update — update a tuple in a heap (heapam.c).
@@ -163,7 +163,7 @@ pub fn heap_update<'mcx>(
     // HeapTupleHeaderGetNatts(newtup->t_data) <= RelationGetNumberOfAttributes.
     debug_assert!({
         let hdr = newtup.tuple.t_data.as_ref().expect("heap_update: no header");
-        (types_tuple::heaptuple::HeapTupleHeaderGetNatts(hdr) as i32)
+        (::types_tuple::heaptuple::HeapTupleHeaderGetNatts(hdr) as i32)
             <= relation.rd_att.natts
     });
 
@@ -196,7 +196,7 @@ pub fn heap_update<'mcx>(
     let id_attrs =
         relcache_seam::relation_get_index_attr_bitmap::call(mcx, relation, IndexAttrBitmapKind::Identity)?;
 
-    let mut interesting_attrs: Option<mcx::PgBox<'mcx, Bitmapset<'mcx>>> = None;
+    let mut interesting_attrs: Option<::mcx::PgBox<'mcx, Bitmapset<'mcx>>> = None;
     interesting_attrs = bms_seam::bms_add_members::call(mcx, interesting_attrs, hot_attrs.as_deref())?;
     interesting_attrs = bms_seam::bms_add_members::call(mcx, interesting_attrs, sum_attrs.as_deref())?;
     interesting_attrs = bms_seam::bms_add_members::call(mcx, interesting_attrs, key_attrs.as_deref())?;
@@ -315,7 +315,7 @@ pub fn heap_update<'mcx>(
             let xwait = HeapTupleHeaderGetRawXmax(data_ref(&oldtup));
             let infomask = data_ref(&oldtup).t_infomask;
 
-            if (infomask & types_tuple::heaptuple::HEAP_XMAX_IS_MULTI) != 0 {
+            if (infomask & ::types_tuple::heaptuple::HEAP_XMAX_IS_MULTI) != 0 {
                 let conflict = heapam_seam::does_multi_xact_id_conflict::call(
                     xwait as MultiXactId,
                     infomask,
@@ -564,7 +564,7 @@ pub fn heap_update<'mcx>(
          * If we found a valid Xmax for the new tuple, the only possibility is
          * the lockers had FOR KEY SHARE lock.
          */
-        if (data_ref(&oldtup).t_infomask & types_tuple::heaptuple::HEAP_XMAX_IS_MULTI) != 0 {
+        if (data_ref(&oldtup).t_infomask & ::types_tuple::heaptuple::HEAP_XMAX_IS_MULTI) != 0 {
             let (m, m2) = GetMultiXactIdHintBits(mcx, xmax_new_tuple)?;
             infomask_new_tuple = m;
             infomask2_new_tuple = m2;
@@ -1090,7 +1090,7 @@ pub fn simple_heap_update<'mcx>(
 /// (heapam.c) — whether the given attribute's values are the same (simple
 /// binary comparison).
 fn heap_attr_equals(
-    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    tupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
     attrnum: i32,
     value1: &Datum<'_>,
     value2: &Datum<'_>,
@@ -1134,9 +1134,9 @@ fn HeapDetermineColumnsInfo<'mcx>(
     oldtup: &FormedTuple<'mcx>,
     newtup: &FormedTuple<'mcx>,
     has_external: &mut bool,
-) -> PgResult<Option<mcx::PgBox<'mcx, Bitmapset<'mcx>>>> {
+) -> PgResult<Option<::mcx::PgBox<'mcx, Bitmapset<'mcx>>>> {
     let tupdesc = &relation.rd_att;
-    let mut modified: Option<mcx::PgBox<'mcx, Bitmapset<'mcx>>> = None;
+    let mut modified: Option<::mcx::PgBox<'mcx, Bitmapset<'mcx>>> = None;
 
     // Deform both tuples once for user-column access (the repo's getattr
     // analog; system columns are read via heap_getsysattr below). C uses
@@ -1250,7 +1250,7 @@ fn log_heap_update<'mcx>(
     old_key_tuple: Option<&FormedTuple<'mcx>>,
     all_visible_cleared: bool,
     new_all_visible_cleared: bool,
-) -> PgResult<types_core::XLogRecPtr> {
+) -> PgResult<::types_core::XLogRecPtr> {
     let need_tuple_data = relation_is_logically_logged(reln);
 
     /* Caller should not call me on a non-WAL-logged relation */
@@ -1451,7 +1451,7 @@ fn read_on_page_tuple<'mcx>(
     tid: ItemPointerData,
 ) -> PgResult<FormedTuple<'mcx>> {
     let offnum = ItemPointerGetOffsetNumber(&tid);
-    let mut out: Option<(HeapTupleHeaderData<'mcx>, mcx::PgVec<'mcx, u8>, u32)> = None;
+    let mut out: Option<(HeapTupleHeaderData<'mcx>, ::mcx::PgVec<'mcx, u8>, u32)> = None;
     bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
         let page = PageRef::new(page_bytes)?;
         let item_id = PageGetItemId(&page, offnum)?;
@@ -1469,7 +1469,7 @@ fn read_on_page_tuple<'mcx>(
         // Slice from `t_hoff`, matching `FormedTuple::read_on_page_full`.
         let t_hoff = hdr.t_hoff as usize;
         let data_start = core::cmp::min(t_hoff, item.len());
-        let mut data = mcx::PgVec::new_in(mcx);
+        let mut data = ::mcx::PgVec::new_in(mcx);
         for &b in &item[data_start..] {
             data.push(b);
         }
@@ -1477,13 +1477,13 @@ fn read_on_page_tuple<'mcx>(
         Ok(())
     })?;
     let (hdr, data, t_len) = out.expect("with_buffer_page closure must have run");
-    let tuple = mcx::alloc_in(
+    let tuple = ::mcx::alloc_in(
         mcx,
         HeapTupleData {
             t_len,
             t_self: tid,
             t_tableOid: rel_id,
-            t_data: Some(mcx::alloc_in(mcx, hdr)?),
+            t_data: Some(::mcx::alloc_in(mcx, hdr)?),
         },
     )?;
     Ok(FormedTuple { tuple, data })
@@ -1502,7 +1502,7 @@ fn write_back_header(buffer: Buffer, tp: &FormedTuple<'_>) -> PgResult<()> {
         };
         let item = page_bytes
             .get_mut(off..off + len)
-            .ok_or_else(|| types_error::PgError::error("item storage is outside page"))?;
+            .ok_or_else(|| ::types_error::PgError::error("item storage is outside page"))?;
         header_image.write_on_page(item)?;
         Ok(())
     })
@@ -1677,7 +1677,7 @@ fn maxalign(len: usize) -> usize {
 /// `RelationIsAccessibleInLogicalDecoding(relation)` (utils/rel.h).
 fn relation_is_accessible_in_logical_decoding(relation: &RelationData<'_>) -> bool {
     let wal = transam_xlog_seams::wal_level::call();
-    let xlog_logical_info_active = wal >= wal::WalLevel::Logical;
+    let xlog_logical_info_active = wal >= ::wal::WalLevel::Logical;
     xlog_logical_info_active
         && relcache_seam::relation_needs_wal::call(relation)
         && (catalog_seam::is_catalog_relation::call(relation)
@@ -1687,7 +1687,7 @@ fn relation_is_accessible_in_logical_decoding(relation: &RelationData<'_>) -> bo
 /// `RelationIsLogicallyLogged(relation)` (utils/rel.h).
 fn relation_is_logically_logged(relation: &RelationData<'_>) -> bool {
     let wal = transam_xlog_seams::wal_level::call();
-    let xlog_logical_info_active = wal >= wal::WalLevel::Logical;
+    let xlog_logical_info_active = wal >= ::wal::WalLevel::Logical;
     xlog_logical_info_active
         && relcache_seam::relation_needs_wal::call(relation)
         && !catalog_seam::is_catalog_relation::call(relation)
@@ -1705,7 +1705,7 @@ fn relation_is_used_as_catalog_table(relation: &RelationData<'_>) -> bool {
 }
 
 /// `elog(ERROR, msg)` builder.
-fn elog_error(msg: &str) -> types_error::PgError {
+fn elog_error(msg: &str) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg.to_string()).into_error()
 }
 
@@ -1743,8 +1743,8 @@ fn compute_prefix_suffix(oldp: &[u8], newp: &[u8]) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
-    use types_tuple::heaptuple::{
+    use ::mcx::MemoryContext;
+    use ::types_tuple::heaptuple::{
         BlockIdData, HeapTupleFields, ItemPointerData,
     };
 
@@ -1810,16 +1810,16 @@ mod tests {
         let ctx = MemoryContext::new("attr_equals");
         let mcx = ctx.mcx();
         // A trivial 1-attribute tuple descriptor (attbyval int4-like).
-        let mut td = types_tuple::heaptuple::TupleDescData {
+        let mut td = ::types_tuple::heaptuple::TupleDescData {
             natts: 1,
             tdtypeid: 0,
             tdtypmod: -1,
             tdrefcount: 0,
             constr: None,
-            compact_attrs: mcx::PgVec::new_in(mcx),
-            attrs: mcx::PgVec::new_in(mcx),
+            compact_attrs: ::mcx::PgVec::new_in(mcx),
+            attrs: ::mcx::PgVec::new_in(mcx),
         };
-        td.compact_attrs.push(types_tuple::heaptuple::CompactAttribute {
+        td.compact_attrs.push(::types_tuple::heaptuple::CompactAttribute {
             attcacheoff: -1,
             attlen: 4,
             attbyval: true,

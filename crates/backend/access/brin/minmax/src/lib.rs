@@ -18,16 +18,16 @@
 //! bloom opclass into `backend-access-brin-bloom`; minmax-multi panics until its
 //! stage lands). This is the
 //! BRIN F0-opclass S1-minmax stage; S2-S4 (inclusion/bloom/minmax-multi) reuse
-//! the same [`brin::OpaqueOpcInfo`] carrier and the same dispatch
+//! the same [`::brin::OpaqueOpcInfo`] carrier and the same dispatch
 //! installer pattern.
 //!
 //! ## Carrier decision (S1)
 //!
 //! C's `MinmaxOpaque { Oid cached_subtype; FmgrInfo strategy_procinfos[]; }`
 //! lives in the `palloc0`'d tail of the `BrinOpcInfo` (`oi_opaque`, a `void *`).
-//! The repo models `oi_opaque` as the typed enum [`brin::OpaqueOpcInfo`]
+//! The repo models `oi_opaque` as the typed enum [`::brin::OpaqueOpcInfo`]
 //! (one variant per built-in opclass); minmax's variant is
-//! [`brin::MinmaxOpaque`]. Each cached `FmgrInfo` is reduced to the
+//! [`::brin::MinmaxOpaque`]. Each cached `FmgrInfo` is reduced to the
 //! resolved comparison function's `Oid` — the repo's fmgr-call seam
 //! (`function_call2_coll`) re-resolves by OID, so the `Oid` is the whole
 //! callable identity. The BRIN AM dispatches the support procs through a
@@ -43,14 +43,14 @@ use alloc::format;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use brin::{BrinDesc, BrinOpcInfo, BrinValues, MinmaxOpaque, OpaqueOpcInfo};
-use types_core::primitive::{AttrNumber, BlockNumber, Oid};
-use types_error::error::{ERRCODE_INTERNAL_ERROR, ERROR};
-use types_error::PgResult;
-use rel::Relation;
-use types_scan::scankey::ScanKeyData;
+use ::types_core::primitive::{AttrNumber, BlockNumber, Oid};
+use ::types_error::error::{ERRCODE_INTERNAL_ERROR, ERROR};
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_scan::scankey::ScanKeyData;
 use types_tuple::heaptuple::Datum;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use brin_entry_seams as opclass;
 use bloom as bloom;
@@ -662,7 +662,7 @@ fn dispatch_serialize<'mcx>(
     mcx: Mcx<'mcx>,
     keyno: usize,
     bdesc: &BrinDesc<'mcx>,
-    mem_value: &mut brin::BrinMemValue<'mcx>,
+    mem_value: &mut ::brin::BrinMemValue<'mcx>,
     dst: &mut [Datum<'mcx>],
 ) -> PgResult<()> {
     let oid = support_proc_oid(&bdesc.bd_index, keyno, BRIN_PROCNUM_OPCINFO)?;
@@ -689,8 +689,8 @@ fn dispatch_serialize<'mcx>(
 /// owned model expresses through the typed seams instead). Registering the rows
 /// also satisfies the `fmgr_isbuiltin` completeness guard.
 fn register_opclass_support_builtins() {
-    fn b(foid: Oid, name: &str, nargs: i16, strict: bool) -> fmgr::BuiltinFunction {
-        fmgr::BuiltinFunction {
+    fn b(foid: Oid, name: &str, nargs: i16, strict: bool) -> ::fmgr::BuiltinFunction {
+        ::fmgr::BuiltinFunction {
             foid,
             name: alloc::string::String::from(name),
             nargs,
@@ -733,11 +733,11 @@ fn register_opclass_support_builtins() {
     fmgr_core::register_builtins_native([
         (
             b(bloom::F_BRIN_BLOOM_OPTIONS, "brin_bloom_options", 1, false),
-            bloom::fc_brin_bloom_options as fmgr::PgFnNative,
+            bloom::fc_brin_bloom_options as ::fmgr::PgFnNative,
         ),
         (
             b(mmm::F_BRIN_MINMAX_MULTI_OPTIONS, "brin_minmax_multi_options", 1, false),
-            mmm::fc_brin_minmax_multi_options as fmgr::PgFnNative,
+            mmm::fc_brin_minmax_multi_options as ::fmgr::PgFnNative,
         ),
     ]);
 }

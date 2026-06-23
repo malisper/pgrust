@@ -56,7 +56,7 @@ fn set_checkpoint_completion_target(v: f64) {
 /// then recompute `CheckPointSegments`.
 fn assign_max_wal_size_hook(
     newval: i32,
-    _extra: Option<&guc_tables::GucHookExtra>,
+    _extra: Option<&::guc_tables::GucHookExtra>,
 ) {
     set_max_wal_size_mb(newval);
     recompute_checkpoint_segments();
@@ -66,7 +66,7 @@ fn assign_max_wal_size_hook(
 /// `CheckPointCompletionTarget` then recompute `CheckPointSegments`.
 fn assign_checkpoint_completion_target_hook(
     newval: f64,
-    _extra: Option<&guc_tables::GucHookExtra>,
+    _extra: Option<&::guc_tables::GucHookExtra>,
 ) {
     set_checkpoint_completion_target(newval);
     recompute_checkpoint_segments();

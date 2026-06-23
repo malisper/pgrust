@@ -51,7 +51,7 @@
 //! aligned region `bbs_buffer` and ship type-byte-plus-data with a single
 //! zero-copy `pq_putmessage('d', msgbuffer, len + 1)`. That is purely a
 //! copy-avoidance optimization below the libpq boundary. Here
-//! [`pq_putmessage`](pqcomm_seams::pq_putmessage) takes the
+//! [`pq_putmessage`](::pqcomm_seams::pq_putmessage) takes the
 //! complete body, so the `'d'` byte is prepended to the buffer slice when
 //! assembling the message; the bytes on the wire are identical. The
 //! `bbsink base` (forwarding chain — empty for this leaf — and the working
@@ -78,9 +78,9 @@ use pqformat::{
     pq_sendint16, pq_sendint64, pq_sendstring,
 };
 use timestamp_seams::{get_current_timestamp, timestamp_difference_milliseconds};
-use mcx::Mcx;
-use types_core::primitive::{Size, TimeLineID, TimestampTz, XLogRecPtr};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Size, TimeLineID, TimestampTz, XLogRecPtr};
+use ::types_error::PgResult;
 
 use backup_copy_seams as seam;
 use backup_copy_seams::{ResultColumn, ResultColumnType, ResultValue};

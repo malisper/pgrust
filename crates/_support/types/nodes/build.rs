@@ -251,7 +251,7 @@ fn emit_node_payload_impls(
          use crate::nodes::{Node, NodeTag, NodePtr};\n\
          use crate::opaque_node::{NodePayload, node_equal_seam};\n\
          use mcx::{Mcx, PgVec};\n\
-         use types_error::PgResult;\n\n",
+         use ::types_error::PgResult;\n\n",
     );
 
     let mut count = 0usize;
@@ -421,16 +421,16 @@ fn clone_in_dyn_body(ident: &str, _payload: &str, snake: &str) -> String {
         "List" => String::from(
             "    fn clone_in_dyn<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {\n        \
              let mut out: PgVec<'b, NodePtr<'b>> =\n            \
-             mcx::vec_with_capacity_in(mcx, self.0.len())?;\n        \
+             ::mcx::vec_with_capacity_in(mcx, self.0.len())?;\n        \
              for item in self.0.iter() {\n            \
              let cloned = item.clone_in(mcx)?;\n            \
-             out.push(mcx::alloc_in(mcx, cloned)?);\n        }\n        \
+             out.push(::mcx::alloc_in(mcx, cloned)?);\n        }\n        \
              Node::mk_list(mcx, out)\n    }\n",
         ),
         // T_IntList: bare-int list, copied verbatim into a fresh context vec.
         "IntList" => String::from(
             "    fn clone_in_dyn<'b>(&self, mcx: Mcx<'b>) -> PgResult<Node<'b>> {\n        \
-             let mut out: PgVec<'b, i32> = mcx::vec_with_capacity_in(mcx, self.0.len())?;\n        \
+             let mut out: PgVec<'b, i32> = ::mcx::vec_with_capacity_in(mcx, self.0.len())?;\n        \
              out.extend(self.0.iter().copied());\n        \
              Node::mk_int_list(mcx, out)\n    }\n",
         ),
@@ -513,7 +513,7 @@ fn emit_constructors(
                 "    /// Wrap an already-built `Expr` value as a `Node`. Allocates the\n    \
                  /// opaque representation in `mcx` (fallible).\n    \
                  #[inline]\n    \
-                 pub fn mk_expr(mcx: mcx::Mcx<'mcx>, payload: crate::primnodes::Expr<'mcx>) -> types_error::PgResult<crate::nodes::Node<'mcx>> {\n        \
+                 pub fn mk_expr(mcx: ::mcx::Mcx<'mcx>, payload: crate::primnodes::Expr<'mcx>) -> ::types_error::PgResult<crate::nodes::Node<'mcx>> {\n        \
                  crate::nodes::Node::new(mcx, crate::node_payload_gen::NodePayload_Expr(payload))\n    }\n",
             );
         }
@@ -543,7 +543,7 @@ fn emit_constructors(
             "    /// `makeNode({ident})` — build a `{ident}` node, allocating the\n    \
              /// opaque representation in `mcx` (fallible).\n    \
              #[inline]\n    \
-             pub fn mk_{snake}(mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
+             pub fn mk_{snake}(mcx: ::mcx::Mcx<'mcx>, payload: {payload_ty}) -> ::types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
              crate::nodes::Node::new(mcx, {adapter_ctor})\n    }}\n",
             ident = v.ident,
             snake = to_snake_case(&v.ident),
@@ -561,7 +561,7 @@ fn emit_constructors(
             "    /// `makeNode({ident})` — build a `{ident}` expression node, routed\n    \
              /// through the opaque `Expr` payload, allocating in `mcx` (fallible).\n    \
              #[inline]\n    \
-             pub fn mk_{snake}(mcx: mcx::Mcx<'mcx>, payload: {payload_ty}) -> types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
+             pub fn mk_{snake}(mcx: ::mcx::Mcx<'mcx>, payload: {payload_ty}) -> ::types_error::PgResult<crate::nodes::Node<'mcx>> {{\n        \
              crate::nodes::Node::new(mcx, crate::node_payload_gen::NodePayload_Expr(crate::primnodes::Expr::{ident}(payload)))\n    }}\n",
             ident = v.ident,
             snake = to_snake_case(&v.ident),
@@ -1346,9 +1346,9 @@ fn emit(variants: &[Variant]) -> String {
          /// `#[derive(PgNode)]`, or hand-written for the special-cased\n    \
          /// `List`/`Bitmapset`), re-homing the copy onto the TARGET context\n    \
          /// `dst`. Fallible: a charged allocation can OOM. Generated.\n    \
-         pub fn copy_node_in<'dst>(\n        &self,\n        dst: mcx::Mcx<'dst>,\n    \
-         ) -> types_error::PgResult<Node<'dst>> {\n        \
-         use node_support::PgNodeCopy;\n        match self {\n",
+         pub fn copy_node_in<'dst>(\n        &self,\n        dst: ::mcx::Mcx<'dst>,\n    \
+         ) -> ::types_error::PgResult<Node<'dst>> {\n        \
+         use ::node_support::PgNodeCopy;\n        match self {\n",
     );
     for v in variants {
         s.push_str(&format!(
@@ -1365,7 +1365,7 @@ fn emit(variants: &[Variant]) -> String {
          /// same-tag nodes delegate to that struct's per-struct `PgNodeEqual`\n    \
          /// impl. Infallible + lifetime-agnostic. Generated.\n    \
          pub fn equal_node(&self, other: &Node<'_>) -> bool {\n        \
-         use node_support::PgNodeEqual;\n        match (self, other) {\n",
+         use ::node_support::PgNodeEqual;\n        match (self, other) {\n",
     );
     for v in variants {
         s.push_str(&format!(
@@ -1397,10 +1397,10 @@ fn emit(variants: &[Variant]) -> String {
          /// hand-written serializer is wired. Generated.\n    \
          #[allow(unused_variables)]\n    \
          pub fn out_node(\n        &self,\n        \
-         buf: &mut node_support::alloc_reexport::string::String,\n    \
+         buf: &mut ::node_support::alloc_reexport::string::String,\n    \
          ) {\n        \
          #[allow(unused_imports)]\n        \
-         use node_support::PgNodeOut;\n        match self {\n",
+         use ::node_support::PgNodeOut;\n        match self {\n",
     );
     for v in variants {
         match v.out_read {
@@ -1440,11 +1440,11 @@ fn emit(variants: &[Variant]) -> String {
          /// until its hand-written reader is wired. Generated.\n    \
          #[allow(unused_variables, unreachable_code)]\n    \
          pub fn read_node<'dst>(\n        \
-         cur: &mut node_support::ReadCursor<'_>,\n        \
-         dst: mcx::Mcx<'dst>,\n    \
-         ) -> types_error::PgResult<Node<'dst>> {\n        \
+         cur: &mut ::node_support::ReadCursor<'_>,\n        \
+         dst: ::mcx::Mcx<'dst>,\n    \
+         ) -> ::types_error::PgResult<Node<'dst>> {\n        \
          #[allow(unused_imports)]\n        \
-         use node_support::PgNodeRead;\n        \
+         use ::node_support::PgNodeRead;\n        \
          let __peek = cur.peek_token()\n            \
          .expect(\"read_node: unexpected end of node token stream\");\n        \
          if __peek.text == \"{\" {\n            \
@@ -1506,7 +1506,7 @@ fn emit(variants: &[Variant]) -> String {
          /// unported routine. Generated.\n\
          #[allow(unused_variables)]\n\
          fn out_node_custom(\n    label: &str,\n    \
-         buf: &mut node_support::alloc_reexport::string::String,\n) {\n    \
+         buf: &mut ::node_support::alloc_reexport::string::String,\n) {\n    \
          ::core::panic!(\n        \
          \"out_node: special-read-write node `{}` needs a hand-written serializer; \
          none wired yet (K1 phase-3 OUT/READ stage is infra-only)\",\n        label)\n}\n\n",
@@ -1517,8 +1517,8 @@ fn emit(variants: &[Variant]) -> String {
          /// unported routine. Generated.\n\
          #[allow(unused_variables)]\n\
          fn read_node_custom<'dst>(\n    label: &str,\n    \
-         cur: &mut node_support::ReadCursor<'_>,\n    \
-         dst: mcx::Mcx<'dst>,\n) -> types_error::PgResult<Node<'dst>> {\n    \
+         cur: &mut ::node_support::ReadCursor<'_>,\n    \
+         dst: ::mcx::Mcx<'dst>,\n) -> ::types_error::PgResult<Node<'dst>> {\n    \
          ::core::panic!(\n        \
          \"read_node: special-read-write node `{}` needs a hand-written reader; \
          none wired yet (K1 phase-3 OUT/READ stage is infra-only)\",\n        label)\n}\n\n",
@@ -1534,8 +1534,8 @@ fn emit(variants: &[Variant]) -> String {
         "/// `nodeToString(obj)` (outfuncs.c) — serialize a node to its textual\n\
          /// token form. Builds a fresh scratch buffer (the `StringInfo` analogue)\n\
          /// and appends the node's tokens. Infallible. Generated.\n\
-         pub fn node_to_string(node: &Node<'_>) -> node_support::alloc_reexport::string::String {\n    \
-         let mut buf = node_support::alloc_reexport::string::String::new();\n    \
+         pub fn node_to_string(node: &Node<'_>) -> ::node_support::alloc_reexport::string::String {\n    \
+         let mut buf = ::node_support::alloc_reexport::string::String::new();\n    \
          node.out_node(&mut buf);\n    buf\n}\n\n",
     );
     s.push_str(
@@ -1544,8 +1544,8 @@ fn emit(variants: &[Variant]) -> String {
          /// (C's `stringToNode` allocates against `CurrentMemoryContext`; here the\n\
          /// destination is explicit). Fallible: the rebuild can OOM. Generated.\n\
          pub fn parse_node_string<'dst>(\n    s: &str,\n    \
-         dst: mcx::Mcx<'dst>,\n) -> types_error::PgResult<Node<'dst>> {\n    \
-         let mut cur = node_support::ReadCursor::new(s);\n    \
+         dst: ::mcx::Mcx<'dst>,\n) -> ::types_error::PgResult<Node<'dst>> {\n    \
+         let mut cur = ::node_support::ReadCursor::new(s);\n    \
          Node::read_node(&mut cur, dst)\n}\n",
     );
 

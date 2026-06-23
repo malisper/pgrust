@@ -26,13 +26,13 @@
 use core::sync::atomic::Ordering;
 
 use mcx::{Mcx, PgBox};
-use condvar::ConditionVariable;
-use types_parallel::shared_dsm_object::{SharedRef, SharedSlice};
-use types_parallel::SharedDsmObject;
-use rel::Relation;
-use types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64};
-use types_storage::Spinlock;
-use types_tableam::relscan::TableScanDesc;
+use ::condvar::ConditionVariable;
+use ::types_parallel::shared_dsm_object::{SharedRef, SharedSlice};
+use ::types_parallel::SharedDsmObject;
+use ::rel::Relation;
+use ::types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64};
+use ::types_storage::Spinlock;
+use ::types_tableam::relscan::TableScanDesc;
 use tidbitmap::{dsa_pointer, TIDBitmap};
 
 use crate::execexpr::ExprState;
@@ -247,7 +247,7 @@ pub struct BitmapHeapScan<'mcx> {
     pub scan: Scan<'mcx>,
     /// `List *bitmapqualorig` — original index quals (expression nodes), for
     /// rechecking on lossy pages.
-    pub bitmapqualorig: mcx::PgVec<'mcx, crate::primnodes::Expr<'mcx>>,
+    pub bitmapqualorig: ::mcx::PgVec<'mcx, crate::primnodes::Expr<'mcx>>,
 }
 
 impl BitmapHeapScan<'_> {
@@ -260,9 +260,9 @@ impl BitmapHeapScan<'_> {
     /// allocates.
     pub fn clone_in<'b>(
         &self,
-        mcx: mcx::Mcx<'b>,
+        mcx: ::mcx::Mcx<'b>,
     ) -> types_error::PgResult<BitmapHeapScan<'b>> {
-        let mut bitmapqualorig = mcx::vec_with_capacity_in(mcx, self.bitmapqualorig.len())?;
+        let mut bitmapqualorig = ::mcx::vec_with_capacity_in(mcx, self.bitmapqualorig.len())?;
         for e in self.bitmapqualorig.iter() {
             // Deep-copy via `clone_in`, not the derived `Expr::clone`
             // (which panics on a `SubPlan` arm).

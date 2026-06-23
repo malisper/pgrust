@@ -22,7 +22,7 @@
 //! cross-subsystem probe go through seams.
 //!
 //! Where lmgr.c takes a `Relation`, this layer takes the
-//! [`LockRelId`](types_storage::lock::LockRelId) value the relcache entry
+//! [`LockRelId`](::types_storage::lock::LockRelId) value the relcache entry
 //! carries in `rd_lockInfo.lockRelId` (the caller reads it off its own
 //! relation — `MyDatabaseId`/`IsSharedRelation`/`relisshared` are caller/global
 //! state, kept out of this layer except where the lmgr OID entry points must
@@ -33,16 +33,16 @@ extern crate alloc;
 use core::fmt;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::primitive::{BlockNumber, OffsetNumber, Oid, TransactionId};
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid, TransactionId};
 use types_error::{PgError, PgResult};
-use types_storage::lock::{
+use ::types_storage::lock::{
     LockRelId, XLTW_Oper, DEFAULT_LOCKMETHOD, ExclusiveLock, LOCKACQUIRE_ALREADY_CLEAR,
     LOCKACQUIRE_NOT_AVAIL, LOCKMODE, LOCKTAG, LOCKTAG_ADVISORY, LOCKTAG_APPLY_TRANSACTION,
     LOCKTAG_DATABASE_FROZEN_IDS, LOCKTAG_LAST_TYPE, LOCKTAG_OBJECT, LOCKTAG_PAGE, LOCKTAG_RELATION,
     LOCKTAG_RELATION_EXTEND, LOCKTAG_SPECULATIVE_TOKEN, LOCKTAG_TRANSACTION, LOCKTAG_TUPLE,
     LOCKTAG_USERLOCK, LOCKTAG_VIRTUALTRANSACTION, ShareLock,
 };
-use types_storage::storage::VirtualTransactionId;
+use ::types_storage::storage::VirtualTransactionId;
 
 use subtrans_seams as subtrans;
 use catalog_seams as catalog;
@@ -242,7 +242,7 @@ fn lock_acquire(
     lockmode: LOCKMODE,
     session_lock: bool,
     dont_wait: bool,
-) -> PgResult<types_storage::lock::LockAcquireResult> {
+) -> PgResult<::types_storage::lock::LockAcquireResult> {
     lock::lock_acquire_extended::call(tag, lockmode, session_lock, dont_wait, false)
 }
 
@@ -712,7 +712,7 @@ pub fn WaitForLockersMultiple(
     // is bounded by `locktags.len()` (caller-supplied, not data-derived), so
     // one sized reservation suffices.
     let mut holders: PgVec<PgVec<VirtualTransactionId>> =
-        mcx::vec_with_capacity_in(mcx, locktags.len())?;
+        ::mcx::vec_with_capacity_in(mcx, locktags.len())?;
     for locktag in locktags {
         let conflicts = lock::get_lock_conflicts::call(mcx, locktag, lockmode)?;
         if progress {
@@ -1130,7 +1130,7 @@ fn seam_unlock_relation_for_extension(dbid: Oid, relid: Oid) -> PgResult<()> {
 /// appends to a caller `StringInfo`; the seam allocates a transient buffer and
 /// returns the rendered text (the deadlock detector appends it itself).
 fn seam_describe_lock_tag(tag: LOCKTAG) -> alloc::string::String {
-    let ctx = mcx::MemoryContext::new("DescribeLockTag");
+    let ctx = ::mcx::MemoryContext::new("DescribeLockTag");
     let mut buf = PgString::new_in(ctx.mcx());
     // The descriptions are small, bounded strings; an OOM here would already
     // have aborted the deadlock report that called us.
@@ -1265,7 +1265,7 @@ pub fn init_seams() {
         UnlockRelationIdForSession(&relid, lockmode)
     });
     inward::wait_for_lockers::set(|heaplocktag, lockmode, progress| {
-        let ctx = mcx::MemoryContext::new("WaitForLockers");
+        let ctx = ::mcx::MemoryContext::new("WaitForLockers");
         WaitForLockers(ctx.mcx(), heaplocktag, lockmode, progress)
     });
     inward::set_locktag_relation::set(set_locktag_relation);
@@ -1292,6 +1292,6 @@ pub fn init_seams() {
     // user.c `LockSharedObject(AuthIdRelationId, roleid, 0, lockmode)` —
     // CREATE/ALTER/DROP ROLE lock the role-catalog object by OID.
     user_seams::lock_shared_object_authid::set(|roleid, lockmode| {
-        LockSharedObject(types_core::AUTH_ID_RELATION_ID, roleid, 0, lockmode)
+        LockSharedObject(::types_core::AUTH_ID_RELATION_ID, roleid, 0, lockmode)
     });
 }

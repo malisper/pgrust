@@ -1,10 +1,10 @@
 //! `access/rmgrdesc/gistdesc.c` — rmgr descriptor routines for GiST indexes.
 
 use crate::appendf;
-use mcx::PgString;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_error::PgResult;
 use wal::{DecodedXLogRecord, XLR_INFO_MASK};
-use xlog_records::gistxlog::{gistxlogDelete, gistxlogPageDelete, gistxlogPageReuse,
+use ::xlog_records::gistxlog::{gistxlogDelete, gistxlogPageDelete, gistxlogPageReuse,
                                    gistxlogPageSplit};
 
 // access/gistxlog.h
@@ -104,7 +104,7 @@ pub fn gist_identify(info: u8) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::test_support::record;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");

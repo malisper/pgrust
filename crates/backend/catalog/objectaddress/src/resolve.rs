@@ -14,9 +14,9 @@
 //! surface). The node demux uses the real [`Node`] accessors (`as_list` /
 //! `as_string` / `as_typename` / `as_objectwithargs`); no invented node model.
 
-use mcx::Mcx;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT,
@@ -37,17 +37,17 @@ use ::nodes::parsenodes::{
     OBJECT_VIEW,
 };
 use parsenodes::{Node, StringNode};
-use rel::Relation;
-use types_storage::lock::LOCKMODE;
-use types_tuple::access::RangeVar;
+use ::rel::Relation;
+use ::types_storage::lock::LOCKMODE;
+use ::types_tuple::access::RangeVar;
 
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX,
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_VIEW,
 };
 use types_tuple::heaptuple::{Datum as TupleDatum, FormedTuple};
 
-use objectaddress_seams::ResolvedObjectAddress;
+use ::objectaddress_seams::ResolvedObjectAddress;
 
 use crate::consts::*;
 
@@ -97,8 +97,8 @@ fn name_list_strs<'a>(names: &'a [Node]) -> Vec<&'a str> {
 /// error message. The C reads it in `CurrentMemoryContext`; the result is
 /// copied into the owned `String` immediately, so a transient context is the
 /// faithful stand-in for the seam's mcx-bearing signature.
-fn type_name_to_string(tn: &parsenodes::TypeName) -> PgResult<String> {
-    let cx = mcx::MemoryContext::new("TypeNameToString");
+fn type_name_to_string(tn: &::parsenodes::TypeName) -> PgResult<String> {
+    let cx = ::mcx::MemoryContext::new("TypeNameToString");
     let s = parse_type_seams::typename_to_string_node::call(cx.mcx(), tn)?;
     Ok(s.as_str().to_string())
 }
@@ -646,7 +646,7 @@ pub fn get_object_address_relobject<'mcx>(
     object: &Node,
     missing_ok: bool,
 ) -> PgResult<ResolvedObjectAddress<'mcx>> {
-    use types_storage::lock::AccessShareLock;
+    use ::types_storage::lock::AccessShareLock;
 
     let mut address = ObjectAddress {
         classId: INVALID_OID,
@@ -946,8 +946,8 @@ pub fn get_object_address_opf_member(
 ) -> PgResult<ObjectAddress> {
     use cache_syscache::{SearchSysCache4, SysCacheGetAttrNotNull};
     use cache_syscache::{AMOPSTRATEGY, AMPROCNUM};
-    use cache::SysCacheKey;
-    use datum::Datum as KeyDatum;
+    use ::cache::SysCacheKey;
+    use ::datum::Datum as KeyDatum;
 
     let outer = cast_list(object)?;
     let first = cast_list(&outer[0])?;
@@ -1061,7 +1061,7 @@ pub fn get_object_address_opf_member(
 /// `getObjectDescription(&famaddr, false)` for the opf-member error messages.
 fn describe_family<'mcx>(mcx: Mcx<'mcx>, famaddr: &ObjectAddress) -> PgResult<String> {
     let desc =
-        objectaddress_seams::get_object_description::call(mcx, famaddr, false)?;
+        ::objectaddress_seams::get_object_description::call(mcx, famaddr, false)?;
     Ok(desc.map(|s| s.as_str().to_string()).unwrap_or_default())
 }
 
@@ -1136,11 +1136,11 @@ pub fn get_object_address_publication_rel<'mcx>(
     object: &Node,
     missing_ok: bool,
 ) -> PgResult<ResolvedObjectAddress<'mcx>> {
-    use cache_syscache::GetSysCacheOid;
-    use cache_syscache::PUBLICATIONRELMAP;
-    use cache::SysCacheKey;
-    use datum::Datum as KeyDatum;
-    use types_storage::lock::AccessShareLock;
+    use ::cache_syscache::GetSysCacheOid;
+    use ::cache_syscache::PUBLICATIONRELMAP;
+    use ::cache::SysCacheKey;
+    use ::datum::Datum as KeyDatum;
+    use ::types_storage::lock::AccessShareLock;
 
     let mut address = ObjectAddress {
         classId: PublicationRelRelationId,
@@ -1219,10 +1219,10 @@ pub fn get_object_address_publication_schema(
     object: &Node,
     missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    use cache_syscache::GetSysCacheOid;
-    use cache_syscache::PUBLICATIONNAMESPACEMAP;
-    use cache::SysCacheKey;
-    use datum::Datum as KeyDatum;
+    use ::cache_syscache::GetSysCacheOid;
+    use ::cache_syscache::PUBLICATIONNAMESPACEMAP;
+    use ::cache::SysCacheKey;
+    use ::datum::Datum as KeyDatum;
 
     let mut address = ObjectAddress {
         classId: PublicationNamespaceRelationId,
@@ -1275,10 +1275,10 @@ pub fn get_object_address_defacl(
     object: &Node,
     missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    use cache_syscache::GetSysCacheOid;
-    use cache_syscache::DEFACLROLENSPOBJ;
-    use cache::SysCacheKey;
-    use datum::Datum as KeyDatum;
+    use ::cache_syscache::GetSysCacheOid;
+    use ::cache_syscache::DEFACLROLENSPOBJ;
+    use ::cache::SysCacheKey;
+    use ::datum::Datum as KeyDatum;
 
     const DEFACLOBJ_RELATION: u8 = b'r';
     const DEFACLOBJ_SEQUENCE: u8 = b'S';
@@ -1382,7 +1382,7 @@ pub fn check_object_ownership<'mcx>(
     object: &Node,
     relation: Option<&Relation<'mcx>>,
 ) -> PgResult<()> {
-    use types_acl::ACLCHECK_NOT_OWNER;
+    use ::types_acl::ACLCHECK_NOT_OWNER;
 
     match objtype {
         OBJECT_INDEX | OBJECT_SEQUENCE | OBJECT_TABLE | OBJECT_VIEW | OBJECT_MATVIEW
@@ -1568,7 +1568,7 @@ pub fn check_object_ownership<'mcx>(
                 if !user_seams::is_admin_of_role::call(roleid, address.objectId)? {
                     // GetUserNameFromId(address.objectId, true) in a transient
                     // context — the name is copied into the detail string.
-                    let cx = mcx::MemoryContext::new("check_object_ownership");
+                    let cx = ::mcx::MemoryContext::new("check_object_ownership");
                     let target =
                         user_seams::get_user_name_from_id::call(
                             cx.mcx(),
@@ -1617,8 +1617,8 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
 /// 2573).
 pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
     use cache_syscache::{SearchSysCache1, SysCacheGetAttrNotNull};
-    use cache::SysCacheKey;
-    use datum::Datum;
+    use ::cache::SysCacheKey;
+    use ::datum::Datum;
 
     let property = crate::properties::get_object_property_data(address.classId)?;
     if property.attnum_namespace == crate::consts::InvalidAttrNumber {
@@ -1628,7 +1628,7 @@ pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
     let cache = property.oid_catcache_id;
     debug_assert!(cache != -1);
 
-    let cx = mcx::MemoryContext::new("get_object_namespace");
+    let cx = ::mcx::MemoryContext::new("get_object_namespace");
     let mcx = cx.mcx();
     let tuple = SearchSysCache1(
         mcx,
@@ -1663,7 +1663,7 @@ pub fn read_objtype_from_string(objtype: &str) -> PgResult<i32> {
 
 /// `get_relkind_objtype(char relkind)` (objectaddress.c 6186).
 pub fn get_relkind_objtype(relkind: u8) -> ObjectType {
-    use types_tuple::access::RELKIND_TOASTVALUE;
+    use ::types_tuple::access::RELKIND_TOASTVALUE;
     match relkind {
         x if x == RELKIND_RELATION || x == RELKIND_PARTITIONED_TABLE => OBJECT_TABLE,
         x if x == RELKIND_INDEX || x == RELKIND_PARTITIONED_INDEX => OBJECT_INDEX,
@@ -1713,7 +1713,7 @@ pub fn cast_source_target<'mcx>(
     mcx: Mcx<'mcx>,
     castid: Oid,
 ) -> PgResult<Option<(Oid, Oid)>> {
-    use types_storage::lock::AccessShareLock;
+    use ::types_storage::lock::AccessShareLock;
 
     let cast_desc = common_relation_seams::relation_open::call(
         mcx,

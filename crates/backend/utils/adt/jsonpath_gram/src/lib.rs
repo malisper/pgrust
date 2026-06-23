@@ -35,14 +35,14 @@ use alloc::vec::Vec;
 use jsonpath_scan::{
     jsonpath_yyerror, jsonpath_yyerror_yytext, JsonPathLexer, Lexeme, Token,
 };
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use types_error::{ERRCODE_INVALID_REGULAR_EXPRESSION, ERRCODE_SYNTAX_ERROR};
-use types_jsonpath::jsonpath::{
+use ::types_jsonpath::jsonpath::{
     JsonPathItemType, JSP_REGEX_DOTALL, JSP_REGEX_ICASE, JSP_REGEX_MLINE, JSP_REGEX_QUOTE,
     JSP_REGEX_WSPACE,
 };
-use types_jsonpath::parse::{
+use ::types_jsonpath::parse::{
     JsonPathParseItem, JsonPathParseResult, JsonPathParseValue, JsonPathString, JsonPathSubscript,
 };
 
@@ -267,7 +267,7 @@ fn make_item_like_regex(
         let cx = MemoryContext::new("JsonPathRegexValidate");
         let wpattern =
             mbutils::pg_mb2wchar_with_len(cx.mcx(), &pattern_bytes)?;
-        match regex_core::regex_compile::pg_regcomp(
+        match ::regex_core::regex_compile::pg_regcomp(
             cx.mcx(),
             wpattern.as_slice(),
             cflags,
@@ -278,7 +278,7 @@ fn make_item_like_regex(
             }
             Err(e) => {
                 // C: pg_regerror(...) -> ereturn ERRCODE_INVALID_REGULAR_EXPRESSION.
-                let msg = regex_core::regex_export_free_error::pg_regerror(e.0);
+                let msg = ::regex_core::regex_export_free_error::pg_regerror(e.0);
                 return ereturn(
                     escontext.as_deref_mut(),
                     None,
@@ -300,10 +300,10 @@ fn jsp_convert_regex_flags(
     xflags: u32,
     escontext: &mut Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<i32>> {
-    use regex_core::regex_consts::{
+    use ::regex_core::regex_consts::{
         REG_ADVANCED, REG_ICASE, REG_NLANCH, REG_NLSTOP, REG_QUOTE,
     };
-    use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
+    use ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 
     // C: "By default, XQuery is very nearly the same as Spencer's AREs".
     let mut cflags: i32 = REG_ADVANCED;
@@ -1372,7 +1372,7 @@ pub fn parsejsonpath(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_jsonpath::parse::JsonPathParseValue;
+    use ::types_jsonpath::parse::JsonPathParseValue;
 
     fn parse(s: &str) -> Option<JsonPathParseResult> {
         parsejsonpath(s.as_bytes(), None).expect("hard error")

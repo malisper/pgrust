@@ -27,13 +27,13 @@
 //! `anyelement` / `anyarray` / `record` argument), and drives the type-output
 //! dispatch through the value core.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use fmgr_core as fmgr_core;
-/// The unified value type the cores consume (`types_tuple::Datum`).
-use types_tuple::Datum as ValDatum;
+/// The unified value type the cores consume (`::types_tuple::Datum`).
+use ::types_tuple::Datum as ValDatum;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -84,7 +84,7 @@ fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, i: i32) -> types_core::Oid
     fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), i)
 }
 
-/// Materialize argument `i` as the unified `types_tuple::Datum` the json value
+/// Materialize argument `i` as the unified `::types_tuple::Datum` the json value
 /// cores consume: a by-value scalar word, a by-reference varlena (`ByRef`, the
 /// FULL header-ful image, carried verbatim under the header-ful convention), a
 /// `cstring`, or a composite record (`Composite`). Scratch copies live in `mcx`.
@@ -99,12 +99,12 @@ fn arg_value<'mcx>(
         Some(RefPayload::Varlena(b)) => ValDatum::ByRef(mcx::slice_in(mcx, b)?),
         Some(RefPayload::Cstring(s)) => ValDatum::Cstring(s.clone()),
         Some(RefPayload::Composite(image)) => ValDatum::Composite(
-            types_tuple::FormedTuple::from_datum_image(mcx, image)?,
+            ::types_tuple::FormedTuple::from_datum_image(mcx, image)?,
         ),
         Some(RefPayload::Expanded(eo)) => {
             // C: a `VARATT_IS_EXPANDED` value; the cores flatten through
             // `clone_in` when they need the byte image.
-            ValDatum::ByRef(mcx::slice_in(mcx, &datum::flatten_expanded(eo.as_ref()))?)
+            ValDatum::ByRef(mcx::slice_in(mcx, &::datum::flatten_expanded(eo.as_ref()))?)
         }
         // No output-family entry takes an `internal` argument.
         Some(RefPayload::Internal(_)) => {
@@ -345,7 +345,7 @@ const TEXTOID_VARIADIC: types_core::Oid = 25;
 
 /// The extracted variadic argument vectors (`Datum *args`, `Oid *types`,
 /// `bool *nulls`), or `None` for the C `nargs < 0` `PG_RETURN_NULL()` case
-/// (`VARIADIC NULL`). The `Datum`s are canonical `types_tuple::Datum`s living in
+/// (`VARIADIC NULL`). The `Datum`s are canonical `::types_tuple::Datum`s living in
 /// the supplied scratch `mcx`.
 struct VariadicArgs<'mcx> {
     args: Vec<ValDatum<'mcx>>,

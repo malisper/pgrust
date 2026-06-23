@@ -28,11 +28,11 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::BlockNumber;
+use ::types_core::BlockNumber;
 use types_dsa::{DsaHandle, DsaPointer};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::bitmapset::bitmapword;
-use types_vacuum::vacuumlazy::{TidStore, TidStoreIterHandle};
+use ::types_vacuum::vacuumlazy::{TidStore, TidStoreIterHandle};
 
 // ---- creation / teardown ----------------------------------------------------
 

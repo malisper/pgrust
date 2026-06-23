@@ -23,7 +23,7 @@
 
 
 use pgtime::{pg_tm};
-use state_pgtz::session_timezone;
+use ::state_pgtz::session_timezone;
 use types_datetime::{
     Interval, TimeTzADT, DTERR_BAD_FORMAT, DTK_DATE, DTK_EARLY, DTK_EPOCH, DTK_LATE, DT_NOBEGIN,
     DT_NOEND, MIN_TIMESTAMP, POSTGRES_EPOCH_JDATE, SECS_PER_DAY, TIMESTAMP_END_JULIAN,
@@ -49,7 +49,7 @@ use crate::timestamp::{
     TIMESTAMP_IS_NOBEGIN, TIMESTAMP_IS_NOEND,
 };
 
-const MAXDATEFIELDS: usize = types_datetime::MAXDATEFIELDS as usize;
+const MAXDATEFIELDS: usize = ::types_datetime::MAXDATEFIELDS as usize;
 
 // ---------------------------------------------------------------------------
 // date.h / timestamp.h constants and macros (not part of the shared ABI).
@@ -117,12 +117,12 @@ pub fn date_in_safe(
     let mut fsec: fsec_t = 0;
     let mut dtype: i32 = 0;
     let mut tzp: i32 = 0;
-    let mut extra = types_datetime::DateTimeErrorExtra::default();
+    let mut extra = ::types_datetime::DateTimeErrorExtra::default();
 
     // C date_in: workbuf[MAXDATELEN + 1] (date.c:128).
     let mut dterr = ParseDateTime(
         str,
-        types_datetime::MAXDATELEN as usize + 1,
+        ::types_datetime::MAXDATELEN as usize + 1,
         &mut field,
         &mut ftype,
         MAXDATEFIELDS,
@@ -538,7 +538,7 @@ fn unit_not_recognized(lowunits: &str) -> PgError {
 // ---------------------------------------------------------------------------
 
 /// Map a `DTERR_*` code to a [`PgError`] for the date type.
-fn date_parse_error(dterr: i32, str: &str, extra: &types_datetime::DateTimeErrorExtra) -> PgError {
+fn date_parse_error(dterr: i32, str: &str, extra: &::types_datetime::DateTimeErrorExtra) -> PgError {
     datetime_parse_error_for(dterr, str, "date", extra)
 }
 
@@ -549,7 +549,7 @@ pub(crate) fn datetime_parse_error_for(
     dterr: i32,
     str: &str,
     datatype: &str,
-    extra: &types_datetime::DateTimeErrorExtra,
+    extra: &::types_datetime::DateTimeErrorExtra,
 ) -> PgError {
     use types_datetime::{
         DTERR_BAD_TIMEZONE, DTERR_BAD_ZONE_ABBREV, DTERR_FIELD_OVERFLOW, DTERR_INTERVAL_OVERFLOW,
@@ -857,7 +857,7 @@ pub fn time_timetz(time: TimeADT) -> TimeTzADT {
 mod tests {
     use super::*;
     use crate::settings::{set_date_order, DATE_ORDER_TEST_LOCK};
-    use types_datetime::DATEORDER_MDY;
+    use ::types_datetime::DATEORDER_MDY;
 
     #[test]
     fn date_in_out_round_trip() {
@@ -1007,7 +1007,7 @@ mod tests {
     fn time_timetz_uses_session_zone_offset() {
         crate::test_install_seams();
         use crate::time::time_in;
-        use types_datetime::USECS_PER_HOUR;
+        use ::types_datetime::USECS_PER_HOUR;
 
         // The session zone is pinned to GMT, so the session-derived offset is 0.
         let t: TimeADT = USECS_PER_HOUR * 12; // 12:00:00
@@ -1019,7 +1019,7 @@ mod tests {
             let _g = DATE_ORDER_TEST_LOCK
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            crate::settings::set_date_style(types_datetime::USE_ISO_DATES);
+            crate::settings::set_date_style(::types_datetime::USE_ISO_DATES);
             time_in("12:00:00", -1).unwrap()
         };
         let r2 = time_timetz(parsed);

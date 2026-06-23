@@ -41,20 +41,20 @@ use lwlock::{
     LWLockInitialize, LWLockRelease,
 };
 use sync_seams as sync_seams;
-use activity_small::pgstat_checkpointer::with_pending_checkpointer_stats;
+use ::activity_small::pgstat_checkpointer::with_pending_checkpointer_stats;
 use stat_seams as stat_seams;
 use waitevent_seams as waitevent_seams;
-use utils_error::errno::current_errno;
+use ::utils_error::errno::current_errno;
 use utils_error::{config, ereport, PgResult};
 use init_small_seams as globals;
 use types_core::{
     InvalidTransactionId, InvalidXLogRecPtr, Size, TransactionId, XLogRecPtr, BLCKSZ,
 };
 use types_error::{ErrorLocation, DEBUG2, ERROR, LOG};
-use types_pgstat::wait_event::{
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_SLRU_FLUSH_SYNC, WAIT_EVENT_SLRU_READ, WAIT_EVENT_SLRU_SYNC, WAIT_EVENT_SLRU_WRITE,
 };
-use types_storage::sync::{FileTag, SyncRequestHandler, SyncRequestType};
+use ::types_storage::sync::{FileTag, SyncRequestHandler, SyncRequestType};
 use types_storage::{
     pg_atomic_uint64, LWLock, LWLockPadded, LW_EXCLUSIVE, LW_SHARED, LWLOCK_PADDED_SIZE,
 };
@@ -1844,7 +1844,7 @@ pub fn SlruScanDirectory(
                 .expect("checked hex SLRU segment name failed to parse");
             let segpage = segno * SLRU_PAGES_PER_SEGMENT;
 
-            utils_error::elog(
+            ::utils_error::elog(
                 DEBUG2,
                 format!(
                     "SlruScanDirectory invoking callback on {}/{}",

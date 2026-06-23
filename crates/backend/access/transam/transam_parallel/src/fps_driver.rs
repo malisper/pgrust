@@ -18,8 +18,8 @@
 //! passes/returns; the shared layout below is the on-the-wire DSM record.
 
 use types_core::{pid_t, Oid, ProcNumber, TimestampTz, XLogRecPtr};
-use types_parallel::FixedParallelState;
-use types_storage::storage::Spinlock;
+use ::types_parallel::FixedParallelState;
+use ::types_storage::storage::Spinlock;
 
 use s_lock::{s_lock_macro, s_unlock};
 

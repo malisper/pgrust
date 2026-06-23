@@ -1,6 +1,6 @@
 //! `create_partial_bitmap_paths` (allpaths.c:4237).
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use pathnodes::{PathId, PlannerInfo, RelId};
 
 use pathnode_seams as pathnode;
@@ -15,7 +15,7 @@ use crate::{compute_parallel_worker, max_parallel_workers_per_gather};
 /// costsize-seams (it is the `cost_bitmap_*` family the indxpath driver also uses).
 pub fn create_partial_bitmap_paths<'mcx>(
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     bitmapqual: PathId,
 ) -> PgResult<()> {

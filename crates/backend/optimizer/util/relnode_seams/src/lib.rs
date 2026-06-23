@@ -8,8 +8,8 @@
 //! real implementation. Set-returning ops hand back a freshly-owned `Relids`;
 //! query ops return a scalar.
 
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
 seam_core::seam!(
@@ -154,7 +154,7 @@ seam_core::seam!(
         parent_joinrel: RelId,
         restrictlist: &[RinfoId],
         sjinfo: &SpecialJoinInfo,
-        appinfos: &[pathnodes::AppendRelInfo],
+        appinfos: &[::pathnodes::AppendRelInfo],
     ) -> PgResult<RelId>
 );
 seam_core::seam!(

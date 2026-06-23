@@ -42,20 +42,20 @@ extern crate std;
 use core::cmp::Ordering;
 
 use mcx::{Mcx, PgVec};
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::{InvalidOid, Oid};
-use types_error::PgResult;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_error::PgResult;
 use types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP};
 use types_selfuncs::{STATISTIC_KIND_BOUNDS_HISTOGRAM, STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM};
-use statistics::VacAttrStats;
-use types_tuple::Datum;
+use ::statistics::VacAttrStats;
+use ::types_tuple::Datum;
 
 // The analyze working values (RangeBound.val) and the detoast/(de)serialization
 // seams speak the bare-word transitional `Datum` (a varlena *pointer* word);
 // the stored statistic slots (`VacAttrStats.stavalues`) speak the canonical
-// `types_tuple::Datum<'mcx>` byte-lane enum. The two only meet at the two
+// `::types_tuple::Datum<'mcx>` byte-lane enum. The two only meet at the two
 // bridges in this file (`bridge_value_ptr` and the bounds-histogram serialize).
-use datum::datum::Datum as WordDatum;
+use ::datum::datum::Datum as WordDatum;
 
 use vacuum_seams as vacuum_seams;
 use multirangetypes_seams as mr_seams;
@@ -231,14 +231,14 @@ fn int_ordering(c: i32) -> Ordering {
 /// Control flow, loop bounds, branch order, and slot bookkeeping are
 /// transcribed 1:1 from the C.
 ///
-/// The signature matches [`statistics::AnalyzeAttrComputeStatsFunc`] so
+/// The signature matches [`::statistics::AnalyzeAttrComputeStatsFunc`] so
 /// this is the function pointer the typanalyze routine installs into
 /// `stats.compute_stats`. The C `stats->extra_data` is read back here from the
 /// `void *`-faithful side table; on a missing token the call panics loudly
 /// (the analyze driver must have run `*_typanalyze` first).
 pub fn compute_range_stats<'mcx>(
     stats: &mut VacAttrStats<'mcx>,
-    fetchfunc: statistics::AnalyzeAttrFetchFunc,
+    fetchfunc: ::statistics::AnalyzeAttrFetchFunc,
     samplerows: i32,
     _totalrows: f64,
 ) {
@@ -253,7 +253,7 @@ pub fn compute_range_stats<'mcx>(
 
 fn compute_range_stats_inner<'mcx>(
     stats: &mut VacAttrStats<'mcx>,
-    fetchfunc: statistics::AnalyzeAttrFetchFunc,
+    fetchfunc: ::statistics::AnalyzeAttrFetchFunc,
     samplerows: i32,
 ) -> PgResult<()> {
     /* TypeCacheEntry *typcache = (TypeCacheEntry *) stats->extra_data; */
@@ -292,9 +292,9 @@ fn compute_range_stats_inner<'mcx>(
         .anl_context
         .expect("VacAttrStats.anl_context must be set before compute_stats");
     let cap = samplerows.max(0) as usize;
-    let mut lowers: PgVec<'mcx, RangeBound> = mcx::vec_with_capacity_in(mcx, cap)?;
-    let mut uppers: PgVec<'mcx, RangeBound> = mcx::vec_with_capacity_in(mcx, cap)?;
-    let mut lengths: PgVec<'mcx, f64> = mcx::vec_with_capacity_in(mcx, cap)?;
+    let mut lowers: PgVec<'mcx, RangeBound> = ::mcx::vec_with_capacity_in(mcx, cap)?;
+    let mut uppers: PgVec<'mcx, RangeBound> = ::mcx::vec_with_capacity_in(mcx, cap)?;
+    let mut lengths: PgVec<'mcx, f64> = ::mcx::vec_with_capacity_in(mcx, cap)?;
 
     // The accumulated `RangeBound.val`s are *pointers* into the fetched sample
     // value's bytes (for a by-reference subtype like `numeric`: the deserialized
@@ -626,7 +626,7 @@ fn sort_range_bounds<'mcx>(typcache: &TypeCacheEntry, bounds: &mut [RangeBound])
     // qsort_interruptible's cooperative interrupt check.
     vacuum_seams::vacuum_delay_point::call()?;
 
-    let mut captured: Option<types_error::PgError> = None;
+    let mut captured: Option<::types_error::PgError> = None;
     bounds.sort_by(|a, b| match range_bound_qsort_cmp(typcache, a, b) {
         Ok(c) => int_ordering(c),
         Err(e) => {
@@ -666,7 +666,7 @@ fn range_type_p_to_datum<'mcx>(mcx: Mcx<'mcx>, range: RangeTypeP<'mcx>) -> PgRes
     // varlena (a 4B uncompressed image); its first 4 bytes are the length word.
     let len = unsafe { varsize_4b_le(p) };
     let bytes = unsafe { core::slice::from_raw_parts(p, len) };
-    Ok(Datum::ByRef(mcx::slice_in(mcx, bytes)?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, bytes)?))
 }
 
 /// `VARSIZE_4B(PTR)` (varatt.h, little-endian build): the total varlena length

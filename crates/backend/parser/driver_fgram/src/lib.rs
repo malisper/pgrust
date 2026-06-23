@@ -32,7 +32,7 @@ use scan_fgram::{
     tokens, CoreYYSTYPE, LexError, Scanner, ScannerSettings, Token, UnicodeToServerSeam,
     Utf8UnicodeSeam, YY_NULL,
 };
-use pg_ffi_fgram::spi::{
+use ::pg_ffi_fgram::spi::{
     RawParseMode, RAW_PARSE_DEFAULT, RAW_PARSE_PLPGSQL_ASSIGN1, RAW_PARSE_PLPGSQL_ASSIGN2,
     RAW_PARSE_PLPGSQL_ASSIGN3, RAW_PARSE_PLPGSQL_EXPR, RAW_PARSE_TYPE_NAME,
 };
@@ -112,7 +112,7 @@ impl From<LexError> for ParseError {
         let yyerror = e.source.is_none()
             && e.detail.is_none()
             && e.hint.is_none()
-            && e.sqlstate == pg_ffi_fgram::ERRCODE_SYNTAX_ERROR;
+            && e.sqlstate == ::pg_ffi_fgram::ERRCODE_SYNTAX_ERROR;
         // The source-propagated errors carry their own detail/hint; otherwise
         // forward the scanner's own errdetail/errhint (scan.l).
         let (detail, hint) = if e.source.is_some() {
@@ -126,7 +126,7 @@ impl From<LexError> for ParseError {
         ParseError {
             message,
             location: e.location,
-            sqlstate: pg_ffi_fgram::error::unpack_sqlstate(e.sqlstate),
+            sqlstate: ::pg_ffi_fgram::error::unpack_sqlstate(e.sqlstate),
             yyerror,
             detail,
             hint,
@@ -492,7 +492,7 @@ impl<'a> BaseLexer<'a> {
 /// `truncate_identifier(str, strlen(str), true)` on a de-escaped `UIDENT`.
 fn truncate_ident_bytes(bytes: &[u8]) -> Vec<u8> {
     let len = bytes.len();
-    if len >= pg_ffi_fgram::NAMEDATALEN as usize {
+    if len >= ::pg_ffi_fgram::NAMEDATALEN as usize {
         let mut buf = bytes.to_vec();
         buf.push(0);
         if scansup_fgram::truncate_identifier(&mut buf, len as core::ffi::c_int, true)

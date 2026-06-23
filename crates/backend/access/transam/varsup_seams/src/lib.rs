@@ -3,7 +3,7 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 use types_core::{FullTransactionId, Oid, TransactionId};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `ReadNextFullTransactionId()` — the next full xid to be assigned.
@@ -86,14 +86,14 @@ seam_core::seam!(
     /// `VarsupShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn varsup_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn varsup_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
     /// `VarsupShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
     /// this subsystem's shared-memory structures. `Err` carries the C
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn varsup_shmem_init() -> types_error::PgResult<()>
+    pub fn varsup_shmem_init() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

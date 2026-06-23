@@ -28,9 +28,9 @@ pub use internals::{
 };
 pub use serial::CheckPointPredicate;
 
-use types_core::primitive::{BlockNumber, Oid};
+use ::types_core::primitive::{BlockNumber, Oid};
 use types_error::{PgError, PgResult};
-use snapshot::snapshot::SnapshotData;
+use ::snapshot::snapshot::SnapshotData;
 
 // ---------------------------------------------------------------------------
 // Relation-field projection from the relcache, by OID.
@@ -91,20 +91,20 @@ pub fn init_seams() {
     {
         fn check_serial_buffers_hook(
             newval: &mut i32,
-            _extra: &mut Option<guc_tables::GucHookExtra>,
+            _extra: &mut Option<::guc_tables::GucHookExtra>,
             _source: types_guc::guc::GucSource,
-        ) -> types_error::PgResult<bool> {
+        ) -> ::types_error::PgResult<bool> {
             let (ok, detail) = check_serial_buffers(*newval);
             if ok {
                 Ok(true)
             } else {
                 match detail {
-                    Some(d) => Err(types_error::PgError::error(d)),
+                    Some(d) => Err(::types_error::PgError::error(d)),
                     None => Ok(false),
                 }
             }
         }
-        guc_tables::hooks::check_serial_buffers
+        ::guc_tables::hooks::check_serial_buffers
             .install(check_serial_buffers_hook);
     }
 
@@ -315,7 +315,7 @@ pub fn init_seams() {
 /// A non-MVCC sentinel snapshot for the page-lock seam's `None` case
 /// (`IsMVCCSnapshot` is false ⇒ SerializationNeededForRead returns early).
 fn special_snapshot() -> SnapshotData {
-    SnapshotData::sentinel(snapshot::snapshot::SnapshotType::SNAPSHOT_NON_VACUUMABLE)
+    SnapshotData::sentinel(::snapshot::snapshot::SnapshotType::SNAPSHOT_NON_VACUUMABLE)
 }
 
 /// Read the predicate-relevant fields from a live `Relation` handle.
@@ -329,6 +329,6 @@ fn relation_fields_from_handle(rel: &rel::Relation<'_>) -> PgResult<(Oid, Oid, b
 /// Decompose an `ItemPointerData` into (block, offset).
 fn item_pointer_parts(
     tid: &types_tuple::heaptuple::ItemPointerData,
-) -> (BlockNumber, types_core::primitive::OffsetNumber) {
+) -> (BlockNumber, ::types_core::primitive::OffsetNumber) {
     (tid.ip_blkid.block_number(), tid.ip_posid)
 }

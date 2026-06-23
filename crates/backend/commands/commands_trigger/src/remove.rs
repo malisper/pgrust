@@ -3,23 +3,23 @@
 //! invokes for a `pg_trigger` object.
 
 use mcx::{Mcx, MemoryContext};
-use types_catalog::pg_trigger as pt;
-use types_core::fmgr::F_OIDEQ;
-use types_core::Oid;
+use ::types_catalog::pg_trigger as pt;
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
-use types_tuple::access::{
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
+use ::types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
 };
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 /// `RemoveTriggerById(trigOid)` (trigger.c:1292-1362): open `pg_trigger`, scan
 /// by oid over `TriggerOidIndexId`, read the trigger's `tgrelid`, delete the

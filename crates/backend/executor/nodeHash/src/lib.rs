@@ -45,7 +45,7 @@ pub mod instrument;
 pub mod parallel;
 pub mod skew;
 
-use types_core::Size;
+use ::types_core::Size;
 
 // ===========================================================================
 //                          Constants & macros
@@ -109,7 +109,7 @@ mod _seam_deps {
 /// [`init_seams`].
 mod adapters {
     use execExpr_seams as execExpr;
-    use mcx::PgBox;
+    use ::mcx::PgBox;
     use types_error::{PgError, PgResult};
     use ::nodes::execnodes::{EStateData, SlotId};
     use ::nodes::execexpr::ExprState;
@@ -117,7 +117,7 @@ mod adapters {
     use ::nodes::nodehash::{
         HashJoinState, HashJoinTableData, HashJoinTupleLink, HashState,
     };
-    use types_tuple::heaptuple::HEAP_TUPLE_HAS_MATCH;
+    use ::types_tuple::heaptuple::HEAP_TUPLE_HAS_MATCH;
 
     use crate::{hash_table, instrument, parallel, skew};
 
@@ -328,7 +328,7 @@ mod adapters {
             let state = inner_hash_state(node);
             if state.hinstrument.is_none() {
                 state.hinstrument =
-                    Some(::nodes::nodehash::HashInstrumentSlot::Local(mcx::alloc_in(
+                    Some(::nodes::nodehash::HashInstrumentSlot::Local(::mcx::alloc_in(
                         table.spillCxt,
                         ::nodes::nodehash::HashInstrumentation::default(),
                     )?));
@@ -345,8 +345,8 @@ mod adapters {
     pub fn exec_build_hash32_expr<'mcx>(
         node: &mut HashJoinState<'mcx>,
         is_outer: bool,
-        hashfuncids: &[types_core::primitive::Oid],
-        collations: &[types_core::primitive::Oid],
+        hashfuncids: &[::types_core::primitive::Oid],
+        collations: &[::types_core::primitive::Oid],
         hash_exprs: &[::nodes::primnodes::Expr<'mcx>],
         opstrict: &[bool],
         keep_nulls: bool,
@@ -419,7 +419,7 @@ mod adapters {
                     &mut inner_hash_state(node).ps
                 };
                 if head.sub_plan_ids.is_none() {
-                    head.sub_plan_ids = Some(mcx::vec_with_capacity_in(mcx, ids.len())?);
+                    head.sub_plan_ids = Some(::mcx::vec_with_capacity_in(mcx, ids.len())?);
                 }
                 let v = head.sub_plan_ids.as_mut().expect("just initialized");
                 v.try_reserve(ids.len()).map_err(|_| mcx.oom(0))?;
@@ -434,8 +434,8 @@ mod adapters {
 
     pub fn setup_skew_hashfunction<'mcx>(
         node: &mut HashJoinState<'mcx>,
-        skew_hashfuncid: types_core::primitive::Oid,
-        skew_collation: types_core::primitive::Oid,
+        skew_hashfuncid: ::types_core::primitive::Oid,
+        skew_collation: ::types_core::primitive::Oid,
         skew_table_valid: bool,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
@@ -445,7 +445,7 @@ mod adapters {
             return Ok(());
         }
         let mcx = estate.es_query_cxt;
-        let mut fi = mcx::alloc_in(mcx, types_core::FmgrInfo::default())?;
+        let mut fi = ::mcx::alloc_in(mcx, ::types_core::FmgrInfo::default())?;
         // fmgr_info(skew_hashfuncid, skew_hashfunction)
         fi.fn_oid = skew_hashfuncid;
         let state = inner_hash_state(node);
@@ -520,7 +520,7 @@ mod adapters {
 
     pub fn force_store_minimal_into_slot<'mcx>(
         slot: SlotId,
-        tuple: types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
+        tuple: ::types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()> {
         // ExecForceStoreMinimalTuple(tuple, slot, false) — owned by execTuples.

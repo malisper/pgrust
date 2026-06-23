@@ -9,7 +9,7 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::aio::ioh;
 use crate::{PgAioHandleState, PGAIO_TID_INVALID, PGAIO_TID_SMGR};

@@ -3,7 +3,7 @@
 //!
 //! `create_plan_recurse` (in the owning `backend-optimizer-plan-createplan`
 //! crate) is the `best_path->pathtype` dispatch over the 36-variant
-//! [`PathNode`](pathnodes::PathNode) enum. createplan.c is a single
+//! [`PathNode`](::pathnodes::PathNode) enum. createplan.c is a single
 //! translation unit, so the converters that ARE ported here
 //! (`create_seqscan_plan`, `create_nestloop_plan`, `create_mergejoin_plan`,
 //! `create_append_plan`, the sort/group/setop/gather upper converters, …) are
@@ -27,7 +27,7 @@
 //!   `resolve_worktable_param`, `create_subqueryscan_subplan`).
 //!
 //! Each remaining converter mirrors the C `create_*_plan(root, (XxxPath *)
-//! best_path, flags)`: a `Path *` is a [`PathId`](pathnodes::PathId) into
+//! best_path, flags)`: a `Path *` is a [`PathId`](::pathnodes::PathId) into
 //! `PlannerInfo::path_arena` (the owner recovers the subtype from the
 //! [`PathNode`] variant), plus the `mcx` the produced
 //! [`Node`](::nodes::nodes::Node) plan tree is allocated in and `run:
@@ -44,7 +44,7 @@ use alloc::vec::Vec;
 
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::TargetEntry;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PathId, PlannerInfo, RinfoId};
 
 // ---------------------------------------------------------------------------

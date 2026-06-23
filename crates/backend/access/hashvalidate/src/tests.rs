@@ -11,7 +11,7 @@ use super::*;
 use mcx::{slice_in, MemoryContext, PgString};
 use std::string::ToString;
 use std::sync::Once;
-use types_error::make_sqlstate;
+use ::types_error::make_sqlstate;
 
 // Scenario opclass OIDs.
 const OC_VALID: Oid = 1; // valid single-type int4 opclass

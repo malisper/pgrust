@@ -19,12 +19,12 @@
 //! `tg_trigtuple` / `tg_newtuple`); the protocol checks and tuple comparison are
 //! the owned logic, ported verbatim.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED};
-use types_ri_triggers::TriggerDataRef;
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heap::SizeofHeapTupleHeader;
-use types_tuple::heaptuple::{
+use ::types_ri_triggers::TriggerDataRef;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heap::SizeofHeapTupleHeader;
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderData, HeapTupleHeaderGetNatts, HEAP_XACT_MASK,
 };
 
@@ -171,7 +171,7 @@ fn decide<'mcx>(
     }
 
     // rettuple = newtuple (the surviving NEW tuple).
-    Ok(Some(mcx::box_into_inner_leak(newtuple.tuple)))
+    Ok(Some(::mcx::box_into_inner_leak(newtuple.tuple)))
 }
 
 /// Internal error for a trigger-manager contract violation (a tuple/header the
@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use mcx::{slice_in, MemoryContext, PgBox};
     use std::sync::Once;
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         bits8, HeapTupleFields, HeapTupleHeaderChoice, ItemPointerData, HEAP_NATTS_MASK,
     };
 
@@ -428,11 +428,11 @@ mod tests {
             });
             // tg_newslot/tg_trigslot resolve to distinct slot markers; the formed
             // tuple seam returns identical NEW/OLD tuples for both.
-            trigger::tg_newslot::set(|_td| types_ri_triggers::TupleTableSlotRef(1));
-            trigger::tg_trigslot::set(|_td| types_ri_triggers::TupleTableSlotRef(2));
+            trigger::tg_newslot::set(|_td| ::types_ri_triggers::TupleTableSlotRef(1));
+            trigger::tg_trigslot::set(|_td| ::types_ri_triggers::TupleTableSlotRef(2));
             fn mk_formed(
                 mcx: Mcx<'_>,
-                _slot: types_ri_triggers::TupleTableSlotRef,
+                _slot: ::types_ri_triggers::TupleTableSlotRef,
             ) -> PgResult<Option<FormedTuple<'_>>> {
                 let data = [0x2a, 0x00];
                 Ok(Some(make_formed(mcx, make_header(mcx, 24, 1, 0, &[0b1]), &data)))

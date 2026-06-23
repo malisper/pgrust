@@ -27,7 +27,7 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use execparallel::{
     InstrumentationHandle, ParallelContextHandle, ParamExecValue, RestoredParam, SerializeCursor,
     Size,
@@ -63,7 +63,7 @@ seam_core::seam!(pub fn create_parallel_query_desc<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     pstmt_text: String,
     query_string: String,
-    receiver: execparallel::DestReceiverHandle,
+    receiver: ::execparallel::DestReceiverHandle,
     params: ::nodes::params::ParamListInfo,
     instrument_options: i32,
 ) -> PgResult<QueryDesc>);

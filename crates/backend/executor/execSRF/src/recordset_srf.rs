@@ -26,9 +26,9 @@
 //! worker reads/writes); the by-OID fmgr-core registry's tag-only `resultinfo`
 //! cannot carry it.
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 

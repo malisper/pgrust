@@ -15,14 +15,14 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use seam_core::seam;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::seam_core::seam;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::ddlnodes::DefElem;
-use rel::Relation;
-use types_storage::lock::LOCKMODE;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_storage::lock::LOCKMODE;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 /// A `pg_tablespace` row matched by a catalog scan: the `spcoid` read out of
 /// `((Form_pg_tablespace) GETSTRUCT(tuple))->oid` and the `tuple->t_self`
@@ -79,7 +79,7 @@ seam!(
         mcx: Mcx<'mcx>,
         rel: &Relation<'mcx>,
         spc_oid: Oid,
-    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> PgResult<Option<::mcx::PgString<'mcx>>>
 );
 
 seam!(

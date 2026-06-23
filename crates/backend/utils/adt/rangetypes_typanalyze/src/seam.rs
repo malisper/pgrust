@@ -17,10 +17,10 @@ use core::cell::RefCell;
 
 use alloc::collections::BTreeMap;
 
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use statistics::VacAttrStats;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::statistics::VacAttrStats;
 
 use crate::{compute_range_stats as _compute_range_stats, multirange_typanalyze, range_typanalyze};
 

@@ -19,7 +19,7 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// One token produced by `core_yylex` (the `core_YYSTYPE`/`YYLTYPE` triple plus
 /// the resume cursor).

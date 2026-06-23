@@ -58,8 +58,8 @@ use ::nodes::nodesetop::{
     SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL, SETOP_HASHED,
 };
 use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
-use types_sortsupport::SortSupportData;
-use types_tuple::heaptuple::Datum;
+use ::types_sortsupport::SortSupportData;
+use ::types_tuple::heaptuple::Datum;
 
 /// Install this crate's seam implementations. nodeSetOp owns no inbound seams:
 /// it is reached through the executor dispatch (execProcnode), which can depend
@@ -120,9 +120,9 @@ fn build_hash_table<'mcx>(
         .lefttree
         .as_deref()
         .expect("build_hash_table: outerPlanState is NULL");
-    let desc: types_tuple::heaptuple::TupleDesc<'mcx> =
+    let desc: ::types_tuple::heaptuple::TupleDesc<'mcx> =
         match execTuples::exec_get_result_type::call(outer.ps_head()) {
-            Some(d) => Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
+            Some(d) => Some(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
             None => None,
         };
 
@@ -661,7 +661,7 @@ fn setop_retrieve_hash_table<'mcx>(
         // ScanTupleHashTable; we capture the per-group counts here, then run
         // set_output_count and the store below.
         let mut entry_tuple: Option<
-            types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
+            ::types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
         > = None;
         let found = {
             let mcx = estate.es_query_cxt;
@@ -743,7 +743,7 @@ pub fn ExecInitSetOp<'mcx>(
     let node: &'mcx SetOp<'mcx> = plan_node.expect_setop();
 
     // create state structure: makeNode(SetOpState)
-    let mut setopstate = mcx::alloc_in(mcx, SetOpStateData::new_in(mcx))?;
+    let mut setopstate = ::mcx::alloc_in(mcx, SetOpStateData::new_in(mcx))?;
     //   setopstate->ps.plan = (Plan *) node;
     //   setopstate->ps.state = estate;            (threaded explicitly as estate)
     //   setopstate->ps.ExecProcNode = ExecSetOp;
@@ -801,7 +801,7 @@ pub fn ExecInitSetOp<'mcx>(
         //   setopstate->rightInput.firstTupleSlot =
         //       ExecInitExtraTupleSlot(estate, ps_ResultTupleDesc, &TTSOpsMinimalTuple);
         let desc = match &setopstate.ps.ps_ResultTupleDesc {
-            Some(d) => Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
+            Some(d) => Some(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
             None => None,
         };
         let right_first =
@@ -880,7 +880,7 @@ pub fn ExecEndSetOp<'mcx>(
 ) -> PgResult<()> {
     // free subsidiary stuff including hashtable
     //   if (node->tableContext) MemoryContextDelete(node->tableContext);
-    // `mcx::MemoryContext` frees its allocation domain on drop, so taking it
+    // `::mcx::MemoryContext` frees its allocation domain on drop, so taking it
     // (and dropping the hash table that lives in it) is the MemoryContextDelete.
     node.hashtable = None;
     node.tableContext = None;
@@ -1143,9 +1143,9 @@ fn write_pergroup(additional: &mut [u8], pergroup: &SetOpStatePerGroupData) {
 /// Copy a hash entry's stored `firstTuple` (`TupleHashEntryGetTuple`) into a new
 /// owned `MinimalTuple` in `mcx` for storing into the result slot.
 fn copy_minimal_tuple<'mcx>(
-    src: &Option<types_tuple::heaptuple::FormedMinimalTuple<'mcx>>,
+    src: &Option<::types_tuple::heaptuple::FormedMinimalTuple<'mcx>>,
     mcx: Mcx<'mcx>,
-) -> Option<types_tuple::heaptuple::FormedMinimalTuple<'mcx>> {
+) -> Option<::types_tuple::heaptuple::FormedMinimalTuple<'mcx>> {
     src.as_ref().map(|m| {
         m.clone_in(mcx)
             .expect("copy_minimal_tuple: cloning the hash entry tuple")

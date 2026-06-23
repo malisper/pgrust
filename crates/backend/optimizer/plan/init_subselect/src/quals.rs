@@ -37,10 +37,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{Index, Oid};
+use ::types_core::primitive::{Index, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::{Const, Expr, NullTest, NullTestType, OR_EXPR};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     OuterJoinClauseInfo, PlannerInfo, Relids, RestrictInfo, RinfoId, SpecialJoinInfo, JOIN_ANTI,
     JOIN_FULL,
@@ -50,7 +50,7 @@ use relnode_seams as bms;
 use equivclass_ext_seams as eqext;
 use init_subselect_ext_seams as initext;
 
-use nodes_core::makefuncs::make_opclause;
+use ::nodes_core::makefuncs::make_opclause;
 
 use crate::{JoinTreeItem, JtId, BMS_MULTIPLE, BMS_SINGLETON, BOOLOID};
 
@@ -884,7 +884,7 @@ fn get_join_domain_min_rels(root: &PlannerInfo, domain_relids: &Relids) -> Relid
     let lefts: Vec<(i32, Relids)> = root
         .join_info_list
         .iter()
-        .filter(|sj| sj.jointype == pathnodes::JOIN_LEFT)
+        .filter(|sj| sj.jointype == ::pathnodes::JOIN_LEFT)
         .map(|sj| (sj.ojrelid as i32, bms::relids_copy::call(&sj.syn_righthand)))
         .collect();
     for (ojrelid, syn_righthand) in lefts {

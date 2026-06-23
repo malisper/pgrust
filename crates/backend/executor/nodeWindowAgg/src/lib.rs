@@ -61,10 +61,10 @@ use init_small_seams as globals;
 use sort_storage_seams as tuplestore;
 
 use mcx::{alloc_in, PgBox, PgVec};
-use types_error::PgResult;
-use types_tuple::heaptuple::Datum;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::Datum;
 
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 
 use ::nodes::execnodes::{EcxtId, SlotId};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -86,9 +86,9 @@ fn oid_is_valid(o: Oid) -> bool {
 /// ACL_EXECUTE); if (aclresult != ACLCHECK_OK) aclcheck_error(aclresult,
 /// OBJECT_FUNCTION, get_func_name(fnoid)); InvokeFunctionExecuteHook(fnoid);`
 /// for a transition/inverse/final component function of a window aggregate.
-fn check_component_fn_acl<'mcx>(mcx: mcx::Mcx<'mcx>, fnoid: Oid, agg_owner: Oid) -> PgResult<()> {
+fn check_component_fn_acl<'mcx>(mcx: ::mcx::Mcx<'mcx>, fnoid: Oid, agg_owner: Oid) -> PgResult<()> {
     let aclresult = aclchk_seams::object_aclcheck::call(
-        types_core::catalog::PROCEDURE_RELATION_ID,
+        ::types_core::catalog::PROCEDURE_RELATION_ID,
         fnoid,
         agg_owner,
         types_acl::acl::ACL_EXECUTE,
@@ -315,10 +315,10 @@ fn advance_windowaggregate<'mcx>(
     // advance_windowaggregate_base().
     //   if (fcinfo->isnull && OidIsValid(peraggstate->invtransfn_oid)) ereport(ERROR, ...);
     if isnull && oid_is_valid(peragg_ref(winstate, peraggno).invtransfn_oid) {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "moving-aggregate transition function must not return null",
         )
-        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+        .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
     }
 
     // We must track the number of rows included in transValue, since to remove
@@ -361,7 +361,7 @@ fn window_copy_trans_value<'mcx>(
     new_value_is_null: bool,
     old_value: Datum<'mcx>,
     _old_value_is_null: bool,
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
 ) -> PgResult<Datum<'mcx>> {
     let (by_val, len) = {
         let pa = peragg_ref(winstate, peraggno);
@@ -434,7 +434,7 @@ fn advance_windowaggregate_base<'mcx>(
 
     // In moving-aggregate mode, the state must never be NULL here.
     if peragg_ref(winstate, peraggno).transValueIsNull {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "aggregate transition value is NULL before inverse transition",
         ));
     }
@@ -664,7 +664,7 @@ fn eval_windowaggregates<'mcx>(
     // First, update the frame head position.
     update_frameheadpos(winstate, estate)?;
     if winstate.frameheadpos < winstate.aggregatedbase {
-        return Err(types_error::PgError::error("window frame head moved backward"));
+        return Err(::types_error::PgError::error("window frame head moved backward"));
     }
 
     // If the frame didn't change compared to the previous row, re-use the saved
@@ -707,7 +707,7 @@ fn eval_windowaggregates<'mcx>(
     while numaggs_restart < numaggs && winstate.aggregatedbase < winstate.frameheadpos {
         // Fetch the next tuple of those being removed (must never fail).
         if !window_gettupleslot_agg(winstate, winstate.aggregatedbase, temp_slot, estate)? {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "could not re-fetch previously fetched frame row",
             ));
         }
@@ -978,9 +978,9 @@ fn eval_windowfunction<'mcx>(
 /// canonical built-in OID. A built-in (3100-3114) resolves to itself (`prosrc`
 /// names its own entry); any other OID is resolved via its `prosrc` text.
 fn resolve_window_builtin_oid<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    winfnoid: types_core::Oid,
-) -> PgResult<types_core::Oid> {
+    mcx: ::mcx::Mcx<'mcx>,
+    winfnoid: ::types_core::Oid,
+) -> PgResult<::types_core::Oid> {
     // Fast path: the canonical built-in OIDs dispatch to themselves.
     if (3100..=3114).contains(&winfnoid) {
         return Ok(winfnoid);
@@ -990,7 +990,7 @@ fn resolve_window_builtin_oid<'mcx>(
     // C: fmgr_lookupByName(prosrc) -> fbp->foid (fmgr_internal_function).
     let row = syscache_seams::proc_compile_row::call(mcx, winfnoid)?
         .ok_or_else(|| {
-            PgResult::<()>::Err(types_error::PgError::error(format!(
+            PgResult::<()>::Err(::types_error::PgError::error(format!(
                 "cache lookup failed for function {winfnoid}"
             )))
             .unwrap_err()
@@ -1013,7 +1013,7 @@ fn resolve_window_builtin_oid<'mcx>(
         "window_last_value" => 3113,
         "window_nth_value" => 3114,
         other => {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "there is no built-in window function named \"{other}\""
             )));
         }
@@ -1179,7 +1179,7 @@ fn window_ntile<'mcx>(
         // per spec: If NT is less than or equal to 0, then an exception
         // condition is raised.
         if nbuckets <= 0 {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "argument of ntile must be greater than zero",
             ));
         }
@@ -1315,7 +1315,7 @@ fn window_nth_value<'mcx>(
     let const_offset = get_fn_expr_arg_stable(winstate, perfuncno, 1);
 
     if nth <= 0 {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "argument of nth_value must be greater than zero",
         ));
     }
@@ -1860,7 +1860,7 @@ fn update_frameheadpos<'mcx>(
                     framehead_slot,
                     estate,
                 )? {
-                    return Err(types_error::PgError::error("unexpected end of tuplestore"));
+                    return Err(::types_error::PgError::error("unexpected end of tuplestore"));
                 }
             }
 
@@ -1928,7 +1928,7 @@ fn update_frameheadpos<'mcx>(
                     framehead_slot,
                     estate,
                 )? {
-                    return Err(types_error::PgError::error("unexpected end of tuplestore"));
+                    return Err(::types_error::PgError::error("unexpected end of tuplestore"));
                 }
             }
 
@@ -2011,7 +2011,7 @@ fn update_frameheadpos<'mcx>(
                     framehead_slot,
                     estate,
                 )? {
-                    return Err(types_error::PgError::error("unexpected end of tuplestore"));
+                    return Err(::types_error::PgError::error("unexpected end of tuplestore"));
                 }
             }
 
@@ -2094,7 +2094,7 @@ fn update_frametailpos<'mcx>(
                     frametail_slot,
                     estate,
                 )? {
-                    return Err(types_error::PgError::error("unexpected end of tuplestore"));
+                    return Err(::types_error::PgError::error("unexpected end of tuplestore"));
                 }
             }
 
@@ -2161,7 +2161,7 @@ fn update_frametailpos<'mcx>(
                     frametail_slot,
                     estate,
                 )? {
-                    return Err(types_error::PgError::error("unexpected end of tuplestore"));
+                    return Err(::types_error::PgError::error("unexpected end of tuplestore"));
                 }
             }
 
@@ -2238,7 +2238,7 @@ fn update_frametailpos<'mcx>(
                     frametail_slot,
                     estate,
                 )? {
-                    return Err(types_error::PgError::error("unexpected end of tuplestore"));
+                    return Err(::types_error::PgError::error("unexpected end of tuplestore"));
                 }
             }
 
@@ -2346,7 +2346,7 @@ fn calculate_frame_offsets<'mcx>(
             execExpr::exec_eval_expr_switch_context::call(so, econtext, estate)?
         };
         if isnull {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "frame starting offset must not be null",
             ));
         }
@@ -2368,7 +2368,7 @@ fn calculate_frame_offsets<'mcx>(
             // value is known to be int8
             let offset = winstate.startOffsetValue.as_i64();
             if offset < 0 {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "frame starting offset must not be negative",
                 ));
             }
@@ -2382,7 +2382,7 @@ fn calculate_frame_offsets<'mcx>(
             execExpr::exec_eval_expr_switch_context::call(eo, econtext, estate)?
         };
         if isnull {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "frame ending offset must not be null",
             ));
         }
@@ -2400,7 +2400,7 @@ fn calculate_frame_offsets<'mcx>(
         if (frameOptions & (FRAMEOPTION_ROWS | FRAMEOPTION_GROUPS)) != 0 {
             let offset = winstate.endOffsetValue.as_i64();
             if offset < 0 {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "frame ending offset must not be negative",
                 ));
             }
@@ -2494,7 +2494,7 @@ pub fn ExecWindowAgg<'mcx>(
                 scan_slot,
                 estate,
             )? {
-                return Err(types_error::PgError::error("unexpected end of tuplestore"));
+                return Err(::types_error::PgError::error("unexpected end of tuplestore"));
             }
             if !are_peers(winstate, temp_slot_2, scan_slot, estate)? {
                 winstate.currentgroup += 1;
@@ -2509,7 +2509,7 @@ pub fn ExecWindowAgg<'mcx>(
             scan_slot,
             estate,
         )? {
-            return Err(types_error::PgError::error("unexpected end of tuplestore"));
+            return Err(::types_error::PgError::error("unexpected end of tuplestore"));
         }
 
         // Don't evaluate the window functions when we're in pass-through mode.
@@ -2773,7 +2773,7 @@ pub fn ExecInitWindowAgg<'mcx>(
                     winstate.numaggs += 1;
                 }
                 if winstate.funcs.is_none() {
-                    winstate.funcs = Some(mcx::vec_with_capacity_in(mcx, 1)?);
+                    winstate.funcs = Some(::mcx::vec_with_capacity_in(mcx, 1)?);
                 }
                 winstate.funcs.as_mut().unwrap().push(wfstate);
             }
@@ -2826,14 +2826,14 @@ pub fn ExecInitWindowAgg<'mcx>(
     //   peragg  = palloc0(sizeof(WindowStatePerAggData) * numaggs);
     {
         let mut perfunc: PgVec<'mcx, WindowStatePerFuncData<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, numfuncs)?;
+            ::mcx::vec_with_capacity_in(mcx, numfuncs)?;
         for _ in 0..numfuncs {
             perfunc.push(WindowStatePerFuncData::default());
         }
         winstate.perfunc = Some(perfunc);
         let numaggs0 = winstate.numaggs as usize;
         let mut peragg: PgVec<'mcx, WindowStatePerAggData<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, numaggs0)?;
+            ::mcx::vec_with_capacity_in(mcx, numaggs0)?;
         for _ in 0..numaggs0 {
             peragg.push(WindowStatePerAggData::default());
         }
@@ -2868,7 +2868,7 @@ pub fn ExecInitWindowAgg<'mcx>(
             )
         };
         if winref != node_winref {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "WindowFunc with winref {winref} assigned to WindowAgg with winref {node_winref}"
             )));
         }
@@ -2895,7 +2895,7 @@ pub fn ExecInitWindowAgg<'mcx>(
                 .wfunc
                 .as_ref()
                 .expect("WindowFuncExprState.wfunc not set");
-            mcx::alloc_in(mcx, (**w).clone_in(mcx)?)?
+            ::mcx::alloc_in(mcx, (**w).clone_in(mcx)?)?
         };
         let pf = perfunc_mut(&mut winstate, perfuncno);
         pf.wfunc = Some(wfunc_clone);
@@ -2928,7 +2928,7 @@ pub fn ExecInitWindowAgg<'mcx>(
             // left None on the winobj satellite and resolved through funcs[fi].
             winobj.argstates = None;
             perfunc_mut(&mut winstate, perfuncno).winobj =
-                Some(mcx::alloc_in(mcx, winobj)?);
+                Some(::mcx::alloc_in(mcx, winobj)?);
 
             // C: fmgr_info_cxt(wfunc->winfnoid, &flinfo, ecxt_per_query_memory);
             //    fmgr_info_set_expr((Node *) wfunc, &flinfo);
@@ -2956,7 +2956,7 @@ pub fn ExecInitWindowAgg<'mcx>(
             markpos: 0,
             seekpos: 0,
         };
-        winstate.agg_winobj = Some(mcx::alloc_in(mcx, agg_winobj)?);
+        winstate.agg_winobj = Some(::mcx::alloc_in(mcx, agg_winobj)?);
     }
 
     // Set the status to running.
@@ -3087,7 +3087,7 @@ fn initialize_peragg<'mcx>(
     perfuncno: usize,
     peraggno: usize,
     estate: &mut EStateData<'mcx>,
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
     // Pull the data we need off the perfunc's WindowFunc node. `wfunc` was just
     // cloned into the perfunc slot by the caller; it carries winfnoid, the arg
@@ -3097,7 +3097,7 @@ fn initialize_peragg<'mcx>(
         let wfunc = pf.wfunc.as_ref().expect("perfunc.wfunc not set");
         // numArguments = list_length(wfunc->args);
         // inputTypes[i] = exprType((Node *) lfirst(lc));
-        let mut its: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, wfunc.args.len())?;
+        let mut its: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, wfunc.args.len())?;
         for arg in wfunc.args.iter() {
             its.push(nodeFuncs_seams::expr_type_info::call(arg)?.typid);
         }
@@ -3108,7 +3108,7 @@ fn initialize_peragg<'mcx>(
     // aggTuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(wfunc->winfnoid));
     let aggform = syscache_seams::agg_form_by_oid::call(mcx, winfnoid)?
         .ok_or_else(|| {
-            types_error::PgError::error(alloc::format!(
+            ::types_error::PgError::error(alloc::format!(
                 "cache lookup failed for aggregate {winfnoid}"
             ))
         })?;
@@ -3164,7 +3164,7 @@ fn initialize_peragg<'mcx>(
     let agg_owner = {
         let proc = syscache_seams::lookup_proc::call(mcx, winfnoid)?
             .ok_or_else(|| {
-                types_error::PgError::error(alloc::format!(
+                ::types_error::PgError::error(alloc::format!(
                     "cache lookup failed for function {winfnoid}"
                 ))
             })?;
@@ -3182,7 +3182,7 @@ fn initialize_peragg<'mcx>(
     // window function.
     if finalmodify != AGGMODIFY_READ_ONLY {
         let name = regproc_seams::format_procedure::call(mcx, winfnoid)?;
-        return Err(types_error::PgError::error(alloc::format!(
+        return Err(::types_error::PgError::error(alloc::format!(
             "aggregate function {} does not support use as a window function",
             name.as_str()
         )));
@@ -3285,7 +3285,7 @@ fn initialize_peragg<'mcx>(
                 aggtranstype,
             )?;
         if !coercible {
-            return Err(types_error::PgError::error(alloc::format!(
+            return Err(::types_error::PgError::error(alloc::format!(
                 "aggregate {winfnoid} needs to have compatible input type and transition type"
             )));
         }
@@ -3295,7 +3295,7 @@ fn initialize_peragg<'mcx>(
     if oid_is_valid(invtransfn_oid) {
         let pa = peragg_ref(winstate, peraggno);
         if pa.transfn.fn_strict != pa.invtransfn.fn_strict {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "strictness of aggregate's forward and inverse transition functions must match",
             ));
         }
@@ -3439,7 +3439,7 @@ fn window_gettupleslot_with<'mcx>(
     }
 
     if pos < markpos {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "cannot fetch row before WindowObject's mark position",
         ));
     }
@@ -3453,7 +3453,7 @@ fn window_gettupleslot_with<'mcx>(
             pos - 1 - seekpos,
             true,
         )? {
-            return Err(types_error::PgError::error("unexpected end of tuplestore"));
+            return Err(::types_error::PgError::error("unexpected end of tuplestore"));
         }
         seekpos = pos - 1;
     } else if seekpos > pos + 1 {
@@ -3462,7 +3462,7 @@ fn window_gettupleslot_with<'mcx>(
             seekpos - (pos + 1),
             false,
         )? {
-            return Err(types_error::PgError::error("unexpected end of tuplestore"));
+            return Err(::types_error::PgError::error("unexpected end of tuplestore"));
         }
         seekpos = pos + 1;
     } else if seekpos == pos {
@@ -3481,7 +3481,7 @@ fn window_gettupleslot_with<'mcx>(
             slot,
             estate,
         )? {
-            return Err(types_error::PgError::error("unexpected end of tuplestore"));
+            return Err(::types_error::PgError::error("unexpected end of tuplestore"));
         }
         seekpos -= 1;
     } else {
@@ -3492,7 +3492,7 @@ fn window_gettupleslot_with<'mcx>(
             slot,
             estate,
         )? {
-            return Err(types_error::PgError::error("unexpected end of tuplestore"));
+            return Err(::types_error::PgError::error("unexpected end of tuplestore"));
         }
         seekpos += 1;
     }
@@ -3556,7 +3556,7 @@ pub fn WinGetPartitionLocalMemory<'a, 'mcx>(
             .as_ref()
             .expect("WinGetPartitionLocalMemory: partcontext not set")
             .mcx();
-        let mut buf = mcx::vec_with_capacity_in(partmcx, sz)?;
+        let mut buf = ::mcx::vec_with_capacity_in(partmcx, sz)?;
         for _ in 0..sz {
             buf.push(0u8);
         }
@@ -3637,7 +3637,7 @@ fn win_set_mark_position_common<'mcx>(
 ) -> PgResult<(i64, i64)> {
     let _ = estate;
     if markpos < markpos_field {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "cannot move WindowObject's mark position backward",
         ));
     }
@@ -3681,12 +3681,12 @@ pub fn WinRowsArePeers<'mcx>(
     let slot2 = winstate.temp_slot_2.unwrap();
 
     if !window_gettupleslot_func(winstate, perfuncno, pos1, slot1, estate)? {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "specified position is out of window",
         ));
     }
     if !window_gettupleslot_func(winstate, perfuncno, pos2, slot2, estate)? {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "specified position is out of window",
         ));
     }
@@ -3721,7 +3721,7 @@ pub fn WinGetFuncArgInPartition<'mcx>(
             winstate.spooled_rows - 1 + relpos
         }
         _ => {
-            return Err(types_error::PgError::error("unrecognized window seek type"));
+            return Err(::types_error::PgError::error("unrecognized window seek type"));
         }
     };
 
@@ -3762,7 +3762,7 @@ pub fn WinGetFuncArgInFrame<'mcx>(
 
     match seektype {
         WINDOW_SEEK_CURRENT => {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "WINDOW_SEEK_CURRENT is not supported for WinGetFuncArgInFrame",
             ));
         }
@@ -3801,7 +3801,7 @@ pub fn WinGetFuncArgInFrame<'mcx>(
                     }
                 }
                 _ => {
-                    return Err(types_error::PgError::error("unrecognized frame option state"));
+                    return Err(::types_error::PgError::error("unrecognized frame option state"));
                 }
             }
             abs_pos = ap;
@@ -3857,13 +3857,13 @@ pub fn WinGetFuncArgInFrame<'mcx>(
                     mark_pos = winstate.frameheadpos;
                 }
                 _ => {
-                    return Err(types_error::PgError::error("unrecognized frame option state"));
+                    return Err(::types_error::PgError::error("unrecognized frame option state"));
                 }
             }
             abs_pos = ap;
         }
         _ => {
-            return Err(types_error::PgError::error("unrecognized window seek type"));
+            return Err(::types_error::PgError::error("unrecognized window seek type"));
         }
     }
 
@@ -4116,7 +4116,7 @@ fn init_expr_opt<'mcx>(
             // datumCopy of the frame offset. Ensure the back-reference is present
             // (the deep-copy mirrors C's borrowed pointer into the plan tree).
             if state.expr.is_none() {
-                state.expr = Some(mcx::alloc_in(estate.es_query_cxt, e.clone_in(estate.es_query_cxt)?)?);
+                state.expr = Some(::mcx::alloc_in(estate.es_query_cxt, e.clone_in(estate.es_query_cxt)?)?);
             }
             Ok(Some(state))
         }
@@ -4124,18 +4124,18 @@ fn init_expr_opt<'mcx>(
 }
 
 fn new_datum_vec<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     n: usize,
 ) -> PgResult<PgVec<'mcx, Datum<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, n)?;
     for _ in 0..n {
         v.push(Datum::null());
     }
     Ok(v)
 }
 
-fn new_bool_vec<'mcx>(mcx: mcx::Mcx<'mcx>, n: usize) -> PgResult<PgVec<'mcx, bool>> {
-    let mut v = mcx::vec_with_capacity_in(mcx, n)?;
+fn new_bool_vec<'mcx>(mcx: ::mcx::Mcx<'mcx>, n: usize) -> PgResult<PgVec<'mcx, bool>> {
+    let mut v = ::mcx::vec_with_capacity_in(mcx, n)?;
     for _ in 0..n {
         v.push(false);
     }
@@ -4147,8 +4147,8 @@ fn new_bool_vec<'mcx>(mcx: mcx::Mcx<'mcx>, n: usize) -> PgResult<PgVec<'mcx, boo
 fn clone_slot_descriptor<'mcx>(
     estate: &EStateData<'mcx>,
     slot: SlotId,
-    mcx: mcx::Mcx<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDescData<'mcx>> {
+    mcx: ::mcx::Mcx<'mcx>,
+) -> PgResult<::types_tuple::heaptuple::TupleDescData<'mcx>> {
     let desc = estate
         .slot_data(slot)
         .base()
@@ -4159,9 +4159,9 @@ fn clone_slot_descriptor<'mcx>(
 }
 
 fn clone_desc<'mcx>(
-    desc: &types_tuple::heaptuple::TupleDescData<'_>,
-    mcx: mcx::Mcx<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    desc: &::types_tuple::heaptuple::TupleDescData<'_>,
+    mcx: ::mcx::Mcx<'mcx>,
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     let cloned = desc.clone_in(mcx)?;
     Ok(Some(alloc_in(mcx, cloned)?))
 }

@@ -7,17 +7,17 @@
 //! aliases follow the owned model ([`SlotId`] for `TupleTableSlot *`,
 //! [`EcxtId`] for `ExprContext *`). `ioss_RelationDesc` is the open index
 //! relation handle; `ioss_ScanDesc` is the index-AM scan descriptor
-//! ([`types_tableam::relscan::IndexScanDesc`]).
+//! ([`::types_tableam::relscan::IndexScanDesc`]).
 
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
-use rel::Relation;
-use types_scan::scankey::ScanKeyData;
-use types_scan::sdir::ScanDirection;
-use types_sortsupport::SortSupportData;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_scan::scankey::ScanKeyData;
+use ::types_scan::sdir::ScanDirection;
+use ::types_sortsupport::SortSupportData;
 use types_tuple::heaptuple::Datum;
 
 use crate::execexpr::ExprState;
@@ -36,8 +36,8 @@ pub use types_storage::{Buffer, InvalidBuffer};
 // trimmed copies that used to live here are deleted; these re-exports keep the
 // `nodes::nodeindexonlyscan::…` paths the executor nodes use. `types-nodes`
 // already depends on `types-tableam`, so there is no dependency cycle.
-pub use types_tableam::genam::{IndexScanInstrumentation, SharedIndexScanInstrumentation};
-pub use types_tableam::relscan::{
+pub use ::types_tableam::genam::{IndexScanInstrumentation, SharedIndexScanInstrumentation};
+pub use ::types_tableam::relscan::{
     IndexScanDesc, IndexScanDescData, ParallelIndexScanDescData, ParallelIndexScanDescHandle,
 };
 

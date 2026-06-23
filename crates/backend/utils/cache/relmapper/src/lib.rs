@@ -34,10 +34,10 @@ use types_error::{
     ErrorLocation, PgError, PgResult, SqlState, ERRCODE_DATA_CORRUPTED,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, FATAL, PANIC,
 };
-use types_pgstat::wait_event::{
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_RELATION_MAP_READ, WAIT_EVENT_RELATION_MAP_REPLACE, WAIT_EVENT_RELATION_MAP_WRITE,
 };
-use types_storage::RelFileLocator;
+use ::types_storage::RelFileLocator;
 use wal::{RM_RELMAP_ID, XLR_INFO_MASK};
 
 use transam_xact_seams as xact_seams;
@@ -1019,7 +1019,7 @@ fn perform_relmap_update(shared: bool, updates: &RelMapFile) -> PgResult<()> {
 
 /// `relmap_redo(record)` — WAL replay for relmap update records (the `rm_redo`
 /// slot). The decoded record carries `XLogRecGetInfo` and `XLogRecGetData`.
-pub fn relmap_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> PgResult<()> {
+pub fn relmap_redo(record: &mut ::wal::rmgr::XLogReaderState<'_>) -> PgResult<()> {
     let decoded = record
         .record
         .as_ref()
@@ -1068,7 +1068,7 @@ pub fn relmap_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> PgResult<()> 
  * Small error/elevel helpers (mirror elog()/ereport(elevel, ...)).
  * ------------------------------------------------------------------------- */
 
-fn level(elevel: i32) -> types_error::ErrorLevel {
+fn level(elevel: i32) -> ::types_error::ErrorLevel {
     if elevel >= PANIC.0 {
         PANIC
     } else if elevel >= FATAL.0 {

@@ -1,8 +1,8 @@
 //! `dbasedesc.c` — rmgr descriptor routines for `commands/dbcommands.c`.
 
-use mcx::PgString;
-use types_core::uint8;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_core::uint8;
+use ::types_error::PgResult;
 use wal::{
     xl_dbase_create_file_copy_rec, xl_dbase_create_wal_log_rec, xl_dbase_drop_rec,
     DecodedXLogRecord, XLR_INFO_MASK,
@@ -66,7 +66,7 @@ pub fn dbase_identify(info: uint8) -> Option<&'static str> {
 /// rmgr table invokes `rm_desc`.
 pub fn dbase_desc_seam(
     buf: &mut PgString<'_>,
-    record: &wal::rmgr::XLogReaderState<'_>,
+    record: &::wal::rmgr::XLogReaderState<'_>,
 ) -> PgResult<()> {
     let record = record
         .record

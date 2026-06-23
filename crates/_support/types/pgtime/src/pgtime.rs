@@ -15,7 +15,7 @@ pub const TM_YEAR_BASE: i32 = 1900;
 
 use alloc::string::String;
 
-pub use types_core::primitive::pg_time_t;
+pub use ::types_core::primitive::pg_time_t;
 
 /// pgtime.h — maximum length of a timezone name/POSIX TZ string (not
 /// including the trailing NUL).

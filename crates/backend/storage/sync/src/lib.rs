@@ -42,10 +42,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Instant;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{DEBUG1, ERROR, ErrorLocation, PgError, PgResult, WARNING};
 
-use types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
+use ::types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
 
 // ===========================================================================
 // Constants transcribed 1:1 from sync.c.

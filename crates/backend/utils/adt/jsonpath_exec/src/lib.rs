@@ -40,7 +40,7 @@
 //! `mcx` through the context and the public entrypoints take it as their first
 //! argument (C charges against the ambient `CurrentMemoryContext`).
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use adt_jsonb::{JsonbExtractScalar, JsonbTypeName};
 use jsonb_util::{
@@ -53,9 +53,9 @@ use adt_jsonpath::{
     JsonPathItemType, JSONPATH_LAX,
 };
 use utils_error::{ereport, PgError, PgResult};
-use types_error::ERROR;
-use types_core::Oid;
-use datum::Datum;
+use ::types_error::ERROR;
+use ::types_core::Oid;
+use ::datum::Datum;
 use types_error::{
     ERRCODE_INVALID_ARGUMENT_FOR_SQL_JSON_DATETIME_FUNCTION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_SQL_JSON_SUBSCRIPT, ERRCODE_MORE_THAN_ONE_SQL_JSON_ITEM,
@@ -65,11 +65,11 @@ use types_error::{
     ERRCODE_SQL_JSON_SCALAR_REQUIRED, ERRCODE_UNDEFINED_OBJECT,
 };
 use types_jsonb::jsonb_util::{JsonbDatetime, JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::{
+use ::types_jsonb::jsonb::{
     is_a_jsonb_scalar, jbvType, json_container_is_array, json_container_is_object,
     json_container_is_scalar, json_container_size, JsonbIteratorToken, JB_FOBJECT,
 };
-use types_tuple::heaptuple::DEFAULT_COLLATION_OID;
+use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 
 pub(crate) use jsonpath_exec_seams as seam;
 
@@ -1825,7 +1825,7 @@ fn executeLikeRegex(
         let pattern_bytes = like_regex_pattern(jsp).to_vec();
         cxt.regex = Some(pattern_bytes);
         cxt.cflags =
-            adt_jsonpath::jspConvertRegexFlags(jsp.content.like_regex.flags)?;
+            ::adt_jsonpath::jspConvertRegexFlags(jsp.content.like_regex.flags)?;
     }
 
     // C: `RE_compile_and_execute(cxt->regex, str, len, cflags,
@@ -2319,7 +2319,7 @@ fn CountJsonPathVars(vars: &JsonPathVars) -> PgResult<i32> {
 /// `VARSIZE_ANY_EXHDR`), and the jsonb/json arms reuse the in-crate
 /// `JsonbExtractScalar`/`JsonbInitBinary`/`jsonb_in`.
 fn JsonItemFromDatum(mcx: Mcx<'_>, var: &JsonPathVariable) -> PgResult<JsonbValue> {
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         BOOLOID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, JSONBOID, JSONOID,
         NUMERICOID, TEXTOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, VARCHAROID,
     };
@@ -2721,7 +2721,7 @@ fn compareItems(
 
 /// C: `compareNumeric` (jsonpath_exec.c:3435).
 fn compareNumeric(_mcx: Mcx<'_>, a: &[u8], b: &[u8]) -> i32 {
-    use adt_numeric::ops_sql::numeric_cmp;
+    use ::adt_numeric::ops_sql::numeric_cmp;
     use core::cmp::Ordering;
     match numeric_cmp(a, b) {
         Ordering::Less => -1,
@@ -3793,7 +3793,7 @@ fn execute_string_func(
             // C: `JsonEncodeDateTime(buf, value, typid, &tz)` — `&tz` is a
             // non-NULL pointer to the jbvDatetime's tz field.
             json_seams::json_encode_datetime::call(
-                &types_tuple::Datum::from_usize(d.value),
+                &::types_tuple::Datum::from_usize(d.value),
                 d.typid,
                 Some(d.tz),
             )?
@@ -3827,7 +3827,7 @@ fn execute_string_func(
 
 /// `jspOperationName` wrapper returning an owned message-safe string.
 pub(crate) fn op_name(typ: JsonPathItemType) -> PgResult<&'static str> {
-    adt_jsonpath::jspOperationName(typ)
+    ::adt_jsonpath::jspOperationName(typ)
 }
 
 /// Build a `PgError` for an internal `elog(ERROR, ...)` (XX000) invariant.
@@ -3956,7 +3956,7 @@ fn rebase_binary_offset(v: &mut JsonbValue, base_doc_offset: i32) {
 
 /// `JsonbValueToJsonb` -> on-disk jsonb varlena bytes.
 fn JsonbValueToJsonb(mcx: Mcx<'_>, v: &JsonbValue) -> PgResult<Vec<u8>> {
-    Ok(jsonb_util::JsonbValueToJsonb(mcx, v)?.to_vec())
+    Ok(::jsonb_util::JsonbValueToJsonb(mcx, v)?.to_vec())
 }
 
 /// Build the `JsonPathVars` for the optional `vars` jsonb argument.
@@ -3972,25 +3972,25 @@ fn vars_from_opt_jsonb(vars: Option<&[u8]>) -> JsonPathVars {
 /// C: `DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(str)))` ->
 /// on-disk jsonb varlena bytes. `txt` is the header-stripped `json` text body.
 fn jsonb_in_bytes(mcx: Mcx<'_>, txt: &[u8]) -> PgResult<Vec<u8>> {
-    Ok(adt_jsonb::jsonb_in(mcx, txt, None)?
+    Ok(::adt_jsonb::jsonb_in(mcx, txt, None)?
         .expect("jsonb_in without escontext never soft-fails")
         .to_vec())
 }
 
 /// C: `int64_to_numeric(val)` -> on-disk varlena bytes.
 fn int64_to_numeric_bytes(mcx: Mcx<'_>, val: i64) -> PgResult<Vec<u8>> {
-    Ok(adt_numeric::convert::int64_to_numeric(mcx, val)?.to_vec())
+    Ok(::adt_numeric::convert::int64_to_numeric(mcx, val)?.to_vec())
 }
 
 /// C: `DatumGetNumeric(DirectFunctionCall1(float8_numeric, val))` -> bytes.
 fn float8_to_numeric_bytes(mcx: Mcx<'_>, val: f64) -> PgResult<Vec<u8>> {
-    Ok(adt_numeric::convert::float8_to_numeric(mcx, val)?.to_vec())
+    Ok(::adt_numeric::convert::float8_to_numeric(mcx, val)?.to_vec())
 }
 
 /// The binary arithmetic op on on-disk numeric bytes. Returns `Err` on
 /// overflow/division-by-zero, matching the C `*error == true` case.
 fn numeric_binop(mcx: Mcx<'_>, op: ArithmOp, a: &[u8], b: &[u8]) -> PgResult<Vec<u8>> {
-    use adt_numeric::ops_sql::{
+    use ::adt_numeric::ops_sql::{
         numeric_add, numeric_div, numeric_mod, numeric_mul, numeric_sub,
     };
     let res = match op {
@@ -4005,12 +4005,12 @@ fn numeric_binop(mcx: Mcx<'_>, op: ArithmOp, a: &[u8], b: &[u8]) -> PgResult<Vec
 
 /// C: `numeric_uminus(num)` -> bytes.
 fn numeric_uminus_bytes(mcx: Mcx<'_>, a: &[u8]) -> PgResult<Vec<u8>> {
-    Ok(adt_numeric::ops_sql::numeric_uminus(mcx, a)?.to_vec())
+    Ok(::adt_numeric::ops_sql::numeric_uminus(mcx, a)?.to_vec())
 }
 
 /// C: the `.abs()`/`.floor()`/`.ceiling()` numeric functions -> bytes.
 fn numeric_unary_method(mcx: Mcx<'_>, func: NumericMethod, a: &[u8]) -> PgResult<Vec<u8>> {
-    use adt_numeric::ops_sql::{numeric_abs, numeric_ceil, numeric_floor};
+    use ::adt_numeric::ops_sql::{numeric_abs, numeric_ceil, numeric_floor};
     let res = match func {
         NumericMethod::Abs => numeric_abs(mcx, a)?,
         NumericMethod::Floor => numeric_floor(mcx, a)?,
@@ -4021,12 +4021,12 @@ fn numeric_unary_method(mcx: Mcx<'_>, func: NumericMethod, a: &[u8]) -> PgResult
 
 /// C: `numeric_trunc(num, scale)` -> bytes.
 fn numeric_trunc_bytes(mcx: Mcx<'_>, a: &[u8], scale: i32) -> PgResult<Vec<u8>> {
-    Ok(adt_numeric::ops_sql::numeric_trunc(mcx, a, scale)?.to_vec())
+    Ok(::adt_numeric::ops_sql::numeric_trunc(mcx, a, scale)?.to_vec())
 }
 
 /// C: `numeric_int4_opt_error(num, &have_error)` — `Err` on the error case.
 fn numeric_int4_opt(mcx: Mcx<'_>, num: &[u8]) -> PgResult<i32> {
-    use adt_numeric::convert::{numericvar_to_int32, set_var_from_num};
+    use ::adt_numeric::convert::{numericvar_to_int32, set_var_from_num};
     let var = set_var_from_num(mcx, num)?;
     match numericvar_to_int32(&var)? {
         Some(v) => Ok(v),
@@ -4036,8 +4036,8 @@ fn numeric_int4_opt(mcx: Mcx<'_>, num: &[u8]) -> PgResult<i32> {
 
 /// C: `numeric_int8_opt_error(num, &have_error)` — `Err` on the error case.
 fn numeric_int8_opt(mcx: Mcx<'_>, num: &[u8]) -> PgResult<i64> {
-    use adt_numeric::convert::set_var_from_num;
-    use adt_numeric::kernel_transcendental::numericvar_to_int64;
+    use ::adt_numeric::convert::set_var_from_num;
+    use ::adt_numeric::kernel_transcendental::numericvar_to_int64;
     let var = set_var_from_num(mcx, num)?;
     match numericvar_to_int64(&var)? {
         Some(v) => Ok(v),
@@ -4047,18 +4047,18 @@ fn numeric_int8_opt(mcx: Mcx<'_>, num: &[u8]) -> PgResult<i64> {
 
 /// The "X out of range" error the numeric-to-int conversions raise.
 fn int_out_of_range() -> PgError {
-    use types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
+    use ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
     PgError::error("integer out of range").with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
 }
 
 /// C: `numeric_is_nan(num) || numeric_is_inf(num)` on on-disk bytes.
 fn numeric_is_nan_or_inf(num: &[u8]) -> bool {
-    adt_numeric::on_disk::numeric_is_special(num)
+    ::adt_numeric::on_disk::numeric_is_special(num)
 }
 
 /// C: `numeric_out(num)` -> canonical decimal text.
 fn numeric_out(mcx: Mcx<'_>, num: &[u8]) -> PgResult<String> {
-    adt_numeric::io::numeric_out(mcx, num)
+    ::adt_numeric::io::numeric_out(mcx, num)
 }
 
 // ---------------------------------------------------------------------------
@@ -4131,9 +4131,9 @@ fn soft_numeric_in_with_typmod(
     let typmod = if precision == -1 {
         -1
     } else {
-        adt_numeric::ops_sql::numerictypmodin(&[precision, scale])?
+        ::adt_numeric::ops_sql::numerictypmodin(&[precision, scale])?
     };
-    Ok(soft_input(adt_numeric::io::numeric_in(mcx, numstr, typmod))?.map(|b| b.to_vec()))
+    Ok(soft_input(::adt_numeric::io::numeric_in(mcx, numstr, typmod))?.map(|b| b.to_vec()))
 }
 
 /// The 13 ISO datetime template strings (jsonpath_exec.c:2408-2423).

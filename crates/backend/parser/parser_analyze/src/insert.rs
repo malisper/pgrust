@@ -20,7 +20,7 @@ use ::nodes::parsestmt::{ParseExprKind, ParseState};
 use ::nodes::primnodes::Expr;
 use ::nodes::rawnodes::{InsertStmt, ResTarget, SelectStmt};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::elog_error;
 
@@ -157,9 +157,9 @@ pub fn transformInsertStmt<'mcx>(
                 Some(items) => items,
                 None => return Err(elog_error("INSERT single VALUES sublist is not a List")),
             };
-            let mut sublist_owned = mcx::vec_with_capacity_in(mcx, sublist.len())?;
+            let mut sublist_owned = ::mcx::vec_with_capacity_in(mcx, sublist.len())?;
             for item in sublist.iter() {
-                sublist_owned.push(mcx::alloc_in(mcx, item.clone_in(mcx)?)?);
+                sublist_owned.push(::mcx::alloc_in(mcx, item.clone_in(mcx)?)?);
             }
             let raw = parse_target::transformExpressionList(
                 mcx,
@@ -183,7 +183,7 @@ pub fn transformInsertStmt<'mcx>(
         .unwrap_or(0);
 
     let mut target_list: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, expr_list.len())?;
+        ::mcx::vec_with_capacity_in(mcx, expr_list.len())?;
     debug_assert!(expr_list.len() <= icolumns.len());
 
     for (idx, expr) in expr_list.into_iter().enumerate() {
@@ -221,7 +221,7 @@ pub fn transformInsertStmt<'mcx>(
 
     // Process ON CONFLICT, if any. (analyze.c:1019)
     if let Some(occ) = stmt.onConflictClause.as_deref() {
-        qry.onConflict = Some(mcx::alloc_in(
+        qry.onConflict = Some(::mcx::alloc_in(
             mcx,
             transformOnConflictClause(mcx, pstate, occ)?,
         )?);
@@ -240,7 +240,7 @@ pub fn transformInsertStmt<'mcx>(
     qry.rtable = core::mem::replace(&mut pstate.p_rtable, PgVec::new_in(mcx));
     qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, PgVec::new_in(mcx));
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, PgVec::new_in(mcx));
-    qry.jointree = Some(mcx::alloc_in(
+    qry.jointree = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
@@ -335,7 +335,7 @@ fn transformInsertSelect<'mcx>(
             .subquery
             .as_deref()
             .ok_or_else(|| elog_error("INSERT ... SELECT subquery RTE has no subquery"))?;
-        let mut tl = mcx::vec_with_capacity_in(mcx, subq.targetList.len())?;
+        let mut tl = ::mcx::vec_with_capacity_in(mcx, subq.targetList.len())?;
         for te in subq.targetList.iter() {
             tl.push(te.clone_in(mcx)?);
         }
@@ -397,7 +397,7 @@ fn transformInsertMultiRowValues<'mcx>(
     // exprsLists: a List (PgVec<NodePtr>) where each element is a Node::List of
     // Node::Expr — one row of coerced column expressions.
     let mut exprs_lists: PgVec<'mcx, NodePtr<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, select_stmt.valuesLists.len())?;
+        ::mcx::vec_with_capacity_in(mcx, select_stmt.valuesLists.len())?;
     let mut sublist_length: i32 = -1;
 
     for row_node in select_stmt.valuesLists.iter() {
@@ -405,9 +405,9 @@ fn transformInsertMultiRowValues<'mcx>(
             Some(items) => items,
             None => return Err(elog_error("INSERT VALUES sublist is not a List")),
         };
-        let mut sublist_owned = mcx::vec_with_capacity_in(mcx, sublist.len())?;
+        let mut sublist_owned = ::mcx::vec_with_capacity_in(mcx, sublist.len())?;
         for item in sublist.iter() {
-            sublist_owned.push(mcx::alloc_in(mcx, item.clone_in(mcx)?)?);
+            sublist_owned.push(::mcx::alloc_in(mcx, item.clone_in(mcx)?)?);
         }
 
         // Basic expression transformation (same as a ROW() expr, but allow
@@ -448,11 +448,11 @@ fn transformInsertMultiRowValues<'mcx>(
 
         // Wrap the row as a Node::List of Node::Expr for the VALUES RTE.
         let mut row_nodes: PgVec<'mcx, NodePtr<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, row.len())?;
+            ::mcx::vec_with_capacity_in(mcx, row.len())?;
         for expr in row.into_iter() {
-            row_nodes.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?);
+            row_nodes.push(::mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?);
         }
-        exprs_lists.push(mcx::alloc_in(mcx, Node::mk_list(mcx, row_nodes)?)?);
+        exprs_lists.push(::mcx::alloc_in(mcx, Node::mk_list(mcx, row_nodes)?)?);
     }
 
     // Construct column type/typmod/collation lists from the first row.
@@ -475,9 +475,9 @@ fn transformInsertMultiRowValues<'mcx>(
     let lateral = if pstate.p_rtable.len() != 1 {
         let probe = Node::mk_list(mcx, {
             let mut v: PgVec<'mcx, NodePtr<'mcx>> =
-                mcx::vec_with_capacity_in(mcx, exprs_lists.len())?;
+                ::mcx::vec_with_capacity_in(mcx, exprs_lists.len())?;
             for e in exprs_lists.iter() {
-                v.push(mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
+                v.push(::mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
             }
             v
         })?;
@@ -506,9 +506,9 @@ fn transformInsertMultiRowValues<'mcx>(
 
     parser_relation::addNSItemToQuery(mcx, pstate, nsitem, true, false, false)?;
 
-    let mut var_exprs: PgVec<'mcx, Expr<'static>> = mcx::vec_with_capacity_in(mcx, var_nodes.len())?;
+    let mut var_exprs: PgVec<'mcx, Expr<'static>> = ::mcx::vec_with_capacity_in(mcx, var_nodes.len())?;
     for vn in var_nodes.into_iter() {
-        match mcx::PgBox::into_inner(vn).into_expr() {
+        match ::mcx::PgBox::into_inner(vn).into_expr() {
             // Re-intern into the parse arena's `'static` for `transformInsertRow`
             // (it `clone_in`s back into `mcx`).
             Some(e) => var_exprs.push(e.erase_lifetime()),
@@ -572,7 +572,7 @@ pub fn transformInsertRow<'mcx>(
     }
 
     // Prepare columns for assignment to the target table.
-    let mut result: PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, exprlist.len())?;
+    let mut result: PgVec<'mcx, Expr<'mcx>> = ::mcx::vec_with_capacity_in(mcx, exprlist.len())?;
     for (idx, expr) in exprlist.into_iter().enumerate() {
         let col: &ResTarget<'mcx> = &icolumns[idx];
         let attno = attrnos[idx];
@@ -668,7 +668,7 @@ fn copy_cols<'mcx>(
     mcx: Mcx<'mcx>,
     cols: &PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
 ) -> PgResult<PgVec<'mcx, ResTarget<'mcx>>> {
-    let mut out: PgVec<'mcx, ResTarget<'mcx>> = mcx::vec_with_capacity_in(mcx, cols.len())?;
+    let mut out: PgVec<'mcx, ResTarget<'mcx>> = ::mcx::vec_with_capacity_in(mcx, cols.len())?;
     for c in cols.iter() {
         match c.as_ref().as_restarget() {
             Some(rt) => out.push(rt.clone_in(mcx)?),
@@ -748,14 +748,14 @@ fn transformOnConflictClause<'mcx>(
     // Convert the arbiter element Exprs into the node-pointer list the
     // OnConflictExpr carries.
     let mut arbiter_elems: PgVec<'mcx, NodePtr<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, arbiter_exprs.len())?;
+        ::mcx::vec_with_capacity_in(mcx, arbiter_exprs.len())?;
     for e in arbiter_exprs.into_iter() {
         // The arbiter Exprs come back in the parser-arena `'static`; re-clone
         // each into `mcx` before wrapping (invariant `Expr`).
-        arbiter_elems.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
+        arbiter_elems.push(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
     }
     let arbiter_where: Option<NodePtr<'mcx>> = match arbiter_where_expr {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
+        Some(e) => Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
         None => None,
     };
 
@@ -779,9 +779,9 @@ fn transformOnConflictClause<'mcx>(
             pstate,
             &on_conflict_clause.targetList,
         )?;
-        on_conflict_set = mcx::vec_with_capacity_in(mcx, set_tles.len())?;
+        on_conflict_set = ::mcx::vec_with_capacity_in(mcx, set_tles.len())?;
         for tle in set_tles.into_iter() {
-            on_conflict_set.push(mcx::alloc_in(
+            on_conflict_set.push(::mcx::alloc_in(
                 mcx,
                 Node::mk_target_entry(mcx, tle)?,
             )?);
@@ -800,7 +800,7 @@ fn transformOnConflictClause<'mcx>(
             "WHERE",
         )?;
         on_conflict_where = match where_expr {
-            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
+            Some(e) => Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
             None => None,
         };
 
@@ -834,7 +834,7 @@ pub fn build_on_conflict_excluded_targetlist<'mcx>(
     excl_rel_index: i32,
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
     let natts = targetrel.rd_att.attrs.len();
-    let mut result: PgVec<'mcx, NodePtr<'mcx>> = mcx::vec_with_capacity_in(mcx, natts + 1)?;
+    let mut result: PgVec<'mcx, NodePtr<'mcx>> = ::mcx::vec_with_capacity_in(mcx, natts + 1)?;
 
     // Note that resnos of the tlist must correspond to attnos of the underlying
     // relation, hence we need entries for dropped columns too.
@@ -871,14 +871,14 @@ pub fn build_on_conflict_excluded_targetlist<'mcx>(
             name,
             false,
         )?;
-        result.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, te)?)?);
+        result.push(::mcx::alloc_in(mcx, Node::mk_target_entry(mcx, te)?)?);
     }
 
     // Add a whole-row-Var entry to support references to "EXCLUDED.*". Its resno
     // must match the Var's varattno (InvalidAttrNumber). (analyze.c:1316)
     let whole_row = nodes_core::makefuncs::make_var(
         excl_rel_index,
-        types_core::primitive::InvalidAttrNumber,
+        ::types_core::primitive::InvalidAttrNumber,
         targetrel.rd_rel.reltype,
         -1,
         InvalidOid,
@@ -887,11 +887,11 @@ pub fn build_on_conflict_excluded_targetlist<'mcx>(
     let te = nodes_core::makefuncs::make_target_entry(
         mcx,
         Expr::Var(whole_row),
-        types_core::primitive::InvalidAttrNumber,
+        ::types_core::primitive::InvalidAttrNumber,
         None,
         true,
     )?;
-    result.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, te)?)?);
+    result.push(::mcx::alloc_in(mcx, Node::mk_target_entry(mcx, te)?)?);
 
     Ok(result)
 }

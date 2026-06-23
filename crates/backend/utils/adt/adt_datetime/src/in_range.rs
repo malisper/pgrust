@@ -18,7 +18,7 @@
 //! the `offset->time < 0` test, since those disregard the month/day fields).
 
 use types_datetime::{Interval, TimeTzADT};
-use types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE;
+use ::types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE;
 use types_datetime::{DateADT, TimeADT, Timestamp, TimestampTz};
 use types_error::{PgError};
 
@@ -229,7 +229,7 @@ pub fn in_range_timetz_interval(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_datetime::USECS_PER_HOUR;
+    use ::types_datetime::USECS_PER_HOUR;
 
     fn hours_interval(n: i64) -> Interval {
         Interval {

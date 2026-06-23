@@ -27,18 +27,18 @@
 //! `like_regex_support` are not reached by this seam and are not ported.
 
 use mcx::{slice_in, Mcx};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_COLLATION,
 };
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::VARHDRSZ;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::VARHDRSZ;
 
-use nodes_core::makefuncs::{make_const, make_opclause};
-use nodes_core::nodefuncs::expr_type;
+use ::nodes_core::makefuncs::{make_const, make_opclause};
+use ::nodes_core::nodefuncs::expr_type;
 use pg_locale_seams as locale_seams;
 use regexp_seams as regexp;
 use varlena_seams as varlena;
@@ -276,8 +276,8 @@ fn regex_selectivity(patt: &[u8], case_insensitive: bool, fixed_prefix_len: usiz
 
 /// `pattern_char_isalpha(c, is_multibyte, locale)` (like_support.c) — whether a
 /// char is a letter (subject to case-folding). 1:1 with the C body.
-fn pattern_char_isalpha(c: u8, is_multibyte: bool, locale: &locale::PgLocaleStruct) -> bool {
-    use locale::CollProvider;
+fn pattern_char_isalpha(c: u8, is_multibyte: bool, locale: &::locale::PgLocaleStruct) -> bool {
+    use ::locale::CollProvider;
     let highbit = (c & 0x80) != 0;
     if locale.ctype_is_c {
         c.is_ascii_alphabetic()
@@ -387,7 +387,7 @@ fn like_fixed_prefix<'mcx>(
     debug_assert!(typeid == BYTEAOID || typeid == TEXTOID);
 
     let is_multibyte = mb::pg_database_encoding_max_length::call() > 1;
-    let mut locale: Option<locale::PgLocale> = None;
+    let mut locale: Option<::locale::PgLocale> = None;
 
     if case_insensitive {
         if typeid == BYTEAOID {
@@ -1061,7 +1061,7 @@ pub fn func_selectivity_support<'mcx>(
     inputcollid: Oid,
     is_join: bool,
     jointype: i16,
-    sjinfo: Option<&pathnodes::SpecialJoinInfo>,
+    sjinfo: Option<&::pathnodes::SpecialJoinInfo>,
 ) -> PgResult<Option<f64>> {
     let prosupport = lsc::get_func_support::call(funcid)?;
     // Map the function's prosupport (the C `*_support` entry point that bakes in
@@ -1122,7 +1122,7 @@ fn func_selectivity_support_by_prosrc<'mcx>(
     inputcollid: Oid,
     is_join: bool,
     jointype: i16,
-    sjinfo: Option<&pathnodes::SpecialJoinInfo>,
+    sjinfo: Option<&::pathnodes::SpecialJoinInfo>,
 ) -> PgResult<Option<f64>> {
     let Some(prosrc) = lsc::get_func_prosrc::call(mcx, prosupport)? else {
         return Ok(None);
@@ -1448,7 +1448,7 @@ fn index_condition_support(
     _funcid: Oid,
     clause: NodeId,
     indexarg: i32,
-    index: &pathnodes::IndexOptInfo,
+    index: &::pathnodes::IndexOptInfo,
     indexcol: i32,
 ) -> (alloc::vec::Vec<Expr<'static>>, bool) {
     // Map the support function (shared by the text/name/bpchar variants of each
@@ -1494,7 +1494,7 @@ fn index_condition_support(
     // The estimator's prefix-extraction allocations live in a per-call context;
     // the produced Expr nodes are cloned out into the planner arena by the seam
     // caller (it allocs each into `root` and wraps in a RestrictInfo).
-    let cx = mcx::MemoryContext::new("selfuncs match_pattern_prefix");
+    let cx = ::mcx::MemoryContext::new("selfuncs match_pattern_prefix");
     let result = match match_pattern_prefix(
         cx.mcx(),
         left,
@@ -1537,7 +1537,7 @@ fn index_condition_support(
 /// (network_subset_support registers from `backend-utils-adt-network-selfuncs`),
 /// so installing the dispatcher here no longer monopolizes the single seam slot.
 pub fn init_support_seam() {
-    use fmgr_support_seams::index_support_registry as reg;
+    use ::fmgr_support_seams::index_support_registry as reg;
     reg::register_index_condition(F_TEXTLIKE_SUPPORT, index_condition_support);
     reg::register_index_condition(F_TEXTICLIKE_SUPPORT, index_condition_support);
     reg::register_index_condition(F_TEXTREGEXEQ_SUPPORT, index_condition_support);

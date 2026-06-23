@@ -35,7 +35,7 @@
 //! OIDs / nargs / strict / retset are transcribed exactly from `pg_proc.dat`
 //! (every row is `proisstrict => 't'` — the default — and not retset).
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// The shared fmgr-frame entry point for every GiST opclass support proc. In

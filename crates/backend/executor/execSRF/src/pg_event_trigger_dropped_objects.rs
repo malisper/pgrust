@@ -10,8 +10,8 @@
 //! registry whose tag-only `resultinfo` cannot carry the live `ReturnSetInfo`
 //! (the WONTFIX dual-home, same as [`crate::pg_lock_status`]).
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 

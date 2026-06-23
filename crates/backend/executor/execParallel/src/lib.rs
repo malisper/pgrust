@@ -50,7 +50,7 @@ use execparallel::{
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::querydesc::QueryDesc;
 use nodes::{EStateData, PlanStateNode};
-use types_core::instrument::{BufferUsage, WalUsage};
+use ::types_core::instrument::{BufferUsage, WalUsage};
 use ::nodes::instrument::Instrumentation;
 
 use transam_parallel as parallel;
@@ -120,7 +120,7 @@ const fn maxalign(len: usize) -> usize {
 
 /// `LWTRANCHE_PARALLEL_QUERY_DSA` (storage/lwlock.h) — the canonical
 /// build-derived value (`NUM_INDIVIDUAL_LWLOCKS` + tranche offset = 71).
-use types_storage::LWTRANCHE_PARALLEL_QUERY_DSA;
+use ::types_storage::LWTRANCHE_PARALLEL_QUERY_DSA;
 
 /// `ForwardScanDirection` (access/sdir.h) — value `1`.
 const FORWARD_SCAN_DIRECTION: types_scan::sdir::ScanDirection =
@@ -133,7 +133,7 @@ const OFFSET_OF_JIT_INSTR: usize = maxalign(core::mem::size_of::<i32>());
 
 const SIZEOF_INSTRUMENTATION: usize = core::mem::size_of::<Instrumentation>();
 const SIZEOF_JIT_INSTRUMENTATION: usize =
-    core::mem::size_of::<execparallel::JitInstrumentation>();
+    core::mem::size_of::<::execparallel::JitInstrumentation>();
 const SIZEOF_FIXED_STATE: usize = core::mem::size_of::<FixedParallelExecutorState>();
 const SIZEOF_BUFFER_USAGE: usize = core::mem::size_of::<BufferUsage>();
 const SIZEOF_WAL_USAGE: usize = core::mem::size_of::<WalUsage>();
@@ -203,7 +203,7 @@ fn ExecSerializePlan(
 fn ExecParallelEstimate<'mcx>(
     planstate: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-    pcxt: execparallel::ParallelContextHandle,
+    pcxt: ::execparallel::ParallelContextHandle,
     nnodes: &mut i32,
 ) -> PgResult<bool> {
     // Count this node.
@@ -390,8 +390,8 @@ fn RestoreParamExecParams(cursor: SerializeCursor, estate: &mut EStateData<'_>) 
 fn ExecParallelInitializeDSM<'mcx>(
     planstate: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-    pcxt: execparallel::ParallelContextHandle,
-    instrumentation: Option<execparallel::InstrumentationHandle>,
+    pcxt: ::execparallel::ParallelContextHandle,
+    instrumentation: Option<::execparallel::InstrumentationHandle>,
     nnodes: &mut i32,
 ) -> PgResult<bool> {
     // If instrumentation is enabled, initialize slot for this node.
@@ -479,9 +479,9 @@ fn ExecParallelInitializeDSM<'mcx>(
 /// `shm_mq_handle **` array (empty when there are no workers).
 fn ExecParallelSetupTupleQueues<'mcx>(
     mcx: Mcx<'mcx>,
-    pcxt: execparallel::ParallelContextHandle,
+    pcxt: ::execparallel::ParallelContextHandle,
     reinitialize: bool,
-) -> PgResult<PgVec<'mcx, execparallel::ShmMqAttachHandle>> {
+) -> PgResult<PgVec<'mcx, ::execparallel::ShmMqAttachHandle>> {
     let nworkers = parallel::pcxt_nworkers(pcxt);
 
     // Skip this if no workers.
@@ -506,7 +506,7 @@ fn ExecParallelSetupTupleQueues<'mcx>(
 
     // Allocate the `nworkers`-sized handle array (C `palloc`). Create the
     // queues, and become the receiver for each.
-    let mut responseq = mcx::vec_with_capacity_in(mcx, nworkers as usize)?;
+    let mut responseq = ::mcx::vec_with_capacity_in(mcx, nworkers as usize)?;
     for i in 0..nworkers {
         let mq = shmmq::shm_mq_create_at::call(tqueuespace, i, PARALLEL_TUPLE_QUEUE_SIZE);
         shmmq::shm_mq_set_receiver_to_myproc::call(mq);
@@ -802,7 +802,7 @@ pub fn ExecParallelCreateReaders<'mcx>(
     debug_assert!(pei.reader.is_empty());
 
     if nworkers > 0 {
-        let mut reader = mcx::vec_with_capacity_in(mcx, nworkers as usize)?;
+        let mut reader = ::mcx::vec_with_capacity_in(mcx, nworkers as usize)?;
         for i in 0..nworkers {
             let tqueue_i = pei.tqueue[i as usize];
             shmmq::shm_mq_set_handle::call(tqueue_i, parallel::pcxt_worker_bgwhandle(pcxt, i));
@@ -891,7 +891,7 @@ pub fn ExecParallelReinitialize<'mcx>(
 fn ExecParallelReInitializeDSM<'mcx>(
     planstate: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-    pcxt: execparallel::ParallelContextHandle,
+    pcxt: ::execparallel::ParallelContextHandle,
 ) -> PgResult<bool> {
     let parallel_aware = planstate.parallel_aware();
     match planstate {
@@ -977,7 +977,7 @@ fn ExecParallelReInitializeDSM<'mcx>(
 fn ExecParallelRetrieveInstrumentation<'mcx>(
     mcx: Mcx<'mcx>,
     planstate: &mut PlanStateNode<'mcx>,
-    sei: execparallel::InstrumentationHandle,
+    sei: ::execparallel::InstrumentationHandle,
 ) -> PgResult<()> {
     let plan_node_id = planstate.plan_node_id();
 
@@ -1046,7 +1046,7 @@ fn instr_agg_node_local(dst: &mut Instrumentation, add: &Instrumentation) {
 /// planstate->instrument)` (done DSM-side by the `report_instr_to_dsm` seam).
 fn ExecParallelReportInstrumentation<'mcx>(
     planstate: &mut PlanStateNode<'mcx>,
-    sei: execparallel::InstrumentationHandle,
+    sei: ::execparallel::InstrumentationHandle,
     worker: i32,
 ) -> PgResult<()> {
     let plan_node_id = planstate.plan_node_id();
@@ -1169,7 +1169,7 @@ pub fn ExecParallelCleanup<'mcx>(
 fn ExecParallelGetReceiver(
     seg: DsmSegmentHandle,
     toc: ShmTocHandle,
-) -> PgResult<execparallel::DestReceiverHandle> {
+) -> PgResult<::execparallel::DestReceiverHandle> {
     let mqspace = parallel::shm_toc_lookup(toc, PARALLEL_KEY_TUPLE_QUEUE, false)
         .ok_or_else(|| PgError::error("ExecParallelGetReceiver: PARALLEL_KEY_TUPLE_QUEUE present"))?;
     // mqspace += ParallelWorkerNumber * PARALLEL_TUPLE_QUEUE_SIZE
@@ -1193,7 +1193,7 @@ fn ExecParallelGetReceiver(
 fn ExecParallelGetQueryDesc<'mcx>(
     mcx: Mcx<'mcx>,
     toc: ShmTocHandle,
-    receiver: execparallel::DestReceiverHandle,
+    receiver: ::execparallel::DestReceiverHandle,
     instrument_options: i32,
 ) -> PgResult<QueryDesc> {
     // Get the query string from shared memory.
@@ -1241,7 +1241,7 @@ fn ExecParallelGetQueryDesc<'mcx>(
 fn ExecParallelInitializeWorker<'mcx>(
     planstate: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-    pwcxt: execparallel::ParallelWorkerContextHandle,
+    pwcxt: ::execparallel::ParallelWorkerContextHandle,
 ) -> PgResult<bool> {
     let parallel_aware = planstate.parallel_aware();
     match planstate {
@@ -1459,7 +1459,7 @@ pub fn ParallelQueryMain<'mcx>(
 
 fn foreignscan_no_owned_pcxt(
     which: &str,
-    _node: &mut mcx::PgBox<'_, ::nodes::nodeforeigncustom::ForeignScanState<'_>>,
+    _node: &mut ::mcx::PgBox<'_, ::nodes::nodeforeigncustom::ForeignScanState<'_>>,
 ) -> ! {
     panic!(
         "{which}: the owned per-node ForeignScan parallel method takes &mut ParallelContext, \
@@ -1471,7 +1471,7 @@ fn foreignscan_no_owned_pcxt(
 
 fn customscan_no_owned_pcxt(
     which: &str,
-    _node: &mut mcx::PgBox<'_, ::nodes::nodeforeigncustom::CustomScanState<'_>>,
+    _node: &mut ::mcx::PgBox<'_, ::nodes::nodeforeigncustom::CustomScanState<'_>>,
 ) -> ! {
     panic!(
         "{which}: the owned per-node CustomScan parallel method takes &mut ParallelContext, \

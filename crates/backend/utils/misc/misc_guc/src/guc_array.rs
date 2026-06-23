@@ -10,13 +10,13 @@
 //! normalization via `find_option`, the superuser shortcut in `GUCArrayReset`)
 //! mirrors the C 1:1.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_acl::{AclResult, ACL_SET};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR, ERROR,
     WARNING,
 };
-use types_guc::guc::{GucContext, GucSource};
+use ::types_guc::guc::{GucContext, GucSource};
 use types_guc::{GUC_CUSTOM_PLACEHOLDER, PGC_SUSET, PGC_S_TEST, PGC_USERSET};
 
 use crate::live::{set_config_option_global, with_store};
@@ -73,7 +73,7 @@ pub fn ProcessGUCArray(
             get_user_id(),
             action,
             true,
-            types_error::ErrorLevel(0),
+            ::types_error::ErrorLevel(0),
             false,
         )?;
     }

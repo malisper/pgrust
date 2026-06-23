@@ -4,8 +4,8 @@
 //! [`crate::io`]; this module has the constructor, the relational operators,
 //! the arithmetic operators, and the internal slope / distance helpers.
 
-use types_core::geo::Point;
-use types_error::PgResult;
+use ::types_core::geo::Point;
+use ::types_error::PgResult;
 
 use crate::f8::{float8_div, float8_eq, float8_mi, float8_mul, float8_pl, get_float8_infinity};
 use crate::{FPeq, FPgt, FPlt, HYPOT};

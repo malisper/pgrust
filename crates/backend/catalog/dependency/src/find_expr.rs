@@ -18,16 +18,16 @@
 //! first error in `context.err`/a local and surface it after the walk (see
 //! [`run_subwalk`]).
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use nodes_core::node_walker::{
+use ::nodes_core::node_walker::{
     self, QTW_EXAMINE_SORTGROUP, QTW_IGNORE_JOINALIASES,
 };
-use nodes_core::nodefuncs::expr_type;
+use ::nodes_core::nodefuncs::expr_type;
 use utils_error::{ereport, elog};
 
-use types_catalog::catalog_dependency::ObjectAddresses;
-use types_core::primitive::{AttrNumber, InvalidAttrNumber, Oid};
+use ::types_catalog::catalog_dependency::ObjectAddresses;
+use ::types_core::primitive::{AttrNumber, InvalidAttrNumber, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_COLUMN, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node, CMD_INSERT, CMD_UPDATE};
@@ -35,11 +35,11 @@ use ::nodes::parsenodes::{
     RangeTblEntry, RTE_FUNCTION, RTE_JOIN, RTE_NAMEDTUPLESTORE, RTE_RELATION,
 };
 use ::nodes::primnodes::Expr;
-use types_tuple::heaptuple::{DEFAULT_COLLATION_OID, RECORDOID};
+use ::types_tuple::heaptuple::{DEFAULT_COLLATION_OID, RECORDOID};
 
 // Catalog class OIDs the walker references, aliased to the C `...RelationId`
 // identifier spelling so dispatch reads 1:1 against dependency.c.
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     COLLATION_RELATION_ID as CollationRelationId, CONSTRAINT_RELATION_ID as ConstraintRelationId,
     NAMESPACE_RELATION_ID as NamespaceRelationId,
     OPERATOR_FAMILY_RELATION_ID as OperatorFamilyRelationId,
@@ -676,7 +676,7 @@ fn find_expr_references_query(
 /// onto the owned `context.rtables` stack — the C `lcons(query->rtable, …)`
 /// shares the list pointer, but our owned model has no shared pointer.
 fn clone_rtable<'mcx>(
-    rtable: &mcx::PgVec<'_, RangeTblEntry<'_>>,
+    rtable: &::mcx::PgVec<'_, RangeTblEntry<'_>>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<Vec<RangeTblEntry<'mcx>>> {
     let mut out = Vec::with_capacity(rtable.len());

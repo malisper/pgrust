@@ -2,7 +2,7 @@
 //! round-trip (exact C byte layout) + the k-permutation generator.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 fn dep(degree: f64, attrs: &[AttrNumber]) -> Box<MVDependency> {
     Box::new(MVDependency {

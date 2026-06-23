@@ -29,7 +29,7 @@
 //! on-disk `Numeric` Datums and returns one; that `PG_GETARG_NUMERIC` /
 //! `PG_RETURN_NUMERIC` (toast/Datum boundary) conversion is the systemic
 //! fmgr/Datum deferral, so this core takes and returns the on-disk `numeric`
-//! byte images that `adt_numeric::random::random_numeric` works
+//! byte images that `::adt_numeric::random::random_numeric` works
 //! on (its NaN/infinity bound rejection lives there, exactly as `random_var` in
 //! `numeric.c`).
 //!
@@ -66,12 +66,12 @@
 use std::sync::{Mutex, MutexGuard};
 
 use mcx::{Mcx, PgVec};
-use prng::PgPrng;
+use ::prng::PgPrng;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
-use adt_numeric::random::random_numeric;
-use timestamp_seams::get_current_timestamp;
-use init_small_seams::my_proc_pid;
+use ::adt_numeric::random::random_numeric;
+use ::timestamp_seams::get_current_timestamp;
+use ::init_small_seams::my_proc_pid;
 
 /// Shared PRNG state used by all the random functions, plus the
 /// `prng_seed_set` flag, held together under one lock to mirror the two C

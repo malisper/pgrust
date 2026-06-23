@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use ::nodes::primnodes::Expr;
 use pathnodes::{
     EcId, EmId, EquivalenceMember, ForeignKeyOptInfo, PlannerInfo,
@@ -145,7 +145,7 @@ pub fn relation_can_be_sorted_early(
     // required because the derived `Expr::clone` panics on an owned-subtree child.
     let work_ctx = mcx::MemoryContext::new("relation_can_be_sorted_early");
     let work_mcx = work_ctx.mcx();
-    let target_expr_ids: Vec<pathnodes::NodeId> = {
+    let target_expr_ids: Vec<::pathnodes::NodeId> = {
         let relopt = root.rel(rel);
         let target = relopt
             .reltarget

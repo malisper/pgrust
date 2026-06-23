@@ -39,7 +39,7 @@ use execTuples_seams as execTuples;
 use execUtils_seams as execUtils;
 use postgres_seams as tcop_postgres;
 use mcx::{alloc_in, vec_with_capacity_in, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::execexpr::{ExprDoneCond, SetExprState};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
 use ::nodes::nodeprojectset::{ProjectSet as ProjectSetPlan, ProjectSetElem, ProjectSetState};
@@ -383,7 +383,7 @@ pub fn ExecInitProjectSet<'mcx>(
         .map(|tl| tl.len())
         .unwrap_or(0);
     state.nelems = i32::try_from(nelems).map_err(|_| {
-        types_error::PgError::error("ProjectSet has too many targetlist entries".to_string())
+        ::types_error::PgError::error("ProjectSet has too many targetlist entries".to_string())
     })?;
     let mut elems: PgVec<'mcx, ProjectSetElem<'mcx>> = vec_with_capacity_in(mcx, nelems)?;
     let mut elemdone: PgVec<'mcx, ExprDoneCond> = vec_with_capacity_in(mcx, nelems)?;

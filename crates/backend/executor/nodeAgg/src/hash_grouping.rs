@@ -3,8 +3,8 @@
 //! expressions for hashed input, and the bucket/partition sizing helpers.
 
 use nodeHash_seams as nodeHash_seams;
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::nodeagg::{do_aggsplit_skipfinal, AggStrategy};
 use crate::aggstate::{AggStateData, AggStatePerGroupData};
 use nodes::{EStateData, SlotId};
@@ -67,7 +67,7 @@ pub fn prepare_hash_slot<'mcx>(
             .hash_grp_col_idx_input
             .as_ref()
             .expect("perhash->hashGrpColIdxInput");
-        let mut idx_input = mcx::vec_with_capacity_in(estate.es_query_cxt, src.len())?;
+        let mut idx_input = ::mcx::vec_with_capacity_in(estate.es_query_cxt, src.len())?;
         for &v in src.iter() {
             idx_input.push(v);
         }
@@ -75,9 +75,9 @@ pub fn prepare_hash_slot<'mcx>(
     };
 
     let mut values =
-        mcx::vec_with_capacity_in(estate.es_query_cxt, num_cols.max(0) as usize)?;
+        ::mcx::vec_with_capacity_in(estate.es_query_cxt, num_cols.max(0) as usize)?;
     let mut isnull =
-        mcx::vec_with_capacity_in(estate.es_query_cxt, num_cols.max(0) as usize)?;
+        ::mcx::vec_with_capacity_in(estate.es_query_cxt, num_cols.max(0) as usize)?;
     for i in 0..num_cols as usize {
         // varNumber = perhash->hashGrpColIdxInput[i] - 1; (1-based attr = +1)
         let attno = idx_input[i] as i32;
@@ -174,7 +174,7 @@ pub fn build_hash_table<'mcx>(
     let (num_cols, hashslot, idx_hash, eqfuncoids, hashfunctions, grp_collations) = {
         let perhash = &aggstate.perhash.as_ref().expect("perhash")[setno as usize];
         let hashslot = perhash.hashslot.expect("perhash->hashslot");
-        let mut idx_hash = mcx::vec_with_capacity_in(
+        let mut idx_hash = ::mcx::vec_with_capacity_in(
             mcx,
             perhash
                 .hash_grp_col_idx_hash
@@ -191,11 +191,11 @@ pub fn build_hash_table<'mcx>(
             idx_hash.push(v);
         }
         let mut eqfuncoids =
-            mcx::vec_with_capacity_in(mcx, perhash.eqfuncoids.as_ref().map(|v| v.len()).unwrap_or(0))?;
+            ::mcx::vec_with_capacity_in(mcx, perhash.eqfuncoids.as_ref().map(|v| v.len()).unwrap_or(0))?;
         for &o in perhash.eqfuncoids.as_ref().expect("perhash->eqfuncoids").iter() {
             eqfuncoids.push(o);
         }
-        let mut hashfunctions = mcx::vec_with_capacity_in(
+        let mut hashfunctions = ::mcx::vec_with_capacity_in(
             mcx,
             perhash.hashfunctions.as_ref().map(|v| v.len()).unwrap_or(0),
         )?;
@@ -208,7 +208,7 @@ pub fn build_hash_table<'mcx>(
                 .grp_collations
                 .as_ref()
                 .expect("perhash->aggnode->grpCollations");
-            let mut v = mcx::vec_with_capacity_in(mcx, src.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, src.len())?;
             for &c in src.iter() {
                 v.push(c);
             }
@@ -236,7 +236,7 @@ pub fn build_hash_table<'mcx>(
     // The three contexts (metacxt = hash_metacxt, tablecxt = hash_tablecxt,
     // tmpcxt) are caller-owned; the table borrows them.
     let table = {
-        let tmpcxt: &mcx::MemoryContext = &estate.ecxt(tmpcontext).ecxt_per_tuple_memory;
+        let tmpcxt: &::mcx::MemoryContext = &estate.ecxt(tmpcontext).ecxt_per_tuple_memory;
         let metacxt = aggstate
             .hash_metacxt
             .as_ref()
@@ -544,8 +544,8 @@ pub fn initialize_hash_entry<'mcx>(
         let perhash =
             &mut aggstate.perhash.as_mut().expect("perhash")[setno as usize];
         debug_assert_eq!(perhash.pergroup_sidetable.len(), index);
-        let mut pg: mcx::PgVec<'mcx, AggStatePerGroupData<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, num_trans)?;
+        let mut pg: ::mcx::PgVec<'mcx, AggStatePerGroupData<'mcx>> =
+            ::mcx::vec_with_capacity_in(mcx, num_trans)?;
         for _ in 0..num_trans {
             pg.push(AggStatePerGroupData::default());
         }
@@ -677,7 +677,7 @@ pub fn lookup_hash_entries<'mcx>(
                     crate::spill::hash_agg_check_limits(aggstate, estate, estate_mcx(estate))?;
                 }
                 if let Some(hp) = aggstate.hash_pergroup.as_mut() {
-                    hp[setno as usize] = Some(mcx::PgVec::new_in(estate.es_query_cxt));
+                    hp[setno as usize] = Some(::mcx::PgVec::new_in(estate.es_query_cxt));
                 }
             } else {
                 let index =
@@ -763,7 +763,7 @@ pub fn lookup_hash_entries<'mcx>(
                 // TupleHashEntryGetAdditional(entry).
                 if aggstate.numtrans == 0 {
                     if let Some(hp) = aggstate.hash_pergroup.as_mut() {
-                        hp[setno as usize] = Some(mcx::PgVec::new_in(estate.es_query_cxt));
+                        hp[setno as usize] = Some(::mcx::PgVec::new_in(estate.es_query_cxt));
                     }
                 } else {
                     let index = captured_index
@@ -1091,7 +1091,7 @@ pub fn agg_refill_hash_table<'mcx>(
                     crate::spill::hash_agg_check_limits(aggstate, estate, mcx)?;
                 }
                 if let Some(hp) = aggstate.hash_pergroup.as_mut() {
-                    hp[setno as usize] = Some(mcx::PgVec::new_in(mcx));
+                    hp[setno as usize] = Some(::mcx::PgVec::new_in(mcx));
                 }
             } else {
                 let index = captured_index
@@ -1344,15 +1344,15 @@ pub fn agg_retrieve_hash_table_in_memory<'mcx>(
                 .hash_grp_col_idx_input
                 .as_ref()
                 .expect("perhash->hashGrpColIdxInput");
-            let mut idx = mcx::vec_with_capacity_in(estate.es_query_cxt, src.len())?;
+            let mut idx = ::mcx::vec_with_capacity_in(estate.es_query_cxt, src.len())?;
             for &v in src.iter() {
                 idx.push(v);
             }
             (n, idx)
         };
-        let mut values: mcx::PgVec<'mcx, types_tuple::heaptuple::Datum<'mcx>> =
-            mcx::vec_with_capacity_in(estate.es_query_cxt, first_natts.max(0) as usize)?;
-        let mut isnull = mcx::vec_with_capacity_in(estate.es_query_cxt, first_natts.max(0) as usize)?;
+        let mut values: ::mcx::PgVec<'mcx, types_tuple::heaptuple::Datum<'mcx>> =
+            ::mcx::vec_with_capacity_in(estate.es_query_cxt, first_natts.max(0) as usize)?;
+        let mut isnull = ::mcx::vec_with_capacity_in(estate.es_query_cxt, first_natts.max(0) as usize)?;
         for _ in 0..first_natts {
             values.push(types_tuple::heaptuple::Datum::null());
             isnull.push(true);

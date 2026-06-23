@@ -5,7 +5,7 @@
 
 use std::cell::Cell;
 
-use types_core::TimestampTz;
+use ::types_core::TimestampTz;
 
 /// `bool Trace_connection_negotiation = false;` (backend_startup.c:46) — the
 /// `trace_connection_negotiation` developer GUC.

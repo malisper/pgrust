@@ -25,20 +25,20 @@
 #![allow(clippy::result_large_err)]
 
 use mcx::{vec_with_capacity_in, MemoryContext, Mcx, PgVec};
-use types_core::primitive::{AttrNumber, OidIsValid};
+use ::types_core::primitive::{AttrNumber, OidIsValid};
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use rel::{Relation, RelationData};
 use snapshot::{SnapshotData, SnapshotType};
-use types_storage::lock::{AccessShareLock, LOCKMODE, NoLock, RowExclusiveLock};
+use ::types_storage::lock::{AccessShareLock, LOCKMODE, NoLock, RowExclusiveLock};
 
 use heaptuple::{heap_form_tuple, Datum};
-use scankey::ScanKeyInit;
-use indexam::index_insert;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_scan::sdir::ForwardScanDirection;
-use types_tableam::amapi::IndexUniqueCheck;
-use types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::scankey::ScanKeyInit;
+use ::indexam::index_insert;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_scan::sdir::ForwardScanDirection;
+use ::types_tableam::amapi::IndexUniqueCheck;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
 
 use genam_seams as genam_seams;
 use heapam_seams as heapam_seams;
@@ -816,7 +816,7 @@ fn toastid_valueid_exists<'mcx>(mcx: Mcx<'mcx>, toastrelid: Oid, valueid: Oid) -
     Ok(result)
 }
 
-pub use toast_internals_seams::ToastIndexesGuard;
+pub use ::toast_internals_seams::ToastIndexesGuard;
 
 /// Install this unit's owned seams. Wired into `seams-init::init_all()`.
 ///
@@ -844,11 +844,11 @@ fn indirect_pointer<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u
         payload[0], payload[1], payload[2], payload[3], payload[4], payload[5], payload[6],
         payload[7],
     ]);
-    let bytes = toast_internals_seams::resolve_indirect_target(token)
+    let bytes = ::toast_internals_seams::resolve_indirect_target(token)
         .ok_or_else(|| {
             PgError::error("indirect TOAST pointer references an unregistered target")
         })?;
-    mcx::slice_in(mcx, &bytes)
+    ::mcx::slice_in(mcx, &bytes)
 }
 
 pub fn init_seams() {

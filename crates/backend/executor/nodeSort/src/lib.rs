@@ -38,10 +38,10 @@ use transam_parallel as parallel_sup;
 use postgres_seams as tcop_postgres;
 use init_small_seams as globals;
 use tuplesort_seams as tuplesort;
-use types_parallel::shared_dsm_object;
+use ::types_parallel::shared_dsm_object;
 
 use mcx::{alloc_in, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
@@ -70,14 +70,14 @@ fn shared_sort_info_size(nworkers: usize) -> usize {
 /// worker's slot in the DSM `SharedSortInfo` flex array.
 #[inline]
 fn sinstrument_slot_cursor(
-    chunk: execparallel::SerializeCursor,
+    chunk: ::execparallel::SerializeCursor,
     worker_index: i32,
-) -> execparallel::SerializeCursor {
+) -> ::execparallel::SerializeCursor {
     use core::mem::{align_of, size_of};
     let h = size_of::<SharedSortInfoHeader>();
     let a = align_of::<TuplesortInstrumentation>();
     let off = (h + a - 1) & !(a - 1);
-    execparallel::SerializeCursor(
+    ::execparallel::SerializeCursor(
         chunk.0 + off + (worker_index as usize) * size_of::<TuplesortInstrumentation>(),
     )
 }
@@ -729,7 +729,7 @@ pub fn ExecSortInitializeWorker<'mcx>(
 /// DSM-resident carrier the Init paths also need. Same blocker as nodeAgg's
 /// `ExecAggRetrieveInstrumentation`; mirror-and-panic until it lands.
 pub fn ExecSortRetrieveInstrumentation<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     node: &mut SortStateData<'mcx>,
 ) -> PgResult<()> {
     //   SharedSortInfo *si;
@@ -801,7 +801,7 @@ fn resolve_sort_state<'mcx>(_node: PlanStateHandle) -> &'mcx mut SortStateData<'
 /// directly over its owned `SortState` from `ExecParallelRetrieveInstrumentation`,
 /// recovering the mcx from the node's EState back-link; this handle-shim path is
 /// only reached by a hypothetical pointer-registry caller.)
-fn resolve_retrieve_mcx<'mcx>(_node: PlanStateHandle) -> mcx::Mcx<'mcx> {
+fn resolve_retrieve_mcx<'mcx>(_node: PlanStateHandle) -> ::mcx::Mcx<'mcx> {
     panic!(
         "backend-executor-nodeSort: the CurrentMemoryContext for \
          ExecSortRetrieveInstrumentation's palloc'd copy is recovered from the unported executor \
@@ -925,26 +925,26 @@ fn store_worker_stats<'mcx>(
 
 // --- recoverable errors (internal-error ereports) -------------------------
 
-fn ereport_internal(msg: &'static str) -> types_error::PgError {
-    types_error::PgError::error(msg).with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR)
+fn ereport_internal(msg: &'static str) -> ::types_error::PgError {
+    ::types_error::PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR)
 }
 
-fn missing_plan() -> types_error::PgError {
+fn missing_plan() -> ::types_error::PgError {
     ereport_internal("Sort node has no plan back-link")
 }
-fn missing_outer_plan_state() -> types_error::PgError {
+fn missing_outer_plan_state() -> ::types_error::PgError {
     ereport_internal("Sort node has no outer plan state")
 }
-fn missing_result_slot() -> types_error::PgError {
+fn missing_result_slot() -> ::types_error::PgError {
     ereport_internal("Sort node result slot not initialized")
 }
-fn missing_result_type() -> types_error::PgError {
+fn missing_result_type() -> ::types_error::PgError {
     ereport_internal("Sort outer node result type not set")
 }
-fn missing_sortkey() -> types_error::PgError {
+fn missing_sortkey() -> ::types_error::PgError {
     ereport_internal("Sort plan node has no sort keys")
 }
-fn worker_slot_oob(_idx: usize, _len: usize) -> types_error::PgError {
+fn worker_slot_oob(_idx: usize, _len: usize) -> ::types_error::PgError {
     ereport_internal("Sort worker instrumentation slot out of range")
 }
 

@@ -7,9 +7,9 @@
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::{AttrNumber, Oid};
-use types_error::PgResult;
-use execparallel::SerializeCursor;
-use types_slot::SlotData;
+use ::types_error::PgResult;
+use ::execparallel::SerializeCursor;
+use ::types_slot::SlotData;
 
 use crate::execnodes::{PlanStateData, ScanStateData};
 use crate::execstate_tags::T_IncrementalSortState;
@@ -202,7 +202,7 @@ pub enum SharedIncrementalSortInfo<'mcx> {
         /// The DSM segment the chunk lives in, so the retrieve path can
         /// `attach_flex` the array and the worker fold can `with_mut` its slot
         /// before detach.
-        seg: execparallel::DsmSegmentHandle,
+        seg: ::execparallel::DsmSegmentHandle,
         /// `shared_info->num_workers`.
         num_workers: i32,
     },

@@ -13,7 +13,7 @@ use heaptuple::{
     heap_deform_tuple, heap_form_tuple, heap_modify_tuple, Datum,
 };
 use mcx::{slice_in, Mcx, MemoryContext, PgVec};
-use types_tuple::heaptuple::{CompactAttribute, TupleDescData};
+use ::types_tuple::heaptuple::{CompactAttribute, TupleDescData};
 
 /// A by-value `CompactAttribute` of the given `attlen`/alignment.
 fn byval(attlen: i16, attalignby: u8) -> CompactAttribute {

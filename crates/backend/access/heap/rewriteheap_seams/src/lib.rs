@@ -34,16 +34,16 @@ use alloc::vec::Vec;
 use std::collections::HashMap;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::{BlockNumber, MultiXactId, Oid, XLogRecPtr};
-use types_core::TransactionId;
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::file::File;
-use types_storage::RelFileLocator;
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_core::primitive::{BlockNumber, MultiXactId, Oid, XLogRecPtr};
+use ::types_core::TransactionId;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::file::File;
+use ::types_storage::RelFileLocator;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use bulkwrite_seams::BulkWriteState;
+use ::bulkwrite_seams::BulkWriteState;
 
 /// `RewriteState` (`access/rewriteheap.h`) — opaque to every consumer. The
 /// owned model boxes the concrete [`RewriteStateData`] in `mcx` (C: the

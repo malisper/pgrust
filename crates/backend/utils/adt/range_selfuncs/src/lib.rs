@@ -22,11 +22,11 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::{OidIsValid, Selectivity};
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::{OidIsValid, Selectivity};
 use types_error::{PgError, PgResult, ERROR};
-use types_rangetypes::RangeBound;
+use ::types_rangetypes::RangeBound;
 use types_selfuncs::{
     AttStatsSlot, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES,
     STATISTIC_KIND_BOUNDS_HISTOGRAM, STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM,
@@ -49,7 +49,7 @@ pub fn init_seams() {}
  * Variable-stats RAII guard (C: ReleaseVariableStats on every exit path).
  * ------------------------------------------------------------------------- */
 
-use selfuncs_seams::release_variable_stats;
+use ::selfuncs_seams::release_variable_stats;
 
 /// Holds a `VariableStatData` acquired by `get_restriction_variable`, running
 /// `ReleaseVariableStats` (the `release_variable_stats` seam) on drop — covering
@@ -160,7 +160,7 @@ fn lookup_null_empty_frac(
 ) -> PgResult<(f32, f32)> {
     if let Some(stats_tuple) = vardata.stats_tuple {
         let null_frac =
-            selfuncs_seams::stats_tuple_stanullfrac::call(stats_tuple);
+            ::selfuncs_seams::stats_tuple_stanullfrac::call(stats_tuple);
 
         /* Try to get fraction of empty (multi)ranges */
         let empty_frac = match get_attstatsslot::call(
@@ -294,7 +294,7 @@ pub(crate) fn calc_hist_prologue<'mcx>(
     vardata: &VariableStatData,
     needs_length_hist: bool,
 ) -> PgResult<Option<HistData<'mcx>>> {
-    use selfuncs_seams::statistic_proc_security_check;
+    use ::selfuncs_seams::statistic_proc_security_check;
 
     /* Can't use the histogram with insecure range support functions */
     if !statistic_proc_security_check::call(vardata, rng_typcache.rng_cmp_proc_finfo.fn_oid)? {

@@ -10,7 +10,7 @@
 
 use super::*;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Once;

@@ -17,12 +17,12 @@
 //! encoding pair with [`check_encoding_conversion_args`] (the C
 //! `CHECK_ENCODING_CONVERSION_ARGS` macro).
 
-use error_fgram::PgResult;
+use ::error_fgram::PgResult;
 use mb_fgram::{check_encoding_conversion_args, report_invalid_encoding};
-use conv_string_helpers::ConversionResult;
-use conv_string_helpers::make_conversion_builtin;
-use common_wchar::pg_encoding_verifymbchar;
-use types_wchar::encoding::{pg_enc, PG_EUC_JIS_2004, PG_SHIFT_JIS_2004};
+use ::conv_string_helpers::ConversionResult;
+use ::conv_string_helpers::make_conversion_builtin;
+use ::common_wchar::pg_encoding_verifymbchar;
+use ::types_wchar::encoding::{pg_enc, PG_EUC_JIS_2004, PG_SHIFT_JIS_2004};
 
 /// Convention no-op: this crate installs no inward seams.
 /// Bridge a fgram-typed conversion `PgResult` into the real

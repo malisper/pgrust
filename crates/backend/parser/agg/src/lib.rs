@@ -19,10 +19,10 @@
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 
-use utils_error::ereport;
-use types_error::ERROR;
+use ::utils_error::ereport;
+use ::types_error::ERROR;
 use types_core::{AttrNumber, Index, Oid};
-use types_error::error::{
+use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_GROUPING_ERROR, ERRCODE_INVALID_RECURSION,
     ERRCODE_STATEMENT_TOO_COMPLEX, ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WINDOWING_ERROR,
@@ -35,9 +35,9 @@ use ::nodes::parsestmt::{ParseExprKind, ParseState};
 use ::nodes::primnodes::{Aggref, Expr, GroupingFunc, Param, ParamKind, Var};
 use ::nodes::rawnodes::{GroupingSet, GroupingSetKind, SortGroupClause, WindowDef};
 
-use nodes_core::makefuncs::{make_func_expr, make_target_entry, make_var};
-use nodes_core::nodefuncs::{expr_location, expr_type};
-use nodes_core::node_walker::{
+use ::nodes_core::makefuncs::{make_func_expr, make_target_entry, make_var};
+use ::nodes_core::nodefuncs::{expr_location, expr_type};
+use ::nodes_core::node_walker::{
     expression_tree_walker, expression_tree_walker_mut, query_tree_mutator, query_tree_walker,
 };
 
@@ -397,7 +397,7 @@ pub fn transformGroupingFunc<'mcx>(
     for arg in p.args.into_iter() {
         // Each raw arg is a `NodePtr` (PgBox<Node>); move out the inner raw Node
         // and feed it to transformExpr (C: transformExpr(pstate, lfirst(...))).
-        let arg_node = mcx::PgBox::into_inner(arg);
+        let arg_node = ::mcx::PgBox::into_inner(arg);
         let current_result = parse_expr_seams::transformExpr::call(
             pstate,
             Some(arg_node),
@@ -1194,7 +1194,7 @@ pub fn transformWindowFuncCall<'mcx>(
 }
 
 /// `contain_windowfuncs((Node *) list)` over an `Expr` list.
-fn contain_windowfuncs_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> types_error::PgResult<bool> {
+fn contain_windowfuncs_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> ::types_error::PgResult<bool> {
     for e in args {
         // C wraps the whole list in one Node and walks; an Expr list visits each
         // element. We test each element's subtree via the rewriteManip seam.
@@ -1207,7 +1207,7 @@ fn contain_windowfuncs_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> types_error
 }
 
 /// `locate_windowfunc((Node *) list)` over an `Expr` list.
-fn locate_windowfunc_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> types_error::PgResult<i32> {
+fn locate_windowfunc_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> ::types_error::PgResult<i32> {
     for e in args {
         let n = wrap_expr_ref(mcx, e)?;
         let loc = rewritemanip_seams::locate_windowfunc::call(&n);
@@ -1225,7 +1225,7 @@ fn locate_windowfunc_exprs<'mcx>(mcx: Mcx<'mcx>, args: &[Expr]) -> types_error::
 /// `sum(sum(salary)) OVER (...)`), whose `Aggref` carries context-allocated
 /// `TargetEntry` args that a derived `.clone()` panics on, so deep-copy via the
 /// non-panicking `Expr::clone_in`.
-fn wrap_expr_ref<'mcx>(mcx: Mcx<'mcx>, e: &Expr) -> types_error::PgResult<Node<'mcx>> {
+fn wrap_expr_ref<'mcx>(mcx: Mcx<'mcx>, e: &Expr) -> ::types_error::PgResult<Node<'mcx>> {
     // The contain/locate seams take a borrowed Node and never retain it; the
     // deep copy is observationally identical to C's borrowed pointer.
     let copy = e.clone_in(mcx)?;
@@ -1407,7 +1407,7 @@ pub fn parseCheckAggregates<'mcx>(
             pstate,
             &group_clauses,
         )?;
-        pstate.p_grouping_nsitem = Some(mcx::alloc_in(mcx, nsitem)?);
+        pstate.p_grouping_nsitem = Some(::mcx::alloc_in(mcx, nsitem)?);
         // qry->rtable = pstate->p_rtable (C shares the list; here re-sync).
         let mut rtable: PgVec<RangeTblEntry<'mcx>> = PgVec::new_in(mcx);
         for rte in pstate.p_rtable.iter() {
@@ -1512,7 +1512,7 @@ pub fn parseCheckAggregates<'mcx>(
                 ))
             }
         };
-        qry.havingQual = Some(mcx::alloc_in(mcx, new_having_expr)?);
+        qry.havingQual = Some(::mcx::alloc_in(mcx, new_having_expr)?);
     }
 
     // Write back the (possibly extended) constraint dependency list.

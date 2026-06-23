@@ -55,7 +55,7 @@ use transam_xact_seams as xact_seam;
 use datum_seams as datum_seam;
 use lsyscache_seams as lsyscache_seam;
 use fmgr_seams as fmgr_seam;
-use types_core::Oid;
+use ::types_core::Oid;
 // The canonical unified value type (Datum-unification keystone). The owned
 // `ParamListInfoData`/`ParamExternData` carry `Datum<'mcx>`; a live param list
 // is interned into the backend-lifetime context, so the value type is

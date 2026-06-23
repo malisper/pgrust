@@ -13,10 +13,10 @@
 //! callback ([`crate::scan_block::vacuum_reap_lp_read_stream_next`]) and the
 //! all-visible recheck control flow are ported 1:1 in-crate.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, DEBUG2, ERROR};
 use types_core::{BlockNumber, Buffer, OffsetNumber, TransactionId};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::consts::{
     buffer_is_valid, offset_number_next, transaction_id_follows, transaction_id_is_normal,

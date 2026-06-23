@@ -44,9 +44,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{TimestampTz, TransactionId, XLogRecPtr};
-use types_core::xact::{CommandId, FirstCommandId, InvalidTransactionId, InvalidXLogRecPtr};
-use types_core::primitive::RepOriginId;
+use ::types_core::primitive::{TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::xact::{CommandId, FirstCommandId, InvalidTransactionId, InvalidXLogRecPtr};
+use ::types_core::primitive::RepOriginId;
 
 use crate::{
     ReorderBuffer, ReorderBufferChange, ReorderBufferChangeData, ReorderBufferChangeType,
@@ -757,7 +757,7 @@ impl ReorderBuffer {
                     ReorderBufferChangeData::CommandId(c) => *c,
                     _ => unreachable!("INTERNAL_COMMAND_ID change carries a command id"),
                 };
-                debug_assert!(cid != types_core::xact::InvalidCommandId);
+                debug_assert!(cid != ::types_core::xact::InvalidCommandId);
 
                 if *command_id < cid {
                     *command_id = cid;
@@ -825,9 +825,9 @@ impl ReorderBuffer {
         // A mapped catalog tuple without data emitted during a catalog rewrite
         // can fail the relfilenumber lookup; that is OK because we don't decode
         // catalog changes. Skip it (goto change_done). Otherwise it is an error.
-        if reloid == types_core::InvalidOid && !has_newtuple && !has_oldtuple {
+        if reloid == ::types_core::InvalidOid && !has_newtuple && !has_oldtuple {
             return self.tp_change_done(txn_xid, specinsert, None);
-        } else if reloid == types_core::InvalidOid {
+        } else if reloid == ::types_core::InvalidOid {
             // change_done is reached after raising; mirror C: free specinsert.
             self.tp_change_done(txn_xid, specinsert, None)?;
             return Err(types_error::PgError::error(
@@ -856,7 +856,7 @@ impl ReorderBuffer {
         // Ignore temporary heaps created during DDL unless the plugin asked.
         let relrewrite = relcache::rd_rel_relrewrite::call(reloid)?;
         let output_rewrites = self.output_rewrites_pub();
-        if relrewrite != types_core::InvalidOid && !output_rewrites {
+        if relrewrite != ::types_core::InvalidOid && !output_rewrites {
             return self.tp_change_done(txn_xid, specinsert, Some(reloid));
         }
         // Ignore sequence changes entirely.
@@ -905,7 +905,7 @@ impl ReorderBuffer {
         &mut self,
         _txn_xid: TransactionId,
         specinsert: &mut Option<ReorderBufferChange>,
-        reloid: Option<types_core::Oid>,
+        reloid: Option<::types_core::Oid>,
     ) -> Result<(), types_error::PgError> {
         if let Some(prev) = specinsert.take() {
             self.free_change(prev, true);
@@ -933,7 +933,7 @@ impl ReorderBuffer {
         };
 
         // relations = palloc0(nrelids); collect the logically-logged ones.
-        let mut relations: alloc::vec::Vec<types_core::Oid> = alloc::vec::Vec::new();
+        let mut relations: alloc::vec::Vec<::types_core::Oid> = alloc::vec::Vec::new();
         for relid in &relids {
             let opened = relcache::relation_id_get_relation_shared::call(*relid)?;
             if opened.is_none() {
@@ -990,7 +990,7 @@ impl ReorderBuffer {
         change: &ReorderBufferChange,
     ) -> reorderbuffer_seams::ResolvedChange {
         use reorderbuffer_seams as seams;
-        use types_storage::RelFileLocator;
+        use ::types_storage::RelFileLocator;
 
         let kind = match change.action {
             ReorderBufferChangeType::Insert => seams::DecodedChangeKind::Insert,
@@ -1569,7 +1569,7 @@ impl ReorderBuffer {
     /// accumulated shared-invalidation message.
     pub(crate) fn execute_invalidations(
         &self,
-        msgs: &[types_storage::sinval::SharedInvalidationMessage],
+        msgs: &[::types_storage::sinval::SharedInvalidationMessage],
     ) {
         for msg in msgs {
             inval_seams::local_execute_invalidation_message::call(msg)

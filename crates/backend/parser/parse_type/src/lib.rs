@@ -24,18 +24,18 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use types_core::{AttrNumber, Oid};
-use datum::Datum;
+use ::datum::Datum;
 use types_error::{
     ereturn, ErrorLevel, ErrorLocation, PgError, PgResult, SoftErrorContext,
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use parsenodes::{Node, TypeName};
-use types_tuple::access::RangeVar;
-use types_tuple::pg_type::FormData_pg_type;
+use ::types_tuple::access::RangeVar;
+use ::types_tuple::pg_type::FormData_pg_type;
 
 use catalog_namespace as namespace;
 use lsyscache as lsyscache;
@@ -50,7 +50,7 @@ const InvalidAttrNumber: AttrNumber = 0;
 /// `NoLock` (storage/lockdefs.h).
 const NoLock: i32 = 0;
 /// `NOTICE` (elog.h).
-const NOTICE: ErrorLevel = types_error::error::NOTICE;
+const NOTICE: ErrorLevel = ::types_error::error::NOTICE;
 /// `TYPTYPE_DOMAIN` (pg_type.h): the `typtype` value for a domain.
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
 
@@ -98,9 +98,9 @@ fn parser_errposition(pstate: Option<&types_cluster::ParseState<'_>>, location: 
 
 /// Attach a parse-location cursor position to an error builder unless it is 0.
 fn with_errposition(
-    builder: utils_error::ErrorBuilder,
+    builder: ::utils_error::ErrorBuilder,
     cursor_position: i32,
-) -> utils_error::ErrorBuilder {
+) -> ::utils_error::ErrorBuilder {
     if cursor_position > 0 {
         builder.errposition(cursor_position)
     } else {
@@ -908,16 +908,16 @@ pub fn init_seams() {
 
     // functioncmds.c (CreateFunction / CreateCast) resolves type names through
     // its own outward seam crate; the real owner is parse_type.c. The seams pass
-    // owned `parsenodes::TypeName` and carry no caller `mcx`/pstate, so the
+    // owned `::parsenodes::TypeName` and carry no caller `mcx`/pstate, so the
     // adapters resolve them behind a scratch context with `pstate = None`.
     use functioncmds_seams as fc;
     fc::typename_type_id::set(|type_name| {
-        let scratch = mcx::MemoryContext::new("functioncmds typename_type_id");
+        let scratch = ::mcx::MemoryContext::new("functioncmds typename_type_id");
         typenameTypeId(scratch.mcx(), None, &type_name)
     });
     fc::type_name_to_string::set(|type_name| TypeNameToString(&type_name));
     fc::lookup_type_name::set(|type_name| {
-        let scratch = mcx::MemoryContext::new("functioncmds lookup_type_name");
+        let scratch = ::mcx::MemoryContext::new("functioncmds lookup_type_name");
         match LookupTypeName(scratch.mcx(), None, &type_name, /* missing_ok */ true)? {
             Some((typ, _typmod)) => Ok(Some(
                 functioncmds_seams::LookupTypeResult {
@@ -932,7 +932,7 @@ pub fn init_seams() {
 
 /// `typenameTypeIdAndMod(NULL, typeName, &typid, &typmod)` — tablecmds seam.
 /// Bridges the owned `rawnodes::TypeName<'mcx>` to the resolver-facing
-/// `parsenodes::TypeName`.
+/// `::parsenodes::TypeName`.
 fn seam_tc_typename_type_id_and_mod(
     mcx: Mcx<'_>,
     type_name: &::nodes::rawnodes::TypeName<'_>,
@@ -943,7 +943,7 @@ fn seam_tc_typename_type_id_and_mod(
 
 /// `typenameTypeId(NULL, typeName)` — tablecmds seam (CREATE TABLE ... OF type).
 /// Bridges the owned `rawnodes::TypeName<'mcx>` to the resolver-facing
-/// `parsenodes::TypeName`, discarding the typmod like the C entry point.
+/// `::parsenodes::TypeName`, discarding the typmod like the C entry point.
 fn seam_tc_typename_type_id(
     mcx: Mcx<'_>,
     type_name: &::nodes::rawnodes::TypeName<'_>,
@@ -968,7 +968,7 @@ fn seam_tc_get_column_def_collation(
                 match (&**n).node_tag() {
                     ntag::T_String => {
                         let s = (&**n).expect_string();
-                        names.push(Node::String(parsenodes::StringNode {
+                        names.push(Node::String(::parsenodes::StringNode {
                             sval: Some(s.sval.as_str().to_string()),
                         }))
                     }
@@ -997,7 +997,7 @@ fn seam_tc_get_column_def_collation(
 }
 
 /// Bridge the K1 owned-tree `::nodes::rawnodes::TypeName<'mcx>` (carried in
-/// a `DefElem`'s `arg`) into the resolver-facing `parsenodes::TypeName`
+/// a `DefElem`'s `arg`) into the resolver-facing `::parsenodes::TypeName`
 /// the owner's `typenameTypeId`/`LookupTypeName` operate on. Mirrors
 /// parse_expr's `typename_type_id_and_mod` converter: the qualified `names` are
 /// `String` nodes; `typmods` are not consulted by the OID lookup but are carried
@@ -1006,15 +1006,15 @@ fn seam_tc_get_column_def_collation(
 /// only need to be non-empty for `LookupTypeName` to resolve the array type.
 pub fn raw_typename_to_parse(
     tn: &::nodes::rawnodes::TypeName<'_>,
-) -> PgResult<parsenodes::TypeName> {
+) -> PgResult<::parsenodes::TypeName> {
     use ::nodes::nodes::ntag;
 
-    let mut names: Vec<parsenodes::Node> = Vec::with_capacity(tn.names.len());
+    let mut names: Vec<::parsenodes::Node> = Vec::with_capacity(tn.names.len());
     for n in tn.names.iter() {
         match (&**n).node_tag() {
             ntag::T_String => {
                 let s = (&**n).expect_string();
-                names.push(parsenodes::Node::String(parsenodes::StringNode {
+                names.push(::parsenodes::Node::String(::parsenodes::StringNode {
                     sval: Some(s.sval.as_str().to_string()),
                 }))
             }
@@ -1028,76 +1028,76 @@ pub fn raw_typename_to_parse(
         }
     }
 
-    let mut typmods: Vec<parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
+    let mut typmods: Vec<::parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
     for tm in tn.typmods.iter() {
-        let bridged: parsenodes::Node = match (&**tm).node_tag() {
+        let bridged: ::parsenodes::Node = match (&**tm).node_tag() {
             ntag::T_A_Const => {
                 let ac = (&**tm).expect_a_const();
                 let val = ac.val.as_deref();
                 match val.map(|n| n.node_tag()) {
                     Some(ntag::T_Integer) => {
                         let i = val.unwrap().expect_integer();
-                        parsenodes::Node::Integer(parsenodes::Integer { ival: i.ival })
+                        ::parsenodes::Node::Integer(::parsenodes::Integer { ival: i.ival })
                     }
                     Some(ntag::T_Float) => {
                         let f = val.unwrap().expect_float();
-                        parsenodes::Node::Float(parsenodes::Float {
+                        ::parsenodes::Node::Float(::parsenodes::Float {
                             fval: Some(f.fval.as_str().to_string()),
                         })
                     }
                     Some(ntag::T_String) => {
                         let s = val.unwrap().expect_string();
-                        parsenodes::Node::String(parsenodes::StringNode {
+                        ::parsenodes::Node::String(::parsenodes::StringNode {
                             sval: Some(s.sval.as_str().to_string()),
                         })
                     }
                     Some(ntag::T_Boolean) => {
                         let b = val.unwrap().expect_boolean();
-                        parsenodes::Node::Boolean(parsenodes::Boolean { boolval: b.boolval })
+                        ::parsenodes::Node::Boolean(::parsenodes::Boolean { boolval: b.boolval })
                     }
                     Some(ntag::T_BitString) => {
                         let b = val.unwrap().expect_bitstring();
-                        parsenodes::Node::BitString(parsenodes::BitString {
+                        ::parsenodes::Node::BitString(::parsenodes::BitString {
                             bsval: Some(b.bsval.as_str().to_string()),
                         })
                     }
-                    _ => parsenodes::Node::A_Star,
+                    _ => ::parsenodes::Node::A_Star,
                 }
             }
             ntag::T_ColumnRef => {
                 let cr = (&**tm).expect_columnref();
                 if cr.fields.len() == 1 {
                     if let Some(s) = cr.fields[0].as_string() {
-                        parsenodes::Node::String(parsenodes::StringNode {
+                        ::parsenodes::Node::String(::parsenodes::StringNode {
                             sval: Some(s.sval.as_str().to_string()),
                         })
                     } else {
-                        parsenodes::Node::A_Star
+                        ::parsenodes::Node::A_Star
                     }
                 } else {
-                    parsenodes::Node::A_Star
+                    ::parsenodes::Node::A_Star
                 }
             }
-            _ => parsenodes::Node::A_Star,
+            _ => ::parsenodes::Node::A_Star,
         };
         typmods.push(bridged);
     }
 
-    let mut array_bounds: Vec<parsenodes::Node> = Vec::with_capacity(tn.arrayBounds.len());
+    let mut array_bounds: Vec<::parsenodes::Node> = Vec::with_capacity(tn.arrayBounds.len());
     for n in tn.arrayBounds.iter() {
         match (&**n).node_tag() {
             ntag::T_Integer => {
                 let i = (&**n).expect_integer();
-                array_bounds.push(parsenodes::Node::Integer(parsenodes::Integer {
+                array_bounds.push(::parsenodes::Node::Integer(::parsenodes::Integer {
                     ival: i.ival,
                 }))
             }
             _ => array_bounds
-                .push(parsenodes::Node::Integer(parsenodes::Integer { ival: -1 })),
+                .push(::parsenodes::Node::Integer(::parsenodes::Integer { ival: -1 })),
         }
     }
 
-    Ok(parsenodes::TypeName {
+    Ok(::parsenodes::TypeName {
         names,
         typeOid: tn.typeOid,
         setof: tn.setof,
@@ -1110,68 +1110,68 @@ pub fn raw_typename_to_parse(
 }
 
 /// Convert one rich owned [`::nodes::nodes::Node`] into the flat
-/// [`parsenodes::Node`] the command bodies (`DefineType`,
+/// [`::parsenodes::Node`] the command bodies (`DefineType`,
 /// `CreateFunction`, `CreateCast`, `RemoveObjects`) consume. Handles the leaf /
 /// value / DDL-vocabulary node kinds that appear inside DEFINE / CREATE
 /// FUNCTION / CREATE CAST / DROP statements: the value literals, `TypeName`
 /// (through [`raw_typename_to_parse`]), `DefElem`, `ObjectWithArgs`,
 /// `FunctionParameter`, and `List`. Recurses through nested args. Arbitrary
 /// expression nodes (e.g. a parameter `DEFAULT` expression, or a non-value
-/// `DefElem.arg`) are NOT yet expressible as a flat `parsenodes::Node`; those
+/// `DefElem.arg`) are NOT yet expressible as a flat `::parsenodes::Node`; those
 /// raise loudly — they do not occur in the base-type / C-language DDL paths.
 pub fn rich_node_to_parse(
     n: &::nodes::nodes::Node<'_>,
-) -> PgResult<parsenodes::Node> {
+) -> PgResult<::parsenodes::Node> {
     use ::nodes::nodes::ntag;
 
     let out = match n.node_tag() {
         ntag::T_Integer => {
             let i = n.expect_integer();
-            parsenodes::Node::Integer(parsenodes::Integer { ival: i.ival })
+            ::parsenodes::Node::Integer(::parsenodes::Integer { ival: i.ival })
         }
         ntag::T_Float => {
             let f = n.expect_float();
-            parsenodes::Node::Float(parsenodes::Float {
+            ::parsenodes::Node::Float(::parsenodes::Float {
                 fval: Some(f.fval.as_str().to_string()),
             })
         }
         ntag::T_Boolean => {
             let b = n.expect_boolean();
-            parsenodes::Node::Boolean(parsenodes::Boolean {
+            ::parsenodes::Node::Boolean(::parsenodes::Boolean {
                 boolval: b.boolval,
             })
         }
         ntag::T_String => {
             let s = n.expect_string();
-            parsenodes::Node::String(parsenodes::StringNode {
+            ::parsenodes::Node::String(::parsenodes::StringNode {
                 sval: Some(s.sval.as_str().to_string()),
             })
         }
         ntag::T_BitString => {
             let b = n.expect_bitstring();
-            parsenodes::Node::BitString(parsenodes::BitString {
+            ::parsenodes::Node::BitString(::parsenodes::BitString {
                 bsval: Some(b.bsval.as_str().to_string()),
             })
         }
         ntag::T_TypeName => {
             let tn = n.expect_typename();
-            parsenodes::Node::TypeName(raw_typename_to_parse(tn)?)
+            ::parsenodes::Node::TypeName(raw_typename_to_parse(tn)?)
         }
         ntag::T_DefElem => {
             let de = n.expect_defelem();
-            parsenodes::Node::DefElem(rich_defelem_to_parse(de)?)
+            ::parsenodes::Node::DefElem(rich_defelem_to_parse(de)?)
         }
         ntag::T_VariableSetStmt => {
             let vss = n.expect_variablesetstmt();
-            parsenodes::Node::VariableSetStmt(rich_variablesetstmt_to_parse(vss)?)
+            ::parsenodes::Node::VariableSetStmt(rich_variablesetstmt_to_parse(vss)?)
         }
         ntag::T_ObjectWithArgs => {
             let owa = n.expect_objectwithargs();
-            parsenodes::Node::ObjectWithArgs(rich_objectwithargs_to_parse(owa)?)
+            ::parsenodes::Node::ObjectWithArgs(rich_objectwithargs_to_parse(owa)?)
         }
         ntag::T_FunctionParameter => {
             let fp = n.expect_functionparameter();
-            parsenodes::Node::FunctionParameter(rich_functionparameter_to_parse(fp)?)
+            ::parsenodes::Node::FunctionParameter(rich_functionparameter_to_parse(fp)?)
         }
         ntag::T_List => {
             let l = n.expect_list();
@@ -1179,7 +1179,7 @@ pub fn rich_node_to_parse(
             for e in l.iter() {
                 out.push(rich_node_to_parse(e)?);
             }
-            parsenodes::Node::List(out)
+            ::parsenodes::Node::List(out)
         }
         other => {
             return Err(PgError::error(format!(
@@ -1194,12 +1194,12 @@ pub fn rich_node_to_parse(
 /// `DefElem` (rich → flat). `arg` (when present) is recursively converted.
 pub fn rich_defelem_to_parse(
     de: &::nodes::ddlnodes::DefElem<'_>,
-) -> PgResult<parsenodes::DefElem> {
+) -> PgResult<::parsenodes::DefElem> {
     let arg = match de.arg.as_deref() {
         Some(a) => Some(Box::new(rich_node_to_parse(a)?)),
         None => None,
     };
-    Ok(parsenodes::DefElem {
+    Ok(::parsenodes::DefElem {
         defnamespace: de.defnamespace.as_ref().map(|s| s.as_str().to_string()),
         defname: de.defname.as_ref().map(|s| s.as_str().to_string()),
         arg,
@@ -1215,9 +1215,9 @@ pub fn rich_defelem_to_parse(
 /// `VariableSetStmt` nodes) round-trip through `rich_node_to_parse`.
 pub fn rich_variablesetstmt_to_parse(
     vss: &::nodes::ddlnodes::VariableSetStmt<'_>,
-) -> PgResult<parsenodes::VariableSetStmt> {
+) -> PgResult<::parsenodes::VariableSetStmt> {
     use ::nodes::ddlnodes::VariableSetKind as RichKind;
-    use parsenodes::VariableSetKind as FlatKind;
+    use ::parsenodes::VariableSetKind as FlatKind;
 
     let kind = match vss.kind {
         RichKind::VAR_SET_VALUE => FlatKind::SetValue,
@@ -1231,7 +1231,7 @@ pub fn rich_variablesetstmt_to_parse(
     // VAR_SET_MULTI). The flat parsenodes universe has no `A_Const`; by
     // convention the inner value node is carried directly (mirrors the GUC
     // owner's `set_arg_from_nodes` flattener). Unwrap A_Const to its `val`.
-    let mut args: Vec<parsenodes::Node> = Vec::with_capacity(vss.args.len());
+    let mut args: Vec<::parsenodes::Node> = Vec::with_capacity(vss.args.len());
     for n in vss.args.iter() {
         if n.node_tag() == ::nodes::nodes::ntag::T_A_Const {
             let c = n.expect_a_const();
@@ -1239,15 +1239,15 @@ pub fn rich_variablesetstmt_to_parse(
                 Some(v) => args.push(rich_node_to_parse(v)?),
                 // A NULL A_Const has no value node; SET literals are never NULL,
                 // but carry an empty String to stay total.
-                None => args.push(parsenodes::Node::String(
-                    parsenodes::StringNode { sval: None },
+                None => args.push(::parsenodes::Node::String(
+                    ::parsenodes::StringNode { sval: None },
                 )),
             }
         } else {
             args.push(rich_node_to_parse(n)?);
         }
     }
-    Ok(parsenodes::VariableSetStmt {
+    Ok(::parsenodes::VariableSetStmt {
         kind,
         name: vss.name.as_ref().map(|s| s.as_str().to_string()),
         args,
@@ -1260,7 +1260,7 @@ pub fn rich_variablesetstmt_to_parse(
 /// to `Vec<String>`; `objargs` / `objfuncargs` are node lists.
 pub fn rich_objectwithargs_to_parse(
     owa: &::nodes::ddlnodes::ObjectWithArgs<'_>,
-) -> PgResult<parsenodes::ObjectWithArgs> {
+) -> PgResult<::parsenodes::ObjectWithArgs> {
     let mut objname: Vec<String> = Vec::with_capacity(owa.objname.len());
     for n in owa.objname.iter() {
         match n.as_string() {
@@ -1272,15 +1272,15 @@ pub fn rich_objectwithargs_to_parse(
             }
         }
     }
-    let mut objargs: Vec<parsenodes::Node> = Vec::with_capacity(owa.objargs.len());
+    let mut objargs: Vec<::parsenodes::Node> = Vec::with_capacity(owa.objargs.len());
     for n in owa.objargs.iter() {
         objargs.push(rich_node_to_parse(n)?);
     }
-    let mut objfuncargs: Vec<parsenodes::Node> = Vec::with_capacity(owa.objfuncargs.len());
+    let mut objfuncargs: Vec<::parsenodes::Node> = Vec::with_capacity(owa.objfuncargs.len());
     for n in owa.objfuncargs.iter() {
         objfuncargs.push(rich_node_to_parse(n)?);
     }
-    Ok(parsenodes::ObjectWithArgs {
+    Ok(::parsenodes::ObjectWithArgs {
         objname,
         objargs,
         objfuncargs,
@@ -1292,7 +1292,7 @@ pub fn rich_objectwithargs_to_parse(
 /// `DEFAULT` expression) is not yet expressible as a flat node and raises.
 pub fn rich_functionparameter_to_parse(
     fp: &::nodes::ddlnodes::FunctionParameter<'_>,
-) -> PgResult<parsenodes::FunctionParameter> {
+) -> PgResult<::parsenodes::FunctionParameter> {
     let argType = match fp.argType.as_deref() {
         Some(a) => Some(Box::new(rich_node_to_parse(a)?)),
         None => None,
@@ -1306,10 +1306,10 @@ pub fn rich_functionparameter_to_parse(
     // (`FunctionParameter` consumers never read the flat `defexpr` value — the
     // cooked default is produced from the rich node).
     let defexpr = match fp.defexpr {
-        Some(_) => Some(Box::new(parsenodes::Node::A_Star)),
+        Some(_) => Some(Box::new(::parsenodes::Node::A_Star)),
         None => None,
     };
-    Ok(parsenodes::FunctionParameter {
+    Ok(::parsenodes::FunctionParameter {
         name: fp.name.as_ref().map(|s| s.as_str().to_string()),
         argType,
         mode: fp.mode as i8,
@@ -1338,7 +1338,7 @@ fn seam_typename_type_id_from_defelem(
     };
 
     let tn_pn = raw_typename_to_parse(tn)?;
-    let scratch = mcx::MemoryContext::new("typenameTypeIdFromDefElem");
+    let scratch = ::mcx::MemoryContext::new("typenameTypeIdFromDefElem");
     typenameTypeId(scratch.mcx(), None, &tn_pn)
 }
 
@@ -1347,8 +1347,8 @@ fn seam_typename_type_id_from_defelem(
 fn seam_parse_type_string(
     string: &str,
     soft: bool,
-) -> PgResult<Result<(Oid, i32), types_error::PgError>> {
-    let scratch = mcx::MemoryContext::new("parse_type_string");
+) -> PgResult<Result<(Oid, i32), ::types_error::PgError>> {
+    let scratch = ::mcx::MemoryContext::new("parse_type_string");
     if soft {
         // C threads the caller's escontext straight through; here the boundary
         // takes only `soft`, so capture the soft `ereturn` into a local
@@ -1361,8 +1361,8 @@ fn seam_parse_type_string(
                 // A soft failure recorded its error into escontext. Surface it so
                 // the caller carries the real message (e.g. `pg_input_error_info`).
                 let err = escontext.take_error().unwrap_or_else(|| {
-                    types_error::PgError::error("invalid type name").with_sqlstate(
-                        types_error::ERRCODE_SYNTAX_ERROR,
+                    ::types_error::PgError::error("invalid type name").with_sqlstate(
+                        ::types_error::ERRCODE_SYNTAX_ERROR,
                     )
                 });
                 Ok(Err(err))
@@ -1396,9 +1396,9 @@ fn seam_type_string_to_type_name(string: &str) -> PgResult<TypeName> {
 /// string, allocated in `mcx`.
 fn seam_name_list_to_string<'mcx>(
     mcx: Mcx<'mcx>,
-    names: &[mcx::PgString<'_>],
-) -> PgResult<mcx::PgString<'mcx>> {
-    let mut out = mcx::PgString::new_in(mcx);
+    names: &[::mcx::PgString<'_>],
+) -> PgResult<::mcx::PgString<'mcx>> {
+    let mut out = ::mcx::PgString::new_in(mcx);
     for (i, name) in names.iter().enumerate() {
         if i != 0 {
             out.try_push('.')?;
@@ -1410,16 +1410,16 @@ fn seam_name_list_to_string<'mcx>(
 
 /// `typenameTypeId(NULL, typeName)` over the trimmed `opclass::TypeName`.
 fn seam_typename_type_id(type_name: &opclass::TypeName) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("typenameTypeId");
+    let scratch = ::mcx::MemoryContext::new("typenameTypeId");
     let tn = from_opclass_typename(type_name);
     typenameTypeId(scratch.mcx(), None, &tn)
 }
 
 /// `typenameTypeIdAndMod(NULL, typeName, ...)` over the full
-/// `parsenodes::TypeName` (carries the `typmods` decoration the typmod
+/// `::parsenodes::TypeName` (carries the `typmods` decoration the typmod
 /// resolution needs).
 fn seam_typename_type_id_and_mod(type_name: &TypeName) -> PgResult<(Oid, i32)> {
-    let scratch = mcx::MemoryContext::new("typenameTypeIdAndMod");
+    let scratch = ::mcx::MemoryContext::new("typenameTypeIdAndMod");
     typenameTypeIdAndMod(scratch.mcx(), None, type_name)
 }
 
@@ -1427,7 +1427,7 @@ fn seam_typename_type_id_and_mod(type_name: &TypeName) -> PgResult<(Oid, i32)> {
 /// `opclass::TypeName` — the shell-allowing OID resolver `AlterTypeOwner`
 /// uses (returns a shell type rather than rejecting it).
 fn seam_lookup_type_name_oid_from_names(type_name: &opclass::TypeName) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("LookupTypeNameOid");
+    let scratch = ::mcx::MemoryContext::new("LookupTypeNameOid");
     let tn = from_opclass_typename(type_name);
     LookupTypeNameOid(scratch.mcx(), None, &tn, false)
 }
@@ -1436,34 +1436,34 @@ fn seam_lookup_type_name_oid_from_names(type_name: &opclass::TypeName) -> PgResu
 fn seam_typename_to_string<'mcx>(
     mcx: Mcx<'mcx>,
     type_name: &opclass::TypeName,
-) -> PgResult<mcx::PgString<'mcx>> {
+) -> PgResult<::mcx::PgString<'mcx>> {
     let tn = from_opclass_typename(type_name);
     let s = TypeNameToString(&tn)?;
-    let mut out = mcx::PgString::new_in(mcx);
+    let mut out = ::mcx::PgString::new_in(mcx);
     out.try_push_str(&s)?;
     Ok(out)
 }
 
-/// `TypeNameToString(typeName)` over the raw-parser `parsenodes::TypeName`.
+/// `TypeNameToString(typeName)` over the raw-parser `::parsenodes::TypeName`.
 fn seam_typename_to_string_node<'mcx>(
     mcx: Mcx<'mcx>,
     type_name: &TypeName,
-) -> PgResult<mcx::PgString<'mcx>> {
+) -> PgResult<::mcx::PgString<'mcx>> {
     let s = TypeNameToString(type_name)?;
-    let mut out = mcx::PgString::new_in(mcx);
+    let mut out = ::mcx::PgString::new_in(mcx);
     out.try_push_str(&s)?;
     Ok(out)
 }
 
 /// `LookupTypeNameOid(NULL, typeName, missing_ok)` over the raw-parser node.
 fn seam_lookup_type_name_oid(type_name: &TypeName, missing_ok: bool) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("LookupTypeNameOid");
+    let scratch = ::mcx::MemoryContext::new("LookupTypeNameOid");
     LookupTypeNameOid(scratch.mcx(), None, type_name, missing_ok)
 }
 
 /// `typenameTypeId(NULL, typeName)` over the raw-parser node.
 fn seam_typename_type_id_node(type_name: &TypeName) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("typenameTypeId");
+    let scratch = ::mcx::MemoryContext::new("typenameTypeId");
     typenameTypeId(scratch.mcx(), None, type_name)
 }
 
@@ -1471,7 +1471,7 @@ fn seam_typename_type_id_node(type_name: &TypeName) -> PgResult<Oid> {
 /// (PREPARE's `argtypes`); bridges through `raw_typename_to_parse`.
 fn seam_typename_type_id_raw(type_name: &::nodes::rawnodes::TypeName<'_>) -> PgResult<Oid> {
     let tn = raw_typename_to_parse(type_name)?;
-    let scratch = mcx::MemoryContext::new("typenameTypeId");
+    let scratch = ::mcx::MemoryContext::new("typenameTypeId");
     typenameTypeId(scratch.mcx(), None, &tn)
 }
 
@@ -1483,7 +1483,7 @@ fn seam_typename_type_id_raw_pstate(
     type_name: &::nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<Oid> {
     let tn = raw_typename_to_parse(type_name)?;
-    let scratch = mcx::MemoryContext::new("typenameTypeId");
+    let scratch = ::mcx::MemoryContext::new("typenameTypeId");
     typenameTypeId(scratch.mcx(), Some(pstate), &tn)
 }
 
@@ -1491,9 +1491,9 @@ fn seam_typename_type_id_raw_pstate(
 fn seam_type_name_list_to_string<'mcx>(
     mcx: Mcx<'mcx>,
     typenames: &[TypeName],
-) -> PgResult<mcx::PgString<'mcx>> {
+) -> PgResult<::mcx::PgString<'mcx>> {
     let s = TypeNameListToString(typenames)?;
-    let mut out = mcx::PgString::new_in(mcx);
+    let mut out = ::mcx::PgString::new_in(mcx);
     out.try_push_str(&s)?;
     Ok(out)
 }
@@ -1505,7 +1505,7 @@ fn seam_lookup_type_name_oid_owa(
     type_name: &opclass::TypeName,
     missing_ok: bool,
 ) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("LookupTypeNameOid");
+    let scratch = ::mcx::MemoryContext::new("LookupTypeNameOid");
     let tn = from_opclass_typename(type_name);
     LookupTypeNameOid(scratch.mcx(), None, &tn, missing_ok)
 }
@@ -1514,8 +1514,8 @@ fn seam_lookup_type_name_oid_owa(
 /// type-coercion target. `LookupTypeNameExtended(NULL,
 /// makeTypeNameFromNameList(funcname), NULL, false, false)` then keep the OID
 /// only for a fully-defined, non-composite (scalar/domain) type.
-fn seam_func_name_as_type(funcname: &[mcx::PgString<'_>]) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("FuncNameAsType");
+fn seam_func_name_as_type(funcname: &[::mcx::PgString<'_>]) -> PgResult<Oid> {
+    let scratch = ::mcx::MemoryContext::new("FuncNameAsType");
 
     /*
      * temp_ok=false protects the contract for writing SECURITY DEFINER
@@ -1538,12 +1538,12 @@ fn seam_func_name_as_type(funcname: &[mcx::PgString<'_>]) -> PgResult<Oid> {
 /// `makeTypeNameFromNameList(names)` (makefuncs.c) over a `String`-list function
 /// name: a `TypeName` carrying just the name components (no typmods/array
 /// bounds; `typemod = -1`, `location = -1`).
-fn makeTypeNameFromNameList(names: &[mcx::PgString<'_>]) -> TypeName {
+fn makeTypeNameFromNameList(names: &[::mcx::PgString<'_>]) -> TypeName {
     TypeName {
         names: names
             .iter()
             .map(|n| {
-                Node::String(parsenodes::StringNode {
+                Node::String(::parsenodes::StringNode {
                     sval: Some(n.as_str().to_string()),
                 })
             })
@@ -1559,7 +1559,7 @@ fn makeTypeNameFromNameList(names: &[mcx::PgString<'_>]) -> TypeName {
 }
 
 /// Convert the trimmed `opclass::TypeName` (names as `Vec<String>`) into
-/// the canonical raw-parser `parsenodes::TypeName` (names as `Vec<Node>`
+/// the canonical raw-parser `::parsenodes::TypeName` (names as `Vec<Node>`
 /// of `String` nodes). The trimmed node carries no typmods/arrayBounds, so the
 /// rendering / lookup behaves as a plain qualified name.
 fn from_opclass_typename(tn: &opclass::TypeName) -> TypeName {
@@ -1567,7 +1567,7 @@ fn from_opclass_typename(tn: &opclass::TypeName) -> TypeName {
         names: tn
             .names
             .iter()
-            .map(|n| Node::String(parsenodes::StringNode { sval: Some(n.clone()) }))
+            .map(|n| Node::String(::parsenodes::StringNode { sval: Some(n.clone()) }))
             .collect(),
         typeOid: tn.typeOid,
         setof: tn.setof,
@@ -1581,7 +1581,7 @@ fn from_opclass_typename(tn: &opclass::TypeName) -> TypeName {
         arrayBounds: tn
             .arrayBounds
             .iter()
-            .map(|&b| Node::Integer(parsenodes::Integer { ival: b }))
+            .map(|&b| Node::Integer(::parsenodes::Integer { ival: b }))
             .collect(),
         location: tn.location,
     }

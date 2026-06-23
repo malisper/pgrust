@@ -8,8 +8,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mcx::{slice_in, Mcx, MemoryContext};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{
     CompactAttribute, FormData_pg_attribute, TupleDescData, TYPALIGN_CHAR, TYPALIGN_DOUBLE,
     TYPALIGN_INT, TYPALIGN_SHORT, TYPSTORAGE_PLAIN,
 };

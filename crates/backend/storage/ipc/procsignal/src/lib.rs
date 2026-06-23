@@ -36,7 +36,7 @@
 //!   recorded in process-global `AtomicPtr`s (`PROC_SIGNAL_SLOTS` /
 //!   `PROC_SIGNAL_HDR_GEN`).
 //! - `slock_t pss_mutex` becomes a genuine cross-process
-//!   [`types_storage::storage::Spinlock`] (the same primitive `ProcStructLock`
+//!   [`::types_storage::storage::Spinlock`] (the same primitive `ProcStructLock`
 //!   uses), acquired via the `s_lock.c` backoff loop; it guards the
 //!   non-atomic cancel-key fields (`pss_cancel_key_len`/`pss_cancel_key`),
 //!   which live in an [`core::cell::UnsafeCell`] inside the `#[repr(C)]` slot.
@@ -44,7 +44,7 @@
 //!   as in C, with their writes performed while holding the spinlock,
 //!   mirroring the C lock discipline. The atomics use `SeqCst`, at least as
 //!   strong as the `pg_atomic_*` full-barrier RMW ops the C relies on.
-//! - `pss_barrierCV` is a [`condvar::ConditionVariable`]; the sleep /
+//! - `pss_barrierCV` is a [`::condvar::ConditionVariable`]; the sleep /
 //!   broadcast protocol is `condition_variable.c`'s and is reached through
 //!   `backend-storage-lmgr-condition-variable-seams`.
 //! - `MyProcSignalSlot` (a per-process static) is a thread-local slot index,
@@ -70,10 +70,10 @@ use std::sync::atomic::{
     Ordering::SeqCst,
 };
 
-use types_storage::storage::Spinlock;
+use ::types_storage::storage::Spinlock;
 
 use utils_error::{elog, ereport};
-use condvar::ConditionVariable;
+use ::condvar::ConditionVariable;
 use types_core::{ProcNumber, INVALID_PROC_NUMBER, MAX_CANCEL_KEY_LENGTH};
 use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG2, ERROR, LOG};
 use types_storage::{
@@ -1040,8 +1040,8 @@ pub fn init_seams() {
         |_postgres_signal_arg| procsignal_sigusr1_handler(),
     );
     procsignal_seams::send_proc_signal::set(SendProcSignal);
-    // `types_core::Size` is `usize`, so `ProcSignalShmemSize`'s
-    // `PgResult<usize>` matches the seam's `PgResult<types_core::Size>`.
+    // `::types_core::Size` is `usize`, so `ProcSignalShmemSize`'s
+    // `PgResult<usize>` matches the seam's `PgResult<::types_core::Size>`.
     procsignal_seams::proc_signal_shmem_size::set(ProcSignalShmemSize);
     procsignal_seams::proc_signal_shmem_init::set(ProcSignalShmemInit);
 

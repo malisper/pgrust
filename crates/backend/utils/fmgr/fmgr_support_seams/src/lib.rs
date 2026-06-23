@@ -12,7 +12,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, NodeId, PlannerInfo};
 

@@ -122,7 +122,7 @@ impl XLogStats {
 ///
 /// Returns `(rec_len, fpi_len)`.
 ///
-/// [`DecodedBkpBlock::fpi_len`]: wal::DecodedBkpBlock::fpi_len
+/// [`DecodedBkpBlock::fpi_len`]: ::wal::DecodedBkpBlock::fpi_len
 pub fn xlog_rec_get_len(record: &DecodedXLogRecord<'_>) -> (uint32, uint32) {
     let fpi_len = record
         .blocks()

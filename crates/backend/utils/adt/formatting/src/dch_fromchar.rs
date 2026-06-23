@@ -36,10 +36,10 @@
 //! consumer stores in `TmFromChar.tzp` and the (later-ported) `do_to_timestamp`
 //! driver hands back to the timezone provider to resolve the offset.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult, SoftErrorContext};
 use types_datetime::{TzAbbrevMatch, TzHandle};
-use types_datetime::MONTHS_PER_YEAR;
+use ::types_datetime::MONTHS_PER_YEAR;
 use types_error::{ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_INVALID_DATETIME_FORMAT};
 use types_core::{InvalidOid, Oid};
 
@@ -53,7 +53,7 @@ use crate::tables::*;
 /// Local `errsave` helper mirroring C's `errsave(escontext, ...)`: routes a
 /// complete [`PgError`] through the shared soft-error context discipline.
 fn errsave(escontext: Option<&mut SoftErrorContext>, err: PgError) -> PgResult<()> {
-    types_error::ereturn(escontext, (), err)
+    ::types_error::ereturn(escontext, (), err)
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ fn cache_locale_time() -> PgResult<()> {
 
 /// The localized-name seams return arena-allocated `PgVec<PgVec<u8>>`; the DCH
 /// engine consumes them as plain `Vec<Vec<u8>>` (NUL-free owned names).
-fn pgvec_of_pgvec_to_vec(a: mcx::PgVec<'_, mcx::PgVec<'_, u8>>) -> Vec<Vec<u8>> {
+fn pgvec_of_pgvec_to_vec(a: ::mcx::PgVec<'_, ::mcx::PgVec<'_, u8>>) -> Vec<Vec<u8>> {
     a.iter().map(|e| e.to_vec()).collect()
 }
 
@@ -1027,7 +1027,7 @@ pub fn dch_datetime_type(nodes: &[FormatNode]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     // The numeric/ASCII from-char paths exercised here call `cache_locale_time`
     // (a no-op when LC_TIME is C) and `pg_mblen` (to advance over text/space

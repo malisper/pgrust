@@ -13,7 +13,7 @@
 
 use super::*;
 use core::sync::atomic::{AtomicBool, Ordering};
-use hash::hsearch::{
+use ::hash::hsearch::{
     HASHCTL, HASH_BLOBS, HASH_DIRSIZE, HASH_ELEM, HASH_ENTER, HASH_ENTER_NULL, HASH_FIND,
     HASH_FIXED_SIZE, HASH_REMOVE, HASH_STRINGS,
 };

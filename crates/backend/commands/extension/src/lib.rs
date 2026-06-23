@@ -41,7 +41,7 @@ use std::cell::Cell;
 use std::path::Path;
 
 use mcx::{Mcx, PgString};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_core::{AttrNumber, InvalidOid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_NAME,
@@ -50,27 +50,27 @@ use types_error::{
 };
 use types_error::{ERRCODE_INVALID_RECURSION, ERRCODE_UNDEFINED_SCHEMA};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use scankey::ScanKeyInit;
-use indexing::keystone::CatalogTupleDelete;
+use ::scankey::ScanKeyInit;
+use ::indexing::keystone::CatalogTupleDelete;
 use cache_syscache::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, EXTENSIONNAME, EXTENSIONOID,
 };
 
-use cache::SysCacheKey;
-use types_catalog::catalog::NAMESPACE_RELATION_ID;
-use types_catalog::catalog_dependency::{
+use ::cache::SysCacheKey;
+use ::types_catalog::catalog::NAMESPACE_RELATION_ID;
+use ::types_catalog::catalog_dependency::{
     InvalidObjectAddress, ObjectAddress, DEPENDENCY_EXTENSION, DEPENDENCY_NORMAL,
 };
-use types_catalog::pg_database::DatabaseRelationId;
-use types_catalog::catalog_dependency::DEPEND_RELATION_ID;
-use types_catalog::pg_extension as cat;
-use datum::Datum as KeyDatum;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessShareLock, RowExclusiveLock};
-use types_tuple::heaptuple::Datum;
-use types_acl::acl::{ACLCHECK_OK, ACL_CREATE};
+use ::types_catalog::pg_database::DatabaseRelationId;
+use ::types_catalog::catalog_dependency::DEPEND_RELATION_ID;
+use ::types_catalog::pg_extension as cat;
+use ::datum::Datum as KeyDatum;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessShareLock, RowExclusiveLock};
+use ::types_tuple::heaptuple::Datum;
+use ::types_acl::acl::{ACLCHECK_OK, ACL_CREATE};
 
 use genam_seams as genam_seams;
 use table_seams as table_seams;
@@ -88,19 +88,19 @@ use transam_xact_seams as xact_seams;
 use heaptuple::{
     heap_copytuple, heap_deform_tuple, heap_form_tuple, heap_modify_tuple,
 };
-use alter::AlterObjectNamespace_oid;
-use types_acl::acl::ACLCHECK_NOT_OWNER;
+use ::alter::AlterObjectNamespace_oid;
+use ::types_acl::acl::ACLCHECK_NOT_OWNER;
 use ::nodes::parsenodes::{OBJECT_EXTENSION, OBJECT_SCHEMA};
-use catalog_catalog::GetNewOidWithIndex;
-use indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
-use arrayfuncs::construct::build_name_array;
-use name::namein;
-use types_tuple::heaptuple::NameData;
-use miscinit::GetUserId;
-use init_small::globals::MyDatabaseId;
+use ::catalog_catalog::GetNewOidWithIndex;
+use ::indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
+use ::arrayfuncs::construct::build_name_array;
+use ::name::namein;
+use ::types_tuple::heaptuple::NameData;
+use ::miscinit::GetUserId;
+use ::init_small::globals::MyDatabaseId;
 use catalog_namespace::{fetch_search_path, get_namespace_oid, isTempNamespace};
-use schemacmds::CreateSchemaCommand;
-use comment::CreateComments;
+use ::schemacmds::CreateSchemaCommand;
+use ::comment::CreateComments;
 
 pub mod deferred;
 pub mod script_exec;
@@ -110,8 +110,8 @@ pub mod script_exec;
 pub const MAXPGPATH: usize = 1024;
 
 /// `here(funcname)` — the error-source location attached to emitted NOTICEs.
-fn here(funcname: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new("../src/backend/commands/extension.c", 0, funcname)
+fn here(funcname: &'static str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new("../src/backend/commands/extension.c", 0, funcname)
 }
 
 // ===========================================================================
@@ -344,7 +344,7 @@ pub fn is_extension_script_filename(filename: &str) -> bool {
 /// `get_share_path(my_exec_path, sharepath)` (`common/path.c`) — the installed
 /// share directory, derived from the backend's `my_exec_path` global.
 fn share_path() -> String {
-    let buf = init_small::globals::my_exec_path();
+    let buf = ::init_small::globals::my_exec_path();
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     let my_exec_path = String::from_utf8_lossy(&buf[..end]).into_owned();
     common_path_seams::get_share_path::call(&my_exec_path)
@@ -733,7 +733,7 @@ pub fn parse_extension_control_file(
 /// seam, returning owned `String`s (the C copies + downcases per identifier
 /// rules). `Ok(None)` is the C `false` (syntax error).
 fn split_name_list(value: &str) -> PgResult<Option<Vec<String>>> {
-    let scratch = mcx::MemoryContext::new("extension split identifier");
+    let scratch = ::mcx::MemoryContext::new("extension split identifier");
     let mcx = scratch.mcx();
     let result = match varlena_seams::split_identifier_string::call(mcx, value, ',')? {
         None => None,
@@ -879,7 +879,7 @@ pub fn get_ext_ver_list(control: &ExtensionControlFile) -> PgResult<EviList> {
     let extnamelen = extname.len();
 
     let location = get_extension_script_directory(control)?;
-    let scratch = mcx::MemoryContext::new("extension script directory scan");
+    let scratch = ::mcx::MemoryContext::new("extension script directory scan");
     let entries = fd_seams::list_dir::call(scratch.mcx(), &location, false)?
         .ok_or_else(|| PgError::error("AllocateDir(location) failed for the script directory"))?;
 
@@ -1107,7 +1107,7 @@ pub fn find_install_path(
 /// name, look up its OID. Returns `InvalidOid` (with `missing_ok`) or raises the
 /// C ereport when the extension does not exist.
 pub fn get_extension_oid(extname: &str, missing_ok: bool) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("get_extension_oid");
+    let scratch = ::mcx::MemoryContext::new("get_extension_oid");
     // GetSysCacheOid1(EXTENSIONNAME, Anum_pg_extension_oid, CStringGetDatum(extname))
     let result = GetSysCacheOid(
         scratch.mcx(),
@@ -1169,7 +1169,7 @@ pub fn get_extension_name<'mcx>(mcx: Mcx<'mcx>, ext_oid: Oid) -> PgResult<Option
 /// the OID of its namespace (`extnamespace`). Returns `InvalidOid` (the C
 /// `InvalidOid`) if there is no such extension.
 pub fn get_extension_schema(ext_oid: Oid) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("get_extension_schema");
+    let scratch = ::mcx::MemoryContext::new("get_extension_schema");
     let mcx = scratch.mcx();
 
     let tuple = SearchSysCache1(mcx, EXTENSIONOID, SysCacheKey::Value(KeyDatum::from_oid(ext_oid)))?;
@@ -1289,9 +1289,9 @@ pub fn read_whole_file(filename: &str) -> PgResult<String> {
     };
 
     // fst.st_size > (MaxAllocSize - 1)
-    if bytes.len() > mcx::MAX_ALLOC_SIZE - 1 {
+    if bytes.len() > ::mcx::MAX_ALLOC_SIZE - 1 {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .errcode(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
             .errmsg(format!("file \"{filename}\" is too large"))
             .into_error());
     }
@@ -1311,7 +1311,7 @@ pub fn extension_file_exists(extension_name: &str) -> PgResult<bool> {
     let mut result = false;
     let locations = get_extension_control_directories()?;
 
-    let scratch = mcx::MemoryContext::new("extension_file_exists dir scan");
+    let scratch = ::mcx::MemoryContext::new("extension_file_exists dir scan");
     for location in &locations {
         // missing_ok = true: a missing control directory is the silent ENOENT
         // case (C returns false); any other error is raised by list_dir.
@@ -1378,7 +1378,7 @@ pub fn pg_available_extensions() -> PgResult<Vec<AvailableExtension>> {
     let mut found_ext: Vec<String> = Vec::new();
     let locations = get_extension_control_directories()?;
 
-    let scratch = mcx::MemoryContext::new("pg_available_extensions dir scan");
+    let scratch = ::mcx::MemoryContext::new("pg_available_extensions dir scan");
     for location in &locations {
         // A missing control directory is the silent ENOENT case (C does
         // nothing); any other error is raised by list_dir.
@@ -1520,7 +1520,7 @@ pub fn pg_available_extension_versions() -> PgResult<Vec<AvailableExtensionVersi
     let mut found_ext: Vec<String> = Vec::new();
     let locations = get_extension_control_directories()?;
 
-    let scratch = mcx::MemoryContext::new("pg_available_extension_versions dir scan");
+    let scratch = ::mcx::MemoryContext::new("pg_available_extension_versions dir scan");
     for location in &locations {
         let entries = match fd_seams::list_dir::call(scratch.mcx(), location, true)? {
             None => continue,
@@ -1594,7 +1594,7 @@ pub fn InsertExtensionTuple<'mcx>(
     let name = namein(ext_name)?;
     let name_bytes: Vec<u8> = name.data.iter().map(|&b| b as u8).collect();
     values[cat::Anum_pg_extension_extname as usize - 1] =
-        Datum::ByRef(mcx::slice_in(mcx, &name_bytes)?);
+        Datum::ByRef(::mcx::slice_in(mcx, &name_bytes)?);
 
     values[cat::Anum_pg_extension_extowner as usize - 1] = Datum::from_oid(ext_owner);
     values[cat::Anum_pg_extension_extnamespace as usize - 1] = Datum::from_oid(schema_oid);
@@ -1843,7 +1843,7 @@ pub fn CreateExtensionInternal<'mcx>(
             let csstmt = ::nodes::ddlnodes::CreateSchemaStmt {
                 schemaname: Some(PgString::from_str_in(control_schema, mcx)?),
                 authrole: None,
-                schemaElts: mcx::vec_with_capacity_in(mcx, 0)?,
+                schemaElts: ::mcx::vec_with_capacity_in(mcx, 0)?,
                 if_not_exists: false,
             };
             CreateSchemaCommand(mcx, &csstmt, "(generated CREATE SCHEMA command)", -1, -1)?;
@@ -1968,7 +1968,7 @@ pub fn AlterExtensionNamespace<'mcx>(
 ) -> PgResult<(ObjectAddress, Oid)> {
     let extension_oid = get_extension_oid(extension_name, false)?;
 
-    let nsp_oid = catalog_namespace::LookupCreationNamespace(mcx, newschema)?;
+    let nsp_oid = ::catalog_namespace::LookupCreationNamespace(mcx, newschema)?;
 
     // Permission check: must own extension.
     if !aclchk_seams::object_ownercheck::call(cat::ExtensionRelationId, extension_oid, GetUserId())? {
@@ -2005,7 +2005,7 @@ pub fn AlterExtensionNamespace<'mcx>(
         &mut ext_key,
         cat::Anum_pg_extension_oid as AttrNumber,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         Datum::from_oid(extension_oid),
     )?;
     let mut ext_scan = genam_seams::systable_beginscan::call(
@@ -2065,22 +2065,22 @@ pub fn AlterExtensionNamespace<'mcx>(
     let mut dep_key0 = ScanKeyData::empty();
     ScanKeyInit(
         &mut dep_key0,
-        types_catalog::catalog_dependency::Anum_pg_depend_refclassid,
+        ::types_catalog::catalog_dependency::Anum_pg_depend_refclassid,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         Datum::from_oid(cat::ExtensionRelationId),
     )?;
     let mut dep_key1 = ScanKeyData::empty();
     ScanKeyInit(
         &mut dep_key1,
-        types_catalog::catalog_dependency::Anum_pg_depend_refobjid,
+        ::types_catalog::catalog_dependency::Anum_pg_depend_refobjid,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         Datum::from_oid(extension_oid),
     )?;
     let mut dep_scan = genam_seams::systable_beginscan::call(
         &dep_rel,
-        types_catalog::catalog_dependency::DependReferenceIndexId,
+        ::types_catalog::catalog_dependency::DependReferenceIndexId,
         true,
         None,
         &[dep_key0, dep_key1],
@@ -2092,10 +2092,10 @@ pub fn AlterExtensionNamespace<'mcx>(
             None => break,
         };
         let dcols = heap_deform_tuple(mcx, &dep_tup.tuple, &dep_rel.rd_att, &dep_tup.data)?;
-        let dep_classid = datum_as_oid(&dcols[types_catalog::catalog_dependency::Anum_pg_depend_classid as usize - 1].0)?;
-        let dep_objid = datum_as_oid(&dcols[types_catalog::catalog_dependency::Anum_pg_depend_objid as usize - 1].0)?;
-        let dep_objsubid = dcols[types_catalog::catalog_dependency::Anum_pg_depend_objsubid as usize - 1].0.as_i32();
-        let deptype: i8 = dcols[types_catalog::catalog_dependency::Anum_pg_depend_deptype as usize - 1].0.as_i32() as i8;
+        let dep_classid = datum_as_oid(&dcols[::types_catalog::catalog_dependency::Anum_pg_depend_classid as usize - 1].0)?;
+        let dep_objid = datum_as_oid(&dcols[::types_catalog::catalog_dependency::Anum_pg_depend_objid as usize - 1].0)?;
+        let dep_objsubid = dcols[::types_catalog::catalog_dependency::Anum_pg_depend_objsubid as usize - 1].0.as_i32();
+        let deptype: i8 = dcols[::types_catalog::catalog_dependency::Anum_pg_depend_deptype as usize - 1].0.as_i32() as i8;
 
         // If a dependent extension has a no_relocate request for this extension,
         // disallow SET SCHEMA.
@@ -2212,7 +2212,7 @@ fn AlterExtensionNamespace_seam(
     newschema: &str,
     want_oldschema: bool,
 ) -> PgResult<(ObjectAddress, Oid)> {
-    let scratch = mcx::MemoryContext::new("AlterExtensionNamespace");
+    let scratch = ::mcx::MemoryContext::new("AlterExtensionNamespace");
     let (addr, oldschema) = AlterExtensionNamespace(scratch.mcx(), extension_name, newschema)?;
     Ok((addr, if want_oldschema { oldschema } else { InvalidOid }))
 }
@@ -2226,7 +2226,7 @@ fn AlterExtensionNamespace_seam(
 /// `pg_extension` object. All it does is remove the pg_extension tuple itself;
 /// everything else is handled by the dependency infrastructure.
 pub fn RemoveExtensionById(extId: Oid) -> PgResult<()> {
-    let scratch = mcx::MemoryContext::new("RemoveExtensionById");
+    let scratch = ::mcx::MemoryContext::new("RemoveExtensionById");
     let mcx = scratch.mcx();
 
     // Disallow deletion of the extension currently open for insertion, else
@@ -2253,7 +2253,7 @@ pub fn RemoveExtensionById(extId: Oid) -> PgResult<()> {
         &mut key,
         cat::Anum_pg_extension_oid as AttrNumber,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         Datum::from_oid(extId),
     )?;
     let keys = [key];
@@ -2299,13 +2299,13 @@ pub fn CreateExtension<'mcx>(
     if OidIsValid(get_extension_oid(extname, true)?) {
         if stmt.if_not_exists {
             ereport(NOTICE)
-                .errcode(types_error::ERRCODE_DUPLICATE_OBJECT)
+                .errcode(::types_error::ERRCODE_DUPLICATE_OBJECT)
                 .errmsg(format!("extension \"{extname}\" already exists, skipping"))
                 .finish(here("CreateExtension"))?;
             return Ok(InvalidObjectAddress);
         } else {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_DUPLICATE_OBJECT)
+                .errcode(::types_error::ERRCODE_DUPLICATE_OBJECT)
                 .errmsg(format!("extension \"{extname}\" already exists"))
                 .into_error());
         }

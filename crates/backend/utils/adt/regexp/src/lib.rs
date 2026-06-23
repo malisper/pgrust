@@ -86,7 +86,7 @@ struct ReCache<'mcx> {
     entries: PgVec<'mcx, CachedRe<'mcx>>,
 }
 
-mcx::bind!(ReCacheTy => ReCache<'mcx>);
+::mcx::bind!(ReCacheTy => ReCache<'mcx>);
 
 thread_local! {
     static RE_CACHE: RefCell<Option<McxOwned<ReCacheTy>>> = const { RefCell::new(None) };

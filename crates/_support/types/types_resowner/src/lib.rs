@@ -13,7 +13,7 @@
 
 #![allow(non_snake_case)]
 
-use datum::Datum;
+use ::datum::Datum;
 
 /// `ResourceOwner` (`utils/resowner.h`) — an opaque, `Copy` handle to a
 /// resource owner object owned by the resowner subsystem's arena. The reserved

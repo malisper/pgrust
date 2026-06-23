@@ -15,11 +15,11 @@
 //! same panic. The post-recognition arithmetic ([`crate::scalar`],
 //! [`crate::ineq`]) is fully ported and is what runs once the keystone lands.
 
-use mcx::Mcx;
-use types_core::primitive::{Oid, OidIsValid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo};
 
 use lsyscache_seams as lsc;

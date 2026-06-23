@@ -52,7 +52,7 @@ fn routine_selection() {
 
 /// A leaked static memory context for tests (never freed; fine for a test).
 fn leak_ctx() -> Mcx<'static> {
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     let ctx: &'static MemoryContext =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(MemoryContext::new("copyto test")));
     ctx.mcx()

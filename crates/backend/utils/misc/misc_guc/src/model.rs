@@ -47,7 +47,7 @@ pub const GUC_SET_LOCAL: GucStackState = 3;
 
 /// The opaque "extra" payload a check hook hands its paired assign hook
 /// (C's `void *extra`). Re-exported from guc_tables (one definition).
-pub use guc_tables::GucHookExtra as HookExtra;
+pub use ::guc_tables::GucHookExtra as HookExtra;
 
 /// A *shared* GUC extra payload, the faithful analog of C's `void *extra`.
 ///
@@ -182,7 +182,7 @@ impl config_generic {
 pub struct config_bool {
     pub gen: config_generic,
     /// The owner's storage accessors (`conf->variable`).
-    pub variable: &'static guc_tables::GucBoolVar,
+    pub variable: &'static ::guc_tables::GucBoolVar,
     /// The live value cached in this record (mirrors `*conf->variable`).
     pub value: Option<bool>,
     pub boot_val: bool,
@@ -197,7 +197,7 @@ pub struct config_bool {
 #[derive(Debug)]
 pub struct config_int {
     pub gen: config_generic,
-    pub variable: &'static guc_tables::GucIntVar,
+    pub variable: &'static ::guc_tables::GucIntVar,
     pub value: Option<i32>,
     pub boot_val: i32,
     pub min: i32,
@@ -213,7 +213,7 @@ pub struct config_int {
 #[derive(Debug)]
 pub struct config_real {
     pub gen: config_generic,
-    pub variable: &'static guc_tables::GucRealVar,
+    pub variable: &'static ::guc_tables::GucRealVar,
     pub value: Option<f64>,
     pub boot_val: f64,
     pub min: f64,
@@ -229,7 +229,7 @@ pub struct config_real {
 #[derive(Debug)]
 pub struct config_string {
     pub gen: config_generic,
-    pub variable: &'static guc_tables::GucStringVar,
+    pub variable: &'static ::guc_tables::GucStringVar,
     pub value: Option<Option<String>>,
     pub boot_val: Option<String>,
     pub check_hook: Option<&'static GucStringCheckHook>,
@@ -243,7 +243,7 @@ pub struct config_string {
 #[derive(Debug)]
 pub struct config_enum {
     pub gen: config_generic,
-    pub variable: &'static guc_tables::GucEnumVar,
+    pub variable: &'static ::guc_tables::GucEnumVar,
     pub value: Option<i32>,
     pub boot_val: i32,
     pub options: GucEnumOptions,

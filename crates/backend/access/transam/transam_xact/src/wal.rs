@@ -148,7 +148,7 @@ pub fn XactLogCommitRecord(
 
     // dump transaction origin information
     let session_origin = origin_seams::replorigin_session_origin::call();
-    if session_origin != types_core::InvalidRepOriginId {
+    if session_origin != ::types_core::InvalidRepOriginId {
         xinfo |= XACT_XINFO_HAS_ORIGIN;
     }
 
@@ -285,7 +285,7 @@ pub fn XactLogAbortRecord(
     // Dump transaction origin information (needed during recovery to update
     // the replication origin progress).
     let session_origin = origin_seams::replorigin_session_origin::call();
-    if session_origin != types_core::InvalidRepOriginId {
+    if session_origin != ::types_core::InvalidRepOriginId {
         xinfo |= XACT_XINFO_HAS_ORIGIN;
     }
 

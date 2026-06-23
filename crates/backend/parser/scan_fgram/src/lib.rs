@@ -33,10 +33,10 @@
 
 pub mod tokens;
 
-use scansup_fgram::scanner_isspace;
+use ::scansup_fgram::scanner_isspace;
 use error_fgram::{PgError, PgResult};
 use mb_fgram::{pg_get_client_encoding, pg_verifymbstr};
-use pg_ffi_fgram::error::make_sqlstate;
+use ::pg_ffi_fgram::error::make_sqlstate;
 use pg_ffi_fgram::{SqlState, ERRCODE_FEATURE_NOT_SUPPORTED, PG_ENCODING_IS_CLIENT_ONLY};
 
 /// `ERRCODE_INVALID_ESCAPE_SEQUENCE` (utils/errcodes.txt: `22025`). Not yet
@@ -113,15 +113,15 @@ pub mod gucs {
 
 /// Install this crate's seam providers.
 ///
-/// Installs the [`GucVarAccessors`](guc_tables::GucVarAccessors)
+/// Installs the [`GucVarAccessors`](::guc_tables::GucVarAccessors)
 /// for the three scanner-owned GUCs (`backslash_quote`, `escape_string_warning`,
 /// `standard_conforming_strings`) over the [`gucs`] backing store, so the GUC
 /// engine's `.read()`/`.set()` reach the `conf->variable` C globals. Also wires
 /// [`ScannerSettings`]' live provider to read the same store, matching scan.l's
 /// `scanner_init` (scan.l:1265-1267) which copies the globals into the scanner.
 pub fn init_seams() {
-    use guc_tables::vars;
-    use guc_tables::GucVarAccessors;
+    use ::guc_tables::vars;
+    use ::guc_tables::GucVarAccessors;
 
     vars::backslash_quote.install(GucVarAccessors {
         get: gucs::backslash_quote,
@@ -331,7 +331,7 @@ pub struct LexError {
     /// dynamic message; we carry the real error here instead of rewriting it to
     /// a generic syntax error.  When set, `sqlstate` mirrors the source's code
     /// and the dynamic message lives here (the static `message` is a fallback).
-    pub source: Option<error_fgram::PgError>,
+    pub source: Option<::error_fgram::PgError>,
 }
 
 /// The core scanner: holds the input buffer and all of `core_yy_extra_type`'s
@@ -493,7 +493,7 @@ impl<'a> Scanner<'a> {
             return 0;
         }
         // C: pg_mbstrlen_with_len(scanbuf, location) + 1.
-        match mb_fgram::pg_mbstrlen_with_len(self.scanbuf, location) {
+        match ::mb_fgram::pg_mbstrlen_with_len(self.scanbuf, location) {
             Ok(n) => n + 1,
             Err(_) => 0,
         }
@@ -540,7 +540,7 @@ impl<'a> Scanner<'a> {
     /// default `ERRCODE_SYNTAX_ERROR` and no detail/hint.
     fn lexerr(&self, message: &'static str) -> LexError {
         LexError {
-            sqlstate: pg_ffi_fgram::ERRCODE_SYNTAX_ERROR,
+            sqlstate: ::pg_ffi_fgram::ERRCODE_SYNTAX_ERROR,
             message,
             detail: None,
             hint: None,

@@ -37,9 +37,9 @@
 //! ## Genuine reuse / external boundary
 //!
 //!  * `&BlockSig` / signal-mask install → [`libpq_pqsignal`]'s owned
-//!    [`libpq_pqsignal::SignalMasks`] (the backend-private
+//!    [`::libpq_pqsignal::SignalMasks`] (the backend-private
 //!    `BlockSig`/`UnBlockSig` globals) plus direct `libc::sigprocmask`.
-//!  * `MyProcPid = getpid()` → [`init_small::globals::SetMyProcPid`]
+//!  * `MyProcPid = getpid()` → [`::init_small::globals::SetMyProcPid`]
 //!    fed by `libc::getpid()`.
 //!  * `pg_strong_random_init()` → the
 //!    [`pg_strong_random_seams::pg_strong_random_init`] seam, whose owner
@@ -53,9 +53,9 @@
 
 #![allow(non_snake_case)]
 
-use libpq_pqsignal::signal_masks;
-use init_small::globals::SetMyProcPid;
-use types_core::pid_t;
+use ::libpq_pqsignal::signal_masks;
+use ::init_small::globals::SetMyProcPid;
+use ::types_core::pid_t;
 
 /// Install this crate's seams: the `fork_process` chokepoint consumed by
 /// `launch_backend.c`'s `postmaster_child_launch`.

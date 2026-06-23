@@ -15,7 +15,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use pgtime::pg_tz;
+use ::pgtime::pg_tz;
 
 use crate::{DEFAULT_LOG_ROTATION_AGE, DEFAULT_LOG_ROTATION_SIZE};
 
@@ -38,7 +38,7 @@ thread_local! {
     /// is at least GMT before anything can log, hence the GMT boot value.
     static LOG_TIMEZONE: RefCell<pg_tz> = RefCell::new(pg_tz::new(
         String::from("GMT"),
-        pgtime::state::default(),
+        ::pgtime::state::default(),
     ));
 }
 

@@ -31,15 +31,15 @@ use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use utils_error::ereport;
-use types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::utils_error::ereport;
+use ::types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use types_error::{PgError, PgResult};
 
 use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::{
+use ::types_jsonb::jsonb::{
     jbvType, json_container_is_array, json_container_is_object, json_container_is_scalar,
     JsonbIteratorToken,
 };
@@ -47,9 +47,9 @@ use types_jsonfuncs::{
     ColumnIOUnion, JsonHashEntry, TypeCat, NAMEDATALEN,
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, RECORDOID};
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::Datum;
+use ::types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, RECORDOID};
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::Datum;
 
 use heaptuple::{heap_deform_tuple, HeapTupleGetDatum};
 use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext};
@@ -213,7 +213,7 @@ fn populate_recordset_worker<'mcx>(
     // input/result record type. (See PopulateRecordCacheLocal.)
     let mut cache = PopulateRecordCacheLocal {
         argtype: types_core::InvalidOid,
-        c: types_jsonfuncs::ColumnIOData::default(),
+        c: ::types_jsonfuncs::ColumnIOData::default(),
     };
 
     // The result-type resolution + arg reads need a `'mcx` shared view of the
@@ -302,7 +302,7 @@ fn populate_recordset_worker<'mcx>(
     };
     funcapi::init_materialized_srf_with_desc::call(
         fcinfo,
-        Some(mcx::alloc_in(mcx, setdesc_box)?),
+        Some(::mcx::alloc_in(mcx, setdesc_box)?),
     )?;
 
     // if the json is null send back an empty set (the materialize-mode store is
@@ -518,7 +518,7 @@ fn populate_recordset_worker<'mcx>(
 fn put_recordset_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-    tupdesc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+    tupdesc: &::types_tuple::heaptuple::TupleDescData<'mcx>,
     tuple: &FormedTuple<'mcx>,
 ) -> PgResult<()> {
     let deformed = heap_deform_tuple(mcx, &tuple.tuple, tupdesc, &tuple.data)?;

@@ -5,9 +5,9 @@
 //! table-producer functions.
 
 use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::ExprState;

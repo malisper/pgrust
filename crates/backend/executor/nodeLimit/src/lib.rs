@@ -34,7 +34,7 @@ use execUtils_seams as execUtils;
 use postgres_seams as tcop_postgres;
 
 use mcx::{alloc_in, PgBox};
-use types_core::int64;
+use ::types_core::int64;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_error::{
     ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE, ERRCODE_INVALID_ROW_COUNT_IN_RESULT_OFFSET_CLAUSE,

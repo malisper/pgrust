@@ -2,7 +2,7 @@
 //! (`utils/adt/skipsupport.c`, PostgreSQL 18.3).
 //!
 //! `PrepareSkipSupportFromOpclass` is the entry point B-Tree skip scan uses to
-//! obtain a [`SkipSupportData`](types_sortsupport::SkipSupportData) for an
+//! obtain a [`SkipSupportData`](::types_sortsupport::SkipSupportData) for an
 //! operator class (opfamily + opcintype). The B-Tree skip-scan preprocessing
 //! code (`_bt_preprocess_array_keys` in `nbtutils.c`) calls it; the
 //! implementation lives in the owner crate `backend-utils-adt-skipsupport`,
@@ -14,9 +14,9 @@
 
 #![allow(non_snake_case)]
 
-use types_core::Oid;
-use types_error::PgResult;
-use types_sortsupport::SkipSupportData;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_sortsupport::SkipSupportData;
 
 seam_core::seam!(
     /// `PrepareSkipSupportFromOpclass(opfamily, opcintype, reverse)`

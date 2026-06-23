@@ -144,7 +144,7 @@ fn build_variable(setting: GucSetting) -> Option<GucVariable> {
     };
     Some(match (setting, boot) {
         (GucSetting::Bool(s), BootValue::Bool(b)) => GucVariable::Bool(config_bool {
-            gen: gen(types_guc::PGC_BOOL),
+            gen: gen(::types_guc::PGC_BOOL),
             variable: s.variable,
             value: Some(b),
             boot_val: b,
@@ -155,7 +155,7 @@ fn build_variable(setting: GucSetting) -> Option<GucVariable> {
             reset_extra: None,
         }),
         (GucSetting::Int(s), BootValue::Int(i)) => GucVariable::Int(config_int {
-            gen: gen(types_guc::PGC_INT),
+            gen: gen(::types_guc::PGC_INT),
             variable: s.variable,
             value: Some(i),
             boot_val: i,
@@ -168,7 +168,7 @@ fn build_variable(setting: GucSetting) -> Option<GucVariable> {
             reset_extra: None,
         }),
         (GucSetting::Real(s), BootValue::Real(r)) => GucVariable::Real(config_real {
-            gen: gen(types_guc::PGC_REAL),
+            gen: gen(::types_guc::PGC_REAL),
             variable: s.variable,
             value: Some(r),
             boot_val: r,
@@ -181,7 +181,7 @@ fn build_variable(setting: GucSetting) -> Option<GucVariable> {
             reset_extra: None,
         }),
         (GucSetting::String(s), BootValue::String(v)) => GucVariable::String(config_string {
-            gen: gen(types_guc::PGC_STRING),
+            gen: gen(::types_guc::PGC_STRING),
             variable: s.variable,
             value: Some(v.clone()),
             boot_val: v.clone(),
@@ -192,7 +192,7 @@ fn build_variable(setting: GucSetting) -> Option<GucVariable> {
             reset_extra: None,
         }),
         (GucSetting::Enum(s), BootValue::Enum(e)) => GucVariable::Enum(config_enum {
-            gen: gen(types_guc::PGC_ENUM),
+            gen: gen(::types_guc::PGC_ENUM),
             variable: s.variable,
             value: Some(e),
             boot_val: e,

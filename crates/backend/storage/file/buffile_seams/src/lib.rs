@@ -7,9 +7,9 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_error::PgResult;
-use execparallel::FileSetHandle;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::execparallel::FileSetHandle;
 use ::nodes::nodehashjoin::BufFile;
 
 seam_core::seam!(
@@ -22,7 +22,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         fileset: FileSetHandle,
         name: &str,
-    ) -> PgResult<mcx::PgBox<'mcx, BufFile>>
+    ) -> PgResult<::mcx::PgBox<'mcx, BufFile>>
 );
 
 seam_core::seam!(
@@ -36,7 +36,7 @@ seam_core::seam!(
         name: &str,
         mode: i32,
         missing_ok: bool,
-    ) -> PgResult<Option<mcx::PgBox<'mcx, BufFile>>>
+    ) -> PgResult<Option<::mcx::PgBox<'mcx, BufFile>>>
 );
 
 seam_core::seam!(
@@ -55,12 +55,12 @@ seam_core::seam!(
     pub fn buf_file_create_temp<'mcx>(
         mcx: Mcx<'mcx>,
         inter_xact: bool,
-    ) -> PgResult<mcx::PgBox<'mcx, BufFile>>
+    ) -> PgResult<::mcx::PgBox<'mcx, BufFile>>
 );
 
 seam_core::seam!(
     /// `BufFileClose(file)` (buffile.c): close and delete a temporary file.
-    pub fn buf_file_close<'mcx>(file: mcx::PgBox<'mcx, BufFile>) -> PgResult<()>
+    pub fn buf_file_close<'mcx>(file: ::mcx::PgBox<'mcx, BufFile>) -> PgResult<()>
 );
 
 seam_core::seam!(

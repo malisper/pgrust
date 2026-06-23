@@ -843,7 +843,7 @@ fn file_access_error(
 /// `ereport(ERROR, (errcode(code), errmsg(message)))` — build the ERROR-level
 /// `PgError` so the caller returns it as `Err`.
 fn ereport_error(
-    code: types_error::SqlState,
+    code: ::types_error::SqlState,
     message: String,
     line: i32,
     func: &str,
@@ -857,7 +857,7 @@ fn ereport_error(
 /// `Ok(())`, since WARNING is below ERROR).
 fn ereport_warning(message: &str, line: i32, func: &str) -> PgResult<()> {
     error_seams::ereport::call(
-        PgError::new(types_error::WARNING, message.to_owned())
+        PgError::new(::types_error::WARNING, message.to_owned())
             .with_error_location(ErrorLocation::new(SRCFILE, line, func)),
     )
 }
@@ -886,7 +886,7 @@ fn ereport_at(err: PgError) -> PgResult<()> {
 // keep ERRCODE_OUT_OF_MEMORY referenced — it documents reserveAllocatedDesc's
 // fatal OOM branch, which collapses under Vec (see that function's doc).
 #[allow(dead_code)]
-const _OOM: types_error::SqlState = ERRCODE_OUT_OF_MEMORY;
+const _OOM: ::types_error::SqlState = ERRCODE_OUT_OF_MEMORY;
 
 // ---------------------------------------------------------------------------
 // Seam adapters installed by `init_seams`.

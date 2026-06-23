@@ -56,8 +56,8 @@ use mcx::{alloc_in, Mcx, PgBox};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::nodegather::{Gather, GatherStateData};
 use nodes::{Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind};
-use types_pgstat::wait_event::WAIT_EVENT_EXECUTE_GATHER;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
+use ::types_pgstat::wait_event::WAIT_EVENT_EXECUTE_GATHER;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
 use types_tuple::heaptuple::FormedMinimalTuple;
 
 /// Decode a flat C `MinimalTuple` byte image (the tuple-queue wire bytes) into
@@ -66,8 +66,8 @@ fn mintuple_from_flat<'mcx>(
     mcx: Mcx<'mcx>,
     blob: &[u8],
 ) -> PgResult<FormedMinimalTuple<'mcx>> {
-    use heaptuple::flat::MinimalTupleFlatError;
-    match heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
+    use ::heaptuple::flat::MinimalTupleFlatError;
+    match ::heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
         Ok(mtup) => Ok(mtup),
         Err(MinimalTupleFlatError::Pg(err)) => Err(err),
         Err(other) => panic!("minimal_tuple_from_flat on a tuple-queue image failed: {other:?}"),
@@ -219,7 +219,7 @@ pub fn ExecInitGather<'mcx>(
             nworkers_launched: 0,
             nreaders: 0,
             nextreader: 0,
-            reader: mcx::vec_with_capacity_in(mcx, 0)?,
+            reader: ::mcx::vec_with_capacity_in(mcx, 0)?,
         },
     )?;
 
@@ -341,8 +341,8 @@ pub fn ExecGather<'mcx>(
                 node.nreaders = nworkers_launched;
                 let nreaders = usize::try_from(nworkers_launched)
                     .map_err(|_| elog_error("Gather nreaders is negative"))?;
-                let mut reader: mcx::PgVec<'mcx, execparallel::TupleQueueReaderHandle> =
-                    mcx::vec_with_capacity_in(mcx, nreaders)?;
+                let mut reader: ::mcx::PgVec<'mcx, execparallel::TupleQueueReaderHandle> =
+                    ::mcx::vec_with_capacity_in(mcx, nreaders)?;
                 {
                     let pei = node
                         .pei
@@ -362,7 +362,7 @@ pub fn ExecGather<'mcx>(
                 //   node->nreaders = 0;
                 //   node->reader = NULL;
                 node.nreaders = 0;
-                node.reader = mcx::vec_with_capacity_in(mcx, 0)?;
+                node.reader = ::mcx::vec_with_capacity_in(mcx, 0)?;
             }
             // node->nextreader = 0;
             node.nextreader = 0;

@@ -14,13 +14,13 @@
 
 use alloc::string::ToString;
 
-use arrayfuncs_seams::construct_text_array_bytes;
-use dict_seams::subdict_lexize;
-use mcx::MemoryContext;
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::arrayfuncs_seams::construct_text_array_bytes;
+use ::dict_seams::subdict_lexize;
+use ::mcx::MemoryContext;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 const VARHDRSZ: usize = 4;

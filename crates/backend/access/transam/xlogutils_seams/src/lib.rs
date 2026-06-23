@@ -3,8 +3,8 @@
 //! owns. The owning unit installs these from its `init_seams()` when it
 //! lands; until then a call panics loudly.
 
-use types_storage::Buffer;
-use wal::rmgr::XLogReaderState;
+use ::types_storage::Buffer;
+use ::wal::rmgr::XLogReaderState;
 use wal::{HotStandbyState, XLogRedoAction};
 
 seam_core::seam!(
@@ -30,7 +30,7 @@ seam_core::seam!(
     /// invalid-page tracking table. `DropRelationFiles` calls it per fork during
     /// replay. Infallible (`void` in C; only updates a backend-local hash).
     pub fn xlog_drop_relation(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         forknum: types_core::primitive::ForkNumber,
     )
 );
@@ -74,7 +74,7 @@ seam_core::seam!(
     pub fn xlog_read_buffer_for_redo_extended(
         record: &XLogReaderState<'_>,
         block_id: u8,
-        mode: types_storage::storage::ReadBufferMode,
+        mode: ::types_storage::storage::ReadBufferMode,
         get_cleanup_lock: bool,
     ) -> types_error::PgResult<(XLogRedoAction, Buffer)>
 );
@@ -98,7 +98,7 @@ seam_core::seam!(
     /// Used by `XLogRecordPageWithFreeSpace`. `Err` carries the smgr/read
     /// `ereport(ERROR)`s.
     pub fn xlog_read_buffer_extended_fsm(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         blkno: types_core::primitive::BlockNumber,
     ) -> types_error::PgResult<Buffer>
 );

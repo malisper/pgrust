@@ -18,8 +18,8 @@
 //! `backend-catalog-indexing`, no cycle), and `systable_beginscan` /
 //! `systable_getnext` keyed scans. The decoded `pg_subscription` /
 //! `pg_subscription_rel` rows cross the boundary as the owned
-//! [`types_catalog::pg_subscription::Subscription`] /
-//! [`types_catalog::pg_subscription::SubscriptionRelState`] carriers, so
+//! [`::types_catalog::pg_subscription::Subscription`] /
+//! [`::types_catalog::pg_subscription::SubscriptionRelState`] carriers, so
 //! consumers never touch the datum layout.
 //!
 //! `GetPublicationsStr` lives in `pg_subscription.c` too, but it is pure
@@ -32,19 +32,19 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_catalog::pg_subscription as cat;
-use types_core::fmgr::{F_CHARNE, F_OIDEQ};
-use types_core::primitive::{AttrNumber, Oid, XLogRecPtr};
-use types_core::xact::InvalidXLogRecPtr;
-use types_core::OidIsValid;
+use ::types_catalog::pg_subscription as cat;
+use ::types_core::fmgr::{F_CHARNE, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, Oid, XLogRecPtr};
+use ::types_core::xact::InvalidXLogRecPtr;
+use ::types_core::OidIsValid;
 use types_error::{PgError, PgResult};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
 use types_tuple::heaptuple::{Datum, DeformedColumn};
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
-use scankey::ScanKeyInit;
-use indexing::keystone::{
+use ::scankey::ScanKeyInit;
+use ::indexing::keystone::{
     CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate,
 };
 
@@ -56,20 +56,20 @@ use arrayfuncs_seams as array_seams;
 use varlena_seams as varlena_seams;
 use lsyscache_seams as lsyscache_seams;
 use cache_syscache::{SearchSysCache1, SearchSysCache2};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use superuser_seams as superuser_seams;
 
-use cache::SysCacheKey;
-use datum::Datum as KeyDatum;
+use ::cache::SysCacheKey;
+use ::datum::Datum as KeyDatum;
 use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use types_syscache::{SUBSCRIPTIONOID, SUBSCRIPTIONRELMAP};
 
 // The launcher's trimmed `Subscription` summary (`replication/launcher.c`'s
 // `get_subscription_list` local struct), distinct from the full
-// `types_catalog::pg_subscription::Subscription` re-exported below.
-use replication_launcher::Subscription as LauncherSubscription;
+// `::types_catalog::pg_subscription::Subscription` re-exported below.
+use ::replication_launcher::Subscription as LauncherSubscription;
 
-pub use types_catalog::pg_subscription::{Subscription, SubscriptionRelState};
+pub use ::types_catalog::pg_subscription::{Subscription, SubscriptionRelState};
 
 /* ==========================================================================
  * Scan-key builders.
@@ -165,12 +165,12 @@ fn textarray_to_stringlist<'mcx>(
 
     // if (nelems == 0) return NIL;
     if elems.is_empty() {
-        return mcx::vec_with_capacity_in(mcx, 0);
+        return ::mcx::vec_with_capacity_in(mcx, 0);
     }
 
     // for (i = 0; i < nelems; i++)
     //     res = lappend(res, makeString(TextDatumGetCString(elems[i])));
-    let mut res: PgVec<'mcx, PgString<'mcx>> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+    let mut res: PgVec<'mcx, PgString<'mcx>> = ::mcx::vec_with_capacity_in(mcx, elems.len())?;
     for s in elems.iter() {
         res.push(PgString::from_str_in(s.as_str(), mcx)?);
     }
@@ -197,7 +197,7 @@ fn get_subscription_list<'mcx>(
     // is the `mcx` the seam was handed. The transaction below runs in its own
     // (transaction) context, and the list elements are owned (`String`), so
     // there is no leak across the StartTransaction/CommitTransaction boundary.
-    let mut res: PgVec<'mcx, LauncherSubscription> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut res: PgVec<'mcx, LauncherSubscription> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     // Start a transaction so we can access pg_subscription.
     xact_seams::start_transaction_command::call()?;
@@ -666,7 +666,7 @@ fn RemoveSubscriptionRel(mcx: Mcx<'_>, subid: Oid, relid: Oid) -> PgResult<()> {
     let rel = table_seams::table_open::call(mcx, cat::SubscriptionRelRelationId, RowExclusiveLock)?;
 
     // Build only the OidIsValid keys (the C nkeys-counted skey[2]).
-    let mut keys: PgVec<'_, ScanKeyData<'_>> = mcx::vec_with_capacity_in(mcx, 2)?;
+    let mut keys: PgVec<'_, ScanKeyData<'_>> = ::mcx::vec_with_capacity_in(mcx, 2)?;
     if OidIsValid(subid) {
         keys.push(oid_key(cat::Anum_pg_subscription_rel_srsubid as AttrNumber, subid)?);
     }
@@ -770,14 +770,14 @@ fn GetSubscriptionRelations<'mcx>(
     not_ready: bool,
 ) -> PgResult<PgVec<'mcx, SubscriptionRelState>> {
     // List *res = NIL;
-    let mut res: PgVec<'mcx, SubscriptionRelState> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut res: PgVec<'mcx, SubscriptionRelState> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     // rel = table_open(SubscriptionRelRelationId, AccessShareLock);
     let rel = table_seams::table_open::call(mcx, cat::SubscriptionRelRelationId, AccessShareLock)?;
 
     // ScanKeyInit(... srsubid, F_OIDEQ, subid); if (not_ready) ScanKeyInit(...
     // srsubstate, F_CHARNE, SUBREL_STATE_READY);
-    let mut keys: PgVec<'mcx, ScanKeyData<'mcx>> = mcx::vec_with_capacity_in(mcx, 2)?;
+    let mut keys: PgVec<'mcx, ScanKeyData<'mcx>> = ::mcx::vec_with_capacity_in(mcx, 2)?;
     keys.push(oid_key(cat::Anum_pg_subscription_rel_srsubid as AttrNumber, subid)?);
     if not_ready {
         keys.push(char_ne_key(
@@ -851,14 +851,14 @@ fn ereport_invalid_param(
  * Seam installation.
  * ========================================================================== */
 
-/// Run `f` against a fresh, self-contained scratch [`mcx::MemoryContext`]
+/// Run `f` against a fresh, self-contained scratch [`::mcx::MemoryContext`]
 /// (the C `CurrentMemoryContext` for these short catalog operations), dropped
 /// when the call returns. Used to adapt the no-`mcx` seam signatures (the
 /// caller never observes a heap allocation: every such seam returns `Copy` /
 /// unit values, exactly as the C functions return scalars / void). `f`'s
 /// result borrows nothing from the context.
 fn with_scratch<R>(f: impl FnOnce(Mcx<'_>) -> PgResult<R>) -> PgResult<R> {
-    let ctx = mcx::MemoryContext::new("pg_subscription scratch");
+    let ctx = ::mcx::MemoryContext::new("pg_subscription scratch");
     f(ctx.mcx())
 }
 

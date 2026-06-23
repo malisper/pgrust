@@ -23,12 +23,12 @@
 
 extern crate alloc;
 
-use seam_core::seam;
+use ::seam_core::seam;
 
 use types_core::{BlockNumber, MultiXactId, Oid, TimestampTz, TransactionId};
-use types_error::PgResult;
-use types_storage::buf::BufferAccessStrategy;
-use types_vacuum::vacuum::VacuumParams;
+use ::types_error::PgResult;
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_vacuum::vacuum::VacuumParams;
 use types_autovacuum::{
     AvwDbase, DbStatEntry, OrphanClassRow, PgClassScanRow, RecheckClassRow, TabStatEntry,
 };
@@ -149,7 +149,7 @@ seam!(pub fn set_query_cancel_pending(v: bool));
 // StartTransactionCommand, RESUME_INTERRUPTS.  All foreign error/xact
 // machinery; the errcontext text and the catch-and-continue control flow are
 // ported in-crate.
-seam!(pub fn emit_report_and_restart_after_table_error(err: types_error::PgError));
+seam!(pub fn emit_report_and_restart_after_table_error(err: ::types_error::PgError));
 seam!(pub fn vac_update_datfrozenxid() -> PgResult<()>);
 seam!(pub fn set_vacuum_cost_delay(v: f64));
 seam!(pub fn vacuum_cost_delay() -> f64);

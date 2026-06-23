@@ -22,9 +22,9 @@ mod tables;
 use conv_string_helpers::{
     check_encoding_conversion_args, ConversionResult, LocalToUtf, UtfToLocal,
 };
-use conv_string_helpers::make_conversion_builtin;
-use types_error::PgResult;
-use types_wchar::encoding::{pg_enc, PG_SJIS, PG_UTF8};
+use ::conv_string_helpers::make_conversion_builtin;
+use ::types_error::PgResult;
+use ::types_wchar::encoding::{pg_enc, PG_SJIS, PG_UTF8};
 
 /// `sjis_to_utf8` — convert an SJIS string to UTF-8.
 pub fn sjis_to_utf8(

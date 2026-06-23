@@ -18,7 +18,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{AttrNumber, Index, Oid};
+use ::types_core::primitive::{AttrNumber, Index, Oid};
 
 /// Trimmed `AppendRelInfo` carried on `PlannedStmt.appendRelations`.
 ///

@@ -36,15 +36,15 @@ use std::fs::File as StdFile;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use transam_xlog_seams::enable_fsync;
-use fd::allocated_desc::{AllocateDir, FreeDir, ReadDir};
-use fd::sync_cleanup::{fsync_fname, pg_flush_data};
-use fd_seams::make_pg_directory;
-use postgres_seams::check_for_interrupts;
+use ::transam_xlog_seams::enable_fsync;
+use ::fd::allocated_desc::{AllocateDir, FreeDir, ReadDir};
+use ::fd::sync_cleanup::{fsync_fname, pg_flush_data};
+use ::fd_seams::make_pg_directory;
+use ::postgres_seams::check_for_interrupts;
 use utils_error::{ereport, errno::sqlstate_for_file_access};
-use types_core::BLCKSZ;
+use ::types_core::BLCKSZ;
 use types_error::{PgError, PgResult, ERROR};
-use types_storage::file::{FileCopyMethod, FILE_COPY_METHOD_CLONE, FILE_COPY_METHOD_COPY};
+use ::types_storage::file::{FileCopyMethod, FILE_COPY_METHOD_CLONE, FILE_COPY_METHOD_COPY};
 
 /// `COPY_BUF_SIZE` (copydir.c:143) — `(8 * BLCKSZ)`, the read/write buffer size.
 const COPY_BUF_SIZE: usize = 8 * BLCKSZ;
@@ -114,7 +114,7 @@ pub fn init_seams() {
 fn io_error(message: String, error: &std::io::Error) -> PgError {
     let errno = error
         .raw_os_error()
-        .unwrap_or(utils_error::errno::EIO);
+        .unwrap_or(::utils_error::errno::EIO);
     ereport(ERROR)
         .errcode(sqlstate_for_file_access(errno))
         .with_saved_errno(errno)
@@ -136,7 +136,7 @@ pub fn copydir(fromdir: &str, todir: &str, recurse: bool) -> PgResult<()> {
     if make_pg_directory::call(todir) != 0 {
         let errno = std::io::Error::last_os_error()
             .raw_os_error()
-            .unwrap_or(utils_error::errno::EIO);
+            .unwrap_or(::utils_error::errno::EIO);
         return Err(ereport(ERROR)
             .errcode(sqlstate_for_file_access(errno))
             .with_saved_errno(errno)
@@ -410,7 +410,7 @@ fn clone_file(_fromfile: &str, _tofile: &str) -> PgResult<()> {
 
 fn out_of_memory() -> PgError {
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+        .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
         .errmsg("out of memory")
         .into_error()
 }

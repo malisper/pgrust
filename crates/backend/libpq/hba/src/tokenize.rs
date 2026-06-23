@@ -17,9 +17,9 @@ use std::path::PathBuf;
 
 use fd_seams as fd;
 use conffiles_seams as conffiles;
-use types_error::ErrorLevel;
-use types_error::PgResult;
-use net::AuthToken;
+use ::types_error::ErrorLevel;
+use ::types_error::PgResult;
+use ::net::AuthToken;
 
 use crate::token::{free_auth_file, make_auth_token, next_token, open_auth_file, FileHandle};
 use crate::{report_file_access, tok_str, TokenizedAuthLine, CONF_FILE_START_DEPTH, ENOENT};
@@ -105,7 +105,7 @@ pub(crate) fn tokenize_include_file(
                 crate::report_plain(
                     elevel,
                     "tokenize_include_file",
-                    types_error::ERRCODE_INTERNAL_ERROR,
+                    ::types_error::ERRCODE_INTERNAL_ERROR,
                     format!("skipping missing authentication file \"{inc_fullname}\""),
                 )?;
                 // *err_msg = NULL;

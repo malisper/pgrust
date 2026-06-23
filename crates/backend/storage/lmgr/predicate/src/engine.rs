@@ -26,19 +26,19 @@ use dynahash::{
     get_hash_value, hash_create, hash_destroy, hash_estimate_size, hash_get_num_entries,
     hash_search, hash_search_with_hash_value, hash_seq_init, hash_seq_search,
 };
-use types_core::primitive::{BlockNumber, Oid, Size};
-use types_core::xact::InvalidTransactionId;
-use types_core::TransactionId;
+use ::types_core::primitive::{BlockNumber, Oid, Size};
+use ::types_core::xact::InvalidTransactionId;
+use ::types_core::TransactionId;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_OUT_OF_MEMORY, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
-use hash::hsearch::{
+use ::hash::hsearch::{
     HASHACTION::{HASH_ENTER, HASH_ENTER_NULL, HASH_FIND, HASH_REMOVE},
     HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_FIXED_SIZE, HASH_FUNCTION, HASH_PARTITION, HASH_SEQ_STATUS,
     HTAB,
 };
-use snapshot::snapshot::{IsMVCCSnapshot, SnapshotData};
+use ::snapshot::snapshot::{IsMVCCSnapshot, SnapshotData};
 
 use crate::globals::*;
 use crate::internals::*;
@@ -151,7 +151,7 @@ unsafe fn PredicateLockHashCodeFromTargetHashCode(
     predicatelocktag: *const PREDICATELOCKTAG,
     targethash: u32,
 ) -> u32 {
-    targethash ^ (((*predicatelocktag).myXact as usize as u32) << types_storage::LOG2_NUM_PREDICATELOCK_PARTITIONS)
+    targethash ^ (((*predicatelocktag).myXact as usize as u32) << ::types_storage::LOG2_NUM_PREDICATELOCK_PARTITIONS)
 }
 
 /// `NPREDICATELOCKTARGETENTS()`.
@@ -192,7 +192,7 @@ fn serialization_failure(reason: &str) -> PgError {
 /// `RelationUsesLocalBuffers` are passed in pre-computed.
 #[inline]
 fn predicate_locking_needed(rd_id: Oid, uses_local_buffers: bool) -> bool {
-    !(rd_id < types_core::catalog::FirstUnpinnedObjectId || uses_local_buffers)
+    !(rd_id < ::types_core::catalog::FirstUnpinnedObjectId || uses_local_buffers)
 }
 
 /// `SerializationNeededForRead(relation, snapshot)`. Returns whether predicate
@@ -412,7 +412,7 @@ pub fn PredicateLockShmemInit() -> PgResult<()> {
         // PREDICATELOCKTARGET hash.
         info.keysize = core::mem::size_of::<PREDICATELOCKTARGETTAG>();
         info.entrysize = core::mem::size_of::<PREDICATELOCKTARGET>();
-        info.num_partitions = types_storage::NUM_PREDICATELOCK_PARTITIONS as i64;
+        info.num_partitions = ::types_storage::NUM_PREDICATELOCK_PARTITIONS as i64;
 
         let target_hash = ShmemInitHash(
             "PREDICATELOCKTARGET hash",
@@ -441,7 +441,7 @@ pub fn PredicateLockShmemInit() -> PgResult<()> {
         info.keysize = core::mem::size_of::<PREDICATELOCKTAG>();
         info.entrysize = core::mem::size_of::<PREDICATELOCK>();
         info.hash = Some(predicatelock_hash);
-        info.num_partitions = types_storage::NUM_PREDICATELOCK_PARTITIONS as i64;
+        info.num_partitions = ::types_storage::NUM_PREDICATELOCK_PARTITIONS as i64;
 
         let max_table_size_locks = max_table_size_targets * 2;
         let lock_hash = ShmemInitHash(
@@ -483,7 +483,7 @@ pub fn PredicateLockShmemInit() -> PgResult<()> {
                 let e = (*px).element.add(i as usize);
                 LWLockInitialize(
                     &mut (*e).perXactPredicateListLock,
-                    types_storage::LWTRANCHE_PER_XACT_PREDICATE_LIST,
+                    ::types_storage::LWTRANCHE_PER_XACT_PREDICATE_LIST,
                 );
                 crate::ilist_inline::dlist_push_tail(
                     &raw mut (*px).availableList,
@@ -492,7 +492,7 @@ pub fn PredicateLockShmemInit() -> PgResult<()> {
             }
             let oc = CreatePredXact();
             (*px).OldCommittedSxact = oc;
-            (*oc).vxid = types_core::VirtualTransactionId::invalid();
+            (*oc).vxid = ::types_core::VirtualTransactionId::invalid();
             (*oc).prepareSeqNo = 0;
             (*oc).commitSeqNo = 0;
             (*oc).SeqNo.lastCommitBeforeSnapshot = 0;
@@ -676,13 +676,13 @@ const PREDICATE_LOCK_TAG_TYPE_NAMES: [&str; 3] = ["relation", "page", "tuple"];
 
 /// The predicate (SIREAD) leg of `pg_lock_status` (lockfuncs.c): snapshot the
 /// predicate-lock hash via [`GetPredicateLockStatusData`] and project each entry
-/// to a [`types_storage::lock::PredLockStatusRow`] (the columns the listing
+/// to a [`::types_storage::lock::PredLockStatusRow`] (the columns the listing
 /// function emits). The target-tag decode and the holder-`SERIALIZABLEXACT`
 /// reads are predicate.c-internal, so they happen here; the column layout is
 /// applied by lockfuncs.c's owner from these scalars.
 pub fn pg_lock_status_predicate_rows<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, types_storage::lock::PredLockStatusRow>> {
+) -> PgResult<mcx::PgVec<'mcx, ::types_storage::lock::PredLockStatusRow>> {
     let data = GetPredicateLockStatusData()?;
 
     let mut out = mcx::PgVec::new_in(mcx);
@@ -702,7 +702,7 @@ pub fn pg_lock_status_predicate_rows<'mcx>(
         let page = if has_page { GET_PREDICATELOCKTARGETTAG_PAGE(tag) } else { 0 };
         let tuple = if has_tuple { GET_PREDICATELOCKTARGETTAG_OFFSET(tag) } else { 0 };
 
-        out.push(types_storage::lock::PredLockStatusRow {
+        out.push(::types_storage::lock::PredLockStatusRow {
             locktypename,
             database,
             relation,
@@ -866,7 +866,7 @@ pub fn GetSerializableTransactionSnapshot(snapshot: SnapshotData) -> PgResult<Sn
 /// `SetSerializableTransactionSnapshot(snapshot, sourcevxid, sourcepid)`.
 pub fn SetSerializableTransactionSnapshot(
     snapshot: SnapshotData,
-    sourcevxid: types_core::VirtualTransactionId,
+    sourcevxid: ::types_core::VirtualTransactionId,
     sourcepid: i32,
 ) -> PgResult<()> {
     debug_assert!(isolation_is_serializable());
@@ -888,7 +888,7 @@ pub fn SetSerializableTransactionSnapshot(
 
 fn GetSerializableTransactionSnapshotInt(
     mut snapshot: SnapshotData,
-    sourcevxid: Option<types_core::VirtualTransactionId>,
+    sourcevxid: Option<::types_core::VirtualTransactionId>,
     sourcepid: i32,
 ) -> PgResult<SnapshotData> {
     unsafe {
@@ -1498,7 +1498,7 @@ pub fn PredicateLockTID(
     uses_local_buffers: bool,
     is_index: bool,
     blkno: BlockNumber,
-    offnum: types_core::primitive::OffsetNumber,
+    offnum: ::types_core::primitive::OffsetNumber,
     snapshot: &SnapshotData,
     tuple_xid: TransactionId,
 ) -> PgResult<()> {
@@ -1751,7 +1751,7 @@ unsafe fn DropAllPredicateLocksFromTable(
         None => (false, rel_id),
         Some(indrelid) => (true, indrelid),
     };
-    debug_assert!(heap_id != types_core::primitive::InvalidOid);
+    debug_assert!(heap_id != ::types_core::primitive::InvalidOid);
     debug_assert!(transfer || !is_index);
 
     let mut heaptargettaghash: u32 = 0;
@@ -2732,7 +2732,7 @@ pub fn CheckForSerializableConflictIn(
     db_oid: Oid,
     rd_id: Oid,
     uses_local_buffers: bool,
-    tid: Option<(BlockNumber, types_core::primitive::OffsetNumber)>,
+    tid: Option<(BlockNumber, ::types_core::primitive::OffsetNumber)>,
     blkno: BlockNumber,
 ) -> PgResult<()> {
     unsafe {
@@ -3136,7 +3136,7 @@ pub fn predicatelock_twophase_recover(
             }
 
             (*sxact).vxid.procNumber = INVALID_PROC_NUMBER;
-            (*sxact).vxid.localTransactionId = xid as types_core::primitive::LocalTransactionId;
+            (*sxact).vxid.localTransactionId = xid as ::types_core::primitive::LocalTransactionId;
             (*sxact).pid = 0;
             (*sxact).pgprocno = INVALID_PROC_NUMBER;
 

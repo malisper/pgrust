@@ -5,7 +5,7 @@
 //! count — is a compile-time catalog constant transcribed from the generated
 //! header (cross-checked against the proven c2rust rendering of this unit).
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// `SysCacheSize` (`catalog/syscache_ids.h`).
 pub const SysCacheSize: usize = 85;

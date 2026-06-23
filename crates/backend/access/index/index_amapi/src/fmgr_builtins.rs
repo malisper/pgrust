@@ -8,8 +8,8 @@
 //! table (C: `fmgr_builtins[]`), so by-OID dispatch resolves them. OIDs / nargs
 //! / strict / retset are transcribed exactly from `pg_proc.dat`.
 
-use types_core::Oid;
-use datum::Datum;
+use ::types_core::Oid;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------

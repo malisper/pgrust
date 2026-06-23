@@ -16,7 +16,7 @@
 
 use mcx::{Mcx, PgString};
 use types_core::{InvalidOid, Oid};
-use types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::catalog_dependency::ObjectAddress;
 use types_error::{PgError, PgResult};
 
 use crate::consts::{

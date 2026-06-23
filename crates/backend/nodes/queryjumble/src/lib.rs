@@ -49,8 +49,8 @@ mod walker;
 
 pub use state::{JumbleState, LocationLen, JUMBLE_SIZE};
 
-use guc_tables::consts::{COMPUTE_QUERY_ID_OFF, COMPUTE_QUERY_ID_ON};
-use guc_tables::vars;
+use ::guc_tables::consts::{COMPUTE_QUERY_ID_OFF, COMPUTE_QUERY_ID_ON};
+use ::guc_tables::vars;
 
 /// `bool query_id_enabled` (queryjumblefuncs.c:60). True when `compute_query_id`
 /// is ON or AUTO and a module requests query identifiers (via `EnableQueryId`).

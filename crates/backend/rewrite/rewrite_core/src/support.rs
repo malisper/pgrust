@@ -5,9 +5,9 @@ use alloc::borrow::ToOwned;
 use alloc::format;
 
 use mcx::{Mcx, MemoryContext};
-use cache::SysCacheKey;
+use ::cache::SysCacheKey;
 use types_core::{Oid, RELATION_RELATION_ID};
-use datum::Datum as KeyDatum;
+use ::datum::Datum as KeyDatum;
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
 
 use table as table;
@@ -87,7 +87,7 @@ pub fn get_rewrite_oid(relid: Oid, rulename: &str, missing_ok: bool) -> PgResult
     let found = syscache_seams::search_rewrite_oid::call(relid, rulename)?;
     let Some((ruleoid, ev_class)) = found else {
         if missing_ok {
-            return Ok(types_core::InvalidOid);
+            return Ok(::types_core::InvalidOid);
         }
         let ctx = MemoryContext::new("get_rewrite_oid get_rel_name");
         let relname = lsyscache::relation::get_rel_name(ctx.mcx(), relid)?

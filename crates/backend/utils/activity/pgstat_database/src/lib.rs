@@ -26,23 +26,23 @@ use core::cell::Cell;
 
 pub mod fmgr_builtins;
 
-use activity_pgstat::entry_ref::PgStat_EntryRef;
-use activity_pgstat::kind_info::KindInfoBuilder;
-use activity_pgstat::pgstat_core;
-use activity_pgstat::registry;
-use activity_pgstat::shmem;
+use ::activity_pgstat::entry_ref::PgStat_EntryRef;
+use ::activity_pgstat::kind_info::KindInfoBuilder;
+use ::activity_pgstat::pgstat_core;
+use ::activity_pgstat::registry;
+use ::activity_pgstat::shmem;
 use activity_xact as xact;
 use timestamp_seams::{get_current_timestamp, timestamp_difference};
 use init_small_seams::{my_backend_type, my_database_id, my_start_timestamp};
-use types_core::init::BackendType;
-use types_core::primitive::{InvalidOid, Oid};
-use types_core::TimestampTz;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{
+use ::types_core::init::BackendType;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{
     PgStat_Counter, SessionEndType, PgStat_StatDBEntry, PGSTAT_KIND_DATABASE,
 };
-use types_pgstat::pgstat_internal::{PgStatShared_Common, PgStatShared_Database};
-use types_storage::ProcSignalReason;
+use ::types_pgstat::pgstat_internal::{PgStatShared_Common, PgStatShared_Database};
+use ::types_storage::ProcSignalReason;
 
 /// The `objid` value for database stats keys (`InvalidOid` as the u64 object id).
 const INVALID_OBJID: u64 = InvalidOid as u64;
@@ -571,8 +571,8 @@ fn pgstat_track_counts() -> bool {
 
 /// The `PgStat_KindInfo` metadata for `PGSTAT_KIND_DATABASE`
 /// (`pgstat.c:pgstat_kind_builtin_infos[PGSTAT_KIND_DATABASE]`).
-fn database_kind_info() -> types_pgstat::pgstat_internal::PgStat_KindInfo {
-    types_pgstat::pgstat_internal::PgStat_KindInfo {
+fn database_kind_info() -> ::types_pgstat::pgstat_internal::PgStat_KindInfo {
+    ::types_pgstat::pgstat_internal::PgStat_KindInfo {
         fixed_amount: false,
         // so pg_stat_database entries can be seen in all databases
         accessed_across_databases: true,
@@ -589,7 +589,7 @@ fn database_kind_info() -> types_pgstat::pgstat_internal::PgStat_KindInfo {
 
 /// Register `PGSTAT_KIND_DATABASE` and install the database outward seams.
 ///
-/// Must run before `activity_pgstat::init_seams()` seals the
+/// Must run before `::activity_pgstat::init_seams()` seals the
 /// per-kind table.
 pub fn init_seams() {
     // Register the per-database pg_stat_get_db_* SQL accessors (pgstatfuncs.c).
@@ -604,7 +604,7 @@ pub fn init_seams() {
             .read_var_cb(|header, bytes| {
                 // SAFETY: header points at a live PgStatShared_Database body.
                 let shdb = unsafe { &mut *(header as *mut PgStatShared_Database) };
-                shdb.stats = activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                shdb.stats = ::activity_pgstat::kind_info::pgstat_deserialize_pod::<
                     PgStat_StatDBEntry,
                 >(bytes);
                 Ok(())
@@ -612,7 +612,7 @@ pub fn init_seams() {
             .write_var_cb(|header| {
                 // SAFETY: header points at a live PgStatShared_Database body.
                 let shdb = unsafe { &*(header as *const PgStatShared_Database) };
-                activity_pgstat::kind_info::pgstat_serialize_pod(&shdb.stats)
+                ::activity_pgstat::kind_info::pgstat_serialize_pod(&shdb.stats)
             }),
     );
 

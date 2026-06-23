@@ -2,16 +2,16 @@
 //! pg_trigger leg of `ALTER TABLE ... ALTER CONSTRAINT ... [NOT] DEFERRABLE`.
 
 use mcx::{Mcx, MemoryContext};
-use types_catalog::pg_trigger as pt;
-use types_core::fmgr::F_OIDEQ;
-use types_core::Oid;
-use types_error::PgResult;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
+use ::types_catalog::pg_trigger as pt;
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use indexing_seams as indexing;
 

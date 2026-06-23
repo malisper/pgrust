@@ -9,12 +9,12 @@
 //! resolves them. OIDs / nargs / strict / retset are transcribed exactly from
 //! `pg_proc.dat`.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_tuple::Datum as DatumV;
+use ::types_tuple::Datum as DatumV;
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 const OIDOID: Oid = 26;
 const INT4OID: Oid = 23;
@@ -83,7 +83,7 @@ fn arg_text_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
     // external sentinel 0x01; otherwise it is a 4-byte (VARHDRSZ) header.
     let off = match image.first() {
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
-        _ => datum::varlena::VARHDRSZ,
+        _ => ::datum::varlena::VARHDRSZ,
     };
     let payload = &image[off..];
     std::str::from_utf8(payload).expect("objectaddress fn: text arg not valid UTF-8")

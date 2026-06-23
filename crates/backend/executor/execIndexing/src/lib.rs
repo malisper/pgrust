@@ -21,8 +21,8 @@ extern crate alloc;
 
 use alloc::string::ToString;
 
-use utils_error::ereport;
-use types_error::error::{
+use ::utils_error::ereport;
+use ::types_error::error::{
     ERRCODE_CHECK_VIOLATION, ERRCODE_EXCLUSION_VIOLATION, ERRCODE_INTERNAL_ERROR,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
@@ -30,28 +30,28 @@ use types_error::error::{
 use mcx::{Mcx, PgVec};
 
 use types_core::{fmgr::INDEX_MAX_KEYS, Oid};
-use datum::Datum as DatumWord;
-use types_error::PgResult;
+use ::datum::Datum as DatumWord;
+use ::types_error::PgResult;
 use ::nodes::execnodes::{EStateData, IndexInfo, RriId, SlotId};
 use ::nodes::EcxtId;
-use rel::Relation;
-use types_scan::sdir::ScanDirection;
-use types_scan::scankey::ScanKeyData;
-use snapshot::snapshot::{SnapshotData, SnapshotType};
-use types_storage::lock::XLTW_Oper;
-use types_tableam::amapi::IndexUniqueCheck;
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tuple::heaptuple::Datum as DatumV;
-use types_tuple::heaptuple::{item_pointer_is_valid, ItemPointerData};
+use ::rel::Relation;
+use ::types_scan::sdir::ScanDirection;
+use ::types_scan::scankey::ScanKeyData;
+use ::snapshot::snapshot::{SnapshotData, SnapshotType};
+use ::types_storage::lock::XLTW_Oper;
+use ::types_tableam::amapi::IndexUniqueCheck;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tuple::heaptuple::Datum as DatumV;
+use ::types_tuple::heaptuple::{item_pointer_is_valid, ItemPointerData};
 
-use nodes_core::bitmapset::{bms_free, bms_is_member, bms_union};
+use ::nodes_core::bitmapset::{bms_free, bms_is_member, bms_union};
 
 // Direct (acyclic) callees.
 use indexam as indexam;
 use indexam_seams as indexam_seams;
 use table_tableam as tableam;
 use execUtils as execUtils;
-use nodes_core::nodefuncs::expression_tree_walker;
+use ::nodes_core::nodefuncs::expression_tree_walker;
 
 // Outward seams.
 use genam_seams as genam_seams;
@@ -71,9 +71,9 @@ use snapmgr_seams as snapmgr_seams;
 mod tests;
 
 /// `SK_ISNULL` (`access/skey.h`) — scankey argument is NULL.
-use types_scan::scankey::SK_ISNULL;
+use ::types_scan::scankey::SK_ISNULL;
 /// `SK_SEARCHNULL` (`access/skey.h`) — scankey is an `IS NULL` search.
-use types_scan::scankey::SK_SEARCHNULL;
+use ::types_scan::scankey::SK_SEARCHNULL;
 
 /// `FirstLowInvalidHeapAttributeNumber` (`access/sysattr.h`, PG 18) — `(-7)`.
 const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -7;
@@ -175,7 +175,7 @@ pub fn ExecOpenIndices<'mcx>(
 }
 
 /// `RowExclusiveLock` (`storage/lockdefs.h`) — lock mode 3.
-const ROW_EXCLUSIVE_LOCK: types_storage::lock::LOCKMODE = 3;
+const ROW_EXCLUSIVE_LOCK: ::types_storage::lock::LOCKMODE = 3;
 /// `RowExclusiveLock`'s release uses the same mode.
 
 // ===========================================================================
@@ -686,7 +686,7 @@ fn check_exclusion_or_unique_constraint<'mcx>(
             constr_strats[i],
             0, // InvalidOid
             index_collations[i],
-            constr_procs[i] as types_core::primitive::RegProcedure,
+            constr_procs[i] as ::types_core::primitive::RegProcedure,
             // Carry the canonical per-attribute value into the scan key. A
             // by-reference key (text/numeric/uuid/…) crosses as its `ByRef`
             // byte image; collapsing it to a bare word would panic the scalar

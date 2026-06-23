@@ -8,7 +8,7 @@ use alloc::string::String;
 
 use types_core::{MultiXactId, Oid, TimestampTz, TransactionId};
 use types_reloptions::{AutoVacOpts, StdRdOptions};
-use types_vacuum::vacuum::VacuumParams;
+use ::types_vacuum::vacuum::VacuumParams;
 
 /// `struct avl_dbase` (`autovacuum.c`) — a database in the launcher's
 /// process-local `DatabaseList`.

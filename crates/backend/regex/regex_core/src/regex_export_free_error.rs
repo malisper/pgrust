@@ -6,7 +6,7 @@
 //! # The compiled-regex boundary
 //!
 //! Across the public seam ([`regex_core_seams`]) the compiled regex is
-//! [`regex::RegexCompiled`], which carries the real owned [`RegexT`]
+//! [`::regex::RegexCompiled`], which carries the real owned [`RegexT`]
 //! value type-erased as an `Rc<dyn Any>` (see `types-regex` for why this
 //! real-value/downcast cycle-break introduces no handle or opacity). `pg_regcomp`
 //! boxes the freshly-compiled `RegexT` into the carrier; `pg_regexec`/
@@ -23,8 +23,8 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 
 use mcx::{slice_in, Mcx, MemoryContext};
-use types_core::PgWChar;
-use types_error::PgResult;
+use ::types_core::PgWChar;
+use ::types_error::PgResult;
 use regex::{
     RegMatch, RegcompResult, RegexCompiled, RegexFailure, RegexecResult, RegprefixResult,
 };
@@ -58,7 +58,7 @@ fn regex_of(re: &RegexCompiled) -> &RegexT {
 pub fn seam_pg_regcomp(
     pattern: &[PgWChar],
     cflags: i32,
-    collation: types_core::Oid,
+    collation: ::types_core::Oid,
 ) -> PgResult<RegcompResult> {
     // C: `pg_regcomp` palloc's the compiled RE in the caller's current memory
     // context (regexp.c sets up a dedicated per-regexp context). The owned

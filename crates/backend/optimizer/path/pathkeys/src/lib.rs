@@ -7,7 +7,7 @@
 
 //! Safe-Rust port of `src/backend/optimizer/path/pathkeys.c` (postgres-18.3):
 //! the planner's pathkey engine — pathkey construction, matching, redundancy and
-//! usefulness checks, over the planner arena ([`pathnodes::PlannerInfo`]).
+//! usefulness checks, over the planner arena ([`::pathnodes::PlannerInfo`]).
 //!
 //! pathkeys.c is built on the **pointer identity of canonical `PathKey` /
 //! `EquivalenceClass` objects** (PostgreSQL interns one canonical `PathKey` per
@@ -15,7 +15,7 @@
 //! per equivalence set, then compares with `==` on those shared pointers). The
 //! arena models that faithfully: `PathKey.pk_eclass` /
 //! `RestrictInfo.left_ec`/`right_ec` / `EquivalenceClass.ec_merged` are
-//! [`Option<EcId>`](pathnodes::EcId) handles into
+//! [`Option<EcId>`](::pathnodes::EcId) handles into
 //! [`PlannerInfo::eq_classes`]; [`PlannerInfo::ec_canonical`] chases the
 //! `ec_merged` union-find, so "same canonical EC" is a handle `==`. Canonical
 //! `PathKey`s are still interned in [`PlannerInfo::canon_pathkeys`]
@@ -25,7 +25,7 @@
 //!
 //! # Arena / handle model
 //!
-//! Expression nodes (`Expr *`) are [`NodeId`](pathnodes::NodeId) handles
+//! Expression nodes (`Expr *`) are [`NodeId`](::pathnodes::NodeId) handles
 //! into [`PlannerInfo::node_arena`] (`Vec<Expr>`); `root.node(id) -> &Expr`.
 //! `RelOptInfo`/`Path`/`RestrictInfo`/`EquivalenceMember` are reached by
 //! `RelId`/`PathId`/`RinfoId`/`EmId` handles. Allocating functions return a
@@ -59,14 +59,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{Index, Oid};
+use ::types_core::primitive::{Index, Oid};
 use pathnodes::{
     optimizer_plan::CostSelector, CompareType, EcId, GroupByOrdering, IndexOptInfo, NodeId, PathId,
     PathKey, PlannerInfo, RelId, RelOptInfo, Relids, RestrictInfo, RinfoId, ScanDirection,
     BackwardScanDirection, RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL,
 };
 
-use pathnode_seams::PathKeysComparison;
+use ::pathnode_seams::PathKeysComparison;
 
 use equivclass_seams as ec;
 use indxpath_seams as ix;
@@ -583,7 +583,7 @@ fn compare_path_costs(
     path2: PathId,
     criterion: CostSelector,
 ) -> i32 {
-    pathnode_seams::compare_path_costs::call(root, path1, path2, criterion)
+    ::pathnode_seams::compare_path_costs::call(root, path1, path2, criterion)
 }
 
 /// `compare_fractional_path_costs(path1, path2, fraction)` — pathnode-seams.
@@ -594,7 +594,7 @@ fn compare_fractional_path_costs(
     path2: PathId,
     fraction: f64,
 ) -> i32 {
-    pathnode_seams::compare_fractional_path_costs::call(
+    ::pathnode_seams::compare_fractional_path_costs::call(
         root, path1, path2, fraction,
     )
 }
@@ -801,8 +801,8 @@ pub fn build_index_pathkeys(
 /// (Does not account for non-core opfamilies that might accept boolean.)
 #[inline]
 fn is_builtin_boolean_opfamily(opfamily: Oid) -> bool {
-    opfamily == types_core::catalog::BOOL_BTREE_FAM_OID
-        || opfamily == types_core::catalog::BOOL_HASH_FAM_OID
+    opfamily == ::types_core::catalog::BOOL_BTREE_FAM_OID
+        || opfamily == ::types_core::catalog::BOOL_HASH_FAM_OID
 }
 
 pub fn partkey_is_bool_constant_for_query(
@@ -1362,7 +1362,7 @@ fn singleton_relids(x: i32) -> Relids {
     let off = bit % 64;
     let mut words = alloc::vec![0u64; word + 1];
     words[word] = 1u64 << off;
-    Some(alloc::boxed::Box::new(pathnodes::Bitmapset { words }))
+    Some(alloc::boxed::Box::new(::pathnodes::Bitmapset { words }))
 }
 
 // ===========================================================================

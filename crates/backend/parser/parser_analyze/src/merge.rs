@@ -33,7 +33,7 @@
 use alloc::format;
 
 use mcx::{Mcx, PgVec};
-use types_acl::acl::{
+use ::types_acl::acl::{
     AclMode, ACL_DELETE, ACL_INSERT, ACL_NO_RIGHTS, ACL_SELECT, ACL_UPDATE,
 };
 use types_error::{
@@ -44,9 +44,9 @@ use ::nodes::modifytable::{MergeMatchKind, NUM_MERGE_MATCH_KINDS};
 use ::nodes::nodes::{CmdType, Node, NodePtr};
 use ::nodes::parsestmt::{ParseExprKind, ParseNamespaceItem, ParseState};
 use ::nodes::rawnodes::{MergeAction, MergeStmt, MergeWhenClause};
-use types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW};
+use ::types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::elog_error;
 
@@ -182,8 +182,8 @@ pub fn transformMergeStmt<'mcx>(
         .as_ref()
         .ok_or_else(|| elog_error("MERGE statement has no source relation"))?;
     let source_copy = source_relation.as_ref().clone_in(mcx)?;
-    let mut from_list: PgVec<'mcx, NodePtr<'mcx>> = mcx::vec_with_capacity_in(mcx, 1)?;
-    from_list.push(mcx::alloc_in(mcx, source_copy)?);
+    let mut from_list: PgVec<'mcx, NodePtr<'mcx>> = ::mcx::vec_with_capacity_in(mcx, 1)?;
+    from_list.push(::mcx::alloc_in(mcx, source_copy)?);
     clause::transformFromClause(mcx, pstate, &from_list[..])?;
     let source_rti = pstate.p_rtable.len() as i32;
 
@@ -251,7 +251,7 @@ pub fn transformMergeStmt<'mcx>(
     )?;
     qry.mergeJoinCondition = match merge_join_cond {
         // Parser-arena `'static` result re-cloned into the query's `mcx`.
-        Some(e) => Some(mcx::alloc_in(mcx, e.clone_in(mcx)?)?),
+        Some(e) => Some(::mcx::alloc_in(mcx, e.clone_in(mcx)?)?),
         None => None,
     };
 
@@ -261,7 +261,7 @@ pub fn transformMergeStmt<'mcx>(
      * will be constructed fully by transform_MERGE_to_join.
      */
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, PgVec::new_in(mcx));
-    qry.jointree = Some(mcx::alloc_in(
+    qry.jointree = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
@@ -293,7 +293,7 @@ pub fn transformMergeStmt<'mcx>(
      * pseudo-relation for INSERT ON CONFLICT.
      */
     let mut merge_action_list: PgVec<'mcx, NodePtr<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, stmt.mergeWhenClauses.len())?;
+        ::mcx::vec_with_capacity_in(mcx, stmt.mergeWhenClauses.len())?;
     for l in stmt.mergeWhenClauses.iter() {
         // Re-read the fields we need up front so the clause borrow doesn't
         // conflict with the mutable pstate borrows in the helpers below.
@@ -346,7 +346,7 @@ pub fn transformMergeStmt<'mcx>(
         )?;
         action.qual = match qual {
             // Parser-arena `'static` qual re-cloned into `mcx` before wrapping.
-            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
+            Some(e) => Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?),
             None => None,
         };
 
@@ -396,9 +396,9 @@ pub fn transformMergeStmt<'mcx>(
                     let values_copy = {
                         let c = as_merge_when_clause(l.as_ref())?;
                         let mut v: PgVec<'mcx, NodePtr<'mcx>> =
-                            mcx::vec_with_capacity_in(mcx, c.values.len())?;
+                            ::mcx::vec_with_capacity_in(mcx, c.values.len())?;
                         for item in c.values.iter() {
-                            v.push(mcx::alloc_in(mcx, item.as_ref().clone_in(mcx)?)?);
+                            v.push(::mcx::alloc_in(mcx, item.as_ref().clone_in(mcx)?)?);
                         }
                         v
                     };
@@ -414,9 +414,9 @@ pub fn transformMergeStmt<'mcx>(
                     let target_cols = {
                         let c = as_merge_when_clause(l.as_ref())?;
                         let mut v: PgVec<'mcx, NodePtr<'mcx>> =
-                            mcx::vec_with_capacity_in(mcx, c.targetList.len())?;
+                            ::mcx::vec_with_capacity_in(mcx, c.targetList.len())?;
                         for item in c.targetList.iter() {
-                            v.push(mcx::alloc_in(mcx, item.as_ref().clone_in(mcx)?)?);
+                            v.push(::mcx::alloc_in(mcx, item.as_ref().clone_in(mcx)?)?);
                         }
                         v
                     };
@@ -458,7 +458,7 @@ pub fn transformMergeStmt<'mcx>(
                     )?;
                     action
                         .targetList
-                        .push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle)?)?);
+                        .push(::mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle)?)?);
 
                     // perminfo->insertedCols =
                     //   bms_add_member(perminfo->insertedCols,
@@ -480,19 +480,19 @@ pub fn transformMergeStmt<'mcx>(
                     let target = {
                         let c = as_merge_when_clause(l.as_ref())?;
                         let mut v: PgVec<'mcx, NodePtr<'mcx>> =
-                            mcx::vec_with_capacity_in(mcx, c.targetList.len())?;
+                            ::mcx::vec_with_capacity_in(mcx, c.targetList.len())?;
                         for item in c.targetList.iter() {
-                            v.push(mcx::alloc_in(mcx, item.as_ref().clone_in(mcx)?)?);
+                            v.push(::mcx::alloc_in(mcx, item.as_ref().clone_in(mcx)?)?);
                         }
                         v
                     };
                     crate::update_delete::transformUpdateTargetList(mcx, pstate, &target)?
                 };
-                action.targetList = mcx::vec_with_capacity_in(mcx, target_list.len())?;
+                action.targetList = ::mcx::vec_with_capacity_in(mcx, target_list.len())?;
                 for tle in target_list.into_iter() {
                     action
                         .targetList
-                        .push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle)?)?);
+                        .push(::mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle)?)?);
                 }
             }
             CmdType::CMD_DELETE => {}
@@ -503,7 +503,7 @@ pub fn transformMergeStmt<'mcx>(
             _ => return Err(elog_error("unknown action in MERGE WHEN clause")),
         }
 
-        merge_action_list.push(mcx::alloc_in(mcx, Node::mk_merge_action(mcx, action)?)?);
+        merge_action_list.push(::mcx::alloc_in(mcx, Node::mk_merge_action(mcx, action)?)?);
     }
 
     qry.mergeActionList = merge_action_list;
@@ -635,7 +635,7 @@ fn copy_restarget_list<'mcx>(
     cols: &PgVec<'mcx, NodePtr<'mcx>>,
 ) -> PgResult<PgVec<'mcx, ::nodes::rawnodes::ResTarget<'mcx>>> {
     let mut out: PgVec<'mcx, ::nodes::rawnodes::ResTarget<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, cols.len())?;
+        ::mcx::vec_with_capacity_in(mcx, cols.len())?;
     for c in cols.iter() {
         match c.as_ref().as_restarget() {
             Some(rt) => out.push(rt.clone_in(mcx)?),

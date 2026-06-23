@@ -13,9 +13,9 @@ use super::*;
 use mcx::{Mcx, MemoryContext, PgVec};
 use std::sync::Once;
 
-use types_core::primitive::{Oid, INVALID_PROC_NUMBER};
+use ::types_core::primitive::{Oid, INVALID_PROC_NUMBER};
 use rel::{Relation, RelationData};
-use types_storage::RelFileLocator;
+use ::types_storage::RelFileLocator;
 
 const IDX_OID: Oid = 16384;
 
@@ -34,9 +34,9 @@ fn install_test_seams() {
 
 /// Build a minimal in-memory index relation (no cache cell, no close authority).
 fn make_index<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
-    use rel::FormData_pg_class;
-    use types_tuple::heaptuple::TupleDescData;
-    use mcx::PgString;
+    use ::rel::FormData_pg_class;
+    use ::types_tuple::heaptuple::TupleDescData;
+    use ::mcx::PgString;
 
     let td = TupleDescData {
         natts: 1,
@@ -80,7 +80,7 @@ fn make_index<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
         },
         rd_backend: INVALID_PROC_NUMBER,
         rd_rel,
-        rd_att: mcx::alloc_in(mcx, td).unwrap(),
+        rd_att: ::mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,
         rd_index: None,
         rd_opcintype: PgVec::new_in(mcx),

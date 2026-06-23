@@ -3,7 +3,7 @@
 //! unported subsystem.
 
 use super::*;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 fn tid(blk: u32, off: u16) -> ItemPointerData {
     ItemPointerData::new(blk, off)

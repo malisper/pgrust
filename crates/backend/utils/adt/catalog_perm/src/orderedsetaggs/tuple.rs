@@ -25,12 +25,12 @@ use alloc::boxed::Box;
 
 use mcx::{alloc_in, Mcx};
 use types_core::{AttrNumber, Oid};
-use datum::Datum as Word;
-use types_error::PgError;
-use fmgr::boundary::RefPayload;
-use fmgr::FunctionCallInfoBaseData;
+use ::datum::Datum as Word;
+use ::types_error::PgError;
+use ::fmgr::boundary::RefPayload;
+use ::fmgr::FunctionCallInfoBaseData;
 use ::nodes::tuptable::SlotData;
-use types_tuple::heaptuple::Datum as CDatum;
+use ::types_tuple::heaptuple::Datum as CDatum;
 
 use execTuples_seams as slots;
 use nodeAgg_aggapi_seams as aggapi;
@@ -255,7 +255,7 @@ fn new_group_state_tuples(
 fn build_tupdesc<'mcx>(
     mcx: Mcx<'mcx>,
     qstate: &OSAPerQueryState,
-) -> types_tuple::heaptuple::TupleDesc<'mcx> {
+) -> ::types_tuple::heaptuple::TupleDesc<'mcx> {
     let tuple = qstate
         .tuple
         .as_ref()

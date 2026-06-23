@@ -12,9 +12,9 @@
 //! node-crate logic and its seams.
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::{AttrNumber, Index, Oid};
-use types_error::PgResult;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_core::primitive::{AttrNumber, Index, Oid};
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::execnodes::{PlanStateData, SlotId};
 use crate::nodeindexscan::Plan;
@@ -89,7 +89,7 @@ impl LockRows<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<LockRows<'b>> {
         let rowMarks = match &self.rowMarks {
             Some(rms) => {
-                let mut out = mcx::vec_with_capacity_in(mcx, rms.len())?;
+                let mut out = ::mcx::vec_with_capacity_in(mcx, rms.len())?;
                 for rm in rms.iter() {
                     out.push(*rm);
                 }
@@ -217,7 +217,7 @@ impl<'mcx> ExecRowMark<'mcx> {
     /// re-allocates the (empty) opaque carrier. Used by `EvalPlanQualStart` to
     /// share the parent's rowmarks into the recheck EState (C aliases the same
     /// `ExecRowMark *`).
-    pub fn clone_in(&self, mcx: mcx::Mcx<'mcx>) -> PgResult<ExecRowMark<'mcx>> {
+    pub fn clone_in(&self, mcx: ::mcx::Mcx<'mcx>) -> PgResult<ExecRowMark<'mcx>> {
         Ok(ExecRowMark {
             relation: self.relation.as_ref().map(|r| r.alias()),
             relid: self.relid,
@@ -230,7 +230,7 @@ impl<'mcx> ExecRowMark<'mcx> {
             ermActive: self.ermActive,
             curCtid: self.curCtid,
             ermExtra: match self.ermExtra.as_ref() {
-                Some(_) => Some(mcx::alloc_in(mcx, ErmExtra {})?),
+                Some(_) => Some(::mcx::alloc_in(mcx, ErmExtra {})?),
                 None => None,
             },
         })
@@ -274,10 +274,10 @@ impl<'mcx> ExecAuxRowMarkData<'mcx> {
     /// recheck estate's `es_epq_active` marker so `EvalPlanQualFetchRowMark`
     /// (which runs threaded with the recheck estate) can reach the `ExecRowMark`
     /// + the resjunk column numbers. C aliases the single `ExecAuxRowMark *`.
-    pub fn clone_in(&self, mcx: mcx::Mcx<'mcx>) -> PgResult<ExecAuxRowMarkData<'mcx>> {
+    pub fn clone_in(&self, mcx: ::mcx::Mcx<'mcx>) -> PgResult<ExecAuxRowMarkData<'mcx>> {
         Ok(ExecAuxRowMarkData {
             rowmark: match self.rowmark.as_deref() {
-                Some(e) => Some(mcx::alloc_in(mcx, e.clone_in(mcx)?)?),
+                Some(e) => Some(::mcx::alloc_in(mcx, e.clone_in(mcx)?)?),
                 None => None,
             },
             ctidAttNo: self.ctidAttNo,

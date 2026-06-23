@@ -1,17 +1,17 @@
 //! Operand-matching + PlaceHolderVar stripping + the pseudo-constant test
 //! (indxpath.c). Ported 1:1 over the unified node tree.
 
-use mcx::Mcx;
-use types_core::primitive::Index;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::Index;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, PlannerInfo};
 
-use nodes_core::bitmapset::bms_is_member as nodes_bms_is_member;
-use nodes_core::nodefuncs::{expression_tree_mutator, expression_tree_walker};
-use equalfuncs_seams::equal_expr;
-use clauses::contain_volatile_functions;
-use var_seams::pull_varnos;
+use ::nodes_core::bitmapset::bms_is_member as nodes_bms_is_member;
+use ::nodes_core::nodefuncs::{expression_tree_mutator, expression_tree_walker};
+use ::equalfuncs_seams::equal_expr;
+use ::clauses::contain_volatile_functions;
+use ::var_seams::pull_varnos;
 
 /// `match_index_to_operand(operand, indexcol, index)` (indxpath.c:4413) —
 /// determine whether `operand` is an indexable column reference for column

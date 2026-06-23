@@ -6,7 +6,7 @@
 //! `Unix_socket_directories`, `Logging_collector`, the crash-restart / abort
 //! policy bools, etc. The postmaster reads them straight from the variable
 //! storage — `*conf->variable` — through the `guc_tables` typed variable slots
-//! (`guc_tables::vars`), which the GUC machinery keeps in
+//! (`::guc_tables::vars`), which the GUC machinery keeps in
 //! sync with `postgresql.conf` / command-line settings.
 //!
 //! `backend-postmaster-postmaster-seams` declares each of these as a caller-side
@@ -15,7 +15,7 @@
 //! here. Each is a pure read of the live GUC value, faithful to the C global
 //! dereference.
 
-use guc_tables::vars;
+use ::guc_tables::vars;
 
 /// `EnableSSL` (postmaster.c GUC `ssl`).
 pub fn enable_ssl() -> bool {

@@ -62,8 +62,8 @@ fn parser_errposition_clamps() {
 /// (`backend-parser-small1`): an integer literal decodes to an `INT4` `Const`.
 #[test]
 fn a_const_integer_dispatches_to_make_const() {
-    use mcx::MemoryContext;
-    use types_tuple::heaptuple::INT4OID;
+    use ::mcx::MemoryContext;
+    use ::types_tuple::heaptuple::INT4OID;
 
     let ctx = MemoryContext::new("a_const_test");
     let mcx = ctx.mcx();
@@ -71,7 +71,7 @@ fn a_const_integer_dispatches_to_make_const() {
 
     let ival = Node::mk_integer(mcx, nodes::value::Integer { ival: 42 });
     let aconst = Node::mk_a_const(mcx, A_Const {
-        val: Some(mcx::alloc_in(mcx, ival).unwrap()),
+        val: Some(::mcx::alloc_in(mcx, ival).unwrap()),
         isnull: false,
         location: -1,
     });
@@ -131,13 +131,13 @@ fn assert_reached_real_logic(msg: &str) {
     );
 }
 
-fn col_ref<'mcx>(mcx: mcx::Mcx<'mcx>, name: &str) -> Node<'mcx> {
-    let mut fields: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+fn col_ref<'mcx>(mcx: ::mcx::Mcx<'mcx>, name: &str) -> Node<'mcx> {
+    let mut fields: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
     fields.push(
-        mcx::alloc_in(
+        ::mcx::alloc_in(
             mcx,
             Node::mk_string(mcx, nodes::value::StringNode {
-                sval: mcx::PgString::from_str_in(name, mcx).unwrap(),
+                sval: ::mcx::PgString::from_str_in(name, mcx).unwrap(),
             }),
         )
         .unwrap(),
@@ -145,23 +145,23 @@ fn col_ref<'mcx>(mcx: mcx::Mcx<'mcx>, name: &str) -> Node<'mcx> {
     Node::mk_column_ref(mcx, ColumnRef { fields, location: -1 })
 }
 
-fn int_const<'mcx>(mcx: mcx::Mcx<'mcx>, v: i32) -> Node<'mcx> {
+fn int_const<'mcx>(mcx: ::mcx::Mcx<'mcx>, v: i32) -> Node<'mcx> {
     Node::mk_a_const(mcx, A_Const {
         val: Some(
-            mcx::alloc_in(mcx, Node::mk_integer(mcx, nodes::value::Integer { ival: v })).unwrap(),
+            ::mcx::alloc_in(mcx, Node::mk_integer(mcx, nodes::value::Integer { ival: v })).unwrap(),
         ),
         isnull: false,
         location: -1,
     })
 }
 
-fn op_name<'mcx>(mcx: mcx::Mcx<'mcx>, op: &str) -> mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> {
-    let mut name: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+fn op_name<'mcx>(mcx: ::mcx::Mcx<'mcx>, op: &str) -> ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> {
+    let mut name: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
     name.push(
-        mcx::alloc_in(
+        ::mcx::alloc_in(
             mcx,
             Node::mk_string(mcx, nodes::value::StringNode {
-                sval: mcx::PgString::from_str_in(op, mcx).unwrap(),
+                sval: ::mcx::PgString::from_str_in(op, mcx).unwrap(),
             }),
         )
         .unwrap(),
@@ -175,15 +175,15 @@ fn op_name<'mcx>(mcx: mcx::Mcx<'mcx>, op: &str) -> mcx::PgVec<'mcx, nodes::NodeP
 #[test]
 fn columnref_and_aexpr_op_reach_real_logic() {
     let msg = panic_message(|| {
-        let ctx = mcx::MemoryContext::new("e2e_columnref");
+        let ctx = ::mcx::MemoryContext::new("e2e_columnref");
         let mcx = ctx.mcx();
         let mut pstate = nodes::parsestmt::ParseState::new(mcx).unwrap();
         pstate.p_expr_kind = ParseExprKind::EXPR_KIND_WHERE;
         let a = Node::A_Expr(A_Expr {
             kind: A_Expr_Kind::AEXPR_OP,
             name: op_name(mcx, ">"),
-            lexpr: Some(mcx::alloc_in(mcx, col_ref(mcx, "a")).unwrap()),
-            rexpr: Some(mcx::alloc_in(mcx, int_const(mcx, 1)).unwrap()),
+            lexpr: Some(::mcx::alloc_in(mcx, col_ref(mcx, "a")).unwrap()),
+            rexpr: Some(::mcx::alloc_in(mcx, int_const(mcx, 1)).unwrap()),
             rexpr_list_start: -1,
             rexpr_list_end: -1,
             location: -1,
@@ -206,20 +206,20 @@ fn columnref_and_aexpr_op_reach_real_logic() {
 #[test]
 fn aexpr_in_reaches_real_logic() {
     let msg = panic_message(|| {
-        let ctx = mcx::MemoryContext::new("e2e_in");
+        let ctx = ::mcx::MemoryContext::new("e2e_in");
         let mcx = ctx.mcx();
         let mut pstate = nodes::parsestmt::ParseState::new(mcx).unwrap();
         pstate.p_expr_kind = ParseExprKind::EXPR_KIND_WHERE;
 
-        let mut items: mcx::PgVec<'_, nodes::NodePtr<'_>> = mcx::PgVec::new_in(mcx);
+        let mut items: ::mcx::PgVec<'_, nodes::NodePtr<'_>> = ::mcx::PgVec::new_in(mcx);
         for v in [1, 2, 3] {
-            items.push(mcx::alloc_in(mcx, int_const(mcx, v)).unwrap());
+            items.push(::mcx::alloc_in(mcx, int_const(mcx, v)).unwrap());
         }
         let a = Node::A_Expr(A_Expr {
             kind: A_Expr_Kind::AEXPR_IN,
             name: op_name(mcx, "="),
-            lexpr: Some(mcx::alloc_in(mcx, int_const(mcx, 1)).unwrap()),
-            rexpr: Some(mcx::alloc_in(mcx, Node::mk_list(mcx, items)).unwrap()),
+            lexpr: Some(::mcx::alloc_in(mcx, int_const(mcx, 1)).unwrap()),
+            rexpr: Some(::mcx::alloc_in(mcx, Node::mk_list(mcx, items)).unwrap()),
             rexpr_list_start: -1,
             rexpr_list_end: -1,
             location: -1,
@@ -236,19 +236,19 @@ fn aexpr_in_reaches_real_logic() {
 #[test]
 fn aexpr_between_reaches_real_logic() {
     let msg = panic_message(|| {
-        let ctx = mcx::MemoryContext::new("e2e_between");
+        let ctx = ::mcx::MemoryContext::new("e2e_between");
         let mcx = ctx.mcx();
         let mut pstate = nodes::parsestmt::ParseState::new(mcx).unwrap();
         pstate.p_expr_kind = ParseExprKind::EXPR_KIND_WHERE;
 
-        let mut bounds: mcx::PgVec<'_, nodes::NodePtr<'_>> = mcx::PgVec::new_in(mcx);
-        bounds.push(mcx::alloc_in(mcx, int_const(mcx, 1)).unwrap());
-        bounds.push(mcx::alloc_in(mcx, int_const(mcx, 3)).unwrap());
+        let mut bounds: ::mcx::PgVec<'_, nodes::NodePtr<'_>> = ::mcx::PgVec::new_in(mcx);
+        bounds.push(::mcx::alloc_in(mcx, int_const(mcx, 1)).unwrap());
+        bounds.push(::mcx::alloc_in(mcx, int_const(mcx, 3)).unwrap());
         let a = Node::A_Expr(A_Expr {
             kind: A_Expr_Kind::AEXPR_BETWEEN,
             name: op_name(mcx, "BETWEEN"),
-            lexpr: Some(mcx::alloc_in(mcx, int_const(mcx, 2)).unwrap()),
-            rexpr: Some(mcx::alloc_in(mcx, Node::mk_list(mcx, bounds)).unwrap()),
+            lexpr: Some(::mcx::alloc_in(mcx, int_const(mcx, 2)).unwrap()),
+            rexpr: Some(::mcx::alloc_in(mcx, Node::mk_list(mcx, bounds)).unwrap()),
             rexpr_list_start: -1,
             rexpr_list_end: -1,
             location: -1,
@@ -265,17 +265,17 @@ fn aexpr_between_reaches_real_logic() {
 #[test]
 fn funccall_reaches_real_logic() {
     let msg = panic_message(|| {
-        let ctx = mcx::MemoryContext::new("e2e_funccall");
+        let ctx = ::mcx::MemoryContext::new("e2e_funccall");
         let mcx = ctx.mcx();
         let mut pstate = nodes::parsestmt::ParseState::new(mcx).unwrap();
         pstate.p_expr_kind = ParseExprKind::EXPR_KIND_WHERE;
 
-        let mut args: mcx::PgVec<'_, nodes::NodePtr<'_>> = mcx::PgVec::new_in(mcx);
-        args.push(mcx::alloc_in(mcx, int_const(mcx, 1)).unwrap());
+        let mut args: ::mcx::PgVec<'_, nodes::NodePtr<'_>> = ::mcx::PgVec::new_in(mcx);
+        args.push(::mcx::alloc_in(mcx, int_const(mcx, 1)).unwrap());
         let fc = Node::mk_func_call(mcx, FuncCall {
             funcname: op_name(mcx, "foo"),
             args,
-            agg_order: mcx::PgVec::new_in(mcx),
+            agg_order: ::mcx::PgVec::new_in(mcx),
             agg_filter: None,
             over: None,
             agg_within_group: false,
@@ -295,8 +295,8 @@ fn funccall_reaches_real_logic() {
 /// A bare NULL `A_Const` decodes to an UNKNOWN null `Const`.
 #[test]
 fn a_const_null_dispatches_to_make_const() {
-    use mcx::MemoryContext;
-    use types_tuple::heaptuple::UNKNOWNOID;
+    use ::mcx::MemoryContext;
+    use ::types_tuple::heaptuple::UNKNOWNOID;
 
     let ctx = MemoryContext::new("a_const_null_test");
     let mcx = ctx.mcx();

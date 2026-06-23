@@ -13,10 +13,10 @@
 #![allow(non_snake_case)]
 
 use types_core::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use nodes::{SlotData, TupleTableSlot, Tuplesortstate, TuplesortInstrumentation};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
 seam_core::seam!(
     /// `bool optimize_bounded_sort` (tuplesort.c): the GUC controlling whether
@@ -298,7 +298,7 @@ seam_core::seam!(
     /// `HeapTuple` into the CLUSTER sort. Allocates the stored tuple, fallible.
     pub fn tuplesort_putheaptuple<'mcx>(
         state: &mut Tuplesortstate<'mcx>,
-        tup: &types_tuple::heaptuple::FormedTuple<'mcx>,
+        tup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -309,7 +309,7 @@ seam_core::seam!(
     pub fn tuplesort_getheaptuple<'mcx>(
         state: &mut Tuplesortstate<'mcx>,
         forward: bool,
-    ) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'mcx>>>
+    ) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'mcx>>>
 );
 
 // === index-GiST sorted build sort (tuplesortvariants.c) ====================

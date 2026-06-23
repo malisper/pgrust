@@ -2,9 +2,9 @@
 //! (`access/transam/xloginsert.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::primitive::{BlockNumber, ForkNumber};
+use ::types_core::primitive::{BlockNumber, ForkNumber};
 use types_core::{RmgrId, XLogRecPtr};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_storage::{Buffer, RelFileLocator};
 
 seam_core::seam!(
@@ -93,7 +93,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `InitXLogInsert()` (xloginsert.c): allocate the backend-local WAL record
     /// construction buffers. `Err` carries its OOM surface.
-    pub fn init_xlog_insert() -> types_error::PgResult<()>
+    pub fn init_xlog_insert() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

@@ -13,7 +13,7 @@
 //! of shared pointers (`bbs_buffer`, `bbs_next`, `bbs_state`). This port
 //! replaces the vtable with the [`BbsinkOps`] trait and replaces the shared raw
 //! buffer/next pointers with owned values: the buffer is an owned
-//! [`PgVec<u8>`](mcx::PgVec) charged to the surrounding memory context (the
+//! [`PgVec<u8>`](::mcx::PgVec) charged to the surrounding memory context (the
 //! C `palloc` analog), and a forwarding sink shares its successor's buffer by
 //! delegating buffer access to the next sink in the chain. The shared backup
 //! `state` is threaded explicitly through the dispatch functions rather than
@@ -35,8 +35,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::primitive::{Oid, Size, TimeLineID, XLogRecPtr, BLCKSZ};
-use types_error::PgResult;
+use ::types_core::primitive::{Oid, Size, TimeLineID, XLogRecPtr, BLCKSZ};
+use ::types_error::PgResult;
 
 /// Information about a tablespace.
 ///
@@ -285,7 +285,7 @@ impl<'mcx> Bbsink<'mcx> {
     /// This is the idiomatic equivalent of a `begin_backup` callback allocating
     /// `bbs_buffer`. The allocation is fallible: it enforces `palloc`'s
     /// `MaxAllocSize` gate and uses fallible reservation, returning a
-    /// [`PgError`](types_error::PgError) instead of aborting on OOM. The bytes
+    /// [`PgError`](::types_error::PgError) instead of aborting on OOM. The bytes
     /// are charged to `mcx` (the surrounding context).
     ///
     /// Any previously installed buffer is replaced; its deallocation is charged

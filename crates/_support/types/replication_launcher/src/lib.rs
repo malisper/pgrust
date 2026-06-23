@@ -8,7 +8,7 @@
 extern crate alloc;
 use alloc::string::String;
 
-use types_core::primitive::{Oid, TimestampTz, XLogRecPtr};
+use ::types_core::primitive::{Oid, TimestampTz, XLogRecPtr};
 
 /// `DEFAULT_NAPTIME_PER_CYCLE` (launcher.c): max sleep between cycles, 3 min.
 pub const DEFAULT_NAPTIME_PER_CYCLE: i64 = 180000;

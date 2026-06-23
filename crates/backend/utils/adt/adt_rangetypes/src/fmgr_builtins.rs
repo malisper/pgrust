@@ -36,8 +36,8 @@
 //! lane (the kernels already read/set those), scalars in the by-value word.
 
 use mcx::{Mcx, MemoryContext};
-use datum::Datum;
-use types_error::PgResult;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ unsafe fn varsize_4b(ptr: *const u8) -> usize {
 fn range_bytes_to_arg_word<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum> {
     use allocator_api2::alloc::Allocator;
     use core::alloc::Layout;
-    mcx::check_alloc_size(image.len())?;
+    ::mcx::check_alloc_size(image.len())?;
     let layout = Layout::from_size_align(image.len().max(1), 8)
         .expect("valid RangeType image layout");
     let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;
@@ -169,7 +169,7 @@ macro_rules! fc_range_result {
             // SAFETY: `word` is the address of a plain `RangeType` varlena that
             // the kernel allocated in `m` and that lives until `m` drops below.
             let bytes = unsafe { range_word_to_result_bytes(word) };
-            fcinfo.set_ref_result(fmgr::RefPayload::Varlena(bytes));
+            fcinfo.set_ref_result(::fmgr::RefPayload::Varlena(bytes));
             Ok(Datum::null())
         }
     };
@@ -492,9 +492,9 @@ pub fn register_rangetypes_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cache::typcache::TypeCacheEntry;
-    use datum::NullableDatum;
-    use fmgr::RefPayload;
+    use ::cache::typcache::TypeCacheEntry;
+    use ::datum::NullableDatum;
+    use ::fmgr::RefPayload;
     use types_rangetypes::{RangeBound, RangeTypeP};
 
     /// OID we use for the synthetic `int4range` type in the test typcache.

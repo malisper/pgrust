@@ -21,8 +21,8 @@
 //! The owning unit (`backend-utils-adt-jsonbsubs`) installs these from its
 //! `init_seams()`; until then a call panics loudly (mirror-PG-and-panic).
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
 
 seam_core::seam!(

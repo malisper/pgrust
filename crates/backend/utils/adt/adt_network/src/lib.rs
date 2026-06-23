@@ -32,7 +32,7 @@ pub mod inet_net_pton;
 pub mod planner;
 pub mod sortsupport;
 
-use network_seams::session;
+use ::network_seams::session;
 use mcx::{Mcx, PgVec};
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INTERNAL_ERROR,
@@ -331,7 +331,7 @@ pub fn cidr_recv(buf: &[u8]) -> PgResult<inet_struct> {
 /// `pq_endtypsend` copy-out analog).
 fn network_send(mcx: Mcx<'_>, addr: &inet_struct, is_cidr: bool) -> PgResult<Vec<u8>> {
     let nb = ip_addrsize(addr.family);
-    let mut out: PgVec<u8> = mcx::vec_with_capacity_in(mcx, 4 + nb)?;
+    let mut out: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, 4 + nb)?;
     out.push(addr.family);
     out.push(addr.bits);
     out.push(is_cidr as u8);
@@ -518,7 +518,7 @@ pub fn network_larger(a1: &inet_struct, a2: &inet_struct) -> inet_struct {
 /// feeds to `hash_any`.
 fn hash_bytes(mcx: Mcx<'_>, addr: &inet_struct) -> PgResult<Vec<u8>> {
     let addrsize = ip_addrsize(addr.family);
-    let mut bytes: PgVec<u8> = mcx::vec_with_capacity_in(mcx, addrsize + 2)?;
+    let mut bytes: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, addrsize + 2)?;
     bytes.push(addr.family);
     bytes.push(addr.bits);
     bytes.extend_from_slice(&addr.ipaddr[..addrsize]);
@@ -1221,5 +1221,5 @@ pub fn init_seams() {
     // The `DatumGetInetPP` varlena-detoast edge the inet selectivity estimators
     // reach: `network.c` owns the `inet_struct` decode, and (depending on the
     // detoast owner without a cycle) it owns this slot too.
-    network_seams::inet::datum_get_inet_pp::set(datum_get_inet_pp);
+    ::network_seams::inet::datum_get_inet_pp::set(datum_get_inet_pp);
 }

@@ -12,9 +12,9 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
-use types_tuple::heaptuple::Datum;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::Datum;
 use types_ri_triggers::{TriggerDataRef, TriggerRef, TupleTableSlotRef};
 
 seam_core::seam!(
@@ -179,7 +179,7 @@ seam_core::seam!(
     pub fn get_tuple_for_trigger_lock<'mcx>(
         estate: &mut nodes::EStateData<'mcx>,
         relinfo: nodes::RriId,
-        tupleid: &types_tuple::heaptuple::ItemPointerData,
+        tupleid: &::types_tuple::heaptuple::ItemPointerData,
         oldslot: nodes::SlotId,
         mode: types_tableam::tableam::LockTupleMode,
         find_last_version: bool,
@@ -194,7 +194,7 @@ seam_core::seam!(
     pub fn get_tuple_for_trigger_fetch<'mcx>(
         estate: &mut nodes::EStateData<'mcx>,
         relinfo: nodes::RriId,
-        tupleid: &types_tuple::heaptuple::ItemPointerData,
+        tupleid: &::types_tuple::heaptuple::ItemPointerData,
         oldslot: nodes::SlotId,
     ) -> PgResult<bool>
 );
@@ -218,7 +218,7 @@ seam_core::seam!(
     pub fn tg_trigtuple<'mcx>(
         mcx: Mcx<'mcx>,
         trigdata: TriggerDataRef,
-    ) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>>
+    ) -> PgResult<Option<::types_tuple::heaptuple::HeapTupleData<'mcx>>>
 );
 seam_core::seam!(
     /// `trigdata->tg_newtuple` — the NEW `HeapTuple` (for an UPDATE) the trigger
@@ -227,7 +227,7 @@ seam_core::seam!(
     pub fn tg_newtuple<'mcx>(
         mcx: Mcx<'mcx>,
         trigdata: TriggerDataRef,
-    ) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>>
+    ) -> PgResult<Option<::types_tuple::heaptuple::HeapTupleData<'mcx>>>
 );
 seam_core::seam!(
     /// The fully-formed OLD/NEW tuple a row trigger is firing on, addressed by
@@ -239,7 +239,7 @@ seam_core::seam!(
     pub fn tg_slot_formed_tuple<'mcx>(
         mcx: Mcx<'mcx>,
         slot: TupleTableSlotRef,
-    ) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'mcx>>>
+    ) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'mcx>>>
 );
 
 seam_core::seam!(
@@ -306,7 +306,7 @@ seam_core::seam!(
     /// so the TID is resolved on the owner side, exactly like `slot_getattr`).
     pub fn slot_tid(
         slot: TupleTableSlotRef,
-    ) -> types_tuple::heaptuple::ItemPointerData
+    ) -> ::types_tuple::heaptuple::ItemPointerData
 );
 
 // ---- slot value access (executor/execTuples.c, access/common) --------------
@@ -415,7 +415,7 @@ seam_core::seam!(
         estate: &mut nodes::EStateData<'mcx>,
         relinfo: nodes::RriId,
         cmd_type: nodes::nodes::CmdType,
-    ) -> PgResult<Option<mcx::PgBox<'mcx, nodes::modifytable::TransitionCaptureState>>>
+    ) -> PgResult<Option<::mcx::PgBox<'mcx, nodes::modifytable::TransitionCaptureState>>>
 );
 
 // ---- ROW-trigger firing (commands/trigger.c), called by nodeModifyTable.c ----
@@ -450,7 +450,7 @@ seam_core::seam!(
     /// back as the fmgr `Datum` result (an opaque `usize` here cannot carry the
     /// arena pointer safely).
     pub fn set_before_trigger_result_tuple<'mcx>(
-        tuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
+        tuple: Option<::types_tuple::heaptuple::FormedTuple<'mcx>>,
     )
 );
 
@@ -482,7 +482,7 @@ seam_core::seam!(
         estate: &mut nodes::EStateData<'mcx>,
         result_rel_info: nodes::RriId,
         slot: nodes::SlotId,
-        recheck_indexes: &[types_core::Oid],
+        recheck_indexes: &[::types_core::Oid],
         transition_capture: Option<&mut nodes::modifytable::TransitionCaptureState>,
     ) -> PgResult<()>
 );
@@ -497,8 +497,8 @@ seam_core::seam!(
         estate: &mut nodes::EStateData<'mcx>,
         epqstate: &mut nodes::EPQState<'mcx>,
         relinfo: nodes::RriId,
-        tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
-        fdw_trigtuple: Option<&types_tuple::heaptuple::FormedTuple<'mcx>>,
+        tupleid: Option<&::types_tuple::heaptuple::ItemPointerData>,
+        fdw_trigtuple: Option<&::types_tuple::heaptuple::FormedTuple<'mcx>>,
         epqslot: Option<&mut Option<nodes::SlotId>>,
         tmresult: Option<&mut types_tableam::tableam::TM_Result>,
         tmfd: &mut types_tableam::tableam::TM_FailureData,
@@ -513,8 +513,8 @@ seam_core::seam!(
     pub fn exec_ar_delete_triggers<'mcx>(
         estate: &mut nodes::EStateData<'mcx>,
         relinfo: nodes::RriId,
-        tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
-        fdw_trigtuple: Option<&types_tuple::heaptuple::FormedTuple<'mcx>>,
+        tupleid: Option<&::types_tuple::heaptuple::ItemPointerData>,
+        fdw_trigtuple: Option<&::types_tuple::heaptuple::FormedTuple<'mcx>>,
         transition_capture: Option<&nodes::TransitionCaptureState>,
         is_crosspart_update: bool,
     ) -> PgResult<()>
@@ -529,7 +529,7 @@ seam_core::seam!(
     pub fn has_noncloned_pk_fkey_trigger<'mcx>(
         estate: &mut nodes::EStateData<'mcx>,
         result_rel_info: nodes::RriId,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -542,13 +542,13 @@ seam_core::seam!(
         estate: &mut nodes::EStateData<'mcx>,
         epqstate: &mut nodes::modifytable::EPQState<'mcx>,
         result_rel_info: nodes::RriId,
-        tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
-        fdw_trigtuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
+        tupleid: Option<&::types_tuple::heaptuple::ItemPointerData>,
+        fdw_trigtuple: Option<::types_tuple::heaptuple::FormedTuple<'mcx>>,
         newslot: nodes::SlotId,
         tmresult: Option<&mut types_tableam::tableam::TM_Result>,
         tmfd: &mut types_tableam::tableam::TM_FailureData,
         is_merge_update: bool,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -558,9 +558,9 @@ seam_core::seam!(
     pub fn exec_ir_update_triggers<'mcx>(
         estate: &mut nodes::EStateData<'mcx>,
         result_rel_info: nodes::RriId,
-        trigtuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
+        trigtuple: Option<::types_tuple::heaptuple::FormedTuple<'mcx>>,
         newslot: nodes::SlotId,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -571,8 +571,8 @@ seam_core::seam!(
     pub fn exec_ir_delete_triggers<'mcx>(
         estate: &mut nodes::EStateData<'mcx>,
         result_rel_info: nodes::RriId,
-        trigtuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
-    ) -> types_error::PgResult<bool>
+        trigtuple: Option<::types_tuple::heaptuple::FormedTuple<'mcx>>,
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -590,13 +590,13 @@ seam_core::seam!(
         result_rel_info: nodes::RriId,
         src_partinfo: Option<nodes::RriId>,
         dst_partinfo: Option<nodes::RriId>,
-        tupleid: Option<&types_tuple::heaptuple::ItemPointerData>,
-        fdw_trigtuple: Option<&types_tuple::heaptuple::FormedTuple<'mcx>>,
+        tupleid: Option<&::types_tuple::heaptuple::ItemPointerData>,
+        fdw_trigtuple: Option<&::types_tuple::heaptuple::FormedTuple<'mcx>>,
         newslot: Option<nodes::SlotId>,
-        recheck_indexes: &[types_core::Oid],
+        recheck_indexes: &[::types_core::Oid],
         transition_capture: Option<&mut nodes::modifytable::TransitionCaptureState>,
         is_crosspart_update: bool,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -610,7 +610,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `renametrig(RenameStmt *stmt)` (trigger.c) — ALTER TRIGGER ... RENAME TO.
     pub fn renametrig<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         stmt: &parsenodes::RenameStmt,
     ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress>
 );

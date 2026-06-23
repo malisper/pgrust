@@ -8,7 +8,7 @@
 //! the WAL-before-unlock discipline, and the revmap/regular-page update
 //! atomicity exactly.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use bufmgr_seams::{
     buffer_get_block_number, lock_buffer, mark_buffer_dirty, read_buffer, release_buffer,
@@ -20,13 +20,13 @@ use page::{
     PageGetItemId, PageGetMaxOffsetNumber, PageIndexTupleDeleteNoCompact, PageIsNew, PageMut,
     PageRef,
 };
-use utils_error::PgResult;
-use types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Size};
-use types_storage::buf::{
+use ::utils_error::PgResult;
+use ::types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Size};
+use ::types_storage::buf::{
     Buffer, InvalidBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
-use types_tuple::heaptuple::INVALID_OFFSET_NUMBER as InvalidOffsetNumber;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER as InvalidOffsetNumber;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::brin_internal::{
     brin_tuple_get_blkno, buffer_is_valid, corrupted_inconsistent,
@@ -269,7 +269,7 @@ pub fn brinGetTupleForHeapBlock(
 pub fn read_found_tuple_bytes<'mcx>(
     mcx: Mcx<'mcx>,
     found: &FoundTuple,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     let off = found.off;
     let bytes = page_read(found.buf, |page: &[u8]| -> Option<alloc::vec::Vec<u8>> {
         let pref = PageRef::new(page).ok()?;
@@ -278,7 +278,7 @@ pub fn read_found_tuple_bytes<'mcx>(
         Some(item.to_vec())
     })?;
     let bytes = bytes.expect("brinGetTupleForHeapBlock located a valid item");
-    let mut out: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+    let mut out: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
     out.extend_from_slice(&bytes);
     Ok(out)
 }
@@ -549,7 +549,7 @@ fn check_for_interrupts() -> PgResult<()> {
 
 /// `ExtendBufferedRel(BMR_REL(irel), MAIN_FORKNUM, NULL, EB_LOCK_FIRST)`.
 fn extend_buffered_rel_lock_first(irel: &Relation<'_>) -> PgResult<Buffer> {
-    bufmgr_seams::extend_buffered_rel::call(irel, ForkNumber::MAIN_FORKNUM)
+    ::bufmgr_seams::extend_buffered_rel::call(irel, ForkNumber::MAIN_FORKNUM)
 }
 
 /// `BRIN_CURRENT_VERSION` (brin_page.h): the on-disk BRIN metapage version.
@@ -602,7 +602,7 @@ pub fn brin_create_metapage(index: &Relation<'_>, pages_per_range: BlockNumber) 
 /// INIT fork to block 0, initializes the metapage, dirties it, and unconditionally
 /// `log_newpage_buffer`s it (the init-fork image must always be WAL-logged).
 pub fn brin_create_empty_metapage(index: &Relation<'_>, pages_per_range: BlockNumber) -> PgResult<()> {
-    let metabuf = bufmgr_seams::extend_buffered_rel::call(
+    let metabuf = ::bufmgr_seams::extend_buffered_rel::call(
         index,
         ForkNumber::INIT_FORKNUM,
     )?;
@@ -620,4 +620,4 @@ pub fn brin_create_empty_metapage(index: &Relation<'_>, pages_per_range: BlockNu
 }
 
 use crate::wal::log_newpage_buffer;
-use rel::Relation;
+use ::rel::Relation;

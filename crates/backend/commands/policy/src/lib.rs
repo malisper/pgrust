@@ -57,19 +57,19 @@ use alloc::string::{String, ToString};
 
 use mcx::{Mcx, MemoryContext};
 
-use types_catalog::catalog::{AUTH_ID_RELATION_ID, RELATION_RELATION_ID};
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog::{AUTH_ID_RELATION_ID, RELATION_RELATION_ID};
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_NORMAL,
 };
-use types_catalog::catalog_shdepend::SHARED_DEPENDENCY_POLICY;
-use types_catalog::pg_policy::{
+use ::types_catalog::catalog_shdepend::SHARED_DEPENDENCY_POLICY;
+use ::types_catalog::pg_policy::{
     Anum_pg_policy_oid, Anum_pg_policy_polcmd, Anum_pg_policy_polname, Anum_pg_policy_polpermissive,
     Anum_pg_policy_polqual, Anum_pg_policy_polrelid, Anum_pg_policy_polroles,
     Anum_pg_policy_polwithcheck, FormData_pg_policy, PgPolicyInsertRow, PgPolicyUpdateRow,
     PolicyOidIndexId, PolicyPolrelidPolnameIndexId, PolicyRelationId,
 };
-use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
-use types_core::primitive::{AttrNumber, InvalidOid, Oid};
+use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
@@ -80,30 +80,30 @@ use ::nodes::nodes::Node;
 use ::nodes::parsenodes::RoleSpecType;
 use ::nodes::parsestmt::ParseExprKind;
 use rel::{Relation, RelationData};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock,
 };
-use types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
-use types_tuple::access::RangeVar;
-use types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
+use ::types_tuple::access::RangeVar;
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
 
-use heaptuple::heap_deform_tuple;
+use ::heaptuple::heap_deform_tuple;
 use common_relation as relation;
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
-use catalog_catalog::IsSystemRelation;
-use catalog_namespace::RangeVarGetRelidExtended;
-use transam_xact::CommandCounterIncrement;
+use ::catalog_catalog::IsSystemRelation;
+use ::catalog_namespace::RangeVarGetRelidExtended;
+use ::transam_xact::CommandCounterIncrement;
 use pg_depend::{deleteDependencyRecordsFor, recordDependencyOn};
 use pg_shdepend::{deleteSharedDependencyRecordsFor, recordSharedDependencyOn};
-use dependency::recordDependencyOnExpr;
+use ::dependency::recordDependencyOnExpr;
 use parser_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
-use adt_acl::role_membership::get_rolespec_oid;
-use utils_error::ereport;
-use types_error::ErrorLocation;
-use miscinit::GetUserId;
+use ::adt_acl::role_membership::get_rolespec_oid;
+use ::utils_error::ereport;
+use ::types_error::ErrorLocation;
+use ::miscinit::GetUserId;
 
 use aclchk_seams as aclchk_seams;
 use indexing_seams as indexing_seams;
@@ -111,8 +111,8 @@ use objectaccess_seams as objectaccess_seams;
 use nodes_core_seams as nodes_seams;
 use read_seams as read_seams;
 use parser_analyze_seams as analyze_seams;
-use clause::transformWhereClause;
-use parse_collate::assign_expr_collations;
+use ::clause::transformWhereClause;
+use ::parse_collate::assign_expr_collations;
 use lsyscache_seams as lsyscache_seams;
 use guc_seams as guc_seams;
 use syscache_seams as syscache_seams;
@@ -171,7 +171,7 @@ fn name_key<'mcx>(mcx: Mcx<'mcx>, attno: AttrNumber, value: &str) -> PgResult<Sc
         attno,
         BTEqualStrategyNumber,
         F_NAMEEQ,
-        Datum::ByRef(mcx::slice_in(mcx, value.as_bytes())?),
+        Datum::ByRef(::mcx::slice_in(mcx, value.as_bytes())?),
     )?;
     Ok(key)
 }
@@ -206,8 +206,8 @@ fn systable_scan_foreach<'mcx>(
             break;
         };
         let cols = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
-        let mut values: mcx::PgVec<'mcx, Datum<'mcx>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
-        let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+        let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> = ::mcx::vec_with_capacity_in(smcx, cols.len())?;
+        let mut isnull: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(smcx, cols.len())?;
         for (value, null) in cols.iter() {
             values.push(value.clone());
             isnull.push(*null);
@@ -385,7 +385,7 @@ fn RangeVarCallbackForPolicy(rv: &RangeVar, relid: Oid, _oldrelid: Oid) -> PgRes
     // No system table modifications unless explicitly allowed.
     // if (!allowSystemTableMods && IsSystemClass(relid, classform))
     if !guc_seams::allow_system_table_mods::call()
-        && catalog_catalog::IsSystemClassByNamespace(relid, relnamespace)
+        && ::catalog_catalog::IsSystemClassByNamespace(relid, relnamespace)
     {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INSUFFICIENT_PRIVILEGE)
@@ -441,7 +441,7 @@ fn parse_policy_command(cmd_name: Option<&str>) -> PgResult<i8> {
 /// WARNING. policy.c:136-183.
 fn policy_role_list_to_array<'mcx>(
     mcx: Mcx<'mcx>,
-    roles: &[mcx::PgBox<'mcx, Node<'mcx>>],
+    roles: &[::mcx::PgBox<'mcx, Node<'mcx>>],
 ) -> PgResult<alloc::vec::Vec<Oid>> {
     // Handle no roles being passed in as being for public.
     if roles.is_empty() {
@@ -509,7 +509,7 @@ pub fn RemovePolicyById(policy_id: Oid) -> PgResult<()> {
     // Find the policy to delete.
     let skey = [oid_key(Anum_pg_policy_oid, policy_id)?];
 
-    let mut found: Option<(Oid, types_tuple::heaptuple::ItemPointerData)> = None;
+    let mut found: Option<(Oid, ::types_tuple::heaptuple::ItemPointerData)> = None;
     systable_scan_foreach(ctx.mcx(), &pg_policy_rel, PolicyOidIndexId, &skey, |row| {
         found = Some((row.form.polrelid, row.htup.tuple.t_self));
         Ok(false)
@@ -891,7 +891,7 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
     // Parse the using policy clause.
     let mut qual: Option<::nodes::primnodes::Expr<'mcx>> = None;
     let mut qual_node: Option<Node<'mcx>> = None;
-    let mut qual_pstate: Option<mcx::PgBox<'mcx, ::nodes::parsestmt::ParseState<'mcx>>> = None;
+    let mut qual_pstate: Option<::mcx::PgBox<'mcx, ::nodes::parsestmt::ParseState<'mcx>>> = None;
     if stmt.qual.is_some() {
         let mut pstate = analyze_seams::make_parsestate::call(mcx, None)?;
         let nsitem = addRangeTableEntryForRelation(
@@ -926,7 +926,7 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
 
     // Parse the with-check policy clause.
     let mut with_check_qual: Option<::nodes::primnodes::Expr<'mcx>> = None;
-    let mut with_check_pstate: Option<mcx::PgBox<'mcx, ::nodes::parsestmt::ParseState<'mcx>>> =
+    let mut with_check_pstate: Option<::mcx::PgBox<'mcx, ::nodes::parsestmt::ParseState<'mcx>>> =
         None;
     if stmt.with_check.is_some() {
         let mut pstate = analyze_seams::make_parsestate::call(mcx, None)?;
@@ -1357,7 +1357,7 @@ fn boxed_callback() -> RangeVarGetRelidCallbackBox {
 
 /// Extract the `RangeVar` from a parse-node `table`/`relation` slot, converting
 /// the owned-tree `rawnodes::RangeVar` to the resolved-form
-/// `types_tuple::access::RangeVar` that `RangeVarGetRelidExtended` consumes.
+/// `::types_tuple::access::RangeVar` that `RangeVarGetRelidExtended` consumes.
 fn expect_range_var(node: Option<&Node<'_>>, funcname: &'static str) -> PgResult<RangeVar> {
     match node.and_then(|n| n.as_rangevar()) {
         Some(rv) => Ok(to_access_range_var(rv)),
@@ -1368,7 +1368,7 @@ fn expect_range_var(node: Option<&Node<'_>>, funcname: &'static str) -> PgResult
 }
 
 /// Convert an owned-tree `rawnodes::RangeVar` to a resolved
-/// `types_tuple::access::RangeVar` (precedent: lockcmds `to_access_range_var`).
+/// `::types_tuple::access::RangeVar` (precedent: lockcmds `to_access_range_var`).
 fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> RangeVar {
     RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
@@ -1457,13 +1457,13 @@ pub fn init_seams() {
     // `castNode(CreatePolicyStmt, parsetree)` is the runtime tag assert.
     rt::create_policy::set(|mcx, parsetree| match parsetree.as_createpolicystmt() {
         Some(stmt) => CreatePolicy(mcx, stmt),
-        None => Err(types_error::PgError::error(
+        None => Err(::types_error::PgError::error(
             "create_policy: parse tree is not a CreatePolicyStmt",
         )),
     });
     rt::alter_policy::set(|mcx, parsetree| match parsetree.as_alterpolicystmt() {
         Some(stmt) => AlterPolicy(mcx, stmt),
-        None => Err(types_error::PgError::error(
+        None => Err(::types_error::PgError::error(
             "alter_policy: parse tree is not an AlterPolicyStmt",
         )),
     });

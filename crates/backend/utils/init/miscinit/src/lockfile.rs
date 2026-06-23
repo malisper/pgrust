@@ -99,13 +99,13 @@ pub fn unlink_lock_files() {
     // Lock file removal is the last externally visible action of a postmaster
     // or standalone backend; log completion (LOG under postmaster, else NOTICE).
     let elevel = if init_small::globals::IsPostmasterEnvironment() {
-        types_error::LOG
+        ::types_error::LOG
     } else {
-        types_error::NOTICE
+        ::types_error::NOTICE
     };
     let _ = utils_error::ereport(elevel)
         .errmsg("database system is shut down")
-        .finish(types_error::ErrorLocation::new(MISCINIT_C, 1197, "UnlinkLockFiles"));
+        .finish(::types_error::ErrorLocation::new(MISCINIT_C, 1197, "UnlinkLockFiles"));
 }
 
 /// `on_proc_exit(UnlinkLockFiles, 0)` once, then `lcons` the file (prepend, so
@@ -202,7 +202,7 @@ pub fn create_lock_file(
 
         if buffer.is_empty() {
             return Err(PgError::new(FATAL, format!("lock file \"{filename}\" is empty"))
-                .with_sqlstate(types_error::ERRCODE_LOCK_FILE_EXISTS)
+                .with_sqlstate(::types_error::ERRCODE_LOCK_FILE_EXISTS)
                 .with_hint(
                     "Either another server is starting, or the lock file is the remnant \
                      of a previous server startup crash.",
@@ -247,7 +247,7 @@ pub fn create_lock_file(
             };
             return Err(
                 PgError::new(FATAL, format!("lock file \"{filename}\" already exists"))
-                    .with_sqlstate(types_error::ERRCODE_LOCK_FILE_EXISTS)
+                    .with_sqlstate(::types_error::ERRCODE_LOCK_FILE_EXISTS)
                     .with_hint(what),
             );
         }
@@ -264,7 +264,7 @@ pub fn create_lock_file(
                             "pre-existing shared memory block (key {id1}, ID {id2}) is still in use"
                         ),
                     )
-                    .with_sqlstate(types_error::ERRCODE_LOCK_FILE_EXISTS)
+                    .with_sqlstate(::types_error::ERRCODE_LOCK_FILE_EXISTS)
                     .with_hint(format!(
                         "Terminate any old server processes associated with data directory \"{ref_name}\"."
                     )));
@@ -521,10 +521,10 @@ fn log_file_access(
     funcname: &'static str,
     lineno: i32,
 ) -> PgResult<()> {
-    utils_error::ereport(types_error::LOG)
+    utils_error::ereport(::types_error::LOG)
         .errcode_for_file_access()
         .errmsg(format!("{msg}: {e}"))
-        .finish(types_error::ErrorLocation::new(MISCINIT_C, lineno, funcname))
+        .finish(::types_error::ErrorLocation::new(MISCINIT_C, lineno, funcname))
 }
 
 // ===========================================================================
@@ -547,21 +547,21 @@ pub fn RecheckDataDirLockFile() -> PgResult<bool> {
             const ENOTDIR: i32 = 20;
             if errno == ENOENT || errno == ENOTDIR {
                 // disaster
-                utils_error::ereport(types_error::LOG)
+                utils_error::ereport(::types_error::LOG)
                     .errcode_for_file_access()
                     .errmsg(format!("could not open file \"{DIRECTORY_LOCK_FILE}\": {e}"))
-                    .finish(types_error::ErrorLocation::new(
+                    .finish(::types_error::ErrorLocation::new(
                         MISCINIT_C, 1720, "RecheckDataDirLockFile",
                     ))?;
                 return Ok(false);
             }
             // non-fatal, at least for now
-            utils_error::ereport(types_error::LOG)
+            utils_error::ereport(::types_error::LOG)
                 .errcode_for_file_access()
                 .errmsg(format!(
                     "could not open file \"{DIRECTORY_LOCK_FILE}\": {e}; continuing anyway"
                 ))
-                .finish(types_error::ErrorLocation::new(
+                .finish(::types_error::ErrorLocation::new(
                     MISCINIT_C, 1727, "RecheckDataDirLockFile",
                 ))?;
             return Ok(true);
@@ -570,10 +570,10 @@ pub fn RecheckDataDirLockFile() -> PgResult<bool> {
 
     let mut buffer = String::new();
     if let Err(e) = file.read_to_string(&mut buffer) {
-        utils_error::ereport(types_error::LOG)
+        utils_error::ereport(::types_error::LOG)
             .errcode_for_file_access()
             .errmsg(format!("could not read from file \"{DIRECTORY_LOCK_FILE}\": {e}"))
-            .finish(types_error::ErrorLocation::new(
+            .finish(::types_error::ErrorLocation::new(
                 MISCINIT_C, 1739, "RecheckDataDirLockFile",
             ))?;
         return Ok(true); // treat read failure as nonfatal
@@ -586,12 +586,12 @@ pub fn RecheckDataDirLockFile() -> PgResult<bool> {
     }
 
     // Trouble: someone's overwritten the lock file.
-    utils_error::ereport(types_error::LOG)
+    utils_error::ereport(::types_error::LOG)
         .errmsg(format!(
             "lock file \"{DIRECTORY_LOCK_FILE}\" contains wrong PID: {file_pid} instead of {}",
             std::process::id()
         ))
-        .finish(types_error::ErrorLocation::new(
+        .finish(::types_error::ErrorLocation::new(
             MISCINIT_C, 1751, "RecheckDataDirLockFile",
         ))?;
     Ok(false)

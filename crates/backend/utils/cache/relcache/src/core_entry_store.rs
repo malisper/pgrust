@@ -36,9 +36,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use utils_error::{ereport, emit_error_report_for, PgError, PgResult};
-use types_core::primitive::{Oid, ProcNumber};
-use types_core::xact::SubTransactionId;
-use types_core::InvalidOid;
+use ::types_core::primitive::{Oid, ProcNumber};
+use ::types_core::xact::SubTransactionId;
+use ::types_core::InvalidOid;
 use types_error::{ERROR, WARNING};
 
 use crate::MAX_EOXACT_LIST;
@@ -59,11 +59,11 @@ pub use entry::RelationData;
 pub(crate) struct OwnedPartitionKey {
     pub(crate) strategy: types_partition::PartitionStrategy,
     pub(crate) partnatts: i16,
-    pub(crate) partattrs: Vec<types_core::primitive::AttrNumber>,
+    pub(crate) partattrs: Vec<::types_core::primitive::AttrNumber>,
     pub(crate) partexprs: Vec<nodes::primnodes::Expr<'static>>,
     pub(crate) partopfamily: Vec<Oid>,
     pub(crate) partopcintype: Vec<Oid>,
-    pub(crate) partsupfunc: Vec<types_core::fmgr::FmgrInfo>,
+    pub(crate) partsupfunc: Vec<::types_core::fmgr::FmgrInfo>,
     pub(crate) partcollation: Vec<Oid>,
     pub(crate) parttypid: Vec<Oid>,
     pub(crate) parttypmod: Vec<i32>,

@@ -7,7 +7,7 @@
 //! context-allocated storage. The header encoding lives here and only here —
 //! producers hand over the raw image and [`Varlena::from_image`] stamps it.
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 
 /// `VARHDRSZ` (`c.h`): `sizeof(int32)` — the 4-byte varlena length word.
 pub const VARHDRSZ: usize = 4;

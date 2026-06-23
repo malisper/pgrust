@@ -3,9 +3,9 @@
 //! `ProcessInvalidationMessages[Multi]` public collectors that snapshot a
 //! group's messages out before the seam may re-enter).
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{InvalidOid, ProcNumber};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_storage::{
     RelFileLocatorBackend, SharedInvalidationMessage, SHAREDINVALCATALOG_ID,
     SHAREDINVALRELCACHE_ID, SHAREDINVALRELMAP_ID, SHAREDINVALRELSYNC_ID, SHAREDINVALSMGR_ID,
@@ -184,8 +184,8 @@ pub fn AcceptInvalidationMessages() -> PgResult<()> {
     //
     // The seam invokes its callbacks with `void` return; capture any error
     // raised by a callback and re-raise it after the drain returns.
-    let mut inval_err: Option<types_error::PgError> = None;
-    let mut reset_err: Option<types_error::PgError> = None;
+    let mut inval_err: Option<::types_error::PgError> = None;
+    let mut reset_err: Option<::types_error::PgError> = None;
     {
         let inval_err = &mut inval_err;
         let reset_err = &mut reset_err;

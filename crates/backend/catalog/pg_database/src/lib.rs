@@ -27,22 +27,22 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgString, PgVec};
-use types_catalog::pg_database as cat;
-use types_catalog::pg_database::{FormPgDatabase, NewDbRecord};
-use types_core::primitive::{AttrNumber, Oid};
-use types_core::fmgr::{F_NAMEEQ, F_OIDEQ, NAMEDATALEN};
+use ::types_catalog::pg_database as cat;
+use ::types_catalog::pg_database::{FormPgDatabase, NewDbRecord};
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ, NAMEDATALEN};
 use types_error::{PgError, PgResult};
-use rel::Relation;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{
+use ::rel::Relation;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, InplaceUpdateTupleLock, RowExclusiveLock,
 };
-use types_tuple::heaptuple::{Datum, DeformedColumn, FormedTuple};
-use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
+use ::types_tuple::heaptuple::{Datum, DeformedColumn, FormedTuple};
+use ::types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple};
-use scankey::ScanKeyInit;
-use indexing::keystone::{
+use ::scankey::ScanKeyInit;
+use ::indexing::keystone::{
     CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate,
 };
 
@@ -51,10 +51,10 @@ use table_seams as table_seams;
 use relcache_seams as relcache_seams;
 use lmgr_seams as lmgr_seams;
 use varlena_seams as varlena_seams;
-use cache_syscache::SearchSysCache1;
-use cache::SysCacheKey;
-use datum::Datum as KeyDatum;
-use types_syscache::DATABASEOID;
+use ::cache_syscache::SearchSysCache1;
+use ::cache::SysCacheKey;
+use ::datum::Datum as KeyDatum;
+use ::types_syscache::DATABASEOID;
 
 /* ==========================================================================
  * Scan-key builders.
@@ -72,7 +72,7 @@ fn oid_key<'mcx>(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
 /// CStringGetDatum(value))`. The name crosses as a NUL-terminated byte image
 /// (the genam `nameeq` comparator interprets it).
 fn name_key<'mcx>(mcx: Mcx<'mcx>, attno: AttrNumber, value: &str) -> PgResult<ScanKeyData<'mcx>> {
-    let mut bytes: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, value.len() + 1)?;
+    let mut bytes: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, value.len() + 1)?;
     for &b in value.as_bytes() {
         bytes.push(b);
     }
@@ -144,7 +144,7 @@ fn decode_form<'mcx>(
             None
         } else {
             match &c.0 {
-                Datum::ByRef(b) => Some(mcx::slice_in(mcx, b)?),
+                Datum::ByRef(b) => Some(::mcx::slice_in(mcx, b)?),
                 // An aclitem[] array is always pass-by-reference; a ByVal here
                 // is impossible for this column, but keep the bytes empty
                 // rather than fabricate.
@@ -152,7 +152,7 @@ fn decode_form<'mcx>(
                 | Datum::Cstring(_)
                 | Datum::Composite(_)
                 | Datum::Expanded(_)
-                | Datum::Internal(_) => Some(mcx::vec_with_capacity_in(mcx, 0)?),
+                | Datum::Internal(_) => Some(::mcx::vec_with_capacity_in(mcx, 0)?),
             }
         }
     };
@@ -201,7 +201,7 @@ fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
 
 /// `namein(s)` — a 64-byte NUL-padded `NameData` by-reference Datum image.
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
-    let mut image: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
+    let mut image: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
     let src = s.as_bytes();
     let take = core::cmp::min(src.len(), (NAMEDATALEN as usize) - 1);
     for &b in &src[..take] {
@@ -304,7 +304,7 @@ fn columns_from_existing<'mcx>(
         None => nulls[idx(cat::Anum_pg_database_datcollversion)] = true,
     }
     match &f.datacl {
-        Some(b) => values[idx(cat::Anum_pg_database_datacl)] = Datum::ByRef(mcx::slice_in(mcx, b)?),
+        Some(b) => values[idx(cat::Anum_pg_database_datacl)] = Datum::ByRef(::mcx::slice_in(mcx, b)?),
         None => nulls[idx(cat::Anum_pg_database_datacl)] = true,
     }
 

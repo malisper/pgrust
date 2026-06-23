@@ -7,7 +7,7 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, Once};
-use types_error::PgError;
+use ::types_error::PgError;
 
 static CHECK_COUNT: AtomicU64 = AtomicU64::new(0);
 static CANCEL_ARMED: AtomicBool = AtomicBool::new(false);

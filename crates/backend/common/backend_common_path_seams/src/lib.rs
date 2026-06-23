@@ -11,8 +11,8 @@
 //! `init_seams()` when they land; until then a call panics loudly.
 
 use mcx::{Mcx, PgString};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `convert_and_check_filename(arg)` (genfile.c): canonicalize the

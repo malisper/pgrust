@@ -4,10 +4,10 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::Oid;
-use types_error::PgResult;
-use opclass::ObjectWithArgs;
-use parsenodes::ObjectWithArgs as ParseObjectWithArgs;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::opclass::ObjectWithArgs;
+use ::parsenodes::ObjectWithArgs as ParseObjectWithArgs;
 
 seam_core::seam!(
     /// `LookupOperWithArgs(oper, noError)` (parse_oper.c): resolve an

@@ -14,9 +14,9 @@
 //! surfaces as `Err(PgError)`; the `to_number` `None` core result is the
 //! C `PG_RETURN_NULL()` arm (a genuine SQL NULL, not an error).
 
-use adt_numeric::convert::{make_result, set_var_from_num};
+use ::adt_numeric::convert::{make_result, set_var_from_num};
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 use fmgr::{FmgrArg, RefPayload};
 

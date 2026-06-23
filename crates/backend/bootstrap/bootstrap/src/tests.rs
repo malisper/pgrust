@@ -8,7 +8,7 @@
 //! at wiring time when their owners land.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 /// A process-lifetime context for the `Mcx<'static>`-taking entry points. The
 /// tested paths never allocate through it.

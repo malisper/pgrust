@@ -29,14 +29,14 @@ use alloc::format;
 use alloc::string::{String, ToString};
 
 use mcx::{Mcx, PgString, PgVec};
-use types_acl::acl::{CheckEnableRlsResult, ACL_INSERT, ACL_SELECT};
-use types_catalog::catalog::{
+use ::types_acl::acl::{CheckEnableRlsResult, ACL_INSERT, ACL_SELECT};
+use ::types_catalog::catalog::{
     ROLE_PG_EXECUTE_SERVER_PROGRAM, ROLE_PG_READ_SERVER_FILES, ROLE_PG_WRITE_SERVER_FILES,
 };
 use types_copy::{
     CopyFormatOptions, CopyHeaderChoice, CopyLogVerbosityChoice, CopyOnErrorChoice,
 };
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::ddlnodes::{CopyStmt, DefElem};
 use ::nodes::nodes::{ntag, Node, NodePtr};
@@ -44,12 +44,12 @@ use ::nodes::nodelimit::LimitOption;
 use ::nodes::parsestmt::{ParseState, RawStmt};
 use ::nodes::rawnodes::{ColumnRef, ResTarget, SelectStmt, SetOperation};
 use ::nodes::Expr;
-use types_tuple::access::RELPERSISTENCE_TEMP;
-use types_tuple::heaptuple::{TupleDesc, FirstLowInvalidHeapAttributeNumber};
+use ::types_tuple::access::RELPERSISTENCE_TEMP;
+use ::types_tuple::heaptuple::{TupleDesc, FirstLowInvalidHeapAttributeNumber};
 
 // Seam aliases.
 use define_seams as define_s;
-use define_seams::DefElemArg;
+use ::define_seams::DefElemArg;
 use small1_seams as small1_s;
 
 // SQLSTATE constants.
@@ -385,7 +385,7 @@ fn defel_arg_string_list<'mcx>(
     let mut out: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     out.try_reserve(elems.len()).map_err(|_| mcx.oom(elems.len()))?;
     for e in elems.iter() {
-        out.push(mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
+        out.push(::mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
     }
     Ok(Some(out))
 }
@@ -1067,7 +1067,7 @@ pub fn DoCopy<'mcx>(
         debug_assert!(stmt.query.is_some());
         let q = stmt.query.as_ref().unwrap();
         query = Some(RawStmt {
-            stmt: mcx::alloc_in(mcx, q.as_ref().clone_in(mcx)?)?,
+            stmt: ::mcx::alloc_in(mcx, q.as_ref().clone_in(mcx)?)?,
             stmt_location,
             stmt_len,
         });
@@ -1230,7 +1230,7 @@ fn analyze_copy_where<'mcx>(
 
     // whereClause = (Node *) make_ands_implicit((Expr *) whereClause);
     let implicit = nodes_core::makefuncs::make_ands_implicit(canon);
-    let mut out: PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, implicit.len())?;
+    let mut out: PgVec<'mcx, Expr<'mcx>> = ::mcx::vec_with_capacity_in(mcx, implicit.len())?;
     for e in implicit {
         out.push(e);
     }
@@ -1256,7 +1256,7 @@ fn copy_from_driver<'mcx>(
 
     // Project the parse-relevant subset of CopyFormatOptions onto the parser's
     // CopyParseOptions.
-    let opts = types_copy::CopyParseOptions {
+    let opts = ::types_copy::CopyParseOptions {
         binary: fmt.binary,
         csv_mode: fmt.csv_mode,
         header_line: fmt.header_line,
@@ -1369,7 +1369,7 @@ fn build_rls_select_query<'mcx>(
         let cr = ColumnRef {
             fields: {
                 let mut v = PgVec::new_in(mcx);
-                v.push(mcx::alloc_in(mcx, Node::mk_a_star(mcx, ::nodes::rawnodes::A_Star)?)?);
+                v.push(::mcx::alloc_in(mcx, Node::mk_a_star(mcx, ::nodes::rawnodes::A_Star)?)?);
                 v
             },
             location: -1,
@@ -1380,7 +1380,7 @@ fn build_rls_select_query<'mcx>(
             let cr = ColumnRef {
                 fields: {
                     let mut v = PgVec::new_in(mcx);
-                    v.push(mcx::alloc_in(mcx, col.as_ref().clone_in(mcx)?)?);
+                    v.push(::mcx::alloc_in(mcx, col.as_ref().clone_in(mcx)?)?);
                     v
                 },
                 location: -1,
@@ -1402,18 +1402,18 @@ fn build_rls_select_query<'mcx>(
         },
         relname: Some(PgString::from_str_in(rel.name(), mcx)?),
         inh: false, // apply ONLY
-        relpersistence: types_tuple::access::RELPERSISTENCE_PERMANENT as i8,
+        relpersistence: ::types_tuple::access::RELPERSISTENCE_PERMANENT as i8,
         alias: None,
         location: -1,
     };
 
     let mut from_clause: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-    from_clause.push(mcx::alloc_in(mcx, Node::mk_range_var(mcx, from)?)?);
+    from_clause.push(::mcx::alloc_in(mcx, Node::mk_range_var(mcx, from)?)?);
 
     let select = empty_select_stmt(mcx, target_list, from_clause)?;
 
     Ok(RawStmt {
-        stmt: mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select)?)?,
+        stmt: ::mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select)?)?,
         stmt_location,
         stmt_len,
     })
@@ -1424,10 +1424,10 @@ fn make_res_target<'mcx>(mcx: Mcx<'mcx>, val: Node<'mcx>) -> PgResult<NodePtr<'m
     let rt = ResTarget {
         name: None,
         indirection: PgVec::new_in(mcx),
-        val: Some(mcx::alloc_in(mcx, val)?),
+        val: Some(::mcx::alloc_in(mcx, val)?),
         location: -1,
     };
-    mcx::alloc_in(mcx, Node::mk_res_target(mcx, rt)?)
+    ::mcx::alloc_in(mcx, Node::mk_res_target(mcx, rt)?)
 }
 
 /// A leaf `SELECT targetList FROM fromClause` (all other fields NIL/default).
@@ -1491,15 +1491,15 @@ fn requires_csv_error(name: &str) -> PgError {
 fn cannot_be_used_with(
     option: &str,
     direction: &str,
-    code: types_error::SqlState,
+    code: ::types_error::SqlState,
 ) -> PgError {
     PgError::error(format!("COPY {option} cannot be used with {direction}")).with_sqlstate(code)
 }
 
 /// Bridge the owned grammar `RangeVar` node into the lifetime-free
 /// `access::RangeVar` the table-open machinery consumes.
-fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.to_string()),
         schemaname: rv.schemaname.as_ref().map(|s| s.to_string()),
         relname: rv.relname.as_ref().map(|s| s.to_string()).unwrap_or_default(),

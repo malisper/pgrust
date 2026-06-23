@@ -21,22 +21,22 @@
 //! holds, per sublink-id, a `Vec<NodeId>` of the replacement `Param` nodes.
 
 use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{
     Expr, OpExpr, Param, ParamKind, SubLinkType, SubPlan, SubPlanExpr,
 };
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PathId, PlannerInfo};
 
-use nodes_core::makefuncs::{
+use ::nodes_core::makefuncs::{
     make_ands_explicit, make_ands_implicit, make_null_const, make_opclause, make_target_entry,
     make_var_from_target_entry,
 };
-use nodeFuncs_seams::expr_type_info;
+use ::nodeFuncs_seams::expr_type_info;
 use init_subselect_ext_seams as initext;
-use clauses::grounded::{
+use ::clauses::grounded::{
     contain_exec_param, contain_subplans, contain_volatile_functions,
 };
 use lsyscache_seams as lsyscache;
@@ -44,13 +44,13 @@ use lsyscache_seams as lsyscache;
 use crate::correlation::SS_process_sublinks;
 
 /// `VOIDOID` (pg_type.h).
-const VOIDOID: Oid = types_core::catalog::VOIDOID;
+const VOIDOID: Oid = ::types_core::catalog::VOIDOID;
 /// `BOOLOID` (pg_type.h).
-const BOOLOID: Oid = types_core::catalog::BOOLOID;
+const BOOLOID: Oid = ::types_core::catalog::BOOLOID;
 /// `RECORDOID` (pg_type.h) — the pseudo-type for an anonymous record.
 const RECORDOID: Oid = 2249;
 /// `INT8OID`.
-const INT8OID: Oid = types_core::catalog::INT8OID;
+const INT8OID: Oid = ::types_core::catalog::INT8OID;
 /// `InvalidOid`.
 const INVALID_OID: Oid = 0;
 /// `ARRAY_EQ_OP` (pg_operator.h) — `anyarray = anyarray`.
@@ -316,7 +316,7 @@ fn build_subplan<'mcx>(
     mut plan: Node<'mcx>,
     subpath: Option<PathId>,
     subroot: PlannerInfo,
-    plan_params: Vec<pathnodes::NodeId>,
+    plan_params: Vec<::pathnodes::NodeId>,
     sub_link_type: SubLinkType,
     sub_link_id: i32,
     testexpr: Option<Expr<'mcx>>,
@@ -420,7 +420,7 @@ fn build_subplan<'mcx>(
         }
         // Save the replacement Param nodes in the n'th cell of
         // root->multiexpr_params; intern each as a NodeId.
-        let mut param_node_ids: Vec<pathnodes::NodeId> = Vec::new();
+        let mut param_node_ids: Vec<::pathnodes::NodeId> = Vec::new();
         for p in params {
             param_node_ids.push(root.alloc_node(p));
         }
@@ -595,7 +595,7 @@ fn generate_subquery_params<'mcx>(
 #[allow(dead_code)]
 fn generate_subquery_vars<'mcx>(
     tlist: &[::nodes::primnodes::TargetEntry<'mcx>],
-    varno: types_core::primitive::Index,
+    varno: ::types_core::primitive::Index,
 ) -> PgResult<Vec<Expr<'mcx>>> {
     let mut result: Vec<Expr<'mcx>> = Vec::new();
     for tent in tlist.iter() {
@@ -641,7 +641,7 @@ fn convert_testexpr_mutator<'mcx>(node: Expr<'mcx>, subst_nodes: &[Expr<'mcx>]) 
         return Ok(node);
     }
     let mut err: Option<PgError> = None;
-    let result = nodes_core::nodefuncs::expression_tree_mutator(node, &mut |child: Expr| {
+    let result = ::nodes_core::nodefuncs::expression_tree_mutator(node, &mut |child: Expr| {
         if err.is_some() {
             return child;
         }
@@ -649,7 +649,7 @@ fn convert_testexpr_mutator<'mcx>(node: Expr<'mcx>, subst_nodes: &[Expr<'mcx>]) 
             Ok(c) => c,
             Err(e) => {
                 err = Some(e);
-                Expr::Const(nodes_core::makefuncs::make_bool_const(true, false))
+                Expr::Const(::nodes_core::makefuncs::make_bool_const(true, false))
             }
         }
     });
@@ -717,7 +717,7 @@ fn test_opexpr_is_hashable(testexpr: &OpExpr, param_ids: &[i32]) -> PgResult<boo
     // Deep-copy the operand for the read-only walker via `Expr::clone_in` into a
     // transient scratch context (a derived `Expr::clone` panics on a
     // context-allocated child).
-    let cx = mcx::MemoryContext::new("test_opexpr_is_hashable scratch");
+    let cx = ::mcx::MemoryContext::new("test_opexpr_is_hashable scratch");
     let arg1_node = Node::mk_expr(cx.mcx(), testexpr.args[1].clone_in(cx.mcx())?)?;
     if vars::var::contain_var_clause(&arg1_node) {
         return Ok(false);
@@ -754,9 +754,9 @@ fn enable_material() -> bool {
     crate::enable_material()
 }
 
-/// `relids_add_member` over the planner [`Relids`](pathnodes::Relids) set
+/// `relids_add_member` over the planner [`Relids`](::pathnodes::Relids) set
 /// (the `glob.rewindPlanIDs` member type) — the relnode seam.
-fn relids_add_member(a: pathnodes::Relids, x: i32) -> pathnodes::Relids {
+fn relids_add_member(a: ::pathnodes::Relids, x: i32) -> ::pathnodes::Relids {
     relnode_seams::relids_add_member::call(a, x)
 }
 
@@ -996,7 +996,7 @@ fn query_contains_volatile_node(node: &Node<'_>) -> PgResult<bool> {
                 }
             }
         };
-        nodes_core::node_walker::query_tree_walker(q, &mut visit, 0);
+        ::nodes_core::node_walker::query_tree_walker(q, &mut visit, 0);
         if let Some(e) = err {
             return Err(e);
         }
@@ -1037,7 +1037,7 @@ fn contain_dml_walker(node: &Node<'_>) -> bool {
             }
             false
         };
-        nodes_core::node_walker::query_tree_walker(query, &mut visit, 0);
+        ::nodes_core::node_walker::query_tree_walker(query, &mut visit, 0);
         return aborted;
     }
     if let Some(e) = node.as_expr() {
@@ -1059,7 +1059,7 @@ fn contain_dml_walker(node: &Node<'_>) -> bool {
         // Deep-copy via `Expr::clone_in` into a transient scratch context for
         // the read-only walker (a derived `Expr::clone` panics on a
         // context-allocated child such as a SubLink).
-        let cx = mcx::MemoryContext::new("contain_dml_walker scratch");
+        let cx = ::mcx::MemoryContext::new("contain_dml_walker scratch");
         let owned = match e.clone_in(cx.mcx()) {
             Ok(o) => o,
             Err(_) => return true,
@@ -1068,7 +1068,7 @@ fn contain_dml_walker(node: &Node<'_>) -> bool {
             Ok(n) => n,
             Err(_) => return true,
         };
-        return nodes_core::node_walker::expression_tree_walker(&e_node, &mut visit);
+        return ::nodes_core::node_walker::expression_tree_walker(&e_node, &mut visit);
     }
     false
 }
@@ -1124,10 +1124,10 @@ fn contain_outer_selfref_walker(node: &Node<'_>, depth: &mut u32) -> bool {
                     }
                     false
                 };
-                nodes_core::node_walker::query_tree_walker(
+                ::nodes_core::node_walker::query_tree_walker(
                     query,
                     &mut visit,
-                    nodes_core::node_walker::QTW_EXAMINE_RTES_BEFORE,
+                    ::nodes_core::node_walker::QTW_EXAMINE_RTES_BEFORE,
                 );
             }
             *depth -= 1;
@@ -1149,10 +1149,10 @@ fn contain_outer_selfref_walker(node: &Node<'_>, depth: &mut u32) -> bool {
         // Deep-copy via `Expr::clone_in` into a transient scratch context for
         // the read-only walker (a derived `Expr::clone` panics on a
         // context-allocated child).
-        let cx = mcx::MemoryContext::new("contain_outer_selfref_walker scratch");
+        let cx = ::mcx::MemoryContext::new("contain_outer_selfref_walker scratch");
         if let Ok(owned) = e.clone_in(cx.mcx()) {
             if let Ok(e_node) = Node::mk_expr(cx.mcx(), owned) {
-                nodes_core::node_walker::expression_tree_walker(&e_node, &mut visit);
+                ::nodes_core::node_walker::expression_tree_walker(&e_node, &mut visit);
             }
         }
         return result;
@@ -1348,7 +1348,7 @@ fn inline_cte_walk_query_exprs<'mcx>(
                 }
             }
             // Recurse into the SubLink's testexpr children (same query level).
-            return nodes_core::node_walker::expression_tree_walker_mut(
+            return ::nodes_core::node_walker::expression_tree_walker_mut(
                 n,
                 &mut |c| visit_node(c, ctx, err, mcx),
                 mcx,
@@ -1356,16 +1356,16 @@ fn inline_cte_walk_query_exprs<'mcx>(
         }
         // Any other node: recurse into its expression children so SubLinks
         // nested inside (Aggref args, FuncExpr args, CaseExpr, ...) are reached.
-        nodes_core::node_walker::expression_tree_walker_mut(
+        ::nodes_core::node_walker::expression_tree_walker_mut(
             n,
             &mut |c| visit_node(c, ctx, err, mcx),
             mcx,
         )
     }
-    nodes_core::node_walker::query_tree_mutator(
+    ::nodes_core::node_walker::query_tree_mutator(
         query,
         &mut |n| visit_node(n, ctx, &mut err, mcx),
-        nodes_core::node_walker::QTW_IGNORE_RANGE_TABLE,
+        ::nodes_core::node_walker::QTW_IGNORE_RANGE_TABLE,
         mcx,
     );
 
@@ -1503,7 +1503,7 @@ fn list_contain_vars_of_level(list: &[Expr], levelsup: i32) -> bool {
     // The read-only walker needs an owned `Node`; deep-copy each conjunct via
     // `Expr::clone_in` into a transient scratch context (a derived `Expr::clone`
     // panics on a context-allocated child such as a SubLink).
-    let cx = mcx::MemoryContext::new("list_contain_vars_of_level scratch");
+    let cx = ::mcx::MemoryContext::new("list_contain_vars_of_level scratch");
     list.iter().any(|e| {
         let Ok(owned) = e.clone_in(cx.mcx()) else { return false };
         match Node::mk_expr(cx.mcx(), owned) {
@@ -1515,7 +1515,7 @@ fn list_contain_vars_of_level(list: &[Expr], levelsup: i32) -> bool {
 
 /// `contain_aggs_of_level((Node *) list, levelsup)` over a slice of `Expr`.
 fn list_contain_aggs_of_level(list: &[Expr], levelsup: i32) -> bool {
-    let cx = mcx::MemoryContext::new("list_contain_aggs_of_level scratch");
+    let cx = ::mcx::MemoryContext::new("list_contain_aggs_of_level scratch");
     list.iter().any(|e| {
         let Ok(owned) = e.clone_in(cx.mcx()) else { return false };
         match Node::mk_expr(cx.mcx(), owned) {
@@ -1761,7 +1761,7 @@ pub fn SS_make_initplan_output_param(
 
 /// Shared core of `SS_make_initplan_from_plan`: build the `SubPlan` node from a
 /// finished plan tree, intern the plan/subroot/subpath into the run's value
-/// store, and return the `SubPlan` [`pathnodes::NodeId`] in `root`'s
+/// store, and return the `SubPlan` [`::pathnodes::NodeId`] in `root`'s
 /// node_arena (WITHOUT appending it to `root.init_plans` OR to `glob.subplans`).
 ///
 /// Public so planagg's `build_minmax_agg_paths` (planner crate) can pre-build the
@@ -1783,7 +1783,7 @@ pub fn build_initplan_subplan_node<'mcx>(
     subroot: PlannerInfo,
     plan: Node<'mcx>,
     prm: &Param,
-) -> PgResult<(pathnodes::NodeId, pathnodes::PlanId)> {
+) -> PgResult<(::pathnodes::NodeId, ::pathnodes::PlanId)> {
     // Build the SubPlan node and fill in costs.
     let (first_col_type, first_col_typmod, first_col_collation) = get_first_col_type(&plan)?;
     let plan_parallel_safe = plan.plan_head().parallel_safe;
@@ -1894,7 +1894,7 @@ pub fn resolve_cte_subplan<'mcx>(
     scan_relid: u32,
 ) -> PgResult<(i32, i32)> {
     debug_assert!(scan_relid > 0);
-    let rte = pathnodes::planner_run::planner_rt_fetch(run, root, scan_relid);
+    let rte = ::pathnodes::planner_run::planner_rt_fetch(run, root, scan_relid);
     debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_CTE);
     debug_assert!(!rte.self_reference);
 
@@ -1979,7 +1979,7 @@ pub fn resolve_worktable_param(
     scan_relid: u32,
 ) -> PgResult<i32> {
     debug_assert!(scan_relid > 0);
-    let rte = pathnodes::planner_run::planner_rt_fetch(_run, root, scan_relid);
+    let rte = ::pathnodes::planner_run::planner_rt_fetch(_run, root, scan_relid);
     debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_CTE);
     debug_assert!(rte.self_reference);
 

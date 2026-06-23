@@ -9,7 +9,7 @@
 #![no_std]
 #![allow(non_camel_case_types)]
 
-use types_core::Size;
+use ::types_core::Size;
 
 /// `FPM_PAGE_SIZE` (`utils/freepage.h`).
 pub const FPM_PAGE_SIZE: Size = 4096;

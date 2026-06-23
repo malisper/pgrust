@@ -55,9 +55,9 @@ use types_core::{BlockNumber, OffsetNumber};
 use types_dsa::{DsaHandle, DsaPointer};
 use types_error::{PgError, PgResult};
 use ::nodes::bitmapset::{bitmapword, BITS_PER_BITMAPWORD};
-use types_storage::bufpage::MaxOffsetNumber;
-use types_tuple::heaptuple::{ItemPointerData, INVALID_OFFSET_NUMBER as InvalidOffsetNumber};
-pub use types_vacuum::vacuumlazy::{ReapBlockInfo, TidStore, TidStoreIterHandle};
+use ::types_storage::bufpage::MaxOffsetNumber;
+use ::types_tuple::heaptuple::{ItemPointerData, INVALID_OFFSET_NUMBER as InvalidOffsetNumber};
+pub use ::types_vacuum::vacuumlazy::{ReapBlockInfo, TidStore, TidStoreIterHandle};
 
 // ===========================================================================
 // Bit-index helpers (`WORDNUM` / `BITNUM` / `WORDS_PER_PAGE`).
@@ -330,7 +330,7 @@ fn tuple_offset_out_of_range(off: OffsetNumber) -> PgError {
 // ===========================================================================
 //
 // `struct TidStore` — the per-backend descriptor is the canonical
-// `types_vacuum::vacuumlazy::TidStore` handle. In C the struct holds the
+// `::types_vacuum::vacuumlazy::TidStore` handle. In C the struct holds the
 // radix-tree pointer (local or shared), the local `rt_context`
 // `MemoryContext`, and the optional DSA `area`; here the whole radix/DSA/LWLock
 // substrate is owned by the radix-tree provider and reached through the
@@ -375,8 +375,8 @@ pub fn TidStoreCreateLocal(max_bytes: usize, insert_only: bool) -> PgResult<TidS
 /// returned object is backend-local; the DSA segment and shared tree are the
 /// external substrate.
 pub fn TidStoreCreateShared(max_bytes: usize, tranche_id: i32) -> PgResult<TidStore> {
-    let mut dsa_init_size = types_dsa::DSA_DEFAULT_INIT_SEGMENT_SIZE;
-    let mut dsa_max_size = types_dsa::DSA_MAX_SEGMENT_SIZE;
+    let mut dsa_init_size = ::types_dsa::DSA_DEFAULT_INIT_SEGMENT_SIZE;
+    let mut dsa_max_size = ::types_dsa::DSA_MAX_SEGMENT_SIZE;
 
     // Choose the initial and maximum DSA segment sizes to be no longer than
     // 1/8 of max_bytes.
@@ -384,8 +384,8 @@ pub fn TidStoreCreateShared(max_bytes: usize, tranche_id: i32) -> PgResult<TidSt
         dsa_max_size >>= 1;
     }
 
-    if dsa_max_size < types_dsa::DSA_MIN_SEGMENT_SIZE {
-        dsa_max_size = types_dsa::DSA_MIN_SEGMENT_SIZE;
+    if dsa_max_size < ::types_dsa::DSA_MIN_SEGMENT_SIZE {
+        dsa_max_size = ::types_dsa::DSA_MIN_SEGMENT_SIZE;
     }
 
     if dsa_init_size > dsa_max_size {
@@ -401,8 +401,8 @@ pub fn TidStoreCreateShared(max_bytes: usize, tranche_id: i32) -> PgResult<TidSt
 /// the DSA area, `handle` is the value from [`TidStoreGetHandle`]. The returned
 /// object is backend-local.
 pub fn TidStoreAttach(area_handle: DsaHandle, handle: DsaPointer) -> PgResult<TidStore> {
-    debug_assert!(area_handle != types_dsa::DSA_HANDLE_INVALID);
-    debug_assert!(handle != types_dsa::INVALID_DSA_POINTER);
+    debug_assert!(area_handle != ::types_dsa::DSA_HANDLE_INVALID);
+    debug_assert!(handle != ::types_dsa::INVALID_DSA_POINTER);
     radixtree_attach::call(area_handle, handle)
 }
 

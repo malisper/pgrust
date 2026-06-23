@@ -13,9 +13,9 @@
 #![allow(non_upper_case_globals)]
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use types_plancache::UtilityStmtHandle;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::types_plancache::UtilityStmtHandle;
 
 /* ---------------------------------------------------------------------------
  * Catalog relation OIDs (`catalog/pg_*_d.h`).
@@ -108,7 +108,7 @@ pub struct DefElem<'mcx> {
     /// `defaction` — SET/ADD/DROP or unspecified.
     pub defaction: DefElemAction,
     /// `location` — parse location of the option, for `parser_errposition`.
-    pub location: types_core::primitive::ParseLoc,
+    pub location: ::types_core::primitive::ParseLoc,
 }
 
 impl<'mcx> DefElem<'mcx> {
@@ -120,7 +120,7 @@ impl<'mcx> DefElem<'mcx> {
         let defname = self.defname.clone_in(mcx)?;
         let arg = match &self.arg {
             None => None,
-            Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+            Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         };
         Ok(DefElem {
             defname,
@@ -139,7 +139,7 @@ impl<'mcx> DefElemArg<'mcx> {
             DefElemArg::Boolean(b) => DefElemArg::Boolean(*b),
             DefElemArg::String(s) => DefElemArg::String(s.clone_in(mcx)?),
             DefElemArg::NameList(names) => {
-                let mut out = mcx::vec_with_capacity_in(mcx, names.len())?;
+                let mut out = ::mcx::vec_with_capacity_in(mcx, names.len())?;
                 for n in names.iter() {
                     out.push(n.clone_in(mcx)?);
                 }
@@ -651,4 +651,4 @@ pub use CmdType::Utility as CMD_UTILITY;
 
 /// Re-export of the raw-parse-tree handle the IMPORT loop threads
 /// (`pg_parse_query` → `RawStmt *`).
-pub use types_plancache::RawStmtHandle;
+pub use ::types_plancache::RawStmtHandle;

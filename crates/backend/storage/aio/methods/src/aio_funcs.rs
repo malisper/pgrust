@@ -20,7 +20,7 @@ extern crate alloc;
 use alloc::string::ToString;
 use core::sync::atomic::Ordering;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use funcs_seams::{self as seam, AioRow};
 

@@ -22,19 +22,19 @@ use instrument as instrument;
 use lwlock_seams::{
     lwlock_acquire, lwlock_conditional_acquire, lwlock_initialize,
 };
-use activity_pgstat::kind_info::KindInfoBuilder;
-use activity_pgstat::registry;
+use ::activity_pgstat::kind_info::KindInfoBuilder;
+use ::activity_pgstat::registry;
 use init_small_seams::{my_backend_type, my_proc_number};
 use ::instr_time::instr_time_set_current;
-use types_core::instrument::instr_time;
-use types_core::init::{BackendType, BACKEND_NUM_TYPES};
-use types_core::TimestampTz;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{
+use ::types_core::instrument::instr_time;
+use ::types_core::init::{BackendType, BACKEND_NUM_TYPES};
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{
     pgstat_is_ioop_tracked_in_bytes, IOContext, IOObject, IOOp, PgStat_PendingIO,
     IOCONTEXT_NUM_TYPES, IOOBJECT_NUM_TYPES, IOOP_NUM_TYPES, PGSTAT_KIND_IO,
 };
-use types_pgstat::pgstat_internal::{
+use ::types_pgstat::pgstat_internal::{
     PgStat_KindInfo, PgStat_ShmemControl, PgStat_Snapshot,
 };
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
@@ -245,7 +245,7 @@ pub fn pgstat_io_flush_cb(nowait: bool) -> PgResult<bool> {
 
     let bktype = my_backend_type::call() as usize;
 
-    activity_pgstat::local::with_local(|l| {
+    ::activity_pgstat::local::with_local(|l| {
         let ctl: &mut PgStat_ShmemControl = l
             .shmem
             .as_mut()
@@ -253,7 +253,7 @@ pub fn pgstat_io_flush_cb(nowait: bool) -> PgResult<bool> {
         // Split-borrow PgStatShared_IO { locks, stats } so the lock guard's
         // `&LWLock` borrow and the `&mut PgStat_BktypeIO` write borrow target
         // disjoint fields (mirrors C's `&io.locks[bktype]` / `&io.stats.stats[bktype]`).
-        let types_pgstat::pgstat_internal::PgStatShared_IO {
+        let ::types_pgstat::pgstat_internal::PgStatShared_IO {
             ref locks,
             ref mut stats,
         } = ctl.io;
@@ -305,9 +305,9 @@ pub fn pgstat_io_flush_cb(nowait: bool) -> PgResult<bool> {
 
 /// Port of `PgStat_IO *pgstat_fetch_stat_io(void)`. In C this returns a pointer
 /// into the snapshot; here it returns a copy of the snapshot's IO stats.
-pub fn pgstat_fetch_stat_io() -> PgResult<types_pgstat::activity_pgstat::PgStat_IO> {
+pub fn pgstat_fetch_stat_io() -> PgResult<::types_pgstat::activity_pgstat::PgStat_IO> {
     pgstat_seams::snapshot_fixed::call(PGSTAT_KIND_IO)?;
-    Ok(activity_pgstat::local::with_local(|l| l.snapshot.io))
+    Ok(::activity_pgstat::local::with_local(|l| l.snapshot.io))
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +317,7 @@ pub fn pgstat_fetch_stat_io() -> PgResult<types_pgstat::activity_pgstat::PgStat_
 /// Port of `bool pgstat_bktype_io_stats_valid(PgStat_BktypeIO *backend_io,
 /// BackendType bktype)`.
 pub fn pgstat_bktype_io_stats_valid(
-    backend_io: &types_pgstat::activity_pgstat::PgStat_BktypeIO,
+    backend_io: &::types_pgstat::activity_pgstat::PgStat_BktypeIO,
     bktype: BackendType,
 ) -> bool {
     for io_object in 0..IOOBJECT_NUM_TYPES {
@@ -387,7 +387,7 @@ pub fn pgstat_io_reset_all_cb(ctl: &mut PgStat_ShmemControl, ts: TimestampTz) ->
         if i == 0 {
             ctl.io.stats.stat_reset_timestamp = ts;
         }
-        ctl.io.stats.stats[i] = types_pgstat::activity_pgstat::PgStat_BktypeIO::default();
+        ctl.io.stats.stats[i] = ::types_pgstat::activity_pgstat::PgStat_BktypeIO::default();
         guard.release()?;
     }
     Ok(())
@@ -653,7 +653,7 @@ fn io_kind_info() -> PgStat_KindInfo {
         snapshot_ctl_off: 0,
         shared_ctl_off: 0,
         shared_data_off: 0,
-        shared_data_len: core::mem::size_of::<types_pgstat::activity_pgstat::PgStat_IO>() as u32,
+        shared_data_len: core::mem::size_of::<::types_pgstat::activity_pgstat::PgStat_IO>() as u32,
         pending_size: 0,
         name: "io",
     }
@@ -670,13 +670,13 @@ pub fn init_seams() {
             .flush_static_cb(pgstat_io_flush_cb)
             // On-disk (de)serialization of the typed `PgStat_IO` field.
             .read_fixed_cb(|ctl, bytes| {
-                ctl.io.stats = activity_pgstat::kind_info::pgstat_deserialize_pod::<
-                    types_pgstat::activity_pgstat::PgStat_IO,
+                ctl.io.stats = ::activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                    ::types_pgstat::activity_pgstat::PgStat_IO,
                 >(bytes);
                 Ok(())
             })
             .write_fixed_cb(|snap| {
-                activity_pgstat::kind_info::pgstat_serialize_pod(&snap.io)
+                ::activity_pgstat::kind_info::pgstat_serialize_pod(&snap.io)
             }),
     );
 

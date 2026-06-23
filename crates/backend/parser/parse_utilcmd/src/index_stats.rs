@@ -9,10 +9,10 @@
 
 use mcx::{Mcx, PgString};
 
-use utils_error::ereport;
-use types_core::Oid;
+use ::utils_error::ereport;
+use ::types_core::Oid;
 use types_error::{PgResult, ERRCODE_INVALID_COLUMN_REFERENCE, ERROR};
-use types_storage::lock::{AccessShareLock, NoLock};
+use ::types_storage::lock::{AccessShareLock, NoLock};
 
 use ::nodes::ddlnodes::{IndexElem, StatsElem};
 use ::nodes::nodes::Node;
@@ -20,12 +20,12 @@ use ::nodes::parsestmt::ParseExprKind::{
     EXPR_KIND_INDEX_EXPRESSION, EXPR_KIND_INDEX_PREDICATE, EXPR_KIND_STATS_EXPRESSION,
 };
 
-use common_relation::relation_open;
-use table::table_close;
-use clause::transformWhereClause;
-use parse_collate::assign_expr_collations;
-use parse_expr::transformExpr;
-use parse_target::FigureIndexColname;
+use ::common_relation::relation_open;
+use ::table::table_close;
+use ::clause::transformWhereClause;
+use ::parse_collate::assign_expr_collations;
+use ::parse_expr::transformExpr;
+use ::parse_target::FigureIndexColname;
 use parser_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
 use small1::{free_parsestate, make_parsestate};
 
@@ -39,7 +39,7 @@ pub fn transformIndexStmt<'mcx>(
     stmt: NodePtr<'mcx>,
     query_string: &str,
 ) -> PgResult<NodePtr<'mcx>> {
-    let stmt_node = mcx::PgBox::into_inner(stmt);
+    let stmt_node = ::mcx::PgBox::into_inner(stmt);
     let stmt_tag = stmt_node.node_tag();
     let mut stmt = match stmt_node.into_indexstmt() {
         Some(s) => s,
@@ -48,7 +48,7 @@ pub fn transformIndexStmt<'mcx>(
 
     // Nothing to do if statement already transformed.
     if stmt.transformed {
-        return mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt)?);
+        return ::mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt)?);
     }
 
     // Set up pstate.
@@ -67,7 +67,7 @@ pub fn transformIndexStmt<'mcx>(
 
     // take care of the where clause
     if stmt.whereClause.is_some() {
-        let clause = stmt.whereClause.take().map(|n| mcx::PgBox::into_inner(n));
+        let clause = stmt.whereClause.take().map(|n| ::mcx::PgBox::into_inner(n));
         let where_expr =
             transformWhereClause(mcx, &mut pstate, clause, EXPR_KIND_INDEX_PREDICATE, "WHERE")?;
         // Bring the parser-arena `'static` qual into `mcx` for the in-place
@@ -81,7 +81,7 @@ pub fn transformIndexStmt<'mcx>(
             assign_expr_collations(Some(&pstate), e)?;
         }
         stmt.whereClause = match where_expr {
-            Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
+            Some(e) => Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
             None => None,
         };
     }
@@ -113,7 +113,7 @@ pub fn transformIndexStmt<'mcx>(
     // Mark statement as successfully transformed.
     stmt.transformed = true;
 
-    mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt)?)
+    ::mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, stmt)?)
 }
 
 /// The per-`IndexElem` expression transform from `transformIndexStmt`.
@@ -134,7 +134,7 @@ fn transform_index_elem_expr<'mcx>(
     }
 
     // Now do parse transformation of the expression.
-    let expr = ielem.expr.take().map(|n| mcx::PgBox::into_inner(n));
+    let expr = ielem.expr.take().map(|n| ::mcx::PgBox::into_inner(n));
     let t = transformExpr(pstate, expr, EXPR_KIND_INDEX_EXPRESSION)?;
     // Bring the parser-arena `'static` result into `mcx` for the in-place
     // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
@@ -148,7 +148,7 @@ fn transform_index_elem_expr<'mcx>(
         assign_expr_collations(Some(pstate), e)?;
     }
     ielem.expr = match t {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
+        Some(e) => Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
         None => None,
     };
     Ok(())
@@ -162,7 +162,7 @@ pub fn transformStatsStmt<'mcx>(
     stmt: NodePtr<'mcx>,
     query_string: &str,
 ) -> PgResult<NodePtr<'mcx>> {
-    let stmt_node = mcx::PgBox::into_inner(stmt);
+    let stmt_node = ::mcx::PgBox::into_inner(stmt);
     let stmt_tag = stmt_node.node_tag();
     let mut stmt = match stmt_node.into_createstatsstmt() {
         Some(s) => s,
@@ -173,7 +173,7 @@ pub fn transformStatsStmt<'mcx>(
 
     // Nothing to do if statement already transformed.
     if stmt.transformed {
-        return mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt)?);
+        return ::mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt)?);
     }
 
     // Set up pstate.
@@ -213,7 +213,7 @@ pub fn transformStatsStmt<'mcx>(
     // Mark statement as successfully transformed.
     stmt.transformed = true;
 
-    mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt)?)
+    ::mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt)?)
 }
 
 /// The per-`StatsElem` expression transform from `transformStatsStmt`.
@@ -226,7 +226,7 @@ fn transform_stats_elem_expr<'mcx>(
         return Ok(());
     }
     // Now do parse transformation of the expression.
-    let expr = selem.expr.take().map(|n| mcx::PgBox::into_inner(n));
+    let expr = selem.expr.take().map(|n| ::mcx::PgBox::into_inner(n));
     let t = transformExpr(pstate, expr, EXPR_KIND_STATS_EXPRESSION)?;
     // Bring the parser-arena `'static` result into `mcx` for the in-place
     // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
@@ -240,7 +240,7 @@ fn transform_stats_elem_expr<'mcx>(
         assign_expr_collations(Some(pstate), e)?;
     }
     selem.expr = match t {
-        Some(e) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
+        Some(e) => Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?),
         None => None,
     };
     Ok(())

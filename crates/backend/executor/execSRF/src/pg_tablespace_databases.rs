@@ -17,10 +17,10 @@
 //! by-OID builtin registry whose tag-only `resultinfo` cannot carry the live
 //! `ReturnSetInfo` (the WONTFIX dual-home).
 
-use types_core::Oid;
+use ::types_core::Oid;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 
 use ::funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};

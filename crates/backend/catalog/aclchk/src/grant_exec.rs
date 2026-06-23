@@ -26,23 +26,23 @@ use types_acl::{
     ACL_ID_PUBLIC, ACL_INSERT, ACL_MAINTAIN, ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT,
     ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use types_catalog::pg_attribute::{
+use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attacl, Anum_pg_attribute_attisdropped, Anum_pg_attribute_attname,
     AttributeRelationId,
 };
-use types_catalog::pg_class::{
+use ::types_catalog::pg_class::{
     Anum_pg_class_oid, Anum_pg_class_relacl, Anum_pg_class_relkind, Anum_pg_class_relname,
     Anum_pg_class_relnamespace, Anum_pg_class_relnatts, Anum_pg_class_relowner, RelationRelationId,
 };
-use types_catalog::pg_type::{
+use ::types_catalog::pg_type::{
     Anum_pg_type_typelem, Anum_pg_type_typsubscript, Anum_pg_type_typtype, TypeRelationId,
 };
-use types_catalog::pg_proc::{
+use ::types_catalog::pg_proc::{
     Anum_pg_proc_oid, Anum_pg_proc_prokind, Anum_pg_proc_pronamespace, ProcedureRelationId,
     PROKIND_PROCEDURE,
 };
-use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
+use ::types_core::primitive::{InvalidOid, Oid};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_GRANT_OPERATION,
     ERRCODE_WRONG_OBJECT_TYPE, ERRCODE_WARNING_PRIVILEGE_NOT_GRANTED,
@@ -54,41 +54,41 @@ use ::nodes::ddlnodes::{ACL_TARGET_ALL_IN_SCHEMA, ACL_TARGET_OBJECT};
 use ::nodes::parsenodes::{
     DropBehavior, ObjectType, RoleSpec as ParseRoleSpec, RoleSpecType, OBJECT_SCHEMA,
 };
-use types_tuple::access::{
+use ::types_tuple::access::{
     RangeVar as AccessRangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX,
     RELKIND_SEQUENCE, RELKIND_VIEW,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use objectaddress::consts::{
+use ::objectaddress::consts::{
     NamespaceRelationId, DefaultAclOidIndexId, Anum_pg_default_acl_defaclrole,
     Anum_pg_default_acl_defaclnamespace, Anum_pg_default_acl_defaclobjtype,
     Anum_pg_default_acl_defaclacl, DEFACLOBJ_RELATION, DEFACLOBJ_SEQUENCE, DEFACLOBJ_FUNCTION,
     DEFACLOBJ_TYPE, DEFACLOBJ_NAMESPACE, DEFACLOBJ_LARGEOBJECT,
 };
-use objectaddress::consts::Anum_pg_default_acl_oid;
-use objectaddress::properties::{
+use ::objectaddress::consts::Anum_pg_default_acl_oid;
+use ::objectaddress::properties::{
     get_object_attnum_acl, get_object_attnum_name, get_object_attnum_owner, get_object_catcache_oid,
     get_object_class_descr, get_object_type,
 };
-use adt_acl::acl_ops::{
+use ::adt_acl::acl_ops::{
     aclcopy, aclequal, aclitemsort, aclmembers, aclupdate, make_empty_acl, ACL_MODECHG_ADD,
     ACL_MODECHG_DEL,
 };
-use adt_acl::acldefault::acldefault;
-use adt_acl::role_membership::{get_rolespec_oid, select_best_grantor};
+use ::adt_acl::acldefault::acldefault;
+use ::adt_acl::role_membership::{get_rolespec_oid, select_best_grantor};
 
 use table::{table_close, table_open};
 use heaptuple::{heap_form_tuple, heap_modify_tuple};
-use indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
+use ::indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
 use cache_syscache::{
     SearchSysCache3, SearchSysCacheLocked1, SysCacheGetAttr, SysCacheGetAttrNotNull,
 };
-use cache::syscache::SysCacheKey;
-use datum::Datum as KeyDatum;
-use types_storage::lock::{AccessShareLock, RowExclusiveLock};
-use types_tuple::heaptuple::{Datum, FormedTuple};
+use ::cache::syscache::SysCacheKey;
+use ::datum::Datum as KeyDatum;
+use ::types_storage::lock::{AccessShareLock, RowExclusiveLock};
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
 
 use crate::string_to_privilege;
 
@@ -166,7 +166,7 @@ fn merge_acl_with_grant<'mcx>(
     let mut new_acl: &mut [AclItem] = {
         // Start from a private copy so aclupdate's pfree(old)-equivalent churn
         // never frees the caller's old_acl.
-        let buf = mcx::vec_with_capacity_in::<AclItem>(mcx, old_acl.len())?;
+        let buf = ::mcx::vec_with_capacity_in::<AclItem>(mcx, old_acl.len())?;
         let mut buf = buf;
         for it in old_acl {
             buf.push(*it);
@@ -214,7 +214,7 @@ fn restrict_and_check_grant(
     grantor_id: Oid,
     objtype: ObjectType,
     objname: &str,
-    att_number: types_core::AttrNumber,
+    att_number: ::types_core::AttrNumber,
     colname: Option<&str>,
 ) -> PgResult<AclMode> {
     let whole_mask = match objtype {
@@ -335,7 +335,7 @@ pub(crate) fn acl_to_datum<'mcx>(mcx: Mcx<'mcx>, acl: &[AclItem]) -> PgResult<Da
     let data_off = maxalign(ARRAYTYPE_HDRSZ + 2 * 4); // ndim=1: dims[1] + lbound[1]
     let total = data_off + n * SIZEOF_ACLITEM;
 
-    let mut bytes: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut bytes: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     bytes.resize(total, 0);
 
     // vl_len_ : SET_VARSIZE_4B(total) = (total << 2) (4-byte, uncompressed).
@@ -380,7 +380,7 @@ pub fn acl_change_owner_datum<'mcx>(
     new_owner_id: Oid,
 ) -> PgResult<Datum<'mcx>> {
     let old_acl = decode_acl(mcx, acl_on_disk)?;
-    let new_acl = adt_acl::acl_ops::aclnewowner(mcx, old_acl, old_owner_id, new_owner_id)?;
+    let new_acl = ::adt_acl::acl_ops::aclnewowner(mcx, old_acl, old_owner_id, new_owner_id)?;
     acl_to_datum(mcx, new_acl)
 }
 
@@ -460,7 +460,7 @@ fn exec_grant_common(
         let (old_acl, noldmembers_vec): (&[AclItem], Option<PgVec<Oid>>);
         let (acl_datum, acl_is_null) = SysCacheGetAttr(mcx, cacheid, &tuple, acl_attnum)?;
         let old_acl_owned: &[AclItem];
-        let mut old_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+        let mut old_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
         if acl_is_null {
             old_acl_owned = acldefault(mcx, get_object_type(classid, objectid)?, owner_id)?;
         } else {
@@ -516,16 +516,16 @@ fn exec_grant_common(
             owner_id,
         )?;
 
-        let mut new_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+        let mut new_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
         for m in aclmembers(mcx, new_acl)?.iter() {
             new_members.push(*m);
         }
 
         // replaces[acl-1]=true; values[acl-1]=PointerGetDatum(new_acl).
         let natts = relation.rd_att.natts as usize;
-        let mut values: PgVec<Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
-        let mut nulls: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
-        let mut replaces: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut values: PgVec<Datum> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replaces: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
         for _ in 0..natts {
             values.push(Datum::ByVal(0));
             nulls.push(false);
@@ -552,7 +552,7 @@ fn exec_grant_common(
         // Update the shared dependency ACL info.
         let old_for_dep = match noldmembers_vec {
             Some(v) => v,
-            None => mcx::vec_with_capacity_in(mcx, 0)?,
+            None => ::mcx::vec_with_capacity_in(mcx, 0)?,
         };
         pg_shdepend_seams::updateAclDependencies::call(
             mcx, classid, objectid, 0, owner_id, old_for_dep, new_members,
@@ -606,7 +606,7 @@ fn exec_grant_type_check(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>) ->
 /// check `ExecGrant_common` runs for `OBJECT_LANGUAGE`: GRANT/REVOKE is rejected
 /// on an untrusted language, since only superusers may use untrusted languages.
 fn exec_grant_language_check(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>) -> PgResult<()> {
-    use types_catalog::pg_language::{Anum_pg_language_lanname, Anum_pg_language_lanpltrusted};
+    use ::types_catalog::pg_language::{Anum_pg_language_lanname, Anum_pg_language_lanpltrusted};
 
     let lanpltrusted =
         SysCacheGetAttrNotNull(mcx, cacheid, tuple, Anum_pg_language_lanpltrusted as i32)?.as_bool();
@@ -724,7 +724,7 @@ fn exec_grant_relation(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<
         // corresponds to FirstLowInvalidHeapAttributeNumber.
         let num_col_privileges =
             (relnatts as i32 - FirstLowInvalidHeapAttributeNumber as i32 + 1) as usize;
-        let mut col_privileges: PgVec<AclMode> = mcx::vec_with_capacity_in(mcx, num_col_privileges)?;
+        let mut col_privileges: PgVec<AclMode> = ::mcx::vec_with_capacity_in(mcx, num_col_privileges)?;
         col_privileges.resize(num_col_privileges, ACL_NO_RIGHTS);
         let mut have_col_privileges = false;
 
@@ -748,7 +748,7 @@ fn exec_grant_relation(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<
         // substitute the proper default.
         let (acl_datum, acl_is_null) = SysCacheGetAttr(mcx, RELOID, &tuple, acl_attnum)?;
         let old_acl: &[AclItem];
-        let mut old_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+        let mut old_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
         let has_old_members;
         if acl_is_null {
             let default_objtype = if relkind == RELKIND_SEQUENCE {
@@ -772,7 +772,7 @@ fn exec_grant_relation(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<
 
         // Need an extra copy of original rel ACL for column handling.
         let old_rel_acl: &[AclItem] = {
-            let buf = mcx::vec_with_capacity_in::<AclItem>(mcx, old_acl.len())?;
+            let buf = ::mcx::vec_with_capacity_in::<AclItem>(mcx, old_acl.len())?;
             let mut buf = buf;
             for it in old_acl {
                 buf.push(*it);
@@ -818,15 +818,15 @@ fn exec_grant_relation(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<
                 owner_id,
             )?;
 
-            let mut new_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+            let mut new_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
             for m in aclmembers(mcx, new_acl)?.iter() {
                 new_members.push(*m);
             }
 
             let natts = relation.rd_att.natts as usize;
-            let mut values: PgVec<Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
-            let mut nulls: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
-            let mut replaces: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut values: PgVec<Datum> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut nulls: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+            let mut replaces: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
             for _ in 0..natts {
                 values.push(Datum::ByVal(0));
                 nulls.push(false);
@@ -853,7 +853,7 @@ fn exec_grant_relation(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<
             let old_for_dep = if has_old_members {
                 old_members
             } else {
-                mcx::vec_with_capacity_in(mcx, 0)?
+                ::mcx::vec_with_capacity_in(mcx, 0)?
             };
             pg_shdepend_seams::updateAclDependencies::call(
                 mcx,
@@ -921,7 +921,7 @@ fn exec_grant_relation(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<
                     istmt,
                     rel_oid,
                     &relname,
-                    attnum as types_core::AttrNumber,
+                    attnum as ::types_core::AttrNumber,
                     owner_id,
                     col_privileges[i],
                     &att_relation,
@@ -946,16 +946,16 @@ fn exec_grant_relation(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<
 /// column is recomputed via `merge_acl_with_grant` and written back with
 /// `heap_modify_tuple` + `CatalogTupleUpdate`.
 fn exec_grant_largeobject(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<()> {
-    use scankey::ScanKeyInit;
+    use ::scankey::ScanKeyInit;
     use genam_seams as genam;
-    use objectaddress::consts::{
+    use ::objectaddress::consts::{
         Anum_pg_largeobject_metadata_lomacl, Anum_pg_largeobject_metadata_lomowner,
         Anum_pg_largeobject_metadata_oid, LargeObjectMetadataOidIndexId,
         LargeObjectMetadataRelationId, LargeObjectRelationId,
     };
-    use heaptuple::heap_getattr;
-    use types_core::fmgr::F_OIDEQ;
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::heaptuple::heap_getattr;
+    use ::types_core::fmgr::F_OIDEQ;
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
     if istmt.all_privs && istmt.privileges == ACL_NO_RIGHTS {
         istmt.privileges = ACL_ALL_RIGHTS_LARGEOBJECT;
@@ -1000,7 +1000,7 @@ fn exec_grant_largeobject(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResu
         let (acl_datum, acl_is_null) = heap_getattr(mcx, &tuple, acl_attnum, &relation.rd_att)?;
 
         let old_acl: &[AclItem];
-        let mut old_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+        let mut old_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
         let has_old_members;
         if acl_is_null {
             old_acl = acldefault(mcx, ObjectType::Largeobject, owner_id)?;
@@ -1058,16 +1058,16 @@ fn exec_grant_largeobject(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResu
             owner_id,
         )?;
 
-        let mut new_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+        let mut new_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
         for m in aclmembers(mcx, new_acl)?.iter() {
             new_members.push(*m);
         }
 
         // finished building new ACL value, now insert it.
         let natts = relation.rd_att.natts as usize;
-        let mut values: PgVec<Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
-        let mut nulls: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
-        let mut replaces: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut values: PgVec<Datum> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replaces: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
         for _ in 0..natts {
             values.push(Datum::ByVal(0));
             nulls.push(false);
@@ -1091,7 +1091,7 @@ fn exec_grant_largeobject(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResu
         let old_for_dep = if has_old_members {
             old_members
         } else {
-            mcx::vec_with_capacity_in(mcx, 0)?
+            ::mcx::vec_with_capacity_in(mcx, 0)?
         };
         pg_shdepend_seams::updateAclDependencies::call(
             mcx,
@@ -1137,7 +1137,7 @@ fn expand_col_privileges(
                 .map(|n| n.as_str().to_string())
                 .unwrap_or_default();
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+                .errcode(::types_error::ERRCODE_UNDEFINED_COLUMN)
                 .errmsg(format!(
                     "column \"{colname}\" of relation \"{relname}\" does not exist"
                 ))
@@ -1180,7 +1180,7 @@ fn expand_all_col_privileges(
             continue;
         }
 
-        let att_tuple = cache_syscache::SearchSysCache2(
+        let att_tuple = ::cache_syscache::SearchSysCache2(
             mcx,
             ATTNUM,
             SysCacheKey::Value(KeyDatum::from_oid(table_oid)),
@@ -1214,7 +1214,7 @@ fn exec_grant_attribute(
     istmt: &InternalGrant<'_>,
     rel_oid: Oid,
     relname: &str,
-    attnum: types_core::AttrNumber,
+    attnum: ::types_core::AttrNumber,
     owner_id: Oid,
     col_privileges: AclMode,
     att_relation: &rel::Relation<'_>,
@@ -1223,7 +1223,7 @@ fn exec_grant_attribute(
     const ATTNUM: i32 = 7;
     let attacl_attnum = Anum_pg_attribute_attacl as i32;
 
-    let att_tuple = cache_syscache::SearchSysCache2(
+    let att_tuple = ::cache_syscache::SearchSysCache2(
         mcx,
         ATTNUM,
         SysCacheKey::Value(KeyDatum::from_oid(rel_oid)),
@@ -1241,7 +1241,7 @@ fn exec_grant_attribute(
     // proper default.
     let (acl_datum, acl_is_null) = SysCacheGetAttr(mcx, ATTNUM, &att_tuple, attacl_attnum)?;
     let old_acl: &[AclItem];
-    let mut old_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut old_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let has_old_members;
     if acl_is_null {
         old_acl = acldefault(mcx, ObjectType::Column, owner_id)?;
@@ -1262,7 +1262,7 @@ fn exec_grant_attribute(
     // as well as the per-column ACL. Build a new ACL that is their
     // concatenation.
     let merged_acl =
-        adt_acl::acl_ops::aclconcat(mcx, old_rel_acl, old_acl)?;
+        ::adt_acl::acl_ops::aclconcat(mcx, old_rel_acl, old_acl)?;
 
     let user_id = miscinit_seams::get_user_id::call();
     let (grantor_id, avail_goptions) =
@@ -1294,7 +1294,7 @@ fn exec_grant_attribute(
         owner_id,
     )?;
 
-    let mut new_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut new_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     for m in aclmembers(mcx, new_acl)?.iter() {
         new_members.push(*m);
     }
@@ -1304,9 +1304,9 @@ fn exec_grant_attribute(
     // times for any relation-level REVOKE even if there were never any column
     // GRANTs.
     let natts = att_relation.rd_att.natts as usize;
-    let mut values: PgVec<Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
-    let mut nulls: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
-    let mut replaces: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut values: PgVec<Datum> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut nulls: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut replaces: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
     for _ in 0..natts {
         values.push(Datum::ByVal(0));
         nulls.push(false);
@@ -1337,7 +1337,7 @@ fn exec_grant_attribute(
         let old_for_dep = if has_old_members {
             old_members
         } else {
-            mcx::vec_with_capacity_in(mcx, 0)?
+            ::mcx::vec_with_capacity_in(mcx, 0)?
         };
         pg_shdepend_seams::updateAclDependencies::call(
             mcx,
@@ -1375,7 +1375,7 @@ pub(crate) fn decode_acl<'mcx>(mcx: Mcx<'mcx>, on_disk: &[u8]) -> PgResult<&'mcx
     } else {
         maxalign(ARRAYTYPE_HDRSZ + 2 * 4 * ndim.max(1) as usize)
     };
-    let mut items: PgVec<AclItem> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut items: PgVec<AclItem> = ::mcx::vec_with_capacity_in(mcx, n)?;
     for i in 0..n {
         let off = data_off + i * SIZEOF_ACLITEM;
         let b = raw
@@ -1405,7 +1405,7 @@ fn read_name(mcx: Mcx<'_>, cacheid: i32, tuple: &FormedTuple<'_>, attnum: i32) -
 
 /// `ExecGrantStmt_oids(istmt)` (aclchk.c) — dispatch on object type.
 fn exec_grant_stmt_oids(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResult<()> {
-    use objectaddress::consts::{
+    use ::objectaddress::consts::{
         DatabaseRelationId, ForeignDataWrapperRelationId, ForeignServerRelationId,
         LanguageRelationId, TableSpaceRelationId,
     };
@@ -1490,14 +1490,14 @@ fn rolespec_oid(role: &DdlRoleSpec<'_>, mcx: Mcx<'_>) -> PgResult<Oid> {
 
 // `ACL_ALL_RIGHTS_FUNCTION` / `ACL_ALL_RIGHTS_TYPE` / `ACL_ALL_RIGHTS_LARGEOBJECT`
 // (`utils/acl.h`).
-const ACL_ALL_RIGHTS_FUNCTION: AclMode = types_acl::ACL_EXECUTE;
+const ACL_ALL_RIGHTS_FUNCTION: AclMode = ::types_acl::ACL_EXECUTE;
 const ACL_ALL_RIGHTS_TYPE: AclMode = ACL_USAGE;
 const ACL_ALL_RIGHTS_LARGEOBJECT: AclMode = ACL_SELECT | ACL_UPDATE;
 // `ACL_ALL_RIGHTS_LANGUAGE` (`utils/acl.h`).
 const ACL_ALL_RIGHTS_LANGUAGE: AclMode = ACL_USAGE;
 // `ACL_ALL_RIGHTS_DATABASE` (`utils/acl.h`).
 const ACL_ALL_RIGHTS_DATABASE: AclMode =
-    types_acl::ACL_CREATE | types_acl::ACL_CREATE_TEMP | types_acl::ACL_CONNECT;
+    ::types_acl::ACL_CREATE | ::types_acl::ACL_CREATE_TEMP | ::types_acl::ACL_CONNECT;
 
 /// `InternalDefaultACL` (`aclchk.c`) — the internal form
 /// `ExecAlterDefaultPrivilegesStmt` builds before dispatching to
@@ -1582,7 +1582,7 @@ pub fn exec_alter_default_privileges_stmt<'mcx>(
         objtype: action.objtype,
         all_privs: false,
         privileges: ACL_NO_RIGHTS,
-        grantees: mcx::vec_with_capacity_in(mcx, action.grantees.len())?,
+        grantees: ::mcx::vec_with_capacity_in(mcx, action.grantees.len())?,
         grant_option: action.grant_option,
         behavior: action.behavior,
     };
@@ -1672,9 +1672,9 @@ pub fn exec_alter_default_privileges_stmt<'mcx>(
             // FOR ROLE is just a syntactic convenience and doesn't give any
             // special privileges.
             let user_id = miscinit_seams::get_user_id::call();
-            if !adt_acl::role_membership::has_privs_of_role(user_id, iacls.roleid)? {
+            if !::adt_acl::role_membership::has_privs_of_role(user_id, iacls.roleid)? {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                    .errcode(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
                     .errmsg("permission denied to change default privileges".to_string())
                     .into_error());
             }
@@ -1736,7 +1736,7 @@ fn set_default_acls_in_schemas<'mcx>(
 /// `SetDefaultACL(iacls)` (aclchk.c): create, update or remove a
 /// `pg_default_acl` entry holding the default ACL described by `iacls`.
 fn set_default_acl<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'mcx>) -> PgResult<()> {
-    use types_catalog::catalog::DEFAULT_ACL_RELATION_ID;
+    use ::types_catalog::catalog::DEFAULT_ACL_RELATION_ID;
 
     const DEFACLROLENSPOBJ: i32 = 22;
     let acl_attnum = Anum_pg_default_acl_defaclacl as i32;
@@ -1828,7 +1828,7 @@ fn set_default_acl<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'mcx>) -> Pg
 
     // Determine old ACL + members.
     let old_acl: &[AclItem];
-    let mut old_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut old_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let is_new;
     let existing_oid;
     match &existing {
@@ -1886,14 +1886,14 @@ fn set_default_acl<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'mcx>) -> Pg
     // aclitemsort + aclequal both new_acl and def_acl (private copies so we can
     // sort in place).
     let new_acl: &mut [AclItem] = {
-        let mut buf = mcx::vec_with_capacity_in::<AclItem>(mcx, new_acl_ref.len())?;
+        let mut buf = ::mcx::vec_with_capacity_in::<AclItem>(mcx, new_acl_ref.len())?;
         for it in new_acl_ref.iter() {
             buf.push(*it);
         }
         buf.leak()
     };
     let def_acl_sorted: &mut [AclItem] = {
-        let mut buf = mcx::vec_with_capacity_in::<AclItem>(mcx, def_acl.len())?;
+        let mut buf = ::mcx::vec_with_capacity_in::<AclItem>(mcx, def_acl.len())?;
         for it in def_acl.iter() {
             buf.push(*it);
         }
@@ -1915,9 +1915,9 @@ fn set_default_acl<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'mcx>) -> Pg
         }
     } else {
         let natts = rel.rd_att.natts as usize;
-        let mut values: PgVec<Datum> = mcx::vec_with_capacity_in(mcx, natts)?;
-        let mut nulls: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
-        let mut replaces: PgVec<bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut values: PgVec<Datum> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut nulls: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+        let mut replaces: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
         for _ in 0..natts {
             values.push(Datum::ByVal(0));
             nulls.push(false);
@@ -1929,7 +1929,7 @@ fn set_default_acl<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'mcx>) -> Pg
             def_acl_oid = catalog_catalog::GetNewOidWithIndex(
                 &rel,
                 DefaultAclOidIndexId,
-                Anum_pg_default_acl_oid as types_core::AttrNumber,
+                Anum_pg_default_acl_oid as ::types_core::AttrNumber,
             )?;
             values[(Anum_pg_default_acl_oid - 1) as usize] = Datum::from_oid(def_acl_oid);
             values[(Anum_pg_default_acl_defaclrole - 1) as usize] = Datum::from_oid(iacls.roleid);
@@ -1963,12 +1963,12 @@ fn set_default_acl<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'mcx>) -> Pg
                 iacls.roleid,
             )?;
             if iacls.nspid != InvalidOid {
-                let myself = types_catalog::catalog_dependency::ObjectAddress {
+                let myself = ::types_catalog::catalog_dependency::ObjectAddress {
                     classId: DEFAULT_ACL_RELATION_ID,
                     objectId: def_acl_oid,
                     objectSubId: 0,
                 };
-                let referenced = types_catalog::catalog_dependency::ObjectAddress {
+                let referenced = ::types_catalog::catalog_dependency::ObjectAddress {
                     classId: NamespaceRelationId,
                     objectId: iacls.nspid,
                     objectSubId: 0,
@@ -1977,13 +1977,13 @@ fn set_default_acl<'mcx>(mcx: Mcx<'mcx>, iacls: &InternalDefaultACL<'mcx>) -> Pg
                     mcx,
                     &myself,
                     &referenced,
-                    types_catalog::catalog_dependency::DEPENDENCY_AUTO,
+                    ::types_catalog::catalog_dependency::DEPENDENCY_AUTO,
                 )?;
             }
         }
 
         // Update the shared dependency ACL info.
-        let mut new_members: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+        let mut new_members: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
         for m in aclmembers(mcx, new_acl)?.iter() {
             new_members.push(*m);
         }
@@ -2030,17 +2030,17 @@ pub(crate) fn remove_role_from_object_acl<'mcx>(
     classid: Oid,
     objid: Oid,
 ) -> PgResult<()> {
-    use objectaddress::consts::{
+    use ::objectaddress::consts::{
         DatabaseRelationId, DefaultAclRelationId, ForeignDataWrapperRelationId,
         ForeignServerRelationId, LanguageRelationId, LargeObjectRelationId,
         ParameterAclRelationId, TableSpaceRelationId,
     };
 
     if classid == DefaultAclRelationId {
-        use scankey::ScanKeyInit;
+        use ::scankey::ScanKeyInit;
         use genam_seams as genam;
-        use types_core::fmgr::F_OIDEQ;
-        use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+        use ::types_core::fmgr::F_OIDEQ;
+        use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
         // first fetch info needed by SetDefaultACL
         let rel = table_open(mcx, DefaultAclRelationId, AccessShareLock)?;
@@ -2066,7 +2066,7 @@ pub(crate) fn remove_role_from_object_acl<'mcx>(
             )));
         };
 
-        let cols = heaptuple::heap_deform_tuple(
+        let cols = ::heaptuple::heap_deform_tuple(
             mcx,
             &tuple.tuple,
             &rel.rd_att,
@@ -2108,7 +2108,7 @@ pub(crate) fn remove_role_from_object_acl<'mcx>(
         scan.end()?;
         rel.close(AccessShareLock)?;
 
-        let mut grantees: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+        let mut grantees: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 1)?;
         grantees.push(roleid);
 
         let iacls = InternalDefaultACL {
@@ -2144,9 +2144,9 @@ pub(crate) fn remove_role_from_object_acl<'mcx>(
         }
     };
 
-    let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+    let mut objects: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 1)?;
     objects.push(objid);
-    let mut grantees: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 1)?;
+    let mut grantees: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 1)?;
     grantees.push(roleid);
 
     let mut istmt = InternalGrant {
@@ -2155,7 +2155,7 @@ pub(crate) fn remove_role_from_object_acl<'mcx>(
         objects,
         all_privs: true,
         privileges: ACL_NO_RIGHTS,
-        col_privs: mcx::vec_with_capacity_in(mcx, 0)?,
+        col_privs: ::mcx::vec_with_capacity_in(mcx, 0)?,
         grantees,
         grant_option: false,
         behavior: DropBehavior::Cascade,
@@ -2199,7 +2199,7 @@ pub fn execute_grant_stmt(mcx: Mcx<'_>, stmt: &Node<'_>) -> PgResult<()> {
     };
 
     // Convert the grantee RoleSpec list into an Oid list (PUBLIC -> ACL_ID_PUBLIC).
-    let mut grantees: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, stmt.grantees.len())?;
+    let mut grantees: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, stmt.grantees.len())?;
     for g in stmt.grantees.iter() {
         let Some(rs) = (**g).as_rolespec() else {
             return Err(PgError::error("ExecuteGrantStmt: grantee is not a RoleSpec"));
@@ -2215,7 +2215,7 @@ pub fn execute_grant_stmt(mcx: Mcx<'_>, stmt: &Node<'_>) -> PgResult<()> {
     // specifications are set aside in col_privs; everything else accumulates
     // into the relation-level mask.
     let (all_privileges, errormsg) = objtype_all_privileges(stmt.objtype)?;
-    let mut col_privs: PgVec<AccessPriv> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut col_privs: PgVec<AccessPriv> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let (all_privs, privileges) = if stmt.privileges.is_empty() {
         (true, ACL_NO_RIGHTS)
     } else {
@@ -2287,7 +2287,7 @@ fn object_names_to_oids<'mcx>(
         // object, but in GRANT/REVOKE all table-like things are addressed as
         // TABLE.  Resolve the RangeVar to a relOid directly.
         ObjectType::Table | ObjectType::Sequence => {
-            let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
+            let mut objects: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, objnames.len())?;
             for name in objnames.iter() {
                 let Some(relvar) = (**name).as_rangevar() else {
                     return Err(PgError::error(
@@ -2306,7 +2306,7 @@ fn object_names_to_oids<'mcx>(
             Ok(objects)
         }
         OBJECT_SCHEMA => {
-            let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
+            let mut objects: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, objnames.len())?;
             for name in objnames.iter() {
                 // get_object_address(OBJECT_SCHEMA, String(name), ...) ->
                 // get_object_address_unqualified -> get_namespace_oid(name, false).
@@ -2327,7 +2327,7 @@ fn object_names_to_oids<'mcx>(
             // The parse representation of types and domains in privilege targets
             // is a name list (List of String), different from the TypeName that
             // get_object_address() expects, so convert here.
-            let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
+            let mut objects: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, objnames.len())?;
             for name in objnames.iter() {
                 // typname = (List *) lfirst(cell);
                 // tn = makeTypeNameFromNameList(typname);
@@ -2357,7 +2357,7 @@ fn object_names_to_oids<'mcx>(
         _ => {
             // For most object types, we use get_object_address() directly on the
             // parser representation (e.g. ObjectWithArgs for functions).
-            let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, objnames.len())?;
+            let mut objects: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, objnames.len())?;
             for name in objnames.iter() {
                 let lowered = parse_type::rich_node_to_parse(name)?;
                 let resolved = objectaddress_seams::get_object_address::call(
@@ -2383,12 +2383,12 @@ fn objects_in_schema_to_oids<'mcx>(
     objtype: ObjectType,
     nspnames: &PgVec<'_, ::nodes::nodes::NodePtr<'_>>,
 ) -> PgResult<PgVec<'mcx, Oid>> {
-    use types_catalog::catalog::{
+    use ::types_catalog::catalog::{
         RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
         RELKIND_SEQUENCE, RELKIND_VIEW,
     };
 
-    let mut objects: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut objects: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     for cell in nspnames.iter() {
         // nspname = strVal(lfirst(cell)).
@@ -2428,10 +2428,10 @@ fn objects_in_schema_to_oids<'mcx>(
                 }
             }
             ObjectType::Function | ObjectType::Procedure | ObjectType::Routine => {
-                use scankey::ScanKeyInit;
+                use ::scankey::ScanKeyInit;
                 use genam_seams as genam;
-                use types_core::fmgr::{F_CHAREQ, F_CHARNE, F_OIDEQ};
-                use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+                use ::types_core::fmgr::{F_CHAREQ, F_CHARNE, F_OIDEQ};
+                use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
                 let rel = table_open(mcx, ProcedureRelationId, AccessShareLock)?;
 
@@ -2447,7 +2447,7 @@ fn objects_in_schema_to_oids<'mcx>(
                 // OBJECT_FUNCTION includes aggregates and window functions
                 // (prokind != PROKIND_PROCEDURE); OBJECT_PROCEDURE filters to
                 // prokind == PROKIND_PROCEDURE; OBJECT_ROUTINE takes everything.
-                let mut keys: PgVec<ScanKeyData> = mcx::vec_with_capacity_in(mcx, 2)?;
+                let mut keys: PgVec<ScanKeyData> = ::mcx::vec_with_capacity_in(mcx, 2)?;
                 keys.push(key0);
                 if objtype == ObjectType::Function || objtype == ObjectType::Procedure {
                     let mut key1 = ScanKeyData::empty();
@@ -2472,7 +2472,7 @@ fn objects_in_schema_to_oids<'mcx>(
                 loop {
                     let tuple = genam::systable_getnext::call(mcx, scan.desc_mut())?;
                     let Some(tuple) = tuple else { break };
-                    let cols = heaptuple::heap_deform_tuple(
+                    let cols = ::heaptuple::heap_deform_tuple(
                         mcx,
                         &tuple.tuple,
                         &rel.rd_att,
@@ -2509,12 +2509,12 @@ fn get_relations_in_namespace<'mcx>(
     namespace_id: Oid,
     relkind: u8,
 ) -> PgResult<PgVec<'mcx, Oid>> {
-    use scankey::ScanKeyInit;
+    use ::scankey::ScanKeyInit;
     use genam_seams as genam;
-    use types_core::fmgr::{F_CHAREQ, F_OIDEQ};
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_core::fmgr::{F_CHAREQ, F_OIDEQ};
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
-    let mut relations: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut relations: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     let mut key0 = ScanKeyData::empty();
     ScanKeyInit(
@@ -2541,7 +2541,7 @@ fn get_relations_in_namespace<'mcx>(
     loop {
         let tuple = genam::systable_getnext::call(mcx, scan.desc_mut())?;
         let Some(tuple) = tuple else { break };
-        let cols = heaptuple::heap_deform_tuple(
+        let cols = ::heaptuple::heap_deform_tuple(
             mcx,
             &tuple.tuple,
             &rel.rd_att,
@@ -2615,7 +2615,7 @@ fn objtype_all_privileges(objtype: ObjectType) -> PgResult<(AclMode, &'static st
 }
 
 /// Convert an owned-tree `rawnodes::RangeVar` to a resolved
-/// `types_tuple::access::RangeVar` (precedent: policy/lockcmds
+/// `::types_tuple::access::RangeVar` (precedent: policy/lockcmds
 /// `to_access_range_var`).
 fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> AccessRangeVar {
     AccessRangeVar {

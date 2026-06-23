@@ -3,14 +3,14 @@
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly. Relations cross as borrows of the caller's open
-//! `rel::RelationData` carriers; the open toast indexes are held
+//! `::rel::RelationData` carriers; the open toast indexes are held
 //! by [`ToastIndexesGuard`] (AGENTS.md "Locks and held resources": held
 //! resources may never cross a `?` without a `Drop` guard).
 
-use mcx::PgVec;
-use types_error::PgResult;
+use ::mcx::PgVec;
+use ::types_error::PgResult;
 use rel::{Relation, RelationData};
-use types_storage::lock::LOCKMODE;
+use ::types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
     /// `toast_delete_external(rel, values, isnull, is_speculative)`
@@ -19,11 +19,11 @@ seam_core::seam!(
     /// columns of the tuple being deleted. `Err` carries the toast-table
     /// scan/delete `ereport(ERROR)`s.
     pub fn toast_delete_external(
-        rel: &rel::RelationData<'_>,
+        rel: &::rel::RelationData<'_>,
         values: &[types_tuple::heaptuple::Datum<'_>],
         isnull: &[bool],
         is_speculative: bool,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -37,10 +37,10 @@ seam_core::seam!(
     /// `elog(ERROR, "no valid index found for toast relation ...")` and the
     /// index-open error surface.
     pub fn toast_open_indexes<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        toastrel: &rel::RelationData<'_>,
-        lock: types_storage::lock::LOCKMODE,
-    ) -> types_error::PgResult<ToastIndexesGuard<'mcx>>
+        mcx: ::mcx::Mcx<'mcx>,
+        toastrel: &::rel::RelationData<'_>,
+        lock: ::types_storage::lock::LOCKMODE,
+    ) -> ::types_error::PgResult<ToastIndexesGuard<'mcx>>
 );
 
 seam_core::seam!(
@@ -51,9 +51,9 @@ seam_core::seam!(
     /// (`close()` or `Drop`); consumers never call it directly. `Err`
     /// carries the index-close error surface.
     pub fn toast_close_indexes<'mcx>(
-        toastidxs: mcx::PgVec<'mcx, rel::Relation<'mcx>>,
-        lock: types_storage::lock::LOCKMODE,
-    ) -> types_error::PgResult<()>
+        toastidxs: ::mcx::PgVec<'mcx, ::rel::Relation<'mcx>>,
+        lock: ::types_storage::lock::LOCKMODE,
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -65,10 +65,10 @@ seam_core::seam!(
     /// `PointerGetDatum(NULL)`) when compression did not shrink the value
     /// enough. `Err` carries OOM and the unsupported-method `elog(ERROR)`.
     pub fn toast_compress_datum<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         value: &[u8],
         cmethod: i8,
-    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
+    ) -> ::types_error::PgResult<Option<::mcx::PgVec<'mcx, u8>>>
 );
 
 seam_core::seam!(
@@ -82,12 +82,12 @@ seam_core::seam!(
     /// TOAST value OID when re-saving, or `None`. `Err` carries the toast-table
     /// insert / index `ereport(ERROR)` surface and OOM.
     pub fn toast_save_datum<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         rel: types_core::primitive::Oid,
         value: &[u8],
         oldexternal: Option<&[u8]>,
         options: i32,
-    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+    ) -> ::types_error::PgResult<::mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
@@ -100,7 +100,7 @@ seam_core::seam!(
         rel: types_core::primitive::Oid,
         value: &[u8],
         is_speculative: bool,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -115,7 +115,7 @@ seam_core::seam!(
     /// snapshot")`.
     pub fn get_toast_snapshot(
         have_registered_or_active_snapshot: bool,
-    ) -> types_error::PgResult<snapshot::SnapshotData>
+    ) -> ::types_error::PgResult<snapshot::SnapshotData>
 );
 
 seam_core::seam!(
@@ -130,9 +130,9 @@ seam_core::seam!(
     /// reassembly is the TOAST-relation I/O the toast-internals subsystem
     /// owns, so detoast reaches it across the cycle through this seam.
     pub fn toast_fetch_datum<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         attr: &[u8],
-    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+    ) -> ::types_error::PgResult<::mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
@@ -143,11 +143,11 @@ seam_core::seam!(
     /// requested slice must be a prefix, i.e. `sliceoffset == 0`). The result
     /// comes back in `mcx`. `Err` carries the toast-fetch `ereport(ERROR)`s.
     pub fn toast_fetch_datum_slice<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         attr: &[u8],
         sliceoffset: i32,
         slicelength: i32,
-    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+    ) -> ::types_error::PgResult<::mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
@@ -158,9 +158,9 @@ seam_core::seam!(
     /// raw in-memory pointer only the writer that built it can follow, so the
     /// dereference crosses this seam. `Err` carries OOM.
     pub fn indirect_pointer<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         attr: &[u8],
-    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+    ) -> ::types_error::PgResult<::mcx::PgVec<'mcx, u8>>
 );
 
 /// The held-resource token returned by [`toast_open_indexes`]: the open

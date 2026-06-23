@@ -14,7 +14,7 @@
 //! # Arena model
 //!
 //! The C pointer graph is modelled over the
-//! [`PlannerInfo`](pathnodes::PlannerInfo) arena: a
+//! [`PlannerInfo`](::pathnodes::PlannerInfo) arena: a
 //! [`RelId`]/[`PathId`]/[`RinfoId`]/[`NodeId`] handle indexes the matching arena,
 //! and `root.rel(id)` / `root.path(id)` / `root.rinfo(id)` / `root.node(id)`
 //! recover the node. The `bms_*` set algebra over `Relids` crosses through the
@@ -29,11 +29,11 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, ExprRelids};
 
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     AppendRelInfo, ParamPathInfo, PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
     UpperRelationKind, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_SEMI, NodeId,
@@ -94,7 +94,7 @@ const INVALID_OID: types_core::primitive::Oid = 0;
 
 /// `IS_OTHER_REL(rel)` (pathnodes.h).
 #[inline]
-fn is_other_rel(rel: &pathnodes::RelOptInfo) -> bool {
+fn is_other_rel(rel: &::pathnodes::RelOptInfo) -> bool {
     rel.reloptkind == RELOPT_OTHER_MEMBER_REL
         || rel.reloptkind == RELOPT_OTHER_JOINREL
         || rel.reloptkind == RELOPT_OTHER_UPPER_REL
@@ -106,9 +106,9 @@ fn is_outer_join(jointype: u32) -> bool {
     (1u32 << jointype)
         & ((1 << JOIN_LEFT)
             | (1 << JOIN_FULL)
-            | (1 << pathnodes::JOIN_RIGHT)
+            | (1 << ::pathnodes::JOIN_RIGHT)
             | (1 << JOIN_ANTI)
-            | (1 << pathnodes::JOIN_RIGHT_ANTI))
+            | (1 << ::pathnodes::JOIN_RIGHT_ANTI))
         != 0
 }
 
@@ -132,7 +132,7 @@ fn exprrelids_to_relids(er: &ExprRelids) -> Relids {
     if er.words.iter().all(|&w| w == 0) {
         None
     } else {
-        Some(alloc::boxed::Box::new(pathnodes::Bitmapset {
+        Some(alloc::boxed::Box::new(::pathnodes::Bitmapset {
             words: er.words.clone(),
         }))
     }
@@ -168,9 +168,9 @@ fn relids_to_exprrelids(r: &Relids) -> ExprRelids {
 /// phase 2 interns each (the now-released shared borrow lets `intern_rte` take
 /// `&mut self`).
 pub fn setup_simple_rel_arrays<'mcx>(
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
 ) -> PgResult<()> {
     /* Arrays are accessed using RT indexes (1..N) */
     let size = run.rtable(root.parse).len() as i32 + 1;
@@ -199,8 +199,8 @@ pub fn setup_simple_rel_arrays<'mcx>(
      * Phase 2: intern each cloned RTE into the run store, recording the
      * returned RangeTblEntryId at its RT index (slot 0 is unused).
      */
-    let mut simple_rte_array: Vec<pathnodes::RangeTblEntryId> =
-        alloc::vec![pathnodes::RangeTblEntryId(0); size as usize];
+    let mut simple_rte_array: Vec<::pathnodes::RangeTblEntryId> =
+        alloc::vec![::pathnodes::RangeTblEntryId(0); size as usize];
     for (i, rte) in cloned.into_iter().enumerate() {
         simple_rte_array[i + 1] = run.intern_rte(rte);
     }
@@ -245,7 +245,7 @@ pub fn expand_planner_arrays(root: &mut PlannerInfo, add_size: i32) {
 
     root.simple_rel_array.resize(new_size as usize, None);
     root.simple_rte_array
-        .resize(new_size as usize, pathnodes::RangeTblEntryId(0));
+        .resize(new_size as usize, ::pathnodes::RangeTblEntryId(0));
 
     if !root.append_rel_array.is_empty() {
         root.append_rel_array.resize(new_size as usize, None);
@@ -277,7 +277,7 @@ pub fn build_simple_rel<'mcx>(
     /* Fetch RTE for relation */
     let rtekind = rte::rte_rtekind::call(run, root, relid as u32);
 
-    let mut rel = pathnodes::RelOptInfo {
+    let mut rel = ::pathnodes::RelOptInfo {
         reloptkind: if parent.is_some() {
             RELOPT_OTHER_MEMBER_REL
         } else {
@@ -586,7 +586,7 @@ pub fn build_join_rel<'mcx>(
     let relids = bms::relids_copy::call(joinrelids);
     let lateral_relids = min_join_parameterization(root, &relids, outer_rel, inner_rel);
 
-    let joinrel = pathnodes::RelOptInfo {
+    let joinrel = ::pathnodes::RelOptInfo {
         reloptkind: RELOPT_JOINREL,
         relids,
         rows: 0.0,
@@ -734,7 +734,7 @@ pub fn build_child_join_rel<'mcx>(
     };
     let top_parent_relids = bms::relids_copy::call(&root.rel(top_parent.unwrap()).relids);
 
-    let joinrel = pathnodes::RelOptInfo {
+    let joinrel = ::pathnodes::RelOptInfo {
         reloptkind: RELOPT_OTHER_JOINREL,
         relids,
         rows: 0.0,
@@ -1144,7 +1144,7 @@ pub fn fetch_upper_rel(root: &mut PlannerInfo, kind: UpperRelationKind, relids: 
         }
     }
 
-    let upperrel = pathnodes::RelOptInfo {
+    let upperrel = ::pathnodes::RelOptInfo {
         reloptkind: RELOPT_UPPER_REL,
         relids: bms::relids_copy::call(relids),
         consider_startup: root.tuple_fraction > 0.0,
@@ -1296,8 +1296,8 @@ pub fn get_joinrel_parampathinfo<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
     joinrel: RelId,
-    outer_path: pathnodes::PathId,
-    inner_path: pathnodes::PathId,
+    outer_path: ::pathnodes::PathId,
+    inner_path: ::pathnodes::PathId,
     sjinfo: &SpecialJoinInfo,
     required_outer: &Relids,
     restrict_clauses: Vec<RinfoId>,
@@ -1361,7 +1361,7 @@ pub fn get_joinrel_parampathinfo<'mcx>(
         None,
     )?;
     /* We only want ones that aren't movable to lower levels */
-    let mut dropped_ecs: Vec<pathnodes::EcId> = Vec::new();
+    let mut dropped_ecs: Vec<::pathnodes::EcId> = Vec::new();
     for &rinfo in eclauses.iter() {
         debug_assert!(join_clause_is_movable_into_relids(root, rinfo, &joinrel_relids, &join_and_req));
         if join_clause_is_movable_into_relids(root, rinfo, &outer_parent_relids, &outer_and_req) {
@@ -1444,7 +1444,7 @@ pub fn get_joinrel_parampathinfo<'mcx>(
 
 /// `PATH_REQ_OUTER(path)` — `path->param_info ? path->param_info->ppi_req_outer
 /// : NULL`.
-fn path_req_outer(root: &PlannerInfo, path: pathnodes::PathId) -> Relids {
+fn path_req_outer(root: &PlannerInfo, path: ::pathnodes::PathId) -> Relids {
     match &root.path(path).base().param_info {
         Some(pi) => bms::relids_copy::call(&pi.ppi_req_outer),
         None => None,
@@ -1511,7 +1511,7 @@ pub fn find_param_path_info(
  * ======================================================================== */
 
 /// `get_param_path_clause_serials(path)` (relnode.c).
-pub fn get_param_path_clause_serials(root: &PlannerInfo, path: pathnodes::PathId) -> Relids {
+pub fn get_param_path_clause_serials(root: &PlannerInfo, path: ::pathnodes::PathId) -> Relids {
     if root.path(path).base().param_info.is_none() {
         return None; /* not parameterized */
     }
@@ -1655,7 +1655,7 @@ fn build_joinrel_partition_info(
 
 /// `IS_PARTITIONED_REL(rel)` field-only conjuncts (pathnodes.h).
 #[inline]
-fn is_partitioned_rel(rel: &pathnodes::RelOptInfo) -> bool {
+fn is_partitioned_rel(rel: &::pathnodes::RelOptInfo) -> bool {
     rel.part_scheme.is_some()
         && rel.boundinfo.is_some()
         && rel.nparts > 0
@@ -2080,7 +2080,7 @@ fn build_child_join_reltarget(
  * vs bitmapset.c and installed by `init_seams`.
  * ======================================================================== */
 
-use pathnodes::Bitmapset;
+use ::pathnodes::Bitmapset;
 
 /// `BITS_PER_BITMAPWORD` — width of a `bitmapword` (`uint64`).
 const BITS_PER_BITMAPWORD: i32 = 64;
@@ -2693,8 +2693,8 @@ fn seam_get_joinrel_parampathinfo<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
     joinrel: RelId,
-    outer_path: pathnodes::PathId,
-    inner_path: pathnodes::PathId,
+    outer_path: ::pathnodes::PathId,
+    inner_path: ::pathnodes::PathId,
     sjinfo: &SpecialJoinInfo,
     required_outer: &Relids,
     restrict_clauses: Vec<RinfoId>,
@@ -2711,7 +2711,7 @@ fn seam_get_joinrel_parampathinfo<'mcx>(
     )
     .expect("get_joinrel_parampathinfo")
 }
-fn seam_get_param_path_clause_serials(root: &PlannerInfo, path: pathnodes::PathId) -> Relids {
+fn seam_get_param_path_clause_serials(root: &PlannerInfo, path: ::pathnodes::PathId) -> Relids {
     get_param_path_clause_serials(root, path)
 }
 fn seam_find_childrel_parents(root: &PlannerInfo, rel: RelId) -> Relids {

@@ -7,10 +7,10 @@
 
 use std::cell::Cell;
 
-use utils_error::elog;
-use types_core::Size;
+use ::utils_error::elog;
+use ::types_core::Size;
 use types_error::{PgResult, DEBUG3, FATAL};
-use types_guc::guc::{PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT};
+use ::types_guc::guc::{PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT};
 
 use crate::ipci_seams_bgworker_repl_stats as bg;
 use crate::ipci_seams_storage_access as sa;
@@ -254,7 +254,7 @@ pub fn attach_shared_memory_structs() -> PgResult<()> {
     // InitProcess must've been called already: Assert(MyProc != NULL).
     debug_assert_ne!(
         init_small_seams::my_proc_number::call(),
-        types_core::INVALID_PROC_NUMBER
+        ::types_core::INVALID_PROC_NUMBER
     );
     // Assert(IsUnderPostmaster).
     debug_assert!(init_small_seams::is_under_postmaster::call());

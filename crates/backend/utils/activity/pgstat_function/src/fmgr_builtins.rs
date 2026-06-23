@@ -10,12 +10,12 @@
 //! `PG_STAT_GET_FUNCENTRY_FLOAT8_MS` macro: `NULL` when no entry, otherwise the
 //! microsecond counter converted to milliseconds (`/ 1000.0`) as `float8`.
 
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::resolution::BuiltinFunction;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::resolution::BuiltinFunction;
 use fmgr::{FunctionCallInfoBaseData, PgFnNative};
-use types_pgstat::activity_pgstat::{PgStat_FunctionCounts, PgStat_StatFuncEntry};
+use ::types_pgstat::activity_pgstat::{PgStat_FunctionCounts, PgStat_StatFuncEntry};
 
 /// `PG_GETARG_OID(0)` → `DatumGetObjectId`: the function OID argument.
 #[inline]

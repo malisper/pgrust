@@ -39,37 +39,37 @@ pub mod lock;
 pub mod scan;
 pub mod update;
 
-use mcx::Mcx;
-use types_core::primitive::{
+use ::mcx::Mcx;
+use ::types_core::primitive::{
     InvalidBlockNumber, MultiXactId, OffsetNumber, Oid, TransactionId,
 };
-use types_core::xact::{CommandId, InvalidCommandId};
-use types_core::XLogRecPtr;
-use types_error::PgResult;
-use rel::RelationData;
-use types_storage::buf::BufferAccessStrategyType;
+use ::types_core::xact::{CommandId, InvalidCommandId};
+use ::types_core::XLogRecPtr;
+use ::types_error::PgResult;
+use ::rel::RelationData;
+use ::types_storage::buf::BufferAccessStrategyType;
 use types_storage::{Buffer, InvalidBuffer};
-use types_tableam::tableam::LockTupleMode;
-use types_tuple::heaptuple::{
+use ::types_tableam::tableam::LockTupleMode;
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderData, HEAP_COMBOCID, HEAP_KEYS_UPDATED,
     HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK,
     HEAP_XMAX_LOCK_ONLY,
 };
-use xlog_records::heapam_xlog::{
+use ::xlog_records::heapam_xlog::{
     xl_heap_new_cid, xl_heap_visible, SizeOfHeapNewCid, SizeOfHeapVisible,
 };
-use wal::xloginsert::{REGBUF_NO_IMAGE, REGBUF_STANDARD};
-use xlog_records::multixact::MultiXactStatus;
+use ::wal::xloginsert::{REGBUF_NO_IMAGE, REGBUF_STANDARD};
+use ::xlog_records::multixact::MultiXactStatus;
 
 // htup_details.h infomask helpers + lock-mask vocabulary already live in the
 // W1 visibility crate; reuse them rather than re-deriving.
-use heapam_visibility::htup::HEAP_XMAX_IS_LOCKED_ONLY;
-use heapam_visibility::htup::HeapTupleHeaderGetRawXmax;
-use types_tuple::heaptuple::HEAP_XMAX_EXCL_LOCK;
+use ::heapam_visibility::htup::HEAP_XMAX_IS_LOCKED_ONLY;
+use ::heapam_visibility::htup::HeapTupleHeaderGetRawXmax;
+use ::types_tuple::heaptuple::HEAP_XMAX_EXCL_LOCK;
 use heapam_visibility::{HeapTupleHeaderGetUpdateXid, HeapTupleSetHintBits};
 
 // XLHL_* infobits live with the heap rmgr-desc (access/heapam_xlog.h constants).
-use rmgrdesc_next::heapdesc::{
+use ::rmgrdesc_next::heapdesc::{
     XLHL_KEYS_UPDATED, XLHL_XMAX_EXCL_LOCK, XLHL_XMAX_IS_MULTI, XLHL_XMAX_KEYSHR_LOCK,
     XLHL_XMAX_LOCK_ONLY,
 };
@@ -80,8 +80,8 @@ use transam_xact_seams as xact_seam;
 use xloginsert_seams as xloginsert_seam;
 use bufmgr_seams as bufmgr_seam;
 
-use wal::wal::RM_HEAP2_ID;
-use rmgrdesc_next::heapdesc::{XLOG_HEAP2_NEW_CID, XLOG_HEAP2_VISIBLE};
+use ::wal::wal::RM_HEAP2_ID;
+use ::rmgrdesc_next::heapdesc::{XLOG_HEAP2_NEW_CID, XLOG_HEAP2_VISIBLE};
 
 // ===========================================================================
 // HeapTupleFreeze / HeapPageFreeze — NET-NEW descriptors (access/heapam.h).
@@ -92,7 +92,7 @@ use rmgrdesc_next::heapdesc::{XLOG_HEAP2_NEW_CID, XLOG_HEAP2_VISIBLE};
 /// vocabulary, alongside `VacuumCutoffs`) so the prune/freeze + vacuum seams can
 /// carry them across the cycle; re-exported here so the heap AM families keep
 /// referring to them by their canonical names.
-pub use types_vacuum::vacuum::{HeapPageFreeze, HeapTupleFreeze};
+pub use ::types_vacuum::vacuum::{HeapPageFreeze, HeapTupleFreeze};
 
 // ===========================================================================
 // BulkInsertStateData — bulk-insert carrier (access/hio.h struct).
@@ -103,7 +103,7 @@ pub use types_vacuum::vacuum::{HeapPageFreeze, HeapTupleFreeze};
 /// passes it through opaquely and `hio.c`'s `RelationGetBufferForTuple` reads
 /// it directly); the heap AM re-exports it so `GetBulkInsertState` /
 /// `heap_insert` and the hio page placement share one type.
-pub use types_tableam::tableam::BulkInsertStateData;
+pub use ::types_tableam::tableam::BulkInsertStateData;
 
 /// `BulkInsertState` (`access/heapam.h`) — the by-value handle callers thread.
 /// C uses a `BulkInsertStateData *`; the repo carries the owned struct.
@@ -172,7 +172,7 @@ pub fn compute_infobits(infomask: u16, infomask2: u16) -> u8 {
 /// `xmax_infomask_changed(new_infomask, old_infomask)` (heapam.c) — whether the
 /// relevant xmax status bits changed across a buffer-lock release/reacquire.
 pub fn xmax_infomask_changed(new_infomask: u16, old_infomask: u16) -> bool {
-    use heapam_visibility::htup::HEAP_LOCK_MASK;
+    use ::heapam_visibility::htup::HEAP_LOCK_MASK;
     let interesting = HEAP_XMAX_IS_MULTI | HEAP_XMAX_LOCK_ONLY | HEAP_LOCK_MASK;
     (new_infomask & interesting) != (old_infomask & interesting)
 }
@@ -439,7 +439,7 @@ fn HeapTupleHeaderGetCmax(hdr: &HeapTupleHeaderData) -> CommandId {
 /// `HeapTupleHeaderGetRawCommandId(hdr)` — the raw command id stored in the
 /// header (`t_field3.t_cid`), via the types-tuple accessor.
 fn HeapTupleHeaderGetRawCommandId(hdr: &HeapTupleHeaderData) -> CommandId {
-    types_tuple::heaptuple::HeapTupleHeaderGetRawCommandId(hdr)
+    ::types_tuple::heaptuple::HeapTupleHeaderGetRawCommandId(hdr)
 }
 
 // ===========================================================================
@@ -498,7 +498,7 @@ pub fn init_seams() {
             relation,
             Some(snapshot),
             0,
-            mcx::vec_with_capacity_in(mcx, 0)?,
+            ::mcx::vec_with_capacity_in(mcx, 0)?,
             None,
             flags,
         )
@@ -524,7 +524,7 @@ pub fn init_seams() {
     // trackers.
     vacuumlazy_seams::heap_tuple_should_freeze::set(
         |buffer, offnum, cutoffs, relfrozen_xid_in, relmin_mxid_in| {
-            let ctx = mcx::MemoryContext::new("heap_tuple_should_freeze");
+            let ctx = ::mcx::MemoryContext::new("heap_tuple_should_freeze");
             let mcx = ctx.mcx();
             let tuple = read_on_page_header(mcx, buffer, offnum)?;
             freeze::heap_tuple_should_freeze(
@@ -541,7 +541,7 @@ pub fn init_seams() {
     // on-page header and runs the pure predicate.
     vacuumlazy_seams::heap_tuple_needs_eventual_freeze::set(
         |buffer, offnum| {
-            let ctx = mcx::MemoryContext::new("heap_tuple_needs_eventual_freeze");
+            let ctx = ::mcx::MemoryContext::new("heap_tuple_needs_eventual_freeze");
             let mcx = ctx.mcx();
             let tuple = read_on_page_header(mcx, buffer, offnum)?;
             Ok(freeze::heap_tuple_needs_eventual_freeze(&tuple))
@@ -572,10 +572,10 @@ pub fn init_seams() {
     // integer.
     vacuumlazy_seams::heap_tuple_satisfies_vacuum::set(
         |rel, buffer, offnum, oldest_xmin| {
-            let ctx = mcx::MemoryContext::new("heap_tuple_satisfies_vacuum");
+            let ctx = ::mcx::MemoryContext::new("heap_tuple_satisfies_vacuum");
             let mcx = ctx.mcx();
             let mut tuple = read_on_page_tuple(mcx, rel, buffer, offnum)?;
-            let res = heapam_visibility::HeapTupleSatisfiesVacuum(
+            let res = ::heapam_visibility::HeapTupleSatisfiesVacuum(
                 &mut tuple,
                 oldest_xmin,
                 buffer,
@@ -588,16 +588,16 @@ pub fn init_seams() {
     // `HeapTupleHeaderXminCommitted` / `HeapTupleHeaderGetXmin` for the tuple at
     // `(buffer, offnum)`.
     vacuumlazy_seams::header_xmin_committed::set(|buffer, offnum| {
-        let ctx = mcx::MemoryContext::new("header_xmin_committed");
+        let ctx = ::mcx::MemoryContext::new("header_xmin_committed");
         let tuple = read_on_page_header(ctx.mcx(), buffer, offnum)?;
         // HeapTupleHeaderXminCommitted(htup) (htup_details.h): t_infomask &
         // HEAP_XMIN_COMMITTED.
-        Ok((tuple.t_infomask & types_tuple::heaptuple::HEAP_XMIN_COMMITTED) != 0)
+        Ok((tuple.t_infomask & ::types_tuple::heaptuple::HEAP_XMIN_COMMITTED) != 0)
     });
     vacuumlazy_seams::header_get_xmin::set(|buffer, offnum| {
-        let ctx = mcx::MemoryContext::new("header_get_xmin");
+        let ctx = ::mcx::MemoryContext::new("header_get_xmin");
         let tuple = read_on_page_header(ctx.mcx(), buffer, offnum)?;
-        Ok(heapam_visibility::htup::HeapTupleHeaderGetXmin(&tuple))
+        Ok(::heapam_visibility::htup::HeapTupleHeaderGetXmin(&tuple))
     });
 
     // F6 — the heapam tableam `index_delete_tuples` implementation.
@@ -655,7 +655,7 @@ pub fn init_seams() {
         lock::unlock_tuple_tuplock(relation, tid, mode)
     });
     heapam_seam::does_multi_xact_id_conflict::set(|multi, infomask, lockmode| {
-        let ctx = mcx::MemoryContext::new("does_multi_xact_id_conflict");
+        let ctx = ::mcx::MemoryContext::new("does_multi_xact_id_conflict");
         let mcx = ctx.mcx();
         let c = lock::DoesMultiXactIdConflict(mcx, multi, infomask, lockmode)?;
         Ok(heapam_seam::MultiXactConflict {
@@ -664,7 +664,7 @@ pub fn init_seams() {
         })
     });
     heapam_seam::multi_xact_id_wait::set(|multi, status, infomask, rel, tid, oper| {
-        let ctx = mcx::MemoryContext::new("multi_xact_id_wait");
+        let ctx = ::mcx::MemoryContext::new("multi_xact_id_wait");
         let mcx = ctx.mcx();
         lock::multi_xact_id_wait(mcx, multi, status, infomask, rel, tid, oper)
     });
@@ -761,7 +761,7 @@ fn read_on_page_tuple<'mcx>(
     buffer: Buffer,
     offnum: OffsetNumber,
 ) -> PgResult<HeapTupleData<'mcx>> {
-    use types_tuple::heaptuple::ItemPointerData;
+    use ::types_tuple::heaptuple::ItemPointerData;
     let blockno = bufmgr_seam::buffer_get_block_number::call(buffer);
     let reltableoid = rel.rd_id;
     let mut out: Option<HeapTupleData<'mcx>> = None;
@@ -774,7 +774,7 @@ fn read_on_page_tuple<'mcx>(
             t_len: page::ItemIdGetLength(&item_id) as u32,
             t_self: ItemPointerData::default(),
             t_tableOid: reltableoid,
-            t_data: Some(mcx::alloc_in(mcx, htup)?),
+            t_data: Some(::mcx::alloc_in(mcx, htup)?),
         };
         page::ItemPointerSet(&mut tup.t_self, blockno, offnum);
         out = Some(tup);
@@ -786,7 +786,7 @@ fn read_on_page_tuple<'mcx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use heapam_visibility::htup::HEAP_XMAX_SHR_LOCK as TT_HEAP_XMAX_SHR_LOCK;
+    use ::heapam_visibility::htup::HEAP_XMAX_SHR_LOCK as TT_HEAP_XMAX_SHR_LOCK;
 
     #[test]
     fn compute_infobits_matches_c() {
@@ -842,13 +842,13 @@ mod tests {
             cmin: 11,
             cmax: 22,
             combocid: 33,
-            target_locator: types_storage::storage::RelFileLocator {
+            target_locator: ::types_storage::storage::RelFileLocator {
                 spcOid: 1,
                 dbOid: 2,
                 relNumber: 3,
             },
-            target_tid: types_tuple::heaptuple::ItemPointerData {
-                ip_blkid: types_tuple::heaptuple::BlockIdData::new(0x000A_BBCC),
+            target_tid: ::types_tuple::heaptuple::ItemPointerData {
+                ip_blkid: ::types_tuple::heaptuple::BlockIdData::new(0x000A_BBCC),
                 ip_posid: 7,
             },
         };

@@ -11,7 +11,7 @@
 //! `BufFile` provides the buffering aspect of stdio on top of fd.c's virtual
 //! files. A `BufFile` breaks its logical data stream into
 //! [`MAX_PHYSICAL_FILESIZE`]-byte physical segments (each a VFD
-//! [`File`](types_storage::file::File) managed by fd.c), so it can hold temp
+//! [`File`](::types_storage::file::File) managed by fd.c), so it can hold temp
 //! data exceeding the OS per-file size limit — the feature behind sorts and
 //! hash joins on large inputs. A `BufFile` is either a standalone temp file
 //! ([`BufFileCreateTemp`]) or a member of a [`FileSet`](types_storage) that
@@ -33,16 +33,16 @@
 use utils_error::{ereport, errno};
 use mcx::{Mcx, PgBox};
 use types_error::{ErrorLocation, PgError, PgResult, ERROR};
-use execparallel::FileSetHandle;
+use ::execparallel::FileSetHandle;
 use ::nodes::nodehash::BufFile;
-use types_storage::file::{File, PGAlignedBlock};
+use ::types_storage::file::{File, PGAlignedBlock};
 
-use instrument::with_pgBufferUsage;
+use ::instrument::with_pgBufferUsage;
 use fd_seams as fd;
 use fileset_seams as fileset;
-use guc_tables::vars::track_io_timing;
+use ::guc_tables::vars::track_io_timing;
 use ::instr_time::instr_time_set_current_lazy;
-use types_core::instr_time;
+use ::types_core::instr_time;
 
 mod seams;
 pub use seams::init_seams;
@@ -54,7 +54,7 @@ const BUFFILE_C: &str = "buffile.c";
 // ---------------------------------------------------------------------------
 
 /// `BLCKSZ` (pg_config.h) — the page/block size, 8 KiB.
-const BLCKSZ: usize = types_core::BLCKSZ;
+const BLCKSZ: usize = ::types_core::BLCKSZ;
 
 /// `MAX_PHYSICAL_FILESIZE` (buffile.c:62) — `0x40000000` (1 GiB). We break
 /// BufFiles into gigabyte-sized segments, regardless of `RELSEG_SIZE`, so large
@@ -196,7 +196,7 @@ pub fn BufFileCreateTemp<'mcx>(mcx: Mcx<'mcx>, interXact: bool) -> PgResult<PgBo
 
     let mut file = makeBufFile(pfile);
     file.isInterXact = interXact;
-    mcx::alloc_in(mcx, file)
+    ::mcx::alloc_in(mcx, file)
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +217,7 @@ pub fn BufFileCreateFileSet<'mcx>(
     file.files.push(segment);
     file.numFiles = file.files.len() as i32;
     file.readOnly = false;
-    mcx::alloc_in(mcx, file)
+    ::mcx::alloc_in(mcx, file)
 }
 
 // ---------------------------------------------------------------------------
@@ -270,7 +270,7 @@ pub fn BufFileOpenFileSet<'mcx>(
     file.readOnly = mode == O_RDONLY;
     file.fileset = Some(fileset);
     file.name = Some(name.to_owned());
-    Ok(Some(mcx::alloc_in(mcx, file)?))
+    Ok(Some(::mcx::alloc_in(mcx, file)?))
 }
 
 // ---------------------------------------------------------------------------

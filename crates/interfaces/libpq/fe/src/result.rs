@@ -7,7 +7,7 @@
 //! simple-query) read are modelled — the per-field error diagnostics arena, the
 //! event/instance hooks, and the noticeHooks are not.
 
-pub use types_libpqwalreceiver::ExecStatusType;
+pub use ::types_libpqwalreceiver::ExecStatusType;
 
 /// `PGresAttDesc` (`libpq-fe.h`) — one column's attribute descriptor, read out
 /// of a RowDescription ('T') message (`getRowDescriptions`).

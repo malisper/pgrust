@@ -4,7 +4,7 @@
 //! `chgParam` checks), so only the storage fields are carried; the set
 //! operations stay with their owning unit when it lands.
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 
 /// `bitmapword` — the word the bit storage is built from.
 pub type bitmapword = u64;
@@ -57,9 +57,9 @@ impl<'mcx> Bitmapset<'mcx> {
     /// C `NULL` `Bitmapset *` where a slot must hold a value (e.g. a
     /// grouped_cols entry for an empty grouping set). `bms_is_empty` of this is
     /// true.
-    pub fn empty(mcx: mcx::Mcx<'mcx>) -> types_error::PgResult<Bitmapset<'mcx>> {
+    pub fn empty(mcx: ::mcx::Mcx<'mcx>) -> types_error::PgResult<Bitmapset<'mcx>> {
         Ok(Bitmapset {
-            words: mcx::vec_with_capacity_in(mcx, 0)?,
+            words: ::mcx::vec_with_capacity_in(mcx, 0)?,
         })
     }
 }
@@ -72,9 +72,9 @@ impl Bitmapset<'_> {
 
     /// `bms_copy(a)`-shaped deep copy into `mcx` (C: `palloc` + `memcpy`).
     /// Fallible: copying allocates.
-    pub fn clone_in<'b>(&self, mcx: mcx::Mcx<'b>) -> types_error::PgResult<Bitmapset<'b>> {
+    pub fn clone_in<'b>(&self, mcx: ::mcx::Mcx<'b>) -> types_error::PgResult<Bitmapset<'b>> {
         Ok(Bitmapset {
-            words: mcx::slice_in(mcx, &self.words)?,
+            words: ::mcx::slice_in(mcx, &self.words)?,
         })
     }
 }
@@ -93,7 +93,7 @@ impl<'mcx> node_support::PgNodeCopy for Bitmapset<'mcx> {
     /// target context (fallible: allocates).
     fn copy_node_in<'dst>(
         &self,
-        dst: mcx::Mcx<'dst>,
+        dst: ::mcx::Mcx<'dst>,
     ) -> types_error::PgResult<Self::Bound<'dst>> {
         self.clone_in(dst)
     }

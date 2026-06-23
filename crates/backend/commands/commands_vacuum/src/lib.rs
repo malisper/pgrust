@@ -36,44 +36,44 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_LOCK_NOT_AVAILABLE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_TABLE, ERROR, LOG, WARNING,
 };
 
-use types_core::primitive::{bits32, BlockNumber, InvalidOid, MultiXactId, Oid, TransactionId};
-use types_core::xact::{FirstNormalTransactionId, InvalidTransactionId};
+use ::types_core::primitive::{bits32, BlockNumber, InvalidOid, MultiXactId, Oid, TransactionId};
+use ::types_core::xact::{FirstNormalTransactionId, InvalidTransactionId};
 
-use types_storage::lock::{
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, ExclusiveLock, NoLock, ShareUpdateExclusiveLock, LOCKMODE,
 };
-use types_storage::storage::LW_EXCLUSIVE;
-use types_tuple::access::{
+use ::types_storage::storage::LW_EXCLUSIVE;
+use ::types_tuple::access::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use types_cluster::{ClusterParams, ParseState, CLUOPT_VERBOSE};
 use ::nodes::ddlnodes::{VacuumRelation, VacuumStmt};
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::RangeVar;
 
-use types_vacuum::vacuum::VacOptValue::{
+use ::types_vacuum::vacuum::VacOptValue::{
     VACOPTVALUE_AUTO, VACOPTVALUE_DISABLED, VACOPTVALUE_ENABLED, VACOPTVALUE_UNSPECIFIED,
 };
-use types_vacuum::vacuum::{
+use ::types_vacuum::vacuum::{
     VacOptValue, VacuumCutoffs, VacuumParams, VACOPT_ANALYZE, VACOPT_DISABLE_PAGE_SKIPPING,
     VACOPT_FREEZE, VACOPT_FULL, VACOPT_ONLY_DATABASE_STATS, VACOPT_PROCESS_MAIN,
     VACOPT_PROCESS_TOAST, VACOPT_SKIP_DATABASE_STATS, VACOPT_SKIP_LOCKED, VACOPT_VACUUM,
     VACOPT_VERBOSE,
 };
-use types_storage::buf::BufferAccessStrategy;
-use types_vacuum::vacuumlazy::{TidStore, UpdateRelStatsArgs};
-use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo};
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_vacuum::vacuumlazy::{TidStore, UpdateRelStatsArgs};
+use ::types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo};
 
-use define_seams::DefElemArg;
+use ::define_seams::DefElemArg;
 
 use transam_xact_seams as xact;
 use tidstore_seams as tidstore_seams;
@@ -400,12 +400,12 @@ fn make_vacuum_relation<'mcx>(
     // C builds this into vac_context via palloc; a plain arena alloc is
     // behavior-equivalent here.
     let rel_node = match relation {
-        Some(rv) => Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv.clone_in(mcx)?)?)?),
+        Some(rv) => Some(::mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv.clone_in(mcx)?)?)?),
         None => None,
     };
     let mut cols: PgVec<::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
     for c in va_cols.iter() {
-        cols.push(mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
+        cols.push(::mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
     }
     Ok(VacuumRelation {
         relation: rel_node,
@@ -1097,7 +1097,7 @@ pub fn vacuum_is_permitted_for_relation_scalar(
 
     let userid = miscinit_seam::get_user_id::call();
     if (aclchk_seam::object_ownercheck::call(
-        types_core::catalog::DATABASE_RELATION_ID,
+        ::types_core::catalog::DATABASE_RELATION_ID,
         init_small_seam::my_database_id::call(),
         userid,
     )? && !relisshared)
@@ -2060,7 +2060,7 @@ fn vacuum_rel<'mcx>(
 ) -> PgResult<bool> {
     let lmode: LOCKMODE;
     let mut rel: Option<Oid>;
-    let lockrelid: types_storage::lock::LockRelId;
+    let lockrelid: ::types_storage::lock::LockRelId;
     let priv_relid: Oid;
     let toast_relid: Oid;
     let save_userid: Oid;
@@ -2774,7 +2774,7 @@ thread_local! {
     /// atomic-mutate it. A backend is in at most one parallel vacuum at a time,
     /// so a single cell is exact.
     static VACUUM_SHARED_COST_STATE:
-        core::cell::RefCell<Option<alloc::sync::Arc<types_vacuum::vacuumparallel::VacuumSharedCostState>>> =
+        core::cell::RefCell<Option<alloc::sync::Arc<::types_vacuum::vacuumparallel::VacuumSharedCostState>>> =
         const { core::cell::RefCell::new(None) };
 }
 
@@ -2783,7 +2783,7 @@ thread_local! {
 /// like dereferencing the C pointer when the caller has already checked it is
 /// non-NULL (the `vacuum_*_is_set` guards gate every mutating call).
 fn with_shared_cost_state<R>(
-    f: impl FnOnce(&types_vacuum::vacuumparallel::VacuumSharedCostState) -> R,
+    f: impl FnOnce(&::types_vacuum::vacuumparallel::VacuumSharedCostState) -> R,
 ) -> R {
     VACUUM_SHARED_COST_STATE.with(|s| {
         let s = s.borrow();
@@ -2902,7 +2902,7 @@ fn add_vacuum_cost_balance_local_impl(v: i32) -> PgResult<i32> {
  * (compute_parallel_delay) and vacuumparallel.c atomic-mutate it.
  * ========================================================================= */
 
-use types_vacuum::vacuumparallel::VacuumSharedCostState;
+use ::types_vacuum::vacuumparallel::VacuumSharedCostState;
 
 /// `VacuumSharedCostBalance = enable ? &shared->cost_balance : NULL`.
 fn set_vacuum_shared_cost_balance_enable_impl(

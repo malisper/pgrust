@@ -15,7 +15,7 @@ use crate::pool::{alloc_chromo, alloc_pool, random_init_pool, sort_pool, spread_
 use crate::random::geqo_set_seed;
 use crate::selection::geqo_selection;
 use crate::{GeqoPrivateData, Operator};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId};
 
 /* Configuration option bounds / defaults (geqo.h). */

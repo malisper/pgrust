@@ -12,8 +12,8 @@
 //! `backend-storage-ipc-latch-seams`, which the throttle crate consumes
 //! directly.
 
-use types_core::primitive::TimestampTz;
-use types_error::PgResult;
+use ::types_core::primitive::TimestampTz;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `GetCurrentTimestamp()` (`utils/adt/timestamp.c`) — current

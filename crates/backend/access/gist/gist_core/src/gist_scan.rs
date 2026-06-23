@@ -34,17 +34,17 @@ use am_seams::{
     gistbuild, gistbuildempty, gistbulkdelete, gistinsert, gistvacuumcleanup,
 };
 use dispatch_seams::{gist_consistent, gist_distance};
-use indexam_seams::index_getprocid;
+use ::indexam_seams::index_getprocid;
 use bufmgr_seams::{
     buffer_get_block_number, buffer_get_lsn_atomic, buffer_get_page, mark_buffer_dirty_hint,
     read_buffer, unlock_release_buffer, with_buffer_page,
 };
-use predicate_seams::predicate_lock_page;
+use ::predicate_seams::predicate_lock_page;
 use page::{
     ItemIdIsDead, ItemIdMarkDead, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageMut,
     PageRef,
 };
-use pgstat_seams::pgstat_count_index_scan;
+use ::pgstat_seams::pgstat_count_index_scan;
 use utils_error::{ereport, PgResult};
 use mcx::{Mcx, PgBox};
 
@@ -52,24 +52,24 @@ use types_amapi::{
     AmCostEstimate, IndexAMProperty as AmIndexAMProperty, IndexAmRoutine, IndexBuildResult,
     IndexPath, OpFamilyMember, PlannerInfo, T_IndexAmRoutine,
 };
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, OidIsValid};
-use types_core::InvalidOid;
-use types_error::error::ERROR;
-use rel::Relation;
-use types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
-use types_storage::buf::BufferIsValid;
-use types_tableam::amapi::{IndexUniqueCheck, TIDBitmap as AmTIDBitmap};
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::amopaque::AmOpaque;
-use types_tableam::genam::{IndexBulkDeleteResult, IndexOrderByDistance, IndexVacuumInfo};
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER};
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, OidIsValid};
+use ::types_core::InvalidOid;
+use ::types_error::error::ERROR;
+use ::rel::Relation;
+use ::types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
+use ::types_storage::buf::BufferIsValid;
+use ::types_tableam::amapi::{IndexUniqueCheck, TIDBitmap as AmTIDBitmap};
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::amopaque::AmOpaque;
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexOrderByDistance, IndexVacuumInfo};
+use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER};
 use gist::{
     GISTScanOpaqueData, GISTSearchHeapItem, GISTSearchItem, GISTSearchItemData,
     GISTSearchItemIsHeap, GISTSTATE, GIST_DISTANCE_PROC, GIST_ROOT_BLKNO,
 };
-use types_scan::sdir::{ForwardScanDirection, ScanDirection};
+use ::types_scan::sdir::{ForwardScanDirection, ScanDirection};
 
 use crate::gist_page::{
     gist_page_get_nsn, GistMarkPageHasGarbage, GistPageIsDeleted, GistPageIsLeaf,
@@ -88,7 +88,7 @@ const GIST_SHARE: i32 = 1;
 
 /// `FLOAT8OID` / `FLOAT4OID` (pg_type.dat) — the only ORDER BY result types the
 /// distance-ordering save path knows how to convert to.
-use types_tuple::heaptuple::{FLOAT4OID, FLOAT8OID};
+use ::types_tuple::heaptuple::{FLOAT4OID, FLOAT8OID};
 
 /// `MaxIndexTuplesPerPage` (itup.h) — the killedItems / pageData array bound.
 /// `(BLCKSZ - SizeOfPageHeaderData) / (sizeof(ItemIdData) + sizeof(IndexTupleData))`
@@ -207,7 +207,7 @@ fn gistkillitems(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
         return Ok(());
     }
 
-    bufmgr_seams::lock_buffer::call(buffer, GIST_SHARE)?;
+    ::bufmgr_seams::lock_buffer::call(buffer, GIST_SHARE)?;
     gistcheckpage(index.name(), buffer)?;
 
     // If page LSN differs the page was modified; LP_DEAD hints are not safe.
@@ -421,7 +421,7 @@ fn gistScanPage<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut IndexScanDescData<'mcx>,
     page_item_blkno: BlockNumber,
-    page_item_parentlsn: Option<gist::GistNSN>,
+    page_item_parentlsn: Option<::gist::GistNSN>,
     my_distances: Option<&[IndexOrderByDistance]>,
     mut bitmap: Option<&mut AmTIDBitmap>,
 ) -> PgResult<i64> {
@@ -438,7 +438,7 @@ fn gistScanPage<'mcx>(
 
     // buffer = ReadBuffer(scan->indexRelation, pageItem->blkno);
     let buffer = read_buffer::call(&index, page_item_blkno)?;
-    bufmgr_seams::lock_buffer::call(buffer, GIST_SHARE)?;
+    ::bufmgr_seams::lock_buffer::call(buffer, GIST_SHARE)?;
     // PredicateLockPage(r, BufferGetBlockNumber(buffer), scan->xs_snapshot);
     let bgnum = buffer_get_block_number::call(buffer);
     predicate_lock_page::call(
@@ -701,7 +701,7 @@ fn getNextNearest<'mcx>(mcx: Mcx<'mcx>, scan: &mut IndexScanDescData<'mcx>) -> P
 
 /// The parent LSN of an index-page search item (`item->data.parentlsn`), or
 /// `None` for a heap item (its `data` is the heap union member).
-fn item_parentlsn(item: &GISTSearchItem<'_>) -> Option<gist::GistNSN> {
+fn item_parentlsn(item: &GISTSearchItem<'_>) -> Option<::gist::GistNSN> {
     match &item.data {
         GISTSearchItemData::Parentlsn(lsn) => Some(*lsn),
         GISTSearchItemData::Heap(_) => None,
@@ -1105,7 +1105,7 @@ fn build_fetch_tupdesc<'mcx>(
     scan: &IndexScanDescData<'mcx>,
     natts: usize,
     nkeyatts: usize,
-) -> PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>> {
+) -> PgResult<::mcx::PgBox<'mcx, ::types_tuple::heaptuple::TupleDescData<'mcx>>> {
     let index = &scan.index_relation;
     // CreateTemplateTupleDesc(natts)
     let mut td = tupdesc::CreateTemplateTupleDesc(mcx, natts as i32)?;
@@ -1150,7 +1150,7 @@ fn build_fetch_tupdesc<'mcx>(
         };
         tupdesc::TupleDescInitEntry(
             &mut td,
-            attno as types_core::primitive::AttrNumber,
+            attno as ::types_core::primitive::AttrNumber,
             None,
             typid,
             -1,
@@ -1158,7 +1158,7 @@ fn build_fetch_tupdesc<'mcx>(
         )?;
     }
 
-    mcx::alloc_in(mcx, td)
+    ::mcx::alloc_in(mcx, td)
 }
 
 /// `freeGISTstate` is a no-op in the owned model: the `GISTSTATE` and the whole
@@ -1176,12 +1176,12 @@ pub fn gistcanreturn(index: &Relation<'_>, attno: i32) -> PgResult<bool> {
     if attno > index.indnkeyatts() {
         return Ok(true);
     }
-    let fetch = index_getprocid::call(index, attno as types_core::primitive::AttrNumber, GIST_FETCH_PROC as u16)?;
+    let fetch = index_getprocid::call(index, attno as ::types_core::primitive::AttrNumber, GIST_FETCH_PROC as u16)?;
     if OidIsValid(fetch) {
         return Ok(true);
     }
     let compress =
-        index_getprocid::call(index, attno as types_core::primitive::AttrNumber, GIST_COMPRESS_PROC as u16)?;
+        index_getprocid::call(index, attno as ::types_core::primitive::AttrNumber, GIST_COMPRESS_PROC as u16)?;
     Ok(!OidIsValid(compress))
 }
 
@@ -1201,8 +1201,8 @@ pub fn gisthandler() -> IndexAmRoutine {
     IndexAmRoutine {
         type_: T_IndexAmRoutine,
         amstrategies: 0,
-        amsupport: gist::GISTNProcs as u16,
-        amoptsprocnum: gist::GIST_OPTIONS_PROC as u16,
+        amsupport: ::gist::GISTNProcs as u16,
+        amoptsprocnum: ::gist::GIST_OPTIONS_PROC as u16,
         amcanorder: false,
         amcanorderbyop: true,
         amcanhash: false,
@@ -1508,7 +1508,7 @@ fn erase_gistscan<'mcx>(
     mcx: Mcx<'mcx>,
     so: GISTScanOpaqueData<'mcx>,
 ) -> PgResult<PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx>> {
-    let boxed: PgBox<'mcx, GISTScanOpaqueData<'mcx>> = mcx::alloc_in(mcx, so)?;
+    let boxed: PgBox<'mcx, GISTScanOpaqueData<'mcx>> = ::mcx::alloc_in(mcx, so)?;
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn AmOpaque` vtable (the A0 erase pattern).

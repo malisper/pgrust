@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::sync::Once;
 
 use crate::{crypt_seams, syscache_seams, timestamp_seams, RolePasswordLookup};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// Deterministic fake of `pg_md5_encrypt`: `"md5" + 32-hex` from a tiny rolling
 /// hash over `passwd || salt`. Stable for equal inputs; classifies as MD5.

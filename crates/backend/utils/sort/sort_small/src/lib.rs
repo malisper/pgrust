@@ -38,14 +38,14 @@
 //! tail-iteration is a `loop` / `continue`.
 //!
 //! `CHECK_FOR_INTERRUPTS()` is the workspace's centralized interrupt seam
-//! ([`postgres_seams::check_for_interrupts`]): in C the macro
+//! ([`::postgres_seams::check_for_interrupts`]): in C the macro
 //! services a pending interrupt and may `ereport(ERROR/FATAL)` (e.g. on query
 //! cancel), which here surfaces as an `Err` that aborts the sort and is
 //! propagated to the caller. The owner of that seam is `tcop/postgres.c`; until
 //! it lands a call panics, exactly as for any other unported seam.
 
-use postgres_seams::check_for_interrupts;
-use types_error::PgResult;
+use ::postgres_seams::check_for_interrupts;
+use ::types_error::PgResult;
 
 /// `Min(a, b)` (`c.h`), over the signed offset distances used by the partition
 /// (`pa - a`, `pb - pa`, `pd - pc`, `pn - pd - 1` — the C pointer differences,

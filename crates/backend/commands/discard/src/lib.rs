@@ -18,17 +18,17 @@
 //! sequence) are reached through their seam crates and panic loudly until those
 //! owners land.
 
-use catalog_namespace::ResetTempTableNamespace;
-use async_seams::async_unlisten_all;
-use prepare::DropAllPreparedStatements;
-use sequence_seams_2::reset_sequence_caches;
-use lock_seams::lock_release_all_user;
-use cache_plancache::ResetPlanCache;
+use ::catalog_namespace::ResetTempTableNamespace;
+use ::async_seams::async_unlisten_all;
+use ::prepare::DropAllPreparedStatements;
+use ::sequence_seams_2::reset_sequence_caches;
+use ::lock_seams::lock_release_all_user;
+use ::cache_plancache::ResetPlanCache;
 use guc_seams::{reset_all_options, set_pg_variable_session_authorization_reset};
-use portalmem::PortalHashTableDeleteAll;
+use ::portalmem::PortalHashTableDeleteAll;
 
-use transam_xact_seams::prevent_in_transaction_block;
-use types_error::PgResult;
+use ::transam_xact_seams::prevent_in_transaction_block;
+use ::types_error::PgResult;
 // The canonical CALL/DISCARD parse node lives in `::nodes::ddlnodes` (the
 // node-opaque payload the dispatcher downcasts to). `parsenodes::DiscardMode`
 // is a re-export of this same enum, so the two `DiscardStmt` shapes are

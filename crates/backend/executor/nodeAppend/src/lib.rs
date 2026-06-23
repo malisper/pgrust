@@ -34,7 +34,7 @@
 #![allow(clippy::result_large_err)]
 
 use transam_parallel as parallel;
-use transam_parallel::shared_dsm_object;
+use ::transam_parallel::shared_dsm_object;
 use execAmi_seams as execAmi;
 use execAsync_seams as execAsync;
 use execPartition_seams as execPartition;
@@ -46,13 +46,13 @@ use nodeForeignscan_seams as nodeForeignscan;
 use nodes_core_seams as bms;
 use latch_seams as latch;
 use ipc_shmem_seams as shmem;
-use waiteventset_seams::WaitEventSet;
+use ::waiteventset_seams::WaitEventSet;
 use lwlock_seams as lwlock;
 use postgres_seams as tcop_postgres;
 use init_small_seams as globals;
 
 use mcx::{Mcx, PgBox};
-use types_core::PGINVALID_SOCKET;
+use ::types_core::PGINVALID_SOCKET;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use execparallel::{
     DsmSegmentHandle, ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
@@ -64,9 +64,9 @@ use ::nodes::nodeappend::{
 };
 use ::nodes::nodes::Node;
 use nodes::{Bitmapset, EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
-use types_pgstat::wait_event::WAIT_EVENT_APPEND_READY;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_SOCKET_READABLE};
-use types_storage::LWLockMode;
+use ::types_pgstat::wait_event::WAIT_EVENT_APPEND_READY;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_SOCKET_READABLE};
+use ::types_storage::LWLockMode;
 
 /// `INVALID_SUBPLAN_INDEX` (nodeAppend.c).
 const INVALID_SUBPLAN_INDEX: i32 = -1;
@@ -192,7 +192,7 @@ pub fn ExecInitAppend<'mcx>(
     debug_assert!(eflags & EXEC_FLAG_MARK == 0);
 
     // create new AppendState for our append node
-    let mut appendstate = mcx::alloc_in(mcx, AppendStateData::make(mcx))?;
+    let mut appendstate = ::mcx::alloc_in(mcx, AppendStateData::make(mcx))?;
     // appendstate->ps.plan = (Plan *) node; appendstate->ps.state = estate;
     // appendstate->ps.ExecProcNode = ExecAppend;
     appendstate.ps.plan = Some(node);
@@ -357,7 +357,7 @@ pub fn ExecInitAppend<'mcx>(
             // The `requestor`/`requestee` raw back-pointers alias `appendstate`
             // and `appendplans[i]`; the owned async dispatch reaches them
             // through the node and `request_index` (the load-bearing field).
-            let areq = mcx::alloc_in(
+            let areq = ::mcx::alloc_in(
                 mcx,
                 AsyncRequestData {
                     request_index: i,
@@ -684,7 +684,7 @@ pub fn ExecAppendInitializeDSM(
     shared_dsm_object::with_mut::<ParallelAppendState, ()>(seg, chunk, |pstate| {
         lwlock::lwlock_initialize::call(
             &mut pstate.pa_lock,
-            types_storage::storage::LWTRANCHE_PARALLEL_APPEND,
+            ::types_storage::storage::LWTRANCHE_PARALLEL_APPEND,
         );
     });
     // Zero the `pa_finished[]` tail (the residual of `memset(pstate, 0, ...)`):
@@ -1278,7 +1278,7 @@ fn ExecAppendAsyncEventWait<'mcx>(
     // If the timeout is -1, wait until at least one event occurs. If the
     // timeout is 0, poll for events, but do not wait at all.
     let mut occurred =
-        [types_storage::waiteventset::WaitEvent::default(); EVENT_BUFFER_SIZE as usize];
+        [::types_storage::waiteventset::WaitEvent::default(); EVENT_BUFFER_SIZE as usize];
     let occurred = &mut occurred[..nevents as usize];
     let noccurred = eventset.wait(timeout, occurred, WAIT_EVENT_APPEND_READY)?;
     if noccurred == 0 {
@@ -1725,7 +1725,7 @@ fn lwlock_acquire<'a>(
     // SAFETY: `pa_lock` is in the DSM-resident `ParallelAppendState` header
     // (live for the DSM segment, which outlives the handle); it is `Sync` over
     // its interior-mutable atomic state and is never moved.
-    let lock: &'a types_storage::LWLock =
+    let lock: &'a ::types_storage::LWLock =
         unsafe { &*core::ptr::addr_of!(pstate.header().pa_lock) };
     lwlock::lwlock_acquire::call(
         lock,

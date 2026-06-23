@@ -5,8 +5,8 @@
 //! plus an assertion sweep; the constant-folding engine itself is REAL (see
 //! [`crate::fold`]), so these route through it directly.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 
 /// `contain_mutable_functions_after_planning(expr)` (clauses.c:488):

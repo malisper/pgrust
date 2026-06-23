@@ -3,7 +3,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::params::{ParamListInfo, ParamListInfoData};
 
 seam_core::seam!(

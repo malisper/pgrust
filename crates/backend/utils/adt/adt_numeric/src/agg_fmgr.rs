@@ -23,12 +23,12 @@
 //! whose `pfree`/reset nodeAgg owns (the by-ref free is a deferred TODO across
 //! this repo). `Int128AggState` is `Copy`/`'static` and needs no context.
 
-use mcx::MemoryContext;
-use datum::Datum;
-use fmgr::boundary::RefPayload;
-use fmgr::FunctionCallInfoBaseData;
-use types_numeric::var::NumericAggState;
-use types_numeric::Int128AggState;
+use ::mcx::MemoryContext;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
+use ::fmgr::FunctionCallInfoBaseData;
+use ::types_numeric::var::NumericAggState;
+use ::types_numeric::Int128AggState;
 
 use crate::aggregate;
 
@@ -96,9 +96,9 @@ pub(crate) fn unpack_short_to_4b(bytes: &[u8]) -> Option<Vec<u8>> {
     }
     let short_len = ((h >> 1) & 0x7f) as usize; // VARSIZE_SHORT == (header >> 1) & 0x7F
     let data_size = short_len.saturating_sub(1); // minus VARHDRSZ_SHORT (1)
-    let total = datum::varlena::VARHDRSZ + data_size;
+    let total = ::datum::varlena::VARHDRSZ + data_size;
     let mut buf = Vec::with_capacity(total);
-    buf.extend_from_slice(&datum::varlena::set_varsize_4b(total));
+    buf.extend_from_slice(&::datum::varlena::set_varsize_4b(total));
     buf.extend_from_slice(&bytes[1..1 + data_size]);
     Some(buf)
 }
@@ -115,9 +115,9 @@ fn numeric_with_header(bytes: &[u8]) -> Vec<u8> {
     if let Some(unpacked) = unpack_short_to_4b(bytes) {
         return unpacked;
     }
-    let total = datum::varlena::VARHDRSZ + bytes.len();
+    let total = ::datum::varlena::VARHDRSZ + bytes.len();
     let mut buf = Vec::with_capacity(total);
-    buf.extend_from_slice(&datum::varlena::set_varsize_4b(total));
+    buf.extend_from_slice(&::datum::varlena::set_varsize_4b(total));
     buf.extend_from_slice(bytes);
     buf
 }
@@ -125,7 +125,7 @@ fn numeric_with_header(bytes: &[u8]) -> Vec<u8> {
 /// True if `bytes` begins with a 4-byte varlena length word equal to its length
 /// (a header-ful image), distinguishing it from a bare header-less payload.
 fn numeric_has_header(bytes: &[u8]) -> bool {
-    if bytes.len() < datum::varlena::VARHDRSZ {
+    if bytes.len() < ::datum::varlena::VARHDRSZ {
         return false;
     }
     // VARATT_IS_1B (low bit set) means a 1-byte short header — not produced for
@@ -227,7 +227,7 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// Run a numeric final `f(mcx)` in a fresh scratch context, copying its result
 /// image out by value (C: the palloc'd result lives in the caller's context).
 fn run_final(
-    f: impl for<'mcx> FnOnce(mcx::Mcx<'mcx>) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>,
+    f: impl for<'mcx> FnOnce(::mcx::Mcx<'mcx>) -> types_error::PgResult<Option<::mcx::PgVec<'mcx, u8>>>,
 ) -> types_error::PgResult<Option<Vec<u8>>> {
     let m = crate::fmgr_builtins::scratch_mcx();
     let out = f(m.mcx())?.map(|image| image.as_slice().to_vec());
@@ -582,11 +582,11 @@ fn arg_bytea_body(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
     // SHORT (1-byte) header: un-pack to a 4-byte-header image, then strip the
     // canonical 4-byte header (== `VARDATA_ANY` on the short form).
     if let Some(unpacked) = unpack_short_to_4b(payload) {
-        return unpacked[datum::varlena::VARHDRSZ..].to_vec();
+        return unpacked[::datum::varlena::VARHDRSZ..].to_vec();
     }
     // 4-byte header whose length word matches the image: strip the 4-byte header.
     if numeric_has_header(payload) {
-        payload[datum::varlena::VARHDRSZ..].to_vec()
+        payload[::datum::varlena::VARHDRSZ..].to_vec()
     } else {
         // Already header-less wire body.
         payload.to_vec()

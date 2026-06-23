@@ -23,15 +23,15 @@ mod fmgr_builtins;
 
 use std::cell::{Cell, RefCell};
 
-use mcx::Mcx;
-use datum::Datum;
+use ::mcx::Mcx;
+use ::datum::Datum;
 use types_error::{PgResult, DEBUG1};
-use execparallel::JitInstrumentation;
+use ::execparallel::JitInstrumentation;
 use ::nodes::execexpr::ExprState;
 
 use llvmjit_seams as provider;
 use fd_seams as fd;
-use guc_tables::vars;
+use ::guc_tables::vars;
 
 /// `DLSUFFIX` — platform shared-library suffix (`.so` on the build platforms;
 /// mirrors `backend-utils-fmgr-dfmgr`).
@@ -186,12 +186,12 @@ pub fn jit_compile_expr<'mcx>(
     }
 
     /* if no jitting should be performed at all */
-    if jit_flags & execparallel::PGJIT_PERFORM == 0 {
+    if jit_flags & ::execparallel::PGJIT_PERFORM == 0 {
         return Ok(false);
     }
 
     /* or if expressions aren't JITed */
-    if jit_flags & execparallel::PGJIT_EXPR == 0 {
+    if jit_flags & ::execparallel::PGJIT_EXPR == 0 {
         return Ok(false);
     }
 

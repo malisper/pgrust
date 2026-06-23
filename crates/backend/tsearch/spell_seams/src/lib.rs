@@ -7,7 +7,7 @@
 //!
 //! C embeds an `IspellDict obj` inside the caller's `DictISpell` and threads
 //! `&d->obj` through every step. Here the build state lives behind the opaque
-//! [`SpellHandle`](tsearch::SpellHandle) the owner mints in
+//! [`SpellHandle`](::tsearch::SpellHandle) the owner mints in
 //! `NIStartBuild` and resolves to its real `IspellDict`. Every step can
 //! `ereport(ERROR)` (file-read failures, parse errors, OOM), so all return
 //! `PgResult`. `NINormalizeWord` allocates its `TSLexeme[]` result in the
@@ -15,7 +15,7 @@
 //! carries `'mcx`; `None` mirrors the C `NULL` return.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use tsearch::{SpellHandle, TSLexeme};
 
 seam_core::seam!(

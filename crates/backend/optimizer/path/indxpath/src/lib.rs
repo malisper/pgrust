@@ -32,7 +32,7 @@
 //! # Failure surface / seams
 //!
 //! Allocating routines take an [`Mcx`](mcx::Mcx) and return
-//! [`PgResult`](types_error::PgResult): every C `palloc` can
+//! [`PgResult`](::types_error::PgResult): every C `palloc` can
 //! `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`. Everything that crosses a subsystem
 //! boundary crosses through a seam — pathnode.c (`create_*_path`/`add_path`),
 //! costsize.c (`cost_bitmap_*`, `create_partial_bitmap_paths`,
@@ -109,9 +109,9 @@ pub fn init_seams() {
     use pathnode_seams as pn;
 
     use pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
-    use types_core::primitive::Oid;
+    use ::types_core::primitive::Oid;
     use ::nodes::primnodes::Expr;
-    use types_error::PgResult;
+    use ::types_error::PgResult;
 
     // create_index_paths / check_index_predicates allocate; the registry seam
     // signatures take `&mut PlannerInfo` only (no Mcx in the seam contract).
@@ -121,7 +121,7 @@ pub fn init_seams() {
     // inward wrappers stand up a transient context (the C
     // `CurrentMemoryContext`) and thread its `Mcx` down.
     ix::create_index_paths::set(
-        |run: &pathnodes::planner_run::PlannerRun<'_>,
+        |run: &::pathnodes::planner_run::PlannerRun<'_>,
          root: &mut PlannerInfo,
          rel: RelId|
          -> PgResult<()> {
@@ -132,7 +132,7 @@ pub fn init_seams() {
         },
     );
     ix::check_index_predicates::set(
-        |run: &pathnodes::planner_run::PlannerRun<'_>,
+        |run: &::pathnodes::planner_run::PlannerRun<'_>,
          root: &mut PlannerInfo,
          rel: RelId|
          -> PgResult<()> {

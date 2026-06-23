@@ -52,14 +52,14 @@
 //!    relation's `rd_options` directly via [`Relation::get_fillfactor`]
 //!    (defaulting to `BTREE_DEFAULT_FILLFACTOR`); no seam needed.
 
-use types_core::primitive::{BlockNumber, OffsetNumber, Size};
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Size};
 use types_error::{PgError, PgResult};
 use types_nbtree::{
     BTPageOpaqueData, BTREE_SINGLEVAL_FILLFACTOR, BT_IS_POSTING, INDEX_ALT_TID_MASK, P_FIRSTKEY,
     P_HIKEY, P_NONE,
 };
-use rel::Relation;
-use types_tuple::heaptuple::{BlockIdData, IndexTupleData, IndexTupleSize, ItemPointerData};
+use ::rel::Relation;
+use ::types_tuple::heaptuple::{BlockIdData, IndexTupleData, IndexTupleSize, ItemPointerData};
 
 use page::{
     ItemIdGetLength, ItemPointerGetBlockNumber, ItemPointerGetBlockNumberNoCheck,

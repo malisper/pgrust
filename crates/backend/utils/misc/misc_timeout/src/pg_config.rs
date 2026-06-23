@@ -12,9 +12,9 @@
 //! ported) is reached through the `common-config-info-seams::get_configdata`
 //! seam.
 
-use utils_error::PgResult;
-use config_info_seams::get_configdata;
-use misc_more2::ConfigDataRow;
+use ::utils_error::PgResult;
+use ::config_info_seams::get_configdata;
+use ::misc_more2::ConfigDataRow;
 
 /// `pg_config` — produce the configuration rows that the SRF materializes.
 ///

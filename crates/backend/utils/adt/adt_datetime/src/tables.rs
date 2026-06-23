@@ -10,7 +10,7 @@
 //! characters, mirroring the `char token[TOKMAXLEN + 1]` field that the C
 //! source pre-truncates via its initializer.
 
-use types_datetime::DateToken;
+use ::types_datetime::DateToken;
 use types_datetime::{
     AD, ADBC, AGO, AM, AMPM, BC, DOW, DTK_CENTURY, DTK_DAY, DTK_DECADE, DTK_DOW, DTK_DOY,
     DTK_EARLY, DTK_EPOCH, DTK_HOUR, DTK_ISODOW, DTK_ISOYEAR, DTK_JULIAN, DTK_LATE, DTK_MICROSEC,
@@ -196,7 +196,7 @@ pub static days: [&str; 7] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_datetime::TOKMAXLEN;
+    use ::types_datetime::TOKMAXLEN;
 
     /// Compare two tokens the way `datebsearch` does: by their first
     /// `TOKMAXLEN` bytes (which, since the source tokens are already

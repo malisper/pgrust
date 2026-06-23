@@ -15,7 +15,7 @@ use types_datetime::{DTK_M, HOUR, MICROSECOND, MILLISECOND, MINUTE, SECOND};
 pub const DTK_ALL_SECS_M: i32 = DTK_M(SECOND) | DTK_M(MILLISECOND) | DTK_M(MICROSECOND);
 /// YEAR | MONTH | DAY.
 pub const DTK_DATE_M: i32 =
-    DTK_M(types_datetime::YEAR) | DTK_M(types_datetime::MONTH) | DTK_M(types_datetime::DAY);
+    DTK_M(::types_datetime::YEAR) | DTK_M(::types_datetime::MONTH) | DTK_M(::types_datetime::DAY);
 /// HOUR | MINUTE | all seconds.
 pub const DTK_TIME_M: i32 = DTK_M(HOUR) | DTK_M(MINUTE) | DTK_ALL_SECS_M;
 

@@ -5,11 +5,11 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::Oid;
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::Oid;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use types_rangetypes::{RangeBound, RangeTypeP};
 // Canonical unified value (the Datum-unification keystone): a by-reference
 // `RangeType` array element rides the `Datum::ByRef` arm verbatim.
@@ -344,7 +344,7 @@ seam_core::seam!(
         input: &str,
         rngtypoid: Oid,
         typmod: i32,
-        escontext: Option<&mut types_error::SoftErrorContext>,
+        escontext: Option<&mut ::types_error::SoftErrorContext>,
     ) -> PgResult<Option<RangeTypeP<'mcx>>>
 );
 

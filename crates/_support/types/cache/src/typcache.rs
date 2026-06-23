@@ -11,8 +11,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::Oid;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::Oid;
 use ::nodes::primnodes::Expr;
 
 /// `TypeCacheEntry` (`typcache.h`), trimmed. For a range type

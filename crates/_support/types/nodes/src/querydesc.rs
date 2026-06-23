@@ -10,7 +10,7 @@
 //!
 //! ## The owned model (why a bundle)
 //!
-//! In this repo an `EState` is an [`mcx::McxOwned`] bundle: the `EStateData`
+//! In this repo an `EState` is an [`::mcx::McxOwned`] bundle: the `EStateData`
 //! node lives *inside* its own per-query "ExecutorState" context (the C
 //! `es_query_cxt`), and everything `ExecutorStart` builds — the plan-state
 //! tree, the slot/exprcontext/result-rel pools, the result `TupleDesc` — is
@@ -43,8 +43,8 @@ use crate::nodes::{CmdType, Node};
 use crate::params::ParamListInfo;
 use crate::parsestmt::DestReceiverHandle;
 use crate::planstate::PlanStateNode;
-use types_error::PgResult;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::TupleDescData;
 
 /// The executor working state a started query owns, all living in the one
 /// per-query "ExecutorState" context.
@@ -71,7 +71,7 @@ pub struct QueryWorkState<'mcx> {
     pub planstate: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
 }
 
-mcx::bind!(pub QueryWorkStateTy => QueryWorkState<'mcx>);
+::mcx::bind!(pub QueryWorkStateTy => QueryWorkState<'mcx>);
 
 /// `QueryDesc` (`executor/execdesc.h`) — the owned executor invocation handle.
 ///
@@ -131,7 +131,7 @@ impl QueryDesc {
         let work = McxOwned::<QueryWorkStateTy>::try_new(
             parent.new_child("ExecutorState"),
             |mcx: Mcx<'_>| {
-                let plannedstmt = mcx::alloc_in(mcx, plannedstmt.clone_in(mcx)?)?;
+                let plannedstmt = ::mcx::alloc_in(mcx, plannedstmt.clone_in(mcx)?)?;
                 let source_text = PgString::from_str_in(source_text, mcx)?;
                 Ok(QueryWorkState {
                     estate: EStateData::new_in(mcx),
@@ -290,7 +290,7 @@ impl QueryDesc {
     /// reachable through `for<'mcx>`-universal closures so that no borrow at the
     /// bundle's private lifetime escapes. This accessor bridges the two: inside
     /// the bundle (at its genuine `'mcx`), it leaks the `planTree`
-    /// [`PgBox`](mcx::PgBox) into an honest `&'mcx Node` via [`mcx::leak_in`]
+    /// [`PgBox`](::mcx::PgBox) into an honest `&'mcx Node` via [`::mcx::leak_in`]
     /// (the value still lives until the per-query context drop — faithful to C's
     /// "plan freed with its context"), takes the split `&mut estate` /
     /// `&mut planstate` borrows, and runs the `for<'mcx>` closure. The closure
@@ -321,7 +321,7 @@ impl QueryDesc {
                 .plannedstmt
                 .planTree
                 .take()
-                .map(|tree| &*mcx::leak_in(tree));
+                .map(|tree| &*::mcx::leak_in(tree));
             // The remaining `plannedstmt` fields stay reachable so `InitPlan`
             // can move the range table / permInfos / unprunableRelids out of the
             // bundle into the `EState` (`ExecInitRangeTable`) and read the

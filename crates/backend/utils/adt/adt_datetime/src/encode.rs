@@ -34,7 +34,7 @@ use types_datetime::{
 };
 use types_datetime::{fsec_t, DateADT, Timestamp};
 
-use pgtime::pg_tm;
+use ::pgtime::pg_tm;
 
 use crate::calendar::{date2j, j2day};
 use crate::consts::{EARLY, LATE};

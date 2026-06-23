@@ -25,12 +25,12 @@
 
 extern crate alloc;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, PlaceHolderVar};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, Relids};
 
 seam_core::seam!(
@@ -268,8 +268,8 @@ pub struct SublinkPlanResult<'mcx> {
     pub plan: Node<'mcx>,
     /// The chosen `Path`'s handle in `subroot`'s path arena (C `best_path`),
     /// or `None` for the dummy-path init case.
-    pub subpath: Option<pathnodes::PathId>,
+    pub subpath: Option<::pathnodes::PathId>,
     /// The sub-query's interned `QueryId` (so the caller can read its
     /// `targetList` back through the run for `generate_subquery_params`).
-    pub subquery_id: pathnodes::QueryId,
+    pub subquery_id: ::pathnodes::QueryId,
 }

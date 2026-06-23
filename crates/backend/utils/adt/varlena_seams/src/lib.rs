@@ -5,7 +5,7 @@
 //! until then a call panics loudly.
 
 use mcx::{Mcx, PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 // The canonical unified value type (Datum-unification keystone). The `*_v` seam
 // variants below take/return it and are the migration target for this unit's
 // value-carrying seams; migrated consumers call them.
@@ -61,11 +61,11 @@ seam_core::seam!(
     /// carried on `Err`.
     ///
     /// TRANSITIONAL SHIM: superseded by [`cstring_to_text_v`], which returns the
-    /// unified `types_tuple::Datum` value. Kept until callers migrate.
+    /// unified `::types_tuple::Datum` value. Kept until callers migrate.
     pub fn cstring_to_text<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         s: &str,
-    ) -> types_error::PgResult<datum::Datum>
+    ) -> ::types_error::PgResult<datum::Datum>
 );
 
 seam_core::seam!(
@@ -75,9 +75,9 @@ seam_core::seam!(
     /// freshly built varlena bytes (header + payload) allocated in `mcx`. OOM
     /// `ereport(ERROR)` carried on `Err`.
     pub fn cstring_to_text_v<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         s: &str,
-    ) -> types_error::PgResult<DatumV<'mcx>>
+    ) -> ::types_error::PgResult<DatumV<'mcx>>
 );
 
 seam_core::seam!(
@@ -88,11 +88,11 @@ seam_core::seam!(
     /// representation is identical. OOM `ereport(ERROR)` carried on `Err`.
     ///
     /// TRANSITIONAL SHIM: superseded by [`bytes_to_varlena_v`], which returns the
-    /// unified `types_tuple::Datum` value. Kept until callers migrate.
+    /// unified `::types_tuple::Datum` value. Kept until callers migrate.
     pub fn bytes_to_varlena<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         bytes: &[u8],
-    ) -> types_error::PgResult<datum::Datum>
+    ) -> ::types_error::PgResult<datum::Datum>
 );
 
 seam_core::seam!(
@@ -102,9 +102,9 @@ seam_core::seam!(
     /// varlena bytes (`VARHDRSZ` header + payload) copied into `mcx`. OOM
     /// `ereport(ERROR)` carried on `Err`.
     pub fn bytes_to_varlena_v<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         bytes: &[u8],
-    ) -> types_error::PgResult<DatumV<'mcx>>
+    ) -> ::types_error::PgResult<DatumV<'mcx>>
 );
 
 seam_core::seam!(
@@ -131,11 +131,11 @@ seam_core::seam!(
     /// `Err` carries `text_substring`'s "negative substring length not
     /// allowed" `ereport(ERROR)` and palloc OOM.
     pub fn text_substr<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         str: &[u8],
         start: i32,
         length: i32,
-    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+    ) -> ::types_error::PgResult<::mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
@@ -148,7 +148,7 @@ seam_core::seam!(
     /// payload is allocated in `mcx`. `Err` carries the regex-compile/
     /// execute `ereport(ERROR)`s and palloc OOM.
     pub fn replace_text_regexp<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         src_text: &[u8],
         pattern_text: &[u8],
         replace_text: &[u8],
@@ -156,7 +156,7 @@ seam_core::seam!(
         collation: types_core::Oid,
         search_start: i32,
         n: i32,
-    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+    ) -> ::types_error::PgResult<::mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
@@ -165,9 +165,9 @@ seam_core::seam!(
     /// path elements, each allocated in `mcx`. `Ok(None)` is the C `false`
     /// return (syntax error); `Ok(Some(list))` carries the parsed elements.
     pub fn split_directories_string<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         rawstring: &str,
-    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, mcx::PgString<'mcx>>>>
+    ) -> ::types_error::PgResult<Option<::mcx::PgVec<'mcx, ::mcx::PgString<'mcx>>>>
 );
 
 seam_core::seam!(
@@ -178,7 +178,7 @@ seam_core::seam!(
     /// carries detoast/OOM `ereport(ERROR)`.
     ///
     /// TRANSITIONAL SHIM: superseded by [`text_to_cstring_v`], which takes the
-    /// unified `types_tuple::Datum` value. Kept until callers migrate.
+    /// unified `::types_tuple::Datum` value. Kept until callers migrate.
     pub fn text_to_cstring<'mcx>(
         mcx: Mcx<'mcx>,
         d: datum::Datum,

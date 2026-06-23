@@ -5,16 +5,16 @@
 
 #![allow(non_snake_case)]
 
-use launch_backend::postmaster_child_launch;
+use ::launch_backend::postmaster_child_launch;
 use pmchild::{
     AssignPostmasterChildSlot, PMChild, ReleasePostmasterChildSlot, SetActiveChildBgworkerInfo,
     SetActiveChildPid,
 };
 use utils_error::{ereport};
 use types_error::{LOG, PANIC};
-use types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED;
-use types_core::init::BackendType;
-use types_startup::StartupData;
+use ::types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED;
+use ::types_core::init::BackendType;
+use ::types_startup::StartupData;
 
 use crate::core::{
     pm, pm_mut, PMState, SMART_SHUTDOWN, B_ARCHIVER, B_AUTOVAC_WORKER,
@@ -225,7 +225,7 @@ pub fn StartSysLogger() {
 
 /// C: `static void StartAutovacuumWorker(void)`.
 pub fn StartAutovacuumWorker() {
-    use types_startup::CacState;
+    use ::types_startup::CacState;
     if statemachine::canAcceptConnections(B_AUTOVAC_WORKER) == CacState::Ok {
         let bn = StartChildProcess(B_AUTOVAC_WORKER);
         if let Some(bn) = bn {

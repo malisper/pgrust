@@ -10,8 +10,8 @@
 
 use super::*;
 use core_seam as cs;
-use mcx::MemoryContext;
-use types_core::AttrNumber;
+use ::mcx::MemoryContext;
+use ::types_core::AttrNumber;
 
 /* ---------------------------------------------------------------------------
  * Seam install helpers — a trivial by-value int codec for the byte-layout tests.

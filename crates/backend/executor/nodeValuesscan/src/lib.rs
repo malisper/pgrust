@@ -41,9 +41,9 @@ use clauses_seams as clauses;
 use postgres_seams as tcop_postgres;
 use misc2_seams as expandeddatum;
 
-use mcx::alloc_in;
-use types_error::PgResult;
-use execparallel::PGJIT_NONE;
+use ::mcx::alloc_in;
+use ::types_error::PgResult;
+use ::execparallel::PGJIT_NONE;
 use ::nodes::nodes::Node;
 use ::nodes::nodevaluesscan::{ValuesScan, ValuesScanState};
 use nodes::{EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
@@ -142,8 +142,8 @@ fn ValuesNext<'mcx>(
                 // only for the seam call. The compiled states are allocated in
                 // the per-query context by the seam.
                 let exprs = &node.exprlists[row];
-                let mut refs: mcx::PgVec<'mcx, Option<&::nodes::primnodes::Expr<'mcx>>> =
-                    mcx::vec_with_capacity_in(mcx, exprs.len())?;
+                let mut refs: ::mcx::PgVec<'mcx, Option<&::nodes::primnodes::Expr<'mcx>>> =
+                    ::mcx::vec_with_capacity_in(mcx, exprs.len())?;
                 for e in exprs.iter() {
                     refs.push(Some(e));
                 }
@@ -160,10 +160,10 @@ fn ValuesNext<'mcx>(
         // typlen test. The scan slot's descriptor is below this crate's layer
         // (the slot payload lives in execTuples), so it is read through the
         // owner's seam. `Assert(ncols == natts)` is the same shared length.
-        let attlens: mcx::PgVec<'mcx, i16> = {
+        let attlens: ::mcx::PgVec<'mcx, i16> = {
             let mcx = estate.es_query_cxt;
             let desc = execTuples::exec_scan_slot_descriptor::call(mcx, &node.ss, estate)?;
-            let mut v = mcx::vec_with_capacity_in(mcx, ncols)?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, ncols)?;
             match desc.as_deref() {
                 Some(td) => {
                     debug_assert_eq!(ncols as i32, td.natts);
@@ -186,9 +186,9 @@ fn ValuesNext<'mcx>(
         //
         //   resind = 0; foreach(lc, exprstatelist) { ...; resind++; }
         let mcx = estate.es_query_cxt;
-        let mut values: mcx::PgVec<'mcx, types_tuple::heaptuple::Datum<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, ncols)?;
-        let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, ncols)?;
+        let mut values: ::mcx::PgVec<'mcx, types_tuple::heaptuple::Datum<'mcx>> =
+            ::mcx::vec_with_capacity_in(mcx, ncols)?;
+        let mut isnull: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, ncols)?;
         for resind in 0..ncols {
             // values[resind] = ExecEvalExpr(estate, econtext, &isnull[resind]);
             //
@@ -316,7 +316,7 @@ pub fn ExecInitValuesScan<'mcx>(
     node: &'mcx Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     _eflags: i32,
-) -> PgResult<mcx::PgBox<'mcx, ValuesScanState<'mcx>>> {
+) -> PgResult<::mcx::PgBox<'mcx, ValuesScanState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
     let plan: &'mcx ValuesScan<'mcx> = match node.as_valuesscan() {
@@ -393,15 +393,15 @@ pub fn ExecInitValuesScan<'mcx>(
     //   scanstate->exprstatelists = (List **) palloc0(array_len * sizeof(List *));
     let array_len = plan.values_lists.len();
     {
-        let mut exprlists = mcx::vec_with_capacity_in(mcx, array_len)?;
-        let mut exprstatelists = mcx::vec_with_capacity_in(mcx, array_len)?;
+        let mut exprlists = ::mcx::vec_with_capacity_in(mcx, array_len)?;
+        let mut exprstatelists = ::mcx::vec_with_capacity_in(mcx, array_len)?;
         for i in 0..array_len {
             // scanstate->exprlists[i] = exprs;  (a copy of the row's expr list,
             // owned by the node in the per-query context — the plan tree is
             // read-only)
             let src = &plan.values_lists[i];
-            let mut row: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
-                mcx::vec_with_capacity_in(mcx, src.len())?;
+            let mut row: ::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
+                ::mcx::vec_with_capacity_in(mcx, src.len())?;
             for e in src.iter() {
                 // C aliases the plan's expr list (`exprlists[i] = exprs`); here
                 // the node owns its copy in the per-query context. Deep-copy via
@@ -411,7 +411,7 @@ pub fn ExecInitValuesScan<'mcx>(
             }
             exprlists.push(row);
             // scanstate->exprstatelists[i] = NULL;  (palloc0 -> empty cell)
-            exprstatelists.push(mcx::PgVec::new_in(mcx));
+            exprstatelists.push(::mcx::PgVec::new_in(mcx));
         }
         scanstate.exprlists = exprlists;
         scanstate.exprstatelists = exprstatelists;
@@ -448,8 +448,8 @@ pub fn ExecInitValuesScan<'mcx>(
                 ..
             } = &mut *scanstate;
             let exprs = &exprlists[i];
-            let mut refs: mcx::PgVec<'mcx, Option<&::nodes::primnodes::Expr<'mcx>>> =
-                mcx::vec_with_capacity_in(mcx, exprs.len())?;
+            let mut refs: ::mcx::PgVec<'mcx, Option<&::nodes::primnodes::Expr<'mcx>>> =
+                ::mcx::vec_with_capacity_in(mcx, exprs.len())?;
             for e in exprs.iter() {
                 refs.push(Some(e));
             }

@@ -49,18 +49,18 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::MemoryContext;
-use types_core::primitive::{
+use ::mcx::MemoryContext;
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, OffsetNumber, RegProcedure, BLCKSZ,
 };
-use types_core::XLogRecPtr;
+use ::types_core::XLogRecPtr;
 use types_error::{PgError, PgResult, PANIC};
-use types_storage::storage::{Buffer, InvalidBuffer, ReadBufferMode};
-use types_storage::RelFileLocator;
-use wal::rmgr::XLogReaderState;
-use wal::xlogutils::in_hot_standby;
-use wal::XLogRedoAction;
-use xlog_records::hash_xlog::{
+use ::types_storage::storage::{Buffer, InvalidBuffer, ReadBufferMode};
+use ::types_storage::RelFileLocator;
+use ::wal::rmgr::XLogReaderState;
+use ::wal::xlogutils::in_hot_standby;
+use ::wal::XLogRedoAction;
+use ::xlog_records::hash_xlog::{
     xl_hash_add_ovfl_page, xl_hash_delete, xl_hash_init_bitmap_page, xl_hash_init_meta_page,
     xl_hash_insert, xl_hash_move_page_contents, xl_hash_split_allocate_page,
     xl_hash_split_complete, xl_hash_squeeze_page, xl_hash_update_meta_page,
@@ -70,7 +70,7 @@ use xlog_records::hash_xlog::{
 use page::{PageAddItemExtended, PageIndexMultiDelete, PageInit, PageMut};
 
 use bufmask_seams as bufmask;
-use xlogreader_seams::xlog_rec_get_block_tag_extended;
+use ::xlogreader_seams::xlog_rec_get_block_tag_extended;
 use xlogutils_seams as xlogutils;
 use bufmgr_seams as bufmgr;
 use standby_seams as standby;

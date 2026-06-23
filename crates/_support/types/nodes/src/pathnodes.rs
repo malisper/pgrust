@@ -8,7 +8,7 @@
 //! fields are added as their consuming units are ported.
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::nodes::NodeTag;
 
@@ -66,7 +66,7 @@ impl IndexPath<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<IndexPath<'b>> {
         Ok(IndexPath {
             path: self.path.clone_in(mcx)?,
-            indexinfo: mcx::alloc_in(mcx, self.indexinfo.clone_in(mcx)?)?,
+            indexinfo: ::mcx::alloc_in(mcx, self.indexinfo.clone_in(mcx)?)?,
         })
     }
 }
@@ -108,7 +108,7 @@ impl ProjectionPath<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ProjectionPath<'b>> {
         Ok(ProjectionPath {
             path: self.path.clone_in(mcx)?,
-            subpath: mcx::alloc_in(mcx, self.subpath.clone_in(mcx)?)?,
+            subpath: ::mcx::alloc_in(mcx, self.subpath.clone_in(mcx)?)?,
         })
     }
 }
@@ -160,7 +160,7 @@ impl AppendPath<'_> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying recurses
     /// into the owned `subpaths` list.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<AppendPath<'b>> {
-        let mut subpaths = mcx::vec_with_capacity_in(mcx, self.subpaths.len())?;
+        let mut subpaths = ::mcx::vec_with_capacity_in(mcx, self.subpaths.len())?;
         for child in self.subpaths.iter() {
             subpaths.push(child.clone_in(mcx)?);
         }
@@ -184,7 +184,7 @@ impl MergeAppendPath<'_> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying recurses
     /// into the owned `subpaths` list.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<MergeAppendPath<'b>> {
-        let mut subpaths = mcx::vec_with_capacity_in(mcx, self.subpaths.len())?;
+        let mut subpaths = ::mcx::vec_with_capacity_in(mcx, self.subpaths.len())?;
         for child in self.subpaths.iter() {
             subpaths.push(child.clone_in(mcx)?);
         }

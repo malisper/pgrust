@@ -1,7 +1,7 @@
 //! `pg_transform` catalog row layout and constants (`catalog/pg_transform.h`,
 //! PostgreSQL 18.3), trimmed to what the `CreateTransform` catalog insert reads.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_transform.h CATALOG / DECLARE_*).

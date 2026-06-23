@@ -4,10 +4,10 @@
 //! Every cluster.c function is present in-crate with identical control flow,
 //! branch order, constants, lock levels, SQLSTATEs and messages, and
 //! `CommandCounterIncrement` placement. Relations cross as
-//! [`rel::Relation`] handles (opened through the table/index owner's
+//! [`::rel::Relation`] handles (opened through the table/index owner's
 //! seams; `rd_rel` fields read directly off the handle); the catalog-row copy
 //! `swap_relation_files`/`copy_table_data` mutate is the real
-//! [`types_cluster::PgClassForm`]. Outward calls go through each owner's
+//! [`::types_cluster::PgClassForm`]. Outward calls go through each owner's
 //! `-seams` crate and panic loudly until the owner lands.
 
 #![allow(non_snake_case)]
@@ -30,18 +30,18 @@ use types_cluster::{
     REINDEX_REL_FORCE_INDEXES_UNLOGGED, REINDEX_REL_SUPPRESS_INDEX_USE,
 };
 use types_core::{InvalidOid, MultiXactId, Oid, TransactionId};
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::lock::{
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, RowExclusiveLock, NoLock, LOCKMODE,
 };
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
     RELKIND_TOASTVALUE, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, DEBUG2, ERROR, INFO, WARNING};
 
 // Owner seam crates.
@@ -190,8 +190,8 @@ fn format_namedata(s: &str) -> String {
 /// `cluster(ParseState *pstate, ClusterStmt *stmt, bool isTopLevel)`.
 pub fn cluster(
     mcx: Mcx<'_>,
-    pstate: &types_cluster::ParseState<'_>,
-    stmt: &types_cluster::ClusterStmt,
+    pstate: &::types_cluster::ParseState<'_>,
+    stmt: &::types_cluster::ClusterStmt,
     isTopLevel: bool,
 ) -> PgResult<()> {
     let mut params = ClusterParams::new();
@@ -201,13 +201,13 @@ pub fn cluster(
     /* Parse option list */
     for opt in &stmt.params {
         if opt.defname == "verbose" {
-            verbose = define_seams::def_get_boolean::call(
+            verbose = ::define_seams::def_get_boolean::call(
                 opt.defname.clone(),
                 opt.arg.as_ref().map(map_defelem_arg),
             )?;
         } else {
             return ereport(ERROR)
-                .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!("unrecognized {} option \"{}\"", "CLUSTER", opt.defname))
                 .errposition(parse_node::parser_errposition::call(pstate, opt.location)?)
                 .finish(here("cluster"));
@@ -238,7 +238,7 @@ pub fn cluster(
          */
         if relation_is_other_temp(&opened)? {
             return ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("cannot cluster temporary tables of other sessions")
                 .finish(here("cluster"));
         }
@@ -256,7 +256,7 @@ pub fn cluster(
 
                 if !OidIsValid(indexOid) {
                     return ereport(ERROR)
-                        .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                        .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
                         .errmsg(format!(
                             "there is no previously clustered index for table \"{}\"",
                             relation.relname
@@ -272,7 +272,7 @@ pub fn cluster(
                 )?;
                 if !OidIsValid(indexOid) {
                     return ereport(ERROR)
-                        .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                        .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
                         .errmsg(format!(
                             "index \"{}\" for table \"{}\" does not exist",
                             indexname, relation.relname
@@ -338,14 +338,14 @@ fn relation_is_other_temp(rel: &Relation<'_>) -> PgResult<bool> {
 
 /// Marshal the local `DefElemArg` projection into the define owner's variant.
 fn map_defelem_arg(
-    a: &types_cluster::DefElemArg,
-) -> define_seams::DefElemArg {
-    use define_seams::DefElemArg as D;
+    a: &::types_cluster::DefElemArg,
+) -> ::define_seams::DefElemArg {
+    use ::define_seams::DefElemArg as D;
     match a {
-        types_cluster::DefElemArg::Integer(i) => D::Integer(*i),
-        types_cluster::DefElemArg::Float(s) => D::Float(s.clone()),
-        types_cluster::DefElemArg::Boolean(b) => D::Boolean(*b),
-        types_cluster::DefElemArg::String(s) => D::String(s.clone()),
+        ::types_cluster::DefElemArg::Integer(i) => D::Integer(*i),
+        ::types_cluster::DefElemArg::Float(s) => D::Float(s.clone()),
+        ::types_cluster::DefElemArg::Boolean(b) => D::Boolean(*b),
+        ::types_cluster::DefElemArg::String(s) => D::String(s.clone()),
     }
 }
 
@@ -519,7 +519,7 @@ fn cluster_rel_body(
     /* We allow VACUUM FULL, but not CLUSTER, on shared catalogs. */
     if OidIsValid(indexOid) && relcache::rd_rel_relisshared::call(&OldHeap)? {
         return ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("cannot cluster a shared catalog")
             .finish(here("cluster_rel"));
     }
@@ -528,12 +528,12 @@ fn cluster_rel_body(
     if relation_is_other_temp(OldHeap)? {
         if OidIsValid(indexOid) {
             return ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("cannot cluster temporary tables of other sessions")
                 .finish(here("cluster_rel"));
         } else {
             return ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("cannot vacuum temporary tables of other sessions")
                 .finish(here("cluster_rel"));
         }
@@ -601,7 +601,7 @@ pub fn check_index_is_clusterable(
     };
     if mismatch {
         return ereport(ERROR)
-            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg(format!(
                 "\"{}\" is not an index for table \"{}\"",
                 OldIndex.name(),
@@ -613,7 +613,7 @@ pub fn check_index_is_clusterable(
     /* Index AM must allow clustering */
     if !relcache::rd_indam_amclusterable::call(&OldIndex)? {
         return ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "cannot cluster on index \"{}\" because access method does not support clustering",
                 OldIndex.name()
@@ -624,7 +624,7 @@ pub fn check_index_is_clusterable(
     /* Disallow clustering on incomplete (partial) indexes. */
     if relcache::rd_index_has_indpred::call(&OldIndex)? {
         return ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "cannot cluster on partial index \"{}\"",
                 OldIndex.name()
@@ -635,7 +635,7 @@ pub fn check_index_is_clusterable(
     /* Disallow if index is left over from a failed CREATE INDEX CONCURRENTLY. */
     if !relcache::rd_index_indisvalid::call(&OldIndex)? {
         return ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "cannot cluster on invalid index \"{}\"",
                 OldIndex.name()
@@ -663,7 +663,7 @@ pub fn mark_index_clustered(
     /* Disallow applying to a partitioned table */
     if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
         return ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("cannot mark index clustered in partitioned table")
             .finish(here("mark_index_clustered"));
     }

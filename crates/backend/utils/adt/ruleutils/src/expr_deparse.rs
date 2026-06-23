@@ -51,7 +51,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{
@@ -1926,7 +1926,7 @@ fn get_rule_expr_e(
 
 /// The `T_List` body of `get_rule_expr` over an owned `Vec<Node>`.
 fn get_rule_expr_list(
-    list: &PgVec<'_, mcx::PgBox<'_, Node<'_>>>,
+    list: &PgVec<'_, ::mcx::PgBox<'_, Node<'_>>>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
@@ -2123,7 +2123,7 @@ fn get_rule_expr_toplevel_expr(
 /// `static void get_rule_list_toplevel(List *lst, ...)` — C 10652-10666 over a
 /// `PgVec<PgBox<Node>>`.
 pub fn get_rule_list_toplevel(
-    list: &PgVec<'_, mcx::PgBox<'_, Node<'_>>>,
+    list: &PgVec<'_, ::mcx::PgBox<'_, Node<'_>>>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
@@ -3285,7 +3285,7 @@ fn get_subplan_expr(
         // Push SubPlan into ancestors list while deparsing testexpr, so we can
         // handle PARAM_EXEC references to the SubPlan's paramIds.
         // dpns = linitial(context->namespaces); dpns->ancestors = lcons(subplan, ...).
-        let sub_node = mcx::alloc_in(
+        let sub_node = ::mcx::alloc_in(
             mcx,
             Node::mk_expr(
                 mcx,
@@ -3299,7 +3299,7 @@ fn get_subplan_expr(
             .map_err(|_| mcx.oom(0))?;
         new_ancestors.push(sub_node);
         for a in dpns.ancestors.iter() {
-            new_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+            new_ancestors.push(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
         }
         // Save the prior ancestors list to restore (C: list_delete_first).
         let saved = core::mem::replace(&mut dpns.ancestors, new_ancestors);
@@ -3352,7 +3352,7 @@ pub fn get_parameter<'mcx>(expr: &Expr<'_>, context: &mut DeparseContext<'mcx>) 
             let dpns = &context.namespaces[0];
             let cloned: ::nodes::nodes::Node<'mcx> =
                 dpns.ancestors[ancestor_index].clone_in(mcx)?;
-            mcx::alloc_in(mcx, cloned)?
+            ::mcx::alloc_in(mcx, cloned)?
         };
         let save = crate::push_ancestor_plan(mcx, &mut context.namespaces[0], ancestor_index, &target)?;
 
@@ -3580,7 +3580,7 @@ fn get_rule_partition_bound_spec(
 /// Each element is a `PartitionRangeDatum` node: the MINVALUE/MAXVALUE sentinels
 /// render as keywords, a VALUE renders its `Const` via `get_const_expr`.
 pub fn get_range_partbound_string<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     bound_datums: &[::nodes::nodes::NodePtr<'_>],
 ) -> PgResult<alloc::string::String> {
     use ::nodes::partition::PartitionRangeDatumKind;
@@ -3588,10 +3588,10 @@ pub fn get_range_partbound_string<'mcx>(
     // memset(&context, 0, sizeof(deparse_context)); context.buf = makeStringInfo();
     let mut context = DeparseContext {
         buf: stringinfo::StringInfo::new_in(mcx),
-        namespaces: mcx::PgVec::new_in(mcx),
+        namespaces: ::mcx::PgVec::new_in(mcx),
         resultDesc: None,
-        targetList: mcx::PgVec::new_in(mcx),
-        windowClause: mcx::PgVec::new_in(mcx),
+        targetList: ::mcx::PgVec::new_in(mcx),
+        windowClause: ::mcx::PgVec::new_in(mcx),
         prettyFlags: 0,
         wrapColumn: -1,
         indentLevel: 0,
@@ -3957,7 +3957,7 @@ const INDEX_VAR: i32 = -3;
 /// `mcx`.
 fn get_tle_expr_by_resno<'mcx>(
     mcx: Mcx<'mcx>,
-    tlist: &PgVec<'mcx, mcx::PgBox<'mcx, Node<'mcx>>>,
+    tlist: &PgVec<'mcx, ::mcx::PgBox<'mcx, Node<'mcx>>>,
     resno: i16,
 ) -> PgResult<Option<Node<'mcx>>> {
     for n in tlist.iter() {
@@ -4500,7 +4500,7 @@ fn get_name_for_var_field<'mcx>(
             let target = {
                 let dpns = &context.namespaces[0];
                 let cloned: Node<'mcx> = dpns.ancestors[ancestor_index].clone_in(mcx)?;
-                mcx::alloc_in(mcx, cloned)?
+                ::mcx::alloc_in(mcx, cloned)?
             };
             let save = crate::push_ancestor_plan(
                 mcx,
@@ -5196,7 +5196,7 @@ fn deferred(what: &str) -> PgError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     use ::nodes::primnodes::{
         BoolExpr, BoolExprType, Expr, NullTest, NullTestType, OpExpr, SQLValueFunction,
         SQLValueFunctionOp, Var,

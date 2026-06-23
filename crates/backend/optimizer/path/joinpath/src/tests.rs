@@ -15,10 +15,10 @@
 
 use super::*;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 use ::nodes::nodes::NodeTag;
-use pathnodes::optimizer_plan::JoinCostWorkspace;
+use ::pathnodes::optimizer_plan::JoinCostWorkspace;
 use pathnodes::{
     JoinPath as TJoinPath, NestPath, Path, PathNode, RelOptInfo, RELOPT_BASEREL, RTE_RELATION,
 };

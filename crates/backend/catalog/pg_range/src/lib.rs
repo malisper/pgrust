@@ -14,21 +14,21 @@
 
 use mcx::{Mcx, MemoryContext};
 
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     COLLATION_RELATION_ID, OPERATOR_CLASS_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID,
 };
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL};
-use types_catalog::pg_range::{
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_range::{
     Anum_pg_range_rngtypid, PgRangeInsertRow, RangeRelationId, RangeTypidIndexId,
 };
-use types_core::fmgr::F_OIDEQ;
-use types_core::primitive::{Oid, OidIsValid};
-use types_error::PgResult;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::types_error::PgResult;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;
 
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
 use dependency_seams as dependency_seams;

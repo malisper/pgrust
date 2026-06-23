@@ -7,9 +7,9 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
-use types_storage::storage::dsm_handle;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_error::PgResult;
+use ::types_storage::storage::dsm_handle;
+use ::types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(
     /// Whether a `SharedRecordTypmodRegistry` is attached to the current

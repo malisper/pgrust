@@ -3,7 +3,7 @@
 //! queue, so the leader can receive the worker's ErrorResponse / NoticeResponse
 //! / NotificationResponse messages and re-raise them.
 //!
-//! This installs an alternate [`PQcommMethods`](pqcomm::PQcommMethods)
+//! This installs an alternate [`PQcommMethods`](::pqcomm::PQcommMethods)
 //! table (`PqCommMqMethods`) into pqcomm's pluggable comm-method slot, plus the
 //! `pq_redirect_to_shm_mq` / `pq_set_parallel_leader` orchestration seams that
 //! `access/transam/parallel.c` calls from `ParallelWorkerMain`, and the
@@ -15,14 +15,14 @@
 //! `dsm_segment *`. In this workspace the backend-private `shm_mq_handle` is an
 //! owned `PgBox<ShmMqHandle>` parked in the `shm-mq` owner's process-global
 //! registry and named across the seam by a small id
-//! ([`ShmMqAttachHandle`](execparallel::ShmMqAttachHandle), same id the
+//! ([`ShmMqAttachHandle`](::execparallel::ShmMqAttachHandle), same id the
 //! parallel orchestration carries as
-//! [`ShmMqHandleHandle`](types_parallel::ShmMqHandleHandle)). So `pq_mq_handle`
+//! [`ShmMqHandleHandle`](::types_parallel::ShmMqHandleHandle)). So `pq_mq_handle`
 //! becomes a stored registry id, and `mq_putmessage` / `mq_comm_reset` route
 //! their work through the `shm-mq` registry seams rather than touching a raw
 //! pointer. The `dsm_segment *` is named by
-//! [`DsmSegmentHandle`](types_parallel::DsmSegmentHandle), whose `.0` is the
-//! real [`DsmSegmentId`](dsm_core::dsm::DsmSegmentId) word.
+//! [`DsmSegmentHandle`](::types_parallel::DsmSegmentHandle), whose `.0` is the
+//! real [`DsmSegmentId`](::dsm_core::dsm::DsmSegmentId) word.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
@@ -33,11 +33,11 @@ use std::cell::Cell;
 use pqcomm::{
     set_pq_comm_methods, PQcommMethods, EOF, PQ_COMM_SOCKET_METHODS,
 };
-use dsm_core::dsm::{on_dsm_detach, DsmSegmentId};
+use ::dsm_core::dsm::{on_dsm_detach, DsmSegmentId};
 use utils_error::{PgError, ThrowErrorData};
 use types_core::{pid_t, ProcNumber, INVALID_PROC_NUMBER};
-use datum::Datum;
-use types_dest::CommandDest;
+use ::datum::Datum;
+use ::types_dest::CommandDest;
 use types_error::{
     ErrorLevel, ErrorLocation, PgResult, SqlState, ERRCODE_PROTOCOL_VIOLATION, PANIC,
     PG_DIAG_COLUMN_NAME, PG_DIAG_CONSTRAINT_NAME, PG_DIAG_CONTEXT, PG_DIAG_DATATYPE_NAME,
@@ -47,10 +47,10 @@ use types_error::{
     PG_DIAG_STATEMENT_POSITION, PG_DIAG_TABLE_NAME, DEBUG1, ERROR, FATAL, INFO, LOG, NOTICE,
     WARNING,
 };
-use execparallel::ShmMqAttachHandle;
+use ::execparallel::ShmMqAttachHandle;
 use types_parallel::{DsmSegmentHandle, ShmMqHandleHandle};
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
-use types_storage::ProcSignalReason;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
+use ::types_storage::ProcSignalReason;
 
 use parallel_rt_seams as rt;
 use latch_seams as latch;
@@ -112,7 +112,7 @@ pub fn pq_redirect_to_shm_mq(seg: DsmSegmentHandle, mqh: ShmMqHandleHandle) -> P
     // same registry id.)
     PQ_MQ_HANDLE.with(|h| h.set(Some(ShmMqAttachHandle(mqh.0))));
     // whereToSendOutput = DestRemote;
-    utils_error::config::set_where_to_send_output(CommandDest::Remote);
+    ::utils_error::config::set_where_to_send_output(CommandDest::Remote);
     // FrontendProtocol = PG_PROTOCOL_LATEST;
     init_small::globals::SetFrontendProtocol(PG_PROTOCOL_LATEST);
     // on_dsm_detach(seg, pq_cleanup_redirect_to_shm_mq, (Datum) 0);
@@ -241,7 +241,7 @@ fn mq_putmessage(msgtype: u8, s: &[u8]) -> PgResult<i32> {
             );
         }
 
-        if result != types_parallel::ShmMqResult::WouldBlock {
+        if result != ::types_parallel::ShmMqResult::WouldBlock {
             break result;
         }
 
@@ -256,7 +256,7 @@ fn mq_putmessage(msgtype: u8, s: &[u8]) -> PgResult<i32> {
 
     PQ_MQ_BUSY.with(|c| c.set(false));
 
-    if result != types_parallel::ShmMqResult::Success {
+    if result != ::types_parallel::ShmMqResult::Success {
         return Ok(EOF);
     }
     Ok(0)
@@ -418,7 +418,7 @@ fn parse_errornotice(msg: &[u8]) -> PgResult<ErrorData> {
             break;
         }
         let value = cur.getmsgrawstring()?;
-        let field = types_error::ErrorField(code as i32);
+        let field = ::types_error::ErrorField(code as i32);
 
         if field == PG_DIAG_SEVERITY {
             // ignore, trusting to PG_DIAG_SEVERITY_NONLOCALIZED

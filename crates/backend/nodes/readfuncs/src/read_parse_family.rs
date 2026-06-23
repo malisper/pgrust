@@ -12,7 +12,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::copy_query::{Query, QuerySource};
 use ::nodes::jointype::JoinType;
 use ::nodes::modifytable::{MergeMatchKind, OverridingKind};
@@ -38,7 +38,7 @@ use crate::{
     read_float_field, read_int_field, read_location_field, read_node_field, read_node_list_field,
     read_oid_field, read_uint64_field, read_uint_field, tok_str,
 };
-use nodes_core::read::{self, Token};
+use ::nodes_core::read::{self, Token};
 
 type NodePtr<'mcx> = PgBox<'mcx, Node<'mcx>>;
 
@@ -70,7 +70,7 @@ fn read_string_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgString<'mcx>>> {
 /// `READ_NODE_FIELD` of a `List *` of nodes into an owned `PgVec<NodePtr>`.
 fn read_node_vec_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
     let items = read_node_list_field(mcx)?;
-    let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, items.len())?;
     for it in items {
         v.push(it);
     }
@@ -87,7 +87,7 @@ fn read_oid_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, u32>> {
 /// `READ_NODE_FIELD` of an `int` scalar list `(i ...)` (or `<>` for NIL).
 fn read_int_scalar_list_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, i32>> {
     let raw = read_scalar_list_u32(mcx, b'i')?;
-    let mut v = mcx::vec_with_capacity_in(mcx, raw.len())?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, raw.len())?;
     for x in raw.iter() {
         v.push(*x as i32);
     }
@@ -134,7 +134,7 @@ fn read_opt_box<'mcx, T>(
     match read_node_field(mcx)? {
         None => Ok(None),
         Some(n) => match extract(PgBox::into_inner(n)) {
-            Some(v) => Ok(Some(mcx::alloc_in(mcx, v)?)),
+            Some(v) => Ok(Some(::mcx::alloc_in(mcx, v)?)),
             None => Err(elog_error("unexpected node type for framed child field")),
         },
     }
@@ -214,7 +214,7 @@ fn read_opt_expr_box<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgBox<'mcx, Expr>>
             let __n = PgBox::into_inner(n);
             let __tag = __n.node_tag();
             match __n.into_expr() {
-                Some(e) => Ok(Some(mcx::alloc_in(mcx, e)?)),
+                Some(e) => Ok(Some(::mcx::alloc_in(mcx, e)?)),
                 None => Err(elog_error(alloc::format!(
                 "expected Expr child, got {:?}",
                 __tag
@@ -249,7 +249,7 @@ fn read_box_expr_list_opt<'mcx>(
             let __n = PgBox::into_inner(n);
             let __tag = __n.node_tag();
             match __n.into_expr() {
-                Some(e) => out.push(mcx::alloc_in(mcx, e)?),
+                Some(e) => out.push(::mcx::alloc_in(mcx, e)?),
                 None => {
                     return Err(elog_error(alloc::format!(
                         "expected Expr in list, got {:?}",
@@ -293,7 +293,7 @@ fn read_opt_box_expr_list_opt<'mcx>(
             let __n = PgBox::into_inner(n);
             let __tag = __n.node_tag();
             match __n.into_expr() {
-                Some(e) => out.push(Some(mcx::alloc_in(mcx, e)?)),
+                Some(e) => out.push(Some(::mcx::alloc_in(mcx, e)?)),
                 None => {
                     return Err(elog_error(alloc::format!(
                         "expected Expr in nullable list, got {:?}",
@@ -391,7 +391,7 @@ fn read_int_list_opt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<PgVec<'mcx, i32>>>
     match read_oid_list_opt(mcx, b'i')? {
         None => Ok(None),
         Some(raw) => {
-            let mut v = mcx::vec_with_capacity_in(mcx, raw.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, raw.len())?;
             for x in raw.iter() {
                 v.push(*x as i32);
             }
@@ -418,7 +418,7 @@ fn read_string_token<'mcx>(mcx: Mcx<'mcx>, t: &Token<'_>) -> PgResult<PgString<'
 
 fn read_rte_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RangeTblEntry<'mcx>>> {
     let items = read_node_list_field(mcx)?;
-    let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, items.len())?;
     for it in items {
         {
             let __n = PgBox::into_inner(it);
@@ -439,7 +439,7 @@ fn read_rte_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RangeTblEntry<'mcx
 
 fn read_rteperminfo_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RTEPermissionInfo<'mcx>>> {
     let items = read_node_list_field(mcx)?;
-    let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, items.len())?;
     for it in items {
         {
             let __n = PgBox::into_inner(it);
@@ -462,7 +462,7 @@ fn read_te_vec<'mcx>(
     mcx: Mcx<'mcx>,
 ) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     let items = read_node_list_field(mcx)?;
-    let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, items.len())?;
     for it in items {
         {
             let __n = PgBox::into_inner(it);
@@ -835,7 +835,7 @@ fn read_table_sample_clause<'mcx>(mcx: Mcx<'mcx>) -> PgResult<TableSampleClause<
     let tsmhandler = read_oid_field()?;
     let args_vec = read_expr_list(mcx)?;
     let args = {
-        let mut out: PgVec<'mcx, Expr> = mcx::vec_with_capacity_in(mcx, args_vec.len())?;
+        let mut out: PgVec<'mcx, Expr> = ::mcx::vec_with_capacity_in(mcx, args_vec.len())?;
         for a in args_vec {
             out.push(a);
         }
@@ -1044,7 +1044,7 @@ fn read_search_clause_field<'mcx>(
             "readCommonTableExpr: expected '}' after CTESEARCHCLAUSE body".to_string(),
         ));
     }
-    Ok(Some(mcx::alloc_in(mcx, body)?))
+    Ok(Some(::mcx::alloc_in(mcx, body)?))
 }
 
 /// `_readCommonTableExpr` (readfuncs.funcs.c).
@@ -1335,14 +1335,14 @@ fn read_a_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<A_Expr<'mcx>> {
                     let node = PgBox::into_inner(n);
                     if node.is_list() {
                         let elements = node.into_list().unwrap();
-                        let mut v = mcx::vec_with_capacity_in(mcx, elements.len())?;
+                        let mut v = ::mcx::vec_with_capacity_in(mcx, elements.len())?;
                         for c in elements {
                             v.push(c);
                         }
                         v
                     } else {
-                        let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
-                        v.push(mcx::alloc_in(mcx, node)?);
+                        let mut v = ::mcx::vec_with_capacity_in(mcx, 1)?;
+                        v.push(::mcx::alloc_in(mcx, node)?);
                         v
                     }
                 }
@@ -1952,9 +1952,9 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
 mod tests {
     use super::*;
     use crate::ensure_seams_for_tests as ensure_seams;
-    use nodes_core::read::string_to_node;
-    use outfuncs::nodeToString;
-    use mcx::MemoryContext;
+    use ::nodes_core::read::string_to_node;
+    use ::outfuncs::nodeToString;
+    use ::mcx::MemoryContext;
     use ::nodes::primnodes::VarReturningType;
 
     fn assert_framed_round_trip(node: &Node<'_>) -> String {
@@ -2068,7 +2068,7 @@ mod tests {
             aliascolnames: PgVec::new_in(mcx),
             ctematerialized: CTEMaterialize::CTEMaterializeAlways,
             ctequery: None,
-            search_clause: Some(mcx::alloc_in(mcx, sc).unwrap()),
+            search_clause: Some(::mcx::alloc_in(mcx, sc).unwrap()),
             cycle_clause: None,
             location: -1,
             cterecursive: true,

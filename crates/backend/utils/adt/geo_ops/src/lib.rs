@@ -7,7 +7,7 @@
 //! unpacking via `PG_GETARG_*`, `PG_RETURN_*`, `PG_FREE_IF_COPY`, the varlena
 //! palloc / `SET_VARSIZE` serialization of `path` / `polygon`) are part of the
 //! project-wide deferred fmgr/Datum boundary; each core is exposed behind a
-//! stable, typed signature over the value structs from [`types_core::geo`]
+//! stable, typed signature over the value structs from [`::types_core::geo`]
 //! (`Point`, `LSEG`, `LINE`, `BOX`, `CIRCLE`) plus the owned [`Path`] /
 //! [`Polygon`] stand-ins for the toastable `PATH` / `POLYGON` varlena values.
 //!
@@ -38,7 +38,7 @@ use types_error::{
     ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
 
-pub use types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
+pub use ::types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
 
 // ---------------------------------------------------------------------------
 // Owned safe-Rust stand-ins for the toastable varlena `PATH` / `POLYGON` types
@@ -177,7 +177,7 @@ impl Polygon {
         // points: npts * Point (16 bytes each) starting at offset 40
         // (= POLYGON_HEADER_SIZE).
         let mut points: Vec<Point> = Vec::with_capacity(npts);
-        let base = types_core::geo::POLYGON_HEADER_SIZE;
+        let base = ::types_core::geo::POLYGON_HEADER_SIZE;
         for i in 0..npts {
             let off = base + i * 16;
             points.push(Point::from_datum_bytes(&bytes[off..off + 16]));
@@ -191,14 +191,14 @@ impl Polygon {
     /// `Datum::ByRef`.
     pub fn to_datum_image(&self) -> Vec<u8> {
         let npts = self.points.len();
-        let total = types_core::geo::POLYGON_HEADER_SIZE + npts * 16;
+        let total = ::types_core::geo::POLYGON_HEADER_SIZE + npts * 16;
         let mut out = vec![0u8; total];
         // vl_len_: the standard 4-byte varlena length word (length << 2, lowest
         // bits clear). Mirrors `SET_VARSIZE(poly, total)`.
         out[0..4].copy_from_slice(&((total as u32) << 2).to_ne_bytes());
         out[4..8].copy_from_slice(&(npts as i32).to_ne_bytes());
         out[8..40].copy_from_slice(&self.boundbox.to_datum_bytes());
-        let base = types_core::geo::POLYGON_HEADER_SIZE;
+        let base = ::types_core::geo::POLYGON_HEADER_SIZE;
         for (i, p) in self.points.iter().enumerate() {
             let off = base + i * 16;
             out[off..off + 16].copy_from_slice(&p.to_datum_bytes());
@@ -214,7 +214,7 @@ impl Polygon {
 // ---------------------------------------------------------------------------
 pub(crate) mod f8 {
     use float_seams as s;
-    use types_error::PgResult;
+    use ::types_error::PgResult;
 
     #[inline]
     pub fn float8_pl(a: f64, b: f64) -> PgResult<f64> {

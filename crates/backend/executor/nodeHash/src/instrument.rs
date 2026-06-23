@@ -14,18 +14,18 @@
 //! `shm_toc_estimate_keys`/`shm_toc_allocate`/`shm_toc_insert`/`shm_toc_lookup`),
 //! which take owned handles and keep the DSM layout behind the parallel owner.
 //! The chunk bytes are placed/attached through the typed shared-DSM-object flex
-//! primitive (`types_parallel::shared_dsm_object::place_flex`/`attach_flex`), so
+//! primitive (`::types_parallel::shared_dsm_object::place_flex`/`attach_flex`), so
 //! `SharedHashInfo` lives DIRECTLY in the segment that every worker maps.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodehash::{
     HashInstrumentSlot, HashInstrumentation, HashJoinTableData, HashState, SharedHashInfo,
     SharedHashInfoHeader,
 };
 
 use transam_parallel as parallel_sup;
-use types_parallel::shared_dsm_object;
+use ::types_parallel::shared_dsm_object;
 
 /// `node->ps.plan->plan_node_id` — the DSM toc key. Mirrors the C
 /// `node->ps.plan->plan_node_id` dereference.

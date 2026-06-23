@@ -14,8 +14,8 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::primitive::{TimeLineID, XLogRecPtr};
-use parsenodes::DefElem;
+use ::types_core::primitive::{TimeLineID, XLogRecPtr};
+use ::parsenodes::DefElem;
 
 /// `typedef enum ReplicationKind` (`nodes/replnodes.h`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

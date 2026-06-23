@@ -23,9 +23,9 @@ use alloc::vec::Vec;
 
 use crate::bitmapset::bitmapword;
 use crate::primnodes::Expr;
-use types_core::primitive::{Index, Oid};
-use mcx::Mcx;
-use types_error::PgResult;
+use ::types_core::primitive::{Index, Oid};
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 
 impl<'mcx> PartitionPruneInfo<'mcx> {
     /// Deep copy into `mcx`, recursing through the pruning-step expressions so the

@@ -34,17 +34,17 @@ use network_gist_seams as inet_gist;
 use geo_ops_seams as geo;
 use rangetypes_gist as range_gist;
 use tsgistidx as tsgist;
-use tsquery_core::gist as tsqgist;
-use tsearch::tsearch::TSQuerySign;
-use tsearch::tsgistidx::SignTsVector;
-use types_network::GistInetKey;
+use ::tsquery_core::gist as tsqgist;
+use ::tsearch::tsearch::TSQuerySign;
+use ::tsearch::tsgistidx::SignTsVector;
+use ::types_network::GistInetKey;
 use dispatch::{GistConsistentResult, GistDistanceResult, StrategyNumber};
 use mcx::{Mcx, PgBox};
-use types_core::geo::{Point, CIRCLE, BOX};
-use types_core::primitive::{Oid, OffsetNumber};
+use ::types_core::geo::{Point, CIRCLE, BOX};
+use ::types_core::primitive::{Oid, OffsetNumber};
 use types_error::{PgError, PgResult};
 use gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
-use types_sortsupport::SortSupportData;
+use ::types_sortsupport::SortSupportData;
 use types_tuple::heaptuple::Datum;
 
 // ---------------------------------------------------------------------------
@@ -262,7 +262,7 @@ fn entry_box(entry: &GISTENTRY<'_>) -> BOX {
 fn gistentryinit<'mcx>(
     key: Datum<'mcx>,
     rel: Oid,
-    page: types_core::primitive::BlockNumber,
+    page: ::types_core::primitive::BlockNumber,
     offset: OffsetNumber,
     leafkey: bool,
 ) -> GISTENTRY<'mcx> {
@@ -289,13 +289,13 @@ fn inet_keys_from_vec<'mcx>(entryvec: &GistEntryVector<'mcx>) -> Vec<GistInetKey
 
 /// Pack a `GistInetKey` into a by-reference key `Datum` (`InetKeyPGetDatum`).
 fn inet_key_datum<'mcx>(mcx: Mcx<'mcx>, k: &GistInetKey) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &k.to_datum_bytes())?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &k.to_datum_bytes())?))
 }
 
 /// Wrap a `BOX` into a by-reference key [`Datum`] (`BoxPGetDatum`).
 #[inline]
 fn box_datum<'mcx>(mcx: Mcx<'mcx>, b: &BOX) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &b.to_datum_bytes())?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &b.to_datum_bytes())?))
 }
 
 /// `point_distance` -> `point_dt` (geo_ops.c): `HYPOT(p1.x - p2.x, p1.y -
@@ -831,9 +831,9 @@ fn gist_poly_compress<'mcx>(
         // r = palloc(sizeof(BOX)); memcpy(r, &in->boundbox, sizeof(BOX));
         let r = geo::poly_query_boundbox::call(entry.key.as_ref_bytes());
         let retval = gistentryinit(box_datum(mcx, &r)?, entry.rel, entry.page, entry.offset, false);
-        return mcx::alloc_in(mcx, retval);
+        return ::mcx::alloc_in(mcx, retval);
     }
-    mcx::alloc_in(mcx, entry.clone())
+    ::mcx::alloc_in(mcx, entry.clone())
 }
 
 /// `gist_poly_consistent` (gistproc.c) — the GiST consistent method for polygons.
@@ -869,9 +869,9 @@ fn gist_circle_compress<'mcx>(
         let in_ = CIRCLE::from_datum_bytes(entry.key.as_ref_bytes());
         let r = circle_bbox(&in_);
         let retval = gistentryinit(box_datum(mcx, &r)?, entry.rel, entry.page, entry.offset, false);
-        return mcx::alloc_in(mcx, retval);
+        return ::mcx::alloc_in(mcx, retval);
     }
-    mcx::alloc_in(mcx, entry.clone())
+    ::mcx::alloc_in(mcx, entry.clone())
 }
 
 /// The bounding box of a circle (`gist_circle_compress` / `gist_circle_consistent`).
@@ -931,9 +931,9 @@ fn gist_point_compress<'mcx>(
             entry.offset,
             false,
         );
-        return mcx::alloc_in(mcx, retval);
+        return ::mcx::alloc_in(mcx, retval);
     }
-    mcx::alloc_in(mcx, entry.clone())
+    ::mcx::alloc_in(mcx, entry.clone())
 }
 
 /// `gist_point_fetch` (gistproc.c) — reconstruct the point from its bounding
@@ -948,13 +948,13 @@ fn gist_point_fetch<'mcx>(
         y: in_.high.y,
     };
     let retval = gistentryinit(
-        Datum::ByRef(mcx::slice_in(mcx, &r.to_datum_bytes())?),
+        Datum::ByRef(::mcx::slice_in(mcx, &r.to_datum_bytes())?),
         entry.rel,
         entry.page,
         entry.offset,
         false,
     );
-    mcx::alloc_in(mcx, retval)
+    ::mcx::alloc_in(mcx, retval)
 }
 
 /// `computeDistance(isLeaf, box, point)` (gistproc.c) — distance from a point to
@@ -1425,8 +1425,8 @@ fn signtsvector_from_key_or_placeholder<'mcx>(
 ) -> PgResult<SignTsVector> {
     if matches!(key, Datum::ByVal(_)) {
         return Ok(SignTsVector {
-            flag: tsearch::tsgistidx::ARRKEY,
-            data: tsearch::tsgistidx::SignTsVectorData::Arr(Vec::new()),
+            flag: ::tsearch::tsgistidx::ARRKEY,
+            data: ::tsearch::tsgistidx::SignTsVectorData::Arr(Vec::new()),
         });
     }
     signtsvector_from_key(mcx, key)
@@ -1438,7 +1438,7 @@ fn signtsvector_result_datum<'mcx>(
     mcx: Mcx<'mcx>,
     key: &SignTsVector,
 ) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &key.to_image())?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &key.to_image())?))
 }
 
 // ---------------------------------------------------------------------------
@@ -1515,7 +1515,7 @@ fn materialize_varlena<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<*const u8
         let total_1b = ((image[0] >> 1) & 0x7F) as usize;
         let data_size = total_1b.saturating_sub(1);
         let new_size = data_size + 4; // VARHDRSZ
-        mcx::check_alloc_size(new_size)?;
+        ::mcx::check_alloc_size(new_size)?;
         let layout = Layout::from_size_align(new_size.max(1), 8)
             .expect("valid varlena image layout");
         let block = mcx.allocate(layout).map_err(|_| mcx.oom(new_size))?;
@@ -1530,7 +1530,7 @@ fn materialize_varlena<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<*const u8
         return Ok(dst as *const u8);
     }
 
-    mcx::check_alloc_size(image.len())?;
+    ::mcx::check_alloc_size(image.len())?;
     let layout = Layout::from_size_align(image.len().max(1), 8)
         .expect("valid varlena image layout");
     let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;
@@ -1590,7 +1590,7 @@ fn gist_range_query<'mcx>(
     subtype: Oid,
     key_is_multirange: bool,
 ) -> PgResult<range_gist::GistQuery<'mcx>> {
-    let invalid = !types_core::primitive::OidIsValid(subtype);
+    let invalid = !::types_core::primitive::OidIsValid(subtype);
     if key_is_multirange {
         if invalid || subtype == range_gist::ANYMULTIRANGEOID {
             Ok(range_gist::GistQuery::Multirange(multirange_from_datum(mcx, query)?))
@@ -1638,7 +1638,7 @@ fn range_result_datum<'mcx>(
         let len = varsize_4b(r.ptr as *const u8);
         core::slice::from_raw_parts(r.ptr as *const u8, len)
     };
-    Ok(Datum::ByRef(mcx::slice_in(mcx, bytes)?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, bytes)?))
 }
 
 /// Copy a pointer-word `RangeType *` key [`Datum`] (the form the range body
@@ -1829,9 +1829,9 @@ fn dispatch_compress<'mcx>(
                     None => Datum::ByVal(0),
                 };
                 let retval = gistentryinit(key, entry.rel, entry.page, entry.offset, false);
-                return mcx::alloc_in(mcx, retval);
+                return ::mcx::alloc_in(mcx, retval);
             }
-            mcx::alloc_in(mcx, entry.clone())
+            ::mcx::alloc_in(mcx, entry.clone())
         }
         F_GIST_POLY_COMPRESS => gist_poly_compress(mcx, entry),
         F_GIST_CIRCLE_COMPRESS => gist_circle_compress(mcx, entry),
@@ -1858,9 +1858,9 @@ fn dispatch_compress<'mcx>(
                 };
                 let key = range_result_datum(mcx, r)?;
                 let retval = gistentryinit(key, out.rel, out.page, out.offset, out.leafkey);
-                return mcx::alloc_in(mcx, retval);
+                return ::mcx::alloc_in(mcx, retval);
             }
-            mcx::alloc_in(mcx, entry.clone())
+            ::mcx::alloc_in(mcx, entry.clone())
         }
         F_GTSVECTOR_COMPRESS => {
             if entry.leafkey {
@@ -1868,7 +1868,7 @@ fn dispatch_compress<'mcx>(
                 // = PG_DETOAST_DATUM); detoast to a plain 4-byte-header image and
                 // extract its per-lexeme byte slices (ARRPTR/STRPTR) to build the
                 // array key. See the DIVERGENCE note: build uses SIGLEN_DEFAULT.
-                use tsvector_core::access::{arrptr, lexeme, tsv_size};
+                use ::tsvector_core::access::{arrptr, lexeme, tsv_size};
                 let detoasted = detoast_seams::detoast_attr::call(
                     mcx,
                     entry.key.as_ref_bytes(),
@@ -1883,7 +1883,7 @@ fn dispatch_compress<'mcx>(
                 let res = tsgist::gtsvector_compress_leaf(&lexemes, tsgist::SIGLEN_DEFAULT);
                 let key = signtsvector_result_datum(mcx, &res)?;
                 let retval = gistentryinit(key, entry.rel, entry.page, entry.offset, false);
-                return mcx::alloc_in(mcx, retval);
+                return ::mcx::alloc_in(mcx, retval);
             }
             // Inner entry: rewrite an all-0xff SIGNKEY as ALLISTRUE; otherwise
             // pass through unchanged. A NULL key (`DatumGetPointer(entry->key)`
@@ -1891,7 +1891,7 @@ fn dispatch_compress<'mcx>(
             // `else if (ISSIGNKEY(..) && !ISALLTRUE(..))` falls through to
             // `retval = entry` — pass it through without decoding.
             if matches!(entry.key, Datum::ByVal(_)) {
-                return mcx::alloc_in(mcx, entry.clone());
+                return ::mcx::alloc_in(mcx, entry.clone());
             }
             let key = signtsvector_from_key(mcx, &entry.key)?;
             if key.is_signkey() && !key.is_alltrue() {
@@ -1903,10 +1903,10 @@ fn dispatch_compress<'mcx>(
                 {
                     let datum = signtsvector_result_datum(mcx, &res)?;
                     let retval = gistentryinit(datum, entry.rel, entry.page, entry.offset, false);
-                    return mcx::alloc_in(mcx, retval);
+                    return ::mcx::alloc_in(mcx, retval);
                 }
             }
-            mcx::alloc_in(mcx, entry.clone())
+            ::mcx::alloc_in(mcx, entry.clone())
         }
         F_GTSQUERY_COMPRESS => {
             // gtsquery_compress (tsquery_gist.c:30): leaf — turn the tsquery
@@ -1915,9 +1915,9 @@ fn dispatch_compress<'mcx>(
                 let sign = tsqgist::gtsquery_compress_leaf(entry.key.as_ref_bytes())?;
                 let retval =
                     gistentryinit(Datum::from_u64(sign), entry.rel, entry.page, entry.offset, false);
-                return mcx::alloc_in(mcx, retval);
+                return ::mcx::alloc_in(mcx, retval);
             }
-            mcx::alloc_in(mcx, entry.clone())
+            ::mcx::alloc_in(mcx, entry.clone())
         }
         // The box opclass has no compress proc (gistproc.c: "we store boxes as
         // boxes ... so we do not need compress").
@@ -1935,7 +1935,7 @@ fn dispatch_decompress<'mcx>(
     // the owned by-reference lane the key is already a plain image, so it is
     // the identity (return the entry unchanged).
     if proc_oid == F_GTSVECTOR_DECOMPRESS {
-        return mcx::alloc_in(_mcx, _entry.clone());
+        return ::mcx::alloc_in(_mcx, _entry.clone());
     }
     // The box/point opclass has no decompress proc (the AM uses the identity
     // decompress when none is registered). A registered decompress OID for
@@ -2147,13 +2147,13 @@ fn dispatch_fetch<'mcx>(
             let key = GistInetKey::from_datum_bytes(entry.key.as_ref_bytes());
             let dst = inet_gist::inet_gist_fetch::call(key);
             let retval = gistentryinit(
-                Datum::ByRef(mcx::slice_in(mcx, &dst.to_datum_bytes())?),
+                Datum::ByRef(::mcx::slice_in(mcx, &dst.to_datum_bytes())?),
                 entry.rel,
                 entry.page,
                 entry.offset,
                 false,
             );
-            mcx::alloc_in(mcx, retval)
+            ::mcx::alloc_in(mcx, retval)
         }
         _ => Err(unrecognized_proc(proc_oid)),
     }

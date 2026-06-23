@@ -49,9 +49,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, MemoryContext};
-use types_core::primitive::XLogRecPtr;
+use ::types_core::primitive::XLogRecPtr;
 use types_error::{PgError, PgResult};
-use replication::repl_token::Token;
+use ::replication::repl_token::Token;
 
 use scansup_seams::{downcase_truncate_identifier, truncate_identifier};
 use repl_scanner_seams as seams;
@@ -62,7 +62,7 @@ use repl_scanner_seams as seams;
 /// recoverable [`PgError`], matching the cycle-partner grammar unit's identical
 /// helper.
 fn replication_yyerror(message: &str) -> PgError {
-    use utils_error::ereport;
+    use ::utils_error::ereport;
     use types_error::{ERRCODE_SYNTAX_ERROR, ERROR};
     ereport(ERROR)
         .errcode(ERRCODE_SYNTAX_ERROR)

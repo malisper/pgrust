@@ -8,7 +8,7 @@ use error_fgram::{
     elog, ereport, errmsg_internal, PgError, PgResult, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
     ERRCODE_UNTRANSLATABLE_CHARACTER, ERROR,
 };
-use extra_encnames_fgram::pg_encoding_to_char;
+use ::extra_encnames_fgram::pg_encoding_to_char;
 use wchar_fgram::{
     pg_encoding_dsplen as wchar_encoding_dsplen, pg_encoding_max_length,
     pg_encoding_mblen as wchar_encoding_mblen, pg_encoding_mblen_or_incomplete,
@@ -566,7 +566,7 @@ fn mblen_for_encoding(encoding: pg_enc, mbstr: &[u8]) -> PgResult<c_int> {
         .ok_or_else(|| invalid_encoding_error("encoding", encoding))
 }
 
-fn wchar_table_for_encoding(encoding: pg_enc) -> PgResult<&'static pg_ffi_fgram::pg_wchar_tbl> {
+fn wchar_table_for_encoding(encoding: pg_enc) -> PgResult<&'static ::pg_ffi_fgram::pg_wchar_tbl> {
     if !pg_valid_encoding(encoding) {
         return Err(invalid_encoding_error("encoding", encoding));
     }

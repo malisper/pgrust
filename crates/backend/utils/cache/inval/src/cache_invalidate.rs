@@ -2,19 +2,19 @@
 //! and dispatch (`CacheRegister*Callback`, `CallSyscacheCallbacks`,
 //! `CallRelSyncCallbacks`).
 
-use types_core::primitive::{OidIsValid, InvalidOid};
-use types_core::Oid;
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`:
+use ::types_core::primitive::{OidIsValid, InvalidOid};
+use ::types_core::Oid;
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`:
 // the opaque callback-registration cookie, stored and handed back verbatim
 // (never deformed). See the crate-root note; the canonical `Datum<'mcx>` enum
 // is for deformed tuple values, not passthrough args.
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult, FATAL};
-use rel::RelationData;
+use ::rel::RelationData;
 use types_storage::{
     RelFileLocatorBackend, SharedInvalidationMessage, SharedInvalRelmapMsg, SharedInvalSmgrMsg,
 };
-use types_tuple::HeapTupleData;
+use ::types_tuple::HeapTupleData;
 
 use crate::registration::{
     prepare_inplace_invalidation_state, prepare_invalidation_state, register_catalog_invalidation,
@@ -91,7 +91,7 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
      * borrow below. The scratch context hosts the transient PgVec the seam
      * allocates (mirroring C's PrepareToInvalidateCacheTuple workspace).
      */
-    let catcache_reqs: Vec<types_storage::PrepareToInvalidateCacheTuple> =
+    let catcache_reqs: Vec<::types_storage::PrepareToInvalidateCacheTuple> =
         if catalog_seams::relation_invalidates_snapshots_only::call(tuple_rel_id) {
             Vec::new()
         } else {
@@ -147,7 +147,7 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
          * Note we ignore newtuple here; we assume an update cannot move a tuple
          * from being part of one relcache entry to being part of another.
          */
-        let (relation_id, database_id) = if tuple_rel_id == types_core::catalog::RELATION_RELATION_ID
+        let (relation_id, database_id) = if tuple_rel_id == ::types_core::catalog::RELATION_RELATION_ID
         {
             let classtup = syscache_seams::pg_class_shape::call(tuple, tuple_data);
             let database_id = if classtup.relisshared {
@@ -156,21 +156,21 @@ pub(crate) fn cache_invalidate_heap_tuple_common(
                 init_small_seams::my_database_id::call()
             };
             (classtup.oid, database_id)
-        } else if tuple_rel_id == types_core::catalog::ATTRIBUTE_RELATION_ID {
+        } else if tuple_rel_id == ::types_core::catalog::ATTRIBUTE_RELATION_ID {
             let relation_id = syscache_seams::pg_attribute_attrelid::call(tuple, tuple_data);
             /*
              * KLUGE ALERT: we always send the relcache event with MyDatabaseId,
              * even if the rel in question is shared (which we can't easily tell).
              */
             (relation_id, init_small_seams::my_database_id::call())
-        } else if tuple_rel_id == types_core::catalog::INDEX_RELATION_ID {
+        } else if tuple_rel_id == ::types_core::catalog::INDEX_RELATION_ID {
             /*
              * When a pg_index row is updated, we should send out a relcache inval
              * for the index relation.
              */
             let relation_id = syscache_seams::pg_index_indexrelid::call(tuple, tuple_data);
             (relation_id, init_small_seams::my_database_id::call())
-        } else if tuple_rel_id == types_core::catalog::CONSTRAINT_RELATION_ID {
+        } else if tuple_rel_id == ::types_core::catalog::CONSTRAINT_RELATION_ID {
             /*
              * Foreign keys are part of relcache entries, too, so send out an
              * inval for the table that the FK applies to.
@@ -236,7 +236,7 @@ pub fn CacheInvalidateHeapTuple(
 pub fn CacheInvalidateHeapTupleByOid(class_id: Oid, object_id: Oid) -> PgResult<()> {
     /* SysCacheIdentifier for the catalog: only pg_type is reached today. */
     const TYPEOID: i32 = 82;
-    let cache_id = if class_id == types_core::catalog::TYPE_RELATION_ID {
+    let cache_id = if class_id == ::types_core::catalog::TYPE_RELATION_ID {
         TYPEOID
     } else {
         return Err(PgError::error(format!(
@@ -265,7 +265,7 @@ pub fn CacheInvalidateHeapTupleByOid(class_id: Oid, object_id: Oid) -> PgResult<
 
     /* tup = SearchSysCache1(cacheId, ObjectIdGetDatum(objectId)) */
     let result = (|| {
-        let key = cache::SysCacheKey::Value(ScalarWord::from_oid(object_id));
+        let key = ::cache::SysCacheKey::Value(ScalarWord::from_oid(object_id));
         let formed = catcache_seams::search_cat_cache_1::call(mcx, cache_id, key)?;
         match formed {
             Some(tuple) => cache_invalidate_heap_tuple_common(
@@ -485,7 +485,7 @@ pub fn CacheInvalidateRelmap(databaseId: Oid) -> PgResult<()> {
 /// `SharedInvalMessages` and forward the typed slice to sinval, exactly as the
 /// C dispatcher does.
 pub fn SendSharedInvalidMessagesRaw(msgs: &[u8], nmsgs: i32) -> PgResult<()> {
-    let view = types_storage::SharedInvalMessages::from_bytes(msgs);
+    let view = ::types_storage::SharedInvalMessages::from_bytes(msgs);
     let mut decoded: Vec<SharedInvalidationMessage> = Vec::with_capacity(nmsgs as usize);
     for i in 0..nmsgs as usize {
         if let Some(m) = view.get(i) {

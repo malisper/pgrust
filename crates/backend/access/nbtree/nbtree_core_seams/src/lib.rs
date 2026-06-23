@@ -8,23 +8,23 @@
 //! then a call panics loudly.
 //!
 //! Every seam whose C counterpart takes `Relation` carries
-//! `&rel::Relation<'mcx>`, the faithful open-handle shape. Allocating
+//! `&::rel::Relation<'mcx>`, the faithful open-handle shape. Allocating
 //! seams take `Mcx<'mcx>` and return `PgResult`; reads that can `ereport`
 //! return `PgResult`.
 
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{BlockNumber, OffsetNumber};
-use types_error::PgResult;
+use ::types_core::primitive::{BlockNumber, OffsetNumber};
+use ::types_error::PgResult;
 use types_nbtree::{
     BTCycleId, BTScanInsert, BTScanOpaqueData, BTStack, BTVacState, BTVacuumPosting,
     IndexUniqueCheck, TmIndexDeleteOp,
 };
-use rel::Relation;
-use types_scan::sdir::ScanDirection;
-use types_storage::storage::Buffer;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_scan::sdir::ScanDirection;
+use ::types_storage::storage::Buffer;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 // === btinsert (nbtinsert.c) ================================================
 
@@ -411,7 +411,7 @@ seam_core::seam!(
     /// ereports.
     pub fn bt_binsrch_insert<'mcx>(
         rel: &Relation<'mcx>,
-        insertstate: &mut types_nbtree::BTInsertStateData<'mcx>,
+        insertstate: &mut ::types_nbtree::BTInsertStateData<'mcx>,
     ) -> PgResult<OffsetNumber>
 );
 

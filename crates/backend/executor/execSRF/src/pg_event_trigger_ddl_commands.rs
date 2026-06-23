@@ -11,8 +11,8 @@
 //! registry whose tag-only `resultinfo` cannot carry the live `ReturnSetInfo`
 //! (the WONTFIX dual-home, same as [`crate::pg_event_trigger_dropped_objects`]).
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 

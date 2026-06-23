@@ -14,8 +14,8 @@
 //! entry point is a loud panic; the SRF result lane is not expressible at this
 //! boundary).
 
-use datum::Datum;
-use types_error::PgResult;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------

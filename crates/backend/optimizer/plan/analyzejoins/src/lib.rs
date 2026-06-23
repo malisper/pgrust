@@ -12,7 +12,7 @@
 //! adjust their relids for a change of RT index. In this repo those are arena
 //! handles (`RinfoId` / `EmId`), not `Node` variants, so they are not directly
 //! walkable. The [`change_relids`] module reproduces that walker faithfully over
-//! the arena handle model (see its docs), and [`pathnodes::UniqueRelInfo`]
+//! the arena handle model (see its docs), and [`::pathnodes::UniqueRelInfo`]
 //! is the carrier the uniqueness cache (`RelOptInfo::unique_for_rels`) needs.
 //!
 //! # What is built vs seam-and-panic in this pass (#294)
@@ -60,9 +60,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     JoinType, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL,
     JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_SEMI, RELOPT_BASEREL, RTE_RELATION,
@@ -70,7 +70,7 @@ use pathnodes::{
 
 use relnode as relnode;
 use equivclass as equivclass;
-use nodes_core::list as pg_list;
+use ::nodes_core::list as pg_list;
 
 /// Backing storage for the `enable_self_join_elimination` GUC.
 ///
@@ -102,7 +102,7 @@ pub mod remove_joins;
 mod tests;
 
 /// `RTE_SUBQUERY` (`parsenodes.h` `RTEKind`).
-const RTE_SUBQUERY: pathnodes::RTEKind = 1;
+const RTE_SUBQUERY: ::pathnodes::RTEKind = 1;
 
 /// `IS_OUTER_JOIN(jointype)` (nodes.h): LEFT/FULL/RIGHT/ANTI/RIGHT_ANTI.
 #[inline]
@@ -195,7 +195,7 @@ pub fn join_is_removable<'mcx>(
      * used above the join.
      */
     let innerrel_relids = relids::copy(&root.rel(innerrel).relids);
-    let ph_ids: Vec<pathnodes::PhInfoId> = root.placeholder_list.clone();
+    let ph_ids: Vec<::pathnodes::PhInfoId> = root.placeholder_list.clone();
     for ph_id in ph_ids {
         let (ph_lateral, ph_eval_at, ph_needed) = {
             let phinfo = root.phinfo(ph_id);
@@ -338,7 +338,7 @@ pub fn subquery_is_distinct_for<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     rel: RelId,
-    uniq_exprs: &[pathnodes::NodeId],
+    uniq_exprs: &[::pathnodes::NodeId],
     in_operators: &[types_core::primitive::Oid],
 ) -> bool {
     let relid = root.rel(rel).relid;
@@ -612,7 +612,7 @@ pub fn innerrel_is_unique_ext<'mcx>(
 
     if proved {
         /* Cache the positive result for future probes. */
-        let uri = pathnodes::UniqueRelInfo {
+        let uri = ::pathnodes::UniqueRelInfo {
             outerrelids: relids::copy(outerrelids),
             self_join,
             extra_clauses: outer_exprs.clone(),

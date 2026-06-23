@@ -5,7 +5,7 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use nodes::{AsyncRequestData, ForeignScanState};
 
 // The parallel-scan methods (ExecForeignScanEstimate / InitializeDSM /

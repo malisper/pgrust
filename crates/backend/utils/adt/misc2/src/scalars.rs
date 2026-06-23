@@ -40,9 +40,9 @@
 //!   that *surrounds* these (syntax scan, range checks, comparison) is ported
 //!   in full; only the container/runtime crossing panics.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use alloc::string::ToString;
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_ARGUMENT_FOR_NTH_VALUE,
@@ -66,7 +66,7 @@ type OffsetNumber = u16;
 
 /// `ItemPointerData` (`storage/itemptr.h`) — `BlockIdData` (two `uint16`) plus a
 /// `uint16` offset. Field-for-field with the C struct; the layered owner is
-/// `types_tuple::ItemPointerData` (not a dependency of this carrier crate, so
+/// `::types_tuple::ItemPointerData` (not a dependency of this carrier crate, so
 /// the (block, offset) pair is modeled locally and crosses as a `Datum`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ItemPointer {
@@ -224,7 +224,7 @@ pub fn tidout<'mcx>(mcx: Mcx<'mcx>, item_ptr: Datum) -> PgResult<Datum<'mcx>> {
 pub fn tidrecv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<Datum<'mcx>> {
     // Wrap the wire bytes as a real StringInfo (cursor = 0) and read through the
     // libpq/pqformat owner, exactly mirroring tidrecv's two pq_getmsgint calls.
-    let mut msg = stringinfo::StringInfo::from_vec(mcx::slice_in(mcx, buf)?);
+    let mut msg = stringinfo::StringInfo::from_vec(::mcx::slice_in(mcx, buf)?);
     // blockNumber = pq_getmsgint(buf, sizeof(blockNumber)); // uint32
     let block_number = pqformat::pq_getmsgint(&mut msg, 4)?;
     // offsetNumber = pq_getmsgint(buf, sizeof(offsetNumber)); // uint16
@@ -366,13 +366,13 @@ fn itempointer_image(ptr: &ItemPointer) -> [u8; 6] {
 }
 
 /// Convert the local 6-byte image `ItemPointer` (this unit's decoupled struct)
-/// into the layered `types_tuple::ItemPointerData` the table-AM consumes.
-fn to_item_pointer_data(p: &ItemPointer) -> types_tuple::ItemPointerData {
-    types_tuple::ItemPointerData::new(p.block_number_no_check(), p.offset_number_no_check())
+/// into the layered `::types_tuple::ItemPointerData` the table-AM consumes.
+fn to_item_pointer_data(p: &ItemPointer) -> ::types_tuple::ItemPointerData {
+    ::types_tuple::ItemPointerData::new(p.block_number_no_check(), p.offset_number_no_check())
 }
 
 /// Convert back from the table-AM `ItemPointerData` into the local image struct.
-fn from_item_pointer_data(p: &types_tuple::ItemPointerData) -> ItemPointer {
+fn from_item_pointer_data(p: &::types_tuple::ItemPointerData) -> ItemPointer {
     ItemPointer::set(p.ip_blkid.block_number(), p.ip_posid)
 }
 
@@ -385,7 +385,7 @@ fn currtid_internal<'mcx>(
     rel: &rel::Relation<'mcx>,
     tid: &ItemPointer,
 ) -> PgResult<ItemPointer> {
-    use types_tuple::access::{
+    use ::types_tuple::access::{
         RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
         RELKIND_VIEW,
     };
@@ -457,7 +457,7 @@ fn currtid_for_view<'mcx>(
     viewrel: &rel::Relation<'mcx>,
     tid: &ItemPointer,
 ) -> PgResult<ItemPointer> {
-    use types_tuple::heaptuple::{SelfItemPointerAttributeNumber, TIDOID};
+    use ::types_tuple::heaptuple::{SelfItemPointerAttributeNumber, TIDOID};
 
     let att = &viewrel.rd_att;
     let natts = att.natts as usize;
@@ -1097,7 +1097,7 @@ mod unported {
     /// pointer lives in the current memory context).
     pub fn return_itempointer<'mcx>(mcx: Mcx<'mcx>, ptr: ItemPointer) -> PgResult<Datum<'mcx>> {
         let image = super::itempointer_image(&ptr);
-        Ok(Datum::ByRef(mcx::slice_in(mcx, &image)?))
+        Ok(Datum::ByRef(::mcx::slice_in(mcx, &image)?))
     }
 
     /// `PG_RETURN_CSTRING(pstrdup(buf))` — the C `cstring` result. The
@@ -1112,7 +1112,7 @@ mod unported {
     /// `Datum::ByRef` arm carries that verbatim varlena image, copied into the
     /// caller's context.
     pub fn return_bytea<'mcx>(mcx: Mcx<'mcx>, bytes: alloc::vec::Vec<u8>) -> PgResult<Datum<'mcx>> {
-        Ok(Datum::ByRef(mcx::slice_in(mcx, &bytes)?))
+        Ok(Datum::ByRef(::mcx::slice_in(mcx, &bytes)?))
     }
 
     /// `common/hashfn.c` `hash_any(k, keylen)` — the Bob Jenkins hash, mapped to

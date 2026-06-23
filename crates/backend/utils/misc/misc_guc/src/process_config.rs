@@ -481,7 +481,7 @@ fn bail_out(
 }
 
 /// Emit a report at a sub-ERROR `elevel`, or throw when `elevel >= ERROR`.
-fn report(elevel: ErrorLevel, error: types_error::PgError) -> PgResult<()> {
+fn report(elevel: ErrorLevel, error: ::types_error::PgError) -> PgResult<()> {
     if elevel >= ERROR {
         Err(error)
     } else {

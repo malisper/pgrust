@@ -24,18 +24,18 @@ pub mod htup;
 #[cfg(test)]
 mod tests;
 
-use types_core::primitive::{Size, TransactionId, XLogRecPtr};
-use types_core::xact::{
+use ::types_core::primitive::{Size, TransactionId, XLogRecPtr};
+use ::types_core::xact::{
     FirstNormalTransactionId, InvalidCommandId, InvalidTransactionId,
 };
 use types_core::{CommandId, InvalidOid};
-use types_error::PgResult;
-use types_storage::buf::BufferIsValid;
-use types_storage::storage::Buffer;
-use snapshot::snapshot::SnapshotType;
-use snapshot::SnapshotData;
-use types_tableam::tableam::TM_Result;
-use types_tuple::heaptuple::{
+use ::types_error::PgResult;
+use ::types_storage::buf::BufferIsValid;
+use ::types_storage::storage::Buffer;
+use ::snapshot::snapshot::SnapshotType;
+use ::snapshot::SnapshotData;
+use ::types_tableam::tableam::TM_Result;
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderData, HeapTupleHeaderGetRawXmin, HeapTupleHeaderXminCommitted,
     HEAP_MOVED_IN, HEAP_MOVED_OFF, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMAX_IS_MULTI,
     HEAP_XMAX_LOCK_ONLY, HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID,
@@ -50,10 +50,10 @@ use htup::{
 
 // `HeapTupleHeaderGetRawCommandId` lives in `types_tuple` (it is also used by
 // combocid); reach it through the canonical path.
-use types_tuple::heaptuple::HeapTupleHeaderGetRawCommandId;
+use ::types_tuple::heaptuple::HeapTupleHeaderGetRawCommandId;
 
-pub use types_tableam::tableam::TM_Result::*;
-pub use snapshot::snapshot::HTSV_Result::{self, *};
+pub use ::types_tableam::tableam::TM_Result::*;
+pub use ::snapshot::snapshot::HTSV_Result::{self, *};
 
 // Owner seam crates.
 use heapam_seams as heapam_seam;
@@ -1385,7 +1385,7 @@ fn HeapTupleSatisfiesNonVacuumable(
 /// when in doubt.
 pub fn HeapTupleIsSurelyDead(
     htup: &HeapTupleData,
-    vistest: snapshot::snapshot::GlobalVisStateHandle,
+    vistest: ::snapshot::snapshot::GlobalVisStateHandle,
 ) -> PgResult<bool> {
     let tuple = data_ref(htup);
 

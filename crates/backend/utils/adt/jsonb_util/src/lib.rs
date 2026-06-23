@@ -5,7 +5,7 @@
 //!
 //! The on-disk ABI types (`Jsonb`, `JsonbContainer`, `JEntry`, the
 //! `jbvType`/`JsonbIteratorToken`/`JsonbIterState` enums, and every flag
-//! constant) live in [`types_jsonb::jsonb`] and are re-exported here.  The
+//! constant) live in [`::types_jsonb::jsonb`] and are re-exported here.  The
 //! *in-memory* working types (`JsonbValue`, `JsonbPair`, `JsonbParseState`,
 //! `JsonbIterator`) live in [`types_jsonb::jsonb_util`]: they
 //! are idiomatic owned-tree
@@ -64,7 +64,7 @@ pub use types_jsonb::jsonb_util::{
     JsonbDatetime, JsonbIterator, JsonbNumeric, JsonbPair, JsonbParseState, JsonbValue,
     JsonbValueData,
 };
-pub use types_jsonb::jsonb::{
+pub use ::types_jsonb::jsonb::{
     is_a_jsonb_scalar, jbe_has_off, jbe_isbool_false, jbe_isbool_true, jbe_iscontainer, jbe_isnull,
     jbe_isnumeric, jbe_isstring, jbe_offlenfld, jbvType, json_container_is_array,
     json_container_is_object, json_container_is_scalar, json_container_size, JEntry, Jsonb,
@@ -73,7 +73,7 @@ pub use types_jsonb::jsonb::{
     JENTRY_ISCONTAINER, JENTRY_ISNULL, JENTRY_ISNUMERIC, JENTRY_ISSTRING, JENTRY_OFFLENMASK,
     JENTRY_TYPEMASK,
 };
-pub use types_jsonb::VARHDRSZ;
+pub use ::types_jsonb::VARHDRSZ;
 
 use jbvType::*;
 use JsonbIterState::*;
@@ -223,7 +223,7 @@ pub fn JsonbValueToJsonb<'mcx>(mcx: Mcx<'mcx>, val: &JsonbValue) -> PgResult<PgV
         if VARHDRSZ + len > MAX_ALLOC_SIZE {
             return Err(oom());
         }
-        let mut out = mcx::vec_with_capacity_in(mcx, VARHDRSZ + len)?;
+        let mut out = ::mcx::vec_with_capacity_in(mcx, VARHDRSZ + len)?;
         out.extend_from_slice(&[0u8; VARHDRSZ]);
         out.extend_from_slice(&data[..len]);
         set_varsize(&mut out, VARHDRSZ + len);
@@ -956,7 +956,7 @@ struct ConvertBuffer<'mcx> {
 impl<'mcx> ConvertBuffer<'mcx> {
     fn new(mcx: Mcx<'mcx>) -> PgResult<Self> {
         // Mirror the C StringInfo's 1024-byte initial allocation.
-        let mut data = mcx::vec_with_capacity_in(mcx, 1024)?;
+        let mut data = ::mcx::vec_with_capacity_in(mcx, 1024)?;
         data.resize(1024, 0);
         Ok(ConvertBuffer { mcx, data, len: 0 })
     }
@@ -1746,7 +1746,7 @@ fn rotate_high_and_low_32bits(v: u64) -> u64 {
 /// Decode the i-th `NumericDigit` (i16) from a native-endian digit byte slice.
 #[inline]
 fn numeric_digit_at_bytes(digit_bytes: &[u8], i: usize) -> i16 {
-    types_numeric::numeric_digit_at(digit_bytes, i)
+    ::types_numeric::numeric_digit_at(digit_bytes, i)
 }
 
 /// C: `hash_numeric(NumericGetDatum(num))` (numeric.c) -- ported in-crate over

@@ -5,8 +5,8 @@
 
 use std::boxed::Box;
 
-use types_core::primitive::BlockNumber;
-use rel::Relation;
+use ::types_core::primitive::BlockNumber;
+use ::rel::Relation;
 
 /// `BufferAccessStrategy` (`storage/bufmgr.h`) — opaque ring-buffer access
 /// strategy; indexam.c only passes it through inside [`IndexVacuumInfo`].

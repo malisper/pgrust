@@ -1,13 +1,13 @@
 //! Thin marshal-and-delegate wrappers for the `backend-utils-activity-status`
 //! seams. All real logic lives in `lib.rs`; these only adapt the seam contract
-//! types (the trimmed `types_pgstat::backend_status::PgBackendStatus` view, the
+//! types (the trimmed `::types_pgstat::backend_status::PgBackendStatus` view, the
 //! `String`-carrying activity reporters) to the internal functions.
 
 use core::sync::atomic::Ordering;
 
-use types_core::Size;
-use types_error::PgResult;
-use types_pgstat::backend_status::PgBackendStatus as BeView;
+use ::types_core::Size;
+use ::types_error::PgResult;
+use ::types_pgstat::backend_status::PgBackendStatus as BeView;
 
 use crate::{
     pgstat_get_backend_current_activity, pgstat_report_activity, MyBEEntry, PgBackendStatusEntry,
@@ -28,7 +28,7 @@ pub(crate) fn my_be_entry_present() -> bool {
 }
 
 /// Run `f` on this backend's live `*MyBEEntry`, exposed as the trimmed
-/// `types_pgstat::backend_status::PgBackendStatus` view (changecount + progress
+/// `::types_pgstat::backend_status::PgBackendStatus` view (changecount + progress
 /// fields). Callers (`backend_progress.c`) write the progress fields and run
 /// their own `PGSTAT_BEGIN/END_WRITE_ACTIVITY` bracketing on the view's
 /// `AtomicU32` changecount; we copy the four fields out of the in-segment entry

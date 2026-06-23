@@ -58,7 +58,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
 use page::{
@@ -66,22 +66,22 @@ use page::{
     PageIndexTupleDelete, PageMut, PageRef,
 };
 use utils_error::{ereport, PgResult};
-use types_error::error::{ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::error::{ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 
 use indextuple::{index_form_tuple, FormedIndexTuple};
 use gindatapage as gdp;
 use ginutil as ginutil;
 
-use types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
-use types_core::InvalidBlockNumber;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
+use ::types_core::InvalidBlockNumber;
 use gin::{
     BeginPlaceToPageResult, GinBtreeData, GinBtreeEntryInsertData, GinBtreeStack, GinInsertPayload,
     GinNullCategory, GinPlaceToPageRC, GinState, PtpWorkspace, GinMaxItemSize, GIN_CAT_NORM_KEY,
     GIN_ROOT_BLKNO,
 };
-use types_storage::storage::Buffer;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{
+use ::types_storage::storage::Buffer;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{
     BlockIdData, IndexTupleData, ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber,
     INDEX_NULL_MASK, INDEX_SIZE_MASK, INVALID_OFFSET_NUMBER as InvalidOffsetNumber,
 };

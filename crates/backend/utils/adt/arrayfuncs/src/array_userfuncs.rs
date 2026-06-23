@@ -31,7 +31,7 @@
 //! has none of that machinery:
 //!
 //!  * no concrete `ExpandedArrayHeader` carrier (only the generic
-//!    `datum::ExpandedObject` flatten-only trait + the read-only
+//!    `::datum::ExpandedObject` flatten-only trait + the read-only
 //!    `ExpandedObjectRef` byte handle exist);
 //!  * no `EOH_init_header` + owning child `MemoryContext` model, no `EA_MAGIC`;
 //!  * no `EOHPGetRWDatum` read-write-expanded-datum constructor, and the
@@ -60,16 +60,16 @@
 //! (sub-array) variants are not yet ported.
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use array::ArrayElementDatum;
-use types_core::Oid;
-use datum::datum::Datum;
+use ::array::ArrayElementDatum;
+use ::types_core::Oid;
+use ::datum::datum::Datum;
 use types_error::{
     PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_UNDEFINED_FUNCTION,
     ERROR,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::construct::{self, array_contains_nulls};
 use crate::foundation::{self, INT4OID};
@@ -82,7 +82,7 @@ use tuplesort_seams as tuplesort;
 use prng_seams as prng;
 
 use crate::sql;
-use types_error::PgError;
+use ::types_error::PgError;
 
 /// `format_type_be(element_type)` — the type's printable name for backend error
 /// messages (format_type.c), via the installed `format_type_be` seam in a
@@ -110,8 +110,8 @@ pub fn array_cat<'mcx>(
     // Concatenating a null array is a no-op, just return the other input.
     let (v1, v2) = match (v1, v2) {
         (None, None) => return Ok(None),                 // PG_RETURN_NULL()
-        (None, Some(v2)) => return Ok(Some(mcx::slice_in(mcx, v2)?)),
-        (Some(v1), None) => return Ok(Some(mcx::slice_in(mcx, v1)?)),
+        (None, Some(v2)) => return Ok(Some(::mcx::slice_in(mcx, v2)?)),
+        (Some(v1), None) => return Ok(Some(::mcx::slice_in(mcx, v1)?)),
         (Some(v1), Some(v2)) => (v1, v2),
     };
 
@@ -141,10 +141,10 @@ pub fn array_cat<'mcx>(
     // return the non-empty one as the result; if both are empty, return the
     // first one.
     if ndims1 == 0 && ndims2 > 0 {
-        return Ok(Some(mcx::slice_in(mcx, v2)?));
+        return Ok(Some(::mcx::slice_in(mcx, v2)?));
     }
     if ndims2 == 0 {
-        return Ok(Some(mcx::slice_in(mcx, v1)?));
+        return Ok(Some(::mcx::slice_in(mcx, v1)?));
     }
 
     // the rest fall under rule 3, 4, or 5.
@@ -283,7 +283,7 @@ pub fn array_cat<'mcx>(
 }
 
 /// `errdetail("Arrays with differing ... dimensions ...")` for `array_cat`.
-fn incompatible_dims_err() -> types_error::PgError {
+fn incompatible_dims_err() -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
         .errmsg("cannot concatenate incompatible arrays")
@@ -302,7 +302,7 @@ fn dims_slice<'mcx>(mcx: Mcx<'mcx>, a: &[u8]) -> PgResult<PgVec<'mcx, i32>> {
 /// public `make_md_array_result`.
 fn make_array_result<'mcx>(
     mcx: Mcx<'mcx>,
-    astate: &datum::array_build::ArrayBuildState,
+    astate: &::datum::array_build::ArrayBuildState,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let ndims = if astate.nelems > 0 { 1 } else { 0 };
     let dims = [astate.nelems];
@@ -528,9 +528,9 @@ pub fn array_position_start(
 /// output) into parallel `values`/`nulls` slices for `construct_md_array_values`.
 fn split_values_nulls<'mcx>(
     mcx: Mcx<'mcx>,
-    elems: &[(types_tuple::Datum<'mcx>, bool)],
-) -> PgResult<(PgVec<'mcx, types_tuple::Datum<'mcx>>, PgVec<'mcx, bool>)> {
-    let mut values = vec_with_capacity_in::<types_tuple::Datum<'mcx>>(mcx, elems.len())?;
+    elems: &[(::types_tuple::Datum<'mcx>, bool)],
+) -> PgResult<(PgVec<'mcx, ::types_tuple::Datum<'mcx>>, PgVec<'mcx, bool>)> {
+    let mut values = vec_with_capacity_in::<::types_tuple::Datum<'mcx>>(mcx, elems.len())?;
     let mut nulls = vec_with_capacity_in::<bool>(mcx, elems.len())?;
     for (d, n) in elems {
         values.push(d.clone());
@@ -611,7 +611,7 @@ fn array_shuffle_n<'mcx>(
 pub fn array_shuffle<'mcx>(mcx: Mcx<'mcx>, array: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     // There is no point in shuffling empty arrays or arrays with < 2 items.
     if foundation::arr_ndim(array) < 1 || foundation::arr_dim(array, 0) < 2 {
-        return Ok(mcx::slice_in(mcx, array)?);
+        return Ok(::mcx::slice_in(mcx, array)?);
     }
     let elmtyp = foundation::arr_elemtype(array);
     let te = typcache::lookup_type_cache::call(elmtyp, 0)?;
@@ -638,7 +638,7 @@ pub fn array_sample<'mcx>(mcx: Mcx<'mcx>, array: &[u8], n: i32) -> PgResult<PgVe
 
     if n < 0 || n > nitem {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(format!("sample size must be between 0 and {nitem}"))
             .into_error());
     }
@@ -711,7 +711,7 @@ fn array_reverse_n<'mcx>(
 pub fn array_reverse<'mcx>(mcx: Mcx<'mcx>, array: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     // There is no point in reversing empty arrays or arrays with < 2 items.
     if foundation::arr_ndim(array) < 1 || foundation::arr_dim(array, 0) < 2 {
-        return Ok(mcx::slice_in(mcx, array)?);
+        return Ok(::mcx::slice_in(mcx, array)?);
     }
     let elmtyp = foundation::arr_elemtype(array);
     let te = typcache::lookup_type_cache::call(elmtyp, 0)?;
@@ -757,7 +757,7 @@ fn array_sort_internal<'mcx>(
 
     // Quick exit if we don't need to sort.
     if ndim < 1 || foundation::arr_dim(array, 0) < 2 {
-        return Ok(mcx::slice_in(mcx, array)?);
+        return Ok(::mcx::slice_in(mcx, array)?);
     }
 
     let elmtyp = foundation::arr_elemtype(array);
@@ -777,7 +777,7 @@ fn array_sort_internal<'mcx>(
         let typarray = lsyscache::get_array_type::call(elmtyp)?.unwrap_or(0);
         if typarray == 0 {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
                 .errmsg(format!(
                     "could not find array type for data type {}",
                     format_type_be(elmtyp)
@@ -836,7 +836,7 @@ fn array_sort_internal<'mcx>(
                     // Unreachable for slice_ndim > 0, but mirror the C: a slice
                     // iterator never yields a scalar.
                     return Err(PgError::error("array_sort: slice iterator yielded a scalar")
-                        .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR));
+                        .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR));
                 }
             }
         }
@@ -872,7 +872,7 @@ fn array_sort_internal<'mcx>(
             values.push(value.clone_in(mcx)?);
             nulls.push(isnull);
         }
-        tuplesort::tuplesort_end::call(mcx::alloc_in(mcx, tss)?)?;
+        tuplesort::tuplesort_end::call(::mcx::alloc_in(mcx, tss)?)?;
 
         let nelems = values.len() as i32;
         let nd = if nelems > 0 { 1 } else { 0 };
@@ -891,7 +891,7 @@ fn array_sort_internal<'mcx>(
     } else {
         // Multi-dimensional: the sorted things are sub-arrays; rebuild the nD
         // array via accumArrayResultAny (the array case).
-        let mut astate: Option<datum::array_build::ArrayBuildStateAny> = None;
+        let mut astate: Option<::datum::array_build::ArrayBuildStateAny> = None;
         loop {
             let (found, value, _isnull) =
                 tuplesort::tuplesort_getdatum::call(&mut tss, true, false)?;
@@ -904,7 +904,7 @@ fn array_sort_internal<'mcx>(
                     return Err(PgError::error(
                         "array_sort: sub-array sort output is not a by-ref array",
                     )
-                    .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR))
+                    .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR))
                 }
             };
             astate = Some(construct::accum_array_result_any_mcx(
@@ -916,7 +916,7 @@ fn array_sort_internal<'mcx>(
                 sort_typ,
             )?);
         }
-        tuplesort::tuplesort_end::call(mcx::alloc_in(mcx, tss)?)?;
+        tuplesort::tuplesort_end::call(::mcx::alloc_in(mcx, tss)?)?;
 
         let astate =
             astate.unwrap_or(construct::init_array_result_any_mcx(sort_typ, true)?);

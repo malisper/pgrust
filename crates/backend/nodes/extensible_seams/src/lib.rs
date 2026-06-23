@@ -14,7 +14,7 @@
 
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_extensible::{CustomScanMethods, ExtensibleNodeMethods};
 
 seam_core::seam!(
@@ -59,7 +59,7 @@ seam_core::seam!(
 // `ParallelContext` cross by value.
 // ===========================================================================
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use nodes::{
     CustomScan, CustomScanState, EStateData, ParallelContext, ParallelWorkerContext, SlotId,
 };

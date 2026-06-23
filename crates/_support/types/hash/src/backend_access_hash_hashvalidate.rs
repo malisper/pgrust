@@ -9,8 +9,8 @@
 //! so they live under this module's own C-path. The cross-validator
 //! `OpFamilyOpFuncGroup` is types-amvalidate's shared definition.
 
-use mcx::PgString;
-use types_core::Oid;
+use ::mcx::PgString;
+use ::types_core::Oid;
 
 /// `Form_pg_opclass` fields read by `hashvalidate` (the result of
 /// `SearchSysCache1(CLAOID, opclassoid)` projected to what the validator uses).

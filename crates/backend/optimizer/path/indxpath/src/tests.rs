@@ -27,7 +27,7 @@ fn index_clause_set_new_is_empty() {
 #[test]
 fn relids_next_member_iterates_bits() {
     use crate::util::relids_next_member;
-    use pathnodes::Bitmapset;
+    use ::pathnodes::Bitmapset;
     // bits 0, 3, 65 set.
     let relids = Some(alloc::boxed::Box::new(Bitmapset {
         words: alloc::vec![0b1001u64, 0b10u64],

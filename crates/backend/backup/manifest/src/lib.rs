@@ -30,29 +30,29 @@ use core::ffi::CStr;
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::{pg_time_t, Oid, TimeLineID, XLogRecPtr, MAXPGPATH};
-use crypto::pg_cryptohash_ctx;
-use crypto::pg_cryptohash_type::PG_SHA256;
+use ::crypto::pg_cryptohash_ctx;
+use ::crypto::pg_cryptohash_type::PG_SHA256;
 use types_error::{ErrorLocation, PgError, PgResult, ERROR};
-use types_storage::file::PG_TBLSPC_DIR;
-use types_wchar::encoding::PG_UTF8;
+use ::types_storage::file::PG_TBLSPC_DIR;
+use ::types_wchar::encoding::PG_UTF8;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use sink::{
     bbsink_begin_manifest, bbsink_end_manifest, bbsink_manifest_contents, Bbsink, BbsinkState,
 };
-use encode::hex_encode;
-use adt_json::escape_json_with_len;
-use common_wchar::pg_encoding_verifymbstr;
+use ::encode::hex_encode;
+use ::adt_json::escape_json_with_len;
+use ::common_wchar::pg_encoding_verifymbstr;
 
 use buffile::{
     BufFileClose, BufFileCreateTemp, BufFileReadExact, BufFileSeek, BufFileWrite,
 };
 use ::nodes::nodehash::BufFile;
 
-use timeline::readTimeLineHistory;
-use localtime::pg_gmtime;
-use strftime::pg_strftime;
+use ::timeline::readTimeLineHistory;
+use ::localtime::pg_gmtime;
+use ::strftime::pg_strftime;
 
 use checksum_helper::{
     pg_checksum_final, pg_checksum_type, pg_checksum_type_name, PgChecksumContext,

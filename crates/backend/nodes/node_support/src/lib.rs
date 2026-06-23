@@ -58,8 +58,8 @@ use mcx::{PgBox, PgString, PgVec};
 // exported `pg_scalar_*!` macros can name them as
 // `::node_support::Mcx` / `::PgResult` without bringing `mcx` /
 // `types-error` into scope themselves.
-pub use mcx::Mcx;
-pub use types_error::PgResult;
+pub use ::mcx::Mcx;
+pub use ::types_error::PgResult;
 
 /// Deep-copy a node value INTO a target memory context. Fallible owned-tree
 /// analogue of `copyObject` (`copyfuncs.c`), which deep-copies into
@@ -197,14 +197,14 @@ macro_rules! pg_scalar_ignore {
 /// `palloc`-shaped fallible `PgVec` constructor, re-exported under a stable path
 /// so the `#[derive(PgNode)]`-generated `array_size` copy code (expanded in the
 /// downstream `types-nodes` crate) can build a destination-charged `PgVec`
-/// without naming `mcx` directly. Forwards to [`mcx::vec_with_capacity_in`].
+/// without naming `mcx` directly. Forwards to [`::mcx::vec_with_capacity_in`].
 #[doc(hidden)]
 #[inline]
 pub fn mcx_vec_with_capacity_in<'dst, T>(
     dst: Mcx<'dst>,
     cap: usize,
 ) -> PgResult<PgVec<'dst, T>> {
-    mcx::vec_with_capacity_in(dst, cap)
+    ::mcx::vec_with_capacity_in(dst, cap)
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +243,7 @@ impl<'a, T: PgNodeCopy> PgNodeCopy for PgBox<'a, T> {
     type Bound<'dst> = PgBox<'dst, T::Bound<'dst>>;
     fn copy_node_in<'dst>(&self, dst: Mcx<'dst>) -> PgResult<Self::Bound<'dst>> {
         let payload = (**self).copy_node_in(dst)?;
-        mcx::alloc_in(dst, payload)
+        ::mcx::alloc_in(dst, payload)
     }
 }
 impl<'a, T: PgNodeEqual> PgNodeEqual for PgBox<'a, T> {
@@ -260,7 +260,7 @@ impl<'a, T: PgNodeEqual> PgNodeEqual for PgBox<'a, T> {
 impl<'a, T: PgNodeCopy> PgNodeCopy for PgVec<'a, T> {
     type Bound<'dst> = PgVec<'dst, T::Bound<'dst>>;
     fn copy_node_in<'dst>(&self, dst: Mcx<'dst>) -> PgResult<Self::Bound<'dst>> {
-        let mut out = mcx::vec_with_capacity_in(dst, self.len())?;
+        let mut out = ::mcx::vec_with_capacity_in(dst, self.len())?;
         for elem in self.iter() {
             out.push(elem.copy_node_in(dst)?);
         }
@@ -1211,7 +1211,7 @@ impl<'a, T: PgNodeRead> PgNodeRead for PgBox<'a, T> {
         dst: Mcx<'dst>,
     ) -> PgResult<Self::Bound<'dst>> {
         let payload = T::read_node(cur, dst)?;
-        mcx::alloc_in(dst, payload)
+        ::mcx::alloc_in(dst, payload)
     }
 }
 
@@ -1246,7 +1246,7 @@ impl<'a, T: PgNodeRead> PgNodeRead for PgVec<'a, T> {
         // list is the NULL-pointer token). The rebuilt list is charged to `dst`.
         let open = cur.expect_token();
         if open.is_empty_sentinel || open.text == "<>" {
-            return mcx::vec_with_capacity_in(dst, 0);
+            return ::mcx::vec_with_capacity_in(dst, 0);
         }
         debug_assert_eq!(open.text, "(", "expected '(' or '<>' at start of list");
         let mut out: PgVec<'dst, T::Bound<'dst>> = PgVec::new_in(dst);
@@ -1268,7 +1268,7 @@ mod serialization_tests {
     extern crate std;
 
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn out_to_string<T: PgNodeOut>(v: &T) -> String {
         let mut s = String::new();
@@ -1460,7 +1460,7 @@ mod serialization_tests {
             assert_eq!(back.as_slice(), elems.as_slice());
         }
         // PgBox<i32>: transparent.
-        let boxed = mcx::alloc_in(mcx, 99i32).unwrap();
+        let boxed = ::mcx::alloc_in(mcx, 99i32).unwrap();
         let mut buf = String::new();
         boxed.out_node(&mut buf);
         let mut cur = ReadCursor::new(&buf);

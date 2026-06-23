@@ -12,7 +12,7 @@
 //! is fd-coupled there); the rest are installed below.
 
 use backup_basebackup_seams::{self as bbseam, LstatInfo, TarError, TarHeader, TAR_BLOCK_SIZE};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgResult, ERROR};
 
 use crate::here;

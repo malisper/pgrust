@@ -12,8 +12,8 @@
 //! forms. Only the bare `list_member_oid` primitive (a `list.c` helper, not
 //! part of the de-handle slice) remains.
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `list_member_oid(relationOids, oid)` over a relation-OID `List`.

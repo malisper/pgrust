@@ -47,7 +47,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgVec};
 use types_error::{
     PgError, PgResult, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INTERNAL_ERROR,

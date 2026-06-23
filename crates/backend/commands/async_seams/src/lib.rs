@@ -4,8 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
-use types_core::TransactionId;
-use types_error::PgResult;
+use ::types_core::TransactionId;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `HandleNotifyInterrupt()` (async.c) — the PROCSIG_NOTIFY_INTERRUPT
@@ -50,14 +50,14 @@ seam_core::seam!(
     /// `AsyncShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn async_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn async_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
     /// `AsyncShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
     /// this subsystem's shared-memory structures. `Err` carries the C
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn async_shmem_init() -> types_error::PgResult<()>
+    pub fn async_shmem_init() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

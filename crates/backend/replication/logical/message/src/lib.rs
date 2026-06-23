@@ -31,10 +31,10 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use utils_error::{ereport, PgError, PgResult};
-use types_core::primitive::{Size, XLogRecPtr};
-use types_error::error::PANIC;
-use wal::rmgr::XLogReaderState;
-use wal::wal::{RM_LOGICALMSG_ID, XLOG_INCLUDE_ORIGIN, XLOG_LOGICAL_MESSAGE, XLR_INFO_MASK};
+use ::types_core::primitive::{Size, XLogRecPtr};
+use ::types_error::error::PANIC;
+use ::wal::rmgr::XLogReaderState;
+use ::wal::wal::{RM_LOGICALMSG_ID, XLOG_INCLUDE_ORIGIN, XLOG_LOGICAL_MESSAGE, XLR_INFO_MASK};
 
 /// `SizeOfLogicalMessage` (replication/message.h):
 /// `offsetof(xl_logical_message, message)`.
@@ -130,7 +130,7 @@ fn panic_unknown_opcode(info: u8) -> PgError {
 /// `prefix_size` (u64 LE), `message_size` (u64 LE). Total length
 /// [`SIZE_OF_LOGICAL_MESSAGE`].
 fn serialize_header(
-    db_id: types_core::primitive::Oid,
+    db_id: ::types_core::primitive::Oid,
     transactional: bool,
     prefix_size: Size,
     message_size: Size,

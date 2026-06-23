@@ -22,19 +22,19 @@ pub mod fmgr_builtins;
 pub mod querybuild;
 pub mod triggers;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{InvalidOid, Oid};
-use types_error::PgResult;
-use rel::Relation;
-use types_ri_triggers::TriggerDataRef;
-use types_tuple::heaptuple::NameData;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_ri_triggers::TriggerDataRef;
+use ::types_tuple::heaptuple::NameData;
 
 // ---------------------------------------------------------------------------
 // RelSide: the two sources of a "Relation" in this unit
 //
 // In C `fk_rel`/`pk_rel` are both `Relation`, whether opened here via
 // `table_open` or handed in as the trigger relation. In this port the opened
-// relation is a real `rel::Relation` we own (RAII close), while the
+// relation is a real `::rel::Relation` we own (RAII close), while the
 // trigger relation is owned by the trigger manager and reached by handle. The
 // field/attribute readers dispatch on which side they are given.
 // ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ impl<'a, 'mcx> RelSide<'a, 'mcx> {
     /// `rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE`.
     pub fn is_partitioned(&self) -> bool {
         match self {
-            RelSide::Open(r) => r.rd_rel.relkind == types_tuple::access::RELKIND_PARTITIONED_TABLE,
+            RelSide::Open(r) => r.rd_rel.relkind == ::types_tuple::access::RELKIND_PARTITIONED_TABLE,
             RelSide::Trigger(t) => {
                 trigger_seams::tg_relation_is_partitioned::call(*t)
             }
@@ -139,7 +139,7 @@ use alloc::vec::Vec;
 // ---------------------------------------------------------------------------
 
 /// `RI_MAX_NUMKEYS` == `INDEX_MAX_KEYS` (32).
-pub const RI_MAX_NUMKEYS: usize = types_core::fmgr::INDEX_MAX_KEYS as usize;
+pub const RI_MAX_NUMKEYS: usize = ::types_core::fmgr::INDEX_MAX_KEYS as usize;
 
 /// `RI_INIT_CONSTRAINTHASHSIZE`.
 pub const RI_INIT_CONSTRAINTHASHSIZE: usize = 64;
@@ -167,7 +167,7 @@ pub const RI_PLAN_SETDEFAULT_ONDELETE: i32 = 9;
 pub const RI_PLAN_SETDEFAULT_ONUPDATE: i32 = 10;
 
 /// `MAX_QUOTED_NAME_LEN` == `NAMEDATALEN*2+3`.
-pub const MAX_QUOTED_NAME_LEN: usize = (types_core::fmgr::NAMEDATALEN as usize) * 2 + 3;
+pub const MAX_QUOTED_NAME_LEN: usize = (::types_core::fmgr::NAMEDATALEN as usize) * 2 + 3;
 /// `MAX_QUOTED_REL_NAME_LEN` == `MAX_QUOTED_NAME_LEN*2`.
 pub const MAX_QUOTED_REL_NAME_LEN: usize = MAX_QUOTED_NAME_LEN * 2;
 

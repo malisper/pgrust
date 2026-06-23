@@ -17,34 +17,34 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::ToString;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use utils_error::{ereport, PgResult};
 use types_error::{PgError, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERROR};
 
-use types_acl::acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, AclResult};
-use types_catalog::catalog::DATABASE_RELATION_ID;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_subscription::{
+use ::types_acl::acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, AclResult};
+use ::types_catalog::catalog::DATABASE_RELATION_ID;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_subscription::{
     Anum_pg_subscription_oid, Anum_pg_subscription_subname, Anum_pg_subscription_subowner,
     Anum_pg_subscription_subpasswordrequired, Natts_pg_subscription, SubscriptionRelationId,
 };
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_core::primitive::{InvalidOid, Oid};
 use ::nodes::parsenodes::ObjectType;
-use types_storage::lock::RowExclusiveLock;
-use types_syscache::syscache_ids::SUBSCRIPTIONOID;
+use ::types_storage::lock::RowExclusiveLock;
+use ::types_syscache::syscache_ids::SUBSCRIPTIONOID;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
 use heaptuple::{heap_deform_tuple, heap_modify_tuple};
 use aclchk::{object_aclcheck, object_ownercheck};
-use indexing::keystone::CatalogTupleUpdate;
-use pg_shdepend::changeDependencyOnOwner;
-use cache_syscache::cacheinfo::SUBSCRIPTIONNAME;
+use ::indexing::keystone::CatalogTupleUpdate;
+use ::pg_shdepend::changeDependencyOnOwner;
+use ::cache_syscache::cacheinfo::SUBSCRIPTIONNAME;
 use cache_syscache::{ReleaseSysCache, SearchSysCache1, SearchSysCache2};
-use miscinit::GetUserId;
+use ::miscinit::GetUserId;
 
-use cache::syscache::SysCacheKey;
-use datum::Datum as KeyDatum;
+use ::cache::syscache::SysCacheKey;
+use ::datum::Datum as KeyDatum;
 
 use aclchk_seams as aclchk_seams;
 use objectaccess_seams as objaccess;
@@ -70,7 +70,7 @@ pub(crate) fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<D
     const VARHDRSZ: usize = 4;
     let payload = s.as_bytes();
     let total = VARHDRSZ + payload.len();
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     let vl_len: u32 = (total as u32) << 2;
     buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
@@ -80,8 +80,8 @@ pub(crate) fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<D
 
 /// `namein(s)` image — a `NAMEDATALEN`-byte NUL-padded `NameData` Datum.
 pub(crate) fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
-    use types_core::fmgr::NAMEDATALEN;
-    let mut image: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
+    use ::types_core::fmgr::NAMEDATALEN;
+    let mut image: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
     let src = s.as_bytes();
     let take = core::cmp::min(src.len(), (NAMEDATALEN as usize) - 1);
     for &b in &src[..take] {
@@ -126,7 +126,7 @@ pub(crate) fn deform<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &rel::Relation<'mcx>,
     tup: &FormedTuple<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, (Datum<'mcx>, bool)>> {
+) -> PgResult<::mcx::PgVec<'mcx, (Datum<'mcx>, bool)>> {
     let desc = rel.rd_att_clone_in(mcx)?;
     heap_deform_tuple(mcx, &tup.tuple, &desc, &tup.data)
 }

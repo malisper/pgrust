@@ -2,10 +2,10 @@
 //! (`commands/tablecmds.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::Oid;
-use types_core::SubTransactionId;
-use types_error::PgResult;
-use types_storage::lock::LOCKMODE;
+use ::types_core::Oid;
+use ::types_core::SubTransactionId;
+use ::types_error::PgResult;
+use ::types_storage::lock::LOCKMODE;
 
 // ---------------------------------------------------------------------------
 // F0 inward seams (relation create / drop / truncate). The owning unit
@@ -309,7 +309,7 @@ seam_core::seam!(
     pub fn add_relation_new_constraints<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         rel: &rel::Relation<'mcx>,
-        raw_defaults: &[(types_core::AttrNumber, nodes::nodes::NodePtr<'mcx>, i8)],
+        raw_defaults: &[(::types_core::AttrNumber, nodes::nodes::NodePtr<'mcx>, i8)],
         new_constraints: &[nodes::nodes::NodePtr<'mcx>],
         allow_merge: bool,
         is_local: bool,
@@ -330,7 +330,7 @@ seam_core::seam!(
         constraints: &[nodes::nodes::NodePtr<'mcx>],
         old_notnulls: &[nodes::nodes::NodePtr<'mcx>],
         connames: &[String],
-    ) -> PgResult<mcx::PgVec<'mcx, types_core::AttrNumber>>
+    ) -> PgResult<mcx::PgVec<'mcx, ::types_core::AttrNumber>>
 );
 
 seam_core::seam!(
@@ -340,7 +340,7 @@ seam_core::seam!(
     pub fn set_attnotnull<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         rel: &rel::Relation<'mcx>,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
         is_valid: bool,
         queue_validation: bool,
     ) -> PgResult<()>

@@ -3,7 +3,7 @@
 //!
 //! `dsnowball_init` parses the `Language`/`StopWords` options, locates the
 //! per-language Snowball stemmer module for the database encoding (the
-//! `stemmer_modules[]` table, here [`runtime::STEMMER_MODULES`]),
+//! `stemmer_modules[]` table, here [`::runtime::STEMMER_MODULES`]),
 //! creates a live `SN_env`, and loads the optional stop list. `dsnowball_lexize`
 //! lowercases the token, drops stop words, then runs the stemmer (recoding
 //! to/from UTF-8 when the matched UTF-8 stemmer's encoding differs from the
@@ -13,7 +13,7 @@
 //! (`SN_create_env`/`SN_set_current`/`find_among`/…) live in the
 //! `backend-snowball-runtime` crate; the live `SN_env *` and stem fn pointer
 //! cross the type/backend layering boundary behind
-//! [`tsearch::SnowballEnvHandle`], resolved through this crate's
+//! [`::tsearch::SnowballEnvHandle`], resolved through this crate's
 //! [`env_registry`]. Stop-list/config-file helpers cross to the (unported)
 //! `ts_utils.c` through `backend-tsearch-ts-utils-seams`; `str_tolower` to
 //! `formatting.c`; `GetDatabaseEncoding`/`pg_server_to_any`/`pg_any_to_server`
@@ -29,8 +29,8 @@ use core::ffi::c_int;
 use define_seams::{def_get_string, DefElemArg};
 use runtime::{SN_env, SN_set_current, STEMMER_MODULES, PG_SQL_ASCII, PG_UTF8};
 use ts_utils_seams::{readstoplist, searchstoplist};
-use formatting_seams::str_tolower;
-use utils_error::ereport;
+use ::formatting_seams::str_tolower;
+use ::utils_error::ereport;
 use mbutils_seams::{
     get_database_encoding, get_database_encoding_name, pg_any_to_server, pg_server_to_any,
 };

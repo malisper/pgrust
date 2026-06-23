@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `GetStableLatestTransactionId()` (xact.c:607): the transaction's XID if
@@ -258,7 +258,7 @@ seam_core::seam!(
     /// `RequireTransactionBlock(isTopLevel, stmtType)` (xact.c) — `ereport`s if
     /// the statement is not running inside a transaction block (so it would
     /// have no user-visible effect). The C arg is `const char *stmtType`.
-    pub fn require_transaction_block(is_top_level: bool, stmt_type: &str) -> types_error::PgResult<()>
+    pub fn require_transaction_block(is_top_level: bool, stmt_type: &str) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

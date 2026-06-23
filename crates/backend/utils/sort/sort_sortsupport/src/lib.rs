@@ -16,17 +16,17 @@
 
 use std::cell::RefCell;
 
-use mcx::Mcx;
-use types_core::primitive::AttrNumber;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::primitive::AttrNumber;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-// Canonical value type (`types_tuple::Datum<'mcx>`, the ByVal/ByRef enum) —
+// Canonical value type (`::types_tuple::Datum<'mcx>`, the ByVal/ByRef enum) —
 // this crate's comparator API (`apply_sort_comparator` / `comparison_shim`)
 // threads canonical `Datum<'mcx>` end-to-end. It drops to the bare-word
 // `datum::Datum` ONLY at the still-bare-word fmgr-ABI scalar edge
 // (`function_call2_coll` / `oid_function_call1_coll` argument/return slots).
-use types_tuple::Datum;
-use rel::Relation;
+use ::types_tuple::Datum;
+use ::rel::Relation;
 use types_sortsupport::{
     AbbrevAbortId, AbbrevConverterId, SkipSupportData, SkipSupportIncDecId, SortComparatorId,
     SortSupportData, BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID,
@@ -36,7 +36,7 @@ use types_sortsupport::{
 use fmgr_core::{
     datum_to_ref_arg, fmgr_info_cxt, function_call_coll_ref_args,
 };
-use fmgr::ResolvedFmgrInfo;
+use ::fmgr::ResolvedFmgrInfo;
 
 use lsyscache_seams as lsyscache;
 use relcache_seams as relcache;
@@ -142,7 +142,7 @@ fn comparison_shim(mcx: Mcx<'_>, id: SortComparatorId, x: Datum<'_>, y: Datum<'_
     // fmgr call, so a (re-entrant) comparator that itself prepares a shim can
     // not trip a RefCell double-borrow.
     enum Resolved {
-        Shim(fmgr::FmgrResolution, fmgr::FmgrInfo, Oid),
+        Shim(::fmgr::FmgrResolution, ::fmgr::FmgrInfo, Oid),
         Native(nbtcompare::FastComparator),
         GistBox(gist_proc::GistComparator),
         UnsignedCmp,

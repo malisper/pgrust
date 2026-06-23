@@ -8,8 +8,8 @@
 //! dependency boundary; the owning crate installs them from its `init_seams()`.
 //! Until then a call panics loudly (no silent fallback).
 
-use types_error::PgResult;
-use statistics::VacAttrStats;
+use ::types_error::PgResult;
+use ::statistics::VacAttrStats;
 
 seam_core::seam!(
     /// `range_typanalyze(PG_FUNCTION_ARGS)` (rangetypes_typanalyze.c): the

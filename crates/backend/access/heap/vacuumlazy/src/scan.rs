@@ -14,7 +14,7 @@
 use utils_error::{ereport};
 use types_error::{ErrorLocation, DEBUG2, INFO};
 use types_core::{BlockNumber, Buffer};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::consts::{
     buffer_is_valid, InvalidBlockNumber, InvalidBuffer, InvalidOffsetNumber, BUFFER_LOCK_SHARE,

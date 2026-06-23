@@ -37,7 +37,7 @@ use transam::{
 };
 use lwlock::{LWLockAcquire, LWLockRelease};
 use types_storage::{LW_EXCLUSIVE, LW_SHARED};
-use utils_error::errno::current_errno;
+use ::utils_error::errno::current_errno;
 use utils_error::{ereport, PgError, PgResult};
 
 use types_core::{
@@ -46,12 +46,12 @@ use types_core::{
 };
 use types_error::{ERROR, PANIC};
 use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
-use types_storage::sync::SyncRequestHandler;
+use ::types_storage::sync::SyncRequestHandler;
 use types_storage::{LWTRANCHE_COMMITTS_BUFFER, LWTRANCHE_COMMITTS_SLRU};
 
 use varsup_seams as varsup;
-use guc_tables::vars;
-use types_guc::guc::{PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE};
+use ::guc_tables::vars;
+use ::types_guc::guc::{PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE};
 
 #[cfg(test)]
 mod tests;
@@ -68,7 +68,7 @@ pub const COMMIT_TS_ZEROPAGE: u8 = 0x00;
 pub const COMMIT_TS_TRUNCATE: u8 = 0x10;
 
 /// `RM_COMMIT_TS_ID` — the CommitTs resource manager (rmgrlist.h entry 18).
-pub const RM_COMMIT_TS_ID: types_core::RmgrId = 18;
+pub const RM_COMMIT_TS_ID: ::types_core::RmgrId = 18;
 
 /// `CommitTsLock` — fixed individual LWLock at offset 39 in `MainLWLockArray`
 /// (`PG_LWLOCK(39, CommitTs)`, lwlocklist.h).
@@ -185,8 +185,8 @@ fn commit_ts_lock_release() -> PgResult<()> {
     LWLockRelease(commit_ts_lock())
 }
 
-fn commit_ts_lock() -> &'static types_storage::LWLock {
-    lwlock::main_lock_ref(COMMIT_TS_LOCK_OFFSET)
+fn commit_ts_lock() -> &'static ::types_storage::LWLock {
+    ::lwlock::main_lock_ref(COMMIT_TS_LOCK_OFFSET)
 }
 
 // ===========================================================================
@@ -900,11 +900,11 @@ pub fn commit_ts_redo(state: &mut CommitTsState, info: u8, data: &[u8]) -> PgRes
 /// Returns the fsync `(result, path, errno)` triple.
 pub fn committssyncfiletag(
     state: &CommitTsState,
-    ftag: &types_storage::sync::FileTag,
-) -> PgResult<types_storage::sync::FileTagOpResult> {
+    ftag: &::types_storage::sync::FileTag,
+) -> PgResult<::types_storage::sync::FileTagOpResult> {
     let (result, path) = SlruSyncFileTag(&state.CommitTsCtl, ftag)?;
     let errno = current_errno();
-    Ok(types_storage::sync::FileTagOpResult {
+    Ok(::types_storage::sync::FileTagOpResult {
         result,
         path,
         errno,
@@ -952,7 +952,7 @@ pub fn init_seams() {
     // guc-tables references this slot by C symbol). The C
     // `check_commit_ts_buffers` records its detail via `GUC_check_errdetail`
     // and returns false on a bad value.
-    guc_tables::hooks::check_commit_ts_buffers.install(
+    ::guc_tables::hooks::check_commit_ts_buffers.install(
         |newval, _extra, _source| {
             let (ok, detail) = check_commit_ts_buffers(*newval);
             if let Some(detail) = detail {

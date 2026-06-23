@@ -26,11 +26,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use mcx::{PgBox, PgString};
-use types_core::primitive::{Oid, ProcNumber};
-use types_error::PgResult;
-use types_storage::lock::{LOCKMODE, NoLock};
-use types_storage::RelFileLocator;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_core::primitive::{Oid, ProcNumber};
+use ::types_error::PgResult;
+use ::types_storage::lock::{LOCKMODE, NoLock};
+use ::types_storage::RelFileLocator;
+use ::types_tuple::heaptuple::TupleDescData;
 
 /// `FormData_pg_class` (`catalog/pg_class.h`), trimmed to the fields ports
 /// consume (the `rd_rel` payload of a relcache entry).
@@ -89,10 +89,10 @@ pub struct FormData_pg_class<'mcx> {
     /// `TransactionId relfrozenxid` — all xids before this are frozen in this
     /// table (`InvalidTransactionId` for relations without storage). Read by
     /// `heap_abort_speculative` to pick a safe prune xid.
-    pub relfrozenxid: types_core::primitive::TransactionId,
+    pub relfrozenxid: ::types_core::primitive::TransactionId,
     /// `MultiXactId relminmxid` — all multixacts before this are frozen in this
     /// table. Read by `rewrite_heap_tuple`'s `heap_freeze_tuple` cutoff.
-    pub relminmxid: types_core::primitive::MultiXactId,
+    pub relminmxid: ::types_core::primitive::MultiXactId,
 }
 
 /// `FormData_pg_index` (`catalog/pg_index.h`), trimmed to the fields ports
@@ -137,7 +137,7 @@ pub struct FormData_pg_index {
     /// `int2vector indkey.values[0]` — the table column number of the index's
     /// first key column (`InvalidAttrNumber` for an expression key). `pg_nextoid`
     /// reads only this first entry.
-    pub indkey0: types_core::primitive::AttrNumber,
+    pub indkey0: ::types_core::primitive::AttrNumber,
     /// `int2vector indkey.values[0..indnatts]` — the table column number of
     /// each index column (`InvalidAttrNumber` for an expression key). The full
     /// vector, length `indnatts`. `SetIndexStorageProperties` (commands/
@@ -146,7 +146,7 @@ pub struct FormData_pg_index {
     /// `ATExecSetStatistics` reads `indkey.values[attnum-1]` to reject a
     /// non-expression index column. `indkey0` is retained as the existing
     /// `pg_nextoid` fast-path read; this is the additive widening.
-    pub indkey: std::vec::Vec<types_core::primitive::AttrNumber>,
+    pub indkey: std::vec::Vec<::types_core::primitive::AttrNumber>,
 }
 
 /// `StdRdOptions` (`utils/rel.h`): the parsed heap reloptions the reloptions
@@ -185,19 +185,19 @@ pub struct RelationData<'mcx> {
     /// `Oid *rd_opcintype` — the input type OID of each index column's
     /// operator class (`RelationGetIndexRawAttOptions` cache). Empty for a
     /// non-index relation. Indexed by attribute number (0-based).
-    pub rd_opcintype: mcx::PgVec<'mcx, Oid>,
+    pub rd_opcintype: ::mcx::PgVec<'mcx, Oid>,
     /// `Oid *rd_opfamily` — the operator family OID of each index column's
     /// operator class. Empty for a non-index relation. Indexed by attribute
     /// number (0-based). Consumed by nbtree's `_bt_mkscankey` /
     /// `_bt_preprocess_keys` for opclass member/proc lookups.
-    pub rd_opfamily: mcx::PgVec<'mcx, Oid>,
+    pub rd_opfamily: ::mcx::PgVec<'mcx, Oid>,
     /// `int16 *rd_indoption` — the per-column index option flags
     /// (`INDOPTION_DESC` / `INDOPTION_NULLS_FIRST`). Empty for a non-index
     /// relation. Indexed by attribute number (0-based).
-    pub rd_indoption: mcx::PgVec<'mcx, i16>,
+    pub rd_indoption: ::mcx::PgVec<'mcx, i16>,
     /// `Oid *rd_indcollation` — the per-column collation OID used by the index.
     /// Empty for a non-index relation. Indexed by attribute number (0-based).
-    pub rd_indcollation: mcx::PgVec<'mcx, Oid>,
+    pub rd_indcollation: ::mcx::PgVec<'mcx, Oid>,
     /// `TriggerDesc *rd_trigdesc` (`utils/rel.h`) — the relation's triggers, or
     /// `None` (the C NULL) when the relation has none (`relhastriggers` false).
     /// Built by `RelationBuildTriggers` (commands/trigger.c, F1); until that
@@ -228,17 +228,17 @@ impl<'mcx> RelationData<'mcx> {
         if idx >= self.rd_att.attrs.len() || idx >= self.rd_opcintype.len() {
             return false;
         }
-        self.rd_att.attr(idx).atttypid == types_tuple::heaptuple::CSTRINGOID
-            && self.rd_opcintype[idx] == types_tuple::heaptuple::NAMEOID
+        self.rd_att.attr(idx).atttypid == ::types_tuple::heaptuple::CSTRINGOID
+            && self.rd_opcintype[idx] == ::types_tuple::heaptuple::NAMEOID
     }
 
     /// `RelationGetDescr(relation)` deep-copied into `mcx` — the table slot's
     /// descriptor for an index-only scan's recheck slot.
     pub fn rd_att_clone_in<'b>(
         &self,
-        mcx: mcx::Mcx<'b>,
+        mcx: ::mcx::Mcx<'b>,
     ) -> PgResult<PgBox<'b, TupleDescData<'b>>> {
-        mcx::alloc_in(mcx, self.rd_att.clone_in(mcx)?)
+        ::mcx::alloc_in(mcx, self.rd_att.clone_in(mcx)?)
     }
 
     /// `RelationGetRelationName(relation)` (utils/rel.h):
@@ -272,14 +272,14 @@ impl<'mcx> RelationData<'mcx> {
     /// `RelationUsesLocalBuffers(relation)` (utils/rel.h):
     /// `relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP`.
     pub fn uses_local_buffers(&self) -> bool {
-        self.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_TEMP
+        self.rd_rel.relpersistence == ::types_tuple::access::RELPERSISTENCE_TEMP
     }
 
     /// `RelationIsMapped(relation)` (utils/rel.h): true if the relation uses
     /// the relfilenumber map —
     /// `RELKIND_HAS_STORAGE(relkind) && relfilenode == InvalidRelFileNumber`.
     pub fn is_mapped(&self) -> bool {
-        use types_tuple::access::{
+        use ::types_tuple::access::{
             RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
         };
         let relkind = self.rd_rel.relkind;
@@ -288,7 +288,7 @@ impl<'mcx> RelationData<'mcx> {
             || relkind == RELKIND_SEQUENCE
             || relkind == RELKIND_TOASTVALUE
             || relkind == RELKIND_MATVIEW;
-        has_storage && self.rd_rel.relfilenode == types_core::primitive::InvalidRelFileNumber
+        has_storage && self.rd_rel.relfilenode == ::types_core::primitive::InvalidRelFileNumber
     }
 }
 
@@ -552,7 +552,7 @@ impl Drop for Relation<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     /// A standalone `'static` entry-cell stand-in for the cell-semantics tests.
     /// (`types-relcache-entry` is not a dep here — and cannot be, the cycle this
@@ -565,15 +565,15 @@ mod tests {
         name: String,
     }
 
-    fn trimmed<'mcx>(mcx: mcx::Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
+    fn trimmed<'mcx>(mcx: ::mcx::Mcx<'mcx>, oid: Oid) -> RelationData<'mcx> {
         let td = TupleDescData {
             natts: 0,
             tdtypeid: 0,
             tdtypmod: -1,
             tdrefcount: 1,
             constr: None,
-            compact_attrs: mcx::PgVec::new_in(mcx),
-            attrs: mcx::PgVec::new_in(mcx),
+            compact_attrs: ::mcx::PgVec::new_in(mcx),
+            attrs: ::mcx::PgVec::new_in(mcx),
         };
         RelationData {
             rd_id: oid,
@@ -582,7 +582,7 @@ mod tests {
                 dbOid: 0,
                 relNumber: 0,
             },
-            rd_backend: types_core::primitive::INVALID_PROC_NUMBER,
+            rd_backend: ::types_core::primitive::INVALID_PROC_NUMBER,
             rd_rel: FormData_pg_class {
                 relname: PgString::from_str_in("t", mcx).unwrap(),
                 relnamespace: 0,
@@ -607,13 +607,13 @@ mod tests {
                 relfrozenxid: 0,
                 relminmxid: 0,
             },
-            rd_att: mcx::alloc_in(mcx, td).unwrap(),
+            rd_att: ::mcx::alloc_in(mcx, td).unwrap(),
             rd_options: None,
             rd_index: None,
-            rd_opcintype: mcx::PgVec::new_in(mcx),
-            rd_opfamily: mcx::PgVec::new_in(mcx),
-            rd_indoption: mcx::PgVec::new_in(mcx),
-            rd_indcollation: mcx::PgVec::new_in(mcx),
+            rd_opcintype: ::mcx::PgVec::new_in(mcx),
+            rd_opfamily: ::mcx::PgVec::new_in(mcx),
+            rd_indoption: ::mcx::PgVec::new_in(mcx),
+            rd_indcollation: ::mcx::PgVec::new_in(mcx),
             rd_trigdesc: None,
             pgstat_enabled: false,
         }

@@ -15,11 +15,11 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid};
-use datum::Datum;
+use ::datum::Datum;
 // Canonical unified value (the Datum-unification keystone) for the value-form
 // `get_attstatsslot_value_datums` path (by-reference stats elements by value).
 use types_tuple::heaptuple::Datum as DatumV;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_selfuncs::{
     AttStatsSlot, StatsTuple, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES,
 };
@@ -35,7 +35,7 @@ const FLOAT4_TYPLEN: i16 = 4;
 const FLOAT4_TYPALIGN: u8 = b'i';
 use lsyscache_seams as own_seams;
 use syscache_seams as syscache_seams;
-use syscache_seams::STATISTIC_NUM_SLOTS;
+use ::syscache_seams::STATISTIC_NUM_SLOTS;
 
 /// `STATISTIC_KIND_MCV` (pg_statistic.h) — most-common-values slot kind.
 /// C: `#define STATISTIC_KIND_MCV 1`.
@@ -133,7 +133,7 @@ pub fn get_attstatsslot<'mcx>(
             type_form.typbyval,
             type_form.typalign as core::ffi::c_char,
         )?;
-        let mut out: PgVec<'mcx, Datum> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+        let mut out: PgVec<'mcx, Datum> = ::mcx::vec_with_capacity_in(mcx, elems.len())?;
         for (datum, _isnull) in elems.iter().copied() {
             out.push(datum);
         }
@@ -168,7 +168,7 @@ pub fn get_attstatsslot<'mcx>(
             true,
             FLOAT4_TYPALIGN as core::ffi::c_char,
         )?;
-        let mut out: PgVec<'mcx, f32> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+        let mut out: PgVec<'mcx, f32> = ::mcx::vec_with_capacity_in(mcx, elems.len())?;
         for (datum, _isnull) in elems.iter() {
             out.push(datum.as_f32());
         }
@@ -238,7 +238,7 @@ pub fn get_attstatsslot_value_datums<'mcx>(
         type_form.typbyval,
         type_form.typalign as core::ffi::c_char,
     )?;
-    let mut out: PgVec<'mcx, DatumV<'mcx>> = mcx::vec_with_capacity_in(mcx, elems.len())?;
+    let mut out: PgVec<'mcx, DatumV<'mcx>> = ::mcx::vec_with_capacity_in(mcx, elems.len())?;
     // NULLs not expected in a stavalues array (C ignores the per-element isnull).
     for (datum, _isnull) in elems.iter() {
         out.push(datum.clone_in(mcx)?);

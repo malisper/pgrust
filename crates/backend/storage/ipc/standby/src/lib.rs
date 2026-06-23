@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use utils_error::{elog, ereport};
 use mcx::{Mcx, PgString, PgVec};
-use types_core::xact::{
+use ::types_core::xact::{
     FullTransactionId, InvalidTransactionId, MaxTransactionId, TransactionIdIsNormal,
     TransactionIdIsValid,
 };
@@ -821,7 +821,7 @@ pub fn ResolveRecoveryConflictWithBufferPin() -> PgResult<()> {
 /// `(wait_start, waiting, logged_recovery_conflict)`. Installed as the bufmgr
 /// `lock_buffer_for_cleanup_recovery_wait_park` outward seam.
 fn lock_buffer_for_cleanup_recovery_wait_park(
-    buffer: types_storage::storage::Buffer,
+    buffer: ::types_storage::storage::Buffer,
     mut wait_start: TimestampTz,
     mut waiting: bool,
     mut logged_recovery_conflict: bool,
@@ -841,7 +841,7 @@ fn lock_buffer_for_cleanup_recovery_wait_park(
     if wait_start != 0 && !logged_recovery_conflict {
         let now = ts::get_current_timestamp::call();
         if ts::timestamp_difference_exceeds::call(wait_start, now, proc::deadlock_timeout::call()) {
-            let ctx = mcx::MemoryContext::new("LockBufferForCleanup");
+            let ctx = ::mcx::MemoryContext::new("LockBufferForCleanup");
             LogRecoveryConflict(
                 ctx.mcx(),
                 ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_BUFFERPIN,
@@ -876,13 +876,13 @@ fn lock_buffer_for_cleanup_recovery_wait_park(
 /// reachable after the park leg set `logged_recovery_conflict`). Installed as
 /// the bufmgr `lock_buffer_for_cleanup_recovery_wait` outward seam.
 fn lock_buffer_for_cleanup_recovery_wait(
-    _buffer: types_storage::storage::Buffer,
+    _buffer: ::types_storage::storage::Buffer,
     wait_start: TimestampTz,
     _waiting: bool,
     _logged_recovery_conflict: bool,
     _resolved: bool,
 ) -> PgResult<()> {
-    let ctx = mcx::MemoryContext::new("LockBufferForCleanup");
+    let ctx = ::mcx::MemoryContext::new("LockBufferForCleanup");
     LogRecoveryConflict(
         ctx.mcx(),
         ProcSignalReason::PROCSIG_RECOVERY_CONFLICT_BUFFERPIN,
@@ -1127,7 +1127,7 @@ pub fn StandbyReleaseOldLocks(oldxid: TransactionId) -> PgResult<()> {
 /// Parse an `xl_standby_locks` record body.
 fn parse_xl_standby_locks<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<XlStandbyLocks<'mcx>> {
     let nlocks = i32::from_ne_bytes(slice4(data, 0)?) as usize;
-    let mut locks = mcx::vec_with_capacity_in(mcx, nlocks)?;
+    let mut locks = ::mcx::vec_with_capacity_in(mcx, nlocks)?;
     for i in 0..nlocks {
         let off = OFFSETOF_XL_STANDBY_LOCKS_LOCKS + i * SIZEOF_XL_STANDBY_LOCK;
         locks.push(xl_standby_lock {
@@ -1152,7 +1152,7 @@ fn parse_xl_running_xacts<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<XlRunni
     let latestCompletedXid = u32::from_ne_bytes(slice4(data, 20)?);
 
     let nxids = (xcnt + subxcnt) as usize;
-    let mut xids = mcx::vec_with_capacity_in(mcx, nxids)?;
+    let mut xids = ::mcx::vec_with_capacity_in(mcx, nxids)?;
     for i in 0..nxids {
         xids.push(u32::from_ne_bytes(slice4(
             data,
@@ -1180,7 +1180,7 @@ fn parse_xl_invalidations<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<XlInval
         != 0;
     let nmsgs = i32::from_ne_bytes(slice4(data, 12)?) as usize;
 
-    let mut msgs = mcx::vec_with_capacity_in(mcx, nmsgs)?;
+    let mut msgs = ::mcx::vec_with_capacity_in(mcx, nmsgs)?;
     for i in 0..nmsgs {
         let off = MIN_SIZE_OF_INVALIDATIONS + i * SHARED_INVALIDATION_MESSAGE_SIZE;
         let raw: [u8; SHARED_INVALIDATION_MESSAGE_SIZE] = data
@@ -1215,8 +1215,8 @@ fn slice4(data: &[u8], off: usize) -> PgResult<[u8; 4]> {
 /// Adapter installed into the rmgr-table `standby_redo` seam: marshals the
 /// dispatcher's `XLogReaderState` into [`RedoRecord`] and parses the record
 /// body in a per-call context (the C redo loop's per-record context).
-fn standby_redo_seam(state: &mut wal::rmgr::XLogReaderState<'_>) -> PgResult<()> {
-    let ctx = mcx::MemoryContext::new("standby_redo");
+fn standby_redo_seam(state: &mut ::wal::rmgr::XLogReaderState<'_>) -> PgResult<()> {
+    let ctx = ::mcx::MemoryContext::new("standby_redo");
     let rec = state
         .record
         .as_ref()
@@ -1305,7 +1305,7 @@ pub fn standby_redo(mcx: Mcx<'_>, record: RedoRecord<'_>) -> PgResult<()> {
 /// surviving allocation in it) is freed when this wrapper returns, mirroring the
 /// C cleanup.
 fn log_standby_snapshot_seam() -> PgResult<XLogRecPtr> {
-    let ctx = mcx::MemoryContext::new("LogStandbySnapshot");
+    let ctx = ::mcx::MemoryContext::new("LogStandbySnapshot");
     LogStandbySnapshot(ctx.mcx())
 }
 
@@ -1354,7 +1354,7 @@ fn LogCurrentRunningXacts(
 
     // xl_running_xacts up to MinSizeOfXactRunningXacts (the flexible xids
     // array follows).
-    let mut header: PgVec<u8> = mcx::vec_with_capacity_in(mcx, MIN_SIZE_OF_XACT_RUNNING_XACTS)?;
+    let mut header: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, MIN_SIZE_OF_XACT_RUNNING_XACTS)?;
     header.extend_from_slice(&CurrRunningXacts.xcnt.to_ne_bytes());
     header.extend_from_slice(&CurrRunningXacts.subxcnt.to_ne_bytes());
     header.push(subxid_overflow as u8);
@@ -1366,7 +1366,7 @@ fn LogCurrentRunningXacts(
     // array of TransactionIds
     let recptr = if CurrRunningXacts.xcnt > 0 {
         let nxids = (CurrRunningXacts.xcnt + CurrRunningXacts.subxcnt) as usize;
-        let mut xids: PgVec<u8> = mcx::vec_with_capacity_in(mcx, nxids * 4)?;
+        let mut xids: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, nxids * 4)?;
         for &xid in CurrRunningXacts.xids.iter().take(nxids) {
             xids.extend_from_slice(&xid.to_ne_bytes());
         }
@@ -1430,7 +1430,7 @@ fn LogAccessExclusiveLocks(mcx: Mcx<'_>, locks: &[xl_standby_lock]) -> PgResult<
     // xl_standby_locks up to offsetof(xl_standby_locks, locks): the nlocks.
     let header = (locks.len() as i32).to_ne_bytes();
 
-    let mut body: PgVec<u8> = mcx::vec_with_capacity_in(mcx, locks.len() * SIZEOF_XL_STANDBY_LOCK)?;
+    let mut body: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, locks.len() * SIZEOF_XL_STANDBY_LOCK)?;
     for l in locks {
         body.extend_from_slice(&l.xid.to_ne_bytes());
         body.extend_from_slice(&l.dbOid.to_ne_bytes());
@@ -1481,7 +1481,7 @@ pub fn LogStandbyInvalidations(
 ) -> PgResult<()> {
     // xl_invalidations up to MinSizeOfInvalidations: dbId, tsId,
     // relcacheInitFileInval (+3 bytes padding), nmsgs.
-    let mut header: PgVec<u8> = mcx::vec_with_capacity_in(mcx, MIN_SIZE_OF_INVALIDATIONS)?;
+    let mut header: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, MIN_SIZE_OF_INVALIDATIONS)?;
     header.extend_from_slice(&globals::my_database_id::call().to_ne_bytes());
     header.extend_from_slice(&globals::my_database_table_space::call().to_ne_bytes());
     header.push(relcacheInitFileInval as u8);
@@ -1489,7 +1489,7 @@ pub fn LogStandbyInvalidations(
     header.extend_from_slice(&(msgs.len() as i32).to_ne_bytes());
 
     let mut body: PgVec<u8> =
-        mcx::vec_with_capacity_in(mcx, msgs.len() * SHARED_INVALIDATION_MESSAGE_SIZE)?;
+        ::mcx::vec_with_capacity_in(mcx, msgs.len() * SHARED_INVALIDATION_MESSAGE_SIZE)?;
     for msg in msgs {
         body.extend_from_slice(&msg.to_wire_bytes());
     }

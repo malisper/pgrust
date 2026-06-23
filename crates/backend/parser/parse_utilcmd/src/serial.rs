@@ -16,10 +16,10 @@
 
 use mcx::{Mcx, PgString, PgVec};
 
-use utils_error::ereport;
-use types_core::primitive::InvalidOid;
+use ::utils_error::ereport;
+use ::types_core::primitive::InvalidOid;
 use types_core::{Oid, OidIsValid};
-use types_error::pg_error::PgError;
+use ::types_error::pg_error::PgError;
 use types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERROR};
 
 use ::nodes::ddlnodes::{AlterSeqStmt, CreateSeqStmt, DefElem, DEFELEM_UNSPEC};
@@ -27,13 +27,13 @@ use ::nodes::nodes::Node;
 use ::nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
 use ::nodes::value::StringNode;
 
-use common_relation::relation_open;
+use ::common_relation::relation_open;
 use catalog_namespace::{
     makeRangeVarFromNameList, RangeVarAdjustRelationPersistence, RangeVarGetCreationNamespace,
 };
-use indexcmds::ChooseRelationName;
-use lsyscache::namespace_range_index_pubsub::get_namespace_name;
-use types_storage::lock::NoLock;
+use ::indexcmds::ChooseRelationName;
+use ::lsyscache::namespace_range_index_pubsub::get_namespace_name;
+use ::types_storage::lock::NoLock;
 
 use crate::core::{CreateStmtContext, NodePtr};
 use crate::errpos::parser_errposition;
@@ -70,7 +70,7 @@ fn make_range_var<'mcx>(
 
 /// `makeString(str)` as a boxed `Node`.
 fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         Node::mk_string(
             mcx,
@@ -83,7 +83,7 @@ fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
 
 /// `makeTypeNameFromOid(typeOid, typmod)` (`nodes/makefuncs.c`).
 fn make_type_name_node<'mcx>(mcx: Mcx<'mcx>, type_oid: Oid, typmod: i32) -> PgResult<NodePtr<'mcx>> {
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         Node::mk_type_name(
             mcx,
@@ -249,24 +249,24 @@ pub fn generateSerialExtraStmts<'mcx>(
     if OidIsValid(seqtypid) {
         let as_arg = make_type_name_node(mcx, seqtypid, -1)?;
         let as_def = make_def_elem(mcx, "as", Some(as_arg), -1)?;
-        create_options.push(mcx::alloc_in(mcx, Node::mk_def_elem(mcx, as_def)?)?);
+        create_options.push(::mcx::alloc_in(mcx, Node::mk_def_elem(mcx, as_def)?)?);
     }
     for o in kept_options.into_iter() {
         create_options.push(o);
     }
 
     let seqstmt = CreateSeqStmt {
-        sequence: Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, seq_rangevar)?)?),
+        sequence: Some(::mcx::alloc_in(mcx, Node::mk_range_var(mcx, seq_rangevar)?)?),
         options: create_options,
         ownerId: owner_id,
         for_identity,
         if_not_exists: false,
     };
     cxt.blist
-        .push(mcx::alloc_in(mcx, Node::mk_create_seq_stmt(mcx, seqstmt)?)?);
+        .push(::mcx::alloc_in(mcx, Node::mk_create_seq_stmt(mcx, seqstmt)?)?);
 
     // Store the identity sequence name on the column.
-    column.identitySequence = Some(mcx::alloc_in(
+    column.identitySequence = Some(::mcx::alloc_in(
         mcx,
         make_range_var(mcx, Some(snamespace.as_str()), sname.as_str(), -1)?,
     )?);
@@ -277,18 +277,18 @@ pub fn generateSerialExtraStmts<'mcx>(
     attnamelist.push(make_string_node(mcx, snamespace.as_str())?);
     attnamelist.push(make_string_node(mcx, &relname)?);
     attnamelist.push(make_string_node(mcx, &colname)?);
-    let attnamelist_node = mcx::alloc_in(mcx, Node::mk_list(mcx, attnamelist)?)?;
+    let attnamelist_node = ::mcx::alloc_in(mcx, Node::mk_list(mcx, attnamelist)?)?;
     let owned_by = make_def_elem(mcx, "owned_by", Some(attnamelist_node), -1)?;
     let mut alt_options: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-    alt_options.push(mcx::alloc_in(mcx, Node::mk_def_elem(mcx, owned_by)?)?);
+    alt_options.push(::mcx::alloc_in(mcx, Node::mk_def_elem(mcx, owned_by)?)?);
 
     let altseqstmt = AlterSeqStmt {
-        sequence: Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, alt_rangevar)?)?),
+        sequence: Some(::mcx::alloc_in(mcx, Node::mk_range_var(mcx, alt_rangevar)?)?),
         options: alt_options,
         for_identity,
         missing_ok: false,
     };
-    let altseq_node = mcx::alloc_in(mcx, Node::mk_alter_seq_stmt(mcx, altseqstmt)?)?;
+    let altseq_node = ::mcx::alloc_in(mcx, Node::mk_alter_seq_stmt(mcx, altseqstmt)?)?;
 
     if col_exists {
         cxt.blist.push(altseq_node);

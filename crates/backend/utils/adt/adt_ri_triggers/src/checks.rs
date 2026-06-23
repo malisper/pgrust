@@ -8,7 +8,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 // Canonical value type (Datum unification). The fmgr `function_call*` seams
 // still carry the bare-word shim (`datum::Datum`), so a by-value scalar
 // crosses that ABI edge via `byval_word()` / `Datum::ByVal`.

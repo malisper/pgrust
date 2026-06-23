@@ -22,15 +22,15 @@ use instrument as instrument;
 use lwlock_seams::{
     lwlock_acquire, lwlock_conditional_acquire, lwlock_initialize,
 };
-use activity_pgstat::kind_info::KindInfoBuilder;
-use activity_pgstat::registry;
-use init_small_seams::my_proc_number;
-use instrument::WalUsageAccumDiff;
-use types_core::instrument::WalUsage;
-use types_core::TimestampTz;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::PGSTAT_KIND_WAL;
-use types_pgstat::pgstat_internal::{PgStat_KindInfo, PgStat_ShmemControl, PgStat_Snapshot};
+use ::activity_pgstat::kind_info::KindInfoBuilder;
+use ::activity_pgstat::registry;
+use ::init_small_seams::my_proc_number;
+use ::instrument::WalUsageAccumDiff;
+use ::types_core::instrument::WalUsage;
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::PGSTAT_KIND_WAL;
+use ::types_pgstat::pgstat_internal::{PgStat_KindInfo, PgStat_ShmemControl, PgStat_Snapshot};
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
 thread_local! {
@@ -81,9 +81,9 @@ pub fn pgstat_report_wal(force: bool) -> PgResult<()> {
 /// Port of `PgStat_WalStats *pgstat_fetch_stat_wal(void)`. In C this returns a
 /// pointer into the snapshot; here it returns a copy of the snapshot's WAL
 /// stats.
-pub fn pgstat_fetch_stat_wal() -> PgResult<types_pgstat::activity_pgstat::PgStat_WalStats> {
+pub fn pgstat_fetch_stat_wal() -> PgResult<::types_pgstat::activity_pgstat::PgStat_WalStats> {
     pgstat_seams::snapshot_fixed::call(PGSTAT_KIND_WAL)?;
-    Ok(activity_pgstat::local::with_local(|l| l.snapshot.wal))
+    Ok(::activity_pgstat::local::with_local(|l| l.snapshot.wal))
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +114,7 @@ pub fn pgstat_wal_flush_cb(nowait: bool) -> PgResult<bool> {
     let mut wal_usage_diff = WalUsage::default();
     WalUsageAccumDiff(&mut wal_usage_diff, &cur, &prev);
 
-    activity_pgstat::local::with_local(|l| {
+    ::activity_pgstat::local::with_local(|l| {
         let ctl: &mut PgStat_ShmemControl = l
             .shmem
             .as_mut()
@@ -171,7 +171,7 @@ pub fn pgstat_wal_reset_all_cb(ctl: &mut PgStat_ShmemControl, ts: TimestampTz) -
     let stats_shmem = &mut ctl.wal;
     let guard = lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE, my_proc_number::call())?;
     // memset(&stats_shmem->stats, 0, ...); stats_shmem->stats.stat_reset_timestamp = ts;
-    stats_shmem.stats = types_pgstat::activity_pgstat::PgStat_WalStats::default();
+    stats_shmem.stats = ::types_pgstat::activity_pgstat::PgStat_WalStats::default();
     stats_shmem.stats.stat_reset_timestamp = ts;
     guard.release()
 }
@@ -210,7 +210,7 @@ fn wal_kind_info() -> PgStat_KindInfo {
         snapshot_ctl_off: 0,
         shared_ctl_off: 0,
         shared_data_off: 0,
-        shared_data_len: core::mem::size_of::<types_pgstat::activity_pgstat::PgStat_WalStats>()
+        shared_data_len: core::mem::size_of::<::types_pgstat::activity_pgstat::PgStat_WalStats>()
             as u32,
         pending_size: 0,
         name: "wal",
@@ -228,13 +228,13 @@ pub fn init_seams() {
             .flush_static_cb(pgstat_wal_flush_cb)
             // On-disk (de)serialization of the typed `PgStat_WalStats` field.
             .read_fixed_cb(|ctl, bytes| {
-                ctl.wal.stats = activity_pgstat::kind_info::pgstat_deserialize_pod::<
-                    types_pgstat::activity_pgstat::PgStat_WalStats,
+                ctl.wal.stats = ::activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                    ::types_pgstat::activity_pgstat::PgStat_WalStats,
                 >(bytes);
                 Ok(())
             })
             .write_fixed_cb(|snap| {
-                activity_pgstat::kind_info::pgstat_serialize_pod(&snap.wal)
+                ::activity_pgstat::kind_info::pgstat_serialize_pod(&snap.wal)
             }),
     );
 

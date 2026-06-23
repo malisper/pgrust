@@ -16,12 +16,12 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Oid};
-use types_core::fmgr::F_OIDEQ;
-use types_error::PgResult;
-use scankey::ScanKeyInit;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_error::PgResult;
+use ::scankey::ScanKeyInit;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::heaptuple::Datum;
 
 /* genbki catalog + index OIDs (catalog/pg_partitioned_table.h, indexing.h). */
@@ -63,7 +63,7 @@ pub fn RemovePartitionKeyByRelId<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<(
     let rel = table::table_open(
         mcx,
         PartitionedRelationId,
-        types_storage::lock::RowExclusiveLock,
+        ::types_storage::lock::RowExclusiveLock,
     )?;
 
     let mut key = [ScanKeyData::empty()];
@@ -86,9 +86,9 @@ pub fn RemovePartitionKeyByRelId<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<(
     let tuple = genam_seams::systable_getnext::call(mcx, scan.desc_mut())?;
     let Some(tuple) = tuple else {
         scan.end()?;
-        rel.close(types_storage::lock::RowExclusiveLock)?;
+        rel.close(::types_storage::lock::RowExclusiveLock)?;
         return utils_error::elog(
-            types_error::ERROR,
+            ::types_error::ERROR,
             &format!("cache lookup failed for partition key of relation {relid}"),
         );
     };
@@ -96,7 +96,7 @@ pub fn RemovePartitionKeyByRelId<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<(
     indexing_seams::catalog_tuple_delete::call(&rel, tuple.tuple.t_self)?;
 
     scan.end()?;
-    rel.close(types_storage::lock::RowExclusiveLock)
+    rel.close(::types_storage::lock::RowExclusiveLock)
 }
 
 /// `buildint2vector(int2s, n)` (utils/adt/int.c): the on-disk `int2vector`
@@ -110,7 +110,7 @@ fn buildint2vector<'mcx>(mcx: Mcx<'mcx>, int2s: &[i16]) -> PgResult<Datum<'mcx>>
     const HEADER: usize = 24; // offsetof(int2vector, values)
     let n = int2s.len();
     let total = HEADER + n * core::mem::size_of::<i16>();
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     let vl_len: u32 = (total as u32) << 2; // SET_VARSIZE
     buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
@@ -132,7 +132,7 @@ fn buildoidvector<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<Datum<'mcx>> {
     const HEADER: usize = 24; // offsetof(oidvector, values)
     let n = oids.len();
     let total = HEADER + n * core::mem::size_of::<Oid>();
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     let vl_len: u32 = (total as u32) << 2; // SET_VARSIZE
     buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
@@ -154,7 +154,7 @@ fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>>
     const VARHDRSZ: usize = 4;
     let payload = s.as_bytes();
     let total = VARHDRSZ + payload.len();
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     let vl_len: u32 = (total as u32) << 2; // SET_VARSIZE
     buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
@@ -181,13 +181,13 @@ pub fn StorePartitionKey<'mcx>(
     partopclass: &[Oid],
     partcollation: &[Oid],
 ) -> PgResult<()> {
-    use types_catalog::catalog_dependency::{
+    use ::types_catalog::catalog_dependency::{
         ObjectAddress, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     };
 
     debug_assert_eq!(
         rel.rd_rel.relkind,
-        types_tuple::access::RELKIND_PARTITIONED_TABLE
+        ::types_tuple::access::RELKIND_PARTITIONED_TABLE
     );
 
     let relid = rel.rd_id;
@@ -211,7 +211,7 @@ pub fn StorePartitionKey<'mcx>(
     let pg_partitioned_table = table::table_open(
         mcx,
         PartitionedRelationId,
-        types_storage::lock::RowExclusiveLock,
+        ::types_storage::lock::RowExclusiveLock,
     )?;
 
     let mut values: Vec<Datum> = vec![Datum::null(); Natts_pg_partitioned_table];
@@ -221,7 +221,7 @@ pub fn StorePartitionKey<'mcx>(
     values[Anum_pg_partitioned_table_partstrat as usize - 1] = Datum::from_char(strategy);
     values[Anum_pg_partitioned_table_partnatts as usize - 1] = Datum::from_i16(partnatts);
     values[Anum_pg_partitioned_table_partdefid as usize - 1] =
-        Datum::from_oid(types_core::primitive::InvalidOid);
+        Datum::from_oid(::types_core::primitive::InvalidOid);
     values[Anum_pg_partitioned_table_partattrs as usize - 1] = partattrs_vec;
     values[Anum_pg_partitioned_table_partclass as usize - 1] = partopclass_vec;
     values[Anum_pg_partitioned_table_partcollation as usize - 1] = partcollation_vec;
@@ -233,7 +233,7 @@ pub fn StorePartitionKey<'mcx>(
     let tupdesc = pg_partitioned_table.rd_att_clone_in(mcx)?;
     let mut tuple = heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
     indexing::keystone::CatalogTupleInsert(mcx, &pg_partitioned_table, &mut tuple)?;
-    pg_partitioned_table.close(types_storage::lock::RowExclusiveLock)?;
+    pg_partitioned_table.close(::types_storage::lock::RowExclusiveLock)?;
 
     /* Mark this relation as dependent on a few things as follows. */
     let myself = ObjectAddress {
@@ -254,7 +254,7 @@ pub fn StorePartitionKey<'mcx>(
         dependency::add_exact_object_address(&referenced, &mut addrs);
 
         /* The default collation is pinned, so don't bother recording it. */
-        if types_core::primitive::OidIsValid(partcollation[i])
+        if ::types_core::primitive::OidIsValid(partcollation[i])
             && partcollation[i] != DEFAULT_COLLATION_OID
         {
             let referenced = ObjectAddress {
@@ -339,7 +339,7 @@ pub fn StorePartitionBound<'mcx>(
     parent: &rel::Relation<'mcx>,
     bound: &nodes::ddlnodes::PartitionBoundSpec<'mcx>,
 ) -> PgResult<()> {
-    use types_storage::lock::RowExclusiveLock;
+    use ::types_storage::lock::RowExclusiveLock;
 
     // classRel = table_open(RelationRelationId, RowExclusiveLock);
     let class_rel = table::table_open(mcx, RelationRelationId, RowExclusiveLock)?;
@@ -366,7 +366,7 @@ pub fn StorePartitionBound<'mcx>(
         scan.end()?;
         class_rel.close(RowExclusiveLock)?;
         return utils_error::elog(
-            types_error::ERROR,
+            ::types_error::ERROR,
             &format!("cache lookup failed for relation {}", rel.rd_id),
         );
     };
@@ -431,7 +431,7 @@ pub fn StorePartitionBound<'mcx>(
         partdesc::RelationGetPartitionDesc(mcx, &parent.alias(), true)?;
     let default_part_oid =
         partdesc::get_default_oid_from_partdesc(Some(&partdesc));
-    if types_core::primitive::OidIsValid(default_part_oid) {
+    if ::types_core::primitive::OidIsValid(default_part_oid) {
         inval::cache_invalidate::CacheInvalidateRelcacheByRelid(default_part_oid)?;
     }
 
@@ -454,7 +454,7 @@ pub fn ClearPartitionBound<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &rel::Relation<'mcx>,
 ) -> PgResult<()> {
-    use types_storage::lock::RowExclusiveLock;
+    use ::types_storage::lock::RowExclusiveLock;
 
     // classRel = table_open(RelationRelationId, RowExclusiveLock);
     let class_rel = table::table_open(mcx, RelationRelationId, RowExclusiveLock)?;
@@ -481,7 +481,7 @@ pub fn ClearPartitionBound<'mcx>(
         scan.end()?;
         class_rel.close(RowExclusiveLock)?;
         return utils_error::elog(
-            types_error::ERROR,
+            ::types_error::ERROR,
             &format!("cache lookup failed for relation {}", rel.rd_id),
         );
     };

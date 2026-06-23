@@ -17,10 +17,10 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use seam_core::seam;
+use ::mcx::Mcx;
+use ::seam_core::seam;
 use ::nodes::nodes::Node;
-use types_tuple::heaptuple::TupleDesc;
+use ::types_tuple::heaptuple::TupleDesc;
 
 /* ===========================================================================
  * backend-state predicates the read-only / parallel / recovery / security
@@ -123,12 +123,12 @@ use ::nodes::parsestmt::{ParseState, ProcessUtilityContext};
 use ::nodes::portalcmds::ParamListInfo;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::parsenodes::ObjectType;
-use portal::QueryCompletion;
-use types_error::PgResult;
-use types_core::primitive::Oid;
-use types_core::init::BackendType;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_storage::lock::LOCKMODE;
+use ::portal::QueryCompletion;
+use ::types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_core::init::BackendType;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_storage::lock::LOCKMODE;
 use ::nodes::nodes::NodePtr;
 use ::nodes::ddlnodes::CreateStmt;
 use ::nodes::nodeindexscan::PlannedStmt;
@@ -664,7 +664,7 @@ seam!(
         mcx: Mcx<'mcx>,
         stmt: NodePtr<'mcx>,
         query_string: &str,
-    ) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>>
+    ) -> PgResult<::mcx::PgVec<'mcx, NodePtr<'mcx>>>
 );
 seam!(
     /// `transformIndexStmt(relid, stmt, queryString)` (parse_utilcmd.c) — parse
@@ -693,7 +693,7 @@ seam!(
         mcx: Mcx<'mcx>,
         heap_rv: NodePtr<'mcx>,
         like_clause: NodePtr<'mcx>,
-    ) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>>
+    ) -> PgResult<::mcx::PgVec<'mcx, NodePtr<'mcx>>>
 );
 
 /* ---- event-trigger fences (event_trigger.c — unported) ---- */
@@ -780,7 +780,7 @@ seam!(
     pub fn create_toast_for_relation<'mcx>(
         mcx: Mcx<'mcx>,
         relid: Oid,
-        options: &mcx::PgVec<'mcx, NodePtr<'mcx>>,
+        options: &::mcx::PgVec<'mcx, NodePtr<'mcx>>,
     ) -> PgResult<()>
 );
 seam!(

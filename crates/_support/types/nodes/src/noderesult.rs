@@ -6,7 +6,7 @@
 //! executor state.
 
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::execexpr::ExprState;
 use crate::execnodes::PlanStateData;
@@ -37,7 +37,7 @@ pub struct Result<'mcx> {
     pub plan: crate::nodeindexscan::Plan<'mcx>,
     /// `Node *resconstantqual` — the constant ("one-time") qualification, an
     /// implicitly-ANDed list of clauses (`None` = the C `NULL`).
-    pub resconstantqual: Option<mcx::PgVec<'mcx, Expr<'mcx>>>,
+    pub resconstantqual: Option<::mcx::PgVec<'mcx, Expr<'mcx>>>,
 }
 
 impl Result<'_> {
@@ -51,7 +51,7 @@ impl Result<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Result<'b>> {
         let resconstantqual = match &self.resconstantqual {
             Some(list) => {
-                let mut out = mcx::vec_with_capacity_in(mcx, list.len())?;
+                let mut out = ::mcx::vec_with_capacity_in(mcx, list.len())?;
                 for e in list.iter() {
                     // Deep-copy each qual `Expr` via `clone_in`, not the derived
                     // `Expr::clone()`: the one-time `resconstantqual` filter of a

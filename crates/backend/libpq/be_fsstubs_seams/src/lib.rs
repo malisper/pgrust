@@ -21,8 +21,8 @@
 //!     import/export file transfer are the server-file primitive. Until their
 //!     owners land, a call panics loudly.
 
-use types_core::SubTransactionId;
-use types_error::PgResult;
+use ::types_core::SubTransactionId;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `AtEOXact_LargeObject(isCommit)` — close large-object descriptors at

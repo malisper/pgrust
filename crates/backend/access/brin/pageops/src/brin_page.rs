@@ -7,9 +7,9 @@
 //! redo crate is re-pointed.
 
 use page::{PageInit, PageMut};
-use utils_error::PgResult;
-use types_core::primitive::{BlockNumber, BLCKSZ};
-use types_storage::bufpage::SizeOfPageHeaderData;
+use ::utils_error::PgResult;
+use ::types_core::primitive::{BlockNumber, BLCKSZ};
+use ::types_storage::bufpage::SizeOfPageHeaderData;
 
 // ===========================================================================
 // brin_page.h constants.
@@ -215,7 +215,7 @@ pub fn brin_metapage_init(
 // ===========================================================================
 
 /// `PageSetLSN(page, recptr)` against the page bytes.
-pub fn page_set_lsn(page: &mut [u8], recptr: types_core::XLogRecPtr) -> PgResult<()> {
+pub fn page_set_lsn(page: &mut [u8], recptr: ::types_core::XLogRecPtr) -> PgResult<()> {
     let mut pmut = PageMut::new(page)?;
     ::page::PageSetLSN(&mut pmut, recptr);
     Ok(())

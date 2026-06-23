@@ -12,14 +12,14 @@
 //! (the F3+ GiST insert/vacuum lanes); until then a call panics loudly
 //! (mirror-PG-and-panic). The serial *scan* path never invokes them.
 
-use mcx::Mcx;
-use types_error::PgResult;
-use rel::Relation;
-use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
     /// `gistbuild(heap, index, indexInfo)` (gistbuild.c): the GiST AM's

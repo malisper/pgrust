@@ -86,10 +86,10 @@ pub struct VacDeadItemsInfo {
 }
 
 /// `IndexBulkDeleteResult` (`access/genam.h`) — per-index vacuum statistics.
-/// Canonically defined in `types_tableam::genam` (the `access/genam.h` home);
+/// Canonically defined in `::types_tableam::genam` (the `access/genam.h` home);
 /// re-exported here so existing
 /// `types_vacuum::vacuumparallel::IndexBulkDeleteResult` paths keep working.
-pub use types_tableam::genam::IndexBulkDeleteResult;
+pub use ::types_tableam::genam::IndexBulkDeleteResult;
 
 /// `IndexVacuumInfo` (`access/genam.h`) — the per-call info struct handed to
 /// `ambulkdelete` / `amvacuumcleanup`.

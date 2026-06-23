@@ -27,9 +27,9 @@
 #![allow(clippy::result_large_err)]
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
-use types_tuple::heaptuple::ItemPointerData;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_catalog::catalog::{
+use ::types_tuple::heaptuple::ItemPointerData;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_catalog::catalog::{
     AUTH_ID_RELATION_ID, AUTH_MEM_RELATION_ID, COLLATION_RELATION_ID, CONVERSION_RELATION_ID,
     DATABASE_RELATION_ID, DEFAULTTABLESPACE_OID, DEFAULT_ACL_RELATION_ID, EVENT_TRIGGER_RELATION_ID,
     EXTENSION_RELATION_ID, FOREIGN_DATA_WRAPPER_RELATION_ID, FOREIGN_SERVER_RELATION_ID,
@@ -39,8 +39,8 @@ use types_catalog::catalog::{
     SUBSCRIPTION_RELATION_ID, TABLE_SPACE_RELATION_ID, TS_CONFIG_RELATION_ID,
     TS_DICTIONARY_RELATION_ID, TYPE_RELATION_ID, USER_MAPPING_RELATION_ID,
 };
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::catalog_shdepend::{
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::catalog_shdepend::{
     Anum_pg_shdepend_classid, Anum_pg_shdepend_dbid, Anum_pg_shdepend_deptype,
     Anum_pg_shdepend_objid, Anum_pg_shdepend_objsubid, Anum_pg_shdepend_refclassid,
     Anum_pg_shdepend_refobjid, FormData_pg_shdepend, Natts_pg_shdepend,
@@ -49,8 +49,8 @@ use types_catalog::catalog_shdepend::{
     SHARED_DEPENDENCY_OWNER, SHARED_DEPENDENCY_POLICY, SHARED_DEPENDENCY_TABLESPACE,
     SHARED_DEPEND_RELATION_ID,
 };
-use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 // Migrated onto the canonical `Datum<'mcx>` enum. The bare-word newtype
 // survives only as `ScalarWord` at the external `ScanKeyData.sk_argument` ABI
 // edge (types-scan's `sk_argument` is still a bare word; the scankey crate is
@@ -61,11 +61,11 @@ use types_error::{
 };
 use ::nodes::parsenodes::DropBehavior;
 use rel::{Relation, RelationData};
-use types_storage::lock::{AccessExclusiveLock, AccessShareLock, RowExclusiveLock, LOCKMODE};
-use types_tuple::heaptuple::Datum;
+use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, RowExclusiveLock, LOCKMODE};
+use ::types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
 use transam_xact_seams as xact_seams;
@@ -1762,9 +1762,9 @@ pub fn init_seams() {
     // detail_log)) when the role still has dependents, else None.
     user_seams::shdep_lock_and_check_object::set(shdepLockAndCheckObject);
     user_seams::check_shared_dependencies::set(|roleid| {
-        let ctx = mcx::MemoryContext::new("checkSharedDependencies");
+        let ctx = ::mcx::MemoryContext::new("checkSharedDependencies");
         let (has_deps, detail, detail_log) =
-            checkSharedDependencies(ctx.mcx(), types_core::AUTH_ID_RELATION_ID, roleid)?;
+            checkSharedDependencies(ctx.mcx(), ::types_core::AUTH_ID_RELATION_ID, roleid)?;
         if has_deps {
             Ok(Some((
                 detail.map(|s| s.to_string()).unwrap_or_default(),

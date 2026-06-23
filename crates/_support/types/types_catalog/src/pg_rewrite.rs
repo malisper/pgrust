@@ -2,7 +2,7 @@
 //! PostgreSQL 18.3), trimmed to what the `backend-rewrite-rewriteDefine` port
 //! (CREATE RULE) reads and writes.
 
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_rewrite.h CATALOG / DECLARE_*).

@@ -60,7 +60,7 @@ use ::nodes::nodeincrementalsort::{
     PresortedKeyData, SharedIncrementalSortInfo, SharedIncrementalSortInfoHeader,
     INCSORT_LOADFULLSORT, INCSORT_LOADPREFIXSORT, INCSORT_READFULLSORT, INCSORT_READPREFIXSORT,
 };
-use types_parallel::shared_dsm_object;
+use ::types_parallel::shared_dsm_object;
 use ::nodes::nodesort::{
     TuplesortInstrumentation, TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,
 };
@@ -84,14 +84,14 @@ fn shared_incremental_sort_info_size(nworkers: usize) -> usize {
 /// slot in the DSM `SharedIncrementalSortInfo` flex array.
 #[inline]
 fn sinfo_slot_cursor(
-    chunk: execparallel::SerializeCursor,
+    chunk: ::execparallel::SerializeCursor,
     worker_index: i32,
-) -> execparallel::SerializeCursor {
+) -> ::execparallel::SerializeCursor {
     use core::mem::{align_of, size_of};
     let h = size_of::<SharedIncrementalSortInfoHeader>();
     let a = align_of::<IncrementalSortInfo>();
     let off = (h + a - 1) & !(a - 1);
-    execparallel::SerializeCursor(
+    ::execparallel::SerializeCursor(
         chunk.0 + off + (worker_index as usize) * size_of::<IncrementalSortInfo>(),
     )
 }
@@ -1625,7 +1625,7 @@ fn transfer_tuple_is_null(node: &IncrementalSortStateData<'_>) -> bool {
 /// `OidIsValid(oid)`.
 #[inline]
 fn oid_is_valid(oid: Oid) -> bool {
-    types_core::primitive::OidIsValid(oid)
+    ::types_core::primitive::OidIsValid(oid)
 }
 
 /// Clone an `Option<PgBox<TupleDescData>>` for the second standalone slot

@@ -14,7 +14,7 @@
 
 #![allow(non_upper_case_globals)]
 
-use types_core::primitive::{Oid, RepOriginId, Size, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::primitive::{Oid, RepOriginId, Size, TimestampTz, TransactionId, XLogRecPtr};
 
 /// `WalLevel` (`access/xlog.h`) — `WAL_LEVEL_MINIMAL=0`, `WAL_LEVEL_REPLICA=1`,
 /// `WAL_LEVEL_LOGICAL=2`. The `wal_level`/`GetActiveWalLevelOnStandby` reads
@@ -620,9 +620,9 @@ pub enum ReorderBufferCallback {
 // `types-logical`, which both snapmgr (owner of the storage) and reorderbuffer
 // (builder/resolver) already depend on.
 
-use types_core::xact::CommandId;
-use types_storage::RelFileLocator;
-use types_tuple::ItemPointerData;
+use ::types_core::xact::CommandId;
+use ::types_storage::RelFileLocator;
+use ::types_tuple::ItemPointerData;
 
 /// `ReorderBufferTupleCidKey` (reorderbuffer.c) — `(relfilelocator, ctid)`.
 ///

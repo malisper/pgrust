@@ -9,18 +9,18 @@
 //! date/timestamp arithmetic route through their owners' seams (hashfn /
 //! sortsupport / date-ts).
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::OidIsValid;
-use datum::datum::Datum;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::OidIsValid;
+use ::datum::datum::Datum;
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext,
                   ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
 use types_rangetypes::{
     RangeTypeP, RANGE_EMPTY, RANGE_LB_INF, RANGE_LB_NULL, RANGE_UB_INF, RANGE_UB_NULL,
 };
 
-use numeric_seams::numeric_subdiff;
-use typcache_seams::lookup_range_elem_hash_proc;
+use ::numeric_seams::numeric_subdiff;
+use ::typcache_seams::lookup_range_elem_hash_proc;
 use fmgr_seams::{
     function_call1_coll_datum, function_call2_coll, function_call2_coll_datum,
 };
@@ -345,7 +345,7 @@ pub fn hash_range(typcache: &TypeCacheEntry, r: RangeTypeP<'_>) -> PgResult<u32>
     // empty ("by-ref arg missing from by-ref lane"). `function_call1_coll` over a
     // by-value bare word stays equivalent for by-value subtypes.
     let lower_hash = if range_has_lbound(flags) {
-        let scratch = mcx::MemoryContext::new_bump("hash_range lower");
+        let scratch = ::mcx::MemoryContext::new_bump("hash_range lower");
         let m = scratch.mcx();
         let v = crate::range_bounds_compare::elem_word_to_canon(m, typcache, lower.val)?;
         let r = function_call1_coll_datum::call(m, hash_proc_oid, typcache.rng_collation, v)?;
@@ -355,7 +355,7 @@ pub fn hash_range(typcache: &TypeCacheEntry, r: RangeTypeP<'_>) -> PgResult<u32>
     };
 
     let upper_hash = if range_has_ubound(flags) {
-        let scratch = mcx::MemoryContext::new_bump("hash_range upper");
+        let scratch = ::mcx::MemoryContext::new_bump("hash_range upper");
         let m = scratch.mcx();
         let v = crate::range_bounds_compare::elem_word_to_canon(m, typcache, upper.val)?;
         let r = function_call1_coll_datum::call(m, hash_proc_oid, typcache.rng_collation, v)?;
@@ -403,7 +403,7 @@ pub fn hash_range_extended(
     let seed_canon = types_tuple::heaptuple::Datum::from_usize(seed as usize);
 
     let lower_hash = if range_has_lbound(flags) {
-        let scratch = mcx::MemoryContext::new_bump("hash_range_extended lower");
+        let scratch = ::mcx::MemoryContext::new_bump("hash_range_extended lower");
         let m = scratch.mcx();
         let v = crate::range_bounds_compare::elem_word_to_canon(m, typcache, lower.val)?;
         let r = function_call2_coll_datum::call(
@@ -419,7 +419,7 @@ pub fn hash_range_extended(
     };
 
     let upper_hash = if range_has_ubound(flags) {
-        let scratch = mcx::MemoryContext::new_bump("hash_range_extended upper");
+        let scratch = ::mcx::MemoryContext::new_bump("hash_range_extended upper");
         let m = scratch.mcx();
         let v = crate::range_bounds_compare::elem_word_to_canon(m, typcache, upper.val)?;
         let r = function_call2_coll_datum::call(

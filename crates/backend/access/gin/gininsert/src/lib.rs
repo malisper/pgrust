@@ -44,20 +44,20 @@ use alloc::vec::Vec;
 use bufmgr_seams as bufmgr;
 use predicate_seams as predicate;
 use page::{PageGetItem, PageGetItemId, PageRef};
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, OffsetNumber};
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, OffsetNumber};
 use gin::{GinNullCategory, GinState, GinStatsData, GinMaxItemSize, GIN_UNLOCK, GIN_EXCLUSIVE};
-use rel::Relation;
-use types_storage::storage::Buffer;
-use types_tableam::amapi::IndexUniqueCheck;
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{IndexTupleData, ItemPointerData};
+use ::rel::Relation;
+use ::types_storage::storage::Buffer;
+use ::types_tableam::amapi::IndexUniqueCheck;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{IndexTupleData, ItemPointerData};
 
 // gin-core-probe: the audited posting-list codec + cross-list merge.
-use core_probe::ginpostinglist::{
+use ::core_probe::ginpostinglist::{
     ginCompressPostingList, ginMergeItemPointers,
 };
 // gindatapage: posting-tree create + bulk-insert + the t_tid byte predicates.
@@ -100,13 +100,13 @@ pub fn init_seams() {
 // ===========================================================================
 
 pub fn clone_ginstate<'mcx>(mcx: Mcx<'mcx>, src: &GinState<'mcx>) -> PgResult<GinState<'mcx>> {
-    let clone_td = |td: &types_tuple::heaptuple::TupleDesc<'mcx>| -> PgResult<
-        types_tuple::heaptuple::TupleDesc<'mcx>,
+    let clone_td = |td: &::types_tuple::heaptuple::TupleDesc<'mcx>| -> PgResult<
+        ::types_tuple::heaptuple::TupleDesc<'mcx>,
     > {
         match td.as_ref() {
             Some(t) => {
                 let copy = tupdesc::CreateTupleDescCopy(mcx, t)?;
-                Ok(Some(mcx::alloc_in(mcx, copy)?))
+                Ok(Some(::mcx::alloc_in(mcx, copy)?))
             }
             None => Ok(None),
         }
@@ -168,7 +168,7 @@ fn gin_set_posting_tree(itup: &mut [u8], blkno: BlockNumber) {
 /// Decode the 8-byte `IndexTupleData` header from a tuple byte image.
 #[inline]
 fn header_of(tup: &[u8]) -> IndexTupleData {
-    use types_tuple::heaptuple::BlockIdData;
+    use ::types_tuple::heaptuple::BlockIdData;
     let bi_hi = u16::from_ne_bytes([tup[0], tup[1]]);
     let bi_lo = u16::from_ne_bytes([tup[2], tup[3]]);
     let ip_posid = u16::from_ne_bytes([tup[4], tup[5]]);
@@ -199,7 +199,7 @@ fn buffer_get_block_number(buffer: Buffer) -> BlockNumber {
 /// `CheckForSerializableConflictIn(index, NULL, blkno)` — the index-page
 /// predicate-lock conflict check GIN runs before modifying a leaf page.
 #[inline]
-fn check_for_serializable_conflict_in(index_oid: types_core::primitive::Oid, blkno: BlockNumber)
+fn check_for_serializable_conflict_in(index_oid: ::types_core::primitive::Oid, blkno: BlockNumber)
 -> PgResult<()> {
     predicate::check_for_serializable_conflict_in_page::call(index_oid, blkno)
 }
@@ -605,7 +605,7 @@ pub fn gininsert<'mcx>(
 
     // C: ginstate = indexInfo->ii_AmCache; if NULL, initGinState(ginstate, index).
     // Rebuilt every call (see the doc comment) instead of cached in ii_AmCache.
-    let ginstate = ginutil::initGinState(index, mcx)?;
+    let ginstate = ::ginutil::initGinState(index, mcx)?;
 
     // C creates a short-lived "Gin insert temporary context" here; in the owned
     // model the per-call scratch allocations ride `mcx`.

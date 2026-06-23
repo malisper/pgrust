@@ -20,10 +20,10 @@
 //! Both default `proisstrict => 't'` (no key present) and neither is a set
 //! returning function.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

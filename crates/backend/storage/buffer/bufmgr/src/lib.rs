@@ -39,7 +39,7 @@ pub use buf_flush::{writeback_context_init, BgBufferSyncState, WritebackContext}
 pub use mgr::BufferManager;
 pub use read::ReadOp;
 
-use types_storage::storage::Buffer;
+use ::types_storage::storage::Buffer;
 
 /// `LockBufHdr(GetBufferDescriptor(buf_id))` installed seam (buf_internals.h):
 /// spin on the header `BM_LOCKED` bit, returning the observed state word (with
@@ -113,7 +113,7 @@ fn lock_buffer(buffer: Buffer, mode: i32) -> types_error::PgResult<()> {
 /// `LockBuffer(buffer, BUFFER_LOCK_EXCLUSIVE)` installed seam (bufmgr.c).
 fn lock_buffer_exclusive(buffer: Buffer) -> types_error::PgResult<()> {
     BufferManager::global_expect()
-        .LockBuffer(buffer, types_storage::buf::BUFFER_LOCK_EXCLUSIVE)
+        .LockBuffer(buffer, ::types_storage::buf::BUFFER_LOCK_EXCLUSIVE)
 }
 
 /// `LockBufferForCleanup(buffer)` installed seam (bufmgr.c) — acquire a cleanup
@@ -184,7 +184,7 @@ fn buffer_get_block_number(buf: Buffer) -> types_core::primitive::BlockNumber {
 fn buffer_get_tag(
     buf: Buffer,
 ) -> types_error::PgResult<(
-    types_storage::RelFileLocator,
+    ::types_storage::RelFileLocator,
     types_core::primitive::ForkNumber,
     types_core::primitive::BlockNumber,
 )> {
@@ -245,9 +245,9 @@ const EB_CLEAR_SIZE_CACHE: u32 = 1 << 4;
 /// BULKREAD / BULKWRITE / VACUUM contexts. The ring object itself stays
 /// collapsed in the buffer manager core, but its KIND is threaded to the stats.
 fn io_context_for_strategy(
-    strategy: &types_storage::buf::BufferAccessStrategy,
-) -> types_storage::buf::IOContext {
-    use types_storage::buf::{BufferAccessStrategyType as Bas, IOContext};
+    strategy: &::types_storage::buf::BufferAccessStrategy,
+) -> ::types_storage::buf::IOContext {
+    use ::types_storage::buf::{BufferAccessStrategyType as Bas, IOContext};
     match strategy {
         None => IOContext::IOCONTEXT_NORMAL,
         Some(s) => match s.borrow().btype {
@@ -270,7 +270,7 @@ fn extend_buffered_rel(
     BufferManager::global_expect().ExtendBufferedRel(
         rel,
         fork_num,
-        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
         EB_LOCK_FIRST | EB_SKIP_EXTENSION_LOCK,
     )
 }
@@ -287,7 +287,7 @@ fn extend_buffered_rel_locked(
     BufferManager::global_expect().ExtendBufferedRel(
         rel,
         fork_num,
-        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
         EB_LOCK_FIRST,
     )
 }
@@ -299,9 +299,9 @@ fn extend_buffered_rel_locked(
 /// sized accordingly.
 fn extend_buffered_rel_by_main(
     rel: &rel::Relation,
-    io_context: types_storage::buf::IOContext,
+    io_context: ::types_storage::buf::IOContext,
     extend_by: u32,
-) -> types_error::PgResult<types_storage::buf::ExtendedRelation> {
+) -> types_error::PgResult<::types_storage::buf::ExtendedRelation> {
     // MAX_BUFFERS_TO_EXTEND_BY (hio.c) — the caller's hard cap on extend_by.
     const MAX_BUFFERS_TO_EXTEND_BY: usize = 64;
     let mut buffers = [Buffer::default(); MAX_BUFFERS_TO_EXTEND_BY];
@@ -315,7 +315,7 @@ fn extend_buffered_rel_by_main(
         &mut buffers[..extend_by as usize],
         &mut extended_by,
     )?;
-    Ok(types_storage::buf::ExtendedRelation {
+    Ok(::types_storage::buf::ExtendedRelation {
         first_block,
         victim_buffers: buffers[..extended_by as usize].to_vec(),
         extended_by,
@@ -333,10 +333,10 @@ fn extend_buffered_rel_to_fsm(
     BufferManager::global_expect().ExtendBufferedRelTo(
         rel,
         types_core::primitive::ForkNumber::FSM_FORKNUM,
-        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
         EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE,
         fsm_nblocks,
-        types_storage::storage::ReadBufferMode::ZeroOnError,
+        ::types_storage::storage::ReadBufferMode::ZeroOnError,
     )
 }
 
@@ -351,10 +351,10 @@ fn extend_buffered_rel_to_vm(
     BufferManager::global_expect().ExtendBufferedRelTo(
         rel,
         types_core::primitive::ForkNumber::VISIBILITYMAP_FORKNUM,
-        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
         EB_CREATE_FORK_IF_NEEDED | EB_CLEAR_SIZE_CACHE,
         vm_nblocks,
-        types_storage::storage::ReadBufferMode::ZeroOnError,
+        ::types_storage::storage::ReadBufferMode::ZeroOnError,
     )
 }
 
@@ -377,7 +377,7 @@ fn release_and_read_buffer<'mcx>(
     relation: &rel::Relation<'mcx>,
     block_num: types_core::primitive::BlockNumber,
 ) -> types_error::PgResult<Buffer> {
-    use types_storage::buf::BufferIsValid;
+    use ::types_storage::buf::BufferIsValid;
     let bm = BufferManager::global_expect();
     if BufferIsValid(buffer) {
         // we have pin, so it's ok to examine tag without spinlock.
@@ -404,8 +404,8 @@ fn read_buffer_extended<'mcx>(
         rel,
         types_core::primitive::ForkNumber::MAIN_FORKNUM,
         blkno,
-        types_storage::storage::ReadBufferMode::Normal,
-        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        ::types_storage::storage::ReadBufferMode::Normal,
+        ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
@@ -414,11 +414,11 @@ fn read_buffer_extended<'mcx>(
 /// identified only by its `RelFileLocator`. The createdb cross-database scan
 /// reaches this.
 fn read_buffer_without_relcache(
-    rlocator: types_storage::RelFileLocator,
+    rlocator: ::types_storage::RelFileLocator,
     forknum: types_core::primitive::ForkNumber,
     blocknum: types_core::primitive::BlockNumber,
-    mode: types_storage::storage::ReadBufferMode,
-    io_context: types_storage::buf::IOContext,
+    mode: ::types_storage::storage::ReadBufferMode,
+    io_context: ::types_storage::buf::IOContext,
     permanent: bool,
 ) -> types_error::PgResult<Buffer> {
     BufferManager::global_expect().ReadBufferWithoutRelcache(
@@ -430,8 +430,8 @@ fn read_buffer_without_relcache(
 /// installed seam (bufmgr.c) — the buffered per-fork copy engine of
 /// `CreateAndCopyRelationData` (createdb WAL_LOG strategy).
 fn relation_copy_storage_using_buffer(
-    srclocator: types_storage::RelFileLocator,
-    dstlocator: types_storage::RelFileLocator,
+    srclocator: ::types_storage::RelFileLocator,
+    dstlocator: ::types_storage::RelFileLocator,
     forknum: types_core::primitive::ForkNumber,
     permanent: bool,
 ) -> types_error::PgResult<()> {
@@ -445,8 +445,8 @@ fn relation_copy_storage_using_buffer(
 fn read_buffer_extended_mode<'mcx>(
     rel: &rel::Relation<'mcx>,
     blkno: types_core::primitive::BlockNumber,
-    mode: types_storage::storage::ReadBufferMode,
-    io_context: types_storage::buf::IOContext,
+    mode: ::types_storage::storage::ReadBufferMode,
+    io_context: ::types_storage::buf::IOContext,
 ) -> types_error::PgResult<Buffer> {
     BufferManager::global_expect().ReadBufferExtended(
         rel,
@@ -468,8 +468,8 @@ fn read_buffer_extended_fork<'mcx>(
         rel,
         forknum,
         blkno,
-        types_storage::storage::ReadBufferMode::Normal,
-        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        ::types_storage::storage::ReadBufferMode::Normal,
+        ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
@@ -485,8 +485,8 @@ fn read_buffer_zero_and_lock<'mcx>(
         rel,
         fork_num,
         blkno,
-        types_storage::storage::ReadBufferMode::ZeroAndLock,
-        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        ::types_storage::storage::ReadBufferMode::ZeroAndLock,
+        ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
@@ -497,14 +497,14 @@ fn read_buffer_zero_and_lock<'mcx>(
 fn read_buffer_with_strategy<'mcx>(
     rel: &rel::Relation<'mcx>,
     blkno: types_core::primitive::BlockNumber,
-    strategy: types_storage::buf::BufferAccessStrategy,
+    strategy: ::types_storage::buf::BufferAccessStrategy,
 ) -> types_error::PgResult<Buffer> {
     let io_context = io_context_for_strategy(&strategy);
     BufferManager::global_expect().ReadBufferExtended(
         rel,
         types_core::primitive::ForkNumber::MAIN_FORKNUM,
         blkno,
-        types_storage::storage::ReadBufferMode::Normal,
+        ::types_storage::storage::ReadBufferMode::Normal,
         io_context,
     )
 }
@@ -519,8 +519,8 @@ fn read_buffer_extended_fsm<'mcx>(
         rel,
         types_core::primitive::ForkNumber::FSM_FORKNUM,
         blkno,
-        types_storage::storage::ReadBufferMode::ZeroOnError,
-        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        ::types_storage::storage::ReadBufferMode::ZeroOnError,
+        ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
@@ -534,19 +534,19 @@ fn read_buffer_extended_vm<'mcx>(
         rel,
         types_core::primitive::ForkNumber::VISIBILITYMAP_FORKNUM,
         blkno,
-        types_storage::storage::ReadBufferMode::ZeroOnError,
-        types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+        ::types_storage::storage::ReadBufferMode::ZeroOnError,
+        ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
     )
 }
 
 /// `PrefetchSharedBuffer(smgropen(rlocator, backend), forkNum, blockNum)`
 /// installed seam (bufmgr.c).
 fn prefetch_shared_buffer(
-    rlocator: types_storage::RelFileLocator,
+    rlocator: ::types_storage::RelFileLocator,
     backend: types_core::primitive::ProcNumber,
     fork_num: types_core::primitive::ForkNumber,
     block_num: types_core::primitive::BlockNumber,
-) -> types_error::PgResult<types_storage::PrefetchBufferResult> {
+) -> types_error::PgResult<::types_storage::PrefetchBufferResult> {
     BufferManager::global_expect().PrefetchSharedBuffer(rlocator, backend, fork_num, block_num)
 }
 
@@ -559,10 +559,10 @@ fn prefetch_shared_buffer(
 /// EOF) surfaces as the read's own `Err` rather than `InvalidBuffer`, matching
 /// the synchronous core's smgr read error.
 fn xlog_read_buffer_extended(
-    rlocator: types_storage::RelFileLocator,
+    rlocator: ::types_storage::RelFileLocator,
     forknum: types_core::primitive::ForkNumber,
     blkno: types_core::primitive::BlockNumber,
-    mode: types_storage::ReadBufferMode,
+    mode: ::types_storage::ReadBufferMode,
     recent_buffer: Buffer,
 ) -> types_error::PgResult<Buffer> {
     let bm = BufferManager::global_expect();
@@ -572,7 +572,7 @@ fn xlog_read_buffer_extended(
     }
     // The relation is always treated as permanent for the redo read (recovery
     // replays WAL-logged changes); ReadBufferWithoutRelcache reads it in.
-    bm.ReadBufferWithoutRelcache(rlocator, true, forknum, blkno, mode, types_storage::buf::IOContext::IOCONTEXT_NORMAL)
+    bm.ReadBufferWithoutRelcache(rlocator, true, forknum, blkno, mode, ::types_storage::buf::IOContext::IOCONTEXT_NORMAL)
 }
 
 // --- F5: flush / drop seams (bufmgr.c) ------------------------------------
@@ -588,7 +588,7 @@ fn flush_one_buffer(buffer: Buffer) -> types_error::PgResult<()> {
 /// seam (bufmgr.c) — drop one relation's buffers at/after the per-fork
 /// truncation point without writing them (`smgrtruncate`).
 fn drop_relation_buffers(
-    smgr_reln: types_storage::RelFileLocatorBackend,
+    smgr_reln: ::types_storage::RelFileLocatorBackend,
     forknum: &[types_core::primitive::ForkNumber],
     nblocks: &[types_core::primitive::BlockNumber],
 ) -> types_error::PgResult<()> {
@@ -599,7 +599,7 @@ fn drop_relation_buffers(
 /// drop every buffer of all the given relations without writing them
 /// (`smgrdounlinkall`).
 fn drop_relations_all_buffers(
-    smgr_reln: &[types_storage::RelFileLocatorBackend],
+    smgr_reln: &[::types_storage::RelFileLocatorBackend],
 ) -> types_error::PgResult<()> {
     BufferManager::global_expect().DropRelationsAllBuffers(smgr_reln)
 }
@@ -610,9 +610,9 @@ fn drop_relations_all_buffers(
 /// `RelFileLocatorBackend` slice; this shared core flushes by the unbacked
 /// relfilelocator (temp relations don't reach here).
 fn flush_relations_all_buffers(
-    smgrs: &[types_storage::RelFileLocatorBackend],
+    smgrs: &[::types_storage::RelFileLocatorBackend],
 ) -> types_error::PgResult<()> {
-    let locators: alloc::vec::Vec<types_storage::RelFileLocator> =
+    let locators: alloc::vec::Vec<::types_storage::RelFileLocator> =
         smgrs.iter().map(|s| s.locator).collect();
     BufferManager::global_expect().FlushRelationsAllBuffers(&locators)
 }
@@ -654,7 +654,7 @@ fn drop_database_buffers(dbid: types_core::Oid) -> types_error::PgResult<()> {
 /// `ResOwnerReleaseBufferIO(res)` installed seam (bufmgr.c:6539) — abort a
 /// leaked in-progress buffer I/O (`AbortBufferIO`) the resource owner found
 /// during release, without removing the I/O from the (being-released) owner.
-fn release_buffer_io(buffer: types_storage::storage::Buffer) -> types_error::PgResult<()> {
+fn release_buffer_io(buffer: ::types_storage::storage::Buffer) -> types_error::PgResult<()> {
     BufferManager::global_expect().abort_buffer_io(buffer)
 }
 
@@ -717,7 +717,7 @@ fn fsm_buffer_set_page(
 /// `_hash_alloc_buckets` tail that stamps a checksum into the in-memory page and
 /// writes it past the current EOF (hash consumer). smgr is a direct dep.
 fn smgr_extend_page(
-    rlocator: types_storage::RelFileLocator,
+    rlocator: ::types_storage::RelFileLocator,
     fork_num: types_core::primitive::ForkNumber,
     blkno: types_core::primitive::BlockNumber,
     page: &mut [u8],
@@ -733,7 +733,7 @@ fn smgr_extend_page(
     // page write is keyed by the unbacked RelFileLocatorBackend; the hash AM
     // only reaches this for permanent relations.
     smgr::smgrextend(
-        types_storage::RelFileLocatorBackend {
+        ::types_storage::RelFileLocatorBackend {
             locator: rlocator,
             backend: types_core::primitive::INVALID_PROC_NUMBER,
         },
@@ -878,7 +878,7 @@ pub fn init_seams() {
     // (`GetAccessStrategy(btype)` ring sizing in buffer-support, the read_stream
     // builder in aio, and the bgwriter/checkpoint flush loops here) cannot carry
     // these process-global knobs as parameters.
-    use guc_tables::vars;
+    use ::guc_tables::vars;
     // The effective `io_combine_limit` global (bufmgr.c) is the clamped value
     // `Min(io_combine_limit_guc, io_max_combine_limit)` maintained by the GUC
     // assign-hooks (variable.c). Read/write it through the dedicated effective
@@ -905,7 +905,7 @@ pub fn init_seams() {
     // `io_method == IOMETHOD_SYNC` (aio.c GUC) — read off the live `io_method`
     // enum slot (backed by aio-methods at boot), mirroring C's global compare.
     bufmgr_seams::io_method_sync::set(|| {
-        vars::io_method.read() == guc_tables::consts::IOMETHOD_SYNC
+        vars::io_method.read() == ::guc_tables::consts::IOMETHOD_SYNC
     });
     bufmgr_seams::bgwriter_lru_maxpages::set(|| {
         vars::bgwriter_lru_maxpages.read()
@@ -972,7 +972,7 @@ fn vac_read_buffer_extended<'mcx>(
     rel: &rel::Relation<'mcx>,
     fork: i32,
     blkno: types_core::primitive::BlockNumber,
-    strategy: types_storage::buf::BufferAccessStrategy,
+    strategy: ::types_storage::buf::BufferAccessStrategy,
 ) -> types_error::PgResult<Buffer> {
     let forknum = types_core::primitive::ForkNumber::from_i32(fork)
         .expect("vacuumlazy read_buffer_extended: invalid fork number");
@@ -986,7 +986,7 @@ fn vac_read_buffer_extended<'mcx>(
         rel,
         forknum,
         blkno,
-        types_storage::storage::ReadBufferMode::Normal,
+        ::types_storage::storage::ReadBufferMode::Normal,
         io_context,
     )
 }

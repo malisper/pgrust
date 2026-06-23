@@ -11,8 +11,8 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use regex::{RegMatch, RegexCompiled};
 
 seam_core::seam!(
@@ -20,7 +20,7 @@ seam_core::seam!(
     /// using the backend's self-organizing compiled-RE cache. `pattern` is
     /// the `text` payload in the database encoding. C returns a `regex_t *`
     /// into the cache; here the compiled RE crosses as
-    /// [`regex::RegexCompiled`] (the engine handle plus `re_nsub`).
+    /// [`::regex::RegexCompiled`] (the engine handle plus `re_nsub`).
     /// `mcx` is for the wide-character conversion scratch (C: palloc +
     /// pfree in the caller's current context). `Err` carries the "invalid
     /// regular expression" `ereport(ERROR)` and OOM.

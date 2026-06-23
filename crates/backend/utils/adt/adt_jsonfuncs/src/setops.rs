@@ -27,7 +27,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
-use types_error::error::{
+use ::types_error::error::{
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NULL_VALUE_NOT_ALLOWED,
 };
@@ -36,12 +36,12 @@ use types_error::{PgError, PgResult};
 use types_jsonb::jsonb_util::{
     JsonbIterator, JsonbParseState, JsonbValue, JsonbValueData,
 };
-use types_jsonb::jsonb::{
+use ::types_jsonb::jsonb::{
     jbvType, json_container_is_object, json_container_is_scalar, json_container_size,
     JsonbIteratorToken,
 };
 
-use adt_jsonb::JsonbToCStringIndent;
+use ::adt_jsonb::JsonbToCStringIndent;
 use jsonb_util::{
     JsonbIteratorInit, JsonbIteratorNext, JsonbToJsonbValue, JsonbValueToJsonb, pushJsonbValue,
 };
@@ -196,7 +196,7 @@ fn value_to_jsonb<'mcx>(mcx: Mcx<'mcx>, res: &JsonbValue) -> PgResult<PgVec<'mcx
 /// bytes are copied into `mcx` (the C returns the same datum it received).
 #[inline]
 fn return_jsonb<'mcx>(mcx: Mcx<'mcx>, jb: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, jb.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, jb.len())?;
     out.extend_from_slice(jb);
     Ok(out)
 }

@@ -8,8 +8,8 @@
 //! `array_copy`). Zero seams: this is pure arithmetic over `&[u8]`.
 
 use array::{ArrayType, ARRAYTYPE_HDRSZ, MAXDIM};
-use types_core::Oid;
-use datum::datum::Datum;
+use ::types_core::Oid;
+use ::datum::datum::Datum;
 
 // ---------------------------------------------------------------------------
 // Build-time alignment constants (pg_config.h) for the LP64 / x86-64 / aarch64
@@ -60,7 +60,7 @@ pub const MAX_DIM: i32 = MAXDIM;
 // (`catalog/pg_type_d.h`). Re-exported from `types-tuple` where present.
 // ---------------------------------------------------------------------------
 
-pub use types_tuple::heaptuple::{
+pub use ::types_tuple::heaptuple::{
     ANYARRAYOID, BOOLOID, INT2VECTOROID, INT4OID, INT8OID, OIDOID, OIDVECTOROID, RECORDOID,
     TEXTOID, TIDOID,
 };

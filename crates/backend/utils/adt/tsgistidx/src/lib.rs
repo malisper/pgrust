@@ -21,9 +21,9 @@ use tsvector_core_seams as tsop;
 use hash_small_seams as crc;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
-use types_reloptions::local_relopts;
-use tsearch::tsearch::{ExecPhraseData, QueryItem, QueryOperand, TSTernaryValue, TS_EXEC_PHRASE_NO_POS};
-use tsearch::tsgistidx::{
+use ::types_reloptions::local_relopts;
+use ::tsearch::tsearch::{ExecPhraseData, QueryItem, QueryOperand, TSTernaryValue, TS_EXEC_PHRASE_NO_POS};
+use ::tsearch::tsgistidx::{
     LexemeBytes, PickSplitResult, SignTsVector, SignTsVectorData, ALLISTRUE, ARRKEY, SIGNKEY,
 };
 

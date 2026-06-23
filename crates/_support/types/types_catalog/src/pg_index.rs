@@ -19,7 +19,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_index.h CATALOG / DECLARE_*).

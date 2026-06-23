@@ -6,7 +6,7 @@
 //! recognition, and the missing-parameter / wrong-type error paths.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use parsenodes::{Boolean, DefElem, Float, Integer};
 
 fn defelem(arg: Option<Node>) -> DefElem {
@@ -14,7 +14,7 @@ fn defelem(arg: Option<Node>) -> DefElem {
         defnamespace: None,
         defname: Some("opt".to_string()),
         arg: arg.map(Box::new),
-        defaction: parsenodes::DEFELEM_UNSPEC,
+        defaction: ::parsenodes::DEFELEM_UNSPEC,
         location: -1,
     }
 }

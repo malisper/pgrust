@@ -25,9 +25,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use mcx::{Mcx, PgString};
-use types_core::fmgr::{PgAbiValues, FMGR_ABI_EXTRA};
+use ::types_core::fmgr::{PgAbiValues, FMGR_ABI_EXTRA};
 use types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen, LoadedModule, LoadedModuleDetails};
-use types_dfmgr::Pg_magic_struct;
+use ::types_dfmgr::Pg_magic_struct;
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_NAME,
     ERRCODE_OUT_OF_MEMORY, ERRCODE_UNDEFINED_FUNCTION,
@@ -352,7 +352,7 @@ fn build_field_mismatch_detail(
     magic_data: &PgAbiValues,
     module_magic_data: &PgAbiValues,
 ) -> PgResult<String> {
-    let ctx = mcx::MemoryContext::new("incompatible_module_error");
+    let ctx = ::mcx::MemoryContext::new("incompatible_module_error");
     let mcx = ctx.mcx();
 
     let mut details: PgString = PgString::new_in(mcx);
@@ -845,7 +845,7 @@ fn simple_library_name(name: &str) -> Option<&str> {
 fn install_load_external_function(
     probin: &str,
     prosrc: &str,
-    _function_id: types_core::Oid,
+    _function_id: ::types_core::Oid,
 ) -> PgResult<fmgr::LoadedExternalFunc> {
     if let Some(library) = simple_library_name(probin) {
         if dfmgr_seams::builtin_library_present::call(library) {
@@ -861,7 +861,7 @@ fn install_load_external_function(
         }
     }
 
-    let ctx = mcx::MemoryContext::new("load_external_function");
+    let ctx = ::mcx::MemoryContext::new("load_external_function");
     // C: user_fn = load_external_function(filename, funcname, true, &libraryhandle);
     let handle = load_external_function(ctx.mcx(), probin, prosrc, true)?;
     // C: inforec = fetch_finfo_record(libraryhandle, prosrc);
@@ -886,7 +886,7 @@ fn install_load_output_plugin(plugin: String) -> PgResult<u32> {
     {
         return Ok((builtin.init)());
     }
-    let ctx = mcx::MemoryContext::new("load_output_plugin");
+    let ctx = ::mcx::MemoryContext::new("load_output_plugin");
     // C (LoadOutputPlugin): load_external_function(plugin, "_PG_output_plugin_init",
     //    false, NULL) loads the library; the symbol+vtable init is loader runtime.
     let handle = load_external_function(ctx.mcx(), &plugin, "_PG_output_plugin_init", false)?;
@@ -896,7 +896,7 @@ fn install_load_output_plugin(plugin: String) -> PgResult<u32> {
 /// Installer for `dfmgr_seams::invoke_output_plugin_callback`:
 /// pure loaded-symbol dispatch, delegated wholly to the loader runtime.
 fn install_invoke_output_plugin_callback(
-    inv: types_logical::CallbackInvocation,
+    inv: ::types_logical::CallbackInvocation,
 ) -> PgResult<bool> {
     loader::invoke_output_plugin_callback::call(inv)
 }
@@ -907,8 +907,8 @@ fn install_invoke_output_plugin_callback(
 /// context is somehow not flagged as a builtin (unreachable in this build —
 /// there is no C ABI to load a real `.so`).
 fn install_invoke_builtin_output_plugin_callback(
-    ctx: &mut types_logical::LogicalDecodingContext,
-    inv: &types_logical::CallbackInvocation,
+    ctx: &mut ::types_logical::LogicalDecodingContext,
+    inv: &::types_logical::CallbackInvocation,
 ) -> PgResult<bool> {
     if let Some(plugin) = ctx.builtin_plugin {
         if let Some(result) =
@@ -919,7 +919,7 @@ fn install_invoke_builtin_output_plugin_callback(
     }
     // Not a registered builtin: route to the OS-loaded plugin (graceful ERROR in
     // this build, since open_library always fails).
-    loader::invoke_output_plugin_callback::call(types_logical::CallbackInvocation {
+    loader::invoke_output_plugin_callback::call(::types_logical::CallbackInvocation {
         callback_name: inv.callback_name,
         report_location: inv.report_location,
         accept_writes: inv.accept_writes,
@@ -934,9 +934,9 @@ fn install_invoke_builtin_output_plugin_callback(
 /// value). The args are small projected values; the heavy tuple data is resolved
 /// lazily by the plugin via the reorderbuffer resolver seams.
 fn clone_callback_args(
-    args: &types_logical::OutputPluginCallbackArgs,
-) -> types_logical::OutputPluginCallbackArgs {
-    use types_logical::OutputPluginCallbackArgs as A;
+    args: &::types_logical::OutputPluginCallbackArgs,
+) -> ::types_logical::OutputPluginCallbackArgs {
+    use ::types_logical::OutputPluginCallbackArgs as A;
     match args {
         A::Startup { is_init } => A::Startup { is_init: *is_init },
         A::Shutdown => A::Shutdown,
@@ -1043,7 +1043,7 @@ fn install_load_file(filename: &str, restricted: bool) -> PgResult<()> {
             return Ok(());
         }
     }
-    let ctx = mcx::MemoryContext::new("load_file");
+    let ctx = ::mcx::MemoryContext::new("load_file");
     load_file(ctx.mcx(), filename, restricted)
 }
 
@@ -1154,7 +1154,7 @@ pub fn init_seams() {
         // `parallel_worker_main_type`. The faithful, non-fabricated outcome for
         // such an external entry point is therefore the same lookup-miss error.
         rt::load_external_function::set(|libraryname, funcname| {
-            let ctx = mcx::MemoryContext::new("load_external_function");
+            let ctx = ::mcx::MemoryContext::new("load_external_function");
             // C: load_external_function(libraryname, funcname, true, NULL).
             // Loads the library; raises ERRCODE_UNDEFINED_FUNCTION on a missing
             // symbol (signal_not_found=true). On a missing library it raises the

@@ -1,5 +1,5 @@
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 fn reader() -> XLogReaderState<'static> {
     XLogReaderState {

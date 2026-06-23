@@ -2,12 +2,12 @@
 
 use std::cell::RefCell;
 
-use syslogger_seams::write_syslogger_file;
+use ::syslogger_seams::write_syslogger_file;
 use utils_error::{
     backend_log_context, check_log_of_query, config, error_severity, get_backend_type_for_log,
     get_formatted_log_time, get_formatted_start_time, unpack_sql_state, write_pipe_chunks, PgError,
 };
-use types_error::LOG_DESTINATION_JSONLOG;
+use ::types_error::LOG_DESTINATION_JSONLOG;
 
 use crate::{my_proc_pid, my_start_time, verbose_location, LogLineCounter};
 

@@ -14,8 +14,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::BLCKSZ;
-use types_storage::bufpage::SizeOfPageHeaderData;
+use ::types_core::primitive::BLCKSZ;
+use ::types_storage::bufpage::SizeOfPageHeaderData;
 
 /// `MAXALIGN(LEN)` — round up to `MAXIMUM_ALIGNOF` (8 on supported platforms),
 /// matching `#define MAXALIGN(LEN)` in c.h.

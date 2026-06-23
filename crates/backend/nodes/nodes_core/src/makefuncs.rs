@@ -14,7 +14,7 @@
 //! * **plan/exec-state nodes** (`makeIndexInfo`) build a `nodes` exec
 //!   struct.
 //! * **raw-parser nodes** (`makeRangeVar`, `makeTypeName*`) build an owned
-//!   plain-Rust parse node (`types_tuple::RangeVar`, `parsenodes::*`); no
+//!   plain-Rust parse node (`::types_tuple::RangeVar`, `parsenodes::*`); no
 //!   allocator.
 //! * **raw-grammar parse nodes** (`makeA_Expr`, `makeFromExpr`, `makeFuncCall`,
 //!   `makeColumnDef`, `makeAlias`, `makeGroupingSet`, `makeVarFromTargetEntry`,
@@ -52,19 +52,19 @@
 //! `detoast_attr` seam.
 
 use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, Oid};
-use types_core::catalog::BOOLOID;
-use types_core::InvalidOid;
+use ::types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, Oid};
+use ::types_core::catalog::BOOLOID;
+use ::types_core::InvalidOid;
 // Datum-unification: the owned `Const` carries the canonical unified value type
 // [`Datum`] (`ByVal`/`ByRef`), and `make_const`/`make_const_node_seam` thread it
 // end-to-end. The only residual use of the bare-word [`ScalarWord`] (the canonical
-// `ByVal` arm's payload, `datum::Datum`) is the sanctioned varlena-pointer
+// `ByVal` arm's payload, `::datum::Datum`) is the sanctioned varlena-pointer
 // edge in `pg_detoast_datum`: a varlena `Datum` is a bare pointer into a varlena
 // image, and the `detoast_attr` seam returns the fetched bytes through a leaked
 // pointer word (the audited bare-word ABI edge), not a `ByRef` slice.
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 use types_tuple::heaptuple::Datum;
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{
@@ -78,7 +78,7 @@ use ::nodes::nodes::NodePtr;
 use ::nodes::rawnodes::{
     A_Expr, A_Expr_Kind, Alias, ColumnDef, FromExpr, FuncCall, GroupingSet, GroupingSetKind,
 };
-use types_tuple::access::{RangeVar, RELPERSISTENCE_PERMANENT};
+use ::types_tuple::access::{RangeVar, RELPERSISTENCE_PERMANENT};
 
 use parsenodes::{
     DefElem, DefElemAction, Node as ParseNode, StringNode, TypeName, DEFELEM_UNSPEC,
@@ -140,11 +140,11 @@ pub fn make_whole_row_var(
             // relation: the rowtype is a named composite type
             let toid = lsyscache::get_rel_type_id::call(rte.relid)?;
             if toid == InvalidOid {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "relation with OID {} does not have a composite type",
                     rte.relid
                 ))
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE));
+                .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE));
             }
             make_var(varno, InvalidAttrNumber, toid, -1, InvalidOid, varlevelsup)
         }
@@ -153,11 +153,11 @@ pub fn make_whole_row_var(
                 // Subquery expanded from a view: use the view's rowtype.
                 let toid = lsyscache::get_rel_type_id::call(rte.relid)?;
                 if toid == InvalidOid {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "relation with OID {} does not have a composite type",
                         rte.relid
                     ))
-                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE));
+                    .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE));
                 }
                 make_var(varno, InvalidAttrNumber, toid, -1, InvalidOid, varlevelsup)
             } else if !rte.functions.is_empty() {
@@ -821,7 +821,7 @@ pub fn make_func_call<'mcx>(
     Ok(FuncCall {
         funcname: name,
         args,
-        agg_order: mcx::vec_with_capacity_in(mcx, 0)?,
+        agg_order: ::mcx::vec_with_capacity_in(mcx, 0)?,
         agg_filter: None,
         over: None,
         agg_within_group: false,
@@ -845,16 +845,16 @@ pub fn make_column_def<'mcx>(
 ) -> PgResult<ColumnDef<'mcx>> {
     // makeTypeNameFromOid(typeOid, typmod) — the ColumnDef carries the
     // raw-grammar `::nodes::rawnodes::TypeName`, distinct from the
-    // `parsenodes::TypeName` the standalone `make_type_name_*` build. Its
+    // `::parsenodes::TypeName` the standalone `make_type_name_*` build. Its
     // list fields are `mcx`-charged.
     let type_name = ::nodes::rawnodes::TypeName {
-        names: mcx::vec_with_capacity_in(mcx, 0)?,
+        names: ::mcx::vec_with_capacity_in(mcx, 0)?,
         typeOid: type_oid,
         setof: false,
         pct_type: false,
-        typmods: mcx::vec_with_capacity_in(mcx, 0)?,
+        typmods: ::mcx::vec_with_capacity_in(mcx, 0)?,
         typemod: typmod,
-        arrayBounds: mcx::vec_with_capacity_in(mcx, 0)?,
+        arrayBounds: ::mcx::vec_with_capacity_in(mcx, 0)?,
         location: -1,
     };
     Ok(ColumnDef {
@@ -874,8 +874,8 @@ pub fn make_column_def<'mcx>(
         generated: 0,
         collClause: None,
         collOid: coll_oid,
-        constraints: mcx::vec_with_capacity_in(mcx, 0)?,
-        fdwoptions: mcx::vec_with_capacity_in(mcx, 0)?,
+        constraints: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        fdwoptions: ::mcx::vec_with_capacity_in(mcx, 0)?,
         location: -1,
     })
 }
@@ -950,7 +950,7 @@ pub fn make_null_const<'mcx>(
 
 // ===========================================================================
 // `nodes/parsenodes.h` constructors over the plain-Rust `parsenodes`
-// node universe (`DefElem` carries `parsenodes::Node` args).
+// node universe (`DefElem` carries `::parsenodes::Node` args).
 // ===========================================================================
 
 /// `makeDefElem(name, arg, location)` (makefuncs.c) — a `DefElem` for the

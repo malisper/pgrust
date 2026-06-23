@@ -26,11 +26,11 @@
 //! build; the scaffold keeps its signature, so its faithful opcode-ordering
 //! body is ported even though the non-threaded interpreter never calls it.
 
-use types_tuple::heaptuple::Datum;
-use types_core::primitive::Oid;
+use ::types_tuple::heaptuple::Datum;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use types_error::error::{ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_COLUMN};
-use types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
+use ::types_error::error::{ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_COLUMN};
+use ::types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
 use ::nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, EEO_FLAG_DIRECT_THREADED,
     EEO_FLAG_INTERPRETER_INITIALIZED,
@@ -38,7 +38,7 @@ use ::nodes::execexpr::{
 use ::nodes::execnodes::EcxtId;
 use ::nodes::executor::{TupleSlotKind, TupleTableSlot};
 use ::nodes::EStateData;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 
 use crate::justs::{
     ExecJustApplyFuncToCase, ExecJustAssignInnerVar, ExecJustAssignInnerVarVirt,

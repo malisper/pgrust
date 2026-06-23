@@ -22,7 +22,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 
-use checksum::pg_checksum_page;
+use ::checksum::pg_checksum_page;
 use utils_error::{elog, ereport};
 use mcx::{vec_with_capacity_in, MemoryContext, PgVec};
 use types_core::{
@@ -31,17 +31,17 @@ use types_core::{
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, LOG, PANIC, WARNING,
 };
-use types_storage::bufpage::{
+use ::types_storage::bufpage::{
     ItemIdData, ItemLength, ItemOffset, MaxHeapTuplesPerPage, MaxOffsetNumber,
     MovedPartitionsBlockNumber, MovedPartitionsOffsetNumber, PageTemp, PageXLogRecPtr, PAI_IS_HEAP,
     PAI_OVERWRITE, PD_ALL_VISIBLE, PD_HAS_FREE_LINES, PD_PAGE_FULL, PD_VALID_FLAG_BITS,
     PG_PAGE_LAYOUT_VERSION, PIV_IGNORE_CHECKSUM_FAILURE, PIV_LOG_LOG, PIV_LOG_WARNING,
     SizeOfPageHeaderData,
 };
-use types_storage::storage::LocationIndex;
-use types_tuple::heaptuple::{BlockIdData, ItemPointerData, FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
+use ::types_storage::storage::LocationIndex;
+use ::types_tuple::heaptuple::{BlockIdData, ItemPointerData, FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
 
-pub use types_storage::bufpage::PG_IO_ALIGN_SIZE;
+pub use ::types_storage::bufpage::PG_IO_ALIGN_SIZE;
 
 /// `sizeof(ItemIdData)` — every line pointer is 4 bytes.
 const ITEM_ID_SIZE: usize = core::mem::size_of::<ItemIdData>();
@@ -1561,7 +1561,7 @@ fn push_compact<'mcx>(
     offsetindex: OffsetNumber,
     data: &[u8],
 ) -> PgResult<()> {
-    let owned = mcx::slice_in(ctx.mcx(), data)?;
+    let owned = ::mcx::slice_in(ctx.mcx(), data)?;
     base.push(ItemIdCompact { offsetindex, data: owned });
     Ok(())
 }

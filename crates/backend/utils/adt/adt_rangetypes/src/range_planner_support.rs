@@ -46,12 +46,12 @@
 //! answer (the original clause is left in place); the result is correct, only a
 //! missed optimization, exactly mirroring C's expensive-`elemExpr` behavior.
 
-use mcx::Mcx;
-use types_core::catalog::BOOLOID;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::catalog::BOOLOID;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::{Const, Expr, FuncExpr};
-use pathnodes::PlannerInfo;
+use ::pathnodes::PlannerInfo;
 // The canonical `Const.constvalue` carrier is the `types_tuple` `Datum<'mcx>`
 // enum (`ByVal(word)` / `ByRef(bytes)`), which `make_const` consumes. The range
 // engine's `RangeBound.val` is the bare-word `datum::Datum` (a serialized
@@ -59,7 +59,7 @@ use pathnodes::PlannerInfo;
 // the `Datum` C's `makeConst(... val ...)` stores (for a by-reference element
 // type the word is a pointer the makefuncs owner detoasts, as in C).
 use types_tuple::heaptuple::Datum as NodeDatum;
-use types_scan::scankey::{
+use ::types_scan::scankey::{
     BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber, BTLessEqualStrategyNumber,
     BTLessStrategyNumber,
 };
@@ -307,7 +307,7 @@ pub fn find_simplified_clause<'mcx>(
     let elem_typcache = match rangetypcache.rngelemtype.as_ref() {
         Some(e) => e.as_ref(),
         None => {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "type {rngtypid} is not a range type"
             )));
         }

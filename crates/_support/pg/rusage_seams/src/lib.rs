@@ -7,7 +7,7 @@
 //! consumer holds the [`PgRUsage`] returned by [`pg_rusage_init`] and passes it
 //! back to [`pg_rusage_show`] to format the elapsed delta.
 
-use rusage::PgRUsage;
+use ::rusage::PgRUsage;
 
 seam_core::seam!(
     /// `pg_rusage_init(&ru0)` — capture the start-of-measurement resource-usage

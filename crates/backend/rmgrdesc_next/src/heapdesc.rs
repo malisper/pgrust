@@ -6,12 +6,12 @@ use crate::standbydesc::standby_desc_invalidations;
 use crate::appendf;
 use rmgrdesc_small_seams::{array_desc, offset_elem_desc, oid_elem_desc,
                                    redirect_elem_desc};
-use mcx::PgString;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_error::PgResult;
 use wal::{DecodedXLogRecord, XLR_INFO_MASK};
-use xlog_records::arrays::{OffsetNumberPairs, OffsetNumbers, Oids, SIZEOF_OFFSET_NUMBER,
+use ::xlog_records::arrays::{OffsetNumberPairs, OffsetNumbers, Oids, SIZEOF_OFFSET_NUMBER,
                                  SIZEOF_OID};
-use xlog_records::heapam_xlog::{FreezePlans, xl_heap_confirm, xl_heap_delete,
+use ::xlog_records::heapam_xlog::{FreezePlans, xl_heap_confirm, xl_heap_delete,
                                       xl_heap_inplace, xl_heap_insert, xl_heap_lock,
                                       xl_heap_lock_updated, xl_heap_multi_insert,
                                       xl_heap_new_cid, xl_heap_prune, xl_heap_truncate,
@@ -471,8 +471,8 @@ pub fn heap2_identify(info: u8) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::test_support::record;
-    use mcx::MemoryContext;
-    use types_storage::sinval::SIZEOF_SHARED_INVALIDATION_MESSAGE;
+    use ::mcx::MemoryContext;
+    use ::types_storage::sinval::SIZEOF_SHARED_INVALIDATION_MESSAGE;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");

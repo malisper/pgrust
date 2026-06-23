@@ -75,7 +75,7 @@ use types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT};
 // Well-known pg_type / pg_collation OIDs (pg_type.dat / pg_collation.dat).
 // types-core exports BOOLOID / INT4OID / C_COLLATION_OID; the rest are spelled
 // here from the catalog headers (real OIDs, inherited — not invented).
-use types_core::catalog::{BOOLOID, C_COLLATION_OID, INT4OID};
+use ::types_core::catalog::{BOOLOID, C_COLLATION_OID, INT4OID};
 /// `RECORDOID` (pg_type.dat).
 const RECORDOID: Oid = 2249;
 /// `TEXTOID` (pg_type.dat).
@@ -1054,7 +1054,7 @@ fn fix_opfuncids_walker(node: &mut Expr) -> PgResult<()> {
     }
     // Recurse into children (the in-place mutable analogue of
     // expression_tree_walker(node, fix_opfuncids_walker)).
-    let mut err: Option<types_error::PgError> = None;
+    let mut err: Option<::types_error::PgError> = None;
     for_each_child_mut(node, &mut |child| {
         if err.is_none() {
             if let Err(e) = fix_opfuncids_walker(child) {
@@ -1831,25 +1831,25 @@ where
 // Error constructors (the C elog/ereport surface)
 // ===========================================================================
 
-fn untransformed_sublink_error_t(what: &str) -> types_error::PgError {
+fn untransformed_sublink_error_t(what: &str) -> ::types_error::PgError {
     // C: elog(ERROR, "cannot get %s for untransformed sublink")
-    types_error::PgError::error(format!(
+    ::types_error::PgError::error(format!(
         "cannot get {what} for untransformed sublink"
     ))
 }
 
-fn unrecognized_node_type_error(name: &str) -> PgResult<types_error::PgError> {
+fn unrecognized_node_type_error(name: &str) -> PgResult<::types_error::PgError> {
     // C: elog(ERROR, "unrecognized node type: %d", nodeTag(node))
-    Ok(types_error::PgError::error(format!(
+    Ok(::types_error::PgError::error(format!(
         "unrecognized node type: {name}"
     )))
 }
 
-fn no_array_type_error(elem_type: Oid) -> PgResult<types_error::PgError> {
+fn no_array_type_error(elem_type: Oid) -> PgResult<::types_error::PgError> {
     // C: ereport(ERROR, errcode(ERRCODE_UNDEFINED_OBJECT),
     //     errmsg("could not find array type for data type %s", format_type_be(...)))
     let tyname = format_type::format_type_be_str::call(elem_type)?;
-    Ok(types_error::PgError::error(format!(
+    Ok(::types_error::PgError::error(format!(
         "could not find array type for data type {tyname}"
     ))
     .with_sqlstate(ERRCODE_UNDEFINED_OBJECT))

@@ -42,7 +42,7 @@
 // correspondence.
 #![allow(clippy::needless_range_loop)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{AttrNumber, Oid};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
 use statistics::{
@@ -629,7 +629,7 @@ pub fn pg_ndistinct_out(data: &[u8]) -> PgResult<Vec<u8>> {
 ///
 /// n-distinct is serialized into a bytea value, so the binary-output routine just
 /// sends those bytes. Delegates to the ported `byteasend`.
-pub fn pg_ndistinct_send<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<mcx::PgVec<'mcx, u8>> {
+pub fn pg_ndistinct_send<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     varlena::bytea::byteasend(mcx, data)
 }
 

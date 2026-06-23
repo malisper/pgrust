@@ -13,7 +13,7 @@ use std::os::fd::FromRawFd;
 use std::path::Path;
 
 use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};
-use types_storage::file::File;
+use ::types_storage::file::File;
 
 use fd_seams::{
     CreateEmptyFileOutcome, DirEntryInfo, PgFileStream, PipeReadLine, RelmapReadOutcome,
@@ -61,7 +61,7 @@ fn file_access_error(elevel: ErrorLevel, errno: i32, message: String) -> PgError
     PgError::new(elevel, msg)
         .with_sqlstate(sqlstate)
         .with_saved_errno(errno)
-        .with_error_location(types_error::ErrorLocation::new(SRCFILE, 0, ""))
+        .with_error_location(::types_error::ErrorLocation::new(SRCFILE, 0, ""))
 }
 
 // ===========================================================================
@@ -360,7 +360,7 @@ pub fn read_server_file<'mcx>(
     // if (bytes_to_read > MaxAllocSize - VARHDRSZ) ereport(ERROR, ...)
     if bytes_to_read > MAX_ALLOC_SIZE - VARHDRSZ_I64 {
         return Err(PgError::new(ERROR, "requested length too large".to_string())
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
     }
 
     // file = AllocateFile(filename, PG_BINARY_R);
@@ -412,7 +412,7 @@ pub fn read_server_file<'mcx>(
                 if b.len() > cap {
                     let _ = allocated_desc::FreeFile(index);
                     return Err(PgError::new(ERROR, "file length too large".to_string())
-                        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+                        .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
                 }
                 b
             }
@@ -617,8 +617,8 @@ pub fn open_copy_to_file(filename: &str) -> PgResult<PgFileStream> {
                 //                 errmsg("\"%s\" is a directory", filename)))
                 let _ = allocated_desc::FreeFile(index);
                 return Err(PgError::new(ERROR, format!("\"{filename}\" is a directory"))
-                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
-                    .with_error_location(types_error::ErrorLocation::new(SRCFILE, 0, "")));
+                    .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .with_error_location(::types_error::ErrorLocation::new(SRCFILE, 0, "")));
             }
         }
         Err(errno) => {
@@ -697,9 +697,9 @@ pub fn close_pipe_to_program(stream: PgFileStream, filename: &str) -> PgResult<(
             ERROR,
             format!("program \"{filename}\" failed"),
         )
-        .with_sqlstate(types_error::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION)
+        .with_sqlstate(::types_error::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION)
         .with_detail(detail)
-        .with_error_location(types_error::ErrorLocation::new(SRCFILE, 0, "")));
+        .with_error_location(::types_error::ErrorLocation::new(SRCFILE, 0, "")));
     }
     Ok(())
 }
@@ -786,9 +786,9 @@ pub fn close_pipe_from_program(
         }
         let detail = wait_result_to_str(pclose_rc);
         return Err(PgError::new(ERROR, format!("program \"{filename}\" failed"))
-            .with_sqlstate(types_error::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION)
+            .with_sqlstate(::types_error::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION)
             .with_detail(detail)
-            .with_error_location(types_error::ErrorLocation::new(SRCFILE, 0, "")));
+            .with_error_location(::types_error::ErrorLocation::new(SRCFILE, 0, "")));
     }
     Ok(())
 }
@@ -1402,7 +1402,7 @@ pub fn basebackup_read_link(path: &str) -> PgResult<String> {
         return Err(PgError::error(format!(
             "symbolic link \"{path}\" target is too long"
         ))
-        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
     }
     // linkpath[rllen] = '\0';
     let bytes: Vec<u8> = buf[..rllen as usize].iter().map(|&b| b as u8).collect();
@@ -1604,7 +1604,7 @@ pub fn tablespace_location<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     tablespace_oid: types_core::Oid,
 ) -> PgResult<mcx::PgVec<'mcx, u8>> {
-    use types_storage::file::PG_TBLSPC_DIR;
+    use ::types_storage::file::PG_TBLSPC_DIR;
 
     // if (tablespaceOid == InvalidOid) tablespaceOid = MyDatabaseTableSpace;
     let mut tablespace_oid = tablespace_oid;
@@ -1668,7 +1668,7 @@ pub fn tablespace_location<'mcx>(
         return Err(PgError::error(format!(
             "symbolic link \"{sourcepath}\" target is too long"
         ))
-        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
     }
     // targetpath[rllen] = '\0'; PG_RETURN_TEXT_P(cstring_to_text(targetpath));
     let target: Vec<u8> = buf[..rllen as usize].iter().map(|&b| b as u8).collect();
@@ -1711,7 +1711,7 @@ fn atooid(s: &str) -> types_core::Oid {
 /// tuplestore for the `GLOBALTABLESPACE_OID` and "not a tablespace OID"
 /// WARNING cases.
 pub fn tablespace_databases(tablespace_oid: types_core::Oid) -> PgResult<Option<Vec<types_core::Oid>>> {
-    use types_storage::file::{PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY};
+    use ::types_storage::file::{PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY};
 
     // if (tablespaceOid == GLOBALTABLESPACE_OID) { WARNING; return empty; }
     if tablespace_oid == GLOBALTABLESPACE_OID {
@@ -1929,7 +1929,7 @@ pub fn rmtree(path: &str, rmtopdir: bool) -> bool {
 fn warn_file(message: String, error: &std::io::Error) {
     let errno = error.raw_os_error().unwrap_or(libc::EIO);
     let _ = error_seams::ereport::call(file_access_error(
-        types_error::WARNING,
+        ::types_error::WARNING,
         errno,
         format!("{message}: %m"),
     ));

@@ -3,8 +3,8 @@
 //! and the `plan_cache_mode` GUC (`utils/misc/guc_tables.c`). The owning units
 //! install these; until then a call panics loudly.
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `GetUserId()`.

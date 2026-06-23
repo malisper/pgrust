@@ -82,19 +82,19 @@ seam_core::seam!(
 seam_core::seam!(
     /// `AllocSetContextCreate(CurrentMemoryContext, "Logical decoding context",
     /// ALLOCSET_DEFAULT_SIZES)`.
-    pub fn create_logical_decoding_context_memcxt() -> types_logical::MemoryContextHandle
+    pub fn create_logical_decoding_context_memcxt() -> ::types_logical::MemoryContextHandle
 );
 seam_core::seam!(
     /// `MemoryContextSwitchTo(context)` — returns the previous context.
-    pub fn MemoryContextSwitchTo(context: types_logical::MemoryContextHandle) -> types_logical::MemoryContextHandle
+    pub fn MemoryContextSwitchTo(context: ::types_logical::MemoryContextHandle) -> ::types_logical::MemoryContextHandle
 );
 seam_core::seam!(
     /// `MemoryContextDelete(context)`.
-    pub fn MemoryContextDelete(context: types_logical::MemoryContextHandle)
+    pub fn MemoryContextDelete(context: ::types_logical::MemoryContextHandle)
 );
 seam_core::seam!(
     /// `makeStringInfo()` — allocate an empty output buffer (`ctx->out`).
-    pub fn makeStringInfo() -> types_logical::StringInfoHandle
+    pub fn makeStringInfo() -> ::types_logical::StringInfoHandle
 );
 
 // ---------------------------------------------------------------------------
@@ -111,13 +111,13 @@ seam_core::seam!(
 seam_core::seam!(
     /// `AllocSetContextCreate(TopMemoryContext, "archiver",
     /// ALLOCSET_DEFAULT_SIZES)` (pgarch.c PgArchiverMain).
-    pub fn create_archiver_memcxt() -> types_logical::MemoryContextHandle
+    pub fn create_archiver_memcxt() -> ::types_logical::MemoryContextHandle
 );
 seam_core::seam!(
     /// `MemoryContextReset(context)` — release the context's child contexts
     /// and free all but the context's standard allocation, keeping the
     /// context itself reusable.
-    pub fn MemoryContextReset(context: types_logical::MemoryContextHandle)
+    pub fn MemoryContextReset(context: ::types_logical::MemoryContextHandle)
 );
 
 // ---------------------------------------------------------------------------

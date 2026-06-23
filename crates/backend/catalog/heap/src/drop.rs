@@ -6,15 +6,15 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_core::fmgr::F_OIDEQ;
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::fmgr::F_OIDEQ;
 use types_error::{PgResult, ERROR};
-use scankey::ScanKeyInit;
-use utils_error::elog;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
-use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE};
+use ::scankey::ScanKeyInit;
+use ::utils_error::elog;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
+use ::types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE};
 use types_tuple::heaptuple::Datum;
 
 use crate::delete::{DeleteAttributeTuples, DeleteRelationTuple, RelationRemoveInheritance};

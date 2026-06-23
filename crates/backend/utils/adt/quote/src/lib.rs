@@ -128,7 +128,7 @@ fn quote_literal_internal<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'m
 /// literal without the C NUL terminator. The quoting only emits ASCII delimiters
 /// around the (already valid UTF-8) input, so the result is valid UTF-8.
 pub fn quote_literal_cstr(rawstr: &str) -> String {
-    let ctx = mcx::MemoryContext::new("quote_literal_cstr");
+    let ctx = ::mcx::MemoryContext::new("quote_literal_cstr");
     let buf = quote_literal_internal(ctx.mcx(), rawstr.as_bytes())
         .expect("quote_literal_cstr: palloc failed");
     // pstrdup-out into the caller's representation (the C palloc'd C string).
@@ -188,7 +188,7 @@ mod tests {
     use super::*;
 
     fn lit_cstr(s: &[u8]) -> alloc::vec::Vec<u8> {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let out = quote_literal_internal(ctx.mcx(), s).unwrap().as_slice().to_vec();
         out
     }
@@ -228,14 +228,14 @@ mod tests {
 
     #[test]
     fn quote_nullable_none_is_text_null() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let out = quote_nullable(ctx.mcx(), None).unwrap().as_slice().to_vec();
         assert_eq!(out, b"NULL");
     }
 
     #[test]
     fn quote_nullable_some_delegates_to_quote_literal() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let out = quote_nullable(ctx.mcx(), Some(b"x")).unwrap().as_slice().to_vec();
         assert_eq!(out, b"'x'");
     }

@@ -10,10 +10,10 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::BlockNumber;
-use types_error::PgResult;
-use types_nbtree::BTScanOpaqueData;
-use rel::Relation;
+use ::types_core::primitive::BlockNumber;
+use ::types_error::PgResult;
+use ::types_nbtree::BTScanOpaqueData;
+use ::rel::Relation;
 
 seam_core::seam!(
     /// `_bt_parallel_seize(scan, &next_scan_page, &last_curr_page, first)`

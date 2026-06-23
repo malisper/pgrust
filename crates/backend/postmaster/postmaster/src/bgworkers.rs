@@ -13,7 +13,7 @@
 
 #![allow(non_snake_case)]
 
-use launch_backend::postmaster_child_launch;
+use ::launch_backend::postmaster_child_launch;
 use pmchild::{
     AssignPostmasterChildSlot, ActiveChildListSnapshot, MarkActiveChildBgworkerNotify,
     ReleasePostmasterChildSlot, SetActiveChildBgworkerInfo, SetActiveChildBkendType,
@@ -21,8 +21,8 @@ use pmchild::{
 };
 use utils_error::{ereport};
 use types_error::{DEBUG1, LOG};
-use types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED;
-use types_startup::StartupData;
+use ::types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED;
+use ::types_startup::StartupData;
 
 use crate::core::{pm, pm_mut, PMState, B_BG_WORKER, SIGUSR1};
 use crate::helpers::{here, kill};

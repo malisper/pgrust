@@ -14,12 +14,12 @@
 use core::any::Any;
 
 use types_core::{Oid, TimestampTz};
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{
     PgStat_FetchConsistency, PgStat_Kind, PGSTAT_KIND_BUILTIN_MAX, PGSTAT_KIND_BUILTIN_MIN,
     PGSTAT_KIND_MAX, PGSTAT_KIND_MIN,
 };
-use types_pgstat::pgstat_internal::{PgStat_HashKey, PgStatShared_Common, PgStatShared_HashEntry};
+use ::types_pgstat::pgstat_internal::{PgStat_HashKey, PgStatShared_Common, PgStatShared_HashEntry};
 
 use crate::entry_ref::PgStat_EntryRef;
 use crate::local;
@@ -230,7 +230,7 @@ fn flush_pending_entries(nowait: bool) -> PgResult<bool> {
 
 /// Drop an entry's pending data without flushing (used when a kind has no
 /// `flush_pending_cb`).
-fn drop_pending(key: &types_pgstat::pgstat_internal::PgStat_HashKey) {
+fn drop_pending(key: &::types_pgstat::pgstat_internal::PgStat_HashKey) {
     local::with_pending(|p| {
         if let Some(e) = p.entry_ref_hash.get_mut(key) {
             e.entry_ref.pending = None;
@@ -366,7 +366,7 @@ pub fn pgstat_fetch_pending_entry(
 /// data, or when the pending value is not a `T` (a kind/key mismatch — a bug at
 /// the call site, surfaced rather than mis-downcast).
 pub fn pgstat_with_pending_mut<T: 'static, R>(
-    key: types_pgstat::pgstat_internal::PgStat_HashKey,
+    key: ::types_pgstat::pgstat_internal::PgStat_HashKey,
     f: impl FnOnce(&mut T) -> R,
 ) -> Option<R> {
     local::with_pending(|p| {
@@ -380,7 +380,7 @@ pub fn pgstat_with_pending_mut<T: 'static, R>(
 /// Whether the entry keyed by `key` currently carries pending data — C's
 /// implicit `pgstat_fetch_pending_entry(...) != NULL` test, used by the
 /// relation hooks before reaching for a pending block.
-pub fn pgstat_have_pending(key: types_pgstat::pgstat_internal::PgStat_HashKey) -> bool {
+pub fn pgstat_have_pending(key: ::types_pgstat::pgstat_internal::PgStat_HashKey) -> bool {
     local::with_pending(|p| {
         p.entry_ref_hash
             .get(&key)
@@ -515,7 +515,7 @@ pub fn pgstat_init_snapshot_fixed() -> PgResult<()> {
 ///
 /// This mirrors C's `pgstat_get_entry_data(kind, stats)` (which returns
 /// `(char *) stats + kind_info->shared_data_off`). `data_off` is the kind's
-/// registered [`shared_data_off`](types_pgstat::pgstat_internal::PgStat_KindInfo::shared_data_off),
+/// registered [`shared_data_off`](::types_pgstat::pgstat_internal::PgStat_KindInfo::shared_data_off),
 /// i.e. `offset_of!(PgStatShared_<Kind>, stats)`.
 ///
 /// It is NOT correct to use `size_of::<PgStatShared_Common>()` here: when the
@@ -1011,10 +1011,10 @@ pub fn pgstat_get_kind_from_str(kind_str: &str) -> PgResult<PgStat_Kind> {
     // C asserts a valid kind here (callers validate the string first); the
     // SQL-exposed `pg_stat_have_stats` validates its `stats_type` argument, so
     // an unknown name is a user-facing invalid-parameter error.
-    Err(types_error::PgError::error(format!(
+    Err(::types_error::PgError::error(format!(
         "invalid statistics kind: \"{kind_str}\""
     ))
-    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE))
+    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE))
 }
 
 // ---------------------------------------------------------------------------
@@ -1068,7 +1068,7 @@ fn pgstat_reset_after_failure() -> PgResult<()> {
 
 /// `PGSTAT_FILE_FORMAT_ID` (`pgstat.h`).
 const PGSTAT_FILE_FORMAT_ID: i32 =
-    types_pgstat::activity_pgstat::PGSTAT_FILE_FORMAT_ID as i32;
+    ::types_pgstat::activity_pgstat::PGSTAT_FILE_FORMAT_ID as i32;
 
 /// `PGSTAT_FILE_ENTRY_END` (`pgstat.c`) — end of file.
 const PGSTAT_FILE_ENTRY_END: u8 = b'E';
@@ -1526,8 +1526,8 @@ pub fn pgstat_shutdown_hook(_code: i32, _arg: types_tuple::Datum<'static>) -> Pg
     // drop the backend stats entry; if it could not be freed (still referenced),
     // request a GC of stale entry refs (C pgstat_request_entry_refs_gc()).
     let dropped = shmem::pgstat_drop_entry(
-        types_pgstat::activity_pgstat::PGSTAT_KIND_BACKEND,
-        types_core::primitive::InvalidOid,
+        ::types_pgstat::activity_pgstat::PGSTAT_KIND_BACKEND,
+        ::types_core::primitive::InvalidOid,
         proc_seams::my_proc_number::call() as u64,
     )?;
     if !dropped {

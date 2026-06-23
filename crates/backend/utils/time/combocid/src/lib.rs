@@ -23,7 +23,7 @@
 //! `childXids`/savepoint names (see `DESIGN_DEBT.md`): the backend-local cell
 //! cannot borrow the context it would allocate in. Every allocating touch is
 //! still fallible (`try_reserve`-style), carrying C's OOM `ereport(ERROR)`
-//! surface via [`mcx::oom_named`] against the `ComboCidState` name; what is
+//! surface via [`::mcx::oom_named`] against the `ComboCidState` name; what is
 //! lost is only the context-accounting coupling.
 //!
 //! The `HeapTupleHeaderGetCmin`/`Cmax`/`AdjustCmax` macros over the file-scope
@@ -38,16 +38,16 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::oom_named;
+use ::mcx::oom_named;
 use types_core::{CommandId, Size, TransactionId};
 use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     HeapTupleHeaderData, HeapTupleHeaderGetRawCommandId, HeapTupleHeaderGetRawXmin,
     HeapTupleHeaderXminCommitted, HEAP_COMBOCID, HEAP_MOVED, HEAP_XMIN_FROZEN,
 };
 
 /// The named C context this backend-local state stands in for, used for the
-/// OOM `ereport` message shape (`mcx::oom_named`).
+/// OOM `ereport` message shape (`::mcx::oom_named`).
 const COMBOCID_CONTEXT_NAME: &str = "TopTransactionContext";
 
 thread_local! {

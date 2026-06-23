@@ -6,8 +6,8 @@
 //! both name them without a dependency cycle.
 
 use mcx::{Mcx, PgBox};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::Bitmapset;
 
 /// `EventTriggerEvent` (evtcache.h) — which event a trigger fires on.
@@ -53,7 +53,7 @@ impl<'mcx> EventTriggerCacheItem<'mcx> {
     /// fallible.
     pub fn clone_in<'b>(&self, dst: Mcx<'b>) -> PgResult<EventTriggerCacheItem<'b>> {
         let tagset = match &self.tagset {
-            Some(bms) => Some(mcx::alloc_in(dst, bms.clone_in(dst)?)?),
+            Some(bms) => Some(::mcx::alloc_in(dst, bms.clone_in(dst)?)?),
             None => None,
         };
         Ok(EventTriggerCacheItem {

@@ -22,14 +22,14 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::init::{BackendType, BACKEND_NUM_TYPES};
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::init::{BackendType, BACKEND_NUM_TYPES};
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
-use types_core::primitive::TimestampTz;
-use types_pgstat::activity_pgstat::{
+use ::types_core::primitive::TimestampTz;
+use ::types_pgstat::activity_pgstat::{
     IOContext, IOObject, IOOp, PgStat_BktypeIO, IOCONTEXT_NUM_TYPES, IOOBJECT_NUM_TYPES,
     IOOP_NUM_TYPES,
 };

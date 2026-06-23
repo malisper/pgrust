@@ -37,14 +37,14 @@
 //! (`backend-utils-adt-varlena`): the lane delivers the header-stripped payload
 //! (`VARDATA_ANY`), which is exactly what the cores expect.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use jsonb_util::VARHDRSZ;
+use ::jsonb_util::VARHDRSZ;
 use fmgr_core as fmgr_core;
-/// The unified value type the `to_jsonb` core consumes (`types_tuple::Datum`).
-use types_tuple::Datum as ValDatum;
+/// The unified value type the `to_jsonb` core consumes (`::types_tuple::Datum`).
+use ::types_tuple::Datum as ValDatum;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -125,7 +125,7 @@ fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, i: i32) -> types_core::Oid
     fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), i)
 }
 
-/// Materialize argument `i` as the unified `types_tuple::Datum` the `to_jsonb`
+/// Materialize argument `i` as the unified `::types_tuple::Datum` the `to_jsonb`
 /// value core consumes: a by-value scalar word, a by-reference varlena, a
 /// `cstring`, or a composite record. Scratch copies live in `mcx`. The arg must
 /// be non-NULL (`to_jsonb` is `proisstrict`).
@@ -138,18 +138,18 @@ fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, i: i32) -> types_core::Oid
 /// the `ByRef` image verbatim — no header re-attachment (which would corrupt the
 /// scalar output-function path).
 fn arg_value<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
 ) -> types_error::PgResult<ValDatum<'mcx>> {
     Ok(match fcinfo.ref_arg(i) {
-        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(mcx::slice_in(mcx, b)?),
+        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(::mcx::slice_in(mcx, b)?),
         Some(RefPayload::Cstring(s)) => ValDatum::Cstring(s.clone()),
         Some(RefPayload::Composite(image)) => {
-            ValDatum::Composite(types_tuple::FormedTuple::from_datum_image(mcx, image)?)
+            ValDatum::Composite(::types_tuple::FormedTuple::from_datum_image(mcx, image)?)
         }
         Some(RefPayload::Expanded(eo)) => {
-            ValDatum::ByRef(mcx::slice_in(mcx, &datum::flatten_expanded(eo.as_ref()))?)
+            ValDatum::ByRef(::mcx::slice_in(mcx, &::datum::flatten_expanded(eo.as_ref()))?)
         }
         // `to_jsonb` does not take an `internal` argument.
         Some(RefPayload::Internal(_)) => {
@@ -239,8 +239,8 @@ fn ret_opt<T>(
 /// A scratch context for cores that allocate their result through `Mcx`. The
 /// resulting bytes are copied onto the by-ref lane before it is dropped (C: the
 /// palloc'd result lives in the caller's context; here it crosses by value).
-fn scratch_mcx() -> mcx::MemoryContext {
-    mcx::MemoryContext::new("jsonb fmgr scratch")
+fn scratch_mcx() -> ::mcx::MemoryContext {
+    ::mcx::MemoryContext::new("jsonb fmgr scratch")
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +492,7 @@ const TEXTOID: types_core::Oid = 25;
 
 /// The extracted variadic argument vectors (`Datum *args`, `Oid *types`,
 /// `bool *nulls`), or `None` for the C `nargs < 0` `PG_RETURN_NULL()` case
-/// (`VARIADIC NULL`). The `Datum`s are canonical `types_tuple::Datum`s living in
+/// (`VARIADIC NULL`). The `Datum`s are canonical `::types_tuple::Datum`s living in
 /// the supplied scratch `mcx`.
 struct VariadicArgs<'mcx> {
     args: alloc::vec::Vec<ValDatum<'mcx>>,
@@ -503,7 +503,7 @@ struct VariadicArgs<'mcx> {
 /// `extract_variadic_args(fcinfo, variadic_start, convert_unknown=true, ...)`
 /// (funcapi.c). `None` is the C `return -1` (`VARIADIC NULL`).
 fn extract_variadic_args<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     variadic_start: usize,
 ) -> types_error::PgResult<Option<VariadicArgs<'mcx>>> {
@@ -769,8 +769,8 @@ mod tests {
     use jsonb_util::{
         self as jbu, jbvType, JsonbValue, JsonbValueData, JsonbIteratorToken::*,
     };
-    use mcx::MemoryContext;
-    use datum::NullableDatum;
+    use ::mcx::MemoryContext;
+    use ::datum::NullableDatum;
 
     /// Install the external seams the jsonb serialization / compare / hash cores
     /// reach. Delegates to the crate's single shared installer (`tests.rs`,

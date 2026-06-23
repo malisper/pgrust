@@ -10,12 +10,12 @@
 //! the C signatures (the MCV value arrays, the `nd`/`isdefault` counts, the
 //! `stanullfrac`s, and the `have_mcvs` flags).
 
-use mcx::Mcx;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     NodeId, PlannerInfo, RelId, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER,
     JOIN_LEFT, JOIN_SEMI,
@@ -45,7 +45,7 @@ pub struct JoinSide<'a, 'mcx> {
     /// canonical images on the by-reference-capable
     /// [`fmgr::function_call_invoke_datum`] lane; `None` for a pass-by-value
     /// element (the bare word is the value).
-    pub canon: Option<&'a mcx::PgVec<'mcx, DatumV<'mcx>>>,
+    pub canon: Option<&'a ::mcx::PgVec<'mcx, DatumV<'mcx>>>,
     /// `sslot->numbers` — the side's MCV frequencies (empty when no MCV slot).
     pub numbers: &'a [f32],
     /// `stats->stanullfrac`, or `None` (`stats == NULL`).
@@ -317,7 +317,7 @@ fn build_join_side<'mcx>(
     get_mcv_stats: bool,
 ) -> PgResult<(
     Option<AttStatsSlot<'mcx>>,
-    Option<mcx::PgVec<'mcx, DatumV<'mcx>>>,
+    Option<::mcx::PgVec<'mcx, DatumV<'mcx>>>,
     Option<f32>,
     bool,
 )> {
@@ -467,7 +467,7 @@ pub fn eqjoinsel<'mcx>(
             s.min(inner_rel_rows * selec_inner)
         }
         other => {
-            return Err(types_error::PgError::error(alloc::format!(
+            return Err(::types_error::PgError::error(alloc::format!(
                 "unrecognized join type: {}",
                 other as i32
             )))
@@ -490,7 +490,7 @@ pub fn neqjoinsel<'mcx>(
     root: &mut PlannerInfo,
     operator: Oid,
     args: &[NodeId],
-    jointype: pathnodes::JoinType,
+    jointype: ::pathnodes::JoinType,
     collation: Oid,
     sjinfo: &SpecialJoinInfo,
 ) -> PgResult<f64> {

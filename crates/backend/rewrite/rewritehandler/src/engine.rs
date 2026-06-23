@@ -9,7 +9,7 @@
 //! (`relation->rd_rules->rules[i]`). The trimmed per-query `rel::Relation`
 //! handle this engine holds is node-vocabulary-free and carries no `rd_rules`, so
 //! the rules are fetched by `Oid` through the relcache
-//! [`relcache_seams::relation_rules`] reader, which
+//! [`::relcache_seams::relation_rules`] reader, which
 //! re-projects the cached `RuleLock` into the caller's `mcx` arena (the C
 //! `copyObject` of the relcache rules the rewriter performs before mutating).
 //!
@@ -29,7 +29,7 @@
 
 use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 
-use types_core::primitive::Index;
+use ::types_core::primitive::Index;
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_GENERATED_ALWAYS,
@@ -42,23 +42,23 @@ use ::nodes::nodes::{CmdType, Node, NodePtr};
 use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
 use ::nodes::primnodes::{CoerceToDomain, Expr, FieldStore, SetToDefault, SubscriptingRef, Var};
 use ::nodes::rawnodes::{CommonTableExpr, LockClauseStrength, LockWaitPolicy};
-use types_acl::acl::ACL_SELECT_FOR_UPDATE;
-use parser_analyze::applyLockingClause;
-use parser_relation::getRTEPermissionInfo;
+use ::types_acl::acl::ACL_SELECT_FOR_UPDATE;
+use ::parser_analyze::applyLockingClause;
+use ::parser_relation::getRTEPermissionInfo;
 use ::nodes::value::StringNode;
 
-use table::table_open;
-use nodes_core::makefuncs::{flat_copy_target_entry, make_null_const, make_target_entry};
-use nodes_core::nodefuncs::expr_type;
-use equalfuncs::equal_node;
-use rewrite_core::change::ChangeVarNodes;
-use rewrite_core::manip_rule::{AddInvertedQual, AddQual, CombineRangeTables};
-use rewrite_core::offset::OffsetVarNodes;
-use rewrite_core::replace::{ReplaceVarsFromTargetList, ReplaceVarsNoMatchOption};
-use rewrite_core::walkers::{checkExprHasSubLink, rangeTableEntry_used};
+use ::table::table_open;
+use ::nodes_core::makefuncs::{flat_copy_target_entry, make_null_const, make_target_entry};
+use ::nodes_core::nodefuncs::expr_type;
+use ::equalfuncs::equal_node;
+use ::rewrite_core::change::ChangeVarNodes;
+use ::rewrite_core::manip_rule::{AddInvertedQual, AddQual, CombineRangeTables};
+use ::rewrite_core::offset::OffsetVarNodes;
+use ::rewrite_core::replace::{ReplaceVarsFromTargetList, ReplaceVarsNoMatchOption};
+use ::rewrite_core::walkers::{checkExprHasSubLink, rangeTableEntry_used};
 use relcache_seams::{relation_rules, RewriteRuleImage};
-use types_storage::lock::NoLock;
-use types_tuple::heaptuple::FormData_pg_attribute;
+use ::types_storage::lock::NoLock;
+use ::types_tuple::heaptuple::FormData_pg_attribute;
 
 use crate::{build_generation_expression, view_has_instead_trigger};
 
@@ -353,7 +353,7 @@ fn findDefaultOnlyColumns<'mcx>(
     mcx: Mcx<'mcx>,
     rte: &RangeTblEntry<'_>,
 ) -> PgResult<Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>> {
-    use nodes_core::bitmapset::{bms_add_member, bms_del_member, bms_is_empty};
+    use ::nodes_core::bitmapset::{bms_add_member, bms_del_member, bms_is_empty};
     let mut default_only_cols: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
     let mut initialized = false;
 
@@ -406,7 +406,7 @@ pub fn rewriteTargetListIU<'mcx>(
     values_rte_index: i32,
     unused_values_attrnos: &mut Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>,
 ) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
-    use nodes_core::bitmapset::{bms_add_member, bms_is_member};
+    use ::nodes_core::bitmapset::{bms_add_member, bms_is_member};
 
     let rd_att = &target_relation.rd_att;
     let numattrs = rd_att.natts as usize;
@@ -651,7 +651,7 @@ pub fn rewriteValuesRTE<'mcx>(
     target_relation: &Relation<'mcx>,
     unused_cols: Option<&::nodes::bitmapset::Bitmapset<'mcx>>,
 ) -> PgResult<bool> {
-    use nodes_core::bitmapset::bms_is_member;
+    use ::nodes_core::bitmapset::bms_is_member;
 
     debug_assert!(parsetree.commandType == CmdType::CMD_INSERT);
 
@@ -886,7 +886,7 @@ fn query_range_table_entry_used(parsetree: &Query<'_>, rt_index: i32) -> bool {
         }
         false
     };
-    nodes_core::node_walker::query_tree_walker(parsetree, &mut walker, 0);
+    ::nodes_core::node_walker::query_tree_walker(parsetree, &mut walker, 0);
     used
 }
 
@@ -916,11 +916,11 @@ pub fn AcquireRewriteLocks<'mcx>(
         match rtekind {
             RTEKind::RTE_RELATION => {
                 let lockmode = if !for_execute {
-                    types_storage::lock::AccessShareLock
+                    ::types_storage::lock::AccessShareLock
                 } else if for_update_pushed_down {
                     let rte = &mut parsetree.rtable[rt_index - 1];
-                    if rte.rellockmode == types_storage::lock::AccessShareLock {
-                        rte.rellockmode = types_storage::lock::RowShareLock;
+                    if rte.rellockmode == ::types_storage::lock::AccessShareLock {
+                        rte.rellockmode = ::types_storage::lock::RowShareLock;
                     }
                     rte.rellockmode
                 } else {
@@ -958,7 +958,7 @@ pub fn AcquireRewriteLocks<'mcx>(
                                 }
                                 let curinputrte =
                                     &parsetree.rtable[(curinputvarno - 1) as usize];
-                                let dropped = parser_relation::get_rte_attribute_is_dropped(
+                                let dropped = ::parser_relation::get_rte_attribute_is_dropped(
                                     mcx,
                                     curinputrte,
                                     var.varattno,
@@ -979,7 +979,7 @@ pub fn AcquireRewriteLocks<'mcx>(
             }
             RTEKind::RTE_SUBQUERY => {
                 let pushed = for_update_pushed_down
-                    || parser_relation::get_parse_rowmark(parsetree, rt_index as Index)
+                    || ::parser_relation::get_parse_rowmark(parsetree, rt_index as Index)
                         .is_some();
                 let mut sub = parsetree.rtable[rt_index - 1]
                     .subquery
@@ -1008,16 +1008,16 @@ pub fn AcquireRewriteLocks<'mcx>(
     // rtable and cteList (so skip those, like the C walker's
     // QTW_IGNORE_RC_SUBQUERIES).
     if parsetree.hasSubLinks {
-        let mut err: Option<types_error::PgError> = None;
+        let mut err: Option<::types_error::PgError> = None;
         {
             let mut walker = |node: &mut Node<'mcx>| {
                 acquireLocksOnSubLinks(mcx, node, for_execute, &mut err)
             };
-            nodes_core::node_walker::query_tree_mutator(
+            ::nodes_core::node_walker::query_tree_mutator(
                 parsetree,
                 &mut walker,
-                nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
-                    | nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+                ::nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
+                    | ::nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
                 mcx,
             );
         }
@@ -1043,7 +1043,7 @@ fn acquireLocksOnSubLinks<'mcx>(
     mcx: Mcx<'mcx>,
     node: &mut Node<'mcx>,
     for_execute: bool,
-    err: &mut Option<types_error::PgError>,
+    err: &mut Option<::types_error::PgError>,
 ) -> bool {
     if err.is_some() {
         return true;
@@ -1059,7 +1059,7 @@ fn acquireLocksOnSubLinks<'mcx>(
                 *err = Some(e);
                 return true;
             }
-            match mcx::alloc_in(mcx, subquery) {
+            match ::mcx::alloc_in(mcx, subquery) {
                 Ok(boxed) => sub.subselect = Some(boxed),
                 Err(e) => {
                     *err = Some(e);
@@ -1071,7 +1071,7 @@ fn acquireLocksOnSubLinks<'mcx>(
     }
 
     // Do NOT recurse into Query nodes (the QTW behavior).
-    nodes_core::node_walker::expression_tree_walker_mut(
+    ::nodes_core::node_walker::expression_tree_walker_mut(
         node,
         &mut |n| acquireLocksOnSubLinks(mcx, n, for_execute, err),
         mcx,
@@ -1084,7 +1084,7 @@ fn acquireLocksOnSubLinks<'mcx>(
 fn strip_to_var<'a>(node: &'a NodePtr<'_>) -> Option<&'a Var> {
     (**node)
         .as_expr()
-        .and_then(|e| nodes_core::nodefuncs::strip_implicit_coercions(e).as_var())
+        .and_then(|e| ::nodes_core::nodefuncs::strip_implicit_coercions(e).as_var())
 }
 
 // ===========================================================================
@@ -1116,7 +1116,7 @@ pub fn rewriteRuleAction<'mcx>(
     let new_varno = PRS2_NEW_VARNO + rt_length;
 
     // Find the sub-action: the INSERT...SELECT sub-query, or the action itself.
-    let sub_action_idx = rewrite_core::getInsertSelectQueryIndex(&rule_action)?;
+    let sub_action_idx = ::rewrite_core::getInsertSelectQueryIndex(&rule_action)?;
 
     // Operate on the sub-action in place. Helper closures take the right query.
     {
@@ -1271,7 +1271,7 @@ pub fn rewriteRuleAction<'mcx>(
             !jointree_used && (qual_used || parse_qual_used)
         };
 
-        let newjointree = rewrite_core::manip_rule::adjustJoinTreeList(
+        let newjointree = ::rewrite_core::manip_rule::adjustJoinTreeList(
             parsetree, !keeporig, rt_index, mcx,
         )?;
         if !newjointree.is_empty() {
@@ -1469,7 +1469,7 @@ fn acquire_locks_on_sublinks_node<'mcx>(mcx: Mcx<'mcx>, node: &mut Node<'mcx>) -
     if !checkExprHasSubLink(node) {
         return Ok(());
     }
-    let mut err: Option<types_error::PgError> = None;
+    let mut err: Option<::types_error::PgError> = None;
     acquireLocksOnSubLinks(mcx, node, true, &mut err);
     match err {
         Some(e) => Err(e),
@@ -1677,7 +1677,7 @@ fn ApplyRetrieveRule<'mcx>(
                 // referencing the original RTE. This will later get expanded
                 // into a RowExpr computing all the OLD values of the view row.
                 let rte = &parsetree.rtable[(rt_index - 1) as usize];
-                let var = nodes_core::makefuncs::make_whole_row_var(
+                let var = ::nodes_core::makefuncs::make_whole_row_var(
                     rte, rt_index, 0, false,
                 )?;
                 let resno = (parsetree.targetList.len() + 1) as i16;
@@ -1697,7 +1697,7 @@ fn ApplyRetrieveRule<'mcx>(
     }
 
     // FOR [KEY] UPDATE/SHARE applying to this view?
-    let rc = parser_relation::get_parse_rowmark(&parsetree, rt_index as Index).cloned();
+    let rc = ::parser_relation::get_parse_rowmark(&parsetree, rt_index as Index).cloned();
 
     // Make a modifiable copy of the view query and acquire locks.
     let mut rule_action = core_clone(&rule.actions[0], mcx)?;
@@ -1971,7 +1971,7 @@ pub fn fireRIRrules<'mcx>(
     // the rtable and cteList (QTW_IGNORE_RC_SUBQUERIES).
     if parsetree.hasSubLinks {
         let mut sublink_row_security = false;
-        let mut err: Option<types_error::PgError> = None;
+        let mut err: Option<::types_error::PgError> = None;
         {
             let mut walker = |node: &mut Node<'mcx>| {
                 fireRIRonSubLink(
@@ -1982,11 +1982,11 @@ pub fn fireRIRrules<'mcx>(
                     &mut err,
                 )
             };
-            nodes_core::node_walker::query_tree_mutator(
+            ::nodes_core::node_walker::query_tree_mutator(
                 &mut parsetree,
                 &mut walker,
-                nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
-                    | nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+                ::nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
+                    | ::nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
                 mcx,
             );
         }
@@ -2068,7 +2068,7 @@ pub fn fireRIRrules<'mcx>(
                 // relations they reference (normally acquired by the parser, but
                 // these are added post-parsing).
                 {
-                    let mut err: Option<types_error::PgError> = None;
+                    let mut err: Option<::types_error::PgError> = None;
                     for q in security_quals.iter_mut() {
                         acquireLocksOnSubLinks(mcx, q, true, &mut err);
                     }
@@ -2086,7 +2086,7 @@ pub fn fireRIRrules<'mcx>(
                 // hasRowSecurity since we only reach here when it is already set.
                 {
                     let mut sublink_row_security = false;
-                    let mut err: Option<types_error::PgError> = None;
+                    let mut err: Option<::types_error::PgError> = None;
                     for q in security_quals.iter_mut() {
                         fireRIRonSubLink(
                             mcx,
@@ -2171,7 +2171,7 @@ fn fireRIRonSubLink<'mcx>(
     node: &mut Node<'mcx>,
     active_rirs: &mut Vec<Oid>,
     has_row_security: &mut bool,
-    err: &mut Option<types_error::PgError>,
+    err: &mut Option<::types_error::PgError>,
 ) -> bool {
     if err.is_some() {
         return true;
@@ -2185,7 +2185,7 @@ fn fireRIRonSubLink<'mcx>(
             match fireRIRrules(mcx, subquery, active_rirs) {
                 Ok(rewritten) => {
                     *has_row_security |= rewritten.hasRowSecurity;
-                    match mcx::alloc_in(mcx, rewritten) {
+                    match ::mcx::alloc_in(mcx, rewritten) {
                         Ok(boxed) => sub.subselect = Some(boxed),
                         Err(e) => {
                             *err = Some(e);
@@ -2204,7 +2204,7 @@ fn fireRIRonSubLink<'mcx>(
 
     // Do NOT recurse into Query nodes; expression_tree_walker_mut's Query arm
     // returns false, matching the C QTW behavior.
-    nodes_core::node_walker::expression_tree_walker_mut(
+    ::nodes_core::node_walker::expression_tree_walker_mut(
         node,
         &mut |n| fireRIRonSubLink(mcx, n, active_rirs, has_row_security, err),
         mcx,
@@ -2229,9 +2229,9 @@ fn rewriteTargetView<'mcx>(
     mut parsetree: Query<'mcx>,
     view: &Relation<'mcx>,
 ) -> PgResult<Query<'mcx>> {
-    use nodes_core::bitmapset::{bms_is_empty, bms_union};
+    use ::nodes_core::bitmapset::{bms_is_empty, bms_union};
     use parser_relation::{addRTEPermissionInfo, getRTEPermissionInfo};
-    use types_storage::lock::RowExclusiveLock;
+    use ::types_storage::lock::RowExclusiveLock;
 
     // Get the Query from the view's ON SELECT rule. get_view_query already
     // returns a fresh copyObject re-projected into mcx, so it is ours to munge.
@@ -2292,7 +2292,7 @@ fn rewriteTargetView<'mcx>(
         for tle in parsetree.targetList.iter() {
             if !tle.resjunk {
                 let prev = modified_cols.take();
-                modified_cols = Some(nodes_core::bitmapset::bms_add_member(
+                modified_cols = Some(::nodes_core::bitmapset::bms_add_member(
                     mcx,
                     prev,
                     tle.resno as i32 - crate::FirstLowInvalidHeapAttributeNumber,
@@ -2305,7 +2305,7 @@ fn rewriteTargetView<'mcx>(
                 if let Some(tle) = (**tle_node).as_targetentry() {
                     if !tle.resjunk {
                         let prev = modified_cols.take();
-                        modified_cols = Some(nodes_core::bitmapset::bms_add_member(
+                        modified_cols = Some(::nodes_core::bitmapset::bms_add_member(
                             mcx,
                             prev,
                             tle.resno as i32 - crate::FirstLowInvalidHeapAttributeNumber,
@@ -2324,7 +2324,7 @@ fn rewriteTargetView<'mcx>(
                         if let Some(tle) = (**tle_node).as_targetentry() {
                             if !tle.resjunk {
                                 let prev = modified_cols.take();
-                                modified_cols = Some(nodes_core::bitmapset::bms_add_member(
+                                modified_cols = Some(::nodes_core::bitmapset::bms_add_member(
                                     mcx,
                                     prev,
                                     tle.resno as i32 - crate::FirstLowInvalidHeapAttributeNumber,
@@ -2422,15 +2422,15 @@ fn rewriteTargetView<'mcx>(
     // to (C: acquireLocksOnSubLinks with for_execute = true,
     // QTW_IGNORE_RC_SUBQUERIES). A no-op otherwise.
     if viewquery.hasSubLinks {
-        let mut err: Option<types_error::PgError> = None;
+        let mut err: Option<::types_error::PgError> = None;
         {
             let mut walker =
                 |node: &mut Node<'mcx>| acquireLocksOnSubLinks(mcx, node, true, &mut err);
-            nodes_core::node_walker::query_tree_mutator(
+            ::nodes_core::node_walker::query_tree_mutator(
                 &mut viewquery,
                 &mut walker,
-                nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
-                    | nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
+                ::nodes_core::node_walker::QTW_IGNORE_RT_SUBQUERIES
+                    | ::nodes_core::node_walker::QTW_IGNORE_CTE_SUBQUERIES,
                 mcx,
             );
         }
@@ -2616,9 +2616,9 @@ fn rewriteTargetView<'mcx>(
             .exclRelIndex;
 
         let excl_alias =
-            nodes_core::makefuncs::make_alias(mcx, "excluded", PgVec::new_in(mcx))?;
+            ::nodes_core::makefuncs::make_alias(mcx, "excluded", PgVec::new_in(mcx))?;
         let mut excl_pstate = small1::make_parsestate(mcx, None)?;
-        let new_excl_nsitem = parser_relation::addRangeTableEntryForRelation(
+        let new_excl_nsitem = ::parser_relation::addRangeTableEntryForRelation(
             mcx,
             &mut excl_pstate,
             &base_rel,
@@ -2632,7 +2632,7 @@ fn rewriteTargetView<'mcx>(
             .map(|b| (*b).clone_in(mcx))
             .transpose()?
             .ok_or_else(|| elog("rewriteTargetView: EXCLUDED nsitem has no RTE"))?;
-        new_excl_rte.relkind = types_tuple::access::RELKIND_COMPOSITE_TYPE as i8;
+        new_excl_rte.relkind = ::types_tuple::access::RELKIND_COMPOSITE_TYPE as i8;
         // Ignore the RTEPermissionInfo that would've been added.
         new_excl_rte.perminfoindex = 0;
 
@@ -2647,7 +2647,7 @@ fn rewriteTargetView<'mcx>(
         // Replace the targetlist for the EXCLUDED pseudo-relation with a new one,
         // representing the columns from the new base relation.
         // (rewriteHandler.c:3705)
-        let new_excl_tlist = parser_analyze::BuildOnConflictExcludedTargetlist(
+        let new_excl_tlist = ::parser_analyze::BuildOnConflictExcludedTargetlist(
             mcx,
             &base_rel,
             new_excl_rel_index,
@@ -2799,7 +2799,7 @@ fn view_tle_base_attno<'mcx>(
     view_targetlist: &[::nodes::primnodes::TargetEntry<'mcx>],
     resno: i16,
 ) -> PgResult<i16> {
-    use parser_relation::get_tle_by_resno;
+    use ::parser_relation::get_tle_by_resno;
     let view_tle = get_tle_by_resno(view_targetlist, resno);
     match view_tle {
         Some(tle) if !tle.resjunk => {

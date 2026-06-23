@@ -36,24 +36,24 @@ use utils_error::{elog, ereport};
 use types_error::{
     ErrorLocation, PgResult, DEBUG1, DEBUG3, ERRCODE_ADMIN_SHUTDOWN, LOG, WARNING,
 };
-use types_core::primitive::XLogRecPtr;
-use types_core::xact::{
+use ::types_core::primitive::XLogRecPtr;
+use ::types_core::xact::{
     InvalidXLogRecPtr, SYNCHRONOUS_COMMIT_LOCAL_FLUSH, SYNCHRONOUS_COMMIT_REMOTE_APPLY,
     SYNCHRONOUS_COMMIT_REMOTE_FLUSH, SYNCHRONOUS_COMMIT_REMOTE_WRITE,
 };
 use types_core::{ProcNumber, INVALID_PROC_NUMBER};
-use replication::walsender::{SyncRepStandbyData, WalSndState};
-use types_storage::storage::{proclist_node, LWLockMode, SYNC_REP_LOCK};
-use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
+use ::replication::walsender::{SyncRepStandbyData, WalSndState};
+use ::types_storage::storage::{proclist_node, LWLockMode, SYNC_REP_LOCK};
+use ::types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
 
 use syncrep_gram::{syncrep_yyparse, SYNC_REP_PRIORITY};
-use walsender::core as wsctl;
+use ::walsender::core as wsctl;
 
 use latch_seams as latch;
 use lwlock_seams as lwlock;
 use lmgr_proc_seams as proc_s;
 use init_small_seams as misc;
-use guc_tables::vars;
+use ::guc_tables::vars;
 use ps_status_seams as ps;
 
 mod seams;
@@ -953,7 +953,7 @@ pub fn check_synchronous_standby_names(newval: Option<&str>) -> PgResult<CheckRe
                 Ok(parsed) => parsed,
                 Err(err) => {
                     use misc_guc::{GUC_check_errcode, GUC_check_errdetail};
-                    use types_error::ERRCODE_SYNTAX_ERROR;
+                    use ::types_error::ERRCODE_SYNTAX_ERROR;
                     GUC_check_errcode(ERRCODE_SYNTAX_ERROR);
                     let msg = err.message();
                     if !msg.is_empty() {
@@ -970,7 +970,7 @@ pub fn check_synchronous_standby_names(newval: Option<&str>) -> PgResult<CheckRe
             };
 
             if parsed.num_sync() <= 0 {
-                use misc_guc::GUC_check_errmsg;
+                use ::misc_guc::GUC_check_errmsg;
                 GUC_check_errmsg(alloc::format!(
                     "number of synchronous standbys ({}) must be greater than zero",
                     parsed.num_sync()
@@ -1063,7 +1063,7 @@ fn ascii_tolower(c: u8) -> u8 {
 // `SyncRepLock` held (except the lock-free detached read).
 // ===========================================================================
 
-type Queue = types_storage::storage::proclist_head;
+type Queue = ::types_storage::storage::proclist_head;
 
 #[inline]
 fn link_next(node: proclist_node) -> ProcNumber {

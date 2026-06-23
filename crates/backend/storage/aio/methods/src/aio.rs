@@ -1013,5 +1013,5 @@ fn clear_pgaio_my_backend_local() {
 
 /// `elog(WARNING, ...)` — surfaced through the error crate's logging path.
 fn log_warning(msg: &str) {
-    let _ = utils_error::elog(types_error::WARNING, msg.to_string());
+    let _ = utils_error::elog(::types_error::WARNING, msg.to_string());
 }

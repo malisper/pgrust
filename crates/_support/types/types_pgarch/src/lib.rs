@@ -9,8 +9,8 @@
 #![no_std]
 
 use core::sync::atomic::AtomicI32;
-use types_core::ProcNumber;
-use types_storage::storage::pg_atomic_uint32;
+use ::types_core::ProcNumber;
+use ::types_storage::storage::pg_atomic_uint32;
 
 /// `typedef struct PgArchData` — the archiver's shared-memory control block.
 #[repr(C)]

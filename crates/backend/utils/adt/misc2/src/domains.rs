@@ -38,8 +38,8 @@ use syscache_seams as syscache_seams;
 use typcache_seams as typcache_seams;
 use fmgr_seams as fmgr_seams;
 use mcx::{Mcx, MemoryContext};
-use cache::typcache::{DomainCtxHandle, DomainLevelScan};
-use types_core::Oid;
+use ::cache::typcache::{DomainCtxHandle, DomainLevelScan};
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
 use types_tuple::heaptuple::Datum;
@@ -59,7 +59,7 @@ pub fn domain_in<'mcx>(
     string: Option<&str>,
     typioparam: u32,
     _typmod: i32,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Datum<'mcx>> {
     let domain_type = typioparam;
     let mut escontext = escontext;
@@ -171,7 +171,7 @@ pub fn domain_check_safe<'mcx>(
     value: &Datum<'mcx>,
     isnull: bool,
     domain_type: u32,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<bool> {
     let mut escontext = escontext;
     typcache_seams::domain_check_input::call(value, isnull, domain_type, escontext.as_deref_mut())?;
@@ -225,7 +225,7 @@ pub fn errdomainconstraint(_datatype_oid: u32, _conname: &str) -> PgResult<()> {
 std::thread_local! {
     /// Backend-lifetime context backing [`plan_check_expr`]. The planned domain
     /// CHECK `Expr` it produces is cached in the typcache at backend lifetime
-    /// and can embed context-allocated `mcx::PgBox`/`PgVec` children, so a
+    /// and can embed context-allocated `::mcx::PgBox`/`PgVec` children, so a
     /// transient context freed on return would dangle them (double-free /
     /// SIGSEGV on later domain-check evaluation or cache drop). This leaked,
     /// never-reset context keeps them valid for the node's lifetime (mirrors
@@ -247,7 +247,7 @@ fn domain_check_mcx() -> Mcx<'static> {
 /// node lives at cache lifetime. The returned [`Expr`] is stored long-term in
 /// the typcache `DomainConstraintState` and evaluated on every cast to the
 /// domain, so it MUST outlive this call. A planned `Expr` tree can embed
-/// context-allocated `mcx::PgBox`/`PgVec` children (e.g. const-folded
+/// context-allocated `::mcx::PgBox`/`PgVec` children (e.g. const-folded
 /// sub-expressions the `expression_planner` builds into the passed `Mcx`), so a
 /// transient `MemoryContext::new(..)` freed on return would leave those
 /// children's allocator dangling — a later domain-constraint evaluation or the

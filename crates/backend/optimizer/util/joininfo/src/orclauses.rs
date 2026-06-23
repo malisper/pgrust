@@ -3,12 +3,12 @@
 
 use alloc::vec::Vec;
 
-use nodes_core::makefuncs::{make_ands_explicit, make_orclause};
-use mcx::Mcx;
-use types_error::PgResult;
+use ::nodes_core::makefuncs::{make_ands_explicit, make_orclause};
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use types_core::primitive::Index;
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::Index;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId, RinfoId, JOIN_INNER};
 
 use crate::bms;
@@ -28,7 +28,7 @@ fn is_andclause(node: &Expr) -> bool {
     matches!(node, Expr::BoolExpr(b) if b.boolop == AND_EXPR)
 }
 
-const RELOPT_BASEREL: pathnodes::RelOptKind = pathnodes::RELOPT_BASEREL;
+const RELOPT_BASEREL: ::pathnodes::RelOptKind = ::pathnodes::RELOPT_BASEREL;
 
 /// `extract_restriction_or_clauses`
 ///	  Examine join OR-of-AND clauses to see if any useful restriction OR clauses
@@ -262,10 +262,10 @@ fn consider_new_or_clause<'mcx>(
 /// `bms_difference` outer side is not a single rel). The body is a pure struct
 /// initialiser, identical to the joinrels.c original.
 fn init_dummy_sjinfo(
-    left_relids: pathnodes::Relids,
-    right_relids: pathnodes::Relids,
-) -> pathnodes::SpecialJoinInfo {
-    pathnodes::SpecialJoinInfo {
+    left_relids: ::pathnodes::Relids,
+    right_relids: ::pathnodes::Relids,
+) -> ::pathnodes::SpecialJoinInfo {
+    ::pathnodes::SpecialJoinInfo {
         min_lefthand: bms::relids_copy::call(&left_relids),
         min_righthand: bms::relids_copy::call(&right_relids),
         syn_lefthand: left_relids,

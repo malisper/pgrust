@@ -45,16 +45,16 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgVec, MAX_ALLOC_SIZE};
 
-use types_core::catalog::VOIDOID;
-use types_core::fmgr::FLOAT8PASSBYVAL;
+use ::types_core::catalog::VOIDOID;
+use ::types_core::fmgr::FLOAT8PASSBYVAL;
 use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::error::{
+use ::types_error::error::{
     ERRCODE_AMBIGUOUS_PARAMETER, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INTERNAL_ERROR,
     ERRCODE_NAME_TOO_LONG, ERRCODE_OUT_OF_MEMORY, ERRCODE_TOO_MANY_COLUMNS,
     ERRCODE_UNDEFINED_PARAMETER,
 };
 use types_error::{ErrorLocation, PgError, PgResult, SoftErrorContext, ERROR, NOTICE};
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::params::ParamRef;
@@ -64,16 +64,16 @@ use ::nodes::rawnodes::{A_Const, A_Indices};
 use ::nodes::queryenvironment::{EphemeralNamedRelationMetadataData, QueryEnvironment};
 use ::nodes::copy_query::Query;
 
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     BITOID, BOOLOID, INT2ARRAYOID, INT2VECTOROID, INT4OID, INT8OID, MaxTupleAttributeNumber,
     NUMERICOID, OIDARRAYOID, OIDVECTOROID, UNKNOWNOID,
 };
 
-use types_storage::lock::NoLock;
+use ::types_storage::lock::NoLock;
 
-use utils_error::ereport;
-use nodes_core::makefuncs::make_const as makeConst;
-use nodes_core::nodefuncs::expr_location;
+use ::utils_error::ereport;
+use ::nodes_core::makefuncs::make_const as makeConst;
+use ::nodes_core::nodefuncs::expr_location;
 
 use lsyscache_seams as lsyscache;
 use mbutils_seams as mb;
@@ -944,7 +944,7 @@ pub fn check_variable_parameters(pstate: &ParseState<'_>, query: &Query<'_>) -> 
 
     // (void) query_tree_walker(query, check_parameter_resolution_walker, pstate, 0);
     let mut walk_err: PgResult<()> = Ok(());
-    nodes_core::node_walker::query_tree_walker(
+    ::nodes_core::node_walker::query_tree_walker(
         query,
         &mut |node| check_parameter_resolution_walker(node, pstate, parstate, &mut walk_err),
         0,
@@ -998,13 +998,13 @@ fn check_parameter_resolution_walker(
     }
     if let Some(q) = node_as_query(node) {
         // Recurse into RTE subquery or not-yet-planned sublink subquery.
-        return nodes_core::node_walker::query_tree_walker(
+        return ::nodes_core::node_walker::query_tree_walker(
             q,
             &mut |n| check_parameter_resolution_walker(n, pstate, parstate, err),
             0,
         );
     }
-    nodes_core::node_walker::expression_tree_walker(node, &mut |n| {
+    ::nodes_core::node_walker::expression_tree_walker(node, &mut |n| {
         check_parameter_resolution_walker(n, pstate, parstate, err)
     })
 }
@@ -1026,7 +1026,7 @@ fn query_contains_extern_params_walker(node: &Node<'_>) -> bool {
         // Recurse into RTE subquery or not-yet-planned sublink subquery.
         return query_contains_extern_params_walker_query(q);
     }
-    nodes_core::node_walker::expression_tree_walker(
+    ::nodes_core::node_walker::expression_tree_walker(
         node,
         &mut query_contains_extern_params_walker,
     )
@@ -1035,7 +1035,7 @@ fn query_contains_extern_params_walker(node: &Node<'_>) -> bool {
 /// The `query_tree_walker(query, query_contains_extern_params_walker, ...)`
 /// entry from a `Query`.
 fn query_contains_extern_params_walker_query(query: &Query<'_>) -> bool {
-    nodes_core::node_walker::query_tree_walker(
+    ::nodes_core::node_walker::query_tree_walker(
         query,
         &mut query_contains_extern_params_walker,
         0,

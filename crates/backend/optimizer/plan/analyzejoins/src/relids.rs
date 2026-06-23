@@ -1,7 +1,7 @@
 //! Planner [`Relids`] (`Bitmapset *`) set algebra used by analyzejoins.c.
 //!
 //! The planner `Relids` is `Option<Box<Bitmapset>>` where the planner
-//! [`pathnodes::Bitmapset`] is lifetime-free (`{ words: Vec<u64> }`,
+//! [`::pathnodes::Bitmapset`] is lifetime-free (`{ words: Vec<u64> }`,
 //! `Clone`). The canonical [`nodes_core::bitmapset`] family operates on a
 //! *different*, lifetime-bound arena `Bitmapset<'mcx>`, so the small algebra is
 //! reproduced here over the word storage directly (mirroring the established

@@ -11,9 +11,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_error::PgResult;
-use regex::RegexecResult;
-use tsearch::TSLexeme;
+use ::types_error::PgResult;
+use ::regex::RegexecResult;
+use ::tsearch::TSLexeme;
 
 use crate::{
     check_stack_depth, Affix, AffixReg, IspellDict, FF_COMPOUNDBEGIN, FF_COMPOUNDFORBIDFLAG,
@@ -198,8 +198,8 @@ impl<'mcx> IspellDict<'mcx> {
                 match res {
                     RegexecResult::Matched => Ok((true, new_baselen)),
                     RegexecResult::NoMatch => Ok((false, new_baselen)),
-                    RegexecResult::Failed(f) => Err(utils_error::ereport(types_error::ERROR)
-                        .errcode(types_error::ERRCODE_INVALID_REGULAR_EXPRESSION)
+                    RegexecResult::Failed(f) => Err(utils_error::ereport(::types_error::ERROR)
+                        .errcode(::types_error::ERRCODE_INVALID_REGULAR_EXPRESSION)
                         .errmsg(alloc::format!("regular expression failed: {}", f.message))
                         .into_error()),
                 }

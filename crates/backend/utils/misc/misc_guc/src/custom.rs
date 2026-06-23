@@ -17,7 +17,7 @@
 //!
 //! The live `config_*` records ([`crate::model`]) reference their storage and
 //! hooks through `&'static` install-once *slots*
-//! ([`guc_tables::GucSlot`]). Core GUCs declare those slots as
+//! ([`::guc_tables::GucSlot`]). Core GUCs declare those slots as
 //! file statics in `guc_tables`; a *custom* GUC has no compiled-in slot, so —
 //! exactly as C `guc_malloc`s the `config_*` struct into `GUCMemoryContext` and
 //! never frees it — we leak a freshly-`Box`ed slot to `'static` per registration
@@ -26,7 +26,7 @@
 //! per-backend cell) and the hook `fn` pointers by value; we install them into
 //! the leaked slots and build the record from them.
 
-use types_core::BOOTSTRAP_SUPERUSERID;
+use ::types_core::BOOTSTRAP_SUPERUSERID;
 use types_error::{PgResult, WARNING};
 use types_guc::{
     config_enum_entry, config_group, config_type, GucContext, GucSource, GUC_CUSTOM_PLACEHOLDER,
@@ -89,7 +89,7 @@ fn init_custom_context(name: &str, context: GucContext, flags: i32) -> PgResult<
 
     // We can't support custom GUC_LIST_QUOTE variables.
     if flags & GUC_LIST_QUOTE != 0 {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "extensions cannot define GUC_LIST_QUOTE variables",
         ));
     }
@@ -137,10 +137,10 @@ fn define_custom_variable(var: GucVariable, pending: Option<String>) -> PgResult
             })
             .unwrap_or(false);
             if !is_placeholder {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "attempt to redefine parameter \"{name}\""
                 ))
-                .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR));
+                .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR));
             }
 
             // Replace the placeholder in the store with the real, default-valued
@@ -454,7 +454,7 @@ pub fn mark_guc_prefix_reserved(class_name: &str) {
         for victim in to_remove {
             // ereport(WARNING, "invalid configuration parameter name … removing it").
             let e = utils_error::ereport(WARNING)
-                .errcode(types_error::ERRCODE_INVALID_NAME)
+                .errcode(::types_error::ERRCODE_INVALID_NAME)
                 .errmsg(format!(
                     "invalid configuration parameter name \"{victim}\", removing it"
                 ))
@@ -484,14 +484,14 @@ macro_rules! leak_hook {
     };
 }
 
-leak_hook!(leak_check_bool, guc_tables::GucBoolCheckHook, GucBoolCheckFn);
-leak_hook!(leak_assign_bool, guc_tables::GucBoolAssignHook, GucBoolAssignFn);
-leak_hook!(leak_check_int, guc_tables::GucIntCheckHook, GucIntCheckFn);
-leak_hook!(leak_assign_int, guc_tables::GucIntAssignHook, GucIntAssignFn);
-leak_hook!(leak_check_real, guc_tables::GucRealCheckHook, GucRealCheckFn);
-leak_hook!(leak_assign_real, guc_tables::GucRealAssignHook, GucRealAssignFn);
-leak_hook!(leak_check_string, guc_tables::GucStringCheckHook, GucStringCheckFn);
-leak_hook!(leak_assign_string, guc_tables::GucStringAssignHook, GucStringAssignFn);
-leak_hook!(leak_check_enum, guc_tables::GucEnumCheckHook, GucEnumCheckFn);
-leak_hook!(leak_assign_enum, guc_tables::GucEnumAssignHook, GucEnumAssignFn);
-leak_hook!(leak_show, guc_tables::GucShowHook, GucShowFn);
+leak_hook!(leak_check_bool, ::guc_tables::GucBoolCheckHook, GucBoolCheckFn);
+leak_hook!(leak_assign_bool, ::guc_tables::GucBoolAssignHook, GucBoolAssignFn);
+leak_hook!(leak_check_int, ::guc_tables::GucIntCheckHook, GucIntCheckFn);
+leak_hook!(leak_assign_int, ::guc_tables::GucIntAssignHook, GucIntAssignFn);
+leak_hook!(leak_check_real, ::guc_tables::GucRealCheckHook, GucRealCheckFn);
+leak_hook!(leak_assign_real, ::guc_tables::GucRealAssignHook, GucRealAssignFn);
+leak_hook!(leak_check_string, ::guc_tables::GucStringCheckHook, GucStringCheckFn);
+leak_hook!(leak_assign_string, ::guc_tables::GucStringAssignHook, GucStringAssignFn);
+leak_hook!(leak_check_enum, ::guc_tables::GucEnumCheckHook, GucEnumCheckFn);
+leak_hook!(leak_assign_enum, ::guc_tables::GucEnumAssignHook, GucEnumAssignFn);
+leak_hook!(leak_show, ::guc_tables::GucShowHook, GucShowFn);

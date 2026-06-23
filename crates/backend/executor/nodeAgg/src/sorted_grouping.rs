@@ -2,7 +2,7 @@
 //! reads sorted (or single-group) input, advances transition state per group,
 //! and returns one output tuple per group.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::execexpr::ExprState;
 use ::nodes::nodeagg::{AGG_MIXED, AGG_PLAIN};
 use crate::aggstate::AggStateData;

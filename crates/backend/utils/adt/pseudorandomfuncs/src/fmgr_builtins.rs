@@ -16,9 +16,9 @@
 //! `RefPayload::Varlena` lane (the established `numeric` convention), so it IS
 //! registered here.
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------

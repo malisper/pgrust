@@ -4,9 +4,9 @@
 use crate::arrays::{Oids, OffsetNumbers};
 use crate::bytes::{bool_at, i32_at, item_pointer_at, locator_at, u16_at, u32_at, u8_at};
 use types_core::{CommandId, Oid, OffsetNumber, TransactionId};
-use types_storage::sinval::SharedInvalMessages;
-use types_storage::RelFileLocator;
-use types_tuple::ItemPointerData;
+use ::types_storage::sinval::SharedInvalMessages;
+use ::types_storage::RelFileLocator;
+use ::types_tuple::ItemPointerData;
 
 /// `xl_heap_insert`: `{OffsetNumber offnum; uint8 flags;}`.
 #[derive(Clone, Copy, Debug)]

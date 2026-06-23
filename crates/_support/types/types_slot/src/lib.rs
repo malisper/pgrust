@@ -12,11 +12,11 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{AttrNumber, Oid, Size};
-use types_error::PgResult;
-use types_storage::buf::Buffer;
-use types_tuple::heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
-use types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};
+use ::types_core::primitive::{AttrNumber, Oid, Size};
+use ::types_error::PgResult;
+use ::types_storage::buf::Buffer;
+use ::types_tuple::heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
+use ::types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};
 
 // `EXEC_FLAG_*` (executor.h) — the eflags bits passed down ExecutorStart /
 // ExecInitNode. Shared vocabulary: every executor node unit and the tuplestore
@@ -86,7 +86,7 @@ impl<'mcx> TupleTableSlot<'mcx> {
     /// descriptor — exactly the state a freshly-allocated virtual slot is in
     /// before any tuple is stored or descriptor assigned. `MakeTupleTableSlot`
     /// sets `TTS_EMPTY`; virtual is the default implementation.
-    pub fn new_in(mcx: mcx::Mcx<'mcx>) -> Self {
+    pub fn new_in(mcx: ::mcx::Mcx<'mcx>) -> Self {
         TupleTableSlot {
             tts_flags: TTS_FLAG_EMPTY,
             tts_nvalid: 0,

@@ -4,8 +4,8 @@
 use super::*;
 
 use mcx::{slice_in, MemoryContext, PgString};
-use wal::rmgr::XLogReaderState;
-use wal::wal::{DecodedXLogRecord, XLogRecord};
+use ::wal::rmgr::XLogReaderState;
+use ::wal::wal::{DecodedXLogRecord, XLogRecord};
 
 fn desc(info: u8, data: &[u8]) -> alloc::string::String {
     let ctx = MemoryContext::new("test");

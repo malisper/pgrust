@@ -3,8 +3,8 @@ use super::*;
 use std::sync::Once;
 
 use mcx::{MemoryContext, Mcx, PgVec};
-use types_core::TransactionId;
-use types_tuple::heaptuple::{
+use ::types_core::TransactionId;
+use ::types_tuple::heaptuple::{
     HeapTupleField3, HeapTupleFields, HeapTupleHeaderChoice, ItemPointerData, HEAP_XMIN_COMMITTED,
 };
 

@@ -20,9 +20,9 @@
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 const VARHDRSZ: usize = 4;

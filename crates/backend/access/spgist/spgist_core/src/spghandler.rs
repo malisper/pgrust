@@ -10,24 +10,24 @@
 //! live below this layer) and so are not raw fn-ptr vtable slots — matching the
 //! bt/hash/gin/brin/gist handlers in this repo.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use types_amapi::{
     AmCostEstimate, IndexAMProperty as AmIndexAMProperty, IndexAmRoutine, IndexBuildResult,
     IndexPath, OpFamilyMember, PlannerInfo, T_IndexAmRoutine,
 };
-use types_core::primitive::{InvalidOid, Oid};
-use rel::Relation;
-use types_scan::scankey::ScanKeyData;
-use types_scan::sdir::ScanDirection;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::rel::Relation;
+use ::types_scan::scankey::ScanKeyData;
+use ::types_scan::sdir::ScanDirection;
 use spgist::{SPGISTNProc, SPGIST_OPTIONS_PROC};
-use types_tableam::amapi::{IndexUniqueCheck, TIDBitmap};
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
-use types_error::PgResult;
+use ::types_tableam::amapi::{IndexUniqueCheck, TIDBitmap};
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
+use ::types_error::PgResult;
 
 use crate::spgscan::so;
 use crate::{
@@ -185,7 +185,7 @@ fn spgproperty_am(
         AmIndexAMProperty::AMPROP_DISTANCE_ORDERABLE => IndexAMProperty::DistanceOrderable,
         _ => IndexAMProperty::Other,
     };
-    let cx = mcx::MemoryContext::new("SP-GiST amproperty temporary context");
+    let cx = ::mcx::MemoryContext::new("SP-GiST amproperty temporary context");
     let (handled, r, n) = spgproperty(cx.mcx(), index_oid, attno, sprop)?;
     *res = r;
     *isnull = n;
@@ -297,7 +297,7 @@ fn spgcanreturn_am(index: &Relation<'_>, attno: i32) -> PgResult<bool> {
     // wants an `Mcx`. The `amcanreturn` vtable slot is context-free; build a
     // transient context for the cache lookup (the cached value is interned in
     // the relation's `rd_amcache`, not in this scratch arena).
-    let cx = mcx::MemoryContext::new("SP-GiST amcanreturn temporary context");
+    let cx = ::mcx::MemoryContext::new("SP-GiST amcanreturn temporary context");
     spgcanreturn(cx.mcx(), index, attno)
 }
 

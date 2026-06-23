@@ -44,12 +44,12 @@
 
 extern crate alloc;
 
-use mcx::PgBox;
-use types_error::PgResult;
+use ::mcx::PgBox;
+use ::types_error::PgResult;
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
 use ::nodes::EStateData;
 
-use transam_parallel::shared_dsm_object;
+use ::transam_parallel::shared_dsm_object;
 use tableam_bm_seams as tableam_bm;
 use execAmi_seams as execAmi;
 use execExpr_seams as execExpr;
@@ -507,9 +507,9 @@ pub fn ExecEndBitmapHeapScan<'mcx>(
     // back into shared memory so that it can be picked up by the main process to
     // report in EXPLAIN ANALYZE.
     // if (node->sinstrument != NULL && IsParallelWorker())
-    if node.sinstrument.is_some() && transam_parallel::is_parallel_worker() {
+    if node.sinstrument.is_some() && ::transam_parallel::is_parallel_worker() {
         // Assert(ParallelWorkerNumber <= node->sinstrument->num_workers);
-        let worker = transam_parallel::parallel_worker_number();
+        let worker = ::transam_parallel::parallel_worker_number();
         let sinstr = node.sinstrument.as_ref().expect("sinstrument");
         debug_assert!(worker <= sinstr.num_workers());
         // si = &node->sinstrument->sinstrument[ParallelWorkerNumber];
@@ -611,7 +611,7 @@ pub fn ExecInitBitmapHeapScan<'mcx>(
 
     // open the scan relation
     // currentRelation = ExecOpenScanRelation(estate, node->scan.scanrelid, eflags);
-    let is_parallel_worker = transam_parallel::is_parallel_worker();
+    let is_parallel_worker = ::transam_parallel::is_parallel_worker();
     let current_relation = execUtils::ExecOpenScanRelation(
         estate,
         plan.scan.scanrelid,
@@ -629,7 +629,7 @@ pub fn ExecInitBitmapHeapScan<'mcx>(
     // ExecInitScanTupleSlot(estate, &scanstate->ss, RelationGetDescr(rel),
     //                       table_slot_callbacks(rel));
     let tts_ops: TupleSlotKind = table_tableam::table_slot_callbacks(&current_relation);
-    let tupdesc = Some(mcx::alloc_in(mcx, current_relation.rd_att.clone_in(mcx)?)?);
+    let tupdesc = Some(::mcx::alloc_in(mcx, current_relation.rd_att.clone_in(mcx)?)?);
     execTuples::exec_init_scan_tuple_slot::call(estate, &mut scanstate.ss, tupdesc, tts_ops)?;
 
     // Initialize result type and projection.
@@ -662,7 +662,7 @@ pub fn ExecInitBitmapHeapScan<'mcx>(
     scanstate.ss_currentRelation = Some(current_relation);
 
     // all done.
-    Ok(mcx::alloc_in(mcx, scanstate)?)
+    Ok(::mcx::alloc_in(mcx, scanstate)?)
 }
 
 // ===========================================================================
@@ -751,7 +751,7 @@ pub fn ExecBitmapHeapEstimate(
 
     // account for instrumentation, if required
     // if (node->ss.ps.instrument && pcxt->nworkers > 0)
-    let nworkers = transam_parallel::pcxt_nworkers(pcxt);
+    let nworkers = ::transam_parallel::pcxt_nworkers(pcxt);
     if node.ss.ps.instrument.is_some() && nworkers > 0 {
         // size = add_size(size, offsetof(SharedBitmapHeapInstrumentation, sinstrument));
         size += SharedBitmapHeapInstrumentation::offset_of_sinstrument();
@@ -761,9 +761,9 @@ pub fn ExecBitmapHeapEstimate(
 
     // shm_toc_estimate_chunk(&pcxt->estimator, size);
     // shm_toc_estimate_keys(&pcxt->estimator, 1);
-    let estimator = transam_parallel::pcxt_estimator(pcxt);
-    transam_parallel::shm_toc_estimate_chunk(estimator, size);
-    transam_parallel::shm_toc_estimate_keys(estimator, 1);
+    let estimator = ::transam_parallel::pcxt_estimator(pcxt);
+    ::transam_parallel::shm_toc_estimate_chunk(estimator, size);
+    ::transam_parallel::shm_toc_estimate_keys(estimator, 1);
     Ok(())
 }
 
@@ -782,7 +782,7 @@ pub fn ExecBitmapHeapInitializeDSM<'mcx>(
     }
 
     // Determine whether instrumentation is needed and the chunk size.
-    let nworkers = transam_parallel::pcxt_nworkers(pcxt);
+    let nworkers = ::transam_parallel::pcxt_nworkers(pcxt);
     let want_instr = node.ss.ps.instrument.is_some() && nworkers > 0;
     let mut size = maxalign(core::mem::size_of::<ParallelBitmapHeapState>());
     if want_instr {
@@ -791,8 +791,8 @@ pub fn ExecBitmapHeapInitializeDSM<'mcx>(
     }
 
     // ptr = shm_toc_allocate(pcxt->toc, size);
-    let toc = transam_parallel::pcxt_toc(pcxt);
-    let ptr = transam_parallel::shm_toc_allocate(toc, size);
+    let toc = ::transam_parallel::pcxt_toc(pcxt);
+    let ptr = ::transam_parallel::shm_toc_allocate(toc, size);
     let plan_node_id = bitmap_heap_plan_node_id(node);
     let seg = pcxt_seg_handle(pcxt);
 
@@ -846,7 +846,7 @@ pub fn ExecBitmapHeapInitializeDSM<'mcx>(
     };
 
     // shm_toc_insert(pcxt->toc, node->ss.ps.plan->plan_node_id, pstate);
-    transam_parallel::shm_toc_insert(toc, plan_node_id as u64, ptr);
+    ::transam_parallel::shm_toc_insert(toc, plan_node_id as u64, ptr);
 
     // node->pstate = pstate;
     // node->sinstrument = sinstrument;
@@ -896,8 +896,8 @@ pub fn ExecBitmapHeapInitializeWorker<'mcx>(
     let plan_node_id = bitmap_heap_plan_node_id(node);
 
     // ptr = shm_toc_lookup(pwcxt->toc, node->ss.ps.plan->plan_node_id, false);
-    let toc = transam_parallel::pwcxt_toc(pwcxt);
-    let ptr = transam_parallel::shm_toc_lookup(
+    let toc = ::transam_parallel::pwcxt_toc(pwcxt);
+    let ptr = ::transam_parallel::shm_toc_lookup(
         toc,
         plan_node_id as u64,
         false,
@@ -991,7 +991,7 @@ pub fn ExecBitmapHeapRetrieveInstrumentation(node: &mut BitmapHeapScanState) -> 
 fn pcxt_seg_handle(
     pcxt: execparallel::ParallelContextHandle,
 ) -> execparallel::DsmSegmentHandle {
-    match transam_parallel::pcxt_seg(pcxt) {
+    match ::transam_parallel::pcxt_seg(pcxt) {
         Some(seg) => seg,
         None => execparallel::DsmSegmentHandle(0),
     }

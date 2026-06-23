@@ -12,10 +12,10 @@
 //! arg on the by-reference side channel, the by-value `typioparam`/`typmod`
 //! words, and the array/cstring result back on the by-reference lane.
 
-use mcx::MemoryContext;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::mcx::MemoryContext;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use detoast_seams as detoast_seam;
@@ -58,7 +58,7 @@ fn arg_array_detoast(fcinfo: &FunctionCallInfoBaseData, i: usize) -> PgResult<Ve
     Ok(detoasted.as_slice().to_vec())
 }
 
-fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> types_core::Oid {
+fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> ::types_core::Oid {
     fcinfo.arg(i).expect("array fn: missing arg").value.as_oid()
 }
 
@@ -177,8 +177,8 @@ pub fn register_arrayfuncs_builtins() {
 // by-reference lane onto the ported body's value-typed signature and back.
 // ===========================================================================
 
-use array::ArrayElementDatum;
-use types_core::Oid;
+use ::array::ArrayElementDatum;
+use ::types_core::Oid;
 
 /// `PG_GETARG_ANY_ARRAY_P(i)` when the arg may be NULL: the by-ref varlena image
 /// on the by-ref lane, or `None` for a SQL-NULL.
@@ -608,14 +608,14 @@ fn fc_array_prepend(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     Ok(ret_varlena(fcinfo, result.as_slice().to_vec()))
 }
 
-fn integer_out_of_range() -> types_error::PgError {
-    types_error::PgError::error("integer out of range")
-        .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+fn integer_out_of_range() -> ::types_error::PgError {
+    ::types_error::PgError::error("integer out of range")
+        .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
 }
 
-fn empty_or_one_dim_err() -> types_error::PgError {
-    types_error::PgError::error("argument must be empty or one-dimensional array")
-        .with_sqlstate(types_error::ERRCODE_DATA_EXCEPTION)
+fn empty_or_one_dim_err() -> ::types_error::PgError {
+    ::types_error::PgError::error("argument must be empty or one-dimensional array")
+        .with_sqlstate(::types_error::ERRCODE_DATA_EXCEPTION)
 }
 
 // --- array_position / array_positions (non-strict) --------------------------
@@ -791,7 +791,7 @@ fn fc_array_reverse(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 fn fc_array_sort(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let array = arg_array_detoast(fcinfo, 0)?;
     let m = scratch_mcx();
-    let arr = mcx::slice_in(m.mcx(), &array)?;
+    let arr = ::mcx::slice_in(m.mcx(), &array)?;
     let img = crate::array_userfuncs::array_sort(m.mcx(), &arr, collation(fcinfo))?
         .as_slice()
         .to_vec();
@@ -803,7 +803,7 @@ fn fc_array_sort_order(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum>
     let array = arg_array_detoast(fcinfo, 0)?;
     let descending = fcinfo.arg(1).map(|d| d.value.as_bool()).unwrap_or(false);
     let m = scratch_mcx();
-    let arr = mcx::slice_in(m.mcx(), &array)?;
+    let arr = ::mcx::slice_in(m.mcx(), &array)?;
     let img = crate::array_userfuncs::array_sort_order(
         m.mcx(),
         &arr,
@@ -821,7 +821,7 @@ fn fc_array_sort_order_nulls_first(fcinfo: &mut FunctionCallInfoBaseData) -> PgR
     let descending = fcinfo.arg(1).map(|d| d.value.as_bool()).unwrap_or(false);
     let nulls_first = fcinfo.arg(2).map(|d| d.value.as_bool()).unwrap_or(false);
     let m = scratch_mcx();
-    let arr = mcx::slice_in(m.mcx(), &array)?;
+    let arr = ::mcx::slice_in(m.mcx(), &array)?;
     let img = crate::array_userfuncs::array_sort_order_nulls_first(
         m.mcx(),
         &arr,
@@ -845,13 +845,13 @@ fn fc_array_sort_order_nulls_first(fcinfo: &mut FunctionCallInfoBaseData) -> PgR
 /// span; for a 0-D array it is empty (C `ndims == 0`).
 fn deconstruct_int4_array(array: &[u8]) -> PgResult<Vec<i32>> {
     if crate::foundation::arr_ndim(array) > 1 {
-        return Err(types_error::PgError::error("wrong number of array subscripts")
-            .with_sqlstate(types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+        return Err(::types_error::PgError::error("wrong number of array subscripts")
+            .with_sqlstate(::types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR)
             .with_detail("Dimension array must be one dimensional."));
     }
     if crate::construct::array_contains_nulls(array) {
-        return Err(types_error::PgError::error("dimension values cannot be null")
-            .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+        return Err(::types_error::PgError::error("dimension values cannot be null")
+            .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
     }
     // ndims = number of int values in the (1-D) array's data area.
     let count = if crate::foundation::arr_ndim(array) > 0 {
@@ -885,8 +885,8 @@ fn resolve_fill_value(
 ) -> PgResult<(Oid, Datum, bool, Option<Vec<u8>>)> {
     let elmtype =
         fmgr_core::get_fn_expr_argtype(fcinfo.flinfo.as_deref(), 0);
-    if !types_core::OidIsValid(elmtype) {
-        return Err(types_error::PgError::error(
+    if !::types_core::OidIsValid(elmtype) {
+        return Err(::types_error::PgError::error(
             "could not determine data type of input",
         ));
     }
@@ -918,10 +918,10 @@ fn resolve_fill_value(
 /// `array_fill(anyelement, int4[]) -> anyarray` (oid 1193). Non-strict.
 fn fc_array_fill(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     if arg_isnull(fcinfo, 1) {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "dimension array or low bound array cannot be null",
         )
-        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+        .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
     }
     let dims_img = arg_array_detoast(fcinfo, 1)?;
     let dims = deconstruct_int4_array(&dims_img)?;
@@ -934,10 +934,10 @@ fn fc_array_fill(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 /// `array_fill(anyelement, int4[], int4[]) -> anyarray` (oid 1286). Non-strict.
 fn fc_array_fill_with_lower_bounds(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     if arg_isnull(fcinfo, 1) || arg_isnull(fcinfo, 2) {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "dimension array or low bound array cannot be null",
         )
-        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+        .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
     }
     let dims_img = arg_array_detoast(fcinfo, 1)?;
     let lbs_img = arg_array_detoast(fcinfo, 2)?;
@@ -950,8 +950,8 @@ fn fc_array_fill_with_lower_bounds(fcinfo: &mut FunctionCallInfoBaseData) -> PgR
     // path), so an explicit empty `{}` must be range-checked here before the body
     // could silently default it.
     if lbs.len() != dims.len() {
-        return Err(types_error::PgError::error("wrong number of array subscripts")
-            .with_sqlstate(types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+        return Err(::types_error::PgError::error("wrong number of array subscripts")
+            .with_sqlstate(::types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR)
             .with_detail("Low bound array has different size than dimensions array."));
     }
     let (elmtype, value, isnull, _held) = resolve_fill_value(fcinfo)?;

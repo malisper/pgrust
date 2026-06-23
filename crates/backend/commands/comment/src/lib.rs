@@ -35,30 +35,30 @@
 //! [`comment_seams`] boundary.
 
 use heaptuple::{heap_form_tuple, heap_getattr, heap_modify_tuple};
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
 use table::{table_close, table_open};
-use indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
+use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 use objectaddress_seams as oaddr;
 use comment_seams as seam;
-use utils_error::ereport;
-use miscinit_seams::get_user_id;
-use mcx::Mcx;
-use types_catalog::catalog::{
+use ::utils_error::ereport;
+use ::miscinit_seams::get_user_id;
+use ::mcx::Mcx;
+use ::types_catalog::catalog::{
     DESCRIPTION_OBJ_INDEX_ID, DESCRIPTION_RELATION_ID, RELATION_RELATION_ID,
     SHARED_DESCRIPTION_OBJ_INDEX_ID, SHARED_DESCRIPTION_RELATION_ID,
 };
-use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
+use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::{Oid, OidIsValid};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     WARNING,
 };
 use ::nodes::parsenodes::{OBJECT_COLUMN, OBJECT_DATABASE, OBJECT_ROLE, OBJECT_TABLESPACE};
-use parsenodes::CommentStmt;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
-use types_tuple::access::{
+use ::parsenodes::CommentStmt;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
+use ::types_tuple::access::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_VIEW,
 };
@@ -121,9 +121,9 @@ fn int4_key<'mcx>(attno: i16, value: i32) -> PgResult<ScanKeyData<'mcx>> {
 pub fn CommentObject<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CommentStmt,
-) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+) -> PgResult<::types_catalog::catalog_dependency::ObjectAddress> {
     // ObjectAddress address = InvalidObjectAddress;
-    let mut address = types_catalog::catalog_dependency::InvalidObjectAddress;
+    let mut address = ::types_catalog::catalog_dependency::InvalidObjectAddress;
 
     /*
      * When loading a dump, we may see a COMMENT ON DATABASE for the old name
@@ -471,7 +471,7 @@ pub fn CreateSharedComments<'mcx>(
 ///
 /// comment.c:325-368.
 pub fn DeleteComments(oid: Oid, classoid: Oid, subid: i32) -> PgResult<()> {
-    let scratch = mcx::MemoryContext::new("DeleteComments");
+    let scratch = ::mcx::MemoryContext::new("DeleteComments");
     let mcx = scratch.mcx();
 
     /*
@@ -509,7 +509,7 @@ pub fn DeleteComments(oid: Oid, classoid: Oid, subid: i32) -> PgResult<()> {
 ///
 /// comment.c:373-404. Always two scan keys `{objoid, classoid}`.
 pub fn DeleteSharedComments(oid: Oid, classoid: Oid) -> PgResult<()> {
-    let scratch = mcx::MemoryContext::new("DeleteSharedComments");
+    let scratch = ::mcx::MemoryContext::new("DeleteSharedComments");
     let mcx = scratch.mcx();
 
     let skey = [
@@ -598,7 +598,7 @@ fn reduce_empty(comment: Option<&str>) -> Option<&str> {
 }
 
 /// Decode an arena [`::nodes::nodes::Node`] `CommentStmt` into the flat
-/// [`parsenodes::CommentStmt`] that [`CommentObject`] consumes, then run
+/// [`::parsenodes::CommentStmt`] that [`CommentObject`] consumes, then run
 /// it. This is the bridge from the utility dispatcher's arena parse tree to the
 /// old-model command body, mirroring the `RemoveObjects`/`DefineDomain` seam
 /// adapters. The arena `object` node is lowered through
@@ -641,7 +641,7 @@ fn comment_object_seam<'mcx>(
 fn comment_object_slow_seam<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &::nodes::nodes::Node<'mcx>,
-) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+) -> PgResult<::types_catalog::catalog_dependency::ObjectAddress> {
     let cs = match stmt.as_commentstmt() {
         Some(c) => c,
         None => {
@@ -675,17 +675,17 @@ pub fn init_seams() {
 
     // user.c DROP ROLE: `DeleteSharedComments(roleid, AuthIdRelationId)`.
     user_seams::delete_shared_comments::set(|roleid| {
-        DeleteSharedComments(roleid, types_core::AUTH_ID_RELATION_ID)
+        DeleteSharedComments(roleid, ::types_core::AUTH_ID_RELATION_ID)
     });
 
     // collationcmds.c attaches an ICU display-name comment to the collation it
     // imports: `CreateComments(collid, CollationRelationId, 0, comment)`.
     collationcmds_seams::create_comment::set(|collid, comment| {
-        let scratch = mcx::MemoryContext::new("create_comment");
+        let scratch = ::mcx::MemoryContext::new("create_comment");
         CreateComments(
             scratch.mcx(),
             collid,
-            types_catalog::catalog::COLLATION_RELATION_ID,
+            ::types_catalog::catalog::COLLATION_RELATION_ID,
             0,
             Some(comment),
         )
@@ -706,7 +706,7 @@ pub fn init_seams() {
 fn re_add_comment_object_seam<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &::nodes::ddlnodes::CommentStmt<'mcx>,
-) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+) -> PgResult<::types_catalog::catalog_dependency::ObjectAddress> {
     let owned = arena_commentstmt_to_owned(stmt)?;
     CommentObject(mcx, &owned)
 }

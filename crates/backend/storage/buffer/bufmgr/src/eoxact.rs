@@ -16,10 +16,10 @@
 //! when its ambient per-backend handle lands (panic-until-owner — sanctioned,
 //! same posture as the F1c local-buffer pin dispatch).
 
-use types_core::primitive::{BlockNumber, ForkNumber};
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::RelFileLocatorBackend;
+use ::types_core::primitive::{BlockNumber, ForkNumber};
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::RelFileLocatorBackend;
 
 use crate::mgr::BufferManager;
 
@@ -93,7 +93,7 @@ impl BufferManager {
                 // elog(WARNING, "buffer refcount leak: ...") — Buffer ids are
                 // 1-based (buf_id is the 0-based slot index).
                 utils_error::emit_error_report_for(
-                    &utils_error::ereport(types_error::error::WARNING)
+                    &utils_error::ereport(::types_error::error::WARNING)
                         .errmsg_internal(alloc::format!(
                             "buffer refcount leak: [{}] (rel=?, blockNum=?, flags=?, refcount={} {})",
                             buf_id + 1,

@@ -23,9 +23,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use types_core::FirstNormalTransactionId;
-use types_core::TransactionId;
-use types_logical::TupleCidHash;
+use ::types_core::FirstNormalTransactionId;
+use ::types_core::TransactionId;
+use ::types_logical::TupleCidHash;
 use snapshot::{SnapshotData, SnapshotType};
 
 /// A shared, mutable, owned snapshot — the replacement for C's `Snapshot`
@@ -39,7 +39,7 @@ pub type SnapHandle = Rc<RefCell<SnapshotData>>;
 pub fn new_snapshot_data(snapshot_type: SnapshotType) -> SnapshotData {
     SnapshotData {
         snapshot_type,
-        vistest: snapshot::snapshot::GlobalVisStateHandle::new(0),
+        vistest: ::snapshot::snapshot::GlobalVisStateHandle::new(0),
         xmin: 0,
         xmax: 0,
         xip: Vec::new(),

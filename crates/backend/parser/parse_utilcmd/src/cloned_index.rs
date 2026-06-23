@@ -11,22 +11,22 @@ use alloc::string::{String, ToString};
 
 use mcx::{Mcx, PgString, PgVec};
 
-use types_core::primitive::{AttrNumber, InvalidOid, OidIsValid};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, InvalidOid, OidIsValid};
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::nodes::ddlnodes::{DefElem, IndexElem, IndexStmt, DEFELEM_UNSPEC};
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::{RangeVar, SORTBY_DEFAULT, SORTBY_DESC, SORTBY_NULLS_DEFAULT, SORTBY_NULLS_FIRST, SORTBY_NULLS_LAST};
 use ::nodes::value::StringNode;
-use rel::Relation;
-use types_tuple::attmap::AttrMap;
+use ::rel::Relation;
+use ::types_tuple::attmap::AttrMap;
 
-use nodes_core::nodefuncs::expr_type;
-use utils_error::ereport;
+use ::nodes_core::nodefuncs::expr_type;
+use ::utils_error::ereport;
 
-use index_amapi::GetIndexAmRoutineByAmId;
-use common_reloptions::untransformRelOptions;
+use ::index_amapi::GetIndexAmRoutineByAmId;
+use ::common_reloptions::untransformRelOptions;
 
 use read_seams as read_seams;
 use lsyscache_seams as lsyscache;
@@ -91,7 +91,7 @@ pub fn generateClonedIndexStmt<'mcx>(
     let mut index = IndexStmt {
         idxname: None,
         relation: match heap_rel {
-            Some(rv) => Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv.clone_in(mcx)?)?)?),
+            Some(rv) => Some(::mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv.clone_in(mcx)?)?)?),
             None => None,
         },
         accessMethod: Some(access_method),
@@ -160,7 +160,7 @@ pub fn generateClonedIndexStmt<'mcx>(
                         v
                     };
                     let namelist_node =
-                        mcx::alloc_in(mcx, Node::mk_list(mcx, namelist)?)?;
+                        ::mcx::alloc_in(mcx, Node::mk_list(mcx, namelist)?)?;
                     index.excludeOpNames.push(namelist_node);
                 }
             }
@@ -176,11 +176,11 @@ pub fn generateClonedIndexStmt<'mcx>(
                 match (*node).as_list() {
                     Some(items) => {
                         for it in items.iter() {
-                            v.push(mcx::alloc_in(mcx, it.clone_in(mcx)?)?);
+                            v.push(::mcx::alloc_in(mcx, it.clone_in(mcx)?)?);
                         }
                     }
                     // A single-element list can be represented as a bare node.
-                    None => v.push(mcx::alloc_in(mcx, (*node).clone_in(mcx)?)?),
+                    None => v.push(::mcx::alloc_in(mcx, (*node).clone_in(mcx)?)?),
                 }
                 v
             }
@@ -269,7 +269,7 @@ pub fn generateClonedIndexStmt<'mcx>(
         };
         index
             .indexParams
-            .push(mcx::alloc_in(mcx, Node::mk_index_elem(mcx, iparam)?)?);
+            .push(::mcx::alloc_in(mcx, Node::mk_index_elem(mcx, iparam)?)?);
     }
 
     // Handle included columns separately.
@@ -301,7 +301,7 @@ pub fn generateClonedIndexStmt<'mcx>(
         };
         index
             .indexIncludingParams
-            .push(mcx::alloc_in(mcx, Node::mk_index_elem(mcx, iparam)?)?);
+            .push(::mcx::alloc_in(mcx, Node::mk_index_elem(mcx, iparam)?)?);
     }
 
     // Copy reloptions if any (pg_class.reloptions of the index).
@@ -391,7 +391,7 @@ fn get_opclassopts<'mcx>(
     attnum: i16,
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
     let mut result = PgVec::new_in(mcx);
-    let attoptions = lsyscache::attribute::get_attoptions(mcx, source_relid, attnum)?;
+    let attoptions = ::lsyscache::attribute::get_attoptions(mcx, source_relid, attnum)?;
     let bytes: &[u8] = match &attoptions {
         Some(types_tuple::heaptuple::Datum::ByRef(b)) => &b[..],
         _ => return Ok(result),
@@ -410,7 +410,7 @@ fn make_def_elem<'mcx>(
     arg: Option<&str>,
 ) -> PgResult<NodePtr<'mcx>> {
     let arg_node = match arg {
-        Some(s) => Some(mcx::alloc_in(
+        Some(s) => Some(::mcx::alloc_in(
             mcx,
             Node::mk_string(
                 mcx,
@@ -421,7 +421,7 @@ fn make_def_elem<'mcx>(
         )?),
         None => None,
     };
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         Node::mk_def_elem(
             mcx,
@@ -437,13 +437,13 @@ fn make_def_elem<'mcx>(
 }
 
 /// `elog(ERROR, msg)` shorthand.
-fn elog_error(msg: impl Into<String>) -> types_error::PgError {
+fn elog_error(msg: impl Into<String>) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg).into_error()
 }
 
 /// The `cannot convert whole-row table reference` ereport raised when a cloned
 /// index expression/predicate contains a whole-row Var.
-fn whole_row_error(source_idx: &Relation<'_>) -> types_error::PgError {
+fn whole_row_error(source_idx: &Relation<'_>) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg("cannot convert whole-row table reference")

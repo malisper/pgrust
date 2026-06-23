@@ -52,8 +52,8 @@ use nodeFuncs_seams as nodeFuncs;
 use sort_storage_seams as tuplestore;
 
 use mcx::{alloc_in, vec_with_capacity_in, PgVec};
-use types_core::primitive::AttrNumber;
-use types_error::PgResult;
+use ::types_core::primitive::AttrNumber;
+use ::types_error::PgResult;
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::nodes::funcapi::TypeFuncClass;
 use ::nodes::nodes::Node;
@@ -62,14 +62,14 @@ use nodes::{
     EStateData, FunctionScanPerFuncState, FunctionScanState, ScanDirectionIsForward, SlotId,
     TupleSlotKind,
 };
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 
 /// `RECORDOID` (catalog/pg_type_d.h) — the pseudo-type OID of an anonymous
 /// composite (RECORD) type.
-const RECORDOID: types_core::Oid = 2249;
+const RECORDOID: ::types_core::Oid = 2249;
 /// `INT8OID` (catalog/pg_type_d.h) — the `bigint` type OID (the WITH ORDINALITY
 /// column).
-const INT8OID: types_core::Oid = 20;
+const INT8OID: ::types_core::Oid = 20;
 
 /// nodeFunctionscan owns no inward seam crate: its only cross-cycle callers are
 /// execProcnode's dispatch tables, which (like nodeTableFuncscan /
@@ -373,7 +373,7 @@ pub fn ExecInitFunctionScan<'mcx>(
     node: &'mcx Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
-) -> PgResult<mcx::PgBox<'mcx, FunctionScanState<'mcx>>> {
+) -> PgResult<::mcx::PgBox<'mcx, FunctionScanState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
     let plan: &'mcx FunctionScan<'mcx> = match node.node_tag() {
@@ -477,7 +477,7 @@ pub fn ExecInitFunctionScan<'mcx>(
             //   tupdesc = BuildDescFromLists(rtfunc->funccolnames,
             //       rtfunc->funccoltypes, rtfunc->funccoltypmods,
             //       rtfunc->funccolcollations);
-            let mut names: PgVec<'mcx, mcx::PgString<'mcx>> =
+            let mut names: PgVec<'mcx, ::mcx::PgString<'mcx>> =
                 vec_with_capacity_in(mcx, rtfunc.funccolnames.len())?;
             for n in rtfunc.funccolnames.iter() {
                 let s = match n.node_tag() {
@@ -541,7 +541,7 @@ pub fn ExecInitFunctionScan<'mcx>(
                 _ => {
                     // crummy error message, but parser should have caught this
                     //   elog(ERROR, "function in FROM has unsupported return type");
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "function in FROM has unsupported return type",
                     ));
                 }
@@ -774,9 +774,9 @@ pub fn ExecReScanFunctionScan<'mcx>(
 /// descriptor; the owned model gives the slot its own copy so the per-function
 /// `tupdesc` stays owned by the node).
 fn clone_tupdesc<'mcx>(
-    src: &types_tuple::heaptuple::TupleDesc<'mcx>,
-    mcx: mcx::Mcx<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+    src: &::types_tuple::heaptuple::TupleDesc<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     match src.as_deref() {
         Some(td) => Ok(Some(tupdesc::create_tupledesc_copy::call(mcx, td)?)),
         None => Ok(None),

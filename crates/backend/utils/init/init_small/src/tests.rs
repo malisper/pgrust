@@ -9,7 +9,7 @@ use types_core::{
     USE_ISO_DATES,
 };
 use types_error::{PgError, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERROR};
-use types_storage::latch::Latch;
+use ::types_storage::latch::Latch;
 
 use crate::globals;
 use crate::usercontext::{RestoreUserContext, SwitchToUntrustedUser};
@@ -46,7 +46,7 @@ fn defaults_match_globals_c() {
         assert!(!globals::MyLatchIsSet());
         assert_eq!(globals::DataDir(), None);
         assert_eq!(globals::data_directory_mode(), PG_DIR_MODE_OWNER);
-        assert_eq!(globals::OutputFileName(), [0; types_core::MAXPGPATH]);
+        assert_eq!(globals::OutputFileName(), [0; ::types_core::MAXPGPATH]);
         assert_eq!(globals::MyProcNumber(), INVALID_PROC_NUMBER);
         assert_eq!(globals::ParallelLeaderProcNumber(), INVALID_PROC_NUMBER);
         assert_eq!(globals::MyDatabaseId(), InvalidOid);
@@ -59,8 +59,8 @@ fn defaults_match_globals_c() {
         assert!(!globals::IsBinaryUpgrade());
         assert!(!globals::ExitOnAnyError());
         assert_eq!(globals::DateStyle(), USE_ISO_DATES);
-        assert_eq!(globals::DateOrder(), types_core::DATEORDER_MDY);
-        assert_eq!(globals::IntervalStyle(), types_core::INTSTYLE_POSTGRES);
+        assert_eq!(globals::DateOrder(), ::types_core::DATEORDER_MDY);
+        assert_eq!(globals::IntervalStyle(), ::types_core::INTSTYLE_POSTGRES);
         assert!(globals::enableFsync());
         assert!(!globals::allowSystemTableMods());
         assert_eq!(globals::work_mem(), 4096);
@@ -170,16 +170,16 @@ fn elog_visible_globals_share_a_single_store() {
         assert_eq!(&buf[..12], b"/tmp/out.log");
         assert_eq!(buf[12], 0);
 
-        let mut raw = [0u8; types_core::MAXPGPATH];
+        let mut raw = [0u8; ::types_core::MAXPGPATH];
         raw[..7].copy_from_slice(b"out.txt");
         globals::SetOutputFileName(raw);
         assert_eq!(
             utils_error::config::output_file_name().as_deref(),
             Some("out.txt")
         );
-        globals::SetOutputFileName([0; types_core::MAXPGPATH]);
+        globals::SetOutputFileName([0; ::types_core::MAXPGPATH]);
         assert_eq!(utils_error::config::output_file_name(), None);
-        assert_eq!(globals::OutputFileName(), [0; types_core::MAXPGPATH]);
+        assert_eq!(globals::OutputFileName(), [0; ::types_core::MAXPGPATH]);
     })
     .join()
     .unwrap();

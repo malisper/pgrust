@@ -13,9 +13,9 @@
 //! exactly these points until those owners land.
 
 use types_error::{PgError, PgResult};
-use fmgr::fmgr::FunctionCallInfoBaseData;
-use types_core::Oid;
-use parsenodes::InlineCodeBlock;
+use ::fmgr::fmgr::FunctionCallInfoBaseData;
+use ::types_core::Oid;
+use ::parsenodes::InlineCodeBlock;
 use plpgsql::{int32, EventTriggerData, ResourceOwner, TriggerData};
 
 /// `T_CallContext` (nodetags.h).
@@ -158,7 +158,7 @@ pub fn create_procedure_resowner() -> ResourceOwner {
 /// case it is left `InvalidOid` (the compile body uses the declared `prorettype`).
 pub fn compile_for_call(
     fcinfo: &mut FunctionCallInfoBaseData,
-) -> plpgsql::PLpgSQL_function {
+) -> ::plpgsql::PLpgSQL_function {
     // fcinfo->flinfo->fn_oid — the function being called.
     let funcoid = flinfo_fn_oid(fcinfo);
 
@@ -203,7 +203,7 @@ pub fn compile_for_call(
 fn resolved_rettype_from_call(fcinfo: &FunctionCallInfoBaseData) -> Oid {
     match fcinfo.flinfo.as_deref() {
         Some(flinfo) => fmgr_core::get_fn_expr_rettype(Some(flinfo)),
-        None => types_core::InvalidOid,
+        None => ::types_core::InvalidOid,
     }
 }
 
@@ -222,7 +222,7 @@ fn call_expr_from_fcinfo(
 ) -> Option<funcapi::polymorphic::CallExpr> {
     let flinfo = fcinfo.flinfo.as_deref()?;
     match flinfo.fn_expr.as_deref() {
-        Some(fmgr::fmgr::FnExpr::External(ext)) => {
+        Some(::fmgr::fmgr::FnExpr::External(ext)) => {
             // C carries the field-bearing call node in `fn_expr`; the erased
             // carrier holds the real expression node the resolver downcasts to
             // read argument types. A tag-only carrier (`node == None`) cannot
@@ -247,9 +247,9 @@ fn compile_proc_from_row(
     for_validator: bool,
     resolved_rettype: Oid,
     call_expr: Option<funcapi::polymorphic::CallExpr>,
-) -> PgResult<plpgsql::PLpgSQL_function> {
-    use comp::ProcCompileFacts;
-    use plpgsql::PLpgSQL_trigtype;
+) -> PgResult<::plpgsql::PLpgSQL_function> {
+    use ::comp::ProcCompileFacts;
+    use ::plpgsql::PLpgSQL_trigtype;
 
     let scratch = mcx::MemoryContext::new("plpgsql_compile");
     let mcx = scratch.mcx();
@@ -328,7 +328,7 @@ fn compile_proc_from_row(
 
     // The compile body `ereport`s on a faulty function; that propagates as a
     // PgError panic caught at the PGFunction boundary (== C's longjmp).
-    comp::plpgsql_compile_from_source(&facts)
+    ::comp::plpgsql_compile_from_source(&facts)
 }
 
 // --- validator substrate -----------------------------------------------------
@@ -344,7 +344,7 @@ pub fn flinfo_fn_oid(fcinfo: &FunctionCallInfoBaseData) -> Oid {
         .flinfo
         .as_ref()
         .map(|f| f.fn_oid)
-        .unwrap_or(types_core::InvalidOid)
+        .unwrap_or(::types_core::InvalidOid)
 }
 
 /// `CheckFunctionValidatorAccess(fcinfo->flinfo->fn_oid, funcoid)` (fmgr.c) —
@@ -366,7 +366,7 @@ const VOIDOID: Oid = 2278;
 
 /// `IsPolymorphicType(typid)` (pg_type.h) — a pure OID comparison.
 fn is_polymorphic_type(typid: Oid) -> bool {
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
         ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
         ANYNONARRAYOID, ANYRANGEOID,
@@ -407,7 +407,7 @@ pub fn validate_function_body(funcoid: Oid) -> PgResult<()> {
     // tuple = SearchSysCache1(PROCOID, funcoid); proc = GETSTRUCT(tuple).
     let proc = syscache_seams::proc_row_by_oid::call(mcx, funcoid)?
         .ok_or_else(|| {
-            types_error::PgError::error(format!("cache lookup failed for function {funcoid}"))
+            ::types_error::PgError::error(format!("cache lookup failed for function {funcoid}"))
         })?;
 
     let mut is_dml_trigger = false;
@@ -425,11 +425,11 @@ pub fn validate_function_body(funcoid: Oid) -> PgResult<()> {
             && proc.prorettype != VOIDOID
             && !is_polymorphic_type(proc.prorettype)
         {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "PL/pgSQL functions cannot return type {}",
                 format_type_be(proc.prorettype)
             ))
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
         }
     }
 
@@ -445,11 +445,11 @@ pub fn validate_function_body(funcoid: Oid) -> PgResult<()> {
             && argtype != RECORDOID
             && !is_polymorphic_type(argtype)
         {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "PL/pgSQL functions cannot accept type {}",
                 format_type_be(argtype)
             ))
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
         }
     }
 
@@ -501,9 +501,9 @@ fn validate_test_compile(
         funcoid,
         is_dml_trigger,
         is_event_trigger,
-        /* fn_input_collation = */ types_core::InvalidOid,
+        /* fn_input_collation = */ ::types_core::InvalidOid,
         /* for_validator = */ true,
-        /* resolved_rettype = */ types_core::InvalidOid,
+        /* resolved_rettype = */ ::types_core::InvalidOid,
         // Validator has no call expression; the compile body's forValidator
         // branch substitutes the int4 family for any polymorphic argument.
         /* call_expr = */ None,

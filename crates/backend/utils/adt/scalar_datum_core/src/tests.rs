@@ -3,7 +3,7 @@
 //! (`ScalarWord`) raw-pointer ABI edge.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 // Build a plain 4-byte-header varlena image (uncompressed inline) carrying
 // `payload`. Mirrors `SET_VARSIZE` over a fresh buffer.

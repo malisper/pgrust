@@ -30,15 +30,15 @@
 
 use std::cell::RefCell;
 
-use utils_error::elog;
+use ::utils_error::elog;
 use hashfn::{hash_combine64, murmurhash64};
-use datum::Datum;
+use ::datum::Datum;
 use types_error::{PgError, PgResult, WARNING};
 use types_resowner::{
     ResourceOwner, ResourceOwnerDesc, ResourceReleasePhase, RESOURCE_RELEASE_AFTER_LOCKS,
     RESOURCE_RELEASE_BEFORE_LOCKS, RESOURCE_RELEASE_LOCKS,
 };
-use types_storage::lock::LOCALLOCKTAG;
+use ::types_storage::lock::LOCALLOCKTAG;
 
 mod seam_bodies;
 

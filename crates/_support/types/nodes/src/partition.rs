@@ -17,8 +17,8 @@
 //! `execPartition.c`, so they live in the owning crate, not here.
 
 use mcx::{Mcx, MemoryContext, PgBox, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum;
 
 use crate::bitmapset::Bitmapset;
@@ -279,9 +279,9 @@ impl<'mcx> PartitionBoundInfoData<'mcx> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> types_error::PgResult<PartitionBoundInfoData<'b>> {
         // datums[][]
         let mut datums: PgVec<'b, PgVec<'b, Datum<'b>>> =
-            mcx::vec_with_capacity_in(mcx, self.datums.len())?;
+            ::mcx::vec_with_capacity_in(mcx, self.datums.len())?;
         for row in self.datums.iter() {
-            let mut nrow: PgVec<'b, Datum<'b>> = mcx::vec_with_capacity_in(mcx, row.len())?;
+            let mut nrow: PgVec<'b, Datum<'b>> = ::mcx::vec_with_capacity_in(mcx, row.len())?;
             for d in row.iter() {
                 nrow.push(d.clone_in(mcx)?);
             }
@@ -292,10 +292,10 @@ impl<'mcx> PartitionBoundInfoData<'mcx> {
             None => None,
             Some(rows) => {
                 let mut nkind: PgVec<'b, PgVec<'b, PartitionRangeDatumKind>> =
-                    mcx::vec_with_capacity_in(mcx, rows.len())?;
+                    ::mcx::vec_with_capacity_in(mcx, rows.len())?;
                 for row in rows.iter() {
                     let mut nrow: PgVec<'b, PartitionRangeDatumKind> =
-                        mcx::vec_with_capacity_in(mcx, row.len())?;
+                        ::mcx::vec_with_capacity_in(mcx, row.len())?;
                     for k in row.iter() {
                         nrow.push(*k);
                     }
@@ -307,10 +307,10 @@ impl<'mcx> PartitionBoundInfoData<'mcx> {
         // interleaved_parts
         let interleaved_parts = match &self.interleaved_parts {
             None => None,
-            Some(bms) => Some(mcx::alloc_in(mcx, bms.clone_in(mcx)?)?),
+            Some(bms) => Some(::mcx::alloc_in(mcx, bms.clone_in(mcx)?)?),
         };
         // indexes[]
-        let mut indexes: PgVec<'b, i32> = mcx::vec_with_capacity_in(mcx, self.indexes.len())?;
+        let mut indexes: PgVec<'b, i32> = ::mcx::vec_with_capacity_in(mcx, self.indexes.len())?;
         for v in self.indexes.iter() {
             indexes.push(*v);
         }
@@ -335,17 +335,17 @@ impl<'mcx> PartitionDescData<'mcx> {
     /// into the caller's context. `oids`/`is_leaf` are plain scalars; the
     /// `boundinfo` is deep-copied via [`PartitionBoundInfoData::clone_in`].
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> types_error::PgResult<PartitionDescData<'b>> {
-        let mut oids: PgVec<'b, Oid> = mcx::vec_with_capacity_in(mcx, self.oids.len())?;
+        let mut oids: PgVec<'b, Oid> = ::mcx::vec_with_capacity_in(mcx, self.oids.len())?;
         for v in self.oids.iter() {
             oids.push(*v);
         }
-        let mut is_leaf: PgVec<'b, bool> = mcx::vec_with_capacity_in(mcx, self.is_leaf.len())?;
+        let mut is_leaf: PgVec<'b, bool> = ::mcx::vec_with_capacity_in(mcx, self.is_leaf.len())?;
         for v in self.is_leaf.iter() {
             is_leaf.push(*v);
         }
         let boundinfo = match &self.boundinfo {
             None => None,
-            Some(bi) => Some(mcx::alloc_in(mcx, bi.clone_in(mcx)?)?),
+            Some(bi) => Some(::mcx::alloc_in(mcx, bi.clone_in(mcx)?)?),
         };
         Ok(PartitionDescData {
             nparts: self.nparts,

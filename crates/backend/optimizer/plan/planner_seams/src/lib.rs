@@ -7,13 +7,13 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::rawnodes::SetOperationStmt;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerGlobal, PlannerInfo, QueryId};
 
 seam_core::seam!(

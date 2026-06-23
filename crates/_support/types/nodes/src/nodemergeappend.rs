@@ -6,16 +6,16 @@
 //!
 //! The embedded `PlanState` head reuses [`PlanStateData`], the leading `Plan`
 //! base reuses [`crate::nodeindexscan::Plan`], the sort-support array reuses
-//! [`types_sortsupport::SortSupportData`], and the executor-pool aliases follow
+//! [`::types_sortsupport::SortSupportData`], and the executor-pool aliases follow
 //! the owned model ([`SlotId`] for `TupleTableSlot *`).
 
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum;
-use types_error::PgResult;
-use types_sortsupport::SortSupportData;
+use ::types_error::PgResult;
+use ::types_sortsupport::SortSupportData;
 
 use crate::bitmapset::Bitmapset;
 use crate::execnodes::{PlanStateData, SlotId};
@@ -79,7 +79,7 @@ impl MergeAppend<'_> {
         Ok(MergeAppend {
             plan: self.plan.clone_in(mcx)?,
             apprelids: match &self.apprelids {
-                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
             mergeplans,
@@ -143,7 +143,7 @@ impl<'mcx> BinaryHeap<'mcx> {
             bh_space: capacity as i32,
             bh_size: 0,
             bh_has_heap_property: true,
-            bh_nodes: mcx::vec_with_capacity_in(mcx, capacity)?,
+            bh_nodes: ::mcx::vec_with_capacity_in(mcx, capacity)?,
         })
     }
 }

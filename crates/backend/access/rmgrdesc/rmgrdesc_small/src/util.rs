@@ -4,7 +4,7 @@
 
 use core::fmt;
 
-use mcx::PgString;
+use ::mcx::PgString;
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 
 /// `appendStringInfo(buf, fmt, ...)`: format into the caller's string,

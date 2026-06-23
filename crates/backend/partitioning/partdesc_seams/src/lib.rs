@@ -5,9 +5,9 @@
 //! panics loudly.
 
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::partition::PartitionDescData;
-use rel::Relation;
+use ::rel::Relation;
 
 seam_core::seam!(
     /// `RelationGetPartitionDesc(rel, omit_detached)` (partdesc.c:70): build (or

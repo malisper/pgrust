@@ -12,10 +12,10 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgBox};
-use types_core::primitive::uint32;
-use types_core::Oid;
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::types_core::primitive::uint32;
+use ::types_core::Oid;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use samplescan::{SampleScanState, TsmRoutine};
 
 seam_core::seam!(

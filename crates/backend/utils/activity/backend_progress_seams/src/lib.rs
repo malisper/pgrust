@@ -8,8 +8,8 @@
 //! are infallible. The owning unit installs them from its `init_seams()` when
 //! it lands; until then a call panics loudly.
 
-use types_core::Oid;
-use types_pgstat::backend_progress::ProgressCommandType;
+use ::types_core::Oid;
+use ::types_pgstat::backend_progress::ProgressCommandType;
 
 seam_core::seam!(
     /// `pgstat_progress_start_command(cmdtype, relid)` (backend_progress.c):

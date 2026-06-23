@@ -20,16 +20,16 @@ use reloptions_seams as reloptions_seams;
 use inval_seams as inval_seams;
 use cache_syscache as syscache;
 use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
-use cache::SysCacheKey;
-use types_core::Oid;
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`.
+use ::cache::SysCacheKey;
+use ::types_core::Oid;
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`.
 // The system-cache search keys (`SysCacheKey::Value`) and the syscache
 // invalidation callback's `arg` (`SyscacheCallbackFunction`) are audited bare
 // words (C: `Datum key1..key4`, `Datum arg`); both contracts live in
 // `types-cache`, so the word stays here at that edge.
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult};
-use types_reloptions::AttributeOpts;
+use ::types_reloptions::AttributeOpts;
 // The canonical owned `Datum<'mcx>` enum — the value carried by a deformed
 // catalog column (`SysCacheGetAttr`).
 use types_tuple::heaptuple::Datum;
@@ -61,7 +61,7 @@ struct AttoptCache<'mcx> {
     hash: PgHashMap<'mcx, AttoptCacheKey, AttoptCacheEntry>,
 }
 
-mcx::bind!(AttoptCacheTy => AttoptCache<'mcx>);
+::mcx::bind!(AttoptCacheTy => AttoptCache<'mcx>);
 
 thread_local! {
     /// `static HTAB *AttoptCacheHash = NULL;` — `None` until the cache is

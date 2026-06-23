@@ -20,8 +20,8 @@
 #![allow(clippy::result_large_err)]
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use types_foreigncmds::{
     DefElem, FdwOwnerRow, FdwUpdateRow, ForeignDataWrapper, ForeignServer, ImportForeignSchemaStmt,
     ImportRawStmt, RawStmtHandle, ServerOwnerRow, ServerUpdateRow,

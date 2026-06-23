@@ -130,7 +130,7 @@ pub fn get_cast_oid(
     missing_ok: bool,
 ) -> PgResult<Oid> {
     let oid = syscache::cast_oid::call(sourcetypeid, targettypeid)?;
-    if !types_core::OidIsValid(oid) && !missing_ok {
+    if !::types_core::OidIsValid(oid) && !missing_ok {
         let src = format_type::format_type_be_str::call(sourcetypeid)?;
         let tgt = format_type::format_type_be_str::call(targettypeid)?;
         return Err(PgError::new(

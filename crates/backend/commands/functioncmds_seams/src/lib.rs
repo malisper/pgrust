@@ -14,9 +14,9 @@
 //! vocabulary in `types-parsenodes`.
 
 use types_acl::{AclMode, AclResult};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use parsenodes::{DefElem, InlineCodeBlock, Node, TypeName};
 
 // ---------------------------------------------------------------------------

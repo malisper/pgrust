@@ -27,7 +27,7 @@
 use utils_error::{ereport, PgError};
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     AttrNumber, Oid, OidIsValid, FUNC_MAX_ARGS, InvalidAttrNumber, INVALID_OID as InvalidOid,
 };
 use types_error::{
@@ -41,36 +41,36 @@ use ::nodes::primnodes::{
     Aggref, ArrayExpr, CoercionForm, Expr, FieldSelect, FuncExpr, WindowFunc,
 };
 use ::nodes::rawnodes::FuncCall;
-use opclass::ObjectWithArgs;
+use ::opclass::ObjectWithArgs;
 use ::nodes::parsenodes::{
     ObjectType, OBJECT_AGGREGATE, OBJECT_FUNCTION, OBJECT_PROCEDURE, OBJECT_ROUTINE,
 };
-use parsenodes::CoercionContext;
-use parsenodes::ObjectWithArgs as ParseObjectWithArgs;
+use ::parsenodes::CoercionContext;
+use ::parsenodes::ObjectWithArgs as ParseObjectWithArgs;
 
-use types_tuple::heaptuple::{RECORDOID, UNKNOWNOID, VOIDOID};
+use ::types_tuple::heaptuple::{RECORDOID, UNKNOWNOID, VOIDOID};
 
 // Outward seam aliases.
-use namespace_seams::funcname_get_candidates;
-use nodes_core::nodefuncs::{expr_location as exprLocation, expr_type as exprType};
+use ::namespace_seams::funcname_get_candidates;
+use ::nodes_core::nodefuncs::{expr_location as exprLocation, expr_type as exprType};
 use coerce_seams::{
     can_coerce_type, coerce_type, enforce_generic_type_consistency, find_coercion_pathway_explicit,
     select_common_type, CoercionPathType,
 };
 use parse_agg_seams::{transform_aggregate_call, transform_window_func_call};
-use parse_expr_seams::parse_expr_kind_name;
+use ::parse_expr_seams::parse_expr_kind_name;
 use parse_func_seams as me;
 use parse_type_seams::{
     func_name_as_type, lookup_type_name_oid, lookup_type_name_oid_owa,
 };
 use parser_relation_seams::{expand_record_variable, scan_ns_item_for_column_by_posn};
-use format_type_seams::format_type_be_owned;
+use ::format_type_seams::format_type_be_owned;
 use lsyscache_seams::{
     get_array_type, get_base_element_type, get_base_type, get_func_prokind,
     get_type_category_preferred,
 };
 use syscache_seams::{agg_row_by_oid, proc_argdefaults, proc_row_by_oid};
-use funcapi_seams::get_expr_result_tupdesc;
+use ::funcapi_seams::get_expr_result_tupdesc;
 
 use types_namespace::{FuncCandidate, FuncCandidateList};
 
@@ -146,7 +146,7 @@ fn ISCOMPLEX(typeid: Oid) -> PgResult<bool> {
 /// `get_typ_typrelid(typid)` (lsyscache) — `typrelid`, or `InvalidOid`.
 #[inline]
 fn get_typ_typrelid(typid: Oid) -> PgResult<Oid> {
-    lsyscache_seams::get_typ_typrelid::call(typid)
+    ::lsyscache_seams::get_typ_typrelid::call(typid)
 }
 
 /// `parser_errposition(pstate, location)` (parse_node.c) — the cursor position
@@ -215,7 +215,7 @@ fn set_p_last_srf<'mcx>(pstate: &mut ParseState<'mcx>, result: &Expr<'_>) -> PgR
     // owned `SubLink`/`Aggref` sub-tree (e.g. `unnest(array(SELECT ...))`),
     // whose derived `Clone` panics. `clone_in` routes those through the proper
     // `clone_in`/`copyObject` deep copy.
-    pstate.p_last_srf = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, result.clone_in(mcx)?)?)?);
+    pstate.p_last_srf = Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, result.clone_in(mcx)?)?)?);
     Ok(())
 }
 
@@ -830,7 +830,7 @@ pub fn lookup_func_with_args_for_objtype<'mcx>(
     missing_ok: bool,
 ) -> PgResult<Oid> {
     // Resolve the input arg TypeNames (Node::TypeName carriers) up front.
-    let mut typenames: Vec<&parsenodes::TypeName> = Vec::new();
+    let mut typenames: Vec<&::parsenodes::TypeName> = Vec::new();
     for n in &func.objargs {
         let t = n
             .as_typename()
@@ -848,14 +848,14 @@ pub fn lookup_func_with_args_for_objtype<'mcx>(
     )
 }
 
-/// Shared body for the `opclass::TypeName` (objargs) variant.
+/// Shared body for the `::opclass::TypeName` (objargs) variant.
 fn lookup_func_with_args_impl<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
     objname: &[String],
-    objargs: &[opclass::TypeName],
+    objargs: &[::opclass::TypeName],
     args_unspecified: bool,
-    objfuncargs: &[parsenodes::Node],
+    objfuncargs: &[::parsenodes::Node],
     missing_ok: bool,
 ) -> PgResult<Oid> {
     let funcname: Vec<PgString<'mcx>> = objname
@@ -888,14 +888,14 @@ fn lookup_func_with_args_impl<'mcx>(
     )
 }
 
-/// Shared body for the `parsenodes::TypeName` (objargs) variant.
+/// Shared body for the `::parsenodes::TypeName` (objargs) variant.
 fn lookup_func_with_args_objtype_inner<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
     objname: &[String],
-    objargs: &[&parsenodes::TypeName],
+    objargs: &[&::parsenodes::TypeName],
     args_unspecified: bool,
-    objfuncargs: &[parsenodes::Node],
+    objfuncargs: &[::parsenodes::Node],
     missing_ok: bool,
 ) -> PgResult<Oid> {
     let funcname: Vec<PgString<'mcx>> = objname
@@ -936,7 +936,7 @@ fn lookup_func_with_args_finish<'mcx>(
     argcount: i32,
     argoids: &[Oid],
     args_unspecified: bool,
-    objfuncargs: &[parsenodes::Node],
+    objfuncargs: &[::parsenodes::Node],
     missing_ok: bool,
 ) -> PgResult<Oid> {
     // -1 means no args were specified.
@@ -969,7 +969,7 @@ fn lookup_func_with_args_finish<'mcx>(
             let fp = fp
                 .as_functionparameter()
                 .ok_or_else(|| internal_error("LookupFuncWithArgs: expected FunctionParameter"))?;
-            if fp.mode != parsenodes::FUNC_PARAM_DEFAULT {
+            if fp.mode != ::parsenodes::FUNC_PARAM_DEFAULT {
                 have_param_mode = true;
                 break;
             }
@@ -1352,7 +1352,7 @@ fn dummy_const() -> ::nodes::primnodes::Const<'static> {
         consttypmod: -1,
         constcollid: InvalidOid,
         constlen: 0,
-        constvalue: types_tuple::Datum::null(),
+        constvalue: ::types_tuple::Datum::null(),
         constisnull: true,
         constbyval: false,
         location: -1,
@@ -1411,7 +1411,7 @@ pub fn init_seams() {
     // result string, so materialise them in a throwaway scratch context.
     functioncmds_seams::func_signature_string::set(
         |funcname, nargs, argtypes| {
-            let scratch = mcx::MemoryContext::new("func_signature_string scratch");
+            let scratch = ::mcx::MemoryContext::new("func_signature_string scratch");
             let mcx = scratch.mcx();
             let names: Vec<PgString<'_>> = funcname
                 .iter()
@@ -1438,7 +1438,7 @@ pub fn init_seams() {
     // in a scratch context.
     functioncmds_seams::lookup_func_name::set(
         |funcname, nargs, argtypes, missing_ok| {
-            let scratch = mcx::MemoryContext::new("functioncmds lookup_func_name");
+            let scratch = ::mcx::MemoryContext::new("functioncmds lookup_func_name");
             let mcx = scratch.mcx();
             let names: Vec<PgString<'_>> = funcname
                 .iter()
@@ -1463,7 +1463,7 @@ pub fn init_seams() {
             let owa = func.as_objectwithargs().ok_or_else(|| {
                 internal_error("LookupFuncWithArgs: expected ObjectWithArgs node")
             })?;
-            let scratch = mcx::MemoryContext::new("functioncmds LookupFuncWithArgs");
+            let scratch = ::mcx::MemoryContext::new("functioncmds LookupFuncWithArgs");
             lookup_func_with_args_for_objtype(scratch.mcx(), objtype, owa, missing_ok)
         },
     );

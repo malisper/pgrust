@@ -16,9 +16,9 @@ use crate::{Gene, GeqoPrivateData};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use geqo_all_seams as geqo_seams;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{MemoryContextData, PathnodesMemoryContext, PlannerInfo, RelId};
-use types_core::primitive::Cost;
+use ::types_core::primitive::Cost;
 
 /// `DBL_MAX` (`<float.h>`) — fitness sentinel for an invalid join order.
 const DBL_MAX: Cost = f64::MAX;

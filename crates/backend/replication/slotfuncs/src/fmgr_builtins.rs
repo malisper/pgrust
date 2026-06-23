@@ -25,11 +25,11 @@
 //! the executor-frame SRF home).
 
 use types_core::{Oid, XLogRecPtr};
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_tuple::heaptuple::{NameData, NAMEOID};
-use types_tuple::Datum as DatumV;
+use ::types_tuple::heaptuple::{NameData, NAMEOID};
+use ::types_tuple::Datum as DatumV;
 
 use crate::SlotNameLsnRow;
 

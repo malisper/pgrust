@@ -18,10 +18,10 @@ extern crate alloc;
 use alloc::string::String;
 
 use types_core::{pid_t, Oid, ProcNumber, Size, TimestampTz, XLogRecPtr};
-use types_tuple::Datum;
-use snapshot::SnapshotData;
-use types_error::PgResult;
-use types_bgworker::BackgroundWorkerHandle;
+use ::types_tuple::Datum;
+use ::snapshot::SnapshotData;
+use ::types_error::PgResult;
+use ::types_bgworker::BackgroundWorkerHandle;
 use types_parallel::{
     dsm_handle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState,
     ParallelWorkerMainFn, ShmMqHandleHandle,
@@ -87,7 +87,7 @@ seam_core::seam!(pub fn dsm_segment_from_datum(arg: Datum<'static>) -> PgResult<
 // gone (`ShmMqHandle`/`ShmMqHandleHandle` carriers retired with them).
 
 // --- background workers (postmaster/bgworker.c) ----------------------------
-// These carry the REAL value handle `types_bgworker::BackgroundWorkerHandle`
+// These carry the REAL value handle `::types_bgworker::BackgroundWorkerHandle`
 // (`{slot, generation}`), not an opaque token: parallel.c stores the real
 // `BackgroundWorkerHandle` in `pcxt->worker[i].bgwhandle` (modeled as an
 // `Option`, the C `NULL`-pointer-or-handle).

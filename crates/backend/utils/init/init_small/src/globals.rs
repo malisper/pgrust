@@ -31,9 +31,9 @@ use types_core::{
     TimestampTz, DATEORDER_MDY, INTSTYLE_POSTGRES, INVALID_PROC_NUMBER, MAXPGPATH,
     MAX_CANCEL_KEY_LENGTH, PG_DIR_MODE_OWNER, USE_ISO_DATES,
 };
-pub use types_core::pid_t;
+pub use ::types_core::pid_t;
 use net::{ClientSocket, Port};
-use types_storage::latch::Latch;
+use ::types_storage::latch::Latch;
 
 /// One backend-private scalar global: a `thread_local!` `Cell` plus a getter
 /// named after the C variable and a setter.
@@ -687,7 +687,7 @@ pub fn EndCriticalSection() {
 /// Wrapper for the `with_my_proc_port` seam: adapts the callback-style seam
 /// signature `fn(&mut dyn FnMut(Option<&mut Port>))` to the internal
 /// `WithMyProcPort` which provides `Option<R>` from `FnOnce`.
-pub fn with_my_proc_port_seam(f: &mut dyn FnMut(Option<&mut net::Port>)) {
+pub fn with_my_proc_port_seam(f: &mut dyn FnMut(Option<&mut ::net::Port>)) {
     // Drive through `WithMyProcPort`, which is re-entrant: it reaches the live
     // `Port` both when it sits in the cell (the common case) and when an outer
     // `WithMyProcPort` frame currently holds it out and published its address

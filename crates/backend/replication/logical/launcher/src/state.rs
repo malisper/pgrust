@@ -14,7 +14,7 @@
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 
-use types_storage::storage::{
+use ::types_storage::storage::{
     dsa_handle, dshash_table_handle, DSM_HANDLE_INVALID, INVALID_DSA_POINTER,
 };
 use replication_launcher::{LogicalRepWorker, LogicalRepWorkerType};

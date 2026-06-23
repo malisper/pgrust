@@ -45,19 +45,19 @@ use page::{
 };
 use utils_error::{ereport, PgError, PgResult};
 use mcx::{Mcx, MemoryContext};
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, OffsetNumber, RmgrId, TransactionId, XLogRecPtr,
 };
-use types_core::xact::FullTransactionId;
-use types_error::error::{ERROR, PANIC};
-use types_storage::buf::{Buffer, BufferIsValid};
-use types_storage::storage::RelFileLocator;
-use types_tuple::access::{
+use ::types_core::xact::FullTransactionId;
+use ::types_error::error::{ERROR, PANIC};
+use ::types_storage::buf::{Buffer, BufferIsValid};
+use ::types_storage::storage::RelFileLocator;
+use ::types_tuple::access::{
     RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
-use types_tuple::heaptuple::{FIRST_OFFSET_NUMBER, INDEX_SIZE_MASK, INVALID_OFFSET_NUMBER};
-use wal::rmgr::XLogReaderState;
-use wal::XLogRedoAction;
+use ::types_tuple::heaptuple::{FIRST_OFFSET_NUMBER, INDEX_SIZE_MASK, INVALID_OFFSET_NUMBER};
+use ::wal::rmgr::XLogReaderState;
+use ::wal::XLogRedoAction;
 
 use transam_xlog_seams as xlog_seams;
 use xloginsert_seams as xloginsert;
@@ -69,8 +69,8 @@ use crate::gist_page::{
     GistPageSetDeleted,
 };
 
-use rel::Relation;
-use gist::SplitPageLayout;
+use ::rel::Relation;
+use ::gist::SplitPageLayout;
 
 // ===========================================================================
 // gistxlog.h op-info bytes + REGBUF flags.
@@ -1105,8 +1105,8 @@ pub fn gist_get_fake_lsn(rel: &Relation<'_>) -> PgResult<XLogRecPtr> {
 /// `InHotStandby` macro — true once the standby has begun (or is pending) a
 /// running-xacts snapshot during recovery.
 fn in_hot_standby() -> bool {
-    wal::xlogutils::in_hot_standby(
-        xlogutils::standby_state(),
+    ::wal::xlogutils::in_hot_standby(
+        ::xlogutils::standby_state(),
     )
 }
 

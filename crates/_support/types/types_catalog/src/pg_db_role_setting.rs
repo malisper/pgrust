@@ -5,7 +5,7 @@
 //! carries the attribute numbers the scan-key construction and `heap_getattr`
 //! decode rely on.
 
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 
 /* `Anum_pg_db_role_setting_*` (`pg_db_role_setting_d.h`) — attribute numbers in
  * the CATALOG field order of `catalog/pg_db_role_setting.h`. */

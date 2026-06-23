@@ -29,8 +29,8 @@
 
 use types_error::{PgError, PgResult};
 use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TEXT_REPRESENTATION};
-use types_cash::CashLconv;
-use types_core::Oid;
+use ::types_cash::CashLconv;
+use ::types_core::Oid;
 
 use crate::case::{asc_tolower_z, get_th, pg_ascii_toupper};
 use crate::parse::is_c_space;

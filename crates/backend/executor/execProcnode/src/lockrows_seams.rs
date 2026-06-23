@@ -21,8 +21,8 @@
 
 #![allow(non_snake_case)]
 
-use mcx::PgBox;
-use types_core::primitive::{AttrNumber, Index};
+use ::mcx::PgBox;
+use ::types_core::primitive::{AttrNumber, Index};
 use types_error::{PgError, PgResult};
 use ::nodes::execnodes::EStateData;
 use ::nodes::nodelockrows::{
@@ -145,7 +145,7 @@ fn bridge_recheck_slot_to_parent<'mcx>(
         Some(ps) => ps,
         None => {
             let desc_owned = match desc.as_ref() {
-                Some(d) => Some(mcx::alloc_in(pcx, d.clone_in(pcx)?)?),
+                Some(d) => Some(::mcx::alloc_in(pcx, d.clone_in(pcx)?)?),
                 None => None,
             };
             let ps = execTuples::exec_alloc_table_slot::call(
@@ -193,7 +193,7 @@ fn ExecFindRowMark<'mcx>(
         ermExtra: None,
     };
     let mcx = estate.es_query_cxt;
-    mcx::alloc_in(mcx, copy)
+    ::mcx::alloc_in(mcx, copy)
 }
 
 /// `ExecBuildAuxRowMark(erm, targetlist)` (execMain.c): build the
@@ -258,7 +258,7 @@ fn ExecBuildAuxRowMark<'mcx>(
 /// of the resjunk `TargetEntry` whose `resname` matches, or 0
 /// (`InvalidAttrNumber`) if none.
 fn find_junk_in_tlist<'mcx>(
-    targetlist: Option<&mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>>,
+    targetlist: Option<&::mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>>,
     attr_name: &str,
 ) -> AttrNumber {
     let Some(tlist) = targetlist else {
@@ -464,7 +464,7 @@ pub fn init_seams() {
         let mcx = estate.es_query_cxt;
         let rtsize = estate.es_range_table_size;
         lrstate.lr_epqstate.epqParam = node.epqParam;
-        let mut slots = mcx::vec_with_capacity_in(mcx, rtsize)?;
+        let mut slots = ::mcx::vec_with_capacity_in(mcx, rtsize)?;
         slots.resize(rtsize, None);
         lrstate.lr_epqstate.relsubs_slot = Some(slots);
         lrstate.lr_epqstate.resultRelations = None;
@@ -602,8 +602,8 @@ fn junk_src<'mcx>(
 
 /// Map the `nodelockrows::LockWaitPolicy` (an `i32` mirror of
 /// `nodes/lockoptions.h`) onto the `types_tableam` `LockWaitPolicy` enum.
-fn wait_policy_to_tableam(wait: i32) -> types_tableam::tableam::LockWaitPolicy {
-    use types_tableam::tableam::LockWaitPolicy as P;
+fn wait_policy_to_tableam(wait: i32) -> ::types_tableam::tableam::LockWaitPolicy {
+    use ::types_tableam::tableam::LockWaitPolicy as P;
     if wait == LockWaitSkip {
         P::LockWaitSkip
     } else if wait == LockWaitError {

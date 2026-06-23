@@ -1,7 +1,7 @@
 //! Unit tests for the `pg_saslprep` port.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 /// Run `pg_saslprep` against a fresh scratch context and return the bytes.
 fn prep(input: &[u8]) -> Option<alloc::vec::Vec<u8>> {

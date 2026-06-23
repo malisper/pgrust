@@ -66,7 +66,7 @@ use types_error::{
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERRCODE_RESERVED_NAME, ERRCODE_UNDEFINED_OBJECT, PANIC,
 };
 use types_storage::{LWTRANCHE_REPLICATION_ORIGIN_STATE, LW_EXCLUSIVE, LW_SHARED};
-use wal::rmgr::XLogReaderState;
+use ::wal::rmgr::XLogReaderState;
 
 pub mod catalog_extern;
 pub mod checkpoint_file;
@@ -560,7 +560,7 @@ pub fn replorigin_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
     let decoded = record.record.as_ref().ok_or_else(|| {
         PgError::new(PANIC, "replorigin_redo: record has no decoded payload")
     })?;
-    let info = decoded.info() & !wal::wal::XLR_INFO_MASK;
+    let info = decoded.info() & !::wal::wal::XLR_INFO_MASK;
     let data = decoded.data();
     let end_rec_ptr = record.EndRecPtr;
 

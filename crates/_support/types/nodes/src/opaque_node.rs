@@ -12,7 +12,7 @@
 //!   [`core::any::Any`] (which needs `'static`); downcasting is tag-keyed, not
 //!   `Any`-keyed — exactly C's `castNode`.
 //! - [`PgNodeBox`] — the smart pointer `PgBox<'mcx, dyn NodePayload<'mcx> + 'mcx>`
-//!   that owns the manual unsize coercion (§1.4, via [`mcx::box_unsize_dyn`]) and
+//!   that owns the manual unsize coercion (§1.4, via [`::mcx::box_unsize_dyn`]) and
 //!   the tag-keyed `#[repr(transparent)]` downcast (§1.3). **All `unsafe` related
 //!   to the trait object lives in this one type.**
 //! - [`OpaqueNode`] — the `Node` handle newtype over `PgNodeBox`.
@@ -35,7 +35,7 @@
 //! installed for this target (`miri component not available for
 //! stable-aarch64-apple-darwin`). Running it would require an unpinned nightly
 //! that diverges from the merge-gate compiler. The two `unsafe` operations (the
-//! fat-pointer round-trip in [`mcx::box_unsize_dyn`] and the tag-keyed transparent
+//! fat-pointer round-trip in [`::mcx::box_unsize_dyn`] and the tag-keyed transparent
 //! downcast in [`PgNodeBox::downcast_ref`]) are instead exercised end-to-end on
 //! the pinned stable toolchain by the in-module `construct_unsize_downcast_clone_
 //! equal_drop` test (alloc -> unsize -> tag-keyed downcast -> equal-via-vtable ->
@@ -44,7 +44,7 @@
 
 use crate::nodes::{Node, NodeTag};
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// Installable node-equality seam for the generated `NodePayload::equal_dyn`
 /// bodies (node-opaque P3 codegen). The real per-payload `equal()` comparators
@@ -215,7 +215,7 @@ impl<'mcx> PgNodeBox<'mcx> {
     /// Allocate `payload` in `mcx` and unsize it to the trait object.
     ///
     /// The `*mut P -> *mut (dyn NodePayload + 'mcx)` cast inside
-    /// [`mcx::box_unsize_dyn`] is a stable *unsizing coercion* (`P: Unsize<dyn>`);
+    /// [`::mcx::box_unsize_dyn`] is a stable *unsizing coercion* (`P: Unsize<dyn>`);
     /// only the implicit `Box: CoerceUnsized` impl is nightly, which is exactly
     /// why we route through the manual helper. No `unsafe` appears here — it is
     /// encapsulated (and justified) in `box_unsize_dyn`.
@@ -223,8 +223,8 @@ impl<'mcx> PgNodeBox<'mcx> {
     where
         P: NodePayload<'mcx> + 'mcx,
     {
-        let sized: PgBox<'mcx, P> = mcx::alloc_in(mcx, payload)?;
-        let fat = mcx::box_unsize_dyn(sized, |p| p as *mut (dyn NodePayload<'mcx> + 'mcx));
+        let sized: PgBox<'mcx, P> = ::mcx::alloc_in(mcx, payload)?;
+        let fat = ::mcx::box_unsize_dyn(sized, |p| p as *mut (dyn NodePayload<'mcx> + 'mcx));
         Ok(PgNodeBox(fat))
     }
 
@@ -288,7 +288,7 @@ impl<'mcx> PgNodeBox<'mcx> {
     /// # Soundness
     /// Same tag<->adapter bijection + `repr(transparent)` argument as
     /// [`downcast_ref`]; the move-out itself is encapsulated in
-    /// [`mcx::box_read_payload`] (it `ptr::read`s the payload and frees the box
+    /// [`::mcx::box_read_payload`] (it `ptr::read`s the payload and frees the box
     /// storage without double-dropping).
     #[inline]
     pub fn into_payload<P>(self, expected: NodeTag) -> Result<P, Self>
@@ -300,7 +300,7 @@ impl<'mcx> PgNodeBox<'mcx> {
             // SAFETY: tag matched -> the runtime type is `P` (bijection); `data`
             // is the transparent payload address; `box_read_payload` reads `P` out
             // and frees the box without running the dyn's drop glue.
-            let value = unsafe { mcx::box_read_payload(self.0, data) };
+            let value = unsafe { ::mcx::box_read_payload(self.0, data) };
             Ok(value)
         } else {
             Err(self)
@@ -450,7 +450,7 @@ impl core::fmt::Debug for OpaqueNode<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     /// A self-contained 1-variant payload exercising the full substrate, mirroring
     /// the proposal's risk-gate #3 "1-variant Node end-to-end" spike:

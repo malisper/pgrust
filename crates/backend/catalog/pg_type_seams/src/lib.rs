@@ -13,10 +13,10 @@
 
 #![allow(non_snake_case)]
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_type::{TypeCreateParams, TypeFormFields};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_type::{TypeCreateParams, TypeFormFields};
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `TypeCreate(...)` (pg_type.c): do all the work to define a new type,
@@ -124,7 +124,7 @@ seam_core::seam!(
 // typecmds does NO datum writes and NO GenerateTypeDependencies of its own.
 // ---------------------------------------------------------------------------
 
-use types_catalog::pg_type::TypeAttrUpdate;
+use ::types_catalog::pg_type::TypeAttrUpdate;
 
 seam_core::seam!(
     /// `AlterTypeOwnerInternal`'s SINGLE-ROW write (typecmds.c:3985): set

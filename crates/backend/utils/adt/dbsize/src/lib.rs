@@ -29,18 +29,18 @@
 
 use utils_error::{ereport, PgError, PgResult};
 use mcx::{Mcx, PgVec};
-use types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
-use types_core::primitive::{
+use ::types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+use ::types_core::primitive::{
     ForkNumber, ProcNumber, INVALID_PROC_NUMBER, MAX_FORKNUM as MAX_FORKNUM_ENUM,
 };
-use types_error::error::{
+use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use types_storage::file::{PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY};
-use types_storage::storage::RelFileLocator;
+use ::types_storage::file::{PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY};
+use ::types_storage::storage::RelFileLocator;
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// The fmgr/`Datum` boundary: the SQL-callable `fc_*` adapters for the
 /// `dbsize.c` functions, registered into the fmgr-core builtin table by
@@ -48,7 +48,7 @@ use types_core::primitive::Oid;
 pub mod fmgr_builtins;
 
 /// `RelFileNumber` (`relpath.h`).
-pub type RelFileNumber = types_core::primitive::Oid;
+pub type RelFileNumber = ::types_core::primitive::Oid;
 
 // ===========================================================================
 // Constants and small helpers mirroring the C macros / static tables.
@@ -1281,12 +1281,12 @@ pub fn pg_relation_filepath(relid: Oid) -> PgResult<Option<String>> {
 /// needed across the gap because the size routines consult only the copied-out
 /// fields, and the lock keeps the relation from being dropped concurrently.
 fn try_relation_open_provider(rel_oid: Oid) -> PgResult<Option<OpenRelation>> {
-    let scratch = mcx::MemoryContext::new("dbsize try_relation_open");
+    let scratch = ::mcx::MemoryContext::new("dbsize try_relation_open");
     let mcx = scratch.mcx();
     let opened = common_relation::try_relation_open(
         mcx,
         rel_oid,
-        types_storage::lock::AccessShareLock,
+        ::types_storage::lock::AccessShareLock,
     )?;
     Ok(opened.map(|rel| project_open_relation(&rel)))
 }
@@ -1295,12 +1295,12 @@ fn try_relation_open_provider(rel_oid: Oid) -> PgResult<Option<OpenRelation>> {
 /// the relation cannot be opened). See [`try_relation_open_provider`] for the
 /// lock/pin split.
 fn relation_open_provider(rel_oid: Oid) -> PgResult<OpenRelation> {
-    let scratch = mcx::MemoryContext::new("dbsize relation_open");
+    let scratch = ::mcx::MemoryContext::new("dbsize relation_open");
     let mcx = scratch.mcx();
     let rel = common_relation::relation_open(
         mcx,
         rel_oid,
-        types_storage::lock::AccessShareLock,
+        ::types_storage::lock::AccessShareLock,
     )?;
     Ok(project_open_relation(&rel))
 }
@@ -1327,7 +1327,7 @@ fn project_open_relation(rel: &rel::Relation<'_>) -> OpenRelation {
 fn relation_close_provider(rel_oid: Oid) -> PgResult<()> {
     lmgr_seams::unlock_relation_oid::call(
         rel_oid,
-        types_storage::lock::AccessShareLock,
+        ::types_storage::lock::AccessShareLock,
     )
 }
 
@@ -1501,7 +1501,7 @@ fn read_dir_provider(path: &str) -> OpenDir {
 /// exact non-OK `AclResult` is re-derived through `object_aclcheck` (with the
 /// same class/mode the size routine used) so the owner picks the right message.
 fn aclcheck_error_provider(objtype: AclObjectType, obj_id: Oid) -> PgError {
-    let scratch = mcx::MemoryContext::new("dbsize aclcheck_error");
+    let scratch = ::mcx::MemoryContext::new("dbsize aclcheck_error");
     let mcx = scratch.mcx();
 
     let (class_id, mode, obj_type, name) = match objtype {
@@ -1547,7 +1547,7 @@ fn aclcheck_error_provider(objtype: AclObjectType, obj_id: Oid) -> PgError {
     // here aclresult is non-OK by construction, so unwrap the Err.
     match aclchk_seams::aclcheck_error::call(aclresult, obj_type, name) {
         Ok(()) => ereport(ERROR)
-            .errcode(types_error::error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errcode(::types_error::error::ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg_internal("dbsize aclcheck_error: aclresult unexpectedly OK")
             .into_error(),
         Err(e) => e,

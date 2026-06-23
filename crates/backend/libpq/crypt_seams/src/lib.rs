@@ -15,7 +15,7 @@
 //!   (SHA-256/HMAC/PBKDF2, `pg_strong_random`, SASLprep) absent here, so they
 //!   stay behind this seam to keep crypt's build self-contained.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `pg_md5_encrypt(passwd, salt, salt_len, buf, &errstr)` (`common/md5.c`):

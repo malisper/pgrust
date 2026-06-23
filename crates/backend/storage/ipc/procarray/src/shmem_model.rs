@@ -33,8 +33,8 @@ use types_core::{
     FirstNormalFullTransactionId, FirstNormalTransactionId, FullTransactionId, Size,
     TransactionId, TransactionIdIsValid,
 };
-use types_error::PgResult;
-use types_storage::storage::PGPROC_MAX_CACHED_SUBXIDS;
+use ::types_error::PgResult;
+use ::types_storage::storage::PGPROC_MAX_CACHED_SUBXIDS;
 
 /// `PROCARRAY_MAXPROCS` (procarray.c) — `(MaxBackends + max_prepared_xacts)`.
 /// The allocated size of the `pgprocnos` array and the per-cluster cap on
@@ -177,9 +177,9 @@ pub struct ProcArrayProcSlot {
     /// `ProcGlobal->statusFlags[i]` (mirror of `PGPROC->statusFlags`).
     pub status_flags: u8,
     /// `PGPROC->databaseId`.
-    pub databaseId: types_core::Oid,
+    pub databaseId: ::types_core::Oid,
     /// `PGPROC->tempNamespaceId`.
-    pub tempNamespaceId: types_core::Oid,
+    pub tempNamespaceId: ::types_core::Oid,
 }
 
 /// `struct GlobalVisState` (`utils/snapmgr.h`, body in procarray.c) — the
@@ -362,9 +362,9 @@ pub fn ProcArrayShmemInit() -> PgResult<()> {
             (*proc_array).numKnownAssignedXids = 0;
             (*proc_array).tailKnownAssignedXids = 0;
             (*proc_array).headKnownAssignedXids = 0;
-            (*proc_array).lastOverflowedXid = types_core::InvalidTransactionId;
-            (*proc_array).replication_slot_xmin = types_core::InvalidTransactionId;
-            (*proc_array).replication_slot_catalog_xmin = types_core::InvalidTransactionId;
+            (*proc_array).lastOverflowedXid = ::types_core::InvalidTransactionId;
+            (*proc_array).replication_slot_xmin = ::types_core::InvalidTransactionId;
+            (*proc_array).replication_slot_catalog_xmin = ::types_core::InvalidTransactionId;
             // Zero the flexible `pgprocnos[]` region.
             core::ptr::write_bytes(
                 (*proc_array).pgprocnos.as_mut_ptr(),
@@ -575,7 +575,7 @@ mod tests {
         // First backend initializes the shared header in place.
         conn1.numProcs = 0;
         conn1.maxProcs = maxprocs as i32;
-        conn1.lastOverflowedXid = types_core::InvalidTransactionId;
+        conn1.lastOverflowedXid = ::types_core::InvalidTransactionId;
         for slot in conn1.pgprocnos_mut() {
             *slot = 0;
         }

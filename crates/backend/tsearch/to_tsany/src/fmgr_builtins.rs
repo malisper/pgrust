@@ -11,11 +11,11 @@
 use std::string::ToString;
 use std::vec::Vec;
 
-use fmgr_core::register_builtins_native;
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::fmgr_core::register_builtins_native;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 const VARHDRSZ: usize = 4;

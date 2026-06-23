@@ -42,8 +42,8 @@
 //! building and the [`SplitTextOutputData`](crate::keystone) marker.
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 use mbutils_seams as mb;
 
@@ -85,7 +85,7 @@ pub enum ArrayElement<'mcx> {
 /// `construct_empty_array(TEXTOID)`.
 fn build_text_array<'mcx>(mcx: Mcx<'mcx>, fields: &[SplitField<'mcx>]) -> PgResult<Datum<'mcx>> {
     let elems: PgVec<'mcx, Option<&[u8]>> = {
-        let mut v = mcx::vec_with_capacity_in(mcx, fields.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, fields.len())?;
         for f in fields {
             v.push(if f.is_null { None } else { Some(f.bytes.as_slice()) });
         }
@@ -105,7 +105,7 @@ fn build_text_array<'mcx>(mcx: Mcx<'mcx>, fields: &[SplitField<'mcx>]) -> PgResu
 fn tuplestore_put_field<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut nodes::Tuplestorestate<'_>,
-    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    tupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
     field_value: &[u8],
     is_null: bool,
 ) -> PgResult<()> {
@@ -137,7 +137,7 @@ fn array_to_text_elements<'mcx>(
     let array = v.as_ref_bytes();
     let raw =
         arrayfuncs_seams::array_to_text_elements::call(mcx, array, element_type)?;
-    let mut out = mcx::vec_with_capacity_in(mcx, raw.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, raw.len())?;
     for item in raw {
         out.push(match item {
             Some(bytes) => ArrayElement::Value(bytes),
@@ -170,12 +170,12 @@ fn truncate_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &[u8]) -> PgResult<PgVec<'mc
 /// place; the seam crosses the payload as `String` -> `String`.
 fn canonicalize_path<'mcx>(mcx: Mcx<'mcx>, path: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     let s = core::str::from_utf8(path).map_err(|_| {
-        types_error::PgError::error("invalid byte sequence for encoding")
-            .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+        ::types_error::PgError::error("invalid byte sequence for encoding")
+            .with_sqlstate(::types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
     })?;
     let canonical = common_path_seams::canonicalize_path::call(s.to_string());
     let bytes = canonical.as_bytes();
-    let mut out = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
     out.extend_from_slice(bytes);
     Ok(out)
 }
@@ -206,12 +206,12 @@ fn output_function_call<'mcx>(
 /// the seam crosses the content as `&str` -> `PgString`.
 fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     let s = core::str::from_utf8(ident).map_err(|_| {
-        types_error::PgError::error("invalid byte sequence for encoding")
-            .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+        ::types_error::PgError::error("invalid byte sequence for encoding")
+            .with_sqlstate(::types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
     })?;
     let quoted = ruleutils_seams::quote_identifier::call(mcx, s)?;
     let bytes = quoted.as_bytes();
-    let mut out = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
     out.extend_from_slice(bytes);
     Ok(out)
 }
@@ -225,12 +225,12 @@ fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &[u8]) -> PgResult<PgVec<'mcx, 
 /// error the fmgr text<->cstring boundary would otherwise raise.
 fn quote_literal_cstr<'mcx>(mcx: Mcx<'mcx>, literal: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     let s = core::str::from_utf8(literal).map_err(|_| {
-        types_error::PgError::error("invalid byte sequence for encoding")
-            .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+        ::types_error::PgError::error("invalid byte sequence for encoding")
+            .with_sqlstate(::types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
     })?;
     let quoted = quote_seams::quote_literal_cstr::call(s);
     let bytes = quoted.as_bytes();
-    let mut out = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
     out.extend_from_slice(bytes);
     Ok(out)
 }
@@ -241,8 +241,8 @@ fn quote_literal_cstr<'mcx>(mcx: Mcx<'mcx>, literal: &[u8]) -> PgResult<PgVec<'m
 /// ereports on bad data or overflow, surfaced here as the `Err`.
 fn pg_strtoint32(s: &[u8]) -> PgResult<i32> {
     let s = core::str::from_utf8(s).map_err(|_| {
-        types_error::PgError::error("invalid byte sequence for encoding")
-            .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+        ::types_error::PgError::error("invalid byte sequence for encoding")
+            .with_sqlstate(::types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
     })?;
     numutils::pg_strtoint32(s)
 }
@@ -307,7 +307,7 @@ use crate::position_ops::{
 // by-reference (varlena/array) images ride `ByRef(PgVec<'mcx, u8>)`. The `_v`
 // `&Datum<'mcx>` borrowing convention is used for the value-consuming seam
 // stand-ins so the by-ref payload is not needlessly cloned.
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 
 // ===========================================================================
 // Family-local carriers.
@@ -425,7 +425,7 @@ fn at(buf: &[u8], idx: usize) -> u8 {
 /// Build a working NUL-terminated, modifiable copy of `rawstring` charged to
 /// `mcx` (C's `Split*String` scribbles on its `char *` input in place).
 fn nul_terminated_copy<'mcx>(mcx: Mcx<'mcx>, rawstring: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let mut buf = mcx::vec_with_capacity_in(mcx, rawstring.len() + 1)?;
+    let mut buf = ::mcx::vec_with_capacity_in(mcx, rawstring.len() + 1)?;
     buf.extend_from_slice(rawstring);
     buf.push(0);
     Ok(buf)
@@ -436,11 +436,11 @@ fn nul_terminated_copy<'mcx>(mcx: Mcx<'mcx>, rawstring: &[u8]) -> PgResult<PgVec
 /// string). Invalid UTF-8 in the DB-encoding name surfaces as the seam's `Err`.
 fn name_string<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgString<'mcx>> {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    let mut out = mcx::vec_with_capacity_in(mcx, end)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, end)?;
     out.extend_from_slice(&bytes[..end]);
     PgString::from_utf8(out).map_err(|_| {
-        types_error::PgError::error("invalid byte sequence for encoding")
-            .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+        ::types_error::PgError::error("invalid byte sequence for encoding")
+            .with_sqlstate(::types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
     })
 }
 
@@ -485,71 +485,71 @@ pub fn append_string_info_text<'mcx>(str: &mut PgVec<'mcx, u8>, t: &[u8]) -> PgR
 // Errors the C ereport()s (varlena.c).
 // ===========================================================================
 
-fn invalid_name_syntax() -> types_error::PgError {
-    types_error::PgError::error("invalid name syntax").with_sqlstate(types_error::ERRCODE_INVALID_NAME)
+fn invalid_name_syntax() -> ::types_error::PgError {
+    ::types_error::PgError::error("invalid name syntax").with_sqlstate(::types_error::ERRCODE_INVALID_NAME)
 }
 
-fn field_position_zero() -> types_error::PgError {
-    types_error::PgError::error("field position must not be zero")
-        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+fn field_position_zero() -> ::types_error::PgError {
+    ::types_error::PgError::error("field position must not be zero")
+        .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
-fn number_out_of_range() -> types_error::PgError {
-    types_error::PgError::error("number is out of range")
-        .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+fn number_out_of_range() -> ::types_error::PgError {
+    ::types_error::PgError::error("number is out of range")
+        .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
 }
 
-fn unterminated_specifier() -> types_error::PgError {
-    types_error::PgError::error("unterminated format() type specifier")
-        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+fn unterminated_specifier() -> ::types_error::PgError {
+    ::types_error::PgError::error("unterminated format() type specifier")
+        .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
         .with_hint("For a single \"%\" use \"%%\".")
 }
 
-fn argument_zero() -> types_error::PgError {
-    types_error::PgError::error(
+fn argument_zero() -> ::types_error::PgError {
+    ::types_error::PgError::error(
         "format specifies argument 0, but arguments are numbered from 1",
     )
-    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
-fn width_position_unterminated() -> types_error::PgError {
-    types_error::PgError::error("width argument position must be ended by \"$\"")
-        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+fn width_position_unterminated() -> ::types_error::PgError {
+    ::types_error::PgError::error("width argument position must be ended by \"$\"")
+        .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
-fn too_few_arguments() -> types_error::PgError {
-    types_error::PgError::error("too few arguments for format()")
-        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+fn too_few_arguments() -> ::types_error::PgError {
+    ::types_error::PgError::error("too few arguments for format()")
+        .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
-fn could_not_determine_type() -> types_error::PgError {
-    types_error::PgError::error("could not determine data type of format() input")
-        .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR)
+fn could_not_determine_type() -> ::types_error::PgError {
+    ::types_error::PgError::error("could not determine data type of format() input")
+        .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR)
 }
 
-fn null_identifier() -> types_error::PgError {
-    types_error::PgError::error("null values cannot be formatted as an SQL identifier")
-        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
+fn null_identifier() -> ::types_error::PgError {
+    ::types_error::PgError::error("null values cannot be formatted as an SQL identifier")
+        .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
 }
 
-fn unrecognized_specifier(fmt: &[u8], cp: usize) -> PgResult<types_error::PgError> {
+fn unrecognized_specifier(fmt: &[u8], cp: usize) -> PgResult<::types_error::PgError> {
     // C: errmsg("unrecognized format() type specifier \"%.*s\"",
     //           pg_mblen_range(cp, end_ptr), cp). pg_mblen_range never reads
     //  past the slice end; a byte sequence invalid in the database encoding
     //  surfaces as that report_invalid_encoding error instead (propagated).
     let n = mb::pg_mblen_range::call(&fmt[cp..])?.max(1) as usize;
     let bytes = &fmt[cp..(cp + n).min(fmt.len())];
-    Ok(types_error::PgError::error(format!(
+    Ok(::types_error::PgError::error(format!(
         "unrecognized format() type specifier \"{}\"",
         String::from_utf8_lossy(bytes)
     ))
-    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
     .with_hint("For a single \"%\" use \"%%\"."))
 }
 
-fn insufficient_data() -> types_error::PgError {
-    types_error::PgError::error("insufficient data left in message")
-        .with_sqlstate(types_error::ERRCODE_PROTOCOL_VIOLATION)
+fn insufficient_data() -> ::types_error::PgError {
+    ::types_error::PgError::error("insufficient data left in message")
+        .with_sqlstate(::types_error::ERRCODE_PROTOCOL_VIOLATION)
 }
 
 // ===========================================================================
@@ -1099,7 +1099,7 @@ fn split_text_accum_result<'mcx>(
     }
 
     // C:4998-5018 stash the field (array/tuplestore both reduce to appending).
-    let mut bytes = mcx::vec_with_capacity_in(mcx, field_value.len())?;
+    let mut bytes = ::mcx::vec_with_capacity_in(mcx, field_value.len())?;
     bytes.extend_from_slice(field_value);
     fields.try_reserve(1).map_err(|_| mcx.oom(1))?;
     fields.push(SplitField { bytes, is_null });
@@ -1249,7 +1249,7 @@ pub fn text_to_array_null<'mcx>(
 pub fn text_to_table<'mcx>(
     mcx: Mcx<'mcx>,
     tupstore: &mut nodes::Tuplestorestate<'_>,
-    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    tupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
     inputstring: Option<&[u8]>,
     fldsep: Option<&[u8]>,
     null_string: Option<&[u8]>,
@@ -1272,7 +1272,7 @@ pub fn text_to_table<'mcx>(
 pub fn text_to_table_null<'mcx>(
     mcx: Mcx<'mcx>,
     tupstore: &mut nodes::Tuplestorestate<'_>,
-    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    tupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
     inputstring: Option<&[u8]>,
     fldsep: Option<&[u8]>,
     null_string: Option<&[u8]>,
@@ -1420,8 +1420,8 @@ pub fn pg_column_compression<'mcx>(
         ToastCompressionId::Lz4 => b"lz4",
         // C:5363-5364 default: elog(ERROR, "invalid compression method id %d").
         ToastCompressionId::Invalid => {
-            return Err(types_error::PgError::error("invalid compression method id")
-                .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR));
+            return Err(::types_error::PgError::error("invalid compression method id")
+                .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR));
         }
     };
 
@@ -1587,7 +1587,7 @@ pub fn string_agg_serialize<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     // C's pq_begintypsend/pq_endtypsend build a per-call StringInfo then copy
     // it out into a fresh bytea; the wire blob is [cursor:4 BE][data..].
-    let mut buf = mcx::vec_with_capacity_in(mcx, 4 + state.data.len())?;
+    let mut buf = ::mcx::vec_with_capacity_in(mcx, 4 + state.data.len())?;
     // C:5566 pq_sendint(&buf, state->cursor, 4); (network byte order).
     buf.extend_from_slice(&(state.cursor as u32).to_be_bytes());
     // C:5569 pq_sendbytes(&buf, state->data, state->len).
@@ -1657,7 +1657,7 @@ pub fn bytea_string_agg_finalfn<'mcx>(
         Some(state) => {
             let start = state.cursor as usize;
             let stripped = &state.data[start..];
-            let mut out = mcx::vec_with_capacity_in(mcx, stripped.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, stripped.len())?;
             out.extend_from_slice(stripped);
             Ok(Some(out))
         }
@@ -1782,7 +1782,7 @@ pub fn array_to_format_args<'mcx>(
         lba.typbyval,
         lba.typalign as core::ffi::c_char,
     )?;
-    let mut out = mcx::vec_with_capacity_in(mcx, elems.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, elems.len())?;
     for (value, isnull) in elems {
         out.push(FormatArg { value, is_null: isnull, typid: element_type });
     }
@@ -2060,7 +2060,7 @@ pub fn text_format<'mcx>(
 
             // C:6040-6053 get the value/type of the selected argument.
             let cur = &args[(arg - 1) as usize];
-            if !types_core::OidIsValid(cur.typid) {
+            if !::types_core::OidIsValid(cur.typid) {
                 return Err(could_not_determine_type());
             }
 
@@ -2091,7 +2091,7 @@ pub fn text_format<'mcx>(
 
         // C:6097-6110 get value/type of selected argument.
         let cur = &args[(arg - 1) as usize];
-        if !types_core::OidIsValid(cur.typid) {
+        if !::types_core::OidIsValid(cur.typid) {
             return Err(could_not_determine_type());
         }
 
@@ -2154,7 +2154,7 @@ mod format_tests {
     // the append fast path avoids the mb seam.
     #[test]
     fn format_percent_l_null_yields_null_keyword() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         // text-typed NULL argument; TEXTOID = 25.
         let out = text_format(mcx, Some(b"%L"), &[null_arg(25)]).unwrap().unwrap();
@@ -2175,7 +2175,7 @@ mod format_tests {
     #[test]
     fn quote_literal_cstr_helper_quotes() {
         quote::init_seams();
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let q = quote_literal_cstr(mcx, b"it's").unwrap();
         assert_eq!(&q[..], b"'it''s'");

@@ -15,18 +15,18 @@
 //! loudly. The signatures mirror the `TableAmRoutine` vtable fields exactly so
 //! the core's vtable assignment is a direct `::call` thunk.
 
-use mcx::Mcx;
-use types_core::xact::CommandId;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::xact::CommandId;
+use ::types_error::PgResult;
 use ::nodes::tuptable::SlotData;
-use rel::Relation;
-use types_tableam::tableam::{
+use ::rel::Relation;
+use ::types_tableam::tableam::{
     BulkInsertStateData, LockTupleMode, LockWaitPolicy, Snapshot, TM_FailureData, TM_Result,
     TU_UpdateIndexes,
 };
-use types_storage::RelFileLocator;
-use snapshot::SnapshotData;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_storage::RelFileLocator;
+use ::snapshot::SnapshotData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
     /// `heapam_relation_set_new_filelocator(rel, newrlocator, persistence,

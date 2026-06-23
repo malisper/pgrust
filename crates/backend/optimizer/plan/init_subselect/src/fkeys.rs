@@ -2,14 +2,14 @@
 //!
 //! Matches the foreign-key constraints in `root->fkey_list` against the query's
 //! equivalence classes and loose join quals, annotating each
-//! [`pathnodes::ForeignKeyOptInfo`] with which ECs/RestrictInfos its
+//! [`::pathnodes::ForeignKeyOptInfo`] with which ECs/RestrictInfos its
 //! columns match, and discarding FKs that aren't fully matched. The match
 //! results feed the FK-based join-selectivity estimates in costsize.c.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use equivclass::match_eclasses_to_foreign_key_col;
+use ::equivclass::match_eclasses_to_foreign_key_col;
 use types_core::{Oid, OidIsValid, InvalidOid};
 use ::nodes::primnodes::{Expr, Var};
 use pathnodes::{NodeId, PlannerInfo, RELOPT_BASEREL};

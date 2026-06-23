@@ -30,21 +30,21 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, PANIC};
 
 use types_core::{BlockNumber, Oid, OffsetNumber, Size};
-use rel::RelationData;
-use types_storage::buf::{
+use ::rel::RelationData;
+use ::types_storage::buf::{
     BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK, RBM_NORMAL, RBM_ZERO_AND_CLEANUP_LOCK,
     RBM_ZERO_AND_LOCK,
 };
-use types_storage::bufpage::{
+use ::types_storage::bufpage::{
     ItemIdData, MaxHeapTupleSize, MaxHeapTuplesPerPage, SizeOfPageHeaderData,
 };
-use types_storage::storage::{Buffer, InvalidBuffer};
-use types_tableam::BulkInsertStateData;
-use types_tuple::heaptuple::{
+use ::types_storage::storage::{Buffer, InvalidBuffer};
+use ::types_tableam::BulkInsertStateData;
+use ::types_tuple::heaptuple::{
     HeapTupleData, ItemPointerData, HEAP_XMAX_COMMITTED, HEAP_XMAX_IS_MULTI,
 };
 
@@ -89,9 +89,9 @@ fn rel_handle(relation: &RelationData<'_>) -> Oid {
 /// a BAS_BULKWRITE strategy → IOCONTEXT_BULKWRITE; a NULL strategy is
 /// IOCONTEXT_NORMAL.
 fn io_context_for_strategy(
-    strategy: &types_storage::buf::BufferAccessStrategy,
-) -> types_storage::buf::IOContext {
-    use types_storage::buf::{BufferAccessStrategyType as Bas, IOContext};
+    strategy: &::types_storage::buf::BufferAccessStrategy,
+) -> ::types_storage::buf::IOContext {
+    use ::types_storage::buf::{BufferAccessStrategyType as Bas, IOContext};
     match strategy {
         None => IOContext::IOCONTEXT_NORMAL,
         Some(s) => match s.borrow().btype {
@@ -210,7 +210,7 @@ fn ReadBufferBI(
                 rel,
                 target_block,
                 mode,
-                types_storage::buf::IOContext::IOCONTEXT_NORMAL,
+                ::types_storage::buf::IOContext::IOCONTEXT_NORMAL,
             );
         }
         Some(bistate) => bistate,
@@ -423,7 +423,7 @@ fn RelationAddBlocks(
     let io_context = bistate
         .as_ref()
         .map(|b| io_context_for_strategy(&b.strategy))
-        .unwrap_or(types_storage::buf::IOContext::IOCONTEXT_NORMAL);
+        .unwrap_or(::types_storage::buf::IOContext::IOCONTEXT_NORMAL);
     let extended = hio_seam::extend_buffered_rel_by::call(rel, io_context, extend_by_pages)?;
     let first_block = extended.first_block;
     let extend_by_pages = extended.extended_by;
@@ -899,10 +899,10 @@ mod wire {
         PageGetMaxOffsetNumber, PageIsAllVisible, PageMut, PageRef,
     };
     use types_core::{BlockNumber, OffsetNumber, Size};
-    use types_storage::bufpage::PAI_IS_HEAP;
-    use types_tuple::heaptuple::ItemPointerData;
-    use types_error::PgResult;
-    use types_storage::storage::Buffer;
+    use ::types_storage::bufpage::PAI_IS_HEAP;
+    use ::types_tuple::heaptuple::ItemPointerData;
+    use ::types_error::PgResult;
+    use ::types_storage::storage::Buffer;
 
     pub fn lock_buffer(buffer: Buffer, mode: i32) -> PgResult<()> {
         bufmgr_seam::lock_buffer::call(buffer, mode)
@@ -956,7 +956,7 @@ mod wire {
         // header there would return 0 and underflow the `freespace =
         // BufferGetPageSize - SizeOfPageHeaderData` computation.
         debug_assert!(buffer != super::InvalidBuffer);
-        Ok(types_core::primitive::BLCKSZ as Size)
+        Ok(::types_core::primitive::BLCKSZ as Size)
     }
 
     pub fn page_get_max_offset_number(buffer: Buffer) -> PgResult<OffsetNumber> {
@@ -992,7 +992,7 @@ mod wire {
     /// `image` is the full contiguous on-disk tuple image. The owner holds the
     /// exclusive content lock; `with_buffer_page` hands the live mutable page.
     pub fn page_add_item(buffer: Buffer, image: &[u8]) -> PgResult<OffsetNumber> {
-        use types_tuple::heaptuple::INVALID_OFFSET_NUMBER;
+        use ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER;
         let mut out: OffsetNumber = INVALID_OFFSET_NUMBER;
         bufmgr_seam::with_buffer_page::call(buffer, &mut |bytes| {
             let mut page = PageMut::new(bytes)?;

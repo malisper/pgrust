@@ -39,10 +39,10 @@ mod fmgr_builtins;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
 
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     DEPENDENCY_AUTO, DEPENDENCY_NORMAL, InvalidObjectAddress, ObjectAddress,
 };
-use types_catalog::pg_publication::{
+use ::types_catalog::pg_publication::{
     Anum_pg_publication_namespace_oid, Anum_pg_publication_namespace_pnnspid,
     Anum_pg_publication_namespace_pnpubid, Anum_pg_publication_oid,
     Anum_pg_publication_puballtables, Anum_pg_publication_pubdelete,
@@ -57,31 +57,31 @@ use types_catalog::pg_publication::{
     PublicationTableRow, PgClassRow, PublishGencolsType, PublishedRel,
 };
 
-use types_core::catalog::FirstNormalObjectId;
-use types_core::fmgr::{F_BOOLEQ, F_CHAREQ, F_OIDEQ};
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::catalog::FirstNormalObjectId;
+use ::types_core::fmgr::{F_BOOLEQ, F_CHAREQ, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_error::{
     ERROR, PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_COLUMN,
 };
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::nodes::{ntag, Node};
-use rel::Relation;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
-use types_tuple::access::{
+use ::rel::Relation;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
+use ::types_tuple::access::{
     ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION,
 };
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
-use heaptuple::heap_form_tuple;
-use utils_error::ereport;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_form_tuple;
+use ::utils_error::ereport;
+use ::scankey::ScanKeyInit;
 use catalog_catalog::{GetNewOidWithIndex, IsCatalogNamespace, IsCatalogRelation,
     IsCatalogRelationOid, IsToastNamespace};
-use dependency::recordDependencyOnSingleRelExpr;
-use indexing::keystone::CatalogTupleInsert;
+use ::dependency::recordDependencyOnSingleRelExpr;
+use ::indexing::keystone::CatalogTupleInsert;
 
 use genam_seams as genam;
 use table_seams as table_seams;
@@ -90,15 +90,15 @@ use partition_seams as partition_seams;
 use pg_depend_seams as pg_depend_seams;
 use pg_inherits_seams as inherits_seams;
 use nodes_core_seams as bms;
-use outfuncs::nodeToString;
-use inval::cache_invalidate::CacheInvalidateRelcacheByRelid;
+use ::outfuncs::nodeToString;
+use ::inval::cache_invalidate::CacheInvalidateRelcacheByRelid;
 use lsyscache_seams as lsyscache;
 use cache_syscache::{
     SearchSysCache1, SearchSysCache2, SearchSysCacheExists, SearchSysCacheList1, SysCacheGetAttr,
 };
-use cache::syscache::SysCacheKey;
-use datum::Datum as KeyDatum;
-use types_syscache::syscache_ids::{
+use ::cache::syscache::SysCacheKey;
+use ::datum::Datum as KeyDatum;
+use ::types_syscache::syscache_ids::{
     PUBLICATIONNAMESPACEMAP, PUBLICATIONOID, PUBLICATIONRELMAP, RELOID,
 };
 
@@ -156,7 +156,7 @@ fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>>
     const VARHDRSZ: usize = 4;
     let payload = s.as_bytes();
     let total = VARHDRSZ + payload.len();
-    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     let vl_len: u32 = (total as u32) << 2;
     buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
@@ -173,7 +173,7 @@ fn buildint2vector_bytes<'mcx>(mcx: Mcx<'mcx>, int2s: &[i16]) -> PgResult<PgVec<
     const HEADER: usize = 24; // vl_len_ + ndim + dataoffset + elemtype + dim1 + lbound1
     let n = int2s.len();
     let total = HEADER + n * core::mem::size_of::<i16>();
-    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     let vl_len: u32 = (total as u32) << 2;
     buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
@@ -242,8 +242,8 @@ fn name_str(bytes: &[u8]) -> &str {
 
 /// `namein(s)` — a `NAMEDATALEN`-byte NUL-padded `NameData` by-reference Datum.
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
-    use types_core::fmgr::NAMEDATALEN;
-    let mut image: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
+    use ::types_core::fmgr::NAMEDATALEN;
+    let mut image: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
     let src = s.as_bytes();
     let take = core::cmp::min(src.len(), (NAMEDATALEN as usize) - 1);
     for &b in &src[..take] {
@@ -295,7 +295,7 @@ fn check_publication_add_relation(targetrel: &Relation<'_>) -> PgResult<()> {
 
     // UNLOGGED and TEMP relations cannot be part of a publication.
     let persist = targetrel.rd_rel.relpersistence;
-    if persist == types_tuple::access::RELPERSISTENCE_TEMP {
+    if persist == ::types_tuple::access::RELPERSISTENCE_TEMP {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(format!(
@@ -304,7 +304,7 @@ fn check_publication_add_relation(targetrel: &Relation<'_>) -> PgResult<()> {
             ))
             .errdetail("This operation is not supported for temporary tables.".to_string())
             .into_error());
-    } else if persist == types_tuple::access::RELPERSISTENCE_UNLOGGED {
+    } else if persist == ::types_tuple::access::RELPERSISTENCE_UNLOGGED {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(format!(
@@ -353,7 +353,7 @@ fn check_publication_add_schema(mcx: Mcx<'_>, schemaid: Oid) -> PgResult<()> {
 fn is_publishable_class(relid: Oid, row: &PgClassRow) -> bool {
     (row.relkind == RELKIND_RELATION || row.relkind == RELKIND_PARTITIONED_TABLE)
         && !IsCatalogRelationOid(relid)
-        && row.relpersistence == types_core::catalog::RELPERSISTENCE_PERMANENT
+        && row.relpersistence == ::types_core::catalog::RELPERSISTENCE_PERMANENT
         && relid >= FirstNormalObjectId
 }
 
@@ -646,7 +646,7 @@ fn GetPublicationByName<'mcx>(
 
 /// `GetRelationPublications(relid)` (pg_publication.c:750).
 fn GetRelationPublications<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<PgVec<'mcx, Oid>> {
-    let mut result: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let members = SearchSysCacheList1(mcx, PUBLICATIONRELMAP, oid_cache_key(relid))?;
     for tup in members.iter() {
         let (v, _isnull) =
@@ -658,7 +658,7 @@ fn GetRelationPublications<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<PgVec<'
 
 /// `GetSchemaPublications(schemaid)` (pg_publication.c:962).
 fn GetSchemaPublications<'mcx>(mcx: Mcx<'mcx>, schemaid: Oid) -> PgResult<PgVec<'mcx, Oid>> {
-    let mut result: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let members = SearchSysCacheList1(mcx, PUBLICATIONNAMESPACEMAP, oid_cache_key(schemaid))?;
     for tup in members.iter() {
         let (v, _isnull) = SysCacheGetAttr(
@@ -717,7 +717,7 @@ fn GetPublicationRelations<'mcx>(
     let mut scan =
         genam::systable_beginscan::call(&pubrelsrel, PublicationRelPrpubidIndexId, true, None, &keys)?;
 
-    let mut result: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     loop {
         let Some(tup) = genam::systable_getnext::call(mcx, scan.desc_mut())? else {
             break;
@@ -744,7 +744,7 @@ fn GetAllTablesPublications<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, Oid>> 
     // analog.
     let mut scan = genam::systable_beginscan::call(&rel, 0, false, None, &keys)?;
 
-    let mut result: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     loop {
         let Some(tup) = genam::systable_getnext::call(mcx, scan.desc_mut())? else {
             break;
@@ -771,7 +771,7 @@ fn GetPublicationSchemas<'mcx>(mcx: Mcx<'mcx>, pubid: Oid) -> PgResult<PgVec<'mc
         &keys,
     )?;
 
-    let mut result: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     loop {
         let Some(tup) = genam::systable_getnext::call(mcx, scan.desc_mut())? else {
             break;
@@ -809,7 +809,7 @@ fn GetAllTablesPublicationRelations<'mcx>(
     pubviaroot: bool,
 ) -> PgResult<PgVec<'mcx, Oid>> {
     let class_rel = table_seams::table_open::call(mcx, RELATION_RELATION_ID, AccessShareLock)?;
-    let mut result: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     // Scan pg_class for ordinary tables.
     {
@@ -858,7 +858,7 @@ fn GetSchemaPublicationRelations<'mcx>(
     let keys = [oid_key(Anum_pg_class_relnamespace, schemaid)?];
     let mut scan = genam::systable_beginscan::call(&class_rel, 0, false, None, &keys)?;
 
-    let mut result: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     loop {
         let Some(tup) = genam::systable_getnext::call(mcx, scan.desc_mut())? else {
             break;
@@ -871,7 +871,7 @@ fn GetSchemaPublicationRelations<'mcx>(
         if relkind == RELKIND_RELATION {
             result.push(row.oid);
         } else if relkind == RELKIND_PARTITIONED_TABLE {
-            let partitionrels: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+            let partitionrels: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
             let partitionrels =
                 GetPubPartitionOptionRelations(mcx, partitionrels, pub_partopt, row.oid)?;
             // list_concat_unique_oid(result, partitionrels)
@@ -894,7 +894,7 @@ fn GetAllSchemaPublicationRelations<'mcx>(
     pubid: Oid,
     pub_partopt: PublicationPartOpt,
 ) -> PgResult<PgVec<'mcx, Oid>> {
-    let mut result: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let pubschemalist = GetPublicationSchemas(mcx, pubid)?;
     for schemaid in pubschemalist.iter() {
         let schema_rels = GetSchemaPublicationRelations(mcx, *schemaid, pub_partopt)?;
@@ -945,7 +945,7 @@ fn filter_partitions<'mcx>(
     // Build the set of all relids present, for is_ancestor_member_tableinfos.
     let present: std::vec::Vec<Oid> = table_infos.iter().map(|ti| ti.relid).collect();
 
-    let mut out: PgVec<'mcx, PublishedRel> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut out: PgVec<'mcx, PublishedRel> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     for ti in table_infos.iter() {
         let mut skip = false;
         if lsyscache::get_rel_relispartition::call(ti.relid)? {
@@ -1113,7 +1113,7 @@ fn publication_add_relation<'mcx>(
     rel.close(RowExclusiveLock)?;
 
     // Invalidate relcache for the whole partition hierarchy.
-    let relids: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let relids: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let relids = GetPubPartitionOptionRelations(mcx, relids, PublicationPartOpt::All, relid)?;
     InvalidatePublicationRels(relids.as_slice())?;
 
@@ -1221,7 +1221,7 @@ fn build_publication_table_rows<'mcx>(
     pubnames: &[&str],
 ) -> PgResult<PgVec<'mcx, PublicationTableRow<'mcx>>> {
     // --- gather: one published_rel per (table, publication). ---
-    let mut table_infos: PgVec<'mcx, PublishedRel> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut table_infos: PgVec<'mcx, PublishedRel> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let mut viaroot = false;
 
     for &name in pubnames {
@@ -1241,7 +1241,7 @@ fn build_publication_table_rows<'mcx>(
             let relids = GetPublicationRelations(mcx, pub_elem.oid, partopt)?;
             let schemarelids = GetAllSchemaPublicationRelations(mcx, pub_elem.oid, partopt)?;
             // list_concat_unique_oid(relids, schemarelids)
-            let mut combined: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+            let mut combined: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
             for r in relids.iter() {
                 combined.push(*r);
             }
@@ -1270,7 +1270,7 @@ fn build_publication_table_rows<'mcx>(
     }
 
     // --- build rows. ---
-    let mut rows: PgVec<'mcx, PublicationTableRow<'mcx>> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut rows: PgVec<'mcx, PublicationTableRow<'mcx>> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     for ti in table_infos.iter() {
         let relid = ti.relid;
@@ -1302,12 +1302,12 @@ fn build_publication_table_rows<'mcx>(
                 let (a, anull) =
                     SysCacheGetAttr(mcx, PUBLICATIONRELMAP, &tup, Anum_pg_publication_rel_prattrs)?;
                 if !anull {
-                    attrs = Some(mcx::slice_in(mcx, a.as_ref_bytes())?);
+                    attrs = Some(::mcx::slice_in(mcx, a.as_ref_bytes())?);
                 }
                 let (q, qnull) =
                     SysCacheGetAttr(mcx, PUBLICATIONRELMAP, &tup, Anum_pg_publication_rel_prqual)?;
                 if !qnull {
-                    qual = Some(mcx::slice_in(mcx, q.as_ref_bytes())?);
+                    qual = Some(::mcx::slice_in(mcx, q.as_ref_bytes())?);
                 }
             }
         }
@@ -1375,7 +1375,7 @@ fn deform<'mcx>(
     tup: &FormedTuple<'mcx>,
 ) -> PgResult<PgVec<'mcx, (Datum<'mcx>, bool)>> {
     let desc = rel.rd_att_clone_in(mcx)?;
-    heaptuple::heap_deform_tuple(mcx, &tup.tuple, &desc, &tup.data)
+    ::heaptuple::heap_deform_tuple(mcx, &tup.tuple, &desc, &tup.data)
 }
 
 /// Project a scanned `pg_class` tuple into the [`PgClassRow`] the publication

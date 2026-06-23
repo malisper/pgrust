@@ -4,9 +4,9 @@
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, Mcx, PgBox};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgError, PgResult, NOTICE};
-use tsearch::tsearch::{
+use ::tsearch::tsearch::{
     QueryItem, QueryItemType, HDRSIZETQ, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_OPR, QI_VAL,
     QI_VALSTOP,
 };
@@ -561,7 +561,7 @@ pub fn cleanup_tsquery_stopwords(mcx: Mcx<'_>, in_: &[u8], noisy: bool) -> PgRes
                 .errmsg(
                     "text-search query contains only stop words or doesn't contain lexemes, ignored",
                 )
-                .finish(types_error::ErrorLocation::new(
+                .finish(::types_error::ErrorLocation::new(
                     "tsquery_cleanup.c",
                     409,
                     "cleanup_tsquery_stopwords",

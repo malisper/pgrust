@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::sync::{Mutex, Once};
 
-use mcx::MemoryContext;
-use types_error::FATAL;
+use ::mcx::MemoryContext;
+use ::types_error::FATAL;
 
 thread_local! {
     static FILES: RefCell<BTreeMap<String, Vec<u8>>> = const { RefCell::new(BTreeMap::new()) };
@@ -42,7 +42,7 @@ fn setup() {
 
         fd::read_file_or_absent::set(|mcx, path| {
             FILES.with(|c| match c.borrow().get(path) {
-                Some(bytes) => Ok(Some(mcx::slice_in(mcx, bytes)?)),
+                Some(bytes) => Ok(Some(::mcx::slice_in(mcx, bytes)?)),
                 None => Ok(None),
             })
         });

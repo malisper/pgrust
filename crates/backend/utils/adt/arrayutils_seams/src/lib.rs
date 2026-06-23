@@ -12,7 +12,7 @@
 //! helpers are pure and infallible.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `ArrayGetOffset(n, dim, lb, indx)` (arrayutils.c): linearize an

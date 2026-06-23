@@ -6,7 +6,7 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 const COLLPROVIDER_BUILTIN: i8 = b'b' as i8;
 const COLLPROVIDER_ICU: i8 = b'i' as i8;
@@ -27,7 +27,7 @@ pub fn get_collation_actual_version(
     collprovider: i8,
     collcollate: &str,
 ) -> PgResult<Option<alloc::string::String>> {
-    let ctx = mcx::MemoryContext::new("get_collation_actual_version");
+    let ctx = ::mcx::MemoryContext::new("get_collation_actual_version");
     let mcx = ctx.mcx();
 
     if collprovider == COLLPROVIDER_BUILTIN {

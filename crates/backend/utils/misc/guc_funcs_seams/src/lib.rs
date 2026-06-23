@@ -24,9 +24,9 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use parsenodes::VariableSetStmt;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::parsenodes::VariableSetStmt;
 
 // --- INWARD seam: guc_funcs.c's own ExtractSetVariableArgs --------------------
 //

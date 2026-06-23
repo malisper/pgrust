@@ -13,7 +13,7 @@
 
 use std::cell::Cell;
 
-use types_error::PgError;
+use ::types_error::PgError;
 
 pub trait BackendLogContext: Sync {
     /// `MyProcPort != NULL`.

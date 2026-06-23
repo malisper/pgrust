@@ -9,8 +9,8 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::MemoryContext;
-use tsearch::tsearch::{
+use ::mcx::MemoryContext;
+use ::tsearch::tsearch::{
     QueryItem, QueryOperand, QueryOperator, HDRSIZETQ, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_OPR,
     QI_VAL, QI_VALSTOP,
 };

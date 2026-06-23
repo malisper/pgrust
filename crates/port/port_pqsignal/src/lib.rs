@@ -27,7 +27,7 @@
 //! (`pqinitmask`) in `backend-libpq-pqsignal`.
 
 use core::sync::atomic::{AtomicUsize, Ordering};
-use signal::SigHandler;
+use ::signal::SigHandler;
 
 /// `PG_NSIG` — the bound on signal numbers. C uses `NSIG` (the platform's
 /// highest signal number plus one). The `StaticAssertDecl`s in the C file

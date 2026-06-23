@@ -10,8 +10,8 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use execparallel::{DsmSegmentHandle, ParallelExecutorInfo, ShmTocHandle, TuplesNeeded};
 use ::nodes::bitmapset::Bitmapset;
 

@@ -22,8 +22,8 @@
 //!    `docs/proposals/panic-to-result-migration.md`), surfaced directly at the
 //!    `invoke_builtin` native dispatch arm with no `catch_unwind`.
 
-use fmgr::FunctionCallInfoBaseData;
-use datum::Datum;
+use ::fmgr::FunctionCallInfoBaseData;
+use ::datum::Datum;
 use types_datetime::{Interval, TimeTzADT};
 
 use crate::binio::WireReader;
@@ -117,7 +117,7 @@ fn ret_bool(v: bool) -> Datum {
 /// Set a `cstring` (`_out`) result on the by-ref lane and return the dummy word.
 #[inline]
 fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Cstring(s));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Cstring(s));
     Datum::from_usize(0)
 }
 /// Set a verbatim by-ref result on the by-ref lane. Used for the fixed-length
@@ -126,7 +126,7 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
 /// header-ful by `make_result`).
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(bytes));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(bytes));
     Datum::from_usize(0)
 }
 /// Set a `text` result: prepend the 4-byte varlena length header to the
@@ -137,7 +137,7 @@ fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
     let mut img = Vec::with_capacity(total);
     img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
     img.extend_from_slice(&payload);
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(img));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(img));
     Datum::from_usize(0)
 }
 
@@ -196,7 +196,7 @@ fn ret_timetz(fcinfo: &mut FunctionCallInfoBaseData, t: &TimeTzADT) -> Datum {
 
 /// Serialize a `NumericVar` to its numeric varlena byte image (C: `make_result`),
 /// copying into an owned `Vec` so the scratch context can drop. Raises on OOM.
-fn numericvar_to_bytes(var: &types_numeric::var::NumericVar<'_>) -> types_error::PgResult<Vec<u8>> {
+fn numericvar_to_bytes(var: &::types_numeric::var::NumericVar<'_>) -> types_error::PgResult<Vec<u8>> {
     let m = scratch_mcx();
     let pgvec = match adt_numeric::convert::make_result(m.mcx(), var) {
         Ok(b) => b,
@@ -410,7 +410,7 @@ fn ret_extract_date(
     r: crate::date::ExtractDateResult,
 ) -> types_error::PgResult<Datum> {
     use crate::date::ExtractDateResult::*;
-    use types_numeric::var::{NumericSign, NumericVar};
+    use ::types_numeric::var::{NumericSign, NumericVar};
     let m = scratch_mcx();
     let var: NumericVar = match r {
         Int(i) => match adt_numeric::kernel_transcendental::int64_to_numericvar(
@@ -1128,7 +1128,7 @@ fn take_interval_state(
         return None;
     }
     match fcinfo.take_ref_arg(i) {
-        Some(fmgr::boundary::RefPayload::Internal(b)) => Some(
+        Some(::fmgr::boundary::RefPayload::Internal(b)) => Some(
             b.downcast::<crate::interval::IntervalAggState>().unwrap_or_else(|_| {
                 panic!("interval agg fn: args[{i}] internal state is not an IntervalAggState")
             }),
@@ -1143,7 +1143,7 @@ fn ret_interval_state(
     fcinfo: &mut FunctionCallInfoBaseData,
     state: Box<crate::interval::IntervalAggState>,
 ) -> Datum {
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Internal(state));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Internal(state));
     Datum::from_usize(0)
 }
 
@@ -1159,7 +1159,7 @@ fn keep_interval_state(
     fcinfo: &mut FunctionCallInfoBaseData,
     state: Box<crate::interval::IntervalAggState>,
 ) {
-    fcinfo.set_ref_arg(0, fmgr::boundary::RefPayload::Internal(state));
+    fcinfo.set_ref_arg(0, ::fmgr::boundary::RefPayload::Internal(state));
 }
 
 /// `interval_avg_accum(internal, interval) -> internal` (oid 1843).
@@ -1775,19 +1775,19 @@ fn nullable_timetz(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Option<TimeTz
 // Registration.
 // ===========================================================================
 
-/// Build one Result-native builtin row: the [`fmgr::BuiltinFunction`]
+/// Build one Result-native builtin row: the [`::fmgr::BuiltinFunction`]
 /// metadata (with `func: None` — the legacy callable is unused; dispatch goes
-/// through the native overlay) paired with its [`fmgr::PgFnNative`] body.
+/// through the native overlay) paired with its [`::fmgr::PgFnNative`] body.
 fn builtin(
     foid: u32,
     name: &str,
     nargs: i16,
     strict: bool,
     retset: bool,
-    native: fmgr::PgFnNative,
-) -> (fmgr::BuiltinFunction, fmgr::PgFnNative) {
+    native: ::fmgr::PgFnNative,
+) -> (::fmgr::BuiltinFunction, ::fmgr::PgFnNative) {
     (
-        fmgr::BuiltinFunction {
+        ::fmgr::BuiltinFunction {
             foid,
             name: name.to_string(),
             nargs,

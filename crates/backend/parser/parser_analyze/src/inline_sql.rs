@@ -30,15 +30,15 @@
 //!     incorrectly; it only declines to inline a rare multi-use-expensive-arg
 //!     call, which then runs un-inlined (correct, just less aggressive).
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use ::nodes::primnodes::{CoercionForm, CollateExpr, Const, Expr, ParamKind};
 use parsenodes::{CoercionContext, RawParseMode};
 
-use nodes_core::nodefuncs::{expr_collation, expr_type, expression_tree_mutator};
-use clauses_seams::PgProcSimple;
+use ::nodes_core::nodefuncs::{expr_collation, expr_type, expression_tree_mutator};
+use ::clauses_seams::PgProcSimple;
 
 /// `RECORDOID` (pg_type.dat).
 const RECORDOID: Oid = 2249;
@@ -79,15 +79,15 @@ pub fn inline_sql_function<'mcx>(
     // Re-home prosrc into the mcx arena and leak the binding to 'mcx so
     // raw_parser (which borrows its source for 'mcx) can hold it.
     let prosrc_mcx: &'mcx str = {
-        let boxed = mcx::alloc_in(mcx, mcx::PgString::from_str_in(prosrc, mcx)?)?;
-        mcx::leak_in(boxed).as_str()
+        let boxed = ::mcx::alloc_in(mcx, ::mcx::PgString::from_str_in(prosrc, mcx)?)?;
+        ::mcx::leak_in(boxed).as_str()
     };
 
     // If we have prosqlbody, pay attention to that not prosrc.
     let querytree: ::nodes::copy_query::Query<'mcx> = if let Some(body) = prosqlbody {
         // n = stringToNode(prosqlbody); if (IsA(n, List)) query_list =
         // linitial_node(List, n); else query_list = list_make1(n);
-        let n = nodes_core::read::string_to_node(mcx, body)?;
+        let n = ::nodes_core::read::string_to_node(mcx, body)?;
         let query = extract_single_body_query(mcx, &n)?;
         match query {
             Some(q) => q,
@@ -460,7 +460,7 @@ fn substitute_actual_parameters<'mcx>(
 /// type families 1 and 2, a pure OID comparison (mirrors
 /// `backend-catalog-pg-proc`'s private copy).
 fn is_polymorphic_type(typid: Oid) -> bool {
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
         ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
         ANYNONARRAYOID, ANYRANGEOID,

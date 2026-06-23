@@ -16,9 +16,9 @@
 //! [`crate::exec`]; backward / scrollable fetch reaches the same portal
 //! machinery but is not exercised by these consumers.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgResult, ERROR};
-use portal::FetchDirection;
+use ::portal::FetchDirection;
 use types_xml::{SpiColumn, SpiResult};
 
 use crate::backbone::{SPI_connect, SPI_finish};
@@ -94,9 +94,9 @@ pub(crate) fn receiver_columns(
     spi_result_columns(receiver)
 }
 
-fn cursor_not_found() -> types_error::PgError {
+fn cursor_not_found() -> ::types_error::PgError {
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_UNDEFINED_CURSOR)
+        .errcode(::types_error::ERRCODE_UNDEFINED_CURSOR)
         .errmsg("cursor does not exist")
         .into_error()
 }

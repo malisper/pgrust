@@ -49,8 +49,8 @@ use types_core::{
     FullTransactionId, MultiXactId, MultiXactOffset, Oid, TimeLineID,
     TransactionId, XLogRecPtr, XLogSegNo,
 };
-use types_tuple::Datum;
-use wal::xlog_consts::{
+use ::types_tuple::Datum;
+use ::wal::xlog_consts::{
     ArchiveMode, WALAvailability, WalCompression, WalLevel, WalSyncMethod,
     DEFAULT_XLOG_SEG_SIZE, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, WAL_SEG_MAX_SIZE,
     WAL_SEG_MIN_SIZE, XLOGDIR, XLOG_BLCKSZ, XLOG_FNAME_LEN,
@@ -1047,7 +1047,7 @@ pub fn init_seams() {
     s::create_checkpoint::set(do_checkpoint::CreateCheckPoint);
     s::create_restartpoint::set(|flags| {
         let _ = flags;
-        utils_error::ereport(types_error::LOG)
+        ::utils_error::ereport(types_error::LOG)
             .errmsg(
                 "skipping restartpoint: the WAL checkpoint-record driver (XLogCtl shmem) \
                  is not yet ported; no restartpoint was established",

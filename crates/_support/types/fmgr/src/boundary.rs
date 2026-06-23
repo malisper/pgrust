@@ -16,16 +16,16 @@
 //! | `SendFunctionCall`   | `Datum` → `bytea *`       | [`FmgrArg`] → Vec<u8>|
 
 // Datum-unification migration: the by-value boundary arms carry the canonical
-// value type `types_tuple::Datum<'mcx>` (its `ByVal` arm is the bare machine
+// value type `::types_tuple::Datum<'mcx>` (its `ByVal` arm is the bare machine
 // word; `from_*`/`as_*` are the conversion methods). The deprecated shim newtype
-// `datum::Datum` is no longer used by this crate's own code.
-use types_tuple::Datum;
+// `::datum::Datum` is no longer used by this crate's own code.
+use ::types_tuple::Datum;
 
 // The `ExpandedObject` trait now lives in the lower `types-datum` crate so that
 // both `types-tuple` (the canonical `Datum::Expanded` arm) and this crate
 // (`RefPayload::Expanded`) can name the one trait without a layering cycle.
 // Re-exported here so existing `fmgr::ExpandedObject` paths keep working.
-pub use datum::ExpandedObject;
+pub use ::datum::ExpandedObject;
 
 /// The owned referent of a pass-by-reference `Datum`, carried by value at the
 /// fmgr boundary instead of behind a raw pointer.

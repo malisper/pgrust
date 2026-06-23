@@ -18,9 +18,9 @@
 //! (the same idiom `portal_set_tup_desc`/`set_result_tup_desc_with` already use
 //! for `tupDesc`). No `'static` global arena or token registry is involved.
 
-use types_core::SubTransactionId;
-use types_error::PgResult;
-use portal::ResourceOwner;
+use ::types_core::SubTransactionId;
+use ::types_error::PgResult;
+use ::portal::ResourceOwner;
 
 use portalmem_seams as seams;
 

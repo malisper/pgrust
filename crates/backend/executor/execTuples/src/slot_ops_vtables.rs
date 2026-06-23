@@ -10,16 +10,16 @@
 extern crate alloc;
 
 use mcx::{slice_in, vec_with_capacity_in, Mcx};
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::nodes::tuptable::{
     BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotData,
     VirtualTupleTableSlot, TTS_FLAG_SHOULDFREE,
 };
-use types_storage::buf::{BufferIsValid, InvalidBuffer};
+use ::types_storage::buf::{BufferIsValid, InvalidBuffer};
 // The canonical value enum; `Datum` is its transitional alias.
-use types_tuple::heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
-use types_tuple::heaptuple::CompactAttribute;
+use ::types_tuple::heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
+use ::types_tuple::heaptuple::CompactAttribute;
 
 use crate::slot_deform::slot_deform_heap_tuple;
 
@@ -124,7 +124,7 @@ fn feature_not_supported(msg: &'static str) -> PgError {
 
 // elog(ERROR, "...") — internal error.
 fn elog_error(msg: &'static str) -> PgError {
-    PgError::error(msg).with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR)
+    PgError::error(msg).with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR)
 }
 
 // --- VirtualTupleTableSlot ops --------------------------------------------
@@ -152,7 +152,7 @@ pub fn tts_virtual_clear(slot: &mut VirtualTupleTableSlot) {
     // slot->tts_flags |= TTS_FLAG_EMPTY;
     slot.base.tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
+    slot.base.tts_tid = ::types_tuple::heaptuple::ItemPointerData::invalid();
 }
 
 /// `tts_virtual_getsomeattrs` (execTuples.c):
@@ -275,7 +275,7 @@ pub fn tts_virtual_materialize<'mcx>(
     // uninitialized (MemoryContextAlloc); we zero-fill so the alignment pad
     // bytes between fields are deterministic (behaviour-preserving — only the
     // copied field spans are read back).
-    let mut data: mcx::PgVec<'mcx, u8> = vec_with_capacity_in(mcx, sz)?;
+    let mut data: ::mcx::PgVec<'mcx, u8> = vec_with_capacity_in(mcx, sz)?;
     data.resize(sz, 0u8);
     slot.base.tts_flags |= TTS_FLAG_SHOULDFREE;
 
@@ -418,7 +418,7 @@ fn source_all_attrs<'mcx>(
 
     // Deform a stored heap/minimal body into (value, isnull) columns.
     let deform = |mcx: Mcx<'mcx>,
-                  tuple: &types_tuple::heaptuple::HeapTupleData<'mcx>,
+                  tuple: &::types_tuple::heaptuple::HeapTupleData<'mcx>,
                   data: &[u8]|
      -> PgResult<(alloc::vec::Vec<Datum<'mcx>>, alloc::vec::Vec<bool>)> {
         let desc = src
@@ -590,7 +590,7 @@ pub fn tts_heap_clear(slot: &mut HeapTupleTableSlot) {
     // slot->tts_flags |= TTS_FLAG_EMPTY;
     slot.base.tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
+    slot.base.tts_tid = ::types_tuple::heaptuple::ItemPointerData::invalid();
     // hslot->off = 0;
     slot.off = 0;
     // hslot->tuple = NULL;
@@ -658,7 +658,7 @@ pub fn tts_heap_is_current_xact_tuple(slot: &HeapTupleTableSlot) -> PgResult<boo
         .t_data
         .as_ref()
         .ok_or_else(|| elog_error("tts_heap_is_current_xact_tuple: tuple has no t_data"))?;
-    let xmin = types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(header);
+    let xmin = ::types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(header);
 
     // return TransactionIdIsCurrentTransactionId(xmin);
     Ok(transam_xact_seams::transaction_id_is_current_transaction_id::call(xmin))
@@ -903,7 +903,7 @@ pub fn tts_minimal_clear(slot: &mut MinimalTupleTableSlot) {
     // slot->tts_flags |= TTS_FLAG_EMPTY;
     slot.base.tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
+    slot.base.tts_tid = ::types_tuple::heaptuple::ItemPointerData::invalid();
     // mslot->off = 0;
     slot.off = 0;
     // mslot->mintuple = NULL;
@@ -1355,7 +1355,7 @@ pub fn tts_buffer_heap_clear(slot: &mut BufferHeapTupleTableSlot) {
     // slot->tts_flags |= TTS_FLAG_EMPTY;
     slot.base.base.tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
-    slot.base.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
+    slot.base.base.tts_tid = ::types_tuple::heaptuple::ItemPointerData::invalid();
     // bslot->base.tuple = NULL;
     slot.base.tuple = None;
     // bslot->base.off = 0;
@@ -1426,7 +1426,7 @@ pub fn tts_buffer_is_current_xact_tuple(slot: &BufferHeapTupleTableSlot) -> PgRe
         .t_data
         .as_ref()
         .ok_or_else(|| elog_error("tts_buffer_is_current_xact_tuple: tuple has no t_data"))?;
-    let xmin = types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(header);
+    let xmin = ::types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(header);
 
     // return TransactionIdIsCurrentTransactionId(xmin);
     Ok(transam_xact_seams::transaction_id_is_current_transaction_id::call(xmin))
@@ -1601,12 +1601,12 @@ pub fn tts_buffer_heap_copyslot<'mcx>(
 fn exec_copy_slot_heap_tuple_ref<'mcx>(
     mcx: Mcx<'mcx>,
     src: &SlotData<'mcx>,
-) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'mcx>>> {
+) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'mcx>>> {
     // Assert(!TTS_EMPTY(slot));
     debug_assert!(!src.base().is_empty());
 
     let form_from_values =
-        |mcx: Mcx<'mcx>| -> PgResult<types_tuple::heaptuple::FormedTuple<'mcx>> {
+        |mcx: Mcx<'mcx>| -> PgResult<::types_tuple::heaptuple::FormedTuple<'mcx>> {
             let base = src.base();
             let desc = base.tts_tupleDescriptor.as_ref().ok_or_else(|| {
                 elog_error("ExecCopySlotHeapTuple: source slot has no tuple descriptor")
@@ -1798,12 +1798,12 @@ pub fn slot_getsysattr<'mcx>(
 
     // if (attnum == TableOidAttributeNumber) { *isnull = false;
     //     return ObjectIdGetDatum(slot->tts_tableOid); }
-    if attnum == types_tuple::heaptuple::TableOidAttributeNumber {
+    if attnum == ::types_tuple::heaptuple::TableOidAttributeNumber {
         return Ok((Datum::from_oid(slot.base().tts_tableOid), false));
     }
     // else if (attnum == SelfItemPointerAttributeNumber) { *isnull = false;
     //     return PointerGetDatum(&slot->tts_tid); }
-    if attnum == types_tuple::heaptuple::SelfItemPointerAttributeNumber {
+    if attnum == ::types_tuple::heaptuple::SelfItemPointerAttributeNumber {
         let bytes = heaptuple::item_pointer_bytes(
             mcx,
             &slot.base().tts_tid,

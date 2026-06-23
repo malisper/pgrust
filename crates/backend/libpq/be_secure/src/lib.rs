@@ -29,10 +29,10 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, PgResult, DEBUG2, ERRCODE_ADMIN_SHUTDOWN, FATAL, LOG};
 use net::{Port, SockError, SockResult};
-use types_storage::waiteventset::{
+use ::types_storage::waiteventset::{
     WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE,
 };
 
@@ -422,7 +422,7 @@ fn ssize_to_sock_result(n: isize, arm_errno: i32) -> SockResult {
 /// `(ssl_min_protocol_version, ssl_max_protocol_version)` — the file-scope GUC
 /// pair `be_tls_init` reads. Only consulted on the (dead) `USE_SSL` path.
 fn ssl_protocol_versions() -> (i32, i32) {
-    use guc_tables::vars;
+    use ::guc_tables::vars;
     (
         vars::ssl_min_protocol_version.read(),
         vars::ssl_max_protocol_version.read(),
@@ -499,7 +499,7 @@ fn be_gssapi_write(_port: &mut Port, _buf: &[u8]) -> isize {
  *  SockAddr family helper (the `port->laddr.addr.ss_family` reads).
  * ============================================================== */
 
-fn sockaddr_family(sa: &net::SockAddr) -> i32 {
+fn sockaddr_family(sa: &::net::SockAddr) -> i32 {
     let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     let n = (sa.salen as usize)
         .min(std::mem::size_of::<libc::sockaddr_storage>())

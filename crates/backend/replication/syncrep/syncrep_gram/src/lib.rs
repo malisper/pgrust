@@ -156,7 +156,7 @@ fn create_syncrep_config<'mcx>(
     }
 
     // And transform the data into the flat representation: palloc(size).
-    let mut bytes: PgVec<u8> = mcx::vec_with_capacity_in(mcx, size)?;
+    let mut bytes: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, size)?;
 
     let config_size = size as i32;
     let num_sync = atoi(num_sync);
@@ -271,7 +271,7 @@ impl<'mcx> Parser<'mcx> {
             // message would be an internal contract violation.
             None => PgString::from_str_in("syntax error", self.mcx)?,
         };
-        Ok(PgError::new(types_error::ERROR, text.as_str()))
+        Ok(PgError::new(::types_error::ERROR, text.as_str()))
     }
 
     /// `standby_name: NAME | NUM` — append the lexeme's `yylval->str` to the
@@ -435,7 +435,7 @@ pub fn syncrep_yyparse<'mcx>(
 mod tests {
     use super::*;
     use core::mem::{align_of, offset_of, size_of};
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     #[test]
     fn sync_rep_config_layout_matches_c_header() {

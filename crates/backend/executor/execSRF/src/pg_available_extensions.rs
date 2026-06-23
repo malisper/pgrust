@@ -13,9 +13,9 @@
 //! SRF table because the by-OID fmgr home's tag-only `resultinfo` can't carry the
 //! live `ReturnSetInfo` (the WONTFIX dual-home).
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::heaptuple::Datum;
@@ -46,7 +46,7 @@ fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
 /// `DirectFunctionCall1(namein, CStringGetDatum(s))` — a `NAMEDATALEN`-byte
 /// NUL-padded `NameData` by-reference `Datum` image.
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
-    use types_core::fmgr::NAMEDATALEN;
+    use ::types_core::fmgr::NAMEDATALEN;
     let n = NAMEDATALEN as usize;
     let mut img = vec![0u8; n];
     let src = s.as_bytes();

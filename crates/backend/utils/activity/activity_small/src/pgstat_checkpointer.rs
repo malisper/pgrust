@@ -18,21 +18,21 @@ use crate::changecount::{
     pgstat_end_changecount_write,
 };
 use lwlock_seams::{lwlock_acquire, lwlock_initialize};
-use init_small_seams::my_proc_number;
+use ::init_small_seams::my_proc_number;
 use pgstat_seams::{
     assert_is_up, shmem_is_shutdown, snapshot_fixed, with_shmem_checkpointer,
     with_snapshot_checkpointer,
 };
-use stat_seams::pgstat_flush_io;
-use types_core::TimestampTz;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{
+use ::stat_seams::pgstat_flush_io;
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{
     PgStatShared_Checkpointer, PgStat_CheckpointerStats,
 };
-use types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
+use ::types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
-pub use types_pgstat::activity_pgstat::PGSTAT_KIND_CHECKPOINTER;
+pub use ::types_pgstat::activity_pgstat::PGSTAT_KIND_CHECKPOINTER;
 
 thread_local! {
     /// `PgStat_CheckpointerStats PendingCheckpointerStats = {0};` —

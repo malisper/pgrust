@@ -18,9 +18,9 @@
 //!   scan → set of `(name, statement, prepare_time, parameter_types,
 //!   result_types, from_sql, generic_plans, custom_plans)` rows.
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 

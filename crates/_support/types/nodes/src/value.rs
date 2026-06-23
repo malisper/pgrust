@@ -31,9 +31,9 @@
 //! deferred OUT/READ stage — copy/equal copy/compare every field).
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
-use macros::PgNode;
+use ::macros::PgNode;
 
 /// `typedef struct Integer` (`nodes/value.h`). A small integer literal. Lifetime-
 /// free (its sole payload is a flat `i32`), so `copy_node_in` clones into any

@@ -28,18 +28,18 @@
 //!     through the small substrate handles defined in
 //!     [`seams_ub_heaprest::vacuumlazy`].
 
-use mcx::Mcx;
-use rel::Relation;
+use ::mcx::Mcx;
+use ::rel::Relation;
 use types_core::{
     BlockNumber, Buffer, MultiXactId, OffsetNumber, TransactionId, BLCKSZ,
 };
-use types_vacuum::vacuum::VacuumCutoffs;
-use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, VacDeadItemsInfo};
+use ::types_vacuum::vacuum::VacuumCutoffs;
+use ::types_vacuum::vacuumparallel::{IndexBulkDeleteResult, VacDeadItemsInfo};
 
-use types_vacuum::vacuumlazy::{
+use ::types_vacuum::vacuumlazy::{
     GlobalVisStateHandle, ParallelVacuumStateHandle, TidStore,
 };
-use types_storage::buf::BufferAccessStrategy;
+use ::types_storage::buf::BufferAccessStrategy;
 
 // ===========================================================================
 // File-scope constants (vacuumlazy.c:169-256).

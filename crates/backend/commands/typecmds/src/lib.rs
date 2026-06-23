@@ -46,9 +46,9 @@ use catalog_namespace::{
     QualifiedNameGetCreationNamespace, RangeVarAdjustRelationPersistence,
     RangeVarGetAndCheckCreationNamespace,
 };
-use pg_cast::CastCreate;
+use ::pg_cast::CastCreate;
 use pg_enum::{AddEnumLabel, EnumValuesCreate, RenameEnumLabel};
-use pg_range::RangeCreate;
+use ::pg_range::RangeCreate;
 use pg_type::{
     makeArrayTypeName, makeMultirangeTypeName, moveArrayTypeName, TypeCreate, TypeShellMake,
 };
@@ -56,14 +56,14 @@ use utils_error::{ereport, ThrowErrorData};
 use mcx::{Mcx, MemoryContext};
 
 use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE, ACL_USAGE};
-use types_catalog::catalog::TYPE_RELATION_ID;
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
-use types_catalog::pg_type::{
+use ::types_catalog::catalog::TYPE_RELATION_ID;
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
+use ::types_catalog::pg_type::{
     TypeCreateParams, TYPTYPE_BASE, TYPTYPE_ENUM, TYPTYPE_MULTIRANGE, TYPTYPE_PSEUDO, TYPTYPE_RANGE,
 };
-use types_core::catalog::{BTREE_AM_OID, INT4OID, INTERNALOID, OIDOID, PROCEDURE_RELATION_ID};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::pg_error::ErrorLocation;
+use ::types_core::catalog::{BTREE_AM_OID, INT4OID, INTERNALOID, OIDOID, PROCEDURE_RELATION_ID};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_error::pg_error::ErrorLocation;
 use types_error::{
     PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
@@ -76,12 +76,12 @@ use parsenodes::{
     DefElem, Node, TypeName, COERCION_CODE_EXPLICIT, COERCION_METHOD_FUNCTION,
     PROVOLATILE_IMMUTABLE, PROVOLATILE_VOLATILE,
 };
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     CSTRINGOID, DEFAULT_COLLATION_OID, FLOAT8OID, TEXTOID, TYPALIGN_CHAR, TYPALIGN_DOUBLE,
     TYPALIGN_INT, TYPALIGN_SHORT, TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN,
     TYPSTORAGE_PLAIN,
 };
-use types_core::catalog::BOOTSTRAP_SUPERUSERID;
+use ::types_core::catalog::BOOTSTRAP_SUPERUSERID;
 use parsenodes::{FUNC_PARAM_VARIADIC, PROKIND_FUNCTION, PROPARALLEL_SAFE};
 
 /// `INTERNALlanguageId` (`catalog/pg_language_d.h`) — the OID of the `internal`
@@ -96,9 +96,9 @@ const F_FMGR_INTERNAL_VALIDATOR: Oid = 2246;
 use typecmds_seams as me;
 
 use aclchk_seams::{aclcheck_error, object_aclcheck};
-use define_seams::DefElemArg;
-use coerce_seams::is_binary_coercible;
-use format_type_seams::format_type_be_owned;
+use ::define_seams::DefElemArg;
+use ::coerce_seams::is_binary_coercible;
+use ::format_type_seams::format_type_be_owned;
 use miscinit_seams::{get_user_id, superuser};
 
 use binary_upgrade_seams::{consume_next_pg_type_oid, is_binary_upgrade};
@@ -106,14 +106,14 @@ use functioncmds_seams::{
     aclcheck_error_schema, func_signature_string, get_func_name, lookup_func_name,
     name_list_to_string, namespace_aclcheck,
 };
-use opclasscmds_seams::get_opclass_oid;
+use ::opclasscmds_seams::get_opclass_oid;
 use lsyscache_seams::{
     func_volatile, get_default_opclass, get_func_rettype, get_multirange_range,
     get_namespace_name, get_opclass_input_type, get_range_multirange, get_rel_relkind,
     get_typcollation, get_typisdefined, get_typlen, get_typlenbyvalalign, get_typtype,
     type_is_collatable,
 };
-use syscache_seams::get_type_oid;
+use ::syscache_seams::get_type_oid;
 
 // ---------------------------------------------------------------------------
 // fmgr OIDs used in TypeCreate calls (utils/fmgroids.h).
@@ -249,7 +249,7 @@ fn parser_errposition_src(source: Option<&str>, location: i32) -> i32 {
 
 /// `defGetString(def)` (define.c).
 fn defGetString(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<String> {
-    let s = define_seams::def_get_string::call(
+    let s = ::define_seams::def_get_string::call(
         mcx,
         defel.defname.clone().unwrap_or_default(),
         defel_arg(mcx, defel)?,
@@ -259,7 +259,7 @@ fn defGetString(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<String> {
 
 /// `defGetBoolean(def)` (define.c).
 fn defGetBoolean(mcx: Mcx<'_>, defel: &DefElem) -> PgResult<bool> {
-    define_seams::def_get_boolean::call(
+    ::define_seams::def_get_boolean::call(
         defel.defname.clone().unwrap_or_default(),
         defel_arg(mcx, defel)?,
     )
@@ -482,7 +482,7 @@ fn get_typalign_via_lenbyvalalign(oid: Oid) -> PgResult<i8> {
 
 /// `get_typstorage(typid)` (lsyscache) — the LIKE branch reads `typstorage`.
 fn get_typstorage_seam(oid: Oid) -> PgResult<i8> {
-    Ok(lsyscache_seams::get_typstorage::call(oid)? as i8)
+    Ok(::lsyscache_seams::get_typstorage::call(oid)? as i8)
 }
 
 // ===========================================================================
@@ -1019,7 +1019,7 @@ pub fn RemoveTypeById(type_oid: Oid) -> PgResult<()> {
      * making dependency entries for those, so it has to be done "by hand" here.
      */
     if typtype == TYPTYPE_ENUM {
-        pg_enum::EnumValuesDelete(type_oid)?;
+        ::pg_enum::EnumValuesDelete(type_oid)?;
     }
 
     /*
@@ -1028,7 +1028,7 @@ pub fn RemoveTypeById(type_oid: Oid) -> PgResult<()> {
      * here.
      */
     if typtype == TYPTYPE_RANGE {
-        pg_range::RangeDelete(type_oid)?;
+        ::pg_range::RangeDelete(type_oid)?;
     }
 
     Ok(())
@@ -1306,7 +1306,7 @@ pub fn DefineRange<'mcx>(
     if type_is_collatable::call(rangeSubtype)? {
         if let Some(ref n) = rangeCollationName {
             rangeCollation =
-                catalog_namespace::get_collation_oid(mcx, &as_namelist(n), false)?;
+                ::catalog_namespace::get_collation_oid(mcx, &as_namelist(n), false)?;
         } else {
             rangeCollation = get_typcollation::call(rangeSubtype)?;
         }
@@ -2421,7 +2421,7 @@ pub fn AssignTypeMultirangeArrayOid() -> PgResult<Oid> {
 pub fn DefineCompositeType<'mcx>(
     mcx: Mcx<'mcx>,
     mut typevar: ::nodes::rawnodes::RangeVar<'mcx>,
-    coldeflist: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
+    coldeflist: ::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
 ) -> PgResult<ObjectAddress> {
     /*
      * now set the parameters for keys/inheritance etc. All of these are
@@ -2463,18 +2463,18 @@ pub fn DefineCompositeType<'mcx>(
      *                  &address, NULL);
      */
     let create_stmt = ::nodes::ddlnodes::CreateStmt {
-        relation: Some(mcx::alloc_in(
+        relation: Some(::mcx::alloc_in(
             mcx,
             ::nodes::nodes::Node::mk_range_var(mcx, typevar)?,
         )?),
         tableElts: coldeflist,
-        inhRelations: mcx::vec_with_capacity_in(mcx, 0)?,
+        inhRelations: ::mcx::vec_with_capacity_in(mcx, 0)?,
         partbound: None,
         partspec: None,
         ofTypename: None,
-        constraints: mcx::vec_with_capacity_in(mcx, 0)?,
-        nnconstraints: mcx::vec_with_capacity_in(mcx, 0)?,
-        options: mcx::vec_with_capacity_in(mcx, 0)?,
+        constraints: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        nnconstraints: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        options: ::mcx::vec_with_capacity_in(mcx, 0)?,
         oncommit: ::nodes::primnodes::OnCommitAction::ONCOMMIT_NOOP,
         tablespacename: None,
         accessMethod: None,
@@ -2497,8 +2497,8 @@ pub fn DefineCompositeType<'mcx>(
 /// resolver mutates (mirrors `view.c`'s `to_access_range_var`).
 fn composite_to_access_range_var(
     rv: &::nodes::rawnodes::RangeVar<'_>,
-) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().to_string()),
         schemaname: rv.schemaname.as_ref().map(|s| s.as_str().to_string()),
         relname: rv
@@ -2538,10 +2538,10 @@ fn define_composite_type_seam<'mcx>(
     };
 
     /* Deep-copy the coldeflist ColumnDef nodes into a fresh PgVec. */
-    let mut coldeflist: mcx::PgVec<::nodes::nodes::NodePtr> =
-        mcx::vec_with_capacity_in(mcx, cts.coldeflist.len())?;
+    let mut coldeflist: ::mcx::PgVec<::nodes::nodes::NodePtr> =
+        ::mcx::vec_with_capacity_in(mcx, cts.coldeflist.len())?;
     for n in cts.coldeflist.iter() {
-        coldeflist.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+        coldeflist.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
 
     DefineCompositeType(mcx, typevar, coldeflist)
@@ -2563,8 +2563,8 @@ fn define_composite_type_seam<'mcx>(
 // → panic).
 // ===========================================================================
 
-use types_catalog::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
-use types_catalog::pg_type::{
+use ::types_catalog::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
+use ::types_catalog::pg_type::{
     TYPTYPE_COMPOSITE, TYPTYPE_DOMAIN as PGT_TYPTYPE_DOMAIN,
 };
 use ::nodes::ddlnodes::{ConstrType, CONSTR_CHECK, CONSTR_DEFAULT, CONSTR_NOTNULL, CONSTR_NULL};
@@ -2572,8 +2572,8 @@ use ::nodes::nodes::Node as RichNode;
 use ::nodes::parsenodes::{DropBehavior, ObjectType, DROP_RESTRICT, OBJECT_DOMAIN, OBJECT_SCHEMA};
 use ::nodes::parsestmt::ParseExprKind;
 use ::nodes::primnodes::Expr;
-use types_catalog::pg_constraint::{ConstraintCategory, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL};
-use types_error::ERRCODE_INVALID_COLUMN_REFERENCE;
+use ::types_catalog::pg_constraint::{ConstraintCategory, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL};
+use ::types_error::ERRCODE_INVALID_COLUMN_REFERENCE;
 
 /// `F_DOMAIN_IN` (fmgroids.h) — `domain_in`.
 const F_DOMAIN_IN: Oid = 2597;
@@ -2583,7 +2583,7 @@ const F_DOMAIN_RECV: Oid = 2598;
 /// `RELKIND_COMPOSITE_TYPE` ('c'), as `u8` (matches `get_rel_relkind`).
 const RELKIND_COMPOSITE_TYPE: u8 = b'c';
 /// `ConstraintRelationId` — pg_constraint's OID (catalog).
-const ConstraintRelationId: Oid = types_catalog::catalog::CONSTRAINT_RELATION_ID;
+const ConstraintRelationId: Oid = ::types_catalog::catalog::CONSTRAINT_RELATION_ID;
 /// `NamespaceRelationId` — pg_namespace's OID.
 const NamespaceRelationId: Oid = NAMESPACE_RELATION_ID;
 /// `RelationRelationId` — pg_class's OID.
@@ -2613,8 +2613,8 @@ fn typename_type_id_from_names(names: &[String]) -> PgResult<Oid> {
 /// `SearchSysCacheCopy1(TYPEOID, oid)` + `GETSTRUCT(Form_pg_type)` projected to
 /// the fixed-part [`FormData_pg_type`]; `elog(ERROR, "cache lookup failed for
 /// type %u")` on a missing row (mirrors the C `!HeapTupleIsValid`).
-fn read_type_form(type_oid: Oid) -> PgResult<types_tuple::pg_type::FormData_pg_type> {
-    match syscache_seams::pg_type_form::call(type_oid)? {
+fn read_type_form(type_oid: Oid) -> PgResult<::types_tuple::pg_type::FormData_pg_type> {
+    match ::syscache_seams::pg_type_form::call(type_oid)? {
         Some(f) => Ok(f),
         None => ereport(ERROR)
             .errmsg_internal(format!("cache lookup failed for type {type_oid}"))
@@ -2625,7 +2625,7 @@ fn read_type_form(type_oid: Oid) -> PgResult<types_tuple::pg_type::FormData_pg_t
 
 /// `IsTrueArrayType(typTup)` (typecmds.c:120) — a true array type has a nonzero
 /// `typelem` and uses `array_subscript_handler` as its `typsubscript`.
-fn is_true_array_type(typ: &types_tuple::pg_type::FormData_pg_type) -> bool {
+fn is_true_array_type(typ: &::types_tuple::pg_type::FormData_pg_type) -> bool {
     OidIsValid(typ.typelem) && typ.typsubscript == F_ARRAY_SUBSCRIPT_HANDLER
 }
 
@@ -2635,7 +2635,7 @@ fn format_type_be(oid: Oid) -> PgResult<String> {
 }
 
 /// `NameStr(typTup->typname)`.
-fn type_name_str(typ: &types_tuple::pg_type::FormData_pg_type) -> String {
+fn type_name_str(typ: &::types_tuple::pg_type::FormData_pg_type) -> String {
     String::from_utf8_lossy(typ.typname.name_str()).into_owned()
 }
 
@@ -2667,7 +2667,7 @@ fn cook_default<'mcx>(
     // cookDefault, so coercion/eval errors on the DEFAULT expr carry
     // `parser_errposition(pstate, expr->location)`.
     if let Some(s) = source {
-        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(s, mcx)?);
+        pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(s, mcx)?);
     }
 
     /* Transform raw parsetree to executable expression. */
@@ -2752,7 +2752,7 @@ fn replace_domain_constraint_value<'mcx>(
                     dom_val.location = cref.location;
                     let mcx = *pstate.p_rtable.allocator();
                     let node = RichNode::mk_expr(mcx, Expr::CoerceToDomainValue(dom_val))?;
-                    return Ok(Some(mcx::alloc_in(mcx, node)?));
+                    return Ok(Some(::mcx::alloc_in(mcx, node)?));
                 }
             }
         }
@@ -2820,7 +2820,7 @@ fn domain_add_check_constraint<'mcx>(
     let dom_val = ::nodes::primnodes::CoerceToDomainValue {
         typeId: base_type_oid,
         typeMod: typ_mod,
-        collation: lsyscache_seams::get_typcollation::call(base_type_oid)?,
+        collation: ::lsyscache_seams::get_typcollation::call(base_type_oid)?,
         location: -1,
     };
     pstate.p_pre_columnref_hook = Some(replace_domain_constraint_value);
@@ -3022,7 +3022,7 @@ fn domain_add_not_null_constraint<'mcx>(
 
 /// `checkDomainOwner(tup)` (typecmds.c:3484) — verify the type is a domain and
 /// the current user owns it.
-pub fn checkDomainOwner(typ: &types_tuple::pg_type::FormData_pg_type) -> PgResult<()> {
+pub fn checkDomainOwner(typ: &::types_tuple::pg_type::FormData_pg_type) -> PgResult<()> {
     /* Check that this is actually a domain */
     if typ.typtype != PGT_TYPTYPE_DOMAIN {
         return ereport(ERROR)
@@ -3033,13 +3033,13 @@ pub fn checkDomainOwner(typ: &types_tuple::pg_type::FormData_pg_type) -> PgResul
     }
 
     /* Permission check: must own type */
-    if !aclchk_seams::object_ownercheck::call(
+    if !::aclchk_seams::object_ownercheck::call(
         TypeRelationId,
         typ.oid,
         get_user_id::call(),
     )? {
-        aclchk_seams::aclcheck_error_type::call(
-            types_acl::acl::ACLCHECK_NOT_OWNER,
+        ::aclchk_seams::aclcheck_error_type::call(
+            ::types_acl::acl::ACLCHECK_NOT_OWNER,
             typ.oid,
         )?;
     }
@@ -3475,13 +3475,13 @@ pub fn DefineDomain<'mcx>(
         ACL_USAGE as AclMode,
     )?;
     if aclresult != ACLCHECK_OK {
-        aclchk_seams::aclcheck_error_type::call(aclresult, basetypeoid)?;
+        ::aclchk_seams::aclcheck_error_type::call(aclresult, basetypeoid)?;
     }
 
     /* Identify the collation if any */
     let baseColl = baseType.typcollation;
     let domaincoll = if let Some(coll) = coll_clause {
-        catalog_namespace::get_collation_oid(mcx, &as_namelist(coll), false)?
+        ::catalog_namespace::get_collation_oid(mcx, &as_namelist(coll), false)?
     } else {
         baseColl
     };
@@ -3515,7 +3515,7 @@ pub fn DefineDomain<'mcx>(
     let analyzeProcedure: Oid = baseType.typanalyze;
 
     /* Inherited default value / binary value (via pg_type_default projection). */
-    let base_default = syscache_seams::pg_type_default::call(mcx, basetypeoid)?;
+    let base_default = ::syscache_seams::pg_type_default::call(mcx, basetypeoid)?;
     let mut defaultValue: Option<String> =
         base_default.as_ref().and_then(|d| d.typdefault.clone());
     let mut defaultValueBin: Option<String> =
@@ -3826,26 +3826,26 @@ fn make_constraint<'mcx>(mcx: Mcx<'mcx>, contype: ConstrType) -> PgResult<RichNo
         generated_when: 0,
         generated_kind: 0,
         nulls_not_distinct: false,
-        keys: mcx::PgVec::new_in(mcx),
+        keys: ::mcx::PgVec::new_in(mcx),
         without_overlaps: false,
-        including: mcx::PgVec::new_in(mcx),
-        exclusions: mcx::PgVec::new_in(mcx),
-        options: mcx::PgVec::new_in(mcx),
+        including: ::mcx::PgVec::new_in(mcx),
+        exclusions: ::mcx::PgVec::new_in(mcx),
+        options: ::mcx::PgVec::new_in(mcx),
         indexname: None,
         indexspace: None,
         reset_default_tblspc: false,
         access_method: None,
         where_clause: None,
         pktable: None,
-        fk_attrs: mcx::PgVec::new_in(mcx),
-        pk_attrs: mcx::PgVec::new_in(mcx),
+        fk_attrs: ::mcx::PgVec::new_in(mcx),
+        pk_attrs: ::mcx::PgVec::new_in(mcx),
         fk_with_period: false,
         pk_with_period: false,
         fk_matchtype: 0,
         fk_upd_action: 0,
         fk_del_action: 0,
-        fk_del_set_cols: mcx::PgVec::new_in(mcx),
-        old_conpfeqop: mcx::PgVec::new_in(mcx),
+        fk_del_set_cols: ::mcx::PgVec::new_in(mcx),
+        old_conpfeqop: ::mcx::PgVec::new_in(mcx),
         old_pktable_oid: InvalidOid,
         location: -1,
     })
@@ -3866,13 +3866,13 @@ pub fn RenameType<'mcx>(
     let typ = read_type_form(typeOid)?;
 
     /* check permissions on type */
-    if !aclchk_seams::object_ownercheck::call(
+    if !::aclchk_seams::object_ownercheck::call(
         TypeRelationId,
         typeOid,
         get_user_id::call(),
     )? {
-        aclchk_seams::aclcheck_error_type::call(
-            types_acl::acl::ACLCHECK_NOT_OWNER,
+        ::aclchk_seams::aclcheck_error_type::call(
+            ::types_acl::acl::ACLCHECK_NOT_OWNER,
             typeOid,
         )?;
     }
@@ -3925,7 +3925,7 @@ pub fn RenameType<'mcx>(
             false,
         )?;
     } else {
-        pg_type::RenameTypeInternal(typeOid, new_type_name, typ.typnamespace)?;
+        ::pg_type::RenameTypeInternal(typeOid, new_type_name, typ.typnamespace)?;
     }
 
     Ok(object_address_set_type(typeOid))
@@ -4004,13 +4004,13 @@ pub fn AlterTypeOwner<'mcx>(
         /* Superusers can always do it */
         if !superuser::call(mcx)? {
             /* Otherwise, must be owner of the existing object */
-            if !aclchk_seams::object_ownercheck::call(
+            if !::aclchk_seams::object_ownercheck::call(
                 TypeRelationId,
                 typ.oid,
                 get_user_id::call(),
             )? {
-                aclchk_seams::aclcheck_error_type::call(
-                    types_acl::acl::ACLCHECK_NOT_OWNER,
+                ::aclchk_seams::aclcheck_error_type::call(
+                    ::types_acl::acl::ACLCHECK_NOT_OWNER,
                     typ.oid,
                 )?;
             }
@@ -4156,16 +4156,16 @@ pub fn AlterTypeNamespace_oid(
     type_oid: Oid,
     nsp_oid: Oid,
     ignore_dependent: bool,
-    objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+    objs_moved: &mut ::types_catalog::catalog_dependency::ObjectAddresses,
 ) -> PgResult<Oid> {
     /* check permissions on type */
-    if !aclchk_seams::object_ownercheck::call(
+    if !::aclchk_seams::object_ownercheck::call(
         TypeRelationId,
         type_oid,
         get_user_id::call(),
     )? {
-        aclchk_seams::aclcheck_error_type::call(
-            types_acl::acl::ACLCHECK_NOT_OWNER,
+        ::aclchk_seams::aclcheck_error_type::call(
+            ::types_acl::acl::ACLCHECK_NOT_OWNER,
             type_oid,
         )?;
     }
@@ -4198,7 +4198,7 @@ pub fn AlterTypeNamespaceInternal(
     is_implicit_array: bool,
     ignore_dependent: bool,
     error_on_table_type: bool,
-    objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+    objs_moved: &mut ::types_catalog::catalog_dependency::ObjectAddresses,
 ) -> PgResult<Oid> {
     let thisobj = object_address_set_type(type_oid);
 
@@ -4217,7 +4217,7 @@ pub fn AlterTypeNamespaceInternal(
         namespace_seams::check_set_namespace::call(oldNspOid, nsp_oid)?;
 
         /* check for duplicate name */
-        if syscache_seams::type_exists::call(
+        if ::syscache_seams::type_exists::call(
             &type_name_str(&typform),
             nsp_oid,
         )? {
@@ -4360,7 +4360,7 @@ pub fn AlterType<'mcx>(
     let typeOid = typename_type_id_from_names(type_name)?;
     let typForm = read_type_form(typeOid)?;
 
-    let mut atparams = types_catalog::pg_type::TypeAttrUpdate::default();
+    let mut atparams = ::types_catalog::pg_type::TypeAttrUpdate::default();
     let mut requireSuper = false;
 
     for node in options {
@@ -4491,13 +4491,13 @@ pub fn AlterType<'mcx>(
                 .finish(errloc(4492, "AlterType"))
                 .map(|()| unreachable!());
         }
-    } else if !aclchk_seams::object_ownercheck::call(
+    } else if !::aclchk_seams::object_ownercheck::call(
         TypeRelationId,
         typeOid,
         get_user_id::call(),
     )? {
-        aclchk_seams::aclcheck_error_type::call(
-            types_acl::acl::ACLCHECK_NOT_OWNER,
+        ::aclchk_seams::aclcheck_error_type::call(
+            ::types_acl::acl::ACLCHECK_NOT_OWNER,
             typeOid,
         )?;
     }
@@ -4533,7 +4533,7 @@ pub fn AlterType<'mcx>(
 pub fn AlterTypeRecurse(
     type_oid: Oid,
     is_implicit_array: bool,
-    mut atparams: types_catalog::pg_type::TypeAttrUpdate,
+    mut atparams: ::types_catalog::pg_type::TypeAttrUpdate,
 ) -> PgResult<()> {
     /* Update the current type's tuple + rebuild deps + hook (owner seam). */
     let arrtypoid = pg_type_seams::alter_type_recurse_update::call(
@@ -4548,7 +4548,7 @@ pub fn AlterTypeRecurse(
      */
     if !is_implicit_array && (atparams.update_typmodin || atparams.update_typmodout) {
         if OidIsValid(arrtypoid) {
-            let arrparams = types_catalog::pg_type::TypeAttrUpdate {
+            let arrparams = ::types_catalog::pg_type::TypeAttrUpdate {
                 update_typmodin: atparams.update_typmodin,
                 update_typmodout: atparams.update_typmodout,
                 typmodin_oid: atparams.typmodin_oid,
@@ -4597,12 +4597,12 @@ fn InvalidObjectAddress() -> ObjectAddress {
 
 /// `get_element_type(typid)` (lsyscache) → `InvalidOid` when none.
 fn get_element_type_seam(typid: Oid) -> PgResult<Oid> {
-    Ok(lsyscache_seams::get_element_type::call(typid)?.unwrap_or(InvalidOid))
+    Ok(::lsyscache_seams::get_element_type::call(typid)?.unwrap_or(InvalidOid))
 }
 
 /// `get_array_type(typid)` (lsyscache) → `InvalidOid` when none.
 fn get_array_type_seam(typid: Oid) -> PgResult<Oid> {
-    Ok(lsyscache_seams::get_array_type::call(typid)?.unwrap_or(InvalidOid))
+    Ok(::lsyscache_seams::get_array_type::call(typid)?.unwrap_or(InvalidOid))
 }
 
 /// `get_namespace_name(nspid)` text (panics-safe `String`).
@@ -4644,7 +4644,7 @@ fn get_namespace_name_seam(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>>
 /// `checkEnumOwner(tup)` (typecmds.c:1303) — verify the type is an enum and the
 /// current user owns it. The C function reads `Form_pg_type` out of the syscache
 /// tuple; here we project it to the fixed-part [`FormData_pg_type`].
-fn checkEnumOwner(typ: &types_tuple::pg_type::FormData_pg_type) -> PgResult<()> {
+fn checkEnumOwner(typ: &::types_tuple::pg_type::FormData_pg_type) -> PgResult<()> {
     /* Check that this is actually an enum */
     if typ.typtype != TYPTYPE_ENUM {
         return ereport(ERROR)
@@ -4655,13 +4655,13 @@ fn checkEnumOwner(typ: &types_tuple::pg_type::FormData_pg_type) -> PgResult<()> 
     }
 
     /* Permission check: must own type */
-    if !aclchk_seams::object_ownercheck::call(
+    if !::aclchk_seams::object_ownercheck::call(
         TypeRelationId,
         typ.oid,
         get_user_id::call(),
     )? {
-        aclchk_seams::aclcheck_error_type::call(
-            types_acl::acl::ACLCHECK_NOT_OWNER,
+        ::aclchk_seams::aclcheck_error_type::call(
+            ::types_acl::acl::ACLCHECK_NOT_OWNER,
             typ.oid,
         )?;
     }
@@ -4768,7 +4768,7 @@ fn names_from_list_node(object: &Node) -> PgResult<Vec<String>> {
 /// ported `RenameType` body.
 fn rename_type_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &parsenodes::RenameStmt,
+    stmt: &::parsenodes::RenameStmt,
 ) -> PgResult<ObjectAddress> {
     let object = stmt.object.as_deref().ok_or_else(|| {
         PgError::error("ExecRenameStmt: RENAME object must be set for DOMAIN/TYPE")

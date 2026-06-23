@@ -97,8 +97,8 @@ pub fn ExecInitBitmapOr<'mcx>(
     let nplans = node.bitmapplans.len();
 
     // bitmapplanstates = (PlanState **) palloc0(nplans * sizeof(PlanState *));
-    let mut bitmapplans: mcx::PgVec<'mcx, Option<PgBox<'mcx, ::nodes::PlanStateNode<'mcx>>>> =
-        mcx::PgVec::new_in(mcx);
+    let mut bitmapplans: ::mcx::PgVec<'mcx, Option<PgBox<'mcx, ::nodes::PlanStateNode<'mcx>>>> =
+        ::mcx::PgVec::new_in(mcx);
     bitmapplans
         .try_reserve(nplans)
         .map_err(|_| mcx.oom(nplans * core::mem::size_of::<usize>()))?;

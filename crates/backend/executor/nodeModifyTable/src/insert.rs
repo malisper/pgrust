@@ -3,17 +3,17 @@
 //! CONFLICT relies on. The single-tuple `ExecInsert` driver lives in the
 //! [`crate::insert_exec`] sub-module.
 
-use mcx::Mcx;
-use types_core::xact::CommandId;
+use ::mcx::Mcx;
+use ::types_core::xact::CommandId;
 use types_error::{
     PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
-use rel::Relation;
-use types_tableam::tableam::{
+use ::rel::Relation;
+use ::types_tableam::tableam::{
     LockTupleMode, Snapshot, TM_FailureData, TM_Result,
 };
-use types_tuple::heaptuple::{ItemPointerData, MinTransactionIdAttributeNumber};
+use ::types_tuple::heaptuple::{ItemPointerData, MinTransactionIdAttributeNumber};
 
 use crate::lifecycle::ExecCheckPlanOutput;
 use crate::update::ExecUpdate;
@@ -45,7 +45,7 @@ seam_core::seam!(
         result_rel_info: RriId,
         slots: &[SlotId],
         plan_slots: &[SlotId],
-    ) -> PgResult<mcx::PgVec<'mcx, SlotId>>
+    ) -> PgResult<::mcx::PgVec<'mcx, SlotId>>
 );
 
 seam_core::seam!(
@@ -55,7 +55,7 @@ seam_core::seam!(
     pub fn slot_set_table_oid<'mcx>(
         estate: &mut EStateData<'mcx>,
         slot: SlotId,
-        relid: types_core::Oid,
+        relid: ::types_core::Oid,
     )
 );
 
@@ -72,7 +72,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `RelationGetRelid(resultRelInfo->ri_RelationDesc)` (rel.h): the target
     /// relation's OID.
-    pub fn ri_relation_relid(estate: &EStateData<'_>, result_rel_info: RriId) -> types_core::Oid
+    pub fn ri_relation_relid(estate: &EStateData<'_>, result_rel_info: RriId) -> ::types_core::Oid
 );
 
 seam_core::seam!(
@@ -102,13 +102,13 @@ seam_core::seam!(
 seam_core::seam!(
     /// `resultRelInfo->ri_Slots` (execnodes.h): the buffered-insert source
     /// slots accumulated for this result relation's pending FDW batch.
-    pub fn ri_slots<'mcx>(estate: &EStateData<'mcx>, result_rel_info: RriId) -> mcx::PgVec<'mcx, SlotId>
+    pub fn ri_slots<'mcx>(estate: &EStateData<'mcx>, result_rel_info: RriId) -> ::mcx::PgVec<'mcx, SlotId>
 );
 
 seam_core::seam!(
     /// `resultRelInfo->ri_PlanSlots` (execnodes.h): the buffered-insert plan
     /// slots paralleling `ri_Slots`.
-    pub fn ri_plan_slots<'mcx>(estate: &EStateData<'mcx>, result_rel_info: RriId) -> mcx::PgVec<'mcx, SlotId>
+    pub fn ri_plan_slots<'mcx>(estate: &EStateData<'mcx>, result_rel_info: RriId) -> ::mcx::PgVec<'mcx, SlotId>
 );
 
 seam_core::seam!(
@@ -252,7 +252,7 @@ seam_core::seam!(
     pub fn slot_get_xmin<'mcx>(
         estate: &mut EStateData<'mcx>,
         slot: SlotId,
-    ) -> PgResult<(types_core::TransactionId, bool)>
+    ) -> PgResult<(::types_core::TransactionId, bool)>
 );
 
 seam_core::seam!(
@@ -495,7 +495,7 @@ pub fn ExecInitInsertProjection<'mcx>(
             .map(|tl| tl.as_slice())
             .unwrap_or(empty);
 
-        let mut list = mcx::vec_with_capacity_in(mcx, subplan_tlist.len())?;
+        let mut list = ::mcx::vec_with_capacity_in(mcx, subplan_tlist.len())?;
         let mut need = false;
         for tle in subplan_tlist.iter() {
             if !tle.resjunk {

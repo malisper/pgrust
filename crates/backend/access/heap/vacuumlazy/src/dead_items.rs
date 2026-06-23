@@ -8,7 +8,7 @@
 use utils_error::{ereport};
 use types_error::{ErrorLocation, DEBUG2, INFO, WARNING};
 use types_core::{BlockNumber, OffsetNumber};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::consts::{
     PROGRESS_VACUUM_DEAD_TUPLE_BYTES, PROGRESS_VACUUM_NUM_DEAD_ITEM_IDS,

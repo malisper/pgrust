@@ -21,17 +21,17 @@ use types_deadlock::{
     DeadLockState, DeadlockInfo, DeadlockReport, Edge, LockId, LockSpace, ProcId, WaitOrder,
 };
 use types_error::{PgError, PgResult, ERRCODE_T_R_DEADLOCK_DETECTED, ERROR, FATAL};
-use types_storage::lock::{LOCKMODE, LOCKTAG, LOCKTAG_RELATION_EXTEND};
-use types_storage::storage::{MAX_BACKENDS_BITS, PROC_IS_AUTOVACUUM};
+use ::types_storage::lock::{LOCKMODE, LOCKTAG, LOCKTAG_RELATION_EXTEND};
+use ::types_storage::storage::{MAX_BACKENDS_BITS, PROC_IS_AUTOVACUUM};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use lmgr_seams::describe_lock_tag;
+use ::lmgr_seams::describe_lock_tag;
 use lock_seams::{get_lock_method_table, get_lockmode_name};
-use lmgr_proc_seams::proc_lock_wakeup;
-use stat_seams::report_deadlock;
-use status_seams::backend_current_activity;
-use init_small_seams::max_backends;
+use ::lmgr_proc_seams::proc_lock_wakeup;
+use ::stat_seams::report_deadlock;
+use ::status_seams::backend_current_activity;
+use ::init_small_seams::max_backends;
 
 /// `LOCKBIT_ON(lockmode)` (lock.h:85) — the conflict-table bit for a lock mode.
 #[inline]
@@ -126,7 +126,7 @@ const NULL_WAIT_ORDER: WaitOrder = WaitOrder {
 /// Allocate a `Vec<T>` of length `n` filled with `value`, mirroring a C `palloc`:
 /// the reservation is fallible, converting an out-of-memory to the context OOM
 /// error (`mcx.oom`), then the infallible fill runs.
-fn palloc_vec<T: Clone>(mcx: mcx::Mcx<'_>, n: usize, value: T) -> PgResult<Vec<T>> {
+fn palloc_vec<T: Clone>(mcx: ::mcx::Mcx<'_>, n: usize, value: T) -> PgResult<Vec<T>> {
     let mut v: Vec<T> = Vec::new();
     v.try_reserve_exact(n)
         .map_err(|_| mcx.oom(n.saturating_mul(core::mem::size_of::<T>())))?;
@@ -1111,7 +1111,7 @@ pub(crate) fn build_dead_lock_report() -> (PgError, DeadlockReport) {
 /// as `PgString`s charged to `mcx`, then materialize the owned `String`s the
 /// report carries away. Returns `Err` on any allocation failure (the caller
 /// degrades to the bare deadlock error).
-fn render_dead_lock_report(mcx: mcx::Mcx<'_>) -> PgResult<(String, String)> {
+fn render_dead_lock_report(mcx: ::mcx::Mcx<'_>) -> PgResult<(String, String)> {
     let mut clientbuf = PgString::new_in(mcx); // errdetail for client
     let mut logbuf = PgString::new_in(mcx); // errdetail for server log
 

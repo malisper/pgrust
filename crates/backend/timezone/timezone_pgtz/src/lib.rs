@@ -20,9 +20,9 @@ use std::rc::Rc;
 
 use localtime::{pg_tz_acceptable, tzload, tzparse};
 use pgstrcasecmp::{pg_strncasecmp, pg_toupper};
-use types_core::MAXPGPATH;
+use ::types_core::MAXPGPATH;
 use types_error::{PgError, PgResult};
-use pgtime::pgtime::state;
+use ::pgtime::pgtime::state;
 use pgtime::{pg_tz, TZ_STRLEN_MAX};
 
 // From `datatype/timestamp.h`.

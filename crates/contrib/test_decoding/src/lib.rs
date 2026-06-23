@@ -30,7 +30,7 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_logical::{
     CallbackInvocation, LogicalDecodingContext, OutputPluginCallbackArgs, OutputPluginOptions,
@@ -276,7 +276,7 @@ fn pg_decode_startup(ctx: &mut LogicalDecodingContext, _is_init: bool) -> PgResu
 
     // foreach(option, ctx->output_plugin_options) — parse the (key,value) DefElems.
     for (defname, arg) in
-        logical_logical::output_plugin_options(ctx).into_iter()
+        ::logical_logical::output_plugin_options(ctx).into_iter()
     {
         match defname.as_str() {
             "include-xids" => data.include_xids = parse_opt_bool(&defname, arg, true)?,
@@ -332,7 +332,7 @@ fn pg_decode_shutdown(ctx: &mut LogicalDecodingContext) {
 }
 
 /// `pg_decode_begin_txn` (test_decoding.c:290).
-fn pg_decode_begin_txn(ctx: &mut LogicalDecodingContext, txn: types_logical::TxnHandle) -> PgResult<()> {
+fn pg_decode_begin_txn(ctx: &mut LogicalDecodingContext, txn: ::types_logical::TxnHandle) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     let skip_empty = {
         let data = plugin_data(ctx);
@@ -359,8 +359,8 @@ fn pg_output_begin(ctx: &mut LogicalDecodingContext, xid: u32, last_write: bool)
 /// `pg_decode_commit_txn` (test_decoding.c:322).
 fn pg_decode_commit_txn(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    _commit_lsn: types_core::primitive::XLogRecPtr,
+    txn: ::types_logical::TxnHandle,
+    _commit_lsn: ::types_core::primitive::XLogRecPtr,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     let (skip_empty, include_xids, include_timestamp, xact_wrote_changes) = {
@@ -398,9 +398,9 @@ fn pg_decode_commit_txn(
 /// `pg_decode_change` (test_decoding.c:603).
 fn pg_decode_change(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    relation: types_logical::RelationHandle,
-    change: types_logical::ChangeHandle,
+    txn: ::types_logical::TxnHandle,
+    relation: ::types_logical::RelationHandle,
+    change: ::types_logical::ChangeHandle,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
 
@@ -433,7 +433,7 @@ fn pg_decode_change(
     let relnamespace = relcache::rd_rel_relnamespace::call(&rel)?;
     let relrewrite = relcache::rd_rel_relrewrite::call(reloid)?;
     let nsname = lsyscache::get_namespace_name::call(m, relnamespace)?;
-    let relname = if relrewrite != types_core::primitive::InvalidOid {
+    let relname = if relrewrite != ::types_core::primitive::InvalidOid {
         lsyscache::get_rel_name::call(m, relrewrite)?
     } else {
         lsyscache::get_rel_name::call(m, reloid)?
@@ -489,10 +489,10 @@ fn pg_decode_change(
 /// `pg_decode_truncate` (test_decoding.c:690).
 fn pg_decode_truncate(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
+    txn: ::types_logical::TxnHandle,
     nrelations: i32,
-    relations: types_logical::RelationsHandle,
-    change: types_logical::ChangeHandle,
+    relations: ::types_logical::RelationsHandle,
+    change: ::types_logical::ChangeHandle,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
 
@@ -555,12 +555,12 @@ fn pg_decode_truncate(
 #[allow(clippy::too_many_arguments)]
 fn pg_decode_message(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    _lsn: types_core::primitive::XLogRecPtr,
+    txn: ::types_logical::TxnHandle,
+    _lsn: ::types_core::primitive::XLogRecPtr,
     transactional: bool,
-    prefix: types_logical::PrefixHandle,
-    sz: types_core::primitive::Size,
-    message: types_logical::MessageHandle,
+    prefix: ::types_logical::PrefixHandle,
+    sz: ::types_core::primitive::Size,
+    message: ::types_logical::MessageHandle,
 ) -> PgResult<()> {
     if transactional {
         let xid = rb::txn_xid::call(txn);
@@ -596,7 +596,7 @@ fn pg_decode_message(
 }
 
 /// `pg_decode_filter` (test_decoding.c:463).
-fn pg_decode_filter(ctx: &mut LogicalDecodingContext, origin_id: types_core::primitive::RepOriginId) -> bool {
+fn pg_decode_filter(ctx: &mut LogicalDecodingContext, origin_id: ::types_core::primitive::RepOriginId) -> bool {
     let only_local = plugin_data(ctx).only_local;
     only_local && origin_id != 0
 }
@@ -611,7 +611,7 @@ fn pg_decode_filter_prepare(gid: &[u8]) -> bool {
 /// `pg_decode_begin_prepare_txn` (test_decoding.c:350).
 fn pg_decode_begin_prepare_txn(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
+    txn: ::types_logical::TxnHandle,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     let skip_empty = {
@@ -628,8 +628,8 @@ fn pg_decode_begin_prepare_txn(
 /// `pg_decode_prepare_txn` (test_decoding.c:371).
 fn pg_decode_prepare_txn(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    _prepare_lsn: types_core::primitive::XLogRecPtr,
+    txn: ::types_logical::TxnHandle,
+    _prepare_lsn: ::types_core::primitive::XLogRecPtr,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     let (skip_empty, include_xids, include_timestamp, xact_wrote_changes) = {
@@ -656,8 +656,8 @@ fn pg_decode_prepare_txn(
 /// `pg_decode_commit_prepared_txn` (test_decoding.c:401).
 fn pg_decode_commit_prepared_txn(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    _commit_lsn: types_core::primitive::XLogRecPtr,
+    txn: ::types_logical::TxnHandle,
+    _commit_lsn: ::types_core::primitive::XLogRecPtr,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     let (include_xids, include_timestamp) = {
@@ -680,9 +680,9 @@ fn pg_decode_commit_prepared_txn(
 /// `pg_decode_rollback_prepared_txn` (test_decoding.c:423).
 fn pg_decode_rollback_prepared_txn(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    _prepare_end_lsn: types_core::primitive::XLogRecPtr,
-    _prepare_time: types_core::primitive::TimestampTz,
+    txn: ::types_logical::TxnHandle,
+    _prepare_end_lsn: ::types_core::primitive::XLogRecPtr,
+    _prepare_time: ::types_core::primitive::TimestampTz,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     let (include_xids, include_timestamp) = {
@@ -705,7 +705,7 @@ fn pg_decode_rollback_prepared_txn(
 // --- Streaming callbacks (test_decoding.c:769+). The basic TAP path never
 // streams; ported for faithfulness. ---
 
-fn pg_decode_stream_start(ctx: &mut LogicalDecodingContext, txn: types_logical::TxnHandle) -> PgResult<()> {
+fn pg_decode_stream_start(ctx: &mut LogicalDecodingContext, txn: ::types_logical::TxnHandle) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     let skip_empty = {
         let data = plugin_data(ctx);
@@ -729,7 +729,7 @@ fn pg_output_stream_start(ctx: &mut LogicalDecodingContext, xid: u32, last_write
     OutputPluginWrite(ctx, last_write)
 }
 
-fn pg_decode_stream_stop(ctx: &mut LogicalDecodingContext, txn: types_logical::TxnHandle) -> PgResult<()> {
+fn pg_decode_stream_stop(ctx: &mut LogicalDecodingContext, txn: ::types_logical::TxnHandle) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     if plugin_data(ctx).skip_empty_xacts {
         return Ok(());
@@ -745,8 +745,8 @@ fn pg_decode_stream_stop(ctx: &mut LogicalDecodingContext, txn: types_logical::T
 
 fn pg_decode_stream_abort(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    _abort_lsn: types_core::primitive::XLogRecPtr,
+    txn: ::types_logical::TxnHandle,
+    _abort_lsn: ::types_core::primitive::XLogRecPtr,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     OutputPluginPrepareWrite(ctx, true)?;
@@ -760,8 +760,8 @@ fn pg_decode_stream_abort(
 
 fn pg_decode_stream_prepare(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    _prepare_lsn: types_core::primitive::XLogRecPtr,
+    txn: ::types_logical::TxnHandle,
+    _prepare_lsn: ::types_core::primitive::XLogRecPtr,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     OutputPluginPrepareWrite(ctx, true)?;
@@ -776,8 +776,8 @@ fn pg_decode_stream_prepare(
 
 fn pg_decode_stream_commit(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    _commit_lsn: types_core::primitive::XLogRecPtr,
+    txn: ::types_logical::TxnHandle,
+    _commit_lsn: ::types_core::primitive::XLogRecPtr,
 ) -> PgResult<()> {
     let xid = rb::txn_xid::call(txn);
     OutputPluginPrepareWrite(ctx, true)?;
@@ -791,9 +791,9 @@ fn pg_decode_stream_commit(
 
 fn pg_decode_stream_change(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    relation: types_logical::RelationHandle,
-    change: types_logical::ChangeHandle,
+    txn: ::types_logical::TxnHandle,
+    relation: ::types_logical::RelationHandle,
+    change: ::types_logical::ChangeHandle,
 ) -> PgResult<()> {
     // The plugin just delegates to the same per-change rendering after marking
     // stream_wrote_changes (skip-empty-xacts off in the TAP path).
@@ -807,22 +807,22 @@ fn pg_decode_stream_change(
 #[allow(clippy::too_many_arguments)]
 fn pg_decode_stream_message(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
-    lsn: types_core::primitive::XLogRecPtr,
+    txn: ::types_logical::TxnHandle,
+    lsn: ::types_core::primitive::XLogRecPtr,
     transactional: bool,
-    prefix: types_logical::PrefixHandle,
-    sz: types_core::primitive::Size,
-    message: types_logical::MessageHandle,
+    prefix: ::types_logical::PrefixHandle,
+    sz: ::types_core::primitive::Size,
+    message: ::types_logical::MessageHandle,
 ) -> PgResult<()> {
     pg_decode_message(ctx, txn, lsn, transactional, prefix, sz, message)
 }
 
 fn pg_decode_stream_truncate(
     ctx: &mut LogicalDecodingContext,
-    txn: types_logical::TxnHandle,
+    txn: ::types_logical::TxnHandle,
     nrelations: i32,
-    relations: types_logical::RelationsHandle,
-    change: types_logical::ChangeHandle,
+    relations: ::types_logical::RelationsHandle,
+    change: ::types_logical::ChangeHandle,
 ) -> PgResult<()> {
     pg_decode_truncate(ctx, txn, nrelations, relations, change)
 }
@@ -963,7 +963,7 @@ fn detoast_datum<'mcx>(
 }
 
 /// `timestamptz_to_str(t)` — ISO-style timestamp string.
-fn timestamptz_str(t: types_core::primitive::TimestampTz) -> PgResult<String> {
+fn timestamptz_str(t: ::types_core::primitive::TimestampTz) -> PgResult<String> {
     let scratch = mcx::MemoryContext::new("test_decoding ts");
     let s = timestamp::timestamptz_to_str::call(scratch.mcx(), t)?;
     Ok(s.as_str().to_string())

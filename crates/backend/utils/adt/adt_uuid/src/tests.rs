@@ -1,5 +1,5 @@
 use super::*;
-use types_error::SoftErrorContext;
+use ::types_error::SoftErrorContext;
 
 const NIL: pg_uuid_t = pg_uuid_t {
     data: [0u8; UUID_LEN],
@@ -55,7 +55,7 @@ fn in_rejects_bad_syntax_hard() {
         assert!(r.is_err(), "{bad:?} should hard-error");
         assert_eq!(
             r.unwrap_err().sqlstate(),
-            types_error::ERRCODE_INVALID_TEXT_REPRESENTATION
+            ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION
         );
     }
 }
@@ -67,7 +67,7 @@ fn in_soft_error_saves_not_throws() {
     assert!(r.is_ok(), "soft context must not throw");
     assert!(ctx.error_occurred());
     let e = ctx.take_error().expect("error saved");
-    assert_eq!(e.sqlstate(), types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
+    assert_eq!(e.sqlstate(), ::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION);
     assert_eq!(
         e.message(),
         "invalid input syntax for type uuid: \"bad\""

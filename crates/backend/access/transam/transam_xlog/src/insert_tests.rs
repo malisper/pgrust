@@ -14,11 +14,11 @@ use lwlock as lwlock;
 use lwlock_seams as lwlock_seam;
 use lmgr_proc_seams as proc_s;
 use waitevent_seams as waitevent;
-use init_small::globals;
+use ::init_small::globals;
 use init_small_seams as init_globals;
 
 use insert::SizeOfXLogRecord;
-use types_storage::storage::{proclist_node, LWLockWaitState, LW_WS_NOT_WAITING};
+use ::types_storage::storage::{proclist_node, LWLockWaitState, LW_WS_NOT_WAITING};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 static INSTALL: Once = Once::new();
@@ -54,7 +54,7 @@ fn install_seams() {
     proc_s::set_proc_lw_waiting::set(|p, s| PROC_LW.with(|a| a.borrow_mut()[p as usize].0 = s));
     proc_s::proc_lw_wait_link::set(|p| PROC_LW.with(|a| a.borrow()[p as usize].1));
     proc_s::set_proc_lw_wait_link::set(|p, n| PROC_LW.with(|a| a.borrow_mut()[p as usize].1 = n));
-    proc_s::proc_lw_wait_mode::set(|_| types_storage::storage::LW_EXCLUSIVE);
+    proc_s::proc_lw_wait_mode::set(|_| ::types_storage::storage::LW_EXCLUSIVE);
     proc_s::set_proc_lw_wait_mode::set(|_, _| {});
     proc_s::pg_semaphore_lock::set(|_| {});
     proc_s::pg_semaphore_unlock::set(|_| {});

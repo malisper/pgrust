@@ -2,20 +2,20 @@
 
 use alloc::vec::Vec;
 
-use nodes_core::makefuncs::{make_andclause, make_orclause};
-use mcx::Mcx;
-use types_error::PgResult;
+use ::nodes_core::makefuncs::{make_andclause, make_orclause};
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, OpExpr};
 use pathnodes::{
     NodeId, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId, VOLATILITY_UNKNOWN,
 };
 
-use types_core::primitive::Index;
+use ::types_core::primitive::Index;
 use crate::bms;
 use crate::ext_seam;
 
 use ::nodes::primnodes::{AND_EXPR, OR_EXPR};
-const INVALID_OID: types_core::primitive::Oid = 0;
+const INVALID_OID: ::types_core::primitive::Oid = 0;
 
 /// `is_orclause(node)` (clauses.h).
 #[inline]
@@ -196,7 +196,7 @@ pub fn make_plain_restrictinfo<'mcx>(
         rinfo_serial,
         // Cacheable fields with "not yet set" markers.
         parent_ec: None,
-        eval_cost: pathnodes::QualCost {
+        eval_cost: ::pathnodes::QualCost {
             startup: -1.0,
             per_tuple: 0.0,
         },
@@ -424,7 +424,7 @@ pub fn commute_restrictinfo(
     mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     rinfo: RinfoId,
-    comm_op: types_core::primitive::Oid,
+    comm_op: ::types_core::primitive::Oid,
 ) -> PgResult<RinfoId> {
     let ri = root.rinfo(rinfo).clone();
     // Deep-copy the clause OpExpr via `Expr::clone_in` (the derived

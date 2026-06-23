@@ -27,14 +27,14 @@ use core::any::Any;
 use core::cell::RefCell;
 
 use mcx::{alloc_in, MemoryContext, Mcx, PgBox, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use fmgr::boundary::RefPayload;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
-/// The fmgr-ABI bare word (`datum::Datum`) — what `arg(i).value` carries
+/// The fmgr-ABI bare word (`::datum::Datum`) — what `arg(i).value` carries
 /// and what a `PGFunction` returns.
-use datum::Datum as Word;
+use ::datum::Datum as Word;
 /// The canonical value-bearing `Datum` (`types_tuple`) — what the tuplesort
 /// seams put/get.
 use types_tuple::heaptuple::Datum as CDatum;
@@ -100,7 +100,7 @@ pub(crate) fn ret_internal(fcinfo: &mut FunctionCallInfoBaseData, state: Box<dyn
 
 pub(crate) fn percentile_range_error(p: f64) -> PgError {
     PgError::error(alloc::format!("percentile value {p} is not between 0 and 1"))
-        .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+        .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
 }
 
 // ===========================================================================
@@ -193,7 +193,7 @@ pub(crate) struct OSAPerQueryState {
 #[derive(Clone)]
 pub(crate) struct TupleQueryState {
     pub(crate) num_sort_cols: i32,
-    pub(crate) sort_col_idx: alloc::vec::Vec<types_core::AttrNumber>,
+    pub(crate) sort_col_idx: alloc::vec::Vec<::types_core::AttrNumber>,
     pub(crate) sort_operators: alloc::vec::Vec<Oid>,
     pub(crate) eq_operators: alloc::vec::Vec<Oid>,
     pub(crate) sort_collations: alloc::vec::Vec<Oid>,
@@ -698,7 +698,7 @@ pub(crate) fn float8_lerp(lo: f64, hi: f64, pct: f64) -> f64 {
 // Builtin registration.
 // ===========================================================================
 
-fn entry(foid: u32, name: &str, nargs: i16, native: fmgr::PgFnNative) -> (BuiltinFunction, fmgr::PgFnNative) {
+fn entry(foid: u32, name: &str, nargs: i16, native: ::fmgr::PgFnNative) -> (BuiltinFunction, ::fmgr::PgFnNative) {
     (
         BuiltinFunction {
             foid,

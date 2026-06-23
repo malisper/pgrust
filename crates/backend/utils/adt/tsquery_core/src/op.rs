@@ -9,18 +9,18 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use ts_small::util::{
+use ::ts_small::util::{
     self, get_operand, get_query, operand_distance, operand_length, qt2qtn, qtn2qt, tsq_size,
     QTNode, QTNodeCompare, QTN_NEEDFREE,
 };
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use tsearch::tsearch::{
+use ::tsearch::tsearch::{
     QueryItem, QueryOperator, TSQuerySign, MAXENTRYPOS, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_OPR,
     QI_VAL, TSQS_SIGLEN,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 /// `query->size` of a flat `tsquery` image.
 fn varsize(q: &[u8]) -> u32 {
@@ -210,7 +210,7 @@ fn collect_tsquery_values<'mcx>(mcx: Mcx<'mcx>, a: &[u8]) -> PgResult<PgVec<'mcx
         if item.item_type() == QI_VAL {
             let dist = operand_distance(item) as usize;
             let len = operand_length(item) as usize;
-            let val = mcx::slice_in(mcx, &operand[dist..dist + len]).map_err(|_| util::oom())?;
+            let val = ::mcx::slice_in(mcx, &operand[dist..dist + len]).map_err(|_| util::oom())?;
             values.push(val);
         }
     }

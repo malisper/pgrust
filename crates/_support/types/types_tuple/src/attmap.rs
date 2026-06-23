@@ -1,8 +1,8 @@
 //! Attribute-number map vocabulary (`access/attmap.h`), trimmed.
 
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 
 /// `AttrMap` (`access/attmap.h`):
 ///

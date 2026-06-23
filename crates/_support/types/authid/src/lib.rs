@@ -11,7 +11,7 @@
 
 #![allow(non_camel_case_types)]
 
-use types_core::primitive::{Oid, TimestampTz};
+use ::types_core::primitive::{Oid, TimestampTz};
 
 /// `typedef enum PasswordType` (`libpq/crypt.h`). Values verified against PG
 /// 18.3.

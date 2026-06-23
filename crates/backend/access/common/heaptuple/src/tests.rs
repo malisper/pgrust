@@ -9,7 +9,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mcx::{slice_in, Mcx, MemoryContext, PgVec};
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     CompactAttribute, TupleDescData, TYPALIGN_CHAR, TYPALIGN_DOUBLE, TYPALIGN_INT,
 };
 
@@ -91,7 +91,7 @@ fn form_deform_all_byval_no_nulls() {
     let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
     // No nulls => HEAP_HASNULL not set, t_bits empty.
     let td_hdr = formed.tuple.t_data.as_ref().unwrap();
-    assert_eq!(td_hdr.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
+    assert_eq!(td_hdr.t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL, 0);
     assert!(td_hdr.t_bits.is_empty());
     // t_hoff == MAXALIGN(23) == 24.
     assert_eq!(td_hdr.t_hoff, 24);
@@ -141,11 +141,11 @@ fn composite_datum_bridge_round_trip() {
     let back = DatumGetHeapTupleHeader(mcx, &datum).expect("DatumGetHeapTupleHeader");
     let hdr = back.tuple.t_data.as_ref().unwrap();
     assert_eq!(
-        types_tuple::heaptuple::HeapTupleHeaderGetTypeId(hdr),
+        ::types_tuple::heaptuple::HeapTupleHeaderGetTypeId(hdr),
         2249, // RECORDOID
     );
     assert_eq!(
-        types_tuple::heaptuple::HeapTupleHeaderGetTypMod(hdr),
+        ::types_tuple::heaptuple::HeapTupleHeaderGetTypMod(hdr),
         -1,
     );
     assert_eq!(back.tuple.t_len as usize, bytes.len());
@@ -182,7 +182,7 @@ fn form_deform_with_nulls_sets_bitmap() {
 
     let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
     let hdr = formed.tuple.t_data.as_ref().unwrap();
-    assert_ne!(hdr.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
+    assert_ne!(hdr.t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL, 0);
     // BITMAPLEN(3) == 1 byte; bit 0 and bit 2 set (non-null), bit 1 clear.
     assert_eq!(hdr.t_bits.len(), 1);
     assert_eq!(hdr.t_bits[0] & 0b0000_0001, 0b0000_0001);
@@ -215,7 +215,7 @@ fn form_deform_varlena_roundtrip() {
 
     let formed = heap_form_tuple(mcx, &td, &values, &isnull).expect("form");
     let hdr = formed.tuple.t_data.as_ref().unwrap();
-    assert_ne!(hdr.t_infomask & types_tuple::heaptuple::HEAP_HASVARWIDTH, 0);
+    assert_ne!(hdr.t_infomask & ::types_tuple::heaptuple::HEAP_HASVARWIDTH, 0);
 
     let cols = heap_deform_tuple(mcx, &formed.tuple, &td, &formed.data).expect("deform");
     assert_eq!(cols[0], (Datum::from_i32(42), false));
@@ -326,7 +326,7 @@ fn too_many_columns_errors() {
     // 1665 attrs; just set natts high with a small attrs vec is not valid for
     // the body, so guard only checks natts before touching arrays.
     let td = TupleDescData {
-        natts: types_tuple::heaptuple::MaxTupleAttributeNumber + 1,
+        natts: ::types_tuple::heaptuple::MaxTupleAttributeNumber + 1,
         tdtypeid: 2249,
         tdtypmod: -1,
         tdrefcount: -1,
@@ -340,8 +340,8 @@ fn too_many_columns_errors() {
     assert_eq!(
         err,
         crate::HeapTupleError::TooManyColumns {
-            columns: types_tuple::heaptuple::MaxTupleAttributeNumber + 1,
-            limit: types_tuple::heaptuple::MaxTupleAttributeNumber,
+            columns: ::types_tuple::heaptuple::MaxTupleAttributeNumber + 1,
+            limit: ::types_tuple::heaptuple::MaxTupleAttributeNumber,
         }
     );
 }
@@ -374,7 +374,7 @@ fn alignment_padding_double() {
 #[test]
 fn heap_modify_tuple_overlays_replaced_columns() {
     use crate::heap_modify_tuple;
-    use types_tuple::heaptuple::{BlockIdData, ItemPointerData};
+    use ::types_tuple::heaptuple::{BlockIdData, ItemPointerData};
 
     let ctx = MemoryContext::new("test");
     let mcx = ctx.mcx();
@@ -444,7 +444,7 @@ fn heap_modify_tuple_can_set_column_null() {
     .expect("form old");
     // old tuple had no nulls.
     assert_eq!(
-        old.tuple.t_data.as_ref().unwrap().t_infomask & types_tuple::heaptuple::HEAP_HASNULL,
+        old.tuple.t_data.as_ref().unwrap().t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL,
         0
     );
 
@@ -463,7 +463,7 @@ fn heap_modify_tuple_can_set_column_null() {
     .expect("modify");
 
     let hdr = new.tuple.t_data.as_ref().unwrap();
-    assert_ne!(hdr.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
+    assert_ne!(hdr.t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL, 0);
     let cols = heap_deform_tuple(mcx, &new.tuple, &td, &new.data).expect("deform");
     assert_eq!(cols[0].1, true); // now null
     assert_eq!(cols[1], (Datum::from_i32(2), false)); // from old
@@ -494,10 +494,10 @@ fn copytuple_is_deep_and_equal() {
     let mcx = ctx.mcx();
     let mut orig = formed_three_ints(mcx, 10, 20, 30);
     // Give it a distinguishable identity (t_self/t_tableOid/t_ctid).
-    orig.tuple.t_self = types_tuple::heaptuple::ItemPointerData::new(7, 3);
+    orig.tuple.t_self = ::types_tuple::heaptuple::ItemPointerData::new(7, 3);
     orig.tuple.t_tableOid = 12345;
     if let Some(td) = orig.tuple.t_data.as_mut() {
-        td.t_ctid = types_tuple::heaptuple::ItemPointerData::new(7, 3);
+        td.t_ctid = ::types_tuple::heaptuple::ItemPointerData::new(7, 3);
     }
 
     let copy = crate::heap_copytuple(mcx, Some(&orig))
@@ -564,10 +564,10 @@ fn modify_tuple_replaces_selected_columns_and_keeps_identity() {
     let ctx = MemoryContext::new("test");
     let mcx = ctx.mcx();
     let mut orig = formed_three_ints(mcx, 10, 20, 30);
-    orig.tuple.t_self = types_tuple::heaptuple::ItemPointerData::new(9, 4);
+    orig.tuple.t_self = ::types_tuple::heaptuple::ItemPointerData::new(9, 4);
     orig.tuple.t_tableOid = 999;
     if let Some(td) = orig.tuple.t_data.as_mut() {
-        td.t_ctid = types_tuple::heaptuple::ItemPointerData::new(9, 4);
+        td.t_ctid = ::types_tuple::heaptuple::ItemPointerData::new(9, 4);
     }
 
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4), byval(4, 4)]);
@@ -619,7 +619,7 @@ fn modify_tuple_can_set_a_column_null() {
     assert_eq!(cols[2], (Datum::from_i32(30), false));
     // HEAP_HASNULL now set on the new tuple.
     assert_ne!(
-        new_t.tuple.t_data.as_ref().unwrap().t_infomask & types_tuple::heaptuple::HEAP_HASNULL,
+        new_t.tuple.t_data.as_ref().unwrap().t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL,
         0
     );
 }
@@ -701,12 +701,12 @@ fn form_minimal_tuple_no_nulls_layout() {
 
     let mt = crate::heap_form_minimal_tuple(mcx, &td, &values, &isnull, 0).expect("form_minimal");
     // No nulls.
-    assert_eq!(mt.tuple.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
+    assert_eq!(mt.tuple.t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL, 0);
     assert!(mt.tuple.t_bits.is_empty());
     // t_hoff includes MINIMAL_TUPLE_OFFSET.
     assert_eq!(mt.tuple.t_hoff, 24);
     // natts encoded in t_infomask2.
-    assert_eq!(mt.tuple.t_infomask2 & types_tuple::heaptuple::HEAP_NATTS_MASK, 2);
+    assert_eq!(mt.tuple.t_infomask2 & ::types_tuple::heaptuple::HEAP_NATTS_MASK, 2);
     // data_len: int4 at 0, int4 at 4 => 8.  t_len == hoff(16) + 8 == 24.
     assert_eq!(mt.data.len(), 8);
     assert_eq!(mt.tuple.t_len as usize, 16 + 8);
@@ -725,7 +725,7 @@ fn form_minimal_tuple_with_nulls_sets_bitmap() {
     let isnull = vec![false, true, false];
 
     let mt = crate::heap_form_minimal_tuple(mcx, &td, &values, &isnull, 0).expect("form_minimal");
-    assert_ne!(mt.tuple.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
+    assert_ne!(mt.tuple.t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL, 0);
     // BITMAPLEN(3) == 1 byte; bit0 & bit2 set, bit1 clear.
     assert_eq!(mt.tuple.t_bits.len(), 1);
     assert_eq!(mt.tuple.t_bits[0] & 0b0000_0001, 0b0000_0001);
@@ -738,7 +738,7 @@ fn form_minimal_tuple_too_many_columns_errors() {
     let ctx = MemoryContext::new("test");
     let mcx = ctx.mcx();
     let td = TupleDescData {
-        natts: types_tuple::heaptuple::MaxTupleAttributeNumber + 1,
+        natts: ::types_tuple::heaptuple::MaxTupleAttributeNumber + 1,
         tdtypeid: 2249,
         tdtypmod: -1,
         tdrefcount: -1,
@@ -750,8 +750,8 @@ fn form_minimal_tuple_too_many_columns_errors() {
     assert_eq!(
         err,
         crate::HeapTupleError::TooManyColumns {
-            columns: types_tuple::heaptuple::MaxTupleAttributeNumber + 1,
-            limit: types_tuple::heaptuple::MaxTupleAttributeNumber,
+            columns: ::types_tuple::heaptuple::MaxTupleAttributeNumber + 1,
+            limit: ::types_tuple::heaptuple::MaxTupleAttributeNumber,
         }
     );
 }
@@ -780,7 +780,7 @@ fn attisnull_reports_null_and_present() {
     // System columns are never null.
     assert!(!crate::heap_attisnull(
         &formed.tuple,
-        types_tuple::heaptuple::TableOidAttributeNumber as i32,
+        ::types_tuple::heaptuple::TableOidAttributeNumber as i32,
         Some(&td)
     ));
 }
@@ -806,12 +806,12 @@ fn getsysattr_tableoid_and_ctid() {
     let mcx = ctx.mcx();
     let mut formed = formed_three_ints(mcx, 1, 2, 3);
     formed.tuple.t_tableOid = 1259;
-    formed.tuple.t_self = types_tuple::heaptuple::ItemPointerData::new(5, 9);
+    formed.tuple.t_self = ::types_tuple::heaptuple::ItemPointerData::new(5, 9);
 
     let (val, isnull) = crate::heap_getsysattr(
         mcx,
         &formed.tuple,
-        types_tuple::heaptuple::TableOidAttributeNumber as i32,
+        ::types_tuple::heaptuple::TableOidAttributeNumber as i32,
     )
     .expect("getsysattr");
     assert!(!isnull);
@@ -820,7 +820,7 @@ fn getsysattr_tableoid_and_ctid() {
     let (ctid, isnull2) = crate::heap_getsysattr(
         mcx,
         &formed.tuple,
-        types_tuple::heaptuple::SelfItemPointerAttributeNumber as i32,
+        ::types_tuple::heaptuple::SelfItemPointerAttributeNumber as i32,
     )
     .expect("getsysattr");
     assert!(!isnull2);
@@ -863,8 +863,8 @@ fn heap_expand_tuple_appends_nulls_for_absent_attrs() {
     let expanded = crate::heap_expand_tuple(mcx, &src, &td).unwrap();
 
     let hdr = expanded.tuple.t_data.as_ref().unwrap();
-    assert_ne!(hdr.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
-    assert_eq!(types_tuple::heaptuple::HeapTupleHeaderGetNatts(hdr), 3);
+    assert_ne!(hdr.t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL, 0);
+    assert_eq!(::types_tuple::heaptuple::HeapTupleHeaderGetNatts(hdr), 3);
 
     let cols = heap_deform_tuple(mcx, &expanded.tuple, &td, &expanded.data).expect("deform");
     assert_eq!(cols[0], (Datum::from_i32(42), false));
@@ -878,7 +878,7 @@ fn heap_expand_tuple_appends_nulls_for_absent_attrs() {
 fn tupdesc_with_missing<'mcx>(
     mcx: Mcx<'mcx>,
     attrs: &[CompactAttribute],
-    missing: &[types_tuple::heaptuple::AttrMissing<'mcx>],
+    missing: &[::types_tuple::heaptuple::AttrMissing<'mcx>],
 ) -> TupleDescData<'mcx> {
     let mut td = tupdesc(mcx, attrs);
     for (i, m) in missing.iter().enumerate() {
@@ -886,14 +886,14 @@ fn tupdesc_with_missing<'mcx>(
             td.compact_attrs[i].atthasmissing = true;
         }
     }
-    let mut miss_vec = mcx::vec_with_capacity_in(mcx, missing.len()).unwrap();
+    let mut miss_vec = ::mcx::vec_with_capacity_in(mcx, missing.len()).unwrap();
     for m in missing {
         miss_vec.push(m.clone_in(mcx).unwrap());
     }
     td.constr = Some(
-        mcx::alloc_in(
+        ::mcx::alloc_in(
             mcx,
-            types_tuple::heaptuple::TupleConstr {
+            ::types_tuple::heaptuple::TupleConstr {
                 defval: PgVec::new_in(mcx),
                 check: PgVec::new_in(mcx),
                 missing: miss_vec,
@@ -925,11 +925,11 @@ fn deform_returns_byref_missing_value() {
 
     let default_vl = varlena_4b(b"fallback");
     let missing = [
-        types_tuple::heaptuple::AttrMissing {
+        ::types_tuple::heaptuple::AttrMissing {
             am_present: false,
             am_value: Datum::null(),
         },
-        types_tuple::heaptuple::AttrMissing {
+        ::types_tuple::heaptuple::AttrMissing {
             am_present: true,
             am_value: byref(mcx, &default_vl),
         },
@@ -966,11 +966,11 @@ fn expand_tuple_fills_byref_missing_value() {
 
     let default_vl = varlena_4b(&vec![b'd'; 130]); // not short-packable
     let missing = [
-        types_tuple::heaptuple::AttrMissing {
+        ::types_tuple::heaptuple::AttrMissing {
             am_present: false,
             am_value: Datum::null(),
         },
-        types_tuple::heaptuple::AttrMissing {
+        ::types_tuple::heaptuple::AttrMissing {
             am_present: true,
             am_value: byref(mcx, &default_vl),
         },
@@ -997,8 +997,8 @@ fn minimal_expand_tuple_appends_nulls() {
     .expect("form src");
     let td = tupdesc(mcx, &[byval(4, 4), byval(4, 4)]);
     let mt = crate::minimal_expand_tuple(mcx, &src, &td).unwrap();
-    assert_ne!(mt.tuple.t_infomask & types_tuple::heaptuple::HEAP_HASNULL, 0);
-    assert_eq!(mt.tuple.t_infomask2 & types_tuple::heaptuple::HEAP_NATTS_MASK, 2);
+    assert_ne!(mt.tuple.t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL, 0);
+    assert_eq!(mt.tuple.t_infomask2 & ::types_tuple::heaptuple::HEAP_NATTS_MASK, 2);
 }
 
 #[test]
@@ -1020,7 +1020,7 @@ fn minimal_heap_roundtrip() {
     let mt = crate::minimal_tuple_from_heap_tuple(mcx, &h, 0).expect("to minimal");
     assert_eq!(
         mt.tuple.t_len as usize,
-        h.tuple.t_len as usize - types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET
+        h.tuple.t_len as usize - ::types_tuple::heaptuple::MINIMAL_TUPLE_OFFSET
     );
     assert_eq!(mt.data, h.data);
 
@@ -1064,7 +1064,7 @@ fn copy_tuple_as_datum_sets_composite_header() {
 
     let d = crate::heap_copy_tuple_as_datum(mcx, &h, &td).unwrap();
     match &d.tuple.t_data.as_ref().unwrap().t_choice {
-        types_tuple::heaptuple::HeapTupleHeaderChoice::TDatum(f) => {
+        ::types_tuple::heaptuple::HeapTupleHeaderChoice::TDatum(f) => {
             assert_eq!(f.datum_len_, h.tuple.t_len as i32);
             assert_eq!(f.datum_typeid, td.tdtypeid);
             assert_eq!(f.datum_typmod, td.tdtypmod);
@@ -1096,8 +1096,8 @@ fn form_tuple_accounting_is_exact() {
 
     // The formed tuple's pieces: the HeapTupleData box, the header box, the
     // null bitmap's bytes, and the data area — every requested byte charged.
-    let expected = core::mem::size_of::<types_tuple::heaptuple::HeapTupleData>()
-        + core::mem::size_of::<types_tuple::heaptuple::HeapTupleHeaderData>()
+    let expected = core::mem::size_of::<::types_tuple::heaptuple::HeapTupleData>()
+        + core::mem::size_of::<::types_tuple::heaptuple::HeapTupleHeaderData>()
         + formed.tuple.t_data.as_ref().unwrap().t_bits.capacity()
         + formed.data.capacity();
     assert_eq!(ctx.used(), expected, "bytes charged match the allocation");
@@ -1149,7 +1149,7 @@ mod flat_codec {
     };
     use crate::Datum;
     use alloc::vec;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     /// form -> flat -> deform identity over byval + varlena + NULL columns.
     #[test]

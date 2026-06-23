@@ -5,11 +5,11 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::lock::LOCKMODE;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
     /// `table_open(relationId, lockmode)` (table.c): open+lock a table by OID.

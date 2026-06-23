@@ -48,14 +48,14 @@ use init_small_seams as init_small_seams;
 
 use lwlock::{LWLockAcquireMain, MainLWLockGuard};
 use utils_error::{ereport, PgError, PgResult};
-use types_error::ErrorLocation;
+use ::types_error::ErrorLocation;
 
 use mcx::{Mcx, MemoryContext};
 
-use types_core::catalog::{FirstGenbkiObjectId, FirstNormalObjectId, FirstUnpinnedObjectId};
-use types_core::init::BackendType;
-use types_core::primitive::{Oid, Size, TransactionId};
-use types_core::xact::{
+use ::types_core::catalog::{FirstGenbkiObjectId, FirstNormalObjectId, FirstUnpinnedObjectId};
+use ::types_core::init::BackendType;
+use ::types_core::primitive::{Oid, Size, TransactionId};
+use ::types_core::xact::{
     BootstrapTransactionId, FirstNormalFullTransactionId, FirstNormalTransactionId,
     FullTransactionId, InvalidTransactionId, MaxTransactionId, TransamVariablesData,
 };

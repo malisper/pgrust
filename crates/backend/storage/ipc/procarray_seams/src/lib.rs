@@ -7,14 +7,14 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::{FullTransactionId, Oid, ProcNumber, TransactionId, XLogRecPtr};
-use types_error::PgResult;
-use snapshot::SnapshotData;
+use ::types_error::PgResult;
+use ::snapshot::SnapshotData;
 use types_storage::{
 
     ProcSignalReason, RunningTransactionLocksHeld, RunningTransactionsData, VirtualTransactionId,
 
 };
-use types_vacuum::vacuumlazy::GlobalVisStateHandle;
+use ::types_vacuum::vacuumlazy::GlobalVisStateHandle;
 
 seam_core::seam!(
     /// `GetSnapshotData(snapshot)` (procarray.c) — fill an MVCC snapshot's
@@ -199,7 +199,7 @@ seam_core::seam!(
     /// enough (below the `GlobalVisState` horizon) that a tuple deleted by it can
     /// be removed? Used by the VACUUM / NonVacuumable visibility predicates.
     pub fn global_vis_test_is_removable_xid(
-        state: snapshot::snapshot::GlobalVisStateHandle,
+        state: ::snapshot::snapshot::GlobalVisStateHandle,
         xid: TransactionId,
     ) -> PgResult<bool>
 );
@@ -375,7 +375,7 @@ seam_core::seam!(
     /// `CountDBConnections(databaseid)` (procarray.c): the number of backends
     /// currently connected to `databaseid`. `Err` carries its `ereport`
     /// surface.
-    pub fn count_db_connections(databaseid: types_core::Oid) -> types_error::PgResult<i32>
+    pub fn count_db_connections(databaseid: ::types_core::Oid) -> ::types_error::PgResult<i32>
 );
 
 seam_core::seam!(
@@ -389,14 +389,14 @@ seam_core::seam!(
     /// `ProcArrayShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn proc_array_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn proc_array_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
     /// `ProcArrayShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
     /// this subsystem's shared-memory structures. `Err` carries the C
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn proc_array_shmem_init() -> types_error::PgResult<()>
+    pub fn proc_array_shmem_init() -> ::types_error::PgResult<()>
 );
 
 // --- backend-storage-ipc-signalfuncs consumer (signalfuncs.c) ---

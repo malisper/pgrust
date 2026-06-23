@@ -47,20 +47,20 @@ use alloc::boxed::Box;
 
 use mcx::{Mcx, MemoryContext};
 use types_core::{InvalidOid, Oid};
-use datum::Datum as BareDatum;
+use ::datum::Datum as BareDatum;
 use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED};
-use fmgr::boundary::RefPayload;
-use fmgr::FunctionCallInfoBaseData;
+use ::fmgr::boundary::RefPayload;
+use ::fmgr::FunctionCallInfoBaseData;
 use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use ::nodes::nodes::{CmdType, Node, NodePtr};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::parsestmt::RawStmt;
 use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
-use types_tuple::heaptuple::Datum as CanonDatum;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::Datum as CanonDatum;
+use ::types_tuple::heaptuple::TupleDescData;
 use ::nodes::tuptable::SlotData;
-use types_dest::CommandDest;
-use types_scan::sdir::ForwardScanDirection;
+use ::types_dest::CommandDest;
+use ::types_scan::sdir::ForwardScanDirection;
 
 use execMain as execMain;
 use planner_seams as planner_seams;
@@ -93,11 +93,11 @@ const CMD_UTILITY: ::nodes::nodes::CmdType = ::nodes::nodes::CmdType::CMD_UTILIT
 /// already-analyzed, so it needs no per-statement analysis.
 enum BodyQueries<'mcx> {
     /// `prosqlbody`: the queries are already parse-analyzed.
-    Analyzed(mcx::PgVec<'mcx, Query<'mcx>>),
+    Analyzed(::mcx::PgVec<'mcx, Query<'mcx>>),
     /// Text `prosrc`: raw parse trees to be analyzed lazily, one before each
     /// runs, with `sql_fn_parser_setup`/`pinfo` installed.
     Raw {
-        stmts: mcx::PgVec<'mcx, RawStmt<'mcx>>,
+        stmts: ::mcx::PgVec<'mcx, RawStmt<'mcx>>,
         prosrc_mcx: &'mcx str,
         pinfo: ::nodes::parsestmt::SqlFnParseInfo,
     },
@@ -119,7 +119,7 @@ impl<'mcx> BodyQueries<'mcx> {
 /// applied lazily to the final body query when it's analyzed.
 struct RetvalCheck<'mcx> {
     rettype: Oid,
-    rettupdesc: Option<mcx::PgBox<'mcx, TupleDescData<'mcx>>>,
+    rettupdesc: Option<::mcx::PgBox<'mcx, TupleDescData<'mcx>>>,
     prokind: u8,
 }
 
@@ -473,7 +473,7 @@ fn fmgr_sql<'mcx>(
     // "set-valued function called in context that cannot accept a set" error.
     let set_returning = form.proretset
         || fcinfo.flinfo.as_ref().is_some_and(|f| f.fn_retset);
-    if set_returning && !fmgr::mat_srf::is_active() {
+    if set_returning && !::fmgr::mat_srf::is_active() {
         return Err(PgError::error(
             "set-valued function called in context that cannot accept a set",
         )
@@ -567,7 +567,7 @@ fn fmgr_sql<'mcx>(
         .err()
         .unwrap_or_else(|| {
             PgError::error("return type mismatch in function")
-                .with_sqlstate(types_error::ERRCODE_INVALID_FUNCTION_DEFINITION)
+                .with_sqlstate(::types_error::ERRCODE_INVALID_FUNCTION_DEFINITION)
         })
         .add_context(sql_startup_context(&form.proname)));
     }
@@ -614,7 +614,7 @@ fn fmgr_sql<'mcx>(
         // The whole result set was delivered to the sink; the scalar return is
         // the NULL word (C: `fcinfo->isnull = true; return (Datum) 0;` in
         // materialize mode).
-        fmgr::mat_srf::with_top(|sink| {
+        ::fmgr::mat_srf::with_top(|sink| {
             if let Some(sink) = sink {
                 sink.materialized = true;
             }
@@ -712,7 +712,7 @@ fn resolve_call_result_type<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     rettype: Oid,
-) -> PgResult<(Oid, Option<mcx::PgBox<'mcx, TupleDescData<'mcx>>>)> {
+) -> PgResult<(Oid, Option<::mcx::PgBox<'mcx, TupleDescData<'mcx>>>)> {
     let fn_expr_node = fn_expr_call_node(mcx, fcinfo)?;
     let Some(node) = fn_expr_node else {
         return Ok((rettype, None));
@@ -729,12 +729,12 @@ fn resolve_call_result_type<'mcx>(
     // coerces the body's output columns to the declared coldeflist types (e.g.
     // int -> numeric(4,2)) instead of leaving them un-coerced.
     if resolved.result_tuple_desc.is_none() {
-        let cols = fmgr::mat_srf::with_top(|sink| {
+        let cols = ::fmgr::mat_srf::with_top(|sink| {
             sink.map(|s| s.expected_desc_cols.clone()).unwrap_or_default()
         });
         if !cols.is_empty() {
             let td = tupdesc::CreateTemplateTupleDesc(mcx, cols.len() as i32)?;
-            let mut td = mcx::alloc_in(mcx, td)?;
+            let mut td = ::mcx::alloc_in(mcx, td)?;
             for (i, col) in cols.iter().enumerate() {
                 tupdesc::TupleDescInitEntry(
                     &mut td,
@@ -773,8 +773,8 @@ fn fn_expr_call_node<'mcx>(
         return Ok(None);
     };
     match fn_expr.as_ref() {
-        fmgr::FnExpr::ByteaConst(_) => Ok(None),
-        fmgr::FnExpr::External(ext) => {
+        ::fmgr::FnExpr::ByteaConst(_) => Ok(None),
+        ::fmgr::FnExpr::External(ext) => {
             match ext
                 .node
                 .as_ref()
@@ -796,8 +796,8 @@ fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, argnum: i32) -> PgResult<O
     };
     match fn_expr.as_ref() {
         // The opclass-options ByteaConst is not a call expression.
-        fmgr::FnExpr::ByteaConst(_) => Ok(InvalidOid),
-        fmgr::FnExpr::External(ext) => {
+        ::fmgr::FnExpr::ByteaConst(_) => Ok(InvalidOid),
+        ::fmgr::FnExpr::External(ext) => {
             match ext
                 .node
                 .as_ref()
@@ -823,7 +823,7 @@ fn resolve_sql_fn_argtypes(
             // field-bearing call `Expr` off the frame's stamped `fn_expr` and
             // read the actual declared type of argument `argnum`.
             let actual = fn_expr_argtype(fcinfo, argnum as i32)?;
-            if !types_core::OidIsValid(actual) {
+            if !::types_core::OidIsValid(actual) {
                 return Err(PgError::error(format!(
                     "could not determine actual type of argument declared {}",
                     format_type_seams::format_type_be_owned::call(*slot)?
@@ -907,10 +907,10 @@ fn ref_payload_to_canon(refp: &RefPayload) -> PgResult<CanonDatum<'static>> {
         return Ok(CanonDatum::Cstring(alloc::string::String::from(s)));
     }
     if let Some(bytes) = refp.as_varlena() {
-        return Ok(CanonDatum::ByRef(mcx::slice_in(param_static_mcx(), bytes)?));
+        return Ok(CanonDatum::ByRef(::mcx::slice_in(param_static_mcx(), bytes)?));
     }
     if let Some(bytes) = refp.as_composite() {
-        return Ok(CanonDatum::ByRef(mcx::slice_in(param_static_mcx(), bytes)?));
+        return Ok(CanonDatum::ByRef(::mcx::slice_in(param_static_mcx(), bytes)?));
     }
     Err(PgError::error(
         "fmgr_sql: SQL-function argument is an Expanded/Internal by-reference value \
@@ -932,8 +932,8 @@ fn parse_body_queries<'mcx>(
     prosrc: &str,
     prosqlbody: Option<&str>,
     pinfo: &::nodes::parsestmt::SqlFnParseInfo,
-) -> PgResult<mcx::PgVec<'mcx, Query<'mcx>>> {
-    let mut out: mcx::PgVec<'mcx, Query<'mcx>> = mcx::PgVec::new_in(mcx);
+) -> PgResult<::mcx::PgVec<'mcx, Query<'mcx>>> {
+    let mut out: ::mcx::PgVec<'mcx, Query<'mcx>> = ::mcx::PgVec::new_in(mcx);
 
     if let Some(body) = prosqlbody {
         // n = stringToNode(prosqlbody): a List of (List of Query) or a bare Query.
@@ -942,8 +942,8 @@ fn parse_body_queries<'mcx>(
     } else {
         // raw_parser borrows its source for 'mcx; re-home prosrc into the arena.
         let prosrc_mcx: &'mcx str = {
-            let boxed = mcx::alloc_in(mcx, mcx::PgString::from_str_in(prosrc, mcx)?)?;
-            mcx::leak_in(boxed).as_str()
+            let boxed = ::mcx::alloc_in(mcx, ::mcx::PgString::from_str_in(prosrc, mcx)?)?;
+            ::mcx::leak_in(boxed).as_str()
         };
         let raw_list = driver::raw_parser(
             mcx,
@@ -981,14 +981,14 @@ fn build_body_queries<'mcx>(
 ) -> PgResult<BodyQueries<'mcx>> {
     if let Some(body) = prosqlbody {
         let n = nodes_core::read::string_to_node(mcx, body)?;
-        let mut out: mcx::PgVec<'mcx, Query<'mcx>> = mcx::PgVec::new_in(mcx);
+        let mut out: ::mcx::PgVec<'mcx, Query<'mcx>> = ::mcx::PgVec::new_in(mcx);
         collect_body_queries(mcx, &n, &mut out)?;
         Ok(BodyQueries::Analyzed(out))
     } else {
         // raw_parser borrows its source for 'mcx; re-home prosrc into the arena.
         let prosrc_mcx: &'mcx str = {
-            let boxed = mcx::alloc_in(mcx, mcx::PgString::from_str_in(prosrc, mcx)?)?;
-            mcx::leak_in(boxed).as_str()
+            let boxed = ::mcx::alloc_in(mcx, ::mcx::PgString::from_str_in(prosrc, mcx)?)?;
+            ::mcx::leak_in(boxed).as_str()
         };
         let stmts = driver::raw_parser(
             mcx,
@@ -1036,7 +1036,7 @@ fn prepare_sql_fn_parse_info(
 fn collect_body_queries<'mcx>(
     mcx: Mcx<'mcx>,
     n: &Node<'mcx>,
-    out: &mut mcx::PgVec<'mcx, Query<'mcx>>,
+    out: &mut ::mcx::PgVec<'mcx, Query<'mcx>>,
 ) -> PgResult<()> {
     if let Some(outer) = n.as_list() {
         let Some(first) = outer.first() else {
@@ -1063,7 +1063,7 @@ fn collect_body_queries<'mcx>(
 fn push_query_list<'mcx>(
     mcx: Mcx<'mcx>,
     list: &[NodePtr<'mcx>],
-    out: &mut mcx::PgVec<'mcx, Query<'mcx>>,
+    out: &mut ::mcx::PgVec<'mcx, Query<'mcx>>,
 ) -> PgResult<()> {
     for p in list {
         let q = p
@@ -1125,8 +1125,8 @@ fn check_sql_function_body(mcx: Mcx<'_>, funcoid: Oid) -> PgResult<()> {
         // check; for the prosrc text we raw_parser it.
         if prosqlbody.as_ref().is_none() {
             let prosrc_mcx: &str = {
-                let boxed = mcx::alloc_in(mcx, mcx::PgString::from_str_in(prosrc.as_str(), mcx)?)?;
-                mcx::leak_in(boxed).as_str()
+                let boxed = ::mcx::alloc_in(mcx, ::mcx::PgString::from_str_in(prosrc.as_str(), mcx)?)?;
+                ::mcx::leak_in(boxed).as_str()
             };
             let _ = driver::raw_parser(
                 mcx,
@@ -1325,7 +1325,7 @@ fn prepare_body_statement<'mcx>(
     qi: usize,
     is_last: bool,
     fname: &str,
-) -> PgResult<(mcx::PgVec<'mcx, Query<'mcx>>, Option<bool>)> {
+) -> PgResult<(::mcx::PgVec<'mcx, Query<'mcx>>, Option<bool>)> {
     // Obtain the analyzed Query for body statement `qi`.
     let mut analyzed: Query<'mcx> = match body {
         BodyQueries::Analyzed(queries) => queries[qi].clone_in(mcx)?,
@@ -1523,13 +1523,13 @@ fn accum_receive<'mcx>(mcx: Mcx<'mcx>, _state: u64, slot: &mut SlotData<'mcx>) -
         .as_ref()
         .map(|d| d.natts.max(0))
         .unwrap_or(0);
-    let mut row: alloc::vec::Vec<fmgr::mat_srf::MatCell> =
+    let mut row: alloc::vec::Vec<::fmgr::mat_srf::MatCell> =
         alloc::vec::Vec::with_capacity(natts as usize);
     for attnum in 1..=natts {
         let (value, isnull) =
             execTuples::slot_deform::slot_getattr(mcx, slot, attnum as i16)?;
         let cell = canon_to_capture(&value, isnull)?;
-        row.push(fmgr::mat_srf::MatCell {
+        row.push(::fmgr::mat_srf::MatCell {
             value: cell.value,
             ref_payload: cell.ref_payload,
             isnull: cell.isnull,
@@ -1543,7 +1543,7 @@ fn accum_receive<'mcx>(mcx: Mcx<'mcx>, _state: u64, slot: &mut SlotData<'mcx>) -
     // junkfilter result descriptor (and `tuplestore_donestoring` blesses the
     // RECORD typmod downstream). Done once (the descriptor is constant across
     // rows).
-    let desc_cols: Option<alloc::vec::Vec<fmgr::mat_srf::MatDescCol>> = slot
+    let desc_cols: Option<alloc::vec::Vec<::fmgr::mat_srf::MatDescCol>> = slot
         .base()
         .tts_tupleDescriptor
         .as_ref()
@@ -1551,7 +1551,7 @@ fn accum_receive<'mcx>(mcx: Mcx<'mcx>, _state: u64, slot: &mut SlotData<'mcx>) -
             (0..d.natts.max(0) as usize)
                 .map(|i| {
                     let a = &d.attrs[i];
-                    fmgr::mat_srf::MatDescCol {
+                    ::fmgr::mat_srf::MatDescCol {
                         name: alloc::string::String::from_utf8_lossy(a.attname.name_str())
                             .into_owned(),
                         typid: a.atttypid,
@@ -1561,7 +1561,7 @@ fn accum_receive<'mcx>(mcx: Mcx<'mcx>, _state: u64, slot: &mut SlotData<'mcx>) -
                 })
                 .collect()
         });
-    fmgr::mat_srf::with_top(|sink| {
+    ::fmgr::mat_srf::with_top(|sink| {
         if let Some(sink) = sink {
             if sink.set_desc_cols.is_empty() {
                 if let Some(cols) = desc_cols {

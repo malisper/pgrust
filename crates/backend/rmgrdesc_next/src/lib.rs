@@ -33,9 +33,9 @@ pub use nbtdesc::{btree_desc, btree_identify};
 pub use spgdesc::{spg_desc, spg_identify};
 pub use standbydesc::{standby_desc, standby_desc_invalidations, standby_identify};
 
-use mcx::PgString;
+use ::mcx::PgString;
 use types_error::{PgError, PgResult};
-use wal::rmgr::XLogReaderState;
+use ::wal::rmgr::XLogReaderState;
 
 /// Install all seams owned by this crate. Called once at startup from
 /// `init::init_all()`.
@@ -56,34 +56,34 @@ pub fn init_seams() {
     // The C rm_desc callbacks access the record via state->record, so we
     // unwrap the Option<DecodedXLogRecord> field (None is a programming error
     // equivalent to a NULL-deref in C).
-    fn brin_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn brin_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         brindesc::brin_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
-    fn gin_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn gin_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         gindesc::gin_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
-    fn gist_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn gist_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         gistdesc::gist_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
-    fn hash_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn hash_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         hashdesc::hash_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
-    fn heap_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn heap_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         heapdesc::heap_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
-    fn heap2_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn heap2_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         heapdesc::heap2_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
-    fn multixact_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn multixact_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         mxactdesc::multixact_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
-    fn btree_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn btree_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         nbtdesc::btree_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
-    fn spg_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn spg_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         spgdesc::spg_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
-    fn standby_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> types_error::PgResult<()> {
+    fn standby_desc_shim(buf: &mut PgString<'_>, state: &XLogReaderState<'_>) -> ::types_error::PgResult<()> {
         standbydesc::standby_desc(buf, state.record.as_ref().expect("rm_desc: state->record is NULL"))
     }
 

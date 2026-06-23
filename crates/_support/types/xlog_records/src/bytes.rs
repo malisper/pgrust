@@ -1,8 +1,8 @@
 //! Native-endian field reads for record-body decoding, panicking where the C
 //! cast would read past the record.
 
-use types_core::FullTransactionId;
-use types_storage::RelFileLocator;
+use ::types_core::FullTransactionId;
+use ::types_storage::RelFileLocator;
 use types_tuple::{BlockIdData, ItemPointerData};
 
 pub(crate) const SHORT_RECORD: &str = "WAL record data shorter than the C struct it must hold";

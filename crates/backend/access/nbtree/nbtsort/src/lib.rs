@@ -61,7 +61,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Size, BLCKSZ};
+use ::types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Size, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_nbtree::{
     BTMetaPageData, BTPageOpaqueData, BTScanInsert, BTMaxItemSize, BTP_LEAF, BTP_META, BTP_ROOT,
@@ -70,8 +70,8 @@ use types_nbtree::{
     P_NONE,
 };
 use ::nodes::Tuplesortstate;
-use rel::Relation;
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_tuple::heaptuple::{
     IndexTupleData, IndexTupleSize, ItemPointerData, INDEX_SIZE_MASK, INVALID_OFFSET_NUMBER,
 };
 
@@ -83,8 +83,8 @@ use page::{
 use build_seams as buildhelp;
 use nbtree_core_seams as nbtcore;
 use bulkwrite_seams as bulk;
-use bulkwrite_seams::BulkWriteState;
-use activity_small::backend_progress::pgstat_progress_update_param;
+use ::bulkwrite_seams::BulkWriteState;
+use ::activity_small::backend_progress::pgstat_progress_update_param;
 use tuplesort_seams as tuplesort;
 
 pub mod deferred;

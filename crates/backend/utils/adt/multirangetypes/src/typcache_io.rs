@@ -6,16 +6,16 @@
 //! `multirange_out`/`send` do the reverse. Owns the inward seams
 //! `multirange_get_typcache` and `datum_get_multirange_type_p`.
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::Oid;
-use datum::datum::Datum;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::Oid;
+use ::datum::datum::Datum;
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
-use types_error::error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNDEFINED_FUNCTION};
+use ::types_error::error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNDEFINED_FUNCTION};
 use types_rangetypes::{MultirangeType, MultirangeTypeP, RANGE_EMPTY, RANGE_EMPTY_LITERAL};
 
-use detoast::pg_detoast_datum;
+use ::detoast::pg_detoast_datum;
 use format_type_seams as format_type_seams;
 use lsyscache_seams as lsyscache_seams;
 use typcache_seams as typcache_seams;
@@ -41,7 +41,7 @@ pub struct MultirangeIOData {
 
 /// `IOFuncSelector` (fmgr.h): which I/O direction `get_multirange_io_data`
 /// resolves a proc for. Canonical definition in `types-core::fmgr`.
-pub use types_core::fmgr::IOFuncSelector;
+pub use ::types_core::fmgr::IOFuncSelector;
 
 /// `MultirangeParseState` (multirangetypes.c:56): the `multirange_in` parser's
 /// state machine.
@@ -134,7 +134,7 @@ pub fn get_multirange_io_data(
         // `format_type_be` needs a context for the palloc'd name; a transient
         // context suffices and is dropped with this builder.
         let rngtype_oid = rngtype.type_id;
-        let cx = mcx::MemoryContext::new("get_multirange_io_data error");
+        let cx = ::mcx::MemoryContext::new("get_multirange_io_data error");
         let name = match format_type_seams::format_type_be::call(cx.mcx(), rngtype_oid) {
             Ok(s) => s.as_str().to_string(),
             Err(_) => rngtype_oid.to_string(),
@@ -254,7 +254,7 @@ unsafe fn varsize_any(ptr: *const u8) -> usize {
     } else {
         // 4-byte header: VARSIZE_4B reads the native-order length word and masks
         // off the two kind/tag bits (their position differs by endianness, as in
-        // `datum::varlena`).
+        // `::datum::varlena`).
         let w = (ptr as *const u32).read_unaligned();
         #[cfg(target_endian = "big")]
         let len = w & 0x3FFF_FFFF;
@@ -300,7 +300,7 @@ pub fn multirange_in<'mcx>(
         .as_deref()
         .expect("get_multirange_io_data guarantees rngtype");
 
-    let mut ranges: Vec<types_rangetypes::RangeTypeP<'mcx>> = Vec::with_capacity(8);
+    let mut ranges: Vec<::types_rangetypes::RangeTypeP<'mcx>> = Vec::with_capacity(8);
     let mut ranges_seen: i32 = 0;
 
     let malformed = |detail: &str| {
@@ -515,7 +515,7 @@ pub fn multirange_recv<'mcx>(
 
     // range_count = pq_getmsgint(buf, 4);
     let range_count = pq_getmsgint32(buf)?;
-    let mut ranges: Vec<types_rangetypes::RangeTypeP<'mcx>> =
+    let mut ranges: Vec<::types_rangetypes::RangeTypeP<'mcx>> =
         Vec::with_capacity(range_count as usize);
 
     for _ in 0..range_count {

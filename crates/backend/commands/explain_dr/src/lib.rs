@@ -21,7 +21,7 @@
 //! sent; we only count `buf.len()` into `metrics.bytesSent`.
 //!
 //! The per-column descriptor (`TupleDesc`) is the reused owned
-//! [`types_tuple::heaptuple::TupleDescData`], passed by reference, so
+//! [`::types_tuple::heaptuple::TupleDescData`], passed by reference, so
 //! `TupleDescAttr` / `natts` / `atttypid` are pure in-process reads done here.
 //! C's `myState->attrinfo != typeinfo` identity check compares the descriptor
 //! *pointer*; the owned model records the borrowed descriptor's address as an
@@ -55,15 +55,15 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use mcx::Mcx;
-use types_core::fmgr::FmgrInfo;
-use types_core::instrument::{instr_time, BufferUsage};
-use types_dest::dest::CommandDest;
+use ::mcx::Mcx;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::instrument::{instr_time, BufferUsage};
+use ::types_dest::dest::CommandDest;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_explain::{ExplainSerializeOption, ExplainState};
 use ::nodes::tuptable::SlotData;
-use stringinfo::StringInfo;
-use types_tuple::heaptuple::TupleDescData;
+use ::stringinfo::StringInfo;
+use ::types_tuple::heaptuple::TupleDescData;
 
 use execTuples_seams as exectuples_s;
 use lsyscache_seams as lsyscache_s;

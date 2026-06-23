@@ -19,7 +19,7 @@
 //! 1:1 in-crate.
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::primitive::{BlockNumber, OffsetNumber, RmgrId, Size, BLCKSZ};
+use ::types_core::primitive::{BlockNumber, OffsetNumber, RmgrId, Size, BLCKSZ};
 use types_error::{PgError, PgResult};
 use types_nbtree::{
     BTDedupInterval, BTPageOpaqueData, BTMaxItemSize, BTREE_SINGLEVAL_FILLFACTOR, BTP_HAS_GARBAGE,
@@ -27,12 +27,12 @@ use types_nbtree::{
     MaxTIDsPerBTreePage, P_NONE, SizeOfBtreeDedup, TmIndexDelete, TmIndexDeleteOp, TmIndexStatus,
     XLOG_BTREE_DEDUP,
 };
-use rel::Relation;
-use types_storage::storage::Buffer;
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_storage::storage::Buffer;
+use ::types_tuple::heaptuple::{
     BlockIdData, IndexTupleData, IndexTupleSize, ItemPointerData, INDEX_SIZE_MASK,
 };
-use wal::xloginsert::REGBUF_STANDARD;
+use ::wal::xloginsert::REGBUF_STANDARD;
 
 use page::{
     ItemIdGetLength, ItemIdIsDead, ItemPointerCompare, ItemPointerCopy, ItemPointerGetBlockNumber,

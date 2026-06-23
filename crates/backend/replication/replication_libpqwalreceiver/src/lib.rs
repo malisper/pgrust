@@ -30,7 +30,7 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::result_large_err)]
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     make_sqlstate, ErrorLocation, PgError, PgResult, SqlState, ERROR, ERRCODE_CONNECTION_FAILURE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROTOCOL_VIOLATION,
@@ -79,7 +79,7 @@ pub enum CRSSnapshotAction {
 }
 
 /// `WalRcvExecStatus` (replication/walreceiver.h).  Mirrors
-/// [`types_walreceiver::WalRcvExecStatus`]; kept locally too for the owned
+/// [`::types_walreceiver::WalRcvExecStatus`]; kept locally too for the owned
 /// [`WalRcvExecResult`] struct.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WalRcvExecStatus {
@@ -92,9 +92,9 @@ pub enum WalRcvExecStatus {
 }
 
 impl WalRcvExecStatus {
-    /// Project onto the seam-boundary [`types_walreceiver::WalRcvExecStatus`].
-    pub fn to_types(self) -> types_walreceiver::WalRcvExecStatus {
-        use types_walreceiver::WalRcvExecStatus as T;
+    /// Project onto the seam-boundary [`::types_walreceiver::WalRcvExecStatus`].
+    pub fn to_types(self) -> ::types_walreceiver::WalRcvExecStatus {
+        use ::types_walreceiver::WalRcvExecStatus as T;
         match self {
             WalRcvExecStatus::WALRCV_ERROR => T::WALRCV_ERROR,
             WalRcvExecStatus::WALRCV_OK_COMMAND => T::WALRCV_OK_COMMAND,
@@ -141,7 +141,7 @@ pub enum WalRcvStreamOptionsProto {
 
 /// `WalRcvStreamOptions` (replication/walreceiver.h) — the full physical/logical
 /// form used internally.  The inward seam carries the physical-only
-/// [`types_walreceiver::WalRcvStreamOptions`]; [`walrcv_table`] adapts it.
+/// [`::types_walreceiver::WalRcvStreamOptions`]; [`walrcv_table`] adapts it.
 #[derive(Clone, Debug)]
 pub struct WalRcvStreamOptions {
     /// `bool logical` — true if logical replication, false if physical.
@@ -156,7 +156,7 @@ pub struct WalRcvStreamOptions {
 
 /// `WalRcvExecResult` (replication/walreceiver.h) — the live, owned result of a
 /// `walrcv_exec` query.  Parked in the result registry; the seam boundary sees
-/// the opaque [`types_walreceiver::WalRcvExecResult`] handle.
+/// the opaque [`::types_walreceiver::WalRcvExecResult`] handle.
 ///
 /// `tuplestore` / `tupledesc` are external handles owned by the tuplestore and
 /// tuple-descriptor subsystems; they are populated through the seam by

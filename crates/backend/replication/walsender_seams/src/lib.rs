@@ -6,8 +6,8 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::{TransactionId, XLogRecPtr};
-use replication::walsender::WalSndState;
+use ::types_core::primitive::{TransactionId, XLogRecPtr};
+use ::replication::walsender::WalSndState;
 
 seam_core::seam!(
     /// `WalSndSetState(state)` (walsender.c) — set this walsender's advertised
@@ -143,7 +143,7 @@ seam_core::seam!(
     /// `WalSndShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn wal_snd_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn wal_snd_shmem_size() -> types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(

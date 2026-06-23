@@ -14,8 +14,8 @@ use alloc::vec::Vec;
 extern crate alloc;
 
 use types_core::{BlockNumber, OffsetNumber};
-use types_error::PgResult;
-use types_vacuum::vacuumlazy::{ReapBlockInfo, TidStore, TidStoreIterHandle};
+use ::types_error::PgResult;
+use ::types_vacuum::vacuumlazy::{ReapBlockInfo, TidStore, TidStoreIterHandle};
 
 // =======================================================================
 // access/tidstore.h — the dead-TID radix-tree store.

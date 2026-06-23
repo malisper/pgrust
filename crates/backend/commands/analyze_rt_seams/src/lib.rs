@@ -21,10 +21,10 @@
 
 extern crate alloc;
 
-use types_core::primitive::{BlockNumber, Oid};
-use types_error::PgResult;
-use rel::Relation;
-use statistics::VacAttrStats;
+use ::types_core::primitive::{BlockNumber, Oid};
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::statistics::VacAttrStats;
 
 seam_core::seam!(
     /// `ComputeExtStatisticsRows(onerel, attr_cnt, vacattrstats)`
@@ -118,7 +118,7 @@ seam_core::seam!(
     /// a call panics until a generic catalog-tuple insert is exposed.
     pub fn catalog_tuple_insert_with_info_pg_statistic<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        sd: &rel::Relation<'mcx>,
+        sd: &::rel::Relation<'mcx>,
         tup: &mut types_tuple::heaptuple::FormedTuple<'mcx>,
         indstate: &mut types_cluster::CatalogIndexState<'mcx>,
     ) -> PgResult<()>
@@ -130,7 +130,7 @@ seam_core::seam!(
     /// Owner exposes only per-catalog typed variants; analyze owns this seam.
     pub fn catalog_tuple_update_with_info_pg_statistic<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        sd: &rel::Relation<'mcx>,
+        sd: &::rel::Relation<'mcx>,
         otid: types_tuple::heaptuple::ItemPointerData,
         tup: &mut types_tuple::heaptuple::FormedTuple<'mcx>,
         indstate: &mut types_cluster::CatalogIndexState<'mcx>,

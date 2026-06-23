@@ -26,33 +26,33 @@ extern crate alloc;
 
 use mcx::{Mcx, PgBox, PgVec};
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_collation::CollationRelationId;
-use types_catalog::pg_type::TypeRelationId;
-use types_core::primitive::{AttrNumber, Oid, OidIsValid};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_collation::CollationRelationId;
+use ::types_catalog::pg_type::TypeRelationId;
+use ::types_core::primitive::{AttrNumber, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_TOO_MANY_COLUMNS, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     NOTICE,
 };
 use ::nodes::ddlnodes::AlterTableCmd;
 use ::nodes::nodes::{ntag, Node, NodePtr};
-use rel::Relation;
-use types_storage::lock::{NoLock, LOCKMODE};
-use types_tuple::access::{
+use ::rel::Relation;
+use ::types_storage::lock::{NoLock, LOCKMODE};
+use ::types_tuple::access::{
     ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_COMPOSITE_TYPE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
-use types_tuple::heaptuple::{MaxHeapAttributeNumber, DEFAULT_COLLATION_OID};
+use ::types_tuple::heaptuple::{MaxHeapAttributeNumber, DEFAULT_COLLATION_OID};
 
-use common_relation::relation_open;
+use ::common_relation::relation_open;
 use dependency_seams as dep_seam;
 use heap::{CheckAttributeType, InsertPgAttributeTuples, CHKATYPE_IS_VIRTUAL};
 use indexing_seams as indexing_seam;
-use pg_inherits::find_inheritance_children;
+use ::pg_inherits::find_inheritance_children;
 use cache_syscache::{SearchSysCacheAttName, SysCacheGetAttrNotNull, ATTNAME};
 
-use heaptuple::FormedTuple;
-use types_catalog::catalog_dependency::DEPENDENCY_NORMAL;
-use types_catalog::pg_attribute::Anum_pg_attribute_attnum;
+use ::heaptuple::FormedTuple;
+use ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL;
+use ::types_catalog::pg_attribute::Anum_pg_attribute_attnum;
 
 use crate::at_phase::{
     ATGetQueueEntry, ATSimplePermissions, AlteredTableInfo, AlterTablePass,
@@ -90,18 +90,18 @@ pub fn ATParseTransformCmd<'mcx>(
     let rangevar = ::nodes::rawnodes::RangeVar {
         catalogname: None,
         schemaname: match nspname {
-            Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
+            Some(s) => Some(::mcx::PgString::from_str_in(s.as_str(), mcx)?),
             None => None,
         },
-        relname: Some(mcx::PgString::from_str_in(&relname, mcx)?),
+        relname: Some(::mcx::PgString::from_str_in(&relname, mcx)?),
         inh: recurse,
         relpersistence: b'p' as i8,
         alias: None,
         location: -1,
     };
-    let relation_node = mcx::alloc_in(mcx, Node::mk_range_var(mcx, rangevar)?)?;
+    let relation_node = ::mcx::alloc_in(mcx, Node::mk_range_var(mcx, rangevar)?)?;
 
-    let cmd_node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd.clone_in(mcx)?)?)?;
+    let cmd_node = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd.clone_in(mcx)?)?)?;
     let mut cmds: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     cmds.push(cmd_node);
 
@@ -111,7 +111,7 @@ pub fn ATParseTransformCmd<'mcx>(
         objtype: ::nodes::parsenodes::OBJECT_TABLE,
         missing_ok: false,
     };
-    let atstmt_node = mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, atstmt)?)?;
+    let atstmt_node = ::mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, atstmt)?)?;
 
     // Transform the AlterTableStmt.
     let query_string = context.query_string.unwrap_or("");
@@ -189,7 +189,7 @@ pub fn ATParseTransformCmd<'mcx>(
             )));
         } else if pass > cur_pass {
             // Queue it up for later.
-            let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd2)?)?;
+            let node = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd2)?)?;
             wqueue[ti].subcmds[pass as usize].push(node);
         } else {
             // At most one subcommand for the current pass — the transformed
@@ -232,8 +232,8 @@ pub fn ATPrepAddColumn<'mcx>(
     // typed table). reloftype read through the syscache projection.
     let reloftype =
         syscache_seams::search_relation_reloftype::call(rel.rd_id)?
-            .unwrap_or(types_core::InvalidOid);
-    if reloftype != types_core::InvalidOid && !recursing {
+            .unwrap_or(::types_core::InvalidOid);
+    if reloftype != ::types_core::InvalidOid && !recursing {
         return Err(utils_error::ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg("cannot add column to typed table".to_string())
@@ -288,8 +288,8 @@ pub fn ATExecAddColumn<'mcx>(
     // attrdesc = table_open(AttributeRelationId, RowExclusiveLock);
     let attrdesc = relation_open(
         mcx,
-        types_catalog::pg_attribute::AttributeRelationId,
-        types_storage::lock::RowExclusiveLock,
+        ::types_catalog::pg_attribute::AttributeRelationId,
+        ::types_storage::lock::RowExclusiveLock,
     )?;
 
     // castNode(ColumnDef, cmd->def). (cmd.def is replaced by the transform.)
@@ -301,7 +301,7 @@ pub fn ATExecAddColumn<'mcx>(
     if col_def.inhcount > 0 {
         // Does child already have a column by this name?
         if let Some(tuple) =
-            cache_syscache::SearchSysCacheCopyAttName(
+            ::cache_syscache::SearchSysCacheCopyAttName(
                 mcx,
                 myrelid,
                 columndef_colname(&col_def),
@@ -311,41 +311,41 @@ pub fn ATExecAddColumn<'mcx>(
                 mcx,
                 ATTNAME,
                 &tuple,
-                types_catalog::pg_attribute::Anum_pg_attribute_atttypid as i32,
+                ::types_catalog::pg_attribute::Anum_pg_attribute_atttypid as i32,
             )?
             .as_oid();
             let childatt_typmod = SysCacheGetAttrNotNull(
                 mcx,
                 ATTNAME,
                 &tuple,
-                types_catalog::pg_attribute::Anum_pg_attribute_atttypmod as i32,
+                ::types_catalog::pg_attribute::Anum_pg_attribute_atttypmod as i32,
             )?
             .as_i32();
             let childatt_collation = SysCacheGetAttrNotNull(
                 mcx,
                 ATTNAME,
                 &tuple,
-                types_catalog::pg_attribute::Anum_pg_attribute_attcollation as i32,
+                ::types_catalog::pg_attribute::Anum_pg_attribute_attcollation as i32,
             )?
             .as_oid();
             let childatt_inhcount = SysCacheGetAttrNotNull(
                 mcx,
                 ATTNAME,
                 &tuple,
-                types_catalog::pg_attribute::Anum_pg_attribute_attinhcount as i32,
+                ::types_catalog::pg_attribute::Anum_pg_attribute_attinhcount as i32,
             )?
             .as_i16();
 
             // Child column must match on type, typmod, and collation.
             let (ctype_id, ctypmod) = {
                 let tn = col_def.typeName.as_ref().ok_or_else(|| {
-                    types_error::PgError::error("ATExecAddColumn: ColumnDef has no type name")
+                    ::types_error::PgError::error("ATExecAddColumn: ColumnDef has no type name")
                 })?;
                 seam::typename_type_id_and_mod::call(mcx, tn)?
             };
             if ctype_id != childatt_typid || ctypmod != childatt_typmod {
                 return Err(utils_error::ereport(ERROR)
-                    .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .errcode(::types_error::ERRCODE_DATATYPE_MISMATCH)
                     .errmsg(format!(
                         "child table \"{}\" has different type for column \"{}\"",
                         rel.name(),
@@ -360,7 +360,7 @@ pub fn ATExecAddColumn<'mcx>(
                 let n1 = n1.as_ref().map(|s| s.as_str()).unwrap_or("(null)");
                 let n2 = n2.as_ref().map(|s| s.as_str()).unwrap_or("(null)");
                 return Err(utils_error::ereport(ERROR)
-                    .errcode(types_error::ERRCODE_COLLATION_MISMATCH)
+                    .errcode(::types_error::ERRCODE_COLLATION_MISMATCH)
                     .errmsg(format!(
                         "child table \"{}\" has different collation for column \"{}\"",
                         rel.name(),
@@ -373,11 +373,11 @@ pub fn ATExecAddColumn<'mcx>(
             // Bump the existing child att's inhcount.
             let new_inhcount = childatt_inhcount.checked_add(1).ok_or_else(|| {
                 utils_error::ereport(ERROR)
-                    .errcode(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                    .errcode(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
                     .errmsg("too many inheritance parents".to_string())
                     .into_error()
             })?;
-            let row = types_catalog::pg_attribute::PgAttributeUpdateRow {
+            let row = ::types_catalog::pg_attribute::PgAttributeUpdateRow {
                 attinhcount: Some(new_inhcount),
                 ..Default::default()
             };
@@ -398,8 +398,8 @@ pub fn ATExecAddColumn<'mcx>(
             transam_xact_seams::command_counter_increment::call()?;
 
             return Ok(ObjectAddress {
-                classId: types_core::InvalidOid,
-                objectId: types_core::InvalidOid,
+                classId: ::types_core::InvalidOid,
+                objectId: ::types_core::InvalidOid,
                 objectSubId: 0,
             });
         }
@@ -409,8 +409,8 @@ pub fn ATExecAddColumn<'mcx>(
     if !check_for_column_name_collision(mcx, rel, columndef_colname(&col_def), if_not_exists)? {
         drop(attrdesc);
         return Ok(ObjectAddress {
-            classId: types_core::InvalidOid,
-            objectId: types_core::InvalidOid,
+            classId: ::types_core::InvalidOid,
+            objectId: ::types_core::InvalidOid,
             objectSubId: 0,
         });
     }
@@ -432,7 +432,7 @@ pub fn ATExecAddColumn<'mcx>(
         && !find_inheritance_children(mcx, myrelid, NoLock)?.is_empty()
     {
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_TABLE_DEFINITION)
+            .errcode(::types_error::ERRCODE_INVALID_TABLE_DEFINITION)
             .errmsg(
                 "cannot recursively add identity column to table that has child tables"
                     .to_string(),
@@ -502,7 +502,7 @@ pub fn ATExecAddColumn<'mcx>(
 
     // Update pg_class tuple: relform->relnatts = newattnum.
     relform.relnatts = newattnum;
-    let pgclass = relation_open(mcx, RelationRelationId, types_storage::lock::RowExclusiveLock)?;
+    let pgclass = relation_open(mcx, RelationRelationId, ::types_storage::lock::RowExclusiveLock)?;
     indexing_seam::catalog_tuple_update_pg_class::call(mcx, &pgclass, reltid, &relform)?;
     drop(pgclass);
 
@@ -523,7 +523,7 @@ pub fn ATExecAddColumn<'mcx>(
         // it to pick up the freshly-inserted attribute before resolving the
         // default's attnum.
         let fresh_rel = relation_open(mcx, myrelid, NoLock)?;
-        let raw_default_ptr = mcx::alloc_in(mcx, raw_default.clone_in(mcx)?)?;
+        let raw_default_ptr = ::mcx::alloc_in(mcx, raw_default.clone_in(mcx)?)?;
         let raw_defaults: [(AttrNumber, NodePtr<'mcx>, i8); 1] =
             [(newattnum, raw_default_ptr, col_def.generated)];
         seam::add_relation_new_constraints::call(
@@ -573,7 +573,7 @@ pub fn ATExecAddColumn<'mcx>(
                     typeId: attribute_typid,
                 },
             );
-            Some(mcx::alloc_in(mcx, nve)?)
+            Some(::mcx::alloc_in(mcx, nve)?)
         } else {
             // defval = build_column_default(rel, attribute->attnum).
             //
@@ -632,12 +632,12 @@ pub fn ATExecAddColumn<'mcx>(
             // if (defval == NULL) /* should not happen */
             //     elog(ERROR, "failed to coerce base type to domain");
             let coerced = coerced.ok_or_else(|| {
-                types_error::PgError::error("failed to coerce base type to domain")
+                ::types_error::PgError::error("failed to coerce base type to domain")
             })?;
             // Bring the parser-arena `'static` coercion result into `mcx`
             // (Expr is invariant over its lifetime).
             let coerced: ::nodes::primnodes::Expr<'mcx> = coerced.clone_in(mcx)?;
-            defval = Some(mcx::alloc_in(mcx, coerced)?);
+            defval = Some(::mcx::alloc_in(mcx, coerced)?);
         }
 
         if let Some(dv) = defval.take() {
@@ -647,7 +647,7 @@ pub fn ATExecAddColumn<'mcx>(
                 planner::expression_planner(mcx, dv.clone_in(mcx)?)?;
 
             // Add the new default to the newvals list.
-            let node = mcx::alloc_in(mcx, Node::mk_expr(mcx, planned.clone_in(mcx)?)?)?;
+            let node = ::mcx::alloc_in(mcx, Node::mk_expr(mcx, planned.clone_in(mcx)?)?)?;
             wqueue[ti].newvals.push(crate::at_phase::NewColumnValue {
                 attnum: newattnum,
                 expr: Some(node),
@@ -689,7 +689,7 @@ pub fn ATExecAddColumn<'mcx>(
 
                 // If it turns out NULL, nothing to do; else store it.
                 if !missing_is_null {
-                    heap::StoreAttrMissingVal(
+                    ::heap::StoreAttrMissingVal(
                         mcx, rel, newattnum, missingval,
                     )?;
                     // Make the additional catalog change visible.
@@ -724,7 +724,7 @@ pub fn ATExecAddColumn<'mcx>(
     if !children.is_empty() {
         if !recurse {
             return Err(utils_error::ereport(ERROR)
-                .errcode(types_error::ERRCODE_INVALID_TABLE_DEFINITION)
+                .errcode(::types_error::ERRCODE_INVALID_TABLE_DEFINITION)
                 .errmsg("column must be added to child tables too".to_string())
                 .into_error());
         }
@@ -877,7 +877,7 @@ const AT_REWRITE_DEFAULT_VAL: i32 = 0x02;
 
 /// `RELKIND_HAS_STORAGE(relkind)`.
 fn RELKIND_HAS_STORAGE(relkind: u8) -> bool {
-    use types_tuple::access::{
+    use ::types_tuple::access::{
         RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
     };
     relkind == RELKIND_RELATION

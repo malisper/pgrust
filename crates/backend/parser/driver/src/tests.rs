@@ -2,7 +2,7 @@
 //! surrogate helpers, `mode_token`, and `scanner_errposition`.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::Once;
 
 /// Install the `pg_unicode_to_server` seam with a UTF-8 stand-in (the test
@@ -18,7 +18,7 @@ fn install_seams() {
             })?;
             let mut buf = [0u8; 4];
             let s = ch.encode_utf8(&mut buf);
-            mcx::slice_in(mcx, s.as_bytes())
+            ::mcx::slice_in(mcx, s.as_bytes())
         });
         mb::pg_mbstrlen_with_len::set(|s, limit| {
             let lim = (limit.max(0) as usize).min(s.len());
@@ -150,7 +150,7 @@ fn surrogate_helpers_match_pg_wchar_ranges() {
 
 #[test]
 fn mode_token_maps_each_mode() {
-    use parsenodes::RawParseMode::*;
+    use ::parsenodes::RawParseMode::*;
     assert_eq!(mode_token(RAW_PARSE_DEFAULT), None);
     assert_eq!(mode_token(RAW_PARSE_TYPE_NAME), Some(tokens::MODE_TYPE_NAME));
     assert_eq!(mode_token(RAW_PARSE_PLPGSQL_EXPR), Some(tokens::MODE_PLPGSQL_EXPR));

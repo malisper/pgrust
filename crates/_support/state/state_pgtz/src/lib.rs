@@ -10,8 +10,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pgtime::pg_tz;
-use pgtime::pgtime::state;
+use ::pgtime::pg_tz;
+use ::pgtime::pgtime::state;
 
 thread_local! {
     /// `pg_tz *log_timezone` (pgtz.c). guc.c guarantees at least GMT before

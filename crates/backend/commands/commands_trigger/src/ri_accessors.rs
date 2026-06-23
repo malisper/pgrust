@@ -22,10 +22,10 @@
 //! being false — a trigger-protocol violation the RI procs reject up front.
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED};
 use types_ri_triggers::{TriggerDataRef, TriggerRef, TupleTableSlotRef};
-use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
 use crate::firing::with_current_trigger_data;
 
@@ -114,7 +114,7 @@ pub fn tg_relation_name_impl<'mcx>(
     _trigdata: TriggerDataRef,
 ) -> PgResult<PgVec<'mcx, u8>> {
     with_tg_relation("tg_relation_name", |rel| {
-        mcx::slice_in(mcx, rel.rd_rel.relname.as_bytes())
+        ::mcx::slice_in(mcx, rel.rd_rel.relname.as_bytes())
     })?
 }
 
@@ -158,7 +158,7 @@ pub fn tg_relation_att_name_impl<'mcx>(
     attnum: i16,
 ) -> PgResult<PgVec<'mcx, u8>> {
     with_tg_relation("tg_relation_att_name", |rel| {
-        mcx::slice_in(mcx, rel.rd_att.attr(att_index(rel, attnum)).attname.name_str())
+        ::mcx::slice_in(mcx, rel.rd_att.attr(att_index(rel, attnum)).attname.name_str())
     })?
 }
 
@@ -184,7 +184,7 @@ pub fn tg_relation_att_collation_impl(_trigdata: TriggerDataRef, attnum: i16) ->
 pub fn tg_trigtuple_impl<'mcx>(
     mcx: Mcx<'mcx>,
     _trigdata: TriggerDataRef,
-) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>> {
+) -> PgResult<Option<::types_tuple::heaptuple::HeapTupleData<'mcx>>> {
     with_current_trigger_data(|td| match td.and_then(|t| t.tg_trigtuple.as_ref()) {
         Some(tup) => Ok(Some(tup.clone_in(mcx)?)),
         None => Ok(None),
@@ -197,7 +197,7 @@ pub fn tg_trigtuple_impl<'mcx>(
 pub fn tg_newtuple_impl<'mcx>(
     mcx: Mcx<'mcx>,
     _trigdata: TriggerDataRef,
-) -> PgResult<Option<types_tuple::heaptuple::HeapTupleData<'mcx>>> {
+) -> PgResult<Option<::types_tuple::heaptuple::HeapTupleData<'mcx>>> {
     with_current_trigger_data(|td| match td.and_then(|t| t.tg_newtuple.as_ref()) {
         Some(tup) => Ok(Some(tup.clone_in(mcx)?)),
         None => Ok(None),
@@ -245,7 +245,7 @@ pub fn trigger_name_impl<'mcx>(
     trigger: TriggerRef,
 ) -> PgResult<PgVec<'mcx, u8>> {
     debug_assert_eq!(trigger.0, CURRENT);
-    with_tg_trigger("trigger_name", |t| mcx::slice_in(mcx, t.tgname.as_bytes()))?
+    with_tg_trigger("trigger_name", |t| ::mcx::slice_in(mcx, t.tgname.as_bytes()))?
 }
 
 /// `trigger->tgnargs` — number of textual trigger arguments (`TG_NARGS`).
@@ -265,7 +265,7 @@ pub fn tg_argv_impl<'mcx>(
         if i < 0 || i as usize >= t.tgargs.len() {
             Ok(None)
         } else {
-            Ok(Some(mcx::slice_in(mcx, t.tgargs[i as usize].as_bytes())?))
+            Ok(Some(::mcx::slice_in(mcx, t.tgargs[i as usize].as_bytes())?))
         }
     })?
 }

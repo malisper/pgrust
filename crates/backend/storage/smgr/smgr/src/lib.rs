@@ -21,21 +21,21 @@
 
 use md as md;
 use utils_error::{ereport, PgError, PgResult};
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, ProcNumber,
 };
-use types_error::ERROR;
-use types_storage::smgr::{SMgrRelationData, RELSEG_SIZE, SMGR_NFORKS};
+use ::types_error::ERROR;
+use ::types_storage::smgr::{SMgrRelationData, RELSEG_SIZE, SMGR_NFORKS};
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 
-use xlogutils_seams::xlog_drop_relation as xlog_drop_relation_seam;
+use ::xlogutils_seams::xlog_drop_relation as xlog_drop_relation_seam;
 use bufmgr_seams::{
     drop_relation_buffers as drop_relation_buffers_seam,
     drop_relations_all_buffers as drop_relations_all_buffers_seam,
     flush_relations_all_buffers as flush_relations_all_buffers_seam,
 };
 use smgr_seams as smgr_seam;
-use inval_seams::cache_invalidate_smgr as cache_invalidate_smgr_seam;
+use ::inval_seams::cache_invalidate_smgr as cache_invalidate_smgr_seam;
 
 /// The four-fork array (`for (forknum = 0; forknum <= MAX_FORKNUM; ...)`).
 fn fork_iter() -> [ForkNumber; SMGR_NFORKS] {
@@ -275,7 +275,7 @@ pub fn smgrnblocks(key: RelFileLocatorBackend, forknum: ForkNumber) -> PgResult<
 /// fork-size changes, so the cache is not trusted (returns `InvalidBlockNumber`).
 /// Only in recovery (single-writer) is the cached value returned.
 pub fn smgrnblocks_cached(key: RelFileLocatorBackend, forknum: ForkNumber) -> BlockNumber {
-    if xlogutils_seams::in_recovery::call() {
+    if ::xlogutils_seams::in_recovery::call() {
         if let Some(d) = md::cache_get(key) {
             let cached = d.smgr_cached_nblocks[forknum as usize];
             if cached != InvalidBlockNumber {
@@ -462,10 +462,10 @@ pub fn drop_relation_files(delrels: &[RelFileLocator], is_redo: bool) -> PgResul
     let mut srels: Vec<RelFileLocatorBackend> = Vec::new();
     srels
         .try_reserve(delrels.len())
-        .map_err(|_| ereport(ERROR).errcode(types_error::ERRCODE_OUT_OF_MEMORY).errmsg_internal("out of memory allocating DropRelationFiles srels").into_error())?;
+        .map_err(|_| ereport(ERROR).errcode(::types_error::ERRCODE_OUT_OF_MEMORY).errmsg_internal("out of memory allocating DropRelationFiles srels").into_error())?;
 
     for &delrel in delrels.iter() {
-        let srel = smgropen(delrel, types_core::primitive::INVALID_PROC_NUMBER)?;
+        let srel = smgropen(delrel, ::types_core::primitive::INVALID_PROC_NUMBER)?;
 
         if is_redo {
             for fork in fork_iter() {
@@ -584,12 +584,12 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_storage::RelFileLocator;
+    use ::types_storage::RelFileLocator;
 
     fn key() -> RelFileLocatorBackend {
         RelFileLocatorBackend {
             locator: RelFileLocator { spcOid: 1, dbOid: 2, relNumber: 16384 },
-            backend: types_core::primitive::INVALID_PROC_NUMBER,
+            backend: ::types_core::primitive::INVALID_PROC_NUMBER,
         }
     }
 

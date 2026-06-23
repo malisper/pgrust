@@ -1,8 +1,8 @@
 //! Seam-free unit tests for the foundational reorderbuffer family.
 
 use super::*;
-use snapshot::snapshot::{GlobalVisStateHandle, SnapshotType};
-use types_storage::sinval::SharedInvalSnapshotMsg;
+use ::snapshot::snapshot::{GlobalVisStateHandle, SnapshotType};
+use ::types_storage::sinval::SharedInvalSnapshotMsg;
 
 fn mk_inval() -> SharedInvalidationMessage {
     SharedInvalidationMessage::Snapshot(SharedInvalSnapshotMsg { dbId: 0, relId: 0 })

@@ -4,9 +4,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::TimestampTz;
+use ::types_core::TimestampTz;
 use types_datetime::{fsec_t, pg_itm, Interval, TimeADT, TimeTzADT, Timestamp, Timestamp2TmResult};
-use pgtime::pg_tm;
+use ::pgtime::pg_tm;
 
 seam_core::seam!(
     /// `GetCurrentTimestamp()` (`utils/adt/timestamp.c`).
@@ -27,7 +27,7 @@ seam_core::seam!(
     /// `TimestampTz` (microseconds since the PG epoch, UTC) to a `pg_time_t`
     /// (seconds since the Unix epoch). Pure arithmetic; never errors. Used by
     /// `InitProcessGlobals` to set `MyStartTime` from `MyStartTimestamp`.
-    pub fn timestamptz_to_time_t(t: TimestampTz) -> types_core::pg_time_t
+    pub fn timestamptz_to_time_t(t: TimestampTz) -> ::types_core::pg_time_t
 );
 
 seam_core::seam!(
@@ -140,7 +140,7 @@ seam_core::seam!(
     /// conversion methods.
     pub fn json_encode_datetime<'mcx>(
         value: &types_tuple::Datum<'mcx>,
-        typid: types_core::Oid,
+        typid: ::types_core::Oid,
         tzp: Option<i32>,
     ) -> types_error::PgResult<String>
 );

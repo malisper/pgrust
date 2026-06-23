@@ -21,11 +21,11 @@ extern crate alloc;
 
 mod tables;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use conv_string_helpers::{ConversionResult, LocalToUtf, UtfToLocal};
-use conv_string_helpers::make_conversion_builtin;
-use mbutils_seams::check_encoding_conversion_args;
-use types_wchar::encoding::{pg_enc, PG_KOI8R, PG_KOI8U, PG_UTF8};
+use ::conv_string_helpers::make_conversion_builtin;
+use ::mbutils_seams::check_encoding_conversion_args;
+use ::types_wchar::encoding::{pg_enc, PG_KOI8R, PG_KOI8U, PG_UTF8};
 
 /// `utf8_to_koi8r` (utf8_and_cyrillic.c): convert PG_UTF8 <-> PG_KOI8R.
 pub fn utf8_to_koi8r(

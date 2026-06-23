@@ -31,17 +31,17 @@
 
 use std::cell::Cell;
 
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     NAMESPACE_RELATION_ID as NamespaceRelationId, PROCEDURE_RELATION_ID as ProcedureRelationId,
     RELATION_RELATION_ID as RelationRelationId,
 };
-use types_catalog::object_access::{
+use ::types_catalog::object_access::{
     ObjectAccessArg, ObjectAccessDrop, ObjectAccessNamespaceSearch, ObjectAccessPostAlter,
     ObjectAccessPostCreate, ObjectAccessType, OAT_DROP, OAT_FUNCTION_EXECUTE, OAT_NAMESPACE_SEARCH,
     OAT_POST_ALTER, OAT_POST_CREATE, OAT_TRUNCATE,
 };
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 /// `object_access_hook_type` (`catalog/objectaccess.h:127-131`) — the
 /// object-ID hook prototype. Higher-ranked over the argument's lifetime so the
@@ -499,13 +499,13 @@ pub fn init_seams() {
     // user.c role-object access hooks (CREATE/ALTER/DROP ROLE), all on
     // `AuthIdRelationId` with `subId = 0`.
     user_seams::invoke_object_post_create_hook_authid::set(|roleid| {
-        invoke_object_post_create_hook(types_core::AUTH_ID_RELATION_ID, roleid, 0, false)
+        invoke_object_post_create_hook(::types_core::AUTH_ID_RELATION_ID, roleid, 0, false)
     });
     user_seams::invoke_object_post_alter_hook_authid::set(|roleid| {
-        invoke_object_post_alter_hook(types_core::AUTH_ID_RELATION_ID, roleid, 0, InvalidOid, false)
+        invoke_object_post_alter_hook(::types_core::AUTH_ID_RELATION_ID, roleid, 0, InvalidOid, false)
     });
     user_seams::invoke_object_drop_hook_authid::set(|roleid| {
-        invoke_object_drop_hook(types_core::AUTH_ID_RELATION_ID, roleid, 0, 0)
+        invoke_object_drop_hook(::types_core::AUTH_ID_RELATION_ID, roleid, 0, 0)
     });
 
     // guc_funcs.c (SetPGVariable) invokes the by-name post-alter hook for the
@@ -533,7 +533,7 @@ pub fn init_seams() {
     );
 }
 
-use types_core::primitive::InvalidOid;
+use ::types_core::primitive::InvalidOid;
 
 #[cfg(test)]
 mod tests {

@@ -36,12 +36,12 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, MemoryContext, PgBox};
-use types_core::fmgr::FmgrInfo;
-use types_core::Oid;
-use datum::NullableDatum;
-use types_error::error::{
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::Oid;
+use ::datum::NullableDatum;
+use ::types_error::error::{
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INTERNAL_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
 };
@@ -54,8 +54,8 @@ use ::nodes::funcapi::{
 };
 use ::nodes::primnodes::Expr;
 use nodes::{EcxtId, EStateData, PlanStateData, SlotId, TupleSlotKind};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::TupleDescData;
 
 use execSRF_seams as seams;
 
@@ -471,7 +471,7 @@ fn init_sexpr<'mcx>(
         fn_extra: None,
         fn_mcxt: None,
     };
-    sexpr.fcinfo = Some(mcx::alloc_in(estate.es_query_cxt, fcinfo)?);
+    sexpr.fcinfo = Some(::mcx::alloc_in(estate.es_query_cxt, fcinfo)?);
 
     // C: if (sexpr->func.fn_retset && !allowSRF) ereport(ERROR, "set-valued
     //    function called in context that cannot accept a set");
@@ -553,7 +553,7 @@ fn init_sexpr<'mcx>(
                 .as_deref()
                 .expect("init_sexpr: sexpr->expr set by the caller")
                 .clone_in(per_query)?;
-            mcx::alloc_in(per_query, ::nodes::nodes::Node::mk_expr(per_query, e)?)?
+            ::mcx::alloc_in(per_query, ::nodes::nodes::Node::mk_expr(per_query, e)?)?
         };
         let resolved = funcapi::result_type::get_expr_result_type(
             per_query,
@@ -569,13 +569,13 @@ fn init_sexpr<'mcx>(
                     .as_deref()
                     .expect("get_expr_result_type: COMPOSITE class with NULL tupdesc");
                 let copy = tupdesc::CreateTupleDescCopy(per_query, src)?;
-                sexpr.funcResultDesc = Some(mcx::alloc_in(per_query, copy)?);
+                sexpr.funcResultDesc = Some(::mcx::alloc_in(per_query, copy)?);
             }
             Some(::nodes::funcapi::TypeFuncClass::Scalar) => {
                 // Base data type, i.e. scalar — build a 1-column descriptor.
                 let funcrettype = resolved.result_type_id.unwrap_or_default();
                 let td = tupdesc::CreateTemplateTupleDesc(per_query, 1)?;
-                let mut td = mcx::alloc_in(per_query, td)?;
+                let mut td = ::mcx::alloc_in(per_query, td)?;
                 tupdesc::TupleDescInitEntry(
                     &mut td, 1, None, funcrettype, -1, 0,
                 )?;
@@ -626,7 +626,7 @@ fn ExecInitTableFunctionResult<'mcx>(
     state.func.fn_oid = Oid::default();
 
     // C: state->expr = expr;
-    state.expr = Some(mcx::alloc_in(per_query, expr.clone_in(per_query)?)?);
+    state.expr = Some(::mcx::alloc_in(per_query, expr.clone_in(per_query)?)?);
 
     if let Some(func) = expr.as_funcexpr() {
         // C: state->funcReturnsSet = func->funcretset;
@@ -642,7 +642,7 @@ fn ExecInitTableFunctionResult<'mcx>(
         state.elidedFuncState = Some(es);
     }
 
-    mcx::alloc_in(per_query, state)
+    ::mcx::alloc_in(per_query, state)
 }
 
 /// `ExecInitExprList(args, parent)` over the function's argument expressions.
@@ -653,12 +653,12 @@ fn init_expr_list<'mcx>(
     args: &[Expr<'mcx>],
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, ::nodes::execexpr::ExprState<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, ::nodes::execexpr::ExprState<'mcx>>> {
     let _ = parent;
     let refs: Vec<Option<&Expr<'mcx>>> = args.iter().map(Some).collect();
     let states =
         execExpr_seams::exec_init_expr_list_no_parent::call(&refs, estate)?;
-    let mut out = mcx::PgVec::new_in(estate.es_query_cxt);
+    let mut out = ::mcx::PgVec::new_in(estate.es_query_cxt);
     out.try_reserve(states.len()).map_err(|_| {
         estate
             .es_query_cxt
@@ -685,7 +685,7 @@ fn materialize_sink_into_rsinfo<'mcx>(
     random_access: bool,
     per_query: Mcx<'mcx>,
 ) -> PgResult<()> {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
 
     // C: `rsinfo.returnMode = SFRM_Materialize;` (the callee chose materialize).
     rsinfo.returnMode = SetFunctionReturnMode::Materialize;
@@ -710,7 +710,7 @@ fn materialize_sink_into_rsinfo<'mcx>(
         if expected_desc.natts.max(0) == 0 && !sink.set_desc_cols.is_empty() {
             let ncols = sink.set_desc_cols.len();
             let td = tupdesc::CreateTemplateTupleDesc(per_query, ncols as i32)?;
-            let mut td = mcx::alloc_in(per_query, td)?;
+            let mut td = ::mcx::alloc_in(per_query, td)?;
             for (i, col) in sink.set_desc_cols.iter().enumerate() {
                 tupdesc::TupleDescInitEntry(
                     &mut td,
@@ -732,11 +732,11 @@ fn materialize_sink_into_rsinfo<'mcx>(
             typcache_seams::assign_record_type_typmod::call(&mut td)?;
             td
         } else {
-            mcx::alloc_in(per_query, expected_desc.clone_in(per_query)?)?
+            ::mcx::alloc_in(per_query, expected_desc.clone_in(per_query)?)?
         }
     } else {
         let td = tupdesc::CreateTemplateTupleDesc(per_query, 1)?;
-        let mut td = mcx::alloc_in(per_query, td)?;
+        let mut td = ::mcx::alloc_in(per_query, td)?;
         tupdesc::TupleDescInitEntry(
             &mut td,
             1,
@@ -791,7 +791,7 @@ fn materialize_sink_into_rsinfo<'mcx>(
             let comp: CanonDatum = match &col.ref_payload {
                 Some(fmgr::boundary::RefPayload::Varlena(b))
                 | Some(fmgr::boundary::RefPayload::Composite(b)) => {
-                    CanonDatum::ByRef(mcx::slice_in(per_query, b.as_slice())?)
+                    CanonDatum::ByRef(::mcx::slice_in(per_query, b.as_slice())?)
                 }
                 _ => {
                     return Err(ereport(ERROR)
@@ -875,11 +875,11 @@ fn materialize_sink_into_rsinfo<'mcx>(
             let v = match col.ref_payload {
                 None => CanonDatum::ByVal(col.value),
                 Some(fmgr::boundary::RefPayload::Varlena(b)) => {
-                    CanonDatum::ByRef(mcx::slice_in(per_query, b.as_slice())?)
+                    CanonDatum::ByRef(::mcx::slice_in(per_query, b.as_slice())?)
                 }
                 Some(fmgr::boundary::RefPayload::Cstring(s)) => CanonDatum::Cstring(s),
                 Some(fmgr::boundary::RefPayload::Composite(b)) => {
-                    CanonDatum::ByRef(mcx::slice_in(per_query, b.as_slice())?)
+                    CanonDatum::ByRef(::mcx::slice_in(per_query, b.as_slice())?)
                 }
                 Some(_) => {
                     return Err(ereport(ERROR)
@@ -946,7 +946,7 @@ fn ExecMakeTableFunctionResult<'mcx>(
     }
     let mut rsinfo = ReturnSetInfo {
         econtext: Some(econtext),
-        expectedDesc: Some(mcx::alloc_in(per_query, expected_desc.clone_in(per_query)?)?),
+        expectedDesc: Some(::mcx::alloc_in(per_query, expected_desc.clone_in(per_query)?)?),
         allowedModes: allowed_modes,
         returnMode: SetFunctionReturnMode::ValuePerCall,
         isDone: ExprDoneCond::ExprSingleResult,
@@ -1073,7 +1073,7 @@ fn ExecMakeTableFunctionResult<'mcx>(
                             let td = tupdesc::CreateTemplateTupleDesc(
                                 per_query, 1,
                             )?;
-                            let mut td = mcx::alloc_in(per_query, td)?;
+                            let mut td = ::mcx::alloc_in(per_query, td)?;
                             tupdesc::TupleDescInitEntry(
                                 &mut td,
                                 1,
@@ -1086,7 +1086,7 @@ fn ExecMakeTableFunctionResult<'mcx>(
                             // rsinfo.setDesc points at the built desc (a copy for
                             // the cross-check below).
                             rsinfo.setDesc =
-                                Some(mcx::alloc_in(per_query, tupdesc.as_ref().unwrap().clone_in(per_query)?)?);
+                                Some(::mcx::alloc_in(per_query, tupdesc.as_ref().unwrap().clone_in(per_query)?)?);
                         }
                     }
 
@@ -1135,9 +1135,9 @@ fn ExecMakeTableFunctionResult<'mcx>(
                             // query-specified return row do not match".
                             if let Some(header) = formed.tuple.t_data.as_ref() {
                                 let tup_type =
-                                    types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+                                    ::types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
                                 let tup_typmod =
-                                    types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+                                    ::types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
                                 if let Ok(actual_desc) =
                                     typcache_seams::lookup_rowtype_tupdesc::call(
                                         per_query, tup_type, tup_typmod,
@@ -1275,7 +1275,7 @@ fn ExecMakeTableFunctionResult<'mcx>(
 
     // C: MemoryContextSwitchTo(callerContext); return rsinfo.setResult;
     let setResult = core::mem::take(&mut rsinfo.setResult);
-    mcx::alloc_in(per_query, setResult)
+    ::mcx::alloc_in(per_query, setResult)
 }
 
 /// `ExecEvalFuncArgs(fcinfo, argList, econtext)` (execSRF.c:833) — evaluate the
@@ -1300,7 +1300,7 @@ fn exec_eval_func_args<'mcx>(
             .as_mut()
             .expect("ExecEvalFuncArgs: fcinfo not initialized");
         // The compiled argument expression produced a canonical
-        // `types_tuple::Datum`; the fmgr call frame carries the bare-word
+        // `::types_tuple::Datum`; the fmgr call frame carries the bare-word
         // `args[i].value` plus the by-reference `ref_args[i]` side channel.
         // Marshal each kind onto the frame: a by-value scalar is the bare word
         // (no referent); a by-reference value (text/varlena/cstring/composite)
@@ -1309,26 +1309,26 @@ fn exec_eval_func_args<'mcx>(
         // callee's `PG_GETARG_TEXT_PP`/`PG_GETARG_CSTRING` readers see the
         // value. (The old `as_usize()` downgrade panicked on a by-ref arg —
         // the `pg_input_error_info('junk','bool')` wall.)
-        use types_tuple::heaptuple::Datum as CanonDatum;
+        use ::types_tuple::heaptuple::Datum as CanonDatum;
         use ::nodes::fmgr::FmgrArgRef;
         match value {
             CanonDatum::ByVal(word) => {
-                fcinfo.args[i].value = datum::Datum::from_usize(word);
+                fcinfo.args[i].value = ::datum::Datum::from_usize(word);
             }
             CanonDatum::ByRef(bytes) => {
-                fcinfo.args[i].value = datum::Datum::null();
+                fcinfo.args[i].value = ::datum::Datum::null();
                 fcinfo.set_ref_arg(i, FmgrArgRef::Varlena(bytes.as_slice().to_vec()));
             }
             CanonDatum::Cstring(s) => {
-                fcinfo.args[i].value = datum::Datum::null();
+                fcinfo.args[i].value = ::datum::Datum::null();
                 fcinfo.set_ref_arg(i, FmgrArgRef::Cstring(s.to_string()));
             }
             CanonDatum::Composite(t) => {
-                fcinfo.args[i].value = datum::Datum::null();
+                fcinfo.args[i].value = ::datum::Datum::null();
                 fcinfo.set_ref_arg(i, FmgrArgRef::Varlena(t.to_datum_image()));
             }
             CanonDatum::Expanded(_) | CanonDatum::Internal(_) => {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "ExecEvalFuncArgs: Expanded/Internal argument not supported on the SRF call frame",
                 ));
             }
@@ -1355,7 +1355,7 @@ fn ExecInitFunctionResultSet<'mcx>(
     // C: state->funcReturnsSet = true; state->func.fn_oid = InvalidOid;
     state.funcReturnsSet = true;
     state.func.fn_oid = Oid::default();
-    state.expr = Some(mcx::alloc_in(per_query, expr.clone_in(per_query)?)?);
+    state.expr = Some(::mcx::alloc_in(per_query, expr.clone_in(per_query)?)?);
 
     if let Some(func) = expr.as_funcexpr() {
         // C: state->args = ExecInitExprList(func->args, parent);
@@ -1375,7 +1375,7 @@ fn ExecInitFunctionResultSet<'mcx>(
     }
 
     // C: Assert(state->func.fn_retset);  (the selected function returns a set.)
-    mcx::alloc_in(estate.es_query_cxt, state)
+    ::mcx::alloc_in(estate.es_query_cxt, state)
 }
 
 /// `ExecPrepareTuplestoreResult(sexpr, econtext, resultStore, resultDesc)`
@@ -1399,7 +1399,7 @@ fn exec_prepare_tuplestore_result<'mcx>(
     let per_query = estate.es_query_cxt;
 
     // sexpr->funcResultStore = resultStore;
-    sexpr.funcResultStore = Some(mcx::alloc_in(per_query, result_store)?);
+    sexpr.funcResultStore = Some(::mcx::alloc_in(per_query, result_store)?);
 
     if sexpr.funcResultSlot.is_none() {
         // Create a slot so we can read data out of the tuplestore. C picks the
@@ -1408,11 +1408,11 @@ fn exec_prepare_tuplestore_result<'mcx>(
         let slot_desc: PgBox<'mcx, TupleDescData<'mcx>> = if let Some(d) =
             sexpr.funcResultDesc.as_deref()
         {
-            mcx::alloc_in(per_query, d.clone_in(per_query)?)?
+            ::mcx::alloc_in(per_query, d.clone_in(per_query)?)?
         } else if let Some(rd) = result_desc.as_deref() {
             // don't assume resultDesc is long-lived: CreateTupleDescCopy.
             let copy = tupdesc::CreateTupleDescCopy(per_query, rd)?;
-            mcx::alloc_in(per_query, copy)?
+            ::mcx::alloc_in(per_query, copy)?
         } else {
             return Err(ereport(ERROR)
                 .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
@@ -1557,7 +1557,7 @@ fn ExecMakeFunctionResultSet<'mcx>(
                 expectedDesc: fcache
                     .funcResultDesc
                     .as_deref()
-                    .map(|d| mcx::alloc_in(estate.es_query_cxt, d.clone_in(estate.es_query_cxt)?))
+                    .map(|d| ::mcx::alloc_in(estate.es_query_cxt, d.clone_in(estate.es_query_cxt)?))
                     .transpose()?,
                 allowedModes: SFRM_ValuePerCall | SFRM_Materialize,
                 returnMode: SetFunctionReturnMode::ValuePerCall,

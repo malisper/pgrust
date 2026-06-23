@@ -8,9 +8,9 @@
 //! [`crate::trigger_lookup`].
 
 use mcx::{Mcx, PgString};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use types_storage::lock::AccessShareLock;
+use ::types_storage::lock::AccessShareLock;
 
 use crate::consts::{
     Anum_pg_policy_oid, Anum_pg_policy_polname, Anum_pg_policy_polrelid, PolicyRelationId,

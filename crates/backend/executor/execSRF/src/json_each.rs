@@ -18,9 +18,9 @@
 //! tag-only `resultinfo` cannot carry it, which is why these are registered
 //! here and NOT in `register_jsonfuncs_builtins` (jsonfuncs fmgr_builtins.rs).
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 

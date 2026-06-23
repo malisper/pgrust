@@ -31,10 +31,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_acl::AclItem;
+use ::types_acl::AclItem;
 use types_core::{AttrNumber, Oid};
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::has_privilege as hp;
@@ -93,8 +93,8 @@ fn vardata_any(image: &[u8]) -> &[u8] {
         // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header (skip 1 byte).
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
         // 4-byte uncompressed header (skip VARHDRSZ).
-        Some(_) if image.len() >= datum::varlena::VARHDRSZ => {
-            &image[datum::varlena::VARHDRSZ..]
+        Some(_) if image.len() >= ::datum::varlena::VARHDRSZ => {
+            &image[::datum::varlena::VARHDRSZ..]
         }
         _ => &[],
     }

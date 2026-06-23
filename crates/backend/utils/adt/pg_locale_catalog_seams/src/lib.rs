@@ -15,8 +15,8 @@
 //! to `None`. `provider` is the `char` `collprovider`/`datlocprovider` as `i8`
 //! (`COLLPROVIDER_*`).
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 extern crate alloc;
 use alloc::string::String;

@@ -13,7 +13,7 @@
 use core::cell::RefCell;
 use std::collections::HashMap;
 
-use types_pgstat::pgstat_internal::PgStat_HashKey;
+use ::types_pgstat::pgstat_internal::PgStat_HashKey;
 
 use crate::entry_ref::{PgStat_LocalState, PgStat_PendingState};
 

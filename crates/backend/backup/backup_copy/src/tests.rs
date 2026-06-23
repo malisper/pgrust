@@ -113,7 +113,7 @@ fn begin_backup_emits_two_resultsets_command_complete_and_copyout() {
     };
 
     // bbsink_begin_backup sets buffer_length then invokes begin_backup.
-    sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
+    ::sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
 
     let ev = drain();
     // First result set: SendXlogRecPtrResult (recptr text, tli int8).
@@ -182,7 +182,7 @@ fn begin_archive_frames_new_archive_with_path() {
         ..Default::default()
     };
 
-    sink::bbsink_begin_archive(&mut sink, &mut state, "base.tar").unwrap();
+    ::sink::bbsink_begin_archive(&mut sink, &mut state, "base.tar").unwrap();
 
     let ev = drain();
     // CopyData: 'n', "base.tar\0", "/some/where\0".
@@ -203,7 +203,7 @@ fn begin_archive_null_path_sends_empty_string() {
         ..Default::default()
     };
 
-    sink::bbsink_begin_archive(&mut sink, &mut state, "x").unwrap();
+    ::sink::bbsink_begin_archive(&mut sink, &mut state, "x").unwrap();
 
     let ev = drain();
     let mut body = vec![b'n'];
@@ -220,13 +220,13 @@ fn archive_contents_ships_data_with_leading_type_byte() {
     let mut state = BbsinkState { startptr: 0, starttli: 1, ..Default::default() };
 
     // Allocate the buffer (begin_backup), then drain its setup events.
-    sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
+    ::sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
     drain();
 
     // Fill some bytes into the buffer and ship 4 of them.
     sink.buffer_mut().unwrap()[..4].copy_from_slice(b"ABCD");
     state.bytes_done = 4;
-    sink::bbsink_archive_contents(&mut sink, &mut state, 4).unwrap();
+    ::sink::bbsink_archive_contents(&mut sink, &mut state, 4).unwrap();
 
     let ev = drain();
     // CopyData body = in-band 'd' + the 4 data bytes. No progress report yet
@@ -240,14 +240,14 @@ fn archive_contents_not_to_client_sends_nothing_but_may_report() {
     let mcx = ctx.mcx();
     let mut sink = bbsink_copystream_new(mcx, false);
     let mut state = BbsinkState { startptr: 0, starttli: 1, ..Default::default() };
-    sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
+    ::sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
     drain();
 
     // Cross the byte interval and advance the clock past the threshold so a
     // progress report fires even though no data is sent to the client.
     state.bytes_done = PROGRESS_REPORT_BYTE_INTERVAL + 10;
     NOW.with(|n| n.set(2_000_000)); // 2s in microseconds -> ms diff 2000 >= 1000
-    sink::bbsink_archive_contents(&mut sink, &mut state, 1).unwrap();
+    ::sink::bbsink_archive_contents(&mut sink, &mut state, 1).unwrap();
 
     let ev = drain();
     // No 'd' data message; a 'p' progress CopyData then a flush.
@@ -262,14 +262,14 @@ fn archive_contents_no_report_when_time_threshold_not_met() {
     let mcx = ctx.mcx();
     let mut sink = bbsink_copystream_new(mcx, false);
     let mut state = BbsinkState { startptr: 0, starttli: 1, ..Default::default() };
-    sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
+    ::sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
     drain();
 
     // Cross the byte interval but keep the clock under the threshold (and not
     // before the last report), so no progress report is sent.
     state.bytes_done = PROGRESS_REPORT_BYTE_INTERVAL + 10;
     NOW.with(|n| n.set(500_000)); // 0.5s -> 500ms < 1000
-    sink::bbsink_archive_contents(&mut sink, &mut state, 1).unwrap();
+    ::sink::bbsink_archive_contents(&mut sink, &mut state, 1).unwrap();
 
     assert_eq!(drain(), vec![]);
 }
@@ -281,7 +281,7 @@ fn end_archive_forces_progress_report() {
     let mut sink = bbsink_copystream_new(mcx, true);
     let mut state = BbsinkState { bytes_done: 12345, ..Default::default() };
 
-    sink::bbsink_end_archive(&mut sink, &mut state).unwrap();
+    ::sink::bbsink_end_archive(&mut sink, &mut state).unwrap();
 
     let ev = drain();
     let mut prog = vec![b'p'];
@@ -296,7 +296,7 @@ fn begin_manifest_sends_m_marker() {
     let mut sink = bbsink_copystream_new(mcx, true);
     let mut state = BbsinkState::default();
 
-    sink::bbsink_begin_manifest(&mut sink, &mut state).unwrap();
+    ::sink::bbsink_begin_manifest(&mut sink, &mut state).unwrap();
 
     assert_eq!(drain(), vec![Event::Msg(PQ_MSG_COPY_DATA, vec![b'm'])]);
 }
@@ -307,11 +307,11 @@ fn manifest_contents_ships_data_with_leading_type_byte() {
     let mcx = ctx.mcx();
     let mut sink = bbsink_copystream_new(mcx, true);
     let mut state = BbsinkState { startptr: 0, starttli: 1, ..Default::default() };
-    sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
+    ::sink::bbsink_begin_backup(&mut sink, &mut state, 8192).unwrap();
     drain();
 
     sink.buffer_mut().unwrap()[..3].copy_from_slice(b"xyz");
-    sink::bbsink_manifest_contents(&mut sink, &mut state, 3).unwrap();
+    ::sink::bbsink_manifest_contents(&mut sink, &mut state, 3).unwrap();
 
     assert_eq!(drain(), vec![Event::Msg(PQ_MSG_COPY_DATA, b"dxyz".to_vec())]);
 }
@@ -323,7 +323,7 @@ fn end_manifest_does_nothing() {
     let mut sink = bbsink_copystream_new(mcx, true);
     let mut state = BbsinkState::default();
 
-    sink::bbsink_end_manifest(&mut sink, &mut state).unwrap();
+    ::sink::bbsink_end_manifest(&mut sink, &mut state).unwrap();
 
     assert_eq!(drain(), vec![]);
 }
@@ -336,7 +336,7 @@ fn end_backup_sends_copydone_then_xlogpos_result() {
     // end_backup asserts tablespace_num == tablespaces.len(); both 0 here.
     let mut state = BbsinkState::default();
 
-    sink::bbsink_end_backup(&mut sink, &mut state, 0x0000_0002_0000_0040, 9)
+    ::sink::bbsink_end_backup(&mut sink, &mut state, 0x0000_0002_0000_0040, 9)
         .unwrap();
 
     let ev = drain();
@@ -370,7 +370,7 @@ fn cleanup_does_nothing() {
     let mut sink = bbsink_copystream_new(mcx, true);
     let mut state = BbsinkState::default();
 
-    sink::bbsink_cleanup(&mut sink, &mut state).unwrap();
+    ::sink::bbsink_cleanup(&mut sink, &mut state).unwrap();
 
     assert_eq!(drain(), vec![]);
 }

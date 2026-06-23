@@ -4,7 +4,7 @@
 //!
 //! Ported 1:1 from `src/backend/access/transam/xlogrecovery.c` (lines
 //! 1671-2584), driving the held recovery reader ([`crate::walrecovery`]) and the
-//! real rmgr dispatch table ([`rmgr::GetRmgr`]).
+//! real rmgr dispatch table ([`::rmgr::GetRmgr`]).
 //!
 //! # Held-reader model
 //!
@@ -33,16 +33,16 @@ use utils_error::{ereport, elog};
 use types_core::{TimeLineID, TimestampTz};
 use types_core::{InvalidXLogRecPtr, XLogRecPtr};
 use types_error::{ErrorLocation, PgError, DEBUG1, FATAL, LOG, PANIC};
-use wal::wal::{XLR_CHECK_CONSISTENCY, XLR_INFO_MASK};
-use wal::wal::{RM_XACT_ID, RM_XLOG_ID};
-use wal::xact::{
+use ::wal::wal::{XLR_CHECK_CONSISTENCY, XLR_INFO_MASK};
+use ::wal::wal::{RM_XACT_ID, RM_XLOG_ID};
+use ::wal::xact::{
     XLOG_XACT_ABORT, XLOG_XACT_ABORT_PREPARED, XLOG_XACT_COMMIT, XLOG_XACT_COMMIT_PREPARED,
     XLOG_XACT_OPMASK,
 };
-use wal::xlogutils::STANDBY_INITIALIZED;
-use wal::rmgrdesc::{xl_end_of_recovery, xl_overwrite_contrecord, xl_restore_point, CheckPoint};
+use ::wal::xlogutils::STANDBY_INITIALIZED;
+use ::wal::rmgrdesc::{xl_end_of_recovery, xl_overwrite_contrecord, xl_restore_point, CheckPoint};
 
-use rmgr::GetRmgr;
+use ::rmgr::GetRmgr;
 
 use crate::core::{
     lsn_fmt, RecordRef, RecoveryPauseState, RecoveryTargetAction, RecoveryTargetType,
@@ -51,7 +51,7 @@ use crate::core::{
 };
 use crate::walrecovery::{reader_state, reader_state_mut};
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 // Outward owner seams.
 use varsup_seams as varsup_seam;
@@ -78,7 +78,7 @@ fn loc(lineno: i32, func: &str) -> ErrorLocation {
 }
 
 /// `BLCKSZ` (pg_config.h) — the page size used for the masked-page buffers.
-const BLCKSZ: usize = types_core::primitive::BLCKSZ;
+const BLCKSZ: usize = ::types_core::primitive::BLCKSZ;
 
 /// `timestamptz_to_str(t)` rendered into an owned `String` for a log message.
 /// The C `timestamptz_to_str` never fails (it writes a static buffer); the
@@ -175,7 +175,7 @@ pub fn perform_wal_recovery<'mcx>(
         st.in_redo = true;
 
         // RmgrStartup() — start up all resource managers.
-        rmgr::RmgrStartup(mcx)?;
+        ::rmgr::RmgrStartup(mcx)?;
 
         let _ = ereport(LOG)
             .errmsg(format!(
@@ -265,7 +265,7 @@ pub fn perform_wal_recovery<'mcx>(
             }
         }
 
-        rmgr::RmgrCleanup();
+        ::rmgr::RmgrCleanup();
 
         let _ = ereport(LOG)
             .errmsg(format!(
@@ -299,7 +299,7 @@ pub fn perform_wal_recovery<'mcx>(
         && !reached_recovery_target
     {
         ereport(FATAL)
-            .errcode(types_error::ERRCODE_CONFIG_FILE_ERROR)
+            .errcode(::types_error::ERRCODE_CONFIG_FILE_ERROR)
             .errmsg("recovery ended before configured recovery target was reached")
             .finish(loc(1919, "PerformWalRecovery"))?;
     }
@@ -386,7 +386,7 @@ pub(crate) fn apply_wal_record(
 
     // If we are attempting to enter Hot Standby mode, process XIDs we see.
     if xlogutils_seam::standby_state::call() >= STANDBY_INITIALIZED
-        && types_core::xact::TransactionIdIsValid(xl_xid)
+        && ::types_core::xact::TransactionIdIsValid(xl_xid)
     {
         procarray_seam::record_known_assigned_transaction_ids::call(xl_xid)?;
     }
@@ -611,7 +611,7 @@ pub(crate) fn check_recovery_consistency(st: &mut XLogRecoveryState) -> Result<(
     // Have we got a valid starting snapshot that will allow queries to be run?
     // If so, we can tell postmaster that the database is consistent now,
     // enabling connections.
-    if xlogutils_seam::standby_state::call() == wal::xlogutils::STANDBY_SNAPSHOT_READY
+    if xlogutils_seam::standby_state::call() == ::wal::xlogutils::STANDBY_SNAPSHOT_READY
         && !st.local_hot_standby_active
         && st.reached_consistency
         && init_small_seams::is_under_postmaster::call()
@@ -648,7 +648,7 @@ fn check_tablespace_directory() -> Result<(), PgError> {
         // a valid data directory it always exists.
         Err(e) => {
             return Err(PgError::new(
-                types_error::ERROR,
+                ::types_error::ERROR,
                 format!("could not open directory \"{PG_TBLSPC_DIR}\": {e}"),
             ));
         }
@@ -679,12 +679,12 @@ fn check_tablespace_directory() -> Result<(), PgError> {
 
         if !is_lnk {
             let level = if allow_in_place {
-                types_error::WARNING
+                ::types_error::WARNING
             } else {
                 PANIC
             };
             ereport(level)
-                .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+                .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
                 .errmsg(format!(
                     "unexpected directory entry \"{}\" found in {PG_TBLSPC_DIR}",
                     de.file_name().to_string_lossy()
@@ -826,7 +826,7 @@ pub(crate) fn verify_backup_page_consistency(
     _st: &XLogRecoveryState,
     _record: RecordRef,
 ) -> Result<(), PgError> {
-    use types_storage::buf::BUFFER_LOCK_EXCLUSIVE;
+    use ::types_storage::buf::BUFFER_LOCK_EXCLUSIVE;
     use types_storage::{BufferIsValid, InvalidBuffer, ReadBufferMode};
 
     let rmid = xlogreader::XLogRecGetRmid(reader_state());
@@ -913,8 +913,8 @@ pub(crate) fn verify_backup_page_consistency(
             &mut primary_image_masked,
         )? {
             let msg = xlogreader::reader_errormsg_buf(reader_state());
-            return Err(PgError::new(types_error::ERROR, msg)
-                .with_sqlstate(types_error::ERRCODE_INTERNAL_ERROR));
+            return Err(PgError::new(::types_error::ERROR, msg)
+                .with_sqlstate(::types_error::ERRCODE_INTERNAL_ERROR));
         }
 
         // If masking function is defined, mask both the primary and replay

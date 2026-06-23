@@ -38,7 +38,7 @@ use types_error::{
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, FATAL,
 };
 
-use mbutils_seams::pg_mblen_range;
+use ::mbutils_seams::pg_mblen_range;
 
 /// C: `VARHDRSZ` — `sizeof(int32)`. Used only to size the `MaxAllocSize`
 /// overflow guard exactly as the C does (`resultlen > MaxAllocSize - VARHDRSZ`).
@@ -147,7 +147,7 @@ fn run_conversion<'mcx>(
 
     // C: result = (text *) palloc(VARHDRSZ + resultlen). The result buffer is a
     // context-charged `PgVec<u8>` zero-filled to `resultlen`.
-    let mut result = mcx::vec_with_capacity_in(mcx, resultlen as usize)?;
+    let mut result = ::mcx::vec_with_capacity_in(mcx, resultlen as usize)?;
     result.resize(resultlen as usize, 0);
 
     // C: res = enc->encode/decode(VARDATA_ANY(data), datalen, VARDATA(result)).
@@ -173,7 +173,7 @@ fn run_conversion<'mcx>(
 /// `len*2 + 2 + 1` and calls `hex_encode(VARDATA_ANY(vlena), len, rp)`; this
 /// returns just the hex bytes (the caller adds the `\x` prefix and NUL).
 fn seam_hex_encode<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let mut dst = mcx::vec_with_capacity_in(mcx, src.len() * 2)?;
+    let mut dst = ::mcx::vec_with_capacity_in(mcx, src.len() * 2)?;
     dst.resize(src.len() * 2, 0);
     let n = hex_encode(src, dst.as_mut_slice());
     dst.truncate(n as usize);
@@ -197,7 +197,7 @@ fn seam_hex_decode_safe<'mcx>(
     src: &[u8],
     soft: bool,
 ) -> PgResult<Result<PgVec<'mcx, u8>, PgError>> {
-    let mut dst = mcx::vec_with_capacity_in(mcx, hex_dec_len(src) as usize)?;
+    let mut dst = ::mcx::vec_with_capacity_in(mcx, hex_dec_len(src) as usize)?;
     dst.resize(hex_dec_len(src) as usize, 0);
 
     if soft {
@@ -238,8 +238,8 @@ pub fn init_seams() {
 // `decode(text, text)` SQL functions; they cross the by-ref varlena lane.
 // ---------------------------------------------------------------------------
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARDATA_ANY` payload bytes of a by-ref varlena arg: skip the 1-byte (short)
@@ -276,7 +276,7 @@ fn arg_varlena_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a 
 /// `backend-utils-adt-varlena`); the wire layer strips the header downstream.
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: &[u8]) -> Datum {
     let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ as usize);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(
         bytes.len() + VARHDRSZ as usize,
     ));
     image.extend_from_slice(bytes);
@@ -288,8 +288,8 @@ fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: &[u8]) -> Datum {
 /// `ereport(ERROR)` of an unrecognized encoding name travels back as
 /// `Err(PgError)` straight to the fmgr dispatch `invoke_builtin`, with no
 /// panic/catch_unwind.
-fn fc_binary_encode(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let scratch = mcx::MemoryContext::new("binary_encode scratch");
+fn fc_binary_encode(fcinfo: &mut FunctionCallInfoBaseData) -> ::types_error::PgResult<Datum> {
+    let scratch = ::mcx::MemoryContext::new("binary_encode scratch");
     let result: Vec<u8> = {
         let data = arg_varlena_bytes(fcinfo, 0);
         let name = arg_varlena_bytes(fcinfo, 1);
@@ -303,8 +303,8 @@ fn fc_binary_encode(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRes
 }
 
 /// `binary_decode(text, text) -> bytea` (C `binary_decode`).
-fn fc_binary_decode(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let scratch = mcx::MemoryContext::new("binary_decode scratch");
+fn fc_binary_decode(fcinfo: &mut FunctionCallInfoBaseData) -> ::types_error::PgResult<Datum> {
+    let scratch = ::mcx::MemoryContext::new("binary_decode scratch");
     let result: Vec<u8> = {
         let data = arg_varlena_bytes(fcinfo, 0);
         let name = arg_varlena_bytes(fcinfo, 1);

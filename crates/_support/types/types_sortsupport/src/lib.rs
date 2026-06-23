@@ -21,9 +21,9 @@
 
 #![no_std]
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Oid};
-use datum::Datum;
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::datum::Datum;
 
 /// `int BTORDER_PROC` (access/nbtree.h) — opfamily support-function number of
 /// the btree comparison (`cmp`) function.

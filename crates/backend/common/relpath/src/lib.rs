@@ -23,15 +23,15 @@
 #![allow(non_upper_case_globals)]
 
 use mcx::{Mcx, PgString};
-use types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
-use types_core::primitive::{
+use ::types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+use ::types_core::primitive::{
     ForkNumber, Oid, ProcNumber, RelFileNumber, INVALID_PROC_NUMBER, MAIN_FORKNUM, MAX_FORKNUM,
 };
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
-use types_storage::file::{
+use ::types_storage::file::{
     FORKNAMECHARS, OIDCHARS, PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY,
 };
-use types_storage::RelFileLocator;
+use ::types_storage::RelFileLocator;
 
 /// `PROCNUMBER_CHARS` (`common/relpath.h`) — max chars to allow for a
 /// `procNumber` in a relation path. `MAX_BACKENDS` is `2^18 - 1`, so the widest
@@ -264,7 +264,7 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_core::primitive::{FSM_FORKNUM, INIT_FORKNUM, VISIBILITYMAP_FORKNUM};
+    use ::types_core::primitive::{FSM_FORKNUM, INIT_FORKNUM, VISIBILITYMAP_FORKNUM};
 
     #[test]
     fn rel_path_str_maxlen_matches_c() {

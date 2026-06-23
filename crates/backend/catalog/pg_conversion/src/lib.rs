@@ -20,24 +20,24 @@
 
 use mcx::{Mcx, MemoryContext, PgVec};
 
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID,
 };
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-use types_catalog::pg_conversion::{
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_conversion::{
     Anum_pg_conversion_conname, Anum_pg_conversion_condefault, Anum_pg_conversion_conforencoding,
     Anum_pg_conversion_connamespace, Anum_pg_conversion_conproc, Anum_pg_conversion_contoencoding,
     ConversionDefaultIndexId, ConversionNameNspIndexId, ConversionRelationId, PgConversionInsertRow,
 };
-use types_core::fmgr::{F_INT4EQ, F_NAMEEQ, F_OIDEQ};
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_core::fmgr::{F_INT4EQ, F_NAMEEQ, F_OIDEQ};
+use ::types_core::primitive::{InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
 use indexing_seams as indexing_seams;
@@ -92,7 +92,7 @@ fn int4_key<'mcx>(attno: i16, value: i32) -> PgResult<ScanKeyData<'mcx>> {
 /// CStringGetDatum(value))`. The name crosses as a NUL-terminated byte image
 /// (the genam owner's `nameeq` comparator interprets it).
 fn name_key<'mcx>(mcx: Mcx<'mcx>, attno: i16, value: &str) -> PgResult<ScanKeyData<'mcx>> {
-    let mut bytes: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, value.len() + 1)?;
+    let mut bytes: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, value.len() + 1)?;
     for &b in value.as_bytes() {
         bytes.push(b);
     }

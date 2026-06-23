@@ -29,7 +29,7 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use crate::regex_consts::REG_ECOLORS;
 use crate::regex_error::{RegError, RegResult};

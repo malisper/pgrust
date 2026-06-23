@@ -3,7 +3,7 @@ use types_core::{
     uint16, uint32, uint8, AttrNumber, BlockNumber, CommandId, OffsetNumber, Oid, Size,
     TransactionId,
 };
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 pub use crate::common_heaptuple::*;
 
@@ -199,11 +199,11 @@ pub const INDEX_SIZE_MASK: uint16 = 0x1FFF;
 pub const INDEX_AM_RESERVED_BIT: uint16 = 0x2000;
 pub const INDEX_VAR_MASK: uint16 = 0x4000;
 pub const INDEX_NULL_MASK: uint16 = 0x8000;
-pub const INDEX_ATTRIBUTE_BITMAP_BYTES: usize = (types_core::INDEX_MAX_KEYS as usize + 8 - 1) / 8;
+pub const INDEX_ATTRIBUTE_BITMAP_BYTES: usize = (::types_core::INDEX_MAX_KEYS as usize + 8 - 1) / 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NameData {
-    pub data: [u8; types_core::NAMEDATALEN as usize],
+    pub data: [u8; ::types_core::NAMEDATALEN as usize],
 }
 
 impl NameData {
@@ -225,7 +225,7 @@ impl NameData {
     pub fn namestrcpy(&mut self, src: &str) {
         self.data.fill(0);
         let bytes = src.as_bytes();
-        let limit = types_core::NAMEDATALEN as usize - 1;
+        let limit = ::types_core::NAMEDATALEN as usize - 1;
         let len = bytes.len().min(limit);
         self.data[..len].copy_from_slice(&bytes[..len]);
     }
@@ -234,7 +234,7 @@ impl NameData {
 impl Default for NameData {
     fn default() -> Self {
         Self {
-            data: [0; types_core::NAMEDATALEN as usize],
+            data: [0; ::types_core::NAMEDATALEN as usize],
         }
     }
 }
@@ -303,7 +303,7 @@ impl ItemPointerData {
     /// `ItemPointerSetInvalid(pointer)` (`storage/itemptr.h`): blkid =
     /// `InvalidBlockNumber`, posid = `InvalidOffsetNumber`.
     pub const fn invalid() -> Self {
-        Self::new(types_core::primitive::InvalidBlockNumber, INVALID_OFFSET_NUMBER)
+        Self::new(::types_core::primitive::InvalidBlockNumber, INVALID_OFFSET_NUMBER)
     }
 }
 
@@ -382,7 +382,7 @@ impl<'mcx> HeapTupleHeaderData<'mcx> {
     /// matching the C union accessors.
     pub fn read_on_page(mcx: Mcx<'mcx>, item: &[u8]) -> PgResult<HeapTupleHeaderData<'mcx>> {
         if item.len() < ON_PAGE_HEADER_SIZE {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "heap tuple item shorter than header",
             ));
         }
@@ -470,7 +470,7 @@ impl<'mcx> HeapTupleHeaderData<'mcx> {
     /// tuple's user-data area past byte 23 are left untouched.
     pub fn write_on_page(&self, item: &mut [u8]) -> PgResult<()> {
         if item.len() < ON_PAGE_HEADER_SIZE {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "heap tuple item shorter than header",
             ));
         }
@@ -630,15 +630,15 @@ pub struct TupleConstr<'mcx> {
 
 impl TupleConstr<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<TupleConstr<'b>> {
-        let mut defval = mcx::vec_with_capacity_in(mcx, self.defval.len())?;
+        let mut defval = ::mcx::vec_with_capacity_in(mcx, self.defval.len())?;
         for d in &self.defval {
             defval.push(d.clone_in(mcx)?);
         }
-        let mut check = mcx::vec_with_capacity_in(mcx, self.check.len())?;
+        let mut check = ::mcx::vec_with_capacity_in(mcx, self.check.len())?;
         for c in &self.check {
             check.push(c.clone_in(mcx)?);
         }
-        let mut missing = mcx::vec_with_capacity_in(mcx, self.missing.len())?;
+        let mut missing = ::mcx::vec_with_capacity_in(mcx, self.missing.len())?;
         for m in &self.missing {
             missing.push(m.clone_in(mcx)?);
         }
@@ -904,7 +904,7 @@ pub const fn HeapTupleHeaderXminFrozen(tup: &HeapTupleHeaderData) -> bool {
 /// `FrozenTransactionId` if the tuple is frozen, else the raw xmin.
 pub fn HeapTupleHeaderGetXmin(tup: &HeapTupleHeaderData) -> TransactionId {
     if HeapTupleHeaderXminFrozen(tup) {
-        types_core::xact::FrozenTransactionId
+        ::types_core::xact::FrozenTransactionId
     } else {
         HeapTupleHeaderGetRawXmin(tup)
     }

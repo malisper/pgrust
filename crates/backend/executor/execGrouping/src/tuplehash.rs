@@ -24,8 +24,8 @@
 //! inputslot" sentinel); the real tuple reaches the callbacks through the
 //! owning table's input slot.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::nodeagg::{
     TupleHashEntryData, TuplehashHash, TUPLEHASH_STATUS_EMPTY, TUPLEHASH_STATUS_IN_USE,
 };
@@ -90,7 +90,7 @@ fn sh_compute_size(newsize: u64) -> PgResult<u64> {
     if (core::mem::size_of::<TupleHashEntryData>() as u64).saturating_mul(size)
         >= (usize::MAX as u64) / 2
     {
-        return Err(types_error::PgError::error("hash table too large"));
+        return Err(::types_error::PgError::error("hash table too large"));
     }
 
     Ok(size)
@@ -135,8 +135,8 @@ pub fn create<'mcx>(mcx: Mcx<'mcx>, nelements: u32) -> PgResult<TuplehashHash<'m
 fn alloc_zeroed_buckets<'mcx>(
     mcx: Mcx<'mcx>,
     size: usize,
-) -> PgResult<mcx::PgVec<'mcx, TupleHashEntryData<'mcx>>> {
-    let mut data: mcx::PgVec<'mcx, TupleHashEntryData<'mcx>> = mcx::PgVec::new_in(mcx);
+) -> PgResult<::mcx::PgVec<'mcx, TupleHashEntryData<'mcx>>> {
+    let mut data: ::mcx::PgVec<'mcx, TupleHashEntryData<'mcx>> = ::mcx::PgVec::new_in(mcx);
     data.try_reserve(size).map_err(|_| mcx.oom(size))?;
     for _ in 0..size {
         data.push(TupleHashEntryData::empty(mcx));
@@ -299,7 +299,7 @@ pub fn insert_hash<'mcx>(
         // We do the grow check even if the key is actually present.
         if tb.members >= tb.grow_threshold {
             if tb.size == SH_MAX_SIZE {
-                return Err(types_error::PgError::error("hash table size exceeded"));
+                return Err(::types_error::PgError::error("hash table size exceeded"));
             }
             let twice = tb.size * 2;
             grow(mcx, tb, twice)?;

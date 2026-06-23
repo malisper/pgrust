@@ -19,7 +19,7 @@
 // (`cz`, `ps`, `PlannerInfo`, `PathId`, `RelId`, `QualCost`, ...). Only the
 // joinpath-seams alias is added here.
 use joinpath_seams as jp;
-use pathnodes::NodeId;
+use ::pathnodes::NodeId;
 
 /// `MAXALIGN(SizeofMinimalTupleHeader)` (htup_details.h). The minimal-tuple
 /// header is `offsetof(MinimalTupleData, t_bits)`; on supported targets this is
@@ -211,13 +211,13 @@ pub fn init_seams() {
  * ------------------------------------------------------------------------ */
 
 fn get_foreign_key_join_selectivity_seam<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     outer_rel: RelId,
     inner_rel: RelId,
-    sjinfo: &pathnodes::SpecialJoinInfo,
-    restrictlist: &[pathnodes::RinfoId],
-) -> (types_core::primitive::Selectivity, Vec<pathnodes::RinfoId>) {
+    sjinfo: &::pathnodes::SpecialJoinInfo,
+    restrictlist: &[::pathnodes::RinfoId],
+) -> (types_core::primitive::Selectivity, Vec<::pathnodes::RinfoId>) {
     let outer_relids = root.rel(outer_rel).relids.clone();
     let inner_relids = root.rel(inner_rel).relids.clone();
     crate::joins::get_foreign_key_join_selectivity(
@@ -242,7 +242,7 @@ fn cost_tidscan_seam(root: &mut PlannerInfo, path: PathId, rel: RelId, tidquals:
     crate::scans::cost_tidscan(root, path, rel, tidquals);
 }
 fn cost_tidrangescan_seam<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
     rel: RelId,
@@ -254,7 +254,7 @@ fn cost_tidrangescan_seam<'mcx>(
 fn cost_merge_append_seam(
     root: &mut PlannerInfo,
     path: PathId,
-    pathkeys: &[pathnodes::PathKey],
+    pathkeys: &[::pathnodes::PathKey],
     n_streams: i32,
     input_disabled_nodes: i32,
     input_startup_cost: types_core::primitive::Cost,
@@ -285,7 +285,7 @@ fn cost_gather_seam(
 fn cost_sort_seam(
     root: &mut PlannerInfo,
     path: PathId,
-    pathkeys: &[pathnodes::PathKey],
+    pathkeys: &[::pathnodes::PathKey],
     input_disabled_nodes: i32,
     input_cost: types_core::primitive::Cost,
     tuples: f64,
@@ -309,10 +309,10 @@ fn cost_sort_seam(
 }
 
 fn cost_incremental_sort_seam<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
-    pathkeys: &[pathnodes::PathKey],
+    pathkeys: &[::pathnodes::PathKey],
     presorted_keys: i32,
     input_disabled_nodes: i32,
     input_startup_cost: types_core::primitive::Cost,
@@ -341,10 +341,10 @@ fn cost_incremental_sort_seam<'mcx>(
 }
 
 fn cost_agg_seam<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
-    aggstrategy: pathnodes::AggStrategy,
+    aggstrategy: ::pathnodes::AggStrategy,
     aggcosts: Option<ps::AggClauseCostsLite>,
     num_group_cols: i32,
     num_groups: f64,
@@ -373,7 +373,7 @@ fn cost_agg_seam<'mcx>(
 }
 
 fn cost_windowagg_seam<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
     window_funcs: &[NodeId],

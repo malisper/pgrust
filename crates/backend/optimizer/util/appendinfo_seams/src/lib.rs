@@ -21,7 +21,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use pathnodes::{
     AppendRelInfo, IndexClause, NodeId, PlannerInfo, RelId, Relids, RinfoId,
 };
@@ -105,12 +105,12 @@ seam_core::seam!(
     /// `palloc`, so it returns [`PgResult`].
     ///
     /// The C body reads `root->parse` (`commandType`/`resultRelation`/`rtable`),
-    /// which is the opaque [`pathnodes::QueryId`] here; the planner-run
+    /// which is the opaque [`::pathnodes::QueryId`] here; the planner-run
     /// resolver (`run`) resolves it to the owned `Query<'mcx>`, and `mcx` is the
     /// planner arena the rare constraint-exclusion edge case allocates in.
     pub fn distribute_row_identity_vars<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
     ) -> PgResult<()>
 );
@@ -121,7 +121,7 @@ seam_core::seam!(
     /// `root->processed_tlist` for an UPDATE/DELETE/MERGE target relation.
     /// `preprocess_targetlist` (preptlist.c) drives it. The caller passes the
     /// resolved relation fields (`relkind`/`relid`) plus the resolved
-    /// `command_type`/`result_relation` (the opaque [`pathnodes::QueryId`]
+    /// `command_type`/`result_relation` (the opaque [`::pathnodes::QueryId`]
     /// resolves only through the caller's run). `has_delete_row_trigger` is the
     /// foreign-table delete-trigger predicate.
     pub fn add_row_identity_columns(

@@ -58,8 +58,8 @@ use alloc::string::ToString;
 use alloc::vec::Vec as StdVec;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
-use types_core::primitive::{BlockNumber, OffsetNumber, RmgrId, Size, TransactionId};
-use types_core::xact::TransactionIdIsValid;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, RmgrId, Size, TransactionId};
+use ::types_core::xact::TransactionIdIsValid;
 use types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
 use types_nbtree::{
     xl_btree_insert, xl_btree_metadata, xl_btree_newroot, xl_btree_split, BTMetaPageData,
@@ -71,14 +71,14 @@ use types_nbtree::{
     XLOG_BTREE_INSERT_POST, XLOG_BTREE_INSERT_UPPER, XLOG_BTREE_NEWROOT, XLOG_BTREE_SPLIT_L,
     XLOG_BTREE_SPLIT_R,
 };
-use rel::Relation;
-use types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE};
-use types_storage::storage::{Buffer, InvalidBuffer};
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE};
+use ::types_storage::storage::{Buffer, InvalidBuffer};
+use ::types_tuple::heaptuple::{
     BlockIdData, IndexTupleData, IndexTupleSize, ItemPointerData,
     INVALID_OFFSET_NUMBER, FIRST_OFFSET_NUMBER,
 };
-use wal::xloginsert::{REGBUF_STANDARD, REGBUF_WILL_INIT};
+use ::wal::xloginsert::{REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use page::{
     ItemIdGetLength, ItemIdIsDead, ItemPointerCompare, PageAddItemExtended,
@@ -310,7 +310,7 @@ fn P_ISROOT(o: &BTPageOpaqueData) -> bool {
 }
 #[inline]
 fn P_IGNORE(o: &BTPageOpaqueData) -> bool {
-    (o.btpo_flags & (types_nbtree::BTP_DELETED | types_nbtree::BTP_HALF_DEAD)) != 0
+    (o.btpo_flags & (::types_nbtree::BTP_DELETED | ::types_nbtree::BTP_HALF_DEAD)) != 0
 }
 #[inline]
 fn P_INCOMPLETE_SPLIT(o: &BTPageOpaqueData) -> bool {
@@ -382,7 +382,7 @@ fn BTreeTupleSetNAtts(bytes: &mut [u8], natts: u16, heaptid: bool) {
     hdr.t_info |= INDEX_ALT_TID_MASK;
     let mut offset = natts;
     if heaptid {
-        offset |= types_nbtree::BT_PIVOT_HEAP_TID_ATTR;
+        offset |= ::types_nbtree::BT_PIVOT_HEAP_TID_ATTR;
     }
     ipd_set_offset(&mut hdr.t_tid, offset);
     write_index_tuple_header(bytes, &hdr);
@@ -396,14 +396,14 @@ fn copy_index_tuple<'mcx>(mcx: Mcx<'mcx>, itup: &[u8]) -> PgResult<PgVec<'mcx, u
     Ok(v)
 }
 
-/// Build an [`IndexTuple`](types_tuple::heaptuple::IndexTuple) header box from
+/// Build an [`IndexTuple`](::types_tuple::heaptuple::IndexTuple) header box from
 /// the leading 8 bytes of `itup`, for storing into `insertstate.itup` (whose
 /// field type is the header-carrier box; the actual on-page bytes are carried
 /// separately by the insert path).
 fn index_tuple_box<'mcx>(
     mcx: Mcx<'mcx>,
     itup: &[u8],
-) -> PgResult<types_tuple::heaptuple::IndexTuple<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::IndexTuple<'mcx>> {
     Ok(Some(alloc_in(mcx, index_tuple_header(itup))?))
 }
 
@@ -549,7 +549,7 @@ fn table_index_fetch_tuple_check<'mcx>(
     all_dead: Option<&mut bool>,
     dirty: Option<&mut DirtyConflict>,
 ) -> PgResult<bool> {
-    use snapshot::snapshot::{SnapshotData, SnapshotType};
+    use ::snapshot::snapshot::{SnapshotData, SnapshotType};
 
     let snap_type = if snapshot_self {
         SnapshotType::SNAPSHOT_SELF
@@ -603,7 +603,7 @@ fn build_index_value_desc<'mcx>(
         rel.rd_att.as_ref(),
     )?;
 
-    let mut values: StdVec<types_tuple::heaptuple::Datum<'mcx>> =
+    let mut values: StdVec<::types_tuple::heaptuple::Datum<'mcx>> =
         StdVec::with_capacity(columns.len());
     let mut isnull: StdVec<bool> = StdVec::with_capacity(columns.len());
     for (value, null) in columns.iter() {
@@ -816,7 +816,7 @@ fn _bt_doinsert_inner<'mcx>(
                         xwait,
                         rel_name(rel).to_string(),
                         itup_t_tid,
-                        types_storage::lock::XLTW_Oper::InsertIndex,
+                        ::types_storage::lock::XLTW_Oper::InsertIndex,
                     )?;
                 }
 

@@ -65,7 +65,7 @@ pub(crate) fn with_query_mcx<R>(f: impl for<'mcx> FnOnce(mcx::Mcx<'mcx>) -> R) -
 /// The rich, lifetime-bearing value [`Datum`] the expanded-record substrate
 /// reads/writes (`ByVal` word / `ByRef` varlena image / `Composite` / …), as
 /// distinct from PL/pgSQL's bare-word [`Datum`] (`datum::Datum`).
-use types_tuple::heaptuple::Datum as RichDatum;
+use ::types_tuple::heaptuple::Datum as RichDatum;
 
 /// `InvalidOid` — the zero OID sentinel.
 const INVALID_OID: Oid = 0;
@@ -155,7 +155,7 @@ fn loop_rc_processing(
 
 /// `get_stmt_mcontext(estate)` (pl_exec.c) — return the current statement-
 /// lifespan memory context, creating it on demand.
-fn get_stmt_mcontext(estate: &mut PLpgSQL_execstate) -> Option<plpgsql::MemoryContext> {
+fn get_stmt_mcontext(estate: &mut PLpgSQL_execstate) -> Option<::plpgsql::MemoryContext> {
     // The on-demand creation (AllocSetContextCreate under stmt_mcontext_parent)
     // is a memory-substrate op; the control-flow effect modeled here is the
     // "current context" handoff.
@@ -187,7 +187,7 @@ pub fn exec_toplevel_block(
     estate: &mut PLpgSQL_execstate,
     block: &PLpgSQL_stmt_block,
 ) -> PLpgSQL_rc_result {
-    estate.err_stmt = Some(plpgsql::ErrStmtMark {
+    estate.err_stmt = Some(::plpgsql::ErrStmtMark {
         lineno: block.lineno,
         typename: "statement block",
     });
@@ -524,7 +524,7 @@ fn rollback_and_release_current_subtransaction(
 /// ```
 fn assign_error_vars(
     estate: &mut PLpgSQL_execstate,
-    block: &plpgsql::PLpgSQL_exception_block,
+    block: &::plpgsql::PLpgSQL_exception_block,
     edata: &types_error::PgError,
 ) -> types_error::PgResult<()> {
     // C's assign_error_vars binds the implicit SQLSTATE / SQLERRM special vars
@@ -828,8 +828,8 @@ fn stmt_lineno(stmt: &PLpgSQL_stmt) -> int32 {
 }
 
 /// Build the `err_stmt` marker for a statement.
-fn err_stmt_mark(stmt: &PLpgSQL_stmt) -> plpgsql::ErrStmtMark {
-    plpgsql::ErrStmtMark {
+fn err_stmt_mark(stmt: &PLpgSQL_stmt) -> ::plpgsql::ErrStmtMark {
+    ::plpgsql::ErrStmtMark {
         lineno: stmt_lineno(stmt),
         typename: stmt_typename(stmt),
     }
@@ -1377,7 +1377,7 @@ pub(crate) fn exec_eval_cleanup(estate: &mut PLpgSQL_execstate) {
 /// demand; the owned parser hook reads a pre-resolved map instead.)
 fn build_plpgsql_parse_state(
     estate: &mut PLpgSQL_execstate,
-    expr: &plpgsql::PLpgSQL_expr,
+    expr: &::plpgsql::PLpgSQL_expr,
     input_collation: Oid,
 ) -> types_error::PgResult<::nodes::parsestmt::PlpgsqlExprParseState> {
     use ::nodes::parsestmt::{PlpgsqlExprParseState, PlpgsqlParamInfo};
@@ -1417,7 +1417,7 @@ fn build_plpgsql_parse_state(
         std::vec::Vec::new();
     while let Some(ns) = cur {
         match ns.itemtype {
-            plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_VAR => {
+            ::plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_VAR => {
                 let dno = ns.itemno;
                 if dno >= 0 && (dno as usize) < estate.datums.len() {
                     if let PLpgSQL_datum::Var(v) = &estate.datums[dno as usize] {
@@ -1442,7 +1442,7 @@ fn build_plpgsql_parse_state(
             // comp↔exec `plpgsql_exec_get_datum_type_info` RECFIELD edge). A whole
             // record bareword (`rec` alone) also resolves, to the REC datum's
             // composite Param.
-            plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_REC => {
+            ::plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_REC => {
                 let rec_dno = ns.itemno;
                 if rec_dno < 0 || (rec_dno as usize) >= estate.datums.len() {
                     cur = ns.prev.as_deref();
@@ -1531,7 +1531,7 @@ fn build_plpgsql_parse_state(
                     pending_keys.push((key, info));
                 }
             }
-            plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_LABEL => {
+            ::plpgsql::PLpgSQL_nsitem_type::PLPGSQL_NSTYPE_LABEL => {
                 let label = ns.name.to_ascii_lowercase();
                 labels.insert(label.clone());
                 // Re-register this level's bindings under `<label>.<key>` so a
@@ -1557,13 +1557,13 @@ fn build_plpgsql_parse_state(
     // columnref hook split (plpgsql_pre_column_ref / plpgsql_post_column_ref)
     // can apply variable-vs-column precedence and raise the ambiguity error.
     let resolve_option = match estate.resolve_option {
-        plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_ERROR => {
+        ::plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_ERROR => {
             ::nodes::parsestmt::PlpgsqlResolveOption::Error
         }
-        plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_VARIABLE => {
+        ::plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_VARIABLE => {
             ::nodes::parsestmt::PlpgsqlResolveOption::Variable
         }
-        plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_COLUMN => {
+        ::plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_COLUMN => {
             ::nodes::parsestmt::PlpgsqlResolveOption::Column
         }
     };
@@ -1633,12 +1633,12 @@ fn rich_datum_to_param(value: &RichDatum<'_>, isnull: bool, typeid: Oid) -> exec
 fn resolve_recfield_finfo(
     handle: u64,
     fieldname: &str,
-) -> types_error::PgResult<Option<plpgsql::ExpandedRecordFieldInfo>> {
+) -> types_error::PgResult<Option<::plpgsql::ExpandedRecordFieldInfo>> {
     let r = erh_table::with_erh_mut(handle, |mcx, erh| {
-        match misc2::expandedrecord::expanded_record_lookup_field(
+        match ::misc2::expandedrecord::expanded_record_lookup_field(
             mcx, erh, fieldname,
         ) {
-            Ok(Some(fi)) => Ok(Some(plpgsql::ExpandedRecordFieldInfo {
+            Ok(Some(fi)) => Ok(Some(::plpgsql::ExpandedRecordFieldInfo {
                 fnumber: fi.fnumber,
                 ftypeid: fi.ftypeid,
                 ftypmod: fi.ftypmod,
@@ -1696,7 +1696,7 @@ fn record_name_for(estate: &PLpgSQL_execstate, dno: int32) -> String {
 /// header (the field reads as NULL via the surrounding `None`-default).
 fn snapshot_recfield(
     estate: &PLpgSQL_execstate,
-    rf: &plpgsql::PLpgSQL_recfield,
+    rf: &::plpgsql::PLpgSQL_recfield,
 ) -> types_error::PgResult<Option<exec_seams::EvalParamValue>> {
     let parent = &estate.datums[rf.recparentno as usize];
     let PLpgSQL_datum::Rec(rec) = parent else {
@@ -1716,7 +1716,7 @@ fn snapshot_recfield(
         return Ok(None);
     };
     let r = erh_table::with_erh_mut(handle, |mcx, erh| {
-        match misc2::expandedrecord::expanded_record_fetch_field(
+        match ::misc2::expandedrecord::expanded_record_fetch_field(
             mcx,
             erh,
             finfo.fnumber,
@@ -1836,7 +1836,7 @@ fn exec_eval_datum_impl(
     estate: &mut PLpgSQL_execstate,
     datum: &PLpgSQL_datum,
 ) -> types_error::PgResult<(Oid, int32, Datum, bool)> {
-    use misc2::expandedrecord as er;
+    use ::misc2::expandedrecord as er;
     estate.last_eval_byref = None;
     match datum {
         PLpgSQL_datum::Var(var) => {
@@ -2023,7 +2023,7 @@ fn rich_datum_to_word(value: &RichDatum<'_>, isnull: bool) -> (usize, Option<Vec
 /// pass-by-value datum word (the by-ref-result keystone is separate).
 fn exec_eval_expr_impl(
     estate: &mut PLpgSQL_execstate,
-    expr: &plpgsql::PLpgSQL_expr,
+    expr: &::plpgsql::PLpgSQL_expr,
 ) -> types_error::PgResult<(Datum, bool, Oid, int32)> {
     // The expression's input collation (fncollation analogue): the function's
     // input collation. The execstate does not carry it directly; the variables'
@@ -2083,7 +2083,7 @@ fn exec_eval_expr_impl(
 fn exec_assign_expr_impl(
     estate: &mut PLpgSQL_execstate,
     target_dno: int32,
-    expr: &plpgsql::PLpgSQL_expr,
+    expr: &::plpgsql::PLpgSQL_expr,
 ) -> types_error::PgResult<()> {
     // exec_prepare_plan is folded into exec_eval_expr's slow path here (the
     // owned model re-prepares per call; the plan-caching optimization is the
@@ -2298,7 +2298,7 @@ fn exec_assign_value_byref_impl(
 
             let r = erh_table::with_erh_mut(handle, |mcx, erh| {
                 let rich = word_to_rich_datum(mcx, newvalue, newbyref, isnull)?;
-                misc2::expandedrecord::expanded_record_set_field_internal(
+                ::misc2::expandedrecord::expanded_record_set_field_internal(
                     mcx, erh, finfo.fnumber, rich, isnull, true, true,
                 )
             });
@@ -2371,7 +2371,7 @@ fn exec_cast_value_with_byref(
 /// the rowcount). The portal (FOR-loop cursor) leg is out of scope.
 fn exec_run_select_impl(
     estate: &mut PLpgSQL_execstate,
-    expr: &plpgsql::PLpgSQL_expr,
+    expr: &::plpgsql::PLpgSQL_expr,
     maxtuples: i64,
     set_portal: bool,
 ) -> types_error::PgResult<int32> {
@@ -2413,7 +2413,7 @@ fn exec_run_select_impl(
 fn exec_run_select_rows(
     estate: &mut PLpgSQL_execstate,
     query: &str,
-    parse_mode: plpgsql::RawParseMode,
+    parse_mode: ::plpgsql::RawParseMode,
     parse_state: ::nodes::parsestmt::PlpgsqlExprParseState,
 ) -> types_error::PgResult<Vec<Vec<exec_seams::ExecsqlColumn>>> {
     let snapshot = build_datum_snapshot(estate)?;
@@ -2437,7 +2437,7 @@ fn exec_run_select_rows(
 /// `SPI_cursor_fetch` of C is the materialize-all `exec_run_select_rows`).
 fn exec_for_query(
     estate: &mut PLpgSQL_execstate,
-    loopvar: &plpgsql::PLpgSQL_variable,
+    loopvar: &::plpgsql::PLpgSQL_variable,
     body: &[PLpgSQL_stmt],
     label: Option<&str>,
     rows: Vec<Vec<exec_seams::ExecsqlColumn>>,
@@ -2482,7 +2482,7 @@ fn exec_for_query(
 /// loop (C `PinPortal`); the caller closes it afterward.
 fn exec_for_query_cursor(
     estate: &mut PLpgSQL_execstate,
-    loopvar: &plpgsql::PLpgSQL_variable,
+    loopvar: &::plpgsql::PLpgSQL_variable,
     body: &[PLpgSQL_stmt],
     label: Option<&str>,
     portal_name: &str,
@@ -2554,9 +2554,9 @@ fn exec_stmt_call(_estate: &mut PLpgSQL_execstate) -> PLpgSQL_rc_result {
 /// target variable.
 fn exec_stmt_getdiag(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_getdiag,
+    stmt: &::plpgsql::PLpgSQL_stmt_getdiag,
 ) -> PLpgSQL_rc_result {
-    use plpgsql::PLpgSQL_getdiag_kind as K;
+    use ::plpgsql::PLpgSQL_getdiag_kind as K;
 
     // STACKED DIAGNOSTICS requires an active exception handler; the grammar and
     // pl_comp.c already reject the standalone case, but if cur_error is None
@@ -2677,7 +2677,7 @@ fn exec_stmt_getdiag(
 /// shared FOR-loop driver over its rows.
 fn exec_stmt_fors(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_fors,
+    stmt: &::plpgsql::PLpgSQL_stmt_fors,
 ) -> PLpgSQL_rc_result {
     let expr = stmt.query.as_deref().expect("FOR-IN-SELECT carries a query");
     let loopvar = stmt
@@ -2705,7 +2705,7 @@ fn exec_stmt_fors(
 /// driver over every fetched row, and close the cursor on the way out.
 fn exec_stmt_forc(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_forc,
+    stmt: &::plpgsql::PLpgSQL_stmt_forc,
 ) -> PLpgSQL_rc_result {
     // Get the cursor variable and, if it has an assigned name, check it's not
     // already in use.
@@ -2807,7 +2807,7 @@ fn read_retvar_into_columns(
     estate: &mut PLpgSQL_execstate,
     retvarno: int32,
 ) -> types_error::PgResult<Vec<exec_seams::ExecsqlColumn>> {
-    use misc2::expandedrecord as er;
+    use ::misc2::expandedrecord as er;
 
     Ok(match datum_dtype(&estate.datums[retvarno as usize]) {
         PLpgSQL_datum_type::PLPGSQL_DTYPE_VAR | PLpgSQL_datum_type::PLPGSQL_DTYPE_PROMISE => {
@@ -2945,7 +2945,7 @@ fn read_retvar_into_columns(
 /// loud.
 fn exec_stmt_return_next(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_return_next,
+    stmt: &::plpgsql::PLpgSQL_stmt_return_next,
 ) -> PLpgSQL_rc_result {
     // C: if (!estate->retisset) ereport(ERROR, "cannot use RETURN NEXT in a
     //    non-SETOF function").
@@ -3008,7 +3008,7 @@ fn exec_stmt_return_next(
 /// keystone). The materialize leg below runs end-to-end; the sink stays loud.
 fn exec_stmt_return_query(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_return_query,
+    stmt: &::plpgsql::PLpgSQL_stmt_return_query,
 ) -> PLpgSQL_rc_result {
     // C: if (!estate->retisset) ereport(ERROR, "cannot use RETURN QUERY in a
     //    non-SETOF function").
@@ -3098,9 +3098,9 @@ fn exec_stmt_return_query(
 /// SQLSTATE mapping, and the re-RAISE (no-parameters) form.
 fn exec_stmt_raise(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_raise,
+    stmt: &::plpgsql::PLpgSQL_stmt_raise,
 ) -> PLpgSQL_rc_result {
-    use plpgsql::PLpgSQL_raise_option_type as Opt;
+    use ::plpgsql::PLpgSQL_raise_option_type as Opt;
 
     let mut err_code: int32 = 0;
     let mut condname: Option<String> = None;
@@ -3403,7 +3403,7 @@ fn unpack_sql_state(sql_state: int32) -> String {
 /// message expression's string when present.
 fn exec_stmt_assert(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_assert,
+    stmt: &::plpgsql::PLpgSQL_stmt_assert,
 ) -> PLpgSQL_rc_result {
     // do nothing when asserts are not enabled
     if !exec_seams::plpgsql_check_asserts::call() {
@@ -3493,7 +3493,7 @@ pub(crate) fn emit_strict_multiassignment(level: i32) -> types_error::PgResult<(
 /// the SQL run crosses the SPI substrate through the installed seam.
 fn exec_stmt_execsql(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_execsql,
+    stmt: &::plpgsql::PLpgSQL_stmt_execsql,
 ) -> PLpgSQL_rc_result {
     let expr = stmt.sqlstmt.as_deref().expect("EXECSQL carries a sqlstmt");
 
@@ -3502,7 +3502,7 @@ fn exec_stmt_execsql(
     // function's compile-time value); the handler exposes it through a seam. The
     // resulting `too_many_rows_level` is the ereport level (ERROR / WARNING / 0).
     let too_many_rows_level: i32 = extra_check_level(
-        plpgsql::PLPGSQL_XCHECK_TOOMANYROWS,
+        ::plpgsql::PLPGSQL_XCHECK_TOOMANYROWS,
     );
 
     // setup_param_list + SPI_execute_plan_with_paramlist. C computes the row limit
@@ -3693,7 +3693,7 @@ fn exec_stmt_execsql(
 /// scope). `columns` empty == the NULL-row store.
 fn exec_move_row_into_target(
     estate: &mut PLpgSQL_execstate,
-    target: &plpgsql::PLpgSQL_variable,
+    target: &::plpgsql::PLpgSQL_variable,
     columns: &[exec_seams::ExecsqlColumn],
 ) -> types_error::PgResult<()> {
     let dno = target.dno;
@@ -3732,7 +3732,7 @@ fn exec_move_row_into_target(
             // strict_multiassignment_level (pl_exec.c exec_move_row PLpgSQL_row
             // branch): the live `plpgsql.extra_*` STRICTMULTIASSIGNMENT check.
             let strict_multiassignment_level =
-                extra_check_level(plpgsql::PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT);
+                extra_check_level(::plpgsql::PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT);
             // `anum` advances through the source columns as C does, so a target
             // with no remaining source triggers the missing-source check.
             let mut anum = 0usize;
@@ -3809,8 +3809,8 @@ fn exec_move_row_into_target(
 fn row_variable_for(
     estate: &PLpgSQL_execstate,
     dno: int32,
-) -> plpgsql::PLpgSQL_variable {
-    plpgsql::PLpgSQL_variable {
+) -> ::plpgsql::PLpgSQL_variable {
+    ::plpgsql::PLpgSQL_variable {
         dtype: datum_dtype(&estate.datums[dno as usize]),
         dno,
         refname: std::string::String::new(),
@@ -3832,8 +3832,8 @@ fn deconstruct_composite_into_columns(
     valtype: Oid,
     valtypmod: int32,
 ) -> types_error::PgResult<Vec<exec_seams::ExecsqlColumn>> {
-    use types_tuple::heaptuple::{Datum as RichDatum, FormedTuple};
-    use types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId};
+    use ::types_tuple::heaptuple::{Datum as RichDatum, FormedTuple};
+    use ::types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId};
 
     let image = value_byref.ok_or_else(|| {
         types_error::PgError::error(
@@ -3920,7 +3920,7 @@ fn deconstruct_composite_into_columns(
 /// owned model carries the by-ref image in `byref`, which outlives the cleanup).
 fn exec_eval_using_params(
     estate: &mut PLpgSQL_execstate,
-    params: &[plpgsql::PLpgSQL_expr],
+    params: &[::plpgsql::PLpgSQL_expr],
 ) -> types_error::PgResult<Vec<exec_seams::DynUsingParam>> {
     // Fast path for no parameters (C returns NULL paramLI).
     if params.is_empty() {
@@ -4001,7 +4001,7 @@ fn format_preparedparamsdata(
 /// checks).
 fn exec_stmt_dynexecute(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_dynexecute,
+    stmt: &::plpgsql::PLpgSQL_stmt_dynexecute,
 ) -> PLpgSQL_rc_result {
     let query_expr = stmt
         .query
@@ -4141,7 +4141,7 @@ fn exec_stmt_dynexecute(
 /// driver over its rows.
 fn exec_stmt_dynfors(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_dynfors,
+    stmt: &::plpgsql::PLpgSQL_stmt_dynfors,
 ) -> PLpgSQL_rc_result {
     let loopvar = stmt
         .var
@@ -4164,8 +4164,8 @@ fn exec_stmt_dynfors(
 /// without USING run end-to-end). Returns the materialized rows.
 fn exec_dynquery_with_params(
     estate: &mut PLpgSQL_execstate,
-    dynquery: &Option<Box<plpgsql::PLpgSQL_expr>>,
-    params: &[plpgsql::PLpgSQL_expr],
+    dynquery: &Option<Box<::plpgsql::PLpgSQL_expr>>,
+    params: &[::plpgsql::PLpgSQL_expr],
 ) -> types_error::PgResult<Vec<Vec<exec_seams::ExecsqlColumn>>> {
     let dynquery = dynquery
         .as_deref()
@@ -4214,8 +4214,8 @@ fn exec_dynquery_with_params(
 /// the open portal's name.
 fn exec_dynquery_open_cursor(
     estate: &mut PLpgSQL_execstate,
-    dynquery: &plpgsql::PLpgSQL_expr,
-    params: &[plpgsql::PLpgSQL_expr],
+    dynquery: &::plpgsql::PLpgSQL_expr,
+    params: &[::plpgsql::PLpgSQL_expr],
     curname: Option<String>,
     cursor_options: int32,
 ) -> types_error::PgResult<String> {
@@ -4250,7 +4250,7 @@ fn exec_dynquery_open_cursor(
 /// declared query, `cursor_explicit_expr`).
 fn exec_stmt_open(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_open,
+    stmt: &::plpgsql::PLpgSQL_stmt_open,
 ) -> PLpgSQL_rc_result {
     // Get the cursor variable and, if it has an assigned name, check it's not
     // already in use.
@@ -4331,7 +4331,7 @@ fn exec_stmt_open(
 /// target, or just MOVE the cursor position.
 fn exec_stmt_fetch(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_fetch,
+    stmt: &::plpgsql::PLpgSQL_stmt_fetch,
 ) -> PLpgSQL_rc_result {
     // Get the portal of the cursor by name.
     let curname = cursor_var_name(estate, stmt.curvar)?.ok_or_else(|| {
@@ -4365,10 +4365,10 @@ fn exec_stmt_fetch(
     };
 
     let direction = match stmt.direction {
-        plpgsql::FetchDirection::FETCH_FORWARD => exec_seams::CursorFetchDirection::Forward,
-        plpgsql::FetchDirection::FETCH_BACKWARD => exec_seams::CursorFetchDirection::Backward,
-        plpgsql::FetchDirection::FETCH_ABSOLUTE => exec_seams::CursorFetchDirection::Absolute,
-        plpgsql::FetchDirection::FETCH_RELATIVE => exec_seams::CursorFetchDirection::Relative,
+        ::plpgsql::FetchDirection::FETCH_FORWARD => exec_seams::CursorFetchDirection::Forward,
+        ::plpgsql::FetchDirection::FETCH_BACKWARD => exec_seams::CursorFetchDirection::Backward,
+        ::plpgsql::FetchDirection::FETCH_ABSOLUTE => exec_seams::CursorFetchDirection::Absolute,
+        ::plpgsql::FetchDirection::FETCH_RELATIVE => exec_seams::CursorFetchDirection::Relative,
     };
 
     let n;
@@ -4404,7 +4404,7 @@ fn exec_stmt_fetch(
 /// `exec_stmt_close(estate, stmt)` (pl_exec.c 4913) — CLOSE a cursor.
 fn exec_stmt_close(
     estate: &mut PLpgSQL_execstate,
-    stmt: &plpgsql::PLpgSQL_stmt_close,
+    stmt: &::plpgsql::PLpgSQL_stmt_close,
 ) -> PLpgSQL_rc_result {
     let curname = cursor_var_name(estate, stmt.curvar)?.ok_or_else(|| {
         types_error::PgError::error(format!(
@@ -4486,7 +4486,7 @@ pub struct FunctionResult {
 /// Control-flow-only execution never reads them.
 pub fn plpgsql_estate_setup(
     func: &PLpgSQL_function,
-    rsi: Option<plpgsql::ReturnSetInfo>,
+    rsi: Option<::plpgsql::ReturnSetInfo>,
     simple_eval_estate: Option<EState>,
     simple_eval_resowner: Option<ResourceOwner>,
 ) -> PLpgSQL_execstate {
@@ -4808,11 +4808,11 @@ pub fn plpgsql_exec_function(
 fn coerce_function_result_tuple(
     estate: &mut PLpgSQL_execstate,
 ) -> types_error::PgResult<Vec<u8>> {
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, HeapTupleHeaderSetTypMod,
         HeapTupleHeaderSetTypeId,
     };
-    use types_tuple::heaptuple::FormedTuple;
+    use ::types_tuple::heaptuple::FormedTuple;
 
     // The composite result's verbatim HeapTupleHeader image.
     let image = estate.retval_byref.clone().ok_or_else(|| {
@@ -4878,7 +4878,7 @@ fn coerce_function_result_tuple(
 /// executor entry.
 pub fn plpgsql_exec_trigger(
     func: &PLpgSQL_function,
-    trigdata: plpgsql::TriggerData,
+    trigdata: ::plpgsql::TriggerData,
 ) -> types_error::PgResult<Datum> {
     trigger::plpgsql_exec_trigger_impl(func, trigdata)
 }
@@ -4890,14 +4890,14 @@ pub fn plpgsql_exec_trigger(
 /// reach a RETURN, exactly as C).
 pub fn plpgsql_exec_event_trigger(
     func: &PLpgSQL_function,
-    _trigdata: plpgsql::EventTriggerData,
+    _trigdata: ::plpgsql::EventTriggerData,
 ) -> types_error::PgResult<()> {
     // Setup the execution state. (No simple_eval_estate/resowner — C passes NULL.)
     let mut estate = plpgsql_estate_setup(func, None, None, None);
 
     // estate.evtrigdata = trigdata (the current-event-trigger marker; the rich
     // event/tag rides commands/event_trigger.c's CURRENT_EVENT_TRIGGER side-channel).
-    estate.evtrigdata = Some(plpgsql::EventTriggerData(0));
+    estate.evtrigdata = Some(::plpgsql::EventTriggerData(0));
 
     // Push this frame onto the live error_context_stack (see
     // plpgsql_exec_function); pops on scope exit.
@@ -4918,7 +4918,7 @@ pub fn plpgsql_exec_event_trigger(
         .as_deref()
         .expect("compiled event-trigger function has an action block");
     let rc = exec_toplevel_block(&mut estate, action)?;
-    if rc != plpgsql::PLpgSQL_rc::PLPGSQL_RC_RETURN {
+    if rc != ::plpgsql::PLpgSQL_rc::PLPGSQL_RC_RETURN {
         estate.err_text = None;
         return Err(types_error::PgError::error(
             "control reached end of trigger procedure without RETURN".to_string(),
@@ -5073,7 +5073,7 @@ fn var_is_domain(d: &PLpgSQL_datum) -> bool {
         if v.datatype.as_ref().map(|t| t.typtype) == Some(TYPTYPE_DOMAIN))
 }
 
-fn clone_var_default(d: &PLpgSQL_datum) -> Option<Box<plpgsql::PLpgSQL_expr>> {
+fn clone_var_default(d: &PLpgSQL_datum) -> Option<Box<::plpgsql::PLpgSQL_expr>> {
     match d {
         PLpgSQL_datum::Var(v) => v.default_val.clone(),
         _ => None,
@@ -5084,7 +5084,7 @@ fn rec_has_default(d: &PLpgSQL_datum) -> bool {
     matches!(d, PLpgSQL_datum::Rec(r) if r.default_val.is_some())
 }
 
-fn clone_rec_default(d: &PLpgSQL_datum) -> Option<Box<plpgsql::PLpgSQL_expr>> {
+fn clone_rec_default(d: &PLpgSQL_datum) -> Option<Box<::plpgsql::PLpgSQL_expr>> {
     match d {
         PLpgSQL_datum::Rec(r) => r.default_val.clone(),
         _ => None,
@@ -5179,7 +5179,7 @@ fn cursor_var_argrow(estate: &PLpgSQL_execstate, curvar_dno: int32) -> int32 {
 fn cursor_var_explicit_query(
     estate: &PLpgSQL_execstate,
     curvar_dno: int32,
-) -> types_error::PgResult<(plpgsql::PLpgSQL_expr, int32)> {
+) -> types_error::PgResult<(::plpgsql::PLpgSQL_expr, int32)> {
     match &estate.datums[curvar_dno as usize] {
         PLpgSQL_datum::Var(v) => {
             let query = v
@@ -5200,11 +5200,11 @@ fn cursor_var_explicit_query(
 /// it through `exec_stmt_execsql` (historically NOT STRICT).
 fn open_cursor_args(
     estate: &mut PLpgSQL_execstate,
-    argquery: &plpgsql::PLpgSQL_expr,
+    argquery: &::plpgsql::PLpgSQL_expr,
     argrow: int32,
     lineno: int32,
 ) -> types_error::PgResult<()> {
-    let target = plpgsql::PLpgSQL_variable {
+    let target = ::plpgsql::PLpgSQL_variable {
         dtype: datum_dtype(&estate.datums[argrow as usize]),
         dno: argrow,
         refname: String::new(),
@@ -5213,8 +5213,8 @@ fn open_cursor_args(
         notnull: false,
         default_val: None,
     };
-    let set_args = plpgsql::PLpgSQL_stmt_execsql {
-        cmd_type: plpgsql::PLpgSQL_stmt_type::PLPGSQL_STMT_EXECSQL,
+    let set_args = ::plpgsql::PLpgSQL_stmt_execsql {
+        cmd_type: ::plpgsql::PLpgSQL_stmt_type::PLPGSQL_STMT_EXECSQL,
         lineno,
         stmtid: 0,
         sqlstmt: Some(Box::new(argquery.clone())),
@@ -5256,7 +5256,7 @@ fn exec_check_assignable(
 /// RELATIVE/ABSOLUTE count. Returns `(value, isnull)`.
 fn exec_eval_integer(
     estate: &mut PLpgSQL_execstate,
-    expr: &plpgsql::PLpgSQL_expr,
+    expr: &::plpgsql::PLpgSQL_expr,
 ) -> types_error::PgResult<(i32, bool)> {
     let (value, isnull, valtype, valtypmod) = exec_eval_expr_impl(estate, expr)?;
     let src_byref = estate.last_eval_byref.take();

@@ -1,7 +1,7 @@
 //! `ObjectAccessType`, the per-event `ObjectAccess*` argument structs, and the
 //! `OAT_*` constants (`catalog/objectaccess.h`).
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// `ObjectAccessType` (`catalog/objectaccess.h:48-56`) — the kind of object
 /// access being reported to the hook.

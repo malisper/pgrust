@@ -4,7 +4,7 @@
 //! `LockMethods[]` lookup. These are read-only `const` data in C; here they
 //! are `const`/`static` functions producing the same values.
 
-use types_storage::lock::{
+use ::types_storage::lock::{
     LOCKMASK, LOCKMETHODID, LOCKMODE, LOCKBIT_ON, MAX_LOCKMODES,
     AccessExclusiveLock, AccessShareLock, ExclusiveLock, RowExclusiveLock, RowShareLock,
     ShareLock, ShareRowExclusiveLock, ShareUpdateExclusiveLock,

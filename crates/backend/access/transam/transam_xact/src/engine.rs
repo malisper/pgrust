@@ -41,8 +41,8 @@ use more2_seams as timeout_seams;
 use portalmem_seams as portal_seams;
 use snapmgr_pc_seams as snapmgr_pc_seams;
 
-use types_core::VirtualTransactionId;
-use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
+use ::types_core::VirtualTransactionId;
+use ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 
 // ---------------------------------------------------------------------------
 //  RecordTransactionCommit (xact.c:1315)
@@ -110,7 +110,7 @@ fn RecordTransactionCommit() -> PgResult<TransactionId> {
         // actions)?
         let session_origin = origin_seams::replorigin_session_origin::call();
         let replorigin =
-            session_origin != types_core::InvalidRepOriginId && session_origin != DoNotReplicateId;
+            session_origin != ::types_core::InvalidRepOriginId && session_origin != DoNotReplicateId;
 
         // Mark ourselves as within our "commit critical section": forces any
         // concurrent checkpoint to wait until we've updated pg_xact.
@@ -226,14 +226,14 @@ fn RecordTransactionAbort(is_subxact: bool) -> PgResult<TransactionId> {
     let transaction_xmin = snapmgr_pc_seams::transaction_xmin::call()?;
     if transam_seams::transaction_id_did_commit::call(xid, transaction_xmin)? {
         return Err(PgError::new(
-            types_error::PANIC,
+            ::types_error::PANIC,
             format!("cannot abort transaction {xid}, it was already committed"),
         ));
     }
 
     let session_origin = origin_seams::replorigin_session_origin::call();
     let replorigin =
-        session_origin != types_core::InvalidRepOriginId && session_origin != DoNotReplicateId;
+        session_origin != ::types_core::InvalidRepOriginId && session_origin != DoNotReplicateId;
 
     // Fetch the data we need for the abort record.
     let workspace = MemoryContext::new("RecordTransactionAbort");

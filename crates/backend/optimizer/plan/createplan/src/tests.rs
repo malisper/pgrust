@@ -15,7 +15,7 @@ use crate::{get_gating_quals, use_physical_tlist, CP_EXACT_TLIST, CP_SMALL_TLIST
 
 /// Build a minimal base-relation `Path` over an `RTE_RELATION` `RelOptInfo`,
 /// returning the populated `PlannerInfo` and the path's `PathId`.
-fn base_rel_planner() -> (PlannerInfo, pathnodes::PathId) {
+fn base_rel_planner() -> (PlannerInfo, ::pathnodes::PathId) {
     let mut root = PlannerInfo::default();
 
     let mut rel = RelOptInfo::default();
@@ -110,18 +110,18 @@ fn get_gating_quals_empty_without_pseudoconstants() {
 // F2c simple-converter tests.
 // ---------------------------------------------------------------------------
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use ::nodes::parsenodes::RTEKind;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 
 /// Build a base-rel `Path` whose parent `RelOptInfo` has `relid = 1`, plus a
 /// `PlannerRun` whose `simple_rte_array[1]` resolves to an RTE of the given
 /// kind. Mirrors `setup_simple_rel_arrays` interning the top `rtable` entry.
 fn scan_setup<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     rtekind: RTEKind,
     pathtype: ::nodes::nodes::NodeTag,
-) -> (PlannerInfo, PlannerRun<'mcx>, pathnodes::PathId) {
+) -> (PlannerInfo, PlannerRun<'mcx>, ::pathnodes::PathId) {
     let mut root = PlannerInfo::default();
     let mut run = PlannerRun::new(mcx);
 
@@ -250,7 +250,7 @@ fn create_tidscan_plan_builds_tidscan_node() {
         scan_setup(mcx, RTEKind::RTE_RELATION, crate::T_SeqScan);
     // Build a TidPath (empty tidquals) over the same base rel.
     let rel_id = root.path(_seq_path).base().parent;
-    let tid_path = pathnodes::TidPath {
+    let tid_path = ::pathnodes::TidPath {
         path: Path {
             type_: crate::T_TidScan,
             pathtype: crate::T_TidScan,
@@ -311,11 +311,11 @@ fn relids_to_apprelids_roundtrips_word_storage() {
     let ctx = MemoryContext::new("t");
     let mcx = ctx.mcx();
     // None (the C NULL Bitmapset *) maps to None.
-    let none: pathnodes::Relids = None;
+    let none: ::pathnodes::Relids = None;
     assert!(crate::relids_to_apprelids(mcx, &none).expect("none").is_none());
     // A populated set re-homes its word vector exactly (bms_copy shape).
-    let relids: pathnodes::Relids =
-        Some(Box::new(pathnodes::Bitmapset { words: alloc::vec![0b1010_u64, 0b1_u64] }));
+    let relids: ::pathnodes::Relids =
+        Some(Box::new(::pathnodes::Bitmapset { words: alloc::vec![0b1010_u64, 0b1_u64] }));
     let bms = crate::relids_to_apprelids(mcx, &relids)
         .expect("relids_to_apprelids")
         .expect("Some");

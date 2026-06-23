@@ -3,7 +3,7 @@ use super::*;
 use std::cell::{Cell, RefCell};
 use std::sync::Once;
 
-use wal::rmgr::{RM_MAX_BUILTIN_ID, RM_NEXT_ID, RmgrIdIsValid, RM_EXPERIMENTAL_ID};
+use ::wal::rmgr::{RM_MAX_BUILTIN_ID, RM_NEXT_ID, RmgrIdIsValid, RM_EXPERIMENTAL_ID};
 
 thread_local! {
     static IN_PRELOAD: Cell<bool> = const { Cell::new(false) };

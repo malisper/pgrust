@@ -19,7 +19,7 @@
 //! nearest, ties-to-even — matched with [`f64::round_ties_even`], *not* Rust's
 //! `round` which rounds ties away from zero). Block/tuple selection hashes a
 //! `uint32[]` array of the candidate identifiers together with the seed via
-//! `hash_any`, reproduced with [`hashfn::hash_bytes`] (the same Bob
+//! `hash_any`, reproduced with [`::hashfn::hash_bytes`] (the same Bob
 //! Jenkins hash, fed the native-endian bytes of the array exactly as the C
 //! `(const unsigned char *) hashinput` cast exposes them) — giving the identical
 //! machine-independent results PostgreSQL's regression tests rely on.
@@ -82,14 +82,14 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tablesample_core_seams as seam;
-use costsize::clamp_row_est;
-use clauses::estimate_expression_value;
-use hashfn::hash_bytes;
+use ::costsize::clamp_row_est;
+use ::clauses::estimate_expression_value;
+use ::hashfn::hash_bytes;
 use mcx::{Mcx, PgBox};
-use types_core::primitive::{
+use ::types_core::primitive::{
     uint16, uint32, BlockNumber, Cardinality, OffsetNumber, Oid, InvalidBlockNumber,
 };
-use datum::datum::Datum;
+use ::datum::datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_TABLESAMPLE_ARGUMENT};
 use ::nodes::nodes::{Node, NodeTag};
 use ::nodes::primnodes::Expr;
@@ -650,7 +650,7 @@ pub fn GetTsmRoutine<'mcx>(mcx: Mcx<'mcx>, tsmhandler: Oid) -> PgResult<PgBox<'m
     //     elog(ERROR, "tablesample handler function %u did not return a
     //                  TsmRoutine struct", tsmhandler);
     match routine {
-        Some(routine) if routine.type_ == T_TsmRoutine => mcx::alloc_in(mcx, routine),
+        Some(routine) if routine.type_ == T_TsmRoutine => ::mcx::alloc_in(mcx, routine),
         _ => Err(PgError::error(alloc::format!(
             "tablesample handler function {tsmhandler} did not return a TsmRoutine struct"
         ))),

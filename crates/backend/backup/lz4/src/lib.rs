@@ -38,10 +38,10 @@ use sink::{
     bbsink_forward_begin_manifest, bbsink_forward_end_archive, bbsink_forward_end_backup,
     bbsink_forward_end_manifest, bbsink_manifest_contents, Bbsink, BbsinkOps, BbsinkState,
 };
-use utils_error::ereport;
-use mcx::Mcx;
-use compression::PgCompressSpecification;
-use types_core::primitive::{Size, TimeLineID, XLogRecPtr, BLCKSZ};
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::compression::PgCompressSpecification;
+use ::types_core::primitive::{Size, TimeLineID, XLogRecPtr, BLCKSZ};
 use types_error::{ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 
 /// The C source path used in `ereport`/`elog` error locations (`__FILE__`).
@@ -92,7 +92,7 @@ pub fn bbsink_lz4_new<'mcx>(
 
 impl<'mcx> BbsinkLz4<'mcx> {
     /// `elog(ERROR, "<context>: %s", LZ4F_getErrorName(...))`.
-    fn lz4_error(prefix: &str, name: String, line: i32) -> types_error::PgError {
+    fn lz4_error(prefix: &str, name: String, line: i32) -> ::types_error::PgError {
         ereport(ERROR)
             .errcode(ERRCODE_INTERNAL_ERROR)
             .errmsg(alloc::format!("{prefix}: {name}"))

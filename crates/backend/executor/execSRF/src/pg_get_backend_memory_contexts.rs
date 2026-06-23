@@ -16,7 +16,7 @@
 //!  * It snapshots the live process `MemoryContext` tree — reachable from the
 //!    `TopMemoryContext` the `mmgr` substrate owns
 //!    ([`mcxt_seams::top_memory_context`]) via
-//!    [`mcx::MemoryContext::stats_tree`], which already prunes dropped children
+//!    [`::mcx::MemoryContext::stats_tree`], which already prunes dropped children
 //!    and yields the live `parent`/`firstchild`/`nextchild` shape — into an
 //!    index-addressed arena parked in a thread-local. The `mcxtfuncs` opaque
 //!    [`MemoryContextRef`] handle is an index into that arena (`idx + 1`, so a
@@ -39,9 +39,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::ReturnSetInfo;
 use types_tuple::heaptuple::Datum;
@@ -219,7 +219,7 @@ fn text_datum<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<Datum<'mcx>> {
 /// Wrap an owned array varlena image on the by-reference Datum lane — exactly
 /// the pointer C's `construct_array_builtin` returned.
 fn byref_image<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum<'mcx>> {
-    let mut buf = mcx::PgVec::new_in(mcx);
+    let mut buf = ::mcx::PgVec::new_in(mcx);
     buf.try_reserve(image.len()).map_err(|_| mcx.oom(image.len()))?;
     buf.extend_from_slice(image);
     Ok(Datum::ByRef(buf))
@@ -230,7 +230,7 @@ fn byref_image<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum<'mcx>> {
 /// `NodeSnap` vector. Mirrors C's intrusive `parent`/`firstchild`/`nextchild`
 /// linkage, sourced from `mcx`'s `stats_tree()`.
 fn snapshot_context_tree() -> Vec<NodeSnap> {
-    use mcx::TreeStats;
+    use ::mcx::TreeStats;
 
     let top = mcxt_seams::top_memory_context::call();
     let tree: TreeStats = top.context().stats_tree();
@@ -267,7 +267,7 @@ fn snapshot_context_tree() -> Vec<NodeSnap> {
         }
     }
 
-    fn flatten(arena: &mut Vec<NodeSnap>, t: &mcx::TreeStats, parent: Option<usize>) -> usize {
+    fn flatten(arena: &mut Vec<NodeSnap>, t: &::mcx::TreeStats, parent: Option<usize>) -> usize {
         let idx = arena.len();
         arena.push(NodeSnap {
             parent,

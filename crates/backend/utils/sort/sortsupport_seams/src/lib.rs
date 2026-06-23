@@ -4,19 +4,19 @@
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly. The resolved comparator is held as a
-//! [`types_sortsupport::SortComparatorId`] token the owner interprets.
+//! [`::types_sortsupport::SortComparatorId`] token the owner interprets.
 
 #![allow(non_snake_case)]
 
-use types_core::Oid;
-use types_error::PgResult;
-use rel::Relation;
-use types_sortsupport::SortSupportData;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_sortsupport::SortSupportData;
 // Canonical value type (`Datum<'mcx>`: `ByVal` word / `ByRef` bytes). The
 // comparator-invocation operands of `apply_sort_comparator` carry this canonical
 // carrier with `'mcx` threaded (a by-reference sort key crosses as `ByRef`), not
 // the bare-word shim.
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
 seam_core::seam!(
     /// `OidFunctionCall1(sortfunc, PointerGetDatum(&ssup))` for a

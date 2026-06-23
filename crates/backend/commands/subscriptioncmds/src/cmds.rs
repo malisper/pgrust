@@ -35,10 +35,10 @@ use types_error::{
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR, NOTICE, WARNING,
 };
 
-use types_acl::acl::{ACLCHECK_OK, ACL_CREATE, ACLCHECK_NOT_OWNER};
-use types_catalog::catalog::DATABASE_RELATION_ID;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_subscription::{
+use ::types_acl::acl::{ACLCHECK_OK, ACL_CREATE, ACLCHECK_NOT_OWNER};
+use ::types_catalog::catalog::DATABASE_RELATION_ID;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_subscription::{
     Anum_pg_subscription_oid, Anum_pg_subscription_subbinary,
     Anum_pg_subscription_subconninfo, Anum_pg_subscription_subdbid,
     Anum_pg_subscription_subdisableonerr, Anum_pg_subscription_subenabled,
@@ -54,7 +54,7 @@ use types_catalog::pg_subscription::{
     LOGICALREP_TWOPHASE_STATE_DISABLED, LOGICALREP_TWOPHASE_STATE_ENABLED,
     LOGICALREP_TWOPHASE_STATE_PENDING, SUBREL_STATE_INIT, SUBREL_STATE_READY,
 };
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_core::primitive::{InvalidOid, Oid};
 use ::nodes::ddlnodes::{
     AlterSubscriptionStmt, AlterSubscriptionType, CreateSubscriptionStmt,
     DropSubscriptionStmt,
@@ -62,32 +62,32 @@ use ::nodes::ddlnodes::{
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::ObjectType;
 use ::nodes::parsestmt::ParseState;
-use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::TEXTOID;
+use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::TEXTOID;
 
 use heaptuple::{heap_form_tuple, heap_modify_tuple};
 use aclchk::{object_aclcheck, object_ownercheck};
-use catalog_catalog::GetNewOidWithIndex;
-use indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert};
-use catalog_namespace::RangeVarGetRelid;
-use objectaccess::invoke_object_drop_hook;
+use ::catalog_catalog::GetNewOidWithIndex;
+use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert};
+use ::catalog_namespace::RangeVarGetRelid;
+use ::objectaccess::invoke_object_drop_hook;
 use pg_shdepend::{deleteSharedDependencyRecordsFor, recordDependencyOnOwner};
-use replication_libpqwalreceiver::libpqrcv_check_conninfo;
+use ::replication_libpqwalreceiver::libpqrcv_check_conninfo;
 use origin::{
     replorigin_by_name, replorigin_create, replorigin_drop_by_name, replorigin_get_progress,
 };
-use lmgr::LockSharedObject;
-use cache_syscache::cacheinfo::SUBSCRIPTIONNAME;
+use ::lmgr::LockSharedObject;
+use ::cache_syscache::cacheinfo::SUBSCRIPTIONNAME;
 use cache_syscache::{ReleaseSysCache, SearchSysCache2};
-use miscinit::GetUserId;
+use ::miscinit::GetUserId;
 
-use cache::syscache::SysCacheKey;
-use datum::Datum as KeyDatum;
+use ::cache::syscache::SysCacheKey;
+use ::datum::Datum as KeyDatum;
 
 use objectaccess_seams as objaccess;
 use dbcommands_seams as dbcommands_seams;
-use define_seams::DefElemArg;
+use ::define_seams::DefElemArg;
 use event_trigger_seams as evttrig_seams;
 use tablespace_globals_seams as globals_seams;
 use launcher_seams as launcher_seams;
@@ -133,8 +133,8 @@ fn is_set(val: u32, bits: u32) -> bool {
 }
 
 /// `ereport` location helper for `subscriptioncmds.c`.
-fn errloc(funcname: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new("../src/backend/commands/subscriptioncmds.c", 0, funcname)
+fn errloc(funcname: &'static str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new("../src/backend/commands/subscriptioncmds.c", 0, funcname)
 }
 
 /// `XLogRecPtrIsInvalid` / `InvalidXLogRecPtr`.
@@ -245,7 +245,7 @@ fn defel_name_list_to_string(names: &[::nodes::nodes::NodePtr<'_>]) -> PgResult<
 
 /// `defGetString(def)` (define.c).
 fn def_get_string(mcx: Mcx<'_>, defname: &str, arg: Option<&Node<'_>>) -> PgResult<String> {
-    let s = define_seams::def_get_string::call(
+    let s = ::define_seams::def_get_string::call(
         mcx,
         defname.to_string(),
         defel_arg(arg)?,
@@ -255,7 +255,7 @@ fn def_get_string(mcx: Mcx<'_>, defname: &str, arg: Option<&Node<'_>>) -> PgResu
 
 /// `defGetBoolean(def)` (define.c).
 fn def_get_boolean(defname: &str, arg: Option<&Node<'_>>) -> PgResult<bool> {
-    define_seams::def_get_boolean::call(defname.to_string(), defel_arg(arg)?)
+    ::define_seams::def_get_boolean::call(defname.to_string(), defel_arg(arg)?)
 }
 
 /// `errorConflictingDefElem(defel, pstate)` (defrem.c).
@@ -937,7 +937,7 @@ fn subscription_exists<'mcx>(mcx: Mcx<'mcx>, dbid: Oid, name: &str) -> PgResult<
 /// `could not connect to the publisher: %s` message exactly as C does.
 fn walrcv_connect_failed(subname: &str, conninfo: &str, must_use_password: bool) -> PgError {
     // wrconn = walrcv_connect(conninfo, true, true, must_use_password, subname, &err);
-    let err = match replication_libpqwalreceiver::libpqrcv_connect(
+    let err = match ::replication_libpqwalreceiver::libpqrcv_connect(
         conninfo,
         /* replication = */ true,
         /* logical = */ true,
@@ -963,7 +963,7 @@ fn walrcv_connect_failed(subname: &str, conninfo: &str, must_use_password: bool)
 // ===========================================================================
 
 fn check_alter_sub_option(
-    sub: &types_catalog::pg_subscription::Subscription<'_>,
+    sub: &::types_catalog::pg_subscription::Subscription<'_>,
     option: &str,
     slot_needs_update: bool,
     is_top_level: bool,
@@ -1334,7 +1334,7 @@ pub fn AlterSubscription<'mcx>(
         let mut newtup = heap_modify_tuple(mcx, &tup, &tupdesc, &values, &nulls, &replaces)
             .map_err(|e| PgError::error(format!("heap_modify_tuple failed: {e:?}")))?;
         let otid = newtup.tuple.t_self;
-        indexing::keystone::CatalogTupleUpdate(mcx, &rel, otid, &mut newtup)?;
+        ::indexing::keystone::CatalogTupleUpdate(mcx, &rel, otid, &mut newtup)?;
     }
 
     // Acquire the connection necessary for altering the slot, if needed. With
@@ -1380,7 +1380,7 @@ fn refresh_preconditions<'mcx>(
     _mcx: Mcx<'mcx>,
     _rel: &rel::Relation<'mcx>,
     _tup: &FormedTuple<'mcx>,
-    sub: &types_catalog::pg_subscription::Subscription<'mcx>,
+    sub: &::types_catalog::pg_subscription::Subscription<'mcx>,
     copy_data: bool,
     _is_top_level: bool,
 ) -> PgResult<()> {
@@ -1405,7 +1405,7 @@ fn refresh_preconditions_addrop<'mcx>(
     _mcx: Mcx<'mcx>,
     _rel: &rel::Relation<'mcx>,
     _tup: &FormedTuple<'mcx>,
-    sub: &types_catalog::pg_subscription::Subscription<'mcx>,
+    sub: &::types_catalog::pg_subscription::Subscription<'mcx>,
     copy_data: bool,
     isadd: bool,
     _is_top_level: bool,
@@ -1614,7 +1614,7 @@ fn _connect_true_leg_surface(mcx: Mcx<'_>) {
     let _ = SUBREL_STATE_READY;
     let _ = TEXTOID;
     let _ = |rv| RangeVarGetRelid(mcx, rv, AccessShareLock, false);
-    let _ = |elems: &[datum::datum::Datum]| {
+    let _ = |elems: &[::datum::datum::Datum]| {
         arrayfuncs_seams::construct_array_builtin_v::call(mcx, elems, TEXTOID)
     };
 }

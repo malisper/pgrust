@@ -21,7 +21,7 @@ mod tables;
 use unicode_category::{pg_u_prop_case_ignorable, pg_u_prop_cased};
 use mcx::{Mcx, PgString, PgVec};
 use tables::*;
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// A Unicode code point. Alias of the fabled `PgWChar` (`pg_wchar` in C).
 pub type pg_wchar = types_core::PgWChar;
@@ -345,7 +345,7 @@ fn push_pg_wchar(out: &mut PgString, ch_buf: &mut [u8; 4], code: pg_wchar) -> Pg
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn s<'a>(v: &'a PgResult<PgVec<'a, u8>>) -> &'a str {
         match v {

@@ -8,16 +8,16 @@ use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 use std::sync::{Mutex, MutexGuard, Once};
 
-use types_core::TimestampTz;
-use types_pgstat::activity_pgstat::{
+use ::types_core::TimestampTz;
+use ::types_pgstat::activity_pgstat::{
     PgStatShared_Archiver, PgStatShared_Checkpointer, PgStat_ArchiverStats,
     PgStat_CheckpointerStats, PgStat_Kind,
 };
-use types_pgstat::backend_status::PgBackendStatus;
-use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
+use ::types_pgstat::backend_status::PgBackendStatus;
+use ::types_pgstat::backend_utils_activity_pgstat_bgwriter::{
     PgStatShared_BgWriter, PgStat_BgWriterStats,
 };
-use types_storage::LWLockMode;
+use ::types_storage::LWLockMode;
 
 /// Per-thread fixture backing every seam dispatcher.
 pub(crate) struct Env {

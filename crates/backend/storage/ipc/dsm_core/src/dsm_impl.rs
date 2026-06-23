@@ -14,14 +14,14 @@
 
 use std::ffi::CString;
 
-use utils_error::config;
-use utils_error::errno::current_errno;
+use ::utils_error::config;
+use ::utils_error::errno::current_errno;
 use utils_error::{elog, ereport};
 use types_error::{
     ErrorLevel, ErrorLocation, PgResult, SqlState, DEBUG4, ERRCODE_OUT_OF_MEMORY, ERROR,
 };
-use types_guc::config_enum_entry;
-use types_storage::dsm_handle;
+use ::types_guc::config_enum_entry;
+use ::types_storage::dsm_handle;
 
 /// `dsm_op` (`storage/dsm_impl.h`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

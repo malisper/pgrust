@@ -279,7 +279,7 @@ impl<'a, 'mcx> PathImporter<'a, 'mcx> {
         // as-is would dangle into the subroot arena; null the ones that hold
         // foreign handles (subroot, partition trees) — set-op child paths are
         // flat scan/join paths whose RelOptInfo carries none of these live.
-        dst.subroot = pathnodes::Subroot(None);
+        dst.subroot = ::pathnodes::Subroot(None);
         dst.part_rels = Vec::new();
 
         *root.rel_mut(new_id) = dst;
@@ -483,7 +483,7 @@ pub fn import_pathkey_eclasses(
     mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
     subroot: &PlannerInfo,
-    pathkeys: &mut [pathnodes::PathKey],
+    pathkeys: &mut [::pathnodes::PathKey],
 ) {
     let mut importer = PathImporter::new(mcx, subroot);
     for pk in pathkeys.iter_mut() {
@@ -496,7 +496,7 @@ pub fn import_pathkey_eclasses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_core::primitive::Cost;
+    use ::types_core::primitive::Cost;
     use ::nodes::nodes::NodeTag;
     use ::nodes::primnodes::{Const, Var};
     use pathnodes::{

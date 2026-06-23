@@ -9,7 +9,7 @@ use super::*;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::Once;
-use types_error::PgError;
+use ::types_error::PgError;
 
 thread_local! {
     /// xid -> (status, lsn), as pg_xact would report via TransactionIdGetStatus.

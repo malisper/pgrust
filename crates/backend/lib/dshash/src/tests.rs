@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use std::collections::HashMap;
 use std::sync::{Mutex, Once, OnceLock};
 
-use types_storage::DshashKeyKind;
+use ::types_storage::DshashKeyKind;
 
 /// Serializes every test (shared simulator + global seam slots).
 fn test_lock() -> std::sync::MutexGuard<'static, ()> {

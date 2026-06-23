@@ -19,10 +19,10 @@ extern crate alloc;
 use core::cmp::Ordering;
 
 use mcx::{Mcx, PgVec};
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 use types_error::{PgError, PgResult};
 
-use types_numeric::var::{NumericSign, NumericVar};
+use ::types_numeric::var::{NumericSign, NumericVar};
 use types_numeric::{
     numeric_is_inf, numeric_is_nan, numeric_is_ninf, numeric_is_pinf, numeric_is_special,
     numeric_sign as numeric_sign_word, NumericDigit, DEC_DIGITS, NUMERIC_DSCALE_MAX,
@@ -114,9 +114,9 @@ fn make_zero(mcx: Mcx<'_>) -> PgResult<PgVec<'_, u8>> {
 /// (validated bound + fallible reserve), mirroring [`crate::alloc_digits`] for
 /// raw byte buffers. OOM surfaces as `numeric value out of range`.
 fn alloc_bytes<'mcx>(mcx: Mcx<'mcx>, n: usize) -> PgResult<PgVec<'mcx, u8>> {
-    let mut v = mcx::vec_with_capacity_in::<u8>(mcx, n).map_err(|_| {
+    let mut v = ::mcx::vec_with_capacity_in::<u8>(mcx, n).map_err(|_| {
         PgError::error("value overflows numeric format")
-            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
+            .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
     })?;
     v.resize(n, 0);
     Ok(v)
@@ -172,7 +172,7 @@ fn numeric_is_integral(mcx: Mcx<'_>, num: &[u8]) -> PgResult<bool> {
 /// the value's VARSIZE).
 #[inline]
 fn numeric_ndigits(num: &[u8]) -> usize {
-    types_numeric::numeric_ndigits(num, num.len())
+    ::types_numeric::numeric_ndigits(num, num.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ fn cmp_var_common_bytes(num1: &[u8], num2: &[u8]) -> i32 {
     // the C path is alloc-free but the result is identical.
     //
     // Use a private transient context for the decode scratch.
-    let ctx = mcx::MemoryContext::new("numeric cmp scratch");
+    let ctx = ::mcx::MemoryContext::new("numeric cmp scratch");
     let mcx = ctx.mcx();
     // Decoding a finite numeric never errors (no overflow possible from a
     // stored value), so unwrap is safe here.
@@ -458,7 +458,7 @@ fn encode_opt_error<'mcx>(mcx: Mcx<'mcx>, var: &NumericVar<'_>) -> PgResult<PgVe
 /// The `ereport(ERROR, ERRCODE_DIVISION_BY_ZERO, "division by zero")` raised by
 /// the division cores.
 fn division_by_zero() -> PgError {
-    PgError::error("division by zero").with_sqlstate(types_error::ERRCODE_DIVISION_BY_ZERO)
+    PgError::error("division by zero").with_sqlstate(::types_error::ERRCODE_DIVISION_BY_ZERO)
 }
 
 // ---------------------------------------------------------------------------
@@ -477,7 +477,7 @@ pub fn numeric_abs<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'mcx, u8>
         write_header_word(&mut res, hdr_word & !NUMERIC_INF_SIGN_MASK);
     } else {
         // n_long.n_sign_dscale = NUMERIC_POS | NUMERIC_DSCALE(num)
-        let dscale = types_numeric::numeric_dscale(num);
+        let dscale = ::types_numeric::numeric_dscale(num);
         write_header_word(&mut res, NUMERIC_POS | dscale);
     }
     Ok(res)
@@ -499,10 +499,10 @@ pub fn numeric_uminus<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'mcx, 
         if numeric_is_short(num) {
             write_header_word(&mut res, hdr_word ^ NUMERIC_SHORT_SIGN_MASK);
         } else if numeric_sign_word(num) == NUMERIC_POS {
-            let dscale = types_numeric::numeric_dscale(num);
+            let dscale = ::types_numeric::numeric_dscale(num);
             write_header_word(&mut res, NUMERIC_NEG | dscale);
         } else {
-            let dscale = types_numeric::numeric_dscale(num);
+            let dscale = ::types_numeric::numeric_dscale(num);
             write_header_word(&mut res, NUMERIC_POS | dscale);
         }
     }
@@ -702,7 +702,7 @@ pub fn numeric_sqrt<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'mcx, u8
     if numeric_is_special(num) {
         if numeric_is_ninf(num) {
             return Err(PgError::error("cannot take square root of a negative number")
-                .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION));
         }
         // For NAN or PINF, duplicate the input.
         return duplicate_numeric(mcx, num);
@@ -758,7 +758,7 @@ pub fn numeric_ln<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'mcx, u8>>
     if numeric_is_special(num) {
         if numeric_is_ninf(num) {
             return Err(PgError::error("cannot take logarithm of a negative number")
-                .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_LOG));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_LOG));
         }
         // For NAN or PINF, duplicate the input.
         return duplicate_numeric(mcx, num);
@@ -787,11 +787,11 @@ pub fn numeric_log<'mcx>(mcx: Mcx<'mcx>, a: &[u8], b: &[u8]) -> PgResult<PgVec<'
         let sign2 = numeric_sign_internal(b);
         if sign1 < 0 || sign2 < 0 {
             return Err(PgError::error("cannot take logarithm of a negative number")
-                .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_LOG));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_LOG));
         }
         if sign1 == 0 || sign2 == 0 {
             return Err(PgError::error("cannot take logarithm of zero")
-                .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_LOG));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_LOG));
         }
         if numeric_is_pinf(a) {
             // log(Inf, Inf) reduces to Inf/Inf -> NaN.
@@ -922,12 +922,12 @@ pub fn numeric_power<'mcx>(mcx: Mcx<'mcx>, a: &[u8], b: &[u8]) -> PgResult<PgVec
 
 fn zero_to_negative_power() -> PgError {
     PgError::error("zero raised to a negative power is undefined")
-        .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION)
+        .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION)
 }
 
 fn negative_to_non_integer_power() -> PgError {
     PgError::error("a negative number raised to a non-integer power yields a complex result")
-        .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION)
+        .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_POWER_FUNCTION)
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,7 +1015,7 @@ pub fn numeric_factorial<'mcx>(mcx: Mcx<'mcx>, n: i64) -> PgResult<PgVec<'mcx, u
     // numeric_fac (numeric.c:3743).
     if n < 0 {
         return Err(PgError::error("factorial of a negative number is undefined")
-            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
+            .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
     }
     if n <= 1 {
         return make_result(mcx, &const_one(mcx)?);
@@ -1023,7 +1023,7 @@ pub fn numeric_factorial<'mcx>(mcx: Mcx<'mcx>, n: i64) -> PgResult<PgVec<'mcx, u
     // Fail immediately if the result would overflow.
     if n > 32177 {
         return Err(PgError::error("value overflows numeric format")
-            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
+            .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
     }
 
     let mut result = int64_to_numericvar(mcx, n)?;
@@ -1063,7 +1063,7 @@ pub fn width_bucket_numeric(
 ) -> PgResult<i32> {
     // width_bucket_numeric (numeric.c:1967). `count` is an int32 supplied as a
     // numeric byte image here; the C function takes int32 directly. Decode it.
-    let ctx = mcx::MemoryContext::new("width_bucket scratch");
+    let ctx = ::mcx::MemoryContext::new("width_bucket scratch");
     let mcx = ctx.mcx();
 
     let count_i32 = {
@@ -1072,14 +1072,14 @@ pub fn width_bucket_numeric(
             Some(v) => v,
             None => {
                 return Err(PgError::error("integer out of range")
-                    .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE))
+                    .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE))
             }
         }
     };
 
     if count_i32 <= 0 {
         return Err(PgError::error("count must be greater than zero")
-            .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION));
+            .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION));
     }
 
     if numeric_is_special(operand) || numeric_is_special(bound1) || numeric_is_special(bound2) {
@@ -1087,12 +1087,12 @@ pub fn width_bucket_numeric(
             return Err(PgError::error(
                 "operand, lower bound, and upper bound cannot be NaN",
             )
-            .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION));
+            .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION));
         }
         // operand may be infinite; cmp_numerics copes. Bounds must be finite.
         if numeric_is_inf(bound1) || numeric_is_inf(bound2) {
             return Err(PgError::error("lower and upper bounds must be finite")
-                .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION));
         }
     }
 
@@ -1104,7 +1104,7 @@ pub fn width_bucket_numeric(
     match cmp_numerics(bound1, bound2) {
         0 => {
             return Err(PgError::error("lower bound cannot equal upper bound")
-                .with_sqlstate(types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_ARGUMENT_FOR_WIDTH_BUCKET_FUNCTION));
         }
         d if d < 0 => {
             // bound1 < bound2
@@ -1132,7 +1132,7 @@ pub fn width_bucket_numeric(
     match numericvar_to_int32(&result_var)? {
         Some(result) => Ok(result),
         None => Err(PgError::error("integer out of range")
-            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)),
+            .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)),
     }
 }
 
@@ -1178,7 +1178,7 @@ pub fn get_min_scale(num: &[u8]) -> i32 {
     // numeric_min_scale (numeric.c:4310) wrapper over get_min_scale (4255).
     // Special values yield NULL in C; the caller is expected to have screened
     // those, but we mirror the inner get_min_scale over a finite value.
-    let ctx = mcx::MemoryContext::new("get_min_scale scratch");
+    let ctx = ::mcx::MemoryContext::new("get_min_scale scratch");
     let mcx = ctx.mcx();
     let var = set_var_from_num(mcx, num).expect("decode finite numeric");
     get_min_scale_var(&var)
@@ -1244,7 +1244,7 @@ pub fn numeric_normalize(num: &[u8]) -> alloc::string::String {
         }
     }
 
-    let ctx = mcx::MemoryContext::new("numeric_normalize scratch");
+    let ctx = ::mcx::MemoryContext::new("numeric_normalize scratch");
     let mcx = ctx.mcx();
     let x = set_var_from_num(mcx, num).expect("decode finite numeric");
     let mut str = crate::io::get_str_from_var(&x);
@@ -1289,7 +1289,7 @@ pub fn in_range_numeric_numeric(
         return Err(PgError::error(
             "invalid preceding or following size in window function",
         )
-        .with_sqlstate(types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE));
+        .with_sqlstate(::types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE));
     }
 
     let result;
@@ -1353,7 +1353,7 @@ pub fn in_range_numeric_numeric(
         }
     } else {
         // Otherwise compute base +/- offset and compare against val.
-        let ctx = mcx::MemoryContext::new("in_range_numeric scratch");
+        let ctx = ::mcx::MemoryContext::new("in_range_numeric scratch");
         let mcx = ctx.mcx();
         let valv = set_var_from_num(mcx, val)?;
         let basev = set_var_from_num(mcx, base)?;
@@ -1379,14 +1379,14 @@ pub fn numeric_scale(num: &[u8]) -> PgResult<i32> {
     // returning the dscale field which for specials is meaningless but the
     // caller screens specials. We follow the C and treat specials as the SQL
     // NULL upstream; for the in-crate contract we report the stored dscale.
-    Ok(types_numeric::numeric_dscale(num) as i32)
+    Ok(::types_numeric::numeric_dscale(num) as i32)
 }
 
 pub fn numerictypmodin(typmod_parts: &[i32]) -> PgResult<i32> {
     // numerictypmodin (numeric.c:1324). `typmod_parts` is ArrayGetIntegerTypmods.
     let tl = typmod_parts;
     let n = tl.len();
-    use types_numeric::make_numeric_typmod;
+    use ::types_numeric::make_numeric_typmod;
 
     if n == 2 {
         if tl[0] < 1 || tl[0] > NUMERIC_MAX_PRECISION {
@@ -1399,7 +1399,7 @@ pub fn numerictypmodin(typmod_parts: &[i32]) -> PgResult<i32> {
                 NUMERIC_MIN_SCALE,
                 NUMERIC_MAX_SCALE
             ))
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
         }
         Ok(make_numeric_typmod(tl[0], tl[1]))
     } else if n == 1 {
@@ -1410,7 +1410,7 @@ pub fn numerictypmodin(typmod_parts: &[i32]) -> PgResult<i32> {
         Ok(make_numeric_typmod(tl[0], 0))
     } else {
         Err(PgError::error("invalid NUMERIC type modifier")
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE))
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE))
     }
 }
 
@@ -1420,7 +1420,7 @@ fn precision_range_error(prec: i32) -> PgError {
         prec,
         NUMERIC_MAX_PRECISION
     ))
-    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
 pub fn numerictypmodout<'mcx>(mcx: Mcx<'mcx>, typmod: i32) -> PgResult<PgVec<'mcx, u8>> {
@@ -1503,8 +1503,8 @@ const VARHDRSZ_U: usize = datum::VARHDRSZ;
 /// A numeric reaching these in-place manipulators is always inline (detoasted).
 #[inline]
 fn numeric_vardata_off(num: &[u8]) -> usize {
-    if types_numeric::varatt_is_1b(num) {
-        types_numeric::VARHDRSZ_SHORT
+    if ::types_numeric::varatt_is_1b(num) {
+        ::types_numeric::VARHDRSZ_SHORT
     } else {
         VARHDRSZ_U
     }
@@ -1549,7 +1549,7 @@ pub fn seam_numeric_maximum_size(typmod: i32) -> i32 {
 /// recover the `&[u8]`, run `numeric_sub` in a transient context, and convert
 /// the result to `f64`.
 pub fn seam_numeric_subdiff(v1: Datum<'_>, v2: Datum<'_>) -> PgResult<f64> {
-    let ctx = mcx::MemoryContext::new("numrange_subdiff scratch");
+    let ctx = ::mcx::MemoryContext::new("numrange_subdiff scratch");
     let mcx = ctx.mcx();
 
     // SAFETY: v1/v2 are pointer-bearing numeric Datums, so the word points to a
@@ -1571,7 +1571,7 @@ pub fn seam_numeric_subdiff(v1: Datum<'_>, v2: Datum<'_>) -> PgResult<f64> {
 /// on-disk `numeric` byte images, with no pointer-deref. `Err` carries the
 /// `numeric_sub` / `numeric_float8` `ereport`s.
 pub fn seam_numeric_subdiff_bytes(a: &[u8], b: &[u8]) -> PgResult<f64> {
-    let ctx = mcx::MemoryContext::new("numeric_subdiff_bytes scratch");
+    let ctx = ::mcx::MemoryContext::new("numeric_subdiff_bytes scratch");
     let mcx = ctx.mcx();
     let diff = numeric_sub(mcx, a, b)?;
     numeric_to_float8(&diff)
@@ -1585,13 +1585,13 @@ pub fn seam_numeric_int4(num: &[u8]) -> PgResult<i32> {
     if numeric_is_special(num) {
         return Err(special_to_int_error(num, "integer"));
     }
-    let ctx = mcx::MemoryContext::new("numeric_int4 scratch");
+    let ctx = ::mcx::MemoryContext::new("numeric_int4 scratch");
     let mcx = ctx.mcx();
     let x = set_var_from_num(mcx, num)?;
     match crate::convert::numericvar_to_int32(&x)? {
         Some(v) => Ok(v),
         None => Err(PgError::error("integer out of range")
-            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)),
+            .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)),
     }
 }
 
@@ -1603,13 +1603,13 @@ pub fn seam_numeric_int8(num: &[u8]) -> PgResult<i64> {
     if numeric_is_special(num) {
         return Err(special_to_int_error(num, "bigint"));
     }
-    let ctx = mcx::MemoryContext::new("numeric_int8 scratch");
+    let ctx = ::mcx::MemoryContext::new("numeric_int8 scratch");
     let mcx = ctx.mcx();
     let x = set_var_from_num(mcx, num)?;
     match numericvar_to_int64(&x)? {
         Some(v) => Ok(v),
         None => Err(PgError::error("bigint out of range")
-            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)),
+            .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)),
     }
 }
 
@@ -1620,19 +1620,19 @@ pub fn seam_numeric_int2(num: &[u8]) -> PgResult<i16> {
     if numeric_is_special(num) {
         return Err(special_to_int_error(num, "smallint"));
     }
-    let ctx = mcx::MemoryContext::new("numeric_int2 scratch");
+    let ctx = ::mcx::MemoryContext::new("numeric_int2 scratch");
     let mcx = ctx.mcx();
     let x = set_var_from_num(mcx, num)?;
     let val = match numericvar_to_int64(&x)? {
         Some(v) => v,
         None => {
             return Err(PgError::error("smallint out of range")
-                .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE))
+                .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE))
         }
     };
     if val < i16::MIN as i64 || val > i16::MAX as i64 {
         return Err(PgError::error("smallint out of range")
-            .with_sqlstate(types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
+            .with_sqlstate(::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE));
     }
     Ok(val as i16)
 }
@@ -1641,7 +1641,7 @@ pub fn seam_numeric_int2(num: &[u8]) -> PgResult<i16> {
 fn special_to_int_error(num: &[u8], type_name: &str) -> PgError {
     let what = if numeric_is_nan(num) { "NaN" } else { "infinity" };
     PgError::error(format!("cannot convert {what} to {type_name}"))
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
 }
 
 /// Recover the on-disk `numeric` byte image a pointer-bearing `Datum` refers
@@ -1675,7 +1675,7 @@ unsafe fn numeric_image_normalized<'mcx>(
         let total = (byte0 >> 1) as usize;
         let body_len = total - 1;
         let body = core::slice::from_raw_parts(ptr.add(1), body_len);
-        let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, VARHDRSZ_U + body_len)?;
+        let mut out: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, VARHDRSZ_U + body_len)?;
         // SET_VARSIZE (4-byte header): total normalized length << 2.
         out.extend_from_slice(&datum::varlena::set_varsize_4b(VARHDRSZ_U + body_len));
         out.extend_from_slice(body);
@@ -1689,6 +1689,6 @@ unsafe fn numeric_image_normalized<'mcx>(
         #[cfg(target_endian = "big")]
         let len = (word & 0x3FFF_FFFF) as usize;
         let bytes = core::slice::from_raw_parts(ptr, len);
-        mcx::slice_in(mcx, bytes)
+        ::mcx::slice_in(mcx, bytes)
     }
 }

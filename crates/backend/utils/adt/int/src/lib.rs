@@ -72,13 +72,13 @@ use pqformat::{
 };
 use numutils::{pg_itoa, pg_ltoa, pg_strtoint16_safe, pg_strtoint32_safe};
 use utils_error::{ereport, PgError, PgResult, SoftErrorContext};
-use mcx::Mcx;
-use datum::Bytea;
+use ::mcx::Mcx;
+use ::datum::Bytea;
 use types_error::{
     ERRCODE_DIVISION_BY_ZERO, ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERROR,
 };
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 use overflow::{pg_add_s32_overflow as add_s32, pg_add_s64_overflow as add_s64};
 
@@ -174,11 +174,11 @@ pub fn int2send<'mcx>(mcx: Mcx<'mcx>, arg1: i16) -> PgResult<Bytea<'mcx>> {
 pub fn buildint2vector<'mcx>(
     mcx: Mcx<'mcx>,
     int2s: &[i16],
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     // construct_md_array(elems, NULL, 1, &dim1, &lbound0, INT2OID, sizeof(int16),
     //                    true /* byval */, TYPALIGN_SHORT)
-    let datums: Vec<datum::Datum> =
-        int2s.iter().map(|&v| datum::Datum::from_i16(v)).collect();
+    let datums: Vec<::datum::Datum> =
+        int2s.iter().map(|&v| ::datum::Datum::from_i16(v)).collect();
     let n = int2s.len() as i32;
     arrayfuncs::construct::construct_md_array(
         mcx,
@@ -204,7 +204,7 @@ pub fn buildint2vector<'mcx>(
 pub fn check_valid_int2vector(ndim: i32, dataoffset: i32, elemtype: types_core::Oid) -> PgResult<()> {
     if ndim != 1 || dataoffset != 0 || elemtype != types_core::INT2OID {
         return Err(PgError::error("array is not a valid int2vector")
-            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH));
     }
     Ok(())
 }
@@ -218,7 +218,7 @@ pub fn int2vectorin<'mcx>(
     mcx: Mcx<'mcx>,
     input: &str,
     escontext: Option<&mut SoftErrorContext>,
-) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, u8>>> {
     let mut ints: Vec<i16> = Vec::new();
     let mut rest = input;
     loop {
@@ -238,7 +238,7 @@ pub fn int2vectorin<'mcx>(
                     "invalid input syntax for type {}: \"{}\"",
                     "smallint", rest
                 ))
-                .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
+                .with_sqlstate(::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
             );
         }
         // if (errno == ERANGE || l < SHRT_MIN || l > SHRT_MAX) -> out of range
@@ -263,7 +263,7 @@ pub fn int2vectorin<'mcx>(
                         "invalid input syntax for type {}: \"{}\"",
                         "smallint", rest
                     ))
-                    .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
+                    .with_sqlstate(::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
                 );
             }
         }
@@ -279,7 +279,7 @@ pub fn int2vectorin<'mcx>(
 fn soft_error_or_err<'mcx>(
     escontext: Option<&mut SoftErrorContext>,
     err: PgError,
-) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, u8>>> {
     match escontext {
         Some(ctx) => {
             ctx.save(err);

@@ -7,9 +7,9 @@
 //! ([`::nodes::parsestmt`]) and reach individual fields through the
 //! accessor seams below.
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::params::ParamListInfo;
@@ -18,7 +18,7 @@ use ::nodes::parsestmt::{
     ResourceOwnerHandle,
 };
 use ::nodes::queryenvironment::QueryEnvironment;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(
     /// `CreateCachedPlan(raw_parse_tree, query_string, commandTag)`
@@ -86,7 +86,7 @@ seam_core::seam!(
     pub fn cached_plan_get_target_list<'mcx>(
         mcx: Mcx<'mcx>,
         plansource: CachedPlanSourceHandle,
-    ) -> PgResult<mcx::PgVec<'mcx, Node<'mcx>>>
+    ) -> PgResult<::mcx::PgVec<'mcx, Node<'mcx>>>
 );
 
 // --- CachedPlanSource / CachedPlan field accessors --------------------------
@@ -107,7 +107,7 @@ seam_core::seam!(
     pub fn plansource_param_types<'mcx>(
         mcx: Mcx<'mcx>,
         plansource: CachedPlanSourceHandle,
-    ) -> PgResult<mcx::PgVec<'mcx, Oid>>
+    ) -> PgResult<::mcx::PgVec<'mcx, Oid>>
 );
 
 seam_core::seam!(
@@ -115,7 +115,7 @@ seam_core::seam!(
     pub fn plansource_query_string<'mcx>(
         mcx: Mcx<'mcx>,
         plansource: CachedPlanSourceHandle,
-    ) -> PgResult<mcx::PgString<'mcx>>
+    ) -> PgResult<::mcx::PgString<'mcx>>
 );
 
 seam_core::seam!(
@@ -155,7 +155,7 @@ seam_core::seam!(
     pub fn cached_plan_stmt_list<'mcx>(
         mcx: Mcx<'mcx>,
         cplan: CachedPlanHandle,
-    ) -> PgResult<mcx::PgVec<'mcx, PlannedStmt<'mcx>>>
+    ) -> PgResult<::mcx::PgVec<'mcx, PlannedStmt<'mcx>>>
 );
 
 seam_core::seam!(

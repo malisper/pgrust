@@ -4,8 +4,8 @@
 //! The owning crate `backend-storage-ipc-shmem` installs these from its
 //! `init_seams()`.
 
-use types_core::Size;
-use types_error::PgResult;
+use ::types_core::Size;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `ShmemInitStruct(const char *name, Size size, bool *foundPtr)` —
@@ -59,7 +59,7 @@ seam_core::seam!(
     /// `InitShmemIndex()` (shmem.c) — create the `ShmemIndex` hashtable used to
     /// find named shmem structures. `Err` carries the out-of-shmem
     /// `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn init_shmem_index() -> types_error::PgResult<()>
+    pub fn init_shmem_index() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

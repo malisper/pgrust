@@ -212,7 +212,7 @@ fn char_inc_dec_extremes() {
 
 #[test]
 fn strategy_routines_route_to_installers() {
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     use types_sortsupport::{SkipSupportIncDecId, SortComparatorId};
 
     // Recording sortsupport installers: stamp an observable token so we know

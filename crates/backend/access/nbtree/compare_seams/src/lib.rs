@@ -5,8 +5,8 @@
 //! `SortSupportData` / `SkipSupportData` node by storing C function pointers
 //! into its `comparator` / `increment` / `decrement` slots. In this repo those
 //! slots are `Copy` tokens
-//! ([`SortComparatorId`](types_sortsupport::SortComparatorId) /
-//! [`SkipSupportIncDecId`](types_sortsupport::SkipSupportIncDecId)) that only
+//! ([`SortComparatorId`](::types_sortsupport::SortComparatorId) /
+//! [`SkipSupportIncDecId`](::types_sortsupport::SkipSupportIncDecId)) that only
 //! the sort / skip *substrate* knows how to mint and interpret. So the field
 //! write is delegated to an install seam.
 //!
@@ -20,8 +20,8 @@
 
 #![allow(non_snake_case)]
 
-use types_core::Oid;
-use datum::Datum;
+use ::types_core::Oid;
+use ::datum::Datum;
 use types_sortsupport::{SkipSupportData, SkipSupportIncDecId, SortSupportData};
 
 /// A SortSupport fast comparator: C `int (*comparator)(Datum, Datum,
@@ -29,7 +29,7 @@ use types_sortsupport::{SkipSupportData, SkipSupportIncDecId, SortSupportData};
 /// (`btint2fastcmp` / `ssup_datum_int32_cmp` / `ssup_datum_signed_cmp` /
 /// `btoidfastcmp`) never read. The two operands are the packed scalar `Datum`s
 /// exactly as C passes them; the substrate mints a
-/// [`types_sortsupport::SortComparatorId`] token denoting this function pointer.
+/// [`::types_sortsupport::SortComparatorId`] token denoting this function pointer.
 pub type FastComparator = fn(Datum, Datum) -> i32;
 
 /// A skip-support increment / decrement kernel: C `Datum (*SkipSupportIncDec)
@@ -38,7 +38,7 @@ pub type FastComparator = fn(Datum, Datum) -> i32;
 /// never read. The kernel returns the incremented / decremented copy paired
 /// with the `*overflow` (or `*underflow`) flag the C kernels set through their
 /// out-pointer. The substrate mints a
-/// [`types_sortsupport::SkipSupportIncDecId`] token denoting this function
+/// [`::types_sortsupport::SkipSupportIncDecId`] token denoting this function
 /// pointer and interprets it when [`run_skip_increment`] / [`run_skip_decrement`]
 /// runs the callback.
 pub type SkipIncDec = fn(Datum) -> (Datum, bool);
@@ -136,7 +136,7 @@ seam_core::seam!(
 // `high_elem` Datums are computed in-crate and stored on the node directly by
 // the strategy routine before the install; the substrate wires the increment /
 // decrement callbacks: `nbtcompare` passes its native kernels, the substrate
-// mints the [`SkipSupportIncDecId`](types_sortsupport::SkipSupportIncDecId)
+// mints the [`SkipSupportIncDecId`](::types_sortsupport::SkipSupportIncDecId)
 // tokens denoting them and stores them into `sksup.increment` / `sksup.decrement`
 // (exactly as the parallel `install_sortsupport_*` seams do for `comparator`).
 // ===========================================================================
@@ -183,7 +183,7 @@ seam_core::seam!(
 // `sksup->decrement(rel, existing, &uf)`).
 //
 // OUTWARD seams owned by the substrate (it minted the
-// [`SkipSupportIncDecId`](types_sortsupport::SkipSupportIncDecId) token in
+// [`SkipSupportIncDecId`](::types_sortsupport::SkipSupportIncDecId) token in
 // `install_skipsupport_*` and holds the kernel registry). The B-Tree skip-array
 // strategy code (`_bt_skiparray_strat_increment` / `_bt_skiparray_strat_decrement`,
 // nbtpreprocesskeys.c) calls them. The `rel` argument is dropped: the in-core

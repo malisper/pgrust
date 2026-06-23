@@ -5,14 +5,14 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use types_core::ProcNumber;
-use types_core::SubTransactionId;
-use types_error::PgResult;
-use types_namespace::FuncCandidateList;
-use types_namespace::SearchPathMatcher;
-use types_storage::lock::LOCKMODE;
-use types_tuple::access::RangeVar;
+use ::types_core::Oid;
+use ::types_core::ProcNumber;
+use ::types_core::SubTransactionId;
+use ::types_error::PgResult;
+use ::types_namespace::FuncCandidateList;
+use ::types_namespace::SearchPathMatcher;
+use ::types_storage::lock::LOCKMODE;
+use ::types_tuple::access::RangeVar;
 
 seam_core::seam!(
     /// `TypeIsVisible(typid)` (namespace.c): whether the type is visible in
@@ -392,7 +392,7 @@ seam_core::seam!(
     /// Takes the K1 owned-tree `RangeVar` node (the node model CreateSeqStmt
     /// carries). Returns any pre-existing relation OID (`InvalidOid` if none).
     /// NOTE: the namespace owner is still on the legacy
-    /// `types_tuple::access::RangeVar` model and has not migrated to the K1
+    /// `::types_tuple::access::RangeVar` model and has not migrated to the K1
     /// owned-tree node, so it cannot yet install this; this is the contract the
     /// migrated owner will install. `Err` carries ACL/lookup ereports.
     pub fn range_var_get_and_check_creation_namespace(

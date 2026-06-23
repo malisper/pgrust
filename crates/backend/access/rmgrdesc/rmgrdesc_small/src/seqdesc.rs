@@ -1,8 +1,8 @@
 //! `seqdesc.c` — rmgr descriptor routines for `commands/sequence.c`.
 
-use mcx::PgString;
-use types_core::uint8;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_core::uint8;
+use ::types_error::PgResult;
 use wal::{xl_seq_rec, DecodedXLogRecord, XLR_INFO_MASK};
 
 use crate::util::{appendf, record_truncated};
@@ -45,7 +45,7 @@ pub fn seq_identify(info: uint8) -> Option<&'static str> {
 /// rmgr table invokes `rm_desc`.
 pub fn seq_desc_seam(
     buf: &mut PgString<'_>,
-    record: &wal::rmgr::XLogReaderState<'_>,
+    record: &::wal::rmgr::XLogReaderState<'_>,
 ) -> PgResult<()> {
     let record = record
         .record

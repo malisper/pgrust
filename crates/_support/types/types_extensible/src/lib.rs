@@ -26,7 +26,7 @@
 #![allow(non_snake_case)]
 #![forbid(unsafe_code)]
 
-use types_core::primitive::Size;
+use ::types_core::primitive::Size;
 
 /// Maximum length of an extensible node identifier (`EXTNODENAME_MAX_LEN`).
 pub const EXTNODENAME_MAX_LEN: usize = 64;

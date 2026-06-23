@@ -10,18 +10,18 @@ use crate::keystone::{
 };
 use functioncmds_seams::{self as seam, CastFuncForm, TransformFuncForm};
 use lsyscache_seams as lsyscache;
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
-use types_catalog::catalog_dependency::ObjectAddress;
-use cache::SysCacheKey;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::cache::SysCacheKey;
 use types_core::{AttrNumber, InvalidOid, Oid, OidIsValid};
 // The syscache search-key word (`SysCacheKey::Value`) is the bare C machine
 // word (`Datum key1..key4`) — the `ByVal` payload of the canonical
-// `types_tuple::Datum`, not the rich value enum. We reference that bare word
+// `::types_tuple::Datum`, not the rich value enum. We reference that bare word
 // directly (aliased `ScalarWord` to make the intent explicit), matching the
 // other syscache consumers (`ts-cache`, `attoptcache`, replication `proto`).
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
@@ -666,7 +666,7 @@ pub fn ExecuteDoStmt(stmt: &DoStmt, atomic: bool) -> PgResult<()> {
 //
 // `standard_ProcessUtility` (utility.c) reaches `ExecuteDoStmt` with the live,
 // arena-lifetimed `nodes::Node<'mcx>` parse tree, whereas the ported body
-// above operates on the non-lifetimed `parsenodes::DoStmt` model the rest
+// above operates on the non-lifetimed `::parsenodes::DoStmt` model the rest
 // of functioncmds is written against. The seam adapter bridges the two node
 // models: it lowers the live `DoStmt` (a `T_DoStmt` node whose `args` is a list
 // of `DefElem` nodes carrying `String` value-node args, per gram.y) into the
@@ -683,7 +683,7 @@ fn lower_defelem(node: &nodes::nodes::Node<'_>) -> DefElem {
     let d = node.expect_defelem();
     let arg = d.arg.as_deref().and_then(|n| {
         n.as_string().map(|s| {
-            Box::new(Node::String(parsenodes::StringNode {
+            Box::new(Node::String(::parsenodes::StringNode {
                 sval: Some(s.sval.as_str().to_string()),
             }))
         })

@@ -32,13 +32,13 @@ extern crate alloc;
 use ::execTuples::exectype_tupoutput::ExecCleanTypeFromTL;
 use execTuples_seams as execTuples;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx};
-use types_core::primitive::{AttrNumber, InvalidAttrNumber};
+use ::types_core::primitive::{AttrNumber, InvalidAttrNumber};
 use types_error::{PgError, PgResult};
 use ::nodes::executor::TupleSlotKind;
 use ::nodes::execnodes::{EStateData, JunkFilter, SlotId};
 use ::nodes::nodes::T_JunkFilter;
 use ::nodes::primnodes::TargetEntry;
-use types_tuple::heaptuple::TupleDesc;
+use ::types_tuple::heaptuple::TupleDesc;
 
 /// `tupdesc->natts` with a NULL-descriptor guard (the C descriptor is always
 /// non-NULL here; the idiomatic `TupleDesc` is an `Option`, so surface a NULL
@@ -78,7 +78,7 @@ fn clone_tupdesc<'mcx>(mcx: Mcx<'mcx>, td: &TupleDesc<'mcx>) -> PgResult<TupleDe
 /// routine does not use.)
 pub fn ExecInitJunkFilter<'mcx>(
     estate: &mut EStateData<'mcx>,
-    targetList: mcx::PgVec<'mcx, TargetEntry<'mcx>>,
+    targetList: ::mcx::PgVec<'mcx, TargetEntry<'mcx>>,
     slot: Option<SlotId>,
 ) -> PgResult<JunkFilter<'mcx>> {
     let mcx = estate.es_query_cxt;
@@ -126,7 +126,7 @@ pub fn ExecInitJunkFilter<'mcx>(
         cleanMap
     } else {
         // cleanMap = NULL;
-        mcx::PgVec::new_in(mcx)
+        ::mcx::PgVec::new_in(mcx)
     };
 
     // Finally create and initialize the JunkFilter struct.
@@ -152,7 +152,7 @@ pub fn ExecInitJunkFilter<'mcx>(
 /// deleted (dropped) attribute, marking that a NULL is needed in the output.
 pub fn ExecInitJunkFilterConversion<'mcx>(
     estate: &mut EStateData<'mcx>,
-    targetList: mcx::PgVec<'mcx, TargetEntry<'mcx>>,
+    targetList: ::mcx::PgVec<'mcx, TargetEntry<'mcx>>,
     cleanTupType: TupleDesc<'mcx>,
     slot: Option<SlotId>,
 ) -> PgResult<JunkFilter<'mcx>> {
@@ -217,7 +217,7 @@ pub fn ExecInitJunkFilterConversion<'mcx>(
         cleanMap
     } else {
         // cleanMap = NULL;
-        mcx::PgVec::new_in(mcx)
+        ::mcx::PgVec::new_in(mcx)
     };
 
     // Finally create and initialize the JunkFilter struct.
@@ -298,18 +298,18 @@ pub fn ExecFilterJunk<'mcx>(
     //   }
     // `values` flows verbatim into `store_virtual_values` and is fed from
     // `slot_getattr_by_id`; both are the execTuples slot-payload seam, whose
-    // canonical carrier is `types_tuple::heaptuple::Datum`
+    // canonical carrier is `::types_tuple::heaptuple::Datum`
     // (the ByVal/ByRef enum). No scalar is constructed or inspected here — the
     // per-column `tts_values` images are carried whole through the canonical
     // type, so by-reference values cross intact (no bare-word `as_usize` edge).
     let mut values = vec_with_capacity_in::<
-        types_tuple::heaptuple::Datum<'_>,
+        ::types_tuple::heaptuple::Datum<'_>,
     >(mcx, cleanLength)?;
     let mut isnull = vec_with_capacity_in::<bool>(mcx, cleanLength)?;
     for i in 0..cleanLength {
         let j = junkfilter.jf_cleanMap[i];
         if j == 0 {
-            values.push(types_tuple::heaptuple::Datum::null());
+            values.push(::types_tuple::heaptuple::Datum::null());
             isnull.push(true);
         } else {
             // old_values[j - 1] / old_isnull[j - 1]: read source attribute j

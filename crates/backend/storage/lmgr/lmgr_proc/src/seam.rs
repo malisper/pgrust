@@ -25,17 +25,17 @@
 //! the scaffold stage panics through them so the control flow in
 //! `proc_lifecycle` is the real one, never a stub of proc.c's own logic.
 
-use types_core::init::BackendType;
+use ::types_core::init::BackendType;
 use types_core::{LocalTransactionId, ProcNumber, TransactionId};
-use types_tuple::Datum;
-use types_error::PgResult;
-use types_storage::lock::{DeadLockState, LOCKMODE, LOCKTAG};
-use types_storage::storage::PGPROC;
+use ::types_tuple::Datum;
+use ::types_error::PgResult;
+use ::types_storage::lock::{DeadLockState, LOCKMODE, LOCKTAG};
+use ::types_storage::storage::PGPROC;
 
 /// Which of the four `ProcGlobal` freelists supplies / receives a `PGPROC`,
 /// matching the by-class partitioning `InitProcGlobal` builds. Re-exported from
 /// the owned `PROC_HDR` layout in `types-storage`.
-pub(crate) use types_storage::storage::FreeListId as FreeList;
+pub(crate) use ::types_storage::storage::FreeListId as FreeList;
 
 // ---- ProcGlobal / MyProc substrate (owned by proc_shmem) ----
 //
@@ -416,7 +416,7 @@ pub(crate) fn lwlock_acquire_exclusive(lock: LWLockHandle) {
     // owner-side acquisition live until that release.
     let guard = lwlock_seams::lwlock_acquire_main::call(
         lock,
-        types_storage::LWLockMode::LW_EXCLUSIVE,
+        ::types_storage::LWLockMode::LW_EXCLUSIVE,
     )
     .expect("LWLockAcquire(lock_group partition, LW_EXCLUSIVE)");
     core::mem::forget(guard);
@@ -469,15 +469,15 @@ pub(crate) fn deadlock_check(procno: ProcNumber) -> DeadLockState {
     let state =
         deadlock_seams::dead_lock_check::call(&mut space, my_id, Some(my_id))
             .expect("DeadLockCheck consistency check (elog(FATAL))");
-    // The detector's `types_deadlock::DeadLockState` and proc.c's
-    // `types_storage::lock::DeadLockState` are the same `DS_*` vocabulary under two
+    // The detector's `::types_deadlock::DeadLockState` and proc.c's
+    // `::types_storage::lock::DeadLockState` are the same `DS_*` vocabulary under two
     // owners; map across.
     match state {
-        types_deadlock::DeadLockState::NotYetChecked => DeadLockState::NotYetChecked,
-        types_deadlock::DeadLockState::NoDeadlock => DeadLockState::NoDeadLock,
-        types_deadlock::DeadLockState::SoftDeadlock => DeadLockState::SoftDeadLock,
-        types_deadlock::DeadLockState::HardDeadlock => DeadLockState::HardDeadLock,
-        types_deadlock::DeadLockState::BlockedByAutovacuum => DeadLockState::BlockedByAutoVacuum,
+        ::types_deadlock::DeadLockState::NotYetChecked => DeadLockState::NotYetChecked,
+        ::types_deadlock::DeadLockState::NoDeadlock => DeadLockState::NoDeadLock,
+        ::types_deadlock::DeadLockState::SoftDeadlock => DeadLockState::SoftDeadLock,
+        ::types_deadlock::DeadLockState::HardDeadlock => DeadLockState::HardDeadLock,
+        ::types_deadlock::DeadLockState::BlockedByAutovacuum => DeadLockState::BlockedByAutoVacuum,
     }
 }
 
@@ -487,7 +487,7 @@ pub(crate) fn deadlock_check(procno: ProcNumber) -> DeadLockState {
 pub(crate) fn get_blocking_autovacuum_pgproc() -> ProcNumber {
     match deadlock_seams::get_blocking_auto_vacuum_pgproc::call() {
         Some(proc_id) => proc_id.0 as ProcNumber,
-        None => types_core::INVALID_PROC_NUMBER,
+        None => ::types_core::INVALID_PROC_NUMBER,
     }
 }
 
@@ -577,39 +577,39 @@ const SRC: &str = "src/backend/storage/lmgr/proc.c";
 pub(crate) fn elog_panic(msg: &str) -> ! {
     // PANIC is unconditionally fatal; the error path never returns. The merged
     // elog promotes PANIC to a process abort, realized here as a panic.
-    let _ = utils_error::elog(types_error::PANIC, msg.to_string());
+    let _ = utils_error::elog(::types_error::PANIC, msg.to_string());
     panic!("PANIC: {msg}")
 }
 
 /// `elog(FATAL, msg)`.
 pub(crate) fn elog_fatal(msg: &str) -> ! {
-    let _ = utils_error::elog(types_error::FATAL, msg.to_string());
+    let _ = utils_error::elog(::types_error::FATAL, msg.to_string());
     panic!("FATAL: {msg}")
 }
 
 /// `elog(ERROR, msg)` — surfaced as the `PgResult` error path.
 pub(crate) fn elog_error(msg: &str) -> PgResult<()> {
-    utils_error::elog(types_error::ERROR, msg.to_string())
+    utils_error::elog(::types_error::ERROR, msg.to_string())
 }
 
 /// `ereport(FATAL, errcode(ERRCODE_TOO_MANY_CONNECTIONS), errmsg("sorry, too
 /// many clients already"))`.
 pub(crate) fn ereport_fatal_too_many_clients() -> PgResult<()> {
-    utils_error::ereport(types_error::FATAL)
-        .errcode(types_error::ERRCODE_TOO_MANY_CONNECTIONS)
+    utils_error::ereport(::types_error::FATAL)
+        .errcode(::types_error::ERRCODE_TOO_MANY_CONNECTIONS)
         .errmsg("sorry, too many clients already")
-        .finish(types_error::ErrorLocation::new(SRC, 457, "InitProcess"))
+        .finish(::types_error::ErrorLocation::new(SRC, 457, "InitProcess"))
 }
 
 /// `ereport(FATAL, errcode(ERRCODE_TOO_MANY_CONNECTIONS), errmsg("number of
 /// requested standby connections exceeds \"max_wal_senders\" (currently %d)"))`.
 pub(crate) fn ereport_fatal_too_many_wal_senders(max_wal_senders: i32) -> PgResult<()> {
-    utils_error::ereport(types_error::FATAL)
-        .errcode(types_error::ERRCODE_TOO_MANY_CONNECTIONS)
+    utils_error::ereport(::types_error::FATAL)
+        .errcode(::types_error::ERRCODE_TOO_MANY_CONNECTIONS)
         .errmsg(format!(
             "number of requested standby connections exceeds \"max_wal_senders\" (currently {max_wal_senders})"
         ))
-        .finish(types_error::ErrorLocation::new(SRC, 453, "InitProcess"))
+        .finish(::types_error::ErrorLocation::new(SRC, 453, "InitProcess"))
 }
 
 /// `ProcSleep`'s autovac-cancel diagnostic (proc.c:1523):
@@ -618,10 +618,10 @@ pub(crate) fn ereport_fatal_too_many_wal_senders(max_wal_senders: i32) -> PgResu
 /// formatted `detail_log` (the lock-tag description) under the
 /// `message_level_is_interesting(DEBUG1)` guard.
 pub(crate) fn report_autovac_cancel(pid: i32, detail_log: String) -> PgResult<()> {
-    utils_error::ereport(types_error::DEBUG1)
+    utils_error::ereport(::types_error::DEBUG1)
         .errmsg_internal(format!("sending cancel to blocking autovacuum PID {pid}"))
         .errdetail_log(detail_log)
-        .finish(types_error::ErrorLocation::new(SRC, 1523, "ProcSleep"))
+        .finish(::types_error::ErrorLocation::new(SRC, 1523, "ProcSleep"))
 }
 
 /// `ProcSleep`'s `kill(pid, SIGINT)` against a blocking autovacuum worker
@@ -634,10 +634,10 @@ pub(crate) fn signal_autovacuum_worker(pid: i32) -> PgResult<()> {
     if rc < 0 {
         let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
         if errno != libc::ESRCH {
-            return utils_error::ereport(types_error::WARNING)
+            return utils_error::ereport(::types_error::WARNING)
                 .with_saved_errno(errno)
                 .errmsg(format!("could not send signal to process {pid}: %m"))
-                .finish(types_error::ErrorLocation::new(SRC, 1546, "ProcSleep"));
+                .finish(::types_error::ErrorLocation::new(SRC, 1546, "ProcSleep"));
         }
     }
     Ok(())
@@ -653,9 +653,9 @@ pub(crate) fn report_lock_wait_log(
     detail_plural: Option<String>,
     holders_num: i32,
 ) -> PgResult<()> {
-    let mut b = utils_error::ereport(types_error::LOG).errmsg(message);
+    let mut b = utils_error::ereport(::types_error::LOG).errmsg(message);
     if let (Some(s), Some(p)) = (detail_singular, detail_plural) {
         b = b.errdetail_log_plural(s, p, holders_num as u64);
     }
-    b.finish(types_error::ErrorLocation::new(SRC, 1590, "ProcSleep"))
+    b.finish(::types_error::ErrorLocation::new(SRC, 1590, "ProcSleep"))
 }

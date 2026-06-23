@@ -8,8 +8,8 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 
 use crate::execnodes::SlotId;
 use crate::jointype::{Join, JoinStateData};

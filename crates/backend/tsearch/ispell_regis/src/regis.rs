@@ -18,9 +18,9 @@
 //! owners: `t_isalpha_cstr` (`ts_locale.c`) and `pg_mblen_cstr`
 //! (`mbutils.c`). `t_iseq` is a pure ASCII byte compare, ported in-crate.
 
-use ts_locale_seams::t_isalpha as t_isalpha_seam;
-use utils_error::ereport;
-use mbutils_seams::pg_mblen_range;
+use ::ts_locale_seams::t_isalpha as t_isalpha_seam;
+use ::utils_error::ereport;
+use ::mbutils_seams::pg_mblen_range;
 use mcx::{Mcx, PgVec};
 use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 
@@ -350,7 +350,7 @@ pub fn rs_execute(r: &Regis<'_>, str: &[u8]) -> PgResult<bool> {
 
 /// The `invalid regis pattern: "%s"` `elog(ERROR)` (an `XX000` internal error),
 /// with `bytes` rendered as the C `%s` would.
-fn invalid_regis_pattern(bytes: &[u8]) -> types_error::PgError {
+fn invalid_regis_pattern(bytes: &[u8]) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INTERNAL_ERROR)
         .errmsg(alloc::format!(

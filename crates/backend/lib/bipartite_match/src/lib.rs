@@ -48,7 +48,7 @@
 //! Here we follow the project's pilot memory model:
 //!
 //! * The two purely-internal working arrays — `distance` and `queue` — live in
-//!   [`mcx::PgVec`]s charged to a private [`mcx::MemoryContext`] (`local_ctx`),
+//!   [`::mcx::PgVec`]s charged to a private [`::mcx::MemoryContext`] (`local_ctx`),
 //!   auto-uncharged when the context drops on every return path. C has no private
 //!   context (the scratch arrays sit in `CurrentMemoryContext`), but routing them
 //!   through a tracked context is the pilot-model analogue of the eventual

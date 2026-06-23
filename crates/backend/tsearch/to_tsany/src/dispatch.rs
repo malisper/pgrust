@@ -35,12 +35,12 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use define_seams::DefElemArg;
+use ::define_seams::DefElemArg;
 use parse_seams::{DictSubState, LexizeLexeme};
 use lsyscache_seams as lsyscache;
 use ts_cache as ts_cache;
 use mcx::{Mcx, MemoryContext, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 use tsearch::{OwnedTSLexeme, TSLexeme, ThesaurusSubState};
 
@@ -226,9 +226,9 @@ fn to_owned_lexeme(l: OwnedLexeme) -> OwnedTSLexeme {
 /// node kind so `defGetBoolean`/`defGetInt32`/... see the same `nodeTag` C does
 /// (e.g. `casesensitive = 1` reaches `defGetBoolean` as a `T_Integer`).
 fn deflist_pairs(
-    options: &PgVec<'_, cache::deflist::DefElemString<'_>>,
+    options: &PgVec<'_, ::cache::deflist::DefElemString<'_>>,
 ) -> Vec<(String, Option<DefElemArg>)> {
-    use cache::deflist::DefElemValKind;
+    use ::cache::deflist::DefElemValKind;
     options
         .iter()
         .map(|de| {
@@ -275,17 +275,17 @@ mod thesaurus_cache {
     use alloc::string::String;
     use core::cell::RefCell;
 
-    use define_seams::DefElemArg;
+    use ::define_seams::DefElemArg;
     use mcx::{Mcx, McxOwned, MemoryContext};
-    use types_error::PgResult;
-    use tsearch::DictThesaurus;
+    use ::types_error::PgResult;
+    use ::tsearch::DictThesaurus;
 
     struct Cache<'mcx> {
         mcx: Mcx<'mcx>,
         dicts: BTreeMap<u32, DictThesaurus<'mcx>>,
     }
 
-    mcx::bind!(CacheTy => Cache<'mcx>);
+    ::mcx::bind!(CacheTy => Cache<'mcx>);
 
     thread_local! {
         static STATE: RefCell<Option<McxOwned<CacheTy>>> = const { RefCell::new(None) };

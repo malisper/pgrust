@@ -13,9 +13,9 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use mcx::Mcx;
-use types_core::Oid;
-use error_fgram::ereport;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::error_fgram::ereport;
 use types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERROR,
 };
@@ -28,10 +28,10 @@ use ::nodes::parsestmt::{DestReceiverHandle, ParseState};
 use ::nodes::portalcmds::ParamListInfo;
 use ::nodes::parsestmt::IntoClause;
 use ::nodes::queryenvironment::QueryEnvironment;
-use types_slot::TupleSlotKind;
-use types_tuple::heaptuple::TupleDesc;
+use ::types_slot::TupleSlotKind;
+use ::types_tuple::heaptuple::TupleDesc;
 
-use define_seams::DefElemArg;
+use ::define_seams::DefElemArg;
 use explain_format as fmt;
 use explain_seams as seams;
 use explain_state as state;
@@ -65,14 +65,14 @@ fn defname_str<'a>(opt: &'a DefElem<'_>) -> &'a str {
 /// `def_get_boolean` seam (owned by `backend-commands-define`).
 fn def_get_boolean(opt: &DefElem<'_>) -> PgResult<bool> {
     let arg = opt.arg.as_deref().map(def_elem_arg);
-    define_seams::def_get_boolean::call(String::from(defname_str(opt)), arg)
+    ::define_seams::def_get_boolean::call(String::from(defname_str(opt)), arg)
 }
 
 /// `defGetString(opt)` over the analyzed-tree `DefElem`, routed through the
 /// `def_get_string` seam.
 fn def_get_string<'mcx>(mcx: Mcx<'mcx>, opt: &DefElem<'_>) -> PgResult<String> {
     let arg = opt.arg.as_deref().map(def_elem_arg);
-    let p = define_seams::def_get_string::call(
+    let p = ::define_seams::def_get_string::call(
         mcx,
         String::from(defname_str(opt)),
         arg,
@@ -387,7 +387,7 @@ pub fn ExplainOneUtility<'mcx>(
                 .skipData;
             let ctas_into = IntoClause {
                 skipData: skip_data,
-                node: mcx::alloc_in(mcx, into_node.clone_in(mcx)?)?,
+                node: ::mcx::alloc_in(mcx, into_node.clone_in(mcx)?)?,
             };
 
             ExplainOneQuery(
@@ -618,5 +618,5 @@ pub fn ExplainResultDesc<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<Tu
         -1,
         0,
     )?;
-    Ok(Some(mcx::alloc_in(mcx, tupdesc)?))
+    Ok(Some(::mcx::alloc_in(mcx, tupdesc)?))
 }

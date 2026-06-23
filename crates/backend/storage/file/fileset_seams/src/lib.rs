@@ -4,9 +4,9 @@
 //! these from its `init_seams()` when it lands; until then a call panics
 //! loudly.
 
-use types_error::PgResult;
-use execparallel::FileSetHandle;
-use types_storage::file::File;
+use ::types_error::PgResult;
+use ::execparallel::FileSetHandle;
+use ::types_storage::file::File;
 
 seam_core::seam!(
     /// `File FileSetCreate(FileSet *fileset, const char *name)` (fileset.c) —

@@ -16,9 +16,9 @@
 //! this platform")` — `pg_numa_init()` is the empty-wrapper `-1` — so it never
 //! reaches the materialize protocol.
 
-use types_core::Oid;
+use ::types_core::Oid;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_storage::HugePagesStatus;
+use ::types_storage::HugePagesStatus;
 use types_tuple::heaptuple::Datum;
 
 use crate::register_srf;

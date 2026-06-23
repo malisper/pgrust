@@ -13,7 +13,7 @@
 //! seam this crate must install.
 
 use types_error::{PgResult, SoftErrorContext};
-use types_jsonpath::parse::JsonPathParseResult;
+use ::types_jsonpath::parse::JsonPathParseResult;
 
 /// Adapter for the `parse` inward seam (C: `parsejsonpath`).
 fn seam_parse(

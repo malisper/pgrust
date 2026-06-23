@@ -10,14 +10,14 @@
 //! Relations cross as borrows of the caller's open
 //! `rel::RelationData` carriers; snapshots as trimmed
 //! `snapshot::SnapshotData`; the live scan state is the trimmed
-//! `types_scan::genam::SysScanDescData`, held by a [`SysScanGuard`] so the
+//! `::types_scan::genam::SysScanDescData`, held by a [`SysScanGuard`] so the
 //! scan is closed on every early return (AGENTS.md "Locks and held
 //! resources"). C returns a `HeapTuple` owned by the scan (valid until the
 //! next call); the owned model copies each result tuple out into `mcx`.
 
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
-use types_scan::genam::SysScanDescData;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
+use ::types_scan::genam::SysScanDescData;
 
 /* ==========================================================================
  * High-level relcache catalog-scan seams.
@@ -600,11 +600,11 @@ seam_core::seam!(
     /// lookup of the key procedures, AM begin-scan).
     pub fn systable_beginscan(
         heap_relation: &rel::RelationData<'_>,
-        index_id: types_core::primitive::Oid,
+        index_id: ::types_core::primitive::Oid,
         index_ok: bool,
         snapshot: Option<&snapshot::SnapshotData>,
-        keys: &[types_scan::scankey::ScanKeyData],
-    ) -> types_error::PgResult<SysScanGuard>
+        keys: &[::types_scan::scankey::ScanKeyData],
+    ) -> ::types_error::PgResult<SysScanGuard>
 );
 
 seam_core::seam!(
@@ -613,8 +613,8 @@ seam_core::seam!(
     /// fetch error surface.
     pub fn systable_getnext<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        sysscan: &mut types_scan::genam::SysScanDescData,
-    ) -> types_error::PgResult<
+        sysscan: &mut ::types_scan::genam::SysScanDescData,
+    ) -> ::types_error::PgResult<
         Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
     >
 );
@@ -625,8 +625,8 @@ seam_core::seam!(
     /// Reached only through [`SysScanGuard`] (`end()` or `Drop`); consumers
     /// never call it directly. `Err` carries the AM end-scan error surface.
     pub fn systable_endscan(
-        sysscan: types_scan::genam::SysScanDescData,
-    ) -> types_error::PgResult<()>
+        sysscan: ::types_scan::genam::SysScanDescData,
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -639,8 +639,8 @@ seam_core::seam!(
     /// current row). `Err` carries the snapshot-acquisition / heap-fetch error
     /// surface as well as any concurrent-abort handling.
     pub fn systable_recheck_tuple(
-        sysscan: &mut types_scan::genam::SysScanDescData,
-    ) -> types_error::PgResult<bool>
+        sysscan: &mut ::types_scan::genam::SysScanDescData,
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -654,8 +654,8 @@ seam_core::seam!(
         heap_relation: &rel::RelationData<'_>,
         index_relation: &rel::RelationData<'_>,
         snapshot: Option<&snapshot::SnapshotData>,
-        keys: &[types_scan::scankey::ScanKeyData],
-    ) -> types_error::PgResult<SysScanGuard>
+        keys: &[::types_scan::scankey::ScanKeyData],
+    ) -> ::types_error::PgResult<SysScanGuard>
 );
 
 seam_core::seam!(
@@ -664,9 +664,9 @@ seam_core::seam!(
     /// `Err` carries the index/heap fetch error surface.
     pub fn systable_getnext_ordered<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        sysscan: &mut types_scan::genam::SysScanDescData,
-        direction: types_scan::sdir::ScanDirection,
-    ) -> types_error::PgResult<
+        sysscan: &mut ::types_scan::genam::SysScanDescData,
+        direction: ::types_scan::sdir::ScanDirection,
+    ) -> ::types_error::PgResult<
         Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
     >
 );
@@ -677,8 +677,8 @@ seam_core::seam!(
     /// consumers never call it directly. `Err` carries the AM end-scan
     /// error surface.
     pub fn systable_endscan_ordered(
-        sysscan: types_scan::genam::SysScanDescData,
-    ) -> types_error::PgResult<()>
+        sysscan: ::types_scan::genam::SysScanDescData,
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -722,9 +722,9 @@ seam_core::seam!(
         relation: &rel::RelationData<'mcx>,
         index_id: Oid,
         index_ok: bool,
-        keys: &[types_scan::scankey::ScanKeyData],
-        mutate: &mut dyn FnMut(&mut [u8]) -> types_error::PgResult<bool>,
-    ) -> types_error::PgResult<Option<types_tuple::heaptuple::ItemPointerData>>
+        keys: &[::types_scan::scankey::ScanKeyData],
+        mutate: &mut dyn FnMut(&mut [u8]) -> ::types_error::PgResult<bool>,
+    ) -> ::types_error::PgResult<Option<types_tuple::heaptuple::ItemPointerData>>
 );
 
 seam_core::seam!(
@@ -739,7 +739,7 @@ seam_core::seam!(
         index_relation: &rel::Relation<'_>,
         values: &[types_tuple::heaptuple::Datum<'mcx>],
         isnull: &[bool],
-    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> ::types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(
@@ -752,9 +752,9 @@ seam_core::seam!(
     /// node-tree decode / deparse path.
     pub fn pg_get_indexdef_columns<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        indexrelid: types_core::primitive::Oid,
+        indexrelid: ::types_core::primitive::Oid,
         pretty: bool,
-    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> ::types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
 
 /// One deformed `pg_attrdef` row, as produced by [`scan_pg_attrdef`]: the
@@ -767,7 +767,7 @@ seam_core::seam!(
 #[derive(Debug, Clone)]
 pub struct PgAttrdefRow {
     /// `attrdef->adnum`.
-    pub adnum: types_core::primitive::AttrNumber,
+    pub adnum: ::types_core::primitive::AttrNumber,
     /// `TextDatumGetCString(adbin)`, or `None` for the C `isnull`.
     pub adbin: Option<String>,
 }
@@ -789,7 +789,7 @@ pub struct PgConstraintNnCheckRow {
     /// NOT NULL only: `!conform->convalidated`.
     pub notnull_invalid: bool,
     /// NOT NULL only: `extractNotNullColumn(htup)`.
-    pub notnull_attnum: types_core::primitive::AttrNumber,
+    pub notnull_attnum: ::types_core::primitive::AttrNumber,
     /// CHECK only: `conform->conenforced`.
     pub ccenforced: bool,
     /// CHECK only: `conform->convalidated`.
@@ -810,8 +810,8 @@ seam_core::seam!(
     /// the caller does the per-attribute accounting/sort/install. `Err`
     /// carries the scan-setup / index-or-heap fetch / detoast error surface.
     pub fn scan_pg_attrdef(
-        relid: types_core::primitive::Oid,
-    ) -> types_error::PgResult<Vec<PgAttrdefRow>>
+        relid: ::types_core::primitive::Oid,
+    ) -> ::types_error::PgResult<Vec<PgAttrdefRow>>
 );
 
 seam_core::seam!(
@@ -824,8 +824,8 @@ seam_core::seam!(
     /// accounting/sort/install + not-null attnullability fixup. `Err` carries
     /// the scan-setup / fetch / detoast error surface.
     pub fn scan_pg_constraint_nncheck(
-        relid: types_core::primitive::Oid,
-    ) -> types_error::PgResult<Vec<PgConstraintNnCheckRow>>
+        relid: ::types_core::primitive::Oid,
+    ) -> ::types_error::PgResult<Vec<PgConstraintNnCheckRow>>
 );
 
 /// The live-scan token returned by [`systable_beginscan`] /

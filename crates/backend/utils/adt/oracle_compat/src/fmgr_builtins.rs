@@ -16,10 +16,10 @@
 //! / nargs / strict / retset are transcribed exactly from `pg_proc.dat`
 //! (all are `proisstrict => 't'`, none retset).
 
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -54,8 +54,8 @@ fn vardata_any(image: &[u8]) -> &[u8] {
         // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header (skip 1 byte).
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
         // 4-byte uncompressed header (skip VARHDRSZ).
-        Some(_) if image.len() >= datum::varlena::VARHDRSZ => {
-            &image[datum::varlena::VARHDRSZ..]
+        Some(_) if image.len() >= ::datum::varlena::VARHDRSZ => {
+            &image[::datum::varlena::VARHDRSZ..]
         }
         _ => &[],
     }
@@ -78,9 +78,9 @@ fn collation(fcinfo: &FunctionCallInfoBaseData) -> Oid {
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     // PG_RETURN_TEXT_P: prepend the 4-byte varlena header (header-ful image).
-    let mut img = Vec::with_capacity(datum::varlena::VARHDRSZ + bytes.len());
-    img.extend_from_slice(&datum::varlena::set_varsize_4b(
-        datum::varlena::VARHDRSZ + bytes.len(),
+    let mut img = Vec::with_capacity(::datum::varlena::VARHDRSZ + bytes.len());
+    img.extend_from_slice(&::datum::varlena::set_varsize_4b(
+        ::datum::varlena::VARHDRSZ + bytes.len(),
     ));
     img.extend_from_slice(&bytes);
     fcinfo.set_ref_result(RefPayload::Varlena(img));

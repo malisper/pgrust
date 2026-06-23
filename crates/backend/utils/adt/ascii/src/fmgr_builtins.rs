@@ -20,8 +20,8 @@
 //! `'f'`; `nargs` is the `proargtypes` count (1 for `to_ascii_default`, 2 for
 //! the two-arg forms).
 
-use datum::Datum;
-use fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
+use ::datum::Datum;
+use ::fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------

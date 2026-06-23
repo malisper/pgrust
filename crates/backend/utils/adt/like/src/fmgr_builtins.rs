@@ -25,10 +25,10 @@
 //! that are not modeled at this boundary and is dispatched only through the bare
 //! `PGFunction` registry, which is deferred.
 
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ fn ret_bool(v: bool) -> Datum {
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
     image.extend_from_slice(&bytes);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)

@@ -32,20 +32,20 @@
 //! (`backend-access-spg-quadtree` / `-kdtree` / `-text` /
 //! `backend-utils-adt-network-spgist`), the bodies here operate directly on the
 //! owned [`spgist`] vocabulary structs, with the range payloads carried
-//! inside [`types_tuple::Datum::ByRef`] varlena images. "Allocate an output
+//! inside [`::types_tuple::Datum::ByRef`] varlena images. "Allocate an output
 //! array" becomes "fill an owned `Vec`".
 //!
 //! `DatumGetRangeTypeP(d)` becomes [`datum_get_range`] over the by-reference
 //! varlena image (the bytes ARE the detoasted `RangeType` varlena — node tuples
 //! are never toasted, since `longValuesOK = false`), and `RangeTypePGetDatum(r)`
 //! becomes [`range_get_datum`], which copies the serialized `RangeType` varlena
-//! bytes back into a [`types_tuple::Datum::ByRef`]. The range kernels
+//! bytes back into a [`::types_tuple::Datum::ByRef`]. The range kernels
 //! (`range_deserialize` / `range_serialize` / `range_cmp_bounds` /
 //! `bounds_adjacent` / `range_get_typcache` and the `*_internal` predicates)
 //! reuse the ported implementations in [`adt_rangetypes`]; the
 //! `range_get_typcache(fcinfo, oid)` C call (which caches in
 //! `fcinfo->flinfo->fn_extra`) becomes the by-OID
-//! `adt_rangetypes::range_bounds_compare::range_get_typcache`
+//! `::adt_rangetypes::range_bounds_compare::range_get_typcache`
 //! (the cache is the typcache owner's job).
 //!
 //! The SP-GiST core dispatches its five opclass support procedures by OID
@@ -55,9 +55,9 @@
 //! leaf_consistent 3473) to the bodies exported here, exactly as it routes the
 //! quad-tree / k-d-tree / text / inet opclasses.
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::Oid;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use types_rangetypes::{RangeBound, RangeTypeP, RANGE_EMPTY};
 use spgist::{
@@ -67,13 +67,13 @@ use spgist::{
 };
 use types_tuple::heaptuple::Datum as TDatum;
 
-use adt_rangetypes::range_bounds_compare::{
+use ::adt_rangetypes::range_bounds_compare::{
     bounds_adjacent, range_adjacent_internal, range_after_internal, range_before_internal,
     range_cmp_bounds, range_contained_by_internal, range_contains_elem_internal,
     range_contains_internal, range_eq_internal, range_get_typcache, range_overlaps_internal,
     range_overleft_internal, range_overright_internal,
 };
-use adt_rangetypes::range_repr_serialize::{range_deserialize, range_serialize};
+use ::adt_rangetypes::range_repr_serialize::{range_deserialize, range_serialize};
 
 // ---------------------------------------------------------------------------
 // pg_proc.dat support-proc OIDs for the range_ops SP-GiST opclass.
@@ -130,7 +130,7 @@ const RANGESTRAT_EQ: u16 = 18;
 // fmgr boundary codecs (DatumGetRangeTypeP / RangeTypePGetDatum).
 //
 // A range leaf/prefix datum crosses the typed dispatch seam as a
-// `types_tuple::Datum::ByRef` whose bytes are the serialized `RangeType`
+// `::types_tuple::Datum::ByRef` whose bytes are the serialized `RangeType`
 // varlena (the on-disk image the range ADT produces and consumes). The node
 // tuples are never toasted (`longValuesOK = false`), so the bytes are always a
 // plain detoasted `RangeType` — exactly what `RangeTypeP` points at.
@@ -170,14 +170,14 @@ fn datum_get_range<'mcx>(mcx: Mcx<'mcx>, d: &TDatum<'mcx>) -> PgResult<RangeType
     if !short {
         // Plain 4B (or empty): borrow verbatim, no allocation.
         return Ok(RangeTypeP {
-            ptr: bytes.as_ptr() as *const types_rangetypes::RangeType,
+            ptr: bytes.as_ptr() as *const ::types_rangetypes::RangeType,
             _marker: core::marker::PhantomData,
         });
     }
     let total_1b = ((bytes[0] >> 1) & 0x7F) as usize;
     let data_size = total_1b.saturating_sub(1);
     let new_size = data_size + 4; // VARHDRSZ
-    mcx::check_alloc_size(new_size)?;
+    ::mcx::check_alloc_size(new_size)?;
     let layout =
         Layout::from_size_align(new_size.max(1), 8).expect("valid RangeType image layout");
     let block = mcx.allocate(layout).map_err(|_| mcx.oom(new_size))?;
@@ -190,7 +190,7 @@ fn datum_get_range<'mcx>(mcx: Mcx<'mcx>, d: &TDatum<'mcx>) -> PgResult<RangeType
         core::ptr::copy_nonoverlapping(bytes.as_ptr().add(1), dst.add(4), data_size);
     }
     Ok(RangeTypeP {
-        ptr: dst as *const types_rangetypes::RangeType,
+        ptr: dst as *const ::types_rangetypes::RangeType,
         _marker: core::marker::PhantomData,
     })
 }
@@ -209,10 +209,10 @@ fn range_get_datum<'mcx>(mcx: Mcx<'mcx>, range: RangeTypeP<'mcx>) -> PgResult<TD
         let len = varsize_4b(core::slice::from_raw_parts(p, 4));
         core::slice::from_raw_parts(p, len)
     };
-    Ok(TDatum::ByRef(mcx::slice_in(mcx, bytes)?))
+    Ok(TDatum::ByRef(::mcx::slice_in(mcx, bytes)?))
 }
 
-/// Bridge a typed `ScanKeyData::sk_argument` (a `types_tuple::Datum`) to the
+/// Bridge a typed `ScanKeyData::sk_argument` (a `::types_tuple::Datum`) to the
 /// bare-word `datum::Datum` that `range_contains_elem_internal` consumes
 /// (the C `sk_argument` is a bare `Datum`). A by-value element passes its
 /// machine word; a by-reference element passes the pointer to its image bytes.
@@ -238,7 +238,7 @@ fn range_get_oid<'mcx>(mcx: Mcx<'mcx>, d: &TDatum<'mcx>) -> PgResult<Oid> {
 #[inline]
 fn range_is_empty<'mcx>(mcx: Mcx<'mcx>, d: &TDatum<'mcx>) -> PgResult<bool> {
     Ok(
-        (adt_rangetypes::range_repr_serialize::range_get_flags(datum_get_range(
+        (::adt_rangetypes::range_repr_serialize::range_get_flags(datum_get_range(
             mcx, d,
         )?) & RANGE_EMPTY)
             != 0,
@@ -672,7 +672,7 @@ pub fn spg_range_quad_inner_consistent<'mcx>(
                         // previous centroid range if present for checking this.
                         let prev = if let Some(bytes) = in_.traversalValue.as_ref() {
                             let prev_centroid = RangeTypeP {
-                                ptr: bytes.as_ptr() as *const types_rangetypes::RangeType,
+                                ptr: bytes.as_ptr() as *const ::types_rangetypes::RangeType,
                                 _marker: core::marker::PhantomData,
                             };
                             let (pl, pu, _pe) = range_deserialize(&typcache, prev_centroid)?;

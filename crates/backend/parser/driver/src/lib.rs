@@ -36,14 +36,14 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgVec};
-use types_core::PgWChar;
-use types_error::PgResult;
+use ::types_core::PgWChar;
+use ::types_error::PgResult;
 use ::nodes::parsestmt::RawStmt;
-use parsenodes::RawParseMode;
+use ::parsenodes::RawParseMode;
 
 use gram_seams as gram;
 use scan_seams as scan;
-use scan_seams::CoreToken;
+use ::scan_seams::CoreToken;
 use scansup_seams as scansup;
 use mbutils_seams as mb;
 
@@ -424,18 +424,18 @@ pub fn mode_seed(mcx: Mcx<'_>, mode: RawParseMode) -> Option<CoreToken<'_>> {
 /// (parse_type.c `typeStringToTypeName`'s inner drive): parse a type-name string
 /// and return the single `TypeName` node it produces.
 ///
-/// The seam contract is `String -> PgResult<parsenodes::TypeName>` (owned,
+/// The seam contract is `String -> PgResult<::parsenodes::TypeName>` (owned,
 /// no arena lifetime). The grammar drive needs an arena, so a private
 /// `MemoryContext` is created for the parse; the decoded arena
 /// `::nodes::rawnodes::TypeName<'mcx>` is bridged into the owned
-/// `parsenodes::TypeName` before the context drops (the owned node carries
+/// `::parsenodes::TypeName` before the context drops (the owned node carries
 /// no `'mcx`, so it outlives the arena soundly). A grammar/syntax error is
 /// raised inside `raw_parser` (with the parser's error position) and propagates
 /// on `Err`; this never returns on a malformed string.
 fn raw_parse_type_name(
     str_: alloc::string::String,
-) -> PgResult<parsenodes::TypeName> {
-    let ctx = mcx::MemoryContext::new("raw_parse_type_name");
+) -> PgResult<::parsenodes::TypeName> {
+    let ctx = ::mcx::MemoryContext::new("raw_parse_type_name");
     let mcx = ctx.mcx();
 
     // C: `raw_parser(str, RAW_PARSE_TYPE_NAME)`.
@@ -453,26 +453,26 @@ fn raw_parse_type_name(
 }
 
 /// Bridge the arena raw-grammar `::nodes::rawnodes::TypeName<'mcx>` into the
-/// owned resolver-facing `parsenodes::TypeName`. Mirrors parse_type.c's
+/// owned resolver-facing `::parsenodes::TypeName`. Mirrors parse_type.c's
 /// `raw_typename_to_parse`: the qualified `names` are `String` nodes; `typmods`
 /// carry the simple `A_Const`/identifier values through (else `A_Star`, so the
 /// resolver raises the C "must be simple constants or identifiers" error);
 /// `arrayBounds` carry the integer bounds through.
 fn raw_typename_to_parse(
     tn: &::nodes::rawnodes::TypeName<'_>,
-) -> PgResult<parsenodes::TypeName> {
+) -> PgResult<::parsenodes::TypeName> {
     use alloc::string::ToString;
     use ::nodes::nodes::{ntag, Node as RawNode};
 
-    let mut names: alloc::vec::Vec<parsenodes::Node> =
+    let mut names: alloc::vec::Vec<::parsenodes::Node> =
         alloc::vec::Vec::with_capacity(tn.names.len());
     for n in tn.names.iter() {
         match (**n).as_string() {
-            Some(s) => names.push(parsenodes::Node::String(
-                parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
+            Some(s) => names.push(::parsenodes::Node::String(
+                ::parsenodes::StringNode { sval: Some(s.sval.as_str().to_string()) },
             )),
             None => {
-                return Err(types_error::PgError::error(alloc::format!(
+                return Err(::types_error::PgError::error(alloc::format!(
                     "raw_parse_type_name: TypeName.names element is not a String node (tag {})",
                     (**n).node_tag().0
                 )));
@@ -480,70 +480,70 @@ fn raw_typename_to_parse(
         }
     }
 
-    let mut typmods: alloc::vec::Vec<parsenodes::Node> =
+    let mut typmods: alloc::vec::Vec<::parsenodes::Node> =
         alloc::vec::Vec::with_capacity(tn.typmods.len());
     for tm in tn.typmods.iter() {
         let tm_node = &**tm;
-        let bridged: parsenodes::Node = if let Some(ac) = tm_node.as_a_const() {
+        let bridged: ::parsenodes::Node = if let Some(ac) = tm_node.as_a_const() {
             match ac.val.as_deref().map(|v| (v.node_tag(), v)) {
                 Some((ntag::T_Integer, v)) => {
                     let i = v.expect_integer();
-                    parsenodes::Node::Integer(parsenodes::Integer { ival: i.ival })
+                    ::parsenodes::Node::Integer(::parsenodes::Integer { ival: i.ival })
                 }
                 Some((ntag::T_Float, v)) => {
                     let fl = v.expect_float();
-                    parsenodes::Node::Float(parsenodes::Float {
+                    ::parsenodes::Node::Float(::parsenodes::Float {
                         fval: Some(fl.fval.as_str().to_string()),
                     })
                 }
                 Some((ntag::T_String, v)) => {
                     let s = v.expect_string();
-                    parsenodes::Node::String(parsenodes::StringNode {
+                    ::parsenodes::Node::String(::parsenodes::StringNode {
                         sval: Some(s.sval.as_str().to_string()),
                     })
                 }
                 Some((ntag::T_Boolean, v)) => {
                     let b = v.expect_boolean();
-                    parsenodes::Node::Boolean(parsenodes::Boolean { boolval: b.boolval })
+                    ::parsenodes::Node::Boolean(::parsenodes::Boolean { boolval: b.boolval })
                 }
                 Some((ntag::T_BitString, v)) => {
                     let b = v.expect_bitstring();
-                    parsenodes::Node::BitString(parsenodes::BitString {
+                    ::parsenodes::Node::BitString(::parsenodes::BitString {
                         bsval: Some(b.bsval.as_str().to_string()),
                     })
                 }
-                _ => parsenodes::Node::A_Star,
+                _ => ::parsenodes::Node::A_Star,
             }
         } else if let Some(cr) = tm_node.as_columnref() {
             if cr.fields.len() == 1 {
                 if let Some(s) = (*cr.fields[0]).as_string() {
-                    parsenodes::Node::String(parsenodes::StringNode {
+                    ::parsenodes::Node::String(::parsenodes::StringNode {
                         sval: Some(s.sval.as_str().to_string()),
                     })
                 } else {
-                    parsenodes::Node::A_Star
+                    ::parsenodes::Node::A_Star
                 }
             } else {
-                parsenodes::Node::A_Star
+                ::parsenodes::Node::A_Star
             }
         } else {
-            parsenodes::Node::A_Star
+            ::parsenodes::Node::A_Star
         };
         typmods.push(bridged);
     }
 
-    let mut array_bounds: alloc::vec::Vec<parsenodes::Node> =
+    let mut array_bounds: alloc::vec::Vec<::parsenodes::Node> =
         alloc::vec::Vec::with_capacity(tn.arrayBounds.len());
     for n in tn.arrayBounds.iter() {
         match (**n).as_integer() {
             Some(i) => array_bounds
-                .push(parsenodes::Node::Integer(parsenodes::Integer { ival: i.ival })),
+                .push(::parsenodes::Node::Integer(::parsenodes::Integer { ival: i.ival })),
             None => array_bounds
-                .push(parsenodes::Node::Integer(parsenodes::Integer { ival: -1 })),
+                .push(::parsenodes::Node::Integer(::parsenodes::Integer { ival: -1 })),
         }
     }
 
-    Ok(parsenodes::TypeName {
+    Ok(::parsenodes::TypeName {
         names,
         typeOid: tn.typeOid,
         setof: tn.setof,
@@ -562,7 +562,7 @@ fn raw_parse_syntax_check(
     stmt: alloc::string::String,
     mode: RawParseMode,
 ) -> PgResult<()> {
-    let ctx = mcx::MemoryContext::new("raw_parse_syntax_check");
+    let ctx = ::mcx::MemoryContext::new("raw_parse_syntax_check");
     let mcx = ctx.mcx();
     // C: `(void) raw_parser(stmt, parseMode)` — only the syntax-check side effect
     // (the error on a malformed string) matters; the parse tree is discarded with
@@ -582,8 +582,8 @@ pub fn init_seams() {
 
 /// Error helper for the `base_yylex` UESCAPE checks (parser.c:273/278): a
 /// syntax error whose cursor is the already-converted 1-based character cursor.
-fn udeescape_syntax_error(message: &str, char_position: i32) -> types_error::PgError {
-    types_error::PgError::error(message)
-        .with_sqlstate(types_error::ERRCODE_SYNTAX_ERROR)
+fn udeescape_syntax_error(message: &str, char_position: i32) -> ::types_error::PgError {
+    ::types_error::PgError::error(message)
+        .with_sqlstate(::types_error::ERRCODE_SYNTAX_ERROR)
         .with_cursor_position(char_position)
 }

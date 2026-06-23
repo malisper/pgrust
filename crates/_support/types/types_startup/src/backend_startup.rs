@@ -2,7 +2,7 @@
 //! (`tcop/backend_startup.h` and the `postmaster_child_launch` interface in
 //! `postmaster/launch_backend.c`).
 
-use types_core::TimestampTz;
+use ::types_core::TimestampTz;
 
 /// `CAC_state` (`tcop/backend_startup.h`) — passed from postmaster to the
 /// backend process, to indicate whether the connection should be accepted, or

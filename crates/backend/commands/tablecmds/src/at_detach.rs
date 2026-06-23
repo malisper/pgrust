@@ -35,12 +35,12 @@
 
 use mcx::{Mcx, PgVec};
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_attribute::{
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attinhcount, Anum_pg_attribute_attislocal, AttributeRelationId,
     PgAttributeUpdateRow,
 };
-use types_core::primitive::{Oid, OidIsValid};
+use ::types_core::primitive::{Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_TABLE, ERROR,
 };
@@ -48,27 +48,27 @@ use ::nodes::ddlnodes::{Constraint, ConstrType, PartitionCmd};
 use ::nodes::nodes::Node;
 use ::nodes::partition::PartitionStrategy;
 use ::nodes::primnodes::Expr;
-use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
 use common_relation::{relation_open, try_relation_open};
-use table::table_openrv;
+use ::table::table_openrv;
 use indexing_seams as indexing_seam;
-use nodes_core::makefuncs::make_ands_explicit;
+use ::nodes_core::makefuncs::make_ands_explicit;
 use cache_syscache::{
     SearchSysCacheCopyAttName, SearchSysCacheExistsAttName, SysCacheGetAttrNotNull, ATTNAME,
 };
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use rel::Relation;
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
+use ::rel::Relation;
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 
 use crate::helpers::{here, object_address_set, RelationRelationId};
 use crate::at_phase::AlteredTableInfo;
 
-/// Convert a rich parse-node `RangeVar` to the trimmed `types_tuple::access`
+/// Convert a rich parse-node `RangeVar` to the trimmed `::types_tuple::access`
 /// shape `table_openrv` consumes (mirrors `at_attach::to_access_range_var`).
-fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),
         relname: rv.relname.as_deref().unwrap_or("").into(),
@@ -78,7 +78,7 @@ fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::acc
     }
 }
 
-fn elog(msg: impl Into<String>) -> types_error::PgError {
+fn elog(msg: impl Into<String>) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg.into()).into_error()
 }
 
@@ -86,11 +86,11 @@ fn elog(msg: impl Into<String>) -> types_error::PgError {
 /// an AUTO dependency, regular inheritance children a NORMAL one.
 fn child_dependency_type(
     child_is_partition: bool,
-) -> types_catalog::catalog_dependency::DependencyType {
+) -> ::types_catalog::catalog_dependency::DependencyType {
     if child_is_partition {
-        types_catalog::catalog_dependency::DEPENDENCY_AUTO
+        ::types_catalog::catalog_dependency::DEPENDENCY_AUTO
     } else {
-        types_catalog::catalog_dependency::DEPENDENCY_NORMAL
+        ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL
     }
 }
 
@@ -257,7 +257,7 @@ pub(crate) fn ATExecDetachPartition<'mcx>(
         let Some(reopened_rel) = reopened_rel else {
             if reopened_part.is_some() {
                 // shouldn't happen
-                ereport(types_error::WARNING)
+                ereport(::types_error::WARNING)
                     .errmsg(format!(
                         "dangling partition \"{partrelname}\" remains, can't fix"
                     ))
@@ -417,7 +417,7 @@ fn DetachAddConstraintIfNeeded<'mcx>(
         fk_del_action: 0,
         fk_del_set_cols: PgVec::new_in(mcx),
         old_conpfeqop: PgVec::new_in(mcx),
-        old_pktable_oid: types_core::primitive::InvalidOid,
+        old_pktable_oid: ::types_core::primitive::InvalidOid,
     };
 
     // It's a re-add, since it nominally already exists.
@@ -449,11 +449,11 @@ pub(crate) fn ATExecDropInherit<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     parent: &::nodes::rawnodes::RangeVar<'mcx>,
-    _lockmode: types_storage::lock::LOCKMODE,
+    _lockmode: ::types_storage::lock::LOCKMODE,
 ) -> PgResult<ObjectAddress> {
     if rel.rd_rel.relispartition {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg("cannot change inheritance of a partition".to_string())
             .into_error());
     }
@@ -465,7 +465,7 @@ pub(crate) fn ATExecDropInherit<'mcx>(
     let parent_rel = table_openrv(
         mcx,
         &access_rv,
-        types_storage::lock::AccessShareLock,
+        ::types_storage::lock::AccessShareLock,
     )?;
 
     // We don't bother to check ownership of the parent table --- ownership of the
@@ -635,7 +635,7 @@ fn GetParentedForeignKeyRefs<'mcx>(
     mcx: Mcx<'mcx>,
     partition: &Relation<'mcx>,
 ) -> PgResult<Vec<Oid>> {
-    use types_catalog::pg_constraint as pc;
+    use ::types_catalog::pg_constraint as pc;
 
     // If no indexes, or no columns are referenceable by FKs, avoid the scan.
     let idxlist = relcache::derived::RelationGetIndexList(partition.rd_id)?;
@@ -654,7 +654,7 @@ fn GetParentedForeignKeyRefs<'mcx>(
     let pg_constraint = table_seams::table_open::call(
         mcx,
         objectaddress::consts::ConstraintRelationId,
-        types_storage::lock::AccessShareLock,
+        ::types_storage::lock::AccessShareLock,
     )?;
 
     let mut key0 = types_scan::scankey::ScanKeyData::empty();
@@ -662,7 +662,7 @@ fn GetParentedForeignKeyRefs<'mcx>(
         &mut key0,
         pc::Anum_pg_constraint_confrelid,
         types_scan::scankey::BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         types_tuple::heaptuple::Datum::from_oid(partition.rd_id),
     )?;
     let mut key1 = types_scan::scankey::ScanKeyData::empty();
@@ -670,7 +670,7 @@ fn GetParentedForeignKeyRefs<'mcx>(
         &mut key1,
         pc::Anum_pg_constraint_contype,
         types_scan::scankey::BTEqualStrategyNumber,
-        types_core::fmgr::F_CHAREQ,
+        ::types_core::fmgr::F_CHAREQ,
         types_tuple::heaptuple::Datum::from_char(pc::CONSTRAINT_FOREIGN),
     )?;
     let keys = [key0, key1];
@@ -679,7 +679,7 @@ fn GetParentedForeignKeyRefs<'mcx>(
     // index_ok=false ⇒ heap scan, as C's genam does for indexId == InvalidOid).
     let mut scan = genam_seams::systable_beginscan::call(
         &pg_constraint,
-        types_core::primitive::InvalidOid,
+        ::types_core::primitive::InvalidOid,
         false,
         None,
         &keys,
@@ -706,7 +706,7 @@ fn GetParentedForeignKeyRefs<'mcx>(
         constraints.push(conoid);
     }
     drop(scan);
-    pg_constraint.close(types_storage::lock::AccessShareLock)?;
+    pg_constraint.close(::types_storage::lock::AccessShareLock)?;
 
     Ok(constraints)
 }
@@ -739,7 +739,7 @@ fn ATDetachCheckNoForeignKeyRefs<'mcx>(
         let rel = table_seams::table_open::call(
             mcx,
             constr_form.conrelid,
-            types_storage::lock::ShareLock,
+            ::types_storage::lock::ShareLock,
         )?;
 
         // Run RI_PartitionRemove_Check through the trigger manager, which
@@ -793,14 +793,14 @@ fn DetachPartitionFinalize<'mcx>(
         pg_constraint::ConstraintSetParentConstraint(
             mcx,
             constr_oid,
-            types_core::primitive::InvalidOid,
-            types_core::primitive::InvalidOid,
+            ::types_core::primitive::InvalidOid,
+            ::types_core::primitive::InvalidOid,
         )?;
         pg_depend_seams::deleteDependencyRecordsForClass::call(
             objectaddress::consts::ConstraintRelationId,
             constr_oid,
             objectaddress::consts::ConstraintRelationId,
-            types_catalog::catalog_dependency::DEPENDENCY_INTERNAL.as_char(),
+            ::types_catalog::catalog_dependency::DEPENDENCY_INTERNAL.as_char(),
         )?;
         transam_xact::CommandCounterIncrement()?;
 
@@ -833,7 +833,7 @@ fn DetachPartitionFinalize<'mcx>(
             idxid,
             AccessExclusiveLock,
         )?;
-        indexcmds::IndexSetParentIndex(mcx, &idx, types_core::primitive::InvalidOid)?;
+        indexcmds::IndexSetParentIndex(mcx, &idx, ::types_core::primitive::InvalidOid)?;
 
         // If there's a constraint associated with the index, detach it too.
         // It is possible for a constraint index in a partition to be the child
@@ -848,8 +848,8 @@ fn DetachPartitionFinalize<'mcx>(
             pg_constraint::ConstraintSetParentConstraint(
                 mcx,
                 constr_oid,
-                types_core::primitive::InvalidOid,
-                types_core::primitive::InvalidOid,
+                ::types_core::primitive::InvalidOid,
+                ::types_core::primitive::InvalidOid,
             )?;
         }
 
@@ -897,7 +897,7 @@ fn DetachPartitionFinalize<'mcx>(
         if partRel.rd_id == default_part_oid {
             catalog_partition::update_default_partition_oid(
                 rel.rd_id,
-                types_core::primitive::InvalidOid,
+                ::types_core::primitive::InvalidOid,
             )?;
         } else {
             inval::cache_invalidate::CacheInvalidateRelcacheByRelid(
@@ -942,10 +942,10 @@ fn DropClonedTriggersFromPartition<'mcx>(
     mcx: Mcx<'mcx>,
     partition_id: Oid,
 ) -> PgResult<()> {
-    use types_catalog::catalog_dependency::{
+    use ::types_catalog::catalog_dependency::{
         DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
     };
-    use types_catalog::pg_trigger as pt;
+    use ::types_catalog::pg_trigger as pt;
 
     let mut objects = dependency_seams::new_object_addresses::call()?;
 
@@ -961,7 +961,7 @@ fn DropClonedTriggersFromPartition<'mcx>(
         &mut skey,
         pt::Anum_pg_trigger_tgrelid,
         types_scan::scankey::BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         types_tuple::heaptuple::Datum::from_oid(partition_id),
     )?;
     let keys = [skey];
@@ -1064,7 +1064,7 @@ pub(crate) fn ATExecDetachPartitionFinalize<'mcx>(
     // Snapshot snap = GetActiveSnapshot();
     let snap_xmin = snapmgr_seams::get_active_snapshot::call()?
         .map(|s| s.xmin)
-        .unwrap_or(types_core::xact::InvalidTransactionId);
+        .unwrap_or(::types_core::xact::InvalidTransactionId);
 
     // partRel = table_openrv(name, AccessExclusiveLock);
     let name_node = cmd
@@ -1083,7 +1083,7 @@ pub(crate) fn ATExecDetachPartitionFinalize<'mcx>(
     indexcmds::WaitForOlderSnapshots(mcx, snap_xmin, false)?;
 
     // DetachPartitionFinalize(rel, partRel, true, InvalidOid);
-    DetachPartitionFinalize(mcx, rel, &partRel, true, types_core::primitive::InvalidOid)?;
+    DetachPartitionFinalize(mcx, rel, &partRel, true, ::types_core::primitive::InvalidOid)?;
 
     // ObjectAddressSet(address, RelationRelationId, RelationGetRelid(partRel));
     let address = object_address_set(RelationRelationId, partRel.rd_id);

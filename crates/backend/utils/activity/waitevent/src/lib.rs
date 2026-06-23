@@ -28,9 +28,9 @@
 //! functions owned by other subsystems:
 //!
 //! * `GetLWLockIdentifier` (`storage/lmgr/lwlock.c`) via
-//!   `lwlock_seams::get_lwlock_identifier`.
+//!   `::lwlock_seams::get_lwlock_identifier`.
 //! * `GetLockNameFromTagType` (`storage/lmgr/lmgr.c`) via
-//!   `lmgr_seams::get_lock_name_from_tag_type`.
+//!   `::lmgr_seams::get_lock_name_from_tag_type`.
 //!
 //! The custom store's shared-memory primitives (`ShmemInitStruct` /
 //! `ShmemInitHash`, `hash_search` / `hash_seq_*`, `LWLockAcquire` of
@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ipc_shmem::{ShmemInitHash, ShmemInitStruct};
-use lmgr_seams::get_lock_name_from_tag_type;
+use ::lmgr_seams::get_lock_name_from_tag_type;
 use lwlock_seams::{get_lwlock_identifier, lwlock_acquire_main};
 use s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
 use utils_error::{elog, ereport};
@@ -56,10 +56,10 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INTERNAL_ERROR,
     ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
-use hash::hsearch::{
+use ::hash::hsearch::{
     HASHACTION, HASHCTL, HASH_BLOBS, HASH_ELEM, HASH_SEQ_STATUS, HASH_STRINGS, HTAB,
 };
-use types_pgstat::wait_event::{
+use ::types_pgstat::wait_event::{
     PG_WAIT_ACTIVITY, PG_WAIT_BUFFERPIN, PG_WAIT_CLIENT, PG_WAIT_EXTENSION, PG_WAIT_INJECTIONPOINT,
     PG_WAIT_IO, PG_WAIT_IPC, PG_WAIT_LOCK, PG_WAIT_LWLOCK, PG_WAIT_TIMEOUT,
     WAIT_EVENT_CLASS_MASK, WAIT_EVENT_CUSTOM_HASH_INIT_SIZE, WAIT_EVENT_CUSTOM_HASH_MAX_SIZE,
@@ -75,7 +75,7 @@ fn loc(funcname: &str) -> ErrorLocation {
 
 /// `NAMEDATALEN` — the maximum length (including the terminating NUL in C) of a
 /// custom wait-event name.
-const NAMEDATALEN: usize = types_core::NAMEDATALEN as usize;
+const NAMEDATALEN: usize = ::types_core::NAMEDATALEN as usize;
 
 /// `MAXALIGN(LEN)` (`c.h`): round up to the maximum alignment (8 bytes on the
 /// 64-bit migration profile).
@@ -646,7 +646,7 @@ impl WaitEventStorage {
 #[derive(Clone)]
 enum WaitEventTarget {
     Local(WaitEventStorage),
-    Proc(types_core::ProcNumber),
+    Proc(::types_core::ProcNumber),
 }
 
 thread_local! {
@@ -714,7 +714,7 @@ pub fn pgstat_reset_wait_event_storage() {
 /// Installs the named proc's shared slot as the current redirect, valid until
 /// `pgstat_reset_wait_event_storage` (the C contract: no scope guard, the
 /// redirect persists for the backend's working life).
-pub fn pgstat_set_wait_event_storage_for_proc(procno: types_core::ProcNumber) {
+pub fn pgstat_set_wait_event_storage_for_proc(procno: ::types_core::ProcNumber) {
     CURRENT_WAIT_EVENT_STORAGE.with(|current| {
         *current.borrow_mut() = Some(WaitEventTarget::Proc(procno));
     });
@@ -834,14 +834,14 @@ fn name_from_field(field: &[u8; NAMEDATALEN]) -> String {
 /// `WaitEventCustomShmemSize()` — bytes of shared memory the custom store needs.
 pub fn WaitEventCustomShmemSize() -> PgResult<Size> {
     let mut sz = maxalign(std::mem::size_of::<WaitEventCustomCounterData>());
-    sz = ipc_shmem::add_size(
+    sz = ::ipc_shmem::add_size(
         sz,
         hash_estimate_size::call(
             WAIT_EVENT_CUSTOM_HASH_MAX_SIZE,
             std::mem::size_of::<WaitEventCustomEntryByInfo>(),
         ),
     )?;
-    sz = ipc_shmem::add_size(
+    sz = ::ipc_shmem::add_size(
         sz,
         hash_estimate_size::call(
             WAIT_EVENT_CUSTOM_HASH_MAX_SIZE,

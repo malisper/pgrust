@@ -5,7 +5,7 @@
 //!
 //! * [`create_plan`] / [`create_plan_recurse`] — the top-level driver and the
 //!   `best_path->pathtype` dispatch over the 36-variant
-//!   [`PathNode`](pathnodes::PathNode) enum (the owned-tree analogue of
+//!   [`PathNode`](::pathnodes::PathNode) enum (the owned-tree analogue of
 //!   the C up-cast `(SubtypePath *) best_path`). Every leaf converter arm
 //!   (`create_seqscan_plan`, `create_indexscan_plan`, `create_nestloop_plan`,
 //!   `create_agg_plan`, …) is routed through a per-converter seam declared in
@@ -28,8 +28,8 @@
 //!
 //! `PlannerInfo` is lifetime-free: a `Path *` is a [`PathId`] into
 //! `PlannerInfo::path_arena` and an expression `Node *` is a
-//! [`NodeId`](pathnodes::NodeId) into `PlannerInfo::node_arena`.
-//! [`PathNode::path_head`](pathnodes::PathNode::path_head) recovers the
+//! [`NodeId`](::pathnodes::NodeId) into `PlannerInfo::node_arena`.
+//! [`PathNode::path_head`](::pathnodes::PathNode::path_head) recovers the
 //! embedded base `Path` (the C up-cast to `Path *`); the variant recovers the
 //! concrete subtype. The produced plan tree is an owned
 //! [`Node<'mcx>`](::nodes::nodes::Node) allocated in `mcx`, so the dispatch
@@ -41,7 +41,7 @@
 //! `&mut PlannerInfo` and forward it to every converter seam. This is the
 //! safe-Rust rendering of `root` reaching `simple_rte_array`: a scan converter
 //! resolves its `RangeTblEntry` with
-//! [`planner_rt_fetch`](pathnodes::planner_run::planner_rt_fetch)`(run,
+//! [`planner_rt_fetch`](::pathnodes::planner_run::planner_rt_fetch)`(run,
 //! root, scanrelid)`, exactly as C dereferences `planner_rt_fetch(scanrelid,
 //! root)`.
 //!
@@ -101,8 +101,8 @@ use ::nodes::nodegather::Gather as GatherNode;
 use ::nodes::nodegathermerge::GatherMerge as GatherMergeNode;
 use ::nodes::nodeincrementalsort::IncrementalSort as IncrementalSortNode;
 use ::nodes::rawnodes::RangeTblFunction;
-use mcx::PgString;
-use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use ::mcx::PgString;
+use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{
     EcId, IndexOptInfo, MaterialPath, NodeId, Path, PathId, PathKey, PathNode, PathTarget,
     PlannerInfo, RelId, Relids, RinfoId,
@@ -114,49 +114,49 @@ use ::nodes::nodebitmapheapscan::BitmapHeapScan;
 use ::nodes::nodebitmapindexscan::BitmapIndexScan;
 use ::nodes::nodebitmapor::BitmapOr;
 use ::nodes::nodeagg::AGGSPLIT_SIMPLE;
-use types_core::primitive::{AttrNumber, Index, InvalidOid, Oid};
-use types_tuple::access::RELKIND_FOREIGN_TABLE;
+use ::types_core::primitive::{AttrNumber, Index, InvalidOid, Oid};
+use ::types_tuple::access::RELKIND_FOREIGN_TABLE;
 
-use nodes_core::makefuncs::{
+use ::nodes_core::makefuncs::{
     make_ands_explicit, make_bool_const, make_orclause, make_target_entry,
 };
-use nodes_core::nodefuncs::expression_tree_mutator;
-use nodes_core::nodefuncs::expr_collation;
-use nodes_core::bitmapset::bms_union;
-use equalfuncs_seams::equal_expr as equal_expr_seam;
+use ::nodes_core::nodefuncs::expression_tree_mutator;
+use ::nodes_core::nodefuncs::expr_collation;
+use ::nodes_core::bitmapset::bms_union;
+use ::equalfuncs_seams::equal_expr as equal_expr_seam;
 use equivclass_seams as equivclass;
 use equivclass_ext_seams as equivclass_ext;
 use createplan_seams as cp_seam;
-use joininfo::restrictinfo::{
+use ::joininfo::restrictinfo::{
     extract_actual_clauses, extract_actual_join_clauses, get_actual_clauses,
 };
-use clauses::grounded::CommuteOpExpr;
+use ::clauses::grounded::CommuteOpExpr;
 use paramassign_seams as paramassign;
 use pathnode_seams as pathnode;
 use placeholder_seams as placeholder;
-use plancat::build_physical_tlist;
+use ::plancat::build_physical_tlist;
 use relnode_seams as relnode;
-use vars::tlist::{
+use ::vars::tlist::{
     apply_pathtarget_labeling_to_tlist, get_sortgroupref_tle, tlist_same_exprs,
 };
-use vars::tlist as util_tlist;
+use ::vars::tlist as util_tlist;
 use costsize_seams as costsize;
 use partprune_seams as partprune;
-use equivclass::{find_computable_ec_member, find_ec_member_matching_expr};
+use ::equivclass::{find_computable_ec_member, find_ec_member_matching_expr};
 use lsyscache_seams as lsyscache;
-use guc_tables::vars;
+use ::guc_tables::vars;
 // fix_indexqual_operand (createplan.c, homed in var.c crate) — index-column Var
 // substitution for index quals.
-use vars::fix_indexqual_operand;
+use ::vars::fix_indexqual_operand;
 // is_redundant_with_indexclauses (equivclass.c) — the real impl, over &[IndexClause].
-use equivclass::is_redundant_with_indexclauses;
+use ::equivclass::is_redundant_with_indexclauses;
 // predicate_implied_by (predtest.c) — prove a scan clause is implied by indexquals.
 use predtest_seams as predtest;
 // contain_mutable_functions (clauses.c) — guard the predicate_implied_by check.
-use clauses::grounded::contain_mutable_functions;
+use ::clauses::grounded::contain_mutable_functions;
 // pull_paramids (clauses.c) — collect paramids referenced by the Memoize cache
 // key expressions, used for create_memoize_plan's keyparamids.
-use clauses::grounded::pull_paramids;
+use ::clauses::grounded::pull_paramids;
 
 // ---------------------------------------------------------------------------
 // RTEKind dispatch keys used by use_physical_tlist (parsenodes.h enum values).
@@ -166,15 +166,15 @@ use clauses::grounded::pull_paramids;
 // ---------------------------------------------------------------------------
 
 /// `RTE_SUBQUERY` (parsenodes.h).
-const RTE_SUBQUERY: pathnodes::RTEKind = 1;
+const RTE_SUBQUERY: ::pathnodes::RTEKind = 1;
 /// `RTE_FUNCTION` (parsenodes.h).
-const RTE_FUNCTION: pathnodes::RTEKind = 3;
+const RTE_FUNCTION: ::pathnodes::RTEKind = 3;
 /// `RTE_TABLEFUNC` (parsenodes.h).
-const RTE_TABLEFUNC: pathnodes::RTEKind = 4;
+const RTE_TABLEFUNC: ::pathnodes::RTEKind = 4;
 /// `RTE_VALUES` (parsenodes.h).
-const RTE_VALUES: pathnodes::RTEKind = 5;
+const RTE_VALUES: ::pathnodes::RTEKind = 5;
 /// `RTE_CTE` (parsenodes.h).
-const RTE_CTE: pathnodes::RTEKind = 6;
+const RTE_CTE: ::pathnodes::RTEKind = 6;
 
 /// `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h) — the most-negative
 /// system attribute number minus one (`-7` in PG 18.3). Used by
@@ -227,11 +227,11 @@ const T_WorkTableScan: NodeTag = NodeTag(353);
 const T_ForeignScan: NodeTag = NodeTag(354);
 const T_CustomScan: NodeTag = NodeTag(355);
 /// `COMPARE_EQ` (`access/cmptype.h`) — the equality compare type (= 3).
-const COMPARE_EQ: pathnodes::CompareType = 3;
+const COMPARE_EQ: ::pathnodes::CompareType = 3;
 /// `COMPARE_GT` (`access/cmptype.h`) — the greater-than compare type (= 5).
 /// A mergeclause's outer pathkey sorted `COMPARE_GT` means the executor must
 /// reverse the comparison (`mergeReversals[i] = true`).
-const COMPARE_GT: pathnodes::CompareType = 5;
+const COMPARE_GT: ::pathnodes::CompareType = 5;
 
 const T_NestLoop: NodeTag = NodeTag(356);
 const T_MergeJoin: NodeTag = NodeTag(358);
@@ -673,7 +673,7 @@ fn use_physical_tlist(root: &PlannerInfo, path: PathId, flags: i32) -> bool {
             .as_deref()
             .expect("use_physical_tlist: path has no pathtarget");
         if !target.sortgrouprefs.is_empty() {
-            let mut sortgroupatts: pathnodes::Relids = None;
+            let mut sortgroupatts: ::pathnodes::Relids = None;
             for (i, &expr_id) in target.exprs.iter().enumerate() {
                 if target.sortgrouprefs[i] != 0 {
                     if let Some(var) = root.node(expr_id).as_var() {
@@ -923,7 +923,7 @@ fn create_scan_plan<'mcx>(
 
 /// `IS_JOIN_REL(rel)` (pathnodes.h) — `rel->reloptkind == RELOPT_JOINREL ||
 /// rel->reloptkind == RELOPT_OTHER_JOINREL`.
-fn is_join_rel(root: &PlannerInfo, rel_id: pathnodes::RelId) -> bool {
+fn is_join_rel(root: &PlannerInfo, rel_id: ::pathnodes::RelId) -> bool {
     use pathnodes::{RELOPT_JOINREL, RELOPT_OTHER_JOINREL};
     let k = root.rel(rel_id).reloptkind;
     k == RELOPT_JOINREL || k == RELOPT_OTHER_JOINREL
@@ -933,7 +933,7 @@ fn is_join_rel(root: &PlannerInfo, rel_id: pathnodes::RelId) -> bool {
 /// `OTHER_MEMBER_REL`, `OTHER_JOINREL`, `OTHER_UPPER_REL`. Note this set
 /// deliberately EXCLUDES `RELOPT_UPPER_REL` (4), so a `>= OTHER_MEMBER_REL`
 /// comparison is wrong — it would wrongly include plain upper rels.
-fn is_other_rel(root: &PlannerInfo, rel_id: pathnodes::RelId) -> bool {
+fn is_other_rel(root: &PlannerInfo, rel_id: ::pathnodes::RelId) -> bool {
     use pathnodes::{RELOPT_OTHER_JOINREL, RELOPT_OTHER_MEMBER_REL, RELOPT_OTHER_UPPER_REL};
     let k = root.rel(rel_id).reloptkind;
     k == RELOPT_OTHER_MEMBER_REL || k == RELOPT_OTHER_JOINREL || k == RELOPT_OTHER_UPPER_REL
@@ -943,7 +943,7 @@ fn is_other_rel(root: &PlannerInfo, rel_id: pathnodes::RelId) -> bool {
 /// && rel->nparts > 0 && rel->part_rels && !IS_DUMMY_REL(rel)`. A plain
 /// inheritance parent (`INHERITS (...)`) has no `part_scheme`, so this is false
 /// for it; only a declaratively-partitioned table satisfies the predicate.
-fn is_partitioned_rel(root: &PlannerInfo, rel_id: pathnodes::RelId) -> bool {
+fn is_partitioned_rel(root: &PlannerInfo, rel_id: ::pathnodes::RelId) -> bool {
     let rel = root.rel(rel_id);
     rel.part_scheme.is_some()
         && rel.boundinfo.is_some()
@@ -956,7 +956,7 @@ fn is_partitioned_rel(root: &PlannerInfo, rel_id: pathnodes::RelId) -> bool {
 /// single path that (after descending any Projection/ProjectSet wrapper) is a
 /// childless `Append`/`AppendPath`. Duplicated here to avoid a cross-crate dep
 /// on `joinrels` just for the `IS_PARTITIONED_REL` dummy-rel conjunct.
-fn is_dummy_rel_local(root: &PlannerInfo, rel_id: pathnodes::RelId) -> bool {
+fn is_dummy_rel_local(root: &PlannerInfo, rel_id: ::pathnodes::RelId) -> bool {
     let pathlist = &root.rel(rel_id).pathlist;
     if pathlist.is_empty() {
         return false;
@@ -986,8 +986,8 @@ fn is_dummy_rel_local(root: &PlannerInfo, rel_id: pathnodes::RelId) -> bool {
 /// a plain inheritance hierarchy, where no ancestor is `IS_PARTITIONED_REL`.
 fn append_has_prunable_partitioned_parent(
     root: &PlannerInfo,
-    parentrel: pathnodes::RelId,
-    subpaths: &[pathnodes::PathId],
+    parentrel: ::pathnodes::RelId,
+    subpaths: &[::pathnodes::PathId],
 ) -> bool {
     for &subpath in subpaths {
         let pathrel = root.path(subpath).base().parent;
@@ -1329,7 +1329,7 @@ fn make_result<'mcx>(
     // plan->qual = NIL;
     plan.qual = None;
     plan.lefttree = match subplan {
-        Some(child) => Some(mcx::alloc_in(mcx, child)?),
+        Some(child) => Some(::mcx::alloc_in(mcx, child)?),
         None => None,
     };
     plan.righttree = None;
@@ -1552,7 +1552,7 @@ fn make_indexscan<'mcx>(
     indexorderby: Option<PgVec<'mcx, Expr<'mcx>>>,
     indexorderbyorig: Option<PgVec<'mcx, Expr<'mcx>>>,
     indexorderbyops: Option<PgVec<'mcx, Oid>>,
-    indexscandir: types_scan::sdir::ScanDirection,
+    indexscandir: ::types_scan::sdir::ScanDirection,
 ) -> IndexScan<'mcx> {
     let mut node = IndexScan {
         scan: Scan::default(),
@@ -1583,7 +1583,7 @@ fn make_indexonlyscan<'mcx>(
     recheckqual: Option<PgVec<'mcx, Expr<'mcx>>>,
     indexorderby: Option<PgVec<'mcx, Expr<'mcx>>>,
     indextlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    indexscandir: types_scan::sdir::ScanDirection,
+    indexscandir: ::types_scan::sdir::ScanDirection,
 ) -> IndexOnlyScan<'mcx> {
     let mut node = IndexOnlyScan {
         scan: Scan::default(),
@@ -1605,8 +1605,8 @@ fn make_indexonlyscan<'mcx>(
 
 /// Convert the path's `indexscandir` (`i32`, types-pathnodes) into the
 /// `ScanDirection` enum the plan node carries.
-fn scan_direction_from_i32(dir: i32) -> types_scan::sdir::ScanDirection {
-    use types_scan::sdir::ScanDirection;
+fn scan_direction_from_i32(dir: i32) -> ::types_scan::sdir::ScanDirection {
+    use ::types_scan::sdir::ScanDirection;
     match dir {
         -1 => ScanDirection::BackwardScanDirection,
         1 => ScanDirection::ForwardScanDirection,
@@ -1760,7 +1760,7 @@ fn create_indexscan_plan<'mcx>(
             // Borrow for the read-only `expr_type` (a derived `.clone()` panics
             // on an owned-subtree child).
             let expr: &Expr = root.node(expr_id);
-            let exprtype = nodes_core::nodefuncs::expr_type(Some(expr))?;
+            let exprtype = ::nodes_core::nodefuncs::expr_type(Some(expr))?;
             // Get sort operator from opfamily.
             let sortop = lsyscache::get_opfamily_member_for_cmptype::call(
                 pathkey.pk_opfamily,
@@ -1978,7 +1978,7 @@ fn create_bitmap_scan_plan<'mcx>(
         let plan: &mut Plan = &mut scan_plan.scan.plan;
         plan.targetlist = tlist_field;
         plan.qual = qpqual_field;
-        plan.lefttree = Some(mcx::alloc_in(mcx, bitmapqualplan.plan)?);
+        plan.lefttree = Some(::mcx::alloc_in(mcx, bitmapqualplan.plan)?);
         plan.righttree = None;
     }
     scan_plan.scan.scanrelid = baserelid;
@@ -2651,7 +2651,7 @@ fn make_subqueryscan<'mcx>(
         plan.righttree = None;
     }
     node.scan.scanrelid = scanrelid;
-    node.subplan = Some(mcx::alloc_in(mcx, subplan)?);
+    node.subplan = Some(::mcx::alloc_in(mcx, subplan)?);
     node.scanstatus = SubqueryScanStatus::Unknown;
     Ok(node)
 }
@@ -3290,7 +3290,7 @@ fn create_tablefuncscan_plan<'mcx>(
     }
 
     let tlist = tlist_to_plan_field(mcx, tlist)?;
-    let tf_box = mcx::alloc_in(mcx, tablefunc)?;
+    let tf_box = ::mcx::alloc_in(mcx, tablefunc)?;
     let mut scan_plan = make_tablefuncscan(tlist, qpqual, scan_relid, tf_box);
 
     copy_generic_path_info(&mut scan_plan.scan.plan, root.path(best_path).base());
@@ -3487,7 +3487,7 @@ fn create_subqueryscan_subplan_inroot<'mcx>(
     best_path: PathId,
 ) -> PgResult<Node<'mcx>> {
     let (subpath_inroot, subroot_subpath) = match root.path(best_path) {
-        pathnodes::PathNode::SubqueryScanPath(p) => (
+        ::pathnodes::PathNode::SubqueryScanPath(p) => (
             p.subpath
                 .expect("create_subqueryscan_subplan: SubqueryScanPath has no subpath"),
             p.subroot_subpath,
@@ -3627,7 +3627,7 @@ fn make_material<'mcx>(
         plan.qual = None;
         plan.righttree = None;
     }
-    node.plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    node.plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
     Ok(node)
 }
 
@@ -3744,7 +3744,7 @@ fn make_project_set<'mcx>(
     let mut node = ProjectSetNode {
         plan: Plan::default(),
     };
-    let sub = mcx::alloc_in(mcx, subplan)?;
+    let sub = ::mcx::alloc_in(mcx, subplan)?;
     let plan: &mut Plan = &mut node.plan;
     plan.targetlist = tlist;
     plan.qual = None;
@@ -3796,7 +3796,7 @@ fn is_projection_capable_plan(plan: &Node<'_>) -> bool {
         // CustomScan can project iff it advertises CUSTOMPATH_SUPPORT_PROJECTION.
         ntag::T_CustomScan => {
             let cs = plan.expect_customscan();
-            cs.flags & pathnodes::CUSTOMPATH_SUPPORT_PROJECTION != 0
+            cs.flags & ::pathnodes::CUSTOMPATH_SUPPORT_PROJECTION != 0
         }
         // ProjectSet projects, but say "no" so the planner won't replace its
         // tlist; the SRFs have to stay at top level.
@@ -3947,7 +3947,7 @@ fn make_memoize<'mcx>(
     let mut plan = Plan::default();
     plan.targetlist = tlist;
     plan.qual = None;
-    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
     plan.righttree = None;
     Ok(Memoize {
         plan,
@@ -4095,7 +4095,7 @@ fn make_sort<'mcx>(
     plan.targetlist = tlist;
     plan.disabled_nodes = lefttree_disabled + i32::from(!enable_sort);
     plan.qual = None;
-    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
     plan.righttree = None;
     Ok(Sort {
         plan,
@@ -4453,7 +4453,7 @@ fn make_limit<'mcx>(
         let plan: &mut Plan = &mut node.plan;
         plan.targetlist = tlist;
         plan.qual = None;
-        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
         plan.righttree = None;
     }
     node.limitOffset = limit_offset;
@@ -4493,7 +4493,7 @@ fn create_limit_plan<'mcx>(
     let mut uniq_col_idx: Option<PgVec<'mcx, AttrNumber>> = None;
     let mut uniq_operators: Option<PgVec<'mcx, Oid>> = None;
     let mut uniq_collations: Option<PgVec<'mcx, Oid>> = None;
-    if limit_option == pathnodes::LIMIT_OPTION_WITH_TIES {
+    if limit_option == ::pathnodes::LIMIT_OPTION_WITH_TIES {
         let parse = run.resolve(root.parse);
         // parse->sortClause is a List of SortGroupClause node handles; resolve
         // each to its value, then match it to parse->targetList.
@@ -4530,11 +4530,11 @@ fn create_limit_plan<'mcx>(
     // best_path->limitOffset / limitCount are bare expr node handles; clone the
     // Expr out of the arena into the owned plan node.
     let limit_offset = match limit_offset_id {
-        Some(id) => Some(mcx::alloc_in(mcx, root.node(id).clone_in(mcx)?)?),
+        Some(id) => Some(::mcx::alloc_in(mcx, root.node(id).clone_in(mcx)?)?),
         None => None,
     };
     let limit_count = match limit_count_id {
-        Some(id) => Some(mcx::alloc_in(mcx, root.node(id).clone_in(mcx)?)?),
+        Some(id) => Some(::mcx::alloc_in(mcx, root.node(id).clone_in(mcx)?)?),
         None => None,
     };
 
@@ -4685,7 +4685,7 @@ fn create_minmaxagg_plan_impl<'mcx>(
     // During setrefs.c we'll replace references to the Agg nodes with InitPlan
     // output params; save the mmaggregates list to tell setrefs.c to do that.
     debug_assert!(root.minmax_aggs.is_empty());
-    let mut minmax_handles: Vec<pathnodes::NodeId> = Vec::with_capacity(mmaggregates.len());
+    let mut minmax_handles: Vec<::pathnodes::NodeId> = Vec::with_capacity(mmaggregates.len());
     for mminfo in mmaggregates {
         minmax_handles.push(root.alloc_minmax_agg_info(mminfo));
     }
@@ -4751,7 +4751,7 @@ fn make_lockrows<'mcx>(
         let plan: &mut Plan = &mut node.plan;
         plan.targetlist = tlist;
         plan.qual = None;
-        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
         plan.righttree = None;
     }
     node.rowMarks = row_marks;
@@ -4847,7 +4847,7 @@ fn make_modifytable<'mcx>(
     root: &PlannerInfo,
     run: &PlannerRun<'mcx>,
     subplan: Node<'mcx>,
-    operation: pathnodes::CmdType,
+    operation: ::pathnodes::CmdType,
     can_set_tag: bool,
     nominal_relation: Index,
     root_relation: Index,
@@ -4868,8 +4868,8 @@ fn make_modifytable<'mcx>(
     //   list_length(resultRelations) == list_length(updateColnosLists) :
     //   updateColnosLists == NIL));
     debug_assert!(
-        operation == pathnodes::CMD_MERGE
-            || if operation == pathnodes::CMD_UPDATE {
+        operation == ::pathnodes::CMD_MERGE
+            || if operation == ::pathnodes::CMD_UPDATE {
                 result_relations.len() == update_colnos_lists.len()
             } else {
                 update_colnos_lists.is_empty()
@@ -4955,11 +4955,11 @@ fn make_modifytable<'mcx>(
     // returningOldAlias / returningNewAlias come off root->parse.
     let parse = run.resolve(root.parse);
     let returning_old_alias = match &parse.returningOldAlias {
-        Some(s) => Some(mcx::slice_in(mcx, s.as_bytes())?.into_boxed_slice()),
+        Some(s) => Some(::mcx::slice_in(mcx, s.as_bytes())?.into_boxed_slice()),
         None => None,
     };
     let returning_new_alias = match &parse.returningNewAlias {
-        Some(s) => Some(mcx::slice_in(mcx, s.as_bytes())?.into_boxed_slice()),
+        Some(s) => Some(::mcx::slice_in(mcx, s.as_bytes())?.into_boxed_slice()),
         None => None,
     };
 
@@ -5001,7 +5001,7 @@ fn make_modifytable<'mcx>(
         // setrefs.c will fill in the targetlist, if needed.
         p.targetlist = None;
         p.qual = None;
-        p.lefttree = Some(mcx::alloc_in(mcx, subplan)?);
+        p.lefttree = Some(::mcx::alloc_in(mcx, subplan)?);
         p.righttree = None;
         p
     };
@@ -5185,14 +5185,14 @@ fn resolve_wco_node<'mcx>(
         None
     } else {
         let expr = root.node(src.qual).clone_in(mcx)?;
-        Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?)
+        Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?)
     };
     let relname = match &src.relname {
-        Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+        Some(s) => Some(::mcx::PgString::from_str_in(s, mcx)?),
         None => None,
     };
     let polname = match &src.polname {
-        Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+        Some(s) => Some(::mcx::PgString::from_str_in(s, mcx)?),
         None => None,
     };
     let wco = ::nodes::rawnodes::WithCheckOption {
@@ -5273,7 +5273,7 @@ fn resolve_onconflict_plan_data<'mcx>(
             .as_expr()
             .unwrap_or_else(|| panic!("onConflictWhere is not an Expr (got {:?})", np.tag()))
             .clone_in(mcx)?;
-        for q in nodes_core::makefuncs::make_ands_implicit(Some(e)) {
+        for q in ::nodes_core::makefuncs::make_ands_implicit(Some(e)) {
             on_conflict_where.push(q);
         }
     }
@@ -5291,7 +5291,7 @@ fn resolve_onconflict_plan_data<'mcx>(
     }
 
     // arbiterIndexes = infer_arbiter_indexes(root) (createplan.c:7242).
-    let arbiter_oids = plancat::infer_arbiter_indexes(run, root)?;
+    let arbiter_oids = ::plancat::infer_arbiter_indexes(run, root)?;
     let mut arbiter_indexes: PgVec<'mcx, Oid> = vec_with_capacity_in(mcx, arbiter_oids.len())?;
     for oid in arbiter_oids {
         arbiter_indexes.push(oid);
@@ -5309,17 +5309,17 @@ fn resolve_onconflict_plan_data<'mcx>(
 }
 
 /// Map the path-layer `CmdType` (raw `u32`) to the plan-node `CmdType`.
-fn cmdtype_path_to_node(op: pathnodes::CmdType) -> ::nodes::nodes::CmdType {
+fn cmdtype_path_to_node(op: ::pathnodes::CmdType) -> ::nodes::nodes::CmdType {
     use ::nodes::nodes::CmdType as N;
     match op {
-        pathnodes::CMD_UNKNOWN => N::CMD_UNKNOWN,
-        pathnodes::CMD_SELECT => N::CMD_SELECT,
-        pathnodes::CMD_UPDATE => N::CMD_UPDATE,
-        pathnodes::CMD_INSERT => N::CMD_INSERT,
-        pathnodes::CMD_DELETE => N::CMD_DELETE,
-        pathnodes::CMD_MERGE => N::CMD_MERGE,
-        pathnodes::CMD_UTILITY => N::CMD_UTILITY,
-        pathnodes::CMD_NOTHING => N::CMD_NOTHING,
+        ::pathnodes::CMD_UNKNOWN => N::CMD_UNKNOWN,
+        ::pathnodes::CMD_SELECT => N::CMD_SELECT,
+        ::pathnodes::CMD_UPDATE => N::CMD_UPDATE,
+        ::pathnodes::CMD_INSERT => N::CMD_INSERT,
+        ::pathnodes::CMD_DELETE => N::CMD_DELETE,
+        ::pathnodes::CMD_MERGE => N::CMD_MERGE,
+        ::pathnodes::CMD_UTILITY => N::CMD_UTILITY,
+        ::pathnodes::CMD_NOTHING => N::CMD_NOTHING,
         _ => N::CMD_UNKNOWN,
     }
 }
@@ -5328,9 +5328,9 @@ fn cmdtype_path_to_node(op: pathnodes::CmdType) -> ::nodes::nodes::CmdType {
 /// `LimitOption` (types-nodes). They are the same C enum; the two layers carry
 /// distinct Rust types.
 fn limit_option_to_node(
-    opt: pathnodes::LimitOption,
+    opt: ::pathnodes::LimitOption,
 ) -> ::nodes::nodelimit::LimitOption {
-    if opt == pathnodes::LIMIT_OPTION_WITH_TIES {
+    if opt == ::pathnodes::LIMIT_OPTION_WITH_TIES {
         ::nodes::nodelimit::LIMIT_OPTION_WITH_TIES
     } else {
         ::nodes::nodelimit::LIMIT_OPTION_COUNT
@@ -5389,7 +5389,7 @@ fn make_agg<'mcx>(
         plan.qual = qual;
         plan.targetlist = tlist;
         plan.lefttree = match lefttree {
-            Some(lt) => Some(mcx::alloc_in(mcx, lt)?),
+            Some(lt) => Some(::mcx::alloc_in(mcx, lt)?),
             None => None,
         };
         plan.righttree = None;
@@ -5433,14 +5433,14 @@ fn oid_vec_to_field<'mcx>(
 /// Map the path-layer `AggStrategy` (types-pathnodes `u32`, the raw C enum) to
 /// the plan-node `AggStrategy` (types-nodes). Same C enum, distinct Rust types.
 fn aggstrategy_path_to_node(
-    s: pathnodes::AggStrategy,
+    s: ::pathnodes::AggStrategy,
 ) -> ::nodes::nodeagg::AggStrategy {
     use ::nodes::nodeagg::AggStrategy as NS;
     match s {
-        pathnodes::AGG_PLAIN => NS::AggPlain,
-        pathnodes::AGG_SORTED => NS::AggSorted,
-        pathnodes::AGG_HASHED => NS::AggHashed,
-        pathnodes::AGG_MIXED => NS::AggMixed,
+        ::pathnodes::AGG_PLAIN => NS::AggPlain,
+        ::pathnodes::AGG_SORTED => NS::AggSorted,
+        ::pathnodes::AGG_HASHED => NS::AggHashed,
+        ::pathnodes::AGG_MIXED => NS::AggMixed,
         _ => NS::AggPlain,
     }
 }
@@ -5699,7 +5699,7 @@ fn create_groupingsets_plan<'mcx>(
                 transition_space,
                 lefttree,
             )?;
-            chain.push(mcx::alloc_in(mcx, agg_plan)?);
+            chain.push(::mcx::alloc_in(mcx, agg_plan)?);
         }
     }
 
@@ -5941,7 +5941,7 @@ pub fn is_projection_capable_path(root: &PlannerInfo, path: PathId) -> bool {
     if pathtype == ntag::T_CustomScan {
         // CustomScan can project iff it advertises CUSTOMPATH_SUPPORT_PROJECTION.
         if let PathNode::CustomPath(cp) = node {
-            return cp.flags & pathnodes::CUSTOMPATH_SUPPORT_PROJECTION != 0;
+            return cp.flags & ::pathnodes::CUSTOMPATH_SUPPORT_PROJECTION != 0;
         }
         return false;
     }
@@ -5968,7 +5968,7 @@ pub fn is_projection_capable_path(root: &PlannerInfo, path: PathId) -> bool {
 
 /// `IS_OUTER_JOIN(jointype)` (nodes/nodes.h) — LEFT/FULL/RIGHT/ANTI/RIGHT_ANTI.
 #[inline]
-fn is_outer_join(jointype: pathnodes::JoinType) -> bool {
+fn is_outer_join(jointype: ::pathnodes::JoinType) -> bool {
     // (1 << JOIN_LEFT) | (1 << JOIN_FULL) | (1 << JOIN_RIGHT) |
     // (1 << JOIN_ANTI) | (1 << JOIN_RIGHT_ANTI)
     const MASK: u32 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 7);
@@ -5977,7 +5977,7 @@ fn is_outer_join(jointype: pathnodes::JoinType) -> bool {
 
 /// Map the path-layer `JoinType` (types-pathnodes `u32`, the raw C enum) to the
 /// plan-node `JoinType` (types-nodes). Same C enum, distinct Rust types.
-fn jointype_path_to_node(j: pathnodes::JoinType) -> NodeJoinType {
+fn jointype_path_to_node(j: ::pathnodes::JoinType) -> NodeJoinType {
     use NodeJoinType as N;
     match j {
         0 => N::JOIN_INNER,
@@ -6007,7 +6007,7 @@ fn make_nestparam_target_entry<'mcx>(
     resno: AttrNumber,
 ) -> PgResult<TargetEntry<'mcx>> {
     Ok(TargetEntry {
-        expr: Some(mcx::alloc_in(mcx, expr)?),
+        expr: Some(::mcx::alloc_in(mcx, expr)?),
         resno,
         resname: None,
         ressortgroupref: 0,
@@ -6150,8 +6150,8 @@ fn make_nestloop<'mcx>(
         let plan: &mut Plan = &mut node.join.plan;
         plan.targetlist = tlist;
         plan.qual = otherclauses;
-        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
-        plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+        plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = Some(::mcx::alloc_in(mcx, righttree)?);
     }
     node.join.jointype = jointype;
     node.join.inner_unique = inner_unique;
@@ -6177,7 +6177,7 @@ fn make_hash<'mcx>(
         let plan: &mut Plan = &mut node.plan;
         plan.targetlist = tlist;
         plan.qual = None;
-        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+        plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
         plan.righttree = None;
     }
     node.hashkeys = hashkeys;
@@ -6209,8 +6209,8 @@ fn make_hashjoin<'mcx>(
         let mut plan = Plan::default();
         plan.targetlist = tlist;
         plan.qual = otherclauses;
-        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
-        plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+        plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = Some(::mcx::alloc_in(mcx, righttree)?);
         plan
     };
     let join = JoinBase {
@@ -6327,7 +6327,7 @@ fn create_nestloop_plan<'mcx>(
                     None => outer_plan.plan_head().targetlist.as_deref().unwrap_or(&[]),
                 };
                 let phv_expr = Expr::PlaceHolderVar(phv.clone_in(mcx)?);
-                if vars::tlist::tlist_member(&phv_expr, cur_tlist).is_some() {
+                if ::vars::tlist::tlist_member(&phv_expr, cur_tlist).is_some() {
                     nest_params.push(NestLoopParam { paramno, paramval: phv_expr });
                     continue;
                 }
@@ -6689,8 +6689,8 @@ fn make_mergejoin<'mcx>(
         let mut plan = Plan::default();
         plan.targetlist = tlist;
         plan.qual = otherclauses;
-        plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
-        plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+        plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
+        plan.righttree = Some(::mcx::alloc_in(mcx, righttree)?);
         plan
     };
     let join = JoinBase {
@@ -6877,7 +6877,7 @@ fn create_mergejoin_plan<'mcx>(
     // opathkey / opeclass track the current outer pathkey; lop/lip are cursors
     // into outer/inner pathkeys (index into the cloned pathkey vecs).
     let mut opathkey: Option<PathKey> = None;
-    let mut opeclass: Option<pathnodes::EcId> = None;
+    let mut opeclass: Option<::pathnodes::EcId> = None;
     let mut lop: usize = 0;
     let mut lip: usize = 0;
 
@@ -6911,7 +6911,7 @@ fn create_mergejoin_plan<'mcx>(
 
         // Identify the inner pathkey, coping with redundant inner pathkeys.
         let mut ipathkey: Option<PathKey> = None;
-        let mut ipeclass: Option<pathnodes::EcId> = None;
+        let mut ipeclass: Option<::pathnodes::EcId> = None;
         let mut first_inner_match = false;
         if lip < innerpathkeys.len() {
             let ipk = innerpathkeys[lip].clone();
@@ -7019,7 +7019,7 @@ fn relids_to_apprelids<'mcx>(
             for &w in &bms.words {
                 words.push(w);
             }
-            Ok(Some(mcx::alloc_in(mcx, Bitmapset { words })?))
+            Ok(Some(::mcx::alloc_in(mcx, Bitmapset { words })?))
         }
     }
 }
@@ -7523,7 +7523,7 @@ fn make_group<'mcx>(
     let mut plan = Plan::default();
     plan.qual = qual;
     plan.targetlist = tlist;
-    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
     plan.righttree = None;
     Ok(GroupNode {
         plan,
@@ -7590,7 +7590,7 @@ fn create_group_plan<'mcx>(
 fn make_windowagg<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
-    wc: &pathnodes::WindowClauseNode,
+    wc: &::pathnodes::WindowClauseNode,
     win_name: Option<PgString<'mcx>>,
     start_offset: Option<Expr<'mcx>>,
     end_offset: Option<Expr<'mcx>>,
@@ -7621,7 +7621,7 @@ fn make_windowagg<'mcx>(
 
     let mut plan = Plan::default();
     plan.targetlist = tlist;
-    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
     plan.righttree = None;
     plan.qual = qual;
 
@@ -7639,11 +7639,11 @@ fn make_windowagg<'mcx>(
         ordCollations: oid_vec_opt(mcx, ord_collations)?,
         frameOptions: wc.frameOptions,
         startOffset: match start_offset {
-            Some(e) => Some(mcx::alloc_in(mcx, e)?),
+            Some(e) => Some(::mcx::alloc_in(mcx, e)?),
             None => None,
         },
         endOffset: match end_offset {
-            Some(e) => Some(mcx::alloc_in(mcx, e)?),
+            Some(e) => Some(::mcx::alloc_in(mcx, e)?),
             None => None,
         },
         runCondition: run_condition,
@@ -7810,7 +7810,7 @@ fn make_unique_from_sortclauses<'mcx>(
     let mut plan = Plan::default();
     plan.targetlist = tlist;
     plan.qual = None;
-    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
     plan.righttree = None;
     Ok(UniqueNode {
         plan,
@@ -7895,7 +7895,7 @@ fn make_unique_from_pathkeys<'mcx>(
     let mut plan = Plan::default();
     plan.targetlist = tlist;
     plan.qual = None;
-    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
     plan.righttree = None;
     Ok(UniqueNode {
         plan,
@@ -8170,8 +8170,8 @@ fn make_setop<'mcx>(
     let mut plan = Plan::default();
     plan.targetlist = tlist;
     plan.qual = None;
-    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
-    plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+    plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = Some(::mcx::alloc_in(mcx, righttree)?);
 
     let plan_tlist: &[TargetEntry<'mcx>] = plan.targetlist.as_deref().unwrap_or(&[]);
 
@@ -8271,8 +8271,8 @@ fn make_recursive_union<'mcx>(
     let mut plan = Plan::default();
     plan.targetlist = tlist;
     plan.qual = None;
-    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
-    plan.righttree = Some(mcx::alloc_in(mcx, righttree)?);
+    plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
+    plan.righttree = Some(::mcx::alloc_in(mcx, righttree)?);
 
     let plan_tlist: &[TargetEntry<'mcx>] = plan.targetlist.as_deref().unwrap_or(&[]);
 
@@ -8360,7 +8360,7 @@ fn make_gather<'mcx>(
         let plan: &mut Plan = &mut node.plan;
         plan.targetlist = qptlist;
         plan.qual = None; // qpqual is NIL at the only call site
-        plan.lefttree = Some(mcx::alloc_in(mcx, subplan)?);
+        plan.lefttree = Some(::mcx::alloc_in(mcx, subplan)?);
         plan.righttree = None;
     }
     node.num_workers = nworkers;
@@ -8446,7 +8446,7 @@ fn create_gather_merge_plan<'mcx>(
     node.sortOperators = sort_operators.iter().copied().collect();
     node.collations = collations.iter().copied().collect();
     node.nullsFirst = nulls_first.iter().copied().collect();
-    node.plan.lefttree = Some(mcx::alloc_in(mcx, subplan)?);
+    node.plan.lefttree = Some(::mcx::alloc_in(mcx, subplan)?);
 
     if let Some(g) = root.glob.as_mut() {
         g.parallel_mode_needed = true;
@@ -8471,7 +8471,7 @@ fn make_incrementalsort<'mcx>(
     let mut plan = Plan::default();
     plan.targetlist = tlist;
     plan.qual = None;
-    plan.lefttree = Some(mcx::alloc_in(mcx, lefttree)?);
+    plan.lefttree = Some(::mcx::alloc_in(mcx, lefttree)?);
     plan.righttree = None;
     let sort = Sort {
         plan,
@@ -8587,7 +8587,7 @@ fn apply_cost_snapshot(dest: &mut Plan, src: &PlanCostSnapshot) {
 
 /// `exprCollation((Node *) tle->expr)` over a `TargetEntry`.
 fn expr_collation_of_tle(tle: &TargetEntry<'_>) -> PgResult<Oid> {
-    nodes_core::nodefuncs::expr_collation(tle.expr.as_deref())
+    ::nodes_core::nodefuncs::expr_collation(tle.expr.as_deref())
 }
 
 /// `get_tle_by_resno(tlist, resno)` (parse_relation.c / tlist helpers) — the

@@ -13,9 +13,9 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{AttrNumber, Oid};
-use types_tuple::pg_type::FormData_pg_type;
+use ::types_tuple::pg_type::FormData_pg_type;
 // The canonical `'mcx` byte-lane value type (`ByVal(usize)` / `ByRef(PgVec<u8>)`).
 // Statistic values that may be pass-by-reference (text/numeric/varchar/…) must
 // live in this safe byte lane, NOT a bare `usize` word (which cannot carry the
@@ -274,7 +274,7 @@ pub type AnalyzeAttrComputeStatsFunc = for<'mcx> fn(
 ///     `numvalues[n]` / `numnumbers[n]` lengths are the corresponding
 ///     `Vec::len()`, kept as explicit fields to stay 1:1 with the C struct and
 ///     the catalog write);
-///   * `MemoryContext anl_context` becomes [`mcx::Mcx`], `Form_pg_type attrtype`
+///   * `MemoryContext anl_context` becomes [`::mcx::Mcx`], `Form_pg_type attrtype`
 ///     becomes `Option<FormData_pg_type>` (NULL before set up), `TupleDesc`
 ///     becomes the repo `TupleDesc`, and `HeapTuple *rows` becomes
 ///     `Vec<HeapTuple>` (the std-fetch sample-row access info).
@@ -353,7 +353,7 @@ pub struct VacAttrStats<'mcx> {
     /// header-only `HeapTuple` alias (`Option<PgBox<HeapTupleData>>`) cannot
     /// carry the user-data bytes `heap_getattr`/`nocachegetattr` need, so the
     /// reservoir holds the repo's real materialized-tuple carrier
-    /// [`types_tuple::FormedTuple`] (header + `data`), which is exactly what
+    /// [`::types_tuple::FormedTuple`] (header + `data`), which is exactly what
     /// `ExecCopySlotHeapTuple` produces. This is the C-faithful carrier for
     /// `HeapTuple *rows` in this repo's value model; it is private to the main
     /// ANALYZE code (no other unit reads it).

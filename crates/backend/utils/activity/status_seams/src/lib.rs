@@ -13,9 +13,9 @@
 
 extern crate alloc;
 
-use types_core::init::BackendType;
-use types_core::ProcNumber;
-use types_pgstat::backend_status::PgBackendStatus;
+use ::types_core::init::BackendType;
+use ::types_core::ProcNumber;
+use ::types_pgstat::backend_status::PgBackendStatus;
 
 seam_core::seam!(
     /// `MyBEEntry != NULL` — is the backend status entry initialized?
@@ -87,7 +87,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `pgstat_report_xact_timestamp(tstamp)` (backend_status.c).
-    pub fn pgstat_report_xact_timestamp(tstamp: types_core::TimestampTz)
+    pub fn pgstat_report_xact_timestamp(tstamp: ::types_core::TimestampTz)
 );
 
 // --- backend-utils-init-postinit consumers (backend_status.c) ---
@@ -121,7 +121,7 @@ seam_core::seam!(
     /// buffers, app-name and client-host buffers); summed by ipci.c
     /// `CalculateShmemSize`. `Err` carries the `add_size`/`mul_size` overflow
     /// `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn backend_status_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn backend_status_shmem_size() -> types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
@@ -138,6 +138,6 @@ seam_core::seam!(
     /// Used by `signalfuncs.c` to recognize autovacuum workers (which do not
     /// advertise a role). Pure read of the shared status array; cannot `ereport`.
     pub fn pgstat_get_backend_type_by_proc_number(
-        proc_number: types_core::ProcNumber,
-    ) -> types_core::init::BackendType
+        proc_number: ::types_core::ProcNumber,
+    ) -> ::types_core::init::BackendType
 );

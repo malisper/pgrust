@@ -4,7 +4,7 @@
 //! owned model is this enum (the `castNode` checks become match arms).
 //! Variants are added as the nodes' executor units are ported.
 
-use mcx::PgBox;
+use ::mcx::PgBox;
 use crate::nodes::NodeTag;
 
 use crate::nodememoize::T_MemoizeState;

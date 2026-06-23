@@ -8,10 +8,10 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
-use types_core::ProcNumber;
-use types_error::PgResult;
-use types_storage::RelFileLocator;
+use ::types_core::primitive::Oid;
+use ::types_core::ProcNumber;
+use ::types_error::PgResult;
+use ::types_storage::RelFileLocator;
 
 /// `CreateDBRelInfo` (`dbcommands.c`): one relation to be copied when creating
 /// a database — its physical identifier, oid, and permanence. Produced by the
@@ -87,7 +87,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `smgr_redo(record)` (storage.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn smgr_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
+    pub fn smgr_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -138,7 +138,7 @@ seam_core::seam!(
     /// `DropRelationFiles(delrels, ndelrels, isRedo=false)` (storage.c) — drop
     /// the physical files a finished prepared transaction was supposed to
     /// delete. Can `ereport(ERROR)`, carried on `Err`.
-    pub fn drop_relation_files(rels: &[wal::RelFileLocator]) -> types_error::PgResult<()>
+    pub fn drop_relation_files(rels: &[wal::RelFileLocator]) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -240,6 +240,6 @@ seam_core::seam!(
     /// `nblocks = 0`. `Err` carries the storage/WAL `ereport(ERROR)`s.
     pub fn relation_truncate(
         rel: &rel::Relation<'_>,
-        nblocks: types_core::primitive::BlockNumber,
+        nblocks: ::types_core::primitive::BlockNumber,
     ) -> PgResult<()>
 );

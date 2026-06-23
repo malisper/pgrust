@@ -11,14 +11,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
-use types_core::uint8;
-use types_error::PgResult;
+use ::types_core::uint8;
+use ::types_error::PgResult;
 use wal::{ArchiveMode, WalLevel, WalSyncMethod};
 
 seam_core::seam!(
     /// `xlog_redo(record)` (xlog.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn xlog_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
+    pub fn xlog_redo(record: &mut ::wal::rmgr::XLogReaderState<'_>) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -96,7 +96,7 @@ seam_core::seam!(
     /// "free" because an FPI is being emitted anyway.
     pub fn xlog_check_buffer_needs_backup(
         buffer: types_storage::Buffer,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -104,7 +104,7 @@ seam_core::seam!(
     /// the system to a consistent, writable state. Many of its paths
     /// `ereport(ERROR)` (besides the FATAL/PANIC ones), so the error
     /// propagates to the caller.
-    pub fn startup_xlog() -> types_error::PgResult<()>
+    pub fn startup_xlog() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -116,7 +116,7 @@ seam_core::seam!(
     /// fork-copy-on-write copy of those singletons (and hence every later
     /// child's) holds valid XID bounds before any snapshot is taken. Calls into
     /// the same fallible owner seams `StartupXLOG` uses.
-    pub fn seed_transam_variables_from_checkpoint() -> types_error::PgResult<()>
+    pub fn seed_transam_variables_from_checkpoint() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -202,7 +202,7 @@ seam_core::seam!(
     /// `BootStrapXLOG(data_checksum_version)` (xlog.c): create the initial WAL
     /// segment and control file at bootstrap. `ereport(PANIC)` on an I/O
     /// failure (modeled as `Err`).
-    pub fn boot_strap_xlog(data_checksum_version: u32) -> types_error::PgResult<()>
+    pub fn boot_strap_xlog(data_checksum_version: u32) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -267,7 +267,7 @@ seam_core::seam!(
     /// `wal_consistency_checking[rmid]` (xlog.c) — whether WAL consistency
     /// checking is enabled for the given resource manager (the per-rmgr boolean
     /// array built by `assign_wal_consistency_checking`).
-    pub fn wal_consistency_checking(rmid: types_core::RmgrId) -> bool
+    pub fn wal_consistency_checking(rmid: ::types_core::RmgrId) -> bool
 );
 
 seam_core::seam!(
@@ -309,7 +309,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `WALAvailability GetWALAvailability(XLogRecPtr targetLSN)` (xlog.c) —
     /// classify whether the WAL at `target_lsn` is still reserved / available.
-    pub fn get_wal_availability(target_lsn: XLogRecPtr) -> wal::WALAvailability
+    pub fn get_wal_availability(target_lsn: XLogRecPtr) -> ::wal::WALAvailability
 );
 
 seam_core::seam!(
@@ -327,7 +327,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `XLogRecPtr LogStandbySnapshot(void)` (standby.c) — log an
     /// `xl_running_xacts` record and return the end LSN. Can `ereport(ERROR)`.
-    pub fn log_standby_snapshot() -> types_error::PgResult<XLogRecPtr>
+    pub fn log_standby_snapshot() -> ::types_error::PgResult<XLogRecPtr>
 );
 
 seam_core::seam!(
@@ -353,7 +353,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `XLogFileInit(segno, tli)` (xlog.c) — create/open the given WAL segment
     /// file, returning the fd. `ereport(ERROR)` on failure.
-    pub fn xlog_file_init(segno: XLogSegNo, tli: TimeLineID) -> types_error::PgResult<i32>
+    pub fn xlog_file_init(segno: XLogSegNo, tli: TimeLineID) -> ::types_error::PgResult<i32>
 );
 
 seam_core::seam!(
@@ -363,7 +363,7 @@ seam_core::seam!(
         fd: i32,
         segno: XLogSegNo,
         tli: TimeLineID
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -428,14 +428,14 @@ seam_core::seam!(
     /// `XLOGShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn xlog_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn xlog_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
     /// `XLOGShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
     /// this subsystem's shared-memory structures. `Err` carries the C
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn xlog_shmem_init() -> types_error::PgResult<()>
+    pub fn xlog_shmem_init() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -443,7 +443,7 @@ seam_core::seam!(
     /// logs the next OID to be allocated, so a crash recovery sees the
     /// preallocated OID range. Called by `GetNewObjectId` while holding
     /// `OidGenLock`. The WAL insert can `ereport(ERROR)`, carried on `Err`.
-    pub fn xlog_put_next_oid(next_oid: types_core::Oid) -> PgResult<()>
+    pub fn xlog_put_next_oid(next_oid: ::types_core::Oid) -> PgResult<()>
 );
 
 seam_core::seam!(
@@ -487,7 +487,7 @@ seam_core::seam!(
     pub fn do_pg_backup_start(
         backupidstr: &str,
         fast: bool,
-    ) -> PgResult<(wal::BackupState, Vec<u8>)>
+    ) -> PgResult<(::wal::BackupState, Vec<u8>)>
 );
 
 seam_core::seam!(
@@ -496,9 +496,9 @@ seam_core::seam!(
     /// archived, and fill the stop fields of `state`. Returns the updated
     /// [`BackupState`]. Can `ereport(ERROR)`, carried on `Err`.
     pub fn do_pg_backup_stop(
-        state: wal::BackupState,
+        state: ::wal::BackupState,
         waitforarchive: bool,
-    ) -> PgResult<wal::BackupState>
+    ) -> PgResult<::wal::BackupState>
 );
 
 seam_core::seam!(
@@ -512,7 +512,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `get_backup_status(void)` (xlog.c:9175) — the session-level backup state
     /// (`sessionBackupState`). Pure read of backend-local state.
-    pub fn get_backup_status() -> wal::SessionBackupState
+    pub fn get_backup_status() -> ::wal::SessionBackupState
 );
 
 // ===========================================================================

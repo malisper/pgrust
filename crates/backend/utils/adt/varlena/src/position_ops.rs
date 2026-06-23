@@ -13,7 +13,7 @@
 //! nondeterministic-collation matching (genuinely external: pg_locale.c).
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_SUBSTRING_ERROR};
 
 use pg_locale_seams as locale;
@@ -719,7 +719,7 @@ pub fn text_reverse<'mcx>(mcx: Mcx<'mcx>, t: &[u8]) -> PgResult<PgVec<'mcx, u8>>
     let len = t.len();
 
     // result = palloc(len + VARHDRSZ); dst = VARDATA(result) + len (fill back).
-    let mut out = mcx::vec_with_capacity_in(mcx, len)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, len)?;
     // Build into a scratch buffer filled from the back, then commit forward.
     let mut buf = vec![0u8; len];
     let mut dst = len; // write position, fills downward
@@ -784,7 +784,7 @@ pub fn replace_text<'mcx>(
     let mut start_ptr: usize = 0;
 
     // initStringInfo: build the result charged to mcx.
-    let mut str = mcx::vec_with_capacity_in(mcx, src_text_len)?;
+    let mut str = ::mcx::vec_with_capacity_in(mcx, src_text_len)?;
 
     loop {
         // CHECK_FOR_INTERRUPTS(): not modeled (cooperative cancellation owner).

@@ -14,7 +14,7 @@ use std::mem::ManuallyDrop;
 use std::os::fd::FromRawFd;
 use std::path::Path;
 
-use types_core::SubTransactionId;
+use ::types_core::SubTransactionId;
 use types_error::{ErrorLevel, PgError, PgResult, DEBUG1, ERROR, LOG, WARNING};
 use types_storage::{
     PG_TBLSPC_DIR, PG_TEMP_FILES_DIR, PG_TEMP_FILE_PREFIX, TABLESPACE_VERSION_DIRECTORY,
@@ -678,7 +678,7 @@ pub fn SyncDataDirectory() -> PgResult<()> {
     };
 
     // fd.c:3645-3680 -- recovery_init_sync_method == syncfs path.
-    if crate::vfd_core::recovery_init_sync_method() == types_storage::DATA_DIR_SYNC_METHOD_SYNCFS {
+    if crate::vfd_core::recovery_init_sync_method() == ::types_storage::DATA_DIR_SYNC_METHOD_SYNCFS {
         begin_startup_progress_phase();
         do_syncfs(".");
         let dir = AllocateDir(PG_TBLSPC_DIR)?;
@@ -929,7 +929,7 @@ pub(crate) fn CleanupTempFiles(is_commit: bool, is_proc_exit: bool) {
     // first to avoid holding the FdState borrow across FileClose (which itself
     // mutates FdState).
     struct ToClose {
-        file: types_storage::File,
+        file: ::types_storage::File,
         warn: bool,
     }
 
@@ -946,9 +946,9 @@ pub(crate) fn CleanupTempFiles(is_commit: bool, is_proc_exit: bool) {
                     && v.file_name.is_some()
                 {
                     if is_proc_exit {
-                        result.push(ToClose { file: types_storage::File(i as i32), warn: false });
+                        result.push(ToClose { file: ::types_storage::File(i as i32), warn: false });
                     } else if fdstate & crate::vfd_core::FD_CLOSE_AT_EOXACT != 0 {
-                        result.push(ToClose { file: types_storage::File(i as i32), warn: true });
+                        result.push(ToClose { file: ::types_storage::File(i as i32), warn: true });
                     }
                 }
             }

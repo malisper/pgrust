@@ -15,7 +15,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mcx::{Mcx, PgString};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 
 use crate::{
@@ -153,7 +153,7 @@ pub fn pg_get_functiondef<'mcx>(
     if crate::oid_is_valid_pub(proc.prosupport) {
         // Qualify the support function's name if not resolvable in the path.
         let argtypes = {
-            let mut v = mcx::PgVec::new_in(mcx);
+            let mut v = ::mcx::PgVec::new_in(mcx);
             v.try_reserve(1).map_err(|_| mcx.oom(0))?;
             v.push(INTERNALOID);
             v
@@ -162,7 +162,7 @@ pub fn pg_get_functiondef<'mcx>(
             mcx,
             proc.prosupport,
             1,
-            mcx::PgVec::new_in(mcx),
+            ::mcx::PgVec::new_in(mcx),
             argtypes,
             false,
             false,
@@ -370,7 +370,7 @@ pub fn pg_get_function_arg_default<'mcx>(
     let expr = list
         .get(nth_default as usize)
         .ok_or_else(|| PgError::error("too few default expressions"))?;
-    let s = deparse_expression(mcx, expr, mcx::PgVec::new_in(mcx), false, false)?;
+    let s = deparse_expression(mcx, expr, ::mcx::PgVec::new_in(mcx), false, false)?;
     Ok(Some(PgString::from_str_in(s.as_str(), mcx)?))
 }
 
@@ -533,7 +533,7 @@ fn print_function_arguments<'mcx>(
                 .get(nextargdefault)
                 .ok_or_else(|| PgError::error("too few default expressions"))?;
             nextargdefault += 1;
-            let s = deparse_expression(mcx, expr, mcx::PgVec::new_in(mcx), false, false)?;
+            let s = deparse_expression(mcx, expr, ::mcx::PgVec::new_in(mcx), false, false)?;
             buf.push_str(" DEFAULT ");
             buf.push_str(s.as_str());
         }
@@ -589,7 +589,7 @@ fn print_function_sqlbody<'mcx>(
     dpns.funcname = Some(PgString::from_str_in(proc.proname.as_str(), mcx)?);
     dpns.numargs = arginfo.argtypes.len() as i32;
     dpns.argnames = {
-        let mut v = mcx::PgVec::new_in(mcx);
+        let mut v = ::mcx::PgVec::new_in(mcx);
         v.try_reserve(arginfo.argnames.len()).map_err(|_| mcx.oom(0))?;
         for a in arginfo.argnames.iter() {
             v.push(match a {

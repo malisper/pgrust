@@ -19,20 +19,20 @@ use alloc::format;
 use alloc::string::String;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::primitive::MAXPGPATH;
+use ::types_core::primitive::MAXPGPATH;
 use types_error::{PgResult, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use tsearch::StopList;
+use ::tsearch::StopList;
 
-use ts_locale_seams::readfile;
-use formatting_seams::str_tolower;
-use utils_error::ereport;
-use mbutils_seams::pg_mblen_range;
-use common_path_seams::get_share_path;
+use ::ts_locale_seams::readfile;
+use ::formatting_seams::str_tolower;
+use ::utils_error::ereport;
+use ::mbutils_seams::pg_mblen_range;
+use ::common_path_seams::get_share_path;
 
 /// `DEFAULT_COLLATION_OID` (`pg_collation_d.h`) — the collation the stop-word
 /// `str_tolower` runs under, matching the C `wordop(line, strlen(line),
 /// DEFAULT_COLLATION_OID)`.
-const DEFAULT_COLLATION_OID: types_core::Oid = 100;
+const DEFAULT_COLLATION_OID: ::types_core::Oid = 100;
 
 /// `isspace((unsigned char) c)` for the C `"C"` locale (what the stop-word
 /// trimming loop uses).

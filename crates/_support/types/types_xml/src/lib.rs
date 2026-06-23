@@ -17,7 +17,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// `XmlBinaryType` (`utils/xml.h`): how binary values map to XML. Carried by the
 /// `xmlbinary` GUC (as an int).

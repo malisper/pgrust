@@ -9,7 +9,7 @@
 //! arena node into the owned form here, exactly as
 //! `backend-catalog-pg-db-role-setting` does for `ALTER ROLE … SET`.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodes::{ntag, Node as ANode};
 
 use parsenodes as pn;
@@ -17,8 +17,8 @@ use parsenodes as pn;
 /// `elog(ERROR, "unrecognized node type: %d", nodeTag(node))` — a node shape the
 /// owned role-statement model does not carry (an option arg or member node the
 /// grammar would never actually produce here).
-fn unrecognized(node: &ANode<'_>) -> types_error::PgError {
-    utils_error::ereport(types_error::ERROR)
+fn unrecognized(node: &ANode<'_>) -> ::types_error::PgError {
+    utils_error::ereport(::types_error::ERROR)
         .errmsg_internal(format!("unrecognized node type: {}", node.node_tag().0))
         .into_error()
 }

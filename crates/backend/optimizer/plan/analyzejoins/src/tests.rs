@@ -15,7 +15,7 @@ use pathnodes::{
     Bitmapset, EquivalenceMember, PlannerInfo, RestrictInfo, RinfoId, VOLATILITY_UNKNOWN,
 };
 
-fn singleton(x: i32) -> pathnodes::Relids {
+fn singleton(x: i32) -> ::pathnodes::Relids {
     let wn = (x / 64) as usize;
     let mut w = std::vec![0u64; wn + 1];
     w[wn] = 1u64 << (x % 64);
@@ -50,7 +50,7 @@ fn mk_var_rinfo(root: &mut PlannerInfo, vno: i32) -> RinfoId {
         right_relids: None,
         rinfo_serial: 0,
         parent_ec: None,
-        eval_cost: pathnodes::QualCost::default(),
+        eval_cost: ::pathnodes::QualCost::default(),
         norm_selec: -1.0,
         outer_selec: -1.0,
         mergeopfamilies: std::vec::Vec::new(),

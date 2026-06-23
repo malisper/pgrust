@@ -16,8 +16,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec, PgString};
-use types_core::primitive::{Oid, InvalidOid, OidIsValid};
-use types_error::PgResult;
+use ::types_core::primitive::{Oid, InvalidOid, OidIsValid};
+use ::types_error::PgResult;
 use types_error::{ERROR, NOTICE, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NO_DATA_FOUND};
 use ::nodes::nodes::{Node, NodePtr};
 use ::nodes::ddlnodes::{AlterTableCmd, AlterTableType};
@@ -26,22 +26,22 @@ use ::nodes::parsenodes::{
 };
 use types_tuple::heaptuple::Datum;
 use types_acl::{ACLCHECK_OK, ACL_CREATE, ACLCHECK_NOT_OWNER};
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     RELKIND_RELATION, RELKIND_PARTITIONED_TABLE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX,
     RELKIND_MATVIEW, GLOBALTABLESPACE_OID,
 };
-use types_catalog::pg_class::{
+use ::types_catalog::pg_class::{
     Anum_pg_class_oid, Anum_pg_class_relname, Anum_pg_class_relnamespace,
     Anum_pg_class_relowner, Anum_pg_class_relisshared, Anum_pg_class_relkind,
     Anum_pg_class_reltablespace,
 };
-use types_storage::lock::{AccessShareLock, AccessExclusiveLock};
+use ::types_storage::lock::{AccessShareLock, AccessExclusiveLock};
 
-use heaptuple::heap_deform_tuple;
+use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam;
 use table::{table_open, table_close};
-use miscinit::GetUserId;
-use utils_error::ereport;
+use ::miscinit::GetUserId;
+use ::utils_error::ereport;
 
 use aclchk_seams as aclchk_seam;
 use catalog_seams as catalog_seam;
@@ -180,7 +180,7 @@ pub fn AlterTableMoveAll<'mcx>(
         &mut key,
         Anum_pg_class_reltablespace,
         types_scan::scankey::BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         Datum::from_oid(orig_tablespaceoid),
     )?;
     let keys = [key];
@@ -244,7 +244,7 @@ pub fn AlterTableMoveAll<'mcx>(
                 .map(|s| s.as_str().to_string())
                 .unwrap_or_default();
             return ereport(ERROR)
-                .errcode(types_error::ERRCODE_OBJECT_IN_USE)
+                .errcode(::types_error::ERRCODE_OBJECT_IN_USE)
                 .errmsg(format!(
                     "aborting because lock on relation \"{}.{}\" is not available",
                     nspname, relname
@@ -291,14 +291,14 @@ pub fn AlterTableMoveAll<'mcx>(
             missing_ok: false,
             recurse: false,
         };
-        let cmdnode = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?;
+        let cmdnode = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?;
         let mut cmds: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
         cmds.push(cmdnode);
 
         // EventTriggerAlterTableStart((Node *) stmt) — pass the original
         // AlterTableMoveAllStmt parse node.
         let stmt_node =
-            mcx::alloc_in(mcx, Node::mk_alter_table_move_all_stmt(mcx, stmt.clone_in(mcx)?)?)?;
+            ::mcx::alloc_in(mcx, Node::mk_alter_table_move_all_stmt(mcx, stmt.clone_in(mcx)?)?)?;
         utility_out_seams::event_trigger_alter_table_start::call(&stmt_node)?;
         // OID is set by AlterTableInternal.
         crate::at_phase::AlterTableInternal(mcx, relOid, &cmds, false)?;

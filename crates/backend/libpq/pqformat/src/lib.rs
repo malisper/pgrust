@@ -28,13 +28,13 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use datum::Bytea;
+use ::datum::Bytea;
 use types_error::{
     PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_PROTOCOL_VIOLATION,
 };
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
-use pqcomm_seams::pq_putmessage;
+use ::pqcomm_seams::pq_putmessage;
 use mbutils_seams::{pg_client_to_server, pg_server_to_client};
 
 /// `MaxAllocSize` (`utils/memutils.h`): `0x3fffffff` — the `enlargeStringInfo`
@@ -296,7 +296,7 @@ fn unsupported_integer_size(b: i32) -> PgError {
 pub fn pq_begintypsend(mcx: Mcx<'_>) -> PgResult<StringInfo<'_>> {
     let mut buf = init_string_info(mcx)?;
     // Reserve four bytes for the bytea length word
-    append_binary(&mut buf, &[0u8; datum::VARHDRSZ])?;
+    append_binary(&mut buf, &[0u8; ::datum::VARHDRSZ])?;
     Ok(buf)
 }
 
@@ -331,7 +331,7 @@ pub fn pq_puttextmessage(mcx: Mcx<'_>, msgtype: u8, s: &[u8]) -> PgResult<()> {
             // (void) pq_putmessage(msgtype, str, slen + 1) — the C body
             // includes the caller's NUL terminator, which a Rust slice does
             // not carry; materialize it.
-            let mut body = mcx::vec_with_capacity_in::<u8>(mcx, s.len() + 1)?;
+            let mut body = ::mcx::vec_with_capacity_in::<u8>(mcx, s.len() + 1)?;
             body.extend_from_slice(s);
             body.push(0);
             let _eof = pq_putmessage::call(msgtype, &body)?;
@@ -464,7 +464,7 @@ pub fn pq_getmsgtext<'mcx>(
     match pg_client_to_server::call(mcx, raw)? {
         Some(p) => Ok(p),
         // No conversion: palloc(rawbytes + 1) + memcpy + NUL — i.e. a copy.
-        None => mcx::slice_in(mcx, raw),
+        None => ::mcx::slice_in(mcx, raw),
     }
 }
 

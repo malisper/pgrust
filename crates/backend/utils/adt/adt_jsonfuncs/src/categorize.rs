@@ -2,14 +2,14 @@
 //! json/jsonb output. json's cycle partner; installed as the
 //! `backend-utils-adt-jsonfuncs-seams::categorize_type` inward seam.
 
-use lsyscache::type_::{
+use ::lsyscache::type_::{
     get_base_type, get_element_type, get_type_output_info, type_is_rowtype,
 };
 use coerce_seams::{find_coercion_pathway_explicit, CoercionPathType};
 use types_core::{Oid, OidIsValid};
-use types_error::PgResult;
-use types_json::JsonTypeCategory;
-use types_tuple::heaptuple::{
+use ::types_error::PgResult;
+use ::types_json::JsonTypeCategory;
+use ::types_tuple::heaptuple::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, BOOLOID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID,
     INT8OID, JSONBOID, JSONOID, NUMERICOID, RECORDARRAYOID, TIMESTAMPOID, TIMESTAMPTZOID,
 };

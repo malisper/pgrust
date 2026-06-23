@@ -30,8 +30,8 @@ mod tables;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{uint16, uint32, uint8};
-use types_error::PgResult;
-use types_wchar::pg_wchar;
+use ::types_error::PgResult;
+use ::types_wchar::pg_wchar;
 
 use qc_tables::{NFC_QC_h, NFKC_QC_h, UnicodeNormProps_NFC_QC, UnicodeNormProps_NFKC_QC};
 use tables::{UnicodeDecompMain, UnicodeDecomp_codepoints};
@@ -539,7 +539,7 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn chars(s: &str) -> alloc::vec::Vec<pg_wchar> {
         s.chars().map(|ch| ch as pg_wchar).collect()

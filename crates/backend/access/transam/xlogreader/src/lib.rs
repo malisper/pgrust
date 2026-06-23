@@ -30,7 +30,7 @@
 //! `XLREAD_WOULDBLOCK`-when-full / `allow_oversized` contract matches C
 //! byte-for-byte; the actual decoded bytes live in the arena.
 //!
-//! [`decode_arena`]: wal::rmgr::XLogReaderState::decode_arena
+//! [`decode_arena`]: ::wal::rmgr::XLogReaderState::decode_arena
 //!
 //! Block-image decompression uses the repo's `common-pglz`; LZ4/ZSTD are
 //! compiled out exactly as the C `#ifdef USE_LZ4 / USE_ZSTD` defaults.
@@ -63,17 +63,17 @@ use core::ptr::NonNull;
 
 use mcx::{Mcx, PgString, PgVec};
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, RelFileNumber, RepOriginId, RmgrId,
     TimeLineID, XLogRecPtr, XLogSegNo,
 };
 use types_core::{
     InvalidRepOriginId, InvalidTransactionId, InvalidXLogRecPtr, TransactionId,
 };
-use types_error::PgResult;
-use wal::rmgr::{XLogReaderState, RmgrIdIsValid, XLREAD_FAIL, XLREAD_SUCCESS, XLREAD_WOULDBLOCK};
-use wal::wal::{DecodedBkpBlock, DecodedXLogRecord, RelFileLocator, XLogRecord};
-use wal::xlog_consts::{SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, XLOG_BLCKSZ};
+use ::types_error::PgResult;
+use ::wal::rmgr::{XLogReaderState, RmgrIdIsValid, XLREAD_FAIL, XLREAD_SUCCESS, XLREAD_WOULDBLOCK};
+use ::wal::wal::{DecodedBkpBlock, DecodedXLogRecord, RelFileLocator, XLogRecord};
+use ::wal::xlog_consts::{SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, XLOG_BLCKSZ};
 
 pub mod handle;
 pub mod seams;
@@ -351,11 +351,11 @@ fn parse_rel_file_locator(b: &[u8]) -> RelFileLocator {
 /// bytes are initialized by `copy_from_slice` before the slice is formed.
 fn arena_copy<'mcx>(arena: Mcx<'mcx>, src: &[u8]) -> PgResult<&'mcx [u8]> {
     use core::alloc::Layout;
-    use mcx::Allocator;
+    use ::mcx::Allocator;
     if src.is_empty() {
         return Ok(&[]);
     }
-    mcx::check_alloc_size(src.len())?;
+    ::mcx::check_alloc_size(src.len())?;
     let layout = Layout::from_size_align(src.len(), 1).map_err(|_| arena.oom(src.len()))?;
     let ptr: NonNull<[u8]> = arena.allocate(layout).map_err(|_| arena.oom(src.len()))?;
     // SAFETY: `ptr` points to `src.len()` freshly-allocated bytes in the arena.
@@ -416,7 +416,7 @@ pub fn allocate_recordbuf<'mcx>(state: &mut XLogReaderState<'mcx>, reclength: ui
     new_size = new_size.wrapping_add(XLOG_BLCKSZ as u32 - (new_size % XLOG_BLCKSZ as u32));
     new_size = new_size.max(5 * (BLCKSZ as u32).max(XLOG_BLCKSZ as u32));
 
-    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(arena, new_size as usize)?;
+    let mut buf: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(arena, new_size as usize)?;
     buf.resize(new_size as usize, 0);
     state.readRecordBuf = Some(buf);
     state.readRecordBufSize = new_size;
@@ -695,8 +695,8 @@ mod layout {
     #[repr(C)]
     #[allow(dead_code)]
     struct RelFileLocatorLayout {
-        spc_oid: types_core::primitive::Oid,
-        db_oid: types_core::primitive::Oid,
+        spc_oid: ::types_core::primitive::Oid,
+        db_oid: ::types_core::primitive::Oid,
         rel_number: RelFileNumber,
     }
 
@@ -1859,7 +1859,7 @@ fn DecodeXLogRecord<'mcx>(
     // `memcpy` into the decode buffer; here a `&'mcx [u8]` borrowing the arena),
     // and build the final DecodedBkpBlock array.
     let mut blocks: PgVec<'mcx, DecodedBkpBlock<'mcx>> =
-        mcx::vec_with_capacity_in(arena, (max_block_id + 1) as usize).map_err(|_| ())?;
+        ::mcx::vec_with_capacity_in(arena, (max_block_id + 1) as usize).map_err(|_| ())?;
 
     for block_id in 0..=max_block_id {
         let blk = &blks[block_id as usize];
@@ -2426,9 +2426,9 @@ pub fn set_read_ahead_record_prefetch_buffer(
 /// prefetcher (the `ReadAheadRecordInfo` Copy facts).
 pub fn read_ahead_record_info(
     state: &XLogReaderState<'_>,
-) -> Option<wal::ReadAheadRecordInfo> {
+) -> Option<::wal::ReadAheadRecordInfo> {
     let r = queue_tail(state)?;
-    Some(wal::ReadAheadRecordInfo {
+    Some(::wal::ReadAheadRecordInfo {
         lsn: r.lsn(),
         xl_rmid: r.header().rmid(),
         xl_info: r.header().info(),
@@ -2448,10 +2448,10 @@ pub fn read_ahead_record_info(
 /// `read_next_full_transaction_id` seam. The `current(state)` borrow mirrors the
 /// C `record->record->header.xl_xid` dereference (the caller guarantees a
 /// decoded current record during replay).
-pub fn XLogRecGetFullXid(state: &XLogReaderState<'_>) -> types_core::FullTransactionId {
+pub fn XLogRecGetFullXid(state: &XLogReaderState<'_>) -> ::types_core::FullTransactionId {
     use varsup_seams as varsup;
-    use types_core::xact::TransactionIdIsNormal;
-    use types_core::FullTransactionId;
+    use ::types_core::xact::TransactionIdIsNormal;
+    use ::types_core::FullTransactionId;
 
     let xid = current(state)
         .expect("XLogRecGetFullXid requires a decoded current record")
@@ -2479,7 +2479,7 @@ pub fn XLogRecGetFullXid(state: &XLogReaderState<'_>) -> types_core::FullTransac
 // ---------------------------------------------------------------------------
 // RelFileLocator conversion: the seam's `XLogBlockTag` uses
 // `types_storage::RelFileLocator`; the decoded block carries
-// `wal::RelFileLocator`. They are the same ABI (three Oids).
+// `::wal::RelFileLocator`. They are the same ABI (three Oids).
 // ---------------------------------------------------------------------------
 
 fn to_storage_locator(loc: RelFileLocator) -> types_storage::RelFileLocator {

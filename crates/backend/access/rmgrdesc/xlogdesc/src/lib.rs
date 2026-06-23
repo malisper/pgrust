@@ -41,7 +41,7 @@
 
 extern crate alloc;
 
-use mcx::PgString;
+use ::mcx::PgString;
 use types_core::{uint8, TimestampTz, XLogRecPtr};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use wal::{
@@ -347,7 +347,7 @@ fn append_lossy(buf: &mut PgString<'_>, bytes: &[u8]) -> PgResult<()> {
 /// renders it.
 pub fn xlog_desc_seam(
     buf: &mut PgString<'_>,
-    record: &wal::rmgr::XLogReaderState<'_>,
+    record: &::wal::rmgr::XLogReaderState<'_>,
 ) -> PgResult<()> {
     let record = record
         .record

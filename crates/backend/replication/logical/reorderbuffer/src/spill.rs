@@ -48,8 +48,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{TransactionId, XLogRecPtr};
-use types_storage::File;
+use ::types_core::primitive::{TransactionId, XLogRecPtr};
+use ::types_storage::File;
 
 use crate::{
     ReorderBuffer, ReorderBufferChange, ReorderBufferChangeData, ReorderBufferChangeType,
@@ -692,7 +692,7 @@ fn decode_change(payload: &[u8]) -> ReorderBufferChange {
     let action = u8_to_action(r.data[r.pos]);
     r.pos += 1;
     let lsn = r.u64();
-    let origin_id = r.u32() as types_core::primitive::RepOriginId;
+    let origin_id = r.u32() as ::types_core::primitive::RepOriginId;
 
     let data = match action {
         ReorderBufferChangeType::Insert
@@ -708,7 +708,7 @@ fn decode_change(payload: &[u8]) -> ReorderBufferChange {
             let has_new = r.byte_bool();
             let newtuple = if has_new { Some(decode_tuplebuf(&mut r)) } else { None };
             ReorderBufferChangeData::Tp {
-                rlocator: types_storage::RelFileLocator {
+                rlocator: ::types_storage::RelFileLocator {
                     spcOid: spc,
                     dbOid: db,
                     relNumber: relnum,
@@ -765,7 +765,7 @@ fn decode_change(payload: &[u8]) -> ReorderBufferChange {
             tid.ip_blkid.bi_lo = bi_lo;
             tid.ip_posid = posid;
             ReorderBufferChangeData::TupleCid {
-                locator: types_storage::RelFileLocator {
+                locator: ::types_storage::RelFileLocator {
                     spcOid: spc,
                     dbOid: db,
                     relNumber: relnum,
@@ -792,7 +792,7 @@ fn decode_change(payload: &[u8]) -> ReorderBufferChange {
 // Snapshot / invalidation logical encoding.
 // ---------------------------------------------------------------------------
 
-fn encode_snapshot(buf: &mut Vec<u8>, snap: &snapshot::SnapshotData) {
+fn encode_snapshot(buf: &mut Vec<u8>, snap: &::snapshot::SnapshotData) {
     put_u32(buf, snapshot_type_to_u32(snap.snapshot_type));
     put_u32(buf, snap.xmin);
     put_u32(buf, snap.xmax);
@@ -810,7 +810,7 @@ fn encode_snapshot(buf: &mut Vec<u8>, snap: &snapshot::SnapshotData) {
     put_u32(buf, snap.speculativeToken);
 }
 
-fn decode_snapshot(r: &mut Reader) -> snapshot::SnapshotData {
+fn decode_snapshot(r: &mut Reader) -> ::snapshot::SnapshotData {
     let snapshot_type = u32_to_snapshot_type(r.u32());
     let xmin = r.u32();
     let xmax = r.u32();
@@ -831,13 +831,13 @@ fn decode_snapshot(r: &mut Reader) -> snapshot::SnapshotData {
     let curcid = r.u32();
     let speculative_token = r.u32();
 
-    snapshot::SnapshotData {
+    ::snapshot::SnapshotData {
         snapshot_type,
         // C: the on-disk snapshot's vistest pointer is meaningless after restore
         // (it pointed into the original backend's shared state) and is unused by
         // a historic decoding snapshot. `GlobalVisStateHandle::new(0)` is the C
         // NULL, the faithful restored value.
-        vistest: snapshot::snapshot::GlobalVisStateHandle::new(0),
+        vistest: ::snapshot::snapshot::GlobalVisStateHandle::new(0),
         xmin,
         xmax,
         xip,
@@ -859,8 +859,8 @@ fn decode_snapshot(r: &mut Reader) -> snapshot::SnapshotData {
 }
 
 /// `SnapshotType` as a `u32` discriminant for the wire format.
-fn snapshot_type_to_u32(t: snapshot::SnapshotType) -> u32 {
-    use snapshot::SnapshotType as T;
+fn snapshot_type_to_u32(t: ::snapshot::SnapshotType) -> u32 {
+    use ::snapshot::SnapshotType as T;
     match t {
         T::SNAPSHOT_MVCC => 0,
         T::SNAPSHOT_SELF => 1,
@@ -871,8 +871,8 @@ fn snapshot_type_to_u32(t: snapshot::SnapshotType) -> u32 {
         T::SNAPSHOT_NON_VACUUMABLE => 6,
     }
 }
-fn u32_to_snapshot_type(v: u32) -> snapshot::SnapshotType {
-    use snapshot::SnapshotType as T;
+fn u32_to_snapshot_type(v: u32) -> ::snapshot::SnapshotType {
+    use ::snapshot::SnapshotType as T;
     match v {
         0 => T::SNAPSHOT_MVCC,
         1 => T::SNAPSHOT_SELF,
@@ -885,16 +885,16 @@ fn u32_to_snapshot_type(v: u32) -> snapshot::SnapshotType {
     }
 }
 
-fn encode_inval(m: &types_storage::sinval::SharedInvalidationMessage) -> Vec<u8> {
+fn encode_inval(m: &::types_storage::sinval::SharedInvalidationMessage) -> Vec<u8> {
     // SharedInvalidationMessage is the fixed 16-byte C union image; round-trip it
     // through the type's own native (native-endian) wire codec.
     m.to_wire_bytes().to_vec()
 }
 
-fn decode_inval(raw: &[u8]) -> types_storage::sinval::SharedInvalidationMessage {
-    let arr: [u8; types_storage::sinval::SHARED_INVALIDATION_MESSAGE_SIZE] =
+fn decode_inval(raw: &[u8]) -> ::types_storage::sinval::SharedInvalidationMessage {
+    let arr: [u8; ::types_storage::sinval::SHARED_INVALIDATION_MESSAGE_SIZE] =
         raw.try_into().expect("16-byte SharedInvalidationMessage image");
-    types_storage::sinval::SharedInvalidationMessage::from_wire_bytes(arr)
+    ::types_storage::sinval::SharedInvalidationMessage::from_wire_bytes(arr)
         .expect("recognized SI message id")
 }
 
@@ -914,8 +914,8 @@ mod tests {
     //! need no fd / slot / wal_segment_size seams installed.
     use super::*;
     use crate::SnapshotData;
-    use snapshot::snapshot::{GlobalVisStateHandle, SnapshotType};
-    use types_storage::sinval::{SharedInvalSnapshotMsg, SharedInvalidationMessage};
+    use ::snapshot::snapshot::{GlobalVisStateHandle, SnapshotType};
+    use ::types_storage::sinval::{SharedInvalSnapshotMsg, SharedInvalidationMessage};
 
     fn rt(change: ReorderBufferChange) -> ReorderBufferChange {
         decode_change(&encode_change(&change))
@@ -941,7 +941,7 @@ mod tests {
             action: ReorderBufferChangeType::Insert,
             origin_id: 7,
             data: ReorderBufferChangeData::Tp {
-                rlocator: types_storage::RelFileLocator {
+                rlocator: ::types_storage::RelFileLocator {
                     spcOid: 11,
                     dbOid: 22,
                     relNumber: 33,

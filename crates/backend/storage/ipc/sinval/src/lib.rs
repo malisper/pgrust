@@ -32,7 +32,7 @@ use core::ptr::NonNull;
 use std::cell::RefCell;
 
 use s_lock::{s_lock, s_unlock};
-use utils_error::elog;
+use ::utils_error::elog;
 
 use transam_xact_seams as xact;
 use latch_seams as latch;
@@ -43,11 +43,11 @@ use lwlock_seams as lwlock;
 use inval_seams as inval;
 use init_small_seams as init_small;
 
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 use types_error::{PgError, PgResult, DEBUG4, PANIC};
-use types_storage::sinval::{SharedInvalCatcacheMsg, SharedInvalidationMessage};
-use types_storage::storage::Spinlock;
-use types_core::ProcNumber;
+use ::types_storage::sinval::{SharedInvalCatcacheMsg, SharedInvalidationMessage};
+use ::types_storage::storage::Spinlock;
+use ::types_core::ProcNumber;
 use types_storage::{
     LWLockMode, ProcSignalReason, NUM_AUXILIARY_PROCS, SINVAL_READ_LOCK, SINVAL_WRITE_LOCK,
 };
@@ -64,8 +64,8 @@ const RECEIVE_BUFFER_PLACEHOLDER: SharedInvalidationMessage =
         hashValue: 0,
     });
 
-type LocalTransactionId = types_core::LocalTransactionId;
-const InvalidLocalTransactionId: LocalTransactionId = types_core::xact::InvalidLocalTransactionId;
+type LocalTransactionId = ::types_core::LocalTransactionId;
+const InvalidLocalTransactionId: LocalTransactionId = ::types_core::xact::InvalidLocalTransactionId;
 
 // ===========================================================================
 // sinvaladt.c — configurable parameters (sinvaladt.c:129-134)
@@ -548,11 +548,11 @@ fn num_proc_state_slots() -> PgResult<usize> {
 }
 
 /// `SharedInvalShmemSize` (sinvaladt.c:217) — return shared-memory space needed.
-pub fn SharedInvalShmemSize() -> PgResult<types_core::Size> {
+pub fn SharedInvalShmemSize() -> PgResult<::types_core::Size> {
     sinval_shmem_size_for_slots(num_proc_state_slots()?)
 }
 
-fn sinval_shmem_size_for_slots(slots: usize) -> PgResult<types_core::Size> {
+fn sinval_shmem_size_for_slots(slots: usize) -> PgResult<::types_core::Size> {
     // size = offsetof(SISeg, procState);
     let size = proc_state_offset();
     // size = add_size(size, mul_size(sizeof(ProcState), NumProcStateSlots));

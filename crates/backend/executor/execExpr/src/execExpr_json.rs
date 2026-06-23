@@ -6,8 +6,8 @@
 //! (`JSON_VALUE`/`JSON_QUERY`/`JSON_EXISTS`). Reached from the core
 //! `ExecInitExprRec` `T_JsonExpr` arm.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, JsonExprState, JsonExprStateId,
     JsonPathVariableState, ResultCellId,
@@ -29,7 +29,7 @@ fn new_json_state<'mcx>(
     js: JsonExprState<'mcx>,
 ) -> PgResult<JsonExprStateId> {
     if state.json_states.states.is_none() {
-        state.json_states.states = Some(mcx::vec_with_capacity_in(mcx, 1)?);
+        state.json_states.states = Some(::mcx::vec_with_capacity_in(mcx, 1)?);
     }
     let states = state.json_states.states.as_mut().unwrap();
     let id = JsonExprStateId(states.len() as u32);
@@ -80,7 +80,7 @@ pub(crate) fn exec_init_json_expr<'mcx>(
             jsexpr: jsexpr.clone(),
             formatted_expr_cell,
             pathspec_cell,
-            args: mcx::vec_with_capacity_in(mcx, jsexpr.passing_values.len())?,
+            args: ::mcx::vec_with_capacity_in(mcx, jsexpr.passing_values.len())?,
             error_cell,
             empty_cell,
             jump_empty: -1,
@@ -88,7 +88,7 @@ pub(crate) fn exec_init_json_expr<'mcx>(
             jump_eval_coercion: -1,
             jump_end: -1,
             input_fcinfo: None,
-            escontext: types_error::SoftErrorContext::default(),
+            escontext: ::types_error::SoftErrorContext::default(),
         },
     )?;
 
@@ -211,7 +211,7 @@ pub(crate) fn exec_init_json_expr<'mcx>(
             lsyscache_seams::get_type_input_info::call(returning.typid)?;
         let finfo = fmgr_seams::fmgr_info::call(mcx, typinput)?;
         // InitFunctionCallInfoData(*fcinfo, finfo, 3, InvalidOid, NULL, escontext);
-        let fcinfo = mcx::alloc_in(
+        let fcinfo = ::mcx::alloc_in(
             mcx,
             ::nodes::fmgr::FunctionCallInfoBaseData {
                 flinfo: Some(finfo),
@@ -414,7 +414,7 @@ fn new_json_coercion_cache<'mcx>(
     state: &mut ExprState<'mcx>,
 ) -> PgResult<::nodes::execexpr::JsonCoercionCacheId> {
     if state.json_coercion_caches.caches.is_none() {
-        state.json_coercion_caches.caches = Some(mcx::vec_with_capacity_in(mcx, 1)?);
+        state.json_coercion_caches.caches = Some(::mcx::vec_with_capacity_in(mcx, 1)?);
     }
     let caches = state.json_coercion_caches.caches.as_mut().unwrap();
     let id = ::nodes::execexpr::JsonCoercionCacheId(caches.len() as u32);
@@ -505,8 +505,8 @@ pub(crate) fn exec_init_xml_expr<'mcx>(
     // Compile each named arg into a fresh cell, recording its cell id and its
     // exprType (needed for the XMLFOREST/XMLELEMENT value mapping).
     let (named_arg_cells, named_arg_types) = if nnamed != 0 {
-        let mut cells = mcx::vec_with_capacity_in(mcx, nnamed)?;
-        let mut types = mcx::vec_with_capacity_in(mcx, nnamed)?;
+        let mut cells = ::mcx::vec_with_capacity_in(mcx, nnamed)?;
+        let mut types = ::mcx::vec_with_capacity_in(mcx, nnamed)?;
         for e in &xexpr.named_args {
             let cell = new_result_cell(mcx, state)?;
             let ti = nodeFuncs_seams::expr_type_info::call(e)?;
@@ -521,7 +521,7 @@ pub(crate) fn exec_init_xml_expr<'mcx>(
 
     // Compile each positional arg into a fresh cell.
     let arg_cells = if nargs != 0 {
-        let mut cells = mcx::vec_with_capacity_in(mcx, nargs)?;
+        let mut cells = ::mcx::vec_with_capacity_in(mcx, nargs)?;
         for e in &xexpr.args {
             let cell = new_result_cell(mcx, state)?;
             exec_init_expr_rec(mcx, e, state, cell)?;
@@ -610,13 +610,13 @@ pub(crate) fn exec_init_json_constructor<'mcx>(
             .map(|f| f.format_type == JsonFormatType::JS_FORMAT_JSONB)
             .unwrap_or(false);
 
-        let mut arg_values: mcx::PgVec<'mcx, DatumV<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, nargs)?;
-        let mut arg_nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, nargs)?;
-        let mut arg_types: mcx::PgVec<'mcx, types_core::primitive::Oid> =
-            mcx::vec_with_capacity_in(mcx, nargs)?;
-        let mut arg_cells: mcx::PgVec<'mcx, Option<ResultCellId>> =
-            mcx::vec_with_capacity_in(mcx, nargs)?;
+        let mut arg_values: ::mcx::PgVec<'mcx, DatumV<'mcx>> =
+            ::mcx::vec_with_capacity_in(mcx, nargs)?;
+        let mut arg_nulls: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, nargs)?;
+        let mut arg_types: ::mcx::PgVec<'mcx, types_core::primitive::Oid> =
+            ::mcx::vec_with_capacity_in(mcx, nargs)?;
+        let mut arg_cells: ::mcx::PgVec<'mcx, Option<ResultCellId>> =
+            ::mcx::vec_with_capacity_in(mcx, nargs)?;
 
         for arg in &ctor.args {
             let typid = nodeFuncs_seams::expr_type_info::call(arg)?.typid;
@@ -645,8 +645,8 @@ pub(crate) fn exec_init_json_constructor<'mcx>(
             // scalar constructor's per-arg category/outfuncid cache cannot be
             // built. The eval path raises FEATURE_NOT_SUPPORTED for SCALAR; we
             // leave the cache empty here (the eval never reads it).
-            let mut cache: mcx::PgVec<'mcx, JsonArgTypeCache> =
-                mcx::vec_with_capacity_in(mcx, nargs)?;
+            let mut cache: ::mcx::PgVec<'mcx, JsonArgTypeCache> =
+                ::mcx::vec_with_capacity_in(mcx, nargs)?;
             for _ in 0..nargs {
                 cache.push(JsonArgTypeCache::default());
             }
@@ -673,7 +673,7 @@ pub(crate) fn exec_init_json_constructor<'mcx>(
             resvalue: resv,
             resnull: resv,
             d: ExprEvalStepData::JsonConstructor {
-                jcstate: Some(mcx::alloc_in(mcx, jcstate)?),
+                jcstate: Some(::mcx::alloc_in(mcx, jcstate)?),
             },
         };
         expr_eval_push_step(mcx, state, scratch)?;

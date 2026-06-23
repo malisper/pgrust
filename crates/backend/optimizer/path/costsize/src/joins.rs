@@ -3,10 +3,10 @@
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{Cost, Oid, Selectivity};
-use types_error::PgResult;
-use pathnodes::optimizer_plan::{JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors};
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::{Cost, Oid, Selectivity};
+use ::types_error::PgResult;
+use ::pathnodes::optimizer_plan::{JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors};
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     HashPath, JoinType, MergePath, NestPath, Path, PathId, PathKey, PathNode, PlannerInfo, RelId,
     Relids, RinfoId, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
@@ -64,7 +64,7 @@ pub fn exec_supports_mark_restore(root: &PlannerInfo, path: PathId) -> bool {
     } else if pathtype == nodes::T_CustomScan {
         match pathnode {
             PathNode::CustomPath(cp) => {
-                cp.flags & pathnodes::CUSTOMPATH_SUPPORT_MARK_RESTORE != 0
+                cp.flags & ::pathnodes::CUSTOMPATH_SUPPORT_MARK_RESTORE != 0
             }
             other => panic!("castNode(CustomPath, pathnode) failed: {other:?}"),
         }
@@ -1043,25 +1043,25 @@ pub fn final_cost_hashjoin<'mcx>(
 fn get_leftop(
     mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
-    clause: pathnodes::NodeId,
-) -> pathnodes::NodeId {
+    clause: ::pathnodes::NodeId,
+) -> ::pathnodes::NodeId {
     op_arg(mcx, root, clause, 0)
 }
 /// `get_rightop((Expr *) clause)` (nodeFuncs.c) — analogous, `lsecond(op->args)`.
 fn get_rightop(
     mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
-    clause: pathnodes::NodeId,
-) -> pathnodes::NodeId {
+    clause: ::pathnodes::NodeId,
+) -> ::pathnodes::NodeId {
     op_arg(mcx, root, clause, 1)
 }
 /// Intern `op->args[i]` of the OpExpr `clause` into the node arena.
 fn op_arg(
     mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
-    clause: pathnodes::NodeId,
+    clause: ::pathnodes::NodeId,
     i: usize,
-) -> pathnodes::NodeId {
+) -> ::pathnodes::NodeId {
     use ::nodes::primnodes::Expr;
     // Deep-copy the operand into the node arena via clone_in (the derived
     // `Expr::clone` panics on an owned-subtree child — a hash clause operand may
@@ -1545,4 +1545,4 @@ fn JoinCostWorkspace_default() -> JoinCostWorkspace {
 }
 
 #[allow(unused_imports)]
-use pathnodes::Relids as _Relids;
+use ::pathnodes::Relids as _Relids;

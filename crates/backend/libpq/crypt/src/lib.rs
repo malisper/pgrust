@@ -31,9 +31,9 @@
 
 use core::cell::Cell;
 
-use utils_error::ereport;
-use authid::PasswordType;
-use types_core::primitive::TimestampTz;
+use ::utils_error::ereport;
+use ::authid::PasswordType;
+use ::types_core::primitive::TimestampTz;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_WARNING_DEPRECATED_FEATURE,
     ERROR, WARNING,
@@ -42,7 +42,7 @@ use types_error::{
 use crypt_seams as crypt_seams;
 use timestamp_seams as timestamp_seams;
 use syscache_seams as syscache_seams;
-use cache::syscache::RolePasswordLookup;
+use ::cache::syscache::RolePasswordLookup;
 
 mod wire;
 pub use wire::init_seams;

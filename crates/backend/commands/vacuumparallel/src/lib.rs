@@ -61,20 +61,20 @@ use core::cell::RefCell;
 use std::collections::BTreeMap;
 use std::thread_local;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERROR};
 
-use types_core::instrument::{BufferUsage, WalUsage};
-use types_core::Oid;
+use ::types_core::instrument::{BufferUsage, WalUsage};
+use ::types_core::Oid;
 use types_dsa::{DsaHandle, DsaPointer};
-use execparallel::ParallelContextHandle;
-use types_storage::buf::BufferAccessStrategy;
-use types_storage::lock::{NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
-use types_storage::storage::LWTRANCHE_PARALLEL_VACUUM_DSA;
-use types_vacuum::vacuumlazy::{
+use ::execparallel::ParallelContextHandle;
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_storage::lock::{NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
+use ::types_storage::storage::LWTRANCHE_PARALLEL_VACUUM_DSA;
+use ::types_vacuum::vacuumlazy::{
     ParallelVacuumInit, ParallelVacuumInitArgs, ParallelVacuumStateHandle, TidStore,
 };
-use types_vacuum::vacuumparallel::{
+use ::types_vacuum::vacuumparallel::{
     IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo, VacuumSharedCostState,
 };
 use alloc::sync::Arc;
@@ -92,11 +92,11 @@ use relcache_seams as relcache_sx;
 use tidstore as tidstore;
 use instrument as instrument;
 use support as buffer_support;
-use lmgr_proc::proc_misc;
-use postgres::globals as tcop;
-use init_small::globals as initglobals;
+use ::lmgr_proc::proc_misc;
+use ::postgres::globals as tcop;
+use ::init_small::globals as initglobals;
 use status as activity_status;
-use activity_small::backend_progress as activity_progress;
+use ::activity_small::backend_progress as activity_progress;
 
 // =======================================================================
 // vacuumparallel.c constants.
@@ -1592,7 +1592,7 @@ fn install_pv_outward_seams() {
     // worker creates its OWN ring sized from the DSM-shared `ring_nbuffers`.
     vac::get_access_strategy_with_size_basvac::set(|ring_size_kb| {
         buffer_support::get_access_strategy_with_size(
-            types_storage::buf::BufferAccessStrategyType::BasVacuum,
+            ::types_storage::buf::BufferAccessStrategyType::BasVacuum,
             ring_size_kb,
         )
     });
@@ -1607,7 +1607,7 @@ fn install_pv_outward_seams() {
     // VACUUM (`ExecVacuum`) creates the one shared `vac_strategy` ring.
     vac::get_access_strategy_with_size::set(|ring_size_kb| {
         buffer_support::get_access_strategy_with_size(
-            types_storage::buf::BufferAccessStrategyType::BasVacuum,
+            ::types_storage::buf::BufferAccessStrategyType::BasVacuum,
             ring_size_kb,
         )
     });

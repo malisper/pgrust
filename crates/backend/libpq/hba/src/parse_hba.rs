@@ -3,7 +3,7 @@
 //!
 //! Ported from `src/backend/libpq/hba.c` (lines 1327-2524).
 
-use ifaddr::AddressFamily;
+use ::ifaddr::AddressFamily;
 use types_error::{ErrorLevel, PgResult};
 use net::{
     clientCertCA, clientCertCN, clientCertDN, clientCertFull, ctHost, ctHostGSS, ctHostNoGSS,
@@ -22,8 +22,8 @@ use crate::{
 };
 
 /// Make a numeric-host `getaddrinfo` (AI_NUMERICHOST, AF_UNSPEC) hint.
-fn numeric_host_hint() -> net::AddrInfoHint {
-    net::AddrInfoHint {
+fn numeric_host_hint() -> ::net::AddrInfoHint {
+    ::net::AddrInfoHint {
         flags: libc::AI_NUMERICHOST,
         family: libc::AF_UNSPEC,
         socktype: 0,
@@ -264,7 +264,7 @@ pub fn parse_hba_line(
             let hint = numeric_host_hint();
             let mcx = MemCtx::new("parse_hba_line/addr");
             let _ = mcx; // ip allocates into Vec, no mcx needed
-            let mut gai_result: Vec<net::PgAddrInfo> = Vec::new();
+            let mut gai_result: Vec<::net::PgAddrInfo> = Vec::new();
             let ret =
                 ip::pg_getaddrinfo_all(Some(addr_part), None, &hint, &mut gai_result);
             if ret == 0 && !gai_result.is_empty() {
@@ -315,7 +315,7 @@ pub fn parse_hba_line(
                     f if f == libc::AF_INET6 => AddressFamily::Inet6,
                     _ => AddressFamily::Other,
                 };
-                match ifaddr::pg_sockaddr_cidr_mask(Some(cidr_bits), fam) {
+                match ::ifaddr::pg_sockaddr_cidr_mask(Some(cidr_bits), fam) {
                     Ok(mask_ip) => {
                         let mask_sa = ipaddr_to_sockaddr(&mask_ip);
                         parsedline.mask = mask_sa.addr;
@@ -372,7 +372,7 @@ pub fn parse_hba_line(
                 let mstr = String::from_utf8_lossy(tok_str(mtoken)).into_owned();
 
                 let hint = numeric_host_hint();
-                let mut gai_result: Vec<net::PgAddrInfo> = Vec::new();
+                let mut gai_result: Vec<::net::PgAddrInfo> = Vec::new();
                 let ret = ip::pg_getaddrinfo_all(Some(&mstr), None, &hint, &mut gai_result);
                 if ret != 0 || gai_result.is_empty() {
                     report_config(
@@ -869,17 +869,17 @@ pub fn parse_hba_line(
 
 // --- views over the addr/mask byte buffers (for ss_family) -----------------
 
-fn addr_view(p: &HbaLine) -> net::SockAddr {
-    net::SockAddr { addr: p.addr, salen: p.addrlen as u32 }
+fn addr_view(p: &HbaLine) -> ::net::SockAddr {
+    ::net::SockAddr { addr: p.addr, salen: p.addrlen as u32 }
 }
-fn mask_view(p: &HbaLine) -> net::SockAddr {
-    net::SockAddr { addr: p.mask, salen: p.masklen as u32 }
+fn mask_view(p: &HbaLine) -> ::net::SockAddr {
+    ::net::SockAddr { addr: p.mask, salen: p.masklen as u32 }
 }
 /// `parsedline->addr.ss_family` even before addrlen is set (for cidr mask): the
 /// family is encoded in the stored bytes; use addrlen if set, else probe the
 /// raw family.
-fn sockaddr_view(p: &HbaLine) -> net::SockAddr {
-    net::SockAddr {
+fn sockaddr_view(p: &HbaLine) -> ::net::SockAddr {
+    ::net::SockAddr {
         addr: p.addr,
         salen: if p.addrlen > 0 {
             p.addrlen as u32
@@ -1128,12 +1128,12 @@ pub(crate) fn parse_hba_auth_opt(
         };
         // For each entry in the list, translate it.
         for srv in &parsed {
-            let hint = net::AddrInfoHint {
+            let hint = ::net::AddrInfoHint {
                 flags: 0,
                 family: libc::AF_UNSPEC,
                 socktype: libc::SOCK_DGRAM,
             };
-            let mut gai_result: Vec<net::PgAddrInfo> = Vec::new();
+            let mut gai_result: Vec<::net::PgAddrInfo> = Vec::new();
             let ret = ip::pg_getaddrinfo_all(Some(srv), None, &hint, &mut gai_result);
             if ret != 0 || gai_result.is_empty() {
                 report_config(
@@ -1251,7 +1251,7 @@ pub(crate) fn parse_hba_auth_opt(
 /// the `ldapurl` not-supported report (no errcontext, matching C).
 fn report_config_feature(elevel: ErrorLevel, msg: String) -> PgResult<()> {
     crate::ereport(elevel)
-        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(msg)
         .finish(crate::here("parse_hba_auth_opt"))
 }

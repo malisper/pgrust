@@ -9,9 +9,9 @@
 //! it as a plain stack local ([`Bookkeeping`]) and threads it through these
 //! seams by value / `&mut` — no opaque token, no registry (C uses none here).
 
-use types_core::instrument::{instr_time, BufferUsage};
-use types_error::PgResult;
-use types_explain::ExplainState;
+use ::types_core::instrument::{instr_time, BufferUsage};
+use ::types_error::PgResult;
+use ::types_explain::ExplainState;
 use ::nodes::ddlnodes::ExecuteStmt;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::Node;

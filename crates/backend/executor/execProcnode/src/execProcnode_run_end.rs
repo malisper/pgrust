@@ -13,7 +13,7 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::PgBox;
+use ::mcx::PgBox;
 use types_error::{PgError, PgResult};
 use nodes::{EStateData, PlanStateNode, SlotId};
 

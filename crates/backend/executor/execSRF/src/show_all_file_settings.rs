@@ -10,8 +10,8 @@
 //! (sourcefile/name/setting/error text via `cstring_to_text`, sourceline/seqno
 //! int4, applied bool).
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use types_error::{PgResult, DEBUG3};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;

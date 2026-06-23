@@ -13,7 +13,7 @@
 //! type-erased handle the bulk-write owner downcasts (mirroring
 //! `nodes::Tuplesortstate`). C's `BulkWriteBuffer` (a pointer to a
 //! writer-owned `BLCKSZ` page the caller fills in place) is the safe owned page
-//! workspace [`mcx::PgVec<u8>`]: `smgr_bulk_get_buf` hands back a zeroed page,
+//! workspace [`::mcx::PgVec<u8>`]: `smgr_bulk_get_buf` hands back a zeroed page,
 //! the caller fills it, and `smgr_bulk_write` takes ownership back.
 
 #![allow(non_snake_case)]
@@ -21,9 +21,9 @@
 use core::any::Any;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::{BlockNumber, ForkNumber};
-use types_error::PgResult;
-use rel::Relation;
+use ::types_core::primitive::{BlockNumber, ForkNumber};
+use ::types_error::PgResult;
+use ::rel::Relation;
 
 /// `BulkWriteState *` (`storage/bulk_write.h`) — opaque to every consumer. The
 /// owned model type-erases the real bulk-write engine state; only the
@@ -40,7 +40,7 @@ impl<'mcx> BulkWriteState<'mcx> {
     /// state in `mcx` and type-erase it. Only the bulk-write owner (or a test
     /// mock) calls this. Fallible: allocating.
     pub fn new<T: Any>(mcx: Mcx<'mcx>, state: T) -> PgResult<Self> {
-        let boxed = mcx::alloc_in(mcx, state)?;
+        let boxed = ::mcx::alloc_in(mcx, state)?;
         let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
         // SAFETY: `ptr` came from `into_raw_with_allocator` with `alloc`; the
         // cast only attaches the `dyn Any` vtable (no `CoerceUnsized` on stable).

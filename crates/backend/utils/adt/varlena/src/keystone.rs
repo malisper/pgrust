@@ -34,7 +34,7 @@
 //! - [`NAMEDATALEN`] / [`VARHDRSZ`] / [`TEXTBUFLEN`] constants.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use mbutils_seams as mb;
 
@@ -186,7 +186,7 @@ pub fn cstring_to_text_with_len<'mcx>(
     let n = len.max(0) as usize;
     // C: palloc(len + VARHDRSZ); SET_VARSIZE; memcpy(VARDATA, s, len).
     // The carrier is the header-less payload, so we copy exactly `len` bytes.
-    mcx::slice_in(mcx, &s[..n])
+    ::mcx::slice_in(mcx, &s[..n])
 }
 
 /// C: `text_to_cstring(const text *t)` — a NUL-terminated copy of a `text`
@@ -194,7 +194,7 @@ pub fn cstring_to_text_with_len<'mcx>(
 /// so this is a `palloc(len + 1)` + `memcpy` + trailing NUL, charged to `mcx`.
 /// The returned vector includes the trailing NUL byte (C's cstring contract).
 pub fn text_to_cstring<'mcx>(mcx: Mcx<'mcx>, t: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, t.len() + 1)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, t.len() + 1)?;
     out.extend_from_slice(t);
     out.push(0);
     Ok(out)
@@ -254,7 +254,7 @@ pub fn text_length(payload: &[u8]) -> PgResult<i32> {
 pub fn text_catenate<'mcx>(mcx: Mcx<'mcx>, t1: &[u8], t2: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     // C clamps negative VARSIZE_ANY_EXHDR to 0; a Rust slice length is never
     // negative, so the clamp is a no-op here.
-    let mut out = mcx::vec_with_capacity_in(mcx, t1.len() + t2.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, t1.len() + t2.len())?;
     out.extend_from_slice(t1);
     out.extend_from_slice(t2);
     Ok(out)
@@ -288,10 +288,10 @@ pub fn charlen_to_bytelen(p: &[u8], n: i32) -> PgResult<i32> {
 /// families. (REAL: pure guard, no external owner.)
 pub fn check_collation_set(collid: types_core::Oid) -> PgResult<()> {
     if !types_core::OidIsValid(collid) {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "could not determine which collation to use for string comparison",
         )
-        .with_sqlstate(types_error::ERRCODE_INDETERMINATE_COLLATION)
+        .with_sqlstate(::types_error::ERRCODE_INDETERMINATE_COLLATION)
         .with_hint("Use the COLLATE clause to set the collation explicitly."));
     }
     Ok(())

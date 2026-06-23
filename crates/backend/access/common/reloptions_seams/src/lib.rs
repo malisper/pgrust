@@ -9,8 +9,8 @@
 //! fixed-size options struct by value (C: a freshly palloc'd `bytea *`).
 //! `Err` carries the C `ereport(ERROR)` surface of option validation.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use types_reloptions::{local_relopts, AttributeOpts, RdOptions, TableSpaceOpts};
 
 seam_core::seam!(
@@ -87,7 +87,7 @@ seam_core::seam!(
     /// `procinfo` and the option-validation `ereport(ERROR)`s are carried on
     /// `Err`; OOM from the built varlena too.
     pub fn index_build_local_reloptions<'mcx>(
-        procinfo: types_core::fmgr::FmgrInfo,
+        procinfo: ::types_core::fmgr::FmgrInfo,
         attoptions: types_tuple::Datum<'mcx>,
         validate: bool,
     ) -> PgResult<Option<std::vec::Vec<u8>>>

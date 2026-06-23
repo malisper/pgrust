@@ -15,15 +15,15 @@
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox};
 use types_error::{PgError, PgResult};
 use nodes::{Bitmapset, EStateData, SlotId};
-use types_tuple::attmap::AttrMap;
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::{
+use ::types_tuple::attmap::AttrMap;
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::{
     FirstLowInvalidHeapAttributeNumber, HeapTupleData, TupleDesc, TupleDescData,
 };
-use types_tuple::tupconvert::TupleConversionMap;
+use ::types_tuple::tupconvert::TupleConversionMap;
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple, HeapTupleError};
-use nodes_core::bitmapset::{bms_add_member, bms_is_member};
+use ::nodes_core::bitmapset::{bms_add_member, bms_is_member};
 
 use crate::attmap::{build_attrmap_by_name_if_req, build_attrmap_by_position};
 
@@ -148,8 +148,8 @@ pub fn execute_attr_map_tuple<'mcx>(
     let deformed = heap_deform_tuple(mcx, tuple, indesc, data)?;
 
     let in_n = indesc.natts as usize + 1;
-    let mut invalues: mcx::PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, in_n)?;
-    let mut inisnull: mcx::PgVec<'mcx, bool> = vec_with_capacity_in(mcx, in_n)?;
+    let mut invalues: ::mcx::PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, in_n)?;
+    let mut inisnull: ::mcx::PgVec<'mcx, bool> = vec_with_capacity_in(mcx, in_n)?;
     invalues.push(Datum::null()); // the NULL entry
     inisnull.push(true);
     for (value, isnull) in deformed.iter() {
@@ -162,8 +162,8 @@ pub fn execute_attr_map_tuple<'mcx>(
     debug_assert_eq!(attr_map.attnums.len() as i32, outdesc.natts);
 
     let maplen = attr_map.attnums.len();
-    let mut outvalues: mcx::PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, maplen)?;
-    let mut outisnull: mcx::PgVec<'mcx, bool> = vec_with_capacity_in(mcx, maplen)?;
+    let mut outvalues: ::mcx::PgVec<'mcx, Datum<'mcx>> = vec_with_capacity_in(mcx, maplen)?;
+    let mut outisnull: ::mcx::PgVec<'mcx, bool> = vec_with_capacity_in(mcx, maplen)?;
 
     for &attnum in attr_map.attnums.iter() {
         // int j = attrMap->attnums[i]; outvalues[i] = invalues[j];
@@ -204,8 +204,8 @@ pub fn execute_attr_map_slot<'mcx>(
     // context (C shares the pointer; the owned model duplicates it,
     // behavior-preserving since the transpose only reads the map).
     let mcx = estate.es_query_cxt;
-    let attnums = mcx::slice_in(mcx, &attr_map.attnums)?;
-    let owned = mcx::alloc_in(mcx, AttrMap { attnums })?;
+    let attnums = ::mcx::slice_in(mcx, &attr_map.attnums)?;
+    let owned = ::mcx::alloc_in(mcx, AttrMap { attnums })?;
     execTuples_seams::execute_attr_map_slot_explicit::call(
         estate, &owned, in_slot, out_slot,
     )

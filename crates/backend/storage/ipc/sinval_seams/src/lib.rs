@@ -4,9 +4,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
-use types_core::LocalTransactionId;
-use types_error::PgResult;
-use types_storage::SharedInvalidationMessage;
+use ::types_core::LocalTransactionId;
+use ::types_error::PgResult;
+use ::types_storage::SharedInvalidationMessage;
 
 seam_core::seam!(
     /// `SendSharedInvalidMessages(msgs, n)` (sinval.c): enqueue `msgs` on the
@@ -60,12 +60,12 @@ seam_core::seam!(
     /// `SharedInvalShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn shared_inval_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn shared_inval_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
     /// `SharedInvalShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
     /// this subsystem's shared-memory structures. `Err` carries the C
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn shared_inval_shmem_init() -> types_error::PgResult<()>
+    pub fn shared_inval_shmem_init() -> ::types_error::PgResult<()>
 );

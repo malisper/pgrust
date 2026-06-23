@@ -4,13 +4,13 @@
 //! These are pure lookups over the static [`OBJECT_PROPERTY`] table; the bodies
 //! are scaffolded as mirror-and-panic and filled in the F0 keystone fill stage.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::parsenodes::ObjectType;
 
 use crate::tables::{ObjectPropertyType, OBJECT_PROPERTY};
 
-use types_error::PgError;
+use ::types_error::PgError;
 use ::nodes::parsenodes::OBJECT_TABLE;
 
 /// `get_object_property_data(Oid class_id)` (objectaddress.c 2755): find the

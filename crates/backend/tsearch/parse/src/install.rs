@@ -21,9 +21,9 @@
 
 use core::ffi::c_int;
 
-use tsearchcmds_seams::LexDescr;
+use ::tsearchcmds_seams::LexDescr;
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// `F_PRSD_LEXTYPE` (`catalog/pg_proc.dat`): the default word parser's
 /// `prsd_lextype` method OID.
@@ -37,9 +37,9 @@ const F_PRSD_LEXTYPE: Oid = 3721;
 fn call_parser_lextype<'mcx>(
     mcx: Mcx<'mcx>,
     lextype_oid: Oid,
-) -> types_error::PgResult<PgVec<'mcx, LexDescr>> {
-    use utils_error::ereport;
-    use types_error::ERROR;
+) -> ::types_error::PgResult<PgVec<'mcx, LexDescr>> {
+    use ::utils_error::ereport;
+    use ::types_error::ERROR;
 
     if lextype_oid != F_PRSD_LEXTYPE {
         return Err(ereport(ERROR)
@@ -50,7 +50,7 @@ fn call_parser_lextype<'mcx>(
     }
 
     let descrs = crate::wparser_def::prsd_lextype();
-    let mut out: PgVec<'mcx, LexDescr> = mcx::vec_with_capacity_in(mcx, descrs.len())?;
+    let mut out: PgVec<'mcx, LexDescr> = ::mcx::vec_with_capacity_in(mcx, descrs.len())?;
     for (lexid, alias, _descr) in descrs {
         out.push(LexDescr { lexid, alias });
     }
@@ -113,7 +113,7 @@ fn is_w_xdigit(wc: u32) -> i32 {
 /// handle the seam does not carry). On an invalid multibyte sequence
 /// (`mbstowcs` returns `(size_t) -1`) the C code reports an
 /// `ERRCODE_CHARACTER_NOT_IN_REPERTOIRE` error; we mirror that as an `Err`.
-fn char2wchar(from: alloc::vec::Vec<u8>) -> types_error::PgResult<alloc::vec::Vec<u32>> {
+fn char2wchar(from: alloc::vec::Vec<u8>) -> ::types_error::PgResult<alloc::vec::Vec<u32>> {
     // The libc `mbstowcs` binding is not exposed by the `libc` crate on every
     // target, so declare it directly (the symbol is in the C standard library
     // this build already links). `(size_t) -1` signals a bad multibyte
@@ -151,8 +151,8 @@ fn char2wchar(from: alloc::vec::Vec<u8>) -> types_error::PgResult<alloc::vec::Ve
 /// path `prsd_start` takes when `database_ctype_is_c()`. Convert the
 /// database-encoding bytes to `pg_wchar` code points (no trailing NUL),
 /// charged to a scratch context (the result is copied into the owned `Vec`).
-fn pg_mb2wchar_with_len(from: alloc::vec::Vec<u8>) -> types_error::PgResult<alloc::vec::Vec<u32>> {
-    let ctx = mcx::MemoryContext::new("pg_mb2wchar_with_len");
+fn pg_mb2wchar_with_len(from: alloc::vec::Vec<u8>) -> ::types_error::PgResult<alloc::vec::Vec<u32>> {
+    let ctx = ::mcx::MemoryContext::new("pg_mb2wchar_with_len");
     let mcx = ctx.mcx();
     let wide = mbutils::pg_mb2wchar_with_len(mcx, &from)?;
     Ok(wide.iter().map(|w| *w as u32).collect())
@@ -160,8 +160,8 @@ fn pg_mb2wchar_with_len(from: alloc::vec::Vec<u8>) -> types_error::PgResult<allo
 
 /// `ereport(ERROR, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, "invalid multibyte
 /// character for locale")` — the C `char2wchar` bad-sequence path.
-fn invalid_multibyte_error() -> types_error::PgError {
-    use utils_error::ereport;
+fn invalid_multibyte_error() -> ::types_error::PgError {
+    use ::utils_error::ereport;
     use types_error::{error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERROR};
     ereport(ERROR)
         .errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
@@ -223,7 +223,7 @@ pub fn init_seams() {
 
     // getTokenTypes's lextype dispatch (OidFunctionCall1 of the parser's
     // lextype method) — the default word parser's prsd_lextype.
-    tsearchcmds_seams::call_parser_lextype::set(call_parser_lextype);
+    ::tsearchcmds_seams::call_parser_lextype::set(call_parser_lextype);
 
     // The remaining seams stay at their loud-panic default until their owners
     // land: `ts_execute_hl` / `ts_execute_locations_hl` (the generic TS_execute

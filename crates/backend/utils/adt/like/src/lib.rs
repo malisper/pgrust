@@ -45,7 +45,7 @@ use pgstrcasecmp::{pg_ascii_tolower, pg_tolower};
 use types_core::{Oid, C_COLLATION_OID};
 use types_error::{make_sqlstate, PgError, PgResult, SqlState};
 use locale::{CollProvider, PgLocaleStruct};
-use types_wchar::encoding::PG_UTF8;
+use ::types_wchar::encoding::PG_UTF8;
 
 /// `#define LIKE_TRUE 1` -- they match.
 pub const LIKE_TRUE: i32 = 1;
@@ -326,7 +326,7 @@ fn match_text(
             // the subpattern.
             let buf: PgVec<'_, u8>;
             let subpat: &[u8] = if found_escape {
-                let mut b = mcx::vec_with_capacity_in(mcx, p1_idx)?;
+                let mut b = ::mcx::vec_with_capacity_in(mcx, p1_idx)?;
                 let mut j = 0usize;
                 while j < p1_idx {
                     if p[j] == b'\\' {
@@ -480,7 +480,7 @@ fn do_like_escape<'mcx>(
     let elen = e.len();
 
     // Worst-case pattern growth is 2x.
-    let mut r = mcx::vec_with_capacity_in(mcx, pat.len().saturating_mul(2))?;
+    let mut r = ::mcx::vec_with_capacity_in(mcx, pat.len().saturating_mul(2))?;
 
     if elen == 0 {
         // No escape character is wanted.  Double any backslashes in the pattern

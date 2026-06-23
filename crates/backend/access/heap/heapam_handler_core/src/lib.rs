@@ -24,21 +24,21 @@
 use mcx::{Mcx, PgVec};
 use std::boxed::Box;
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use rel::Relation;
-use types_scan::sdir::{ForwardScanDirection, ScanDirection};
+use ::rel::Relation;
+use ::types_scan::sdir::{ForwardScanDirection, ScanDirection};
 use types_slot::{SlotData, TupleSlotKind};
-use types_tableam::amopaque::{tags, AmOpaque, AmOpaqueTag, AmOpaqueType};
-use types_tableam::relscan::{
+use ::types_tableam::amopaque::{tags, AmOpaque, AmOpaqueTag, AmOpaqueType};
+use ::types_tableam::relscan::{
     ParallelBlockTableScanDescData, ParallelTableScanDesc, TableScanDesc, TableScanDescData,
 };
-use types_tableam::scankey::ScanKeyData;
-use types_tableam::tableam::{
+use ::types_tableam::scankey::ScanKeyData;
+use ::types_tableam::tableam::{
     BulkInsertStateData, IndexFetchTableData, LockTupleMode, LockWaitPolicy, Snapshot,
     TM_FailureData, TM_Result, TU_UpdateIndexes, TableAmRoutine,
 };
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 pub mod analyze_scan;
 pub mod build_scan;
@@ -54,7 +54,7 @@ use execTuples_seams as slot_seam;
 /// `ItemPointerGetBlockNumber(tid)` (itemptr.h).
 fn item_pointer_get_block_number(
     tid: &ItemPointerData,
-) -> types_core::primitive::BlockNumber {
+) -> ::types_core::primitive::BlockNumber {
     page::ItemPointerGetBlockNumber(tid)
 }
 
@@ -88,12 +88,12 @@ impl<'mcx> AmOpaqueType<'mcx> for IndexFetchHeapData {
 fn erase_index_fetch<'mcx>(
     mcx: Mcx<'mcx>,
     hscan: IndexFetchHeapData,
-) -> PgResult<mcx::PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx>> {
-    let boxed: mcx::PgBox<'mcx, IndexFetchHeapData> = mcx::alloc_in(mcx, hscan)?;
-    let (ptr, alloc) = mcx::PgBox::into_raw_with_allocator(boxed);
+) -> PgResult<::mcx::PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx>> {
+    let boxed: ::mcx::PgBox<'mcx, IndexFetchHeapData> = ::mcx::alloc_in(mcx, hscan)?;
+    let (ptr, alloc) = ::mcx::PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn AmOpaque` vtable.
-    Ok(unsafe { mcx::PgBox::from_raw_in(ptr as *mut (dyn AmOpaque<'mcx> + 'mcx), alloc) })
+    Ok(unsafe { ::mcx::PgBox::from_raw_in(ptr as *mut (dyn AmOpaque<'mcx> + 'mcx), alloc) })
 }
 
 /// Downcast `IndexFetchTableData.am_private` to `&mut IndexFetchHeapData`
@@ -153,8 +153,8 @@ fn heapam_scan_getnextslot<'mcx>(
 /// `.scan_set_tidrange = heap_set_tidrange`.
 fn heapam_scan_set_tidrange<'mcx>(
     scan: &mut TableScanDescData<'mcx>,
-    mintid: &types_tuple::heaptuple::ItemPointerData,
-    maxtid: &types_tuple::heaptuple::ItemPointerData,
+    mintid: &::types_tuple::heaptuple::ItemPointerData,
+    maxtid: &::types_tuple::heaptuple::ItemPointerData,
 ) -> PgResult<()> {
     heapam::scan::heap_set_tidrange(scan, mintid, maxtid);
     Ok(())
@@ -186,7 +186,7 @@ fn heapam_scan_bitmap_next_tuple<'mcx>(
 fn heapam_scan_sample_next_block<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
-    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+    scanstate: &mut dyn ::types_tableam::tableam::SampleScanDriver,
 ) -> PgResult<bool> {
     heapam::scan::heapam_scan_sample_next_block(mcx, scan, scanstate)
 }
@@ -195,7 +195,7 @@ fn heapam_scan_sample_next_block<'mcx>(
 fn heapam_scan_sample_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
-    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+    scanstate: &mut dyn ::types_tableam::tableam::SampleScanDriver,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     heapam::scan::heapam_scan_sample_next_tuple(mcx, scan, scanstate, slot)
@@ -395,8 +395,8 @@ fn heapam_index_fetch_tuple<'mcx>(
 fn heapam_index_delete_tuples<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    delstate: &mut types_tableam::tableam::TmIndexDeleteOp<'mcx>,
-) -> PgResult<types_core::TransactionId> {
+    delstate: &mut ::types_tableam::tableam::TmIndexDeleteOp<'mcx>,
+) -> PgResult<::types_core::TransactionId> {
     heapam_seams::heap_index_delete_tuples::call(mcx, rel, delstate)
 }
 
@@ -469,7 +469,7 @@ fn heapam_tuple_insert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
 ) -> PgResult<()> {
@@ -481,7 +481,7 @@ fn heapam_tuple_insert_speculative<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
     spec_token: u32,
@@ -505,7 +505,7 @@ fn heapam_multi_insert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slots: &mut [&mut SlotData<'mcx>],
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
 ) -> PgResult<()> {
@@ -517,7 +517,7 @@ fn heapam_tuple_delete<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     tid: &ItemPointerData,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     snapshot: &Snapshot,
     crosscheck: &Snapshot,
     wait: bool,
@@ -543,7 +543,7 @@ fn heapam_tuple_update<'mcx>(
     rel: &Relation<'mcx>,
     otid: &ItemPointerData,
     slot: &mut SlotData<'mcx>,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     snapshot: &Snapshot,
     crosscheck: &Snapshot,
     wait: bool,
@@ -573,7 +573,7 @@ fn heapam_tuple_lock<'mcx>(
     tid: &ItemPointerData,
     snapshot: &Snapshot,
     slot: &mut SlotData<'mcx>,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     mode: LockTupleMode,
     wait_policy: LockWaitPolicy,
     flags: u8,
@@ -634,7 +634,7 @@ const fn bitmaplen(natts: i32) -> i32 {
 
 /// `att_align_nominal(cur_offset, attalign)` (tupmacs.h) over an `i32` offset.
 fn att_align_nominal(cur_offset: i32, attalign: i8) -> i32 {
-    use types_tuple::heaptuple::{TYPALIGN_CHAR, TYPALIGN_DOUBLE, TYPALIGN_INT, TYPALIGN_SHORT};
+    use ::types_tuple::heaptuple::{TYPALIGN_CHAR, TYPALIGN_DOUBLE, TYPALIGN_INT, TYPALIGN_SHORT};
     let a = |to: i32| ((cur_offset + (to - 1)) / to) * to;
     if attalign == TYPALIGN_INT {
         a(4)
@@ -663,7 +663,7 @@ fn heapam_relation_needs_toast_table(rel: &Relation<'_>) -> PgResult<bool> {
         if att.attisdropped {
             continue;
         }
-        if att.attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL {
+        if att.attgenerated == ::types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL {
             continue;
         }
         data_length = att_align_nominal(data_length, att.attalign);
@@ -692,7 +692,7 @@ fn heapam_relation_needs_toast_table(rel: &Relation<'_>) -> PgResult<bool> {
         return Ok(true); // any unlimited-length attrs?
     }
     let tuple_length = maxalign(
-        types_tuple::heap::SizeofHeapTupleHeader as i32 + bitmaplen(tupdesc.natts),
+        ::types_tuple::heap::SizeofHeapTupleHeader as i32 + bitmaplen(tupdesc.natts),
     ) + maxalign(data_length);
     Ok(tuple_length > heaptoast::TOAST_TUPLE_THRESHOLD as i32)
 }
@@ -796,7 +796,7 @@ fn table_parallelscan_reinitialize(
 fn release_and_read_buffer<'mcx>(
     buffer: types_storage::buf::Buffer,
     relation: &Relation<'mcx>,
-    block_num: types_core::primitive::BlockNumber,
+    block_num: ::types_core::primitive::BlockNumber,
 ) -> PgResult<types_storage::buf::Buffer> {
     bufmgr_seam::release_and_read_buffer::call(buffer, relation, block_num)
 }
@@ -834,11 +834,11 @@ fn rint(x: f64) -> f64 {
 fn table_relation_estimate_size(
     relid: Oid,
     attr_widths: Option<&mut [i32]>,
-) -> PgResult<(types_core::primitive::BlockNumber, f64, f64)> {
+) -> PgResult<(::types_core::primitive::BlockNumber, f64, f64)> {
     // The estimator reads pg_class stats + RelationGetNumberOfBlocks; the
     // relation handle is opened from a scratch context (the callback's borrowed
     // `Relation` lifetime).
-    let scratch = mcx::MemoryContext::new("table_relation_estimate_size");
+    let scratch = ::mcx::MemoryContext::new("table_relation_estimate_size");
     let data = relcache_seams::relation_id_get_relation::call(
         scratch.mcx(),
         relid,
@@ -876,7 +876,7 @@ fn table_block_relation_estimate_size(
     attr_widths: Option<&mut [i32]>,
     overhead_bytes_per_tuple: usize,
     usable_bytes_per_page: usize,
-) -> PgResult<(types_core::primitive::BlockNumber, f64, f64)> {
+) -> PgResult<(::types_core::primitive::BlockNumber, f64, f64)> {
     // it should have storage, so we can call the smgr
     // curpages = RelationGetNumberOfBlocks(rel);
     let mut curpages =

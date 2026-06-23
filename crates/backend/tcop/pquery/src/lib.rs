@@ -29,7 +29,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION, ERROR,
 };
 
-use types_dest::CommandDest;
+use ::types_dest::CommandDest;
 use ::nodes::copy_query::Query;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::{
@@ -49,15 +49,15 @@ use portal::{
     PORTAL_MULTI_QUERY, PORTAL_ONE_MOD_WITH, PORTAL_ONE_RETURNING, PORTAL_ONE_SELECT, PORTAL_READY,
     PORTAL_UTIL_SELECT,
 };
-use types_scan::sdir::{
+use ::types_scan::sdir::{
     ScanDirection, ScanDirectionIsForward, ScanDirectionIsNoMovement, BackwardScanDirection,
     ForwardScanDirection, NoMovementScanDirection,
 };
 use types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_REWIND};
-use snapshot::SnapshotData;
+use ::snapshot::SnapshotData;
 
 use execMain as execMain;
-use cmdtag::initialize_query_completion;
+use ::cmdtag::initialize_query_completion;
 use portalmem as portalmem;
 
 use transam_xact_seams as xact_seam;
@@ -663,7 +663,7 @@ pub fn portal_start(
     debug_assert!(portal.is_valid());
     debug_assert_eq!(
         portalmem::portal_get_status(portal),
-        portal::PORTAL_DEFINED
+        ::portal::PORTAL_DEFINED
     );
 
     // PG_TRY()/PG_CATCH(): with_portal_globals saves/sets/restores ActivePortal
@@ -2103,7 +2103,7 @@ pub fn init_seams() {
         Ok(portalmem::with_active_portal(|portal| {
             portal.and_then(|p| {
                 let b = p.borrow();
-                if b.status == portal::PORTAL_ACTIVE {
+                if b.status == ::portal::PORTAL_ACTIVE {
                     b.sourceText.clone()
                 } else {
                     None

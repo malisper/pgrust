@@ -10,7 +10,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use types_pgstat::activity_pgstat::PgStat_Kind;
+use ::types_pgstat::activity_pgstat::PgStat_Kind;
 
 use crate::kind_info::{KindInfoBuilder, PgStat_KindInfoFull, PgStat_KindInfoTable};
 

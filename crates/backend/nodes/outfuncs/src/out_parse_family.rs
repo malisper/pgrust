@@ -27,7 +27,7 @@ use alloc::string::String;
 
 use core::fmt::Write as _;
 
-use mcx::PgBox;
+use ::mcx::PgBox;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::Expr;
 use ::nodes::rawnodes::A_Expr_Kind;
@@ -193,7 +193,7 @@ fn write_opt_box_expr_list_field(
 fn write_pgstring_list_field(
     buf: &mut String,
     name: &str,
-    list: Option<&[mcx::PgString<'_>]>,
+    list: Option<&[::mcx::PgString<'_>]>,
 ) {
     let _ = write!(buf, " :{} ", name);
     match list {
@@ -223,7 +223,7 @@ fn write_pgstring_list_field(
 fn write_opt_pgstring_list_field(
     buf: &mut String,
     name: &str,
-    list: Option<&[Option<mcx::PgString<'_>>]>,
+    list: Option<&[Option<::mcx::PgString<'_>>]>,
 ) {
     let _ = write!(buf, " :{} ", name);
     match list {

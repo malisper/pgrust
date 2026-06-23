@@ -4,7 +4,7 @@
 //! `TerminateChildren`, `CountChildren`.
 //!
 //! The active child list (`dlist_head ActiveChildList`, owned by `pmchild.c`)
-//! is walked through [`pmchild::ActiveChildListSnapshot`],
+//! is walked through [`::pmchild::ActiveChildListSnapshot`],
 //! which snapshots the live [`PMChild`]s in `dlist_foreach` order; the
 //! postmaster filters and signals/counts over that snapshot exactly as C
 //! iterates the list. Per-entry `bkend_type` relabeling (a backend that became

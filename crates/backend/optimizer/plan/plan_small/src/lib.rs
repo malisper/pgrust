@@ -42,11 +42,11 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 use pathnodes::{NodeId, PlannerInfo, RelId, RTEKind};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 
 use allpaths as allpaths;
 use equivclass as equivclass;
@@ -348,7 +348,7 @@ pub fn query_planner<'mcx>(
         None => false,
     };
     if !ok {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "failed to construct the join relation",
         ));
     }

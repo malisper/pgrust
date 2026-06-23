@@ -28,7 +28,7 @@
 //! `nodeSubplan`-style), with the shared store driven through sort-storage's
 //! real tuplestore API.
 
-use mcx::PgBox;
+use ::mcx::PgBox;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execnodes::CteSharedState;
 use ::nodes::nodectescan::{CteScan, CteScanState};
@@ -36,7 +36,7 @@ use nodes::{EStateData, PlanStateNode, SlotId, Tuplestorestate};
 
 use execMain_seams as seams;
 use execTuples_seams as execTuples;
-use sort_storage::tuplestore;
+use ::sort_storage::tuplestore;
 
 fn internal(msg: &str) -> PgError {
     PgError::error(msg).with_sqlstate(ERRCODE_INTERNAL_ERROR)

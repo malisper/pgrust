@@ -2,8 +2,8 @@
 //! `access/gist_private.h`, `access/gistxlog.h`) on the real value model.
 //!
 //! The C structs are translated field-for-field, re-homed onto the owned
-//! memory model: `MemoryContext` becomes [`mcx::Mcx`], `TupleDesc` becomes the
-//! owned [`types_tuple::heaptuple::TupleDesc`], `FmgrInfo[INDEX_MAX_KEYS]`
+//! memory model: `MemoryContext` becomes [`::mcx::Mcx`], `TupleDesc` becomes the
+//! owned [`::types_tuple::heaptuple::TupleDesc`], `FmgrInfo[INDEX_MAX_KEYS]`
 //! becomes a [`Vec`] (one entry per index attribute), `Page` bytes are reached
 //! through the bufmgr seam rather than carried as raw pointers, and
 //! `palloc`'d working arrays become [`Vec`].
@@ -17,16 +17,16 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::{
+use ::types_core::primitive::{
     uint16, BlockNumber, OffsetNumber, Oid, Size, XLogRecPtr,
 };
-use types_core::xact::FullTransactionId;
+use ::types_core::xact::FullTransactionId;
 use ::nodes::nodehash::BufFile;
-use types_storage::storage::Buffer;
-use types_tableam::genam::IndexOrderByDistance;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::{ItemPointerData, TupleDesc};
+use ::types_storage::storage::Buffer;
+use ::types_tableam::genam::IndexOrderByDistance;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::{ItemPointerData, TupleDesc};
 
 // ---------------------------------------------------------------------------
 // gist.h — amproc indexes
@@ -170,15 +170,15 @@ pub struct GISTSTATE<'mcx> {
     pub fetchTupdesc: TupleDesc<'mcx>,
 
     /// `FmgrInfo consistentFn[INDEX_MAX_KEYS]` (one per index attribute).
-    pub consistentFn: Vec<types_core::fmgr::FmgrInfo>,
-    pub unionFn: Vec<types_core::fmgr::FmgrInfo>,
-    pub compressFn: Vec<types_core::fmgr::FmgrInfo>,
-    pub decompressFn: Vec<types_core::fmgr::FmgrInfo>,
-    pub penaltyFn: Vec<types_core::fmgr::FmgrInfo>,
-    pub picksplitFn: Vec<types_core::fmgr::FmgrInfo>,
-    pub equalFn: Vec<types_core::fmgr::FmgrInfo>,
-    pub distanceFn: Vec<types_core::fmgr::FmgrInfo>,
-    pub fetchFn: Vec<types_core::fmgr::FmgrInfo>,
+    pub consistentFn: Vec<::types_core::fmgr::FmgrInfo>,
+    pub unionFn: Vec<::types_core::fmgr::FmgrInfo>,
+    pub compressFn: Vec<::types_core::fmgr::FmgrInfo>,
+    pub decompressFn: Vec<::types_core::fmgr::FmgrInfo>,
+    pub penaltyFn: Vec<::types_core::fmgr::FmgrInfo>,
+    pub picksplitFn: Vec<::types_core::fmgr::FmgrInfo>,
+    pub equalFn: Vec<::types_core::fmgr::FmgrInfo>,
+    pub distanceFn: Vec<::types_core::fmgr::FmgrInfo>,
+    pub fetchFn: Vec<::types_core::fmgr::FmgrInfo>,
 
     /// `Oid supportCollation[INDEX_MAX_KEYS]` — collations passed to support fns.
     pub supportCollation: Vec<Oid>,
@@ -233,15 +233,15 @@ pub struct GISTSearchItem<'mcx> {
 /// tuple rather than an index page.
 #[inline]
 pub fn GISTSearchItemIsHeap(item: &GISTSearchItem<'_>) -> bool {
-    item.blkno == types_core::InvalidBlockNumber
+    item.blkno == ::types_core::InvalidBlockNumber
 }
 
 /// `GISTScanOpaqueData` is the concrete type stored in `IndexScanDescData.opaque`
-/// (C's `void *opaque`); the A0 [`types_tableam::amopaque::AmOpaque`] carrier
+/// (C's `void *opaque`); the A0 [`::types_tableam::amopaque::AmOpaque`] carrier
 /// downcasts to it in the GiST scan callbacks. The tag is defined centrally in
-/// `types_tableam::amopaque::tags::GIST_SCAN`.
-impl<'mcx> types_tableam::amopaque::AmOpaqueType<'mcx> for GISTScanOpaqueData<'mcx> {
-    const TAG: types_tableam::amopaque::AmOpaqueTag = types_tableam::amopaque::tags::GIST_SCAN;
+/// `::types_tableam::amopaque::tags::GIST_SCAN`.
+impl<'mcx> ::types_tableam::amopaque::AmOpaqueType<'mcx> for GISTScanOpaqueData<'mcx> {
+    const TAG: ::types_tableam::amopaque::AmOpaqueTag = ::types_tableam::amopaque::tags::GIST_SCAN;
 }
 
 /// The pairing-heap comparator function-pointer type for the
@@ -550,7 +550,7 @@ pub struct GiSTOptions {
 #[cfg(test)]
 mod buildbuffers_tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn new_node_buffer(blkno: BlockNumber, level: i32) -> SharedNodeBuffer {
         Rc::new(RefCell::new(GISTNodeBuffer {

@@ -5,8 +5,8 @@
 //! reads only these fields off the returned values.
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 use crate::nodelimit::LimitOption;
 use crate::nodes::{CmdType, NodePtr};
@@ -252,21 +252,21 @@ impl<'mcx> Query<'mcx> {
             isReturn: self.isReturn,
             cteList: copy_node_vec(&self.cteList, mcx)?,
             rtable: {
-                let mut out = mcx::vec_with_capacity_in(mcx, self.rtable.len())?;
+                let mut out = ::mcx::vec_with_capacity_in(mcx, self.rtable.len())?;
                 for r in self.rtable.iter() {
                     out.push(r.clone_in(mcx)?);
                 }
                 out
             },
             rteperminfos: {
-                let mut out = mcx::vec_with_capacity_in(mcx, self.rteperminfos.len())?;
+                let mut out = ::mcx::vec_with_capacity_in(mcx, self.rteperminfos.len())?;
                 for r in self.rteperminfos.iter() {
                     out.push(r.clone_in(mcx)?);
                 }
                 out
             },
             jointree: match &self.jointree {
-                Some(j) => Some(mcx::alloc_in(mcx, j.clone_in(mcx)?)?),
+                Some(j) => Some(::mcx::alloc_in(mcx, j.clone_in(mcx)?)?),
                 None => None,
             },
             mergeActionList: copy_node_vec(&self.mergeActionList, mcx)?,
@@ -275,7 +275,7 @@ impl<'mcx> Query<'mcx> {
             targetList: copy_te_vec(&self.targetList, mcx)?,
             r#override: self.r#override,
             onConflict: match &self.onConflict {
-                Some(o) => Some(mcx::alloc_in(mcx, o.clone_in(mcx)?)?),
+                Some(o) => Some(::mcx::alloc_in(mcx, o.clone_in(mcx)?)?),
                 None => None,
             },
             returningOldAlias: match &self.returningOldAlias {
@@ -301,7 +301,7 @@ impl<'mcx> Query<'mcx> {
             rowMarks: copy_node_vec(&self.rowMarks, mcx)?,
             setOperations: copy_opt_node(&self.setOperations, mcx)?,
             constraintDeps: {
-                let mut out = mcx::vec_with_capacity_in(mcx, self.constraintDeps.len())?;
+                let mut out = ::mcx::vec_with_capacity_in(mcx, self.constraintDeps.len())?;
                 for x in self.constraintDeps.iter() {
                     out.push(*x);
                 }
@@ -321,7 +321,7 @@ fn copy_opt_node<'b>(
     mcx: Mcx<'b>,
 ) -> PgResult<Option<NodePtr<'b>>> {
     match n {
-        Some(n) => Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
+        Some(n) => Ok(Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -333,7 +333,7 @@ fn copy_opt_expr<'b>(
     mcx: Mcx<'b>,
 ) -> PgResult<Option<PgBox<'b, Expr<'b>>>> {
     match e {
-        Some(e) => Ok(Some(mcx::alloc_in(mcx, e.clone_in(mcx)?)?)),
+        Some(e) => Ok(Some(::mcx::alloc_in(mcx, e.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -343,9 +343,9 @@ fn copy_node_vec<'b>(
     v: &PgVec<'_, NodePtr<'_>>,
     mcx: Mcx<'b>,
 ) -> PgResult<PgVec<'b, NodePtr<'b>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for n in v.iter() {
-        out.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+        out.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
     Ok(out)
 }
@@ -355,7 +355,7 @@ fn copy_te_vec<'b>(
     v: &PgVec<'_, TargetEntry<'_>>,
     mcx: Mcx<'b>,
 ) -> PgResult<PgVec<'b, TargetEntry<'b>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for te in v.iter() {
         out.push(te.clone_in(mcx)?);
     }

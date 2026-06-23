@@ -20,8 +20,8 @@
 //! expressible on the scalar/by-ref fmgr boundary — they are dispatched through
 //! the GIN opclass support-proc family instead.
 
-use datum::Datum;
-use types_error::PgResult;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     // ordinary 4-byte header skips VARHDRSZ.
     match image.first() {
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
-        _ => &image[datum::varlena::VARHDRSZ..],
+        _ => &image[::datum::varlena::VARHDRSZ..],
     }
 }
 
@@ -111,7 +111,7 @@ fn builtin(
 /// fmgr-frame call site is ever added, pointing at the dispatch seam to use.
 fn fc_gin_tsvector_via_dispatch(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let foid = fcinfo.flinfo.as_ref().map(|fi| fi.fn_oid).unwrap_or(0);
-    Err(types_error::PgError::error(format!(
+    Err(::types_error::PgError::error(format!(
         "GIN tsvector_ops support function (OID {foid}) must be invoked through \
          the typed opclass dispatch (gin_extract_value / gin_extract_query / \
          gin_consistent_call_{{bool,tri}} seams), not the fmgr frame; the owned \

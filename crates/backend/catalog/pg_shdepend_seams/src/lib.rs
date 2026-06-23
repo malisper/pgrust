@@ -10,10 +10,10 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgString, PgVec};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::catalog_shdepend::SharedDependencyType;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::catalog_shdepend::SharedDependencyType;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::parsenodes::DropBehavior;
 
 seam_core::seam!(

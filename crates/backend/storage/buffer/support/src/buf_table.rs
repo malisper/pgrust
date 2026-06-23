@@ -39,10 +39,10 @@
 //! appropriate `BufferMappingLock` partition lock, exactly as `buf_table.c`
 //! requires.
 
-use types_core::Size;
+use ::types_core::Size;
 use types_error::{PgError, PgResult};
-use types_storage::buf::buftag;
-use types_storage::NUM_BUFFER_PARTITIONS;
+use ::types_storage::buf::buftag;
+use ::types_storage::NUM_BUFFER_PARTITIONS;
 
 /// `get_hash_value(SharedBufHash, tagPtr)` (BufTableHashCode) — the hash code of
 /// a buffer tag. The five fields are serialized in declaration order (matching
@@ -407,7 +407,7 @@ pub fn BufTableShmemSize(size: i32) -> Size {
 mod tests {
     use super::*;
     use crate::test_support::install_test_seams;
-    use types_core::primitive::ForkNumber;
+    use ::types_core::primitive::ForkNumber;
 
     fn tag(rel: u32, blk: u32) -> buftag {
         buftag {

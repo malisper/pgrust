@@ -4,10 +4,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use tsearch::tsearch::{OP_AND, OP_NOT, OP_OR};
-use types_tuple::heaptuple::TSQUERYOID;
+use ::tsearch::tsearch::{OP_AND, OP_NOT, OP_OR};
+use ::types_tuple::heaptuple::TSQUERYOID;
 
 use postgres_seams as tcop;
 use spi_seams as spi;
@@ -20,7 +20,7 @@ use crate::util::{
 /// Build the empty-`tsquery` datum produced by C's `SET_VARSIZE(rewritten,
 /// HDRSIZETQ); rewritten->size = 0;`: an 8-byte varlena (header + `size = 0`).
 fn empty_tsquery() -> PgResult<Vec<u8>> {
-    let hdr = tsearch::tsearch::HDRSIZETQ;
+    let hdr = ::tsearch::tsearch::HDRSIZETQ;
     let mut out: Vec<u8> = Vec::new();
     out.try_reserve(hdr).map_err(|_| oom())?;
     out.resize(hdr, 0u8);
@@ -159,7 +159,7 @@ fn findeq<'mcx>(
             // pfree(matched) — `matched` drops at end of scope.
         }
     } else {
-        debug_assert!(node.valnode_type() == tsearch::tsearch::QI_VAL);
+        debug_assert!(node.valnode_type() == ::tsearch::tsearch::QI_VAL);
 
         if node.valcrc() != ex.valcrc() {
             return Ok(Some(node));

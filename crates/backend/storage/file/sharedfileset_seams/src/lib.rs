@@ -1,6 +1,6 @@
 //! Seam declarations for the `storage/file/sharedfileset.c` unit: the
 //! shared-temp-file directory protocol layered over a [`SharedFileSet`]
-//! (a [`FileSet`](types_storage::fileset::FileSet) plus refcount bookkeeping).
+//! (a [`FileSet`](::types_storage::fileset::FileSet) plus refcount bookkeeping).
 //! `nodeHashjoin.c`'s parallel DSM hooks drive `SharedFileSetInit` (leader),
 //! `SharedFileSetAttach` (worker) and `SharedFileSetDeleteAll` (rescan).
 //!
@@ -10,8 +10,8 @@
 
 #![allow(non_snake_case)]
 
-use execparallel::DsmSegmentHandle;
-use types_storage::fileset::SharedFileSet;
+use ::execparallel::DsmSegmentHandle;
+use ::types_storage::fileset::SharedFileSet;
 
 seam_core::seam!(
     /// `void SharedFileSetInit(SharedFileSet *fileset, dsm_segment *seg)`

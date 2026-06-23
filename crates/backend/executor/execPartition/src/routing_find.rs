@@ -3,13 +3,13 @@
 
 use mcx::{Mcx, PgString};
 use types_acl::{ACL_SELECT, ACLCHECK_OK, RLS_ENABLED};
-use types_core::primitive::{InvalidOid, OidIsValid};
+use ::types_core::primitive::{InvalidOid, OidIsValid};
 use types_tuple::heaptuple::Datum;
 use types_error::{PgResult, ERRCODE_CHECK_VIOLATION};
 use ::nodes::nodes::CmdType;
 use ::nodes::partition::PartitionStrategy;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
-use rel::Relation;
+use ::rel::Relation;
 
 use crate::{
     PartitionDispatchId, PartitionTupleRouting, PARTITION_CACHED_FIND_THRESHOLD,
@@ -111,7 +111,7 @@ pub fn ExecFindPartition<'mcx>(
                 ExecBuildSlotPartitionKeyDescription(mcx, rel.alias(), &values, &isnull, 64)?;
             // Assert(OidIsValid(RelationGetRelid(rel)));
             debug_assert!(OidIsValid(rel.rd_id));
-            let mut err = types_error::PgError::error(format!(
+            let mut err = ::types_error::PgError::error(format!(
                 "no partition of relation \"{}\" found for row",
                 rel.name()
             ))
@@ -339,7 +339,7 @@ fn dispatch_tupslot_id<'mcx>(
     // `MakeTupleTableSlot`) so a fresh pool entry per use carries no stale payload.
     let kind = slot.kind();
     let tupdesc = match slot.base().tts_tupleDescriptor.as_deref() {
-        Some(d) => Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
+        Some(d) => Some(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
         None => None,
     };
     let fresh = execTuples_seams::make_single_tuple_table_slot::call(
@@ -351,17 +351,17 @@ fn dispatch_tupslot_id<'mcx>(
 /// Copy an `AttrMap` into `mcx` so the estate can be re-borrowed mutably.
 fn clone_attrmap<'mcx>(
     mcx: Mcx<'mcx>,
-    map: &types_tuple::attmap::AttrMap<'_>,
-) -> PgResult<mcx::PgBox<'mcx, types_tuple::attmap::AttrMap<'mcx>>> {
-    let mut attnums = mcx::PgVec::new_in(mcx);
+    map: &::types_tuple::attmap::AttrMap<'_>,
+) -> PgResult<::mcx::PgBox<'mcx, ::types_tuple::attmap::AttrMap<'mcx>>> {
+    let mut attnums = ::mcx::PgVec::new_in(mcx);
     attnums
         .try_reserve(map.attnums.len())
-        .map_err(|_| mcx.oom(map.attnums.len() * core::mem::size_of::<types_core::AttrNumber>()))?;
+        .map_err(|_| mcx.oom(map.attnums.len() * core::mem::size_of::<::types_core::AttrNumber>()))?;
     for n in map.attnums.iter() {
         attnums.push(*n);
     }
-    mcx::PgBox::try_new_in(types_tuple::attmap::AttrMap { attnums }, mcx)
-        .map_err(|_| mcx.oom(core::mem::size_of::<types_tuple::attmap::AttrMap<'_>>()))
+    ::mcx::PgBox::try_new_in(::types_tuple::attmap::AttrMap { attnums }, mcx)
+        .map_err(|_| mcx.oom(core::mem::size_of::<::types_tuple::attmap::AttrMap<'_>>()))
 }
 
 /// `FormPartitionKeyDatum(pd, slot, estate, values, isnull)` — fill the
@@ -434,7 +434,7 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
             // if (partexpr_item == NULL) elog(ERROR, ...)
             let keystate_len = proute.partition_dispatch_info[dispatch].keystate.len();
             if partexpr_item >= keystate_len {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "wrong number of partition key expressions",
                 ));
             }
@@ -461,7 +461,7 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
     // if (partexpr_item != NULL) elog(ERROR, ...)
     let keystate_len = proute.partition_dispatch_info[dispatch].keystate.len();
     if partexpr_item < keystate_len {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "wrong number of partition key expressions",
         ));
     }

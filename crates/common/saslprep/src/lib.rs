@@ -29,9 +29,9 @@
 
 use unicode_norm_bitfields::{unicode_normalize, UNICODE_NFKC};
 use common_wchar::{pg_utf8_islegal, pg_utf_mblen_private};
-use mcx::Mcx;
-use types_error::PgResult;
-use types_wchar::pg_wchar;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::types_wchar::pg_wchar;
 
 mod tables;
 
@@ -281,7 +281,7 @@ fn utf8_leading_len(first: u8) -> usize {
 /// caller-owned `Vec` before it is dropped.
 pub fn init_seams() {
     scram_seams::pg_saslprep::set(|input| {
-        let cx = mcx::MemoryContext::new("SASLprep");
+        let cx = ::mcx::MemoryContext::new("SASLprep");
         match pg_saslprep(cx.mcx(), &input) {
             Ok(opt) => opt,
             // Backend OOM is `ereport(ERROR)`; the seam cannot carry an error,

@@ -20,7 +20,7 @@
 //! The C `JsObject` union holds a `JsonbContainer *` for the binary path; the
 //! repo `jsonb_util` field-lookup (`getKeyJsonValueFromContainer`) consumes
 //! container *bytes*, so the working object carrier here ([`JsObjectW`]) holds
-//! the container as a `&[u8]` slice rather than `types_jsonfuncs::JsObject`'s
+//! the container as a `&[u8]` slice rather than `::types_jsonfuncs::JsObject`'s
 //! `Box<JsonbContainer>`.
 
 #![allow(non_snake_case)]
@@ -35,10 +35,10 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use utils_error::ereport;
-use types_error::error::{
+use ::utils_error::ereport;
+use ::types_error::error::{
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERROR,
 };
@@ -46,7 +46,7 @@ use types_error::{PgError, PgResult, SoftErrorContext};
 
 use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::{
+use ::types_jsonb::jsonb::{
     is_a_jsonb_scalar, jbvType, json_container_is_array, json_container_is_object,
     json_container_is_scalar, json_container_size, JsonbIteratorToken, VARHDRSZ,
 };
@@ -56,29 +56,29 @@ use types_jsonfuncs::{
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::TypeFuncClass;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, TupleDescData, RECORDOID,
 };
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::Datum;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::Datum;
 
-use fmgr::boundary::FmgrOut;
+use ::fmgr::boundary::FmgrOut;
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple, HeapTupleGetDatum};
-use arrayfuncs::construct::{
+use ::arrayfuncs::construct::{
     accum_array_result, init_array_result, make_md_array_result,
 };
-use adt_json::escape_json_with_len;
+use ::adt_json::escape_json_with_len;
 use adt_jsonb::{JsonbToCString, JsonbUnquote};
 use jsonb_util::{
     getKeyJsonValueFromContainer, JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb,
 };
-use adt_numeric::io::numeric_out;
-use lsyscache::type_ as lsyscache_type;
-use cache_typcache::lookup_rowtype_tupdesc;
+use ::adt_numeric::io::numeric_out;
+use ::lsyscache::type_ as lsyscache_type;
+use ::cache_typcache::lookup_rowtype_tupdesc;
 use fmgr_core::{fmgr_info, input_function_call_safe_typed};
 use funcapi_seams as funcapi;
-use datum::array_build::ArrayBuildState;
+use ::datum::array_build::ArrayBuildState;
 
 /// `TYPTYPE_DOMAIN` (`pg_type.h`).
 const TYPTYPE_DOMAIN: u8 = b'd';
@@ -181,27 +181,27 @@ fn fmgr_out_to_datum<'mcx>(mcx: Mcx<'mcx>, out: FmgrOut<'mcx>) -> PgResult<Datum
     match out {
         FmgrOut::ByVal(d) => Ok(d),
         FmgrOut::Ref(payload) => match payload {
-            fmgr::boundary::RefPayload::Varlena(b) => {
-                let mut v = mcx::vec_with_capacity_in::<u8>(mcx, b.len())?;
+            ::fmgr::boundary::RefPayload::Varlena(b) => {
+                let mut v = ::mcx::vec_with_capacity_in::<u8>(mcx, b.len())?;
                 v.extend_from_slice(&b);
                 Ok(Datum::ByRef(v))
             }
-            fmgr::boundary::RefPayload::Cstring(s) => Ok(Datum::Cstring(s)),
+            ::fmgr::boundary::RefPayload::Cstring(s) => Ok(Datum::Cstring(s)),
             // A composite result reconstructs into the canonical `Composite`
             // arm from its flat HeapTupleHeader Datum image (the same mapping
             // the fmgr-core bridge `ref_out_to_datum` performs).
-            fmgr::boundary::RefPayload::Composite(image) => Ok(Datum::Composite(
-                types_tuple::heaptuple::FormedTuple::from_datum_image(
+            ::fmgr::boundary::RefPayload::Composite(image) => Ok(Datum::Composite(
+                ::types_tuple::heaptuple::FormedTuple::from_datum_image(
                     mcx, &image,
                 )?,
             )),
-            fmgr::boundary::RefPayload::Expanded(eo) => Ok(Datum::Expanded(eo)),
-            fmgr::boundary::RefPayload::Internal(state) => Ok(Datum::Internal(state)),
+            ::fmgr::boundary::RefPayload::Expanded(eo) => Ok(Datum::Expanded(eo)),
+            ::fmgr::boundary::RefPayload::Internal(state) => Ok(Datum::Internal(state)),
         },
     }
 }
 
-/// Bridge the canonical [`Datum`] to the bare-word `datum::Datum` the
+/// Bridge the canonical [`Datum`] to the bare-word `::datum::Datum` the
 /// `arrayfuncs.c` `ArrayBuildState` primitives consume. A by-value scalar
 /// carries its machine word directly. A by-reference element (varlena, fixed-len
 /// by-ref, or cstring) is a `Datum` whose word is a POINTER into a live image;
@@ -218,15 +218,15 @@ fn datum_to_bare_word<'mcx>(
     mcx: Mcx<'mcx>,
     d: Datum<'mcx>,
     disnull: bool,
-) -> PgResult<datum::datum::Datum> {
+) -> PgResult<::datum::datum::Datum> {
     // A SQL NULL element carries no payload word; accumArrayResult ignores the
     // value when `disnull`, so a zero word is correct (and matches C, which
     // passes the still-(Datum)0 element through on the null branch).
     if disnull {
-        return Ok(datum::datum::Datum::from_usize(0));
+        return Ok(::datum::datum::Datum::from_usize(0));
     }
     match d {
-        Datum::ByVal(w) => Ok(datum::datum::Datum::from_usize(w)),
+        Datum::ByVal(w) => Ok(::datum::datum::Datum::from_usize(w)),
         // By-reference: copy the verbatim image into `mcx` and hand back a
         // pointer word. `as_varlena_bytes` yields the flat image for
         // ByRef/Composite/Expanded; `Cstring` needs an explicit NUL terminator
@@ -234,17 +234,17 @@ fn datum_to_bare_word<'mcx>(
         Datum::Cstring(ref s) => {
             let mut bytes = s.clone().into_bytes();
             bytes.push(0);
-            let buf = mcx::slice_in(mcx, &bytes)?;
+            let buf = ::mcx::slice_in(mcx, &bytes)?;
             let ptr = buf.as_ptr() as usize;
             core::mem::forget(buf);
-            Ok(datum::datum::Datum::from_usize(ptr))
+            Ok(::datum::datum::Datum::from_usize(ptr))
         }
         ref other => {
             let bytes = other.as_varlena_bytes();
-            let buf = mcx::slice_in(mcx, bytes.as_ref())?;
+            let buf = ::mcx::slice_in(mcx, bytes.as_ref())?;
             let ptr = buf.as_ptr() as usize;
             core::mem::forget(buf);
-            Ok(datum::datum::Datum::from_usize(ptr))
+            Ok(::datum::datum::Datum::from_usize(ptr))
         }
     }
 }
@@ -956,7 +956,7 @@ fn populate_scalar<'mcx>(
                 && *type_ == JsonTokenType::JSON_TOKEN_STRING
             {
                 // make string into a valid JSON literal
-                let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, json.len() + 2)?;
+                let mut buf = ::mcx::vec_with_capacity_in::<u8>(mcx, json.len() + 2)?;
                 // The json text carrier has no explicit length (NUL-terminated
                 // model); C escape_json stops at NUL, escape_json_with_len uses
                 // len. Here the byte slice is the exact payload, so use the
@@ -1320,7 +1320,7 @@ fn datum_get_heap_tuple_header<'mcx>(
     mcx: Mcx<'mcx>,
     d: &Datum<'mcx>,
 ) -> PgResult<FormedTuple<'mcx>> {
-    heaptuple::DatumGetHeapTupleHeader(mcx, d)
+    ::heaptuple::DatumGetHeapTupleHeader(mcx, d)
 }
 
 // ===========================================================================

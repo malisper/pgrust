@@ -18,8 +18,8 @@
 //!     when those land; until then a call panics loudly, which is correct.
 
 use mcx::{Mcx, PgString};
-use types_core::UserAuth;
-use types_error::PgResult;
+use ::types_core::UserAuth;
+use ::types_error::PgResult;
 
 // ----------------------------------------------------------------------------
 // Inward: installed by backend-libpq-auth, consumed by postinit.

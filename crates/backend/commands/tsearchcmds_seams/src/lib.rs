@@ -11,10 +11,10 @@ extern crate alloc;
 use alloc::string::String;
 
 use mcx::{Mcx, PgVec};
-use cache::DefElemString;
-use define_seams::DefElemArg;
-use types_core::Oid;
-use types_error::PgResult;
+use ::cache::DefElemString;
+use ::define_seams::DefElemArg;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 /* ===========================================================================
  * Catalog-row snapshot carriers.

@@ -13,7 +13,7 @@ use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_amvalidate::index_amvalidate::{
     AmopRow, AmprocRow, OpFamilyOpFuncGroup,
 };
-use types_core::primitive::OidIsValid;
+use ::types_core::primitive::OidIsValid;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 
@@ -178,7 +178,7 @@ fn check_amproc_signature(
     }
 
     // proargtypes.values[i] — the function's declared argument types.
-    let scratch = mcx::MemoryContext::new("check_amproc_signature argtypes");
+    let scratch = ::mcx::MemoryContext::new("check_amproc_signature argtypes");
     let proargtypes = lsyscache::get_func_signature::call(scratch.mcx(), funcid)?;
 
     for i in 0..(maxargs as usize) {
@@ -219,7 +219,7 @@ fn check_amop_signature(
     let mut result = true;
 
     // tp = SearchSysCache1(OPEROID, ...); shouldn't be a miss in practice.
-    let scratch = mcx::MemoryContext::new("check_amop_signature");
+    let scratch = ::mcx::MemoryContext::new("check_amop_signature");
     let opform = match syscache::pg_operator_form::call(scratch.mcx(), opno)? {
         Some(f) => f,
         None => {
@@ -256,7 +256,7 @@ fn opclass_for_family_datatype(
 ) -> PgResult<Oid> {
     let mut result = InvalidOid;
 
-    let scratch = mcx::MemoryContext::new("opclass_for_family_datatype");
+    let scratch = ::mcx::MemoryContext::new("opclass_for_family_datatype");
     let opclist = syscache::search_opclass_list_by_am::call(scratch.mcx(), amoid)?;
 
     for &(oid, opcfamily, opcintype) in opclist.iter() {

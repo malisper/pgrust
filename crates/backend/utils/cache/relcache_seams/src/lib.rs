@@ -20,7 +20,7 @@ pub use relcache_entry::{
 
 /// `RewriteRule` (`rewrite/prs2lock.h`), re-projected into a per-query `'mcx`
 /// arena — the mcx-bound mirror of the relcache entry's `'static`
-/// [`relcache_entry::RewriteRule`].
+/// [`::relcache_entry::RewriteRule`].
 ///
 /// The cached entry holds its rule trees in the process-lifetime
 /// CacheMemoryContext (`Query<'static>`/`Node<'static>`), reachable only
@@ -50,7 +50,7 @@ pub struct RewriteRuleImage<'mcx> {
 
 /// `RuleLock` (`rewrite/prs2lock.h`), re-projected into a per-query `'mcx`
 /// arena — the mcx-bound mirror of the relcache entry's `'static`
-/// [`relcache_entry::RuleLock`], returned by [`relation_rules`]. As with
+/// [`::relcache_entry::RuleLock`], returned by [`relation_rules`]. As with
 /// the carrier, `numLocks` is implicit in `rules.len()`.
 pub struct RuleLockImage<'mcx> {
     /// `RewriteRule **rules` — the rules in `RelationBuildRuleLock` read order.
@@ -143,7 +143,7 @@ seam_core::seam!(
     pub fn relation_id_get_relation_shared(
         relation_id: types_core::primitive::Oid,
     ) -> types_error::PgResult<
-        Option<std::rc::Rc<std::cell::RefCell<relcache_entry::RelationData>>>,
+        Option<std::rc::Rc<std::cell::RefCell<::relcache_entry::RelationData>>>,
     >
 );
 
@@ -159,7 +159,7 @@ seam_core::seam!(
     pub fn relation_id_get_relation_cell(
         relation_id: types_core::primitive::Oid,
     ) -> types_error::PgResult<
-        Option<std::rc::Rc<std::cell::RefCell<relcache_entry::RelationData>>>,
+        Option<std::rc::Rc<std::cell::RefCell<::relcache_entry::RelationData>>>,
     >
 );
 
@@ -301,7 +301,7 @@ seam_core::seam!(
 /// `RelationGetIndexAttrBitmap` should return. Canonical definition lives in
 /// `types-relcache-entry` (the relcache entry-store vocabulary crate); both the
 /// owner and cross-crate callers name it from there.
-pub use relcache_entry::IndexAttrBitmapKind;
+pub use ::relcache_entry::IndexAttrBitmapKind;
 
 seam_core::seam!(
     /// `RelationGetIndexAttrBitmap(relation, attrKind)` (relcache.c): the set of
@@ -966,7 +966,7 @@ seam_core::seam!(
 
 /// `RowSecurityPolicy` (`rewrite/rowsecurity.h`), re-projected into a per-query
 /// `'mcx` arena — the mcx-bound mirror of the relcache entry's `'static`
-/// [`relcache_entry::RowSecurityPolicy`].
+/// [`::relcache_entry::RowSecurityPolicy`].
 ///
 /// The cached entry holds its policy quals in the process-lifetime
 /// CacheMemoryContext (`Node<'static>`), reachable only in-crate to the relcache
@@ -1063,7 +1063,7 @@ seam_core::seam!(
     /// static-data lookup); panics on an unknown `reltype` (a bootstrap bug).
     pub fn catalog_schema_attrs(
         reltype: types_core::primitive::Oid,
-    ) -> relcache_entry::BootstrapCatalogSchema
+    ) -> ::relcache_entry::BootstrapCatalogSchema
 );
 
 seam_core::seam!(

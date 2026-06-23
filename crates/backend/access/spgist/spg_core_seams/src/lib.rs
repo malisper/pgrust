@@ -26,8 +26,8 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use spgist::{
     spgChooseIn, spgChooseOut, spgConfigIn, spgConfigOut, spgInnerConsistentIn,
     spgInnerConsistentOut, spgLeafConsistentIn, spgLeafConsistentOut, spgPickSplitIn,
@@ -122,6 +122,6 @@ seam_core::seam!(
     /// `elog(ERROR, "wrong number of index expressions")` surface.
     pub fn get_index_input_type_expr(
         index_oid: Oid,
-        indexcol: types_core::primitive::AttrNumber,
+        indexcol: ::types_core::primitive::AttrNumber,
     ) -> PgResult<Oid>
 );

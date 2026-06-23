@@ -30,19 +30,19 @@
 #![allow(clippy::result_large_err)]
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_core::TransactionId;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_core::TransactionId;
 use types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNSAFE_NEW_ENUM_VALUE_USAGE, ERROR,
 };
-use utils_error::ereport;
-use types_catalog::pg_enum::EnumTupleData;
-use types_core::fmgr::NAMEDATALEN;
-use datum::datum::Datum;
-use types_scan::sdir::ScanDirection;
-use stringinfo::StringInfo;
+use ::utils_error::ereport;
+use ::types_catalog::pg_enum::EnumTupleData;
+use ::types_core::fmgr::NAMEDATALEN;
+use ::datum::datum::Datum;
+use ::types_scan::sdir::ScanDirection;
+use ::stringinfo::StringInfo;
 
 use pg_enum_seams as pg_enum_seams;
 use syscache_seams as syscache_seams;
@@ -51,7 +51,7 @@ use format_type_seams as format_type_seams;
 use procarray_seams as procarray_seams;
 use transam_seams as transam_seams;
 use pqformat as pqformat;
-use arrayfuncs::construct as arrayfuncs;
+use ::arrayfuncs::construct as arrayfuncs;
 
 pub mod boundary;
 pub mod fmgr_builtins;
@@ -421,7 +421,7 @@ fn enum_range_internal<'mcx>(
 /// `format_type_be(type_oid)` via the seam, in a scratch context (the
 /// diagnostic string is consumed into the owned `PgError` message immediately).
 fn format_type_be(type_oid: Oid) -> PgResult<String> {
-    let scratch = mcx::MemoryContext::new("enum format_type_be");
+    let scratch = ::mcx::MemoryContext::new("enum format_type_be");
     let s = format_type_seams::format_type_be::call(scratch.mcx(), type_oid)?;
     Ok(s.as_str().to_string())
 }
@@ -464,7 +464,7 @@ fn enum_contains_no_values(enumtypoid: Oid) -> PgResult<PgError> {
 /// C `errsave(escontext, (Datum) 0, ...)` — save a soft error to `escontext`
 /// (returning `Ok`) or raise it hard when there is none.
 fn errsave(escontext: Option<&mut SoftErrorContext>, err: PgError) -> PgResult<()> {
-    types_error::ereturn(escontext, (), err)
+    ::types_error::ereturn(escontext, (), err)
 }
 
 /// `NameStr(en->enumlabel)` — the catalog `NameData` bytes up to the first NUL.

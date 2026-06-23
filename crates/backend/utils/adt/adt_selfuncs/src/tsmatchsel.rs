@@ -17,16 +17,16 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{InvalidOid, Oid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo};
 use types_selfuncs::{STATISTIC_KIND_MCELEM, VariableStatData};
-use tsearch::tsearch::{QueryItem, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_VAL};
+use ::tsearch::tsearch::{QueryItem, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_VAL};
 
-use ts_small::util::{get_operand, get_query, tsq_size};
+use ::ts_small::util::{get_operand, get_query, tsq_size};
 
 use crate::clamp_probability;
 use crate::scalar::stats_tuple_stanullfrac;
@@ -143,7 +143,7 @@ fn tsquerysel<'mcx>(
             stats_tuple,
             STATISTIC_KIND_MCELEM,
             InvalidOid,
-            types_selfuncs::ATTSTATSSLOT_VALUES | types_selfuncs::ATTSTATSSLOT_NUMBERS,
+            ::types_selfuncs::ATTSTATSSLOT_VALUES | ::types_selfuncs::ATTSTATSSLOT_NUMBERS,
         )?;
 
         let selec = if let Some(sslot) = slot {
@@ -349,7 +349,7 @@ fn tsquery_opr_selec(
                 s1 + s2 - s1 * s2
             }
             other => {
-                return Err(types_error::PgError::error(alloc::format!(
+                return Err(::types_error::PgError::error(alloc::format!(
                     "unrecognized operator: {other}"
                 )));
             }

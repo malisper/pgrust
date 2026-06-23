@@ -14,9 +14,9 @@ use alloc::vec;
 use amutils_seams::{
     AmPropertyRequest, IndexAmRoutineFlags, IndexFormInfo, IndexRelationInfo,
 };
-use mcx::MemoryContext;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::mcx::MemoryContext;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 // --- Synthetic OIDs for the modeled indexes and AMs. -----------------------
 
@@ -124,7 +124,7 @@ fn mock_index_form(index_oid: Oid) -> PgResult<Option<IndexFormInfo>> {
     }))
 }
 
-fn mock_am_property(_mcx: mcx::Mcx<'_>, req: AmPropertyRequest) -> PgResult<Option<(bool, bool)>> {
+fn mock_am_property(_mcx: ::mcx::Mcx<'_>, req: AmPropertyRequest) -> PgResult<Option<(bool, bool)>> {
     // Model gist's amproperty just for DISTANCE_ORDERABLE on a key column, which
     // is what the regress test relies on (gcircleind col 1 -> t).
     if req.amoid == AM_GIST
@@ -137,7 +137,7 @@ fn mock_am_property(_mcx: mcx::Mcx<'_>, req: AmPropertyRequest) -> PgResult<Opti
     Ok(None)
 }
 
-fn mock_index_can_return(_mcx: mcx::Mcx<'_>, index_oid: Oid, _attno: i32) -> PgResult<bool> {
+fn mock_index_can_return(_mcx: ::mcx::Mcx<'_>, index_oid: Oid, _attno: i32) -> PgResult<bool> {
     // btree can always return; gist circle cannot.
     Ok(index_oid == IDX_ONEK_HUNDRED || index_oid == IDX_FOOCOVER)
 }

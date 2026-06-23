@@ -15,13 +15,13 @@ use std::sync::Once;
 
 use mcx::{Mcx, MemoryContext};
 
-use adt_jsonb::jsonb_out;
-use jsonb_util::JsonbValueToJsonb;
-use adt_jsonpath::jsonpath_in;
-use adt_jsonpath::JsonPathItemType;
+use ::adt_jsonb::jsonb_out;
+use ::jsonb_util::JsonbValueToJsonb;
+use ::adt_jsonpath::jsonpath_in;
+use ::adt_jsonpath::JsonPathItemType;
 use types_jsonb::jsonb_util::{JsonbPair, JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::jbvType;
-use types_jsonpath::parse::{
+use ::types_jsonb::jsonb::jbvType;
+use ::types_jsonpath::parse::{
     JsonPathParseItem, JsonPathParseResult, JsonPathParseValue, JsonPathSubscript,
 };
 use JsonPathItemType::*;
@@ -50,7 +50,7 @@ static INIT: Once = Once::new();
 
 /// Real numeric comparison provider for the jsonb-util `numeric_cmp` seam.
 fn real_numeric_cmp(a: &[u8], b: &[u8]) -> i32 {
-    use adt_numeric::ops_sql::numeric_cmp;
+    use ::adt_numeric::ops_sql::numeric_cmp;
     use core::cmp::Ordering;
     match numeric_cmp(a, b) {
         Ordering::Less => -1,
@@ -95,7 +95,7 @@ fn install_seams() {
 // --- jsonb document builders -----------------------------------------------
 
 fn num_bytes(mcx: Mcx<'_>, n: i64) -> Vec<u8> {
-    adt_numeric::convert::int64_to_numeric(mcx, n)
+    ::adt_numeric::convert::int64_to_numeric(mcx, n)
         .unwrap()
         .to_vec()
 }

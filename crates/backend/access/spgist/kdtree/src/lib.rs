@@ -31,7 +31,7 @@
 //! working structs ([`SpgChooseIn`] etc.) that mirror the C field set; "allocate
 //! an output array" becomes "fill an owned `Vec`".  The `point`/`box`/`float8`
 //! payloads carried by the C `Datum` fields are decoded to their concrete
-//! [`types_core::geo`] forms.  In particular the opclass-specific
+//! [`::types_core::geo`] forms.  In particular the opclass-specific
 //! `void *traversalValue` round-trips a `BOX` here -- exactly as the C source.
 //!
 //! ## Seams (genuinely-external deps only)
@@ -48,10 +48,10 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::result_large_err)]
 
-use types_core::geo::{Point, SpgKey, BOX};
+use ::types_core::geo::{Point, SpgKey, BOX};
 use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 
-use spg_proc_seams::spg_key_orderbys_distances;
+use ::spg_proc_seams::spg_key_orderbys_distances;
 use geo_ops_seams::{FPgt, FPlt};
 
 const C_FILE: &str = "../src/backend/access/spgist/spgkdtreeproc.c";
@@ -93,13 +93,13 @@ pub const VOIDOID: u32 = 2278;
 // slot is registered to `spg_quad_leaf_consistent` (OID 4022, in the quadtree
 // crate), so there is no `F_SPG_KD_LEAF_CONSISTENT`.
 /// `F_SPG_KD_CONFIG` — `spg_kd_config` (pg_proc.dat oid 4023).
-pub const F_SPG_KD_CONFIG: types_core::primitive::Oid = 4023;
+pub const F_SPG_KD_CONFIG: ::types_core::primitive::Oid = 4023;
 /// `F_SPG_KD_CHOOSE` — `spg_kd_choose` (pg_proc.dat oid 4024).
-pub const F_SPG_KD_CHOOSE: types_core::primitive::Oid = 4024;
+pub const F_SPG_KD_CHOOSE: ::types_core::primitive::Oid = 4024;
 /// `F_SPG_KD_PICKSPLIT` — `spg_kd_picksplit` (pg_proc.dat oid 4025).
-pub const F_SPG_KD_PICKSPLIT: types_core::primitive::Oid = 4025;
+pub const F_SPG_KD_PICKSPLIT: ::types_core::primitive::Oid = 4025;
 /// `F_SPG_KD_INNER_CONSISTENT` — `spg_kd_inner_consistent` (pg_proc.dat oid 4026).
-pub const F_SPG_KD_INNER_CONSISTENT: types_core::primitive::Oid = 4026;
+pub const F_SPG_KD_INNER_CONSISTENT: ::types_core::primitive::Oid = 4026;
 
 // ===========================================================================
 // Working in/out structs (idiomatic mirrors of the spgist.h ABI structs).

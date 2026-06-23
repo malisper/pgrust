@@ -13,7 +13,7 @@
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::{uint32, Size};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodehash::{
     BucketAndBatch, HashJoinBuckets, HashJoinTupleData, HashJoinTupleLink, HashMemoryChunkData,
     HashMemoryChunkLink, HashChunkIdx, HashJoinState, HashState, HashJoinTableData, HashTupleIdx,
@@ -22,8 +22,8 @@ use ::nodes::nodehash::{
 };
 use ::nodes::nodehash::Hash as HashPlan;
 use ::nodes::nodehash::ParallelHashJoinState;
-use types_tuple::heaptuple::FormedMinimalTuple;
-use types_tuple::heaptuple::{MinimalTupleData, HEAP_TUPLE_HAS_MATCH};
+use ::types_tuple::heaptuple::FormedMinimalTuple;
+use ::types_tuple::heaptuple::{MinimalTupleData, HEAP_TUPLE_HAS_MATCH};
 
 use barrier_seams as barrier;
 
@@ -41,8 +41,8 @@ pub(crate) fn mintuple_to_flat<'mcx>(
     mcx: Mcx<'mcx>,
     mtup: &FormedMinimalTuple<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    use heaptuple::flat::MinimalTupleFlatError;
-    match heaptuple::flat::minimal_tuple_to_flat(mcx, mtup) {
+    use ::heaptuple::flat::MinimalTupleFlatError;
+    match ::heaptuple::flat::minimal_tuple_to_flat(mcx, mtup) {
         Ok(blob) => Ok(blob),
         Err(MinimalTupleFlatError::Pg(err)) => Err(err),
         Err(other) => panic!("minimal_tuple_to_flat on an in-arena tuple failed: {other:?}"),
@@ -245,7 +245,7 @@ pub fn ExecHashTableCreate<'mcx>(
     } = ExecChooseHashTableSize(
         rows,
         outer_plan.plan_width,
-        types_core::OidIsValid(skew_table),
+        ::types_core::OidIsValid(skew_table),
         parallel,
         parallel_workers,
     );
@@ -259,7 +259,7 @@ pub fn ExecHashTableCreate<'mcx>(
     // subsidiary hash/batch/spill contexts (here all modelled by mcx, since the
     // owned arenas are dropped with the table).
     let spaceAllowedSkew = space_allowed * SKEW_HASH_MEM_PERCENT_USIZE / 100;
-    let mut hashtable = mcx::alloc_in(
+    let mut hashtable = ::mcx::alloc_in(
         mcx,
         HashJoinTableData {
             nbuckets,
@@ -999,7 +999,7 @@ pub fn dense_alloc<'mcx>(
 #[inline]
 fn empty_mintuple<'mcx>(mcx: Mcx<'mcx>) -> PgResult<FormedMinimalTuple<'mcx>> {
     Ok(FormedMinimalTuple {
-        tuple: mcx::alloc_in(
+        tuple: ::mcx::alloc_in(
             mcx,
             MinimalTupleData {
                 t_len: 0,

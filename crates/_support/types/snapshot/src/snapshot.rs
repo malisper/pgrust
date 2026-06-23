@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use types_core::{CommandId, TransactionId};
 
-pub use types_core::GlobalVisStateHandle;
+pub use ::types_core::GlobalVisStateHandle;
 
 /// `HTSV_Result` (`access/heapam.h`) — the status of a tuple as judged by
 /// `HeapTupleSatisfiesVacuum`. Discriminants mirror the C enum order so the

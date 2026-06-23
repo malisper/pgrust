@@ -10,8 +10,8 @@
 //!
 //! # Datum-unification status (Wave 3)
 //!
-//! Every seam below intentionally speaks the bare-word [`datum::Datum`]
-//! shim rather than canonical `types_tuple::Datum<'mcx>`. These are the
+//! Every seam below intentionally speaks the bare-word [`::datum::Datum`]
+//! shim rather than canonical `::types_tuple::Datum<'mcx>`. These are the
 //! *sanctioned* bare-word ABI edges of the datum-redesign plan, not unmigrated
 //! shim sites:
 //!
@@ -36,8 +36,8 @@
 //! migrate onto `Datum<'mcx>` without diverging from the DSM contract and the
 //! owner's installed `*_word` impls in `backend-utils-adt-scalar-datum-core`.
 
-use types_core::primitive::Size;
-use datum::Datum;
+use ::types_core::primitive::Size;
+use ::datum::Datum;
 // The canonical unified value type (Datum-unification keystone). The `*_v`
 // seam variants below take/return it by reference; the bare-word `Datum`
 // variants are transitional shims kept until every consumer migrates.
@@ -52,7 +52,7 @@ seam_core::seam!(
     /// `Datum` and its `(typByVal, typLen)`, e.g. `copyParamList` (params.c).
     ///
     /// TRANSITIONAL SHIM: superseded by [`datum_copy_v`], which carries the
-    /// unified `types_tuple::Datum` value. Kept until callers migrate.
+    /// unified `::types_tuple::Datum` value. Kept until callers migrate.
     pub fn datum_copy(value: Datum, typ_byval: bool, typ_len: i32) -> Datum
 );
 

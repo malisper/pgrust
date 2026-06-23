@@ -31,11 +31,11 @@
 
 pub mod tuplehash;
 
-use hashfn::murmurhash32;
+use ::hashfn::murmurhash32;
 use mcx::{Mcx, MemoryContext, PgBox};
 use tuplehash::{Iter, TuplehashOps};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::execexpr::ExprState;
 use ::nodes::execnodes::{EcxtId, SlotId};
@@ -43,7 +43,7 @@ use ::nodes::planstate::PlanStateNode;
 use ::nodes::nodeagg::{TupleHashEntryData, TupleHashIterator, TupleHashTable, TuplehashHash};
 use ::nodes::tuptable::TupleSlotKind;
 use ::nodes::EStateData;
-use types_tuple::heaptuple::TupleDesc;
+use ::types_tuple::heaptuple::TupleDesc;
 
 use execExpr_seams as execExpr;
 use execTuples_seams as execTuples;
@@ -52,10 +52,10 @@ use lsyscache_seams as lsyscache;
 use fmgr_seams as fmgr;
 
 mod parallel {
-    pub use transam_parallel::parallel_worker_number;
+    pub use ::transam_parallel::parallel_worker_number;
 }
 mod nodeHash {
-    pub use nodeHash_seams::get_hash_memory_limit;
+    pub use ::nodeHash_seams::get_hash_memory_limit;
 }
 
 // ===========================================================================
@@ -202,7 +202,7 @@ pub fn exec_tuples_match_prepare<'mcx>(
     let descdata = desc.as_deref().expect("exec_tuples_match_prepare: desc");
 
     // lookup equality functions
-    let mut eq_functions: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let mut eq_functions: ::mcx::PgVec<'mcx, Oid> = ::mcx::PgVec::new_in(mcx);
     eq_functions
         .try_reserve(num_cols as usize)
         .map_err(|_| mcx.oom(num_cols as usize * core::mem::size_of::<Oid>()))?;
@@ -231,12 +231,12 @@ pub fn exec_tuples_hash_prepare<'mcx>(
     mcx: Mcx<'mcx>,
     num_cols: i32,
     eq_operators: &[Oid],
-) -> PgResult<(mcx::PgVec<'mcx, Oid>, mcx::PgVec<'mcx, FmgrInfo>)> {
-    let mut eq_func_oids: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+) -> PgResult<(::mcx::PgVec<'mcx, Oid>, ::mcx::PgVec<'mcx, FmgrInfo>)> {
+    let mut eq_func_oids: ::mcx::PgVec<'mcx, Oid> = ::mcx::PgVec::new_in(mcx);
     eq_func_oids
         .try_reserve(num_cols as usize)
         .map_err(|_| mcx.oom(num_cols as usize * core::mem::size_of::<Oid>()))?;
-    let mut hash_functions: mcx::PgVec<'mcx, FmgrInfo> = mcx::PgVec::new_in(mcx);
+    let mut hash_functions: ::mcx::PgVec<'mcx, FmgrInfo> = ::mcx::PgVec::new_in(mcx);
     hash_functions
         .try_reserve(num_cols as usize)
         .map_err(|_| mcx.oom(num_cols as usize * core::mem::size_of::<FmgrInfo>()))?;
@@ -319,7 +319,7 @@ pub fn build_tuple_hash_table<'mcx>(
     // Copy the input tuple descriptor just for safety (assume all input tuples
     // have equivalent descriptors): the table slot uses TTSOpsMinimalTuple.
     let descdata = input_desc.as_deref().expect("build_tuple_hash_table: inputDesc");
-    let desc_copy = mcx::alloc_in(mcx, descdata.clone_in(mcx)?)?;
+    let desc_copy = ::mcx::alloc_in(mcx, descdata.clone_in(mcx)?)?;
     let pending_tableslot = execTuples::make_single_tuple_table_slot::call(
         mcx,
         Some(desc_copy),
@@ -361,20 +361,20 @@ pub fn build_tuple_hash_table<'mcx>(
     let pending_exprcontext = execUtils::create_standalone_expr_context::call(mcx)?;
 
     // keyColIdx / tab_collations live as long as the table; copy into mcx.
-    let mut key_col_idx_v: mcx::PgVec<'mcx, AttrNumber> = mcx::PgVec::new_in(mcx);
+    let mut key_col_idx_v: ::mcx::PgVec<'mcx, AttrNumber> = ::mcx::PgVec::new_in(mcx);
     key_col_idx_v
         .try_reserve(key_col_idx.len())
         .map_err(|_| mcx.oom(key_col_idx.len() * core::mem::size_of::<AttrNumber>()))?;
     key_col_idx_v.extend_from_slice(key_col_idx);
 
-    let mut collations_v: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let mut collations_v: ::mcx::PgVec<'mcx, Oid> = ::mcx::PgVec::new_in(mcx);
     collations_v
         .try_reserve(collations.len())
         .map_err(|_| mcx.oom(collations.len() * core::mem::size_of::<Oid>()))?;
     collations_v.extend_from_slice(collations);
 
     let table = TupleHashTable {
-        hashtab: Some(mcx::alloc_in(mcx, hashtab)?),
+        hashtab: Some(::mcx::alloc_in(mcx, hashtab)?),
         numCols: num_cols,
         keyColIdx: Some(key_col_idx_v),
         tab_hash_expr: Some(tab_hash_expr),
@@ -697,7 +697,7 @@ fn deliver_entry<'mcx>(
     let mcx = hashtable_mcx(hashtable);
     let hashtab = hashtable.hashtab.as_mut().expect("deliver_entry: hashtab set");
     let entry = &mut hashtab.data[idx];
-    let mut additional = core::mem::replace(&mut entry.additional, mcx::PgVec::new_in(mcx));
+    let mut additional = core::mem::replace(&mut entry.additional, ::mcx::PgVec::new_in(mcx));
     f(entry, additional.as_mut_slice());
     entry.additional = additional;
 }

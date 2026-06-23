@@ -28,8 +28,8 @@
 use std::rc::Rc;
 
 use pgtime::{pg_tm, pg_tz};
-use types_core::pg_time_t;
-use state_pgtz::session_timezone;
+use ::types_core::pg_time_t;
+use ::state_pgtz::session_timezone;
 use localtime::{pg_interpret_timezone_abbrev, pg_next_dst_boundary_tristate, pg_timezone_abbrev_is_known, NextDstBoundary};
 use timezone_pgtz::{pg_tzset, pg_tzset_offset};
 
@@ -47,7 +47,7 @@ use crate::settings::{date_order, interval_style};
 use crate::tables::{datetktbl, deltatktbl};
 
 // `datetkn` is the shared ABI keyword-table entry (idiomatic `DateToken`).
-use types_datetime::DateToken as datetkn;
+use ::types_datetime::DateToken as datetkn;
 
 // ---------------------------------------------------------------------------
 // date.c / timestamp.c helpers (canonical homes).
@@ -1852,7 +1852,7 @@ pub(crate) fn GetCurrentTimeUsec(tm: &mut pg_tm, fsec: &mut fsec_t, tzp: Option<
     secs += day_usec / USECS_PER_SEC;
     let leftover_usec = (day_usec % USECS_PER_SEC) as fsec_t;
 
-    if let Some(local) = localtime::pg_localtime(secs as pg_time_t, &stz) {
+    if let Some(local) = ::localtime::pg_localtime(secs as pg_time_t, &stz) {
         // pg_localtime returns tm_year as (year-1900) and tm_mon 0-based;
         // datetime.c uses full year / 1-based month.
         tm.tm_sec = local.tm_sec;
@@ -2808,7 +2808,7 @@ pub fn DecodeTimeOnly(
             return DTERR_BAD_FORMAT;
         }
         // if non-DST zone, we do not need to know the date
-        if let Some(gmtoff) = localtime::pg_get_timezone_offset(&tz) {
+        if let Some(gmtoff) = ::localtime::pg_get_timezone_offset(&tz) {
             tzval = -(gmtoff as i32);
         } else {
             if (fmask & DTK_DATE_M) != DTK_DATE_M {
@@ -3606,7 +3606,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
-            &mut types_datetime::DateTimeErrorExtra::default(),
+            &mut ::types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, 0, "DecodeDateTime should succeed");
         assert_eq!((tm.tm_year, tm.tm_mon, tm.tm_mday), (2024, 1, 15));
@@ -3629,7 +3629,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
-            &mut types_datetime::DateTimeErrorExtra::default(),
+            &mut ::types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, 0);
         assert_eq!((tm.tm_year, tm.tm_mon, tm.tm_mday), (2024, 1, 15));
@@ -3653,7 +3653,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
-            &mut types_datetime::DateTimeErrorExtra::default(),
+            &mut ::types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, 0);
         assert_eq!((tm.tm_year, tm.tm_mon, tm.tm_mday), (2024, 1, 15));
@@ -3678,7 +3678,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
-            &mut types_datetime::DateTimeErrorExtra::default(),
+            &mut ::types_datetime::DateTimeErrorExtra::default(),
         );
         set_date_order(saved);
         assert_eq!(r, 0, "DMY slash date should decode");
@@ -3705,7 +3705,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
-            &mut types_datetime::DateTimeErrorExtra::default(),
+            &mut ::types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, DTERR_FIELD_OVERFLOW);
     }
@@ -3728,7 +3728,7 @@ mod tests {
             &mut tm,
             &mut fsec,
             Some(&mut tz),
-            &mut types_datetime::DateTimeErrorExtra::default(),
+            &mut ::types_datetime::DateTimeErrorExtra::default(),
         );
         assert_eq!(r, DTERR_BAD_FORMAT);
     }

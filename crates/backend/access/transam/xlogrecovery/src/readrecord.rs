@@ -24,10 +24,10 @@ use alloc::format;
 
 use utils_error::{ereport, elog};
 use types_core::{TimeLineID, XLogRecPtr};
-use types_core::InvalidXLogRecPtr;
+use ::types_core::InvalidXLogRecPtr;
 use types_error::{ErrorLevel, ErrorLocation, PgError, DEBUG1, LOG};
-use wal::wal::{RM_XLOG_ID, XLR_INFO_MASK};
-use wal::xlog_consts::XLOG_BLCKSZ;
+use ::wal::wal::{RM_XLOG_ID, XLR_INFO_MASK};
+use ::wal::xlog_consts::XLOG_BLCKSZ;
 
 use crate::core::{
     lsn_fmt, RecordRef, XLogRecoveryState, XLogSource, XLOG_CHECKPOINT_ONLINE,

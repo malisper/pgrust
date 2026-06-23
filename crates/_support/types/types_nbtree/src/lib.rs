@@ -5,7 +5,7 @@
 //! [`BTVacuumPosting`] / [`BTPendingFSM`]), the page-flag constants, and the
 //! `IndexUniqueCheck` insert mode (`access/genam.h`).
 //!
-//! The scan workspaces are `palloc`'d in C; here they are [`mcx::PgVec`] over
+//! The scan workspaces are `palloc`'d in C; here they are [`::mcx::PgVec`] over
 //! the scan's memory context, so the structs carry the context lifetime
 //! `'mcx`.
 
@@ -15,16 +15,16 @@
 
 extern crate alloc;
 
-use mcx::PgVec;
-use types_core::primitive::{
+use ::mcx::PgVec;
+use ::types_core::primitive::{
     uint16, AttrNumber, BlockNumber, InvalidBlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ,
 };
-use types_core::xact::FullTransactionId;
-use types_tuple::heaptuple::Datum;
-use types_scan::scankey::ScanKeyData;
-use types_scan::sdir::ScanDirection;
-use types_storage::storage::{Buffer, InvalidBuffer, LocationIndex};
-use types_tuple::heaptuple::{IndexTuple, ItemPointerData};
+use ::types_core::xact::FullTransactionId;
+use ::types_tuple::heaptuple::Datum;
+use ::types_scan::scankey::ScanKeyData;
+use ::types_scan::sdir::ScanDirection;
+use ::types_storage::storage::{Buffer, InvalidBuffer, LocationIndex};
+use ::types_tuple::heaptuple::{IndexTuple, ItemPointerData};
 
 /// There's room for a 16-bit vacuum cycle ID in `BTPageOpaqueData`.
 pub type BTCycleId = uint16;
@@ -94,7 +94,7 @@ pub const BTOPTIONS_PROC: u16 = 5;
 /// ` - MAXALIGN(sizeof(BTPageOpaqueData))) / 3) - MAXALIGN(sizeof(ItemPointerData))`
 ///   = `MAXALIGN_DOWN((8192 - MAXALIGN(24+12) - MAXALIGN(16)) / 3) - MAXALIGN(6)`
 ///   = `MAXALIGN_DOWN((8192 - 40 - 16) / 3) - 8` = `2712 - 8` = 2704.
-pub const BTMaxItemSize: types_core::Size = 2704;
+pub const BTMaxItemSize: ::types_core::Size = 2704;
 
 /// `BTREE_SINGLEVAL_FILLFACTOR` (`access/nbtree.h`) — effective leaf-page
 /// fillfactor when a page is full of duplicates of a single value.
@@ -250,7 +250,7 @@ pub struct xl_btree_dedup {
 /// `xl_btree_reuse_page` (`access/nbtxlog.h`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct xl_btree_reuse_page {
-    pub locator: types_storage::RelFileLocator,
+    pub locator: ::types_storage::RelFileLocator,
     pub block: BlockNumber,
     pub snapshotConflictHorizon: FullTransactionId,
     pub isCatalogRel: bool,
@@ -266,7 +266,7 @@ pub struct xl_btree_vacuum {
 /// `xl_btree_delete` (`access/nbtxlog.h`).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct xl_btree_delete {
-    pub snapshotConflictHorizon: types_core::primitive::TransactionId,
+    pub snapshotConflictHorizon: ::types_core::primitive::TransactionId,
     pub ndeleted: uint16,
     pub nupdated: uint16,
     pub isCatalogRel: bool,
@@ -408,7 +408,7 @@ pub struct BTParallelScanDescData {
     /// indicates whether next page is available for scan
     pub btps_pageStatus: BTPS_State,
     /// protects shared parallel state
-    pub btps_lock: types_storage::storage::LWLock,
+    pub btps_lock: ::types_storage::storage::LWLock,
     /// used to synchronize parallel scan
     pub btps_cv: condvar::ConditionVariable,
     /// `int btps_arrElems[FLEXIBLE_ARRAY_MEMBER]` — the inline zero-length FAM
@@ -537,7 +537,7 @@ pub struct BTArrayKeyInfo<'mcx> {
 impl<'mcx> BTArrayKeyInfo<'mcx> {
     /// A fresh, empty array-key info over `mcx` (all fields zeroed as in a
     /// `palloc0`'d `BTArrayKeyInfo`, `cur_elem == -1` for "invalid").
-    pub fn new_in(mcx: mcx::Mcx<'mcx>) -> Self {
+    pub fn new_in(mcx: ::mcx::Mcx<'mcx>) -> Self {
         BTArrayKeyInfo {
             scan_key: 0,
             num_elems: 0,
@@ -602,7 +602,7 @@ pub struct BTScanPosData<'mcx> {
 
 impl<'mcx> BTScanPosData<'mcx> {
     /// A fresh, invalidated position over `mcx`.
-    pub fn new(mcx: mcx::Mcx<'mcx>) -> Self {
+    pub fn new(mcx: ::mcx::Mcx<'mcx>) -> Self {
         BTScanPosData {
             buf: InvalidBuffer,
             currPage: InvalidBlockNumber,
@@ -726,7 +726,7 @@ pub struct BTScanOpaqueData<'mcx> {
 
 impl<'mcx> BTScanOpaqueData<'mcx> {
     /// A fresh scan workspace over `mcx`.
-    pub fn new(mcx: mcx::Mcx<'mcx>) -> Self {
+    pub fn new(mcx: ::mcx::Mcx<'mcx>) -> Self {
         BTScanOpaqueData {
             qual_ok: false,
             numberOfKeys: 0,
@@ -796,7 +796,7 @@ pub struct BTReadPageState<'mcx> {
 
 impl<'mcx> BTReadPageState<'mcx> {
     /// A fresh read-page state over `mcx` (with an empty owned page buffer).
-    pub fn new(mcx: mcx::Mcx<'mcx>) -> Self {
+    pub fn new(mcx: ::mcx::Mcx<'mcx>) -> Self {
         BTReadPageState {
             minoff: 0,
             maxoff: 0,
@@ -860,7 +860,7 @@ pub struct BTVacState<'mcx> {
 }
 
 impl<'mcx> BTVacState<'mcx> {
-    pub fn new(mcx: mcx::Mcx<'mcx>, cycleid: BTCycleId) -> Self {
+    pub fn new(mcx: ::mcx::Mcx<'mcx>, cycleid: BTCycleId) -> Self {
         BTVacState {
             cycleid,
             stats: IndexBulkDeleteResult::default(),
@@ -874,9 +874,9 @@ impl<'mcx> BTVacState<'mcx> {
 
 /// `IndexBulkDeleteResult` (`access/genam.h`) — VACUUM statistics for an
 /// index, accumulated across `btbulkdelete`/`btvacuumcleanup`. Canonically
-/// defined in `types_tableam::genam` (the `access/genam.h` home); re-exported
+/// defined in `::types_tableam::genam` (the `access/genam.h` home); re-exported
 /// here so existing `types_nbtree::IndexBulkDeleteResult` paths keep working.
-pub use types_tableam::genam::IndexBulkDeleteResult;
+pub use ::types_tableam::genam::IndexBulkDeleteResult;
 
 // ===========================================================================
 // Insertion / search scankey descriptor model (access/nbtree.h)

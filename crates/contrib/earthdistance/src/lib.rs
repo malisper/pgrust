@@ -11,7 +11,7 @@
 //! [`geo_distance_datum`] covers callers that still speak the fmgr
 //! float8/point representation.
 
-use types_core::geo::Point;
+use ::types_core::geo::Point;
 use types_tuple::heaptuple::Datum;
 
 /// `float8` is C `double`, i.e. Rust `f64`.

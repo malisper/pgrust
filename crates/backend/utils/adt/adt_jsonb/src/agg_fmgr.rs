@@ -21,13 +21,13 @@
 //! The polymorphic argument types (`anyelement` for `jsonb_agg`, the two `"any"`
 //! arguments for `jsonb_object_agg`) resolve via `get_fn_expr_argtype`.
 
-use mcx::MemoryContext;
-use types_core::Oid;
-use datum::datum::Datum as BoundaryDatum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::mcx::MemoryContext;
+use ::types_core::Oid;
+use ::datum::datum::Datum as BoundaryDatum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_tuple::Datum as ValDatum;
+use ::types_tuple::Datum as ValDatum;
 
 use crate::{
     jsonb_agg_finalfn, jsonb_agg_strict_transfn, jsonb_agg_transfn, jsonb_object_agg_finalfn,
@@ -95,22 +95,22 @@ fn ret_jsonb(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> BoundaryD
     BoundaryDatum::from_usize(0)
 }
 
-/// Materialize argument `i` as the unified `types_tuple::Datum`, charging by-ref
+/// Materialize argument `i` as the unified `::types_tuple::Datum`, charging by-ref
 /// copies to `mcx`.
 fn arg_value<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
 ) -> PgResult<ValDatum<'mcx>> {
     Ok(match fcinfo.ref_arg(i) {
-        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(mcx::slice_in(mcx, b)?),
+        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(::mcx::slice_in(mcx, b)?),
         Some(RefPayload::Cstring(s)) => ValDatum::Cstring(s.clone()),
         Some(RefPayload::Composite(image)) => {
-            ValDatum::Composite(types_tuple::FormedTuple::from_datum_image(mcx, image)?)
+            ValDatum::Composite(::types_tuple::FormedTuple::from_datum_image(mcx, image)?)
         }
-        Some(RefPayload::Expanded(eo)) => ValDatum::ByRef(mcx::slice_in(
+        Some(RefPayload::Expanded(eo)) => ValDatum::ByRef(::mcx::slice_in(
             mcx,
-            &datum::flatten_expanded(eo.as_ref()),
+            &::datum::flatten_expanded(eo.as_ref()),
         )?),
         Some(RefPayload::Internal(_)) => {
             panic!("jsonb_agg fn: unexpected `internal` argument on the by-ref lane")

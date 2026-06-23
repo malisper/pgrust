@@ -1,7 +1,7 @@
 //! Unit tests for the pure (seam-free) logic of lockcmds.c.
 
 use super::*;
-use types_storage::lock::{
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, RowExclusiveLock, RowShareLock,
 };
 

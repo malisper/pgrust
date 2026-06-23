@@ -35,8 +35,8 @@ extern crate alloc;
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
-use types_error::PgResult;
-use types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
+use ::types_error::PgResult;
+use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
 
 mod buf_table;
 mod freelist;
@@ -53,21 +53,21 @@ pub use strategy::{
 
 // Re-export the shared signature types from types-storage so callers reach them
 // through this crate's surface.
-pub use types_storage::buf::{
+pub use ::types_storage::buf::{
     IOContext, LocalBufferLookupEnt, Victim, FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST,
 };
-pub use types_storage::PrefetchBufferResult;
+pub use ::types_storage::PrefetchBufferResult;
 
 /// `BUF_STATE_GET_REFCOUNT(buf_state)` (buf_internals.h).
 #[inline]
 fn buf_state_get_refcount(buf_state: u32) -> u32 {
-    buf_state & types_storage::buf::BUF_REFCOUNT_MASK
+    buf_state & ::types_storage::buf::BUF_REFCOUNT_MASK
 }
 
 /// `BUF_STATE_GET_USAGECOUNT(buf_state)` (buf_internals.h).
 #[inline]
 fn buf_state_get_usagecount(buf_state: u32) -> u32 {
-    (buf_state & types_storage::buf::BUF_USAGECOUNT_MASK) / types_storage::buf::BUF_USAGECOUNT_ONE
+    (buf_state & ::types_storage::buf::BUF_USAGECOUNT_MASK) / ::types_storage::buf::BUF_USAGECOUNT_ONE
 }
 
 // ---------------------------------------------------------------------------
@@ -200,12 +200,12 @@ fn local_buffer_state(buffer: types_core::primitive::Buffer) -> u32 {
 fn local_buffer_get_tag(
     buffer: types_core::primitive::Buffer,
 ) -> PgResult<(
-    types_storage::RelFileLocator,
+    ::types_storage::RelFileLocator,
     types_core::primitive::ForkNumber,
     types_core::primitive::BlockNumber,
 )> {
     let tag = local_mgr_get_or_create().buffer_tag(buffer);
-    let rlocator = types_storage::RelFileLocator {
+    let rlocator = ::types_storage::RelFileLocator {
         spcOid: tag.spcOid,
         dbOid: tag.dbOid,
         relNumber: tag.relNumber,
@@ -262,19 +262,19 @@ fn terminate_local_buffer_io(
 
 /// `LocalBufferAlloc(smgr, forkNum, blockNum, foundPtr)` (localbuf.c).
 fn local_buffer_alloc(
-    smgr_reln: types_storage::RelFileLocatorBackend,
+    smgr_reln: ::types_storage::RelFileLocatorBackend,
     fork_num: types_core::primitive::ForkNumber,
     block_num: types_core::primitive::BlockNumber,
-) -> PgResult<(types_storage::storage::Buffer, bool)> {
+) -> PgResult<(::types_storage::storage::Buffer, bool)> {
     local_mgr_get_or_create().LocalBufferAlloc(smgr_reln.locator, fork_num, block_num)
 }
 
 /// `PrefetchLocalBuffer(smgr, forkNum, blockNum)` (localbuf.c).
 fn prefetch_local_buffer(
-    smgr_reln: types_storage::RelFileLocatorBackend,
+    smgr_reln: ::types_storage::RelFileLocatorBackend,
     fork_num: types_core::primitive::ForkNumber,
     block_num: types_core::primitive::BlockNumber,
-) -> PgResult<types_storage::PrefetchBufferResult> {
+) -> PgResult<::types_storage::PrefetchBufferResult> {
     local_mgr_get_or_create().PrefetchLocalBuffer(smgr_reln.locator, fork_num, block_num)
 }
 
@@ -298,12 +298,12 @@ fn at_proc_exit_local_buffers() -> PgResult<()> {
 
 /// `ExtendBufferedRelLocal(...)` (localbuf.c).
 fn extend_buffered_rel_local(
-    smgr_reln: types_storage::RelFileLocatorBackend,
+    smgr_reln: ::types_storage::RelFileLocatorBackend,
     fork_num: types_core::primitive::ForkNumber,
     flags: u32,
     extend_by: u32,
     extend_upto: types_core::primitive::BlockNumber,
-    buffers: &mut [types_storage::storage::Buffer],
+    buffers: &mut [::types_storage::storage::Buffer],
 ) -> PgResult<(types_core::primitive::BlockNumber, u32)> {
     let mut extended_by: u32 = 0;
     let first_block = local_mgr_get_or_create().ExtendBufferedRelLocal(
@@ -320,7 +320,7 @@ fn extend_buffered_rel_local(
 
 /// `DropRelationLocalBuffers(rlocator, forkNum, firstDelBlock)` (localbuf.c).
 fn drop_relation_local_buffers(
-    rlocator: types_storage::RelFileLocator,
+    rlocator: ::types_storage::RelFileLocator,
     forknum: &[types_core::primitive::ForkNumber],
     first_del_block: &[types_core::primitive::BlockNumber],
 ) -> PgResult<()> {
@@ -328,13 +328,13 @@ fn drop_relation_local_buffers(
 }
 
 /// `DropRelationAllLocalBuffers(rlocator)` (localbuf.c).
-fn drop_relation_all_local_buffers(rlocator: types_storage::RelFileLocator) -> PgResult<()> {
+fn drop_relation_all_local_buffers(rlocator: ::types_storage::RelFileLocator) -> PgResult<()> {
     local_mgr_get_or_create().DropRelationAllLocalBuffers(rlocator)
 }
 
 /// `FlushRelationBuffers`'s `RelationUsesLocalBuffers(rel)` branch — flush every
 /// dirty page of the temp relation from this backend's local buffer pool.
-fn flush_relation_local_buffers(rlocator: types_storage::RelFileLocator) -> PgResult<()> {
+fn flush_relation_local_buffers(rlocator: ::types_storage::RelFileLocator) -> PgResult<()> {
     local_mgr_get_or_create().FlushRelationLocalBuffers(rlocator)
 }
 

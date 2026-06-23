@@ -19,38 +19,38 @@ use alloc::string::ToString;
 
 use mcx::{Mcx, PgVec};
 
-use utils_error::ereport;
-use types_error::ErrorLocation;
-use types_error::error::{
+use ::utils_error::ereport;
+use ::types_error::ErrorLocation;
+use ::types_error::error::{
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_T_R_SERIALIZATION_FAILURE, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR, LOG,
 };
-use types_error::PgResult;
+use ::types_error::PgResult;
 
-use types_core::primitive::{AttrNumber, Oid, RegProcedure};
+use ::types_core::primitive::{AttrNumber, Oid, RegProcedure};
 use ::nodes::execnodes::{EPQState, EStateData, RriId, SlotId};
 use ::nodes::nodes::CmdType;
-use rel::Relation;
-use types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNULL};
-use types_scan::sdir::ScanDirection;
-use types_slot::SlotData;
-use types_sortsupport::COMPARE_EQ;
-use types_tableam::tableam::{
+use ::rel::Relation;
+use ::types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNULL};
+use ::types_scan::sdir::ScanDirection;
+use ::types_slot::SlotData;
+use ::types_sortsupport::COMPARE_EQ;
+use ::types_tableam::tableam::{
     LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
 };
 
-use replication::conflict::ConflictType;
+use ::replication::conflict::ConflictType;
 
 // Direct (acyclic) callees.
 use indexam as indexam;
 use table_tableam as tableam;
 use execTuples as execTuples;
 use conflict as conflict;
-use conflict::ConflictTupleInfo;
+use ::conflict::ConflictTupleInfo;
 use logical_relation as logicalrelation;
-use adt_format_type::format_type_be_owned;
-use guc_tables::vars;
+use ::adt_format_type::format_type_be_owned;
+use ::guc_tables::vars;
 
 // Inward seams (owned by this unit).
 use execReplication_seams as inward;
@@ -96,7 +96,7 @@ fn err_here() -> ErrorLocation {
 }
 
 /// `elog(ERROR, ...)` internal message helper.
-fn elog_internal(msg: alloc::string::String) -> types_error::PgError {
+fn elog_internal(msg: alloc::string::String) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg).into_error()
 }
 
@@ -199,7 +199,7 @@ fn build_replindex_scan_key<'mcx>(
         scankey::ScanKeyInit(
             &mut entry,
             (index_attoff + 1) as AttrNumber,
-            eq_strategy as types_scan::scankey::StrategyNumber,
+            eq_strategy as ::types_scan::scankey::StrategyNumber,
             regop,
             argument,
         )?;
@@ -1275,7 +1275,7 @@ pub fn CheckCmdReplicaIdentity<'mcx>(
 
 /// The shared `ereport(ERROR, errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 /// errmsg(...), errdetail(...))` of `CheckCmdReplicaIdentity`'s checks.
-fn repl_ident_error(msg: alloc::string::String, detail: &'static str) -> types_error::PgError {
+fn repl_ident_error(msg: alloc::string::String, detail: &'static str) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INVALID_COLUMN_REFERENCE)
         .errmsg(msg)

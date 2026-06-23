@@ -2,7 +2,7 @@
 //! security guards (utility.c:93-467).
 
 use utility_out_seams as rt;
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TRANSACTION_STATE,
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERROR, WARNING,
@@ -36,7 +36,7 @@ pub fn CommandIsReadOnly(pstmt: &PlannedStmt) -> PgResult<bool> {
         }
         other => {
             // elog(WARNING, ...) returns Ok(()); fall through to `return false`.
-            utils_error::elog(
+            ::utils_error::elog(
                 WARNING,
                 format!("unrecognized commandType: {}", other as i32),
             )?;

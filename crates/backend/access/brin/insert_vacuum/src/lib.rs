@@ -46,22 +46,22 @@ extern crate alloc;
 
 pub mod fmgr_builtins;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use brin::{BrinDesc, BrinMemTuple};
-use types_core::primitive::{BlockNumber, OffsetNumber, Oid, Size};
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid, Size};
 use types_core::{InvalidOid, MaxBlockNumber};
-use rel::Relation;
-use types_storage::buf::{
+use ::rel::Relation;
+use ::types_storage::buf::{
     BufferIsValid, InvalidBuffer, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
-use types_storage::lock::{AccessShareLock, ShareUpdateExclusiveLock};
-use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tuple::access::RELKIND_INDEX;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_storage::lock::{AccessShareLock, ShareUpdateExclusiveLock};
+use ::types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tuple::access::RELKIND_INDEX;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use pageops::{
     brin_can_do_samepage_update, brin_create_empty_metapage, brin_create_metapage, brin_doinsert,
@@ -75,8 +75,8 @@ use brin_tuple::{
 use brin_scan::{brin_build_desc, brin_free_desc};
 
 use brin_entry_seams as opclass;
-use indexam_seams::index_open;
-use table_seams::table_open;
+use ::indexam_seams::index_open;
+use ::table_seams::table_open;
 use table_tableam_seams::{table_index_build_range_scan, table_index_build_scan};
 use aclchk_seams::{aclcheck_error, object_ownercheck};
 use index_seams::{build_index_info, index_get_relation};
@@ -86,17 +86,17 @@ use bufmgr_seams::{
 use freespace_seams::{
     free_space_map_vacuum, free_space_map_vacuum_range, record_page_with_free_space,
 };
-use relcache_seams::relation_get_number_of_blocks;
+use ::relcache_seams::relation_get_number_of_blocks;
 use utils_error::{ereport, PgError, PgResult};
-use types_error::error::ERROR;
+use ::types_error::error::ERROR;
 
-use types_acl::AclResult;
-use types_catalog::catalog::RELATION_RELATION_ID;
-use types_error::error::{
+use ::types_acl::AclResult;
+use ::types_catalog::catalog::RELATION_RELATION_ID;
+use ::types_error::error::{
     ERRCODE_INTERNAL_ERROR, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
 };
-use types_error::SqlState;
+use ::types_error::SqlState;
 use ::nodes::parsenodes::ObjectType;
 
 /// `ereport(ERROR, (errcode(code), errmsg(msg)))` — build a `PgError`.
@@ -113,7 +113,7 @@ const BRIN_AM_OID: Oid = 3580;
 
 /// `BRIN_ALL_BLOCKRANGES` (`brin.c`): the sentinel `InvalidBlockNumber` passed
 /// for `pageRange` to summarize the whole table.
-const BRIN_ALL_BLOCKRANGES: BlockNumber = types_core::primitive::InvalidBlockNumber;
+const BRIN_ALL_BLOCKRANGES: BlockNumber = ::types_core::primitive::InvalidBlockNumber;
 
 /// `BrinGetAutoSummarize(relation)` (brin.h): the index's autosummarize flag,
 /// the `bool` at byte offset 8 of the serialized `BrinOptions`
@@ -151,7 +151,7 @@ pub struct BrinBuildState<'mcx> {
     /// `bs_numtuples`: number of summary tuples produced.
     pub bs_numtuples: f64,
     /// `bs_currentInsertBuf`: the index buffer the last insert used.
-    pub bs_currentInsertBuf: types_storage::Buffer,
+    pub bs_currentInsertBuf: ::types_storage::Buffer,
     /// `bs_pagesPerRange`.
     pub bs_pagesPerRange: BlockNumber,
     /// `bs_currRangeStart`: the heap block at which the current range starts.
@@ -252,7 +252,7 @@ fn brininsert_loop<'mcx>(
     heap_blk: BlockNumber,
     pages_per_range: BlockNumber,
     bistate: &mut BrinInsertState<'mcx>,
-    buf: &mut types_storage::Buffer,
+    buf: &mut ::types_storage::Buffer,
 ) -> PgResult<()> {
     loop {
         check_for_interrupts()?;
@@ -486,7 +486,7 @@ pub fn brin_summarize_range<'mcx>(
     indexoid: Oid,
     heap_blk64: i64,
 ) -> PgResult<i32> {
-    use transam_xlog_seams::recovery_in_progress;
+    use ::transam_xlog_seams::recovery_in_progress;
     use miscinit_seams::{get_user_id_and_sec_context, set_user_id_and_sec_context};
     use guc_seams::{at_eoxact_guc, new_guc_nest_level, restrict_search_path};
 
@@ -590,8 +590,8 @@ pub fn brin_desummarize_range<'mcx>(
     indexoid: Oid,
     heap_blk64: i64,
 ) -> PgResult<()> {
-    use transam_xlog_seams::recovery_in_progress;
-    use miscinit_seams::get_user_id;
+    use ::transam_xlog_seams::recovery_in_progress;
+    use ::miscinit_seams::get_user_id;
 
     if recovery_in_progress::call() {
         return Err(err(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, "recovery is in progress".into()));
@@ -946,7 +946,7 @@ fn brinsummarize<'mcx>(
                     index,
                     build_revmap,
                     build_ppr,
-                    types_core::primitive::InvalidBlockNumber,
+                    ::types_core::primitive::InvalidBlockNumber,
                 )?;
                 state = Some(st);
                 index_info = Some(build_index_info::call(mcx, index)?);
@@ -1112,7 +1112,7 @@ fn brin_fill_empty_ranges<'mcx>(
 ) -> PgResult<()> {
     // If we already summarized some ranges, start with the next one. Otherwise
     // start from the first range of the table.
-    let mut blkno = if prev_range == types_core::primitive::InvalidBlockNumber {
+    let mut blkno = if prev_range == ::types_core::primitive::InvalidBlockNumber {
         0
     } else {
         prev_range + state.bs_pagesPerRange
@@ -1124,7 +1124,7 @@ fn brin_fill_empty_ranges<'mcx>(
         brin_build_empty_tuple(mcx, state, blkno)?;
         let (bytes, len) = {
             let tup = state.bs_emptyTuple.as_ref().expect("empty tuple built");
-            (mcx::slice_in(mcx, &tup.bytes)?, tup.bytes.len())
+            (::mcx::slice_in(mcx, &tup.bytes)?, tup.bytes.len())
         };
         brin_doinsert(
             mcx,
@@ -1472,7 +1472,7 @@ fn add_values_to_range<'mcx>(
 // brinGetStats (brin.c:1648)
 // ===========================================================================
 
-pub use brin::BrinStatsData;
+pub use ::brin::BrinStatsData;
 
 /// `brinGetStats(index, stats)` (brin.c:1648): fetch the index's statistical
 /// data from the metapage.
@@ -1496,7 +1496,7 @@ pub fn brinGetStats<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<Br
 /// — the `brin_get_stats` seam body called by `brincostestimate` (selfuncs.c).
 /// The index lock is already held by plancat.c, so `NoLock`.
 fn brin_get_stats<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<BrinStatsData> {
-    use types_storage::lock::NoLock;
+    use ::types_storage::lock::NoLock;
     let index_rel = index_open::call(mcx, indexoid, NoLock)?;
     let stats = brinGetStats(mcx, &index_rel)?;
     index_rel.close(NoLock)?;
@@ -1542,8 +1542,8 @@ fn check_for_interrupts() -> PgResult<()> {
 }
 
 /// `PageGetFreeSpace(BufferGetPage(buf))` — read the page's free space.
-fn page_get_free_space<'mcx>(_mcx: Mcx<'mcx>, buf: types_storage::Buffer) -> PgResult<Size> {
-    use bufmgr_seams::with_buffer_page;
+fn page_get_free_space<'mcx>(_mcx: Mcx<'mcx>, buf: ::types_storage::Buffer) -> PgResult<Size> {
+    use ::bufmgr_seams::with_buffer_page;
     use page::{PageGetFreeSpace, PageRef};
     let mut out: Size = 0;
     with_buffer_page::call(buf, &mut |page: &mut [u8]| {
@@ -1557,15 +1557,15 @@ fn page_get_free_space<'mcx>(_mcx: Mcx<'mcx>, buf: types_storage::Buffer) -> PgR
 }
 
 /// `BufferGetBlockNumber(buf)`.
-fn buffer_get_block_number(buf: types_storage::Buffer) -> BlockNumber {
-    bufmgr_seams::buffer_get_block_number::call(buf)
+fn buffer_get_block_number(buf: ::types_storage::Buffer) -> BlockNumber {
+    ::bufmgr_seams::buffer_get_block_number::call(buf)
 }
 
 /// Read `(pagesPerRange, lastRevmapPage)` from a locked BRIN metapage buffer
 /// (`BrinMetaPageData` accessors, brin_page.h). Grounded in-crate 1:1 like the
 /// sibling brin crates until brin-core lands a shared accessor.
-fn with_meta_page(buf: types_storage::Buffer) -> PgResult<(BlockNumber, BlockNumber)> {
-    use bufmgr_seams::with_buffer_page;
+fn with_meta_page(buf: ::types_storage::Buffer) -> PgResult<(BlockNumber, BlockNumber)> {
+    use ::bufmgr_seams::with_buffer_page;
     let mut out = (0u32, 0u32);
     with_buffer_page::call(buf, &mut |page: &mut [u8]| {
         out = (meta_pages_per_range(page), meta_last_revmap_page(page));
@@ -1594,7 +1594,7 @@ fn meta_last_revmap_page(page: &[u8]) -> BlockNumber {
 #[inline]
 fn page_contents_offset() -> usize {
     // MAXALIGN to MAXIMUM_ALIGNOF (8), mirroring brin_page::CONTENTS_OFFSET.
-    let h = types_storage::bufpage::SizeOfPageHeaderData as usize;
+    let h = ::types_storage::bufpage::SizeOfPageHeaderData as usize;
     (h + 7) & !7
 }
 

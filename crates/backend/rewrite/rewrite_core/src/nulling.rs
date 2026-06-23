@@ -11,7 +11,7 @@
 
 #![allow(non_snake_case)]
 
-use nodes_core::node_walker::{
+use ::nodes_core::node_walker::{
     expression_tree_walker_mut, query_or_expression_tree_mutator, query_tree_mutator,
 };
 use ::nodes::nodes::{ntag, Node};

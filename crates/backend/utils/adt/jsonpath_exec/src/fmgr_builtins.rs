@@ -36,9 +36,9 @@
 //! so all four args are always present (and non-NULL under the default `strict`
 //! flag).
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::{

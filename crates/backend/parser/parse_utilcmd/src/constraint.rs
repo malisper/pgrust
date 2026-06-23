@@ -6,7 +6,7 @@
 
 use alloc::format;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 
 use ::nodes::ddlnodes::{

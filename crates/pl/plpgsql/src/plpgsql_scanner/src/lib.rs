@@ -39,10 +39,10 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 
-use scan_fgram::tokens;
+use ::scan_fgram::tokens;
 use scan_seams as scan_seam;
 use comp_seams::{self as comp_seam, CwordResolution, WordResolution};
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
 use plpgsql::{IdentifierLookup, PLcword, PLwdatum, PLword};
 
@@ -690,7 +690,7 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
             // grammar's `yylval.ival` reads (K_SLICE ICONST, array subscripts) get
             // the value rather than a stale 0.
             else if token == tokens::ICONST {
-                use utils_error::SoftErrorContext;
+                use ::utils_error::SoftErrorContext;
                 let mut escontext = SoftErrorContext::new(false);
                 if let Ok(v) = numutils::pg_strtoint32_safe(
                     &yytext,
@@ -905,7 +905,7 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
 
     fn syntax_error(&self, msg: &str, location: i32) -> PgError {
         self.positioned_error(
-            types_error::ERROR,
+            ::types_error::ERROR,
             ERRCODE_SYNTAX_ERROR,
             msg,
             location,
@@ -920,8 +920,8 @@ impl<'mcx> PlpgsqlScanner<'mcx> {
     /// shadowed-variables WARNING/ERROR) so they render with `LINE n: ... ^`.
     pub fn positioned_error(
         &self,
-        level: types_error::ErrorLevel,
-        sqlstate: types_error::SqlState,
+        level: ::types_error::ErrorLevel,
+        sqlstate: ::types_error::SqlState,
         msg: &str,
         location: i32,
     ) -> PgError {

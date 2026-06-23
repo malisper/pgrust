@@ -22,8 +22,8 @@
 //! contributions (for the bitmap build) and presence acknowledgements.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 
 /// One index's attribute contributions for `RelationGetIndexAttrBitmap`,
@@ -153,7 +153,7 @@ seam_core::seam!(
     /// read the `'mcx`-bound relation, exactly as the C runs in
     /// `CurrentMemoryContext`.
     pub fn relation_build_publication_desc<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         rel: &rel::Relation<'mcx>,
     ) -> PgResult<types_catalog::pg_publication::PublicationDesc>
 );

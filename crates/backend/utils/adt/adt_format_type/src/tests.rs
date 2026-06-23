@@ -9,7 +9,7 @@ extern crate std;
 
 use super::*;
 use alloc::borrow::ToOwned;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::Mutex;
 use std::vec;
 use std::vec::Vec;

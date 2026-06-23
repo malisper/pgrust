@@ -73,13 +73,13 @@ use nodes::{
     SlotData, TupleTableSlot, Tuplesortstate, TuplesortInstrumentation, TuplesortMethod,
     TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_RANDOMACCESS,
 };
-use rel::Relation;
-use types_sortsupport::SortSupportData;
-use types_tuple::heaptuple::{Datum, FormedMinimalTuple};
-use types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, TupleDescData};
+use ::rel::Relation;
+use ::types_sortsupport::SortSupportData;
+use ::types_tuple::heaptuple::{Datum, FormedMinimalTuple};
+use ::types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, TupleDescData};
 
-use sort_storage_seams::LogicalTapeSet;
-use sort_storage::logtape;
+use ::sort_storage_seams::LogicalTapeSet;
+use ::sort_storage::logtape;
 use heaptuple as heaptuple;
 // CLUSTER variant deps: the index/executor seams used to order a full-HeapTuple
 // sort by a btree index definition (with the expression-index `FormIndexDatum`
@@ -172,7 +172,7 @@ const MINORDER: i32 = 6;
 /// `MAXORDER` (tuplesort.c) — maximum merge order.
 const MAXORDER: i32 = 500;
 /// `BLCKSZ` (pg_config.h).
-const BLCKSZ: i64 = types_core::BLCKSZ as i64;
+const BLCKSZ: i64 = ::types_core::BLCKSZ as i64;
 /// `TAPE_BUFFER_OVERHEAD` (tuplesort.c) — one block of buffer per tape.
 const TAPE_BUFFER_OVERHEAD: i64 = BLCKSZ;
 /// `MERGE_BUFFER_SIZE` (tuplesort.c) — extra pre-read buffer per input tape.
@@ -216,9 +216,9 @@ pub enum TupSortStatus {
 pub enum TupleBody<'mcx> {
     /// Heap "begin_heap" variant: a `MinimalTuple` (stored as the owned
     /// payload-bearing carrier).
-    Minimal(types_tuple::heaptuple::FormedMinimalTuple<'mcx>),
+    Minimal(::types_tuple::heaptuple::FormedMinimalTuple<'mcx>),
     /// CLUSTER variant: a full `HeapTuple`.
-    Heap(types_tuple::heaptuple::FormedTuple<'mcx>),
+    Heap(::types_tuple::heaptuple::FormedTuple<'mcx>),
     /// Index (btree / hash / gist / brin / gin) variant: on-disk `IndexTuple`
     /// (or BRIN/GIN sort-tuple) bytes.
     Index(PgVec<'mcx, u8>),
@@ -256,7 +256,7 @@ impl<'mcx> SortTuple<'mcx> {
             None => None,
             Some(TupleBody::Minimal(m)) => Some(TupleBody::Minimal(m.clone_in(mcx)?)),
             Some(TupleBody::Heap(h)) => Some(TupleBody::Heap(h.clone_in(mcx)?)),
-            Some(TupleBody::Index(b)) => Some(TupleBody::Index(mcx::slice_in(mcx, b)?)),
+            Some(TupleBody::Index(b)) => Some(TupleBody::Index(::mcx::slice_in(mcx, b)?)),
             Some(TupleBody::Datum(d)) => Some(TupleBody::Datum(d.clone_in(mcx)?)),
         };
         Ok(SortTuple {
@@ -993,9 +993,9 @@ fn heap_deform_sort_minimal<'mcx>(
             ))
         }
     };
-    let blob = heaptuple::flat::minimal_tuple_to_flat(mcx, mtup)
+    let blob = ::heaptuple::flat::minimal_tuple_to_flat(mcx, mtup)
         .map_err(flat_err)?;
-    heaptuple::flat::heap_deform_minimal_tuple_flat(mcx, &blob, tup_desc)
+    ::heaptuple::flat::heap_deform_minimal_tuple_flat(mcx, &blob, tup_desc)
         .map_err(flat_err)
 }
 
@@ -1224,7 +1224,7 @@ fn writetup_heap<'mcx>(
         Some(TupleBody::Minimal(m)) => m,
         _ => return Err(PgError::error("tuplesort writetup_heap: non-minimal tuple body")),
     };
-    let blob = heaptuple::flat::minimal_tuple_to_flat(mcx, mtup)
+    let blob = ::heaptuple::flat::minimal_tuple_to_flat(mcx, mtup)
         .map_err(flat_err)?;
     // tupbody = blob + MINIMAL_TUPLE_DATA_OFFSET; tupbodylen = t_len - offset.
     let t_len = mtup.tuple.t_len as usize;
@@ -1275,7 +1275,7 @@ fn readtup_heap<'mcx>(
     // heap_getattr(&htup, sortKeys[0].ssup_attno, tupDesc, &isnull1): deform the
     // (just-read) tuple and pick the leading sort column.
     let attno = base.sortKeys[0].ssup_attno;
-    let cols = heaptuple::flat::heap_deform_minimal_tuple_flat(
+    let cols = ::heaptuple::flat::heap_deform_minimal_tuple_flat(
         mcx, &blob, tupdesc,
     )
     .map_err(flat_err)?;
@@ -1285,7 +1285,7 @@ fn readtup_heap<'mcx>(
         (d.clone_in(mcx)?, *n)
     };
     let mtup =
-        heaptuple::flat::minimal_tuple_from_flat(mcx, &blob).map_err(flat_err)?;
+        ::heaptuple::flat::minimal_tuple_from_flat(mcx, &blob).map_err(flat_err)?;
     Ok(SortTuple {
         tuple: Some(TupleBody::Minimal(mtup)),
         datum1,
@@ -1373,7 +1373,7 @@ fn readtup_datum<'mcx>(
         // stup->datum1 = PointerGetDatum(raddr); stup->tuple = raddr; the owned
         // model carries the bytes once (datum1 mirrors the by-ref value).
         SortTuple {
-            tuple: Some(TupleBody::Datum(Datum::ByRef(mcx::slice_in(mcx, &raddr)?))),
+            tuple: Some(TupleBody::Datum(Datum::ByRef(::mcx::slice_in(mcx, &raddr)?))),
             datum1: Datum::ByRef(raddr),
             isnull1: false,
             srctape: 0,
@@ -1390,9 +1390,9 @@ fn readtup_datum<'mcx>(
 /// Map a `MinimalTupleFlatError` to a `PgError` (the flat codec's structural
 /// errors become a sort error; a `Pg` variant carries its own error through).
 fn flat_err(
-    e: heaptuple::flat::MinimalTupleFlatError,
+    e: ::heaptuple::flat::MinimalTupleFlatError,
 ) -> PgError {
-    use heaptuple::flat::MinimalTupleFlatError;
+    use ::heaptuple::flat::MinimalTupleFlatError;
     match e {
         MinimalTupleFlatError::Pg(err) => err,
         other => PgError::error(format!("tuplesort minimal-tuple codec: {other:?}")),
@@ -1775,7 +1775,7 @@ fn comparetup_index_btree_tiebreak<'mcx>(
         return Err(PgError::error(format!(
             "could not create unique index \"{index_name}\""
         ))
-        .with_sqlstate(types_error::error::ERRCODE_UNIQUE_VIOLATION)
+        .with_sqlstate(::types_error::error::ERRCODE_UNIQUE_VIOLATION)
         .with_detail(detail));
     }
 
@@ -1934,7 +1934,7 @@ fn cluster_arg<'a, 'mcx>(
 /// Read the `HeapTuple` (`FormedTuple`) a cluster `SortTuple` carries.
 fn cluster_heap_tuple<'a, 'mcx>(
     stup: &'a SortTuple<'mcx>,
-) -> PgResult<&'a types_tuple::heaptuple::FormedTuple<'mcx>> {
+) -> PgResult<&'a ::types_tuple::heaptuple::FormedTuple<'mcx>> {
     match &stup.tuple {
         Some(TupleBody::Heap(h)) => Ok(h),
         _ => Err(PgError::error("tuplesort: cluster SortTuple has no heap tuple body")),
@@ -2068,7 +2068,7 @@ fn comparetup_cluster_tiebreak<'mcx>(
 fn cluster_form_index_values<'mcx>(
     mcx: Mcx<'mcx>,
     index_info: &::nodes::execnodes::IndexInfo<'mcx>,
-    tup: &types_tuple::heaptuple::FormedTuple<'mcx>,
+    tup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
     tup_desc: &TupleDescData<'mcx>,
 ) -> PgResult<PgVec<'mcx, (Datum<'mcx>, bool)>> {
     // CreateExecutorState + MakeSingleTupleTableSlot(tupDesc, &TTSOpsHeapTuple),
@@ -2077,7 +2077,7 @@ fn cluster_form_index_values<'mcx>(
     let econtext = executils_seam::get_per_tuple_expr_context::call(&mut estate)?;
     let slot_data = exectuples_seam::make_single_tuple_table_slot::call(
         mcx,
-        Some(mcx::alloc_in(mcx, tup_desc.clone_in(mcx)?)?),
+        Some(::mcx::alloc_in(mcx, tup_desc.clone_in(mcx)?)?),
         ::nodes::TupleSlotKind::HeapTuple,
     )?;
     let slot = estate.push_slot_data(slot_data)?;
@@ -2135,7 +2135,7 @@ fn writetup_cluster<'mcx>(
 ) -> PgResult<()> {
     let tuple = cluster_heap_tuple(stup)?;
     let t_len = tuple.tuple.t_len as usize;
-    let ipd_size = core::mem::size_of::<types_tuple::heaptuple::ItemPointerData>();
+    let ipd_size = core::mem::size_of::<::types_tuple::heaptuple::ItemPointerData>();
     let tuplen = (t_len + ipd_size + CLUSTER_INT_SIZE) as u32;
 
     let mcx = *tapeset_mcx(tapeset);
@@ -2162,7 +2162,7 @@ fn readtup_cluster<'mcx>(
     tape: usize,
     tuplen: u32,
 ) -> PgResult<SortTuple<'mcx>> {
-    let ipd_size = core::mem::size_of::<types_tuple::heaptuple::ItemPointerData>();
+    let ipd_size = core::mem::size_of::<::types_tuple::heaptuple::ItemPointerData>();
     let t_len = tuplen as usize - ipd_size - CLUSTER_INT_SIZE;
 
     // Reconstruct the HeapTupleData header: read t_self, then the body image.
@@ -2185,7 +2185,7 @@ fn readtup_cluster<'mcx>(
         mcx,
         t_len as u32,
         t_self,
-        types_core::primitive::InvalidOid,
+        ::types_core::primitive::InvalidOid,
         &image,
     )?;
 
@@ -2210,7 +2210,7 @@ fn readtup_cluster<'mcx>(
 /// block-hi, 2-byte block-lo, 2-byte offset, little-endian — matching the C
 /// struct layout written verbatim by `LogicalTapeWrite(&tuple->t_self, ...)`).
 fn item_pointer_to_bytes(
-    tid: &types_tuple::heaptuple::ItemPointerData,
+    tid: &::types_tuple::heaptuple::ItemPointerData,
 ) -> [u8; 6] {
     let mut out = [0u8; 6];
     out[0..2].copy_from_slice(&tid.ip_blkid.bi_hi.to_ne_bytes());
@@ -2220,9 +2220,9 @@ fn item_pointer_to_bytes(
 }
 
 /// Inverse of [`item_pointer_to_bytes`].
-fn item_pointer_from_bytes(bytes: &[u8]) -> types_tuple::heaptuple::ItemPointerData {
-    types_tuple::heaptuple::ItemPointerData {
-        ip_blkid: types_tuple::heaptuple::BlockIdData {
+fn item_pointer_from_bytes(bytes: &[u8]) -> ::types_tuple::heaptuple::ItemPointerData {
+    ::types_tuple::heaptuple::ItemPointerData {
+        ip_blkid: ::types_tuple::heaptuple::BlockIdData {
             bi_hi: u16::from_ne_bytes([bytes[0], bytes[1]]),
             bi_lo: u16::from_ne_bytes([bytes[2], bytes[3]]),
         },
@@ -3119,7 +3119,7 @@ fn computed_max_space(
 ) -> (i64, bool, TupSortStatus) {
     let (space_used, is_space_disk) = if let Some(ts) = &state.tapeset {
         (
-            sort_storage::logtape::logical_tape_set_blocks(ts) * BLCKSZ,
+            ::sort_storage::logtape::logical_tape_set_blocks(ts) * BLCKSZ,
             true,
         )
     } else {
@@ -3211,7 +3211,7 @@ pub fn tuplesort_space_type_name(t: TuplesortSpaceType) -> &'static str {
 fn tuplesort_free<'mcx>(state: &mut TuplesortStateImpl<'mcx>) {
     // Delete temporary "tape" files, if any (LogicalTapeSetClose).
     if let Some(ts) = state.tapeset.take() {
-        sort_storage::logtape::logical_tape_set_close(ts);
+        ::sort_storage::logtape::logical_tape_set_close(ts);
     }
     // FREESTATE(state) — variant-specific cleanup (cluster closes its estate);
     // F4 fills it. The serial in-memory heap/datum variants have no freestate.
@@ -3698,7 +3698,7 @@ fn leader_takeover_tapes<'mcx>(_state: &mut TuplesortStateImpl<'mcx>) -> PgResul
 // `'static` so it fits the type-erased `Tuplesortstate` carrier.
 // ===========================================================================
 
-mcx::bind!(pub TuplesortStateImplBind => TuplesortStateImpl<'mcx>);
+::mcx::bind!(pub TuplesortStateImplBind => TuplesortStateImpl<'mcx>);
 
 /// The self-owned engine bundle (context + state); stored type-erased in the
 /// [`::nodes::Tuplesortstate`] carrier.
@@ -3822,8 +3822,8 @@ impl TupleDescSnapshot {
             tdtypmod: self.tdtypmod,
             tdrefcount: self.tdrefcount,
             constr: None,
-            compact_attrs: mcx::slice_in(sx, &self.compact_attrs)?,
-            attrs: mcx::slice_in(sx, &self.attrs)?,
+            compact_attrs: ::mcx::slice_in(sx, &self.compact_attrs)?,
+            attrs: ::mcx::slice_in(sx, &self.attrs)?,
         })
     }
 }
@@ -3955,10 +3955,10 @@ struct SortSupportSnapshot {
     ssup_nulls_first: bool,
     ssup_attno: AttrNumber,
     abbreviate: bool,
-    comparator: Option<types_sortsupport::SortComparatorId>,
-    abbrev_converter: Option<types_sortsupport::AbbrevConverterId>,
-    abbrev_abort: Option<types_sortsupport::AbbrevAbortId>,
-    abbrev_full_comparator: Option<types_sortsupport::SortComparatorId>,
+    comparator: Option<::types_sortsupport::SortComparatorId>,
+    abbrev_converter: Option<::types_sortsupport::AbbrevConverterId>,
+    abbrev_abort: Option<::types_sortsupport::AbbrevAbortId>,
+    abbrev_full_comparator: Option<::types_sortsupport::SortComparatorId>,
 }
 
 impl SortSupportSnapshot {
@@ -4315,7 +4315,7 @@ fn tuplesort_begin_index_gist_state(
 fn tuplesort_putindextuplevalues_impl<'mcx>(
     state: &mut TuplesortStateImpl<'mcx>,
     rel: &Relation<'mcx>,
-    self_tid: types_tuple::heaptuple::ItemPointerData,
+    self_tid: ::types_tuple::heaptuple::ItemPointerData,
     values: &[Datum<'mcx>],
     isnull: &[bool],
 ) -> PgResult<()> {
@@ -4362,7 +4362,7 @@ fn tuplesort_getindextuple_impl<'mcx>(
         Some(SortTuple {
             tuple: Some(TupleBody::Index(bytes)),
             ..
-        }) => Ok(Some(mcx::slice_in(mcx, &bytes)?)),
+        }) => Ok(Some(::mcx::slice_in(mcx, &bytes)?)),
         _ => Ok(None),
     }
 }
@@ -4372,7 +4372,7 @@ fn tuplesort_getindextuple_impl<'mcx>(
 /// attr (if simple).
 fn tuplesort_putheaptuple_impl<'mcx>(
     state: &mut TuplesortStateImpl<'mcx>,
-    tup: &types_tuple::heaptuple::FormedTuple<'mcx>,
+    tup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
 ) -> PgResult<()> {
     let mcx = state.mcx();
 
@@ -4390,7 +4390,7 @@ fn tuplesort_putheaptuple_impl<'mcx>(
 
     // tuplen = GetMemoryChunkSpace(tuple): the engine's mem accounting charges
     // the stored byte size (header + user-data area).
-    let tuplen = (core::mem::size_of::<types_tuple::heaptuple::HeapTupleData>()
+    let tuplen = (core::mem::size_of::<::types_tuple::heaptuple::HeapTupleData>()
         + stored.tuple.t_len as usize) as i64;
     let use_abbrev = state.base.haveDatum1
         && !state.base.sortKeys.is_empty()
@@ -4411,7 +4411,7 @@ fn tuplesort_putheaptuple_impl<'mcx>(
 fn tuplesort_getheaptuple_impl<'mcx>(
     state: &mut TuplesortStateImpl<'mcx>,
     forward: bool,
-) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'mcx>>> {
+) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'mcx>>> {
     let mcx = state.mcx();
     match tuplesort_gettuple_common(state, forward)? {
         Some(SortTuple {
@@ -4641,8 +4641,8 @@ fn store_minimal_into_slot<'mcx>(
                 .tts_tupleDescriptor
                 .as_ref()
                 .ok_or_else(|| PgError::error("tuplesort gettupleslot: slot has no descriptor"))?;
-            let blob = heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup).map_err(flat_err)?;
-            let cols = heaptuple::flat::heap_deform_minimal_tuple_flat(mcx, &blob, tup_desc)
+            let blob = ::heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup).map_err(flat_err)?;
+            let cols = ::heaptuple::flat::heap_deform_minimal_tuple_flat(mcx, &blob, tup_desc)
                 .map_err(flat_err)?;
 
             let natts = tup_desc.natts as usize;
@@ -4840,7 +4840,7 @@ fn seam_begin_index_gist<'mcx>(
 fn seam_putindextuplevalues<'mcx>(
     state: &mut Tuplesortstate<'mcx>,
     rel: &Relation<'mcx>,
-    self_tid: types_tuple::heaptuple::ItemPointerData,
+    self_tid: ::types_tuple::heaptuple::ItemPointerData,
     values: &[Datum<'mcx>],
     isnull: &[bool],
 ) -> PgResult<()> {
@@ -4882,12 +4882,12 @@ fn seam_begin_cluster<'mcx>(
 
 fn seam_putheaptuple<'mcx>(
     state: &mut Tuplesortstate<'mcx>,
-    tup: &types_tuple::heaptuple::FormedTuple<'mcx>,
+    tup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
 ) -> PgResult<()> {
     with_sort_mut(state, |s| {
         // SAFETY: re-tie the tuple to the engine's universal `'mcx`. It is only
         // READ (its bytes are cloned into the engine arena), so no borrow escapes.
-        let tup: &types_tuple::heaptuple::FormedTuple =
+        let tup: &::types_tuple::heaptuple::FormedTuple =
             unsafe { core::mem::transmute(tup) };
         tuplesort_putheaptuple_impl(s, tup)
     })
@@ -4896,13 +4896,13 @@ fn seam_putheaptuple<'mcx>(
 fn seam_getheaptuple<'mcx>(
     state: &mut Tuplesortstate<'mcx>,
     forward: bool,
-) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'mcx>>> {
+) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'mcx>>> {
     with_sort_mut(state, |s| {
         let out = tuplesort_getheaptuple_impl(s, forward)?;
         // SAFETY: re-tie the returned tuple's lifetime to the carrier's `'mcx`;
         // it was allocated in the engine bundle's context, which the carrier
         // keeps alive at least as long as the caller's `'mcx`.
-        let out: Option<types_tuple::heaptuple::FormedTuple<'mcx>> =
+        let out: Option<::types_tuple::heaptuple::FormedTuple<'mcx>> =
             unsafe { core::mem::transmute(out) };
         Ok(out)
     })

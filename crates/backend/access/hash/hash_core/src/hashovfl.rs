@@ -11,15 +11,15 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use types_core::primitive::{BlockNumber, InvalidBlockNumber};
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber};
 use types_error::{PgError, PgResult, ERROR};
-use hash::hashpage::{
+use ::hash::hashpage::{
     Bucket, HashMetaPageData, HASH_MAX_BITMAPS, HASH_METAPAGE, HASH_READ, HASH_WRITE,
     InvalidBucket, LH_BITMAP_PAGE, LH_BUCKET_PAGE, LH_META_PAGE, LH_OVERFLOW_PAGE, LH_UNUSED_PAGE,
     ALL_SET,
 };
-use rel::Relation;
-use types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
+use ::rel::Relation;
+use ::types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
 
 use transam_xlog_seams as xlog;
 use xloginsert_seams as xloginsert;
@@ -243,7 +243,7 @@ pub fn _hash_addovflpage<'mcx>(
         }
 
         let newmapblk = with_metap(metabuf, |m| bitno_to_blkno(m, bit))?;
-        newmapbuf = _hash_getnewbuf(rel, newmapblk, types_core::primitive::ForkNumber::MAIN_FORKNUM)?;
+        newmapbuf = _hash_getnewbuf(rel, newmapblk, ::types_core::primitive::ForkNumber::MAIN_FORKNUM)?;
     }
 
     // Calculate address of the new overflow page.
@@ -254,7 +254,7 @@ pub fn _hash_addovflpage<'mcx>(
     };
     blkno = with_metap(metabuf, |m| bitno_to_blkno(m, bit))?;
 
-    ovflbuf = _hash_getnewbuf(rel, blkno, types_core::primitive::ForkNumber::MAIN_FORKNUM)?;
+    ovflbuf = _hash_getnewbuf(rel, blkno, ::types_core::primitive::ForkNumber::MAIN_FORKNUM)?;
 
     let _ = bmsize;
     _hash_addovflpage_finish(
@@ -338,7 +338,7 @@ fn _hash_addovflpage_finish<'mcx>(
         set_hasho_nextblkno(page, InvalidBlockNumber);
         set_hasho_bucket(page, bucket);
         set_hasho_flag(page, LH_OVERFLOW_PAGE);
-        set_hasho_page_id(page, hash::hashpage::HASHO_PAGE_ID);
+        set_hasho_page_id(page, ::hash::hashpage::HASHO_PAGE_ID);
         Ok(())
     })?;
     bufmgr::mark_buffer_dirty::call(ovflbuf);
@@ -446,7 +446,7 @@ pub fn _hash_freeovflpage<'mcx>(
     itups: &[Vec<u8>],
     tups_size: &[usize],
     nitups: u16,
-    bstrategy: &types_storage::buf::BufferAccessStrategy,
+    bstrategy: &::types_storage::buf::BufferAccessStrategy,
 ) -> PgResult<BlockNumber> {
     // Get information from the doomed page.
     _hash_checkpage(rel, ovflbuf, LH_OVERFLOW_PAGE as i32)?;
@@ -521,7 +521,7 @@ pub fn _hash_freeovflpage<'mcx>(
         set_hasho_nextblkno(page, InvalidBlockNumber);
         set_hasho_bucket(page, InvalidBucket);
         set_hasho_flag(page, LH_UNUSED_PAGE);
-        set_hasho_page_id(page, hash::hashpage::HASHO_PAGE_ID);
+        set_hasho_page_id(page, ::hash::hashpage::HASHO_PAGE_ID);
         Ok(())
     })?;
     bufmgr::mark_buffer_dirty::call(ovflbuf);
@@ -678,7 +678,7 @@ pub fn _hash_squeezebucket<'mcx>(
     bucket: Bucket,
     bucket_blkno: BlockNumber,
     bucket_buf: Buffer,
-    bstrategy: &types_storage::buf::BufferAccessStrategy,
+    bstrategy: &::types_storage::buf::BufferAccessStrategy,
 ) -> PgResult<()> {
     // start squeezing into the primary bucket page.
     let mut wblkno = bucket_blkno;

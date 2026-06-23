@@ -18,7 +18,7 @@
 //! current connection; this is the same observable behaviour without the
 //! move-invalidation hazard.
 //!
-//! Each `_SPI_connection`'s `procCxt` / `execCxt` are owned `mcx::MemoryContext`
+//! Each `_SPI_connection`'s `procCxt` / `execCxt` are owned `::mcx::MemoryContext`
 //! values (C `AllocSetContextCreate`); `MemoryContextDelete` is dropping them,
 //! `MemoryContextReset` is `.reset()`. The C parent-context choice
 //! (`TopTransactionContext` vs `PortalContext`) is recorded as `atomic` but the
@@ -31,8 +31,8 @@ use crate::result_code::{
     SPI_ERROR_UNCONNECTED, SPI_OK_CONNECT, SPI_OK_FINISH, SPI_OPT_NONATOMIC,
 };
 use transam_xact_seams as xact_seam;
-use utils_error::ereport;
-use mcx::MemoryContext;
+use ::utils_error::ereport;
+use ::mcx::MemoryContext;
 use std::cell::RefCell;
 use types_core::{SubTransactionId, InvalidSubTransactionId};
 use types_error::{ErrorLocation, PgResult, WARNING};
@@ -152,7 +152,7 @@ pub fn SPI_connect_ext(options: i32) -> PgResult<i32> {
     // invariant is `connected == len - 1`. A corrupted state is an elog(ERROR).
     let len = SPI_STACK.with(|s| s.borrow().len()) as i32;
     if connected + 1 != len {
-        ereport(types_error::ERROR)
+        ereport(::types_error::ERROR)
             .errmsg_internal("SPI stack corrupted")
             .finish(loc("SPI_connect_ext"))?;
     }
@@ -260,7 +260,7 @@ pub fn AtEOXact_SPI(is_commit: bool) -> PgResult<()> {
 
     if found && is_commit {
         ereport(WARNING)
-            .errcode(types_error::ERRCODE_WARNING)
+            .errcode(::types_error::ERRCODE_WARNING)
             .errmsg("transaction left non-empty SPI stack")
             .errhint("Check for missing \"SPI_finish\" calls.")
             .finish(loc("AtEOXact_SPI"))?;
@@ -305,7 +305,7 @@ pub fn AtEOSubXact_SPI(is_commit: bool, my_subid: SubTransactionId) -> PgResult<
 
     if found && is_commit {
         ereport(WARNING)
-            .errcode(types_error::ERRCODE_WARNING)
+            .errcode(::types_error::ERRCODE_WARNING)
             .errmsg("subtransaction left non-empty SPI stack")
             .errhint("Check for missing \"SPI_finish\" calls.")
             .finish(loc("AtEOSubXact_SPI"))?;

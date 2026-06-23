@@ -3,7 +3,7 @@
 extern crate std;
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use ::nodes::primnodes::{Const, Expr};
 
 /// A `TargetEntry` carrying a trivial non-NULL `Const` expr leaf.

@@ -34,9 +34,9 @@
 //! `Assert`) and so returns `()`.
 #![allow(non_camel_case_types)]
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 #[cfg(feature = "ilist_debug")]
-use types_error::PgError;
+use ::types_error::PgError;
 
 /* ============================================================================
  * Struct types (lib/ilist.h), repr(C) field-for-field mirrors.

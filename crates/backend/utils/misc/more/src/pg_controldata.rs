@@ -8,17 +8,17 @@
 //! stay here. The owned result structs replace the C `Datum[]`/`bool[]` tuple
 //! arrays the SQL caller's fmgr wrapper would form into a `HeapTuple`.
 
-use transam_xlog_seams::wal_segment_size;
-use varlena_seams::cstring_to_text_v;
-use utils_error::ereport;
-use funcapi_seams::record_from_values;
-use init_small::globals::DataDir;
-use controldata_utils_seams::get_controlfile;
+use ::transam_xlog_seams::wal_segment_size;
+use ::varlena_seams::cstring_to_text_v;
+use ::utils_error::ereport;
+use ::funcapi_seams::record_from_values;
+use ::init_small::globals::DataDir;
+use ::controldata_utils_seams::get_controlfile;
 use mcx::{Mcx, PgString};
-use control::ControlFileData;
+use ::control::ControlFileData;
 use types_core::{Oid, TimeLineID, TimestampTz, XLogRecPtr};
 use types_error::{PgResult, ERROR};
-use types_tuple::Datum as DatumV;
+use ::types_tuple::Datum as DatumV;
 
 // Column type OIDs (pg_type_d.h) for the `pg_control_*` OUT-parameter rowtypes,
 // transcribed from pg_proc.dat.
@@ -48,14 +48,14 @@ pub struct PgControlCheckpoint<'mcx> {
     pub prev_timeline_id: i32,
     pub full_page_writes: bool,
     pub next_xid: PgString<'mcx>,
-    pub next_oid: types_core::Oid,
+    pub next_oid: ::types_core::Oid,
     pub next_multixact_id: u32,
     pub next_multi_offset: u32,
     pub oldest_xid: u32,
-    pub oldest_xid_dbid: types_core::Oid,
+    pub oldest_xid_dbid: ::types_core::Oid,
     pub oldest_active_xid: u32,
     pub oldest_multi_xid: u32,
-    pub oldest_multi_dbid: types_core::Oid,
+    pub oldest_multi_dbid: ::types_core::Oid,
     pub oldest_commit_ts_xid: u32,
     pub newest_commit_ts_xid: u32,
     pub checkpoint_time: TimestampTz,
@@ -185,7 +185,7 @@ pub fn pg_control_init() -> PgResult<PgControlInit> {
 /// `time_t_to_timestamptz(t)` (timestamp.c macro): `(TimestampTz) ((t -
 /// (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY) *
 /// USECS_PER_SEC)`. The epoch offset is 10957 days.
-fn time_t_to_timestamptz(t: types_core::pg_time_t) -> TimestampTz {
+fn time_t_to_timestamptz(t: ::types_core::pg_time_t) -> TimestampTz {
     const SECS_PER_DAY: i64 = 86400;
     const USECS_PER_SEC: i64 = 1_000_000;
     /// POSTGRES_EPOCH_JDATE (2451545) - UNIX_EPOCH_JDATE (2440588).

@@ -47,9 +47,9 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use mcx::Mcx;
-use types_core::primitive::{InvalidOid, Oid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_error::PgResult;
 
 use amutils_seams as seam;
 use amutils_seams::{AmPropertyRequest, IndexAmProperty};

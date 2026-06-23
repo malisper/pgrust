@@ -1,7 +1,7 @@
 //! `pg_range` catalog row layout and constants (`catalog/pg_range.h`,
 //! PostgreSQL 18.3), trimmed to what the `backend-catalog-pg-range` port reads.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_range.h CATALOG / DECLARE_*).

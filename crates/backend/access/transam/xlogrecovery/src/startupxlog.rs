@@ -8,7 +8,7 @@
 //!
 //! Ported from `src/backend/access/transam/xlogrecovery.c`.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::core::XLogRecoveryState;
 

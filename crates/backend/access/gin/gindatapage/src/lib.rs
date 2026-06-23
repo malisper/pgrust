@@ -17,15 +17,15 @@
 //! [`page::PageInit`]. This is the foundational substrate the
 //! data (posting-tree) page codec (`gindatapage.c`) is built on top of.
 
-use utils_error::PgResult;
-use types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
-use types_core::InvalidBlockNumber;
+use ::utils_error::PgResult;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
+use ::types_core::InvalidBlockNumber;
 use gin::{
     GinNullCategory, GinPageOpaqueData, GIN_COMPRESSED, GIN_DATA, GIN_DELETED, GIN_LEAF,
     SIZEOF_GIN_PAGE_OPAQUE_DATA, SIZEOF_POSTING_ITEM,
 };
-use types_storage::bufpage::SizeOfPageHeaderData;
-use types_tuple::heaptuple::{
+use ::types_storage::bufpage::SizeOfPageHeaderData;
+use ::types_tuple::heaptuple::{
     BlockIdData, IndexTupleData, ItemPointerData, INDEX_NULL_MASK,
 };
 
@@ -33,7 +33,7 @@ use types_tuple::heaptuple::{
 mod tests;
 
 /// GIN posting-tree (data tree) page handling — the `gindatapage.c` data-tree
-/// [`gin::GinBtreeData`] vtable callbacks + posting-tree entry points
+/// [`::gin::GinBtreeData`] vtable callbacks + posting-tree entry points
 /// built on top of this byte substrate.
 pub mod datatree;
 
@@ -48,7 +48,7 @@ pub use datatree::{
 // Re-export the PostingItem carrier so consumers of the data-page substrate get
 // it (and its sizing constant) from the substrate owner. The struct itself is
 // owned by `gin` (re-exported from `xlog_records::ginxlog`).
-pub use gin::PostingItem;
+pub use ::gin::PostingItem;
 
 // ---------------------------------------------------------------------------
 // Alignment helpers (c.h) and fixed layout offsets.
@@ -532,7 +532,7 @@ fn index_info_find_data_offset(t_info: u16) -> usize {
     // (INDEX_MAX_KEYS + 7) / 8.
     const SIZEOF_INDEX_TUPLE_DATA: usize = 8;
     const SIZEOF_INDEX_ATTRIBUTE_BITMAP_DATA: usize =
-        (types_core::INDEX_MAX_KEYS as usize + 7) / 8;
+        (::types_core::INDEX_MAX_KEYS as usize + 7) / 8;
     if (t_info & INDEX_NULL_MASK) == 0 {
         maxalign(SIZEOF_INDEX_TUPLE_DATA)
     } else {

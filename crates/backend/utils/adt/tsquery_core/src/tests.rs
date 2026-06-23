@@ -4,14 +4,14 @@
 //! signature math. Building a flat `tsquery` image by hand mirrors the polish
 //! layout `parse_tsquery` produces.
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
-use tsearch::tsearch::{
+use ::tsearch::tsearch::{
     QueryItem, QueryOperand, QueryOperator, HDRSIZETQ, OP_AND, QI_OPR, QI_VAL, TSQS_SIGLEN,
 };
 
 use postgres_seams as tcop;
-use ts_small::util::{encode_record, QI_SIZE};
+use ::ts_small::util::{encode_record, QI_SIZE};
 
 use crate::gist::{gtsquery_consistent, gtsquery_union, RT_CONTAINS_STRATEGY_NUMBER};
 use crate::op::{makeTSQuerySign, tsquery_and, tsquery_cmp, tsquery_numnode};

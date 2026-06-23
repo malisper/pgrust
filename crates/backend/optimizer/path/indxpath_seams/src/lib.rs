@@ -1,5 +1,5 @@
 //! Inward seam declarations for `optimizer/path/indxpath.c` — the index-path
-//! generator. Arena-shaped over [`pathnodes::PlannerInfo`].
+//! generator. Arena-shaped over [`::pathnodes::PlannerInfo`].
 //!
 //! These are the externally-visible entry points of indxpath.c that other
 //! (cycle-partner) crates call: `allpaths.c` (`create_index_paths`),
@@ -13,9 +13,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
 
 seam_core::seam!(

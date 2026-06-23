@@ -41,11 +41,11 @@
 
 use core::cell::Cell;
 
-use types_error::PgResult;
-use types_pgstat::wait_event::WAIT_EVENT_WAL_WRITER_MAIN;
-use types_startup::StartupData;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
-use wal::xlog_consts::XLOG_BLCKSZ;
+use ::types_error::PgResult;
+use ::types_pgstat::wait_event::WAIT_EVENT_WAL_WRITER_MAIN;
+use ::types_startup::StartupData;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::wal::xlog_consts::XLOG_BLCKSZ;
 
 use transam_xlog::{SetWalWriterSleeping, XLogBackgroundFlush};
 use interrupt as interrupt;
@@ -201,7 +201,7 @@ pub fn WalWriterMain(startup_data: &StartupData) -> PgResult<()> {
     // `pss_barrierGeneration`, hanging the emitter of a `DROP DATABASE`
     // (`WaitForProcSignalBarrier`) forever on this slot.
     {
-        use signal::SigHandler;
+        use ::signal::SigHandler;
         let pqsignal = port_pqsignal_seams::pqsignal::call;
         // pqsignal(SIGHUP, SignalHandlerForConfigReload);
         fn config_reload(_sig: i32) {
@@ -326,7 +326,7 @@ fn main_loop_cycle(state: &mut LoopState) -> PgResult<()> {
 /// "These operations are really just a minimal subset of AbortTransaction(). We
 /// don't have very many resources to worry about in walwriter, but we do have
 /// LWLocks, and perhaps buffers?"
-fn walwriter_abort_cleanup(err: &types_error::PgError) -> PgResult<()> {
+fn walwriter_abort_cleanup(err: &::types_error::PgError) -> PgResult<()> {
     // Since not using PG_TRY, must reset error stack by hand (error_context_stack
     // = NULL is host-owned, folded into FlushErrorState below).
 

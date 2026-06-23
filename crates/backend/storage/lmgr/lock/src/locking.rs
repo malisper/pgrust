@@ -40,21 +40,21 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use types_core::primitive::INVALID_PROC_NUMBER;
-use types_core::ProcNumber;
-use types_error::PgResult;
-use types_storage::lock::{
+use ::types_core::primitive::INVALID_PROC_NUMBER;
+use ::types_core::ProcNumber;
+use ::types_error::PgResult;
+use ::types_storage::lock::{
     LOCALLOCK, LOCALLOCKOWNER, LOCALLOCKTAG, LOCK, LOCKMASK, LOCKMODE, LOCKTAG,
     DEFAULT_LOCKMETHOD, LOCKBIT_OFF, LOCKBIT_ON, LOCKTAG_RELATION,
     LOCKTAG_RELATION_EXTEND, LOCKTAG_TUPLE, LockAcquireResult, LOCKACQUIRE_ALREADY_CLEAR,
     LOCKACQUIRE_ALREADY_HELD, LOCKACQUIRE_NOT_AVAIL, LOCKACQUIRE_OK, RowExclusiveLock,
     ResourceOwnerHandle,
 };
-use types_storage::storage::{
+use ::types_storage::storage::{
     ProcWaitStatus, PROC_WAIT_STATUS_ERROR, PROC_WAIT_STATUS_OK, PROC_WAIT_STATUS_WAITING,
     NUM_LOCK_PARTITIONS, LOCK_MANAGER_LWLOCK_OFFSET,
 };
-use types_storage::LWLockMode;
+use ::types_storage::LWLockMode;
 
 use crate::state;
 use crate::tables;
@@ -71,21 +71,21 @@ use resowner_seams_2 as resowner;
 const SRC: &str = "src/backend/storage/lmgr/lock.c";
 
 /// `errstart`-less `ErrorLocation` for lock.c reports.
-fn loc(lineno: i32, funcname: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new(SRC, lineno, funcname)
+fn loc(lineno: i32, funcname: &'static str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new(SRC, lineno, funcname)
 }
 
 /// Build a `PgError` (ERROR level) with an sqlstate and message — the C
 /// `ereport(ERROR, (errcode(...), errmsg(...)))` surface, returned for the
 /// caller's `?`.
-fn pg_error(sqlstate: types_error::SqlState, message: alloc::string::String) -> types_error::PgError {
-    types_error::PgError::error(message).with_sqlstate(sqlstate)
+fn pg_error(sqlstate: ::types_error::SqlState, message: alloc::string::String) -> ::types_error::PgError {
+    ::types_error::PgError::error(message).with_sqlstate(sqlstate)
 }
 
 /// `elog(WARNING, msg)` — emit a warning (does not propagate; the Err leg of the
 /// underlying report cannot fire for WARNING level).
 fn warning(message: alloc::string::String) {
-    let _ = utils_error::ereport(types_error::WARNING)
+    let _ = utils_error::ereport(::types_error::WARNING)
         .errmsg_internal(message)
         .finish(loc(0, "lock.c"));
 }
@@ -122,7 +122,7 @@ pub(crate) fn lock_partition_lock_offset_by_index(i: i32) -> usize {
 fn check_lockmethodid(lockmethodid: u8) -> PgResult<()> {
     if !tables::is_valid_lockmethodid(lockmethodid as u16) {
         return Err(pg_error(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("unrecognized lock method: {lockmethodid}"),
         ));
     }
@@ -134,7 +134,7 @@ fn check_lockmode(lockmethodid: u8, lockmode: LOCKMODE) -> PgResult<()> {
     let num = tables::num_lock_modes(lockmethodid as u16);
     if lockmode <= 0 || lockmode > num {
         return Err(pg_error(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("unrecognized lock mode: {lockmode}"),
         ));
     }
@@ -363,7 +363,7 @@ fn setup_lock_in_table(
     match result {
         Ok(()) => Ok(Some(proc_no)),
         Err((f1, f2, f3)) => Err(pg_error(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!(
                 "lock {} on object {f1}/{f2}/{f3} is already held",
                 mode_name(lockmethodid, lockmode)
@@ -396,7 +396,7 @@ fn lock_check_conflicts(lockmethodid: u8, lockmode: LOCKMODE, locktag: &LOCKTAG,
         // Subtract out locks I hold myself.
         let my_pl = s.proclock_get(locktag, proc_no).unwrap_or_default();
         let my_locks = my_pl.hold_mask;
-        let mut conflicts_remaining = [0i32; types_storage::lock::MAX_LOCKMODES];
+        let mut conflicts_remaining = [0i32; ::types_storage::lock::MAX_LOCKMODES];
         let mut total_conflicts_remaining = 0i32;
         let mut i = 1;
         while i <= num_lock_modes {
@@ -542,7 +542,7 @@ fn proc_lock_wakeup(locktag: &LOCKTAG, _lockmethodid: u8) {
     // Materialize a LOCK value for proc.c (it reads only tag/grant/wait state,
     // all reachable via the lock seams keyed on the tag); the per-LOCK body in
     // the ambient table is the authority for the mutations the seams perform.
-    let method: types_storage::lock::LockMethod = make_lock_method(locktag.locktag_lockmethodid);
+    let method: ::types_storage::lock::LockMethod = make_lock_method(locktag.locktag_lockmethodid);
     let mut lock_val = take_lock_snapshot(locktag);
     proc_owner::proc_waitqueue::ProcLockWakeup(&method, &mut lock_val);
 }
@@ -785,12 +785,12 @@ pub fn LockAcquireExtended(
     // Recovery: only RowExclusiveLock or less on database objects.
     if transam_xlog_seams::recovery_in_progress::call()
         && !xlogrecovery_seams::in_recovery::call()
-        && (locktag.locktag_type == types_storage::lock::LOCKTAG_OBJECT
+        && (locktag.locktag_type == ::types_storage::lock::LOCKTAG_OBJECT
             || locktag.locktag_type == LOCKTAG_RELATION)
         && lockmode > RowExclusiveLock
     {
         return Err(pg_error(
-            types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            ::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
             format!(
                 "cannot acquire lock mode {} on database objects while recovery is in progress",
                 mode_name(lockmethodid, lockmode)
@@ -942,7 +942,7 @@ pub fn LockAcquireExtended(
                 )?;
                 let hw = get_lock_holders_and_waiters(locktag);
                 part_guard.release()?;
-                let _ = utils_error::ereport(types_error::LOG)
+                let _ = utils_error::ereport(::types_error::LOG)
                     .errmsg(format!(
                         "process {} could not obtain {} on {}",
                         init_small_seams::my_proc_pid::call(),
@@ -1268,7 +1268,7 @@ pub fn LockReleaseAll(lockmethodid: u8, all_locks: bool) -> PgResult<()> {
 pub fn LockReleaseSession(lockmethodid: u8) -> PgResult<()> {
     if !tables::is_valid_lockmethodid(lockmethodid as u16) {
         return Err(pg_error(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("unrecognized lock method: {lockmethodid}"),
         ));
     }
@@ -1464,7 +1464,7 @@ pub fn LockRefindAndRelease(
     if !exists {
         partition_guard.release()?;
         return Err(pg_error(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             "failed to re-find shared lock object".into(),
         ));
     }
@@ -1624,7 +1624,7 @@ fn join_pids(pids: &[i32]) -> alloc::string::String {
 
 /// Build the `LockMethodData` descriptor for a lock method (proc.c reads
 /// `numLockModes` / `conflictTab` / `lockModeNames`).
-fn make_lock_method(lockmethodid: u8) -> types_storage::lock::LockMethod {
+fn make_lock_method(lockmethodid: u8) -> ::types_storage::lock::LockMethod {
     let num = tables::num_lock_modes(lockmethodid as u16);
     let conflicts = tables::lock_conflicts();
     let conflict_tab: Vec<LOCKMASK> = conflicts.to_vec();
@@ -1632,7 +1632,7 @@ fn make_lock_method(lockmethodid: u8) -> types_storage::lock::LockMethod {
         .iter()
         .map(|s| alloc::string::String::from(*s))
         .collect();
-    Box::new(types_storage::lock::LockMethodData {
+    Box::new(::types_storage::lock::LockMethodData {
         numLockModes: num,
         conflictTab: conflict_tab,
         lockModeNames: lock_mode_names,
@@ -1689,8 +1689,8 @@ fn with_locallock_mut<R>(
 /// (under `MyProc->fpInfoLock`) is performed by proc.c, which owns the
 /// `MyProc`-private `fpInfoLock` / `fp*` PGPROC storage.
 pub(crate) fn VirtualXactLockTableInsert(
-    vxid: types_storage::VirtualTransactionId,
-) -> types_error::PgResult<()> {
+    vxid: ::types_storage::VirtualTransactionId,
+) -> ::types_error::PgResult<()> {
     debug_assert!(vxid.is_valid());
 
     proc::vxid_lock_table_insert_my_proc::call(vxid.procNumber, vxid.localTransactionId)
@@ -1708,13 +1708,13 @@ pub(crate) fn VirtualXactLockTableCleanup() -> PgResult<()> {
 
     // If fpVXIDLock has been cleared without touching fpLocalTransactionId, that
     // means someone transferred the lock to the main lock table.
-    if !fastpath && lxid != types_core::InvalidLocalTransactionId {
+    if !fastpath && lxid != ::types_core::InvalidLocalTransactionId {
         let myprocno = proc::my_proc_number::call();
         let locktag = LOCKTAG::virtualtransaction(myprocno as u32, lxid);
         LockRefindAndRelease(
             myprocno,
             &locktag,
-            types_storage::lock::ExclusiveLock,
+            ::types_storage::lock::ExclusiveLock,
             false,
         )?;
     }
@@ -1741,9 +1741,9 @@ pub(crate) fn VirtualXactLockTableCleanup() -> PgResult<()> {
 /// `hash_seq_search(LockMethodProcLockHash)`.
 pub fn GetRunningTransactionLocks<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, types_storage::storage::xl_standby_lock>> {
-    use types_core::xact::TransactionIdIsValid;
-    use types_storage::lock::AccessExclusiveLock;
+) -> PgResult<mcx::PgVec<'mcx, ::types_storage::storage::xl_standby_lock>> {
+    use ::types_core::xact::TransactionIdIsValid;
+    use ::types_storage::lock::AccessExclusiveLock;
 
     // Acquire lock on the entire shared lock data structure. Must grab LWLocks
     // in partition-number order to avoid LWLock deadlock. The guards are held
@@ -1784,7 +1784,7 @@ pub fn GetRunningTransactionLocks<'mcx>(
             continue;
         }
 
-        access_exclusive_locks.push(types_storage::storage::xl_standby_lock {
+        access_exclusive_locks.push(::types_storage::storage::xl_standby_lock {
             xid,
             dbOid: tag.locktag_field1,
             relOid: tag.locktag_field2,
@@ -1806,9 +1806,9 @@ pub fn GetRunningTransactionLocks<'mcx>(
 // Error-surface helpers.
 // ===========================================================================
 
-fn out_of_shared_memory() -> types_error::PgError {
+fn out_of_shared_memory() -> ::types_error::PgError {
     pg_error(
-        types_error::ERRCODE_OUT_OF_MEMORY,
+        ::types_error::ERRCODE_OUT_OF_MEMORY,
         "out of shared memory".into(),
     )
 }
@@ -1820,9 +1820,9 @@ fn out_of_shared_memory() -> types_error::PgError {
 
 /// `pg_error` for the recovery module.
 pub(crate) fn pg_error_internal(
-    sqlstate: types_error::SqlState,
+    sqlstate: ::types_error::SqlState,
     message: alloc::string::String,
-) -> types_error::PgError {
+) -> ::types_error::PgError {
     pg_error(sqlstate, message)
 }
 
@@ -1876,12 +1876,12 @@ pub fn DoLockModesConflict(mode1: LOCKMODE, mode2: LOCKMODE) -> bool {
 /// prepared XID that was known as `vxid` before its `PREPARE TRANSACTION`.
 /// Returns false only when `wait == false` and the xid is still running.
 fn XactLockForVirtualXact(
-    vxid: types_storage::VirtualTransactionId,
-    mut xid: types_core::TransactionId,
+    vxid: ::types_storage::VirtualTransactionId,
+    mut xid: ::types_core::TransactionId,
     wait: bool,
 ) -> PgResult<bool> {
-    use types_core::xact::TransactionIdIsValid;
-    use types_storage::lock::ShareLock;
+    use ::types_core::xact::TransactionIdIsValid;
+    use ::types_storage::lock::ShareLock;
 
     // There is no point to wait for 2PCs if you have no 2PCs.
     if init_small_seams::max_prepared_xacts::call() == 0 {
@@ -1892,7 +1892,7 @@ fn XactLockForVirtualXact(
     loop {
         // Clear state from previous iterations.
         if more {
-            xid = types_core::xact::InvalidTransactionId;
+            xid = ::types_core::xact::InvalidTransactionId;
             more = false;
         }
 
@@ -1936,10 +1936,10 @@ fn XactLockForVirtualXact(
 /// (`SetupLockInTable` + `GrantLock`) is this unit's work, threaded into the
 /// critical section through the `transfer` callback.
 pub fn VirtualXactLock(
-    vxid: types_storage::VirtualTransactionId,
+    vxid: ::types_storage::VirtualTransactionId,
     wait: bool,
 ) -> PgResult<bool> {
-    use types_storage::lock::{ExclusiveLock, ShareLock, VirtualXactExamineOutcome};
+    use ::types_storage::lock::{ExclusiveLock, ShareLock, VirtualXactExamineOutcome};
 
     debug_assert!(vxid.is_valid());
 
@@ -1955,7 +1955,7 @@ pub fn VirtualXactLock(
     // reassigned to a new backend before we get around to examining it, but it
     // doesn't matter.
     if !proc::proc_number_get_proc_is_present::call(vxid.procNumber) {
-        return XactLockForVirtualXact(vxid, types_core::xact::InvalidTransactionId, wait);
+        return XactLockForVirtualXact(vxid, ::types_core::xact::InvalidTransactionId, wait);
     }
 
     // `transfer`: convert the target proc's fast-path VXID lock into a regular
@@ -1994,7 +1994,7 @@ pub fn VirtualXactLock(
 
     let xid = match outcome {
         VirtualXactExamineOutcome::Ended => {
-            return XactLockForVirtualXact(vxid, types_core::xact::InvalidTransactionId, wait);
+            return XactLockForVirtualXact(vxid, ::types_core::xact::InvalidTransactionId, wait);
         }
         VirtualXactExamineOutcome::StillRunningNoWait => {
             return Ok(false);

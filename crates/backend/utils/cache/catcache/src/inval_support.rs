@@ -2,7 +2,7 @@
 //! `PrepareToInvalidateCacheTuple`.
 //!
 //! For each cache on `RelationGetRelid(relation)`, compute the tuple's hash
-//! value(s) and emit one [`types_storage::PrepareToInvalidateCacheTuple`]
+//! value(s) and emit one [`::types_storage::PrepareToInvalidateCacheTuple`]
 //! request per `(*function)` invocation the C code makes (one for the old
 //! tuple's keys, plus one for the new tuple's keys on an update when the hash
 //! differs). The key columns are deformed from the real `HeapTupleData` via the
@@ -13,20 +13,20 @@
 use alloc::vec::Vec;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::primitive::InvalidOid;
-use types_core::Oid;
+use ::types_core::primitive::InvalidOid;
+use ::types_core::Oid;
 use cache::catcache::{CCFastKind, CacheIdx, CatKey};
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`:
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`:
 // `CatalogCacheComputeHashValue` consumes the by-value scalar key word (and the
 // `PointerGetDatum` of a detoasted by-reference payload). Pass-by-value scalar
-// keys stay the audited bare word, not the canonical `types_tuple::Datum<'mcx>`
+// keys stay the audited bare word, not the canonical `::types_tuple::Datum<'mcx>`
 // enum (which carries deformed tuple values).
-use datum::Datum as ScalarWord;
-use types_error::PgResult;
-use rel::RelationData;
-use types_storage::PrepareToInvalidateCacheTuple;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderGetNatts, TupleDescData};
+use ::datum::Datum as ScalarWord;
+use ::types_error::PgResult;
+use ::rel::RelationData;
+use ::types_storage::PrepareToInvalidateCacheTuple;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderGetNatts, TupleDescData};
 
 use heaptuple::{getmissingattr, heap_attisnull, nocachegetattr};
 use init_small_seams as init_small_seams;
@@ -219,7 +219,7 @@ pub fn prepare_to_invalidate_cache_tuple<'mcx>(
                 },
             ));
         }
-        Ok::<_, types_error::PgError>(probes)
+        Ok::<_, ::types_error::PgError>(probes)
     })?;
 
     // Up to two requests per matching cache (old + new on a hash-changing

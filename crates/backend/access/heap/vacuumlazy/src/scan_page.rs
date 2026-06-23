@@ -15,10 +15,10 @@
 //! [`seams_ub_heaprest::vacuumlazy`]; the page-local accounting + VM-bit decision
 //! logic is ported 1:1 in-crate over the owned [`LVRelState`].
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, ERROR, WARNING};
 use types_core::{BlockNumber, Buffer, BLCKSZ};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::consts::{
     offset_number_next, pg_cmp_u16, transaction_id_is_valid, FirstOffsetNumber,
@@ -336,7 +336,7 @@ pub fn lazy_scan_noprune<'mcx>(
     let mut hastup = false;
     let mut no_freeze_relfrozen_xid = vacrel.new_relfrozen_xid;
     let mut no_freeze_relmin_mxid = vacrel.new_relmin_mxid;
-    let mut deadoffsets: Vec<types_core::OffsetNumber> = Vec::new();
+    let mut deadoffsets: Vec<::types_core::OffsetNumber> = Vec::new();
 
     debug_assert!(bufmgr_seams::buffer_get_block_number::call(buf) == blkno);
 

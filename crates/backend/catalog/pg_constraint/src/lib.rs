@@ -16,15 +16,15 @@
 
 use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
 
-use types_amapi::COMPARE_CONTAINED_BY;
-use types_catalog::catalog::{
+use ::types_amapi::COMPARE_CONTAINED_BY;
+use ::types_catalog::catalog::{
     CONSTRAINT_RELATION_ID, OPERATOR_RELATION_ID, RELATION_RELATION_ID, TYPE_RELATION_ID,
 };
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_NORMAL, DEPENDENCY_PARTITION_PRI,
     DEPENDENCY_PARTITION_SEC,
 };
-use types_catalog::pg_constraint::{
+use ::types_catalog::pg_constraint::{
     Anum_pg_constraint_condeferrable, Anum_pg_constraint_condeferred,
     Anum_pg_constraint_conenforced, Anum_pg_constraint_confdeltype, Anum_pg_constraint_confmatchtype,
     Anum_pg_constraint_confrelid, Anum_pg_constraint_confupdtype, Anum_pg_constraint_conindid,
@@ -41,29 +41,29 @@ use types_catalog::pg_constraint::{
     CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, OID_MULTIRANGE_INTERSECT_MULTIRANGE_OP,
     OID_RANGE_INTERSECT_RANGE_OP,
 };
-use types_core::fmgr::{F_NAMEEQ, F_OIDEQ, INDEX_MAX_KEYS};
-use types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ, INDEX_MAX_KEYS};
+use ::types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR, NOTICE,
 };
-use types_error::pg_error::ErrorLocation;
+use ::types_error::pg_error::ErrorLocation;
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::parsenodes::DropBehavior;
 use ::nodes::nodes::{Node, NodePtr};
-use rel::RelationData;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::{
+use ::rel::RelationData;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::{
     FirstLowInvalidHeapAttributeNumber, ItemPointerData, INT2OID,
 };
 
-use heaptuple::heap_deform_tuple;
-use cache::typcache::DomainCheckConstraintRow;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::cache::typcache::DomainCheckConstraintRow;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
 use dependency_seams as dependency_seams;
@@ -71,7 +71,7 @@ use indexing_seams as indexing_seams;
 use objectaccess_seams as objectaccess_seams;
 use pg_depend_seams as pg_depend_seams;
 use indexcmds_seams as indexcmds_seams;
-use nodes_core::bitmapset::{bms_add_member, bms_is_subset};
+use ::nodes_core::bitmapset::{bms_add_member, bms_is_subset};
 use format_type_seams as format_type_seams;
 use varlena_seams as varlena_seams;
 use ruleutils_seams as ruleutils_seams;
@@ -83,7 +83,7 @@ const NAMEDATALEN: usize = 64;
 
 use equalfuncs_seams as equalfuncs_seams;
 use read_seams as read_seams;
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 /// `ErrorLocation` for `ereport(...).finish(...)` in this module (the C source
 /// is `src/backend/catalog/heap.c` for `MergeWithExistingConstraint`).
@@ -196,7 +196,7 @@ fn oid_key<'mcx>(attno: AttrNumber, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
 /// CStringGetDatum(conname))`. The name crosses as a NUL-terminated byte image
 /// (the genam owner's `nameeq` comparator interprets it).
 fn name_key<'mcx>(mcx: Mcx<'mcx>, attno: AttrNumber, value: &str) -> PgResult<ScanKeyData<'mcx>> {
-    let mut bytes: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, value.len() + 1)?;
+    let mut bytes: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, value.len() + 1)?;
     for &b in value.as_bytes() {
         bytes.push(b);
     }
@@ -276,7 +276,7 @@ fn systable_scan_foreach(
             break;
         };
         let cols = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
-        let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+        let mut values: PgVec<'_, Datum<'_>> = ::mcx::vec_with_capacity_in(smcx, cols.len())?;
         for (value, _null) in cols.iter() {
             values.push(value.clone());
         }
@@ -846,7 +846,7 @@ pub fn disinherit_constraints(
     mcx: Mcx<'_>,
     child_rel: &RelationData<'_>,
     parent_rel: &RelationData<'_>,
-    attmap: &types_tuple::attmap::AttrMap<'_>,
+    attmap: &::types_tuple::attmap::AttrMap<'_>,
 ) -> PgResult<()> {
     let child_relid = child_rel.rd_id;
     let parent_relid = parent_rel.rd_id;
@@ -1285,7 +1285,7 @@ pub fn MergeWithExistingConstraint(
     };
 
     let cols = heap_deform_tuple(smcx, &tup.tuple, &conDesc.rd_att, &tup.data)?;
-    let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+    let mut values: PgVec<'_, Datum<'_>> = ::mcx::vec_with_capacity_in(smcx, cols.len())?;
     for (value, _null) in cols.iter() {
         values.push(value.clone());
     }
@@ -1837,7 +1837,7 @@ pub fn AlterConstraintNamespaces(
     oldNspId: Oid,
     newNspId: Oid,
     isType: bool,
-    objsMoved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+    objsMoved: &mut ::types_catalog::catalog_dependency::ObjectAddresses,
 ) -> PgResult<()> {
     let con_ctx = MemoryContext::new("pg_constraint");
     let conRel = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, RowExclusiveLock)?;
@@ -2625,20 +2625,20 @@ fn load_fk_constraint<'mcx>(
 
     /* conname bytes copied into mcx */
     let conname_bytes = form.conname_str().as_bytes();
-    let mut conname: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, conname_bytes.len())?;
+    let mut conname: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, conname_bytes.len())?;
     for &b in conname_bytes {
         conname.push(b);
     }
 
     let to_pgvec_i16 = |mcx: Mcx<'mcx>, v: &[i16]| -> PgResult<PgVec<'mcx, i16>> {
-        let mut out: PgVec<'mcx, i16> = mcx::vec_with_capacity_in(mcx, v.len())?;
+        let mut out: PgVec<'mcx, i16> = ::mcx::vec_with_capacity_in(mcx, v.len())?;
         for &x in v {
             out.push(x);
         }
         Ok(out)
     };
     let to_pgvec_oid = |mcx: Mcx<'mcx>, v: &[Oid]| -> PgResult<PgVec<'mcx, Oid>> {
-        let mut out: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, v.len())?;
+        let mut out: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, v.len())?;
         for &x in v {
             out.push(x);
         }
@@ -2807,7 +2807,7 @@ fn find_domain_check_constraint(
         }
         Some(tup) => {
             let cols = heap_deform_tuple(smcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
-            let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+            let mut values: PgVec<'_, Datum<'_>> = ::mcx::vec_with_capacity_in(smcx, cols.len())?;
             for (value, _null) in cols.iter() {
                 values.push(value.clone());
             }
@@ -2900,7 +2900,7 @@ pub fn get_check_constraint_conbin(
                     "null conbin for constraint \"{constr_name}\""
                 )));
             }
-            let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+            let mut values: PgVec<'_, Datum<'_>> = ::mcx::vec_with_capacity_in(smcx, cols.len())?;
             for (value, _null) in cols.iter() {
                 values.push(value.clone());
             }
@@ -2954,7 +2954,7 @@ fn scan_domain_check_constraints(type_id: Oid) -> PgResult<Vec<DomainCheckConstr
             break;
         };
         let cols = heap_deform_tuple(smcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
-        let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+        let mut values: PgVec<'_, Datum<'_>> = ::mcx::vec_with_capacity_in(smcx, cols.len())?;
         let mut conbin_is_null = true;
         for (i, (value, null)) in cols.iter().enumerate() {
             values.push(value.clone());
@@ -3142,7 +3142,7 @@ pub fn find_relation_constraint_by_name(
     mcx: Mcx<'_>,
     relid: Oid,
     conname: &str,
-) -> PgResult<Option<types_catalog::pg_constraint::ConstraintFormCopy>> {
+) -> PgResult<Option<::types_catalog::pg_constraint::ConstraintFormCopy>> {
     let con_ctx = MemoryContext::new("pg_constraint");
     let pg_constraint = table::table_open(con_ctx.mcx(), CONSTRAINT_RELATION_ID, AccessShareLock)?;
 
@@ -3152,10 +3152,10 @@ pub fn find_relation_constraint_by_name(
         name_key(mcx, Anum_pg_constraint_conname, conname)?,
     ];
 
-    let mut found: Option<types_catalog::pg_constraint::ConstraintFormCopy> = None;
+    let mut found: Option<::types_catalog::pg_constraint::ConstraintFormCopy> = None;
     /* There can be at most one matching row */
     systable_scan_foreach(&pg_constraint, ConstraintRelidTypidNameIndexId, &skey, |row| {
-        found = Some(types_catalog::pg_constraint::ConstraintFormCopy {
+        found = Some(::types_catalog::pg_constraint::ConstraintFormCopy {
             form: row.form.clone(),
             conkey: None,
             tid: row.tid,
@@ -3186,7 +3186,7 @@ fn swap_index_constraints_and_triggers(
     old_index_id: Oid,
     new_index_id: Oid,
 ) -> PgResult<()> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         Anum_pg_trigger_tgconstraint, Anum_pg_trigger_tgconstrindid, TriggerConstraintIndexId,
         TriggerFieldUpdate, TriggerRelationId,
     };
@@ -3387,7 +3387,7 @@ pub fn constraint_connoinherit(mcx: Mcx<'_>, tup: &FormedTuple<'_>) -> PgResult<
     // comes from the relcache. We deform via a fresh pg_constraint open.
     let pg_constraint = table::table_open(mcx, CONSTRAINT_RELATION_ID, AccessShareLock)?;
     let cols = heap_deform_tuple(mcx, &tup.tuple, &pg_constraint.rd_att, &tup.data)?;
-    let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(mcx, cols.len())?;
+    let mut values: PgVec<'_, Datum<'_>> = ::mcx::vec_with_capacity_in(mcx, cols.len())?;
     for (value, _null) in cols.iter() {
         values.push(value.clone());
     }
@@ -3473,7 +3473,7 @@ pub fn merge_constraints_into_existing<'mcx>(
     )?;
 
     let parent_partitioned = parent_rel.rd_rel.relkind
-        == types_tuple::access::RELKIND_PARTITIONED_TABLE;
+        == ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
     // Collect the parent's inheritable CHECK / NOT NULL constraints first (the C
     // nests two scans on the same relation; we materialize the outer scan to
@@ -3578,7 +3578,7 @@ pub fn merge_constraints_into_existing<'mcx>(
             {
                 constraintrel.close(RowExclusiveLock)?;
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .errcode(::types_error::ERRCODE_DATATYPE_MISMATCH)
                     .errmsg(format!(
                         "child table \"{}\" has different definition for check constraint \"{}\"",
                         child_rel_name(child_rel),
@@ -3591,7 +3591,7 @@ pub fn merge_constraints_into_existing<'mcx>(
             if child_form.connoinherit {
                 constraintrel.close(RowExclusiveLock)?;
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg(format!(
                         "constraint \"{}\" conflicts with non-inherited constraint on child table \"{}\"",
                         name_str(&child_form.conname),
@@ -3605,7 +3605,7 @@ pub fn merge_constraints_into_existing<'mcx>(
             if parent_con.convalidated && child_form.conenforced && !child_form.convalidated {
                 constraintrel.close(RowExclusiveLock)?;
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg(format!(
                         "constraint \"{}\" conflicts with NOT VALID constraint on child table \"{}\"",
                         name_str(&child_form.conname),
@@ -3619,7 +3619,7 @@ pub fn merge_constraints_into_existing<'mcx>(
             if parent_con.conenforced && !child_form.conenforced {
                 constraintrel.close(RowExclusiveLock)?;
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg(format!(
                         "constraint \"{}\" conflicts with NOT ENFORCED constraint on child table \"{}\"",
                         name_str(&child_form.conname),
@@ -3671,7 +3671,7 @@ pub fn merge_constraints_into_existing<'mcx>(
                         .map(|s| s.as_str().to_string())
                         .unwrap_or_default();
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .errcode(::types_error::ERRCODE_DATATYPE_MISMATCH)
                     .errmsg(format!(
                         "column \"{}\" in child table \"{}\" must be marked NOT NULL",
                         colname,
@@ -3680,7 +3680,7 @@ pub fn merge_constraints_into_existing<'mcx>(
                     .into_error());
             }
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .errcode(::types_error::ERRCODE_DATATYPE_MISMATCH)
                 .errmsg(format!(
                     "child table is missing constraint \"{}\"",
                     name_str(&parent_con.conname)
@@ -3769,7 +3769,7 @@ mod tests {
         assert_eq!(CONSTRAINT_UNIQUE, b'u' as i8);
         assert_eq!(CONSTRAINT_EXCLUSION, b'x' as i8);
         assert_eq!(F_NAMEEQ, 62);
-        assert_eq!(types_catalog::pg_constraint::Natts_pg_constraint, 28);
+        assert_eq!(::types_catalog::pg_constraint::Natts_pg_constraint, 28);
         assert_eq!(OID_RANGE_INTERSECT_RANGE_OP, 3900);
         assert_eq!(OID_MULTIRANGE_INTERSECT_MULTIRANGE_OP, 4394);
     }

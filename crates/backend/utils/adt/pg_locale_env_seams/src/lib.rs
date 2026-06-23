@@ -19,7 +19,7 @@
 //! crate as OS FFI, not seamed.)
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `SetMessageEncoding(encoding)` (mbutils.c): set the encoding used for

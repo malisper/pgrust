@@ -24,18 +24,18 @@ use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_RESOURCES, ERRCODE_INVALID_TRANSACTION_STATE,
     ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
-use types_storage::buf::{
+use ::types_storage::buf::{
     buftag, BufferDesc, PgAioWaitRef, BM_DIRTY, BM_IO_ERROR, BM_JUST_DIRTIED, BM_MAX_USAGE_COUNT,
     BM_TAG_VALID, BM_VALID, BUF_FLAG_MASK, BUF_REFCOUNT_ONE, BUF_USAGECOUNT_MASK,
     BUF_USAGECOUNT_ONE, MAX_BLOCK_NUMBER,
 };
-use types_storage::PrefetchBufferResult;
-use types_storage::RelFileLocator;
+use ::types_storage::PrefetchBufferResult;
+use ::types_storage::RelFileLocator;
 use types_core::{
     BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, InvalidBuffer, BLCKSZ,
 };
 
-use mcx::MAX_ALLOC_SIZE;
+use ::mcx::MAX_ALLOC_SIZE;
 
 use crate::{buf_state_get_refcount, buf_state_get_usagecount};
 
@@ -360,7 +360,7 @@ impl LocalBufferManager {
         bufmgr_seams::count_io_op_temp::call(
             types_pgstat::activity_pgstat::IOOp::IOOP_WRITE,
             1,
-            types_core::BLCKSZ as u64,
+            ::types_core::BLCKSZ as u64,
         );
 
         // Mark not-dirty.
@@ -582,7 +582,7 @@ impl LocalBufferManager {
         bufmgr_seams::count_io_op_temp::call(
             types_pgstat::activity_pgstat::IOOp::IOOP_EXTEND,
             extend_by as u64,
-            extend_by as u64 * types_core::BLCKSZ as u64,
+            extend_by as u64 * ::types_core::BLCKSZ as u64,
         );
 
         for buf in buffers.iter().take(extend_by as usize) {
@@ -855,7 +855,7 @@ impl LocalBufferManager {
             buf.buf_id = -i - 2;
             // pgaio_wref_clear(&buf->io_wref) — default is already cleared.
             // wait_backend_pgprocno = INVALID_PROC_NUMBER.
-            buf.wait_backend_pgprocno = types_core::INVALID_PROC_NUMBER;
+            buf.wait_backend_pgprocno = ::types_core::INVALID_PROC_NUMBER;
             descriptors.push(buf);
         }
 

@@ -30,10 +30,10 @@ use types_error::{
     ERRCODE_OUT_OF_MEMORY, ERROR, LOG,
 };
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     InvalidOid, Oid, RepOriginId, Size, TimestampTz, TransactionId, XLogRecPtr,
 };
-use types_core::xact::InvalidTransactionId;
+use ::types_core::xact::InvalidTransactionId;
 
 use types_logical::{
     CallbackInvocation, ChangeHandle, GidHandle, MessageHandle,
@@ -92,7 +92,7 @@ pub use types_logical::{
 // `with_parked_decoding_ctx`) lives in the seams crate so that both decode.c
 // (which parks the ctx around the reorder buffer entry points) and this owner
 // (whose dispatch seam reads it) can reach it without a dependency cycle.
-pub use logical_seams::with_parked_decoding_ctx;
+pub use ::logical_seams::with_parked_decoding_ctx;
 
 /// `LogicalErrorCallbackState` (logical.c:50) — data for the errcontext
 /// callback.
@@ -201,7 +201,7 @@ fn StartupDecodingContext(
     prepare_write: bool,
     do_write: bool,
     update_progress: bool,
-    writer: types_logical::OutputWriter,
+    writer: ::types_logical::OutputWriter,
     wal_segment_size: i32,
 ) -> PgResult<Box<LogicalDecodingContext>> {
     let _slot = slot::my_replication_slot_is_set::call();
@@ -236,7 +236,7 @@ fn StartupDecodingContext(
         output_plugin_private: None,
         processing_required: false,
         builtin_plugin: None,
-        writer: types_logical::OutputWriter::None,
+        writer: ::types_logical::OutputWriter::None,
         output_writer_private: None,
     });
 
@@ -360,7 +360,7 @@ pub fn CreateInitDecodingContext(
     prepare_write: bool,
     do_write: bool,
     update_progress: bool,
-    writer: types_logical::OutputWriter,
+    writer: ::types_logical::OutputWriter,
     wal_level: WalLevel,
     wal_segment_size: i32,
     my_database_id: Oid,
@@ -511,7 +511,7 @@ pub fn CreateDecodingContext(
     prepare_write: bool,
     do_write: bool,
     update_progress: bool,
-    writer: types_logical::OutputWriter,
+    writer: ::types_logical::OutputWriter,
     wal_segment_size: i32,
     my_database_id: Oid,
 ) -> PgResult<Box<LogicalDecodingContext>> {
@@ -583,7 +583,7 @@ pub fn CreateDecodingContext(
          * common for a client to acknowledge a LSN it doesn't have to do
          * anything for, and thus didn't store persistently.
          */
-        utils_error::elog(
+        ::utils_error::elog(
             LOG,
             format!(
                 "{} has been already streamed, forwarding to {}",
@@ -663,7 +663,7 @@ pub fn DecodingContextFindStartpoint(ctx: &mut LogicalDecodingContext) -> PgResu
     /* Initialize from where to start reading WAL. */
     xlogreader::XLogBeginRead::call(ctx.reader, slot::slot_restart_lsn::call());
 
-    utils_error::elog(
+    ::utils_error::elog(
         DEBUG1,
         format!(
             "searching for logical decoding starting point, starting at {}",
@@ -737,14 +737,14 @@ pub fn OutputPluginPrepareWrite(ctx: &mut LogicalDecodingContext, last_write: bo
     }
 
     match ctx.writer {
-        types_logical::OutputWriter::WalSnd => {
+        ::types_logical::OutputWriter::WalSnd => {
             walsender::call_prepare_write::call(ctx.write_location, ctx.write_xid, last_write)?;
         }
-        types_logical::OutputWriter::SqlSrf => {
+        ::types_logical::OutputWriter::SqlSrf => {
             // LogicalOutputPrepareWrite: resetStringInfo(ctx->out).
             mcxt::store_reset_string_info(ctx.out);
         }
-        types_logical::OutputWriter::None => {
+        ::types_logical::OutputWriter::None => {
             return Err(elog_error("no output writer is installed on this context"));
         }
     }
@@ -767,14 +767,14 @@ pub fn OutputPluginWrite(ctx: &mut LogicalDecodingContext, last_write: bool) -> 
     }
 
     match ctx.writer {
-        types_logical::OutputWriter::WalSnd => {
+        ::types_logical::OutputWriter::WalSnd => {
             walsender::call_write::call(ctx.write_location, ctx.write_xid, last_write)?;
         }
-        types_logical::OutputWriter::SqlSrf => {
+        ::types_logical::OutputWriter::SqlSrf => {
             let (lsn, xid) = (ctx.write_location, ctx.write_xid);
-            logical_seams::sql_srf_output_write::call(ctx, lsn, xid)?;
+            ::logical_seams::sql_srf_output_write::call(ctx, lsn, xid)?;
         }
-        types_logical::OutputWriter::None => {
+        ::types_logical::OutputWriter::None => {
             return Err(elog_error("no output writer is installed on this context"));
         }
     }
@@ -793,7 +793,7 @@ pub fn OutputPluginUpdateProgress(
 
     // Only the walsender path has an update_progress callback; the SQL-function
     // path passes NULL (`update_progress == false` keeps us out of here).
-    if ctx.writer == types_logical::OutputWriter::WalSnd {
+    if ctx.writer == ::types_logical::OutputWriter::WalSnd {
         walsender::call_update_progress::call(ctx.write_location, ctx.write_xid, skipped_xact)?;
     }
     Ok(())
@@ -806,7 +806,7 @@ pub fn OutputPluginUpdateProgress(
 pub fn output_plugin_options(
     ctx: &LogicalDecodingContext,
 ) -> Vec<(String, Option<String>)> {
-    logical_seams::output_plugin_options_list(
+    ::logical_seams::output_plugin_options_list(
         ctx.output_plugin_options,
     )
 }
@@ -1634,7 +1634,7 @@ pub fn LogicalIncreaseXminForSlot(current_lsn: XLogRecPtr, xmin: TransactionId) 
     slot::slot_mutex_release::call();
 
     if got_new_xmin {
-        utils_error::elog(
+        ::utils_error::elog(
             DEBUG1,
             format!("got new catalog xmin {} at {}", xmin, lsn_str(current_lsn)),
         )?;
@@ -1684,7 +1684,7 @@ pub fn LogicalIncreaseRestartDecodingForSlot(
         slot::slot_set_candidate_restart_lsn::call(restart_lsn);
         slot::slot_mutex_release::call();
 
-        utils_error::elog(
+        ::utils_error::elog(
             DEBUG1,
             format!(
                 "got new restart lsn {} at {}",
@@ -1698,7 +1698,7 @@ pub fn LogicalIncreaseRestartDecodingForSlot(
         let confirmed_flush = slot::slot_confirmed_flush::call();
         slot::slot_mutex_release::call();
 
-        utils_error::elog(
+        ::utils_error::elog(
             DEBUG1,
             format!(
                 "failed to increase restart lsn: proposed {}, after {}, current candidate {}, current after {}, flushed up to {}",
@@ -1786,7 +1786,7 @@ pub fn LogicalConfirmReceivedLocation(lsn: XLogRecPtr) -> PgResult<()> {
 
             slot::replication_slot_mark_dirty::call();
             slot::replication_slot_save::call()?;
-            utils_error::elog(
+            ::utils_error::elog(
                 DEBUG1,
                 format!(
                     "updated xmin: {} restart: {}",
@@ -1837,7 +1837,7 @@ pub fn UpdateDecodingStats(ctx: &LogicalDecodingContext) -> PgResult<()> {
         return Ok(());
     }
 
-    utils_error::elog(
+    ::utils_error::elog(
         DEBUG2,
         format!(
             "UpdateDecodingStats: updating stats {:#x} {} {} {} {} {} {} {} {}",
@@ -1885,7 +1885,7 @@ pub fn LogicalReplicationSlotHasPendingWal(
             false,
             false,
             false,
-            types_logical::OutputWriter::None,
+            ::types_logical::OutputWriter::None,
             wal_segment_size,
             my_database_id,
         )?;
@@ -1974,7 +1974,7 @@ pub fn LogicalSlotAdvanceAndCheckSnapState(
             false,
             false,
             false,
-            types_logical::OutputWriter::None,
+            ::types_logical::OutputWriter::None,
             wal_segment_size,
             my_database_id,
         )?;
@@ -2119,8 +2119,8 @@ fn procarray_lock_exclusive() {
 
 /// The `ErrorLocation` for `ereport`s that `finish` here (LOG-level reports).
 #[inline]
-fn error_location() -> types_error::ErrorLocation {
-    types_error::ErrorLocation {
+fn error_location() -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation {
         filename: None,
         lineno: 0,
         funcname: None,
@@ -2292,7 +2292,7 @@ pub fn dispatch_reorderbuffer_callback(
 
 /// Install this crate's inward seams.
 pub fn init_seams() {
-    logical_seams::reset_logical_streaming_state::set(
+    ::logical_seams::reset_logical_streaming_state::set(
         ResetLogicalStreamingState,
     );
     // The inward seam carries only the callback variant; the live ctx
@@ -2301,10 +2301,10 @@ pub fn init_seams() {
     // driving us (decode.c's ReorderBufferCommit / Prepare / FinishPrepared / …
     // call sites). This is the faithful single-threaded analog of C's
     // `rb->private_data` back-pointer.
-    logical_seams::dispatch_reorderbuffer_callback::set(
+    ::logical_seams::dispatch_reorderbuffer_callback::set(
         dispatch_reorderbuffer_callback_seam,
     );
-    logical_seams::logical_slot_advance_and_check_snap_state::set(
+    ::logical_seams::logical_slot_advance_and_check_snap_state::set(
         |moveto, found_consistent_snapshot, wal_segment_size, my_database_id| {
             LogicalSlotAdvanceAndCheckSnapState(
                 moveto,
@@ -2314,20 +2314,20 @@ pub fn init_seams() {
             )
         },
     );
-    logical_seams::logical_increase_xmin_for_slot::set(
+    ::logical_seams::logical_increase_xmin_for_slot::set(
         LogicalIncreaseXminForSlot,
     );
-    logical_seams::logical_increase_restart_decoding_for_slot::set(
+    ::logical_seams::logical_increase_restart_decoding_for_slot::set(
         LogicalIncreaseRestartDecodingForSlot,
     );
     // decode.c-facing output-plugin filter wrappers + stats reporter.
-    logical_seams::filter_prepare_cb_wrapper::set(
+    ::logical_seams::filter_prepare_cb_wrapper::set(
         filter_prepare_cb_wrapper,
     );
-    logical_seams::filter_by_origin_cb_wrapper::set(
+    ::logical_seams::filter_by_origin_cb_wrapper::set(
         filter_by_origin_cb_wrapper,
     );
-    logical_seams::UpdateDecodingStats::set(|ctx| {
+    ::logical_seams::UpdateDecodingStats::set(|ctx| {
         UpdateDecodingStats(ctx)
     });
 }
@@ -2345,7 +2345,7 @@ fn dispatch_reorderbuffer_callback_seam(cb: ReorderBufferCallback) -> PgResult<(
     // per-backend). No other `&mut` to the ctx is live across the seam: the
     // reorder buffer entry point borrows `ctx.reorder` (the handle) by value to
     // call the seam and does not retain a `&mut ctx`.
-    logical_seams::with_current_decoding_ctx(|ctx| {
+    ::logical_seams::with_current_decoding_ctx(|ctx| {
         dispatch_reorderbuffer_callback(ctx, cb)
     })
 }

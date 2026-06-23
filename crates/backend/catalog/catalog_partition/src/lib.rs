@@ -38,32 +38,32 @@ use alloc::format;
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 
-use types_catalog::pg_inherits::{
+use ::types_catalog::pg_inherits::{
     Anum_pg_inherits_inhrelid, Anum_pg_inherits_inhseqno, FormData_pg_inherits,
     InheritsRelationId, InheritsRelidSeqnoIndexId, Natts_pg_inherits,
 };
-use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERROR};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::Expr;
-use pathnodes::Bitmapset;
+use ::pathnodes::Bitmapset;
 use rel::{Relation, RelationData};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::AccessShareLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use table as table;
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use next::attmap::build_attrmap_by_name;
-use nodes_core::makefuncs::{make_ands_explicit, make_ands_implicit, make_notclause};
-use clauses::eval_const_expressions;
-use vars::pull_varattnos;
-use prepqual::canonicalize_qual;
-use rewrite_core::map_variable_attnos;
+use ::next::attmap::build_attrmap_by_name;
+use ::nodes_core::makefuncs::{make_ands_explicit, make_ands_implicit, make_notclause};
+use ::clauses::eval_const_expressions;
+use ::vars::pull_varattnos;
+use ::prepqual::canonicalize_qual;
+use ::rewrite_core::map_variable_attnos;
 
 use genam_seams as genam_seams;
 use lsyscache_seams as lsyscache_seams;
@@ -614,7 +614,7 @@ pub fn init_seams() {
 fn has_partition_attrs_seam<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    attnums: Option<&pathnodes::Bitmapset>,
+    attnums: Option<&::pathnodes::Bitmapset>,
 ) -> PgResult<(bool, bool)> {
     let mut used_in_expr = false;
     let found = has_partition_attrs(mcx, rel, attnums, Some(&mut used_in_expr))?;

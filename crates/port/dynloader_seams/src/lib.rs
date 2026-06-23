@@ -6,12 +6,12 @@
 //! unit for them. The platform runtime installs the real implementations; a
 //! call panics loudly until then. The opaque `void *` library handle never
 //! crosses the idiomatic surface — the runtime maps it to/from an integer
-//! [`LibraryHandle`](types_dfmgr::LibraryHandle) token.
+//! [`LibraryHandle`](::types_dfmgr::LibraryHandle) token.
 
 use types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen};
-use types_error::PgResult;
-use fmgr::LoadedExternalFunc;
-use types_logical::CallbackInvocation;
+use ::types_error::PgResult;
+use ::fmgr::LoadedExternalFunc;
+use ::types_logical::CallbackInvocation;
 
 seam_core::seam!(
     /// `stat(libname, &stat_buf)` — the device/inode identity used by

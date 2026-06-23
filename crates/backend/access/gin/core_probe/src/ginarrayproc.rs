@@ -13,16 +13,16 @@
 //! `deconstruct_array`) reach across a subsystem boundary, so they go through
 //! the installed lsyscache / arrayfuncs seams.
 
-use mcx::Mcx;
-use types_core::Oid;
-use datum::datum::Datum;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::datum::datum::Datum;
 use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use types_jsonb::jsonb::{
+use ::types_jsonb::jsonb::{
     GinTernaryValue, GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_ALL, GIN_SEARCH_MODE_DEFAULT,
     GIN_SEARCH_MODE_INCLUDE_EMPTY, GIN_TRUE,
 };
 
-use types_scan::StrategyNumber;
+use ::types_scan::StrategyNumber;
 
 use arrayfuncs_seams as arrayfuncs_seams;
 use lsyscache_seams as lsyscache_seams;

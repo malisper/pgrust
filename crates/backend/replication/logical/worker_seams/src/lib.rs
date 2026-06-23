@@ -19,7 +19,7 @@
 
 use applyparallel::{DsmSetupResult, FileSet, ShmMqReceived, ShmMqResult};
 use types_core::{Oid, TransactionId, XLogRecPtr};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 // --- apply-worker / subscription identity + state -------------------------
 // `am_leader_apply_worker()` (worker.c): leader apply worker?
@@ -117,7 +117,7 @@ seam_core::seam!(
     /// `walrcv_disconnect(LogRepWorkerWalRcvConn)` (walreceiver dispatch via the
     /// worker's connection global): gracefully disconnect from the remote side.
     /// Can `ereport(ERROR)` on a protocol/libpq failure, carried on `Err`.
-    pub fn walrcv_disconnect() -> types_error::PgResult<()>
+    pub fn walrcv_disconnect() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -130,7 +130,7 @@ seam_core::seam!(
     /// `FileSetDeleteAll(MyLogicalRepWorker->stream_fileset)`: delete the
     /// streaming-transaction fileset and all its buffiles. Can `ereport` on a
     /// filesystem error, carried on `Err`.
-    pub fn fileset_delete_all() -> types_error::PgResult<()>
+    pub fn fileset_delete_all() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -143,5 +143,5 @@ seam_core::seam!(
     /// `LogicalRepWorkersWakeupAtCommit(Oid subid)` (worker.c) — schedule a
     /// wakeup of the apply workers for subscription `subid` at the next
     /// transaction commit, so a rename takes effect quickly.
-    pub fn LogicalRepWorkersWakeupAtCommit(subid: types_core::Oid) -> types_error::PgResult<()>
+    pub fn LogicalRepWorkersWakeupAtCommit(subid: ::types_core::Oid) -> ::types_error::PgResult<()>
 );

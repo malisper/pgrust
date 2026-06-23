@@ -14,13 +14,13 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{Mcx, PgString};
-use types_core::primitive::Index;
-use types_core::Oid;
+use ::types_core::primitive::Index;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 use types_explain::{ExplainFormat, ExplainState};
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
-use types_scan::sdir::{ScanDirection, BackwardScanDirection, ForwardScanDirection};
+use ::types_scan::sdir::{ScanDirection, BackwardScanDirection, ForwardScanDirection};
 
 use explain_format as fmt;
 use ruleutils as ruleutils;
@@ -218,7 +218,7 @@ pub fn ExplainTargetRel<'mcx>(
             //   "xmltable" : "json_table". The TableFunc node is carried by the
             //   TableFuncScan plan.
             let tfs = plan_node.expect_tablefuncscan();
-            objectname = Some(mcx::PgString::from_str_in(
+            objectname = Some(::mcx::PgString::from_str_in(
                 if tfs.tablefunc.functype == ::nodes::primnodes::TFT_XMLTABLE {
                     "xmltable"
                 } else {

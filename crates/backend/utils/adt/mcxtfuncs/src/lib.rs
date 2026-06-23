@@ -37,15 +37,15 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use utils_error::ereport;
-use types_error::error::{ERROR, WARNING};
+use ::utils_error::ereport;
+use ::types_error::error::{ERROR, WARNING};
 use types_error::{ErrorLocation, PgResult};
 
-use procsignal_seams::send_proc_signal;
+use ::procsignal_seams::send_proc_signal;
 use mcxtfuncs_seams as seam;
 use mcxtfuncs_seams::{McxtRow, MemoryContextRef, MemoryContextType};
-use mbutils_seams::pg_mbcliplen;
-use types_storage::ProcSignalReason;
+use ::mbutils_seams::pg_mbcliplen;
+use ::types_storage::ProcSignalReason;
 
 pub mod fmgr_builtins;
 

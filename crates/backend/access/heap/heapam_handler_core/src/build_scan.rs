@@ -18,15 +18,15 @@
 
 use mcx::{Mcx, PgVec};
 
-use utils_error::ereport;
-use types_core::primitive::{AttrNumber, BlockNumber};
+use ::utils_error::ereport;
+use ::types_core::primitive::{AttrNumber, BlockNumber};
 use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, WARNING};
-use rel::Relation;
-use types_scan::sdir::ForwardScanDirection;
-use snapshot::snapshot::{HTSV_Result, IsMVCCSnapshot};
-use types_tableam::relscan::TableScanDescData;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_scan::sdir::ForwardScanDirection;
+use ::snapshot::snapshot::{HTSV_Result, IsMVCCSnapshot};
+use ::types_tableam::relscan::TableScanDescData;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{
     HeapTupleData, ItemPointerData, HEAP_HOT_UPDATED, HEAP_ONLY_TUPLE,
 };
 
@@ -38,8 +38,8 @@ use execTuples_seams as slot_seam;
 use execUtils_seams as exec_util_seam;
 use bufmgr_seams as bufmgr_seam;
 
-use types_core::fmgr::INDEX_MAX_KEYS;
-use types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
+use ::types_core::fmgr::INDEX_MAX_KEYS;
+use ::types_core::xact::{InvalidTransactionId, TransactionIdIsValid};
 
 /// `BUFFER_LOCK_UNLOCK` / `BUFFER_LOCK_SHARE` (bufmgr.h).
 const BUFFER_LOCK_UNLOCK: i32 = 0;
@@ -74,7 +74,7 @@ fn heap_tuple_is_hot_updated(tuple: &HeapTupleData<'_>) -> bool {
         .as_ref()
         .expect("heap_tuple_is_hot_updated: tuple has no header");
     (hdr.t_infomask2 & HEAP_HOT_UPDATED) != 0
-        && (hdr.t_infomask & types_tuple::heaptuple::HEAP_XMAX_INVALID) == 0
+        && (hdr.t_infomask & ::types_tuple::heaptuple::HEAP_XMAX_INVALID) == 0
         && !visibility::htup::HeapTupleHeaderXminInvalid(hdr)
 }
 
@@ -107,7 +107,7 @@ fn heapam_scan_get_blocks_done(scan: &mut TableScanDescData<'_>) -> BlockNumber 
 #[allow(clippy::type_complexity)]
 pub(crate) fn form_index_datum<'mcx>(
     index_info: &nodes::execnodes::IndexInfo<'mcx>,
-    expr_states: &mut PgVec<'mcx, mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>,
+    expr_states: &mut PgVec<'mcx, ::mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>,
     slot: nodes::SlotId,
     econtext: nodes::EcxtId,
     estate: &mut nodes::EStateData<'mcx>,
@@ -115,7 +115,7 @@ pub(crate) fn form_index_datum<'mcx>(
     let mcx = estate.es_query_cxt;
 
     let n = index_info.ii_NumIndexAttrs as usize;
-    let mut values: PgVec<'mcx, Datum<'mcx>> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut values: PgVec<'mcx, Datum<'mcx>> = ::mcx::vec_with_capacity_in(mcx, n)?;
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
 
     // Index into the prepared expression states as we consume expr columns.
@@ -166,7 +166,7 @@ struct IndexDecision {
     count_live: bool,
     /// The caller must drop the buffer lock, `XactLockTableWait(xwait)`, and
     /// recheck visibility (the C `goto recheck`).
-    wait_xwait: Option<types_core::TransactionId>,
+    wait_xwait: Option<::types_core::TransactionId>,
 }
 
 /// `heapam_index_build_range_scan(...)` (heapam_handler.c) — the serial /
@@ -229,12 +229,12 @@ pub fn heapam_index_build_range_scan<'mcx>(
     // hoisted out of the per-tuple loop. `ii_ExpressionsState` is nulled at
     // teardown (it would point into the now-gone estate), so we keep the
     // compiled states in this local across the scan instead.
-    let mut expr_states: PgVec<'mcx, mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>> =
+    let mut expr_states: PgVec<'mcx, ::mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>> =
         if let Some(exprs) = index_info.ii_Expressions.as_ref() {
             let exprs: Vec<nodes::primnodes::Expr> = exprs.iter().cloned().collect();
             expr_seam::exec_prepare_expr_list::call(&exprs, &mut estate)?
         } else {
-            mcx::vec_with_capacity_in(mcx, 0)?
+            ::mcx::vec_with_capacity_in(mcx, 0)?
         };
 
     // Prepare for scan of the base relation.  In a normal index build we use
@@ -253,7 +253,7 @@ pub fn heapam_index_build_range_scan<'mcx>(
     // Serial index build: begin our own heap scan, registering a snapshot whose
     // lifetime is under our direct control if we use an MVCC snapshot.
     let mut need_unregister_snapshot = false;
-    let snapshot: types_tableam::tableam::Snapshot = if !TransactionIdIsValid(oldest_xmin) {
+    let snapshot: ::types_tableam::tableam::Snapshot = if !TransactionIdIsValid(oldest_xmin) {
         let snap = snapmgr_seams::get_transaction_snapshot::call()?;
         let snap = snapmgr_seams::register_snapshot::call(snap)?;
         need_unregister_snapshot = true;
@@ -269,7 +269,7 @@ pub fn heapam_index_build_range_scan<'mcx>(
         heap_relation,
         snapshot.clone(),
         0,
-        mcx::vec_with_capacity_in(mcx, 0)?,
+        ::mcx::vec_with_capacity_in(mcx, 0)?,
         true,
         allow_sync,
     )?;
@@ -511,7 +511,7 @@ fn classify_vacuum_result<'mcx>(
     heap_relation: &Relation<'mcx>,
     index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
 ) -> PgResult<IndexDecision> {
-    use snapshot::snapshot::HTSV_Result::*;
+    use ::snapshot::snapshot::HTSV_Result::*;
 
     let hdr = tuple
         .t_data

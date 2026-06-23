@@ -34,49 +34,49 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use types_acl::ACLCHECK_NOT_OWNER;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_attribute::{
+use ::types_acl::ACLCHECK_NOT_OWNER;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attinhcount, Anum_pg_attribute_attnum, PgAttributeUpdateRow,
 };
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
 use ::nodes::parsenodes::OBJECT_INDEX;
-use parsenodes::RenameStmt;
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
-use types_tuple::access::{
+use ::parsenodes::RenameStmt;
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
+use ::types_tuple::access::{
     RangeVar as AccessRangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX,
     RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
     RELKIND_VIEW,
 };
 use types_tuple::heaptuple::FormedTuple;
 
-use common_relation::relation_open;
-use utils_error::ereport;
+use ::common_relation::relation_open;
+use ::utils_error::ereport;
 
 use aclchk_seams as aclchk_seam;
 use indexing_seams as indexing_seam;
 use catalog_namespace::{RangeVarGetRelidExtended, RVR_MISSING_OK};
-use pg_constraint::RenameConstraintById;
-use lmgr::UnlockRelationOid;
+use ::pg_constraint::RenameConstraintById;
+use ::lmgr::UnlockRelationOid;
 use pg_depend_seams as depend_seam;
 use pg_inherits::{find_all_inheritors, find_inheritance_children};
 use pg_type_seams as pg_type_seam;
 use tablespace_globals_seams as ts_globals_seam;
 use lsyscache_seams as lsyscache_seam;
-use cache_syscache::cacheinfo::RELOID;
+use ::cache_syscache::cacheinfo::RELOID;
 use cache_syscache::{
     SearchSysCacheCopyAttName, SysCacheGetAttrNotNull, ATTNAME,
 };
 use syscache_seams as syscache_seam;
 use miscinit_seams as miscinit_seam;
-use types_catalog::pg_class::Anum_pg_class_reloftype;
+use ::types_catalog::pg_class::Anum_pg_class_reloftype;
 
 use tablecmds_seams as seam;
 
@@ -292,7 +292,7 @@ fn renameatt_internal<'mcx>(
     // attrelation = table_open(AttributeRelationId, RowExclusiveLock);
     let attrelation = relation_open(
         mcx,
-        types_catalog::pg_attribute::AttributeRelationId,
+        ::types_catalog::pg_attribute::AttributeRelationId,
         RowExclusiveLock,
     )?;
 

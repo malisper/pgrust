@@ -5,7 +5,7 @@
 //! [`crate::io`]; this module has the construction, slope, intersection,
 //! containment, and relational routines.
 
-use types_core::geo::{Point, LINE};
+use ::types_core::geo::{Point, LINE};
 use types_error::{PgError, PgResult};
 
 use crate::f8::{float8_div, float8_eq, float8_mi, float8_mul, float8_pl, get_float8_infinity};

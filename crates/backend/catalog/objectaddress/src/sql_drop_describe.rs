@@ -12,12 +12,12 @@ extern crate alloc;
 
 use alloc::string::ToString;
 
-use mcx::Mcx;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_event_trigger::SqlDropObjectInfo;
+use ::mcx::Mcx;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_event_trigger::SqlDropObjectInfo;
 use types_core::{Oid, OidIsValid};
-use types_error::PgResult;
-use types_storage::lock::AccessShareLock;
+use ::types_error::PgResult;
+use ::types_storage::lock::AccessShareLock;
 
 use namespace_seams as namespace;
 use lsyscache_seams as lsyscache;
@@ -122,10 +122,10 @@ fn fetch_owning_relid<'mcx>(
         Some(tuple) => {
             match crate::fmgr_sql::heap_getattr(mcx, &tuple, attnum_relid as i32, &catalog.rd_att)? {
                 Some(d) => d.as_oid(),
-                None => types_core::InvalidOid,
+                None => ::types_core::InvalidOid,
             }
         }
-        None => types_core::InvalidOid, // shouldn't happen
+        None => ::types_core::InvalidOid, // shouldn't happen
     };
     catalog.close(AccessShareLock)?;
     Ok(relid)
@@ -294,7 +294,7 @@ pub fn event_trigger_describe_command_object<'mcx>(
                 Some(t) => t,
                 None => {
                     catalog.close(AccessShareLock)?;
-                    return Err(utils_error::ereport(types_error::ERROR)
+                    return Err(utils_error::ereport(::types_error::ERROR)
                         .errmsg_internal(format!(
                             "cache lookup failed for object {}/{}",
                             object.classId, object.objectId
@@ -311,7 +311,7 @@ pub fn event_trigger_describe_command_object<'mcx>(
                 }
                 None => {
                     catalog.close(AccessShareLock)?;
-                    return Err(utils_error::ereport(types_error::ERROR)
+                    return Err(utils_error::ereport(::types_error::ERROR)
                         .errmsg_internal(format!(
                             "invalid null namespace in object {}/{}/{}",
                             object.classId, object.objectId, object.objectSubId

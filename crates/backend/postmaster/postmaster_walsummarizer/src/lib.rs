@@ -23,7 +23,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use types_core::{
     ForkNumber, Oid, TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo, FSM_FORKNUM, INVALID_PROC_NUMBER,
@@ -33,16 +33,16 @@ use types_error::{
     DEBUG1, ERRCODE_INTERNAL_ERROR, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, PgError,
     PgResult, WARNING,
 };
-use types_error::ErrorLocation;
-use utils_error::ereport;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::types_error::ErrorLocation;
+use ::utils_error::ereport;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 use types_storage::{LWLockMode, RelFileLocator};
-use types_pgstat::wait_event::{WAIT_EVENT_WAL_SUMMARIZER_ERROR, WAIT_EVENT_WAL_SUMMARIZER_WAL};
-use types_startup::StartupData;
-use wal::RM_XACT_ID;
+use ::types_pgstat::wait_event::{WAIT_EVENT_WAL_SUMMARIZER_ERROR, WAIT_EVENT_WAL_SUMMARIZER_WAL};
+use ::types_startup::StartupData;
+use ::wal::RM_XACT_ID;
 use types_walsummarizer::{BlockTag, ReadRecordResult, WalSummarizerData, WalSummaryFile, XLogReaderHandle};
 
-use types_blkreftable::BlockRefTable;
+use ::types_blkreftable::BlockRefTable;
 
 use ipc_shmem_seams as shmem;
 use dsm_core_seams as ipc;
@@ -376,7 +376,7 @@ fn error_recovery_cleanup(err: &PgError) -> PgResult<()> {
     miscinit::hold_interrupts::call();
 
     // EmitErrorReport(): report the error to the server log.
-    utils_error::emit_error_report_for(err);
+    ::utils_error::emit_error_report_for(err);
 
     // Release resources we might have acquired.
     let _ = lwlock::lwlock_release_all::call();
@@ -390,7 +390,7 @@ fn error_recovery_cleanup(err: &PgError) -> PgResult<()> {
     // FlushErrorState() + MemoryContextReset of the work context are handled by
     // the host (the work context lifetime is owned at the entry point); here
     // we have nothing further to reset.
-    utils_error::FlushErrorState();
+    ::utils_error::FlushErrorState();
 
     // RESUME_INTERRUPTS().
     miscinit::resume_interrupts::call();
@@ -1565,7 +1565,7 @@ fn timestamp_time_now() -> i64 {
 /// C reset) when `f` returns. `SummarizeWAL` wraps its whole record-walk in one
 /// such context so the block-reference table and all loop allocations share it.
 fn with_top_mcx<R>(f: impl FnOnce(Mcx<'_>) -> PgResult<R>) -> PgResult<R> {
-    let ctx = mcx::MemoryContext::new("Wal Summarizer");
+    let ctx = ::mcx::MemoryContext::new("Wal Summarizer");
     f(ctx.mcx())
 }
 
@@ -1634,7 +1634,7 @@ fn wal_summarizer_main_entry(startup_data: &StartupData) -> ! {
         Ok(()) => unreachable!("WalSummarizerMain returned Ok; it only exits via proc_exit"),
         Err(err) => {
             // A FATAL/unhandled error before the loop's setjmp is armed.
-            utils_error::emit_error_report_for(&err);
+            ::utils_error::emit_error_report_for(&err);
             ipc::proc_exit::call(1, initsmall::my_proc_pid::call());
         }
     }

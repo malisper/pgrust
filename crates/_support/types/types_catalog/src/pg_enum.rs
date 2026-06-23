@@ -1,8 +1,8 @@
 //! `pg_enum` catalog row layout and constants (`catalog/pg_enum.h`,
 //! PostgreSQL 18.3), trimmed to what the `backend-catalog-pg-enum` port reads.
 
-use types_core::primitive::Oid;
-use types_core::TransactionId;
+use ::types_core::primitive::Oid;
+use ::types_core::TransactionId;
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_enum.h CATALOG / DECLARE_*).

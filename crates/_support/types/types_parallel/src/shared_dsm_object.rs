@@ -70,7 +70,7 @@
 use core::marker::PhantomData;
 use core::mem::size_of;
 
-use types_core::Size;
+use ::types_core::Size;
 // The execParallel-visible `dsm_segment *` handle — the one per-node crates
 // receive from the `pcxt_seg` / `pwcxt_seg` seams. It is value-identical to the
 // parallel-internal `types_parallel::DsmSegmentHandle` (both wrap the same real

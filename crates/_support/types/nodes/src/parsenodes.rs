@@ -4,10 +4,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_acl::AclMode;
-use types_core::primitive::{Index, Oid};
-use types_error::PgResult;
-use types_storage::lock::LOCKMODE;
+use ::types_acl::AclMode;
+use ::types_core::primitive::{Index, Oid};
+use ::types_error::PgResult;
+use ::types_storage::lock::LOCKMODE;
 
 use crate::bitmapset::Bitmapset;
 
@@ -105,7 +105,7 @@ pub struct RangeTblEntry<'mcx> {
     pub values_lists: PgVec<'mcx, crate::nodes::NodePtr<'mcx>>,
     // --- Fields valid for a CTE RTE (else NULL/zero): ---
     /// `char *ctename` — name of the WITH list item.
-    pub ctename: Option<mcx::PgString<'mcx>>,
+    pub ctename: Option<::mcx::PgString<'mcx>>,
     /// `Index ctelevelsup` — number of query levels up.
     pub ctelevelsup: Index,
     /// `bool self_reference` — is this a recursive self-reference?
@@ -119,7 +119,7 @@ pub struct RangeTblEntry<'mcx> {
     pub colcollations: PgVec<'mcx, Oid>,
     // --- Fields valid for ENR RTEs (else NULL/zero): ---
     /// `char *enrname` — name of ephemeral named relation.
-    pub enrname: Option<mcx::PgString<'mcx>>,
+    pub enrname: Option<::mcx::PgString<'mcx>>,
     /// `Cardinality enrtuples` — estimated or actual from caller.
     pub enrtuples: f64,
     // --- Fields valid for a GROUP RTE (else NIL): ---
@@ -191,7 +191,7 @@ impl<'mcx> RangeTblEntry<'mcx> {
             perminfoindex: self.perminfoindex,
             tablesample: clone_opt_node(&self.tablesample, mcx)?,
             subquery: match &self.subquery {
-                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                Some(q) => Some(::mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
                 None => None,
             },
             security_barrier: self.security_barrier,
@@ -232,7 +232,7 @@ fn clone_opt_alias<'b>(
     mcx: Mcx<'b>,
 ) -> PgResult<Option<PgBox<'b, crate::rawnodes::Alias<'b>>>> {
     match a {
-        Some(a) => Ok(Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?)),
+        Some(a) => Ok(Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -242,7 +242,7 @@ fn clone_opt_node<'b>(
     mcx: Mcx<'b>,
 ) -> PgResult<Option<crate::nodes::NodePtr<'b>>> {
     match n {
-        Some(n) => Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
+        Some(n) => Ok(Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -251,9 +251,9 @@ fn clone_node_vec<'b>(
     v: &PgVec<'_, crate::nodes::NodePtr<'_>>,
     mcx: Mcx<'b>,
 ) -> PgResult<PgVec<'b, crate::nodes::NodePtr<'b>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for n in v.iter() {
-        out.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+        out.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
     Ok(out)
 }
@@ -262,7 +262,7 @@ fn clone_scalar_vec<'b, T: Copy>(
     v: &PgVec<'_, T>,
     mcx: Mcx<'b>,
 ) -> PgResult<PgVec<'b, T>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for x in v.iter() {
         out.push(*x);
     }
@@ -298,15 +298,15 @@ impl RTEPermissionInfo<'_> {
             requiredPerms: self.requiredPerms,
             checkAsUser: self.checkAsUser,
             selectedCols: match &self.selectedCols {
-                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
             insertedCols: match &self.insertedCols {
-                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
             updatedCols: match &self.updatedCols {
-                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
         })
@@ -455,7 +455,7 @@ pub struct RoleSpec<'mcx> {
     /// `roletype`.
     pub roletype: RoleSpecType,
     /// `rolename` — filled only for `ROLESPEC_CSTRING`.
-    pub rolename: Option<mcx::PgString<'mcx>>,
+    pub rolename: Option<::mcx::PgString<'mcx>>,
 }
 
 impl RoleSpec<'_> {

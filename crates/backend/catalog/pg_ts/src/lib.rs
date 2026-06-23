@@ -25,22 +25,22 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, MemoryContext, PgVec};
-use cache::SysCacheKey;
-use types_core::primitive::{AttrNumber, Oid};
-use datum::Datum as ScalarWord;
+use ::cache::SysCacheKey;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult};
 use rel::{Relation, RelationData};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple};
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table::{table_close, table_open};
-use catalog_catalog::GetNewOidWithIndex;
-use indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
+use ::catalog_catalog::GetNewOidWithIndex;
+use ::indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
 use indexing_seams as indexing_seams;
 use cache_syscache as syscache;
 
@@ -49,7 +49,7 @@ use tsearchcmds_seams::{
     TSTemplateForm,
 };
 
-use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
+use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 
 /* ===========================================================================
  * Catalog OIDs + attribute numbers (catalog/pg_ts_*_d.h).
@@ -118,7 +118,7 @@ fn name_datum<'mcx>(mcx: Mcx<'mcx>, src: &str) -> PgResult<Datum<'mcx>> {
     for (i, &b) in src.as_bytes().iter().take(63).enumerate() {
         name[i] = b;
     }
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &name[..])?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &name[..])?))
 }
 
 /// `CStringGetTextDatum(src)` — pack a string into a `text` varlena image.
@@ -192,7 +192,7 @@ fn systable_scan_foreach(
             break;
         };
         let cols = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
-        let mut values: PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+        let mut values: PgVec<'_, Datum<'_>> = ::mcx::vec_with_capacity_in(smcx, cols.len())?;
         for (value, _null) in cols.iter() {
             values.push(value.clone());
         }
@@ -719,7 +719,7 @@ fn update_dict_options(dict_id: Oid, opttext: Option<&str>) -> PgResult<()> {
      * full row from the cached tuple's deformed columns with the one attribute
      * replaced. */
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let cols = heaptuple::heap_deform_tuple(
+    let cols = ::heaptuple::heap_deform_tuple(
         mcx,
         &tup.tuple,
         &rel.rd_att,

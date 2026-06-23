@@ -2,13 +2,13 @@
 //! pass-throughs to the substrate seams (relcache / freespace / lmgr /
 //! xloginsert) used by both `brin_pageops.c` and `brin_revmap.c`.
 
-use utils_error::PgResult;
-use types_core::primitive::BlockNumber;
-use rel::Relation;
-use types_core::RmgrId;
-use types_storage::buf::Buffer;
+use ::utils_error::PgResult;
+use ::types_core::primitive::BlockNumber;
+use ::rel::Relation;
+use ::types_core::RmgrId;
+use ::types_storage::buf::Buffer;
 
-pub use types_core::primitive::InvalidBlockNumber;
+pub use ::types_core::primitive::InvalidBlockNumber;
 
 // ===========================================================================
 // brin_xlog.h opcodes (high nibble of the WAL info byte).
@@ -98,8 +98,8 @@ pub fn free_space_map_vacuum_range(
 // lmgr (lmgr.c) — relation-extension lock guard.
 // ===========================================================================
 
-pub use lmgr_seams::lock_relation_for_extension;
-pub use lmgr_seams::RelationExtensionLockGuard;
+pub use ::lmgr_seams::lock_relation_for_extension;
+pub use ::lmgr_seams::RelationExtensionLockGuard;
 
 // ===========================================================================
 // xloginsert (xloginsert.c).
@@ -126,11 +126,11 @@ pub fn xlog_register_buf_data(block_id: u8, data: &[u8]) -> PgResult<()> {
 }
 
 /// `XLogInsert(rmid, info)`.
-pub fn xlog_insert_record(rmid: RmgrId, info: u8) -> PgResult<types_core::XLogRecPtr> {
+pub fn xlog_insert_record(rmid: RmgrId, info: u8) -> PgResult<::types_core::XLogRecPtr> {
     xloginsert_seams::xlog_insert_record::call(rmid, info)
 }
 
 /// `log_newpage_buffer(buffer, page_std)`.
-pub fn log_newpage_buffer(buffer: Buffer, page_std: bool) -> PgResult<types_core::XLogRecPtr> {
+pub fn log_newpage_buffer(buffer: Buffer, page_std: bool) -> PgResult<::types_core::XLogRecPtr> {
     xloginsert_seams::log_newpage_buffer::call(buffer, page_std)
 }

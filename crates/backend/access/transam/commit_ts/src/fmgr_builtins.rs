@@ -17,7 +17,7 @@
 //! 6168 `pg_xact_commit_timestamp_origin`) are NOT expressible at this boundary
 //! and are left to their own registration.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::{TimestampTz, TransactionId};

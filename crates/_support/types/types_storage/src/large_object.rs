@@ -4,7 +4,7 @@
 use alloc::rc::Rc;
 
 use types_core::{int64, uint64, Oid, SubTransactionId, BLCKSZ};
-use snapshot::SnapshotData;
+use ::snapshot::SnapshotData;
 
 /// `Snapshot` (`utils/snapshot.h`) — the C `Snapshot` is a shared pointer; the
 /// owned model carries it as `Option<Rc<SnapshotData>>` (`None` is the C

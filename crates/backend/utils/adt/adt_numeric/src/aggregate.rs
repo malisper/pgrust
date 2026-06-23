@@ -18,8 +18,8 @@
 //! abbreviation machinery).
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
-use types_numeric::var::{NumericAggState, NumericSign, NumericSumAccum, NumericVar};
+use ::types_error::PgResult;
+use ::types_numeric::var::{NumericAggState, NumericSign, NumericSumAccum, NumericVar};
 use types_numeric::{
     numeric_digit_at, numeric_digits, numeric_is_ninf, numeric_is_pinf, numeric_is_special,
     numeric_ndigits, numeric_weight, Int128AggState, NumericDigit, NumericSortSupport, DEC_DIGITS,
@@ -1141,11 +1141,11 @@ fn int128_to_numericvar<'mcx>(mcx: Mcx<'mcx>, val: i128) -> PgResult<NumericVar<
 // backend-utils-adt-float::aggregates.
 // ---------------------------------------------------------------------------
 
-use arrayfuncs::construct::construct_array;
-use arrayfuncs::foundation::{
+use ::arrayfuncs::construct::construct_array;
+use ::arrayfuncs::foundation::{
     self, arr_dim, arr_elemtype, arr_hasnull, arr_ndim, fetch_att, INT8OID,
 };
-use datum::Datum as ByValDatum;
+use ::datum::Datum as ByValDatum;
 
 /// INT8 array element storage attributes (`pg_type`): 8-byte, pass-by-value,
 /// `'d'` alignment — matching `construct_array`'s INT8OID switch arm.
@@ -1158,7 +1158,7 @@ const INT8_ELMALIGN: u8 = b'd';
 /// ARR_OVERHEAD_NONULLS(1) + sizeof(Int8TransTypeData)` and otherwise
 /// `elog(ERROR, "expected 2-element int8 array")`.
 fn check_int8_trans_array(transarray: &[u8]) -> PgResult<(i64, i64)> {
-    use types_error::PgError;
+    use ::types_error::PgError;
     // ARR_HASNULL || ARR_SIZE != ARR_OVERHEAD_NONULLS(1) + sizeof(Int8TransTypeData)
     // is equivalent (for a well-formed non-null array) to: 1-D, no nulls,
     // INT8OID element type, exactly 2 elements.
@@ -1454,7 +1454,7 @@ pub fn numeric_abbrev_abort(memtupcount: i32, nss: &mut NumericSortSupportState<
 // tuplesort abbreviation owner lands.
 // ---------------------------------------------------------------------------
 
-use types_sortsupport::SortSupportData;
+use ::types_sortsupport::SortSupportData;
 
 /// The `ssup->ssup_extra` payload for numeric abbreviated-key sorting
 /// (numeric.c:340-347 `NumericSortSupport`): the in-crate computation fields
@@ -1645,7 +1645,7 @@ pub fn hash_numeric_extended(num: &[u8], seed: u64) -> u64 {
 /// fallible reserve, surfacing OOM as the `numeric value out of range` error.
 fn alloc_zeroed_limbs<'mcx>(mcx: Mcx<'mcx>, n: usize) -> PgResult<PgVec<'mcx, i32>> {
     use types_error::{PgError, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
-    let mut v = mcx::vec_with_capacity_in::<i32>(mcx, n).map_err(|_| {
+    let mut v = ::mcx::vec_with_capacity_in::<i32>(mcx, n).map_err(|_| {
         PgError::error("value overflows numeric format")
             .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
     })?;
@@ -1683,7 +1683,7 @@ fn clone_agg_state<'mcx>(mcx: Mcx<'mcx>, src: &NumericAggState<'_>) -> NumericAg
 // total varlena length there with SET_VARSIZE.  We reproduce that framing so
 // the serialized state is the full on-disk `bytea` image.
 
-use datum::VARHDRSZ;
+use ::datum::VARHDRSZ;
 
 fn begin_typsend<'mcx>(mcx: Mcx<'mcx>) -> PgVec<'mcx, u8> {
     let mut buf = PgVec::new_in(mcx);

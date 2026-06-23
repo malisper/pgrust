@@ -17,7 +17,7 @@
 //! [`::nodes::fmgr::FunctionCallInfoBaseData`], which now carries the real
 //! `args: Vec<NullableDatum>` / `isnull` / `flinfo` payload (#296 widened the
 //! frame). The OID-keyed shared fmgr dispatch
-//! [`fmgr_seams::function_call_invoke`] runs the function by
+//! [`::fmgr_seams::function_call_invoke`] runs the function by
 //! re-resolving `pertrans->transfn.fn_oid` under `pertrans->aggCollation` over
 //! the gathered `args`, exactly as the merged eval_scalar.rs `EEOP_FUNCEXPR`
 //! path already does. So the by-value transfn call-frame reads/writes and the
@@ -36,18 +36,18 @@
 use execTuples_seams::{
     exec_clear_tuple, exec_copy_slot, store_virtual_values,
 };
-use fmgr_seams::function_call2_coll_datum;
+use ::fmgr_seams::function_call2_coll_datum;
 use tuplesort_seams::{tuplesort_putdatum, tuplesort_puttupleslot};
 
 // The bare-word newtype: the transition-value form the fmgr/tuplesort seams and
 // the nodeAgg-parked transfn frame operate on.
-use datum::Datum;
+use ::datum::Datum;
 // The canonical unified value type (Datum-unification keystone) — what the
 // keystone-owned `AggStatePerTransData.lastdatum` / `AggStatePerGroupData
 // .trans_value` carry. Transition values are scalar/pointer words under the
 // transitional model, so they cross into its by-value arm.
 use types_tuple::heaptuple::Datum as DatumV;
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// Recover the bare scalar word from a stored canonical by-value datum (the
 /// transitional bridge: the fmgr/tuplesort seams take a word).
@@ -133,7 +133,7 @@ fn invoke_transfn(
     // newVal = FunctionCallInvoke(fcinfo);  (re-resolved by OID, run under the
     // aggregate collation over the args[] frame just populated). A transfn
     // ereport propagates, as in C's advance_transition_function.
-    fmgr_seams::function_call_invoke::call(fn_oid, collation, &fcinfo.args)
+    ::fmgr_seams::function_call_invoke::call(fn_oid, collation, &fcinfo.args)
 }
 
 // ---------------------------------------------------------------------------
@@ -163,12 +163,12 @@ fn invoke_transfn(
 pub fn ExecAggCopyTransValue<'mcx>(
     aggstate: &mut AggState<'mcx>,
     pertrans: usize,
-    new_value: datum::Datum,
+    new_value: ::datum::Datum,
     new_value_is_null: bool,
-    old_value: datum::Datum,
+    old_value: ::datum::Datum,
     old_value_is_null: bool,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<datum::Datum> {
+) -> PgResult<::datum::Datum> {
     let _ = (&aggstate, pertrans, &estate);
     // Assert(newValue != oldValue);
     debug_assert_ne!(new_value, old_value);
@@ -809,7 +809,7 @@ fn ecxt_id_to_aggcontext_index<'mcx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodeAgg::AggStatePerTransData;
+    use ::nodeAgg::AggStatePerTransData;
 
     /// `1219` — `pg_proc.dat` OID of `int8inc(int8) -> int8`, a by-value
     /// strict transition function (the SUM/COUNT increment leg).
@@ -823,7 +823,7 @@ mod tests {
         use std::sync::Once;
         static INSTALL: Once = Once::new();
         INSTALL.call_once(|| {
-            fmgr_seams::function_call_invoke::set(
+            ::fmgr_seams::function_call_invoke::set(
                 |fn_oid, _collation, args| match fn_oid {
                     INT8INC_OID => {
                         // int8inc is strict; the by-value fast path never calls
@@ -852,7 +852,7 @@ mod tests {
         let mut fcinfo = ::nodes::fmgr::FunctionCallInfoBaseData::default();
         // One argument cell (transfn nargs = 1: arg0 is the running state).
         fcinfo.nargs = 1;
-        fcinfo.args = vec![datum::NullableDatum::null()];
+        fcinfo.args = vec![::datum::NullableDatum::null()];
         pt.transfn_fcinfo = Some(mcx::alloc_in(mcx, fcinfo).expect("alloc transfn_fcinfo"));
         pt
     }
@@ -888,7 +888,7 @@ mod tests {
         let mut pt = pertrans_int8inc(mcx);
         {
             let fcinfo = pt.transfn_fcinfo.as_mut().unwrap();
-            fcinfo.args[0] = datum::NullableDatum::value(Datum::from_i64(7));
+            fcinfo.args[0] = ::datum::NullableDatum::value(Datum::from_i64(7));
         }
         assert_eq!(transfn_arg_value(&pt, 0).as_i64(), 7);
         assert!(!transfn_arg_isnull(&pt, 0));

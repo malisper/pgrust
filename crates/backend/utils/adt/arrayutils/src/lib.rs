@@ -7,18 +7,18 @@
 //! parses each element with `pg_strtoint32`; its element decode goes through
 //! the construct/deconstruct port in `backend-utils-adt-arrayfuncs`.
 
-use mcx::Mcx;
-use datum::datum::Datum;
+use ::mcx::Mcx;
+use ::datum::datum::Datum;
 use types_error::{
     ereturn, PgResult, SoftErrorContext, ERRCODE_ARRAY_ELEMENT_ERROR, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
     ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use arrayfuncs::construct::{array_contains_nulls, deconstruct_array_builtin};
-use arrayfuncs::foundation::{arr_elemtype, arr_ndim, CSTRINGOID, MAX_ARRAY_SIZE};
-use numutils::pg_strtoint32;
+use ::arrayfuncs::construct::{array_contains_nulls, deconstruct_array_builtin};
+use ::arrayfuncs::foundation::{arr_elemtype, arr_ndim, CSTRINGOID, MAX_ARRAY_SIZE};
+use ::numutils::pg_strtoint32;
 
 
 /// `ArrayGetOffset(n, dim, lb, indx)` — convert a subscript list into a linear
@@ -76,7 +76,7 @@ pub fn array_get_n_items_safe(
 
 /// `errmsg("array size exceeds the maximum allowed (%d)", (int) MaxArraySize)`
 /// with `ERRCODE_PROGRAM_LIMIT_EXCEEDED`.
-fn size_exceeds_error() -> types_error::PgError {
+fn size_exceeds_error() -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
         .errmsg(format!(
@@ -214,7 +214,7 @@ pub fn array_get_integer_typmods<'mcx>(mcx: Mcx<'mcx>, arr: &[u8]) -> PgResult<V
     let mut result: Vec<i32> = Vec::new();
     result.try_reserve(n).map_err(|_| {
         ereport(ERROR)
-            .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+            .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
             .errmsg("out of memory")
             .into_error()
     })?;
@@ -233,7 +233,7 @@ pub fn array_get_integer_typmods<'mcx>(mcx: Mcx<'mcx>, arr: &[u8]) -> PgResult<V
 /// `cstring` is `attlen == -2` / pass-by-reference, so `fetch_att` records the
 /// element as the in-buffer **offset** into the deconstructed array bytes (the
 /// byte-model stand-in for C's `PointerGetDatum(T)` element address — see
-/// `arrayfuncs::foundation::fetch_att`). A `cstring` is *not*
+/// `::arrayfuncs::foundation::fetch_att`). A `cstring` is *not*
 /// a varlena and is never TOASTed, so the bytes are read straight out of `arr`
 /// at that offset; the payload is NUL-terminated (`DatumGetCString`), and C
 /// hands the raw bytes straight to `pg_strtoint32` with no encoding gate, so we
@@ -242,7 +242,7 @@ fn datum_cstring(arr: &[u8], datum: Datum) -> PgResult<String> {
     let off = datum.as_usize();
     let bytes = arr.get(off..).ok_or_else(|| {
         ereport(ERROR)
-            .errcode(types_error::error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::error::ERRCODE_DATA_CORRUPTED)
             .errmsg("corrupt cstring element offset in typmod array")
             .into_error()
     })?;
@@ -268,11 +268,11 @@ pub fn init_seams() {
 /// Seam adapter for [`array_get_integer_typmods`]: copy the typmod list into an
 /// `mcx`-charged [`PgVec`] (the seam returns its result in the caller's context).
 fn array_get_integer_typmods_seam<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     arr: &[u8],
-) -> PgResult<mcx::PgVec<'mcx, i32>> {
+) -> PgResult<::mcx::PgVec<'mcx, i32>> {
     let v = array_get_integer_typmods(mcx, arr)?;
-    mcx::slice_in(mcx, &v)
+    ::mcx::slice_in(mcx, &v)
 }
 
 #[cfg(test)]
@@ -351,10 +351,10 @@ mod tests {
     /// given decimal strings, matching the on-disk layout
     /// `array_get_integer_typmods` deconstructs and decodes.
     fn build_cstring_array(strs: &[&str]) -> Vec<u8> {
-        use arrayfuncs::foundation::{
+        use ::arrayfuncs::foundation::{
             arr_overhead_nonulls, maxalign, set_varsize,
         };
-        use array::ARRAYTYPE_HDRSZ;
+        use ::array::ARRAYTYPE_HDRSZ;
 
         let ndim = 1i32;
         let overhead = arr_overhead_nonulls(ndim); // MAXALIGN(hdr + 2*4*ndim)
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn integer_typmods_decode_and_guards() {
         init_seams();
-        let root = mcx::MemoryContext::new("test");
+        let root = ::mcx::MemoryContext::new("test");
 
         // Real cstring[] → integer typmods (exercises the in-buffer offset
         // decode that replaced the empty-window detoast stub).

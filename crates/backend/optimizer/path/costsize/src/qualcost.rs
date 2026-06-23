@@ -20,7 +20,7 @@
 //! exactly as `set_opfuncid` would) without writing it back. The
 //! numerically-identical result is a faithful behavioral port.
 
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_core::primitive::{InvalidOid, Oid};
 use ::nodes::primnodes::Expr;
 use pathnodes::{PlannerInfo, QualCost};
 
@@ -31,7 +31,7 @@ use lsyscache_seams as lsyscache;
 /// `cost_qual_eval_walker((Node *) node, &context)` over the arena node `node`.
 /// Returns the `(startup, per_tuple)` cost this node and its descendants
 /// contribute. Installed as the `cost_qual_eval_walker` seam.
-pub fn cost_qual_eval_walker(root: &PlannerInfo, node: pathnodes::NodeId) -> (f64, f64) {
+pub fn cost_qual_eval_walker(root: &PlannerInfo, node: ::pathnodes::NodeId) -> (f64, f64) {
     let mut total = QualCost {
         startup: 0.0,
         per_tuple: 0.0,
@@ -101,7 +101,7 @@ fn walk<'mcx>(mcx: mcx::Mcx<'mcx>, root: Option<&PlannerInfo>, node: &Expr, tota
             // free-standing `cost_qual_eval_expr` (root == None) is never handed a
             // RestrictInfo (those are built later by the planner).
             let root = root.expect("cost_qual_eval: RestrictInfo requires a PlannerInfo root");
-            let rinfo = root.rinfo(pathnodes::RinfoId::from(*rref));
+            let rinfo = root.rinfo(::pathnodes::RinfoId::from(*rref));
             let eval = if rinfo.eval_cost.startup < 0.0 {
                 // For an OR clause, recurse into the marked-up tree so that we
                 // would set the eval_cost for contained RestrictInfos too.

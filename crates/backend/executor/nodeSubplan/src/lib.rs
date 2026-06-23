@@ -54,17 +54,17 @@ use fmgr_seams as fmgr;
 
 use exec_expr::ProjectionKind;
 use mcx::{vec_with_capacity_in, PgBox, PgVec};
-use types_core::fmgr::FmgrInfo;
+use ::types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
 // The fmgr-call ABI / array-seam contracts still hand and return the bare-word
 // `Datum` newtype at their (un-migrated owner) edges: `FunctionCall2Coll`
 // (fmgr), and `accum_array_result_any` / `make_array_result_any` /
 // `pfree_array_datum` (arrayfuncs). Those words enter/leave via the canonical
-// value's by-value arm; this crate touches `datum::Datum` ONLY to bridge
+// value's by-value arm; this crate touches `::datum::Datum` ONLY to bridge
 // across those still-word seams (see `word`/`from_word`). Everything internal
 // — the `result` register, the per-param values, `curArray` — is the canonical
 // unified value.
-use datum::Datum as Word;
+use ::datum::Datum as Word;
 // The canonical unified value type (Datum-unification keystone): what the
 // `result` register, `ParamExecData.value`, `SubPlanState.curArray`, and the
 // migrated seam returns all carry.
@@ -94,7 +94,7 @@ fn DatumGetBool(x: &Datum<'_>) -> bool {
 }
 
 /// Project a canonical scalar value onto the bare machine word
-/// (`datum::Datum`) for the still-bare-word array/fmgr seams
+/// (`::datum::Datum`) for the still-bare-word array/fmgr seams
 /// (`accum_array_result_any` `dvalue`, `function_call2_coll` args). The columns
 /// fed to those edges are scalar (by-value) words; a by-reference value would
 /// `panic` here exactly as the C would misread a pointer image as a scalar —
@@ -1273,10 +1273,10 @@ pub fn ExecReScanSetParamPlan<'mcx>(
 /// holding a borrow of `node`/`subplan` across the per-element seam calls (which
 /// also borrow `node`). Allocation failure surfaces the executor's OOM error.
 fn clone_int_list<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    src: &mcx::PgVec<'mcx, i32>,
-) -> PgResult<mcx::PgVec<'mcx, i32>> {
-    mcx::slice_in(mcx, src).map_err(|_| mcx.oom(src.len() * core::mem::size_of::<i32>()))
+    mcx: ::mcx::Mcx<'mcx>,
+    src: &::mcx::PgVec<'mcx, i32>,
+) -> PgResult<::mcx::PgVec<'mcx, i32>> {
+    ::mcx::slice_in(mcx, src).map_err(|_| mcx.oom(src.len() * core::mem::size_of::<i32>()))
 }
 
 /// Borrow `node->subplan`, erroring loudly if absent (the C dereferences
@@ -1384,7 +1384,7 @@ fn planstate_extparam_is_empty<'mcx>(node: &SubPlanState<'mcx>, estate: &EStateD
 fn take_subplanstate<'mcx>(
     estate: &mut EStateData<'mcx>,
     idx: usize,
-) -> PgResult<mcx::PgBox<'mcx, ::nodes::planstate::PlanStateNode<'mcx>>> {
+) -> PgResult<::mcx::PgBox<'mcx, ::nodes::planstate::PlanStateNode<'mcx>>> {
     estate
         .es_subplanstates
         .get_mut(idx)
@@ -1396,7 +1396,7 @@ fn take_subplanstate<'mcx>(
 fn put_subplanstate<'mcx>(
     estate: &mut EStateData<'mcx>,
     idx: usize,
-    ps: mcx::PgBox<'mcx, ::nodes::planstate::PlanStateNode<'mcx>>,
+    ps: ::mcx::PgBox<'mcx, ::nodes::planstate::PlanStateNode<'mcx>>,
 ) {
     estate.es_subplanstates[idx] = Some(ps);
 }

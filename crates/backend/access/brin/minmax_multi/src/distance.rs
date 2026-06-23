@@ -10,8 +10,8 @@
 //! (by-value scalars off the bare word, by-reference values off the fmgr
 //! by-reference lane) and the `float8` result.
 
-use datum::Datum as WordDatum;
-use types_error::PgResult;
+use ::datum::Datum as WordDatum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use numeric_seams as numeric;

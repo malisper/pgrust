@@ -108,7 +108,7 @@ pub type ParallelWorkerMainFn = usize;
 /// `BgwHandleStatus` (`postmaster/bgworker.h`) — canonically defined in
 /// `types_bgworker` (the `postmaster/bgworker.h` home); re-exported here so
 /// existing `types_parallel::BgwHandleStatus` paths keep working.
-pub use types_bgworker::BgwHandleStatus;
+pub use ::types_bgworker::BgwHandleStatus;
 
 /// `shm_mq_result` (`storage/shm_mq.h`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

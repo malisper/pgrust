@@ -7,13 +7,13 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::ddlnodes::{IndexStmt, RuleStmt};
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::RangeVar;
-use rel::Relation;
-use types_tuple::attmap::AttrMap;
+use ::rel::Relation;
+use ::types_tuple::attmap::AttrMap;
 
 /// An owned, arena-allocated `Node` (`Node *` in C).
 pub type NodeBox<'mcx> = PgBox<'mcx, Node<'mcx>>;

@@ -13,7 +13,7 @@ use super::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 // ---------------------------------------------------------------------------
 // Page builders shared by the byte-logic tests.

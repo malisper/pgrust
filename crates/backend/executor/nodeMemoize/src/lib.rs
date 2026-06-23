@@ -30,8 +30,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{Oid, Size};
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, Size};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
 use ::nodes::execnodes::{EStateData, ScanStateData, SlotId};
 use ::nodes::nodememoize::{
@@ -39,7 +39,7 @@ use ::nodes::nodememoize::{
     MemoizeKeyAttr, MemoizeScanState,
 };
 use ::nodes::TupleSlotKind;
-use types_tuple::heaptuple::FormedMinimalTuple;
+use ::types_tuple::heaptuple::FormedMinimalTuple;
 // Datum-unification: the canonical unified value enum is this crate's internal
 // currency for every slot value. The execExpr eval leaf and the execTuples
 // deform seams already hand back canonical `Datum<'mcx>`, and the binary-mode
@@ -47,7 +47,7 @@ use types_tuple::heaptuple::FormedMinimalTuple;
 // still-bare-word ABI edge is the fmgr `function_call1_coll` leaf, whose
 // `arg1: DatumWord` forces a by-value-word projection at the call site
 // (see `byval_word`); everywhere else stays canonical.
-use types_tuple::heaptuple::Datum as DatumV;
+use ::types_tuple::heaptuple::Datum as DatumV;
 
 use transam_parallel as parallel;
 use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
@@ -890,7 +890,7 @@ pub fn ExecInitMemoize<'mcx>(
     // Just point directly to the plan data (copied into the owned node).
     {
         let mcx = estate.es_query_cxt;
-        let mut collations = mcx::vec_with_capacity_in(mcx, node.collations.len())?;
+        let mut collations = ::mcx::vec_with_capacity_in(mcx, node.collations.len())?;
         for c in node.collations.iter() {
             collations.push(*c);
         }
@@ -916,7 +916,7 @@ pub fn ExecInitMemoize<'mcx>(
     // A memory context dedicated for the cache. In the owned model the cache is
     // held in the node (no separate arena); we keep the diagnostic name only.
     let mcx = estate.es_query_cxt;
-    mstate.table_context_name = Some(mcx::PgString::from_str_in("MemoizeHashTable", mcx)?);
+    mstate.table_context_name = Some(::mcx::PgString::from_str_in("MemoizeHashTable", mcx)?);
 
     mstate.last_tuple = None;
     mstate.entry = None;
@@ -925,7 +925,7 @@ pub fn ExecInitMemoize<'mcx>(
     mstate.singlerow = node.singlerow;
     // keyparamids: copy of node->keyparamids.
     mstate.keyparamids = match &node.keyparamids {
-        Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+        Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
         None => None,
     };
 
@@ -950,12 +950,12 @@ fn build_eqfuncoids<'mcx>(
     mstate: &mut MemoizeScanState<'mcx>,
     node: &Memoize<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, Oid>> {
+) -> PgResult<::mcx::PgVec<'mcx, Oid>> {
     let mcx = estate.es_query_cxt;
     let nkeys = node.numKeys;
     // palloc(nkeys * sizeof(Oid)): reserve the spine up front (fallible).
-    let mut eqfuncoids: mcx::PgVec<'mcx, Oid> =
-        mcx::vec_with_capacity_in(mcx, nkeys.max(0) as usize)?;
+    let mut eqfuncoids: ::mcx::PgVec<'mcx, Oid> =
+        ::mcx::vec_with_capacity_in(mcx, nkeys.max(0) as usize)?;
 
     for i in 0..nkeys {
         let i = i as usize;
@@ -1676,19 +1676,19 @@ fn make_memoize_state<'mcx>(
         mstatus: MemoStatus::CacheLookup,
         nkeys: 0,
         hashkeydesc: None,
-        key_attrs: mcx::vec_with_capacity_in(mcx, 0)?,
+        key_attrs: ::mcx::vec_with_capacity_in(mcx, 0)?,
         tableslot: None,
         probeslot: None,
-        table_values: mcx::vec_with_capacity_in(mcx, 0)?,
-        table_isnull: mcx::vec_with_capacity_in(mcx, 0)?,
-        probe_values: mcx::vec_with_capacity_in(mcx, 0)?,
-        probe_isnull: mcx::vec_with_capacity_in(mcx, 0)?,
+        table_values: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        table_isnull: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        probe_values: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        probe_isnull: ::mcx::vec_with_capacity_in(mcx, 0)?,
         cache_eq_expr: None,
-        param_exprs: mcx::vec_with_capacity_in(mcx, 0)?,
-        hashfunctions: mcx::vec_with_capacity_in(mcx, 0)?,
+        param_exprs: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        hashfunctions: ::mcx::vec_with_capacity_in(mcx, 0)?,
         hashtable: None,
         est_entries: 0,
-        collations: mcx::vec_with_capacity_in(mcx, 0)?,
+        collations: ::mcx::vec_with_capacity_in(mcx, 0)?,
         mem_used: 0,
         mem_limit: 0,
         entry: None,
@@ -1742,7 +1742,7 @@ fn init_hashkeydesc_and_slots<'mcx>(
 
     // Distill the per-key attbyval/attlen the binary-mode hash/equal loops read
     // via TupleDescCompactAttr(hashkeydesc, i).
-    let mut key_attrs = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut key_attrs = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
     {
         let desc = hashkeydesc
             .as_ref()
@@ -1779,28 +1779,28 @@ fn init_hashkeydesc_and_slots<'mcx>(
     // mstate->hashfunctions = (FmgrInfo *) palloc(nkeys * sizeof(FmgrInfo));
     // build_eqfuncoids fills these per key; here we presize the spines so the
     // per-key writes (`mstate->param_exprs[i] = ...`) can index in place.
-    let mut param_exprs = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut param_exprs = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
     for _ in 0..nkeys {
         // Placeholder ExprState; overwritten in build_eqfuncoids's per-key loop.
-        param_exprs.push(mcx::alloc_in(mcx, ::nodes::execexpr::ExprState::default())?);
+        param_exprs.push(::mcx::alloc_in(mcx, ::nodes::execexpr::ExprState::default())?);
     }
     mstate.param_exprs = param_exprs;
 
-    let mut hashfunctions = mcx::vec_with_capacity_in(mcx, nkeys)?;
-    hashfunctions.resize(nkeys, types_core::fmgr::FmgrInfo::default());
+    let mut hashfunctions = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
+    hashfunctions.resize(nkeys, ::types_core::fmgr::FmgrInfo::default());
     mstate.hashfunctions = hashfunctions;
 
     // Presize the tts_values/tts_isnull mirrors of the two slots.
-    let mut tv = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut tv = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
     tv.resize(nkeys, DatumV::null());
     mstate.table_values = tv;
-    let mut ti = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut ti = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
     ti.resize(nkeys, false);
     mstate.table_isnull = ti;
-    let mut pv = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut pv = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
     pv.resize(nkeys, DatumV::null());
     mstate.probe_values = pv;
-    let mut pi = mcx::vec_with_capacity_in(mcx, nkeys)?;
+    let mut pi = ::mcx::vec_with_capacity_in(mcx, nkeys)?;
     pi.resize(nkeys, false);
     mstate.probe_isnull = pi;
 
@@ -1812,11 +1812,11 @@ fn init_hashkeydesc_and_slots<'mcx>(
 /// the slot to its own descriptor; the C node shares one `TupleDesc *`, the
 /// owned model gives each slot its own copy in `mcx`).
 fn clone_hashkeydesc<'mcx>(
-    hashkeydesc: &types_tuple::heaptuple::TupleDesc<'mcx>,
+    hashkeydesc: &::types_tuple::heaptuple::TupleDesc<'mcx>,
     mcx: Mcx<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     match hashkeydesc {
-        Some(desc) => Ok(Some(mcx::alloc_in(mcx, desc.clone_in(mcx)?)?)),
+        Some(desc) => Ok(Some(::mcx::alloc_in(mcx, desc.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }

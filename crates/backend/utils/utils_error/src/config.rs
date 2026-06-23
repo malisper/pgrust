@@ -20,8 +20,8 @@
 
 use std::cell::{Cell, RefCell};
 
-use types_core::NAMEDATALEN;
-use types_dest::CommandDest;
+use ::types_core::NAMEDATALEN;
+use ::types_dest::CommandDest;
 use types_error::{
     ErrorLevel, PGErrorVerbosity, PgError, PgResult, ERROR, LOG_DESTINATION_CSVLOG,
     LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, NOTICE, WARNING,

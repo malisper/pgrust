@@ -9,11 +9,11 @@
 //! trigger-OID downcast (a trigger-subsystem node access). Each defaults to a
 //! loud-panic stub until its owner installs it; there is no silent fallback.
 
-use mcx::Mcx;
-use seam_core::seam;
+use ::mcx::Mcx;
+use ::seam_core::seam;
 
-use types_core::Oid;
-use types_funccache::ProcCompileInfo;
+use ::types_core::Oid;
+use ::types_funccache::ProcCompileInfo;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 
 /* ---- syscache.c (pg_proc projection) --------------------------------------- */

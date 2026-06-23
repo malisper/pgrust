@@ -4,18 +4,18 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use utils_error::ereport;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::Oid;
+use ::utils_error::ereport;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::Oid;
 use types_error::{ErrorLocation, PgResult, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE};
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::RangeVar;
-use types_tuple::access::RangeVar as AccessRangeVar;
+use ::types_tuple::access::RangeVar as AccessRangeVar;
 
-use catalog_namespace::LookupNamespaceNoError;
+use ::catalog_namespace::LookupNamespaceNoError;
 
 /// `RelationRelationId` — `pg_class` OID.
-pub const RelationRelationId: Oid = types_core::catalog::RELATION_RELATION_ID;
+pub const RelationRelationId: Oid = ::types_core::catalog::RELATION_RELATION_ID;
 /// `NamespaceRelationId` — `pg_namespace` OID (catalog OID 2615).
 pub const NamespaceRelationId: Oid = 2615;
 /// `TableSpaceRelationId` — `pg_tablespace` OID (catalog OID 1213).
@@ -95,22 +95,22 @@ pub fn namelist_of_nodes(cells: &[Node]) -> Vec<Option<String>> {
 /// fidelity.
 struct DropMsgStrings {
     kind: u8,
-    nonexistent_code: types_error::SqlState,
+    nonexistent_code: ::types_error::SqlState,
     nonexistent_msg: &'static str,
     skipping_msg: &'static str,
     nota_msg: &'static str,
     drophint_msg: &'static str,
 }
 
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_VIEW,
 };
 
 use types_error::{ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_TABLE};
-const ERRCODE_UNDEFINED_TABLE_STR: types_error::SqlState = ERRCODE_UNDEFINED_TABLE;
-const ERRCODE_UNDEFINED_OBJECT_STR: types_error::SqlState = ERRCODE_UNDEFINED_OBJECT;
+const ERRCODE_UNDEFINED_TABLE_STR: ::types_error::SqlState = ERRCODE_UNDEFINED_TABLE;
+const ERRCODE_UNDEFINED_OBJECT_STR: ::types_error::SqlState = ERRCODE_UNDEFINED_OBJECT;
 
 /// The C `dropmsgstringarray` (tablecmds.c:255-310), 9 real entries.
 const DROPMSGSTRINGARRAY: &[DropMsgStrings] = &[
@@ -195,7 +195,7 @@ pub fn DropErrorMsgNonExistent(
     missing_ok: bool,
 ) -> PgResult<()> {
     if let Some(schemaname) = rel.schemaname.as_deref() {
-        if !types_core::primitive::OidIsValid(LookupNamespaceNoError(schemaname)?) {
+        if !::types_core::primitive::OidIsValid(LookupNamespaceNoError(schemaname)?) {
             if !missing_ok {
                 return ereport(ERROR)
                     .errcode(ERRCODE_UNDEFINED_SCHEMA)
@@ -238,7 +238,7 @@ pub fn DropErrorMsgWrongType(relname: &str, wrongkind: u8, rightkind: u8) -> PgR
     let wentry = DROPMSGSTRINGARRAY.iter().find(|e| e.kind == wrongkind);
 
     let mut builder = ereport(ERROR)
-        .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+        .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
         .errmsg(rentry.nota_msg.replace("%s", relname));
     if let Some(wentry) = wentry {
         builder = builder.errhint(wentry.drophint_msg);

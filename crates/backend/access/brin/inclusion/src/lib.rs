@@ -18,7 +18,7 @@
 //! installer of those seams lives in `backend-access-brin-minmax`, which
 //! dispatches the built-in `brin_inclusion_*` support-procedure OIDs into the
 //! public bodies here. This is the BRIN F0-opclass S2-inclusion stage; it reuses
-//! the [`brin::OpaqueOpcInfo`] carrier (its [`InclusionOpaque`] variant).
+//! the [`::brin::OpaqueOpcInfo`] carrier (its [`InclusionOpaque`] variant).
 //!
 //! ## Carrier and fmgr-dispatch
 //!
@@ -26,8 +26,8 @@
 //! `bool extra_proc_missing[]` / `Oid cached_subtype` /
 //! `FmgrInfo strategy_procinfos[]` in the `palloc0`'d tail of the `BrinOpcInfo`
 //! (`oi_opaque`). The repo models `oi_opaque` as the typed enum
-//! [`brin::OpaqueOpcInfo`]; inclusion's variant is
-//! [`brin::InclusionOpaque`], whose every cached `FmgrInfo` is reduced to
+//! [`::brin::OpaqueOpcInfo`]; inclusion's variant is
+//! [`::brin::InclusionOpaque`], whose every cached `FmgrInfo` is reduced to
 //! the resolved function's `Oid` (the repo's fmgr-call seams re-resolve by OID).
 //! The AM dispatches the support procs through a `&BrinDesc` (immutable), so the
 //! cache slots are `Cell`s and fill lazily through the shared reference, matching
@@ -53,16 +53,16 @@ use brin::{
     BrinDesc, BrinOpcInfo, BrinValues, InclusionOpaque, OpaqueOpcInfo, INCLUSION_MAX_PROCNUMS,
     RT_MAX_STRATEGY_NUMBER,
 };
-use types_core::catalog::BOOLOID;
-use types_core::primitive::{AttrNumber, Oid, RegProcedure};
-use types_error::error::{
+use ::types_core::catalog::BOOLOID;
+use ::types_core::primitive::{AttrNumber, Oid, RegProcedure};
+use ::types_error::error::{
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
 };
-use types_error::PgResult;
-use types_scan::scankey::ScanKeyData;
+use ::types_error::PgResult;
+use ::types_scan::scankey::ScanKeyData;
 use types_tuple::heaptuple::Datum;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use indexam_seams as indexam;
 use scalar_seams as scalar;

@@ -25,18 +25,18 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
 use mcx::{PgBox, PgString, PgVec};
-use types_core::primitive::Oid;
-use types_core::fmgr::FmgrInfo;
-use types_tuple::heaptuple::Datum;
+use ::types_core::primitive::Oid;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_tuple::heaptuple::Datum;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::ExprState;
 use crate::execnodes::{ScanStateData, SlotId};
-use types_tuple::heaptuple::TupleDesc;
+use ::types_tuple::heaptuple::TupleDesc;
 use crate::nodeindexscan::Plan;
 use crate::nodes::NodeTag;
 use crate::primnodes::Expr;
-use types_tuple::heaptuple::FormedMinimalTuple;
+use ::types_tuple::heaptuple::FormedMinimalTuple;
 
 // `Expr` is not lifetime-generic in this crate.
 
@@ -104,16 +104,16 @@ pub struct Memoize<'mcx> {
 impl Memoize<'_> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
     /// allocates.
-    pub fn clone_in<'b>(&self, mcx: mcx::Mcx<'b>) -> types_error::PgResult<Memoize<'b>> {
-        let mut hash_operators = mcx::vec_with_capacity_in(mcx, self.hashOperators.len())?;
+    pub fn clone_in<'b>(&self, mcx: ::mcx::Mcx<'b>) -> types_error::PgResult<Memoize<'b>> {
+        let mut hash_operators = ::mcx::vec_with_capacity_in(mcx, self.hashOperators.len())?;
         for op in self.hashOperators.iter() {
             hash_operators.push(*op);
         }
-        let mut collations = mcx::vec_with_capacity_in(mcx, self.collations.len())?;
+        let mut collations = ::mcx::vec_with_capacity_in(mcx, self.collations.len())?;
         for c in self.collations.iter() {
             collations.push(*c);
         }
-        let mut param_exprs = mcx::vec_with_capacity_in(mcx, self.param_exprs.len())?;
+        let mut param_exprs = ::mcx::vec_with_capacity_in(mcx, self.param_exprs.len())?;
         for e in self.param_exprs.iter() {
             // Deep-copy via `clone_in`, not the derived `Expr::clone`
             // (which panics on a `SubPlan` arm).
@@ -130,7 +130,7 @@ impl Memoize<'_> {
             binary_mode: self.binary_mode,
             est_entries: self.est_entries,
             keyparamids: match &self.keyparamids {
-                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
         })

@@ -152,7 +152,7 @@ seam_core::seam!(
     /// which WAL has been replayed by the startup process, with the replay
     /// timeline. Returns `(read_upto, replayTLI)`. Distinct from the
     /// NULL-`replayTLI` variant some callers use.
-    pub fn get_xlog_replay_rec_ptr_tli() -> (XLogRecPtr, types_core::TimeLineID)
+    pub fn get_xlog_replay_rec_ptr_tli() -> (XLogRecPtr, ::types_core::TimeLineID)
 );
 
 seam_core::seam!(
@@ -165,7 +165,7 @@ seam_core::seam!(
     /// `XLogRecoveryShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn xlog_recovery_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn xlog_recovery_shmem_size() -> types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(

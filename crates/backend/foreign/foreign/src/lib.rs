@@ -62,7 +62,7 @@ pub const FSV_MISSING_OK: bits16 = 0x01;
 const RESTRICT_RELKIND_FOREIGN_TABLE: i32 = 0x02;
 
 /// `ForeignServerRelationId` (`catalog/pg_foreign_server.h`).
-const ForeignServerRelationId: Oid = types_core::catalog::FOREIGN_SERVER_RELATION_ID;
+const ForeignServerRelationId: Oid = ::types_core::catalog::FOREIGN_SERVER_RELATION_ID;
 /// `UserMappingRelationId` (`catalog/pg_user_mapping.h`, OID 1418).
 const UserMappingRelationId: Oid = 1418;
 
@@ -715,9 +715,9 @@ pub fn get_foreign_server_oid(servername: &str, missing_ok: bool) -> PgResult<Oi
 /// `IS_JOIN_REL(rel)` (pathnodes.h) — true for `RELOPT_JOINREL` /
 /// `RELOPT_OTHER_JOINREL`.
 #[inline]
-fn is_join_rel(rel: &pathnodes::RelOptInfo) -> bool {
-    rel.reloptkind == pathnodes::RELOPT_JOINREL
-        || rel.reloptkind == pathnodes::RELOPT_OTHER_JOINREL
+fn is_join_rel(rel: &::pathnodes::RelOptInfo) -> bool {
+    rel.reloptkind == ::pathnodes::RELOPT_JOINREL
+        || rel.reloptkind == ::pathnodes::RELOPT_OTHER_JOINREL
 }
 
 /// `GetExistingLocalJoinPath` — get a copy of an existing local path for a join
@@ -738,13 +738,13 @@ fn is_join_rel(rel: &pathnodes::RelOptInfo) -> bool {
 /// copy become [`PathNode`] enum matches plus a clone pushed back into the
 /// arena.
 pub fn GetExistingLocalJoinPath(
-    root: &mut pathnodes::PlannerInfo,
-    joinrel: pathnodes::RelId,
-) -> Option<pathnodes::PathId> {
+    root: &mut ::pathnodes::PlannerInfo,
+    joinrel: ::pathnodes::RelId,
+) -> Option<::pathnodes::PathId> {
     use ::nodes::nodehashjoin::T_HashJoin;
     use ::nodes::nodemergejoin::T_MergeJoin;
     use ::nodes::nodenestloop::T_NestLoop;
-    use pathnodes::PathNode;
+    use ::pathnodes::PathNode;
 
     // Assert(IS_JOIN_REL(joinrel));
     debug_assert!(is_join_rel(root.rel(joinrel)));
@@ -789,7 +789,7 @@ pub fn GetExistingLocalJoinPath(
         // The cloned subtype shares its JoinPath base regardless of variant;
         // grab a &mut JoinPath view to manipulate outer/inner subpaths exactly
         // as the C `(JoinPath *) hash_path/nest_path/merge_path` up-cast does.
-        let jpath: &mut pathnodes::JoinPath = match &mut joinpath {
+        let jpath: &mut ::pathnodes::JoinPath = match &mut joinpath {
             PathNode::HashPath(p) => &mut p.jpath,
             PathNode::NestPath(p) => &mut p.jpath,
             PathNode::MergePath(p) => &mut p.jpath,
@@ -814,7 +814,7 @@ pub fn GetExistingLocalJoinPath(
                     if jpath.path.pathtype == T_MergeJoin {
                         // If the new outer path is already well enough ordered
                         // for the mergejoin, we can skip doing an explicit sort.
-                        let new_outer_pathkeys: Vec<pathnodes::PathKey> = fdw_outerpath
+                        let new_outer_pathkeys: Vec<::pathnodes::PathKey> = fdw_outerpath
                             .map(|id| root.path(id).base().pathkeys.clone())
                             .unwrap_or_default();
                         if let PathNode::MergePath(merge_path) = &mut joinpath {
@@ -837,7 +837,7 @@ pub fn GetExistingLocalJoinPath(
 
         // Re-borrow the JoinPath view for the inner side (the outer block above
         // borrowed `root` immutably, which must end before we touch it again).
-        let jpath: &mut pathnodes::JoinPath = match &mut joinpath {
+        let jpath: &mut ::pathnodes::JoinPath = match &mut joinpath {
             PathNode::HashPath(p) => &mut p.jpath,
             PathNode::NestPath(p) => &mut p.jpath,
             PathNode::MergePath(p) => &mut p.jpath,
@@ -857,7 +857,7 @@ pub fn GetExistingLocalJoinPath(
                     if jpath.path.pathtype == T_MergeJoin {
                         // If the new inner path is already well enough ordered
                         // for the mergejoin, we can skip doing an explicit sort.
-                        let new_inner_pathkeys: Vec<pathnodes::PathKey> = fdw_outerpath
+                        let new_inner_pathkeys: Vec<::pathnodes::PathKey> = fdw_outerpath
                             .map(|id| root.path(id).base().pathkeys.clone())
                             .unwrap_or_default();
                         if let PathNode::MergePath(merge_path) = &mut joinpath {
@@ -893,7 +893,7 @@ pub fn GetExistingLocalJoinPath(
  * foreigncmds.c; in the owned tree the C `Datum`/`HeapTuple`/`values[]`/
  * `nulls[]`/`repl_*[]` plumbing belongs to the catalog-access layer, so each
  * catalog-row operation is a single by-value seam here. The relation is opened
- * directly via `backend-access-table-table::table_open` (mirrors the merged
+ * directly via `backend-access-table-::table::table_open` (mirrors the merged
  * `pg_namespace`/`pg_am` ports); the row OID is assigned via
  * `GetNewOidWithIndex` (direct call into merged `backend-catalog-catalog`);
  * the `heap_form_tuple` + `CatalogTupleInsert`/`Update` value layer crosses
@@ -903,7 +903,7 @@ pub fn GetExistingLocalJoinPath(
  * mirror-pg-and-panic).
  * ======================================================================== */
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use types_foreigncmds::{
     DefElem, DefElemArg, ForeignDataWrapperRelationId as FdwRelationId,
     ForeignServerRelationId as SrvRelationId, ForeignTableRelationId as FtRelationId,
@@ -916,13 +916,13 @@ use types_foreigncmds::{
     PgForeignDataWrapperUpdateRow, PgForeignServerInsertRow, PgForeignServerUpdateRow,
     PgForeignTableInsertRow, PgUserMappingInsertRow, PgUserMappingUpdateRow, UserMappingOidIndexId,
 };
-use types_storage::lock::RowExclusiveLock;
+use ::types_storage::lock::RowExclusiveLock;
 
-use table::table_open;
-use catalog_catalog::GetNewOidWithIndex;
+use ::table::table_open;
+use ::catalog_catalog::GetNewOidWithIndex;
 use indexing_seams as indexing;
 use pg_depend_seams as pg_depend;
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 
 /// `defGetString(def)` (`commands/define.c`) restricted to the value-node
 /// variants a generic FDW option carries. `def->arg == NULL` raises
@@ -980,8 +980,8 @@ fn options_to_pairs(options: Option<&[DefElem<'_>]>) -> PgResult<Option<Vec<(Str
 /// crate.
 fn untransform_options<'mcx>(
     mcx: Mcx<'mcx>,
-    raw: Option<Option<mcx::PgVec<'mcx, u8>>>,
-) -> PgResult<mcx::PgVec<'mcx, DefElem<'mcx>>> {
+    raw: Option<Option<::mcx::PgVec<'mcx, u8>>>,
+) -> PgResult<::mcx::PgVec<'mcx, DefElem<'mcx>>> {
     // The projection seam returns `Some(bytes)` when the row was present; a
     // cache miss (`None`) is treated as no options (the caller already validated
     // the object exists). `Some(None)` is the SQL-NULL column.
@@ -992,18 +992,18 @@ fn untransform_options<'mcx>(
         )?,
         Some(None) | None => Vec::new(),
     };
-    let mut out = mcx::vec_with_capacity_in(mcx, pairs.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, pairs.len())?;
     for (name, value) in pairs {
         out.push(DefElem {
             defname: PgString::from_str_in(&name, mcx)?,
             arg: match value {
-                Some(v) => Some(mcx::alloc_in(
+                Some(v) => Some(::mcx::alloc_in(
                     mcx,
                     DefElemArg::String(PgString::from_str_in(&v, mcx)?),
                 )?),
                 None => None,
             },
-            defaction: types_foreigncmds::DEFELEM_UNSPEC,
+            defaction: ::types_foreigncmds::DEFELEM_UNSPEC,
             location: -1,
         });
     }
@@ -1057,7 +1057,7 @@ fn fdw_owner_row_by_oid<'mcx>(mcx: Mcx<'mcx>, fdwid: Oid) -> PgResult<Option<Fdw
 
 /// `SysCacheGetAttr(FOREIGNDATAWRAPPEROID, fdwid, fdwoptions)` decoded into a
 /// `DefElem` list (NULL → empty).
-fn fdw_options<'mcx>(mcx: Mcx<'mcx>, fdwid: Oid) -> PgResult<mcx::PgVec<'mcx, DefElem<'mcx>>> {
+fn fdw_options<'mcx>(mcx: Mcx<'mcx>, fdwid: Oid) -> PgResult<::mcx::PgVec<'mcx, DefElem<'mcx>>> {
     let raw = syscache::foreign_data_wrapper_options::call(mcx, fdwid)?;
     untransform_options(mcx, raw)
 }
@@ -1112,7 +1112,7 @@ fn server_owner_row_by_oid<'mcx>(
 fn server_options<'mcx>(
     mcx: Mcx<'mcx>,
     serverid: Oid,
-) -> PgResult<mcx::PgVec<'mcx, DefElem<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, DefElem<'mcx>>> {
     let raw = syscache::foreign_server_options::call(mcx, serverid)?;
     untransform_options(mcx, raw)
 }
@@ -1132,7 +1132,7 @@ fn usermapping_oid(useid: Oid, serverid: Oid) -> PgResult<Oid> {
 fn usermapping_options<'mcx>(
     mcx: Mcx<'mcx>,
     umid: Oid,
-) -> PgResult<mcx::PgVec<'mcx, DefElem<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, DefElem<'mcx>>> {
     let raw = syscache::user_mapping_options_by_oid::call(mcx, umid)?;
     untransform_options(mcx, raw)
 }
@@ -1276,7 +1276,7 @@ fn insert_foreign_table(
 
     /* Add pg_class dependency on the server. */
     let myself = ObjectAddress {
-        classId: types_foreigncmds::RelationRelationId,
+        classId: ::types_foreigncmds::RelationRelationId,
         objectId: relid,
         objectSubId: 0,
     };
@@ -1414,7 +1414,7 @@ pub fn init_seams() {
     // stores presence in `RelOptInfo::has_fdwroutine`; it is never NULL on
     // success, so a clean resolve yields `true`.
     plancat_ext_seams::rel_has_fdwroutine::set(|relid| {
-        let ctx = mcx::MemoryContext::new("rel_has_fdwroutine");
+        let ctx = ::mcx::MemoryContext::new("rel_has_fdwroutine");
         GetFdwRoutineForRelation(ctx.mcx(), relid)?;
         Ok(true)
     });
@@ -1489,12 +1489,12 @@ pub fn init_seams() {
         // RelationGetRelid(node->ss.ss_currentRelation). The resolved
         // FdwRoutine is a Copy flag table, so a transient context suffices.
         let relid = scan_relation_relid(node);
-        let ctx = mcx::MemoryContext::new("GetFdwRoutineForRelation");
+        let ctx = ::mcx::MemoryContext::new("GetFdwRoutineForRelation");
         GetFdwRoutineForRelation(ctx.mcx(), relid)
     });
 
     inward::get_fdw_routine_by_server_id::set(|serverid| {
-        let ctx = mcx::MemoryContext::new("GetFdwRoutineByServerId");
+        let ctx = ::mcx::MemoryContext::new("GetFdwRoutineByServerId");
         GetFdwRoutineByServerId(ctx.mcx(), serverid)
     });
 
@@ -1579,10 +1579,10 @@ mod tests {
 
     fn import_stmt<'mcx>(
         mcx: Mcx<'mcx>,
-        list_type: types_foreigncmds::ImportForeignSchemaType,
+        list_type: ::types_foreigncmds::ImportForeignSchemaType,
         names: &[&str],
     ) -> PgResult<ImportForeignSchemaStmt<'mcx>> {
-        let mut table_list = mcx::vec_with_capacity_in(mcx, names.len())?;
+        let mut table_list = ::mcx::vec_with_capacity_in(mcx, names.len())?;
         for n in names {
             table_list.push(PgString::from_str_in(n, mcx)?);
         }
@@ -1592,13 +1592,13 @@ mod tests {
             local_schema: PgString::from_str_in("ls", mcx)?,
             list_type,
             table_list,
-            options: mcx::vec_with_capacity_in(mcx, 0)?,
+            options: ::mcx::vec_with_capacity_in(mcx, 0)?,
         })
     }
 
     #[test]
     fn is_importable_filters() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
 
         let all = import_stmt(mcx, FDW_IMPORT_SCHEMA_ALL, &[]).unwrap();

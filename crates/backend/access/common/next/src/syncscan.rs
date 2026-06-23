@@ -32,10 +32,10 @@
 use core::mem::size_of;
 use std::sync::{Mutex, OnceLock};
 
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, InvalidOid, Oid};
-use types_core::Size;
-use types_core::primitive::BLCKSZ;
-use types_error::PgResult;
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, InvalidOid, Oid};
+use ::types_core::Size;
+use ::types_core::primitive::BLCKSZ;
+use ::types_error::PgResult;
 
 /// `SYNC_SCAN_NELEM` — size of the LRU list (syncscan.c). The code assumes
 /// `SYNC_SCAN_NELEM > 1`.

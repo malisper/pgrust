@@ -8,12 +8,12 @@
 //! [`NumericVar`], replicating the same fast scaling math at the var level.
 //! Callers (fmgr shims) wrap it with `make_result`.
 
-use adt_numeric::convert::int128_to_numericvar;
-use adt_numeric::kernel_transcendental::int64_to_numericvar;
-use mcx::Mcx;
-use types_error::PgResult;
-use types_numeric::var::NumericVar;
-use types_numeric::DEC_DIGITS;
+use ::adt_numeric::convert::int128_to_numericvar;
+use ::adt_numeric::kernel_transcendental::int64_to_numericvar;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::types_numeric::var::NumericVar;
+use ::types_numeric::DEC_DIGITS;
 
 /// `int64_div_fast_to_numericvar()` -- the `NumericVar`-producing analogue of
 /// numeric.c's `int64_div_fast_to_numeric(val1, log10val2)`, i.e. the value
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn div_fast_sets_scale_and_weight() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         // 1_500_000 / 10^6 == 1.5 at scale 6.
         let v = int64_div_fast_to_numericvar(mcx, 1_500_000, 6).unwrap();

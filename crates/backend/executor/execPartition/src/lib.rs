@@ -17,8 +17,8 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::primitive::AttrNumber;
+use ::mcx::Mcx;
+use ::types_core::primitive::AttrNumber;
 use nodes::{EcxtId, ResultRelInfo, RriId, SlotId};
 
 // Canonical carrier types homed in `types-nodes` (so the owner, the seam crate,
@@ -81,9 +81,9 @@ fn seam_exec_setup_partition_tuple_routing<'mcx>(
     mcx: Mcx<'mcx>,
     estate: &mut ::nodes::EStateData<'mcx>,
     rel: rel::Relation<'mcx>,
-) -> types_error::PgResult<mcx::PgBox<'mcx, PartitionTupleRouting<'mcx>>> {
+) -> types_error::PgResult<::mcx::PgBox<'mcx, PartitionTupleRouting<'mcx>>> {
     let proute = routing_setup::ExecSetupPartitionTupleRouting(mcx, estate, rel)?;
-    mcx::alloc_in(mcx, proute)
+    ::mcx::alloc_in(mcx, proute)
 }
 
 /// Seam adapter for `exec_find_partition`: thread the `mcx` into the by-value

@@ -1,6 +1,6 @@
 use super::*;
-use mcx::MemoryContext;
-use types_core::instrument::{instr_time, INSTRUMENT_ALL, INSTRUMENT_ROWS, NS_PER_S};
+use ::mcx::MemoryContext;
+use ::types_core::instrument::{instr_time, INSTRUMENT_ALL, INSTRUMENT_ROWS, NS_PER_S};
 
 #[test]
 fn instr_alloc_initializes_flags() {

@@ -21,21 +21,21 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, RegProcedure, BLCKSZ,
 };
 use types_error::{PgError, PgResult, ERROR};
-use hash::hashpage::{
+use ::hash::hashpage::{
     Bucket, HashMetaPageData, H_BUCKET_BEING_SPLIT, H_NEEDS_SPLIT_CLEANUP, HASH_MAX_BITMAPS,
     HASH_METAPAGE, HASH_READ, HASH_WRITE, HASH_NOLOCK, INDEX_MOVED_BY_SPLIT_MASK,
     InvalidBucket, LH_BUCKET_BEING_POPULATED, LH_BUCKET_BEING_SPLIT,
     LH_BUCKET_NEEDS_SPLIT_CLEANUP, LH_BUCKET_PAGE, LH_META_PAGE, LH_OVERFLOW_PAGE,
     LH_UNUSED_PAGE,
 };
-use hash::hash::HASHSTANDARD_PROC;
-use rel::Relation;
-use types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
-use types_tuple::heaptuple::ItemPointerData;
+use ::hash::hash::HASHSTANDARD_PROC;
+use ::rel::Relation;
+use ::types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use bufmgr_seams as bufmgr;
 use predicate_seams as predicate;
@@ -51,7 +51,7 @@ use page::{
     PageRef, ItemIdIsDead,
 };
 
-use hash::hsearch::{HASHACTION, HASHCTL, HASH_BLOBS, HASH_CONTEXT, HASH_ELEM, HTAB};
+use ::hash::hsearch::{HASHACTION, HASHCTL, HASH_BLOBS, HASH_CONTEXT, HASH_ELEM, HTAB};
 
 use crate::hashutil::{
     BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK, _hash_checkpage, _hash_get_newblock_from_oldbucket,
@@ -291,7 +291,7 @@ pub fn _hash_getbuf_with_strategy<'mcx>(
     blkno: BlockNumber,
     access: i32,
     flags: i32,
-    bstrategy: &types_storage::buf::BufferAccessStrategy,
+    bstrategy: &::types_storage::buf::BufferAccessStrategy,
 ) -> PgResult<Buffer> {
     if blkno == P_NEW {
         return Err(PgError::new(ERROR, "hash AM does not use P_NEW"));
@@ -327,7 +327,7 @@ pub fn _hash_dropbuf<'mcx>(_rel: &Relation<'mcx>, buf: Buffer) {
 /// `_hash_dropscanbuf(rel, so)` — release buffers used in a scan.
 pub fn _hash_dropscanbuf<'mcx>(
     rel: &Relation<'mcx>,
-    so: &mut hash::hashpage::HashScanOpaqueData,
+    so: &mut ::hash::hashpage::HashScanOpaqueData,
 ) {
     // release pin we hold on primary bucket page
     if BufferIsValid(so.hashso_bucket_buf) && so.hashso_bucket_buf != so.currPos.buf {
@@ -381,7 +381,7 @@ pub fn _hash_init<'mcx>(
     // where HashGetFillFactor reads the relation's fillfactor reloption
     // (defaulting to HASH_DEFAULT_FILLFACTOR). (hash.h:281)
     let mut ffactor = hash_get_target_page_usage(
-        rel.get_fillfactor(hash::hashpage::HASH_DEFAULT_FILLFACTOR),
+        rel.get_fillfactor(::hash::hashpage::HASH_DEFAULT_FILLFACTOR),
     ) / item_width;
     if ffactor < 10 {
         ffactor = 10;
@@ -656,7 +656,7 @@ pub fn _hash_expandtable<'mcx>(rel: &Relation<'mcx>, metabuf: Buffer) -> PgResul
             set_hasho_nextblkno(page, InvalidBlockNumber);
             set_hasho_bucket(page, new_bucket);
             set_hasho_flag(page, LH_BUCKET_PAGE | LH_BUCKET_BEING_POPULATED);
-            set_hasho_page_id(page, hash::hashpage::HASHO_PAGE_ID);
+            set_hasho_page_id(page, ::hash::hashpage::HASHO_PAGE_ID);
             Ok(())
         })?;
         bufmgr::mark_buffer_dirty::call(buf_nblkno);
@@ -761,7 +761,7 @@ fn _hash_alloc_buckets<'mcx>(
     set_hasho_nextblkno(&mut zerobuf, InvalidBlockNumber);
     set_hasho_bucket(&mut zerobuf, InvalidBucket);
     set_hasho_flag(&mut zerobuf, LH_UNUSED_PAGE);
-    set_hasho_page_id(&mut zerobuf, hash::hashpage::HASHO_PAGE_ID);
+    set_hasho_page_id(&mut zerobuf, ::hash::hashpage::HASHO_PAGE_ID);
 
     if relcache::relation_needs_wal::call(rel) {
         bufmgr::log_newpage::call(rel.rd_locator, ForkNumber::MAIN_FORKNUM, lastblock, &zerobuf, true)?;

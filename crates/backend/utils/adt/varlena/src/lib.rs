@@ -17,7 +17,7 @@
 //! `types-datum` for the `Varlena`/`Bytea` header framing at the Datum
 //! boundary, `types-locale` for the resolved collation, `types-sortsupport`
 //! for `SortSupportData`); buffers charged to the caller are
-//! `mcx::PgVec<'mcx, u8>` / `mcx::PgString<'mcx>`. Genuinely-external owners
+//! `::mcx::PgVec<'mcx, u8>` / `::mcx::PgString<'mcx>`. Genuinely-external owners
 //! are reached through per-owner seam crates:
 //! - `backend-utils-mb-mbutils-seams` — multibyte encoding helpers (mbutils.c)
 //! - `backend-utils-adt-pg-locale-seams` — collation/ICU providers
@@ -99,7 +99,7 @@ pub fn set_bytea_output(value: i32) {
     BYTEA_OUTPUT.with(|v| v.set(value));
 }
 
-// The bare-word newtype `datum::Datum` (aliased `BareDatum`) survives only
+// The bare-word newtype `::datum::Datum` (aliased `BareDatum`) survives only
 // at the externally pinned, still-bare-word seam ABI edges (the `cstring_to_text`
 // / `bytes_to_varlena` / `text_to_cstring` shims — the `CStringGetTextDatum` /
 // `TextDatumGetCString` macro shape that ~22 unmigrated consumers + this owner's
@@ -108,7 +108,7 @@ pub fn set_bytea_output(value: i32) {
 // canonical unified value `types_tuple::...::Datum<'mcx>` (aliased `DatumV`),
 // which the migrated `_v` seam variants take/return.
 use datum::{Datum as BareDatum, Varlena};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
 
 // ---------------------------------------------------------------------------
@@ -213,7 +213,7 @@ unsafe fn vardata_1b(ptr: *const u8) -> *const u8 {
 //   migration target the migrated consumers (execTuples / nodeTableFuncscan)
 //   call.
 //
-// * The bare-word `datum::Datum` (`BareDatum`) variants are the
+// * The bare-word `::datum::Datum` (`BareDatum`) variants are the
 //   transitional shims still pinned by ~22 unmigrated consumers (the
 //   `CStringGetTextDatum` / `TextDatumGetCString` macro shape). They are the
 //   genuinely still-bare-word seam ABI edge: the result/argument is a raw
@@ -229,7 +229,7 @@ unsafe fn vardata_1b(ptr: *const u8) -> *const u8 {
 /// bytes (header + payload), charged to `mcx`.
 fn build_text_varlena_image<'mcx>(mcx: Mcx<'mcx>, s: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     let payload = keystone::cstring_to_text(mcx, s)?;
-    let mut image = mcx::vec_with_capacity_in(mcx, VARHDRSZ + payload.len())?;
+    let mut image = ::mcx::vec_with_capacity_in(mcx, VARHDRSZ + payload.len())?;
     image.extend_from_slice(&[0u8; VARHDRSZ]); // reserved header (SET_VARSIZE).
     image.extend_from_slice(&payload);
     Ok(Varlena::from_image(image).into_image())
@@ -263,25 +263,25 @@ unsafe fn text_payload_from_ptr<'mcx>(mcx: Mcx<'mcx>, ptr: *const u8) -> PgResul
         let copy = detoast_seams::detoast_attr::call(mcx, bytes)?;
         // detoast_attr returns the whole detoasted image (header + data);
         // copy out just the payload past its 4B header.
-        mcx::slice_in(mcx, &copy[VARHDRSZ..])
+        ::mcx::slice_in(mcx, &copy[VARHDRSZ..])
     } else if varatt_is_1b(ptr) {
         // Short 1-byte-header inline datum (never compressed/external).
         let total = varsize_1b(ptr);
         let data = vardata_1b(ptr);
         let len = total - 1;
-        mcx::slice_in(mcx, core::slice::from_raw_parts(data, len))
+        ::mcx::slice_in(mcx, core::slice::from_raw_parts(data, len))
     } else if varatt_is_4b_u(ptr) {
         // Plain uncompressed 4-byte-header datum.
         let total = varsize_4b(ptr);
         let data = vardata_4b(ptr);
         let len = total - VARHDRSZ;
-        mcx::slice_in(mcx, core::slice::from_raw_parts(data, len))
+        ::mcx::slice_in(mcx, core::slice::from_raw_parts(data, len))
     } else {
         // 4B compressed (the only remaining extended inline form): detoast.
         let total = varsize_4b(ptr);
         let bytes = core::slice::from_raw_parts(ptr, total);
         let copy = detoast_seams::detoast_attr::call(mcx, bytes)?;
-        mcx::slice_in(mcx, &copy[VARHDRSZ..])
+        ::mcx::slice_in(mcx, &copy[VARHDRSZ..])
     }
 }
 
@@ -309,22 +309,22 @@ fn text_payload_from_bytes<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<PgVec
         };
         let span = 2 + tag_size;
         let copy = detoast_seams::detoast_attr::call(mcx, &image[..span])?;
-        mcx::slice_in(mcx, &copy[VARHDRSZ..])
+        ::mcx::slice_in(mcx, &copy[VARHDRSZ..])
     } else if header & 0x01 == 0x01 {
         // VARATT_IS_1B: short 1-byte-header inline datum.
         let total = ((header >> 1) & 0x7F) as usize;
-        mcx::slice_in(mcx, &image[1..total])
+        ::mcx::slice_in(mcx, &image[1..total])
     } else if header & 0x03 == 0x00 {
         // VARATT_IS_4B_U: plain uncompressed 4-byte-header datum.
         let word = u32::from_le_bytes([image[0], image[1], image[2], image[3]]);
         let total = ((word >> 2) & 0x3FFF_FFFF) as usize;
-        mcx::slice_in(mcx, &image[VARHDRSZ..total])
+        ::mcx::slice_in(mcx, &image[VARHDRSZ..total])
     } else {
         // 4B compressed: detoast the whole image, copy payload past 4B header.
         let word = u32::from_le_bytes([image[0], image[1], image[2], image[3]]);
         let total = ((word >> 2) & 0x3FFF_FFFF) as usize;
         let copy = detoast_seams::detoast_attr::call(mcx, &image[..total])?;
-        mcx::slice_in(mcx, &copy[VARHDRSZ..])
+        ::mcx::slice_in(mcx, &copy[VARHDRSZ..])
     }
 }
 
@@ -412,7 +412,7 @@ fn seam_cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<DatumV
 /// `text_to_cstring((text *) DatumGetPointer(value))`. The detoast/copy runs in
 /// a private scratch context; the result is copied out as an owned `String`.
 fn seam_text_datum_get_cstring(value: DatumV<'_>) -> PgResult<String> {
-    let ctx = mcx::MemoryContext::new("TextDatumGetCString");
+    let ctx = ::mcx::MemoryContext::new("TextDatumGetCString");
     let mcx = ctx.mcx();
     let s = varlena_seams::text_to_cstring_v::call(mcx, &value)?;
     Ok(s.as_str().to_owned())
@@ -602,7 +602,7 @@ pub fn init_seams() {
     // pg_get_functiondef's proconfig rendering. The body lives in this unit; the
     // result list crosses by value (owned `String`s) so no `mcx` is threaded out.
     guc_funcs_seams::split_guc_list::set(|rawstring, separator| {
-        let scratch = mcx::MemoryContext::new("split_guc_list seam");
+        let scratch = ::mcx::MemoryContext::new("split_guc_list seam");
         let out: Option<std::vec::Vec<std::string::String>> = {
             match crate::split_format::split_guc_list(scratch.mcx(), &rawstring, separator as char)? {
                 Some(list) => Some(

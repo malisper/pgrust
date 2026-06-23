@@ -6,10 +6,10 @@
 //! INITIALLY / ENFORCED attribute markers against the preceding constraint.
 //! Ported 1:1, same branch order and error text/SQLSTATE as the C source.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 
-use types_core::Oid;
+use ::types_core::Oid;
 use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableStmt, ConstrType, AT_AddConstraint, CONSTR_ATTR_DEFERRABLE,
     CONSTR_ATTR_DEFERRED, CONSTR_ATTR_ENFORCED, CONSTR_ATTR_IMMEDIATE, CONSTR_ATTR_NOT_DEFERRABLE,

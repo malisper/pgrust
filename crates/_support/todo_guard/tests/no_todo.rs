@@ -10,9 +10,9 @@
 //!     `-- --nocapture`) without failing.
 //!
 //! REMOVE the `#[ignore]` once the count reaches zero so the gate becomes
-//! enforcing. See `todo_guard::scan_workspace`.
+//! enforcing. See `::todo_guard::scan_workspace`.
 
-use todo_guard::scan_workspace;
+use ::todo_guard::scan_workspace;
 
 /// The enforcing gate. Currently #[ignore]'d because the tree is not yet clean
 /// (see module docs). Un-ignore once `report_todo_count` reports 0.
@@ -48,7 +48,7 @@ fn report_todo_count() {
     // Sanity: the scanner must have actually walked the tree. If it found zero
     // crates it would be silently useless, so assert it saw something to scan.
     assert!(
-        todo_guard::workspace_root().join("crates").is_dir(),
+        ::todo_guard::workspace_root().join("crates").is_dir(),
         "guard could not locate crates/ — scanner would be a no-op"
     );
 }

@@ -2,7 +2,7 @@
 //! `ObjectProperty[]` (per-catalog property rows) and `ObjectTypeMap[]`
 //! (string-name → [`ObjectType`] mapping used by `read_objtype_from_string`).
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 use cache_syscache::{
     AMNAME, AMOID, AUTHNAME, AUTHOID, CLAOID, COLLOID, CONNAMENSP, CONSTROID, CONVOID, DATABASEOID,

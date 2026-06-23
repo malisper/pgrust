@@ -19,41 +19,41 @@
 //! multixact owner. `heap_fetch` (the scan family, heapam.c) is reached through
 //! an honest seam that panics until that family lands.
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, MultiXactId, Oid, TransactionId};
-use types_core::xact::{CommandId, InvalidCommandId};
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, MultiXactId, Oid, TransactionId};
+use ::types_core::xact::{CommandId, InvalidCommandId};
 use types_error::{PgResult, ERRCODE_LOCK_NOT_AVAILABLE, ERROR};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use rel::{Relation, RelationData};
-use snapshot::snapshot::{SnapshotData, SnapshotType};
-use types_storage::lock::{
+use ::snapshot::snapshot::{SnapshotData, SnapshotType};
+use ::types_storage::lock::{
     XLTW_Oper, AccessExclusiveLock, AccessShareLock, ExclusiveLock, RowShareLock, LOCKMODE,
 };
 use types_storage::{Buffer, InvalidBuffer};
-use types_tableam::tableam::{
+use ::types_tableam::tableam::{
     LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result,
 };
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderChoice, HeapTupleHeaderData, ItemPointerData,
     HEAP_HOT_UPDATED, HEAP_KEYS_UPDATED, HEAP_XMAX_COMMITTED,
     HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_INVALID, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK,
     HEAP_XMAX_LOCK_ONLY,
 };
-use xlog_records::multixact::MultiXactStatus;
+use ::xlog_records::multixact::MultiXactStatus;
 
 use page::{
     ItemPointerEquals, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber,
     ItemPointerIndicatesMovedPartitions, PageGetItem, PageGetItemId, PageRef,
 };
 
-use heapam_visibility::htup::{
+use ::heapam_visibility::htup::{
     HeapTupleHeaderGetRawXmax, HEAP_LOCKED_UPGRADED, HEAP_LOCK_MASK, HEAP_XMAX_IS_LOCKED_ONLY,
 };
-use heapam_visibility::htup::HeapTupleHeaderGetXmin;
+use ::heapam_visibility::htup::HeapTupleHeaderGetXmin;
 use heapam_visibility::{
     HeapTupleHeaderGetUpdateXid, HeapTupleHeaderIsOnlyLocked, HeapTupleSatisfiesUpdate,
 };
-use transam::TransactionIdEquals;
+use ::transam::TransactionIdEquals;
 
 use crate::{
     compute_infobits, xmax_infomask_changed, TUPLOCK_from_mxstatus, UpdateXmaxHintBits,
@@ -71,10 +71,10 @@ use lmgr_seams as lmgr_seam;
 use lock_seams as lock_seam;
 use relcache_seams as relcache_seam;
 
-use wal::wal::{RM_HEAP_ID, RM_HEAP2_ID};
-use wal::xloginsert::REGBUF_STANDARD;
-use rmgrdesc_next::heapdesc::{XLOG_HEAP_LOCK, XLOG_HEAP2_LOCK_UPDATED};
-use xlog_records::heapam_xlog::{
+use ::wal::wal::{RM_HEAP_ID, RM_HEAP2_ID};
+use ::wal::xloginsert::REGBUF_STANDARD;
+use ::rmgrdesc_next::heapdesc::{XLOG_HEAP_LOCK, XLOG_HEAP2_LOCK_UPDATED};
+use ::xlog_records::heapam_xlog::{
     xl_heap_lock, xl_heap_lock_updated, SizeOfHeapLock, SizeOfHeapLockUpdated,
     XLH_LOCK_ALL_FROZEN_CLEARED,
 };
@@ -158,7 +158,7 @@ fn get_mxact_status_for_lock(mode: LockTupleMode, is_update: bool) -> PgResult<M
 /// `conflict_tab` seam (the default lock method).
 fn DoLockModesConflict(mode1: LOCKMODE, mode2: LOCKMODE) -> PgResult<bool> {
     let conflicts = lock_seam::conflict_tab::call(DEFAULT_LOCKMETHOD, mode1);
-    Ok((conflicts & types_storage::lock::LOCKBIT_ON(mode2)) != 0)
+    Ok((conflicts & ::types_storage::lock::LOCKBIT_ON(mode2)) != 0)
 }
 
 // ===========================================================================
@@ -869,7 +869,7 @@ fn commit_lock<'mcx>(
         };
         let item = page_bytes
             .get_mut(off..off + len)
-            .ok_or_else(|| types_error::PgError::error("item storage is outside page"))?;
+            .ok_or_else(|| ::types_error::PgError::error("item storage is outside page"))?;
         header_image.write_on_page(item)?;
         Ok(())
     })?;
@@ -1167,7 +1167,7 @@ fn heap_lock_updated_tuple_rec<'mcx>(
                     };
                     let item = page_bytes
                         .get_mut(off..off + len)
-                        .ok_or_else(|| types_error::PgError::error("item storage is outside page"))?;
+                        .ok_or_else(|| ::types_error::PgError::error("item storage is outside page"))?;
                     header_image.write_on_page(item)?;
                     Ok(())
                 })?;
@@ -1289,7 +1289,7 @@ fn test_lockmode_for_conflict<'mcx>(
 
 /// The result of [`DoesMultiXactIdConflict`] — C's `bool` return + the
 /// `*current_is_member` out param.
-pub use types_storage::multixact::MultiXactConflict;
+pub use ::types_storage::multixact::MultiXactConflict;
 
 /// `DoesMultiXactIdConflict(multi, infomask, lockmode, &current_is_member)`
 /// (heapam.c). The repo's callers always pass a non-NULL `current_is_member`
@@ -1484,7 +1484,7 @@ fn read_on_page_tuple<'mcx>(
         t_len,
         t_self: tid,
         t_tableOid: rel_id,
-        t_data: Some(mcx::alloc_in(mcx, hdr)?),
+        t_data: Some(::mcx::alloc_in(mcx, hdr)?),
     })
 }
 
@@ -1584,6 +1584,6 @@ fn HeapTupleHeaderIndicatesMovedPartitions(hdr: &HeapTupleHeaderData<'_>) -> boo
 }
 
 /// `elog(ERROR, msg)` builder.
-fn elog_error(msg: &str) -> types_error::PgError {
+fn elog_error(msg: &str) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg.to_string()).into_error()
 }

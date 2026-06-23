@@ -2,16 +2,16 @@
 //! sequence, the cross-partition UPDATE (delete-then-insert + foreign-key
 //! bookkeeping), the new-tuple projection setup, and the `ExecUpdate` driver.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use snapshot::{SnapshotData, SnapshotType};
-use types_tableam::tableam::{
+use ::types_tableam::tableam::{
     LockWaitPolicy, TM_Result, TU_UpdateIndexes, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 };
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::lifecycle::ExecProcessReturning;
 use crate::{ModifyTableContext, UpdateContext};
@@ -50,14 +50,14 @@ pub fn ExecUpdate<'mcx>(
         crossPartUpdate: false,
         updateIndexes: TU_UpdateIndexes::TU_None,
         // C: zero-initialized stack field, overwritten by ExecUpdateAct.
-        lockmode: types_tableam::tableam::LockTupleMode::LockTupleKeyShare,
+        lockmode: ::types_tableam::tableam::LockTupleMode::LockTupleKeyShare,
     };
 
     let result_relation_oid = relation_oid(estate, result_rel_info);
 
     // abort the operation if not running transactions
     if miscinit_seams::is_bootstrap_processing_mode::call() {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "cannot UPDATE during bootstrap",
         ));
     }
@@ -147,10 +147,10 @@ pub fn ExecUpdate<'mcx>(
             match r {
                 TM_Result::TM_SelfModified => {
                     if context.tmfd.cmax != estate.es_output_cid {
-                        return Err(types_error::PgError::error(
+                        return Err(::types_error::PgError::error(
                             "tuple to be updated was already modified by an operation triggered by the current command",
                         )
-                        .with_sqlstate(types_error::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION)
+                        .with_sqlstate(::types_error::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION)
                         .with_hint(
                             "Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.",
                         ));
@@ -161,10 +161,10 @@ pub fn ExecUpdate<'mcx>(
                 TM_Result::TM_Ok => break TM_Result::TM_Ok,
                 TM_Result::TM_Updated => {
                     if transam_xact_seams::isolation_uses_xact_snapshot::call() {
-                        return Err(types_error::PgError::error(
+                        return Err(::types_error::PgError::error(
                             "could not serialize access due to concurrent update",
                         )
-                        .with_sqlstate(types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
+                        .with_sqlstate(::types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
                     }
 
                     let rti = estate.result_rel(result_rel_info).ri_RangeTableIndex;
@@ -251,7 +251,7 @@ pub fn ExecUpdate<'mcx>(
                             if !table_tableam::table_tuple_fetch_row_version(
                                 mcx, &rel2, &cur_tid, &any, oldslot_ref,
                             )? {
-                                return Err(types_error::PgError::error(
+                                return Err(::types_error::PgError::error(
                                     "failed to fetch tuple being updated",
                                 ));
                             }
@@ -268,10 +268,10 @@ pub fn ExecUpdate<'mcx>(
                         TM_Result::TM_Deleted => return Ok(None),
                         TM_Result::TM_SelfModified => {
                             if context.tmfd.cmax != estate.es_output_cid {
-                                return Err(types_error::PgError::error(
+                                return Err(::types_error::PgError::error(
                                     "tuple to be updated was already modified by an operation triggered by the current command",
                                 )
-                                .with_sqlstate(types_error::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION)
+                                .with_sqlstate(::types_error::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION)
                                 .with_hint(
                                     "Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.",
                                 ));
@@ -279,7 +279,7 @@ pub fn ExecUpdate<'mcx>(
                             return Ok(None);
                         }
                         other => {
-                            return Err(types_error::PgError::error(format!(
+                            return Err(::types_error::PgError::error(format!(
                                 "unexpected table_tuple_lock status: {}",
                                 other as u32
                             )));
@@ -288,16 +288,16 @@ pub fn ExecUpdate<'mcx>(
                 }
                 TM_Result::TM_Deleted => {
                     if transam_xact_seams::isolation_uses_xact_snapshot::call() {
-                        return Err(types_error::PgError::error(
+                        return Err(::types_error::PgError::error(
                             "could not serialize access due to concurrent delete",
                         )
-                        .with_sqlstate(types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
+                        .with_sqlstate(::types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
                     }
                     // tuple already deleted; nothing to do
                     return Ok(None);
                 }
                 other => {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "unrecognized table_tuple_update status: {}",
                         other as u32
                     )));
@@ -596,7 +596,7 @@ pub fn ExecUpdateEpilogue<'mcx>(
     slot: SlotId,
 ) -> PgResult<()> {
     let _ = &oldtuple;
-    let mut recheck_indexes: mcx::PgVec<'mcx, types_core::Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut recheck_indexes: ::mcx::PgVec<'mcx, types_core::Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     // insert index entries for tuple if necessary
     let num_indices = estate.result_rel(result_rel_info).ri_NumIndices;
@@ -675,8 +675,8 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
     // Disallow an INSERT ON CONFLICT DO UPDATE that causes the original row to
     // migrate to a different partition.
     if mtstate_on_conflict_is_update(mtstate) {
-        return Err(types_error::PgError::error("invalid ON UPDATE specification")
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        return Err(::types_error::PgError::error("invalid ON UPDATE specification")
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .with_detail(
                 "The result tuple would appear in a different partition than the original tuple.",
             ));
@@ -753,10 +753,10 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
             // serialization error rather than spin. (Non-concurrent
             // cross-partition UPDATE never reaches here — epqslot is None above.)
             let _ = (epqslot, retry_slot);
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "could not serialize access due to concurrent update",
             )
-            .with_sqlstate(types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
+            .with_sqlstate(::types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
         }
     }
 
@@ -841,10 +841,10 @@ pub fn ExecCrossPartitionUpdateForeignKey<'mcx>(
         if has_noncloned_fkey {
             let rinfo_name = relation_name(estate, r_info);
             let root_name = relation_name(estate, root_rel_info);
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "cannot move tuple across partitions when a non-root ancestor of the source partition is directly referenced in a foreign key",
             )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .with_detail(format!(
                 "A foreign key points to ancestor \"{}\" but not the root ancestor \"{}\".",
                 rinfo_name, root_name
@@ -906,13 +906,13 @@ pub fn ExecInitUpdateProjection<'mcx>(
             .expect("ExecInitUpdateProjection: resultRelInfo not in mtstate->resultRelInfo[]");
     }
 
-    let update_colnos: mcx::PgVec<'mcx, i32> = {
+    let update_colnos: ::mcx::PgVec<'mcx, i32> = {
         let lists = mtstate
             .mt_updateColnosLists
             .as_ref()
             .expect("ExecInitUpdateProjection: mt_updateColnosLists is NIL");
         let src = &lists[whichrel];
-        let mut v = mcx::vec_with_capacity_in(mcx, src.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, src.len())?;
         for &c in src.iter() {
             v.push(c);
         }

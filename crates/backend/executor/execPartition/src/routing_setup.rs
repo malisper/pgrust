@@ -5,13 +5,13 @@
 //! its own `routing_init_info` sub-module.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::executor::TupleSlotKind;
 use ::nodes::partition::PartitionDescData;
 use nodes::{EStateData, ModifyTableState, Opaque, ResultRelInfo, RriId};
-use rel::Relation;
-use types_storage::lock::{NoLock, RowExclusiveLock};
+use ::rel::Relation;
+use ::types_storage::lock::{NoLock, RowExclusiveLock};
 
 use crate::{PartitionDispatchData, PartitionDispatchId, PartitionTupleRouting};
 
@@ -219,7 +219,7 @@ pub(crate) fn ExecInitPartitionDispatchInfo<'mcx>(
     };
 
     // partdesc = PartitionDirectoryLookup(estate->es_partition_directory, rel);
-    let partdesc: mcx::PgBox<'mcx, PartitionDescData<'mcx>> =
+    let partdesc: ::mcx::PgBox<'mcx, PartitionDescData<'mcx>> =
         partitioning_core_seams::partition_directory_lookup::call(
             mcx,
             &mut estate.es_partition_directory,
@@ -260,7 +260,7 @@ pub(crate) fn ExecInitPartitionDispatchInfo<'mcx>(
         let tupslot = if tupmap.is_some() {
             let tupdesc_copy = rel.rd_att.clone_in(mcx)?;
             let tupdesc: types_tuple::heaptuple::TupleDesc<'mcx> =
-                Some(mcx::alloc_in(mcx, tupdesc_copy)?);
+                Some(::mcx::alloc_in(mcx, tupdesc_copy)?);
             Some(execTuples_seams::make_single_tuple_table_slot::call(
                 mcx,
                 tupdesc,
@@ -276,7 +276,7 @@ pub(crate) fn ExecInitPartitionDispatchInfo<'mcx>(
     };
 
     // memset(pd->indexes, -1, sizeof(int) * partdesc->nparts);
-    let mut indexes = mcx::vec_with_capacity_in(mcx, nparts as usize)?;
+    let mut indexes = ::mcx::vec_with_capacity_in(mcx, nparts as usize)?;
     for _ in 0..nparts {
         indexes.push(-1);
     }
@@ -316,7 +316,7 @@ pub(crate) fn ExecInitPartitionDispatchInfo<'mcx>(
             .partition_dispatch_info
             .try_reserve(extra_d)
             .map_err(|_| {
-                mcx.oom(extra_d * core::mem::size_of::<mcx::PgBox<'_, PartitionDispatchData<'_>>>())
+                mcx.oom(extra_d * core::mem::size_of::<::mcx::PgBox<'_, PartitionDispatchData<'_>>>())
             })?;
         let extra_n = cap.saturating_sub(proute.nonleaf_partitions.len());
         proute
@@ -329,7 +329,7 @@ pub(crate) fn ExecInitPartitionDispatchInfo<'mcx>(
     debug_assert_eq!(dispatchidx as usize, proute.partition_dispatch_info.len());
     proute
         .partition_dispatch_info
-        .push(mcx::alloc_in(mcx, pd)?);
+        .push(::mcx::alloc_in(mcx, pd)?);
 
     // If setting up a PartitionDispatch for a sub-partitioned table, we may also
     // need a minimally valid ResultRelInfo for checking the partition constraint

@@ -44,16 +44,16 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use types_core::primitive::Size;
-use types_core::init::BackendType;
-use types_core::ProcNumber;
+use ::types_core::primitive::Size;
+use ::types_core::init::BackendType;
+use ::types_core::ProcNumber;
 use types_error::{PgError, PgResult};
-use types_pgstat::wait_event::PG_WAIT_ACTIVITY;
-use signal::SigHandler;
-use types_startup::StartupData;
-use types_storage::storage::MAX_IO_WORKERS;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
-use types_storage::LW_EXCLUSIVE;
+use ::types_pgstat::wait_event::PG_WAIT_ACTIVITY;
+use ::signal::SigHandler;
+use ::types_startup::StartupData;
+use ::types_storage::storage::MAX_IO_WORKERS;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
+use ::types_storage::LW_EXCLUSIVE;
 
 use lwlock::{main_lock_ref, LWLockAcquire, LWLockRelease};
 use ipc_shmem_seams as ipc_shmem;
@@ -96,7 +96,7 @@ const AIO_WORKER_SUBMISSION_QUEUE_LOCK: usize = 53;
 const WAIT_EVENT_IO_WORKER_MAIN: u32 = PG_WAIT_ACTIVITY + 6;
 
 /// `INVALID_PROC_NUMBER` (-1): a free worker slot has no owning procno.
-const INVALID_PROC_NUMBER: ProcNumber = types_core::primitive::INVALID_PROC_NUMBER;
+const INVALID_PROC_NUMBER: ProcNumber = ::types_core::primitive::INVALID_PROC_NUMBER;
 
 // ===========================================================================
 // The shared-memory ring buffer (PgAioWorkerSubmissionQueue) — repr(C) flat.

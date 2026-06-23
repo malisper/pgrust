@@ -7,7 +7,7 @@
 //! nodes.
 //!
 //! Every C function is ported here against the raw-parser node tree
-//! ([`parsenodes::DefElem`], whose value is `Option<Box<Node>>`): the C
+//! ([`::parsenodes::DefElem`], whose value is `Option<Box<Node>>`): the C
 //! `nodeTag(def->arg)` `switch` becomes a `match` on the owned node.
 //!
 //! Cross-subsystem boundaries cross the owning unit's seam: `TypeNameToString`
@@ -22,24 +22,24 @@
 //! node as the projected [`DefElemArg`] (the variants `defGetString` /
 //! `defGetBoolean` read), and this crate runs the same nodeTag logic on it.
 
-use define_seams::DefElemArg;
-use parse_type_seams::typename_to_string_node;
-use small1_seams::parser_errposition;
-use utils_error::ereport;
+use ::define_seams::DefElemArg;
+use ::parse_type_seams::typename_to_string_node;
+use ::small1_seams::parser_errposition;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgString};
-use types_cluster::ParseState;
-use types_core::Oid;
+use ::types_cluster::ParseState;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 use parsenodes::{Node, StringNode, TypeName};
 
 // ---------------------------------------------------------------------------
-// The raw-node value extractors (operating on `parsenodes::DefElem`).
+// The raw-node value extractors (operating on `::parsenodes::DefElem`).
 // ---------------------------------------------------------------------------
 
 /// `defGetString` (define.c:34-62) — extract a string value (otherwise
 /// uninterpreted) from a `DefElem`. Allocates the result in `mcx`
 /// (C: `psprintf` / `pstrdup` / the rendered string).
-pub fn defGetString<'mcx>(mcx: Mcx<'mcx>, def: &parsenodes::DefElem) -> PgResult<PgString<'mcx>> {
+pub fn defGetString<'mcx>(mcx: Mcx<'mcx>, def: &::parsenodes::DefElem) -> PgResult<PgString<'mcx>> {
     let arg = require_arg(def, "requires a parameter")?;
     match arg {
         // case T_Integer: return psprintf("%ld", (long) intVal(def->arg));
@@ -66,7 +66,7 @@ pub fn defGetString<'mcx>(mcx: Mcx<'mcx>, def: &parsenodes::DefElem) -> PgResult
 
 /// `defGetNumeric` (define.c:67-88) — extract a numeric value (actually
 /// `double`) from a `DefElem`.
-pub fn defGetNumeric(def: &parsenodes::DefElem) -> PgResult<f64> {
+pub fn defGetNumeric(def: &::parsenodes::DefElem) -> PgResult<f64> {
     let arg = require_arg_msg(def, |name| format!("{name} requires a numeric value"))?;
     match arg {
         // case T_Integer: return (double) intVal(def->arg);
@@ -79,7 +79,7 @@ pub fn defGetNumeric(def: &parsenodes::DefElem) -> PgResult<f64> {
 }
 
 /// `defGetBoolean` (define.c:93-143) — extract a Boolean value from a `DefElem`.
-pub fn defGetBoolean(def: &parsenodes::DefElem) -> PgResult<bool> {
+pub fn defGetBoolean(def: &::parsenodes::DefElem) -> PgResult<bool> {
     // If no parameter value given, assume "true" is meant.
     let Some(arg) = def.arg.as_deref() else {
         return Ok(true);
@@ -115,7 +115,7 @@ pub fn defGetBoolean(def: &parsenodes::DefElem) -> PgResult<bool> {
 }
 
 /// `defGetInt32` (define.c:148-167) — extract an int32 value from a `DefElem`.
-pub fn defGetInt32(def: &parsenodes::DefElem) -> PgResult<i32> {
+pub fn defGetInt32(def: &::parsenodes::DefElem) -> PgResult<i32> {
     let arg = require_arg_msg(def, |name| format!("{name} requires an integer value"))?;
     match arg {
         // case T_Integer: return (int32) intVal(def->arg);
@@ -126,7 +126,7 @@ pub fn defGetInt32(def: &parsenodes::DefElem) -> PgResult<i32> {
 }
 
 /// `defGetInt64` (define.c:172-200) — extract an int64 value from a `DefElem`.
-pub fn defGetInt64(def: &parsenodes::DefElem) -> PgResult<i64> {
+pub fn defGetInt64(def: &::parsenodes::DefElem) -> PgResult<i64> {
     let arg = require_arg_msg(def, |name| format!("{name} requires a numeric value"))?;
     match arg {
         // case T_Integer: return (int64) intVal(def->arg);
@@ -141,7 +141,7 @@ pub fn defGetInt64(def: &parsenodes::DefElem) -> PgResult<i64> {
 }
 
 /// `defGetObjectId` (define.c:205-233) — extract an OID value from a `DefElem`.
-pub fn defGetObjectId(def: &parsenodes::DefElem) -> PgResult<Oid> {
+pub fn defGetObjectId(def: &::parsenodes::DefElem) -> PgResult<Oid> {
     let arg = require_arg_msg(def, |name| format!("{name} requires a numeric value"))?;
     match arg {
         // case T_Integer: return (Oid) intVal(def->arg);
@@ -157,7 +157,7 @@ pub fn defGetObjectId(def: &parsenodes::DefElem) -> PgResult<Oid> {
 
 /// `defGetQualifiedName` (define.c:238-262) — extract a possibly-qualified name
 /// (as a list of `String`s) from a `DefElem`.
-pub fn defGetQualifiedName(def: &parsenodes::DefElem) -> PgResult<Vec<Node>> {
+pub fn defGetQualifiedName(def: &::parsenodes::DefElem) -> PgResult<Vec<Node>> {
     let arg = require_arg(def, "requires a parameter")?;
     match arg {
         // case T_TypeName: return ((TypeName *) def->arg)->names;
@@ -175,7 +175,7 @@ pub fn defGetQualifiedName(def: &parsenodes::DefElem) -> PgResult<Vec<Node>> {
 ///
 /// Note: a `List` arg is not accepted, because the parser only returns a bare
 /// `List` when the name looks like an operator name.
-pub fn defGetTypeName(def: &parsenodes::DefElem) -> PgResult<TypeName> {
+pub fn defGetTypeName(def: &::parsenodes::DefElem) -> PgResult<TypeName> {
     let arg = require_arg(def, "requires a parameter")?;
     match arg {
         // case T_TypeName: return (TypeName *) def->arg;
@@ -193,7 +193,7 @@ pub fn defGetTypeName(def: &parsenodes::DefElem) -> PgResult<TypeName> {
 /// `defGetTypeLength` (define.c:298-337) — extract a type-length indicator
 /// (either absolute bytes, or `-1` for "variable") from a `DefElem`. Allocates
 /// in `mcx` only on the error path (which renders `defGetString`).
-pub fn defGetTypeLength<'mcx>(mcx: Mcx<'mcx>, def: &parsenodes::DefElem) -> PgResult<i32> {
+pub fn defGetTypeLength<'mcx>(mcx: Mcx<'mcx>, def: &::parsenodes::DefElem) -> PgResult<i32> {
     let arg = require_arg(def, "requires a parameter")?;
     match arg {
         // case T_Integer: return intVal(def->arg);
@@ -236,7 +236,7 @@ pub fn defGetTypeLength<'mcx>(mcx: Mcx<'mcx>, def: &parsenodes::DefElem) -> PgRe
 /// (otherwise uninterpreted) from a `DefElem`. Returns the cells (borrowing the
 /// arg); each is validated to be a `String` node, as the C `IsA(str, String)`
 /// loop.
-pub fn defGetStringList(def: &parsenodes::DefElem) -> PgResult<&[Node]> {
+pub fn defGetStringList(def: &::parsenodes::DefElem) -> PgResult<&[Node]> {
     let arg = require_arg(def, "requires a parameter")?;
     // if (nodeTag(def->arg) != T_List) elog(ERROR, "unrecognized node type: %d", ...);
     let Some(cells) = arg.as_list() else {
@@ -256,7 +256,7 @@ pub fn defGetStringList(def: &parsenodes::DefElem) -> PgResult<&[Node]> {
 
 /// `errorConflictingDefElem` (define.c:370-377) — raise an error about a
 /// conflicting `DefElem`.
-pub fn errorConflictingDefElem(defel: &parsenodes::DefElem, pstate: &ParseState<'_>) -> PgResult<()> {
+pub fn errorConflictingDefElem(defel: &::parsenodes::DefElem, pstate: &ParseState<'_>) -> PgResult<()> {
     let position = parser_errposition::call(pstate, defel.location)?;
     Err(ereport(ERROR)
         .errcode(ERRCODE_SYNTAX_ERROR)
@@ -333,8 +333,8 @@ fn arg_get_string(defname: &str, arg: Option<&DefElemArg>) -> PgResult<String> {
 // ---------------------------------------------------------------------------
 
 pub fn init_seams() {
-    define_seams::def_get_string::set(seam_def_get_string);
-    define_seams::def_get_boolean::set(seam_def_get_boolean);
+    ::define_seams::def_get_string::set(seam_def_get_string);
+    ::define_seams::def_get_boolean::set(seam_def_get_boolean);
 
     // functioncmds.c (CreateFunction / AlterFunction) reads DefElem options
     // (`defGetNumeric`, `defGetQualifiedName`, and the AS-clause list) through
@@ -381,7 +381,7 @@ fn seam_def_get_int32(defname: String, arg: Option<DefElemArg>) -> PgResult<i32>
 /// The AS clause of a CREATE FUNCTION option list: `(List *) def->arg`
 /// (`compute_function_attributes` reads `defel->arg` directly in C). The grammar
 /// hands a `List` of `String` nodes; a bare `String` is accepted as a singleton.
-fn def_get_as_clause(def: &parsenodes::DefElem) -> PgResult<Vec<Node>> {
+fn def_get_as_clause(def: &::parsenodes::DefElem) -> PgResult<Vec<Node>> {
     let arg = require_arg(def, "requires a parameter")?;
     match arg {
         Node::List(cells) => Ok(cells.to_vec()),
@@ -397,13 +397,13 @@ fn def_get_as_clause(def: &parsenodes::DefElem) -> PgResult<Vec<Node>> {
 /// `def->defname` — the option name used in every error message. The owned tree
 /// keeps `defname` as `Option<String>`; an absent name renders empty (the
 /// parser always sets it).
-fn defname(def: &parsenodes::DefElem) -> &str {
+fn defname(def: &::parsenodes::DefElem) -> &str {
     def.defname.as_deref().unwrap_or("")
 }
 
 /// `if (def->arg == NULL) ereport(ERRCODE_SYNTAX_ERROR, "%s <detail>")` — the
 /// shared parameter-presence guard, returning the borrowed argument node.
-fn require_arg<'a>(def: &'a parsenodes::DefElem, detail: &str) -> PgResult<&'a Node> {
+fn require_arg<'a>(def: &'a ::parsenodes::DefElem, detail: &str) -> PgResult<&'a Node> {
     def.arg
         .as_deref()
         .ok_or_else(|| syntax_error(format!("{} {}", defname(def), detail)))
@@ -413,7 +413,7 @@ fn require_arg<'a>(def: &'a parsenodes::DefElem, detail: &str) -> PgResult<&'a N
 /// is the same text as the per-tag default (e.g. "<name> requires a numeric
 /// value").
 fn require_arg_msg<'a>(
-    def: &'a parsenodes::DefElem,
+    def: &'a ::parsenodes::DefElem,
     message: impl FnOnce(&str) -> String,
 ) -> PgResult<&'a Node> {
     def.arg
@@ -432,7 +432,7 @@ fn require_arg_msg<'a>(
 /// has none of), and it could not equal a boolean keyword, so it correctly
 /// falls through to the "requires a Boolean value" error. We surface that here
 /// by leaving the rendered text empty for those forms.
-fn def_get_string_text(def: &parsenodes::DefElem) -> PgResult<String> {
+fn def_get_string_text(def: &::parsenodes::DefElem) -> PgResult<String> {
     let arg = require_arg(def, "requires a parameter")?;
     Ok(match arg {
         Node::Integer(i) => i.ival.to_string(),
@@ -446,14 +446,14 @@ fn def_get_string_text(def: &parsenodes::DefElem) -> PgResult<String> {
 
 /// `castNode(Float, def->arg)->fval` — the `Float` value node's textual value.
 /// An absent `fval` renders empty (a Float node always carries it in practice).
-fn float_fval(value: &parsenodes::Float) -> &str {
+fn float_fval(value: &::parsenodes::Float) -> &str {
     value.fval.as_deref().unwrap_or("")
 }
 
 /// `floatVal(def->arg)` — `atof(castNode(Float, def->arg)->fval)`
 /// (`nodes/value.h`): parse the Float node's text as a `double`, matching C
 /// `atof` (which yields `0.0` on an unparsable prefix rather than erroring).
-fn floatVal(value: &parsenodes::Float) -> f64 {
+fn floatVal(value: &::parsenodes::Float) -> f64 {
     atof(float_fval(value))
 }
 

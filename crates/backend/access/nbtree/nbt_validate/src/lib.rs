@@ -25,7 +25,7 @@ use types_nbtree::{BTMaxStrategyNumber, BTORDER_PROC, BTOPTIONS_PROC};
 // The opclass-form / member-row mirror types carried across the syscache seams
 // live in `types-hash` (shared by every AM validator); re-export so callers and
 // tests can name them through this crate as well.
-pub use hash::backend_access_hash_hashvalidate::{OpclassForm, AmopRow, AmprocRow};
+pub use ::hash::backend_access_hash_hashvalidate::{OpclassForm, AmopRow, AmprocRow};
 
 use amvalidate_seams as amvalidate_seams;
 use transam_xact_seams as xact_seams;
@@ -85,7 +85,7 @@ const INTERNALOID: Oid = 2281;
 /// `OpFamilyMember` (`amapi.h`), mutated in place by [`btadjustmembers`].
 /// Canonical definition lives in `opclass`; re-exported here so this
 /// crate names the same type (no duplicate definition).
-pub use opclass::OpFamilyMember;
+pub use ::opclass::OpFamilyMember;
 
 /// `list_append_unique_oid(list, oid)` — append `oid` if not already present.
 /// Fallible: C's `lappend_oid` pallocs in the list's context.

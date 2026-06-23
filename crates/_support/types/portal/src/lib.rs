@@ -24,12 +24,12 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use core::cell::RefCell;
 
-use mcx::MemoryContext;
-use types_core::primitive::TimestampTz;
-use types_core::xact::SubTransactionId;
+use ::mcx::MemoryContext;
+use ::types_core::primitive::TimestampTz;
+use ::types_core::xact::SubTransactionId;
 use ::nodes::funcapi::Tuplestorestate;
-use snapshot::SnapshotData;
-use types_tuple::heaptuple::TupleDescData;
+use ::snapshot::SnapshotData;
+use ::types_tuple::heaptuple::TupleDescData;
 
 /// `CommandTag` (`tcop/cmdtaglist.h`) — the 0-based position of the enumerator
 /// in `cmdtaglist.h`. Kept as the integer the C enum compiles to so command

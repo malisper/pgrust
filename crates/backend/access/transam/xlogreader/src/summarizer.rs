@@ -35,18 +35,18 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
 use types_error::{PgError, PgResult};
-use types_storage::RelFileLocator;
-use wal::rmgr::{XLogReaderRoutine, XLogReaderState, XLREAD_FAIL};
-use wal::xlog_consts::{XLOGDIR, XLOG_BLCKSZ};
+use ::types_storage::RelFileLocator;
+use ::wal::rmgr::{XLogReaderRoutine, XLogReaderState, XLREAD_FAIL};
+use ::wal::xlog_consts::{XLOGDIR, XLOG_BLCKSZ};
 
 use types_walsummarizer::{BlockTag, ReadRecordResult, XLogReaderHandle};
 
 use xlogreader_seams as seam;
-use xlogreader_seams::SummarizerPageReadCB;
+use ::xlogreader_seams::SummarizerPageReadCB;
 use fd_seams as fd;
 
 // ===========================================================================
@@ -233,7 +233,7 @@ fn allocate_reader(
     };
 
     // Permanently allocate readBuf (XLOG_BLCKSZ), MAXALIGN'd by the arena.
-    let mut read_buf = match mcx::vec_with_capacity_in(arena, XLOG_BLCKSZ) {
+    let mut read_buf = match ::mcx::vec_with_capacity_in(arena, XLOG_BLCKSZ) {
         Ok(v) => v,
         Err(_) => {
             // pfree(state) path; reclaim the leaked context.
@@ -554,7 +554,7 @@ fn summarizer_rec_get_block_tag_extended(
 }
 
 /// The seam `XLogBlockTag.rlocator` and the summarizer `BlockTag.rlocator` are
-/// both `types_storage::RelFileLocator`; an identity copy.
+/// both `::types_storage::RelFileLocator`; an identity copy.
 fn relfilelocator(loc: RelFileLocator) -> RelFileLocator {
     loc
 }

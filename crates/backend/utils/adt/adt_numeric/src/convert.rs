@@ -15,9 +15,9 @@ use alloc::string::String;
 use core::mem::size_of;
 
 use mcx::{Mcx, PgVec};
-use datum::VARHDRSZ;
+use ::datum::VARHDRSZ;
 use types_error::{PgError, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
-use types_numeric::var::{NumericSign, NumericVar};
+use ::types_numeric::var::{NumericSign, NumericVar};
 use types_numeric::{
     is_valid_numeric_typmod, numeric_digit_at, numeric_digits, numeric_dscale,
     numeric_header_is_short, numeric_is_special, numeric_ndigits, numeric_sign,
@@ -63,7 +63,7 @@ fn value_overflow() -> PgError {
 /// validated bound + fallible reserve).
 #[inline]
 fn varlena_buf<'mcx>(mcx: Mcx<'mcx>, len: usize) -> PgResult<PgVec<'mcx, u8>> {
-    let mut v = mcx::vec_with_capacity_in::<u8>(mcx, len).map_err(|_| value_overflow())?;
+    let mut v = ::mcx::vec_with_capacity_in::<u8>(mcx, len).map_err(|_| value_overflow())?;
     // Capacity already reserved -> no realloc -> infallible.
     v.resize(len, 0);
     Ok(v)
@@ -299,7 +299,7 @@ pub fn apply_typmod_special(num: &[u8], typmod: i32) -> PgResult<()> {
     debug_assert!(numeric_is_special(num)); // caller error if not
 
     // NaN is allowed regardless of the typmod.
-    if types_numeric::numeric_is_nan(num) {
+    if ::types_numeric::numeric_is_nan(num) {
         return Ok(());
     }
 
@@ -354,23 +354,23 @@ pub fn numeric_data_from_bytes(num: &[u8]) -> PgResult<NumericData> {
     // VARSIZE_ANY: the on-disk length word, handling both a 1-byte (short) and a
     // 4-byte (long) varlena header. The numeric reaching here is always inline
     // (detoasted), never compressed/external.
-    let varsize = types_numeric::varsize_any(num);
+    let varsize = ::types_numeric::varsize_any(num);
     if varsize != num.len() {
         return Err(corrupt("numeric varlena length word disagrees with image size"));
     }
     // numeric_header_size accounts for the varlena header (short or long) plus
     // the numeric struct header; require at least that many bytes present.
-    if num.len() < types_numeric::numeric_header_size(num) {
+    if num.len() < ::types_numeric::numeric_header_size(num) {
         return Err(corrupt("numeric byte image shorter than its minimum header"));
     }
 
     // The numeric struct header word (`choice.n_header`), read from the
     // header-agnostic VARDATA_ANY offset (so a short-varlena image reads it from
     // byte 1, a long one from byte 4).
-    let header = types_numeric::header_word(num);
+    let header = ::types_numeric::header_word(num);
 
     if numeric_is_special(num) {
-        if num.len() != types_numeric::numeric_header_size(num) {
+        if num.len() != ::types_numeric::numeric_header_size(num) {
             return Err(corrupt("special numeric carries trailing bytes"));
         }
         // numeric_data_to_bytes re-emits a special as a 4-byte (long) varlena
@@ -383,7 +383,7 @@ pub fn numeric_data_from_bytes(num: &[u8]) -> PgResult<NumericData> {
     }
 
     // Finite value: digit-count must divide evenly.
-    let hdr_size = types_numeric::numeric_header_size(num);
+    let hdr_size = ::types_numeric::numeric_header_size(num);
     if (num.len() - hdr_size) % size_of::<NumericDigit>() != 0 {
         return Err(corrupt("numeric digit area has a fractional digit"));
     }
@@ -412,7 +412,7 @@ pub fn numeric_data_from_bytes(num: &[u8]) -> PgResult<NumericData> {
         (
             NumericChoice::NLong(NumericLong {
                 n_sign_dscale: header,
-                n_weight: types_numeric::long_weight_word(num),
+                n_weight: ::types_numeric::long_weight_word(num),
                 n_data,
             }),
             NUMERIC_HDRSZ + ndigits * size_of::<NumericDigit>(),
@@ -442,7 +442,7 @@ pub fn numeric_data_to_bytes<'mcx>(mcx: Mcx<'mcx>, data: &NumericData) -> PgResu
         return Err(corrupt("numeric vl_len_ disagrees with its digit count"));
     }
 
-    let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, len)
+    let mut buf = ::mcx::vec_with_capacity_in::<u8>(mcx, len)
         .map_err(|_| corrupt("out of memory building numeric byte image"))?;
     buf.extend_from_slice(&varsize_header(len).to_ne_bytes());
 
@@ -872,9 +872,9 @@ pub fn float4_to_numeric<'mcx>(mcx: Mcx<'mcx>, val: f32) -> PgResult<PgVec<'mcx,
 /// (numeric.c:4746)
 pub fn numeric_to_float8(num: &[u8]) -> PgResult<f64> {
     if numeric_is_special(num) {
-        if types_numeric::numeric_is_pinf(num) {
+        if ::types_numeric::numeric_is_pinf(num) {
             return Ok(f64::INFINITY);
-        } else if types_numeric::numeric_is_ninf(num) {
+        } else if ::types_numeric::numeric_is_ninf(num) {
             return Ok(f64::NEG_INFINITY);
         } else {
             return Ok(f64::NAN);
@@ -888,7 +888,7 @@ pub fn numeric_to_float8(num: &[u8]) -> PgResult<f64> {
     // Numeric); allocate the scratch in a short-lived local context. The var
     // (and its PgVec) is dropped before the context, satisfying the reset
     // accounting.
-    let scratch = mcx::MemoryContext::new("numeric_float8 scratch");
+    let scratch = ::mcx::MemoryContext::new("numeric_float8 scratch");
     let var = decode_finite_for_str(scratch.mcx(), num);
     let s = io::get_str_from_var(&var);
     let result: f64 = s
@@ -916,16 +916,16 @@ pub fn numeric_to_float8(num: &[u8]) -> PgResult<f64> {
 /// but mirror float4in_internal's ERANGE handling for `real`. (numeric.c:4840)
 pub fn numeric_to_float4(num: &[u8]) -> PgResult<f32> {
     if numeric_is_special(num) {
-        if types_numeric::numeric_is_pinf(num) {
+        if ::types_numeric::numeric_is_pinf(num) {
             return Ok(f32::INFINITY);
-        } else if types_numeric::numeric_is_ninf(num) {
+        } else if ::types_numeric::numeric_is_ninf(num) {
             return Ok(f32::NEG_INFINITY);
         } else {
             return Ok(f32::NAN);
         }
     }
 
-    let scratch = mcx::MemoryContext::new("numeric_float4 scratch");
+    let scratch = ::mcx::MemoryContext::new("numeric_float4 scratch");
     let var = decode_finite_for_str(scratch.mcx(), num);
     let s = io::get_str_from_var(&var);
     let result: f32 = s.parse().map_err(|_| float_out_of_range(&s, "real"))?;

@@ -24,9 +24,9 @@
 
 use std::cell::RefCell;
 
-use types_core::xact::SubTransactionId;
-use types_core::Oid;
-use types_storage::large_object::LargeObjectDesc;
+use ::types_core::xact::SubTransactionId;
+use ::types_core::Oid;
+use ::types_storage::large_object::LargeObjectDesc;
 
 /// The be-fsstubs file-scope statics, bundled.
 pub struct LoState {

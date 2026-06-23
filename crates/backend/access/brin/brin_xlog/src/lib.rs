@@ -44,7 +44,7 @@ use alloc::format;
 use bufmask_seams::{
     mask_page_hint_bits, mask_page_lsn_and_checksum, mask_unused_space,
 };
-use xlogreader_seams::xlog_rec_get_block_tag_extended;
+use ::xlogreader_seams::xlog_rec_get_block_tag_extended;
 use xlogutils::{XLogInitBufferForRedo, XLogReadBufferForRedo};
 use bufmgr_seams::{
     buffer_get_block_number, mark_buffer_dirty, unlock_release_buffer, with_buffer_page,
@@ -55,14 +55,14 @@ use page::{
     PageIndexTupleDeleteNoCompact, PageIndexTupleOverwrite, PageInit, PageMut, PageRef, PageSetLSN,
 };
 use utils_error::{ereport, PgError, PgResult};
-use types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
-use types_error::error::PANIC;
-use types_storage::buf::{Buffer, BufferIsValid};
-use types_storage::bufpage::{SizeOfPageHeaderData, PAI_OVERWRITE};
-use types_tuple::heaptuple::{ItemPointerData, INVALID_OFFSET_NUMBER};
-use wal::rmgr::XLogReaderState;
-use wal::XLogRedoAction;
-use types_core::XLogRecPtr;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
+use ::types_error::error::PANIC;
+use ::types_storage::buf::{Buffer, BufferIsValid};
+use ::types_storage::bufpage::{SizeOfPageHeaderData, PAI_OVERWRITE};
+use ::types_tuple::heaptuple::{ItemPointerData, INVALID_OFFSET_NUMBER};
+use ::wal::rmgr::XLogReaderState;
+use ::wal::XLogRedoAction;
+use ::types_core::XLogRecPtr;
 
 // ===========================================================================
 // brin_xlog.h opcodes (access/brin_xlog.h).

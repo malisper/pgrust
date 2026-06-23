@@ -11,8 +11,8 @@
 
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
-use types_evtcache::EventTriggerEvent;
+use ::types_error::PgResult;
+use ::types_evtcache::EventTriggerEvent;
 use ::nodes::nodes::Node;
 
 seam_core::seam!(

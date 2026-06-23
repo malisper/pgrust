@@ -9,7 +9,7 @@
 //! `opclass` structs name (`String`, `TypeName`, `ObjectWithArgs`,
 //! `CreateOpClassItem`), so a mismatch is an internal error.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgResult, ERROR};
 use ::nodes::ddlnodes as pnode;
 use ::nodes::nodes::Node;
@@ -37,7 +37,7 @@ fn string_list(nodes: &[::nodes::nodes::NodePtr<'_>], ctx: &str) -> PgResult<Vec
 }
 
 /// Flatten a parse-node `TypeName` (`rawnodes::TypeName`) into the
-/// `opclass::TypeName` the type-resolver seams consume. `names` is the
+/// `::opclass::TypeName` the type-resolver seams consume. `names` is the
 /// `List *` of `String` nodes; the remaining fields are scalar copies.
 fn type_name(tn: &PTypeName<'_>) -> PgResult<TypeName> {
     let names: Vec<String> = tn

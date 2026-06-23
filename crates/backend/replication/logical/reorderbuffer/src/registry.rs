@@ -12,17 +12,17 @@ extern crate alloc;
 
 use core::cell::RefCell;
 
-use types_core::primitive::{ForkNumber, TransactionId, XLogRecPtr};
-use types_core::xact::{CommandId, InvalidCommandId};
-use types_error::PgResult;
+use ::types_core::primitive::{ForkNumber, TransactionId, XLogRecPtr};
+use ::types_core::xact::{CommandId, InvalidCommandId};
+use ::types_error::PgResult;
 use types_logical::{ReorderBufferHandle, ReorderBufferStats, TxnHandle};
-use snapshot::snapshot::ResolveCminCmaxResult;
-use snapshot::SnapshotData;
-use types_storage::sinval::SharedInvalidationMessage;
-use types_storage::storage::Buffer;
-use types_storage::RelFileLocator;
-use types_tuple::heaptuple::HeapTupleData;
-use types_tuple::ItemPointerData;
+use ::snapshot::snapshot::ResolveCminCmaxResult;
+use ::snapshot::SnapshotData;
+use ::types_storage::sinval::SharedInvalidationMessage;
+use ::types_storage::storage::Buffer;
+use ::types_storage::RelFileLocator;
+use ::types_tuple::heaptuple::HeapTupleData;
+use ::types_tuple::ItemPointerData;
 
 use crate::snapshot::ReorderBufferTupleCidKey;
 use crate::ReorderBuffer;
@@ -118,7 +118,7 @@ pub(crate) fn txn_handle_for_xid(xid: TransactionId) -> TxnHandle {
 // scratch's `change`.
 // ---------------------------------------------------------------------------
 
-use types_core::Oid;
+use ::types_core::Oid;
 use types_logical::{ChangeHandle, MessageHandle, PrefixHandle, RelationHandle, RelationsHandle};
 
 /// Live values published for the in-flight output-plugin callback.
@@ -214,7 +214,7 @@ fn seam_txn_gid_by_handle(txn: TxnHandle) -> alloc::vec::Vec<u8> {
 }
 
 /// `txn->xact_time` (commit/prepare time union) for a `TxnHandle`.
-fn seam_txn_xact_time_by_handle(txn: TxnHandle) -> types_core::primitive::TimestampTz {
+fn seam_txn_xact_time_by_handle(txn: TxnHandle) -> ::types_core::primitive::TimestampTz {
     let xid = txn_handle_to_xid(txn);
     BUFFERS.with(|b| {
         let tab = b.borrow();
@@ -441,8 +441,8 @@ fn seam_commit(
     xid: TransactionId,
     commit_lsn: XLogRecPtr,
     end_lsn: XLogRecPtr,
-    commit_time: types_core::primitive::TimestampTz,
-    origin_id: types_core::primitive::RepOriginId,
+    commit_time: ::types_core::primitive::TimestampTz,
+    origin_id: ::types_core::primitive::RepOriginId,
     origin_lsn: XLogRecPtr,
 ) {
     with_buffer(handle, |rb| {
@@ -486,7 +486,7 @@ fn seam_queue_truncate(
     lsn: XLogRecPtr,
     cascade: bool,
     restart_seqs: bool,
-    relids: alloc::vec::Vec<types_core::Oid>,
+    relids: alloc::vec::Vec<::types_core::Oid>,
 ) {
     with_buffer(rb, |b| b.queue_truncate(xid, lsn, cascade, restart_seqs, relids));
 }
@@ -510,7 +510,7 @@ fn seam_abort(
     rb: ReorderBufferHandle,
     xid: TransactionId,
     lsn: XLogRecPtr,
-    abort_time: types_core::primitive::TimestampTz,
+    abort_time: ::types_core::primitive::TimestampTz,
 ) {
     with_buffer(rb, |b| b.abort(xid, lsn, abort_time));
 }
@@ -526,8 +526,8 @@ fn seam_finish_prepared(
     commit_lsn: XLogRecPtr,
     end_lsn: XLogRecPtr,
     two_phase_at: XLogRecPtr,
-    commit_time: types_core::primitive::TimestampTz,
-    origin_id: types_core::primitive::RepOriginId,
+    commit_time: ::types_core::primitive::TimestampTz,
+    origin_id: ::types_core::primitive::RepOriginId,
     origin_lsn: XLogRecPtr,
     gid: alloc::vec::Vec<u8>,
     is_commit: bool,
@@ -570,8 +570,8 @@ fn seam_remember_prepare_info(
     xid: TransactionId,
     prepare_lsn: XLogRecPtr,
     end_lsn: XLogRecPtr,
-    prepare_time: types_core::primitive::TimestampTz,
-    origin_id: types_core::primitive::RepOriginId,
+    prepare_time: ::types_core::primitive::TimestampTz,
+    origin_id: ::types_core::primitive::RepOriginId,
     origin_lsn: XLogRecPtr,
 ) -> bool {
     with_buffer(rb, |b| {
@@ -687,7 +687,7 @@ fn seam_resolve_cmin_cmax_during_decoding(
 /// through a mutating snapmgr seam rather than reading a clone (the current
 /// read-only fetch is faithful only because every non-panicking path performs a
 /// single lookup with no mapping update).
-fn update_logical_mappings(_relid: types_core::Oid, _snapshot: &SnapshotData) -> PgResult<()> {
+fn update_logical_mappings(_relid: ::types_core::Oid, _snapshot: &SnapshotData) -> PgResult<()> {
     panic!(
         "UpdateLogicalMappings: logical-rewrite mapping-file replay not yet \
          ported (logical-rewrite-mapping family)"

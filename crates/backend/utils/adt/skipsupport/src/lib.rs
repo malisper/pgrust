@@ -1,7 +1,7 @@
 //! Port of `src/backend/utils/adt/skipsupport.c` (PostgreSQL 18.3).
 //!
 //! Support routines for B-Tree skip scan: `PrepareSkipSupportFromOpclass`
-//! fills in a [`SkipSupportData`](types_sortsupport::SkipSupportData) given an
+//! fills in a [`SkipSupportData`](::types_sortsupport::SkipSupportData) given an
 //! operator class (opfamily + opcintype). The B-Tree skip-scan preprocessing
 //! code (`_bt_preprocess_array_keys`) calls it to obtain the
 //! enumerate/increment/decrement support for a skipped attribute.
@@ -31,9 +31,9 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::{Oid, OidIsValid};
-use types_error::PgResult;
-use types_sortsupport::SkipSupportData;
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::types_error::PgResult;
+use ::types_sortsupport::SkipSupportData;
 
 use compare_seams as nbtcompare;
 use skipsupport_seams as seams;

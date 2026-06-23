@@ -3,8 +3,8 @@
 //! from its `init_seams()` when it lands; until then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
-use replication_launcher::Subscription;
+use ::types_error::PgResult;
+use ::replication_launcher::Subscription;
 
 seam_core::seam!(
     /// `get_subscription_list()` (launcher.c): inside a fresh transaction,
@@ -43,13 +43,13 @@ seam_core::seam!(
     /// `SUBREL_STATE_UNKNOWN` with `sublsn = InvalidXLogRecPtr`. `Err` carries
     /// the catalog-scan error surface.
     pub fn get_subscription_rel_state(
-        subid: types_core::primitive::Oid,
-        relid: types_core::primitive::Oid,
-    ) -> PgResult<(u8, types_core::primitive::XLogRecPtr)>
+        subid: ::types_core::primitive::Oid,
+        relid: ::types_core::primitive::Oid,
+    ) -> PgResult<(u8, ::types_core::primitive::XLogRecPtr)>
 );
 
-use types_catalog::pg_subscription as cat_sub;
-use types_core::primitive::{Oid, XLogRecPtr};
+use ::types_catalog::pg_subscription as cat_sub;
+use ::types_core::primitive::{Oid, XLogRecPtr};
 
 seam_core::seam!(
     /// `GetSubscription(subid, missing_ok)` (pg_subscription.c):

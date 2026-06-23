@@ -8,10 +8,10 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgString};
-use types_core::primitive::AttrNumber;
-use types_core::Oid;
-use types_error::PgResult;
-use types_tuple::heaptuple::{TupleDesc, TupleDescData};
+use ::types_core::primitive::AttrNumber;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::{TupleDesc, TupleDescData};
 
 seam_core::seam!(
     /// `CreateTemplateTupleDesc(natts)` (access/common/tupdesc.c): allocate an

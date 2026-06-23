@@ -33,7 +33,7 @@
 //! through the normal path. Reproducing the recovery-driven self-set is
 //! documented as deferred rather than stubbed behind a pretend-success.
 
-use types_guc::GUC_REPORT;
+use ::types_guc::GUC_REPORT;
 
 use crate::live::{with_store, with_store_mut};
 use crate::model::GUC_NEEDS_REPORT;

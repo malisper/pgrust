@@ -17,7 +17,7 @@
 //! In C the context is a stack struct whose `Datum` arrays alias the caller's
 //! deformed-value arrays; the relation crosses as a live `Relation *` and the
 //! descriptor is reached by `ttc->ttc_rel->rd_att` (`RelationGetDescr`). Here
-//! the context ([`types_tuple::toast_helper::ToastTupleContext`]) owns its
+//! the context ([`::types_tuple::toast_helper::ToastTupleContext`]) owns its
 //! deformed values (the unified [`Datum`] enum) and the relation crosses as its
 //! `Oid`; the descriptor is resolved back through the by-OID relcache seam
 //! ([`relation_id_get_relation`]) and released with [`relation_close`], exactly
@@ -37,11 +37,11 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
-use types_tuple::toast_helper::{
+use ::types_tuple::toast_helper::{
     ToastTupleContext, TOASTCOL_IGNORE, TOASTCOL_INCOMPRESSIBLE,
     TOASTCOL_NEEDS_DELETE_OLD, TOASTCOL_NEEDS_FREE, TOAST_HAS_NULLS,
     TOAST_NEEDS_CHANGE, TOAST_NEEDS_DELETE_OLD, TOAST_NEEDS_FREE,
@@ -297,8 +297,8 @@ pub fn toast_tuple_init(ttc: &mut ToastTupleContext<'_>) -> PgResult<()> {
             if varatt_is_external(ttc.ttc_values[idx].as_ref_bytes()) {
                 // tai_oldexternal = new_value (the original external pointer
                 // image, retained for cleanup / comparison).
-                let old_external: mcx::PgVec<'_, u8> =
-                    mcx::slice_in(mcx, ttc.ttc_values[idx].as_ref_bytes())?;
+                let old_external: ::mcx::PgVec<'_, u8> =
+                    ::mcx::slice_in(mcx, ttc.ttc_values[idx].as_ref_bytes())?;
                 let fetched = {
                     let bytes = ttc.ttc_values[idx].as_ref_bytes();
                     if att_attstorage == TYPSTORAGE_PLAIN {

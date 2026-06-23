@@ -10,9 +10,9 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::io::FromRawFd;
 use std::path::Path;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, PgResult, ERROR};
-use types_storage::File;
+use ::types_storage::File;
 
 use aio_seams as aio_seams;
 use waitevent_seams as waitevent;
@@ -250,7 +250,7 @@ pub fn FileClose(file: File) -> PgResult<()> {
         // In any case do the unlink.
         if unsafe { libc::unlink(cpath.as_ptr()) } != 0 {
             let en = get_errno();
-            ereport(types_error::LOG)
+            ereport(::types_error::LOG)
                 .with_saved_errno(en)
                 .errcode_for_file_access()
                 .errmsg(format!("could not delete file \"{file_name}\": %m"))
@@ -262,7 +262,7 @@ pub fn FileClose(file: File) -> PgResult<()> {
             crate::temp_files::ReportTemporaryFileUsage(&file_name, statbuf.st_size as u64);
         } else {
             set_errno(stat_errno);
-            ereport(types_error::LOG)
+            ereport(::types_error::LOG)
                 .with_saved_errno(stat_errno)
                 .errcode_for_file_access()
                 .errmsg(format!("could not stat file \"{file_name}\": %m"))
@@ -477,7 +477,7 @@ pub fn FileWriteV(
             new_total += (past_write - file_size) as u64;
             if new_total > (temp_file_limit as u64) * 1024u64 {
                 ereport(ERROR)
-                    .errcode(types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
+                    .errcode(::types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
                     .errmsg(format!(
                         "temporary file size exceeds \"temp_file_limit\" ({temp_file_limit}kB)"
                     ))

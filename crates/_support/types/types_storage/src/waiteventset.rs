@@ -1,7 +1,7 @@
 //! Wait-event vocabulary (`storage/waiteventset.h`), trimmed to the items the
 //! pqcomm port consumes.
 
-use types_core::pgsocket;
+use ::types_core::pgsocket;
 
 pub const WL_LATCH_SET: u32 = 1 << 0;
 pub const WL_SOCKET_READABLE: u32 = 1 << 1;

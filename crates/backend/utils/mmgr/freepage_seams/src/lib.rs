@@ -2,10 +2,10 @@
 //! (`utils/mmgr/freepage.c`).
 //!
 //! A `FreePageManager` lives in shared memory (its real layout is
-//! `types_freepage::FreePageManager`), so it crosses the seam as a raw
+//! `::types_freepage::FreePageManager`), so it crosses the seam as a raw
 //! pointer, exactly as the C functions take `FreePageManager *`.
 
-use types_freepage::FreePageManager;
+use ::types_freepage::FreePageManager;
 
 seam_core::seam!(
     /// `FreePageManagerInitialize(FreePageManager *fpm, char *base)` —

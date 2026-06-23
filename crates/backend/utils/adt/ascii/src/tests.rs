@@ -9,7 +9,7 @@
 
 use super::*;
 use std::sync::Once;
-use types_wchar::encoding::{PG_LATIN1, PG_LATIN2, PG_UTF8, PG_WIN1250, PG_SQL_ASCII};
+use ::types_wchar::encoding::{PG_LATIN1, PG_LATIN2, PG_UTF8, PG_WIN1250, PG_SQL_ASCII};
 
 static INSTALL: Once = Once::new();
 

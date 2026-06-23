@@ -6,8 +6,8 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `RemoveRewriteRuleById(ruleOid)` (rewrite/rewriteRemove.c): the per-class

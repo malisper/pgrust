@@ -1,7 +1,7 @@
 //! `mode_final` — most common value (`orderedsetaggs.c:1033`).
 
-use datum::Datum as Word;
-use fmgr::FunctionCallInfoBaseData;
+use ::datum::Datum as Word;
+use ::fmgr::FunctionCallInfoBaseData;
 
 use tuplesort_seams as tsort;
 

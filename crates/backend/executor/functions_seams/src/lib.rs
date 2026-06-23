@@ -9,25 +9,25 @@
 //! `executor/functions.c` lands and installs it from its own `init_seams()`, a
 //! call panics loudly ("seam not installed").
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 // Datum-completion (Wave 5; reaffirmed): this seam's only `Datum` use is the
-// `fmgr_sql` result. It is contract-pinned to the bare-word `datum::Datum`,
+// `fmgr_sql` result. It is contract-pinned to the bare-word `::datum::Datum`,
 // NOT the canonical `types_tuple::Datum<'mcx>`, because it IS the sanctioned
 // PGFunction-return ABI edge: a `PGFunction` hands back its result as one C
 // `Datum` word (a by-value scalar, or a pointer-shaped word for by-ref). Its
 // sole consumer `backend-utils-fmgr-core::function_call_invoke_with_expr`
 // returns this seam's result as one arm of a `match` whose other arms come from
 // `invoke_pgfunction` — the same audited bare-word `Datum` PGFunction-return
-// edge — and fmgr-core is itself typed in bare-word `datum::Datum`.
+// edge — and fmgr-core is itself typed in bare-word `::datum::Datum`.
 // Flipping this seam to the canonical enum would diverge from that consumer
 // contract and break its `cargo check`. There are no construction/read sites
 // (no `from_*`/`as_*`) to thread `'mcx` through; this lone `use` is the kept
 // bare-word edge per the datum-redesign-plan. See
 // execExpr-datum-mig-contract-blocked for the identical pattern.
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::FunctionCallInfoBaseData;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::FunctionCallInfoBaseData;
 
 seam_core::seam!(
     /// `fmgr_sql(PG_FUNCTION_ARGS)` (`executor/functions.c`): the call handler

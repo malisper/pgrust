@@ -2,7 +2,7 @@
 //! `InvalidationInfo` / `TransInvalidationInfo`, `Register*Invalidation`,
 //! `Prepare[Inplace]InvalidationState`).
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{primitive::OidIsValid, Oid};
 use types_error::{PgError, PgResult};
 

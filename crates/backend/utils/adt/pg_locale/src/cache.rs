@@ -9,7 +9,7 @@
 //! never-reset `CollationCacheContext`; the struct carries the flag core, the
 //! `collate` method vtable (non-NULL only for non-C libc/ICU), and the `info`
 //! union (libc `locale_t`, builtin tables, ICU `UCollator`). The repo's
-//! `locale::PgLocaleStruct` is the flag core only — every consumer reads
+//! `::locale::PgLocaleStruct` is the flag core only — every consumer reads
 //! it off the resolved locale, and the provider-specific operations re-key by
 //! the collation OID (`pg_strncoll`/`pg_strxfrm`/`char_tolower`), with this crate
 //! re-resolving the same cache entry. So the full entry lives here as
@@ -29,12 +29,12 @@ use alloc::format;
 use alloc::string::String;
 use core::cell::RefCell;
 
-use utils_error::ereport;
-use mcx::Mcx;
-use types_core::primitive::{Oid, OidIsValid};
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, OidIsValid};
 use types_error::{ErrorLocation, PgError, PgResult, WARNING};
 use locale::{CollProvider, PgLocale, PgLocaleStruct};
-use types_tuple::heaptuple::DEFAULT_COLLATION_OID;
+use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 
 use pg_locale_catalog_seams as catalog;
 
@@ -42,7 +42,7 @@ use crate::libc_provider::LibcLocale;
 
 /// `C_COLLATION_OID` (`pg_collation.dat` oid 950) — the `C` collation, which
 /// `pg_newlocale_from_collation` resolves without catalog access.
-const C_COLLATION_OID: Oid = types_core::catalog::C_COLLATION_OID;
+const C_COLLATION_OID: Oid = ::types_core::catalog::C_COLLATION_OID;
 
 /// `COLLPROVIDER_*` codes as the `char`/`i8` the catalog row carries.
 const COLLPROVIDER_BUILTIN: i8 = b'b' as i8;
@@ -234,7 +234,7 @@ pub fn resolve(collid: Oid) -> PgResult<&'static LocaleEntry> {
 /// flag core ([`PgLocaleStruct`]) into `mcx` (the seam carrier).
 pub fn pg_newlocale_from_collation<'mcx>(mcx: Mcx<'mcx>, collid: Oid) -> PgResult<PgLocale<'mcx>> {
     let entry = resolve(collid)?;
-    mcx::alloc_in(mcx, entry.view)
+    ::mcx::alloc_in(mcx, entry.view)
 }
 
 /// `init_database_collation()` (`pg_locale.c:1153`): build the database default
@@ -291,7 +291,7 @@ fn datctype_is_c(datctype: &str) -> bool {
 /// a transient context (the flag core is `Copy`'d out, then the cached entry is
 /// interned in the backend-lifetime `Box`, matching C's permanent cache).
 fn create_pg_locale_builtin(collid: Oid) -> PgResult<LocaleEntry> {
-    let ctx = mcx::MemoryContext::new("create_pg_locale_builtin");
+    let ctx = ::mcx::MemoryContext::new("create_pg_locale_builtin");
     let (view, casemap_full) = {
         let result =
             pg_locale_builtin_seams::create_pg_locale_builtin::call(ctx.mcx(), collid)?;
@@ -306,7 +306,7 @@ fn create_pg_locale_builtin(collid: Oid) -> PgResult<LocaleEntry> {
 /// `create_pg_locale_icu(collid, context)` (`pg_locale_icu.c`) — merged; the
 /// ICU-disabled profile always returns `Err(FEATURE_NOT_SUPPORTED)`.
 fn create_pg_locale_icu(collid: Oid) -> PgResult<()> {
-    let ctx = mcx::MemoryContext::new("create_pg_locale_icu");
+    let ctx = ::mcx::MemoryContext::new("create_pg_locale_icu");
     pg_locale_icu::create_pg_locale_icu(ctx.mcx(), collid).map(|_| ())
 }
 

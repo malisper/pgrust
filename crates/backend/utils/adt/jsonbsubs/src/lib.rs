@@ -41,15 +41,15 @@
 //! `SubscriptHandler::Jsonb` arm), exactly as PostgreSQL would obtain it through
 //! `OidFunctionCall0(F_JSONB_SUBSCRIPT_HANDLER)`.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::jbvType;
+use ::types_jsonb::jsonb::jbvType;
 use types_tuple::heaptuple::Datum as DatumV;
 
 use jsonb_util::{JsonbToJsonbValue, JsonbValueToJsonb};
-use adt_jsonfuncs::getfield::jsonb_get_element;
-use adt_jsonfuncs::setops::jsonb_set_element;
+use ::adt_jsonfuncs::getfield::jsonb_get_element;
+use ::adt_jsonfuncs::setops::jsonb_set_element;
 
 /// `DatumGetJsonbP(d)` (jsonb.h): `(Jsonb *) PG_DETOAST_DATUM(d)`. Read the
 /// by-reference jsonb varlena image off the canonical lane and detoast it via
@@ -62,7 +62,7 @@ use adt_jsonfuncs::setops::jsonb_set_element;
 fn datum_get_jsonb_p<'mcx>(
     mcx: Mcx<'mcx>,
     container: &DatumV<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     detoast_seams::pg_detoast_datum_packed::call(
         mcx,
         container.as_ref_bytes(),
@@ -217,7 +217,7 @@ const JSONB_SUBSCRIPT_HANDLER_UNREGISTERED: () = ();
 #[allow(dead_code)]
 fn jsonb_subscript_null_assignment_error() -> PgError {
     PgError::error("jsonb subscript in assignment must not be null")
-        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
+        .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
 }
 
 /// Install this unit's per-callback execution seams. Invoked from the global

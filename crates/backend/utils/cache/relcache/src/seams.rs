@@ -13,7 +13,7 @@
 use relcache_seams as sx;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::{AttrNumber, Oid, RegProcedure};
+use ::types_core::primitive::{AttrNumber, Oid, RegProcedure};
 use types_core::{MultiXactId, SubTransactionId, TransactionId};
 use types_error::{PgError, PgResult};
 
@@ -299,7 +299,7 @@ pub fn init_seams() {
 fn ruleutils_relation_real_colnames<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
-) -> PgResult<PgVec<'mcx, Option<mcx::PgString<'mcx>>>> {
+) -> PgResult<PgVec<'mcx, Option<::mcx::PgString<'mcx>>>> {
     // C: rel = relation_open(rte->relid, AccessShareLock); ... relation_close.
     // The deparser can be invoked on a relation that is not already pinned in
     // the current statement (e.g. standalone `pg_get_indexdef` /
@@ -315,7 +315,7 @@ fn ruleutils_relation_real_colnames<'mcx>(
             if att.attisdropped {
                 out.push(None);
             } else {
-                out.push(Some(mcx::PgString::from_str_in(&att.attname, mcx)?));
+                out.push(Some(::mcx::PgString::from_str_in(&att.attname, mcx)?));
             }
         }
         Ok(out)
@@ -335,7 +335,7 @@ fn tc_relation_get_refcount(rel: &rel::Relation<'_>) -> PgResult<i32> {
 /// `rel->rd_createSubid` (rel.h) — the sub-xact that created this relation.
 fn tc_relation_get_create_subid(
     rel: &rel::Relation<'_>,
-) -> PgResult<types_core::SubTransactionId> {
+) -> PgResult<::types_core::SubTransactionId> {
     crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_createSubid)
 }
 
@@ -343,7 +343,7 @@ fn tc_relation_get_create_subid(
 /// relation a new relfilenumber (`InvalidSubTransactionId` if none).
 fn tc_relation_get_new_relfilelocator_subid(
     rel: &rel::Relation<'_>,
-) -> PgResult<types_core::SubTransactionId> {
+) -> PgResult<::types_core::SubTransactionId> {
     crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_newRelfilelocatorSubid)
 }
 
@@ -351,7 +351,7 @@ fn tc_relation_get_new_relfilelocator_subid(
 /// handle (no release authority) — the OID→`&Relation` bridge the buffer/FSM/VM
 /// owners need. The arena is dropped when the returned handle is dropped.
 fn project_open(
-    relcx: &mcx::MemoryContext,
+    relcx: &::mcx::MemoryContext,
     rel: Oid,
 ) -> PgResult<rel::Relation<'_>> {
     let data = crate::core_entry_store::with_relation(rel, |rd| {
@@ -363,10 +363,10 @@ fn project_open(
 /// `RecordPageWithFreeSpace(rel, heapBlk, spaceAvail)` (freespace.c), OID-keyed.
 fn record_page_with_free_space(
     rel: Oid,
-    heap_blk: types_core::primitive::BlockNumber,
-    space_avail: types_core::Size,
+    heap_blk: ::types_core::primitive::BlockNumber,
+    space_avail: ::types_core::Size,
 ) -> PgResult<()> {
-    let relcx = mcx::MemoryContext::new("record_page_with_free_space");
+    let relcx = ::mcx::MemoryContext::new("record_page_with_free_space");
     let rel = project_open(&relcx, rel)?;
     freespace_seams::record_page_with_free_space::call(&rel, heap_blk, space_avail)
 }
@@ -374,10 +374,10 @@ fn record_page_with_free_space(
 /// `FreeSpaceMapVacuumRange(rel, start, end)` (freespace.c), OID-keyed.
 fn free_space_map_vacuum_range(
     rel: Oid,
-    start: types_core::primitive::BlockNumber,
-    end: types_core::primitive::BlockNumber,
+    start: ::types_core::primitive::BlockNumber,
+    end: ::types_core::primitive::BlockNumber,
 ) -> PgResult<()> {
-    let relcx = mcx::MemoryContext::new("free_space_map_vacuum_range");
+    let relcx = ::mcx::MemoryContext::new("free_space_map_vacuum_range");
     let rel = project_open(&relcx, rel)?;
     freespace_seams::free_space_map_vacuum_range::call(&rel, start, end)
 }
@@ -385,9 +385,9 @@ fn free_space_map_vacuum_range(
 /// `ReadBuffer(rel, blkno)` (bufmgr.c), OID-keyed.
 fn read_buffer(
     rel: Oid,
-    target_block: types_core::primitive::BlockNumber,
+    target_block: ::types_core::primitive::BlockNumber,
 ) -> PgResult<types_storage::storage::Buffer> {
-    let relcx = mcx::MemoryContext::new("read_buffer");
+    let relcx = ::mcx::MemoryContext::new("read_buffer");
     let rel = project_open(&relcx, rel)?;
     bufmgr_seams::read_buffer::call(&rel, target_block)
 }
@@ -397,7 +397,7 @@ fn read_buffer(
 /// `ReadBufferMode` discriminants).
 fn read_buffer_extended(
     rel: Oid,
-    target_block: types_core::primitive::BlockNumber,
+    target_block: ::types_core::primitive::BlockNumber,
     mode: i32,
     io_context: types_storage::buf::IOContext,
 ) -> PgResult<types_storage::storage::Buffer> {
@@ -407,12 +407,12 @@ fn read_buffer_extended(
         2 => types_storage::storage::ReadBufferMode::ZeroAndCleanupLock,
         other => {
             return Err(PgError::new(
-                types_error::ERROR,
+                ::types_error::ERROR,
                 format!("unexpected read-buffer mode {other} from hio.c"),
             ));
         }
     };
-    let relcx = mcx::MemoryContext::new("read_buffer_extended");
+    let relcx = ::mcx::MemoryContext::new("read_buffer_extended");
     let rel = project_open(&relcx, rel)?;
     bufmgr_seams::read_buffer_extended_mode::call(
         &rel,
@@ -429,7 +429,7 @@ fn extend_buffered_rel_by(
     io_context: types_storage::buf::IOContext,
     extend_by: u32,
 ) -> PgResult<types_storage::buf::ExtendedRelation> {
-    let relcx = mcx::MemoryContext::new("extend_buffered_rel_by");
+    let relcx = ::mcx::MemoryContext::new("extend_buffered_rel_by");
     let rel = project_open(&relcx, rel)?;
     bufmgr_seams::extend_buffered_rel_by_main::call(
         &rel,
@@ -441,22 +441,22 @@ fn extend_buffered_rel_by(
 /// `RelationGetNumberOfBlocks(rel)` (bufmgr.h) == `relation_get_number_of_blocks_in_fork(rel, MAIN_FORKNUM)`, OID-keyed.
 fn hio_relation_get_number_of_blocks(
     rel: Oid,
-) -> PgResult<types_core::primitive::BlockNumber> {
-    let relcx = mcx::MemoryContext::new("relation_get_number_of_blocks");
+) -> PgResult<::types_core::primitive::BlockNumber> {
+    let relcx = ::mcx::MemoryContext::new("relation_get_number_of_blocks");
     let rel = project_open(&relcx, rel)?;
     bufmgr_seams::relation_get_number_of_blocks_in_fork::call(
         &rel,
-        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        ::types_core::primitive::ForkNumber::MAIN_FORKNUM,
     )
 }
 
 /// `visibilitymap_pin(rel, heapBlk, &vmbuf)` (visibilitymap.c), OID-keyed.
 fn visibilitymap_pin(
     rel: Oid,
-    heap_blk: types_core::primitive::BlockNumber,
+    heap_blk: ::types_core::primitive::BlockNumber,
     vmbuf: types_storage::storage::Buffer,
 ) -> PgResult<types_storage::storage::Buffer> {
-    let relcx = mcx::MemoryContext::new("visibilitymap_pin");
+    let relcx = ::mcx::MemoryContext::new("visibilitymap_pin");
     let rel = project_open(&relcx, rel)?;
     visibilitymap_seams::visibilitymap_pin::call(rel, heap_blk, vmbuf)
 }
@@ -466,7 +466,7 @@ fn visibilitymap_pin(
 fn hio_relation_is_local(rel: Oid) -> PgResult<bool> {
     with_entry(rel, |rd| {
         rd.rd_islocaltemp
-            || rd.rd_createSubid != types_core::xact::InvalidSubTransactionId
+            || rd.rd_createSubid != ::types_core::xact::InvalidSubTransactionId
     })
 }
 
@@ -482,7 +482,7 @@ fn relation_extension_lock_waiter_count(rel: Oid) -> PgResult<u32> {
     let (relid, relisshared) =
         crate::core_entry_store::with_relation(rel, |rd| (rd.rd_id, rd.rd_rel.relisshared))?;
     let db_id = if relisshared {
-        types_core::InvalidOid
+        ::types_core::InvalidOid
     } else {
         init_small_seams::my_database_id::call()
     };
@@ -501,9 +501,9 @@ fn relation_extension_lock_waiter_count(rel: Oid) -> PgResult<u32> {
 /// authority) and call the FSM owner's `&Relation`-keyed seam.
 fn get_page_with_free_space(
     rel: Oid,
-    len: types_core::Size,
-) -> PgResult<types_core::primitive::BlockNumber> {
-    let relcx = mcx::MemoryContext::new("get_page_with_free_space");
+    len: ::types_core::Size,
+) -> PgResult<::types_core::primitive::BlockNumber> {
+    let relcx = ::mcx::MemoryContext::new("get_page_with_free_space");
     let data = crate::core_entry_store::with_relation(rel, |rd| {
         crate::build::project_relation_data(relcx.mcx(), rd)
     })??;
@@ -516,11 +516,11 @@ fn get_page_with_free_space(
 /// to a transient `Relation` read handle and call the FSM owner's seam.
 fn record_and_get_page_with_free_space(
     rel: Oid,
-    old_page: types_core::primitive::BlockNumber,
-    old_avail: types_core::Size,
-    needed: types_core::Size,
-) -> PgResult<types_core::primitive::BlockNumber> {
-    let relcx = mcx::MemoryContext::new("record_and_get_page_with_free_space");
+    old_page: ::types_core::primitive::BlockNumber,
+    old_avail: ::types_core::Size,
+    needed: ::types_core::Size,
+) -> PgResult<::types_core::primitive::BlockNumber> {
+    let relcx = ::mcx::MemoryContext::new("record_and_get_page_with_free_space");
     let data = crate::core_entry_store::with_relation(rel, |rd| {
         crate::build::project_relation_data(relcx.mcx(), rd)
     })??;
@@ -534,7 +534,7 @@ fn record_and_get_page_with_free_space(
 /// `RelationGetSmgr(relation)->smgr_targblock` (or `InvalidBlockNumber` when
 /// `rd_smgr` is NULL). A cached insertion hint; reads smgr-owned state keyed by
 /// the relation's `(rd_locator, rd_backend)`.
-fn relation_get_target_block(rel: Oid) -> PgResult<types_core::primitive::BlockNumber> {
+fn relation_get_target_block(rel: Oid) -> PgResult<::types_core::primitive::BlockNumber> {
     let (locator, backend) =
         crate::core_entry_store::with_relation(rel, |rd| (rd.rd_locator, rd.rd_backend))?;
     Ok(smgr_seams::smgrgettargblock::call(locator, backend))
@@ -545,7 +545,7 @@ fn relation_get_target_block(rel: Oid) -> PgResult<types_core::primitive::BlockN
 /// rd_backend)` come off the owned entry; the hint lives in smgr-owned state.
 fn relation_set_target_block(
     rel: Oid,
-    target_block: types_core::primitive::BlockNumber,
+    target_block: ::types_core::primitive::BlockNumber,
 ) -> PgResult<()> {
     let (locator, backend) =
         crate::core_entry_store::with_relation(rel, |rd| (rd.rd_locator, rd.rd_backend))?;
@@ -558,7 +558,7 @@ fn relation_set_target_block(
 /// `defaultff` when unset).
 fn relation_get_target_page_free_space(rel: Oid, defaultff: i32) -> PgResult<usize> {
     let fillfactor = with_entry(rel, |rd| rd.get_fillfactor(defaultff))?;
-    Ok(types_core::primitive::BLCKSZ * (100 - fillfactor as usize) / 100)
+    Ok(::types_core::primitive::BLCKSZ * (100 - fillfactor as usize) / 100)
 }
 
 // --- vacuumlazy.c inline relcache reads ---
@@ -612,16 +612,16 @@ fn relation_rules(
             Some(rl) => rl,
         };
         let mut rules: PgVec<sx::RewriteRuleImage<'_>> =
-            mcx::vec_with_capacity_in(mcx, rule_lock.rules.len())?;
+            ::mcx::vec_with_capacity_in(mcx, rule_lock.rules.len())?;
         for r in rule_lock.rules.iter() {
             // `qual = copyObject(rule->qual)` — re-home the qualification Node.
             let qual = match &r.qual {
-                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                Some(q) => Some(::mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
                 None => None,
             };
             // `actions = copyObject(rule->actions)` — re-home each action Query.
             let mut actions: PgVec<::nodes::copy_query::Query<'_>> =
-                mcx::vec_with_capacity_in(mcx, r.actions.len())?;
+                ::mcx::vec_with_capacity_in(mcx, r.actions.len())?;
             for a in r.actions.iter() {
                 actions.push(a.clone_in(mcx)?);
             }
@@ -655,20 +655,20 @@ fn relation_row_security(
             Some(d) => d,
         };
         let mut policies: PgVec<sx::RowSecurityPolicyImage<'_>> =
-            mcx::vec_with_capacity_in(mcx, rsdesc.policies.len())?;
+            ::mcx::vec_with_capacity_in(mcx, rsdesc.policies.len())?;
         for p in rsdesc.policies.iter() {
-            let policy_name = mcx::PgString::from_str_in(p.policy_name.as_str(), mcx)
+            let policy_name = ::mcx::PgString::from_str_in(p.policy_name.as_str(), mcx)
                 .map_err(|_| mcx.oom(p.policy_name.as_str().len()))?;
-            let mut roles: PgVec<Oid> = mcx::vec_with_capacity_in(mcx, p.roles.len())?;
+            let mut roles: PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, p.roles.len())?;
             for &r in p.roles.iter() {
                 roles.push(r);
             }
             let qual = match &p.qual {
-                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                Some(q) => Some(::mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
                 None => None,
             };
             let with_check_qual = match &p.with_check_qual {
-                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                Some(q) => Some(::mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
                 None => None,
             };
             policies.push(sx::RowSecurityPolicyImage {
@@ -691,7 +691,7 @@ fn relation_row_security(
 /// `rd_rules` (the RuleLock carrier), so the relcache reports this. Mirrors the C
 /// reads: `relhasrules`, `numLocks` (`< 0` when `rd_rules == NULL`), and for the
 /// first rule `event == CMD_SELECT`, `isInstead`, and `list_length(actions)`.
-fn matview_rule_info(rel: Oid) -> PgResult<types_matview::MatViewRuleInfo> {
+fn matview_rule_info(rel: Oid) -> PgResult<::types_matview::MatViewRuleInfo> {
     use ::nodes::nodes::CmdType;
     crate::core_entry_store::with_relation(rel, |rd| {
         let relhasrules = rd.rd_rel.relhasrules;
@@ -699,7 +699,7 @@ fn matview_rule_info(rel: Oid) -> PgResult<types_matview::MatViewRuleInfo> {
             // C `rd_rules == NULL`: `numLocks` is read as `< 1` so the caller
             // raises "missing rewrite information". Report `num_rules < 0` and
             // leave the first-rule fields at their never-inspected defaults.
-            None => Ok(types_matview::MatViewRuleInfo {
+            None => Ok(::types_matview::MatViewRuleInfo {
                 relhasrules,
                 num_rules: -1,
                 rule_is_select: false,
@@ -719,7 +719,7 @@ fn matview_rule_info(rel: Oid) -> PgResult<types_matview::MatViewRuleInfo> {
                         ),
                         None => (false, false, 0),
                     };
-                Ok(types_matview::MatViewRuleInfo {
+                Ok(::types_matview::MatViewRuleInfo {
                     relhasrules,
                     num_rules,
                     rule_is_select,
@@ -744,7 +744,7 @@ fn matview_data_query<'mcx>(
 ) -> PgResult<::nodes::copy_query::Query<'mcx>> {
     crate::core_entry_store::with_relation(rel, |rd| {
         let internal = |msg: &str| {
-            utils_error::ereport(types_error::ERROR)
+            utils_error::ereport(::types_error::ERROR)
                 .errmsg_internal(msg.to_string())
                 .into_error()
         };
@@ -774,10 +774,10 @@ mod relation_rules_tests {
 
     use crate::core_entry_store;
     use crate::core_entry_store::entry::{RelationData, RewriteRule, RuleLock};
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use types_core::primitive::Oid;
+    use ::types_core::primitive::Oid;
     use ::nodes::copy_query::Query;
     use ::nodes::nodes::CmdType;
 
@@ -793,9 +793,9 @@ mod relation_rules_tests {
         let cache_mcx = crate::derived::cache_memory_context();
         let mut q = Query::new(cache_mcx);
         q.commandType = CmdType::CMD_SELECT;
-        let mut actions = mcx::PgVec::new_in(cache_mcx);
+        let mut actions = ::mcx::PgVec::new_in(cache_mcx);
         actions.push(q);
-        let mut rules = mcx::PgVec::new_in(cache_mcx);
+        let mut rules = ::mcx::PgVec::new_in(cache_mcx);
         rules.push(RewriteRule {
             ruleId: 42,
             event: CmdType::CMD_SELECT,
@@ -804,8 +804,8 @@ mod relation_rules_tests {
             qual: None,
             actions,
         });
-        let lock: mcx::PgBox<'static, RuleLock> =
-            mcx::alloc_in(cache_mcx, RuleLock { rules }).expect("alloc RuleLock");
+        let lock: ::mcx::PgBox<'static, RuleLock> =
+            ::mcx::alloc_in(cache_mcx, RuleLock { rules }).expect("alloc RuleLock");
 
         // Place the entry in the id_cache, exactly as a relcache build would.
         let mut entry = RelationData::default();
@@ -893,7 +893,7 @@ fn relation_get_index_expressions<'mcx>(
             Some(idx) => idx
                 .indkey
                 .iter()
-                .any(|&k| k == types_core::primitive::InvalidAttrNumber),
+                .any(|&k| k == ::types_core::primitive::InvalidAttrNumber),
         }
     })?;
     if !has_expression_col {
@@ -913,7 +913,7 @@ fn relation_get_index_expressions<'mcx>(
         None => Ok(None),
         Some(exprs) => {
             let mut out: PgVec<'mcx, ::nodes::Expr<'mcx>> =
-                mcx::vec_with_capacity_in(mcx, exprs.len())?;
+                ::mcx::vec_with_capacity_in(mcx, exprs.len())?;
             for e in exprs.iter() {
                 out.push(e.clone_in(mcx)?);
             }
@@ -968,7 +968,7 @@ fn relation_get_index_predicate<'mcx>(
         None => Ok(None),
         Some(clauses) => {
             let mut out: PgVec<'mcx, ::nodes::Expr<'mcx>> =
-                mcx::vec_with_capacity_in(mcx, clauses.len())?;
+                ::mcx::vec_with_capacity_in(mcx, clauses.len())?;
             for e in clauses.iter() {
                 out.push(e.clone_in(mcx)?);
             }
@@ -1004,7 +1004,7 @@ fn relation_get_dummy_index_expressions<'mcx>(
             Some(idx) => idx
                 .indkey
                 .iter()
-                .any(|&k| k == types_core::primitive::InvalidAttrNumber),
+                .any(|&k| k == ::types_core::primitive::InvalidAttrNumber),
         }
     })?;
     if !has_expression_col {
@@ -1026,7 +1026,7 @@ fn relation_get_dummy_index_expressions<'mcx>(
         None => Ok(None),
         Some(exprs) => {
             let mut out: PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
-                mcx::vec_with_capacity_in(mcx, exprs.len())?;
+                ::mcx::vec_with_capacity_in(mcx, exprs.len())?;
             for e in exprs.iter() {
                 out.push(e.clone_in(mcx)?);
             }
@@ -1134,7 +1134,7 @@ fn relation_id_get_relation<'mcx>(
     relation_id: Oid,
 ) -> PgResult<Option<rel::RelationData<'mcx>>> {
     let rd = crate::core_entry_store::RelationIdGetRelation(relation_id)?;
-    if rd == types_core::InvalidOid {
+    if rd == ::types_core::InvalidOid {
         return Ok(None);
     }
     // Project the owned entry into the cross-unit value-slice in `mcx`. The
@@ -1203,8 +1203,8 @@ fn relation_needs_wal(rel: &rel::RelationData<'_>) -> bool {
     // rd_createSubid/rd_firstRelfilelocatorSubid are owned-store fields not in
     // the cross-unit value-slice, so resolve the entry; XLogIsNeeded() is
     // `wal_level >= WAL_LEVEL_REPLICA` (the xlog GUC owner seam).
-    use types_core::xact::InvalidSubTransactionId;
-    use wal::xlog_consts::WAL_LEVEL_REPLICA;
+    use ::types_core::xact::InvalidSubTransactionId;
+    use ::wal::xlog_consts::WAL_LEVEL_REPLICA;
     const RELPERSISTENCE_PERMANENT: i8 = b'p' as i8;
     let wal = transam_xlog_seams::wal_level::call();
     crate::core_entry_store::try_with_relation(rel.rd_id, |rd| {
@@ -1228,8 +1228,8 @@ fn relation_is_accessible_in_logical_decoding(
     // is `rd_options && (relkind r|m) && user_catalog_table`. rd_createSubid /
     // rd_firstRelfilelocatorSubid / rd_options are owned-store fields, so
     // resolve the live entry (Err propagates a cache miss).
-    use types_core::xact::InvalidSubTransactionId;
-    use wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
+    use ::types_core::xact::InvalidSubTransactionId;
+    use ::wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
     const RELPERSISTENCE_PERMANENT: i8 = b'p' as i8;
     const RELKIND_RELATION: i8 = b'r' as i8;
     const RELKIND_MATVIEW: i8 = b'm' as i8;
@@ -1268,8 +1268,8 @@ fn relation_is_logically_logged(relation_id: Oid) -> PgResult<bool> {
     // `wal_level >= WAL_LEVEL_LOGICAL`; RelationNeedsWAL is the permanent &&
     // (XLogIsNeeded() || not-newly-created) test; both read owned-store fields
     // and the wal_level GUC, so resolve the live entry (Err propagates a miss).
-    use types_core::xact::InvalidSubTransactionId;
-    use wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
+    use ::types_core::xact::InvalidSubTransactionId;
+    use ::wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
     const RELPERSISTENCE_PERMANENT: i8 = b'p' as i8;
     const RELKIND_FOREIGN_TABLE: i8 = b'f' as i8;
     let wal = transam_xlog_seams::wal_level::call();
@@ -1297,7 +1297,7 @@ fn rd_rel_relkind_by_oid(relation_id: Oid) -> PgResult<i8> {
 fn relation_is_local(rel: &rel::RelationData<'_>) -> bool {
     // RELATION_IS_LOCAL(relation) (utils/rel.h): rd_islocaltemp ||
     // rd_createSubid != InvalidSubTransactionId. Both are owned-store fields.
-    use types_core::xact::InvalidSubTransactionId;
+    use ::types_core::xact::InvalidSubTransactionId;
     crate::core_entry_store::try_with_relation(rel.rd_id, |rd| {
         rd.rd_islocaltemp || rd.rd_createSubid != InvalidSubTransactionId
     })
@@ -1347,7 +1347,7 @@ fn index_getprocinfo(
     procnum: u16,
     optsproc: u16,
     procindex: i32,
-) -> PgResult<types_core::fmgr::FmgrInfo> {
+) -> PgResult<::types_core::fmgr::FmgrInfo> {
     // `index_getprocinfo` (indexam.c) lazy-init half, over the cache-owned
     // `rd_supportinfo[procindex]` `FmgrInfo` array. The caller computed
     // `procindex = nproc*(attnum-1) + (procnum-1)` and passed `optsproc =
@@ -1372,7 +1372,7 @@ fn index_getprocinfo(
     if needs_init {
         // Complain if the function was not found during IndexSupportInitialize.
         if proc_id == 0 {
-            return Err(utils_error::ereport(types_error::ERROR)
+            return Err(utils_error::ereport(::types_error::ERROR)
                 .errmsg_internal(format!(
                     "missing support function {procnum} for attribute {attnum} of index \"{relname}\""
                 ))
@@ -1383,7 +1383,7 @@ fn index_getprocinfo(
         // call time (no handle), so this just records the lookup metadata; the
         // resolution's transient handler state is allocated in a scratch
         // context dropped here (the entry stores the owned `FmgrInfo` by value).
-        let scratch = mcx::MemoryContext::new("index_getprocinfo");
+        let scratch = ::mcx::MemoryContext::new("index_getprocinfo");
         let finfo = fmgr_seams::fmgr_info::call(scratch.mcx(), proc_id)?;
         crate::core_entry_store::with_relation_mut(index_oid, |rd| rd.rd_supportinfo[pi] = finfo)?;
 
@@ -1409,20 +1409,20 @@ fn index_opclass_missing_options_error(
     // ereport(ERROR, ERRCODE_INVALID_PARAMETER_VALUE, "operator class %s has
     // no options", generate_opclass_name(opclass)). The raw indclass read is
     // the syscache owner's; the name is the ruleutils owner's.
-    let scratch = mcx::MemoryContext::new("opclass missing options");
+    let scratch = ::mcx::MemoryContext::new("opclass missing options");
     let mcx = scratch.mcx();
     let (_indnatts, _indnkeyatts, indclass) =
         syscache_seams::pg_index_indclass::call(mcx, index_oid)?
             .ok_or_else(|| {
-                utils_error::ereport(types_error::ERROR)
+                utils_error::ereport(::types_error::ERROR)
                     .errmsg_internal(format!("cache lookup failed for index {index_oid}"))
                     .into_error()
             })?;
     let opclass = indclass[(attnum - 1) as usize];
     let opclass_name =
         ruleutils_seams::generate_opclass_name::call(mcx, opclass)?;
-    Ok(utils_error::ereport(types_error::ERROR)
-        .errcode(types_error::error::ERRCODE_INVALID_PARAMETER_VALUE)
+    Ok(utils_error::ereport(::types_error::ERROR)
+        .errcode(::types_error::error::ERRCODE_INVALID_PARAMETER_VALUE)
         .errmsg(format!("operator class {opclass_name} has no options"))
         .into_error())
 }
@@ -1645,7 +1645,7 @@ fn rd_islocaltemp(rel: &rel::Relation<'_>) -> PgResult<bool> {
 fn rel_frozenxid_minmxid(rel: Oid) -> PgResult<(TransactionId, MultiXactId)> {
     with_entry(rel, |rd| (rd.rd_rel.relfrozenxid, rd.rd_rel.relminmxid))
 }
-fn rel_pages_tuples(rel: Oid) -> PgResult<(types_core::primitive::BlockNumber, f64)> {
+fn rel_pages_tuples(rel: Oid) -> PgResult<(::types_core::primitive::BlockNumber, f64)> {
     // `relpages` is stored as `int32`, `reltuples` as `float4`; widen the
     // latter to `f64` for the caller (`vac_estimate_reltuples`).
     with_entry(rel, |rd| {
@@ -1693,7 +1693,7 @@ fn rd_index_has_indpred(index: &rel::Relation<'_>) -> PgResult<bool> {
     Ok(syscache_seams::pg_index_has_predicate::call(index.rd_id)?
         .unwrap_or(false))
 }
-fn rd_index_indkey(index: &rel::Relation<'_>) -> PgResult<Option<std::vec::Vec<types_core::primitive::AttrNumber>>> {
+fn rd_index_indkey(index: &rel::Relation<'_>) -> PgResult<Option<std::vec::Vec<::types_core::primitive::AttrNumber>>> {
     with_entry(index.rd_id, |rd| {
         rd.rd_index.as_ref().map(|i| i.indkey.clone())
     })
@@ -1743,7 +1743,7 @@ fn rd_index_indnullsnotdistinct(index: &rel::Relation<'_>) -> PgResult<bool> {
 /// "not usable".
 fn index_usability_info(
     index: &rel::Relation<'_>,
-) -> PgResult<types_matview::IndexUsabilityInfo> {
+) -> PgResult<::types_matview::IndexUsabilityInfo> {
     // pred_is_nil = (RelationGetIndexPredicate(indexRel) == NIL).
     //
     // `RelationGetIndexPredicate` (relcache.c:5210) does NOT merely test
@@ -1755,7 +1755,7 @@ fn index_usability_info(
     // refresh. The raw `pg_index_has_predicate` attisnull test would wrongly report
     // it non-NIL, so resolve the fully-evaluated predicate here.
     let pred_is_nil = {
-        let cxt = mcx::MemoryContext::new("is_usable_unique_index predicate");
+        let cxt = ::mcx::MemoryContext::new("is_usable_unique_index predicate");
         let m = cxt.mcx();
         match relcache_nodexform_seams::index_predicate::call(m, index.rd_id)? {
             None => true,
@@ -1763,7 +1763,7 @@ fn index_usability_info(
         }
     };
     with_entry(index.rd_id, |rd| match rd.rd_index.as_ref() {
-        Some(i) => types_matview::IndexUsabilityInfo {
+        Some(i) => ::types_matview::IndexUsabilityInfo {
             indisunique: i.indisunique,
             indimmediate: i.indimmediate,
             indisvalid: i.indisvalid,
@@ -1771,7 +1771,7 @@ fn index_usability_info(
             indnatts: i.indnatts,
             indkey: i.indkey.clone(),
         },
-        None => types_matview::IndexUsabilityInfo {
+        None => ::types_matview::IndexUsabilityInfo {
             indisunique: false,
             indimmediate: false,
             indisvalid: false,
@@ -1791,8 +1791,8 @@ fn index_usability_info(
 fn index_match_merge_quals(
     index: &rel::Relation<'_>,
     matview: &rel::Relation<'_>,
-) -> PgResult<std::vec::Vec<types_matview::MatchMergeQual>> {
-    use types_matview::MatchMergeQual;
+) -> PgResult<std::vec::Vec<::types_matview::MatchMergeQual>> {
+    use ::types_matview::MatchMergeQual;
 
     // `COMPARE_EQ` (access/cmptype.h) — the equality comparison type.
     const COMPARE_EQ: i32 = 3;
@@ -1837,7 +1837,7 @@ fn index_match_merge_quals(
 
     // A scratch context for the `quote_qualified_identifier` outputs (copied
     // into owned `String`s before it drops).
-    let cxt = mcx::MemoryContext::new("matview match-merge quals");
+    let cxt = ::mcx::MemoryContext::new("matview match-merge quals");
     let mcx = cxt.mcx();
 
     let mut quals: std::vec::Vec<MatchMergeQual> = std::vec::Vec::with_capacity(indkey.len());
@@ -1856,7 +1856,7 @@ fn index_match_merge_quals(
             COMPARE_EQ,
         )?;
         if op == Oid::default() {
-            return Err(utils_error::ereport(types_error::ERROR)
+            return Err(utils_error::ereport(::types_error::ERROR)
                 .errmsg_internal(format!(
                     "missing equality operator for ({opcintype},{opcintype}) in opfamily {opfamily}"
                 ))
@@ -1954,7 +1954,7 @@ fn relation_get_number_of_blocks(rel: &rel::Relation<'_>) -> PgResult<u32> {
     smgr_seams::smgrnblocks::call(
         locator,
         backend,
-        types_core::primitive::MAIN_FORKNUM,
+        ::types_core::primitive::MAIN_FORKNUM,
     )
 }
 fn set_rd_toastoid(new_heap: &rel::Relation<'_>, value: Oid) -> PgResult<()> {
@@ -1968,7 +1968,7 @@ fn set_rd_toastoid(new_heap: &rel::Relation<'_>, value: Oid) -> PgResult<()> {
 /// eoxact cleanup. Own logic over the entry; the current subxid is the xact
 /// owner seam.
 fn assume_new_relfilelocator(relid: Oid) -> PgResult<()> {
-    use types_core::xact::InvalidSubTransactionId;
+    use ::types_core::xact::InvalidSubTransactionId;
     let subid = transam_xact_seams::get_current_sub_transaction_id::call();
     crate::core_entry_store::with_relation_mut(relid, |r| {
         r.rd_newRelfilelocatorSubid = subid;
@@ -2006,11 +2006,11 @@ fn swap_relfilelocator_subids(r1: Oid, r2: Oid) -> PgResult<()> {
     // the rel1->rel2 subid copy, and (c) errored with "no open relation" when r2
     // was not already resident — the VACUUM FULL / CLUSTER crash regression.
     let rel1 = crate::core_entry_store::RelationIdGetRelation(r1)?;
-    if rel1 == types_core::InvalidOid {
+    if rel1 == ::types_core::InvalidOid {
         return Err(crate::core_entry_store::relcache_open_failed(r1));
     }
     let rel2 = crate::core_entry_store::RelationIdGetRelation(r2)?;
-    if rel2 == types_core::InvalidOid {
+    if rel2 == ::types_core::InvalidOid {
         // Release rel1's pin before erroring out.
         let _ = crate::core_entry_store::RelationClose(rel1);
         return Err(crate::core_entry_store::relcache_open_failed(r2));

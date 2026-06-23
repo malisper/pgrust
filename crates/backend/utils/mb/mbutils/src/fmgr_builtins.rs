@@ -16,13 +16,13 @@
 //! that when no conversion is required the *source* bytes stand unchanged
 //! (`Ok(None)`); at the SQL boundary that means the result is the input image.
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::NAMEDATALEN;
-use types_tuple::heaptuple::NameData;
+use ::types_core::NAMEDATALEN;
+use ::types_tuple::heaptuple::NameData;
 
 use crate::{
     PG_char_to_encoding, PG_encoding_to_char, getdatabaseencoding, length_in_encoding,
@@ -54,7 +54,7 @@ fn varlena_payload(image: &[u8]) -> &[u8] {
 #[inline]
 fn varlena_image(payload: &[u8]) -> Vec<u8> {
     let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
     image.extend_from_slice(payload);
     image
 }

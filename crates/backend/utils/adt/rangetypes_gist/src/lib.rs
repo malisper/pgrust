@@ -49,9 +49,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use allocator_api2::alloc::Allocator;
-use mcx::Mcx;
-use types_core::primitive::{Oid, OidIsValid};
-use datum::datum::Datum;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::datum::datum::Datum;
 use types_error::{PgError, PgResult};
 
 use types_rangetypes::{
@@ -59,31 +59,31 @@ use types_rangetypes::{
     RANGE_UB_INF,
 };
 
-use cache::typcache::TypeCacheEntry;
+use ::cache::typcache::TypeCacheEntry;
 
-use adt_rangetypes::range_bounds_compare::{
+use ::adt_rangetypes::range_bounds_compare::{
     range_adjacent_internal, range_after_internal, range_before_internal, range_cmp_bounds,
     range_contained_by_internal, range_contains_elem_internal, range_contains_internal,
     range_eq_internal, range_get_typcache, range_overlaps_internal, range_overleft_internal,
     range_overright_internal,
 };
-use adt_rangetypes::range_canonical_subdiff_hash::range_subdiff;
-use adt_rangetypes::range_repr_serialize::{
+use ::adt_rangetypes::range_canonical_subdiff_hash::range_subdiff;
+use ::adt_rangetypes::range_repr_serialize::{
     make_range, range_deserialize, range_get_flags, range_set_contain_empty,
 };
 
-use multirangetypes::operators::{
+use ::multirangetypes::operators::{
     multirange_contains_range_internal, range_adjacent_multirange_internal,
     range_after_multirange_internal, range_before_multirange_internal,
     range_contains_multirange_internal, range_overlaps_multirange_internal,
     range_overleft_multirange_internal, range_overright_multirange_internal,
 };
-use multirangetypes::serialize_core::{
+use ::multirangetypes::serialize_core::{
     multirange_get_bounds, multirange_get_union_range,
 };
-use multirangetypes::typcache_io::multirange_get_typcache;
+use ::multirangetypes::typcache_io::multirange_get_typcache;
 
-use float::get_float4_infinity;
+use ::float::get_float4_infinity;
 
 use gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
 
@@ -551,7 +551,7 @@ pub fn range_gist_same(r1: RangeTypeP<'_>, r2: RangeTypeP<'_>) -> PgResult<bool>
 // `range_sortsupport` installs `range_fast_cmp` as the SortSupport comparator;
 // the GiST sorted index build (`gist_indexsortbuild`) sorts the leaf keys with
 // it. The comparator lives here (rather than in `rangetypes`) because the GiST
-// sortsupport substrate seam is `Datum`-typed over `types_tuple::Datum` and the
+// sortsupport substrate seam is `Datum`-typed over `::types_tuple::Datum` and the
 // install is driven from the GiST `gist_sortsupport` dispatch; the kernel is a
 // thin re-use of the already-ported `range_deserialize` / `range_cmp_bounds`.
 // ===========================================================================
@@ -589,7 +589,7 @@ fn range_fast_cmp_inner(
     // ("type with OID N does not exist"). Materialize each operand into a fresh
     // 8-aligned 4-byte-header `mcx` image first (the buffers live for this call).
     // While the flag is OFF every key is already 4B so this is a verbatim copy.
-    let ctx = mcx::MemoryContext::new("range_fast_cmp");
+    let ctx = ::mcx::MemoryContext::new("range_fast_cmp");
     let mcx = ctx.mcx();
     let range_a = materialize_range_arg(mcx, &a)?;
     let range_b = materialize_range_arg(mcx, &b)?;
@@ -1405,7 +1405,7 @@ fn entry_range<'mcx>(entryvec: &GistEntryVector<'mcx>, i: usize) -> PgResult<Ran
 /// raw word is the `RangeType *` address.
 fn datum_get_range_type_p<'mcx>(d: types_tuple::heaptuple::Datum<'mcx>) -> RangeTypeP<'mcx> {
     RangeTypeP {
-        ptr: d.as_usize() as *const types_rangetypes::RangeType,
+        ptr: d.as_usize() as *const ::types_rangetypes::RangeType,
         _marker: core::marker::PhantomData,
     }
 }
@@ -1429,7 +1429,7 @@ fn materialize_range_arg<'mcx>(
     // A by-value pointer word: the address is already a live `RangeType *`.
     if let TDatum::ByVal(w) = d {
         return Ok(RangeTypeP {
-            ptr: *w as *const types_rangetypes::RangeType,
+            ptr: *w as *const ::types_rangetypes::RangeType,
             _marker: core::marker::PhantomData,
         });
     }
@@ -1446,7 +1446,7 @@ fn materialize_range_arg<'mcx>(
         (0usize, image.len())
     };
     let new_size = if short { payload_len + 4 } else { image.len() };
-    mcx::check_alloc_size(new_size)?;
+    ::mcx::check_alloc_size(new_size)?;
     let layout =
         Layout::from_size_align(new_size.max(1), 8).expect("valid RangeType image layout");
     let block = mcx.allocate(layout).map_err(|_| mcx.oom(new_size))?;
@@ -1462,7 +1462,7 @@ fn materialize_range_arg<'mcx>(
         }
     }
     Ok(RangeTypeP {
-        ptr: dst as *const types_rangetypes::RangeType,
+        ptr: dst as *const ::types_rangetypes::RangeType,
         _marker: core::marker::PhantomData,
     })
 }
@@ -1481,7 +1481,7 @@ fn range_copy<'mcx>(mcx: Mcx<'mcx>, r: RangeTypeP<'mcx>) -> PgResult<RangeTypeP<
     // SAFETY: `r` is a detoasted RangeType image; its total length is its
     // varlena size (the 4B header low bits).
     let size = unsafe { varsize(r.ptr as *const u8) };
-    mcx::check_alloc_size(size)?;
+    ::mcx::check_alloc_size(size)?;
     let layout =
         core::alloc::Layout::from_size_align(size, 8).expect("valid RangeType image layout");
     let block = mcx.allocate(layout).map_err(|_| mcx.oom(size))?;
@@ -1491,7 +1491,7 @@ fn range_copy<'mcx>(mcx: Mcx<'mcx>, r: RangeTypeP<'mcx>) -> PgResult<RangeTypeP<
         core::ptr::copy_nonoverlapping(r.ptr as *const u8, dst, size);
     }
     Ok(RangeTypeP {
-        ptr: dst as *const types_rangetypes::RangeType,
+        ptr: dst as *const ::types_rangetypes::RangeType,
         _marker: core::marker::PhantomData,
     })
 }

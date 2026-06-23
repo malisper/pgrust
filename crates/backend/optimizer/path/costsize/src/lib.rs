@@ -27,9 +27,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{BlockNumber, Cardinality, Cost};
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::{BlockNumber, Cardinality, Cost};
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     GatherMergePath, GatherPath, ParamPathInfo, Path, PathId, PathKey, PathNode,
     PlannerInfo, QualCost, RelId, RelOptInfo, RinfoId, JOIN_INNER,
@@ -989,7 +989,7 @@ fn cost_incremental_sort_compute<'mcx>(
     input_groups = Min(input_tuples, DEFAULT_NUM_DISTINCT);
 
     // Extract presorted keys as list of expressions; detect "varno 0".
-    let mut presorted_exprs: Vec<pathnodes::NodeId> = Vec::new();
+    let mut presorted_exprs: Vec<::pathnodes::NodeId> = Vec::new();
     let mut unknown_varno = false;
     for (i, key) in pathkeys.iter().enumerate() {
         let ec = key
@@ -1330,7 +1330,7 @@ pub fn cost_append(root: &mut PlannerInfo, path_id: PathId) {
 /// `cost_qual_eval` (costsize.c:4756) over resolved RestrictInfo clause handles.
 /// The `quals` are the clause-expr `NodeId`s; the walker recursion crosses the
 /// seam, the accumulation stays in-crate.
-pub fn cost_qual_eval(root: &PlannerInfo, quals: &[pathnodes::NodeId]) -> QualCost {
+pub fn cost_qual_eval(root: &PlannerInfo, quals: &[::pathnodes::NodeId]) -> QualCost {
     let mut total = QualCost::default();
     for &q in quals {
         let (s, p) = cz::cost_qual_eval_walker::call(root, q);
@@ -1341,7 +1341,7 @@ pub fn cost_qual_eval(root: &PlannerInfo, quals: &[pathnodes::NodeId]) -> QualCo
 }
 
 /// `cost_qual_eval_node` (costsize.c:4782) — single node.
-pub fn cost_qual_eval_node(root: &PlannerInfo, qual: pathnodes::NodeId) -> QualCost {
+pub fn cost_qual_eval_node(root: &PlannerInfo, qual: ::pathnodes::NodeId) -> QualCost {
     let (s, p) = cz::cost_qual_eval_walker::call(root, qual);
     QualCost {
         startup: s,
@@ -1350,7 +1350,7 @@ pub fn cost_qual_eval_node(root: &PlannerInfo, qual: pathnodes::NodeId) -> QualC
 }
 
 /// Resolve a slice of `RinfoId` clause handles to their clause-expr `NodeId`s.
-pub(crate) fn rinfo_clause_nodes(root: &PlannerInfo, ids: &[RinfoId]) -> Vec<pathnodes::NodeId> {
+pub(crate) fn rinfo_clause_nodes(root: &PlannerInfo, ids: &[RinfoId]) -> Vec<::pathnodes::NodeId> {
     ids.iter().map(|id| root.rinfo(*id).clause).collect()
 }
 
@@ -1391,7 +1391,7 @@ pub(crate) fn path_base(root: &PlannerInfo, id: PathId) -> &Path {
 }
 
 /// `bms_is_subset(a, b)` over the node-field `Relids`.
-pub(crate) fn bms_is_subset(a: &pathnodes::Relids, b: &pathnodes::Relids) -> bool {
+pub(crate) fn bms_is_subset(a: &::pathnodes::Relids, b: &::pathnodes::Relids) -> bool {
     use relnode_seams as bms;
     bms::relids_is_subset::call(a, b)
 }

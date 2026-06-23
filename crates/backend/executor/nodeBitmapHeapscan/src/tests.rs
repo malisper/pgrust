@@ -2,7 +2,7 @@
 
 use super::*;
 use nodes::SpinLockGuard;
-use types_storage::Spinlock;
+use ::types_storage::Spinlock;
 
 #[test]
 fn bm_state_constants_match_c() {

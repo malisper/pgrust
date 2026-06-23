@@ -30,10 +30,10 @@ extern crate alloc;
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
-use mcx::PgBox;
-use types_core::primitive::{Oid, Size, TransactionId};
-use types_core::FUNC_MAX_ARGS;
-use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
+use ::mcx::PgBox;
+use ::types_core::primitive::{Oid, Size, TransactionId};
+use ::types_core::FUNC_MAX_ARGS;
+use ::types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
 /// `TupleDesc` as carried inside a cache key (`funccache.h`: the optional
 /// `callResultType` for a composite-returning function). It is copied into
@@ -200,9 +200,9 @@ pub struct ProcCompileInfo<'mcx> {
     /// `procStruct->pronargs`.
     pub pronargs: i16,
     /// `procStruct->proargtypes.values` (length `pronargs`).
-    pub proargtypes: mcx::PgVec<'mcx, Oid>,
+    pub proargtypes: ::mcx::PgVec<'mcx, Oid>,
     /// `NameStr(procStruct->proname)` — for the polymorphic-resolution error.
-    pub proname: mcx::PgString<'mcx>,
+    pub proname: ::mcx::PgString<'mcx>,
     /// `HeapTupleHeaderGetRawXmin(procTup->t_data)`.
     pub xmin: TransactionId,
     /// `procTup->t_self`.

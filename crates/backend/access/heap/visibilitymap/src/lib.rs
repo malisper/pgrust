@@ -39,15 +39,15 @@
 // `PgResult`'s `Err` arm is fixed-size and large by project convention.
 #![allow(clippy::result_large_err)]
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, TransactionId, XLogRecPtr, BLCKSZ,
 };
 use types_error::{PgError, PgResult, ERROR};
 use rel::{Relation, RelationData};
-use types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
+use ::types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
 use types_storage::{Buffer, BufferIsValid, InvalidBuffer, RelFileLocatorBackend};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use heapam_seams as heapam;
 use transam_xlog_seams as xlog;

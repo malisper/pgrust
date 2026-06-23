@@ -347,7 +347,7 @@ fn enr_index(query_env: &QueryEnvironment<'_>, name: &str) -> Option<usize> {
 /// owned descriptor; C shares the pointer).
 fn clone_tupdesc<'mcx>(
     td: &types_tuple::heaptuple::TupleDesc<'mcx>,
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
 ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
     match td {
         Some(d) => Ok(Some(alloc_in(mcx, d.clone_in(mcx)?)?)),

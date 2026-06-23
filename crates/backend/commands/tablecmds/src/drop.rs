@@ -5,11 +5,11 @@
 
 use std::cell::RefCell;
 
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 
-use types_acl::ACLCHECK_NOT_OWNER;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_acl::ACLCHECK_NOT_OWNER;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::nodes::ddlnodes::DropStmt;
 use ::nodes::nodes::Node;
@@ -17,10 +17,10 @@ use ::nodes::parsenodes::{
     DROP_CASCADE, OBJECT_FOREIGN_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_SEQUENCE, OBJECT_TABLE,
     OBJECT_VIEW,
 };
-use types_storage::lock::{
+use ::types_storage::lock::{
     AccessExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE,
 };
-use types_tuple::access::{
+use ::types_tuple::access::{
     RangeVar as AccessRangeVar, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_VIEW, RELPERSISTENCE_TEMP,
@@ -302,7 +302,7 @@ fn RangeVarCallbackForDropRelation(
         && seam::is_system_class_relid::call(rel_oid, info.relkind, info.relnamespace)?
     {
         return ereport(ERROR)
-            .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errcode(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
                 "permission denied: \"{}\" is a system catalog",
                 rel.relname

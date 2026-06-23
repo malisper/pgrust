@@ -27,7 +27,7 @@
 
 #![allow(non_snake_case)]
 
-use node_support::PgNodeEqual;
+use ::node_support::PgNodeEqual;
 use ::nodes::nodes::ntag;
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{

@@ -2,7 +2,7 @@
 //! PostgreSQL 18.3) — the full `FormData_pg_operator` field set (15 attributes)
 //! plus the relation/index OIDs the `pg_operator.c` catalog owner needs.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// `OperatorRelationId` — `pg_operator` (OID 2617).
 pub const OperatorRelationId: Oid = 2617;

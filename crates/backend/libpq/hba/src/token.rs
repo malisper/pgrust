@@ -17,7 +17,7 @@
 
 use fd_seams as fd;
 use types_error::{ErrorLevel, PgResult};
-use net::AuthToken;
+use ::net::AuthToken;
 use regex::{RegMatch, RegcompResult, RegexCompiled, RegexecResult};
 
 use crate::{
@@ -200,7 +200,7 @@ pub(crate) fn regcomp_auth_token(
             //   errcontext("line %d of configuration file \"%s\"", ...)))
             let msg = format!("invalid regular expression \"{pat_str}\": {}", f.message);
             crate::ereport(elevel)
-                .errcode(types_error::ERRCODE_INVALID_REGULAR_EXPRESSION)
+                .errcode(::types_error::ERRCODE_INVALID_REGULAR_EXPRESSION)
                 .errmsg(msg.clone())
                 .errcontext_msg(crate::line_context(line_num, filename))
                 .finish(here("regcomp_auth_token"))?;

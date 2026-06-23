@@ -6,8 +6,8 @@
 
 #![allow(non_snake_case)]
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `RemoveRoleFromObjectPolicy(roleid, classid, objid)` (policy.c): during

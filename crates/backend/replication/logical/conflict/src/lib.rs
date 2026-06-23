@@ -18,9 +18,9 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 
-use utils_error::ereport;
-use mcx::Mcx;
-use types_core::primitive::{
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::types_core::primitive::{
     AttrNumber, InvalidRepOriginId, Oid, OidIsValid, RepOriginId, TimestampTz, TransactionId,
 };
 use types_error::{
@@ -29,10 +29,10 @@ use types_error::{
 };
 use ::nodes::execnodes::{EStateData, RriId, SlotId};
 use ::nodes::TupleSlotKind;
-use rel::Relation;
-use types_storage::lock::NoLock;
+use ::rel::Relation;
+use ::types_storage::lock::NoLock;
 
-pub use replication::conflict::{ConflictType, CONFLICT_NUM_TYPES};
+pub use ::replication::conflict::{ConflictType, CONFLICT_NUM_TYPES};
 
 use ConflictType::*;
 
@@ -201,7 +201,7 @@ pub fn InitConflictIndexes<'mcx>(
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     // List *uniqueIndexes = NIL;  (lappend_oid pallocs; fallible growth)
-    let mut unique_indexes: mcx::PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let mut unique_indexes: ::mcx::PgVec<'mcx, Oid> = ::mcx::PgVec::new_in(mcx);
 
     let rri = estate.result_rel(rel_info);
     for i in 0..rri.ri_NumIndices as usize {
@@ -585,7 +585,7 @@ fn build_index_value_desc<'b, 'mcx>(
     localrel: &Relation<'_>,
     slot: Option<SlotId>,
     indexoid: Oid,
-) -> PgResult<Option<mcx::PgString<'b>>> {
+) -> PgResult<Option<::mcx::PgString<'b>>> {
     // if (!tableslot) return NULL;
     let Some(slot) = slot else {
         return Ok(None);

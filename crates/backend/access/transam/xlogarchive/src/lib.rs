@@ -31,13 +31,13 @@
 
 use core::ffi::c_char;
 
-use utils_error::errno::current_errno;
-use utils_error::ereport;
+use ::utils_error::errno::current_errno;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgString};
 use types_error::{ErrorLocation, PgResult};
 use types_error::{DEBUG1, DEBUG2, DEBUG3, ERROR, FATAL, LOG, WARNING};
-use types_core::primitive::{TimeLineID, XLogRecPtr, XLogSegNo};
-use wal::xlog_consts::{ArchiveMode, RecoveryState, XLOGDIR};
+use ::types_core::primitive::{TimeLineID, XLogRecPtr, XLogSegNo};
+use ::wal::xlog_consts::{ArchiveMode, RecoveryState, XLOGDIR};
 
 use transam_xlog_seams as xlog;
 use xlogarchive_seams as inward;
@@ -46,7 +46,7 @@ use pgarch_seams as pgarch;
 use startup_seams as startup;
 use walsender_seams as walsender;
 use fd_seams as fd;
-use fd_seams::CreateEmptyFileOutcome;
+use ::fd_seams::CreateEmptyFileOutcome;
 use file_seams as file;
 use ipc_seams as ipc;
 use waitevent_seams as waitevent;
@@ -190,7 +190,7 @@ fn here() -> ErrorLocation {
 }
 
 /// Emit a non-throwing report (`ereport` at `< ERROR`).
-fn emit(builder: utils_error::ErrorBuilder) {
+fn emit(builder: ::utils_error::ErrorBuilder) {
     let _ = builder.finish(here());
 }
 

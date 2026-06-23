@@ -34,24 +34,24 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use types_core::primitive::{TransactionId, XLogRecPtr};
-use types_core::xact::{
+use ::types_core::primitive::{TransactionId, XLogRecPtr};
+use ::types_core::xact::{
     CommandId, FirstCommandId, InvalidCommandId, InvalidTransactionId, InvalidXLogRecPtr,
     TransactionIdIsNormal, TransactionIdIsValid, XACT_REPEATABLE_READ,
 };
 use types_error::{PgError, PgResult};
-use types_logical::ReorderBufferHandle;
-use snapshot::snapshot::{SnapshotData, SnapshotType};
-use xlog_records::heapam_xlog::xl_heap_new_cid;
-use xlog_records::standbydefs::xl_running_xacts;
+use ::types_logical::ReorderBufferHandle;
+use ::snapshot::snapshot::{SnapshotData, SnapshotType};
+use ::xlog_records::heapam_xlog::xl_heap_new_cid;
+use ::xlog_records::standbydefs::xl_running_xacts;
 
 use transam::{
     TransactionIdFollows, TransactionIdFollowsOrEquals, TransactionIdPrecedes,
     TransactionIdPrecedesOrEquals,
 };
-use varsup::TransactionIdAdvance;
+use ::varsup::TransactionIdAdvance;
 
-use utils_error::ErrorLevel;
+use ::utils_error::ErrorLevel;
 
 // Outward owner seams.
 use transam_xact_seams as xact;
@@ -68,10 +68,10 @@ use snapmgr_seams as snapmgr;
 use crc32c_seams as crc;
 
 // Error helper SqlStates.
-use types_error::error::{ERRCODE_DATA_CORRUPTED, ERRCODE_T_R_SERIALIZATION_FAILURE};
+use ::types_error::error::{ERRCODE_DATA_CORRUPTED, ERRCODE_T_R_SERIALIZATION_FAILURE};
 
 // elog levels.
-use types_error::error::{DEBUG1, DEBUG2, DEBUG3, ERROR, LOG};
+use ::types_error::error::{DEBUG1, DEBUG2, DEBUG3, ERROR, LOG};
 
 mod ondisk;
 mod registry;
@@ -238,7 +238,7 @@ fn lsn_str(lsn: XLogRecPtr) -> String {
 /// `elog(level, msg)` — the simple no-fields report. The snapbuild elogs are
 /// all DEBUG/LOG level (no ERROR), so the Ok result is discarded.
 fn elog(level: ErrorLevel, msg: String) {
-    let _ = utils_error::elog(level, msg);
+    let _ = ::utils_error::elog(level, msg);
 }
 
 // ===========================================================================
@@ -357,7 +357,7 @@ fn snap_build_build_snapshot(builder: &SnapBuild) -> SnapshotData {
 
     SnapshotData {
         snapshot_type: SnapshotType::SNAPSHOT_HISTORIC_MVCC,
-        vistest: snapshot::snapshot::GlobalVisStateHandle::new(0),
+        vistest: ::snapshot::snapshot::GlobalVisStateHandle::new(0),
         xmin: builder.xmin,
         xmax: builder.xmax,
         xcnt: xip.len() as u32,

@@ -5,9 +5,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     EcId, EmId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
 };
@@ -453,7 +453,7 @@ pub fn generate_implied_equalities_for_column<'mcx>(
     debug_assert!(root.ec_merging_done);
 
     let is_child_rel =
-        root.rel(rel).reloptkind == pathnodes::RELOPT_OTHER_MEMBER_REL;
+        root.rel(rel).reloptkind == ::pathnodes::RELOPT_OTHER_MEMBER_REL;
     let parent_relids: Relids = if is_child_rel {
         ec_seam::find_childrel_parents::call(root, rel)
     } else {
@@ -640,7 +640,7 @@ fn throw_back_dummy<'mcx>(
 fn reconsider_outer_join_clause<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
-    ojcinfo: &pathnodes::OuterJoinClauseInfo,
+    ojcinfo: &::pathnodes::OuterJoinClauseInfo,
     outer_on_left: bool,
 ) -> PgResult<bool> {
     let rinfo = ojcinfo.rinfo;
@@ -748,7 +748,7 @@ fn reconsider_outer_join_clause<'mcx>(
 fn reconsider_full_join_clause<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
-    ojcinfo: &pathnodes::OuterJoinClauseInfo,
+    ojcinfo: &::pathnodes::OuterJoinClauseInfo,
 ) -> PgResult<bool> {
     let rinfo = ojcinfo.rinfo;
     let sjinfo = ojcinfo.sjinfo.clone();

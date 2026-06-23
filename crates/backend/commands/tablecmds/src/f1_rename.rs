@@ -22,22 +22,22 @@
 
 use mcx::{alloc_in, Mcx};
 
-use types_acl::ACLCHECK_NOT_OWNER;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::catalog::{BOOLOID, INT8OID};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_acl::ACLCHECK_NOT_OWNER;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::catalog::{BOOLOID, INT8OID};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
 use ::nodes::ddlnodes::{CreateSeqStmt, CreateStmt};
 use ::nodes::nodes::{Node, NodePtr};
 use ::nodes::primnodes::OnCommitAction;
-use types_tuple::access::RELKIND_SEQUENCE;
+use ::types_tuple::access::RELKIND_SEQUENCE;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use aclchk_seams as aclchk_seam;
 use objectaddress_seams as objaddr_seam;
 use tablespace_globals_seams as ts_globals_seam;
-use nodes_core::makefuncs::make_column_def;
+use ::nodes_core::makefuncs::make_column_def;
 use lsyscache_seams as lsyscache_seam;
 use miscinit_seams as miscinit_seam;
 
@@ -124,7 +124,7 @@ pub fn define_sequence_relation<'mcx>(
      * for (i = SEQ_COL_FIRSTCOL; i <= SEQ_COL_LASTCOL; i++) { coldef = ...;
      *     coldef->is_not_null = true; stmt->tableElts = lappend(..., coldef); }
      */
-    let mut table_elts: mcx::PgVec<'mcx, NodePtr<'mcx>> = mcx::vec_with_capacity_in(mcx, 3)?;
+    let mut table_elts: ::mcx::PgVec<'mcx, NodePtr<'mcx>> = ::mcx::vec_with_capacity_in(mcx, 3)?;
 
     /* SEQ_COL_LASTVAL: makeColumnDef("last_value", INT8OID, -1, InvalidOid) */
     let mut last_value = make_column_def(mcx, "last_value", INT8OID, -1, InvalidOid)?;
@@ -155,13 +155,13 @@ pub fn define_sequence_relation<'mcx>(
     let stmt = CreateStmt {
         relation,
         tableElts: table_elts,
-        inhRelations: mcx::vec_with_capacity_in(mcx, 0)?,
+        inhRelations: ::mcx::vec_with_capacity_in(mcx, 0)?,
         partbound: None,
         partspec: None,
         ofTypename: None,
-        constraints: mcx::vec_with_capacity_in(mcx, 0)?,
-        nnconstraints: mcx::vec_with_capacity_in(mcx, 0)?,
-        options: mcx::vec_with_capacity_in(mcx, 0)?,
+        constraints: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        nnconstraints: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        options: ::mcx::vec_with_capacity_in(mcx, 0)?,
         oncommit: OnCommitAction::ONCOMMIT_NOOP,
         tablespacename: None,
         accessMethod: None,

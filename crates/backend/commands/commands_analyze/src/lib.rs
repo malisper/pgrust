@@ -7,10 +7,10 @@
 //! `compute_distinct_stats` / `compute_scalar_stats` / `analyze_mcv_list`).
 //!
 //! Repo-model adaptations (none change behaviour):
-//!   * Values are the canonical `types_tuple::Datum<'mcx>` 6-arm enum (the safe
+//!   * Values are the canonical `::types_tuple::Datum<'mcx>` 6-arm enum (the safe
 //!     value lane), not bare words; `*GetDatum`/`DatumGet*` become the `from_*` /
 //!     `as_*` codec on it.
-//!   * The relation is the real `rel::Relation<'mcx>` returned by
+//!   * The relation is the real `::rel::Relation<'mcx>` returned by
 //!     `table_open`; fields are read through `Deref` (`rd_rel`, `rd_att`, ...).
 //!   * `StdAnalyzeData` (the C `stats->extra_data` `void *`) cannot live in the
 //!     `u64 extra_data` field, so the compute routines RE-DERIVE the `<`/`=`
@@ -43,27 +43,27 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_LOCK_NOT_AVAILABLE,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_TABLE, DEBUG2, ERROR, INFO, LOG, WARNING,
 };
 
-use types_core::primitive::{BlockNumber, InvalidOid, Oid};
-use types_storage::buf::Buffer;
-use types_storage::lock::{
+use ::types_core::primitive::{BlockNumber, InvalidOid, Oid};
+use ::types_storage::buf::Buffer;
+use ::types_storage::lock::{
     AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE,
 };
 
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
-use types_tuple::heaptuple::ItemPointerData;
-use types_tuple::pg_type::FormData_pg_type;
+use ::types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::pg_type::FormData_pg_type;
 use types_tuple::{Datum, FormedTuple, TupleDesc};
 
 use ::nodes::rawnodes::RangeVar;
-use rel::Relation;
+use ::rel::Relation;
 
 use statistics::{
     AnalyzeAttrComputeStatsFunc, AnalyzeAttrFetchFunc, VacAttrStats, Anum_pg_statistic_staattnum,
@@ -73,18 +73,18 @@ use statistics::{
     Anum_pg_statistic_stawidth, Natts_pg_statistic, StatisticRelationId, FLOAT4OID,
     STATISTIC_KIND_CORRELATION, STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, STATISTIC_NUM_SLOTS,
 };
-use types_storage::buf::BufferAccessStrategy;
-use types_vacuum::vacuum::{
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_vacuum::vacuum::{
     VacuumParams, VACOPT_ANALYZE, VACOPT_SKIP_LOCKED, VACOPT_VACUUM, VACOPT_VERBOSE,
 };
 
-use types_sortsupport::SortSupportData;
+use ::types_sortsupport::SortSupportData;
 
 // owner seam crates (outward) + landed direct deps -------------------------
 use analyze_rt_seams as rt;
 
 use table::{table_close, table_open, try_table_open};
-use table_tableam::table_slot_create;
+use ::table_tableam::table_slot_create;
 use table_tableam_seams as tableam;
 
 use indexing_seams as indexing;
@@ -93,32 +93,32 @@ use execExpr_seams as expr_seam;
 use execTuples_seams as slot_seam;
 use execUtils_seams as exec_util_seam;
 
-use arrayfuncs::construct::construct_array_values;
-use scalar_datum_core::datum_copy_v;
-use attoptcache::get_attribute_options;
-use lsyscache::namespace_range_index_pubsub::get_namespace_name;
-use lsyscache::opfamily_operator::get_opcode;
-use parse_oper::get_sort_group_operators;
+use ::arrayfuncs::construct::construct_array_values;
+use ::scalar_datum_core::datum_copy_v;
+use ::attoptcache::get_attribute_options;
+use ::lsyscache::namespace_range_index_pubsub::get_namespace_name;
+use ::lsyscache::opfamily_operator::get_opcode;
+use ::parse_oper::get_sort_group_operators;
 use fmgr_seams as fmgr;
-use sort_sortsupport::PrepareSortSupportFromOrderingOp;
-use sortsupport_seams::apply_sort_comparator;
+use ::sort_sortsupport::PrepareSortSupportFromOrderingOp;
+use ::sortsupport_seams::apply_sort_comparator;
 
 use detoast_seams as detoast;
-use heaptuple::nocachegetattr;
-use next::tupconvert::{convert_tuples_by_name, execute_attr_map_tuple};
-use tupdesc_seams::equal_row_types;
+use ::heaptuple::nocachegetattr;
+use ::next::tupconvert::{convert_tuples_by_name, execute_attr_map_tuple};
+use ::tupdesc_seams::equal_row_types;
 
 use index_seams as index_seam;
-use pg_inherits::find_all_inheritors;
-use tablecmds_seams::set_relation_has_subclass::call as SetRelationHasSubclass;
+use ::pg_inherits::find_all_inheritors;
+use ::tablecmds_seams::set_relation_has_subclass::call as SetRelationHasSubclass;
 
 use nodeFuncs_seams as nodefuncs;
-use parser_relation::attnameAttNum;
+use ::parser_relation::attnameAttNum;
 
 use activity_small_seams as progress;
 use cache_syscache as syscache;
-use cache::syscache::SysCacheKey;
-use datum::Datum as KeyDatum;
+use ::cache::syscache::SysCacheKey;
+use ::datum::Datum as KeyDatum;
 
 mod seams_install;
 pub use seams_install::init_seams;
@@ -416,7 +416,7 @@ fn do_analyze_rel<'mcx>(
     relpages: BlockNumber,
     inh: bool,
     in_outer_xact: bool,
-    elevel: types_error::ErrorLevel,
+    elevel: ::types_error::ErrorLevel,
     bstrategy: BufferAccessStrategy,
 ) -> PgResult<()> {
     let verbose = params.options & VACOPT_VERBOSE != 0;
@@ -858,12 +858,12 @@ fn compute_index_stats<'mcx>(
             expr_seam::exec_prepare_qual::call(predicate_src.as_deref(), &mut estate)?;
 
         // Compiled ii_ExpressionsState (the C "first time through" setup).
-        let mut expr_states: PgVec<'mcx, mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>> =
+        let mut expr_states: PgVec<'mcx, ::mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>> =
             if let Some(exprs) = thisdata.indexInfo.ii_Expressions.as_ref() {
                 let exprs: Vec<::nodes::primnodes::Expr> = exprs.iter().cloned().collect();
                 expr_seam::exec_prepare_expr_list::call(&exprs, &mut estate)?
             } else {
-                mcx::vec_with_capacity_in(mcx, 0)?
+                ::mcx::vec_with_capacity_in(mcx, 0)?
             };
 
         // exprvals/exprnulls flat buffers: numrows * attr_cnt entries.
@@ -1210,7 +1210,7 @@ fn run_custom_typanalyze<'mcx>(
 fn acquire_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
-    elevel: types_error::ErrorLevel,
+    elevel: ::types_error::ErrorLevel,
     rows: &mut Vec<FormedTuple<'mcx>>,
     targrows: i32,
     totalrows: &mut f64,
@@ -1271,7 +1271,7 @@ fn acquire_sample_rows<'mcx>(
     let mut next_buffer = || -> PgResult<Buffer> {
         if !BlockSampler_HasMore(&bs) {
             // InvalidBuffer ends the stream / outer loop.
-            return Ok(types_storage::buf::InvalidBuffer);
+            return Ok(::types_storage::buf::InvalidBuffer);
         }
         let blk = BlockSampler_Next(&mut bs);
         bufmgr_seams::read_buffer_with_strategy::call(
@@ -1372,7 +1372,7 @@ fn qsort_rows(rows: &mut [FormedTuple<'_>]) {
 fn acquire_inherited_sample_rows<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
-    elevel: types_error::ErrorLevel,
+    elevel: ::types_error::ErrorLevel,
     rows: &mut Vec<FormedTuple<'mcx>>,
     targrows: i32,
     totalrows: &mut f64,
@@ -1665,7 +1665,7 @@ fn update_attstats<'mcx>(
         let indstate_ref = indstate.as_mut().unwrap();
 
         if let Some(oldtup) = oldtup {
-            let mut stup = heaptuple::heap_modify_tuple(
+            let mut stup = ::heaptuple::heap_modify_tuple(
                 mcx,
                 &oldtup,
                 &sd.rd_att,
@@ -1684,7 +1684,7 @@ fn update_attstats<'mcx>(
             )?;
         } else {
             let mut stup =
-                heaptuple::heap_form_tuple(mcx, &sd.rd_att, &values, &nulls)
+                ::heaptuple::heap_form_tuple(mcx, &sd.rd_att, &values, &nulls)
                     .map_err(|_| PgError::error("heap_form_tuple failed in update_attstats"))?;
             rt::catalog_tuple_insert_with_info_pg_statistic::call(mcx, &sd, &mut stup, indstate_ref)?;
         }
@@ -1719,7 +1719,7 @@ fn std_fetch_func<'mcx>(stats: &VacAttrStats<'mcx>, rownum: i32, is_null: &mut b
         .as_deref()
         .expect("std_fetch_func: tup_desc set");
     let has_nulls = (header.t_infomask & HEAP_HASNULL) != 0;
-    if has_nulls && heaptuple::heap_attisnull(&tuple.tuple, attnum, Some(tupdesc)) {
+    if has_nulls && ::heaptuple::heap_attisnull(&tuple.tuple, attnum, Some(tupdesc)) {
         *is_null = true;
         return Datum::null();
     }
@@ -2600,7 +2600,7 @@ fn run_compute_stats<'mcx>(
 /// the slot and index expressions from the prepared states.
 fn form_index_datum<'mcx>(
     index_info: &::nodes::execnodes::IndexInfo<'mcx>,
-    expr_states: &mut PgVec<'mcx, mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>,
+    expr_states: &mut PgVec<'mcx, ::mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>,
     slot: ::nodes::SlotId,
     econtext: ::nodes::EcxtId,
     estate: &mut ::nodes::EStateData<'mcx>,
@@ -2651,7 +2651,7 @@ fn vacuum_open_relation<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     relation: Option<&RangeVar<'mcx>>,
-    options: types_core::primitive::bits32,
+    options: ::types_core::primitive::bits32,
     verbose: bool,
     lmode: LOCKMODE,
 ) -> PgResult<Option<Relation<'mcx>>> {
@@ -2732,8 +2732,8 @@ fn vacuum_open_relation<'mcx>(
 /// Form_pg_class, so pass them by value to avoid crossing the borrow.
 fn vacuum_is_permitted_for_relation(
     relid: Oid,
-    reltuple: &rel::FormData_pg_class<'_>,
-    options: types_core::primitive::bits32,
+    reltuple: &::rel::FormData_pg_class<'_>,
+    options: ::types_core::primitive::bits32,
 ) -> PgResult<bool> {
     vacuum_seams::vacuum_is_permitted_for_relation::call(
         relid,
@@ -2749,7 +2749,7 @@ fn vacuum_is_permitted_for_relation(
 /// the common ANALYZE case (own/regular relations) returns false and the rare
 /// other-backend-temp skip is not modeled.
 fn relation_is_other_temp(rel: &Relation<'_>) -> bool {
-    rel.uses_local_buffers() && rel.rd_backend != types_core::primitive::INVALID_PROC_NUMBER
+    rel.uses_local_buffers() && rel.rd_backend != ::types_core::primitive::INVALID_PROC_NUMBER
         // and rd_backend != MyProcNumber — MyProcNumber unreachable; treat as not-other.
         && false
 }
@@ -2816,14 +2816,14 @@ fn vac_update_relstats(
     in_outer_xact: bool,
 ) -> PgResult<()> {
     vacuumlazy_seams::vac_update_relstats::call(
-        types_vacuum::vacuumlazy::UpdateRelStatsArgs {
+        ::types_vacuum::vacuumlazy::UpdateRelStatsArgs {
             relation,
             num_pages,
             num_tuples,
             num_all_visible_pages,
             num_all_frozen_pages,
             hasindex,
-            frozenxid: types_core::xact::InvalidTransactionId,
+            frozenxid: ::types_core::xact::InvalidTransactionId,
             minmulti: 0,
             in_outer_xact,
         },
@@ -2848,7 +2848,7 @@ fn AtEOXact_GUC(is_commit: bool, nestlevel: i32) -> PgResult<()> {
 
 /// `RELKIND_HAS_STORAGE(relkind)` (catalog/pg_class.h).
 fn relkind_has_storage(relkind: u8) -> bool {
-    use types_tuple::access::{
+    use ::types_tuple::access::{
         RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
     };
     relkind == RELKIND_RELATION
@@ -2932,7 +2932,7 @@ fn new_vac_attr_stats<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Va
 
 fn varsize_any_datum(value: &Datum<'_>) -> usize {
     match value {
-        Datum::ByRef(b) => heaptuple::varsize_any(b),
+        Datum::ByRef(b) => ::heaptuple::varsize_any(b),
         Datum::Cstring(s) => s.len() + 1,
         _ => 0,
     }

@@ -21,11 +21,11 @@
 //! same adapters under their own OIDs.
 
 use types_core::{CommandId, FullTransactionId, TransactionId};
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -129,7 +129,7 @@ fn scratch_mcx() -> mcx::MemoryContext {
 fn recv_buf<'mcx>(mcx: mcx::Mcx<'mcx>, src: &[u8]) -> PgResult<StringInfo<'mcx>> {
     let mut data = mcx::PgVec::new_in(mcx);
     if data.try_reserve(src.len()).is_err() {
-        return Err(types_error::PgError::error("out of memory"));
+        return Err(::types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     Ok(StringInfo::from_vec(data))

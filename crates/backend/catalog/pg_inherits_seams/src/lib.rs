@@ -5,9 +5,9 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
-use types_storage::lock::LOCKMODE;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
     /// `find_all_inheritors(parentrelId, lockmode, NULL)` (pg_inherits.c) —

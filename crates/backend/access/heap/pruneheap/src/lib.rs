@@ -30,19 +30,19 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, OffsetNumber, TransactionId};
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, TransactionId};
 use types_error::{PgError, PgResult};
 use rel::{Relation, RelationData};
-use snapshot::snapshot::{GlobalVisStateHandle, HTSV_Result};
-use types_storage::bufpage::MaxHeapTuplesPerPage;
-use types_storage::Buffer;
-use types_tuple::access::{RELKIND_MATVIEW, RELKIND_RELATION};
-use types_tuple::heaptuple::{
+use ::snapshot::snapshot::{GlobalVisStateHandle, HTSV_Result};
+use ::types_storage::bufpage::MaxHeapTuplesPerPage;
+use ::types_storage::Buffer;
+use ::types_tuple::access::{RELKIND_MATVIEW, RELKIND_RELATION};
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderData, ItemPointerData, FIRST_OFFSET_NUMBER,
     HEAP_HOT_UPDATED, HEAP_ONLY_TUPLE, HEAP_XMAX_INVALID,
 };
-use types_vacuum::vacuum::{HeapPageFreeze, HeapTupleFreeze, PruneFreezeResult, VacuumCutoffs};
+use ::types_vacuum::vacuum::{HeapPageFreeze, HeapTupleFreeze, PruneFreezeResult, VacuumCutoffs};
 
 use page::{
     ItemIdGetRedirect, ItemIdIsDead, ItemIdIsNormal,
@@ -52,11 +52,11 @@ use page::{
     PageRepairFragmentation, PageTruncateLinePointerArray,
 };
 
-use heapam::freeze::{
+use ::heapam::freeze::{
     heap_freeze_prepared_tuples, heap_pre_freeze_checks, heap_prepare_freeze_tuple,
     HeapTupleHeaderAdvanceConflictHorizon,
 };
-use heapam_visibility::htup::HeapTupleHeaderGetXmin;
+use ::heapam_visibility::htup::HeapTupleHeaderGetXmin;
 use heapam_visibility::{
     HeapTupleHeaderGetUpdateXid, HeapTupleSatisfiesVacuumHorizon,
 };
@@ -71,14 +71,14 @@ use relcache_seams as relcache_seam;
 use catalog_seams as catalog_seam;
 use hio_seams as hio_seam;
 
-use rmgrdesc_next::heapdesc::{
+use ::rmgrdesc_next::heapdesc::{
     XLHP_CLEANUP_LOCK, XLHP_HAS_CONFLICT_HORIZON, XLHP_HAS_DEAD_ITEMS,
     XLHP_HAS_FREEZE_PLANS, XLHP_HAS_NOW_UNUSED_ITEMS, XLHP_HAS_REDIRECTIONS,
     XLHP_IS_CATALOG_REL, XLOG_HEAP2_PRUNE_ON_ACCESS, XLOG_HEAP2_PRUNE_VACUUM_CLEANUP,
     XLOG_HEAP2_PRUNE_VACUUM_SCAN,
 };
-use wal::wal::RM_HEAP2_ID;
-use xlog_records::heapam_xlog::{SIZEOF_XLHP_FREEZE_PLAN, SIZE_OF_HEAP_PRUNE};
+use ::wal::wal::RM_HEAP2_ID;
+use ::xlog_records::heapam_xlog::{SIZEOF_XLHP_FREEZE_PLAN, SIZE_OF_HEAP_PRUNE};
 
 pub mod init;
 pub use init::init_seams;
@@ -175,7 +175,7 @@ fn OffsetNumberPrev(offset: OffsetNumber) -> OffsetNumber {
 /// `HeapTupleHeaderIsHotUpdated(tup)` (htup_details.h).
 #[inline]
 fn HeapTupleHeaderIsHotUpdated(tup: &HeapTupleHeaderData) -> bool {
-    use heapam_visibility::htup::HeapTupleHeaderXminInvalid;
+    use ::heapam_visibility::htup::HeapTupleHeaderXminInvalid;
     (tup.t_infomask2 & HEAP_HOT_UPDATED) != 0
         && (tup.t_infomask & HEAP_XMAX_INVALID) == 0
         && !HeapTupleHeaderXminInvalid(tup)
@@ -528,7 +528,7 @@ pub fn heap_page_prune_and_freeze<'mcx>(
                 t_len: ::page::ItemIdGetLength(&itemid) as u32,
                 t_self: ItemPointerData::default(),
                 t_tableOid: reltableoid,
-                t_data: Some(mcx::alloc_in(mcx, htup)?),
+                t_data: Some(::mcx::alloc_in(mcx, htup)?),
             };
             ItemPointerSet(&mut tup.t_self, blockno, offnum);
 
@@ -1095,8 +1095,8 @@ fn heap_prune_record_unchanged_lp_normal<'mcx>(
     prstate: &mut PruneState,
     offnum: OffsetNumber,
 ) -> PgResult<()> {
-    use heapam_visibility::htup::HeapTupleHeaderXminFrozen;
-    use types_tuple::heaptuple::HeapTupleHeaderXminCommitted;
+    use ::heapam_visibility::htup::HeapTupleHeaderXminFrozen;
+    use ::types_tuple::heaptuple::HeapTupleHeaderXminCommitted;
 
     debug_assert!(!prstate.processed[offnum as usize]);
     prstate.processed[offnum as usize] = true;
@@ -1600,7 +1600,7 @@ const REGBUF_STANDARD: u8 = 0x04;
 
 fn relation_is_accessible_in_logical_decoding(relation: &RelationData<'_>) -> bool {
     let wal = xlog_seam::wal_level::call();
-    let xlog_logical_info_active = wal >= wal::WalLevel::Logical;
+    let xlog_logical_info_active = wal >= ::wal::WalLevel::Logical;
     xlog_logical_info_active
         && relcache_seam::relation_needs_wal::call(relation)
         && (catalog_seam::is_catalog_relation::call(relation)

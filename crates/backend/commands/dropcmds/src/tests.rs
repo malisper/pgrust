@@ -1,7 +1,7 @@
 //! Unit tests for the pure (seam-free) helpers of dropcmds.c.
 
 use super::*;
-use parsenodes::StringNode;
+use ::parsenodes::StringNode;
 
 fn s(v: &str) -> Node {
     Node::String(StringNode {

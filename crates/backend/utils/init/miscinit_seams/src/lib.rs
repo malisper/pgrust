@@ -12,8 +12,8 @@ extern crate alloc;
 use alloc::string::String;
 
 use mcx::{Mcx, PgString};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `CreateSocketLockFile(socketfile, amPostmaster, socketDir)` — create the
@@ -23,7 +23,7 @@ seam_core::seam!(
         socketfile: &str,
         am_postmaster: bool,
         socket_dir: &str,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -31,13 +31,13 @@ seam_core::seam!(
     /// process-local latch to this backend's shared `&MyProc->procLatch`
     /// (called by `InitProcess`/`InitAuxiliaryProcess` after `OwnLatch`).
     /// Touches the FeBe wait set, which can `ereport(ERROR)`, hence `PgResult`.
-    pub fn switch_to_shared_latch() -> types_error::PgResult<()>
+    pub fn switch_to_shared_latch() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `SwitchBackToLocalLatch()` (miscinit.c) — repoint `MyLatch` back to the
     /// process-local latch (called by `ProcKill`/`AuxiliaryProcKill`).
-    pub fn switch_back_to_local_latch() -> types_error::PgResult<()>
+    pub fn switch_back_to_local_latch() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -115,7 +115,7 @@ seam_core::seam!(
     /// postmaster children — detangle the child from the postmaster (signal
     /// handling, process group, postmaster-death watch, etc.). Failure paths
     /// `elog/ereport(FATAL)`.
-    pub fn init_postmaster_child() -> types_error::PgResult<()>
+    pub fn init_postmaster_child() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -160,7 +160,7 @@ seam_core::seam!(
     /// `GetBackendTypeDesc(backendType)` (miscinit.c): the human-readable
     /// process-type description string for `backendType` (a static table
     /// lookup; the C returns a `const char *` into static text). Infallible.
-    pub fn get_backend_type_desc(backend_type: types_core::init::BackendType) -> &'static str
+    pub fn get_backend_type_desc(backend_type: ::types_core::init::BackendType) -> &'static str
 );
 
 // ---- critical-section / interrupt brackets + superuser check (miscadmin.h) ----
@@ -179,7 +179,7 @@ seam_core::seam!(
     /// `CHECK_FOR_INTERRUPTS()` (miscadmin.h) — service any pending interrupt
     /// (query cancel, termination, recovery conflict). `Err` carries the
     /// `ProcessInterrupts` `ereport(ERROR/FATAL)`.
-    pub fn check_for_interrupts() -> types_error::PgResult<()>
+    pub fn check_for_interrupts() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -195,7 +195,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `superuser_arg(roleid)` (superuser.c) — true if `roleid` has superuser
     /// privilege. Reads the catalog cache, so `Err` carries a lookup failure.
-    pub fn superuser_arg(roleid: types_core::Oid) -> types_error::PgResult<bool>
+    pub fn superuser_arg(roleid: ::types_core::Oid) -> ::types_error::PgResult<bool>
 );
 
 // ---- bootstrap-mode backend startup (miscinit.c) ----
@@ -206,7 +206,7 @@ seam_core::seam!(
     /// `MyStartTime`, shared-memory disposition, fake `LocalProcessControl`.
     /// `elog(FATAL)`s if the executable path cannot be located
     /// (`find_my_exec` failure), so `Err` carries that failure.
-    pub fn init_standalone_process(argv0: &str) -> types_error::PgResult<()>
+    pub fn init_standalone_process(argv0: &str) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -283,12 +283,12 @@ seam_core::seam!(
     /// non-superuser path does an `AUTHOID` syscache lookup, so it takes an
     /// `Mcx` and returns `PgResult` (the lookup / `superuser_arg` can
     /// `ereport(ERROR)`).
-    pub fn has_rolreplication(mcx: mcx::Mcx<'_>, roleid: types_core::Oid) -> types_error::PgResult<bool>
+    pub fn has_rolreplication(mcx: ::mcx::Mcx<'_>, roleid: ::types_core::Oid) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
     /// `BackendType MyBackendType` (globals.c) — this process's backend type.
-    pub fn my_backend_type() -> types_core::init::BackendType
+    pub fn my_backend_type() -> ::types_core::init::BackendType
 );
 
 seam_core::seam!(
@@ -318,7 +318,7 @@ seam_core::seam!(
     /// applying a function's `proconfig` SET items. Equals
     /// `superuser_arg(GetUserId())`; reads the catalog cache, so it takes an
     /// `Mcx` and returns `PgResult` (the syscache read can `ereport(ERROR)`).
-    pub fn superuser(mcx: mcx::Mcx<'_>) -> types_error::PgResult<bool>
+    pub fn superuser(mcx: ::mcx::Mcx<'_>) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -338,7 +338,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `GetSessionUserId()` (miscinit.c): the session user's role OID.
-    pub fn get_session_user_id() -> types_core::Oid
+    pub fn get_session_user_id() -> ::types_core::Oid
 );
 
 
@@ -346,7 +346,7 @@ seam_core::seam!(
     /// `InitializeSessionUserIdStandalone()` (miscinit.c): set the session user
     /// to the bootstrap superuser (standalone/aux processes). `Err` carries its
     /// `ereport` surface.
-    pub fn initialize_session_user_id_standalone() -> types_error::PgResult<()>
+    pub fn initialize_session_user_id_standalone() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -356,9 +356,9 @@ seam_core::seam!(
     pub fn initialize_session_user_id(
         mcx: Mcx<'_>,
         rolename: Option<&str>,
-        roleid: types_core::Oid,
+        roleid: ::types_core::Oid,
         bypass_login_check: bool,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -375,7 +375,7 @@ seam_core::seam!(
     /// `ValidatePgVersion(path)` (miscinit.c): verify the database
     /// directory's PG_VERSION matches the server. `Err` carries its
     /// `ereport(FATAL)` surface.
-    pub fn validate_pg_version(path: &str) -> types_error::PgResult<()>
+    pub fn validate_pg_version(path: &str) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -392,7 +392,7 @@ seam_core::seam!(
     /// `process_session_preload_libraries()` (miscinit.c): load the libraries
     /// named by `session_preload_libraries`/`local_preload_libraries`. `Err`
     /// carries the loader's `ereport` surface.
-    pub fn process_session_preload_libraries(mcx: Mcx<'_>) -> types_error::PgResult<()>
+    pub fn process_session_preload_libraries(mcx: Mcx<'_>) -> ::types_error::PgResult<()>
 );
 
 // ---------------------------------------------------------------------------

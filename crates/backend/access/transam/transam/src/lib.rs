@@ -23,8 +23,8 @@ use std::cell::Cell;
 
 use clog_seams as clog_seams;
 use subtrans_seams as subtrans_seams;
-use utils_error::elog;
-use types_core::xact::{
+use ::utils_error::elog;
+use ::types_core::xact::{
     BootstrapTransactionId, FirstNormalTransactionId, FrozenTransactionId, InvalidTransactionId,
     InvalidXLogRecPtr, XidStatus, TRANSACTION_STATUS_ABORTED, TRANSACTION_STATUS_COMMITTED,
     TRANSACTION_STATUS_IN_PROGRESS, TRANSACTION_STATUS_SUB_COMMITTED,

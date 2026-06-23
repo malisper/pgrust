@@ -15,14 +15,14 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{McxOwned, MemoryContext};
 use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
-use tsearch::SpellHandle;
+use ::tsearch::SpellHandle;
 
 use crate::IspellDict;
 
-mcx::bind!(IspellDictTy => IspellDict<'mcx>);
+::mcx::bind!(IspellDictTy => IspellDict<'mcx>);
 
 thread_local! {
     /// `SpellHandle` -> the live dictionary (C's `d->obj`, cache-lifetime).

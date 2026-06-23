@@ -17,9 +17,9 @@
 //! ```
 //!
 //! In this repo those slots are `Copy` tokens
-//! ([`SortComparatorId`](types_sortsupport::SortComparatorId) /
-//! [`AbbrevConverterId`](types_sortsupport::AbbrevConverterId) /
-//! [`AbbrevAbortId`](types_sortsupport::AbbrevAbortId)) that only the sort
+//! ([`SortComparatorId`](::types_sortsupport::SortComparatorId) /
+//! [`AbbrevConverterId`](::types_sortsupport::AbbrevConverterId) /
+//! [`AbbrevAbortId`](::types_sortsupport::AbbrevAbortId)) that only the sort
 //! *substrate* knows how to mint and interpret. So the field write is delegated
 //! to install seams.
 //!
@@ -36,14 +36,14 @@
 
 #![allow(non_snake_case)]
 
-use types_sortsupport::SortSupportData;
-use types_tuple::Datum;
+use ::types_sortsupport::SortSupportData;
+use ::types_tuple::Datum;
 
 /// A GiST box sort comparator kernel: C `int (*comparator)(Datum, Datum,
 /// SortSupport)` (`gist_bbox_zorder_cmp`). The two operands are the canonical
 /// by-reference `Datum<'_>` (a `ByRef` `BOX` image — a GiST sort key is
 /// pass-by-reference, so it crosses as `ByRef`, NOT a bare word); the substrate
-/// mints a [`types_sortsupport::SortComparatorId`] token denoting this function
+/// mints a [`::types_sortsupport::SortComparatorId`] token denoting this function
 /// pointer. The kernel never reads the third `ssup` argument, so it is dropped.
 pub type GistComparator = fn(Datum<'_>, Datum<'_>) -> i32;
 
@@ -57,7 +57,7 @@ pub type GistAbbrevConverter = fn(Datum<'_>) -> Datum<'static>;
 seam_core::seam!(
     /// `ssup->comparator = gist_bbox_zorder_cmp;` — the non-abbreviated arm of
     /// `gist_point_sortsupport`. The substrate registers `cmp` as a GiST
-    /// box comparator and stores its [`SortComparatorId`](types_sortsupport::SortComparatorId)
+    /// box comparator and stores its [`SortComparatorId`](::types_sortsupport::SortComparatorId)
     /// token into `ssup.comparator`.
     pub fn install_gist_sortsupport_comparator(
         ssup: &mut SortSupportData<'_>,

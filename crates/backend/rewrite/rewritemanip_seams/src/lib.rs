@@ -8,8 +8,8 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 
 seam_core::seam!(
@@ -76,9 +76,9 @@ seam_core::seam!(
     /// `init_seams()` when it lands — until then a call panics loudly.
     pub fn map_variable_attnos_expr_list<'mcx>(
         mcx: Mcx<'mcx>,
-        exprs: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>,
+        exprs: ::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>,
         attmap: &[types_core::primitive::AttrNumber],
-    ) -> PgResult<(mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>, bool)>
+    ) -> PgResult<(::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>, bool)>
 );
 
 seam_core::seam!(
@@ -95,11 +95,11 @@ seam_core::seam!(
     /// (the caller ignores it). `Err` carries the rewrite `ereport(ERROR)` surface.
     pub fn map_variable_attnos_expr_list_varno<'mcx>(
         mcx: Mcx<'mcx>,
-        exprs: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>,
+        exprs: ::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>,
         target_varno: i32,
         attmap: &[types_core::primitive::AttrNumber],
         to_rowtype: types_core::primitive::Oid,
-    ) -> PgResult<(mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>, bool)>
+    ) -> PgResult<(::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>, bool)>
 );
 
 seam_core::seam!(
@@ -114,11 +114,11 @@ seam_core::seam!(
     /// (the caller ignores it). `Err` carries the rewrite `ereport(ERROR)` surface.
     pub fn map_variable_attnos_targetentry_list<'mcx>(
         mcx: Mcx<'mcx>,
-        tlist: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
+        tlist: ::mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
         target_varno: i32,
         attmap: &[types_core::primitive::AttrNumber],
         to_rowtype: types_core::primitive::Oid,
-    ) -> PgResult<(mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>, bool)>
+    ) -> PgResult<(::mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>, bool)>
 );
 
 seam_core::seam!(

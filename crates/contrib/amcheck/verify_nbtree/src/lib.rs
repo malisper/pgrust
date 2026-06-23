@@ -43,14 +43,14 @@ use mcx::{MemoryContext, Mcx, PgVec};
 /// The verification arena handle (`Mcx<'mcx>`), an alias for clarity at the
 /// [`BtreeCheckState`] field.
 pub type MemoryContextHandle<'mcx> = Mcx<'mcx>;
-use types_core::primitive::{BlockNumber, OffsetNumber, XLogRecPtr};
+use ::types_core::primitive::{BlockNumber, OffsetNumber, XLogRecPtr};
 use ::nodes::execnodes::IndexInfo;
-use rel::Relation;
-use types_storage::buf::BufferAccessStrategy;
-use types_tableam::tableam::Snapshot;
-use types_tuple::heaptuple::{IndexTuple, ItemPointerData};
+use ::rel::Relation;
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_tableam::tableam::Snapshot;
+use ::types_tuple::heaptuple::{IndexTuple, ItemPointerData};
 
-use bloomfilter_seams::BloomFilter;
+use ::bloomfilter_seams::BloomFilter;
 
 pub mod entry;
 pub mod linkage;

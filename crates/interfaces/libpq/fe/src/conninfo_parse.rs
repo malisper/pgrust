@@ -12,7 +12,7 @@
 //! supplied (matching `PQconninfoParse`, which returns only the parsed values,
 //! not defaults — `use_defaults = false`).
 
-use types_libpqwalreceiver::ConninfoOption;
+use ::types_libpqwalreceiver::ConninfoOption;
 
 /// The recognized libpq connection keywords (`PQconninfoOptions[].keyword`,
 /// `fe-connect.c`). `conninfo_find` accepts exactly these; anything else is the

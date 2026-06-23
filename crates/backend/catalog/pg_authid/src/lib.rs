@@ -19,12 +19,12 @@
 
 use mcx::{Mcx, MemoryContext};
 use authid::{AuthIdUpdate, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord};
-use types_catalog::pg_authid as pa;
-use types_core::primitive::{InvalidOid, Oid};
-use types_error::PgResult;
-use types_storage::lock::RowExclusiveLock;
+use ::types_catalog::pg_authid as pa;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_error::PgResult;
+use ::types_storage::lock::RowExclusiveLock;
 
-use table::table_open;
+use ::table::table_open;
 use indexing_seams as idx;
 use pg_shdepend_seams as shdep;
 use user_seams as user;
@@ -44,7 +44,7 @@ fn open<'mcx>(mcx: Mcx<'mcx>, rel: Oid) -> PgResult<rel::Relation<'mcx>> {
 /// The user seam's contract carries the relation as its OID identity (the role
 /// catalog drivers re-open it in their own `mcx`), so we return the OID after
 /// acquiring the lock.
-fn table_open_seam(relid: Oid, lockmode: types_storage::lock::LOCKMODE) -> PgResult<Oid> {
+fn table_open_seam(relid: Oid, lockmode: ::types_storage::lock::LOCKMODE) -> PgResult<Oid> {
     let ctx = MemoryContext::new("table_open_authid");
     let mcx = ctx.mcx();
     let r = table_open(mcx, relid, lockmode)?;
@@ -57,12 +57,12 @@ fn table_open_seam(relid: Oid, lockmode: types_storage::lock::LOCKMODE) -> PgRes
 /// `table_close(rel, lockmode)` — `rel` is the OID identity. user.c closes the
 /// role catalog with `NoLock` (the lock is held to transaction end), so there
 /// is nothing to release here; a non-`NoLock` close would release the lock.
-fn table_close_seam(rel: Oid, lockmode: types_storage::lock::LOCKMODE) -> PgResult<()> {
-    if lockmode != types_storage::lock::NoLock {
+fn table_close_seam(rel: Oid, lockmode: ::types_storage::lock::LOCKMODE) -> PgResult<()> {
+    if lockmode != ::types_storage::lock::NoLock {
         let ctx = MemoryContext::new("table_close_authid");
         let mcx = ctx.mcx();
         // Re-open (no extra lock) and close at `lockmode` to release it.
-        let r = table_open(mcx, rel, types_storage::lock::NoLock)?;
+        let r = table_open(mcx, rel, ::types_storage::lock::NoLock)?;
         r.close(lockmode)?;
     }
     Ok(())
@@ -77,7 +77,7 @@ fn get_new_oid_with_index(rel: Oid, index_id: Oid) -> PgResult<Oid> {
     } else if index_id == pa::AuthMemOidIndexId {
         idx::get_new_oid_with_index_pg_auth_members::call(&r)
     } else {
-        Err(types_error::PgError::error(
+        Err(::types_error::PgError::error(
             "get_new_oid_with_index: unexpected index for role catalog",
         ))
     }
@@ -122,8 +122,8 @@ fn insert_authmem(rel: Oid, rec: NewAuthMemRecord) -> PgResult<()> {
     let grantor = rec.grantor;
     idx::catalog_tuple_insert_pg_auth_members::call(&r, &rec)?;
 
-    let oldmembers = mcx::vec_with_capacity_in::<Oid>(mcx, 0)?;
-    let mut newmembers = mcx::vec_with_capacity_in::<Oid>(mcx, 1)?;
+    let oldmembers = ::mcx::vec_with_capacity_in::<Oid>(mcx, 0)?;
+    let mut newmembers = ::mcx::vec_with_capacity_in::<Oid>(mcx, 1)?;
     newmembers.push(grantor);
     shdep::updateAclDependencies::call(
         mcx,

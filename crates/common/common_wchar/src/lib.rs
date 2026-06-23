@@ -17,7 +17,7 @@
 // Re-export the encoding identifiers and the wide-character vocabulary so
 // callers of this crate can name them without also depending on `types`
 // directly, matching the source crate's re-export surface.
-pub use types_wchar::encoding::{
+pub use ::types_wchar::encoding::{
     pg_enc, PG_BIG5, PG_EUC_CN, PG_EUC_JIS_2004, PG_EUC_JP, PG_EUC_KR, PG_EUC_TW, PG_GB18030,
     PG_GBK, PG_ISO_8859_5, PG_ISO_8859_6, PG_ISO_8859_7, PG_ISO_8859_8, PG_JOHAB, PG_KOI8R,
     PG_KOI8U, PG_LATIN1, PG_LATIN10, PG_LATIN2, PG_LATIN3, PG_LATIN4, PG_LATIN5, PG_LATIN6,
@@ -25,7 +25,7 @@ pub use types_wchar::encoding::{
     PG_UHC, PG_UTF8, PG_WIN1250, PG_WIN1251, PG_WIN1252, PG_WIN1253, PG_WIN1254, PG_WIN1255,
     PG_WIN1256, PG_WIN1257, PG_WIN1258, PG_WIN866, PG_WIN874, _PG_LAST_ENCODING_,
 };
-pub use types_wchar::wchar::{mbinterval, pg_wchar};
+pub use ::types_wchar::wchar::{mbinterval, pg_wchar};
 
 // ---------------------------------------------------------------------------
 // Converter function-pointer vocabulary (idiomatic, slice based).

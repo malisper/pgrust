@@ -1,5 +1,5 @@
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 #[test]
 fn charin_plain_byte() {

@@ -26,7 +26,7 @@ use error_fgram::{ereport, ErrorLocation, PgResult, ERRCODE_NAME_TOO_LONG, NOTIC
 use mb_fgram::{pg_database_encoding_max_length, pg_mbcliplen};
 use mmgr_fgram::{palloc, MemoryContextScope};
 use core::ffi::c_int;
-use pg_ffi_fgram::NAMEDATALEN;
+use ::pg_ffi_fgram::NAMEDATALEN;
 
 /// `IS_HIGHBIT_SET(ch)` (c.h): true when the high bit of the byte is set.
 #[inline]
@@ -61,7 +61,7 @@ pub fn downcase_identifier<'ctx>(
     truncate: bool,
 ) -> PgResult<PgIdentifier<'ctx>> {
     let len = len as usize;
-    let mut result = palloc(scope, (len + 1) as pg_ffi_fgram::Size)?;
+    let mut result = palloc(scope, (len + 1) as ::pg_ffi_fgram::Size)?;
     let enc_is_single_byte = pg_database_encoding_max_length() == 1;
 
     let buf = result.as_mut_slice();
@@ -145,7 +145,7 @@ fn cstr_lossy(ident: &[u8], len: usize) -> String {
 /// buffer the C routines return.  `len` is the logical byte length (excluding
 /// the NUL terminator).
 pub struct PgIdentifier<'ctx> {
-    memory: mmgr_fgram::PgMemory<'ctx>,
+    memory: ::mmgr_fgram::PgMemory<'ctx>,
     len: usize,
 }
 
@@ -177,8 +177,8 @@ impl<'ctx> PgIdentifier<'ctx> {
 mod tests {
     use super::*;
     use error_fgram::{set_report_sink, unpack_sqlstate, PgError};
-    use mb_fgram::SetDatabaseEncoding;
-    use mmgr_fgram::OwnedMemoryContext;
+    use ::mb_fgram::SetDatabaseEncoding;
+    use ::mmgr_fgram::OwnedMemoryContext;
     use std::sync::Mutex;
 
     /// Serializes tests that touch process-global state (the report sink and the
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn truncate_identifier_golden_notice_matches_pg_regress() {
         let _guard = GLOBAL_STATE_LOCK.lock().unwrap();
-        SetDatabaseEncoding(pg_ffi_fgram::PG_SQL_ASCII).unwrap();
+        SetDatabaseEncoding(::pg_ffi_fgram::PG_SQL_ASCII).unwrap();
         CAPTURED.lock().unwrap().clear();
         let previous = set_report_sink(Some(capture_report));
 
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn truncate_identifier_no_warn_no_notice() {
         let _guard = GLOBAL_STATE_LOCK.lock().unwrap();
-        SetDatabaseEncoding(pg_ffi_fgram::PG_SQL_ASCII).unwrap();
+        SetDatabaseEncoding(::pg_ffi_fgram::PG_SQL_ASCII).unwrap();
         CAPTURED.lock().unwrap().clear();
         let previous = set_report_sink(Some(capture_report));
 
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn downcase_truncate_full_path_emits_notice() {
         let _guard = GLOBAL_STATE_LOCK.lock().unwrap();
-        SetDatabaseEncoding(pg_ffi_fgram::PG_SQL_ASCII).unwrap();
+        SetDatabaseEncoding(::pg_ffi_fgram::PG_SQL_ASCII).unwrap();
         CAPTURED.lock().unwrap().clear();
         let previous = set_report_sink(Some(capture_report));
         let ctx = test_scope();

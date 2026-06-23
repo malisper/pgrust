@@ -35,10 +35,10 @@ extern crate alloc;
 
 use std::rc::Rc;
 
-use rel::Relation;
-use types_scan::scankey::ScanKeyData;
-use snapshot::SnapshotData;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_scan::scankey::ScanKeyData;
+use ::snapshot::SnapshotData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 pub mod hashinsert;
 pub mod hashovfl;

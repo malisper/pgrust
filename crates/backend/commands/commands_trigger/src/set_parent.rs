@@ -2,22 +2,22 @@
 //! trigger as a child of its parent trigger (or remove the linkage).
 
 use mcx::{Mcx, MemoryContext};
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
 };
-use types_catalog::pg_trigger as pt;
-use types_core::fmgr::F_OIDEQ;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_catalog::pg_trigger as pt;
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERROR};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use indexing_seams as indexing;
-use objectaddress::consts::{RelationRelationId, TriggerRelationId};
+use ::objectaddress::consts::{RelationRelationId, TriggerRelationId};
 
 /// `TriggerSetParentTrigger(trigRel, childTrigId, parentTrigId, childTableId)`
 /// (trigger.c:1220).

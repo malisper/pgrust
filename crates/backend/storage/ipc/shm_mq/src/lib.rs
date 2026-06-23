@@ -32,26 +32,26 @@ use core::mem::{offset_of, size_of};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{compiler_fence, fence, AtomicBool, AtomicI32, AtomicU64, Ordering};
 
-use bgworker_seams::get_background_worker_pid;
-use dsm_core::dsm::{cancel_on_dsm_detach, on_dsm_detach, DsmSegmentId};
+use ::bgworker_seams::get_background_worker_pid;
+use ::dsm_core::dsm::{cancel_on_dsm_detach, on_dsm_detach, DsmSegmentId};
 use latch_seams::{reset_latch, set_latch, wait_latch};
-use lmgr_proc_seams::proc_latch;
+use ::lmgr_proc_seams::proc_latch;
 use s_lock::{s_lock_macro, s_unlock, Spinlock};
-use postgres_seams::check_for_interrupts;
-use utils_error::ereport;
+use ::postgres_seams::check_for_interrupts;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgBox, PgVec, MAX_ALLOC_SIZE};
 use types_bgworker::{BackgroundWorkerHandle, BgwHandleStatus};
 use types_core::{ProcNumber, Size, INVALID_PROC_NUMBER};
-use datum::Datum;
+use ::datum::Datum;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
-use types_pgstat::wait_event::{
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_MESSAGE_QUEUE_INTERNAL, WAIT_EVENT_MESSAGE_QUEUE_RECEIVE,
     WAIT_EVENT_MESSAGE_QUEUE_SEND,
 };
-use types_storage::latch::LatchHandle;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
+use ::types_storage::latch::LatchHandle;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
 
 fn loc(funcname: &str) -> ErrorLocation {
     ErrorLocation::new("shm_mq.c", 0, funcname)
@@ -491,7 +491,7 @@ pub fn shm_mq_attach<'mcx>(
     // queue detached through `mq`'s base address — it must not touch this
     // backend-local box. The box's `Drop` owns the actual free
     // (`shm_mq_detach` consumes it; see the struct comment / OPTION (i)).
-    let mqh = mcx::alloc_in(
+    let mqh = ::mcx::alloc_in(
         mcx,
         ShmMqHandle {
             mqh_queue: mq,
@@ -1443,7 +1443,7 @@ unsafe fn slice_from_raw<'a>(ptr: *const u8, len: Size) -> &'a [u8] {
 /// `MemoryContextAlloc(mqh->mqh_context, len)` for the reassembly buffer:
 /// fallible reservation whose failure is the context's OOM error.
 fn alloc_buffer(mcx: Mcx<'_>, len: Size) -> PgResult<PgVec<'_, u8>> {
-    let mut buf = mcx::vec_with_capacity_in(mcx, len)?;
+    let mut buf = ::mcx::vec_with_capacity_in(mcx, len)?;
     buf.resize(len, 0);
     Ok(buf)
 }
@@ -1451,24 +1451,24 @@ fn alloc_buffer(mcx: Mcx<'_>, len: Size) -> PgResult<PgVec<'_, u8>> {
 // ===========================================================================
 // Seam layer (OPTION (i)): the backend-private `shm_mq_handle` is the owned
 // `PgBox<ShmMqHandle>` parked in this process-global registry; across the seam
-// it is named by a small id ([`execparallel::ShmMqAttachHandle`]). The
+// it is named by a small id ([`::execparallel::ShmMqAttachHandle`]). The
 // in-segment `shm_mq` is named by its real base address
-// ([`execparallel::ShmMqHandle`], value == base as usize). This is the
+// ([`::execparallel::ShmMqHandle`], value == base as usize). This is the
 // real-DSM substrate the parallel executor and parallel orchestration consume.
 // ===========================================================================
 mod seam_layer {
     use core::cell::RefCell;
     use core::ptr::NonNull;
 
-    use dsm_core::dsm::DsmSegmentId;
-    use mcxt_seams::top_memory_context;
-    use mcx::PgBox;
-    use types_error::PgResult;
+    use ::dsm_core::dsm::DsmSegmentId;
+    use ::mcxt_seams::top_memory_context;
+    use ::mcx::PgBox;
+    use ::types_error::PgResult;
     use execparallel::{
         BackgroundWorkerHandle as ExecBgwHandle, DsmSegmentHandle as ExecDsmSeg, SerializeCursor,
         ShmMqAttachHandle, ShmMqHandle as ExecShmMq, Size,
     };
-    use types_parallel::ShmMqResult;
+    use ::types_parallel::ShmMqResult;
 
     use crate::{
         shm_mq_attach as real_attach, shm_mq_create as real_create, shm_mq_detach as real_detach,
@@ -1480,7 +1480,7 @@ mod seam_layer {
 
     /// `MyProcNumber` — the identity passed to `shm_mq_set_receiver/sender(mq,
     /// MyProc)`.
-    fn my_proc() -> types_core::ProcNumber {
+    fn my_proc() -> ::types_core::ProcNumber {
         init_small_seams::my_proc_number::call()
     }
 
@@ -1604,7 +1604,7 @@ mod seam_layer {
         shm_mq_set_sender(mq_from_token(mq), my_proc());
     }
 
-    fn shm_mq_get_sender(mq: ExecShmMq) -> Option<types_core::ProcNumber> {
+    fn shm_mq_get_sender(mq: ExecShmMq) -> Option<::types_core::ProcNumber> {
         real_get_sender(mq_from_token(mq))
     }
 
@@ -1616,7 +1616,7 @@ mod seam_layer {
         let top = top_memory_context::call();
         // `0` is the NULL sentinel for the execParallel `DsmSegmentHandle`.
         let seg = seg.filter(|s| s.0 != 0).map(|s| (seg_id_of(s), top));
-        let my_latch = latch_seams::my_latch::call();
+        let my_latch = ::latch_seams::my_latch::call();
         let mqh = real_attach(mq_from_token(mq), top, seg, None, my_latch)?;
         Ok(with_registry(|r| r.insert(mqh)))
     }

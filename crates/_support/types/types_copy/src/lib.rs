@@ -23,15 +23,15 @@
 #![allow(non_camel_case_types)]
 
 use mcx::{PgBox, PgString, PgVec};
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum as TupleDatum;
-use types_error::SoftErrorContext;
-use fmgr::FmgrInfo;
+use ::types_error::SoftErrorContext;
+use ::fmgr::FmgrInfo;
 use ::nodes::execexpr::ExprState;
 use ::nodes::primnodes::Expr;
 use ::nodes::execnodes::{EStateLink, EcxtId};
 use ::nodes::nodes::NodePtr;
-use rel::Relation;
+use ::rel::Relation;
 
 /* ===========================================================================
  * Copy enums (commands/copy.h, commands/copyfrom_internal.h).

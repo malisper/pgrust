@@ -1,20 +1,20 @@
 use super::*;
-use types_wchar::encoding::{PG_EUC_JIS_2004, PG_UTF8};
+use ::types_wchar::encoding::{PG_EUC_JIS_2004, PG_UTF8};
 
 // The `check_encoding_conversion_args` seam is owned by the unported
 // `utils/mb/mbutils.c`; install a faithful 1:1 copy of that function for the
 // duration of these tests so the conversion entry points are exercisable.
 fn install_check_seam() {
-    use utils_error::elog;
-    use types_error::ERROR;
-    use types_wchar::encoding::{pg_enc, pg_valid_encoding};
+    use ::utils_error::elog;
+    use ::types_error::ERROR;
+    use ::types_wchar::encoding::{pg_enc, pg_valid_encoding};
     fn check(
         src_encoding: pg_enc,
         dest_encoding: pg_enc,
         len: i32,
         expected_src_encoding: pg_enc,
         expected_dest_encoding: pg_enc,
-    ) -> utils_error::PgResult<()> {
+    ) -> ::utils_error::PgResult<()> {
         if !pg_valid_encoding(src_encoding) {
             return elog(ERROR, format!("invalid source encoding ID: {src_encoding}"));
         }

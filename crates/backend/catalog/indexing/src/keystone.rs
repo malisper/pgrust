@@ -31,33 +31,33 @@
 //! reaches it and panics until index.c lands. This is the inherited
 //! `mirror-pg-and-panic` boundary, not own-logic.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::execnodes::IndexInfo;
 use ::nodes::TupleSlotKind;
-use rel::Relation;
-use types_storage::lock::{NoLock, RowExclusiveLock};
-use types_tableam::amapi::IndexUniqueCheck;
-use types_tableam::tableam::TU_UpdateIndexes;
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::ItemPointerData;
-use types_tuple::heaptuple::HEAP_ONLY_TUPLE;
+use ::rel::Relation;
+use ::types_storage::lock::{NoLock, RowExclusiveLock};
+use ::types_tableam::amapi::IndexUniqueCheck;
+use ::types_tableam::tableam::TU_UpdateIndexes;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::HEAP_ONLY_TUPLE;
 
-use execTuples::exec_init_slots::{
+use ::execTuples::exec_init_slots::{
     ExecDropSingleTupleTableSlot, MakeSingleTupleTableSlot,
 };
-use execTuples::slot_deform::slot_getattr;
-use execTuples::slot_ops_vtables::slot_getsysattr;
-use execTuples::slot_store_fetch::ExecStoreHeapTuple;
+use ::execTuples::slot_deform::slot_getattr;
+use ::execTuples::slot_ops_vtables::slot_getsysattr;
+use ::execTuples::slot_store_fetch::ExecStoreHeapTuple;
 
 /// `CatalogIndexState` (the on-disk C type is `struct ResultRelInfo *`).
 ///
-/// The owned carrier now lives in [`types_cluster::CatalogIndexState`] so the
+/// The owned carrier now lives in [`::types_cluster::CatalogIndexState`] so the
 /// `backend-catalog-indexing-seams` declarations and the cross-crate consumers
 /// (cluster, large-object) can name the real value — there is no opaque
 /// `CatalogIndexStateToken` handle anymore. This crate re-exports it for the
 /// engine functions below.
-pub use types_cluster::CatalogIndexState;
+pub use ::types_cluster::CatalogIndexState;
 
 /// `CatalogOpenIndexes(heapRel)` (indexing.c): prepare to update the catalog's
 /// indexes for an insert/update.
@@ -278,7 +278,7 @@ fn CatalogIndexInsert<'mcx>(
         // ignores it; an exclusion/expression AM would downcast and read it.)
         let index_desc = indstate.index_descs[i].alias();
         let mut am_index_info =
-            types_tableam::index_info_carrier::IndexInfoCarrier::new(&mut indstate.index_infos[i]);
+            ::types_tableam::index_info_carrier::IndexInfoCarrier::new(&mut indstate.index_infos[i]);
         indexam::index_insert(
             mcx,
             &index_desc,              // index relation
@@ -314,13 +314,13 @@ fn form_index_datum<'mcx>(
     slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<(
-    Vec<types_tuple::heaptuple::Datum<'mcx>>,
+    Vec<::types_tuple::heaptuple::Datum<'mcx>>,
     Vec<bool>,
 )> {
     // indexInfo->ii_Expressions == NIL for catalog indexes, so there is no
     // ii_ExpressionsState setup and no GetPerTupleExprContext(estate) check.
     let n = index_info.ii_NumIndexAttrs as usize;
-    let mut values: Vec<types_tuple::heaptuple::Datum<'mcx>> =
+    let mut values: Vec<::types_tuple::heaptuple::Datum<'mcx>> =
         Vec::with_capacity(n);
     let mut isnull: Vec<bool> = Vec::with_capacity(n);
 
@@ -340,7 +340,7 @@ fn form_index_datum<'mcx>(
             // never carry one. The C "wrong number of index expressions"
             // elog(ERROR) covers a mismatch; an expression column on a catalog
             // index is the keystone-invariant violation.
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "wrong number of index expressions",
             ));
         };
@@ -432,7 +432,7 @@ pub fn CatalogTupleInsertWithInfo<'mcx>(
 pub fn CatalogTuplesMultiInsertWithInfo<'mcx>(
     mcx: Mcx<'mcx>,
     heap_rel: &Relation<'mcx>,
-    tuples: mcx::PgVec<'mcx, FormedTuple<'mcx>>,
+    tuples: ::mcx::PgVec<'mcx, FormedTuple<'mcx>>,
     indstate: &mut CatalogIndexState<'mcx>,
 ) -> PgResult<()> {
     // /* Nothing to do */

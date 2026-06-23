@@ -8,7 +8,7 @@
 //! `ExpandedRecordHeader` lives in this backend-thread-local table, keyed by the
 //! 1-based index stored in the `erh` `u64` (`0` == "no live header", the C NULL).
 //!
-//! Each entry owns its own private `mcx::MemoryContext` (the C
+//! Each entry owns its own private `::mcx::MemoryContext` (the C
 //! `estate->datum_context` analogue), so the header — and every by-reference
 //! field value it points at — stays alive for the whole PL/pgSQL call. The
 //! header is stored with a `'static` marker transmuted from the owning context's
@@ -20,7 +20,7 @@
 
 use core::cell::RefCell;
 
-use misc2::expandedrecord::ExpandedRecordHeader;
+use ::misc2::expandedrecord::ExpandedRecordHeader;
 use mcx::{MemoryContext, Mcx};
 
 /// One live expanded record: its private memory context and the header allocated

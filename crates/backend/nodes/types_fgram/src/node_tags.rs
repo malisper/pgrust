@@ -5,7 +5,7 @@
 //! dispatch. PostgreSQL generates this enum from the node definitions; the
 //! numeric values must match the C backend ABI exactly.
 
-use pg_ffi_fgram::NodeTag;
+use ::pg_ffi_fgram::NodeTag;
 
 pub const T_Invalid: NodeTag = 0;
 pub const T_List: NodeTag = 1;

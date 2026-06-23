@@ -7,9 +7,9 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgBox};
-use types_core::Oid;
-use types_error::PgResult;
-use types_tuple::Datum;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_tuple::Datum;
 use ::nodes::nodes::{Node, NodePtr};
 use ::nodes::parsestmt::{ParseExprKind, ParseState};
 use ::nodes::primnodes::Expr;

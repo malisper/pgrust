@@ -16,9 +16,9 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 
 use crate::execnodes::PlanStateData;
 use crate::funcapi::Tuplestorestate;
@@ -133,7 +133,7 @@ pub struct RecursiveUnionStateData<'mcx> {
     /// `FmgrInfo *hashfunctions` — per-grouping-field hash functions (UNION only).
     pub hashfunctions: PgVec<'mcx, FmgrInfo>,
     /// `MemoryContext tempContext` — short-term context for comparisons.
-    /// `mcx::MemoryContext` owns its allocation domain and resets on drop, so
+    /// `::mcx::MemoryContext` owns its allocation domain and resets on drop, so
     /// `MemoryContextDelete`/`Reset` are native (drop / `reset`).
     pub tempContext: Option<MemoryContext>,
     /// `TupleHashTable hashtable` — hash table for tuples already seen.

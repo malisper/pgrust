@@ -2,7 +2,7 @@
 //! (`catalog/pg_extension.h`), trimmed to the rows the extension command port
 //! consumes.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// `ExtensionRelationId` — pg_extension's relation OID (`pg_extension.h` CATALOG).
 pub const ExtensionRelationId: Oid = 3079;

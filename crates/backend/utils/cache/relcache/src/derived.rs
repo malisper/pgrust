@@ -27,11 +27,11 @@ use rewriteDefine_seams::{
 use relcache_nodexform_seams as nodexform_seam;
 use utils_error::{ereport, PgResult};
 use mcx::{Mcx, MemoryContext};
-use rel::Relation;
-use types_tuple::Datum;
-use types_core::primitive::{AttrNumber, Oid, RegProcedure};
+use ::rel::Relation;
+use ::types_tuple::Datum;
+use ::types_core::primitive::{AttrNumber, Oid, RegProcedure};
 use types_core::{InvalidOid, OidIsValid};
-use types_error::ERROR;
+use ::types_error::ERROR;
 use types_tuple::{
     FirstLowInvalidHeapAttributeNumber, RELKIND_PARTITIONED_TABLE, REPLICA_IDENTITY_DEFAULT,
     REPLICA_IDENTITY_INDEX,
@@ -43,7 +43,7 @@ use crate::core_entry_store::entry::{
 use crate::core_entry_store::{with_rel, with_rel_mut};
 
 /// `IndexAttrBitmapKind` (relcache.h) — which attribute-bitmap to fetch.
-pub use relcache_entry::IndexAttrBitmapKind;
+pub use ::relcache_entry::IndexAttrBitmapKind;
 
 /* ==========================================================================
  * RelationGetFKeyList -- foreign-key cache-info list (rd_fkeylist).
@@ -286,7 +286,7 @@ pub fn RelationGetIndexExpressions(relation: Oid) -> PgResult<()> {
         Some(idx) => idx
             .indkey
             .iter()
-            .any(|&k| k == types_core::primitive::InvalidAttrNumber),
+            .any(|&k| k == ::types_core::primitive::InvalidAttrNumber),
     });
     if !has_expression_col {
         return Ok(());
@@ -672,7 +672,7 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
 
     // Build the rule list, `stringToNode`-ing the node strings into the cache
     // arena so the resulting `Query`/`Node` trees live for the entry's lifetime.
-    let mut rules: mcx::PgVec<'static, RewriteRule> = mcx::PgVec::new_in(cache_mcx);
+    let mut rules: ::mcx::PgVec<'static, RewriteRule> = ::mcx::PgVec::new_in(cache_mcx);
     rules.try_reserve(scanned.len()).map_err(|_| cache_mcx.oom(scanned.len()))?;
 
     for row in scanned {
@@ -707,8 +707,8 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
         // `Query` trees. Reconstruct the `List` node, then move each element's
         // `Query` payload into the rule's `actions` (each lives in the cache
         // arena). C keeps a `List *`; the owned model keeps the `Query` values.
-        let mut actions: mcx::PgVec<'static, ::nodes::copy_query::Query<'static>> =
-            mcx::PgVec::new_in(cache_mcx);
+        let mut actions: ::mcx::PgVec<'static, ::nodes::copy_query::Query<'static>> =
+            ::mcx::PgVec::new_in(cache_mcx);
         // `ev_action` deserializes to a `List` of `Query` (the C `List
         // *actions`). An empty action list (INSTEAD NOTHING) renders as `<>`,
         // which `stringToNode` resolves to a NULL pointer — leave `actions`
@@ -719,13 +719,13 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
             None => None,
         };
         if let Some(action_node) = action_node {
-            let action_inner = mcx::PgBox::into_inner(action_node);
+            let action_inner = ::mcx::PgBox::into_inner(action_node);
             match action_inner.node_tag() {
                 ntag::T_List => {
                     let elems = action_inner.into_list().unwrap();
                     actions.try_reserve(elems.len()).map_err(|_| cache_mcx.oom(elems.len()))?;
                     for elem in elems {
-                        let elem_inner = mcx::PgBox::into_inner(elem);
+                        let elem_inner = ::mcx::PgBox::into_inner(elem);
                         match elem_inner.node_tag() {
                             ntag::T_Query => actions.push(elem_inner.into_query().unwrap()),
                             _ => {
@@ -768,7 +768,7 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
             .and_then(|o| o.view())
             .is_some_and(|v| v.security_invoker);
         let check_as_user = if event == CmdType::CMD_SELECT
-            && relation.rd_rel.relkind as u8 == types_tuple::RELKIND_VIEW
+            && relation.rd_rel.relkind as u8 == ::types_tuple::RELKIND_VIEW
             && security_invoker
         {
             InvalidOid
@@ -809,7 +809,7 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
     // above). Firing order is therefore rule-name order, as required.
 
     let lock =
-        mcx::alloc_in(cache_mcx, RuleLock { rules }).map_err(|_| cache_mcx.oom(0))?;
+        ::mcx::alloc_in(cache_mcx, RuleLock { rules }).map_err(|_| cache_mcx.oom(0))?;
     relation.rd_rules = Some(lock);
     Ok(())
 }
@@ -831,7 +831,7 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
 /// hint flags into the `TriggerDesc` so the executor can skip searching for a
 /// kind of trigger the relation does not have.
 fn SetTriggerFlags(trigdesc: &mut types_trigger::TriggerDesc<'static>, tgtype: i16, trigger: &types_trigger::Trigger<'static>) {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_FOR_DELETE, TRIGGER_FOR_INSERT, TRIGGER_FOR_UPDATE, TRIGGER_TYPE_AFTER,
         TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_INSTEAD,
         TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TRUNCATE,
@@ -945,18 +945,18 @@ pub fn RelationBuildTriggers(relation: &mut RelationData) -> PgResult<()> {
 
     let numtrigs = scanned.len();
     let mut trigdesc = types_trigger::TriggerDesc::new_in(cache_mcx);
-    let mut triggers: mcx::PgVec<'static, types_trigger::Trigger<'static>> =
-        mcx::PgVec::new_in(cache_mcx);
+    let mut triggers: ::mcx::PgVec<'static, types_trigger::Trigger<'static>> =
+        ::mcx::PgVec::new_in(cache_mcx);
     triggers.try_reserve(numtrigs).map_err(|_| cache_mcx.oom(numtrigs))?;
 
     for row in scanned {
         // build->tgname = nameout(...); the args/attr arrays + qual/transition
         // tables, all copied into the cache arena (CopyTriggerDesc's pstrdups).
-        let tgname = mcx::PgString::from_str_in(&row.tgname, cache_mcx)
+        let tgname = ::mcx::PgString::from_str_in(&row.tgname, cache_mcx)
             .map_err(|_| cache_mcx.oom(row.tgname.len()))?;
 
         // build->tgnattr = pg_trigger->tgattr.dim1; the int2vector elements.
-        let mut tgattr: mcx::PgVec<'static, i16> = mcx::PgVec::new_in(cache_mcx);
+        let mut tgattr: ::mcx::PgVec<'static, i16> = ::mcx::PgVec::new_in(cache_mcx);
         tgattr.try_reserve(row.tgattr.len()).map_err(|_| cache_mcx.oom(row.tgattr.len()))?;
         for &a in &row.tgattr {
             tgattr.push(a);
@@ -964,28 +964,28 @@ pub fn RelationBuildTriggers(relation: &mut RelationData) -> PgResult<()> {
         let tgnattr = tgattr.len() as i16;
 
         // build->tgargs[i] = pstrdup(p); one PgString per argument.
-        let mut tgargs: mcx::PgVec<'static, mcx::PgString<'static>> = mcx::PgVec::new_in(cache_mcx);
+        let mut tgargs: ::mcx::PgVec<'static, ::mcx::PgString<'static>> = ::mcx::PgVec::new_in(cache_mcx);
         tgargs.try_reserve(row.tgargs.len()).map_err(|_| cache_mcx.oom(row.tgargs.len()))?;
         for arg in &row.tgargs {
-            let s = mcx::PgString::from_str_in(arg, cache_mcx).map_err(|_| cache_mcx.oom(arg.len()))?;
+            let s = ::mcx::PgString::from_str_in(arg, cache_mcx).map_err(|_| cache_mcx.oom(arg.len()))?;
             tgargs.push(s);
         }
 
         let tgqual = match &row.tgqual {
             Some(q) => Some(
-                mcx::PgString::from_str_in(q, cache_mcx).map_err(|_| cache_mcx.oom(q.len()))?,
+                ::mcx::PgString::from_str_in(q, cache_mcx).map_err(|_| cache_mcx.oom(q.len()))?,
             ),
             None => None,
         };
         let tgoldtable = match &row.tgoldtable {
             Some(t) => Some(
-                mcx::PgString::from_str_in(t, cache_mcx).map_err(|_| cache_mcx.oom(t.len()))?,
+                ::mcx::PgString::from_str_in(t, cache_mcx).map_err(|_| cache_mcx.oom(t.len()))?,
             ),
             None => None,
         };
         let tgnewtable = match &row.tgnewtable {
             Some(t) => Some(
-                mcx::PgString::from_str_in(t, cache_mcx).map_err(|_| cache_mcx.oom(t.len()))?,
+                ::mcx::PgString::from_str_in(t, cache_mcx).map_err(|_| cache_mcx.oom(t.len()))?,
             ),
             None => None,
         };
@@ -1022,7 +1022,7 @@ pub fn RelationBuildTriggers(relation: &mut RelationData) -> PgResult<()> {
     trigdesc.numtriggers = numtrigs as i32;
     trigdesc.triggers = triggers;
 
-    let boxed = mcx::alloc_in(cache_mcx, trigdesc).map_err(|_| cache_mcx.oom(0))?;
+    let boxed = ::mcx::alloc_in(cache_mcx, trigdesc).map_err(|_| cache_mcx.oom(0))?;
     relation.rd_trigdesc = Some(boxed);
     Ok(())
 }
@@ -1061,16 +1061,16 @@ pub fn RelationBuildRowSecurity(relation: &mut RelationData) -> PgResult<()> {
     // the polroles oid[] decode + the polqual/polwithcheck text reads.
     let scanned = genam_seam::relcache_scan_pg_policy::call(relation.rd_id)?;
 
-    let mut policies: mcx::PgVec<'static, RowSecurityPolicy> = mcx::PgVec::new_in(cache_mcx);
+    let mut policies: ::mcx::PgVec<'static, RowSecurityPolicy> = ::mcx::PgVec::new_in(cache_mcx);
     policies.try_reserve(scanned.len()).map_err(|_| cache_mcx.oom(scanned.len()))?;
 
     for row in scanned {
         // policy->policy_name = MemoryContextStrdup(rscxt, NameStr(polname)).
-        let policy_name = mcx::PgString::from_str_in(&row.polname, cache_mcx)
+        let policy_name = ::mcx::PgString::from_str_in(&row.polname, cache_mcx)
             .map_err(|_| cache_mcx.oom(row.polname.len()))?;
 
         // policy->roles = DatumGetArrayTypePCopy(polroles) — decoded Oid[].
-        let mut roles: mcx::PgVec<'static, Oid> = mcx::PgVec::new_in(cache_mcx);
+        let mut roles: ::mcx::PgVec<'static, Oid> = ::mcx::PgVec::new_in(cache_mcx);
         roles.try_reserve(row.polroles.len()).map_err(|_| cache_mcx.oom(row.polroles.len()))?;
         for &r in &row.polroles {
             roles.push(r);
@@ -1110,7 +1110,7 @@ pub fn RelationBuildRowSecurity(relation: &mut RelationData) -> PgResult<()> {
     }
 
     let rsdesc = RowSecurityDesc { policies };
-    let boxed = mcx::alloc_in(cache_mcx, rsdesc).map_err(|_| cache_mcx.oom(0))?;
+    let boxed = ::mcx::alloc_in(cache_mcx, rsdesc).map_err(|_| cache_mcx.oom(0))?;
     relation.rd_rsdesc = Some(boxed);
     Ok(())
 }
@@ -1226,8 +1226,8 @@ pub struct ForeignKeyCacheInfo {
     pub confrelid: Oid,
     pub conenforced: bool,
     pub nkeys: i32,
-    pub conkey: Vec<types_core::primitive::AttrNumber>,
-    pub confkey: Vec<types_core::primitive::AttrNumber>,
+    pub conkey: Vec<::types_core::primitive::AttrNumber>,
+    pub confkey: Vec<::types_core::primitive::AttrNumber>,
     pub conpfeqop: Vec<Oid>,
 }
 
@@ -1442,7 +1442,7 @@ pub fn RelationGetIndexAttOptions(rd: &mut RelationData, _copy: bool) -> PgResul
             // Reconstruct the `text[]` Datum (mirroring C `get_attoptions`'s
             // palloc'd text[]); `(Datum) 0` when unset.
             let datum = match &attoptions {
-                Some(bytes) => Datum::ByRef(mcx::slice_in(smcx, bytes)?),
+                Some(bytes) => Datum::ByRef(::mcx::slice_in(smcx, bytes)?),
                 None => Datum::null(),
             };
             // `index_opclass_options(relation, i + 1, attoptions, false)` — the
@@ -1513,7 +1513,7 @@ pub(crate) fn force_index_att_options(relid: Oid) -> PgResult<()> {
             // `get_attoptions`'s palloc'd text[]): a present option is the flat
             // varlena image (the by-reference arm), an absent one is `(Datum) 0`.
             let datum = match &attoptions {
-                Some(bytes) => Datum::ByRef(mcx::slice_in(smcx, bytes)?),
+                Some(bytes) => Datum::ByRef(::mcx::slice_in(smcx, bytes)?),
                 None => Datum::null(),
             };
             // `index_opclass_options(relation, i + 1, attoptions, false)` — the
@@ -1578,10 +1578,10 @@ mod cache_ownership_keystone_tests {
         // RuleLock holding them, exactly the shape `RelationBuildRuleLock`
         // produces and `RelationData.rd_rules` owns.
         let mcx = cache_memory_context();
-        let mut actions = mcx::PgVec::new_in(mcx);
+        let mut actions = ::mcx::PgVec::new_in(mcx);
         actions.push(build_cached_query(CmdType::CMD_SELECT));
 
-        let mut rules = mcx::PgVec::new_in(mcx);
+        let mut rules = ::mcx::PgVec::new_in(mcx);
         rules.push(RewriteRule {
             ruleId: 12345,
             event: CmdType::CMD_SELECT,
@@ -1590,8 +1590,8 @@ mod cache_ownership_keystone_tests {
             qual: None,
             actions,
         });
-        let lock: mcx::PgBox<'static, RuleLock> =
-            mcx::alloc_in(mcx, RuleLock { rules }).expect("alloc RuleLock in cache arena");
+        let lock: ::mcx::PgBox<'static, RuleLock> =
+            ::mcx::alloc_in(mcx, RuleLock { rules }).expect("alloc RuleLock in cache arena");
 
         // A lifetime-free RelationData can own this for the backend's life.
         let mut entry = crate::core_entry_store::entry::RelationData::default();

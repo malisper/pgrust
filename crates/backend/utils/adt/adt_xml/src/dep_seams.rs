@@ -26,8 +26,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::MemoryContext;
-use types_core::Oid;
+use ::mcx::MemoryContext;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT};
 
 use xml_libxml_seams as seam;
@@ -37,7 +37,7 @@ const TYPTYPE_DOMAIN: u8 = b'd';
 
 /// Run `f` with a fresh scratch [`MemoryContext`]; the closure copies whatever
 /// it needs out before the context drops.
-fn with_scratch<R>(f: impl for<'mcx> FnOnce(mcx::Mcx<'mcx>) -> R) -> R {
+fn with_scratch<R>(f: impl for<'mcx> FnOnce(::mcx::Mcx<'mcx>) -> R) -> R {
     let cx = MemoryContext::new("xml dep-seam scratch");
     f(cx.mcx())
 }
@@ -105,7 +105,7 @@ pub fn install() {
     // (dropped columns included; `map_sql_*` filters on `is_dropped`);
     // `table_close(rel, NoLock)`.
     seam::relation_columns::set(|relid: Oid| -> PgResult<Vec<types_xml::RelationColumn>> {
-        use types_storage::lock::{AccessShareLock, NoLock};
+        use ::types_storage::lock::{AccessShareLock, NoLock};
         with_scratch(|mcx| {
             let rel = table::table_open(mcx, relid, AccessShareLock)?;
             let cols = {
@@ -215,7 +215,7 @@ pub fn install() {
     // the first server-encoding character of `s`: convert the leading char to
     // UTF-8, then decode that UTF-8 to a single wide char (codepoint).
     seam::sqlchar_to_unicode::set(|s: &[u8]| -> PgResult<u32> {
-        use types_wchar::encoding::PG_UTF8;
+        use ::types_wchar::encoding::PG_UTF8;
         with_scratch(|mcx| {
             // pg_server_to_any(s, pg_mblen_cstr(s), PG_UTF8)
             let len = mbutils::pg_mblen(s) as usize;

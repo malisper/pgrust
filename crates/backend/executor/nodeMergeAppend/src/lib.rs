@@ -48,7 +48,7 @@ use postgres_seams as tcop_postgres;
 use sortsupport_seams as sortsupport;
 
 use mcx::{alloc_in, Mcx, PgBox};
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 // This crate is fully on the canonical enum `Datum<'mcx>` from the keystone
 // tuple crate. The binary heap's `bh_nodes` storage (owned by `types-nodes`)
 // holds canonical `Datum<'mcx>` (a `ByVal` slot-index word), and both edge
@@ -64,7 +64,7 @@ use ::nodes::nodemergeappend::{BinaryHeap, MergeAppend, MergeAppendStateData};
 use nodes::{
     Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind,
 };
-use types_sortsupport::SortSupportData;
+use ::types_sortsupport::SortSupportData;
 
 /// `SlotNumber` (nodeMergeAppend.c) — `typedef int32 SlotNumber;`. A slot /
 /// subplan index stored in the heap. Provides no formal type-safety; it makes
@@ -176,9 +176,9 @@ pub fn ExecInitMergeAppend<'mcx>(
     // mergestate->ms_slots = (TupleTableSlot **) palloc0(sizeof(...) * nplans);
     let nplans_usize =
         usize::try_from(nplans).map_err(|_| elog_error("MergeAppend has a negative subplan count"))?;
-    let mut mergeplanstates: mcx::PgVec<'mcx, Option<PgBox<'mcx, PlanStateNode<'mcx>>>> =
-        mcx::vec_with_capacity_in(mcx, nplans_usize)?;
-    let mut ms_slots: mcx::PgVec<'mcx, Option<SlotId>> = mcx::vec_with_capacity_in(mcx, nplans_usize)?;
+    let mut mergeplanstates: ::mcx::PgVec<'mcx, Option<PgBox<'mcx, PlanStateNode<'mcx>>>> =
+        ::mcx::vec_with_capacity_in(mcx, nplans_usize)?;
+    let mut ms_slots: ::mcx::PgVec<'mcx, Option<SlotId>> = ::mcx::vec_with_capacity_in(mcx, nplans_usize)?;
     for _ in 0..nplans_usize {
         ms_slots.push(None);
     }
@@ -253,8 +253,8 @@ pub fn ExecInitMergeAppend<'mcx>(
     let num_cols = node.numCols;
     let num_cols_usize =
         usize::try_from(num_cols).map_err(|_| elog_error("MergeAppend has a negative numCols"))?;
-    let mut ms_sortkeys: mcx::PgVec<'mcx, SortSupportData<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, num_cols_usize)?;
+    let mut ms_sortkeys: ::mcx::PgVec<'mcx, SortSupportData<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, num_cols_usize)?;
 
     //   for (i = 0; i < node->numCols; i++) { ... }
     for k in 0..num_cols_usize {
@@ -941,7 +941,7 @@ mod tests {
     //! cover the comparator's NULL ordering, the compare-result inversion, and
     //! the in-crate binary-heap structure.
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     #[test]
     fn invert_compare_result_matches_c() {

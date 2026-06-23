@@ -41,11 +41,11 @@ use sink::{
     bbsink_forward_end_backup, bbsink_forward_end_manifest, bbsink_manifest_contents, Bbsink,
     BbsinkOps, BbsinkState,
 };
-use mcx::Mcx;
-use compression::PgCompressSpecification;
-use types_core::primitive::{Size, TimeLineID, XLogRecPtr};
+use ::mcx::Mcx;
+use ::compression::PgCompressSpecification;
+use ::types_core::primitive::{Size, TimeLineID, XLogRecPtr};
 use types_error::{ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 /// The C source path used in `ereport`/`elog` error locations (`__FILE__`).
 const SRCFILE: &str = "src/backend/backup/basebackup_gzip.c";
@@ -99,7 +99,7 @@ pub fn bbsink_gzip_new<'mcx>(
 
 impl<'mcx> BbsinkGzip<'mcx> {
     /// `elog(ERROR, "could not compress data: %s", zs->msg)`.
-    fn compress_error(msg: Option<String>, line: i32) -> types_error::PgError {
+    fn compress_error(msg: Option<String>, line: i32) -> ::types_error::PgError {
         let detail = msg.unwrap_or_default();
         ereport(ERROR)
             .errcode(ERRCODE_INTERNAL_ERROR)

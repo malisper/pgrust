@@ -14,7 +14,7 @@
 //! Until then a GiST dispatch to an inet OID hits an uninstalled seam — the
 //! mirror-PG-and-panic contract.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_network::{inet_struct, GistInetKey, GistInetSplitVec};
 
 /// `StrategyNumber` (access/stratnum.h).

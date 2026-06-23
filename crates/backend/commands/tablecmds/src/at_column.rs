@@ -35,16 +35,16 @@
 //!     `PgAttributeUpdateRow.attoptions` ByRef-bytes carrier (same
 //!     `transformRelOptionsBytes` → `construct_text_array_bytes` image path).
 //!
-//! [`PgAttributeUpdateRow`]: types_catalog::pg_attribute::PgAttributeUpdateRow
+//! [`PgAttributeUpdateRow`]: ::types_catalog::pg_attribute::PgAttributeUpdateRow
 
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
-use types_core::primitive::{AttrNumber, InvalidAttrNumber};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
+use ::types_core::primitive::{AttrNumber, InvalidAttrNumber};
 use types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_REFERENCE,
@@ -54,21 +54,21 @@ use types_error::{
 };
 use ::nodes::ddlnodes::AlterTableType;
 use ::nodes::nodes::{ntag, Node};
-use rel::Relation;
-use types_storage::lock::{NoLock, RowExclusiveLock, ShareLock, LOCKMODE};
+use ::rel::Relation;
+use ::types_storage::lock::{NoLock, RowExclusiveLock, ShareLock, LOCKMODE};
 use ::nodes::parsenodes::DROP_RESTRICT;
-use statistics::MAX_STATISTICS_TARGET;
-use types_tuple::access::{
+use ::statistics::MAX_STATISTICS_TARGET;
+use ::types_tuple::access::{
     ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE,
     RELKIND_VIEW,
 };
 use types_tuple::heaptuple::Datum;
 
-use common_relation::relation_open;
+use ::common_relation::relation_open;
 use indexing_seams as indexing_seam;
 use pg_attrdef::{RemoveAttrDefault, StoreAttrDefault};
-use lsyscache::attribute::get_attnum;
+use ::lsyscache::attribute::get_attnum;
 use cache_syscache::{SearchSysCacheAttName, ATTNAME, ATTNUM};
 use objectaccess_seams as objaccess_seam;
 
@@ -77,7 +77,7 @@ use tablecmds_seams as seam;
 use crate::helpers::{here, RelationRelationId};
 
 /// `ObjectAddressSubSet(addr, class, object, sub)`.
-fn object_address_subset(class_id: types_core::Oid, object_id: types_core::Oid, sub: i32) -> ObjectAddress {
+fn object_address_subset(class_id: ::types_core::Oid, object_id: ::types_core::Oid, sub: i32) -> ObjectAddress {
     ObjectAddress {
         classId: class_id,
         objectId: object_id,
@@ -99,7 +99,7 @@ fn relation_mark_replica_identity<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     ri_type: i8,
-    index_oid: types_core::Oid,
+    index_oid: ::types_core::Oid,
 ) -> PgResult<()> {
     // Check whether relreplident has changed, and update it if so. The pg_class
     // open/SearchSysCacheCopy1/conditional-poke/CatalogTupleUpdate/close lives in
@@ -153,8 +153,8 @@ pub fn ATExecReplicaIdentity<'mcx>(
         || identity_type == REPLICA_IDENTITY_FULL
         || identity_type == REPLICA_IDENTITY_NOTHING
     {
-        relation_mark_replica_identity(mcx, rel, identity_type, types_core::InvalidOid)?;
-        return Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0));
+        relation_mark_replica_identity(mcx, rel, identity_type, ::types_core::InvalidOid)?;
+        return Ok(object_address_subset(::types_core::InvalidOid, ::types_core::InvalidOid, 0));
     } else if identity_type == REPLICA_IDENTITY_INDEX {
         // fallthrough
     } else {
@@ -174,7 +174,7 @@ pub fn ATExecReplicaIdentity<'mcx>(
         index_name,
         rel.rd_rel.relnamespace,
     )?;
-    if index_oid == types_core::InvalidOid {
+    if index_oid == ::types_core::InvalidOid {
         return utils_error::ereport(ERROR)
             .errcode(ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
@@ -290,7 +290,7 @@ pub fn ATExecReplicaIdentity<'mcx>(
     // index_close(indexRel, NoLock): drop the relcache pin, keep the lock.
     drop(index_rel);
 
-    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
+    Ok(object_address_subset(::types_core::InvalidOid, ::types_core::InvalidOid, 0))
 }
 
 
@@ -388,7 +388,7 @@ pub fn ATExecColumnDefault<'mcx>(
         //   rawEnt->generated = '\0';
         //   AddRelationNewConstraints(rel, list_make1(rawEnt), NIL,
         //                             false, true, false, NULL);
-        let raw_default_ptr = mcx::alloc_in(mcx, new_default.clone_in(mcx)?)?;
+        let raw_default_ptr = ::mcx::alloc_in(mcx, new_default.clone_in(mcx)?)?;
         let raw_defaults: [(AttrNumber, ::nodes::nodes::NodePtr<'mcx>, i8); 1] =
             [(attnum, raw_default_ptr, 0)];
         seam::add_relation_new_constraints::call(
@@ -466,7 +466,7 @@ pub fn ATExecSetStatistics<'mcx>(
             let ival = match node.node_tag() {
                 ntag::T_Integer => node.expect_integer().ival,
                 _ => {
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "ATExecSetStatistics: SET STATISTICS value is not an Integer node",
                     ))
                 }
@@ -516,7 +516,7 @@ pub fn ATExecSetStatistics<'mcx>(
                     .map(|()| unreachable!());
             }
         },
-        None => match cache_syscache::SearchSysCacheAttNum(mcx, rel.rd_id, colNum)? {
+        None => match ::cache_syscache::SearchSysCacheAttNum(mcx, rel.rd_id, colNum)? {
             Some(t) => t,
             None => {
                 return utils_error::ereport(ERROR)
@@ -533,7 +533,7 @@ pub fn ATExecSetStatistics<'mcx>(
     };
 
     // attrtuple = (Form_pg_attribute) GETSTRUCT(tuple); attnum = attrtuple->attnum;
-    let cache_id = if colName.is_some() { ATTNAME } else { cache_syscache::ATTNUM };
+    let cache_id = if colName.is_some() { ATTNAME } else { ::cache_syscache::ATTNUM };
     let attnum = att_field_i16(mcx, cache_id, &tuple, Anum_pg_attribute_attnum)?;
     let attgenerated = att_field_char(mcx, cache_id, &tuple, Anum_pg_attribute_attgenerated)?;
     let colname_for_msg = colName.unwrap_or("");
@@ -659,7 +659,7 @@ pub fn ATPrepDropExpression<'mcx>(
             mcx,
             ATTNAME,
             &tuple,
-            types_catalog::pg_attribute::Anum_pg_attribute_attinhcount,
+            ::types_catalog::pg_attribute::Anum_pg_attribute_attinhcount,
         )?;
         if attinhcount > 0 {
             return utils_error::ereport(ERROR)
@@ -741,7 +741,7 @@ pub fn ATExecDropExpression<'mcx>(
                 .finish(here("ATExecDropExpression"))
                 .map(|()| unreachable!());
         } else {
-            utils_error::ereport(types_error::error::NOTICE)
+            utils_error::ereport(::types_error::error::NOTICE)
                 .errmsg(format!(
                     "column \"{}\" of relation \"{}\" is not a generated column, skipping",
                     colname,
@@ -751,8 +751,8 @@ pub fn ATExecDropExpression<'mcx>(
             // heap_freetuple(tuple); table_close(attrelation, ...); — RAII.
             drop(attrelation);
             return Ok(object_address_subset(
-                types_core::InvalidOid,
-                types_core::InvalidOid,
+                ::types_core::InvalidOid,
+                ::types_core::InvalidOid,
                 0,
             ));
         }
@@ -774,8 +774,8 @@ pub fn ATExecDropExpression<'mcx>(
 
     // Drop the dependency records of the GENERATED expression, in particular
     // its INTERNAL dependency on the column.
-    let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
-    if !types_core::primitive::OidIsValid(attrdefoid) {
+    let attrdefoid = ::pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
+    if !::types_core::primitive::OidIsValid(attrdefoid) {
         return utils_error::ereport(ERROR)
             .errmsg(format!(
                 "could not find attrdef tuple for relation {} attnum {}",
@@ -785,7 +785,7 @@ pub fn ATExecDropExpression<'mcx>(
             .map(|()| unreachable!());
     }
     pg_depend_seams::deleteDependencyRecordsFor::call(
-        types_catalog::pg_attrdef::AttrDefaultRelationId,
+        ::types_catalog::pg_attrdef::AttrDefaultRelationId,
         attrdefoid,
         false,
     )?;
@@ -810,9 +810,9 @@ pub fn ATExecDropOf<'mcx>(
     let relid = rel.rd_id;
     // rel->rd_rel->reloftype (read via the syscache RELOID projection).
     let reloftype = syscache_seams::search_relation_reloftype::call(relid)?
-        .unwrap_or(types_core::InvalidOid);
+        .unwrap_or(::types_core::InvalidOid);
 
-    if !types_core::primitive::OidIsValid(reloftype) {
+    if !::types_core::primitive::OidIsValid(reloftype) {
         return utils_error::ereport(ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg(format!("\"{}\" is not a typed table", rel.name()))
@@ -830,13 +830,13 @@ pub fn ATExecDropOf<'mcx>(
     pg_depend_seams::deleteDependencyRecordsForSpecific::call(
         RelationRelationId,
         relid,
-        types_catalog::catalog_dependency::DEPENDENCY_NORMAL.as_char(),
-        types_catalog::pg_type::TypeRelationId,
+        ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL.as_char(),
+        ::types_catalog::pg_type::TypeRelationId,
         reloftype,
     )?;
 
     // Clear pg_class.reloftype.
-    let valid = indexing_seam::set_pg_class_reloftype::call(relid, types_core::InvalidOid)?;
+    let valid = indexing_seam::set_pg_class_reloftype::call(relid, ::types_core::InvalidOid)?;
     if !valid {
         return utils_error::ereport(ERROR)
             .errmsg(format!("cache lookup failed for relation {relid}"))
@@ -861,9 +861,9 @@ pub fn ATExecAddOf<'mcx>(
     of_typename: &::nodes::rawnodes::TypeName<'mcx>,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    use types_catalog::catalog_dependency::DEPENDENCY_NORMAL;
-    use types_catalog::pg_type::{TypeRelationId, TYPTYPE_COMPOSITE};
-    use types_storage::lock::AccessShareLock;
+    use ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL;
+    use ::types_catalog::pg_type::{TypeRelationId, TYPTYPE_COMPOSITE};
+    use ::types_storage::lock::AccessShareLock;
 
     let relid = rel.rd_id;
 
@@ -876,7 +876,7 @@ pub fn ATExecAddOf<'mcx>(
     // check_of_type(typetuple): the target must be a stand-alone composite type
     // (typtype == 'c' and its typrelid relkind == 'c'). (tablecmds.c check_of_type)
     if typeform.typtype == TYPTYPE_COMPOSITE {
-        debug_assert!(types_core::primitive::OidIsValid(typeform.typrelid));
+        debug_assert!(::types_core::primitive::OidIsValid(typeform.typrelid));
         let type_relation = relation_open(mcx, typeform.typrelid, AccessShareLock)?;
         let type_ok = type_relation.rd_rel.relkind == b'c';
         // Close the parent rel, but keep the AccessShareLock until xact commit.
@@ -996,8 +996,8 @@ pub fn ATExecAddOf<'mcx>(
     // If the table was already typed, drop the existing dependency.
     let cur_reloftype =
         syscache_seams::search_relation_reloftype::call(relid)?
-            .unwrap_or(types_core::InvalidOid);
-    if types_core::primitive::OidIsValid(cur_reloftype) {
+            .unwrap_or(::types_core::InvalidOid);
+    if ::types_core::primitive::OidIsValid(cur_reloftype) {
         // drop_parent_dependency(relid, TypeRelationId, reloftype, DEPENDENCY_NORMAL):
         // remove the relation's NORMAL dependency on its previous OF-type.
         pg_depend_seams::deleteDependencyRecordsForSpecific::call(
@@ -1044,24 +1044,24 @@ pub fn ATExecAddOf<'mcx>(
 // reads).
 // ---------------------------------------------------------------------------
 
-use heaptuple::FormedTuple;
-use types_catalog::pg_attribute::{
+use ::heaptuple::FormedTuple;
+use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attgenerated, Anum_pg_attribute_attnum, Anum_pg_attribute_atttypid,
 };
 
 /// `GETSTRUCT(tuple)->field` for a non-null `int2` `pg_attribute` column.
 fn att_field_i16(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<i16> {
-    Ok(cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_i16())
+    Ok(::cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_i16())
 }
 
 /// `GETSTRUCT(tuple)->field` for a non-null `oid` `pg_attribute` column.
-fn att_field_oid(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<types_core::Oid> {
-    Ok(cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_oid())
+fn att_field_oid(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<::types_core::Oid> {
+    Ok(::cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_oid())
 }
 
 /// `GETSTRUCT(tuple)->field` for a non-null `char` `pg_attribute` column.
 fn att_field_char(mcx: Mcx<'_>, cache_id: i32, tup: &FormedTuple<'_>, anum: i16) -> PgResult<i8> {
-    Ok(cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_char())
+    Ok(::cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)?.as_char())
 }
 
 // ===========================================================================
@@ -1141,11 +1141,11 @@ pub fn ATExecSetOptions<'mcx>(
     //   datum = SysCacheGetAttr(ATTNAME, tuple, Anum_pg_attribute_attoptions, &isnull);
     //   newOptions = transformRelOptions(isnull ? (Datum) 0 : datum, options,
     //                                    NULL, NULL, false, isReset);
-    let (cur_datum, cur_isnull) = cache_syscache::SysCacheGetAttr(
+    let (cur_datum, cur_isnull) = ::cache_syscache::SysCacheGetAttr(
         mcx,
         ATTNAME,
         &tuple,
-        types_catalog::pg_attribute::Anum_pg_attribute_attoptions as i32,
+        ::types_catalog::pg_attribute::Anum_pg_attribute_attoptions as i32,
     )?;
     let old_bytes: Option<&[u8]> = if cur_isnull {
         None
@@ -1314,8 +1314,8 @@ pub fn ATExecAlterColumnGenericOptions<'mcx>(
     if new_options.is_empty() {
         // C: `if (options == NIL) return InvalidObjectAddress;`
         return Ok(ObjectAddress {
-            classId: types_core::InvalidOid,
-            objectId: types_core::InvalidOid,
+            classId: ::types_core::InvalidOid,
+            objectId: ::types_core::InvalidOid,
             objectSubId: 0,
         });
     }
@@ -1354,11 +1354,11 @@ pub fn ATExecAlterColumnGenericOptions<'mcx>(
 
     // Extract the current options: datum = SysCacheGetAttr(ATTNAME, tuple,
     // attfdwoptions, &isnull); options = isnull ? NIL : untransformRelOptions(datum);
-    let (cur_datum, cur_isnull) = cache_syscache::SysCacheGetAttr(
+    let (cur_datum, cur_isnull) = ::cache_syscache::SysCacheGetAttr(
         mcx,
         ATTNAME,
         &tuple,
-        types_catalog::pg_attribute::Anum_pg_attribute_attfdwoptions as i32,
+        ::types_catalog::pg_attribute::Anum_pg_attribute_attfdwoptions as i32,
     )?;
     let old_options: Vec<(String, Option<String>)> = if cur_isnull {
         Vec::new()
@@ -1656,7 +1656,7 @@ fn SetIndexStorageProperties<'mcx>(
 
         // tuple = SearchSysCacheCopyAttNum(RelationGetRelid(indrel), indattnum);
         let tuple =
-            cache_syscache::SearchSysCacheAttNum(mcx, indrel.rd_id, indattnum)?;
+            ::cache_syscache::SearchSysCacheAttNum(mcx, indrel.rd_id, indattnum)?;
         if let Some(tuple) = tuple {
             let attnum_idx = att_field_i16(mcx, ATTNUM, &tuple, Anum_pg_attribute_attnum)?;
             // if (setstorage) attrtuple->attstorage = newstorage;
@@ -1704,9 +1704,9 @@ pub fn ATExecClusterOn<'mcx>(
         rel.rd_rel.relnamespace,
     )?;
 
-    if index_oid == types_core::InvalidOid {
+    if index_oid == ::types_core::InvalidOid {
         return utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+            .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "index \"{}\" for table \"{}\" does not exist",
                 indexName,
@@ -1734,10 +1734,10 @@ pub fn ATExecDropCluster<'mcx>(
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
     // mark_index_clustered(rel, InvalidOid, false);
-    cluster_seams::mark_index_clustered::call(mcx, rel, types_core::InvalidOid, false)?;
+    cluster_seams::mark_index_clustered::call(mcx, rel, ::types_core::InvalidOid, false)?;
 
     // C returns void / InvalidObjectAddress; the dispatch records no address.
-    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
+    Ok(object_address_subset(::types_core::InvalidOid, ::types_core::InvalidOid, 0))
 }
 
 /// `ATExecSetRowSecurity(rel, rls)` (tablecmds.c:18604) — ALTER TABLE
@@ -1756,7 +1756,7 @@ pub fn ATExecSetRowSecurity<'mcx>(rel: &Relation<'mcx>, rls: bool) -> PgResult<O
             .map(|()| unreachable!());
     }
     // InvokeObjectPostAlterHook(RelationRelationId, relid, 0): no-op.
-    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
+    Ok(object_address_subset(::types_core::InvalidOid, ::types_core::InvalidOid, 0))
 }
 
 /// `ATExecForceNoForceRowSecurity(rel, force_rls)` (tablecmds.c:18634) — ALTER
@@ -1773,20 +1773,20 @@ pub fn ATExecForceNoForceRowSecurity<'mcx>(
             .finish(here("ATExecForceNoForceRowSecurity"))
             .map(|()| unreachable!());
     }
-    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
+    Ok(object_address_subset(::types_core::InvalidOid, ::types_core::InvalidOid, 0))
 }
 
 /// `ResetRelRewrite(myrelid)` (tablecmds.c:4363) — clear `pg_class.relrewrite`
 /// (set to `InvalidOid`) on `myrelid` after a heap rewrite/swap. Installed as the
 /// `reset_rel_rewrite` seam (consumed by cluster's `finish_heap_swap` for the
 /// swapped relation and its toast table).
-pub fn ResetRelRewrite(myrelid: types_core::Oid) -> PgResult<()> {
+pub fn ResetRelRewrite(myrelid: ::types_core::Oid) -> PgResult<()> {
     // pg_class = table_open(RelationRelationId, RowExclusiveLock);
     // reltup = SearchSysCacheCopy1(RELOID, myrelid);
     // ((Form_pg_class) GETSTRUCT(reltup))->relrewrite = InvalidOid;
     // CatalogTupleUpdate(pg_class, &reltup->t_self, reltup);
     let valid =
-        indexing_seam::set_pg_class_relrewrite::call(myrelid, types_core::InvalidOid)?;
+        indexing_seam::set_pg_class_relrewrite::call(myrelid, ::types_core::InvalidOid)?;
     if !valid {
         return utils_error::ereport(ERROR)
             .errmsg(format!("cache lookup failed for relation {myrelid}"))
@@ -1808,7 +1808,7 @@ const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
 fn validate_setrel_options(
     mcx: Mcx<'_>,
     relkind: u8,
-    amhandler: types_core::Oid,
+    amhandler: ::types_core::Oid,
     new_options: Option<&[u8]>,
 ) -> PgResult<()> {
     if relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW {
@@ -1822,7 +1822,7 @@ fn validate_setrel_options(
     } else {
         // RELKIND_TOASTVALUE / default — shouldn't ever get here.
         return utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg("cannot set options for this relation")
             .finish(here("ATExecSetRelOptions"))
             .map(|()| unreachable!());
@@ -1844,7 +1844,7 @@ pub fn ATExecSetRelOptions<'mcx>(
 ) -> PgResult<ObjectAddress> {
     // if (defList == NIL && operation != AT_ReplaceRelOptions) return;
     if def_list.is_empty() && operation != AlterTableType::AT_ReplaceRelOptions {
-        return Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0));
+        return Ok(object_address_subset(::types_core::InvalidOid, ::types_core::InvalidOid, 0));
     }
 
     let relid = rel.rd_id;
@@ -1855,9 +1855,9 @@ pub fn ATExecSetRelOptions<'mcx>(
     // rel->rd_indam->amoptions; the port keys on the handler OID).
     let amhandler = if relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX {
         syscache_seams::search_am_handler::call(rel.rd_rel.relam)?
-            .unwrap_or(types_core::InvalidOid)
+            .unwrap_or(::types_core::InvalidOid)
     } else {
-        types_core::InvalidOid
+        ::types_core::InvalidOid
     };
 
     // Get the old reloptions (AT_ReplaceRelOptions pretends there were none).
@@ -1895,7 +1895,7 @@ pub fn ATExecSetRelOptions<'mcx>(
 
     // Repeat the whole exercise for the toast table, if there's one.
     let toastid = rel.rd_rel.reltoastrelid;
-    if types_core::OidIsValid(toastid) {
+    if ::types_core::OidIsValid(toastid) {
         // toastrel = table_open(toastid, lockmode); — take and hold `lockmode`
         // on the toast table until commit (C closes with NoLock). This is what
         // makes ALTER TABLE ... SET (toast.*) show the toast relation's lock in
@@ -1939,5 +1939,5 @@ pub fn ATExecSetRelOptions<'mcx>(
         toastrel.close(NoLock)?;
     }
 
-    Ok(object_address_subset(types_core::InvalidOid, types_core::InvalidOid, 0))
+    Ok(object_address_subset(::types_core::InvalidOid, ::types_core::InvalidOid, 0))
 }

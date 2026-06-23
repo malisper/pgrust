@@ -585,7 +585,7 @@ fn exec_init_node_finish<'mcx>(
             // node's InitPlan `plan_id` so ExecReScan can reach it.
             let head = result.ps_head_mut();
             if head.init_plan_ids.is_none() {
-                head.init_plan_ids = Some(mcx::PgVec::new_in(mcx));
+                head.init_plan_ids = Some(::mcx::PgVec::new_in(mcx));
             }
             let v = head.init_plan_ids.as_mut().expect("just set");
             v.try_reserve(1).map_err(|_| mcx.oom(core::mem::size_of::<i32>()))?;
@@ -714,7 +714,7 @@ fn exec_init_subqueryscan_wholerow_junk<'mcx>(
 
     // Snapshot the subplan targetlist (clone_in) so the &mut estate borrow used
     // to build the filter below does not alias the borrowed subplan PlanState.
-    let mut src_tlist_snap = mcx::vec_with_capacity_in(mcx, src_tlist.len())?;
+    let mut src_tlist_snap = ::mcx::vec_with_capacity_in(mcx, src_tlist.len())?;
     for tle in src_tlist.iter() {
         src_tlist_snap.push(tle.clone_in(mcx)?);
     }
@@ -755,7 +755,7 @@ fn exec_init_subqueryscan_wholerow_junk<'mcx>(
     let mut filters: Vec<PgBox<'mcx, ::nodes::execnodes::JunkFilter<'mcx>>> =
         Vec::with_capacity(n_wholerow);
     for _ in 0..n_wholerow {
-        let mut tlist = mcx::vec_with_capacity_in(mcx, src_tlist_snap.len())?;
+        let mut tlist = ::mcx::vec_with_capacity_in(mcx, src_tlist_snap.len())?;
         for tle in src_tlist_snap.iter() {
             tlist.push(tle.clone_in(mcx)?);
         }

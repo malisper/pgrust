@@ -3,8 +3,8 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
-use wal::XlXactStatsItem;
+use ::types_error::PgResult;
+use ::wal::XlXactStatsItem;
 
 seam_core::seam!(
     /// `AtEOXact_PgStat(isCommit, parallel)` — apply/discard transactional

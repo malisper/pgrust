@@ -16,9 +16,9 @@ use types_core::{
     FirstNormalTransactionId, FullTransactionId, InvalidLocalTransactionId, InvalidTransactionId,
     ProcNumber, TransactionId, TransactionIdIsValid, INVALID_PROC_NUMBER,
 };
-use types_error::PgResult;
-use types_storage::storage::{PROC_AFFECTS_ALL_HORIZONS, PROC_VACUUM_STATE_MASK};
-use types_storage::LWLockMode::LW_EXCLUSIVE;
+use ::types_error::PgResult;
+use ::types_storage::storage::{PROC_AFFECTS_ALL_HORIZONS, PROC_VACUUM_STATE_MASK};
+use ::types_storage::LWLockMode::LW_EXCLUSIVE;
 
 use transam_seams as transam;
 use varsup_seams as varsup;
@@ -66,7 +66,7 @@ fn proc_array_add_locked(pgprocno: ProcNumber) -> PgResult<()> {
             // Oops, no room.  (This really shouldn't happen, since there is a
             // fixed supply of PGPROC structs too, and so we should have failed
             // earlier.)
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "sorry, too many clients already",
             ));
         }
@@ -271,7 +271,7 @@ pub fn ProcArrayEndTransactionInternal(pgprocno: ProcNumber, latest_xid: Transac
     // Note: we need exclusive lock here because we're going to change other
     // processes' PGPROC entries.
     debug_assert!(lwlock::lwlock_held_by_me_in_mode_main::call(
-        types_storage::PROC_ARRAY_LOCK,
+        ::types_storage::PROC_ARRAY_LOCK,
         LW_EXCLUSIVE
     ));
     debug_assert!(TransactionIdIsValid(proc::proc_array_xid::call(pgxactoff)));

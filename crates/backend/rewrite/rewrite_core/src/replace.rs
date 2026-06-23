@@ -21,13 +21,13 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
-use coerce::coerce_null_to_domain;
+use ::nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
+use ::coerce::coerce_null_to_domain;
 use parser_relation::{expandRTE, get_tle_by_resno};
-use lsyscache::type_::get_typlenbyval as lsyscache_get_typlenbyval;
-use utils_error::ereport;
+use ::lsyscache::type_::get_typlenbyval as lsyscache_get_typlenbyval;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::parsenodes::RangeTblEntry;
@@ -462,7 +462,7 @@ pub fn map_variable_attnos_expr_list<'mcx>(
     exprs: PgVec<'mcx, Expr<'mcx>>,
     attmap: &[i16],
 ) -> PgResult<(PgVec<'mcx, Expr<'mcx>>, bool)> {
-    let mut out: PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+    let mut out: PgVec<'mcx, Expr<'mcx>> = ::mcx::vec_with_capacity_in(mcx, exprs.len())?;
     let mut found_whole_row = false;
     for owned in exprs.into_iter() {
         // Wrap each list element as a Node::Expr, map it in place (mirroring the
@@ -495,7 +495,7 @@ pub fn map_variable_attnos_expr_list_varno<'mcx>(
     attmap: &[i16],
     to_rowtype: Oid,
 ) -> PgResult<(PgVec<'mcx, Expr<'mcx>>, bool)> {
-    let mut out: PgVec<'mcx, Expr<'mcx>> = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+    let mut out: PgVec<'mcx, Expr<'mcx>> = ::mcx::vec_with_capacity_in(mcx, exprs.len())?;
     let mut found_whole_row = false;
     for owned in exprs.into_iter() {
         let mut node = Node::mk_expr(mcx, owned)?;
@@ -531,14 +531,14 @@ pub fn map_variable_attnos_targetentry_list<'mcx>(
     to_rowtype: Oid,
 ) -> PgResult<(PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>, bool)> {
     let mut out: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, tlist.len())?;
+        ::mcx::vec_with_capacity_in(mcx, tlist.len())?;
     let mut found_whole_row = false;
     for mut tle in tlist.into_iter() {
         if let Some(expr_box) = tle.expr.take() {
             // Move the TargetEntry's expr out, wrap it as a Node::Expr, map it in
             // place (the C generic mutator arm recurses into tle->expr), then
             // write it back. found_whole_row is OR-accumulated across the list.
-            let owned: Expr = mcx::box_into_inner_leak(expr_box);
+            let owned: Expr = ::mcx::box_into_inner_leak(expr_box);
             let mut node = Node::mk_expr(mcx, owned)?;
             let mut one_fwr = false;
             map_variable_attnos(
@@ -553,7 +553,7 @@ pub fn map_variable_attnos_targetentry_list<'mcx>(
             found_whole_row |= one_fwr;
             match node.into_expr() {
                 Some(mapped) => {
-                    tle.expr = Some(mcx::alloc_in(mcx, mapped)?);
+                    tle.expr = Some(::mcx::alloc_in(mcx, mapped)?);
                 }
                 None => unreachable!(
                     "map_variable_attnos returned a non-Expr for a TargetEntry expr input"

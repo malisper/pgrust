@@ -1,6 +1,6 @@
 // Generated from postgres-18.3/src/backend/utils/mb/Unicode/*.map.
 
-use types_wchar::pg_mb_radix_tree;
+use ::types_wchar::pg_mb_radix_tree;
 
 const ISO8859_2_TO_UNICODE_TREE_TABLE: [u16; 256] = [
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,

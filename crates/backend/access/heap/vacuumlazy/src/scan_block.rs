@@ -16,8 +16,8 @@
 //! skip/eager-scan and TID-store iteration decision logic in-crate (1:1 with C)
 //! and seams only the buffer read.
 
-use types_error::PgResult;
-use types_vacuum::vacuumlazy::{ReapBlockInfo, TidStoreIterHandle};
+use ::types_error::PgResult;
+use ::types_vacuum::vacuumlazy::{ReapBlockInfo, TidStoreIterHandle};
 
 use crate::consts::{
     buffer_is_valid, InvalidBlockNumber, InvalidBuffer, VISIBILITYMAP_ALL_FROZEN,

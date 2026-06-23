@@ -18,14 +18,14 @@
 
 #![allow(clippy::result_large_err)]
 
-use error_fgram::PgResult;
+use ::error_fgram::PgResult;
 use mb_fgram::{
     check_encoding_conversion_args, report_invalid_encoding, report_untranslatable_char,
 };
-use conv_string_helpers::ConversionResult;
-use conv_string_helpers::make_conversion_builtin;
-use common_wchar::pg_encoding_verifymbchar;
-use types_wchar::encoding::{pg_enc, PG_EUC_KR, PG_MULE_INTERNAL};
+use ::conv_string_helpers::ConversionResult;
+use ::conv_string_helpers::make_conversion_builtin;
+use ::common_wchar::pg_encoding_verifymbchar;
+use ::types_wchar::encoding::{pg_enc, PG_EUC_KR, PG_MULE_INTERNAL};
 
 /// `LC_KS5601` (mb/pg_wchar.h) — the MULE_INTERNAL charset code for Korean.
 const LC_KS5601: u8 = 0x93;

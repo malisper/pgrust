@@ -2,10 +2,10 @@
 //! `adjust_partition_colnos_using_map`.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 use types_error::{PgError, PgResult};
 use nodes::{EStateData, RriId};
-use types_tuple::attmap::AttrMap;
+use ::types_tuple::attmap::AttrMap;
 
 /// `adjust_partition_colnos(colnos, leaf_part_rri)` — adjust an UPDATE target
 /// column-number list for the attribute differences between the parent and the
@@ -54,7 +54,7 @@ pub fn adjust_partition_colnos_using_attnums<'mcx>(
     let maplen = attnums.len() as i32;
 
     // List *new_colnos = NIL; built up one entry per input colno (lappend_int).
-    let mut new_colnos: PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, colnos.len())?;
+    let mut new_colnos: PgVec<'mcx, i32> = ::mcx::vec_with_capacity_in(mcx, colnos.len())?;
 
     for &parentattrno in colnos {
         if parentattrno <= 0

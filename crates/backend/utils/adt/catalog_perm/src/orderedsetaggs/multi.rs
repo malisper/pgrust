@@ -10,9 +10,9 @@
 //! (`construct_md_array` over the same dims with a null bitmap, supporting both
 //! by-value and by-reference result element types) seams.
 
-use datum::Datum as Word;
-use fmgr::boundary::RefPayload;
-use fmgr::FunctionCallInfoBaseData;
+use ::datum::Datum as Word;
+use ::fmgr::boundary::RefPayload;
+use ::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum as CDatum;
 
 use tuplesort_seams as tsort;

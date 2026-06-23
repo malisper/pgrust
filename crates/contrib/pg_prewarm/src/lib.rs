@@ -21,23 +21,23 @@ extern crate alloc;
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
-use mcx::MemoryContext;
-use types_core::primitive::{BlockNumber, ForkNumber, Oid};
-use datum::Datum;
+use ::mcx::MemoryContext;
+use ::types_core::primitive::{BlockNumber, ForkNumber, Oid};
+use ::datum::Datum;
 use types_error::{
     PgError, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
-use rel::Relation;
-use types_storage::lock::AccessShareLock;
-use types_storage::storage::InvalidBuffer;
-use types_storage::RelFileLocatorBackend;
+use ::rel::Relation;
+use ::types_storage::lock::AccessShareLock;
+use ::types_storage::storage::InvalidBuffer;
+use ::types_storage::RelFileLocatorBackend;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use read_stream as read_stream;
-use bufmgr::BufferManager;
+use ::bufmgr::BufferManager;
 use smgr as smgr;
 
 use aclchk_seams as aclchk_seams;
@@ -47,8 +47,8 @@ use bufmgr_seams as bufmgr_seams;
 use lmgr_seams as lmgr_seams;
 use lsyscache_seams as lsyscache_seams;
 
-use types_acl::acl::{ACLCHECK_OK, ACL_SELECT};
-use types_tuple::access::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
+use ::types_acl::acl::{ACLCHECK_OK, ACL_SELECT};
+use ::types_tuple::access::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
 
 /// The simple (suffix-free, directory-free) name of the loadable module —
 /// `$libdir/pg_prewarm` reduces to this for the registry.
@@ -77,7 +77,7 @@ enum PrewarmType {
 /// `RELKIND_HAS_STORAGE(relkind)` (pg_class.h) — does a relation of this kind
 /// have physical storage?
 fn RELKIND_HAS_STORAGE(relkind: u8) -> bool {
-    use types_tuple::access::{
+    use ::types_tuple::access::{
         RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
     };
     relkind == RELKIND_RELATION
@@ -127,7 +127,7 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
     // Basic sanity checking.
     //   if (PG_ARGISNULL(0)) ereport(ERROR, errmsg("relation cannot be null"));
     if arg_isnull(fcinfo, 0) {
-        return Err(ereport(types_error::ERROR)
+        return Err(ereport(::types_error::ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("relation cannot be null")
             .into_error());
@@ -136,7 +136,7 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
 
     //   if (PG_ARGISNULL(1)) ereport(ERROR, errmsg("prewarm type cannot be null"));
     if arg_isnull(fcinfo, 1) {
-        return Err(ereport(types_error::ERROR)
+        return Err(ereport(::types_error::ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("prewarm type cannot be null")
             .into_error());
@@ -149,7 +149,7 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
     } else if ttype == "buffer" {
         PrewarmType::Buffer
     } else {
-        return Err(ereport(types_error::ERROR)
+        return Err(ereport(::types_error::ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("invalid prewarm type")
             .errhint("Valid prewarm types are \"prefetch\", \"read\", and \"buffer\".")
@@ -158,7 +158,7 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
 
     //   if (PG_ARGISNULL(2)) ereport(ERROR, errmsg("relation fork cannot be null"));
     if arg_isnull(fcinfo, 2) {
-        return Err(ereport(types_error::ERROR)
+        return Err(ereport(::types_error::ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("relation fork cannot be null")
             .into_error());
@@ -173,7 +173,7 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
     if relkind == RELKIND_INDEX || relkind == RELKIND_PARTITIONED_INDEX {
         priv_oid = index::IndexGetRelation(rel_oid, true)?;
         // Lock table before index to avoid deadlock.
-        if types_core::OidIsValid(priv_oid) {
+        if ::types_core::OidIsValid(priv_oid) {
             lmgr_seams::lock_relation_oid::call(priv_oid, AccessShareLock)?.keep();
         }
     } else {
@@ -190,11 +190,11 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
     //   if (!OidIsValid(privOid) ||
     //       (privOid != relOid &&
     //        privOid != IndexGetRelation(relOid, true)))
-    if !types_core::OidIsValid(priv_oid)
+    if !::types_core::OidIsValid(priv_oid)
         || (priv_oid != rel_oid
             && priv_oid != index::IndexGetRelation(rel_oid, true)?)
     {
-        return Err(ereport(types_error::ERROR)
+        return Err(ereport(::types_error::ERROR)
             .errcode(ERRCODE_UNDEFINED_TABLE)
             .errmsg(format!(
                 "could not find parent table of index \"{}\"",
@@ -221,7 +221,7 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
     // Check that the relation has storage.
     if !RELKIND_HAS_STORAGE(rel.rd_rel.relkind) {
         let detail = pg_class_seams::errdetail_relkind_not_supported::call(rel.rd_rel.relkind)?;
-        return Err(ereport(types_error::ERROR)
+        return Err(ereport(::types_error::ERROR)
             .errcode(ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg(format!(
                 "relation \"{}\" does not have storage",
@@ -235,7 +235,7 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
     //   if (!smgrexists(RelationGetSmgr(rel), forkNumber))
     let smgr_key = rel_smgr_key(&rel)?;
     if !smgr::smgrexists(smgr_key, fork_number)? {
-        return Err(ereport(types_error::ERROR)
+        return Err(ereport(::types_error::ERROR)
             .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(format!(
                 "fork \"{fork_string}\" does not exist for this relation"
@@ -253,7 +253,7 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
     } else {
         let fb = arg_int64(fcinfo, 3);
         if fb < 0 || fb >= nblocks as i64 {
-            return Err(ereport(types_error::ERROR)
+            return Err(ereport(::types_error::ERROR)
                 .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
                 .errmsg(format!(
                     "starting block number must be between 0 and {}",
@@ -268,7 +268,7 @@ fn pg_prewarm_impl(fcinfo: &mut FunctionCallInfoBaseData) -> Result<Datum, PgErr
     } else {
         let lb = arg_int64(fcinfo, 4);
         if lb < 0 || lb >= nblocks as i64 {
-            return Err(ereport(types_error::ERROR)
+            return Err(ereport(::types_error::ERROR)
                 .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
                 .errmsg(format!(
                     "ending block number must be between 0 and {}",
@@ -409,8 +409,8 @@ fn varlena_payload(image: &[u8]) -> &[u8] {
         // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header (skip 1 byte).
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
         // 4-byte uncompressed header (skip VARHDRSZ).
-        Some(_) if image.len() >= datum::varlena::VARHDRSZ => {
-            &image[datum::varlena::VARHDRSZ..]
+        Some(_) if image.len() >= ::datum::varlena::VARHDRSZ => {
+            &image[::datum::varlena::VARHDRSZ..]
         }
         _ => &[],
     }

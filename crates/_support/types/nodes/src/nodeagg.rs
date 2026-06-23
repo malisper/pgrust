@@ -20,8 +20,8 @@
 //! collections are the C `NIL`/NULL array.
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
-use types_core::primitive::{AttrNumber, Index, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, Index, Oid};
+use ::types_error::PgResult;
 use types_tuple::heaptuple::FormedMinimalTuple;
 
 use crate::bitmapset::Bitmapset;
@@ -470,7 +470,7 @@ impl<'mcx> TupleHashEntryData<'mcx> {
     /// A fresh empty bucket: `firstTuple = NULL`, no additional bytes, status
     /// `EMPTY`. (`PgVec` has no allocator-free `Default`, so empty buckets are
     /// built through this `mcx`-bound constructor.)
-    pub fn empty(mcx: mcx::Mcx<'mcx>) -> Self {
+    pub fn empty(mcx: ::mcx::Mcx<'mcx>) -> Self {
         Self {
             firstTuple: None,
             additional: PgVec::new_in(mcx),
@@ -604,7 +604,7 @@ pub struct TupleHashIterator {
 /// ```
 ///
 /// This is *pure data* — the register array is an owned [`PgVec<u8>`] charged to
-/// a [`mcx::MemoryContext`], the control fields are plain owned values, and
+/// a [`::mcx::MemoryContext`], the control fields are plain owned values, and
 /// there is no raw pointer. The struct lives here in the foundational
 /// `types-nodes` crate so that struct holders below the `backend-lib-*` layer
 /// (e.g. [`HashAggSpill`]) can store the estimator *by value*, exactly as C

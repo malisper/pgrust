@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
-// Every fallible function returns the shared `types_error::PgResult`
+// Every fallible function returns the shared `::types_error::PgResult`
 // (== `Result<_, PgError>`), the project-wide error contract; we accept the
 // large-`Err` lint crate-wide.
 #![allow(clippy::result_large_err)]
@@ -18,7 +18,7 @@
 //!   guard), already ported.
 //! * `ScanKeyInit` + the `systable_beginscan` / `systable_getnext` /
 //!   `systable_endscan` genam iterator over the real
-//!   [`SysScanDescData`][types_scan::genam::SysScanDescData] — installed by the
+//!   [`SysScanDescData`][::types_scan::genam::SysScanDescData] — installed by the
 //!   `backend-access-index-genam` owner.
 //! * the `setconfig text[]` `heap_getattr` decode and the
 //!   `heap_modify_tuple` / `heap_form_tuple` + `CatalogTuple{Update,Insert,
@@ -34,23 +34,23 @@
 //! `allow_sync = false`), exactly what `table_beginscan_catalog` does.
 
 use mcx::{Mcx, MemoryContext};
-use types_catalog::catalog::{DB_ROLE_SETTING_DATID_ROLID_INDEX_ID, DB_ROLE_SETTING_RELATION_ID};
-use types_catalog::pg_db_role_setting::{
+use ::types_catalog::catalog::{DB_ROLE_SETTING_DATID_ROLID_INDEX_ID, DB_ROLE_SETTING_RELATION_ID};
+use ::types_catalog::pg_db_role_setting::{
     Anum_pg_db_role_setting_setdatabase, Anum_pg_db_role_setting_setrole,
 };
-use types_core::fmgr::F_OIDEQ;
-use types_core::primitive::{AttrNumber, Oid, OidIsValid};
-use types_error::PgResult;
-use types_guc::guc::GucSource;
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::primitive::{AttrNumber, Oid, OidIsValid};
+use ::types_error::PgResult;
+use ::types_guc::guc::GucSource;
 use parsenodes::{VariableSetKind, VariableSetStmt};
-use rel::Relation;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use snapshot::SnapshotData;
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::snapshot::SnapshotData;
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
 use table as table;
 use indexing_seams as indexing;
@@ -344,8 +344,8 @@ pub fn ApplySetting(
 /// Installed as the `apply_db_role_settings` seam consumed by
 /// `process_settings` in `backend-utils-init-postinit`.
 pub fn process_db_role_settings(mcx: Mcx<'_>, databaseid: Oid, roleid: Oid) -> PgResult<()> {
-    use types_core::primitive::INVALID_OID;
-    use types_guc::guc::GucSource::{PGC_S_DATABASE, PGC_S_DATABASE_USER, PGC_S_GLOBAL, PGC_S_USER};
+    use ::types_core::primitive::INVALID_OID;
+    use ::types_guc::guc::GucSource::{PGC_S_DATABASE, PGC_S_DATABASE_USER, PGC_S_GLOBAL, PGC_S_USER};
 
     // relsetting = table_open(DbRoleSettingRelationId, AccessShareLock);
     let relsetting = open_db_role_setting(mcx, AccessShareLock)?;
@@ -377,7 +377,7 @@ pub fn process_db_role_settings(mcx: Mcx<'_>, databaseid: Oid, roleid: Oid) -> P
  *
  * `AlterDatabaseSet` hands the canonical `'mcx` arena `VariableSetStmt` (an arm
  * of `::nodes::nodes::Node`); `AlterSetting` consumes the owner's
- * owned-`String` `parsenodes::VariableSetStmt`. The two parse-node models
+ * owned-`String` `::parsenodes::VariableSetStmt`. The two parse-node models
  * meet only here. We convert the arena node into the owned form and run the
  * catalog read-modify-write.
  * ========================================================================= */
@@ -389,10 +389,10 @@ pub fn process_db_role_settings(mcx: Mcx<'_>, databaseid: Oid, roleid: Oid) -> P
 /// model — mirroring `ExtractSetVariableArgs`/`flatten_set_variable_args` —
 /// carries the `A_Const` value node directly (`Node::Integer`/`Float`/`String`/
 /// `Boolean`/`BitString`). We unwrap `A_Const.val` to the bare value node and
-/// re-home it onto the owned `parsenodes::Node`.
+/// re-home it onto the owned `::parsenodes::Node`.
 fn arena_arg_to_owned(
     arg: &::nodes::nodes::Node<'_>,
-) -> PgResult<parsenodes::Node> {
+) -> PgResult<::parsenodes::Node> {
     use ::nodes::nodes::ntag;
     use ::nodes::nodes::Node as ANode;
     use parsenodes as pn;
@@ -434,8 +434,8 @@ fn arena_arg_to_owned(
 
 /// C: `elog(ERROR, "unrecognized node type: %d", nodeTag(arg))` from
 /// `flatten_set_variable_args` for an arg shape the value-node model can't carry.
-fn unrecognized_arg(node: &::nodes::nodes::Node<'_>) -> types_error::PgError {
-    utils_error::ereport(types_error::ERROR)
+fn unrecognized_arg(node: &::nodes::nodes::Node<'_>) -> ::types_error::PgError {
+    utils_error::ereport(::types_error::ERROR)
         .errmsg_internal(format!("unrecognized node type: {}", node.node_tag().0))
         .into_error()
 }
@@ -464,7 +464,7 @@ fn alter_database_setting<'mcx, 's>(
         AKind::VAR_RESET_ALL => VariableSetKind::ResetAll,
     };
 
-    let mut args: Vec<parsenodes::Node> = Vec::with_capacity(v.args.len());
+    let mut args: Vec<::parsenodes::Node> = Vec::with_capacity(v.args.len());
     for a in v.args.iter() {
         args.push(arena_arg_to_owned(a)?);
     }
@@ -488,24 +488,24 @@ pub fn init_seams() {
     // user.c DROP ROLE: `DropSetting(InvalidOid, roleid)` removes the role's
     // per-database GUC settings.
     user_seams::drop_setting::set(|databaseid, roleid| {
-        let ctx = mcx::MemoryContext::new("DropSetting");
+        let ctx = ::mcx::MemoryContext::new("DropSetting");
         DropSetting(ctx.mcx(), databaseid, roleid)
     });
 
     // user.c ALTER ROLE ... SET: `AlterSetting(databaseid, roleid, setstmt)`.
     // The `VariableSetStmt` arrives already in the owned `parsenodes`
-    // model (carried opaquely as `parsenodes::Node::VariableSetStmt`).
+    // model (carried opaquely as `::parsenodes::Node::VariableSetStmt`).
     user_seams::alter_setting::set(|databaseid, roleid, setstmt| {
-        let ctx = mcx::MemoryContext::new("AlterSetting");
+        let ctx = ::mcx::MemoryContext::new("AlterSetting");
         let setstmt = setstmt.ok_or_else(|| {
-            utils_error::ereport(types_error::ERROR)
+            utils_error::ereport(::types_error::ERROR)
                 .errmsg_internal("AlterSetting: missing VariableSetStmt".to_string())
                 .into_error()
         })?;
         let v = match &setstmt {
-            parsenodes::Node::VariableSetStmt(v) => v,
+            ::parsenodes::Node::VariableSetStmt(v) => v,
             other => {
-                return Err(utils_error::ereport(types_error::ERROR)
+                return Err(utils_error::ereport(::types_error::ERROR)
                     .errmsg_internal(format!(
                         "unrecognized node type: {}",
                         other.node_tag_name()

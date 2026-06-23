@@ -35,7 +35,7 @@
 
 use core::cmp::min;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use be_gssapi_common_seams as gss_seam;
 use types_error::{ErrorLocation, COMMERROR};
 
@@ -221,7 +221,7 @@ mod tests {
         SETUP.call_once(|| {
             // COMMERROR reports run through the error subsystem, which consults
             // the `log_min_messages` GUC. A benign value lets the report finish.
-            utils_error::config::set_log_min_messages(types_error::WARNING);
+            ::utils_error::config::set_log_min_messages(::types_error::WARNING);
 
             s::gss_display_status::set(|stat, type_, ctx| {
                 DISPLAY.with(|f| (f.borrow().as_ref().expect("DISPLAY set"))(stat, type_, ctx))

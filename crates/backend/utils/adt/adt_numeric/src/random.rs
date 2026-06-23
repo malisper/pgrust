@@ -4,20 +4,20 @@
 //! These are this unit's OWN logic: range-bound validation, the rejection
 //! sampler that draws a uniform value in `[0, rmax - rmin]` NBASE-digit by
 //! NBASE-digit and shifts it by `rmin`. The only external is the random source,
-//! the real `prng` generator ([`prng::PgPrng`]) threaded in by value — the
+//! the real `prng` generator ([`::prng::PgPrng`]) threaded in by value — the
 //! C `pg_prng_state *state` from the SQL `random()` setup. `pg_prng_uint64_range`
 //! is [`PgPrng::u64_range`].
 
-use mcx::Mcx;
-use prng::PgPrng;
+use ::mcx::Mcx;
+use ::prng::PgPrng;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
-use types_numeric::var::{NumericSign, NumericVar};
+use ::types_numeric::var::{NumericSign, NumericVar};
 use types_numeric::{
     numeric_is_nan, numeric_is_special, NumericDigit, DEC_DIGITS, NBASE,
 };
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 
 use crate::convert::{make_result, set_var_from_num};
 use crate::kernel_var::{add_var, alloc_var, cmp_var, set_var_from_var, strip_var, sub_var};
@@ -207,7 +207,7 @@ pub fn random_var<'mcx>(
 mod tests {
     use super::*;
     use crate::io::{numeric_in, numeric_out};
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn rnum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgVec<'mcx, u8> {
         numeric_in(mcx, s, -1).expect("parse numeric literal")

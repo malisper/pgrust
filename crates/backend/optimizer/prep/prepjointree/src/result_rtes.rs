@@ -3,7 +3,7 @@
 //!
 //! 1:1 port over the repo's lifetime-free owned `Query<'mcx>` + embedded-`PgBox`
 //! jointree model, the central `Node`-level tree walkers
-//! ([`nodes_core::node_walker`]), and the rewrite-core
+//! ([`::nodes_core::node_walker`]), and the rewrite-core
 //! `remove_nulling_relids` engine.
 //!
 //! ## Model notes
@@ -24,7 +24,7 @@
 //! * `substitute_phv_relids` mutates `PlaceHolderVar.phrels` (the lifetime-free
 //!   [`ExprRelids`]) in place over the parse tree and over each
 //!   `AppendRelInfo.translated_vars` element — carried as arena
-//!   [`NodeId`](pathnodes::NodeId) handles, resolved through
+//!   [`NodeId`](::pathnodes::NodeId) handles, resolved through
 //!   `root.node_arena` and written back (same arena-walk pattern FAMILY 4's
 //!   `remove_nulling_relids_in_append_rel_list` uses).
 //! * `subrelids` is the `'mcx`-arena [`Bitmapset`]; PHV relid edits happen on
@@ -33,15 +33,15 @@
 
 use alloc::vec::Vec;
 
-use nodes_core::bitmapset::{
+use ::nodes_core::bitmapset::{
     bms_add_member, bms_is_empty, bms_join, bms_make_singleton, bms_next_member,
 };
-use nodes_core::node_walker::{
+use ::nodes_core::node_walker::{
     expression_tree_walker, expression_tree_walker_mut, query_tree_mutator, query_tree_walker,
     range_table_entry_walker,
 };
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::copy_query::Query;
 use ::nodes::jointype::JoinType;
@@ -160,7 +160,7 @@ pub fn remove_useless_result_rtes<'mcx>(
     // `rti` resolves to an `RTE_RESULT` RTE.
     debug_assert_eq!(root.rowMarks.len(), rowmark_rtis.len());
     if !root.rowMarks.is_empty() {
-        let mut kept: Vec<pathnodes::PlanRowMarkId> =
+        let mut kept: Vec<::pathnodes::PlanRowMarkId> =
             Vec::with_capacity(root.rowMarks.len());
         for (i, &rmid) in root.rowMarks.iter().enumerate() {
             let rti = rowmark_rtis[i];
@@ -366,7 +366,7 @@ fn remove_useless_results_recurse<'mcx>(
         ntag::T_JoinExpr => {
             remove_useless_results_recurse_joinexpr(mcx, root, parse, path, parent_quals, dropped_outer_joins)
         }
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+        _ => Err(::types_error::PgError::error("unrecognized node type")),
     }
 }
 
@@ -603,7 +603,7 @@ fn remove_useless_results_recurse_joinexpr<'mcx>(
         }
         _ => {
             // JOIN_RIGHT should be gone at this point.
-            return Err(types_error::PgError::error("unrecognized join type"));
+            return Err(::types_error::PgError::error("unrecognized join type"));
         }
     }
 
@@ -648,9 +648,9 @@ fn inner_collapse<'mcx>(
     let quals = jt_joinexpr_at(parse, path).quals.take();
     let result = if quals.is_some() && parent_quals.is_none() {
         // makeFromExpr(list_make1(side), j->quals)
-        let mut fromlist = mcx::PgVec::new_in(mcx);
+        let mut fromlist = ::mcx::PgVec::new_in(mcx);
         fromlist.try_reserve(1).map_err(|_| mcx.oom(1))?;
-        fromlist.push(mcx::alloc_in(mcx, side)?);
+        fromlist.push(::mcx::alloc_in(mcx, side)?);
         Node::mk_from_expr(mcx, ::nodes::rawnodes::FromExpr { fromlist, quals })?
     } else {
         // Merge any quals up to parent, return the surviving side.
@@ -1032,7 +1032,7 @@ pub(crate) fn fix_append_rel_relids<'mcx>(
         debug_assert_ne!(appinfo.parent_relid as i32, varno);
         if appinfo.child_relid as i32 == varno {
             if subvarno < 0 {
-                subvarno = nodes_core::bitmapset::bms_singleton_member(subrelids_bms);
+                subvarno = ::nodes_core::bitmapset::bms_singleton_member(subrelids_bms);
             }
             appinfo.child_relid = subvarno as u32;
         }
@@ -1098,7 +1098,7 @@ pub fn get_relids_in_jointree<'mcx>(
             }
             Ok(result)
         }
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+        _ => Err(::types_error::PgError::error("unrecognized node type")),
     }
 }
 
@@ -1162,7 +1162,7 @@ fn find_jointree_node_for_rel<'a, 'mcx>(
             }
             Ok(None)
         }
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+        _ => Err(::types_error::PgError::error("unrecognized node type")),
     }
 }
 
@@ -1193,7 +1193,7 @@ pub(crate) fn get_relids_for_join<'mcx>(
     };
     let jtnode = match jtnode {
         None => {
-            return Err(types_error::PgError::error(alloc::format!(
+            return Err(::types_error::PgError::error(alloc::format!(
                 "could not find join node {joinrelid}"
             )))
         }
@@ -1292,12 +1292,12 @@ fn get_nullingrels_recurse<'mcx>(
                     get_nullingrels_recurse(mcx, rarg, upper_nullingrels, info)?;
                 }
                 _ => {
-                    return Err(types_error::PgError::error("unrecognized join type"));
+                    return Err(::types_error::PgError::error("unrecognized join type"));
                 }
             }
             Ok(())
         }
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+        _ => Err(::types_error::PgError::error("unrecognized node type")),
     }
 }
 
@@ -1326,7 +1326,7 @@ fn add_member_to_copy<'mcx>(
 
 /// `bms_copy(a)` returning an owned `'mcx` Relids.
 fn clone_relids<'mcx>(mcx: Mcx<'mcx>, a: Option<&Bitmapset>) -> PgResult<Relids<'mcx>> {
-    nodes_core::bitmapset::bms_copy(mcx, a)
+    ::nodes_core::bitmapset::bms_copy(mcx, a)
 }
 
 // ===========================================================================
@@ -1380,9 +1380,9 @@ fn concat_quals<'mcx>(
     child: Option<NodePtr<'mcx>>,
     parent: Option<NodePtr<'mcx>>,
 ) -> PgResult<Option<NodePtr<'mcx>>> {
-    let mut out: mcx::PgVec<'mcx, NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut out: ::mcx::PgVec<'mcx, NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
     let push_list = |q: Option<NodePtr<'mcx>>,
-                         out: &mut mcx::PgVec<'mcx, NodePtr<'mcx>>|
+                         out: &mut ::mcx::PgVec<'mcx, NodePtr<'mcx>>|
      -> PgResult<()> {
         match q {
             None => Ok(()),
@@ -1399,7 +1399,7 @@ fn concat_quals<'mcx>(
                     // Defensive: a non-List qual (C asserts implicit-AND List by
                     // now) is treated as a one-element list.
                     out.try_reserve(1).map_err(|_| mcx.oom(1))?;
-                    out.push(mcx::alloc_in(mcx, node)?);
+                    out.push(::mcx::alloc_in(mcx, node)?);
                     Ok(())
                 }
             }
@@ -1410,7 +1410,7 @@ fn concat_quals<'mcx>(
     if out.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(mcx::alloc_in(mcx, Node::mk_list(mcx, out)?)?))
+        Ok(Some(::mcx::alloc_in(mcx, Node::mk_list(mcx, out)?)?))
     }
 }
 

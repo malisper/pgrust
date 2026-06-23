@@ -2,7 +2,7 @@
 //! PostgreSQL 18.3), trimmed to what the `backend-commands-proclang` port
 //! reads and writes for `CREATE [OR REPLACE] LANGUAGE`.
 
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_language.h CATALOG / DECLARE_*).

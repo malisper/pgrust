@@ -13,8 +13,8 @@
 //! and installs them from `init_seams`.
 
 use utils_error::{elog, PgResult};
-use types_core::Size;
-use types_error::ERROR;
+use ::types_core::Size;
+use ::types_error::ERROR;
 
 // C: lowercase "injection" only in InjectionPointAttach; uppercase elsewhere.
 const UNSUPPORTED_LOWER: &str = "injection points are not supported by this build";

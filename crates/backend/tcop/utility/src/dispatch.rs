@@ -41,14 +41,14 @@
 //! `CreateCommandTag`, `PreventCommandIf*`, `CheckRestrictedOperation`) are
 //! grounded in-crate (see [`crate::classify`]).
 
-use cmdtag::get_command_tag_name;
-use utils_error::ereport;
-use mcx::Mcx;
-use types_core::cmdtag::CommandTag;
+use ::cmdtag::get_command_tag_name;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::types_core::cmdtag::CommandTag;
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR,
 };
-use types_core::init::BackendType;
+use ::types_core::init::BackendType;
 use ::nodes::ddlnodes::TransactionStmtKind;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::Node;
@@ -63,7 +63,7 @@ use ::nodes::parsestmt::{
     PROCESS_UTILITY_TOPLEVEL,
 };
 use ::nodes::portalcmds::ParamListInfo;
-use portal::QueryCompletion;
+use ::portal::QueryCompletion;
 
 use utility_out_seams as rt;
 
@@ -80,7 +80,7 @@ use crate::consts::{
 /// `SetQueryCompletion(qc, commandTag, nprocessed)` (cmdtag.h, inline). `qc` is
 /// `Option` because the C parameter is a nullable pointer; the `qc == NULL`
 /// guard becomes `if let Some(qc) = qc`. `CommandTag` is the
-/// `types_core::cmdtag::CommandTag` newtype; `QueryCompletion.commandTag` is the
+/// `::types_core::cmdtag::CommandTag` newtype; `QueryCompletion.commandTag` is the
 /// `portal` `i32` alias, so the value crosses through its `.0`.
 #[inline]
 fn set_query_completion(qc: &mut Option<&mut QueryCompletion>, command_tag: CommandTag, nprocessed: u64) {
@@ -191,7 +191,7 @@ pub fn standard_ProcessUtility<'mcx>(
     // `pstate->p_sourcetext = queryString` and `pstate->p_queryEnv = queryEnv`.
     // The owned parsestate lives in `mcx`; dropping `mcx` is `free_parsestate`.
     let mut pstate = parser_analyze_seams::make_parsestate::call(mcx, None)?;
-    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(query_string, mcx)?);
+    pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(query_string, mcx)?);
 
     let stmt_location = pstmt.stmt_location;
     let stmt_len = pstmt.stmt_len;
@@ -687,7 +687,7 @@ pub fn ProcessUtilityForAlterTable<'mcx>(
     stmt: &Node<'mcx>,
     outer_pstmt: &PlannedStmt<'mcx>,
     query_string: &str,
-    relid: types_core::primitive::Oid,
+    relid: ::types_core::primitive::Oid,
 ) -> PgResult<()> {
     rt::event_trigger_alter_table_end::call()?;
 
@@ -743,7 +743,7 @@ pub fn process_utility_wrapper<'mcx, 'a>(
     // is independent of the allocation context `'mcx` — keeping them separate lets
     // a subcommand re-entry pass a statement that does not live in `mcx` (the now
     // invariant `Node` would otherwise force `'a == 'mcx`).
-    let utility_stmt = mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
+    let utility_stmt = ::mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
     let wrapper = PlannedStmt {
         commandType: ::nodes::nodes::CmdType::CMD_UTILITY,
         queryId: 0,

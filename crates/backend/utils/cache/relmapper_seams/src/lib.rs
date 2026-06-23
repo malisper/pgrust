@@ -9,7 +9,7 @@
 #![allow(non_snake_case)]
 
 use types_core::{Oid, RelFileNumber};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `RelationMapFilenumberToOid(filenumber, shared)` (relmapper.c): the
@@ -21,7 +21,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `relmap_redo(record)` (relmapper.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn relmap_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
+    pub fn relmap_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -58,7 +58,7 @@ seam_core::seam!(
     /// `RelationMapFinishBootstrap()` (relmapper.c): write out the initial
     /// relation-map files at the end of bootstrap. `ereport(ERROR/FATAL)` on
     /// an I/O failure.
-    pub fn relation_map_finish_bootstrap() -> types_error::PgResult<()>
+    pub fn relation_map_finish_bootstrap() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

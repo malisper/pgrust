@@ -8,12 +8,12 @@
 //! `heap_getattr` on the fixed `defaclrole` / `defaclnamespace` /
 //! `defaclobjtype` columns. Mirrors [`crate::auth_member_lookup`].
 
-use mcx::MemoryContext;
-use types_core::Oid;
+use ::mcx::MemoryContext;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use types_storage::lock::AccessShareLock;
+use ::types_storage::lock::AccessShareLock;
 
-use syscache_seams::DefaultAclDescRow;
+use ::syscache_seams::DefaultAclDescRow;
 
 use crate::consts::{
     Anum_pg_default_acl_defaclnamespace, Anum_pg_default_acl_defaclobjtype,

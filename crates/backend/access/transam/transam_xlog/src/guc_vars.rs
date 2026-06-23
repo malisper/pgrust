@@ -22,10 +22,10 @@ extern crate std;
 use core::cell::Cell;
 
 use guc_tables::{hooks, option_sets, vars, GucHookExtra, GucVarAccessors};
-use types_guc::config_enum_entry;
-use types_error::PgResult;
-use types_guc::GucSource;
-use wal::rmgr::RM_N_IDS;
+use ::types_guc::config_enum_entry;
+use ::types_error::PgResult;
+use ::types_guc::GucSource;
+use ::wal::rmgr::RM_N_IDS;
 
 std::thread_local! {
     /// `bool fullPageWrites = true` (xlog.c). `full_page_writes` GUC.
@@ -117,7 +117,7 @@ fn check_wal_consistency_checking(
 ) -> PgResult<bool> {
     use rmgr::{GetRmgr, RmgrIdExists};
     use miscinit_seams as misc;
-    use pgstrcasecmp::pg_strcasecmp;
+    use ::pgstrcasecmp::pg_strcasecmp;
 
     // C:4737-4740 — the new array, zero-initialized.
     let mut newwalconsistency = [false; RM_N_IDS];
@@ -240,7 +240,7 @@ pub fn InitializeWalConsistencyChecking() {
             srole,
             misc_guc::GUC_ACTION_SET,
             true,
-            types_error::ERROR,
+            ::types_error::ERROR,
             false,
         )
         .expect("InitializeWalConsistencyChecking: set_config_option failed");

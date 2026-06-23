@@ -4,10 +4,10 @@
 //! layouts there).
 
 use page::{PageGetContents, PageGetSpecialPointer, PageRef};
-use utils_error::PgResult;
-use types_core::primitive::BlockNumber;
-use types_core::primitive::OffsetNumber;
-use gin::GinMetaPageData;
+use ::utils_error::PgResult;
+use ::types_core::primitive::BlockNumber;
+use ::types_core::primitive::OffsetNumber;
+use ::gin::GinMetaPageData;
 
 /// `GinPageOpaqueData` field layout in the page special area:
 /// `rightlink: BlockNumber (u32) | maxoff: OffsetNumber (u16) | flags: u16`.

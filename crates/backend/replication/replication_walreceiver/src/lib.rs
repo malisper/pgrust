@@ -28,11 +28,11 @@ use types_error::{
 };
 
 use types_core::{pgsocket, TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
-use types_pgstat::wait_event::{
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_WAL_RECEIVER_MAIN, WAIT_EVENT_WAL_RECEIVER_WAIT_START, WAIT_EVENT_WAL_WRITE,
 };
-use types_startup::StartupData;
-use wal::ArchiveMode;
+use ::types_startup::StartupData;
+use ::wal::ArchiveMode;
 use types_walreceiver::{
     WalRcvData, WalRcvState, WalRcvStreamOptions, WalRcvWakeupReason, WalReceiverActivity,
     WalReceiverConn, MAXCONNINFO, NAMEDATALEN, NUM_WALRCV_WAKEUPS, TIMESTAMP_INFINITY,
@@ -44,7 +44,7 @@ use transam_xlog_seams as xlog;
 use xlogarchive_seams as xlogarchive;
 use xlogrecovery_seams as xlogrecovery;
 use varsup_seams as varsup;
-use replication_libpqwalreceiver::walrcv_table as libpqwalrcv;
+use ::replication_libpqwalreceiver::walrcv_table as libpqwalrcv;
 use walreceiverfuncs_seams as walrcvfuncs;
 use walsender_seams as walsender;
 use latch_seams as latch;
@@ -76,7 +76,7 @@ const WL_TIMEOUT: i32 = 1 << 3;
 const WL_EXIT_ON_PM_DEATH: i32 = 1 << 5;
 
 // `catalog/pg_authid.d.h`: `ROLE_PG_READ_ALL_STATS`.
-const ROLE_PG_READ_ALL_STATS: types_core::Oid = 3375;
+const ROLE_PG_READ_ALL_STATS: ::types_core::Oid = 3375;
 
 /// `ArchiveMode == ARCHIVE_MODE_ALWAYS`.
 fn xlog_archive_mode_is_always() -> bool {
@@ -295,7 +295,7 @@ fn TimestampTzPlusSeconds(tz: TimestampTz, s: i64) -> TimestampTz {
 }
 
 /// Emit a non-ERROR-level `ereport(...)` (LOG/DEBUG): logs and returns.
-fn emit(builder: utils_error::ErrorBuilder) {
+fn emit(builder: ::utils_error::ErrorBuilder) {
     let _ = builder.finish(here!());
 }
 
@@ -971,7 +971,7 @@ pub fn WalRcvDie(_code: i32, startpointTLI: TimeLineID) -> PgResult<()> {
         assert!(walrcv.pid == my_proc_pid());
         walrcv.walRcvState = WalRcvState::WALRCV_STOPPED;
         walrcv.pid = 0;
-        walrcv.procno = types_core::INVALID_PROC_NUMBER;
+        walrcv.procno = ::types_core::INVALID_PROC_NUMBER;
         walrcv.ready_to_display = false;
     });
 
@@ -1474,11 +1474,11 @@ fn WalRcvComputeNextWakeup(reason: WalRcvWakeupReason, now: TimestampTz) {
 pub fn WalRcvForceReply() {
     walrcvfuncs::set_force_reply::call();
     /* fetching the proc number is probably atomic, but don't rely on it */
-    let mut procno = types_core::INVALID_PROC_NUMBER;
+    let mut procno = ::types_core::INVALID_PROC_NUMBER;
     walrcvfuncs::with_walrcv::call(&mut |walrcv: &mut WalRcvData| {
         procno = walrcv.procno;
     });
-    if procno != types_core::INVALID_PROC_NUMBER {
+    if procno != ::types_core::INVALID_PROC_NUMBER {
         latch::set_latch_for_procno::call(procno);
     }
 }
@@ -1602,7 +1602,7 @@ pub fn pg_stat_get_wal_receiver() -> PgResult<Option<WalReceiverActivity>> {
 // ---------------------------------------------------------------------------
 
 fn setup_signal_handlers() {
-    use signal::SigHandler;
+    use ::signal::SigHandler;
     let pqsignal = port_pqsignal_seams::pqsignal::call;
 
     pqsignal(
@@ -1738,7 +1738,7 @@ fn strlcpy_to_buf(src: &[u8], size: usize) -> [u8; NAMEDATALEN] {
 
 /// `MyProcNumber` (globals.c) — passed explicitly per the no-ambient-global
 /// rule.
-fn my_proc_number() -> types_core::ProcNumber {
+fn my_proc_number() -> ::types_core::ProcNumber {
     init_small_seams::my_proc_number::call()
 }
 

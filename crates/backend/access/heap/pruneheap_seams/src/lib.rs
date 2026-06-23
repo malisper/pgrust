@@ -14,11 +14,11 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::OffsetNumber;
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::Buffer;
+use ::mcx::Mcx;
+use ::types_core::primitive::OffsetNumber;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::Buffer;
 
 seam_core::seam!(
     /// `heap_page_prune_opt(relation, buffer)` — opportunistically prune and

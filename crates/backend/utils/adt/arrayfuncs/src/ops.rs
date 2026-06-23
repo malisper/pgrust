@@ -11,11 +11,11 @@
 //! `lookup_type_cache(elemtype, TYPECACHE_*_FINFO)->*_finfo.fn_oid`); element
 //! storage metadata comes from the lsyscache owner's `get_typlenbyvalalign`.
 
-use array::ArrayElementDatum;
-use types_core::Oid;
-use datum::datum::Datum;
+use ::array::ArrayElementDatum;
+use ::types_core::Oid;
+use ::datum::datum::Datum;
 use types_error::{PgError, PgResult};
-use types_error::error::{ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_FUNCTION};
+use ::types_error::error::{ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_FUNCTION};
 
 use crate::foundation::{
     arr_data_ptr_off, arr_dim, arr_elemtype, arr_lbound, arr_ndim, arr_nullbitmap_off,

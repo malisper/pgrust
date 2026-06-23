@@ -28,7 +28,7 @@
 use crate::dispatch;
 use arrayfuncs_seams as arrayfuncs_seam;
 use lsyscache_seams as lsyscache_seam;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::execexpr::{
     ExprEvalStepData, ExprState, ResultCell, ResultCellId, STATE_RESULT_CELL,
 };

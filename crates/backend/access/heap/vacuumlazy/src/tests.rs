@@ -7,8 +7,8 @@
 
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
 use rel::{FormData_pg_class, Relation, RelationData};
-use types_storage::RelFileLocator;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_storage::RelFileLocator;
+use ::types_tuple::heaptuple::TupleDescData;
 
 use crate::consts::*;
 use crate::core::{LVRelState, LVSavedErrInfo, VacErrPhase};
@@ -59,7 +59,7 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
             relfrozenxid: 0,
             relminmxid: 0,
         },
-        rd_att: mcx::alloc_in(mcx, td).unwrap(),
+        rd_att: ::mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,
         rd_index: None,
         rd_opcintype: PgVec::new_in(mcx),

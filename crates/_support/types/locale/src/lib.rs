@@ -23,7 +23,7 @@
 
 #![no_std]
 
-use mcx::PgBox;
+use ::mcx::PgBox;
 
 /// `COLLPROVIDER_*` codes (`catalog/pg_collation.h`), the single `char`
 /// `pg_locale_struct.provider` holds.

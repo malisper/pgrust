@@ -33,8 +33,8 @@ use control::{
     PG_CONTROL_FILE_SIZE, PG_CONTROL_VERSION,
 };
 use types_core::{pg_crc32c, pg_time_t, FullTransactionId, TimeLineID, XLogRecPtr, XLogSegNo};
-use types_storage::storage::{pg_atomic_uint64, LWLock, Spinlock, LWTRANCHE_WAL_INSERT};
-use wal::xlog_consts::{
+use ::types_storage::storage::{pg_atomic_uint64, LWLock, Spinlock, LWTRANCHE_WAL_INSERT};
+use ::wal::xlog_consts::{
     RecoveryState, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, XLOG_BLCKSZ,
 };
 
@@ -232,7 +232,7 @@ std::thread_local! {
     /// `int wal_segment_size` (xlog.c GUC global). Read from the control file by
     /// `ReadControlFile`; defaults to the build default until then.
     static WAL_SEGMENT_SIZE: Cell<i32> =
-        const { Cell::new(wal::xlog_consts::DEFAULT_XLOG_SEG_SIZE) };
+        const { Cell::new(::wal::xlog_consts::DEFAULT_XLOG_SEG_SIZE) };
 
     /// `int XLOGbuffers` (xlog.c GUC global) — the resolved WAL buffer count.
     /// The auto-tune (`-1`) is resolved by `check_wal_buffers` before
@@ -341,11 +341,11 @@ fn spin_lock_init(lock: &Spinlock) {
 ///
 /// The C `XLOGbuffers == -1` auto-tune is a GUC concern handled before this is
 /// reached (`check_wal_buffers`); here we take the resolved buffer count.
-pub fn XLOGShmemSize(XLOGbuffers: i32) -> PgResult<types_core::Size> {
+pub fn XLOGShmemSize(XLOGbuffers: i32) -> PgResult<::types_core::Size> {
     debug_assert!(XLOGbuffers > 0);
 
     // XLogCtl
-    let mut size: types_core::Size = size_of::<XLogCtlData>();
+    let mut size: ::types_core::Size = size_of::<XLogCtlData>();
 
     // WAL insertion locks, plus alignment.
     size = shmem::add_size::call(
@@ -1089,7 +1089,7 @@ pub fn recompute_segment_derived(
 // ===========================================================================
 
 /// `XLOGShmemSize()` seam wrapper — reads the resolved `XLOGbuffers` GUC global.
-pub fn xlog_shmem_size_seam() -> PgResult<types_core::Size> {
+pub fn xlog_shmem_size_seam() -> PgResult<::types_core::Size> {
     XLOGShmemSize(xlog_buffers())
 }
 

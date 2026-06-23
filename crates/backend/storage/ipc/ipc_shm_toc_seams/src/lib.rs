@@ -11,7 +11,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::ParallelContext;
 
 seam_core::seam!(

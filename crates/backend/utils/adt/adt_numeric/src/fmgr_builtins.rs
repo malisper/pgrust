@@ -32,8 +32,8 @@
 
 use std::cmp::Ordering;
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -376,9 +376,9 @@ fn fc_numeric_send(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResu
     // The send seam (oid_send_function_call_seam) strips VARHDRSZ to recover the
     // wire payload, so stamp the 4-byte SET_VARSIZE header here — otherwise the
     // strip eats the first 4 wire bytes ("invalid sign in external numeric").
-    let total = payload.len() + datum::varlena::VARHDRSZ;
+    let total = payload.len() + ::datum::varlena::VARHDRSZ;
     let mut image = Vec::with_capacity(total);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(total));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(total));
     image.extend_from_slice(payload.as_slice());
     Ok(ret_varlena(fcinfo, image))
 }
@@ -839,8 +839,8 @@ fn fc_numerictypmodout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::Pg
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datum::NullableDatum;
-    use fmgr::FunctionCallInfoBaseData;
+    use ::datum::NullableDatum;
+    use ::fmgr::FunctionCallInfoBaseData;
 
     /// Dispatch a migrated (Result-native) numeric builtin by OID for the tests.
     /// Mirrors the fmgr-core native overlay: registration records `func: None`,

@@ -27,7 +27,7 @@ use utils_error::{PgError, PgResult};
 
 use control::{CheckPoint, ControlFileData, DBState};
 use types_core::{FullTransactionId, InvalidTransactionId, TimeLineID, TimestampTz, XLogRecPtr};
-use wal::xlog_consts::{
+use ::wal::xlog_consts::{
     CHECKPOINT_END_OF_RECOVERY, CHECKPOINT_FORCE, CHECKPOINT_IS_SHUTDOWN, DELAY_CHKPT_COMPLETE,
     DELAY_CHKPT_START, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD,
 };
@@ -538,7 +538,7 @@ mod ext {
     deferred! {
         pub fn RecoveryInProgress() -> bool;
         pub fn GetCurrentTimestamp() -> TimestampTz;
-        pub fn GetWallClockTime() -> types_core::pg_time_t;
+        pub fn GetWallClockTime() -> ::types_core::pg_time_t;
         pub fn SyncPreCheckpoint();
         pub fn SyncPostCheckpoint();
         pub fn XLogStandbyInfoActive() -> bool;
@@ -563,9 +563,9 @@ mod ext {
         pub fn GetFakeLSNForUnloggedRel() -> XLogRecPtr;
         pub fn WakeupWalSummarizer();
         pub fn UpdateCheckPointDistanceEstimate(nbytes: u64);
-        pub fn KeepLogSeg(recptr: XLogRecPtr, log_seg_no: types_core::XLogSegNo) -> types_core::XLogSegNo;
-        pub fn InvalidateObsoleteReplicationSlots(cause: i32, oldest_seg_no: types_core::XLogSegNo) -> bool;
-        pub fn RemoveOldXlogFiles(segno: types_core::XLogSegNo, lastredoptr: XLogRecPtr, endptr: XLogRecPtr, insert_tli: TimeLineID);
+        pub fn KeepLogSeg(recptr: XLogRecPtr, log_seg_no: ::types_core::XLogSegNo) -> ::types_core::XLogSegNo;
+        pub fn InvalidateObsoleteReplicationSlots(cause: i32, oldest_seg_no: ::types_core::XLogSegNo) -> bool;
+        pub fn RemoveOldXlogFiles(segno: ::types_core::XLogSegNo, lastredoptr: XLogRecPtr, endptr: XLogRecPtr, insert_tli: TimeLineID);
         pub fn TruncateSUBTRANS(oldest_xact: TransactionId);
         pub fn GetOldestTransactionIdConsideredRunning() -> TransactionId;
         pub fn CheckPointGutsCallbacks(checkpoint_redo: XLogRecPtr, flags: i32);

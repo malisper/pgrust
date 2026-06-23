@@ -10,11 +10,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_FOREIGN_KEY_VIOLATION};
-use types_storage::lock::{RowExclusiveLock, RowShareLock};
-use types_guc::guc::{GucContext, PGC_S_SESSION};
+use ::types_storage::lock::{RowExclusiveLock, RowShareLock};
+use ::types_guc::guc::{GucContext, PGC_S_SESSION};
 use types_ri_triggers::{TriggerDataRef, TriggerRef, TupleTableSlotRef};
 
 use crate::cache::{ri_build_query_key, ri_fetch_constraint_info, ri_fetch_prepared_plan};
@@ -36,7 +36,7 @@ use crate::{
     SPI_OK_SELECT, SPI_OK_UPDATE,
 };
 
-use table::table_open;
+use ::table::table_open;
 use trigger_seams as trig;
 use spi_seams as spi;
 use guc_seams as guc;

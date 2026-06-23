@@ -26,23 +26,23 @@ use std::collections::HashSet;
 
 use mcx::{Mcx, MemoryContext, PgVec};
 
-use types_catalog::catalog::TYPE_RELATION_ID;
-use types_catalog::pg_enum::{
+use ::types_catalog::catalog::TYPE_RELATION_ID;
+use ::types_catalog::pg_enum::{
     Anum_pg_enum_enumlabel, Anum_pg_enum_enumsortorder, Anum_pg_enum_enumtypid, Anum_pg_enum_oid,
     EnumOidIndexId, EnumRelationId, EnumTupleData, EnumTypIdLabelIndexId,
     EnumTypIdSortOrderIndexId, PgEnumInsertRow,
 };
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_core::Size;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_core::Size;
 use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_NAME,
     ERRCODE_INVALID_PARAMETER_VALUE, ERROR, NOTICE};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{ExclusiveLock, RowExclusiveLock};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{ExclusiveLock, RowExclusiveLock};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use indexam_seams as indexam_seams;
 use table as table;
@@ -55,7 +55,7 @@ use lmgr_seams as lmgr_seams;
 const NAMEDATALEN: usize = 64;
 
 /// `F_OIDEQ` (`catalog/fmgroids.h`).
-use types_core::fmgr::F_OIDEQ;
+use ::types_core::fmgr::F_OIDEQ;
 
 /* ===========================================================================
  * Transaction-lifespan uncommitted-enum bookkeeping (the C HTABs).
@@ -215,9 +215,9 @@ pub fn scan_enum_typid_sorted<'mcx>(
     mcx: Mcx<'mcx>,
     enumtypoid: Oid,
 ) -> PgResult<PgVec<'mcx, EnumTupleData>> {
-    use types_scan::sdir::ScanDirection::ForwardScanDirection;
-    use types_storage::lock::AccessShareLock;
-    use types_tuple::heaptuple::{HeapTupleHeaderGetXmin, HeapTupleHeaderXminCommitted};
+    use ::types_scan::sdir::ScanDirection::ForwardScanDirection;
+    use ::types_storage::lock::AccessShareLock;
+    use ::types_tuple::heaptuple::{HeapTupleHeaderGetXmin, HeapTupleHeaderXminCommitted};
 
     let skey = [oid_key(Anum_pg_enum_enumtypid, enumtypoid)?];
 
@@ -816,9 +816,9 @@ fn scan_enum_members_seam(
 ) -> PgResult<()> {
     let ctx = MemoryContext::new("scan_enum_members");
     let mcx = ctx.mcx();
-    let pg_enum = table::table_open(mcx, EnumRelationId, types_storage::lock::AccessShareLock)?;
+    let pg_enum = table::table_open(mcx, EnumRelationId, ::types_storage::lock::AccessShareLock)?;
     let members = list_enum_members(mcx, &pg_enum, enum_type_id)?;
-    pg_enum.close(types_storage::lock::AccessShareLock)?;
+    pg_enum.close(::types_storage::lock::AccessShareLock)?;
     for m in &members {
         emit(m.oid, m.enumsortorder);
     }

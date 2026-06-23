@@ -5,9 +5,9 @@
 //! recheck state (`EPQState`) is the canonical owned struct in
 //! [`crate::execnodes`]; this module does not redefine it.
 
-use mcx::Mcx;
-use types_error::PgResult;
-use types_tableam::relscan::TableScanDesc;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::types_tableam::relscan::TableScanDesc;
 
 use crate::execnodes::ScanStateData;
 use crate::nodeindexscan::Scan;
@@ -58,7 +58,7 @@ pub struct SeqScanState<'mcx> {
 }
 
 // Manual `Debug` (not `derive`): `ss_currentScanDesc`'s
-// [`TableScanDescData`](types_tableam::relscan::TableScanDescData) carries the
+// [`TableScanDescData`](::types_tableam::relscan::TableScanDescData) carries the
 // AM's opaque `dyn Any` tail (`am_private`), which is not `Debug`. (Same as
 // [`crate::nodetidscan::TidScanState`].)
 impl core::fmt::Debug for SeqScanState<'_> {

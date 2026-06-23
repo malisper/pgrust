@@ -17,7 +17,7 @@
 //! vocabulary, and the one item that would otherwise pull
 //! `backend-storage-lmgr-s-lock` into `types-nodes`.
 
-use types_storage::Spinlock;
+use ::types_storage::Spinlock;
 
 pub use ::nodes::nodebitmapheapscan::{
     BitmapHeapScan, BitmapHeapScanInstrumentation, BitmapHeapScanState, NodeSinstrument,

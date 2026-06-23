@@ -32,7 +32,7 @@
 use std::ffi::CStr;
 
 use localtime::{pg_localtime, pg_tz};
-use strftime::pg_strftime;
+use ::strftime::pg_strftime;
 use utils_error::{PgError, PgResult};
 use types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
 use wal::{BackupState, DEFAULT_XLOG_SEG_SIZE};

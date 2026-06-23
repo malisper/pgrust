@@ -45,7 +45,7 @@ fn select_common_typmod_all_match() {
 
 #[test]
 fn check_valid_internal_signature_rules() {
-    use types_tuple::heaptuple::INTERNALOID;
+    use ::types_tuple::heaptuple::INTERNALOID;
     assert!(check_valid_internal_signature(INT4OID, &[INT4OID], 1).is_none());
     assert!(check_valid_internal_signature(INTERNALOID, &[INTERNALOID], 1).is_none());
     assert!(check_valid_internal_signature(INTERNALOID, &[INT4OID], 1).is_some());

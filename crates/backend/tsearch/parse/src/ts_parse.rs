@@ -32,7 +32,7 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, NOTICE,
 };
@@ -405,16 +405,16 @@ fn lexize_exec(
                 // to basic mode and redo end of stack.
                 let res = if let Some(res) = lexemes {
                     let stop = ld.cur_sub.ok_or_else(|| {
-                        utils_error::PgError::error("lexize_exec: cur_sub present")
+                        ::utils_error::PgError::error("lexize_exec: cur_sub present")
                     })?;
                     ld.move_to_waste(stop);
                     res
                 } else {
                     let res = ld.tmp_res.take().ok_or_else(|| {
-                        utils_error::PgError::error("lexize_exec: tmp_res present")
+                        ::utils_error::PgError::error("lexize_exec: tmp_res present")
                     })?;
                     let stop = ld.last_res.ok_or_else(|| {
-                        utils_error::PgError::error("lexize_exec: last_res present")
+                        ::utils_error::PgError::error("lexize_exec: last_res present")
                     })?;
                     ld.move_to_waste(stop);
                     res

@@ -67,24 +67,24 @@
 //! `AtEOSubXact_LargeObject` seams (consumed by `access/xact.c`) from
 //! [`init_seams`].
 
-use aclchk_seams::object_ownercheck;
-use pg_largeobject::LargeObjectExists;
+use ::aclchk_seams::object_ownercheck;
+use ::pg_largeobject::LargeObjectExists;
 use object::{
     close_lo_relation, inv_close, inv_create, inv_drop, inv_open, inv_read, inv_seek, inv_tell,
     inv_truncate, inv_write,
 };
 use utils_error::{ereport, PgError, PgResult};
-use miscinit::GetUserId;
+use ::miscinit::GetUserId;
 use be_fsstubs_seams as seam;
 use snapmgr_seams as snapmgr_seam;
-use types_core::xact::SubTransactionId;
+use ::types_core::xact::SubTransactionId;
 use types_core::{int64, InvalidOid, Oid};
 use types_error::{
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use types_storage::large_object::{IFS_RDLOCK, IFS_WRLOCK, LargeObjectDesc};
+use ::types_storage::large_object::{IFS_RDLOCK, IFS_WRLOCK, LargeObjectDesc};
 
 pub mod fmgr_builtins;
 pub mod state;

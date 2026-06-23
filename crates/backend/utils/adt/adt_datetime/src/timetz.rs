@@ -19,9 +19,9 @@
 
 use std::rc::Rc;
 
-use pgtime::pg_tm;
-use mcx::Mcx;
-use types_numeric::var::NumericVar;
+use ::pgtime::pg_tm;
+use ::mcx::Mcx;
+use ::types_numeric::var::NumericVar;
 use types_datetime::{
     Interval, TimeTzADT, MINS_PER_HOUR, SECS_PER_HOUR, SECS_PER_MINUTE, USECS_PER_DAY,
     USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
@@ -39,7 +39,7 @@ use crate::numeric_helpers::int64_div_fast_to_numericvar;
 use crate::settings::date_style;
 use crate::time::{AdjustTimeForTypmod, INTERVAL_NOT_FINITE};
 
-const MAXDATEFIELDS: usize = types_datetime::MAXDATEFIELDS as usize;
+const MAXDATEFIELDS: usize = ::types_datetime::MAXDATEFIELDS as usize;
 
 // ---------------------------------------------------------------------------
 // tm2timetz / timetz2tm
@@ -88,12 +88,12 @@ pub fn timetz_in(
     let mut fsec: fsec_t = 0;
     let mut dtype: i32 = 0;
     let mut tz: i32 = 0;
-    let mut extra = types_datetime::DateTimeErrorExtra::default();
+    let mut extra = ::types_datetime::DateTimeErrorExtra::default();
 
     // C timetz_in: workbuf[MAXDATELEN + 1] (date.c:2353).
     let mut dterr = ParseDateTime(
         str,
-        types_datetime::MAXDATELEN as usize + 1,
+        ::types_datetime::MAXDATELEN as usize + 1,
         &mut field,
         &mut ftype,
         MAXDATEFIELDS,
@@ -354,7 +354,7 @@ pub fn timetz_zone(zone: &str, t: &TimeTzADT) -> PgResult<TimeTzADT> {
     use types_datetime::{TZNAME_DYNTZ, TZNAME_FIXED_OFFSET};
 
     let mut val: i32 = 0;
-    let mut tzp: Option<Rc<pgtime::pg_tz>> = None;
+    let mut tzp: Option<Rc<::pgtime::pg_tz>> = None;
     let type_ = DecodeTimezoneName(zone, &mut val, &mut tzp)?;
 
     let tz: i32;
@@ -525,7 +525,7 @@ fn timetz_unit_not_recognized(lowunits: &str) -> PgError {
 mod tests {
     use super::*;
     use crate::settings::{set_date_style, DATE_ORDER_TEST_LOCK};
-    use types_datetime::USE_ISO_DATES;
+    use ::types_datetime::USE_ISO_DATES;
 
     fn parse(s: &str) -> TimeTzADT {
         let _guard = DATE_ORDER_TEST_LOCK
@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn extract_timetz_fields() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let t = parse("13:45:30+00");
         match timetz_part_common(mcx, "hour", &t, false).unwrap() {

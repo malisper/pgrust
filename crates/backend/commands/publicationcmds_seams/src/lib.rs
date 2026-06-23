@@ -6,10 +6,10 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
-use rel::Relation;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::rel::Relation;
 
 seam_core::seam!(
     /// `AlterPublicationOwner_oid(pubid, newOwnerId)` (publicationcmds.c):

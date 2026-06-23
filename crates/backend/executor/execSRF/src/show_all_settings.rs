@@ -3,7 +3,7 @@
 //! `pg_settings` view and psql's `\dconfig`.
 //!
 //! The `GetConfigOptionValues` row projection over the live GUC registry lives in
-//! [`guc_funcs::pg_settings_rows`] (the `config_generic`
+//! [`::guc_funcs::pg_settings_rows`] (the `config_generic`
 //! generic attributes + the per-`vartype` typed `min`/`max`/`enumvals`/`boot`/
 //! `reset` reads + the `PGC_S_FILE` source-file/line security gate). This module
 //! is the executor-frame adapter: it runs `InitMaterializedSRF` to establish
@@ -17,14 +17,14 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 use funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
-use guc_funcs::PgSettingsRow;
+use ::guc_funcs::PgSettingsRow;
 
 use crate::register_srf;
 
@@ -32,7 +32,7 @@ use crate::register_srf;
 const SHOW_ALL_SETTINGS: Oid = 2084;
 
 /// `NUM_PG_SETTINGS_ATTS` (guc_funcs.c) — 17 output columns.
-const NUM_PG_SETTINGS_ATTS: usize = guc_funcs::NUM_PG_SETTINGS_ATTS;
+const NUM_PG_SETTINGS_ATTS: usize = ::guc_funcs::NUM_PG_SETTINGS_ATTS;
 
 /// Register the `pg_settings` SRF in the executor-frame SRF table.
 pub(crate) fn register_show_all_settings() {
@@ -47,7 +47,7 @@ fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
 /// Wrap an owned array varlena image on the by-reference Datum lane (the pointer
 /// C's `array_in`/`construct_array_builtin` returns).
 fn byref_image<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum<'mcx>> {
-    let mut buf = mcx::PgVec::new_in(mcx);
+    let mut buf = ::mcx::PgVec::new_in(mcx);
     buf.try_reserve(image.len()).map_err(|_| mcx.oom(image.len()))?;
     buf.extend_from_slice(image);
     Ok(Datum::ByRef(buf))
@@ -152,7 +152,7 @@ fn show_all_settings<'mcx>(
 
     // Snapshot the pg_settings rows (sorted, visible, non-NO_SHOW_ALL) from the
     // live GUC registry, then emit each into the live materialized result.
-    let rows = guc_funcs::pg_settings_rows();
+    let rows = ::guc_funcs::pg_settings_rows();
     let rsinfo = fcinfo
         .resultinfo
         .as_mut()

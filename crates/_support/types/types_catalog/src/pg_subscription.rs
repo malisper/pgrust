@@ -13,7 +13,7 @@
 #![allow(non_upper_case_globals)]
 
 use mcx::{PgString, PgVec};
-use types_core::primitive::{Oid, XLogRecPtr};
+use ::types_core::primitive::{Oid, XLogRecPtr};
 
 /* ==========================================================================
  * Relation / index OIDs (`pg_subscription.h` / `pg_subscription_rel.h`

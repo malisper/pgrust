@@ -14,7 +14,7 @@
 //! unconsumed tail as a `&str` where C uses the `uint*in_subr` "endloc"
 //! out-parameter. Hard errors surface as [`PgError`] via `Result`; the
 //! `*_safe` / `escontext` variants route to a soft [`SoftErrorContext`] when
-//! one is supplied, via `types_error::ereturn`.
+//! one is supplied, via `::types_error::ereturn`.
 //!
 //! This crate has no cyclic callers, so it declares no seams.
 

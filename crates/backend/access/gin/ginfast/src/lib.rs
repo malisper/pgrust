@@ -37,27 +37,27 @@ use freespace_seams as fsm;
 use page::{
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageIsEmpty, PageMut, PageRef,
 };
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
-use types_core::Oid;
-use types_error::PgError;
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
+use ::types_core::Oid;
+use ::types_error::PgError;
 use gin::{
     GinMetaPageData, GinNullCategory, GinState, GIN_EXCLUSIVE, GIN_LIST, GIN_LIST_FULLROW,
     GIN_METAPAGE_BLKNO, GIN_SHARE, GIN_UNLOCK,
 };
-use rel::Relation;
-use types_storage::lock::{ExclusiveLock, LockRelId};
-use types_storage::storage::{Buffer, InvalidBuffer};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_storage::lock::{ExclusiveLock, LockRelId};
+use ::types_storage::storage::{Buffer, InvalidBuffer};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use ginutil::{
     ginExtractEntries, GinInitBuffer, GinNewBuffer, gintuple_get_attrnum, gintuple_get_key,
 };
-use ginentrypage::GinFormTuple;
-use gininsert::ginEntryInsert;
+use ::ginentrypage::GinFormTuple;
+use ::gininsert::ginEntryInsert;
 
 use lmgr::{ConditionalLockPage, LockPage, UnlockPage};
 
@@ -78,7 +78,7 @@ mod tests;
 
 /// `RM_GIN_ID` (rmgrlist.h) — the GIN resource manager id (local per repo
 /// convention; siblings open-code the same value).
-const RM_GIN_ID: types_core::RmgrId = 13;
+const RM_GIN_ID: ::types_core::RmgrId = 13;
 
 /// `XLOG_GIN_UPDATE_META_PAGE` (ginxlog.h).
 const XLOG_GIN_UPDATE_META_PAGE: u8 = 0x60;
@@ -192,7 +192,7 @@ pub fn init_seams() {
     // the call (`initGinState(&ginstate, index)`); do the same in the shim.
     ginvacuum_seams::gin_insert_cleanup::set(
         |mcx, index, full_clean, fill_fsm, force_cleanup| {
-            let ginstate = ginutil::initGinState(index, mcx)?;
+            let ginstate = ::ginutil::initGinState(index, mcx)?;
             ginInsertCleanup(&ginstate, mcx, index, full_clean, fill_fsm, force_cleanup, None)
         },
     );
@@ -252,7 +252,7 @@ fn gin_fast_insert<'mcx>(
     isnull: Vec<bool>,
     ht_ctid: ItemPointerData,
 ) -> PgResult<()> {
-    let ginstate = ginutil::initGinState(index, mcx)?;
+    let ginstate = ::ginutil::initGinState(index, mcx)?;
     let _ = index_oid;
     let natts = ginstate.natts();
 
@@ -722,7 +722,7 @@ fn shiftList(
 
         for &b in &buffers {
             bufmgr::with_buffer_page::call(b, &mut |page: &mut [u8]| {
-                set_flags(page, gin::GIN_DELETED);
+                set_flags(page, ::gin::GIN_DELETED);
                 Ok(())
             })?;
             bufmgr::mark_buffer_dirty::call(b);
@@ -1013,18 +1013,18 @@ pub fn ginInsertCleanup<'mcx>(
 /// index the caller owns, derives a `GinState`, and runs [`ginInsertCleanup`]
 /// with `full_clean = fill_fsm = force_cleanup = true`.
 pub fn gin_clean_pending_list<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<u32> {
-    use indexam_seams::index_open;
+    use ::indexam_seams::index_open;
     use aclchk_seams::{aclcheck_error, object_ownercheck};
-    use miscinit_seams::get_user_id;
-    use types_acl::AclResult;
-    use types_catalog::catalog::RELATION_RELATION_ID;
-    use types_error::error::{
+    use ::miscinit_seams::get_user_id;
+    use ::types_acl::AclResult;
+    use ::types_catalog::catalog::RELATION_RELATION_ID;
+    use ::types_error::error::{
         ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
         ERRCODE_WRONG_OBJECT_TYPE,
     };
     use ::nodes::parsenodes::ObjectType;
-    use types_storage::lock::RowExclusiveLock;
-    use types_tuple::access::RELKIND_INDEX;
+    use ::types_storage::lock::RowExclusiveLock;
+    use ::types_tuple::access::RELKIND_INDEX;
 
     /// `GIN_AM_OID` (pg_am_d.h).
     const GIN_AM_OID: Oid = 2742;
@@ -1073,7 +1073,7 @@ pub fn gin_clean_pending_list<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<u
         .map(|i| i.indisvalid)
         .unwrap_or(false)
     {
-        let ginstate = ginutil::initGinState(&index_rel, mcx)?;
+        let ginstate = ::ginutil::initGinState(&index_rel, mcx)?;
         ginInsertCleanup(&ginstate, mcx, &index_rel, true, true, true, None)?
     } else {
         // ereport(DEBUG1, ...): index is not valid.
@@ -1091,7 +1091,7 @@ pub fn gin_clean_pending_list<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<u
 
 /// `RELATION_IS_OTHER_TEMP(rel)` — a temp relation owned by another backend.
 fn rel_is_other_temp(rel: &Relation<'_>) -> bool {
-    rel.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_TEMP
+    rel.rd_rel.relpersistence == ::types_tuple::access::RELPERSISTENCE_TEMP
         && rel.rd_backend != init_small_seams::my_proc_number::call()
 }
 
@@ -1136,7 +1136,7 @@ fn read_listpage(buffer: Buffer) -> PgResult<(Vec<u8>, BlockNumber, bool, Offset
 
 /// `itup->t_tid` over a tuple byte image.
 fn itup_tid(itup: &[u8]) -> ItemPointerData {
-    use types_tuple::heaptuple::BlockIdData;
+    use ::types_tuple::heaptuple::BlockIdData;
     ItemPointerData {
         ip_blkid: BlockIdData {
             bi_hi: u16::from_ne_bytes([itup[0], itup[1]]),
@@ -1223,7 +1223,7 @@ fn xlog_register_buf_data(block_id: u8, data: &[u8]) -> PgResult<()> {
     xloginsert_seams::xlog_register_buf_data::call(block_id, data)
 }
 #[inline]
-fn xlog_insert_record(rmid: types_core::RmgrId, info: u8) -> PgResult<types_core::XLogRecPtr> {
+fn xlog_insert_record(rmid: ::types_core::RmgrId, info: u8) -> PgResult<::types_core::XLogRecPtr> {
     xloginsert_seams::xlog_insert_record::call(rmid, info)
 }
 #[inline]

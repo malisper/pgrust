@@ -55,9 +55,9 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub use types_core::Oid;
-pub use datum::Datum;
-pub use parsenodes::RawParseMode;
+pub use ::types_core::Oid;
+pub use ::datum::Datum;
+pub use ::parsenodes::RawParseMode;
 
 // ---------------------------------------------------------------------------
 // Fixed-width integer aliases (match plpgsql.h's use of c.h typedefs).

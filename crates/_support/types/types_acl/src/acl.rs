@@ -2,7 +2,7 @@
 //! ACL value vocabulary (`AclItem`, `RoleRecurseType`, `AclMaskHow`) consumed
 //! by `utils/adt/acl.c`.
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// `AclMode` (`nodes/parsenodes.h`) — a `uint64` bitmask of privilege bits.
 pub type AclMode = u64;

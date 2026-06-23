@@ -41,25 +41,25 @@ extern crate alloc;
 
 use mcx::{Mcx, PgVec};
 
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-use types_catalog::pg_attribute::{
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attalign, Anum_pg_attribute_attbyval, Anum_pg_attribute_attcollation,
     Anum_pg_attribute_attgenerated, Anum_pg_attribute_atthasdef, Anum_pg_attribute_atthasmissing,
     Anum_pg_attribute_attinhcount, Anum_pg_attribute_attlen, Anum_pg_attribute_attmissingval,
     Anum_pg_attribute_attnotnull, Anum_pg_attribute_attnum, Anum_pg_attribute_atttypid,
     Anum_pg_attribute_atttypmod, AttributeRelationId, PgAttributeUpdateRow,
 };
-use types_catalog::pg_attrdef::AttrDefaultRelationId;
-use types_catalog::pg_collation::CollationRelationId;
-use types_catalog::pg_policy::PolicyRelationId;
-use types_catalog::pg_proc::ProcedureRelationId;
-use types_catalog::pg_publication::PublicationRelRelationId;
-use types_catalog::pg_rewrite::RewriteRelationId;
-use types_catalog::pg_statistic_ext::StatisticExtRelationId;
-use types_catalog::pg_trigger::TriggerRelationId;
-use types_catalog::pg_type::TypeRelationId;
-use types_core::catalog::CONSTRAINT_RELATION_ID as ConstraintRelationId;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_catalog::pg_attrdef::AttrDefaultRelationId;
+use ::types_catalog::pg_collation::CollationRelationId;
+use ::types_catalog::pg_policy::PolicyRelationId;
+use ::types_catalog::pg_proc::ProcedureRelationId;
+use ::types_catalog::pg_publication::PublicationRelRelationId;
+use ::types_catalog::pg_rewrite::RewriteRelationId;
+use ::types_catalog::pg_statistic_ext::StatisticExtRelationId;
+use ::types_catalog::pg_trigger::TriggerRelationId;
+use ::types_catalog::pg_type::TypeRelationId;
+use ::types_core::catalog::CONSTRAINT_RELATION_ID as ConstraintRelationId;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_DEFINITION, ERRCODE_INVALID_TABLE_DEFINITION,
@@ -69,17 +69,17 @@ use types_error::{
 use ::nodes::ddlnodes::{AlterTableCmd, AlterTableType, CoercionContext};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{CoercionForm, Expr};
-use rel::Relation;
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
-use types_tuple::access::{
+use ::rel::Relation;
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
+use ::types_tuple::access::{
     ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_COMPOSITE_TYPE,
     RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_SEQUENCE,
 };
-use types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, InvalidCompressionMethod};
+use ::types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, InvalidCompressionMethod};
 
-use common_relation::relation_open;
-use transam_xact::CommandCounterIncrement;
+use ::common_relation::relation_open;
+use ::transam_xact::CommandCounterIncrement;
 use aclchk_seams as aclchk_seam;
 use heap::{
     CheckAttributeType, RelationClearMissing, RemoveStatistics, CHKATYPE_IS_VIRTUAL,
@@ -88,16 +88,16 @@ use heap::{
 use indexing_seams as indexing_seam;
 use pg_attrdef::{RemoveAttrDefault, StoreAttrDefault};
 use pg_depend_seams as pg_depend_seam;
-use pg_inherits::find_inheritance_children;
-use nodes_core::makefuncs::make_var;
-use nodes_core::nodefuncs::{expr_type, strip_implicit_coercions};
-use parse_collate::assign_expr_collations_in;
+use ::pg_inherits::find_inheritance_children;
+use ::nodes_core::makefuncs::make_var;
+use ::nodes_core::nodefuncs::{expr_type, strip_implicit_coercions};
+use ::parse_collate::assign_expr_collations_in;
 use rewritehandler_seams as rewrite_seam;
-use lsyscache::relation::get_rel_relkind;
+use ::lsyscache::relation::get_rel_relkind;
 use cache_syscache::{
     SearchSysCacheAttName, SearchSysCacheCopyAttName, SysCacheGetAttrNotNull, ATTNAME,
 };
-use miscinit::GetUserId;
+use ::miscinit::GetUserId;
 
 use crate::at_coladd::{add_column_collation_dependency, add_column_datatype_dependency};
 use crate::at_phase::{
@@ -564,7 +564,7 @@ pub fn ATPrepAlterColumnType<'mcx>(
 
         // Add a work queue item to make ATRewriteTable update the column contents.
         let requires_rewrite = ATColumnChangeRequiresRewrite(&planned, attnum)?;
-        let node = mcx::alloc_in(mcx, Node::mk_expr(mcx, planned)?)?;
+        let node = ::mcx::alloc_in(mcx, Node::mk_expr(mcx, planned)?)?;
         wqueue[ti].newvals.push(crate::at_phase::NewColumnValue {
             attnum,
             expr: Some(node),
@@ -597,7 +597,7 @@ pub fn ATPrepAlterColumnType<'mcx>(
     // tables; else the alter would put them out of step.
     if recurse {
         let (child_oids, child_numparents) =
-            pg_inherits::find_all_inheritors(mcx, rel.rd_id, lockmode, true)?;
+            ::pg_inherits::find_all_inheritors(mcx, rel.rd_id, lockmode, true)?;
         // want_numparents=true always returns Some.
         let child_numparents =
             child_numparents.expect("find_all_inheritors did not return numparents");
@@ -665,7 +665,7 @@ pub fn ATPrepAlterColumnType<'mcx>(
                     false,
                 )?;
                 let cooked_clone = cooked.clone_in(mcx)?;
-                let cooked_ptr = mcx::alloc_in(mcx, cooked_clone)?;
+                let cooked_ptr = ::mcx::alloc_in(mcx, cooked_clone)?;
                 let (mapped, found_whole_row) =
                     rewritemanip_seams::map_variable_attnos_node::call(
                         mcx,
@@ -766,7 +766,7 @@ fn RememberAllDependentForRebuilding<'mcx>(
                     // SERIAL column's sequence — nothing to do.
                 } else {
                     // C: elog(ERROR, "unexpected object depending on column").
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "unexpected object depending on column",
                     ));
                 }
@@ -831,12 +831,12 @@ fn RememberAllDependentForRebuilding<'mcx>(
                 // Could be the column's own default/generation expression
                 // (handled by the caller) or a generated column elsewhere in the
                 // same table referencing it.
-                let col = pg_attrdef::GetAttrDefaultColumnAddress(mcx, row.objid)?;
+                let col = ::pg_attrdef::GetAttrDefaultColumnAddress(mcx, row.objid)?;
                 if col.objectId == rel.rd_id && col.objectSubId == attnum as i32 {
                     // Ignore the column's own expression; the caller deals with it.
                 } else if is_alter_type {
                     // A generated column elsewhere uses this column — punt.
-                    let gen_name = lsyscache::attribute::get_attname(
+                    let gen_name = ::lsyscache::attribute::get_attname(
                         mcx,
                         col.objectId,
                         col.objectSubId as AttrNumber,
@@ -871,8 +871,8 @@ fn RememberAllDependentForRebuilding<'mcx>(
 /// row, matching the C `ObjectAddress` populated in the dependency scan loop.
 fn found_object_of(
     row: &pg_depend_seams::TypeRefererRow,
-) -> types_catalog::catalog_dependency::ObjectAddress {
-    types_catalog::catalog_dependency::ObjectAddress {
+) -> ::types_catalog::catalog_dependency::ObjectAddress {
+    ::types_catalog::catalog_dependency::ObjectAddress {
         classId: row.classid,
         objectId: row.objid,
         objectSubId: row.objsubid,
@@ -882,7 +882,7 @@ fn found_object_of(
 fn feature_not_supported<'mcx>(
     mcx: Mcx<'mcx>,
     msg: &str,
-    found_object: &types_catalog::catalog_dependency::ObjectAddress,
+    found_object: &::types_catalog::catalog_dependency::ObjectAddress,
     col_name: &str,
 ) -> PgResult<()> {
     // errdetail("%s depends on column \"%s\"",
@@ -913,12 +913,12 @@ fn RememberReplicaIdentityForRebuilding<'mcx>(
     indoid: Oid,
     tab: &mut AlteredTableInfo<'mcx>,
 ) -> PgResult<()> {
-    if !lsyscache::relation::get_index_isreplident(indoid)? {
+    if !::lsyscache::relation::get_index_isreplident(indoid)? {
         return Ok(());
     }
 
     if tab.replicaIdentityIndex.is_some() {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "relation {} has multiple indexes marked as replica identity",
             tab.relid
         )));
@@ -935,12 +935,12 @@ fn RememberClusterOnForRebuilding<'mcx>(
     indoid: Oid,
     tab: &mut AlteredTableInfo<'mcx>,
 ) -> PgResult<()> {
-    if !lsyscache::relation::get_index_isclustered(indoid)? {
+    if !::lsyscache::relation::get_index_isclustered(indoid)? {
         return Ok(());
     }
 
     if tab.clusterOnIndex.is_some() {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "relation {} has multiple clustered indexes",
             tab.relid
         )));
@@ -967,7 +967,7 @@ fn RememberConstraintForRebuilding<'mcx>(
     // OK, capture the constraint's existing definition string.
     let defstring =
         ruleutils::constraintdef::pg_get_constraintdef_command(mcx, conoid)?;
-    let defnode = mcx::alloc_in(
+    let defnode = ::mcx::alloc_in(
         mcx,
         Node::mk_string(mcx, ::nodes::value::StringNode { sval: defstring })?,
     )?;
@@ -975,7 +975,7 @@ fn RememberConstraintForRebuilding<'mcx>(
     // Create not-null constraints ahead of primary key indexes; otherwise the
     // not-null constraint would be created by the primary key with the wrong
     // name.
-    if lsyscache::collation_constraint_language_cast::get_constraint_type(
+    if ::lsyscache::collation_constraint_language_cast::get_constraint_type(
         conoid,
     )? == CONSTRAINT_NOTNULL
     {
@@ -989,7 +989,7 @@ fn RememberConstraintForRebuilding<'mcx>(
     // For the index of a constraint, if any, remember replica-identity /
     // clustered status so ATPostAlterTypeCleanup can restore it.
     let indoid =
-        lsyscache::collation_constraint_language_cast::get_constraint_index(
+        ::lsyscache::collation_constraint_language_cast::get_constraint_index(
             conoid,
         )?;
     if OidIsValid(indoid) {
@@ -1018,7 +1018,7 @@ fn RememberIndexForRebuilding<'mcx>(
     // OK, capture the index's existing definition string.
     let defstring =
         ruleutils::indexdef::pg_get_indexdef_string(mcx, indoid)?;
-    let defnode = mcx::alloc_in(
+    let defnode = ::mcx::alloc_in(
         mcx,
         Node::mk_string(mcx, ::nodes::value::StringNode { sval: defstring })?,
     )?;
@@ -1043,7 +1043,7 @@ fn RememberStatisticsForRebuilding<'mcx>(
     let defstring = ruleutils::statisticsdef::pg_get_statisticsobjdef_string(
         mcx, stxoid,
     )?;
-    let defnode = mcx::alloc_in(
+    let defnode = ::mcx::alloc_in(
         mcx,
         Node::mk_string(mcx, ::nodes::value::StringNode { sval: defstring })?,
     )?;
@@ -1078,7 +1078,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
     // queue entries, BEFORE dropping. Snapshot the (oid,def) pairs first; the
     // C `forboth` iterates the saved lists while ATPostAlterTypeParse appends to
     // `tab->subcmds` (later passes) and possibly to `wqueue`.
-    let con_pairs: alloc::vec::Vec<(Oid, mcx::PgString<'mcx>)> = wqueue[ti]
+    let con_pairs: alloc::vec::Vec<(Oid, ::mcx::PgString<'mcx>)> = wqueue[ti]
         .changedConstraintOids
         .iter()
         .zip(wqueue[ti].changedConstraintDefs.iter())
@@ -1098,7 +1098,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
         // conislocal.
         let con = syscache_seams::search_constraint_form_by_oid::call(old_id)?;
         let con = con.ok_or_else(|| {
-            types_error::PgError::error(format!("cache lookup failed for constraint {old_id}"))
+            ::types_error::PgError::error(format!("cache lookup failed for constraint {old_id}"))
         })?;
         let conform = con.form;
         let con_relid;
@@ -1130,7 +1130,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
         if con_relid != relid {
             lmgr::LockRelationOid(
                 con_relid,
-                types_storage::lock::AccessExclusiveLock,
+                ::types_storage::lock::AccessExclusiveLock,
             )?;
         }
 
@@ -1140,7 +1140,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
     }
 
     // Re-parse the index definitions.
-    let idx_pairs: alloc::vec::Vec<(Oid, mcx::PgString<'mcx>)> = wqueue[ti]
+    let idx_pairs: alloc::vec::Vec<(Oid, ::mcx::PgString<'mcx>)> = wqueue[ti]
         .changedIndexOids
         .iter()
         .zip(wqueue[ti].changedIndexDefs.iter())
@@ -1161,7 +1161,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
         if idx_relid != relid {
             lmgr::LockRelationOid(
                 idx_relid,
-                types_storage::lock::AccessExclusiveLock,
+                ::types_storage::lock::AccessExclusiveLock,
             )?;
         }
 
@@ -1176,7 +1176,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
     }
 
     // Re-parse the extended-statistics definitions.
-    let stat_pairs: alloc::vec::Vec<(Oid, mcx::PgString<'mcx>)> = wqueue[ti]
+    let stat_pairs: alloc::vec::Vec<(Oid, ::mcx::PgString<'mcx>)> = wqueue[ti]
         .changedStatisticsOids
         .iter()
         .zip(wqueue[ti].changedStatisticsDefs.iter())
@@ -1197,7 +1197,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
         // itself wraps.
         let stat_relid = syscache_seams::statext_get_relid::call(old_id)?
             .ok_or_else(|| {
-                types_error::PgError::error(format!(
+                ::types_error::PgError::error(format!(
                     "cache lookup failed for statistics object {old_id}"
                 ))
             })?;
@@ -1208,7 +1208,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
         if stat_relid != relid {
             lmgr::LockRelationOid(
                 stat_relid,
-                types_storage::lock::ShareUpdateExclusiveLock,
+                ::types_storage::lock::ShareUpdateExclusiveLock,
             )?;
         }
 
@@ -1229,7 +1229,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
             identity_type: b'i' as i8, // REPLICA_IDENTITY_INDEX
             name: Some(rep_idx),
         };
-        let subnode = mcx::alloc_in(mcx, Node::mk_replica_identity_stmt(mcx, subcmd)?)?;
+        let subnode = ::mcx::alloc_in(mcx, Node::mk_replica_identity_stmt(mcx, subcmd)?)?;
         let cmd = AlterTableCmd {
             subtype: AlterTableType::AT_ReplicaIdentity,
             name: None,
@@ -1241,7 +1241,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
             recurse: false,
         };
         // do it after indexes and constraints
-        let cmdnode = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?;
+        let cmdnode = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?;
         wqueue[ti].subcmds[crate::at_phase::AT_PASS_OLD_CONSTR as usize].push(cmdnode);
     }
 
@@ -1258,7 +1258,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
             missing_ok: false,
             recurse: false,
         };
-        let cmdnode = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?;
+        let cmdnode = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, cmd)?)?;
         wqueue[ti].subcmds[crate::at_phase::AT_PASS_OLD_CONSTR as usize].push(cmdnode);
     }
 
@@ -1298,8 +1298,8 @@ fn ATPostAlterTypeParse<'mcx>(
     // pass them through parse_utilcmd.c (no parse_analyze / rewriter needed).
     // raw_parser needs a 'mcx-lived &str: allocate the command text into the
     // arena and leak it into an honest 'mcx borrow.
-    let cmd_box = mcx::alloc_in(mcx, mcx::PgString::from_str_in(cmd, mcx)?)?;
-    let cmd_str: &'mcx str = mcx::leak_in(cmd_box).as_str();
+    let cmd_box = ::mcx::alloc_in(mcx, ::mcx::PgString::from_str_in(cmd, mcx)?)?;
+    let cmd_str: &'mcx str = ::mcx::leak_in(cmd_box).as_str();
     let raw_parsetree_list = driver::raw_parser(
         mcx,
         cmd_str,
@@ -1313,14 +1313,14 @@ fn ATPostAlterTypeParse<'mcx>(
         let stmt_tag = stmt.node_tag();
         match stmt_tag {
             t if t == ntag::T_IndexStmt => {
-                let stmt_clone = mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
+                let stmt_clone = ::mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
                 let transformed = utility_out_seams::transform_index_stmt::call(
                     mcx, old_rel_id, stmt_clone, cmd,
                 )?;
                 querytree_list.push(transformed);
             }
             t if t == ntag::T_AlterTableStmt => {
-                let stmt_box = mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
+                let stmt_box = ::mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
                 let (new_stmt, before_stmts, after_stmts) =
                     parse_utilcmd_seams::transformAlterTableStmt::call(
                         mcx, old_rel_id, stmt_box, cmd,
@@ -1334,14 +1334,14 @@ fn ATPostAlterTypeParse<'mcx>(
                 }
             }
             t if t == ntag::T_CreateStatsStmt => {
-                let stmt_clone = mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
+                let stmt_clone = ::mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
                 let transformed = utility_out_seams::transform_stats_stmt::call(
                     mcx, old_rel_id, stmt_clone, cmd,
                 )?;
                 querytree_list.push(transformed);
             }
             _ => {
-                let cloned = mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
+                let cloned = ::mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
                 querytree_list.push(cloned);
             }
         }
@@ -1379,7 +1379,7 @@ fn ATPostAlterTypeParse<'mcx>(
                 RelationRelationId,
                 0,
             )? {
-                Some(c) => Some(mcx::PgString::from_str_in(&c, mcx)?),
+                Some(c) => Some(::mcx::PgString::from_str_in(&c, mcx)?),
                 None => None,
             };
 
@@ -1388,12 +1388,12 @@ fn ATPostAlterTypeParse<'mcx>(
                 name: None,
                 num: 0,
                 newowner: None,
-                def: Some(mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, istmt)?)?),
+                def: Some(::mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, istmt)?)?),
                 behavior: ::nodes::parsenodes::DropBehavior::Restrict,
                 missing_ok: false,
                 recurse: false,
             };
-            let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
+            let node = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
             wqueue[tab_idx].subcmds[crate::at_phase::AT_PASS_OLD_INDEX as usize].push(node);
         } else if stm_tag == ntag::T_AlterTableStmt {
             let atstmt = stm
@@ -1416,7 +1416,7 @@ fn ATPostAlterTypeParse<'mcx>(
                         // indoid = get_constraint_index(oldId): the index OID
                         // backing the constraint being rebuilt.
                         let indoid =
-                            lsyscache::collation_constraint_language_cast::get_constraint_index(
+                            ::lsyscache::collation_constraint_language_cast::get_constraint_index(
                                 old_id,
                             )?;
                         if rewrite == 0 {
@@ -1431,7 +1431,7 @@ fn ATPostAlterTypeParse<'mcx>(
                                 RelationRelationId,
                                 0,
                             )? {
-                                Some(c) => Some(mcx::PgString::from_str_in(&c, mcx)?),
+                                Some(c) => Some(::mcx::PgString::from_str_in(&c, mcx)?),
                                 None => None,
                             };
                         indstmt.reset_default_tblspc = true;
@@ -1442,12 +1442,12 @@ fn ATPostAlterTypeParse<'mcx>(
                             name: None,
                             num: 0,
                             newowner: None,
-                            def: Some(mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, indstmt)?)?),
+                            def: Some(::mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, indstmt)?)?),
                             behavior: subcmd.behavior,
                             missing_ok: subcmd.missing_ok,
                             recurse: subcmd.recurse,
                         };
-                        let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
+                        let node = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
                         wqueue[tab_idx].subcmds[crate::at_phase::AT_PASS_OLD_INDEX as usize]
                             .push(node);
 
@@ -1487,7 +1487,7 @@ fn ATPostAlterTypeParse<'mcx>(
                             let pfeqops =
                                 pg_constraint::TryReuseForeignKey(mcx, old_id)?;
                             for op in pfeqops {
-                                let node = mcx::alloc_in(
+                                let node = ::mcx::alloc_in(
                                     mcx,
                                     Node::mk_integer(
                                         mcx,
@@ -1505,12 +1505,12 @@ fn ATPostAlterTypeParse<'mcx>(
                             name: None,
                             num: 0,
                             newowner: None,
-                            def: Some(mcx::alloc_in(mcx, Node::mk_constraint(mcx, con)?)?),
+                            def: Some(::mcx::alloc_in(mcx, Node::mk_constraint(mcx, con)?)?),
                             behavior: subcmd.behavior,
                             missing_ok: subcmd.missing_ok,
                             recurse: subcmd.recurse,
                         };
-                        let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
+                        let node = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
                         wqueue[tab_idx].subcmds[crate::at_phase::AT_PASS_OLD_CONSTR as usize]
                             .push(node);
 
@@ -1531,7 +1531,7 @@ fn ATPostAlterTypeParse<'mcx>(
                         }
                     }
                     other => {
-                        return Err(types_error::PgError::error(format!(
+                        return Err(::types_error::PgError::error(format!(
                             "unexpected statement subtype: {}",
                             other as i32
                         )));
@@ -1557,15 +1557,15 @@ fn ATPostAlterTypeParse<'mcx>(
                     .expect("AlterDomainStmt.def is not a Constraint");
                 let conname = con.conname.as_ref().map(|s| s.to_string());
                 // stmt->typeName: domain namelist used by RebuildConstraintComment.
-                let mut domname: PgVec<'mcx, mcx::PgString<'mcx>> = PgVec::new_in(mcx);
+                let mut domname: PgVec<'mcx, ::mcx::PgString<'mcx>> = PgVec::new_in(mcx);
                 for n in ads.typeName.iter() {
                     let s = n
                         .as_string()
                         .expect("AlterDomainStmt.typeName element is not a String");
-                    domname.push(mcx::PgString::from_str_in(s.sval.as_str(), mcx)?);
+                    domname.push(::mcx::PgString::from_str_in(s.sval.as_str(), mcx)?);
                 }
 
-                let stmt_clone = mcx::alloc_in(mcx, stm.clone_in(mcx)?)?;
+                let stmt_clone = ::mcx::alloc_in(mcx, stm.clone_in(mcx)?)?;
                 let newcmd = AlterTableCmd {
                     subtype: AlterTableType::AT_ReAddDomainConstraint,
                     name: None,
@@ -1576,7 +1576,7 @@ fn ATPostAlterTypeParse<'mcx>(
                     missing_ok: false,
                     recurse: false,
                 };
-                let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
+                let node = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
                 wqueue[tab_idx].subcmds[crate::at_phase::AT_PASS_OLD_CONSTR as usize].push(node);
 
                 // recreate any comment on the constraint:
@@ -1595,7 +1595,7 @@ fn ATPostAlterTypeParse<'mcx>(
                     )?;
                 }
             } else {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "unexpected statement subtype: {}",
                     ads.subtype
                 )));
@@ -1614,7 +1614,7 @@ fn ATPostAlterTypeParse<'mcx>(
                 StatisticExtRelationId,
                 0,
             )? {
-                Some(c) => Some(mcx::PgString::from_str_in(&c, mcx)?),
+                Some(c) => Some(::mcx::PgString::from_str_in(&c, mcx)?),
                 None => None,
             };
             let newcmd = AlterTableCmd {
@@ -1622,15 +1622,15 @@ fn ATPostAlterTypeParse<'mcx>(
                 name: None,
                 num: 0,
                 newowner: None,
-                def: Some(mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt)?)?),
+                def: Some(::mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt)?)?),
                 behavior: ::nodes::parsenodes::DropBehavior::Restrict,
                 missing_ok: false,
                 recurse: false,
             };
-            let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
+            let node = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
             wqueue[tab_idx].subcmds[crate::at_phase::AT_PASS_MISC as usize].push(node);
         } else {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "unexpected statement type: {}",
                 stm_tag
             )));
@@ -1667,8 +1667,8 @@ fn TryReuseIndex<'mcx>(
             // the reachable ALTER-COLUMN-TYPE path the index was created in a
             // prior (sub)transaction, so both are InvalidSubTransactionId; the
             // downstream restore (ATExecAddIndex) then lets relcache.c rebuild.
-            stmt.oldCreateSubid = types_core::xact::InvalidSubTransactionId;
-            stmt.oldFirstRelfilelocatorSubid = types_core::xact::InvalidSubTransactionId;
+            stmt.oldCreateSubid = ::types_core::xact::InvalidSubTransactionId;
+            stmt.oldFirstRelfilelocatorSubid = ::types_core::xact::InvalidSubTransactionId;
         }
         irel.close(NoLock)?;
     }
@@ -1690,7 +1690,7 @@ fn RebuildConstraintComment<'mcx>(
     pass: i32,
     objid: Oid,
     rel: Option<&Relation<'mcx>>,
-    domname: Option<&[mcx::PgString<'mcx>]>,
+    domname: Option<&[::mcx::PgString<'mcx>]>,
     conname: &str,
 ) -> PgResult<()> {
     // comment_str = GetComment(objid, ConstraintRelationId, 0); if NULL return.
@@ -1707,20 +1707,20 @@ fn RebuildConstraintComment<'mcx>(
     // Helper: build a String value node holding `s` in the arena.
     let mk_str = |s: &str| -> PgResult<::nodes::nodes::NodePtr<'mcx>> {
         let sn = ::nodes::value::StringNode {
-            sval: mcx::PgString::from_str_in(s, mcx)?,
+            sval: ::mcx::PgString::from_str_in(s, mcx)?,
         };
-        mcx::alloc_in(mcx, Node::mk_string(mcx, sn)?)
+        ::mcx::alloc_in(mcx, Node::mk_string(mcx, sn)?)
     };
 
     // Build the CommentStmt, copying input data for safety.
     let object: Node<'mcx> = if let Some(rel) = rel {
         // OBJECT_TABCONSTRAINT: list_make3(schema, relname, conname)
-        let nsp = lsyscache::namespace_range_index_pubsub::get_namespace_name(
+        let nsp = ::lsyscache::namespace_range_index_pubsub::get_namespace_name(
             mcx,
             rel.rd_rel.relnamespace,
         )?
         .ok_or_else(|| {
-            types_error::PgError::error("RebuildConstraintComment: namespace not found")
+            ::types_error::PgError::error("RebuildConstraintComment: namespace not found")
         })?;
         let mut list: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
         list.push(mk_str(nsp.as_str())?);
@@ -1747,7 +1747,7 @@ fn RebuildConstraintComment<'mcx>(
             location: -1,
         };
         let mut list: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
-        list.push(mcx::alloc_in(mcx, Node::mk_type_name(mcx, typename)?)?);
+        list.push(::mcx::alloc_in(mcx, Node::mk_type_name(mcx, typename)?)?);
         list.push(mk_str(conname)?);
         Node::mk_list(mcx, list)?
     };
@@ -1759,8 +1759,8 @@ fn RebuildConstraintComment<'mcx>(
     };
     let cmt = ::nodes::ddlnodes::CommentStmt {
         objtype,
-        object: Some(mcx::alloc_in(mcx, object)?),
-        comment: Some(mcx::PgString::from_str_in(&comment_str, mcx)?),
+        object: Some(::mcx::alloc_in(mcx, object)?),
+        comment: Some(::mcx::PgString::from_str_in(&comment_str, mcx)?),
     };
 
     let newcmd = AlterTableCmd {
@@ -1768,12 +1768,12 @@ fn RebuildConstraintComment<'mcx>(
         name: None,
         num: 0,
         newowner: None,
-        def: Some(mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, cmt)?)?),
+        def: Some(::mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, cmt)?)?),
         behavior: ::nodes::parsenodes::DropBehavior::Restrict,
         missing_ok: false,
         recurse: false,
     };
-    let node = mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
+    let node = ::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, newcmd)?)?;
     wqueue[tab_idx].subcmds[pass as usize].push(node);
     Ok(())
 }
@@ -1923,9 +1923,9 @@ pub fn ATExecSetExpression<'mcx>(
     // Drop the dependency records of the GENERATED expression, in particular its
     // INTERNAL dependency on the column, which would otherwise cause
     // dependency.c to refuse to perform the deletion.
-    let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
+    let attrdefoid = ::pg_attrdef::GetAttrDefaultOid(mcx, rel.rd_id, attnum)?;
     if !OidIsValid(attrdefoid) {
-        return Err(types_error::PgError::error(&format!(
+        return Err(::types_error::PgError::error(&format!(
             "could not find attrdef tuple for relation {} attnum {}",
             rel.rd_id, attnum
         )));
@@ -1948,7 +1948,7 @@ pub fn ATExecSetExpression<'mcx>(
     //   rawEnt->raw_default = newExpr;
     //   rawEnt->generated = attgenerated;
     //   AddRelationNewConstraints(rel, list_make1(rawEnt), NIL, false, true, false, NULL);
-    let raw_default_ptr = mcx::alloc_in(mcx, new_expr.clone_in(mcx)?)?;
+    let raw_default_ptr = ::mcx::alloc_in(mcx, new_expr.clone_in(mcx)?)?;
     let raw_defaults: [(AttrNumber, ::nodes::nodes::NodePtr<'mcx>, i8); 1] =
         [(attnum, raw_default_ptr, attgenerated)];
     seam::add_relation_new_constraints::call(
@@ -1984,7 +1984,7 @@ pub fn ATExecSetExpression<'mcx>(
         let planned =
             planner::expression_planner(mcx, (*defval).clone_in(mcx)?)?;
 
-        let node = mcx::alloc_in(mcx, Node::mk_expr(mcx, planned)?)?;
+        let node = ::mcx::alloc_in(mcx, Node::mk_expr(mcx, planned)?)?;
         wqueue[ti].newvals.push(crate::at_phase::NewColumnValue {
             attnum,
             expr: Some(node),
@@ -2196,7 +2196,7 @@ pub fn ATExecAlterColumnType<'mcx>(
 
         // missingval = heap_getattr(heapTup, Anum_pg_attribute_attmissingval,
         //                           attrelation->rd_att, &missingNull);
-        let (missingval_bytes, missing_null) = cache_syscache::SysCacheGetAttr(
+        let (missingval_bytes, missing_null) = ::cache_syscache::SysCacheGetAttr(
             mcx,
             ATTNAME,
             &heap_tup,
@@ -2304,9 +2304,9 @@ pub fn ATExecAlterColumnType<'mcx>(
         // particular its INTERNAL dependency on the column, which would
         // otherwise cause dependency.c to refuse to perform the deletion.
         if attgenerated != 0 {
-            let attrdefoid = pg_attrdef::GetAttrDefaultOid(mcx, relid, attnum)?;
+            let attrdefoid = ::pg_attrdef::GetAttrDefaultOid(mcx, relid, attnum)?;
             if !OidIsValid(attrdefoid) {
-                return Err(types_error::PgError::error(&format!(
+                return Err(::types_error::PgError::error(&format!(
                     "could not find attrdef tuple for relation {} attnum {}",
                     relid, attnum
                 )));

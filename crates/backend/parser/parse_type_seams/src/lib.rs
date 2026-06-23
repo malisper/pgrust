@@ -6,10 +6,10 @@
 //! until then a call panics loudly.
 
 use mcx::{Mcx, PgString};
-use types_core::Oid;
-use types_error::PgResult;
-use opclass::TypeName;
-use parsenodes::TypeName as ParseTypeName;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::opclass::TypeName;
+use ::parsenodes::TypeName as ParseTypeName;
 
 seam_core::seam!(
     /// `parseTypeString(str, &typeid, &typmod, escontext)` (parse_type.c):
@@ -28,7 +28,7 @@ seam_core::seam!(
     pub fn parse_type_string(
         string: &str,
         soft: bool,
-    ) -> PgResult<Result<(Oid, i32), types_error::PgError>>
+    ) -> PgResult<Result<(Oid, i32), ::types_error::PgError>>
 );
 
 seam_core::seam!(
@@ -57,8 +57,8 @@ seam_core::seam!(
     /// `Err` carries the same `ereport(ERROR)` surface (type missing / shell /
     /// bad typmod decoration).
     ///
-    /// Takes the full `parsenodes::TypeName` (not the trimmed
-    /// `opclass::TypeName`) because resolving the typmod requires the
+    /// Takes the full `::parsenodes::TypeName` (not the trimmed
+    /// `::opclass::TypeName`) because resolving the typmod requires the
     /// `typmods` decoration list, which the trimmed resolver TypeName drops.
     pub fn typename_type_id_and_mod(type_name: &ParseTypeName) -> PgResult<(Oid, i32)>
 );
@@ -145,7 +145,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `LookupTypeNameOid(NULL, typeName, missing_ok)` (parse_type.c) over the
-    /// opclasscmds/function `TypeName` carrier (`opclass::TypeName`),
+    /// opclasscmds/function `TypeName` carrier (`::opclass::TypeName`),
     /// resolving a (possibly schema-qualified) type name to its OID. With
     /// `missing_ok = true` a missing type yields `InvalidOid` (no error); else
     /// it raises. Used by `LookupFuncWithArgs` (parse_func.c) to resolve the
@@ -172,7 +172,7 @@ seam_core::seam!(
     /// carries that surface.
     pub fn typename_type_id_from_defelem(
         def: &nodes::ddlnodes::DefElem<'_>,
-    ) -> types_error::PgResult<types_core::Oid>
+    ) -> ::types_error::PgResult<::types_core::Oid>
 );
 
 seam_core::seam!(

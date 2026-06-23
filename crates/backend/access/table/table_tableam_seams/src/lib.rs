@@ -13,19 +13,19 @@
 //! both land.)
 //!
 //! The scan descriptor crosses as the C-faithful value-typed
-//! [`TableScanDesc`](types_tableam::relscan::TableScanDesc) (an owned
+//! [`TableScanDesc`](::types_tableam::relscan::TableScanDesc) (an owned
 //! `Box<TableScanDescData>`), matching the bodies the tableam.c owner was
 //! ported with (and the value-typed bitmap-scan seams in
 //! `backend-access-table-tableam-bm-seams`).
 
 use std::rc::Rc;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::tuptable::SlotData;
-use rel::Relation;
-use snapshot::SnapshotData;
-use types_tableam::relscan::{TableScanDesc, TableScanDescData};
+use ::rel::Relation;
+use ::snapshot::SnapshotData;
+use ::types_tableam::relscan::{TableScanDesc, TableScanDescData};
 
 seam_core::seam!(
     /// `table_index_build_scan(table_rel, index_rel, index_info, allow_sync,
@@ -48,8 +48,8 @@ seam_core::seam!(
     #[allow(clippy::type_complexity)]
     pub fn table_index_build_scan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        table_rel: &rel::Relation<'mcx>,
-        index_rel: &rel::Relation<'mcx>,
+        table_rel: &::rel::Relation<'mcx>,
+        index_rel: &::rel::Relation<'mcx>,
         index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
         allow_sync: bool,
         progress: bool,
@@ -82,14 +82,14 @@ seam_core::seam!(
     #[allow(clippy::type_complexity)]
     pub fn table_index_build_range_scan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        table_rel: &rel::Relation<'mcx>,
-        index_rel: &rel::Relation<'mcx>,
+        table_rel: &::rel::Relation<'mcx>,
+        index_rel: &::rel::Relation<'mcx>,
         index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
         allow_sync: bool,
         anyvisible: bool,
         progress: bool,
-        start_blockno: types_core::primitive::BlockNumber,
-        numblocks: types_core::primitive::BlockNumber,
+        start_blockno: ::types_core::primitive::BlockNumber,
+        numblocks: ::types_core::primitive::BlockNumber,
         callback: &mut dyn FnMut(
             types_tuple::heaptuple::ItemPointerData,
             &[types_tuple::heaptuple::Datum<'mcx>],
@@ -129,10 +129,10 @@ seam_core::seam!(
     #[allow(clippy::type_complexity)]
     pub fn table_index_validate_scan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        table_rel: &rel::Relation<'mcx>,
-        index_rel: &rel::Relation<'mcx>,
+        table_rel: &::rel::Relation<'mcx>,
+        index_rel: &::rel::Relation<'mcx>,
         index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
-        snapshot: types_tableam::tableam::Snapshot,
+        snapshot: ::types_tableam::tableam::Snapshot,
         counters: &mut ValidateScanCounters,
         get_next_index_tid: &mut dyn FnMut() -> PgResult<Option<i64>>,
     ) -> PgResult<()>
@@ -146,7 +146,7 @@ seam_core::seam!(
     /// (wrong magic number / NULL routine).
     pub fn get_table_am_routine(
         amhandler: Oid,
-    ) -> PgResult<types_tableam::TableAmRoutine>
+    ) -> PgResult<::types_tableam::TableAmRoutine>
 );
 
 seam_core::seam!(
@@ -249,7 +249,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn table_parallelscan_reinitialize(
         rel: &Relation<'_>,
-        pscan: &types_tableam::relscan::ParallelBlockTableScanDescData,
+        pscan: &::types_tableam::relscan::ParallelBlockTableScanDescData,
     ) -> PgResult<()>
 );
 
@@ -299,7 +299,7 @@ seam_core::seam!(
     pub fn table_scan_analyze_next_tuple<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
-        oldest_xmin: types_core::TransactionId,
+        oldest_xmin: ::types_core::TransactionId,
         liverows: &mut f64,
         deadrows: &mut f64,
         slot: &mut SlotData<'mcx>,
@@ -339,7 +339,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         rel: &Relation<'mcx>,
         tid: &mut types_tuple::heaptuple::ItemPointerData,
-        snapshot: &mut types_tableam::tableam::Snapshot,
+        snapshot: &mut ::types_tableam::tableam::Snapshot,
         all_dead: Option<&mut bool>,
     ) -> PgResult<bool>
 );
@@ -361,6 +361,6 @@ seam_core::seam!(
     pub fn table_index_delete_tuples<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         rel: &Relation<'mcx>,
-        delstate: &mut types_tableam::tableam::TmIndexDeleteOp<'mcx>,
-    ) -> PgResult<types_core::TransactionId>
+        delstate: &mut ::types_tableam::tableam::TmIndexDeleteOp<'mcx>,
+    ) -> PgResult<::types_core::TransactionId>
 );

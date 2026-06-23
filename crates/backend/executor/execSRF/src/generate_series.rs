@@ -5,7 +5,7 @@
 //! int8 counterparts (`pg_proc` OIDs 1066/1067 int4, 1068/1069 int8) are
 //! value-per-call SRFs: their value core (the `generate_series_fctx` cross-call
 //! state + the per-call step, including the overflow-stopping final value) is
-//! ported in `backend-utils-adt-int::series` / `backend-utils-adt-int8`, and the
+//! ported in `backend-utils-adt-::int::series` / `backend-utils-adt-int8`, and the
 //! `SRF_FIRSTCALL_INIT` / `SRF_PERCALL_SETUP` / `SRF_RETURN_NEXT` /
 //! `SRF_RETURN_DONE` glue is `backend-utils-fmgr-::funcapi::srf_support`.
 //!
@@ -21,14 +21,14 @@
 
 use core::any::Any;
 
-use int::series::GenerateSeriesInt4;
+use ::int::series::GenerateSeriesInt4;
 use ::funcapi::srf_support::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall,
 };
 use mcx::{Mcx, PgBox};
-use types_core::Oid;
-use types_datetime::Interval;
-use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
+use ::types_core::Oid;
+use ::types_datetime::Interval;
+use ::types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
 use types_error::{PgError, PgResult};
 use ::nodes::execexpr::ExprDoneCond;
 use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
@@ -69,7 +69,7 @@ pub(crate) fn register_generate_series() {
 /// Erase a `'static` cross-call state value into the
 /// `FuncCallContext.user_fctx` carrier (C: `funcctx->user_fctx = palloc(...)`).
 fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
-    let boxed = mcx::alloc_in(mcx, v).expect("alloc user_fctx");
+    let boxed = ::mcx::alloc_in(mcx, v).expect("alloc user_fctx");
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn Any` vtable.

@@ -14,7 +14,7 @@
 //! panics loudly.
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::funcapi::ReturnSetInfo;
 
 seam_core::seam!(

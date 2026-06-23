@@ -16,7 +16,7 @@
 
 use core::ffi::c_void;
 
-use runtime::mem::{install, AllocHooks};
+use ::runtime::mem::{install, AllocHooks};
 
 unsafe fn p_palloc(size: usize) -> *mut c_void {
     // C `palloc(0)` returns a valid unique pointer; libc malloc(0) is
@@ -36,7 +36,7 @@ unsafe fn p_repalloc(ptr: *mut c_void, size: usize) -> *mut c_void {
 }
 
 unsafe fn p_pfree(ptr: *mut c_void) {
-    // `backend-snowball-runtime::mem::pfree` already guards NULL before calling
+    // `backend-snowball-::runtime::mem::pfree` already guards NULL before calling
     // this provider, but libc `free(NULL)` is a safe no-op regardless.
     unsafe { libc::free(ptr) }
 }

@@ -26,12 +26,12 @@
 //! units' seam crates; the function bodies themselves are ported exactly.
 //!
 //! No `extern "C"`, no `*mut`/`*const`, no `libc`; soft errors flow through
-//! `types_error::SoftErrorContext`.
+//! `::types_error::SoftErrorContext`.
 
 pub mod fmgr_builtins;
 
 use types_core::{CommandId, FullTransactionId, MultiXactId, TransactionId};
-use datum::Bytea;
+use ::datum::Bytea;
 use types_error::{PgResult, SoftErrorContext};
 
 // ---------------------------------------------------------------------------

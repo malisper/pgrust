@@ -10,12 +10,12 @@
 //! conversion) — are private to selfuncs.c and depend on unported index-AM /
 //! type-dispatch machinery; they are kept structurally and panic when reached.
 
-use mcx::Mcx;
-use types_core::primitive::{InvalidOid, Oid};
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
-use pathnodes::PlannerInfo;
+use ::pathnodes::PlannerInfo;
 use types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES};
 
 use lsyscache_seams as lsc;
@@ -24,9 +24,9 @@ use indexam_seams as idxseam;
 use amapi_seams as amapi;
 use common_relation_seams as relseam;
 use indxpath_seams as ix;
-use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use types_scan::sdir::{BackwardScanDirection, ForwardScanDirection, ScanDirection};
-use types_storage::lock::NoLock;
+use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use ::types_scan::sdir::{BackwardScanDirection, ForwardScanDirection, ScanDirection};
+use ::types_storage::lock::NoLock;
 use crate::RELKIND_PARTITIONED_TABLE;
 
 use crate::scalar::{get_variable_numdistinct, statistic_proc_security_check};
@@ -34,7 +34,7 @@ use crate::{
     clamp_probability, SELF_ITEM_POINTER_ATTRIBUTE_NUMBER, STATISTIC_KIND_HISTOGRAM,
     STATISTIC_KIND_MCV,
 };
-use types_selfuncs::DEFAULT_INEQ_SEL;
+use ::types_selfuncs::DEFAULT_INEQ_SEL;
 
 /// `COMPARE_LT` (cmptype.h) — `BTLessStrategyNumber`.
 const COMPARE_LT: i32 = 1;
@@ -50,7 +50,7 @@ const COMPARE_GT: i32 = 5;
 /// bare word wrapped as `ByVal` (no separate canonical array is fetched).
 pub(crate) fn slot_value_canon<'mcx>(
     bare: &[Datum],
-    canon: Option<&mcx::PgVec<'mcx, DatumV<'mcx>>>,
+    canon: Option<&::mcx::PgVec<'mcx, DatumV<'mcx>>>,
     i: usize,
     mcx: Mcx<'mcx>,
 ) -> PgResult<DatumV<'mcx>> {
@@ -68,7 +68,7 @@ pub(crate) fn slot_value_canon<'mcx>(
 /// for position `i`, else falls back to the recorded histogram bound.
 fn hist_value_at<'mcx>(
     bare: &[Datum],
-    canon: Option<&mcx::PgVec<'mcx, DatumV<'mcx>>>,
+    canon: Option<&::mcx::PgVec<'mcx, DatumV<'mcx>>>,
     overrides: &[Option<DatumV<'mcx>>],
     i: usize,
     mcx: Mcx<'mcx>,
@@ -85,11 +85,11 @@ fn hist_value_at<'mcx>(
 /// Returns `None` for a pass-by-value element type — the bare word is the value.
 pub(crate) fn slot_canon_values<'mcx>(
     mcx: Mcx<'mcx>,
-    stats_tuple: types_selfuncs::StatsTuple,
+    stats_tuple: ::types_selfuncs::StatsTuple,
     reqkind: i32,
     reqop: Oid,
     valuetype: Oid,
-) -> PgResult<Option<mcx::PgVec<'mcx, DatumV<'mcx>>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, DatumV<'mcx>>>> {
     if lsc::get_typbyval::call(valuetype)? {
         return Ok(None);
     }

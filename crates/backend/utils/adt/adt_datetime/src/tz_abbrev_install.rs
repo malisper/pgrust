@@ -17,8 +17,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use misc_more2::TimeZoneAbbrevTable;
-use pgtime::pg_tz;
+use ::misc_more2::TimeZoneAbbrevTable;
+use ::pgtime::pg_tz;
 
 use crate::tz_resolver::{set_timezone_resolver, TimezoneResolver, TzAbbrev};
 
@@ -112,11 +112,11 @@ pub struct ZoneAbbrevRow {
 /// (C: `gmtoffset = -DetermineTimeZoneAbbrevOffsetTS(...)`). A `zoneabbrevtbl ==
 /// NULL` (no set installed) yields no rows.
 pub fn pg_timezone_abbrevs_abbrevs_rows() -> types_error::PgResult<Vec<ZoneAbbrevRow>> {
-    use transam_xact::GetCurrentTransactionStartTimestamp;
+    use ::transam_xact::GetCurrentTransactionStartTimestamp;
 
     // Snapshot the entries out of the thread-local table, releasing the borrow
     // before any DYNTZ resolution (which may touch timezone state).
-    let entries: Vec<misc_more2::TzEntry> = ZONEABBREVTBL.with(|cell| {
+    let entries: Vec<::misc_more2::TzEntry> = ZONEABBREVTBL.with(|cell| {
         cell.borrow()
             .as_ref()
             .map(|tbl| tbl.abbrevs.clone())
@@ -165,7 +165,7 @@ pub fn pg_timezone_abbrevs_abbrevs_rows() -> types_error::PgResult<Vec<ZoneAbbre
 mod tests {
     use super::*;
     use types_datetime::{DTZ, DYNTZ, TZ};
-    use misc_more2::TzEntry;
+    use ::misc_more2::TzEntry;
 
     fn entry(abbrev: &str, zone: Option<&str>, offset: i32, is_dst: bool) -> TzEntry {
         TzEntry {

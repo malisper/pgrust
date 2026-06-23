@@ -596,7 +596,7 @@ pub fn init_all() {
     cache_typcache::init_seams();
     utils_error::init_seams();
     error_small::init_seams();
-    fmgr_core::init_seams();
+    ::fmgr_core::init_seams();
     fmgr_dfmgr::init_seams();
     dynloader::init_seams();
     funcapi::init_seams();
@@ -2292,7 +2292,7 @@ mod builtin_registry_completeness {
     //!
     //! `init_all()` populates the (per-backend `thread_local`) registry; we then
     //! compare the live gap against `crate::builtin_gap_baseline::KNOWN_GAP`. The
-    //! canonical set is `fmgr_core::builtin_canonical::CANONICAL`,
+    //! canonical set is `::fmgr_core::builtin_canonical::CANONICAL`,
     //! derived from the SAME `pg_proc.dat` C uses.
     //!
     //! ## Semantics: the baseline is an UPPER BOUND, not an exact set
@@ -2396,7 +2396,7 @@ mod builtin_registry_completeness {
     /// canonical `prosrc` too.
     #[test]
     fn baseline_only_cites_canonical_builtins() {
-        use fmgr_core::builtin_canonical::CANONICAL;
+        use ::fmgr_core::builtin_canonical::CANONICAL;
         let canon: BTreeMap<u32, &'static str> =
             CANONICAL.iter().map(|(oid, name, ..)| (*oid, *name)).collect();
         let mut bad: Vec<String> = Vec::new();

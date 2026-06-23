@@ -55,23 +55,23 @@ use page::{
     ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid, ItemPointerSet,
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageRef,
 };
-use utils_error::ereport;
-use types_error::error::ERROR;
+use ::utils_error::ereport;
+use ::types_error::error::ERROR;
 use types_error::{PgError, PgResult};
 
-use types_core::primitive::{OffsetNumber, Oid, RegProcedure};
-use rel::Relation;
-use types_storage::buf::{Buffer, InvalidBuffer, BUFFER_LOCK_SHARE};
-use types_tableam::amapi::TIDBitmap as AmTIDBitmap;
-use types_tableam::amopaque::{tags, AmOpaque, AmOpaqueType};
-use types_tableam::genam::IndexOrderByDistance;
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
-use types_scan::sdir::ScanDirection;
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::{
+use ::types_core::primitive::{OffsetNumber, Oid, RegProcedure};
+use ::rel::Relation;
+use ::types_storage::buf::{Buffer, InvalidBuffer, BUFFER_LOCK_SHARE};
+use ::types_tableam::amapi::TIDBitmap as AmTIDBitmap;
+use ::types_tableam::amopaque::{tags, AmOpaque, AmOpaqueType};
+use ::types_tableam::genam::IndexOrderByDistance;
+use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use ::types_scan::sdir::ScanDirection;
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::{
     ItemPointerData, TupleDescData, FLOAT4OID, FLOAT8OID,
 };
-use types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
+use ::types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
 use spgist::{
     spgInnerConsistentIn, spgInnerConsistentOut, spgKeyColumn, spgLeafConsistentIn,
     spgLeafConsistentOut, SpGistCache, SpGistState, SPGIST_DEAD, SPGIST_INNER_CONSISTENT_PROC,
@@ -82,8 +82,8 @@ use spgist::{
 use bufmgr_seams as bufmgr;
 use relcache_seams as relcache;
 use lsyscache_seams as lsyscache;
-use pgstat_seams::pgstat_count_index_scan;
-use nodes_core_seams::tbm_add_tuples;
+use ::pgstat_seams::pgstat_count_index_scan;
+use ::nodes_core_seams::tbm_add_tuples;
 
 use crate::spgdoinsert::{
     it_all_the_same, it_datum, it_n_nodes, it_prefix_size, lt_datum, lt_get_next_offset,
@@ -93,7 +93,7 @@ use crate::{
     getSpGistTupleDesc, initSpGistState, spgDeformLeafTuple, spgExtractNodeLabels, spgGetCache,
     SpGistPageIsLeaf, SpGistPageStoresNulls,
 };
-use spgist::SpGistBlockIsRoot;
+use ::spgist::SpGistBlockIsRoot;
 
 // ===========================================================================
 // Local invariants / constants (relscan.h, itemptr.h, indextuple.h).
@@ -239,7 +239,7 @@ pub type SpgScanQueue<'mcx> = pairingheap::PairingHeap<
 /// `SpGistScanOpaqueData` is the concrete type stored in
 /// `IndexScanDescData.opaque` (C's `void *opaque`).
 impl<'mcx> AmOpaqueType<'mcx> for SpGistScanOpaqueData<'mcx> {
-    const TAG: types_tableam::amopaque::AmOpaqueTag = tags::SPGIST_SCAN;
+    const TAG: ::types_tableam::amopaque::AmOpaqueTag = tags::SPGIST_SCAN;
 }
 
 /// Downcast `scan.opaque` to the SP-GiST scan working state (the A0 tag-checked
@@ -1572,7 +1572,7 @@ fn erase_opaque<'mcx>(
     mcx: Mcx<'mcx>,
     opaque: SpGistScanOpaqueData<'mcx>,
 ) -> PgResult<PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx>> {
-    let boxed: PgBox<'mcx, SpGistScanOpaqueData<'mcx>> = mcx::alloc_in(mcx, opaque)?;
+    let boxed: PgBox<'mcx, SpGistScanOpaqueData<'mcx>> = ::mcx::alloc_in(mcx, opaque)?;
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn AmOpaque` vtable (the A0 erase pattern).

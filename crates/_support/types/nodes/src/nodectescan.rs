@@ -10,8 +10,8 @@
 //! the leader-only fields (`cte_table`, `eof_cte`) are valid only in the leader,
 //! exactly as the C documents.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 
 use crate::execnodes::ScanStateData;
 use crate::nodeindexscan::Scan;

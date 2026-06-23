@@ -26,7 +26,7 @@
 //! Where C allocates the querytree / plan / search-path / result-tupdesc data
 //! in a `MemoryContext` subsidiary to the `CachedPlanSource`/`CachedPlan`, the
 //! Rust model OWNS those values directly inside the struct, backed by a
-//! struct-private [`mcx::MemoryContext`] (the portalmem pattern,
+//! struct-private [`::mcx::MemoryContext`] (the portalmem pattern,
 //! `docs/mctx-design.md`): each value is produced/copied via `clone_in(ctx.mcx())`
 //! and its borrow extended to the field's `'static` marker. That is sound
 //! because each value field is declared *before* the `MemoryContext` field that
@@ -44,9 +44,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use mcx::{Mcx, MemoryContext, PgVec};
-use types_core::primitive::{Oid, INVALID_OID};
+use ::types_core::primitive::{Oid, INVALID_OID};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use types_namespace::namespace::SearchPathMatcher;
+use ::types_namespace::namespace::SearchPathMatcher;
 use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::{ntag, CmdType, Node};
@@ -63,7 +63,7 @@ use types_plancache::{
     FIRST_NORMAL_TRANSACTION_ID, PLAN_CACHE_MODE_FORCE_CUSTOM_PLAN,
     PLAN_CACHE_MODE_FORCE_GENERIC_PLAN,
 };
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 
 // Value-producer seams (the de-handled pipeline).
 use namespace_seams as namespace_seams;
@@ -332,7 +332,7 @@ fn clone_search_path_into(
     ctx: &MemoryContext,
     sp: &SearchPathMatcher<'_>,
 ) -> PgResult<SearchPathMatcher<'static>> {
-    let mut schemas: PgVec<'_, Oid> = mcx::vec_with_capacity_in(ctx.mcx(), sp.schemas.len())?;
+    let mut schemas: PgVec<'_, Oid> = ::mcx::vec_with_capacity_in(ctx.mcx(), sp.schemas.len())?;
     for &o in sp.schemas.iter() {
         schemas.push(o);
     }
@@ -936,7 +936,7 @@ fn RevalidateCachedQuery(
             )?;
             rewrite_seams::query_rewrite_canonical::call(transient.mcx(), locked)?
         } else {
-            mcx::vec_with_capacity_in(transient.mcx(), 0)?
+            ::mcx::vec_with_capacity_in(transient.mcx(), 0)?
         }
     };
 
@@ -1693,7 +1693,7 @@ pub fn CachedPlanGetTargetList<'mcx>(
     debug_assert!(src.borrow().is_complete);
 
     if src.borrow().result_desc.is_none() {
-        return mcx::vec_with_capacity_in(mcx, 0);
+        return ::mcx::vec_with_capacity_in(mcx, 0);
     }
 
     RevalidateCachedQuery(plansource, query_env)?;
@@ -1703,13 +1703,13 @@ pub fn CachedPlanGetTargetList<'mcx>(
     let primary = query_list_get_primary_stmt(&p.query_list);
     match primary {
         Some(q) => {
-            let mut out = mcx::vec_with_capacity_in(mcx, q.targetList.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, q.targetList.len())?;
             for te in q.targetList.iter() {
                 out.push(te.clone_in(mcx)?);
             }
             Ok(out)
         }
-        None => mcx::vec_with_capacity_in(mcx, 0),
+        None => ::mcx::vec_with_capacity_in(mcx, 0),
     }
 }
 
@@ -1724,7 +1724,7 @@ pub fn GetCachedExpression(expr: Expr<'static>) -> PgResult<CachedExpressionHand
     // The planned `Expr` is cached at backend lifetime (in `s.expressions` /
     // `cached_expression_list`) and evaluated on later calls, so it MUST outlive
     // this function. A planned `Expr` tree can embed context-allocated
-    // `mcx::PgBox`/`PgVec` children (const-folded sub-expressions the planner
+    // `::mcx::PgBox`/`PgVec` children (const-folded sub-expressions the planner
     // builds into the passed `Mcx`), so planning into a transient context freed
     // on return would dangle them — a later evaluation or the cache drop would
     // double-free through a NULL `Mcx` (SIGSEGV), the parser-coerce crash class.
@@ -1970,7 +1970,7 @@ fn scan_query_sublinks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
     // `CheckRelationLockedByMe` assert in `ExecGetRangeTableRelation`. We therefore
     // mirror C exactly: a recursive `scan_query_walker` that handles the SubLink
     // and then descends via `expression_tree_walker`.
-    let mut err: Option<types_error::PgError> = None;
+    let mut err: Option<::types_error::PgError> = None;
     {
         let mut walker = |node: &Node<'_>| -> bool { scan_query_walker(node, acquire, &mut err) };
         nodes_core::node_walker::query_tree_walker(
@@ -1995,7 +1995,7 @@ fn scan_query_sublinks(parsetree: &Query<'_>, acquire: bool) -> PgResult<()> {
 fn scan_query_walker(
     node: &Node<'_>,
     acquire: bool,
-    err: &mut Option<types_error::PgError>,
+    err: &mut Option<::types_error::PgError>,
 ) -> bool {
     if err.is_some() {
         return true;
@@ -2045,9 +2045,9 @@ fn PlanCacheComputeResultDesc(
     dest: &MemoryContext,
     stmt_list: &[Query<'_>],
 ) -> PgResult<Option<TupleDescData<'static>>> {
-    use portal::PortalStrategy as PStrat;
+    use ::portal::PortalStrategy as PStrat;
     let strategy = pquery_seams::choose_portal_strategy_queries::call(stmt_list)?;
-    let td: types_tuple::heaptuple::TupleDesc<'_> = match strategy {
+    let td: ::types_tuple::heaptuple::TupleDesc<'_> = match strategy {
         PStrat::PORTAL_ONE_SELECT | PStrat::PORTAL_ONE_MOD_WITH => match stmt_list.first() {
             Some(q) => {
                 // The `exec_clean_type_from_tl` seam unifies the target-list and the
@@ -2448,7 +2448,7 @@ fn seam_release_cached_plan(cplan: SeamPlanHandle, owner: ResourceOwnerHandle) -
 /// `ReleaseCachedPlan(portal->cplan, NULL)` (portalmem.c:314). With a NULL
 /// owner `ReleaseCachedPlan` only drops the refcount (the sole fallible path —
 /// `resource_owner_forget_plan` — is skipped), so this is infallible.
-fn seam_portal_release_cached_plan(plan: portal::CachedPlanHandle) {
+fn seam_portal_release_cached_plan(plan: ::portal::CachedPlanHandle) {
     ReleaseCachedPlan(plan.0, ResourceOwnerHandle::NULL)
         .expect("ReleaseCachedPlan(plan, NULL) cannot fail");
 }
@@ -2459,7 +2459,7 @@ fn seam_cached_plan_get_target_list<'mcx>(
     plansource: SeamSourceHandle,
 ) -> PgResult<PgVec<'mcx, Node<'mcx>>> {
     let tl = CachedPlanGetTargetList(mcx, plansource.0, None)?;
-    let mut out = mcx::vec_with_capacity_in(mcx, tl.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, tl.len())?;
     for te in tl.into_iter() {
         out.push(Node::mk_target_entry(mcx, te)?);
     }
@@ -2483,7 +2483,7 @@ fn seam_plansource_param_types<'mcx>(
 ) -> PgResult<PgVec<'mcx, Oid>> {
     let src = get_source(plansource.0);
     let p = src.borrow();
-    let mut out = mcx::vec_with_capacity_in(mcx, p.param_types.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, p.param_types.len())?;
     for &o in p.param_types.iter() {
         out.push(o);
     }
@@ -2494,10 +2494,10 @@ fn seam_plansource_param_types<'mcx>(
 fn seam_plansource_query_string<'mcx>(
     mcx: Mcx<'mcx>,
     plansource: SeamSourceHandle,
-) -> PgResult<mcx::PgString<'mcx>> {
+) -> PgResult<::mcx::PgString<'mcx>> {
     let src = get_source(plansource.0);
     let p = src.borrow();
-    mcx::PgString::from_str_in(p.query_string.as_str(), mcx)
+    ::mcx::PgString::from_str_in(p.query_string.as_str(), mcx)
 }
 
 /// `plansource_command_tag(plansource)`.
@@ -2589,7 +2589,7 @@ fn seam_cached_plan_stmt_list<'mcx>(
     let pl = get_plan(cplan.0);
     let p = pl.borrow();
     debug_assert_eq!(p.magic, CACHEDPLAN_MAGIC);
-    let mut out = mcx::vec_with_capacity_in(mcx, p.stmt_list.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, p.stmt_list.len())?;
     for s in p.stmt_list.iter() {
         out.push(s.clone_in(mcx)?);
     }

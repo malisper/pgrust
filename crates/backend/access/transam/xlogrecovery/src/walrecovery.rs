@@ -34,14 +34,14 @@ use core::cell::Cell;
 
 use alloc::boxed::Box;
 
-use mcx::MemoryContext;
-use types_core::XLogRecPtr;
-use types_error::PgResult;
-use wal::rmgr::XLogReaderState;
-use wal::xlog_consts::XLOG_BLCKSZ;
-use wal::xlogrecovery_carriers::{ReadRecordResult, RecordRef};
+use ::mcx::MemoryContext;
+use ::types_core::XLogRecPtr;
+use ::types_error::PgResult;
+use ::wal::rmgr::XLogReaderState;
+use ::wal::xlog_consts::XLOG_BLCKSZ;
+use ::wal::xlogrecovery_carriers::{ReadRecordResult, RecordRef};
 
-use xlogprefetcher::XLogPrefetcher;
+use ::xlogprefetcher::XLogPrefetcher;
 
 use crate::pageread::{self, XLogPageReadPrivate};
 
@@ -142,7 +142,7 @@ pub fn init_wal_recovery_reader(
     // Permanently allocate readBuf (XLOG_BLCKSZ); the page-read driver reads
     // pages into it.
     state.readBuf = {
-        let mut v = mcx::vec_with_capacity_in(arena, XLOG_BLCKSZ).map_err(|_| arena.oom(XLOG_BLCKSZ))?;
+        let mut v = ::mcx::vec_with_capacity_in(arena, XLOG_BLCKSZ).map_err(|_| arena.oom(XLOG_BLCKSZ))?;
         v.resize(XLOG_BLCKSZ, 0);
         Some(v)
     };
@@ -151,20 +151,20 @@ pub fn init_wal_recovery_reader(
     state.segcxt.ws_segsize = wal_segment_size;
 
     // errormsg_buf = palloc(MAX_ERRORMSG_LEN + 1); start empty.
-    let _ = mcx::vec_with_capacity_in::<u8>(arena, MAX_ERRORMSG_LEN + 1)
+    let _ = ::mcx::vec_with_capacity_in::<u8>(arena, MAX_ERRORMSG_LEN + 1)
         .map_err(|_| arena.oom(MAX_ERRORMSG_LEN + 1))?;
-    state.errormsg_buf = Some(mcx::PgString::new_in(arena));
+    state.errormsg_buf = Some(::mcx::PgString::new_in(arena));
     state.errormsg_deferred = false;
 
     // private = palloc0(sizeof(XLogPageReadPrivate)) — the page-read scratch,
     // type-erased into the reader's `private_data: Option<PgBox<dyn Any>>`.
     {
-        let boxed = mcx::alloc_in(arena, XLogPageReadPrivate::default())?;
-        let (ptr, alloc) = mcx::PgBox::into_raw_with_allocator(boxed);
+        let boxed = ::mcx::alloc_in(arena, XLogPageReadPrivate::default())?;
+        let (ptr, alloc) = ::mcx::PgBox::into_raw_with_allocator(boxed);
         // SAFETY: `ptr` came from `into_raw_with_allocator` with `alloc`; the
         // cast only attaches the `dyn Any` vtable (no `CoerceUnsized` on stable).
-        let erased: mcx::PgBox<'static, dyn core::any::Any> =
-            unsafe { mcx::PgBox::from_raw_in(ptr as *mut dyn core::any::Any, alloc) };
+        let erased: ::mcx::PgBox<'static, dyn core::any::Any> =
+            unsafe { ::mcx::PgBox::from_raw_in(ptr as *mut dyn core::any::Any, alloc) };
         state.private_data = Some(erased);
     }
 
@@ -241,7 +241,7 @@ pub(crate) fn reader_end_rec_ptr() -> XLogRecPtr {
 
 /// `xlogreader->seg.ws_tli` — timeline of the currently open WAL segment.
 #[inline]
-pub(crate) fn reader_seg_tli() -> types_core::TimeLineID {
+pub(crate) fn reader_seg_tli() -> ::types_core::TimeLineID {
     reader_state().seg.ws_tli
 }
 
@@ -273,12 +273,12 @@ pub(crate) fn prefetcher_begin_read_pub(rec_ptr: XLogRecPtr) {
 /// `private->fetching_ckpt/emode/randAccess/replayTLI`. `randAccess` is
 /// `(xlogreader->ReadRecPtr == InvalidXLogRecPtr)`.
 pub(crate) fn set_page_read_private(
-    emode: types_error::ErrorLevel,
+    emode: ::types_error::ErrorLevel,
     fetching_ckpt: bool,
-    replay_tli: types_core::TimeLineID,
+    replay_tli: ::types_core::TimeLineID,
 ) {
     let r = reader();
-    let rand_access = r.ReadRecPtr == types_core::InvalidXLogRecPtr;
+    let rand_access = r.ReadRecPtr == ::types_core::InvalidXLogRecPtr;
     if let Some(any) = r.private_data.as_mut() {
         if let Some(p) = (any.as_mut() as &mut dyn core::any::Any)
             .downcast_mut::<crate::pageread::XLogPageReadPrivate>()
@@ -381,7 +381,7 @@ fn prefetcher_read_record() -> ReadRecordResult {
     // reader the prefetcher just drove.
     let r = reader();
 
-    use wal::wal::XLogNextRecordResult;
+    use ::wal::wal::XLogNextRecordResult;
     let (record, errormsg) = match outcome {
         Ok(XLogNextRecordResult::Record { .. }) => {
             // Got a record: name it with a non-zero RecordRef (the held

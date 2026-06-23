@@ -34,13 +34,13 @@
 //! a single bufmgr-defined outward seam installed by the recovery/standby owner
 //! when it ports.
 
-use types_core::primitive::{Buffer, XLogRecPtr};
-use types_storage::buf::{
+use ::types_core::primitive::{Buffer, XLogRecPtr};
+use ::types_storage::buf::{
     BM_DIRTY, BM_JUST_DIRTIED, BM_PERMANENT, BM_PIN_COUNT_WAITER, BUFFER_LOCK_EXCLUSIVE,
     BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
 use types_error::{PgError, PgResult};
-use types_storage::storage::{LWLockMode, RelFileLocator};
+use ::types_storage::storage::{LWLockMode, RelFileLocator};
 
 use bufmgr_seams as sb;
 use lwlock as lwlock;
@@ -53,7 +53,7 @@ const INVALID_XLOG_REC_PTR: XLogRecPtr = 0;
 /// `BUF_STATE_GET_REFCOUNT(buf_state)` (buf_internals.h).
 #[inline]
 fn buf_state_get_refcount(buf_state: u32) -> u32 {
-    buf_state & types_storage::buf::BUF_REFCOUNT_MASK
+    buf_state & ::types_storage::buf::BUF_REFCOUNT_MASK
 }
 
 /// `BufferIsLocal(buffer)` (buf.h) — temp/local buffers carry a NEGATIVE handle.

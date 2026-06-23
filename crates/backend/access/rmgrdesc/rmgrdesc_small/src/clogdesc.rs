@@ -1,8 +1,8 @@
 //! `clogdesc.c` — rmgr descriptor routines for `access/transam/clog.c`.
 
-use mcx::PgString;
-use types_core::uint8;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_core::uint8;
+use ::types_error::PgResult;
 use wal::{xl_clog_truncate, DecodedXLogRecord, XLR_INFO_MASK};
 
 use crate::util::{appendf, read_i64, record_truncated};
@@ -46,7 +46,7 @@ pub fn clog_identify(info: uint8) -> Option<&'static str> {
 /// rmgr table invokes `rm_desc`.
 pub fn clog_desc_seam(
     buf: &mut PgString<'_>,
-    record: &wal::rmgr::XLogReaderState<'_>,
+    record: &::wal::rmgr::XLogReaderState<'_>,
 ) -> PgResult<()> {
     let record = record
         .record

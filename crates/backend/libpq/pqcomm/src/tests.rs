@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Once;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use net::{Port, SockError, SockResult};
 
 use crate::*;
@@ -248,7 +248,7 @@ fn socket_set_nonblocking_errors_without_port() {
     install_fakes();
     FAKE_PORT.with(|p| *p.borrow_mut() = None);
     let err = socket_set_nonblocking(true).unwrap_err();
-    assert_eq!(err.sqlstate, types_error::ERRCODE_CONNECTION_DOES_NOT_EXIST);
+    assert_eq!(err.sqlstate, ::types_error::ERRCODE_CONNECTION_DOES_NOT_EXIST);
     FAKE_PORT.with(|p| *p.borrow_mut() = Some(Port::zeroed()));
 }
 

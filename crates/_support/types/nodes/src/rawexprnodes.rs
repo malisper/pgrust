@@ -26,8 +26,8 @@
 //! types and ride as data — the grammar leaves them `InvalidOid`/`-1`.
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::primitive::{Index, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{Index, Oid};
+use ::types_error::PgResult;
 
 use crate::nodes::NodePtr;
 use crate::primnodes::{
@@ -307,11 +307,11 @@ pub struct GroupingFunc<'mcx> {
 impl GroupingFunc<'_> {
     /// Deep copy into `mcx` (C: `copyObject` over `GroupingFunc`).
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<GroupingFunc<'b>> {
-        let mut refs = mcx::vec_with_capacity_in(mcx, self.refs.len())?;
+        let mut refs = ::mcx::vec_with_capacity_in(mcx, self.refs.len())?;
         for r in self.refs.iter() {
             refs.push(*r);
         }
-        let mut cols = mcx::vec_with_capacity_in(mcx, self.cols.len())?;
+        let mut cols = ::mcx::vec_with_capacity_in(mcx, self.cols.len())?;
         for c in self.cols.iter() {
             cols.push(*c);
         }
@@ -480,7 +480,7 @@ pub struct XmlSerialize<'mcx> {
     /// `Node *expr` — the value expression to serialize.
     pub expr: Option<NodePtr<'mcx>>,
     /// `TypeName *typeName` — the target SQL type (`AS <type>`).
-    pub type_name: Option<mcx::PgBox<'mcx, TypeName<'mcx>>>,
+    pub type_name: Option<::mcx::PgBox<'mcx, TypeName<'mcx>>>,
     /// `bool indent` — `[NO] INDENT`.
     pub indent: bool,
     /// `ParseLoc location`.
@@ -494,7 +494,7 @@ impl XmlSerialize<'_> {
             xmloption: self.xmloption,
             expr: copy_opt_node(&self.expr, mcx)?,
             type_name: match &self.type_name {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             indent: self.indent,
@@ -625,7 +625,7 @@ impl JsonBehavior<'_> {
 #[derive(Debug)]
 pub struct JsonOutput<'mcx> {
     /// `TypeName *typeName`.
-    pub type_name: Option<mcx::PgBox<'mcx, TypeName<'mcx>>>,
+    pub type_name: Option<::mcx::PgBox<'mcx, TypeName<'mcx>>>,
     /// `JsonReturning *returning` — analyze-filled.
     pub returning: Option<crate::primnodes::JsonReturning>,
 }
@@ -635,7 +635,7 @@ impl JsonOutput<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<JsonOutput<'b>> {
         Ok(JsonOutput {
             type_name: match &self.type_name {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             returning: self.returning,
@@ -650,7 +650,7 @@ pub struct JsonKeyValue<'mcx> {
     /// `Expr *key` — raw key expression.
     pub key: Option<NodePtr<'mcx>>,
     /// `JsonValueExpr *value` — raw value.
-    pub value: Option<mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
+    pub value: Option<::mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
 }
 
 impl JsonKeyValue<'_> {
@@ -659,7 +659,7 @@ impl JsonKeyValue<'_> {
         Ok(JsonKeyValue {
             key: copy_opt_node(&self.key, mcx)?,
             value: match &self.value {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
         })
@@ -672,7 +672,7 @@ pub struct JsonObjectConstructor<'mcx> {
     /// `List *exprs` — list of `JsonKeyValue` pairs.
     pub exprs: PgVec<'mcx, NodePtr<'mcx>>,
     /// `JsonOutput *output`.
-    pub output: Option<mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
+    pub output: Option<::mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
     /// `bool absent_on_null`.
     pub absent_on_null: bool,
     /// `bool unique`.
@@ -700,7 +700,7 @@ pub struct JsonArrayConstructor<'mcx> {
     /// `List *exprs` — list of `JsonValueExpr` elements.
     pub exprs: PgVec<'mcx, NodePtr<'mcx>>,
     /// `JsonOutput *output`.
-    pub output: Option<mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
+    pub output: Option<::mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
     /// `bool absent_on_null`.
     pub absent_on_null: bool,
     /// `ParseLoc location`.
@@ -725,7 +725,7 @@ pub struct JsonArrayQueryConstructor<'mcx> {
     /// `Node *query` — the subquery.
     pub query: Option<NodePtr<'mcx>>,
     /// `JsonOutput *output`.
-    pub output: Option<mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
+    pub output: Option<::mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
     /// `JsonFormat *format`.
     pub format: Option<JsonFormat>,
     /// `bool absent_on_null`.
@@ -752,13 +752,13 @@ impl JsonArrayQueryConstructor<'_> {
 #[derive(Debug)]
 pub struct JsonAggConstructor<'mcx> {
     /// `JsonOutput *output`.
-    pub output: Option<mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
+    pub output: Option<::mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
     /// `Node *agg_filter` — FILTER clause.
     pub agg_filter: Option<NodePtr<'mcx>>,
     /// `List *agg_order` — ORDER BY in the aggregate.
     pub agg_order: PgVec<'mcx, NodePtr<'mcx>>,
     /// `WindowDef *over` — OVER clause.
-    pub over: Option<mcx::PgBox<'mcx, crate::rawnodes::WindowDef<'mcx>>>,
+    pub over: Option<::mcx::PgBox<'mcx, crate::rawnodes::WindowDef<'mcx>>>,
     /// `ParseLoc location`.
     pub location: i32,
 }
@@ -771,7 +771,7 @@ impl JsonAggConstructor<'_> {
             agg_filter: copy_opt_node(&self.agg_filter, mcx)?,
             agg_order: copy_node_vec(&self.agg_order, mcx)?,
             over: match &self.over {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             location: self.location,
@@ -783,9 +783,9 @@ impl JsonAggConstructor<'_> {
 #[derive(Debug)]
 pub struct JsonObjectAgg<'mcx> {
     /// `JsonAggConstructor *constructor`.
-    pub constructor: Option<mcx::PgBox<'mcx, JsonAggConstructor<'mcx>>>,
+    pub constructor: Option<::mcx::PgBox<'mcx, JsonAggConstructor<'mcx>>>,
     /// `JsonKeyValue *arg`.
-    pub arg: Option<mcx::PgBox<'mcx, JsonKeyValue<'mcx>>>,
+    pub arg: Option<::mcx::PgBox<'mcx, JsonKeyValue<'mcx>>>,
     /// `bool absent_on_null`.
     pub absent_on_null: bool,
     /// `bool unique`.
@@ -797,11 +797,11 @@ impl JsonObjectAgg<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<JsonObjectAgg<'b>> {
         Ok(JsonObjectAgg {
             constructor: match &self.constructor {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             arg: match &self.arg {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             absent_on_null: self.absent_on_null,
@@ -814,9 +814,9 @@ impl JsonObjectAgg<'_> {
 #[derive(Debug)]
 pub struct JsonArrayAgg<'mcx> {
     /// `JsonAggConstructor *constructor`.
-    pub constructor: Option<mcx::PgBox<'mcx, JsonAggConstructor<'mcx>>>,
+    pub constructor: Option<::mcx::PgBox<'mcx, JsonAggConstructor<'mcx>>>,
     /// `JsonValueExpr *arg`.
-    pub arg: Option<mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
+    pub arg: Option<::mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
     /// `bool absent_on_null`.
     pub absent_on_null: bool,
 }
@@ -826,11 +826,11 @@ impl JsonArrayAgg<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<JsonArrayAgg<'b>> {
         Ok(JsonArrayAgg {
             constructor: match &self.constructor {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             arg: match &self.arg {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             absent_on_null: self.absent_on_null,
@@ -842,9 +842,9 @@ impl JsonArrayAgg<'_> {
 #[derive(Debug)]
 pub struct JsonParseExpr<'mcx> {
     /// `JsonValueExpr *expr`.
-    pub expr: Option<mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
+    pub expr: Option<::mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
     /// `JsonOutput *output`.
-    pub output: Option<mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
+    pub output: Option<::mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
     /// `bool unique_keys`.
     pub unique_keys: bool,
     /// `ParseLoc location`.
@@ -856,7 +856,7 @@ impl JsonParseExpr<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<JsonParseExpr<'b>> {
         Ok(JsonParseExpr {
             expr: match &self.expr {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             output: copy_opt_json_output(&self.output, mcx)?,
@@ -872,7 +872,7 @@ pub struct JsonScalarExpr<'mcx> {
     /// `Expr *expr` — raw subject expression.
     pub expr: Option<NodePtr<'mcx>>,
     /// `JsonOutput *output`.
-    pub output: Option<mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
+    pub output: Option<::mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
     /// `ParseLoc location`.
     pub location: i32,
 }
@@ -892,9 +892,9 @@ impl JsonScalarExpr<'_> {
 #[derive(Debug)]
 pub struct JsonSerializeExpr<'mcx> {
     /// `JsonValueExpr *expr`.
-    pub expr: Option<mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
+    pub expr: Option<::mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
     /// `JsonOutput *output`.
-    pub output: Option<mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
+    pub output: Option<::mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
     /// `ParseLoc location`.
     pub location: i32,
 }
@@ -904,7 +904,7 @@ impl JsonSerializeExpr<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<JsonSerializeExpr<'b>> {
         Ok(JsonSerializeExpr {
             expr: match &self.expr {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             output: copy_opt_json_output(&self.output, mcx)?,
@@ -917,7 +917,7 @@ impl JsonSerializeExpr<'_> {
 #[derive(Debug)]
 pub struct JsonArgument<'mcx> {
     /// `JsonValueExpr *val`.
-    pub val: Option<mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
+    pub val: Option<::mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
     /// `char *name`.
     pub name: Option<PgString<'mcx>>,
 }
@@ -927,7 +927,7 @@ impl JsonArgument<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<JsonArgument<'b>> {
         Ok(JsonArgument {
             val: match &self.val {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             name: copy_opt_str(&self.name, mcx)?,
@@ -944,13 +944,13 @@ pub struct JsonFuncExpr<'mcx> {
     /// `char *column_name`.
     pub column_name: Option<PgString<'mcx>>,
     /// `JsonValueExpr *context_item`.
-    pub context_item: Option<mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
+    pub context_item: Option<::mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
     /// `Node *pathspec`.
     pub pathspec: Option<NodePtr<'mcx>>,
     /// `List *passing` — list of `JsonArgument`.
     pub passing: PgVec<'mcx, NodePtr<'mcx>>,
     /// `JsonOutput *output`.
-    pub output: Option<mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
+    pub output: Option<::mcx::PgBox<'mcx, JsonOutput<'mcx>>>,
     /// `JsonBehavior *on_empty`.
     pub on_empty: Option<NodePtr<'mcx>>,
     /// `JsonBehavior *on_error`.
@@ -970,7 +970,7 @@ impl JsonFuncExpr<'_> {
             op: self.op,
             column_name: copy_opt_str(&self.column_name, mcx)?,
             context_item: match &self.context_item {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             pathspec: copy_opt_node(&self.pathspec, mcx)?,
@@ -1015,9 +1015,9 @@ impl JsonTablePathSpec<'_> {
 #[derive(Debug)]
 pub struct JsonTable<'mcx> {
     /// `JsonValueExpr *context_item`.
-    pub context_item: Option<mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
+    pub context_item: Option<::mcx::PgBox<'mcx, JsonValueExpr<'mcx>>>,
     /// `JsonTablePathSpec *pathspec`.
-    pub pathspec: Option<mcx::PgBox<'mcx, JsonTablePathSpec<'mcx>>>,
+    pub pathspec: Option<::mcx::PgBox<'mcx, JsonTablePathSpec<'mcx>>>,
     /// `List *passing` — list of `JsonArgument`.
     pub passing: PgVec<'mcx, NodePtr<'mcx>>,
     /// `List *columns` — list of `JsonTableColumn`.
@@ -1025,7 +1025,7 @@ pub struct JsonTable<'mcx> {
     /// `JsonBehavior *on_error`.
     pub on_error: Option<NodePtr<'mcx>>,
     /// `Alias *alias`.
-    pub alias: Option<mcx::PgBox<'mcx, crate::rawnodes::Alias<'mcx>>>,
+    pub alias: Option<::mcx::PgBox<'mcx, crate::rawnodes::Alias<'mcx>>>,
     /// `bool lateral`.
     pub lateral: bool,
     /// `ParseLoc location`.
@@ -1037,18 +1037,18 @@ impl JsonTable<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<JsonTable<'b>> {
         Ok(JsonTable {
             context_item: match &self.context_item {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             pathspec: match &self.pathspec {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             passing: copy_node_vec(&self.passing, mcx)?,
             columns: copy_node_vec(&self.columns, mcx)?,
             on_error: copy_opt_node(&self.on_error, mcx)?,
             alias: match &self.alias {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             lateral: self.lateral,
@@ -1065,9 +1065,9 @@ pub struct JsonTableColumn<'mcx> {
     /// `char *name`.
     pub name: Option<PgString<'mcx>>,
     /// `TypeName *typeName`.
-    pub type_name: Option<mcx::PgBox<'mcx, TypeName<'mcx>>>,
+    pub type_name: Option<::mcx::PgBox<'mcx, TypeName<'mcx>>>,
     /// `JsonTablePathSpec *pathspec`.
-    pub pathspec: Option<mcx::PgBox<'mcx, JsonTablePathSpec<'mcx>>>,
+    pub pathspec: Option<::mcx::PgBox<'mcx, JsonTablePathSpec<'mcx>>>,
     /// `JsonFormat *format`.
     pub format: Option<JsonFormat>,
     /// `JsonWrapper wrapper`.
@@ -1091,11 +1091,11 @@ impl JsonTableColumn<'_> {
             coltype: self.coltype,
             name: copy_opt_str(&self.name, mcx)?,
             type_name: match &self.type_name {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             pathspec: match &self.pathspec {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             format: self.format,
@@ -1111,11 +1111,11 @@ impl JsonTableColumn<'_> {
 
 /// Deep-copy an `Option<PgBox<JsonOutput>>` into `mcx` (shared helper).
 fn copy_opt_json_output<'b>(
-    o: &Option<mcx::PgBox<'_, JsonOutput<'_>>>,
+    o: &Option<::mcx::PgBox<'_, JsonOutput<'_>>>,
     mcx: Mcx<'b>,
-) -> PgResult<Option<mcx::PgBox<'b, JsonOutput<'b>>>> {
+) -> PgResult<Option<::mcx::PgBox<'b, JsonOutput<'b>>>> {
     match o {
-        Some(t) => Ok(Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?)),
+        Some(t) => Ok(Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }

@@ -4,9 +4,9 @@
 
 use alloc::format;
 
-use mcx::Mcx;
-use types_acl::acl::ACL_SELECT_FOR_UPDATE;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_acl::acl::ACL_SELECT_FOR_UPDATE;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::RTEKind;
@@ -32,11 +32,11 @@ pub fn LCS_asString(strength: LockClauseStrength) -> &'static str {
 /// `RangeVar`'s token position (C: `parser_errposition(pstate, thisrel->location)`).
 fn locking_errpos(
     pstate: &ParseState<'_>,
-    errcode: types_error::SqlState,
+    errcode: ::types_error::SqlState,
     msg: alloc::string::String,
     location: i32,
-) -> types_error::PgError {
-    utils_error::ereport(types_error::ERROR)
+) -> ::types_error::PgError {
+    utils_error::ereport(::types_error::ERROR)
         .errcode(errcode)
         .errmsg(msg)
         .errposition(small1::parser_errposition(pstate, location))
@@ -130,7 +130,7 @@ pub fn transformLockingClause<'mcx>(
                     applyLockingClause(mcx, qry, i, lc.strength, lc.waitPolicy, pushed_down)?;
                     // Propagate to all of subquery's rels via an "all rels" clause.
                     let allrels = LockingClause {
-                        lockedRels: mcx::PgVec::new_in(mcx),
+                        lockedRels: ::mcx::PgVec::new_in(mcx),
                         strength: lc.strength,
                         waitPolicy: lc.waitPolicy,
                     };
@@ -228,7 +228,7 @@ pub fn transformLockingClause<'mcx>(
                     RTEKind::RTE_SUBQUERY => {
                         applyLockingClause(mcx, qry, i, lc.strength, lc.waitPolicy, pushed_down)?;
                         let allrels = LockingClause {
-                            lockedRels: mcx::PgVec::new_in(mcx),
+                            lockedRels: ::mcx::PgVec::new_in(mcx),
                             strength: lc.strength,
                             waitPolicy: lc.waitPolicy,
                         };
@@ -241,7 +241,7 @@ pub fn transformLockingClause<'mcx>(
                     RTEKind::RTE_JOIN => {
                         return Err(locking_errpos(
                             pstate,
-                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                             format!("{} cannot be applied to a join", LCS_asString(lc.strength)),
                             thisrel_location,
                         ))
@@ -249,7 +249,7 @@ pub fn transformLockingClause<'mcx>(
                     RTEKind::RTE_FUNCTION => {
                         return Err(locking_errpos(
                             pstate,
-                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                             format!(
                                 "{} cannot be applied to a function",
                                 LCS_asString(lc.strength)
@@ -260,7 +260,7 @@ pub fn transformLockingClause<'mcx>(
                     RTEKind::RTE_TABLEFUNC => {
                         return Err(locking_errpos(
                             pstate,
-                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                             format!(
                                 "{} cannot be applied to a table function",
                                 LCS_asString(lc.strength)
@@ -271,7 +271,7 @@ pub fn transformLockingClause<'mcx>(
                     RTEKind::RTE_VALUES => {
                         return Err(locking_errpos(
                             pstate,
-                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                             format!("{} cannot be applied to VALUES", LCS_asString(lc.strength)),
                             thisrel_location,
                         ))
@@ -279,7 +279,7 @@ pub fn transformLockingClause<'mcx>(
                     RTEKind::RTE_CTE => {
                         return Err(locking_errpos(
                             pstate,
-                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                             format!(
                                 "{} cannot be applied to a WITH query",
                                 LCS_asString(lc.strength)
@@ -290,7 +290,7 @@ pub fn transformLockingClause<'mcx>(
                     RTEKind::RTE_NAMEDTUPLESTORE => {
                         return Err(locking_errpos(
                             pstate,
-                            types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                            ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                             format!(
                                 "{} cannot be applied to a named tuplestore",
                                 LCS_asString(lc.strength)
@@ -310,7 +310,7 @@ pub fn transformLockingClause<'mcx>(
             if !found {
                 return Err(locking_errpos(
                     pstate,
-                    types_error::ERRCODE_UNDEFINED_TABLE,
+                    ::types_error::ERRCODE_UNDEFINED_TABLE,
                     format!(
                         "relation \"{}\" in {} clause not found in FROM clause",
                         thisrel_name,
@@ -363,7 +363,7 @@ pub fn applyLockingClause<'mcx>(
     qry.rowMarks
         .try_reserve(1)
         .map_err(|_| mcx.oom(core::mem::size_of::<RowMarkClause>()))?;
-    let node = mcx::alloc_in(mcx, Node::mk_row_mark_clause(mcx, rc)?)?;
+    let node = ::mcx::alloc_in(mcx, Node::mk_row_mark_clause(mcx, rc)?)?;
     qry.rowMarks.push(node);
     Ok(())
 }

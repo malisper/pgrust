@@ -232,6 +232,6 @@ pub fn extract_autovac_opts(
 
 /// `BlockNumberIsValid(blockNumber)` — `blockNumber != InvalidBlockNumber`.
 #[inline]
-pub const fn BlockNumberIsValid(block_number: types_core::BlockNumber) -> bool {
+pub const fn BlockNumberIsValid(block_number: ::types_core::BlockNumber) -> bool {
     block_number != InvalidBlockNumber
 }

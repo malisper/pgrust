@@ -62,13 +62,13 @@
 //! This crate owns no inward seam crate (no cyclic caller needs it), so it
 //! declares no seams and has no `init_seams()`.
 
-// Fallible functions return the shared `types_error::PgResult`.
+// Fallible functions return the shared `::types_error::PgResult`.
 #![allow(clippy::result_large_err)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
 use mcx::{Mcx, PgVec};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     PgError, PgResult, ERROR, WARNING, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -90,8 +90,8 @@ fn xlog_is_needed() -> bool {
 
 /// `ErrorLocation` for this TU's `ereport` calls (file/line/func, line 0 since
 /// the value model does not carry C line numbers).
-fn here(funcname: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new(
+fn here(funcname: &'static str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new(
         "../src/backend/access/transam/xlogfuncs.c",
         0,
         funcname,
@@ -190,7 +190,7 @@ pub fn pg_backup_start<'mcx>(
     mcx: Mcx<'mcx>,
     backupid: &str,
     fast: bool,
-) -> PgResult<(XLogRecPtr, wal::BackupState, PgVec<'mcx, u8>)> {
+) -> PgResult<(XLogRecPtr, ::wal::BackupState, PgVec<'mcx, u8>)> {
     let status = xlog_seams::get_backup_status::call();
 
     // text_to_cstring(backupid): in the value model the label is already decoded.
@@ -211,7 +211,7 @@ pub fn pg_backup_start<'mcx>(
         xlog_seams::do_pg_backup_start::call(backupidstr, fast)?;
 
     let startpoint = backup_state.startpoint();
-    let map = mcx::slice_in(mcx, &tablespace_map_bytes)?;
+    let map = ::mcx::slice_in(mcx, &tablespace_map_bytes)?;
 
     Ok((startpoint, backup_state, map))
 }
@@ -233,7 +233,7 @@ fn register_persistent_abort_backup_handler() -> PgResult<()> {
 pub fn pg_backup_stop<'mcx>(
     mcx: Mcx<'mcx>,
     waitforarchive: bool,
-    backup_state: wal::BackupState,
+    backup_state: ::wal::BackupState,
     tablespace_map: &[u8],
 ) -> PgResult<BackupStopResult<'mcx>> {
     let status = xlog_seams::get_backup_status::call();
@@ -472,7 +472,7 @@ pub fn pg_split_walfile_name<'mcx>(
 
     let wal_segsz = xlog_seams::wal_segment_size::call();
     // XLogFromFileName(fname_upper, &tli, &segno, wal_segment_size).
-    let (tli, segno): (TimeLineID, types_core::XLogSegNo) =
+    let (tli, segno): (TimeLineID, ::types_core::XLogSegNo) =
         xlog::XLogFromFileName(&fname_upper, wal_segsz)?;
 
     // get_call_result_type composite-check: elided (value model).
@@ -683,8 +683,8 @@ pub fn pg_promote(wait: bool, wait_seconds: i32) -> PgResult<bool> {
         // Emergency bailout if postmaster has died.
         if rc & types_storage::waiteventset::WL_POSTMASTER_DEATH != 0 {
             // C: ereport(FATAL, ...). The error builder carries FATAL on Err.
-            return ereport(types_error::FATAL)
-                .errcode(types_error::ERRCODE_ADMIN_SHUTDOWN)
+            return ereport(::types_error::FATAL)
+                .errcode(::types_error::ERRCODE_ADMIN_SHUTDOWN)
                 .errmsg("terminating connection due to unexpected postmaster exit")
                 .errcontext_msg("while waiting on promotion")
                 .finish(here("pg_promote"))

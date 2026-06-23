@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-pub use types_core::PgWChar;
+pub use ::types_core::PgWChar;
 
 pub type pg_wchar = PgWChar;
 

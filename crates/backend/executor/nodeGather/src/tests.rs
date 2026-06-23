@@ -4,7 +4,7 @@
 //! exercised by the integration suite once those owners land. Here we cover the
 //! plan-node vocabulary and the seam-free constants.
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use ::nodes::nodegather::{Gather, T_Gather, T_GatherState};
 
 #[test]

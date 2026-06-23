@@ -1,9 +1,9 @@
 //! Finalize family: running final functions to produce aggregate results
 //! (full and partial) and projecting the group's output tuple.
 
-use types_core::primitive::{Oid, OidIsValid};
+use ::types_core::primitive::{Oid, OidIsValid};
 use types_tuple::heaptuple::Datum;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::execexpr::ExprState;
 use ::nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
 use ::nodes::nodeagg::do_aggsplit_skipfinal;
@@ -397,7 +397,7 @@ fn invoke_finalfn<'mcx>(
     collation: Oid,
     args: alloc::vec::Vec<Datum<'mcx>>,
     arg_isnull: alloc::vec::Vec<bool>,
-    fn_expr: Option<types_core::fmgr::FnExprErased>,
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool, Option<Datum<'mcx>>)> {
     let mcx = estate.es_query_cxt;
@@ -461,7 +461,7 @@ fn invoke_serialfn<'mcx>(
     // The serialfn frame was built with `InvalidOid` collation (numeric.c serialfns
     // ignore collation); `agg_collation` is the input collation and is not used by
     // the serialfn. Mirror the C `InitFunctionCallInfoData(..., InvalidOid, ...)`.
-    let collation = types_core::primitive::INVALID_OID;
+    let collation = ::types_core::primitive::INVALID_OID;
     let fn_expr = pertrans.serialfn.fn_expr.clone();
     let serialfn_fcinfo = pertrans.serialfn_fcinfo.as_deref();
 

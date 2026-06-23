@@ -21,12 +21,12 @@ extern crate alloc;
 
 mod tables;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use conv_string_helpers::{
     make_conversion_builtin, ConversionResult, LocalToUtf, UtfToLocal,
 };
-use mbutils_seams::check_encoding_conversion_args;
-use types_wchar::encoding::{pg_enc, PG_EUC_JP, PG_UTF8};
+use ::mbutils_seams::check_encoding_conversion_args;
+use ::types_wchar::encoding::{pg_enc, PG_EUC_JP, PG_UTF8};
 
 /// `euc_jp_to_utf8` (utf8_and_euc_jp.c): convert PG_EUC_JP <-> PG_UTF8.
 pub fn euc_jp_to_utf8(

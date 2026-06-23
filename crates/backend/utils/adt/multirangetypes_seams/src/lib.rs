@@ -5,11 +5,11 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::Oid;
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::Oid;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP};
 use types_tuple::heaptuple::Datum as DatumV;
 

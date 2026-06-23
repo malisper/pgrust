@@ -4,7 +4,7 @@
 use crate::raw_parser;
 use backend_nodes_types::node_tags::*;
 use backend_nodes_types::parsenodes_stmts::RawStmt;
-use pg_ffi_fgram::spi::RAW_PARSE_DEFAULT;
+use ::pg_ffi_fgram::spi::RAW_PARSE_DEFAULT;
 use pg_ffi_fgram::{List, Node, NodeTag};
 
 /// Parse `sql` and return the top NodeTag of the first statement (the `stmt`

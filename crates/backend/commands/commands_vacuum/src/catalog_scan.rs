@@ -23,13 +23,13 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, MemoryContext};
 
-use types_core::primitive::{MultiXactId, Oid, TransactionId};
+use ::types_core::primitive::{MultiXactId, Oid, TransactionId};
 use types_error::{PgError, PgResult};
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
 
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
+use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam;
 use table::{table_close, table_open};
 
@@ -37,7 +37,7 @@ use vacuum_seams::{
     DatFrozenApplyResult, PgClassFrozenRow, PgClassScanRow, PgDatabaseFrozenRow,
     RelStatsApplyResult,
 };
-use types_vacuum::vacuumlazy::UpdateRelStatsArgs;
+use ::types_vacuum::vacuumlazy::UpdateRelStatsArgs;
 
 use crate::{multixact_seam, varsup_seam};
 
@@ -45,20 +45,20 @@ use crate::{multixact_seam, varsup_seam};
 // Catalog constants (verified against PostgreSQL 18.3 headers).
 // ---------------------------------------------------------------------------
 
-use types_catalog::pg_class::{
+use ::types_catalog::pg_class::{
     Anum_pg_class_oid, Anum_pg_class_relallfrozen, Anum_pg_class_relallvisible,
     Anum_pg_class_relfrozenxid, Anum_pg_class_relhasindex, Anum_pg_class_relisshared,
     Anum_pg_class_relkind, Anum_pg_class_relminmxid, Anum_pg_class_relpages,
     Anum_pg_class_relreplident, Anum_pg_class_reltuples, ClassOidIndexId, RelationRelationId,
 };
-use types_catalog::pg_class::{
+use ::types_catalog::pg_class::{
     Anum_pg_class_relam, Anum_pg_class_relfilenode, Anum_pg_class_relhassubclass,
     Anum_pg_class_relispartition, Anum_pg_class_relispopulated, Anum_pg_class_relname,
     Anum_pg_class_relnamespace, Anum_pg_class_relowner, Anum_pg_class_relpersistence,
     Anum_pg_class_relrowsecurity, Anum_pg_class_reltablespace, Anum_pg_class_reltoastrelid,
     Anum_pg_class_reltype,
 };
-use types_catalog::pg_database::{
+use ::types_catalog::pg_database::{
     Anum_pg_database_datconnlimit, Anum_pg_database_datfrozenxid, Anum_pg_database_datminmxid,
     Anum_pg_database_datname, Anum_pg_database_oid, DatabaseOidIndexId, DatabaseRelationId,
     DATCONNLIMIT_INVALID_DB,
@@ -186,7 +186,7 @@ fn scan_all_pg_class<'caller>(caller_mcx: Mcx<'caller>) -> PgResult<Vec<PgClassS
         // consumers read are filled from the tuple; the rest take faithful
         // deformed values too so the projection is a true GETSTRUCT image.
         let class_form = rel::FormData_pg_class {
-            relname: mcx::PgString::from_str_in(
+            relname: ::mcx::PgString::from_str_in(
                 &name_str(&cols[(Anum_pg_class_relname - 1) as usize]),
                 caller_mcx,
             )?,
@@ -237,8 +237,8 @@ fn scan_all_pg_class<'caller>(caller_mcx: Mcx<'caller>) -> PgResult<Vec<PgClassS
 /// `datminmxid`@11, before the variable-length `datcollate`@13) are all
 /// fixed-width non-null, so each sits at a constant data-area offset. Returns
 /// `None` if a preceding column is variable-length.
-fn fixed_attr_offset(tupdesc: &types_tuple::heaptuple::TupleDescData<'_>, anum: i16) -> Option<usize> {
-    use arrayfuncs::foundation::att_align_nominal;
+fn fixed_attr_offset(tupdesc: &::types_tuple::heaptuple::TupleDescData<'_>, anum: i16) -> Option<usize> {
+    use ::arrayfuncs::foundation::att_align_nominal;
     let mut off: usize = 0;
     for i in 0..(anum as usize - 1) {
         let att = tupdesc.attr(i);
@@ -256,7 +256,7 @@ fn fixed_attr_offset(tupdesc: &types_tuple::heaptuple::TupleDescData<'_>, anum: 
 /// `oid = OID` scan key on `attno` (`ScanKeyInit(BTEqualStrategyNumber,
 /// F_OIDEQ)`).
 fn oid_key<'mcx>(
-    attno: types_core::AttrNumber,
+    attno: ::types_core::AttrNumber,
     value: Oid,
 ) -> PgResult<types_scan::scankey::ScanKeyData<'mcx>> {
     let mut key = types_scan::scankey::ScanKeyData::empty();
@@ -264,7 +264,7 @@ fn oid_key<'mcx>(
         &mut key,
         attno,
         types_scan::scankey::BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         Datum::from_oid(value),
     )?;
     Ok(key)
@@ -322,10 +322,10 @@ fn vac_update_relstats_apply(relation: Oid, args: UpdateRelStatsArgs) -> PgResul
         .ok_or_else(|| PgError::error("pg_class relallfrozen not at a fixed offset"))?;
     let off_relhasindex = fixed_attr_offset(&tupdesc, Anum_pg_class_relhasindex)
         .ok_or_else(|| PgError::error("pg_class relhasindex not at a fixed offset"))?;
-    let off_relhasrules = fixed_attr_offset(&tupdesc, types_catalog::pg_class::Anum_pg_class_relhasrules)
+    let off_relhasrules = fixed_attr_offset(&tupdesc, ::types_catalog::pg_class::Anum_pg_class_relhasrules)
         .ok_or_else(|| PgError::error("pg_class relhasrules not at a fixed offset"))?;
     let off_relhastriggers =
-        fixed_attr_offset(&tupdesc, types_catalog::pg_class::Anum_pg_class_relhastriggers)
+        fixed_attr_offset(&tupdesc, ::types_catalog::pg_class::Anum_pg_class_relhastriggers)
             .ok_or_else(|| PgError::error("pg_class relhastriggers not at a fixed offset"))?;
     let off_relfrozenxid = fixed_attr_offset(&tupdesc, Anum_pg_class_relfrozenxid)
         .ok_or_else(|| PgError::error("pg_class relfrozenxid not at a fixed offset"))?;
@@ -594,9 +594,9 @@ fn multixact_id_precedes(multi1: MultiXactId, multi2: MultiXactId) -> bool {
 /// Install the catalog SCAN + inplace-WRITE seams this unit owns (the five
 /// vacuum.c loops/writers that were seamed out of `lib.rs`).
 pub(crate) fn install() {
-    vacuum_seams::scan_pg_class_frozenids::set(scan_pg_class_frozenids);
-    vacuum_seams::scan_pg_database_frozenids::set(scan_pg_database_frozenids);
-    vacuum_seams::scan_all_pg_class::set(scan_all_pg_class);
-    vacuum_seams::vac_update_relstats_apply::set(vac_update_relstats_apply);
-    vacuum_seams::vac_update_datfrozenxid_apply::set(vac_update_datfrozenxid_apply);
+    ::vacuum_seams::scan_pg_class_frozenids::set(scan_pg_class_frozenids);
+    ::vacuum_seams::scan_pg_database_frozenids::set(scan_pg_database_frozenids);
+    ::vacuum_seams::scan_all_pg_class::set(scan_all_pg_class);
+    ::vacuum_seams::vac_update_relstats_apply::set(vac_update_relstats_apply);
+    ::vacuum_seams::vac_update_datfrozenxid_apply::set(vac_update_datfrozenxid_apply);
 }

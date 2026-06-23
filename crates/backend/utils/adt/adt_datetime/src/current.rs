@@ -19,10 +19,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use transam_xact::{
     GetCurrentStatementStartTimestamp, GetCurrentTransactionStartTimestamp,
 };
-use localtime::pg_localtime;
-use state_pgtz::session_timezone;
-use types_core::pg_time_t;
-use types_datetime::TimestampTz;
+use ::localtime::pg_localtime;
+use ::state_pgtz::session_timezone;
+use ::types_core::pg_time_t;
+use ::types_datetime::TimestampTz;
 
 use crate::timestamp::GetCurrentTimestamp;
 
@@ -91,7 +91,7 @@ pub fn timeofday() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use transam_xact::SetParallelStartTimestamps;
+    use ::transam_xact::SetParallelStartTimestamps;
 
     #[test]
     #[ignore = "SetParallelStartTimestamps asserts is_parallel_worker; pinning timestamps outside a parallel worker is not unit-isolatable"]

@@ -14,9 +14,9 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::parsestmt::RawStmt;
-use parsenodes::RawParseMode;
+use ::parsenodes::RawParseMode;
 
 seam_core::seam!(
     /// The `raw_parser` drive owned by the grammar/scanner: `scanner_init` +

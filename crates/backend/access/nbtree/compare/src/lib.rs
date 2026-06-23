@@ -35,8 +35,8 @@
 // fmgr-core builtin table (C: `fmgr_builtins[]`), which uses `String`/`std`.
 #![allow(non_snake_case)]
 
-use types_core::primitive::{InvalidOid, Oid};
-use datum::Datum;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::datum::Datum;
 use types_sortsupport::{SkipSupportData, SortSupportData};
 
 use compare_seams as sort;

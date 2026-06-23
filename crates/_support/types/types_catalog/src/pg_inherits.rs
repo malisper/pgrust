@@ -2,7 +2,7 @@
 //! PostgreSQL 18.3), trimmed to what the `backend-catalog-pg-inherits` port
 //! reads and writes.
 
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_inherits.h CATALOG / DECLARE_*).

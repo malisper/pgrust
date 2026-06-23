@@ -24,10 +24,10 @@
 
 #![allow(non_snake_case)]
 
-use types_core::geo::{Point, SpgKey, BOX};
-use types_error::PgResult;
+use ::types_core::geo::{Point, SpgKey, BOX};
+use ::types_error::PgResult;
 
-use geo_ops_seams::HYPOT;
+use ::geo_ops_seams::HYPOT;
 
 /// `get_float8_nan()` (float.c) -- `f64::NAN`.  Inlined as in the sibling
 /// `geo_spgist.c` port (the float seam owner is not a dependency here).

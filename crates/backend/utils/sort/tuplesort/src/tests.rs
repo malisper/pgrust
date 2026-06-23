@@ -2,7 +2,7 @@
 //! through `begin_state` + a Datum sort over a test integer comparator.
 
 use super::*;
-use mcx::Mcx;
+use ::mcx::Mcx;
 use std::sync::Once;
 use types_sortsupport::{SortComparatorId, SortSupportData};
 
@@ -243,8 +243,8 @@ fn install_top_mcx_once() {
     fn make() -> Mcx<'static> {
         thread_local! {
             static TOP: Mcx<'static> = {
-                let leaked: &'static mcx::MemoryContext =
-                    Box::leak(Box::new(mcx::MemoryContext::new("test-top")));
+                let leaked: &'static ::mcx::MemoryContext =
+                    Box::leak(Box::new(::mcx::MemoryContext::new("test-top")));
                 leaked.mcx()
             };
         }
@@ -260,7 +260,7 @@ fn install_fake_buffile() {
     ONCE.call_once(|| {
         use buffile_seams as bf;
         use ::nodes::nodehashjoin::BufFile;
-        use types_storage::file::PGAlignedBlock;
+        use ::types_storage::file::PGAlignedBlock;
 
         bf::buf_file_create_temp::set(|mcx: Mcx<'_>, _inter_xact: bool| {
             let id = NEXT_FAKE_ID.with(|n| {
@@ -272,7 +272,7 @@ fn install_fake_buffile() {
             FAKE_FILES.with(|f| {
                 f.borrow_mut().insert(id, (Vec::new(), 0));
             });
-            Ok(mcx::alloc_in(
+            Ok(::mcx::alloc_in(
                 mcx,
                 BufFile {
                     numFiles: 0,
@@ -294,7 +294,7 @@ fn install_fake_buffile() {
             .unwrap())
         });
 
-        bf::buf_file_close::set(|file: mcx::PgBox<'_, BufFile>| {
+        bf::buf_file_close::set(|file: ::mcx::PgBox<'_, BufFile>| {
             FAKE_FILES.with(|f| {
                 f.borrow_mut().remove(&file.curFile);
             });
@@ -478,7 +478,7 @@ fn method_and_space_names() {
 fn carrier_round_trip() {
     // The type-erased carrier downcast path used by every seam.
     install_test_comparator();
-    let ctx = mcx::MemoryContext::new("test");
+    let ctx = ::mcx::MemoryContext::new("test");
     let mcx = ctx.mcx();
     let owned = begin_state(4096, TUPLESORT_NONE, SortVariantKind::Datum).unwrap();
     let mut carrier = into_carrier(mcx, owned).unwrap();
@@ -520,7 +520,7 @@ fn begin_datum_end_to_end() {
     // Drive the real begin_datum_state + putdatum_impl + getdatum_impl through
     // the carrier (the seam path), sorting pass-by-value int4s.
     install_begin_seams();
-    let ctx = mcx::MemoryContext::new("test-root");
+    let ctx = ::mcx::MemoryContext::new("test-root");
     let mcx = ctx.mcx();
 
     let owned = tuplesort_begin_datum_state(
@@ -591,8 +591,8 @@ fn two_int4_tupdesc<'mcx>(mcx: Mcx<'mcx>) -> TupleDescData<'mcx> {
         tdtypmod: -1,
         tdrefcount: -1,
         constr: None,
-        compact_attrs: mcx::slice_in(mcx, &[compact, compact]).unwrap(),
-        attrs: mcx::slice_in(mcx, &[attr, attr]).unwrap(),
+        compact_attrs: ::mcx::slice_in(mcx, &[compact, compact]).unwrap(),
+        attrs: ::mcx::slice_in(mcx, &[attr, attr]).unwrap(),
     }
 }
 

@@ -49,7 +49,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use utils_error::elog;
+use ::utils_error::elog;
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::{BLCKSZ, MAXPGPATH};
 use types_error::{PgError, PgResult, ERROR};
@@ -62,7 +62,7 @@ use buffile_seams as buffile;
 use sort_storage_seams::{LogicalTape, LogicalTapeSet};
 
 /// `MaxAllocSize` (`memutils.h`).
-const MaxAllocSize: usize = mcx::MAX_ALLOC_SIZE;
+const MaxAllocSize: usize = ::mcx::MAX_ALLOC_SIZE;
 
 /// Preallocation lower bound (blocks).
 pub const TAPE_WRITE_PREALLOC_MIN: i32 = 8;
@@ -576,7 +576,7 @@ pub fn logical_tape_set_create<'mcx>(
         return Err(e);
     }
 
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         LogicalTapeSet {
             pfile: Some(pfile),
@@ -978,7 +978,7 @@ pub fn logical_tape_tell(set: &mut LogicalTapeSet<'_>, slot: usize) -> PgResult<
 /// derives a genuine file-access SQLSTATE rather than the bare INTERNAL_ERROR.
 fn file_access_error(msg: String) -> PgError {
     const EIO: i32 = 5;
-    utils_error::ereport(ERROR)
+    ::utils_error::ereport(ERROR)
         .with_saved_errno(EIO)
         .errcode_for_file_access()
         .errmsg(msg)

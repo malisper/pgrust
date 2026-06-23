@@ -6,7 +6,7 @@
 //! panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `int run_ssl_passphrase_command(const char *prompt, bool is_server_start,

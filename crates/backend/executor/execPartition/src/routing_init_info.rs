@@ -5,11 +5,11 @@
 //! CHECK OPTION / RETURNING / ON CONFLICT / MERGE state before storing it in the
 //! `proute->partitions` array and the EState's tuple-routing list.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, ResultRelInfo, RriId};
-use types_storage::lock::RowExclusiveLock;
+use ::types_storage::lock::RowExclusiveLock;
 
 use crate::{PartitionDispatchId, PartitionTupleRouting};
 

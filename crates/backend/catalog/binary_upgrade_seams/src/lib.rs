@@ -15,8 +15,8 @@
 //! keeps). The owning units install these from `init_seams()` when they land;
 //! until then a call panics loudly.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `IsBinaryUpgrade` (`catalog/binary_upgrade.h` / `globals.c`) — the mode

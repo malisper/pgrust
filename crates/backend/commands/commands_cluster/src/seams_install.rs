@@ -20,9 +20,9 @@ pub fn init_seams() {
     // marshaled here.
     {
         use matview_deps_seams as m;
-        use types_storage::lock::ExclusiveLock;
+        use ::types_storage::lock::ExclusiveLock;
         m::make_new_heap::set(|matview_oid, table_space, relam, relpersistence| {
-            let ctx = mcx::MemoryContext::new("make_new_heap");
+            let ctx = ::mcx::MemoryContext::new("make_new_heap");
             crate::make_new_heap(
                 ctx.mcx(),
                 matview_oid,
@@ -33,7 +33,7 @@ pub fn init_seams() {
             )
         });
         m::finish_heap_swap::set(|matview_oid, oid_new_heap, relpersistence| {
-            let ctx = mcx::MemoryContext::new("finish_heap_swap");
+            let ctx = ::mcx::MemoryContext::new("finish_heap_swap");
             let frozen_xid = snapmgr::RecentXmin();
             let cutoff_multi =
                 multixact_seams::read_next_multixact_id::call()?;
@@ -53,15 +53,15 @@ pub fn init_seams() {
     }
 }
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 use ::nodes::parsestmt::ParseState;
 
 /// `case T_ClusterStmt: cluster(pstate, (ClusterStmt *) parsetree, isTopLevel)`
 /// (utility.c). The dispatch carries the parse tree as `&Node`; extract the
 /// `ClusterStmt` variant from the node-opaque payload and project it onto the
-/// command-view `types_cluster::ClusterStmt` (concrete `RangeVar`/`DefElem`/
+/// command-view `::types_cluster::ClusterStmt` (concrete `RangeVar`/`DefElem`/
 /// option-string), which `cluster()` consumes.
 fn cluster_arm<'mcx>(
     mcx: Mcx<'mcx>,
@@ -80,10 +80,10 @@ fn cluster_arm<'mcx>(
 }
 
 /// Project the node-tree `ClusterStmt` (NodePtr children) onto the command-view
-/// `types_cluster::ClusterStmt` the `cluster()` body reads.
+/// `::types_cluster::ClusterStmt` the `cluster()` body reads.
 fn node_clusterstmt_to_view(
     cs: &::nodes::ddlnodes::ClusterStmt<'_>,
-) -> PgResult<types_cluster::ClusterStmt> {
+) -> PgResult<::types_cluster::ClusterStmt> {
     use alloc::string::ToString;
     use alloc::vec::Vec;
 
@@ -99,7 +99,7 @@ fn node_clusterstmt_to_view(
 
     let indexname = cs.indexname.as_ref().map(|s| s.as_str().to_string());
 
-    let mut params: Vec<types_cluster::DefElem> = Vec::with_capacity(cs.params.len());
+    let mut params: Vec<::types_cluster::DefElem> = Vec::with_capacity(cs.params.len());
     for n in cs.params.iter() {
         let Some(de) = n.as_defelem() else {
             panic!("cluster: ClusterStmt.params element is not a DefElem");
@@ -107,7 +107,7 @@ fn node_clusterstmt_to_view(
         params.push(node_defelem_to_view(de)?);
     }
 
-    Ok(types_cluster::ClusterStmt {
+    Ok(::types_cluster::ClusterStmt {
         relation,
         indexname,
         params,
@@ -134,13 +134,13 @@ fn node_rangevar_to_access(
     }
 }
 
-/// `DefElem` (node) → `types_cluster::DefElem`. The `arg` is one of the value
+/// `DefElem` (node) → `::types_cluster::DefElem`. The `arg` is one of the value
 /// nodes the CLUSTER option parse reads through `defGetBoolean`.
 fn node_defelem_to_view(
     de: &::nodes::ddlnodes::DefElem<'_>,
-) -> PgResult<types_cluster::DefElem> {
+) -> PgResult<::types_cluster::DefElem> {
     use alloc::string::ToString;
-    use types_cluster::DefElemArg;
+    use ::types_cluster::DefElemArg;
 
     let arg = match &de.arg {
         None => None,
@@ -154,7 +154,7 @@ fn node_defelem_to_view(
             } else if let Some(s) = n.as_string() {
                 Some(DefElemArg::String(s.sval.as_str().to_string()))
             } else {
-                return Err(types_error::PgError::error(alloc::format!(
+                return Err(::types_error::PgError::error(alloc::format!(
                     "unrecognized DefElem arg node (tag {:?})",
                     n.node_tag()
                 )));
@@ -162,7 +162,7 @@ fn node_defelem_to_view(
         }
     };
 
-    Ok(types_cluster::DefElem {
+    Ok(::types_cluster::DefElem {
         defnamespace: de.defnamespace.as_ref().map(|s| s.as_str().to_string()),
         defname: de
             .defname

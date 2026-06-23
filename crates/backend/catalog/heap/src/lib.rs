@@ -97,31 +97,31 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use lsyscache::namespace_range_index_pubsub::{
+use ::lsyscache::namespace_range_index_pubsub::{
     get_range_collation, get_range_subtype,
 };
-use lsyscache::type_::{
+use ::lsyscache::type_::{
     get_base_type, get_element_type, get_typ_typrelid, get_typtype, type_is_collatable,
 };
-use utils_error::ereport;
-use mcx::Mcx;
-use types_core::primitive::{
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::types_core::primitive::{
     AttrNumber, InvalidOid, InvalidRelFileNumber, Oid, OidIsValid, RelFileNumber, TransactionId,
 };
-use types_core::xact::{CommandId, InvalidTransactionId};
+use ::types_core::xact::{CommandId, InvalidTransactionId};
 use types_core::{FirstUnpinnedObjectId, NAMEDATALEN};
-use types_error::ERROR;
+use ::types_error::ERROR;
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_TOO_MANY_COLUMNS,
 };
-use types_storage::lock::{AccessShareLock, NoLock};
-use types_tuple::access::{
+use ::types_storage::lock::{AccessShareLock, NoLock};
+use ::types_tuple::access::{
     ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_COMPOSITE_TYPE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_TOASTVALUE, RELKIND_VIEW,
 };
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     FormData_pg_attribute, ItemPointerData, MaxHeapAttributeNumber, NameData, TupleDescData,
     ANYARRAYOID, CIDOID, OIDOID, RECORDARRAYOID, RECORDOID, TIDOID, XIDOID,
 };
@@ -722,7 +722,7 @@ pub fn heap_create<'mcx>(
         && miscinit::IsNormalProcessingMode()
     {
         let nsp =
-            lsyscache::namespace_range_index_pubsub::get_namespace_name(
+            ::lsyscache::namespace_range_index_pubsub::get_namespace_name(
                 mcx,
                 relnamespace,
             )?

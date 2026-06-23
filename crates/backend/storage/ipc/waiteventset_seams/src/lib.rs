@@ -7,8 +7,8 @@
 //! The owning unit installs the seams from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
-use types_storage::latch::LatchHandle;
-use types_storage::waiteventset::{WaitEvent, WaitEventSetHandle};
+use ::types_storage::latch::LatchHandle;
+use ::types_storage::waiteventset::{WaitEvent, WaitEventSetHandle};
 
 seam_core::seam!(
     /// `CreateWaitEventSet(NULL /* resowner */, nevents)` — allocate a wait

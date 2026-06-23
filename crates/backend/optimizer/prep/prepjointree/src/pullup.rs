@@ -37,7 +37,7 @@
 //! The callback mixes three relid representations and bridges them faithfully:
 //!   * `'mcx`-arena [`Bitmapset`] — `rcon.relids` (from `get_relids_in_jointree`)
 //!     and `nullinfo.nullingrels[i]` (from `get_nullingrels`).
-//!   * lifetime-free [`PathRelids`](pathnodes::Relids) — what `pull_varnos`
+//!   * lifetime-free [`PathRelids`](::pathnodes::Relids) — what `pull_varnos`
 //!     returns.
 //!   * [`ExprRelids`] word-vectors — `Var.varnullingrels`,
 //!     `PlaceHolderVar.phrels`/`phnullingrels`, and `add_nulling_relids` args.
@@ -50,8 +50,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
-use types_core::primitive::AttrNumber;
-use types_error::PgResult;
+use ::types_core::primitive::AttrNumber;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::jointype::JoinType;
 use ::nodes::nodes::{ntag, Node, NodePtr};
@@ -59,19 +59,19 @@ use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
 use ::nodes::primnodes::{Expr, ExprRelids, Var};
 use ::nodes::rawnodes::FromExpr;
 use pathnodes::{NodeId, PlannerInfo};
-use types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
+use ::types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
 
-use nodes_core::bitmapset::{bms_is_member, bms_is_subset};
-use clauses::grounded::{
+use ::nodes_core::bitmapset::{bms_is_member, bms_is_subset};
+use ::clauses::grounded::{
     contain_nonstrict_functions, contain_volatile_functions,
 };
-use vars::var::{contain_vars_of_level, pull_varnos, pull_varnos_of_level};
+use ::vars::var::{contain_vars_of_level, pull_varnos, pull_varnos_of_level};
 use rewrite_core::{
     add_nulling_relids, replace_rte_variables, IncrementVarSublevelsUp,
     IncrementVarSublevelsUp_rtable, OffsetVarNodes, ReplaceVarFromTargetList,
     ReplaceVarsNoMatchOption,
 };
-use rewrite_core::replace::ReplaceRteVariablesContext;
+use ::rewrite_core::replace::ReplaceRteVariablesContext;
 
 use subselect_pullup as subselect;
 use placeholder_seams as placeholder;
@@ -87,7 +87,7 @@ type Relids<'mcx> = Option<PgBox<'mcx, Bitmapset<'mcx>>>;
 
 /// C `Relids` as it is returned by `pull_varnos` / consumed by
 /// `make_placeholder_expr` — the lifetime-free word-vector `Bitmapset`.
-type PathRelids = pathnodes::Relids;
+type PathRelids = ::pathnodes::Relids;
 
 // ===========================================================================
 // REPLACE_WRAP option (prepjointree.c ReplaceWrapOption)
@@ -147,7 +147,7 @@ fn pathrelids_singleton(x: i32) -> PathRelids {
     let mut words = alloc::vec::Vec::new();
     words.resize(wnum + 1, 0u64);
     words[wnum] |= 1u64 << bit;
-    Some(Box::new(pathnodes::Bitmapset { words }))
+    Some(Box::new(::pathnodes::Bitmapset { words }))
 }
 
 #[inline]
@@ -616,7 +616,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                 | JoinType::JOIN_FULL
                 | JoinType::JOIN_RIGHT => Some(LowestOuterJoin { path }),
                 _ => {
-                    return Err(types_error::PgError::error("unrecognized join type"));
+                    return Err(::types_error::PgError::error("unrecognized join type"));
                 }
             };
             let pass: Option<&LowestOuterJoin<'_, 'mcx>> = match jointype {
@@ -631,7 +631,7 @@ fn pull_up_subqueries_recurse<'mcx>(
 
             Ok(())
         }
-        Kind::Other => Err(types_error::PgError::error("unrecognized node type")),
+        Kind::Other => Err(::types_error::PgError::error("unrecognized node type")),
     }
 }
 
@@ -723,7 +723,7 @@ fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'
                 quals: None,
             })?)
         }
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+        _ => Err(::types_error::PgError::error("unrecognized node type")),
     }
 }
 
@@ -776,7 +776,7 @@ fn clone_jointree_with_quals<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<N
             mcx,
             clone_fromexpr_with_quals(mcx, n.expect_fromexpr())?,
         )?),
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+        _ => Err(::types_error::PgError::error("unrecognized node type")),
     }
 }
 
@@ -905,7 +905,7 @@ fn pull_up_simple_subquery<'mcx>(
                 if let Some(e) = flat.into_expr() {
                     subquery.targetList[i].expr = Some(alloc_in(mcx, e)?);
                 } else {
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "flatten_join_alias_vars: targetlist entry is not an expression",
                     ));
                 }
@@ -1096,7 +1096,7 @@ fn pull_up_simple_subquery<'mcx>(
     Ok(Node::mk_from_expr(mcx, PgBox::into_inner(jt))?)
 }
 
-/// Convert an `'mcx` Bitmapset (the lifetime-free `pathnodes::Relids` form
+/// Convert an `'mcx` Bitmapset (the lifetime-free `::pathnodes::Relids` form
 /// returned by `result_rtes::get_relids_in_jointree`) to [`ExprRelids`].
 fn pathlike_bms_to_expr_relids(a: Option<&Bitmapset>) -> ExprRelids {
     bms_to_expr_relids(a)
@@ -1285,7 +1285,7 @@ fn pull_up_union_leaf_queries<'mcx>(
             let child_rt_index = child_rt_offset + rtr.rtindex;
 
             // Build a suitable AppendRelInfo, and attach to parent's list.
-            let mut appinfo = pathnodes::AppendRelInfo {
+            let mut appinfo = ::pathnodes::AppendRelInfo {
                 parent_relid: parent_rt_index as u32,
                 child_relid: child_rt_index as u32,
                 parent_reltype: 0,
@@ -1356,7 +1356,7 @@ fn pull_up_union_leaf_queries<'mcx>(
             )?;
             Ok(())
         }
-        other => Err(types_error::PgError::error(alloc::format!(
+        other => Err(::types_error::PgError::error(alloc::format!(
             "unrecognized node type: {:?}",
             other
         ))),
@@ -1372,7 +1372,7 @@ fn make_setop_translation_list<'mcx>(
     root: &mut PlannerInfo,
     query: &Query<'mcx>,
     newvarno: i32,
-    appinfo: &mut pathnodes::AppendRelInfo,
+    appinfo: &mut ::pathnodes::AppendRelInfo,
 ) {
     // Initialize reverse-translation array with all entries zero. (Entries for
     // resjunk columns stay zero.)
@@ -1384,7 +1384,7 @@ fn make_setop_translation_list<'mcx>(
         if tle.resjunk {
             continue;
         }
-        let var = nodes_core::makefuncs::make_var_from_target_entry(newvarno, tle)
+        let var = ::nodes_core::makefuncs::make_var_from_target_entry(newvarno, tle)
             .expect("make_var_from_target_entry");
         let id = root.alloc_node(Expr::Var(var));
         vars.push(id);
@@ -1402,7 +1402,7 @@ fn is_simple_union_all(subquery: &Query) -> PgResult<bool> {
     // Let's just make sure it's a valid subselect. (commandType is the only
     // check we can make on the owned Query; the IsA(Query) is structural.)
     if subquery.commandType != ::nodes::nodes::CmdType::CMD_SELECT {
-        return Err(types_error::PgError::error("subquery is bogus"));
+        return Err(::types_error::PgError::error("subquery is bogus"));
     }
 
     // Is it a set-operation query at all?
@@ -1435,7 +1435,7 @@ fn is_simple_union_all(subquery: &Query) -> PgResult<bool> {
 fn is_simple_union_all_recurse(
     set_op: &Node,
     set_op_query: &Query,
-    col_types: &[types_core::primitive::Oid],
+    col_types: &[::types_core::primitive::Oid],
 ) -> PgResult<bool> {
     // Since this function recurses, it could be driven to stack overflow.
     postgres_seams::check_stack_depth::call()?;
@@ -1451,7 +1451,7 @@ fn is_simple_union_all_recurse(
                 .expect("UNION ALL leaf RTE has NULL subquery");
             // Leaf nodes are OK if they match the toplevel column types. We don't
             // have to compare typmods or collations here.
-            vars::tlist::tlist_same_datatypes(
+            ::vars::tlist::tlist_same_datatypes(
                 &subquery.targetList,
                 col_types,
                 true,
@@ -1471,7 +1471,7 @@ fn is_simple_union_all_recurse(
                     && is_simple_union_all_recurse(&**rarg, set_op_query, col_types)?,
             )
         }
-        other => Err(types_error::PgError::error(alloc::format!(
+        other => Err(::types_error::PgError::error(alloc::format!(
             "unrecognized node type: {:?}",
             other
         ))),
@@ -1713,7 +1713,7 @@ fn eval_const_expressions_in_rtfunc<'mcx>(
             let node = PgBox::into_inner(fe);
             if node.is_expr() {
                 let e = node.into_expr().expect("is_expr implies into_expr");
-                let folded = clauses::fold::eval_const_expressions(mcx, e)?;
+                let folded = ::clauses::fold::eval_const_expressions(mcx, e)?;
                 rtf.funcexpr = Some(alloc_in(mcx, Node::mk_expr(mcx, folded)?)?);
             } else {
                 rtf.funcexpr = Some(alloc_in(mcx, node)?);
@@ -1821,7 +1821,7 @@ pub fn expand_virtual_generated_columns<'mcx>(
 pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
     mcx: Mcx<'mcx>,
     _root: &mut PlannerInfo,
-    relid: types_core::primitive::Oid,
+    relid: ::types_core::primitive::Oid,
     rt_index: i32,
 ) -> PgResult<Option<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>>> {
     // rel = table_open(rte->relid, NoLock);
@@ -1888,7 +1888,7 @@ pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
             // expression's Vars reference rt_index 1 (build_column_default emits
             // a single-relation expression); remap them onto this RTE's index.
             let mut defnode = Node::mk_expr(mcx, defexpr)?;
-            rewrite_core::ChangeVarNodes(&mut defnode, 1, rt_index, 0, mcx);
+            ::rewrite_core::ChangeVarNodes(&mut defnode, 1, rt_index, 0, mcx);
             let defexpr = defnode
                 .into_expr()
                 .unwrap_or_else(|| unreachable!("ChangeVarNodes preserves the node kind"));
@@ -1896,7 +1896,7 @@ pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
             tlist.push(make_target_entry(mcx, defexpr, attrno, None, false)?);
         } else {
             // var = makeVar(rt_index, i + 1, atttypid, atttypmod, attcollation, 0);
-            let var = nodes_core::makefuncs::make_var(
+            let var = ::nodes_core::makefuncs::make_var(
                 rt_index,
                 attrno,
                 attr.atttypid,
@@ -1960,7 +1960,7 @@ fn pull_up_simple_values<'mcx>(
         let expr = match item.as_expr() {
             Some(e) => e.clone_in(mcx)?,
             None => {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "pull_up_simple_values: VALUES item is not an expression",
                 ));
             }
@@ -2092,7 +2092,7 @@ fn pull_up_constant_function<'mcx>(
     let (funcexpr, funccolcount, has_colnames): (Expr, i32, bool) = {
         let func0 = &parse.rtable[(varno - 1) as usize].functions[0];
         let Some(rtf) = func0.as_rangetblfunction() else {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "pull_up_constant_function: RTE function is not a RangeTblFunction",
             ));
         };
@@ -2205,11 +2205,11 @@ fn make_target_entry<'mcx>(
         expr: Some(alloc_in(mcx, expr)?),
         resno,
         resname: match resname {
-            Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+            Some(s) => Some(::mcx::PgString::from_str_in(s, mcx)?),
             None => None,
         },
         ressortgroupref: 0,
-        resorigtbl: types_core::primitive::Oid::default(),
+        resorigtbl: ::types_core::primitive::Oid::default(),
         resorigcol: 0,
         resjunk,
     })
@@ -2219,7 +2219,7 @@ fn make_target_entry<'mcx>(
 /// no column aliases.
 fn make_alias<'mcx>(mcx: Mcx<'mcx>, aliasname: &str) -> PgResult<::nodes::rawnodes::Alias<'mcx>> {
     Ok(::nodes::rawnodes::Alias {
-        aliasname: Some(mcx::PgString::from_str_in(aliasname, mcx)?),
+        aliasname: Some(::mcx::PgString::from_str_in(aliasname, mcx)?),
         colnames: PgVec::new_in(mcx),
     })
 }
@@ -2244,7 +2244,7 @@ fn node_expression_returns_set(node: &Node) -> bool {
         }
         false
     } else if let Some(e) = node.as_expr() {
-        nodes_core::nodefuncs::expression_returns_set(Some(e))
+        ::nodes_core::nodefuncs::expression_returns_set(Some(e))
     } else {
         false
     }
@@ -2300,7 +2300,7 @@ fn is_simple_subquery<'mcx>(
 ) -> PgResult<bool> {
     // Let's just make sure it's a valid subselect.
     if subquery.commandType != ::nodes::nodes::CmdType::CMD_SELECT {
-        return Err(types_error::PgError::error("subquery is bogus"));
+        return Err(::types_error::PgError::error("subquery is bogus"));
     }
 
     // Can't pull up a query with setops (unless simple UNION ALL, handled
@@ -2550,7 +2550,7 @@ fn jointree_contains_lateral_outer_refs<'mcx>(
             }
             Ok(false)
         }
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+        _ => Err(::types_error::PgError::error("unrecognized node type")),
     }
 }
 
@@ -2737,7 +2737,7 @@ fn pullup_replace_vars_targetlist<'mcx>(
             if let Some(e) = newnode.into_expr() {
                 tlist[i].expr = Some(alloc_in(mcx, e)?);
             } else {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "pullup_replace_vars: targetlist entry is not an expression",
                 ));
             }
@@ -2787,10 +2787,10 @@ fn pullup_replace_vars_opt<'mcx>(
 fn pullup_replace_vars_opt_expr<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    node: Option<mcx::PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>,
+    node: Option<::mcx::PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>,
     rvcontext: &mut PullupReplaceVarsContext<'mcx>,
     outer_has_sublinks: &mut Option<bool>,
-) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>> {
+) -> PgResult<Option<::mcx::PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>> {
     match node {
         None => Ok(None),
         Some(n) => {
@@ -2803,7 +2803,7 @@ fn pullup_replace_vars_opt_expr<'mcx>(
             )?;
             match newnode.into_expr() {
                 Some(e) => Ok(Some(alloc_in(mcx, e)?)),
-                None => Err(types_error::PgError::error(
+                None => Err(::types_error::PgError::error(
                     "pullup_replace_vars: expression-only Query field lowered to a non-Expr node",
                 )),
             }
@@ -2828,7 +2828,7 @@ fn pullup_replace_vars_merge_action<'mcx>(
             pullup_replace_vars_nodelist(mcx, root, &mut a.targetList, rvcontext, outer_has_sublinks)?;
             Ok(Node::mk_merge_action(mcx, a)?)
         }
-        None => Err(types_error::PgError::error(
+        None => Err(::types_error::PgError::error(
             "pullup_replace_vars: mergeActionList element is not a MergeAction",
         )),
     }
@@ -2851,7 +2851,7 @@ fn pullup_replace_vars_with_check_option<'mcx>(
             }
             Ok(Node::mk_with_check_option(mcx, wco)?)
         }
-        None => Err(types_error::PgError::error(
+        None => Err(::types_error::PgError::error(
             "pullup_replace_vars: withCheckOptions element is not a WithCheckOption",
         )),
     }
@@ -2879,7 +2879,7 @@ fn replace_vars_in_translated_vars<'mcx>(
             // Re-intern the rewritten node into the planner arena ('static).
             *root.node_mut(id) = e.erase_lifetime();
         } else {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "pullup_replace_vars: translated_vars element is not an expression",
             ));
         }
@@ -3026,7 +3026,7 @@ fn replace_vars_in_jointree<'mcx>(
             Ok(())
         }
     } else {
-        Err(types_error::PgError::error("unrecognized node type"))
+        Err(::types_error::PgError::error("unrecognized node type"))
     }
 }
 
@@ -3099,7 +3099,7 @@ fn pullup_replace_vars_callback<'mcx>(
     let varlevelsup = var.varlevelsup;
 
     // System columns are not replaced.
-    if varattno < types_core::primitive::InvalidAttrNumber {
+    if varattno < ::types_core::primitive::InvalidAttrNumber {
         return Ok(Expr::Var(var.clone()));
     }
 
@@ -3117,7 +3117,7 @@ fn pullup_replace_vars_callback<'mcx>(
     // generating identical PHVs with different IDs. Cached items have
     // phlevelsup=0, phnullingrels=NULL; copy + adjust below.
     if need_phv
-        && varattno >= types_core::primitive::InvalidAttrNumber
+        && varattno >= ::types_core::primitive::InvalidAttrNumber
         && varattno <= tlist_len
         && rcon.rv_cache[varattno as usize].is_some()
     {
@@ -3151,7 +3151,7 @@ fn pullup_replace_vars_callback<'mcx>(
                 .clone_in(mcx)?;
                 newnode = Node::mk_place_holder_var(mcx, phv)?;
                 // Cache it if possible.
-                if varattno >= types_core::primitive::InvalidAttrNumber && varattno <= tlist_len {
+                if varattno >= ::types_core::primitive::InvalidAttrNumber && varattno <= tlist_len {
                     if let Some(e) = newnode.as_expr() {
                         rcon.rv_cache[varattno as usize] = Some(e.clone_in(mcx)?);
                     }
@@ -3238,7 +3238,7 @@ fn pullup_replace_vars_callback<'mcx>(
 
     match newnode.into_expr() {
         Some(e) => Ok(e),
-        None => Err(types_error::PgError::error(
+        None => Err(::types_error::PgError::error(
             "pullup_replace_vars: replacement is not an expression",
         )),
     }
@@ -3258,7 +3258,7 @@ fn compute_wrap<'mcx>(
         // Caller told us to wrap all expressions.
         return Ok(true);
     }
-    if varattno == types_core::primitive::InvalidAttrNumber {
+    if varattno == ::types_core::primitive::InvalidAttrNumber {
         // Whole-tuple reference: wrap one PHV around the whole RowExpr.
         return Ok(true);
     }
@@ -3419,7 +3419,7 @@ fn offset_var_nodes_in_query<'mcx>(
     subquery: &mut Query<'mcx>,
     offset: i32,
     sublevels_up: i32,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     let node = core::mem::replace(subquery, Query::new(mcx));
     let mut qnode = Node::mk_query(mcx, node)?;
     OffsetVarNodes(&mut qnode, offset, sublevels_up, mcx);
@@ -3437,7 +3437,7 @@ fn increment_var_sublevels_up_in_query<'mcx>(
     subquery: &mut Query<'mcx>,
     delta: i32,
     min_sublevels_up: i32,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     let node = core::mem::replace(subquery, Query::new(mcx));
     let mut qnode = Node::mk_query(mcx, node)?;
     let res = IncrementVarSublevelsUp(&mut qnode, delta, min_sublevels_up, mcx);
@@ -3456,7 +3456,7 @@ fn offset_var_nodes_in_append_rel_list<'mcx>(
     subroot: &mut PlannerInfo,
     offset: i32,
     sublevels_up: i32,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     // C: OffsetVarNodes_walker has an explicit `IsA(node, AppendRelInfo)` case
     // (rewriteManip.c:444) that, when sublevels_up == 0, adds `offset` to the
     // integer fields parent_relid and child_relid (then falls through to recurse
@@ -3497,7 +3497,7 @@ fn increment_var_sublevels_up_in_append_rel_list<'mcx>(
     subroot: &mut PlannerInfo,
     delta: i32,
     min_sublevels_up: i32,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     let mut ids: Vec<NodeId> = Vec::new();
     for ai in subroot.append_rel_list.iter() {
         for &id in ai.translated_vars.iter() {
@@ -3520,4 +3520,4 @@ fn increment_var_sublevels_up_in_append_rel_list<'mcx>(
 
 // silence unused import in some configurations
 #[allow(unused_imports)]
-use pathnodes::AppendRelInfo as _AppendRelInfo;
+use ::pathnodes::AppendRelInfo as _AppendRelInfo;

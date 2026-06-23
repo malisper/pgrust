@@ -4,14 +4,14 @@
 //! `rangeTableEntry_used`.
 //!
 //! Each is a 1:1 transcription of the C `bool (*)(Node *, void *)` walker over
-//! the central [`nodes_core::node_walker`] engine, whose walker is a Rust
+//! the central [`::nodes_core::node_walker`] engine, whose walker is a Rust
 //! `&mut dyn FnMut(&Node) -> bool` closure. C's `IsA(node, X)` dispatch is a
 //! match over the [`Node`]/[`Expr`] enum arms (every `Var`-family node is an
 //! `Expr` arm carried as `Node::Expr`; `Query` is its own `Node` arm).
 
 #![allow(non_snake_case)]
 
-use nodes_core::node_walker::{
+use ::nodes_core::node_walker::{
     expression_tree_walker, query_or_expression_tree_walker, query_tree_walker,
     QTW_IGNORE_CTE_SUBQUERIES, QTW_IGNORE_RT_SUBQUERIES,
 };

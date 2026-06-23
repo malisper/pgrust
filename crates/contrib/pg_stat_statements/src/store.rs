@@ -11,12 +11,12 @@
 
 use core::cell::RefCell;
 
-use types_core::instrument::{instr_time, BufferUsage, WalUsage};
-use types_core::Oid;
-use types_error::PgResult;
-use hash::hsearch::{HASHACTION, HASH_ENTER, HASH_FIND, HASH_REMOVE};
+use ::types_core::instrument::{instr_time, BufferUsage, WalUsage};
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::hash::hsearch::{HASHACTION, HASH_ENTER, HASH_FIND, HASH_REMOVE};
 use ::nodes::querydesc::QueryDesc;
-use types_scan::sdir::ScanDirection;
+use ::types_scan::sdir::ScanDirection;
 
 use crate::shmem::{self, entry_ref, pgss_hash, pgss_ref};
 use crate::{
@@ -392,7 +392,7 @@ fn entry_dealloc() {
     let mut tottextlen: usize = 0;
     let mut nvalidtexts: usize = 0;
 
-    let mut hash_seq = hash::hsearch::HASH_SEQ_STATUS::new();
+    let mut hash_seq = ::hash::hsearch::HASH_SEQ_STATUS::new();
     dynahash::hash_seq_init(&mut hash_seq, pgss_hash);
     loop {
         let ptr = match dynahash::hash_seq_search(&mut hash_seq) {
@@ -456,7 +456,7 @@ pub(crate) fn entry_reset(
     queryid: i64,
     minmax_only: bool,
 ) -> PgResult<i64> {
-    use utils_error::ereport;
+    use ::utils_error::ereport;
     use types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
 
     if !shmem::is_initialized() {
@@ -492,7 +492,7 @@ pub(crate) fn entry_reset(
             single_entry_reset(ptr, minmax_only, stats_reset, &mut num_remove);
         }
     } else if uid != 0 || did != 0 || queryid != 0 {
-        let mut hash_seq = hash::hsearch::HASH_SEQ_STATUS::new();
+        let mut hash_seq = ::hash::hsearch::HASH_SEQ_STATUS::new();
         dynahash::hash_seq_init(&mut hash_seq, pgss_hash);
         loop {
             let ptr = match dynahash::hash_seq_search(&mut hash_seq) {
@@ -511,7 +511,7 @@ pub(crate) fn entry_reset(
             }
         }
     } else {
-        let mut hash_seq = hash::hsearch::HASH_SEQ_STATUS::new();
+        let mut hash_seq = ::hash::hsearch::HASH_SEQ_STATUS::new();
         dynahash::hash_seq_init(&mut hash_seq, pgss_hash);
         loop {
             let ptr = match dynahash::hash_seq_search(&mut hash_seq) {
@@ -584,7 +584,7 @@ fn hash_search_raw(key: &PgssHashKey, action: HASHACTION) -> PgResult<(*mut u8, 
 // ---------------------------------------------------------------------------
 
 fn lwlock_acquire(lock: *const types_storage::storage::LWLock, exclusive: bool) -> PgResult<()> {
-    use lwlock::LWLockAcquire; use types_storage::storage::LWLockMode;
+    use ::lwlock::LWLockAcquire; use types_storage::storage::LWLockMode;
     // SAFETY: `lock` points into the live MAP_SHARED LWLock array.
     let lock = unsafe { &*lock };
     let mode = if exclusive {
@@ -599,7 +599,7 @@ fn lwlock_acquire(lock: *const types_storage::storage::LWLock, exclusive: bool) 
 fn lwlock_release(lock: *const types_storage::storage::LWLock) {
     // SAFETY: `lock` points into the live MAP_SHARED LWLock array.
     let lock = unsafe { &*lock };
-    let _ = lwlock::LWLockRelease(lock);
+    let _ = ::lwlock::LWLockRelease(lock);
 }
 
 // ---------------------------------------------------------------------------

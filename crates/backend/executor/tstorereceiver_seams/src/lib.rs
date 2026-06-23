@@ -5,9 +5,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::parsestmt::DestReceiverHandle;
-use portal::Portal;
+use ::portal::Portal;
 
 seam_core::seam!(
     /// `CreateDestReceiver(DestTuplestore)` (dest.c) — allocate a tuplestore
@@ -16,7 +16,7 @@ seam_core::seam!(
     ///
     /// The receiver is named by a router-keyed [`DestReceiverHandle`]
     /// (`tcop/dest.c`'s `CreateDestReceiver` mints it through the unified
-    /// receiver-value router); the old by-value `portal::DestReceiver`
+    /// receiver-value router); the old by-value `::portal::DestReceiver`
     /// return is retired here (QueryDesc de-handle F1b).
     pub fn create_dest_receiver_tuplestore() -> PgResult<DestReceiverHandle>
 );

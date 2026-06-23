@@ -14,11 +14,11 @@
 //! resolves them. OIDs / nargs / strict / retset are transcribed from
 //! `pg_proc.dat` (all RI procs are `pronargs 0`, not strict, not retset).
 
-use mcx::Mcx;
-use datum::Datum;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_ri_triggers::TriggerDataRef;
+use ::types_ri_triggers::TriggerDataRef;
 
 use crate::triggers;
 use crate::{
@@ -36,9 +36,9 @@ const CURRENT_TRIGGER: TriggerDataRef = TriggerDataRef(1);
 /// `PointerGetDatum(NULL)`, i.e. a null `Datum` with the `isnull` flag clear.
 #[inline]
 fn dispatch(
-    core: impl FnOnce(Mcx<'_>, TriggerDataRef) -> types_error::PgResult<()>,
+    core: impl FnOnce(Mcx<'_>, TriggerDataRef) -> ::types_error::PgResult<()>,
 ) -> PgResult<Datum> {
-    let m = mcx::MemoryContext::new("RI trigger fmgr scratch");
+    let m = ::mcx::MemoryContext::new("RI trigger fmgr scratch");
     core(m.mcx(), CURRENT_TRIGGER)?;
     Ok(Datum::null())
 }

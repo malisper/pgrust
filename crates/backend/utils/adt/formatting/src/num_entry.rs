@@ -18,10 +18,10 @@
 //! and the to_char finishing/padding logic are ported in-crate (see
 //! [`crate::num`]).
 
-use mcx::Mcx;
-use types_error::PgResult;
-use types_numeric::var::NumericVar;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::types_numeric::var::NumericVar;
+use ::types_core::Oid;
 
 use crate::num::{fill_str, int_to_roman, num_processor};
 use crate::printf::{fmt_f, fmt_f0, fmt_plus_e};
@@ -237,7 +237,7 @@ pub fn numeric_to_char<'mcx>(
         // C: `orgnum = numeric_out(x)`, which renders NaN/Infinity specially;
         // `get_str_from_var` (used for the finite case) renders specials as "0".
         let orgnum = {
-            use types_numeric::var::NumericSign;
+            use ::types_numeric::var::NumericSign;
             match x.sign {
                 NumericSign::NaN => "NaN".to_string(),
                 NumericSign::PInf => "Infinity".to_string(),
@@ -578,7 +578,7 @@ fn numeric_out_sci_var(value: &NumericVar, scale: i32) -> PgResult<String> {
     // renders the special values; only the finite path reaches
     // `get_str_from_var_sci` (which asserts non-special). Mirror that here, since
     // the formatting caller holds a `NumericVar` rather than the on-disk image.
-    use types_numeric::var::NumericSign;
+    use ::types_numeric::var::NumericSign;
     match value.sign {
         NumericSign::NaN => return Ok("NaN".to_string()),
         NumericSign::PInf => return Ok("Infinity".to_string()),

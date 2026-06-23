@@ -10,11 +10,11 @@
 //! sibling `hash-core` unit (called directly), interrupts/progress are seams.
 
 use mcx::{alloc_in, Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::Tuplesortstate;
-use rel::Relation;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use hash_core as core;
 use tuplesort_seams as tuplesort;

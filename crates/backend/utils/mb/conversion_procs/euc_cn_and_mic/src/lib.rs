@@ -14,13 +14,13 @@
 //! high-bit-set lead byte and validated by inspecting the high bit of the
 //! following byte(s) directly (the C `IS_HIGHBIT_SET(*euc)` checks).
 
-use error_fgram::PgResult;
+use ::error_fgram::PgResult;
 use mb_fgram::{
     check_encoding_conversion_args, report_invalid_encoding, report_untranslatable_char,
 };
-use conv_string_helpers::ConversionResult;
-use conv_string_helpers::make_conversion_builtin;
-use types_wchar::encoding::{pg_enc, PG_EUC_CN, PG_MULE_INTERNAL};
+use ::conv_string_helpers::ConversionResult;
+use ::conv_string_helpers::make_conversion_builtin;
+use ::types_wchar::encoding::{pg_enc, PG_EUC_CN, PG_MULE_INTERNAL};
 
 /// Convention no-op: this crate installs no inward seams.
 /// Bridge a fgram-typed conversion `PgResult` into the real

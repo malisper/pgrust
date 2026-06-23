@@ -36,8 +36,8 @@ use types_error::{
 };
 
 use encode_seams as encode;
-use guc_tables::consts::{BYTEA_OUTPUT_ESCAPE, BYTEA_OUTPUT_HEX};
-use guc_tables::vars::bytea_output;
+use ::guc_tables::consts::{BYTEA_OUTPUT_ESCAPE, BYTEA_OUTPUT_HEX};
+use ::guc_tables::vars::bytea_output;
 
 /// C: `MaxAllocSize` (memutils.h) — the 1GB-minus-a-header palloc ceiling that
 /// `SET_VARSIZE`/`palloc` enforce. Mirrored here for the `byteaout` escape
@@ -98,7 +98,7 @@ pub fn byteain<'mcx>(
     }
 
     // C: result = palloc(bc + VARHDRSZ); the carrier is the header-less payload.
-    let mut result = mcx::vec_with_capacity_in(mcx, bc)?;
+    let mut result = ::mcx::vec_with_capacity_in(mcx, bc)?;
 
     // Second pass: decode.
     let mut i = 0usize;
@@ -141,7 +141,7 @@ pub fn byteaout<'mcx>(mcx: Mcx<'mcx>, v: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     if output == BYTEA_OUTPUT_HEX {
         // C: palloc(len*2 + 2 + 1); *rp++='\\'; *rp++='x'; rp += hex_encode(...).
         let hex = encode::hex_encode::call(mcx, v)?;
-        let mut result = mcx::vec_with_capacity_in(mcx, hex.len() + 3)?;
+        let mut result = ::mcx::vec_with_capacity_in(mcx, hex.len() + 3)?;
         result.push(b'\\');
         result.push(b'x');
         result.extend_from_slice(&hex);
@@ -167,7 +167,7 @@ pub fn byteaout<'mcx>(mcx: Mcx<'mcx>, v: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
             .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
         }
         // C: rp = result = palloc(len); ... *rp = '\0';
-        let mut result = mcx::vec_with_capacity_in(mcx, len as usize)?;
+        let mut result = ::mcx::vec_with_capacity_in(mcx, len as usize)?;
         for &c in v {
             if c == b'\\' {
                 result.push(b'\\');
@@ -202,13 +202,13 @@ pub fn byteaout<'mcx>(mcx: Mcx<'mcx>, v: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
 /// a fresh `bytea` payload (C: `nbytes = buf->len - buf->cursor`,
 /// `pq_copymsgbytes`). `buf` is exactly those remaining message bytes.
 pub fn bytearecv<'mcx>(mcx: Mcx<'mcx>, buf: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, buf)
+    ::mcx::slice_in(mcx, buf)
 }
 
 /// C: `byteasend(PG_FUNCTION_ARGS)` — "just copy the input" (C: a verbatim copy
 /// of the datum). Returns a copy of the payload charged to `mcx`.
 pub fn byteasend<'mcx>(mcx: Mcx<'mcx>, v: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, v)
+    ::mcx::slice_in(mcx, v)
 }
 
 /// C: `byteaoctetlen(PG_FUNCTION_ARGS)` — byte count of a `bytea` (C derives it
@@ -232,7 +232,7 @@ pub fn bytea_catenate<'mcx>(mcx: Mcx<'mcx>, t1: &[u8], t2: &[u8]) -> PgResult<Pg
     // C: len = len1 + len2 + VARHDRSZ; result = palloc(len).
     let total = len1.checked_add(len2).ok_or_else(out_of_memory)?;
     checked_i32(total)?;
-    let mut out = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, total)?;
     if len1 > 0 {
         out.extend_from_slice(t1);
     }
@@ -267,7 +267,7 @@ fn bytea_substring<'mcx>(
     } else if let Some(e) = s.checked_add(l) {
         // C: A zero or negative end position -> zero-length string.
         if e < 1 {
-            return mcx::vec_with_capacity_in(mcx, 0);
+            return ::mcx::vec_with_capacity_in(mcx, 0);
         }
         l1 = e - s1;
     } else {
@@ -280,7 +280,7 @@ fn bytea_substring<'mcx>(
     let start = (s1 - 1) as usize;
     if start >= str.len() {
         // Past the end -> zero-length (C's PSlice does this).
-        return mcx::vec_with_capacity_in(mcx, 0);
+        return ::mcx::vec_with_capacity_in(mcx, 0);
     }
     let avail = str.len() - start;
     // L1 < 0 means "to the end"; otherwise clamp to what's available.
@@ -289,7 +289,7 @@ fn bytea_substring<'mcx>(
     } else {
         (l1 as usize).min(avail)
     };
-    mcx::slice_in(mcx, &str[start..start + take])
+    ::mcx::slice_in(mcx, &str[start..start + take])
 }
 
 /// C: `bytea_substr(PG_FUNCTION_ARGS)` — 1-based substring with explicit length.
@@ -428,7 +428,7 @@ pub fn bytea_set_byte<'mcx>(
     if n < 0 || (n as usize) >= len {
         return Err(byte_index_out_of_range(n as i64, len as i64 - 1));
     }
-    let mut res = mcx::slice_in(mcx, v)?;
+    let mut res = ::mcx::slice_in(mcx, v)?;
     res[n as usize] = newbyte as u8;
     Ok(res)
 }
@@ -453,7 +453,7 @@ pub fn bytea_set_bit<'mcx>(
         return Err(PgError::error("new bit must be 0 or 1")
             .with_sqlstate(ERRCODE_INVALID_PARAMETER_VALUE));
     }
-    let mut res = mcx::slice_in(mcx, v)?;
+    let mut res = ::mcx::slice_in(mcx, v)?;
     let old_byte = res[byte_no];
     let new_byte = if newbit == 0 {
         old_byte & !(1 << bit_no)
@@ -466,7 +466,7 @@ pub fn bytea_set_bit<'mcx>(
 
 /// C: `bytea_reverse(PG_FUNCTION_ARGS)` — the `bytea` payload reversed.
 pub fn bytea_reverse<'mcx>(mcx: Mcx<'mcx>, v: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     out.extend(v.iter().rev().copied());
     Ok(out)
 }
@@ -535,7 +535,7 @@ pub fn bytea_larger<'mcx>(mcx: Mcx<'mcx>, a: &[u8], b: &[u8]) -> PgResult<PgVec<
     } else {
         b
     };
-    mcx::slice_in(mcx, result)
+    ::mcx::slice_in(mcx, result)
 }
 
 /// C: `bytea_smaller(PG_FUNCTION_ARGS)` — returns whichever sorts smaller.
@@ -547,7 +547,7 @@ pub fn bytea_smaller<'mcx>(mcx: Mcx<'mcx>, a: &[u8], b: &[u8]) -> PgResult<PgVec
     } else {
         b
     };
-    mcx::slice_in(mcx, result)
+    ::mcx::slice_in(mcx, result)
 }
 
 // ===========================================================================
@@ -600,17 +600,17 @@ pub fn bytea_int8(v: &[u8]) -> PgResult<i64> {
 
 /// C: `int2_bytea(PG_FUNCTION_ARGS)` — `int2send`: the value's big-endian bytes.
 pub fn int2_bytea<'mcx>(mcx: Mcx<'mcx>, val: i16) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, &val.to_be_bytes())
+    ::mcx::slice_in(mcx, &val.to_be_bytes())
 }
 
 /// C: `int4_bytea(PG_FUNCTION_ARGS)` — `int4send`: the value's big-endian bytes.
 pub fn int4_bytea<'mcx>(mcx: Mcx<'mcx>, val: i32) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, &val.to_be_bytes())
+    ::mcx::slice_in(mcx, &val.to_be_bytes())
 }
 
 /// C: `int8_bytea(PG_FUNCTION_ARGS)` — `int8send`: the value's big-endian bytes.
 pub fn int8_bytea<'mcx>(mcx: Mcx<'mcx>, val: i64) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, &val.to_be_bytes())
+    ::mcx::slice_in(mcx, &val.to_be_bytes())
 }
 
 // ===========================================================================

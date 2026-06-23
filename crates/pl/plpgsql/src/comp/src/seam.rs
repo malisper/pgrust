@@ -13,9 +13,9 @@
 
 use core::cell::Cell;
 
-use types_core::Oid;
-use plpgsql::PLpgSQL_resolve_option;
-use types_tuple::pg_type::FormData_pg_type;
+use ::types_core::Oid;
+use ::plpgsql::PLpgSQL_resolve_option;
+use ::types_tuple::pg_type::FormData_pg_type;
 
 /// `InvalidOid`.
 pub const INVALID_OID: Oid = 0;
@@ -167,7 +167,7 @@ pub fn format_type_be(type_oid: Oid) -> String {
 /// tupdesc changes (including drops). When the type is not composite the
 /// resolved `tupDesc` is `None`, which C turns into
 /// `ERRCODE_WRONG_OBJECT_TYPE` ("type %s is not composite").
-pub fn composite_tupdesc_id(typoid: Oid) -> (Option<plpgsql::TypeCacheEntry>, u64) {
+pub fn composite_tupdesc_id(typoid: Oid) -> (Option<::plpgsql::TypeCacheEntry>, u64) {
     // The seam clones the composite tupdesc into the supplied context; build a
     // throwaway one (we only read the scalar identifier + the not-composite flag).
     let ctx = mcx::MemoryContext::new("plpgsql composite_tupdesc_id");
@@ -185,7 +185,7 @@ pub fn composite_tupdesc_id(typoid: Oid) -> (Option<plpgsql::TypeCacheEntry>, u6
     // typ->tcache is a TypeCacheEntry* handle in C; the exec layer keys it by
     // type OID for revalidation. typ->tupdesc_id mirrors tupDesc_identifier.
     (
-        Some(plpgsql::TypeCacheEntry(typoid as u64)),
+        Some(::plpgsql::TypeCacheEntry(typoid as u64)),
         view.tup_desc_identifier,
     )
 }
@@ -226,7 +226,7 @@ pub fn column_atttype(
     class_oid: Oid,
     relname: &str,
     fldname: &str,
-) -> types_error::PgResult<Box<plpgsql::PLpgSQL_type>> {
+) -> types_error::PgResult<Box<::plpgsql::PLpgSQL_type>> {
     use lsyscache_seams as lsyscache;
     let attnum = lsyscache::get_attnum::call(class_oid, fldname)?;
     if attnum == 0 {
@@ -251,7 +251,7 @@ pub fn column_atttype(
 pub fn parse_datatype(
     string: &str,
     _location: i32,
-) -> types_error::PgResult<Box<plpgsql::PLpgSQL_type>> {
+) -> types_error::PgResult<Box<::plpgsql::PLpgSQL_type>> {
     // typeStringToTypeName(string, NULL) + typenameTypeIdAndMod(NULL, typeName,
     // &type_id, &typmod). parseTypeString folds both (no soft-error context, so
     // a bad type name raises).
@@ -265,7 +265,7 @@ pub fn parse_datatype(
     // plpgsql_build_datatype(type_id, typmod, plpgsql_curr_compile->
     // fn_input_collation, typeName). The C passes the parsed `typeName` as
     // `origtypname` (kept for re-resolving the type on a cached recompile). The
-    // owned `PLpgSQL_type.origtypname` is `plpgsql::TypeName`, a distinct
+    // owned `PLpgSQL_type.origtypname` is `::plpgsql::TypeName`, a distinct
     // model from the parser's `parsenodes::TypeName`; a directly-named type
     // re-resolves to the same OID by name, so `None` is faithful here (origtypname
     // matters for %TYPE/%ROWTYPE-derived types, which take the wordtype path).
@@ -289,7 +289,7 @@ pub fn get_collation_oid(_names: &[String], _missing_ok: bool) -> ! {
 /// — this is reached only in the validating (`forValidator`) compile.
 pub fn check_sql_expr(
     stmt: &str,
-    mode: plpgsql::RawParseMode,
+    mode: ::plpgsql::RawParseMode,
     _location: i32,
 ) -> types_error::PgResult<()> {
     driver_seams::raw_parse_syntax_check::call(stmt.to_owned(), mode)
@@ -310,7 +310,7 @@ pub fn check_sql_expr(
 /// yields no descriptor (the C NULL).
 pub fn build_row_tupledesc(
     members: &[crate::RowMember],
-) -> types_error::PgResult<Option<plpgsql::TupleDesc>> {
+) -> types_error::PgResult<Option<::plpgsql::TupleDesc>> {
     if members.is_empty() {
         return Ok(None);
     }
@@ -340,7 +340,7 @@ pub fn build_row_tupledesc(
     }
 
     let handle = crate::rowtupdesc_table::register(ctx, td);
-    Ok(Some(plpgsql::TupleDesc(handle)))
+    Ok(Some(::plpgsql::TupleDesc(handle)))
 }
 
 /// `cached_function_compile(fcinfo, fn_extra, plpgsql_compile_callback, …)` +

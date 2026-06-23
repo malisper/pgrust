@@ -9,20 +9,20 @@ use crate::changecount::{
     pgstat_end_changecount_write,
 };
 use lwlock_seams::{lwlock_acquire, lwlock_initialize};
-use init_small_seams::my_proc_number;
+use ::init_small_seams::my_proc_number;
 use pgstat_seams::{
     snapshot_fixed, with_shmem_archiver, with_snapshot_archiver,
 };
-use timestamp_seams::get_current_timestamp;
-use types_core::TimestampTz;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{
+use ::timestamp_seams::get_current_timestamp;
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{
     PgStatShared_Archiver, PgStat_ArchiverStats, WAL_NAME_LEN,
 };
-use types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
+use ::types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
-pub use types_pgstat::activity_pgstat::PGSTAT_KIND_ARCHIVER;
+pub use ::types_pgstat::activity_pgstat::PGSTAT_KIND_ARCHIVER;
 
 /// Report archiver statistics.
 ///

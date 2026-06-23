@@ -30,11 +30,11 @@ extern crate alloc;
 use alloc::string::String;
 
 use types_core::{Oid, XLogRecPtr};
-use types_error::PgResult;
-use replication_launcher::LogicalRepWorkerType;
-use types_storage::LWLockMode;
+use ::types_error::PgResult;
+use ::replication_launcher::LogicalRepWorkerType;
+use ::types_storage::LWLockMode;
 
-use launcher::with_my_logical_rep_worker;
+use ::launcher::with_my_logical_rep_worker;
 use lwlock_seams as lwlock;
 
 /// `LogicalRepWorkerLock` — individual built-in LWLock #43 (lwlocklist.h).
@@ -56,7 +56,7 @@ const LOGICAL_REP_WORKER_LOCK: usize = 43;
 
 thread_local! {
     /// `static List *on_commit_wakeup_workers_subids = NIL;` (worker.c:295).
-    static ON_COMMIT_WAKEUP_WORKERS_SUBIDS: core::cell::RefCell<Vec<types_core::Oid>> =
+    static ON_COMMIT_WAKEUP_WORKERS_SUBIDS: core::cell::RefCell<Vec<::types_core::Oid>> =
         const { core::cell::RefCell::new(Vec::new()) };
 }
 
@@ -159,7 +159,7 @@ fn with_my_subscription<R>(f: impl FnOnce(&MySubscriptionState) -> R) -> R {
 /// `list_append_unique_oid` (append-if-not-already-present). The thread-local
 /// `Vec<Oid>` carries the transaction-scoped lifetime; the dedup is the
 /// `contains` check.
-pub fn LogicalRepWorkersWakeupAtCommit(subid: types_core::Oid) -> PgResult<()> {
+pub fn LogicalRepWorkersWakeupAtCommit(subid: ::types_core::Oid) -> PgResult<()> {
     ON_COMMIT_WAKEUP_WORKERS_SUBIDS.with(|cell| {
         let mut list = cell.borrow_mut();
         if !list.contains(&subid) {
@@ -183,7 +183,7 @@ pub fn LogicalRepWorkersWakeupAtCommit(subid: types_core::Oid) -> PgResult<()> {
 pub fn AtEOXact_LogicalRepWorkers(is_commit: bool) -> PgResult<()> {
     // Snapshot the scheduled subids and clear the list. We take the snapshot
     // first so the launcher calls below do not re-enter the RefCell borrow.
-    let subids: Vec<types_core::Oid> =
+    let subids: Vec<::types_core::Oid> =
         ON_COMMIT_WAKEUP_WORKERS_SUBIDS.with(|cell| core::mem::take(&mut *cell.borrow_mut()));
 
     if is_commit && !subids.is_empty() {
@@ -199,7 +199,7 @@ pub fn AtEOXact_LogicalRepWorkers(is_commit: bool) -> PgResult<()> {
         let result = (|| -> PgResult<()> {
             for subid in &subids {
                 // workers = logicalrep_workers_find(subid, true, false);
-                let workers = launcher::logicalrep_workers_find(
+                let workers = ::launcher::logicalrep_workers_find(
                     *subid, true, false,
                 )?;
                 // foreach(lc2, workers) logicalrep_worker_wakeup_ptr(worker);

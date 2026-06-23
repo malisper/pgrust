@@ -15,7 +15,7 @@ use super::*;
 
 use std::sync::{Mutex, MutexGuard, Once};
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use types_network::{PGSQL_AF_INET, PGSQL_AF_INET6};
 
 static SEAM_LOCK: Mutex<()> = Mutex::new(());
@@ -241,7 +241,7 @@ fn inet_varlena(s: inet_struct) -> Vec<u8> {
 /// A canonical by-reference inet `Datum` carrying the real varlena image, built
 /// in `mcx` (mirrors a `pg_statistic` element / query `Const` value).
 fn inet_datum<'mcx>(mcx: Mcx<'mcx>, s: inet_struct) -> DatumV<'mcx> {
-    DatumV::ByRef(mcx::slice_in(mcx, &inet_varlena(s)).unwrap())
+    DatumV::ByRef(::mcx::slice_in(mcx, &inet_varlena(s)).unwrap())
 }
 
 /// Install the *production* inet-detoast owner (the slot

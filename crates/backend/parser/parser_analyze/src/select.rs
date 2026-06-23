@@ -3,8 +3,8 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{CmdType, Node, NodePtr};
 use ::nodes::parsestmt::{ParseExprKind, ParseState};
@@ -67,8 +67,8 @@ pub fn transformSelectStmt<'mcx>(
     if let Some(into_node) = stmt.intoClause.as_deref() {
         // C: parser_errposition(pstate, exprLocation((Node *) stmt->intoClause)).
         // exprLocation(IntoClause) uses the contained RangeVar's location.
-        return Err(utils_error::ereport(types_error::ERROR)
-            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+        return Err(utils_error::ereport(::types_error::ERROR)
+            .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
             .errmsg("SELECT ... INTO is not allowed here".to_string())
             .errposition(small1::parser_errposition(
                 pstate,
@@ -79,16 +79,16 @@ pub fn transformSelectStmt<'mcx>(
 
     /* make FOR UPDATE/FOR SHARE info available to addRangeTableEntry */
     pstate.p_locking_clause = {
-        let mut v = mcx::vec_with_capacity_in(mcx, stmt.lockingClause.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, stmt.lockingClause.len())?;
         for n in stmt.lockingClause.iter() {
-            v.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+            v.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
         }
         v
     };
 
     /* make WINDOW info available for window functions, too */
     pstate.p_windowdefs = {
-        let mut v = mcx::vec_with_capacity_in(mcx, stmt.windowClause.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, stmt.windowClause.len())?;
         for n in stmt.windowClause.iter() {
             match n.as_ref().as_windowdef() {
                 Some(w) => v.push(w.clone_in(mcx)?),
@@ -103,7 +103,7 @@ pub fn transformSelectStmt<'mcx>(
 
     /* transform targetlist */
     let target_list = {
-        let mut tl = mcx::vec_with_capacity_in(mcx, stmt.targetList.len())?;
+        let mut tl = ::mcx::vec_with_capacity_in(mcx, stmt.targetList.len())?;
         for n in stmt.targetList.iter() {
             match n.as_ref().as_restarget() {
                 Some(rt) => tl.push(rt.clone_in(mcx)?),
@@ -231,7 +231,7 @@ pub fn transformSelectStmt<'mcx>(
 
     /* transform window clauses after we have seen all window functions */
     let windowdefs = {
-        let mut v = mcx::vec_with_capacity_in(mcx, pstate.p_windowdefs.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, pstate.p_windowdefs.len())?;
         for w in pstate.p_windowdefs.iter() {
             v.push(w.clone_in(mcx)?);
         }
@@ -244,9 +244,9 @@ pub fn transformSelectStmt<'mcx>(
         &mut tlist,
     )?;
     qry.windowClause = {
-        let mut v = mcx::vec_with_capacity_in(mcx, window_clause.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, window_clause.len())?;
         for wc in window_clause {
-            v.push(mcx::alloc_in(mcx, Node::mk_window_clause(mcx, wc)?)?);
+            v.push(::mcx::alloc_in(mcx, Node::mk_window_clause(mcx, wc)?)?);
         }
         v
     };
@@ -258,7 +258,7 @@ pub fn transformSelectStmt<'mcx>(
 
     /* Put the (possibly clause-modified) target list back into the Query. */
     qry.targetList = {
-        let mut v = mcx::vec_with_capacity_in(mcx, tlist.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, tlist.len())?;
         for te in tlist {
             v.push(te);
         }
@@ -270,11 +270,11 @@ pub fn transformSelectStmt<'mcx>(
     qry.distinctClause = sgc_vec_to_nodes(mcx, distinct_clause)?;
 
     /* move the range table and join tree out of the ParseState into the Query */
-    qry.rtable = core::mem::replace(&mut pstate.p_rtable, mcx::PgVec::new_in(mcx));
-    qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, mcx::PgVec::new_in(mcx));
-    let joinlist = core::mem::replace(&mut pstate.p_joinlist, mcx::PgVec::new_in(mcx));
+    qry.rtable = core::mem::replace(&mut pstate.p_rtable, ::mcx::PgVec::new_in(mcx));
+    qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, ::mcx::PgVec::new_in(mcx));
+    let joinlist = core::mem::replace(&mut pstate.p_joinlist, ::mcx::PgVec::new_in(mcx));
     let qual_node = opt_expr_to_node(mcx, qual)?;
-    qry.jointree = Some(mcx::alloc_in(
+    qry.jointree = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
@@ -288,7 +288,7 @@ pub fn transformSelectStmt<'mcx>(
     qry.hasAggs = pstate.p_hasAggs;
 
     /* FOR UPDATE/SHARE */
-    let locking = core::mem::replace(&mut pstate.p_locking_clause, mcx::PgVec::new_in(mcx));
+    let locking = core::mem::replace(&mut pstate.p_locking_clause, ::mcx::PgVec::new_in(mcx));
     for lc_node in locking.iter() {
         match lc_node.as_ref().as_lockingclause() {
             Some(lc) => {
@@ -343,7 +343,7 @@ pub fn transformReturnStmt<'mcx>(
     let expr = expr.ok_or_else(|| elog_error("RETURN has no return value"))?;
     let tle = nodes_core::makefuncs::make_target_entry(mcx, expr.clone_in(mcx)?, 1, None, false)?;
     qry.targetList = {
-        let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, 1)?;
         v.push(tle);
         v
     };
@@ -351,12 +351,12 @@ pub fn transformReturnStmt<'mcx>(
     /* if (pstate->p_resolve_unknowns) resolveTargetListUnknowns(...) */
     if pstate.p_resolve_unknowns {
         let mut tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> =
-            core::mem::replace(&mut qry.targetList, mcx::PgVec::new_in(mcx))
+            core::mem::replace(&mut qry.targetList, ::mcx::PgVec::new_in(mcx))
                 .into_iter()
                 .collect();
         parse_target::resolveTargetListUnknowns(mcx, pstate, &mut tlist)?;
         qry.targetList = {
-            let mut v = mcx::vec_with_capacity_in(mcx, tlist.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, tlist.len())?;
             for te in tlist {
                 v.push(te);
             }
@@ -365,10 +365,10 @@ pub fn transformReturnStmt<'mcx>(
     }
 
     /* move the range table and join tree out of the ParseState into the Query */
-    qry.rtable = core::mem::replace(&mut pstate.p_rtable, mcx::PgVec::new_in(mcx));
-    qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, mcx::PgVec::new_in(mcx));
-    let joinlist = core::mem::replace(&mut pstate.p_joinlist, mcx::PgVec::new_in(mcx));
-    qry.jointree = Some(mcx::alloc_in(
+    qry.rtable = core::mem::replace(&mut pstate.p_rtable, ::mcx::PgVec::new_in(mcx));
+    qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, ::mcx::PgVec::new_in(mcx));
+    let joinlist = core::mem::replace(&mut pstate.p_joinlist, ::mcx::PgVec::new_in(mcx));
+    qry.jointree = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
@@ -421,9 +421,9 @@ pub fn transformValuesClause<'mcx>(
             Some(items) => items,
             None => return Err(elog_error("VALUES sublist is not a List")),
         };
-        let mut sublist_owned = mcx::vec_with_capacity_in(mcx, sublist.len())?;
+        let mut sublist_owned = ::mcx::vec_with_capacity_in(mcx, sublist.len())?;
         for item in sublist.iter() {
-            sublist_owned.push(mcx::alloc_in(mcx, item.clone_in(mcx)?)?);
+            sublist_owned.push(::mcx::alloc_in(mcx, item.clone_in(mcx)?)?);
         }
         let transformed = parse_target::transformExpressionList(
             mcx,
@@ -453,9 +453,9 @@ pub fn transformValuesClause<'mcx>(
     /*
      * Resolve common types/typmods/collations per column and coerce.
      */
-    let mut coltypes = mcx::vec_with_capacity_in(mcx, sublist_length.max(0) as usize)?;
-    let mut coltypmods = mcx::vec_with_capacity_in(mcx, sublist_length.max(0) as usize)?;
-    let mut colcollations = mcx::vec_with_capacity_in(mcx, sublist_length.max(0) as usize)?;
+    let mut coltypes = ::mcx::vec_with_capacity_in(mcx, sublist_length.max(0) as usize)?;
+    let mut coltypmods = ::mcx::vec_with_capacity_in(mcx, sublist_length.max(0) as usize)?;
+    let mut colcollations = ::mcx::vec_with_capacity_in(mcx, sublist_length.max(0) as usize)?;
 
     for i in 0..(sublist_length.max(0) as usize) {
         let coltype = coerce::select_common_type(
@@ -510,18 +510,18 @@ pub fn transformValuesClause<'mcx>(
     for i in 0..ncols {
         col_iters.push(core::mem::take(&mut colexprs[i]).into_iter());
     }
-    let mut exprs_lists: mcx::PgVec<'mcx, NodePtr<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, nrows)?;
+    let mut exprs_lists: ::mcx::PgVec<'mcx, NodePtr<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, nrows)?;
     for _ in 0..nrows {
-        let mut row: mcx::PgVec<'mcx, NodePtr<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, ncols)?;
+        let mut row: ::mcx::PgVec<'mcx, NodePtr<'mcx>> =
+            ::mcx::vec_with_capacity_in(mcx, ncols)?;
         for ci in col_iters.iter_mut() {
             let e = ci
                 .next()
                 .expect("VALUES column shorter than row count (length-checked above)");
-            row.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?);
+            row.push(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?);
         }
-        exprs_lists.push(mcx::alloc_in(mcx, Node::mk_list(mcx, row)?)?);
+        exprs_lists.push(::mcx::alloc_in(mcx, Node::mk_list(mcx, row)?)?);
     }
 
     /*
@@ -531,9 +531,9 @@ pub fn transformValuesClause<'mcx>(
     let mut lateral = false;
     if !pstate.p_rtable.is_empty() {
         let probe = Node::mk_list(mcx, {
-            let mut v = mcx::vec_with_capacity_in(mcx, exprs_lists.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, exprs_lists.len())?;
             for e in exprs_lists.iter() {
-                v.push(mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
+                v.push(::mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
             }
             v
         })?;
@@ -576,7 +576,7 @@ pub fn transformValuesClause<'mcx>(
     )?;
     qry.sortClause = sgc_vec_to_nodes(mcx, sort_clause)?;
     qry.targetList = {
-        let mut v = mcx::vec_with_capacity_in(mcx, tlist_vec.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, tlist_vec.len())?;
         for te in tlist_vec {
             v.push(te);
         }
@@ -614,10 +614,10 @@ pub fn transformValuesClause<'mcx>(
         )));
     }
 
-    qry.rtable = core::mem::replace(&mut pstate.p_rtable, mcx::PgVec::new_in(mcx));
-    qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, mcx::PgVec::new_in(mcx));
-    let joinlist = core::mem::replace(&mut pstate.p_joinlist, mcx::PgVec::new_in(mcx));
-    qry.jointree = Some(mcx::alloc_in(
+    qry.rtable = core::mem::replace(&mut pstate.p_rtable, ::mcx::PgVec::new_in(mcx));
+    qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, ::mcx::PgVec::new_in(mcx));
+    let joinlist = core::mem::replace(&mut pstate.p_joinlist, ::mcx::PgVec::new_in(mcx));
+    qry.jointree = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,

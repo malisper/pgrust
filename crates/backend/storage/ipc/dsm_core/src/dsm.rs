@@ -27,8 +27,8 @@ use std::cell::{Cell, RefCell};
 use lwlock::{LWLockAcquireMain, MainLWLockGuard};
 use utils_error::{elog, ereport};
 use mcx::{Mcx, PgVec};
-use types_core::Size;
-use datum::Datum;
+use ::types_core::Size;
+use ::datum::Datum;
 use types_error::{
     ErrorLocation, PgResult, DEBUG1, DEBUG2, ERRCODE_INSUFFICIENT_RESOURCES, ERROR, LOG, WARNING,
 };
@@ -521,7 +521,7 @@ fn dsm_cleanup_for_mmap() -> PgResult<()> {
             let cbuf = std::ffi::CString::new(buf.clone())
                 .expect("interior NUL in dsm file name");
             if unsafe { libc::unlink(cbuf.as_ptr()) } != 0 {
-                let en = utils_error::errno::current_errno();
+                let en = ::utils_error::errno::current_errno();
                 ereport(ERROR)
                     .with_saved_errno(en)
                     .errcode_for_file_access()

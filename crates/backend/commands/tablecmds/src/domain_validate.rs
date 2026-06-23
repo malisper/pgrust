@@ -21,23 +21,23 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use types_core::primitive::{AttrNumber, Oid, OidIsValid};
+use ::types_core::primitive::{AttrNumber, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_NOT_NULL_VIOLATION, ERROR};
-use rel::Relation;
-use types_storage::lock::{LOCKMODE, NoLock, ShareLock};
-use types_tuple::access::{RELKIND_MATVIEW, RELKIND_RELATION};
+use ::rel::Relation;
+use ::types_storage::lock::{LOCKMODE, NoLock, ShareLock};
+use ::types_tuple::access::{RELKIND_MATVIEW, RELKIND_RELATION};
 
-use common_relation::relation_open;
-use objectaddress::consts::{RelationRelationId, TypeRelationId};
+use ::common_relation::relation_open;
+use ::objectaddress::consts::{RelationRelationId, TypeRelationId};
 use pg_depend_seams as pg_depend_seam;
-use execTuples::exec_init_slots::ExecDropSingleTupleTableSlot;
-use execTuples::slot_deform::slot_getattr;
-use lsyscache_seams::get_typtype;
-use stack_depth::check_stack_depth;
+use ::execTuples::exec_init_slots::ExecDropSingleTupleTableSlot;
+use ::execTuples::slot_deform::slot_getattr;
+use ::lsyscache_seams::get_typtype;
+use ::stack_depth::check_stack_depth;
 
-use types_catalog::pg_type::TYPTYPE_DOMAIN;
+use ::types_catalog::pg_type::TYPTYPE_DOMAIN;
 
 use crate::at_altertype::find_composite_type_dependencies;
 use crate::helpers::here;
@@ -123,7 +123,7 @@ pub fn validate_domain_check_constraint<'mcx>(
 ) -> PgResult<()> {
     // expr = (Expr *) stringToNode(ccbin);
     let cnode = read_seams::string_to_node::call(mcx, ccbin)?;
-    let expr = mcx::PgBox::into_inner(cnode)
+    let expr = ::mcx::PgBox::into_inner(cnode)
         .into_expr()
         .ok_or_else(|| {
             utils_error::ereport(ERROR)

@@ -113,11 +113,11 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicI32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
-use condvar::ConditionVariable;
-use types_core::primitive::Size;
+use ::condvar::ConditionVariable;
+use ::types_core::primitive::Size;
 use types_error::{PgError, PgResult};
-use types_resowner::ResourceOwner;
-use types_storage::storage::NUM_AUXILIARY_PROCS;
+use ::types_resowner::ResourceOwner;
+use ::types_storage::storage::NUM_AUXILIARY_PROCS;
 
 // ===========================================================================
 // io_method enum (storage/aio.h)
@@ -308,7 +308,7 @@ pub struct PgAioReturn {
 }
 
 /// `struct ResourceOwnerData *resowner` (`utils/resowner.c`) — the value-typed
-/// resource-owner handle (`types_resowner::ResourceOwner`), `None` until an
+/// resource-owner handle (`::types_resowner::ResourceOwner`), `None` until an
 /// owner is set. The resowner AIO integration (`pgaio_io_resowner_register`)
 /// threads this through the `resource_owner_remember/forget_aio_handle` seams.
 pub type ResourceOwnerId = ResourceOwner;
@@ -648,7 +648,7 @@ fn io_workers() -> i32 {
 /// `pgaio_method_ops` from the table. Here `pgaio_method_ops` is resolved on
 /// demand, so the assign hook only validates the index (the C asserts the table
 /// entry is non-NULL).
-fn assign_io_method(newval: i32, _extra: Option<&guc_tables::GucHookExtra>) {
+fn assign_io_method(newval: i32, _extra: Option<&::guc_tables::GucHookExtra>) {
     // Assert(newval < lengthof(pgaio_method_ops_table)) +
     // Assert(pgaio_method_ops_table[newval] != NULL): validate by resolving.
     debug_assert!((IOMETHOD_SYNC..=IOMETHOD_IO_URING).contains(&newval));
@@ -660,7 +660,7 @@ fn assign_io_method(newval: i32, _extra: Option<&guc_tables::GucHookExtra>) {
 /// (aio.c).
 fn check_io_max_concurrency(
     newval: &mut i32,
-    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _extra: &mut Option<::guc_tables::GucHookExtra>,
     _source: types_guc::GucSource,
 ) -> PgResult<bool> {
     if *newval == -1 {
@@ -1012,7 +1012,7 @@ pub fn pgaio_init_backend() -> PgResult<()> {
     // Assert(!pgaio_my_backend) — shouldn't be initialized twice.
 
     if init_small_seams::my_backend_type::call()
-        == types_core::init::BackendType::IoWorker
+        == ::types_core::init::BackendType::IoWorker
     {
         return Ok(());
     }
@@ -1021,7 +1021,7 @@ pub fn pgaio_init_backend() -> PgResult<()> {
     // reads `INVALID_PROC_NUMBER` (-1) when `MyProc == NULL`, so the NULL test
     // is the invalid-procnumber test plus the upper bound.
     let my_proc_number = init_small_seams::my_proc_number::call();
-    if my_proc_number == types_core::primitive::INVALID_PROC_NUMBER
+    if my_proc_number == ::types_core::primitive::INVALID_PROC_NUMBER
         || my_proc_number >= AioProcs() as i32
     {
         return Err(PgError::error("aio requires a normal PGPROC"));

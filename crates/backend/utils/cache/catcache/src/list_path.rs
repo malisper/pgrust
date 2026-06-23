@@ -16,17 +16,17 @@ use cache::catcache::{
     ArenaCatCList, CacheIdx, ClIdx, CtIdx, FetchedCatalogTuple, ItemPointer, CATCACHE_MAXKEYS,
     CL_MAGIC,
 };
-use cache::SysCacheKey;
+use ::cache::SysCacheKey;
 use cache::catcache::CatKey;
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`:
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`:
 // the by-value scalar word a `CatKey::Scalar` carries (C's by-value key `Datum`).
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 // The canonical unified value type (Datum-unification keystone) — what the
 // keystone-owned `ScanKeyData.sk_argument` carries.
-use types_tuple::heaptuple::Datum as DatumV;
-use types_error::PgResult;
-use types_scan::scankey::ScanKeyData;
-use types_tuple::heaptuple::{FormedTuple, Datum};
+use ::types_tuple::heaptuple::Datum as DatumV;
+use ::types_error::PgResult;
+use ::types_scan::scankey::ScanKeyData;
+use ::types_tuple::heaptuple::{FormedTuple, Datum};
 
 use genam_seams as genam;
 
@@ -292,7 +292,7 @@ fn build_list_body(
     cc_nbuckets: i32,
     skey_tmpl: &[ScanKeyData<'_>; CATCACHE_MAXKEYS],
     arguments: [CatKey; 4],
-) -> Result<ClIdx, (Vec<CtIdx>, types_error::PgError)> {
+) -> Result<ClIdx, (Vec<CtIdx>, ::types_error::PgError)> {
     // ctlist = NIL; nmembers = 0; ordered = false;
     let mut ctlist: Vec<CtIdx> = Vec::new();
     let mut ordered = false;
@@ -483,7 +483,7 @@ fn scan_members(
     // CurrentMemoryContext during the scan); the key datums and tuple bytes we
     // keep are copied out into owned `FetchedCatalogTuple`s, so the scratch is
     // dropped when the scan ends.
-    let scratch = mcx::MemoryContext::new("SearchCatCacheList scan");
+    let scratch = ::mcx::MemoryContext::new("SearchCatCacheList scan");
     let scan_mcx = scratch.mcx();
 
     // relation = table_open(cache->cc_reloid, AccessShareLock);
@@ -511,7 +511,7 @@ fn scan_members(
     for i in 0..(nkeys as usize) {
         cur_skey[i].sk_argument = match &arguments[i] {
             CatKey::Scalar(w) => DatumV::ByVal(w.as_usize()),
-            CatKey::ByRef(bytes) => DatumV::ByRef(mcx::slice_in(scan_mcx, bytes)?),
+            CatKey::ByRef(bytes) => DatumV::ByRef(::mcx::slice_in(scan_mcx, bytes)?),
         };
     }
 
@@ -622,11 +622,11 @@ pub(crate) fn build_fetched(
         .t_data
         .as_ref()
         .map(|h| {
-            (h.t_infomask & types_tuple::heaptuple::HEAP_HASEXTERNAL) != 0
+            (h.t_infomask & ::types_tuple::heaptuple::HEAP_HASEXTERNAL) != 0
         })
         .unwrap_or(false);
 
-    let mut flat_err: Option<types_error::PgError> = None;
+    let mut flat_err: Option<::types_error::PgError> = None;
     let mut flattened: Option<FormedTuple<'_>> = None;
     if has_external {
         crate::init_meta::with_cache_tupdesc(cache_id, &mut |tupdesc| {
@@ -664,7 +664,7 @@ pub(crate) fn build_fetched(
     // column i (0..cc_nkeys), keys[i] = values[cc_keyno[i] - 1]. This is the C
     // `CatCacheCopyKeys`: by-value keys keep the scalar word, by-reference keys
     // (name/text/oidvector) `datumCopy` their payload bytes into the entry.
-    let mut extract_err: Option<types_error::PgError> = None;
+    let mut extract_err: Option<::types_error::PgError> = None;
     crate::init_meta::with_cache_tupdesc(cache_id, &mut |tupdesc| {
         let res = heaptuple::heap_deform_tuple(
             scan_mcx,
@@ -778,7 +778,7 @@ pub(crate) fn build_list_members<'mcx>(
             .clone()
     });
 
-    let mut out: PgVec<'mcx, FormedTuple<'mcx>> = mcx::vec_with_capacity_in(mcx, members.len())?;
+    let mut out: PgVec<'mcx, FormedTuple<'mcx>> = ::mcx::vec_with_capacity_in(mcx, members.len())?;
     for ct_idx in members {
         let formed = crate::search_path::build_formed_tuple(mcx, cache_idx, ct_idx)?;
         out.push(formed);

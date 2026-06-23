@@ -2,8 +2,8 @@
 //! `str_udeescape` Unicode de-escaping.
 
 use super::*;
-use scan_fgram::Utf8UnicodeSeam;
-use mb_fgram::SetDatabaseEncoding;
+use ::scan_fgram::Utf8UnicodeSeam;
+use ::mb_fgram::SetDatabaseEncoding;
 use std::sync::Mutex;
 
 static ENC_LOCK: Mutex<()> = Mutex::new(());

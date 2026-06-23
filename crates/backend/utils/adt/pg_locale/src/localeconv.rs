@@ -1,7 +1,7 @@
 //! `PGLC_localeconv()` and `cache_locale_time()` (`pg_locale.c:531-858`): the
 //! `lconv`/`lc_time` formatting caches consulted by `to_char`/the money type.
 //!
-//! The repo seam carriers are the monetary/number subset ([`types_cash::CashLconv`])
+//! The repo seam carriers are the monetary/number subset ([`::types_cash::CashLconv`])
 //! and the four localized day/month name arrays. The C-locale fast paths
 //! (`lc_monetary`/`lc_numeric`/`lc_time` all C/POSIX) are bound here directly;
 //! the non-C paths need `pg_localeconv_r` / `strftime_l` + the
@@ -19,7 +19,7 @@ use core::cell::RefCell;
 use core::ffi::c_char;
 
 use mcx::{Mcx, PgVec};
-use types_cash::CashLconv;
+use ::types_cash::CashLconv;
 use types_error::{PgError, PgResult};
 
 use pg_locale_env_seams as env;
@@ -136,9 +136,9 @@ fn copy_names<'mcx>(
     if names.is_empty() {
         return Ok(None);
     }
-    let mut out = mcx::vec_with_capacity_in::<PgVec<'mcx, u8>>(mcx, names.len())?;
+    let mut out = ::mcx::vec_with_capacity_in::<PgVec<'mcx, u8>>(mcx, names.len())?;
     for n in names {
-        out.push(mcx::slice_in(mcx, n)?);
+        out.push(::mcx::slice_in(mcx, n)?);
     }
     Ok(Some(out))
 }

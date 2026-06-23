@@ -32,13 +32,13 @@
 //! * a node is a `&mut Node` (mutation in place) and the context is a `&mut
 //!   AssignCollationsContext` captured by the recursion;
 //! * `expression_tree_walker(node, assign_collations_walker, &loccontext)`
-//!   becomes [`nodes_core::node_walker::expression_tree_walker_mut`]
+//!   becomes [`::nodes_core::node_walker::expression_tree_walker_mut`]
 //!   driven by a closure that recurses with `assign_collations_walker(child,
 //!   loccontext)` — each child is mutated and merged into `loccontext` exactly
 //!   as C does;
 //! * the node-level `exprType`/`exprCollation`/`exprSetCollation`/
 //!   `exprSetInputCollation`/`exprLocation` accessors are the `Expr`-level
-//!   [`nodes_core::nodefuncs`] functions reached *through* the
+//!   [`::nodes_core::nodefuncs`] functions reached *through* the
 //!   `Node::Expr(Expr)` arm (the general/default arms of the C switch only ever
 //!   handle expression-bearing nodes);
 //! * a C `List *` handed to the walker (the `RowExpr`/`WindowFunc` arg lists, the
@@ -67,14 +67,14 @@
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERROR, ERRCODE_COLLATION_MISMATCH, ERRCODE_OUT_OF_MEMORY};
 use parsenodes::{AGGKIND_HYPOTHETICAL, AGGKIND_NORMAL, AGGKIND_ORDERED_SET};
-use types_cluster::ParseState;
+use ::types_cluster::ParseState;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::{Aggref, CoercionForm, Expr};
 
-use utils_error::ereport;
-use nodes_core::makefuncs::make_relabel_type;
-use nodes_core::node_walker::expression_tree_walker_mut;
-use nodes_core::nodefuncs::{
+use ::utils_error::ereport;
+use ::nodes_core::makefuncs::make_relabel_type;
+use ::nodes_core::node_walker::expression_tree_walker_mut;
+use ::nodes_core::nodefuncs::{
     expr_collation, expr_location, expr_set_collation, expr_set_input_collation, expr_type,
     expr_typmod,
 };
@@ -905,7 +905,7 @@ fn recurse_children<'mcx>(
     node: &mut Node<'mcx>,
     loccontext: &mut AssignCollationsContext<'_, 'mcx>,
 ) -> PgResult<()> {
-    let mut err: Option<types_error::PgError> = None;
+    let mut err: Option<::types_error::PgError> = None;
     // The in-place walker wraps each `Expr` child as a transient opaque `Node`
     // tied to the walked tree's context (`'mcx`); recover that context from the
     // pstate (the tree being collated lives in the query mcx), or from the
@@ -1280,7 +1280,7 @@ fn implicit_conflict_error(
     collation: Oid,
     collation2: Oid,
     location2: i32,
-) -> PgResult<types_error::PgError> {
+) -> PgResult<::types_error::PgError> {
     let name1 = get_collation_name(collation)?;
     let name2 = get_collation_name(collation2)?;
     let cursor = parser_errposition(pstate, location2)?;
@@ -1303,7 +1303,7 @@ fn explicit_conflict_error(
     collation: Oid,
     collation2: Oid,
     location: i32,
-) -> PgResult<types_error::PgError> {
+) -> PgResult<::types_error::PgError> {
     let name1 = get_collation_name(collation)?;
     let name2 = get_collation_name(collation2)?;
     let cursor = parser_errposition(pstate, location)?;
@@ -1317,7 +1317,7 @@ fn explicit_conflict_error(
 }
 
 /// `elog(ERROR, "unrecognized aggkind: %d")` (parse_collate.c:615).
-fn unrecognized_aggkind(aggkind: i8) -> types_error::PgError {
+fn unrecognized_aggkind(aggkind: i8) -> ::types_error::PgError {
     ereport(ERROR)
         .errmsg_internal(format!("unrecognized aggkind: {}", aggkind as i32))
         .into_error()
@@ -1326,7 +1326,7 @@ fn unrecognized_aggkind(aggkind: i8) -> types_error::PgError {
 /// C default arm of `assign_collations_walker`: `elog(ERROR, "unrecognized node
 /// type")`. Reached only for a non-expression `Node` arm the C switch has no
 /// case for.
-fn unrecognized_node_type(node: &Node) -> types_error::PgError {
+fn unrecognized_node_type(node: &Node) -> ::types_error::PgError {
     ereport(ERROR)
         .errmsg_internal(format!(
             "assign_collations_walker: unrecognized node type {}",
@@ -1335,7 +1335,7 @@ fn unrecognized_node_type(node: &Node) -> types_error::PgError {
         .into_error()
 }
 
-fn alloc_failed() -> types_error::PgError {
+fn alloc_failed() -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_OUT_OF_MEMORY)
         .errmsg_internal("out of memory building RowCompareExpr inputcollids")

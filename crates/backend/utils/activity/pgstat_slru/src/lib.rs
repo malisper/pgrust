@@ -20,14 +20,14 @@
 use core::cell::{Cell, RefCell};
 
 use lwlock_seams::{lwlock_acquire, lwlock_initialize};
-use activity_pgstat::kind_info::KindInfoBuilder;
-use activity_pgstat::registry;
-use init_small_seams::my_proc_number;
-use timestamp_seams::get_current_timestamp;
-use types_core::TimestampTz;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{PgStat_SLRUStats, PGSTAT_KIND_SLRU};
-use types_pgstat::pgstat_internal::{
+use ::activity_pgstat::kind_info::KindInfoBuilder;
+use ::activity_pgstat::registry;
+use ::init_small_seams::my_proc_number;
+use ::timestamp_seams::get_current_timestamp;
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{PgStat_SLRUStats, PGSTAT_KIND_SLRU};
+use ::types_pgstat::pgstat_internal::{
     PgStat_KindInfo, PgStat_ShmemControl, PgStat_Snapshot, SLRU_NAMES, SLRU_NUM_ELEMENTS,
 };
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
@@ -128,7 +128,7 @@ pub fn pgstat_count_slru_truncate(slru_idx: i32) {
 /// pointer into the snapshot's SLRU array; here it returns a copy.
 pub fn pgstat_fetch_slru() -> PgResult<[PgStat_SLRUStats; SLRU_NUM_ELEMENTS]> {
     pgstat_seams::snapshot_fixed::call(PGSTAT_KIND_SLRU)?;
-    Ok(activity_pgstat::local::with_local(|l| l.snapshot.slru))
+    Ok(::activity_pgstat::local::with_local(|l| l.snapshot.slru))
 }
 
 /// Port of `const char *pgstat_get_slru_name(int slru_idx)`.
@@ -170,7 +170,7 @@ pub fn pgstat_slru_flush_cb(nowait: bool) -> PgResult<bool> {
         return Ok(false);
     }
 
-    activity_pgstat::local::with_local(|l| {
+    ::activity_pgstat::local::with_local(|l| {
         let ctl: &mut PgStat_ShmemControl = l
             .shmem
             .as_mut()
@@ -182,7 +182,7 @@ pub fn pgstat_slru_flush_cb(nowait: bool) -> PgResult<bool> {
         if !nowait {
             guard = lwlock_acquire::call(&stats_shmem.lock, LW_EXCLUSIVE, my_proc_number::call())?;
         } else {
-            match lwlock_seams::lwlock_conditional_acquire::call(
+            match ::lwlock_seams::lwlock_conditional_acquire::call(
                 &stats_shmem.lock,
                 LW_EXCLUSIVE,
             )? {
@@ -257,7 +257,7 @@ pub fn pgstat_slru_snapshot_cb(
 /// TimestampTz ts)`. Reaches `pgStatLocal.shmem->slru` through the owner local
 /// state.
 fn pgstat_reset_slru_counter_internal(index: i32, ts: TimestampTz) -> PgResult<()> {
-    activity_pgstat::local::with_local(|l| {
+    ::activity_pgstat::local::with_local(|l| {
         let ctl: &mut PgStat_ShmemControl = l
             .shmem
             .as_mut()
@@ -296,8 +296,8 @@ fn pgstat_reset_slru_counter_internal_ctl(
 /// `[PgStat_SLRUStats; SLRU_NUM_ELEMENTS]` array. SLRU is a fixed kind with a
 /// dedicated control-block field, so `shared_size` is 0.
 fn slru_kind_info() -> PgStat_KindInfo {
-    use types_pgstat::activity_pgstat::PgStat_SLRUStats;
-    use types_pgstat::pgstat_internal::SLRU_NUM_ELEMENTS;
+    use ::types_pgstat::activity_pgstat::PgStat_SLRUStats;
+    use ::types_pgstat::pgstat_internal::SLRU_NUM_ELEMENTS;
     PgStat_KindInfo {
         fixed_amount: true,
         accessed_across_databases: false,
@@ -314,8 +314,8 @@ fn slru_kind_info() -> PgStat_KindInfo {
 
 /// Register `PGSTAT_KIND_SLRU` and install the SLRU outward seams.
 pub fn init_seams() {
-    use types_pgstat::activity_pgstat::PgStat_SLRUStats;
-    use types_pgstat::pgstat_internal::SLRU_NUM_ELEMENTS;
+    use ::types_pgstat::activity_pgstat::PgStat_SLRUStats;
+    use ::types_pgstat::pgstat_internal::SLRU_NUM_ELEMENTS;
     registry::register(
         KindInfoBuilder::new(PGSTAT_KIND_SLRU, slru_kind_info())
             .init_shmem_cb(pgstat_slru_init_shmem_cb)
@@ -324,13 +324,13 @@ pub fn init_seams() {
             .flush_static_cb(pgstat_slru_flush_cb)
             // On-disk (de)serialization of the typed SLRU stats array.
             .read_fixed_cb(|ctl, bytes| {
-                ctl.slru.stats = activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                ctl.slru.stats = ::activity_pgstat::kind_info::pgstat_deserialize_pod::<
                     [PgStat_SLRUStats; SLRU_NUM_ELEMENTS],
                 >(bytes);
                 Ok(())
             })
             .write_fixed_cb(|snap| {
-                activity_pgstat::kind_info::pgstat_serialize_pod(&snap.slru)
+                ::activity_pgstat::kind_info::pgstat_serialize_pod(&snap.slru)
             }),
     );
 

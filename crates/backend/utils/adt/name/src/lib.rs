@@ -6,7 +6,7 @@
 //! (the on-disk catalog identifier representation).
 //!
 //! `name` is pass-by-reference; its referent is a fixed-size [`NameData`]
-//! ([`types_tuple::heaptuple::NameData`]). Following the sibling adt ports
+//! ([`::types_tuple::heaptuple::NameData`]). Following the sibling adt ports
 //! (`backend-utils-adt-char`), these are plain typed Rust functions, not an
 //! fmgr/`Datum` marshalling layer: a `name` value crosses as `&NameData`, a
 //! `cstring` as `&str`, binary I/O uses [`StringInfo`].
@@ -26,16 +26,16 @@ use alloc::format;
 
 use mcx::{Mcx, PgString, PgVec};
 use types_core::{Oid, C_COLLATION_OID, NAMEDATALEN};
-use datum::Bytea;
+use ::datum::Bytea;
 use types_error::{PgResult, ERRCODE_NAME_TOO_LONG};
-use types_sortsupport::SortSupportData;
-use stringinfo::StringInfo;
-use types_tuple::heaptuple::{NameData, NAMEOID};
+use ::types_sortsupport::SortSupportData;
+use ::stringinfo::StringInfo;
+use ::types_tuple::heaptuple::{NameData, NAMEOID};
 
 use pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgtext, pq_sendtext};
-use varlena::comparison::varstr_cmp;
-use varlena::sortsupport::{varstr_sortsupport, VarStrSortSupport};
-use types_error::PgError;
+use ::varlena::comparison::varstr_cmp;
+use ::varlena::sortsupport::{varstr_sortsupport, VarStrSortSupport};
+use ::types_error::PgError;
 
 use namespace_seams as namespace_seam;
 use arrayfuncs_seams as arrayfuncs_seam;
@@ -264,7 +264,7 @@ pub fn current_schemas<'mcx>(
     // names = palloc(list_length * sizeof(Datum)); for each oid with a live
     // namespace name, names[i] = namein(nspname). Build the NameData images.
     let mut names: PgVec<'mcx, NameData> =
-        mcx::vec_with_capacity_in(mcx, search_path.len())?;
+        ::mcx::vec_with_capacity_in(mcx, search_path.len())?;
     for &oid in search_path.iter() {
         let nspname = lsyscache_seam::get_namespace_name::call(mcx, oid)?;
         if let Some(nspname) = nspname {
@@ -275,7 +275,7 @@ pub fn current_schemas<'mcx>(
 
     // array = construct_array_builtin(names, i, NAMEOID);
     let images: PgVec<'mcx, &[u8]> = {
-        let mut v = mcx::vec_with_capacity_in(mcx, names.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, names.len())?;
         for n in names.iter() {
             v.push(&n.data[..]);
         }

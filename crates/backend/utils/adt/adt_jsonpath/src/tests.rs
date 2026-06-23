@@ -6,7 +6,7 @@
 use super::*;
 use alloc::boxed::Box;
 use alloc::vec;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 fn pi(typ: JsonPathItemType, value: JsonPathParseValue) -> JsonPathParseItem {
     JsonPathParseItem {
@@ -19,13 +19,13 @@ fn pi(typ: JsonPathItemType, value: JsonPathParseValue) -> JsonPathParseItem {
 #[test]
 fn convert_regex_flags_default_advanced() {
     // No flags -> REG_ADVANCED | REG_NLSTOP (dotall off by default).
-    use regex_core::regex_consts::{REG_ADVANCED, REG_NLSTOP};
+    use ::regex_core::regex_consts::{REG_ADVANCED, REG_NLSTOP};
     assert_eq!(jspConvertRegexFlags(0).unwrap(), REG_ADVANCED | REG_NLSTOP);
 }
 
 #[test]
 fn convert_regex_flags_icase_dotall_mline() {
-    use regex_core::regex_consts::{REG_ADVANCED, REG_ICASE, REG_NLANCH};
+    use ::regex_core::regex_consts::{REG_ADVANCED, REG_ICASE, REG_NLANCH};
     let xflags = JSP_REGEX_ICASE | JSP_REGEX_DOTALL | JSP_REGEX_MLINE;
     // dotall set -> no REG_NLSTOP; mline -> REG_NLANCH; icase -> REG_ICASE.
     assert_eq!(
@@ -36,7 +36,7 @@ fn convert_regex_flags_icase_dotall_mline() {
 
 #[test]
 fn convert_regex_flags_quote_overrides() {
-    use regex_core::regex_consts::{REG_ADVANCED, REG_QUOTE};
+    use ::regex_core::regex_consts::{REG_ADVANCED, REG_QUOTE};
     // q clears REG_ADVANCED and sets REG_QUOTE; m/s/x are ignored.
     let xflags = JSP_REGEX_QUOTE | JSP_REGEX_MLINE | JSP_REGEX_DOTALL;
     let cflags = jspConvertRegexFlags(xflags).unwrap();

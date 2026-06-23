@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 //!
-//! The compiled regex crosses this boundary as [`regex::RegexCompiled`],
+//! The compiled regex crosses this boundary as [`::regex::RegexCompiled`],
 //! which carries the real engine-owned `regex_t` value type-erased as an
 //! `Rc<dyn Any>`; the owning unit downcasts it back to its own `regex_t` (see
 //! `types-regex` for why that real-value/downcast cycle-break introduces no
@@ -21,9 +21,9 @@
 //! non-`Compiled` arms of the result enums, carrying the
 //! `pg_regerror`-formatted message (`regerror.c` owns the message table).
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{Oid, PgWChar};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use regex::{RegMatch, RegcompResult, RegexCompiled, RegexecResult, RegprefixResult};
 
 seam_core::seam!(

@@ -16,7 +16,7 @@ use std::vec::Vec;
 
 use super::*;
 use jsonb_util::{JsonbPair, JsonbValueToJsonb};
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 /// Install the sibling-crate seams the jsonb engine and our hashing reach when
 /// these tests serialize / iterate / hash real on-disk jsonb.
@@ -423,8 +423,8 @@ fn numeric_normalize_strips_trailing_zeroes() {
     let ctx = MemoryContext::new("jsonb_gin.test.numnorm");
     let mcx = ctx.mcx();
     // Build the on-disk numeric for 1.50 -> normalized "1.5"; for 100 -> "100".
-    use adt_numeric::convert::make_result;
-    use adt_numeric::io::set_var_from_str;
+    use ::adt_numeric::convert::make_result;
+    use ::adt_numeric::io::set_var_from_str;
 
     let render = |s: &str| -> std::string::String {
         let (v, _) = set_var_from_str(mcx, s, 0).unwrap();

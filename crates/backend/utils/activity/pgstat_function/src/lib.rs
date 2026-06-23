@@ -29,24 +29,24 @@ pub mod fmgr_builtins;
 
 use core::cell::Cell;
 
-use activity_pgstat::entry_ref::PgStat_EntryRef;
-use activity_pgstat::kind_info::KindInfoBuilder;
-use activity_pgstat::pgstat_core;
-use activity_pgstat::registry;
-use activity_pgstat::shmem;
+use ::activity_pgstat::entry_ref::PgStat_EntryRef;
+use ::activity_pgstat::kind_info::KindInfoBuilder;
+use ::activity_pgstat::pgstat_core;
+use ::activity_pgstat::registry;
+use ::activity_pgstat::shmem;
 use activity_xact as xact;
-use utils_error::ereport;
-use init_small_seams::my_database_id;
+use ::utils_error::ereport;
+use ::init_small_seams::my_database_id;
 use ::instr_time::instr_time_set_current;
-use types_core::instrument::instr_time;
-use types_core::primitive::Oid;
-use types_error::error::{ERRCODE_UNDEFINED_FUNCTION, ERROR};
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{
+use ::types_core::instrument::instr_time;
+use ::types_core::primitive::Oid;
+use ::types_error::error::{ERRCODE_UNDEFINED_FUNCTION, ERROR};
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{
     PgStat_Counter, PgStat_FunctionCallUsage, PgStat_FunctionCounts, PgStat_StatFuncEntry,
     PGSTAT_KIND_FUNCTION,
 };
-use types_pgstat::pgstat_internal::{PgStat_KindInfo, PgStatShared_Function};
+use ::types_pgstat::pgstat_internal::{PgStat_KindInfo, PgStatShared_Function};
 
 thread_local! {
     /// `static instr_time total_func_time;` — total time charged to functions
@@ -325,7 +325,7 @@ fn function_kind_info() -> PgStat_KindInfo {
 /// Register `PGSTAT_KIND_FUNCTION` and install the pgstat_function.c outward
 /// seams.
 ///
-/// Must run before `activity_pgstat::init_seams()` seals the
+/// Must run before `::activity_pgstat::init_seams()` seals the
 /// per-kind table.
 pub fn init_seams() {
     // Register the per-function pg_stat_get_function_* SQL accessors (pgstatfuncs.c).
@@ -338,7 +338,7 @@ pub fn init_seams() {
             .read_var_cb(|header, bytes| {
                 // SAFETY: header points at a live PgStatShared_Function body.
                 let sh = unsafe { &mut *(header as *mut PgStatShared_Function) };
-                sh.stats = activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                sh.stats = ::activity_pgstat::kind_info::pgstat_deserialize_pod::<
                     PgStat_StatFuncEntry,
                 >(bytes);
                 Ok(())
@@ -346,7 +346,7 @@ pub fn init_seams() {
             .write_var_cb(|header| {
                 // SAFETY: header points at a live PgStatShared_Function body.
                 let sh = unsafe { &*(header as *const PgStatShared_Function) };
-                activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
+                ::activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
             }),
     );
 

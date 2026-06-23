@@ -10,7 +10,7 @@
 
 use utils_error::{ereport};
 use types_error::{ErrorLocation, WARNING};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::consts::{
     PROGRESS_VACUUM_INDEXES_PROCESSED, PROGRESS_VACUUM_INDEXES_TOTAL,

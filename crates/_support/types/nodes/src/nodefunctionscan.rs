@@ -6,7 +6,7 @@
 //! per-function descriptors as [`RangeTblFunction`] values.
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::execexpr::SetExprState;
 use crate::execnodes::ScanStateData;
@@ -173,7 +173,7 @@ pub struct FunctionScanState<'mcx> {
     /// `MemoryContext argcontext` — context `ExecMakeTableFunctionResult` uses
     /// to evaluate function arguments in. A real owned child context (`None`
     /// until set in init).
-    pub argcontext: Option<mcx::MemoryContext>,
+    pub argcontext: Option<::mcx::MemoryContext>,
 }
 
 impl<'mcx> FunctionScanState<'mcx> {

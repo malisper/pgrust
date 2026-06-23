@@ -8,9 +8,9 @@
 //! tuple is always the `THeap` arm (the only variant these read-only visibility
 //! accessors observe).
 
-use types_core::primitive::{uint16, OffsetNumber, TransactionId};
-use types_core::xact::{FrozenTransactionId, InvalidTransactionId};
-use types_tuple::heaptuple::{
+use ::types_core::primitive::{uint16, OffsetNumber, TransactionId};
+use ::types_core::xact::{FrozenTransactionId, InvalidTransactionId};
+use ::types_tuple::heaptuple::{
     HeapTupleField3, HeapTupleHeaderChoice, HeapTupleHeaderData, ItemPointerData, HEAP_MOVED,
     HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK, HEAP_XMAX_LOCK_ONLY,
     HEAP_XMIN_COMMITTED, HEAP_XMIN_FROZEN, HEAP_XMIN_INVALID, INVALID_OFFSET_NUMBER,
@@ -111,7 +111,7 @@ pub fn HeapTupleHeaderGetXmin(tup: &HeapTupleHeaderData) -> TransactionId {
     if HeapTupleHeaderXminFrozen(tup) {
         FrozenTransactionId
     } else {
-        types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(tup)
+        ::types_tuple::heaptuple::HeapTupleHeaderGetRawXmin(tup)
     }
 }
 

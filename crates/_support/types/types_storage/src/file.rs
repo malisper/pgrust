@@ -15,7 +15,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use types_core::BLCKSZ;
+use ::types_core::BLCKSZ;
 
 /// `File` (`storage/fd.h`) — `typedef int File`. A virtual file descriptor: an
 /// index into fd.c's VFD cache, NOT an OS file descriptor. A value `> 0` is a

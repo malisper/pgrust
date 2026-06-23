@@ -3,9 +3,9 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_catalog::pg_enum::EnumTupleData;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::pg_enum::EnumTupleData;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `AtEOXact_Enum()` — discard the uncommitted-enum-value bookkeeping.

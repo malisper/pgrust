@@ -20,13 +20,13 @@
 //! arguments for `json_object_agg`) resolve via `get_fn_expr_argtype`, off the
 //! `build_aggregate_transfn_expr` call node nodeAgg stamps onto `flinfo`.
 
-use mcx::MemoryContext;
-use types_core::Oid;
-use datum::datum::Datum as BoundaryDatum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::mcx::MemoryContext;
+use ::types_core::Oid;
+use ::datum::datum::Datum as BoundaryDatum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_tuple::Datum as ValDatum;
+use ::types_tuple::Datum as ValDatum;
 
 use crate::{
     json_agg_finalfn, json_agg_strict_transfn, json_agg_transfn, json_object_agg_finalfn,
@@ -124,23 +124,23 @@ fn ret_json(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> BoundaryDa
     BoundaryDatum::from_usize(0)
 }
 
-/// Materialize argument `i` as the unified `types_tuple::Datum` the json value
+/// Materialize argument `i` as the unified `::types_tuple::Datum` the json value
 /// cores consume, charging by-ref copies to `mcx` (the aggcontext). The arg may
 /// be NULL — the caller passes the matching `is_null` flag separately.
 fn arg_value<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
 ) -> PgResult<ValDatum<'mcx>> {
     Ok(match fcinfo.ref_arg(i) {
-        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(mcx::slice_in(mcx, b)?),
+        Some(RefPayload::Varlena(b)) => ValDatum::ByRef(::mcx::slice_in(mcx, b)?),
         Some(RefPayload::Cstring(s)) => ValDatum::Cstring(s.clone()),
         Some(RefPayload::Composite(image)) => {
-            ValDatum::Composite(types_tuple::FormedTuple::from_datum_image(mcx, image)?)
+            ValDatum::Composite(::types_tuple::FormedTuple::from_datum_image(mcx, image)?)
         }
-        Some(RefPayload::Expanded(eo)) => ValDatum::ByRef(mcx::slice_in(
+        Some(RefPayload::Expanded(eo)) => ValDatum::ByRef(::mcx::slice_in(
             mcx,
-            &datum::flatten_expanded(eo.as_ref()),
+            &::datum::flatten_expanded(eo.as_ref()),
         )?),
         Some(RefPayload::Internal(_)) => {
             panic!("json_agg fn: unexpected `internal` argument on the by-ref lane")

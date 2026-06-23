@@ -25,11 +25,11 @@
 //! owner's function, called directly via `backend-rewrite-core`.
 
 use mcx::{Mcx, PgVec};
-use types_acl::acl::ACLCHECK_NOT_OWNER;
-use types_catalog::catalog_dependency::{
+use ::types_acl::acl::ACLCHECK_NOT_OWNER;
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
 };
-use types_catalog::pg_rewrite::{RewriteRelationId, ViewSelectRuleName};
+use ::types_catalog::pg_rewrite::{RewriteRelationId, ViewSelectRuleName};
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -40,12 +40,12 @@ use types_error::{
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{CmdType, Node};
 use ::nodes::parsenodes::RTEKind;
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
-use types_tuple::access::{
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
+use ::types_tuple::access::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
 };
 
-use rewrite_core::getInsertSelectQuery;
+use ::rewrite_core::getInsertSelectQuery;
 
 /// `RelationRelationId` — `pg_class` (`pg_class_d.h`).
 const RelationRelationId: Oid = 1259;
@@ -55,8 +55,8 @@ const NAMEDATALEN: usize = 64;
 /// Faithful field copy of an owned-tree `RangeVar` node into the access-layer
 /// `RangeVar` the namespace core consumes (mirrors `to_access_range_var` in the
 /// sibling command crates).
-fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().to_string()),
         schemaname: rv.schemaname.as_ref().map(|s| s.as_str().to_string()),
         relname: rv
@@ -241,9 +241,9 @@ fn cmdtype_ev_type(evtype: CmdType) -> u8 {
 /// `(Node *) action` cast over the existing list pointer.
 fn action_as_list_node<'mcx>(mcx: Mcx<'mcx>, action: &[Query<'mcx>]) -> PgResult<Node<'mcx>> {
     let mut items: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, action.len())?;
+        ::mcx::vec_with_capacity_in(mcx, action.len())?;
     for q in action.iter() {
-        items.push(mcx::alloc_in(mcx, Node::mk_query(mcx, q.clone_in(mcx)?)?)?);
+        items.push(::mcx::alloc_in(mcx, Node::mk_query(mcx, q.clone_in(mcx)?)?)?);
     }
     Ok(Node::mk_list(mcx, items)?)
 }
@@ -627,7 +627,7 @@ const PRS2_NEW_VARNO: i32 = 2;
 fn checkRuleResultList<'mcx>(
     mcx: Mcx<'mcx>,
     target_list: &[::nodes::primnodes::TargetEntry<'_>],
-    result_desc: &types_tuple::heaptuple::TupleDescData<'_>,
+    result_desc: &::types_tuple::heaptuple::TupleDescData<'_>,
     is_select: bool,
     require_column_name_match: bool,
 ) -> PgResult<()> {
@@ -909,7 +909,7 @@ pub fn EnableDisableRule<'mcx>(
 
 /// `RangeVarCallbackForRenameRule` — permission + integrity checks before
 /// acquiring the relation lock (the `RangeVarGetRelidExtended` callback).
-fn RangeVarCallbackForRenameRule(mcx: Mcx<'_>, rv: &types_tuple::access::RangeVar, relid: Oid) -> PgResult<()> {
+fn RangeVarCallbackForRenameRule(mcx: Mcx<'_>, rv: &::types_tuple::access::RangeVar, relid: Oid) -> PgResult<()> {
     // tuple = SearchSysCache1(RELOID, relid); if invalid return (concurrently dropped);
     let class = syscache_seams::class_relkind_namespace::call(relid)?;
     let Some((relkind, relnamespace)) = class else {
@@ -959,7 +959,7 @@ fn RangeVarCallbackForRenameRule(mcx: Mcx<'_>, rv: &types_tuple::access::RangeVa
 /// rule.
 pub fn RenameRewriteRule<'mcx>(
     mcx: Mcx<'mcx>,
-    relation: &types_tuple::access::RangeVar,
+    relation: &::types_tuple::access::RangeVar,
     old_name: &str,
     new_name: &str,
 ) -> PgResult<ObjectAddress> {
@@ -967,7 +967,7 @@ pub fn RenameRewriteRule<'mcx>(
      * Look up name, check permissions, and acquire lock (held until end of
      * transaction).
      */
-    let mut cb = |rv: &types_tuple::access::RangeVar, relid: Oid, _old_relid: Oid| {
+    let mut cb = |rv: &::types_tuple::access::RangeVar, relid: Oid, _old_relid: Oid| {
         RangeVarCallbackForRenameRule(mcx, rv, relid)
     };
     let relid = catalog_namespace::RangeVarGetRelidExtended(

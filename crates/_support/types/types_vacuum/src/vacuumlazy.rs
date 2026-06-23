@@ -9,7 +9,7 @@
 use alloc::vec::Vec;
 
 use types_core::{BlockNumber, Buffer, MultiXactId, OffsetNumber, Oid, TransactionId, XLogRecPtr};
-use types_storage::buf::BufferAccessStrategy;
+use ::types_storage::buf::BufferAccessStrategy;
 
 use crate::vacuum::VacuumCutoffs;
 use crate::vacuum::PruneFreezeResult;
@@ -70,7 +70,7 @@ impl ParallelVacuumStateHandle {
 /// dependency cycle (`SnapshotData.vistest` needs it); re-exported here so
 /// existing `types_vacuum::vacuumlazy::GlobalVisStateHandle` consumers keep
 /// working unchanged.
-pub use types_core::GlobalVisStateHandle;
+pub use ::types_core::GlobalVisStateHandle;
 
 /// A `ReadStream` (sequential read-ahead over a relation fork).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]

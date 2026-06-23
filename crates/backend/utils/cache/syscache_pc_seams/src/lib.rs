@@ -2,8 +2,8 @@
 //! integer `SysCacheIdentifier` for the caches `InitPlanCache` hooks. The
 //! owning unit installs this; until then a call panics loudly.
 
-use types_error::PgResult;
-use types_plancache::SysCacheId;
+use ::types_error::PgResult;
+use ::types_plancache::SysCacheId;
 
 seam_core::seam!(
     /// The `SysCacheIdentifier` integer for the named syscache (`utils/syscache.h`).

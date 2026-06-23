@@ -3,9 +3,9 @@
 //! `catalog/dependency.h` (`DependencyType`), and `catalog/pg_depend.h`
 //! (`FormData_pg_depend`), trimmed to the items the current ports consume.
 
-use types_core::primitive::AttrNumber;
-use types_core::primitive::InvalidOid;
-use types_core::primitive::Oid;
+use ::types_core::primitive::AttrNumber;
+use ::types_core::primitive::InvalidOid;
+use ::types_core::primitive::Oid;
 
 /// `DependRelationId` — `pg_depend` (`pg_depend_d.h`,
 /// `CATALOG(pg_depend,2608,DependRelationId)`).

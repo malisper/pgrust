@@ -18,11 +18,11 @@
 //! collects the first error message into `*syncrep_parse_error_msg_p` and
 //! leaves reporting to the ultimate caller (the GUC machinery). A genuine
 //! `palloc` failure (e.g. `pstrdup(yytext)`) maps to a recoverable
-//! [`types_error::PgError`] via [`PgResult`], exactly as the C `palloc`
+//! [`::types_error::PgError`] via [`PgResult`], exactly as the C `palloc`
 //! `ereport(ERROR)`s and unwinds without killing the backend.
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use scanner_seams as seams;
 
@@ -493,7 +493,7 @@ mod registry {
     use std::cell::RefCell;
     use std::string::String;
     use std::vec::Vec;
-    use types_error::PgResult;
+    use ::types_error::PgResult;
 
     /// One live scanner's persistent (cross-call) reentrant state.
     struct Entry {
@@ -649,7 +649,7 @@ mod registry {
         handle: seams::SyncrepScannerHandle,
         f: impl FnOnce(&mut SyncrepScanner<'_, '_>) -> PgResult<R>,
     ) -> PgResult<R> {
-        let ctx = mcx::MemoryContext::new("syncrep_yyerror");
+        let ctx = ::mcx::MemoryContext::new("syncrep_yyerror");
         with_scanner(ctx.mcx(), handle, f)
     }
 
@@ -675,7 +675,7 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     /// Drive the scanner over `input`, collecting `(token_code, str_value)`
     /// pairs (excluding the terminal EOF) plus any recorded error message.

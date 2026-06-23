@@ -27,16 +27,16 @@ extern crate alloc;
 use types_core::{
     BlockNumber, Buffer, MultiXactId, OffsetNumber, Oid, TimestampTz, TransactionId,
 };
-use types_error::PgResult;
-use rel::Relation;
-use types_vacuum::vacuum::{HeapTupleFreeze, VacuumCutoffs, VacuumParams};
-use types_vacuum::vacuumlazy::{
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_vacuum::vacuum::{HeapTupleFreeze, VacuumCutoffs, VacuumParams};
+use ::types_vacuum::vacuumlazy::{
     GlobalVisStateHandle, LinePointerState, ParallelVacuumInit, ParallelVacuumInitArgs,
     ParallelVacuumStateHandle, PruneAndFreezeArgs, PruneAndFreezeOut, ReadStreamHandle,
     ScanCallback, TidStore, TidStoreIterHandle, UpdateRelStatsArgs, VmSetArgs,
 };
-use types_storage::buf::BufferAccessStrategy;
-use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo};
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo};
 
 // =======================================================================
 // Inward — the driver's public entry.

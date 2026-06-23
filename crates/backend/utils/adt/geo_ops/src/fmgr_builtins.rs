@@ -31,11 +31,11 @@
 //!
 //! `cstring` I/O (`*_in`/`*_out`) crosses on the `RefPayload::Cstring` lane.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
+use ::types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
 
 use crate::{Path, Polygon};
 
@@ -143,7 +143,7 @@ fn ret_ref(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
 fn ret_send(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
     const VARHDRSZ: usize = 4;
     let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
     image.extend_from_slice(&payload);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
@@ -1461,7 +1461,7 @@ pub fn register_geo_ops_path_poly_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datum::NullableDatum;
+    use ::datum::NullableDatum;
 
     /// Install the float8 text-I/O seams (the geo `*_in`/`*_out` cores route
     /// float parsing/formatting through `backend-utils-adt-float`) plus this

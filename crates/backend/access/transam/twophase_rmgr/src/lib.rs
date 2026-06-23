@@ -15,8 +15,8 @@
 
 #![allow(non_upper_case_globals)]
 
-use types_core::primitive::TransactionId;
-use types_error::PgResult;
+use ::types_core::primitive::TransactionId;
+use ::types_error::PgResult;
 
 use multixact_seams as multixact;
 use lock_seams as lock;

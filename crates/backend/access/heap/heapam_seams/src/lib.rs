@@ -7,24 +7,24 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
-use types_tuple::heaptuple::Datum as TupleDatum;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_tuple::heaptuple::Datum as TupleDatum;
+use ::types_error::PgResult;
 use rel::{Relation, RelationData};
-use types_tuple::heaptuple::FormData_pg_attribute;
-use types_tuple::pg_type::FormData_pg_type;
-use types_core::primitive::{OffsetNumber, TransactionId};
-use types_nbtree::TmIndexDeleteOp;
-use snapshot::SnapshotData;
-use types_storage::Buffer;
-use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
-use types_core::xact::CommandId;
-use types_tableam::tableam::{
+use ::types_tuple::heaptuple::FormData_pg_attribute;
+use ::types_tuple::pg_type::FormData_pg_type;
+use ::types_core::primitive::{OffsetNumber, TransactionId};
+use ::types_nbtree::TmIndexDeleteOp;
+use ::snapshot::SnapshotData;
+use ::types_storage::Buffer;
+use ::types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderData, ItemPointerData};
+use ::types_core::xact::CommandId;
+use ::types_tableam::tableam::{
     LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result, TU_UpdateIndexes,
 };
-use types_tuple::heaptuple::FormedTuple;
-use xlog_records::multixact::MultiXactStatus;
-use types_storage::lock::XLTW_Oper;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::xlog_records::multixact::MultiXactStatus;
+use ::types_storage::lock::XLTW_Oper;
 
 seam_core::seam!(
     /// `HeapKeyTest(tuple, RelationGetDescr(rel), nkeys, keys)` (`access/valid.h`)
@@ -38,7 +38,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         tuple: &FormedTuple<'mcx>,
         rel: &RelationData<'mcx>,
-        keys: &PgVec<'mcx, types_tableam::scankey::ScanKeyData<'mcx>>,
+        keys: &PgVec<'mcx, ::types_tableam::scankey::ScanKeyData<'mcx>>,
     ) -> PgResult<bool>
 );
 
@@ -86,7 +86,7 @@ seam_core::seam!(
     pub fn simple_heap_insert<'mcx>(
         mcx: Mcx<'mcx>,
         relation: &Relation<'mcx>,
-        tup: &mut types_tuple::heaptuple::FormedTuple<'mcx>,
+        tup: &mut ::types_tuple::heaptuple::FormedTuple<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -107,11 +107,11 @@ seam_core::seam!(
     pub fn heap_multi_insert<'mcx>(
         mcx: Mcx<'mcx>,
         relation: &Relation<'mcx>,
-        tuples: PgVec<'mcx, types_tuple::heaptuple::FormedTuple<'mcx>>,
-        cid: types_core::xact::CommandId,
+        tuples: PgVec<'mcx, ::types_tuple::heaptuple::FormedTuple<'mcx>>,
+        cid: ::types_core::xact::CommandId,
         options: i32,
-        bistate: Option<&mut types_tableam::tableam::BulkInsertStateData>,
-    ) -> PgResult<PgVec<'mcx, types_tuple::heaptuple::FormedTuple<'mcx>>>
+        bistate: Option<&mut ::types_tableam::tableam::BulkInsertStateData>,
+    ) -> PgResult<PgVec<'mcx, ::types_tuple::heaptuple::FormedTuple<'mcx>>>
 );
 
 seam_core::seam!(
@@ -124,10 +124,10 @@ seam_core::seam!(
     pub fn heap_insert<'mcx>(
         mcx: Mcx<'mcx>,
         relation: &Relation<'mcx>,
-        tup: &mut types_tuple::heaptuple::FormedTuple<'mcx>,
-        cid: types_core::xact::CommandId,
+        tup: &mut ::types_tuple::heaptuple::FormedTuple<'mcx>,
+        cid: ::types_core::xact::CommandId,
         options: i32,
-        bistate: Option<&mut types_tableam::tableam::BulkInsertStateData>,
+        bistate: Option<&mut ::types_tableam::tableam::BulkInsertStateData>,
     ) -> PgResult<()>
 );
 
@@ -135,7 +135,7 @@ seam_core::seam!(
     /// `GetBulkInsertState()` (heapam.c) — prepare a `BulkInsertState` (a
     /// `BAS_BULKWRITE` ring buffer) for a bulk insert (e.g. `ATRewriteTable`,
     /// `copy_heap_data`). **Installed by `backend-access-heap-heapam`.**
-    pub fn get_bulk_insert_state() -> PgResult<types_tableam::tableam::BulkInsertStateData>
+    pub fn get_bulk_insert_state() -> PgResult<::types_tableam::tableam::BulkInsertStateData>
 );
 
 seam_core::seam!(
@@ -143,7 +143,7 @@ seam_core::seam!(
     /// the ring strategy of a `BulkInsertState` made by `get_bulk_insert_state`.
     /// **Installed by `backend-access-heap-heapam`.**
     pub fn free_bulk_insert_state(
-        bistate: &mut types_tableam::tableam::BulkInsertStateData,
+        bistate: &mut ::types_tableam::tableam::BulkInsertStateData,
     ) -> PgResult<()>
 );
 
@@ -154,8 +154,8 @@ seam_core::seam!(
     /// xmax/infomask are consulted, so a borrowed header suffices. `Err` carries
     /// the multixact-member-read `ereport` surface.
     pub fn heap_tuple_get_update_xid(
-        tuple: &types_tuple::heaptuple::HeapTupleHeaderData<'_>,
-    ) -> PgResult<types_core::primitive::TransactionId>
+        tuple: &::types_tuple::heaptuple::HeapTupleHeaderData<'_>,
+    ) -> PgResult<::types_core::primitive::TransactionId>
 );
 
 seam_core::seam!(
@@ -194,11 +194,11 @@ seam_core::seam!(
     /// carries the `XLogInsert` `ereport(ERROR)` surface.
     pub fn log_heap_visible(
         rel: &RelationData<'_>,
-        heap_buffer: types_storage::Buffer,
-        vm_buffer: types_storage::Buffer,
-        snapshot_conflict_horizon: types_core::primitive::TransactionId,
+        heap_buffer: ::types_storage::Buffer,
+        vm_buffer: ::types_storage::Buffer,
+        snapshot_conflict_horizon: ::types_core::primitive::TransactionId,
         vmflags: u8,
-    ) -> PgResult<types_core::primitive::XLogRecPtr>
+    ) -> PgResult<::types_core::primitive::XLogRecPtr>
 );
 
 // ===========================================================================
@@ -235,8 +235,8 @@ seam_core::seam!(
     pub fn index_compute_xid_horizon_for_tuples<'mcx>(
         irel: &Relation<'mcx>,
         hrel: &Relation<'mcx>,
-        ibuf: types_storage::storage::Buffer,
-        itemnos: &[types_core::primitive::OffsetNumber],
+        ibuf: ::types_storage::storage::Buffer,
+        itemnos: &[::types_core::primitive::OffsetNumber],
     ) -> PgResult<TransactionId>
 );
 
@@ -453,7 +453,7 @@ seam_core::seam!(
 
 /// The result of [`does_multi_xact_id_conflict`] — C's `bool` return plus the
 /// `*current_is_member` out param.
-pub use types_storage::multixact::MultiXactConflict;
+pub use ::types_storage::multixact::MultiXactConflict;
 
 seam_core::seam!(
     /// `DoesMultiXactIdConflict(multi, infomask, lockmode, &current_is_member)`
@@ -463,7 +463,7 @@ seam_core::seam!(
     /// LOCK family (heapam.c); uninstalled — and panics — until that family
     /// lands.**
     pub fn does_multi_xact_id_conflict(
-        multi: types_core::primitive::MultiXactId,
+        multi: ::types_core::primitive::MultiXactId,
         infomask: u16,
         lockmode: LockTupleMode,
     ) -> PgResult<MultiXactConflict>
@@ -491,7 +491,7 @@ seam_core::seam!(
     /// **Owned by the heapam LOCK family (heapam.c); uninstalled — and panics —
     /// until that family lands.**
     pub fn multi_xact_id_wait<'mcx>(
-        multi: types_core::primitive::MultiXactId,
+        multi: ::types_core::primitive::MultiXactId,
         status: MultiXactStatus,
         infomask: u16,
         rel: &Relation<'mcx>,
@@ -641,7 +641,7 @@ seam_core::seam!(
         relation: Relation<'mcx>,
         snapshot: SnapshotData,
         flags: u32,
-    ) -> PgResult<types_tableam::relscan::TableScanDesc<'mcx>>
+    ) -> PgResult<::types_tableam::relscan::TableScanDesc<'mcx>>
 );
 
 seam_core::seam!(
@@ -653,7 +653,7 @@ seam_core::seam!(
     /// `backend-access-heap-heapam`.**
     pub fn heap_getnext<'mcx>(
         mcx: Mcx<'mcx>,
-        sscan: &mut types_tableam::relscan::TableScanDescData<'mcx>,
+        sscan: &mut ::types_tableam::relscan::TableScanDescData<'mcx>,
     ) -> PgResult<Option<FormedTuple<'mcx>>>
 );
 
@@ -663,6 +663,6 @@ seam_core::seam!(
     /// [`TableScanDesc`] is consumed. **Installed by
     /// `backend-access-heap-heapam`.**
     pub fn heap_endscan<'mcx>(
-        sscan: types_tableam::relscan::TableScanDesc<'mcx>,
+        sscan: ::types_tableam::relscan::TableScanDesc<'mcx>,
     ) -> PgResult<()>
 );

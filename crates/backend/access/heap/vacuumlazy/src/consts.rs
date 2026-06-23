@@ -153,7 +153,7 @@ pub fn transaction_id_is_valid(xid: TransactionId) -> bool {
 /// `TransactionIdIsNormal(xid)`.
 #[inline]
 pub fn transaction_id_is_normal(xid: TransactionId) -> bool {
-    xid >= types_core::FirstNormalTransactionId
+    xid >= ::types_core::FirstNormalTransactionId
 }
 
 /// `TransactionIdPrecedes(id1, id2)` — modular "id1 < id2".

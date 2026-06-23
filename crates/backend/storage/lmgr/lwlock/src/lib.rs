@@ -37,11 +37,11 @@ use lmgr_proc_seams as proc_s;
 use s_lock as s_lock;
 use waitevent_seams as waitevent;
 use utils_error::{elog, PgError, PgResult};
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{ERROR, FATAL, PANIC};
 use init_small_seams as globals;
 use types_core::{uint16, uint32, ProcNumber, Size, INVALID_PROC_NUMBER, NAMEDATALEN};
-use types_pgstat::wait_event::PG_WAIT_LWLOCK;
+use ::types_pgstat::wait_event::PG_WAIT_LWLOCK;
 use types_storage::{
     pg_atomic_uint32, pg_atomic_uint64, proclist_head, proclist_node, LWLock, LWLockMode,
     LWLockPadded, BUFFER_MAPPING_LWLOCK_OFFSET, LOCK_MANAGER_LWLOCK_OFFSET, LW_EXCLUSIVE,
@@ -1864,39 +1864,39 @@ fn relation_mapping_lock_held_by_me_exclusive_seam() -> bool {
 /// in `mode`. `MyProcNumber` is read from the globals seam (the C ambient
 /// per-backend global).
 fn lwlock_acquire_proc_array_seam(mode: LWLockMode) -> PgResult<()> {
-    let lock = main_lock(types_storage::PROC_ARRAY_LOCK);
+    let lock = main_lock(::types_storage::PROC_ARRAY_LOCK);
     LWLockAcquire(lock, mode, globals::my_proc_number::call()).map(|_| ())
 }
 
 /// `lwlock_release_proc_array` seam shape: release `ProcArrayLock`.
 fn lwlock_release_proc_array_seam() -> PgResult<()> {
-    let lock = main_lock(types_storage::PROC_ARRAY_LOCK);
+    let lock = main_lock(::types_storage::PROC_ARRAY_LOCK);
     LWLockRelease(lock)
 }
 
 /// `lwlock_conditional_acquire_proc_array` seam shape:
 /// `LWLockConditionalAcquire(ProcArrayLock, mode)`.
 fn lwlock_conditional_acquire_proc_array_seam(mode: LWLockMode) -> PgResult<bool> {
-    let lock = main_lock(types_storage::PROC_ARRAY_LOCK);
+    let lock = main_lock(::types_storage::PROC_ARRAY_LOCK);
     LWLockConditionalAcquire(lock, mode)
 }
 
 /// `lwlock_held_by_me_proc_array` seam shape:
 /// `LWLockHeldByMe(ProcArrayLock)`.
 fn lwlock_held_by_me_proc_array_seam() -> bool {
-    let lock = main_lock(types_storage::PROC_ARRAY_LOCK);
+    let lock = main_lock(::types_storage::PROC_ARRAY_LOCK);
     LWLockHeldByMe(lock)
 }
 
 /// `lwlock_acquire_xid_gen` seam shape: `LWLockAcquire(XidGenLock, mode)`.
 fn lwlock_acquire_xid_gen_seam(mode: LWLockMode) -> PgResult<()> {
-    let lock = main_lock(types_storage::XID_GEN_LOCK);
+    let lock = main_lock(::types_storage::XID_GEN_LOCK);
     LWLockAcquire(lock, mode, globals::my_proc_number::call()).map(|_| ())
 }
 
 /// `lwlock_release_xid_gen` seam shape: `LWLockRelease(XidGenLock)`.
 fn lwlock_release_xid_gen_seam() -> PgResult<()> {
-    let lock = main_lock(types_storage::XID_GEN_LOCK);
+    let lock = main_lock(::types_storage::XID_GEN_LOCK);
     LWLockRelease(lock)
 }
 
@@ -1904,14 +1904,14 @@ fn lwlock_release_xid_gen_seam() -> PgResult<()> {
 /// `LWLockAcquire(WrapLimitsVacuumLock, mode)` (vacuum.c `vac_truncate_clog`,
 /// which restricts the task to one backend per cluster; see SimpleLruTruncate).
 fn lwlock_acquire_wrap_limits_vacuum_seam(mode: LWLockMode) -> PgResult<()> {
-    let lock = main_lock(types_storage::WRAP_LIMITS_VACUUM_LOCK);
+    let lock = main_lock(::types_storage::WRAP_LIMITS_VACUUM_LOCK);
     LWLockAcquire(lock, mode, globals::my_proc_number::call()).map(|_| ())
 }
 
 /// `lwlock_release_wrap_limits_vacuum` seam shape:
 /// `LWLockRelease(WrapLimitsVacuumLock)`.
 fn lwlock_release_wrap_limits_vacuum_seam() -> PgResult<()> {
-    let lock = main_lock(types_storage::WRAP_LIMITS_VACUUM_LOCK);
+    let lock = main_lock(::types_storage::WRAP_LIMITS_VACUUM_LOCK);
     LWLockRelease(lock)
 }
 
@@ -1939,7 +1939,7 @@ fn lwlock_held_by_me_in_mode_main_seam(offset: usize, mode: LWLockMode) -> bool 
 /// inward seams use). The published `&'static LWLockTable` is discarded:
 /// consumers reach the table through `MAIN_LWLOCKS`/`main_lock`.
 fn create_lwlocks_seam() -> PgResult<()> {
-    let cx = mcx::MemoryContext::new("CreateLWLocks");
+    let cx = ::mcx::MemoryContext::new("CreateLWLocks");
     CreateLWLocks(cx.mcx(), globals::is_under_postmaster::call()).map(|_| ())
 }
 

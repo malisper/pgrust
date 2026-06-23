@@ -30,8 +30,8 @@
 //! `noerror = true` — returns NULL silently on a missing AM / handler. The
 //! `am_routine` seam mirrors that with `Ok(None)`.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 /// `IndexAMProperty` (`access/amapi.h`) — the recognized index-AM property
 /// codes that `indexam_property` dispatches on. `AMPROP_UNKNOWN` is the

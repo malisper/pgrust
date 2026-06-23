@@ -11,11 +11,11 @@
 //! `scan_params` working sets are `::nodes::Bitmapset<'mcx>` (the same type
 //! the `Plan.extParam`/`allParam` fields hold), reached through the
 //! `backend-nodes-core` bms ops. The `root.outer_params` set
-//! (`pathnodes::Relids`) is converted to a `::nodes::Bitmapset` at the
+//! (`::pathnodes::Relids`) is converted to a `::nodes::Bitmapset` at the
 //! `SS_finalize_plan` boundary.
 //!
 //! Child SubPlans referenced by `plan->initPlan` / a `SubPlan` expr are read
-//! through [`planner_subplan_get_plan`](pathnodes::planner_run::planner_subplan_get_plan)
+//! through [`planner_subplan_get_plan`](::pathnodes::planner_run::planner_subplan_get_plan)
 //! (the run-backed `glob->subplans` deref); we never mutate those child plans
 //! here (C only reads their already-finalized `extParam`).
 //!
@@ -28,10 +28,10 @@ use types_error::{PgError, PgResult};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, ParamKind};
-use pathnodes::planner_run::{planner_subplan_get_plan, PlannerRun};
+use ::pathnodes::planner_run::{planner_subplan_get_plan, PlannerRun};
 use pathnodes::{PlannerInfo, RelId};
 
-use nodes_core::bitmapset as bms;
+use ::nodes_core::bitmapset as bms;
 use init_subselect_ext_seams as initext;
 
 /// `elog(ERROR, ...)` shorthand.
@@ -39,7 +39,7 @@ fn elog_error(msg: impl Into<alloc::string::String>) -> PgError {
     PgError::error(msg)
 }
 
-/// Convert a planner `Relids` ([`pathnodes::Bitmapset`]) into a
+/// Convert a planner `Relids` ([`::pathnodes::Bitmapset`]) into a
 /// `::nodes::Bitmapset<'mcx>` — both are word-vectors of param ids; the
 /// boundary between the `outer_params` set (Relids) and the `Plan.extParam`
 /// model (nodes) needs this bridge.
@@ -57,7 +57,7 @@ fn find_base_rel(root: &PlannerInfo, relid: i32) -> RelId {
 
 fn relids_to_bms<'mcx>(
     mcx: Mcx<'mcx>,
-    r: &pathnodes::Relids,
+    r: &::pathnodes::Relids,
 ) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
     match r {
         None => Ok(None),
@@ -77,8 +77,8 @@ fn relids_to_bms<'mcx>(
     }
 }
 
-/// `bms_next_member` over a planner [`pathnodes::Bitmapset`].
-fn next_member_relids(b: &pathnodes::Bitmapset, prevbit: i32) -> i32 {
+/// `bms_next_member` over a planner [`::pathnodes::Bitmapset`].
+fn next_member_relids(b: &::pathnodes::Bitmapset, prevbit: i32) -> i32 {
     let words = &b.words;
     let mut bit = prevbit + 1;
     while (bit as usize) / 64 < words.len() {
@@ -869,7 +869,7 @@ fn finalize_primnode<'mcx>(
     // expression_tree_walker(node, finalize_primnode, context): recurse into
     // children only. Capture any error from the fallible body.
     let mut err: Option<PgError> = None;
-    nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr| {
+    ::nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr| {
         if err.is_some() {
             return true;
         }
@@ -913,7 +913,7 @@ fn finalize_agg_primnode<'mcx>(
         return Ok(false); // no Aggrefs below here
     }
     let mut err: Option<PgError> = None;
-    nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr| {
+    ::nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr| {
         if err.is_some() {
             return true;
         }
@@ -1042,7 +1042,7 @@ pub fn SS_attach_initplans<'mcx>(
     root: &PlannerInfo,
     plan: &mut Node<'mcx>,
 ) -> PgResult<()> {
-    let mut list: mcx::PgVec<'mcx, ::nodes::primnodes::SubPlan<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut list: ::mcx::PgVec<'mcx, ::nodes::primnodes::SubPlan<'mcx>> = ::mcx::PgVec::new_in(mcx);
     for &ipl in &root.init_plans {
         if let Expr::SubPlan(splan) = root.node(ipl) {
             list.push(splan.0.clone_in(mcx)?);

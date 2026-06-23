@@ -17,26 +17,26 @@
 
 use mcx::{Mcx, MemoryContext};
 
-use types_catalog::catalog::{LANGUAGE_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID};
-use types_catalog::catalog_dependency::{DependencyType, ObjectAddress, DEPENDENCY_NORMAL};
-use types_catalog::pg_cast::{
+use ::types_catalog::catalog::{LANGUAGE_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID};
+use ::types_catalog::catalog_dependency::{DependencyType, ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_cast::{
     Anum_pg_cast_castsource, Anum_pg_cast_casttarget, CastRelationId, CastSourceTargetIndexId,
     PgCastInsertRow,
 };
-use types_catalog::pg_transform::{
+use ::types_catalog::pg_transform::{
     Anum_pg_transform_oid, Anum_pg_transform_trflang, Anum_pg_transform_trftype,
     PgTransformInsertRow, TransformRelationId, TransformTypeLangIndexId,
 };
-use types_core::fmgr::F_OIDEQ;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
 use dependency_seams as dependency_seams;

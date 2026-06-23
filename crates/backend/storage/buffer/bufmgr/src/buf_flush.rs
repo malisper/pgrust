@@ -31,13 +31,13 @@
 
 use core::cmp::Ordering as CmpOrdering;
 
-use types_core::primitive::{BlockNumber, Buffer, ForkNumber, Oid, BLCKSZ};
+use ::types_core::primitive::{BlockNumber, Buffer, ForkNumber, Oid, BLCKSZ};
 use types_error::{PgError, PgResult};
-use types_storage::buf::{
+use ::types_storage::buf::{
     buftag, BM_CHECKPOINT_NEEDED, BM_DIRTY, BM_IO_IN_PROGRESS, BM_JUST_DIRTIED, BM_PERMANENT,
     BM_VALID,
 };
-use types_storage::storage::LWLockMode;
+use ::types_storage::storage::LWLockMode;
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 
 use bufmgr_seams as sb;
@@ -67,13 +67,13 @@ const CHECKPOINT_FLUSH_ALL: i32 = 1 << 5;
 /// `BUF_STATE_GET_REFCOUNT(buf_state)` (buf_internals.h).
 #[inline]
 fn buf_state_get_refcount(buf_state: u32) -> u32 {
-    buf_state & types_storage::buf::BUF_REFCOUNT_MASK
+    buf_state & ::types_storage::buf::BUF_REFCOUNT_MASK
 }
 
 /// `BUF_STATE_GET_USAGECOUNT(buf_state)` (buf_internals.h).
 #[inline]
 fn buf_state_get_usagecount(buf_state: u32) -> u32 {
-    (buf_state & types_storage::buf::BUF_USAGECOUNT_MASK) / types_storage::buf::BUF_USAGECOUNT_ONE
+    (buf_state & ::types_storage::buf::BUF_USAGECOUNT_MASK) / ::types_storage::buf::BUF_USAGECOUNT_ONE
 }
 
 /// `BufferDescriptorGetBuffer(buf)` — the 1-based [`Buffer`] for a 0-based id.
@@ -182,7 +182,7 @@ impl BufferManager {
     pub(crate) fn flush_buffer(
         &self,
         buf_id: usize,
-        io_context: types_storage::buf::IOContext,
+        io_context: ::types_storage::buf::IOContext,
     ) -> PgResult<()> {
         // StartBufferIO(buf, false, false): false if someone else flushed it.
         if !self.start_flush_io(buf_id)? {
@@ -228,7 +228,7 @@ impl BufferManager {
         // smgrwrite the page out (bufmgr.c:4377).
         let backend = RelFileLocatorBackend {
             locator: tag_to_rlocator(&tag),
-            backend: types_core::primitive::INVALID_PROC_NUMBER,
+            backend: ::types_core::primitive::INVALID_PROC_NUMBER,
         };
         // `FlushBuffer(buf, reln, ...)` (bufmgr.c:4332): when no `reln`
         // (SMgrRelation) is supplied — the bgwriter/checkpointer flush path
@@ -291,7 +291,7 @@ impl BufferManager {
         // BufferDescriptorGetContentLock(bufHdr), LW_EXCLUSIVE)).
         let buf_id = self.buffer_to_buf_id_pub(buffer)?;
         // FlushBuffer(bufHdr, NULL, IOOBJECT_RELATION, IOCONTEXT_NORMAL).
-        self.flush_buffer(buf_id, types_storage::buf::IOContext::IOCONTEXT_NORMAL)
+        self.flush_buffer(buf_id, ::types_storage::buf::IOContext::IOCONTEXT_NORMAL)
     }
 
     // -----------------------------------------------------------------------
@@ -346,7 +346,7 @@ impl BufferManager {
 
         // SyncOneBuffer() is only called by checkpointer and bgwriter, so
         // IOContext will always be IOCONTEXT_NORMAL (bufmgr.c:3978).
-        let flush = self.flush_buffer(buf_id, types_storage::buf::IOContext::IOCONTEXT_NORMAL);
+        let flush = self.flush_buffer(buf_id, ::types_storage::buf::IOContext::IOCONTEXT_NORMAL);
 
         lwlock::LWLockRelease(lock)?;
         flush?;
@@ -752,7 +752,7 @@ impl BufferManager {
                     LWLockMode::LW_SHARED,
                     lmgr_proc_seams::my_proc_number::call(),
                 )?;
-                let flush = self.flush_buffer(i, types_storage::buf::IOContext::IOCONTEXT_NORMAL);
+                let flush = self.flush_buffer(i, ::types_storage::buf::IOContext::IOCONTEXT_NORMAL);
                 lwlock::LWLockRelease(lock)?;
                 flush?;
                 // UnpinBuffer(bufHdr) — with-owner (bufmgr.c:5009).
@@ -837,7 +837,7 @@ impl BufferManager {
                     LWLockMode::LW_SHARED,
                     lmgr_proc_seams::my_proc_number::call(),
                 )?;
-                let flush = self.flush_buffer(i, types_storage::buf::IOContext::IOCONTEXT_NORMAL);
+                let flush = self.flush_buffer(i, ::types_storage::buf::IOContext::IOCONTEXT_NORMAL);
                 lwlock::LWLockRelease(lock)?;
                 flush?;
                 // UnpinBuffer(bufHdr) — with-owner (bufmgr.c:5106).
@@ -881,7 +881,7 @@ impl BufferManager {
                     LWLockMode::LW_SHARED,
                     lmgr_proc_seams::my_proc_number::call(),
                 )?;
-                let flush = self.flush_buffer(i, types_storage::buf::IOContext::IOCONTEXT_NORMAL);
+                let flush = self.flush_buffer(i, ::types_storage::buf::IOContext::IOCONTEXT_NORMAL);
                 lwlock::LWLockRelease(lock)?;
                 flush?;
                 // UnpinBuffer(bufHdr) — with-owner (bufmgr.c:5334).
@@ -985,7 +985,7 @@ impl BufferManager {
             // (bufmgr.c:6531).
             let backend = RelFileLocatorBackend {
                 locator: currlocator,
-                backend: types_core::primitive::INVALID_PROC_NUMBER,
+                backend: ::types_core::primitive::INVALID_PROC_NUMBER,
             };
             // Same `smgropen` discipline as `flush_buffer`: the writeback may run
             // in a process (bgwriter/checkpointer) whose thread-local smgr cache
@@ -1145,7 +1145,7 @@ impl Default for BgBufferSyncState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_core::primitive::ForkNumber;
+    use ::types_core::primitive::ForkNumber;
 
     fn tag(spc: u32, db: u32, rel: u32, fork: ForkNumber, blk: u32) -> buftag {
         buftag {

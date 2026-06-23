@@ -24,7 +24,7 @@
 
 extern crate alloc;
 
-use types_core::instrument::instr_time;
+use ::types_core::instrument::instr_time;
 // The canonical value type (Datum unification): the `ByVal`/`ByRef` enum that
 // replaces the bare-word shim `datum::Datum`. A PARAM_EXEC parameter's
 // serializable value is a real `Datum`, so it carries the allocator lifetime
@@ -208,7 +208,7 @@ handle!(
 /// it in their per-worker bookkeeping and pass it across the shm-mq / bgworker
 /// seams unchanged. (Formerly a `usize` `handle!` token resolved through a
 /// bgworker registry; that lossy bridge is retired.)
-pub use types_bgworker::BackgroundWorkerHandle;
+pub use ::types_bgworker::BackgroundWorkerHandle;
 handle!(
     /// Live `DestReceiver *` (`tcop/dest.h`).
     DestReceiverHandle);

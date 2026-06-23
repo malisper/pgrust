@@ -11,9 +11,9 @@ use mcx::{Mcx, PgVec};
 // signature below takes it (`ByVal`/`ByRef`) with the call frame's `'mcx`
 // lifetime; the bare-word `datum::Datum` shim is retained only at the
 // sanctioned ABI edges (none in this crate) per the datum-redesign plan.
-use types_tuple::Datum;
-use rel::Relation;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::Datum;
+use ::rel::Relation;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
     /// `index_form_tuple(RelationGetDescr(rel), values, isnull)` with
@@ -41,7 +41,7 @@ seam_core::seam!(
     /// `t_tid` itself). `Err` carries the oversize ereport and OOM.
     pub fn index_form_tuple_desc<'mcx>(
         mcx: Mcx<'mcx>,
-        tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        tupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
         values: &[Datum<'mcx>],
         isnull: &[bool],
     ) -> types_error::PgResult<PgVec<'mcx, u8>>
@@ -63,7 +63,7 @@ seam_core::seam!(
     pub fn index_deform_tuple<'mcx>(
         mcx: Mcx<'mcx>,
         itup: &[u8],
-        itupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        itupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
     ) -> types_error::PgResult<PgVec<'mcx, (Datum<'mcx>, bool)>>
 );
 
@@ -103,6 +103,6 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         itup: &[u8],
         attnum: i32,
-        itupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+        itupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
     ) -> types_error::PgResult<(Datum<'mcx>, bool)>
 );

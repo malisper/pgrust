@@ -21,8 +21,8 @@
 //! canonical homes (`crate::nodes` / `crate::execnodes`) rather than redefined.
 
 use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{Index, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{Index, Oid};
+use ::types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::{ExprState, ProjectionInfo};
@@ -31,9 +31,9 @@ use crate::nodeindexscan::Plan;
 use crate::nodes::{CmdType, Node, NodeTag};
 use crate::partition::{PartitionDescData, PartitionKeyData};
 use crate::primnodes::{Expr, TargetEntry};
-use rel::Relation;
-use types_slot::TupleTableSlot;
-use types_tuple::attmap::AttrMap;
+use ::rel::Relation;
+use ::types_slot::TupleTableSlot;
+use ::types_tuple::attmap::AttrMap;
 
 // `OnConflictAction` is canonically defined in `crate::nodes` (nodes/nodes.h);
 // re-export it here so the modifytable port can reach it under the

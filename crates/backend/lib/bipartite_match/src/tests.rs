@@ -219,7 +219,7 @@ fn empty_graph_no_matching() {
 #[test]
 fn invalid_set_size_matches_c_message() {
     install_seam_mocks();
-    use types_error::ERRCODE_INTERNAL_ERROR;
+    use ::types_error::ERRCODE_INTERNAL_ERROR;
 
     let adjacency: &[&[i16]] = &[&[], &[]];
     for (u, v) in [(-1, 1), (1, -1), (i16::MAX as i32, 1), (1, i16::MAX as i32)] {

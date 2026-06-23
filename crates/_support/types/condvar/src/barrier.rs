@@ -5,7 +5,7 @@
 //! crate.
 
 use crate::ConditionVariable;
-use types_storage::Spinlock;
+use ::types_storage::Spinlock;
 
 /// `Barrier` (`storage/barrier.h`) — a shmem-resident phased barrier. Embedded
 /// directly in DSM structs, so it carries a real spinlock and condition

@@ -4,7 +4,7 @@
 //! type stands in for the toastable varlena `PATH`; the fmgr shims
 //! (`path_in`/`path_out`/`path_recv`/`path_send`) live in [`crate::io`].
 
-use types_core::geo::{Point, BOX};
+use ::types_core::geo::{Point, BOX};
 use types_error::{PgError, PgResult};
 
 use crate::f8::{float8_div, float8_lt, float8_max, float8_mi, float8_min, float8_mul, float8_pl};
@@ -220,7 +220,7 @@ pub fn path_add(p1: &Path, p2: &Path) -> PgResult<Option<Path>> {
     // Check for integer overflow (matches the C base_size computation).
     let point_size = core::mem::size_of::<Point>();
     let base_size = point_size.wrapping_mul(total);
-    let size = types_core::geo::PATH_HEADER_SIZE.wrapping_add(base_size);
+    let size = ::types_core::geo::PATH_HEADER_SIZE.wrapping_add(base_size);
     if base_size / point_size != total || size <= base_size {
         return Err(
             PgError::error("too many points requested").with_sqlstate(errcode_program_limit()),

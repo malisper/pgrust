@@ -4,7 +4,7 @@
 //! ## `pg_logical_emit_message_*`
 //!
 //! Fully ported; both bottom out on
-//! [`message::LogLogicalMessage`].
+//! [`::message::LogLogicalMessage`].
 //!
 //! ## `pg_logical_slot_{get,peek}[_binary]_changes`
 //!
@@ -38,11 +38,11 @@
 
 extern crate alloc;
 
-use types_core::primitive::{TransactionId, XLogRecPtr};
-use types_error::PgResult;
+use ::types_core::primitive::{TransactionId, XLogRecPtr};
+use ::types_error::PgResult;
 use types_logical::{LogicalDecodingContext, OutputWriter};
 
-use message::LogLogicalMessage;
+use ::message::LogLogicalMessage;
 
 use transam_xlog_seams as xlog;
 use xlogreader_seams as xlogreader;
@@ -103,7 +103,7 @@ pub fn run_changes_into_collector(
     options: alloc::vec::Vec<(alloc::string::String, Option<alloc::string::String>)>,
     confirm: bool,
     binary: bool,
-    my_database_id: types_core::Oid,
+    my_database_id: ::types_core::Oid,
 ) -> PgResult<()> {
     // state to write output to.
     let p = DecodingOutputState { binary_output: binary };
@@ -143,14 +143,14 @@ pub fn run_changes_into_collector(
 
         // Check whether the output plugin writes textual output if that's what we
         // need.
-        if !binary && ctx.options.output_type != types_logical::OUTPUT_PLUGIN_TEXTUAL_OUTPUT
+        if !binary && ctx.options.output_type != ::types_logical::OUTPUT_PLUGIN_TEXTUAL_OUTPUT
         {
             logical::FreeDecodingContext(&mut ctx)?;
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "logical decoding output plugin produces binary output, but function \
                  expects textual data",
             )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
         }
 
         // Decoding of WAL must start at restart_lsn.
@@ -168,7 +168,7 @@ pub fn run_changes_into_collector(
             let read = xlogreader::XLogReadRecord::call(ctx.reader);
             if let Some(err) = read.err {
                 logical::FreeDecodingContext(&mut ctx)?;
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "could not find record for logical decoding: {err}"
                 )));
             }

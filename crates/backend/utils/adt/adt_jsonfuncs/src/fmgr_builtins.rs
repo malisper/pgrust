@@ -33,11 +33,11 @@
 //! `json[b]_object_keys`, `json[b]_array_elements[_text]`) are NOT registered
 //! here.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use arrayfuncs::construct::deconstruct_text_array_with_ndim_bytes;
+use ::arrayfuncs::construct::deconstruct_text_array_with_ndim_bytes;
 
 /// `VARHDRSZ` — the uncompressed 4-byte varlena length-word size.
 const VARHDRSZ: usize = 4;

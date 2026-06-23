@@ -33,8 +33,8 @@ use core::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use mcx::{McxOwned, MemoryContext};
-use cache::typcache::{DomainCtxHandle, ExprStateHandle};
-use types_error::PgResult;
+use ::cache::typcache::{DomainCtxHandle, ExprStateHandle};
+use ::types_error::PgResult;
 use ::nodes::execexpr::ExprState;
 use ::nodes::primnodes::Expr;
 use nodes::{EStateData, EcxtId};
@@ -60,7 +60,7 @@ struct DomainExprBundle<'mcx> {
     econtext: EcxtId,
 }
 
-mcx::bind!(DomainExprBundleTy => DomainExprBundle<'mcx>);
+::mcx::bind!(DomainExprBundleTy => DomainExprBundle<'mcx>);
 
 thread_local! {
     /// Backend-local registry of compiled domain-CHECK `ExprState`s, keyed by the
@@ -173,7 +173,7 @@ pub fn domain_check_exec(
             // `exec_init_expr`; a miss is an invariant violation. Raise a clean
             // error rather than panicking on the unwind path.
             None => {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "domain_check_exec: unknown ExprStateHandle {}",
                     exprstate.0
                 )))

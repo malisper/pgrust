@@ -14,14 +14,14 @@
 use alloc::boxed::Box;
 use mcx::{Mcx, PgBox, PgVec};
 
-use condvar::Barrier;
+use ::condvar::Barrier;
 use types_core::{uint32, Oid, Size};
-use types_core::FmgrInfo;
+use ::types_core::FmgrInfo;
 use execparallel::{DsaAreaHandle, DsaPointer, FileSetHandle, SerializeCursor};
-use types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64, LWLock};
-use types_storage::fileset::SharedFileSet;
-use types_storage::file::{File, PGAlignedBlock};
-use types_storage::lock::ResourceOwnerHandle;
+use ::types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64, LWLock};
+use ::types_storage::fileset::SharedFileSet;
+use ::types_storage::file::{File, PGAlignedBlock};
+use ::types_storage::lock::ResourceOwnerHandle;
 use types_tuple::heaptuple::FormedMinimalTuple;
 
 use crate::execexpr::ExprState;
@@ -610,7 +610,7 @@ pub enum SharedHashInfo<'mcx> {
         chunk: SerializeCursor,
         /// The DSM segment the chunk lives in (the leader's `pcxt->seg`), so the
         /// retrieve path can `attach_flex` the array before detach.
-        seg: execparallel::DsmSegmentHandle,
+        seg: ::execparallel::DsmSegmentHandle,
         /// `shared_info->num_workers`.
         num_workers: i32,
     },
@@ -641,7 +641,7 @@ pub enum HashInstrumentSlot<'mcx> {
         chunk: SerializeCursor,
         /// The DSM segment the chunk lives in (the worker's `pwcxt->seg`), so
         /// the slot can be mutated via `shared_dsm_object::with_mut`.
-        seg: execparallel::DsmSegmentHandle,
+        seg: ::execparallel::DsmSegmentHandle,
         /// `ParallelWorkerNumber` — this worker's slot index in the array.
         worker_index: i32,
     },

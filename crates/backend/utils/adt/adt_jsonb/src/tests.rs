@@ -19,8 +19,8 @@ use std::vec::Vec;
 
 use super::*;
 use jsonb_util as jbu;
-use mcx::MemoryContext;
-use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
+use ::mcx::MemoryContext;
+use ::types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
 use JsonbIteratorToken::*;
 
 static INSTALL: Once = Once::new();

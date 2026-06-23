@@ -23,7 +23,7 @@
 //! `remove_unused_subquery_outputs` / window-runcondition cluster, in
 //! [`pushdown`]) operates on the owned `Query<'mcx>` *subtrees* (`targetList`,
 //! `setOperations`, `windowClause`, `distinctClause`, …). The subquery is
-//! resolved off its RTE (interned in the [`pathnodes::planner_run`]
+//! resolved off its RTE (interned in the [`::pathnodes::planner_run`]
 //! store), copied, optionally has the rel's restriction clauses pushed into it,
 //! then planned into its own subroot via the planner-owned
 //! `subquery_planner_for_fromsubquery` seam (the planner unit owns
@@ -48,19 +48,19 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Index, Oid};
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     PathId, PlannerInfo, RelId, Relids, JOIN_ANTI, JOIN_SEMI, RELOPT_BASEREL, RTE_RELATION,
 };
 
-/* RTEKind discriminants (parsenodes.h). `pathnodes::RTEKind` is a bare
+/* RTEKind discriminants (parsenodes.h). `::pathnodes::RTEKind` is a bare
  * `u32`; only `RTE_RELATION` is exported there, so mirror the rest here to match
  * the values the `rte_rtekind` seam returns. */
-use pathnodes::RTEKind;
+use ::pathnodes::RTEKind;
 const RTE_SUBQUERY: RTEKind = 1;
 const RTE_FUNCTION: RTEKind = 3;
 const RTE_TABLEFUNC: RTEKind = 4;
@@ -907,7 +907,7 @@ fn rel_functions_parallel_safe<'mcx>(
     root: &PlannerInfo,
     rti: Index,
 ) -> bool {
-    let rte = pathnodes::planner_run::planner_rt_fetch(run, root, rti);
+    let rte = ::pathnodes::planner_run::planner_rt_fetch(run, root, rti);
     for fn_node in rte.functions.iter() {
         // Each element is a RangeTblFunction; check its funcexpr (a Node).
         if let Some(rtf) = (**fn_node).as_rangetblfunction() {
@@ -929,7 +929,7 @@ fn rel_values_parallel_safe<'mcx>(
     root: &PlannerInfo,
     rti: Index,
 ) -> bool {
-    let rte = pathnodes::planner_run::planner_rt_fetch(run, root, rti);
+    let rte = ::pathnodes::planner_run::planner_rt_fetch(run, root, rti);
     for row_node in rte.values_lists.iter() {
         // Each element of values_lists is a List node of column expressions.
         if let Some(cols) = (**row_node).as_list() {
@@ -973,7 +973,7 @@ fn build_ordinality_pathkeys(
     root: &mut PlannerInfo,
     mcx: Mcx<'_>,
     rel: RelId,
-) -> Vec<pathnodes::PathKey> {
+) -> Vec<::pathnodes::PathKey> {
     let ordattno: AttrNumber = root.rel(rel).max_attr;
     let relid = root.rel(rel).relid;
 
@@ -1032,7 +1032,7 @@ fn subroot_final_rel_is_dummy_impl(
     };
     let result = {
         let final_rel = subroot.upper_rels
-            [pathnodes::UPPERREL_FINAL as usize]
+            [::pathnodes::UPPERREL_FINAL as usize]
             .first()
             .copied();
         match final_rel {

@@ -11,9 +11,9 @@
 #![allow(non_camel_case_types)]
 
 use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 
 /// `PartitionStrategy` (`nodes/parsenodes.h`) — the partitioning strategy,
 /// a `char`-valued code stored in `pg_partitioned_table.partstrat`.
@@ -109,7 +109,7 @@ pub struct PartKeyOpInfo<'mcx> {
     pub support_funcid: Oid,
     /// `NameStr(opclassform->opcname)` — used only to build the
     /// missing-support-function error message.
-    pub opcname: mcx::PgString<'mcx>,
+    pub opcname: ::mcx::PgString<'mcx>,
 }
 
 /// Per-key type information: the result of the `attno != 0`

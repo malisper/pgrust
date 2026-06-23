@@ -282,7 +282,7 @@ pub fn get_index_column_opclass(index_oid: Oid, attno: i32) -> PgResult<Oid> {
     // The seam folds `SearchSysCache1(INDEXRELID)` + the `indnatts`/`indnkeyatts`
     // reads + `SysCacheGetAttrNotNull(Anum_pg_index_indclass)`, returning the
     // per-column opclass `oidvector` copied into a scratch context.
-    let scratch = mcx::MemoryContext::new("get_index_column_opclass");
+    let scratch = ::mcx::MemoryContext::new("get_index_column_opclass");
     let (indnatts, indnkeyatts, indclass) =
         match syscache::pg_index_indclass::call(scratch.mcx(), index_oid)? {
             Some(t) => t,

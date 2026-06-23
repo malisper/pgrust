@@ -7,4 +7,4 @@
 //! key is the same full `access/skey.h` carrier index scans use, re-exported
 //! from [`types_scan`] (one canonical `ScanKeyData`, no trimmed sibling).
 
-pub use types_scan::scankey::*;
+pub use ::types_scan::scankey::*;

@@ -1,6 +1,6 @@
 //! `backend/optimizer/path/equivclass.c` — the planner's EquivalenceClass
 //! engine, ported 1:1 over the arena+handle model of
-//! [`pathnodes::PlannerInfo`].
+//! [`::pathnodes::PlannerInfo`].
 //!
 //! Every `EquivalenceClass *` is an [`EcId`] arena handle, every
 //! `EquivalenceMember *` an [`EmId`], every `RestrictInfo *` a [`RinfoId`], every
@@ -68,7 +68,7 @@ use equivclass_seams as ec_seam;
 use joinpath_seams as jp_seam;
 use path_small_seams as ps_seam;
 use relnode_ext_seams as relnode_ext;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use pathnodes::{
     EcId, PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
 };

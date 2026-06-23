@@ -8,7 +8,7 @@
 //! C `JoinTreeItem.jtnode` is a `Node *` into the parse jointree, read (never
 //! mutated) by the distribute passes. This repo's `PlannerInfo.parse` is the
 //! opaque [`QueryId`]; the jointree is reached through the established
-//! [`PlannerRun`](pathnodes::planner_run::PlannerRun) resolver
+//! [`PlannerRun`](::pathnodes::planner_run::PlannerRun) resolver
 //! (`run.jointree(root.parse) -> &FromExpr<'mcx>`, the safe-Rust `Query *`
 //! deref landed by task #264). So every public entry here takes an additional
 //! `run: &PlannerRun<'mcx>` parameter alongside `&mut PlannerInfo`, exactly as
@@ -36,17 +36,17 @@
 //!     - `left_rels: Relids`
 //!     - `right_rels: Relids`
 //!     - `nonnullable_rels: Relids`
-//!     - `sjinfo: Option<alloc::boxed::Box<pathnodes::SpecialJoinInfo>>`
+//!     - `sjinfo: Option<alloc::boxed::Box<::pathnodes::SpecialJoinInfo>>`
 //!     - `oj_joinclauses: alloc::vec::Vec<::nodes::primnodes::Expr>`
 //!     - `lateral_clauses: alloc::vec::Vec<::nodes::primnodes::Expr>`
 //!   plus `#[derive(Clone, Debug, Default)]`.
 //! - `pub enum JtNodeKind` (lifetime-free, `#[derive(Clone, Debug)]` + `Default`):
 //!     - `RangeTblRef { rtindex: i32 }`
 //!     - `FromExpr { quals: alloc::vec::Vec<::nodes::primnodes::Expr> }`
-//!     - `JoinExpr { jointype: pathnodes::JoinType, rtindex: i32,
+//!     - `JoinExpr { jointype: ::pathnodes::JoinType, rtindex: i32,
 //!                   quals: alloc::vec::Vec<::nodes::primnodes::Expr> }`
 //! - consts/helpers: `from_collapse_limit() -> i32`, `join_collapse_limit() -> i32`.
-//! - `pub fn new_join_domain(root: &mut pathnodes::PlannerInfo) -> usize`
+//! - `pub fn new_join_domain(root: &mut ::pathnodes::PlannerInfo) -> usize`
 //!   is provided HERE (below); lib.rs need not supply it.
 //! - `crate::quals::{distribute_qual_to_rels, distribute_restrictinfo_to_rels}`
 //!   and `crate::outerjoin::{make_outerjoininfo, compute_semijoin_info}` are
@@ -58,7 +58,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     JoinDomain, JoinlistNode, PlannerInfo, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL,
     JOIN_INNER, JOIN_LEFT, JOIN_SEMI,
@@ -69,7 +69,7 @@ use relnode_seams as bms;
 use equivclass_ext_seams as eqext;
 use init_subselect_ext_seams as initext;
 
-use nodes_core::makefuncs::make_ands_implicit;
+use ::nodes_core::makefuncs::make_ands_implicit;
 
 use crate::{from_collapse_limit, join_collapse_limit, JoinTreeItem, JtId, JtNodeKind};
 
@@ -416,13 +416,13 @@ fn deconstruct_recurse<'mcx>(
         let rightjoinlist: Vec<JoinlistNode>;
         jtitem.kind = JtNodeKind::JoinExpr {
             // C `JoinType` discriminant — store the lifetime-free
-            // `pathnodes::JoinType` (u32) the planner uses, converted from
+            // `::pathnodes::JoinType` (u32) the planner uses, converted from
             // the `::nodes::jointype::JoinType` enum the raw node carries.
-            jointype: j.jointype as pathnodes::JoinType,
+            jointype: j.jointype as ::pathnodes::JoinType,
             rtindex: j.rtindex,
             quals: quals_implicit_and(run.mcx(), j.quals.as_deref()),
         };
-        let jointype = j.jointype as pathnodes::JoinType;
+        let jointype = j.jointype as ::pathnodes::JoinType;
         if jointype == JOIN_INNER {
             // This node belongs to parent_domain, as do its children.
             jtitem.jdomain = parent_domain;

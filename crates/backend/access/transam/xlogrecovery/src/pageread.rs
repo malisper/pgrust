@@ -33,14 +33,14 @@ use alloc::format;
 use alloc::string::String;
 
 use types_core::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
-use types_core::InvalidXLogRecPtr;
+use ::types_core::InvalidXLogRecPtr;
 use types_error::{ErrorLevel, ErrorLocation, PgError, DEBUG1, DEBUG2, LOG, PANIC};
-use wal::rmgr::{XLogReaderState, XLREAD_FAIL, XLREAD_WOULDBLOCK};
-use wal::xlog_consts::XLOG_BLCKSZ;
-use wal::xlogrecovery_carriers::{XLogPageReadResult, XLogSource};
+use ::wal::rmgr::{XLogReaderState, XLREAD_FAIL, XLREAD_WOULDBLOCK};
+use ::wal::xlog_consts::XLOG_BLCKSZ;
+use ::wal::xlogrecovery_carriers::{XLogPageReadResult, XLogSource};
 
-use utils_error::elog;
-use utils_error::ereport;
+use ::utils_error::elog;
+use ::utils_error::ereport;
 
 use crate::core::{lsn_fmt, RecoveryTargetTimeLineGoal, XLogRecoveryState};
 
@@ -775,7 +775,7 @@ fn wait_for_wal_to_become_available(
 
         // Check for recovery pause here so a requested pause takes effect quickly.
         if crate::shmem::get_recovery_pause_state()
-            != wal::wal::RecoveryPauseState::NotPaused
+            != ::wal::wal::RecoveryPauseState::NotPaused
         {
             crate::stop::recovery_pauses_here(recovery_state(), false);
         }
@@ -970,7 +970,7 @@ fn x_log_file_read_any_tli(
     let wal_segment_size = xlog_seam::wal_segment_size::call();
 
     // The list of TLIs to scan: expectedTLEs, or read it now (without saving).
-    let tles: alloc::vec::Vec<wal::wal::TimeLineHistoryEntry> = if !st.expected_tles.is_empty() {
+    let tles: alloc::vec::Vec<::wal::wal::TimeLineHistoryEntry> = if !st.expected_tles.is_empty() {
         st.expected_tles.clone()
     } else {
         let ctx = mcx::MemoryContext::new("recovery anytli history");

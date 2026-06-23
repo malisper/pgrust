@@ -22,7 +22,7 @@
 //! `CreateTemplateTupleDesc` / `TupleDescInitEntry` are called directly on the
 //! ported `backend-access-common-tupdesc` crate.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{vec_with_capacity_in, Mcx, PgString};
 use types_core::{Oid, OidIsValid};
 // The canonical unified value type (Datum-unification keystone) — what
@@ -32,12 +32,12 @@ use types_core::{Oid, OidIsValid};
 // `deconstruct_array` (still bare-word at the sanctioned fmgr PG_GETARG ABI
 // edge) flow into its by-value arm, while `cstring_get_text_datum` already
 // returns the canonical value verbatim.
-use types_tuple::heaptuple::Datum as DatumV;
+use ::types_tuple::heaptuple::Datum as DatumV;
 use types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::{ExtractedVariadicArgs, TypeFuncClass};
-use types_storage::lock::AccessShareLock;
-use types_tuple::heaptuple::{TupleDesc, RECORDOID, TEXTOID, UNKNOWNOID};
+use ::types_storage::lock::AccessShareLock;
+use ::types_tuple::heaptuple::{TupleDesc, RECORDOID, TEXTOID, UNKNOWNOID};
 
 /// `RelationNameGetTupleDesc(relname)` (funcapi.c:1870) — look up the relation
 /// by (possibly qualified) name and return a copy of its row `TupleDesc`.
@@ -53,7 +53,7 @@ pub fn RelationNameGetTupleDesc<'mcx>(mcx: Mcx<'mcx>, relname: &str) -> PgResult
 
     // relvar = makeRangeVarFromNameList(relname_list);
     // The seam takes the parts as `&[&str]`.
-    let parts: mcx::PgVec<'mcx, &str> = {
+    let parts: ::mcx::PgVec<'mcx, &str> = {
         let mut v = vec_with_capacity_in(mcx, relname_list.len())?;
         for s in relname_list.iter() {
             v.push(s.as_str());
@@ -171,7 +171,7 @@ pub fn TypeGetTupleDesc<'mcx>(
 
             // CreateTemplateTupleDesc returns the descriptor by value; the
             // owned TupleDesc carrier is a context-allocated PgBox.
-            Some(mcx::alloc_in(mcx, td)?)
+            Some(::mcx::alloc_in(mcx, td)?)
         }
         TypeFuncClass::Record => {
             // XXX can't support this because typmod wasn't passed in ...
@@ -213,9 +213,9 @@ pub fn extract_variadic_args<'mcx>(
     // The extracted argument values are returned as the canonical unified
     // value type (`ExtractedVariadicArgs.values`); the per-element words from
     // deconstruct_array / PG_GETARG cross into its by-value arm.
-    let mut args_res: mcx::PgVec<'mcx, DatumV<'mcx>>;
-    let mut nulls_res: mcx::PgVec<'mcx, bool>;
-    let mut types_res: mcx::PgVec<'mcx, Oid>;
+    let mut args_res: ::mcx::PgVec<'mcx, DatumV<'mcx>>;
+    let mut nulls_res: ::mcx::PgVec<'mcx, bool>;
+    let mut types_res: ::mcx::PgVec<'mcx, Oid>;
 
     let nargs: i32;
 
@@ -408,7 +408,7 @@ pub fn record_from_values<'mcx>(
     let formed = heaptuple::heap_form_tuple(mcx, &td, values, nulls)
         .map_err(|e| {
             ereport(ERROR)
-                .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+                .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
                 .errmsg(format!("record_from_values: heap_form_tuple failed: {e:?}"))
                 .into_error()
         })?;

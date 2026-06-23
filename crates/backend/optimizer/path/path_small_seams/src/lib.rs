@@ -31,10 +31,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     EcId, EmId, JoinType, NodeId, RelId, Relids, RinfoId, PlannerInfo, SpecialJoinInfo,
 };

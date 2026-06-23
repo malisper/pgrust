@@ -4,9 +4,9 @@
 //! and `CreateCommandTag` (utility.c:2362-3236) reconciled to this repo's
 //! split-crate node model.
 
-use utils_error::PgResult;
-use types_error::WARNING;
-use types_core::cmdtag::CommandTag;
+use ::utils_error::PgResult;
+use ::types_error::WARNING;
+use ::types_core::cmdtag::CommandTag;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::*;
 use ::nodes::rawnodes::{
@@ -404,7 +404,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
                 None => CMDTAG_UNKNOWN,
             },
             other => {
-                utils_error::elog(
+                ::utils_error::elog(
                     WARNING,
                     format!("unrecognized commandType: {}", other as i32),
                 )?;
@@ -414,7 +414,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
         }
 
         _ => {
-            utils_error::elog(
+            ::utils_error::elog(
                 WARNING,
                 format!("unrecognized node type: {}", parsetree.node_tag().0),
             )?;
@@ -470,7 +470,7 @@ pub fn CreateCommandTagForPlannedStmt(
             None => CMDTAG_UNKNOWN,
         },
         other => {
-            utils_error::elog(
+            ::utils_error::elog(
                 WARNING,
                 format!("unrecognized commandType: {}", other as i32),
             )?;

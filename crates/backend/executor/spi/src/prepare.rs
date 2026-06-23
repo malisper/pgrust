@@ -31,18 +31,18 @@
 
 use core::cell::RefCell;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{MemoryContext, Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::CmdType;
 use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
 use ::nodes::parsestmt::CachedPlanHandle;
-use types_resowner::ResourceOwner;
+use ::types_resowner::ResourceOwner;
 use types_ri_triggers::{ResultColumn, SpiExecResult, SpiPlanPtr};
-use types_tuple::Datum;
-use types_xml::SpiResult;
+use ::types_tuple::Datum;
+use ::types_xml::SpiResult;
 
 use crate::backbone::{set_spi_processed, set_spi_result};
 use crate::dest_spi::{create_spi_dest_receiver, take_spi_result};
@@ -610,7 +610,7 @@ pub fn spi_first_row_columns<'mcx>(
         namebuf.extend_from_slice(&name);
 
         let value = match first_row.get(idx) {
-            Some(Some(s)) => Some(mcx::PgString::from_str_in(s, mcx)?),
+            Some(Some(s)) => Some(::mcx::PgString::from_str_in(s, mcx)?),
             _ => None,
         };
         out.push(ResultColumn {

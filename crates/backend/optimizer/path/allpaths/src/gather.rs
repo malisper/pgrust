@@ -4,8 +4,8 @@
 
 use alloc::vec::Vec;
 
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PathId, PathKey, PlannerInfo, RelId};
 
 use pathnode_seams as pathnode;

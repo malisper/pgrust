@@ -34,9 +34,9 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::{Aggref, Expr};
@@ -157,7 +157,7 @@ pub fn preprocess_minmax_aggregates<'mcx>(
 /// for `count`/`sum`/`avg`), else `Some(list)`.
 ///
 /// Each built `MinMaxAggInfo` has `aggfnoid` / `aggsortop` set and `target` =
-/// the [`pathnodes::NodeId`] of the aggregate argument expression, interned
+/// the [`::pathnodes::NodeId`] of the aggregate argument expression, interned
 /// into the OUTER `root`'s `node_arena` (so `build_minmax_path` and the setrefs
 /// Aggref→Param replacement can both read it). `path` / `param` / `subroot_idx`
 /// are left at their `Default` (the planner-crate path-build step fills them).
@@ -167,7 +167,7 @@ fn can_minmax_aggs<'mcx>(
 ) -> PgResult<Option<alloc::vec::Vec<MinMaxAggInfo>>> {
     let mut context: alloc::vec::Vec<MinMaxAggInfo> = alloc::vec::Vec::new();
     // foreach(lc, root->agginfos)
-    let agginfo_ids: alloc::vec::Vec<pathnodes::NodeId> = root.agginfos.clone();
+    let agginfo_ids: alloc::vec::Vec<::pathnodes::NodeId> = root.agginfos.clone();
     for agginfo_id in agginfo_ids {
         // aggref = linitial_node(Aggref, agginfo->aggrefs);
         let aggref_id = root.agg_info(agginfo_id).aggrefs[0];

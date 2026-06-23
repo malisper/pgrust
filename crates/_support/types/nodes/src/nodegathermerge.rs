@@ -4,7 +4,7 @@
 //!
 //! The embedded `PlanState` head reuses [`PlanStateData`], the leading `Plan`
 //! base reuses [`crate::nodeindexscan::Plan`], the sort-support array reuses
-//! [`types_sortsupport::SortSupportData`], the binary heap reuses
+//! [`::types_sortsupport::SortSupportData`], the binary heap reuses
 //! [`crate::nodemergeappend::BinaryHeap`] (the same `lib/binaryheap.c`
 //! slot-index heap), and the executor-pool aliases follow the owned model
 //! ([`SlotId`] for `TupleTableSlot *`). The leader's parallel handle and the
@@ -12,12 +12,12 @@
 //! ([`ParallelExecutorInfo`] / [`TupleQueueReaderHandle`]).
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 use execparallel::{ParallelExecutorInfo, TupleQueueReaderHandle};
-use types_sortsupport::SortSupportData;
-use types_tuple::heaptuple::FormedMinimalTuple;
-use types_tuple::heaptuple::TupleDesc;
+use ::types_sortsupport::SortSupportData;
+use ::types_tuple::heaptuple::FormedMinimalTuple;
+use ::types_tuple::heaptuple::TupleDesc;
 
 use crate::bitmapset::Bitmapset;
 use crate::execnodes::{PlanStateData, SlotId};
@@ -93,7 +93,7 @@ impl GatherMerge<'_> {
             collations: self.collations.clone(),
             nullsFirst: self.nullsFirst.clone(),
             initParam: match &self.initParam {
-                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
         })

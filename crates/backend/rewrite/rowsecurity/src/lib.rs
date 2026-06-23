@@ -27,29 +27,29 @@
 
 use mcx::{alloc_in, Mcx, PgString, PgVec};
 
-use types_acl::acl::{
+use ::types_acl::acl::{
     ACL_DELETE_CHR, ACL_ID_PUBLIC, ACL_INSERT_CHR, ACL_SELECT, ACL_SELECT_CHR, ACL_UPDATE,
     ACL_UPDATE_CHR,
 };
-use types_core::primitive::OidIsValid;
-use types_core::Oid;
+use ::types_core::primitive::OidIsValid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERROR};
 use ::nodes::nodes::{CmdType, Node, NodePtr};
 use ::nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
 use ::nodes::primnodes::{BoolExprType, Expr};
 use ::nodes::rawnodes::{WCOKind, WithCheckOption};
 
-use nodes_core::makefuncs::{make_bool_const, make_bool_expr};
-use equalfuncs::equal_node;
-use rewrite_core::change::ChangeVarNodes;
-use rewriteDefine::setRuleCheckAsUser;
-use adt_acl::role_membership::has_privs_of_role;
+use ::nodes_core::makefuncs::{make_bool_const, make_bool_expr};
+use ::equalfuncs::equal_node;
+use ::rewrite_core::change::ChangeVarNodes;
+use ::rewriteDefine::setRuleCheckAsUser;
+use ::adt_acl::role_membership::has_privs_of_role;
 use relcache_seams::{relation_row_security, RowSecurityPolicyImage};
-use miscinit::GetUserId;
-use more::rls::check_enable_rls;
+use ::miscinit::GetUserId;
+use ::more::rls::check_enable_rls;
 
-use types_acl::CheckEnableRlsResult;
-use types_storage::lock::NoLock;
+use ::types_acl::CheckEnableRlsResult;
+use ::types_storage::lock::NoLock;
 
 // `RELKIND_*` (the `i8` stored in `RangeTblEntry.relkind`).
 const RELKIND_RELATION: i8 = b'r' as i8;

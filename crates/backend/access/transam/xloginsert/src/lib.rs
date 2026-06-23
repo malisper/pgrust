@@ -39,11 +39,11 @@ use core::cell::RefCell;
 
 use utils_error::{PgError, PgResult};
 use pglz::{pglz_compress, PGLZ_strategy_default, PglzError};
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, Buffer, ForkNumber, RmgrId, TransactionId, XLogRecPtr, BLCKSZ,
 };
-use types_storage::bufpage::SizeOfPageHeaderData;
-use types_storage::storage::{RelFileLocator, RelFileLocatorEquals};
+use ::types_storage::bufpage::SizeOfPageHeaderData;
+use ::types_storage::storage::{RelFileLocator, RelFileLocatorEquals};
 use wal::{
     BKPBLOCK_HAS_DATA, BKPBLOCK_HAS_IMAGE, BKPBLOCK_SAME_REL, BKPBLOCK_WILL_INIT, BKPIMAGE_APPLY,
     BKPIMAGE_COMPRESS_LZ4, BKPIMAGE_COMPRESS_PGLZ, BKPIMAGE_COMPRESS_ZSTD, BKPIMAGE_HAS_HOLE,
@@ -337,7 +337,7 @@ pub fn XLogEnsureRecordSpace(mut max_block_id: i32, mut ndatas: i32) -> PgResult
          * This must be called before entering a critical section, because
          * allocating memory inside a critical section can fail.
          */
-        debug_assert!(utils_error::config::crit_section_count() == 0);
+        debug_assert!(::utils_error::config::crit_section_count() == 0);
 
         /* the minimum values can't be decreased */
         if max_block_id < XLR_NORMAL_MAX_BLOCK_ID {
@@ -1487,7 +1487,7 @@ pub fn log_newpage_buffer(buffer: Buffer, page_std: bool) -> PgResult<XLogRecPtr
     })?;
 
     /* Shared buffers should be modified in a critical section. */
-    debug_assert!(utils_error::config::crit_section_count() > 0);
+    debug_assert!(::utils_error::config::crit_section_count() > 0);
 
     let (rlocator, forkno, block) = bufmgr_seam::buffer_get_tag::call(buffer)?;
 
@@ -1651,7 +1651,7 @@ pub fn init_seams() {
         XLogBeginInsert()?;
         XLogRegisterData(body)?;
         XLogSetRecordFlags(XLOG_INCLUDE_ORIGIN);
-        XLogInsert(wal::RM_XACT_ID, wal::XLOG_XACT_PREPARE)
+        XLogInsert(::wal::RM_XACT_ID, ::wal::XLOG_XACT_PREPARE)
     });
     s::xlog_register_block::set(|block_id, rlocator, forknum, blknum, page, flags| {
         XLogRegisterBlock(block_id, &rlocator, forknum, blknum, page, flags)

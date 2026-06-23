@@ -20,22 +20,22 @@ use core::cell::RefCell;
 
 use mcx::{Mcx, PgString, PgVec};
 use types_copy::{CopyFormatOptions, CopyHeaderChoice};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid};
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_NAME};
 use ::nodes::copy_query::{ParseState, QuerySource, T_CreateTableAsStmt};
 use ::nodes::querydesc::QueryDesc;
 use ::nodes::parsestmt::RawStmt;
 use ::nodes::nodes::{CmdType, CMD_SELECT};
-use types_pgstat::backend_progress::ProgressCommandType;
-use rel::Relation;
-use stringinfo::StringInfo;
-use types_tuple::access::{
+use ::types_pgstat::backend_progress::ProgressCommandType;
+use ::rel::Relation;
+use ::stringinfo::StringInfo;
+use ::types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
     RELKIND_SEQUENCE, RELKIND_VIEW,
 };
-use types_tuple::heaptuple::DeformedColumn;
-use types_tuple::heaptuple::TupleDesc;
+use ::types_tuple::heaptuple::DeformedColumn;
+use ::types_tuple::heaptuple::TupleDesc;
 
 use table_tableam_seams as tableam_s;
 use commands_copy_seams as copy_s;
@@ -46,8 +46,8 @@ use lsyscache_seams as lsyscache_s;
 use fmgr_seams as fmgr_s;
 use mbutils_seams as mbutils_s;
 
-use utils_error::config::where_to_send_output;
-use types_dest::CommandDest;
+use ::utils_error::config::where_to_send_output;
+use ::types_dest::CommandDest;
 
 mod tests;
 
@@ -496,7 +496,7 @@ fn copy_send_end_of_row(cstate: &mut CopyToStateData<'_>) -> PgResult<()> {
             )? {
                 if cstate.is_program {
                     let mut errnum = write_errno;
-                    if errnum == utils_error::errno::EPIPE {
+                    if errnum == ::utils_error::errno::EPIPE {
                         // The pipe will be closed automatically on error at the
                         // end of transaction, but we might get a better error
                         // message from the subprocess' exit code than just
@@ -505,24 +505,24 @@ fn copy_send_end_of_row(cstate: &mut CopyToStateData<'_>) -> PgResult<()> {
                         // If ClosePipeToProgram() didn't throw an error, the
                         // program terminated normally, but closed the pipe
                         // first. Restore errno, and throw an error.
-                        errnum = utils_error::errno::EPIPE;
+                        errnum = ::utils_error::errno::EPIPE;
                     }
                     return Err(PgError::error(
-                        utils_error::errno::replace_percent_m(
+                        ::utils_error::errno::replace_percent_m(
                             "could not write to COPY program: %m",
                             errnum,
                         ),
                     )
-                    .with_sqlstate(utils_error::errno::sqlstate_for_file_access(errnum))
+                    .with_sqlstate(::utils_error::errno::sqlstate_for_file_access(errnum))
                     .with_saved_errno(errnum));
                 } else {
                     return Err(PgError::error(
-                        utils_error::errno::replace_percent_m(
+                        ::utils_error::errno::replace_percent_m(
                             "could not write to COPY file: %m",
                             write_errno,
                         ),
                     )
-                    .with_sqlstate(utils_error::errno::sqlstate_for_file_access(
+                    .with_sqlstate(::utils_error::errno::sqlstate_for_file_access(
                         write_errno,
                     ))
                     .with_saved_errno(write_errno));
@@ -652,7 +652,7 @@ pub fn BeginCopyTo<'mcx>(
                     "cannot copy from view \"{}\"",
                     rel.name()
                 ))
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .with_hint("Try the COPY (SELECT ...) TO variant."));
             } else if relkind == RELKIND_MATVIEW {
                 if !rel.rd_rel.relispopulated {
@@ -660,7 +660,7 @@ pub fn BeginCopyTo<'mcx>(
                         "cannot copy from unpopulated materialized view \"{}\"",
                         rel.name()
                     ))
-                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .with_hint("Use the REFRESH MATERIALIZED VIEW command."));
                 }
             } else if relkind == RELKIND_FOREIGN_TABLE {
@@ -668,27 +668,27 @@ pub fn BeginCopyTo<'mcx>(
                     "cannot copy from foreign table \"{}\"",
                     rel.name()
                 ))
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .with_hint("Try the COPY (SELECT ...) TO variant."));
             } else if relkind == RELKIND_SEQUENCE {
                 return Err(PgError::error(alloc::format!(
                     "cannot copy from sequence \"{}\"",
                     rel.name()
                 ))
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE));
+                .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE));
             } else if relkind == RELKIND_PARTITIONED_TABLE {
                 return Err(PgError::error(alloc::format!(
                     "cannot copy from partitioned table \"{}\"",
                     rel.name()
                 ))
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .with_hint("Try the COPY (SELECT ...) TO variant."));
             } else {
                 return Err(PgError::error(alloc::format!(
                     "cannot copy from non-table relation \"{}\"",
                     rel.name()
                 ))
-                .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE));
+                .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE));
             }
         }
     }
@@ -746,7 +746,7 @@ pub fn BeginCopyTo<'mcx>(
             return Err(PgError::error(
                 "DO INSTEAD NOTHING rules are not supported for COPY",
             )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
         } else if rewritten.len() > 1 {
             // examine queries to determine which error message to issue
             for q in rewritten.iter() {
@@ -754,17 +754,17 @@ pub fn BeginCopyTo<'mcx>(
                     return Err(PgError::error(
                         "conditional DO INSTEAD rules are not supported for COPY",
                     )
-                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+                    .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
                 }
                 if q.querySource == QuerySource::QSRC_NON_INSTEAD_RULE {
                     return Err(PgError::error("DO ALSO rules are not supported for COPY")
-                        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+                        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
                 }
             }
             return Err(PgError::error(
                 "multi-statement DO INSTEAD rules are not supported for COPY",
             )
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
         }
 
         // query = linitial_node(Query, rewritten);
@@ -775,11 +775,11 @@ pub fn BeginCopyTo<'mcx>(
             let tag = stmt.tag();
             if tag == T_CreateTableAsStmt {
                 return Err(PgError::error("COPY (SELECT INTO) is not supported")
-                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+                    .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
             }
             // The only other utility command we could see is NOTIFY.
             return Err(PgError::error("COPY query must not be a utility command")
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
         }
 
         // RETURNING clause is required for non-SELECT.
@@ -790,7 +790,7 @@ pub fn BeginCopyTo<'mcx>(
                 CmdType::CMD_INSERT | CmdType::CMD_UPDATE | CmdType::CMD_DELETE | CmdType::CMD_MERGE
             ));
             return Err(PgError::error("COPY query must have a RETURNING clause")
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
         }
         let _ = CMD_SELECT;
 
@@ -812,7 +812,7 @@ pub fn BeginCopyTo<'mcx>(
                 return Err(PgError::error(
                     "relation referenced by COPY statement has changed",
                 )
-                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
+                .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
             }
         }
 
@@ -1132,16 +1132,16 @@ fn copy_dest_receive(receiver: u64, slot: &mut ::nodes::tuptable::SlotData<'_>) 
 /// The dest-router vtable's `rStartup` slot; the leading `state` token is the
 /// copyto `RECEIVERS` index (the `DR_copy` stand-in), unused here as in C.
 fn copy_dest_startup(
-    _mcx: mcx::Mcx<'_>,
+    _mcx: ::mcx::Mcx<'_>,
     _state: u64,
     _operation: CmdType,
-    _typeinfo: &types_tuple::heaptuple::TupleDescData<'_>,
+    _typeinfo: &::types_tuple::heaptuple::TupleDescData<'_>,
 ) -> PgResult<()> {
     Ok(())
 }
 
 /// `copy_dest_shutdown(self)` (copyto.c:1417) — `/* no-op */`.
-fn copy_dest_shutdown(_mcx: mcx::Mcx<'_>, _state: u64) -> PgResult<()> {
+fn copy_dest_shutdown(_mcx: ::mcx::Mcx<'_>, _state: u64) -> PgResult<()> {
     Ok(())
 }
 
@@ -1157,7 +1157,7 @@ fn copy_dest_shutdown(_mcx: mcx::Mcx<'_>, _state: u64) -> PgResult<()> {
 /// the real `CopyOneRowTo`. This is the unified `DestReceiver` identity for
 /// `DestCopyOut`; the [`copy_dest_receive`] inward seam delegates here.
 fn copy_dest_receive_slot(
-    _mcx: mcx::Mcx<'_>,
+    _mcx: ::mcx::Mcx<'_>,
     state: u64,
     slot: &mut ::nodes::tuptable::SlotData<'_>,
 ) -> PgResult<bool> {
@@ -1394,7 +1394,7 @@ fn is_highbit_set(c: u8) -> bool {
 
 /// `*tupDesc` — the descriptor behind the `TupleDesc` (a non-NULL pointer in C;
 /// `RelationGetDescr`/`ExecutorStart` always set it).
-fn td<'a, 'mcx>(tup_desc: &'a TupleDesc<'mcx>) -> &'a types_tuple::heaptuple::TupleDescData<'mcx> {
+fn td<'a, 'mcx>(tup_desc: &'a TupleDesc<'mcx>) -> &'a ::types_tuple::heaptuple::TupleDescData<'mcx> {
     tup_desc.as_ref().expect("COPY TO with a NULL TupleDesc")
 }
 
@@ -1408,9 +1408,9 @@ fn tup_desc_natts(tup_desc: &TupleDesc<'_>) -> i32 {
 /// not mutate it).
 fn clone_tupdesc<'mcx>(
     mcx: Mcx<'mcx>,
-    src: &types_tuple::heaptuple::TupleDescData<'_>,
+    src: &::types_tuple::heaptuple::TupleDescData<'_>,
 ) -> PgResult<TupleDesc<'mcx>> {
-    Ok(Some(mcx::alloc_in(mcx, src.clone_in(mcx)?)?))
+    Ok(Some(::mcx::alloc_in(mcx, src.clone_in(mcx)?)?))
 }
 
 /// Convert raw bytes (file-encoding) to a [`PgString`] charged to `mcx`. COPY's
@@ -1436,7 +1436,7 @@ fn pgstring_bytes(s: &PgString<'_>) -> alloc::vec::Vec<u8> {
 
 /// `palloc0(n * sizeof(bool))` — a fresh `false`-filled flag vector in `mcx`.
 fn make_false_vec(mcx: Mcx<'_>, n: usize) -> PgResult<PgVec<'_, bool>> {
-    let mut v = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, n)?;
     for _ in 0..n {
         v.push(false);
     }
@@ -1446,7 +1446,7 @@ fn make_false_vec(mcx: Mcx<'_>, n: usize) -> PgResult<PgVec<'_, bool>> {
 /// `palloc(num_phys_attrs * sizeof(FmgrInfo))` — `num_phys_attrs` unresolved
 /// `FmgrInfo`s in `mcx` (only the referenced slots get filled, as in C).
 fn make_unresolved_finfo_vec(mcx: Mcx<'_>, n: usize) -> PgResult<PgVec<'_, FmgrInfo>> {
-    let mut v = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, n)?;
     for _ in 0..n {
         v.push(FmgrInfo::empty());
     }

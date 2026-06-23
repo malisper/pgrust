@@ -13,9 +13,9 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_catalog::catalog_dependency::{DependencyType, ObjectAddress};
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_catalog::catalog_dependency::{DependencyType, ObjectAddress};
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `recordDependencyOn(depender, referenced, behavior)`.

@@ -17,19 +17,19 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use types_datetime::{fsec_t, pg_itm_in, Interval, USECS_PER_SEC};
-use types_error::PgResult;
-use pgtime::pg_tm;
+use ::types_error::PgResult;
+use ::pgtime::pg_tm;
 
 use crate::convert::timestamptz_to_time_t;
 use crate::interval::itmin2interval;
 use crate::timestamp::timestamp2tm;
-use transam_xact::GetCurrentTransactionStartTimestamp;
+use ::transam_xact::GetCurrentTransactionStartTimestamp;
 
 use localtime::{
     pg_get_next_timezone_abbrev, pg_get_timezone_name, pg_interpret_timezone_abbrev,
 };
 use timezone_pgtz::{pg_tzenumerate_next, pg_tzenumerate_start};
-use state_pgtz::session_timezone;
+use ::state_pgtz::session_timezone;
 
 /// One row of `pg_timezone_names`: `(name text, abbrev text, utc_offset
 /// interval, is_dst bool)`.
@@ -122,7 +122,7 @@ pub fn pg_timezone_abbrevs_zone_rows() -> Vec<TimezoneAbbrevRow> {
     let now = GetCurrentTransactionStartTimestamp();
     let t = timestamptz_to_time_t(now);
     let tz = session_timezone();
-    let tz_ref: &pgtime::pg_tz = &tz;
+    let tz_ref: &::pgtime::pg_tz = &tz;
 
     let mut rows: Vec<TimezoneAbbrevRow> = Vec::new();
     let mut pindex: i32 = 0;

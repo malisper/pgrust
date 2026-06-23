@@ -18,7 +18,7 @@
 //! the function manager the same `(user_fn, api_version)` pair the OS loader's
 //! `fetch_finfo_record` would have produced.
 
-use datum::Datum;
+use ::datum::Datum;
 use types_error::{PgError, PgResult};
 use fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
 
@@ -79,8 +79,8 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
 #[inline]
 fn arg_name_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     match fcinfo.ref_arg(i) {
-        Some(fmgr::boundary::RefPayload::Cstring(s)) => s.as_bytes(),
-        Some(fmgr::boundary::RefPayload::Varlena(b)) => {
+        Some(::fmgr::boundary::RefPayload::Cstring(s)) => s.as_bytes(),
+        Some(::fmgr::boundary::RefPayload::Varlena(b)) => {
             let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
             &b[..end]
         }
@@ -119,8 +119,8 @@ fn varlena_payload(image: &[u8]) -> &[u8] {
         // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header (skip 1 byte).
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
         // 4-byte uncompressed header (skip VARHDRSZ).
-        Some(_) if image.len() >= datum::varlena::VARHDRSZ => {
-            &image[datum::varlena::VARHDRSZ..]
+        Some(_) if image.len() >= ::datum::varlena::VARHDRSZ => {
+            &image[::datum::varlena::VARHDRSZ..]
         }
         _ => &[],
     }
@@ -130,7 +130,7 @@ fn varlena_payload(image: &[u8]) -> &[u8] {
 #[inline]
 fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     fcinfo.isnull = false;
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Cstring(s));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Cstring(s));
     Datum::from_usize(0)
 }
 
@@ -146,16 +146,16 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
 fn ret_name(fcinfo: &mut FunctionCallInfoBaseData, image: Vec<u8>) -> Datum {
     debug_assert_eq!(image.len(), NAMEDATALEN);
     fcinfo.isnull = false;
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(image));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
 /// Build a header-ful varlena (`text`/`bytea`) image from its payload bytes
 /// (C: `SET_VARSIZE(result, len + VARHDRSZ)` over a fresh palloc'd block).
 fn varlena_image(payload: &[u8]) -> Vec<u8> {
-    let total = payload.len() + datum::varlena::VARHDRSZ;
+    let total = payload.len() + ::datum::varlena::VARHDRSZ;
     let mut image = Vec::with_capacity(total);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(total));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(total));
     image.extend_from_slice(payload);
     image
 }
@@ -164,7 +164,7 @@ fn varlena_image(payload: &[u8]) -> Vec<u8> {
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> Datum {
     fcinfo.isnull = false;
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(varlena_image(payload)));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(varlena_image(payload)));
     Datum::from_usize(0)
 }
 
@@ -266,7 +266,7 @@ fn fc_int44in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         image.extend_from_slice(&v.to_ne_bytes());
     }
     fcinfo.isnull = false;
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(image));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
@@ -311,7 +311,7 @@ fn fc_widget_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
             PgError::error(format!(
                 "invalid input syntax for type widget: \"{str_in}\""
             ))
-            .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
+            .with_sqlstate(::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION),
         );
     }
 
@@ -324,7 +324,7 @@ fn fc_widget_in(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     image.extend_from_slice(&cy.to_ne_bytes());
     image.extend_from_slice(&radius.to_ne_bytes());
     fcinfo.isnull = false;
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(image));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
@@ -472,7 +472,7 @@ fn fc_interpt_pp(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
                     match geo_ops::lseg_interpt(&seg1, &seg2) {
                         Ok(Some(point)) => {
                             fcinfo.isnull = false;
-                            fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(
+                            fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(
                                 point.to_datum_bytes().to_vec(),
                             ));
                             return Datum::from_usize(0);
@@ -590,7 +590,7 @@ fn fc_test_relpath(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `elog(WARNING, msg)` through the elog unit's seam (emit, do not raise).
 fn warn(msg: &str) {
     let _ = elog_seams::ereport_msg::call(
-        types_error::WARNING,
+        ::types_error::WARNING,
         msg.to_owned(),
         None,
     );
@@ -824,7 +824,7 @@ fn test_spinlock() {
  * by-ref lane before it drops.
  * ========================================================================= */
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 /// `_PG_LAST_ENCODING_` (`mb/pg_wchar.h`) as a plain count.
 const PG_LAST_ENCODING: i32 = extra_encnames_fgram::_PG_LAST_ENCODING_;
@@ -922,7 +922,7 @@ const MAX_CONVERSION_GROWTH: usize = 4;
 const MAX_ALLOC_SIZE: usize = 0x3fff_ffff;
 
 fn fc_test_enc_conversion(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    use types_tuple::heaptuple::{BYTEAOID, INT4OID};
+    use ::types_tuple::heaptuple::{BYTEAOID, INT4OID};
 
     // bytea string = PG_GETARG_BYTEA_PP(0); src = VARDATA_ANY, srclen = EXHDR.
     let src = arg_text(fcinfo, 0).to_vec();
@@ -941,7 +941,7 @@ fn fc_test_enc_conversion(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
                 "invalid source encoding name \"{}\"",
                 String::from_utf8_lossy(&src_name)
             ))
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
         );
     }
     if dest_encoding < 0 {
@@ -950,7 +950,7 @@ fn fc_test_enc_conversion(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
                 "invalid destination encoding name \"{}\"",
                 String::from_utf8_lossy(&dest_name)
             ))
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE),
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE),
         );
     }
 
@@ -995,7 +995,7 @@ fn fc_test_enc_conversion(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
                     extra_encnames_fgram::pg_encoding_to_char(src_encoding),
                     extra_encnames_fgram::pg_encoding_to_char(dest_encoding),
                 ))
-                .with_sqlstate(types_error::ERRCODE_UNDEFINED_FUNCTION),
+                .with_sqlstate(::types_error::ERRCODE_UNDEFINED_FUNCTION),
             );
         }
 
@@ -1005,7 +1005,7 @@ fn fc_test_enc_conversion(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
                     .with_detail(format!(
                         "String of {srclen} bytes is too long for encoding conversion."
                     ))
-                    .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                    .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED),
             );
         }
 
@@ -1039,19 +1039,19 @@ fn fc_test_enc_conversion(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let m = MemoryContext::new("test_enc_conversion record");
     let image = build_conv_record(m.mcx(), &[INT4OID, BYTEAOID], convertedbytes, &retval);
     fcinfo.isnull = false;
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Composite(image));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Composite(image));
     Datum::from_usize(0)
 }
 
 /// `record_from_values` over (int4, bytea), returning the self-describing
 /// composite-Datum byte image (copied out of `mcx`).
 fn build_conv_record(
-    mcx: mcx::Mcx<'_>,
+    mcx: ::mcx::Mcx<'_>,
     coltypes: &[types_core::primitive::Oid],
     convertedbytes: i32,
     retval: &[u8],
 ) -> Vec<u8> {
-    use types_tuple::heaptuple::Datum as TDatum;
+    use ::types_tuple::heaptuple::Datum as TDatum;
     let bytea_image = varlena_image(retval);
     let bytea_datum = match TDatum::from_byref_bytes_in(mcx, &bytea_image) {
         Ok(d) => d,
@@ -1160,14 +1160,14 @@ fn fc_test_text_to_wchars(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let array_v = match arrayfuncs::construct::construct_array_builtin_v(
         m.mcx(),
         &datums,
-        types_tuple::heaptuple::INT4OID,
+        ::types_tuple::heaptuple::INT4OID,
     ) {
         Ok(v) => v,
         Err(err) => raise(err),
     };
     let image = array_v.as_varlena_bytes().into_owned();
     fcinfo.isnull = false;
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(image));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
@@ -1196,7 +1196,7 @@ fn fc_test_wchars_to_text(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     let elems = match arrayfuncs::construct::deconstruct_array_builtin(
         m.mcx(),
         &array,
-        types_tuple::heaptuple::INT4OID,
+        ::types_tuple::heaptuple::INT4OID,
     ) {
         Ok(v) => v,
         Err(err) => raise(err),
@@ -1247,7 +1247,7 @@ fn fc_get_environ(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         Err(err) => raise(err),
     };
     fcinfo.isnull = false;
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(image));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(image));
     Datum::from_usize(0)
 }
 
@@ -1276,7 +1276,7 @@ fn fc_overpaid(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
         None => panic!("overpaid: composite arg missing from by-ref lane"),
     };
     let m = MemoryContext::new("overpaid scratch");
-    let tuple = match types_tuple::FormedTuple::from_datum_image(m.mcx(), &image) {
+    let tuple = match ::types_tuple::FormedTuple::from_datum_image(m.mcx(), &image) {
         Ok(t) => t,
         Err(err) => raise(err),
     };
@@ -1499,14 +1499,14 @@ fn make_tuple_indirect_impl(
     let mcx = m.mcx();
 
     // Build the temporary HeapTuple control structure from the Datum image.
-    let formed = types_tuple::FormedTuple::from_datum_image(mcx, &image)?;
+    let formed = ::types_tuple::FormedTuple::from_datum_image(mcx, &image)?;
     let header = formed.tuple.t_data.as_ref().ok_or_else(|| {
         PgError::error("make_tuple_indirect: record has no header")
     })?;
 
     // tupType = HeapTupleHeaderGetTypeId(rec); tupTypmod = HeapTupleHeaderGetTypMod(rec);
-    let tup_type = types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
-    let tup_typmod = types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+    let tup_type = ::types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+    let tup_typmod = ::types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
 
     // tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod); ncolumns = tupdesc->natts;
     let tupdesc = typcache_seams::lookup_rowtype_tupdesc::call(
@@ -1554,7 +1554,7 @@ fn make_tuple_indirect_impl(
             detoast::detoast_external_attr(mcx, &attr)?.to_vec()
         } else {
             // palloc0(VARSIZE_ANY(oldattr)); memcpy(attr, oldattr, VARSIZE_ANY(oldattr));
-            let sz = heaptuple::varsize_any(&attr);
+            let sz = ::heaptuple::varsize_any(&attr);
             attr[..sz.min(attr.len())].to_vec()
         };
 
@@ -1584,7 +1584,7 @@ fn make_tuple_indirect_impl(
     // so the indirect toast pointers survive in the returned composite for the
     // downstream indirect-toast machinery to exercise.
     let out_image = newtup.to_datum_image();
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Composite(out_image));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Composite(out_image));
     fcinfo.isnull = false;
     Ok(Datum::from_usize(0))
 }

@@ -7,8 +7,8 @@
 //! driver without a cargo cycle. `backend-commands-dropcmds` installs it from
 //! its `init_seams()`; until then a call panics loudly.
 
-use types_error::PgResult;
-use parsenodes::DropStmt;
+use ::types_error::PgResult;
+use ::parsenodes::DropStmt;
 
 seam_core::seam!(
     /// `RemoveObjects(stmt)` (dropcmds.c): resolve, ownership-check, and

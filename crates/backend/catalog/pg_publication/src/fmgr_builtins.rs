@@ -10,10 +10,10 @@
 //! dispatch resolves them. OIDs / nargs / strict / retset are transcribed
 //! exactly from `pg_proc.dat`.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// `PG_GETARG_OID(i)` → `DatumGetObjectId`: the low 32 bits of arg `i`'s word.
 #[inline]

@@ -14,9 +14,9 @@
 //! 'text', proargtypes => '', prosrc => 'pgsql_version' }` — no `proisstrict`
 //! key, so strict defaults to `false`; not `proretset`, so retset is `false`).
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `version()` (version.c `pgsql_version`) — `PG_RETURN_TEXT_P(cstring_to_text(

@@ -163,7 +163,7 @@
 //!   inward seam's result-array contract is the word-model `datum::Datum`;
 //!   the executor eval/slot seams it routes through (`exec_prepare_expr_list` /
 //!   `slot_getattr` / `slot_getsysattr` / `exec_eval_expr_switch_context`) yield
-//!   the canonical `types_tuple::Datum`, so each result is narrowed to its bare
+//!   the canonical `::types_tuple::Datum`, so each result is narrowed to its bare
 //!   scalar word via `as_usize()` (exact for a by-value type — every case the
 //!   current correctness scope reaches; a loud panic on a by-reference value,
 //!   which would need the Datum-unification flip the seam doc names).
@@ -183,15 +183,15 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::fmgr::INDEX_MAX_KEYS;
-use types_core::primitive::{InvalidOid, OidIsValid};
-use types_core::primitive::{Oid, Size};
+use ::types_core::fmgr::INDEX_MAX_KEYS;
+use ::types_core::primitive::{InvalidOid, OidIsValid};
+use ::types_core::primitive::{Oid, Size};
 use types_error::{PgError, PgResult};
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use ::nodes::execnodes::IndexInfo;
-use rel::Relation;
-use types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::rel::Relation;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
 
 use transam_xact_seams as xact;
 use index_seams as index_seam;
@@ -218,7 +218,7 @@ use execExpr_seams as exec_expr;
 use execUtils_seams as exec_utils;
 use tuplesort_seams as tuplesort_seam;
 
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 
 /* progress.h CREATE INDEX phase constants (duplicated here, as in the AM
  * crates, since `commands/progress.h` has no owned crate). */
@@ -498,7 +498,7 @@ fn FormIndexDatum<'mcx>(
     slot: ::nodes::SlotId,
     estate: &mut ::nodes::EStateData<'mcx>,
 ) -> PgResult<(
-    [types_tuple::heaptuple::Datum<'mcx>; INDEX_MAX_KEYS as usize],
+    [::types_tuple::heaptuple::Datum<'mcx>; INDEX_MAX_KEYS as usize],
     [bool; INDEX_MAX_KEYS as usize],
 )> {
     let mcx = estate.es_query_cxt;
@@ -506,9 +506,9 @@ fn FormIndexDatum<'mcx>(
     // The canonical per-attribute `Datum` carries a by-reference index key
     // (text/varchar/name/numeric/…) as its `ByRef` byte image; collapsing to a
     // bare machine word here would panic the scalar accessor on a by-ref value.
-    let mut values: [types_tuple::heaptuple::Datum<'mcx>;
+    let mut values: [::types_tuple::heaptuple::Datum<'mcx>;
         INDEX_MAX_KEYS as usize] =
-        core::array::from_fn(|_| types_tuple::heaptuple::Datum::null());
+        core::array::from_fn(|_| ::types_tuple::heaptuple::Datum::null());
     let mut isnull = [false; INDEX_MAX_KEYS as usize];
 
     let n = index_info.ii_NumIndexAttrs as usize;
@@ -518,7 +518,7 @@ fn FormIndexDatum<'mcx>(
     // expression-count check below; build the executable expression states up
     // front if any index expression columns exist.
     let mut expr_states: Option<
-        mcx::PgVec<'mcx, mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>,
+        ::mcx::PgVec<'mcx, ::mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>,
     > = None;
     let mut econtext: Option<::nodes::EcxtId> = None;
     if let Some(exprs) = index_info.ii_Expressions.as_deref() {
@@ -768,7 +768,7 @@ const DEFAULT_COLLATION_OID: Oid = 100;
 /// }
 /// ```
 ///
-/// The pg_index INSERT carrier ([`types_catalog::pg_index::PgIndexInsertRow`],
+/// The pg_index INSERT carrier ([`::types_catalog::pg_index::PgIndexInsertRow`],
 /// keystone #341) maps 1:1 to the C `values[]` array; the seam
 /// `catalog_tuple_insert_pg_index` (catalog-indexing) does the
 /// `buildint2vector`/`buildoidvector`, `heap_form_tuple`, and
@@ -814,7 +814,7 @@ fn UpdateIndexRelation<'mcx>(
      * (buildint2vector/buildoidvector run inside catalog_tuple_insert_pg_index;
      * here we just gather the values the carrier holds.)
      */
-    let indkey: Vec<types_core::primitive::AttrNumber> =
+    let indkey: Vec<::types_core::primitive::AttrNumber> =
         index_info.ii_IndexAttrNumbers[..numatts].to_vec();
     let indcollation: Vec<Oid> = collation_oids[..numkeyatts].to_vec();
     let indclass: Vec<Oid> = opclass_oids[..numkeyatts].to_vec();
@@ -830,9 +830,9 @@ fn UpdateIndexRelation<'mcx>(
     let indexprs: Option<alloc::string::String> = match &index_info.ii_Expressions {
         Some(exprs) if !exprs.is_empty() => {
             // nodeToString of the List of Exprs.
-            let mut cells = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+            let mut cells = ::mcx::vec_with_capacity_in(mcx, exprs.len())?;
             for e in exprs.iter() {
-                cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
+                cells.push(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
             }
             let list = Node::mk_list(mcx, cells)?;
             let s = nodes_seam::node_to_string_with_locations::call(mcx, &list)?;
@@ -872,7 +872,7 @@ fn UpdateIndexRelation<'mcx>(
      *     ... indisclustered = false, indcheckxmin = false, indislive = true,
      *         indisreplident = false ...
      */
-    let row = types_catalog::pg_index::PgIndexInsertRow {
+    let row = ::types_catalog::pg_index::PgIndexInsertRow {
         indexrelid: indexoid,
         indrelid: heapoid,
         indnatts: index_info.ii_NumIndexAttrs as i16,
@@ -982,11 +982,11 @@ use catalog_storage_seams as storage;
 use pgstat_seams as pgstat;
 use lmgr_seams as lmgr;
 use snapmgr_seams as snapmgr;
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
 };
-use types_catalog::catalog::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
+use ::types_catalog::catalog::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
 
 /// `index_create(...)` (catalog/index.c): create the catalog entries for a new
 /// index relation and (unless deferred) build it. Returns
@@ -994,7 +994,7 @@ use types_catalog::catalog::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
 /// the OID of the constraint created for it (the C `Oid *constraintId`
 /// out-parameter; `InvalidOid` when no constraint was created).
 ///
-/// Faithful to the C; see the seam doc on [`index_seams::index_create`]
+/// Faithful to the C; see the seam doc on [`::index_seams::index_create`]
 /// for the parameter-carrier mapping. The per-column `opclassOptions`
 /// (attoptions) ride in `args.opclass_options` and are threaded to
 /// `AppendAttributeTuples` (so each index `pg_attribute` row stores its
@@ -1003,7 +1003,7 @@ use types_catalog::catalog::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
 /// not carried.
 pub fn index_create<'mcx>(
     heap_relation: &Relation<'mcx>,
-    args: index_seams::IndexCreateArgs<'mcx>,
+    args: ::index_seams::IndexCreateArgs<'mcx>,
 ) -> PgResult<(Oid, Oid)> {
     // The carrier owns the mcx-bound IndexInfo; pull out the pieces and reborrow.
     let mcx = args
@@ -1154,7 +1154,7 @@ pub fn index_create<'mcx>(
     if OidIsValid(lsyscache::get_relname_relid::call(&index_relation_name, namespace_id)?) {
         if (flags & INDEX_CREATE_IF_NOT_EXISTS) != 0 {
             error_seams::ereport::call(PgError::new(
-                types_error::NOTICE,
+                ::types_error::NOTICE,
                 alloc::format!("relation \"{index_relation_name}\" already exists, skipping"),
             ))?;
             pg_class.close(ROW_EXCLUSIVE_LOCK)?;
@@ -1554,7 +1554,7 @@ pub fn index_create<'mcx>(
         for i in 0..index_info.ii_NumIndexKeyAttrs as usize {
             let _ = indexam::index_opclass_options::call(
                 &index_relation,
-                (i + 1) as types_core::primitive::AttrNumber,
+                (i + 1) as ::types_core::primitive::AttrNumber,
                 opclass_options[i].clone_in(mcx)?,
                 true, /* validate */
             )?;
@@ -1587,14 +1587,14 @@ pub fn index_create<'mcx>(
 }
 
 /// `CStringGetTextDatum(NULL)` vs the `Datum reloptions` argument — in the owned
-/// model `reloptions` rides as a `types_tuple::Datum`. The C `(Datum) 0` (no
+/// model `reloptions` rides as a `::types_tuple::Datum`. The C `(Datum) 0` (no
 /// WITH clause) maps to `None` for the `InsertPgClassTuple` carrier. A real
 /// reloptions value is always a `text[]` varlena, carried on the by-reference
 /// lane as `Datum::ByRef`; its detoasted on-disk bytes are exactly the
 /// `pg_class.reloptions` image (`DefineIndex` builds it via
 /// `transformRelOptions` → `construct_text_array_bytes`).
-fn reloptions_to_bytes(reloptions: &types_tuple::Datum<'_>) -> Option<alloc::vec::Vec<u8>> {
-    use types_tuple::Datum;
+fn reloptions_to_bytes(reloptions: &::types_tuple::Datum<'_>) -> Option<alloc::vec::Vec<u8>> {
+    use ::types_tuple::Datum;
     match reloptions {
         // C `(Datum) 0` — no WITH clause.
         Datum::ByVal(0) => None,
@@ -1616,12 +1616,12 @@ fn reloptions_to_bytes(reloptions: &types_tuple::Datum<'_>) -> Option<alloc::vec
 /// to scan, descending into each element.
 fn exprs_to_list_node<'mcx>(
     mcx: Mcx<'mcx>,
-    exprs: &mcx::PgVec<'mcx, ::nodes::primnodes::Expr>,
+    exprs: &::mcx::PgVec<'mcx, ::nodes::primnodes::Expr>,
 ) -> PgResult<::nodes::nodes::Node<'mcx>> {
     use ::nodes::nodes::Node;
-    let mut cells = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+    let mut cells = ::mcx::vec_with_capacity_in(mcx, exprs.len())?;
     for e in exprs.iter() {
-        cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
+        cells.push(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
     }
     Ok(Node::mk_list(mcx, cells)?)
 }
@@ -1869,9 +1869,9 @@ pub fn index_constraint_create<'mcx>(
 pub fn index_set_state_flags<'mcx>(
     mcx: Mcx<'mcx>,
     index_id: Oid,
-    action: index_seams::IndexStateFlagsAction,
+    action: ::index_seams::IndexStateFlagsAction,
 ) -> PgResult<()> {
-    use index_seams::IndexStateFlagsAction as Action;
+    use ::index_seams::IndexStateFlagsAction as Action;
 
     /* Open pg_index and fetch a writable copy of the index's tuple */
     let pg_index = table_am::table_open::call(mcx, INDEX_RELATION_ID, ROW_EXCLUSIVE_LOCK)?;
@@ -1934,7 +1934,7 @@ pub fn index_set_state_flags<'mcx>(
 
 /// `RELKIND_HAS_STORAGE(relkind)` (`catalog/pg_class.h`).
 fn RELKIND_HAS_STORAGE(relkind: u8) -> bool {
-    use types_tuple::access::{
+    use ::types_tuple::access::{
         RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
     };
     relkind == RELKIND_RELATION
@@ -1967,7 +1967,7 @@ const PROGRESS_CREATEIDX_PHASE_VALIDATE_TABLESCAN: i64 = 6;
 /// int64 that sorts identically to the original TID. The 16 LSBs hold the
 /// offset; the next 32 bits hold the block number. Used by `validate_index` to
 /// sort the index's TIDs as pass-by-value int8 rather than pass-by-ref TID.
-fn itemptr_encode(itemptr: &types_tuple::heaptuple::ItemPointerData) -> i64 {
+fn itemptr_encode(itemptr: &::types_tuple::heaptuple::ItemPointerData) -> i64 {
     let block = page::ItemPointerGetBlockNumber(itemptr) as u64;
     let offset = page::ItemPointerGetOffsetNumber(itemptr) as u64;
     (((block) << 16) | (offset & 0xFFFF)) as i64
@@ -2037,7 +2037,7 @@ pub fn index_concurrently_build<'mcx>(
     index_set_state_flags(
         mcx,
         index_relation_id,
-        index_seams::IndexStateFlagsAction::SetReady,
+        ::index_seams::IndexStateFlagsAction::SetReady,
     )?;
 
     Ok(())
@@ -2057,7 +2057,7 @@ pub fn validate_index<'mcx>(
     mcx: Mcx<'mcx>,
     heap_id: Oid,
     index_id: Oid,
-    snapshot: types_tableam::tableam::Snapshot,
+    snapshot: ::types_tableam::tableam::Snapshot,
 ) -> PgResult<()> {
     use core::cell::RefCell;
     extern crate alloc;
@@ -2106,7 +2106,7 @@ pub fn validate_index<'mcx>(
     /*
      * Scan the index and gather up all the TIDs into a tuplesort object.
      */
-    let ivinfo = types_tableam::genam::IndexVacuumInfo {
+    let ivinfo = ::types_tableam::genam::IndexVacuumInfo {
         index: index_relation.alias(),
         heaprel: heap_relation.alias(),
         analyze_only: false,
@@ -2146,7 +2146,7 @@ pub fn validate_index<'mcx>(
     let handle = {
         let collected_for_cb = Rc::clone(&collected);
         vacuum_seams::bulk_delete_callback::register(Box::new(
-            move |tid: types_tuple::heaptuple::ItemPointerData| -> bool {
+            move |tid: ::types_tuple::heaptuple::ItemPointerData| -> bool {
                 collected_for_cb.borrow_mut().push(itemptr_encode(&tid));
                 false // never actually delete anything
             },
@@ -2166,7 +2166,7 @@ pub fn validate_index<'mcx>(
     for encoded in collected {
         tuplesort_seam::tuplesort_putdatum::call(
             &mut tuplesort,
-            types_tuple::heaptuple::Datum::from_i64(encoded),
+            ::types_tuple::heaptuple::Datum::from_i64(encoded),
             false,
         )?;
     }
@@ -2218,7 +2218,7 @@ pub fn validate_index<'mcx>(
     let tuplesort = sort_pull.into_inner();
 
     /* Done with tuplesort object */
-    let boxed: mcx::PgBox<'mcx, ::nodes::Tuplesortstate<'mcx>> = mcx::alloc_in(mcx, tuplesort)?;
+    let boxed: ::mcx::PgBox<'mcx, ::nodes::Tuplesortstate<'mcx>> = ::mcx::alloc_in(mcx, tuplesort)?;
     tuplesort_seam::tuplesort_end::call(boxed)?;
 
     /* Make sure to release resources cached in indexInfo (if needed). */
@@ -2285,7 +2285,7 @@ pub fn index_concurrently_create_copy<'mcx>(
         return Err(PgError::error(
             "concurrent index creation for exclusion constraints is not supported".to_string(),
         )
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
     }
 
     /*
@@ -2301,9 +2301,9 @@ pub fn index_concurrently_create_copy<'mcx>(
 
     let reloptions_token = syscache::fetch_class_reloptions::call(mcx, old_index_id)?;
     let reloptions = if reloptions_token.is_null {
-        types_tuple::Datum::null()
+        ::types_tuple::Datum::null()
     } else {
-        types_tuple::Datum::ByRef(mcx::slice_in(mcx, &reloptions_token.bytes)?)
+        ::types_tuple::Datum::ByRef(::mcx::slice_in(mcx, &reloptions_token.bytes)?)
     };
 
     /*
@@ -2318,13 +2318,13 @@ pub fn index_concurrently_create_copy<'mcx>(
      */
     // The raw-decode seams return the trees in their query-lifetime result context
     // (`'static`); re-localize into the IndexInfo's `mcx` via `clone_in`.
-    let relocalize = |opt: Option<mcx::PgVec<'static, ::nodes::primnodes::Expr<'static>>>|
-     -> PgResult<Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>>> {
+    let relocalize = |opt: Option<::mcx::PgVec<'static, ::nodes::primnodes::Expr<'static>>>|
+     -> PgResult<Option<::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>>> {
         match opt {
             None => Ok(None),
             Some(v) => {
-                let mut out: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
-                    mcx::vec_with_capacity_in(mcx, v.len())?;
+                let mut out: ::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
+                    ::mcx::vec_with_capacity_in(mcx, v.len())?;
                 for e in v.iter() {
                     out.push(e.clone_in(mcx)?);
                 }
@@ -2332,13 +2332,13 @@ pub fn index_concurrently_create_copy<'mcx>(
             }
         }
     };
-    let index_exprs: Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> =
+    let index_exprs: Option<::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> =
         if old_info.ii_Expressions.is_some() {
             relocalize(nodexform::index_raw_expressions::call(mcx, old_index_id)?)?
         } else {
             None
         };
-    let index_preds: Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> =
+    let index_preds: Option<::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> =
         if old_info.ii_Predicate.is_some() {
             relocalize(nodexform::index_raw_predicate::call(mcx, old_index_id)?)?
         } else {
@@ -2383,11 +2383,11 @@ pub fn index_concurrently_create_copy<'mcx>(
     }
 
     /* Extract opclass options for each attribute (get_attoptions(oldIndexId, i+1)). */
-    let mut opclass_options: Vec<types_tuple::Datum<'mcx>> =
+    let mut opclass_options: Vec<::types_tuple::Datum<'mcx>> =
         Vec::with_capacity(new_info.ii_NumIndexAttrs as usize);
     for i in 0..new_info.ii_NumIndexAttrs as usize {
         let opt = lsyscache::get_attoptions::call(mcx, old_index_id, (i + 1) as i16)?;
-        opclass_options.push(opt.unwrap_or_else(types_tuple::Datum::null));
+        opclass_options.push(opt.unwrap_or_else(::types_tuple::Datum::null));
     }
 
     /* Extract statistic targets for each attribute (SearchSysCache2(ATTNUM, ...)
@@ -2411,7 +2411,7 @@ pub fn index_concurrently_create_copy<'mcx>(
      * Now create the new index. For a partition index the partition dependency
      * is adjusted later (parentIndexRelid is left InvalidOid here).
      */
-    let args = index_seams::IndexCreateArgs {
+    let args = ::index_seams::IndexCreateArgs {
         index_relation_name: new_index_name,
         index_relation_id: InvalidOid,
         parent_index_relid: InvalidOid,
@@ -2631,7 +2631,7 @@ pub fn index_concurrently_set_dead<'mcx>(
     index_set_state_flags(
         mcx,
         index_id,
-        index_seams::IndexStateFlagsAction::DropSetDead,
+        ::index_seams::IndexStateFlagsAction::DropSetDead,
     )?;
 
     inval::cache_invalidate_relcache::call(user_heap_relation.rd_id)?;
@@ -2700,11 +2700,11 @@ pub fn index_drop<'mcx>(
          * transactional work must have happened yet — verify no XID is
          * assigned.
          */
-        if xact::get_top_transaction_id_if_any::call() != types_core::InvalidTransactionId {
+        if xact::get_top_transaction_id_if_any::call() != ::types_core::InvalidTransactionId {
             let msg: alloc::string::String =
                 "DROP INDEX CONCURRENTLY must be first action in transaction".into();
             return Err(
-                PgError::error(msg).with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                PgError::error(msg).with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             );
         }
 
@@ -2712,7 +2712,7 @@ pub fn index_drop<'mcx>(
         index_set_state_flags(
             mcx,
             index_id,
-            index_seams::IndexStateFlagsAction::DropClearValid,
+            ::index_seams::IndexStateFlagsAction::DropClearValid,
         )?;
 
         /*
@@ -2944,9 +2944,9 @@ pub fn BuildSpeculativeIndexInfo<'mcx>(
         .ii_Context
         .expect("BuildSpeculativeIndexInfo: IndexInfo has no owning context");
 
-    let mut unique_ops: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, indnkeyatts)?;
-    let mut unique_procs: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, indnkeyatts)?;
-    let mut unique_strats: mcx::PgVec<'mcx, u16> = mcx::vec_with_capacity_in(mcx, indnkeyatts)?;
+    let mut unique_ops: ::mcx::PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, indnkeyatts)?;
+    let mut unique_procs: ::mcx::PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, indnkeyatts)?;
+    let mut unique_strats: ::mcx::PgVec<'mcx, u16> = ::mcx::vec_with_capacity_in(mcx, indnkeyatts)?;
 
     let relam = relcache::rd_rel_relam::call(index)?;
 
@@ -2955,7 +2955,7 @@ pub fn BuildSpeculativeIndexInfo<'mcx>(
      * cross-check that the operator does match the index.
      */
     for i in 0..indnkeyatts {
-        let attno = (i + 1) as types_core::primitive::AttrNumber;
+        let attno = (i + 1) as ::types_core::primitive::AttrNumber;
         let opfamily = relcache::rd_opfamily::call(index, attno)?;
         let opcintype = relcache::rd_opcintype::call(index, attno)?;
 
@@ -3142,7 +3142,7 @@ fn ConstructTupleDescriptor<'mcx>(
     access_method_id: Oid,
     collation_ids: &[Oid],
     opclass_ids: &[Oid],
-) -> PgResult<types_tuple::heaptuple::TupleDescData<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDescData<'mcx>> {
     let numatts = index_info.ii_NumIndexAttrs as usize;
     let numkeyatts = index_info.ii_NumIndexKeyAttrs as usize;
 
@@ -3169,7 +3169,7 @@ fn ConstructTupleDescriptor<'mcx>(
         let atnum = index_info.ii_IndexAttrNumbers[i];
 
         // MemSet(to, 0, ATTRIBUTE_FIXED_PART_SIZE) — start from a zeroed attr.
-        let mut to = types_tuple::heaptuple::FormData_pg_attribute::default();
+        let mut to = ::types_tuple::heaptuple::FormData_pg_attribute::default();
         to.attnum = (i + 1) as i16;
         to.attislocal = true;
         to.attcollation = if i < numkeyatts { collation_ids[i] } else { InvalidOid };
@@ -3324,10 +3324,10 @@ fn ConstructTupleDescriptor<'mcx>(
 fn AppendAttributeTuples<'mcx>(
     mcx: Mcx<'mcx>,
     index_relation: &Relation<'mcx>,
-    opclass_options: Option<&[types_tuple::Datum<'mcx>]>,
+    opclass_options: Option<&[::types_tuple::Datum<'mcx>]>,
     stattargets: Option<&[Option<i16>]>,
 ) -> PgResult<()> {
-    use types_tuple::Datum;
+    use ::types_tuple::Datum;
     // C: InsertPgAttributeTuples is given attopts == opclassOptions verbatim.
     // The owned `append_attribute_tuples` seam takes the per-attno bytea image;
     // map each attoptions Datum to its varlena bytes (null Datum -> SQL NULL).
@@ -3555,7 +3555,7 @@ pub fn CompareIndexInfo<'mcx>(
     }
     if e1 {
         // map_variable_attnos((Node *) info2->ii_Expressions, 1, 0, attmap, ...)
-        let mut cloned = mcx::vec_with_capacity_in(mcx, info2.ii_Expressions.as_ref().unwrap().len())?;
+        let mut cloned = ::mcx::vec_with_capacity_in(mcx, info2.ii_Expressions.as_ref().unwrap().len())?;
         for e in info2.ii_Expressions.as_ref().unwrap().iter() {
             cloned.push(e.clone_in(mcx)?);
         }
@@ -3579,7 +3579,7 @@ pub fn CompareIndexInfo<'mcx>(
         return Ok(false);
     }
     if p1 {
-        let mut cloned = mcx::vec_with_capacity_in(mcx, info2.ii_Predicate.as_ref().unwrap().len())?;
+        let mut cloned = ::mcx::vec_with_capacity_in(mcx, info2.ii_Predicate.as_ref().unwrap().len())?;
         for e in info2.ii_Predicate.as_ref().unwrap().iter() {
             cloned.push(e.clone_in(mcx)?);
         }
@@ -3875,7 +3875,7 @@ const SHARE_LOCK: i32 = 5;
 /// belonging to some other session. `rel->rd_rel->relpersistence ==
 /// RELPERSISTENCE_TEMP && !rel->rd_islocaltemp`.
 fn relation_is_other_temp(rel: &Relation<'_>) -> PgResult<bool> {
-    if rel.rd_rel.relpersistence != types_tuple::access::RELPERSISTENCE_TEMP {
+    if rel.rd_rel.relpersistence != ::types_tuple::access::RELPERSISTENCE_TEMP {
         return Ok(false);
     }
     Ok(!relcache::rd_islocaltemp::call(rel)?)
@@ -3986,11 +3986,11 @@ fn reindex_index<'mcx>(
      * command, collect the index for event triggers.
      */
     if let Some(stmt) = stmt {
-        let mut address = types_catalog::catalog_dependency::InvalidObjectAddress;
+        let mut address = ::types_catalog::catalog_dependency::InvalidObjectAddress;
         object_address_set(&mut address, RELATION_RELATION_ID, index_id);
         event_trigger::event_trigger_collect_simple_command_reindex::call(
             address,
-            types_catalog::catalog_dependency::InvalidObjectAddress,
+            ::types_catalog::catalog_dependency::InvalidObjectAddress,
             stmt,
         )?;
     }
@@ -4016,7 +4016,7 @@ fn reindex_index<'mcx>(
         return Err(PgError::error(alloc::string::String::from(
             "cannot reindex temporary tables of other sessions",
         ))
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
     }
 
     /*
@@ -4030,7 +4030,7 @@ fn reindex_index<'mcx>(
         return Err(PgError::error(alloc::string::String::from(
             "cannot reindex invalid index on TOAST table",
         ))
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
     }
 
     /*
@@ -4044,7 +4044,7 @@ fn reindex_index<'mcx>(
             "cannot move system relation \"{}\"",
             i_rel.name()
         ))
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
     }
 
     /* Check if the tablespace of this index needs to be changed */
@@ -4172,7 +4172,7 @@ fn reindex_index<'mcx>(
         let name = lsyscache::get_rel_name::call(mcx, index_id)?;
         error_seams::ereport::call(
             PgError::new(
-                types_error::INFO,
+                ::types_error::INFO,
                 alloc::format!(
                     "index \"{}\" was reindexed",
                     name.as_deref().unwrap_or("")
@@ -4313,14 +4313,14 @@ fn reindex_relation<'mcx>(
             let name = lsyscache::get_rel_name::call(mcx, index_oid)?;
             error_seams::ereport::call(
                 PgError::new(
-                    types_error::WARNING,
+                    ::types_error::WARNING,
                     alloc::format!(
                         "cannot reindex invalid index \"{}.{}\" on TOAST table, skipping",
                         nsp.as_deref().unwrap_or(""),
                         name.as_deref().unwrap_or("")
                     ),
                 )
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
+                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED),
             )?;
 
             /*
@@ -4425,7 +4425,7 @@ pub fn init_seams() {
     // index a table owns, including the implicit TOAST index). The inward seam
     // carries no `mcx`, so the shim allocates a scratch context.
     index_seam::index_drop::set(|index_id, concurrent, concurrent_lock_mode| {
-        let ctx = mcx::MemoryContext::new("index_drop");
+        let ctx = ::mcx::MemoryContext::new("index_drop");
         index_drop(ctx.mcx(), index_id, concurrent, concurrent_lock_mode)
     });
 

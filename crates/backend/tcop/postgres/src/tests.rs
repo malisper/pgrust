@@ -4,8 +4,8 @@
 
 use crate::globals;
 use crate::guc::{get_stats_option_name, restrict_nonsystem_relation_kind};
-use types_dest::dest::CommandDest;
-use types_storage::ProcSignalReason;
+use ::types_dest::dest::CommandDest;
+use ::types_storage::ProcSignalReason;
 
 #[test]
 fn where_to_send_output_defaults_to_debug() {

@@ -1,5 +1,5 @@
 //! The `postgres` executable entry shell — the C-ABI `main()` over
-//! [`main_main::pg_main`].
+//! [`::main_main::pg_main`].
 //!
 //! Mirrors `src/backend/main/main.c`'s `main(argc, argv)` flow:
 //!

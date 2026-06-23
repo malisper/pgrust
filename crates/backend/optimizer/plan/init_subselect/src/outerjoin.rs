@@ -12,7 +12,7 @@
 //! Both entry points additionally take `run: &PlannerRun<'_>` because the
 //! `root->parse->rowMarks` check needs the parse tree, and `root.parse` is the
 //! opaque [`QueryId`](pathnodes) resolved through the
-//! [`PlannerRun`](pathnodes::planner_run::PlannerRun) carrier (task #264).
+//! [`PlannerRun`](::pathnodes::planner_run::PlannerRun) carrier (task #264).
 //!
 //! ## Whole-`List` callees that have only per-`Expr` seams
 //!
@@ -42,10 +42,10 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, ExprRelids};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     Bitmapset, PlannerInfo, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT,
     JOIN_RIGHT, JOIN_SEMI,
@@ -57,7 +57,7 @@ use pathnode_seams as psnode;
 use relnode_seams as bms;
 use lsyscache_seams as lsc;
 
-use joininfo::placeholder::contain_placeholder_references_to;
+use ::joininfo::placeholder::contain_placeholder_references_to;
 
 /// `make_outerjoininfo` (initsplan.c:1707).
 ///
@@ -75,7 +75,7 @@ pub fn make_outerjoininfo(
     left_rels: &Relids,
     right_rels: &Relids,
     inner_join_rels: &Relids,
-    jointype: pathnodes::JoinType,
+    jointype: ::pathnodes::JoinType,
     rtindex: i32,
     clause: &[Expr<'_>],
 ) -> PgResult<SpecialJoinInfo> {
@@ -95,7 +95,7 @@ pub fn make_outerjoininfo(
             if bms::relids_is_member::call(rti, right_rels)
                 || (jointype == JOIN_FULL && bms::relids_is_member::call(rti, left_rels))
             {
-                return Err(types_error::pg_error::PgError::error(alloc::format!(
+                return Err(::types_error::pg_error::PgError::error(alloc::format!(
                     "{} cannot be applied to the nullable side of an outer join",
                     lcs_as_string(rc.strength),
                 )));
@@ -527,7 +527,7 @@ pub fn compute_semijoin_info(
     // `semi_rhs_exprs` is the planner arena-handle list `Vec<NodeId>`; intern the
     // owned RHS expressions (the C `copyObject(right_expr)` analogue: we already
     // hold an owned clone — `root.alloc_node` takes ownership into the arena).
-    let rhs_ids: Vec<pathnodes::NodeId> = semi_rhs_exprs
+    let rhs_ids: Vec<::pathnodes::NodeId> = semi_rhs_exprs
         .into_iter()
         .map(|e| root.alloc_node(e))
         .collect();

@@ -63,7 +63,7 @@ use ruleutils_seams as ruleutils;
 use lsyscache_seams as lsyscache;
 use syscache_seams as syscache;
 use parse_type_seams as parse_type;
-use pgstrcasecmp::pg_strcasecmp;
+use ::pgstrcasecmp::pg_strcasecmp;
 
 /// `scanner_isspace` (scansup.c): the lexer's {space} set — NOT Unicode
 /// whitespace. A pure char classifier, reproduced locally (the scansup unit
@@ -998,7 +998,7 @@ pub fn regdictionaryin(
 /// `get_ts_dict_oid(namelist, false)` — raising `ERRCODE_UNDEFINED_OBJECT` on a
 /// miss (the hard-error `missing_ok = false` path).
 pub fn get_ts_dict_oid_from_name(name: alloc::string::String) -> PgResult<Oid> {
-    let ctx = mcx::MemoryContext::new("get_ts_dict_oid_from_name");
+    let ctx = ::mcx::MemoryContext::new("get_ts_dict_oid_from_name");
     let mcx = ctx.mcx();
 
     /* stringToQualifiedNameList(name, NULL): a hard (NULL escontext) parse. */
@@ -1479,7 +1479,7 @@ fn ereturn_oid(
     escontext: Option<&mut SoftErrorContext>,
     error: PgError,
 ) -> PgResult<Option<Oid>> {
-    types_error::ereturn(escontext, None, error)
+    ::types_error::ereturn(escontext, None, error)
 }
 
 /// `ereturn(escontext, NIL, ...)` for [`stringToQualifiedNameList`].
@@ -1487,7 +1487,7 @@ fn ereturn_namelist(
     escontext: Option<&mut SoftErrorContext>,
     error: PgError,
 ) -> PgResult<Option<Vec<String>>> {
-    types_error::ereturn(escontext, None, error)
+    ::types_error::ereturn(escontext, None, error)
 }
 
 /// `ereturn(escontext, false, ...)` for [`parseNameAndArgTypes`].
@@ -1495,5 +1495,5 @@ fn ereturn_parsed(
     escontext: Option<&mut SoftErrorContext>,
     error: PgError,
 ) -> PgResult<Option<(Vec<String>, Vec<Oid>)>> {
-    types_error::ereturn(escontext, None, error)
+    ::types_error::ereturn(escontext, None, error)
 }

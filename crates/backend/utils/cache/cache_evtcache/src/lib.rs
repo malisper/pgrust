@@ -20,23 +20,23 @@
 use std::cell::RefCell;
 
 use mcx::{Mcx, McxOwned, MemoryContext, PgHashMap, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 use types_evtcache::{EventTriggerCacheItem, EventTriggerEvent};
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
+use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam_seams;
 use indexam_seams as indexam_seams;
 use table::{table_close, table_open};
 use nodes_core_seams as bms_seams;
-use cmdtag::get_command_tag_enum;
+use ::cmdtag::get_command_tag_enum;
 use arrayfuncs_seams as array_seams;
 use inval_seams as inval_seams;
-use cache_syscache::EVENTTRIGGEROID;
+use ::cache_syscache::EVENTTRIGGEROID;
 
-use types_scan::sdir::ScanDirection::ForwardScanDirection;
-use types_storage::lock::AccessShareLock;
+use ::types_scan::sdir::ScanDirection::ForwardScanDirection;
+use ::types_storage::lock::AccessShareLock;
 
 /// `EventTriggerRelationId` (`pg_event_trigger_d.h`).
 const EventTriggerRelationId: Oid = 3466;
@@ -78,7 +78,7 @@ struct CacheState<'mcx> {
     cache: PgHashMap<'mcx, EventTriggerEvent, PgVec<'mcx, EventTriggerCacheItem<'mcx>>>,
 }
 
-mcx::bind!(CacheTy => CacheState<'mcx>);
+::mcx::bind!(CacheTy => CacheState<'mcx>);
 
 thread_local! {
     /// `static HTAB *EventTriggerCache;` + `static MemoryContext
@@ -128,7 +128,7 @@ pub fn EventCacheLookup<'mcx>(
             let Some(list) = state.cache.get(&event) else {
                 return Ok(PgVec::new_in(mcx));
             };
-            let mut out = mcx::vec_with_capacity_in(mcx, list.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, list.len())?;
             for item in list.iter() {
                 out.push(item.clone_in(mcx)?);
             }
@@ -316,7 +316,7 @@ fn build_cache() -> PgResult<McxOwned<CacheTy>> {
 fn DecodeTextArrayToBitmapset<'mcx>(
     mcx: Mcx<'mcx>,
     array: &[u8],
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<::mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
     // arr = DatumGetArrayTypeP(array);
     // if (ARR_NDIM(arr) != 1 || ARR_HASNULL(arr) || ARR_ELEMTYPE(arr) != TEXTOID)
     //     elog(ERROR, "expected 1-D text array");
@@ -328,7 +328,7 @@ fn DecodeTextArrayToBitmapset<'mcx>(
     //     bms = bms_add_member(bms, GetCommandTagEnum(str));
     //     pfree(str);
     // }
-    let mut bms: Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+    let mut bms: Option<::mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
     for str in elems.iter() {
         let tag = get_command_tag_enum(str.as_bytes());
         bms = Some(bms_seams::bms_add_member::call(mcx, bms, tag)?);

@@ -21,9 +21,9 @@ use types_error::{
 };
 
 use pg_locale_env_seams as env;
-use pg_locale_seams::LcCategory;
+use ::pg_locale_seams::LcCategory;
 use mbutils_seams as mb;
-use string::pg_is_ascii;
+use ::string::pg_is_ascii;
 
 thread_local! {
     /// `bool database_ctype_is_c` — whether the database's LC_CTYPE is C/POSIX.
@@ -53,7 +53,7 @@ thread_local! {
 // `int icu_validation_level = WARNING` (pg_locale.c) — the GUC `conf->variable`
 // backing for `icu_validation_level`, read directly by `icu_validate_locale`.
 thread_local! {
-    static ICU_VALIDATION_LEVEL: Cell<i32> = const { Cell::new(types_error::WARNING.0) };
+    static ICU_VALIDATION_LEVEL: Cell<i32> = const { Cell::new(::types_error::WARNING.0) };
 }
 
 /// `database_ctype_is_c` getter.
@@ -337,7 +337,7 @@ pub fn check_locale_messages(newval: &str, is_default_source: bool) -> PgResult<
 /// `assign_locale_messages` (`pg_locale.c:434`): set LC_MESSAGES globally,
 /// ignoring failure (C's `(void) pg_perm_setlocale(LC_MESSAGES, newval)`).
 pub fn assign_locale_messages(newval: &str) {
-    let ctx = mcx::MemoryContext::new("assign_locale_messages");
+    let ctx = ::mcx::MemoryContext::new("assign_locale_messages");
     let _ = pg_perm_setlocale(ctx.mcx(), LcCategory::LcMessages, newval);
 }
 

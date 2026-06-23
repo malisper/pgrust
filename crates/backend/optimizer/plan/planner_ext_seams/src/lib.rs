@@ -22,8 +22,8 @@
 // so any crate invoking it must link `std`.
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
-use pathnodes::PlannerInfo;
+use ::types_error::PgResult;
+use ::pathnodes::PlannerInfo;
 
 seam_core::seam!(
     /// `create_pathtarget(root, tlist)` (tlist.c) — the first unported

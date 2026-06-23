@@ -12,7 +12,7 @@ use mcx::{MemoryContext, PgBox, PgVec};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, Var};
 use ::nodes::rawnodes::{FromExpr, RangeTblRef};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     NodeTag, Path, PathNode, PathTarget, PlannerInfo, RelId, RelOptInfo, VOLATILITY_UNKNOWN,
 };
@@ -101,7 +101,7 @@ fn preprocess_qual_conditions_rangetblref_noop() {
 // ---------------------------------------------------------------------------
 
 /// Build a fresh `PathTarget` carrying the given expr handles (no sortgrouprefs).
-fn target_with_exprs(exprs: alloc::vec::Vec<pathnodes::NodeId>) -> PathTarget {
+fn target_with_exprs(exprs: alloc::vec::Vec<::pathnodes::NodeId>) -> PathTarget {
     PathTarget {
         exprs,
         sortgrouprefs: alloc::vec::Vec::new(),

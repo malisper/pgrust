@@ -4,8 +4,8 @@
 //! with the writers in `wal.rs` (the rmgr-desc unit reuses these exports).
 
 use crate::*;
-use types_core::RepOriginId;
-use types_error::PANIC;
+use ::types_core::RepOriginId;
+use ::types_error::PANIC;
 use types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
 use ::wal::{
     xact_completion_apply_feedback, xact_completion_force_sync_commit,
@@ -296,7 +296,7 @@ fn xact_redo_commit(
 
     debug_assert_eq!(
         (parsed.xinfo & XACT_XINFO_HAS_ORIGIN) == 0,
-        origin_id == types_core::InvalidRepOriginId
+        origin_id == ::types_core::InvalidRepOriginId
     );
 
     let commit_time = if (parsed.xinfo & XACT_XINFO_HAS_ORIGIN) != 0 {

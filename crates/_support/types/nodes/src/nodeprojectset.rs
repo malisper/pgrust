@@ -45,7 +45,7 @@ impl ProjectSet<'_> {
     /// allocates.
     pub fn clone_in<'b>(
         &self,
-        mcx: mcx::Mcx<'b>,
+        mcx: ::mcx::Mcx<'b>,
     ) -> types_error::PgResult<ProjectSet<'b>> {
         Ok(ProjectSet {
             plan: self.plan.clone_in(mcx)?,

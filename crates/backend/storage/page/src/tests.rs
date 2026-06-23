@@ -3,7 +3,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use types_storage::bufpage::LP_NORMAL;
+use ::types_storage::bufpage::LP_NORMAL;
 
 /// The `data_checksums_enabled` seam is an `OnceLock` slot that can only be
 /// installed once per process, so we install it exactly once pointing at this

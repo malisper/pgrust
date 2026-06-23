@@ -6,7 +6,7 @@
 //! conversion owned by `utils/mb/mbutils.c`) — crosses the mb seam.
 
 use mcx::{Mcx, PgVec};
-use types_core::PgWChar;
+use ::types_core::PgWChar;
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
 
 use mbutils_seams as mb;
@@ -79,7 +79,7 @@ pub fn str_udeescape<'mcx>(
     // (the C repalloc loop at :393-401 is the same amortized growth), so we just
     // reserve the initial estimate.
     let new_len = str_.len() + MAX_UNICODE_EQUIVALENT_STRING + 1;
-    let mut out: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, new_len)?;
+    let mut out: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, new_len)?;
 
     let mut pair_first: PgWChar = 0;
     let in_bytes = str_;

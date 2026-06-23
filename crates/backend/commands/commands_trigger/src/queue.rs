@@ -26,8 +26,8 @@
 
 use std::cell::RefCell;
 
-use types_core::primitive::Oid;
-use types_core::xact::CommandId;
+use ::types_core::primitive::Oid;
+use ::types_core::xact::CommandId;
 use ::nodes::trigger::{
     AfterTriggerEventData, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_DONE,
     AFTER_TRIGGER_INITDEFERRED, AFTER_TRIGGER_IN_PROGRESS, AFTER_TRIGGER_OFFSET, TriggerFlags,

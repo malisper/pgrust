@@ -8,14 +8,14 @@
 
 #![allow(non_snake_case)]
 
-use types_core::xact::XidStatus;
+use ::types_core::xact::XidStatus;
 use types_core::{TransactionId, XLogRecPtr};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `clog_redo(record)` (clog.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn clog_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
+    pub fn clog_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -44,21 +44,21 @@ seam_core::seam!(
     /// `clogsyncfiletag(const FileTag *ftag, char *path)` (the `syncsw[SYNC_HANDLER_*]`
     /// sync callback this SLRU owns) — fsync the SLRU segment the tag names,
     /// returning the `0`/`<0` code, resolved path, and saved `errno`.
-    pub fn clogsyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
+    pub fn clogsyncfiletag(ftag: types_storage::sync::FileTag) -> ::types_error::PgResult<types_storage::sync::FileTagOpResult>
 );
 
 seam_core::seam!(
     /// `CLOGShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn clog_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn clog_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
     /// `CLOGShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
     /// this subsystem's shared-memory structures. `Err` carries the C
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn clog_shmem_init() -> types_error::PgResult<()>
+    pub fn clog_shmem_init() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -99,6 +99,6 @@ seam_core::seam!(
     /// carried on `Err`.
     pub fn truncate_clog(
         oldest_xact: TransactionId,
-        oldestxid_datoid: types_core::Oid,
+        oldestxid_datoid: ::types_core::Oid,
     ) -> PgResult<()>
 );

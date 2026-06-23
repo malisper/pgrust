@@ -2,8 +2,8 @@
 //! `access/gin_private.h`) on the real owned value model.
 //!
 //! The C structs are translated field-for-field, re-homed onto the owned memory
-//! model: `MemoryContext` becomes [`mcx::Mcx`], `TupleDesc` becomes the owned
-//! [`types_tuple::heaptuple::TupleDesc`], `FmgrInfo[INDEX_MAX_KEYS]` becomes a
+//! model: `MemoryContext` becomes [`::mcx::Mcx`], `TupleDesc` becomes the owned
+//! [`::types_tuple::heaptuple::TupleDesc`], `FmgrInfo[INDEX_MAX_KEYS]` becomes a
 //! [`Vec`] (one entry per index attribute), `Relation` becomes the index
 //! relation `Oid` (the page bytes are reached through the bufmgr seam, as in
 //! `types-gist`), `Datum` becomes the owned [`datum`] value, `palloc`'d
@@ -31,16 +31,16 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_error::PgResult;
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{BlockNumber, OffsetNumber, Oid};
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid};
 use types_core::{InvalidOid, INDEX_MAX_KEYS};
-use types_scan::scankey::StrategyNumber;
-use types_storage::storage::Buffer;
+use ::types_scan::scankey::StrategyNumber;
+use ::types_storage::storage::Buffer;
 use tidbitmap::{TBMPrivateIterator, TIDBitmap};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{ItemPointerData, TupleDesc};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{ItemPointerData, TupleDesc};
 
 // ===========================================================================
 // access/gin.h — ternary / search-mode vocabulary and amproc indexes.
@@ -136,12 +136,12 @@ pub const SIZEOF_GIN_PAGE_OPAQUE_DATA: usize = 8;
 /// `sizeof(PostingItem)` (ginblock.h) — `{BlockIdData child_blkno;
 /// ItemPointerData key;}` = 4 + 6, 2-aligned, 10 bytes. Re-exported from the
 /// crate that owns the [`PostingItem`] struct.
-pub use xlog_records::ginxlog::SIZEOF_POSTING_ITEM;
+pub use ::xlog_records::ginxlog::SIZEOF_POSTING_ITEM;
 
 /// `PostingItem` (ginblock.h) — `{BlockIdData child_blkno; ItemPointerData
 /// key;}`. Re-exported from the crate that owns the struct so all GIN carriers
 /// are reachable through `gin::*`.
-pub use xlog_records::ginxlog::PostingItem as PostingItem;
+pub use ::xlog_records::ginxlog::PostingItem as PostingItem;
 
 /// `MAXALIGN(LEN)` (`c.h`) — round up to `MAXIMUM_ALIGNOF` (8 on supported
 /// platforms).
@@ -160,15 +160,15 @@ const fn maxalign_down(len: usize) -> usize {
 /// + 3 * sizeof(ItemIdData)) - MAXALIGN(sizeof(GinPageOpaqueData))) / 3))`.
 pub const GinMaxItemSize: usize = {
     let raw = maxalign_down(
-        (types_core::primitive::BLCKSZ
+        (::types_core::primitive::BLCKSZ
             - maxalign(
-                types_storage::bufpage::SizeOfPageHeaderData
-                    + 3 * core::mem::size_of::<types_storage::bufpage::ItemIdData>(),
+                ::types_storage::bufpage::SizeOfPageHeaderData
+                    + 3 * core::mem::size_of::<::types_storage::bufpage::ItemIdData>(),
             )
             - maxalign(SIZEOF_GIN_PAGE_OPAQUE_DATA))
             / 3,
     );
-    let mask = types_tuple::heaptuple::INDEX_SIZE_MASK as usize;
+    let mask = ::types_tuple::heaptuple::INDEX_SIZE_MASK as usize;
     if raw < mask {
         raw
     } else {
@@ -528,7 +528,7 @@ impl core::fmt::Debug for TBMIterateResult {
 }
 
 /// `TBM_MAX_TUPLES_PER_PAGE` (`nodes/tidbitmap.h`): `MaxHeapTuplesPerPage`.
-pub const TBM_MAX_TUPLES_PER_PAGE: usize = types_storage::bufpage::MaxHeapTuplesPerPage;
+pub const TBM_MAX_TUPLES_PER_PAGE: usize = ::types_storage::bufpage::MaxHeapTuplesPerPage;
 
 /// `GinScanEntryData` (gin_private.h) — one specific index search condition
 /// extracted from a qual. Multiple `GinScanKey.scanEntry` indices may refer to

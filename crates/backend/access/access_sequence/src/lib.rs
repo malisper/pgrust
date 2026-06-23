@@ -5,7 +5,7 @@
 //! `sequence_open` is essentially `relation_open` (reached through the
 //! `access/common/relation.c` seams) plus `validate_relation_kind`, which
 //! checks that the relation is a sequence. The C `Relation` crosses as a
-//! [`rel::Relation`] handle (the trimmed relcache-entry copy, allocated
+//! [`::rel::Relation`] handle (the trimmed relcache-entry copy, allocated
 //! in the caller-supplied `mcx`, armed by the relation.c owner with its close
 //! function).
 //!
@@ -16,12 +16,12 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
-use rel::Relation;
-use types_storage::lock::{LOCKMODE, NoLock};
-use types_tuple::access::RELKIND_SEQUENCE;
+use ::rel::Relation;
+use ::types_storage::lock::{LOCKMODE, NoLock};
+use ::types_tuple::access::RELKIND_SEQUENCE;
 
 /// Install this crate's seam implementations.
 pub fn init_seams() {

@@ -18,10 +18,10 @@ use mcx::{Mcx, MemoryContext};
 use types_copy::{
     AttrInfo, AttrValue, CopyGetDataResult, CopyParseState, EncodingConversionResult,
 };
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_tuple::heaptuple::Datum as RichDatum;
 use types_error::{PgError, PgResult};
-use rel::Relation;
+use ::rel::Relation;
 
 use copyfrom_seams as s;
 
@@ -112,8 +112,8 @@ pub fn init_seams() {
     );
 
     // -- pgstat progress (real backend-status updates) --
-    use activity_small::backend_progress as progress;
-    use types_pgstat::backend_progress::ProgressCommandType;
+    use ::activity_small::backend_progress as progress;
+    use ::types_pgstat::backend_progress::ProgressCommandType;
     s::pgstat_progress_update_bytes_processed::set(|value: i64| -> PgResult<()> {
         // pgstat_progress_update_param(PROGRESS_COPY_BYTES_PROCESSED, value).
         progress::pgstat_progress_update_param(crate::PROGRESS_COPY_BYTES_PROCESSED, value);
@@ -216,10 +216,10 @@ pub fn init_seams() {
                     "skipping row due to data type incompatibility at line {lineno} for column \"{attname}\": null input"
                 ),
             };
-            utils_error::ereport(types_error::NOTICE)
+            utils_error::ereport(::types_error::NOTICE)
                 .errmsg(msg)
                 .errcontext_msg(format!("COPY {relname}"))
-                .finish(types_error::ErrorLocation::new(
+                .finish(::types_error::ErrorLocation::new(
                     "copyfromparse.c",
                     0,
                     "notice_skipping_row",

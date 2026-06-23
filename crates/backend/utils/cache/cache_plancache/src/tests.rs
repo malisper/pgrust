@@ -10,7 +10,7 @@
 
 use std::sync::Once;
 
-use types_plancache::SysCacheId;
+use ::types_plancache::SysCacheId;
 
 use super::*;
 

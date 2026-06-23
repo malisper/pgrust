@@ -25,8 +25,8 @@ extern crate alloc;
 
 use tablesample_core_seams as tsm;
 use nodeSamplescan_seams as seam;
-use mcx::vec_with_capacity_in;
-use datum::datum::Datum;
+use ::mcx::vec_with_capacity_in;
+use ::datum::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_INVALID_TABLESAMPLE_ARGUMENT, ERRCODE_INVALID_TABLESAMPLE_REPEAT,
     ERRCODE_OUT_OF_MEMORY,
@@ -579,14 +579,14 @@ fn out_of_memory(what: &str) -> PgError {
 /// auto-coerce unsized types on stable). The concrete type is recovered via the
 /// tag-checked `downcast_sample_scan_state_*` helpers.
 pub fn erase_sample_scan_state<'mcx>(
-    boxed: mcx::PgBox<'mcx, SampleScanState<'mcx>>,
-) -> mcx::PgBox<'mcx, dyn ::nodes::samplescanstate_carrier::SampleScanStateLive<'mcx> + 'mcx> {
-    let (ptr, alloc) = mcx::PgBox::into_raw_with_allocator(boxed);
+    boxed: ::mcx::PgBox<'mcx, SampleScanState<'mcx>>,
+) -> ::mcx::PgBox<'mcx, dyn ::nodes::samplescanstate_carrier::SampleScanStateLive<'mcx> + 'mcx> {
+    let (ptr, alloc) = ::mcx::PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn SampleScanStateLive` vtable (the established erase
     // pattern, identical to `erase_agg_state`).
     unsafe {
-        mcx::PgBox::from_raw_in(
+        ::mcx::PgBox::from_raw_in(
             ptr as *mut (dyn ::nodes::samplescanstate_carrier::SampleScanStateLive<'mcx> + 'mcx),
             alloc,
         )

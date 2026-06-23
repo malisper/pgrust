@@ -17,12 +17,12 @@
 
 #![allow(non_snake_case)]
 
-use relpath::GetRelationPath;
-use utils_error::ereport;
-use hashfn::hash_bytes;
-use mcx::Mcx;
+use ::relpath::GetRelationPath;
+use ::utils_error::ereport;
+use ::hashfn::hash_bytes;
+use ::mcx::Mcx;
 use std::collections::HashMap;
-use types_blkreftable::BlockRefTable;
+use ::types_blkreftable::BlockRefTable;
 use types_core::{
     BlockNumber, ForkNumber, InvalidBlockNumber, InvalidOid, Oid, RelFileNumber, TimeLineID,
     XLogRecPtr, BLCKSZ, FSM_FORKNUM, INVALID_PROC_NUMBER, MAIN_FORKNUM,
@@ -34,9 +34,9 @@ use types_error::{
 use parse_manifest::{
     JsonManifestParseIncrementalStateHandle, ManifestFileRecord, ParsedManifestChunk,
 };
-use types_storage::smgr::RELSEG_SIZE;
-use types_storage::RelFileLocator;
-use wal::BackupState;
+use ::types_storage::smgr::RELSEG_SIZE;
+use ::types_storage::RelFileLocator;
+use ::wal::BackupState;
 
 use common_blkreftable as blkreftable;
 use parse_manifest_seams as parse_manifest;
@@ -478,7 +478,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
             if tle.tli == earliest_wal_range_tli {
                 tli_start_lsn = earliest_wal_range_start_lsn;
             }
-            let tli_wslist = walsummary::filter_wal_summaries(
+            let tli_wslist = ::walsummary::filter_wal_summaries(
                 self.mcx,
                 &all_wslist,
                 tle.tli,
@@ -491,7 +491,7 @@ impl<'mcx> IncrementalBackupInfo<'mcx> {
             // that we found any WAL summaries at all. Check whether we have a
             // problem of that sort.
             let mut tli_missing_lsn: XLogRecPtr = InvalidXLogRecPtr;
-            let complete = walsummary::wal_summaries_are_complete(
+            let complete = ::walsummary::wal_summaries_are_complete(
                 &tli_wslist,
                 tli_start_lsn,
                 tli_end_lsn,

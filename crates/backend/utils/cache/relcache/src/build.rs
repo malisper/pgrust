@@ -11,18 +11,18 @@
 //! reloptions unit) are genuine cross-unit seams, routed through their owner
 //! (seam-and-panic until the owner lands).
 
-use tupdesc::CreateTupleDesc;
+use ::tupdesc::CreateTupleDesc;
 use utils_error::{ereport, PgResult};
 use mcx::{Mcx, PgString, PgVec};
-use types_catalog::catalog::GLOBALTABLESPACE_OID;
-use types_core::catalog::{
+use ::types_catalog::catalog::GLOBALTABLESPACE_OID;
+use ::types_core::catalog::{
     PG_CATALOG_NAMESPACE, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
-use types_core::primitive::Oid;
-use types_core::xact::InvalidSubTransactionId;
+use ::types_core::primitive::Oid;
+use ::types_core::xact::InvalidSubTransactionId;
 use types_core::{InvalidOid, INVALID_PROC_NUMBER};
-use types_error::ERROR;
-use types_tuple::access::{
+use ::types_error::ERROR;
+use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW,
 };
@@ -47,7 +47,7 @@ pub fn relation_get_composite_tupdesc<'mcx>(
     mcx: Mcx<'mcx>,
     typrelid: Oid,
     type_id: Oid,
-) -> PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>> {
+) -> PgResult<::mcx::PgBox<'mcx, ::types_tuple::heaptuple::TupleDescData<'mcx>>> {
     // relation_open(typrelid, AccessShareLock) — the relcache pin (RAII guard).
     let rel = crate::core_entry_store::RelationRef::open(typrelid)?;
     // CreateTupleDescCopyConstr(RelationGetDescr(rel)) — materialize a standalone
@@ -71,7 +71,7 @@ pub fn relation_get_composite_tupdesc<'mcx>(
     td.tdtypeid = type_id;
     td.tdtypmod = -1;
     td.tdrefcount = 1;
-    let boxed = mcx::alloc_in(mcx, td)?;
+    let boxed = ::mcx::alloc_in(mcx, td)?;
     // relation_close(rel, AccessShareLock) — release the pin (guard Drop).
     drop(rel);
     Ok(boxed)
@@ -152,19 +152,19 @@ fn project_entry<'mcx>(
         indkey0: ix.indkey.first().copied().unwrap_or(0),
         indkey: ix.indkey.clone(),
     });
-    let mut rd_opcintype: PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let mut rd_opcintype: PgVec<'mcx, Oid> = ::mcx::PgVec::new_in(mcx);
     for &t in &r.rd_opcintype {
         rd_opcintype.push(t);
     }
-    let mut rd_opfamily: PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let mut rd_opfamily: PgVec<'mcx, Oid> = ::mcx::PgVec::new_in(mcx);
     for &t in &r.rd_opfamily {
         rd_opfamily.push(t);
     }
-    let mut rd_indoption: PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+    let mut rd_indoption: PgVec<'mcx, i16> = ::mcx::PgVec::new_in(mcx);
     for &t in &r.rd_indoption {
         rd_indoption.push(t);
     }
-    let mut rd_indcollation: PgVec<'mcx, Oid> = mcx::PgVec::new_in(mcx);
+    let mut rd_indcollation: PgVec<'mcx, Oid> = ::mcx::PgVec::new_in(mcx);
     for &t in &r.rd_indcollation {
         rd_indcollation.push(t);
     }
@@ -203,7 +203,7 @@ fn project_entry<'mcx>(
 fn project_trigdesc<'mcx>(
     mcx: Mcx<'mcx>,
     src: &types_trigger::TriggerDesc<'_>,
-) -> PgResult<mcx::PgBox<'mcx, types_trigger::TriggerDesc<'mcx>>> {
+) -> PgResult<::mcx::PgBox<'mcx, types_trigger::TriggerDesc<'mcx>>> {
     let mut td = types_trigger::TriggerDesc::new_in(mcx);
     // Copy the hint flags verbatim.
     td.numtriggers = src.numtriggers;
@@ -229,18 +229,18 @@ fn project_trigdesc<'mcx>(
     td.trig_update_new_table = src.trig_update_new_table;
     td.trig_delete_old_table = src.trig_delete_old_table;
 
-    let mut triggers: PgVec<'mcx, types_trigger::Trigger<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut triggers: PgVec<'mcx, types_trigger::Trigger<'mcx>> = ::mcx::PgVec::new_in(mcx);
     triggers
         .try_reserve(src.triggers.len())
         .map_err(|_| mcx.oom(src.triggers.len()))?;
     for t in src.triggers.iter() {
         let tgname = PgString::from_str_in(t.tgname.as_str(), mcx)?;
-        let mut tgattr: PgVec<'mcx, i16> = mcx::PgVec::new_in(mcx);
+        let mut tgattr: PgVec<'mcx, i16> = ::mcx::PgVec::new_in(mcx);
         tgattr.try_reserve(t.tgattr.len()).map_err(|_| mcx.oom(t.tgattr.len()))?;
         for &a in t.tgattr.iter() {
             tgattr.push(a);
         }
-        let mut tgargs: PgVec<'mcx, PgString<'mcx>> = mcx::PgVec::new_in(mcx);
+        let mut tgargs: PgVec<'mcx, PgString<'mcx>> = ::mcx::PgVec::new_in(mcx);
         tgargs.try_reserve(t.tgargs.len()).map_err(|_| mcx.oom(t.tgargs.len()))?;
         for a in t.tgargs.iter() {
             tgargs.push(PgString::from_str_in(a.as_str(), mcx)?);
@@ -280,7 +280,7 @@ fn project_trigdesc<'mcx>(
         });
     }
     td.triggers = triggers;
-    mcx::alloc_in(mcx, td).map_err(|_| mcx.oom(0))
+    ::mcx::alloc_in(mcx, td).map_err(|_| mcx.oom(0))
 }
 
 /// Project the owned `FormPgClass` mirror into the cross-unit trimmed form,
@@ -319,7 +319,7 @@ fn project_form_pg_class<'mcx>(
 
 /// `ProcNumberForTempRelations()` (`storage/procnumber.h`): our own proc number
 /// normally, but parallel workers use their leader's.
-fn proc_number_for_temp_relations() -> types_core::ProcNumber {
+fn proc_number_for_temp_relations() -> ::types_core::ProcNumber {
     let leader = parallel_rt_seams::parallel_leader_proc_number::call();
     if leader == INVALID_PROC_NUMBER {
         init_small_seams::my_proc_number::call()
@@ -367,7 +367,7 @@ pub fn RelationBuildDesc(targetRelId: Oid, insertIt: bool) -> PgResult<Oid> {
                 with_state(|st| {
                     st.in_progress_list.truncate(in_progress_offset);
                 });
-                return Ok(types_core::InvalidOid);
+                return Ok(::types_core::InvalidOid);
             }
         };
 
@@ -677,8 +677,8 @@ pub fn AllocateRelationDesc(relp: FormPgClass) -> PgResult<Box<RelationData>> {
 /// `pg_attribute` (+ attrdef/notnull constraint fetches). **Own logic**; the
 /// `pg_attribute` scan + `GETSTRUCT` deform is the seamed catalog primitive.
 pub fn RelationBuildTupleDesc(relation: &mut RelationData) -> PgResult<()> {
-    use types_tuple::access::{ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL};
-    use types_tuple::heaptuple::{
+    use ::types_tuple::access::{ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL};
+    use ::types_tuple::heaptuple::{
         ATTNULLABLE_INVALID, ATTNULLABLE_UNKNOWN, ATTNULLABLE_UNRESTRICTED, ATTNULLABLE_VALID,
     };
 
@@ -1058,7 +1058,7 @@ const HEAP_TABLE_AM_OID: Oid = 2;
 /// `TextDatumGetCString` detoast of `adbin` happens behind the scan seam (it is
 /// a cross-unit deform); the per-attribute accounting is own logic.
 pub(crate) struct ScannedAttrDefault {
-    pub adnum: types_core::primitive::AttrNumber,
+    pub adnum: ::types_core::primitive::AttrNumber,
     pub adbin: Option<String>,
 }
 
@@ -1143,7 +1143,7 @@ pub(crate) struct ScannedConstraint {
     /// NOT NULL only: `!conform->convalidated`.
     pub notnull_invalid: bool,
     /// NOT NULL only: `extractNotNullColumn(htup)`.
-    pub notnull_attnum: types_core::primitive::AttrNumber,
+    pub notnull_attnum: ::types_core::primitive::AttrNumber,
     /// CHECK only: `conform->conenforced`.
     pub ccenforced: bool,
     /// CHECK only: `conform->convalidated`.
@@ -1169,7 +1169,7 @@ const CONSTRAINT_NOTNULL: i8 = b'n' as i8;
 /// (`scan_pg_constraint_nncheck_seam`).
 pub fn CheckNNConstraintFetch(relation: &mut RelationData) -> PgResult<()> {
     use crate::core_entry_store::entry::OwnedConstrCheck;
-    use types_tuple::heaptuple::ATTNULLABLE_UNKNOWN;
+    use ::types_tuple::heaptuple::ATTNULLABLE_UNKNOWN;
 
     let ncheck = relation.rd_rel.relchecks as i32;
     let relname = relation.rd_rel.relname.clone();
@@ -1195,7 +1195,7 @@ pub fn CheckNNConstraintFetch(relation: &mut RelationData) -> PgResult<()> {
                     relation.rd_att.attrs[idx].attnullability == ATTNULLABLE_UNKNOWN
                 );
                 relation.rd_att.attrs[idx].attnullability =
-                    types_tuple::heaptuple::ATTNULLABLE_INVALID;
+                    ::types_tuple::heaptuple::ATTNULLABLE_INVALID;
             }
             continue;
         }

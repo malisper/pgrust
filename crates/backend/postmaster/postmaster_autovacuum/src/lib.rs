@@ -47,7 +47,7 @@ pub use schedule::*;
 pub use shmem::*;
 pub use worker::*;
 
-use types_startup::StartupData;
+use ::types_startup::StartupData;
 
 /// `-> !` adapter for the launcher entry-point seam. The per-backend lifecycle
 /// setup (`InitProcess`/`BaseInit`/`InitPostgres`, signal handlers, the

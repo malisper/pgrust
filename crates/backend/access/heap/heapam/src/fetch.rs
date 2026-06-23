@@ -27,18 +27,18 @@
 //! `heap_get_latest_tid` is the heap AM's `tuple_get_latest_tid` table-AM
 //! vtable callback; it is exported for the vtable assembly to wire.
 
-use mcx::Mcx;
-use types_core::primitive::{Oid, TransactionId};
-use types_core::xact::InvalidTransactionId;
-use types_error::PgResult;
-use rel::Relation;
-use snapshot::SnapshotData;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, TransactionId};
+use ::types_core::xact::InvalidTransactionId;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::snapshot::SnapshotData;
 use types_storage::{Buffer, InvalidBuffer};
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     HeapTupleHeaderData, ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber,
     HEAP_HOT_UPDATED, HEAP_ONLY_TUPLE, HEAP_XMAX_INVALID,
 };
-use types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::FormedTuple;
 
 use page::{
     ItemIdGetLength, ItemIdGetRedirect, ItemIdIsNormal, ItemIdIsRedirected, ItemPointerGetBlockNumber,
@@ -47,7 +47,7 @@ use page::{
 };
 
 use heapam_seams::{HeapDirtyFetchResult, HeapFetchResult, HotSearchResult};
-use heapam_visibility::htup::{
+use ::heapam_visibility::htup::{
     HeapTupleHeaderGetXmin, HeapTupleHeaderXminInvalid, ItemPointerEquals, ItemPointerIsValid,
 };
 use heapam_visibility::{
@@ -58,7 +58,7 @@ use heapam_visibility::{
 use bufmgr_seams as bufmgr_seam;
 use predicate_seams as predicate_seam;
 use vacuumlazy_seams as vacuumlazy_seam;
-use transam::TransactionIdEquals;
+use ::transam::TransactionIdEquals;
 
 /// `BUFFER_LOCK_UNLOCK` (bufmgr.h).
 const BUFFER_LOCK_UNLOCK: i32 = 0;
@@ -247,7 +247,7 @@ pub fn heap_fetch_dirty<'mcx>(
     relation: &Relation<'mcx>,
     tid: ItemPointerData,
 ) -> PgResult<HeapDirtyFetchResult<'mcx>> {
-    use snapshot::snapshot::SnapshotType;
+    use ::snapshot::snapshot::SnapshotType;
 
     let relid = relation.rd_id;
 
@@ -334,7 +334,7 @@ pub fn heap_hot_search_buffer<'mcx>(
     let mut at_chain_start = first_call;
     let mut skip = !first_call;
     // GlobalVisState — fetched lazily on the first all-dead test (C's `vistest`).
-    let mut vistest: Option<snapshot::snapshot::GlobalVisStateHandle> = None;
+    let mut vistest: Option<::snapshot::snapshot::GlobalVisStateHandle> = None;
 
     // If this is not the first call, the previous call returned a (live) tuple.
     let mut all_dead = if want_all_dead { Some(first_call) } else { None };

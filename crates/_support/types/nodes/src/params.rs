@@ -27,9 +27,9 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{Oid, ParseLoc};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, ParseLoc};
+use ::types_error::PgResult;
 pub use types_tuple::heaptuple::Datum;
 
 use crate::nodes::NodeTag;

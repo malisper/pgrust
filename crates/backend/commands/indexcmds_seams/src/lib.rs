@@ -4,11 +4,11 @@
 //! The owning unit (`backend-commands-indexcmds`) installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use mcx::Mcx;
-use types_amapi::CompareType;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_amapi::CompareType;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::ddlnodes::IndexStmt;
 
 /// `DefineIndex(...)` (indexcmds.c) parameters, bundled to keep the seam call

@@ -28,9 +28,9 @@
 #![allow(clippy::too_many_arguments)]
 
 use mcx::{Mcx, MemoryContext, PgBox};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 use ::nodes::execexpr::ExprState;
 use ::nodes::execnodes::{PlanStateData, SlotId};
 use ::nodes::nodeagg::{TupleHashEntryData, TupleHashIterator, TupleHashTable};
@@ -54,7 +54,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         num_cols: i32,
         eq_operators: &[Oid],
-    ) -> PgResult<(mcx::PgVec<'mcx, Oid>, mcx::PgVec<'mcx, FmgrInfo>)>
+    ) -> PgResult<(::mcx::PgVec<'mcx, Oid>, ::mcx::PgVec<'mcx, FmgrInfo>)>
 );
 
 seam_core::seam!(
@@ -75,7 +75,7 @@ seam_core::seam!(
     /// are caller-owned `MemoryContext`s the table merely aliases (the table's
     /// bucket array lives in `metacxt`, entries in `tablecxt`, temp work in
     /// `tempcxt`; the caller — e.g. nodeSubplan/nodeAgg — keeps owning and
-    /// resetting them). `mcx::MemoryContext` is move-only (it carries the
+    /// resetting them). `::mcx::MemoryContext` is move-only (it carries the
     /// allocation domain and resets on drop), so they cross the seam by `&`,
     /// matching C's pointer aliasing; the still-unported execGrouping owner
     /// records its own non-owning handle when it lands.

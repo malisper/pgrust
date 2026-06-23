@@ -21,10 +21,10 @@
 use tsvector_core_seams as tsop;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_error::{PgError, PgResult};
-use tsearch::gin::{
+use ::tsearch::gin::{
     GinTernaryValue, GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_ALL, GIN_SEARCH_MODE_DEFAULT, GIN_TRUE,
 };
-use tsearch::tsearch::{
+use ::tsearch::tsearch::{
     ExecPhraseData, QueryItem, QueryOperand, QueryOperator, TSTernaryValue, QI_OPR, QI_VAL,
     TS_EXEC_PHRASE_NO_POS,
 };

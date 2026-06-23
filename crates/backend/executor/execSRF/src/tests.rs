@@ -14,7 +14,7 @@ use core::any::Any;
 use std::sync::Once;
 
 use mcx::{Mcx, MemoryContext, PgBox};
-use datum::NullableDatum;
+use ::datum::NullableDatum;
 use ::nodes::execexpr::{ExprDoneCond, SetExprState};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::FuncCallContext;
@@ -42,7 +42,7 @@ fn install() {
     // tuplestore_begin_heap → a carrier wrapping a fresh MockStore.
     sort_storage_seams::tuplestore_begin_heap::set(
         |mcx, _random, _interxact, _kb| {
-            Ok(mcx::alloc_in(
+            Ok(::mcx::alloc_in(
                 mcx,
                 Tuplestorestate::begin(mcx, MockStore::default())?,
             )?)
@@ -193,7 +193,7 @@ struct GenerateSeriesFctx {
 }
 
 fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
-    let boxed = mcx::alloc_in(mcx, v).expect("alloc user_fctx");
+    let boxed = ::mcx::alloc_in(mcx, v).expect("alloc user_fctx");
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn Any` vtable.
@@ -212,8 +212,8 @@ fn push_econtext<'mcx>(estate: &mut EStateData<'mcx>) -> ::nodes::EcxtId {
         ecxt_newtuple: None,
         ecxt_per_query_memory: per_query,
         ecxt_per_tuple_memory: per_tuple,
-        ecxt_aggvalues: mcx::PgVec::new_in(per_query),
-        ecxt_aggnulls: mcx::PgVec::new_in(per_query),
+        ecxt_aggvalues: ::mcx::PgVec::new_in(per_query),
+        ecxt_aggnulls: ::mcx::PgVec::new_in(per_query),
         caseValue_datum: Datum::default(),
         caseValue_isNull: false,
         domainValue_datum: Datum::default(),
@@ -254,27 +254,27 @@ fn make_table_function_result_yields_three_rows() {
     // them in place), fn_oid = the registered test SRF.
     let mut setexpr = SetExprState::default();
     setexpr.funcReturnsSet = true;
-    setexpr.expr = Some(mcx::alloc_in(mcx, srf_funcexpr()).unwrap());
+    setexpr.expr = Some(::mcx::alloc_in(mcx, srf_funcexpr()).unwrap());
     setexpr.func.fn_oid = TEST_SRF_OID;
     setexpr.func.fn_retset = true;
     setexpr.func.fn_strict = false;
     // args list empty → ExecEvalFuncArgs no-op.
-    setexpr.args = Some(mcx::PgVec::new_in(mcx));
+    setexpr.args = Some(::mcx::PgVec::new_in(mcx));
     // Call frame with two int4 args = generate_series(1, 3).
     let fcinfo = FunctionCallInfoBaseData {
         flinfo: Some(setexpr.func.clone()),
         nargs: 2,
         args: alloc::vec![
-            NullableDatum::value(datum::Datum::from_i32(1)),
-            NullableDatum::value(datum::Datum::from_i32(3)),
+            NullableDatum::value(::datum::Datum::from_i32(1)),
+            NullableDatum::value(::datum::Datum::from_i32(3)),
         ],
         ..Default::default()
     };
-    setexpr.fcinfo = Some(mcx::alloc_in(mcx, fcinfo).unwrap());
+    setexpr.fcinfo = Some(::mcx::alloc_in(mcx, fcinfo).unwrap());
 
     // A 1-column expected descriptor (int4).
     let expected = tupdesc::CreateTemplateTupleDesc(mcx, 1).unwrap();
-    let mut expected = mcx::alloc_in(mcx, expected).unwrap();
+    let mut expected = ::mcx::alloc_in(mcx, expected).unwrap();
     tupdesc::TupleDescInitEntry(&mut expected, 1, Some("g"), INT4OID, -1, 0)
         .unwrap();
 
@@ -320,7 +320,7 @@ fn real_generate_series_int4_yields_three_rows() {
 
     let mut setexpr = SetExprState::default();
     setexpr.funcReturnsSet = true;
-    setexpr.expr = Some(mcx::alloc_in(
+    setexpr.expr = Some(::mcx::alloc_in(
         mcx,
         Expr::FuncExpr(FuncExpr {
             funcid: GENERATE_SERIES_INT4,
@@ -338,20 +338,20 @@ fn real_generate_series_int4_yields_three_rows() {
     setexpr.func.fn_oid = GENERATE_SERIES_INT4;
     setexpr.func.fn_retset = true;
     setexpr.func.fn_strict = false;
-    setexpr.args = Some(mcx::PgVec::new_in(mcx));
+    setexpr.args = Some(::mcx::PgVec::new_in(mcx));
     let fcinfo = FunctionCallInfoBaseData {
         flinfo: Some(setexpr.func.clone()),
         nargs: 2,
         args: alloc::vec![
-            NullableDatum::value(datum::Datum::from_i32(1)),
-            NullableDatum::value(datum::Datum::from_i32(3)),
+            NullableDatum::value(::datum::Datum::from_i32(1)),
+            NullableDatum::value(::datum::Datum::from_i32(3)),
         ],
         ..Default::default()
     };
-    setexpr.fcinfo = Some(mcx::alloc_in(mcx, fcinfo).unwrap());
+    setexpr.fcinfo = Some(::mcx::alloc_in(mcx, fcinfo).unwrap());
 
     let expected = tupdesc::CreateTemplateTupleDesc(mcx, 1).unwrap();
-    let mut expected = mcx::alloc_in(mcx, expected).unwrap();
+    let mut expected = ::mcx::alloc_in(mcx, expected).unwrap();
     tupdesc::TupleDescInitEntry(
         &mut expected,
         1,
@@ -489,7 +489,7 @@ fn make_function_result_set_materialize_drains_all_rows() {
     fcache.funcReturnsSet = true;
     // scalar (1-column) return → drain via slot_getattr, not the whole-tuple path.
     fcache.funcReturnsTuple = false;
-    fcache.expr = Some(mcx::alloc_in(
+    fcache.expr = Some(::mcx::alloc_in(
         mcx,
         Expr::FuncExpr(FuncExpr {
             funcid: TEST_MAT_SRF_OID,
@@ -507,11 +507,11 @@ fn make_function_result_set_materialize_drains_all_rows() {
     fcache.func.fn_oid = TEST_MAT_SRF_OID;
     fcache.func.fn_retset = true;
     fcache.func.fn_strict = false;
-    fcache.args = Some(mcx::PgVec::new_in(mcx));
+    fcache.args = Some(::mcx::PgVec::new_in(mcx));
     // funcResultDesc: a 1-column int4 descriptor so ExecPrepareTuplestoreResult
     // builds the funcResultSlot from it.
     let rd = tupdesc::CreateTemplateTupleDesc(mcx, 1).unwrap();
-    let mut rd = mcx::alloc_in(mcx, rd).unwrap();
+    let mut rd = ::mcx::alloc_in(mcx, rd).unwrap();
     tupdesc::TupleDescInitEntry(&mut rd, 1, Some("v"), INT4OID, -1, 0)
         .unwrap();
     fcache.funcResultDesc = Some(rd);
@@ -520,7 +520,7 @@ fn make_function_result_set_materialize_drains_all_rows() {
         nargs: 0,
         ..Default::default()
     };
-    fcache.fcinfo = Some(mcx::alloc_in(mcx, frame).unwrap());
+    fcache.fcinfo = Some(::mcx::alloc_in(mcx, frame).unwrap());
 
     let arg_ctx = ctx.mcx().context().new_child("argcontext");
 

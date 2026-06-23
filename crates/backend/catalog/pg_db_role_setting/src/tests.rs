@@ -6,16 +6,16 @@
 //! fake; what these tests pin is the genbki-assigned OID / attribute-number /
 //! scan-key vocabulary the scan-key construction relies on.
 
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     DB_ROLE_SETTING_DATID_ROLID_INDEX_ID, DB_ROLE_SETTING_RELATION_ID,
 };
-use types_catalog::pg_db_role_setting::{
+use ::types_catalog::pg_db_role_setting::{
     Anum_pg_db_role_setting_setconfig, Anum_pg_db_role_setting_setdatabase,
     Anum_pg_db_role_setting_setrole, Natts_pg_db_role_setting,
 };
-use types_core::fmgr::F_OIDEQ;
-use types_scan::scankey::BTEqualStrategyNumber;
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_scan::scankey::BTEqualStrategyNumber;
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
 
 #[test]
 fn catalog_oids_match_postgres() {

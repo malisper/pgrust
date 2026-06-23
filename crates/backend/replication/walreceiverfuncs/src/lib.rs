@@ -49,12 +49,12 @@ use condition_variable::{
     ConditionVariableBroadcast, ConditionVariableCancelSleep, ConditionVariableInit,
     ConditionVariablePrepareToSleep, ConditionVariableSleep,
 };
-use condvar::ConditionVariable;
+use ::condvar::ConditionVariable;
 use types_core::{
     pg_time_t, Size, TimeLineID, TimestampTz, XLogRecPtr, INVALID_PROC_NUMBER,
 };
-use types_error::PgResult;
-use types_pgstat::wait_event::WAIT_EVENT_WAL_RECEIVER_EXIT;
+use ::types_error::PgResult;
+use ::types_pgstat::wait_event::WAIT_EVENT_WAL_RECEIVER_EXIT;
 use types_walreceiver::{WalRcvData, WalRcvShared, WalRcvState, MAXCONNINFO, NAMEDATALEN};
 
 use transam_xlog_seams as xlog;
@@ -149,7 +149,7 @@ pub fn WalRcvShmemSize() -> PgResult<Size> {
 /// like the C `ereport(ERROR, "requested shared memory size overflows ...")`.
 fn add_size(s1: Size, s2: Size) -> PgResult<Size> {
     s1.checked_add(s2).ok_or_else(|| {
-        types_error::PgError::error("requested shared memory size overflows size_t")
+        ::types_error::PgError::error("requested shared memory size overflows size_t")
     })
 }
 

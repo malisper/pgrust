@@ -3,7 +3,7 @@
 //! dispatch helpers that don't require an installed catalog substrate.
 
 use super::*;
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     EVENT_TRIGGER_RELATION_ID, FOREIGN_DATA_WRAPPER_RELATION_ID, FOREIGN_SERVER_RELATION_ID,
     LANGUAGE_RELATION_ID, PUBLICATION_RELATION_ID, SUBSCRIPTION_RELATION_ID, TYPE_RELATION_ID,
 };

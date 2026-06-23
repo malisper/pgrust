@@ -11,14 +11,14 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use types_core::primitive::OffsetNumber;
+use ::types_core::primitive::OffsetNumber;
 use types_error::{PgError, PgResult, ERROR};
-use hash::hashpage::{
+use ::hash::hashpage::{
     H_BUCKET_BEING_SPLIT, H_HAS_DEAD_TUPLES, HASH_METAPAGE, HASH_NOLOCK, HASH_WRITE,
     LH_BUCKET_PAGE, LH_META_PAGE, LH_OVERFLOW_PAGE, LH_PAGE_HAS_DEAD_TUPLES, LH_PAGE_TYPE,
 };
-use rel::Relation;
-use types_storage::storage::Buffer;
+use ::rel::Relation;
+use ::types_storage::storage::Buffer;
 
 use heapam_seams as heapam;
 use xloginsert_seams as xloginsert;
@@ -83,7 +83,7 @@ pub fn _hash_doinsert<'mcx>(
         }
 
         // Lock the primary bucket page for the target bucket.
-        let mut usedmetap = hash::hashpage::HashMetaPageData::default();
+        let mut usedmetap = ::hash::hashpage::HashMetaPageData::default();
         let mut buf =
             _hash_getbucketbuf_from_hashkey(rel, hashkey, HASH_WRITE, Some(&mut usedmetap))?;
 

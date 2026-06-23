@@ -22,8 +22,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use parse_seams as ctype;
-use mbutils_seams::pg_any_to_server;
-use mbutils_seams::pg_mblen_range;
+use ::mbutils_seams::pg_any_to_server;
+use ::mbutils_seams::pg_mblen_range;
 
 /// `PG_UTF8` (`mb/pg_wchar.h`) — tsearch config files are expected to be UTF-8.
 const PG_UTF8: i32 = 6;

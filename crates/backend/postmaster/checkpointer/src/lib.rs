@@ -35,21 +35,21 @@ use core::cell::Cell;
 use core::ptr::NonNull;
 
 use types_core::{Size, XLogRecPtr, INVALID_PROC_NUMBER};
-use condvar::ConditionVariable;
+use ::condvar::ConditionVariable;
 use types_error::{ErrorLocation, PgError, PgResult, DEBUG1, ERROR, LOG};
-use types_pgstat::wait_event::{
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_CHECKPOINTER_MAIN, WAIT_EVENT_CHECKPOINTER_SHUTDOWN, WAIT_EVENT_CHECKPOINT_DONE,
     WAIT_EVENT_CHECKPOINT_START, WAIT_EVENT_CHECKPOINT_WRITE_DELAY,
 };
-use types_startup::StartupData;
-use types_storage::sync::{FileTag, SyncRequestType};
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
-use wal::xlog_consts::{
+use ::types_startup::StartupData;
+use ::types_storage::sync::{FileTag, SyncRequestType};
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::wal::xlog_consts::{
     CHECKPOINT_CAUSE_TIME, CHECKPOINT_CAUSE_XLOG, CHECKPOINT_END_OF_RECOVERY, CHECKPOINT_IMMEDIATE,
     CHECKPOINT_REQUESTED, CHECKPOINT_WAIT,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use s_lock::{s_lock, s_unlock, Spinlock};
 
@@ -81,7 +81,7 @@ use pgstat_seams as pgstat;
 use transam_xlog_seams as xlog;
 use syncrep_seams as syncrep;
 
-use types_storage::LWLockMode;
+use ::types_storage::LWLockMode;
 
 #[cfg(test)]
 mod tests;
@@ -437,7 +437,7 @@ pub fn CheckpointerMain(startup_data: &StartupData) -> PgResult<()> {
     // `pss_barrierGeneration`, hanging the emitter of a `DROP DATABASE`
     // (`WaitForProcSignalBarrier`) forever on this slot.
     {
-        use signal::SigHandler;
+        use ::signal::SigHandler;
         let pqsignal = port_pqsignal_seams::pqsignal::call;
         // pqsignal(SIGHUP, SignalHandlerForConfigReload);
         fn config_reload(_sig: i32) {
@@ -460,7 +460,7 @@ pub fn CheckpointerMain(startup_data: &StartupData) -> PgResult<()> {
         pqsignal(
             libc::SIGUSR1,
             SigHandler::Handler(
-                procsignal::procsignal_sigusr1_handler_signal,
+                ::procsignal::procsignal_sigusr1_handler_signal,
             ),
         );
         // pqsignal(SIGUSR2, SignalHandlerForShutdownRequest);
@@ -557,7 +557,7 @@ fn checkpointer_abort_cleanup(cp: &Checkpointer, err: &PgError) -> PgResult<()> 
     // Since not using PG_TRY, must reset error stack by hand (host-owned), then
     // HOLD_INTERRUPTS() and report the error to the server log.
     miscinit::hold_interrupts::call();
-    utils_error::emit_error_report_for(err);
+    ::utils_error::emit_error_report_for(err);
 
     // The minimal subset of AbortTransaction(): LWLocks, buffers, temp files.
     lwlock::lwlock_release_all::call();
@@ -590,7 +590,7 @@ fn checkpointer_abort_cleanup(cp: &Checkpointer, err: &PgError) -> PgResult<()> 
 
     // Return to normal context and clear ErrorContext for next time
     // (FlushErrorState + MemoryContextReset + RESUME_INTERRUPTS).
-    utils_error::FlushErrorState();
+    ::utils_error::FlushErrorState();
     miscinit::resume_interrupts::call();
     Ok(())
 }
@@ -1473,7 +1473,7 @@ fn checkpointer_main_entry(startup_data: &StartupData) -> ! {
     match CheckpointerMain(startup_data) {
         Ok(()) => ipc::proc_exit::call(0, initsmall::my_proc_pid::call()),
         Err(err) => {
-            utils_error::emit_error_report_for(&err);
+            ::utils_error::emit_error_report_for(&err);
             ipc::proc_exit::call(1, initsmall::my_proc_pid::call());
         }
     }
@@ -1494,7 +1494,7 @@ fn request_checkpoint_seam(flags: i32) {
     if let Err(err) = RequestCheckpoint(flags) {
         // C's RequestCheckpoint either succeeds or ereport(ERROR)s (LONGJMP);
         // the seam is void, so re-raise as a panic on the (rare) Err path.
-        utils_error::emit_error_report_for(&err);
+        ::utils_error::emit_error_report_for(&err);
         panic!("RequestCheckpoint failed: {}", err.message());
     }
 }

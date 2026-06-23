@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 
 use types_core::{uint16, uint32, uint8, BlockNumber, InvalidBlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ};
-use types_error::PgError;
+use ::types_error::PgError;
 
 /// `ItemOffset` (`storage/itemid.h`): a line pointer's `lp_off` field.
 pub type ItemOffset = uint16;

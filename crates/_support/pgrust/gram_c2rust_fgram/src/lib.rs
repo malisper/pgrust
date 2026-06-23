@@ -29,7 +29,7 @@ mod support;
 mod tests;
 
 pub use gram::{base_yy_extra_type, base_yyparse, parser_init, YYSTYPE};
-pub use pg_ffi_fgram::spi::RawParseMode;
+pub use ::pg_ffi_fgram::spi::RawParseMode;
 pub use support::{
     last_error, last_error_hint_detail, last_error_message, raw_parser, raw_parser_bytes,
     ParserAbort,

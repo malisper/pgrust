@@ -8,7 +8,7 @@
 //! 1-byte character (the value those error messages assume for ASCII bytes).
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::Once;
 use std::vec;
 

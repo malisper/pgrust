@@ -8,8 +8,8 @@
 //! OAuth owner lands and installs it, a call panics loudly (which is correct —
 //! it is only reachable for a configured `oauth` line).
 
-use types_error::PgResult;
-use net::HbaLine;
+use ::types_error::PgResult;
+use ::net::HbaLine;
 
 seam_core::seam!(
     /// `bool check_oauth_validator(const HbaLine *hbaline, int elevel, char

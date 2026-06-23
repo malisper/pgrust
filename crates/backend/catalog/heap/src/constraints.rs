@@ -32,10 +32,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{alloc_in, Mcx, PgString, PgVec};
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_core::catalog::FirstUnpinnedObjectId;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::catalog::FirstUnpinnedObjectId;
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE,
@@ -46,9 +46,9 @@ use ::nodes::ddlnodes::{CoercionContext, ConstrType, Constraint};
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::parsestmt::ParseExprKind;
 use ::nodes::primnodes::{CoercionForm, Expr};
-use rel::Relation;
-use types_storage::lock::AccessShareLock;
-use types_tuple::access::{ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_PARTITIONED_TABLE};
+use ::rel::Relation;
+use ::types_storage::lock::AccessShareLock;
+use ::types_tuple::access::{ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_PARTITIONED_TABLE};
 
 /* pg_constraint contype codes (catalog/pg_constraint.h). */
 const CONSTRAINT_CHECK: i8 = b'c' as i8;
@@ -1110,7 +1110,7 @@ pub fn AddRelationNewConstraints<'mcx>(
             if let Some(cn) = cdef_conname.as_ref() {
                 if pg_constraint::ConstraintNameIsUsed(
                     mcx,
-                    types_catalog::pg_constraint::ConstraintCategory::Relation,
+                    ::types_catalog::pg_constraint::ConstraintCategory::Relation,
                     rel.rd_id,
                     cn,
                 )? {
@@ -1287,7 +1287,7 @@ pub fn AddRelationNotNullConstraints<'mcx>(
             if work[restpos].keyname == outer_key {
                 if work[restpos].is_no_inherit != outer_noinh {
                     return Err(ereport(ERROR)
-                        .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                        .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
                         .errmsg(format!(
                             "conflicting NO INHERIT declaration for not-null constraint on column \"{outer_key}\""
                         ))
@@ -1298,7 +1298,7 @@ pub fn AddRelationNotNullConstraints<'mcx>(
                         None => work[outerpos].conname = Some(other_name),
                         Some(my) if my != other_name => {
                             return Err(ereport(ERROR)
-                                .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                                .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
                                 .errmsg(format!(
                                     "conflicting not-null constraint names \"{my}\" and \"{other_name}\""
                                 ))
@@ -1462,10 +1462,10 @@ pub fn AddRelationNotNullConstraints<'mcx>(
 /// single-row case of that scan). The `RemoveStatistics` half is real in-crate
 /// and runs after.
 pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber) -> PgResult<()> {
-    use scankey::ScanKeyInit;
-    use types_core::fmgr::F_OIDEQ;
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    use types_tuple::heaptuple::Datum;
+    use ::scankey::ScanKeyInit;
+    use ::types_core::fmgr::F_OIDEQ;
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_tuple::heaptuple::Datum;
 
     // pg_attribute catalog OID + its (attrelid, attnum) index, and the columns
     // touched (catalog/pg_attribute.h).
@@ -1494,14 +1494,14 @@ pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber)
     let rel = common_relation::relation_open(
         mcx,
         relid,
-        types_storage::lock::AccessExclusiveLock,
+        ::types_storage::lock::AccessExclusiveLock,
     )?;
 
     // attr_rel = table_open(AttributeRelationId, RowExclusiveLock);
     let attr_rel = table::table_open(
         mcx,
         AttributeRelationId,
-        types_storage::lock::RowExclusiveLock,
+        ::types_storage::lock::RowExclusiveLock,
     )?;
 
     // SearchSysCacheCopy2(ATTNUM, relid, attnum) — keyed single-row case: scan
@@ -1568,7 +1568,7 @@ pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber)
         // snprintf newattname = "........pg.dropped.%d........", attnum;
         // namestrcpy(&attStruct->attname, newattname).
         let newattname = alloc::format!("........pg.dropped.{}........", attnum);
-        let mut image: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, NAMEDATALEN)?;
+        let mut image: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, NAMEDATALEN)?;
         let src = newattname.as_bytes();
         let take = core::cmp::min(src.len(), NAMEDATALEN - 1);
         for &b in &src[..take] {
@@ -1628,13 +1628,13 @@ pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber)
     }
 
     // table_close(attr_rel, RowExclusiveLock);
-    attr_rel.close(types_storage::lock::RowExclusiveLock)?;
+    attr_rel.close(::types_storage::lock::RowExclusiveLock)?;
 
     crate::statistics::RemoveStatistics(mcx, relid, attnum)?;
 
     // relation_close(rel, NoLock) — keep the AccessExclusiveLock until end of
     // transaction.
-    rel.close(types_storage::lock::NoLock)?;
+    rel.close(::types_storage::lock::NoLock)?;
     Ok(())
 }
 
@@ -1651,10 +1651,10 @@ pub fn RemoveAttributeById<'mcx>(mcx: Mcx<'mcx>, relid: Oid, attnum: AttrNumber)
 /// including dropped). For each row with `atthasmissing` set, `heap_modify_tuple`
 /// clears `atthasmissing` and nulls `attmissingval`, then `CatalogTupleUpdate`.
 pub fn RelationClearMissing<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<()> {
-    use scankey::ScanKeyInit;
-    use types_core::fmgr::F_OIDEQ;
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    use types_tuple::heaptuple::Datum;
+    use ::scankey::ScanKeyInit;
+    use ::types_core::fmgr::F_OIDEQ;
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_tuple::heaptuple::Datum;
 
     // pg_attribute catalog OID + its (attrelid, attnum) index, and the columns
     // touched (catalog/pg_attribute.h).
@@ -1671,7 +1671,7 @@ pub fn RelationClearMissing<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgRes
     let attr_rel = table::table_open(
         mcx,
         AttributeRelationId,
-        types_storage::lock::RowExclusiveLock,
+        ::types_storage::lock::RowExclusiveLock,
     )?;
 
     // Use the index to scan only attributes of the target relation.
@@ -1758,7 +1758,7 @@ pub fn RelationClearMissing<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgRes
     // Our update of the pg_attribute rows forces a relcache rebuild; nothing
     // else to do. table_close(attr_rel, RowExclusiveLock).
     scan.end()?;
-    attr_rel.close(types_storage::lock::RowExclusiveLock)
+    attr_rel.close(::types_storage::lock::RowExclusiveLock)
 }
 
 /// `StoreAttrDefault`'s pg_attribute update (pg_attrdef.c): after inserting the
@@ -1777,14 +1777,14 @@ pub fn SetAttributeHasDefault<'mcx>(
     relid: Oid,
     attnum: AttrNumber,
 ) -> PgResult<Option<i8>> {
-    use scankey::ScanKeyInit;
-    use types_catalog::pg_attribute::{
+    use ::scankey::ScanKeyInit;
+    use ::types_catalog::pg_attribute::{
         Anum_pg_attribute_attgenerated, Anum_pg_attribute_atthasdef, Anum_pg_attribute_attnum,
         Anum_pg_attribute_attrelid,
     };
-    use types_core::fmgr::F_OIDEQ;
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    use types_tuple::heaptuple::Datum;
+    use ::types_core::fmgr::F_OIDEQ;
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_tuple::heaptuple::Datum;
 
     const AttributeRelationId: Oid = 1249;
     const AttributeRelidNumIndexId: Oid = 2659;
@@ -1793,7 +1793,7 @@ pub fn SetAttributeHasDefault<'mcx>(
     let attr_rel = table::table_open(
         mcx,
         AttributeRelationId,
-        types_storage::lock::RowExclusiveLock,
+        ::types_storage::lock::RowExclusiveLock,
     )?;
 
     // SearchSysCacheCopy2(ATTNUM, relid, attnum): scan on attrelid (the index's
@@ -1880,7 +1880,7 @@ pub fn SetAttributeHasDefault<'mcx>(
     }
 
     scan.end()?;
-    attr_rel.close(types_storage::lock::RowExclusiveLock)?;
+    attr_rel.close(::types_storage::lock::RowExclusiveLock)?;
 
     Ok(result)
 }
@@ -1907,13 +1907,13 @@ pub fn ClearAttributeHasDefault<'mcx>(
     relid: Oid,
     attnum: AttrNumber,
 ) -> PgResult<bool> {
-    use scankey::ScanKeyInit;
-    use types_catalog::pg_attribute::{
+    use ::scankey::ScanKeyInit;
+    use ::types_catalog::pg_attribute::{
         Anum_pg_attribute_attnum, Anum_pg_attribute_atthasdef, Anum_pg_attribute_attrelid,
     };
-    use types_core::fmgr::F_OIDEQ;
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    use types_tuple::heaptuple::Datum;
+    use ::types_core::fmgr::F_OIDEQ;
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_tuple::heaptuple::Datum;
 
     const AttributeRelationId: Oid = 1249;
     const AttributeRelidNumIndexId: Oid = 2659;
@@ -1922,7 +1922,7 @@ pub fn ClearAttributeHasDefault<'mcx>(
     let attr_rel = table::table_open(
         mcx,
         AttributeRelationId,
-        types_storage::lock::RowExclusiveLock,
+        ::types_storage::lock::RowExclusiveLock,
     )?;
 
     // SearchSysCacheCopy2(ATTNUM, relid, attnum): scan on attrelid (the index's
@@ -1994,7 +1994,7 @@ pub fn ClearAttributeHasDefault<'mcx>(
     }
 
     scan.end()?;
-    attr_rel.close(types_storage::lock::RowExclusiveLock)?;
+    attr_rel.close(::types_storage::lock::RowExclusiveLock)?;
 
     Ok(found)
 }
@@ -2025,17 +2025,17 @@ pub fn StoreAttrMissingVal<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     attnum: AttrNumber,
-    missingval: types_tuple::heaptuple::Datum<'mcx>,
+    missingval: ::types_tuple::heaptuple::Datum<'mcx>,
 ) -> PgResult<()> {
-    use scankey::ScanKeyInit;
-    use types_catalog::pg_attribute::{
+    use ::scankey::ScanKeyInit;
+    use ::types_catalog::pg_attribute::{
         Anum_pg_attribute_attalign, Anum_pg_attribute_attbyval, Anum_pg_attribute_atthasmissing,
         Anum_pg_attribute_attlen, Anum_pg_attribute_attmissingval, Anum_pg_attribute_attnum,
         Anum_pg_attribute_attrelid, Anum_pg_attribute_atttypid,
     };
-    use types_core::fmgr::F_OIDEQ;
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    use types_tuple::heaptuple::Datum;
+    use ::types_core::fmgr::F_OIDEQ;
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_tuple::heaptuple::Datum;
 
     const AttributeRelationId: Oid = 1249;
     const AttributeRelidNumIndexId: Oid = 2659;
@@ -2046,7 +2046,7 @@ pub fn StoreAttrMissingVal<'mcx>(
     let attr_rel = table::table_open(
         mcx,
         AttributeRelationId,
-        types_storage::lock::RowExclusiveLock,
+        ::types_storage::lock::RowExclusiveLock,
     )?;
 
     // SearchSysCache2(ATTNUM, relid, attnum): scan on attrelid (the index's
@@ -2164,7 +2164,7 @@ pub fn StoreAttrMissingVal<'mcx>(
     }
 
     scan.end()?;
-    attr_rel.close(types_storage::lock::RowExclusiveLock)?;
+    attr_rel.close(::types_storage::lock::RowExclusiveLock)?;
 
     if found {
         // C relies on CatalogTupleUpdate's CacheInvalidateHeapTuple (keyed on the
@@ -2177,7 +2177,7 @@ pub fn StoreAttrMissingVal<'mcx>(
         // substitutes the missing value. `missingval` is the single element; the
         // relcache reader stores the element-1 image, which equals this Datum's
         // image.
-        let image = types_tuple::heaptuple::MissingValueImage::from_datum(&missingval);
+        let image = ::types_tuple::heaptuple::MissingValueImage::from_datum(&missingval);
         relcache_seams::set_relcache_attmissing::call(relid, attnum, image)?;
         // Also register the standard relcache invalidation so other backends
         // (and this backend's next-transaction rebuild) pick up the change.
@@ -2186,7 +2186,7 @@ pub fn StoreAttrMissingVal<'mcx>(
 
     if !found {
         // C: elog(ERROR, "cache lookup failed for attribute %d of relation %u").
-        return Err(utils_error::PgError::error(format!(
+        return Err(::utils_error::PgError::error(format!(
             "cache lookup failed for attribute {attnum} of relation {relid}"
         )));
     }

@@ -10,14 +10,14 @@ extern crate std;
 use std::sync::Once;
 
 use mcx::{Mcx, MemoryContext};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_tuple::tupdesc::PgTypeInfo;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     ATTNULLABLE_UNKNOWN, ATTNULLABLE_UNRESTRICTED, ATTNULLABLE_VALID, BOOLOID, INT4OID, INT8OID,
     OIDOID, RECORDOID, TEXTOID, TYPALIGN_CHAR, TYPALIGN_DOUBLE, TYPALIGN_INT, TYPSTORAGE_EXTENDED,
     TYPSTORAGE_PLAIN,
 };
-use types_core::primitive::InvalidOid;
+use ::types_core::primitive::InvalidOid;
 
 use crate::*;
 

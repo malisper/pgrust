@@ -18,21 +18,21 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, Oid, ProcNumber, Size, BLCKSZ, INVALID_PROC_NUMBER,
 };
-use types_core::primitive::ForkNumber::{
+use ::types_core::primitive::ForkNumber::{
     FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM,
 };
-use types_core::primitive::InvalidBlockNumber;
+use ::types_core::primitive::InvalidBlockNumber;
 use types_error::{PgError, PgResult};
-use types_error::error::{
+use ::types_error::error::{
     ERRCODE_DATA_CORRUPTED, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, PANIC,
 };
-use types_storage::storage::{RelFileLocator, RelFileLocatorEquals};
-use types_storage::relfilelocator::RelFileLocatorBackend;
+use ::types_storage::storage::{RelFileLocator, RelFileLocatorEquals};
+use ::types_storage::relfilelocator::RelFileLocatorBackend;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use catalog_storage_seams as storage_seam;
 use index_seams as index_seam;
@@ -88,7 +88,7 @@ const SMGR_TRUNCATE_FSM: i32 = 0x0004;
 const SMGR_TRUNCATE_ALL: i32 = SMGR_TRUNCATE_HEAP | SMGR_TRUNCATE_VM | SMGR_TRUNCATE_FSM;
 
 /// `RM_SMGR_ID` — the Storage resource manager.
-const RM_SMGR_ID: types_core::primitive::RmgrId = wal::wal::RM_SMGR_ID;
+const RM_SMGR_ID: ::types_core::primitive::RmgrId = wal::wal::RM_SMGR_ID;
 /// `XLR_SPECIAL_REL_UPDATE`.
 const XLR_SPECIAL_REL_UPDATE: u8 = wal::wal::XLR_SPECIAL_REL_UPDATE;
 /// `XLR_INFO_MASK`.
@@ -97,14 +97,14 @@ const XLR_INFO_MASK: u8 = wal::wal::XLR_INFO_MASK;
 /// `RelationRelationId` (pg_class OID).
 const RelationRelationId: Oid = 1259;
 /// `RowExclusiveLock` (lockdefs.h).
-const RowExclusiveLock: types_storage::lock::LOCKMODE = types_storage::lock::RowExclusiveLock;
+const RowExclusiveLock: ::types_storage::lock::LOCKMODE = ::types_storage::lock::RowExclusiveLock;
 /// `RELOID` syscache id.
 const RELOID: i32 = types_syscache::syscache_ids::RELOID;
 
 /// `PIV_LOG_WARNING` (bufpage.h).
-const PIV_LOG_WARNING: i32 = types_storage::bufpage::PIV_LOG_WARNING;
+const PIV_LOG_WARNING: i32 = ::types_storage::bufpage::PIV_LOG_WARNING;
 /// `PIV_IGNORE_CHECKSUM_FAILURE` (bufpage.h).
-const PIV_IGNORE_CHECKSUM_FAILURE: i32 = types_storage::bufpage::PIV_IGNORE_CHECKSUM_FAILURE;
+const PIV_IGNORE_CHECKSUM_FAILURE: i32 = ::types_storage::bufpage::PIV_IGNORE_CHECKSUM_FAILURE;
 
 /// `BlockNumberIsValid(b)` (block.h): `b != InvalidBlockNumber`.
 #[inline]
@@ -638,7 +638,7 @@ fn log_smgr_truncate(
     rlocator: RelFileLocator,
     blkno: BlockNumber,
     flags: i32,
-) -> PgResult<types_core::primitive::XLogRecPtr> {
+) -> PgResult<::types_core::primitive::XLogRecPtr> {
     let mut xlrec = [0u8; 20];
     xlrec[0..4].copy_from_slice(&blkno.to_ne_bytes());
     xlrec[4..8].copy_from_slice(&rlocator.spcOid.to_ne_bytes());
@@ -751,7 +751,7 @@ pub fn RelationCopyStorage<'mcx>(
 
 /// `ignore_checksum_failure` GUC (bufpage.c) — backend-local bool.
 fn ignore_checksum_failure() -> PgResult<bool> {
-    Ok(guc_tables::vars::ignore_checksum_failure.read())
+    Ok(::guc_tables::vars::ignore_checksum_failure.read())
 }
 
 /* ---------------------------------------------------------------------------
@@ -1040,7 +1040,7 @@ fn log_newpage_range_fake(
     fork: ForkNumber,
     n: BlockNumber,
 ) -> PgResult<()> {
-    let ctx = mcx::MemoryContext::new("log_newpage_range_fake");
+    let ctx = ::mcx::MemoryContext::new("log_newpage_range_fake");
     let mcx = ctx.mcx();
     // rel = CreateFakeRelcacheEntry(locator);
     let fakerel = xlogutils::CreateFakeRelcacheEntry(mcx, rlocator)?;
@@ -1072,7 +1072,7 @@ fn fork_iter() -> impl Iterator<Item = ForkNumber> {
 pub fn smgr_get_pending_deletes<'mcx>(
     mcx: Mcx<'mcx>,
     for_commit: bool,
-) -> PgResult<mcx::PgVec<'mcx, RelFileLocator>> {
+) -> PgResult<::mcx::PgVec<'mcx, RelFileLocator>> {
     let nest_level = xact_seam::get_current_transaction_nest_level::call();
 
     PENDING.with(|p| {
@@ -1087,7 +1087,7 @@ pub fn smgr_get_pending_deletes<'mcx>(
                     && pending.proc_number == INVALID_PROC_NUMBER
             })
             .count();
-        let mut rels = mcx::vec_with_capacity_in(mcx, count)?;
+        let mut rels = ::mcx::vec_with_capacity_in(mcx, count)?;
         for pending in st.deletes.iter().filter(|pending| {
             pending.nest_level >= nest_level
                 && pending.at_commit == for_commit
@@ -1208,7 +1208,7 @@ pub fn smgr_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> PgResult<()> {
 
 /// The `XLOG_SMGR_TRUNCATE` redo body.
 fn smgr_redo_truncate(
-    lsn: types_core::primitive::XLogRecPtr,
+    lsn: ::types_core::primitive::XLogRecPtr,
     xlrec: wal::rmgrdesc::xl_smgr_truncate,
 ) -> PgResult<()> {
     let mut need_fsm_vacuum = false;
@@ -1244,7 +1244,7 @@ fn smgr_redo_truncate(
     // Prepare for truncation of FSM and VM too.
     // rel = CreateFakeRelcacheEntry(xlrec->rlocator);
     {
-        let ctx = mcx::MemoryContext::new("smgr_redo truncate");
+        let ctx = ::mcx::MemoryContext::new("smgr_redo truncate");
         let mcx = ctx.mcx();
         let fakerel = xlogutils::CreateFakeRelcacheEntry(mcx, rlocator)?;
         let rel = rel::Relation::open(fakerel, None);
@@ -1388,7 +1388,7 @@ pub fn update_pg_class_relfilenumber(
     freeze_xid: u32,
     minmulti: u32,
 ) -> PgResult<()> {
-    let ctx = mcx::MemoryContext::new("update_pg_class_relfilenumber");
+    let ctx = ::mcx::MemoryContext::new("update_pg_class_relfilenumber");
     let mcx = ctx.mcx();
     {
         // pg_class = table_open(RelationRelationId, RowExclusiveLock);

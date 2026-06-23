@@ -145,9 +145,9 @@ pub fn WalSndShmemInit() {
                 }),
                 lsn: [0; NUM_SYNC_REP_WAIT_MODE],
                 sync_standbys_status: 0,
-                wal_flush_cv: condvar::ConditionVariable::new(),
-                wal_replay_cv: condvar::ConditionVariable::new(),
-                wal_confirm_rcv_cv: condvar::ConditionVariable::new(),
+                wal_flush_cv: ::condvar::ConditionVariable::new(),
+                wal_replay_cv: ::condvar::ConditionVariable::new(),
+                wal_confirm_rcv_cv: ::condvar::ConditionVariable::new(),
             };
             core::ptr::write(ctl_ptr, header);
         }

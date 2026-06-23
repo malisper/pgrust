@@ -23,7 +23,7 @@
 //!
 //! WAL is emitted inline (the nbtree/BRIN idiom): a critical section wraps the
 //! mutate-and-log region, the record header is serialized by the
-//! `xlog_records::spgxlog` write-side encoders, and `XLogRegisterBuffer`
+//! `::xlog_records::spgxlog` write-side encoders, and `XLogRegisterBuffer`
 //! registers the live buffers by block id. During an index build
 //! (`state.isBuild`) page changes are made but no WAL record is written.
 
@@ -42,17 +42,17 @@ use page::{
     PageAddItemExtended, PageGetExactFreeSpace, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
     PageIndexTupleDelete, PageMut, PageRef,
 };
-use utils_error::ereport;
-use types_error::error::{ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::utils_error::ereport;
+use ::types_error::error::{ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use types_error::{PgError, PgResult};
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, RegProcedure, Size,
 };
-use rel::Relation;
-use types_storage::buf::{Buffer, InvalidBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_storage::buf::{Buffer, InvalidBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{
     ItemPointerData, TupleDescData, FIRST_OFFSET_NUMBER as FirstOffsetNumber,
     INVALID_OFFSET_NUMBER as InvalidOffsetNumber,
 };
@@ -66,11 +66,11 @@ use spgist::{
 };
 use spgist::{SPGIST_CHOOSE_PROC, SPGIST_PICKSPLIT_PROC};
 
-use xlog_records::spgxlog::{
+use ::xlog_records::spgxlog::{
     spgxlogAddLeaf, spgxlogAddNode, spgxlogMoveLeafs, spgxlogPickSplit, spgxlogSplitTuple,
     spgxlogState,
 };
-use wal::xloginsert::{REGBUF_STANDARD, REGBUF_WILL_INIT};
+use ::wal::xloginsert::{REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use xloginsert_seams as xloginsert;
 use bufmgr_seams as bufmgr;
@@ -88,7 +88,7 @@ use crate::{
 /// `RM_SPGIST_ID` (rmgrlist.h entry 16) — the SP-GiST resource-manager id.
 /// Defined locally until rmgr ids migrate to `types-wal` (mirrors BRIN's
 /// `RM_BRIN_ID`).
-const RM_SPGIST_ID: types_core::RmgrId = 16;
+const RM_SPGIST_ID: ::types_core::RmgrId = 16;
 
 // XLOG record types for SPGiST (spgxlog.h).
 const XLOG_SPGIST_ADD_LEAF: u8 = 0x10;
@@ -139,7 +139,7 @@ fn buffer_is_valid(buf: Buffer) -> bool {
 /// `OidIsValid(oid)`.
 #[inline]
 fn OidIsValid(oid: Oid) -> bool {
-    oid != types_core::primitive::InvalidOid
+    oid != ::types_core::primitive::InvalidOid
 }
 
 /// `RelationGetRelationName(index)` for error messages.
@@ -157,8 +157,8 @@ pub(crate) fn elog_error(msg: alloc::string::String) -> PgError {
 // The SP-GiST special area lives in the last MAXALIGN element of the page:
 // flags (u16 @0), nRedirection (u16 @2), nPlaceholder (u16 @4), page_id (@6).
 const OPAQUE_OFFSET: usize =
-    types_core::primitive::BLCKSZ as usize - crate::MAXALIGN(core::mem::size_of::<
-        spgist::SpGistPageOpaqueData,
+    ::types_core::primitive::BLCKSZ as usize - crate::MAXALIGN(core::mem::size_of::<
+        ::spgist::SpGistPageOpaqueData,
     >());
 
 #[inline]
@@ -323,7 +323,7 @@ pub(crate) fn node_offsets(inner: &[u8]) -> Vec<usize> {
 /// Read a node tuple's `t_tid` (the 6-byte ItemPointerData @0).
 pub(crate) fn node_t_tid(node: &[u8]) -> ItemPointerData {
     ItemPointerData {
-        ip_blkid: types_tuple::heaptuple::BlockIdData {
+        ip_blkid: ::types_tuple::heaptuple::BlockIdData {
             bi_hi: u16::from_ne_bytes([node[0], node[1]]),
             bi_lo: u16::from_ne_bytes([node[2], node[3]]),
         },
@@ -400,7 +400,7 @@ fn addNode<'mcx>(
         // Copy node i verbatim.
         let noff = node_offs[i as usize];
         let nsz = node_tuple_size(&tuple[noff..]);
-        let mut buf = mcx::vec_with_capacity_in(mcx, nsz)?;
+        let mut buf = ::mcx::vec_with_capacity_in(mcx, nsz)?;
         buf.extend_from_slice(&tuple[noff..noff + nsz]);
         nodes.push(buf);
     }
@@ -566,7 +566,7 @@ fn checkSplitConditions(
 ) -> PgResult<(usize, i32)> {
     if SpGistBlockIsRoot(current.blkno) {
         // Impossible values to force the doPickSplit path.
-        return Ok((types_core::primitive::BLCKSZ as usize, types_core::primitive::BLCKSZ as i32));
+        return Ok((::types_core::primitive::BLCKSZ as usize, ::types_core::primitive::BLCKSZ as i32));
     }
 
     let mut n: i32 = 0;

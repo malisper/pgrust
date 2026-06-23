@@ -23,14 +23,14 @@ use std::boxed::Box;
 use std::string::String;
 use std::vec::Vec;
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_tuple::heaptuple::Datum;
-use types_error::PgResult;
-use rel::Relation;
-use types_scan::sdir::ScanDirection;
-use types_scan::scankey::{ScanKeyData, StrategyNumber};
-use types_tuple::heaptuple::ItemPointerData;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_tuple::heaptuple::Datum;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_scan::sdir::ScanDirection;
+use ::types_scan::scankey::{ScanKeyData, StrategyNumber};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use crate::index_info_carrier::IndexInfoCarrier;

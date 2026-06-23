@@ -11,8 +11,8 @@ use std::cell::RefCell;
 use std::sync::Once;
 
 use super::*;
-use types_core::primitive::MAIN_FORKNUM;
-use types_storage::RelFileLocator;
+use ::types_core::primitive::MAIN_FORKNUM;
+use ::types_storage::RelFileLocator;
 
 #[derive(Default)]
 struct TestRt {

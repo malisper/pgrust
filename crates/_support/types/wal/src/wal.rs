@@ -1,6 +1,6 @@
 //! WAL record types and resource-manager constants.
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 use types_core::{
     pg_crc32c, pg_time_t, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber,
     RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr, MAXPGPATH,
@@ -166,7 +166,7 @@ pub const WAL_COMPRESSION_ZSTD: i32 = 3;
 /// relation: tablespace, database, relfilenumber. Canonical definition lives
 /// in `types_storage`; re-exported here so `wal`'s `RelFileLocator`
 /// names the same type (no duplicate definition).
-pub use types_storage::RelFileLocator;
+pub use ::types_storage::RelFileLocator;
 
 /// The fixed-size WAL record header (`XLogRecord`, access/xlogrecord.h).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -526,11 +526,11 @@ impl<'mcx> DecodedXLogRecord<'mcx> {
             size: 0,
             oversized: false,
             buffer_offset: 0,
-            lsn: types_core::InvalidXLogRecPtr,
-            next_lsn: types_core::InvalidXLogRecPtr,
+            lsn: ::types_core::InvalidXLogRecPtr,
+            next_lsn: ::types_core::InvalidXLogRecPtr,
             header,
-            record_origin: types_core::InvalidRepOriginId,
-            toplevel_xid: types_core::InvalidTransactionId,
+            record_origin: ::types_core::InvalidRepOriginId,
+            toplevel_xid: ::types_core::InvalidTransactionId,
             main_data,
             main_data_len,
             max_block_id,

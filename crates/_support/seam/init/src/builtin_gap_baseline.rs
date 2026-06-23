@@ -28,8 +28,8 @@
 //! The baseline is the maximum gap still accepted; the live gap is smaller and
 //! ratchets toward empty as more `adt/*` builtin crates are registered.
 
-use fmgr_core::BuiltinGapKind;
-use types_core::Oid;
+use ::fmgr_core::BuiltinGapKind;
+use ::types_core::Oid;
 
 /// One known-missing/mismatched canonical built-in: `(foid, prosrc, kind)`.
 pub type BaselineGap = (Oid, &'static str, BuiltinGapKind);

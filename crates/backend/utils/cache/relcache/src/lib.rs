@@ -104,7 +104,7 @@ pub use core_entry_store::{
     RelationIncrementReferenceCount, RelationDecrementReferenceCount,
 };
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// The C `Relation`, idiomatically: the relcache entry store is keyed by the
 /// relation OID, so the "pointer" callers carry IS the [`Oid`]. A live handle

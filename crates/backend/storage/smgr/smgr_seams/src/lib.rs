@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 
 seam_core::seam!(
@@ -34,7 +34,7 @@ seam_core::seam!(
     /// for the PROCSIGNAL_BARRIER_SMGRRELEASE barrier. Returns true when the
     /// barrier was absorbed; an `ereport(ERROR)` from the file layer is the
     /// `Err` (the caller's PG_TRY in `ProcessProcSignalBarrier`).
-    pub fn process_barrier_smgr_release() -> types_error::PgResult<bool>
+    pub fn process_barrier_smgr_release() -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -42,10 +42,10 @@ seam_core::seam!(
     /// number of blocks in the fork. `Err` carries the C `ereport(ERROR)`s
     /// from the underlying `mdnblocks` (e.g. `could not seek to end of file`).
     pub fn smgrnblocks(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         backend: types_core::primitive::ProcNumber,
         forknum: types_core::primitive::ForkNumber,
-    ) -> types_error::PgResult<types_core::primitive::BlockNumber>
+    ) -> ::types_error::PgResult<types_core::primitive::BlockNumber>
 );
 
 seam_core::seam!(
@@ -55,7 +55,7 @@ seam_core::seam!(
     /// `fsm_does_block_exist` to avoid an `lseek` when the cached MAIN-fork
     /// size already proves the block exists. Pure read of smgr-owned state.
     pub fn smgr_cached_nblocks(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         backend: types_core::primitive::ProcNumber,
         forknum: types_core::primitive::ForkNumber,
     ) -> types_core::primitive::BlockNumber
@@ -68,7 +68,7 @@ seam_core::seam!(
     /// `rd_smgr->smgr_targblock`; an unopened smgr (C `rd_smgr == NULL`) yields
     /// `InvalidBlockNumber`. Pure read of smgr-owned state.
     pub fn smgrgettargblock(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         backend: types_core::primitive::ProcNumber,
     ) -> types_core::primitive::BlockNumber
 );
@@ -79,10 +79,10 @@ seam_core::seam!(
     /// `RelationSetTargetBlock(rel, blkno)` writes through
     /// `RelationGetSmgr(rel)->smgr_targblock`.
     pub fn smgrsettargblock(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         backend: types_core::primitive::ProcNumber,
         targblock: types_core::primitive::BlockNumber,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -102,10 +102,10 @@ seam_core::seam!(
     /// `ereport(ERROR)`s reachable under `mdexists` (the implicit `smgropen`
     /// can also OOM-error creating the relation's smgr hash entry).
     pub fn smgrexists(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         backend: types_core::primitive::ProcNumber,
         forknum: types_core::primitive::ForkNumber,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -140,12 +140,12 @@ seam_core::seam!(
     /// (smgr.c) — read one block of a (temp) relation fork into `dst`
     /// (`BLCKSZ` bytes). `Err` carries the file-layer `ereport(ERROR)`s.
     pub fn smgr_read(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         backend: types_core::primitive::ProcNumber,
         forknum: types_core::primitive::ForkNumber,
         blocknum: types_core::primitive::BlockNumber,
         dst: &mut [u8],
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -153,12 +153,12 @@ seam_core::seam!(
     /// false)` (smgr.c) — write one block of a (temp) relation fork from
     /// `src` (`BLCKSZ` bytes). `Err` carries the file-layer `ereport(ERROR)`s.
     pub fn smgr_write(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         backend: types_core::primitive::ProcNumber,
         forknum: types_core::primitive::ForkNumber,
         blocknum: types_core::primitive::BlockNumber,
         src: &[u8],
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -167,13 +167,13 @@ seam_core::seam!(
     /// `nblocks` all-zero blocks starting at `blocknum`. `Err` carries the
     /// file-layer `ereport(ERROR)`s.
     pub fn smgr_zeroextend(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         backend: types_core::primitive::ProcNumber,
         forknum: types_core::primitive::ForkNumber,
         blocknum: types_core::primitive::BlockNumber,
         nblocks: u32,
         skip_fsync: bool,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -182,11 +182,11 @@ seam_core::seam!(
     /// prefetch facility is available. `Err` carries the file-layer
     /// `ereport(ERROR)`s.
     pub fn smgr_prefetch(
-        rlocator: types_storage::RelFileLocator,
+        rlocator: ::types_storage::RelFileLocator,
         backend: types_core::primitive::ProcNumber,
         forknum: types_core::primitive::ForkNumber,
         blocknum: types_core::primitive::BlockNumber,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 // --- backend-utils-init-postinit consumer (smgr.c) ---
@@ -194,5 +194,5 @@ seam_core::seam!(
 seam_core::seam!(
     /// `smgrinit()` (smgr.c): initialize the storage-manager switch and
     /// register its shutdown hook. `Err` carries its `ereport` surface.
-    pub fn smgrinit() -> types_error::PgResult<()>
+    pub fn smgrinit() -> ::types_error::PgResult<()>
 );

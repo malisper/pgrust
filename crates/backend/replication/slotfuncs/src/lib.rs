@@ -40,18 +40,18 @@
 
 use core::cmp::{max, min};
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{InvalidOid, OidIsValid, XLogRecPtr, XLogSegNo};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_tuple::heaptuple::NameData;
-use types_tuple::Datum;
-use wal::WALAvailability;
+use ::types_tuple::heaptuple::NameData;
+use ::types_tuple::Datum;
+use ::wal::WALAvailability;
 use replication_slot_2::{ReplicationSlotInvalidationCause, ReplicationSlotPersistency};
 
 use replication_slot as slot;
@@ -65,7 +65,7 @@ use init_small_seams as smallinit;
 use guc_seams as guc;
 use dfmgr_seams as dfmgr;
 use slotsync_seams as slotsync;
-use replication_libpqwalreceiver::walrcv_table as walreceiver;
+use ::replication_libpqwalreceiver::walrcv_table as walreceiver;
 
 /// `PG_GET_REPLICATION_SLOTS_COLS` — the SRF column count (a local `#define`).
 const PG_GET_REPLICATION_SLOTS_COLS: usize = 20;
@@ -650,7 +650,7 @@ pub fn pg_get_replication_slots<'mcx>(
 /// `namein(s)` / `NameGetDatum` — a 64-byte NUL-padded `NameData` by-reference
 /// Datum image (the C `Name` is a pointer to a fixed-length `NameData`).
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, nd: &NameData) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &nd.data)?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &nd.data)?))
 }
 
 // ---------------------------------------------------------------------------

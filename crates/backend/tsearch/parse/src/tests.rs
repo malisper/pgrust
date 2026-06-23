@@ -17,7 +17,7 @@ use crate::wparser_def::{
     ASCIIHWORD, ASCIIPARTHWORD, ASCIIWORD, DECIMAL_T, EMAIL, NUMWORD, SIGNEDINT, SPACE, TAG_T,
     UNSIGNEDINT, WORD_T,
 };
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERROR};
 use std::cell::RefCell;
 use std::sync::{Mutex, Once};
@@ -102,7 +102,7 @@ fn utf8_to_wchar(from: &[u8]) -> Vec<u32> {
     out
 }
 
-fn report_invalid_encoding(mbstr: &[u8], mblen: i32, len: i32) -> utils_error::PgError {
+fn report_invalid_encoding(mbstr: &[u8], mblen: i32, len: i32) -> ::utils_error::PgError {
     let limit = (mblen.max(0) as usize).min(len.max(0) as usize).min(8);
     let bytes = mbstr
         .iter()
@@ -197,7 +197,7 @@ fn install_env() {
         // char2wchar: pass-through UTF-8 decode unless the test asks it to fail.
         seam::char2wchar::set(|from| {
             if CHAR2WCHAR_FAILS.with(|f| *f.borrow()) {
-                return Err(utils_error::PgError::error(
+                return Err(::utils_error::PgError::error(
                     "simulated char2wchar failure",
                 ));
             }

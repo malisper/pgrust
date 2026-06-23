@@ -5,9 +5,9 @@
 //! here; the `validate_encoding` path is owned locally and is tested.
 
 use super::*;
-use types_error::ERRCODE_INVALID_PARAMETER_VALUE;
-use types_wchar::encoding::{PG_EUC_CN, PG_LATIN1};
-use types_wchar::LC_ISO8859_1;
+use ::types_error::ERRCODE_INVALID_PARAMETER_VALUE;
+use ::types_wchar::encoding::{PG_EUC_CN, PG_LATIN1};
+use ::types_wchar::LC_ISO8859_1;
 
 /// Build a radix tree with the given `chars16` payload and a 1-byte-only root
 /// covering `[lower, upper]` (the rest of the bounds are zeroed, as the C build

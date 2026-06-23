@@ -20,12 +20,12 @@
 //! tuples are dropped (but still fed to `rewrite_heap_dead_tuple` so the rewrite
 //! module can resolve update chains).
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{MultiXactId, TransactionId};
-use types_error::PgResult;
-use rel::Relation;
-use types_slot::SlotData;
-use types_cluster::CopyForClusterResult;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_slot::SlotData;
+use ::types_cluster::CopyForClusterResult;
 
 use heapam as heapam;
 use heapam_visibility as visibility;
@@ -36,16 +36,16 @@ use bufmgr_seams as bufmgr_seam;
 // concrete tuplesort owner depends on this crate's executor seams indirectly;
 // routing the calls through the seams avoids a dependency cycle).
 use tuplesort_seams as tuplesort_seam;
-use execTuples::exec_init_slots::ExecDropSingleTupleTableSlot;
-use execTuples::slot_store_fetch::ExecFetchSlotHeapTuple;
+use ::execTuples::exec_init_slots::ExecDropSingleTupleTableSlot;
+use ::execTuples::slot_store_fetch::ExecFetchSlotHeapTuple;
 
-use types_scan::sdir::ForwardScanDirection;
-use snapshot::snapshot::{SnapshotData, SnapshotType};
-use types_storage::buf::{BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
-use types_storage::Buffer;
-use snapshot::snapshot::HTSV_Result;
+use ::types_scan::sdir::ForwardScanDirection;
+use ::snapshot::snapshot::{SnapshotData, SnapshotType};
+use ::types_storage::buf::{BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
+use ::types_storage::Buffer;
+use ::snapshot::snapshot::HTSV_Result;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, ERROR, WARNING};
 
 /// `heapam_relation_copy_for_cluster(OldHeap, NewHeap, OldIndex, use_sort,
@@ -112,8 +112,8 @@ pub fn heapam_relation_copy_for_cluster<'mcx>(
     let mut slot = table_tableam::table_slot_create(mcx, old_heap)?;
 
     // Scan descriptors — exactly one of these is live.
-    let mut index_scan: Option<types_tableam::relscan::IndexScanDesc<'mcx>> = None;
-    let mut table_scan: Option<std::boxed::Box<types_tableam::relscan::TableScanDescData<'mcx>>> =
+    let mut index_scan: Option<::types_tableam::relscan::IndexScanDesc<'mcx>> = None;
+    let mut table_scan: Option<std::boxed::Box<::types_tableam::relscan::TableScanDescData<'mcx>>> =
         None;
 
     if use_index_scan {
@@ -129,7 +129,7 @@ pub fn heapam_relation_copy_for_cluster<'mcx>(
         // tableScan = table_beginscan(OldHeap, SnapshotAny, 0, NULL);
         // SnapshotAny == None in the value model; the C `table_beginscan` flags
         // are SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE.
-        use types_tableam::relscan::{
+        use ::types_tableam::relscan::{
             SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TYPE_SEQSCAN,
         };
         let flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
@@ -138,7 +138,7 @@ pub fn heapam_relation_copy_for_cluster<'mcx>(
             old_heap.alias(),
             None,
             0,
-            mcx::vec_with_capacity_in(mcx, 0)?,
+            ::mcx::vec_with_capacity_in(mcx, 0)?,
             None,
             flags,
         )?;
@@ -301,7 +301,7 @@ pub fn heapam_relation_copy_for_cluster<'mcx>(
         }
 
         // tuplesort_end(tuplesort).
-        let boxed: mcx::PgBox<'mcx, nodes::Tuplesortstate<'mcx>> = mcx::alloc_in(mcx, ts)?;
+        let boxed: ::mcx::PgBox<'mcx, nodes::Tuplesortstate<'mcx>> = ::mcx::alloc_in(mcx, ts)?;
         tuplesort_seam::tuplesort_end::call(boxed)?;
     }
 

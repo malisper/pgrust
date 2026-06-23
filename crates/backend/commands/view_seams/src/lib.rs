@@ -19,9 +19,9 @@
 //! `AlterTableCmd` node lists itself and calls the real entry points, so no
 //! view-private adapter seams are needed for them.
 
-use mcx::Mcx;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::ddlnodes::ViewStmt;
 
@@ -50,7 +50,7 @@ seam_core::seam!(
     pub fn view_query_is_auto_updatable<'mcx>(
         mcx: Mcx<'mcx>,
         view_query: &Query<'mcx>,
-    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> PgResult<Option<::mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(

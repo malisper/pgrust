@@ -3,7 +3,7 @@
 
 extern crate std;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use ::nodes::nodes::{CmdType, Node};
 
 /// Install exactly the owner seams the analyze SELECT path traverses, once for
@@ -41,7 +41,7 @@ fn init_seams_once() {
 /// Analyze a single SQL statement string into an owned `Query`, asserting it
 /// parsed to exactly one statement.
 fn analyze_one<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     sql: &'mcx str,
 ) -> types_error::PgResult<::nodes::copy_query::Query<'mcx>> {
     let raw = driver::raw_parser(
@@ -53,7 +53,7 @@ fn analyze_one<'mcx>(
     assert_eq!(raw.len(), 1, "expected exactly one raw statement");
 
     let mut pstate = small1::make_parsestate(mcx, None).unwrap();
-    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(sql, mcx).unwrap());
+    pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(sql, mcx).unwrap());
     crate::transformTopLevelStmt(mcx, &mut pstate, &raw[0])
 }
 

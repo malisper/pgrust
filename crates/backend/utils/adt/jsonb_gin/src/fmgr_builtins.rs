@@ -31,8 +31,8 @@
 //! through the typed seam, never through `fn_addr`) — the identical pattern used
 //! by `backend-access-gist-proc` for the GiST opclass support procs.
 
-use datum::Datum;
-use types_error::PgResult;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ fn fc_gin_compare_jsonb(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
 /// a future fmgr-frame call site is added, pointing at the dispatch seam.
 fn fc_jsonb_gin_via_dispatch(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let foid = fcinfo.flinfo.as_ref().map(|fi| fi.fn_oid).unwrap_or(0);
-    Err(types_error::PgError::error(alloc::format!(
+    Err(::types_error::PgError::error(alloc::format!(
         "jsonb GIN support function (OID {foid}) must be invoked through the typed \
          opclass dispatch (backend-utils-adt-jsonb-gin-seams), not the fmgr frame; \
          the owned GIN access method dispatches these by FmgrInfo.fn_oid"

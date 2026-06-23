@@ -33,15 +33,15 @@ mod catalog;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use catalog_catalog::IsReservedName;
-use utils_error::ereport;
+use ::catalog_catalog::IsReservedName;
+use ::utils_error::ereport;
 use mcx::{Mcx, MemoryContext};
-use types_acl::acl::ACL_CREATE;
-use types_acl::acl::{ACLCHECK_NOT_OWNER, ACLCHECK_NO_PRIV, ACLCHECK_OK};
-use types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLE_SPACE_RELATION_ID};
-use types_tuple::access::RELPERSISTENCE_TEMP;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::Oid;
+use ::types_acl::acl::ACL_CREATE;
+use ::types_acl::acl::{ACLCHECK_NOT_OWNER, ACLCHECK_NO_PRIV, ACLCHECK_OK};
+use ::types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLE_SPACE_RELATION_ID};
+use ::types_tuple::access::RELPERSISTENCE_TEMP;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::Oid;
 use types_error::{
     ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST,
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
@@ -50,7 +50,7 @@ use types_error::{
     ERRCODE_RESERVED_NAME, ERRCODE_UNDEFINED_FILE, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, LOG, NOTICE, PANIC, WARNING,
 };
-use types_guc::guc::{GucSource, PGC_S_INTERACTIVE, PGC_S_TEST};
+use ::types_guc::guc::{GucSource, PGC_S_INTERACTIVE, PGC_S_TEST};
 use ::nodes::ddlnodes::{
     AlterTableSpaceOptionsStmt, CreateTableSpaceStmt, DefElem, DropTableSpaceStmt,
 };
@@ -70,13 +70,13 @@ const NAMEDATALEN: usize = 64;
 // The path-layout constants are the workspace's single source of truth
 // (`types-storage`), so the version directory stays in lockstep with
 // `GetDatabasePath` and the relcache init file.
-use types_core::primitive::MAXPGPATH;
-use types_storage::file::{
+use ::types_core::primitive::MAXPGPATH;
+use ::types_storage::file::{
     FORKNAMECHARS, OIDCHARS, PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY,
 };
 
 /// `RM_TBLSPC_ID` (`access/rmgrlist.h`).
-const RM_TBLSPC_ID: types_core::primitive::RmgrId = 5;
+const RM_TBLSPC_ID: ::types_core::primitive::RmgrId = 5;
 /// `XLOG_TBLSPC_CREATE` (`commands/tablespace.h`).
 const XLOG_TBLSPC_CREATE: u8 = 0x00;
 /// `XLOG_TBLSPC_DROP` (`commands/tablespace.h`).
@@ -89,7 +89,7 @@ const NoLock: i32 = 0;
 
 /// `OidIsValid(oid)` (`c.h`).
 fn OidIsValid(oid: Oid) -> bool {
-    oid != types_core::primitive::InvalidOid
+    oid != ::types_core::primitive::InvalidOid
 }
 
 /// `ErrorLocation` for `ereport(...).finish(...)` in this module.
@@ -329,9 +329,9 @@ pub fn CreateTableSpace<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateTableSpaceStmt<'mcx>)
         }
         next
     } else {
-        catalog_catalog::GetNewOidWithIndex(
+        ::catalog_catalog::GetNewOidWithIndex(
             &rel,
-            types_catalog::catalog::TABLESPACE_OID_INDEX_ID,
+            ::types_catalog::catalog::TABLESPACE_OID_INDEX_ID,
             ANUM_PG_TABLESPACE_OID,
         )?
     };
@@ -426,7 +426,7 @@ pub fn DropTableSpace<'mcx>(mcx: Mcx<'mcx>, stmt: &DropTableSpaceStmt<'mcx>) -> 
     }
 
     /* Disallow drop of the standard tablespaces, even by superuser */
-    if catalog_catalog::IsPinnedObject(TABLE_SPACE_RELATION_ID, tablespaceoid) {
+    if ::catalog_catalog::IsPinnedObject(TABLE_SPACE_RELATION_ID, tablespaceoid) {
         aclchk_seams::aclcheck_error::call(
             ACLCHECK_NO_PRIV,
             OBJECT_TABLESPACE,
@@ -1256,7 +1256,7 @@ pub fn get_tablespace_oid<'mcx>(
 pub fn get_tablespace_name<'mcx>(
     mcx: Mcx<'mcx>,
     spc_oid: Oid,
-) -> PgResult<Option<mcx::PgString<'mcx>>> {
+) -> PgResult<Option<::mcx::PgString<'mcx>>> {
     /*
      * Search pg_tablespace.  We use a heapscan here even though there is an
      * index on oid.
@@ -1357,7 +1357,7 @@ fn xlog_tblspc_drop(tablespaceoid: Oid) -> PgResult<()> {
 /// — ask all backends to close their smgr fds and wait.
 fn smgr_release_barrier() -> PgResult<()> {
     let gen = procsignal::EmitProcSignalBarrier(
-        types_storage::storage::ProcSignalBarrierType::PROCSIGNAL_BARRIER_SMGRRELEASE,
+        ::types_storage::storage::ProcSignalBarrierType::PROCSIGNAL_BARRIER_SMGRRELEASE,
     );
     procsignal::WaitForProcSignalBarrier(gen)
 }
@@ -1366,10 +1366,10 @@ fn smgr_release_barrier() -> PgResult<()> {
  * Small helpers
  * ------------------------------------------------------------------------- */
 
-use types_core::primitive::InvalidOid;
+use ::types_core::primitive::InvalidOid;
 
 /// `Anum_pg_tablespace_oid` (`catalog/pg_tablespace.h`) — the `oid` column.
-const ANUM_PG_TABLESPACE_OID: types_core::AttrNumber = 1;
+const ANUM_PG_TABLESPACE_OID: ::types_core::AttrNumber = 1;
 
 /// `CHECKPOINT_IMMEDIATE | CHECKPOINT_FORCE | CHECKPOINT_WAIT`
 /// (`access/xlog.h`).
@@ -1389,7 +1389,7 @@ fn ObjectAddressSet(class_id: Oid, object_id: Oid) -> ObjectAddress {
 /// Build an `ereport(level)` with `errcode_for_file_access()` derived from
 /// `errno` and the `errno` saved so a trailing `%m` in the message expands to
 /// the system error string.
-fn file_access_error(level: ErrorLevel, errno: i32) -> utils_error::ErrorBuilder {
+fn file_access_error(level: ErrorLevel, errno: i32) -> ::utils_error::ErrorBuilder {
     ereport(level)
         .with_saved_errno(errno)
         .errcode_for_file_access()
@@ -1832,17 +1832,17 @@ pub fn init_seams() {
     // GUCs boot to "" and a NULL slot is mapped to "" (C reads `char *` whose
     // boot_val is the empty string).
     glob::default_tablespace::set(|| {
-        Ok(guc_tables::vars::default_tablespace
+        Ok(::guc_tables::vars::default_tablespace
             .read()
             .unwrap_or_default())
     });
     glob::temp_tablespaces::set(|| {
-        Ok(guc_tables::vars::temp_tablespaces
+        Ok(::guc_tables::vars::temp_tablespaces
             .read()
             .unwrap_or_default())
     });
     glob::allow_in_place_tablespaces::set(|| {
-        Ok(guc_tables::vars::allow_in_place_tablespaces.read())
+        Ok(::guc_tables::vars::allow_in_place_tablespaces.read())
     });
 
     // --- ProcessUtility dispatch arms (utility.c tablespace globals) ---------
@@ -1854,7 +1854,7 @@ pub fn init_seams() {
     // outward frontier seam crate; tablespace owns the body. matview always
     // passes partitioned=false.
     matview_deps_seams::get_default_tablespace::set(|relpersistence| {
-        let ctx = mcx::MemoryContext::new("GetDefaultTablespace");
+        let ctx = ::mcx::MemoryContext::new("GetDefaultTablespace");
         GetDefaultTablespace(ctx.mcx(), relpersistence, false)
     });
 }

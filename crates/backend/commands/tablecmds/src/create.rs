@@ -5,13 +5,13 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
 
 use types_acl::{ACLCHECK_OK, ACL_CREATE, ACL_USAGE};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_core::AttrNumber;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_core::AttrNumber;
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
@@ -20,27 +20,27 @@ use ::nodes::ddlnodes::{ConstrType, CreateStmt};
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::primnodes::OnCommitAction;
 use ::nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW, RELPERSISTENCE_TEMP,
     RELPERSISTENCE_UNLOGGED,
 };
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 
-use types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
-use rel::Relation;
-use types_storage::lock::RowExclusiveLock;
+use ::types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
+use ::rel::Relation;
+use ::types_storage::lock::RowExclusiveLock;
 
-use types_tuple::heaptuple::ATTNULLABLE_VALID;
+use ::types_tuple::heaptuple::ATTNULLABLE_VALID;
 
-use common_relation::relation_open;
+use ::common_relation::relation_open;
 use indexing_seams as indexing_seam;
 use relcache_seams as relcache_seam;
-use cache_syscache::SearchSysCacheAttNum;
+use ::cache_syscache::SearchSysCacheAttNum;
 use tupdesc::{
     populate_compact_attribute, CreateTemplateTupleDesc, TupleDescInitEntry,
     TupleDescInitEntryCollation,
 };
-use transam_xact::CommandCounterIncrement;
+use ::transam_xact::CommandCounterIncrement;
 use aclchk_seams as aclchk_seam;
 use heap_seams::{heap_create_with_catalog, HeapCreateWithCatalogArgs};
 use catalog_namespace::{RangeVarGetAndCheckCreationNamespace, RangeVarGetRelid};
@@ -90,8 +90,8 @@ const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
 /// `backend-commands-vacuum::defel_arg`). `None` mirrors `def->arg == NULL`.
 pub(crate) fn defel_arg(
     def: &::nodes::ddlnodes::DefElem<'_>,
-) -> PgResult<Option<define_seams::DefElemArg>> {
-    use define_seams::DefElemArg;
+) -> PgResult<Option<::define_seams::DefElemArg>> {
+    use ::define_seams::DefElemArg;
     let Some(node) = def.arg.as_deref() else {
         return Ok(None);
     };
@@ -231,7 +231,7 @@ pub(crate) fn transform_and_check_reloptions<'mcx>(
 
         // Flatten the DefElem into "name=value"; bare "name" means "name=true".
         let value: String = if def.arg.is_some() {
-            define_seams::def_get_string::call(
+            ::define_seams::def_get_string::call(
                 mcx,
                 defname.to_string(),
                 defel_arg(def)?,
@@ -255,7 +255,7 @@ pub(crate) fn transform_and_check_reloptions<'mcx>(
 
         // acceptOidsOff: filter out WITH (oids=false); error on oids=true.
         if def.defnamespace.is_none() && defname == "oids" {
-            if define_seams::def_get_boolean::call(
+            if ::define_seams::def_get_boolean::call(
                 defname.to_string(),
                 defel_arg(def)?,
             )? {
@@ -375,7 +375,7 @@ pub fn create_toast_for_relation<'mcx>(
 
         // Flatten the DefElem into "name=value"; bare "name" means "name=true".
         let value: String = if def.arg.is_some() {
-            define_seams::def_get_string::call(
+            ::define_seams::def_get_string::call(
                 mcx,
                 defname.to_string(),
                 defel_arg(def)?,
@@ -406,7 +406,7 @@ pub fn create_toast_for_relation<'mcx>(
         // the empty set (a no-op confirming emptiness is acceptable).
         common_reloptions::heap_reloptions(
             mcx,
-            types_tuple::access::RELKIND_TOASTVALUE,
+            ::types_tuple::access::RELKIND_TOASTVALUE,
             None,
             true,
         )?;
@@ -426,7 +426,7 @@ pub fn create_toast_for_relation<'mcx>(
         // (void) heap_reloptions(RELKIND_TOASTVALUE, toast_options, true).
         common_reloptions::heap_reloptions(
             mcx,
-            types_tuple::access::RELKIND_TOASTVALUE,
+            ::types_tuple::access::RELKIND_TOASTVALUE,
             Some(&bytes),
             true,
         )?;
@@ -504,7 +504,7 @@ pub fn define_relation<'mcx>(
     let namespace_id = RangeVarGetAndCheckCreationNamespace(
         mcx,
         &mut access_rv,
-        types_storage::lock::NoLock,
+        ::types_storage::lock::NoLock,
         None,
     )?;
     /* propagate the (possibly temp-promoted) persistence back to the node */
@@ -520,7 +520,7 @@ pub fn define_relation<'mcx>(
     if relpersistence == RELPERSISTENCE_TEMP && miscinit_seam::in_security_restricted_operation::call()
     {
         return ereport(ERROR)
-            .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errcode(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg("cannot create temporary table within security-restricted operation")
             .finish(here("DefineRelation"))
             .map(|()| object_address_set(InvalidOid, InvalidOid));
@@ -530,9 +530,9 @@ pub fn define_relation<'mcx>(
      * Determine the lockmode to use when scanning parents.
      */
     let parent_lockmode = if stmt.partbound.is_some() {
-        types_storage::lock::AccessExclusiveLock
+        ::types_storage::lock::AccessExclusiveLock
     } else {
-        types_storage::lock::ShareUpdateExclusiveLock
+        ::types_storage::lock::ShareUpdateExclusiveLock
     };
 
     /* Determine the list of OIDs of the parents. */
@@ -546,7 +546,7 @@ pub fn define_relation<'mcx>(
         if inherit_oids.contains(&parent_oid) {
             let pname = lsyscache_seam::get_rel_name::call(mcx, parent_oid)?;
             return ereport(ERROR)
-                .errcode(types_error::ERRCODE_DUPLICATE_TABLE)
+                .errcode(::types_error::ERRCODE_DUPLICATE_TABLE)
                 .errmsg(format!(
                     "relation \"{}\" would be inherited from more than once",
                     pname.as_ref().map(|s| s.as_str()).unwrap_or("")
@@ -750,7 +750,7 @@ pub fn define_relation<'mcx>(
     /*
      * Open the new relation and acquire exclusive lock on it.
      */
-    let rel = relation_open(mcx, relation_id, types_storage::lock::AccessExclusiveLock)?;
+    let rel = relation_open(mcx, relation_id, ::types_storage::lock::AccessExclusiveLock)?;
 
     /*
      * Now add any newly specified column default and generation expressions to
@@ -841,8 +841,8 @@ pub fn define_relation<'mcx>(
      * matching C's in-place rebuild.
      */
     let rel = {
-        rel.close(types_storage::lock::NoLock)?;
-        relation_open(mcx, relation_id, types_storage::lock::NoLock)?
+        rel.close(::types_storage::lock::NoLock)?;
+        relation_open(mcx, relation_id, ::types_storage::lock::NoLock)?
     };
 
     /*
@@ -879,7 +879,7 @@ pub fn define_relation<'mcx>(
     /*
      * Clean up.  We keep lock on new relation.
      */
-    rel.close(types_storage::lock::NoLock)?;
+    rel.close(::types_storage::lock::NoLock)?;
 
     Ok(address)
 }
@@ -1062,8 +1062,8 @@ pub fn set_attnotnull<'mcx>(
 /// they are deliberately excluded here — matching pg_class.h exactly.
 fn RELKIND_HAS_TABLE_AM(relkind: u8) -> bool {
     relkind == RELKIND_RELATION
-        || relkind == types_tuple::access::RELKIND_TOASTVALUE
-        || relkind == types_tuple::access::RELKIND_MATVIEW
+        || relkind == ::types_tuple::access::RELKIND_TOASTVALUE
+        || relkind == ::types_tuple::access::RELKIND_MATVIEW
 }
 
 /// `BuildDescForRelation(const List *columns)` (tablecmds.c:1380).
@@ -1183,7 +1183,7 @@ pub fn store_catalog_inheritance_supers<'mcx>(
      */
     let inh_relation = relation_open(
         mcx,
-        types_catalog::pg_inherits::InheritsRelationId,
+        ::types_catalog::pg_inherits::InheritsRelationId,
         RowExclusiveLock,
     )?;
 
@@ -1234,11 +1234,11 @@ fn store_catalog_inheritance1<'mcx>(
 /// an AUTO dependency, regular inheritance children a NORMAL one.
 fn child_dependency_type(
     child_is_partition: bool,
-) -> types_catalog::catalog_dependency::DependencyType {
+) -> ::types_catalog::catalog_dependency::DependencyType {
     if child_is_partition {
-        types_catalog::catalog_dependency::DEPENDENCY_AUTO
+        ::types_catalog::catalog_dependency::DEPENDENCY_AUTO
     } else {
-        types_catalog::catalog_dependency::DEPENDENCY_NORMAL
+        ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL
     }
 }
 
@@ -1260,7 +1260,7 @@ pub fn findAttrByName(attribute_name: &str, columns: &[ColumnDef<'_>]) -> i32 {
 /// enum value (used in F1+ ALTER error messages).
 #[allow(dead_code)]
 pub(crate) fn storage_name(c: i8) -> &'static str {
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN, TYPSTORAGE_PLAIN,
     };
     match c {
@@ -1319,7 +1319,7 @@ pub(crate) fn get_attribute_compression(
 /// for the column type. Used both by `DefineRelation` (column-level STORAGE in
 /// CREATE TABLE) and `ATExecSetStorage` (ALTER COLUMN SET STORAGE).
 pub(crate) fn get_attribute_storage(atttypid: Oid, storagemode: &str) -> PgResult<i8> {
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         TYPSTORAGE_EXTENDED, TYPSTORAGE_EXTERNAL, TYPSTORAGE_MAIN, TYPSTORAGE_PLAIN,
     };
 
@@ -1360,7 +1360,7 @@ pub(crate) fn get_attribute_storage(atttypid: Oid, storagemode: &str) -> PgResul
 /// `get_typstorage(typid) != TYPSTORAGE_PLAIN`.
 fn type_is_toastable(typid: Oid) -> PgResult<bool> {
     let storage = lsyscache_seam::get_typstorage::call(typid)?;
-    Ok(storage as i8 != types_tuple::heaptuple::TYPSTORAGE_PLAIN)
+    Ok(storage as i8 != ::types_tuple::heaptuple::TYPSTORAGE_PLAIN)
 }
 
 // ---------------------------------------------------------------------------

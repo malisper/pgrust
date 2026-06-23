@@ -14,14 +14,14 @@
 //! `PG_RETURN_*` marshaling lives in [`crate::fmgr_builtins`].
 
 use crate::PrivMap;
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_acl::{
     acl_grant_option_for, AclMode, AclResult, ACLCHECK_NO_PRIV, ACLCHECK_OK, ACLMASK_ANY,
     ACL_ALTER_SYSTEM, ACL_CONNECT, ACL_CREATE, ACL_CREATE_TEMP, ACL_DELETE, ACL_EXECUTE,
     ACL_INSERT, ACL_MAINTAIN, ACL_REFERENCES, ACL_SELECT, ACL_SET, ACL_TRIGGER, ACL_TRUNCATE,
     ACL_UPDATE, ACL_USAGE,
 };
-use types_core::primitive::{AttrNumber, InvalidAttrNumber, OidIsValid};
+use ::types_core::primitive::{AttrNumber, InvalidAttrNumber, OidIsValid};
 use types_core::{
     Oid, DATABASE_RELATION_ID, FOREIGN_DATA_WRAPPER_RELATION_ID, FOREIGN_SERVER_RELATION_ID,
     LANGUAGE_RELATION_ID, NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, TABLE_SPACE_RELATION_ID,
@@ -31,10 +31,10 @@ use types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
 };
-use types_storage::lock::NoLock;
-use types_tuple::access::RELKIND_SEQUENCE;
+use ::types_storage::lock::NoLock;
+use ::types_tuple::access::RELKIND_SEQUENCE;
 
-use pgstrcasecmp::pg_strcasecmp;
+use ::pgstrcasecmp::pg_strcasecmp;
 
 use aclchk_seams as aclchk;
 use namespace_seams as namespace;
@@ -148,7 +148,7 @@ fn not_a_sequence(name: &str) -> PgError {
 
 /// C: `get_rel_name(oid)` returns NULL for a missing relation; the error
 /// messages then print the (possibly empty) name. Mirror that string view.
-fn rel_name_str<'a>(name: &'a Option<mcx::PgString<'_>>) -> &'a str {
+fn rel_name_str<'a>(name: &'a Option<::mcx::PgString<'_>>) -> &'a str {
     match name {
         Some(s) => s.as_str(),
         None => "",

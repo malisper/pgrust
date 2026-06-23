@@ -18,7 +18,7 @@
 //! subsystem.
 //!
 //! The hooks are installed into the typed GUC slots in
-//! [`guc_tables::hooks`] from [`init_seams`].
+//! [`::guc_tables::hooks`] from [`init_seams`].
 //!
 //! ## The GUC slot contract (`guc-tables/slots.rs`)
 //!
@@ -46,7 +46,7 @@ use std::any::Any;
 use misc_guc::{
     GUC_check_errcode, GUC_check_errdetail, GUC_check_errhint, GUC_check_errmsg,
 };
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use types_core::{
     InvalidOid, Oid, OidIsValid, DATEORDER_DMY, DATEORDER_MDY, DATEORDER_YMD, USE_GERMAN_DATES,
     USE_ISO_DATES, USE_POSTGRES_DATES, USE_SQL_DATES,
@@ -58,8 +58,8 @@ use types_error::{
 };
 use types_guc::{GucSource, PGC_S_DEFAULT, PGC_S_INTERACTIVE, PGC_S_TEST};
 
-use guc_tables::hooks;
-use guc_tables::GucHookExtra;
+use ::guc_tables::hooks;
+use ::guc_tables::GucHookExtra;
 
 // Owner seam crates this unit reaches into.
 use transam_parallel as parallel;
@@ -69,7 +69,7 @@ use variable_seams as own;
 use acl_seams as acl;
 use superuser_seams as superuser;
 
-const XACT_SERIALIZABLE: i32 = types_core::XACT_SERIALIZABLE;
+const XACT_SERIALIZABLE: i32 = ::types_core::XACT_SERIALIZABLE;
 
 #[cfg(test)]
 mod tests;
@@ -1032,7 +1032,7 @@ pub fn assign_maintenance_io_concurrency(_newval: i32, _extra: Option<&GucHookEx
 /// This mirrors C's two one-line assign-hooks (variable.c L1163-1172), which both
 /// write the file-scope effective `io_combine_limit` global in bufmgr.c.
 fn recompute_io_combine_limit(newval: i32, from_max: bool) {
-    use guc_tables::vars;
+    use ::guc_tables::vars;
     let effective = if from_max {
         std::cmp::min(newval, vars::io_combine_limit_guc.read())
     } else {
@@ -1194,9 +1194,9 @@ pub fn init_seams() {
 /// (mirror-pg-and-panic) until that owner lands. No subsystem logic lives here.
 mod install {
     use super::own;
-    use utils_error::ereport;
-    use types_error::error::{LOG, NOTICE};
-    use types_error::ErrorLocation;
+    use ::utils_error::ereport;
+    use ::types_error::error::{LOG, NOTICE};
+    use ::types_error::ErrorLocation;
 
     fn here(fn_name: &'static str) -> ErrorLocation {
         ErrorLocation::new("../src/backend/commands/variable.c", 0, fn_name)
@@ -1265,7 +1265,7 @@ mod install {
             // contract means an unknown name is a hard error; here the store
             // lookup returns None for both unknown and value-less, which for the
             // only caller (the always-present "datestyle") cannot happen.
-            match misc_guc::get_reset_string(&name) {
+            match ::misc_guc::get_reset_string(&name) {
                 Some(Some(s)) => Ok(s),
                 Some(None) => Ok(String::new()),
                 None => Ok(String::new()),
@@ -1346,7 +1346,7 @@ mod install {
         // procs are reachable (may run a syscache scan, so a transient context
         // backs the lookup). `< 0` means not (yet) usable.
         own::prepare_client_encoding::set(|encoding| {
-            let scratch = mcx::MemoryContext::new("PrepareClientEncoding");
+            let scratch = ::mcx::MemoryContext::new("PrepareClientEncoding");
             mbutils::PrepareClientEncoding(scratch.mcx(), encoding)
         });
         // `assign_client_encoding`'s `SetClientEncoding(encoding)` (mbutils.c)
@@ -1374,7 +1374,7 @@ mod install {
             // The C `bool current_role_is_superuser` is the GUC-tables backing
             // variable for the `is_superuser` GUC, maintained via
             // SetConfigOption("is_superuser", ...) in SetOuterUserId.
-            guc_tables::backing::current_role_is_superuser()
+            ::guc_tables::backing::current_role_is_superuser()
         });
         own::set_session_authorization::set(
             miscinit::SetSessionAuthorization,
@@ -1382,7 +1382,7 @@ mod install {
         own::set_current_role_id::set(miscinit::SetCurrentRoleId);
         own::role_string::set(|| {
             // The `role` GUC's string storage (guc-tables `role_string` var).
-            guc_tables::vars::role_string.read()
+            ::guc_tables::vars::role_string.read()
         });
 
         // -------- syscache (AUTHNAME, unported) — delegate to its seam --------
@@ -1411,7 +1411,7 @@ mod install {
         // -------- io_combine_limit / xlogprefetcher --------
         own::am_startup_process::set(|| {
             init_small_seams::my_backend_type::call()
-                == types_core::init::BackendType::Startup
+                == ::types_core::init::BackendType::Startup
         });
         own::xlog_prefetch_reconfigure::set(
             xlogprefetcher::XLogPrefetchReconfigure,

@@ -13,7 +13,7 @@
 #![allow(non_camel_case_types)]
 
 use types_core::{Oid, TransactionId, XLogRecPtr, NAMEDATALEN};
-use types_tuple::heaptuple::NameData;
+use ::types_tuple::heaptuple::NameData;
 
 /// `PG_REPLSLOT_DIR` (slot.h) — directory to store replication slot data in.
 pub const PG_REPLSLOT_DIR: &str = "pg_replslot";
@@ -169,11 +169,11 @@ pub struct SlotInvalidationCauseMap {
 /// `SlotIsPhysical(slot)` — `slot->data.database == InvalidOid`.
 #[inline]
 pub fn slot_is_physical(data: &ReplicationSlotPersistentData) -> bool {
-    data.database == types_core::InvalidOid
+    data.database == ::types_core::InvalidOid
 }
 
 /// `SlotIsLogical(slot)` — `slot->data.database != InvalidOid`.
 #[inline]
 pub fn slot_is_logical(data: &ReplicationSlotPersistentData) -> bool {
-    data.database != types_core::InvalidOid
+    data.database != ::types_core::InvalidOid
 }

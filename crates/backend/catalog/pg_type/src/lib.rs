@@ -42,36 +42,36 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
-use array::ArrayType;
-use types_catalog::catalog::{
+use ::array::ArrayType;
+use ::types_catalog::catalog::{
     COLLATION_RELATION_ID, NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, RELATION_RELATION_ID,
 };
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
 };
-use types_catalog::pg_type::{
+use ::types_catalog::pg_type::{
     type_create_fields, Anum_pg_type_oid, PgTypeInsertRow, TypeCreateParams, TypeFormFields,
     TypeOidIndexId, TypeRelationId,
     TYPTYPE_MULTIRANGE,
 };
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_core::fmgr::F_OIDEQ;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_tuple::heaptuple::Datum as HeapDatum;
-use utils_error::ereport;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_tuple::heaptuple::Datum as HeapDatum;
+use ::utils_error::ereport;
 use types_error::{PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use types_storage::lock::RowExclusiveLock;
-use types_tuple::heaptuple::{
+use ::types_storage::lock::RowExclusiveLock;
+use ::types_tuple::heaptuple::{
     DEFAULT_COLLATION_OID, TYPALIGN_CHAR, TYPALIGN_DOUBLE, TYPALIGN_INT, TYPALIGN_SHORT,
     TYPSTORAGE_PLAIN,
 };
 
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
-use table::table_open;
+use ::table::table_open;
 use dependency::{
     add_exact_object_address, new_object_addresses, record_object_address_dependencies,
     recordDependencyOnExpr,
@@ -83,21 +83,21 @@ use pg_shdepend::{deleteSharedDependencyRecordsFor, recordDependencyOnOwner};
 use aclchk_seams::{aclcheck_error, get_user_default_acl, record_dependency_on_new_acl};
 use binary_upgrade_seams as binary_upgrade_seams;
 use indexing_seams as indexing_seams;
-use pg_depend_seams::recordDependencyOnCurrentExtension;
-use read_seams::string_to_node;
+use ::pg_depend_seams::recordDependencyOnCurrentExtension;
+use ::read_seams::string_to_node;
 use lsyscache_seams::{get_array_type, get_element_type, get_typisdefined};
 use syscache_seams::{get_type_oid, pg_type_form, type_exists};
-use miscinit_seams::is_bootstrap_processing_mode;
+use ::miscinit_seams::is_bootstrap_processing_mode;
 
-use types_acl::acl::ACLCHECK_NOT_OWNER;
+use ::types_acl::acl::ACLCHECK_NOT_OWNER;
 use ::nodes::parsenodes::OBJECT_TYPE;
 
 /// `RELKIND_COMPOSITE_TYPE` (`catalog/pg_class.h`) — `pg_class.relkind` for a
 /// stand-alone composite type.
-const RELKIND_COMPOSITE_TYPE: i8 = types_tuple::access::RELKIND_COMPOSITE_TYPE as i8;
+const RELKIND_COMPOSITE_TYPE: i8 = ::types_tuple::access::RELKIND_COMPOSITE_TYPE as i8;
 
 /// `NAMEDATALEN` (`pg_config_manual.h`).
-const NAMEDATALEN: i32 = types_core::NAMEDATALEN;
+const NAMEDATALEN: i32 = ::types_core::NAMEDATALEN;
 
 /// `ObjectAddressSet(object, classId, objectId)` (objectaddress.h).
 #[inline]
@@ -311,13 +311,13 @@ pub fn TypeCreate(params: TypeCreateParams) -> PgResult<ObjectAddress> {
     /*
      * Initialize the type's ACL.  Dependent types don't get one.
      */
-    let typacl: Option<types_tuple::heaptuple::Datum> = if isDependentType {
+    let typacl: Option<::types_tuple::heaptuple::Datum> = if isDependentType {
         None
     } else {
         get_user_default_acl::call(mcx, OBJECT_TYPE, params.owner_id, params.type_namespace)?
     };
     let typacl_bytes: Option<Vec<u8>> = match &typacl {
-        Some(types_tuple::heaptuple::Datum::ByRef(b)) => Some(b[..].to_vec()),
+        Some(::types_tuple::heaptuple::Datum::ByRef(b)) => Some(b[..].to_vec()),
         _ => None,
     };
 
@@ -422,7 +422,7 @@ pub fn TypeCreate(params: TypeCreateParams) -> PgResult<ObjectAddress> {
 }
 
 /// `errmsg("alignment \"%c\" is invalid for passed-by-value type of size %d")`.
-fn invalid_byval_alignment(alignment: i8, internal_size: i16) -> types_error::PgError {
+fn invalid_byval_alignment(alignment: i8, internal_size: i16) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INVALID_OBJECT_DEFINITION)
         .errmsg(format!(
@@ -457,10 +457,10 @@ fn build_insert_row(
 /// `pg_type` row crosses as [`TypeFormFields`]; `default_expr_bin` is the cooked
 /// default's `nodeToString` text (`None` = SQL NULL); `typacl` the ACL array.
 fn generate_type_dependencies<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     typeForm: &TypeFormFields,
     default_expr_bin: Option<String>,
-    typacl: Option<types_tuple::heaptuple::Datum<'mcx>>,
+    typacl: Option<::types_tuple::heaptuple::Datum<'mcx>>,
     relationKind: i8,
     isImplicitArray: bool,
     isDependentType: bool,
@@ -765,10 +765,10 @@ fn fetch_type_form_internal(type_oid: Oid) -> PgResult<TypeFormFields> {
     }
 }
 
-/// Project the on-disk [`FormData_pg_type`](types_tuple::pg_type::FormData_pg_type)
+/// Project the on-disk [`FormData_pg_type`](::types_tuple::pg_type::FormData_pg_type)
 /// fixed-part struct onto the owned [`TypeFormFields`] (the `RegProcedure`
 /// columns are `Oid`s; `typname` `NameData` → `String`).
-fn form_to_fields(f: &types_tuple::pg_type::FormData_pg_type) -> TypeFormFields {
+fn form_to_fields(f: &::types_tuple::pg_type::FormData_pg_type) -> TypeFormFields {
     TypeFormFields {
         oid: f.oid,
         typname: String::from_utf8_lossy(f.typname.name_str()).into_owned(),
@@ -969,7 +969,7 @@ fn set_domain_default(
 fn alter_type_recurse_update(
     type_oid: Oid,
     is_implicit_array: bool,
-    attr: types_catalog::pg_type::TypeAttrUpdate,
+    attr: ::types_catalog::pg_type::TypeAttrUpdate,
 ) -> PgResult<Oid> {
     let ctx = MemoryContext::new("AlterTypeRecurse");
     let mcx = ctx.mcx();
@@ -1037,7 +1037,7 @@ fn alter_type_recurse_update(
 /// `typtype == TYPTYPE_DOMAIN`. The full-table (non-index) scan + per-row
 /// `GETSTRUCT` deform run here; typecmds re-fires `AlterTypeRecurse` over each.
 fn scan_domains_over_basetype(base_type_oid: Oid) -> PgResult<Vec<Oid>> {
-    use types_catalog::pg_type::{Anum_pg_type_typbasetype, TYPTYPE_DOMAIN};
+    use ::types_catalog::pg_type::{Anum_pg_type_typbasetype, TYPTYPE_DOMAIN};
 
     let ctx = MemoryContext::new("scan_domains_over_basetype");
     let relation = table_open(ctx.mcx(), TypeRelationId, RowExclusiveLock)?;
@@ -1076,7 +1076,7 @@ fn scan_domains_over_basetype(base_type_oid: Oid) -> PgResult<Vec<Oid>> {
         )?;
 
         let domain_oid = cols[(Anum_pg_type_oid - 1) as usize].0.as_oid();
-        let typtype = cols[(types_catalog::pg_type::Anum_pg_type_typtype - 1) as usize]
+        let typtype = cols[(::types_catalog::pg_type::Anum_pg_type_typtype - 1) as usize]
             .0
             .as_char();
 
@@ -1116,8 +1116,8 @@ pub fn init_seams() {
             let ctx = MemoryContext::new("GenerateTypeDependencies");
             let mcx = ctx.mcx();
             let typacl = match typacl {
-                Some(image) => Some(types_tuple::heaptuple::Datum::ByRef(
-                    mcx::slice_in(mcx, &image)?,
+                Some(image) => Some(::types_tuple::heaptuple::Datum::ByRef(
+                    ::mcx::slice_in(mcx, &image)?,
                 )),
                 None => None,
             };

@@ -11,7 +11,7 @@
 //! exactly from `pg_proc.dat`: both rows are `nargs => 1`, `proisstrict 't'`,
 //! `proretset 'f'`.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARHDRSZ` — the 4-byte uncompressed varlena length word.

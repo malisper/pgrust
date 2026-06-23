@@ -13,8 +13,8 @@
 
 #![allow(non_snake_case)]
 
-use tsearch::backend_access_gin_ginlogic::GinScanKey;
-use tsearch::gin::GinTernaryValue;
+use ::tsearch::backend_access_gin_ginlogic::GinScanKey;
+use ::tsearch::gin::GinTernaryValue;
 
 seam_core::seam!(
     /// `FunctionCall8Coll(key->consistentFmgrInfo, key->collation, ...)`

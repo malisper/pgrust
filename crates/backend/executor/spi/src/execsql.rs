@@ -18,15 +18,15 @@
 //! the bare-word channel does not).
 
 use mcx::{MemoryContext, Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::CmdType;
 use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
 use ::nodes::parsestmt::{CachedPlanHandle, PlpgsqlExprParseState};
-use parsenodes::RawParseMode;
-use types_resowner::ResourceOwner;
-use types_tuple::Datum as RichDatum;
+use ::parsenodes::RawParseMode;
+use ::types_resowner::ResourceOwner;
+use ::types_tuple::Datum as RichDatum;
 
 use crate::backbone::set_spi_processed;
 use crate::dest_spi::{create_spi_dest_receiver, take_spi_raw_result, RawCol};
@@ -526,7 +526,7 @@ pub(crate) fn build_param_list(
                 value: RichDatum::null(),
                 isnull: true,
                 pflags: PARAM_FLAG_CONST,
-                ptype: types_core::InvalidOid,
+                ptype: ::types_core::InvalidOid,
             });
         }
     }
@@ -705,7 +705,7 @@ fn run_one_execsql_stmt<'mcx>(
                     typeid: columns
                         .get(i)
                         .map(|c| c.typeid)
-                        .unwrap_or(types_core::InvalidOid),
+                        .unwrap_or(::types_core::InvalidOid),
                     name: columns.get(i).map(|c| c.name.clone()).unwrap_or_default(),
                     byref: col.byref.clone(),
                 })
@@ -777,7 +777,7 @@ fn run_one_execsql_stmt<'mcx>(
             .map(|(i, col): (usize, &RawCol)| ExecsqlColumn {
                 value: col.value,
                 isnull: col.isnull,
-                typeid: columns.get(i).map(|c| c.typeid).unwrap_or(types_core::InvalidOid),
+                typeid: columns.get(i).map(|c| c.typeid).unwrap_or(::types_core::InvalidOid),
                 name: columns.get(i).map(|c| c.name.clone()).unwrap_or_default(),
                 byref: col.byref.clone(),
             })

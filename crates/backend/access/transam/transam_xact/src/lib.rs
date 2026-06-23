@@ -45,8 +45,8 @@
 use std::cell::RefCell;
 
 use utils_error::{elog, ereport, message_level_is_interesting};
-use mcx::MemoryContext;
-use types_core::xact::*;
+use ::mcx::MemoryContext;
+use ::types_core::xact::*;
 use types_core::{LocalTransactionId, TimestampTz, TransactionId, XLogRecPtr};
 use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG5, ERRCODE_ACTIVE_SQL_TRANSACTION,
@@ -111,7 +111,7 @@ pub(crate) struct TransactionNode {
     /// reserves carries the same bound + OOM surface.)
     pub child_xids: Vec<TransactionId>,
     /// `prevUser` / `prevSecContext` (GetUserIdAndSecContext at start).
-    pub prev_user: types_core::Oid,
+    pub prev_user: ::types_core::Oid,
     pub prev_sec_context: i32,
     pub prev_xact_read_only: bool,
     pub started_in_recovery: bool,
@@ -1555,7 +1555,7 @@ pub fn IsSubTransaction() -> bool {
 /// `set_my_xact_flags_acquired_access_exclusive_lock`.
 fn seam_set_my_xact_flags_acquired_access_exclusive_lock() {
     xs(|s| {
-        s.MyXactFlags |= types_core::xact::XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK;
+        s.MyXactFlags |= ::types_core::xact::XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK;
     });
 }
 
@@ -1563,7 +1563,7 @@ fn seam_set_my_xact_flags_acquired_access_exclusive_lock() {
 /// `set_xact_accessed_temp_namespace`.
 fn seam_set_xact_accessed_temp_namespace() {
     xs(|s| {
-        s.MyXactFlags |= types_core::xact::XACT_FLAGS_ACCESSEDTEMPNAMESPACE;
+        s.MyXactFlags |= ::types_core::xact::XACT_FLAGS_ACCESSEDTEMPNAMESPACE;
     });
 }
 
@@ -1574,14 +1574,14 @@ fn seam_set_xact_accessed_temp_namespace() {
 /// declared in `tablecmds-seams` next to its consumer.
 fn seam_xact_accessed_temp_namespace() -> PgResult<bool> {
     Ok(xs(|s| {
-        (s.MyXactFlags & types_core::xact::XACT_FLAGS_ACCESSEDTEMPNAMESPACE) != 0
+        (s.MyXactFlags & ::types_core::xact::XACT_FLAGS_ACCESSEDTEMPNAMESPACE) != 0
     }))
 }
 
 /// Read `XactLastRecEnd` — the end LSN of the last WAL record written by this
 /// backend. Owned by xlog.c; this crate forwards via the xlog seam (the xact
 /// crate drives that global through `set_xact_last_rec_end`).
-fn seam_xact_last_rec_end() -> types_core::XLogRecPtr {
+fn seam_xact_last_rec_end() -> ::types_core::XLogRecPtr {
     xlog_seams::xact_last_rec_end::call()
 }
 
@@ -1610,11 +1610,11 @@ fn seam_xact_redo(record: &mut ::wal::rmgr::XLogReaderState<'_>) -> PgResult<()>
 
 /// The xact-records argument bundles carry `wal`'s own `RelFileLocator`
 /// and `types_core`'s `XlXactStatsItem`; the in-crate WAL builders take
-/// `types_storage::RelFileLocator` / `::wal::XlXactStatsItem`. These are the
+/// `::types_storage::RelFileLocator` / `::wal::XlXactStatsItem`. These are the
 /// same C structs under different nominal types; convert field-for-field.
-fn convert_rels(rels: &[::wal::RelFileLocator]) -> Vec<types_storage::RelFileLocator> {
+fn convert_rels(rels: &[::wal::RelFileLocator]) -> Vec<::types_storage::RelFileLocator> {
     rels.iter()
-        .map(|r| types_storage::RelFileLocator {
+        .map(|r| ::types_storage::RelFileLocator {
             spcOid: r.spc_oid(),
             dbOid: r.db_oid(),
             relNumber: r.rel_number(),
@@ -1622,7 +1622,7 @@ fn convert_rels(rels: &[::wal::RelFileLocator]) -> Vec<types_storage::RelFileLoc
         .collect()
 }
 
-fn convert_stats(stats: &[types_core::xact::XlXactStatsItem]) -> Vec<::wal::XlXactStatsItem> {
+fn convert_stats(stats: &[::types_core::xact::XlXactStatsItem]) -> Vec<::wal::XlXactStatsItem> {
     stats
         .iter()
         .map(|s| ::wal::XlXactStatsItem {
@@ -1872,8 +1872,8 @@ pub fn init_seams() {
     // xact.c). The GUC core / SyncRepRequested read it via `vars::`; install the
     // accessors backed by the xact-state field so the GUC `set` writes through
     // and reads see the live value.
-    guc_tables::vars::synchronous_commit.install(
-        guc_tables::GucVarAccessors {
+    ::guc_tables::vars::synchronous_commit.install(
+        ::guc_tables::GucVarAccessors {
             get: synchronous_commit,
             set: SetSynchronousCommit,
         },

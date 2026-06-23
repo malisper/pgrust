@@ -23,39 +23,39 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_amapi::{
     CompareType, IndexAmRoutine, IndexBuildResult, COMPARE_EQ, COMPARE_INVALID, T_IndexAmRoutine,
 };
 // Vtable-facing types (F2/F3): unified descriptor + erased AM-opaque carrier (A0).
-use types_tableam::amapi::{
+use ::types_tableam::amapi::{
     AmCostEstimate, IndexPath, IndexUniqueCheck as AmIndexUniqueCheck, OpFamilyMember,
     PlannerInfo, TIDBitmap as AmTIDBitmap,
 };
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::genam::{
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::genam::{
     IndexBulkDeleteResult as AmIndexBulkDeleteResult, IndexVacuumInfo,
 };
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
-use types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Oid};
-use types_core::catalog::RELPERSISTENCE_TEMP;
-use types_core::INT4OID;
-use types_error::PgResult;
-use hash::hash::{HTEqualStrategyNumber, HTMaxStrategyNumber, HASHNProcs, HASHOPTIONS_PROC};
-use hash::hashpage::{
+use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use ::types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Oid};
+use ::types_core::catalog::RELPERSISTENCE_TEMP;
+use ::types_core::INT4OID;
+use ::types_error::PgResult;
+use ::hash::hash::{HTEqualStrategyNumber, HTMaxStrategyNumber, HASHNProcs, HASHOPTIONS_PROC};
+use ::hash::hashpage::{
     Bucket, HashScanPosIsValid, InvalidBucket, H_BUCKET_BEING_SPLIT, H_HAS_DEAD_TUPLES,
     H_NEEDS_SPLIT_CLEANUP, LH_BUCKET_NEEDS_SPLIT_CLEANUP, LH_BUCKET_PAGE, LH_OVERFLOW_PAGE,
     LH_PAGE_HAS_DEAD_TUPLES, MaxIndexTuplesPerPage, HASH_METAPAGE, HASH_NOLOCK, HASH_WRITE,
 };
-use types_scan::scankey::{ScanKeyData, StrategyNumber, InvalidStrategy};
-use types_scan::sdir::ScanDirection;
-use types_storage::buf::BufferAccessStrategy;
-use types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
-use types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_scan::scankey::{ScanKeyData, StrategyNumber, InvalidStrategy};
+use ::types_scan::sdir::ScanDirection;
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
+use ::types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use indextuple_seams::index_form_tuple;
+use ::indextuple_seams::index_form_tuple;
 use hash_core as core;
 use bufmgr_seams as bufmgr;
 use page::{
@@ -72,7 +72,7 @@ const VACUUM_OPTION_PARALLEL_BULKDEL: u8 = 1 << 0;
 const PROGRESS_CREATEIDX_TUPLES_TOTAL: i32 = 8;
 
 // WAL: hash rmgr id + op codes (access/rmgrlist.h, access/hash_xlog.h).
-const RM_HASH_ID: types_core::RmgrId = 12;
+const RM_HASH_ID: ::types_core::RmgrId = 12;
 const XLOG_HASH_DELETE: u8 = 0x90;
 const XLOG_HASH_SPLIT_CLEANUP: u8 = 0xA0;
 const XLOG_HASH_UPDATE_META_PAGE: u8 = 0xB0;
@@ -429,14 +429,14 @@ fn relation_get_index_scan<'mcx>(
 fn erase_hashscan<'mcx>(
     mcx: Mcx<'mcx>,
     hashscan: core::HashScan<'mcx>,
-) -> PgResult<mcx::PgBox<'mcx, dyn types_tableam::amopaque::AmOpaque<'mcx> + 'mcx>> {
-    let boxed: mcx::PgBox<'mcx, core::HashScan<'mcx>> = mcx::alloc_in(mcx, hashscan)?;
-    let (ptr, alloc) = mcx::PgBox::into_raw_with_allocator(boxed);
+) -> PgResult<::mcx::PgBox<'mcx, dyn ::types_tableam::amopaque::AmOpaque<'mcx> + 'mcx>> {
+    let boxed: ::mcx::PgBox<'mcx, core::HashScan<'mcx>> = ::mcx::alloc_in(mcx, hashscan)?;
+    let (ptr, alloc) = ::mcx::PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn AmOpaque` vtable (the A0 erase pattern).
     Ok(unsafe {
-        mcx::PgBox::from_raw_in(
-            ptr as *mut (dyn types_tableam::amopaque::AmOpaque<'mcx> + 'mcx),
+        ::mcx::PgBox::from_raw_in(
+            ptr as *mut (dyn ::types_tableam::amopaque::AmOpaque<'mcx> + 'mcx),
             alloc,
         )
     })
@@ -468,7 +468,7 @@ pub fn hashbuild<'mcx>(
     if bufmgr::relation_get_number_of_blocks_in_fork::call(index, ForkNumber::MAIN_FORKNUM)?
         != 0
     {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "index already contains data",
         ));
     }
@@ -487,7 +487,7 @@ pub fn hashbuild<'mcx>(
     let mut sort_threshold: usize = (guc_seams::maintenance_work_mem::call()
         as usize
         * 1024)
-        / types_core::primitive::BLCKSZ;
+        / ::types_core::primitive::BLCKSZ;
     if index.rd_rel.relpersistence != RELPERSISTENCE_TEMP {
         // Min(sort_threshold, NBuffers).
         let nbuffers = init_small_seams::nbuffers::call() as usize;
@@ -763,8 +763,8 @@ pub fn hashbeginscan<'mcx>(
     // no order by operators allowed
     debug_assert!(norderbys == 0);
 
-    let mut so = hash::hashpage::HashScanOpaqueData::default();
-    hash::hashpage::HashScanPosInvalidate(&mut so.currPos);
+    let mut so = ::hash::hashpage::HashScanOpaqueData::default();
+    ::hash::hashpage::HashScanPosInvalidate(&mut so.currPos);
     so.hashso_bucket_buf = InvalidBuffer;
     so.hashso_split_bucket_buf = InvalidBuffer;
 
@@ -812,7 +812,7 @@ pub fn hashrescan<'mcx>(
     core::_hash_dropscanbuf(&rel, &mut scan.opaque);
 
     // set position invalid (this will cause a _hash_first call)
-    hash::hashpage::HashScanPosInvalidate(&mut scan.opaque.currPos);
+    ::hash::hashpage::HashScanPosInvalidate(&mut scan.opaque.currPos);
 
     // Update scan key, if a new one is given.
     if let Some(sk) = scankey {
@@ -861,10 +861,10 @@ pub fn hashendscan(scan: &mut HashScan) -> PgResult<()> {
 pub fn hashbulkdelete<'mcx>(
     info: &HashVacuumInfo,
     rel: &rel::Relation<'mcx>,
-    stats: Option<types_tableam::genam::IndexBulkDeleteResult>,
+    stats: Option<::types_tableam::genam::IndexBulkDeleteResult>,
     has_callback: bool,
     callback_state_handle: u64,
-) -> PgResult<types_tableam::genam::IndexBulkDeleteResult> {
+) -> PgResult<::types_tableam::genam::IndexBulkDeleteResult> {
     let mut tuples_removed: f64 = 0.0;
     let mut num_index_tuples: f64 = 0.0;
 
@@ -912,7 +912,7 @@ pub fn hashbulkdelete<'mcx>(
                 // can't be split further), refresh the cached metapage if its
                 // mapping data is too old to remove tuples left by the most
                 // recent split.
-                debug_assert!(bucket_prevblkno != types_core::primitive::InvalidBlockNumber);
+                debug_assert!(bucket_prevblkno != ::types_core::primitive::InvalidBlockNumber);
                 if bucket_prevblkno > cachedmetap.hashm_maxbucket {
                     cachedmetap = core::_hash_getcachedmetap(rel, &mut metabuf, true)?;
                 }
@@ -943,7 +943,7 @@ pub fn hashbulkdelete<'mcx>(
         }
 
         if !BufferIsValid(metabuf) {
-            metabuf = core::_hash_getbuf(rel, HASH_METAPAGE, HASH_NOLOCK, hash::hashpage::LH_META_PAGE as i32)?;
+            metabuf = core::_hash_getbuf(rel, HASH_METAPAGE, HASH_NOLOCK, ::hash::hashpage::LH_META_PAGE as i32)?;
         }
 
         // Write-lock metapage and check for a split since we started.
@@ -1023,8 +1023,8 @@ pub fn hashbulkdelete<'mcx>(
 /// (no change; covers the analyze-only case too).
 pub fn hashvacuumcleanup<'mcx>(
     rel: &rel::Relation<'mcx>,
-    stats: Option<types_tableam::genam::IndexBulkDeleteResult>,
-) -> PgResult<Option<types_tableam::genam::IndexBulkDeleteResult>> {
+    stats: Option<::types_tableam::genam::IndexBulkDeleteResult>,
+) -> PgResult<Option<::types_tableam::genam::IndexBulkDeleteResult>> {
     // If hashbulkdelete wasn't called, return NULL signifying no change.
     let mut stats = match stats {
         Some(s) => s,
@@ -1385,7 +1385,7 @@ fn index_tuple_tid(itup: &[u8]) -> ItemPointerData {
     let bi_lo = u16::from_ne_bytes([itup[2], itup[3]]);
     let posid = u16::from_ne_bytes([itup[4], itup[5]]);
     ItemPointerData {
-        ip_blkid: types_tuple::heaptuple::BlockIdData { bi_hi, bi_lo },
+        ip_blkid: ::types_tuple::heaptuple::BlockIdData { bi_hi, bi_lo },
         ip_posid: posid,
     }
 }
@@ -1393,7 +1393,7 @@ fn index_tuple_tid(itup: &[u8]) -> ItemPointerData {
 /// `BlockNumberIsValid(blkno)` (`storage/block.h`).
 #[inline]
 fn block_number_is_valid(blkno: BlockNumber) -> bool {
-    blkno != types_core::primitive::InvalidBlockNumber
+    blkno != ::types_core::primitive::InvalidBlockNumber
 }
 
 /// `with_page_ref` over the bufmgr seam (mirrors hash-core's private helper).

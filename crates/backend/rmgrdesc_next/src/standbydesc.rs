@@ -3,12 +3,12 @@
 //! with the xact and heap-inplace descriptors).
 
 use crate::appendf;
-use mcx::PgString;
-use types_core::Oid;
-use types_error::PgResult;
-use types_storage::sinval::{SharedInvalMessages, SharedInvalidationMessage};
+use ::mcx::PgString;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_storage::sinval::{SharedInvalMessages, SharedInvalidationMessage};
 use wal::{DecodedXLogRecord, XLR_INFO_MASK};
-use xlog_records::standbydefs::{xl_invalidations, xl_running_xacts, xl_standby_locks};
+use ::xlog_records::standbydefs::{xl_invalidations, xl_running_xacts, xl_standby_locks};
 
 // storage/standbydefs.h
 pub const XLOG_STANDBY_LOCK: u8 = 0x00;
@@ -130,8 +130,8 @@ pub fn standby_desc_invalidations(
 mod tests {
     use super::*;
     use crate::test_support::record;
-    use mcx::MemoryContext;
-    use types_storage::sinval::{SHAREDINVALRELCACHE_ID, SHAREDINVALSMGR_ID};
+    use ::mcx::MemoryContext;
+    use ::types_storage::sinval::{SHAREDINVALRELCACHE_ID, SHAREDINVALSMGR_ID};
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");

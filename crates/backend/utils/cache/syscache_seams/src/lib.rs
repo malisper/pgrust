@@ -12,22 +12,22 @@
 //! allocated outputs carry its lifetime; `Err` includes OOM from the copy.
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
-use hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
-use mcx::PgString;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
+use ::mcx::PgString;
 use types_namespace::{
     CatalogObjectName, FastpathProcRow, FuncProcAttrs, OperRow, ProcCompileRow, ProcRow,
 };
-use cache::AuthIdRow;
-use cache::syscache::{
+use ::cache::AuthIdRow;
+use ::cache::syscache::{
     ClassOwnerAcl, ForeignDataWrapperFormRow, ForeignServerFormRow, NamespaceOwnerAcl,
     ObjectOwnerAcl, RolePasswordLookup, TypeOwnerAcl,
 };
-use types_acl::AclItem;
-use types_catalog::pg_aggregate::{AggFormData, AggRow};
+use ::types_acl::AclItem;
+use ::types_catalog::pg_aggregate::{AggFormData, AggRow};
 use ::nodes::nodes::NodePtr;
-use types_partition::PartrelTupleData;
+use ::types_partition::PartrelTupleData;
 
 seam_core::seam!(
     /// `SearchSysCache2(ATTNAME, ObjectIdGetDatum(relid),
@@ -40,7 +40,7 @@ seam_core::seam!(
     pub fn search_attname_attnum(
         relid: Oid,
         colname: &str,
-    ) -> PgResult<Option<(types_core::AttrNumber, bool)>>
+    ) -> PgResult<Option<(::types_core::AttrNumber, bool)>>
 );
 
 seam_core::seam!(
@@ -51,7 +51,7 @@ seam_core::seam!(
     /// (parser/parse_relation.c).
     pub fn search_attnum_attisdropped(
         relid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
     ) -> PgResult<Option<bool>>
 );
 
@@ -81,7 +81,7 @@ seam_core::seam!(
         roleid: Oid,
         member: Oid,
         grantor: Oid,
-    ) -> PgResult<Option<cache::AuthMembersFullRow>>
+    ) -> PgResult<Option<::cache::AuthMembersFullRow>>
 );
 
 seam_core::seam!(
@@ -90,7 +90,7 @@ seam_core::seam!(
     pub fn lookup_authmem_list_by_role<'mcx>(
         mcx: Mcx<'mcx>,
         roleid: Oid,
-    ) -> PgResult<Vec<cache::AuthMembersFullRow>>
+    ) -> PgResult<Vec<::cache::AuthMembersFullRow>>
 );
 
 seam_core::seam!(
@@ -130,7 +130,7 @@ seam_core::seam!(
     /// (utils/adt/enum.c).
     pub fn lookup_enum_by_oid(
         enumval: Oid,
-    ) -> PgResult<Option<types_catalog::pg_enum::EnumTupleData>>
+    ) -> PgResult<Option<::types_catalog::pg_enum::EnumTupleData>>
 );
 
 seam_core::seam!(
@@ -143,7 +143,7 @@ seam_core::seam!(
     pub fn lookup_enum_by_typoid_name(
         enumtypoid: Oid,
         name: &str,
-    ) -> PgResult<Option<types_catalog::pg_enum::EnumTupleData>>
+    ) -> PgResult<Option<::types_catalog::pg_enum::EnumTupleData>>
 );
 
 seam_core::seam!(
@@ -253,7 +253,7 @@ seam_core::seam!(
     pub fn search_type_name<'mcx>(
         mcx: Mcx<'mcx>,
         typoid: Oid,
-    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> PgResult<Option<::mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(
@@ -265,7 +265,7 @@ seam_core::seam!(
     pub fn search_namespace_name<'mcx>(
         mcx: Mcx<'mcx>,
         nspid: Oid,
-    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> PgResult<Option<::mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(
@@ -277,7 +277,7 @@ seam_core::seam!(
     pub fn search_am_name<'mcx>(
         mcx: Mcx<'mcx>,
         am_oid: Oid,
-    ) -> PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> PgResult<Option<::mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(
@@ -309,7 +309,7 @@ seam_core::seam!(
     pub fn namespace_owner_row_by_name<'mcx>(
         mcx: Mcx<'mcx>,
         name: &str,
-    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
+    ) -> PgResult<Option<(Oid, Oid, ::mcx::PgString<'mcx>)>>
 );
 
 seam_core::seam!(
@@ -321,7 +321,7 @@ seam_core::seam!(
     pub fn namespace_owner_row_by_oid<'mcx>(
         mcx: Mcx<'mcx>,
         schemaoid: Oid,
-    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
+    ) -> PgResult<Option<(Oid, Oid, ::mcx::PgString<'mcx>)>>
 );
 
 seam_core::seam!(
@@ -840,7 +840,7 @@ seam_core::seam!(
     ) -> PgResult<
         Option<(
             types_tuple::heaptuple::FormedTuple<'mcx>,
-            types_catalog::pg_language::FormData_pg_language,
+            ::types_catalog::pg_language::FormData_pg_language,
         )>,
     >
 );
@@ -860,7 +860,7 @@ seam_core::seam!(
     /// so a caller that mutates it (`AlterSequence`) treats it as its own.
     pub fn search_seqrelid(
         seqid: Oid,
-    ) -> PgResult<Option<types_catalog::pg_sequence::FormData_pg_sequence>>
+    ) -> PgResult<Option<::types_catalog::pg_sequence::FormData_pg_sequence>>
 );
 seam_core::seam!(
     /// `SearchSysCacheCopy1(RELOID, relid)` + `GETSTRUCT` (syscache.c): the
@@ -889,7 +889,7 @@ seam_core::seam!(
     pub fn search_pg_index_info<'mcx>(
         mcx: Mcx<'mcx>,
         index_oid: Oid,
-    ) -> PgResult<Option<cache::PgIndexInfo<'mcx>>>
+    ) -> PgResult<Option<::cache::PgIndexInfo<'mcx>>>
 );
 seam_core::seam!(
     /// `SearchSysCache1(AMOID, ObjectIdGetDatum(amoid))` +
@@ -942,7 +942,7 @@ seam_core::seam!(
     pub fn search_syscache_attname(
         relid: Oid,
         attname: &str,
-    ) -> PgResult<Option<(types_core::primitive::AttrNumber, Oid)>>
+    ) -> PgResult<Option<(::types_core::primitive::AttrNumber, Oid)>>
 );
 seam_core::seam!(
     /// `SearchSysCache1 + SysCacheGetAttr(Anum_pg_class_reloptions) +
@@ -990,7 +990,7 @@ seam_core::seam!(
     pub fn search_attnum_attname<'mcx>(
         mcx: Mcx<'mcx>,
         relid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
     ) -> PgResult<Option<PgString<'mcx>>>
 );
 
@@ -1022,7 +1022,7 @@ seam_core::seam!(
     /// no lifetime). `Err` carries OOM from the copy.
     pub fn auth_members_of_member(
         memberid: Oid,
-    ) -> PgResult<Vec<cache::AuthMembersRow>>
+    ) -> PgResult<Vec<::cache::AuthMembersRow>>
 );
 
 /* ------------------------------------------------------------------------
@@ -1329,10 +1329,10 @@ seam_core::seam!(
     /// `ReleaseSysCache`. The C also reads `NameStr(attname)` for the error
     /// message, returned alongside the flag.
     pub fn att_get_attnotnull<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         relid: Oid,
         attnum: i16,
-    ) -> PgResult<Option<(bool, mcx::PgString<'mcx>)>>
+    ) -> PgResult<Option<(bool, ::mcx::PgString<'mcx>)>>
 );
 
 seam_core::seam!(
@@ -1344,9 +1344,9 @@ seam_core::seam!(
     /// or the nondeterministic-collation `errmsg`; the installer owns the
     /// `ReleaseSysCache`.
     pub fn pg_opclass_keytype<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         opclass: Oid,
-    ) -> PgResult<Option<(Oid, Oid, mcx::PgString<'mcx>)>>
+    ) -> PgResult<Option<(Oid, Oid, ::mcx::PgString<'mcx>)>>
 );
 
 seam_core::seam!(
@@ -1370,7 +1370,7 @@ seam_core::seam!(
     /// (`!HeapTupleIsValid`); the installer owns the `ReleaseSysCache`.
     pub fn pg_range_form(
         rngtypid: Oid,
-    ) -> PgResult<Option<cache::typcache::PgRangeRow>>
+    ) -> PgResult<Option<::cache::typcache::PgRangeRow>>
 );
 
 seam_core::seam!(
@@ -1451,7 +1451,7 @@ seam_core::seam!(
     /// contract.
     pub fn syscache_get_attr_not_null_statistic(
         stats_tuple: types_selfuncs::StatsTuple,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
     ) -> PgResult<types_tuple::Datum<'static>>
 );
 
@@ -1466,7 +1466,7 @@ seam_core::seam!(
     pub fn search_statrelattinh<'mcx>(
         mcx: Mcx<'mcx>,
         relid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
         inherit: bool,
     ) -> PgResult<Option<types_selfuncs::StatsTuple>>
 );
@@ -1631,7 +1631,7 @@ seam_core::seam!(
     /// `Ok(None)` on a cache miss; the installer owns the `ReleaseSysCache`.
     pub fn pg_attribute_form(
         relid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
     ) -> PgResult<Option<types_tuple::heaptuple::FormData_pg_attribute>>
 );
 
@@ -1966,7 +1966,7 @@ seam_core::seam!(
     /// miss (`!HeapTupleIsValid`); the installer owns the `ReleaseSysCache`.
     pub fn pg_statistic_stawidth(
         relid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
     ) -> PgResult<Option<i32>>
 );
 
@@ -2634,7 +2634,7 @@ seam_core::seam!(
     /// for constraint %u`. `Err` carries OOM / catcache `ereport(ERROR)`s.
     pub fn search_constraint_form_by_oid(
         conoid: Oid,
-    ) -> PgResult<Option<types_catalog::pg_constraint::ConstraintFormCopy>>
+    ) -> PgResult<Option<::types_catalog::pg_constraint::ConstraintFormCopy>>
 );
 
 seam_core::seam!(
@@ -2662,7 +2662,7 @@ seam_core::seam!(
     pub fn search_pg_constraintdef_info<'mcx>(
         mcx: Mcx<'mcx>,
         conoid: Oid,
-    ) -> PgResult<Option<types_catalog::pg_constraint::PgConstraintDefInfo>>
+    ) -> PgResult<Option<::types_catalog::pg_constraint::PgConstraintDefInfo>>
 );
 
 seam_core::seam!(
@@ -2677,7 +2677,7 @@ seam_core::seam!(
     pub fn search_pg_functiondef_info<'mcx>(
         mcx: Mcx<'mcx>,
         funcid: Oid,
-    ) -> PgResult<Option<types_catalog::pg_proc::PgFunctiondefInfo>>
+    ) -> PgResult<Option<::types_catalog::pg_proc::PgFunctiondefInfo>>
 );
 
 seam_core::seam!(
@@ -2724,7 +2724,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn set_attribute_has_default(
         relid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
     ) -> PgResult<Option<i8>>
 );
 
@@ -2739,7 +2739,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn clear_attribute_has_default(
         relid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
     ) -> PgResult<bool>
 );
 
@@ -2751,7 +2751,7 @@ seam_core::seam!(
     /// validation + error message. `Err` carries the detoast `ereport(ERROR)`s.
     pub fn get_conkey_array(
         tuple: &types_tuple::heaptuple::FormedTuple<'_>,
-    ) -> PgResult<types_catalog::pg_constraint::ConKeyArray>
+    ) -> PgResult<::types_catalog::pg_constraint::ConKeyArray>
 );
 
 seam_core::seam!(
@@ -2763,7 +2763,7 @@ seam_core::seam!(
     /// messages. `confdelsetcols` is `None` when the column is SQL NULL.
     pub fn deconstruct_fk_arrays(
         tuple: &types_tuple::heaptuple::FormedTuple<'_>,
-    ) -> PgResult<types_catalog::pg_constraint::FkArrayProjection>
+    ) -> PgResult<::types_catalog::pg_constraint::FkArrayProjection>
 );
 
 seam_core::seam!(
@@ -2777,7 +2777,7 @@ seam_core::seam!(
     pub fn heap_get_conkey(
         rel: &rel::RelationData<'_>,
         tuple: &types_tuple::heaptuple::FormedTuple<'_>,
-    ) -> PgResult<Option<types_catalog::pg_constraint::ConKeyArray>>
+    ) -> PgResult<Option<::types_catalog::pg_constraint::ConKeyArray>>
 );
 
 seam_core::seam!(
@@ -2788,7 +2788,7 @@ seam_core::seam!(
     /// any decode `ereport(ERROR)`.
     pub fn read_constraint_form(
         tuple: &types_tuple::heaptuple::FormedTuple<'_>,
-    ) -> PgResult<types_catalog::pg_constraint::FormData_pg_constraint>
+    ) -> PgResult<::types_catalog::pg_constraint::FormData_pg_constraint>
 );
 
 /* ------------------------------------------------------------------------
@@ -2992,7 +2992,7 @@ seam_core::seam!(
     ) -> PgResult<
         Option<(
             types_tuple::heaptuple::FormedTuple<'mcx>,
-            types_catalog::pg_rewrite::FormData_pg_rewrite,
+            ::types_catalog::pg_rewrite::FormData_pg_rewrite,
         )>,
     >
 );

@@ -5,7 +5,7 @@
 //! vocabulary; the handle/typed reconciliation is DESIGN_DEBT until plancache
 //! lands.)
 
-use portal::CachedPlanHandle;
+use ::portal::CachedPlanHandle;
 
 seam_core::seam!(
     /// `ReleaseCachedPlan(plan, owner)` — portalmem passes the portal's owner;

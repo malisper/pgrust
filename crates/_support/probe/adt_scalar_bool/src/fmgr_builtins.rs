@@ -18,11 +18,11 @@
 //! / `numeric_avg_accum` families), so `bool_and`/`bool_or` work both as plain
 //! aggregates and in moving-window (`OVER (... ROWS ...)`) frames.
 
-use mcx::MemoryContext;
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::mcx::MemoryContext;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -127,7 +127,7 @@ fn fc_boolrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<D
     // charrecv.
     let m = scratch_mcx();
     let src = arg_varlena(fcinfo, 0);
-    let mut data = mcx::PgVec::new_in(m.mcx());
+    let mut data = ::mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
         return Err(types_error::PgError::error("out of memory"));
     }
@@ -228,7 +228,7 @@ fn take_bool_state(fcinfo: &mut FunctionCallInfoBaseData, i: usize) -> Option<Bo
         return None;
     }
     match fcinfo.take_ref_arg(i) {
-        Some(fmgr::boundary::RefPayload::Internal(b)) => Some(
+        Some(::fmgr::boundary::RefPayload::Internal(b)) => Some(
             b.downcast::<BoolAggState>().unwrap_or_else(|_| {
                 panic!("bool agg fn: args[{i}] internal state is not a BoolAggState")
             }),
@@ -241,7 +241,7 @@ fn take_bool_state(fcinfo: &mut FunctionCallInfoBaseData, i: usize) -> Option<Bo
 /// `PG_RETURN_POINTER(state)`.
 #[inline]
 fn ret_bool_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<BoolAggState>) -> Datum {
-    fcinfo.set_ref_result(fmgr::boundary::RefPayload::Internal(state));
+    fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Internal(state));
     Datum::from_usize(0)
 }
 
@@ -252,7 +252,7 @@ fn ret_bool_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<BoolAggState
 /// forward/inverse transition.
 #[inline]
 fn keep_bool_state(fcinfo: &mut FunctionCallInfoBaseData, state: Box<BoolAggState>) {
-    fcinfo.set_ref_arg(0, fmgr::boundary::RefPayload::Internal(state));
+    fcinfo.set_ref_arg(0, ::fmgr::boundary::RefPayload::Internal(state));
 }
 
 /// `bool_accum(internal, bool) -> internal` (oid 3496) — forward transition.

@@ -37,7 +37,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 
 use crate::seam;
 
@@ -467,8 +467,8 @@ fn tparser_init(str: Vec<u8>, len: usize) -> PgResult<TParser> {
     Ok(prs)
 }
 
-fn oom(what: &str) -> utils_error::PgError {
-    utils_error::PgError::error(format!("out of memory in {what}"))
+fn oom(what: &str) -> ::utils_error::PgError {
+    ::utils_error::PgError::error(format!("out of memory in {what}"))
 }
 
 /// `TParserCopyInit`: a parser that shares the original's (wide) string and
@@ -965,7 +965,7 @@ fn tparser_get(prs: &mut TParser) -> PgResult<bool> {
         } else if item.flags & A_CLRALL != 0 {
             // clear all previous pushed state: keep only the top element
             let top = prs.stack.pop().ok_or_else(|| {
-                utils_error::PgError::error("tparser_get: non-empty stack")
+                ::utils_error::PgError::error("tparser_get: non-empty stack")
             })?;
             prs.stack.clear();
             prs.stack.push(top);
@@ -973,7 +973,7 @@ fn tparser_get(prs: &mut TParser) -> PgResult<bool> {
             // merge posinfo with current and pushed state
             debug_assert!(prs.stack.len() >= 2);
             let ptr = prs.stack.pop().ok_or_else(|| {
-                utils_error::PgError::error("tparser_get: non-empty stack")
+                ::utils_error::PgError::error("tparser_get: non-empty stack")
             })?;
             let st = prs.top_mut();
             st.posbyte = ptr.posbyte;
@@ -1716,7 +1716,7 @@ pub fn prsd_headline(
     prsoptions: &[(String, String)],
     query: &crate::ts_parse::TSQuery,
 ) -> PgResult<()> {
-    use utils_error::ereport;
+    use ::utils_error::ereport;
     use types_error::{ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 
     // default option values:
@@ -1861,7 +1861,7 @@ fn pg_strcasecmp(a: &str, b: &str) -> bool {
 /// `22003` (numeric value out of range) / `22P02` (invalid input syntax) on
 /// failure, matching the C error the option parser would surface.
 fn pg_strtoint32(val: &str) -> PgResult<i32> {
-    use utils_error::ereport;
+    use ::utils_error::ereport;
     use types_error::{
         ErrorLocation, ERRCODE_INVALID_TEXT_REPRESENTATION,
         ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERROR,

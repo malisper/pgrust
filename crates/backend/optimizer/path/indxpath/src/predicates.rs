@@ -7,11 +7,11 @@ use ::nodes::bitmapset::Bitmapset;
 use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId};
 
-use nodes_core::bitmapset::{bms_add_member, bms_is_subset, bms_union};
-use costsize_seams::enable_indexonlyscan;
-use predtest_seams::predicate_implied_by;
+use ::nodes_core::bitmapset::{bms_add_member, bms_is_subset, bms_union};
+use ::costsize_seams::enable_indexonlyscan;
+use ::predtest_seams::predicate_implied_by;
 use restrictinfo_seams as restrictinfo;
-use var_seams::pull_varattnos;
+use ::var_seams::pull_varattnos;
 
 use crate::matchers::{match_boolean_index_clause, IsBooleanOpfamily};
 use crate::util::{FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER, RELOPT_OTHER_MEMBER_REL};
@@ -84,7 +84,7 @@ pub fn check_index_only(
 pub fn check_index_predicates<'mcx>(
     _mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
 ) -> Result<(), types_error::PgError> {
     // Initialize indrestrictinfo to baserestrictinfo and detect partial indexes.
@@ -179,7 +179,7 @@ pub fn check_index_predicates<'mcx>(
 
         // Else compute indrestrictinfo as the non-implied quals.
         let indpred = root.rel(rel).indexlist[i].indpred.clone();
-        let mut kept: Vec<pathnodes::RinfoId> = Vec::new();
+        let mut kept: Vec<::pathnodes::RinfoId> = Vec::new();
         for &ric in &baserestrictinfo {
             let clause_id = root.rinfo(ric).clause;
             // predicate_implied_by() assumes first arg is immutable. Borrow the
@@ -238,7 +238,7 @@ pub fn indexcol_is_bool_constant_for_query(
 
 /* ---- small Relids helpers over the planner `Relids` (Vec<u64> bitmapset) ---- */
 
-fn relids_is_empty(a: &pathnodes::Relids) -> bool {
+fn relids_is_empty(a: &::pathnodes::Relids) -> bool {
     match a {
         None => true,
         Some(b) => b.words.iter().all(|w| *w == 0),
@@ -247,9 +247,9 @@ fn relids_is_empty(a: &pathnodes::Relids) -> bool {
 
 /// `bms_difference(a, b)` over the planner `Relids`.
 fn bms_difference_relids(
-    a: &pathnodes::Relids,
-    b: &pathnodes::Relids,
-) -> pathnodes::Relids {
+    a: &::pathnodes::Relids,
+    b: &::pathnodes::Relids,
+) -> ::pathnodes::Relids {
     let aw = match a {
         None => return None,
         Some(x) => &x.words,
@@ -269,15 +269,15 @@ fn bms_difference_relids(
     if out.is_empty() {
         None
     } else {
-        Some(alloc::boxed::Box::new(pathnodes::Bitmapset { words: out }))
+        Some(alloc::boxed::Box::new(::pathnodes::Bitmapset { words: out }))
     }
 }
 
 /// `bms_union(a, b)` over the planner `Relids`.
 fn bms_union_relids(
-    a: &pathnodes::Relids,
-    b: &pathnodes::Relids,
-) -> pathnodes::Relids {
+    a: &::pathnodes::Relids,
+    b: &::pathnodes::Relids,
+) -> ::pathnodes::Relids {
     let aw: &[u64] = match a {
         None => &[],
         Some(x) => &x.words,
@@ -300,6 +300,6 @@ fn bms_union_relids(
     if out.is_empty() {
         None
     } else {
-        Some(alloc::boxed::Box::new(pathnodes::Bitmapset { words: out }))
+        Some(alloc::boxed::Box::new(::pathnodes::Bitmapset { words: out }))
     }
 }

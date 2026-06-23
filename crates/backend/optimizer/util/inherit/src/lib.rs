@@ -34,26 +34,26 @@ extern crate alloc;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{Index, InvalidAttrNumber};
-use types_core::catalog::OIDOID;
-use types_core::InvalidOid;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Index, InvalidAttrNumber};
+use ::types_core::catalog::OIDOID;
+use ::types_core::InvalidOid;
 use types_error::{PgError, PgResult};
 use ::nodes::nodelockrows::{PlanRowMark, RowMarkType, ROW_MARK_COPY};
 use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{
     AppendRelInfo, NodeId, PlanRowMarkId, PlannerInfo, RelId, Relids,
 };
-use rel::Relation;
-use types_tuple::access::RELKIND_PARTITIONED_TABLE;
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use ::types_tuple::heaptuple::{
     FirstLowInvalidHeapAttributeNumber, SelfItemPointerAttributeNumber,
     TableOidAttributeNumber, TIDOID,
 };
 
-use nodes_core::makefuncs;
+use ::nodes_core::makefuncs;
 use appendinfo::{adjust_appendrel_attrs_in, make_append_rel_info};
 use relnode::{build_simple_rel, expand_planner_arrays};
 use relnode_seams as bms;
@@ -305,7 +305,7 @@ pub fn expand_inherited_rtentry<'mcx>(
 /// `lappend(root->processed_tlist, makeTargetEntry(...))`).
 fn push_rowmark_junk_var(root: &mut PlannerInfo, var: &Expr, resname: &str) {
     let expr_id = root.alloc_node(var.clone());
-    let tle = pathnodes::TargetEntryNode {
+    let tle = ::pathnodes::TargetEntryNode {
         expr: expr_id,
         resno: (root.processed_tlist.len() + 1) as i16,
         resname: Some(resname.to_string()),
@@ -336,7 +336,7 @@ fn lock_clause_strength_from_i32(s: i32) -> ::nodes::rawnodes::LockClauseStrengt
 /// `RELATION_IS_OTHER_TEMP(rel)` (rel.h): a temp relation belonging to another
 /// session — `relpersistence == 't' && !rd_islocaltemp`.
 fn relation_is_other_temp(rel: &Relation<'_>) -> PgResult<bool> {
-    Ok(rel.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_TEMP
+    Ok(rel.rd_rel.relpersistence == ::types_tuple::access::RELPERSISTENCE_TEMP
         && !relcache_seams::rd_islocaltemp::call(rel)?)
 }
 
@@ -572,7 +572,7 @@ fn expand_single_inheritance_child<'mcx>(
     } else {
         childrte.inh = false;
     }
-    childrte.securityQuals = mcx::PgVec::new_in(mcx);
+    childrte.securityQuals = ::mcx::PgVec::new_in(mcx);
     childrte.perminfoindex = 0;
 
     // Build the child column alias list (parent's query-assigned names where the
@@ -607,8 +607,8 @@ fn expand_single_inheritance_child<'mcx>(
     };
 
     let child_tupdesc = &childrel.rd_att;
-    let mut child_colnames: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
-        mcx::PgVec::new_in(mcx);
+    let mut child_colnames: ::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
+        ::mcx::PgVec::new_in(mcx);
     for cattno in 0..(child_tupdesc.natts as usize) {
         let att = child_tupdesc.attr(cattno);
         let attname: alloc::string::String = if att.attisdropped {
@@ -630,20 +630,20 @@ fn expand_single_inheritance_child<'mcx>(
     }
 
     let alias = makefuncs::make_alias(mcx, &parent_aliasname, child_colnames)?;
-    let alias_box = mcx::alloc_in(mcx, alias)?;
+    let alias_box = ::mcx::alloc_in(mcx, alias)?;
     // childrte->alias = childrte->eref = makeAlias(...). The two share the value;
     // clone the second.
     let eref_alias = {
         let a = &*alias_box;
-        let mut colnames2: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
-            mcx::PgVec::new_in(mcx);
+        let mut colnames2: ::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
+            ::mcx::PgVec::new_in(mcx);
         for cn in a.colnames.iter() {
             colnames2.push(make_string_node(mcx, &node_string_value(cn))?);
         }
         makefuncs::make_alias(mcx, &parent_aliasname, colnames2)?
     };
     childrte.alias = Some(alias_box);
-    childrte.eref = Some(mcx::alloc_in(mcx, eref_alias)?);
+    childrte.eref = Some(::mcx::alloc_in(mcx, eref_alias)?);
 
     // Link the child RTE into parse->rtable; childRTindex = list_length(rtable).
     run.rtable_mut(root.parse).push(childrte);
@@ -772,10 +772,10 @@ fn make_string_node<'mcx>(
     let node = ::nodes::nodes::Node::mk_string(
         mcx,
         ::nodes::value::StringNode {
-            sval: mcx::PgString::from_str_in(s, mcx)?,
+            sval: ::mcx::PgString::from_str_in(s, mcx)?,
         },
     )?;
-    mcx::alloc_in(mcx, node)
+    ::mcx::alloc_in(mcx, node)
 }
 
 /// Read the `String` value out of a value-node `NodePtr` (the parser's
@@ -1000,7 +1000,7 @@ pub fn apply_child_basequals<'mcx>(
     const UINT_MAX: Index = u32::MAX;
     let mcx = run.mcx();
 
-    let mut childquals: Vec<pathnodes::RinfoId> = Vec::new();
+    let mut childquals: Vec<::pathnodes::RinfoId> = Vec::new();
     let mut cq_min_security: Index = UINT_MAX;
 
     // Process each parent RestrictInfo separately (to keep per-qual security

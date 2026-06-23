@@ -22,8 +22,8 @@
 //! the element's bytes out of the (already-detoasted, flat) array buffer.
 
 use mcx::{Mcx, PgVec};
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
 
 use detoast_seams as detoast_seam;
@@ -58,7 +58,7 @@ fn detoast_container<'mcx>(
 ) -> PgResult<PgVec<'mcx, u8>> {
     let bytes = container_bytes(container);
     if arraytyplen > 0 {
-        let mut v = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
         v.extend_from_slice(bytes);
         Ok(v)
     } else {
@@ -84,7 +84,7 @@ fn flatten_replacement<'mcx>(
     match value {
         DatumV::ByVal(w) => Ok(DatumV::ByVal(*w)),
         DatumV::ByRef(b) => {
-            let mut v = mcx::vec_with_capacity_in(mcx, b.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, b.len())?;
             v.extend_from_slice(b);
             Ok(DatumV::ByRef(v))
         }
@@ -95,11 +95,11 @@ fn flatten_replacement<'mcx>(
             // routes Composite→Composite and Expanded→ByRef, then take the flat
             // image. Simpler: materialize the varlena bytes directly.
             let bytes = value.as_varlena_bytes();
-            let mut v = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
             v.extend_from_slice(&bytes);
             Ok(DatumV::ByRef(v))
         }
-        DatumV::Internal(_) => Err(types_error::PgError::error(
+        DatumV::Internal(_) => Err(::types_error::PgError::error(
             "array_set_element: cannot store an internal-typed value into an array element",
         )),
     }
@@ -142,7 +142,7 @@ fn element_from_word<'mcx>(
     } else {
         let off = word.as_usize();
         let end = att_addlength_pointer(off, elmlen as i32, array, off);
-        let mut v = mcx::vec_with_capacity_in(mcx, end - off)?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, end - off)?;
         v.extend_from_slice(&array[off..end]);
         Ok(DatumV::ByRef(v))
     }

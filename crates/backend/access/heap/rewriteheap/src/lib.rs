@@ -29,8 +29,8 @@ extern crate alloc;
 
 use std::collections::HashMap;
 
-use mcx::Mcx;
-use types_core::primitive::{
+use ::mcx::Mcx;
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, MultiXactId, Oid, Size, XLogRecPtr, InvalidBlockNumber,
     InvalidOid,
 };
@@ -39,10 +39,10 @@ use types_error::{
     PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
 use rel::{Relation, RelationData};
-use types_storage::RelFileLocator;
-use types_storage::bufpage::{MaxHeapTupleSize, MovedPartitionsOffsetNumber};
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::{
+use ::types_storage::RelFileLocator;
+use ::types_storage::bufpage::{MaxHeapTupleSize, MovedPartitionsOffsetNumber};
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::{
     HeapTupleHeaderChoice, HeapTupleHeaderData, ItemPointerData,
     HEAP2_XACT_MASK, HEAP_HASNULL, HEAP_HASEXTERNAL, HEAP_UPDATED, HEAP_XACT_MASK,
     HEAP_XMAX_INVALID, ON_PAGE_HEADER_SIZE,
@@ -57,8 +57,8 @@ use page::{
 };
 
 use heaptoast::{heap_toast_insert_or_update, TOAST_TUPLE_THRESHOLD};
-use heapam::freeze::heap_freeze_tuple;
-use heapam::insert::{HEAP_INSERT_NO_LOGICAL, HEAP_INSERT_SKIP_FSM};
+use ::heapam::freeze::heap_freeze_tuple;
+use ::heapam::insert::{HEAP_INSERT_NO_LOGICAL, HEAP_INSERT_SKIP_FSM};
 
 use transam_xact_seams as xact_seam;
 use transam_xlog_seams as xlog_seam;
@@ -70,7 +70,7 @@ use init_small_seams as globals_seam;
 use relcache_seams as relcache_seam;
 use catalog_seams as catalog_seam;
 
-use types_pgstat::wait_event::{
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_LOGICAL_REWRITE_CHECKPOINT_SYNC, WAIT_EVENT_LOGICAL_REWRITE_MAPPING_SYNC,
     WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE, WAIT_EVENT_LOGICAL_REWRITE_SYNC,
     WAIT_EVENT_LOGICAL_REWRITE_TRUNCATE, WAIT_EVENT_LOGICAL_REWRITE_WRITE,
@@ -90,22 +90,22 @@ use seams::{
 const MAIN_FORKNUM: ForkNumber = ForkNumber::MAIN_FORKNUM;
 
 /// `BLCKSZ` (`pg_config.h`).
-const BLCKSZ: Size = types_core::BLCKSZ;
+const BLCKSZ: Size = ::types_core::BLCKSZ;
 
 /// `RELKIND_TOASTVALUE` (`catalog/pg_class.h`).
-const RELKIND_TOASTVALUE: u8 = types_tuple::access::RELKIND_TOASTVALUE;
+const RELKIND_TOASTVALUE: u8 = ::types_tuple::access::RELKIND_TOASTVALUE;
 
 /// `HEAP_DEFAULT_FILLFACTOR` (`utils/rel.h`).
 const HEAP_DEFAULT_FILLFACTOR: i32 = 100;
 
 /// `InvalidOffsetNumber` (`storage/off.h`).
-const InvalidOffsetNumber: u16 = types_tuple::heaptuple::INVALID_OFFSET_NUMBER;
+const InvalidOffsetNumber: u16 = ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER;
 
 /// `PAI_IS_HEAP` (`storage/bufpage.h`) — `PageAddItem(... is_heap=true ...)`.
-const PAI_IS_HEAP: i32 = types_storage::bufpage::PAI_IS_HEAP;
+const PAI_IS_HEAP: i32 = ::types_storage::bufpage::PAI_IS_HEAP;
 
 /// `RM_HEAP2_ID` / `XLOG_HEAP2_REWRITE`.
-const RM_HEAP2_ID: types_core::RmgrId = wal::wal::RM_HEAP2_ID;
+const RM_HEAP2_ID: ::types_core::RmgrId = wal::wal::RM_HEAP2_ID;
 const XLOG_HEAP2_REWRITE: u8 = 0x00;
 
 /// `LOGICAL_REWRITE_FORMAT` (`access/rewriteheap.h`):
@@ -246,7 +246,7 @@ pub fn begin_heap_rewrite<'mcx>(
     logical_begin_heap_rewrite(&mut state)?;
 
     // palloc the state in the "Table rewrite" context (here: `mcx`).
-    mcx::alloc_in(mcx, state)
+    ::mcx::alloc_in(mcx, state)
 }
 
 // ===========================================================================
@@ -805,7 +805,7 @@ fn logical_heap_rewrite_flush_mappings<'mcx>(state: &mut RewriteStateData<'mcx>)
             let src = state.rs_logical_mappings.get(&xid).unwrap();
             (src.vfd, src.off, src.path.clone())
         };
-        let written = fd::vfd_io::FileWriteV(
+        let written = ::fd::vfd_io::FileWriteV(
             vfd,
             &[std::io::IoSlice::new(&waldata)],
             off,
@@ -849,7 +849,7 @@ fn logical_end_heap_rewrite<'mcx>(state: &mut RewriteStateData<'mcx>) -> PgResul
     }
 
     // Iterate over all mappings we have written and fsync the files.
-    let entries: Vec<(types_storage::file::File, String)> = state
+    let entries: Vec<(::types_storage::file::File, String)> = state
         .rs_logical_mappings
         .values()
         .map(|f| (f.vfd, f.path.clone()))
@@ -857,14 +857,14 @@ fn logical_end_heap_rewrite<'mcx>(state: &mut RewriteStateData<'mcx>) -> PgResul
     for (vfd, path) in entries {
         // if (FileSync(src->vfd, WAIT_*) != 0) ereport(data_sync_elevel(ERROR), ...);
         // FileSync returns Err on failure (carrying data_sync_elevel(ERROR)).
-        if let Err(_e) = fd::vfd_io::FileSync(vfd, WAIT_EVENT_LOGICAL_REWRITE_SYNC) {
+        if let Err(_e) = ::fd::vfd_io::FileSync(vfd, WAIT_EVENT_LOGICAL_REWRITE_SYNC) {
             return Err(ereport(ERROR)
                 .errcode_for_file_access()
                 .errmsg(format!("could not fsync file \"{}\"", path))
                 .into_error());
         }
         // FileClose(src->vfd);
-        fd::vfd_io::FileClose(vfd)?;
+        ::fd::vfd_io::FileClose(vfd)?;
     }
     // memory context cleanup will deal with the rest (Drop).
     Ok(())
@@ -900,7 +900,7 @@ fn logical_rewrite_log_mapping<'mcx>(
         );
 
         // src->vfd = PathNameOpenFile(path, O_CREAT|O_EXCL|O_WRONLY|PG_BINARY);
-        let vfd = fd::vfd_io::PathNameOpenFile(
+        let vfd = ::fd::vfd_io::PathNameOpenFile(
             &path,
             libc_flags::O_CREAT | libc_flags::O_EXCL | libc_flags::O_WRONLY | libc_flags::PG_BINARY,
         )?;
@@ -1265,7 +1265,7 @@ fn HeapTupleHasExternal(tup: &FormedTuple<'_>) -> bool {
 /// `ItemPointerIndicatesMovedPartitions(&tup->t_ctid)`: the ctid offset is the
 /// moved-partitions sentinel and the block is `MovedPartitionsBlockNumber`.
 fn HeapTupleHeaderIndicatesMovedPartitions(hdr: &HeapTupleHeaderData<'_>) -> bool {
-    use types_storage::bufpage::MovedPartitionsBlockNumber;
+    use ::types_storage::bufpage::MovedPartitionsBlockNumber;
     hdr.t_ctid.ip_posid == MovedPartitionsOffsetNumber
         && hdr.t_ctid.ip_blkid.block_number() == MovedPartitionsBlockNumber
 }
@@ -1293,7 +1293,7 @@ fn RelationGetRelid(relation: &RelationData<'_>) -> Oid {
 /// `RelationGetNumberOfBlocks(rel)` (`storage/bufmgr.h`):
 /// `smgrnblocks({rel->rd_locator, rel->rd_backend}, MAIN_FORKNUM)`.
 fn RelationGetNumberOfBlocks(rel: &RelationData<'_>) -> PgResult<BlockNumber> {
-    let key = types_storage::RelFileLocatorBackend {
+    let key = ::types_storage::RelFileLocatorBackend {
         locator: rel.rd_locator,
         backend: rel.rd_backend,
     };
@@ -1328,7 +1328,7 @@ fn relation_is_accessible_in_logical_decoding(relation: &RelationData<'_>) -> bo
 
 /// `RelationIsUsedAsCatalogTable(relation)` (`utils/rel.h`).
 fn relation_is_used_as_catalog_table(relation: &RelationData<'_>) -> bool {
-    use types_tuple::access::{RELKIND_RELATION};
+    use ::types_tuple::access::{RELKIND_RELATION};
     const RELKIND_MATVIEW: u8 = b'm';
     let relkind = relation.rd_rel.relkind as u8;
     (relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW)
@@ -1371,7 +1371,7 @@ fn HeapTupleHeaderGetXmin(hdr: &HeapTupleHeaderData<'_>) -> TransactionId {
 /// `HeapTupleHeaderXminFrozen(tup)`: `(t_infomask & HEAP_XMIN_FROZEN) ==
 /// HEAP_XMIN_FROZEN`.
 fn HeapTupleHeaderXminFrozen(hdr: &HeapTupleHeaderData<'_>) -> bool {
-    use types_tuple::heaptuple::HEAP_XMIN_FROZEN;
+    use ::types_tuple::heaptuple::HEAP_XMIN_FROZEN;
     (hdr.t_infomask & HEAP_XMIN_FROZEN) == HEAP_XMIN_FROZEN
 }
 
@@ -1389,7 +1389,7 @@ fn HeapTupleHeaderGetRawXmin(hdr: &HeapTupleHeaderData<'_>) -> TransactionId {
 use heapam_visibility::{
     HeapTupleHeaderGetUpdateXid, HeapTupleHeaderIsOnlyLocked,
 };
-use heapam_visibility::htup::HEAP_XMAX_IS_LOCKED_ONLY;
+use ::heapam_visibility::htup::HEAP_XMAX_IS_LOCKED_ONLY;
 
 // ---------------------------------------------------------------------------
 // FormedTuple <-> on-page byte image (own logic, the inverse of

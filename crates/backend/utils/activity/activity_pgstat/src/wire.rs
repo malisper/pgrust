@@ -184,7 +184,7 @@ pub fn install_seams() {
         // `assign_stats_fetch_consistency` (pgstat.c) — the assign hook for the
         // `stats_fetch_consistency` GUC. C wires this function pointer into the
         // config table at compile time; this unit owns it and installs the slot.
-        guc_tables::hooks::assign_stats_fetch_consistency
+        ::guc_tables::hooks::assign_stats_fetch_consistency
             .install(crate::guc::assign_stats_fetch_consistency);
     }
 }

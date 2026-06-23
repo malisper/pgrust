@@ -21,13 +21,13 @@
 //! `cstring_to_text_with_len`, which returns the payload `PgVec<'mcx, u8>`). So:
 //!
 //! * functions that *produce* a `bpchar`/`varchar` value return the owned
-//!   payload bytes as a [`mcx::PgVec<'mcx, u8>`] charged to the caller's
-//!   [`mcx::Mcx`] (C: `palloc` in `CurrentMemoryContext` + `SET_VARSIZE` —
+//!   payload bytes as a [`::mcx::PgVec<'mcx, u8>`] charged to the caller's
+//!   [`::mcx::Mcx`] (C: `palloc` in `CurrentMemoryContext` + `SET_VARSIZE` —
 //!   the header is re-stamped at the boundary);
 //! * comparison / hash / length functions take `&[u8]` = the already-detoasted
 //!   `VARDATA` payload (the caller's fmgr glue does the detoast).
 //!
-//! `*send` returns a full [`datum::Bytea`] image (header + payload), built
+//! `*send` returns a full [`::datum::Bytea`] image (header + payload), built
 //! by the shared `textsend` path in `backend-utils-adt-varlena`.
 //!
 //! # The fmgr / `Datum` boundary
@@ -94,7 +94,7 @@ pub fn init_seams() {
 /// simplification" (C's `NULL`).
 #[allow(clippy::too_many_arguments)]
 fn varchar_support<'mcx>(
-    _mcx: mcx::Mcx<'mcx>,
+    _mcx: ::mcx::Mcx<'mcx>,
     _funcid: types_core::primitive::Oid,
     _result_type: types_core::primitive::Oid,
     _result_collid: types_core::primitive::Oid,
@@ -120,7 +120,7 @@ fn varchar_support<'mcx>(
             // new_typmod = DatumGetInt32(((Const *) typmod)->constvalue);
             let new_typmod = typmod_const.constvalue.as_i32();
             // old_max = old_typmod - VARHDRSZ; new_max = new_typmod - VARHDRSZ;
-            let varhdrsz = datum::varlena::VARHDRSZ as i32;
+            let varhdrsz = ::datum::varlena::VARHDRSZ as i32;
             let old_max = old_typmod - varhdrsz;
             let new_max = new_typmod - varhdrsz;
 
@@ -138,19 +138,19 @@ fn varchar_support<'mcx>(
     Ok(None)
 }
 
-use varlena::comparison::varstr_cmp;
-use varlena::keystone::{check_collation_set, cstring_to_text_with_len};
-use varlena::sortsupport::{bpchartruelen, varstr_sortsupport};
-use varlena::wire_io::textsend;
+use ::varlena::comparison::varstr_cmp;
+use ::varlena::keystone::{check_collation_set, cstring_to_text_with_len};
+use ::varlena::sortsupport::{bpchartruelen, varstr_sortsupport};
+use ::varlena::wire_io::textsend;
 use hashfn::{hash_bytes, hash_bytes_extended};
 use mcx::{Mcx, PgVec};
-use datum::Bytea;
+use ::datum::Bytea;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INDETERMINATE_COLLATION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_STRING_DATA_RIGHT_TRUNCATION,
 };
-use types_sortsupport::SortSupportData;
-use stringinfo::StringInfo;
+use ::types_sortsupport::SortSupportData;
+use ::stringinfo::StringInfo;
 
 use pg_locale_seams as loc;
 use mbutils_seams as mb;
@@ -281,7 +281,7 @@ fn bpchar_input<'mcx>(
     // C: result = palloc(maxlen + VARHDRSZ); SET_VARSIZE; memcpy(r, s, len);
     // blank-pad. Carrier is the header-less payload, so build exactly `maxlen`
     // payload bytes: the first `len` are the input, the rest are blanks.
-    let mut result = mcx::vec_with_capacity_in(mcx, maxlen)?;
+    let mut result = ::mcx::vec_with_capacity_in(mcx, maxlen)?;
     result.extend_from_slice(&s[..len]);
     if maxlen > len {
         result.resize(maxlen, b' ');
@@ -400,7 +400,7 @@ pub fn bpchar<'mcx>(
     debug_assert!(maxlen >= len);
 
     // C: result = palloc(maxlen + VARHDRSZ); memcpy(r, s, len); blank-pad.
-    let mut result = mcx::vec_with_capacity_in(mcx, maxlen as usize)?;
+    let mut result = ::mcx::vec_with_capacity_in(mcx, maxlen as usize)?;
     result.extend_from_slice(&s[..len as usize]);
     if maxlen > len {
         result.resize(maxlen as usize, b' ');
@@ -413,7 +413,7 @@ pub fn bpchar<'mcx>(
 pub fn char_bpchar<'mcx>(mcx: Mcx<'mcx>, c: i8) -> PgResult<PgVec<'mcx, u8>> {
     // C: result = palloc(VARHDRSZ + 1); SET_VARSIZE(result, VARHDRSZ + 1);
     // *VARDATA(result) = c;  -- one payload byte.
-    let mut result = mcx::vec_with_capacity_in(mcx, 1)?;
+    let mut result = ::mcx::vec_with_capacity_in(mcx, 1)?;
     result.push(c as u8);
     Ok(result)
 }
@@ -440,7 +440,7 @@ pub fn bpchar_name<'mcx>(mcx: Mcx<'mcx>, source: &[u8]) -> PgResult<PgVec<'mcx, 
 
     // C: result = (Name) palloc0(NAMEDATALEN); memcpy(NameStr(*result), s_data, len);
     // -- zero-padded fixed NAMEDATALEN buffer.
-    let mut result = mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
+    let mut result = ::mcx::vec_with_capacity_in(mcx, NAMEDATALEN as usize)?;
     result.extend_from_slice(&s_data[..len as usize]);
     result.resize(NAMEDATALEN as usize, 0);
     Ok(result)
@@ -748,7 +748,7 @@ pub fn bpcharcmp(arg1: &[u8], arg2: &[u8], collid: Oid) -> PgResult<i32> {
 /// its scratch to `ssup.ssup_cxt`).
 pub fn bpchar_sortsupport<'mcx>(
     ssup: &mut SortSupportData<'mcx>,
-) -> PgResult<varlena::sortsupport::VarStrSortSupport<'mcx>> {
+) -> PgResult<::varlena::sortsupport::VarStrSortSupport<'mcx>> {
     let collid = ssup.ssup_collation;
     // Use generic string SortSupport
     varstr_sortsupport(ssup, BPCHAROID, collid)
@@ -792,7 +792,7 @@ pub fn hashbpchar<'mcx>(mcx: Mcx<'mcx>, key: &[u8], collid: Oid) -> PgResult<u32
         // In principle there's no reason to include the terminating NUL in the
         // hash, but it was done before and the behavior must be preserved.
         let transform = loc::pg_strxfrm::call(mcx, collid, &key[..keylen])?;
-        let mut withnul = mcx::vec_with_capacity_in(mcx, transform.len() + 1)?;
+        let mut withnul = ::mcx::vec_with_capacity_in(mcx, transform.len() + 1)?;
         withnul.extend_from_slice(&transform);
         withnul.push(0);
         Ok(hash_bytes(&withnul))
@@ -817,7 +817,7 @@ pub fn hashbpcharextended<'mcx>(
     } else {
         // See `hashbpchar`: hash the transform plus one appended trailing NUL.
         let transform = loc::pg_strxfrm::call(mcx, collid, &key[..keylen])?;
-        let mut withnul = mcx::vec_with_capacity_in(mcx, transform.len() + 1)?;
+        let mut withnul = ::mcx::vec_with_capacity_in(mcx, transform.len() + 1)?;
         withnul.extend_from_slice(&transform);
         withnul.push(0);
         Ok(hash_bytes_extended(&withnul, seed))
@@ -876,7 +876,7 @@ pub fn btbpchar_pattern_cmp(arg1: &[u8], arg2: &[u8]) -> i32 {
 /// but forces the `"C"` collation.
 pub fn btbpchar_pattern_sortsupport<'mcx>(
     ssup: &mut SortSupportData<'mcx>,
-) -> PgResult<varlena::sortsupport::VarStrSortSupport<'mcx>> {
+) -> PgResult<::varlena::sortsupport::VarStrSortSupport<'mcx>> {
     // Use generic string SortSupport, forcing "C" collation
     varstr_sortsupport(ssup, BPCHAROID, C_COLLATION_OID)
 }
@@ -888,7 +888,7 @@ pub fn btbpchar_pattern_sortsupport<'mcx>(
 /// Build a NUL-terminated cstring (`PG_RETURN_CSTRING` analog): the payload
 /// bytes followed by exactly one trailing NUL, charged to `mcx`.
 fn cstring<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, bytes.len() + 1)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, bytes.len() + 1)?;
     out.extend_from_slice(bytes);
     out.push(0);
     Ok(out)

@@ -34,14 +34,14 @@
 //!   side). Splicing a new join `j` means `j.larg = take(*jtlink); *jtlink = j`,
 //!   exactly as the C does. `jtlink2` (which may be C `NULL`) is
 //!   `Option<&mut Option<NodePtr<'mcx>>>`.
-//! * Relids are the lifetime-free [`Relids`](pathnodes::Relids) the
+//! * Relids are the lifetime-free [`Relids`](::pathnodes::Relids) the
 //!   conversion seams consume (a word-vector `Bitmapset`); the small set helpers
 //!   below mirror `bms_make_singleton` / `bms_join` / `bms_add_member` over it.
 
 use alloc::boxed::Box;
 
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::jointype::JoinType;
 use ::nodes::nodes::{ntag, Node, NodePtr};
@@ -49,7 +49,7 @@ use ::nodes::primnodes::{Expr, SubLinkType};
 use ::nodes::rawnodes::FromExpr;
 use pathnodes::{Bitmapset, PlannerInfo, Relids};
 
-use nodes_core::makefuncs::make_andclause;
+use ::nodes_core::makefuncs::make_andclause;
 use nodeFuncs_seams as nodefuncs;
 
 use subselect_pullup_seams as subselect;
@@ -386,10 +386,10 @@ fn pull_up_sublinks_jointree_recurse<'mcx>(
                     }
                     Ok(Some(alloc_in(mcx, Node::mk_join_expr(mcx, j)?)?))
                 }
-                _ => Err(types_error::PgError::error("unrecognized join type")),
+                _ => Err(::types_error::PgError::error("unrecognized join type")),
             }
         }
-        _ => Err(types_error::PgError::error("unrecognized node type")),
+        _ => Err(::types_error::PgError::error("unrecognized node type")),
     }
 }
 
@@ -613,7 +613,7 @@ fn pull_up_sublinks_qual_recurse<'mcx>(
                         // keep it faithful by re-wrapping is impossible since
                         // newclauses is Vec<Expr>. Treat any non-Expr as a hard
                         // error mirroring C's type expectations.
-                        return Err(types_error::PgError::error(
+                        return Err(::types_error::PgError::error(
                             "pull_up_sublinks: non-expression AND clause",
                         ));
                     }

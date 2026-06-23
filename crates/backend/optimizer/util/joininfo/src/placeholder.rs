@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::{Expr, ExprRelids, PlaceHolderVar};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     NodeId, PhInfoId, PlaceHolderInfo, PlannerInfo, Relids, SpecialJoinInfo,
 };
@@ -22,7 +22,7 @@ fn expr_relids_to_relids(er: &ExprRelids) -> Relids {
     if er.words.iter().all(|&w| w == 0) {
         None
     } else {
-        Some(alloc::boxed::Box::new(pathnodes::Bitmapset {
+        Some(alloc::boxed::Box::new(::pathnodes::Bitmapset {
             words: er.words.clone(),
         }))
     }
@@ -453,9 +453,9 @@ pub fn add_placeholders_to_base_rels(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) 
 pub fn add_placeholders_to_joinrel(
     mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
-    joinrel: pathnodes::RelId,
-    outer_rel: pathnodes::RelId,
-    inner_rel: pathnodes::RelId,
+    joinrel: ::pathnodes::RelId,
+    outer_rel: ::pathnodes::RelId,
+    inner_rel: ::pathnodes::RelId,
     _sjinfo: &SpecialJoinInfo,
 ) -> PgResult<()> {
     let relids = root.rel(joinrel).relids.clone();

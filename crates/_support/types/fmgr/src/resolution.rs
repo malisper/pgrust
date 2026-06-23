@@ -4,7 +4,7 @@
 
 use mcx::{PgString, PgVec};
 use types_core::{Oid, TransactionId};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::fmgr::{FmgrInfo, PGFunction};
 

@@ -42,18 +42,18 @@
 
 use mcx::{Mcx, PgVec};
 use types_error::{PgError, PgResult};
-use types_error::error::{make_sqlstate, SqlState};
+use ::types_error::error::{make_sqlstate, SqlState};
 use ::nodes::parsestmt::RawStmt;
-use parsenodes::RawParseMode;
+use ::parsenodes::RawParseMode;
 
 use gram_seams as gram_seam;
 use scan_seams as scan_seam;
-use scan_seams::CoreToken;
+use ::scan_seams::CoreToken;
 
 mod convert;
 
 use gram_c2rust_fgram as mech;
-use pg_ffi_fgram::List as RawList;
+use ::pg_ffi_fgram::List as RawList;
 
 // ===========================================================================
 // base_yyparse — run the c2rust mechanism, convert the raw graph to owned.
@@ -93,7 +93,7 @@ pub fn base_yyparse<'mcx>(
     // Convert each cell (a `*mut RawStmt`) into an owned RawStmt.
     let list: &RawList = unsafe { &*raw };
     let mut out: PgVec<'mcx, RawStmt<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+        ::mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
     for cell in list.cells() {
         let rs: *mut backend_nodes_types::parsenodes_stmts::RawStmt = cell.ptr();
         if rs.is_null() {
@@ -108,12 +108,12 @@ pub fn base_yyparse<'mcx>(
 /// (identical discriminants; `parser/parser.h`).
 fn raw_parse_mode_to_mech(mode: RawParseMode) -> mech::RawParseMode {
     match mode {
-        RawParseMode::RAW_PARSE_DEFAULT => pg_ffi_fgram::spi::RAW_PARSE_DEFAULT,
-        RawParseMode::RAW_PARSE_TYPE_NAME => pg_ffi_fgram::spi::RAW_PARSE_TYPE_NAME,
-        RawParseMode::RAW_PARSE_PLPGSQL_EXPR => pg_ffi_fgram::spi::RAW_PARSE_PLPGSQL_EXPR,
-        RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN1 => pg_ffi_fgram::spi::RAW_PARSE_PLPGSQL_ASSIGN1,
-        RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN2 => pg_ffi_fgram::spi::RAW_PARSE_PLPGSQL_ASSIGN2,
-        RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN3 => pg_ffi_fgram::spi::RAW_PARSE_PLPGSQL_ASSIGN3,
+        RawParseMode::RAW_PARSE_DEFAULT => ::pg_ffi_fgram::spi::RAW_PARSE_DEFAULT,
+        RawParseMode::RAW_PARSE_TYPE_NAME => ::pg_ffi_fgram::spi::RAW_PARSE_TYPE_NAME,
+        RawParseMode::RAW_PARSE_PLPGSQL_EXPR => ::pg_ffi_fgram::spi::RAW_PARSE_PLPGSQL_EXPR,
+        RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN1 => ::pg_ffi_fgram::spi::RAW_PARSE_PLPGSQL_ASSIGN1,
+        RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN2 => ::pg_ffi_fgram::spi::RAW_PARSE_PLPGSQL_ASSIGN2,
+        RawParseMode::RAW_PARSE_PLPGSQL_ASSIGN3 => ::pg_ffi_fgram::spi::RAW_PARSE_PLPGSQL_ASSIGN3,
     }
 }
 
@@ -169,10 +169,10 @@ fn core_yylex<'mcx>(
     // longjmps (`finish` returns Ok), and a failure to emit is dropped (the C
     // path cannot fail here either).
     for n in &scanner.notices {
-        let _ = utils_error::ereport(types_error::error::NOTICE)
+        let _ = utils_error::ereport(::types_error::error::NOTICE)
             .errcode(SqlState(n.sqlstate.0))
             .errmsg(n.message.clone())
-            .finish(types_error::ErrorLocation::new(
+            .finish(::types_error::ErrorLocation::new(
                 "scansup.c",
                 102,
                 "truncate_identifier",
@@ -203,13 +203,13 @@ fn core_yylex<'mcx>(
     if scan_seam::plpgsql_body_warnings_armed() {
         for w in &scanner.warnings {
             let cursor = scanner.scanner_errposition(w.location);
-            let mut builder = utils_error::ereport(types_error::error::WARNING)
+            let mut builder = utils_error::ereport(::types_error::error::WARNING)
                 .errcode(SqlState(w.sqlstate.0))
                 .errmsg(w.message);
             if !w.hint.is_empty() {
                 builder = builder.errhint(w.hint);
             }
-            let _ = builder.errposition(cursor).finish(types_error::ErrorLocation::new(
+            let _ = builder.errposition(cursor).finish(::types_error::ErrorLocation::new(
                 "scan.l",
                 1424,
                 "check_string_escape_warning",

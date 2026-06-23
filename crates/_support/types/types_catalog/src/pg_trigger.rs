@@ -2,7 +2,7 @@
 //! PostgreSQL 18.3), trimmed to what `RelationBuildTriggers` (the relcache
 //! trigger-descriptor build, commands/trigger.c) reads.
 
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_trigger.h CATALOG / DECLARE_*).

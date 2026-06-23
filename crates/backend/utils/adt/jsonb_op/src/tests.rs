@@ -16,7 +16,7 @@ use std::vec::Vec;
 
 use super::*;
 use jsonb_util::{JsonbValueToJsonb, VARHDRSZ};
-use tsvector_ext_seams::ArrayElem;
+use ::tsvector_ext_seams::ArrayElem;
 
 static INSTALL: Once = Once::new();
 
@@ -106,7 +106,7 @@ fn jstring(s: &str) -> JsonbValue {
 }
 
 fn jobj(pairs: &[(&str, JsonbValue)]) -> JsonbValue {
-    use jsonb_util::JsonbPair;
+    use ::jsonb_util::JsonbPair;
     let mut ps: Vec<JsonbPair> = Vec::new();
     for (i, (k, v)) in pairs.iter().enumerate() {
         ps.push(JsonbPair {

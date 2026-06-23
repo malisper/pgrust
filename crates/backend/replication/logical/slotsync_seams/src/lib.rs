@@ -10,9 +10,9 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::Size;
-use types_error::PgResult;
-use types_walreceiver::WalReceiverConn;
+use ::types_core::primitive::Size;
+use ::types_error::PgResult;
+use ::types_walreceiver::WalReceiverConn;
 
 seam_core::seam!(
     /// `ShutDownSlotSync()` — stop the slot-sync worker / SQL sync during

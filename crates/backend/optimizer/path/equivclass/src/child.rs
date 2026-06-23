@@ -5,8 +5,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     EcId, PlannerInfo, RelId, RELOPT_BASEREL, RELOPT_JOINREL, RELOPT_OTHER_JOINREL,
 };
@@ -218,8 +218,8 @@ pub fn add_child_join_rel_equivalences<'mcx>(
 pub fn add_setop_child_rel_equivalences(
     root: &mut PlannerInfo,
     child_rel: RelId,
-    child_tlist: &[pathnodes::NodeId],
-    setop_pathkeys: &[pathnodes::PathKey],
+    child_tlist: &[::pathnodes::NodeId],
+    setop_pathkeys: &[::pathnodes::PathKey],
 ) -> PgResult<()> {
     let child_relids = root.rel(child_rel).relids.clone();
     let child_relid = root.rel(child_rel).relid;
@@ -302,4 +302,4 @@ pub fn rebuild_eclass_attr_needed(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) -> 
 }
 
 #[allow(unused_imports)]
-use pathnodes::Relids as _Relids;
+use ::pathnodes::Relids as _Relids;

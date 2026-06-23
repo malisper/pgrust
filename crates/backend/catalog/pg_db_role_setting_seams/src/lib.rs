@@ -9,9 +9,9 @@
 
 #![allow(clippy::result_large_err)]
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 
 seam_core::seam!(

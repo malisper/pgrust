@@ -34,11 +34,11 @@
 //! state ([`crate::globals`]).
 
 
-use types_core::primitive::INVALID_PROC_NUMBER;
-use types_core::ProcNumber;
-use types_error::PgResult;
-use types_storage::lock::{DeadLockState, DEFAULT_LOCKMETHOD, LOCKMASK, LOCKMODE, LOCKTAG};
-use types_storage::storage::{
+use ::types_core::primitive::INVALID_PROC_NUMBER;
+use ::types_core::ProcNumber;
+use ::types_error::PgResult;
+use ::types_storage::lock::{DeadLockState, DEFAULT_LOCKMETHOD, LOCKMASK, LOCKMODE, LOCKTAG};
+use ::types_storage::storage::{
     ProcWaitStatus, NUM_LOCK_PARTITIONS, PROC_IS_AUTOVACUUM, PROC_VACUUM_FOR_WRAPAROUND,
     PROC_WAIT_STATUS_ERROR, PROC_WAIT_STATUS_OK, PROC_WAIT_STATUS_WAITING,
 };
@@ -58,12 +58,12 @@ use postgres_seams as postgres;
 use timestamp_seams as timestamp;
 use init_small_seams as initsmall;
 use timeout_seams as timeout;
-use mcx::MemoryContext;
-use types_storage::storage::ProcSignalReason;
-use types_storage::lock::AccessExclusiveLock;
-use types_storage::LWLockMode;
+use ::mcx::MemoryContext;
+use ::types_storage::storage::ProcSignalReason;
+use ::types_storage::lock::AccessExclusiveLock;
+use ::types_storage::LWLockMode;
 use types_timeout::{DisableTimeoutParams, EnableTimeoutParams, TimeoutId, TimeoutType};
-use wal::xlogutils::in_hot_standby;
+use ::wal::xlogutils::in_hot_standby;
 
 /// `WL_LATCH_SET | WL_EXIT_ON_PM_DEATH` and `PG_WAIT_LOCK` (latch.h / wait_event.h).
 const WL_LATCH_SET: u32 = 1 << 0;
@@ -88,14 +88,14 @@ fn lock_hash_partition(hashcode: u32) -> i32 {
 /// `LOCK_MANAGER_LWLOCK_OFFSET + LockHashPartition(hashcode)`.
 #[inline]
 fn lock_partition_lock_offset(hashcode: u32) -> usize {
-    (types_storage::storage::LOCK_MANAGER_LWLOCK_OFFSET + lock_hash_partition(hashcode)) as usize
+    (::types_storage::storage::LOCK_MANAGER_LWLOCK_OFFSET + lock_hash_partition(hashcode)) as usize
 }
 
 /// `LockHashPartitionLockByIndex(i)` (lock.h) — the `MainLWLockArray` offset of
 /// the i-th partition LWLock.
 #[inline]
 fn lock_partition_lock_offset_by_index(i: i32) -> usize {
-    (types_storage::storage::LOCK_MANAGER_LWLOCK_OFFSET + i) as usize
+    (::types_storage::storage::LOCK_MANAGER_LWLOCK_OFFSET + i) as usize
 }
 
 /// `JoinWaitQueue(locallock, lockMethodTable, dontWait)` — insert `MyProc` into
@@ -108,8 +108,8 @@ fn lock_partition_lock_offset_by_index(i: i32) -> usize {
 /// `conflict_tab` / `lock_check_conflicts` seams keyed on the lock-method id in
 /// the locallock's tag.
 pub fn JoinWaitQueue(
-    locallock: &mut types_storage::lock::LOCALLOCK,
-    _lockMethodTable: &types_storage::lock::LockMethod,
+    locallock: &mut ::types_storage::lock::LOCALLOCK,
+    _lockMethodTable: &::types_storage::lock::LockMethod,
     dontWait: bool,
 ) -> PgResult<ProcWaitStatus> {
     let lockmode = locallock.tag.mode;
@@ -223,7 +223,7 @@ pub fn JoinWaitQueue(
 /// `ProcSleep(locallock)` — block on the process latch until the awaited lock is
 /// granted, a deadlock is detected, or a timeout fires.
 pub fn ProcSleep(
-    locallock: &mut types_storage::lock::LOCALLOCK,
+    locallock: &mut ::types_storage::lock::LOCALLOCK,
 ) -> PgResult<ProcWaitStatus> {
     let lockmode = locallock.tag.mode;
     let lock_tag: LOCKTAG = locallock.tag.lock;
@@ -366,7 +366,7 @@ pub fn ProcSleep(
                 let pid = proc::proc_pid::call(autovac_proc);
 
                 // Report the case, if configured to do so (DEBUG1).
-                if utils_error::message_level_is_interesting(types_error::DEBUG1) {
+                if utils_error::message_level_is_interesting(::types_error::DEBUG1) {
                     let locktagbuf = lock::describe_lock_tag::call(locktag_copy);
                     let modename =
                         lock::get_lockmode_name::call(lockmethod_copy as u16, lockmode);
@@ -527,7 +527,7 @@ pub fn ProcSleep(
 /// `ProcWakeup(proc, waitStatus)` — remove `proc` from its wait queue, stamp its
 /// final status, and signal it. The partition lock must be held by the caller.
 pub fn ProcWakeup(
-    proc_arg: &mut types_storage::storage::PGPROC,
+    proc_arg: &mut ::types_storage::storage::PGPROC,
     waitStatus: ProcWaitStatus,
 ) {
     // GetNumberFromPGProc(proc): the proc's slot in ProcGlobal->allProcs.
@@ -556,8 +556,8 @@ pub fn ProcWakeup(
 /// `ProcLockWakeup(lockMethodTable, lock)` — wake every waiter on `lock` that can
 /// now be granted. The partition lock must be held by the caller.
 pub fn ProcLockWakeup(
-    _lockMethodTable: &types_storage::lock::LockMethod,
-    lock_arg: &mut types_storage::lock::LOCK,
+    _lockMethodTable: &::types_storage::lock::LockMethod,
+    lock_arg: &mut ::types_storage::lock::LOCK,
 ) {
     let lock_tag: LOCKTAG = lock_arg.tag;
     let lockmethodid = lock_tag.locktag_lockmethodid;
@@ -735,7 +735,7 @@ const USER_LOCKMETHOD: u8 = 2;
 /// lockHoldersNum)` — build the human-readable holder/waiter PID lists for a
 /// lock-wait log message. The partition lock must be held on entry and exit.
 pub fn GetLockHoldersAndWaiters(
-    locallock: &types_storage::lock::LOCALLOCK,
+    locallock: &::types_storage::lock::LOCALLOCK,
     lock_holders_sbuf: &mut stringinfo::StringInfo<'_>,
     lock_waiters_sbuf: &mut stringinfo::StringInfo<'_>,
     lockHoldersNum: &mut i32,
@@ -767,7 +767,7 @@ fn append_str(sbuf: &mut stringinfo::StringInfo<'_>, s: &str) -> PgResult<()> {
     let bytes = s.as_bytes();
     sbuf.data
         .try_reserve(bytes.len())
-        .map_err(|_| mcx::oom_named("GetLockHoldersAndWaiters", bytes.len()))?;
+        .map_err(|_| ::mcx::oom_named("GetLockHoldersAndWaiters", bytes.len()))?;
     sbuf.data.extend_from_slice(bytes);
     Ok(())
 }

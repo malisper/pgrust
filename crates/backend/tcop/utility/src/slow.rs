@@ -20,17 +20,17 @@
 //! an uninstalled seam, which is the project's loud documented panic — never a
 //! silent stub.
 
-use mcx::Mcx;
-use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
+use ::types_error::PgResult;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::Node;
 use ::nodes::nodes as ntag;
 use ::nodes::parsestmt::{ParseState, ProcessUtilityContext, PROCESS_UTILITY_SUBCOMMAND};
 use ::nodes::portalcmds::ParamListInfo;
-use portal::QueryCompletion;
-use types_storage::lock::{ShareLock, ShareUpdateExclusiveLock};
-use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_RELATION};
+use ::portal::QueryCompletion;
+use ::types_storage::lock::{ShareLock, ShareUpdateExclusiveLock};
+use ::types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_RELATION};
 
 use utility_out_seams as rt;
 
@@ -142,7 +142,7 @@ fn process_utility_slow_body<'mcx>(
         t if t == ntag::T_CreateStmt || t == ntag::T_CreateForeignTableStmt => {
             // Run parse analysis ...
             let parsetree_ptr =
-                mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
+                ::mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
             let mut stmts = rt::transform_create_stmt::call(mcx, parsetree_ptr, query_string)?;
 
             // ... and do it.  We can't use foreach() because we may modify the
@@ -158,7 +158,7 @@ fn process_utility_slow_body<'mcx>(
                         let cstmt = stmt.expect_createstmt();
                         // Remember transformed RangeVar for LIKE.
                         table_rv = match &cstmt.relation {
-                            Some(rv) => Some(mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
+                            Some(rv) => Some(::mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
                             None => None,
                         };
 
@@ -190,7 +190,7 @@ fn process_utility_slow_body<'mcx>(
                         let cstmt = stmt.expect_createforeigntablestmt();
                         // Remember transformed RangeVar for LIKE.
                         table_rv = match &cstmt.base.relation {
-                            Some(rv) => Some(mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
+                            Some(rv) => Some(::mcx::alloc_in(mcx, rv.clone_in(mcx)?)?),
                             None => None,
                         };
 
@@ -214,7 +214,7 @@ fn process_utility_slow_body<'mcx>(
                         let heap_rv_src = table_rv
                             .as_ref()
                             .expect("expandTableLikeClause: table_rv is NULL");
-                        let heap_rv = mcx::alloc_in(mcx, heap_rv_src.clone_in(mcx)?)?;
+                        let heap_rv = ::mcx::alloc_in(mcx, heap_rv_src.clone_in(mcx)?)?;
                         let morestmts =
                             rt::expand_table_like_clause::call(mcx, heap_rv, stmt)?;
                         // list_concat(morestmts, stmts): morestmts first.
@@ -299,7 +299,7 @@ fn process_utility_slow_body<'mcx>(
                 .relation
                 .as_ref()
                 .expect("CREATE INDEX: IndexStmt.relation is NULL");
-            let relation = mcx::alloc_in(mcx, relation_src.clone_in(mcx)?)?;
+            let relation = ::mcx::alloc_in(mcx, relation_src.clone_in(mcx)?)?;
             let relid = rt::range_var_get_relid_owns_relation::call(mcx, relation, lockmode)?;
 
             // CREATE INDEX on partitioned tables (but not regular inherited
@@ -308,7 +308,7 @@ fn process_utility_slow_body<'mcx>(
             // the find_all_inheritors search. The owner reads stmt->relation->inh
             // and stmt->unique/primary internally and returns -1 when the target
             // is not a partitioned table.
-            let stmt_for_count = mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
+            let stmt_for_count = ::mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
             let nparts: i32 =
                 rt::create_index_count_partitions::call(mcx, relid, stmt_for_count, lockmode)?;
 
@@ -317,7 +317,7 @@ fn process_utility_slow_body<'mcx>(
             let is_alter_table = stmt.transformed;
 
             // Run parse analysis ...
-            let stmt_ptr = mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
+            let stmt_ptr = ::mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
             let stmt2 = rt::transform_index_stmt::call(mcx, relid, stmt_ptr, query_string)?;
 
             // ... and do it.
@@ -486,8 +486,8 @@ fn process_utility_slow_body<'mcx>(
                 .first()
                 .expect("CREATE STATISTICS: empty relations list");
             if !rel_src.is_rangevar() {
-                return Err(utils_error::ereport(types_error::ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                return Err(utils_error::ereport(::types_error::ERROR)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(
                         "CREATE STATISTICS only supports relation names in the FROM clause"
                             .to_string(),
@@ -496,11 +496,11 @@ fn process_utility_slow_body<'mcx>(
             }
             // ShareUpdateExclusiveLock: conflicts with ANALYZE / other DDL that
             // sets statistics, but not with normal queries.
-            let rel = mcx::alloc_in(mcx, rel_src.clone_in(mcx)?)?;
+            let rel = ::mcx::alloc_in(mcx, rel_src.clone_in(mcx)?)?;
             let relid = rt::range_var_get_relid_share_update::call(mcx, rel)?;
 
             // Run parse analysis ...
-            let stmt_ptr = mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
+            let stmt_ptr = ::mcx::alloc_in(mcx, parsetree.clone_in(mcx)?)?;
             let stmt2 = rt::transform_stats_stmt::call(mcx, relid, stmt_ptr, query_string)?;
             address = rt::create_statistics::call(mcx, stmt2)?;
         }

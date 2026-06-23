@@ -9,8 +9,8 @@
 //! the real `&mut VacAttrStats`). The owning crate installs it from its
 //! `init_seams()`; until then a call panics loudly (no silent fallback).
 
-use types_error::PgResult;
-use statistics::VacAttrStats;
+use ::types_error::PgResult;
+use ::statistics::VacAttrStats;
 
 seam_core::seam!(
     /// `ts_typanalyze(PG_FUNCTION_ARGS)` (ts_typanalyze.c:58): the `typanalyze`

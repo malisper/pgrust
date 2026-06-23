@@ -13,8 +13,8 @@
 //! `LWLockReleaseAll` — is a direct dependency on the ported owner crate, not
 //! a seam (no dependency cycle requires one).
 
-use types_core::ProcNumber;
-use types_error::PgResult;
+use ::types_core::ProcNumber;
+use ::types_error::PgResult;
 use types_storage::{LWLock, LWLockMode};
 
 seam_core::seam!(
@@ -26,7 +26,7 @@ seam_core::seam!(
     /// `GetLWLockIdentifier(uint32 classId, uint16 eventId)` — the tranche name
     /// for an LWLock wait event. Returns a `'static` tranche name owned by
     /// `lwlock.c`'s built-in/registered tranche tables.
-    pub fn get_lwlock_identifier(class_id: types_core::uint32, event_id: types_core::uint16) -> &'static str
+    pub fn get_lwlock_identifier(class_id: ::types_core::uint32, event_id: ::types_core::uint16) -> &'static str
 );
 
 seam_core::seam!(
@@ -104,7 +104,7 @@ impl Drop for LWLockGuard<'_> {
 seam_core::seam!(
     /// `LWLockAcquire(&MainLWLockArray[lock_offset].lock, mode)` — acquire one
     /// of the individual built-in locks (`lwlocklist.h` offsets, e.g.
-    /// `types_storage::DYNAMIC_SHARED_MEMORY_CONTROL_LOCK`). `MainLWLockArray`
+    /// `::types_storage::DYNAMIC_SHARED_MEMORY_CONTROL_LOCK`). `MainLWLockArray`
     /// lives in main shared memory owned by `lwlock.c`, so the lock is named
     /// by offset rather than by reference. Returns a [`MainLWLockGuard`] that
     /// releases the lock on drop (AGENTS.md "Locks and held resources": a lock
@@ -290,14 +290,14 @@ seam_core::seam!(
     /// the LWLock arrays/tranches; summed by ipci.c `CalculateShmemSize`.
     /// `Err` carries the `add_size`/`mul_size` overflow `ereport`. Owner
     /// unported; scaffolded slot.
-    pub fn lwlock_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn lwlock_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
     /// `CreateLWLocks()` (lwlock.c) — allocate the LWLocks (must run first in
     /// `CreateOrAttachShmemStructs`, before `InitShmemIndex`). `Err` carries
     /// the out-of-shmem `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn create_lwlocks() -> types_error::PgResult<()>
+    pub fn create_lwlocks() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

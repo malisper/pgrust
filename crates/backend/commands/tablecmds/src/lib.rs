@@ -77,7 +77,7 @@ pub fn init_seams() {
     // (a no-op release) to obtain aliasable `Relation`s for the body.
     partbounds_seams::check_default_partition_contents::set(
         |mcx, parent_data, default_data, new_spec| {
-            use types_storage::lock::NoLock;
+            use ::types_storage::lock::NoLock;
             let parent =
                 common_relation::relation_open(mcx, parent_data.rd_id, NoLock)?;
             let default_rel =
@@ -136,7 +136,7 @@ pub fn init_seams() {
         smallfns::check_relation_tablespace_move,
     );
     index_seams::set_relation_table_space::set(|rel, new_ts, new_relfile| {
-        let scratch = mcx::MemoryContext::new("SetRelationTableSpace");
+        let scratch = ::mcx::MemoryContext::new("SetRelationTableSpace");
         smallfns::set_relation_tablespace(scratch.mcx(), rel, new_ts, new_relfile)
     });
     seam::reset_rel_rewrite::set(at_column::ResetRelRewrite);
@@ -151,7 +151,7 @@ pub fn init_seams() {
     // pg_shdepend's shdepReassignOwned drives by OID (no caller-side `mcx`), so
     // the closure runs the body in a fresh MemoryContext.
     seam::at_exec_change_owner::set(|relation_oid, new_owner_id, recursing, lockmode| {
-        let ctx = mcx::MemoryContext::new("ATExecChangeOwner");
+        let ctx = ::mcx::MemoryContext::new("ATExecChangeOwner");
         at_owner::ATExecChangeOwner(ctx.mcx(), relation_oid, new_owner_id, recursing, lockmode)
     });
 
@@ -227,18 +227,18 @@ pub fn init_seams() {
     // AlterDomain* drivers call through the seam; we run the body in a fresh
     // MemoryContext (the caller passes only the domain oid / ccbin, no `mcx`).
     typecmds_seams::validate_domain_not_null_constraint::set(|domainoid| {
-        let ctx = mcx::MemoryContext::new("validateDomainNotNullConstraint");
+        let ctx = ::mcx::MemoryContext::new("validateDomainNotNullConstraint");
         domain_validate::validate_domain_not_null_constraint(ctx.mcx(), domainoid)
     });
     typecmds_seams::validate_domain_check_constraint::set(|domainoid, ccbin| {
-        let ctx = mcx::MemoryContext::new("validateDomainCheckConstraint");
+        let ctx = ::mcx::MemoryContext::new("validateDomainCheckConstraint");
         domain_validate::validate_domain_check_constraint(ctx.mcx(), domainoid, &ccbin)
     });
 }
 
-use mcx::Mcx;
-use types_core::primitive::{Oid, OidIsValid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::types_error::PgResult;
 use ::nodes::ddlnodes::AlterTableType::AT_DetachPartition;
 use ::nodes::nodes::Node;
 
@@ -330,7 +330,7 @@ fn alter_table_slow_arm<'mcx>(
                 None => None,
             })
             .unwrap_or_default();
-        utils_error::ereport(types_error::NOTICE)
+        utils_error::ereport(::types_error::NOTICE)
             .errmsg(format!("relation \"{relname}\" does not exist, skipping"))
             .finish(helpers::here("alter_table_slow"))?;
     }

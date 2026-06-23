@@ -42,7 +42,7 @@
 
 use core::ffi::c_void;
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 use types_core::{Oid, TransactionId};
 
 use crate::nodes::NodeTag;
@@ -159,11 +159,11 @@ impl<'mcx> node_support::PgNodeCopy for List<'mcx> {
     /// target context.
     fn copy_node_in<'dst>(
         &self,
-        dst: mcx::Mcx<'dst>,
+        dst: ::mcx::Mcx<'dst>,
     ) -> types_error::PgResult<Self::Bound<'dst>> {
         Ok(List {
             r#type: self.r#type,
-            elements: mcx::slice_in(dst, &self.elements)?,
+            elements: ::mcx::slice_in(dst, &self.elements)?,
         })
     }
 }

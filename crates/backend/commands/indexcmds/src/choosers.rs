@@ -11,23 +11,23 @@
 //! case and only diverges when a concurrent uncommitted backend is creating the
 //! same name — the narrow window the C's dirty snapshot additionally guards.
 //! The pg_constraint existence probe is the direct
-//! `pg_constraint::ConstraintNameExists` owner call.
+//! `::pg_constraint::ConstraintNameExists` owner call.
 
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use types_core::primitive::Oid;
-use types_core::OidIsValid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_core::OidIsValid;
+use ::types_error::PgResult;
 use ::nodes::ddlnodes::IndexElem;
 
-use utils_error::ereport;
-use types_error::ERROR;
+use ::utils_error::ereport;
+use ::types_error::ERROR;
 
-use pg_constraint::ConstraintNameExists;
+use ::pg_constraint::ConstraintNameExists;
 use lsyscache_seams as lsyscache;
 use mbutils_seams as mb_seam;
 
@@ -270,9 +270,9 @@ pub fn ChooseIndexColumnNames(index_elems: &[&IndexElem<'_>]) -> Vec<String> {
 
 /// Out-of-memory error (the `try_reserve` failure path), matching the project's
 /// OOM-safe allocation rule.
-fn out_of_memory(ctx: &str) -> utils_error::PgError {
+fn out_of_memory(ctx: &str) -> ::utils_error::PgError {
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+        .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
         .errmsg(format!("out of memory in {ctx}"))
         .into_error()
 }

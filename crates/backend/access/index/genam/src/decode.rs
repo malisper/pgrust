@@ -18,27 +18,27 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, MemoryContext};
-use types_core::fmgr::{FmgrInfo, F_INT2GT, F_OIDEQ};
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::fmgr::{FmgrInfo, F_INT2GT, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
-use types_scan::scankey::{
+use ::types_scan::scankey::{
     BTEqualStrategyNumber, BTGreaterStrategyNumber, ScanKeyData,
 };
-use types_storage::lock::AccessShareLock;
-use types_tuple::heaptuple::{Datum, DeformedColumn};
+use ::types_storage::lock::AccessShareLock;
+use ::types_tuple::heaptuple::{Datum, DeformedColumn};
 
-use heaptuple::heap_deform_tuple;
+use ::heaptuple::heap_deform_tuple;
 use genam_seams as seam;
 use table::{table_close, table_open};
 use fmgr_seams as fmgr_seams;
 
-use types_catalog::catalog::CONSTRAINT_RELATION_ID;
+use ::types_catalog::catalog::CONSTRAINT_RELATION_ID;
 
-use types_catalog::pg_attrdef::{
+use ::types_catalog::pg_attrdef::{
     AttrDefaultIndexId, AttrDefaultRelationId, Anum_pg_attrdef_adbin,
     Anum_pg_attrdef_adnum,
 };
-use types_catalog::pg_attribute::{
+use ::types_catalog::pg_attribute::{
     AttributeRelationId, AttributeRelidNumIndexId, Anum_pg_attribute_attalign,
     Anum_pg_attribute_attbyval, Anum_pg_attribute_attcollation,
     Anum_pg_attribute_attcompression, Anum_pg_attribute_attgenerated,
@@ -52,7 +52,7 @@ use types_catalog::pg_attribute::{
     Anum_pg_attribute_attstorage, Anum_pg_attribute_atttypid,
     Anum_pg_attribute_atttypmod,
 };
-use types_catalog::opclasscmds_catalog::{
+use ::types_catalog::opclasscmds_catalog::{
     AccessMethodProcedureIndexId, AccessMethodProcedureRelationId,
     Anum_pg_amproc_amproc, Anum_pg_amproc_amprocfamily,
     Anum_pg_amproc_amproclefttype, Anum_pg_amproc_amprocnum,
@@ -60,7 +60,7 @@ use types_catalog::opclasscmds_catalog::{
     Anum_pg_opclass_opcfamily, Anum_pg_opclass_opcintype, OpclassOidIndexId,
     OperatorClassRelationId,
 };
-use types_catalog::pg_class::{
+use ::types_catalog::pg_class::{
     ClassOidIndexId, RelationRelationId, Anum_pg_class_oid,
     Anum_pg_class_relallvisible, Anum_pg_class_relam, Anum_pg_class_relchecks,
     Anum_pg_class_relfilenode, Anum_pg_class_relforcerowsecurity,
@@ -75,7 +75,7 @@ use types_catalog::pg_class::{
     Anum_pg_class_relrowsecurity, Anum_pg_class_reltablespace,
     Anum_pg_class_reltoastrelid, Anum_pg_class_reltuples, Anum_pg_class_reltype,
 };
-use types_catalog::pg_constraint::{
+use ::types_catalog::pg_constraint::{
     ConstraintRelidTypidNameIndexId, Anum_pg_constraint_conbin,
     Anum_pg_constraint_conenforced, Anum_pg_constraint_conexclop,
     Anum_pg_constraint_confkey, Anum_pg_constraint_confrelid,
@@ -86,7 +86,7 @@ use types_catalog::pg_constraint::{
     Anum_pg_constraint_oid, CONSTRAINT_CHECK, CONSTRAINT_EXCLUSION,
     CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
 };
-use types_catalog::pg_index::{
+use ::types_catalog::pg_index::{
     IndexIndrelidIndexId, IndexRelationId, Anum_pg_index_indcheckxmin,
     Anum_pg_index_indexrelid, Anum_pg_index_indimmediate,
     Anum_pg_index_indisclustered, Anum_pg_index_indisexclusion,
@@ -96,17 +96,17 @@ use types_catalog::pg_index::{
     Anum_pg_index_indnatts, Anum_pg_index_indnkeyatts,
     Anum_pg_index_indnullsnotdistinct, Anum_pg_index_indpred, Anum_pg_index_indrelid,
 };
-use types_catalog::pg_rewrite::{
+use ::types_catalog::pg_rewrite::{
     RewriteRelationId, Anum_pg_rewrite_ev_action, Anum_pg_rewrite_ev_class,
     Anum_pg_rewrite_ev_enabled, Anum_pg_rewrite_ev_qual,
     Anum_pg_rewrite_ev_type, Anum_pg_rewrite_is_instead, Anum_pg_rewrite_oid,
     Anum_pg_rewrite_rulename,
 };
-use types_catalog::pg_statistic_ext::{
+use ::types_catalog::pg_statistic_ext::{
     StatisticExtRelationId, StatisticExtRelidIndexId,
     Anum_pg_statistic_ext_oid, Anum_pg_statistic_ext_stxrelid,
 };
-use types_catalog::pg_trigger::{
+use ::types_catalog::pg_trigger::{
     TriggerOidIndexId, TriggerRelationId, TriggerRelidNameIndexId, Anum_pg_trigger_oid,
     Anum_pg_trigger_tgargs, Anum_pg_trigger_tgattr, Anum_pg_trigger_tgconstraint,
     Anum_pg_trigger_tgconstrindid, Anum_pg_trigger_tgconstrrelid,
@@ -118,12 +118,12 @@ use types_catalog::pg_trigger::{
     Anum_pg_trigger_tgtype,
 };
 
-use types_catalog::pg_policy::{
+use ::types_catalog::pg_policy::{
     PolicyPolrelidPolnameIndexId, PolicyRelationId, Anum_pg_policy_polcmd,
     Anum_pg_policy_polname, Anum_pg_policy_polpermissive, Anum_pg_policy_polqual,
     Anum_pg_policy_polrelid, Anum_pg_policy_polroles, Anum_pg_policy_polwithcheck,
 };
-use types_core::catalog::OIDOID;
+use ::types_core::catalog::OIDOID;
 
 use crate::{systable_beginscan, systable_getnext};
 
@@ -145,7 +145,7 @@ const REWRITE_REL_RULES_INDEX_ID: Oid = 2693;
 /// the lookup; the trimmed [`FmgrInfo`] records the resolved procedure OID.
 fn scan_key_init<'mcx>(
     attno: AttrNumber,
-    strategy: types_scan::scankey::StrategyNumber,
+    strategy: ::types_scan::scankey::StrategyNumber,
     proc_oid: Oid,
     argument: Datum<'mcx>,
 ) -> PgResult<ScanKeyData<'mcx>> {
@@ -154,8 +154,8 @@ fn scan_key_init<'mcx>(
     key.sk_flags = 0;
     key.sk_attno = attno;
     key.sk_strategy = strategy;
-    key.sk_subtype = types_core::InvalidOid;
-    key.sk_collation = types_core::InvalidOid;
+    key.sk_subtype = ::types_core::InvalidOid;
+    key.sk_collation = ::types_core::InvalidOid;
     key.sk_func = FmgrInfo {
         fn_oid: proc_oid,
         ..Default::default()
@@ -582,7 +582,7 @@ fn extract_attmissingval(
     attlen: i16,
     attbyval: bool,
     attalign: i8,
-) -> PgResult<Option<types_tuple::heaptuple::MissingValueImage>> {
+) -> PgResult<Option<::types_tuple::heaptuple::MissingValueImage>> {
     if !atthasmissing {
         return Ok(None);
     }
@@ -606,7 +606,7 @@ fn extract_attmissingval(
     if *is_null {
         return Err(PgError::error("attmissingval element is unexpectedly NULL"));
     }
-    Ok(Some(types_tuple::heaptuple::MissingValueImage::from_datum(
+    Ok(Some(::types_tuple::heaptuple::MissingValueImage::from_datum(
         datum,
     )))
 }
@@ -823,7 +823,7 @@ fn relcache_scan_pg_rewrite(relid: Oid) -> PgResult<Vec<seam::ScannedPgRewrite>>
 /// equivalent MVCC scan over `RewriteOidIndexId`. `Ok(None)` on a scan miss
 /// (C: `SPI_processed != 1`). The decoded row is copied into `mcx`.
 fn rule_by_oid(mcx: Mcx<'_>, ruleoid: Oid) -> PgResult<Option<seam::RuleByOid>> {
-    use types_catalog::pg_rewrite::{Anum_pg_rewrite_rulename, RewriteOidIndexId};
+    use ::types_catalog::pg_rewrite::{Anum_pg_rewrite_rulename, RewriteOidIndexId};
 
     // ScanKeyInit(&skey, Anum_pg_rewrite_oid, BTEqualStrategyNumber, F_OIDEQ,
     //             ObjectIdGetDatum(ruleoid));
@@ -1220,7 +1220,7 @@ fn scan_pg_constraint_truncate_fks() -> PgResult<Vec<seam::ScannedConstraintFk>>
 
     // systable_beginscan(fkeyRel, InvalidOid, false, NULL, 0, NULL);
     let mut scandesc =
-        systable_beginscan(&relation, types_core::InvalidOid, false, None, &[])?;
+        systable_beginscan(&relation, ::types_core::InvalidOid, false, None, &[])?;
 
     let mut out = Vec::new();
     while let Some(ntp) = systable_getnext(smcx, scandesc.desc_mut())? {
@@ -1442,7 +1442,7 @@ fn scan_pg_attrdef(relid: Oid) -> PgResult<Vec<seam::PgAttrdefRow>> {
     // ScanKeyInit(&skey, Anum_pg_attrdef_adrelid, BTEqualStrategyNumber,
     //             F_OIDEQ, ObjectIdGetDatum(RelationGetRelid(relation)));
     let skey = [scan_key_init(
-        types_catalog::pg_attrdef::Anum_pg_attrdef_adrelid,
+        ::types_catalog::pg_attrdef::Anum_pg_attrdef_adrelid,
         BTEqualStrategyNumber,
         F_OIDEQ,
         Datum::from_oid(relid),
@@ -1477,7 +1477,7 @@ fn scan_pg_attrdef(relid: Oid) -> PgResult<Vec<seam::PgAttrdefRow>> {
 /// constraint's `conkey` is a 1-D smallint array with a single element. The
 /// `conkey` column comes back as the array image; decode its sole element.
 fn extract_not_null_column(row: &[DeformedColumn<'_>]) -> PgResult<AttrNumber> {
-    let val = col(row, types_catalog::pg_constraint::Anum_pg_constraint_conkey, "conkey")?;
+    let val = col(row, ::types_catalog::pg_constraint::Anum_pg_constraint_conkey, "conkey")?;
     let bytes = val.as_ref_bytes();
     // 1-D int2 array: struct content (ndim@+0, dataoffset@+4, elemtype@+8,
     // dim0@+12, lbound0@+16, data@+20) past a varlena header read header-form-

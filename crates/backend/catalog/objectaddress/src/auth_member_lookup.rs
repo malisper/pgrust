@@ -12,13 +12,13 @@
 //!
 //! Unlike the trigger projection the seam carries no `mcx` (its result is two
 //! `Oid`s, which are `Copy`), so the scan runs inside a private transient
-//! [`mcx::MemoryContext`] whose allocations are reclaimed when it drops — the
+//! [`::mcx::MemoryContext`] whose allocations are reclaimed when it drops — the
 //! C call's `CurrentMemoryContext` churn.
 
-use mcx::MemoryContext;
-use types_core::Oid;
+use ::mcx::MemoryContext;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use types_storage::lock::AccessShareLock;
+use ::types_storage::lock::AccessShareLock;
 
 use crate::consts::{
     Anum_pg_auth_members_member, Anum_pg_auth_members_oid, Anum_pg_auth_members_roleid,

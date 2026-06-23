@@ -31,7 +31,7 @@
 //! [`BaseBackupTarget`] trait, the per-target opaque `void *detail_arg`
 //! (whatever `check_detail` returns and `get_sink` later consumes) becomes the
 //! owned [`TargetDetail`] value, and the C `bbsink *` chain is the owned
-//! [`Box<Bbsink>`](sink::Bbsink) chain from
+//! [`Box<Bbsink>`](::sink::Bbsink) chain from
 //! `backend-backup-sink`. There is no raw `void *`, no function pointer, and no
 //! `extern "C"`.
 //!
@@ -60,10 +60,10 @@
 
 use std::cell::RefCell;
 
-use sink::Bbsink;
-use server::bbsink_server_new;
-use utils_error::ereport;
-use mcx::Mcx;
+use ::sink::Bbsink;
+use ::server::bbsink_server_new;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR,
 };

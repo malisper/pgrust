@@ -59,7 +59,7 @@ extern crate alloc;
 use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 
-use bloomfilter_seams::BloomFilter;
+use ::bloomfilter_seams::BloomFilter;
 use hashfn_seams as hashfn;
 use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 

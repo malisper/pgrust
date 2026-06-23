@@ -7,27 +7,27 @@
 //! three `ATExec*Identity` functions that flip `pg_attribute.attidentity` and,
 //! for DROP, tear down the owned sequence.
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_attribute::{
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_attribute::{
     AttributeRelationId, Anum_pg_attribute_atthasdef, Anum_pg_attribute_attidentity,
     Anum_pg_attribute_attnotnull, Anum_pg_attribute_attnum, PgAttributeUpdateRow,
 };
-use types_core::primitive::{AttrNumber, InvalidOid, Oid};
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERROR, NOTICE,
 };
-use mcx::Mcx;
+use ::mcx::Mcx;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::DROP_RESTRICT;
-use rel::Relation;
-use types_storage::lock::{NoLock, RowExclusiveLock, LOCKMODE};
+use ::rel::Relation;
+use ::types_storage::lock::{NoLock, RowExclusiveLock, LOCKMODE};
 
-use common_relation::relation_open;
-use transam_xact::CommandCounterIncrement;
+use ::common_relation::relation_open;
+use ::transam_xact::CommandCounterIncrement;
 use indexing_seams as indexing_seam;
-use pg_inherits::find_inheritance_children;
+use ::pg_inherits::find_inheritance_children;
 use cache_syscache::{SearchSysCacheCopyAttName, SysCacheGetAttrNotNull, ATTNAME};
 
 use crate::helpers::{here, RelationRelationId};
@@ -59,7 +59,7 @@ fn rel_sub_address(relid: Oid, attnum: AttrNumber) -> ObjectAddress {
 }
 
 /// `errmsg("column \"%s\" of relation \"%s\" does not exist", ...)`.
-fn undefined_column_error(rel: &Relation<'_>, colname: &str) -> types_error::PgError {
+fn undefined_column_error(rel: &Relation<'_>, colname: &str) -> ::types_error::PgError {
     utils_error::ereport(ERROR)
         .errcode(ERRCODE_UNDEFINED_COLUMN)
         .errmsg(format!(

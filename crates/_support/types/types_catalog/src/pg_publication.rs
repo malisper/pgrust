@@ -34,7 +34,7 @@ impl PublishGencolsType {
 }
 
 use mcx::{PgString, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /* ==========================================================================
  * Relation / index OIDs (`pg_publication.h`, `pg_publication_rel.h`,

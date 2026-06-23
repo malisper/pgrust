@@ -32,24 +32,24 @@
 //! structs and `palloc` their output arrays. As in the sibling point opclasses
 //! (`backend-access-spg-quadtree` / `-kdtree`), the bodies here operate
 //! directly on the owned [`spgist`] vocabulary structs, with the `text`
-//! payloads carried inside [`types_tuple::Datum::ByRef`] varlena images and the
-//! `int16` node labels inside [`types_tuple::Datum::ByVal`]. "Allocate an output
+//! payloads carried inside [`::types_tuple::Datum::ByRef`] varlena images and the
+//! `int16` node labels inside [`::types_tuple::Datum::ByVal`]. "Allocate an output
 //! array" becomes "fill an owned `Vec`".
 //!
 //! `formTextDatum` builds a `text` varlena image (short or long header, exactly
-//! as C) into an `mcx::PgVec<u8>` wrapped in `Datum::ByRef`; `DatumGetTextPP`
+//! as C) into an `::mcx::PgVec<u8>` wrapped in `Datum::ByRef`; `DatumGetTextPP`
 //! becomes the local [`vardata_any`] header-stripping reader. The two cross-file
 //! support calls — `DirectFunctionCall2Coll(text_starts_with, ...)` and
 //! `varstr_cmp` (varlena.c) — are reached directly through the leaf
-//! `varlena::comparison` bodies; `collate_is_c` /
+//! `::varlena::comparison` bodies; `collate_is_c` /
 //! `collation_is_deterministic` come from the `pg-locale` seams.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 use spgist::{
     spgChooseIn, spgChooseOut, spgChooseOutAddNode, spgChooseOutMatchNode,
@@ -59,7 +59,7 @@ use spgist::{
 };
 use types_tuple::heaptuple::Datum;
 
-use varlena::comparison::{text_starts_with, varstr_cmp};
+use ::varlena::comparison::{text_starts_with, varstr_cmp};
 use pg_locale_seams as locale_seams;
 
 // ===========================================================================
@@ -192,7 +192,7 @@ fn form_text_datum<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<Datum<'mcx>> {
         v.extend_from_slice(data);
         v
     };
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &image)?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &image)?))
 }
 
 /// Build a long-header (`SET_VARSIZE`) `text` of length `datalen`, payload
@@ -220,7 +220,7 @@ fn set_varsize(image: &mut [u8], total: usize) {
 // ===========================================================================
 
 /// `spg_text_config(cfgin, cfg)` — fill the opclass config output.
-pub fn spg_text_config(_cfgin: &spgist::spgConfigIn, cfg: &mut spgConfigOut) {
+pub fn spg_text_config(_cfgin: &::spgist::spgConfigIn, cfg: &mut spgConfigOut) {
     cfg.prefixType = TEXTOID;
     cfg.labelType = INT2OID;
     cfg.canReturnData = true;
@@ -647,7 +647,7 @@ pub fn spg_text_inner_consistent<'mcx>(
             let mut copy = reconstr_text[..total].to_vec();
             set_varsize(&mut copy, total);
             out.reconstructedValues
-                .push(Datum::ByRef(mcx::slice_in(mcx, &copy)?));
+                .push(Datum::ByRef(::mcx::slice_in(mcx, &copy)?));
             out.nNodes += 1;
         }
     }
@@ -781,7 +781,7 @@ fn form_long_text_datum<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<Datum<'mc
     let mut image = alloc::vec::Vec::with_capacity(total);
     image.extend_from_slice(&((total as u32) << 2).to_le_bytes());
     image.extend_from_slice(data);
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &image)?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &image)?))
 }
 
 /// `memcmp(a, b, n)` 3-way result over equal-length slices (`-1`/`0`/`1`),

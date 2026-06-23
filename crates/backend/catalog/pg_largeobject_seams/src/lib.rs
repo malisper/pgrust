@@ -7,9 +7,9 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_acl::AclItem;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_acl::AclItem;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `pg_largeobject_aclmask_snapshot`'s catalog read (aclchk.c): open

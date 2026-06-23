@@ -5,7 +5,7 @@
 
 //! Port of `src/backend/access/gin/ginget.c` (PostgreSQL 18.3) — the GIN index
 //! `amgetbitmap` read path: fetch heap tuples that match a GIN scan into a
-//! [`tidbitmap::TIDBitmap`].
+//! [`::tidbitmap::TIDBitmap`].
 //!
 //! Every ginget.c function is ported 1:1. The scan key-state machine
 //! (`startScan`/`startScanKey`/`startScanEntry`, the per-entry/per-key/AND-of-keys
@@ -13,7 +13,7 @@
 //! entry-tree collect `collectMatchBitmap`/`scanPostingTree`, and the
 //! pending-list scan `scanPendingInsert`/`collectMatchesForHeapRow`/
 //! `matchPartialInPendingList`) is pure control flow over the
-//! [`gin::GinScanOpaqueData`] runtime model.
+//! [`::gin::GinScanOpaqueData`] runtime model.
 //!
 //! The GIN entry/posting-tree descent reuses the ported `ginbtree`
 //! (`ginFindLeafPage`/`ginStepRight`/`freeGinBtreeStack`), `gindatapage`
@@ -42,15 +42,15 @@ use std::rc::Rc;
 use bufmgr_seams as bufmgr;
 use page::{PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageRef};
 use utils_error::{ereport, PgResult};
-use types_error::error::{ERROR, ERRCODE_INTERNAL_ERROR};
+use ::types_error::error::{ERROR, ERRCODE_INTERNAL_ERROR};
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, OffsetNumber};
-use types_core::InvalidBlockNumber;
-use rel::Relation;
-use types_storage::storage::{Buffer, InvalidBuffer};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{BlockIdData, IndexTupleData, ItemPointerData};
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, OffsetNumber};
+use ::types_core::InvalidBlockNumber;
+use ::rel::Relation;
+use ::types_storage::storage::{Buffer, InvalidBuffer};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{BlockIdData, IndexTupleData, ItemPointerData};
 
 use gin::{
     GinNullCategory, GinScanEntryData, GinScanOpaqueData, GinState,
@@ -59,9 +59,9 @@ use gin::{
 };
 use gin::{GinBtreeData, GinBtreeStack};
 
-use types_tableam::relscan::IndexScanDescData;
+use ::types_tableam::relscan::IndexScanDescData;
 
-use tidbitmap::TIDBitmap;
+use ::tidbitmap::TIDBitmap;
 
 use ginbtree::{freeGinBtreeStack, ginFindLeafPage, ginStepRight};
 use gindatapage::{
@@ -70,13 +70,13 @@ use gindatapage::{
     GinIsPostingTree,
 };
 use gindatapage::{gin_page_get_flags, GinPageIsLeaf, GinPageRightMost};
-use core_probe::ginpostinglist::ginCompareItemPointers;
+use ::core_probe::ginpostinglist::ginCompareItemPointers;
 use ginentrypage::{ginPrepareEntryScan, ginReadTuple};
 use ginutil::{gintuple_get_attrnum, gintuple_get_key, ginCompareEntries};
-use core_probe::ginlogic::{callBoolConsistentFn, callTriConsistentFn};
+use ::core_probe::ginlogic::{callBoolConsistentFn, callTriConsistentFn};
 
 use ginutil_seams as sx;
-use nodes_core::tidbitmap as tbm;
+use ::nodes_core::tidbitmap as tbm;
 use predicate_seams as predicate;
 use postgres_seams as postgres;
 
@@ -770,14 +770,14 @@ fn startScanKey<'mcx>(so: &mut GinScanOpaqueData<'mcx>, ki: usize) -> PgResult<(
         });
 
         for i in 1..nentries {
-            so.keys[ki].entryRes[entryIndexes[i]] = gin::GIN_MAYBE;
+            so.keys[ki].entryRes[entryIndexes[i]] = ::gin::GIN_MAYBE;
         }
         let mut last_required = nentries - 1;
         for i in 0..nentries - 1 {
             // Pass all entries <= i as FALSE, and the rest as MAYBE.
-            so.keys[ki].entryRes[entryIndexes[i]] = gin::GIN_FALSE;
+            so.keys[ki].entryRes[entryIndexes[i]] = ::gin::GIN_FALSE;
 
-            if callTriConsistentFn(&mut so.keys[ki]) == gin::GIN_FALSE {
+            if callTriConsistentFn(&mut so.keys[ki]) == ::gin::GIN_FALSE {
                 last_required = i;
                 break;
             }
@@ -1228,13 +1228,13 @@ fn keyGetItem<'mcx>(
             && ginCompareItemPointers(&so.entries[ei].curItem, &curPageLossy) == 0
         {
             if i < nuserentries {
-                so.keys[ki].entryRes[i] = gin::GIN_MAYBE;
+                so.keys[ki].entryRes[i] = ::gin::GIN_MAYBE;
             } else {
-                so.keys[ki].entryRes[i] = gin::GIN_TRUE;
+                so.keys[ki].entryRes[i] = ::gin::GIN_TRUE;
             }
             haveLossyEntry = true;
         } else {
-            so.keys[ki].entryRes[i] = gin::GIN_FALSE;
+            so.keys[ki].entryRes[i] = ::gin::GIN_FALSE;
         }
     }
 
@@ -1243,7 +1243,7 @@ fn keyGetItem<'mcx>(
         // Have lossy-page entries, so see if whole page matches.
         let res = callTriConsistentFn(&mut so.keys[ki]);
 
-        if res == gin::GIN_TRUE || res == gin::GIN_MAYBE {
+        if res == ::gin::GIN_TRUE || res == ::gin::GIN_MAYBE {
             // Return lossy pointer for whole page.
             so.keys[ki].curItem = curPageLossy;
             so.keys[ki].curItemMatches = true;
@@ -1256,27 +1256,27 @@ fn keyGetItem<'mcx>(
     for i in 0..nentries {
         let ei = so.keys[ki].scanEntry[i] as usize;
         if so.entries[ei].isFinished {
-            so.keys[ki].entryRes[i] = gin::GIN_FALSE;
+            so.keys[ki].entryRes[i] = ::gin::GIN_FALSE;
         } else if ginCompareItemPointers(&so.entries[ei].curItem, &curPageLossy) == 0 {
-            so.keys[ki].entryRes[i] = gin::GIN_MAYBE;
+            so.keys[ki].entryRes[i] = ::gin::GIN_MAYBE;
         } else if ginCompareItemPointers(&so.entries[ei].curItem, &minItem) == 0 {
-            so.keys[ki].entryRes[i] = gin::GIN_TRUE;
+            so.keys[ki].entryRes[i] = ::gin::GIN_TRUE;
         } else {
-            so.keys[ki].entryRes[i] = gin::GIN_FALSE;
+            so.keys[ki].entryRes[i] = ::gin::GIN_FALSE;
         }
     }
 
     let res = callTriConsistentFn(&mut so.keys[ki]);
 
     match res {
-        gin::GIN_TRUE => {
+        ::gin::GIN_TRUE => {
             so.keys[ki].curItemMatches = true;
             // triConsistentFn set recheckCurItem
         }
-        gin::GIN_FALSE => {
+        ::gin::GIN_FALSE => {
             so.keys[ki].curItemMatches = false;
         }
-        gin::GIN_MAYBE => {
+        ::gin::GIN_MAYBE => {
             so.keys[ki].curItemMatches = true;
             so.keys[ki].recheckCurItem = true;
         }
@@ -1543,7 +1543,7 @@ fn collectMatchesForHeapRow<'mcx>(
     for i in 0..nkeys {
         let nentries = so.keys[i].nentries as usize;
         for j in 0..nentries {
-            so.keys[i].entryRes[j] = gin::GIN_FALSE;
+            so.keys[i].entryRes[j] = ::gin::GIN_FALSE;
         }
     }
     for h in pos.hasMatchKey.iter_mut() {
@@ -1584,7 +1584,7 @@ fn collectMatchesForHeapRow<'mcx>(
                 };
 
                 // If already matched on earlier page, do no extra work.
-                if so.keys[i].entryRes[j] != gin::GIN_FALSE {
+                if so.keys[i].entryRes[j] != ::gin::GIN_FALSE {
                     continue;
                 }
 
@@ -1655,7 +1655,7 @@ fn collectMatchesForHeapRow<'mcx>(
                                 &mut datumExtracted,
                             )?);
                         } else {
-                            so.keys[i].entryRes[j] = gin::GIN_TRUE;
+                            so.keys[i].entryRes[j] = ::gin::GIN_TRUE;
                         }
                         found = true;
                         break;
@@ -1681,7 +1681,7 @@ fn collectMatchesForHeapRow<'mcx>(
                     )?);
                 }
 
-                pos.hasMatchKey[i] = pos.hasMatchKey[i] || (so.keys[i].entryRes[j] != gin::GIN_FALSE);
+                pos.hasMatchKey[i] = pos.hasMatchKey[i] || (so.keys[i].entryRes[j] != ::gin::GIN_FALSE);
             }
         }
 
@@ -1787,19 +1787,19 @@ fn scanPendingInsert<'mcx>(
 
 /// `gingetbitmap(scan, tbm)` (ginget.c) — the `amgetbitmap` callback; fetch all
 /// matching tuples into the bitmap, returning the count. The unified index-AM
-/// vtable carries the bitmap erased (`types_tableam::TIDBitmap`); ginget works
-/// over the concrete `tidbitmap::TIDBitmap`, so downcast it (the same
+/// vtable carries the bitmap erased (`::types_tableam::TIDBitmap`); ginget works
+/// over the concrete `::tidbitmap::TIDBitmap`, so downcast it (the same
 /// erase/downcast as the BRIN/hash `amgetbitmap` adapters).
 pub fn gingetbitmap<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut IndexScanDescData<'mcx>,
-    tbm_erased: &mut types_tableam::amapi::TIDBitmap,
+    tbm_erased: &mut ::types_tableam::amapi::TIDBitmap,
 ) -> PgResult<i64> {
     let tbm_out = tbm_erased
         .payload
         .as_mut()
         .and_then(|p| p.downcast_mut::<TIDBitmap>())
-        .expect("amgetbitmap TIDBitmap payload is not a tidbitmap::TIDBitmap");
+        .expect("amgetbitmap TIDBitmap payload is not a ::tidbitmap::TIDBitmap");
     // Set up the scan keys, and check for unsatisfiable query.
     ginscan::ginFreeScanKeys(gin_so(scan));
     ginscan::ginNewScanKey(scan)?;
@@ -1908,13 +1908,13 @@ fn compact_attr<'mcx>(ginstate: &GinState<'mcx>, attnum: OffsetNumber) -> (bool,
 /// `FmgrInfo`/`Oid`/`bool` arrays clone by value; the `TupleDesc`s are deep
 /// copied via `CreateTupleDescCopy` (same as `initGinState`).
 fn clone_ginstate<'mcx>(mcx: Mcx<'mcx>, src: &GinState<'mcx>) -> PgResult<GinState<'mcx>> {
-    let clone_td = |td: &types_tuple::heaptuple::TupleDesc<'mcx>| -> PgResult<
-        types_tuple::heaptuple::TupleDesc<'mcx>,
+    let clone_td = |td: &::types_tuple::heaptuple::TupleDesc<'mcx>| -> PgResult<
+        ::types_tuple::heaptuple::TupleDesc<'mcx>,
     > {
         match td.as_ref() {
             Some(t) => {
                 let copy = tupdesc::CreateTupleDescCopy(mcx, t)?;
-                Ok(Some(mcx::alloc_in(mcx, copy)?))
+                Ok(Some(::mcx::alloc_in(mcx, copy)?))
             }
             None => Ok(None),
         }
@@ -1961,17 +1961,17 @@ fn gin_page_get_meta_head(page: &[u8]) -> BlockNumber {
     BlockNumber::from_ne_bytes([contents[0], contents[1], contents[2], contents[3]])
 }
 
-/// Convert a `bool` to a [`gin::GinTernaryValue`] flag (the C `key->entryRes[j]
+/// Convert a `bool` to a [`::gin::GinTernaryValue`] flag (the C `key->entryRes[j]
 /// = <bool>` assignment, which sets `GIN_TRUE`/`GIN_FALSE`).
-fn bool_to_tri(b: bool) -> gin::GinTernaryValue {
+fn bool_to_tri(b: bool) -> ::gin::GinTernaryValue {
     if b {
-        gin::GIN_TRUE
+        ::gin::GIN_TRUE
     } else {
-        gin::GIN_FALSE
+        ::gin::GIN_FALSE
     }
 }
 
 /// `BLCKSZ` (pg_config.h).
-const BLCKSZ: usize = types_core::primitive::BLCKSZ as usize;
+const BLCKSZ: usize = ::types_core::primitive::BLCKSZ as usize;
 /// `sizeof(IndexTupleData)` (itup.h): 8 bytes (t_tid[6] + t_info[2]).
 const SIZE_OF_INDEX_TUPLE_DATA: usize = 8;

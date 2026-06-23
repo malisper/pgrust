@@ -2,14 +2,14 @@
 
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use ::nodes::primnodes::Expr;
 use pathnodes::{
     EquivalenceClass, EquivalenceMember, IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId,
 };
 
-use nodes_core::bitmapset::BMS_Membership;
-use lsyscache_seams::op_in_opfamily;
+use ::nodes_core::bitmapset::BMS_Membership;
+use ::lsyscache_seams::op_in_opfamily;
 
 use crate::operand::match_index_to_operand;
 use crate::util::{index_coll_matches_expr_coll, BTREE_AM_OID};
@@ -35,7 +35,7 @@ fn get_rightop<'a, 'mcx>(clause: &'a Expr<'mcx>) -> &'a Expr<'mcx> {
 }
 
 /// `bms_is_empty(set)` over the planner `Relids` (`Option<Box<Bitmapset>>`).
-fn relids_is_empty(set: &pathnodes::Relids) -> bool {
+fn relids_is_empty(set: &::pathnodes::Relids) -> bool {
     match set {
         None => true,
         Some(b) => b.words.iter().all(|w| *w == 0),
@@ -43,7 +43,7 @@ fn relids_is_empty(set: &pathnodes::Relids) -> bool {
 }
 
 /// `bms_membership(set)` over the planner `Relids`.
-fn relids_membership(set: &pathnodes::Relids) -> BMS_Membership {
+fn relids_membership(set: &::pathnodes::Relids) -> BMS_Membership {
     match set {
         None => BMS_Membership::BMS_EMPTY_SET,
         Some(b) => {

@@ -120,11 +120,11 @@ fn install() {
         while estate.es_subplanstates.len() <= idx {
             estate.es_subplanstates.push(None);
         }
-        let sub = mcx::alloc_in(
+        let sub = ::mcx::alloc_in(
             estate.es_query_cxt,
             ::nodes::noderesult::ResultState::default(),
         )?;
-        estate.es_subplanstates[idx] = Some(mcx::alloc_in(
+        estate.es_subplanstates[idx] = Some(::mcx::alloc_in(
             estate.es_query_cxt,
             ::nodes::PlanStateNode::Result(sub),
         )?);
@@ -313,7 +313,7 @@ fn init_leader_path_creates_shared_store_and_runs_setup() {
     setup();
     IS_LEADER.with(|c| c.set(true));
     let ctx = MemoryContext::new("per-query");
-    let node_plan = mcx::alloc_in(
+    let node_plan = ::mcx::alloc_in(
         ctx.mcx(),
         ::nodes::nodes::Node::mk_cte_scan(ctx.mcx(), CteScan {
             ctePlanId: 1,
@@ -343,7 +343,7 @@ fn init_follower_path_allocs_own_read_pointer() {
     setup();
     IS_LEADER.with(|c| c.set(false));
     let ctx = MemoryContext::new("per-query");
-    let node_plan = mcx::alloc_in(
+    let node_plan = ::mcx::alloc_in(
         ctx.mcx(),
         ::nodes::nodes::Node::mk_cte_scan(ctx.mcx(), CteScan {
             ctePlanId: 1,

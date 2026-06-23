@@ -8,7 +8,7 @@
 //! catalog/syscache, dynamic-library loading, GUC, userid, ACL, and node-expr
 //! introspection externals are reached through per-owner seam crates.
 //!
-//! Errors surface as [`types_error::PgResult`] / [`PgError`] mirroring the C
+//! Errors surface as [`::types_error::PgResult`] / [`PgError`] mirroring the C
 //! `ereport`/`elog` text and SQLSTATE instead of `longjmp`; allocation goes
 //! through the caller-provided [`Mcx`] (OOM is `Err`).
 //!
@@ -25,21 +25,21 @@ use std::collections::HashMap;
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
 
 use types_acl::{AclMode, AclResult, ACL_EXECUTE, ACL_USAGE};
-use types_core::init::SECURITY_LOCAL_USERID_CHANGE;
+use ::types_core::init::SECURITY_LOCAL_USERID_CHANGE;
 use types_core::{InvalidOid, Oid, TransactionId};
 use datum::{Datum, NullableDatum};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_FUNCTION,
 };
-use fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
+use ::fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
 use fmgr::{
     AclObjectType, BuiltinFunction, FmgrHookEventType, FmgrInfo, FmgrResolution, FnExpr,
     FunctionCallInfoBaseData, LangInfo, LoadedCFunc, PGFunction, PgFnNative, ProcInfo,
     ProcLanguage, ResolvedFmgrInfo, TRACK_FUNC_ALL, TRACK_FUNC_OFF, TRACK_FUNC_PL,
 };
-use types_guc::GucContext;
+use ::types_guc::GucContext;
 use ::nodes::parsenodes::ObjectType;
 
 pub mod builtin_canonical;
@@ -259,13 +259,13 @@ fn fcinfo_pool_take(flinfo: Option<FmgrInfo>, collation: Oid) -> FunctionCallInf
     // C: a trigger / CALL / aggregate dispatcher deposits the `fcinfo->context`
     // node-tag / agg back-pointer on a thread-local; consume it onto THIS frame
     // (per-frame discipline), exactly as `init_fcinfo` does.
-    let context = fmgr::fmgr::take_call_context_tag()
-        .map(|(tag, atomic)| fmgr::fmgr::ContextNode { tag, atomic });
+    let context = ::fmgr::fmgr::take_call_context_tag()
+        .map(|(tag, atomic)| ::fmgr::fmgr::ContextNode { tag, atomic });
     let mut frame = FCINFO_POOL
         .with(|p| p.borrow_mut().pop())
         .unwrap_or_else(|| FunctionCallInfoBaseData::new(None, 0, 0, None, None));
     frame.reset_for_reuse(flinfo, 0, collation, context, None);
-    if let Some(link) = fmgr::fmgr::take_agg_context_link() {
+    if let Some(link) = ::fmgr::fmgr::take_agg_context_link() {
         frame.set_agg_context_link(link);
     }
     frame
@@ -514,8 +514,8 @@ fn init_fcinfo(
     // (making e.g. a plain 2-arg helper compile as a trigger function). The
     // dispatcher's RAII guard still restores the prior tag on drop, so a sibling
     // trigger fired afterwards re-observes it.
-    let context = fmgr::fmgr::take_call_context_tag()
-        .map(|(tag, atomic)| fmgr::fmgr::ContextNode { tag, atomic });
+    let context = ::fmgr::fmgr::take_call_context_tag()
+        .map(|(tag, atomic)| ::fmgr::fmgr::ContextNode { tag, atomic });
     let mut fcinfo =
         FunctionCallInfoBaseData::new(flinfo.map(Box::new), nargs, collation, context, None);
     // C: `fcinfo->context = (Node *) aggstate` for an aggregate transition/final
@@ -525,7 +525,7 @@ fn init_fcinfo(
     // Take it onto THIS one frame (per-frame `fcinfo->context` discipline) so the
     // aggregate support functions (AggGetAggref / AggCheckCallContext / …) recover
     // the AggState, and any nested call the support function issues sees `None`.
-    if let Some(link) = fmgr::fmgr::take_agg_context_link() {
+    if let Some(link) = ::fmgr::fmgr::take_agg_context_link() {
         fcinfo.set_agg_context_link(link);
     }
     fcinfo.args = args;
@@ -695,7 +695,7 @@ fn invoke_pgfunction(func: &PGFunction, fcinfo: &mut FunctionCallInfoBaseData) -
                                 let mut chars = [0u8; 5];
                                 chars.copy_from_slice(code.as_bytes());
                                 Err(PgError::error(msg[1..].to_string())
-                                    .with_sqlstate(types_error::make_sqlstate(chars)))
+                                    .with_sqlstate(::types_error::make_sqlstate(chars)))
                             }
                             _ => Err(PgError::error(m)),
                         },
@@ -1386,7 +1386,7 @@ fn copy_charged<'mcx>(
     mcx: Mcx<'mcx>,
     src: &[PgString<'_>],
 ) -> PgResult<PgVec<'mcx, PgString<'mcx>>> {
-    let mut out = mcx::vec_with_capacity_in::<PgString>(mcx, src.len())?;
+    let mut out = ::mcx::vec_with_capacity_in::<PgString>(mcx, src.len())?;
     for s in src {
         let ps = PgString::from_str_in(s.as_str(), mcx)?;
         // The spine was reserved above, so this never reallocates.
@@ -1584,7 +1584,7 @@ fn invoke_io3_soft(
     arg0: Datum,
     typioparam: Datum,
     typmod: Datum,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<(Datum, bool, bool)> {
     let mut fcinfo = init_fcinfo(
         Some(flinfo),
@@ -1600,7 +1600,7 @@ fn invoke_io3_soft(
     // caller sink, the frame keeps a NULL escontext and the callee's `ereturn`
     // degrades to a hard error.
     if let Some(caller) = escontext.as_ref() {
-        fcinfo.set_escontext(types_error::SoftErrorContext::new(caller.details_wanted()));
+        fcinfo.set_escontext(::types_error::SoftErrorContext::new(caller.details_wanted()));
     }
     let invoke = function_call_invoke(mcx, res, &mut fcinfo);
     // C: SOFT_ERROR_OCCURRED(escontext) — did the callee record a soft error?
@@ -1671,7 +1671,7 @@ pub fn input_function_call_safe(
     str: Option<Datum>,
     typioparam: Oid,
     typmod: i32,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<(bool, Datum)> {
     // C: if (str == NULL && fn_strict) { *result = 0; return true; }
     if str.is_none() && flinfo.fn_strict {
@@ -1714,7 +1714,7 @@ pub fn direct_input_function_call_safe(
     str: Option<Datum>,
     typioparam: Oid,
     typmod: i32,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<(bool, Datum)> {
     // C: if (str == NULL) { *result = 0; return true; }  (assumed strict)
     if str.is_none() {
@@ -1890,27 +1890,27 @@ fn init_io3_ref(
 }
 
 /// Datum-unification bridge: the fmgr boundary `FmgrArg`/`FmgrOut` `ByVal` arm
-/// is now the canonical `types_tuple::Datum<'mcx>` (Wave 3 types-fmgr migration),
+/// is now the canonical `::types_tuple::Datum<'mcx>` (Wave 3 types-fmgr migration),
 /// while this crate's internal call machinery still speaks the bare-word
-/// `datum::Datum` (the sanctioned fmgr-ABI scalar edge). Lift a bare word
+/// `::datum::Datum` (the sanctioned fmgr-ABI scalar edge). Lift a bare word
 /// into the canonical `ByVal` arm (a pure by-value, lifetime-free wrap).
 #[inline]
-fn canon_byval(word: Datum) -> types_tuple::heaptuple::Datum<'static> {
-    types_tuple::heaptuple::Datum::ByVal(word.as_usize())
+fn canon_byval(word: Datum) -> ::types_tuple::heaptuple::Datum<'static> {
+    ::types_tuple::heaptuple::Datum::ByVal(word.as_usize())
 }
 
 /// Lower a canonical by-value `Datum` back to the bare ABI word. The boundary's
 /// `ByVal` arm only ever carries a scalar (`ByVal`); a `ByRef` here would be a
 /// contract violation (C would read garbage treating a referent as a word).
 #[inline]
-fn canon_word(d: &types_tuple::heaptuple::Datum<'_>) -> Datum {
+fn canon_word(d: &::types_tuple::heaptuple::Datum<'_>) -> Datum {
     match d {
-        types_tuple::heaptuple::Datum::ByVal(w) => Datum::from_usize(*w),
-        types_tuple::heaptuple::Datum::ByRef(_)
-        | types_tuple::heaptuple::Datum::Cstring(_)
-        | types_tuple::heaptuple::Datum::Composite(_)
-        | types_tuple::heaptuple::Datum::Expanded(_)
-        | types_tuple::heaptuple::Datum::Internal(_) => {
+        ::types_tuple::heaptuple::Datum::ByVal(w) => Datum::from_usize(*w),
+        ::types_tuple::heaptuple::Datum::ByRef(_)
+        | ::types_tuple::heaptuple::Datum::Cstring(_)
+        | ::types_tuple::heaptuple::Datum::Composite(_)
+        | ::types_tuple::heaptuple::Datum::Expanded(_)
+        | ::types_tuple::heaptuple::Datum::Internal(_) => {
             panic!("fmgr boundary ByVal arm carried a by-reference Datum")
         }
     }
@@ -1968,7 +1968,7 @@ pub fn input_function_call_safe_typed<'mcx>(
     input: Option<&str>,
     typioparam: Oid,
     typmod: i32,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Option<FmgrOut<'mcx>>> {
     if input.is_none() && flinfo.fn_strict {
         return Ok(Some(FmgrOut::ByVal(canon_byval(Datum::null()))));
@@ -1987,7 +1987,7 @@ pub fn input_function_call_safe_typed<'mcx>(
     // errors.
     let mut escontext = escontext;
     if let Some(caller) = escontext.as_ref() {
-        fcinfo.set_escontext(types_error::SoftErrorContext::new(caller.details_wanted()));
+        fcinfo.set_escontext(::types_error::SoftErrorContext::new(caller.details_wanted()));
     }
     let invoke = function_call_invoke(mcx, res, &mut fcinfo);
     // C: if (SOFT_ERROR_OCCURRED(escontext)) return false; (here: Ok(None)).
@@ -2161,7 +2161,7 @@ fn oid_input_function_call_out<'mcx>(
 /// node available — the readers then fall through to the tag-only seams). The
 /// downcast targets the one concrete type the setter ever boxes; a mismatch
 /// maps to the same `None` fall-through.
-fn external_expr(ext: &fmgr::ExternalFnExpr) -> Option<&::nodes::primnodes::Expr<'static>> {
+fn external_expr(ext: &::fmgr::ExternalFnExpr) -> Option<&::nodes::primnodes::Expr<'static>> {
     ext.node
         .as_ref()?
         .downcast_ref::<::nodes::primnodes::Expr>()
@@ -2423,13 +2423,13 @@ fn fmgr_info_check(function_id: Oid) -> PgResult<()> {
 /// callable does not have to cross). The fields are copied straight across;
 /// `fn_addr` is the resolved callable's address (`0` when unresolved, e.g. the
 /// security-definer / SQL legs where C installs a wrapper).
-fn fmgr_info_resolve(mcx: Mcx<'_>, function_id: Oid) -> PgResult<types_core::fmgr::FmgrInfo> {
+fn fmgr_info_resolve(mcx: Mcx<'_>, function_id: Oid) -> PgResult<::types_core::fmgr::FmgrInfo> {
     let resolved = fmgr_info(mcx, function_id)?;
     let f = &resolved.finfo;
     // PGFunction is `Option<fn(...) -> Datum>`; a function pointer casts to its
     // address. `None` (no direct callable resolved) maps to 0.
     let fn_addr = f.fn_addr.map(|p| p as usize).unwrap_or(0);
-    Ok(types_core::fmgr::FmgrInfo {
+    Ok(::types_core::fmgr::FmgrInfo {
         fn_addr,
         fn_oid: f.fn_oid,
         fn_nargs: f.fn_nargs,
@@ -2450,14 +2450,14 @@ fn fmgr_info_resolve(mcx: Mcx<'_>, function_id: Oid) -> PgResult<types_core::fmg
 /// erased box. The downcast type used by the readers below is exactly this
 /// `::nodes::primnodes::Expr`.
 fn fmgr_info_set_expr_seam<'mcx, 'e>(
-    mcx: mcx::Mcx<'mcx>,
-    finfo: &mut types_core::fmgr::FmgrInfo,
+    mcx: ::mcx::Mcx<'mcx>,
+    finfo: &mut ::types_core::fmgr::FmgrInfo,
     expr: &::nodes::primnodes::Expr<'e>,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     // clone_in: the call node may be an OpExpr/FuncExpr carrying an Aggref (a
     // HAVING qual operator), whose context-allocated TargetEntry args a bare
     // derived `.clone()` panics on.
-    finfo.fn_expr = Some(types_core::fmgr::FnExprErased::from_node_erased::<
+    finfo.fn_expr = Some(::types_core::fmgr::FnExprErased::from_node_erased::<
         ::nodes::primnodes::Expr,
         ::nodes::primnodes::Expr,
     >(expr.clone_in(mcx)?));
@@ -2646,9 +2646,9 @@ fn typmodin_seam(typmodin: Oid, cstrings: &[String], cursorpos: i32) -> PgResult
 /// by-reference attribute's owned byte image is its `Varlena` referent (the
 /// already-detoasted `struct varlena *` C would have passed).
 fn tuple_value_to_arg(
-    val: &types_tuple::heaptuple::Datum<'_>,
+    val: &::types_tuple::heaptuple::Datum<'_>,
 ) -> (Datum, Option<RefPayload>) {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     match val {
         CanonDatum::ByVal(d) => (Datum::from_usize(*d), None),
         // Header-ful everywhere: the canonical `ByRef` image and the fmgr
@@ -2675,7 +2675,7 @@ fn tuple_value_to_arg(
 /// Copy a `&[u8]` into a fresh `mcx`-charged `PgVec<u8>` (the seam returns its
 /// result allocated in the caller's context, as C `pstrdup`/`palloc` would).
 fn bytes_into<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let mut out = mcx::vec_with_capacity_in::<u8>(mcx, src.len())?;
+    let mut out = ::mcx::vec_with_capacity_in::<u8>(mcx, src.len())?;
     for &byte in src {
         out.push(byte);
     }
@@ -2689,7 +2689,7 @@ fn bytes_into<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
 fn oid_send_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
-    val: &types_tuple::heaptuple::Datum<'_>,
+    val: &::types_tuple::heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let (datum, ref_arg) = tuple_value_to_arg(val);
     // Detoast a TOAST-pointer / inline-compressed stored value before the send
@@ -2705,7 +2705,7 @@ fn oid_send_function_call_seam<'mcx>(
     let image = send_function_call_typed(mcx, &resolved.resolution, resolved.finfo, arg)?;
     // The seam contract strips the 4-byte varlena header to the payload the wire
     // protocol carries (proto.c reads VARSIZE - VARHDRSZ / VARDATA).
-    let payload = image.get(datum::varlena::VARHDRSZ..).unwrap_or(&[]);
+    let payload = image.get(::datum::varlena::VARHDRSZ..).unwrap_or(&[]);
     bytes_into(mcx, payload)
 }
 
@@ -2716,7 +2716,7 @@ fn oid_send_function_call_seam<'mcx>(
 fn oid_output_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
-    val: &types_tuple::heaptuple::Datum<'_>,
+    val: &::types_tuple::heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     // Header-ful everywhere: every by-ref value (string cores AND container I/O
     // cores) reads the same framed varlena image, so the argument crosses
@@ -2763,9 +2763,9 @@ fn function_call2_coll_seam(
 /// word with no referent; a by-reference value is the null word plus its owned
 /// detoasted bytes as a `Varlena` referent (the `struct varlena *` C would pass).
 pub fn datum_to_ref_arg(
-    val: &types_tuple::heaptuple::Datum<'_>,
+    val: &::types_tuple::heaptuple::Datum<'_>,
 ) -> (NullableDatum, Option<RefPayload>) {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     match val {
         CanonDatum::ByVal(d) => (NullableDatum::value(Datum::from_usize(*d)), None),
         // Header-ful everywhere: the canonical `ByRef` image and the fmgr
@@ -2803,9 +2803,9 @@ pub fn datum_to_ref_arg(
 /// `internal` value's owned `Box<dyn Any>` moves into the `RefPayload::Internal`
 /// by-reference referent (C: `args[0].value = (Datum) state`, a `void *`).
 pub fn datum_to_ref_arg_owned(
-    val: types_tuple::heaptuple::Datum<'_>,
+    val: ::types_tuple::heaptuple::Datum<'_>,
 ) -> (NullableDatum, Option<RefPayload>) {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     match val {
         CanonDatum::Internal(state) => (
             NullableDatum::value(Datum::null()),
@@ -2823,8 +2823,8 @@ fn ref_out_to_datum<'mcx>(
     mcx: Mcx<'mcx>,
     word: Datum,
     ref_result: Option<RefPayload>,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     match ref_result {
         // A `cstring`-typed result (e.g. a type's output function) stays a
         // canonical `Cstring` so a downstream consumer that reads its arg via the
@@ -2838,7 +2838,7 @@ fn ref_out_to_datum<'mcx>(
         // (C: the `HeapTupleHeader` Datum is a fully-formed tuple, not raw
         // varlena bytes) so downstream consumers see the row, not bytes.
         Some(RefPayload::Composite(image)) => Ok(CanonDatum::Composite(
-            types_tuple::heaptuple::FormedTuple::from_datum_image(
+            ::types_tuple::heaptuple::FormedTuple::from_datum_image(
                 mcx, &image,
             )?,
         )),
@@ -2853,7 +2853,7 @@ fn ref_out_to_datum<'mcx>(
             // (Composite/Expanded already flatten to a header-ful image;
             // Cstring/Internal are handled in their own arms above.)
             let image = byref_element_ondisk_image(payload);
-            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &image)?))
+            Ok(CanonDatum::ByRef(::mcx::slice_in(mcx, &image)?))
         }
         None => Ok(CanonDatum::ByVal(canon_word(&canon_byval(word)).as_usize())),
     }
@@ -2866,8 +2866,8 @@ fn function_call1_coll_datum_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
     collation: Oid,
-    arg1: types_tuple::heaptuple::Datum<'mcx>,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
+    arg1: ::types_tuple::heaptuple::Datum<'mcx>,
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
     let resolved = fmgr_info(mcx, function_id)?;
     let (a1, r1) = datum_to_ref_arg(&arg1);
     let (word, ref_result) = function_call_coll_ref_args_out(
@@ -2901,10 +2901,10 @@ fn fmgr_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     funcid: Oid,
     inputcollid: Oid,
-    args: Vec<(types_tuple::heaptuple::Datum<'mcx>, bool, Oid)>,
+    args: Vec<(::types_tuple::heaptuple::Datum<'mcx>, bool, Oid)>,
     rettype: Oid,
     fn_expr: Option<&::nodes::primnodes::Expr>,
-) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
     let _ = rettype; // result classification rides the callee's `ref_result` arm.
     let mut resolved = fmgr_info(mcx, funcid)?;
 
@@ -2918,9 +2918,9 @@ fn fmgr_call_seam<'mcx>(
         // clone_in: the call node may carry an Aggref (a HAVING qual operator),
         // whose context-allocated TargetEntry args a bare derived `.clone()`
         // panics on.
-        resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(fmgr::ExternalFnExpr {
+        resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(::fmgr::ExternalFnExpr {
             tag: 0,
-            node: Some(types_core::fmgr::FnExprErased::from_node_erased::<
+            node: Some(::types_core::fmgr::FnExprErased::from_node_erased::<
                 ::nodes::primnodes::Expr,
                 ::nodes::primnodes::Expr,
             >(expr.clone_in(mcx)?)),
@@ -2931,7 +2931,7 @@ fn fmgr_call_seam<'mcx>(
     // returns NULL without being called. `fn_strict` is `proisstrict`.
     if resolved.finfo.fn_strict && args.iter().any(|(_, isnull, _)| *isnull) {
         return Ok((
-            types_tuple::heaptuple::Datum::null(),
+            ::types_tuple::heaptuple::Datum::null(),
             true,
         ));
     }
@@ -2985,7 +2985,7 @@ fn fmgr_call_seam<'mcx>(
     let ref_result = fcinfo.take_ref_result();
     if const_is_null {
         return Ok((
-            types_tuple::heaptuple::Datum::null(),
+            ::types_tuple::heaptuple::Datum::null(),
             true,
         ));
     }
@@ -3000,9 +3000,9 @@ fn function_call2_coll_datum_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
     collation: Oid,
-    arg1: types_tuple::heaptuple::Datum<'mcx>,
-    arg2: types_tuple::heaptuple::Datum<'mcx>,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
+    arg1: ::types_tuple::heaptuple::Datum<'mcx>,
+    arg2: ::types_tuple::heaptuple::Datum<'mcx>,
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
     let resolved = fmgr_info(mcx, function_id)?;
     let (a1, r1) = datum_to_ref_arg(&arg1);
     let (a2, r2) = datum_to_ref_arg(&arg2);
@@ -3037,10 +3037,10 @@ fn function_call3_seam(
 fn function_call3_coll_datum_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
-    arg1: types_tuple::heaptuple::Datum<'mcx>,
-    arg2: types_tuple::heaptuple::Datum<'mcx>,
-    arg3: types_tuple::heaptuple::Datum<'mcx>,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
+    arg1: ::types_tuple::heaptuple::Datum<'mcx>,
+    arg2: ::types_tuple::heaptuple::Datum<'mcx>,
+    arg3: ::types_tuple::heaptuple::Datum<'mcx>,
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
     let resolved = fmgr_info(mcx, function_id)?;
     let (a1, r1) = datum_to_ref_arg(&arg1);
     let (a2, r2) = datum_to_ref_arg(&arg2);
@@ -3062,8 +3062,8 @@ fn function_call3_coll_datum_seam<'mcx>(
 /// NUL) charged to `mcx`.
 fn output_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    flinfo: &types_core::fmgr::FmgrInfo,
-    val: &types_tuple::heaptuple::Datum<'_>,
+    flinfo: &::types_core::fmgr::FmgrInfo,
+    val: &::types_tuple::heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     oid_output_function_call_seam(mcx, flinfo.fn_oid, val)
 }
@@ -3073,8 +3073,8 @@ fn output_function_call_seam<'mcx>(
 /// PAYLOAD bytes (varlena header stripped) charged to `mcx`.
 fn send_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    flinfo: &types_core::fmgr::FmgrInfo,
-    val: &types_tuple::heaptuple::Datum<'_>,
+    flinfo: &::types_core::fmgr::FmgrInfo,
+    val: &::types_tuple::heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     oid_send_function_call_seam(mcx, flinfo.fn_oid, val)
 }
@@ -3091,13 +3091,13 @@ fn oid_input_function_call_seam<'mcx>(
     str_: &str,
     typioparam: Oid,
     typmod: i32,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     match oid_input_function_call_out(mcx, function_id, Some(str_), typioparam, typmod)? {
         FmgrOut::ByVal(d) => Ok(d),
         FmgrOut::Ref(payload) => {
             let bytes: Vec<u8> = payload.flatten();
-            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+            Ok(CanonDatum::ByRef(::mcx::slice_in(mcx, &bytes)?))
         }
     }
 }
@@ -3114,8 +3114,8 @@ fn oid_receive_function_call_seam<'mcx>(
     buf: Option<&[u8]>,
     typioparam: Oid,
     typmod: i32,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     let resolved = fmgr_info(mcx, function_id)?;
     let out = receive_function_call_typed(
         mcx,
@@ -3129,7 +3129,7 @@ fn oid_receive_function_call_seam<'mcx>(
         FmgrOut::ByVal(d) => Ok(d),
         FmgrOut::Ref(payload) => {
             let bytes: Vec<u8> = payload.flatten();
-            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+            Ok(CanonDatum::ByRef(::mcx::slice_in(mcx, &bytes)?))
         }
     }
 }
@@ -3148,7 +3148,7 @@ fn fastpath_input_function_call_seam<'mcx>(
     str_: Option<&str>,
     typioparam: Oid,
     typmod: i32,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
     let out = oid_input_function_call_out(mcx, typinput, str_, typioparam, typmod)?;
     fmgr_out_to_canon(mcx, out)
 }
@@ -3166,7 +3166,7 @@ fn fastpath_receive_function_call_seam<'mcx>(
     buf: Option<&[u8]>,
     typioparam: Oid,
     typmod: i32,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
     let resolved = fmgr_info(mcx, typreceive)?;
     let out = receive_function_call_typed(
         mcx,
@@ -3187,7 +3187,7 @@ fn fastpath_receive_function_call_seam<'mcx>(
 fn fastpath_output_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     typoutput: Oid,
-    retval: &types_tuple::heaptuple::Datum<'_>,
+    retval: &::types_tuple::heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     oid_output_function_call_seam(mcx, typoutput, retval)
 }
@@ -3201,7 +3201,7 @@ fn fastpath_output_function_call_seam<'mcx>(
 fn fastpath_send_function_call_seam<'mcx>(
     mcx: Mcx<'mcx>,
     typsend: Oid,
-    retval: &types_tuple::heaptuple::Datum<'_>,
+    retval: &::types_tuple::heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     oid_send_function_call_seam(mcx, typsend, retval)
 }
@@ -3216,9 +3216,9 @@ fn fastpath_function_call_invoke_seam<'mcx>(
     mcx: Mcx<'mcx>,
     fn_oid: Oid,
     collation: Oid,
-    args: &[types_tuple::heaptuple::Datum<'mcx>],
+    args: &[::types_tuple::heaptuple::Datum<'mcx>],
     args_null: &[bool],
-) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
     function_call_invoke_datum_seam(mcx, fn_oid, collation, args, args_null, None)
 }
 
@@ -3235,8 +3235,8 @@ fn input_function_call_for_heap_form_seam<'mcx>(
     typioparam: Oid,
     typmod: i32,
     attbyval: bool,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     // The seam contract is the canonical `Datum<'mcx>` enum, so the input
     // function's result maps straight onto it — no per-backend registry token
     // round-trip. A by-value result is `ByVal` (the bare word); a by-reference
@@ -3260,7 +3260,7 @@ fn input_function_call_for_heap_form_seam<'mcx>(
         }
         FmgrOut::Ref(payload) => {
             let bytes: Vec<u8> = payload.flatten();
-            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+            Ok(CanonDatum::ByRef(::mcx::slice_in(mcx, &bytes)?))
         }
     }
 }
@@ -3275,9 +3275,9 @@ fn input_function_call_for_heap_form_seam<'mcx>(
 fn oid_output_function_call_datum_seam<'mcx>(
     mcx: Mcx<'mcx>,
     function_id: Oid,
-    val: types_tuple::heaptuple::Datum<'mcx>,
+    val: ::types_tuple::heaptuple::Datum<'mcx>,
 ) -> PgResult<PgString<'mcx>> {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     let resolved = fmgr_info(mcx, function_id)?;
     let s = match &val {
         CanonDatum::ByVal(_) => output_function_call_typed(
@@ -3291,7 +3291,7 @@ fn oid_output_function_call_datum_seam<'mcx>(
             // self-describing varlena the output function reads (string cores via
             // `VARDATA_ANY`, container I/O cores via the framed image), so it
             // crosses VERBATIM.
-            let payload = fmgr::boundary::RefPayload::Varlena(bytes.as_slice().to_vec());
+            let payload = ::fmgr::boundary::RefPayload::Varlena(bytes.as_slice().to_vec());
             output_function_call_typed(
                 mcx,
                 &resolved.resolution,
@@ -3300,7 +3300,7 @@ fn oid_output_function_call_datum_seam<'mcx>(
             )?
         }
         CanonDatum::Cstring(s2) => {
-            let payload = fmgr::boundary::RefPayload::Cstring(s2.clone());
+            let payload = ::fmgr::boundary::RefPayload::Cstring(s2.clone());
             output_function_call_typed(
                 mcx,
                 &resolved.resolution,
@@ -3309,7 +3309,7 @@ fn oid_output_function_call_datum_seam<'mcx>(
             )?
         }
         CanonDatum::Composite(t) => {
-            let payload = fmgr::boundary::RefPayload::Composite(t.to_datum_image());
+            let payload = ::fmgr::boundary::RefPayload::Composite(t.to_datum_image());
             output_function_call_typed(
                 mcx,
                 &resolved.resolution,
@@ -3381,7 +3381,7 @@ fn fmgr_out_element_word<'mcx>(mcx: Mcx<'mcx>, out: FmgrOut<'_>) -> PgResult<Dat
         FmgrOut::ByVal(d) => Ok(canon_word(&d)),
         FmgrOut::Ref(payload) => {
             let image = byref_element_ondisk_image(payload);
-            let stored: &'mcx mut [u8] = mcx::slice_in(mcx, &image)?.leak();
+            let stored: &'mcx mut [u8] = ::mcx::slice_in(mcx, &image)?.leak();
             Ok(Datum::from_usize(stored.as_ptr() as usize))
         }
     }
@@ -3402,9 +3402,9 @@ fn input_function_call_seam<'mcx>(
     str: Option<&str>,
     typioparam: Oid,
     typmod: i32,
-    escontext: Option<&mut types_error::SoftErrorContext>,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     // With a soft sink (C: `InputFunctionCallSafe(..., escontext, &result)`), run
     // the input function under the escontext: a recoverable conversion error is
     // saved into it and we return `Datum::null()` (C returns false, result = 0;
@@ -3440,7 +3440,7 @@ fn input_function_call_seam<'mcx>(
         FmgrOut::Ref(RefPayload::Cstring(s)) => Ok(CanonDatum::Cstring(s)),
         FmgrOut::Ref(payload) => {
             let bytes: Vec<u8> = payload.flatten();
-            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+            Ok(CanonDatum::ByRef(::mcx::slice_in(mcx, &bytes)?))
         }
     }
 }
@@ -3478,7 +3478,7 @@ fn input_function_call_safe_seam<'mcx>(
     str_: &str,
     typioparam: Oid,
     typmod: i32,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Option<Datum>> {
     let resolved = fmgr_info(mcx, function_id)?;
     // C: `InputFunctionCallSafe(&my_extra->proc, ..., escontext, &result)` —
@@ -3522,7 +3522,7 @@ fn input_is_valid_by_type_seam(
     typoid: Oid,
     typmod: i32,
     str_: &[u8],
-    escontext: &mut types_error::SoftErrorContext,
+    escontext: &mut ::types_error::SoftErrorContext,
 ) -> PgResult<bool> {
     let ctx = MemoryContext::new("input_is_valid_by_type");
     let mcx = ctx.mcx();
@@ -3542,7 +3542,7 @@ fn input_is_valid_by_type_seam(
         Err(_) => {
             escontext.save(
                 PgError::error("invalid byte sequence for encoding")
-                    .with_sqlstate(types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
+                    .with_sqlstate(::types_error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE),
             );
             return Ok(false);
         }
@@ -3596,14 +3596,14 @@ fn function_call_invoke_seam(
     // nested fmgr calls — catalog lookups) does not consume/observe it. We
     // re-install it just before `init_fcinfo` so it rides onto exactly the callee
     // frame, matching C's per-frame `fcinfo->context`.
-    let deposited_ctx = fmgr::fmgr::take_call_context_tag();
+    let deposited_ctx = ::fmgr::fmgr::take_call_context_tag();
     let resolved = fmgr_info(mcx, fn_oid)?;
     // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658) — thread
     // the caller's fn_expr before the FmgrInfo is moved into fcinfo.
     let fn_expr = resolved.finfo.fn_expr.clone();
     // Re-deposit the snapshot tag so `init_fcinfo` consumes it onto this frame.
     let _ctx_reinstall = deposited_ctx
-        .map(|(tag, atomic)| fmgr::fmgr::CallContextTagGuard::install_call(tag, atomic));
+        .map(|(tag, atomic)| ::fmgr::fmgr::CallContextTagGuard::install_call(tag, atomic));
     let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, args.to_vec());
     // C: fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo);
     fcinfo.isnull = false;
@@ -3752,8 +3752,8 @@ fn function_call_invoke_datum_core<'mcx>(
     collation: Oid,
     nargs: Vec<NullableDatum>,
     ref_args: Vec<Option<RefPayload>>,
-    fn_expr: Option<types_core::fmgr::FnExprErased>,
-) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
     match function_call_invoke_datum_core_soft(mcx, fn_oid, collation, nargs, ref_args, fn_expr, None)? {
         Some(pair) => Ok(pair),
         // No escontext was installed, so a soft error never occurs: any callee
@@ -3771,9 +3771,9 @@ fn function_call_invoke_datum_core_soft<'mcx>(
     collation: Oid,
     nargs: Vec<NullableDatum>,
     ref_args: Vec<Option<RefPayload>>,
-    fn_expr: Option<types_core::fmgr::FnExprErased>,
-    escontext: Option<&mut types_error::SoftErrorContext>,
-) -> PgResult<Option<(types_tuple::heaptuple::Datum<'mcx>, bool)>> {
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
+) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
     let mut resolved = fmgr_info(mcx, fn_oid)?;
 
     // C: ExecInitFunc does `fmgr_info_set_expr((Node *) node, flinfo)`, so the
@@ -3789,7 +3789,7 @@ fn function_call_invoke_datum_core_soft<'mcx>(
     // expression tree — deep-cloning here is catastrophic on a hot dispatch path
     // (a 100M-iteration nested-loop join qual was effectively hung on it).
     if let Some(node) = fn_expr {
-        resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(fmgr::ExternalFnExpr {
+        resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(::fmgr::ExternalFnExpr {
             tag: 0,
             node: Some(node),
         })));
@@ -3816,8 +3816,8 @@ fn function_call_invoke_resolved_core_soft<'mcx>(
     collation: Oid,
     nargs: Vec<NullableDatum>,
     ref_args: Vec<Option<RefPayload>>,
-    escontext: Option<&mut types_error::SoftErrorContext>,
-) -> PgResult<Option<(types_tuple::heaptuple::Datum<'mcx>, bool)>> {
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
+) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
     // The freshly-allocated-frame path (the non-pooled callers). Build the frame
     // via `init_fcinfo` (allocates), dispatch through the shared body, and let
     // the frame drop at end of scope.
@@ -3838,8 +3838,8 @@ fn dispatch_resolved_into_frame<'mcx>(
     resolved: &ResolvedFmgrInfo,
     fcinfo: &mut FunctionCallInfoBaseData,
     ref_args: Vec<Option<RefPayload>>,
-    escontext: Option<&mut types_error::SoftErrorContext>,
-) -> PgResult<Option<(types_tuple::heaptuple::Datum<'mcx>, bool)>> {
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
+) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
     let fn_oid = resolved.finfo.fn_oid;
     // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658).
     let fn_expr = resolved.finfo.fn_expr.clone();
@@ -3865,7 +3865,7 @@ fn dispatch_resolved_into_frame<'mcx>(
     // (a fresh frame-local context whose captured error is lifted back to the
     // caller after the call, mirroring `input_function_call_safe_typed`).
     if let Some(caller) = escontext.as_ref() {
-        fcinfo.set_escontext(types_error::SoftErrorContext::new(caller.details_wanted()));
+        fcinfo.set_escontext(::types_error::SoftErrorContext::new(caller.details_wanted()));
     }
     // C: fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo). Dispatch directly
     // (NOT through `invoke_flinfo`/`null_check`): a function may legitimately
@@ -3886,7 +3886,7 @@ fn dispatch_resolved_into_frame<'mcx>(
     let ref_result = fcinfo.take_ref_result();
     if isnull {
         return Ok(Some((
-            types_tuple::heaptuple::Datum::null(),
+            ::types_tuple::heaptuple::Datum::null(),
             true,
         )));
     }
@@ -3912,10 +3912,10 @@ fn function_call_invoke_datum_resolved_seam<'mcx>(
     mcx: Mcx<'mcx>,
     fn_oid: Oid,
     collation: Oid,
-    args: &[types_tuple::heaptuple::Datum<'mcx>],
+    args: &[::types_tuple::heaptuple::Datum<'mcx>],
     args_null: &[bool],
-    fn_expr: Option<types_core::fmgr::FnExprErased>,
-) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
     // Recover the cached built-in resolution; on a miss (non-built-in or any
     // resolution error) fall through to the ordinary by-OID seam, which keeps
     // the catalog / secdef / SQL legs exactly as before.
@@ -3941,7 +3941,7 @@ fn function_call_invoke_datum_resolved_seam<'mcx>(
                 finfo: resolved.finfo.clone(),
                 resolution: resolved.resolution.clone(),
             };
-            owned.finfo.fn_expr = Some(Box::new(FnExpr::External(fmgr::ExternalFnExpr {
+            owned.finfo.fn_expr = Some(Box::new(FnExpr::External(::fmgr::ExternalFnExpr {
                 tag: 0,
                 node: Some(node),
             })));
@@ -3987,10 +3987,10 @@ fn function_call_invoke_datum_seam<'mcx>(
     mcx: Mcx<'mcx>,
     fn_oid: Oid,
     collation: Oid,
-    args: &[types_tuple::heaptuple::Datum<'mcx>],
+    args: &[::types_tuple::heaptuple::Datum<'mcx>],
     args_null: &[bool],
-    fn_expr: Option<types_core::fmgr::FnExprErased>,
-) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
     // Build the `fcinfo->args[]` frame: by-value word lane + by-reference side
     // channel. The canonical `Datum::ByVal(0)` word cannot encode SQL NULL, so
     // `args_null[i]` (`fcinfo->args[i].isnull`) is threaded explicitly — a
@@ -4020,11 +4020,11 @@ fn function_call_invoke_datum_soft_seam<'mcx>(
     mcx: Mcx<'mcx>,
     fn_oid: Oid,
     collation: Oid,
-    args: &[types_tuple::heaptuple::Datum<'mcx>],
+    args: &[::types_tuple::heaptuple::Datum<'mcx>],
     args_null: &[bool],
-    fn_expr: Option<types_core::fmgr::FnExprErased>,
-    escontext: &mut types_error::SoftErrorContext,
-) -> PgResult<Option<(types_tuple::heaptuple::Datum<'mcx>, bool)>> {
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
+    escontext: &mut ::types_error::SoftErrorContext,
+) -> PgResult<Option<(::types_tuple::heaptuple::Datum<'mcx>, bool)>> {
     let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
     let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
     for (i, val) in args.iter().enumerate() {
@@ -4047,10 +4047,10 @@ fn function_call_invoke_datum_owned_seam<'mcx>(
     mcx: Mcx<'mcx>,
     fn_oid: Oid,
     collation: Oid,
-    args: Vec<types_tuple::heaptuple::Datum<'mcx>>,
+    args: Vec<::types_tuple::heaptuple::Datum<'mcx>>,
     args_null: Vec<bool>,
-    fn_expr: Option<types_core::fmgr::FnExprErased>,
-) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
     debug_assert_eq!(args.len(), args_null.len());
     let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
     let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
@@ -4080,13 +4080,13 @@ fn function_call_finalfn_owned_seam<'mcx>(
     mcx: Mcx<'mcx>,
     fn_oid: Oid,
     collation: Oid,
-    args: Vec<types_tuple::heaptuple::Datum<'mcx>>,
+    args: Vec<::types_tuple::heaptuple::Datum<'mcx>>,
     args_null: Vec<bool>,
-    fn_expr: Option<types_core::fmgr::FnExprErased>,
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
 ) -> PgResult<(
-    types_tuple::heaptuple::Datum<'mcx>,
+    ::types_tuple::heaptuple::Datum<'mcx>,
     bool,
-    Option<types_tuple::heaptuple::Datum<'mcx>>,
+    Option<::types_tuple::heaptuple::Datum<'mcx>>,
 )> {
     debug_assert_eq!(args.len(), args_null.len());
     let mut nargs: Vec<NullableDatum> = Vec::with_capacity(args.len());
@@ -4102,7 +4102,7 @@ fn function_call_finalfn_owned_seam<'mcx>(
 
     let mut resolved = fmgr_info(mcx, fn_oid)?;
     if let Some(node) = fn_expr {
-        resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(fmgr::ExternalFnExpr {
+        resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(::fmgr::ExternalFnExpr {
             tag: 0,
             node: Some(node),
         })));
@@ -4133,7 +4133,7 @@ fn function_call_finalfn_owned_seam<'mcx>(
     };
     if isnull {
         return Ok((
-            types_tuple::heaptuple::Datum::null(),
+            ::types_tuple::heaptuple::Datum::null(),
             true,
             surviving_arg0,
         ));
@@ -4270,14 +4270,14 @@ fn convert_via_proc_counted_seam<'mcx>(
         Some(RefPayload::Varlena(b)) => b.as_slice(),
         _ => &[],
     };
-    Ok((result.as_i32(), mcx::slice_in(mcx, converted)?))
+    Ok((result.as_i32(), ::mcx::slice_in(mcx, converted)?))
 }
 
 // ===========================================================================
 // Frame-widening seams (`PG_GETARG_*` / `PG_RETURN_*` / `PG_NARGS` /
 // `PG_ARGISNULL` / call mcx / fn_expr readers) over the executor's
 // `::nodes::fmgr::FunctionCallInfoBaseData<'mcx>` frame. The frame's
-// `args[i].value` is a bare-word `datum::Datum`; only by-value scalar
+// `args[i].value` is a bare-word `::datum::Datum`; only by-value scalar
 // arguments can be decoded here (the by-reference `PG_GETARG_{NAME,TEXT_PP,
 // VARLENA_PP,CSTRING}` readers need a by-reference channel the trimmed nodes
 // frame does not carry — see DESIGN_DEBT TD-FMGR-GETARG-BYREF).
@@ -4309,7 +4309,7 @@ fn pg_getarg_oid_seam(
 fn pg_getarg_int16_seam(
     fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     n: usize,
-) -> types_core::AttrNumber {
+) -> ::types_core::AttrNumber {
     fcinfo.args[n].value.as_i16()
 }
 
@@ -4371,7 +4371,7 @@ fn getarg_ref<'a>(
 fn pg_getarg_text_pp_seam<'mcx>(
     fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
     n: usize,
-) -> PgResult<datum::varlena::Bytea<'mcx>> {
+) -> PgResult<::datum::varlena::Bytea<'mcx>> {
     let mcx = pg_call_mcx_seam(fcinfo);
     let bytes = match getarg_ref(fcinfo, n, "PG_GETARG_TEXT_PP") {
         ::nodes::fmgr::FmgrArgRef::Varlena(b) => b.as_slice(),
@@ -4409,7 +4409,7 @@ fn pg_getarg_text_pp_seam<'mcx>(
     } else {
         detoasted
     };
-    Ok(datum::varlena::Bytea::from_image(mcx::slice_in(
+    Ok(::datum::varlena::Bytea::from_image(::mcx::slice_in(
         mcx,
         detoasted.as_slice(),
     )?))
@@ -4421,7 +4421,7 @@ fn pg_getarg_text_pp_seam<'mcx>(
 fn pg_getarg_varlena_pp_seam<'mcx>(
     fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
     n: usize,
-) -> PgResult<datum::varlena::Bytea<'mcx>> {
+) -> PgResult<::datum::varlena::Bytea<'mcx>> {
     pg_getarg_text_pp_seam(fcinfo, n)
 }
 
@@ -4465,8 +4465,8 @@ fn pg_getarg_cstring_seam<'mcx>(
     // `char *` points into the call's context, which `fn_mcxt` models).
     let ps = PgString::from_str_in(&s, mcx)
         .unwrap_or_else(|_| panic!("PG_GETARG_CSTRING: OOM allocating cstring into call context"));
-    let leaked: &'mcx mut PgString<'mcx> = mcx::leak_in(
-        mcx::alloc_in(mcx, ps)
+    let leaked: &'mcx mut PgString<'mcx> = ::mcx::leak_in(
+        ::mcx::alloc_in(mcx, ps)
             .unwrap_or_else(|_| panic!("PG_GETARG_CSTRING: OOM boxing cstring into call context")),
     );
     leaked.as_str()
@@ -4571,7 +4571,7 @@ fn fn_oid_and_expr_seam<'mcx>(
 /// `exprInputCollation` resolve against. `None` is C's NULL `fn_expr`.
 fn fn_oid_and_fn_expr_erased_seam(
     fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'_>,
-) -> (Oid, Option<types_core::fmgr::FnExprErased>) {
+) -> (Oid, Option<::types_core::fmgr::FnExprErased>) {
     let fn_oid = fcinfo.flinfo.as_ref().map_or(InvalidOid, |f| f.fn_oid);
     let erased = fcinfo
         .flinfo
@@ -4592,13 +4592,13 @@ fn fn_oid_and_fn_expr_erased_seam(
 fn fmgr_out_to_canon<'mcx>(
     mcx: Mcx<'mcx>,
     out: FmgrOut<'mcx>,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
-    use types_tuple::heaptuple::Datum as CanonDatum;
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
     match out {
         FmgrOut::ByVal(d) => Ok(d),
         FmgrOut::Ref(payload) => {
             let bytes: Vec<u8> = payload.flatten();
-            Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &bytes)?))
+            Ok(CanonDatum::ByRef(::mcx::slice_in(mcx, &bytes)?))
         }
     }
 }
@@ -4612,8 +4612,8 @@ fn record_column_input_seam<'mcx>(
     coltype: Oid,
     column_data: Option<&str>,
     atttypmod: i32,
-    escontext: Option<&mut types_error::SoftErrorContext>,
-) -> PgResult<Option<types_tuple::heaptuple::Datum<'mcx>>> {
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
+) -> PgResult<Option<::types_tuple::heaptuple::Datum<'mcx>>> {
     let (typinput, typioparam) =
         lsyscache_seams::get_type_input_info::call(coltype)?;
     let resolved = fmgr_info(mcx, typinput)?;
@@ -4640,7 +4640,7 @@ fn record_column_receive_seam<'mcx>(
     item: Option<&[u8]>,
     atttypmod: i32,
     colno: i32,
-) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::Datum<'mcx>> {
     let _ = colno; // The whole-buffer cursor check lives inside the receive call
                    // (the typed helper does not surface bytes-consumed); see
                    // DESIGN_DEBT TD-FMGR-RECORD-RECV-CURSOR.
@@ -4663,7 +4663,7 @@ fn record_column_receive_seam<'mcx>(
 fn record_column_output_seam<'mcx>(
     mcx: Mcx<'mcx>,
     coltype: Oid,
-    val: &types_tuple::heaptuple::Datum<'_>,
+    val: &::types_tuple::heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let (typoutput, _typisvarlena) =
         lsyscache_seams::get_type_output_info::call(coltype)?;
@@ -4683,7 +4683,7 @@ fn record_column_output_seam<'mcx>(
 fn record_column_send_seam<'mcx>(
     mcx: Mcx<'mcx>,
     coltype: Oid,
-    val: &types_tuple::heaptuple::Datum<'_>,
+    val: &::types_tuple::heaptuple::Datum<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let (typsend, _typisvarlena) =
         lsyscache_seams::get_type_binary_output_info::call(coltype)?;
@@ -4694,7 +4694,7 @@ fn record_column_send_seam<'mcx>(
         None => FmgrArg::ByVal(canon_byval(datum)),
     };
     let image = send_function_call_typed(mcx, &resolved.resolution, resolved.finfo, arg)?;
-    let payload = image.get(datum::varlena::VARHDRSZ..).unwrap_or(&[]);
+    let payload = image.get(::datum::varlena::VARHDRSZ..).unwrap_or(&[]);
     bytes_into(mcx, payload)
 }
 
@@ -4932,7 +4932,7 @@ fn array_send_function_call_seam<'mcx>(
             )?
         }
     };
-    let payload = image.get(datum::varlena::VARHDRSZ..).unwrap_or(&[]);
+    let payload = image.get(::datum::varlena::VARHDRSZ..).unwrap_or(&[]);
     bytes_into(mcx, payload)
 }
 
@@ -5098,7 +5098,7 @@ pub fn init_seams() {
         // C: if (fmgr_internal_function(prosrc) == InvalidOid)
         //        ereport(ERROR, ERRCODE_UNDEFINED_FUNCTION,
         //                "there is no built-in function named \"%s\"").
-        if !types_core::primitive::OidIsValid(fmgr_internal_function(prosrc)) {
+        if !::types_core::primitive::OidIsValid(fmgr_internal_function(prosrc)) {
             return Err(PgError::error(format!(
                 "there is no built-in function named \"{prosrc}\""
             ))

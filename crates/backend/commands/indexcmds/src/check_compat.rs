@@ -10,21 +10,21 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use types_core::primitive::Oid;
-use types_core::InvalidOid;
+use ::types_core::primitive::Oid;
+use ::types_core::InvalidOid;
 use types_error::{PgResult, ERROR};
 
-use types_storage::lock::{AccessShareLock, NoLock};
+use ::types_storage::lock::{AccessShareLock, NoLock};
 
-use index_amapi::GetIndexAmRoutineByAmId;
+use ::index_amapi::GetIndexAmRoutineByAmId;
 use indexam_seams as indexam_seam;
 use table_seams as table_seam;
-use index::IndexGetRelation;
-use utils_error::ereport;
+use ::index::IndexGetRelation;
+use ::utils_error::ereport;
 
-use nodes_core::makefuncs::make_index_info;
+use ::nodes_core::makefuncs::make_index_info;
 use lsyscache_seams as lsyscache;
 use syscache_seams as syscache;
 
@@ -32,7 +32,7 @@ use crate::vec_oid;
 use crate::ComputeIndexAttrs;
 
 // IsPolymorphicTypeFamily1 / Family2 OIDs (catalog/pg_type.h:313).
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
     ANYNONARRAYOID, ANYRANGEOID,
@@ -70,7 +70,7 @@ pub fn CheckIndexCompatible<'mcx>(
     old_id: Oid,
     access_method_name: &str,
     attribute_list: &[&nodes::ddlnodes::IndexElem<'mcx>],
-    exclusion_op_names: Option<&mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>>,
+    exclusion_op_names: Option<&::mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>>,
     is_without_overlaps: bool,
 ) -> PgResult<bool> {
     // Caller should already have the relation locked in some way.
@@ -87,7 +87,7 @@ pub fn CheckIndexCompatible<'mcx>(
     // look up the access method
     let Some(am_info) = syscache::search_am_by_name::call(mcx, access_method_name)? else {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+            .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!(
                 "access method \"{access_method_name}\" does not exist"
             ))
@@ -123,8 +123,8 @@ pub fn CheckIndexCompatible<'mcx>(
     let mut type_ids = vec_oid(number_of_attributes);
     let mut collation_ids = vec_oid(number_of_attributes);
     let mut opclass_ids = vec_oid(number_of_attributes);
-    let mut opclass_options: Vec<types_tuple::Datum<'mcx>> = (0..number_of_attributes)
-        .map(|_| types_tuple::Datum::null())
+    let mut opclass_options: Vec<::types_tuple::Datum<'mcx>> = (0..number_of_attributes)
+        .map(|_| ::types_tuple::Datum::null())
         .collect();
     let mut col_options = vec![0i16; number_of_attributes as usize];
 
@@ -203,12 +203,12 @@ pub fn CheckIndexCompatible<'mcx>(
 
     // Any change in opclass options break compatibility.
     if ret {
-        let mut old_opclass_options: Vec<types_tuple::Datum<'mcx>> =
-            (0..old_natts).map(|_| types_tuple::Datum::null()).collect();
+        let mut old_opclass_options: Vec<::types_tuple::Datum<'mcx>> =
+            (0..old_natts).map(|_| ::types_tuple::Datum::null()).collect();
         for (i, slot) in old_opclass_options.iter_mut().enumerate() {
             *slot = match lsyscache::get_attoptions::call(mcx, old_id, (i + 1) as i16)? {
                 Some(d) => d,
-                None => types_tuple::Datum::null(),
+                None => ::types_tuple::Datum::null(),
             };
         }
         ret = compare_opclass_options(&old_opclass_options, &opclass_options, old_natts);
@@ -272,8 +272,8 @@ pub fn check_index_compatible_stmt<'mcx>(
 /// i.e. byte equality). The reachable `CheckIndexCompatible` path passes all-NULL
 /// options (no `WITH` clause), which compare equal element-wise.
 fn compare_opclass_options<'mcx>(
-    opts1: &[types_tuple::Datum<'mcx>],
-    opts2: &[types_tuple::Datum<'mcx>],
+    opts1: &[::types_tuple::Datum<'mcx>],
+    opts2: &[::types_tuple::Datum<'mcx>],
     natts: usize,
 ) -> bool {
     for i in 0..natts {
@@ -298,6 +298,6 @@ fn compare_opclass_options<'mcx>(
 
 /// A `(Datum) 0` sentinel — the "no opclass options" marker, modelled as the
 /// by-value zero word (`Datum::null()`).
-fn is_null_datum(d: &types_tuple::Datum<'_>) -> bool {
-    matches!(d, types_tuple::Datum::ByVal(0))
+fn is_null_datum(d: &::types_tuple::Datum<'_>) -> bool {
+    matches!(d, ::types_tuple::Datum::ByVal(0))
 }

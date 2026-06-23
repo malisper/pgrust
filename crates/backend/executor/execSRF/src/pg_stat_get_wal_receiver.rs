@@ -16,12 +16,12 @@
 //! `WalReceiverActivity`) is its walreceiver.c owner's; this is the
 //! `Datum`/tuple-construction adapter.
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
-use types_walreceiver::WalReceiverActivity;
+use ::types_walreceiver::WalReceiverActivity;
 
 use crate::register_srf;
 
@@ -96,29 +96,29 @@ fn pg_stat_get_wal_receiver<'mcx>(
     // [1] status — text
     set!(1, act.state.as_deref(), |s: &str| text_datum(mcx, s));
     // [2] receive_start_lsn — pg_lsn (u64, pass-by-value)
-    set!(2, act.receive_start_lsn, |v: u64| Ok::<_, types_error::PgError>(Datum::from_u64(v)));
+    set!(2, act.receive_start_lsn, |v: u64| Ok::<_, ::types_error::PgError>(Datum::from_u64(v)));
     // [3] receive_start_tli — int4
-    set!(3, act.receive_start_tli, |v: u32| Ok::<_, types_error::PgError>(Datum::from_i32(v as i32)));
+    set!(3, act.receive_start_tli, |v: u32| Ok::<_, ::types_error::PgError>(Datum::from_i32(v as i32)));
     // [4] written_lsn — pg_lsn
-    set!(4, act.written_lsn, |v: u64| Ok::<_, types_error::PgError>(Datum::from_u64(v)));
+    set!(4, act.written_lsn, |v: u64| Ok::<_, ::types_error::PgError>(Datum::from_u64(v)));
     // [5] flushed_lsn — pg_lsn
-    set!(5, act.flushed_lsn, |v: u64| Ok::<_, types_error::PgError>(Datum::from_u64(v)));
+    set!(5, act.flushed_lsn, |v: u64| Ok::<_, ::types_error::PgError>(Datum::from_u64(v)));
     // [6] received_tli — int4
-    set!(6, act.received_tli, |v: u32| Ok::<_, types_error::PgError>(Datum::from_i32(v as i32)));
+    set!(6, act.received_tli, |v: u32| Ok::<_, ::types_error::PgError>(Datum::from_i32(v as i32)));
     // [7] last_msg_send_time — timestamptz (i64, pass-by-value)
-    set!(7, act.last_send_time, |v: i64| Ok::<_, types_error::PgError>(Datum::from_i64(v)));
+    set!(7, act.last_send_time, |v: i64| Ok::<_, ::types_error::PgError>(Datum::from_i64(v)));
     // [8] last_msg_receipt_time — timestamptz
-    set!(8, act.last_receipt_time, |v: i64| Ok::<_, types_error::PgError>(Datum::from_i64(v)));
+    set!(8, act.last_receipt_time, |v: i64| Ok::<_, ::types_error::PgError>(Datum::from_i64(v)));
     // [9] latest_end_lsn — pg_lsn
-    set!(9, act.latest_end_lsn, |v: u64| Ok::<_, types_error::PgError>(Datum::from_u64(v)));
+    set!(9, act.latest_end_lsn, |v: u64| Ok::<_, ::types_error::PgError>(Datum::from_u64(v)));
     // [10] latest_end_time — timestamptz
-    set!(10, act.latest_end_time, |v: i64| Ok::<_, types_error::PgError>(Datum::from_i64(v)));
+    set!(10, act.latest_end_time, |v: i64| Ok::<_, ::types_error::PgError>(Datum::from_i64(v)));
     // [11] slot_name — text
     set!(11, act.slotname.as_deref(), |s: &str| text_datum(mcx, s));
     // [12] sender_host — text
     set!(12, act.sender_host.as_deref(), |s: &str| text_datum(mcx, s));
     // [13] sender_port — int4
-    set!(13, act.sender_port, |v: i32| Ok::<_, types_error::PgError>(Datum::from_i32(v)));
+    set!(13, act.sender_port, |v: i32| Ok::<_, ::types_error::PgError>(Datum::from_i32(v)));
     // [14] conninfo — text
     set!(14, act.conninfo.as_deref(), |s: &str| text_datum(mcx, s));
 

@@ -19,8 +19,8 @@
 //! length of the first delimiter (stripped off only in the final function), per
 //! the C comment.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `StringInfo` transition state for `string_agg`. `data` is the accumulated
@@ -124,7 +124,7 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 /// `arg_text` reads args back (skipping the header).
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
     let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
     image.extend_from_slice(&payload);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
@@ -214,7 +214,7 @@ fn arg_bytea<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
 /// `ret_text` (`SET_VARSIZE` over a 4-byte uncompressed length word + payload).
 fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
     let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
     image.extend_from_slice(&payload);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)

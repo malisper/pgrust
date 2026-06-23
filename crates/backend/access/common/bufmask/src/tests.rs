@@ -5,7 +5,7 @@
 //! reproduces the C behaviour.
 
 use super::*;
-use types_storage::bufpage::{LP_NORMAL, PD_ALL_VISIBLE, PD_HAS_FREE_LINES, PD_PAGE_FULL};
+use ::types_storage::bufpage::{LP_NORMAL, PD_ALL_VISIBLE, PD_HAS_FREE_LINES, PD_PAGE_FULL};
 
 const OFF_PD_FLAGS: usize = 10;
 const OFF_PD_PRUNE_XID: usize = 20;

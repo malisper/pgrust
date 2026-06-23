@@ -19,8 +19,8 @@
 //!   lock, which is what C's transaction-abort resowner sweep would do.
 
 use types_core::{Oid, TransactionId, VirtualTransactionId};
-use types_error::PgResult;
-use types_storage::lock::LOCKMODE;
+use ::types_error::PgResult;
+use ::types_storage::lock::LOCKMODE;
 
 extern crate alloc;
 
@@ -29,7 +29,7 @@ seam_core::seam!(
     /// heavyweight lock type (`LockTagTypeNames[locktag_type]`, or
     /// `"unknown wait event"` for an out-of-range value). Returns a `'static`
     /// lock-method name owned by lmgr.c.
-    pub fn get_lock_name_from_tag_type(locktag_type: types_core::uint16) -> &'static str
+    pub fn get_lock_name_from_tag_type(locktag_type: ::types_core::uint16) -> &'static str
 );
 
 seam_core::seam!(
@@ -152,7 +152,7 @@ seam_core::seam!(
     /// `ereport(ERROR)` (deadlock, cancel), carried on `Err`.
     pub fn lock_apply_transaction_for_session(
         suboid: Oid,
-        xid: types_core::TransactionId,
+        xid: ::types_core::TransactionId,
         objid: u16,
         lockmode: LOCKMODE,
     ) -> PgResult<()>
@@ -166,7 +166,7 @@ seam_core::seam!(
     /// lock-table inconsistency, carried on `Err`.
     pub fn unlock_apply_transaction_for_session(
         suboid: Oid,
-        xid: types_core::TransactionId,
+        xid: ::types_core::TransactionId,
         objid: u16,
         lockmode: LOCKMODE,
     ) -> PgResult<()>
@@ -308,7 +308,7 @@ seam_core::seam!(
     /// `DescribeLockTag(buf, tag)` (lmgr.c) — render a `LOCKTAG` to a human
     /// description for the deadlock report. C appends to a `StringInfo`; the
     /// seam returns the rendered `String` (the detector appends it itself).
-    pub fn describe_lock_tag(tag: types_storage::lock::LOCKTAG) -> alloc::string::String
+    pub fn describe_lock_tag(tag: ::types_storage::lock::LOCKTAG) -> alloc::string::String
 );
 
 seam_core::seam!(
@@ -380,7 +380,7 @@ seam_core::seam!(
         xid: TransactionId,
         rel_name: alloc::string::String,
         ctid: types_tuple::heaptuple::ItemPointerData,
-        oper: types_storage::lock::XLTW_Oper,
+        oper: ::types_storage::lock::XLTW_Oper,
     ) -> PgResult<()>
 );
 
@@ -454,7 +454,7 @@ seam_core::seam!(
     /// uses it to decide how aggressively to bulk-extend. `Err` carries the
     /// lock-manager `ereport(ERROR)` surface.
     pub fn relation_extension_lock_waiter_count(
-        lock_rel_id: types_storage::lock::LockRelId,
+        lock_rel_id: ::types_storage::lock::LockRelId,
     ) -> PgResult<i32>
 );
 
@@ -465,7 +465,7 @@ seam_core::seam!(
     /// CONCURRENTLY) to hold the table/index across its commit/start sequence.
     /// `Err` carries the lock-manager `ereport(ERROR)` surface.
     pub fn lock_relation_id_for_session(
-        relid: types_storage::lock::LockRelId,
+        relid: ::types_storage::lock::LockRelId,
         lockmode: LOCKMODE,
     ) -> PgResult<()>
 );
@@ -475,7 +475,7 @@ seam_core::seam!(
     /// session-level relation lock taken by `LockRelationIdForSession`.
     /// `Err` carries the lock-manager `ereport(ERROR)` surface.
     pub fn unlock_relation_id_for_session(
-        relid: types_storage::lock::LockRelId,
+        relid: ::types_storage::lock::LockRelId,
         lockmode: LOCKMODE,
     ) -> PgResult<()>
 );
@@ -486,7 +486,7 @@ seam_core::seam!(
     /// Used by `index_drop` (DROP INDEX CONCURRENTLY) to drain in-flight users of
     /// the index. `Err` carries the lock-manager `ereport(ERROR)` surface.
     pub fn wait_for_lockers(
-        heaplocktag: types_storage::lock::LOCKTAG,
+        heaplocktag: ::types_storage::lock::LOCKTAG,
         lockmode: LOCKMODE,
         progress: bool,
     ) -> PgResult<()>
@@ -497,7 +497,7 @@ seam_core::seam!(
     /// `LOCKTAG` for `(dbid, relid)`. `index_drop` uses it to form the heap
     /// locktag it hands to `WaitForLockers`.
     pub fn set_locktag_relation(
-        dbid: types_core::Oid,
-        relid: types_core::Oid,
-    ) -> types_storage::lock::LOCKTAG
+        dbid: ::types_core::Oid,
+        relid: ::types_core::Oid,
+    ) -> ::types_storage::lock::LOCKTAG
 );

@@ -18,9 +18,9 @@
 //! `ReturnSetInfo` (the WONTFIX dual-home), exactly like `pg_listening_channels`
 //! and `pg_lock_status`.
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 

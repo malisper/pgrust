@@ -3,14 +3,14 @@
 
 extern crate alloc;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::FromExpr;
-use pathnodes::planner_run::PlannerRun;
-use pathnodes::PlannerInfo;
+use ::pathnodes::planner_run::PlannerRun;
+use ::pathnodes::PlannerInfo;
 use pathnodes::{RELOPT_BASEREL, RelOptKind};
 
-use relnode::build_simple_rel;
+use ::relnode::build_simple_rel;
 use init_subselect_ext_seams as initext;
 
 /// `add_base_rels_to_query` (initsplan.c:158).

@@ -16,12 +16,12 @@
 //! set-returning glue, neither of which is expressible at this boundary (see the
 //! crate docs). Only the scalar / text transaction-id functions register.
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::FullTransactionId;
+use ::types_core::FullTransactionId;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -155,7 +155,7 @@ fn fc_pg_snapshot_out(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> 
         .expect("pg_snapshot_out: by-ref pg_snapshot arg missing from by-ref lane");
     let snap = match crate::PgSnapshot::from_varlena_bytes(image) {
         Some(snap) => snap,
-        None => return Err(types_error::PgError::error("invalid pg_snapshot image")),
+        None => return Err(::types_error::PgError::error("invalid pg_snapshot image")),
     };
     let s = crate::pg_snapshot_out(&snap);
     Ok(ret_cstring(fcinfo, s))
@@ -170,7 +170,7 @@ fn arg_snapshot(fcinfo: &FunctionCallInfoBaseData, i: usize) -> PgResult<crate::
         .expect("xid8funcs fn: by-ref pg_snapshot arg missing from by-ref lane");
     match crate::PgSnapshot::from_varlena_bytes(image) {
         Some(snap) => Ok(snap),
-        None => Err(types_error::PgError::error("invalid pg_snapshot image")),
+        None => Err(::types_error::PgError::error("invalid pg_snapshot image")),
     }
 }
 

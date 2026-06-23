@@ -24,7 +24,7 @@
 //! The C `hyperLogLogState` holds a raw `uint8 *hashesArr` that `initHyperLogLog`
 //! `palloc0`s and `freeHyperLogLog` `pfree`s, addressing registers by raw index.
 //! This port replaces that raw pointer with an owned [`PgVec<u8>`] register array
-//! charged to a [`mcx::MemoryContext`], and the control fields (`registerWidth`,
+//! charged to a [`::mcx::MemoryContext`], and the control fields (`registerWidth`,
 //! `nRegisters`, `alphaMM`, `arrSize`) as plain owned values. There is no raw
 //! pointer, no `extern "C"`, and the whole crate is `#![forbid(unsafe_code)]`.
 //! Register addressing (`hash >> k` index, `Max(count, reg)` update) is unchanged
@@ -42,7 +42,7 @@
 //! No opaque handle, no process-wide registry, no seam: the consumer holds the
 //! real owned struct and calls these functions on it directly.
 
-use utils_error::elog;
+use ::utils_error::elog;
 use mcx::{Mcx, PgVec};
 use types_error::{PgResult, ERROR};
 use ::nodes::nodeagg::HyperLogLog;
@@ -247,11 +247,11 @@ fn pg_leftmost_one_pos32(word: u32) -> u32 {
 /// `mcx`.
 ///
 /// The analog of C's `palloc0(arrSize)`: a contiguous run of zero bytes. The
-/// allocation is fallible (`mcx::vec_with_capacity_in` enforces `palloc`'s
+/// allocation is fallible (`::mcx::vec_with_capacity_in` enforces `palloc`'s
 /// `MaxAllocSize` gate and surfaces the context's OOM error), exactly where C's
 /// `palloc0` would `ereport(ERROR, ...)` on failure.
 fn zeroed_array(mcx: Mcx<'_>, bytes: usize) -> PgResult<PgVec<'_, u8>> {
-    let mut zeros = mcx::vec_with_capacity_in(mcx, bytes)?;
+    let mut zeros = ::mcx::vec_with_capacity_in(mcx, bytes)?;
     zeros.resize(bytes, 0);
     Ok(zeros)
 }

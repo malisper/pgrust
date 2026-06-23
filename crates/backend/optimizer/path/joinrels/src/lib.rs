@@ -18,9 +18,9 @@
 //! # Arena model
 //!
 //! The C pointer graph is modelled over the
-//! [`PlannerInfo`](pathnodes::PlannerInfo) arena: a
-//! [`RelId`](pathnodes::RelId)/[`PathId`](pathnodes::PathId)/
-//! [`RinfoId`](pathnodes::RinfoId) handle indexes the matching arena, and
+//! [`PlannerInfo`](::pathnodes::PlannerInfo) arena: a
+//! [`RelId`](::pathnodes::RelId)/[`PathId`](::pathnodes::PathId)/
+//! [`RinfoId`](::pathnodes::RinfoId) handle indexes the matching arena, and
 //! `root.rel(id)` / `root.path(id)` / `root.rinfo(id)` recover the node.
 //! `join_rel_level` is a `Vec<Vec<RelId>>`; the `bms_*` set algebra over
 //! `Relids` crosses through the canonical `relids_*` seams in
@@ -29,7 +29,7 @@
 //! reads) all cross through their owners' `*-seams` crates.
 //!
 //! Functions that `palloc` in C carry the OOM channel as
-//! [`PgResult`](types_error::PgResult); the in-crate working `Vec`s
+//! [`PgResult`](::types_error::PgResult); the in-crate working `Vec`s
 //! (`pushed_down_joins`, the partition-pairing lists) reserve fallibly first.
 //!
 //! There is no `extern "C"`, no raw pointers, and no `c_void`.
@@ -47,8 +47,8 @@ use pathnodes::{
     JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER, RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL,
 };
 
-use mcx::Mcx;
-use pathnodes::planner_run::PlannerRun;
+use ::mcx::Mcx;
+use ::pathnodes::planner_run::PlannerRun;
 
 use geqo_all_seams as geqo;
 use joinpath::{add_paths_to_joinrel, JoinEnableFlags};
@@ -87,7 +87,7 @@ fn oom(_: alloc::collections::TryReserveError) -> PgError {
 /// values here and pass them along — behaviour-identical to C's direct reads.
 #[inline]
 fn join_enable_flags() -> JoinEnableFlags {
-    use guc_tables::vars;
+    use ::guc_tables::vars;
     JoinEnableFlags {
         enable_mergejoin: vars::enable_mergejoin.read(),
         enable_hashjoin: vars::enable_hashjoin.read(),
@@ -103,7 +103,7 @@ fn join_enable_flags() -> JoinEnableFlags {
 
 /// `IS_SIMPLE_REL(rel)` (pathnodes.h) — base rel or "other member" rel.
 #[inline]
-pub fn is_simple_rel(rel: &pathnodes::RelOptInfo) -> bool {
+pub fn is_simple_rel(rel: &::pathnodes::RelOptInfo) -> bool {
     rel.reloptkind == RELOPT_BASEREL || rel.reloptkind == RELOPT_OTHER_MEMBER_REL
 }
 
@@ -113,13 +113,13 @@ pub fn is_simple_rel(rel: &pathnodes::RelOptInfo) -> bool {
 /// The macro's `&& !IS_DUMMY_REL(rel)` conjunct depends on the `is_dummy_rel`
 /// Path descent and is applied at the callsite (as in C).
 #[inline]
-pub fn is_partitioned_rel(rel: &pathnodes::RelOptInfo) -> bool {
+pub fn is_partitioned_rel(rel: &::pathnodes::RelOptInfo) -> bool {
     rel.part_scheme.is_some() && rel.boundinfo.is_some() && rel.nparts > 0 && !rel.part_rels.is_empty()
 }
 
 /// `REL_HAS_ALL_PART_PROPS(rel)` (pathnodes.h) — every required member set.
 #[inline]
-pub fn rel_has_all_part_props(rel: &pathnodes::RelOptInfo) -> bool {
+pub fn rel_has_all_part_props(rel: &::pathnodes::RelOptInfo) -> bool {
     rel.part_scheme.is_some()
         && rel.boundinfo.is_some()
         && rel.nparts > 0
@@ -901,7 +901,7 @@ fn populate_joinrel_with_paths<'mcx>(
                     return Err(PgError::error(
                         "FULL JOIN is only supported with merge-joinable or hash-joinable join conditions",
                     )
-                    .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+                    .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
                 }
             }
         }
@@ -1139,7 +1139,7 @@ fn has_legal_joinclause<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, re
 /// structural witness used by the debug-only partition-scheme-identity check
 /// (the C pointer-equality `Assert` over canonicalized schemes).
 #[inline]
-fn scheme_partnatts(rel: &pathnodes::RelOptInfo) -> i16 {
+fn scheme_partnatts(rel: &::pathnodes::RelOptInfo) -> i16 {
     match rel.part_scheme.as_ref() {
         Some(s) => s.partnatts,
         None => -1,

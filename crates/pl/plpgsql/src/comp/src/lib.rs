@@ -38,9 +38,9 @@ pub use seam::{
 
 use core::cell::RefCell;
 
-use types_core::Oid;
-use datum::Datum;
-pub use types_error::ERRCODE_UNDEFINED_COLUMN;
+use ::types_core::Oid;
+use ::datum::Datum;
+pub use ::types_error::ERRCODE_UNDEFINED_COLUMN;
 use types_error::{
     PgError, PgResult, SqlState, ERRCODE_ERROR_IN_ASSIGNMENT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_TABLE,

@@ -16,14 +16,14 @@
 //! the latch substrate are reached through seams. `kill(2)` is the OS boundary
 //! (`libc`).
 
-use utils_error::ereport;
-use types_core::init::BackendType;
+use ::utils_error::ereport;
+use ::types_core::init::BackendType;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERROR, WARNING,
 };
-use types_pgstat::wait_event::WAIT_EVENT_BACKEND_TERMINATION;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::types_pgstat::wait_event::WAIT_EVENT_BACKEND_TERMINATION;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
 use crate::pmsignal::{PMSignalReason, SendPostmasterSignal};
 
@@ -44,9 +44,9 @@ pub const SIGNAL_BACKEND_NOSUPERUSER: i32 = 3;
 pub const SIGNAL_BACKEND_NOAUTOVAC: i32 = 4;
 
 /// `ROLE_PG_SIGNAL_BACKEND` (`catalog/pg_authid.h`).
-const ROLE_PG_SIGNAL_BACKEND: types_core::Oid = 4200;
+const ROLE_PG_SIGNAL_BACKEND: ::types_core::Oid = 4200;
 /// `ROLE_PG_SIGNAL_AUTOVACUUM_WORKER` (`catalog/pg_authid.h`).
-const ROLE_PG_SIGNAL_AUTOVACUUM_WORKER: types_core::Oid = 6392;
+const ROLE_PG_SIGNAL_AUTOVACUUM_WORKER: ::types_core::Oid = 6392;
 
 fn loc(lineno: i32, funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new(FILE, lineno, funcname)
@@ -95,7 +95,7 @@ pub fn pg_signal_backend(pid: i32, sig: i32) -> PgResult<i32> {
     // roles they have privileges of.
     //
     // C: if (!OidIsValid(proc->roleId) || superuser_arg(proc->roleId))
-    if role_id == types_core::InvalidOid
+    if role_id == ::types_core::InvalidOid
         || superuser_seams::superuser_arg::call(role_id)?
     {
         // C: backendType = pgstat_get_backend_type_by_proc_number(procNumber);
@@ -137,7 +137,7 @@ pub fn pg_signal_backend(pid: i32, sig: i32) -> PgResult<i32> {
 
 /// `has_privs_of_role(GetUserId(), role)`.
 #[inline]
-fn current_user_has_privs_of_role(role: types_core::Oid) -> PgResult<bool> {
+fn current_user_has_privs_of_role(role: ::types_core::Oid) -> PgResult<bool> {
     let user = miscinit_seams::get_user_id::call();
     acl_seams::has_privs_of_role::call(user, role)
 }
@@ -217,7 +217,7 @@ fn pg_wait_until_termination(pid: i32, timeout: i64) -> PgResult<bool> {
                 return Ok(true);
             }
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_INTERNAL_ERROR)
+                .errcode(::types_error::ERRCODE_INTERNAL_ERROR)
                 .errmsg(format!(
                     "could not check the existence of the backend with PID {pid}"
                 ))

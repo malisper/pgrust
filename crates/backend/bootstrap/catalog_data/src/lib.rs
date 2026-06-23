@@ -14,8 +14,8 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::Oid;
-use relcache_entry::BootstrapCatalogSchema;
+use ::types_core::primitive::Oid;
+use ::relcache_entry::BootstrapCatalogSchema;
 
 pub mod data;
 

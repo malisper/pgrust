@@ -5,13 +5,13 @@
 use alloc::vec::Vec;
 
 use parse::{parsetext, ParsedText};
-use tsquery_core::tsquery::{parse_tsquery_with_pushval, QueryBuilder};
-use ts_cache::getTSCurrentConfig;
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
-use tsearch::tsearch::{OP_AND, OP_OR, OP_PHRASE, P_TSQ_PLAIN, P_TSQ_WEB};
-use tsearch::TSL_PREFIX;
+use ::tsquery_core::tsquery::{parse_tsquery_with_pushval, QueryBuilder};
+use ::ts_cache::getTSCurrentConfig;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::tsearch::tsearch::{OP_AND, OP_OR, OP_PHRASE, P_TSQ_PLAIN, P_TSQ_WEB};
+use ::tsearch::TSL_PREFIX;
 
 /// `MorphOpaque` (to_tsany.c:25): the data `pushval_morph` carries.
 struct MorphOpaque {
@@ -34,7 +34,7 @@ fn pushval_morph(
     weight: i16,
     prefix: bool,
 ) -> PgResult<()> {
-    let ctx = mcx::MemoryContext::new("pushval_morph");
+    let ctx = ::mcx::MemoryContext::new("pushval_morph");
     let _mcx: Mcx<'_> = ctx.mcx();
 
     let mut prs = ParsedText {

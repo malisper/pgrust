@@ -12,11 +12,11 @@
 //! into the live `SortSupportData` node, and the HyperLogLog cardinality
 //! estimator used by `network_abbrev_abort` / the `estimating` branch of
 //! `network_abbrev_convert`) cross the
-//! [`network_seams::sortsupport`] seam. With no registrar
+//! [`::network_seams::sortsupport`] seam. With no registrar
 //! installed, [`network_sortsupport`] is a faithful no-op (the btree AM falls
 //! back to the ordinary `network_cmp` ordering proc).
 
-use network_seams::sortsupport;
+use ::network_seams::sortsupport;
 use types_network::{inet_struct, PGSQL_AF_INET};
 
 use crate::network_cmp_internal;
@@ -51,11 +51,11 @@ pub fn network_fast_cmp(arg1: &inet_struct, arg2: &inet_struct) -> i32 {
 /// Produces the abbreviated sort key for `authoritative` — the exact bit math of
 /// the C function for the running ABI's `Datum` width, minus the HyperLogLog
 /// `addHyperLogLog` side effect (which lives behind the
-/// [`network_seams::sortsupport`] seam together with
+/// [`::network_seams::sortsupport`] seam together with
 /// `uss->input_count` / `estimating`).
 pub fn network_abbrev_convert_bits(authoritative: &inet_struct) -> usize {
     let data = authoritative;
-    debug_assert!(data.family == PGSQL_AF_INET || data.family == types_network::PGSQL_AF_INET6);
+    debug_assert!(data.family == PGSQL_AF_INET || data.family == ::types_network::PGSQL_AF_INET6);
 
     // Unsigned integer representation of the IP address: take the first 4 or 8
     // bytes. The inet's ipaddr is most-significant-byte first, so interpret
@@ -136,7 +136,7 @@ pub fn network_abbrev_convert_bits(authoritative: &inet_struct) -> usize {
 /// HyperLogLog estimator) into the live `SortSupportData` node — together with
 /// `network_abbrev_abort`'s HyperLogLog cardinality estimation — belongs to the
 /// tuplesort / `lib/hyperloglog` subsystems and is delegated to the
-/// [`network_seams::sortsupport::register`] seam. The pure
+/// [`::network_seams::sortsupport::register`] seam. The pure
 /// key-packing it depends on is [`network_abbrev_convert_bits`] and the pure
 /// comparator is [`network_fast_cmp`]. Returns whether a registrar was wired
 /// (the default is a faithful no-op, as if sortsupport were never registered).

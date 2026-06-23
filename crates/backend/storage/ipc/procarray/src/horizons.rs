@@ -20,7 +20,7 @@ use types_core::{
     FullTransactionId, GlobalVisStateHandle, InvalidOid, InvalidTransactionId, Oid, TransactionId,
     TransactionIdIsValid,
 };
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use varsup_seams as varsup;
 use transam_xlog_seams as xlog;
@@ -30,11 +30,11 @@ use lmgr_proc_seams as proc;
 use relcache_seams as relcache;
 use snapmgr_pc_seams as snapmgr;
 
-use types_storage::storage::{
+use ::types_storage::storage::{
     PROC_AFFECTS_ALL_HORIZONS, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM,
 };
-use types_storage::LWLockMode;
-use types_tuple::access::{RELKIND_MATVIEW, RELKIND_RELATION};
+use ::types_storage::LWLockMode;
+use ::types_tuple::access::{RELKIND_MATVIEW, RELKIND_RELATION};
 
 use crate::shmem_model::{
     FullTransactionIdNewer, FullXidRelativeTo, GlobalVisState, TransactionIdOlder,
@@ -121,8 +121,8 @@ fn full_transaction_id_follows_or_equals(a: FullTransactionId, b: FullTransactio
 #[inline]
 fn transaction_id_advance(dest: TransactionId) -> TransactionId {
     let mut d = dest.wrapping_add(1);
-    if d < types_core::FirstNormalTransactionId {
-        d = types_core::FirstNormalTransactionId;
+    if d < ::types_core::FirstNormalTransactionId {
+        d = ::types_core::FirstNormalTransactionId;
     }
     d
 }
@@ -291,13 +291,13 @@ pub fn GlobalVisHorizonKindForRel(rel: Oid) -> PgResult<i32> {
     let mcx = ctx.mcx();
 
     let relation = relcache::relation_id_get_relation::call(mcx, rel)?
-        .ok_or_else(|| types_error::PgError::error("relation no longer exists"))?;
+        .ok_or_else(|| ::types_error::PgError::error("relation no longer exists"))?;
 
     // Other relkinds currently don't contain xids (C Assert).
     debug_assert!(
         relation.rd_rel.relkind == RELKIND_RELATION
             || relation.rd_rel.relkind == RELKIND_MATVIEW
-            || relation.rd_rel.relkind == types_tuple::access::RELKIND_TOASTVALUE
+            || relation.rd_rel.relkind == ::types_tuple::access::RELKIND_TOASTVALUE
     );
 
     let kind = if relation.rd_rel.relisshared {

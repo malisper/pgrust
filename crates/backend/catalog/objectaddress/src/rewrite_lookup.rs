@@ -10,9 +10,9 @@
 //! `rulename` columns.
 
 use mcx::{Mcx, PgString};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use types_storage::lock::AccessShareLock;
+use ::types_storage::lock::AccessShareLock;
 
 use crate::consts::{Anum_pg_rewrite_oid, Anum_pg_rewrite_rulename, RewriteRelationId};
 use crate::resolve::get_catalog_object_by_oid;

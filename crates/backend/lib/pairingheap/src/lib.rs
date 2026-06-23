@@ -72,7 +72,7 @@
 //! context reset) this is automatic and leak-free.
 
 // `clippy::result_large_err`: the allocating operation (`add`) returns the shared
-// `types_error::PgResult` (== `Result<_, PgError>`) to model the C `palloc`
+// `::types_error::PgResult` (== `Result<_, PgError>`) to model the C `palloc`
 // failure / `elog(ERROR, ...)` non-local exit faithfully. `PgError`'s size is
 // fixed by that crate, and the un-boxed `PgResult` is the project-wide error
 // contract these ports must match; boxing it locally would diverge from every

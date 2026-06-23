@@ -19,8 +19,8 @@ use ::nodes::execexpr::{
 };
 use ::nodes::execnodes::EcxtId;
 use ::nodes::EStateData;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{JSONBOID, JSONOID, TEXTOID};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{JSONBOID, JSONOID, TEXTOID};
 
 use jsonpath_exec::{
     JsonPathExists, JsonPathQuery, JsonPathValue, JsonPathVariable, JsonPathVars,
@@ -110,7 +110,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 }
             }
             if !values.is_empty() {
-                let out = adt_xml::xmlconcat(&values)?;
+                let out = ::adt_xml::xmlconcat(&values)?;
                 write_xmltype(state, resv, resnull, mcx, &out)?;
             }
         }
@@ -168,7 +168,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 }
             }
             let name = xexpr.name.as_deref().unwrap_or("");
-            let out = adt_xml::xmlelement(name, &named, &content)?;
+            let out = ::adt_xml::xmlelement(name, &named, &content)?;
             write_xmltype(state, resv, resnull, mcx, &out)?;
         }
         XmlExprOp::IS_XMLPARSE => {
@@ -183,7 +183,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 return Ok(());
             }
             let preserve_whitespace = v1.as_bool();
-            let out = adt_xml::xmlparse(&data, xexpr.xmloption, preserve_whitespace)?;
+            let out = ::adt_xml::xmlparse(&data, xexpr.xmloption, preserve_whitespace)?;
             write_xmltype(state, resv, resnull, mcx, &out)?;
         }
         XmlExprOp::IS_XMLPI => {
@@ -200,7 +200,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
             };
             let target = xexpr.name.as_deref().unwrap_or("");
             let (out, is_null) =
-                adt_xml::xmlpi(target, arg.as_deref(), isnull)?;
+                ::adt_xml::xmlpi(target, arg.as_deref(), isnull)?;
             match out {
                 Some(bytes) if !is_null => write_xmltype(state, resv, resnull, mcx, &bytes)?,
                 _ => { /* result stays NULL */ }
@@ -218,7 +218,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
             let (v2, _n2) = read_cell(state, arg_cells[2]); // always present
             let standalone = xml_standalone_from_i32(v2.as_usize() as i32);
             let out =
-                adt_xml::xmlroot(&data, version.as_deref(), standalone)?;
+                ::adt_xml::xmlroot(&data, version.as_deref(), standalone)?;
             write_xmltype(state, resv, resnull, mcx, &out)?;
         }
         XmlExprOp::IS_XMLSERIALIZE => {
@@ -228,7 +228,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 return Ok(());
             }
             let data = xml_arg_payload(&v0).to_vec();
-            let out = adt_xml::xmltotext_with_options(
+            let out = ::adt_xml::xmltotext_with_options(
                 &data,
                 xexpr.xmloption,
                 xexpr.indent,
@@ -242,7 +242,7 @@ pub fn ExecEvalXmlExpr<'mcx>(
                 return Ok(());
             }
             let data = xml_arg_payload(&v0).to_vec();
-            let is_doc = adt_xml::xml_is_document(&data)?;
+            let is_doc = ::adt_xml::xml_is_document(&data)?;
             write_cell(state, resv, Datum::from_bool(is_doc), false);
             if resnull != resv {
                 write_cell(state, resnull, Datum::from_bool(false), false);
@@ -293,7 +293,7 @@ fn write_xmltype<'mcx>(
     bytes: &[u8],
 ) -> PgResult<()> {
     let total = datum::varlena::VARHDRSZ + bytes.len();
-    let mut img = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut img = ::mcx::vec_with_capacity_in(mcx, total)?;
     img.extend_from_slice(&datum::varlena::set_varsize_4b(total));
     img.extend_from_slice(bytes);
     write_cell(state, resv, Datum::ByRef(img), false);
@@ -317,7 +317,7 @@ fn map_named_value<'mcx>(
     mcx: Mcx<'mcx>,
     xml_escape_strings: bool,
 ) -> PgResult<String> {
-    adt_xml::map_sql_value_to_xml_value_v(mcx, value, typid, xml_escape_strings)
+    ::adt_xml::map_sql_value_to_xml_value_v(mcx, value, typid, xml_escape_strings)
 }
 
 /// Scalar snapshot of the [`XmlExpr`](::nodes::primnodes::XmlExpr) fields the
@@ -335,8 +335,8 @@ struct XmlExprSnapshot {
 }
 
 /// Decode the `int` standalone argument of IS_XMLROOT (a `XmlStandaloneType`).
-fn xml_standalone_from_i32(v: i32) -> adt_xml::XmlStandaloneType {
-    use adt_xml::XmlStandaloneType as X;
+fn xml_standalone_from_i32(v: i32) -> ::adt_xml::XmlStandaloneType {
+    use ::adt_xml::XmlStandaloneType as X;
     match v {
         0 => X::XML_STANDALONE_YES,
         1 => X::XML_STANDALONE_NO,
@@ -431,7 +431,7 @@ pub fn ExecEvalJsonConstructor<'mcx>(
         if is_jsonb {
             // res = jsonb_from_text(js, true);
             let jb = adt_jsonb::jsonb_from_text(mcx, js, true)?;
-            let payload = mcx::slice_in(mcx, jb.as_slice())?;
+            let payload = ::mcx::slice_in(mcx, jb.as_slice())?;
             write_cell(state, resv, Datum::ByRef(payload), false);
         } else {
             // (void) json_validate(js, true, true); res = value;
@@ -515,21 +515,21 @@ pub fn ExecEvalJsonConstructor<'mcx>(
     //   * `jsonb_*_worker` returns `JsonbValueToJsonb`, already a full varlena.
     //   * `json_*_worker` returns the header-less json text payload, so frame it
     //     into a text varlena (C: the json output function's `cstring_to_text`).
-    let image: mcx::PgVec<'mcx, u8> = if is_jsonb {
+    let image: ::mcx::PgVec<'mcx, u8> = if is_jsonb {
         // `jsonb_*_worker` returns `JsonbValueToJsonb`, already a full varlena.
-        mcx::slice_in(mcx, &bytes)?
+        ::mcx::slice_in(mcx, &bytes)?
     } else {
         // `json_*_worker` returns the header-less json text payload; build the
         // text varlena image (4-byte length word + payload), mirroring C's
         // `cstring_to_text` (which is what the json output function returns).
         const VARHDRSZ: usize = 4;
         let total = bytes.len() + VARHDRSZ;
-        let mut out = mcx::vec_with_capacity_in(mcx, total)?;
+        let mut out = ::mcx::vec_with_capacity_in(mcx, total)?;
         out.extend_from_slice(&datum::varlena::set_varsize_4b(total));
         out.extend_from_slice(&bytes);
         out
     };
-    let payload = mcx::slice_in(mcx, image.as_slice())?;
+    let payload = ::mcx::slice_in(mcx, image.as_slice())?;
     write_cell(state, resv, Datum::ByRef(payload), false);
     if resnull != resv {
         write_cell(state, resnull, Datum::from_bool(false), false);
@@ -547,7 +547,7 @@ pub fn ExecEvalJsonIsPredicate<'mcx>(
     op: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    use types_jsonb::jsonb::{
+    use ::types_jsonb::jsonb::{
         json_container_is_array, json_container_is_object, json_container_is_scalar,
     };
     use ::nodes::primnodes::JsonValueType as Jt;
@@ -768,7 +768,7 @@ pub fn ExecEvalJsonExprPath<'mcx>(
     write_cell(state, empty_cell, Datum::from_bool(false), false);
     {
         let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
-        js.escontext = types_error::SoftErrorContext::default();
+        js.escontext = ::types_error::SoftErrorContext::default();
     }
 
     let column_name = jsexpr.column_name.as_deref();
@@ -799,7 +799,7 @@ pub fn ExecEvalJsonExprPath<'mcx>(
             empty = r.empty;
             match r.value {
                 Some(bytes) => {
-                    let v = mcx::slice_in(mcx, &bytes)?;
+                    let v = ::mcx::slice_in(mcx, &bytes)?;
                     write_cell(state, resv, Datum::ByRef(v), false);
                 }
                 None => write_cell(state, resv, Datum::null(), true),
@@ -830,7 +830,7 @@ pub fn ExecEvalJsonExprPath<'mcx>(
                         } else if jsexpr.use_json_coercion {
                             let jb =
                                 jsonb_util::JsonbValueToJsonb(mcx, &jbv)?;
-                            let v = mcx::slice_in(mcx, jb.as_slice())?;
+                            let v = ::mcx::slice_in(mcx, jb.as_slice())?;
                             write_cell(state, resv, Datum::ByRef(v), false);
                         } else {
                             // C: val_string = ExecGetJsonValueItemString(jbv,
@@ -945,13 +945,13 @@ pub fn ExecEvalJsonExprPath<'mcx>(
             if on_empty.btype != JsonBehaviorType::JSON_BEHAVIOR_ERROR {
                 write_cell(state, empty_cell, Datum::from_bool(true), false);
                 let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
-                js.escontext = types_error::SoftErrorContext::new(true);
+                js.escontext = ::types_error::SoftErrorContext::new(true);
                 return Ok(if jump_empty >= 0 { jump_empty } else { jump_end });
             }
         } else if on_error.btype != JsonBehaviorType::JSON_BEHAVIOR_ERROR {
             write_cell(state, error_cell, Datum::from_bool(true), false);
             let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
-            js.escontext = types_error::SoftErrorContext::new(true);
+            js.escontext = ::types_error::SoftErrorContext::new(true);
             return Ok(if jump_error >= 0 { jump_error } else { jump_end });
         }
 
@@ -963,7 +963,7 @@ pub fn ExecEvalJsonExprPath<'mcx>(
         write_cell(state, resv, Datum::null(), true);
         write_cell(state, error_cell, Datum::from_bool(true), false);
         let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
-        js.escontext = types_error::SoftErrorContext::new(true);
+        js.escontext = ::types_error::SoftErrorContext::new(true);
         return Ok(if jump_error >= 0 { jump_error } else { jump_end });
     }
 
@@ -1057,7 +1057,7 @@ fn exec_get_json_value_item_string<'mcx>(
             // timestamptz types; `timetz` is a by-reference 12-byte
             // `{ TimeADT time, int32 zone }` rebuilt from `value` (the time word)
             // and `tz` (the zone).
-            use types_tuple::heaptuple::{
+            use ::types_tuple::heaptuple::{
                 DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID,
             };
             // Builtin `*_out` function OIDs (pg_proc.dat).
@@ -1073,7 +1073,7 @@ fn exec_get_json_value_item_string<'mcx>(
                 TIMESTAMPTZOID => (TIMESTAMPTZ_OUT, Datum::ByVal(dt.value)),
                 TIMETZOID => {
                     // On-disk `TimeTzADT`: 8-byte `time` + 4-byte `zone`.
-                    let mut img = mcx::vec_with_capacity_in(mcx, 12)?;
+                    let mut img = ::mcx::vec_with_capacity_in(mcx, 12)?;
                     img.extend_from_slice(&(dt.value as i64).to_ne_bytes());
                     img.extend_from_slice(&dt.tz.to_ne_bytes());
                     (TIMETZ_OUT, Datum::ByRef(img))
@@ -1186,7 +1186,7 @@ pub fn ExecEvalJsonCoercion<'mcx>(
         // DirectFunctionCall1: no soft escontext, so this never soft-fails.
         let jb = adt_jsonb::jsonb_in(mcx, s, None)?
             .expect("jsonb_in without escontext never soft-fails");
-        write_cell(state, resv, Datum::ByRef(mcx::slice_in(mcx, jb.as_slice())?), false);
+        write_cell(state, resv, Datum::ByRef(::mcx::slice_in(mcx, jb.as_slice())?), false);
     }
 
     // *op->resvalue = json_populate_type(*op->resvalue, JSONBOID, targettype,
@@ -1294,7 +1294,7 @@ pub fn ExecEvalJsonCoercionFinish<'mcx>(
         write_cell(state, resv, Datum::null(), true);
         write_cell(state, error_cell, Datum::from_bool(true), false);
         let js = &mut state.json_states.states.as_mut().unwrap()[jsestate_id.0 as usize];
-        js.escontext = types_error::SoftErrorContext::new(true);
+        js.escontext = ::types_error::SoftErrorContext::new(true);
     }
     Ok(())
 }

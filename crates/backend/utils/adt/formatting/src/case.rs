@@ -17,9 +17,9 @@ use types_error::{PgError, PgResult};
 use types_error::{
     ERRCODE_INDETERMINATE_COLLATION, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR,
 };
-use locale::PgLocale;
+use ::locale::PgLocale;
 use types_core::{InvalidOid, Oid};
-use types_wchar::encoding::PG_UTF8;
+use ::types_wchar::encoding::PG_UTF8;
 
 use crate::tables::{
     keyword_index_filter, KeySuffix, KeyWord, NUM_TH_LOWER, NUM_TH_UPPER, TH_UPPER,
@@ -174,7 +174,7 @@ type ProviderFn = for<'mcx> fn(Mcx<'mcx>, Oid, &[u8]) -> PgResult<PgVec<'mcx, u8
 /// Copy an ASCII fast-path `Vec<u8>` result into a `PgVec` allocated in `mcx`,
 /// mirroring the palloc'd C result the locale path also produces.
 fn asc_into_mcx<'mcx>(mcx: Mcx<'mcx>, v: Vec<u8>) -> PgResult<PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, &v)
+    ::mcx::slice_in(mcx, &v)
 }
 
 /// Shared engine for the four locale-aware case routines: validate collation,
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn invalid_collation_errors() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let err = str_tolower(ctx.mcx(), b"abc", InvalidOid).unwrap_err();
         assert_eq!(err.sqlstate(), ERRCODE_INDETERMINATE_COLLATION);
         assert!(err.message().contains("lower()"));

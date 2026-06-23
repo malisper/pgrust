@@ -25,12 +25,12 @@ mod fmgr_builtins;
 use alloc::format;
 
 use pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgbyte, pq_sendbyte};
-use varlena_seams::cstring_to_text;
+use ::varlena_seams::cstring_to_text;
 use hashfn::{hash_bytes_uint32, hash_bytes_uint32_extended};
-use mcx::Mcx;
+use ::mcx::Mcx;
 use datum::{Bytea, Datum};
 use types_error::{PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 // ===========================================================================
 // Pure parser (bool.c:35-160)
@@ -183,7 +183,7 @@ pub fn boolin(in_str: &str, escontext: Option<&mut SoftErrorContext>) -> PgResul
 
     // C `ereturn(escontext, (Datum) 0, …)`: false is the suppress-warning
     // value the C parser leaves in `*result`.
-    types_error::ereturn(
+    ::types_error::ereturn(
         escontext,
         false,
         PgError::error(format!(

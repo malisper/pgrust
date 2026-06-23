@@ -11,8 +11,8 @@ use types_datetime::{
     fsec_t, DateADT, TimeADT, Timestamp, TimeTzADT, USE_ISO_DATES, USE_XSD_DATES,
     POSTGRES_EPOCH_JDATE, USECS_PER_SEC,
 };
-use types_tuple::heaptuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
-use pgtime::pg_tm;
+use ::types_tuple::heaptuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
+use ::pgtime::pg_tm;
 
 use crate::calendar::j2date;
 use crate::date::DATE_NOT_FINITE;
@@ -135,7 +135,7 @@ pub fn parse_recovery_target_time(newval: String) -> bool {
     let mut fsec: fsec_t = 0;
     let mut tz: i32 = 0;
     let mut dtype: i32 = 0;
-    let mut extra = types_datetime::DateTimeErrorExtra::default();
+    let mut extra = ::types_datetime::DateTimeErrorExtra::default();
 
     // C workbuf is MAXDATELEN + MAXDATEFIELDS here (not MAXDATELEN + 1).
     let mut dterr = ParseDateTime(
@@ -177,7 +177,7 @@ pub fn parse_recovery_target_time(newval: String) -> bool {
 /// date/time `Datum` into ISO/XSD format. `value` is the canonical unified
 /// value; a datetime is a by-value word except `timetz` (by-reference).
 pub fn json_encode_datetime(
-    value: &types_tuple::Datum<'_>,
+    value: &::types_tuple::Datum<'_>,
     typid: Oid,
     tzp: Option<i32>,
 ) -> types_error::PgResult<String> {
@@ -319,8 +319,8 @@ use std::rc::Rc;
 use types_datetime::{
     pg_itm, Interval, Timestamp2TmResult, TzAbbrevMatch, TzHandle, YmdDate,
 };
-use pgtime::pg_tz;
-use state_pgtz::session_timezone;
+use ::pgtime::pg_tz;
+use ::state_pgtz::session_timezone;
 
 // --- datetime.c calendar / validate / tz-offset adapters ------------------
 
@@ -502,7 +502,7 @@ fn seam_isoweek2j(year: i32, week: i32) -> i32 {
 /// reference.
 fn seam_timestamptz_pl_interval(
     timestamp: TimestampTz,
-    span: types_datetime::Interval,
+    span: ::types_datetime::Interval,
 ) -> types_error::PgResult<TimestampTz> {
     crate::timestamp::timestamptz_pl_interval(timestamp, &span)
 }
@@ -512,10 +512,10 @@ fn seam_timestamptz_pl_interval(
 /// `diff = interval_mi(hi, lo); mul = interval_mul(diff, pct);
 /// result = interval_pl(mul, lo)`.
 fn seam_interval_lerp(
-    lo: types_datetime::Interval,
-    hi: types_datetime::Interval,
+    lo: ::types_datetime::Interval,
+    hi: ::types_datetime::Interval,
     pct: f64,
-) -> types_error::PgResult<types_datetime::Interval> {
+) -> types_error::PgResult<::types_datetime::Interval> {
     let diff = crate::interval::interval_mi(&hi, &lo)?;
     let mul = crate::interval::interval_mul(&diff, pct)?;
     crate::interval::interval_pl(&mul, &lo)

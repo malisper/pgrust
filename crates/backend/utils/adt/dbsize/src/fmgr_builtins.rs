@@ -26,11 +26,11 @@
 //! The `Option<Oid>`/`Option<String>` cores map `None` to C's
 //! `PG_RETURN_NULL()` via `fcinfo.set_result_null(true)`.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -68,7 +68,7 @@ fn arg_text_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
         .and_then(|p| p.as_varlena())
         .expect("dbsize fn: text arg missing from by-ref lane");
     // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
-    &image[datum::varlena::VARHDRSZ..]
+    &image[::datum::varlena::VARHDRSZ..]
 }
 
 /// Write an `int8` result, or set the result NULL for `None` (C:
@@ -91,9 +91,9 @@ fn ret_int64_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<i64>) -> Datum
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
     // cstring_to_text: prepend the 4-byte varlena header (header-ful image).
     let payload = s.into_bytes();
-    let mut img = Vec::with_capacity(datum::varlena::VARHDRSZ + payload.len());
-    img.extend_from_slice(&datum::varlena::set_varsize_4b(
-        datum::varlena::VARHDRSZ + payload.len(),
+    let mut img = Vec::with_capacity(::datum::varlena::VARHDRSZ + payload.len());
+    img.extend_from_slice(&::datum::varlena::set_varsize_4b(
+        ::datum::varlena::VARHDRSZ + payload.len(),
     ));
     img.extend_from_slice(&payload);
     fcinfo.set_ref_result(RefPayload::Varlena(img));

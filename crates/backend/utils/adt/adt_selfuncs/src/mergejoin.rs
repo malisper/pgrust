@@ -19,11 +19,11 @@
 //! this value model: the per-call `MemoryContext` outlives the estimate, so the
 //! min/max Datums stay valid for the `scalarineqsel` calls that consume them.
 
-use mcx::Mcx;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo};
 use types_tuple::heaptuple::Datum as DatumV;
 use types_selfuncs::{
@@ -40,7 +40,7 @@ use crate::scalar::{
 };
 use crate::{clamp_probability, clamp_row_est, STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV};
 
-use types_selfuncs::DEFAULT_INEQ_SEL;
+use ::types_selfuncs::DEFAULT_INEQ_SEL;
 
 /* ---------------------------------------------------------------------------
  * CompareType (access/cmptype.h) and StrategyNumber (access/stratnum.h) the
@@ -105,7 +105,7 @@ fn index_am_translate_compare_type(cmptype: i32, amoid: Oid, opfamily: Oid) -> i
 fn get_stats_slot_range<'mcx>(
     mcx: Mcx<'mcx>,
     sslot: &AttStatsSlot<'mcx>,
-    canon: Option<&mcx::PgVec<'mcx, DatumV<'mcx>>>,
+    canon: Option<&::mcx::PgVec<'mcx, DatumV<'mcx>>>,
     opfuncoid: Oid,
     collation: Oid,
     min: &mut Option<DatumV<'mcx>>,

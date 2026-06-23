@@ -105,7 +105,7 @@ pub use walkers::{
 /// Install the rewriteManip.c- and rewriteSupport.c-owned seams.
 pub fn init_seams() {
     use rewritemanip_seams as s;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     s::contain_aggs_of_level::set(|node, levelsup| walkers::contain_aggs_of_level(node, levelsup));
     s::contain_windowfuncs::set(|node| walkers::contain_windowfuncs(node));
     s::check_expr_has_sub_link::set(|node| walkers::checkExprHasSubLink(node));

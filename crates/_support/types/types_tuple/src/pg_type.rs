@@ -1,6 +1,6 @@
 //! `pg_type` catalog-row vocabulary (`catalog/pg_type.h`).
 
-use types_core::primitive::{Oid, RegProcedure};
+use ::types_core::primitive::{Oid, RegProcedure};
 
 use crate::heaptuple::NameData;
 

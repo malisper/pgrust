@@ -5,7 +5,7 @@
 //! touches installed).
 
 use super::*;
-use types_async::QueuePosition;
+use ::types_async::QueuePosition;
 
 fn pos(page: i64, offset: i32) -> QueuePosition {
     QueuePosition { page, offset }

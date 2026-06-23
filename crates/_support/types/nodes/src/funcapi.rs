@@ -14,7 +14,7 @@
 use core::any::Any;
 
 use mcx::{Mcx, MemoryContext, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 pub struct Tuplestorestate<'mcx> {
     /// The real owned store, type-erased and context-allocated (C:
@@ -27,7 +27,7 @@ pub struct Tuplestorestate<'mcx> {
     /// cursor's portal-lifetime store). For the ordinary [`begin`](Self::begin)
     /// carrier the payload is allocated in the caller's `'mcx` and this is
     /// `None`. Heap-pinned (`Box`) so its address is stable across moves of the
-    /// carrier, exactly like [`mcx::McxOwned`]'s context; the explicit `Drop`
+    /// carrier, exactly like [`::mcx::McxOwned`]'s context; the explicit `Drop`
     /// frees the payload **before** this arena.
     hold_ctx: Option<alloc::boxed::Box<MemoryContext>>,
 }
@@ -38,7 +38,7 @@ impl<'mcx> Tuplestorestate<'mcx> {
     /// it. Fallible: allocating. Only the owning tuplestore unit (or a test
     /// mock standing in for it) calls this.
     pub fn begin<T: Any>(mcx: Mcx<'mcx>, store: T) -> PgResult<Self> {
-        let boxed = mcx::alloc_in(mcx, store)?;
+        let boxed = ::mcx::alloc_in(mcx, store)?;
         let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
         // Unsizing through the raw pointer: `PgBox` has no `CoerceUnsized` on
         // stable. SAFETY: `ptr` came from `into_raw_with_allocator` with the
@@ -64,12 +64,12 @@ impl<'mcx> Tuplestorestate<'mcx> {
     /// `Drop`. Only the owning tuplestore unit calls this.
     pub fn begin_static<T: Any>(store: T) -> PgResult<Tuplestorestate<'static>> {
         let ctx = alloc::boxed::Box::new(MemoryContext::new("PortalHoldStore"));
-        // SAFETY: mirror `mcx::McxOwned::try_new` — the box's heap address is
+        // SAFETY: mirror `::mcx::McxOwned::try_new` — the box's heap address is
         // stable across moves of the carrier, the context is dropped only after
         // the payload (explicit `Drop` impl), and the `'static` payload never
         // escapes except re-shortened through the `'mcx`-universal accessors.
         let mcx: Mcx<'static> = unsafe { core::mem::transmute::<Mcx<'_>, Mcx<'static>>(ctx.mcx()) };
-        let boxed = mcx::alloc_in(mcx, store)?;
+        let boxed = ::mcx::alloc_in(mcx, store)?;
         let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
         // Unsizing through the raw pointer (see `begin`).
         let erased: PgBox<'static, dyn Any> =
@@ -104,7 +104,7 @@ impl Drop for Tuplestorestate<'_> {
     /// the payload's `Drop` deallocates through an `Mcx` reference into that
     /// context (the held-store case), so the context must outlive it. The
     /// ordinary (`begin`) carrier has `hold_ctx == None`, so this is a no-op
-    /// beyond the normal field drop. Mirrors `mcx::McxOwned::drop`.
+    /// beyond the normal field drop. Mirrors `::mcx::McxOwned::drop`.
     fn drop(&mut self) {
         self.store = None;
         self.hold_ctx = None;
@@ -290,11 +290,11 @@ pub struct AttInMetadata<'mcx> {
     /// `FmgrInfo *attinfuncs` — per-attribute type-input function. C caches a
     /// resolved `FmgrInfo`; we keep the function OID and re-resolve (no
     /// invented handle).
-    pub attinfuncs: mcx::PgVec<'mcx, types_core::Oid>,
+    pub attinfuncs: ::mcx::PgVec<'mcx, types_core::Oid>,
     /// `Oid *attioparams` — per-attribute type I/O parameter OIDs.
-    pub attioparams: mcx::PgVec<'mcx, types_core::Oid>,
+    pub attioparams: ::mcx::PgVec<'mcx, types_core::Oid>,
     /// `int32 *atttypmods` — per-attribute typmods.
-    pub atttypmods: mcx::PgVec<'mcx, i32>,
+    pub atttypmods: ::mcx::PgVec<'mcx, i32>,
 }
 
 /// The unpacked result of `extract_variadic_args` (funcapi.c) — the
@@ -304,11 +304,11 @@ pub struct AttInMetadata<'mcx> {
 #[derive(Debug)]
 pub struct ExtractedVariadicArgs<'mcx> {
     /// `*values` — per-element datums (the C `Datum *args`).
-    pub values: mcx::PgVec<'mcx, types_tuple::heaptuple::Datum<'mcx>>,
+    pub values: ::mcx::PgVec<'mcx, types_tuple::heaptuple::Datum<'mcx>>,
     /// `*types` — per-element type OIDs (the C `Oid *types`).
-    pub types: mcx::PgVec<'mcx, types_core::Oid>,
+    pub types: ::mcx::PgVec<'mcx, types_core::Oid>,
     /// `*nulls` — per-element null flags (the C `bool *nulls`).
-    pub nulls: mcx::PgVec<'mcx, bool>,
+    pub nulls: ::mcx::PgVec<'mcx, bool>,
 }
 
 /// `FuncCallContext` (funcapi.h) — cross-call state for a Set Returning
@@ -328,7 +328,7 @@ pub struct FuncCallContext<'mcx> {
     /// persistence the C arena provides is preserved) and frees it with the rest
     /// of the per-query memory at end of query, equivalently to the multi-call
     /// context being deleted by `shutdown_MultiFuncCall`.
-    pub user_fctx: Option<mcx::PgBox<'mcx, dyn core::any::Any>>,
+    pub user_fctx: Option<::mcx::PgBox<'mcx, dyn core::any::Any>>,
     /// `AttInMetadata *attinmeta` — input metadata for `BuildTupleFromCStrings`
     /// (`None` is the C `NULL`).
     pub attinmeta: Option<AttInMetadata<'mcx>>,
@@ -342,7 +342,7 @@ pub struct FuncCallContext<'mcx> {
     /// deleted"). The `'mcx`-bound fields above are NOT allocated in this arena
     /// (that would be a self-borrow); they live in the per-query `'mcx`, which
     /// outlives this context.
-    pub multi_call_memory_ctx: Option<mcx::MemoryContext>,
+    pub multi_call_memory_ctx: Option<::mcx::MemoryContext>,
     /// `TupleDesc tuple_desc` — descriptor for `heap_form_tuple`-built tuples
     /// (`None` is the C `NULL`).
     pub tuple_desc: types_tuple::heaptuple::TupleDesc<'mcx>,

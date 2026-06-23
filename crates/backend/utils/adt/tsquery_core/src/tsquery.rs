@@ -13,8 +13,8 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use ts_small::cleanup::{clean_NOT, cleanup_tsquery_stopwords};
-use ts_small::util::{
+use ::ts_small::cleanup::{clean_NOT, cleanup_tsquery_stopwords};
+use ::ts_small::util::{
     self, encode_record, get_operand, get_query, operand_length, QI_SIZE,
 };
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
@@ -22,8 +22,8 @@ use types_error::{
     ereturn, ErrorLocation, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERROR, NOTICE,
 };
-use stringinfo::StringInfo;
-use tsearch::tsearch::{
+use ::stringinfo::StringInfo;
+use ::tsearch::tsearch::{
     QueryItem, QueryOperand, QueryOperator, HDRSIZETQ, MAXENTRYPOS, MAXSTRLEN, MAXSTRPOS, OP_AND,
     OP_NOT, OP_OR, OP_PHRASE, P_TSQ_PLAIN, P_TSQ_WEB, P_TSV_IS_TSQUERY, P_TSV_IS_WEB,
     P_TSV_OPR_IS_DELIM, QI_OPR, QI_VAL, QI_VALSTOP, TsVectorParseStateHandle,
@@ -33,13 +33,13 @@ use pqformat as pq;
 use postgres_seams as tcop;
 use ts_locale_seams as locale;
 use tsvector_core_seams as tsvparser;
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mbutils_seams as mb;
 
-use pgstrcasecmp::pg_strncasecmp;
+use ::pgstrcasecmp::pg_strncasecmp;
 
 /// `MaxAllocSize` (`memutils.h`).
-const MAX_ALLOC_SIZE: usize = mcx::MAX_ALLOC_SIZE;
+const MAX_ALLOC_SIZE: usize = ::mcx::MAX_ALLOC_SIZE;
 
 /// `tsearch_op_priority[OP_COUNT]` (tsquery.c:29) — FTS operator priorities.
 /// Indexed by `OP_* - 1` (the C array is indexed by the operator codes which

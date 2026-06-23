@@ -20,8 +20,8 @@
 //!   travel through it, so the timezone seams traffic in the canonical zone
 //!   *name* (a `String`) and re-resolve through the cached `pg_tzset`.
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use types_error::{PgResult, SqlState};
 
 /* ---- datetime.c globals (DateStyle / DateOrder) ------------------------- */

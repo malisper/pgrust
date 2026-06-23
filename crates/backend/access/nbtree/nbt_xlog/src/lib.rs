@@ -60,10 +60,10 @@ use page::{
     PageIndexTupleDelete, PageIndexTupleOverwrite, PageInit, PageMut, PageRef, PageRestoreTempPage,
 };
 use mcx::{MemoryContext, Mcx};
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, TransactionId, XLogRecPtr,
 };
-use types_core::xact::FullTransactionId;
+use ::types_core::xact::FullTransactionId;
 use types_error::{PgError, PgResult, PANIC};
 use types_nbtree::{
     xl_btree_dedup, xl_btree_delete, xl_btree_insert, xl_btree_mark_page_halfdead,
@@ -77,12 +77,12 @@ use types_nbtree::{
     XLOG_BTREE_META_CLEANUP, XLOG_BTREE_NEWROOT, XLOG_BTREE_REUSE_PAGE, XLOG_BTREE_SPLIT_L,
     XLOG_BTREE_SPLIT_R, XLOG_BTREE_UNLINK_PAGE, XLOG_BTREE_UNLINK_PAGE_META, XLOG_BTREE_VACUUM,
 };
-use types_storage::storage::{Buffer, InvalidBuffer, ReadBufferMode};
-use types_storage::RelFileLocator;
-use types_tuple::heaptuple::{IndexTupleData, IndexTupleSize, ItemPointerData};
-use wal::rmgr::XLogReaderState;
-use wal::xlogutils::in_hot_standby;
-use wal::XLogRedoAction;
+use ::types_storage::storage::{Buffer, InvalidBuffer, ReadBufferMode};
+use ::types_storage::RelFileLocator;
+use ::types_tuple::heaptuple::{IndexTupleData, IndexTupleSize, ItemPointerData};
+use ::wal::rmgr::XLogReaderState;
+use ::wal::xlogutils::in_hot_standby;
+use ::wal::XLogRedoAction;
 
 use bufmask_seams as bufmask;
 use xlogutils_seams as xlogutils;
@@ -354,8 +354,8 @@ fn decode_dedup(b: &[u8]) -> xl_btree_dedup {
     }
 }
 
-fn decode_vacuum(b: &[u8]) -> types_nbtree::xl_btree_vacuum {
-    types_nbtree::xl_btree_vacuum {
+fn decode_vacuum(b: &[u8]) -> ::types_nbtree::xl_btree_vacuum {
+    ::types_nbtree::xl_btree_vacuum {
         ndeleted: rd_u16(b, 0),
         nupdated: rd_u16(b, 2),
     }
@@ -456,7 +456,7 @@ fn decode_dedup_intervals(ptr: &[u8], nintervals: usize) -> Vec<BTDedupInterval>
 /// freshly read record).
 fn rec<'a, 'mcx>(
     record: &'a XLogReaderState<'mcx>,
-) -> &'a wal::wal::DecodedXLogRecord<'mcx> {
+) -> &'a ::wal::wal::DecodedXLogRecord<'mcx> {
     // Borrow the decoded record straight off the reader, preserving its arena
     // lifetime `'mcx`. Mirrors the hash/brin -xlog siblings' `record.record
     // .as_ref()`; no lifetime laundering is needed.

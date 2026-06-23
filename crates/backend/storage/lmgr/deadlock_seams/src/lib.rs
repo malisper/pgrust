@@ -7,7 +7,7 @@
 
 use types_deadlock::{DeadLockState, LockId, LockSpace, ProcId};
 use types_error::{PgError, PgResult};
-use types_storage::lock::LOCKMODE;
+use ::types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
     /// `InitDeadLockChecking()` — per-backend allocation of the detector's

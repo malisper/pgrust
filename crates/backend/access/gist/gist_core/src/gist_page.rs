@@ -24,18 +24,18 @@ use page::{
     PageAddItemExtended, PageGetContents, PageGetMaxOffsetNumber, PageGetSpecialPointer,
     PageGetSpecialSize, PageInit, PageIsEmpty, PageIsNew, PageMut, PageRef,
 };
-use types_storage::bufpage::SizeOfPageHeaderData;
+use ::types_storage::bufpage::SizeOfPageHeaderData;
 use alloc::format;
 use alloc::vec::Vec;
 use bufmgr_seams::{buffer_get_block_number, with_buffer_page};
 use utils_error::{ereport, PgResult};
-use types_error::error::ERROR;
-use types_core::primitive::{BlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ};
-use types_core::xact::{FirstNormalTransactionId, FullTransactionId};
-use types_error::error::ERRCODE_INDEX_CORRUPTED;
+use ::types_error::error::ERROR;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ};
+use ::types_core::xact::{FirstNormalTransactionId, FullTransactionId};
+use ::types_error::error::ERRCODE_INDEX_CORRUPTED;
 use gist::{GistNSN, GIST_PAGE_ID};
-use types_storage::Buffer;
-use types_tuple::heaptuple::{FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
+use ::types_storage::Buffer;
+use ::types_tuple::heaptuple::{FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
 
 /// `MAXALIGN(x)` (c.h): round up to `MAXIMUM_ALIGNOF` (8).
 pub const fn maxalign(x: usize) -> usize {
@@ -239,29 +239,29 @@ pub fn set_gist_page_id(page: &mut [u8], id: u16) -> PgResult<()> {
 
 /// `GistPageIsLeaf(page)` (gist.h:172): `GistPageGetOpaque(page)->flags & F_LEAF`.
 pub fn GistPageIsLeaf(page: &[u8]) -> PgResult<bool> {
-    Ok((gist_page_flags(page)? & gist::F_LEAF) != 0)
+    Ok((gist_page_flags(page)? & ::gist::F_LEAF) != 0)
 }
 
 /// `GistPageIsDeleted(page)` (gist.h:175): `flags & F_DELETED`.
 pub fn GistPageIsDeleted(page: &[u8]) -> PgResult<bool> {
-    Ok((gist_page_flags(page)? & gist::F_DELETED) != 0)
+    Ok((gist_page_flags(page)? & ::gist::F_DELETED) != 0)
 }
 
 /// `GistFollowRight(page)` (gist.h:185): `flags & F_FOLLOW_RIGHT`.
 pub fn GistFollowRight(page: &[u8]) -> PgResult<bool> {
-    Ok((gist_page_flags(page)? & gist::F_FOLLOW_RIGHT) != 0)
+    Ok((gist_page_flags(page)? & ::gist::F_FOLLOW_RIGHT) != 0)
 }
 
 /// `GistMarkFollowRight(page)` (gist.h:186): `flags |= F_FOLLOW_RIGHT`.
 pub fn GistMarkFollowRight(page: &mut [u8]) -> PgResult<()> {
     let f = gist_page_flags(page)?;
-    set_gist_page_flags(page, f | gist::F_FOLLOW_RIGHT)
+    set_gist_page_flags(page, f | ::gist::F_FOLLOW_RIGHT)
 }
 
 /// `GistClearFollowRight(page)` (gist.h:187): `flags &= ~F_FOLLOW_RIGHT`.
 pub fn GistClearFollowRight(page: &mut [u8]) -> PgResult<()> {
     let f = gist_page_flags(page)?;
-    set_gist_page_flags(page, f & !gist::F_FOLLOW_RIGHT)
+    set_gist_page_flags(page, f & !::gist::F_FOLLOW_RIGHT)
 }
 
 /// `GistPageGetDeleteXid(page)` (gist.h:217): the `deleteXid` stored in the
@@ -294,25 +294,25 @@ pub fn GistPageGetDeleteXid(page: &[u8]) -> PgResult<FullTransactionId> {
 
 /// `GistPageHasGarbage(page)` (gist.h:183): `flags & F_HAS_GARBAGE`.
 pub fn GistPageHasGarbage(page: &[u8]) -> PgResult<bool> {
-    Ok((gist_page_flags(page)? & gist::F_HAS_GARBAGE) != 0)
+    Ok((gist_page_flags(page)? & ::gist::F_HAS_GARBAGE) != 0)
 }
 
 /// `GistClearPageHasGarbage(page)` (gist.h:184): `flags &= ~F_HAS_GARBAGE`.
 pub fn GistClearPageHasGarbage(page: &mut [u8]) -> PgResult<()> {
     let f = gist_page_flags(page)?;
-    set_gist_page_flags(page, f & !gist::F_HAS_GARBAGE)
+    set_gist_page_flags(page, f & !::gist::F_HAS_GARBAGE)
 }
 
 /// `GistMarkPageHasGarbage(page)` (gist.h:182): `flags |= F_HAS_GARBAGE`.
 pub fn GistMarkPageHasGarbage(page: &mut [u8]) -> PgResult<()> {
     let f = gist_page_flags(page)?;
-    set_gist_page_flags(page, f | gist::F_HAS_GARBAGE)
+    set_gist_page_flags(page, f | ::gist::F_HAS_GARBAGE)
 }
 
 /// `GistMarkTuplesDeleted(page)` (gist.h:178): `flags |= F_TUPLES_DELETED`.
 pub fn GistMarkTuplesDeleted(page: &mut [u8]) -> PgResult<()> {
     let f = gist_page_flags(page)?;
-    set_gist_page_flags(page, f | gist::F_TUPLES_DELETED)
+    set_gist_page_flags(page, f | ::gist::F_TUPLES_DELETED)
 }
 
 /// `GistPageSetDeleted(page, deletexid)` (gist.h:206): mark an *empty* page as
@@ -332,7 +332,7 @@ pub fn GistPageSetDeleted(page: &mut [u8], deletexid: FullTransactionId) -> PgRe
 
     // GistPageGetOpaque(page)->flags |= F_DELETED;
     let f = gist_page_flags(page)?;
-    set_gist_page_flags(page, f | gist::F_DELETED)?;
+    set_gist_page_flags(page, f | ::gist::F_DELETED)?;
 
     // ((PageHeader) page)->pd_lower =
     //     MAXALIGN(SizeOfPageHeaderData) + sizeof(GISTDeletedPageContents);
@@ -392,8 +392,8 @@ mod tests {
     #[test]
     fn initpage_sets_opaque_fields() {
         let mut page = alloc::vec![0u8; BLCKSZ as usize];
-        gistinitpage(&mut page, gist::F_LEAF).unwrap();
-        assert_eq!(gist_page_flags(&page).unwrap(), gist::F_LEAF);
+        gistinitpage(&mut page, ::gist::F_LEAF).unwrap();
+        assert_eq!(gist_page_flags(&page).unwrap(), ::gist::F_LEAF);
         assert_eq!(gist_page_rightlink(&page).unwrap(), BlockNumber::MAX);
         // PageGetSpecialSize == MAXALIGN(sizeof(GISTPageOpaqueData)) so checkpage
         // would accept it.

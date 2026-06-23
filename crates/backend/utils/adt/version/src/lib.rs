@@ -9,7 +9,7 @@
 //!
 //! Datum-unification status: this unit has **no own-logic shim use**. Its only
 //! contact with the bare-word `datum::Datum` is the return type it
-//! forwards verbatim from `varlena_seams::cstring_to_text`
+//! forwards verbatim from `::varlena_seams::cstring_to_text`
 //! (owned by the `backend-utils-adt-varlena` lane, migrated in this same batch).
 //! A `text` result is by-reference, so its canonical form is
 //! `types_tuple::Datum::ByRef`; once the `cstring_to_text` seam flips to
@@ -21,8 +21,8 @@
 // `std` (the by-ref `String`/`Vec<u8>` result lane and `panic_any` for
 // `ereport`).
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 
 use varlena_seams::{cstring_to_text, cstring_to_text_v};
 

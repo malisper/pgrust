@@ -54,9 +54,9 @@ use core::cell::Cell;
 
 use types_core::{ProcNumber, TimestampTz, XLogRecPtr, InvalidXLogRecPtr, INVALID_PROC_NUMBER};
 use types_error::{PgError, PgResult};
-use types_pgstat::wait_event::{WAIT_EVENT_BGWRITER_HIBERNATE, WAIT_EVENT_BGWRITER_MAIN};
-use types_startup::StartupData;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::types_pgstat::wait_event::{WAIT_EVENT_BGWRITER_HIBERNATE, WAIT_EVENT_BGWRITER_MAIN};
+use ::types_startup::StartupData;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
 use bufmgr::{
     writeback_context_init, BgBufferSyncState, BufferManager, WritebackContext,
@@ -187,7 +187,7 @@ pub fn BackgroundWriterMain(startup_data: &StartupData) -> PgResult<()> {
     // `ALTER/DROP DATABASE SET TABLESPACE` barrier (`movedb` ->
     // `WaitForProcSignalBarrier`) forever on this slot.
     {
-        use signal::SigHandler;
+        use ::signal::SigHandler;
         let pqsignal = port_pqsignal_seams::pqsignal::call;
         // pqsignal(SIGHUP, SignalHandlerForConfigReload);
         fn config_reload(_sig: i32) {

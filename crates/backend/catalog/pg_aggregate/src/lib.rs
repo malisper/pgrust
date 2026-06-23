@@ -69,7 +69,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 use utils_error::{elog, ereport};
 use types_error::{
@@ -78,18 +78,18 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 
-use types_core::primitive::{InvalidOid, Oid, OidIsValid, FUNC_MAX_ARGS};
-use types_acl::acl::{AclResult, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
-use types_catalog::catalog::{OPERATOR_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID};
-use types_catalog::catalog_dependency::{ObjectAddress, DependencyType, DEPENDENCY_NORMAL};
-use types_catalog::pg_aggregate::{
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid, FUNC_MAX_ARGS};
+use ::types_acl::acl::{AclResult, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
+use ::types_catalog::catalog::{OPERATOR_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID};
+use ::types_catalog::catalog_dependency::{ObjectAddress, DependencyType, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_aggregate::{
     AggregateRelationId, FormData_pg_aggregate, PgAggregateInsertRow, PgAggregateReplaces,
     AGGKIND_HYPOTHETICAL, AGGKIND_IS_ORDERED_SET, AGGKIND_NORMAL, AGGKIND_ORDERED_SET,
 };
-use types_storage::lock::RowExclusiveLock;
-use types_tuple::heaptuple::{ANYOID, BYTEAOID, INTERNALOID};
+use ::types_storage::lock::RowExclusiveLock;
+use ::types_tuple::heaptuple::{ANYOID, BYTEAOID, INTERNALOID};
 
-use table::table_open;
+use ::table::table_open;
 use dependency::{
     add_exact_object_address, new_object_addresses, record_object_address_dependencies,
 };
@@ -105,12 +105,12 @@ use coerce_seams::{
     enforce_generic_type_consistency, is_binary_coercible,
 };
 use parse_func_seams::{func_get_detail, FuncDetailCode};
-use parse_oper_seams::lookup_oper_name;
-use format_type_seams::format_type_be;
+use ::parse_oper_seams::lookup_oper_name;
+use ::format_type_seams::format_type_be;
 use lsyscache_seams::{func_strict, get_func_name};
 use syscache_seams::{aggregate_tuple_by_fnoid, pg_proc_form};
 
-use pg_aggregate_seams::AggregateCreateArgs;
+use ::pg_aggregate_seams::AggregateCreateArgs;
 
 /// `ProcedureRelationId` (`catalog/pg_proc.h`).
 const ProcedureRelationId: Oid = PROCEDURE_RELATION_ID;
@@ -1116,5 +1116,5 @@ fn lookup_agg_function(
 /// Install this unit's inward seam ([`pg_aggregate_seams`]).
 /// `aggregatecmds.c`'s `DefineAggregate` consumes `aggregate_create`.
 pub fn init_seams() {
-    pg_aggregate_seams::aggregate_create::set(AggregateCreate);
+    ::pg_aggregate_seams::aggregate_create::set(AggregateCreate);
 }

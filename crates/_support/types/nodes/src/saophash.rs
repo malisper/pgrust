@@ -14,7 +14,7 @@
 //! interpreter crate (`execExprInterp::saophash`), which owns
 //! the simplehash template instantiation.
 
-use types_core::fmgr::FmgrInfo;
+use ::types_core::fmgr::FmgrInfo;
 use types_tuple::heaptuple::Datum;
 
 /// `ScalarArrayOpExprHashEntry` (execExprInterp.c:195) — one simplehash slot.

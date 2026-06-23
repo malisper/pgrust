@@ -18,13 +18,13 @@ use pathnodes::{
 
 use relnode_seams as bms_seam;
 
-fn words_of(a: &pathnodes::Relids) -> &[u64] {
+fn words_of(a: &::pathnodes::Relids) -> &[u64] {
     match a {
         Some(b) => &b.words,
         None => &[],
     }
 }
-fn member(x: i32, a: &pathnodes::Relids) -> bool {
+fn member(x: i32, a: &::pathnodes::Relids) -> bool {
     let w = words_of(a);
     if x < 0 {
         return false;
@@ -33,21 +33,21 @@ fn member(x: i32, a: &pathnodes::Relids) -> bool {
     let bn = (x % 64) as u32;
     wn < w.len() && (w[wn] >> bn) & 1 == 1
 }
-fn singleton(x: i32) -> pathnodes::Relids {
+fn singleton(x: i32) -> ::pathnodes::Relids {
     let wn = (x / 64) as usize;
     let bn = (x % 64) as u32;
     let mut w = alloc::vec![0u64; wn + 1];
     w[wn] = 1u64 << bn;
     Some(alloc::boxed::Box::new(Bitmapset { words: w }))
 }
-fn from_members(xs: &[i32]) -> pathnodes::Relids {
+fn from_members(xs: &[i32]) -> ::pathnodes::Relids {
     let mut r = None;
     for &x in xs {
         r = union(&r, &singleton(x));
     }
     r
 }
-fn union(a: &pathnodes::Relids, b: &pathnodes::Relids) -> pathnodes::Relids {
+fn union(a: &::pathnodes::Relids, b: &::pathnodes::Relids) -> ::pathnodes::Relids {
     let aw = words_of(a);
     let bw = words_of(b);
     let n = aw.len().max(bw.len());
@@ -61,13 +61,13 @@ fn union(a: &pathnodes::Relids, b: &pathnodes::Relids) -> pathnodes::Relids {
         Some(alloc::boxed::Box::new(Bitmapset { words: out }))
     }
 }
-fn overlap(a: &pathnodes::Relids, b: &pathnodes::Relids) -> bool {
+fn overlap(a: &::pathnodes::Relids, b: &::pathnodes::Relids) -> bool {
     let aw = words_of(a);
     let bw = words_of(b);
     let n = aw.len().min(bw.len());
     (0..n).any(|i| aw[i] & bw[i] != 0)
 }
-fn is_subset(a: &pathnodes::Relids, b: &pathnodes::Relids) -> bool {
+fn is_subset(a: &::pathnodes::Relids, b: &::pathnodes::Relids) -> bool {
     let aw = words_of(a);
     let bw = words_of(b);
     aw.iter()
@@ -99,8 +99,8 @@ fn mk_rel(root: &mut PlannerInfo, relid: u32) -> RelId {
 /// the movability/extract logic).
 fn mk_rinfo(
     root: &mut PlannerInfo,
-    clause_relids: pathnodes::Relids,
-    outer_relids: pathnodes::Relids,
+    clause_relids: ::pathnodes::Relids,
+    outer_relids: ::pathnodes::Relids,
     is_clone: bool,
 ) -> RinfoId {
     // Intern a non-constant clause node so rinfo_is_constant_true can deref it
@@ -128,7 +128,7 @@ fn mk_rinfo(
         right_relids: None,
         rinfo_serial: 0,
         parent_ec: None,
-        eval_cost: pathnodes::QualCost::default(),
+        eval_cost: ::pathnodes::QualCost::default(),
         norm_selec: -1.0,
         outer_selec: -1.0,
         mergeopfamilies: alloc::vec::Vec::new(),

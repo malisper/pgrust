@@ -29,9 +29,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::{AttrNumber, Index, Oid, ParseLoc};
+use ::types_core::primitive::{AttrNumber, Index, Oid, ParseLoc};
 use types_tuple::heaptuple::Datum;
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// `SubLinkType` (nodes/primnodes.h) — the kind of sub-select. Values match the
 /// C enumerator order exactly (`#[repr(i32)]`).
@@ -110,7 +110,7 @@ impl SubPlan<'_> {
             Some(e) => Some(alloc_in(mcx, e.clone_in(mcx)?)?),
             None => None,
         };
-        let mut paramIds = mcx::vec_with_capacity_in(mcx, self.paramIds.len())?;
+        let mut paramIds = ::mcx::vec_with_capacity_in(mcx, self.paramIds.len())?;
         for x in self.paramIds.iter() {
             paramIds.push(*x);
         }
@@ -118,15 +118,15 @@ impl SubPlan<'_> {
             Some(s) => Some(PgString::from_str_in(s.as_str(), mcx)?),
             None => None,
         };
-        let mut setParam = mcx::vec_with_capacity_in(mcx, self.setParam.len())?;
+        let mut setParam = ::mcx::vec_with_capacity_in(mcx, self.setParam.len())?;
         for x in self.setParam.iter() {
             setParam.push(*x);
         }
-        let mut parParam = mcx::vec_with_capacity_in(mcx, self.parParam.len())?;
+        let mut parParam = ::mcx::vec_with_capacity_in(mcx, self.parParam.len())?;
         for x in self.parParam.iter() {
             parParam.push(*x);
         }
-        let mut args = mcx::vec_with_capacity_in(mcx, self.args.len())?;
+        let mut args = ::mcx::vec_with_capacity_in(mcx, self.args.len())?;
         for e in self.args.iter() {
             args.push(alloc_in(mcx, e.clone_in(mcx)?)?);
         }
@@ -242,7 +242,7 @@ impl TableFunc<'_> {
             ns_uris: clone_expr_list(&self.ns_uris, mcx)?,
             ns_names: match &self.ns_names {
                 Some(v) => {
-                    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+                    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
                     for n in v.iter() {
                         out.push(match n {
                             Some(s) => Some(s.clone_in(mcx)?),
@@ -257,7 +257,7 @@ impl TableFunc<'_> {
             rowexpr: clone_opt_expr(&self.rowexpr, mcx)?,
             colnames: match &self.colnames {
                 Some(v) => {
-                    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+                    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
                     for s in v.iter() {
                         out.push(s.clone_in(mcx)?);
                     }
@@ -304,7 +304,7 @@ fn clone_expr_list<'b>(
 ) -> PgResult<Option<PgVec<'b, PgBox<'b, Expr<'b>>>>> {
     match list {
         Some(v) => {
-            let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
             for e in v.iter() {
                 out.push(alloc_in(mcx, e.clone_in(mcx)?)?);
             }
@@ -320,7 +320,7 @@ fn clone_opt_expr_list<'b>(
 ) -> PgResult<Option<PgVec<'b, Option<PgBox<'b, Expr<'b>>>>>> {
     match list {
         Some(v) => {
-            let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
             for e in v.iter() {
                 out.push(clone_opt_expr(e, mcx)?);
             }
@@ -336,7 +336,7 @@ fn clone_copy_list<'b, T: Copy>(
 ) -> PgResult<Option<PgVec<'b, T>>> {
     match list {
         Some(v) => {
-            let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
             for x in v.iter() {
                 out.push(*x);
             }
@@ -691,11 +691,11 @@ pub struct BoolExpr<'mcx> {
 }
 
 /// `CompareType` (nodes/cmptype.h) — abstract comparison kind requested of a
-/// [`RowCompareExpr`]. Canonically defined in `types_tableam::amapi` (the full
+/// [`RowCompareExpr`]. Canonically defined in `::types_tableam::amapi` (the full
 /// 9-variant `cmptype.h` enum); re-exported here so the node, executor, and
 /// access-method layers share one type. The btree comparison strategies
 /// (`COMPARE_INVALID`..`COMPARE_NE`) carry identical discriminants.
-pub use types_tableam::amapi::CompareType;
+pub use ::types_tableam::amapi::CompareType;
 
 /// `MinMaxOp` (nodes/primnodes.h) — GREATEST vs LEAST.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2726,7 +2726,7 @@ impl TargetEntry<'_> {
 #[cfg(test)]
 mod clone_in_tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     /// Build a trivial `Expr::Var` for use as a leaf child.
     fn a_var<'mcx>(varattno: AttrNumber) -> Expr<'mcx> {
@@ -2783,7 +2783,7 @@ mod clone_in_tests {
         // Aggref with one aggregated arg (a TargetEntry wrapping a Var) and a
         // FILTER expression.
         let inner_te = TargetEntry {
-            expr: Some(mcx::alloc_in(mcx, a_var(2)).unwrap()),
+            expr: Some(::mcx::alloc_in(mcx, a_var(2)).unwrap()),
             resno: 1,
             resname: None,
             ressortgroupref: 0,
@@ -2819,7 +2819,7 @@ mod clone_in_tests {
         };
 
         let tlist = alloc::vec![TargetEntry {
-            expr: Some(mcx::alloc_in(mcx, Expr::Aggref(aggref)).unwrap()),
+            expr: Some(::mcx::alloc_in(mcx, Expr::Aggref(aggref)).unwrap()),
             resno: 5,
             resname: None,
             ressortgroupref: 7,
@@ -2872,7 +2872,7 @@ mod clone_in_tests {
         // An analyzed sub-Query (minimal: default fields). Erase to 'static to
         // match SubLink.subselect's notional lifetime.
         let q = crate::copy_query::Query::new(mcx);
-        let q_boxed = mcx::alloc_in(mcx, q).unwrap();
+        let q_boxed = ::mcx::alloc_in(mcx, q).unwrap();
         let q_static: PgBox<'static, crate::copy_query::Query<'static>> =
             unsafe { core::mem::transmute(q_boxed) };
 
@@ -2929,7 +2929,7 @@ mod clone_in_tests {
         let mcx = ctx.mcx();
 
         let q = crate::copy_query::Query::new(mcx);
-        let q_boxed = mcx::alloc_in(mcx, q).unwrap();
+        let q_boxed = ::mcx::alloc_in(mcx, q).unwrap();
         let q_static: PgBox<'static, crate::copy_query::Query<'static>> =
             unsafe { core::mem::transmute(q_boxed) };
 
@@ -2988,7 +2988,7 @@ mod clone_in_tests {
 #[cfg(test)]
 mod arena_uaf_tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     use types_tuple::heaptuple::Datum;
 
     /// Build a `Const` carrying a by-reference `Datum` whose 8-byte image is

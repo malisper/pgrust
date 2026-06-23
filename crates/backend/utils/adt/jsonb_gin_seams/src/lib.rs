@@ -25,7 +25,7 @@
 //! to these typed bodies, marshaling the `Datum`s (detoasting jsonb / jsonpath
 //! varlenas into their root bytes and wrapping the produced key bytes back into
 //! GIN-key Datums). The opaque GIN `extra_data[0]` round-trip is the
-//! [`types_jsonb::jsonb_gin::JsonPathGinNode`] expression tree.
+//! [`::types_jsonb::jsonb_gin::JsonPathGinNode`] expression tree.
 //!
 //! `backend-utils-adt-jsonb-gin` is the single installer of these seams (it
 //! never calls them); they panic loudly until that owner's `init_seams()` runs
@@ -34,10 +34,10 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use mcx::Mcx;
-use types_error::PgResult;
-use types_jsonb::jsonb_gin::{GinJsonbQuery, GinQueryExtraction, JsonPathGinNode};
-use types_jsonb::jsonb::GinTernaryValue;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::types_jsonb::jsonb_gin::{GinJsonbQuery, GinQueryExtraction, JsonPathGinNode};
+use ::types_jsonb::jsonb::GinTernaryValue;
 
 seam_core::seam!(
     /// `gin_compare_jsonb` (jsonb_gin.c:203, OID 3480) — compare two GIN keys

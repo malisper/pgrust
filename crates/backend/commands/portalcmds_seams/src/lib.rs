@@ -5,7 +5,7 @@
 //! at commit) reach these across the command↔portal cycle. The owning crate
 //! installs all of them from its `init_seams()`.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::portalcmds::{DeclareCursorStmt, FetchStmt, ParamListInfo, ParseState};
 use portal::{Portal, QueryCompletion};

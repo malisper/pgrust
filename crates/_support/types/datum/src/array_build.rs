@@ -9,7 +9,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use types_core::Oid;
+use ::types_core::Oid;
 
 use crate::datum::Datum;
 

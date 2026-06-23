@@ -7,17 +7,17 @@
 
 #![allow(non_snake_case)]
 
-use types_core::xact::FullTransactionId;
+use ::types_core::xact::FullTransactionId;
 use types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr};
-use types_error::PgResult;
-use types_storage::SharedInvalidationMessage;
-use types_storage::lock::LOCKTAG;
-use types_storage::storage::{ProcSignalReason, RelFileLocator, VirtualTransactionId};
+use ::types_error::PgResult;
+use ::types_storage::SharedInvalidationMessage;
+use ::types_storage::lock::LOCKTAG;
+use ::types_storage::storage::{ProcSignalReason, RelFileLocator, VirtualTransactionId};
 
 seam_core::seam!(
     /// `standby_redo(record)` (standby.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn standby_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
+    pub fn standby_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

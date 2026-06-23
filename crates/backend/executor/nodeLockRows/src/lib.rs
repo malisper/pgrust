@@ -28,7 +28,7 @@ extern crate alloc;
 use nodeLockRows_seams as seam;
 use mcx::{Mcx, PgBox, PgVec};
 use seam::{ForeignRefetch, TupleLockRequest};
-use types_core::xact::XACT_REPEATABLE_READ;
+use ::types_core::xact::XACT_REPEATABLE_READ;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_T_R_SERIALIZATION_FAILURE};
 use ::nodes::execnodes::EStateData;
 use ::nodes::nodelockrows::{
@@ -36,7 +36,7 @@ use ::nodes::nodelockrows::{
     ROW_MARK_EXCLUSIVE, ROW_MARK_KEYSHARE, ROW_MARK_NOKEYEXCLUSIVE, ROW_MARK_SHARE,
 };
 use ::nodes::parsenodes::RTE_RELATION;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 use types_tableam::{
     LockTupleExclusive, LockTupleKeyShare, LockTupleMode, LockTupleNoKeyExclusive, LockTupleShare,
     TM_FailureData, TM_Result, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
@@ -298,7 +298,7 @@ pub fn ExecInitLockRows<'mcx>(
 
     // create state structure: makeNode(LockRowsState)
     let mcx = estate.es_query_cxt;
-    let mut lrstate = mcx::alloc_in(mcx, LockRowsStateData::new_in(mcx))?;
+    let mut lrstate = ::mcx::alloc_in(mcx, LockRowsStateData::new_in(mcx))?;
 
     // lrstate->ps.plan = (Plan *) node; lrstate->ps.state = estate;
     // lrstate->ps.ExecProcNode = ExecLockRows;
@@ -515,7 +515,7 @@ fn push_in<'mcx, T>(mcx: Mcx<'mcx>, v: &mut PgVec<'mcx, T>, x: T) -> PgResult<()
 #[inline]
 fn item_pointer_set_invalid() -> ItemPointerData {
     // BlockIdSet(InvalidBlockNumber); ip_posid = InvalidOffsetNumber(0)
-    ItemPointerData::new(types_core::primitive::InvalidBlockNumber, 0)
+    ItemPointerData::new(::types_core::primitive::InvalidBlockNumber, 0)
 }
 
 /// `elog(ERROR, "...")` — an internal (untranslated) error.
@@ -551,7 +551,7 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_core::xact::{XACT_READ_COMMITTED, XACT_SERIALIZABLE};
+    use ::types_core::xact::{XACT_READ_COMMITTED, XACT_SERIALIZABLE};
 
     #[test]
     fn isolation_uses_xact_snapshot_matches_c() {
@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(ip.ip_posid, 0);
         assert_eq!(
             ip,
-            ItemPointerData::new(types_core::primitive::InvalidBlockNumber, 0)
+            ItemPointerData::new(::types_core::primitive::InvalidBlockNumber, 0)
         );
     }
 

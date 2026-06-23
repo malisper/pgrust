@@ -37,7 +37,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use crate::regex_consts::{DUPINF, REG_UEMPTYMATCH, REG_UIMPOSSIBLE};
 use crate::regex_error::{err_assert, err_etoobig, RegResult};

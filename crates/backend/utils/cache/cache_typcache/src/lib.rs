@@ -40,27 +40,27 @@ use std::rc::Rc;
 use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use std::collections::HashMap;
 
-use cache::typcache::{
+use ::cache::typcache::{
     DomainConstraintState, DomainCtxHandle, PgTypeRow,
     DOM_CONSTRAINT_CHECK, DOM_CONSTRAINT_NOTNULL,
 };
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{Oid, INVALID_OID};
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{Oid, INVALID_OID};
 use types_error::{
     PgError, PgResult, SqlState, ERRCODE_CHECK_VIOLATION, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_NOT_NULL_VIOLATION, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
 };
-use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData, RECORDOID};
-use execparallel::DsaPointer;
-use types_storage::DsaArea;
+use ::types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData, RECORDOID};
+use ::execparallel::DsaPointer;
+use ::types_storage::DsaArea;
 
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`.
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`.
 // Kept only at the cache-callback registration ABI edge: the syscache/relcache
 // callback `arg` is a plain machine word that C passes as `(Datum) 0`. The
-// value-carrying canonical enum is `types_tuple::heaptuple::Datum`,
+// value-carrying canonical enum is `::types_tuple::heaptuple::Datum`,
 // which typcache does not traffic in (it returns typed entries, not Datums).
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 
 use session_seams as session_seams;
 use tupdesc_seams as tupdesc_seams;
@@ -470,7 +470,7 @@ impl<'mcx> TypCacheState<'mcx> {
     }
 }
 
-mcx::bind!(TypCacheStateTy => TypCacheState<'mcx>);
+::mcx::bind!(TypCacheStateTy => TypCacheState<'mcx>);
 
 thread_local! {
     /// The crate's `CacheMemoryContext` analog co-owning the process-global
@@ -1359,7 +1359,7 @@ fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
                     constrainttype: DOM_CONSTRAINT_CHECK,
                     name: row.conname,
                     check_expr: Some(check_expr),
-                    check_exprstate: cache::typcache::ExprStateHandle::NULL,
+                    check_exprstate: ::cache::typcache::ExprStateHandle::NULL,
                 });
             }
 
@@ -1397,7 +1397,7 @@ fn load_domaintype_info(type_id: Oid) -> PgResult<()> {
             constrainttype: DOM_CONSTRAINT_NOTNULL,
             name: "NOT NULL".to_string(),
             check_expr: None,
-            check_exprstate: cache::typcache::ExprStateHandle::NULL,
+            check_exprstate: ::cache::typcache::ExprStateHandle::NULL,
         };
         // lcons to apply the nullness check FIRST.
         dcc.as_mut().unwrap().1.insert(0, node);
@@ -1749,7 +1749,7 @@ fn copy_tupdesc_out<'mcx>(
     mcx: Mcx<'mcx>,
     src: &TupleDescData<'_>,
 ) -> PgResult<PgBox<'mcx, TupleDescData<'mcx>>> {
-    mcx::alloc_in(mcx, src.clone_in(mcx)?)
+    ::mcx::alloc_in(mcx, src.clone_in(mcx)?)
 }
 
 /// `lookup_rowtype_tupdesc_internal` core, returning the descriptor copied into
@@ -1830,7 +1830,7 @@ fn copy_tupdesc_into_cache<'mcx>(
     st: &TypCacheState<'mcx>,
     src: &TupleDescData<'_>,
 ) -> PgResult<PgBox<'mcx, TupleDescData<'mcx>>> {
-    mcx::alloc_in(st.mcx, src.clone_in(st.mcx)?)
+    ::mcx::alloc_in(st.mcx, src.clone_in(st.mcx)?)
 }
 
 /// `lookup_rowtype_tupdesc`. The returned descriptor is an owned copy in
@@ -2303,7 +2303,7 @@ fn read_shared_tupledesc<'mcx>(
     // SAFETY: `addr` resolves a flat descriptor block written by
     // `share_tupledesc`; the header + `natts` attributes are in bounds.
     let desc = unsafe { read_flat_tupledesc(mcx, addr) }?;
-    mcx::alloc_in(mcx, desc)
+    ::mcx::alloc_in(mcx, desc)
 }
 
 /// Read the `SharedRecordTableKey` at the start of a dshash key/entry byte
@@ -2391,8 +2391,8 @@ fn shared_registry_import_seam(
     }
 
     let area = area as *mut DsaArea;
-    let record_table = record_table as *mut types_storage::DshashTable;
-    let typmod_table = typmod_table as *mut types_storage::DshashTable;
+    let record_table = record_table as *mut ::types_storage::DshashTable;
+    let typmod_table = typmod_table as *mut ::types_storage::DshashTable;
 
     // Snapshot each present descriptor's structural content (typmod, type id,
     // attribute array) as plain owned data outside the cache borrow, so the
@@ -2495,8 +2495,8 @@ fn find_or_make_matching_shared_tupledesc_seam<'mcx>(
     next_typmod: usize,
 ) -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
     let area = area as *mut DsaArea;
-    let record_table = record_table as *mut types_storage::DshashTable;
-    let typmod_table = typmod_table as *mut types_storage::DshashTable;
+    let record_table = record_table as *mut ::types_storage::DshashTable;
+    let typmod_table = typmod_table as *mut ::types_storage::DshashTable;
     let np = next_typmod as *mut core::sync::atomic::AtomicU32;
 
     // Try to find a matching tuple descriptor in the record table.
@@ -2592,7 +2592,7 @@ fn shared_typmod_table_find_seam<'mcx>(
     area: usize,
 ) -> PgResult<Option<PgBox<'mcx, TupleDescData<'mcx>>>> {
     let area = area as *mut DsaArea;
-    let typmod_table = typmod_table as *mut types_storage::DshashTable;
+    let typmod_table = typmod_table as *mut ::types_storage::DshashTable;
 
     let key = (typmod as u32).to_ne_bytes();
     let guard = dshash_seams::dshash_find::call(typmod_table, &key, false)?;
@@ -2610,7 +2610,7 @@ fn shared_typmod_table_find_seam<'mcx>(
 
 /// `shared_record_table_hash` (typcache.c:259) — DshashKeyKind::Record hash.
 /// Resolve the `SharedRecordTableKey` to a TupleDesc and run `hashRowType`.
-fn shared_record_key_hash_seam(area: *mut types_storage::DsaArea, key: &[u8]) -> u32 {
+fn shared_record_key_hash_seam(area: *mut ::types_storage::DsaArea, key: &[u8]) -> u32 {
     let k = read_record_table_key(key);
     // SAFETY: `area` is the record table's live DSA area; a local key's `u` is a
     // valid `*const TupleDescData` (the caller's stack-pinned lookup key).
@@ -2621,7 +2621,7 @@ fn shared_record_key_hash_seam(area: *mut types_storage::DsaArea, key: &[u8]) ->
 /// Resolve both keys to TupleDescs and run `equalRowTypes` (C returns 0 on
 /// equal; the dshash Rust port compares the bool directly).
 fn shared_record_key_compare_seam(
-    area: *mut types_storage::DsaArea,
+    area: *mut ::types_storage::DsaArea,
     a: &[u8],
     b: &[u8],
 ) -> bool {
@@ -2923,7 +2923,7 @@ fn load_enum_cache_data(type_id: Oid) -> PgResult<()> {
         debug_assert!(bitmap.as_ref().map(|b| b.num_members()).unwrap_or(0) <= numitems);
 
         // Copy the data into the cache context (charged).
-        let enum_values = mcx::slice_in(mcx, &items)?;
+        let enum_values = ::mcx::slice_in(mcx, &items)?;
         let enumdata = TypeCacheEnumData {
             bitmap_base,
             sorted_values: bitmap.unwrap_or_else(|| Bitmapset::new(mcx)),
@@ -3072,7 +3072,7 @@ fn prep_domain_constraints(
         // uninstalled, EState-substrate-blocked) `exec_init_expr` seam.
         let check_exprstate = match &r.check_expr {
             Some(expr) => domains_seams::exec_init_expr::call(expr, execctx)?,
-            None => cache::typcache::ExprStateHandle::NULL,
+            None => ::cache::typcache::ExprStateHandle::NULL,
         };
         result.push(DomainConstraintState {
             constrainttype: r.constrainttype,
@@ -3253,7 +3253,7 @@ fn domain_check_input(
     value: &ColumnDatum<'_>,
     isnull: bool,
     domain_type: Oid,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<()> {
     // Carry the soft-error sink into the per-constraint closure so the NOT NULL
     // and CHECK violations can `errsave` into it (domains.c: `errsave(escontext,
@@ -3292,7 +3292,7 @@ fn domain_check_input(
                         // error is saved into it and we `break` (C `return`s out
                         // of the loop after errsave, since on a soft-error path
                         // errsave does not longjmp).
-                        types_error::ereturn(
+                        ::types_error::ereturn(
                             escontext.as_deref_mut(),
                             (),
                             PgError::error(format!(
@@ -3320,7 +3320,7 @@ fn domain_check_input(
                         // errdatatype fields are the no-op documented in the
                         // domains family. With a soft sink the error is saved and
                         // we return (matching C's flow after errsave).
-                        types_error::ereturn(
+                        ::types_error::ereturn(
                             escontext.as_deref_mut(),
                             (),
                             PgError::error(format!(
@@ -3396,7 +3396,7 @@ pub fn type_hash_eq_operator(type_id: Oid) -> PgResult<Option<Oid>> {
 
 /// Seam `type_cache_typtype` — `lookup_type_cache(atttypid, 0)->typtype`
 /// (execIndexing.c's `ExecWithoutOverlapsNotEmpty`).
-pub fn type_cache_typtype_seam(type_id: Oid) -> types_error::PgResult<i8> {
+pub fn type_cache_typtype_seam(type_id: Oid) -> ::types_error::PgResult<i8> {
     Ok(type_cache_typtype(type_id))
 }
 
@@ -3430,12 +3430,12 @@ fn lookup_type_cache_copyout(
     }))
 }
 
-/// Build the `cache::TypeCacheEntry` copy-out shape (the range/multirange
+/// Build the `::cache::TypeCacheEntry` copy-out shape (the range/multirange
 /// view: storage fields + rng_*/hash_* finfo + recursively-copied element/range
 /// sub-entries). Pure read of the already-resolved cache entry.
-fn build_types_cache_entry(st: &TypCacheState<'_>, type_id: Oid) -> cache::TypeCacheEntry {
+fn build_types_cache_entry(st: &TypCacheState<'_>, type_id: Oid) -> ::cache::TypeCacheEntry {
     let e = st.entry(type_id);
-    cache::TypeCacheEntry {
+    ::cache::TypeCacheEntry {
         type_id: e.type_id,
         typlen: e.typlen,
         typbyval: e.typbyval,
@@ -3457,9 +3457,9 @@ fn build_types_cache_entry(st: &TypCacheState<'_>, type_id: Oid) -> cache::TypeC
 }
 
 /// `lookup_type_cache(type_id, flags)` range/multirange-ADT view: resolve the
-/// entry, then hand back the `cache::TypeCacheEntry` shape (with the
+/// entry, then hand back the `::cache::TypeCacheEntry` shape (with the
 /// rng_*/hash_* finfo support fields the range ports read).
-fn lookup_type_cache_entry(type_id: Oid, flags: i32) -> PgResult<cache::TypeCacheEntry> {
+fn lookup_type_cache_entry(type_id: Oid, flags: i32) -> PgResult<::cache::TypeCacheEntry> {
     lookup_type_cache(type_id, flags)?;
     Ok(with_state(|st| build_types_cache_entry(st, type_id)))
 }
@@ -3559,7 +3559,7 @@ fn lookup_range_elem_hash_proc(elem_type_id: Oid, extended: bool) -> PgResult<Oi
  * (re-resolved by OID; the C `FmgrInfo *` cannot cross).
  * ======================================================================== */
 
-use types_tuple::heaptuple::Datum as ColumnDatum;
+use ::types_tuple::heaptuple::Datum as ColumnDatum;
 
 /// `array_typanalyze`'s element-type typcache lookup (array_typanalyze.c:124):
 /// `lookup_type_cache(element_typeid, TYPECACHE_EQ_OPR | TYPECACHE_CMP_PROC_FINFO

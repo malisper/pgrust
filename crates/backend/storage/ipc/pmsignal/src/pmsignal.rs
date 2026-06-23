@@ -3,8 +3,8 @@
 
 use std::sync::atomic::Ordering::SeqCst;
 
-use utils_error::elog;
-use types_core::sig_atomic_t;
+use ::utils_error::elog;
+use ::types_core::sig_atomic_t;
 use types_error::{ErrorLocation, PgResult, FATAL};
 
 use crate::{add_size, mul_size};
@@ -690,7 +690,7 @@ pub fn PostmasterDeathSignalInit_seam() -> PgResult<()> {
 // `lineno` records the pmsignal.c source line for parity with C `__LINE__`.
 // ---------------------------------------------------------------------------
 
-fn elog_internal(level: types_error::ErrorLevel, msg: &str, lineno: i32) -> PgResult<()> {
+fn elog_internal(level: ::types_error::ErrorLevel, msg: &str, lineno: i32) -> PgResult<()> {
     let _loc = ErrorLocation::new(FILE, lineno, "pmsignal");
     elog(level, msg)
 }

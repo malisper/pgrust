@@ -16,7 +16,7 @@
 //! cleanup, the retry counting, `PgArchForceDirScan`, `PgArchWakeup`,
 //! `pgarch_die`, `ProcessPgArchInterrupts`, and `LoadArchiveLibrary`.
 //!
-//! The shared-memory control block ([`types_pgarch::PgArchData`]) holds
+//! The shared-memory control block ([`::types_pgarch::PgArchData`]) holds
 //! `pgprocno`/`force_dir_scan` as interior atomics (real shmem-shared state);
 //! `PgArchShmemInit` registers it. The `stat`/`unlink`/`rename` status-file
 //! syscalls are plain libc, done in-crate via `std::fs`. Every PG-subsystem
@@ -38,12 +38,12 @@ use std::sync::OnceLock;
 use utils_error::{ereport, PgResult};
 use types_error::{ErrorLocation, ERROR, LOG, WARNING};
 use types_core::{init::BackendType, INVALID_PROC_NUMBER};
-use types_error::ERRCODE_INVALID_PARAMETER_VALUE;
-use types_guc::PGC_SIGHUP;
+use ::types_error::ERRCODE_INVALID_PARAMETER_VALUE;
+use ::types_guc::PGC_SIGHUP;
 use types_pgarch::{ArchiveModuleCallbacks, ArchiveModuleState, PgArchData};
-use types_pgstat::wait_event::WAIT_EVENT_ARCHIVER_MAIN;
-use signal::SigHandler;
-use types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_TIMEOUT};
+use ::types_pgstat::wait_event::WAIT_EVENT_ARCHIVER_MAIN;
+use ::signal::SigHandler;
+use ::types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_TIMEOUT};
 use wal::{MAXFNAMELEN, XLOGDIR};
 
 #[cfg(test)]
@@ -69,7 +69,7 @@ const NUM_ORPHAN_CLEANUP_RETRIES: i32 = 3;
 const NUM_FILES_PER_DIRECTORY_SCAN: usize = 64;
 
 /// `MAXPGPATH` (`pg_config_manual.h`).
-const MAXPGPATH: usize = types_core::MAXPGPATH;
+const MAXPGPATH: usize = ::types_core::MAXPGPATH;
 
 // pgarch.h archiver control info.
 const MIN_XFN_CHARS: usize = 16;
@@ -458,7 +458,7 @@ pub fn PgArchiverMain(startup_data: &types_startup::StartupData) -> ! {
         // An ERROR escaping the archiver's main with no handler is promoted to
         // FATAL, exactly as in C; proc_exit carries it out of the process.
         Err(err) => {
-            utils_error::emit_error_report_for(&err);
+            ::utils_error::emit_error_report_for(&err);
             dsm_core_seams::proc_exit::call(
                 1,
                 init_small_seams::my_proc_pid::call(),
@@ -757,7 +757,7 @@ fn pgarch_ArchiverCopyLoop() -> PgResult<()> {
 /// `pgstat_report_archiver(xlog, failed)` — copies exactly `WAL_NAME_LEN` bytes
 /// from the (NUL-terminated) WAL name; build that fixed buffer here.
 fn report_archiver(xlog: &str, failed: bool) {
-    let mut buf = [0u8; types_pgstat::activity_pgstat::WAL_NAME_LEN];
+    let mut buf = [0u8; ::types_pgstat::activity_pgstat::WAL_NAME_LEN];
     let bytes = xlog.as_bytes();
     let n = bytes.len().min(buf.len());
     buf[..n].copy_from_slice(&bytes[..n]);
@@ -833,7 +833,7 @@ fn archive_error_cleanup(
 
     // Report the error to the server log. (The error value is the `Err` from the
     // callback; the elog stack may have no frame, so emit it directly.)
-    let _ = utils_error::EmitErrorReport();
+    let _ = ::utils_error::EmitErrorReport();
 
     // Try to clean up anything the archive module left behind.
     let _ = timeout_seams::disable_all_timeouts::call(false);
@@ -848,7 +848,7 @@ fn archive_error_cleanup(
     // Return to the original memory context and clear ErrorContext for next
     // time: MemoryContextSwitchTo(oldcontext); FlushErrorState();
     mcxt_seams::MemoryContextSwitchTo::call(oldcontext);
-    utils_error::FlushErrorState();
+    ::utils_error::FlushErrorState();
 
     // Flush any leaked data: MemoryContextReset(archive_context).
     mcxt_seams::MemoryContextReset::call(archive_ctx);
@@ -1124,7 +1124,7 @@ fn LoadArchiveLibrary() -> PgResult<()> {
     // If shell archiving is enabled, use shell_archive_init(); otherwise load
     // the library and call its _PG_archive_module_init().
     let archive_lib = transam_xlog_seams::xlog_archive_library::call();
-    let archive_init: types_pgarch::ArchiveModuleInit = if archive_lib.is_empty() {
+    let archive_init: ::types_pgarch::ArchiveModuleInit = if archive_lib.is_empty() {
         shell_archive_seams::shell_archive_init::call
     } else {
         match dfmgr_seams::load_archive_module_init::call(&archive_lib)? {

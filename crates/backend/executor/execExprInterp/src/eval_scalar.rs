@@ -36,7 +36,7 @@ use fmgr_seams::{
 };
 // The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
 // step-payload eval helpers operate on.
-use datum::Datum;
+use ::datum::Datum;
 // The canonical unified value type (Datum-unification keystone) — what the
 // keystone-owned `ResultCell.value` / `ExprState.resvalue` carry.
 use types_tuple::heaptuple::Datum as DatumV;
@@ -72,8 +72,8 @@ fn func_step_inputs<'mcx>(
     state: &ExprState<'mcx>,
     op: usize,
 ) -> (
-    types_core::primitive::Oid,
-    types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
     Vec<DatumV<'mcx>>,
     Vec<bool>,
     usize,
@@ -120,7 +120,7 @@ fn func_step_inputs<'mcx>(
 fn func_step_fn_expr<'a, 'mcx>(
     state: &'a ExprState<'mcx>,
     op: usize,
-) -> Option<types_core::fmgr::FnExprErased> {
+) -> Option<::types_core::fmgr::FnExprErased> {
     // Hand the by-OID fmgr dispatch the call node as the cheap `Rc`-backed erased
     // handle the step's `FmgrInfo` was stamped with (`fmgr_info_set_expr` at
     // `ExecInitFunc` time), NOT a borrow that the dispatch would have to deep-clone
@@ -220,8 +220,8 @@ fn distinct_step_inputs<'mcx>(
     state: &ExprState<'mcx>,
     op: usize,
 ) -> (
-    types_core::primitive::Oid,
-    types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
     Vec<DatumV<'mcx>>,
     Vec<bool>,
     bool,
@@ -378,8 +378,8 @@ fn rowcompare_step_inputs<'mcx>(
     state: &ExprState<'mcx>,
     op: usize,
 ) -> (
-    types_core::primitive::Oid,
-    types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
     Vec<DatumV<'mcx>>,
     Vec<bool>,
     bool,
@@ -485,8 +485,8 @@ fn hashdatum_step_inputs<'mcx>(
     state: &ExprState<'mcx>,
     op: usize,
 ) -> (
-    types_core::primitive::Oid,
-    types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
     Vec<DatumV<'mcx>>,
     bool,
     u32,
@@ -529,7 +529,7 @@ fn hashdatum_step_inputs<'mcx>(
 fn hashdatum_step_fn_expr<'a, 'mcx>(
     state: &'a ExprState<'mcx>,
     op: usize,
-) -> Option<types_core::fmgr::FnExprErased> {
+) -> Option<::types_core::fmgr::FnExprErased> {
     // Cheap `Rc` clone of the step's stamped call node, not a borrow the by-OID
     // dispatch would deep-clone per call (see `func_step_fn_expr`).
     match step_data(state, op) {
@@ -625,7 +625,7 @@ pub fn exec_hashdatum_step<'mcx>(
 /// Read a `Func`-payload step's `(fn_stats, fn_oid)` — C's
 /// `fcinfo->flinfo->fn_stats` / `fcinfo->flinfo->fn_oid`, the two values
 /// `pgstat_init_function_usage` needs.
-fn func_step_stats(state: &ExprState<'_>, op: usize) -> (u8, types_core::primitive::Oid) {
+fn func_step_stats(state: &ExprState<'_>, op: usize) -> (u8, ::types_core::primitive::Oid) {
     match step_data(state, op) {
         ExprEvalStepData::Func { finfo, .. } => {
             let finfo = finfo
@@ -784,7 +784,7 @@ pub fn ExecEvalParamExec<'mcx>(
             .get_mut(idx)
             .and_then(|slot| slot.take())
             .ok_or_else(|| {
-                types_error::PgError::error(
+                ::types_error::PgError::error(
                     "ExecEvalParamExec: initplan not found for pending PARAM_EXEC",
                 )
             })?;
@@ -866,12 +866,12 @@ pub fn ExecEvalParamExtern<'mcx>(
             let prm = &param_info.params[(paramid - 1) as usize];
             if prm.ptype != 0 {
                 if prm.ptype != paramtype {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "type of parameter {paramid} ({}) does not match that when \
                          preparing the plan ({})",
                         prm.ptype, paramtype
                     ))
-                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
+                    .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH));
                 }
                 // *op->resvalue = prm->value; *op->resnull = prm->isnull. Write
                 // through `write_cell`, which routes the ExprState's own result
@@ -896,10 +896,10 @@ pub fn ExecEvalParamExtern<'mcx>(
         }
     }
 
-    Err(types_error::PgError::error(format!(
+    Err(::types_error::PgError::error(format!(
         "no value found for parameter {paramid}"
     ))
-    .with_sqlstate(types_error::ERRCODE_UNDEFINED_OBJECT))
+    .with_sqlstate(::types_error::ERRCODE_UNDEFINED_OBJECT))
 }
 
 /// `ExecEvalParamSet(...)` — store a value into a PARAM_EXEC slot.
@@ -953,12 +953,12 @@ fn iocoerce_step_inputs<'mcx>(
     state: &ExprState<'mcx>,
     op: usize,
 ) -> (
-    types_core::primitive::Oid,
-    types_core::primitive::Oid,
-    types_core::primitive::Oid,
-    types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
+    ::types_core::primitive::Oid,
     bool,
-    Vec<datum::NullableDatum>,
+    Vec<::datum::NullableDatum>,
 ) {
     match step_data(state, op) {
         ExprEvalStepData::IoCoerce {
@@ -1076,7 +1076,7 @@ fn iocoerce_core<'mcx>(
                 Some(id) => core::mem::take(
                     &mut state.json_states.states.as_mut().unwrap()[id.0 as usize].escontext,
                 ),
-                None => types_error::SoftErrorContext::new(false),
+                None => ::types_error::SoftErrorContext::new(false),
             };
             let out = function_call_invoke_datum_soft::call(
                 mcx,
@@ -1165,8 +1165,8 @@ pub fn ExecEvalSQLValueFunction<'mcx>(
     let (resvalue_id, _resnull_id) = res_cells(state, op);
     let mcx = estate.es_query_cxt;
 
-    use adt_datetime::date::{GetSQLCurrentDate, GetSQLCurrentTime, GetSQLLocalTime};
-    use adt_datetime::timestamp::{GetSQLCurrentTimestamp, GetSQLLocalTimestamp};
+    use ::adt_datetime::date::{GetSQLCurrentDate, GetSQLCurrentTime, GetSQLLocalTime};
+    use ::adt_datetime::timestamp::{GetSQLCurrentTimestamp, GetSQLLocalTimestamp};
 
     // *op->resnull = false; (the role/user/catalog/schema arms may set it true)
     let (value, isnull): (DatumV<'mcx>, bool) = match svf.op {
@@ -1263,7 +1263,7 @@ pub fn ExecEvalNextValueExpr<'mcx>(
     // }
     // *op->resnull = false;
     //
-    use types_core::catalog::{INT2OID, INT4OID, INT8OID};
+    use ::types_core::catalog::{INT2OID, INT4OID, INT8OID};
 
     let (seqid, seqtypid) = match step_data(state, op) {
         ExprEvalStepData::NextValueExpr { seqid, seqtypid } => (*seqid, *seqtypid),
@@ -1503,7 +1503,7 @@ pub fn ExecEvalSysVar<'mcx>(
 
     // if (unlikely(*op->resnull)) elog(ERROR, "failed to fetch attribute from slot");
     if isnull {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "failed to fetch attribute from slot",
         ));
     }
@@ -1685,8 +1685,8 @@ pub fn ExecEvalScalarArrayOp<'mcx>(
 /// collation `InitFunctionCallInfoData` stamped onto `hash_fcinfo_data`).
 pub fn saop_element_hash<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    hashfuncid: types_core::primitive::Oid,
-    collation: types_core::primitive::Oid,
+    hashfuncid: ::types_core::primitive::Oid,
+    collation: ::types_core::primitive::Oid,
     key: &DatumV<'mcx>,
 ) -> PgResult<u32> {
     // fcinfo->args[0].value = key; fcinfo->args[0].isnull = false;
@@ -1698,7 +1698,7 @@ pub fn saop_element_hash<'mcx>(
     // downgraded word (which would panic in `word_of`). The hash result is a
     // by-value int4.
     let hash =
-        fmgr_seams::function_call1_coll_datum::call(
+        ::fmgr_seams::function_call1_coll_datum::call(
             mcx, hashfuncid, collation, key.clone(),
         )?;
     Ok(hash.as_u32())
@@ -1719,8 +1719,8 @@ pub fn saop_element_hash<'mcx>(
 /// NULLs), matching `FunctionCall2Coll`'s non-null-arg contract.
 pub fn saop_hash_element_match<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    matchfuncid: types_core::primitive::Oid,
-    collation: types_core::primitive::Oid,
+    matchfuncid: ::types_core::primitive::Oid,
+    collation: ::types_core::primitive::Oid,
     key1: &DatumV<'mcx>,
     key2: &DatumV<'mcx>,
 ) -> PgResult<bool> {
@@ -1732,7 +1732,7 @@ pub fn saop_hash_element_match<'mcx>(
     // Dispatch on the canonical by-reference-capable lane so by-ref array
     // elements (text/varchar/numeric) reach the equality function intact.
     let result =
-        fmgr_seams::function_call2_coll_datum::call(
+        ::fmgr_seams::function_call2_coll_datum::call(
             mcx, matchfuncid, collation, key1.clone(), key2.clone(),
         )?;
     Ok(result.as_bool())

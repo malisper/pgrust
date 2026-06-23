@@ -16,13 +16,13 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use amapi_seams as amapi;
-use lsyscache_seams::OpIndexInterpretation;
+use ::lsyscache_seams::OpIndexInterpretation;
 use syscache_seams as syscache;
 use typcache_seams as typcache;
 use mcx::{Mcx, MemoryContext, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use hash::hash::{HASHSTANDARD_PROC, HTEqualStrategyNumber};
+use ::hash::hash::{HASHSTANDARD_PROC, HTEqualStrategyNumber};
 use opclass::{AMOP_ORDER, AMOP_SEARCH};
 
 /// `InvalidOid` (`postgres_ext.h`).
@@ -307,7 +307,7 @@ fn oid_is_valid(oid: Oid) -> bool {
 /// Copy a scratch `Vec<T>` into a `mcx`-allocated `PgVec<T>` (the C `palloc`'d
 /// list result, allocated in the caller's context).
 fn pgvec_from<'mcx, T: Copy>(mcx: Mcx<'mcx>, src: &[T]) -> PgResult<PgVec<'mcx, T>> {
-    let mut out: PgVec<'mcx, T> = mcx::vec_with_capacity_in(mcx, src.len())?;
+    let mut out: PgVec<'mcx, T> = ::mcx::vec_with_capacity_in(mcx, src.len())?;
     for &v in src {
         out.push(v);
     }
@@ -661,9 +661,9 @@ fn pg_operator_form<'mcx>(mcx: Mcx<'mcx>, opno: Oid) -> PgResult<Option<syscache
 }
 
 /// `get_opname(opno)` (lsyscache.c): the operator's name, or `None`.
-pub fn get_opname<'mcx>(mcx: Mcx<'mcx>, opno: Oid) -> PgResult<Option<mcx::PgString<'mcx>>> {
+pub fn get_opname<'mcx>(mcx: Mcx<'mcx>, opno: Oid) -> PgResult<Option<::mcx::PgString<'mcx>>> {
     match pg_operator_form(mcx, opno)? {
-        Some(optup) => Ok(Some(mcx::PgString::from_str_in(&optup.oprname, mcx)?)),
+        Some(optup) => Ok(Some(::mcx::PgString::from_str_in(&optup.oprname, mcx)?)),
         None => Ok(None),
     }
 }

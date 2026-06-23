@@ -20,13 +20,13 @@
 use std::cell::Cell;
 use std::ptr::NonNull;
 
-use lwlock::LWLockAcquireMain;
+use ::lwlock::LWLockAcquireMain;
 use s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
 use utils_error::{elog, ereport};
 use funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
 use dynahash_seams as dynahash;
-use mcx::Mcx;
-use types_core::Size;
+use ::mcx::Mcx;
+use ::types_core::Size;
 // The SQL functions here return the canonical unified `types_tuple::Datum`
 // (ByVal/ByRef). They only ever return the by-value null (`Datum::null()`) or a
 // by-value bool (`Datum::from_bool`), neither of which borrows from `mcx`, so
@@ -38,7 +38,7 @@ use types_core::Size;
 use types_error::{
     ErrorLocation, PgResult, DEBUG1, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
-use hash::hsearch::{
+use ::hash::hsearch::{
     HASHCTL, HASHHDR, HASH_ALLOC, HASH_DIRSIZE, HASH_ELEM, HASH_SEQ_STATUS, HASH_SHARED_MEM,
     HASH_STRINGS, HTAB,
 };
@@ -338,7 +338,7 @@ pub fn ShmemInitHash(
     // if it already exists, attach to it rather than allocate and initialize
     // new space
     if found {
-        hash_flags |= hash::hsearch::HASH_ATTACH;
+        hash_flags |= ::hash::hsearch::HASH_ATTACH;
     }
 
     // Pass location of hashtable header to hash_create
@@ -409,7 +409,7 @@ pub fn ShmemInitStruct(name: &str, size: Size) -> PgResult<(NonNull<u8>, bool)> 
     let (result, mut found) = dynahash::hash_search::call(
         shmem_index,
         key.as_ptr(),
-        hash::hsearch::HASHACTION::HASH_ENTER_NULL,
+        ::hash::hsearch::HASHACTION::HASH_ENTER_NULL,
     )?;
 
     if result.is_null() {
@@ -452,7 +452,7 @@ pub fn ShmemInitStruct(name: &str, size: Size) -> PgResult<(NonNull<u8>, bool)> 
             dynahash::hash_search::call(
                 shmem_index,
                 key.as_ptr(),
-                hash::hsearch::HASHACTION::HASH_REMOVE,
+                ::hash::hsearch::HASHACTION::HASH_REMOVE,
             )?;
             guard.release()?;
             ereport(ERROR)
@@ -636,7 +636,7 @@ pub fn pg_get_shmem_allocations_numa<'mcx>(
 
     let max_nodes = pg_numa_seams::pg_numa_get_max_node::call() as u64;
     // nodes = palloc(sizeof(Size) * (max_nodes + 2));
-    let mut nodes: mcx::PgVec<'_, Size> = mcx::vec_with_capacity_in(mcx, (max_nodes + 2) as usize)?;
+    let mut nodes: ::mcx::PgVec<'_, Size> = ::mcx::vec_with_capacity_in(mcx, (max_nodes + 2) as usize)?;
     nodes.resize((max_nodes + 2) as usize, 0);
 
     // To map each allocation to NUMA nodes we align each allocation's
@@ -651,9 +651,9 @@ pub fn pg_get_shmem_allocations_numa<'mcx>(
     // SAFETY: live segment header.
     let shm_total_page_count = (unsafe { (*shmem_seg_hdr).totalsize } / os_page_size) + 1;
     // page_ptrs = palloc0(...); pages_status = palloc(...);
-    let mut page_ptrs: mcx::PgVec<'_, *mut u8> = mcx::vec_with_capacity_in(mcx, shm_total_page_count)?;
+    let mut page_ptrs: ::mcx::PgVec<'_, *mut u8> = ::mcx::vec_with_capacity_in(mcx, shm_total_page_count)?;
     page_ptrs.resize(shm_total_page_count, std::ptr::null_mut());
-    let mut pages_status: mcx::PgVec<'_, i32> = mcx::vec_with_capacity_in(mcx, shm_total_page_count)?;
+    let mut pages_status: ::mcx::PgVec<'_, i32> = ::mcx::vec_with_capacity_in(mcx, shm_total_page_count)?;
     pages_status.resize(shm_total_page_count, 0);
 
     if FIRST_NUMA_TOUCH.get() {
@@ -721,7 +721,7 @@ pub fn pg_get_shmem_allocations_numa<'mcx>(
         ) == -1
         {
             // elog(ERROR, "failed NUMA pages inquiry status: %m")
-            let en = utils_error::errno::current_errno();
+            let en = ::utils_error::errno::current_errno();
             ereport(ERROR)
                 .with_saved_errno(en)
                 .errmsg("failed NUMA pages inquiry status: %m")

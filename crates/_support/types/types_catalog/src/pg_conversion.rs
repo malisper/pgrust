@@ -2,7 +2,7 @@
 //! (`catalog/pg_conversion.h`, PostgreSQL 18.3), trimmed to what the
 //! `backend-catalog-pg-conversion` port reads.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_conversion.h CATALOG / DECLARE_*).

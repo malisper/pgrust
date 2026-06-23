@@ -16,9 +16,9 @@
 //! opacity-inherited-never-introduced; no handles, no stand-ins).
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::Index;
-use types_tableam::relscan::TableScanDesc;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_core::primitive::Index;
+use ::types_tableam::relscan::TableScanDesc;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::execexpr::ExprState;
 use crate::execnodes::ScanStateData;
@@ -94,7 +94,7 @@ pub struct TidScanState<'mcx> {
 }
 
 // Manual `Debug` (not `derive`): `ss_currentScanDesc`'s
-// [`TableScanDescData`](types_tableam::relscan::TableScanDescData) carries the
+// [`TableScanDescData`](::types_tableam::relscan::TableScanDescData) carries the
 // AM's opaque `dyn Any` tail, which is not `Debug`. The central
 // `PlanStateNode` enum derives `Debug`, so this variant payload must be
 // `Debug`; the scan descriptor is printed as an opaque present/absent marker.

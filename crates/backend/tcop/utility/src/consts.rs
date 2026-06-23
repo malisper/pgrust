@@ -7,13 +7,13 @@
 //! `CMDTAG_*` enumerator set (`tcop/cmdtaglist.h`). Each value is verified
 //! against PostgreSQL 18.3.
 //!
-//! `CommandTag` is `types_core::cmdtag::CommandTag` — a `CommandTag(i32)`
+//! `CommandTag` is `::types_core::cmdtag::CommandTag` — a `CommandTag(i32)`
 //! newtype whose value is the 0-based list-position from `cmdtaglist.h` (the
 //! same numbering `backend-tcop-cmdtag`'s `TAG_BEHAVIOR` table indexes).
 
 pub use ::nodes::parsestmt::ProcessUtilityContext;
-use types_core::cmdtag::CommandTag;
-use types_core::Oid;
+use ::types_core::cmdtag::CommandTag;
+use ::types_core::Oid;
 
 /* tcop/utility.h — ProcessUtility read-only classification flags. */
 

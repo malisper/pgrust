@@ -15,12 +15,12 @@ extern crate alloc;
 
 use mcx::{Mcx, PgVec};
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_attribute::{
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_attribute::{
     AttributeRelationId, Anum_pg_attribute_attinhcount, Anum_pg_attribute_attislocal,
     Anum_pg_attribute_attnum, PgAttributeUpdateRow,
 };
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
     ERROR, NOTICE,
@@ -28,16 +28,16 @@ use types_error::{
 use ::nodes::ddlnodes::AlterTableType::AT_DropColumn;
 use ::nodes::ddlnodes::AlterTableCmd;
 use ::nodes::parsenodes::DropBehavior;
-use rel::Relation;
-use types_storage::lock::{NoLock, RowExclusiveLock, LOCKMODE};
-use types_tuple::access::{RELKIND_COMPOSITE_TYPE, RELKIND_PARTITIONED_TABLE};
-use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
+use ::rel::Relation;
+use ::types_storage::lock::{NoLock, RowExclusiveLock, LOCKMODE};
+use ::types_tuple::access::{RELKIND_COMPOSITE_TYPE, RELKIND_PARTITIONED_TABLE};
+use ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 
-use common_relation::relation_open;
+use ::common_relation::relation_open;
 use dependency_seams as dep_seam;
 use indexing_seams as indexing_seam;
-use pg_inherits::find_inheritance_children;
-use cache_syscache::SearchSysCacheAttName;
+use ::pg_inherits::find_inheritance_children;
+use ::cache_syscache::SearchSysCacheAttName;
 
 use crate::at_phase::{
     ATSimplePermissions, AlterTableUtilityContext, CheckAlterTableIsSafe, ATT_FOREIGN_TABLE,
@@ -45,7 +45,7 @@ use crate::at_phase::{
 };
 use crate::helpers::{here, RelationRelationId};
 
-use heaptuple::FormedTuple;
+use ::heaptuple::FormedTuple;
 use cache_syscache::{SysCacheGetAttrNotNull, ATTNAME};
 
 const BITS_PER_BITMAPWORD: i32 = 64;
@@ -87,10 +87,10 @@ pub fn ATPrepDropColumn<'mcx>(
     // through the syscache projection (InvalidOid for an ordinary table).
     let reloftype =
         syscache_seams::search_relation_reloftype::call(rel.rd_id)?
-            .unwrap_or(types_core::InvalidOid);
-    if reloftype != types_core::InvalidOid && !recursing {
+            .unwrap_or(::types_core::InvalidOid);
+    if reloftype != ::types_core::InvalidOid && !recursing {
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg("cannot drop column from typed table".to_string())
             .into_error());
     }
@@ -145,7 +145,7 @@ fn drop_column_recurse<'mcx>(
     recurse: bool,
     recursing: bool,
     missing_ok: bool,
-    addrs: &mut types_catalog::catalog_dependency::ObjectAddresses,
+    addrs: &mut ::types_catalog::catalog_dependency::ObjectAddresses,
 ) -> PgResult<ObjectAddress> {
     // At top level, permission check was done in ATPrepCmd, else do it.
     if recursing {
@@ -178,8 +178,8 @@ fn drop_column_recurse<'mcx>(
                     ))
                     .finish(here("ATExecDropColumn"))?;
                 return Ok(ObjectAddress {
-                    classId: types_core::InvalidOid,
-                    objectId: types_core::InvalidOid,
+                    classId: ::types_core::InvalidOid,
+                    objectId: ::types_core::InvalidOid,
                     objectSubId: 0,
                 });
             }

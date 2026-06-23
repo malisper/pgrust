@@ -1,10 +1,10 @@
 //! `genericdesc.c` — rmgr descriptor routines for
 //! `access/transam/generic_xlog.c`.
 
-use mcx::PgString;
-use types_core::uint8;
-use types_error::PgResult;
-use wal::DecodedXLogRecord;
+use ::mcx::PgString;
+use ::types_core::uint8;
+use ::types_error::PgResult;
+use ::wal::DecodedXLogRecord;
 
 use crate::util::{appendf, read_u16};
 
@@ -44,7 +44,7 @@ pub fn generic_identify(_info: uint8) -> Option<&'static str> {
 /// rmgr table invokes `rm_desc`.
 pub fn generic_desc_seam(
     buf: &mut PgString<'_>,
-    record: &wal::rmgr::XLogReaderState<'_>,
+    record: &::wal::rmgr::XLogReaderState<'_>,
 ) -> PgResult<()> {
     let record = record
         .record

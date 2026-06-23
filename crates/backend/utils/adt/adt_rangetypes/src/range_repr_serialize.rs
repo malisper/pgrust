@@ -21,10 +21,10 @@ use core::mem::size_of;
 use allocator_api2::alloc::Allocator;
 use detoast_seams as detoast;
 use fmgr_seams as fmgr;
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::OidIsValid;
-use datum::datum::Datum;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::OidIsValid;
+use ::datum::datum::Datum;
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATA_EXCEPTION};
 use types_rangetypes::{
     RangeBound, RangeType, RangeTypeP, RANGE_EMPTY, RANGE_LB_INC, RANGE_LB_INF, RANGE_UB_INC,
@@ -377,7 +377,7 @@ pub fn range_is_empty_seam<'mcx>(mcx: Mcx<'mcx>, attval: Datum) -> PgResult<bool
 /// (C: `palloc0` always returns MAXALIGN'd storage). The block lives for the
 /// context's lifetime, like palloc'd memory freed at context reset.
 fn palloc0_maxaligned<'mcx>(mcx: Mcx<'mcx>, size: usize) -> PgResult<*mut u8> {
-    mcx::check_alloc_size(size)?;
+    ::mcx::check_alloc_size(size)?;
     let layout = Layout::from_size_align(size, 8).expect("valid RangeType image layout");
     let block = mcx
         .allocate_zeroed(layout)
@@ -653,7 +653,7 @@ pub fn range_set_contain_empty(range: RangeTypeP<'_>) {
     // GiST caller owns a mutable copy, as in C).
     unsafe {
         let flagsp = base.add(varsize(base as *const u8) - 1);
-        *flagsp |= types_rangetypes::RANGE_CONTAIN_EMPTY;
+        *flagsp |= ::types_rangetypes::RANGE_CONTAIN_EMPTY;
     }
 }
 
@@ -717,7 +717,7 @@ pub fn make_range_soft<'mcx>(
         // `int4range_canonical` on `[1,INT_MAX]`) `ereturn`s "integer out of
         // range" into `escontext` instead of raising.
         use types_tuple::heaptuple::Datum as CanonDatum;
-        let arg = CanonDatum::ByRef(mcx::slice_in(mcx, &range_to_varlena_bytes(range))?);
+        let arg = CanonDatum::ByRef(::mcx::slice_in(mcx, &range_to_varlena_bytes(range))?);
         let (result, isnull) = match escontext.as_deref_mut() {
             Some(ctx) => match fmgr::function_call_invoke_datum_soft::call(
                 mcx,

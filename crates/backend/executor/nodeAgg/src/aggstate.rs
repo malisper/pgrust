@@ -14,11 +14,11 @@
 //! module names them downward through `nodes::`.
 
 use mcx::{Mcx, MemoryContext, PgBox, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::TupleDescData;
 
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::execexpr::ExprState;
@@ -29,7 +29,7 @@ use ::nodes::nodeagg::{
 };
 use ::nodes::nodesort::{Sort, Tuplesortstate};
 
-use sort_storage_seams::LogicalTapeSet;
+use ::sort_storage_seams::LogicalTapeSet;
 
 // ---------------------------------------------------------------------------
 // nodeAgg.h per-* state structs
@@ -511,7 +511,7 @@ pub struct AggStateData<'mcx> {
     /// `ExecCopySlotHeapTuple` result), since a bare `HeapTupleData` header does
     /// not hold the tuple's data bytes.
     pub grp_first_tuple:
-        Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
+        Option<::types_tuple::heaptuple::FormedTuple<'mcx>>,
     /// `bool table_filled`.
     pub table_filled: bool,
     /// `int num_hashes`.

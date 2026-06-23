@@ -15,14 +15,14 @@
 #![allow(non_upper_case_globals)]
 
 use mcx::{PgBox, PgVec};
-use types_core::primitive::{uint16, uint32, BlockNumber, OffsetNumber, Oid};
-use datum::datum::Datum;
+use ::types_core::primitive::{uint16, uint32, BlockNumber, OffsetNumber, Oid};
+use ::datum::datum::Datum;
 use ::nodes::execexpr::ExprState;
 use ::nodes::execnodes::Opaque;
 use ::nodes::nodes::NodeTag;
 use pathnodes::{PlannerInfo, RelOptInfo};
-use rel::Relation;
-use types_tableam::relscan::TableScanDesc;
+use ::rel::Relation;
+use ::types_tableam::relscan::TableScanDesc;
 
 pub use ::nodes::execnodes::ScanStateData;
 pub use ::nodes::nodesamplescan::{SampleScan, TableSampleClause};
@@ -210,7 +210,7 @@ impl<'mcx> ::nodes::samplescanstate_carrier::SampleScanStateTagged<'mcx>
 // node's `tsmroutine` callback (passing the node itself as the C `scanstate`).
 // ===========================================================================
 
-impl<'mcx> types_tableam::tableam::SampleScanDriver for SampleScanState<'mcx> {
+impl<'mcx> ::types_tableam::tableam::SampleScanDriver for SampleScanState<'mcx> {
     fn has_next_sample_block(&self) -> bool {
         self.tsmroutine
             .as_ref()

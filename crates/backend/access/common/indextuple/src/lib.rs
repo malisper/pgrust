@@ -66,7 +66,7 @@ extern crate alloc;
 use alloc::format;
 
 use heaptuple::{heap_compute_data_size, heap_fill_tuple};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
 use types_core::{Size, INDEX_MAX_KEYS};
 use types_error::{
@@ -75,8 +75,8 @@ use types_error::{
 // The one canonical value type (Datum-unification keystone). The crate's own
 // form/deform model is `Datum<'mcx>` (ByVal/ByRef); the former `Datum`
 // spelling was a transitional alias for exactly this enum.
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{
     bits8, CompactAttribute, IndexTupleData, ItemPointerData, TupleDescData,
     HEAP_HASEXTERNAL, HEAP_HASVARWIDTH, INDEX_NULL_MASK, INDEX_SIZE_MASK, INDEX_VAR_MASK,
     TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN,

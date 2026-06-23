@@ -35,7 +35,7 @@ use core::ffi::c_void;
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::{Oid, TransactionId};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::list::{List, ListCell};
 use ::nodes::nodes::{NodeTag, T_IntList, T_List, T_OidList, T_XidList};
 
@@ -108,12 +108,12 @@ pub fn list_length(l: Option<&List<'_>>) -> i32 {
 fn new_list<'mcx>(mcx: Mcx<'mcx>, r#type: NodeTag, min_size: i32) -> PgResult<PgBox<'mcx, List<'mcx>>> {
     debug_assert!(min_size > 0);
     let n = min_size as usize;
-    let mut elements = mcx::vec_with_capacity_in::<ListCell>(mcx, n)?;
+    let mut elements = ::mcx::vec_with_capacity_in::<ListCell>(mcx, n)?;
     for _ in 0..n {
         elements.push(ListCell { ptr_value: core::ptr::null_mut() });
     }
     let list = List { r#type, elements };
-    mcx::alloc_in(mcx, list)
+    ::mcx::alloc_in(mcx, list)
 }
 
 /// Reserve room for one more cell (C: `enlarge_list` is folded into PgVec's

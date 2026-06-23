@@ -29,11 +29,11 @@
 
 use std::cell::Cell;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{DEBUG1, WARNING};
 
-use types_core::primitive::{InvalidOid, Oid, OidIsValid, Size, TimestampTz, XLogRecPtr};
-use types_core::xact::InvalidXLogRecPtr;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid, Size, TimestampTz, XLogRecPtr};
+use ::types_core::xact::InvalidXLogRecPtr;
 // Datum-unification: this crate's OWN value construction is on the canonical
 // `types_tuple::Datum` (the `bgw_main_arg` writes use
 // `types_tuple::Datum::{from_i32,null}().as_usize()` to fill the raw-word
@@ -51,27 +51,27 @@ use types_core::xact::InvalidXLogRecPtr;
 // `backend-utils-fmgr-funcapi-seams` set-returning-function plumbing
 // (`materialized_srf_putvalues` / `cstring_get_text_datum` and this function's
 // fmgr return value) are all on the canonical `types_tuple::Datum` now.
-use types_storage::storage::{
+use ::types_storage::storage::{
     dsa_handle as DsaHandle, dshash_table_handle as DshashTableHandle, DsaArea, DshashKeyKind,
     DshashParameters, DshashTable, DSM_HANDLE_INVALID as DSA_HANDLE_INVALID,
     INVALID_DSA_POINTER as DSHASH_HANDLE_INVALID,
 };
-use types_storage::storage::LWTRANCHE_LAUNCHER_HASH;
+use ::types_storage::storage::LWTRANCHE_LAUNCHER_HASH;
 use types_error::{PgError, PgResult};
-use types_guc::PGC_SIGHUP;
+use ::types_guc::PGC_SIGHUP;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_pgstat::wait_event::{
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_BGWORKER_SHUTDOWN, WAIT_EVENT_BGWORKER_STARTUP, WAIT_EVENT_LOGICAL_LAUNCHER_MAIN,
 };
-use signal::SigHandler;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
-use types_storage::LWLockMode;
+use ::signal::SigHandler;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::types_storage::LWLockMode;
 
 use types_bgworker::{
     BackgroundWorker, BgWorkerStartTime, BgwHandleStatus, BGWORKER_BACKEND_DATABASE_CONNECTION,
     BGWORKER_SHMEM_ACCESS, BGW_NEVER_RESTART,
 };
-use replication_applyparallel::ParallelApplyWorkerInfo;
+use ::replication_applyparallel::ParallelApplyWorkerInfo;
 use replication_launcher::{
     LauncherLastStartTimesEntry, LogicalRepWorker, LogicalRepWorkerType, Subscription,
     DEFAULT_NAPTIME_PER_CYCLE, DSM_HANDLE_INVALID, SUBREL_STATE_UNKNOWN,
@@ -129,7 +129,7 @@ const SIZEOF_LOGICAL_REP_CTX_STRUCT: usize = 16;
 const SIZEOF_LOGICAL_REP_WORKER: usize = 128;
 
 /// `LWTRANCHE_LAUNCHER_DSA` — DSA tranche for the last-start-times area.
-const LWTRANCHE_LAUNCHER_DSA: i32 = types_storage::storage::LWTRANCHE_LAUNCHER_DSA;
+const LWTRANCHE_LAUNCHER_DSA: i32 = ::types_storage::storage::LWTRANCHE_LAUNCHER_DSA;
 
 /// `LogicalRepWorkerLock` — individual built-in LWLock #43 (lwlocklist.h).
 const LOGICAL_REP_WORKER_LOCK: usize = 43;
@@ -171,8 +171,8 @@ fn Min(a: i64, b: i64) -> i64 {
 const DT_NOBEGIN: TimestampTz = i64::MIN;
 
 #[inline]
-fn error_location() -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new(file!(), line!() as i32, "launcher")
+fn error_location() -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new(file!(), line!() as i32, "launcher")
 }
 
 // ===========================================================================
@@ -303,7 +303,7 @@ fn get_subscription_list(mcx: mcx::Mcx<'_>) -> PgResult<mcx::PgVec<'_, Subscript
 fn WaitForReplicationWorkerAttach(
     slot: i32,
     generation: u16,
-    handle: types_bgworker::BackgroundWorkerHandle,
+    handle: ::types_bgworker::BackgroundWorkerHandle,
 ) -> PgResult<bool> {
     let mut result = false;
     let mut dropped_latch = false;
@@ -466,7 +466,7 @@ pub fn logicalrep_worker_launch(
         return Err(PgError::error(
             "cannot start logical replication workers when \"max_active_replication_origins\" is 0",
         )
-        .with_sqlstate(types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED));
+        .with_sqlstate(::types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED));
     }
 
     // We need to do the modification of the shared memory under lock so that we
@@ -553,7 +553,7 @@ pub fn logicalrep_worker_launch(
         None => {
             worker_lock_release()?;
             ereport(WARNING)
-                .errcode(types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
+                .errcode(::types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
                 .errmsg("out of logical replication worker slots")
                 .errhint("You might need to increase \"max_logical_replication_workers\".")
                 .finish(error_location())?;
@@ -596,24 +596,24 @@ pub fn logicalrep_worker_launch(
     let mut bgw = BackgroundWorker::zeroed();
     bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
     bgw.bgw_start_time = BgWorkerStartTime::RecoveryFinished;
-    types_bgworker::snprintf_cstr(&mut bgw.bgw_library_name, "postgres");
+    ::types_bgworker::snprintf_cstr(&mut bgw.bgw_library_name, "postgres");
 
     match wtype {
         LogicalRepWorkerType::Apply => {
-            types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "ApplyWorkerMain");
-            types_bgworker::snprintf_cstr(
+            ::types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "ApplyWorkerMain");
+            ::types_bgworker::snprintf_cstr(
                 &mut bgw.bgw_name,
                 &format!("logical replication apply worker for subscription {subid}"),
             );
-            types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication apply worker");
+            ::types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication apply worker");
         }
         LogicalRepWorkerType::ParallelApply => {
-            types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "ParallelApplyWorkerMain");
-            types_bgworker::snprintf_cstr(
+            ::types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "ParallelApplyWorkerMain");
+            ::types_bgworker::snprintf_cstr(
                 &mut bgw.bgw_name,
                 &format!("logical replication parallel apply worker for subscription {subid}"),
             );
-            types_bgworker::snprintf_cstr(
+            ::types_bgworker::snprintf_cstr(
                 &mut bgw.bgw_type,
                 "logical replication parallel worker",
             );
@@ -621,14 +621,14 @@ pub fn logicalrep_worker_launch(
             bgw.bgw_extra[..4].copy_from_slice(&subworker_dsm.to_ne_bytes());
         }
         LogicalRepWorkerType::Tablesync => {
-            types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "TablesyncWorkerMain");
-            types_bgworker::snprintf_cstr(
+            ::types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "TablesyncWorkerMain");
+            ::types_bgworker::snprintf_cstr(
                 &mut bgw.bgw_name,
                 &format!(
                     "logical replication tablesync worker for subscription {subid} sync {relid}"
                 ),
             );
-            types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication tablesync worker");
+            ::types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication tablesync worker");
         }
         LogicalRepWorkerType::Unknown => {
             // Should never happen.
@@ -653,7 +653,7 @@ pub fn logicalrep_worker_launch(
             worker_lock_release()?;
 
             ereport(WARNING)
-                .errcode(types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
+                .errcode(::types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED)
                 .errmsg("out of background worker slots")
                 .errhint("You might need to increase \"max_worker_processes\".")
                 .finish(error_location())?;
@@ -866,7 +866,7 @@ pub fn logicalrep_worker_attach(slot: i32) -> PgResult<()> {
         return Err(PgError::error(format!(
             "logical replication worker slot {slot} is empty, cannot attach"
         ))
-        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
+        .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
     }
 
     if proc_attached {
@@ -874,7 +874,7 @@ pub fn logicalrep_worker_attach(slot: i32) -> PgResult<()> {
         return Err(PgError::error(format!(
             "logical replication worker slot {slot} is already used by another worker, cannot attach"
         ))
-        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
+        .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
     }
 
     // MyLogicalRepWorker = &LogicalRepCtx->workers[slot]; worker->proc = MyProc;
@@ -980,7 +980,7 @@ fn logicalrep_worker_onexit(_code: i32, _arg: types_tuple::Datum<'static>) -> Pg
     // manually release all locks before the worker exits. They are reacquired
     // once the worker is initialized.
     if !worker::initializing_apply_worker::call() {
-        lockmgr::lock_release_all::call(types_storage::lock::DEFAULT_LOCKMETHOD, true)?;
+        lockmgr::lock_release_all::call(::types_storage::lock::DEFAULT_LOCKMETHOD, true)?;
     }
 
     ApplyLauncherWakeup()
@@ -1049,10 +1049,10 @@ pub fn ApplyLauncherRegister() -> PgResult<()> {
     let mut bgw = BackgroundWorker::zeroed();
     bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
     bgw.bgw_start_time = BgWorkerStartTime::RecoveryFinished;
-    types_bgworker::snprintf_cstr(&mut bgw.bgw_library_name, "postgres");
-    types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "ApplyLauncherMain");
-    types_bgworker::snprintf_cstr(&mut bgw.bgw_name, "logical replication launcher");
-    types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication launcher");
+    ::types_bgworker::snprintf_cstr(&mut bgw.bgw_library_name, "postgres");
+    ::types_bgworker::snprintf_cstr(&mut bgw.bgw_function_name, "ApplyLauncherMain");
+    ::types_bgworker::snprintf_cstr(&mut bgw.bgw_name, "logical replication launcher");
+    ::types_bgworker::snprintf_cstr(&mut bgw.bgw_type, "logical replication launcher");
     bgw.bgw_restart_time = 5;
     bgw.bgw_notify_pid = 0;
     // (Datum) 0: store the null Datum's raw word into the `usize` ABI field.

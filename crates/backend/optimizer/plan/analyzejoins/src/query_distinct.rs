@@ -14,13 +14,13 @@
 //! `Node`s wrapping [`SortGroupClause`]; `groupingSets` items wrap
 //! [`GroupingSet`]; `setOperations` is a `Node` wrapping [`SetOperationStmt`].
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::rawnodes::{GroupingSet, SetOperationStmt, SortGroupClause, GROUPING_SET_EMPTY};
 use ::nodes::copy_query::Query;
 
-use vars::tlist::get_sortgroupclause_tle;
-use lsyscache::opfamily_operator::equality_ops_are_compatible;
+use ::vars::tlist::get_sortgroupclause_tle;
+use ::lsyscache::opfamily_operator::equality_ops_are_compatible;
 
 /// `OidIsValid(oid)` — a valid OID is nonzero (InvalidOid == 0).
 #[inline]

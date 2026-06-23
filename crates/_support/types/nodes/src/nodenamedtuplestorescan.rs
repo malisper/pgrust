@@ -9,8 +9,8 @@
 use core::ptr::NonNull;
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
-use types_tuple::heaptuple::TupleDesc;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::TupleDesc;
 
 use crate::execnodes::{PlanStateData, ScanStateData};
 use crate::funcapi::Tuplestorestate;

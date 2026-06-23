@@ -20,8 +20,8 @@
 //! | `WaitEventCustomShmemSize`/`Init`     | `backend-utils-activity-waitevent-seams`      |
 //! | `InjectionPointShmemSize`/`Init`      | `backend-storage-ipc-injection-point-seams`   |
 
-use types_core::Size;
-use types_error::PgResult;
+use ::types_core::Size;
+use ::types_error::PgResult;
 
 pub fn checkpointer_shmem_size() -> PgResult<Size> {
     checkpointer_seams::checkpointer_shmem_size::call()

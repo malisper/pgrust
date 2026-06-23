@@ -33,8 +33,8 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 /// The fixed columns + the named-parameter / defaults columns of an existing
 /// `pg_proc` row that the replace path reads (`Form_pg_proc` GETSTRUCT +

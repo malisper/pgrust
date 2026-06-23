@@ -37,9 +37,9 @@
 // The canonical unified value type (Datum-unification keystone) — what the
 // keystone-owned `ExprState.resvalue` / `ResultCell.value` carry, and what the
 // composite helpers operate on directly.
-use fmgr_seams::function_call_invoke_datum;
-use types_tuple::heaptuple::Datum;
-use types_error::PgResult;
+use ::fmgr_seams::function_call_invoke_datum;
+use ::types_tuple::heaptuple::Datum;
+use ::types_error::PgResult;
 use ::nodes::execexpr::{
     ExprEvalStepData, ExprState, MinMaxOp, ResultCell, ResultCellId, EEO_FLAG_NEW_IS_NULL,
     EEO_FLAG_OLD_IS_NULL, STATE_RESULT_CELL,
@@ -98,7 +98,7 @@ fn store_result<'mcx>(state: &mut ExprState<'mcx>, op: usize, value: Datum<'mcx>
 fn datum_get_heap_tuple_header<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     value: &Datum<'_>,
-) -> PgResult<types_tuple::heaptuple::FormedTuple<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::FormedTuple<'mcx>> {
     match value {
         Datum::Composite(t) => t.clone_in(mcx),
         Datum::ByRef(image) => {
@@ -110,12 +110,12 @@ fn datum_get_heap_tuple_header<'mcx>(
             let extended = bytes.first().is_some_and(|b| (b & 0x03) != 0x00);
             if extended {
                 let flat = detoast_seams::detoast_attr::call(mcx, bytes)?;
-                types_tuple::heaptuple::FormedTuple::from_datum_image(
+                ::types_tuple::heaptuple::FormedTuple::from_datum_image(
                     mcx,
                     flat.as_slice(),
                 )
             } else {
-                types_tuple::heaptuple::FormedTuple::from_datum_image(
+                ::types_tuple::heaptuple::FormedTuple::from_datum_image(
                     mcx, bytes,
                 )
             }
@@ -199,8 +199,8 @@ pub fn ExecEvalRowNullInt<'mcx>(
         .t_data
         .as_ref()
         .expect("ExecEvalRowNullInt: composite Datum has no header");
-    let tup_type = types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
-    let tup_typmod = types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+    let tup_type = ::types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+    let tup_typmod = ::types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
     let tup_desc = typcache_seams::lookup_rowtype_tupdesc::call(
         mcx, tup_type, tup_typmod,
     )?;
@@ -297,7 +297,7 @@ pub fn ExecEvalRow<'mcx>(
 
     // tuple = heap_form_tuple(tupdesc, values, nulls);
     let tuple = heaptuple::heap_form_tuple(mcx, &tupdesc, &values, &nulls)
-        .map_err(|e| types_error::PgError::error(format!("ExecEvalRow: {e:?}")))?;
+        .map_err(|e| ::types_error::PgError::error(format!("ExecEvalRow: {e:?}")))?;
 
     // *op->resvalue = HeapTupleGetDatum(tuple);  *op->resnull = false;
     //
@@ -310,7 +310,7 @@ pub fn ExecEvalRow<'mcx>(
         .tuple
         .t_data
         .as_ref()
-        .map(|h| types_tuple::heaptuple::HeapTupleHeaderHasExternal(h))
+        .map(|h| ::types_tuple::heaptuple::HeapTupleHeaderHasExternal(h))
         .unwrap_or(false);
     let datum = if has_external {
         let (flattened, _datum) =
@@ -498,8 +498,8 @@ pub fn ExecEvalFieldSelect<'mcx>(
         .t_data
         .as_ref()
         .expect("ExecEvalFieldSelect: composite Datum has no header");
-    let tup_type = types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
-    let tup_typmod = types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
+    let tup_type = ::types_tuple::heaptuple::HeapTupleHeaderGetTypeId(header);
+    let tup_typmod = ::types_tuple::heaptuple::HeapTupleHeaderGetTypMod(header);
 
     // tupDesc = get_cached_rowtype(tupType, tupTypmod, &op->d.fieldselect.rowcache, NULL);
     //
@@ -519,12 +519,12 @@ pub fn ExecEvalFieldSelect<'mcx>(
     // if (fieldnum <= 0)  elog(ERROR, "unsupported reference to system column %d ...");
     // if (fieldnum > tupDesc->natts)  elog(ERROR, "attribute number %d exceeds number of columns %d");
     if fieldnum <= 0 {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "unsupported reference to system column {fieldnum} in FieldSelect"
         )));
     }
     if fieldnum as i32 > tup_desc.natts {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "attribute number {fieldnum} exceeds number of columns {}",
             tup_desc.natts
         )));
@@ -542,7 +542,7 @@ pub fn ExecEvalFieldSelect<'mcx>(
     // if (op->d.fieldselect.resulttype != attr->atttypid)
     //     ereport(ERROR, "attribute %d has wrong type", ...);
     if resulttype != attr.atttypid {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "attribute {fieldnum} has wrong type"
         ))
         .with_detail(format!(
@@ -643,7 +643,7 @@ pub fn ExecEvalFieldStoreDeForm<'mcx>(
     // if (unlikely(tupDesc->natts > op->d.fieldstore.ncolumns))
     //     elog(ERROR, "too many columns in composite type %u", fstore->resulttype);
     if tup_desc.natts as usize > ncolumns {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "too many columns in composite type {resulttype}"
         )));
     }
@@ -723,7 +723,7 @@ pub fn ExecEvalFieldStoreForm<'mcx>(
 
     // tuple = heap_form_tuple(tupDesc, values, nulls);
     let tuple = heaptuple::heap_form_tuple(mcx, &tup_desc, &values, &nulls)
-        .map_err(|e| types_error::PgError::error(format!("ExecEvalFieldStoreForm: {e:?}")))?;
+        .map_err(|e| ::types_error::PgError::error(format!("ExecEvalFieldStoreForm: {e:?}")))?;
 
     // *op->resvalue = HeapTupleGetDatum(tuple); *op->resnull = false;
     store_result(state, op, Datum::Composite(tuple), false);
@@ -924,7 +924,7 @@ pub fn ExecEvalWholeRowVar<'mcx>(
         let mut new_slow = false;
 
         let output_tupdesc;
-        if vartype != types_tuple::heaptuple::RECORDOID {
+        if vartype != ::types_tuple::heaptuple::RECORDOID {
             // Named composite: check the slot's actual rowtype is compatible.
             //
             // var_tupdesc = lookup_rowtype_tupdesc_domain(variable->vartype, -1, false);
@@ -941,10 +941,10 @@ pub fn ExecEvalWholeRowVar<'mcx>(
 
             // if (var_tupdesc->natts != slot_tupdesc->natts) ereport(...);
             if var_tupdesc.natts != slot_tupdesc.natts {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "table row type and query-specified row type do not match",
                 )
-                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
                 .with_detail(format!(
                     "Table row contains {} attributes, but query expects {}.",
                     slot_tupdesc.natts, var_tupdesc.natts
@@ -968,10 +968,10 @@ pub fn ExecEvalWholeRowVar<'mcx>(
                         format_type_seams::format_type_be_owned::call(
                             vattr.atttypid,
                         )?;
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "table row type and query-specified row type do not match",
                     )
-                    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
                     .with_detail(format!(
                         "Table has type {} at ordinal position {}, but query expects {}.",
                         sname,
@@ -998,7 +998,7 @@ pub fn ExecEvalWholeRowVar<'mcx>(
             let mut out = slot_tupdesc.clone_in(mcx)?;
 
             // We're supposed to return RECORD, so reset to that.
-            out.tdtypeid = types_tuple::heaptuple::RECORDOID;
+            out.tdtypeid = ::types_tuple::heaptuple::RECORDOID;
             out.tdtypmod = -1;
 
             // Try to find the source RTE and adopt its column aliases (a String
@@ -1089,10 +1089,10 @@ pub fn ExecEvalWholeRowVar<'mcx>(
                 continue; // null is always okay
             }
             if vattr.attlen != sattr.attlen || vattr.attalignby != sattr.attalignby {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "table row type and query-specified row type do not match",
                 )
-                .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
                 .with_detail(format!(
                     "Physical storage mismatch on dropped attribute at ordinal position {}.",
                     i + 1
@@ -1121,8 +1121,8 @@ pub fn ExecEvalWholeRowVar<'mcx>(
             .t_data
             .as_mut()
             .expect("ExecEvalWholeRowVar: built tuple has no header");
-        types_tuple::heaptuple::HeapTupleHeaderSetTypeId(header, var_tupdesc.tdtypeid);
-        types_tuple::heaptuple::HeapTupleHeaderSetTypMod(header, var_tupdesc.tdtypmod);
+        ::types_tuple::heaptuple::HeapTupleHeaderSetTypeId(header, var_tupdesc.tdtypeid);
+        ::types_tuple::heaptuple::HeapTupleHeaderSetTypMod(header, var_tupdesc.tdtypmod);
     }
 
     // *op->resvalue = PointerGetDatum(dtuple); *op->resnull = false;

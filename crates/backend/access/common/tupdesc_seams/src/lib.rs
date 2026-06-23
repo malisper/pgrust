@@ -7,10 +7,10 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgBox};
-use types_core::primitive::AttrNumber;
-use types_core::Oid;
-use types_error::PgResult;
-use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData};
+use ::types_core::primitive::AttrNumber;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData};
 
 seam_core::seam!(
     /// `CreateTupleDesc(natts, attrs)` (tupdesc.c): allocate a new `TupleDesc`

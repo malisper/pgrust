@@ -3,7 +3,7 @@
 //! This is the non-Windows (unix/macOS) implementation. The Windows path uses
 //! `ioctlsocket(FIONBIO)`; on unix we use `fcntl(F_GETFL)` / `fcntl(F_SETFL)`.
 
-use types_core::pgsocket;
+use ::types_core::pgsocket;
 
 /// Put socket into nonblock mode.
 ///

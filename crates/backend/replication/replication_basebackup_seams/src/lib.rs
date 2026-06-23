@@ -8,8 +8,8 @@
 
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
-use replication::replnodes::BaseBackupCmd;
+use ::types_error::PgResult;
+use ::replication::replnodes::BaseBackupCmd;
 
 seam_core::seam!(
     /// `SendBaseBackup(BaseBackupCmd *cmd, IncrementalBackupInfo *ib)`

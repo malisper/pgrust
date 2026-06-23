@@ -18,11 +18,11 @@
 //! read through the bufmgr seams.
 
 use types_error::{PgError, PgResult};
-use types_storage::buf::{
+use ::types_storage::buf::{
     BufferAccessStrategyData, BufferAccessStrategyType, IOContext, Victim,
 };
 use types_core::{Buffer, BLCKSZ};
-use types_storage::InvalidBuffer;
+use ::types_storage::InvalidBuffer;
 
 use crate::{buf_state_get_refcount, buf_state_get_usagecount};
 
@@ -276,7 +276,7 @@ impl BufferAccessStrategyRing for BufferAccessStrategyData {
 /// freed when the last reference is dropped, so this consumes the handle (the
 /// "don't crash on a default (NULL) strategy" guard is the `Option` being
 /// `None`).
-pub fn FreeAccessStrategy(strategy: types_storage::buf::BufferAccessStrategy) {
+pub fn FreeAccessStrategy(strategy: ::types_storage::buf::BufferAccessStrategy) {
     drop(strategy);
 }
 
@@ -604,7 +604,7 @@ mod tests {
         .unwrap();
         // Wrap the ring in the by-pointer handle (`Rc<RefCell<_>>`), as
         // `GetAccessStrategy` does, then free it.
-        let handle: types_storage::buf::BufferAccessStrategy =
+        let handle: ::types_storage::buf::BufferAccessStrategy =
             Some(alloc::rc::Rc::new(core::cell::RefCell::new(s)));
         FreeAccessStrategy(handle);
     }

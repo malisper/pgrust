@@ -45,7 +45,7 @@ use alloc::format;
 use alloc::string::String;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{CmdType, Node};
@@ -456,11 +456,11 @@ fn flatten_group_exprs_targetlist<'mcx>(
         };
         if let Some(e) = expr_opt {
             let node = Node::mk_expr(mcx, e)?;
-            let boxed = mcx::alloc_in(mcx, node)?;
+            let boxed = ::mcx::alloc_in(mcx, node)?;
             let flattened =
                 ruleutils_seams::flatten_group_exprs::call(mcx, &snapshot, &boxed)?;
             if let Some(ne) = (*flattened).clone_in(mcx)?.into_expr() {
-                query.targetList[t].expr = Some(mcx::alloc_in(mcx, ne)?);
+                query.targetList[t].expr = Some(::mcx::alloc_in(mcx, ne)?);
             }
         }
     }
@@ -472,11 +472,11 @@ fn flatten_group_exprs_targetlist<'mcx>(
     };
     if let Some(e) = having_opt {
         let node = Node::mk_expr(mcx, e)?;
-        let boxed = mcx::alloc_in(mcx, node)?;
+        let boxed = ::mcx::alloc_in(mcx, node)?;
         let flattened =
             ruleutils_seams::flatten_group_exprs::call(mcx, &snapshot, &boxed)?;
         query.havingQual = match (*flattened).clone_in(mcx)?.into_expr() {
-            Some(ne) => Some(mcx::alloc_in(mcx, ne)?),
+            Some(ne) => Some(::mcx::alloc_in(mcx, ne)?),
             None => None,
         };
     }
@@ -1712,7 +1712,7 @@ fn get_update_query_targetlist_def<'mcx>(
                 if let Some(e @ Expr::SubLink(sl)) = tle.expr.as_deref() {
                     if sl.subLinkType == ::nodes::primnodes::SubLinkType::MultiExpr {
                         ma_sublinks.try_reserve(1).map_err(|_| mcx.oom(0))?;
-                        ma_sublinks.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
+                        ma_sublinks.push(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
                     }
                 }
             }
@@ -1736,7 +1736,7 @@ fn get_update_query_targetlist_def<'mcx>(
         if next_ma < ma_sublinks.len() && !cur_ma_active {
             // Dig down past FieldStore/SubscriptingRef/CoerceToDomain.
             if expr_is_multiexpr_param(tle.expr.as_deref()) {
-                cur_ma_sublink = Some(mcx::alloc_in(mcx, ma_sublinks[next_ma].clone_in(mcx)?)?);
+                cur_ma_sublink = Some(::mcx::alloc_in(mcx, ma_sublinks[next_ma].clone_in(mcx)?)?);
                 next_ma += 1;
                 cur_ma_active = true;
                 remaining_ma = multiexpr_remaining(cur_ma_sublink.as_deref())?;
@@ -2211,12 +2211,12 @@ fn get_function_rte<'mcx>(
                 if let Some(f) = rtfunc.funcexpr.as_deref().and_then(|n| n.as_funcexpr()) {
                     for a in f.args.iter() {
                         allargs.try_reserve(1).map_err(|_| mcx.oom(0))?;
-                        allargs.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, a.clone_in(mcx)?)?)?);
+                        allargs.push(::mcx::alloc_in(mcx, Node::mk_expr(mcx, a.clone_in(mcx)?)?)?);
                     }
                 }
             }
             str_(context, "UNNEST(")?;
-            let list = mcx::alloc_in(mcx, Node::mk_list(mcx, allargs)?)?;
+            let list = ::mcx::alloc_in(mcx, Node::mk_list(mcx, allargs)?)?;
             get_rule_expr(&list, context, true)?;
             ch_(context, b')')?;
         } else {
@@ -2507,7 +2507,7 @@ pub(crate) fn process_indirection<'mcx>(
         }
     }
 
-    Ok(mcx::alloc_in(mcx, cur)?)
+    Ok(::mcx::alloc_in(mcx, cur)?)
 }
 
 /* -------------------------------------------------------------------------- *
@@ -2627,7 +2627,7 @@ fn clone_node_list_from_tles<'mcx>(
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(tl.len()).map_err(|_| mcx.oom(0))?;
     for t in tl.iter() {
-        out.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, t.clone_in(mcx)?)?)?);
+        out.push(::mcx::alloc_in(mcx, Node::mk_target_entry(mcx, t.clone_in(mcx)?)?)?);
     }
     Ok(out)
 }
@@ -2639,7 +2639,7 @@ fn node_list<'mcx>(
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(items.len()).map_err(|_| mcx.oom(0))?;
     for n in items.iter() {
-        out.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+        out.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
     Ok(Node::mk_list(mcx, out)?)
 }
@@ -2649,7 +2649,7 @@ fn clone_opt_tupdesc<'mcx>(
     rd: Option<&types_tuple::heaptuple::TupleDescData<'mcx>>,
 ) -> PgResult<Option<PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>> {
     match rd {
-        Some(d) => Ok(Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
+        Some(d) => Ok(Some(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -2791,7 +2791,7 @@ fn multiexpr_remaining(sublink_node: Option<&Node<'_>>) -> PgResult<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     /// A bare deparse context (no namespaces) with the given pretty flags.
     fn ctx<'mcx>(mcx: Mcx<'mcx>, pretty_flags: i32, wrap: i32) -> DeparseContext<'mcx> {

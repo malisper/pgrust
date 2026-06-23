@@ -26,11 +26,11 @@
 
 use alloc::string::{String, ToString};
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -69,7 +69,7 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
     // external sentinel 0x01; otherwise it is a 4-byte (VARHDRSZ) header.
     let off = match image.first() {
         Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => 1,
-        _ => datum::varlena::VARHDRSZ,
+        _ => ::datum::varlena::VARHDRSZ,
     };
     let bytes = &image[off..];
     core::str::from_utf8(bytes).expect("amutils fn: text arg not valid UTF-8")
@@ -98,9 +98,9 @@ fn ret_text_opt(fcinfo: &mut FunctionCallInfoBaseData, v: Option<String>) -> Dat
         Some(s) => {
             // CStringGetTextDatum: prepend the 4-byte varlena header.
             let payload = s.into_bytes();
-            let mut img = Vec::with_capacity(datum::varlena::VARHDRSZ + payload.len());
-            img.extend_from_slice(&datum::varlena::set_varsize_4b(
-                datum::varlena::VARHDRSZ + payload.len(),
+            let mut img = Vec::with_capacity(::datum::varlena::VARHDRSZ + payload.len());
+            img.extend_from_slice(&::datum::varlena::set_varsize_4b(
+                ::datum::varlena::VARHDRSZ + payload.len(),
             ));
             img.extend_from_slice(&payload);
             fcinfo.set_ref_result(RefPayload::Varlena(img));

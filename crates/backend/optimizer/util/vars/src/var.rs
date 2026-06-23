@@ -10,7 +10,7 @@
 //! [`PlannerInfo`] node arena (`node_arena: Vec<Expr>`); a seam takes a
 //! [`NodeId`] handle, which this crate resolves to `&Expr` via
 //! [`PlannerInfo::node`], wraps as `Node::Expr(expr.clone())`, and walks with
-//! the central [`nodes_core::node_walker`] engine
+//! the central [`::nodes_core::node_walker`] engine
 //! (`expression_tree_walker` / `query_or_expression_tree_walker` /
 //! `query_tree_walker`), whose `bool (*)(Node *, void *)` walker is a Rust
 //! `&mut dyn FnMut(&Node) -> bool` closure. C's `IsA(node, X)` dispatch is a
@@ -33,10 +33,10 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use nodes_core::node_walker::{
+use ::nodes_core::node_walker::{
     expression_tree_walker, node_expr_wrapper, query_or_expression_tree_walker, query_tree_walker,
 };
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::Expr;
 use pathnodes::{Bitmapset, NodeId, PlannerInfo, Relids};
@@ -295,7 +295,7 @@ fn pull_varnos_walker_expr(
                 // Ideally, the PHV's contribution is its ph_eval_at set; but
                 // this code can run before that's computed. If we cannot find a
                 // PlaceHolderInfo, fall back to the syntactic level (phv.phrels).
-                let mut phinfo: Option<&pathnodes::PlaceHolderInfo> = None;
+                let mut phinfo: Option<&::pathnodes::PlaceHolderInfo> = None;
                 if phv.phlevelsup == 0 && (phv.phid as i32) < root.placeholder_array_size {
                     if let Some(Some(phid)) = root.placeholder_array.get(phv.phid as usize) {
                         phinfo = Some(root.phinfo(*phid));
@@ -414,7 +414,7 @@ pub fn pull_vars_of_level<'mcx>(
         sublevels_up: levelsup,
         mcx,
     };
-    let mut err: Option<types_error::PgError> = None;
+    let mut err: Option<::types_error::PgError> = None;
     query_or_expression_tree_walker(
         node,
         &mut |n: &Node| pull_vars_walker(n, &mut context, &mut err),
@@ -443,7 +443,7 @@ pub fn pull_vars_of_level_query<'mcx>(
         sublevels_up: levelsup,
         mcx,
     };
-    let mut err: Option<types_error::PgError> = None;
+    let mut err: Option<::types_error::PgError> = None;
     query_tree_walker(
         query,
         &mut |n: &Node| pull_vars_walker(n, &mut context, &mut err),
@@ -458,7 +458,7 @@ pub fn pull_vars_of_level_query<'mcx>(
 /// `pull_vars_walker` (var.c:358). `err` carries out a deep-copy failure from
 /// the `PlaceHolderVar::clone_in` arm (the walker signature is `-> bool`, so a
 /// fallible clone reports through this out-param and aborts the walk).
-fn pull_vars_walker(node: &Node, context: &mut PullVarsContext, err: &mut Option<types_error::PgError>) -> bool {
+fn pull_vars_walker(node: &Node, context: &mut PullVarsContext, err: &mut Option<::types_error::PgError>) -> bool {
     if err.is_some() {
         return true; // abort: a prior deep-copy failed
     }
@@ -697,7 +697,7 @@ struct PullVarClauseContext<'mcx> {
     /// the owned model needs a copy.
     mcx: mcx::Mcx<'mcx>,
     /// First clone error encountered, propagated out by `pull_var_clause`.
-    err: Option<types_error::PgError>,
+    err: Option<::types_error::PgError>,
 }
 
 /// `pull_var_clause(node, flags)` (var.c:652). Recursively pull all Var nodes
@@ -948,7 +948,7 @@ fn seam_pull_varattnos<'mcx>(
                 if bit < 0 {
                     break;
                 }
-                acc = Some(nodes_core::bitmapset::bms_add_member(mcx, acc, bit)?);
+                acc = Some(::nodes_core::bitmapset::bms_add_member(mcx, acc, bit)?);
             }
             Ok(acc)
         }
@@ -989,7 +989,7 @@ fn relids_to_mcx_bitmapset<'mcx>(
                 if bit < 0 {
                     break;
                 }
-                acc = Some(nodes_core::bitmapset::bms_add_member(mcx, acc, bit)?);
+                acc = Some(::nodes_core::bitmapset::bms_add_member(mcx, acc, bit)?);
             }
             Ok(acc)
         }

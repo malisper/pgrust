@@ -4,8 +4,8 @@
 //!
 //! The scan-key vocabulary the cache scans use lives in the access layer:
 //! the `ScanKeyData` carrier and `BTEqualStrategyNumber` in
-//! `types_scan::scankey`, the comparison-proc OIDs (`F_OIDEQ`) in
-//! `types_core::fmgr`, and the `ScanKeyInit` initializer in
+//! `::types_scan::scankey`, the comparison-proc OIDs (`F_OIDEQ`) in
+//! `::types_core::fmgr`, and the `ScanKeyInit` initializer in
 //! `backend-access-common-scankey`. The former value-form `ScanKeyInit`
 //! record here is gone; `F_OIDEQ` / `BTEqualStrategyNumber` are re-exported
 //! from their canonical homes so existing `cache::{F_OIDEQ,
@@ -28,5 +28,5 @@ pub use inval::*;
 pub use syscache::*;
 pub use typcache::TypeCacheEntry;
 
-pub use types_core::fmgr::F_OIDEQ;
-pub use types_scan::scankey::BTEqualStrategyNumber;
+pub use ::types_core::fmgr::F_OIDEQ;
+pub use ::types_scan::scankey::BTEqualStrategyNumber;

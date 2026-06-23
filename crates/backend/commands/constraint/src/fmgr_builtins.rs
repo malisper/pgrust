@@ -18,10 +18,10 @@
 //! transcribed from `pg_proc.dat` (`pronargs 0`, strict by default, not retset),
 //! matching the `fmgr_builtins[]` canonical row.
 
-use datum::Datum;
-use types_error::PgResult;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_ri_triggers::TriggerDataRef;
+use ::types_ri_triggers::TriggerDataRef;
 
 use trigger_seams as trigger;
 

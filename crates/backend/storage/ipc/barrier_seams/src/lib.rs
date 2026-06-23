@@ -2,7 +2,7 @@
 //! (`storage/ipc/barrier.c`): the dynamic-party phased barrier protocol used to
 //! coordinate parallel-query backends.
 //!
-//! The [`Barrier`](condvar::Barrier) struct itself is the shared-memory
+//! The [`Barrier`](::condvar::Barrier) struct itself is the shared-memory
 //! data shape from `types-condvar`; these functions are its attach/arrive/wait
 //! protocol. The caller resolves the barrier out of its DSA/DSM-resident parent
 //! (e.g. `ParallelHashJoinState::build_barrier`) and passes a borrow. The owning
@@ -14,8 +14,8 @@
 
 #![allow(non_snake_case)]
 
-use condvar::Barrier;
-use types_core::uint32;
+use ::condvar::Barrier;
+use ::types_core::uint32;
 
 seam_core::seam!(
     /// `BarrierInit(barrier, participants)` (barrier.c): initialize a barrier

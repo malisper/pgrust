@@ -28,16 +28,16 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{Oid, OidIsValid};
 use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_error::{PgResult, ERROR};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_tuple::heaptuple::Datum;
 
 use ::funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
-use ts_cache::lookup_ts_parser_cache;
+use ::ts_cache::lookup_ts_parser_cache;
 
 use crate::register_srf;
 

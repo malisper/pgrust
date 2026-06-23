@@ -7,9 +7,9 @@
 //! Each defaults to a loud panic until the underlying substrate lands.
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
-use adt_misc::CatalogForeignKeyRow;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::adt_misc::CatalogForeignKeyRow;
 
 seam_core::seam!(
     /// `pg_tablespace_databases(tablespaceOid)` (misc.c:223): the OIDs of the

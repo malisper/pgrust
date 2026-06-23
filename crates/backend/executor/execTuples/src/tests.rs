@@ -15,8 +15,8 @@ use mcx::{alloc_in, slice_in, Mcx, MemoryContext, PgVec};
 use ::nodes::tuptable::SlotData;
 use ::nodes::TupleSlotKind;
 // The canonical value enum; `Datum` is its transitional alias.
-use types_tuple::heaptuple::{Datum};
-use types_tuple::heaptuple::{CompactAttribute, TupleDesc, TupleDescData};
+use ::types_tuple::heaptuple::{Datum};
+use ::types_tuple::heaptuple::{CompactAttribute, TupleDesc, TupleDescData};
 
 use crate::slot_payload_model::MakeTupleTableSlot;
 use crate::slot_store_fetch::{

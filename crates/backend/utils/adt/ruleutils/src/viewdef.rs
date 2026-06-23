@@ -31,10 +31,10 @@
 use alloc::format;
 use alloc::vec::Vec;
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::{ntag, CmdType, Node};
-use types_storage::lock::AccessShareLock;
+use ::types_storage::lock::AccessShareLock;
 
 use crate::{PRETTYFLAG_INDENT, PRETTYFLAG_SCHEMA, WRAP_COLUMN_DEFAULT};
 
@@ -216,7 +216,7 @@ fn make_ruledef<'mcx>(
                 "rule \"{}\" has unsupported event type {}",
                 ruletup.rulename, other as i32
             ))
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
         }
     }
 
@@ -404,7 +404,7 @@ fn clone_result_desc<'mcx>(
 ) -> PgResult<Option<PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>> {
     match desc {
         None => Ok(None),
-        Some(d) => Ok(Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
+        Some(d) => Ok(Some(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
     }
 }
 

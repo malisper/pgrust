@@ -10,7 +10,7 @@
 //! `GistInetKey` index-key representation is owned by this file, so it is a real
 //! Rust struct; the low-level bit helpers (`bitncmp`, `bitncommon`) reuse the
 //! ported implementations in [`adt_network`], and the `inet`
-//! payload is [`types_network::inet_struct`].
+//! payload is [`::types_network::inet_struct`].
 //!
 //! The fmgr `Datum`/varlena packing of `GistInetKey`/`inet` and the
 //! `GIST_SPLITVEC` offset arrays are surfaced as the typed inet GiST
@@ -20,7 +20,7 @@
 //! support-proc OIDs to these seams.
 
 use adt_network::{bitncmp, bitncommon};
-use types_core::primitive::{uint16, OffsetNumber};
+use ::types_core::primitive::{uint16, OffsetNumber};
 use types_error::{PgError, PgResult};
 use types_network::{inet_struct, GistInetKey, GistInetSplitVec, PGSQL_AF_INET6};
 
@@ -846,7 +846,7 @@ pub fn init_seams() {
 /// the dispatch seam to use instead.
 fn fc_inet_gist_support_via_dispatch(
     fcinfo: &mut fmgr::FunctionCallInfoBaseData,
-) -> types_error::PgResult<datum::Datum> {
+) -> ::types_error::PgResult<datum::Datum> {
     let foid = fcinfo.flinfo.as_ref().map(|fi| fi.fn_oid).unwrap_or(0);
     Err(PgError::error(format!(
         "inet GiST support function (OID {foid}) must be invoked through the \
@@ -896,7 +896,7 @@ pub fn register_inet_gist_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_network::PGSQL_AF_INET;
+    use ::types_network::PGSQL_AF_INET;
 
     /// Build a v4 `inet_struct` from `a.b.c.d/bits`.
     fn v4_inet(a: u8, b: u8, c: u8, d: u8, bits: u8) -> inet_struct {

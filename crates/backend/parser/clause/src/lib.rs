@@ -62,8 +62,8 @@ use types_error::{
     ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_COLUMNS, ERRCODE_WINDOWING_ERROR,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use utils_error::ereport;
-use types_tuple::heaptuple::{INT8OID, TEXTOID, UNKNOWNOID};
+use ::utils_error::ereport;
+use ::types_tuple::heaptuple::{INT8OID, TEXTOID, UNKNOWNOID};
 
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::parsestmt::{ParseExprKind, ParseState};
@@ -76,13 +76,13 @@ use ::nodes::rawnodes::{
 };
 use ::nodes::value::Integer;
 
-use parsenodes::CoercionContext;
+use ::parsenodes::CoercionContext;
 
-use nodes_core::makefuncs::make_grouping_set;
-use nodes_core::nodefuncs::{expr_location, expr_type, strip_implicit_coercions};
+use ::nodes_core::makefuncs::make_grouping_set;
+use ::nodes_core::nodefuncs::{expr_location, expr_type, strip_implicit_coercions};
 
-use vars::var::{contain_vars_of_level, locate_var_of_level};
-use parse_expr::transformExpr;
+use ::vars::var::{contain_vars_of_level, locate_var_of_level};
+use ::parse_expr::transformExpr;
 use parse_oper::{compatible_oper_opid, get_sort_group_operators};
 
 use equalfuncs_seams as equalfuncs;
@@ -150,7 +150,7 @@ fn with_errposition_callback<T>(
 /// `Node *` at the var/agg/windowfunc walk sites. In the split model that is an
 /// owned [`Expr`] wrapped as [`Node::Expr`]. An absent expr is an internal error
 /// (the C code always has a non-NULL `tle->expr` at these call sites).
-fn tle_expr_node<'mcx>(mcx: mcx::Mcx<'mcx>, tle: &TargetEntry<'mcx>) -> PgResult<Node<'mcx>> {
+fn tle_expr_node<'mcx>(mcx: ::mcx::Mcx<'mcx>, tle: &TargetEntry<'mcx>) -> PgResult<Node<'mcx>> {
     // Deep-copy via `clone_in` (C copyObject shape), never the panicking derived
     // `.clone()`: the expr can embed a SubLink whose owned subselect `Query` must
     // go through the analyzed-tree clone path.
@@ -323,7 +323,7 @@ fn checkTargetlistEntrySQL92<'mcx>(
 /// `ParseExprKindName(exprKind)` — the SQL construct name for error text.
 /// Delegated to the parse_expr.c port (the canonical owner of the table).
 fn parse_expr_kind_name(exprKind: ParseExprKind) -> &'static str {
-    parse_expr::ParseExprKindName(exprKind)
+    ::parse_expr::ParseExprKindName(exprKind)
 }
 
 // ===========================================================================
@@ -1394,7 +1394,7 @@ fn leftmost_loc(loc1: i32, loc2: i32) -> i32 {
 /// `exprLocation((Node *) node)` (nodeFuncs.c) over a raw-grammar [`Node`].
 ///
 /// The repo splits `exprLocation` so that
-/// [`nodes_core::nodefuncs::expr_location`] only handles the typed
+/// [`::nodes_core::nodefuncs::expr_location`] only handles the typed
 /// [`Expr`] arms; the GROUP BY / DISTINCT ON items reaching the clause core are
 /// still raw grammar nodes, so the raw-`Node` arms of the C `exprLocation`
 /// switch are ported here directly (delegating to `expr_location` for an already
@@ -1463,7 +1463,7 @@ fn list_exprLocation(list: &[NodePtr<'_>]) -> PgResult<i32> {
 
 /// Convert a raw `List *opname` (a list of `String` value nodes) into the
 /// `Vec<String>` `compatible_oper_opid` expects.
-fn opname_strings(name: &mcx::PgVec<'_, NodePtr<'_>>) -> Vec<String> {
+fn opname_strings(name: &::mcx::PgVec<'_, NodePtr<'_>>) -> Vec<String> {
     let mut out = Vec::with_capacity(name.len());
     for n in name.iter() {
         if let Some(s) = str_val(n) {
@@ -1490,8 +1490,8 @@ fn get_sortgroupclause_tle_idx(
 fn refs_to_int_pgvec<'mcx>(
     mcx: Mcx<'mcx>,
     refs: &[Index],
-) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, refs.len())?;
+) -> PgResult<::mcx::PgVec<'mcx, NodePtr<'mcx>>> {
+    let mut v = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, refs.len())?;
     for &r in refs.iter() {
         let cell = alloc_in(mcx, Node::mk_integer(mcx, Integer { ival: r as i32 })?)?;
         v.try_reserve(1).map_err(|_| mcx.oom(0))?;
@@ -1504,8 +1504,8 @@ fn refs_to_int_pgvec<'mcx>(
 fn nodes_into_pgvec<'mcx>(
     mcx: Mcx<'mcx>,
     nodes: Vec<NodePtr<'mcx>>,
-) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, nodes.len())?;
+) -> PgResult<::mcx::PgVec<'mcx, NodePtr<'mcx>>> {
+    let mut v = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, nodes.len())?;
     for n in nodes.into_iter() {
         v.try_reserve(1).map_err(|_| mcx.oom(0))?;
         v.push(n);
@@ -1514,8 +1514,8 @@ fn nodes_into_pgvec<'mcx>(
 }
 
 /// An empty `PgVec<NodePtr>` (the C `NIL`).
-fn empty_pgvec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>> {
-    mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 0)
+fn empty_pgvec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::mcx::PgVec<'mcx, NodePtr<'mcx>>> {
+    ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 0)
 }
 
 /// This crate owns no inward seam: every `parse_clause.c` function in the F1

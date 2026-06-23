@@ -3,16 +3,16 @@
 
 #![allow(non_snake_case)]
 
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_IN_USE,
     ERROR,
 };
-use rel::Relation;
-use types_tuple::access::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
+use ::rel::Relation;
+use ::types_tuple::access::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
 
 use tablecmds_seams as seam;
 
@@ -24,7 +24,7 @@ use crate::helpers::{here, GLOBALTABLESPACE_OID};
 /// RELPERSISTENCE_TEMP && !rel->rd_islocaltemp` — a temp table belonging to some
 /// *other* session.
 pub fn relation_is_other_temp(rel: &Relation<'_>) -> PgResult<bool> {
-    Ok(rel.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_TEMP
+    Ok(rel.rd_rel.relpersistence == ::types_tuple::access::RELPERSISTENCE_TEMP
         && !relcache_seams::rd_islocaltemp::call(rel)?)
 }
 
@@ -102,7 +102,7 @@ pub fn check_relation_tablespace_move<'mcx>(
     let old_tablespace_id = rel.rd_rel.reltablespace;
     if new_tablespace_id == old_tablespace_id
         || (new_tablespace_id == tablespace_globals_seams::MyDatabaseTableSpace::call()?
-            && old_tablespace_id == types_core::primitive::InvalidOid)
+            && old_tablespace_id == ::types_core::primitive::InvalidOid)
     {
         return Ok(false);
     }
@@ -187,20 +187,20 @@ pub fn get_pg_class_drop_info(
     let relpersistence = sc::pg_class_extra::call(relid)?
         .map(|e| e.relpersistence)
         .ok_or_else(|| {
-            types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
+            ::types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
         })?;
     let relispartition = sc::rel_relispartition::call(relid)?.ok_or_else(|| {
-        types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
+        ::types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
     })?;
     let relnamespace = sc::rel_namespace::call(relid)?.ok_or_else(|| {
-        types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
+        ::types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
     })?;
 
-    let scratch = mcx::MemoryContext::new("get_pg_class_drop_info relname");
+    let scratch = ::mcx::MemoryContext::new("get_pg_class_drop_info relname");
     let relname = sc::rel_name::call(scratch.mcx(), relid)?
         .map(|s| s.as_str().to_string())
         .ok_or_else(|| {
-            types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
+            ::types_error::PgError::error("get_pg_class_drop_info: pg_class tuple vanished mid-read")
         })?;
 
     Ok(Some(seam::PgClassDropInfo {

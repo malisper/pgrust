@@ -412,7 +412,7 @@ pub fn restore_guc_state(
 /// and storage write, mirroring the per-type reset already used by
 /// `reset_all_options`.
 fn reset_to_default(var: &mut GucVariable) {
-    use types_core::BOOTSTRAP_SUPERUSERID;
+    use ::types_core::BOOTSTRAP_SUPERUSERID;
 
     match var {
         GucVariable::Bool(c) => {

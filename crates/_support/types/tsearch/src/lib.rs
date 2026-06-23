@@ -29,7 +29,7 @@ pub mod backend_access_gin_ginlogic;
 pub mod tsgistidx;
 
 use mcx::{PgString, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// `TSL_ADDPOS` (`ts_public.h`).
 pub const TSL_ADDPOS: u16 = 0x01;

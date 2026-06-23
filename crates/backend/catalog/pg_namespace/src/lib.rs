@@ -16,29 +16,29 @@
 //! (`backend-catalog-pg-shdepend`), `recordDependencyOnCurrentExtension`
 //! (`backend-catalog-pg-depend`), and the `InvokeObjectPostCreateHook` hook
 //! (`backend-catalog-objectaccess`). The relation is opened directly through
-//! `backend-access-table-table::table_open`, which returns the owned
+//! `backend-access-table-::table::table_open`, which returns the owned
 //! `Relation` handle.
 //!
 //! The default ACL (`Acl *` = `ArrayType`) crosses opaquely from its producer
 //! (`get_user_default_acl`) to its consumers (the row-form value layer and
 //! `recordDependencyOnNewAcl`); `None` is the C `nspacl == NULL`.
 
-use utils_error::ereport;
-use mcx::MemoryContext;
-use types_catalog::catalog::NAMESPACE_RELATION_ID;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::utils_error::ereport;
+use ::mcx::MemoryContext;
+use ::types_catalog::catalog::NAMESPACE_RELATION_ID;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_DUPLICATE_SCHEMA, ERROR};
 use ::nodes::parsenodes::ObjectType;
-use types_storage::lock::RowExclusiveLock;
+use ::types_storage::lock::RowExclusiveLock;
 
-use table::table_open;
+use ::table::table_open;
 use aclchk_seams::{get_user_default_acl, record_dependency_on_new_acl};
-use indexing_seams::catalog_tuple_insert_pg_namespace;
+use ::indexing_seams::catalog_tuple_insert_pg_namespace;
 use objectaccess_seams::{object_access_hook_present, run_object_post_create_hook};
-use pg_depend_seams::recordDependencyOnCurrentExtension;
-use pg_shdepend_seams::recordDependencyOnOwner;
-use syscache_seams::namespace_name_exists;
+use ::pg_depend_seams::recordDependencyOnCurrentExtension;
+use ::pg_shdepend_seams::recordDependencyOnOwner;
+use ::syscache_seams::namespace_name_exists;
 
 /// `NamespaceRelationId` — `pg_namespace`.
 const NamespaceRelationId: Oid = NAMESPACE_RELATION_ID;

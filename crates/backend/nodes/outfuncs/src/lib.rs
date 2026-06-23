@@ -68,7 +68,7 @@ use alloc::string::String;
 use core::fmt::Write as _;
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::{
     BoolExpr, BoolExprType, Const, Expr, FuncExpr, OpExpr, Param, TargetEntry, Var,
@@ -630,7 +630,7 @@ pub(crate) fn out_expr(buf: &mut String, e: &Expr, write_loc: bool) {
 /// [`::nodes::nodes::Node::List`] arm is always a `T_List` (a
 /// `PgVec<NodePtr>`), so this writes the `(` opener (no type char for `T_List`),
 /// each child through `out_node` separated by a single space, then `)`.
-fn out_list(buf: &mut String, elements: &[mcx::PgBox<'_, Node<'_>>]) {
+fn out_list(buf: &mut String, elements: &[::mcx::PgBox<'_, Node<'_>>]) {
     buf.push('(');
     // C: foreach(lc, node) { outNode(str, lfirst(lc)); if (lnext(node, lc))
     // appendStringInfoChar(str, ' '); }  — for the IsA(node, List) flavour.

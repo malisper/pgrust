@@ -20,9 +20,9 @@
 //! (`exec_open_partition_indices` / `exec_init_partition_*`), which
 //! execPartition's `ExecInitPartitionInfo` calls per leaf partition.
 
-use mcx::Mcx;
-use types_error::PgResult;
-use types_core::primitive::Index;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::types_core::primitive::Index;
 use ::nodes::modifytable::{ONCONFLICT_NONE, ONCONFLICT_UPDATE};
 use ::nodes::nodes::{CmdType, OnConflictAction};
 use nodes::{EStateData, ModifyTableState, RriId};
@@ -108,7 +108,7 @@ pub fn ExecInitPartitionWithCheckOptions<'mcx>(
         alloc::vec::Vec::with_capacity(ref_wco_list.len());
     for wco_node in ref_wco_list {
         let wco = wco_node.as_withcheckoption().ok_or_else(|| {
-            types_error::PgError::error(
+            ::types_error::PgError::error(
                 "ExecInitPartitionWithCheckOptions: withCheckOptionLists element is not a \
                  WithCheckOption node",
             )
@@ -167,8 +167,8 @@ pub fn ExecInitPartitionWithCheckOptions<'mcx>(
     // `WithCheckOption` Node so the (working) per-rel `exec_init_with_check_options`
     // seam — the same one ExecInitModifyTable uses — can ExecInitQual each qual and
     // store ri_WithCheckOptions / ri_WithCheckOptionExprs.
-    let mut remapped_wco_nodes: mcx::PgVec<'mcx, ::nodes::nodes::Node<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, cloned_wcos.len())?;
+    let mut remapped_wco_nodes: ::mcx::PgVec<'mcx, ::nodes::nodes::Node<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, cloned_wcos.len())?;
     for mut wco in cloned_wcos {
         if let Some(qual) = wco.qual.take() {
             let (mapped_qual, _found_whole_row) =
@@ -220,8 +220,8 @@ pub fn ExecInitPartitionReturning<'mcx>(
         Some(lists) if !lists.is_empty() => lists[0].as_slice(),
         _ => return Ok(()),
     };
-    let mut returning_list: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, ref_returning_list.len())?;
+    let mut returning_list: ::mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, ref_returning_list.len())?;
     for tle in ref_returning_list {
         returning_list.push(tle.clone_in(mcx)?);
     }
@@ -329,9 +329,9 @@ pub fn ExecInitPartitionOnConflict<'mcx>(
     // partition by scanning the partition's index list and searching for
     // ancestry relationships to each index in the ancestor table.
     //   if (rootResultRelInfo->ri_onConflictArbiterIndexes != NIL) { ... }
-    let mut arbiter_indexes: alloc::vec::Vec<types_core::Oid> = alloc::vec::Vec::new();
+    let mut arbiter_indexes: alloc::vec::Vec<::types_core::Oid> = alloc::vec::Vec::new();
 
-    let root_arbiters: alloc::vec::Vec<types_core::Oid> = estate
+    let root_arbiters: alloc::vec::Vec<::types_core::Oid> = estate
         .result_rel(root_result_rel_info)
         .ri_onConflictArbiterIndexes
         .as_ref()
@@ -370,7 +370,7 @@ pub fn ExecInitPartitionOnConflict<'mcx>(
     //   if (list_length(root arbiters) != list_length(arbiterIndexes))
     //       elog(ERROR, "invalid arbiter index list");
     if root_arbiters.len() != arbiter_indexes.len() {
-        return Err(types_error::PgError::error("invalid arbiter index list"));
+        return Err(::types_error::PgError::error("invalid arbiter index list"));
     }
 
     // leaf_part_rri->ri_onConflictArbiterIndexes = arbiterIndexes;
@@ -378,7 +378,7 @@ pub fn ExecInitPartitionOnConflict<'mcx>(
         let dst = if arbiter_indexes.is_empty() {
             None
         } else {
-            let mut v = mcx::vec_with_capacity_in(mcx, arbiter_indexes.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, arbiter_indexes.len())?;
             for oid in arbiter_indexes.iter().copied() {
                 v.push(oid);
             }
@@ -493,8 +493,8 @@ fn ExecInitPartitionOnConflictUpdate<'mcx>(
         .as_ref()
         .map(|l| l.as_slice())
         .unwrap_or(&[]);
-    let mut onconflset_init: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, ref_set.len())?;
+    let mut onconflset_init: ::mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, ref_set.len())?;
     for tle in ref_set {
         onconflset_init.push(tle.clone_in(mcx)?);
     }
@@ -603,8 +603,8 @@ fn ExecInitPartitionOnConflictUpdate<'mcx>(
     //       ExecInitQual((List *) clause, &mtstate->ps); }
     let oc_where_clause = match node.onConflictWhere.as_deref() {
         Some(ref_where) if !ref_where.is_empty() => {
-            let mut clause: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
-                mcx::vec_with_capacity_in(mcx, ref_where.len())?;
+            let mut clause: ::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
+                ::mcx::vec_with_capacity_in(mcx, ref_where.len())?;
             for e in ref_where {
                 clause.push(e.clone_in(mcx)?);
             }
@@ -643,7 +643,7 @@ fn ExecInitPartitionOnConflictUpdate<'mcx>(
 
     // OnConflictSetState *onconfl = makeNode(OnConflictSetState);
     // leaf_part_rri->ri_onConflict = onconfl;
-    let onconfl = mcx::alloc_in(
+    let onconfl = ::mcx::alloc_in(
         mcx,
         ::nodes::modifytable::OnConflictSetState {
             type_: ::nodes::nodes::T_OnConflictSetState,
@@ -677,7 +677,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
     }
 
     // List *firstMergeActionList = linitial(node->mergeActionLists);
-    let ref_merge_action_list: &'mcx mcx::PgVec<'mcx, ::nodes::modifytable::MergeAction<'mcx>> =
+    let ref_merge_action_list: &'mcx ::mcx::PgVec<'mcx, ::nodes::modifytable::MergeAction<'mcx>> =
         match node.mergeActionLists.as_ref() {
             Some(lists) if !lists.is_empty() => &lists[0],
             _ => return Ok(()),
@@ -733,7 +733,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
     //                           &found_whole_row);
     //   leaf_part_rri->ri_MergeJoinCondition =
     //       ExecInitQual((List *) joinCondition, &mtstate->ps);
-    let mapped_join_condition: Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> = {
+    let mapped_join_condition: Option<::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> = {
         let ref_join_condition: Option<&'mcx [::nodes::primnodes::Expr]> = node
             .mergeJoinConditions
             .as_ref()
@@ -743,8 +743,8 @@ pub fn ExecInitPartitionMerge<'mcx>(
         match ref_join_condition {
             None => None,
             Some(jc) => {
-                let mut cloned: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
-                    mcx::vec_with_capacity_in(mcx, jc.len())?;
+                let mut cloned: ::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
+                    ::mcx::vec_with_capacity_in(mcx, jc.len())?;
                 for e in jc {
                     cloned.push(e.clone_in(mcx)?);
                 }
@@ -782,9 +782,9 @@ pub fn ExecInitPartitionMerge<'mcx>(
 
         // INSERT/UPDATE: clone + remap the action's targetList; UPDATE also
         // remaps updateColnos via the part_attmap.
-        let target_list: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = {
-            let mut tl: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
-                mcx::vec_with_capacity_in(
+        let target_list: ::mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = {
+            let mut tl: ::mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
+                ::mcx::vec_with_capacity_in(
                     mcx,
                     action.targetList.as_ref().map(|t| t.len()).unwrap_or(0),
                 )?;
@@ -796,7 +796,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
             tl
         };
 
-        let mas_proj: Option<mcx::PgBox<'mcx, ::nodes::execexpr::ProjectionInfo<'mcx>>>;
+        let mas_proj: Option<::mcx::PgBox<'mcx, ::nodes::execexpr::ProjectionInfo<'mcx>>>;
 
         match command_type {
             CmdType::CMD_INSERT => {
@@ -837,7 +837,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
                             &part_attnums,
                         )?
                     }
-                    _ => mcx::PgVec::new_in(mcx),
+                    _ => ::mcx::PgVec::new_in(mcx),
                 };
                 // action_state->mas_proj =
                 //     ExecBuildUpdateProjection(action->targetList, true,
@@ -861,7 +861,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
             }
             _ => {
                 // default: elog(ERROR, "unknown action in MERGE WHEN clause");
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "unknown action in MERGE WHEN clause",
                 ));
             }
@@ -874,12 +874,12 @@ pub fn ExecInitPartitionMerge<'mcx>(
         //                           &found_whole_row);
         //   action_state->mas_whenqual =
         //       ExecInitQual((List *) action->qual, &mtstate->ps);
-        let mapped_qual: Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> =
+        let mapped_qual: Option<::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> =
             match action.qual.as_ref() {
                 None => None,
                 Some(q) => {
-                    let mut cloned: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
-                        mcx::vec_with_capacity_in(mcx, q.len())?;
+                    let mut cloned: ::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
+                        ::mcx::vec_with_capacity_in(mcx, q.len())?;
                     for e in q.iter() {
                         cloned.push(e.clone_in(mcx)?);
                     }
@@ -907,7 +907,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
         // pooled state, so `mas_action` carries the command/match-kind/overriding
         // fields the executor reads (ExecMergeMatched reads only commandType /
         // matchKind), matching merge.rs::ExecInitMerge.
-        let mas_action = mcx::alloc_in(
+        let mas_action = ::mcx::alloc_in(
             mcx,
             ::nodes::modifytable::MergeAction {
                 matchKind: match_kind,
@@ -918,7 +918,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
                 updateColnos: None,
             },
         )?;
-        let action_state = mcx::alloc_in(
+        let action_state = ::mcx::alloc_in(
             mcx,
             ::nodes::modifytable::MergeActionState {
                 type_: ::nodes::nodes::T_MergeActionState,
@@ -935,7 +935,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
         match slot {
             Some(list) => list.push(action_state),
             None => {
-                let mut v = mcx::PgVec::new_in(mcx);
+                let mut v = ::mcx::PgVec::new_in(mcx);
                 v.push(action_state);
                 *slot = Some(v);
             }

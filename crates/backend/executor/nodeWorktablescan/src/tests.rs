@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use ::nodes::execnodes::{RecursiveUnionSharedState, ScanStateData};
 use ::nodes::executor::{TupleTableSlot, TTS_FLAG_EMPTY};
 use ::nodes::nodeworktablescan::WorkTableScan;

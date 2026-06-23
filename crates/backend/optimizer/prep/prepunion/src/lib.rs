@@ -9,7 +9,7 @@
 //! `Path *`/`RelOptInfo *` pointers across the leaf subqueries' `PlannerInfo`s;
 //! this port keeps each leaf's paths in its own subroot arena and brings the
 //! chosen ones into the outer root's arena with
-//! [`import_path_from_subroot`](pathnode::import_path_from_subroot).
+//! [`import_path_from_subroot`](::pathnode::import_path_from_subroot).
 
 extern crate alloc;
 
@@ -17,27 +17,27 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Index, Oid};
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::Expr;
 use ::nodes::rawnodes::{SetOperation, SetOperationStmt, SortGroupClause};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     NodeId, PathId, PlannerInfo, RelId, Relids, TargetEntryNode, UPPERREL_FINAL, UPPERREL_SETOP,
 };
 
-use nodes_core::makefuncs::make_var;
-use nodes_core::nodefuncs::{apply_relabel_type, expr_collation, expr_type, expr_typmod};
+use ::nodes_core::makefuncs::make_var;
+use ::nodes_core::nodefuncs::{apply_relabel_type, expr_collation, expr_type, expr_typmod};
 
-use costsize::sizeest::set_subquery_size_estimates;
+use ::costsize::sizeest::set_subquery_size_estimates;
 use pathkeys as pathkeys;
 use pathnode as pathnode;
-use pathnode::import::import_path_from_subroot;
+use ::pathnode::import::import_path_from_subroot;
 use relnode as relnode;
 use relnode_seams as bms;
-use vars::tlist;
+use ::vars::tlist;
 
 /// Borrow the `Node` behind an `Option<NodePtr>` (`PgBox<Node>` is not a std
 /// `Box`, so `Option::as_deref` does not apply).
@@ -60,8 +60,8 @@ fn pg_leftmost_one_pos32(word: u32) -> i32 {
 }
 
 /// `TOTAL_COST` (`pathnodes.h` `CostSelector`).
-const TOTAL_COST: pathnodes::optimizer_plan::CostSelector =
-    pathnodes::optimizer_plan::CostSelector::TOTAL_COST;
+const TOTAL_COST: ::pathnodes::optimizer_plan::CostSelector =
+    ::pathnodes::optimizer_plan::CostSelector::TOTAL_COST;
 
 // ===========================================================================
 // Seam install.
@@ -421,7 +421,7 @@ fn plan_leaf_subquery<'mcx>(
     // parent op is borrowed from the caller's stack; leak an mcx-lifetime copy so
     // it can cross the planner seam boundary.
     let setop_op: Option<&'mcx SetOperationStmt<'mcx>> = match parent_op {
-        Some(op) => Some(&*mcx::leak_in(mcx::alloc_in(mcx, op.clone_in(mcx)?)?)),
+        Some(op) => Some(&*::mcx::leak_in(::mcx::alloc_in(mcx, op.clone_in(mcx)?)?)),
         None => None,
     };
     // C passes the recursion-planning `root` as the leaf's `parent_root`. Move it
@@ -485,7 +485,7 @@ fn generate_union_paths<'mcx>(
     // For UNIONs (not ALL), try sorting if sorting is possible (C:723-738).
     let mut group_list: Vec<NodeId> = Vec::new();
     let mut try_sorted = false;
-    let mut union_pathkeys: Vec<pathnodes::PathKey> = Vec::new();
+    let mut union_pathkeys: Vec<::pathnodes::PathKey> = Vec::new();
     if !op.all {
         // Identify the grouping semantics (C:727).
         group_list = generate_setop_grouplist(mcx, root, op, &tlist)?;
@@ -603,7 +603,7 @@ fn generate_union_paths<'mcx>(
             parallel_workers = parallel_workers
                 .max(pg_leftmost_one_pos32(partial_pathlist.len() as u32) + 1);
             parallel_workers = parallel_workers
-                .min(costsize::max_parallel_workers_per_gather());
+                .min(::costsize::max_parallel_workers_per_gather());
         }
         debug_assert!(parallel_workers > 0);
 
@@ -648,7 +648,7 @@ fn generate_union_paths<'mcx>(
                 result_rel,
                 apath,
                 Box::new(target),
-                pathnodes::AGG_HASHED,
+                ::pathnodes::AGG_HASHED,
                 AGGSPLIT_SIMPLE,
                 group_list.clone(),
                 Vec::new(),
@@ -666,7 +666,7 @@ fn generate_union_paths<'mcx>(
                     result_rel,
                     gp,
                     Box::new(target),
-                    pathnodes::AGG_HASHED,
+                    ::pathnodes::AGG_HASHED,
                     AGGSPLIT_SIMPLE,
                     group_list.clone(),
                     Vec::new(),
@@ -792,7 +792,7 @@ fn generate_nonunion_paths<'mcx>(
     if !can_sort && !can_hash {
         let what = if op.op == SetOperation::SETOP_INTERSECT { "INTERSECT" } else { "EXCEPT" };
         return Err(PgError::error(alloc::format!("could not implement {what}"))
-            .with_sqlstate(types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .with_sqlstate(::types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .with_detail(
                 "Some of the datatypes only support hashing, while others only support sorting.",
             ));
@@ -861,10 +861,10 @@ fn generate_nonunion_paths<'mcx>(
     // SetOpCmd (C:1156-1168).
     let cmd = match op.op {
         SetOperation::SETOP_INTERSECT => {
-            if op.all { pathnodes::SETOPCMD_INTERSECT_ALL } else { pathnodes::SETOPCMD_INTERSECT }
+            if op.all { ::pathnodes::SETOPCMD_INTERSECT_ALL } else { ::pathnodes::SETOPCMD_INTERSECT }
         }
         SetOperation::SETOP_EXCEPT => {
-            if op.all { pathnodes::SETOPCMD_EXCEPT_ALL } else { pathnodes::SETOPCMD_EXCEPT }
+            if op.all { ::pathnodes::SETOPCMD_EXCEPT_ALL } else { ::pathnodes::SETOPCMD_EXCEPT }
         }
         _ => return Err(PgError::error(String::from("unrecognized set op"))),
     };
@@ -872,7 +872,7 @@ fn generate_nonunion_paths<'mcx>(
     // Hash path (C:1173-1185).
     if can_hash {
         let path = pathnode::create::create_setop_path(
-            root, result_rel, lpath, rpath, cmd, pathnodes::SETOP_HASHED,
+            root, result_rel, lpath, rpath, cmd, ::pathnodes::SETOP_HASHED,
             group_list.clone(), d_num_groups, d_num_output_rows,
         )?;
         pathnode::add_path(root, result_rel, path)?;
@@ -887,7 +887,7 @@ fn generate_nonunion_paths<'mcx>(
             root, mcx, rrel, rpath, &group_list, &rpath_tlist, &nonunion_pathkeys,
         )?;
         let path = pathnode::create::create_setop_path(
-            root, result_rel, slpath, srpath, cmd, pathnodes::SETOP_SORTED,
+            root, result_rel, slpath, srpath, cmd, ::pathnodes::SETOP_SORTED,
             group_list.clone(), d_num_groups, d_num_output_rows,
         )?;
         pathnode::add_path(root, result_rel, path)?;
@@ -906,7 +906,7 @@ fn sorted_input_for_setop(
     path: PathId,
     group_list: &[NodeId],
     path_tlist: &[NodeId],
-    nonunion_pathkeys: &[pathnodes::PathKey],
+    nonunion_pathkeys: &[::pathnodes::PathKey],
 ) -> PgResult<PathId> {
     let pk = pathkeys::make_pathkeys_for_sortclauses(root, mcx, group_list, path_tlist);
     let path_pathkeys = root.path(path).base().pathkeys.clone();
@@ -1008,7 +1008,7 @@ fn generate_recursion_path<'mcx>(
             group_list.iter().map(|&id| *root.sortgroupclause(id)).collect();
         if !tlist::grouping_is_hashable(&group_clauses_owned) {
             return Err(PgError::error(String::from("could not implement recursive UNION"))
-                .with_sqlstate(types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_sqlstate(::types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .with_detail("All column datatypes must be hashable."));
         }
         // Worst case: distinct groups == total input size (C:446).
@@ -1045,7 +1045,7 @@ fn build_setop_child_paths<'mcx>(
     rel: RelId,
     trivial_tlist: bool,
     child_tlist: &[NodeId],
-    interesting_pathkeys: &[pathnodes::PathKey],
+    interesting_pathkeys: &[::pathnodes::PathKey],
     p_num_groups: Option<&mut f64>,
 ) -> PgResult<()> {
     debug_assert!(root.rel(rel).rtekind == RTE_SUBQUERY);
@@ -1053,7 +1053,7 @@ fn build_setop_child_paths<'mcx>(
     // setop_pathkeys = rel->subroot->setop_pathkeys (C:486). These are the keys
     // that, if the child can produce a presorted path, let the parent set-op
     // avoid re-sorting. They are expressed in the SUBROOT's representation.
-    let setop_pathkeys: Vec<pathnodes::PathKey> = root
+    let setop_pathkeys: Vec<::pathnodes::PathKey> = root
         .rel(rel)
         .subroot
         .0
@@ -1615,9 +1615,9 @@ fn generate_setop_grouplist<'mcx>(
 
 /// `create_pathtarget(root, tlist)` = make_pathtarget_from_tlist +
 /// set_pathtarget_cost_width.
-fn make_pathtarget(root: &PlannerInfo, tlist: &[NodeId]) -> pathnodes::PathTarget {
+fn make_pathtarget(root: &PlannerInfo, tlist: &[NodeId]) -> ::pathnodes::PathTarget {
     let mut t = tlist::make_pathtarget_from_tlist(root, tlist);
-    costsize::sizeest::set_pathtarget_cost_width(root, &mut t);
+    ::costsize::sizeest::set_pathtarget_cost_width(root, &mut t);
     t
 }
 
@@ -1699,4 +1699,4 @@ fn tlist_same_collations_ids(
 }
 
 /// `AGGSPLIT_SIMPLE` (`nodes.h`).
-const AGGSPLIT_SIMPLE: pathnodes::AggSplit = pathnodes::AGGSPLIT_SIMPLE;
+const AGGSPLIT_SIMPLE: ::pathnodes::AggSplit = ::pathnodes::AGGSPLIT_SIMPLE;

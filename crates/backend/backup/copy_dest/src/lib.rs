@@ -32,10 +32,10 @@
 
 use std::cell::RefCell;
 
-use mcx::MemoryContext;
-use types_core::catalog::OIDOID;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{INT8OID, TEXTOID};
+use ::mcx::MemoryContext;
+use ::types_core::catalog::OIDOID;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{INT8OID, TEXTOID};
 
 use backup_copy_seams::{
     ResultColumn, ResultColumnType, ResultValue, TupOutputState as SeamTupOutputState,
@@ -71,7 +71,7 @@ thread_local! {
 
 /// Map a seam [`ResultColumnType`] to its builtin type OID (the C
 /// `TupleDescInitBuiltinEntry` type argument).
-fn column_type_oid(typ: ResultColumnType) -> types_core::primitive::Oid {
+fn column_type_oid(typ: ResultColumnType) -> ::types_core::primitive::Oid {
     match typ {
         ResultColumnType::Text => TEXTOID,
         ResultColumnType::Int8 => INT8OID,
@@ -95,7 +95,7 @@ fn begin_tup_output_tupdesc(
     columns: Vec<ResultColumn>,
 ) -> SeamTupOutputState {
     // Own a MemoryContext for the duration of this result set (begin..end),
-    // mirroring IdentifySystem's `mcx::MemoryContext::new(...)`. Box it up front
+    // mirroring IdentifySystem's `::mcx::MemoryContext::new(...)`. Box it up front
     // so its address is stable: the slot allocations below capture `mcx` (a
     // `&MemoryContext`) as their allocator, so the struct must not move after
     // this point — only the `Box` pointer is parked in the thread-local.
@@ -118,7 +118,7 @@ fn begin_tup_output_tupdesc(
         )
         .expect("TupleDescInitBuiltinEntry(basebackup result column)");
     }
-    let tupdesc = Some(mcx::alloc_in(mcx, tupdesc).expect("alloc basebackup result tupdesc"));
+    let tupdesc = Some(::mcx::alloc_in(mcx, tupdesc).expect("alloc basebackup result tupdesc"));
 
     // tstate = begin_tup_output_tupdesc(dest, tupdesc, &TTSOpsVirtual);
     let state = execTuples_seams::begin_tup_output_tupdesc::call(
@@ -236,8 +236,8 @@ fn end_tup_output(_tstate: SeamTupOutputState) {
 
 /// Install the four `DestRemoteSimple` result-set seams.
 pub fn init_seams() {
-    backup_copy_seams::create_dest_remote_simple::set(create_dest_remote_simple);
-    backup_copy_seams::begin_tup_output_tupdesc::set(begin_tup_output_tupdesc);
-    backup_copy_seams::do_tup_output::set(do_tup_output);
-    backup_copy_seams::end_tup_output::set(end_tup_output);
+    ::backup_copy_seams::create_dest_remote_simple::set(create_dest_remote_simple);
+    ::backup_copy_seams::begin_tup_output_tupdesc::set(begin_tup_output_tupdesc);
+    ::backup_copy_seams::do_tup_output::set(do_tup_output);
+    ::backup_copy_seams::end_tup_output::set(end_tup_output);
 }

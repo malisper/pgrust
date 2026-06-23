@@ -7,9 +7,9 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `InitializeMaxBackends()` (postinit.c): compute and set `MaxBackends`

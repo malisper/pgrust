@@ -27,9 +27,9 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ fn arg_text_opt<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
     image.extend_from_slice(&bytes);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
@@ -105,7 +105,7 @@ fn fc_quote_ident(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     // UTF-8 text content. quote_identifier takes &str.
     let s = match core::str::from_utf8(t) {
         Ok(s) => s,
-        Err(_) => return Err(types_error::PgError::error("invalid byte sequence for encoding")),
+        Err(_) => return Err(::types_error::PgError::error("invalid byte sequence for encoding")),
     };
     let bytes = crate::quote_ident(m.mcx(), s)?.as_slice().to_vec();
     Ok(ret_text(fcinfo, bytes))

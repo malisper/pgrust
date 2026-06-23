@@ -32,7 +32,7 @@
 //! mirrors C (one `TopMemoryContext` per process, lives for the whole process)
 //! and is the same proven idiom as the dsm test bring-up's `TopMemoryContext`
 //! stand-in (`backend-storage-ipc-dsm-core`'s `TOP_MCX`). A `thread_local!`
-//! (not a `static`) is required because `mcx::MemoryContext` is `!Sync` by
+//! (not a `static`) is required because `::mcx::MemoryContext` is `!Sync` by
 //! construction (interior `Cell`/`Rc`: a context belongs to one process/thread,
 //! as in PG) and so cannot live in a `Sync` `static`.
 
@@ -179,7 +179,7 @@ pub fn handle_log_memory_context_interrupt() {
 ///   non-`print_to_stderr` path C emits **one `ereport(LOG_SERVER_ONLY)` per
 ///   context** (`MemoryContextStatsPrint`: `"level: %d; %s: %s%s"`) plus a final
 ///   "Grand total" message. We reproduce that per-context-per-message shape over
-///   this allocator's own context tree (`mcx::MemoryContext::stats_tree()`, the
+///   this allocator's own context tree (`::mcx::MemoryContext::stats_tree()`, the
 ///   model's `MemoryContextStatsDetail` analog), with depth/child caps of 100.
 /// - the in-progress flag is cleared in all paths (the `PG_FINALLY` analog) — a
 ///   propagating `ereport(ERROR)` here is returned as `Err`, and the guard is
@@ -190,7 +190,7 @@ pub fn handle_log_memory_context_interrupt() {
 /// allocator without the block/freelist accounting of C's aset.c, so the
 /// per-context line carries the real numbers it has rather than fabricated
 /// block/free counts.
-pub fn process_log_memory_context_interrupt() -> types_error::PgResult<()> {
+pub fn process_log_memory_context_interrupt() -> ::types_error::PgResult<()> {
     LOG_MEMORY_CONTEXT_PENDING.with(|p| p.set(false));
 
     // Exit immediately if a dump is already in progress (recursion guard).
@@ -209,9 +209,9 @@ pub fn process_log_memory_context_interrupt() -> types_error::PgResult<()> {
 /// The body of [`process_log_memory_context_interrupt`]'s `PG_TRY` block:
 /// `ereport`s the header line then walks the `TopMemoryContext` stats tree
 /// (`MemoryContextStatsDetail(TopMemoryContext, 100, 100, false)`).
-fn dump_memory_contexts() -> types_error::PgResult<()> {
-    use utils_error::ereport;
-    use types_error::LOG_SERVER_ONLY;
+fn dump_memory_contexts() -> ::types_error::PgResult<()> {
+    use ::utils_error::ereport;
+    use ::types_error::LOG_SERVER_ONLY;
 
     let pid = init_small_seams::my_proc_pid::call();
 
@@ -238,12 +238,12 @@ fn memory_context_stats_detail(
     root: &TreeStats,
     max_level: usize,
     max_children: usize,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     let mut grand_total_used: usize = 0;
     stats_internal(root, 1, max_level, max_children, &mut grand_total_used)?;
 
     // Grand total (errmsg_internal in C; LOG_SERVER_ONLY, hidden stmt/context).
-    utils_error::ereport(types_error::LOG_SERVER_ONLY)
+    ::utils_error::ereport(::types_error::LOG_SERVER_ONLY)
         .errhidestmt(true)
         .errhidecontext(true)
         .errmsg(format!("Grand total: {grand_total_used} bytes used"))
@@ -259,7 +259,7 @@ fn stats_internal(
     max_level: usize,
     max_children: usize,
     grand_total_used: &mut usize,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     use core::fmt::Write;
 
     *grand_total_used = grand_total_used.saturating_add(node.used);
@@ -285,7 +285,7 @@ fn stats_internal(
             idlen += 1;
         }
     }
-    utils_error::ereport(types_error::LOG_SERVER_ONLY)
+    ::utils_error::ereport(::types_error::LOG_SERVER_ONLY)
         .errhidestmt(true)
         .errhidecontext(true)
         .errmsg(line)
@@ -304,7 +304,7 @@ fn stats_internal(
                 summarized_used = summarized_used.saturating_add(child.subtree_used);
             }
             *grand_total_used = grand_total_used.saturating_add(summarized_used);
-            utils_error::ereport(types_error::LOG_SERVER_ONLY)
+            ::utils_error::ereport(::types_error::LOG_SERVER_ONLY)
                 .errhidestmt(true)
                 .errhidecontext(true)
                 .errmsg(format!(
@@ -321,7 +321,7 @@ fn stats_internal(
             summarized_used = summarized_used.saturating_add(child.subtree_used);
         }
         *grand_total_used = grand_total_used.saturating_add(summarized_used);
-        utils_error::ereport(types_error::LOG_SERVER_ONLY)
+        ::utils_error::ereport(::types_error::LOG_SERVER_ONLY)
             .errhidestmt(true)
             .errhidecontext(true)
             .errmsg(format!(
@@ -335,6 +335,6 @@ fn stats_internal(
 }
 
 /// `ErrorLocation` for the `mcxt.c` interrupt/stats functions.
-fn loc(lineno: i32, func: &str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new("mcxt.c", lineno, func)
+fn loc(lineno: i32, func: &str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new("mcxt.c", lineno, func)
 }

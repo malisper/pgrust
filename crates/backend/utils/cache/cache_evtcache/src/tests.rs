@@ -36,7 +36,7 @@ fn install_seams_once() {
             ADDED_TAGS.with(|t| t.borrow_mut().push(x));
             match a {
                 Some(b) => Ok(b),
-                None => mcx::alloc_in(
+                None => ::mcx::alloc_in(
                     mcx,
                     nodes::Bitmapset {
                         words: PgVec::new_in(mcx),

@@ -24,10 +24,10 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use seam_core::seam;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::seam_core::seam;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 
 // --- fmgr / varlena (the project-wide Datum/fmgr deferral) -----------------

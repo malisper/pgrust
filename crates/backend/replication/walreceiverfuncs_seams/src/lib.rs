@@ -8,7 +8,7 @@
 //! lock-free atomic words.  All `switch(walRcvState)` / state-transition
 //! branching stays in the walreceiver crate, inside those closures.
 
-use types_walreceiver::WalRcvData;
+use ::types_walreceiver::WalRcvData;
 
 seam_core::seam!(
     /// `WalRcvShmemSize()` (walreceiverfuncs.c; ipci.c `CalculateShmemSize`

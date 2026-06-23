@@ -19,12 +19,12 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use types_core::{InvalidOid, Oid};
-use fmgr::resolution::FmgrResolution;
-use fmgr::FmgrInfo;
+use ::fmgr::resolution::FmgrResolution;
+use ::fmgr::FmgrInfo;
 use types_json::{JsonTokenType, JsonTypeCategory};
 use types_jsonb::jsonb_util::JsonbValue;
-use types_jsonb::jsonb::JsonbContainer;
-use types_tuple::heaptuple::TupleDesc;
+use ::types_jsonb::jsonb::JsonbContainer;
+use ::types_tuple::heaptuple::TupleDesc;
 
 /// `NAMEDATALEN` — pg name length (the `JsonHashEntry.fname` key width).
 pub const NAMEDATALEN: usize = 64;

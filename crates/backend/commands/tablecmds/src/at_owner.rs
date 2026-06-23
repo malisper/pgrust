@@ -30,53 +30,53 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use types_acl::{ACLCHECK_OK, ACL_CREATE};
-use types_catalog::catalog::NAMESPACE_RELATION_ID;
-use types_catalog::pg_attribute::{
+use ::types_catalog::catalog::NAMESPACE_RELATION_ID;
+use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attacl, Anum_pg_attribute_attisdropped, AttributeRelationId,
     PgAttributeUpdateRow,
 };
-use types_catalog::pg_class::{Anum_pg_class_relacl, RelationRelationId};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_catalog::pg_class::{Anum_pg_class_relacl, RelationRelationId};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
-use types_acl::ACLCHECK_NOT_OWNER;
-use types_storage::lock::{NoLock, RowExclusiveLock, LOCKMODE};
-use types_tuple::access::{
+use ::types_acl::ACLCHECK_NOT_OWNER;
+use ::types_storage::lock::{NoLock, RowExclusiveLock, LOCKMODE};
+use ::types_tuple::access::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_TOASTVALUE, RELKIND_VIEW,
 };
 use types_tuple::heaptuple::Datum;
 
-use common_relation::relation_open;
-use utils_error::ereport;
+use ::common_relation::relation_open;
+use ::utils_error::ereport;
 
 use aclchk_seams as aclchk_seam;
 use dependency_seams as dep_seam;
 use indexing_seams as indexing_seam;
 use objectaccess_seams as objaccess_seam;
 use pg_depend_seams as pg_depend_seam;
-use pg_shdepend::changeDependencyOnOwner;
+use ::pg_shdepend::changeDependencyOnOwner;
 use tablecmds_seams as me;
 use lsyscache_seams as lsyscache_seam;
 use relcache_seams as relcache_seam;
-use cache_syscache::cacheinfo::RELOID;
+use ::cache_syscache::cacheinfo::RELOID;
 use cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SearchSysCacheAttNum, SysCacheGetAttr, ATTNUM,
 };
 use objectaddress_seams as objaddr_seam;
-use miscinit::GetUserId;
+use ::miscinit::GetUserId;
 use miscinit_seams as miscinit_seam;
 
 use crate::helpers::here;
 
 /// `DEPENDENCY_AUTO` / `DEPENDENCY_INTERNAL` codes (`catalog/dependency.h`),
 /// matching the `sequence_is_owned` seam's `deptype` argument.
-use types_catalog::catalog_dependency::{DEPENDENCY_AUTO, DEPENDENCY_INTERNAL};
+use ::types_catalog::catalog_dependency::{DEPENDENCY_AUTO, DEPENDENCY_INTERNAL};
 
 /// `SysCacheKey::Value(Int(ObjectIdGetDatum(relid)))` — the by-OID syscache key
 /// (the publicationcmds `oid_cache_key` pattern).

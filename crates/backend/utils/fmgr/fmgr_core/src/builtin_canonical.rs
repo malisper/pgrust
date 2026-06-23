@@ -36,7 +36,7 @@
 //! ```
 //! This file is GENERATED; do not hand-edit the table body.
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// One canonical built-in: `(foid, prosrc/funcName, nargs, strict, retset)`,
 /// mirroring the five `FmgrBuiltin` fields `Gen_fmgrtab.pl` emits.

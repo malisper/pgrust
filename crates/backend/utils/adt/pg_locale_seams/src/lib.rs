@@ -4,10 +4,10 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgString, PgVec};
-use types_cash::CashLconv;
+use ::types_cash::CashLconv;
 use types_core::{Oid, PgWChar};
-use types_error::PgResult;
-use locale::PgLocale;
+use ::types_error::PgResult;
+use ::locale::PgLocale;
 
 seam_core::seam!(
     /// `PGLC_localeconv()` (pg_locale.c): snapshot the monetary subset of
@@ -111,7 +111,7 @@ seam_core::seam!(
     /// (`provider`/`deterministic`/`ctype_is_c`/`is_default`) it needs to pick a
     /// classification strategy. `Err` carries its catalog-read / `ereport(ERROR)`
     /// failure surface (e.g. a dropped collation). The returned value is the flag
-    /// core ([`locale::PgLocaleStruct`]) copied into `mcx`; the provider-specific `info`
+    /// core ([`::locale::PgLocaleStruct`]) copied into `mcx`; the provider-specific `info`
     /// union stays inside pg_locale.c's permanent cache, reached later by OID via
     /// the probe seams below. C returns a pointer into that permanent cache.
     pub fn pg_newlocale_from_collation<'mcx>(
@@ -326,7 +326,7 @@ seam_core::seam!(
     /// `tolower_l(c, locale->info.lt)` (pg_locale_libc.c, via `SB_lower_char` in
     /// like.c): single-byte lower-case fold of `c` through the libc `locale_t`
     /// (`info.lt`) of the resolved locale identified by `collid`. The flag-core
-    /// [`locale::PgLocaleStruct`] does not carry the provider-specific `info` union (the
+    /// [`::locale::PgLocaleStruct`] does not carry the provider-specific `info` union (the
     /// libc `locale_t` lives inside pg_locale.c's permanent cache), so this seam
     /// re-keys by `collid`; the owner re-resolves the same cache entry and calls
     /// `tolower_l`. Reached only on `SB_lower_char`'s third leg (locale is neither

@@ -15,9 +15,9 @@
 //! src-idiomatic `seams`/`types` crates, which do not exist in this repo).
 
 use functioncmds_seams::{self as seam, LanguageForm};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_acl::{ACLCHECK_NO_PRIV, ACLCHECK_OK, ACL_USAGE};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_SYNTAX_ERROR, ERROR,

@@ -2,7 +2,7 @@
 //! `src/backend/access/brin/brin.c` (PostgreSQL 18.3):
 //!
 //!   * `brinhandler` — assembles the unified
-//!     [`types_amapi::IndexAmRoutine`] (BRIN is a bitmap-only AM:
+//!     [`::types_amapi::IndexAmRoutine`] (BRIN is a bitmap-only AM:
 //!     `amgettuple = None`, `amgetbitmap = Some(bringetbitmap)`).
 //!   * `brinbeginscan` / `brinrescan` / `bringetbitmap` / `brinendscan` — the
 //!     scan callbacks.
@@ -56,20 +56,20 @@ use types_amapi::{
     AmCostEstimate, IndexAmRoutine, IndexBuildResult, IndexPath, PlannerInfo, T_IndexAmRoutine,
 };
 use brin::{BrinDesc, BrinMemTuple, BrinOpcInfo, BrinValues};
-use types_core::primitive::{BlockNumber, OffsetNumber, Size};
-use types_core::InvalidOid;
-use rel::Relation;
-use types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
-use types_storage::buf::{BufferIsValid, InvalidBuffer, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
-use types_storage::lock::AccessShareLock;
-use types_tableam::amapi::TIDBitmap as AmTIDBitmap;
-use types_tableam::amopaque::{tags, AmOpaque, AmOpaqueType};
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tableam::amapi::IndexUniqueCheck;
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Size};
+use ::types_core::InvalidOid;
+use ::rel::Relation;
+use ::types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
+use ::types_storage::buf::{BufferIsValid, InvalidBuffer, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
+use ::types_storage::lock::AccessShareLock;
+use ::types_tableam::amapi::TIDBitmap as AmTIDBitmap;
+use ::types_tableam::amopaque::{tags, AmOpaque, AmOpaqueType};
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tableam::amapi::IndexUniqueCheck;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use pageops::{
     brinGetTupleForHeapBlock, brinRevmapInitialize, brinRevmapTerminate, read_found_tuple_bytes,
@@ -77,14 +77,14 @@ use pageops::{
 };
 use brin_tuple::{brin_copy_tuple, brin_deform_tuple, brin_new_memtuple, BrinTupleImage};
 use brin_entry_seams as opclass;
-use index_seams::index_get_relation;
-use bufmgr_seams::lock_buffer;
-use bufmgr_seams::release_buffer;
-use table_seams::table_open;
-use nodes_core_seams::tbm_add_page;
-use pgstat_seams::pgstat_count_index_scan;
-use relcache_seams::relation_get_number_of_blocks;
-use utils_error::PgResult;
+use ::index_seams::index_get_relation;
+use ::bufmgr_seams::lock_buffer;
+use ::bufmgr_seams::release_buffer;
+use ::table_seams::table_open;
+use ::nodes_core_seams::tbm_add_page;
+use ::pgstat_seams::pgstat_count_index_scan;
+use ::relcache_seams::relation_get_number_of_blocks;
+use ::utils_error::PgResult;
 
 // ===========================================================================
 // Constants (access/brin_internal.h, commands/vacuum.h).
@@ -125,7 +125,7 @@ pub struct BrinScan<'mcx> {
 /// `BrinScan` is the concrete type stored in `IndexScanDescData.opaque` (C's
 /// `void *opaque`); the A0 carrier downcasts to it in every scan adapter.
 impl<'mcx> AmOpaqueType<'mcx> for BrinScan<'mcx> {
-    const TAG: types_tableam::amopaque::AmOpaqueTag = tags::BRIN_SCAN;
+    const TAG: ::types_tableam::amopaque::AmOpaqueTag = tags::BRIN_SCAN;
 }
 
 /// Downcast `scan.opaque` to the BRIN scan working state (the A0 tag-checked
@@ -476,7 +476,7 @@ fn erase_brinscan<'mcx>(
     mcx: Mcx<'mcx>,
     brinscan: BrinScan<'mcx>,
 ) -> PgResult<PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx>> {
-    let boxed: PgBox<'mcx, BrinScan<'mcx>> = mcx::alloc_in(mcx, brinscan)?;
+    let boxed: PgBox<'mcx, BrinScan<'mcx>> = ::mcx::alloc_in(mcx, brinscan)?;
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn AmOpaque` vtable (the A0 erase pattern).

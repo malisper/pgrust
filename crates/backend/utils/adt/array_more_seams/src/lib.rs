@@ -5,9 +5,9 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
-pub use tsvector_ext_seams::ArrayElem;
+pub use ::tsvector_ext_seams::ArrayElem;
 
 seam_core::seam!(
     /// Deconstruct a 1-D `float4[]` weight array (`win`, the detoasted array

@@ -8,7 +8,7 @@
 //! `::nodes::nodes::Node<'mcx>` enum (one variant per plan subtype), and
 //! expressions are the lifetime-free `::nodes::primnodes::Expr` enum. The
 //! expression-fixing mutators (`fix_scan_expr`/`fix_join_expr`/`fix_upper_expr`)
-//! walk `Expr` via `nodes_core::nodefuncs::expression_tree_mutator`; the
+//! walk `Expr` via `::nodes_core::nodefuncs::expression_tree_mutator`; the
 //! plan recursion (`set_plan_refs`) matches on `Node`. Genuine cross-subsystem
 //! externals (PlanInvalItem append, RTEPermissionInfo copy, the dummy-rel check,
 //! the MULTIEXPR-param / minmax-agg resolution, and planner.c's
@@ -27,16 +27,16 @@ use alloc::vec::Vec;
 use mcx::{Mcx, PgBox, PgVec};
 use types_error::{PgError, PgResult};
 
-use nodes_core::nodefuncs::{
+use ::nodes_core::nodefuncs::{
     expr_collation, expr_type, expr_typmod, expression_tree_mutator, resolved_opfuncid,
     set_opfuncid, set_sa_opfuncid,
 };
-use nodes_core::makefuncs::{
+use ::nodes_core::makefuncs::{
     flat_copy_target_entry, make_null_const, make_var, make_var_from_target_entry,
 };
-use equalfuncs::equal_expr;
+use ::equalfuncs::equal_expr;
 
-use types_core::primitive::{AttrNumber, Index, Oid};
+use ::types_core::primitive::{AttrNumber, Index, Oid};
 use ::nodes::nodes::Node;
 use ::nodes::nodes::ntag;
 use ::nodes::nodeagg::do_aggsplit_combine;
@@ -128,14 +128,14 @@ fn is_regclass_const(con: &Const) -> bool {
 /// (`Option<Box<Bitmapset>>`): a one-member relid set. Bit `x` lives in word
 /// `x/64`, bit `x%64`. Used by the grouping-sets nullingrels strip in
 /// `set_upper_references` (C: `bms_make_singleton(root->group_rtindex)`).
-fn bms_make_singleton_relids(x: i32) -> pathnodes::Relids {
+fn bms_make_singleton_relids(x: i32) -> ::pathnodes::Relids {
     debug_assert!(x > 0);
     let bit = x as usize;
     let wordnum = bit / 64;
     let bitnum = bit % 64;
     let mut words = alloc::vec![0u64; wordnum + 1];
     words[wordnum] = 1u64 << bitnum;
-    Some(alloc::boxed::Box::new(pathnodes::Bitmapset { words }))
+    Some(alloc::boxed::Box::new(::pathnodes::Bitmapset { words }))
 }
 
 fn expr_relids_equal(
@@ -191,7 +191,7 @@ fn nullingrels_ok(
 /// Plan-subtype walk (`set_plan_refs`) runs over the unified `Node` tree.
 pub fn set_plan_references<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     plan: Node<'mcx>,
 ) -> PgResult<Node<'mcx>> {
@@ -287,20 +287,20 @@ fn glob_mut<'a>(root: &'a mut PlannerInfo) -> PgResult<&'a mut PlannerGlobal> {
 /// `add_rtes_to_flat_rtable(root, recursing)` (setrefs.c:395).
 fn add_rtes_to_flat_rtable<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     recursing: bool,
 ) -> PgResult<()> {
     // Add the query's own RTEs to the flattened rangetable.
     let parse = root.parse;
-    let rte_ids: Vec<pathnodes::RangeTblEntryId> = run.rtable(parse).iter().enumerate().map(
+    let rte_ids: Vec<::pathnodes::RangeTblEntryId> = run.rtable(parse).iter().enumerate().map(
         |(i, _)| {
             // RangeTblEntryId is the i-th entry of the query's rtable; the run
             // interned them in order. We re-resolve below by index via the
             // query's rtable slice; reconstruct the id by re-interning is wrong,
             // so collect the (kind, relid) we need plus the slice index.
             let _ = i;
-            pathnodes::RangeTblEntryId::default()
+            ::pathnodes::RangeTblEntryId::default()
         },
     ).collect();
     let _ = rte_ids;
@@ -370,9 +370,9 @@ fn add_rtes_to_flat_rtable<'mcx>(
 /// query whose rtable/rteperminfos own `rte`; `src_idx` is its 0-based slot.
 fn add_rte_to_flat_rtable<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    q: pathnodes::QueryId,
+    q: ::pathnodes::QueryId,
     src_idx: usize,
 ) -> PgResult<()> {
     // Clone the source RTE and, if any, the source query's matching
@@ -393,7 +393,7 @@ fn add_rte_to_flat_rtable<'mcx>(
 /// parse tree whose RTEs were never interned).
 fn add_rte_to_flat_rtable_core<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     mut newrte: ::nodes::parsenodes::RangeTblEntry<'mcx>,
     src_perminfo: Option<::nodes::parsenodes::RTEPermissionInfo<'mcx>>,
@@ -459,9 +459,9 @@ fn add_rte_to_flat_rtable_core<'mcx>(
 /// the flat rangetable along with the owning query's matching RTEPermissionInfo.
 fn flatten_unplanned_rtes<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    parse: pathnodes::QueryId,
+    parse: ::pathnodes::QueryId,
     src_idx: usize,
 ) -> PgResult<()> {
     // Clone the embedded subquery out of the run-interned source RTE so we can
@@ -479,7 +479,7 @@ fn flatten_unplanned_rtes<'mcx>(
 /// sublink subselects reachable through expressions).
 fn flatten_rtes_in_query<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     query: &::nodes::copy_query::Query<'mcx>,
 ) -> PgResult<()> {
@@ -530,14 +530,14 @@ fn flatten_rtes_in_query<'mcx>(
 
 // ===========================================================================
 // Relids word helpers (offset_relid_set / all_relids add — over the
-// `pathnodes::Bitmapset { words }` carrier, which has no bms ops here).
+// `::pathnodes::Bitmapset { words }` carrier, which has no bms ops here).
 // ===========================================================================
 
 /// `bms_add_member(a, x)` over the `Relids` carrier (1-based-bit semantics: bit
 /// `x` of word `x/64`). `x` must be >= 0.
 fn relids_add_member(a: Relids, x: i32) -> Relids {
     debug_assert!(x >= 0);
-    let mut bms = a.unwrap_or_else(|| ABox::new(pathnodes::Bitmapset { words: Vec::new() }));
+    let mut bms = a.unwrap_or_else(|| ABox::new(::pathnodes::Bitmapset { words: Vec::new() }));
     let wi = (x as usize) / 64;
     let bit = (x as usize) % 64;
     if bms.words.len() <= wi {
@@ -1278,7 +1278,7 @@ fn fix_scan_list_tlist<'mcx>(
     for mut tle in list {
         if let Some(expr_box) = tle.expr.take() {
             let fixed = fix_scan_expr(mcx, root, PgBox::into_inner(expr_box), rtoffset, num_exec)?;
-            tle.expr = Some(mcx::alloc_in(mcx, fixed)?);
+            tle.expr = Some(::mcx::alloc_in(mcx, fixed)?);
         }
         out.push(tle);
     }
@@ -1326,7 +1326,7 @@ fn set_dummy_tlist_references<'mcx>(
             }
         }
         let mut newtle = flat_copy_target_entry(mcx, &tle)?;
-        newtle.expr = Some(mcx::alloc_in(mcx, Expr::Var(newvar))?);
+        newtle.expr = Some(::mcx::alloc_in(mcx, Expr::Var(newvar))?);
         out.push(newtle);
     }
     plan.targetlist = Some(out);
@@ -1601,14 +1601,14 @@ fn fix_upper_expr_mutator<'mcx>(
                             let fixed = fix_upper_expr_mutator(
                                 mcx,
                                 root,
-                                mcx::PgBox::into_inner(b),
+                                ::mcx::PgBox::into_inner(b),
                                 ctx,
                             )?;
                             // Re-box into the plan arena and re-tag as 'static (the
                             // backing alloc lives in `mcx`); same lifetime-only
                             // transmute the combining-aggref split path uses.
-                            let boxed: mcx::PgBox<'mcx, Expr> = mcx::alloc_in(mcx, fixed)?;
-                            let boxed_static: mcx::PgBox<'static, Expr> =
+                            let boxed: ::mcx::PgBox<'mcx, Expr> = ::mcx::alloc_in(mcx, fixed)?;
+                            let boxed_static: ::mcx::PgBox<'static, Expr> =
                                 unsafe { core::mem::transmute(boxed) };
                             te.expr = Some(boxed_static);
                         }
@@ -1686,7 +1686,7 @@ fn fix_upper_tlist<'mcx>(
     for mut tle in list {
         if let Some(expr_box) = tle.expr.take() {
             let fixed = fix_upper_expr(mcx, root, PgBox::into_inner(expr_box), ctx)?;
-            tle.expr = Some(mcx::alloc_in(mcx, fixed)?);
+            tle.expr = Some(::mcx::alloc_in(mcx, fixed)?);
         }
         out.push(tle);
     }
@@ -1748,7 +1748,7 @@ fn set_upper_references<'mcx>(
     // element's expr, so stripping each TLE/qual `Expr` is identical.
     if is_agg && root.group_rtindex > 0 && agg_grouping_sets {
         let removable = bms_make_singleton_relids(root.group_rtindex);
-        let except: pathnodes::Relids = None; // C NULL
+        let except: ::pathnodes::Relids = None; // C NULL
         if let Some(tlist) = plan.targetlist.as_mut() {
             for tle in tlist.iter_mut() {
                 if let Some(expr) = tle.expr.take() {
@@ -1756,11 +1756,11 @@ fn set_upper_references<'mcx>(
                     // is needed; `PgBox::into_inner` extracts it from the box.
                     let stripped = nodeFuncs_seams::remove_nulling_relids::call(
                         mcx,
-                        mcx::PgBox::into_inner(expr),
+                        ::mcx::PgBox::into_inner(expr),
                         &removable,
                         &except,
                     );
-                    tle.expr = Some(mcx::alloc_in(mcx, stripped)?);
+                    tle.expr = Some(::mcx::alloc_in(mcx, stripped)?);
                 }
             }
         }
@@ -1805,7 +1805,7 @@ fn set_upper_references<'mcx>(
                 fix_upper_expr(mcx, root, PgBox::into_inner(expr), &ctx)?
             };
             let mut newtle = flat_copy_target_entry(mcx, &tle)?;
-            newtle.expr = Some(mcx::alloc_in(mcx, newexpr)?);
+            newtle.expr = Some(::mcx::alloc_in(mcx, newexpr)?);
             output.push(newtle);
         }
     }
@@ -1858,7 +1858,7 @@ fn set_param_references<'mcx>(
             if let Some(sp) = p.node(ipl).as_subplan() {
                 for &pid in sp.0.setParam.iter() {
                     init_set_param =
-                        Some(nodes_core::bitmapset::bms_add_member(
+                        Some(::nodes_core::bitmapset::bms_add_member(
                             mcx,
                             init_set_param.take(),
                             pid,
@@ -1872,7 +1872,7 @@ fn set_param_references<'mcx>(
     // bms_intersect(plan->lefttree->extParam, initSetParam): the set of extern
     // initplan params used by the Gather's children that some initplan above
     // sets — the leader serializes exactly these for the workers.
-    nodes_core::bitmapset::bms_intersect(
+    ::nodes_core::bitmapset::bms_intersect(
         mcx,
         Some(ext_param),
         init_set_param.as_deref(),
@@ -1907,7 +1907,7 @@ fn convert_combining_aggrefs<'mcx>(mcx: Mcx<'mcx>, node: Expr<'mcx>) -> PgResult
             // parent_agg.args = list_make1(makeTargetEntry((Expr*) child_agg, 1,
             // NULL, false)). Aggref.args is a plain Vec<TargetEntry<'static>>.
             let te: TargetEntry<'mcx> = TargetEntry {
-                expr: Some(mcx::alloc_in(mcx, Expr::Aggref(child_agg))?),
+                expr: Some(::mcx::alloc_in(mcx, Expr::Aggref(child_agg))?),
                 resno: 1,
                 resname: None,
                 ressortgroupref: 0,
@@ -1973,7 +1973,7 @@ fn convert_combining_aggrefs_tlist<'mcx>(
     for mut tle in list {
         if let Some(eb) = tle.expr.take() {
             let c = convert_combining_aggrefs(mcx, PgBox::into_inner(eb))?;
-            tle.expr = Some(mcx::alloc_in(mcx, c)?);
+            tle.expr = Some(::mcx::alloc_in(mcx, c)?);
         }
         out.push(tle);
     }
@@ -2002,7 +2002,7 @@ fn convert_combining_aggrefs_qual<'mcx>(
 /// `set_plan_refs(root, plan, rtoffset)` (setrefs.c:618).
 pub fn set_plan_refs<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     plan: Node<'mcx>,
     rtoffset: i32,
@@ -2118,11 +2118,11 @@ pub fn set_plan_refs<'mcx>(
             if let Some(l) = plan.as_limit_mut() {
                 if let Some(off) = l.limitOffset.take() {
                     let f = fix_scan_expr(mcx, root, PgBox::into_inner(off), rtoffset, 1.0)?;
-                    l.limitOffset = Some(mcx::alloc_in(mcx, f)?);
+                    l.limitOffset = Some(::mcx::alloc_in(mcx, f)?);
                 }
                 if let Some(cnt) = l.limitCount.take() {
                     let f = fix_scan_expr(mcx, root, PgBox::into_inner(cnt), rtoffset, 1.0)?;
-                    l.limitCount = Some(mcx::alloc_in(mcx, f)?);
+                    l.limitCount = Some(::mcx::alloc_in(mcx, f)?);
                 }
             }
         }
@@ -2182,11 +2182,11 @@ pub fn set_plan_refs<'mcx>(
             if let Some(w) = plan.as_windowagg_mut() {
                 if let Some(off) = w.startOffset.take() {
                     let f = fix_scan_expr(mcx, root, PgBox::into_inner(off), rtoffset, 1.0)?;
-                    w.startOffset = Some(mcx::alloc_in(mcx, f)?);
+                    w.startOffset = Some(::mcx::alloc_in(mcx, f)?);
                 }
                 if let Some(off) = w.endOffset.take() {
                     let f = fix_scan_expr(mcx, root, PgBox::into_inner(off), rtoffset, 1.0)?;
-                    w.endOffset = Some(mcx::alloc_in(mcx, f)?);
+                    w.endOffset = Some(::mcx::alloc_in(mcx, f)?);
                 }
                 let num_exec = num_exec_tlist(&w.plan);
                 let rc = w.runCondition.take();
@@ -2214,7 +2214,7 @@ pub fn set_plan_refs<'mcx>(
                             };
                             if let Some((vt, vm, vc)) = replace {
                                 let nc = make_null_const(mcx, vt, vm, vc)?;
-                                tle.expr = Some(mcx::alloc_in(mcx, Expr::Const(nc))?);
+                                tle.expr = Some(::mcx::alloc_in(mcx, Expr::Const(nc))?);
                             }
                         }
                     }
@@ -2303,7 +2303,7 @@ pub fn set_plan_refs<'mcx>(
 
 fn set_plan_refs_opt<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     child: Option<PgBox<'mcx, Node<'mcx>>>,
     rtoffset: i32,
@@ -2312,7 +2312,7 @@ fn set_plan_refs_opt<'mcx>(
         None => Ok(None),
         Some(b) => {
             let fixed = set_plan_refs(mcx, run, root, PgBox::into_inner(b), rtoffset)?;
-            Ok(Some(mcx::alloc_in(mcx, fixed)?))
+            Ok(Some(::mcx::alloc_in(mcx, fixed)?))
         }
     }
 }
@@ -2400,7 +2400,7 @@ fn set_scan_node_refs<'mcx>(
                             if node.as_expr().is_some() {
                                 node.into_expr()
                             } else {
-                                functions[f].funcexpr = Some(mcx::alloc_in(mcx, node)?);
+                                functions[f].funcexpr = Some(::mcx::alloc_in(mcx, node)?);
                                 None
                             }
                         }
@@ -2409,7 +2409,7 @@ fn set_scan_node_refs<'mcx>(
                     if let Some(e) = funcexpr {
                         let fixed = fix_scan_expr(mcx, root, e, rtoffset, 1.0)?;
                         functions[f].funcexpr =
-                            Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, fixed)?)?);
+                            Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, fixed)?)?);
                     }
                 }
             }
@@ -2426,11 +2426,11 @@ fn set_scan_node_refs<'mcx>(
             let tf = &mut *s.tablefunc;
             if let Some(b) = tf.docexpr.take() {
                 let fixed = fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
-                tf.docexpr = Some(mcx::alloc_in(mcx, fixed)?);
+                tf.docexpr = Some(::mcx::alloc_in(mcx, fixed)?);
             }
             if let Some(b) = tf.rowexpr.take() {
                 let fixed = fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
-                tf.rowexpr = Some(mcx::alloc_in(mcx, fixed)?);
+                tf.rowexpr = Some(::mcx::alloc_in(mcx, fixed)?);
             }
             if let Some(v) = tf.colexprs.as_mut() {
                 let n = v.len();
@@ -2438,7 +2438,7 @@ fn set_scan_node_refs<'mcx>(
                     if let Some(b) = v[k].take() {
                         let fixed =
                             fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
-                        v[k] = Some(mcx::alloc_in(mcx, fixed)?);
+                        v[k] = Some(::mcx::alloc_in(mcx, fixed)?);
                     }
                 }
             }
@@ -2448,16 +2448,16 @@ fn set_scan_node_refs<'mcx>(
                     if let Some(b) = v[k].take() {
                         let fixed =
                             fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
-                        v[k] = Some(mcx::alloc_in(mcx, fixed)?);
+                        v[k] = Some(::mcx::alloc_in(mcx, fixed)?);
                     }
                 }
             }
             if let Some(v) = tf.ns_uris.take() {
                 let mut out: PgVec<'mcx, PgBox<'mcx, Expr>> =
-                    mcx::vec_with_capacity_in(mcx, v.len())?;
+                    ::mcx::vec_with_capacity_in(mcx, v.len())?;
                 for b in v.into_iter() {
                     let fixed = fix_scan_expr(mcx, root, PgBox::into_inner(b), rtoffset, 1.0)?;
-                    out.push(mcx::alloc_in(mcx, fixed)?);
+                    out.push(::mcx::alloc_in(mcx, fixed)?);
                 }
                 tf.ns_uris = Some(out);
             }
@@ -2688,7 +2688,7 @@ fn set_join_references<'mcx>(
 
     // Now the targetlist + qpqual (above the join).
     let jointype = join_jointype(plan);
-    let tl_nrm = if jointype == pathnodes::JOIN_INNER {
+    let tl_nrm = if jointype == ::pathnodes::JOIN_INNER {
         NRM_EQUAL
     } else {
         NRM_SUPERSET
@@ -2713,7 +2713,7 @@ fn set_join_references<'mcx>(
                             num_exec: nt,
                         },
                     )?;
-                    tle.expr = Some(mcx::alloc_in(mcx, fixed)?);
+                    tle.expr = Some(::mcx::alloc_in(mcx, fixed)?);
                 }
                 out.push(tle);
             }
@@ -2763,12 +2763,12 @@ fn set_joinqual<'mcx>(plan: &mut Node<'mcx>, list: Vec<Expr<'mcx>>, mcx: Mcx<'mc
         _ => {}
     }
 }
-fn join_jointype<'mcx>(plan: &Node<'mcx>) -> pathnodes::JoinType {
+fn join_jointype<'mcx>(plan: &Node<'mcx>) -> ::pathnodes::JoinType {
     match plan.node_tag() {
-        ntag::T_NestLoop => plan.as_nestloop().unwrap().join.jointype as pathnodes::JoinType,
-        ntag::T_MergeJoin => plan.as_mergejoin().unwrap().join.jointype as pathnodes::JoinType,
-        ntag::T_HashJoin => plan.as_hashjoin().unwrap().join.jointype as pathnodes::JoinType,
-        _ => pathnodes::JOIN_INNER,
+        ntag::T_NestLoop => plan.as_nestloop().unwrap().join.jointype as ::pathnodes::JoinType,
+        ntag::T_MergeJoin => plan.as_mergejoin().unwrap().join.jointype as ::pathnodes::JoinType,
+        ntag::T_HashJoin => plan.as_hashjoin().unwrap().join.jointype as ::pathnodes::JoinType,
+        _ => ::pathnodes::JOIN_INNER,
     }
 }
 
@@ -2936,7 +2936,7 @@ fn fix_windowagg_condition_expr_mutator<'mcx>(itlist: &IndexedTlist, node: Expr<
 /// `set_indexonlyscan_references(root, plan, rtoffset)` (setrefs.c:1332).
 fn set_indexonlyscan_references<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     mut plan: Node<'mcx>,
     rtoffset: i32,
@@ -3072,11 +3072,11 @@ fn set_foreignscan_references<'mcx>(
 }
 
 /// Convert a `::nodes::bitmapset::Bitmapset` (Plan-side) to a `Relids`
-/// (`pathnodes::Bitmapset`) for the offset helper, by copying words.
+/// (`::pathnodes::Bitmapset`) for the offset helper, by copying words.
 fn bms_nodes_to_relids(b: Option<&::nodes::bitmapset::Bitmapset>) -> Relids {
     match b {
         None => None,
-        Some(bms) => Some(ABox::new(pathnodes::Bitmapset {
+        Some(bms) => Some(ABox::new(::pathnodes::Bitmapset {
             words: bms.words.iter().copied().collect(),
         })),
     }
@@ -3093,7 +3093,7 @@ fn relids_to_bms_node<'mcx>(
             for w in bms.words {
                 words.push(w);
             }
-            Ok(Some(mcx::alloc_in(
+            Ok(Some(::mcx::alloc_in(
                 mcx,
                 ::nodes::bitmapset::Bitmapset { words },
             )?))
@@ -3123,7 +3123,7 @@ fn relids_to_bms_node<'mcx>(
 /// `rel->subroot->glob == root->glob` pointer, then move it back.
 fn set_subqueryscan_references<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     plan: Node<'mcx>,
     rtoffset: i32,
@@ -3162,7 +3162,7 @@ fn set_subqueryscan_references<'mcx>(
     root.glob = subroot.glob.take();
     root.rel_mut(rel_id).subroot.0 = Some(subroot);
     let processed = processed_res?;
-    sqs.subplan = Some(mcx::alloc_in(mcx, processed)?);
+    sqs.subplan = Some(::mcx::alloc_in(mcx, processed)?);
 
     if trivial_subqueryscan(&mut sqs) {
         // Omit the SubqueryScan node and pull up the subplan.
@@ -3243,7 +3243,7 @@ fn trivial_subqueryscan(plan: &mut ::nodes::nodeindexscan::SubqueryScan<'_>) -> 
 /// `set_append_references(root, aplan, rtoffset)` (setrefs.c:1820).
 fn set_append_references<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     mut plan: Node<'mcx>,
     rtoffset: i32,
@@ -3298,7 +3298,7 @@ fn set_append_references<'mcx>(
 /// `set_mergeappend_references(root, mplan, rtoffset)` (setrefs.c:1887).
 fn set_mergeappend_references<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     mut plan: Node<'mcx>,
     rtoffset: i32,
@@ -3425,7 +3425,7 @@ fn clean_up_removed_plan_level<'mcx>(
 /// MERGE) path is ported; the join-expr fix-up legs are loud-deferred.
 fn set_modifytable_references<'mcx>(
     mcx: Mcx<'mcx>,
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     mut plan: Node<'mcx>,
     rtoffset: i32,
@@ -3470,7 +3470,7 @@ fn set_modifytable_references<'mcx>(
                         wco.qual.take()
                     };
                     if let Some(qual) = qual_opt {
-                        let qual_node = mcx::PgBox::into_inner(qual);
+                        let qual_node = ::mcx::PgBox::into_inner(qual);
                         let expr = qual_node.into_expr().ok_or_else(|| {
                             PgError::error(
                                 "set_modifytable_references: WCO qual is not an Expr node",
@@ -3480,7 +3480,7 @@ fn set_modifytable_references<'mcx>(
                         let wco = wco_node
                             .as_withcheckoption_mut()
                             .expect("WCO node checked above");
-                        wco.qual = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, fixed)?)?);
+                        wco.qual = Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, fixed)?)?);
                     }
                     new_sub.push(wco_node);
                 }
@@ -3542,7 +3542,7 @@ fn set_modifytable_references<'mcx>(
                                         num_exec: nt,
                                     },
                                 )?;
-                                tle.expr = Some(mcx::alloc_in(mcx, fixed)?);
+                                tle.expr = Some(::mcx::alloc_in(mcx, fixed)?);
                             }
                             new_tl.push(tle);
                         }
@@ -3669,7 +3669,7 @@ fn set_modifytable_references<'mcx>(
                             num_exec: nt,
                         },
                     )?;
-                    tle.expr = Some(mcx::alloc_in(mcx, fixed)?);
+                    tle.expr = Some(::mcx::alloc_in(mcx, fixed)?);
                 }
                 new_set.push(tle);
             }
@@ -3939,7 +3939,7 @@ fn extract_query_dependencies_walker(node: &Node, ctx: &mut ExtractDepsCtx) -> P
                     }
                 }
             };
-            nodes_core::node_walker::query_tree_walker(query, &mut walker, 0)
+            ::nodes_core::node_walker::query_tree_walker(query, &mut walker, 0)
         };
         if let Some(e) = callback_err {
             return Err(e);
@@ -3966,7 +3966,7 @@ fn extract_query_dependencies_walker(node: &Node, ctx: &mut ExtractDepsCtx) -> P
                 }
             }
         };
-        nodes_core::node_walker::expression_tree_walker(node, &mut walker)
+        ::nodes_core::node_walker::expression_tree_walker(node, &mut walker)
     };
     if let Some(e) = callback_err {
         return Err(e);
@@ -4107,7 +4107,7 @@ fn set_returning_clause_references<'mcx>(
                     num_exec: nt,
                 },
             )?;
-            tle.expr = Some(mcx::alloc_in(mcx, fixed)?);
+            tle.expr = Some(::mcx::alloc_in(mcx, fixed)?);
         }
         out.push(tle);
     }

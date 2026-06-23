@@ -16,22 +16,22 @@
 //! heavyweight tuple lock goes through the lmgr seams; the WAL block
 //! registration goes through the xloginsert seam.
 
-use mcx::Mcx;
-use types_core::primitive::{Oid, TransactionId};
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, TransactionId};
 use types_error::{
     PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
-use utils_error::ereport;
+use ::utils_error::ereport;
 use rel::{Relation, RelationData};
-use types_storage::lock::{InplaceUpdateTupleLock, XLTW_Oper};
+use ::types_storage::lock::{InplaceUpdateTupleLock, XLTW_Oper};
 use types_storage::{Buffer, RelFileLocator};
-use types_tableam::tableam::{LockTupleMode, TM_Result};
-use types_tuple::heaptuple::{
+use ::types_tableam::tableam::{LockTupleMode, TM_Result};
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleField3, HeapTupleFields, HeapTupleHeaderChoice, HeapTupleHeaderData,
     ItemPointerData, HEAP_HASEXTERNAL, HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_XMAX_COMMITTED,
     HEAP_XMAX_INVALID, HEAP_XMAX_IS_MULTI, HEAP_XMAX_LOCK_ONLY,
 };
-use xlog_records::multixact::MultiXactStatus;
+use ::xlog_records::multixact::MultiXactStatus;
 
 use page::{
     ItemPointerEquals, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid,
@@ -39,10 +39,10 @@ use page::{
     PageSetPrunable,
 };
 
-use heapam_visibility::htup::{
+use ::heapam_visibility::htup::{
     HeapTupleHeaderGetRawXmax, HeapTupleHeaderIsSpeculative, HEAP_LOCK_MASK,
 };
-use heapam_visibility::HeapTupleSatisfiesUpdate;
+use ::heapam_visibility::HeapTupleSatisfiesUpdate;
 
 use crate::compute_infobits;
 use crate::lock::DoesMultiXactIdConflict;
@@ -57,16 +57,16 @@ use lmgr_seams as lmgr_seam;
 use lmgr_proc_seams as proc_seam;
 use relcache_seams as relcache_seam;
 
-use wal::wal::{RM_HEAP_ID, XLOG_INCLUDE_ORIGIN};
-use wal::xloginsert::REGBUF_STANDARD;
-use rmgrdesc_next::heapdesc::{XLOG_HEAP_CONFIRM, XLOG_HEAP_DELETE, XLOG_HEAP_INPLACE};
-use xlog_records::heapam_xlog::{
+use ::wal::wal::{RM_HEAP_ID, XLOG_INCLUDE_ORIGIN};
+use ::wal::xloginsert::REGBUF_STANDARD;
+use ::rmgrdesc_next::heapdesc::{XLOG_HEAP_CONFIRM, XLOG_HEAP_DELETE, XLOG_HEAP_INPLACE};
+use ::xlog_records::heapam_xlog::{
     xl_heap_confirm, xl_heap_delete, xl_heap_inplace, MinSizeOfHeapInplace, SizeOfHeapConfirm,
     SizeOfHeapDelete, XLH_DELETE_IS_SUPER,
 };
-use types_storage::sinval::SHARED_INVALIDATION_MESSAGE_SIZE;
-use types_storage::bufpage::SizeofHeapTupleHeader;
-use types_core::primitive::BLCKSZ;
+use ::types_storage::sinval::SHARED_INVALIDATION_MESSAGE_SIZE;
+use ::types_storage::bufpage::SizeofHeapTupleHeader;
+use ::types_core::primitive::BLCKSZ;
 
 /// `InvalidTransactionId`.
 const InvalidTransactionId: TransactionId = 0;
@@ -137,7 +137,7 @@ pub fn heap_finish_speculative<'mcx>(
         };
         let item = page_bytes
             .get_mut(off..off + len)
-            .ok_or_else(|| types_error::PgError::error("item storage is outside page"))?;
+            .ok_or_else(|| ::types_error::PgError::error("item storage is outside page"))?;
         header_image.write_on_page(item)?;
         Ok(())
     })?;
@@ -257,7 +257,7 @@ pub fn heap_abort_speculative<'mcx>(
         };
         let item = page_bytes
             .get_mut(off..off + len)
-            .ok_or_else(|| types_error::PgError::error("item storage is outside page"))?;
+            .ok_or_else(|| ::types_error::PgError::error("item storage is outside page"))?;
         header_image.write_on_page(item)?;
         Ok(())
     })?;
@@ -335,7 +335,7 @@ pub fn heap_inplace_lock<'mcx>(
         check_inplace_rel_lock(relation, oldtup)?;
     }
 
-    debug_assert!(buffer != types_storage::InvalidBuffer);
+    debug_assert!(buffer != ::types_storage::InvalidBuffer);
 
     /*
      * Register shared cache invals if necessary, *before* LockBuffer (a
@@ -497,7 +497,7 @@ pub fn heap_inplace_update_and_unlock<'mcx>(
     /* XLOG stuff */
     if relcache_seam::relation_needs_wal::call(relation) {
         let (rlocator, forkno, blkno) = bufmgr_seam::buffer_get_tag::call(buffer)?;
-        debug_assert!(forkno == types_core::primitive::MAIN_FORKNUM);
+        debug_assert!(forkno == ::types_core::primitive::MAIN_FORKNUM);
 
         let xlrec = xl_heap_inplace {
             offnum: ItemPointerGetOffsetNumber(&tuple.t_self),
@@ -574,7 +574,7 @@ pub fn heap_inplace_update_and_unlock<'mcx>(
         let dst_off = item_off + hoff;
         page_bytes
             .get_mut(dst_off..dst_off + newlen)
-            .ok_or_else(|| types_error::PgError::error("inplace dst outside page"))?
+            .ok_or_else(|| ::types_error::PgError::error("inplace dst outside page"))?
             .copy_from_slice(src);
         Ok(())
     })?;
@@ -635,7 +635,7 @@ fn check_inplace_rel_lock<'mcx>(
     relation: &Relation<'mcx>,
     oldtup: &HeapTupleData<'mcx>,
 ) -> PgResult<()> {
-    use types_storage::lock::ShareUpdateExclusiveLock;
+    use ::types_storage::lock::ShareUpdateExclusiveLock;
 
     // Form_pg_class classForm = GETSTRUCT(oldtup); relid = classForm->oid;
     // The on-page pg_class tuple's oid is the relation OID; the inplace caller
@@ -670,7 +670,7 @@ fn check_inplace_rel_lock<'mcx>(
     if !held {
         let _ = oldtup;
         // elog(WARNING, ...) — surface as a debug warning via ereport(WARNING).
-        let _ = ereport(types_error::WARNING)
+        let _ = ereport(::types_error::WARNING)
             .errmsg_internal(format!(
                 "missing lock for relation (OID {relid}, relkind {})",
                 relation.rd_rel.relkind as char
@@ -695,7 +695,7 @@ fn indrelid_to_oid(indrelid: Oid, _dbid: Oid) -> Oid {
 fn read_on_page_header<'mcx>(
     mcx: Mcx<'mcx>,
     buffer: Buffer,
-    offnum: types_core::primitive::OffsetNumber,
+    offnum: ::types_core::primitive::OffsetNumber,
 ) -> PgResult<HeapTupleHeaderData<'mcx>> {
     let mut out: Option<HeapTupleHeaderData<'mcx>> = None;
     bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
@@ -715,16 +715,16 @@ fn read_on_page_formed<'mcx>(
     rel_id: Oid,
     buffer: Buffer,
     tid: ItemPointerData,
-) -> PgResult<types_tuple::heaptuple::FormedTuple<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::FormedTuple<'mcx>> {
     let offnum = ItemPointerGetOffsetNumber(&tid);
-    let mut out: Option<(HeapTupleHeaderData<'mcx>, mcx::PgVec<'mcx, u8>, u32)> = None;
+    let mut out: Option<(HeapTupleHeaderData<'mcx>, ::mcx::PgVec<'mcx, u8>, u32)> = None;
     bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
         let page = PageRef::new(page_bytes)?;
         let item_id = PageGetItemId(&page, offnum)?;
         debug_assert!(item_id.has_storage());
         let item = PageGetItem(&page, &item_id)?;
         let hdr = HeapTupleHeaderData::read_on_page(mcx, item)?;
-        let mut data = mcx::PgVec::new_in(mcx);
+        let mut data = ::mcx::PgVec::new_in(mcx);
         for &b in &item[SizeofHeapTupleHeader..] {
             data.push(b);
         }
@@ -732,16 +732,16 @@ fn read_on_page_formed<'mcx>(
         Ok(())
     })?;
     let (hdr, data, t_len) = out.expect("with_buffer_page closure must have run");
-    let tuple = mcx::alloc_in(
+    let tuple = ::mcx::alloc_in(
         mcx,
         HeapTupleData {
             t_len,
             t_self: tid,
             t_tableOid: rel_id,
-            t_data: Some(mcx::alloc_in(mcx, hdr)?),
+            t_data: Some(::mcx::alloc_in(mcx, hdr)?),
         },
     )?;
-    Ok(types_tuple::heaptuple::FormedTuple { tuple, data })
+    Ok(::types_tuple::heaptuple::FormedTuple { tuple, data })
 }
 
 /// Materialize the on-page tuple header (only) at `(buffer, tid)` into a bare
@@ -770,7 +770,7 @@ fn read_on_page_tuple<'mcx>(
         t_len,
         t_self: tid,
         t_tableOid: rel_id,
-        t_data: Some(mcx::alloc_in(mcx, hdr)?),
+        t_data: Some(::mcx::alloc_in(mcx, hdr)?),
     })
 }
 
@@ -782,9 +782,9 @@ fn read_on_page_user_data<'mcx>(
     mcx: Mcx<'mcx>,
     buffer: Buffer,
     tid: ItemPointerData,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     let offnum = ItemPointerGetOffsetNumber(&tid);
-    let mut out: Option<mcx::PgVec<'mcx, u8>> = None;
+    let mut out: Option<::mcx::PgVec<'mcx, u8>> = None;
     bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
         let page = PageRef::new(page_bytes)?;
         let item_id = PageGetItemId(&page, offnum)?;
@@ -792,7 +792,7 @@ fn read_on_page_user_data<'mcx>(
         let item = PageGetItem(&page, &item_id)?;
         let hdr = HeapTupleHeaderData::read_on_page(mcx, item)?;
         let t_hoff = (hdr.t_hoff as usize).min(item.len());
-        let mut data = mcx::PgVec::new_in(mcx);
+        let mut data = ::mcx::PgVec::new_in(mcx);
         for &b in &item[t_hoff..] {
             data.push(b);
         }
@@ -804,13 +804,13 @@ fn read_on_page_user_data<'mcx>(
 
 /// `tp->t_data` (shared) for a `FormedTuple`.
 fn data_ref_f<'a, 'mcx>(
-    tp: &'a types_tuple::heaptuple::FormedTuple<'mcx>,
+    tp: &'a ::types_tuple::heaptuple::FormedTuple<'mcx>,
 ) -> &'a HeapTupleHeaderData<'mcx> {
     tp.tuple.t_data.as_ref().expect("inplace: tuple has no t_data")
 }
 /// `tp->t_data` (mutable) for a `FormedTuple`.
 fn data_mut_f<'a, 'mcx>(
-    tp: &'a mut types_tuple::heaptuple::FormedTuple<'mcx>,
+    tp: &'a mut ::types_tuple::heaptuple::FormedTuple<'mcx>,
 ) -> &'a mut HeapTupleHeaderData<'mcx> {
     tp.tuple.t_data.as_mut().expect("inplace: tuple has no t_data")
 }
@@ -821,7 +821,7 @@ fn data_ref<'a, 'mcx>(tuple: &'a HeapTupleData<'mcx>) -> &'a HeapTupleHeaderData
 }
 
 /// `HeapTupleHasExternal(tp)` for a `FormedTuple`.
-fn HeapTupleHasExternalF(tp: &types_tuple::heaptuple::FormedTuple<'_>) -> bool {
+fn HeapTupleHasExternalF(tp: &::types_tuple::heaptuple::FormedTuple<'_>) -> bool {
     tp.tuple.t_data.as_ref().is_some_and(|hdr| (hdr.t_infomask & HEAP_HASEXTERNAL) != 0)
 }
 
@@ -835,7 +835,7 @@ fn HeapTupleHeaderSetXmin(hdr: &mut HeapTupleHeaderData<'_>, xid: TransactionId)
 
 /// `HEAP_XMAX_IS_KEYSHR_LOCKED(infomask)` (htup_details.h).
 fn HEAP_XMAX_IS_KEYSHR_LOCKED(infomask: u16) -> bool {
-    (infomask & HEAP_LOCK_MASK) == types_tuple::heaptuple::HEAP_XMAX_KEYSHR_LOCK
+    (infomask & HEAP_LOCK_MASK) == ::types_tuple::heaptuple::HEAP_XMAX_KEYSHR_LOCK
 }
 
 /// `IsToastRelation(relation)` via the catalog seam.
@@ -854,7 +854,7 @@ fn transaction_id_precedes(a: TransactionId, b: TransactionId) -> bool {
 }
 
 /// `elog(ERROR, msg)`.
-fn elog_error(msg: &str) -> types_error::PgError {
+fn elog_error(msg: &str) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg.to_string()).into_error()
 }
 

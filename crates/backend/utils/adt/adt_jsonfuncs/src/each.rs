@@ -22,16 +22,16 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use utils_error::ereport;
-use mcx::Mcx;
-use types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use types_error::PgResult;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::types_error::PgResult;
 use types_json::{JsonLexContext, JsonParseErrorType, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::{jbvType, json_container_is_object, JsonbIteratorToken};
+use ::types_jsonb::jsonb::{jbvType, json_container_is_object, JsonbIteratorToken};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_BLESS;
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
 use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb};
 use funcapi_seams as funcapi;
@@ -127,7 +127,7 @@ fn put_each_row<'mcx>(
         EachValue::Jsonb(bytes) => {
             // JsonbValueToJsonb already produced a full jsonb varlena; it is a
             // pass-by-reference value -> Datum::ByRef of those bytes.
-            let mut v = mcx::vec_with_capacity_in::<u8>(mcx, bytes.len())?;
+            let mut v = ::mcx::vec_with_capacity_in::<u8>(mcx, bytes.len())?;
             v.extend_from_slice(bytes);
             (Datum::ByRef(v), false)
         }
@@ -366,7 +366,7 @@ fn each_worker<'mcx>(
     // state->normalize_results = as_text; state->next_scalar = false;
     state.borrow_mut().normalize_results = as_text;
 
-    let mut sem = types_json::JsonSemAction::default();
+    let mut sem = ::types_json::JsonSemAction::default();
 
     // sem->array_start = each_array_start;
     sem.array_start = Some(Box::new(|lex: &JsonLexContext| each_array_start(lex)));

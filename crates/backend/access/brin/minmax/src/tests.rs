@@ -9,11 +9,11 @@
 extern crate std;
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::Once;
 
-use types_core::NAMEDATALEN;
-use types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
+use ::types_core::NAMEDATALEN;
+use ::types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
 use types_typcache::{TypeCacheEntry, TYPSTORAGE_PLAIN};
 
 // Synthetic function OIDs the get_opcode stub maps each B-tree operator to.
@@ -93,9 +93,9 @@ fn int4_typcache(type_id: Oid) -> TypeCacheEntry {
     }
 }
 
-fn index_tupdesc<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> mcx::PgBox<'mcx, TupleDescData<'mcx>> {
-    let mut compact_attrs = mcx::vec_with_capacity_in(mcx, natts).unwrap();
-    let mut attrs = mcx::vec_with_capacity_in(mcx, natts).unwrap();
+fn index_tupdesc<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> ::mcx::PgBox<'mcx, TupleDescData<'mcx>> {
+    let mut compact_attrs = ::mcx::vec_with_capacity_in(mcx, natts).unwrap();
+    let mut attrs = ::mcx::vec_with_capacity_in(mcx, natts).unwrap();
     for i in 0..natts {
         compact_attrs.push(CompactAttribute {
             attcacheoff: -1,
@@ -133,7 +133,7 @@ fn index_tupdesc<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> mcx::PgBox<'mcx, TupleDe
             attcollation: 0,
         });
     }
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         TupleDescData {
             natts: natts as i32,
@@ -150,8 +150,8 @@ fn index_tupdesc<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> mcx::PgBox<'mcx, TupleDe
 
 fn make_index_rel<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> Relation<'mcx> {
     use rel::{FormData_pg_class, RelationData};
-    use types_storage::RelFileLocator;
-    let mut rd_opfamily = mcx::PgVec::new_in(mcx);
+    use ::types_storage::RelFileLocator;
+    let mut rd_opfamily = ::mcx::PgVec::new_in(mcx);
     for _ in 0..natts {
         rd_opfamily.push(INT4_OPFAMILY);
     }
@@ -162,9 +162,9 @@ fn make_index_rel<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> Relation<'mcx> {
             dbOid: 0,
             relNumber: 0,
         },
-        rd_backend: types_core::INVALID_PROC_NUMBER,
+        rd_backend: ::types_core::INVALID_PROC_NUMBER,
         rd_rel: FormData_pg_class {
-            relname: mcx::PgString::from_str_in("brinidx", mcx).unwrap(),
+            relname: ::mcx::PgString::from_str_in("brinidx", mcx).unwrap(),
             relnamespace: 0,
             relowner: 0,
             relrowsecurity: false,
@@ -190,10 +190,10 @@ fn make_index_rel<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> Relation<'mcx> {
         rd_att: index_tupdesc(mcx, natts),
         rd_options: None,
         rd_index: None,
-        rd_opcintype: mcx::PgVec::new_in(mcx),
+        rd_opcintype: ::mcx::PgVec::new_in(mcx),
         rd_opfamily,
-        rd_indoption: mcx::PgVec::new_in(mcx),
-        rd_indcollation: mcx::PgVec::new_in(mcx),
+        rd_indoption: ::mcx::PgVec::new_in(mcx),
+        rd_indcollation: ::mcx::PgVec::new_in(mcx),
         rd_trigdesc: None,
         pgstat_enabled: false,
     };
@@ -201,13 +201,13 @@ fn make_index_rel<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> Relation<'mcx> {
 }
 
 fn brin_desc<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> BrinDesc<'mcx> {
-    let mut bd_info = mcx::vec_with_capacity_in(mcx, natts).unwrap();
+    let mut bd_info = ::mcx::vec_with_capacity_in(mcx, natts).unwrap();
     for _ in 0..natts {
-        let mut typcache_vec = mcx::vec_with_capacity_in(mcx, 2).unwrap();
+        let mut typcache_vec = ::mcx::vec_with_capacity_in(mcx, 2).unwrap();
         typcache_vec.push(int4_typcache(INT4OID));
         typcache_vec.push(int4_typcache(INT4OID));
         bd_info.push(
-            mcx::alloc_in(
+            ::mcx::alloc_in(
                 mcx,
                 BrinOpcInfo {
                     oi_nstored: 2,
@@ -232,7 +232,7 @@ fn d(v: i32) -> Datum<'static> {
 }
 
 fn brin_values<'mcx>(mcx: Mcx<'mcx>, min: i32, max: i32) -> BrinValues<'mcx> {
-    let mut vals = mcx::vec_with_capacity_in(mcx, 2).unwrap();
+    let mut vals = ::mcx::vec_with_capacity_in(mcx, 2).unwrap();
     vals.push(d(min));
     vals.push(d(max));
     BrinValues {
@@ -307,7 +307,7 @@ fn consistent_equal_two_call_short_circuit() {
         sk_strategy: strat,
         sk_subtype: INT4OID,
         sk_collation: 0,
-        sk_func: types_core::fmgr::FmgrInfo::empty(),
+        sk_func: ::types_core::fmgr::FmgrInfo::empty(),
         sk_argument: d(arg),
         sk_subkeys: None,
     };
@@ -340,7 +340,7 @@ fn consistent_invalid_strategy_errors() {
         sk_strategy: 99,
         sk_subtype: INT4OID,
         sk_collation: 0,
-        sk_func: types_core::fmgr::FmgrInfo::empty(),
+        sk_func: ::types_core::fmgr::FmgrInfo::empty(),
         sk_argument: d(1),
         sk_subkeys: None,
     };

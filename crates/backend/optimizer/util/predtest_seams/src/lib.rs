@@ -1,5 +1,5 @@
 //! Seam declarations for `optimizer/util/predtest.c` (the predicate theorem
-//! prover), arena-shaped over [`pathnodes::PlannerInfo`].
+//! prover), arena-shaped over [`::pathnodes::PlannerInfo`].
 //!
 //! indxpath.c uses `predicate_implied_by` to prove partial-index predicates
 //! from the query's WHERE/predicate clauses (in `build_paths_for_OR`,
@@ -9,8 +9,8 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use pathnodes::{NodeId, PlannerInfo};
 

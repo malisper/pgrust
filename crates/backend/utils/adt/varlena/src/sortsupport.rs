@@ -12,8 +12,8 @@
 //! `ssup->abbrev_full_comparator`) and a `VarStringSortSupport` scratch struct
 //! into the C-ABI `SortSupportData` node, then drives the comparators/abbrev
 //! through those pointers. In this repo's layered model the
-//! [`types_sortsupport::SortSupportData`] is trimmed: `comparator` is a `Copy`
-//! [`SortComparatorId`](types_sortsupport::SortComparatorId) token the
+//! [`::types_sortsupport::SortSupportData`] is trimmed: `comparator` is a `Copy`
+//! [`SortComparatorId`](::types_sortsupport::SortComparatorId) token the
 //! sortsupport owner interprets, and the `ssup_extra`/abbreviation-hook slots
 //! are NOT carried (they are filled/read only inside the comparator-providing
 //! unit). So `varstr_sortsupport` here resolves the collation, builds the
@@ -38,10 +38,10 @@
 //! Depends on the keystone for [`VarStringSortSupport`](crate::keystone) and
 //! [`check_collation_set`](crate::keystone::check_collation_set).
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
-use types_sortsupport::SortSupportData;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_sortsupport::SortSupportData;
 
 use hyperloglog as hll;
 use pg_locale_seams as loc;
@@ -62,7 +62,7 @@ pub const TEXTOID: Oid = 25;
 pub const BPCHAROID: Oid = 1042;
 
 /// C: `C_COLLATION_OID` (`pg_collation.dat` oid 950).
-pub const C_COLLATION_OID: Oid = types_core::catalog::C_COLLATION_OID;
+pub const C_COLLATION_OID: Oid = ::types_core::catalog::C_COLLATION_OID;
 
 /// C: `NAMEDATALEN` (c.h) — fixed `name` width.
 pub const NAMEDATALEN: usize = crate::keystone::NAMEDATALEN;
@@ -212,8 +212,8 @@ pub fn varstr_sortsupport<'mcx>(
     // C:2063-2114 build the scratch state when abbreviating or non-C.
     let extra = if abbreviate || !collate_c {
         // C:2065-2069 sss = palloc; buf1/buf2 = palloc(TEXTBUFLEN); buflen = TEXTBUFLEN.
-        let buf1 = mcx::vec_with_capacity_in(ssup.ssup_cxt, TEXTBUFLEN)?;
-        let buf2 = mcx::vec_with_capacity_in(ssup.ssup_cxt, TEXTBUFLEN)?;
+        let buf1 = ::mcx::vec_with_capacity_in(ssup.ssup_cxt, TEXTBUFLEN)?;
+        let buf2 = ::mcx::vec_with_capacity_in(ssup.ssup_cxt, TEXTBUFLEN)?;
         let mut sss = VarStringSortSupport {
             buf1,
             buf2,

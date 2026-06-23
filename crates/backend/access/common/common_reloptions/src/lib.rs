@@ -50,7 +50,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use mcx::{Mcx, PgVec};
-use datum::datum::Datum;
+use ::datum::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERRCODE_WRONG_OBJECT_TYPE,
@@ -62,15 +62,15 @@ use types_reloptions::{
     VIEW_OPTION_CHECK_OPTION_CASCADED, VIEW_OPTION_CHECK_OPTION_LOCAL,
     VIEW_OPTION_CHECK_OPTION_NOT_SET,
 };
-use types_storage::lock::{
+use ::types_storage::lock::{
     AccessExclusiveLock, NoLock, ShareUpdateExclusiveLock, LOCKMODE,
 };
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX,
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE, RELKIND_VIEW,
 };
 
-use define_seams::DefElemArg;
+use ::define_seams::DefElemArg;
 
 /// `bits32` (`c.h`) — `uint32`.
 pub type bits32 = u32;
@@ -789,7 +789,7 @@ pub fn transformRelOptions(
 ) -> PgResult<Option<Datum>> {
     // Build the element strings, then emit the bare-word `text[]` Datum via the
     // construct seam. NOTE: this returns a bare in-`mcx` pointer word
-    // (`datum::Datum`), which is NOT carried on the `types_tuple::Datum`
+    // (`::datum::Datum`), which is NOT carried on the `::types_tuple::Datum`
     // by-reference lane the catalog write path deforms; callers that store the
     // result into a catalog tuple (CREATE INDEX, attoptions) must instead use
     // [`transformRelOptionsBytes`], which returns the array varlena image so it
@@ -816,7 +816,7 @@ pub fn transformRelOptions(
 }
 
 /// `transformRelOptions` returning the on-disk `text[]` array varlena image (the
-/// bytes a `types_tuple::Datum::ByRef` / `RefPayload::Varlena` carries), rather
+/// bytes a `::types_tuple::Datum::ByRef` / `RefPayload::Varlena` carries), rather
 /// than a bare in-`mcx` pointer word. This is the catalog-write form: the
 /// returned bytes are exactly what `pg_class.reloptions` / `pg_attribute.
 /// attoptions` store, so a consumer lowers them onto the by-reference Datum lane
@@ -974,7 +974,7 @@ fn transform_rel_options_strings(
             // have just "name", assume "name=true" is meant.
             let name = &def.defname;
             let value: String = if def.has_arg() {
-                let s = define_seams::def_get_string::call(mcx, def.defname.clone(), def.arg.clone())?;
+                let s = ::define_seams::def_get_string::call(mcx, def.defname.clone(), def.arg.clone())?;
                 s.as_str().to_string()
             } else {
                 "true".to_string()
@@ -987,7 +987,7 @@ fn transform_rel_options_strings(
 
             // Filter out WITH (oids = false); error on oids = true.
             if accept_oids_off && def.defnamespace.is_none() && name == "oids" {
-                if define_seams::def_get_boolean::call(def.defname.clone(), def.arg.clone())? {
+                if ::define_seams::def_get_boolean::call(def.defname.clone(), def.arg.clone())? {
                     return Err(PgError::error("tables declared WITH OIDS are not supported").with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
                 }
                 // skip over option, reloptions machinery doesn't know it
@@ -1710,9 +1710,9 @@ fn extract_rel_options_seam(
     relkind: u8,
     reloptions: Option<&[u8]>,
     amoptions: Option<types_core::Oid>,
-) -> PgResult<Option<types_reloptions::RdOptions>> {
-    use types_reloptions::RdOptions;
-    let scratch = mcx::MemoryContext::new("RelationParseRelOptions");
+) -> PgResult<Option<::types_reloptions::RdOptions>> {
+    use ::types_reloptions::RdOptions;
+    let scratch = ::mcx::MemoryContext::new("RelationParseRelOptions");
     let input = ExtractRelOptionsInput { relkind, reloptions };
     let parsed = extractRelOptions(scratch.mcx(), &input, amoptions)?;
     Ok(match parsed {
@@ -1729,7 +1729,7 @@ fn extract_rel_options_seam(
 /// non-null bytea (the ATTRIBUTE kind always has registered options). A scratch
 /// context holds the transient parse allocations.
 fn attribute_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<AttributeOpts> {
-    let scratch = mcx::MemoryContext::new("attribute_reloptions");
+    let scratch = ::mcx::MemoryContext::new("attribute_reloptions");
     let opts = attribute_reloptions(scratch.mcx(), Some(reloptions), validate)?;
     // C returns the (always non-null) bytea for a non-null datum of this kind.
     Ok(opts.unwrap_or_default())
@@ -1758,7 +1758,7 @@ fn build_reloptions_btree_seam(
     reloptions: Option<&[u8]>,
     validate: bool,
 ) -> PgResult<Option<Vec<u8>>> {
-    let scratch = mcx::MemoryContext::new("btoptions");
+    let scratch = ::mcx::MemoryContext::new("btoptions");
     let tab = [
         RelOptParseElt::new("fillfactor", RELOPT_TYPE_INT, 4),
         RelOptParseElt::new("vacuum_cleanup_index_scale_factor", RELOPT_TYPE_REAL, 8),
@@ -1775,7 +1775,7 @@ fn build_reloptions_hash_seam(
     reloptions: Option<&[u8]>,
     validate: bool,
 ) -> PgResult<Option<Vec<u8>>> {
-    let scratch = mcx::MemoryContext::new("hashoptions");
+    let scratch = ::mcx::MemoryContext::new("hashoptions");
     let tab = [RelOptParseElt::new("fillfactor", RELOPT_TYPE_INT, 4)];
     build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_HASH, 8, &tab)
 }
@@ -1792,7 +1792,7 @@ fn build_reloptions_spgist_seam(
     reloptions: Option<&[u8]>,
     validate: bool,
 ) -> PgResult<Option<Vec<u8>>> {
-    let scratch = mcx::MemoryContext::new("spgoptions");
+    let scratch = ::mcx::MemoryContext::new("spgoptions");
     let tab = [RelOptParseElt::new("fillfactor", RELOPT_TYPE_INT, 4)];
     build_reloptions(scratch.mcx(), reloptions, validate, RELOPT_KIND_SPGIST, 8, &tab)
 }
@@ -1811,7 +1811,7 @@ fn build_reloptions_gist_seam(
     reloptions: Option<&[u8]>,
     validate: bool,
 ) -> PgResult<Option<Vec<u8>>> {
-    let scratch = mcx::MemoryContext::new("gistoptions");
+    let scratch = ::mcx::MemoryContext::new("gistoptions");
     let tab = [
         RelOptParseElt::new("fillfactor", RELOPT_TYPE_INT, 4),
         RelOptParseElt::new("buffering", RELOPT_TYPE_ENUM, 8),
@@ -1834,7 +1834,7 @@ fn build_reloptions_brin_seam(
     reloptions: Option<&[u8]>,
     validate: bool,
 ) -> PgResult<Option<Vec<u8>>> {
-    let scratch = mcx::MemoryContext::new("brinoptions");
+    let scratch = ::mcx::MemoryContext::new("brinoptions");
     let tab = [
         RelOptParseElt::new("pages_per_range", RELOPT_TYPE_INT, 4),
         RelOptParseElt::new("autosummarize", RELOPT_TYPE_BOOL, 8),
@@ -1845,18 +1845,18 @@ fn build_reloptions_brin_seam(
 /// Seam target for `tablespace_reloptions(reloptions, validate)` (see
 /// [`attribute_reloptions_seam`]).
 fn tablespace_reloptions_seam(reloptions: &[u8], validate: bool) -> PgResult<TableSpaceOpts> {
-    let scratch = mcx::MemoryContext::new("tablespace_reloptions");
+    let scratch = ::mcx::MemoryContext::new("tablespace_reloptions");
     let opts = tablespace_reloptions(scratch.mcx(), Some(reloptions), validate)?;
     Ok(opts.unwrap_or_default())
 }
 
 /// Seam target for `init_local_reloptions(relopts, relopt_struct_size)`.
 ///
-/// Operates directly on the shared `types_reloptions::local_relopts` (the
+/// Operates directly on the shared `::types_reloptions::local_relopts` (the
 /// cross-crate seam type). Lossless, exactly mirroring C: clear the
 /// option/validator lists and record the struct size.
 fn init_local_reloptions_seam(
-    relopts: &mut types_reloptions::local_relopts,
+    relopts: &mut ::types_reloptions::local_relopts,
     relopt_struct_size: usize,
 ) {
     relopts.options.clear();
@@ -1867,14 +1867,14 @@ fn init_local_reloptions_seam(
 /// Seam target for `add_local_int_reloption(relopts, name, desc, default, min,
 /// max, offset)`.
 ///
-/// Operates on the shared `types_reloptions::local_relopts`, mirroring the C:
+/// Operates on the shared `::types_reloptions::local_relopts`, mirroring the C:
 /// `init_int_reloption(RELOPT_KIND_LOCAL, ...)` builds a `relopt_int` whose
 /// `relopt_gen` tail carries `default_val`/`min`/`max`, then
 /// `add_local_reloption` appends it at `offset`. The range/default are stored on
-/// the option's [`types_reloptions::relopt_typed::Int`] payload, so nothing is
+/// the option's [`::types_reloptions::relopt_typed::Int`] payload, so nothing is
 /// dropped at the seam boundary.
 fn add_local_int_reloption_seam(
-    relopts: &mut types_reloptions::local_relopts,
+    relopts: &mut ::types_reloptions::local_relopts,
     name: &str,
     desc: Option<&str>,
     default_val: i32,
@@ -1882,32 +1882,32 @@ fn add_local_int_reloption_seam(
     max_val: i32,
     offset: i32,
 ) {
-    let newoption = types_reloptions::relopt_gen {
+    let newoption = ::types_reloptions::relopt_gen {
         name: Some(name.to_string()),
         desc: desc.map(|d| d.to_string()),
-        kinds: RELOPT_KIND_LOCAL as types_reloptions::bits32,
+        kinds: RELOPT_KIND_LOCAL as ::types_reloptions::bits32,
         lockmode: 0,
         namelen: name.len() as i32,
-        type_: types_reloptions::relopt_type::RELOPT_TYPE_INT,
-        data: types_reloptions::relopt_typed::Int {
+        type_: ::types_reloptions::relopt_type::RELOPT_TYPE_INT,
+        data: ::types_reloptions::relopt_typed::Int {
             default_val,
             min: min_val,
             max: max_val,
         },
     };
     debug_assert!((offset as usize) < relopts.relopt_struct_size);
-    relopts.options.push(types_reloptions::local_relopt {
+    relopts.options.push(::types_reloptions::local_relopt {
         option: Some(Box::new(newoption)),
         offset,
     });
 }
 
 /// Rebuild the crate-internal [`LocalRelOpts`] from the shared
-/// `types_reloptions::local_relopts` an opclass `options` support procedure
+/// `::types_reloptions::local_relopts` an opclass `options` support procedure
 /// filled. The shared vocabulary is what crosses the fmgr `internal` lane (the
 /// `init_local_reloptions` / `add_local_*_reloption` seams operate on it); this
 /// reconstructs the typed-option list `build_local_reloptions` consumes.
-fn local_relopts_from_shared(shared: &types_reloptions::local_relopts) -> LocalRelOpts {
+fn local_relopts_from_shared(shared: &::types_reloptions::local_relopts) -> LocalRelOpts {
     use types_reloptions::{relopt_type as ST, relopt_typed};
     let mut out = LocalRelOpts {
         options: Vec::with_capacity(shared.options.len()),
@@ -1973,11 +1973,11 @@ fn local_relopts_from_shared(shared: &types_reloptions::local_relopts) -> LocalR
 /// AM-specific knowledge.
 fn index_build_local_reloptions_seam<'mcx>(
     procinfo: types_core::fmgr::FmgrInfo,
-    attoptions: types_tuple::Datum<'mcx>,
+    attoptions: ::types_tuple::Datum<'mcx>,
     validate: bool,
 ) -> PgResult<Option<Vec<u8>>> {
     // init_local_reloptions(&relopts, 0).
-    let mut shared = types_reloptions::local_relopts::default();
+    let mut shared = ::types_reloptions::local_relopts::default();
     reloptions_seams::init_local_reloptions::call(&mut shared, 0);
 
     // (void) FunctionCall1(procinfo, PointerGetDatum(&relopts)) — the opclass's
@@ -1992,19 +1992,19 @@ fn index_build_local_reloptions_seam<'mcx>(
     // (no options specified) is the by-value zero word.
     let relopts = local_relopts_from_shared(&shared);
     let options_bytes: Option<&[u8]> = match &attoptions {
-        types_tuple::Datum::ByRef(b) => Some(b.as_slice()),
+        ::types_tuple::Datum::ByRef(b) => Some(b.as_slice()),
         _ => None,
     };
-    let ctx = mcx::MemoryContext::new("index_build_local_reloptions");
+    let ctx = ::mcx::MemoryContext::new("index_build_local_reloptions");
     let bytes = build_local_reloptions(ctx.mcx(), &relopts, options_bytes, validate)?;
     Ok(Some(bytes))
 }
 
 /// Seam target for `add_local_real_reloption(relopts, name, desc, default, min,
-/// max, offset)`, operating on the shared `types_reloptions::local_relopts`
+/// max, offset)`, operating on the shared `::types_reloptions::local_relopts`
 /// (mirrors [`add_local_int_reloption_seam`] for the REAL type).
 fn add_local_real_reloption_seam(
-    relopts: &mut types_reloptions::local_relopts,
+    relopts: &mut ::types_reloptions::local_relopts,
     name: &str,
     desc: Option<&str>,
     default_val: f64,
@@ -2012,21 +2012,21 @@ fn add_local_real_reloption_seam(
     max_val: f64,
     offset: i32,
 ) {
-    let newoption = types_reloptions::relopt_gen {
+    let newoption = ::types_reloptions::relopt_gen {
         name: Some(name.to_string()),
         desc: desc.map(|d| d.to_string()),
-        kinds: RELOPT_KIND_LOCAL as types_reloptions::bits32,
+        kinds: RELOPT_KIND_LOCAL as ::types_reloptions::bits32,
         lockmode: 0,
         namelen: name.len() as i32,
-        type_: types_reloptions::relopt_type::RELOPT_TYPE_REAL,
-        data: types_reloptions::relopt_typed::Real {
+        type_: ::types_reloptions::relopt_type::RELOPT_TYPE_REAL,
+        data: ::types_reloptions::relopt_typed::Real {
             default_val,
             min: min_val,
             max: max_val,
         },
     };
     debug_assert!((offset as usize) < relopts.relopt_struct_size);
-    relopts.options.push(types_reloptions::local_relopt {
+    relopts.options.push(::types_reloptions::local_relopt {
         option: Some(Box::new(newoption)),
         offset,
     });

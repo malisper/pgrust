@@ -55,7 +55,7 @@ use core::cell::RefCell;
 use bufmask_seams::{
     mask_page_content, mask_page_hint_bits, mask_page_lsn_and_checksum, mask_unused_space,
 };
-use xlogreader_seams::xlog_rec_get_block_tag_extended;
+use ::xlogreader_seams::xlog_rec_get_block_tag_extended;
 use xlogutils::{XLogInitBufferForRedo, XLogReadBufferForRedo};
 use bufmgr_seams::{
     buffer_get_block_number, mark_buffer_dirty, unlock_release_buffer, with_buffer_page,
@@ -66,27 +66,27 @@ use page::{
 };
 use utils_error::{PgError, PgResult};
 
-use core_probe::ginpostinglist::{
+use ::core_probe::ginpostinglist::{
     ginCompressPostingList, ginMergeItemPointers, ginPostingListDecode,
 };
 use gindatapage as gdp;
-use gindatapage::datatree::GinDataPageAddPostingItem;
+use ::gindatapage::datatree::GinDataPageAddPostingItem;
 use ginutil::{GinInitBuffer, GinInitMetabuffer};
 
 use mcx::{Mcx, MemoryContext};
-use types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
-use types_error::error::PANIC;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
+use ::types_error::error::PANIC;
 use gin::{
     GinMetaPageData, GIN_COMPRESSED, GIN_DATA, GIN_DELETED, GIN_INCOMPLETE_SPLIT, GIN_LEAF,
     GIN_LIST, GIN_LIST_FULLROW, GIN_METAPAGE_BLKNO,
 };
-use types_storage::bufpage::SizeOfPageHeaderData;
-use types_storage::buf::{Buffer, BufferIsValid};
-use types_tuple::heaptuple::{
+use ::types_storage::bufpage::SizeOfPageHeaderData;
+use ::types_storage::buf::{Buffer, BufferIsValid};
+use ::types_tuple::heaptuple::{
     ItemPointerData, FIRST_OFFSET_NUMBER, INDEX_SIZE_MASK, INVALID_OFFSET_NUMBER,
 };
-use wal::rmgr::XLogReaderState;
-use wal::XLogRedoAction;
+use ::wal::rmgr::XLogReaderState;
+use ::wal::XLogRedoAction;
 
 #[cfg(test)]
 mod tests;

@@ -25,10 +25,10 @@
 
 extern crate alloc;
 
-use types_core::primitive::{BlockNumber, ForkNumber};
-use types_error::PgResult;
-use types_storage::buf::PgAioWaitRef as BufAioWaitRef;
-use types_storage::RelFileLocatorBackend;
+use ::types_core::primitive::{BlockNumber, ForkNumber};
+use ::types_error::PgResult;
+use ::types_storage::buf::PgAioWaitRef as BufAioWaitRef;
+use ::types_storage::RelFileLocatorBackend;
 
 use crate::aio::{
     ioh, pgaio_io_acquire, pgaio_io_get_wref, pgaio_io_stage, pgaio_wref_check_done,

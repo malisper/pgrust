@@ -5,7 +5,7 @@
 //! # Why a hook?
 //!
 //! Full tzdb zone names (e.g. `America/New_York`) are resolved by calling
-//! [`pgtime::pg_tzset`] directly -- a fully-implemented,
+//! [`::pgtime::pg_tzset`] directly -- a fully-implemented,
 //! safe-Rust tzdb loader that the rest of this crate already uses (see
 //! `DecodeTimezoneName`'s "full zone name" leg and the `UNKNOWN_FIELD` legs of
 //! `DecodeDateTime`/`DecodeTimeOnly`, all of which call `pg_tzset`).  No
@@ -34,7 +34,7 @@
 use core::cell::Cell;
 use std::rc::Rc;
 
-use pgtime::pg_tz;
+use ::pgtime::pg_tz;
 use types_datetime::{DTZ, DYNTZ, TZ};
 
 /// The result of resolving a timezone abbreviation against the runtime
@@ -123,7 +123,7 @@ impl TzAbbrev {
 /// Installable resolver for the one timezone lookup that the rest of this
 /// crate cannot perform on its own: the runtime abbreviation table.  (Full
 /// tzdb zone names are resolved directly via
-/// [`pgtime::pg_tzset`] and need no resolver.)  Mirrors the
+/// [`::pgtime::pg_tzset`] and need no resolver.)  Mirrors the
 /// role of `regex_core::RegexCollationResolver`.
 pub trait TimezoneResolver: Sync {
     /// Resolve a timezone abbreviation against the runtime abbreviation table

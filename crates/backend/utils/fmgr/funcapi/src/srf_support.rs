@@ -6,9 +6,9 @@
 //! shutdown callback. Also hosts the two thin fmgr-call-frame seam readers the
 //! inward seam crate exposes (`srf_arg0_oid`, `cstring_get_text_datum`).
 
-use utils_error::ereport;
-use mcx::Mcx;
-use types_core::Oid;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 // The canonical unified value (Datum-unification keystone): the public funcapi
 // seams (`materialized_srf_putvalues`, `cstring_get_text_datum`) carry it.
 // `materialized_srf_putvalues` threads it straight through to the
@@ -16,15 +16,15 @@ use types_core::Oid;
 // Wave 7). `cstring_get_text_datum` bridges the still-bare-word `cstring_to_text`
 // varlena seam at that audited ABI edge: its returned pointer word is carried in
 // the canonical by-value arm here, with no shim type held by funcapi.
-use types_tuple::heaptuple::Datum as DatumV;
-use types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED;
+use ::types_tuple::heaptuple::Datum as DatumV;
+use ::types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED;
 use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::{
     FuncCallContext, ReturnSetInfo, SetFunctionReturnMode, TypeFuncClass, MAT_SRF_BLESS,
     MAT_SRF_USE_EXPECTED_DESC, SFRM_Materialize, SFRM_Materialize_Random,
 };
-use types_tuple::heaptuple::RECORDOID;
+use ::types_tuple::heaptuple::RECORDOID;
 
 use crate::result_type::internal_get_result_type;
 
@@ -135,7 +135,7 @@ pub fn InitMaterializedSRF<'mcx>(
     //
     // C: if (flags & MAT_SRF_USE_EXPECTED_DESC)
     //        stored_tupdesc = CreateTupleDescCopy(rsinfo->expectedDesc);
-    let mut stored_tupdesc: types_tuple::heaptuple::TupleDesc<'mcx> =
+    let mut stored_tupdesc: ::types_tuple::heaptuple::TupleDesc<'mcx> =
         if (flags & MAT_SRF_USE_EXPECTED_DESC) != 0 {
             let expected = fcinfo_ref
                 .resultinfo
@@ -145,7 +145,7 @@ pub fn InitMaterializedSRF<'mcx>(
                     "InitMaterializedSRF: MAT_SRF_USE_EXPECTED_DESC checked rsinfo->expectedDesc != NULL above",
                 );
             let copy = tupdesc_seams::create_tuple_desc_copy::call(mcx, expected)?;
-            Some(mcx::alloc_in(mcx, copy)?)
+            Some(::mcx::alloc_in(mcx, copy)?)
         } else {
             // C: if (get_call_result_type(fcinfo, NULL, &stored_tupdesc)
             //         != TYPEFUNC_COMPOSITE)
@@ -224,7 +224,7 @@ pub fn InitMaterializedSRF<'mcx>(
 /// `setResult`/`setDesc` assignment.
 pub fn init_materialized_srf_with_desc<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-    setdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+    setdesc: ::types_tuple::heaptuple::TupleDesc<'mcx>,
 ) -> PgResult<()> {
     // rsi = (ReturnSetInfo *) fcinfo->resultinfo;
     // if (!rsi || !IsA(rsi, ReturnSetInfo)) ereport("set-valued function ...")
@@ -493,7 +493,7 @@ pub fn srf_arg_int64<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>, n: usize) ->
 pub fn srf_arg_lsn<'mcx>(
     fcinfo: &FunctionCallInfoBaseData<'mcx>,
     n: usize,
-) -> types_core::XLogRecPtr {
+) -> ::types_core::XLogRecPtr {
     // C: #define PG_GETARG_LSN(n) DatumGetLSN(PG_GETARG_DATUM(n))
     //    #define DatumGetLSN(X) ((XLogRecPtr) GET_8_BYTES(X))
     fcinfo.args[n].value.as_u64()
@@ -519,7 +519,7 @@ pub fn srf_arg_varlena_bytes<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData<'mcx>,
     n: usize,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     use ::nodes::fmgr::FmgrArgRef;
 
     // C: PG_GETARG_TEXT_PP / PG_GETARG_JSONB_P detoast the by-reference arg via
@@ -587,9 +587,9 @@ pub fn srf_arg_record<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData<'mcx>,
     n: usize,
-) -> PgResult<types_tuple::heaptuple::FormedTuple<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::FormedTuple<'mcx>> {
     use ::nodes::fmgr::FmgrArgRef;
-    use types_tuple::heaptuple::FormedTuple;
+    use ::types_tuple::heaptuple::FormedTuple;
 
     // C: rec = PG_GETARG_HEAPTUPLEHEADER(n) — detoast the by-reference composite
     // argument. The owned lane carries the detoasted, header-ful composite-Datum
@@ -661,7 +661,7 @@ mod srf_protocol_tests {
     use super::*;
     use core::any::Any;
     use mcx::{MemoryContext, PgBox};
-    use datum::NullableDatum;
+    use ::datum::NullableDatum;
     use ::nodes::execexpr::ExprDoneCond;
     use ::nodes::funcapi::{ReturnSetInfo, SFRM_ValuePerCall};
 
@@ -682,7 +682,7 @@ mod srf_protocol_tests {
         mcx: Mcx<'mcx>,
         v: T,
     ) -> PgResult<PgBox<'mcx, dyn Any>> {
-        let boxed = mcx::alloc_in(mcx, v)?;
+        let boxed = ::mcx::alloc_in(mcx, v)?;
         let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
         // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast
         // only attaches the `dyn Any` vtable.
@@ -784,7 +784,7 @@ mod srf_protocol_tests {
             nargs: args.len() as i16,
             args: args
                 .iter()
-                .map(|&v| NullableDatum::value(datum::Datum::from_i32(v)))
+                .map(|&v| NullableDatum::value(::datum::Datum::from_i32(v)))
                 .collect(),
             fn_mcxt: Some(mcx),
             ..Default::default()

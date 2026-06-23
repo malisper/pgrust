@@ -4,8 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use control::ControlFileData;
-use types_error::PgResult;
+use ::control::ControlFileData;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `get_controlfile(DataDir, &crc_ok)` (controldata_utils.c): read and

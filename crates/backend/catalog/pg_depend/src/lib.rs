@@ -24,11 +24,11 @@
 #![allow(clippy::result_large_err)]
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     CONSTRAINT_RELATION_ID, EXTENSION_RELATION_ID, RELATION_RELATION_ID, RELKIND_SEQUENCE,
     TYPE_RELATION_ID,
 };
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     Anum_pg_depend_classid, Anum_pg_depend_deptype, Anum_pg_depend_objid,
     Anum_pg_depend_objsubid, Anum_pg_depend_refclassid, Anum_pg_depend_refobjid,
     Anum_pg_depend_refobjsubid, DependDependerIndexId, DependReferenceIndexId, DependencyType,
@@ -36,24 +36,24 @@ use types_catalog::catalog_dependency::{
     DEPENDENCY_AUTO_EXTENSION, DEPENDENCY_EXTENSION, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     DEPEND_RELATION_ID,
 };
-use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
-use types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERROR,
 };
-use rel::RelationData;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessShareLock, RowExclusiveLock, LOCKMODE};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::RelationData;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessShareLock, RowExclusiveLock, LOCKMODE};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
-use pg_depend_seams::TypeRefererRow;
+use ::pg_depend_seams::TypeRefererRow;
 use table as table;
-use rel::Relation;
+use ::rel::Relation;
 use catalog_seams as catalog_seams;
 use indexing_seams as indexing_seams;
 use objectaddress_seams as objectaddress_seams;

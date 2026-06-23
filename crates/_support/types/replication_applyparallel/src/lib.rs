@@ -8,7 +8,7 @@
 //! fields, so the `shm_mq_handle`/`dsm_segment`/`FileSet` substrate
 //! applyparallelworker owns is not modeled here.
 
-use types_core::primitive::{TransactionId, XLogRecPtr};
+use ::types_core::primitive::{TransactionId, XLogRecPtr};
 
 /// `ParallelTransState` (worker_internal.h) — commit-ordering state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

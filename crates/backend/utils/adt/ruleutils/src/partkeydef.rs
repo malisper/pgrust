@@ -15,7 +15,7 @@
 use alloc::format;
 use alloc::string::String;
 use mcx::{Mcx, PgString};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use types_partition::{
     PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
@@ -130,7 +130,7 @@ pub fn pg_get_partkeydef_worker<'mcx>(
             // The partexprs cells are bare `Expr`s; wrap as a Node for the
             // deparse engine / nodeFuncs.
             let node = nodes::nodes::Node::mk_expr(mcx, partkey.clone_in(mcx)?)?;
-            let node_box = mcx::alloc_in(mcx, node)?;
+            let node_box = ::mcx::alloc_in(mcx, node)?;
 
             // str = deparse_expression_pretty(partkey, context, false, false, ...).
             let context = deparse_context_for(mcx, relname.as_str(), relid)?;

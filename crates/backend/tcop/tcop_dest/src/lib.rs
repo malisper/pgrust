@@ -76,14 +76,14 @@ extern crate alloc;
 
 use core::cell::RefCell;
 
-use mcx::Mcx;
-use types_dest::CommandDest;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_dest::CommandDest;
+use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
 use portal::{CommandTag, QueryCompletion};
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 
 // Protocol message-type bytes (`protocol.h` / `PqMsg_*`). Defined locally,
 // mirroring the per-crate convention in `printtup`/`explain_dr`/`auth` (there is

@@ -39,24 +39,24 @@ use alloc::format;
 use mcx::{Mcx, PgString, PgVec};
 
 use types_core::{AttrNumber, Index, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
-use types_core::catalog::INT4OID;
-use types_tuple::heaptuple::RECORDOID;
+use ::types_core::catalog::INT4OID;
+use ::types_tuple::heaptuple::RECORDOID;
 
 /// `RECORDARRAYOID` (`catalog/pg_type_d.h`) — OID of the `record[]` type. Not
 /// re-exported by the type-OID crates yet; carried locally (used by the CTE
 /// SEARCH/CYCLE extra-column arms).
 const RECORDARRAYOID: Oid = 2287;
 
-use types_acl::acl::ACL_SELECT;
+use ::types_acl::acl::ACL_SELECT;
 
-use types_storage::lock::{AccessShareLock, RowExclusiveLock, RowShareLock, NoLock, LOCKMODE};
+use ::types_storage::lock::{AccessShareLock, RowExclusiveLock, RowShareLock, NoLock, LOCKMODE};
 
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     FirstLowInvalidHeapAttributeNumber,
     TableOidAttributeNumber, TupleDescData,
 };
-use types_tuple::access::RELKIND_COMPOSITE_TYPE;
-use types_tuple::access::RELPERSISTENCE_TEMP;
+use ::types_tuple::access::RELKIND_COMPOSITE_TYPE;
+use ::types_tuple::access::RELPERSISTENCE_TEMP;
 
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::nodes::CmdType::CMD_SELECT;
@@ -77,16 +77,16 @@ use ::nodes::parsestmt::ParseExprKind::{
 use ::nodes::copy_query::Query;
 use ::nodes::queryenvironment::ENR_NAMED_TUPLESTORE;
 
-use types_error::error::{
+use ::types_error::error::{
     ERRCODE_AMBIGUOUS_ALIAS, ERRCODE_AMBIGUOUS_COLUMN, ERRCODE_DUPLICATE_ALIAS,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_TABLE,
 };
 use types_error::{PgResult, ERROR};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use nodes_core::makefuncs::{make_alias, make_null_const, make_target_entry, make_var};
+use ::nodes_core::makefuncs::{make_alias, make_null_const, make_target_entry, make_var};
 
 use small1_seams as small1_seam;
 use lsyscache_seams as lsyscache;
@@ -112,7 +112,7 @@ fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
     let node = Node::mk_string(mcx, StringNode {
         sval: PgString::from_str_in(s, mcx)?,
     })?;
-    mcx::alloc_in(mcx, node)
+    ::mcx::alloc_in(mcx, node)
 }
 
 /// `strVal(node)` — read a `String` node's contents.
@@ -129,18 +129,18 @@ fn var_node<'mcx>(mcx: Mcx<'mcx>, var: Var) -> PgResult<Node<'mcx>> {
 }
 
 /// `NameStr(attr->attname)` (a `NameData` carries NUL-terminated bytes).
-fn attname_str(attr: &types_tuple::heaptuple::FormData_pg_attribute) -> &str {
+fn attname_str(attr: &::types_tuple::heaptuple::FormData_pg_attribute) -> &str {
     let bytes = attr.attname.name_str();
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     core::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
 /// Convert a parse-tree [`RangeVar`] (`::nodes::rawnodes::RangeVar`) into the
-/// access-layer `types_tuple::access::RangeVar` that `table_openrv_extended` /
+/// access-layer `::types_tuple::access::RangeVar` that `table_openrv_extended` /
 /// `RangeVarGetRelid` consume. (The two RangeVar models are an inherited split;
 /// the access layer's variant carries no alias.)
-fn to_access_range_var(rv: &RangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &RangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),
         relname: rv.relname.as_deref().unwrap_or("").into(),
@@ -1271,7 +1271,7 @@ fn markRTEForSelectPriv<'mcx>(
         perminfo.requiredPerms |= ACL_SELECT;
         // Must offset the attnum to fit in a bitmapset.
         let existing = perminfo.selectedCols.take();
-        let added = nodes_core::bitmapset::bms_add_member(
+        let added = ::nodes_core::bitmapset::bms_add_member(
             mcx,
             existing,
             col as i32 - FirstLowInvalidHeapAttributeNumber as i32,
@@ -1485,7 +1485,7 @@ fn buildNSItemFromTupleDesc<'mcx>(
     let eref = rte.eref.as_deref().expect("eref set");
     debug_assert!(maxattrs == eref.colnames.len());
 
-    let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> = mcx::vec_with_capacity_in(mcx, maxattrs)?;
+    let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> = ::mcx::vec_with_capacity_in(mcx, maxattrs)?;
     for varattno in 0..maxattrs {
         let attr = tupdesc.attr(varattno);
         let mut nscol = ParseNamespaceColumn::default();
@@ -1503,11 +1503,11 @@ fn buildNSItemFromTupleDesc<'mcx>(
     }
 
     Ok(ParseNamespaceItem {
-        p_names: Some(mcx::alloc_in(mcx, eref.clone_in(mcx)?)?),
-        p_rte: Some(mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
+        p_names: Some(::mcx::alloc_in(mcx, eref.clone_in(mcx)?)?),
+        p_rte: Some(::mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
         p_rtindex: rtindex as i32,
         p_perminfo: match perminfo {
-            Some(p) => Some(mcx::alloc_in(mcx, p.clone_in(mcx)?)?),
+            Some(p) => Some(::mcx::alloc_in(mcx, p.clone_in(mcx)?)?),
             None => None,
         },
         p_nscolumns: nscolumns,
@@ -1534,7 +1534,7 @@ fn buildNSItemFromLists<'mcx>(
     debug_assert!(maxattrs == coltypmods.len());
     debug_assert!(maxattrs == colcollations.len());
 
-    let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> = mcx::vec_with_capacity_in(mcx, maxattrs)?;
+    let mut nscolumns: PgVec<'mcx, ParseNamespaceColumn> = ::mcx::vec_with_capacity_in(mcx, maxattrs)?;
     for varattno in 0..maxattrs {
         let mut nscol = ParseNamespaceColumn::default();
         nscol.p_varno = rtindex;
@@ -1548,8 +1548,8 @@ fn buildNSItemFromLists<'mcx>(
     }
 
     Ok(ParseNamespaceItem {
-        p_names: Some(mcx::alloc_in(mcx, eref.clone_in(mcx)?)?),
-        p_rte: Some(mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
+        p_names: Some(::mcx::alloc_in(mcx, eref.clone_in(mcx)?)?),
+        p_rte: Some(::mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
         p_rtindex: rtindex as i32,
         p_perminfo: None,
         p_nscolumns: nscolumns,
@@ -1647,7 +1647,7 @@ pub fn addRangeTableEntry<'mcx>(
     let mut rte = RangeTblEntry::new_in(mcx);
     rte.rtekind = RTE_RELATION;
     rte.alias = match &alias {
-        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         None => None,
     };
     rte.relid = rel.rd_id;
@@ -1662,11 +1662,11 @@ pub fn addRangeTableEntry<'mcx>(
         None => None,
     };
     buildRelationAliases(mcx, &rel.rd_att, alias_for_build.as_mut(), &mut eref)?;
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
     // The user alias's colnames may have been rebuilt; re-store the (rebuilt)
     // user alias on the RTE so it matches C (which stored the same pointer).
     if let Some(a) = alias_for_build {
-        rte.alias = Some(mcx::alloc_in(mcx, a)?);
+        rte.alias = Some(::mcx::alloc_in(mcx, a)?);
     }
 
     rte.lateral = false;
@@ -1714,7 +1714,7 @@ pub fn addRangeTableEntryForRelation<'mcx>(
     let mut rte = RangeTblEntry::new_in(mcx);
     rte.rtekind = RTE_RELATION;
     rte.alias = match &alias {
-        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         None => None,
     };
     rte.relid = rel.rd_id;
@@ -1725,9 +1725,9 @@ pub fn addRangeTableEntryForRelation<'mcx>(
     let mut eref = make_alias(mcx, refname_owned.as_str(), PgVec::new_in(mcx))?;
     let mut alias_for_build = alias;
     buildRelationAliases(mcx, &rel.rd_att, alias_for_build.as_mut(), &mut eref)?;
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
     if let Some(a) = alias_for_build {
-        rte.alias = Some(mcx::alloc_in(mcx, a)?);
+        rte.alias = Some(::mcx::alloc_in(mcx, a)?);
     }
 
     rte.lateral = false;
@@ -1779,9 +1779,9 @@ pub fn addRangeTableEntryForSubquery<'mcx>(
             eref.colnames.push(make_string_node(mcx, attrname)?);
         }
         let expr = te.expr.as_deref();
-        coltypes.push(nodes_core::nodefuncs::expr_type(expr)?);
-        coltypmods.push(nodes_core::nodefuncs::expr_typmod(expr)?);
-        colcollations.push(nodes_core::nodefuncs::expr_collation(expr)?);
+        coltypes.push(::nodes_core::nodefuncs::expr_type(expr)?);
+        coltypmods.push(::nodes_core::nodefuncs::expr_typmod(expr)?);
+        colcollations.push(::nodes_core::nodefuncs::expr_collation(expr)?);
     }
     if varattno < numaliases {
         let aliasname = eref.aliasname.as_deref().unwrap_or("");
@@ -1793,12 +1793,12 @@ pub fn addRangeTableEntryForSubquery<'mcx>(
             .into_error());
     }
 
-    rte.subquery = Some(mcx::alloc_in(mcx, subquery)?);
+    rte.subquery = Some(::mcx::alloc_in(mcx, subquery)?);
     rte.alias = match &alias {
-        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         None => None,
     };
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
     rte.lateral = lateral;
     rte.inFromCl = in_from_cl;
 
@@ -1829,7 +1829,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
     use ::nodes::funcapi::TypeFuncClass;
     use ::nodes::primnodes::Expr;
-    use types_tuple::heaptuple::{INT8OID, MaxHeapAttributeNumber, MaxTupleAttributeNumber};
+    use ::types_tuple::heaptuple::{INT8OID, MaxHeapAttributeNumber, MaxTupleAttributeNumber};
 
     let mut rte = RangeTblEntry::new_in(mcx);
     let nfuncs = funcexprs.len() as i32;
@@ -1865,7 +1865,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
         // C: RangeTblFunction *rtfunc = makeNode(RangeTblFunction);
         //    rtfunc->funcexpr = funcexpr; (lists initialized NIL; funcparams NULL)
         let mut rtfunc = ::nodes::rawnodes::RangeTblFunction {
-            funcexpr: Some(mcx::alloc_in(mcx, (**funcexpr_node).clone_in(mcx)?)?),
+            funcexpr: Some(::mcx::alloc_in(mcx, (**funcexpr_node).clone_in(mcx)?)?),
             funccolcount: 0,
             funccolnames: PgVec::new_in(mcx),
             funccoltypes: PgVec::new_in(mcx),
@@ -1898,15 +1898,15 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                     // If the function's raw result type is RECORD, we resolved
                     // it using OUT parameters. Otherwise it's a named composite.
                     let loc = expr_location_of_list(coldeflist)?;
-                    if nodes_core::nodefuncs::expr_type(funcexpr_expr)? == RECORDOID {
+                    if ::nodes_core::nodefuncs::expr_type(funcexpr_expr)? == RECORDOID {
                         return Err(ereport(ERROR)
-                            .errcode(types_error::error::ERRCODE_SYNTAX_ERROR)
+                            .errcode(::types_error::error::ERRCODE_SYNTAX_ERROR)
                             .errmsg("a column definition list is redundant for a function with OUT parameters")
                             .errposition(parser_errposition(pstate, loc))
                             .into_error());
                     } else {
                         return Err(ereport(ERROR)
-                            .errcode(types_error::error::ERRCODE_SYNTAX_ERROR)
+                            .errcode(::types_error::error::ERRCODE_SYNTAX_ERROR)
                             .errmsg("a column definition list is redundant for a function returning a named composite type")
                             .errposition(parser_errposition(pstate, loc))
                             .into_error());
@@ -1915,7 +1915,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                 _ => {
                     let loc = expr_location_of_list(coldeflist)?;
                     return Err(ereport(ERROR)
-                        .errcode(types_error::error::ERRCODE_SYNTAX_ERROR)
+                        .errcode(::types_error::error::ERRCODE_SYNTAX_ERROR)
                         .errmsg("a column definition list is only allowed for functions returning \"record\"")
                         .errposition(parser_errposition(pstate, loc))
                         .into_error());
@@ -1923,11 +1923,11 @@ pub fn addRangeTableEntryForFunction<'mcx>(
             }
         } else if functypclass == Some(TypeFuncClass::Record) {
             return Err(ereport(ERROR)
-                .errcode(types_error::error::ERRCODE_SYNTAX_ERROR)
+                .errcode(::types_error::error::ERRCODE_SYNTAX_ERROR)
                 .errmsg("a column definition list is required for functions returning \"record\"")
                 .errposition(parser_errposition(
                     pstate,
-                    nodes_core::nodefuncs::expr_location(funcexpr_expr)?,
+                    ::nodes_core::nodefuncs::expr_location(funcexpr_expr)?,
                 ))
                 .into_error());
         }
@@ -1957,14 +1957,14 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                     1,
                     Some(colname.as_str()),
                     funcrettype,
-                    nodes_core::nodefuncs::expr_typmod(funcexpr_expr)?,
+                    ::nodes_core::nodefuncs::expr_typmod(funcexpr_expr)?,
                     0,
                 )?;
                 // C: TupleDescInitEntryCollation(tupdesc, 1, exprCollation(funcexpr));
                 tupdesc::TupleDescInitEntryCollation(
                     &mut td,
                     1,
-                    nodes_core::nodefuncs::expr_collation(funcexpr_expr)?,
+                    ::nodes_core::nodefuncs::expr_collation(funcexpr_expr)?,
                 )?;
                 td
             }
@@ -2008,7 +2008,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                     // C: if (n->typeName->setof) ereport(ERROR, INVALID_TABLE_DEFINITION, ...)
                     if type_name.setof {
                         return Err(ereport(ERROR)
-                            .errcode(types_error::error::ERRCODE_INVALID_TABLE_DEFINITION)
+                            .errcode(::types_error::error::ERRCODE_INVALID_TABLE_DEFINITION)
                             .errmsg(format!("column \"{attrname}\" cannot be declared SETOF"))
                             .errposition(parser_errposition(pstate, n.location))
                             .into_error());
@@ -2057,7 +2057,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
             _ => {
                 // C: ereport(ERROR, DATATYPE_MISMATCH, "function ... has unsupported return type ...")
                 return Err(ereport(ERROR)
-                    .errcode(types_error::error::ERRCODE_DATATYPE_MISMATCH)
+                    .errcode(::types_error::error::ERRCODE_DATATYPE_MISMATCH)
                     .errmsg(format!(
                         "function \"{}\" in FROM has unsupported return type {}",
                         funcname.as_str(),
@@ -2065,7 +2065,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
                     ))
                     .errposition(parser_errposition(
                         pstate,
-                        nodes_core::nodefuncs::expr_location(funcexpr_expr)?,
+                        ::nodes_core::nodefuncs::expr_location(funcexpr_expr)?,
                     ))
                     .into_error());
             }
@@ -2075,7 +2075,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
         rtfunc.funccolcount = final_tupdesc.natts;
         // C: rte->functions = lappend(rte->functions, rtfunc);
         rte.functions
-            .push(mcx::alloc_in(mcx, Node::mk_range_tbl_function(mcx, rtfunc)?)?);
+            .push(::mcx::alloc_in(mcx, Node::mk_range_tbl_function(mcx, rtfunc)?)?);
 
         // C: functupdescs[funcno] = tupdesc; totalatts += tupdesc->natts;
         totalatts += final_tupdesc.natts;
@@ -2141,11 +2141,11 @@ pub fn addRangeTableEntryForFunction<'mcx>(
     // C: rte->alias = alias (the rangefunc alias, with colnames as rebuilt by
     // buildRelationAliases so they are 1-to-1 with physical columns).
     rte.alias = match alias_for_build {
-        Some(a) => Some(mcx::alloc_in(mcx, a)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a)?),
         None => None,
     };
 
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
 
     // C: rte->lateral = lateral; rte->inFromCl = inFromCl;
     rte.lateral = lateral;
@@ -2167,7 +2167,7 @@ fn expr_location_of_list<'mcx>(list: &PgVec<'mcx, NodePtr<'mcx>>) -> PgResult<i3
     match list.first() {
         Some(first) => {
             if let Some(e) = first.as_expr() {
-                return nodes_core::nodefuncs::expr_location(Some(e));
+                return ::nodes_core::nodefuncs::expr_location(Some(e));
             }
             match first.node_tag() {
                 ntag::T_ColumnDef => Ok(first.expect_columndef().location),
@@ -2190,9 +2190,9 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use types_error::error::ERRCODE_TOO_MANY_COLUMNS;
+    use ::types_error::error::ERRCODE_TOO_MANY_COLUMNS;
     use ::nodes::primnodes::TFT_XMLTABLE;
-    use types_tuple::heaptuple::MaxTupleAttributeNumber;
+    use ::types_tuple::heaptuple::MaxTupleAttributeNumber;
 
     // The column lists are populated by the caller (transformRangeTableFunc /
     // transformJsonTable).
@@ -2223,7 +2223,7 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
     // Snapshot the column lists for the RTE / buildNSItemFromLists before we
     // move `tf` into the RTE's `tablefunc` field.
     let coltypes_snap: PgVec<'mcx, Oid> = {
-        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, colnames_len)?;
         if let Some(ct) = coltypes {
             for t in ct.iter() {
                 v.push(*t);
@@ -2232,7 +2232,7 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
         v
     };
     let coltypmods_snap: PgVec<'mcx, i32> = {
-        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, colnames_len)?;
         if let Some(ct) = coltypmods {
             for t in ct.iter() {
                 v.push(*t);
@@ -2241,7 +2241,7 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
         v
     };
     let colcollations_snap: PgVec<'mcx, Oid> = {
-        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, colnames_len)?;
         if let Some(cc) = colcollations {
             for t in cc.iter() {
                 v.push(*t);
@@ -2258,21 +2258,21 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
 
     // rte->coltypes/coltypmods/colcollations = tf->...
     rte.coltypes = {
-        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, colnames_len)?;
         for t in coltypes_snap.iter() {
             v.push(*t);
         }
         v
     };
     rte.coltypmods = {
-        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, colnames_len)?;
         for t in coltypmods_snap.iter() {
             v.push(*t);
         }
         v
     };
     rte.colcollations = {
-        let mut v = mcx::vec_with_capacity_in(mcx, colnames_len)?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, colnames_len)?;
         for t in colcollations_snap.iter() {
             v.push(*t);
         }
@@ -2280,7 +2280,7 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
     };
 
     // rte->tablefunc = tf  (store the TableFunc as a Node).
-    rte.tablefunc = Some(mcx::alloc_in(mcx, Node::mk_table_func(mcx, tf)?)?);
+    rte.tablefunc = Some(::mcx::alloc_in(mcx, Node::mk_table_func(mcx, tf)?)?);
 
     // refname = alias ? alias->aliasname : ("xmltable" | "json_table")
     let refname_owned: String = match &alias {
@@ -2322,10 +2322,10 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
     }
 
     rte.alias = match &alias {
-        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         None => None,
     };
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
 
     // Tablefuncs are never checked for access rights, so no addRTEPermissionInfo.
     rte.lateral = lateral;
@@ -2403,26 +2403,26 @@ pub fn addRangeTableEntryForValues<'mcx>(
     rte.coltypmods = coltypmods;
     rte.colcollations = colcollations;
     rte.alias = match &alias {
-        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         None => None,
     };
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
     rte.lateral = lateral;
     rte.inFromCl = in_from_cl;
 
     // Snapshot the column lists for buildNSItemFromLists.
     let coltypes_snap: PgVec<'mcx, Oid> = {
-        let mut v = mcx::vec_with_capacity_in(mcx, rte.coltypes.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, rte.coltypes.len())?;
         for t in rte.coltypes.iter() { v.push(*t); }
         v
     };
     let coltypmods_snap: PgVec<'mcx, i32> = {
-        let mut v = mcx::vec_with_capacity_in(mcx, rte.coltypmods.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, rte.coltypmods.len())?;
         for t in rte.coltypmods.iter() { v.push(*t); }
         v
     };
     let colcollations_snap: PgVec<'mcx, Oid> = {
-        let mut v = mcx::vec_with_capacity_in(mcx, rte.colcollations.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, rte.colcollations.len())?;
         for t in rte.colcollations.iter() { v.push(*t); }
         v
     };
@@ -2473,11 +2473,11 @@ pub fn addRangeTableEntryForJoin<'mcx>(
     rte.joinleftcols = leftcols;
     rte.joinrightcols = rightcols;
     rte.join_using_alias = match &join_using_alias {
-        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         None => None,
     };
     rte.alias = match &alias {
-        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         None => None,
     };
 
@@ -2505,7 +2505,7 @@ pub fn addRangeTableEntryForJoin<'mcx>(
             .into_error());
     }
 
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
     rte.lateral = false;
     rte.inFromCl = in_from_cl;
 
@@ -2515,8 +2515,8 @@ pub fn addRangeTableEntryForJoin<'mcx>(
     let eref_clone = rte_ref.eref.as_deref().expect("eref set").clone_in(mcx)?;
 
     Ok(ParseNamespaceItem {
-        p_names: Some(mcx::alloc_in(mcx, eref_clone)?),
-        p_rte: Some(mcx::alloc_in(mcx, rte_ref.clone_in(mcx)?)?),
+        p_names: Some(::mcx::alloc_in(mcx, eref_clone)?),
+        p_rte: Some(::mcx::alloc_in(mcx, rte_ref.clone_in(mcx)?)?),
         p_perminfo: None,
         p_rtindex: rtindex as i32,
         p_nscolumns: nscolumns,
@@ -2581,12 +2581,12 @@ pub fn addRangeTableEntryForCTE<'mcx>(
         }
     }
 
-    rte.coltypes = mcx::slice_in(mcx, &cte.ctecoltypes)?;
-    rte.coltypmods = mcx::slice_in(mcx, &cte.ctecoltypmods)?;
-    rte.colcollations = mcx::slice_in(mcx, &cte.ctecolcollations)?;
+    rte.coltypes = ::mcx::slice_in(mcx, &cte.ctecoltypes)?;
+    rte.coltypmods = ::mcx::slice_in(mcx, &cte.ctecoltypmods)?;
+    rte.colcollations = ::mcx::slice_in(mcx, &cte.ctecolcollations)?;
 
     rte.alias = match alias {
-        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         None => None,
     };
     let mut eref = match alias {
@@ -2600,7 +2600,7 @@ pub fn addRangeTableEntryForCTE<'mcx>(
     for lc in cte.ctecolnames.iter() {
         varattno += 1;
         if varattno > numaliases {
-            eref.colnames.push(mcx::alloc_in(mcx, lc.clone_in(mcx)?)?);
+            eref.colnames.push(::mcx::alloc_in(mcx, lc.clone_in(mcx)?)?);
         }
     }
     if varattno < numaliases {
@@ -2612,7 +2612,7 @@ pub fn addRangeTableEntryForCTE<'mcx>(
             .into_error());
     }
 
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
 
     let mut n_dontexpand_columns = 0usize;
 
@@ -2653,9 +2653,9 @@ pub fn addRangeTableEntryForCTE<'mcx>(
 
     // Snapshot the column lists for buildNSItemFromLists (matches C reading the
     // appended lists).
-    let coltypes_copy = mcx::slice_in(mcx, &rte.coltypes)?;
-    let coltypmods_copy = mcx::slice_in(mcx, &rte.coltypmods)?;
-    let colcollations_copy = mcx::slice_in(mcx, &rte.colcollations)?;
+    let coltypes_copy = ::mcx::slice_in(mcx, &rte.coltypes)?;
+    let coltypmods_copy = ::mcx::slice_in(mcx, &rte.coltypmods)?;
+    let colcollations_copy = ::mcx::slice_in(mcx, &rte.colcollations)?;
     let ctelevelsup = rte.ctelevelsup;
 
     pstate.p_rtable.push(rte);
@@ -2738,7 +2738,7 @@ pub fn addRangeTableEntryForENR<'mcx>(
         None => None,
     };
     buildRelationAliases(mcx, tupdesc, alias_for_build.as_mut(), &mut eref)?;
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
 
     // Record additional data for ENR, including column type info.
     rte.enrname = Some(enrname);
@@ -2801,14 +2801,14 @@ pub fn addRangeTableEntryForGroup<'mcx>(
             Some(e) => Node::mk_expr(mcx, e.clone_in(mcx)?)?,
             None => panic!("addRangeTableEntryForGroup: group clause has no expr"),
         };
-        groupexprs.push(mcx::alloc_in(mcx, expr_node)?);
+        groupexprs.push(::mcx::alloc_in(mcx, expr_node)?);
 
-        coltypes.push(nodes_core::nodefuncs::expr_type(expr)?);
-        coltypmods.push(nodes_core::nodefuncs::expr_typmod(expr)?);
-        colcollations.push(nodes_core::nodefuncs::expr_collation(expr)?);
+        coltypes.push(::nodes_core::nodefuncs::expr_type(expr)?);
+        coltypmods.push(::nodes_core::nodefuncs::expr_typmod(expr)?);
+        colcollations.push(::nodes_core::nodefuncs::expr_collation(expr)?);
     }
 
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
     rte.groupexprs = groupexprs;
     rte.lateral = false;
     rte.inFromCl = false;
@@ -2878,7 +2878,7 @@ pub fn addNSItemToQuery<'mcx>(
         let rtr = Node::mk_range_tbl_ref(mcx, RangeTblRef {
             rtindex: nsitem.p_rtindex,
         })?;
-        pstate.p_joinlist.push(mcx::alloc_in(mcx, rtr)?);
+        pstate.p_joinlist.push(::mcx::alloc_in(mcx, rtr)?);
     }
     if add_to_rel_namespace || add_to_var_namespace {
         nsitem.p_rel_visible = add_to_rel_namespace;
@@ -2950,14 +2950,14 @@ pub fn expandRTE<'mcx>(
                     let mut varnode = make_var(
                         rtindex,
                         varattno as AttrNumber,
-                        nodes_core::nodefuncs::expr_type(expr)?,
-                        nodes_core::nodefuncs::expr_typmod(expr)?,
-                        nodes_core::nodefuncs::expr_collation(expr)?,
+                        ::nodes_core::nodefuncs::expr_type(expr)?,
+                        ::nodes_core::nodefuncs::expr_typmod(expr)?,
+                        ::nodes_core::nodefuncs::expr_collation(expr)?,
                         sublevels_up as Index,
                     );
                     varnode.varreturningtype = returning_type;
                     varnode.location = location;
-                    cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
+                    cv.push(::mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
                 }
                 aliasp_idx += 1;
             }
@@ -2965,7 +2965,7 @@ pub fn expandRTE<'mcx>(
         RTE_FUNCTION => {
             // Function RTE (parse_relation.c:2825-2951).
             use ::nodes::funcapi::TypeFuncClass;
-            use types_tuple::heaptuple::INT8OID;
+            use ::types_tuple::heaptuple::INT8OID;
 
             let eref = rte.eref.as_deref().expect("eref set");
             let mut atts_done: i32 = 0;
@@ -3043,13 +3043,13 @@ pub fn expandRTE<'mcx>(
                                 rtindex,
                                 (atts_done + 1) as AttrNumber,
                                 funcrettype,
-                                nodes_core::nodefuncs::expr_typmod(funcexpr)?,
-                                nodes_core::nodefuncs::expr_collation(funcexpr)?,
+                                ::nodes_core::nodefuncs::expr_typmod(funcexpr)?,
+                                ::nodes_core::nodefuncs::expr_collation(funcexpr)?,
                                 sublevels_up as Index,
                             );
                             varnode.varreturningtype = returning_type;
                             varnode.location = location;
-                            cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
+                            cv.push(::mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
                         }
                     }
                     Some(TypeFuncClass::Record) => {
@@ -3084,7 +3084,7 @@ pub fn expandRTE<'mcx>(
                                 );
                                 varnode.varreturningtype = returning_type;
                                 varnode.location = location;
-                                cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
+                                cv.push(::mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
                             }
                         }
                     }
@@ -3120,7 +3120,7 @@ pub fn expandRTE<'mcx>(
                         sublevels_up as Index,
                     );
                     varnode.varreturningtype = returning_type;
-                    cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
+                    cv.push(::mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
                 }
             }
         }
@@ -3157,16 +3157,16 @@ pub fn expandRTE<'mcx>(
                         let mut nv = make_var(
                             rtindex,
                             varattno as AttrNumber,
-                            nodes_core::nodefuncs::expr_type(oe)?,
-                            nodes_core::nodefuncs::expr_typmod(oe)?,
-                            nodes_core::nodefuncs::expr_collation(oe)?,
+                            ::nodes_core::nodefuncs::expr_type(oe)?,
+                            ::nodes_core::nodefuncs::expr_typmod(oe)?,
+                            ::nodes_core::nodefuncs::expr_collation(oe)?,
                             sublevels_up as Index,
                         );
                         nv.varreturningtype = returning_type;
                         nv.location = location;
                         var_node(mcx, nv)?
                     };
-                    cv.push(mcx::alloc_in(mcx, varnode)?);
+                    cv.push(::mcx::alloc_in(mcx, varnode)?);
                 }
             }
         }
@@ -3203,10 +3203,10 @@ pub fn expandRTE<'mcx>(
                         );
                         varnode.varreturningtype = returning_type;
                         varnode.location = location;
-                        cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
+                        cv.push(::mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
                     } else if include_dropped {
                         let nc = make_null_const(mcx, INT4OID, -1, InvalidOid)?;
-                        cv.push(mcx::alloc_in(mcx, Node::mk_const(mcx, nc)?)?);
+                        cv.push(::mcx::alloc_in(mcx, Node::mk_const(mcx, nc)?)?);
                     }
                 }
             }
@@ -3289,7 +3289,7 @@ fn expandTupleDesc<'mcx>(
                 }
                 if let Some(cv) = colvars.as_deref_mut() {
                     let nc = make_null_const(mcx, INT4OID, -1, InvalidOid)?;
-                    cv.push(mcx::alloc_in(mcx, Node::mk_const(mcx, nc)?)?);
+                    cv.push(::mcx::alloc_in(mcx, Node::mk_const(mcx, nc)?)?);
                 }
             }
             if let Some(ai) = aliasidx {
@@ -3329,7 +3329,7 @@ fn expandTupleDesc<'mcx>(
             );
             varnode.varreturningtype = returning_type;
             varnode.location = location;
-            cv.push(mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
+            cv.push(::mcx::alloc_in(mcx, var_node(mcx, varnode)?)?);
         }
     }
     Ok(())
@@ -3375,7 +3375,7 @@ pub fn expandNSItemVars<'mcx>(
 
             markNullableIfNeeded(pstate, &mut var)?;
 
-            result.push(mcx::alloc_in(mcx, var_node(mcx, var)?)?);
+            result.push(::mcx::alloc_in(mcx, var_node(mcx, var)?)?);
             if let Some(cn) = colnames.as_deref_mut() {
                 cn.push(make_string_node(mcx, colname)?);
             }
@@ -4009,8 +4009,8 @@ fn isQueryUsingTempRelation_walker(mcx: Mcx<'_>, node: &Node<'_>) -> PgResult<bo
     // view whose only temp reference is inside a sublink is never detected as
     // temporary (no "will be a temporary view" NOTICE).
     let mut found = false;
-    let mut err: Option<types_error::PgError> = None;
-    nodes_core::node_walker::expression_tree_walker(node, &mut |child: &Node| {
+    let mut err: Option<::types_error::PgError> = None;
+    ::nodes_core::node_walker::expression_tree_walker(node, &mut |child: &Node| {
         if found || err.is_some() {
             return true;
         }
@@ -4047,8 +4047,8 @@ fn isQueryUsingTempRelation_walker_query(mcx: Mcx<'_>, query: &Query<'_>) -> PgR
     // query_tree_walker(query, walker, ..., QTW_IGNORE_JOINALIASES). The owned
     // query walker visits sub-Querys (in sublink/CTE/RTE subquery positions).
     let mut found = false;
-    let mut err: Option<types_error::PgError> = None;
-    nodes_core::node_walker::query_tree_walker(
+    let mut err: Option<::types_error::PgError> = None;
+    ::nodes_core::node_walker::query_tree_walker(
         query,
         &mut |node: &Node| {
             if found || err.is_some() {
@@ -4130,7 +4130,7 @@ fn clone_nscolumns<'mcx>(
     cols: &[ParseNamespaceColumn],
     mcx: Mcx<'mcx>,
 ) -> PgResult<PgVec<'mcx, ParseNamespaceColumn>> {
-    mcx::slice_in(mcx, cols)
+    ::mcx::slice_in(mcx, cols)
 }
 
 /// Deep-copy a `ParseNamespaceItem` into `mcx`.
@@ -4140,16 +4140,16 @@ fn clone_nsitem<'mcx>(
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
     Ok(ParseNamespaceItem {
         p_names: match nsitem.p_names.as_deref() {
-            Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+            Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
             None => None,
         },
         p_rte: match nsitem.p_rte.as_deref() {
-            Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+            Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
             None => None,
         },
         p_rtindex: nsitem.p_rtindex,
         p_perminfo: match nsitem.p_perminfo.as_deref() {
-            Some(p) => Some(mcx::alloc_in(mcx, p.clone_in(mcx)?)?),
+            Some(p) => Some(::mcx::alloc_in(mcx, p.clone_in(mcx)?)?),
             None => None,
         },
         p_nscolumns: clone_nscolumns(&nsitem.p_nscolumns, mcx)?,

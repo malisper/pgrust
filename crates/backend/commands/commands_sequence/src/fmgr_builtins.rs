@@ -14,10 +14,10 @@
 //! pulls the regclass/int8/bool arguments off the `fmgr` frame and spins a
 //! scratch context to drive them — the same shape `namespace.c`'s builtins use.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// A scratch context for cores that allocate / read through `Mcx`. The C
 /// counterparts palloc their result into the caller's context; here the `int8`
@@ -104,7 +104,7 @@ fn ret_composite_datum(
     fcinfo: &mut FunctionCallInfoBaseData,
     d: types_tuple::Datum<'_>,
 ) -> Datum {
-    use fmgr::boundary::RefPayload;
+    use ::fmgr::boundary::RefPayload;
     match d {
         types_tuple::Datum::ByRef(bytes) => {
             fcinfo.set_ref_result(RefPayload::Composite(bytes.as_slice().to_vec()));

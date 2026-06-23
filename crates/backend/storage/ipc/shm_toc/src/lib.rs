@@ -38,7 +38,7 @@ use s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
 use utils_error::{elog, ereport};
 use types_core::{uint64, Size};
 use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY, ERROR};
-use types_storage::storage::shm_toc_estimator;
+use ::types_storage::storage::shm_toc_estimator;
 
 /// `ALIGNOF_BUFFER` (`pg_config.h`) — buffer alignment used by `BUFFERALIGN`.
 pub const ALIGNOF_BUFFER: Size = 32;

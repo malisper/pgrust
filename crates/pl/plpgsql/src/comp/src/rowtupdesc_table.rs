@@ -24,8 +24,8 @@
 
 use core::cell::RefCell;
 
-use mcx::MemoryContext;
-use types_tuple::heaptuple::TupleDescData;
+use ::mcx::MemoryContext;
+use ::types_tuple::heaptuple::TupleDescData;
 
 /// One compiled row's tuple descriptor: its private memory context and the
 /// descriptor allocated in it (with a `'static` marker — the entry owns the

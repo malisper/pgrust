@@ -4,24 +4,24 @@
 //! partitions for FOR EACH ROW triggers, and broadcast a relcache inval if
 //! anything changed.
 
-use mcx::Mcx;
-use types_catalog::pg_class::RelationRelationId;
-use types_catalog::pg_trigger as pt;
-use types_tuple::access::RELKIND_PARTITIONED_TABLE;
-use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_catalog::pg_class::RelationRelationId;
+use ::types_catalog::pg_trigger as pt;
+use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
+use ::types_core::Oid;
 use types_error::{PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERROR};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use indexing_seams as indexing;
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use rel::Relation;
+use ::rel::Relation;
 
 /// `OidIsValid` test.
 fn valid(oid: Oid) -> bool {
@@ -37,7 +37,7 @@ fn name_str(image: &[u8]) -> String {
 /// `CStringGetDatum(tgname)` over a NUL-padded name — the by-ref convention
 /// `F_NAMEEQ` reads (precedent: rename.rs's `name_datum`).
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, src: &str) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, src.as_bytes())?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, src.as_bytes())?))
 }
 
 /// `EnableDisableTrigger(rel, tgname, tgparent, fires_when, skip_system,
@@ -185,7 +185,7 @@ pub fn EnableDisableTrigger<'mcx>(
                     lockmode,
                 )?;
                 // table_close(part, NoLock); -- keep lock till commit
-                part.close(types_storage::lock::NoLock)?;
+                part.close(::types_storage::lock::NoLock)?;
             }
         }
 

@@ -6,9 +6,9 @@
 //! handle (C: they palloc the node in `CurrentMemoryContext`).
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
-use types_tuple::Datum;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_tuple::Datum;
 use ::nodes::nodes::Node;
 use parsenodes::{Node as ParseNode, TypeName as ParseTypeName};
 

@@ -12,7 +12,7 @@ extern crate alloc;
 
 use core::cell::RefCell;
 
-use types_core::primitive::{TransactionId, XLogRecPtr};
+use ::types_core::primitive::{TransactionId, XLogRecPtr};
 use types_logical::{ReorderBufferHandle, SnapBuildHandle};
 
 use crate::{

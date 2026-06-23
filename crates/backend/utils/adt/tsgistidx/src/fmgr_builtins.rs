@@ -38,11 +38,11 @@
 //! fmgr-frame entry the owned GiST path never enters; it raises a clear error
 //! naming the dispatch seam if a future `FunctionCallNColl` ever reaches it.
 
-use datum::Datum;
+use ::datum::Datum;
 use types_error::{PgError, PgResult};
-use fmgr::boundary::RefPayload;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use tsearch::tsgistidx::SignTsVector;
+use ::tsearch::tsgistidx::SignTsVector;
 
 /// `VARHDRSZ` — the uncompressed varlena length-word size, in bytes.
 const VARHDRSZ: usize = 4;

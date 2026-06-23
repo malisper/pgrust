@@ -108,7 +108,7 @@ pub fn replace_percent_placeholders<'mcx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn run(
         instr: &str,

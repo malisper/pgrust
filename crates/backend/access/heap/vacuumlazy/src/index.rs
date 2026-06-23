@@ -5,9 +5,9 @@
 //!   * [`lazy_cleanup_one_index`] (vacuumlazy.c:3120).
 //!   * [`update_relstats_all_indexes`] (vacuumlazy.c:3723).
 
-use types_error::DEBUG2;
-use types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_error::PgResult;
+use ::types_error::DEBUG2;
+use ::types_vacuum::vacuumparallel::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_error::PgResult;
 
 use crate::consts::{
     InvalidMultiXactId, InvalidTransactionId,
@@ -172,7 +172,7 @@ pub fn update_relstats_all_indexes<'mcx>(vacrel: &mut LVRelState<'mcx>) -> PgRes
             _ => continue,
         };
 
-        vl::vac_update_relstats::call(types_vacuum::vacuumlazy::UpdateRelStatsArgs {
+        vl::vac_update_relstats::call(::types_vacuum::vacuumlazy::UpdateRelStatsArgs {
             relation: indrel.rd_id,
             num_pages: istat.num_pages,
             num_tuples: istat.num_index_tuples,

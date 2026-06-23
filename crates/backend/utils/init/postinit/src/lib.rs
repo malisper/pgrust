@@ -12,10 +12,10 @@
 
 #![allow(non_snake_case)]
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, MemoryContext, PgString};
-use types_catalog::pg_database::{FormPgDatabase, COLLPROVIDER_LIBC};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_catalog::pg_database::{FormPgDatabase, COLLPROVIDER_LIBC};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, DEBUG3, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_TOO_MANY_CONNECTIONS,
@@ -31,13 +31,13 @@ pub type bits32 = u32;
 /// The timeout-id variant the `more2-seams` (timeout.c enable/disable) decls
 /// use lives in `types-core`; the `timeout-seams` register decls use
 /// `types-timeout`. Bridge `STATEMENT_TIMEOUT` for the auth timeout.
-use types_core::TimeoutId as CoreTimeoutId;
+use ::types_core::TimeoutId as CoreTimeoutId;
 
 const SRC: &str = "src/backend/utils/init/postinit.c";
 
 #[inline]
-fn loc(lineno: i32, func: &str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new(SRC, lineno, func)
+fn loc(lineno: i32, func: &str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new(SRC, lineno, func)
 }
 
 // ---------------------------------------------------------------------------
@@ -45,12 +45,12 @@ fn loc(lineno: i32, func: &str) -> types_error::ErrorLocation {
 // ---------------------------------------------------------------------------
 
 /// `Template1DbOid` (pg_database_d.h).
-pub const TEMPLATE1_DB_OID: Oid = types_catalog::catalog::TEMPLATE1_DB_OID;
+pub const TEMPLATE1_DB_OID: Oid = ::types_catalog::catalog::TEMPLATE1_DB_OID;
 /// `DEFAULTTABLESPACE_OID` (pg_tablespace_d.h).
-pub const DEFAULTTABLESPACE_OID: Oid = types_catalog::catalog::DEFAULTTABLESPACE_OID;
+pub const DEFAULTTABLESPACE_OID: Oid = ::types_catalog::catalog::DEFAULTTABLESPACE_OID;
 /// `ROLE_PG_USE_RESERVED_CONNECTIONS` (pg_authid_d.h).
 pub const ROLE_PG_USE_RESERVED_CONNECTIONS: Oid =
-    types_catalog::catalog::ROLE_PG_USE_RESERVED_CONNECTIONS;
+    ::types_catalog::catalog::ROLE_PG_USE_RESERVED_CONNECTIONS;
 
 /// `INIT_PG_LOAD_SESSION_LIBS` (miscadmin.h).
 pub const INIT_PG_LOAD_SESSION_LIBS: bits32 = 0x0001;
@@ -206,7 +206,7 @@ fn build_auth_logmsg(mcx: Mcx<'_>) -> PgResult<PgString<'_>> {
     // (#ifdef ENABLE_GSS is not compiled in this build, so the GSS fragment at
     // C 288-307 is omitted.)
     let mut ssl_frag: Option<(PgString<'_>, PgString<'_>, i32)> = None;
-    let mut ssl_err: Option<types_error::PgError> = None;
+    let mut ssl_err: Option<::types_error::PgError> = None;
     init_small_seams::with_my_proc_port::call(&mut |port| {
         if let Some(port) = port {
             if port.ssl_in_use {
@@ -293,7 +293,7 @@ fn CheckMyDatabase(
             let userid = miscinit_seams::get_user_id::call();
             // object_aclcheck(DatabaseRelationId, MyDatabaseId, userid, ACL_CONNECT) != ACLCHECK_OK
             let res = aclchk_seams::object_aclcheck::call(
-                types_catalog::catalog::DATABASE_RELATION_ID,
+                ::types_catalog::catalog::DATABASE_RELATION_ID,
                 my_database_id,
                 userid,
                 types_acl::acl::ACL_CONNECT,
@@ -580,7 +580,7 @@ pub fn InitializeFastPathLocks() -> PgResult<()> {
 /// processes that may not call InitPostgres at all.
 pub fn BaseInit() -> PgResult<()> {
     // Initialize our input/output/debugging file descriptors.
-    utils_error::DebugFileOpen()?;
+    ::utils_error::DebugFileOpen()?;
 
     // Initialize file access. Done early so other subsystems can access files.
     fd_seams::init_file_access::call()?;
@@ -598,7 +598,7 @@ pub fn BaseInit() -> PgResult<()> {
     // sync requests: `!IsUnderPostmaster || AmCheckpointerProcess()` (sync.c).
     let create_pending_ops = !init_small_seams::is_under_postmaster::call()
         || init_small_seams::my_backend_type::call()
-            == types_core::init::BackendType::Checkpointer;
+            == ::types_core::init::BackendType::Checkpointer;
     sync_seams::init_sync::call(create_pending_ops);
     smgr_seams::smgrinit::call()?;
     bufmgr_seams::init_buffer_manager_access::call()?;
@@ -781,7 +781,7 @@ pub fn InitPostgres(
                 .finish(loc(876, "InitPostgres"));
         }
     } else if init_small_seams::my_backend_type::call()
-        == types_core::init::BackendType::BgWorker
+        == ::types_core::init::BackendType::BgWorker
     {
         if username.is_none() && !OidIsValid(useroid) {
             miscinit_seams::initialize_session_user_id_standalone::call()?;
@@ -934,7 +934,7 @@ pub fn InitPostgres(
     if !bootstrap {
         // LockSharedObject(DatabaseRelationId, dboid, 0, RowExclusiveLock)
         lmgr_seams::lock_shared_object::call(
-            types_catalog::catalog::DATABASE_RELATION_ID,
+            ::types_catalog::catalog::DATABASE_RELATION_ID,
             dboid,
             0,
             types_storage::lock::RowExclusiveLock,
@@ -1289,7 +1289,7 @@ fn ThereIsAtLeastOneRole(mcx: Mcx<'_>) -> PgResult<bool> {
     // pg_authid_rel = table_open(AuthIdRelationId, AccessShareLock);
     let pg_authid_rel = table::table_open(
         mcx,
-        types_catalog::catalog::AUTH_ID_RELATION_ID,
+        ::types_catalog::catalog::AUTH_ID_RELATION_ID,
         types_storage::lock::AccessShareLock,
     )?;
 
@@ -1348,7 +1348,7 @@ fn os_error_string(errno: i32) -> String {
 /// Map a `TryReserveError` onto `ERRCODE_OUT_OF_MEMORY` (recoverable), rather
 /// than aborting the process.
 fn reserve_failed(_: std::collections::TryReserveError) -> PgError {
-    PgError::new(ERROR, "out of memory").with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
+    PgError::new(ERROR, "out of memory").with_sqlstate(::types_error::ERRCODE_OUT_OF_MEMORY)
 }
 
 /// Install this crate's seam implementations.

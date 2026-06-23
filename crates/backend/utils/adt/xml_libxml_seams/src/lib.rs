@@ -22,7 +22,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::XmlOptionType;
 use types_xml::{

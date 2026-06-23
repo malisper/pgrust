@@ -11,9 +11,9 @@
 //! the keystone carrier conventions and `text_length`/`text_catenate`.
 
 use mcx::{Mcx, PgVec};
-use datum::Bytea;
-use types_error::PgResult;
-use stringinfo::StringInfo;
+use ::datum::Bytea;
+use ::types_error::PgResult;
+use ::stringinfo::StringInfo;
 
 use pqformat as pq;
 use mbutils_seams as mb;
@@ -115,7 +115,7 @@ pub fn unknownsend<'mcx>(mcx: Mcx<'mcx>, str: &[u8]) -> PgResult<Bytea<'mcx>> {
 /// exactly one NUL terminator.
 fn pstrdup<'mcx>(mcx: Mcx<'mcx>, str: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     let len = str.iter().position(|&b| b == 0).unwrap_or(str.len());
-    let mut out = mcx::vec_with_capacity_in(mcx, len + 1)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, len + 1)?;
     out.extend_from_slice(&str[..len]);
     out.push(0);
     Ok(out)

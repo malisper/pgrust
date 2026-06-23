@@ -52,31 +52,31 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_core::{InvalidOid, OidIsValid};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::ddlnodes::{IndexElem, IndexStmt};
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::Expr;
 use ::nodes::rawnodes::RangeVar;
-use rel::Relation;
+use ::rel::Relation;
 
-use utils_error::ereport;
-use types_error::ERROR;
+use ::utils_error::ereport;
+use ::types_error::ERROR;
 
 // ---- real owner crates ----
-use nodes_core::makefuncs::{make_ands_implicit, make_index_info};
-use nodes_core::bitmapset::{bms_is_member, bms_next_member, bms_union};
-use index::index_check_primary_key;
-use index_amapi::GetIndexAmRoutineByAmId;
-use clauses::contain_mutable_functions_after_planning;
+use ::nodes_core::makefuncs::{make_ands_implicit, make_index_info};
+use ::nodes_core::bitmapset::{bms_is_member, bms_next_member, bms_union};
+use ::index::index_check_primary_key;
+use ::index_amapi::GetIndexAmRoutineByAmId;
+use ::clauses::contain_mutable_functions_after_planning;
 use tablespace::{get_tablespace_name, get_tablespace_oid, GetDefaultTablespace};
-use comment::CreateComments;
+use ::comment::CreateComments;
 use misc_guc::{at_eoxact_guc, NewGUCNestLevel};
 use guc_seams::{restrict_search_path, set_config_option};
-use table::table_close as owner_table_close;
+use ::table::table_close as owner_table_close;
 use miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
-use activity_small::backend_progress::{
+use ::activity_small::backend_progress::{
     pgstat_progress_end_command, pgstat_progress_incr_param, pgstat_progress_start_command,
     pgstat_progress_update_param,
 };
@@ -107,21 +107,21 @@ use indexam_seams as indexam_seam;
 use parse_utilcmd_seams as utilcmd_seam;
 
 use crate::opclass::get_am_name_str;
-use types_amapi::COMPARE_EQ;
-use hash::hash::HTEqualStrategyNumber;
-use types_scan::scankey::BTEqualStrategyNumber;
+use ::types_amapi::COMPARE_EQ;
+use ::hash::hash::HTEqualStrategyNumber;
+use ::types_scan::scankey::BTEqualStrategyNumber;
 
-use types_acl::acl::{ACL_CREATE, ACLCHECK_OK};
+use ::types_acl::acl::{ACL_CREATE, ACLCHECK_OK};
 use ::nodes::parsenodes::{OBJECT_SCHEMA, OBJECT_TABLESPACE};
-use types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLESPACE_RELATION_ID};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
-use types_tuple::access::{
+use ::types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLESPACE_RELATION_ID};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
+use ::types_tuple::access::{
     ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
-use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
-use types_pgstat::backend_progress::ProgressCommandType;
+use ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
+use ::types_pgstat::backend_progress::ProgressCommandType;
 
 pub mod check_compat;
 pub mod choosers;
@@ -222,7 +222,7 @@ pub(crate) fn name_list_strings(
 pub fn CheckPredicate<'mcx>(mcx: Mcx<'mcx>, predicate: Expr<'mcx>) -> PgResult<()> {
     if contain_mutable_functions_after_planning(mcx, predicate)? {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+            .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
             .errmsg("functions in index predicate must be marked IMMUTABLE")
             .into_error());
     }
@@ -311,13 +311,13 @@ pub fn DefineIndex<'mcx>(
 
     if number_of_key_attributes <= 0 {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+            .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
             .errmsg("must specify at least one column")
             .into_error());
     }
     if number_of_attributes > INDEX_MAX_KEYS {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_TOO_MANY_COLUMNS)
+            .errcode(::types_error::ERRCODE_TOO_MANY_COLUMNS)
             .errmsg(format!(
                 "cannot use more than {INDEX_MAX_KEYS} columns in an index"
             ))
@@ -326,10 +326,10 @@ pub fn DefineIndex<'mcx>(
 
     // Take the table lock. ShareUpdateExclusiveLock for concurrent, ShareLock
     // otherwise.
-    let lockmode: types_storage::lock::LOCKMODE = if concurrent {
-        types_storage::lock::ShareUpdateExclusiveLock
+    let lockmode: ::types_storage::lock::LOCKMODE = if concurrent {
+        ::types_storage::lock::ShareUpdateExclusiveLock
     } else {
-        types_storage::lock::ShareLock
+        ::types_storage::lock::ShareLock
     };
     let rel = table_seam::table_open::call(mcx, table_id, lockmode)?;
 
@@ -354,7 +354,7 @@ pub fn DefineIndex<'mcx>(
                 rel.rd_rel.relkind,
             )?;
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!("cannot create index on relation \"{name}\""))
                 .errdetail(detail)
                 .into_error());
@@ -367,7 +367,7 @@ pub fn DefineIndex<'mcx>(
     if partitioned && stmt.concurrent {
         let name = rel.rd_rel.relname.as_str().to_string();
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "cannot create index on partitioned table \"{name}\" concurrently"
             ))
@@ -398,7 +398,7 @@ pub fn DefineIndex<'mcx>(
         tablespace_id = get_tablespace_oid(mcx, ts.as_str(), false)?;
         if partitioned && tablespace_id == my_database_tablespace()? {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("cannot specify default tablespace for partitioned relations")
                 .into_error());
         }
@@ -425,7 +425,7 @@ pub fn DefineIndex<'mcx>(
         tablespace_id = GLOBALTABLESPACE_OID;
     } else if tablespace_id == GLOBALTABLESPACE_OID {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("only shared relations can be placed in pg_global tablespace")
             .into_error());
     }
@@ -455,7 +455,7 @@ pub fn DefineIndex<'mcx>(
         .expect("DefineIndex: IndexStmt has no accessMethod");
     let mut am_info = syscache::search_am_by_name::call(mcx, &access_method_name)?;
     if am_info.is_none() && access_method_name == "rtree" {
-        ereport(types_error::NOTICE)
+        ereport(::types_error::NOTICE)
             .errmsg("substituting access method \"gist\" for obsolete method \"rtree\"")
             .finish(here("DefineIndex"))?;
         access_method_name = "gist".to_string();
@@ -465,7 +465,7 @@ pub fn DefineIndex<'mcx>(
         Some(a) => a,
         None => {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
                 .errmsg(format!("access method \"{access_method_name}\" does not exist"))
                 .into_error());
         }
@@ -511,12 +511,12 @@ pub fn DefineIndex<'mcx>(
     //    where amoptions = accessMethodForm->amoptions.
     //
     // `transformRelOptionsBytes` builds the on-disk `text[]` varlena image (the
-    // bytes `pg_class.reloptions` stores); it rides the `types_tuple::Datum`
+    // bytes `pg_class.reloptions` stores); it rides the `::types_tuple::Datum`
     // by-reference lane as `Datum::ByRef` so `index_create`'s catalog write
     // (`reloptions_to_bytes`) reads the real array (the Datum-bridge fix —
     // construct_text_array_bytes, mirroring the array-producer ByRef fixes).
-    let reloptions: types_tuple::Datum<'mcx> = if stmt.options.is_empty() {
-        types_tuple::Datum::null()
+    let reloptions: ::types_tuple::Datum<'mcx> = if stmt.options.is_empty() {
+        ::types_tuple::Datum::null()
     } else {
         // amoptions = accessMethodForm->amoptions; the port keys the AM's option
         // parser on the handler OID (rd_amhandler), the same dispatch the
@@ -526,7 +526,7 @@ pub fn DefineIndex<'mcx>(
             None => InvalidOid,
         };
         let bytes = transform_index_reloptions_byref(mcx, &stmt.options, amhandler)?;
-        types_tuple::Datum::from_byref_bytes_in(mcx, &bytes)?
+        ::types_tuple::Datum::from_byref_bytes_in(mcx, &bytes)?
     };
 
     // Prepare the IndexInfo. Predicates must be in implicit-AND format. In a
@@ -563,8 +563,8 @@ pub fn DefineIndex<'mcx>(
     let mut type_ids = vec_oid(number_of_attributes);
     let mut collation_ids = vec_oid(number_of_attributes);
     let mut opclass_ids = vec_oid(number_of_attributes);
-    let mut opclass_options: Vec<types_tuple::Datum<'mcx>> =
-        (0..number_of_attributes).map(|_| types_tuple::Datum::null()).collect();
+    let mut opclass_options: Vec<::types_tuple::Datum<'mcx>> =
+        (0..number_of_attributes).map(|_| ::types_tuple::Datum::null()).collect();
     let mut col_options = vec![0i16; number_of_attributes as usize];
 
     ComputeIndexAttrs(
@@ -622,7 +622,7 @@ pub fn DefineIndex<'mcx>(
         let attno = index_info.ii_IndexAttrNumbers[i];
         if attno < 0 {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("index creation on system columns is not supported")
                 .into_error());
         }
@@ -635,7 +635,7 @@ pub fn DefineIndex<'mcx>(
 
     // Check for system and generated columns used in expressions / predicates.
     if index_info.ii_Expressions.is_some() || index_info.ii_Predicate.is_some() {
-        let mut indexattrs: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
+        let mut indexattrs: Option<::mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
         if let Some(exprs) = index_info.ii_Expressions.as_ref() {
             for e in exprs.iter() {
                 indexattrs = bms_union_opt(mcx, indexattrs, var_seam::pull_varattnos::call(mcx, e, 1)?)?;
@@ -652,7 +652,7 @@ pub fn DefineIndex<'mcx>(
         while i < 0 {
             if bms_is_member(i - FirstLowInvalidHeapAttributeNumber as i32, attrs_ref) {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg("index creation on system columns is not supported")
                     .into_error());
             }
@@ -762,7 +762,7 @@ pub fn DefineIndex<'mcx>(
         // IF NOT EXISTS hit an existing index: roll back GUC + userid, close.
         at_eoxact_guc(false, root_save_nestlevel);
         SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
-        owner_table_close(rel, types_storage::lock::NoLock)?;
+        owner_table_close(rel, ::types_storage::lock::NoLock)?;
         if !OidIsValid(parent_index_id) {
             pgstat_progress_end_command();
         }
@@ -799,7 +799,7 @@ pub fn DefineIndex<'mcx>(
                     let children = inherits_seam::find_all_inheritors::call(
                         mcx,
                         table_id,
-                        types_storage::lock::NoLock,
+                        ::types_storage::lock::NoLock,
                     )?;
                     total_parts = children.len() as i32 - 1;
                 }
@@ -812,7 +812,7 @@ pub fn DefineIndex<'mcx>(
             // We'll need an IndexInfo describing the parent index, built the same
             // way (BuildIndexInfo) so it will match those for child indexes.
             let parent_index = indexam_seam::index_open::call(mcx, index_relation_id, lockmode)?;
-            let parent_index_info = index::BuildIndexInfo(mcx, &parent_index)?;
+            let parent_index_info = ::index::BuildIndexInfo(mcx, &parent_index)?;
             let parent_index_collations: Vec<Oid> = parent_index.rd_indcollation.to_vec();
             let parent_index_opfamilies: Vec<Oid> = parent_index.rd_opfamily.to_vec();
 
@@ -834,7 +834,7 @@ pub fn DefineIndex<'mcx>(
                 if childrel.rd_rel.relkind == RELKIND_FOREIGN_TABLE {
                     if stmt.unique || stmt.primary {
                         return Err(ereport(ERROR)
-                            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                            .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                             .errmsg(format!(
                                 "cannot create unique index on partitioned table \"{}\"",
                                 rel.rd_rel.relname.as_str()
@@ -868,8 +868,8 @@ pub fn DefineIndex<'mcx>(
                     }
 
                     let cldidx = indexam_seam::index_open::call(mcx, cldidxid, lockmode)?;
-                    let cld_idx_info = index::BuildIndexInfo(mcx, &cldidx)?;
-                    if index::CompareIndexInfo(
+                    let cld_idx_info = ::index::BuildIndexInfo(mcx, &cldidx)?;
+                    if ::index::CompareIndexInfo(
                         mcx,
                         &cld_idx_info,
                         &parent_index_info,
@@ -921,7 +921,7 @@ pub fn DefineIndex<'mcx>(
                         pgstat_progress_incr_param(PROGRESS_CREATEIDX_PARTITIONS_DONE, 1);
 
                         // keep lock till commit
-                        cldidx.close(types_storage::lock::NoLock)?;
+                        cldidx.close(::types_storage::lock::NoLock)?;
                         break;
                     }
 
@@ -930,7 +930,7 @@ pub fn DefineIndex<'mcx>(
 
                 at_eoxact_guc(false, child_save_nestlevel);
                 SetUserIdAndSecContext(child_save_userid, child_save_sec_context);
-                owner_table_close(childrel, types_storage::lock::NoLock)?;
+                owner_table_close(childrel, ::types_storage::lock::NoLock)?;
 
                 // If no matching index was found, create our own.
                 if !found {
@@ -987,7 +987,7 @@ pub fn DefineIndex<'mcx>(
         // Indexes on partitioned tables are not themselves built, so we're done.
         at_eoxact_guc(false, root_save_nestlevel);
         SetUserIdAndSecContext(root_save_userid, root_save_sec_context);
-        owner_table_close(rel, types_storage::lock::NoLock)?;
+        owner_table_close(rel, ::types_storage::lock::NoLock)?;
         if !OidIsValid(parent_index_id) {
             pgstat_progress_end_command();
         } else {
@@ -1001,7 +1001,7 @@ pub fn DefineIndex<'mcx>(
 
     if !concurrent {
         // Non-concurrent: index_create already built it; close and we're done.
-        owner_table_close(rel, types_storage::lock::NoLock)?;
+        owner_table_close(rel, ::types_storage::lock::NoLock)?;
         if !OidIsValid(parent_index_id) {
             pgstat_progress_end_command();
         } else {
@@ -1017,7 +1017,7 @@ pub fn DefineIndex<'mcx>(
     // Save lockrelid and locktag for below, then close rel (keep the lock).
     let heaprelid = relcache_seam::rel_lock_relid::call(rel.rd_id)?;
     let heaplocktag = lmgr_seam::set_locktag_relation::call(heaprelid.dbId, heaprelid.relId);
-    owner_table_close(rel, types_storage::lock::NoLock)?;
+    owner_table_close(rel, ::types_storage::lock::NoLock)?;
 
     // For a concurrent build, we must make the catalog entries visible to other
     // transactions before we start to build the index (the new index is marked
@@ -1054,7 +1054,7 @@ pub fn DefineIndex<'mcx>(
     ))?;
 
     // Perform concurrent build of the index (first pass).
-    index::index_concurrently_build(mcx, table_id, index_relation_id)?;
+    ::index::index_concurrently_build(mcx, table_id, index_relation_id)?;
 
     // We can do away with our snapshot.
     snapmgr_seam::pop_active_snapshot::call()?;
@@ -1080,7 +1080,7 @@ pub fn DefineIndex<'mcx>(
     snapmgr_seam::push_active_snapshot::call(alloc::rc::Rc::new(snapshot.clone()))?;
 
     // Scan the index and the heap, insert any missing index entries (2nd pass).
-    index::validate_index(mcx, table_id, index_relation_id, Some(snapshot.clone()))?;
+    ::index::validate_index(mcx, table_id, index_relation_id, Some(snapshot.clone()))?;
 
     // Drop the reference snapshot. We must do this before waiting out other
     // snapshot holders, else we deadlock against other CREATE INDEX CONCURRENTLY
@@ -1115,10 +1115,10 @@ pub fn DefineIndex<'mcx>(
     ))?;
 
     // Index can now be marked valid -- update its pg_index entry.
-    index::index_set_state_flags(
+    ::index::index_set_state_flags(
         mcx,
         index_relation_id,
-        index_seams::IndexStateFlagsAction::SetValid,
+        ::index_seams::IndexStateFlagsAction::SetValid,
     )?;
 
     snapmgr_seam::pop_active_snapshot::call()?;
@@ -1137,12 +1137,12 @@ pub fn DefineIndex<'mcx>(
 }
 
 /// `ShareUpdateExclusiveLock` (`storage/lockdefs.h`).
-fn ShareUpdateExclusiveLock_v() -> types_storage::lock::LOCKMODE {
+fn ShareUpdateExclusiveLock_v() -> ::types_storage::lock::LOCKMODE {
     4
 }
 
 /// `ShareLock` (`storage/lockdefs.h`).
-fn ShareLock_v() -> types_storage::lock::LOCKMODE {
+fn ShareLock_v() -> ::types_storage::lock::LOCKMODE {
     5
 }
 
@@ -1157,10 +1157,10 @@ fn ShareLock_v() -> types_storage::lock::LOCKMODE {
 /// this returns immediately.
 pub fn WaitForOlderSnapshots<'mcx>(
     mcx: Mcx<'mcx>,
-    limit_xmin: types_core::TransactionId,
+    limit_xmin: ::types_core::TransactionId,
     progress: bool,
 ) -> PgResult<()> {
-    use types_storage::storage::{PROC_IN_SAFE_IC, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM};
+    use ::types_storage::storage::{PROC_IN_SAFE_IC, PROC_IN_VACUUM, PROC_IS_AUTOVACUUM};
 
     let exclude_vacuum = (PROC_IS_AUTOVACUUM | PROC_IN_VACUUM | PROC_IN_SAFE_IC) as i32;
 
@@ -1204,7 +1204,7 @@ pub fn WaitForOlderSnapshots<'mcx>(
                         && nv.localTransactionId == old_snapshots[j].localTransactionId
                 });
                 if !still_present {
-                    old_snapshots[j] = types_core::xact::VirtualTransactionId::invalid();
+                    old_snapshots[j] = ::types_core::xact::VirtualTransactionId::invalid();
                 }
             }
         }
@@ -1240,8 +1240,8 @@ use types_cluster::{
     REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
 };
 use ::nodes::ddlnodes::{DefElem, ReindexObjectType, ReindexStmt};
-use types_storage::lock::{AccessExclusiveLock, ShareLock, ShareUpdateExclusiveLock};
-use types_tuple::access::RELKIND_PARTITIONED_INDEX;
+use ::types_storage::lock::{AccessExclusiveLock, ShareLock, ShareUpdateExclusiveLock};
+use ::types_tuple::access::RELKIND_PARTITIONED_INDEX;
 
 const RELPERSISTENCE_TEMP_U8: u8 = b't';
 
@@ -1272,9 +1272,9 @@ fn reindex_def_get_boolean(defel: &DefElem<'_>) -> PgResult<bool> {
     }
 }
 
-fn reindex_boolean_err(name: &str) -> utils_error::PgError {
+fn reindex_boolean_err(name: &str) -> ::utils_error::PgError {
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+        .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
         .errmsg(format!("{name} requires a Boolean value"))
         .into_error()
 }
@@ -1285,7 +1285,7 @@ fn reindex_def_get_string(defel: &DefElem<'_>) -> PgResult<String> {
     match defel.arg.as_deref() {
         Some(n) if n.is_string() => Ok(n.expect_string().sval.as_str().to_string()),
         _ => Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+            .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
             .errmsg(format!("{name} requires a parameter"))
             .into_error()),
     }
@@ -1294,8 +1294,8 @@ fn reindex_def_get_string(defel: &DefElem<'_>) -> PgResult<String> {
 /// Marshal a parse-tree `RangeVar` node onto the access-layer `RangeVar`
 /// consumed by the namespace target-resolution seams (mirrors the matview /
 /// CLUSTER bridge).
-fn reindex_access_rangevar(rv: &RangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn reindex_access_rangevar(rv: &RangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().to_string()),
         schemaname: rv.schemaname.as_ref().map(|s| s.as_str().to_string()),
         relname: rv
@@ -1347,7 +1347,7 @@ pub fn ExecReindex<'mcx>(
             tablespacename = Some(reindex_def_get_string(opt)?);
         } else {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!("unrecognized REINDEX option \"{defname}\""))
                 .into_error());
         }
@@ -1372,7 +1372,7 @@ pub fn ExecReindex<'mcx>(
             let aclresult = aclchk_seam::object_aclcheck::call(
                 TABLESPACE_RELATION_ID,
                 tablespace_oid,
-                miscinit::GetUserId(),
+                ::miscinit::GetUserId(),
                 ACL_CREATE,
             )?;
             if aclresult != ACLCHECK_OK {
@@ -1492,7 +1492,7 @@ fn ReindexTable<'mcx>(
         let result =
             reindex_concurrently::ReindexRelationConcurrently(mcx, stmt, heap_oid, params)?;
         if !result {
-            ereport(types_error::NOTICE)
+            ereport(::types_error::NOTICE)
                 .errmsg(format!(
                     "table \"{relname}\" has no indexes that can be reindexed concurrently"
                 ))
@@ -1509,7 +1509,7 @@ fn ReindexTable<'mcx>(
             newparams,
         )?;
         if !result {
-            ereport(types_error::NOTICE)
+            ereport(::types_error::NOTICE)
                 .errmsg(format!("table \"{relname}\" has no indexes to reindex"))
                 .finish(here("ReindexTable"))?;
         }
@@ -1523,7 +1523,7 @@ fn ReindexTable<'mcx>(
 // ---------------------------------------------------------------------------
 
 /// `elog(ERROR, msg)` shorthand returning the error value.
-fn elog_error(msg: impl Into<String>) -> utils_error::PgError {
+fn elog_error(msg: impl Into<String>) -> ::utils_error::PgError {
     ereport(ERROR).errmsg_internal(msg).into_error()
 }
 
@@ -1587,7 +1587,7 @@ fn define_index_partition_keycheck<'mcx>(
         // are expressions, but is it worth it? Give up for now.
         if key.partattrs[i] == 0 {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
                     "unsupported {constraint_type} constraint with partition key definition"
                 ))
@@ -1632,7 +1632,7 @@ fn define_index_partition_keycheck<'mcx>(
                         let am_name =
                             get_am_name_str(lsyscache::get_opfamily_method::call(idx_opfamily)?)?;
                         return Err(ereport(ERROR)
-                            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                            .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
                             .errmsg(format!(
                                 "could not identify an equality operator for type {}",
                                 formattype_seam::format_type_be_owned::call(idx_opcintype)?
@@ -1660,7 +1660,7 @@ fn define_index_partition_keycheck<'mcx>(
                             .map(|s| s.as_str().to_string())
                             .unwrap_or_default();
                         return Err(ereport(ERROR)
-                            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                             .errmsg(format!(
                                 "cannot match partition key to index on column \"{}\" using non-equal operator \"{}\"",
                                 String::from_utf8_lossy(att.attname.name_str()),
@@ -1675,7 +1675,7 @@ fn define_index_partition_keycheck<'mcx>(
         if !found {
             let att = rel.rd_att.attr((key.partattrs[i] - 1) as usize);
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg("unique constraint on partitioned table must include all partitioning columns")
                 .errdetail(format!(
                     "{constraint_type} constraint on table \"{}\" lacks column \"{}\" which is part of the partition key.",
@@ -1703,7 +1703,7 @@ pub fn IndexSetParentIndex<'mcx>(
     partition_idx: &Relation<'mcx>,
     parent_oid: Oid,
 ) -> PgResult<()> {
-    use types_catalog::catalog_dependency::{DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC};
+    use ::types_catalog::catalog_dependency::{DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC};
 
     let part_relid = partition_idx.rd_id;
 
@@ -1807,14 +1807,14 @@ fn vec_oid(n: i32) -> Vec<Oid> {
     vec![InvalidOid; n.max(0) as usize]
 }
 
-fn amerr(what: &str, amname: &str) -> utils_error::PgError {
+fn amerr(what: &str, amname: &str) -> ::utils_error::PgError {
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(format!("access method \"{amname}\" {what}"))
         .into_error()
 }
 
-fn virtual_gencol_error(stmt: &IndexStmt<'_>) -> utils_error::PgError {
+fn virtual_gencol_error(stmt: &IndexStmt<'_>) -> ::utils_error::PgError {
     let msg = if stmt.primary {
         "primary keys on virtual generated columns are not supported"
     } else if stmt.isconstraint {
@@ -1823,19 +1823,19 @@ fn virtual_gencol_error(stmt: &IndexStmt<'_>) -> utils_error::PgError {
         "indexes on virtual generated columns are not supported"
     };
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(msg)
         .into_error()
 }
 
-fn virtual_gencol_error_expr(stmt: &IndexStmt<'_>) -> utils_error::PgError {
+fn virtual_gencol_error_expr(stmt: &IndexStmt<'_>) -> ::utils_error::PgError {
     let msg = if stmt.isconstraint {
         "unique constraints on virtual generated columns are not supported"
     } else {
         "indexes on virtual generated columns are not supported"
     };
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(msg)
         .into_error()
 }
@@ -1844,9 +1844,9 @@ fn virtual_gencol_error_expr(stmt: &IndexStmt<'_>) -> utils_error::PgError {
 /// `Option<PgBox<Bitmapset>>` (the C `Bitmapset *`, NULL == empty).
 fn bms_union_opt<'mcx>(
     mcx: Mcx<'mcx>,
-    a: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>,
-    b: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>,
-) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
+    a: Option<::mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>,
+    b: Option<::mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>,
+) -> PgResult<Option<::mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     match (a, b) {
         (None, x) => Ok(x),
         (x, None) => Ok(x),
@@ -1861,7 +1861,7 @@ fn my_database_tablespace() -> PgResult<Oid> {
 
 /// `allowSystemTableMods` (globals.c).
 fn allow_system_table_mods() -> bool {
-    guc_seams::allow_system_table_mods::call()
+    ::guc_seams::allow_system_table_mods::call()
 }
 
 /// `stmt->relation && !stmt->relation->inh` (the recursion-declined-but-
@@ -1897,8 +1897,8 @@ fn node_as_index_elem<'a, 'mcx>(node: &'a Node<'mcx>) -> &'a IndexElem<'mcx> {
 }
 
 /// `ErrorLocation` for `ereport(...).finish(...)` in this module.
-pub(crate) fn here(funcname: &'static str) -> types_error::pg_error::ErrorLocation {
-    types_error::pg_error::ErrorLocation::new("../src/backend/commands/indexcmds.c", 0, funcname)
+pub(crate) fn here(funcname: &'static str) -> ::types_error::pg_error::ErrorLocation {
+    ::types_error::pg_error::ErrorLocation::new("../src/backend/commands/indexcmds.c", 0, funcname)
 }
 
 /// `RelationGetPartitionDesc(rel, true)->nparts != 0` (indexcmds.c:1232-1234).
@@ -2016,7 +2016,7 @@ fn exec_reindex_dispatch_arm<'mcx>(
 fn utility_range_var_get_relid_owns_relation<'mcx>(
     mcx: Mcx<'mcx>,
     relation: ::nodes::nodes::NodePtr<'mcx>,
-    lockmode: types_storage::lock::LOCKMODE,
+    lockmode: ::types_storage::lock::LOCKMODE,
 ) -> PgResult<Oid> {
     let rv = match relation.node_tag() {
         ntag::T_RangeVar => relation.expect_rangevar(),
@@ -2036,7 +2036,7 @@ fn create_index_count_partitions<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     stmt: ::nodes::nodes::NodePtr<'mcx>,
-    lockmode: types_storage::lock::LOCKMODE,
+    lockmode: ::types_storage::lock::LOCKMODE,
 ) -> PgResult<i32> {
     let index_stmt = match stmt.node_tag() {
         ntag::T_IndexStmt => stmt.expect_indexstmt(),
@@ -2079,7 +2079,7 @@ fn create_index_count_partitions<'mcx>(
         }
         if relkind == RELKIND_FOREIGN_TABLE && unique_or_primary {
             ereport(ERROR)
-                .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!(
                     "cannot create unique index on partitioned table \"{}\"",
                     relname
@@ -2106,7 +2106,7 @@ fn define_index_dispatch_arm<'mcx>(
     is_alter_table: bool,
 ) -> PgResult<ObjectAddress> {
     let stmt_tag = stmt.node_tag();
-    let stmt = match mcx::PgBox::into_inner(stmt).into_indexstmt() {
+    let stmt = match ::mcx::PgBox::into_inner(stmt).into_indexstmt() {
         Some(s) => s,
         None => unreachable!("define_index: not an IndexStmt node: {}", stmt_tag),
     };
@@ -2138,7 +2138,7 @@ fn define_index_dispatch_arm<'mcx>(
 fn reloptions_view_defel(
     def: &DefElem<'_>,
 ) -> PgResult<common_reloptions::DefElem> {
-    use define_seams::DefElemArg;
+    use ::define_seams::DefElemArg;
     // Mirror `defGetString`/`defGetBoolean` (define.c): every node form that
     // those accessors render must round-trip through the `DefElemArg`
     // projection, not collapse into `A_Star`. Bare identifiers such as

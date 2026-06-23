@@ -20,17 +20,17 @@ use reloptions_seams as reloptions_seams;
 use inval_seams as inval_seams;
 use cache_syscache as syscache;
 use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
-use cache::SysCacheKey;
+use ::cache::SysCacheKey;
 use types_core::{InvalidOid, Oid};
 // The canonical owned datum enum is the migration target.
 use types_tuple::heaptuple::Datum;
-// `datum::Datum` (the bare-word shim) survives only at the two unmigrated
+// `::datum::Datum` (the bare-word shim) survives only at the two unmigrated
 // cross-crate contract edges: `SysCacheKey::Value`'s search-key word and the
 // `SyscacheCallbackFunction` `arg` carried through the inval seam. Both are
 // audited ABI edges driven by still-unmigrated `types-cache` vocabulary.
-use datum::Datum as KeyDatum;
+use ::datum::Datum as KeyDatum;
 use types_error::{PgError, PgResult};
-use types_reloptions::TableSpaceOpts;
+use ::types_reloptions::TableSpaceOpts;
 
 /// `Anum_pg_tablespace_spcoptions` (`catalog/pg_tablespace.h`).
 const Anum_pg_tablespace_spcoptions: i32 = 5;
@@ -42,7 +42,7 @@ struct TableSpaceCache<'mcx> {
     hash: PgHashMap<'mcx, Oid, Option<TableSpaceOpts>>,
 }
 
-mcx::bind!(TableSpaceCacheTy => TableSpaceCache<'mcx>);
+::mcx::bind!(TableSpaceCacheTy => TableSpaceCache<'mcx>);
 
 thread_local! {
     /// `static HTAB *TableSpaceCacheHash = NULL;`
@@ -57,7 +57,7 @@ thread_local! {
 /// that tablespace. Currently, we just flush them all. This is quick and
 /// easy and doesn't cost much, since there shouldn't be terribly many
 /// tablespaces, nor do we expect them to be frequently modified.
-// `arg` matches `SyscacheCallbackFunction = fn(arg: datum::Datum, ...)`;
+// `arg` matches `SyscacheCallbackFunction = fn(arg: ::datum::Datum, ...)`;
 // it must stay the bare-word shim to satisfy that unmigrated fn-pointer type.
 fn InvalidateTableSpaceCacheCallback(_arg: KeyDatum, _cacheid: i32, _hashvalue: u32) {
     TABLESPACE_CACHE.with(|cell| {
@@ -86,7 +86,7 @@ fn InitializeTableSpaceCache() -> PgResult<()> {
     inval_seams::cache_register_syscache_callback::call(
         syscache::TABLESPACEOID,
         InvalidateTableSpaceCacheCallback,
-        // The seam's `arg: datum::Datum` is the unmigrated contract edge.
+        // The seam's `arg: ::datum::Datum` is the unmigrated contract edge.
         KeyDatum::null(),
     )
 }
@@ -124,7 +124,7 @@ fn get_tablespace(mut spcid: Oid, my_database_tablespace: Oid) -> PgResult<Optio
         let tp = syscache::SearchSysCache1(
             mcx,
             syscache::TABLESPACEOID,
-            // `SysCacheKey::Value` carries a bare-word `datum::Datum`
+            // `SysCacheKey::Value` carries a bare-word `::datum::Datum`
             // search key (unmigrated `types-cache` vocabulary).
             SysCacheKey::Value(KeyDatum::from_oid(spcid)),
         )?;

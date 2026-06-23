@@ -15,7 +15,7 @@
 use std::io::Write;
 
 use utils_error::{backend_log_context, config, reset_formatted_start_time};
-use types_error::PGErrorVerbosity;
+use ::types_error::PGErrorVerbosity;
 
 mod csvlog;
 mod jsonlog;

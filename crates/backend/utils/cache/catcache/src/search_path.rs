@@ -14,18 +14,18 @@
 //! [`FetchedCatalogTuple`] carriers; resource-owner enlarge/remember/forget
 //! cross the resowner seams.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use cache::catcache::{
     CacheIdx, CatKey, CtIdx, FetchedCatalogTuple, ItemPointer,
 };
-use cache::SysCacheKey;
-use types_core::Oid;
+use ::cache::SysCacheKey;
+use ::types_core::Oid;
 // Catcache key slots cross as `CatKey` (the owned form of C's `Datum keys[]`):
 // by-value keys carry the scalar word (C's `cur_skey[i].sk_argument = vN`), and
 // by-reference keys (name/text/oidvector) carry their resolved payload bytes —
 // the pointer-bearing `Datum` C's search key already holds.
-use types_error::PgResult;
-use types_tuple::heaptuple::FormedTuple;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::FormedTuple;
 
 use crate::core_compute::{
     CatalogCacheCompareTuple, CatalogCacheComputeHashValue, HASH_INDEX,
@@ -612,7 +612,7 @@ fn catcache_scan_single_impl(
     use cache::catcache::CATCACHE_MAXKEYS;
     // The canonical by-value Datum the keystone-owned `ScanKeyData.sk_argument`
     // carries (the per-search scalar word crosses into its by-value arm).
-    use types_tuple::heaptuple::Datum as DatumV;
+    use ::types_tuple::heaptuple::Datum as DatumV;
     use genam_seams as genam;
 
     let cache_idx = with_arena(|arena| {
@@ -637,7 +637,7 @@ fn catcache_scan_single_impl(
     // owned `FetchedCatalogTuple`s, so the scratch is dropped when the scan ends.
     // Declared before `cur_skey` so it outlives the by-reference `sk_argument`s
     // that borrow it.
-    let scratch = mcx::MemoryContext::new("SearchCatCacheMiss scan");
+    let scratch = ::mcx::MemoryContext::new("SearchCatCacheMiss scan");
     let scan_mcx = scratch.mcx();
     let mut cur_skey: [types_scan::scankey::ScanKeyData<'_>;
         cache::catcache::CATCACHE_MAXKEYS] =
@@ -684,7 +684,7 @@ fn catcache_scan_single_impl(
             CatKey::Scalar(w) => DatumV::ByVal(w.as_usize()),
             CatKey::ByRef(bytes) => {
                 let image = frame_byref_scankey_arg(cc_fastkind[i], bytes);
-                DatumV::ByRef(mcx::slice_in(scan_mcx, &image)?)
+                DatumV::ByRef(::mcx::slice_in(scan_mcx, &image)?)
             }
         };
     }
@@ -728,8 +728,8 @@ fn catcache_form_cached_tuple_impl<'mcx>(
     t_tableoid: Oid,
     t_data: &[u8],
 ) -> PgResult<FormedTuple<'mcx>> {
-    let ip = types_tuple::heaptuple::ItemPointerData {
-        ip_blkid: types_tuple::heaptuple::BlockIdData::new(t_self.block),
+    let ip = ::types_tuple::heaptuple::ItemPointerData {
+        ip_blkid: ::types_tuple::heaptuple::BlockIdData::new(t_self.block),
         ip_posid: t_self.offset,
     };
     heaptuple::heap_copytuple_from_disk_image(
@@ -791,7 +791,7 @@ fn skey_template<'a>(
     cache: &cache::catcache::ArenaCatCache,
 ) -> [types_scan::scankey::ScanKeyData<'a>;
     cache::catcache::CATCACHE_MAXKEYS] {
-    use types_tuple::heaptuple::Datum as DatumV;
+    use ::types_tuple::heaptuple::Datum as DatumV;
     core::array::from_fn(|i| match &cache.cc_skey[i] {
         Some(k) => types_scan::scankey::ScanKeyData {
             sk_flags: k.sk_flags,

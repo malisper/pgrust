@@ -56,14 +56,14 @@ use sink::{
     bbsink_forward_end_backup, bbsink_forward_end_manifest, bbsink_forward_manifest_contents,
     Bbsink, BbsinkOps, BbsinkState,
 };
-use activity_small::backend_progress::{
+use ::activity_small::backend_progress::{
     pgstat_progress_end_command, pgstat_progress_start_command,
     pgstat_progress_update_multi_param, pgstat_progress_update_param,
 };
-use mcx::Mcx;
-use types_core::primitive::{int64, InvalidOid, Size, TimeLineID, XLogRecPtr};
-use types_error::PgResult;
-use types_pgstat::backend_progress::ProgressCommandType;
+use ::mcx::Mcx;
+use ::types_core::primitive::{int64, InvalidOid, Size, TimeLineID, XLogRecPtr};
+use ::types_error::PgResult;
+use ::types_pgstat::backend_progress::ProgressCommandType;
 
 // ---------------------------------------------------------------------------
 // Constants from src/include/commands/progress.h.

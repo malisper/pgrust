@@ -24,9 +24,9 @@
 //! strict / retset are transcribed exactly from `pg_proc.dat` (every row here is
 //! `proisstrict => 't'` — the pg_proc default — and not retset).
 
-use types_core::Oid;
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::CoerceResult;

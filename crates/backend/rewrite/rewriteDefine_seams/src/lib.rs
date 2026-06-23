@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()`; until then a call
 //! panics loudly.
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 seam_core::seam!(
     /// `setRuleCheckAsUser(node, userid)` (rewriteDefine.c): recursively scan a

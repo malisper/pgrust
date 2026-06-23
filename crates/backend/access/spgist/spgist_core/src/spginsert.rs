@@ -18,20 +18,20 @@
 //! retry loop (re-running `spgdoinsert` until it returns `true`) is mirrored
 //! exactly.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
 use bulkwrite_seams as bulk;
 use xloginsert_seams as xloginsert;
 use miscinit_seams as miscinit;
 
-use types_core::primitive::ForkNumber;
-use types_error::PgResult;
-use rel::Relation;
-use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_core::primitive::ForkNumber;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck};
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use spgist::{
     SPGIST_LEAF, SPGIST_METAPAGE_BLKNO, SPGIST_NULLS, SPGIST_NULL_BLKNO, SPGIST_ROOT_BLKNO,
@@ -41,7 +41,7 @@ use crate::{
     initSpGistState, spgdoinsert::spgdoinsert, SpGistInitMetapage, SpGistInitPage,
     SpGistNewBuffer, SpGistUpdateMetaPage,
 };
-use spgist::SpGistState;
+use ::spgist::SpGistState;
 
 // ===========================================================================
 // spgistBuildCallback (spginsert.c:40)
@@ -94,7 +94,7 @@ pub fn spgbuild<'mcx>(
     index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     if bufmgr::relation_get_number_of_blocks_in_fork::call(index, ForkNumber::MAIN_FORKNUM)? != 0 {
-        return Err(types_error::PgError::error(&alloc::format!(
+        return Err(::types_error::PgError::error(&alloc::format!(
             "index \"{}\" already contains data",
             index.name()
         )));

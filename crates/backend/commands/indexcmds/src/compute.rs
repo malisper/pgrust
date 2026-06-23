@@ -15,33 +15,33 @@ use alloc::vec::Vec;
 use mcx::{Mcx, PgVec};
 
 use types_amapi::{CompareType, COMPARE_EQ, COMPARE_OVERLAP};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_core::{InvalidOid, OidIsValid};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::ddlnodes::IndexElem;
 use ::nodes::execnodes::IndexInfo;
 use ::nodes::nodes::{ntag, NodePtr};
 use ::nodes::primnodes::Expr;
-use types_scan::scankey::{InvalidStrategy, StrategyNumber};
+use ::types_scan::scankey::{InvalidStrategy, StrategyNumber};
 
-use utils_error::ereport;
-use types_error::ERROR;
+use ::utils_error::ereport;
+use ::types_error::ERROR;
 
-use catalog_namespace::get_collation_oid;
-use nodes_core::nodefuncs::{expr_collation, expr_type};
-use parse_oper::compatible_oper_opid;
-use clauses::contain_mutable_functions_after_planning;
+use ::catalog_namespace::get_collation_oid;
+use ::nodes_core::nodefuncs::{expr_collation, expr_type};
+use ::parse_oper::compatible_oper_opid;
+use ::clauses::contain_mutable_functions_after_planning;
 
 use miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
 use misc_guc::{at_eoxact_guc, NewGUCNestLevel};
-use guc_seams::restrict_search_path;
+use ::guc_seams::restrict_search_path;
 
 use format_type_seams as formattype_seam;
 use regproc_seams as regproc_seam;
 use lsyscache_seams as lsyscache;
 use syscache_seams as syscache;
 
-use types_catalog::pg_index::{INDOPTION_DESC, INDOPTION_NULLS_FIRST};
+use ::types_catalog::pg_index::{INDOPTION_DESC, INDOPTION_NULLS_FIRST};
 use ::nodes::rawnodes::{SORTBY_DEFAULT, SORTBY_DESC, SORTBY_NULLS_DEFAULT, SORTBY_NULLS_FIRST};
 
 use crate::{name_list, name_list_strings, opclass::GetOperatorFromCompareType, opclass::ResolveOpClass};
@@ -143,12 +143,12 @@ pub fn ComputeIndexAttrs<'mcx>(
                     // difference in error message spellings is historical
                     if isconstraint {
                         return Err(ereport(ERROR)
-                            .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+                            .errcode(::types_error::ERRCODE_UNDEFINED_COLUMN)
                             .errmsg(format!("column \"{name}\" named in key does not exist"))
                             .into_error());
                     } else {
                         return Err(ereport(ERROR)
-                            .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+                            .errcode(::types_error::ERRCODE_UNDEFINED_COLUMN)
                             .errmsg(format!("column \"{name}\" does not exist"))
                             .into_error());
                     }
@@ -164,7 +164,7 @@ pub fn ComputeIndexAttrs<'mcx>(
 
             if attn >= nkeycols {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg("expressions are not supported in included columns")
                     .into_error());
             }
@@ -206,25 +206,25 @@ pub fn ComputeIndexAttrs<'mcx>(
         if attn >= nkeycols {
             if !attribute.collation.is_empty() {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("including column does not support a collation")
                     .into_error());
             }
             if !attribute.opclass.is_empty() {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("including column does not support an operator class")
                     .into_error());
             }
             if attribute.ordering != SORTBY_DEFAULT {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("including column does not support ASC/DESC options")
                     .into_error());
             }
             if attribute.nulls_ordering != SORTBY_NULLS_DEFAULT {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+                    .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
                     .errmsg("including column does not support NULLS FIRST/LAST options")
                     .into_error());
             }
@@ -261,14 +261,14 @@ pub fn ComputeIndexAttrs<'mcx>(
         if lsyscache::type_is_collatable::call(atttype)? {
             if !OidIsValid(attcollation) {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INDETERMINATE_COLLATION)
+                    .errcode(::types_error::ERRCODE_INDETERMINATE_COLLATION)
                     .errmsg("could not determine which collation to use for index expression")
                     .errhint("Use the COLLATE clause to set the collation explicitly.")
                     .into_error());
             }
         } else if OidIsValid(attcollation) {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                .errcode(::types_error::ERRCODE_DATATYPE_MISMATCH)
                 .errmsg(format!(
                     "collations are not supported by type {}",
                     formattype_seam::format_type_be_owned::call(atttype)?
@@ -322,7 +322,7 @@ pub fn ComputeIndexAttrs<'mcx>(
             // X, bad things will happen.
             if lsyscache::get_commutator::call(opid)? != opid {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                     .errmsg(format!(
                         "operator {} is not commutative",
                         format_operator_str(opid)?
@@ -336,7 +336,7 @@ pub fn ComputeIndexAttrs<'mcx>(
             let strat = lsyscache::get_op_opfamily_strategy::call(opid, opfamily)?;
             if strat == 0 {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                     .errmsg(format!(
                         "operator {} is not a member of operator family \"{}\"",
                         format_operator_str(opid)?,
@@ -389,7 +389,7 @@ pub fn ComputeIndexAttrs<'mcx>(
             // index AM does not support ordering
             if attribute.ordering != SORTBY_DEFAULT {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!(
                         "access method \"{access_method_name}\" does not support ASC/DESC options"
                     ))
@@ -397,7 +397,7 @@ pub fn ComputeIndexAttrs<'mcx>(
             }
             if attribute.nulls_ordering != SORTBY_NULLS_DEFAULT {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!(
                         "access method \"{access_method_name}\" does not support NULLS FIRST/LAST options"
                     ))
@@ -451,7 +451,7 @@ fn set_expression_column<'mcx>(
     // clear what the index entries mean at all.
     if contain_mutable_functions_after_planning(mcx, expr_val)? {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+            .errcode(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
             .errmsg("functions in index expression must be marked IMMUTABLE")
             .into_error());
     }
@@ -511,7 +511,7 @@ fn exclusion_list_entry(node: &NodePtr<'_>) -> Vec<String> {
 
 /// `format_operator(opno)` rendered as an owned `String` for error messages.
 fn format_operator_str(opno: Oid) -> PgResult<String> {
-    let tmp = mcx::MemoryContext::new("indexcmds:format_operator");
+    let tmp = ::mcx::MemoryContext::new("indexcmds:format_operator");
     let s = regproc_seam::format_operator::call(tmp.mcx(), opno)?
         .as_str()
         .to_string();
@@ -520,7 +520,7 @@ fn format_operator_str(opno: Oid) -> PgResult<String> {
 
 /// `get_opfamily_name(opfamily, false)` rendered as an owned `String`.
 fn get_opfamily_name_str(opfamily: Oid) -> PgResult<String> {
-    let tmp = mcx::MemoryContext::new("indexcmds:get_opfamily_name");
+    let tmp = ::mcx::MemoryContext::new("indexcmds:get_opfamily_name");
     let name = lsyscache::get_opfamily_name::call(tmp.mcx(), opfamily, false)?
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();

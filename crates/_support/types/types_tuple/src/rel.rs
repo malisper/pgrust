@@ -8,8 +8,8 @@
 //! (`relation_close` / `table_close`) consumes the carrier, mirroring the C
 //! contract that the pointer is dead after close.
 
-use mcx::PgString;
-use types_core::primitive::Oid;
+use ::mcx::PgString;
+use ::types_core::primitive::Oid;
 
 use crate::heaptuple::TupleDesc;
 

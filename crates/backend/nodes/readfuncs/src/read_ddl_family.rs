@@ -3,7 +3,7 @@
 //! exact order the OUT side wrote them.
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodes::{Node, NodePtr};
 use ::nodes::ddlnodes as dn;
 
@@ -11,7 +11,7 @@ use crate::{
     elog_error, read_bool_field, read_char_field, read_enum_field, read_int64_field,
     read_int_field, read_location_field, read_oid_field, read_uint_field,
 };
-use nodes_core::read;
+use ::nodes_core::read;
 
 /// `READ_NODE_FIELD` of an `Option<NodePtr>`: `crate::read_node_field` skips the
 /// label and node_reads; `<>` -> None.
@@ -770,7 +770,7 @@ fn read_create_foreign_table_stmt<'mcx>(mcx: Mcx<'mcx>) -> PgResult<dn::CreateFo
     let base_if_not_exists = read_bool_field()?;
     let servername = read_str(mcx)?;
     let options = read_node_vec(mcx)?;
-    let base = mcx::alloc_in(mcx, dn::CreateStmt {
+    let base = ::mcx::alloc_in(mcx, dn::CreateStmt {
         relation: base_relation,
         tableElts: base_tableElts,
         inhRelations: base_inhRelations,
@@ -2046,7 +2046,7 @@ fn read_publication_obj_spec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<dn::PublicationOb
             let __n = PgBox::into_inner(n);
             let __tag = __n.node_tag();
             match __n.into_publicationtable() {
-                Some(t) => Some(mcx::alloc_in(mcx, t)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t)?),
                 None => return Err(elog_error(alloc::format!("expected PublicationTable, got {:?}", __tag))),
             }
         },
@@ -2657,9 +2657,9 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
 mod tests {
     use super::*;
     use alloc::string::{String, ToString};
-    use mcx::MemoryContext;
-    use nodes_core::read::string_to_node;
-    use outfuncs::nodeToString;
+    use ::mcx::MemoryContext;
+    use ::nodes_core::read::string_to_node;
+    use ::outfuncs::nodeToString;
     use ::nodes::nodes::Node;
     use ::nodes::ddlnodes as dn;
 

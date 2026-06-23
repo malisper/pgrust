@@ -26,8 +26,8 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, MemoryContext};
 
-use types_core::primitive::{AttrNumber, BlockNumber, InvalidOid, Oid};
-use datum::Datum as KeyDatum;
+use ::types_core::primitive::{AttrNumber, BlockNumber, InvalidOid, Oid};
+use ::datum::Datum as KeyDatum;
 use types_error::{
     ErrorLocation, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -36,16 +36,16 @@ use types_error::{
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_tuple::heaptuple::Datum;
 
-use types_acl::acl::{AclResult, ACL_MAINTAIN};
-use cache::syscache::SysCacheKey;
-use types_catalog::pg_class::{
+use ::types_acl::acl::{AclResult, ACL_MAINTAIN};
+use ::cache::syscache::SysCacheKey;
+use ::types_catalog::pg_class::{
     Anum_pg_class_relallfrozen, Anum_pg_class_relallvisible, Anum_pg_class_relisshared,
     Anum_pg_class_relkind, Anum_pg_class_relname, Anum_pg_class_relpages, Anum_pg_class_reltuples,
     RelationRelationId,
 };
-use types_catalog::pg_database::DatabaseRelationId;
-use types_catalog::pg_type::{TYPTYPE_MULTIRANGE, TYPTYPE_RANGE};
-use types_tuple::access::RangeVar;
+use ::types_catalog::pg_database::DatabaseRelationId;
+use ::types_catalog::pg_type::{TYPTYPE_MULTIRANGE, TYPTYPE_RANGE};
+use ::types_tuple::access::RangeVar;
 use statistics::{
     Anum_pg_statistic_staattnum, Anum_pg_statistic_stacoll1, Anum_pg_statistic_stadistinct,
     Anum_pg_statistic_stainherit, Anum_pg_statistic_stakind1, Anum_pg_statistic_stanullfrac,
@@ -54,40 +54,40 @@ use statistics::{
     StatisticRelationId, STATISTIC_KIND_CORRELATION, STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV,
     STATISTIC_NUM_SLOTS,
 };
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 
-use utils_error::ereport as ereport_builder;
+use ::utils_error::ereport as ereport_builder;
 
 use heaptuple::{
     heap_deform_tuple, heap_form_tuple, heap_modify_tuple, heap_modify_tuple_by_cols,
 };
 use table::{table_close, table_open};
-use transam_xact::CommandCounterIncrement;
-use index::IndexGetRelation;
-use indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
+use ::transam_xact::CommandCounterIncrement;
+use ::index::IndexGetRelation;
+use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 use catalog_namespace::{RangeVarGetRelidExtended, RangeVarGetRelidCallback};
-use objectaddress::resolve::{get_relkind_objtype, object_ownercheck};
-use pg_class::errdetail_relkind_not_supported;
-use nodes_core::makefuncs::make_range_var;
-use arrayfuncs::construct::{array_contains_nulls, construct_array_values};
-use arrayfuncs::io::array_in;
-use adt_format_type::format_type_be_str;
-use lsyscache::attribute::{get_attname, get_attnum};
-use lsyscache::relation::{get_rel_name, get_rel_relkind};
-use lsyscache::type_::{
+use ::objectaddress::resolve::{get_relkind_objtype, object_ownercheck};
+use ::pg_class::errdetail_relkind_not_supported;
+use ::nodes_core::makefuncs::make_range_var;
+use ::arrayfuncs::construct::{array_contains_nulls, construct_array_values};
+use ::arrayfuncs::io::array_in;
+use ::adt_format_type::format_type_be_str;
+use ::lsyscache::attribute::{get_attname, get_attnum};
+use ::lsyscache::relation::{get_rel_name, get_rel_relkind};
+use ::lsyscache::type_::{
     get_base_element_type, get_multirange_range, type_is_multirange,
 };
-use relcache_seams::relation_get_index_expressions;
+use ::relcache_seams::relation_get_index_expressions;
 use cache_syscache as syscache;
 use cache_syscache::{ReleaseSysCache, SearchSysCacheExistsAttName};
-use miscinit::GetUserId;
-use common_relation_seams::relation_open;
+use ::miscinit::GetUserId;
+use ::common_relation_seams::relation_open;
 
-use nodeFuncs_seams::expr_type_info;
+use ::nodeFuncs_seams::expr_type_info;
 
 /// Emit a WARNING (logs and continues, the C `ereport(WARNING, ...)`); never
 /// returns `Err`.  `code` is the optional SQLSTATE; `detail`/`hint` optional.
-fn warn(msg: String, code: Option<types_error::SqlState>, detail: Option<&str>) {
+fn warn(msg: String, code: Option<::types_error::SqlState>, detail: Option<&str>) {
     let mut b = ereport_builder(WARNING).errmsg(msg);
     if let Some(c) = code {
         b = b.errcode(c);
@@ -296,7 +296,7 @@ fn stats_check_arg_array(
     // the header/null-bitmap off the flat image. Behavior-preserving while the
     // flag is OFF (the image is already a plain 4-byte varlena).
     let raw = args.datum(argnum).as_ref_bytes();
-    let flat = arrayfuncs::construct::detoast_array_image(mcx, raw)?;
+    let flat = ::arrayfuncs::construct::detoast_array_image(mcx, raw)?;
     let image: &[u8] = &flat;
 
     // ARR_NDIM(arr) != 1
@@ -484,15 +484,15 @@ fn arg_value<'mcx>(
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
 ) -> PgResult<Datum<'mcx>> {
-    use fmgr::boundary::RefPayload;
+    use ::fmgr::boundary::RefPayload;
     Ok(match fcinfo.ref_arg(i) {
-        Some(RefPayload::Varlena(b)) => Datum::ByRef(mcx::slice_in(mcx, b)?),
+        Some(RefPayload::Varlena(b)) => Datum::ByRef(::mcx::slice_in(mcx, b)?),
         Some(RefPayload::Cstring(s)) => Datum::Cstring(s.clone()),
         Some(RefPayload::Composite(image)) => {
-            Datum::Composite(types_tuple::FormedTuple::from_datum_image(mcx, image)?)
+            Datum::Composite(::types_tuple::FormedTuple::from_datum_image(mcx, image)?)
         }
         Some(RefPayload::Expanded(eo)) => {
-            Datum::ByRef(mcx::slice_in(mcx, &datum::flatten_expanded(eo.as_ref()))?)
+            Datum::ByRef(::mcx::slice_in(mcx, &::datum::flatten_expanded(eo.as_ref()))?)
         }
         Some(RefPayload::Internal(_)) => {
             return Err(PgError::error("stats import: unexpected `internal` argument"));
@@ -722,7 +722,7 @@ struct PgClassFields {
 
 /// `(Form_pg_class) GETSTRUCT(tuple)` for the fields the callback needs, read by
 /// deforming the pg_class tuple against the open pg_class descriptor.
-fn pg_class_form(mcx: Mcx<'_>, tuple: &types_tuple::FormedTuple<'_>) -> PgResult<PgClassFields> {
+fn pg_class_form(mcx: Mcx<'_>, tuple: &::types_tuple::FormedTuple<'_>) -> PgResult<PgClassFields> {
     // pg_class column order (pg_class.h): oid(1) relname(2) ... relisshared(16)
     // relkind(17) ...  Deform against the pg_class descriptor.
     let crel = relation_open::call(mcx, RelationRelationId, AccessShareLock)?;
@@ -1433,7 +1433,7 @@ struct PgAttributeFields {
 /// `(Form_pg_attribute) GETSTRUCT(atup)` for the fields we need.  pg_attribute
 /// (`pg_attribute.h`): attrelid(1) attname(2) atttypid(3) attlen(4) attnum(5)
 /// atttypmod(6) ... attisdropped(17) ... attcollation(20).
-fn pg_attribute_form(mcx: Mcx<'_>, atup: &types_tuple::FormedTuple<'_>) -> PgResult<PgAttributeFields> {
+fn pg_attribute_form(mcx: Mcx<'_>, atup: &::types_tuple::FormedTuple<'_>) -> PgResult<PgAttributeFields> {
     let arel = relation_open::call(mcx, AttributeRelationId, AccessShareLock)?;
     let deformed = heap_deform_tuple(mcx, &atup.tuple, &arel.rd_att, &atup.data)?;
 
@@ -1582,7 +1582,7 @@ fn set_stats_slot<'mcx>(
 fn upsert_pg_statistic<'mcx>(
     mcx: Mcx<'mcx>,
     starel: &rel::Relation<'mcx>,
-    oldtup: Option<&types_tuple::FormedTuple<'mcx>>,
+    oldtup: Option<&::types_tuple::FormedTuple<'mcx>>,
     values: &[Datum<'mcx>],
     nulls: &[bool],
     replaces: &[bool],
@@ -1736,7 +1736,7 @@ fn direct_text_datum_to_string(d: &Datum) -> PgResult<String> {
 fn strip_direct_text<'mcx>(mcx: Mcx<'mcx>, d: &Datum<'mcx>) -> PgResult<Datum<'mcx>> {
     match d {
         Datum::Cstring(s) => varlena_seams::cstring_to_text_v::call(mcx, s),
-        _ => Ok(Datum::ByRef(mcx::slice_in(mcx, d.as_ref_bytes())?)),
+        _ => Ok(Datum::ByRef(::mcx::slice_in(mcx, d.as_ref_bytes())?)),
     }
 }
 
@@ -1745,7 +1745,7 @@ fn strip_direct_text<'mcx>(mcx: Mcx<'mcx>, d: &Datum<'mcx>) -> PgResult<Datum<'m
 // ===========================================================================
 
 /// `pg_restore_relation_stats(PG_FUNCTION_ARGS)` (relation_stats.c) — oid 6362.
-fn fc_pg_restore_relation_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<datum::Datum> {
+fn fc_pg_restore_relation_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<::datum::Datum> {
     let m = scratch_mcx();
     let mcx = m.mcx();
 
@@ -1760,11 +1760,11 @@ fn fc_pg_restore_relation_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResu
         result = false;
     }
 
-    Ok(datum::Datum::from_bool(result))
+    Ok(::datum::Datum::from_bool(result))
 }
 
 /// `pg_restore_attribute_stats(PG_FUNCTION_ARGS)` (attribute_stats.c) — oid 6363.
-fn fc_pg_restore_attribute_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<datum::Datum> {
+fn fc_pg_restore_attribute_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<::datum::Datum> {
     let m = scratch_mcx();
     let mcx = m.mcx();
 
@@ -1779,11 +1779,11 @@ fn fc_pg_restore_attribute_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgRes
         result = false;
     }
 
-    Ok(datum::Datum::from_bool(result))
+    Ok(::datum::Datum::from_bool(result))
 }
 
 /// `pg_clear_relation_stats(PG_FUNCTION_ARGS)` (relation_stats.c) — oid 6397.
-fn fc_pg_clear_relation_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<datum::Datum> {
+fn fc_pg_clear_relation_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<::datum::Datum> {
     let m = scratch_mcx();
     let mcx = m.mcx();
 
@@ -1800,11 +1800,11 @@ fn fc_pg_clear_relation_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult
     positional.args[RELALLFROZEN_ARG] = Some(Datum::from_u32(0));
 
     relation_statistics_update(mcx, &positional)?;
-    Ok(datum::Datum::null())
+    Ok(::datum::Datum::null())
 }
 
 /// `pg_clear_attribute_stats(PG_FUNCTION_ARGS)` (attribute_stats.c) — oid 6398.
-fn fc_pg_clear_attribute_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<datum::Datum> {
+fn fc_pg_clear_attribute_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<::datum::Datum> {
     let m = scratch_mcx();
     let mcx = m.mcx();
 
@@ -1865,7 +1865,7 @@ fn fc_pg_clear_attribute_stats(fcinfo: &mut FunctionCallInfoBaseData) -> PgResul
     let inherited = clear.datum(C_INHERITED_ARG).as_bool();
 
     delete_pg_statistic(mcx, reloid, attnum, inherited)?;
-    Ok(datum::Datum::null())
+    Ok(::datum::Datum::null())
 }
 
 /// Materialize a (non-strict, possibly-null) positional argument as `Option`.

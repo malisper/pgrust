@@ -6,13 +6,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use define_seams::{def_get_boolean, def_get_string, DefElemArg};
-use ts_locale_seams::readfile;
-use ts_utils_seams::get_tsearch_config_filename;
-use formatting_seams::str_tolower;
-use mbutils_seams::pg_mblen_range;
+use ::ts_locale_seams::readfile;
+use ::ts_utils_seams::get_tsearch_config_filename;
+use ::formatting_seams::str_tolower;
+use ::mbutils_seams::pg_mblen_range;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use tsearch::{DictSyn, Syn, TSLexeme, TSL_PREFIX};
 
 use crate::dict_simple::slice_from_in;

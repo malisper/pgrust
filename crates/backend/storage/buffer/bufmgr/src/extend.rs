@@ -43,16 +43,16 @@
 
 #![allow(dead_code)]
 
-use types_core::primitive::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber};
+use ::types_core::primitive::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber};
 use types_error::{PgError, PgResult};
-use rel::Relation;
-use types_storage::buf::{
+use ::rel::Relation;
+use ::types_storage::buf::{
     buftag, IOContext, MAX_BLOCK_NUMBER, BM_DIRTY, BM_JUST_DIRTIED, BM_PERMANENT, BM_TAG_VALID,
     BM_VALID, BUF_USAGECOUNT_ONE,
 };
-use types_storage::storage::{LWLockMode, NUM_AUXILIARY_PROCS, ReadBufferMode};
-use types_storage::RelFileLocatorBackend;
-use types_tuple::access::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
+use ::types_storage::storage::{LWLockMode, NUM_AUXILIARY_PROCS, ReadBufferMode};
+use ::types_storage::RelFileLocatorBackend;
+use ::types_tuple::access::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
 
 use crate::mgr::BufferManager;
 
@@ -79,7 +79,7 @@ const INIT_FORKNUM: ForkNumber = ForkNumber::INIT_FORKNUM;
 /// `BUF_STATE_GET_REFCOUNT(buf_state)` (buf_internals.h).
 #[inline]
 fn buf_state_get_refcount(buf_state: u32) -> u32 {
-    buf_state & types_storage::buf::BUF_REFCOUNT_MASK
+    buf_state & ::types_storage::buf::BUF_REFCOUNT_MASK
 }
 
 /// `BufferDescriptorGetBuffer(buf)` — the 1-based [`Buffer`] for a 0-based id.
@@ -696,7 +696,7 @@ impl BufferManager {
         sb::count_io_op_extend::call(
             io_context,
             1,
-            extend_by as u64 * types_core::primitive::BLCKSZ as u64,
+            extend_by as u64 * ::types_core::primitive::BLCKSZ as u64,
         );
 
         // Set BM_VALID, terminate IO, and wake up any waiters.

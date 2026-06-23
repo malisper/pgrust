@@ -23,15 +23,15 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use replication::conflict::CONFLICT_NUM_TYPES;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::NameData;
+use ::replication::conflict::CONFLICT_NUM_TYPES;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::NameData;
 
-use funcapi_seams::record_from_values;
+use ::funcapi_seams::record_from_values;
 
 use crate::register_srf;
 
@@ -100,7 +100,7 @@ fn cbuf_str(buf: &[u8]) -> &str {
 fn pg_stat_wal_build_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     wc: &types_pgstat::activity_pgstat::PgStat_WalCounters,
-    reset_ts: types_core::primitive::TimestampTz,
+    reset_ts: ::types_core::primitive::TimestampTz,
 ) -> PgResult<Datum<'mcx>> {
     let coltypes = [INT8OID, INT8OID, NUMERICOID, INT8OID, TIMESTAMPTZOID];
     let mut values: [Datum<'mcx>; 5] = [
@@ -330,7 +330,7 @@ fn pg_stat_get_subscription_stats<'mcx>(
 /// `text_to_cstring(PG_GETARG_TEXT_P(i))`: a `text` arg's payload on the by-ref
 /// lane (header-ful image; skip the 4-byte varlena header), decoded as UTF-8.
 fn arg_text(fcinfo: &FunctionCallInfoBaseData, i: usize) -> alloc::string::String {
-    use datum::varlena::VARHDRSZ;
+    use ::datum::varlena::VARHDRSZ;
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())

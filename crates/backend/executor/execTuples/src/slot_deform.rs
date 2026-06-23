@@ -28,14 +28,14 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{slice_in, Mcx};
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 use types_error::{PgError, PgResult};
 use ::nodes::tuptable::{
     HeapTupleTableSlot, SlotData, TTS_FLAG_SLOW,
 };
 // The canonical value enum; `Datum` is its transitional alias.
-use types_tuple::heaptuple::{Datum};
-use types_tuple::heaptuple::{CompactAttribute, HeapTupleHeaderGetNatts};
+use ::types_tuple::heaptuple::{Datum};
+use ::types_tuple::heaptuple::{CompactAttribute, HeapTupleHeaderGetNatts};
 
 use crate::slot_ops_vtables;
 
@@ -303,7 +303,7 @@ pub fn slot_deform_heap_tuple<'mcx>(
         .as_ref()
         .ok_or_else(|| PgError::error("slot_deform_heap_tuple: tuple has no t_data"))?;
 
-    let hasnulls = (tup.t_infomask & types_tuple::heaptuple::HEAP_HASNULL) != 0;
+    let hasnulls = (tup.t_infomask & ::types_tuple::heaptuple::HEAP_HASNULL) != 0;
 
     // We can only fetch as many attributes as the tuple has.
     let tuple_natts = HeapTupleHeaderGetNatts(tup) as i32;

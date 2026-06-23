@@ -5,7 +5,7 @@
 
 use crate::storage::RelFileLocator;
 use alloc::string::String;
-use types_core::primitive::ForkNumber;
+use ::types_core::primitive::ForkNumber;
 
 /// `SyncRequestType` (`storage/sync.h`) — what a sync request asks for. The
 /// discriminant order matches the C enum exactly (the value is used as the

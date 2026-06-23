@@ -8,9 +8,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::TransactionId;
-use types_core::xact::{CommandId, InvalidCommandId};
-use snapshot::SnapshotData;
+use ::types_core::primitive::TransactionId;
+use ::types_core::xact::{CommandId, InvalidCommandId};
+use ::snapshot::SnapshotData;
 // `ReorderBufferTupleCidKey`/`Ent` and the `TupleCidHash` alias are homed in
 // `types-logical` so snapmgr — the owner of the active `tuplecid_data` storage
 // (C `static HTAB *tuplecid_data`) — can name them without depending on this

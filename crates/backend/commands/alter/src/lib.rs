@@ -33,14 +33,14 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR,
 };
 
 use types_acl::{ACLCHECK_OK, ACL_CREATE};
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     COLLATION_RELATION_ID as CollationRelationId, CONVERSION_RELATION_ID as ConversionRelationId,
     DATABASE_RELATION_ID as DatabaseRelationId, EVENT_TRIGGER_RELATION_ID as EventTriggerRelationId,
     FOREIGN_DATA_WRAPPER_RELATION_ID as ForeignDataWrapperRelationId,
@@ -57,10 +57,10 @@ use types_catalog::catalog::{
     TS_DICTIONARY_RELATION_ID as TSDictionaryRelationId, TS_PARSER_RELATION_ID as TSParserRelationId,
     TS_TEMPLATE_RELATION_ID as TSTemplateRelationId, TYPE_RELATION_ID as TypeRelationId,
 };
-use types_catalog::catalog_dependency::{ObjectAddress, ObjectAddresses, DEPENDENCY_AUTO_EXTENSION};
-use cache::SysCacheKey;
-use types_core::primitive::{InvalidOid, OidIsValid};
-use types_core::Oid;
+use ::types_catalog::catalog_dependency::{ObjectAddress, ObjectAddresses, DEPENDENCY_AUTO_EXTENSION};
+use ::cache::SysCacheKey;
+use ::types_core::primitive::{InvalidOid, OidIsValid};
+use ::types_core::Oid;
 use ::nodes::parsenodes::{
     ObjectType, OBJECT_AGGREGATE, OBJECT_ATTRIBUTE, OBJECT_COLLATION, OBJECT_COLUMN,
     OBJECT_CONVERSION, OBJECT_DATABASE, OBJECT_DOMAIN, OBJECT_DOMCONSTRAINT, OBJECT_EVENT_TRIGGER,
@@ -75,12 +75,12 @@ use ::nodes::parsenodes::{
 use parsenodes::{
     AlterObjectDependsStmt, AlterObjectSchemaStmt, AlterOwnerStmt, Node, RenameStmt,
 };
-use types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
 
-use heaptuple::heap_modify_tuple;
+use ::heaptuple::heap_modify_tuple;
 use table::{table_close, table_open};
 use objectaddress as oa;
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
 
 // pg_proc / pg_opclass / pg_opfamily / pg_subscription attribute numbers used
 // only by the duplicate-name friendliness probes below (the C reads these off
@@ -158,15 +158,15 @@ fn owner_obj_str(stmt: &AlterOwnerStmt) -> PgResult<&str> {
 }
 
 /// `castNode(RoleSpec, node)` view for `get_rolespec_oid` (which reads the
-/// `parsenodes::RoleSpec` shape: `roletype` + `rolename`). The
-/// `parsenodes::RoleSpec` is reprojected into the `nodes` view the
+/// `::parsenodes::RoleSpec` shape: `roletype` + `rolename`). The
+/// `::parsenodes::RoleSpec` is reprojected into the `nodes` view the
 /// acl helper consumes (same `roletype`/`rolename`).
 fn role_spec_oid(mcx: Mcx<'_>, node: &Node) -> PgResult<Oid> {
     let rs = node
         .as_rolespec()
         .ok_or_else(|| PgError::error("RoleSpec node expected for newowner"))?;
     use ::nodes::parsenodes::RoleSpecType as NRT;
-    use parsenodes::RoleSpecType as PRT;
+    use ::parsenodes::RoleSpecType as PRT;
     let roletype = match rs.roletype {
         PRT::ROLESPEC_CSTRING => NRT::Cstring,
         PRT::ROLESPEC_CURRENT_ROLE => NRT::CurrentRole,
@@ -177,7 +177,7 @@ fn role_spec_oid(mcx: Mcx<'_>, node: &Node) -> PgResult<Oid> {
     let view = ::nodes::parsenodes::RoleSpec {
         roletype,
         rolename: match &rs.rolename {
-            Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+            Some(s) => Some(::mcx::PgString::from_str_in(s, mcx)?),
             None => None,
         },
     };
@@ -224,7 +224,7 @@ fn namespace_name(mcx: Mcx<'_>, nsp_oid: Oid) -> PgResult<String> {
 }
 
 /// `aclcheck_error(aclresult, objtype, name)` via the aclchk owner.
-fn aclcheck_error(aclerr: types_acl::AclResult, objtype: ObjectType, name: &str) -> PgResult<()> {
+fn aclcheck_error(aclerr: ::types_acl::AclResult, objtype: ObjectType, name: &str) -> PgResult<()> {
     aclchk::aclcheck_error(aclerr, objtype, Some(name.to_string()))
 }
 
@@ -305,7 +305,7 @@ fn search_by_oid<'mcx>(
     cache_id: i32,
     object_id: Oid,
 ) -> PgResult<Option<FormedTuple<'mcx>>> {
-    cache_syscache::SearchSysCache1(
+    ::cache_syscache::SearchSysCache1(
         mcx,
         cache_id,
         SysCacheKey::Value(datum::Datum::from_oid(object_id)),
@@ -318,7 +318,7 @@ fn getattr_notnull<'mcx>(
     tup: &FormedTuple<'mcx>,
     anum: i16,
 ) -> PgResult<Datum<'mcx>> {
-    cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)
+    ::cache_syscache::SysCacheGetAttrNotNull(mcx, cache_id, tup, anum as i32)
 }
 
 /// `SearchSysCacheExists2(nameCacheId, name, nspOid)` — name-and-namespace
@@ -329,7 +329,7 @@ fn name_nsp_exists(
     name: &str,
     nsp_oid: Oid,
 ) -> PgResult<bool> {
-    cache_syscache::SearchSysCacheExists(
+    ::cache_syscache::SearchSysCacheExists(
         mcx,
         name_cache_id,
         SysCacheKey::Str(name),
@@ -341,7 +341,7 @@ fn name_nsp_exists(
 
 /// `SearchSysCacheExists1(nameCacheId, name)`.
 fn name_exists(mcx: Mcx<'_>, name_cache_id: i32, name: &str) -> PgResult<bool> {
-    cache_syscache::SearchSysCacheExists(
+    ::cache_syscache::SearchSysCacheExists(
         mcx,
         name_cache_id,
         SysCacheKey::Str(name),
@@ -353,8 +353,8 @@ fn name_exists(mcx: Mcx<'_>, name_cache_id: i32, name: &str) -> PgResult<bool> {
 
 /// `SearchSysCacheExists2(SUBSCRIPTIONNAME, MyDatabaseId, new_name)`.
 fn subscription_name_exists(mcx: Mcx<'_>, my_database_id: Oid, name: &str) -> PgResult<bool> {
-    use cache_syscache::cacheinfo::SUBSCRIPTIONNAME;
-    cache_syscache::SearchSysCacheExists(
+    use ::cache_syscache::cacheinfo::SUBSCRIPTIONNAME;
+    ::cache_syscache::SearchSysCacheExists(
         mcx,
         SUBSCRIPTIONNAME,
         SysCacheKey::Value(datum::Datum::from_oid(my_database_id)),
@@ -480,7 +480,7 @@ fn AlterObjectRename_internal(
             ownerId,
         )? {
             aclcheck_error(
-                types_acl::ACLCHECK_NOT_OWNER,
+                ::types_acl::ACLCHECK_NOT_OWNER,
                 oa::properties::get_object_type(class_id, objectId)?,
                 &old_name,
             )?;
@@ -556,10 +556,10 @@ fn AlterObjectRename_internal(
     let mut values: Vec<Datum> = vec![Datum::null(); natts];
     let nulls: Vec<bool> = vec![false; natts];
     let mut replaces: Vec<bool> = vec![false; natts];
-    let mut nameattr = types_tuple::heaptuple::NameData::default();
+    let mut nameattr = ::types_tuple::heaptuple::NameData::default();
     nameattr.namestrcpy(new_name);
     values[(meta.anum_name - 1) as usize] =
-        Datum::ByRef(mcx::slice_in(mcx, &nameattr.data)?);
+        Datum::ByRef(::mcx::slice_in(mcx, &nameattr.data)?);
     replaces[(meta.anum_name - 1) as usize] = true;
     let mut newtup = heap_modify_tuple(mcx, &oldtup, &rel.rd_att, &values, &nulls, &replaces)?;
 
@@ -938,7 +938,7 @@ fn AlterObjectNamespace_internal(
             ownerId,
         )? {
             aclcheck_error(
-                types_acl::ACLCHECK_NOT_OWNER,
+                ::types_acl::ACLCHECK_NOT_OWNER,
                 oa::properties::get_object_type(class_id, objid)?,
                 &name_text_of(&name)?,
             )?;
@@ -1152,7 +1152,7 @@ pub fn AlterObjectOwner_internal(
                     format!("{objectId}")
                 };
                 aclcheck_error(
-                    types_acl::ACLCHECK_NOT_OWNER,
+                    ::types_acl::ACLCHECK_NOT_OWNER,
                     oa::properties::get_object_type(catalogId, objectId)?,
                     &objname,
                 )?;
@@ -1198,7 +1198,7 @@ pub fn AlterObjectOwner_internal(
         lmgr_seams::unlock_tuple::call(
             rel.rd_id,
             oldtup.tuple.t_self,
-            types_storage::lock::InplaceUpdateTupleLock,
+            ::types_storage::lock::InplaceUpdateTupleLock,
         )?;
     }
 
@@ -1220,7 +1220,7 @@ fn read_attr<'mcx>(
     anum: i16,
 ) -> PgResult<Datum<'mcx>> {
     let cols =
-        heaptuple::heap_deform_tuple(mcx, &tup.tuple, &rel.rd_att, &tup.data)?;
+        ::heaptuple::heap_deform_tuple(mcx, &tup.tuple, &rel.rd_att, &tup.data)?;
     let (val, isnull) = &cols[(anum - 1) as usize];
     debug_assert!(!isnull);
     val.clone_in(mcx)
@@ -1237,7 +1237,7 @@ fn read_attr_oid<'mcx>(
 
 /// Convert the owned-tree `::nodes::ddlnodes::RenameStmt` (the form carried
 /// by the `tcop/utility.c` `Node` dispatch tree) into the heap-owned
-/// `parsenodes::RenameStmt` that [`ExecRenameStmt`] and its per-object
+/// `::parsenodes::RenameStmt` that [`ExecRenameStmt`] and its per-object
 /// drivers (`RenameRelation` / `renameatt` / `RenameConstraint` / …) consume.
 ///
 /// `renameType` / `relationType` / `behavior` / `missing_ok` are the shared
@@ -1249,7 +1249,7 @@ fn renamestmt_to_parsenodes(
     stmt: &::nodes::ddlnodes::RenameStmt<'_>,
 ) -> PgResult<RenameStmt> {
     let relation = match stmt.relation.as_ref().and_then(|n| n.as_rangevar()) {
-        Some(rv) => Some(types_tuple::access::RangeVar {
+        Some(rv) => Some(::types_tuple::access::RangeVar {
             catalogname: rv.catalogname.as_deref().map(|s| s.into()),
             schemaname: rv.schemaname.as_deref().map(|s| s.into()),
             relname: rv.relname.as_deref().unwrap_or("").into(),
@@ -1321,11 +1321,11 @@ fn exec_rename_stmt_slow_arm<'mcx>(
 /// Lower a live `RangeVar *relation` (`Option<NodePtr>` at a `T_RangeVar`).
 fn lower_alter_relation(
     relation: &Option<::nodes::nodes::NodePtr<'_>>,
-) -> Option<types_tuple::access::RangeVar> {
+) -> Option<::types_tuple::access::RangeVar> {
     relation
         .as_ref()
         .and_then(|n| n.as_rangevar())
-        .map(|rv| types_tuple::access::RangeVar {
+        .map(|rv| ::types_tuple::access::RangeVar {
             catalogname: rv.catalogname.as_deref().map(|s| s.into()),
             schemaname: rv.schemaname.as_deref().map(|s| s.into()),
             relname: rv.relname.as_deref().unwrap_or("").into(),
@@ -1335,7 +1335,7 @@ fn lower_alter_relation(
         })
 }
 
-/// Lower an opaque live `Node *object` to the owned `parsenodes::Node`.
+/// Lower an opaque live `Node *object` to the owned `::parsenodes::Node`.
 fn lower_alter_object(
     object: &Option<::nodes::nodes::NodePtr<'_>>,
 ) -> PgResult<Option<Box<Node>>> {
@@ -1348,13 +1348,13 @@ fn lower_alter_object(
 }
 
 /// Lower a live `RoleSpec *newowner` to the owned
-/// `parsenodes::Node::RoleSpec` (`role_spec_oid` reads `roletype` /
+/// `::parsenodes::Node::RoleSpec` (`role_spec_oid` reads `roletype` /
 /// `rolename`).
 fn lower_alter_rolespec(
     newowner: &Option<::nodes::nodes::NodePtr<'_>>,
 ) -> PgResult<Option<Box<Node>>> {
     use ::nodes::parsenodes::RoleSpecType as NRT;
-    use parsenodes::RoleSpecType as PRT;
+    use ::parsenodes::RoleSpecType as PRT;
     match newowner.as_ref() {
         None => Ok(None),
         Some(n) => {
@@ -1368,7 +1368,7 @@ fn lower_alter_rolespec(
                 NRT::SessionUser => PRT::ROLESPEC_SESSION_USER,
                 NRT::Public => PRT::ROLESPEC_PUBLIC,
             };
-            Ok(Some(Box::new(Node::RoleSpec(parsenodes::RoleSpec {
+            Ok(Some(Box::new(Node::RoleSpec(::parsenodes::RoleSpec {
                 roletype,
                 rolename: rs.rolename.as_ref().map(|s| s.as_str().to_string()),
                 location: -1,
@@ -1492,7 +1492,7 @@ fn exec_alter_owner_stmt_slow_arm<'mcx>(
 pub fn init_seams() {
     alter_seams::alter_object_owner_internal::set(
         |class_id, object_id, new_owner_id| {
-            let ctx = mcx::MemoryContext::new("AlterObjectOwner_internal");
+            let ctx = ::mcx::MemoryContext::new("AlterObjectOwner_internal");
             AlterObjectOwner_internal(ctx.mcx(), class_id, object_id, new_owner_id)
         },
     );

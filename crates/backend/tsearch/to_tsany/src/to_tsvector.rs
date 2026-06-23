@@ -4,12 +4,12 @@
 use alloc::vec::Vec;
 
 use parse::{parsetext, ParsedText};
-use adt_jsonfuncs::iterate::{iterate_json_values, iterate_jsonb_values};
-use adt_jsonfuncs::setops::parse_jsonb_index_flags;
-use ts_cache::getTSCurrentConfig;
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::adt_jsonfuncs::iterate::{iterate_json_values, iterate_jsonb_values};
+use ::adt_jsonfuncs::setops::parse_jsonb_index_flags;
+use ::ts_cache::getTSCurrentConfig;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 use crate::make_tsvector::make_tsvector;
 

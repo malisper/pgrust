@@ -4,8 +4,8 @@
 //! The owning unit (`backend-catalog-pg-parameter-acl`) installs these from its
 //! `init_seams()`; until that runs a call panics loudly.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `ParameterAclLookup(parameter, missing_ok)` (pg_parameter_acl.c): the

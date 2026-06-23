@@ -19,8 +19,8 @@
 
 #![allow(clippy::unreadable_literal)]
 
-use types_core::primitive::Selectivity;
-use datum::Datum;
+use ::types_core::primitive::Selectivity;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// Install this crate's contributions. The selectivity estimators are reached

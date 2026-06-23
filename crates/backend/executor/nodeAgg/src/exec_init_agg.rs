@@ -6,8 +6,8 @@
 //! creation) is far larger than the rest of the lifecycle family combined.
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::execnodes::PlanStateData;
 use ::nodes::nodeagg::{
     do_aggsplit_combine, do_aggsplit_deserialize, do_aggsplit_serialize, do_aggsplit_skipfinal,
@@ -44,7 +44,7 @@ const EXEC_FLAG_MARK: i32 = 0x0010;
 const INTERNALOID: Oid = 2281;
 
 /// `InvalidOid` (postgres_ext.h).
-const INVALID_OID: Oid = types_core::primitive::INVALID_OID;
+const INVALID_OID: Oid = ::types_core::primitive::INVALID_OID;
 
 /// `AGGKIND_IS_ORDERED_SET(kind)` (catalog/pg_aggregate.h): true unless
 /// `kind == AGGKIND_NORMAL` (`'n'`).
@@ -845,7 +845,7 @@ fn clone_phase_sortnode<'mcx>(
 
 /// Build a `Bitmapset` of `grpColIdx[0..numCols]` for an Agg node.
 fn grouped_cols_bms<'mcx>(
-    grp_col_idx: Option<&PgVec<'mcx, types_core::primitive::AttrNumber>>,
+    grp_col_idx: Option<&PgVec<'mcx, ::types_core::primitive::AttrNumber>>,
     num_cols: i32,
     mcx: Mcx<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
@@ -984,7 +984,7 @@ fn build_phase_eqfunction<'mcx>(
     };
     // scanDesc = aggstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor
     let scan_desc = scan_tuple_desc(aggstate, estate)?;
-    let key_col_idx: PgVec<'mcx, types_core::primitive::AttrNumber> = {
+    let key_col_idx: PgVec<'mcx, ::types_core::primitive::AttrNumber> = {
         let mut v = vec_with_capacity_in(mcx, length as usize)?;
         if let Some(idx) = aggnode.grp_col_idx.as_ref() {
             for j in 0..length as usize {
@@ -1192,7 +1192,7 @@ fn init_per_aggref<'mcx>(
             if do_aggsplit_serialize(aggsplit) {
                 debug_assert!(do_aggsplit_skipfinal(aggsplit));
                 if aggform.aggserialfn == INVALID_OID {
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "serialfunc not provided for serialization aggregation",
                     ));
                 }
@@ -1201,7 +1201,7 @@ fn init_per_aggref<'mcx>(
             if do_aggsplit_deserialize(aggsplit) {
                 debug_assert!(do_aggsplit_combine(aggsplit));
                 if aggform.aggdeserialfn == INVALID_OID {
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "deserialfunc not provided for deserialization aggregation",
                     ));
                 }
@@ -1282,7 +1282,7 @@ fn init_per_aggref<'mcx>(
             if do_aggsplit_combine(aggsplit) {
                 let transfn_oid = aggform.aggcombinefn;
                 if transfn_oid == INVALID_OID {
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "combinefn not set for aggregate function",
                     ));
                 }
@@ -1319,7 +1319,7 @@ fn init_per_aggref<'mcx>(
                 let strict = pertrans_transfn_strict(aggstate, transno);
                 if strict && aggtranstype == INTERNALOID {
                     let typ = format_type_be(aggtranstype)?;
-                    return Err(types_error::PgError::error(alloc::format!(
+                    return Err(::types_error::PgError::error(alloc::format!(
                         "combine function with transition type {typ} must not be declared STRICT"
                     )));
                 }
@@ -1367,7 +1367,7 @@ fn init_per_aggref<'mcx>(
                         is_binary_coercible(input_types[num_direct_args as usize], aggtranstype)?
                     };
                     if !coercible {
-                        return Err(types_error::PgError::error(alloc::format!(
+                        return Err(::types_error::PgError::error(alloc::format!(
                             "aggregate {} needs to have compatible input type and transition type",
                             aggfnoid
                         )));
@@ -1385,7 +1385,7 @@ fn init_per_aggref<'mcx>(
 
     // Detect nested aggregates added during expression init.
     if numaggrefs != list_length(&aggstate.aggs) as i32 {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "aggregate function calls cannot be nested",
         ));
     }
@@ -1464,7 +1464,7 @@ fn fetch_agg_form<'mcx>(
 ) -> PgResult<types_catalog::pg_aggregate::AggFormData> {
     syscache_seams::agg_form_by_oid::call(mcx, aggfnoid)?.ok_or_else(|| {
         // C: elog(ERROR, "cache lookup failed for aggregate %u", aggref->aggfnoid)
-        types_error::PgError::error(alloc::format!(
+        ::types_error::PgError::error(alloc::format!(
             "cache lookup failed for aggregate {aggfnoid}"
         ))
     })
@@ -1477,7 +1477,7 @@ fn fetch_agg_form<'mcx>(
 fn check_aggregate_acl<'mcx>(mcx: Mcx<'mcx>, aggfnoid: Oid) -> PgResult<()> {
     let user = miscinit_seams::get_user_id::call();
     let aclresult = aclchk_seams::object_aclcheck::call(
-        types_core::catalog::PROCEDURE_RELATION_ID,
+        ::types_core::catalog::PROCEDURE_RELATION_ID,
         aggfnoid,
         user,
         types_acl::acl::ACL_EXECUTE,
@@ -1502,7 +1502,7 @@ fn check_aggregate_acl<'mcx>(mcx: Mcx<'mcx>, aggfnoid: Oid) -> PgResult<()> {
 fn fetch_proc_owner<'mcx>(mcx: Mcx<'mcx>, aggfnoid: Oid) -> PgResult<Oid> {
     let proc = syscache_seams::lookup_proc::call(mcx, aggfnoid)?
         .ok_or_else(|| {
-            types_error::PgError::error(alloc::format!(
+            ::types_error::PgError::error(alloc::format!(
                 "cache lookup failed for function {aggfnoid}"
             ))
         })?;
@@ -1515,7 +1515,7 @@ fn fetch_proc_owner<'mcx>(mcx: Mcx<'mcx>, aggfnoid: Oid) -> PgResult<Oid> {
 /// for a transition/serial/deserial/final component function.
 fn check_component_fn_acl<'mcx>(mcx: Mcx<'mcx>, fnoid: Oid, agg_owner: Oid) -> PgResult<()> {
     let aclresult = aclchk_seams::object_aclcheck::call(
-        types_core::catalog::PROCEDURE_RELATION_ID,
+        ::types_core::catalog::PROCEDURE_RELATION_ID,
         fnoid,
         agg_owner,
         types_acl::acl::ACL_EXECUTE,

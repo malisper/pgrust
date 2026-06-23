@@ -5,25 +5,25 @@
 
 use std::cell::RefCell;
 
-use heaptuple::heap_deform_tuple;
+use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam_seams;
 use table::{table_close, table_open};
 use inval_seams as inval_seams;
 use relmapper_seams as relmapper_seams;
 use fmgr_seams as fmgr_seams;
 use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
-use types_core::fmgr::F_OIDEQ;
+use ::types_core::fmgr::F_OIDEQ;
 use types_core::{InvalidOid, Oid, RelFileNumber};
 use types_error::{PgError, PgResult};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::AccessShareLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::AccessShareLock;
 // The canonical value enum (`Datum<'mcx>`) is the migration target for the
-// deformed-column reads below. The bare-word newtype (`datum::Datum`)
+// deformed-column reads below. The bare-word newtype (`::datum::Datum`)
 // survives only at the audited ABI/storage edges where a plain machine word is
 // stored: the relcache-callback function-pointer `arg` (its type is fixed by
 // `RelcacheCallbackFunction`) and `ScanKeyData.sk_argument` (a bare word in the
 // `types-scan` vocabulary). Those uses are spelled `ScalarWord` here.
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 use types_tuple::heaptuple::Datum;
 
 /// `RelationRelationId` (`catalog/pg_class.h`) — pg_class.
@@ -59,7 +59,7 @@ struct RelfilenumberMap<'mcx> {
     hash: PgHashMap<'mcx, RelfilenumberMapKey, Oid>,
 }
 
-mcx::bind!(RelfilenumberMapTy => RelfilenumberMap<'mcx>);
+::mcx::bind!(RelfilenumberMapTy => RelfilenumberMap<'mcx>);
 
 thread_local! {
     static RELFILENUMBER_MAP: RefCell<Option<McxOwned<RelfilenumberMapTy>>> =
@@ -97,7 +97,7 @@ fn InitializeRelfilenumberMap() -> PgResult<()> {
     let mut skey = [ScanKeyData::empty(), ScanKeyData::empty()];
     for entry in &mut skey {
         fmgr_seams::fmgr_info_check::call(F_OIDEQ)?;
-        entry.sk_func = types_core::fmgr::FmgrInfo { fn_oid: F_OIDEQ, ..Default::default() };
+        entry.sk_func = ::types_core::fmgr::FmgrInfo { fn_oid: F_OIDEQ, ..Default::default() };
         entry.sk_strategy = BTEqualStrategyNumber;
         entry.sk_subtype = InvalidOid;
         entry.sk_collation = InvalidOid;

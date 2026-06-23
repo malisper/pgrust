@@ -2,9 +2,9 @@
 //! catalog unit `backend-utils-misc-more2`). The owning unit installs these
 //! from its `init_seams()` when it lands; until then a call panics loudly.
 
-use types_error::PgResult;
-use types_timeout::EnableTimeoutParams;
-use types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_timeout::EnableTimeoutParams;
+use ::types_core::TimestampTz;
 use types_timeout::{TimeoutHandlerProc, TimeoutId};
 
 seam_core::seam!(
@@ -51,7 +51,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `disable_timeouts(timeouts, count)` (timeout.c) — cancel several
     /// timeouts at once.
-    pub fn disable_timeouts(timeouts: &[types_timeout::DisableTimeoutParams]) -> PgResult<()>
+    pub fn disable_timeouts(timeouts: &[::types_timeout::DisableTimeoutParams]) -> PgResult<()>
 );
 
 seam_core::seam!(

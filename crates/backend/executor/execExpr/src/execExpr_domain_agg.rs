@@ -9,12 +9,12 @@
 //! builders, so its seams land here.
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::catalog::PROCEDURE_RELATION_ID;
-use types_core::fmgr::FmgrInfo;
+use ::types_core::catalog::PROCEDURE_RELATION_ID;
+use ::types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
 // The canonical unified value type (Datum-unification keystone) — what
 // `ExprEvalStepData::HashDatumInitValue { init_value }` carries.
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, LastAttnumInfo, ResultCell,
@@ -23,11 +23,11 @@ use ::nodes::execexpr::{
 use ::nodes::execexpr::SubPlanState;
 use ::nodes::executor::TupleSlotKind;
 use ::nodes::nodeagg::{do_aggsplit_combine, AggStrategy, Aggref};
-use nodeAgg::AggStateData;
+use ::nodeAgg::AggStateData;
 use ::nodes::parsenodes::OBJECT_FUNCTION;
 use ::nodes::primnodes::{etag, Expr, OpExpr, AND_EXPR};
 use ::nodes::EStateData;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 
 /// `#define INNER_VAR (-1)` (primnodes.h special varnos) — local mirror (the
 /// core constant is module-private); used by the agg setup walker.
@@ -37,7 +37,7 @@ const OUTER_VAR: i32 = -2;
 
 use crate::execExpr_core as core;
 use aclchk_seams as aclchk;
-use cache::typcache::{DOM_CONSTRAINT_CHECK, DOM_CONSTRAINT_NOTNULL};
+use ::cache::typcache::{DOM_CONSTRAINT_CHECK, DOM_CONSTRAINT_NOTNULL};
 use objectaccess_seams as objectaccess;
 use execExpr_seams::{CombiningOpInfo, CombiningTestExpr};
 use lsyscache_seams as lsyscache;
@@ -71,7 +71,7 @@ fn make_expr_state<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ExprState<'mcx>> {
 /// allocate the arena + cell 0 (`STATE_RESULT_CELL`) if not yet present.
 fn ensure_result_arena<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>) -> PgResult<()> {
     if state.result_cells.cells.is_none() {
-        let mut cells = mcx::vec_with_capacity_in(mcx, 1)?;
+        let mut cells = ::mcx::vec_with_capacity_in(mcx, 1)?;
         cells.push(ResultCell::default());
         state.result_cells.cells = Some(cells);
     }
@@ -234,7 +234,7 @@ pub fn exec_init_coerce_to_domain<'mcx>(
     let mut checkvalue_alloc: Option<ResultCellId> = None;
     for con in &constraints {
         // scratch->d.domaincheck.constraintname = con->name;
-        let constraintname = Some(mcx::PgString::from_str_in(&con.name, mcx)?);
+        let constraintname = Some(::mcx::PgString::from_str_in(&con.name, mcx)?);
 
         if con.constrainttype == DOM_CONSTRAINT_NOTNULL {
             // scratch->opcode = EEOP_DOMAIN_NOTNULL; ExprEvalPushStep. The
@@ -469,7 +469,7 @@ pub fn exec_build_agg_trans<'mcx>(
 
         // List of step indices whose early-bailout jump must be pointed past the
         // whole trans (the C `adjust_bailout`).
-        let mut adjust_bailout: PgVec<'mcx, i32> = mcx::vec_with_capacity_in(mcx, 4)?;
+        let mut adjust_bailout: PgVec<'mcx, i32> = ::mcx::vec_with_capacity_in(mcx, 4)?;
 
         // strictnulls / strictargs selection (C locals): for the strict-input
         // check, either a `nulls` array (sorted paths) or the per-arg cells
@@ -486,7 +486,7 @@ pub fn exec_build_agg_trans<'mcx>(
         // gather into `fcinfo->args[1..]`. Empty for ordered (DATUM/TUPLE) and
         // zero-input aggregates (e.g. `count(*)`).
         let mut trans_input_cells: PgVec<'mcx, ResultCellId> =
-            mcx::vec_with_capacity_in(mcx, p.num_trans_inputs.max(0) as usize)?;
+            ::mcx::vec_with_capacity_in(mcx, p.num_trans_inputs.max(0) as usize)?;
 
         // ---- filter (before evaluating input; skipped when combining) ----
         if p.has_aggfilter && !is_combine {
@@ -556,7 +556,7 @@ pub fn exec_build_agg_trans<'mcx>(
                 //   InvalidOid, (Node *) aggstate, NULL) — point the frame at the
                 // resolved deserialfn FmgrInfo so the interpreter re-dispatches by
                 // its fn_oid (the collation stays InvalidOid; deserialfns ignore it).
-                let mut ds_fcinfo = init_fcinfo(mcx, types_core::InvalidOid)?;
+                let mut ds_fcinfo = init_fcinfo(mcx, ::types_core::InvalidOid)?;
                 ds_fcinfo.flinfo = Some(p.deserialfn.clone());
                 let ds_arg_cell = new_result_cell(mcx, &mut state)?;
                 core::exec_init_expr_rec(mcx, &source_expr, &mut state, ds_arg_cell)?;
@@ -601,7 +601,7 @@ pub fn exec_build_agg_trans<'mcx>(
             // ORDER BY / DISTINCT but presorted input. strictargs =
             // trans_fcinfo->args + 1.
             let mut cells: PgVec<'mcx, ResultCellId> =
-                mcx::vec_with_capacity_in(mcx, p.num_trans_inputs.max(0) as usize)?;
+                ::mcx::vec_with_capacity_in(mcx, p.num_trans_inputs.max(0) as usize)?;
             let nargs = p.aggref_args_len;
             for i in 0..nargs {
                 // Don't initialize args for any ORDER BY clause that might exist
@@ -647,7 +647,7 @@ pub fn exec_build_agg_trans<'mcx>(
             // scanning sortslot->tts_isnull, since those nulls came from these
             // very recursions.
             let mut cells: PgVec<'mcx, ResultCellId> =
-                mcx::vec_with_capacity_in(mcx, p.aggref_args_len.max(0) as usize)?;
+                ::mcx::vec_with_capacity_in(mcx, p.aggref_args_len.max(0) as usize)?;
             for i in 0..p.aggref_args_len {
                 let arg = arg_tle_expr_clone(aggstate, transno, i, mcx)?;
                 // Recurse into &values[argno] / &nulls[argno].
@@ -734,7 +734,7 @@ pub fn exec_build_agg_trans<'mcx>(
             // &pertrans->transfn_fcinfo->args[i + 1]; SINGLE keeps the input_cell
             // path and leaves this empty.
             let mut input_cells: PgVec<'mcx, ResultCellId> =
-                mcx::vec_with_capacity_in(mcx, trans_input_cells.len())?;
+                ::mcx::vec_with_capacity_in(mcx, trans_input_cells.len())?;
             if opcode == ExprEvalOp::EEOP_AGG_PRESORTED_DISTINCT_MULTI {
                 for &c in trans_input_cells.iter() {
                     input_cells.push(c);
@@ -858,7 +858,7 @@ pub fn exec_build_agg_trans<'mcx>(
     // SubPlan-init time.
     core::drain_found_subplan_ids(mcx, &mut aggstate.ss.ps, &mut state)?;
 
-    mcx::alloc_in(mcx, state)
+    ::mcx::alloc_in(mcx, state)
 }
 
 /// `ExecBuildAggTransCall(state, aggstate, scratch, fcinfo, pertrans, transno,
@@ -958,10 +958,10 @@ pub fn exec_build_agg_trans_call<'mcx>(
     // arg_cells. The plain TRANS opcodes gather these into `fcinfo->args[1..]`.
     let arg_cells: PgVec<'mcx, ResultCellId> =
         if opcode == ExprEvalOp::EEOP_AGG_ORDERED_TRANS_DATUM {
-            mcx::vec_with_capacity_in(mcx, 0)?
+            ::mcx::vec_with_capacity_in(mcx, 0)?
         } else {
             let mut v: PgVec<'mcx, ResultCellId> =
-                mcx::vec_with_capacity_in(mcx, trans_input_cells.len())?;
+                ::mcx::vec_with_capacity_in(mcx, trans_input_cells.len())?;
             for &c in trans_input_cells {
                 v.push(c);
             }
@@ -1105,7 +1105,7 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
 
         // finfo = &hashfunctions[i]; fcinfo = palloc0(SizeForFunctionCallInfo(1));
         // InitFunctionCallInfoData(*fcinfo, finfo, 1, inputcollid, NULL, NULL);
-        let finfo = mcx::alloc_in(mcx, hashfunctions[i].clone())?;
+        let finfo = ::mcx::alloc_in(mcx, hashfunctions[i].clone())?;
         let fcinfo = init_fcinfo(mcx, inputcollid)?;
 
         // Fetch inner Var for this attnum and store it in the 1st arg of the
@@ -1162,7 +1162,7 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
 
     push_done_return(mcx, &mut state)?;
     exec_ready_expr(&mut state)?;
-    Ok(mcx::alloc_in(mcx, state)?)
+    Ok(::mcx::alloc_in(mcx, state)?)
 }
 
 // ===========================================================================
@@ -1245,15 +1245,15 @@ pub fn exec_build_hash32_expr<'mcx>(
         opcode = ExprEvalOp::EEOP_HASHDATUM_NEXT32;
     }
 
-    let mut adjust_jumps: mcx::PgVec<'mcx, usize> =
-        mcx::vec_with_capacity_in(mcx, num_exprs.max(0) as usize)?;
+    let mut adjust_jumps: ::mcx::PgVec<'mcx, usize> =
+        ::mcx::vec_with_capacity_in(mcx, num_exprs.max(0) as usize)?;
 
     for (i, expr) in hash_exprs.iter().enumerate() {
         let inputcollid = collations[i];
         let funcid = hashfunc_oids[i];
 
         // finfo = palloc0(sizeof(FmgrInfo)); fmgr_info(funcid, finfo).
-        let finfo = mcx::alloc_in(mcx, fmgr_seam::fmgr_info::call(mcx, funcid)?)?;
+        let finfo = ::mcx::alloc_in(mcx, fmgr_seam::fmgr_info::call(mcx, funcid)?)?;
         let fcinfo = init_fcinfo(mcx, inputcollid)?;
 
         // Build the steps to evaluate the hash function's argument so the value
@@ -1312,7 +1312,7 @@ pub fn exec_build_hash32_expr<'mcx>(
 
     push_done_return(mcx, &mut state)?;
     exec_ready_expr(&mut state)?;
-    Ok(mcx::alloc_in(mcx, state)?)
+    Ok(::mcx::alloc_in(mcx, state)?)
 }
 
 // ===========================================================================
@@ -1393,8 +1393,8 @@ pub fn exec_build_grouping_equal<'mcx>(
     // equality function (ACL_EXECUTE + fmgr_info), emits the inner/outer Var
     // steps writing fcinfo args[0]/[1] (owned arena cells), a NOT_DISTINCT call,
     // and a QUAL short-circuit.
-    let mut adjust_jumps: mcx::PgVec<'mcx, usize> =
-        mcx::vec_with_capacity_in(mcx, num_cols.max(0) as usize)?;
+    let mut adjust_jumps: ::mcx::PgVec<'mcx, usize> =
+        ::mcx::vec_with_capacity_in(mcx, num_cols.max(0) as usize)?;
     let mut natt = num_cols;
     while {
         natt -= 1;
@@ -1422,7 +1422,7 @@ pub fn exec_build_grouping_equal<'mcx>(
     fixup_qual_jumps(&mut state, &adjust_jumps);
     push_done_return(mcx, &mut state)?;
     exec_ready_expr(&mut state)?;
-    Ok(Some(mcx::alloc_in(mcx, state)?))
+    Ok(Some(::mcx::alloc_in(mcx, state)?))
 }
 
 // ===========================================================================
@@ -1477,8 +1477,8 @@ pub fn exec_build_param_set_equal<'mcx>(
     // Per-column comparison, front-to-back over every attno (one per param
     // expr). Same per-column body as ExecBuildGroupingEqual; both Var steps read
     // the same `desc` attribute (inner vs outer slot).
-    let mut adjust_jumps: mcx::PgVec<'mcx, usize> =
-        mcx::vec_with_capacity_in(mcx, maxatt.max(0) as usize)?;
+    let mut adjust_jumps: ::mcx::PgVec<'mcx, usize> =
+        ::mcx::vec_with_capacity_in(mcx, maxatt.max(0) as usize)?;
     for attno in 0..maxatt as i32 {
         let att_typid = desc.attr(attno as usize).atttypid;
         let foid = eqfunctions[attno as usize];
@@ -1500,7 +1500,7 @@ pub fn exec_build_param_set_equal<'mcx>(
     fixup_qual_jumps(&mut state, &adjust_jumps);
     push_done_return(mcx, &mut state)?;
     exec_ready_expr(&mut state)?;
-    Ok(mcx::alloc_in(mcx, state)?)
+    Ok(::mcx::alloc_in(mcx, state)?)
 }
 
 // ===========================================================================
@@ -1670,7 +1670,7 @@ fn arg_tle_expr_clone<'mcx>(
 /// Allocate a single-element `PgVec<ResultCellId>` (the strict-input-check's
 /// `arg_cells` for a one-argument transition function).
 fn single_cell_vec<'mcx>(mcx: Mcx<'mcx>, cell: ResultCellId) -> PgResult<PgVec<'mcx, ResultCellId>> {
-    let mut v = mcx::vec_with_capacity_in(mcx, 1)?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, 1)?;
     v.push(cell);
     Ok(v)
 }
@@ -1728,7 +1728,7 @@ fn pertrans_pred(aggstate: &AggStateData<'_>, transno: usize) -> PertransPred {
         num_distinct_cols: pt.num_distinct_cols,
         aggref_args_len: aggref.args.as_ref().map(|a| a.len()).unwrap_or(0),
         // OidIsValid(pertrans->deserialfn_oid)
-        deserialfn_valid: pt.deserialfn_oid != types_core::InvalidOid,
+        deserialfn_valid: pt.deserialfn_oid != ::types_core::InvalidOid,
         deserialfn_strict: pt.deserialfn.fn_strict,
         deserialfn: pt.deserialfn.clone(),
         // trans_fcinfo->flinfo->fn_strict
@@ -1766,7 +1766,7 @@ fn init_fcinfo<'mcx>(
     mcx: Mcx<'mcx>,
     inputcollid: Oid,
 ) -> PgResult<PgBox<'mcx, ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>>> {
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         ::nodes::fmgr::FunctionCallInfoBaseData {
             fncollation: inputcollid,
@@ -1837,10 +1837,10 @@ fn emit_eq_column<'mcx>(
     left_vartype: Oid,
     right_attnum: i32,
     right_vartype: Oid,
-    adjust_jumps: &mut mcx::PgVec<'mcx, usize>,
+    adjust_jumps: &mut ::mcx::PgVec<'mcx, usize>,
 ) -> PgResult<()> {
     // Check permission to call function + look it up.
-    let finfo = mcx::alloc_in(mcx, aclcheck_and_fmgr_info(mcx, foid)?)?;
+    let finfo = ::mcx::alloc_in(mcx, aclcheck_and_fmgr_info(mcx, foid)?)?;
     let fcinfo = init_fcinfo(mcx, collid)?;
 
     // left arg: EEOP_INNER_VAR -> &fcinfo->args[0]
@@ -1872,7 +1872,7 @@ fn emit_eq_column<'mcx>(
     core::expr_eval_push_step(mcx, state, rightstep)?;
 
     // evaluate distinctness: EEOP_NOT_DISTINCT, result into state->resvalue.
-    let mut arg_cells: mcx::PgVec<'mcx, ResultCellId> = mcx::vec_with_capacity_in(mcx, 2)?;
+    let mut arg_cells: ::mcx::PgVec<'mcx, ResultCellId> = ::mcx::vec_with_capacity_in(mcx, 2)?;
     arg_cells.push(arg0);
     arg_cells.push(arg1);
     let ndstep = ExprEvalStep {
@@ -2101,7 +2101,7 @@ pub fn build_hash_projections_and_exprs<'mcx>(
     // slot = ExecInitExtraTupleSlot(estate, tupDescLeft, &TTSOpsVirtual);
     let slot_left = execTuples_seams::exec_init_extra_tuple_slot::call(
         estate,
-        Some(mcx::alloc_in(mcx, tup_desc_left.clone_in(mcx)?)?),
+        Some(::mcx::alloc_in(mcx, tup_desc_left.clone_in(mcx)?)?),
         TupleSlotKind::Virtual,
     )?;
     // sstate->projLeft = ExecBuildProjectionInfo(lefttlist, NULL, slot, parent, NULL);
@@ -2125,7 +2125,7 @@ pub fn build_hash_projections_and_exprs<'mcx>(
     // slot = ExecInitExtraTupleSlot(estate, tupDescRight, &TTSOpsVirtual);
     let slot_right = execTuples_seams::exec_init_extra_tuple_slot::call(
         estate,
-        Some(mcx::alloc_in(mcx, tup_desc_right.clone_in(mcx)?)?),
+        Some(::mcx::alloc_in(mcx, tup_desc_right.clone_in(mcx)?)?),
         TupleSlotKind::Virtual,
     )?;
     // sstate->projRight = ExecBuildProjectionInfo(righttlist, sstate->innerecontext,

@@ -10,9 +10,9 @@
 //! crosses as the repo-universal `&[&str]` (the installer rebuilds the owner's
 //! `&[StringNode]` image).
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `get_opclass_oid(am_id, opclassname, missing_ok)` (opclasscmds.c):

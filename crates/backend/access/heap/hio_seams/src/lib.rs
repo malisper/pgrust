@@ -28,9 +28,9 @@ extern crate alloc;
 use alloc::string::String;
 
 use types_core::{BlockNumber, Buffer, OffsetNumber, Oid, Size};
-use types_error::PgResult;
-use types_storage::buf::ExtendedRelation;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_error::PgResult;
+use ::types_storage::buf::ExtendedRelation;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 // --- bufmgr.c — buffer read / pin / lock / dirty ---------------------------
 
@@ -88,7 +88,7 @@ seam_core::seam!(
         rel: Oid,
         target_block: BlockNumber,
         mode: i32,
-        io_context: types_storage::buf::IOContext,
+        io_context: ::types_storage::buf::IOContext,
     ) -> PgResult<Buffer>
 );
 
@@ -107,7 +107,7 @@ seam_core::seam!(
     /// returned page is exclusive-locked (`EB_LOCK_FIRST`).
     pub fn extend_buffered_rel_by(
         rel: Oid,
-        io_context: types_storage::buf::IOContext,
+        io_context: ::types_storage::buf::IOContext,
         extend_by: u32,
     ) -> PgResult<ExtendedRelation>
 );

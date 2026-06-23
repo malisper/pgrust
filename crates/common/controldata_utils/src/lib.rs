@@ -11,7 +11,7 @@
 //! error.
 
 use fd_seams as fd;
-use utils_error::ereport;
+use ::utils_error::ereport;
 use control::{
     CheckPoint, ControlFileData, DBState, MOCK_AUTH_NONCE_LEN, PG_CONTROL_VERSION,
 };

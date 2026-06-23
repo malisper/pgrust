@@ -3,7 +3,7 @@
 //!
 //! Ported 1:1 from `src/backend/access/transam/xlogrecovery.c` (lines
 //! 2293-2389), driving the held recovery reader ([`crate::walrecovery`]) and the
-//! real rmgr dispatch table ([`rmgr::GetRmgr`]).
+//! real rmgr dispatch table ([`::rmgr::GetRmgr`]).
 //!
 //! # Held-reader model
 //!
@@ -26,11 +26,11 @@ use alloc::format;
 use alloc::string::String;
 
 use mcx::{Mcx, PgString};
-use types_core::primitive::ForkNumber;
-use types_error::PgError;
-use wal::wal::XLR_INFO_MASK;
+use ::types_core::primitive::ForkNumber;
+use ::types_error::PgError;
+use ::wal::wal::XLR_INFO_MASK;
 
-use rmgr::GetRmgr;
+use ::rmgr::GetRmgr;
 
 use crate::core::{lsn_fmt, RecordRef};
 use crate::walrecovery::reader_state;

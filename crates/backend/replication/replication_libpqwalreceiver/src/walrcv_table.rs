@@ -15,7 +15,7 @@
 
 use std::sync::atomic::Ordering;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use types_core::{pgsocket, Oid, TimeLineID};
 use types_walreceiver::{
     WalRcvExecResult as ResHandle, WalRcvExecStatus, WalRcvResultTupslot as TupslotHandle,
@@ -34,8 +34,8 @@ use crate::{
     WalRcvStreamOptions, WalRcvStreamOptionsPhysical, WalRcvStreamOptionsProto,
     WAL_RECEIVER_FUNCTIONS_LOADED,
 };
-use utils_error::ereport;
-use types_error::ERROR;
+use ::utils_error::ereport;
+use ::types_error::ERROR;
 
 // ===========================================================================
 // load_libpqwalreceiver — `load_file("libpqwalreceiver", false)` + the
@@ -140,7 +140,7 @@ pub fn walrcv_create_slot(conn: ConnHandle, slotname: String) -> PgResult<()> {
 }
 
 /// `walrcv_startstreaming(conn, &options)`.  The seam carries the physical-only
-/// [`types_walreceiver::WalRcvStreamOptions`]; adapt to the provider's full
+/// [`::types_walreceiver::WalRcvStreamOptions`]; adapt to the provider's full
 /// physical/logical form by selecting the physical arm.
 pub fn walrcv_startstreaming(conn: ConnHandle, options: SeamStreamOptions) -> PgResult<bool> {
     let provider_options = WalRcvStreamOptions {
@@ -261,7 +261,7 @@ pub fn getattr_text(tupslot: TupslotHandle, col: i32) -> PgResult<(Option<String
 pub fn getattr_lsn(
     tupslot: TupslotHandle,
     col: i32,
-) -> PgResult<(types_core::XLogRecPtr, bool)> {
+) -> PgResult<(::types_core::XLogRecPtr, bool)> {
     let ts = reg::get_tupslot(tupslot.0);
     rt::slot_getattr_lsn::call(ts.slot, col)
 }
@@ -270,7 +270,7 @@ pub fn getattr_lsn(
 pub fn getattr_xid(
     tupslot: TupslotHandle,
     col: i32,
-) -> PgResult<(types_core::TransactionId, bool)> {
+) -> PgResult<(::types_core::TransactionId, bool)> {
     let ts = reg::get_tupslot(tupslot.0);
     rt::slot_getattr_xid::call(ts.slot, col)
 }

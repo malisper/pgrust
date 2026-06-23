@@ -21,7 +21,7 @@
 //! Color-chain bookkeeping in `newarc`/`createarc`/`freearc` runs exactly when
 //! `COLORED(a) && !has_parent`, matching C's `COLORED(a) && nfa->parent == NULL`.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use crate::regex_error::RegResult;
 use crate::regex_foundation::freecolor;

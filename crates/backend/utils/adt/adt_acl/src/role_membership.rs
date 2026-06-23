@@ -29,11 +29,11 @@ use types_core::{InvalidOid, Oid, OidIsValid, ROLE_PG_DATABASE_OWNER};
 // Datum-unification: the syscache invalidation callback `arg` is a plain
 // machine word that C passes as `(Datum) 0` and hands back to the callback
 // verbatim; it carries no deformed value. It therefore stays the audited
-// bare-word `datum::Datum` (aliased `ScalarWord`), matching the
+// bare-word `::datum::Datum` (aliased `ScalarWord`), matching the
 // `types-cache` `SyscacheCallbackFunction` contract and the
 // `cache_register_syscache_callback` seam `arg` type — NOT the canonical
 // `types_tuple::Datum<'mcx>` enum.
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_RESERVED_NAME,
     ERRCODE_UNDEFINED_OBJECT, ERROR,

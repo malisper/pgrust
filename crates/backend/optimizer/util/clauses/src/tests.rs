@@ -4,7 +4,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use ::nodes::primnodes::{
     BoolExpr, BoolExprType, BoolTestType, BooleanTest, Const, Expr, NullTest, NullTestType,
 };

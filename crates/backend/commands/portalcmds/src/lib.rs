@@ -28,7 +28,7 @@ use portal::{
     CommandTag, FetchDirection, Portal, QueryCompletion, CMDTAG_FETCH, CMDTAG_MOVE, PORTAL_FAILED,
     PORTAL_ONE_SELECT, PORTAL_READY,
 };
-use snapshot::SnapshotData;
+use ::snapshot::SnapshotData;
 
 use tupdesc_seams as tupdesc;
 use transam_xact_seams as xact;

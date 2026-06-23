@@ -6,13 +6,13 @@
 
 use alloc::vec::Vec;
 
-use dict_seams::subdict_lexize;
-use arrayfuncs_seams::construct_text_array;
+use ::dict_seams::subdict_lexize;
+use ::arrayfuncs_seams::construct_text_array;
 
-use mcx::Mcx;
-use types_core::Oid;
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 
 /// `ts_lexize(PG_FUNCTION_ARGS)`: lexize one word by dictionary (debug).
 ///

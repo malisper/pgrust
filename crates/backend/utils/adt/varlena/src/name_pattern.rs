@@ -10,9 +10,9 @@
 //! Depends on the keystone for the `name` carrier ([`NAMEDATALEN`]) and on the
 //! comparison family for `varstr_cmp`.
 
-use types_core::catalog::C_COLLATION_OID;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::catalog::C_COLLATION_OID;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 use crate::comparison::varstr_cmp;
 use crate::keystone::check_collation_set;

@@ -18,11 +18,11 @@
 
 #![allow(non_snake_case)]
 
-use nodes_core::makefuncs::make_and_qual;
-use utils_error::ereport;
+use ::nodes_core::makefuncs::make_and_qual;
+use ::utils_error::ereport;
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
-use types_core::primitive::Index;
-use types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_core::primitive::Index;
+use ::types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{CmdType, Node, NodePtr};

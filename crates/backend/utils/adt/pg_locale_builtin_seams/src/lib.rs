@@ -8,11 +8,11 @@
 //! owning crate installs the implementations from its `init_seams()`.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{Oid, PgWChar};
-use types_error::PgResult;
-use locale::PgLocale;
+use ::types_core::primitive::{Oid, PgWChar};
+use ::types_error::PgResult;
+use ::locale::PgLocale;
 
-pub use pg_locale_seams::RegexWcClass;
+pub use ::pg_locale_seams::RegexWcClass;
 
 /// The builtin-provider locale `create_pg_locale_builtin` returns: the
 /// provider-independent flag core (allocated in the caller's `mcx`) plus the

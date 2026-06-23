@@ -9,8 +9,8 @@
 
 #![no_std]
 
-use mcx::PgString;
-use types_core::Oid;
+use ::mcx::PgString;
+use ::types_core::Oid;
 
 /// The decomposed view of one `pg_type` row that `format_type_extended`
 /// reads via `GETSTRUCT((Form_pg_type) tuple)`.

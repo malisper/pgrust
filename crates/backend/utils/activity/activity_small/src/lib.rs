@@ -23,7 +23,7 @@ pub use pgstat_checkpointer::*;
 
 /// Install this crate's `backend_progress.c` inward seams.
 pub fn init_seams() {
-    use types_pgstat::backend_progress::ProgressCommandType;
+    use ::types_pgstat::backend_progress::ProgressCommandType;
 
     // Register the global checkpointer/bgwriter pg_stat_get_* SQL accessors
     // (pgstatfuncs.c).

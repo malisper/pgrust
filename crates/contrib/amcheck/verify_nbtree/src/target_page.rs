@@ -17,11 +17,11 @@
 //! `bt_target_page_check` / `bt_right_page_check_scankey` /
 //! `offset_is_negative_infinity` engine is implemented here.
 
-use types_core::primitive::{BlockNumber, OffsetNumber};
+use ::types_core::primitive::{BlockNumber, OffsetNumber};
 use types_error::{PgError, PgResult};
-use types_error::error::ERRCODE_INDEX_CORRUPTED;
+use ::types_error::error::ERRCODE_INDEX_CORRUPTED;
 use types_nbtree::{BTScanInsert, BTMaxItemSize, BTP_LEAF, P_FIRSTKEY, P_HIKEY, P_NONE};
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     item_pointer_is_valid, IndexTuple, IndexTupleData, ItemPointerData,
 };
 
@@ -49,7 +49,7 @@ use crate::{BtreeCheckState, BtreeLastVisibleEntry, Page};
 ///   = `MAXALIGN_DOWN((8192 - 40 - 16) / 3)` = `2712`. This is the
 /// `BTMaxItemSize` limit *before* BTREE_VERSION 4 requisitioned 8 bytes
 /// (`MAXALIGN(sizeof(ItemPointerData))`) for an explicit heap-TID tiebreaker.
-const BT_MAX_ITEM_SIZE_NO_HEAP_TID: types_core::Size = 2712;
+const BT_MAX_ITEM_SIZE_NO_HEAP_TID: ::types_core::Size = 2712;
 
 /// `OffsetNumberNext(offsetNumber)` (`storage/off.h`).
 #[inline]
@@ -95,43 +95,43 @@ pub(crate) fn p_isleaf(page: &[u8]) -> bool {
 /// `P_ISROOT(opaque)` (`access/nbtree.h`).
 #[inline]
 pub(crate) fn p_isroot(page: &[u8]) -> bool {
-    (btpo_flags(page) & types_nbtree::BTP_ROOT) != 0
+    (btpo_flags(page) & ::types_nbtree::BTP_ROOT) != 0
 }
 
 /// `P_ISDELETED(opaque)` (`access/nbtree.h`).
 #[inline]
 pub(crate) fn p_isdeleted(page: &[u8]) -> bool {
-    (btpo_flags(page) & types_nbtree::BTP_DELETED) != 0
+    (btpo_flags(page) & ::types_nbtree::BTP_DELETED) != 0
 }
 
 /// `P_ISMETA(opaque)` (`access/nbtree.h`).
 #[inline]
 pub(crate) fn p_ismeta(page: &[u8]) -> bool {
-    (btpo_flags(page) & types_nbtree::BTP_META) != 0
+    (btpo_flags(page) & ::types_nbtree::BTP_META) != 0
 }
 
 /// `P_ISHALFDEAD(opaque)` (`access/nbtree.h`).
 #[inline]
 pub(crate) fn p_ishalfdead(page: &[u8]) -> bool {
-    (btpo_flags(page) & types_nbtree::BTP_HALF_DEAD) != 0
+    (btpo_flags(page) & ::types_nbtree::BTP_HALF_DEAD) != 0
 }
 
 /// `P_HAS_GARBAGE(opaque)` (`access/nbtree.h`).
 #[inline]
 pub(crate) fn p_has_garbage(page: &[u8]) -> bool {
-    (btpo_flags(page) & types_nbtree::BTP_HAS_GARBAGE) != 0
+    (btpo_flags(page) & ::types_nbtree::BTP_HAS_GARBAGE) != 0
 }
 
 /// `P_INCOMPLETE_SPLIT(opaque)` (`access/nbtree.h`).
 #[inline]
 pub(crate) fn p_incomplete_split(page: &[u8]) -> bool {
-    (btpo_flags(page) & types_nbtree::BTP_INCOMPLETE_SPLIT) != 0
+    (btpo_flags(page) & ::types_nbtree::BTP_INCOMPLETE_SPLIT) != 0
 }
 
 /// `P_HAS_FULLXID(opaque)` (`access/nbtree.h`).
 #[inline]
 pub(crate) fn p_has_fullxid(page: &[u8]) -> bool {
-    (btpo_flags(page) & types_nbtree::BTP_HAS_FULLXID) != 0
+    (btpo_flags(page) & ::types_nbtree::BTP_HAS_FULLXID) != 0
 }
 
 /// `P_RIGHTMOST(opaque)` (`access/nbtree.h`): `opaque->btpo_next == P_NONE`.
@@ -144,7 +144,7 @@ pub(crate) fn p_rightmost(page: &[u8]) -> bool {
 /// `((opaque)->btpo_flags & (BTP_DELETED | BTP_HALF_DEAD)) != 0`.
 #[inline]
 pub(crate) fn p_ignore(page: &[u8]) -> bool {
-    (btpo_flags(page) & (types_nbtree::BTP_DELETED | types_nbtree::BTP_HALF_DEAD)) != 0
+    (btpo_flags(page) & (::types_nbtree::BTP_DELETED | ::types_nbtree::BTP_HALF_DEAD)) != 0
 }
 
 /// `P_FIRSTDATAKEY(opaque)` (`access/nbtree.h`):
@@ -195,7 +195,7 @@ pub(crate) fn index_tuple_header(item: &[u8]) -> IndexTupleData {
     let t_info = u16::from_ne_bytes([item[6], item[7]]);
     IndexTupleData {
         t_tid: ItemPointerData {
-            ip_blkid: types_tuple::heaptuple::BlockIdData {
+            ip_blkid: ::types_tuple::heaptuple::BlockIdData {
                 bi_hi,
                 bi_lo,
             },
@@ -314,8 +314,8 @@ pub(crate) fn fmt_lsn(lsn: u64) -> String {
 pub fn bt_target_page_check<'mcx>(state: &mut BtreeCheckState<'mcx>) -> PgResult<()> {
     // BtreeLastVisibleEntry lVis = {InvalidBlockNumber, InvalidOffsetNumber, -1, NULL};
     let mut l_vis = BtreeLastVisibleEntry {
-        blkno: types_core::primitive::InvalidBlockNumber,
-        offset: types_tuple::heaptuple::INVALID_OFFSET_NUMBER,
+        blkno: ::types_core::primitive::InvalidBlockNumber,
+        offset: ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER,
         postingIndex: -1,
         tid: None,
     };
@@ -372,10 +372,10 @@ pub fn bt_target_page_check<'mcx>(state: &mut BtreeCheckState<'mcx>) -> PgResult
         let itemid = PageGetItemIdCareful(state, state.targetblock, state.target.as_ref().unwrap(), offset)?;
         let item = page_get_item(mcx, &target, offset)?;
         let itup = index_tuple_header(&item);
-        let tupsize = types_tuple::heaptuple::IndexTupleSize(&itup);
+        let tupsize = ::types_tuple::heaptuple::IndexTupleSize(&itup);
 
         // lp_len must match the IndexTuple reported length exactly.
-        if tupsize != itemid.1 as types_core::Size {
+        if tupsize != itemid.1 as ::types_core::Size {
             return Err(PgError::error(format!(
                 "index tuple size does not equal lp_len in index \"{}\"",
                 state.rel.name()
@@ -650,8 +650,8 @@ pub fn bt_target_page_check<'mcx>(state: &mut BtreeCheckState<'mcx>) -> PgResult
                 offset_number_next(offset),
             )?;
             if cmp != 0 || skey.as_ref().map(|k| k.anynullkeys).unwrap_or(false) {
-                l_vis.blkno = types_core::primitive::InvalidBlockNumber;
-                l_vis.offset = types_tuple::heaptuple::INVALID_OFFSET_NUMBER;
+                l_vis.blkno = ::types_core::primitive::InvalidBlockNumber;
+                l_vis.offset = ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER;
                 l_vis.postingIndex = -1;
                 l_vis.tid = None;
             } else if !unique_checked {
@@ -667,7 +667,7 @@ pub fn bt_target_page_check<'mcx>(state: &mut BtreeCheckState<'mcx>) -> PgResult
         // * Last item check *
         if offset == max {
             // first offset on a right index page (log only)
-            let mut rightfirstoffset = types_tuple::heaptuple::INVALID_OFFSET_NUMBER;
+            let mut rightfirstoffset = ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER;
 
             // Get item in next/right page.
             let mut rightkey = bt_right_page_check_scankey(state, &mut rightfirstoffset)?;
@@ -788,7 +788,7 @@ pub fn bt_target_page_check<'mcx>(state: &mut BtreeCheckState<'mcx>) -> PgResult
         let target_level = nbtcore::page_btpo_level::call(&target);
         bt_child_highkey_check(
             state,
-            types_tuple::heaptuple::INVALID_OFFSET_NUMBER,
+            ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER,
             None,
             target_level,
         )?;
@@ -1015,7 +1015,7 @@ pub fn invariant_g_offset<'mcx>(
 pub fn invariant_l_nontarget_offset<'mcx>(
     state: &BtreeCheckState<'mcx>,
     key: &BTScanInsert<'mcx>,
-    nontargetblock: types_core::primitive::BlockNumber,
+    nontargetblock: ::types_core::primitive::BlockNumber,
     nontarget: &Page<'mcx>,
     upperbound: OffsetNumber,
 ) -> PgResult<bool> {
@@ -1071,7 +1071,7 @@ fn btree_tuple_get_natts<'mcx>(item: &[u8], rel: &rel::Relation<'mcx>) -> u16 {
     let itup = index_tuple_header(item);
     if nbtcore::tuple_is_pivot::call(item) {
         // BTreeTupleGetNAtts pivot path: low 12 bits of t_tid.ip_posid.
-        itup.t_tid.ip_posid & types_nbtree::BT_OFFSET_MASK
+        itup.t_tid.ip_posid & ::types_nbtree::BT_OFFSET_MASK
     } else {
         // Non-pivot: IndexRelationGetNumberOfAttributes(rel).
         rel.rd_att.natts as u16
@@ -1085,7 +1085,7 @@ fn btree_tuple_get_natts<'mcx>(item: &[u8], rel: &rel::Relation<'mcx>) -> u16 {
 fn btree_get_heap_tid_opt(item: &[u8]) -> Option<ItemPointerData> {
     if nbtcore::tuple_is_pivot::call(item) {
         let itup = index_tuple_header(item);
-        if (itup.t_tid.ip_posid & types_nbtree::BT_PIVOT_HEAP_TID_ATTR) != 0 {
+        if (itup.t_tid.ip_posid & ::types_nbtree::BT_PIVOT_HEAP_TID_ATTR) != 0 {
             // Pivot with an explicit heap-TID attribute: present.
             Some(btree_tuple_get_max_heap_tid(item))
         } else {

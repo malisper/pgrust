@@ -3,8 +3,8 @@
 //! exercised end-to-end only once their owner subsystems land; here we cover the
 //! pure-logic surface, plus the ternary-logic shims via installed test seams.
 
-use tsearch::gin::{GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_EVERYTHING, GIN_TRUE};
-use types_tuple::heaptuple::ItemPointerData;
+use ::tsearch::gin::{GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_EVERYTHING, GIN_TRUE};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 // ---------------------------------------------------------------------------
 // ginarrayproc: consistent / triConsistent
@@ -214,7 +214,7 @@ use crate::ginlogic::{
     callTriConsistentFn, directBoolConsistentFn, ginInitConsistentFunction, shimBoolConsistentFn,
     shimTriConsistentFn, trueConsistentFn, trueTriConsistentFn, GinState, MAX_MAYBE_ENTRIES,
 };
-use tsearch::backend_access_gin_ginlogic::{
+use ::tsearch::backend_access_gin_ginlogic::{
     GinBoolConsistentKind, GinScanKey, GinTriConsistentKind,
 };
 
@@ -222,7 +222,7 @@ use std::cell::RefCell;
 use std::sync::Once;
 
 type BoolHook = Box<dyn FnMut(&mut GinScanKey) -> bool>;
-type TriHook = Box<dyn FnMut(&mut GinScanKey) -> tsearch::gin::GinTernaryValue>;
+type TriHook = Box<dyn FnMut(&mut GinScanKey) -> ::tsearch::gin::GinTernaryValue>;
 
 thread_local! {
     static BOOL_HOOK: RefCell<Option<BoolHook>> = const { RefCell::new(None) };
@@ -252,7 +252,7 @@ fn install(boolfn: Option<BoolHook>, trifn: Option<TriHook>) {
     TRI_HOOK.with(|h| *h.borrow_mut() = trifn);
 }
 
-fn install_bool(f: fn(&[tsearch::gin::GinTernaryValue]) -> (bool, bool)) {
+fn install_bool(f: fn(&[::tsearch::gin::GinTernaryValue]) -> (bool, bool)) {
     install(
         Some(Box::new(move |key| {
             let (m, r) = f(&key.entryRes);
@@ -263,7 +263,7 @@ fn install_bool(f: fn(&[tsearch::gin::GinTernaryValue]) -> (bool, bool)) {
     );
 }
 
-fn install_tri(f: fn(&[tsearch::gin::GinTernaryValue]) -> tsearch::gin::GinTernaryValue) {
+fn install_tri(f: fn(&[::tsearch::gin::GinTernaryValue]) -> ::tsearch::gin::GinTernaryValue) {
     install(None, Some(Box::new(move |key| f(&key.entryRes))));
 }
 

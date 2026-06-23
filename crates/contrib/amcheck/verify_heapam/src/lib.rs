@@ -19,38 +19,38 @@
 //! tuple-header / varlena fields are decoded with byte arithmetic mirroring
 //! the C inline macros, exactly as the sibling `verify_nbtree` verifier does.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     AttrNumber, BlockNumber, ForkNumber, OffsetNumber, Oid,
 };
-use types_core::xact::{
+use ::types_core::xact::{
     BootstrapTransactionId, FrozenTransactionId, FullTransactionId, MultiXactIdPrecedes,
     MultiXactIdPrecedesOrEquals, TransactionIdEquals, TransactionIdIsNormal,
     TransactionIdIsValid, TransactionIdPrecedes,
 };
-use types_error::error::{
+use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_error::{DEBUG1, PgError, PgResult};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use rel::Relation;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::buf::BufferAccessStrategyType;
-use types_storage::lock::AccessShareLock;
-use types_storage::storage::{Buffer, InvalidBuffer};
-use types_tuple::access::RELKIND_SEQUENCE;
-use types_tuple::Datum;
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::buf::BufferAccessStrategyType;
+use ::types_storage::lock::AccessShareLock;
+use ::types_storage::storage::{Buffer, InvalidBuffer};
+use ::types_tuple::access::RELKIND_SEQUENCE;
+use ::types_tuple::Datum;
+use ::types_tuple::heaptuple::{
     HeapTupleHeaderData, HeapTupleHeaderGetNatts, HeapTupleHeaderGetXmin,
     HeapTupleHeaderXminCommitted, BITMAPLEN, HEAP_HASEXTERNAL, HEAP_HASNULL,
     HEAP_HOT_UPDATED, HEAP_MOVED_IN, HEAP_MOVED_OFF, HEAP_ONLY_TUPLE, HEAP_UPDATED,
     HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMAX_IS_MULTI, HEAP_XMAX_LOCK_ONLY,
 };
 
-use scankey::ScanKeyInit;
-use heapam_visibility::htup::{
+use ::scankey::ScanKeyInit;
+use ::heapam_visibility::htup::{
     HeapTupleHeaderGetRawXmax, HeapTupleHeaderXminInvalid, HEAP_XMAX_IS_LOCKED_ONLY,
 };
 
@@ -127,10 +127,10 @@ const SizeofHeapTupleHeader: u32 = 23;
 const HEAP_TABLE_AM_OID: Oid = 2;
 
 /// `F_OIDEQ` (`catalog/fmgroids.h`).
-const F_OIDEQ: types_core::primitive::RegProcedure = types_core::fmgr::F_OIDEQ;
+const F_OIDEQ: ::types_core::primitive::RegProcedure = ::types_core::fmgr::F_OIDEQ;
 
 /// `BUFFER_LOCK_SHARE` (`storage/bufmgr.h`).
-const BUFFER_LOCK_SHARE: i32 = types_storage::buf::BUFFER_LOCK_SHARE;
+const BUFFER_LOCK_SHARE: i32 = ::types_storage::buf::BUFFER_LOCK_SHARE;
 
 /// `VISIBILITYMAP_ALL_VISIBLE` / `VISIBILITYMAP_ALL_FROZEN`.
 const VISIBILITYMAP_ALL_VISIBLE: u8 = 0x01;
@@ -155,7 +155,7 @@ const TOAST_INVALID_COMPRESSION_ID: u32 = 2;
 
 /// `RELKIND_HAS_TABLE_AM(relkind)` (`catalog/pg_class.h`).
 fn relkind_has_table_am(relkind: u8) -> bool {
-    use types_tuple::access::{RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_TOASTVALUE};
+    use ::types_tuple::access::{RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_TOASTVALUE};
     relkind == RELKIND_RELATION || relkind == RELKIND_MATVIEW || relkind == RELKIND_TOASTVALUE
 }
 
@@ -264,26 +264,26 @@ struct HeapCheckContext<'mcx> {
 
     // Cached transaction-id range.
     next_fxid: FullTransactionId,
-    next_xid: types_core::TransactionId,
-    oldest_xid: types_core::TransactionId,
+    next_xid: ::types_core::TransactionId,
+    oldest_xid: ::types_core::TransactionId,
     oldest_fxid: FullTransactionId,
-    safe_xmin: types_core::TransactionId,
+    safe_xmin: ::types_core::TransactionId,
 
     // Cached multixact range.
-    next_mxact: types_core::MultiXactId,
-    oldest_mxact: types_core::MultiXactId,
+    next_mxact: ::types_core::MultiXactId,
+    oldest_mxact: ::types_core::MultiXactId,
 
     // Most recently checked xid + status.
-    cached_xid: types_core::TransactionId,
+    cached_xid: ::types_core::TransactionId,
     cached_status: XidCommitStatus,
 
     // The heap relation being checked. Stored as an owned alias handle (shares
     // the relcache cell, releases nothing on drop) so the context is not tied
     // to a borrow of the function-local `rel`.
     rel: Relation<'mcx>,
-    relfrozenxid: types_core::TransactionId,
+    relfrozenxid: ::types_core::TransactionId,
     relfrozenfxid: FullTransactionId,
-    relminmxid: types_core::MultiXactId,
+    relminmxid: ::types_core::MultiXactId,
     toast_rel: Option<Relation<'mcx>>,
 
     // Page iteration. `page` is a private byte copy of the locked buffer.
@@ -403,7 +403,7 @@ fn is_hot_updated(tuphdr: &HeapTupleHeaderData) -> bool {
 /// resolving a multixact xmax via the multixact owner.
 fn header_get_update_xid(
     tuphdr: &HeapTupleHeaderData,
-) -> PgResult<types_core::TransactionId> {
+) -> PgResult<::types_core::TransactionId> {
     if (tuphdr.t_infomask & HEAP_XMAX_INVALID) == 0
         && (tuphdr.t_infomask & HEAP_XMAX_IS_MULTI) != 0
         && (tuphdr.t_infomask & HEAP_XMAX_LOCK_ONLY) == 0
@@ -421,7 +421,7 @@ fn header_get_update_xid(
 /// t_infomask)`.
 fn tuple_get_update_xid(
     tuphdr: &HeapTupleHeaderData,
-) -> PgResult<types_core::TransactionId> {
+) -> PgResult<::types_core::TransactionId> {
     multixact::multi_xact_id_get_update_xid::call(
         HeapTupleHeaderGetRawXmax(tuphdr),
         tuphdr.t_infomask,
@@ -429,8 +429,8 @@ fn tuple_get_update_xid(
 }
 
 /// `HeapTupleHeaderGetXvac(tup)`.
-fn header_get_xvac(tuphdr: &HeapTupleHeaderData) -> types_core::TransactionId {
-    heapam_visibility::htup::HeapTupleHeaderGetXvac(tuphdr)
+fn header_get_xvac(tuphdr: &HeapTupleHeaderData) -> ::types_core::TransactionId {
+    ::heapam_visibility::htup::HeapTupleHeaderGetXvac(tuphdr)
 }
 
 /// `ItemPointerGetBlockNumber(&t_ctid)`.
@@ -459,14 +459,14 @@ fn epoch_of(f: FullTransactionId) -> u32 {
     f.epoch()
 }
 #[inline]
-fn xid_of(f: FullTransactionId) -> types_core::TransactionId {
+fn xid_of(f: FullTransactionId) -> ::types_core::TransactionId {
     f.xid()
 }
 
 /// `FullTransactionIdFromXidAndCtx(xid, ctx)` — convert a 32-bit xid to full,
 /// tolerating an xid before epoch 0 (a form of corruption).
 fn full_xid_from_xid_and_ctx(
-    xid: types_core::TransactionId,
+    xid: ::types_core::TransactionId,
     ctx: &HeapCheckContext,
 ) -> FullTransactionId {
     debug_assert!(TransactionIdIsNormal(ctx.next_xid));
@@ -481,11 +481,11 @@ fn full_xid_from_xid_and_ctx(
     let diff = ctx.next_xid.wrapping_sub(xid) as i32;
 
     let fxid = if diff > 0
-        && (nextfxid_i - types_core::xact::FirstNormalTransactionId as u64)
+        && (nextfxid_i - ::types_core::xact::FirstNormalTransactionId as u64)
             < diff as i64 as u64
     {
         debug_assert!(ctx.next_fxid.epoch() == 0);
-        types_core::xact::FirstNormalFullTransactionId
+        ::types_core::xact::FirstNormalFullTransactionId
     } else {
         FullTransactionId::from_u64(nextfxid_i.wrapping_sub(diff as i64 as u64))
     };
@@ -518,7 +518,7 @@ fn fxid_in_cached_range(fxid: FullTransactionId, ctx: &HeapCheckContext) -> bool
 
 /// `check_mxid_in_range(mxid, ctx)`.
 fn check_mxid_in_range(
-    mxid: types_core::MultiXactId,
+    mxid: ::types_core::MultiXactId,
     ctx: &HeapCheckContext,
 ) -> XidBoundsViolation {
     if !TransactionIdIsValid(mxid) {
@@ -538,7 +538,7 @@ fn check_mxid_in_range(
 
 /// `check_mxid_valid_in_rel(mxid, ctx)`.
 fn check_mxid_valid_in_rel(
-    mxid: types_core::MultiXactId,
+    mxid: ::types_core::MultiXactId,
     ctx: &mut HeapCheckContext,
 ) -> PgResult<XidBoundsViolation> {
     let result = check_mxid_in_range(mxid, ctx);
@@ -551,7 +551,7 @@ fn check_mxid_valid_in_rel(
 
 /// `get_xid_status(xid, ctx, status)`.
 fn get_xid_status(
-    xid: types_core::TransactionId,
+    xid: ::types_core::TransactionId,
     ctx: &mut HeapCheckContext,
     want_status: bool,
 ) -> PgResult<(XidBoundsViolation, Option<XidCommitStatus>)> {
@@ -1385,7 +1385,7 @@ fn check_toasted_attribute<'mcx>(
     rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
     ta: &ToastedAttribute,
     toast_rel: &Relation,
-    valid_toast_index: &rel::RelationData,
+    valid_toast_index: &::rel::RelationData,
     have_registered_or_active_snapshot: bool,
 ) -> PgResult<()> {
     let mcx = ctx.mcx;
@@ -1416,7 +1416,7 @@ fn check_toasted_attribute<'mcx>(
     while let Some(toasttup) = genam::systable_getnext_ordered::call(
         mcx,
         toastscan.desc_mut(),
-        types_scan::sdir::ScanDirection::ForwardScanDirection,
+        ::types_scan::sdir::ScanDirection::ForwardScanDirection,
     )? {
         found_toasttup = true;
         // fastgetattr(toasttup, 2/3, toastdesc): deform and read columns.
@@ -1544,7 +1544,7 @@ pub fn verify_heapam<'mcx>(
     }
 
     // Early exit for unlogged relations during recovery (no fork to check).
-    if rel.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_UNLOGGED
+    if rel.rd_rel.relpersistence == ::types_tuple::access::RELPERSISTENCE_UNLOGGED
         && xlog::recovery_in_progress::call()
     {
         let _ = ERRCODE_READ_ONLY_SQL_TRANSACTION;
@@ -1630,7 +1630,7 @@ pub fn verify_heapam<'mcx>(
         safe_xmin,
         next_mxact: 0,
         oldest_mxact: 0,
-        cached_xid: types_core::xact::InvalidTransactionId,
+        cached_xid: ::types_core::xact::InvalidTransactionId,
         cached_status: XID_COMMITTED,
         rel: rel.alias(),
         relfrozenxid: 0,
@@ -2034,7 +2034,7 @@ fn attach_tbits<'mcx>(
         let len = BITMAPLEN(natts) as usize;
         let start = SizeofHeapTupleHeader as usize;
         if item.len() >= start + len {
-            let mut bits = mcx::PgVec::new_in(mcx);
+            let mut bits = ::mcx::PgVec::new_in(mcx);
             for &b in &item[start..start + len] {
                 bits.push(b);
             }
@@ -2083,7 +2083,7 @@ fn heapcheck_read_stream_next_unskippable<'mcx>(
             }
             return i;
         }
-        types_core::primitive::InvalidBlockNumber
+        ::types_core::primitive::InvalidBlockNumber
     })
 }
 

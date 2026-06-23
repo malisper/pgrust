@@ -30,24 +30,24 @@
 use alloc::vec::Vec;
 
 use integerset::{intset_create, IntegerSet};
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
 use page::{
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageIndexMultiDelete, PageIndexTupleDelete,
     PageIsNew, PageMut, PageRef,
 };
-use utils_error::PgResult;
-use types_error::error::LOG;
+use ::utils_error::PgResult;
+use ::types_error::error::LOG;
 
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
-use types_core::xact::FullTransactionId;
-use rel::Relation;
-use types_storage::buf::BufferIsValid;
-use types_storage::bufpage::MaxOffsetNumber;
-use types_storage::Buffer;
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tuple::heaptuple::{FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
+use ::types_core::xact::FullTransactionId;
+use ::rel::Relation;
+use ::types_storage::buf::BufferIsValid;
+use ::types_storage::bufpage::MaxOffsetNumber;
+use ::types_storage::Buffer;
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tuple::heaptuple::{FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
 use gist::{GistNSN, GIST_ROOT_BLKNO};
 
 use crate::gist_page::{
@@ -169,7 +169,7 @@ fn gist_get_fake_lsn<'mcx>(rel: &Relation<'mcx>) -> PgResult<u64> {
 
 /// The index-vacuum dead-TID test (the `IndexBulkDeleteCallback`).
 fn vacuum_tid_is_dead(
-    tid: types_tuple::heaptuple::ItemPointerData,
+    tid: ::types_tuple::heaptuple::ItemPointerData,
     callback_state: u64,
 ) -> bool {
     vacuum_seams::vacuum_tid_is_dead::call(tid, callback_state)
@@ -731,9 +731,9 @@ fn write_page(buffer: Buffer, page: &[u8]) -> PgResult<()> {
 }
 
 /// `idxtuple->t_tid` — the leading `ItemPointerData` of an on-disk index tuple.
-fn itup_heap_tid(itup: &[u8]) -> types_tuple::heaptuple::ItemPointerData {
-    types_tuple::heaptuple::ItemPointerData {
-        ip_blkid: types_tuple::heaptuple::BlockIdData {
+fn itup_heap_tid(itup: &[u8]) -> ::types_tuple::heaptuple::ItemPointerData {
+    ::types_tuple::heaptuple::ItemPointerData {
+        ip_blkid: ::types_tuple::heaptuple::BlockIdData {
             bi_hi: u16::from_ne_bytes([itup[0], itup[1]]),
             bi_lo: u16::from_ne_bytes([itup[2], itup[3]]),
         },

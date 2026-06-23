@@ -30,7 +30,7 @@
 
 extern crate alloc;
 
-use types_acl::AclMode;
+use ::types_acl::AclMode;
 
 pub mod acl_ops;
 pub mod acldefault;
@@ -81,9 +81,9 @@ pub fn init_seams() {
         let res = aclchk_seams::pg_class_aclcheck::call(
             relid,
             userid,
-            types_acl::ACL_MAINTAIN,
+            ::types_acl::ACL_MAINTAIN,
         )?;
-        Ok(res == types_acl::ACLCHECK_OK)
+        Ok(res == ::types_acl::ACLCHECK_OK)
     });
     acl_seams::get_rolespec_oid::set(role_membership::get_rolespec_oid);
     acl_seams::get_role_oid::set(role_membership::get_role_oid);

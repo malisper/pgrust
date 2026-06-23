@@ -1,5 +1,5 @@
 use super::*;
-use types_wchar::encoding::PG_UTF8;
+use ::types_wchar::encoding::PG_UTF8;
 
 #[test]
 fn converts_euc_kr_to_mic() {

@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use utils_error::{ereport};
 use types_error::{ErrorLocation, DEBUG2, INFO};
-use types_core::BlockNumber;
-use types_error::PgResult;
+use ::types_core::BlockNumber;
+use ::types_error::PgResult;
 
 use crate::consts::{
     offset_number_next, AccessExclusiveLock, FirstOffsetNumber, InvalidBlockNumber,

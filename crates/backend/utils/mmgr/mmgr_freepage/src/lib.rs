@@ -12,7 +12,7 @@
 //! per-size-class freelists, and a recycle list of spare btree pages) is
 //! stored *inside the pages it manages*, addressed by self-relative pointers
 //! from a caller-supplied `base`. The struct layout is
-//! [`types_freepage::FreePageManager`]; the page-resident structures are
+//! [`::types_freepage::FreePageManager`]; the page-resident structures are
 //! private to this crate, exactly as they are private to `freepage.c`.
 //!
 //! Public functions take `*mut FreePageManager`, matching the established
@@ -22,7 +22,7 @@
 //! mutated (in Postgres, callers hold the segment's lock).
 
 use mcx::{Mcx, PgString};
-use types_core::Size;
+use ::types_core::Size;
 use types_error::{PgError, PgResult, FATAL};
 use types_freepage::{FreePageManager, RelPtr, FPM_NUM_FREELISTS, FPM_PAGE_SIZE};
 
@@ -1651,7 +1651,7 @@ fn push_size(buf: &mut PgString<'_>, value: Size) -> PgResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     /// One page-aligned page of a fake segment, like a DSM segment.
     #[repr(C, align(4096))]

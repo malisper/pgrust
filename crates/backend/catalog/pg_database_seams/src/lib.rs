@@ -25,12 +25,12 @@
 //! The owning unit (`backend-catalog-pg-database`) installs these from its
 //! `init_seams()`; until then a call panics loudly.
 
-use mcx::Mcx;
-use types_catalog::pg_database::{FormPgDatabase, NewDbRecord};
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use rel::Relation;
-use types_tuple::heaptuple::ItemPointerData;
+use ::mcx::Mcx;
+use ::types_catalog::pg_database::{FormPgDatabase, NewDbRecord};
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
     /// `GetDatabaseTuple(dbname)` (postinit.c): scan `pg_database` by name
@@ -176,7 +176,7 @@ seam_core::seam!(
         old_datacl: &[u8],
         old_owner_id: Oid,
         new_owner_id: Oid,
-    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+    ) -> PgResult<::mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(

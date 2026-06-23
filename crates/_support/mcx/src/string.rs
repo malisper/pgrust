@@ -6,7 +6,7 @@
 use core::fmt;
 
 use crate::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 pub struct PgString<'mcx> {
     /// Invariant: always valid UTF-8 (only ever extended with `&str` bytes or

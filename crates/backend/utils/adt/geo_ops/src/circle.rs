@@ -4,7 +4,7 @@
 //! in [`crate::io`]; `box_circle`/`circle_box`/`box_poly` are in
 //! [`crate::boxes`] / [`crate::io`].
 
-use types_core::geo::{Point, BOX, CIRCLE};
+use ::types_core::geo::{Point, BOX, CIRCLE};
 use types_error::{PgError, PgResult};
 
 use crate::f8::{float8_div, float8_mi, float8_mul, float8_pl};
@@ -268,7 +268,7 @@ pub fn circle_poly(npts: i32, circle: &CIRCLE) -> PgResult<Polygon> {
     // computation; see `io::check_points_overflow`). `npts >= 2` here, so the
     // `usize` cast is well-defined.
     let n = npts as usize;
-    crate::io::check_points_overflow(n, types_core::geo::POLYGON_HEADER_SIZE)?;
+    crate::io::check_points_overflow(n, ::types_core::geo::POLYGON_HEADER_SIZE)?;
 
     let anglestep = float8_div(2.0 * M_PI, npts as f64)?;
 

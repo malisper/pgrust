@@ -19,18 +19,18 @@ use alloc::format;
 
 use mcx::{Mcx, MemoryContext};
 
-use types_core::primitive::Oid;
-use types_core::OidIsValid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_core::OidIsValid;
+use ::types_error::PgResult;
 
-use types_acl::acl::{ACLCHECK_OK, ACL_CREATE, ACL_MAINTAIN};
-use types_storage::lock::{AccessShareLock, ShareLock};
-use types_tuple::access::{
+use ::types_acl::acl::{ACLCHECK_OK, ACL_CREATE, ACL_MAINTAIN};
+use ::types_storage::lock::{AccessShareLock, ShareLock};
+use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION,
 };
 
-use heaptuple::heap_deform_tuple;
+use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam;
 use table::{table_close, table_open};
 
@@ -42,21 +42,21 @@ use lsyscache_seams as lsyscache;
 use syscache_seams as syscache;
 use snapmgr_seams as snapmgr_seam;
 
-use utils_error::ereport;
-use types_error::ERROR;
+use ::utils_error::ereport;
+use ::types_error::ERROR;
 
-use types_catalog::pg_class::{
+use ::types_catalog::pg_class::{
     Anum_pg_class_oid, Anum_pg_class_relfilenode, Anum_pg_class_relisshared,
     Anum_pg_class_relkind, Anum_pg_class_relnamespace, Anum_pg_class_relpersistence,
     RelationRelationId,
 };
-use types_catalog::catalog::TABLESPACE_RELATION_ID;
-use types_core::catalog::{DATABASE_RELATION_ID, NAMESPACE_RELATION_ID};
+use ::types_catalog::catalog::TABLESPACE_RELATION_ID;
+use ::types_core::catalog::{DATABASE_RELATION_ID, NAMESPACE_RELATION_ID};
 
 use ::nodes::ddlnodes::{ReindexObjectType, ReindexStmt};
 use ::nodes::parsenodes::{OBJECT_DATABASE, OBJECT_SCHEMA};
 
-use tablespace::get_tablespace_name;
+use ::tablespace::get_tablespace_name;
 
 use crate::{xact_seam, ReindexParams};
 use types_cluster::{
@@ -323,7 +323,7 @@ pub(crate) fn ReindexMultipleTables<'mcx>(
         && (params.options & REINDEXOPT_CONCURRENTLY) != 0
     {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!("cannot reindex system catalogs concurrently"))
             .into_error());
     }
@@ -342,7 +342,7 @@ pub(crate) fn ReindexMultipleTables<'mcx>(
             && !user_seam::has_privs_of_role::call(user_id, ROLE_PG_MAINTAIN)?
         {
             aclchk_seam::aclcheck_error::call(
-                types_acl::acl::ACLCHECK_NOT_OWNER,
+                ::types_acl::acl::ACLCHECK_NOT_OWNER,
                 OBJECT_SCHEMA,
                 object_name.map(|s| s.to_string()),
             )?;
@@ -356,7 +356,7 @@ pub(crate) fn ReindexMultipleTables<'mcx>(
             let matches = current.as_ref().map(|s| s.as_str() == name).unwrap_or(false);
             if !matches {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!("can only reindex the currently open database"))
                     .into_error());
             }
@@ -367,7 +367,7 @@ pub(crate) fn ReindexMultipleTables<'mcx>(
             let dbname = dbcommands_seam::get_database_name::call(mcx, object_oid)?
                 .map(|s| s.as_str().to_string());
             aclchk_seam::aclcheck_error::call(
-                types_acl::acl::ACLCHECK_NOT_OWNER,
+                ::types_acl::acl::ACLCHECK_NOT_OWNER,
                 OBJECT_DATABASE,
                 dbname,
             )?;
@@ -459,7 +459,7 @@ pub(crate) fn ReindexMultipleTables<'mcx>(
 
             // A system relation is always skipped, even with
             // allow_system_table_mods enabled.
-            let form = types_cluster::PgClassForm {
+            let form = ::types_cluster::PgClassForm {
                 relnamespace,
                 relfilenode,
                 relisshared,
@@ -502,9 +502,9 @@ pub(crate) fn ReindexMultipleTables<'mcx>(
 }
 
 fn ereport_warning_concurrent_catalogs() -> PgResult<()> {
-    use types_error::WARNING;
+    use ::types_error::WARNING;
     ereport(WARNING)
-        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(format!(
             "cannot reindex system catalogs concurrently, skipping all"
         ))
@@ -513,9 +513,9 @@ fn ereport_warning_concurrent_catalogs() -> PgResult<()> {
 }
 
 fn ereport_warning_system_relations() -> PgResult<()> {
-    use types_error::WARNING;
+    use ::types_error::WARNING;
     ereport(WARNING)
-        .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+        .errcode(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
         .errmsg(format!("cannot move system relations, skipping all"))
         .finish(crate::here("ReindexMultipleTables"))?;
     Ok(())

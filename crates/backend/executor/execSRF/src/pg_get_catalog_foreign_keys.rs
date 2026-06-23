@@ -24,11 +24,11 @@
 //! `init_seams`); it bypasses the by-OID builtin registry whose tag-only
 //! `resultinfo` cannot carry the live `ReturnSetInfo` (the WONTFIX dual-home).
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 
 use ::funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
@@ -49,7 +49,7 @@ pub(crate) fn register_pg_get_catalog_foreign_keys() {
 /// header (the array constructor emits one), so it round-trips header-for-header
 /// through the tuplestore / printtup output lane.
 fn byref_image<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum<'mcx>> {
-    let mut buf = mcx::PgVec::new_in(mcx);
+    let mut buf = ::mcx::PgVec::new_in(mcx);
     buf.try_reserve(image.len())
         .map_err(|_| mcx.oom(image.len()))?;
     buf.extend_from_slice(image);

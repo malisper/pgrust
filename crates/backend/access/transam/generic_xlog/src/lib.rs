@@ -20,18 +20,18 @@ use bufmask_seams::{mask_page_lsn_and_checksum, mask_unused_space};
 use xloginsert_seams::{
     xlog_begin_insert, xlog_insert_record, xlog_register_buf_data, xlog_register_buffer,
 };
-use xlogutils_seams::xlog_read_buffer_for_redo;
+use ::xlogutils_seams::xlog_read_buffer_for_redo;
 use bufmgr_seams::{
     mark_buffer_dirty, unlock_release_buffer, with_buffer_page,
 };
-use relcache_seams::relation_needs_wal;
+use ::relcache_seams::relation_needs_wal;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{BlockNumber, OffsetNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
-use rel::RelationData;
-use types_storage::buf::{Buffer, BufferIsInvalid, BufferIsValid, InvalidBuffer};
-use wal::rmgr::XLogReaderState;
-use wal::xloginsert::{REGBUF_FORCE_IMAGE, REGBUF_STANDARD};
+use ::rel::RelationData;
+use ::types_storage::buf::{Buffer, BufferIsInvalid, BufferIsValid, InvalidBuffer};
+use ::wal::rmgr::XLogReaderState;
+use ::wal::xloginsert::{REGBUF_FORCE_IMAGE, REGBUF_STANDARD};
 use wal::{XLogRedoAction, RM_GENERIC_ID};
 
 // ---------------------------------------------------------------------------
@@ -89,7 +89,7 @@ fn page_pd_upper(page: &[u8]) -> u16 {
 /// `xlogid`/`xrecoff` halves; the in-memory layout is the same native-endian
 /// 64-bit value, so a single store matches `PageXLogRecPtrSet`).
 #[inline]
-fn page_set_lsn(page: &mut [u8], lsn: types_core::XLogRecPtr) {
+fn page_set_lsn(page: &mut [u8], lsn: ::types_core::XLogRecPtr) {
     page[PD_LSN_OFFSET..PD_LSN_OFFSET + 8].copy_from_slice(&lsn.to_ne_bytes());
 }
 
@@ -401,7 +401,7 @@ pub fn GenericXLogRegisterBuffer(
 
 /// Apply changes represented by [`GenericXLogState`] to the actual buffers,
 /// and emit a generic xlog record. Consumes the state (C `pfree(state)`).
-pub fn GenericXLogFinish(mut state: GenericXLogState<'_>) -> PgResult<types_core::XLogRecPtr> {
+pub fn GenericXLogFinish(mut state: GenericXLogState<'_>) -> PgResult<::types_core::XLogRecPtr> {
     let lsn;
 
     if state.is_logged {
@@ -503,7 +503,7 @@ pub fn GenericXLogFinish(mut state: GenericXLogState<'_>) -> PgResult<types_core
         }
         drop(crit); // END_CRIT_SECTION();
         // We don't have a LSN to return, in this case.
-        lsn = types_core::xact::InvalidXLogRecPtr;
+        lsn = ::types_core::xact::InvalidXLogRecPtr;
     }
 
     // pfree(state) — `state` is consumed by value and dropped here.

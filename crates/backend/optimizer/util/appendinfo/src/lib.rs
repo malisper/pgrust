@@ -17,7 +17,7 @@
 //! * `Relids` set algebra runs through the relnode/pathnode bms seams (relnode is
 //!   the bms owner; calling it directly would cycle).
 //! * Two sub-branches of the mutator genuinely need `root->parse` (the opaque
-//!   [`pathnodes::QueryId`]) which the `adjust_appendrel_attrs_*` seam
+//!   [`::pathnodes::QueryId`]) which the `adjust_appendrel_attrs_*` seam
 //!   contract drops: the UNION-ALL whole-row→`RowExpr` expansion (needs the parent
 //!   RTE's `eref->colnames`). That branch is unreachable for inheritance (per the
 //!   C comment) and for non-inherited queries; it returns a loud `Err` naming the
@@ -29,18 +29,18 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use nodes_core::makefuncs;
-use nodes_core::nodefuncs;
+use ::nodes_core::makefuncs;
+use ::nodes_core::nodefuncs;
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Index, Oid};
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use ::nodes::primnodes::etag;
 use ::nodes::primnodes::{
     CoercionForm, Const, ConvertRowtypeExpr, Expr, Var, VarReturningType,
 };
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     AppendRelInfo, NodeId, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId,
     RowIdentityVarInfo,
@@ -317,7 +317,7 @@ pub fn adjust_targetlist_by_appinfos<'mcx>(
         let expr = root.node(te.expr).clone_in(mcx)?;
         let new_expr = adjust_appendrel_attrs_run(run, root, expr, appinfos)?;
         let expr_id = root.alloc_node(new_expr);
-        let new_te = pathnodes::TargetEntryNode {
+        let new_te = ::pathnodes::TargetEntryNode {
             expr: expr_id,
             ..te
         };
@@ -552,7 +552,7 @@ fn adjust_appendrel_attrs_mutator<'mcx>(
 
                         // rte = rt_fetch(appinfo->parent_relid, parse->rtable);
                         // rowexpr->colnames = copyObject(rte->eref->colnames);
-                        let rte = pathnodes::planner_run::planner_rt_fetch(
+                        let rte = ::pathnodes::planner_run::planner_rt_fetch(
                             run,
                             context.root,
                             appinfo.parent_relid,
@@ -894,10 +894,10 @@ pub fn adjust_nodelist_multilevel(
 pub fn adjust_indexclauses_multilevel(
     mcx: Mcx<'_>,
     root: &mut PlannerInfo,
-    indexclauses: &[pathnodes::IndexClause],
+    indexclauses: &[::pathnodes::IndexClause],
     childrel: RelId,
     parentrel: RelId,
-) -> PgResult<Vec<pathnodes::IndexClause>> {
+) -> PgResult<Vec<::pathnodes::IndexClause>> {
     let mut out = Vec::with_capacity(indexclauses.len());
     for ic in indexclauses {
         let mut new_ic = ic.clone();
@@ -950,7 +950,7 @@ fn adjust_child_relids_expr(
     relids: &::nodes::primnodes::ExprRelids,
     appinfos: &[AppendRelInfo],
 ) -> ::nodes::primnodes::ExprRelids {
-    use rewrite_core::relids as er;
+    use ::rewrite_core::relids as er;
     let mut result: Option<::nodes::primnodes::ExprRelids> = None;
     for appinfo in appinfos {
         if er::is_member(appinfo.parent_relid as i32, relids) {
@@ -1210,7 +1210,7 @@ fn add_row_identity_var(
 
     if rtindex == result_relation {
         let expr_id = root.alloc_node(Expr::Var(orig_var));
-        let tle = pathnodes::TargetEntryNode {
+        let tle = ::pathnodes::TargetEntryNode {
             expr: expr_id,
             resno: (root.processed_tlist.len() + 1) as AttrNumber,
             resname: Some(rowid_name.to_string()),
@@ -1290,7 +1290,7 @@ fn add_row_identity_var(
 
     // Push the ROWID_VAR reference variable into processed_tlist.
     let expr_id = root.alloc_node(Expr::Var(rowid_var));
-    let tle = pathnodes::TargetEntryNode {
+    let tle = ::pathnodes::TargetEntryNode {
         expr: expr_id,
         resno: (root.processed_tlist.len() + 1) as AttrNumber,
         resname: Some(rowid_name.to_string()),
@@ -1538,7 +1538,7 @@ fn copy_targetentry_handles(
         // owned-subtree child.
         let expr = root.node(te.expr).clone_in(mcx)?;
         let expr_id = root.alloc_node(expr);
-        let new_te = pathnodes::TargetEntryNode {
+        let new_te = ::pathnodes::TargetEntryNode {
             expr: expr_id,
             ..te
         };
@@ -1565,7 +1565,7 @@ fn adjust_targetlist_multilevel(
         let expr = root.node(te.expr).clone_in(mcx)?;
         let new_expr = adjust_appendrel_attrs_multilevel(root, expr, childrel, parentrel)?;
         let expr_id = root.alloc_node(new_expr);
-        let new_te = pathnodes::TargetEntryNode {
+        let new_te = ::pathnodes::TargetEntryNode {
             expr: expr_id,
             ..te
         };
@@ -1580,7 +1580,7 @@ fn expr_relids_add_all(
     a: ::nodes::primnodes::ExprRelids,
     b: &::nodes::primnodes::ExprRelids,
 ) -> ::nodes::primnodes::ExprRelids {
-    rewrite_core::relids::union(&a, b)
+    ::rewrite_core::relids::union(&a, b)
 }
 
 /* ==========================================================================

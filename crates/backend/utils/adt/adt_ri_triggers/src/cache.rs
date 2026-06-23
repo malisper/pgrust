@@ -15,15 +15,15 @@ use alloc::string::String;
 use core::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::Mcx;
-use types_core::primitive::OidIsValid;
+use ::mcx::Mcx;
+use ::types_core::primitive::OidIsValid;
 use types_core::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_OBJECT_DEFINITION,
 };
 use types_ri_triggers::{SpiPlanPtr, TriggerRef};
 
-use coerce_seams::CoercionPathType;
+use ::coerce_seams::CoercionPathType;
 
 use crate::{
     name_data_from_bytes, RelSide, RiConstraintInfo, RiQueryKey, FKCONSTR_MATCH_FULL,
@@ -122,13 +122,13 @@ pub fn ri_hash_compare_op(mcx: Mcx<'_>, eq_opr: Oid, typeid: Oid) -> PgResult<Ri
         InvalidOid // simplest case
     } else {
         let (pathtype, castfunc) =
-            coerce_seams::find_coercion_pathway_implicit::call(lefttype, typeid)?;
+            ::coerce_seams::find_coercion_pathway_implicit::call(lefttype, typeid)?;
         if pathtype != CoercionPathType::Func && pathtype != CoercionPathType::Relabeltype {
             // The declared input type of the eq_opr might be a polymorphic type
             // such as ANYARRAY or ANYENUM, or other special cases such as
             // RECORD; find_coercion_pathway currently doesn't subsume these
             // special cases.
-            if !coerce_seams::is_binary_coercible::call(typeid, lefttype)? {
+            if !::coerce_seams::is_binary_coercible::call(typeid, lefttype)? {
                 let from = format_type_seams::format_type_be::call(mcx, typeid)?;
                 let to = format_type_seams::format_type_be::call(mcx, lefttype)?;
                 return Err(PgError::error(alloc::format!(

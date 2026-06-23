@@ -4,12 +4,12 @@
 
 #![allow(non_snake_case)]
 
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 
 use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_TRUNCATE};
-use types_core::primitive::{Oid, OidIsValid};
-use types_core::SubTransactionId;
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::types_core::SubTransactionId;
 use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
@@ -17,17 +17,17 @@ use types_error::{
 use ::nodes::ddlnodes::TruncateStmt;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT, OBJECT_SEQUENCE};
-use rel::Relation;
-use types_storage::lock::{AccessExclusiveLock, NoLock, LOCKMODE};
-use types_tuple::access::{
+use ::rel::Relation;
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, LOCKMODE};
+use ::types_tuple::access::{
     RangeVar as AccessRangeVar, RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 
-use common_relation::relation_open;
+use ::common_relation::relation_open;
 use table_seams as table_seam;
-use transam_xact::GetCurrentSubTransactionId;
+use ::transam_xact::GetCurrentSubTransactionId;
 use aclchk_seams as aclchk_seam;
-use catalog_namespace::RangeVarGetRelidExtended;
+use ::catalog_namespace::RangeVarGetRelidExtended;
 use objectaddress_seams as objaddr_seam;
 use pg_inherits_seams as inherits_seam;
 use tablespace_globals_seams as ts_globals_seam;

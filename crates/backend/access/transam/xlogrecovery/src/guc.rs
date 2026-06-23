@@ -14,8 +14,8 @@ use alloc::format;
 use alloc::string::ToString;
 
 use types_core::{TimeLineID, TransactionId, XLogRecPtr};
-use types_error::PgError;
-use wal::MAXFNAMELEN;
+use ::types_error::PgError;
+use ::wal::MAXFNAMELEN;
 
 use crate::core::{RecoveryTargetTimeLineGoal, RecoveryTargetType, XLogRecoveryState};
 
@@ -116,7 +116,7 @@ pub fn check_primary_slot_name(newval: &str) -> bool {
 /// (xlogrecovery.c:4821) — returns the `ERROR` `PgError` to raise.
 pub(crate) fn error_multiple_recovery_targets() -> PgError {
     PgError::error("multiple recovery targets specified")
-        .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+        .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
         .with_detail(
             "At most one of \"recovery_target\", \"recovery_target_lsn\", \
              \"recovery_target_name\", \"recovery_target_time\", \

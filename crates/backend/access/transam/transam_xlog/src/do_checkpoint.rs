@@ -31,9 +31,9 @@ use utils_error::{ereport, PgResult};
 use control::{CheckPoint, DBState};
 use types_core::{InvalidTransactionId, XLogRecPtr};
 use types_error::{ErrorLocation, DEBUG1, ERROR, LOG};
-use types_storage::storage::LW_EXCLUSIVE;
-use wal::wal::RM_XLOG_ID;
-use wal::xlog_consts::{
+use ::types_storage::storage::LW_EXCLUSIVE;
+use ::wal::wal::RM_XLOG_ID;
+use ::wal::xlog_consts::{
     CHECKPOINT_END_OF_RECOVERY, CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE, CHECKPOINT_IS_SHUTDOWN,
     SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD,
 };
@@ -43,8 +43,8 @@ use varsup_seams as varsup_seams;
 use bufmgr_seams as bufmgr_seams;
 use lwlock as lwlock;
 use sync_seams as sync_seams;
-use init_small::globals;
-use guc_tables::vars;
+use ::init_small::globals;
+use ::guc_tables::vars;
 
 use crate::checkpoint::checkpoint_to_bytes;
 use crate::shmem::{self, control_file_mut, wal_segment_size, xlog_ctl};
@@ -318,7 +318,7 @@ pub fn CreateCheckPoint(flags: i32) -> PgResult<bool> {
     // ProcLastRecPtr = start of the checkpoint record; recptr = end of it.
     let proc_last_rec_ptr = crate::insert::proc_last_rec_ptr();
     if shutdown && check_point.redo != proc_last_rec_ptr {
-        return ereport(types_error::PANIC)
+        return ereport(::types_error::PANIC)
             .errmsg("concurrent write-ahead log activity while database system is shutting down")
             .finish(loc(7303, "CreateCheckPoint"))
             .map(|_| false);
@@ -490,10 +490,10 @@ fn log_checkpoint_end(flags: i32) {
 
 /// `(pg_time_t) time(NULL)` — the wall-clock seconds the checkpoint records in
 /// `checkPoint.time`.
-fn wallclock_time() -> types_core::pg_time_t {
+fn wallclock_time() -> ::types_core::pg_time_t {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as types_core::pg_time_t)
+        .map(|d| d.as_secs() as ::types_core::pg_time_t)
         .unwrap_or(0)
 }

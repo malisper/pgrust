@@ -6,13 +6,13 @@
 //! extension-state slot growth, and the in-core option dispatch +
 //! cross-option validation in `ParseExplainOptionList`.
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use types_explain::{ExplainFormat, ExplainSerializeOption};
 use parsenodes::{Boolean, DefElem, DefElemAction, Node, StringNode};
 
 use super::*;
 
-// --- DefElem builders (parsenodes::DefElem) ---------------------------
+// --- DefElem builders (::parsenodes::DefElem) ---------------------------
 
 fn defelem(name: &str, arg: Option<Node>) -> DefElem {
     DefElem {
@@ -42,7 +42,7 @@ fn flag_opt(name: &str) -> DefElem {
     defelem(name, None)
 }
 
-fn empty_pstate(mcx: mcx::Mcx<'_>) -> ParseState<'_> {
+fn empty_pstate(mcx: ::mcx::Mcx<'_>) -> ParseState<'_> {
     // `make_parsestate(NULL)` image: p_sourcetext is None (EXPLAIN options
     // parsing never reads it); the rest are the C palloc0 defaults.
     ParseState::new(mcx).unwrap()

@@ -5,8 +5,8 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `str_tolower(buff, nbytes, collid)` (formatting.c): lowercase the first

@@ -21,9 +21,9 @@
 //! (`PgResult`); the C `elog(ERROR, "negative bitmapset member not allowed")`
 //! is a caller bug and panics, matching the C surface.
 
-use hashfn::hash_bytes;
+use ::hashfn::hash_bytes;
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::bitmapset::{bitmapword, Bitmapset};
 
 /// `BITS_PER_BITMAPWORD` (nodes/bitmapset.h): 64 on LP64.
@@ -90,11 +90,11 @@ fn nwords(a: Option<&Bitmapset>) -> usize {
 
 /// Allocate an `nwords`-word zeroed set in `mcx` (C: `palloc0(BITMAPSET_SIZE)`).
 fn alloc_zeroed<'mcx>(mcx: Mcx<'mcx>, n: usize) -> PgResult<PgBox<'mcx, Bitmapset<'mcx>>> {
-    let mut words = mcx::vec_with_capacity_in::<bitmapword>(mcx, n)?;
+    let mut words = ::mcx::vec_with_capacity_in::<bitmapword>(mcx, n)?;
     for _ in 0..n {
         words.push(0);
     }
-    mcx::alloc_in(mcx, Bitmapset { words })
+    ::mcx::alloc_in(mcx, Bitmapset { words })
 }
 
 /// `bms_copy(a)` — a palloc'd duplicate of `a` (C NULL copies as `None`).
@@ -104,10 +104,10 @@ pub fn bms_copy<'mcx>(
 ) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
     match a {
         None => Ok(None),
-        Some(s) => Ok(Some(mcx::alloc_in(
+        Some(s) => Ok(Some(::mcx::alloc_in(
             mcx,
             Bitmapset {
-                words: mcx::slice_in(mcx, &s.words)?,
+                words: ::mcx::slice_in(mcx, &s.words)?,
             },
         )?)),
     }
@@ -482,7 +482,7 @@ pub fn bms_add_member<'mcx>(
     let wnum = wordnum(x);
     if wnum >= a.words.len() {
         // enlarge, zero-filling the new words (C: repalloc + zero)
-        let mut grown = mcx::vec_with_capacity_in::<bitmapword>(mcx, wnum + 1)?;
+        let mut grown = ::mcx::vec_with_capacity_in::<bitmapword>(mcx, wnum + 1)?;
         for &w in a.words.iter() {
             grown.push(w);
         }
@@ -567,7 +567,7 @@ pub fn bms_replace_members<'mcx>(
     };
     let mut a = a;
     // Resize a's storage to exactly b->nwords, copying b's words.
-    let mut words = mcx::vec_with_capacity_in::<bitmapword>(mcx, b.words.len())?;
+    let mut words = ::mcx::vec_with_capacity_in::<bitmapword>(mcx, b.words.len())?;
     for &w in b.words.iter() {
         words.push(w);
     }
@@ -593,7 +593,7 @@ pub fn bms_add_range<'mcx>(
         None => alloc_zeroed(mcx, uwordnum + 1)?,
         Some(mut a) => {
             if uwordnum >= a.words.len() {
-                let mut grown = mcx::vec_with_capacity_in::<bitmapword>(mcx, uwordnum + 1)?;
+                let mut grown = ::mcx::vec_with_capacity_in::<bitmapword>(mcx, uwordnum + 1)?;
                 for &w in a.words.iter() {
                     grown.push(w);
                 }
@@ -798,7 +798,7 @@ mod tests {
 
     #[test]
     fn membership_and_iteration() {
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
         let a = set_of(mcx, &[1, 64, 130]);
         let r = a.as_deref();
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn union_intersect_difference_equal() {
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
         let a = set_of(mcx, &[1, 2, 100]);
         let b = set_of(mcx, &[2, 3, 100]);
@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn del_member_trims_trailing_zero_words() {
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
         let a = set_of(mcx, &[5, 200]);
         let a = bms_del_member(a, 200);
@@ -868,7 +868,7 @@ mod tests {
 
     #[test]
     fn add_range_and_singleton() {
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
         let a = bms_add_range(mcx, None, 60, 70).unwrap();
         assert_eq!(bms_num_members(a.as_deref()), 11);

@@ -12,14 +12,14 @@
 //! `create_remote_simple_dest_receiver` seam, which registers the
 //! `printsimple_startup` / `printsimple` / (no-op shutdown) vtable.
 
-use mcx::Mcx;
-use types_dest::dest::CommandDest;
+use ::mcx::Mcx;
+use ::types_dest::dest::CommandDest;
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
-use stringinfo::StringInfo;
-use types_tuple::heaptuple::TupleDescData;
+use ::stringinfo::StringInfo;
+use ::types_tuple::heaptuple::TupleDescData;
 
 use pqformat::{
     pq_beginmessage_reuse, pq_endmessage_reuse, pq_sendcountedtext, pq_sendint16, pq_sendint32,
@@ -57,7 +57,7 @@ fn printsimple_startup<'mcx>(
         let attr = tupdesc.attr(i);
 
         // pq_sendstring(&buf, NameStr(attr->attname));
-        pqformat::pq_sendstring(&mut buf, attr.attname.name_str())?;
+        ::pqformat::pq_sendstring(&mut buf, attr.attname.name_str())?;
         // pq_sendint32(&buf, 0);  /* table oid */
         pq_sendint32(&mut buf, 0)?;
         // pq_sendint16(&buf, 0);  /* attnum */

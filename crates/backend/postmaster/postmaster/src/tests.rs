@@ -10,7 +10,7 @@ use pmchild::{
     AssignPostmasterChildSlot, InitPostmasterChildSlots, MaxLivePostmasterChildren, PMChild,
     SetActiveChildPid,
 };
-use types_core::init::BackendType;
+use ::types_core::init::BackendType;
 
 use super::*;
 
@@ -61,17 +61,17 @@ fn marks_matching_pid_and_returns_found() {
     // and verify the mark flips it.)
     InitPostmasterChildSlots();
     let av = AssignPostmasterChildSlot(BackendType::AutovacWorker).unwrap();
-    pmchild::SetActiveChildBgworkerInfo(av.child_slot, None, false);
+    ::pmchild::SetActiveChildBgworkerInfo(av.child_slot, None, false);
     assert!(SetActiveChildPid(av.child_slot, 5151));
 
-    let before = pmchild::ActiveChildListSnapshot();
+    let before = ::pmchild::ActiveChildListSnapshot();
     assert!(before
         .iter()
         .any(|c| c.child_slot == av.child_slot && !c.bgworker_notify));
 
     assert!(PostmasterMarkPIDForWorkerNotify(5151));
 
-    let after = pmchild::ActiveChildListSnapshot();
+    let after = ::pmchild::ActiveChildListSnapshot();
     assert!(after
         .iter()
         .any(|c| c.child_slot == av.child_slot && c.bgworker_notify));

@@ -34,8 +34,8 @@ use buffile_seams as buffile;
 use lwlock_seams as lwlock;
 use sort_storage_seams as seams;
 use types_core::{Size, ProcNumber};
-use types_core::fmgr::NAMEDATALEN;
-use types_core::primitive::BLCKSZ;
+use ::types_core::fmgr::NAMEDATALEN;
+use ::types_core::primitive::BLCKSZ;
 use types_error::{PgError, PgResult};
 use execparallel::{
     FileSetHandle, SharedFileSetHandle, SharedTuplestoreAccessorHandle, SharedTuplestoreHandle,
@@ -206,7 +206,7 @@ fn current_proc_number() -> ProcNumber {
 /// field is the first member, so `&fileset->fs` is the same address.
 #[inline]
 fn fileset_fs(fileset: SharedFileSetHandle) -> FileSetHandle {
-    let sfs = fileset.0 as *const types_storage::fileset::SharedFileSet;
+    let sfs = fileset.0 as *const ::types_storage::fileset::SharedFileSet;
     // `fs` is the first field of `SharedFileSet` (#[repr(C)]), so its address is
     // the struct's address.
     let fs = unsafe { core::ptr::addr_of!((*sfs).fs) } as usize;

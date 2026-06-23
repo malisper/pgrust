@@ -27,12 +27,12 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use s_lock::{s_lock_macro, s_unlock, Spinlock};
-use types_core::Size;
+use ::types_core::Size;
 use types_error::{PgError, PgResult};
-use types_storage::buf::{
+use ::types_storage::buf::{
     BufferAccessStrategyData, Victim, BUF_USAGECOUNT_ONE, FREENEXT_NOT_IN_LIST,
 };
-use types_storage::NUM_BUFFER_PARTITIONS;
+use ::types_storage::NUM_BUFFER_PARTITIONS;
 
 use crate::strategy::BufferAccessStrategyRing;
 use crate::{buf_state_get_refcount, buf_state_get_usagecount};

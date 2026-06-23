@@ -4,12 +4,12 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::portalcmds::ParamListInfo;
 use portal::{FetchDirection, Portal, PortalStrategy, QueryCompletion};
-use snapshot::SnapshotData;
+use ::snapshot::SnapshotData;
 
 seam_core::seam!(
     /// `PortalStart(portal, params, eflags, snapshot)` (pquery.c) — set up a

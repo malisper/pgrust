@@ -5,8 +5,8 @@
 use alloc::boxed::Box;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 use crate::nodeindexscan::Scan;
 use crate::nodes::NodeTag;

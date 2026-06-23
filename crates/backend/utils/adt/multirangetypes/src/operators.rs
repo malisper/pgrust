@@ -6,9 +6,9 @@
 //! decode their operands (through `datum_get_*` / `multirange_get_typcache`) and
 //! delegate. The per-member range comparisons cross `rangetypes-seams`.
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use datum::datum::Datum;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::datum::datum::Datum;
 use types_error::{PgError, PgResult, ERROR};
 use types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP, RANGE_EMPTY};
 
@@ -811,8 +811,8 @@ pub fn multirange_unnest_images<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<
     // address to `datum_get_multirange_type_p` as the argument Datum word.
     let word = {
         use core::alloc::Layout;
-        use mcx::Allocator;
-        mcx::check_alloc_size(image.len())?;
+        use ::mcx::Allocator;
+        ::mcx::check_alloc_size(image.len())?;
         let layout = Layout::from_size_align(image.len().max(1), 8)
             .expect("valid MultirangeType image layout");
         let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;

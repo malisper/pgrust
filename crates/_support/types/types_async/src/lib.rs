@@ -9,7 +9,7 @@
 
 use types_core::{Oid, ProcNumber, TimestampTz, TransactionId, BLCKSZ};
 
-/// `NAMEDATALEN` — identical to `types_core::fmgr::NAMEDATALEN`; re-stated here so
+/// `NAMEDATALEN` — identical to `::types_core::fmgr::NAMEDATALEN`; re-stated here so
 /// the queue-entry layout is self-describing.
 pub const NAMEDATALEN: usize = 64;
 

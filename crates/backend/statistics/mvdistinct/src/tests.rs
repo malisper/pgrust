@@ -3,7 +3,7 @@
 //! estimator, and the I/O surface.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 fn item(ndistinct: f64, attrs: &[AttrNumber]) -> MVNDistinctItem {
     MVNDistinctItem {

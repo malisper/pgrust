@@ -1,7 +1,7 @@
 //! `pg_cast` catalog row layout and constants (`catalog/pg_cast.h`,
 //! PostgreSQL 18.3), trimmed to what the `backend-catalog-pg-cast` port reads.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_cast.h CATALOG / DECLARE_*).

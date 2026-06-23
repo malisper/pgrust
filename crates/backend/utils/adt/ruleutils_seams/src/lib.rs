@@ -5,8 +5,8 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::Node;
 use ::nodes::planstate::PlanStateNode;
@@ -72,13 +72,13 @@ seam_core::seam!(
     /// the returned fragment is likewise raw bytes (C operates on `char *`
     /// end-to-end), copied into `mcx`. Catalog lookups can `ereport(ERROR)`.
     pub fn generate_operator_clause<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         leftop: &[u8],
-        leftoptype: types_core::Oid,
-        opoid: types_core::Oid,
+        leftoptype: ::types_core::Oid,
+        opoid: ::types_core::Oid,
         rightop: &[u8],
-        rightoptype: types_core::Oid,
-    ) -> types_error::PgResult<mcx::PgVec<'mcx, u8>>
+        rightoptype: ::types_core::Oid,
+    ) -> ::types_error::PgResult<::mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
@@ -87,9 +87,9 @@ seam_core::seam!(
     /// into `mcx`; `Ok(None)` for the empty default-partition constraint. Can
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn partition_constraint_def<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
-        pk_relid: types_core::Oid,
-    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+        mcx: ::mcx::Mcx<'mcx>,
+        pk_relid: ::types_core::Oid,
+    ) -> ::types_error::PgResult<Option<::mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(
@@ -101,11 +101,11 @@ seam_core::seam!(
     /// (C returns NULL). Reads the catalog / deparses, so it can
     /// `ereport(ERROR)`; `Err` also carries OOM.
     pub fn pg_get_expr_worker<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         exprstr: &str,
-        relid: types_core::Oid,
+        relid: ::types_core::Oid,
         pretty_flags: i32,
-    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> ::types_error::PgResult<Option<::mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(

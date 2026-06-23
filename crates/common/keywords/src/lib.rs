@@ -8,17 +8,17 @@
 #![allow(non_upper_case_globals)]
 
 // `KeywordCategory` is the ported, idiomatic four-variant category enum from
-// the `types-core` crate (`types_core::keywords`). It mirrors PostgreSQL's
+// the `types-core` crate (`::types_core::keywords`). It mirrors PostgreSQL's
 // keyword category values (UNRESERVED_KEYWORD / COL_NAME_KEYWORD /
 // TYPE_FUNC_NAME_KEYWORD / RESERVED_KEYWORD).
-pub use types_core::keywords::KeywordCategory;
+pub use ::types_core::keywords::KeywordCategory;
 
 mod generated {
     // The generated table refers to the category enum via the original FFI
     // crate path `pg_ffi_fgram::KeywordCategory`. In this workspace that
-    // vocabulary lives in `types_core::keywords`, so alias it here to keep the
+    // vocabulary lives in `::types_core::keywords`, so alias it here to keep the
     // verbatim `build.rs` / generated code unchanged.
-    use types_core::keywords as pg_ffi_fgram;
+    use ::types_core::keywords as pg_ffi_fgram;
 
     include!(concat!(env!("OUT_DIR"), "/keywords.rs"));
 }

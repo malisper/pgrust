@@ -12,16 +12,16 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 
-use types_acl::acl::{AclResult, ACL_CREATE, ACLCHECK_NOT_OWNER};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_collation::{COLLPROVIDER_BUILTIN, COLLPROVIDER_ICU, COLLPROVIDER_LIBC};
-use types_catalog::pg_database::{
+use ::types_acl::acl::{AclResult, ACL_CREATE, ACLCHECK_NOT_OWNER};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_collation::{COLLPROVIDER_BUILTIN, COLLPROVIDER_ICU, COLLPROVIDER_LIBC};
+use ::types_catalog::pg_database::{
     DatabaseRelationId, NewDbRecord, DATCONNLIMIT_UNLIMITED,
 };
-use types_core::catalog::FirstNormalObjectId;
+use ::types_core::catalog::FirstNormalObjectId;
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_DATABASE, ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -37,15 +37,15 @@ use ::nodes::ddlnodes::{
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{OBJECT_DATABASE, OBJECT_TABLESPACE};
 use ::nodes::parsestmt::ParseState;
-use types_storage::lock::{
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, LockRelId, RowExclusiveLock, ShareLock, NoLock,
 };
-use types_storage::storage::{ProcSignalBarrierType, RelFileLocator};
-use wal::xlog_consts::{
+use ::types_storage::storage::{ProcSignalBarrierType, RelFileLocator};
+use ::wal::xlog_consts::{
     CHECKPOINT_FLUSH_ALL, CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE, CHECKPOINT_WAIT,
 };
 use wal::{RM_DBASE_ID, XLR_SPECIAL_REL_UPDATE};
-use types_wchar::encoding::{pg_valid_be_encoding, PG_SQL_ASCII};
+use ::types_wchar::encoding::{pg_valid_be_encoding, PG_SQL_ASCII};
 
 use crate::{
     database_is_invalid_oid, errdetail_busy_db, errloc, get_database_name, get_database_oid,
@@ -69,8 +69,8 @@ use pgstat_seams as pgstat;
 const GLOBALTABLESPACE_OID: Oid = 1664;
 /// `TableSpaceRelationId` (pg_tablespace.h).
 const TableSpaceRelationId: Oid = 1213;
-const DatabaseOidIndexId: Oid = types_catalog::pg_database::DatabaseOidIndexId;
-const Anum_pg_database_oid: i32 = types_catalog::pg_database::Anum_pg_database_oid;
+const DatabaseOidIndexId: Oid = ::types_catalog::pg_database::DatabaseOidIndexId;
+const Anum_pg_database_oid: i32 = ::types_catalog::pg_database::Anum_pg_database_oid;
 
 /// `XLOG_DBASE_*` opcodes (dbcommands_xlog.h).
 const XLOG_DBASE_CREATE_FILE_COPY: u8 = 0x00;
@@ -199,7 +199,7 @@ fn error_conflicting_def_elem(_defel: &DefElem, _pstate: &ParseState<'_>) -> PgR
 
 /// Iterate a statement's `PgVec<NodePtr>` option list as `&DefElem` references.
 fn def_elems<'a, 'mcx>(
-    options: &'a [mcx::PgBox<'mcx, Node<'mcx>>],
+    options: &'a [::mcx::PgBox<'mcx, Node<'mcx>>],
 ) -> Vec<&'a DefElem<'mcx>> {
     options
         .iter()
@@ -209,12 +209,12 @@ fn def_elems<'a, 'mcx>(
 
 /// Allocate a `PgString` in `mcx` from a `&str` (the `cstring_to_text`/
 /// `pstrdup` analog for the formed catalog columns).
-fn pgstr<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<mcx::PgString<'mcx>> {
-    mcx::PgString::from_str_in(s, mcx)
+fn pgstr<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<::mcx::PgString<'mcx>> {
+    ::mcx::PgString::from_str_in(s, mcx)
 }
 
 /// As [`pgstr`], lifting an `Option<&str>` to `Option<PgString>`.
-fn pgstr_opt<'mcx>(mcx: Mcx<'mcx>, s: Option<&str>) -> PgResult<Option<mcx::PgString<'mcx>>> {
+fn pgstr_opt<'mcx>(mcx: Mcx<'mcx>, s: Option<&str>) -> PgResult<Option<::mcx::PgString<'mcx>>> {
     match s {
         Some(s) => Ok(Some(pgstr(mcx, s)?)),
         None => Ok(None),
@@ -241,7 +241,7 @@ fn collprovider_name(c: i8) -> &'static str {
 /// `RELKIND_HAS_STORAGE(relkind)` (pg_class.h) — relkinds that have physical
 /// storage (table / index / sequence / TOAST value / materialized view).
 fn relkind_has_storage(relkind: u8) -> bool {
-    use types_tuple::access::{
+    use ::types_tuple::access::{
         RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
     };
     relkind == RELKIND_RELATION
@@ -268,19 +268,19 @@ fn scan_source_database_pg_class_tuple(
     dbid: Oid,
     srcpath: &str,
 ) -> PgResult<Option<storage::CreateDBRelInfo>> {
-    use types_tuple::access::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
+    use ::types_tuple::access::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
     // GETSTRUCT field readers over the fixed FormData_pg_class prefix.
     let oid_at = |o: usize| -> PgResult<Oid> {
         userdata
             .get(o..o + 4)
             .map(|b| Oid::from_ne_bytes([b[0], b[1], b[2], b[3]]))
             .ok_or_else(|| {
-                types_error::PgError::error("pg_class tuple shorter than FormData_pg_class prefix")
+                ::types_error::PgError::error("pg_class tuple shorter than FormData_pg_class prefix")
             })
     };
     let char_at = |o: usize| -> PgResult<u8> {
         userdata.get(o).copied().ok_or_else(|| {
-            types_error::PgError::error("pg_class tuple shorter than FormData_pg_class prefix")
+            ::types_error::PgError::error("pg_class tuple shorter than FormData_pg_class prefix")
         })
     };
 
@@ -309,7 +309,7 @@ fn scan_source_database_pg_class_tuple(
 
     // We must have a valid relfilenumber.
     if !OidIsValid(relfilenumber) {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "relation with OID {class_oid} does not have a valid relfilenumber"
         )));
     }
@@ -344,17 +344,17 @@ pub(crate) fn scan_source_database_pg_class<'mcx>(
     tbid: Oid,
     dbid: Oid,
     srcpath: &str,
-) -> PgResult<mcx::PgVec<'mcx, storage::CreateDBRelInfo>> {
+) -> PgResult<::mcx::PgVec<'mcx, storage::CreateDBRelInfo>> {
     use bufmgr_seams as bufmgr;
     use page::{
         ItemIdGetLength, ItemIdIsDead, ItemIdIsRedirected, ItemIdIsUsed, PageGetItem, PageGetItemId,
         PageGetMaxOffsetNumber, PageIsEmpty, PageIsNew, PageRef,
     };
-    use types_storage::buf::BUFFER_LOCK_SHARE;
-    use types_tuple::heaptuple::FormedTuple;
-    use types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
+    use ::types_storage::buf::BUFFER_LOCK_SHARE;
+    use ::types_tuple::heaptuple::FormedTuple;
+    use ::types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
 
-    let pg_class_oid = types_core::catalog::RELATION_RELATION_ID;
+    let pg_class_oid = ::types_core::catalog::RELATION_RELATION_ID;
 
     // Get pg_class relfilenumber.
     let relfilenumber =
@@ -378,8 +378,8 @@ pub(crate) fn scan_source_database_pg_class<'mcx>(
     // MAIN_FORKNUM); smgrclose(smgr). pg_class is a permanent catalog.
     let nblocks = smgr_seams::smgrnblocks::call(
         rlocator,
-        types_core::primitive::INVALID_PROC_NUMBER,
-        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        ::types_core::primitive::INVALID_PROC_NUMBER,
+        ::types_core::primitive::ForkNumber::MAIN_FORKNUM,
     )?;
 
     // We need a snapshot that will see all committed transactions as committed;
@@ -388,7 +388,7 @@ pub(crate) fn scan_source_database_pg_class<'mcx>(
         &snapmgr::GetLatestSnapshot()?,
     ));
 
-    let mut rlocatorlist: mcx::PgVec<'mcx, storage::CreateDBRelInfo> = mcx::PgVec::new_in(mcx);
+    let mut rlocatorlist: ::mcx::PgVec<'mcx, storage::CreateDBRelInfo> = ::mcx::PgVec::new_in(mcx);
 
     // Process the relation block by block.
     for blkno in 0..nblocks {
@@ -398,11 +398,11 @@ pub(crate) fn scan_source_database_pg_class<'mcx>(
         //   RBM_NORMAL, bstrategy, permanent=true).
         let buf = bufmgr::read_buffer_without_relcache::call(
             rlocator,
-            types_core::primitive::ForkNumber::MAIN_FORKNUM,
+            ::types_core::primitive::ForkNumber::MAIN_FORKNUM,
             blkno,
-            types_storage::storage::ReadBufferMode::Normal,
+            ::types_storage::storage::ReadBufferMode::Normal,
             // CreateAndCopyRelationData reads the source with a BAS_BULKREAD ring.
-            types_storage::buf::IOContext::IOCONTEXT_BULKREAD,
+            ::types_storage::buf::IOContext::IOCONTEXT_BULKREAD,
             true,
         )?;
 
@@ -510,7 +510,7 @@ fn CreateDatabaseUsingWalLog(
     // cross-database raw buffered pg_class scan + visibility lives behind the
     // storage owner seam (its buffer/smgr/snapshot engine is not the command
     // layer's to own).
-    let ctx = mcx::MemoryContext::new("CreateDatabaseUsingWalLog");
+    let ctx = ::mcx::MemoryContext::new("CreateDatabaseUsingWalLog");
     let rlocatorlist = storage::scan_source_database_pg_class::call(
         ctx.mcx(),
         src_tsid,
@@ -622,7 +622,7 @@ fn CreateDatabaseUsingFileCopy(
     }
 
     // Iterate through all tablespaces of the template database, and copy each.
-    let ctx = mcx::MemoryContext::new("CreateDatabaseUsingFileCopy");
+    let ctx = ::mcx::MemoryContext::new("CreateDatabaseUsingFileCopy");
     let rel = tscat::tablespace_table_open::call(ctx.mcx(), AccessShareLock)?;
     let oids = tscat::scan_all_tablespace_oids::call(&rel)?;
     for srctablespace in oids {
@@ -684,7 +684,7 @@ fn CreateDatabaseUsingFileCopy(
 
 /// `CREATE DATABASE`.
 pub fn createdb<'mcx>(pstate: &ParseState<'mcx>, stmt: &CreatedbStmt<'mcx>) -> PgResult<Oid> {
-    let ctx = mcx::MemoryContext::new("createdb");
+    let ctx = ::mcx::MemoryContext::new("createdb");
     let mcx = ctx.mcx();
 
     let dbname = stmt.dbname.as_deref().unwrap_or("");
@@ -1511,7 +1511,7 @@ fn invalid_locale_err(
     locname: &str,
     provider: i8,
     line: i32,
-) -> types_error::PgError {
+) -> ::types_error::PgError {
     let mut b = ereport(ERROR)
         .errcode(ERRCODE_WRONG_OBJECT_TYPE)
         .errmsg(format!("invalid {which} locale name: \"{locname}\""));
@@ -2220,7 +2220,7 @@ pub fn DropDatabase<'mcx>(pstate: &ParseState<'mcx>, stmt: &DropdbStmt<'mcx>) ->
     }
     let _ = pstate;
 
-    let ctx = mcx::MemoryContext::new("DropDatabase");
+    let ctx = ::mcx::MemoryContext::new("DropDatabase");
     dropdb(
         ctx.mcx(),
         stmt.dbname.as_deref().unwrap_or(""),
@@ -2239,7 +2239,7 @@ pub fn AlterDatabase<'mcx>(
     stmt: &AlterDatabaseStmt<'mcx>,
     isTopLevel: bool,
 ) -> PgResult<Oid> {
-    let ctx = mcx::MemoryContext::new("AlterDatabase");
+    let ctx = ::mcx::MemoryContext::new("AlterDatabase");
     let mcx = ctx.mcx();
     let dbname = stmt.dbname.as_deref().unwrap_or("");
 
@@ -2407,7 +2407,7 @@ pub fn AlterDatabase<'mcx>(
 pub fn AlterDatabaseRefreshColl<'mcx>(
     stmt: &AlterDatabaseRefreshCollStmt<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    let ctx = mcx::MemoryContext::new("AlterDatabaseRefreshColl");
+    let ctx = ::mcx::MemoryContext::new("AlterDatabaseRefreshColl");
     let mcx = ctx.mcx();
     let dbname = stmt.dbname.as_deref().unwrap_or("");
 
@@ -2506,7 +2506,7 @@ pub fn AlterDatabaseRefreshColl<'mcx>(
 
 /// `ALTER DATABASE name SET ...`.
 pub fn AlterDatabaseSet<'mcx>(stmt: &AlterDatabaseSetStmt<'mcx>) -> PgResult<Oid> {
-    let ctx = mcx::MemoryContext::new("AlterDatabaseSet");
+    let ctx = ::mcx::MemoryContext::new("AlterDatabaseSet");
     let mcx = ctx.mcx();
     let dbname = stmt.dbname.as_deref().unwrap_or("");
 

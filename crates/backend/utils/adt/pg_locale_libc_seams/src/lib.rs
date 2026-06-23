@@ -17,8 +17,8 @@
 //! pending that owner.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `strlower_libc(dst, dstsize, src, srclen, locale)`

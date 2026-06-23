@@ -13,17 +13,17 @@ use core::sync::atomic::AtomicU32;
 
 use crate::pgstat_internal::PgStat_HashKey;
 
-use types_core::init::BACKEND_NUM_TYPES;
-use types_core::instrument::instr_time;
-use types_core::primitive::TimestampTz;
-use types_core::xact::XlXactStatsItem;
-use replication::conflict::CONFLICT_NUM_TYPES;
-use types_storage::LWLock;
+use ::types_core::init::BACKEND_NUM_TYPES;
+use ::types_core::instrument::instr_time;
+use ::types_core::primitive::TimestampTz;
+use ::types_core::xact::XlXactStatsItem;
+use ::replication::conflict::CONFLICT_NUM_TYPES;
+use ::types_storage::LWLock;
 
 // Re-export the existing canonical `IOContext` (defined in `types-storage`,
 // where the buffer-strategy ring first needed it) so the pgstat I/O types name
 // the same enum rather than introducing a duplicate.
-pub use types_storage::buf::IOContext;
+pub use ::types_storage::buf::IOContext;
 
 /// Values for `track_functions` GUC variable (`pgstat.h`) — order is
 /// significant!
@@ -376,7 +376,7 @@ pub struct PgStat_FunctionCallUsage {
     /// re-resolves the pending `PgStat_FunctionCounts` from `(MyDatabaseId,
     /// proid)` because the owner-private pending block can't be carried as a raw
     /// pointer here. Meaningful only while `tracking`.
-    pub proid: types_core::primitive::Oid,
+    pub proid: ::types_core::primitive::Oid,
     /// total time previously charged to function, as of function start
     pub save_f_total_time: instr_time,
     /// backend-wide total time as of function start
@@ -457,7 +457,7 @@ impl PgStat_TableCounts {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PgStat_TableStatus {
     /// `id` — table's OID
-    pub id: types_core::primitive::Oid,
+    pub id: ::types_core::primitive::Oid,
     /// `shared` — is it a shared catalog?
     pub shared: bool,
     /// `trans` — owning head of the lowest-open-subxact `PgStat_TableXactStatus`

@@ -34,7 +34,7 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
 use xloginsert_seams as xloginsert;
@@ -52,19 +52,19 @@ use page::{
     PageGetMaxOffsetNumber, PageIsEmpty, PageIsNew, PageRef,
 };
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, TransactionId,
 };
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::buf::{Buffer, BUFFER_LOCK_EXCLUSIVE};
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tuple::heaptuple::{
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::buf::{Buffer, BUFFER_LOCK_EXCLUSIVE};
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tuple::heaptuple::{
     ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber,
     INVALID_OFFSET_NUMBER as InvalidOffsetNumber,
 };
-use wal::xloginsert::REGBUF_STANDARD;
-use xlog_records::spgxlog::{
+use ::wal::xloginsert::REGBUF_STANDARD;
+use ::xlog_records::spgxlog::{
     spgxlogVacuumLeaf, spgxlogVacuumRedirect, spgxlogVacuumRoot,
 };
 
@@ -94,7 +94,7 @@ fn ItemPointerIsValid(ip: &ItemPointerData) -> bool {
 const XLOG_SPGIST_VACUUM_LEAF: u8 = 0x60;
 const XLOG_SPGIST_VACUUM_ROOT: u8 = 0x70;
 const XLOG_SPGIST_VACUUM_REDIRECT: u8 = 0x80;
-const RM_SPGIST_ID: types_core::RmgrId = 16;
+const RM_SPGIST_ID: ::types_core::RmgrId = 16;
 
 // ===========================================================================
 // spgVacPendingItem (spgvacuum.c:33) + spgBulkDeleteState (spgvacuum.c:41)
@@ -514,7 +514,7 @@ pub(crate) fn swap_item_ids(page: &mut [u8], src: OffsetNumber, dest: OffsetNumb
 #[inline]
 fn item_id_byte_offset(off: OffsetNumber) -> usize {
     // SizeOfPageHeaderData (24) + (off - 1) * sizeof(ItemIdData) (4).
-    types_storage::bufpage::SizeOfPageHeaderData as usize + (off as usize - 1) * 4
+    ::types_storage::bufpage::SizeOfPageHeaderData as usize + (off as usize - 1) * 4
 }
 
 // ===========================================================================

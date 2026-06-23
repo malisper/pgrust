@@ -3,13 +3,13 @@
 //! epilogue (AFTER-ROW triggers + transition capture). The `ExecDelete` driver
 //! lives in the [`crate::delete_exec`] sub-module.
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
-use types_tableam::tableam::TM_Result;
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tableam::tableam::TM_Result;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::ModifyTableContext;
 

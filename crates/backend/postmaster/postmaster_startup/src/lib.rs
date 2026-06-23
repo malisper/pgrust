@@ -15,11 +15,11 @@
 
 use std::cell::Cell;
 
-use mcx::Mcx;
-use types_core::TimestampTz;
-use types_error::PgResult;
-use signal::SigHandler;
-use types_timeout::TimeoutId::{
+use ::mcx::Mcx;
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::signal::SigHandler;
+use ::types_timeout::TimeoutId::{
     STANDBY_DEADLOCK_TIMEOUT, STANDBY_LOCK_TIMEOUT, STANDBY_TIMEOUT, STARTUP_PROGRESS_TIMEOUT,
 };
 
@@ -233,7 +233,7 @@ pub fn StartupProcessMain(startup_data: &[u8]) -> PgResult<()> {
     assert_eq!(startup_data.len(), 0);
 
     // MyBackendType = B_STARTUP;
-    init_small_seams::set_my_backend_type::call(types_core::init::BackendType::Startup);
+    init_small_seams::set_my_backend_type::call(::types_core::init::BackendType::Startup);
     auxprocess_seams::auxiliary_process_main_common::call()?;
 
     // Arrange to clean up at startup process exit.

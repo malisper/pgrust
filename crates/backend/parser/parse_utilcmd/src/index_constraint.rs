@@ -12,8 +12,8 @@ use alloc::string::ToString;
 
 use mcx::{Mcx, PgString, PgVec};
 
-use equalfuncs::equal_node;
-use utils_error::ereport;
+use ::equalfuncs::equal_node;
+use ::utils_error::ereport;
 use types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -25,11 +25,11 @@ use ::nodes::ddlnodes::{IndexElem, IndexStmt, CONSTR_EXCLUSION, CONSTR_PRIMARY};
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsestmt::ParseState;
 use ::nodes::rawnodes::{SORTBY_DEFAULT, SORTBY_NULLS_DEFAULT};
-use types_core::primitive::{InvalidOid, OidIsValid};
-use types_core::catalog::BTREE_AM_OID;
-use types_core::Oid;
+use ::types_core::primitive::{InvalidOid, OidIsValid};
+use ::types_core::catalog::BTREE_AM_OID;
+use ::types_core::Oid;
 
-use types_storage::lock::{AccessShareLock, NoLock};
+use ::types_storage::lock::{AccessShareLock, NoLock};
 use common_relation::{relation_open, relation_openrv};
 use types_tuple::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
@@ -68,7 +68,7 @@ pub fn transformIndexConstraints(cxt: &mut CreateStmtContext<'_>) -> PgResult<()
         // We will re-store cxt.pkey below; mark this index so the loop skips it.
         finalindexlist.push(pkey);
         // Re-set cxt.pkey to point at the same node now living in finalindexlist.
-        cxt.pkey = Some(mcx::alloc_in(mcx, finalindexlist[0].clone_in(mcx)?)?);
+        cxt.pkey = Some(::mcx::alloc_in(mcx, finalindexlist[0].clone_in(mcx)?)?);
     }
 
     for index in indexlist {
@@ -245,7 +245,7 @@ fn transformIndexConstraint<'mcx>(
         if_not_exists: false,
         reset_default_tblspc,
     };
-    let index = mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, index)?)?;
+    let index = ::mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, index)?)?;
 
     // The remaining work — USING INDEX validity checks, breaking apart the
     // EXCLUDE pairs, resolving UNIQUE/PRIMARY key column names against
@@ -278,7 +278,7 @@ fn transformIndexConstraint<'mcx>(
     // skeleton — would record an empty-keyed pkey, which then wins the
     // redundancy dedup and reaches DefineIndex with no columns).
     if primary {
-        cxt.pkey = Some(mcx::alloc_in(mcx, index.clone_in(mcx)?)?);
+        cxt.pkey = Some(::mcx::alloc_in(mcx, index.clone_in(mcx)?)?);
     }
 
     Ok(index)
@@ -296,7 +296,7 @@ fn str_val<'a>(n: &'a NodePtr<'_>) -> &'a str {
 /// column-name index element makeNode(IndexElem) builds in
 /// `transformIndexConstraint`).
 fn make_index_elem<'mcx>(mcx: Mcx<'mcx>, key: &str) -> PgResult<NodePtr<'mcx>> {
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         Node::mk_index_elem(mcx, IndexElem {
             name: Some(PgString::from_str_in(key, mcx)?),
@@ -564,17 +564,17 @@ pub fn transform_index_constraint_catalog<'mcx>(
                     // If a PK, ensure the columns get not null constraints.
                     if contype == CONSTR_PRIMARY {
                         let nn = make_not_null_constraint(mcx, &attname)?;
-                        extra_nn.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
+                        extra_nn.push(::mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
                     }
 
-                    new_keys.push(mcx::alloc_in(
+                    new_keys.push(::mcx::alloc_in(
                         mcx,
                         Node::mk_string(mcx, ::nodes::value::StringNode {
                             sval: PgString::from_str_in(&attname, mcx)?,
                         })?,
                     )?);
                 } else {
-                    new_including.push(mcx::alloc_in(
+                    new_including.push(::mcx::alloc_in(
                         mcx,
                         Node::mk_string(mcx, ::nodes::value::StringNode {
                             sval: PgString::from_str_in(&attname, mcx)?,
@@ -611,8 +611,8 @@ pub fn transform_index_constraint_catalog<'mcx>(
         for pair in con.exclusions.iter() {
             let (elem, opname) = match pair.as_ref().as_list() {
                 Some(items) if items.len() == 2 => (
-                    mcx::alloc_in(mcx, items[0].clone_in(mcx)?)?,
-                    mcx::alloc_in(mcx, items[1].clone_in(mcx)?)?,
+                    ::mcx::alloc_in(mcx, items[0].clone_in(mcx)?)?,
+                    ::mcx::alloc_in(mcx, items[1].clone_in(mcx)?)?,
                 ),
                 _ => unreachable!("EXCLUDE pair is not a 2-element List"),
             };
@@ -676,7 +676,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
                             col.is_not_null = true;
                         }
                         let nn = make_not_null_constraint(mcx, key)?;
-                        extra_nn.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
+                        extra_nn.push(::mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
                     }
                 }
                 // (contype == PRIMARY && isalter) — Assert(column->is_not_null),
@@ -697,7 +697,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
                     key_typid = inh_typid;
                     if is_primary {
                         let nn = make_not_null_constraint(mcx, key)?;
-                        extra_nn.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
+                        extra_nn.push(::mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
                     }
                 }
             }
@@ -940,7 +940,7 @@ fn opt_clone_node<'mcx>(
     n: &Option<NodePtr<'_>>,
 ) -> PgResult<Option<NodePtr<'mcx>>> {
     match n.as_deref() {
-        Some(n) => Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
+        Some(n) => Ok(Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -951,7 +951,7 @@ fn clone_vec<'mcx>(
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
     let mut out: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     for n in v.iter() {
-        out.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+        out.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
     Ok(out)
 }
@@ -959,8 +959,8 @@ fn clone_vec<'mcx>(
 fn clone_relation<'mcx>(cxt: &CreateStmtContext<'mcx>) -> PgResult<NodePtr<'mcx>> {
     let mcx = cxt.mcx;
     match cxt.relation.as_deref() {
-        Some(n) => mcx::alloc_in(mcx, n.clone_in(mcx)?),
-        None => Err(types_error::PgError::error(
+        Some(n) => ::mcx::alloc_in(mcx, n.clone_in(mcx)?),
+        None => Err(::types_error::PgError::error(
             "transformIndexConstraint requires cxt.relation",
         )),
     }
@@ -969,7 +969,7 @@ fn clone_relation<'mcx>(cxt: &CreateStmtContext<'mcx>) -> PgResult<NodePtr<'mcx>
 fn clone_relation_opt<'mcx>(cxt: &CreateStmtContext<'mcx>) -> PgResult<Option<NodePtr<'mcx>>> {
     let mcx = cxt.mcx;
     match cxt.relation.as_deref() {
-        Some(n) => Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
+        Some(n) => Ok(Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }

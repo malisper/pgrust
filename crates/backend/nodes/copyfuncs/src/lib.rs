@@ -30,8 +30,8 @@
 // crate's faithful-name convention.
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::node_tree::Node;
 
 /// `copyObjectImpl(from)` — implementation of `copyObject()`; see
@@ -101,7 +101,7 @@ mod tests {
     /// primnode families; those have not converted yet in this repo, so the tree
     /// is adapted to the converted Value/Bitmapset/List subset — the deep-copy /
     /// equal / fallible-copy contract under test is identical.)
-    fn sample_tree(mcx: mcx::Mcx<'_>) -> Node<'_> {
+    fn sample_tree(mcx: ::mcx::Mcx<'_>) -> Node<'_> {
         Node::Float(Float {
             fval: PgString::from_str_in("12345", mcx).unwrap(),
         })
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn equal_distinguishes_a_scalar_but_ignores_location() {
-        use node_support::PgNodeEqual;
+        use ::node_support::PgNodeEqual;
 
         let base = LocNode { value: 7, location: 10 };
 

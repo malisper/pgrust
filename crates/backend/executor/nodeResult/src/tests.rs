@@ -220,7 +220,7 @@ fn install_mocks() {
 fn make_result_plan<'mcx>(mcx: Mcx<'mcx>, with_constqual: bool) -> PgResult<Node<'mcx>> {
     let mut plan = ResultPlan::default();
     if with_constqual {
-        let mut list = mcx::vec_with_capacity_in(mcx, 1)?;
+        let mut list = ::mcx::vec_with_capacity_in(mcx, 1)?;
         list.push(::nodes::primnodes::Expr::Const(
             ::nodes::primnodes::Const::default(),
         ));

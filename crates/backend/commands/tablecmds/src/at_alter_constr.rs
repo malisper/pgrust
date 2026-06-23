@@ -13,24 +13,24 @@
 //! recursion into partition children faithfully seam-and-panic.
 
 use mcx::{Mcx, PgVec};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_constraint::{CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_constraint::{CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use ::nodes::ddlnodes::ATAlterConstraint;
-use rel::Relation;
-use types_storage::lock::{LOCKMODE, NoLock, RowExclusiveLock};
-use types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
+use ::rel::Relation;
+use ::types_storage::lock::{LOCKMODE, NoLock, RowExclusiveLock};
+use ::types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
-use common_relation::relation_open;
-use objectaddress::consts::{ConstraintRelationId, TriggerRelationId};
+use ::common_relation::relation_open;
+use ::objectaddress::consts::{ConstraintRelationId, TriggerRelationId};
 use pg_constraint::{AlterConstrFlags, AlterConstrUpdateConstraintEntry};
 use lsyscache_seams as lsyscache_seams;
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::at_phase::AlteredTableInfo;
 
@@ -46,7 +46,7 @@ fn make_fk_constraint<'mcx>(
     use ::nodes::ddlnodes::ConstrType;
     Ok(::nodes::ddlnodes::Constraint {
         contype: ConstrType::CONSTR_FOREIGN,
-        conname: Some(mcx::PgString::from_str_in(conname, mcx)?),
+        conname: Some(::mcx::PgString::from_str_in(conname, mcx)?),
         deferrable: false,
         initdeferred: false,
         is_enforced: true,
@@ -122,7 +122,7 @@ pub fn ATExecAlterConstraint<'mcx>(
     }
 
     // Find and check the target constraint.
-    let con = pg_constraint::find_relation_constraint_by_name(mcx, rel.rd_id, conname)?;
+    let con = ::pg_constraint::find_relation_constraint_by_name(mcx, rel.rd_id, conname)?;
     let con = match con {
         Some(c) => c,
         None => {
@@ -245,7 +245,7 @@ fn ATExecAlterConstraintInternal<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     cmdcon: &ATAlterConstraint<'mcx>,
     rel: &Relation<'mcx>,
-    con: &types_catalog::pg_constraint::ConstraintFormCopy,
+    con: &::types_catalog::pg_constraint::ConstraintFormCopy,
     recurse: bool,
     lockmode: LOCKMODE,
 ) -> PgResult<bool> {
@@ -298,7 +298,7 @@ fn ATExecAlterConstrDeferrability<'mcx>(
     mcx: Mcx<'mcx>,
     cmdcon: &ATAlterConstraint<'mcx>,
     rel: &Relation<'mcx>,
-    con: &types_catalog::pg_constraint::ConstraintFormCopy,
+    con: &::types_catalog::pg_constraint::ConstraintFormCopy,
     recurse: bool,
     otherrelids: &mut Vec<Oid>,
     _lockmode: LOCKMODE,
@@ -372,16 +372,16 @@ fn AlterConstrDeferrabilityRecurse<'mcx>(
     let mut key = ScanKeyData::empty();
     ScanKeyInit(
         &mut key,
-        types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
+        ::types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         types_tuple::heaptuple::Datum::from_oid(conoid),
     )?;
     let keys = [key];
 
     let mut scan = genam_seams::systable_beginscan::call(
         &conrel,
-        types_catalog::pg_constraint::ConstraintParentIndexId,
+        ::types_catalog::pg_constraint::ConstraintParentIndexId,
         true,
         None,
         &keys,
@@ -396,7 +396,7 @@ fn AlterConstrDeferrabilityRecurse<'mcx>(
     {
         let cols = heap_deform_tuple(mcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
         let child_oid =
-            cols[types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1].0.as_oid();
+            cols[::types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1].0.as_oid();
         child_oids.push(child_oid);
     }
     drop(scan);
@@ -406,7 +406,7 @@ fn AlterConstrDeferrabilityRecurse<'mcx>(
         let childcon =
             syscache_seams::search_constraint_form_by_oid::call(child_oid)?
                 .ok_or_else(|| {
-                    utils_error::ereport(ERROR)
+                    ::utils_error::ereport(ERROR)
                         .errmsg_internal(format!(
                             "could not find tuple for constraint {child_oid}"
                         ))
@@ -439,7 +439,7 @@ fn ATExecAlterConstrEnforceability<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     cmdcon: &ATAlterConstraint<'mcx>,
     rel: &Relation<'mcx>,
-    con: &types_catalog::pg_constraint::ConstraintFormCopy,
+    con: &::types_catalog::pg_constraint::ConstraintFormCopy,
     fkrelid: Oid,
     pkrelid: Oid,
     lockmode: LOCKMODE,
@@ -587,7 +587,7 @@ fn ATExecAlterConstrEnforceability<'mcx>(
             // rows. Only for plain tables whose FK row points at the root PK.
             if crel_relkind == RELKIND_RELATION && currcon.confrelid == pkrelid {
                 let newcon = crate::at_phase::NewConstraint {
-                    name: Some(mcx::PgString::from_str_in(
+                    name: Some(::mcx::PgString::from_str_in(
                         name_str(&currcon.conname),
                         mcx,
                     )?),
@@ -661,16 +661,16 @@ fn AlterConstrEnforceabilityRecurse<'mcx>(
     let mut key = ScanKeyData::empty();
     ScanKeyInit(
         &mut key,
-        types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
+        ::types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         types_tuple::heaptuple::Datum::from_oid(conoid),
     )?;
     let keys = [key];
 
     let mut scan = genam_seams::systable_beginscan::call(
         &conrel,
-        types_catalog::pg_constraint::ConstraintParentIndexId,
+        ::types_catalog::pg_constraint::ConstraintParentIndexId,
         true,
         None,
         &keys,
@@ -685,7 +685,7 @@ fn AlterConstrEnforceabilityRecurse<'mcx>(
     {
         let cols = heap_deform_tuple(mcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
         let child_oid =
-            cols[types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1].0.as_oid();
+            cols[::types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1].0.as_oid();
         child_oids.push(child_oid);
     }
     drop(scan);
@@ -695,7 +695,7 @@ fn AlterConstrEnforceabilityRecurse<'mcx>(
         let childcon =
             syscache_seams::search_constraint_form_by_oid::call(child_oid)?
                 .ok_or_else(|| {
-                    utils_error::ereport(ERROR)
+                    ::utils_error::ereport(ERROR)
                         .errmsg_internal(format!(
                             "could not find tuple for constraint {child_oid}"
                         ))
@@ -734,7 +734,7 @@ fn ATExecAlterConstrInheritability<'mcx>(
     wqueue: &mut PgVec<'mcx, AlteredTableInfo<'mcx>>,
     cmdcon: &ATAlterConstraint<'mcx>,
     rel: &Relation<'mcx>,
-    con: &types_catalog::pg_constraint::ConstraintFormCopy,
+    con: &::types_catalog::pg_constraint::ConstraintFormCopy,
     lockmode: LOCKMODE,
 ) -> PgResult<bool> {
     let currcon = con.form;
@@ -770,8 +770,8 @@ fn ATExecAlterConstrInheritability<'mcx>(
             .ok_or_else(|| {
                 PgError::error(format!("cache lookup failed for constraint {}", currcon.oid))
             })?;
-    let col_num: types_core::AttrNumber =
-        pg_constraint::extractNotNullColumn(&con_tup)?;
+    let col_num: ::types_core::AttrNumber =
+        ::pg_constraint::extractNotNullColumn(&con_tup)?;
     let col_name = lsyscache_seams::get_attname::call(mcx, currcon.conrelid, col_num, false)?
         .map(|s| s.to_string())
         .unwrap_or_default();
@@ -781,7 +781,7 @@ fn ATExecAlterConstrInheritability<'mcx>(
     let children = pg_inherits::find_inheritance_children(mcx, rel.rd_id, lockmode)?;
     for childoid in children {
         if cmdcon.noinherit {
-            let childtup = pg_constraint::findNotNullConstraint(
+            let childtup = ::pg_constraint::findNotNullConstraint(
                 mcx, childoid, &col_name,
             )?;
             let childtup = match childtup {
@@ -801,9 +801,9 @@ fn ATExecAlterConstrInheritability<'mcx>(
             let constr_rel = relation_open(
                 mcx,
                 ConstraintRelationId,
-                types_storage::lock::RowExclusiveLock,
+                ::types_storage::lock::RowExclusiveLock,
             )?;
-            let fields = types_catalog::pg_constraint::ConstraintFieldUpdate {
+            let fields = ::types_catalog::pg_constraint::ConstraintFieldUpdate {
                 conname: childcon.conname,
                 connamespace: childcon.connamespace,
                 conislocal: childcon.conislocal,
@@ -821,7 +821,7 @@ fn ATExecAlterConstrInheritability<'mcx>(
                 childtup.tuple.t_self,
                 &fields,
             )?;
-            constr_rel.close(types_storage::lock::RowExclusiveLock)?;
+            constr_rel.close(::types_storage::lock::RowExclusiveLock)?;
         } else {
             let childrel = relation_open(mcx, childoid, NoLock)?;
             let addr = crate::at_constraint::ATExecSetNotNull(

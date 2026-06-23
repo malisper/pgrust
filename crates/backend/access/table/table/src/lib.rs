@@ -8,7 +8,7 @@
 //! index, or a composite type. The caller should also check that the
 //! relation is not a view or foreign table before assuming it has storage.
 //!
-//! The C `Relation` crosses as a [`rel::Relation`] handle (the trimmed
+//! The C `Relation` crosses as a [`::rel::Relation`] handle (the trimmed
 //! relcache-entry copy, allocated in the caller-supplied `mcx`, armed by the
 //! relation.c owner with its close function). `table_close` consumes the
 //! handle; the C NULL `Relation` of the `try_`/`missing_ok` flavors is
@@ -16,12 +16,12 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
-use rel::Relation;
-use types_storage::lock::{LOCKMODE, NoLock};
-use types_tuple::access::{
+use ::rel::Relation;
+use ::types_storage::lock::{LOCKMODE, NoLock};
+use ::types_tuple::access::{
     RangeVar, RELKIND_COMPOSITE_TYPE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX,
 };
 

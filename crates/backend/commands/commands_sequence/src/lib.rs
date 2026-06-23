@@ -29,32 +29,32 @@
 
 pub mod fmgr_builtins;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, PgResult, ERROR, NOTICE, PANIC};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, ForkNumber, LocalTransactionId, Oid, BLCKSZ};
-use types_core::RmgrId;
-use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
-use types_storage::Buffer;
-use types_tuple::access::{
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, ForkNumber, LocalTransactionId, Oid, BLCKSZ};
+use ::types_core::RmgrId;
+use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
+use ::types_storage::Buffer;
+use ::types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
     RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     HeapTupleField3, HeapTupleHeaderChoice, HeapTupleHeaderData, ItemPointerData, BOOLOID,
     FIRST_OFFSET_NUMBER, HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID, HEAP_XMAX_IS_MULTI,
     HEAP_XMIN_FROZEN, INT2OID, INT4OID, INT8OID, INVALID_OFFSET_NUMBER, OIDOID, ON_PAGE_HEADER_SIZE,
 };
 
 use types_acl::{ACL_SELECT, ACL_UPDATE, ACL_USAGE, ACLCHECK_OK};
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL,
 };
-use types_catalog::pg_sequence::FormData_pg_sequence;
+use ::types_catalog::pg_sequence::FormData_pg_sequence;
 use types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -66,10 +66,10 @@ use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsestmt::ParseState;
 use ::nodes::rawnodes::RangeVar;
-use rel::Relation;
+use ::rel::Relation;
 
-use fmgr_seams::pg_call_mcx;
-use types_tuple::Datum as ValueDatum;
+use ::fmgr_seams::pg_call_mcx;
+use ::types_tuple::Datum as ValueDatum;
 
 mod xact {
     pub use transam_xact_seams::*;
@@ -162,7 +162,7 @@ struct FormData_pg_sequence_data {
 
 /// `xl_seq_rec` (sequence.h): the WAL record fixed part (the locator).
 struct XlSeqRec {
-    locator: types_storage::RelFileLocator,
+    locator: ::types_storage::RelFileLocator,
 }
 
 // Helpers around the SeqTable thread_local.
@@ -238,7 +238,7 @@ fn bool_val(node: &Node<'_>) -> bool {
 /// `OidIsValid(oid)`.
 #[inline]
 fn OidIsValid(oid: Oid) -> bool {
-    oid != types_core::InvalidOid
+    oid != ::types_core::InvalidOid
 }
 
 /// `ObjectAddressSet(addr, class, object)` — sets `objectSubId = 0`.
@@ -297,7 +297,7 @@ pub fn DefineSequence<'mcx>(
                     rangevar_relname(sequence_rangevar(&seq.sequence))
                 ))
                 .finish(here("DefineSequence"))?;
-            return Ok(types_catalog::catalog_dependency::InvalidObjectAddress);
+            return Ok(::types_catalog::catalog_dependency::InvalidObjectAddress);
         }
     }
 
@@ -320,7 +320,7 @@ pub fn DefineSequence<'mcx>(
      */
     let address = tablecmds_seams::define_sequence_relation::call(mcx, seq)?;
     let seqoid = address.objectId;
-    debug_assert!(seqoid != types_core::InvalidOid);
+    debug_assert!(seqoid != ::types_core::InvalidOid);
 
     let rel = sequence_seams::sequence_open::call(mcx, seqoid, AccessExclusiveLock)?;
 
@@ -444,9 +444,9 @@ fn fill_seq_with_data<'mcx>(
 
         // smgrclose(srel);
         smgr_seams::relation_close_smgr::call(
-            types_storage::RelFileLocatorBackend {
+            ::types_storage::RelFileLocatorBackend {
                 locator,
-                backend: types_core::primitive::INVALID_PROC_NUMBER,
+                backend: ::types_core::primitive::INVALID_PROC_NUMBER,
             },
         );
     }
@@ -573,10 +573,10 @@ fn build_seq_item<'mcx>(
     // HeapTupleHeaderSetXmax(InvalidTransactionId);
     // t_data->t_infomask |= HEAP_XMAX_INVALID;
     // ItemPointerSet(&t_data->t_ctid, 0, FirstOffsetNumber);
-    set_header_field3_cmin(&mut hdr, types_core::xact::FirstCommandId);
-    set_header_xmin(&mut hdr, types_core::xact::FrozenTransactionId);
+    set_header_field3_cmin(&mut hdr, ::types_core::xact::FirstCommandId);
+    set_header_xmin(&mut hdr, ::types_core::xact::FrozenTransactionId);
     hdr.t_infomask |= HEAP_XMIN_FROZEN;
-    set_header_xmax(&mut hdr, types_core::xact::InvalidTransactionId);
+    set_header_xmax(&mut hdr, ::types_core::xact::InvalidTransactionId);
     hdr.t_infomask |= HEAP_XMAX_INVALID;
     hdr.t_ctid = ItemPointerData::new(0, FIRST_OFFSET_NUMBER);
 
@@ -588,17 +588,17 @@ fn build_seq_item<'mcx>(
     Ok(item)
 }
 
-fn set_header_xmin(hdr: &mut HeapTupleHeaderData, xid: types_core::TransactionId) {
+fn set_header_xmin(hdr: &mut HeapTupleHeaderData, xid: ::types_core::TransactionId) {
     if let HeapTupleHeaderChoice::THeap(f) = &mut hdr.t_choice {
         f.t_xmin = xid;
     }
 }
-fn set_header_xmax(hdr: &mut HeapTupleHeaderData, xid: types_core::TransactionId) {
+fn set_header_xmax(hdr: &mut HeapTupleHeaderData, xid: ::types_core::TransactionId) {
     if let HeapTupleHeaderChoice::THeap(f) = &mut hdr.t_choice {
         f.t_xmax = xid;
     }
 }
-fn set_header_field3_cmin(hdr: &mut HeapTupleHeaderData, cid: types_core::CommandId) {
+fn set_header_field3_cmin(hdr: &mut HeapTupleHeaderData, cid: ::types_core::CommandId) {
     // HeapTupleHeaderSetCmin: t_field3.t_cid = cid; also clears HEAP_XMAX_IS_MULTI
     // (Assert(!(t_infomask & HEAP_MOVED))). For a fresh formed tuple t_infomask
     // has neither bit; mirror the field write.
@@ -619,7 +619,7 @@ fn special_pointer_offset(page: &[u8]) -> PgResult<usize> {
 
 /// Serialize a `RelFileLocator`'s three Oids to native-endian bytes (C struct
 /// order: spcOid, dbOid, relNumber).
-fn serialize_locator(loc: &types_storage::RelFileLocator) -> Vec<u8> {
+fn serialize_locator(loc: &::types_storage::RelFileLocator) -> Vec<u8> {
     let mut b = Vec::with_capacity(SIZEOF_XL_SEQ_REC);
     b.extend_from_slice(&loc.spcOid.to_ne_bytes());
     b.extend_from_slice(&loc.dbOid.to_ne_bytes());
@@ -642,14 +642,14 @@ pub fn AlterSequence<'mcx>(
         sequence_rangevar(&stmt.sequence),
         stmt.missing_ok,
     )?;
-    if relid == types_core::InvalidOid {
+    if relid == ::types_core::InvalidOid {
         ereport(NOTICE)
             .errmsg(format!(
                 "relation \"{}\" does not exist, skipping",
                 rangevar_relname(sequence_rangevar(&stmt.sequence))
             ))
             .finish(here("AlterSequence"))?;
-        return Ok(types_catalog::catalog_dependency::InvalidObjectAddress);
+        return Ok(::types_catalog::catalog_dependency::InvalidObjectAddress);
     }
 
     let seqrel = init_sequence(mcx, relid)?;
@@ -661,7 +661,7 @@ pub fn AlterSequence<'mcx>(
         Some(t) => t,
         None => {
             return elog_cache_lookup_failed(relid, "AlterSequence")
-                .map(|()| types_catalog::catalog_dependency::InvalidObjectAddress);
+                .map(|()| ::types_catalog::catalog_dependency::InvalidObjectAddress);
         }
     };
 
@@ -723,7 +723,7 @@ pub fn AlterSequence<'mcx>(
     let found = indexing_seams::catalog_update_pg_sequence::call(&seqform)?;
     if !found {
         return elog_cache_lookup_failed(relid, "AlterSequence")
-            .map(|()| types_catalog::catalog_dependency::InvalidObjectAddress);
+            .map(|()| ::types_catalog::catalog_dependency::InvalidObjectAddress);
     }
     // InvokeObjectPostAlterHook folded into catalog_update_pg_sequence.
 
@@ -804,7 +804,7 @@ pub fn DeleteSequenceTuple(relid: Oid) -> PgResult<()> {
 /// `nextval(PG_FUNCTION_ARGS)` — SQL `nextval(text)`.
 pub fn nextval<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
-    let seqin = fmgr_seams::pg_getarg_text_pp::call(fcinfo, 0)?;
+    let seqin = ::fmgr_seams::pg_getarg_text_pp::call(fcinfo, 0)?;
     let name = text_to_str(&seqin);
 
     /*
@@ -822,7 +822,7 @@ pub fn nextval<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<Va
 /// `nextval_oid(PG_FUNCTION_ARGS)` — SQL `nextval(regclass)`.
 pub fn nextval_oid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
-    let relid = fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    let relid = ::fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
     let v = nextval_internal(mcx, relid, true)?;
     Ok(ValueDatum::from_i64(v))
 }
@@ -1077,7 +1077,7 @@ fn write_seq_data_into_buffer<'mcx>(
 /// `currval_oid(PG_FUNCTION_ARGS)` — SQL `currval(regclass)`.
 pub fn currval_oid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
-    let relid = fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    let relid = ::fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
     Ok(ValueDatum::from_i64(currval_internal(mcx, relid)?))
 }
 
@@ -1284,8 +1284,8 @@ fn do_setval<'mcx>(mcx: Mcx<'mcx>, relid: Oid, next: i64, iscalled: bool) -> PgR
 /// `setval_oid(PG_FUNCTION_ARGS)` — SQL `setval(regclass, bigint)`.
 pub fn setval_oid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
-    let relid = fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
-    let next = fmgr_seams::pg_getarg_int64::call(fcinfo, 1);
+    let relid = ::fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    let next = ::fmgr_seams::pg_getarg_int64::call(fcinfo, 1);
 
     do_setval(mcx, relid, next, true)?;
 
@@ -1295,9 +1295,9 @@ pub fn setval_oid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult
 /// `setval3_oid(PG_FUNCTION_ARGS)` — SQL `setval(regclass, bigint, boolean)`.
 pub fn setval3_oid<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
-    let relid = fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
-    let next = fmgr_seams::pg_getarg_int64::call(fcinfo, 1);
-    let iscalled = fmgr_seams::pg_getarg_bool::call(fcinfo, 2);
+    let relid = ::fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    let next = ::fmgr_seams::pg_getarg_int64::call(fcinfo, 1);
+    let iscalled = ::fmgr_seams::pg_getarg_bool::call(fcinfo, 2);
 
     do_setval(mcx, relid, next, iscalled)?;
 
@@ -1346,7 +1346,7 @@ fn init_sequence<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<Relation<'mcx>> {
         let map = b.as_mut().unwrap();
         map.entry(relid).or_insert_with(|| SeqTableData {
             relid,
-            filenumber: types_core::InvalidOid, // InvalidRelFileNumber
+            filenumber: ::types_core::InvalidOid, // InvalidRelFileNumber
             lxid: 0,                            // InvalidLocalTransactionId
             last_valid: false,
             last: 0,
@@ -1424,10 +1424,10 @@ fn read_seq_tuple<'mcx>(
         debug_assert!((infomask & HEAP_XMAX_IS_MULTI) == 0);
 
         // SELECT FOR UPDATE leftover cleanup: clear a non-frozen xmax in place.
-        if raw_xmax != types_core::xact::InvalidTransactionId {
+        if raw_xmax != ::types_core::xact::InvalidTransactionId {
             let mut hdr =
                 HeapTupleHeaderData::read_on_page(mcx, &page[item_off..item_off + item_len])?;
-            set_header_xmax(&mut hdr, types_core::xact::InvalidTransactionId);
+            set_header_xmax(&mut hdr, ::types_core::xact::InvalidTransactionId);
             hdr.t_infomask &= !HEAP_XMAX_COMMITTED;
             hdr.t_infomask |= HEAP_XMAX_INVALID;
             hdr.write_on_page(&mut page[item_off..item_off + ON_PAGE_HEADER_SIZE])?;
@@ -1933,7 +1933,7 @@ fn process_owned_by<'mcx>(
                 .finish(here("process_owned_by"));
         }
         tablerel = None;
-        tablerel_oid = types_core::InvalidOid;
+        tablerel_oid = ::types_core::InvalidOid;
         attnum = 0;
     } else {
         /* Separate relname and attr name */
@@ -2066,7 +2066,7 @@ fn process_owned_by<'mcx>(
 pub fn sequence_options<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
-) -> PgResult<mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
     let pgsform = match syscache_seams::search_seqrelid::call(relid)? {
         Some(p) => p,
         None => {
@@ -2075,7 +2075,7 @@ pub fn sequence_options<'mcx>(
         }
     };
 
-    let mut options = mcx::vec_with_capacity_in(mcx, 6)?;
+    let mut options = ::mcx::vec_with_capacity_in(mcx, 6)?;
 
     // Use makeFloat() for 64-bit integers, like gram.y does.
     push_def_float(mcx, &mut options, "cache", pgsform.seqcache)?;
@@ -2090,29 +2090,29 @@ pub fn sequence_options<'mcx>(
 
 fn push_def_float<'mcx>(
     mcx: Mcx<'mcx>,
-    options: &mut mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
+    options: &mut ::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
     name: &str,
     val: i64,
 ) -> PgResult<()> {
     // makeDefElem(name, (Node *) makeFloat(psprintf(INT64_FORMAT, val)), -1)
     let float = Node::mk_float(mcx, ::nodes::value::Float {
-        fval: mcx::PgString::from_str_in(&val.to_string(), mcx)?,
+        fval: ::mcx::PgString::from_str_in(&val.to_string(), mcx)?,
     })?;
     let de = DefElem {
         defnamespace: None,
-        defname: Some(mcx::PgString::from_str_in(name, mcx)?),
-        arg: Some(mcx::alloc_in(mcx, float)?),
+        defname: Some(::mcx::PgString::from_str_in(name, mcx)?),
+        arg: Some(::mcx::alloc_in(mcx, float)?),
         defaction: ::nodes::ddlnodes::DefElemAction::DEFELEM_UNSPEC,
         location: -1,
     };
-    let node = mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de)?)?;
+    let node = ::mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de)?)?;
     options.push(node);
     Ok(())
 }
 
 fn push_def_bool<'mcx>(
     mcx: Mcx<'mcx>,
-    options: &mut mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
+    options: &mut ::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
     name: &str,
     val: bool,
 ) -> PgResult<()> {
@@ -2120,12 +2120,12 @@ fn push_def_bool<'mcx>(
     let b = Node::mk_boolean(mcx, ::nodes::value::Boolean { boolval: val })?;
     let de = DefElem {
         defnamespace: None,
-        defname: Some(mcx::PgString::from_str_in(name, mcx)?),
-        arg: Some(mcx::alloc_in(mcx, b)?),
+        defname: Some(::mcx::PgString::from_str_in(name, mcx)?),
+        arg: Some(::mcx::alloc_in(mcx, b)?),
         defaction: ::nodes::ddlnodes::DefElemAction::DEFELEM_UNSPEC,
         location: -1,
     };
-    let node = mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de)?)?;
+    let node = ::mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de)?)?;
     options.push(node);
     Ok(())
 }
@@ -2139,7 +2139,7 @@ pub fn pg_sequence_parameters<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
-    let relid = fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    let relid = ::fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
     pg_sequence_parameters_core(mcx, relid)
 }
 
@@ -2200,7 +2200,7 @@ pub fn pg_get_sequence_data<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
-    let relid = fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    let relid = ::fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
     pg_get_sequence_data_core(mcx, relid)
 }
 
@@ -2220,7 +2220,7 @@ pub fn pg_get_sequence_data_core<'mcx>(
         common_relation_seams::try_relation_open::call(mcx, relid, AccessShareLock)?;
 
     if let Some(ref seqrel) = seqrel {
-        if rel_relkind(seqrel) == types_tuple::access::RELKIND_SEQUENCE
+        if rel_relkind(seqrel) == ::types_tuple::access::RELKIND_SEQUENCE
             && aclchk_seams::pg_class_aclcheck::call(
                 relid,
                 miscinit_seams::get_user_id::call(),
@@ -2260,7 +2260,7 @@ pub fn pg_sequence_last_value<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<ValueDatum<'mcx>> {
     let mcx = pg_call_mcx::call(fcinfo);
-    let relid = fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
+    let relid = ::fmgr_seams::pg_getarg_oid::call(fcinfo, 0);
     match pg_sequence_last_value_core(mcx, relid)? {
         Some(v) => Ok(ValueDatum::from_i64(v)),
         None => {
@@ -2423,7 +2423,7 @@ fn rel_relnamespace(rel: &Relation<'_>) -> Oid {
 fn rel_relfilenode(rel: &Relation<'_>) -> Oid {
     rel.rd_rel.relfilenode
 }
-fn rel_locator(rel: &Relation<'_>) -> types_storage::RelFileLocator {
+fn rel_locator(rel: &Relation<'_>) -> ::types_storage::RelFileLocator {
     rel.rd_locator
 }
 fn rel_name(rel: &Relation<'_>) -> String {

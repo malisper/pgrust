@@ -13,15 +13,15 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::nodes::rawnodes::RangeVar;
-use rel::Relation;
+use ::rel::Relation;
 use statistics::{AnalyzeAttrFetchFunc, VacAttrStats};
-use types_storage::buf::BufferAccessStrategy;
-use types_vacuum::vacuum::VacuumParams;
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_vacuum::vacuum::VacuumParams;
 
 seam_core::seam!(
     /// `analyze_rel(relid, relation, params, va_cols, in_outer_xact, bstrategy)`

@@ -12,10 +12,10 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 extern crate alloc;
 use alloc::vec::Vec;

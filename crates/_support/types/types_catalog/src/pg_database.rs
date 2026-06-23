@@ -9,9 +9,9 @@
 //! releasing the buffer) and re-forms it for the catalog mutators, so a
 //! consuming crate never touches the on-disk datum layout.
 
-use mcx::PgString;
-use types_core::primitive::Oid;
-use types_core::TransactionId;
+use ::mcx::PgString;
+use ::types_core::primitive::Oid;
+use ::types_core::TransactionId;
 
 /// `COLLPROVIDER_LIBC` (`pg_collation_d.h`) — the `char` value `'c'`.
 pub const COLLPROVIDER_LIBC: i8 = b'c' as i8;
@@ -126,7 +126,7 @@ pub struct FormPgDatabase<'mcx> {
     pub datcollversion: Option<PgString<'mcx>>,
     /// `datacl` — access permissions: the raw detoasted `aclitem[]` varlena
     /// bytes, or `None` for a SQL NULL (the default for a freshly created DB).
-    pub datacl: Option<mcx::PgVec<'mcx, u8>>,
+    pub datacl: Option<::mcx::PgVec<'mcx, u8>>,
 }
 
 /// `NewDbRecord` — the column values for a freshly created `pg_database` row

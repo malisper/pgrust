@@ -26,11 +26,11 @@ extern crate std;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::MemoryContext;
-use types_core::primitive::Oid;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::mcx::MemoryContext;
+use ::types_core::primitive::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ fn arg_text_str<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .and_then(|p| p.as_varlena())
         .expect("ruleutils fn: by-ref `text` arg missing from by-ref lane");
     // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
-    let bytes = &image[datum::varlena::VARHDRSZ..];
+    let bytes = &image[::datum::varlena::VARHDRSZ..];
     core::str::from_utf8(bytes).expect("ruleutils fn: `text` arg not valid UTF-8")
 }
 
@@ -75,9 +75,9 @@ fn arg_int32(fcinfo: &FunctionCallInfoBaseData, i: usize) -> i32 {
 #[inline]
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> PgResult<Datum> {
     // string_to_text: prepend the 4-byte varlena header (header-ful image).
-    let mut img = Vec::with_capacity(datum::varlena::VARHDRSZ + bytes.len());
-    img.extend_from_slice(&datum::varlena::set_varsize_4b(
-        datum::varlena::VARHDRSZ + bytes.len(),
+    let mut img = Vec::with_capacity(::datum::varlena::VARHDRSZ + bytes.len());
+    img.extend_from_slice(&::datum::varlena::set_varsize_4b(
+        ::datum::varlena::VARHDRSZ + bytes.len(),
     ));
     img.extend_from_slice(&bytes);
     fcinfo.set_ref_result(RefPayload::Varlena(img));
@@ -97,7 +97,7 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 /// fixed-length-by-ref type, not a varlena — no header.
 #[inline]
 fn ret_name(fcinfo: &mut FunctionCallInfoBaseData, name: &[u8]) -> PgResult<Datum> {
-    const NAMEDATALEN: usize = types_core::fmgr::NAMEDATALEN as usize;
+    const NAMEDATALEN: usize = ::types_core::fmgr::NAMEDATALEN as usize;
     let mut buf = alloc::vec![0u8; NAMEDATALEN];
     // namestrcpy truncates at NAMEDATALEN-1 and always NUL-terminates.
     let n = name.len().min(NAMEDATALEN - 1);
@@ -600,7 +600,7 @@ fn builtin(
 /// double-quoted (parsed as a qualified name); the second *is* (used verbatim as
 /// the column name).
 fn fc_pg_get_serial_sequence(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    use types_core::primitive::AttrNumber;
+    use ::types_core::primitive::AttrNumber;
     const INVALID_ATTR_NUMBER: AttrNumber = 0;
 
     let m = scratch_mcx();
@@ -625,10 +625,10 @@ fn fc_pg_get_serial_sequence(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<
         let relname = lsyscache_seams::get_rel_name::call(mcx, table_oid)?
             .map(|s| String::from(s.as_str()))
             .unwrap_or_else(|| String::from(tablename));
-        return Err(types_error::PgError::error(alloc::format!(
+        return Err(::types_error::PgError::error(alloc::format!(
             "column \"{column}\" of relation \"{relname}\" does not exist"
         ))
-        .with_sqlstate(types_error::ERRCODE_UNDEFINED_COLUMN));
+        .with_sqlstate(::types_error::ERRCODE_UNDEFINED_COLUMN));
     }
 
     // Search pg_depend for the dependent (auto/internal) sequence on this column.
@@ -697,8 +697,8 @@ pub fn register_ruleutils_builtins() {
 mod tests {
     use super::*;
     use alloc::vec;
-    use mcx::PgBox;
-    use datum::NullableDatum;
+    use ::mcx::PgBox;
+    use ::datum::NullableDatum;
     use ::nodes::nodes::Node;
     use ::nodes::primnodes::{Expr, SQLValueFunction, SQLValueFunctionOp};
 
@@ -718,22 +718,22 @@ mod tests {
     }
 
     fn test_string_to_node<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         _s: &str,
-    ) -> types_error::PgResult<PgBox<'mcx, Node<'mcx>>> {
+    ) -> ::types_error::PgResult<PgBox<'mcx, Node<'mcx>>> {
         let svf = SQLValueFunction {
             op: SQLValueFunctionOp::SVFOP_CURRENT_USER,
             r#type: 0,
             typmod: -1,
             location: -1,
         };
-        mcx::alloc_in(mcx, Node::mk_expr(mcx, Expr::SQLValueFunction(svf)))
+        ::mcx::alloc_in(mcx, Node::mk_expr(mcx, Expr::SQLValueFunction(svf)))
     }
 
     fn test_pull_varnos<'mcx>(
-        _mcx: mcx::Mcx<'mcx>,
+        _mcx: ::mcx::Mcx<'mcx>,
         _node: &Expr,
-    ) -> types_error::PgResult<Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>> {
+    ) -> ::types_error::PgResult<Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>> {
         Ok(None)
     }
 
@@ -756,8 +756,8 @@ mod tests {
         // Header-ful everywhere: frame the encoded node text with a 4-byte
         // varlena header (the boundary's `arg_text_str` strips VARDATA_ANY).
         let payload = b"{SQLVALUEFUNCTION}";
-        let mut img = datum::varlena::set_varsize_4b(
-            datum::varlena::VARHDRSZ + payload.len(),
+        let mut img = ::datum::varlena::set_varsize_4b(
+            ::datum::varlena::VARHDRSZ + payload.len(),
         )
         .to_vec();
         img.extend_from_slice(payload);
@@ -775,7 +775,7 @@ mod tests {
         match out {
             RefPayload::Varlena(b) => {
                 // Header-ful result: skip the 4-byte varlena header.
-                let payload = &b[datum::varlena::VARHDRSZ..];
+                let payload = &b[::datum::varlena::VARHDRSZ..];
                 assert_eq!(core::str::from_utf8(payload).unwrap(), "CURRENT_USER");
             }
             other => panic!("pg_get_expr: unexpected result lane {other:?}"),

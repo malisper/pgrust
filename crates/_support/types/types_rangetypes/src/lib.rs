@@ -17,8 +17,8 @@
 
 use core::mem::size_of;
 
-use types_core::primitive::Oid;
-use datum::datum::Datum;
+use ::types_core::primitive::Oid;
+use ::datum::datum::Datum;
 
 /// Fixed header of the toastable varlena `RangeType` (rangetypes.h:25). The
 /// bound value(s) and the trailing flags byte follow in the ADT's private

@@ -25,7 +25,7 @@ use core::cmp::Ordering;
 
 use mcx::{Mcx, PgVec};
 use types_error::{PgResult, ERRCODE_DIVISION_BY_ZERO};
-use types_numeric::var::{NumericSign, NumericVar};
+use ::types_numeric::var::{NumericSign, NumericVar};
 use types_numeric::{
     NumericDigit, DEC_DIGITS, DIV_GUARD_DIGITS, HALF_NBASE, MUL_GUARD_DIGITS, NBASE, NBASE_SQR,
     NUMERIC_MAX_DISPLAY_SCALE, NUMERIC_MIN_DISPLAY_SCALE, NUMERIC_MIN_SIG_DIGITS,
@@ -49,7 +49,7 @@ const ROUND_POWERS: [i32; 4] = [0, 1000, 100, 10];
 /// zeroed spare (headroom = 1), all digits zeroed. Mirrors `alloc_var`'s
 /// `digitbuf_alloc(ndigits + 1); buf[0] = 0; digits = buf + 1`.
 fn alloc_result<'mcx>(mcx: Mcx<'mcx>, ndigits: usize) -> PgResult<NumericVar<'mcx>> {
-    let mut digits = mcx::vec_with_capacity_in::<NumericDigit>(mcx, ndigits + 1)?;
+    let mut digits = ::mcx::vec_with_capacity_in::<NumericDigit>(mcx, ndigits + 1)?;
     digits.resize(ndigits + 1, 0);
     Ok(NumericVar {
         sign: NumericSign::Pos,
@@ -793,9 +793,9 @@ pub fn mul_var<'mcx>(
      */
     let res_ndigitpairs_u = res_ndigitpairs as usize;
     let var2ndigitpairs_u = var2ndigitpairs as usize;
-    let mut dig: PgVec<u64> = mcx::vec_with_capacity_in(mcx, res_ndigitpairs_u)?;
+    let mut dig: PgVec<u64> = ::mcx::vec_with_capacity_in(mcx, res_ndigitpairs_u)?;
     dig.resize(res_ndigitpairs_u, 0);
-    let mut var2digitpairs: PgVec<u32> = mcx::vec_with_capacity_in(mcx, var2ndigitpairs_u)?;
+    let mut var2digitpairs: PgVec<u32> = ::mcx::vec_with_capacity_in(mcx, var2ndigitpairs_u)?;
     var2digitpairs.resize(var2ndigitpairs_u, 0);
 
     /* convert var2 to base NBASE^2, shifting up if its length is odd */
@@ -1254,10 +1254,10 @@ pub fn div_var<'mcx>(
      * digit so the main loop can read/write [qi+1] in the approximate case).
      */
     let div_len = (div_ndigitpairs + 1) as usize;
-    let mut dividend: PgVec<i64> = mcx::vec_with_capacity_in(mcx, div_len)?;
+    let mut dividend: PgVec<i64> = ::mcx::vec_with_capacity_in(mcx, div_len)?;
     dividend.resize(div_len, 0);
     let var2pairs_u = var2ndigitpairs as usize;
-    let mut divisor: PgVec<i32> = mcx::vec_with_capacity_in(mcx, var2pairs_u)?;
+    let mut divisor: PgVec<i32> = ::mcx::vec_with_capacity_in(mcx, var2pairs_u)?;
     divisor.resize(var2pairs_u, 0);
 
     /* load var1 into dividend[0 .. var1ndigitpairs-1], zeroing the rest */
@@ -1854,6 +1854,6 @@ pub fn floor_var<'mcx>(mcx: Mcx<'mcx>, var: &NumericVar<'_>) -> PgResult<Numeric
 
 /// `ereport(ERROR, errcode(ERRCODE_DIVISION_BY_ZERO), errmsg("division by
 /// zero"))` (numeric.c div_var/div_var_int/div_var_int64).
-fn division_by_zero() -> types_error::PgError {
-    types_error::PgError::error("division by zero").with_sqlstate(ERRCODE_DIVISION_BY_ZERO)
+fn division_by_zero() -> ::types_error::PgError {
+    ::types_error::PgError::error("division by zero").with_sqlstate(ERRCODE_DIVISION_BY_ZERO)
 }

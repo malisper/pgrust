@@ -6,10 +6,10 @@
 
 #![allow(non_snake_case)]
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::Oid;
-use types_error::PgResult;
-use parsenodes::Node;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::parsenodes::Node;
 
 
 seam_core::seam!(
@@ -138,7 +138,7 @@ seam_core::seam!(
     /// `RenameType(RenameStmt *stmt)` (typecmds.c) — ALTER TYPE/DOMAIN RENAME TO.
     pub fn RenameType<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        stmt: &parsenodes::RenameStmt,
+        stmt: &::parsenodes::RenameStmt,
     ) -> PgResult<ObjectAddress>
 );
 
@@ -164,7 +164,7 @@ seam_core::seam!(
         type_oid: Oid,
         nsp_oid: Oid,
         ignore_dependent: bool,
-        objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+        objs_moved: &mut ::types_catalog::catalog_dependency::ObjectAddresses,
     ) -> PgResult<Oid>
 );
 

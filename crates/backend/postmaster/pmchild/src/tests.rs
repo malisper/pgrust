@@ -12,8 +12,8 @@
 
 use std::sync::{Mutex, Once};
 
-use types_core::init::BackendType;
-use types_storage::MAX_IO_WORKERS;
+use ::types_core::init::BackendType;
+use ::types_storage::MAX_IO_WORKERS;
 
 use super::*;
 

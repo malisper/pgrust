@@ -2,7 +2,7 @@
 //! (`initGISTstate`) and `access/gist/gistutil.c` (`gistFormTuple` /
 //! `gistCompressValues` / `gistDeCompressAtt`).
 //!
-//! `GISTSTATE` ([`gist::GISTSTATE`]) stores, per index column, a resolved
+//! `GISTSTATE` ([`::gist::GISTSTATE`]) stores, per index column, a resolved
 //! [`FmgrInfo`] for each opclass support procedure — exactly the C struct. In
 //! the owned typed-seam dispatch model the AM does not call the function pointer
 //! itself; instead the opclass installs its typed body into the
@@ -15,7 +15,7 @@
 use alloc::vec::Vec;
 use heaptuple::{heap_form_tuple, FormedTuple};
 use indextuple_seams::{index_form_tuple_desc, nocache_index_getattr};
-use tupdesc::CreateTupleDescTruncatedCopy;
+use ::tupdesc::CreateTupleDescTruncatedCopy;
 use dispatch_seams::{
     gist_compress, gist_decompress, gist_fetch, gist_penalty, gist_same, gist_union,
 };
@@ -29,9 +29,9 @@ use page::{
 };
 use utils_error::{ereport, PgResult};
 use mcx::{alloc_in, Mcx, PgVec};
-use types_error::error::ERROR;
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{
+use ::types_error::error::ERROR;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{
     AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, InvalidOid, OffsetNumber, Oid,
 };
 use gist::{
@@ -39,10 +39,10 @@ use gist::{
     GIST_DECOMPRESS_PROC, GIST_DISTANCE_PROC, GIST_EQUAL_PROC, GIST_FETCH_PROC, GIST_PENALTY_PROC,
     GIST_PICKSPLIT_PROC, GIST_UNION_PROC,
 };
-use rel::Relation;
-use types_storage::Buffer;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{DEFAULT_COLLATION_OID, FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
+use ::rel::Relation;
+use ::types_storage::Buffer;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{DEFAULT_COLLATION_OID, FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
 
 use crate::gist_page::{
     gistcheckpage, GistPageGetDeleteXid, GistPageIsDeleted, GiSTPageSize,
@@ -91,7 +91,7 @@ pub fn initGISTstate<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<G
     )?);
     // fetchTupdesc is set later (in gistbeginscan); C leaves it NULL here. We
     // leave the field None so it is well-formed and the scan layer fills it.
-    let fetch_tupdesc: types_tuple::heaptuple::TupleDesc<'mcx> = None;
+    let fetch_tupdesc: ::types_tuple::heaptuple::TupleDesc<'mcx> = None;
 
     let n = natts as usize;
     let mut consistent_fn = Vec::with_capacity(n);
@@ -310,7 +310,7 @@ pub fn gistdentryinit<'mcx>(
     nkey: usize,
     k: Datum<'mcx>,
     rel: Oid,
-    page: types_core::primitive::BlockNumber,
+    page: ::types_core::primitive::BlockNumber,
     o: u16,
     leaf: bool,
     is_null: bool,
@@ -379,7 +379,7 @@ pub fn gistjoinvector<'mcx>(
 ) -> PgResult<()> {
     for it in additvec {
         let mcx = *it.allocator();
-        itvec.push(mcx::slice_in(mcx, it)?);
+        itvec.push(::mcx::slice_in(mcx, it)?);
     }
     Ok(())
 }
@@ -392,7 +392,7 @@ pub fn gistfillitupvec<'mcx>(mcx: Mcx<'mcx>, vec: &[&[u8]]) -> PgResult<PgVec<'m
     for it in vec {
         memlen += index_tuple_size(it);
     }
-    let mut out = mcx::vec_with_capacity_in(mcx, memlen)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, memlen)?;
     for it in vec {
         let sz = index_tuple_size(it);
         out.extend_from_slice(&it[..sz]);
@@ -405,14 +405,14 @@ pub fn gistfillitupvec<'mcx>(mcx: Mcx<'mcx>, vec: &[&[u8]]) -> PgResult<PgVec<'m
 /// `t_tid`'s `ip_posid` is the `u16` at byte offset 4 of the on-disk image.
 #[inline]
 pub(crate) fn gist_tuple_set_valid(itup: &mut [u8]) {
-    itup[4..6].copy_from_slice(&gist::TUPLE_IS_VALID.to_ne_bytes());
+    itup[4..6].copy_from_slice(&::gist::TUPLE_IS_VALID.to_ne_bytes());
 }
 
 /// `GistTupleIsInvalid(itup)` (gist_private.h): is the tuple's `t_tid` offset the
 /// invalid sentinel (`TUPLE_IS_INVALID`)?
 #[inline]
 pub(crate) fn gist_tuple_is_invalid(itup: &[u8]) -> bool {
-    u16::from_ne_bytes([itup[4], itup[5]]) == gist::TUPLE_IS_INVALID
+    u16::from_ne_bytes([itup[4], itup[5]]) == ::gist::TUPLE_IS_INVALID
 }
 
 /// `ItemPointerGetBlockNumber(&itup->t_tid)` over an on-disk image: `t_tid` is
@@ -430,10 +430,10 @@ pub(crate) fn itup_block_number(itup: &[u8]) -> BlockNumber {
 /// (`BlockIdData ip_blkid` [bytes 0..4] then `OffsetNumber ip_posid`
 /// [bytes 4..6]). Used by the scan layer to report a matching heap TID.
 #[inline]
-pub(crate) fn itup_heap_ptr(itup: &[u8]) -> types_tuple::heaptuple::ItemPointerData {
+pub(crate) fn itup_heap_ptr(itup: &[u8]) -> ::types_tuple::heaptuple::ItemPointerData {
     let blkno = itup_block_number(itup);
     let ip_posid = u16::from_ne_bytes([itup[4], itup[5]]);
-    types_tuple::heaptuple::ItemPointerData::new(blkno, ip_posid)
+    ::types_tuple::heaptuple::ItemPointerData::new(blkno, ip_posid)
 }
 
 /// `ItemPointerSetBlockNumber(&itup->t_tid, blkno)` over an on-disk image: store
@@ -495,7 +495,7 @@ pub fn gistextractpage<'mcx>(mcx: Mcx<'mcx>, page: &[u8]) -> PgResult<Vec<PgVec<
     while i <= maxoff {
         let id = PageGetItemId(&pref, i)?;
         let it = PageGetItem(&pref, &id)?;
-        itvec.push(mcx::slice_in(mcx, it)?);
+        itvec.push(::mcx::slice_in(mcx, it)?);
         i += 1;
     }
     Ok(itvec)
@@ -988,7 +988,7 @@ pub fn gistNewBuffer<'mcx>(
                     crate::gistxlog::gist_xlog_page_reuse(
                         r,
                         heaprel,
-                        bufmgr_seams::buffer_get_block_number::call(buffer),
+                        ::bufmgr_seams::buffer_get_block_number::call(buffer),
                         delete_xid,
                     )?;
                 }
@@ -1165,7 +1165,7 @@ const ANYOID: Oid = 2276;
 /// number, or `InvalidStrategy` for anything outside the recognized set. C
 /// returns the result as a `uint16` Datum.
 pub fn gist_translate_cmptype_common(cmptype: i32) -> u16 {
-    use types_tableam::amapi::CompareType;
+    use ::types_tableam::amapi::CompareType;
     if cmptype == CompareType::COMPARE_EQ as i32 {
         RT_EQUAL_STRATEGY_NUMBER
     } else if cmptype == CompareType::COMPARE_LT as i32 {

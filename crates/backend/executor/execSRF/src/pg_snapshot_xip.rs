@@ -21,7 +21,7 @@ use core::any::Any;
 
 use mcx::{Mcx, PgBox};
 use types_core::{FullTransactionId, Oid};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::execexpr::ExprDoneCond;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
@@ -71,7 +71,7 @@ struct SnapshotXipFctx {
 /// Erase a typed cross-call state into the `FuncCallContext.user_fctx` carrier
 /// (C: `funcctx->user_fctx = palloc(...)`).
 fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
-    let boxed = mcx::alloc_in(mcx, v).expect("alloc user_fctx");
+    let boxed = ::mcx::alloc_in(mcx, v).expect("alloc user_fctx");
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn Any` vtable.
@@ -95,7 +95,7 @@ fn pg_snapshot_xip<'mcx>(fcinfo: &mut FunctionCallInfoBaseData<'mcx>) -> PgResul
         let snap = match xid8funcs::PgSnapshot::from_varlena_bytes(image) {
             Some(snap) => snap,
             None => {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "invalid pg_snapshot image".to_string(),
                 ))
             }

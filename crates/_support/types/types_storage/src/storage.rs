@@ -85,37 +85,37 @@ pub struct pg_atomic_uint64 {
 
 impl pg_atomic_uint64 {
     /// `pg_atomic_init_u64(ptr, val)`.
-    pub const fn new(value: types_core::uint64) -> Self {
+    pub const fn new(value: ::types_core::uint64) -> Self {
         Self {
             value: AtomicU64::new(value),
         }
     }
 
     /// `pg_atomic_read_u64(ptr)`.
-    pub fn read(&self) -> types_core::uint64 {
+    pub fn read(&self) -> ::types_core::uint64 {
         self.value.load(Ordering::Relaxed)
     }
 
     /// `pg_atomic_write_u64(ptr, val)`.
-    pub fn write(&self, value: types_core::uint64) {
+    pub fn write(&self, value: ::types_core::uint64) {
         self.value.store(value, Ordering::Relaxed);
     }
 
     /// `pg_atomic_read_membarrier_u64(ptr)` — a read with full-barrier
     /// semantics (`port/atomics.h`).
-    pub fn read_membarrier(&self) -> types_core::uint64 {
+    pub fn read_membarrier(&self) -> ::types_core::uint64 {
         self.value.load(Ordering::SeqCst)
     }
 
     /// `pg_atomic_write_membarrier_u64(ptr, val)` — a write with full-barrier
     /// semantics (`port/atomics.h`).
-    pub fn write_membarrier(&self, value: types_core::uint64) {
+    pub fn write_membarrier(&self, value: ::types_core::uint64) {
         self.value.store(value, Ordering::SeqCst);
     }
 
     /// `pg_atomic_fetch_add_u64(ptr, add_)` (`port/atomics.h`) — atomically add
     /// `add_` and return the value `*ptr` held *before* the addition.
-    pub fn fetch_add(&self, add_: types_core::uint64) -> types_core::uint64 {
+    pub fn fetch_add(&self, add_: ::types_core::uint64) -> ::types_core::uint64 {
         self.value.fetch_add(add_, Ordering::SeqCst)
     }
 
@@ -123,7 +123,7 @@ impl pg_atomic_uint64 {
     /// advance `*ptr` to `target` unless it is already at least `target`;
     /// returns the resulting value (always >= the prior value). Implemented
     /// with the same compare-exchange loop C uses.
-    pub fn monotonic_advance(&self, target: types_core::uint64) -> types_core::uint64 {
+    pub fn monotonic_advance(&self, target: ::types_core::uint64) -> ::types_core::uint64 {
         let mut currval = self.value.load(Ordering::SeqCst);
         while currval < target {
             match self.value.compare_exchange_weak(
@@ -650,8 +650,8 @@ impl RelFileLocator {
     /// padding — the header requires that for hashtable keys): spcOid@0,
     /// dbOid@4, relNumber@8. `None` when fewer than 12 bytes are present.
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
-        let word = |off: usize| -> Option<types_core::uint32> {
-            Some(types_core::uint32::from_ne_bytes(
+        let word = |off: usize| -> Option<::types_core::uint32> {
+            Some(::types_core::uint32::from_ne_bytes(
                 data.get(off..off + 4)?.try_into().ok()?,
             ))
         };
@@ -701,7 +701,7 @@ pub fn RelFileLocatorEquals(a: &RelFileLocator, b: &RelFileLocator) -> bool {
 /// `VirtualTransactionId` (`storage/lock.h`). Canonical definition lives in
 /// `types_core`; re-exported here so `types_storage::VirtualTransactionId`
 /// names the same type (no duplicate definition).
-pub use types_core::VirtualTransactionId;
+pub use ::types_core::VirtualTransactionId;
 
 // ---------------------------------------------------------------------------
 // `storage/standby.h` / `storage/procarray.h` running-xacts vocabulary.
@@ -769,7 +769,7 @@ pub struct shm_toc_estimator {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PrefetchBufferResult {
     /// `Buffer recent_buffer` — the block's buffer if already cached.
-    pub recent_buffer: types_core::Buffer,
+    pub recent_buffer: ::types_core::Buffer,
     /// `bool initiated_io` — whether a prefetch was started.
     pub initiated_io: bool,
 }

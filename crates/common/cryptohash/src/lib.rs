@@ -56,7 +56,7 @@ use sha2::{
 };
 use sha1::{pg_sha1_ctx, pg_sha1_final, pg_sha1_init, pg_sha1_update, SHA1_DIGEST_LENGTH};
 use types_core::{uint8, Size};
-use crypto::pg_cryptohash_type::{
+use ::crypto::pg_cryptohash_type::{
     self, PG_MD5, PG_SHA1, PG_SHA224, PG_SHA256, PG_SHA384, PG_SHA512,
 };
 
@@ -90,7 +90,7 @@ enum CryptoHashData {
 /// Internal `pg_cryptohash_ctx` structure (cryptohash.c).
 ///
 /// The seam crate exposes this only as the opaque `*mut pg_cryptohash_ctx`
-/// pointer (`crypto::pg_cryptohash_ctx`); this concrete struct is the
+/// pointer (`::crypto::pg_cryptohash_ctx`); this concrete struct is the
 /// box this owner mints behind that pointer.
 struct CryptoHashCtx {
     type_: pg_cryptohash_type,
@@ -100,7 +100,7 @@ struct CryptoHashCtx {
 
 /// Cast the opaque seam pointer back to this owner's concrete box pointer.
 #[inline]
-fn as_ctx<'a>(ctx: *mut crypto::pg_cryptohash_ctx) -> Option<&'a mut CryptoHashCtx> {
+fn as_ctx<'a>(ctx: *mut ::crypto::pg_cryptohash_ctx) -> Option<&'a mut CryptoHashCtx> {
     if ctx.is_null() {
         None
     } else {
@@ -118,20 +118,20 @@ fn as_ctx<'a>(ctx: *mut crypto::pg_cryptohash_ctx) -> Option<&'a mut CryptoHashC
 /// `palloc` issues an error without returning; the in-tree allocation here
 /// aborts on OOM the same way). The whole struct is zeroed (`memset(ctx, 0,
 /// ...)`), `type` is set, and `error` is `PG_CRYPTOHASH_ERROR_NONE`.
-pub fn pg_cryptohash_create(type_: pg_cryptohash_type) -> *mut crypto::pg_cryptohash_ctx {
+pub fn pg_cryptohash_create(type_: pg_cryptohash_type) -> *mut ::crypto::pg_cryptohash_ctx {
     let ctx = Box::new(CryptoHashCtx {
         type_,
         error: pg_cryptohash_errno::PG_CRYPTOHASH_ERROR_NONE,
         data: CryptoHashData::Uninit,
     });
-    Box::into_raw(ctx) as *mut crypto::pg_cryptohash_ctx
+    Box::into_raw(ctx) as *mut ::crypto::pg_cryptohash_ctx
 }
 
 /// `pg_cryptohash_init`
 ///
 /// Initialize a hash context. Returns 0 on success, and -1 on failure
 /// (`ctx == NULL`).
-pub fn pg_cryptohash_init(ctx: *mut crypto::pg_cryptohash_ctx) -> i32 {
+pub fn pg_cryptohash_init(ctx: *mut ::crypto::pg_cryptohash_ctx) -> i32 {
     let Some(ctx) = as_ctx(ctx) else {
         return -1;
     };
@@ -182,7 +182,7 @@ pub fn pg_cryptohash_init(ctx: *mut crypto::pg_cryptohash_ctx) -> i32 {
 /// `data` must point to `len` readable bytes (or be NULL with `len == 0`), as
 /// the C `const uint8 *data` contract requires.
 pub fn pg_cryptohash_update(
-    ctx: *mut crypto::pg_cryptohash_ctx,
+    ctx: *mut ::crypto::pg_cryptohash_ctx,
     data: *const uint8,
     len: Size,
 ) -> i32 {
@@ -225,7 +225,7 @@ pub fn pg_cryptohash_update(
 /// `dest` must point to `len` writable bytes, as the C `uint8 *dest, size_t
 /// len` contract requires.
 pub fn pg_cryptohash_final(
-    ctx: *mut crypto::pg_cryptohash_ctx,
+    ctx: *mut ::crypto::pg_cryptohash_ctx,
     dest: *mut uint8,
     len: Size,
 ) -> i32 {
@@ -290,7 +290,7 @@ pub fn pg_cryptohash_final(
 /// Free a hash context. In C this `explicit_bzero`s the context then frees it.
 /// Reconstituting the box and dropping it reclaims the storage; the box is
 /// scrubbed first to mirror `explicit_bzero`.
-pub fn pg_cryptohash_free(ctx: *mut crypto::pg_cryptohash_ctx) {
+pub fn pg_cryptohash_free(ctx: *mut ::crypto::pg_cryptohash_ctx) {
     if ctx.is_null() {
         return;
     }

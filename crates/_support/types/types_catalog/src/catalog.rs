@@ -1,7 +1,7 @@
 //! Genbki-assigned catalog relation OIDs (`catalog/pg_*_d.h`), trimmed to the
 //! rows the current ports consume.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// `RelationRelationId` — `pg_class` (`pg_class_d.h`).
 pub const RELATION_RELATION_ID: Oid = 1259;
@@ -117,25 +117,25 @@ pub const LARGE_OBJECT_METADATA_OID_INDEX_ID: Oid = 2996;
 
 /// `Anum_pg_largeobject_metadata_oid` — `pg_largeobject_metadata.oid` column
 /// number (`pg_largeobject_metadata_d.h`).
-pub const ANUM_PG_LARGEOBJECT_METADATA_OID: types_core::primitive::AttrNumber = 1;
+pub const ANUM_PG_LARGEOBJECT_METADATA_OID: ::types_core::primitive::AttrNumber = 1;
 /// `Anum_pg_largeobject_metadata_lomowner` — `pg_largeobject_metadata.lomowner`
 /// column number (`pg_largeobject_metadata_d.h`).
-pub const ANUM_PG_LARGEOBJECT_METADATA_LOMOWNER: types_core::primitive::AttrNumber = 2;
+pub const ANUM_PG_LARGEOBJECT_METADATA_LOMOWNER: ::types_core::primitive::AttrNumber = 2;
 /// `Anum_pg_largeobject_metadata_lomacl` — `pg_largeobject_metadata.lomacl`
 /// column number (`pg_largeobject_metadata_d.h`).
-pub const ANUM_PG_LARGEOBJECT_METADATA_LOMACL: types_core::primitive::AttrNumber = 3;
+pub const ANUM_PG_LARGEOBJECT_METADATA_LOMACL: ::types_core::primitive::AttrNumber = 3;
 /// `Natts_pg_largeobject_metadata` — number of `pg_largeobject_metadata`
 /// columns (`pg_largeobject_metadata_d.h`).
 pub const NATTS_PG_LARGEOBJECT_METADATA: usize = 3;
 /// `Anum_pg_largeobject_loid` — `pg_largeobject.loid` column number
 /// (`pg_largeobject_d.h`).
-pub const ANUM_PG_LARGEOBJECT_LOID: types_core::primitive::AttrNumber = 1;
+pub const ANUM_PG_LARGEOBJECT_LOID: ::types_core::primitive::AttrNumber = 1;
 /// `Anum_pg_largeobject_pageno` — `pg_largeobject.pageno` column number
 /// (`pg_largeobject_d.h`).
-pub const ANUM_PG_LARGEOBJECT_PAGENO: types_core::primitive::AttrNumber = 2;
+pub const ANUM_PG_LARGEOBJECT_PAGENO: ::types_core::primitive::AttrNumber = 2;
 /// `Anum_pg_largeobject_data` — `pg_largeobject.data` column number
 /// (`pg_largeobject_d.h`).
-pub const ANUM_PG_LARGEOBJECT_DATA: types_core::primitive::AttrNumber = 3;
+pub const ANUM_PG_LARGEOBJECT_DATA: ::types_core::primitive::AttrNumber = 3;
 /// `OperatorFamilyRelationId` — `pg_opfamily` (`pg_opfamily_d.h`).
 pub const OPERATOR_FAMILY_RELATION_ID: Oid = 2753;
 /// `OperatorClassRelationId` — `pg_opclass` (`pg_opclass_d.h`).
@@ -229,7 +229,7 @@ pub const TABLESPACE_OID_INDEX_ID: Oid = 2697;
 /// `ClassOidIndexId` — `pg_class_oid_index` (`pg_class_d.h`).
 pub const CLASS_OID_INDEX_ID: Oid = 2662;
 /// `Anum_pg_class_oid` — the `oid` column of pg_class (`pg_class_d.h`).
-pub const ANUM_PG_CLASS_OID: types_core::primitive::AttrNumber = 1;
+pub const ANUM_PG_CLASS_OID: ::types_core::primitive::AttrNumber = 1;
 
 /* Shared-catalog TOAST tables and their indexes (`pg_*_d.h`). */
 /// `PgDatabaseToastTable`.
@@ -293,8 +293,8 @@ pub const INIT_PRIVS_OBJ_INDEX_ID: Oid = 3395;
 
 /* `Anum_pg_init_privs_*` (`pg_init_privs_d.h`) — CATALOG field order. */
 /// `Anum_pg_init_privs_objoid`.
-pub const Anum_pg_init_privs_objoid: types_core::primitive::AttrNumber = 1;
+pub const Anum_pg_init_privs_objoid: ::types_core::primitive::AttrNumber = 1;
 /// `Anum_pg_init_privs_classoid`.
-pub const Anum_pg_init_privs_classoid: types_core::primitive::AttrNumber = 2;
+pub const Anum_pg_init_privs_classoid: ::types_core::primitive::AttrNumber = 2;
 /// `Anum_pg_init_privs_objsubid`.
-pub const Anum_pg_init_privs_objsubid: types_core::primitive::AttrNumber = 3;
+pub const Anum_pg_init_privs_objsubid: ::types_core::primitive::AttrNumber = 3;

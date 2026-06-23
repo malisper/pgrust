@@ -17,23 +17,23 @@
 //! ## Memory model
 //!
 //! The C `Relation` (an `index->rd_index`/`rd_opcintype`/... bundle) is the
-//! owned [`Relation`](rel::Relation) value, deref'd to read its
+//! owned [`Relation`](::rel::Relation) value, deref'd to read its
 //! `rd_index` / `rd_opcintype` / `rd_indcollation` / `rd_att` / `rd_rel`
 //! fields directly (no per-field seam — those values are already projected onto
 //! the relcache entry). The functions thread `&Relation<'mcx>` exactly where C
-//! passes `Relation index`, even though [`SpGistState::index`](spgist::SpGistState)
+//! passes `Relation index`, even though [`SpGistState::index`](::spgist::SpGistState)
 //! stores only the relation OID (the modelled form of the C `Relation` pointer
 //! it caches).
 //!
 //! The C on-disk tuple pointers (`SpGistLeafTuple` / `SpGistInnerTuple` /
 //! `SpGistNodeTuple` / `SpGistDeadTuple`, all `palloc`'d byte buffers) become
-//! owned byte images: the builders return [`mcx::PgVec`]`<u8>` (or, for
+//! owned byte images: the builders return [`::mcx::PgVec`]`<u8>` (or, for
 //! `spgFormDeadTuple`, write into `state.deadTupleStorage`). Each header struct
 //! is `#[repr(C)]` in `types-spgist`, so the image is assembled by writing the
 //! header bytes at offset 0 followed by the prefix/nodes/data area, matching the
 //! C `palloc` + field-store + `memcpy` layout exactly.
 //!
-//! `Datum` is the owned [`types_tuple` value](types_tuple::heaptuple::Datum):
+//! `Datum` is the owned [`types_tuple` value](::types_tuple::heaptuple::Datum):
 //! the by-value arm is the raw machine word (C's `Datum`), the by-reference arm
 //! is the verbatim on-disk bytes. `memcpyInnerDatum` writes the 8-byte word for
 //! a pass-by-value type and the value bytes for a pass-by-reference type, as in
@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 
 use heaptuple::{heap_compute_data_size, heap_fill_tuple, varsize_any};
-use indextuple::index_deform_tuple_internal;
+use ::indextuple::index_deform_tuple_internal;
 use tupdesc::{populate_compact_attribute, CreateTupleDescCopy};
 use page::{
     ItemPointerSet, ItemPointerSetInvalid, PageAddItemExtended, PageGetExactFreeSpace, PageGetItem,
@@ -60,19 +60,19 @@ use page::{
     PageMut, PageRef,
 };
 use utils_error::{ereport, PgError};
-use types_error::error::{ERROR, PANIC};
-use types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
-use types_error::PgResult;
+use ::types_error::error::{ERROR, PANIC};
+use ::types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::PgResult;
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, InvalidOid, OffsetNumber, Oid, Size,
     BLCKSZ,
 };
-use rel::Relation;
-use types_storage::buf::{Buffer, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
-use types_storage::bufpage::SizeOfPageHeaderData;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_storage::buf::{Buffer, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
+use ::types_storage::bufpage::SizeOfPageHeaderData;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{
     ItemPointerData, TupleDescData, INVALID_OFFSET_NUMBER as InvalidOffsetNumber,
     FIRST_OFFSET_NUMBER as FirstOffsetNumber,
 };
@@ -190,7 +190,7 @@ pub(crate) fn SpGistPageStoresNulls(page: &[u8]) -> bool {
 /// `SpGistPageIsDeleted(page)`: `flags & SPGIST_DELETED`.
 #[inline]
 pub(crate) fn SpGistPageIsDeleted(page: &[u8]) -> bool {
-    opaque_flags(page) & spgist::SPGIST_DELETED != 0
+    opaque_flags(page) & ::spgist::SPGIST_DELETED != 0
 }
 
 /// `SpGistPageGetOpaque(page)->nPlaceholder` (read).
@@ -213,7 +213,7 @@ pub(crate) fn set_opaque_n_placeholder(page: &mut [u8], v: u16) {
 /// pseudotype? Inlined here (the C macro), as the parser's copy is private.
 #[inline]
 fn IsPolymorphicType(typid: Oid) -> bool {
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID,
         ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYNONARRAYOID, ANYRANGEOID,
     };
@@ -382,7 +382,7 @@ pub fn spgGetCache<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<SpG
 
     // Finally, if it's a real index (not a partitioned one), get the
     // lastUsedPages data from the metapage.
-    if index.rd_rel.relkind != types_tuple::access::RELKIND_PARTITIONED_INDEX {
+    if index.rd_rel.relkind != ::types_tuple::access::RELKIND_PARTITIONED_INDEX {
         let metabuffer =
             bufmgr_seams::read_buffer::call(index, SPGIST_METAPAGE_BLKNO)?;
         bufmgr_seams::lock_buffer::call(metabuffer, BUFFER_LOCK_SHARE)?;
@@ -485,7 +485,7 @@ pub fn getSpGistTupleDesc<'mcx>(
         att.attalign = keyType.attalign;
         att.attstorage = keyType.attstorage;
         // We shouldn't need to bother with making these valid:
-        att.attcompression = types_tuple::heaptuple::InvalidCompressionMethod;
+        att.attcompression = ::types_tuple::heaptuple::InvalidCompressionMethod;
         att.attcollation = InvalidOid;
     }
     // In case we changed typlen, we'd better reset following offsets.
@@ -525,7 +525,7 @@ pub fn initSpGistState<'mcx>(
         attLeafType: cache.attLeafType,
         attPrefixType: cache.attPrefixType,
         attLabelType: cache.attLabelType,
-        leafTupDesc: Some(mcx::alloc_in(mcx, leaf_tup_desc)?),
+        leafTupDesc: Some(::mcx::alloc_in(mcx, leaf_tup_desc)?),
         deadTupleStorage: Some(dead_tuple_storage),
         redirectXid: redirect_xid,
         // Assume we're not in an index build (spgbuild will override).
@@ -1229,7 +1229,7 @@ pub fn spgFormDeadTuple(
         tuple.xid = state.redirectXid;
     } else {
         ItemPointerSetInvalid(&mut tuple.pointer);
-        tuple.xid = types_core::xact::InvalidTransactionId;
+        tuple.xid = ::types_core::xact::InvalidTransactionId;
     }
 
     // Serialize into the preallocated storage (state->deadTupleStorage).
@@ -1593,7 +1593,7 @@ pub(crate) fn write_item_pointer(dst: &mut [u8], ip: &ItemPointerData) {
 }
 
 /// `elog(level, "...")` (an internal-message error/panic, no SQLSTATE).
-fn elog_internal(level: types_error::ErrorLevel, msg: alloc::string::String) -> PgError {
+fn elog_internal(level: ::types_error::ErrorLevel, msg: alloc::string::String) -> PgError {
     ereport(level).errmsg_internal(msg).into_error()
 }
 

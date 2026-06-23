@@ -179,6 +179,6 @@ fn fill_in_constant_lengths(clocations: &mut [PgssLocationLen], query: &[u8], qu
 /// The end byte offset (exclusive) of the just-returned token. The scanner's
 /// `pos()` is the start of the next match attempt, i.e. just past the current
 /// token (modulo trailing whitespace already consumed). We clamp to the buffer.
-fn token_end(scanner: &Scanner<'_>, _tok: &scan_fgram::Token, query: &[u8]) -> usize {
+fn token_end(scanner: &Scanner<'_>, _tok: &::scan_fgram::Token, query: &[u8]) -> usize {
     scanner.pos().min(query.len())
 }

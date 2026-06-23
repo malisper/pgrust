@@ -3,12 +3,12 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId};
 
-use joinrels::join_search_one_level;
+use ::joinrels::join_search_one_level;
 use pathnode_seams as pathnode;
 use relnode_seams as bms;
 
@@ -21,7 +21,7 @@ use crate::{enable_geqo, geqo_threshold, generate_partitionwise_join_paths,
 /// `deconstruct_jointree` producer (initsplan.c), the `remove_useless_joins`
 /// trimmers (analyzejoins.c), the cross-crate seams that carry it, and this
 /// `make_one_rel` consumer all name one type.
-pub use pathnodes::JoinlistNode;
+pub use ::pathnodes::JoinlistNode;
 
 /// `make_rel_from_joinlist` (allpaths.c:3351) — build access paths using a
 /// joinlist to guide the join-path search. Returns the final rel, or `None` for
@@ -81,7 +81,7 @@ pub fn make_rel_from_joinlist<'mcx>(
 
 /// `GeqoConfig` from the live `Geqo_*` GUCs (C reads these as globals).
 fn geqo_config_from_gucs() -> geqo_all::main::GeqoConfig {
-    use guc_tables::vars;
+    use ::guc_tables::vars;
     geqo_all::main::GeqoConfig::from_gucs(
         vars::Geqo_effort.read(),
         vars::Geqo_pool_size.read(),

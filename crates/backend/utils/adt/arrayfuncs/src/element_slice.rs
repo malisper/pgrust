@@ -19,8 +19,8 @@
 //! mirror that exactly via [`datum_ptr_bytes`].
 
 use mcx::{Mcx, PgVec};
-use array::MAXDIM;
-use datum::datum::Datum;
+use ::array::MAXDIM;
+use ::datum::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED,

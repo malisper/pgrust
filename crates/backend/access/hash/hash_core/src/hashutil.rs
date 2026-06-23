@@ -16,21 +16,21 @@
 //! * `_hash_kill_items` locks/unlocks buffers and marks them dirty-hint through
 //!   bufmgr-seams.
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, OffsetNumber, Oid,
 };
-use types_core::InvalidOid;
+use ::types_core::InvalidOid;
 use types_error::{PgError, PgResult, ERROR};
-use hash::hashpage::{
+use ::hash::hashpage::{
     Bucket, HASH_MAGIC, HASH_VERSION, HASH_METAPAGE,
     HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE, HASH_SPLITPOINT_PHASE_BITS,
     HASH_SPLITPOINT_PHASE_MASK, LH_META_PAGE,
     LH_OVERFLOW_PAGE, LH_PAGE_HAS_DEAD_TUPLES,
 };
-use hash::hash::{HASHSTANDARD_PROC};
-use rel::Relation;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::hash::hash::{HASHSTANDARD_PROC};
+use ::rel::Relation;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use bufmgr_seams as bufmgr;
 use page::{
@@ -411,7 +411,7 @@ pub fn _hash_get_oldblock_from_newbucket<'mcx>(
     let mask = (1u32 << pg_leftmost_one_pos32(new_bucket)) - 1;
     let old_bucket = new_bucket & mask;
 
-    let metabuf = _hash_getbuf(rel, HASH_METAPAGE, hash::hashpage::HASH_READ, LH_META_PAGE as i32)?;
+    let metabuf = _hash_getbuf(rel, HASH_METAPAGE, ::hash::hashpage::HASH_READ, LH_META_PAGE as i32)?;
     let blkno = crate::hashpage::with_metap(metabuf, |metap| {
         crate::hashpage::bucket_to_blkno(metap, old_bucket)
     })?;
@@ -430,7 +430,7 @@ pub fn _hash_get_newblock_from_oldbucket<'mcx>(
     rel: &Relation<'mcx>,
     old_bucket: Bucket,
 ) -> PgResult<BlockNumber> {
-    let metabuf = _hash_getbuf(rel, HASH_METAPAGE, hash::hashpage::HASH_READ, LH_META_PAGE as i32)?;
+    let metabuf = _hash_getbuf(rel, HASH_METAPAGE, ::hash::hashpage::HASH_READ, LH_META_PAGE as i32)?;
     let (lowmask, maxbucket) = crate::hashpage::with_metap(metabuf, |metap| {
         (metap.hashm_lowmask, metap.hashm_maxbucket)
     })?;
@@ -473,7 +473,7 @@ pub fn _hash_kill_items<'mcx>(scan: &mut HashScan<'mcx>) -> PgResult<()> {
     let num_killed = scan.opaque.numKilled;
     debug_assert!(num_killed > 0);
     debug_assert!(!scan.opaque.killedItems.is_empty());
-    debug_assert!(hash::hashpage::HashScanPosIsValid(&scan.opaque.currPos));
+    debug_assert!(::hash::hashpage::HashScanPosIsValid(&scan.opaque.currPos));
 
     // Always reset the scan state, so we don't look for same items on other
     // pages.
@@ -484,13 +484,13 @@ pub fn _hash_kill_items<'mcx>(scan: &mut HashScan<'mcx>) -> PgResult<()> {
 
     let mut have_pin = false;
     let buf;
-    if hash::hashpage::HashScanPosIsPinned(&scan.opaque.currPos) {
+    if ::hash::hashpage::HashScanPosIsPinned(&scan.opaque.currPos) {
         // We already have pin on this buffer, so just acquire lock on it.
         have_pin = true;
         buf = scan.opaque.currPos.buf;
         bufmgr::lock_buffer::call(buf, BUFFER_LOCK_SHARE)?;
     } else {
-        buf = _hash_getbuf(&rel, blkno, hash::hashpage::HASH_READ, LH_OVERFLOW_PAGE as i32)?;
+        buf = _hash_getbuf(&rel, blkno, ::hash::hashpage::HASH_READ, LH_OVERFLOW_PAGE as i32)?;
     }
 
     let mut killedsomething = false;

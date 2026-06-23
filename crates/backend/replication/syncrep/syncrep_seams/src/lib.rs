@@ -6,8 +6,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::XLogRecPtr;
-use types_error::PgResult;
+use ::types_core::XLogRecPtr;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `SyncRepWaitForLSN(lsn, commit)` — wait for synchronous replication.

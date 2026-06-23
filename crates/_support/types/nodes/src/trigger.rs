@@ -12,15 +12,15 @@
 //! them for the firing context.
 
 use mcx::{MemoryContext, PgBox, PgVec};
-use types_core::primitive::Oid;
-use types_core::xact::CommandId;
-use types_tuple::heaptuple::{HeapTuple, ItemPointerData};
+use ::types_core::primitive::Oid;
+use ::types_core::xact::CommandId;
+use ::types_tuple::heaptuple::{HeapTuple, ItemPointerData};
 
 use crate::bitmapset::Bitmapset;
 use crate::execnodes::SlotId;
 use crate::funcapi::Tuplestorestate;
 use crate::nodes::{CmdType, NodeTag};
-use types_trigger::Trigger;
+use ::types_trigger::Trigger;
 
 /// `TriggerEvent` (`commands/trigger.h`) — a `uint32` carrying the event-type +
 /// timing + row/statement bits (see the `TRIGGER_EVENT_*` consts).

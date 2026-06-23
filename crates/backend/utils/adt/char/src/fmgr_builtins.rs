@@ -16,11 +16,11 @@
 //! payload (the boundary strips the varlena header). OIDs / nargs / strict /
 //! retset are transcribed exactly from `pg_proc.dat` (all strict, none retset).
 
-use mcx::MemoryContext;
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::mcx::MemoryContext;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -135,7 +135,7 @@ fn fc_charout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Da
 fn fc_charrecv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let src = arg_varlena(fcinfo, 0);
-    let mut data = mcx::PgVec::new_in(m.mcx());
+    let mut data = ::mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
         return Err(types_error::PgError::error("out of memory"));
     }

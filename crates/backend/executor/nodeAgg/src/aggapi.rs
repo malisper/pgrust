@@ -7,7 +7,7 @@
 //! (or a `WindowAggState`); these resolve it. The parallel entry points are
 //! the methods this unit installs into `backend-executor-nodeAgg-pq-seams`.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::nodeagg::Aggref;
 use ::nodes::EcxtId;
@@ -17,7 +17,7 @@ use execparallel::{
 };
 
 use transam_parallel as parallel_seams;
-use transam_parallel::shared_dsm_object;
+use ::transam_parallel::shared_dsm_object;
 
 /// `AGG_CONTEXT_AGGREGATE` (executor/executor.h) — called as a plain aggregate.
 pub const AGG_CONTEXT_AGGREGATE: i32 = 1;
@@ -199,18 +199,18 @@ pub fn AggRegisterCallback<'mcx>(
             .copied(),
         None => {
             // elog(ERROR, "aggregate function cannot register a callback in this context")
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "aggregate function cannot register a callback in this context",
             ));
         }
     };
     let Some(ecxt_id) = aggcontext_id else {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "AggRegisterCallback: aggregate has no curaggcontext ExprContext",
         ));
     };
     let Some(link) = fmgr::fmgr::current_estate_link() else {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "AggRegisterCallback: no live EState back-pointer on the dispatch channel",
         ));
     };
@@ -223,7 +223,7 @@ pub fn AggRegisterCallback<'mcx>(
     let estate: &mut ::nodes::execnodes::EStateData<'mcx> =
         unsafe { &mut *(link.data as *mut ::nodes::execnodes::EStateData<'mcx>) };
     let econtext = estate.ecxt_mut(ecxt_id);
-    let mut ecxt_callback = mcx::alloc_in(
+    let mut ecxt_callback = ::mcx::alloc_in(
         econtext.ecxt_per_query_memory,
         ::nodes::execnodes::ExprContext_CB {
             next: None,
@@ -384,7 +384,7 @@ pub fn ExecAggInitializeWorker<'mcx>(
 /// `node->shared_info` then becomes the `Local` arm. Mirrors nodeSort's
 /// `ExecSortRetrieveInstrumentation`.
 pub fn ExecAggRetrieveInstrumentation<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     node: &mut AggStateData<'mcx>,
 ) -> PgResult<()> {
     // if (node->shared_info == NULL) return;
@@ -408,8 +408,8 @@ pub fn ExecAggRetrieveInstrumentation<'mcx>(
             num_workers as usize,
         );
 
-    let mut copy: mcx::PgVec<'mcx, AggregateInstrumentation> =
-        mcx::PgVec::with_capacity_in(num_workers as usize, mcx);
+    let mut copy: ::mcx::PgVec<'mcx, AggregateInstrumentation> =
+        ::mcx::PgVec::with_capacity_in(num_workers as usize, mcx);
     for &elem in tail.get().iter() {
         copy.push(elem);
     }
@@ -424,11 +424,11 @@ pub fn ExecAggRetrieveInstrumentation<'mcx>(
 /// worker's slot in the DSM `SharedAggInfo` flex array.
 #[inline]
 pub fn sinstrument_slot_cursor(
-    chunk: execparallel::SerializeCursor,
+    chunk: ::execparallel::SerializeCursor,
     worker_index: i32,
-) -> execparallel::SerializeCursor {
+) -> ::execparallel::SerializeCursor {
     let off = shared_agg_info_sinstrument_offset();
-    execparallel::SerializeCursor(
+    ::execparallel::SerializeCursor(
         chunk.0
             + off
             + (worker_index as usize) * core::mem::size_of::<AggregateInstrumentation>(),
@@ -509,7 +509,7 @@ fn exec_agg_retrieve_instrumentation_shim(node: PlanStateHandle) -> PgResult<()>
 /// its owned `AggState` from `ExecParallelRetrieveInstrumentation`, threading the
 /// mcx in; this handle-shim path is only reached by a hypothetical
 /// pointer-registry caller.)
-fn resolve_retrieve_mcx<'mcx>(_node: PlanStateHandle) -> mcx::Mcx<'mcx> {
+fn resolve_retrieve_mcx<'mcx>(_node: PlanStateHandle) -> ::mcx::Mcx<'mcx> {
     panic!(
         "backend-executor-nodeAgg: the CurrentMemoryContext for \
          ExecAggRetrieveInstrumentation's palloc'd copy is recovered from the unported executor \
@@ -548,7 +548,7 @@ fn agg_context_from_raw_frame<'a, 'mcx>(
 /// Seam body for `agg_get_aggref` (C `AggGetAggref`). Recovers the `Aggref`
 /// currently being evaluated from the raw frame and returns an `mcx`-arena copy.
 fn agg_get_aggref_shim<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     fcinfo: &fmgr::FunctionCallInfoBaseData,
 ) -> PgResult<Option<Aggref<'mcx>>> {
     let Some(aggstate) = agg_context_from_raw_frame::<'mcx, 'mcx>(fcinfo) else {
@@ -658,7 +658,7 @@ fn agg_register_callback_shim<'mcx>(
     // the call), so this body re-derives it and registers into the live pool.
     let aggcontext_id = {
         let Some(aggstate) = agg_context_from_raw_frame::<'_, 'mcx>(fcinfo) else {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "aggregate function cannot register a callback in this context",
             ));
         };
@@ -670,14 +670,14 @@ fn agg_register_callback_shim<'mcx>(
             .copied()
     };
     let Some(ecxt_id) = aggcontext_id else {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "AggRegisterCallback: aggregate has no curaggcontext ExprContext",
         ));
     };
     let Some(link) = fmgr::fmgr::current_estate_link() else {
         // C would never reach here with a working executor: the dispatch always
         // deposits the EState link for an aggregate support call.
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "AggRegisterCallback: no live EState back-pointer on the dispatch channel \
              (the aggregate transfn/finalfn dispatch did not deposit it)",
         ));
@@ -696,7 +696,7 @@ fn agg_register_callback_shim<'mcx>(
     // the ExprContext's per-query memory and prepend it to the list (reverse
     // execution order), faithful to execUtils.c:RegisterExprContextCallback.
     let econtext = estate.ecxt_mut(ecxt_id);
-    let mut ecxt_callback = mcx::alloc_in(
+    let mut ecxt_callback = ::mcx::alloc_in(
         econtext.ecxt_per_query_memory,
         ::nodes::execnodes::ExprContext_CB {
             next: None,

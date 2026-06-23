@@ -48,8 +48,8 @@ use alloc::boxed::Box;
 use alloc::format;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, BlockNumber, OffsetNumber, Oid};
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, BlockNumber, OffsetNumber, Oid};
 use types_error::{PgError, PgResult};
 use types_nbtree::{
     BTScanInsert, BTScanInsertData, BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsPinned,
@@ -57,18 +57,18 @@ use types_nbtree::{
     BT_PIVOT_HEAP_TID_ATTR, BTORDER_PROC, BTP_DELETED, BTP_HALF_DEAD, BTP_INCOMPLETE_SPLIT,
     BTP_LEAF, INDEX_ALT_TID_MASK, MaxTIDsPerBTreePage, P_FIRSTKEY, P_HIKEY, P_NONE,
 };
-use rel::Relation;
-use types_scan::scankey::{
+use ::rel::Relation;
+use ::types_scan::scankey::{
     ScanKeyData, StrategyNumber, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber,
     BTGreaterStrategyNumber, BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy,
     SK_BT_DESC, SK_BT_NULLS_FIRST, SK_ISNULL, SK_ROW_END, SK_ROW_HEADER, SK_ROW_MEMBER,
     SK_SEARCHNOTNULL, SK_BT_MINVAL, SK_BT_MAXVAL,
 };
-use types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
-use types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE};
-use types_storage::storage::Buffer;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{IndexTupleData, IndexTupleSize, ItemPointerData};
+use ::types_scan::sdir::{ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward};
+use ::types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE};
+use ::types_storage::storage::Buffer;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{IndexTupleData, IndexTupleSize, ItemPointerData};
 
 use page::{
     ItemIdIsDead, ItemPointerCompare, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
@@ -80,7 +80,7 @@ use nbtree_seams as btparallel;
 use indexam_seams as indexam;
 use bufmgr_seams as bufmgr;
 use lsyscache_seams as lsyscache;
-use fmgr_seams::function_call2_coll_datum;
+use ::fmgr_seams::function_call2_coll_datum;
 
 use crate::page::{
     bt_metaversion, bt_relbuf as page_bt_relbuf, _bt_getbuf, _bt_getroot, _bt_gettrueroot,
@@ -213,7 +213,7 @@ struct PageOpaque {
 fn read_ipd(bytes: &[u8]) -> ItemPointerData {
     debug_assert!(bytes.len() >= 6);
     ItemPointerData {
-        ip_blkid: types_tuple::heaptuple::BlockIdData {
+        ip_blkid: ::types_tuple::heaptuple::BlockIdData {
             bi_hi: u16::from_ne_bytes([bytes[0], bytes[1]]),
             bi_lo: u16::from_ne_bytes([bytes[2], bytes[3]]),
         },
@@ -468,7 +468,7 @@ fn predicate_lock_page<'mcx>(
 #[inline]
 fn isolation_is_serializable() -> bool {
     transam_xact_seams::xact_iso_level::call()
-        == types_core::xact::XACT_SERIALIZABLE
+        == ::types_core::xact::XACT_SERIALIZABLE
 }
 
 /// `pgstat_count_index_scan(rel)` (pgstat.h macro): increment the relation's
@@ -885,7 +885,7 @@ fn _bt_binsrch_inner<'mcx>(
 /// only used during insertion. Caches `low`/`stricthigh` in `insertstate`.
 pub fn bt_binsrch_insert<'mcx>(
     rel: &Relation<'mcx>,
-    insertstate: &mut types_nbtree::BTInsertStateData<'mcx>,
+    insertstate: &mut ::types_nbtree::BTInsertStateData<'mcx>,
 ) -> PgResult<OffsetNumber> {
     {
         let mcx = rel_mcx(rel);
@@ -896,7 +896,7 @@ pub fn bt_binsrch_insert<'mcx>(
 fn _bt_binsrch_insert_inner<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    insertstate: &mut types_nbtree::BTInsertStateData<'mcx>,
+    insertstate: &mut ::types_nbtree::BTInsertStateData<'mcx>,
 ) -> PgResult<OffsetNumber> {
     let buf = insertstate.buf;
     let opaque = bufmgr::buffer_with_page(buf, |page_bytes| opaque_from_bytes(page_bytes))?;
@@ -1821,7 +1821,7 @@ fn _bt_readpage<'mcx>(
     let maxoff = PageGetMaxOffsetNumber(&page);
 
     /* initialize page-level state that we'll pass to _bt_checkkeys */
-    let mut pstate = types_nbtree::BTReadPageState::new(mcx);
+    let mut pstate = ::types_nbtree::BTReadPageState::new(mcx);
     pstate.minoff = minoff;
     pstate.maxoff = maxoff;
     pstate.finaltup = None;

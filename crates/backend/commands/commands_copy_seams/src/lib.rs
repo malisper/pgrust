@@ -7,12 +7,12 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_copy::CopyFormatOptions;
-use types_core::primitive::AttrNumber;
-use types_error::PgResult;
+use ::types_copy::CopyFormatOptions;
+use ::types_core::primitive::AttrNumber;
+use ::types_error::PgResult;
 use ::nodes::nodes::NodePtr;
-use rel::Relation;
-use types_tuple::heaptuple::TupleDesc;
+use ::rel::Relation;
+use ::types_tuple::heaptuple::TupleDesc;
 
 seam_core::seam!(
     /// `ProcessCopyOptions(pstate, opts_out, is_from, options)`

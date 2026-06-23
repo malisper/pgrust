@@ -21,16 +21,16 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_catalog as cat;
 use types_core::{InvalidOid, Oid};
-use types_error::PgResult;
-use rel::Relation;
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use heaptuple::{heap_form_tuple, heap_modify_tuple};
-use catalog_catalog::GetNewOidWithIndex;
+use ::catalog_catalog::GetNewOidWithIndex;
 
 use crate::keystone::{
     CatalogCloseIndexes, CatalogOpenIndexes, CatalogTupleInsert, CatalogTupleUpdate,
@@ -42,7 +42,7 @@ use crate::keystone::{
 /// inline). The `InsertRow` carriers already hold the NUL-padded image
 /// (`namestrcpy` ran in the port), so this wraps the bytes unchanged.
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8; 64]) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &image[..])?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &image[..])?))
 }
 
 /// Shared tail: `heap_form_tuple(RelationGetDescr(rel), values, nulls)` +
@@ -80,7 +80,7 @@ fn form_and_multi_insert<'mcx, F>(
     mut row: F,
 ) -> PgResult<()>
 where
-    F: FnMut(usize) -> PgResult<(mcx::PgVec<'mcx, Datum<'mcx>>, mcx::PgVec<'mcx, bool>)>,
+    F: FnMut(usize) -> PgResult<(::mcx::PgVec<'mcx, Datum<'mcx>>, ::mcx::PgVec<'mcx, bool>)>,
 {
     // /* Nothing to do */ — no rows, so no index work either.
     if n == 0 {
@@ -88,7 +88,7 @@ where
     }
 
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let mut tuples: mcx::PgVec<'mcx, FormedTuple<'mcx>> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut tuples: ::mcx::PgVec<'mcx, FormedTuple<'mcx>> = ::mcx::vec_with_capacity_in(mcx, n)?;
     for i in 0..n {
         // The C caller fills slot[i]->tts_values/tts_isnull and
         // ExecStoreVirtualTuple; heap_multi_insert forms the heap tuple. The
@@ -132,7 +132,7 @@ fn multi_insert_pg_depend<'mcx>(
             // slot->tts_values[Anum_pg_depend_refobjid - 1]   = ObjectIdGetDatum(refobjid);
             // slot->tts_values[Anum_pg_depend_refobjsubid - 1]= Int32GetDatum(refobjsubid);
             // slot->tts_values[Anum_pg_depend_deptype - 1]    = CharGetDatum((char) deptype);
-            let mut values = mcx::vec_with_capacity_in(mcx, cat::catalog_dependency::Natts_pg_depend)?;
+            let mut values = ::mcx::vec_with_capacity_in(mcx, cat::catalog_dependency::Natts_pg_depend)?;
             values.push(Datum::from_oid(f.classid));
             values.push(Datum::from_oid(f.objid));
             values.push(Datum::from_i32(f.objsubid));
@@ -141,7 +141,7 @@ fn multi_insert_pg_depend<'mcx>(
             values.push(Datum::from_i32(f.refobjsubid));
             values.push(Datum::from_char(f.deptype));
             // memset(tts_isnull, false, natts);
-            let mut nulls = mcx::vec_with_capacity_in(mcx, cat::catalog_dependency::Natts_pg_depend)?;
+            let mut nulls = ::mcx::vec_with_capacity_in(mcx, cat::catalog_dependency::Natts_pg_depend)?;
             for _ in 0..cat::catalog_dependency::Natts_pg_depend {
                 nulls.push(false);
             }
@@ -167,7 +167,7 @@ fn multi_insert_pg_shdepend<'mcx>(
         |i| {
             let f = &forms[i];
             // dbid / classid / objid / objsubid / refclassid / refobjid / deptype
-            let mut values = mcx::vec_with_capacity_in(mcx, cat::catalog_shdepend::Natts_pg_shdepend)?;
+            let mut values = ::mcx::vec_with_capacity_in(mcx, cat::catalog_shdepend::Natts_pg_shdepend)?;
             values.push(Datum::from_oid(f.dbid));
             values.push(Datum::from_oid(f.classid));
             values.push(Datum::from_oid(f.objid));
@@ -175,7 +175,7 @@ fn multi_insert_pg_shdepend<'mcx>(
             values.push(Datum::from_oid(f.refclassid));
             values.push(Datum::from_oid(f.refobjid));
             values.push(Datum::from_char(f.deptype));
-            let mut nulls = mcx::vec_with_capacity_in(mcx, cat::catalog_shdepend::Natts_pg_shdepend)?;
+            let mut nulls = ::mcx::vec_with_capacity_in(mcx, cat::catalog_shdepend::Natts_pg_shdepend)?;
             for _ in 0..cat::catalog_shdepend::Natts_pg_shdepend {
                 nulls.push(false);
             }
@@ -196,12 +196,12 @@ fn multi_insert_pg_enum<'mcx>(
     form_and_multi_insert(mcx, rel, rows.len(), cat::pg_enum::Natts_pg_enum, |i| {
         let r = &rows[i];
         // oid / enumtypid / enumsortorder (Float4) / enumlabel (NameGetDatum)
-        let mut values = mcx::vec_with_capacity_in(mcx, cat::pg_enum::Natts_pg_enum)?;
+        let mut values = ::mcx::vec_with_capacity_in(mcx, cat::pg_enum::Natts_pg_enum)?;
         values.push(Datum::from_oid(r.oid));
         values.push(Datum::from_oid(r.enumtypid));
         values.push(Datum::from_f32(r.enumsortorder));
         values.push(name_datum(mcx, &r.enumlabel)?);
-        let mut nulls = mcx::vec_with_capacity_in(mcx, cat::pg_enum::Natts_pg_enum)?;
+        let mut nulls = ::mcx::vec_with_capacity_in(mcx, cat::pg_enum::Natts_pg_enum)?;
         for _ in 0..cat::pg_enum::Natts_pg_enum {
             nulls.push(false);
         }
@@ -468,7 +468,7 @@ fn buildint2vector<'mcx>(mcx: Mcx<'mcx>, int2s: &[i16]) -> PgResult<Datum<'mcx>>
     const HEADER: usize = 24;
     let n = int2s.len();
     let total = HEADER + n * core::mem::size_of::<i16>();
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     // SET_VARSIZE(result, Int2VectorSize(n)): va_header = (uint32) total << 2.
     let vl_len: u32 = (total as u32) << 2;
@@ -495,7 +495,7 @@ fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>>
     const VARHDRSZ: usize = 4;
     let payload = s.as_bytes();
     let total = VARHDRSZ + payload.len();
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     // SET_VARSIZE(result, total): va_header = (uint32) total << 2 (4B format).
     let vl_len: u32 = (total as u32) << 2;
@@ -519,8 +519,8 @@ fn insert_pg_statistic_ext<'mcx>(
     let stxkeys = buildint2vector(mcx, &row.stxkeys)?;
 
     // stxkind = construct_array_builtin(types, ntypes, CHAROID);
-    let mut kind_elems: mcx::PgVec<'mcx, datum::datum::Datum> =
-        mcx::vec_with_capacity_in(mcx, row.stxkind.len())?;
+    let mut kind_elems: ::mcx::PgVec<'mcx, datum::datum::Datum> =
+        ::mcx::vec_with_capacity_in(mcx, row.stxkind.len())?;
     for &c in &row.stxkind {
         kind_elems.push(datum::datum::Datum::from_char(c));
     }
@@ -666,7 +666,7 @@ fn cstring_get_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>
     let mut buf = Vec::with_capacity(total);
     buf.extend_from_slice(&word.to_ne_bytes());
     buf.extend_from_slice(payload);
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &buf)?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &buf)?))
 }
 
 /// `namestrcpy(&name, src)` — copy `src` into a zero-filled 64-byte `NameData`,
@@ -684,11 +684,11 @@ fn namestrcpy_image(src: &str) -> [u8; 64] {
 /// tuple, read out of the deformed fixed columns.
 fn rewrite_tuple_oid<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>, tup: &FormedTuple<'mcx>) -> PgResult<Oid> {
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let cols = heaptuple::heap_deform_tuple(mcx, &tup.tuple, &tupdesc, &tup.data)?;
+    let cols = ::heaptuple::heap_deform_tuple(mcx, &tup.tuple, &tupdesc, &tup.data)?;
     let idx = cat::pg_rewrite::Anum_pg_rewrite_oid as usize - 1;
     let (value, isnull) = &cols[idx];
     if *isnull {
-        return Err(types_error::PgError::error("pg_rewrite.oid is NULL"));
+        return Err(::types_error::PgError::error("pg_rewrite.oid is NULL"));
     }
     Ok(value.as_oid())
 }
@@ -880,7 +880,7 @@ fn buildoidvector<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<Datum<'mcx>> {
     const HEADER: usize = 24;
     let n = oids.len();
     let total = HEADER + n * core::mem::size_of::<Oid>();
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     // SET_VARSIZE(result, OidVectorSize(n)): va_header = (uint32) total << 2.
     let vl_len: u32 = (total as u32) << 2;
@@ -903,8 +903,8 @@ fn buildoidvector<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<Datum<'mcx>> {
 /// OID is pass-by-value, so the element-`Datum` path of `construct_array`
 /// resolves without the by-ref `datum_as_byte_window` detoast leg.
 fn build_oid_array<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<Datum<'mcx>> {
-    let mut elems: mcx::PgVec<'mcx, datum::datum::Datum> =
-        mcx::vec_with_capacity_in(mcx, oids.len())?;
+    let mut elems: ::mcx::PgVec<'mcx, datum::datum::Datum> =
+        ::mcx::vec_with_capacity_in(mcx, oids.len())?;
     for &o in oids {
         elems.push(datum::datum::Datum::from_oid(o));
     }
@@ -918,8 +918,8 @@ fn build_oid_array<'mcx>(mcx: Mcx<'mcx>, oids: &[Oid]) -> PgResult<Datum<'mcx>> 
 /// `construct_array(chars, n, CHAROID, 1, true, 'c')` — a 1-D `char[]` array
 /// varlena. `char` is pass-by-value.
 fn build_char_array<'mcx>(mcx: Mcx<'mcx>, chars: &[i8]) -> PgResult<Datum<'mcx>> {
-    let mut elems: mcx::PgVec<'mcx, datum::datum::Datum> =
-        mcx::vec_with_capacity_in(mcx, chars.len())?;
+    let mut elems: ::mcx::PgVec<'mcx, datum::datum::Datum> =
+        ::mcx::vec_with_capacity_in(mcx, chars.len())?;
     for &c in chars {
         elems.push(datum::datum::Datum::from_char(c));
     }
@@ -943,7 +943,7 @@ fn proc_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
     let payload = s.as_bytes();
     let total = 4 + payload.len();
     let word = (total as u32) << 2;
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     buf[0..4].copy_from_slice(&word.to_ne_bytes());
     buf[4..].copy_from_slice(payload);
@@ -1066,7 +1066,7 @@ fn proc_values_nulls<'mcx>(
     match &row.proacl {
         Some(image) => {
             values[(pp::Anum_pg_proc_proacl - 1) as usize] =
-                Datum::ByRef(mcx::slice_in(mcx, image)?)
+                Datum::ByRef(::mcx::slice_in(mcx, image)?)
         }
         None => nulls[(pp::Anum_pg_proc_proacl - 1) as usize] = true,
     }

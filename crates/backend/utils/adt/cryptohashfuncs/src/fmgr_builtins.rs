@@ -13,8 +13,8 @@
 //! retset are transcribed exactly from `pg_proc.dat`: every row is `nargs => 1`,
 //! `proisstrict 't'`, `proretset 'f'`.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARHDRSZ` — the 4-byte uncompressed varlena length word.

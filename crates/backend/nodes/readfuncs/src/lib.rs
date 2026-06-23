@@ -78,7 +78,7 @@ use ::nodes::primnodes::{
 };
 use types_tuple::heaptuple::Datum;
 
-use nodes_core::read::{self, Token};
+use ::nodes_core::read::{self, Token};
 
 /// `elog(ERROR, msg)` — an internal-error `PgError` (`ERRCODE_INTERNAL_ERROR`),
 /// the shape `readfuncs.c`'s `elog(ERROR, ...)` raises for a malformed node
@@ -304,14 +304,14 @@ pub(crate) fn read_bitmapset_opt_field<'mcx>(
     if er.words.iter().all(|w| *w == 0) {
         return Ok(None);
     }
-    let mut words = mcx::PgVec::new_in(mcx);
+    let mut words = ::mcx::PgVec::new_in(mcx);
     words
         .try_reserve(er.words.len())
         .map_err(|_| elog_error("out of memory reading bitmapset"))?;
     for w in &er.words {
         words.push(*w);
     }
-    Ok(Some(mcx::alloc_in(
+    Ok(Some(::mcx::alloc_in(
         mcx,
         ::nodes::bitmapset::Bitmapset { words },
     )?))
@@ -555,10 +555,10 @@ fn read_datum<'mcx>(mcx: Mcx<'mcx>, typbyval: bool) -> PgResult<Datum<'mcx>> {
         Datum::ByVal(usize::from_ne_bytes(bytes))
     } else if length == 0 {
         // res = (Datum) NULL — an empty by-reference image.
-        Datum::ByRef(mcx::PgVec::new_in(mcx))
+        Datum::ByRef(::mcx::PgVec::new_in(mcx))
     } else {
         // s = palloc(length); for i in 0..length { s[i] = atoi(token); }
-        let mut bytes = mcx::PgVec::new_in(mcx);
+        let mut bytes = ::mcx::PgVec::new_in(mcx);
         bytes
             .try_reserve(length)
             .map_err(|_| elog_error("out of memory reading datum"))?;
@@ -623,7 +623,7 @@ fn read_const<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Const> {
             }
             _ => v,
         };
-        nodes_core::makefuncs::intern_const_value(&v)?
+        ::nodes_core::makefuncs::intern_const_value(&v)?
     };
 
     Ok(Const {
@@ -711,7 +711,7 @@ fn read_targetentry<'mcx>(mcx: Mcx<'mcx>) -> PgResult<TargetEntry<'mcx>> {
     // TargetEntry.expr is a `PgBox<'mcx, Expr>`; box the read child into mcx.
     let expr = match expr {
         None => None,
-        Some(e) => Some(mcx::alloc_in(mcx, *e)?),
+        Some(e) => Some(::mcx::alloc_in(mcx, *e)?),
     };
     let resno = read_int_field()? as i16;
     let resname = read_string_field(mcx)?;
@@ -793,7 +793,7 @@ pub fn parse_node_string<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgBox<'mcx, Node<'mcx
         }
     };
 
-    mcx::alloc_in(mcx, node).map_err(Into::into)
+    ::mcx::alloc_in(mcx, node).map_err(Into::into)
 }
 
 /// Install this unit's inward seam: `parse_node_string`, declared on
@@ -825,9 +825,9 @@ pub(crate) fn ensure_seams_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodes_core::read::string_to_node;
-    use outfuncs::nodeToString;
-    use mcx::MemoryContext;
+    use ::nodes_core::read::string_to_node;
+    use ::outfuncs::nodeToString;
+    use ::mcx::MemoryContext;
     use ::nodes::value::{BitString, Boolean, Float, Integer, StringNode};
 
     /// OUT a node, READ it back, and assert the reparse re-serializes to
@@ -868,10 +868,10 @@ mod tests {
     fn float_round_trips() {
         let ctx = MemoryContext::new("flt");
         let mcx = ctx.mcx();
-        let fval = mcx::PgString::from_str_in("3.14", mcx).unwrap();
+        let fval = ::mcx::PgString::from_str_in("3.14", mcx).unwrap();
         assert_round_trip(&Node::mk_float(mcx, Float { fval })?, "3.14");
         // A value too large for i32 lexes as Float and is kept verbatim.
-        let big = mcx::PgString::from_str_in("99999999999999999999", mcx).unwrap();
+        let big = ::mcx::PgString::from_str_in("99999999999999999999", mcx).unwrap();
         assert_round_trip(&Node::mk_float(mcx, Float { fval: big })?, "99999999999999999999");
     }
 
@@ -880,13 +880,13 @@ mod tests {
         let ctx = MemoryContext::new("str");
         let mcx = ctx.mcx();
         // _outString wraps in quotes; the inner content is outToken-escaped.
-        let sval = mcx::PgString::from_str_in("hello", mcx).unwrap();
+        let sval = ::mcx::PgString::from_str_in("hello", mcx).unwrap();
         assert_round_trip(&Node::mk_string(mcx, StringNode { sval })?, "\"hello\"");
         // A string with a space gets the space backslash-escaped inside quotes.
-        let spaced = mcx::PgString::from_str_in("a b", mcx).unwrap();
+        let spaced = ::mcx::PgString::from_str_in("a b", mcx).unwrap();
         assert_round_trip(&Node::mk_string(mcx, StringNode { sval: spaced })?, "\"a\\ b\"");
         // The empty string is just `""` (no outToken `""` doubling).
-        let empty = mcx::PgString::from_str_in("", mcx).unwrap();
+        let empty = ::mcx::PgString::from_str_in("", mcx).unwrap();
         assert_round_trip(&Node::mk_string(mcx, StringNode { sval: empty })?, "\"\"");
     }
 
@@ -894,9 +894,9 @@ mod tests {
     fn bitstring_round_trips() {
         let ctx = MemoryContext::new("bits");
         let mcx = ctx.mcx();
-        let bsval = mcx::PgString::from_str_in("b101", mcx).unwrap();
+        let bsval = ::mcx::PgString::from_str_in("b101", mcx).unwrap();
         assert_round_trip(&Node::mk_bit_string(mcx, BitString { bsval })?, "b101");
-        let hex = mcx::PgString::from_str_in("xFF", mcx).unwrap();
+        let hex = ::mcx::PgString::from_str_in("xFF", mcx).unwrap();
         assert_round_trip(&Node::mk_bit_string(mcx, BitString { bsval: hex })?, "xFF");
     }
 
@@ -906,10 +906,10 @@ mod tests {
         let mcx = ctx.mcx();
         // A `(node node ...)` list of value nodes: `_outList` for T_List emits
         // `(` + space-separated children + `)`.
-        let mut elements: mcx::PgVec<'_, PgBox<'_, Node<'_>>> =
-            mcx::vec_with_capacity_in(mcx, 2).unwrap();
-        elements.push(mcx::alloc_in(mcx, Node::mk_integer(mcx, Integer { ival: 10 })?).unwrap());
-        elements.push(mcx::alloc_in(mcx, Node::mk_boolean(mcx, Boolean { boolval: true })?).unwrap());
+        let mut elements: ::mcx::PgVec<'_, PgBox<'_, Node<'_>>> =
+            ::mcx::vec_with_capacity_in(mcx, 2).unwrap();
+        elements.push(::mcx::alloc_in(mcx, Node::mk_integer(mcx, Integer { ival: 10 })?).unwrap());
+        elements.push(::mcx::alloc_in(mcx, Node::mk_boolean(mcx, Boolean { boolval: true })?).unwrap());
         assert_round_trip(&Node::mk_list(mcx, elements)?, "(10 true)");
     }
 
@@ -917,8 +917,8 @@ mod tests {
     fn empty_node_list_round_trips() {
         let ctx = MemoryContext::new("emptylist");
         let mcx = ctx.mcx();
-        let elements: mcx::PgVec<'_, PgBox<'_, Node<'_>>> =
-            mcx::vec_with_capacity_in(mcx, 0).unwrap();
+        let elements: ::mcx::PgVec<'_, PgBox<'_, Node<'_>>> =
+            ::mcx::vec_with_capacity_in(mcx, 0).unwrap();
         // An empty list serializes as `()`.
         let node = Node::mk_list(mcx, elements)?;
         let text = nodeToString(mcx, &node).unwrap();
@@ -1051,8 +1051,8 @@ mod tests {
         ensure_seams();
         let ctx = MemoryContext::new("te");
         let mcx = ctx.mcx();
-        let expr = mcx::alloc_in(mcx, Expr::Var(mk_var()?)).unwrap();
-        let resname = mcx::PgString::from_str_in("col", mcx).unwrap();
+        let expr = ::mcx::alloc_in(mcx, Expr::Var(mk_var()?)).unwrap();
+        let resname = ::mcx::PgString::from_str_in("col", mcx).unwrap();
         let te = TargetEntry {
             expr: Some(expr),
             resno: 1,
@@ -1126,12 +1126,12 @@ mod tests {
             v.extend_from_slice(payload);
             v
         };
-        let mut bytes = mcx::PgVec::new_in(mcx);
+        let mut bytes = ::mcx::PgVec::new_in(mcx);
         for &b in &image {
             bytes.push(b);
         }
         let constvalue =
-            nodes_core::makefuncs::intern_const_value(&Datum::ByRef(bytes)).unwrap();
+            ::nodes_core::makefuncs::intern_const_value(&Datum::ByRef(bytes)).unwrap();
         let konst = Const {
             consttype: 25, // TEXTOID
             consttypmod: -1,

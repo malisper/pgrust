@@ -1,11 +1,11 @@
 //! Heavyweight-lock vocabulary (`storage/lock.h`, `storage/lockdefs.h`),
 //! trimmed to the items ports consume so far.
 
-use types_core::int64;
-use types_core::uint16;
-use types_core::uint32;
-use types_core::uint8;
-use types_core::Oid;
+use ::types_core::int64;
+use ::types_core::uint16;
+use ::types_core::uint32;
+use ::types_core::uint8;
+use ::types_core::Oid;
 
 use crate::ilist::{dclist_head, dlist_head, dlist_node};
 
@@ -164,7 +164,7 @@ pub struct LockInstanceData {
     /// `VirtualTransactionId vxid` — virtual transaction ID of this PGPROC.
     pub vxid: crate::storage::VirtualTransactionId,
     /// `TimestampTz waitStart` — when this PGPROC started waiting for the lock.
-    pub waitStart: types_core::TimestampTz,
+    pub waitStart: ::types_core::TimestampTz,
     /// `int pid` — pid of this PGPROC.
     pub pid: i32,
     /// `int leaderPid` — pid of the group leader; `= pid` if no group.
@@ -217,7 +217,7 @@ pub enum VirtualXactExamineOutcome {
     /// The VXID is still running and `wait == true`: any fast-path VXID lock has
     /// been transferred to the main lock table; `xid` is the target proc's `xid`
     /// (possibly `InvalidTransactionId`). The caller sleeps on the VXID lock.
-    Proceed { xid: types_core::TransactionId },
+    Proceed { xid: ::types_core::TransactionId },
 }
 
 /// `enum LockAcquireResult` (`storage/lock.h`).

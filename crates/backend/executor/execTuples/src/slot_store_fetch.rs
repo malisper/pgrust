@@ -9,15 +9,15 @@
 //! the `slot->tts_ops->{get,copy}_{heap,minimal}_tuple` / `materialize` /
 //! `clear` / `copyslot` dispatch.
 
-use mcx::Mcx;
-use types_core::primitive::Size;
+use ::mcx::Mcx;
+use ::types_core::primitive::Size;
 use types_error::{PgError, PgResult};
 use ::nodes::tuptable::{SlotData, TTS_FLAG_SHOULDFREE};
 use ::nodes::TupleSlotKind;
-use types_storage::buf::{Buffer, BufferIsValid};
+use ::types_storage::buf::{Buffer, BufferIsValid};
 // The canonical value enum.
-use types_tuple::heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
-use types_tuple::heaptuple::{TupleDesc, MINIMAL_TUPLE_OFFSET};
+use ::types_tuple::heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
+use ::types_tuple::heaptuple::{TupleDesc, MINIMAL_TUPLE_OFFSET};
 
 use crate::slot_ops_vtables::{
     slot_clear, slot_copyslot, slot_materialize, slot_release, tts_buffer_heap_copy_heap_tuple,
@@ -442,7 +442,7 @@ pub fn ExecResetOneSlot(slot: &mut SlotData<'_>) -> PgResult<()> {
             // The owned descriptor lives in a PgBox; DecrTupleDescRefCount takes
             // the value (and frees it when the count reaches zero).
             tupdesc::DecrTupleDescRefCount(
-                mcx::PgBox::into_inner(desc),
+                ::mcx::PgBox::into_inner(desc),
             )?;
         }
     }
@@ -486,7 +486,7 @@ pub fn ExecSetSlotDescriptor<'mcx>(
     // arrays (C: pfree(tts_values)/pfree(tts_isnull)).
     if let Some(old) = base.tts_tupleDescriptor.take() {
         if old.tdrefcount >= 0 {
-            tupdesc::DecrTupleDescRefCount(mcx::PgBox::into_inner(old))?;
+            tupdesc::DecrTupleDescRefCount(::mcx::PgBox::into_inner(old))?;
         }
     }
 
@@ -499,8 +499,8 @@ pub fn ExecSetSlotDescriptor<'mcx>(
     base.tts_tupleDescriptor = Some(tupdesc);
 
     // Allocate Datum/isnull arrays of the appropriate size.
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> = mcx::vec_with_capacity_in(mcx, natts)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> = ::mcx::vec_with_capacity_in(mcx, natts)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, natts)?;
     values.resize(natts, Datum::null());
     isnull.resize(natts, false);
     base.tts_values = values;

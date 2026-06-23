@@ -52,8 +52,8 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::fmgr::NAMEDATALEN;
-use types_core::primitive::Oid;
+use ::types_core::fmgr::NAMEDATALEN;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{
@@ -277,7 +277,7 @@ pub fn generate_function_name_catalog<'mcx>(
             }
         }
         let arg_types: alloc::vec::Vec<Oid> = argtypes.iter().copied().collect();
-        let detail = parse_func_seams::func_get_detail::call(
+        let detail = ::parse_func_seams::func_get_detail::call(
             mcx,
             &names,
             &arg_names,
@@ -286,7 +286,7 @@ pub fn generate_function_name_catalog<'mcx>(
             !use_variadic,
             true,
         )?;
-        use parse_func_seams::FuncDetailCode as FDC;
+        use ::parse_func_seams::FuncDetailCode as FDC;
         matches!(
             detail.fdresult,
             FDC::Normal | FDC::Aggregate | FDC::WindowFunc
@@ -315,7 +315,7 @@ pub fn generate_operator_clause_catalog<'mcx>(
     opoid: Oid,
     rightop: &[u8],
     rightoptype: Oid,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     // opertup = SearchSysCache1(OPEROID, opoid); elog(ERROR) on miss.
     let operform = match syscache_seams::oper_row_by_oid::call(mcx, opoid)? {
         Some(o) => o,
@@ -362,7 +362,7 @@ pub fn generate_operator_clause_catalog<'mcx>(
         add_cast_to(mcx, &mut buf, operform.oprright)?;
     }
 
-    mcx::slice_in(mcx, &buf)
+    ::mcx::slice_in(mcx, &buf)
 }
 
 /// `add_cast_to(buf, typid)` (ruleutils.c:13478) — append `::nsp.typ` for the
@@ -1176,14 +1176,14 @@ pub fn deparse_context_for<'mcx>(
         aliasname: Some(pstrdup(mcx, aliasname)?),
         colnames: PgVec::new_in(mcx),
     };
-    rte.alias = Some(mcx::alloc_in(mcx, alias)?);
+    rte.alias = Some(::mcx::alloc_in(mcx, alias)?);
     // rte->eref = rte->alias (a second copy, since the owned model has no shared
     // pointers; both carry the same aliasname/colnames).
     let eref = Alias {
         aliasname: Some(pstrdup(mcx, aliasname)?),
         colnames: PgVec::new_in(mcx),
     };
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
     rte.lateral = false;
     rte.inh = false;
     rte.inFromCl = true;
@@ -1223,12 +1223,12 @@ pub(crate) fn deparse_context_for_old_new<'mcx>(
             aliasname: Some(pstrdup(mcx, name)?),
             colnames: PgVec::new_in(mcx),
         };
-        rte.alias = Some(mcx::alloc_in(mcx, alias)?);
+        rte.alias = Some(::mcx::alloc_in(mcx, alias)?);
         let eref = Alias {
             aliasname: Some(pstrdup(mcx, name)?),
             colnames: PgVec::new_in(mcx),
         };
-        rte.eref = Some(mcx::alloc_in(mcx, eref)?);
+        rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
         rte.lateral = false;
         rte.inh = false;
         rte.inFromCl = true;
@@ -2292,7 +2292,7 @@ fn clone_subplan<'mcx>(
     sub: &Option<PgBox<'_, Node<'_>>>,
 ) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>> {
     match sub {
-        Some(b) => Ok(Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?)),
+        Some(b) => Ok(Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -2309,7 +2309,7 @@ fn tlist_as_node_vec<'mcx>(
     if let Some(tl) = tlist {
         out.try_reserve(tl.len()).map_err(|_| mcx.oom(0))?;
         for tle in tl.iter() {
-            out.push(mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?)?);
+            out.push(::mcx::alloc_in(mcx, Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?)?);
         }
     }
     Ok(out)
@@ -2330,20 +2330,20 @@ pub fn set_deparse_plan<'mcx, 'p>(
     let header = plan.plan_head();
 
     // dpns->plan = plan;
-    dpns.plan = Some(mcx::alloc_in(mcx, plan.clone_in(mcx)?)?);
+    dpns.plan = Some(::mcx::alloc_in(mcx, plan.clone_in(mcx)?)?);
 
     // OUTER referent: Append/MergeAppend special-case the first child.
     dpns.outer_plan = match tag {
         ntag::T_Append => match plan.as_append() {
             Some(a) => match a.appendplans.first() {
-                Some(c) => Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
+                Some(c) => Some(::mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
                 None => None,
             },
             None => None,
         },
         ntag::T_MergeAppend => match plan.as_mergeappend() {
             Some(m) => match m.mergeplans.first() {
-                Some(c) => Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
+                Some(c) => Some(::mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
                 None => None,
             },
             None => None,
@@ -2369,7 +2369,7 @@ pub fn set_deparse_plan<'mcx, 'p>(
                 // list_nth(dpns->subplans, ctePlanId - 1)
                 let idx = (c.ctePlanId - 1) as usize;
                 match dpns.subplans.get(idx) {
-                    Some(p) => Some(mcx::alloc_in(mcx, p.clone_in(mcx)?)?),
+                    Some(p) => Some(::mcx::alloc_in(mcx, p.clone_in(mcx)?)?),
                     None => None,
                 }
             }
@@ -2385,7 +2385,7 @@ pub fn set_deparse_plan<'mcx, 'p>(
                     clone_subplan(mcx, &header.lefttree)?
                 } else {
                     // dpns->inner_plan = plan
-                    Some(mcx::alloc_in(mcx, plan.clone_in(mcx)?)?)
+                    Some(::mcx::alloc_in(mcx, plan.clone_in(mcx)?)?)
                 }
             }
             None => None,
@@ -2436,7 +2436,7 @@ pub fn find_recursive_union<'mcx>(
         if ancestor.node_tag() == ::nodes::nodes::ntag::T_RecursiveUnion {
             if let Some(ru) = ancestor.as_recursiveunion() {
                 if ru.wtParam == wt_param {
-                    return mcx::alloc_in(mcx, ancestor.clone_in(mcx)?);
+                    return ::mcx::alloc_in(mcx, ancestor.clone_in(mcx)?);
                 }
             }
         }
@@ -2462,9 +2462,9 @@ pub fn push_child_plan<'mcx, 'p>(
         new_ancestors
             .try_reserve(dpns.ancestors.len() + 1)
             .map_err(|_| mcx.oom(0))?;
-        new_ancestors.push(mcx::alloc_in(mcx, p.clone_in(mcx)?)?);
+        new_ancestors.push(::mcx::alloc_in(mcx, p.clone_in(mcx)?)?);
         for a in dpns.ancestors.iter() {
-            new_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+            new_ancestors.push(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
         }
     }
     dpns.ancestors = new_ancestors;
@@ -2512,7 +2512,7 @@ pub fn push_ancestor_plan<'mcx, 'p>(
             .try_reserve(dpns.ancestors.len() - tail_start)
             .map_err(|_| mcx.oom(0))?;
         for a in dpns.ancestors.iter().skip(tail_start) {
-            new_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+            new_ancestors.push(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
         }
     }
     dpns.ancestors = new_ancestors;
@@ -2583,7 +2583,7 @@ pub fn deparse_context_for_plan_tree<'mcx, 'p>(
                 // owned model stores each present subplan as a cloned Node. Only
                 // CteScan reaches dpns->subplans (list_nth), which is gated below.
                 match sp {
-                    Some(b) => out.push(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                    Some(b) => out.push(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                     None => {
                         // list_nth would return NULL; keep alignment with a
                         // placeholder the CteScan path checks for None.
@@ -2652,7 +2652,7 @@ pub fn set_deparse_context_plan<'mcx, 'p>(
         .try_reserve(ancestors.len())
         .map_err(|_| mcx.oom(0))?;
     for a in ancestors.iter() {
-        new_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        new_ancestors.push(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
     }
     dpcontext[0].ancestors = new_ancestors;
 
@@ -2920,7 +2920,7 @@ fn Node_clone<'mcx>(
     mcx: Mcx<'mcx>,
     n: &PgBox<'mcx, Node<'mcx>>,
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
-    mcx::alloc_in(mcx, n.clone_in(mcx)?)
+    ::mcx::alloc_in(mcx, n.clone_in(mcx)?)
 }
 
 /// Clone a `FromExpr` into `mcx`.
@@ -3171,7 +3171,7 @@ pub fn pg_get_expr_worker<'mcx>(
     if let Some(tst) = drill_past_lists(&node) {
         if tst.node_tag() == ::nodes::nodes::ntag::T_Query {
             return Err(PgError::error("input is a query, not an expression")
-                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
         }
     }
 
@@ -3188,7 +3188,7 @@ pub fn pg_get_expr_worker<'mcx>(
             return Err(PgError::error(
                 "expression contains variables of more than one relation",
             )
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
         }
     } else {
         // !bms_is_empty(relids)
@@ -3198,7 +3198,7 @@ pub fn pg_get_expr_worker<'mcx>(
         };
         if !empty {
             return Err(PgError::error("expression contains variables")
-                .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
         }
     }
 
@@ -3231,7 +3231,7 @@ pub fn pg_get_expr_worker<'mcx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     use ::nodes::nodes::Node;
     use ::nodes::parsenodes::{RangeTblEntry, RTE_JOIN, RTE_SUBQUERY};
     use ::nodes::primnodes::{Expr, Var};
@@ -3240,7 +3240,7 @@ mod tests {
 
     /// `makeString(s)` as a boxed `Node`.
     fn make_string<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgBox<'mcx, Node<'mcx>> {
-        mcx::alloc_in(
+        ::mcx::alloc_in(
             mcx,
             Node::mk_string(mcx, StringNode {
                 sval: PgString::from_str_in(s, mcx).unwrap(),
@@ -3259,7 +3259,7 @@ mod tests {
         for c in cols {
             colnames.push(make_string(mcx, c));
         }
-        mcx::alloc_in(
+        ::mcx::alloc_in(
             mcx,
             Alias {
                 aliasname: name.map(|n| PgString::from_str_in(n, mcx).unwrap()),
@@ -3371,7 +3371,7 @@ mod tests {
                 varattno,
                 ..Default::default()
             };
-            jav.push(mcx::alloc_in(mcx, Node::mk_var(mcx, v)?).unwrap());
+            jav.push(::mcx::alloc_in(mcx, Node::mk_var(mcx, v)?).unwrap());
         }
         jrte.joinaliasvars = jav;
         jrte.joinleftcols = {
@@ -3402,8 +3402,8 @@ mod tests {
         let join = JoinExpr {
             jointype: ::nodes::jointype::JoinType::JOIN_INNER,
             isNatural: false,
-            larg: Some(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 })?).unwrap()),
-            rarg: Some(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 2 })?).unwrap()),
+            larg: Some(::mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 })?).unwrap()),
+            rarg: Some(::mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 2 })?).unwrap()),
             usingClause: {
                 let mut v = PgVec::new_in(mcx);
                 v.push(make_string(mcx, "k"));
@@ -3417,12 +3417,12 @@ mod tests {
         let fromexpr = FromExpr {
             fromlist: {
                 let mut v = PgVec::new_in(mcx);
-                v.push(mcx::alloc_in(mcx, Node::mk_join_expr(mcx, join)?).unwrap());
+                v.push(::mcx::alloc_in(mcx, Node::mk_join_expr(mcx, join)?).unwrap());
                 v
             },
             quals: None,
         };
-        q.jointree = Some(mcx::alloc_in(mcx, fromexpr).unwrap());
+        q.jointree = Some(::mcx::alloc_in(mcx, fromexpr).unwrap());
 
         let mut dpns = DeparseNamespace::zeroed(mcx);
         set_deparse_for_query(mcx, &mut dpns, &q, &[]).unwrap();

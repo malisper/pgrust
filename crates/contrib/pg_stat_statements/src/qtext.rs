@@ -9,7 +9,7 @@
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use types_tuple::heaptuple::Datum;
 

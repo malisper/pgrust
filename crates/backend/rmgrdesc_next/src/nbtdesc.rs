@@ -2,11 +2,11 @@
 
 use crate::appendf;
 use rmgrdesc_small_seams::{array_desc, offset_elem_desc};
-use mcx::PgString;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_error::PgResult;
 use wal::{DecodedXLogRecord, XLR_INFO_MASK};
-use xlog_records::arrays::{OffsetNumbers, SIZEOF_OFFSET_NUMBER};
-use xlog_records::nbtxlog::{xl_btree_delete, xl_btree_dedup, xl_btree_insert,
+use ::xlog_records::arrays::{OffsetNumbers, SIZEOF_OFFSET_NUMBER};
+use ::xlog_records::nbtxlog::{xl_btree_delete, xl_btree_dedup, xl_btree_insert,
                                   xl_btree_mark_page_halfdead, xl_btree_metadata,
                                   xl_btree_newroot, xl_btree_reuse_page, xl_btree_split,
                                   xl_btree_unlink_page, xl_btree_update, xl_btree_vacuum,
@@ -229,7 +229,7 @@ pub fn btree_identify(info: u8) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::test_support::record;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");

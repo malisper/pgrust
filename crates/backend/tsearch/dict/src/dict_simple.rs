@@ -6,10 +6,10 @@ use alloc::string::String;
 
 use define_seams::{def_get_boolean, def_get_string, DefElemArg};
 use ts_utils_seams::{readstoplist, searchstoplist};
-use formatting_seams::str_tolower;
+use ::formatting_seams::str_tolower;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use tsearch::{DictSimple, StopList, TSLexeme};
 
 use crate::{invalid_param, DEFAULT_COLLATION_OID};

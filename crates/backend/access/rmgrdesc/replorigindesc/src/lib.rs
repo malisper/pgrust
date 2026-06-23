@@ -18,8 +18,8 @@
 
 extern crate alloc;
 
-use mcx::PgString;
-use types_core::uint8;
+use ::mcx::PgString;
+use ::types_core::uint8;
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use wal::{xl_replorigin_drop, xl_replorigin_set, DecodedXLogRecord, XLR_INFO_MASK};
 
@@ -116,7 +116,7 @@ pub fn replorigin_identify(info: uint8) -> Option<&'static str> {
 /// `record->record`) and renders it.
 pub fn replorigin_desc_seam(
     buf: &mut PgString<'_>,
-    record: &wal::rmgr::XLogReaderState<'_>,
+    record: &::wal::rmgr::XLogReaderState<'_>,
 ) -> PgResult<()> {
     let record = record
         .record

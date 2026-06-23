@@ -3,7 +3,7 @@
 //! Two families of outward calls live here:
 //!
 //!  1. **The GIN AM vtable callbacks** the `ginhandler` assembles into the one
-//!     unified [`types_tableam::amapi::IndexAmRoutine`]. The callback *bodies*
+//!     unified [`::types_tableam::amapi::IndexAmRoutine`]. The callback *bodies*
 //!     are in the not-yet-ported sibling GIN units (`gininsert.c` /
 //!     `ginvacuum.c` / `ginscan.c` / `ginget.c`); `ginutil` is the first cyclic
 //!     caller (it builds the dispatch vector), so it declares the seams. Each
@@ -26,20 +26,20 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use types_core::fmgr::FmgrInfo;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_error::PgResult;
 use gin::{GinMetaPageData, GinNullCategory};
-use rel::Relation;
-use types_scan::scankey::ScanKeyData;
-use types_storage::storage::Buffer;
-use types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck, TIDBitmap};
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{ItemPointerData, TupleDesc};
+use ::rel::Relation;
+use ::types_scan::scankey::ScanKeyData;
+use ::types_storage::storage::Buffer;
+use ::types_tableam::amapi::{IndexBuildResult, IndexUniqueCheck, TIDBitmap};
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{ItemPointerData, TupleDesc};
 
 seam_core::seam!(
     /// `ginbuild(heap, index, indexInfo)` (gininsert.c): the GIN AM's `ambuild`
@@ -113,7 +113,7 @@ seam_core::seam!(
     pub fn gin_relation_get_relation_name<'mcx>(
         mcx: Mcx<'mcx>,
         index: &Relation<'mcx>,
-    ) -> PgResult<mcx::PgString<'mcx>>
+    ) -> PgResult<::mcx::PgString<'mcx>>
 );
 
 seam_core::seam!(
@@ -171,7 +171,7 @@ seam_core::seam!(
         flinfo: &FmgrInfo,
         collation: Oid,
         value: Datum<'mcx>,
-    ) -> PgResult<Option<(mcx::PgVec<'mcx, Datum<'mcx>>, mcx::PgVec<'mcx, bool>)>>
+    ) -> PgResult<Option<(::mcx::PgVec<'mcx, Datum<'mcx>>, ::mcx::PgVec<'mcx, bool>)>>
 );
 
 seam_core::seam!(
@@ -219,13 +219,13 @@ seam_core::seam!(
 /// where the opclass slot was NULL.
 pub struct GinExtractQueryResult<'mcx> {
     /// `Datum *queryValues` — the extracted query key datums.
-    pub query_values: mcx::PgVec<'mcx, Datum<'mcx>>,
+    pub query_values: ::mcx::PgVec<'mcx, Datum<'mcx>>,
     /// `bool *nullFlags` — per-key null flags (empty == C `NULL`).
-    pub null_flags: mcx::PgVec<'mcx, bool>,
+    pub null_flags: ::mcx::PgVec<'mcx, bool>,
     /// `bool *partial_matches` — per-key partial-match flags (empty == C `NULL`).
-    pub partial_matches: mcx::PgVec<'mcx, bool>,
+    pub partial_matches: ::mcx::PgVec<'mcx, bool>,
     /// `Pointer *extra_data` — per-key opclass-private data (`None` == C `NULL`).
-    pub extra_data: mcx::PgVec<'mcx, Option<mcx::PgVec<'mcx, u8>>>,
+    pub extra_data: ::mcx::PgVec<'mcx, Option<::mcx::PgVec<'mcx, u8>>>,
     /// `int32 searchMode` — the GIN search mode the opclass selected.
     pub search_mode: i32,
 }
@@ -284,9 +284,9 @@ seam_core::seam!(
     /// are *not* copied). `Err` carries the buffer / WAL `ereport(ERROR)`s.
     pub fn gin_update_stats<'mcx>(
         index: &Relation<'mcx>,
-        nTotalPages: types_core::primitive::BlockNumber,
-        nEntryPages: types_core::primitive::BlockNumber,
-        nDataPages: types_core::primitive::BlockNumber,
+        nTotalPages: ::types_core::primitive::BlockNumber,
+        nEntryPages: ::types_core::primitive::BlockNumber,
+        nDataPages: ::types_core::primitive::BlockNumber,
         nEntries: i64,
         is_build: bool,
     ) -> PgResult<()>

@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(pub fn exec_incrementalsort_estimate(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()>);
 seam_core::seam!(pub fn exec_incrementalsort_initialize_dsm(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()>);

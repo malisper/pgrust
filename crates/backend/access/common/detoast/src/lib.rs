@@ -14,7 +14,7 @@
 //! buffer) and returns freshly `palloc`'d results. Here a varlena `Datum`
 //! argument is its raw *encoded bytes* (`&[u8]`, header included — exactly what
 //! `DatumGetPointer` dereferences), and a produced varlena is an
-//! [`mcx::PgVec<u8>`] allocated in the caller's memory context. The varlena
+//! [`::mcx::PgVec<u8>`] allocated in the caller's memory context. The varlena
 //! header bit-twiddling (`VARATT_IS_*`, `VARSIZE*`, `VARDATA*`, `SET_VARSIZE*`)
 //! is pure `varatt.h` logic with no external dependency, ported in-crate.
 //!
@@ -41,7 +41,7 @@
 //! decompressor via the `common-pglz` seam. Each panics until its owner lands.
 
 use mcx::{Mcx, PgVec};
-use datum::expandeddatum::{VARTAG_EXPANDED_RO, VARTAG_EXPANDED_RW};
+use ::datum::expandeddatum::{VARTAG_EXPANDED_RO, VARTAG_EXPANDED_RW};
 use datum::{ExpandedObjectRef, VARHDRSZ};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 
@@ -312,12 +312,12 @@ fn copy_verbatim<'mcx>(mcx: Mcx<'mcx>, attr: &[u8]) -> PgResult<PgVec<'mcx, u8>>
     let src = attr
         .get(..len)
         .ok_or_else(|| PgError::error("truncated varlena"))?;
-    mcx::slice_in(mcx, src)
+    ::mcx::slice_in(mcx, src)
 }
 
 /// `mcx`-allocated zeroed buffer of `len` bytes (C: `palloc(len)` then writes).
 fn palloc_zeroed<'mcx>(mcx: Mcx<'mcx>, len: usize) -> PgResult<PgVec<'mcx, u8>> {
-    let mut v = mcx::vec_with_capacity_in(mcx, len)?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, len)?;
     v.resize(len, 0);
     Ok(v)
 }

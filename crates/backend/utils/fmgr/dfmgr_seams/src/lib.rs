@@ -8,16 +8,16 @@
 
 #![allow(non_snake_case)]
 
-use types_logical::CallbackInvocation;
-use types_core::Oid;
-use types_error::PgResult;
-use fmgr::LoadedExternalFunc;
+use ::types_logical::CallbackInvocation;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::fmgr::LoadedExternalFunc;
 
 seam_core::seam!(
     /// `load_file(filename, restricted)` (`utils/fmgr/dfmgr.c`) — load and
     /// initialize a dynamically loadable module. `ereport(ERROR)`s on a missing
     /// or incompatible library.
-    pub fn load_file(filename: &str, restricted: bool) -> types_error::PgResult<()>
+    pub fn load_file(filename: &str, restricted: bool) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -28,7 +28,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `shmem_request_hook()` — invoke the installed shared-memory request hook.
-    pub fn shmem_request_hook() -> types_error::PgResult<()>
+    pub fn shmem_request_hook() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -40,14 +40,14 @@ seam_core::seam!(
     /// can still `ereport(ERROR)` (carried on `Err`).
     pub fn load_archive_module_init(
         filename: &str,
-    ) -> types_error::PgResult<Option<types_pgarch::ArchiveModuleInit>>
+    ) -> ::types_error::PgResult<Option<types_pgarch::ArchiveModuleInit>>
 );
 
 seam_core::seam!(
     /// `load_external_function(...)` + `plugin_init(callbacks)`; returns the
     /// callback-presence bitmask (one bit per `OutputPluginCallbacks` field,
     /// LSB = `startup_cb`). `ereport`s if `_PG_output_plugin_init` is missing.
-    pub fn load_output_plugin(plugin: String) -> types_error::PgResult<u32>
+    pub fn load_output_plugin(plugin: String) -> ::types_error::PgResult<u32>
 );
 
 seam_core::seam!(
@@ -55,7 +55,7 @@ seam_core::seam!(
     /// `output_plugin_error_callback` errcontext frame is on
     /// `error_context_stack`. Returns the bool the two filter callbacks
     /// produce (ignored by the rest). The plugin callback can `ereport`.
-    pub fn invoke_output_plugin_callback(inv: CallbackInvocation) -> types_error::PgResult<bool>
+    pub fn invoke_output_plugin_callback(inv: CallbackInvocation) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -77,9 +77,9 @@ seam_core::seam!(
     /// is set — i.e. always, in this build, since every loadable plugin is a
     /// builtin (no C ABI to dlopen a real `.so`).
     pub fn invoke_builtin_output_plugin_callback(
-        ctx: &mut types_logical::LogicalDecodingContext,
+        ctx: &mut ::types_logical::LogicalDecodingContext,
         inv: &CallbackInvocation,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -152,7 +152,7 @@ pub struct BuiltinLibraryEntry {
     /// builtin-library `load_file` fast path may invoke it on every `LOAD` of
     /// the module (the OS-loader dedup that gates the C `_PG_init` call does not
     /// apply to in-process modules).
-    pub pg_init: Option<fn() -> types_error::PgResult<()>>,
+    pub pg_init: Option<fn() -> ::types_error::PgResult<()>>,
 }
 
 static BUILTIN_LIBRARIES: std::sync::Mutex<Vec<BuiltinLibraryEntry>> =
@@ -195,7 +195,7 @@ pub fn registry_resolve(library: &str, function: &str) -> Option<LoadedExternalF
 /// The `_PG_init`-equivalent registered for `library`, if any. Backs the
 /// builtin-library `load_file` path's `call_pg_init` step (the loader runs a
 /// loaded module's `_PG_init` — `internal_load_library` in dfmgr.c).
-pub fn registry_pg_init(library: &str) -> Option<fn() -> types_error::PgResult<()>> {
+pub fn registry_pg_init(library: &str) -> Option<fn() -> ::types_error::PgResult<()>> {
     BUILTIN_LIBRARIES
         .lock()
         .unwrap()
@@ -242,9 +242,9 @@ pub struct BuiltinOutputPlugin {
     pub init: fn() -> u32,
     /// Run one output-plugin callback against the live decoding context.
     pub invoke: fn(
-        &mut types_logical::LogicalDecodingContext,
-        &types_logical::CallbackInvocation,
-    ) -> types_error::PgResult<bool>,
+        &mut ::types_logical::LogicalDecodingContext,
+        &::types_logical::CallbackInvocation,
+    ) -> ::types_error::PgResult<bool>,
 }
 
 static BUILTIN_OUTPUT_PLUGINS: std::sync::Mutex<Vec<BuiltinOutputPlugin>> =
@@ -281,9 +281,9 @@ pub fn resolve_builtin_output_plugin(plugin: &str) -> Option<BuiltinOutputPlugin
 /// installed body of [`invoke_builtin_output_plugin_callback`].
 pub fn registry_invoke_builtin_output_plugin(
     plugin: &str,
-    ctx: &mut types_logical::LogicalDecodingContext,
-    inv: &types_logical::CallbackInvocation,
-) -> Option<types_error::PgResult<bool>> {
+    ctx: &mut ::types_logical::LogicalDecodingContext,
+    inv: &::types_logical::CallbackInvocation,
+) -> Option<::types_error::PgResult<bool>> {
     let invoke = {
         let plugins = BUILTIN_OUTPUT_PLUGINS.lock().unwrap();
         plugins.iter().find(|e| e.name == plugin).map(|e| e.invoke)

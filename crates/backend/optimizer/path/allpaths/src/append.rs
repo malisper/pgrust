@@ -6,10 +6,10 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{Index, InvalidAttrNumber};
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Index, InvalidAttrNumber};
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     BackwardScanDirection, ForwardScanDirection, PathId, PathKey, PathNode, PlannerInfo, RelId,
     Relids, RELOPT_BASEREL,
@@ -73,7 +73,7 @@ pub fn set_append_rel_size<'mcx>(
     let mut parent_attrsizes: Vec<f64> = alloc::vec![0.0; nattrs];
 
     // Walk the append_rel_list for children of this parent.
-    let appinfos: Vec<pathnodes::AppendRelInfo> = root
+    let appinfos: Vec<::pathnodes::AppendRelInfo> = root
         .append_rel_list
         .iter()
         .filter(|a| a.parent_relid == parent_rtindex)
@@ -83,7 +83,7 @@ pub fn set_append_rel_size<'mcx>(
     for appinfo in &appinfos {
         let child_rtindex = appinfo.child_relid;
         let childrel = bms::find_base_rel::call(root, child_rtindex as i32);
-        debug_assert!(root.rel(childrel).reloptkind == pathnodes::RELOPT_OTHER_MEMBER_REL);
+        debug_assert!(root.rel(childrel).reloptkind == ::pathnodes::RELOPT_OTHER_MEMBER_REL);
 
         // We may already have proven the child dummy.
         if crate::is_dummy_rel(root, childrel) {
@@ -101,7 +101,7 @@ pub fn set_append_rel_size<'mcx>(
         // skipping quals from above outer joins that can null this rel.
         let nulling = bms::relids_copy::call(&root.rel(rel).nulling_relids);
         let parent_joininfo = root.rel(rel).joininfo.clone();
-        let mut kept: Vec<pathnodes::RinfoId> = Vec::new();
+        let mut kept: Vec<::pathnodes::RinfoId> = Vec::new();
         for rinfo in parent_joininfo {
             let clause_relids = root.rinfo(rinfo).clause_relids.clone();
             if !bms::relids_overlap::call(&clause_relids, &nulling) {
@@ -119,7 +119,7 @@ pub fn set_append_rel_size<'mcx>(
             .as_ref()
             .map(|t| t.exprs.clone())
             .unwrap_or_default();
-        let mut child_exprs: Vec<pathnodes::NodeId> = Vec::with_capacity(parent_exprs.len());
+        let mut child_exprs: Vec<::pathnodes::NodeId> = Vec::with_capacity(parent_exprs.len());
         for nid in &parent_exprs {
             // Deep-copy via `clone_in` — moved into the by-value `adjust_appendrel_attrs`
             // seam (the derived `Expr::clone` panics on an owned-subtree child).
@@ -577,7 +577,7 @@ pub fn get_cheapest_parameterized_child_path<'mcx>(
         &root.rel(rel).pathlist.clone(),
         &[],
         required_outer,
-        pathnodes::optimizer_plan::CostSelector::TOTAL_COST,
+        ::pathnodes::optimizer_plan::CostSelector::TOTAL_COST,
         false,
     );
     let cheapest0 = cheapest0.expect("get_cheapest_parameterized_child_path: no candidate");
@@ -599,7 +599,7 @@ pub fn get_cheapest_parameterized_child_path<'mcx>(
                 root,
                 c,
                 path,
-                pathnodes::optimizer_plan::CostSelector::TOTAL_COST,
+                ::pathnodes::optimizer_plan::CostSelector::TOTAL_COST,
             ) <= 0
             {
                 continue;
@@ -617,7 +617,7 @@ pub fn get_cheapest_parameterized_child_path<'mcx>(
                     root,
                     c,
                     path,
-                    pathnodes::optimizer_plan::CostSelector::TOTAL_COST,
+                    ::pathnodes::optimizer_plan::CostSelector::TOTAL_COST,
                 ) <= 0
                 {
                     continue;
@@ -741,7 +741,7 @@ pub fn generate_orderedappend_paths<'mcx>(
                 &root.rel(childrel).pathlist.clone(),
                 pathkeys,
                 &None,
-                pathnodes::optimizer_plan::CostSelector::STARTUP_COST,
+                ::pathnodes::optimizer_plan::CostSelector::STARTUP_COST,
                 false,
             );
             let mut cheapest_total = pathkeys::get_cheapest_path_for_pathkeys(
@@ -749,7 +749,7 @@ pub fn generate_orderedappend_paths<'mcx>(
                 &root.rel(childrel).pathlist.clone(),
                 pathkeys,
                 &None,
-                pathnodes::optimizer_plan::CostSelector::TOTAL_COST,
+                ::pathnodes::optimizer_plan::CostSelector::TOTAL_COST,
                 false,
             );
 
@@ -907,8 +907,8 @@ pub(crate) fn partitions_are_ordered_impl(root: &PlannerInfo, rel: RelId) -> boo
 }
 
 /// `bms_is_member(x, a)` over a planner `Relids` (lifetime-free
-/// `pathnodes::Bitmapset`).
-fn bms_is_member(x: i32, a: &pathnodes::Relids) -> bool {
+/// `::pathnodes::Bitmapset`).
+fn bms_is_member(x: i32, a: &::pathnodes::Relids) -> bool {
     if x < 0 {
         return false;
     }
@@ -921,7 +921,7 @@ fn bms_is_member(x: i32, a: &pathnodes::Relids) -> bool {
 }
 
 /// `bms_overlap(a, b)` over two planner `Relids`.
-fn bms_overlap(a: &pathnodes::Relids, b: &pathnodes::Relids) -> bool {
+fn bms_overlap(a: &::pathnodes::Relids, b: &::pathnodes::Relids) -> bool {
     match (a, b) {
         (Some(ab), Some(bb)) => {
             let n = ab.words.len().min(bb.words.len());

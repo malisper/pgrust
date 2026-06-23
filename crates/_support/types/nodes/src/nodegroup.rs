@@ -8,8 +8,8 @@
 //! qual. `GroupState` is the executor state.
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 
 use crate::execexpr::ExprState;
 use crate::execnodes::ScanStateData;

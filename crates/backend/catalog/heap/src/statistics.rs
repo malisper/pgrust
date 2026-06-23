@@ -9,12 +9,12 @@
 
 use alloc::vec;
 
-use scankey::ScanKeyInit;
-use mcx::Mcx;
-use types_core::fmgr::{F_INT2EQ, F_OIDEQ};
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::scankey::ScanKeyInit;
+use ::mcx::Mcx;
+use ::types_core::fmgr::{F_INT2EQ, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::heaptuple::Datum;
 
 extern crate alloc;
@@ -85,7 +85,7 @@ pub fn CopyStatistics<'mcx>(mcx: Mcx<'mcx>, fromrelid: Oid, torelid: Oid) -> PgR
             &do_replace,
         )
         .map_err(|e| {
-            utils_error::ereport(types_error::ERROR)
+            utils_error::ereport(::types_error::ERROR)
                 .errmsg_internal(format!("heap_modify_tuple failed in CopyStatistics: {e:?}"))
                 .into_error()
         })?;

@@ -15,10 +15,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use mcx::{Mcx, PgString};
-use types_catalog::pg_constraint::{ConKeyArray, FormData_pg_constraint};
-use types_core::primitive::Oid;
+use ::types_catalog::pg_constraint::{ConKeyArray, FormData_pg_constraint};
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use types_tuple::heaptuple::INT2OID;
+use ::types_tuple::heaptuple::INT2OID;
 
 use crate::{
     deparse_context_for, deparse_expression_pretty, generate_relation_name_catalog,
@@ -291,7 +291,7 @@ pub(crate) fn pg_get_constraintdef_worker_inner<'mcx>(
                 )?
             } else {
                 // domain constraint --- can't have Vars
-                let context = mcx::PgVec::new_in(mcx);
+                let context = ::mcx::PgVec::new_in(mcx);
                 deparse_expression_pretty(
                     mcx,
                     expr.as_ref(),

@@ -8,8 +8,8 @@
 
 #![allow(non_snake_case)]
 
-use types_core::geo::{Point, CIRCLE, BOX};
-use types_error::PgResult;
+use ::types_core::geo::{Point, CIRCLE, BOX};
+use ::types_error::PgResult;
 
 // ---------------------------------------------------------------------------
 // Fuzzy float comparators (geo_decls.h FPlt/FPle/FPgt/FPge).

@@ -1,6 +1,6 @@
 use super::*;
 use std::vec::Vec;
-use types_error::ERRCODE_INTERNAL_ERROR;
+use ::types_error::ERRCODE_INTERNAL_ERROR;
 
 /// Build an integer set inside a dedicated context and exercise the closure with
 /// it.  Mirrors PG's recommended usage of holding an integer set in a dedicated

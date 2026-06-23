@@ -6,13 +6,13 @@
 
 extern crate alloc;
 
-use scankey::ScanKeyInit;
-use utils_error::elog;
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Oid};
-use types_core::fmgr::F_OIDEQ;
+use ::scankey::ScanKeyInit;
+use ::utils_error::elog;
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_core::fmgr::F_OIDEQ;
 use types_error::{PgResult, ERROR};
-use types_scan::scankey::{
+use ::types_scan::scankey::{
     ScanKeyData, BTEqualStrategyNumber, BTLessEqualStrategyNumber,
 };
 use types_tuple::heaptuple::Datum;
@@ -31,7 +31,7 @@ const Anum_pg_attribute_attnum: AttrNumber = 5;
 const Anum_pg_inherits_inhrelid: AttrNumber = 1;
 
 /* int2le builtin (utils/fmgroids.h). */
-const F_INT2LE: types_core::primitive::RegProcedure = 148;
+const F_INT2LE: ::types_core::primitive::RegProcedure = 148;
 
 /*
  *		DeleteRelationTuple

@@ -26,7 +26,7 @@
 //! typcache, lsyscache, the still-absent sibling parser crates
 //! (`parse_type` / `parse_coerce` / `parse_func`), and the operator-cache
 //! invalidation registration are reached through their per-owner seam crates
-//! (loud-panic until the owner installs them). [`nodes_core::expr_type`]
+//! (loud-panic until the owner installs them). [`::nodes_core::expr_type`]
 //! (`nodeFuncs.c`) is a ported sibling called directly (no dep cycle).
 //!
 //! The C `Operator` is a `SearchSysCache1(OPEROID)` `HeapTuple` plus a
@@ -49,15 +49,15 @@ use std::sync::Mutex;
 use utils_error::{ereport, PgError, PgResult};
 use mcx::{Mcx, MemoryContext};
 
-use types_core::fmgr::NAMEDATALEN;
-use types_core::primitive::{Oid, OidIsValid, INVALID_OID as InvalidOid};
+use ::types_core::fmgr::NAMEDATALEN;
+use ::types_core::primitive::{Oid, OidIsValid, INVALID_OID as InvalidOid};
 use types_error::{
     ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_INTERNAL_ERROR, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use ::nodes::primnodes::{Expr, OpExpr, ScalarArrayOpExpr};
-use parsenodes::ParseState;
-use types_tuple::heaptuple::{
+use ::parsenodes::ParseState;
+use ::types_tuple::heaptuple::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
     ANYNONARRAYOID, ANYRANGEOID, BOOLOID, UNKNOWNOID,
@@ -67,7 +67,7 @@ use types_tuple::heaptuple::{
 use namespace_seams::{
     lookup_explicit_namespace, opername_get_candidates, opername_get_oprid,
 };
-use nodes_core::nodefuncs::expr_type as exprType;
+use ::nodes_core::nodefuncs::expr_type as exprType;
 use coerce_seams::{enforce_generic_type_consistency, is_binary_coercible};
 use parse_func_seams::{
     check_srf_call_placement, func_match_argtypes, func_select_candidate, make_fn_arguments,
@@ -77,8 +77,8 @@ use parse_type_seams::{lookup_type_name_oid, typename_type_id};
 use lsyscache_seams::{
     get_array_type, get_base_element_type, get_base_type, get_func_retset,
 };
-use syscache_seams::oper_row_by_oid;
-use typcache_seams::sort_group_operators;
+use ::syscache_seams::oper_row_by_oid;
+use ::typcache_seams::sort_group_operators;
 
 #[cfg(test)]
 mod tests;
@@ -290,10 +290,10 @@ fn type_name_arg(objargs: &[opclass::TypeName], i: usize) -> Option<&opclass::Ty
 }
 
 /// `LookupOperWithArgs(oper, missing_ok)` over the raw-parser
-/// [`parsenodes::ObjectWithArgs`] (the `get_object_address`
+/// [`::parsenodes::ObjectWithArgs`] (the `get_object_address`
 /// `OBJECT_OPERATOR` arm). Each `objargs` entry is a `Node::TypeName`.
 pub fn LookupOperWithArgs_node(
-    oper: &parsenodes::ObjectWithArgs,
+    oper: &::parsenodes::ObjectWithArgs,
     missing_ok: bool,
 ) -> PgResult<Oid> {
     // Assert(list_length(oper->objargs) == 2);
@@ -316,12 +316,12 @@ pub fn LookupOperWithArgs_node(
 }
 
 /// `linitial_node(TypeName, list)` / `lsecond_node(TypeName, list)` over a
-/// raw-parser `objargs` list: the i-th entry as a [`parsenodes::TypeName`],
+/// raw-parser `objargs` list: the i-th entry as a [`::parsenodes::TypeName`],
 /// or `None` for a NULL element.
 fn node_type_name_arg(
-    objargs: &[parsenodes::Node],
+    objargs: &[::parsenodes::Node],
     i: usize,
-) -> Option<&parsenodes::TypeName> {
+) -> Option<&::parsenodes::TypeName> {
     match objargs.get(i) {
         Some(n) => n.as_typename(),
         None => None,
@@ -1269,7 +1269,7 @@ fn seam_lookup_oper_with_args(
 
 /// `LookupOperWithArgs(oper, missing_ok)` over the raw-parser `ObjectWithArgs`.
 fn seam_lookup_oper_with_args_node(
-    oper: &parsenodes::ObjectWithArgs,
+    oper: &::parsenodes::ObjectWithArgs,
     missing_ok: bool,
 ) -> PgResult<Oid> {
     LookupOperWithArgs_node(oper, missing_ok)
@@ -1293,9 +1293,9 @@ fn generate_operator_name<'mcx>(
     operid: Oid,
     arg1: Oid,
     arg2: Oid,
-) -> PgResult<mcx::PgString<'mcx>> {
+) -> PgResult<::mcx::PgString<'mcx>> {
     // opertup = SearchSysCache1(OPEROID, operid); elog(ERROR) on miss.
-    let optup = syscache_seams::oper_row_by_oid::call(mcx, operid)?
+    let optup = ::syscache_seams::oper_row_by_oid::call(mcx, operid)?
         .ok_or_else(|| {
             ereport(ERROR)
                 .errcode(ERRCODE_INTERNAL_ERROR)
@@ -1326,7 +1326,7 @@ fn generate_operator_name<'mcx>(
     let mut buf = String::new();
     if need_qual {
         // nspname = get_namespace_name_or_temp(operform->oprnamespace);
-        let nspname = lsyscache_seams::get_namespace_name_or_temp::call(
+        let nspname = ::lsyscache_seams::get_namespace_name_or_temp::call(
             mcx,
             optup.oprnamespace,
         )?
@@ -1349,7 +1349,7 @@ fn generate_operator_name<'mcx>(
     if need_qual {
         buf.push(')');
     }
-    mcx::PgString::from_str_in(&buf, mcx)
+    ::mcx::PgString::from_str_in(&buf, mcx)
 }
 
 pub fn init_seams() {

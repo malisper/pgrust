@@ -119,7 +119,7 @@ impl xl_commit_ts_truncate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct xl_smgr_create {
     rlocator: RelFileLocator,
-    forkNum: types_core::ForkNumber,
+    forkNum: ::types_core::ForkNumber,
 }
 
 impl xl_smgr_create {
@@ -131,7 +131,7 @@ impl xl_smgr_create {
                 read_u32(data, 4)?,
                 read_u32(data, 8)?,
             ),
-            forkNum: types_core::ForkNumber::from_i32(read_i32(data, 12)?)?,
+            forkNum: ::types_core::ForkNumber::from_i32(read_i32(data, 12)?)?,
         })
     }
 
@@ -139,7 +139,7 @@ impl xl_smgr_create {
         self.rlocator
     }
 
-    pub const fn fork_num(&self) -> types_core::ForkNumber {
+    pub const fn fork_num(&self) -> ::types_core::ForkNumber {
         self.forkNum
     }
 }
@@ -147,7 +147,7 @@ impl xl_smgr_create {
 /// `xl_smgr_truncate` (catalog/storage_xlog.h).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct xl_smgr_truncate {
-    blkno: types_core::BlockNumber,
+    blkno: ::types_core::BlockNumber,
     rlocator: RelFileLocator,
     flags: i32,
 }
@@ -166,7 +166,7 @@ impl xl_smgr_truncate {
         })
     }
 
-    pub const fn blkno(&self) -> types_core::BlockNumber {
+    pub const fn blkno(&self) -> ::types_core::BlockNumber {
         self.blkno
     }
 

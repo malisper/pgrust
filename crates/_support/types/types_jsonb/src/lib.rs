@@ -16,7 +16,7 @@
 extern crate alloc;
 
 /// `VARHDRSZ`, the varlena length-header size in bytes (single source of truth).
-pub use datum::VARHDRSZ;
+pub use ::datum::VARHDRSZ;
 
 pub mod jsonb_util;
 pub mod jsonb;

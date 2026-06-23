@@ -12,15 +12,15 @@
 //! * pgstat (`pgstat_count_index_scan`).
 //! * interrupts (`check_for_interrupts`).
 
-use types_core::primitive::{InvalidBlockNumber, OffsetNumber};
+use ::types_core::primitive::{InvalidBlockNumber, OffsetNumber};
 use types_error::{PgError, PgResult, ERROR};
-use hash::hashpage::{
+use ::hash::hashpage::{
     H_BUCKET_BEING_POPULATED, HASH_READ, HashScanPosInvalidate, HashScanPosItem, INDEX_MOVED_BY_SPLIT_MASK, LH_BUCKET_PAGE, LH_OVERFLOW_PAGE,
     MaxIndexTuplesPerPage,
 };
-use types_scan::scankey::SK_ISNULL;
-use types_scan::sdir::{ScanDirection, ScanDirectionIsForward, ScanDirectionIsBackward};
-use types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
+use ::types_scan::scankey::SK_ISNULL;
+use ::types_scan::sdir::{ScanDirection, ScanDirectionIsForward, ScanDirectionIsBackward};
+use ::types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
 
 use bufmgr_seams as bufmgr;
 use predicate_seams as predicate;
@@ -231,7 +231,7 @@ pub fn _hash_first<'mcx>(scan: &mut HashScan<'mcx>, dir: ScanDirection) -> PgRes
     let cur = scan.keyData[0].clone();
 
     debug_assert!(cur.sk_attno == 1);
-    debug_assert!(cur.sk_strategy == hash::hash::HTEqualStrategyNumber);
+    debug_assert!(cur.sk_strategy == ::hash::hash::HTEqualStrategyNumber);
 
     // NULL constant cannot match any items.
     if (cur.sk_flags & SK_ISNULL) != 0 {
@@ -246,7 +246,7 @@ pub fn _hash_first<'mcx>(scan: &mut HashScan<'mcx>, dir: ScanDirection) -> PgRes
     let opcintype = relcache_seams::rd_opcintype::call(&rel, 1)?;
     let hashkey_cxt = mcx::MemoryContext::new("_hash_first hashkey");
     let hk_mcx = hashkey_cxt.mcx();
-    let hashkey = if cur.sk_subtype == opcintype || cur.sk_subtype == types_core::InvalidOid {
+    let hashkey = if cur.sk_subtype == opcintype || cur.sk_subtype == ::types_core::InvalidOid {
         _hash_datum2hashkey(hk_mcx, &rel, &cur.sk_argument)?
     } else {
         _hash_datum2hashkey_type(hk_mcx, &rel, &cur.sk_argument, cur.sk_subtype)?

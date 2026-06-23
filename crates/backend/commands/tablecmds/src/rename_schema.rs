@@ -35,10 +35,10 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress, ObjectAddresses};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress, ObjectAddresses};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
@@ -48,15 +48,15 @@ use ::nodes::parsenodes::{
     OBJECT_SEQUENCE, OBJECT_TYPE, OBJECT_VIEW,
 };
 use parsenodes::{AlterObjectSchemaStmt, Node, RenameStmt};
-use types_storage::lock::{LOCKMODE, AccessExclusiveLock, NoLock, RowExclusiveLock};
-use types_tuple::access::RangeVar as AccessRangeVar;
-use types_tuple::access::{
+use ::types_storage::lock::{LOCKMODE, AccessExclusiveLock, NoLock, RowExclusiveLock};
+use ::types_tuple::access::RangeVar as AccessRangeVar;
+use ::types_tuple::access::{
     RELKIND_COMPOSITE_TYPE, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX,
     RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
 };
 
-use common_relation::relation_open;
-use utils_error::ereport;
+use ::common_relation::relation_open;
+use ::utils_error::ereport;
 
 use aclchk_seams as aclchk_seam;
 use dependency_seams as dep_seam;
@@ -73,11 +73,11 @@ use catalog_namespace::{
     CheckSetNamespace, RangeVarGetAndCheckCreationNamespace, RangeVarGetRelidExtended, RVR_MISSING_OK,
 };
 use pg_constraint::{AlterConstraintNamespaces, RenameConstraintById};
-use relcache::derived::RelationGetIndexList;
+use ::relcache::derived::RelationGetIndexList;
 
 use tablecmds_seams as seam;
 
-use types_acl::acl::ACL_CREATE;
+use ::types_acl::acl::ACL_CREATE;
 use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK};
 
 use crate::helpers::{
@@ -95,7 +95,7 @@ const CONSTRAINT_EXCLUSION: i8 = b'x' as i8;
 const CONSTRAINT_NOTNULL: i8 = b'n' as i8;
 
 /// `ConstraintRelationId` — `pg_constraint` OID.
-const ConstraintRelationId: Oid = types_core::catalog::CONSTRAINT_RELATION_ID;
+const ConstraintRelationId: Oid = ::types_core::catalog::CONSTRAINT_RELATION_ID;
 
 /// The owned `access::RangeVar` carried by `stmt->relation` (the relation
 /// rename / SET SCHEMA forms always have it set).
@@ -378,11 +378,11 @@ pub fn AlterTableNamespace<'mcx>(
         // sequenceIsOwned(relid, DEPENDENCY_AUTO/INTERNAL, &tableId, &colId)
         let owned = dep_seam::sequence_is_owned::call(
             relid,
-            types_catalog::catalog_dependency::DEPENDENCY_AUTO,
+            ::types_catalog::catalog_dependency::DEPENDENCY_AUTO,
         )?
         .or(dep_seam::sequence_is_owned::call(
             relid,
-            types_catalog::catalog_dependency::DEPENDENCY_INTERNAL,
+            ::types_catalog::catalog_dependency::DEPENDENCY_INTERNAL,
         )?);
         if let Some((table_id, _col_id)) = owned {
             let table_name = lsyscache_seam::get_rel_name::call(mcx, table_id)?
@@ -571,7 +571,7 @@ pub fn alter_relation_namespace_internal_seam(
     has_depend_entry: bool,
     objs_moved: &mut ObjectAddresses,
 ) -> PgResult<()> {
-    let ctx = mcx::MemoryContext::new("AlterRelationNamespaceInternal");
+    let ctx = ::mcx::MemoryContext::new("AlterRelationNamespaceInternal");
     let mcx = ctx.mcx();
 
     // classRel = table_open(RelationRelationId, RowExclusiveLock);
@@ -740,7 +740,7 @@ fn range_var_callback_for_alter_relation<'mcx>(
         && seam::is_system_class_relid::call(relid, relkind, info.relnamespace)?
     {
         return ereport(ERROR)
-            .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+            .errcode(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
             .errmsg(format!(
                 "permission denied: \"{}\" is a system catalog",
                 rv.relname
@@ -773,13 +773,13 @@ fn range_var_callback_for_alter_relation<'mcx>(
     if reltype == OBJECT_SEQUENCE && relkind != RELKIND_SEQUENCE {
         return wrong_object_type(&rv.relname, "is not a sequence");
     }
-    if reltype == OBJECT_VIEW && relkind != types_tuple::access::RELKIND_VIEW {
+    if reltype == OBJECT_VIEW && relkind != ::types_tuple::access::RELKIND_VIEW {
         return wrong_object_type(&rv.relname, "is not a view");
     }
     if reltype == OBJECT_MATVIEW && relkind != RELKIND_MATVIEW {
         return wrong_object_type(&rv.relname, "is not a materialized view");
     }
-    if reltype == OBJECT_FOREIGN_TABLE && relkind != types_tuple::access::RELKIND_FOREIGN_TABLE {
+    if reltype == OBJECT_FOREIGN_TABLE && relkind != ::types_tuple::access::RELKIND_FOREIGN_TABLE {
         return wrong_object_type(&rv.relname, "is not a foreign table");
     }
     if reltype == OBJECT_TYPE && relkind != RELKIND_COMPOSITE_TYPE {

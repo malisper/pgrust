@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use types_dest::CommandDest;
+use ::types_dest::CommandDest;
 use types_error::{
     make_sqlstate, ErrorLevel, ErrorLocation, PgError, DEBUG1, ERRCODE_CONNECTION_FAILURE,
     ERRCODE_DISK_FULL, ERRCODE_DUPLICATE_FILE, ERRCODE_INSUFFICIENT_PRIVILEGE,
@@ -242,7 +242,7 @@ fn error_stack_mutators_and_recursion_guard() {
     errposition(7).unwrap();
     internalerrposition(11).unwrap();
     internalerrquery(Some("select 1")).unwrap();
-    err_generic_string(types_error::PG_DIAG_TABLE_NAME, "users").unwrap();
+    err_generic_string(::types_error::PG_DIAG_TABLE_NAME, "users").unwrap();
 
     assert_eq!(geterrcode().unwrap(), UNDEFINED_TABLE);
     assert_eq!(geterrposition().unwrap(), 7);

@@ -7,8 +7,8 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgString};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// The `creating_extension` backend-global (extension.c): true while a

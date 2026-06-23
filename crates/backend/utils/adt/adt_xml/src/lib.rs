@@ -27,7 +27,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 // `clippy::result_large_err`: every fallible function here returns the shared
-// `types_error::PgResult` (== `Result<_, PgError>`). `PgError`'s size is fixed
+// `::types_error::PgResult` (== `Result<_, PgError>`). `PgError`'s size is fixed
 // by the types crate (a faithful port of `ErrorData`) and the un-boxed
 // `PgResult` return type is the project-wide error contract these ports match.
 #![allow(clippy::result_large_err)]
@@ -44,7 +44,7 @@ pub mod chvalid;
 pub mod dep_seams;
 pub mod fmgr_builtins;
 
-use datum::Datum;
+use ::datum::Datum;
 use types_error::{
     ERRCODE_DATA_EXCEPTION, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
@@ -52,7 +52,7 @@ use types_error::{
     ERRCODE_INVALID_XML_PROCESSING_INSTRUCTION, ERRCODE_NULL_VALUE_NOT_ALLOWED, PgError, PgResult,
     SoftErrorContext, ereturn,
 };
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     BOOLOID, BPCHAROID, BYTEAOID, DATEOID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID,
     NUMERICOID, TEXTOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, VARCHAROID, VARHDRSZ,
     XMLOID,
@@ -60,10 +60,10 @@ use types_tuple::heaptuple::{
 use types_core::{InvalidOid, Oid};
 /// The unified value carrier (`ByVal`/`ByRef`/`Cstring`) the executor and
 /// row-mapping callers hold column values in, distinct from the bare-word
-/// [`Datum`] (`datum::Datum`) the in-crate scalar formatters use.
-use types_tuple::heaptuple::Datum as TDatum;
+/// [`Datum`] (`::datum::Datum`) the in-crate scalar formatters use.
+use ::types_tuple::heaptuple::Datum as TDatum;
 
-pub use types_error::ERRCODE_NOT_AN_XML_DOCUMENT;
+pub use ::types_error::ERRCODE_NOT_AN_XML_DOCUMENT;
 pub use ::nodes::primnodes::{XmlExprOp, XmlOptionType};
 pub use types_xml::{PgXmlStrictness, XmlBinaryType, XmlStandaloneType};
 
@@ -71,8 +71,8 @@ use adt_datetime::{
     j2date, timestamp2tm, EncodeDateOnly, EncodeDateTime, TIMESTAMP_NOT_FINITE,
 };
 use types_datetime::{fsec_t, DateADT, Timestamp, POSTGRES_EPOCH_JDATE, USE_XSD_DATES};
-use pgtime::pgtime::pg_tm;
-use types_wchar::encoding::PG_UTF8;
+use ::pgtime::pgtime::pg_tm;
+use ::types_wchar::encoding::PG_UTF8;
 
 use xml_libxml_seams as seam;
 use lsyscache_seams as lsc;
@@ -340,7 +340,7 @@ pub fn xml_out_internal(x: &[u8], target_encoding: i32) -> PgResult<Vec<u8>> {
     //   errmsg_internal("could not parse XML declaration in stored value"),
     //   errdetail_for_xml_code(res_code));
     elog_seams::ereport_msg::call(
-        types_error::WARNING,
+        ::types_error::WARNING,
         "could not parse XML declaration in stored value".to_string(),
         Some(errdetail_for_xml_code(res_code)),
     )?;
@@ -1349,7 +1349,7 @@ pub fn map_sql_value_to_xml_value(
         DATEOID => {
             let date: DateADT = datum_get_date_adt(value);
             // XSD doesn't support infinite values.
-            if adt_datetime::date::DATE_NOT_FINITE(date) {
+            if ::adt_datetime::date::DATE_NOT_FINITE(date) {
                 return Err(PgError::error("date out of range")
                     .with_sqlstate(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE)
                     .with_detail("XML does not support infinite date values."));
@@ -1515,7 +1515,7 @@ pub fn map_sql_value_to_xml_value_v<'mcx>(
             // Datum convention); VARDATA_ANY(bstr) is the payload past the 4-byte
             // header, which is exactly what the C path base64/binhex-encodes.
             let img = value.as_ref_bytes();
-            let payload = &img[datum::varlena::VARHDRSZ.min(img.len())..];
+            let payload = &img[::datum::varlena::VARHDRSZ.min(img.len())..];
             return seam::encode_binary::call(payload, seam::xmlbinary::call());
         }
         _ => {}

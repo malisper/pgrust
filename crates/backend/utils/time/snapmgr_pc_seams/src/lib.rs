@@ -3,7 +3,7 @@
 //! query-lifecycle model (`docs/query-lifecycle-raii.md`); the snapmgr port
 //! installs these. Until then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `ActiveSnapshotSet()`.

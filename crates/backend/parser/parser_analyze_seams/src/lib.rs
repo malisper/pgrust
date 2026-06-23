@@ -14,8 +14,8 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query as CopyQuery;
 use ::nodes::nodes::Node;
 use ::nodes::parsestmt::RawStmt;
@@ -26,9 +26,9 @@ use ::nodes::portalcmds::{JumbleState, ParseState as PortalcmdsParseState, Query
 /// OID array (the C function takes `&argtypes`/`&nargs` in/out).
 pub struct AnalyzedVarparams<'mcx> {
     /// The rewritten query list.
-    pub query_list: mcx::PgVec<'mcx, Node<'mcx>>,
+    pub query_list: ::mcx::PgVec<'mcx, Node<'mcx>>,
     /// The resolved parameter OID array (may differ from the input).
-    pub arg_types: mcx::PgVec<'mcx, Oid>,
+    pub arg_types: ::mcx::PgVec<'mcx, Oid>,
 }
 
 seam_core::seam!(
@@ -180,7 +180,7 @@ seam_core::seam!(
     pub fn make_parsestate<'mcx>(
         mcx: Mcx<'mcx>,
         parent: Option<&::nodes::parsestmt::ParseState<'mcx>>,
-    ) -> PgResult<mcx::PgBox<'mcx, ::nodes::parsestmt::ParseState<'mcx>>>
+    ) -> PgResult<::mcx::PgBox<'mcx, ::nodes::parsestmt::ParseState<'mcx>>>
 );
 
 seam_core::seam!(
@@ -200,5 +200,5 @@ seam_core::seam!(
         parent_cte: Option<&::nodes::rawnodes::CommonTableExpr<'mcx>>,
         locked_from_parent: bool,
         resolve_unknowns: bool,
-    ) -> PgResult<mcx::PgBox<'mcx, Node<'mcx>>>
+    ) -> PgResult<::mcx::PgBox<'mcx, Node<'mcx>>>
 );

@@ -19,11 +19,11 @@
 //! `GetCurrentReplayRecPtr` will be consulted when that subsystem lands.
 
 use utils_error::{ereport, PgResult};
-use control::CheckPoint;
+use ::control::CheckPoint;
 use types_core::{Oid, TimeLineID, XLogRecPtr};
-use types_error::PANIC;
-use wal::rmgr::XLogReaderState;
-use wal::wal::XLR_INFO_MASK;
+use ::types_error::PANIC;
+use ::wal::rmgr::XLogReaderState;
+use ::wal::wal::XLR_INFO_MASK;
 
 use multixact_seams as mx_seams;
 use varsup_seams as varsup_seams;
@@ -119,8 +119,8 @@ pub fn xlog_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
                 .has_block_image(block_id as usize);
             if !has_image {
                 if info == XLOG_FPI {
-                    return Err(utils_error::PgError::new(
-                        types_error::ERROR,
+                    return Err(::utils_error::PgError::new(
+                        ::types_error::ERROR,
                         "XLOG_FPI record did not contain a full-page image",
                     ));
                 }
@@ -129,9 +129,9 @@ pub fn xlog_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
 
             let (action, buffer) =
                 xlogutils::XLogReadBufferForRedo(record, block_id)?;
-            if action != wal::XLogRedoAction::BlkRestored {
-                return Err(utils_error::PgError::new(
-                    types_error::ERROR,
+            if action != ::wal::XLogRedoAction::BlkRestored {
+                return Err(::utils_error::PgError::new(
+                    ::types_error::ERROR,
                     "unexpected XLogReadBufferForRedo result when restoring backup block",
                 ));
             }
@@ -185,7 +185,7 @@ fn redo_checkpoint(record: &mut XLogReaderState<'_>, shutdown: bool) -> PgResult
             check_point.oldestMultiDB,
         )?;
         // No need to set oldestClogXid here; an xl_clog_truncate redo handles it.
-        if types_core::TransactionIdIsNormal(check_point.oldestXid) {
+        if ::types_core::TransactionIdIsNormal(check_point.oldestXid) {
             vacuum_seams::set_transaction_id_limit::call(
                 check_point.oldestXid,
                 check_point.oldestXidDB,
@@ -214,7 +214,7 @@ fn redo_checkpoint(record: &mut XLogReaderState<'_>, shutdown: bool) -> PgResult
             check_point.oldestMulti,
             check_point.oldestMultiDB,
         )?;
-        if types_core::TransactionIdPrecedes(
+        if ::types_core::TransactionIdPrecedes(
             varsup_seams::get_oldest_xid::call(),
             check_point.oldestXid,
         ) {
@@ -265,7 +265,7 @@ fn check_replay_tli(tli: TimeLineID, kind: &str) -> PgResult<()> {
             .errmsg(alloc::format!(
                 "unexpected timeline ID {tli} (should be {replay_tli}) in {kind} checkpoint record"
             ))
-            .finish(types_error::ErrorLocation::new("xlog.c", 8425, "xlog_redo"))
+            .finish(::types_error::ErrorLocation::new("xlog.c", 8425, "xlog_redo"))
             .map(|_| ());
     }
     Ok(())
@@ -273,7 +273,7 @@ fn check_replay_tli(tli: TimeLineID, kind: &str) -> PgResult<()> {
 
 /// `ControlFile->checkPointCopy.nextXid = nextXid` under `ControlFileLock`
 /// (xlog.c:8410-8412 / 8479-8481).
-fn set_control_checkpoint_next_xid(next_xid: types_core::FullTransactionId) -> PgResult<()> {
+fn set_control_checkpoint_next_xid(next_xid: ::types_core::FullTransactionId) -> PgResult<()> {
     let lock = lwlock::main_lock_ref(9 /* ControlFileLock */);
     lwlock::LWLockAcquire(
         lock,
@@ -287,7 +287,7 @@ fn set_control_checkpoint_next_xid(next_xid: types_core::FullTransactionId) -> P
 
 /// `XLogCtl->ckptFullXid = nextXid` under `info_lck` (xlog.c:8415-8417 /
 /// 8484-8486).
-fn set_ckpt_full_xid(next_xid: types_core::FullTransactionId) {
+fn set_ckpt_full_xid(next_xid: ::types_core::FullTransactionId) {
     // SAFETY: live shmem region.
     let ctl = unsafe { &*crate::shmem::xlog_ctl() };
     crate::shmem::spin_lock_acquire(&ctl.info_lck);
@@ -353,7 +353,7 @@ fn redo_parameter_change(record: &mut XLogReaderState<'_>) -> PgResult<()> {
         .as_ref()
         .expect("xlog_redo dispatched on a decoded record")
         .data();
-    let xlrec = wal::rmgrdesc::xl_parameter_change::from_bytes(data)
+    let xlrec = ::wal::rmgrdesc::xl_parameter_change::from_bytes(data)
         .expect("XLOG_PARAMETER_CHANGE record carries a sizeof(xl_parameter_change) image");
 
     // The C hot-standby branch that invalidates obsolete logical replication

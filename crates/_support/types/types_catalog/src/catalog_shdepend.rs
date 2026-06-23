@@ -3,8 +3,8 @@
 //! the `Anum_*` column numbers) and the `SharedDependencyType` enum from
 //! `catalog/dependency.h`, trimmed to what the pg_shdepend port consumes.
 
-use types_core::primitive::AttrNumber;
-use types_core::primitive::Oid;
+use ::types_core::primitive::AttrNumber;
+use ::types_core::primitive::Oid;
 
 /// `SharedDependRelationId` — `pg_shdepend`
 /// (`CATALOG(pg_shdepend,1214,SharedDependRelationId)`).

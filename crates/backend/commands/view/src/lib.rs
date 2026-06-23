@@ -17,8 +17,8 @@
 //!
 //! Pure node walkers / catalog reads cross to ported siblings directly, exactly
 //! as the C calls them: `exprType` / `exprTypmod` / `exprCollation`
-//! ([`nodes_core::nodefuncs`]), `makeColumnDef` / `makeDefElem`
-//! ([`nodes_core::makefuncs`]), `type_is_collatable` /
+//! ([`::nodes_core::nodefuncs`]), `makeColumnDef` / `makeDefElem`
+//! ([`::nodes_core::makefuncs`]), `type_is_collatable` /
 //! `get_collation_name` ([`lsyscache`]),
 //! `format_type_with_typemod` ([`adt_format_type`]),
 //! `RangeVarGetAndCheckCreationNamespace` ([`catalog_namespace`]),
@@ -39,28 +39,28 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgString, PgVec};
 
-use common_relation::relation_open;
-use transam_xact::CommandCounterIncrement;
-use catalog_namespace::RangeVarGetAndCheckCreationNamespace;
-use pg_depend::recordDependencyOnCurrentExtension;
-use nodes_core::makefuncs::make_column_def;
-use nodes_core::nodefuncs::{expr_collation, expr_type, expr_typmod};
-use parser_analyze::parse_analyze_fixedparams;
-use parser_relation::isQueryUsingTempRelation;
-use rewriteDefine::DefineQueryRewrite;
-use adt_format_type::format_type_with_typemod;
-use lsyscache::type_::type_is_collatable;
-use lsyscache::collation_constraint_language_cast::get_collation_name;
+use ::common_relation::relation_open;
+use ::transam_xact::CommandCounterIncrement;
+use ::catalog_namespace::RangeVarGetAndCheckCreationNamespace;
+use ::pg_depend::recordDependencyOnCurrentExtension;
+use ::nodes_core::makefuncs::make_column_def;
+use ::nodes_core::nodefuncs::{expr_collation, expr_type, expr_typmod};
+use ::parser_analyze::parse_analyze_fixedparams;
+use ::parser_relation::isQueryUsingTempRelation;
+use ::rewriteDefine::DefineQueryRewrite;
+use ::adt_format_type::format_type_with_typemod;
+use ::lsyscache::type_::type_is_collatable;
+use ::lsyscache::collation_constraint_language_cast::get_collation_name;
 
-use tablecmds::AlterTableInternal;
+use ::tablecmds::AlterTableInternal;
 use tablecmds_seams as tablecmds_seam;
 use view_seams as seam;
 
-use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_COLLATION,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
@@ -77,16 +77,16 @@ use ::nodes::primnodes::OnCommitAction;
 use ::nodes::parsestmt::RawStmt;
 use ::nodes::rawnodes::{ColumnDef, RangeVar};
 use ::nodes::value::StringNode;
-use rel::Relation;
-use types_storage::lock::{AccessExclusiveLock, NoLock, LOCKMODE};
-use types_tuple::access::{
+use ::rel::Relation;
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, LOCKMODE};
+use ::types_tuple::access::{
     RangeVar as AccessRangeVar, RELKIND_VIEW, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
     RELPERSISTENCE_UNLOGGED,
 };
-use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData};
+use ::types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData};
 
 /// `RelationRelationId` — `pg_class` OID.
-const RelationRelationId: Oid = types_core::catalog::RELATION_RELATION_ID;
+const RelationRelationId: Oid = ::types_core::catalog::RELATION_RELATION_ID;
 
 /// `ErrorLocation` for `ereport(...).finish(...)` in this module.
 fn here(funcname: &'static str) -> ErrorLocation {
@@ -219,7 +219,7 @@ fn DefineVirtualRelation<'mcx>(
          * column list.
          */
         let descriptor: TupleDescData =
-            tablecmds::build_desc_for_relation(mcx, &attr_list)?;
+            ::tablecmds::build_desc_for_relation(mcx, &attr_list)?;
         checkViewColumns(mcx, &descriptor, &rel.rd_att)?;
 
         /*

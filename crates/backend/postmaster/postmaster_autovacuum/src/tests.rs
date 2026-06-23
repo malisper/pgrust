@@ -6,8 +6,8 @@
 use crate::core::{self, RELKIND_RELATION, RELKIND_TOASTVALUE};
 use crate::schedule::relation_needs_vacanalyze;
 use crate::shmem::{check_autovacuum_work_mem, AutoVacuumingActive};
-use types_autovacuum::TabStatEntry;
-use types_reloptions::AutoVacOpts;
+use ::types_autovacuum::TabStatEntry;
+use ::types_reloptions::AutoVacOpts;
 
 /// Seed the GUC globals to PostgreSQL's defaults and clear the worker/wrap
 /// state so the threshold math runs deterministically.
@@ -180,7 +180,7 @@ fn work_mem_clamp() {
 
 #[test]
 fn extract_autovac_opts_projects_autovacuum_subfield() {
-    use types_reloptions::StdRdOptions;
+    use ::types_reloptions::StdRdOptions;
 
     // C: relopts == NULL -> NULL.
     assert_eq!(core::extract_autovac_opts(RELKIND_RELATION, None), None);

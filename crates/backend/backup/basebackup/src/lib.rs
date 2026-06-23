@@ -51,12 +51,12 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 mod leaf_seams;
 
-use utils_error::ereport;
-use types_core::primitive::{
+use ::utils_error::ereport;
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, Oid, RelFileNumber, Size, TimeLineID, XLogRecPtr, BLCKSZ,
 };
 use types_error::{
@@ -82,19 +82,19 @@ use transam_xlog::{
     CheckXLogRemoved, IsTLHistoryFileName, IsXLogFileName, StatusFilePath, XLByteToPrevSeg,
     XLByteToSeg, XLogFileName, XLogFromFileName,
 };
-use xlogbackup::build_backup_content_default;
-use reinit::parse_filename_for_nontemp_relation;
-use fd::sync_cleanup::looks_like_temp_rel_name;
+use ::xlogbackup::build_backup_content_default;
+use ::reinit::parse_filename_for_nontemp_relation;
+use ::fd::sync_cleanup::looks_like_temp_rel_name;
 use page::{PageGetLSN, PageIsNew, PageRef};
-use checksum::pg_checksum_page;
+use ::checksum::pg_checksum_page;
 use define::{defGetBoolean, defGetInt64, defGetString};
 use checksum_helper::{
     pg_checksum_init, pg_checksum_parse_type, pg_checksum_type, pg_checksum_update,
     PgChecksumContext, CHECKSUM_TYPE_CRC32C, CHECKSUM_TYPE_NONE,
 };
 use compression::{PgCompressAlgorithm, PgCompressSpecification};
-use replication::replnodes::BaseBackupCmd;
-use replication::walsender::WalSndState;
+use ::replication::replnodes::BaseBackupCmd;
+use ::replication::walsender::WalSndState;
 
 use backup_basebackup_seams as bbseam;
 use sink_support as progress;
@@ -129,13 +129,13 @@ const TAR_BLOCK_SIZE: usize = 512;
 const RELSEG_SIZE: u64 = types_storage::smgr::RELSEG_SIZE as u64;
 
 /// `INIT_FORKNUM` / `InvalidForkNumber` (relpath.h).
-const INIT_FORKNUM: ForkNumber = types_core::primitive::INIT_FORKNUM;
-const INVALID_FORKNUM: ForkNumber = types_core::primitive::InvalidForkNumber;
+const INIT_FORKNUM: ForkNumber = ::types_core::primitive::INIT_FORKNUM;
+const INVALID_FORKNUM: ForkNumber = ::types_core::primitive::InvalidForkNumber;
 
 /// `InvalidOid`.
-const INVALID_OID: Oid = types_core::primitive::InvalidOid;
+const INVALID_OID: Oid = ::types_core::primitive::InvalidOid;
 /// `InvalidRelFileNumber`.
-const INVALID_REL_FILE_NUMBER: RelFileNumber = types_core::primitive::InvalidOid;
+const INVALID_REL_FILE_NUMBER: RelFileNumber = ::types_core::primitive::InvalidOid;
 
 /// Tablespace OIDs (pg_tablespace_d.h).
 const GLOBALTABLESPACE_OID: Oid = 1664;
@@ -874,7 +874,7 @@ fn parse_basebackup_options<'mcx>(
     let mut o_compression_detail = false;
     let mut compression_detail_str: Option<String> = None;
 
-    let dup = |defname: &str, func: &'static str| -> types_error::PgError {
+    let dup = |defname: &str, func: &'static str| -> ::types_error::PgError {
         ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)
             .errmsg(format!("duplicate option \"{defname}\""))
@@ -2047,6 +2047,6 @@ fn send_base_backup_entry(cmd: BaseBackupCmd) -> PgResult<()> {
     // The C code runs in the walsender's `CurrentMemoryContext`. The repo has no
     // ambient context, so the entry point owns a context for the duration of the
     // backup (mirroring publicationcmds' inward seams).
-    let ctx = mcx::MemoryContext::new("SendBaseBackup");
+    let ctx = ::mcx::MemoryContext::new("SendBaseBackup");
     SendBaseBackup(ctx.mcx(), &cmd, None)
 }

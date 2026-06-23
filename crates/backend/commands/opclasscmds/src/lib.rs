@@ -17,13 +17,13 @@
 //! here.
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use amapi_seams::{am_adjust_members, get_index_am_info};
 use genam_seams as genam_seams;
 use aclchk_seams::{aclcheck_error, object_aclcheck};
-use catalog_seams::is_pinned_object;
-use dependency_seams::perform_deletion;
+use ::catalog_seams::is_pinned_object;
+use ::dependency_seams::perform_deletion;
 use indexing_seams::{
     catalog_tuple_insert_pg_amop, catalog_tuple_insert_pg_amproc,
     catalog_tuple_insert_pg_opclass, catalog_tuple_insert_pg_opfamily,
@@ -34,16 +34,16 @@ use catalog_namespace::{
 };
 use objectaccess_seams::{object_access_hook_present, run_object_post_create_hook};
 use pg_depend_seams::{recordDependencyOn, recordDependencyOnCurrentExtension};
-use pg_shdepend_seams::recordDependencyOnOwner;
-use amcmds_seams::get_index_am_oid;
+use ::pg_shdepend_seams::recordDependencyOnOwner;
+use ::amcmds_seams::get_index_am_oid;
 use event_trigger_seams::{
     event_trigger_collect_alter_opfam, event_trigger_collect_create_opclass,
     event_trigger_collect_simple_command,
 };
-use parse_func_seams::lookup_func_with_args;
+use ::parse_func_seams::lookup_func_with_args;
 use parse_oper_seams::{lookup_oper_name, lookup_oper_with_args};
 use parse_type_seams::{typename_to_string, typename_type_id};
-use format_type_seams::format_type_be;
+use ::format_type_seams::format_type_be;
 use lsyscache_seams::{
     get_am_name, get_func_signature, op_input_types,
 };
@@ -54,41 +54,41 @@ use syscache_seams::{
 use miscinit_seams::{get_user_id, superuser_arg};
 
 use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_core::fmgr::F_OIDEQ;
-use scankey::ScanKeyInit;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_core::fmgr::F_OIDEQ;
+use ::scankey::ScanKeyInit;
 // All in-crate Datum traffic — including the `ScanKeyData.sk_argument`
 // scan-key edge stamped by `ScanKeyInit` — uses the canonical unified
-// `types_tuple::Datum<'mcx>` enum (`heaptuple::Datum`).
-use heaptuple::heap_deform_tuple;
-use types_tuple::heaptuple::ItemPointerData;
-use types_catalog::catalog::{
+// `::types_tuple::Datum<'mcx>` enum (`::heaptuple::Datum`).
+use ::heaptuple::heap_deform_tuple;
+use ::types_tuple::heaptuple::ItemPointerData;
+use ::types_catalog::catalog::{
     ACCESS_METHOD_OPERATOR_RELATION_ID, ACCESS_METHOD_PROCEDURE_RELATION_ID,
     ACCESS_METHOD_RELATION_ID, NAMESPACE_RELATION_ID, OPERATOR_CLASS_RELATION_ID,
     OPERATOR_FAMILY_RELATION_ID, OPERATOR_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID,
 };
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
 };
-use types_catalog::opclasscmds_catalog::{
+use ::types_catalog::opclasscmds_catalog::{
     Anum_pg_opclass_opcdefault, Anum_pg_opclass_opcintype, Anum_pg_opclass_opcmethod,
     Anum_pg_opclass_opcname,
     FormData_pg_amop, FormData_pg_amproc,
     FormData_pg_opclass, FormData_pg_opfamily, OpclassAmNameNspIndexId,
 };
-use types_core::primitive::{Oid, OidIsValid};
-use types_core::primitive::InvalidOid;
-use types_core::catalog::{
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::types_core::primitive::InvalidOid;
+use ::types_core::catalog::{
     BOOLOID, BTREE_AM_OID, INT4OID, INT8OID, INTERNALOID, VOIDOID,
 };
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::parsenodes::OBJECT_SCHEMA;
 use opclass::{
     AlterOpFamilyStmt, CreateOpClassItem, CreateOpClassStmt, CreateOpFamilyStmt,
     ObjectWithArgs, OpFamilyMember, StringNode, TypeName, AMOP_ORDER, AMOP_SEARCH,
     OPCLASS_ITEM_FUNCTION, OPCLASS_ITEM_OPERATOR, OPCLASS_ITEM_STORAGETYPE,
 };
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 
 use types_error::{
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION,
@@ -129,7 +129,7 @@ pub fn init_seams() {
             let resolved = convert::create_op_class_stmt(stmt)?;
             DefineOpClass(mcx, &resolved)
         }
-        None => Err(types_error::PgError::error(
+        None => Err(::types_error::PgError::error(
             "define_op_class: parse tree is not a CreateOpClassStmt",
         )),
     });
@@ -138,7 +138,7 @@ pub fn init_seams() {
             let resolved = convert::create_op_family_stmt(stmt)?;
             DefineOpFamily(mcx, &resolved)
         }
-        None => Err(types_error::PgError::error(
+        None => Err(::types_error::PgError::error(
             "define_op_family: parse tree is not a CreateOpFamilyStmt",
         )),
     });
@@ -147,7 +147,7 @@ pub fn init_seams() {
             let resolved = convert::alter_op_family_stmt(stmt)?;
             AlterOpFamily(mcx, &resolved)
         }
-        None => Err(types_error::PgError::error(
+        None => Err(::types_error::PgError::error(
             "alter_op_family: parse tree is not an AlterOpFamilyStmt",
         )),
     });
@@ -288,7 +288,7 @@ fn OpClassCacheLookup(
         if !OidIsValid(namespaceId) {
             None
         } else {
-            let oid = syscache_seams::get_opclass_oid::call(
+            let oid = ::syscache_seams::get_opclass_oid::call(
                 amID, opcname, namespaceId,
             )?;
             if OidIsValid(oid) {
@@ -429,7 +429,7 @@ fn CreateOpFamily(
     /* Report the new operator family to possibly interested event triggers */
     event_trigger_collect_simple_command::call(
         myself,
-        types_catalog::catalog_dependency::InvalidObjectAddress,
+        ::types_catalog::catalog_dependency::InvalidObjectAddress,
         stmt,
     )?;
 
@@ -1995,7 +1995,7 @@ fn InvokeObjectPostCreateHook(class_id: Oid, object_id: Oid, sub_id: i32) -> PgR
 /// `get_am_name(amoid)` rendered for an error message; `""` if unknown. Used
 /// where the C interpolates `get_am_name(...)` directly into an `errmsg`.
 fn am_name_for_error(amoid: Oid) -> String {
-    let cx = mcx::MemoryContext::new("opclasscmds am_name");
+    let cx = ::mcx::MemoryContext::new("opclasscmds am_name");
     get_am_name::call(cx.mcx(), amoid)
         .ok()
         .flatten()
@@ -2007,7 +2007,7 @@ fn am_name_for_error(amoid: Oid) -> String {
 /// `aclcheck_error` objname.
 fn get_namespace_name_for_acl(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>> {
     Ok(
-        lsyscache_seams::get_namespace_name::call(mcx, nspid)?
+        ::lsyscache_seams::get_namespace_name::call(mcx, nspid)?
             .map(|s| s.as_str().to_string()),
     )
 }
@@ -2015,7 +2015,7 @@ fn get_namespace_name_for_acl(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<Strin
 /// `get_namespace_name(nspid)` rendered for an error message.
 fn namespace_name_for_error(mcx: Mcx<'_>, nspid: Oid) -> PgResult<Option<String>> {
     Ok(
-        lsyscache_seams::get_namespace_name::call(mcx, nspid)?
+        ::lsyscache_seams::get_namespace_name::call(mcx, nspid)?
             .map(|s| s.as_str().to_string()),
     )
 }

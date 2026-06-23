@@ -24,8 +24,8 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_error::PgResult;
-use types_resowner::ResourceOwner;
+use ::types_error::PgResult;
+use ::types_resowner::ResourceOwner;
 
 seam_core::seam!(
     /// `pgaio_io_call_stage(ioh)` leg for one registered callback id

@@ -5,8 +5,8 @@
 //! then a call panics loudly.
 
 use types_acl::{AclMaskHow, AclMode, AclResult};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::parsenodes::ObjectType;
 
 seam_core::seam!(
@@ -74,7 +74,7 @@ seam_core::seam!(
     /// Result is `(aclresult, is_missing)`.
     pub fn pg_attribute_aclcheck_ext(
         table_oid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
         roleid: Oid,
         mode: AclMode,
     ) -> PgResult<(AclResult, bool)>
@@ -131,7 +131,7 @@ seam_core::seam!(
     /// on cache lookup failure, carried on `Err`.
     pub fn pg_attribute_aclcheck(
         table_oid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
         roleid: Oid,
         mode: AclMode,
     ) -> PgResult<AclResult>

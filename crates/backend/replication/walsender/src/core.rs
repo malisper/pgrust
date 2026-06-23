@@ -29,28 +29,28 @@ extern crate alloc;
 use core::cell::{Cell, RefCell};
 use core::ffi::c_int;
 
-use condvar::ConditionVariable;
-use types_core::primitive::{pid_t, sig_atomic_t};
-use types_storage::storage::Spinlock;
+use ::condvar::ConditionVariable;
+use ::types_core::primitive::{pid_t, sig_atomic_t};
+use ::types_storage::storage::Spinlock;
 
-pub use types_core::primitive::{Size, TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
-pub use types_core::primitive::uint32;
-pub use types_core::Oid;
+pub use ::types_core::primitive::{Size, TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
+pub use ::types_core::primitive::uint32;
+pub use ::types_core::Oid;
 pub use types_datetime::{Interval, TimeOffset};
 
-pub use replication::replnodes::{
+pub use ::replication::replnodes::{
     AlterReplicationSlotCmd, BaseBackupCmd, CreateReplicationSlotCmd, DropReplicationSlotCmd,
     IdentifySystemCmd, ReadReplicationSlotCmd, ReplCommand, ReplicationKind, StartReplicationCmd,
     TimeLineHistoryCmd, UploadManifestCmd, VariableShowStmt,
 };
-pub use replication::walsender::{SyncState, WalSenderRow, WalSnd, WalSndState};
+pub use ::replication::walsender::{SyncState, WalSenderRow, WalSnd, WalSndState};
 
 /// `InvalidXLogRecPtr` (`access/xlogdefs.h`): `#define InvalidXLogRecPtr 0`.
 pub const InvalidXLogRecPtr: XLogRecPtr = 0;
 /// `InvalidOid` (postgres_ext.h): `((Oid) 0)`.
-pub const InvalidOid: types_core::Oid = 0;
+pub const InvalidOid: ::types_core::Oid = 0;
 /// `InvalidTransactionId` (`access/transam.h`).
-pub const InvalidTransactionId: types_core::primitive::TransactionId = 0;
+pub const InvalidTransactionId: ::types_core::primitive::TransactionId = 0;
 
 // ---------------------------------------------------------------------------
 // Constants (walsender.c)
@@ -80,10 +80,10 @@ pub const PG_STAT_GET_WAL_SENDERS_COLS: c_int = 12;
 /// `WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS` (local to WalSndUpdateProgress).
 pub const WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS: c_int = 1000;
 
-pub const TEXTOID: types_core::Oid = 25;
-pub const INT8OID: types_core::Oid = 20;
+pub const TEXTOID: ::types_core::Oid = 25;
+pub const INT8OID: ::types_core::Oid = 20;
 /// `ROLE_PG_READ_ALL_STATS` (catalog/pg_authid.dat) — predefined role OID 3375.
-pub const ROLE_PG_READ_ALL_STATS: types_core::Oid = 3375;
+pub const ROLE_PG_READ_ALL_STATS: ::types_core::Oid = 3375;
 
 // Flags for WalSndCtlData->sync_standbys_status (walsender_private.h).
 pub const SYNC_STANDBY_INIT: u8 = 1 << 0;
@@ -291,9 +291,9 @@ pub struct WalSndSlot {
     pub write: XLogRecPtr,
     pub flush: XLogRecPtr,
     pub apply: XLogRecPtr,
-    pub writeLag: types_datetime::TimeOffset,
-    pub flushLag: types_datetime::TimeOffset,
-    pub applyLag: types_datetime::TimeOffset,
+    pub writeLag: ::types_datetime::TimeOffset,
+    pub flushLag: ::types_datetime::TimeOffset,
+    pub applyLag: ::types_datetime::TimeOffset,
     pub sync_standby_priority: c_int,
     pub mutex: Spinlock,
     pub replyTime: TimestampTz,
@@ -311,7 +311,7 @@ pub struct WalSndCtlData {
     /// `with_sync_rep_queue` accessor. Modeled as a `proclist_head` (pgprocno
     /// head/tail) — the shmem-safe intrusive representation, exactly like the
     /// LWLock/CV wait lists; the per-PGPROC links live in `syncRepLinks`.
-    pub SyncRepQueue: [types_storage::storage::proclist_head; NUM_SYNC_REP_WAIT_MODE],
+    pub SyncRepQueue: [::types_storage::storage::proclist_head; NUM_SYNC_REP_WAIT_MODE],
     /// `XLogRecPtr lsn[NUM_SYNC_REP_WAIT_MODE]`.
     pub lsn: [XLogRecPtr; NUM_SYNC_REP_WAIT_MODE],
     /// `bits8 sync_standbys_status`.
@@ -401,7 +401,7 @@ pub fn slot_spin_release(slot: &WalSndSlot) {
 #[inline]
 pub fn with_sync_rep_queue<R>(
     mode: usize,
-    f: impl FnOnce(&mut types_storage::storage::proclist_head) -> R,
+    f: impl FnOnce(&mut ::types_storage::storage::proclist_head) -> R,
 ) -> R {
     f(&mut wal_snd_ctl_mut().SyncRepQueue[mode])
 }

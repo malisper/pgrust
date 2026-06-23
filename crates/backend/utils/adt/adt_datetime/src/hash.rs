@@ -331,7 +331,7 @@ mod tests {
         let seed = 0x0123_4567_89ab_cdef;
         assert_eq!(timetz_hash_extended(&a, seed), timetz_hash_extended(&b, seed));
 
-        use types_datetime::USECS_PER_SEC;
+        use ::types_datetime::USECS_PER_SEC;
         let noon_utc = TimeTzADT {
             time: 43_200_000_000,
             zone: 0,
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn interval_equality_invariant() {
         use crate::interval::interval_cmp_internal;
-        use types_datetime::USECS_PER_DAY;
+        use ::types_datetime::USECS_PER_DAY;
 
         let a = Interval {
             time: 0,

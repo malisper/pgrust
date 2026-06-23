@@ -1,5 +1,5 @@
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 fn name_of(s: &str) -> NameData {
     let mut n = NameData::default();

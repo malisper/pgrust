@@ -9,11 +9,11 @@
 //! that this crate owns (and that panics until the syscache keystone lands —
 //! `examine_simple_variable` cannot yet produce a non-NULL `statsTuple`).
 
-use mcx::Mcx;
-use types_core::primitive::{InvalidOid, Oid};
-use datum::datum::Datum;
-use types_error::PgResult;
-use pathnodes::PlannerInfo;
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
+use ::pathnodes::PlannerInfo;
 use types_selfuncs::{
     StatsTuple, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES,
 };
@@ -180,7 +180,7 @@ fn var_attno(root: &PlannerInfo, vardata: &VariableStatData) -> Option<i16> {
     // (e.g. examine_indexcol_variable, which leaves var unset) carries the NULL
     // node handle NodeId(0); treat it as "not a Var" rather than panicking in the
     // node-arena resolver, so the caller falls through to stadistinct = 0.0.
-    if vardata.var == pathnodes::NodeId(0) {
+    if vardata.var == ::pathnodes::NodeId(0) {
         return None;
     }
     root.node(vardata.var).as_var().map(|v| v.varattno)

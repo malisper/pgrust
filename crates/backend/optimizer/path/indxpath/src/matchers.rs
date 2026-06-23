@@ -5,14 +5,14 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::{CompareType, Expr, RowCompareExpr};
 use pathnodes::{IndexClause, IndexOptInfo, PlannerInfo, RinfoId};
 
-use nodes_core::makefuncs::{make_bool_const, make_opclause};
-use nodes_core::nodefuncs::expr_type;
+use ::nodes_core::makefuncs::{make_bool_const, make_opclause};
+use ::nodes_core::nodefuncs::expr_type;
 use clauses::{contain_volatile_functions, make_SAOP_expr};
 use lsyscache_seams as lsyscache;
 use fmgr_support_seams as fmgr_support;
@@ -552,7 +552,7 @@ pub fn match_saopclause_to_indexcol(
 
     // We must have indexkey on the left and a pseudo-constant array argument.
     if match_index_to_operand(root, &leftop, indexcol, index)
-        && !nodes_core::bitmapset::bms_is_member(index_relid as i32, right_relids.as_deref())
+        && !::nodes_core::bitmapset::bms_is_member(index_relid as i32, right_relids.as_deref())
         && !contain_volatile_functions(Some(&rightop))?
     {
         if index_coll_matches_expr_coll(idxcollation, expr_coll)
@@ -710,7 +710,7 @@ fn operand_uses_index_relid(
     mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     op: &Expr,
-    index_relid: types_core::primitive::Index,
+    index_relid: ::types_core::primitive::Index,
 ) -> PgResult<bool> {
     let op = op.clone_in(mcx)?;
     let id = root.alloc_node(op);
@@ -872,7 +872,7 @@ pub fn expand_indexqual_rowcompare(
         } else if op_strategy == BT_GREATER_STRATEGY_NUMBER {
             op_strategy = BT_GREATER_EQUAL_STRATEGY_NUMBER;
         } else {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "unexpected strategy number {}",
                 op_strategy
             )));
@@ -890,7 +890,7 @@ pub fn expand_indexqual_rowcompare(
                 op_strategy as i16,
             )?;
             if new_op == INVALID_OID {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "missing operator {}({},{}) in opfamily {}",
                     op_strategy, lefttype, righttype, opfam
                 )));
@@ -1150,7 +1150,7 @@ pub fn match_orclause_to_indexcol<'mcx>(
 pub fn match_join_clauses_to_index(
     mcx: Mcx<'_>,
     root: &mut PlannerInfo,
-    rel: pathnodes::RelId,
+    rel: ::pathnodes::RelId,
     index: &IndexOptInfo,
     clauseset: &mut IndexClauseSet,
     joinorclauses: &mut Vec<RinfoId>,
@@ -1183,7 +1183,7 @@ pub fn match_join_clauses_to_index(
 pub fn match_eclass_clauses_to_index<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     index: &IndexOptInfo,
     clauseset: &mut IndexClauseSet,
 ) -> PgResult<()> {
@@ -1205,9 +1205,9 @@ pub fn match_eclass_clauses_to_index<'mcx>(
         // `crate::unique`.
         let mut callback =
             |cb_root: &PlannerInfo,
-             cb_rel: pathnodes::RelId,
-             ec: pathnodes::EcId,
-             em: pathnodes::EmId|
+             cb_rel: ::pathnodes::RelId,
+             ec: ::pathnodes::EcId,
+             em: ::pathnodes::EmId|
              -> bool {
                 crate::unique::ec_member_matches_indexcol(
                     cb_root,

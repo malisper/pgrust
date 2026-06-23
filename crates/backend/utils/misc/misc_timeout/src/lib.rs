@@ -24,9 +24,9 @@ pub mod tzparser;
 
 use std::cell::{Cell, RefCell};
 
-use types_core::TimestampTz;
+use ::types_core::TimestampTz;
 use types_error::{PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, FATAL};
-use signal::SigHandler;
+use ::signal::SigHandler;
 use types_timeout::{
     DisableTimeoutParams, EnableTimeoutParams, TimeoutHandlerProc, TimeoutId, TimeoutType,
     MAX_TIMEOUTS,
@@ -760,7 +760,7 @@ fn elog_fatal(message: String) -> PgError {
 }
 
 /// `ereport(FATAL, (errcode(code), errmsg(...)))`.
-fn elog_fatal_code(message: String, code: types_error::SqlState) -> PgError {
+fn elog_fatal_code(message: String, code: ::types_error::SqlState) -> PgError {
     PgError::new(FATAL, message).with_sqlstate(code)
 }
 
@@ -768,16 +768,16 @@ fn elog_fatal_code(message: String, code: types_error::SqlState) -> PgError {
 mod tests;
 
 /// Adapter: `enable_timeout_after` for the `more2-seams` declaration, whose
-/// `TimeoutId` is `types_core::TimeoutId` (an identical-discriminant copy of
+/// `TimeoutId` is `::types_core::TimeoutId` (an identical-discriminant copy of
 /// the timeout-reason enum that the xact/postinit consumers use).
-fn enable_timeout_after_core(id: types_core::TimeoutId, delay_ms: i32) -> PgResult<()> {
+fn enable_timeout_after_core(id: ::types_core::TimeoutId, delay_ms: i32) -> PgResult<()> {
     enable_timeout_after(TimeoutId::from_index(id as usize), delay_ms)
 }
 
 /// Adapter: `disable_timeout` for the `more2-seams` declaration. The C
 /// function is `void`; the seam's `PgResult` failure surface is never
 /// exercised here, so we always return `Ok`.
-fn disable_timeout_core(id: types_core::TimeoutId, keep_indicator: bool) -> PgResult<()> {
+fn disable_timeout_core(id: ::types_core::TimeoutId, keep_indicator: bool) -> PgResult<()> {
     disable_timeout(TimeoutId::from_index(id as usize), keep_indicator);
     Ok(())
 }

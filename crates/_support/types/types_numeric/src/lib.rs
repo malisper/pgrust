@@ -25,7 +25,7 @@
 extern crate alloc;
 
 use core::mem::size_of;
-use datum::VARHDRSZ;
+use ::datum::VARHDRSZ;
 
 pub mod var;
 

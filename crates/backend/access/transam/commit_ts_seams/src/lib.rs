@@ -8,12 +8,12 @@
 #![allow(non_snake_case)]
 
 use types_core::{RepOriginId, TimestampTz, TransactionId};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `commit_ts_redo(record)` (commit_ts.c) — WAL redo for this resource manager's
     /// records (`rm_redo` slot). Can `ereport(ERROR)`, carried on `Err`.
-    pub fn commit_ts_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> types_error::PgResult<()>
+    pub fn commit_ts_redo(record: &mut wal::rmgr::XLogReaderState<'_>) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -35,11 +35,11 @@ seam_core::seam!(
     /// commit-ts tracking being inactive, is `ereport(ERROR)`, carried on
     /// `Err`.
     pub fn transaction_id_get_commit_ts_data(
-        xid: types_core::TransactionId,
-    ) -> types_error::PgResult<(
+        xid: ::types_core::TransactionId,
+    ) -> ::types_error::PgResult<(
         bool,
-        types_core::TimestampTz,
-        types_core::primitive::RepOriginId,
+        ::types_core::TimestampTz,
+        ::types_core::primitive::RepOriginId,
     )>
 );
 
@@ -48,21 +48,21 @@ seam_core::seam!(
     /// `syncsw[SYNC_HANDLER_COMMIT_TS]` sync callback) — fsync the SLRU segment
     /// the tag names, returning the `0`/`<0` code, resolved path, and saved
     /// `errno`.
-    pub fn committssyncfiletag(ftag: types_storage::sync::FileTag) -> types_error::PgResult<types_storage::sync::FileTagOpResult>
+    pub fn committssyncfiletag(ftag: types_storage::sync::FileTag) -> ::types_error::PgResult<types_storage::sync::FileTagOpResult>
 );
 
 seam_core::seam!(
     /// `CommitTsShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn commit_ts_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn commit_ts_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
     /// `CommitTsShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
     /// this subsystem's shared-memory structures. `Err` carries the C
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn commit_ts_shmem_init() -> types_error::PgResult<()>
+    pub fn commit_ts_shmem_init() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(

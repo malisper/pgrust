@@ -6,8 +6,8 @@
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use brin::{BrinDesc, MinmaxMultiRanges};
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 
 use crate::codec::SerializedRanges;

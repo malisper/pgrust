@@ -3,9 +3,9 @@
 //! (costsize.c:4534).
 
 
-use types_core::primitive::Cost;
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::Cost;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     AggStrategy, NodeId, PathId, PathNode, PlannerInfo, AGG_HASHED, AGG_MIXED,
     AGG_PLAIN, AGG_SORTED,
@@ -24,7 +24,7 @@ use crate::{
 use crate::sizeest::get_expr_width;
 
 /// Per-aggregate cost carrier (matches the pathnode-seams `AggClauseCostsLite`).
-pub use pathnode_seams::AggClauseCostsLite;
+pub use ::pathnode_seams::AggClauseCostsLite;
 
 /* ==========================================================================
  * cost_agg (costsize.c:2682)
@@ -214,7 +214,7 @@ pub fn cost_group<'mcx>(
 /// `cost_windowagg` — fills a WindowAgg path (by `PathId`). `window_funcs` are
 /// the WindowFunc node handles; `winclause` is the WindowClause node handle.
 pub fn cost_windowagg<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path_id: PathId,
     window_funcs: &[NodeId],
@@ -223,7 +223,7 @@ pub fn cost_windowagg<'mcx>(
     input_startup_cost: Cost,
     input_total_cost: Cost,
     input_tuples: f64,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     // The WindowClause column counts + startup-tuples estimate (the C reads
     // winclause->partitionClause/orderClause + get_windowclause_startup_tuples,
     // which also touches root->parse->targetList) are unreachable in the fabled

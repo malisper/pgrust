@@ -21,10 +21,10 @@
 //! fixed-length by-ref type, not a varlena), so the image is header-less and
 //! symmetric on the arg and result lanes.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_network::macaddr;
+use ::types_network::macaddr;
 
 /// A scratch context for the `_send` adapter to frame the `bytea` result, copied
 /// onto the by-ref lane before it is dropped (C: the palloc'd result lives in
@@ -247,7 +247,7 @@ pub fn register_mac_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datum::NullableDatum;
+    use ::datum::NullableDatum;
 
     /// Build a `macaddr` six-byte image via the registered `macaddr_in` (OID 436).
     fn in_macaddr(s: &str) -> Vec<u8> {

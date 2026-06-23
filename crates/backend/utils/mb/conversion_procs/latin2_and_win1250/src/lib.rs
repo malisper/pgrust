@@ -24,15 +24,15 @@
 
 mod tables;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use conv_string_helpers::{
     latin2mic, latin2mic_with_table, local2local, mic2latin, mic2latin_with_table, ConversionResult,
 };
-use conv_string_helpers::make_conversion_builtin;
-use mbutils_seams::check_encoding_conversion_args;
+use ::conv_string_helpers::make_conversion_builtin;
+use ::mbutils_seams::check_encoding_conversion_args;
 use tables::{ISO88592_2_WIN1250, WIN1250_2_ISO88592};
-use types_wchar::encoding::{pg_enc, PG_LATIN2, PG_MULE_INTERNAL, PG_WIN1250};
-use types_wchar::wchar::LC_ISO8859_2;
+use ::types_wchar::encoding::{pg_enc, PG_LATIN2, PG_MULE_INTERNAL, PG_WIN1250};
+use ::types_wchar::wchar::LC_ISO8859_2;
 
 /// `latin2_to_mic` (latin2_and_win1250.c): convert LATIN2 -> MULE_INTERNAL.
 pub fn latin2_to_mic(

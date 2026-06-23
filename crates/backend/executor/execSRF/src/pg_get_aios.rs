@@ -20,9 +20,9 @@ extern crate alloc;
 
 use core::cell::Cell;
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::ReturnSetInfo;
 use types_tuple::heaptuple::Datum;

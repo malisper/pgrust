@@ -24,14 +24,14 @@ use types_acl::{
     ACL_EXECUTE, ACL_USAGE, ACL_CREATE, ACL_CREATE_TEMP, ACL_CONNECT, ACL_SET, ACL_ALTER_SYSTEM,
     ACL_MAINTAIN,
 };
-use types_acl::AclMaskHow::{AclmaskAll as ACLMASK_ALL, AclmaskAny as ACLMASK_ANY};
-use types_core::Oid;
+use ::types_acl::AclMaskHow::{AclmaskAll as ACLMASK_ALL, AclmaskAny as ACLMASK_ANY};
+use ::types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_GRANT_OPERATION, ERRCODE_INVALID_PARAMETER_VALUE,
 };
 
-use acl_seams::has_privs_of_role;
+use ::acl_seams::has_privs_of_role;
 
 /// `ACL_MODECHG_ADD` (`utils/acl.h`).
 pub const ACL_MODECHG_ADD: i32 = 1;
@@ -138,7 +138,7 @@ pub fn allocacl<'mcx>(mcx: Mcx<'mcx>, n: i32) -> PgResult<&'mcx mut [AclItem]> {
         return Err(PgError::error(alloc::format!("invalid size: {n}")));
     }
     let n = n as usize;
-    let mut items: PgVec<'mcx, AclItem> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut items: PgVec<'mcx, AclItem> = ::mcx::vec_with_capacity_in(mcx, n)?;
     items.resize(
         n,
         AclItem { ai_grantee: 0, ai_grantor: 0, ai_privs: 0 },
@@ -632,13 +632,13 @@ pub fn aclmask_direct(
 /// the distinct OIDs in sorted order.
 pub fn aclmembers<'mcx>(mcx: Mcx<'mcx>, acl: &[AclItem]) -> PgResult<&'mcx mut [Oid]> {
     if acl.is_empty() {
-        return Ok(mcx::vec_with_capacity_in::<Oid>(mcx, 0)?.leak());
+        return Ok(::mcx::vec_with_capacity_in::<Oid>(mcx, 0)?.leak());
     }
 
     check_acl(acl)?;
 
     // Allocate the worst-case space requirement (2 OIDs per item).
-    let mut list: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, acl.len() * 2)?;
+    let mut list: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, acl.len() * 2)?;
 
     // Walk the ACL collecting mentioned RoleIds.
     for ai in acl.iter() {

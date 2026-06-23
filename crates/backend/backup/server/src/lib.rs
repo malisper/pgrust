@@ -34,20 +34,20 @@ use sink::{
     bbsink_forward_end_archive, bbsink_forward_end_backup, bbsink_forward_end_manifest,
     bbsink_forward_manifest_contents, Bbsink, BbsinkOps, BbsinkState,
 };
-use fd::sync_cleanup::durable_rename;
-use fd::vfd_io::{
+use ::fd::sync_cleanup::durable_rename;
+use ::fd::vfd_io::{
     FileClose, FilePathName, FileSync, FileWriteV, PathNameOpenFile,
 };
-use fd_seams::make_pg_directory;
+use ::fd_seams::make_pg_directory;
 use utils_error::{ereport, errno};
-use mcx::Mcx;
-use types_catalog::catalog::ROLE_PG_WRITE_SERVER_FILES;
-use types_core::primitive::{Size, TimeLineID, XLogRecPtr};
+use ::mcx::Mcx;
+use ::types_catalog::catalog::ROLE_PG_WRITE_SERVER_FILES;
+use ::types_core::primitive::{Size, TimeLineID, XLogRecPtr};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DISK_FULL, ERRCODE_DUPLICATE_FILE,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_NAME, ERROR,
 };
-use types_storage::File;
+use ::types_storage::File;
 
 use transam_xact_seams as xact;
 use acl_seams as acl;

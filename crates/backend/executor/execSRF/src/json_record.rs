@@ -41,9 +41,9 @@
 //! a tag-only `resultinfo` that cannot deliver the live `ReturnSetInfo` /
 //! `expectedDesc` these record functions need — the WONTFIX dual-home.
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
@@ -231,34 +231,34 @@ pub fn is_scalar_record_function(foid: Oid) -> bool {
 fn canon_arg_to_frame<'mcx>(
     val: &Datum<'mcx>,
     isnull: bool,
-) -> (datum::NullableDatum, Option<::nodes::fmgr::FmgrArgRef>) {
-    use datum::NullableDatum;
+) -> (::datum::NullableDatum, Option<::nodes::fmgr::FmgrArgRef>) {
+    use ::datum::NullableDatum;
     use ::nodes::fmgr::FmgrArgRef;
     if isnull {
         return (NullableDatum::null(), None);
     }
     match val {
         Datum::ByVal(w) => (
-            NullableDatum::value(datum::Datum::from_usize(*w)),
+            NullableDatum::value(::datum::Datum::from_usize(*w)),
             None,
         ),
         Datum::ByRef(bytes) => (
-            NullableDatum::value(datum::Datum::from_usize(0)),
+            NullableDatum::value(::datum::Datum::from_usize(0)),
             Some(FmgrArgRef::Varlena(bytes.as_slice().to_vec())),
         ),
         // A composite Datum is varlena-shaped: its header-ful disk image is what
         // `srf_arg_record` reads (`FmgrArgRef::Varlena`), the inverse of
         // `from_datum_image`.
         Datum::Composite(t) => (
-            NullableDatum::value(datum::Datum::from_usize(0)),
+            NullableDatum::value(::datum::Datum::from_usize(0)),
             Some(FmgrArgRef::Varlena(t.to_datum_image())),
         ),
         Datum::Cstring(s) => (
-            NullableDatum::value(datum::Datum::from_usize(0)),
+            NullableDatum::value(::datum::Datum::from_usize(0)),
             Some(FmgrArgRef::Cstring(s.clone())),
         ),
         Datum::Expanded(_) | Datum::Internal(_) => (
-            NullableDatum::value(datum::Datum::from_usize(0)),
+            NullableDatum::value(::datum::Datum::from_usize(0)),
             None,
         ),
     }
@@ -276,9 +276,9 @@ pub fn invoke_scalar_record_function<'mcx>(
     collation: Oid,
     args: &[Datum<'mcx>],
     nulls: &[bool],
-    fn_expr: Option<types_core::fmgr::FnExprErased>,
+    fn_expr: Option<::types_core::fmgr::FnExprErased>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
-    let mut flinfo = types_core::fmgr::FmgrInfo::empty();
+    let mut flinfo = ::types_core::fmgr::FmgrInfo::empty();
     flinfo.fn_oid = foid;
     flinfo.fn_expr = fn_expr;
 
@@ -307,7 +307,7 @@ pub fn invoke_scalar_record_function<'mcx>(
     let isnull = fcinfo.isnull;
     match dispatch {
         crate::srf_registry::SrfDispatch::Builtin(d) => Ok((d, isnull)),
-        crate::srf_registry::SrfDispatch::Materialized(_) => Err(types_error::PgError::error(
+        crate::srf_registry::SrfDispatch::Materialized(_) => Err(::types_error::PgError::error(
             "invoke_scalar_record_function: non-set record function unexpectedly materialized",
         )),
     }

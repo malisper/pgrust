@@ -5,9 +5,9 @@
 //! `_delete`/`_update`).
 //!
 //! The dispatch model mirrors C: `relation->rd_tableam` is a vtable
-//! ([`types_tableam::TableAmRoutine`], fetched through the relcache owner's
+//! ([`::types_tableam::TableAmRoutine`], fetched through the relcache owner's
 //! seam) whose callbacks the wrappers invoke. The open relation crosses as a
-//! [`rel::Relation`] handle; scan and index-fetch descriptors are
+//! [`::rel::Relation`] handle; scan and index-fetch descriptors are
 //! owned values created by the AM.
 //!
 //! `default_table_access_method` and `synchronize_seqscans` are this unit's
@@ -19,30 +19,30 @@ use std::boxed::Box;
 use std::cell::{Cell, RefCell};
 use std::string::String;
 
-use mcx::Mcx;
-use types_core::primitive::{
+use ::mcx::Mcx;
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, BLCKSZ, InvalidBlockNumber, InvalidForkNumber, FSM_FORKNUM,
     MAIN_FORKNUM, MaxBlockNumber, VISIBILITYMAP_FORKNUM,
 };
-use rel::Relation;
-use types_core::xact::TransactionIdIsValid;
+use ::rel::Relation;
+use ::types_core::xact::TransactionIdIsValid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use ::nodes::TupleSlotKind;
 use ::nodes::tuptable::SlotData;
-use snapshot::snapshot::IsMVCCSnapshot;
-use types_tableam::relscan::{
+use ::snapshot::snapshot::IsMVCCSnapshot;
+use ::types_tableam::relscan::{
     ParallelBlockTableScanDescData, ParallelBlockTableScanWorkerData, ParallelTableScanDesc,
     TableScanDesc, TableScanDescData, SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC,
     SO_TEMP_SNAPSHOT, SO_TYPE_ANALYZE, SO_TYPE_BITMAPSCAN, SO_TYPE_SAMPLESCAN, SO_TYPE_SEQSCAN,
     SO_TYPE_TIDRANGESCAN, SO_TYPE_TIDSCAN,
 };
-use types_tableam::scankey::ScanKeyData;
-use types_tableam::tableam::{
+use ::types_tableam::scankey::ScanKeyData;
+use ::types_tableam::tableam::{
     BulkInsertStateData, IndexFetchTableData, LockTupleMode, LockTupleNoKeyExclusive, Snapshot,
     TM_FailureData, TM_Result, TU_UpdateIndexes, TableAmRoutine,
 };
-use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_VIEW};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_VIEW};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use relcache_seams as relcache;
 
@@ -82,7 +82,7 @@ pub fn init_seams() {
 
     // tablecmds DefineRelation reads the default_table_access_method GUC.
     tablecmds_seams::default_table_access_method::set(|mcx| {
-        mcx::PgString::from_str_in(&default_table_access_method(), mcx)
+        ::mcx::PgString::from_str_in(&default_table_access_method(), mcx)
     });
 
     // The COPY/seqscan value-typed scan seams (unified off the retired
@@ -185,7 +185,7 @@ fn table_rescan_seam<'mcx>(mcx: Mcx<'mcx>, scan: &mut TableScanDescData<'mcx>) -
 fn table_beginscan_seam<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &Relation<'mcx>,
-    snapshot: std::rc::Rc<snapshot::SnapshotData>,
+    snapshot: std::rc::Rc<::snapshot::SnapshotData>,
 ) -> PgResult<TableScanDesc<'mcx>> {
     let flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
     (am(relation).scan_begin)(
@@ -193,7 +193,7 @@ fn table_beginscan_seam<'mcx>(
         relation,
         Some((*snapshot).clone()),
         0,
-        mcx::PgVec::new_in(mcx),
+        ::mcx::PgVec::new_in(mcx),
         None,
         flags,
     )
@@ -319,10 +319,10 @@ fn check_default_table_access_method(
         return Ok(false);
     }
 
-    if name.len() >= types_core::fmgr::NAMEDATALEN as usize {
+    if name.len() >= ::types_core::fmgr::NAMEDATALEN as usize {
         guc_seams::guc_check_errdetail::call(format!(
             "\"default_table_access_method\" is too long (maximum {} characters).",
-            types_core::fmgr::NAMEDATALEN - 1
+            ::types_core::fmgr::NAMEDATALEN - 1
         ));
         return Ok(false);
     }
@@ -332,11 +332,11 @@ fn check_default_table_access_method(
     // the value on faith.
     let in_xact = transam_xact_seams::is_transaction_state::call();
     let my_db = init_small_seams::my_database_id::call();
-    if in_xact && my_db != types_core::primitive::InvalidOid {
+    if in_xact && my_db != ::types_core::primitive::InvalidOid {
         // `get_table_am_oid(*newval, true)` — `missing_ok = true` so a missing AM
         // returns InvalidOid rather than erroring.
         let am_oid = tablecmds_seams::get_table_am_oid::call(name, true)?;
-        if !types_core::primitive::OidIsValid(am_oid) {
+        if !::types_core::primitive::OidIsValid(am_oid) {
             guc_seams::guc_check_errdetail::call(format!(
                 "Table access method \"{name}\" does not exist."
             ));
@@ -382,7 +382,7 @@ fn elog_error(message: impl Into<String>) -> PgError {
 fn add_size(s1: usize, s2: usize) -> PgResult<usize> {
     s1.checked_add(s2).ok_or_else(|| {
         PgError::error("requested shared memory size overflows size_t")
-            .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
     })
 }
 
@@ -437,7 +437,7 @@ pub fn table_slot_create<'mcx>(
     relation: &Relation<'_>,
 ) -> PgResult<::nodes::tuptable::SlotData<'mcx>> {
     let tts_cb = table_slot_callbacks(relation);
-    let tupdesc = Some(mcx::alloc_in(mcx, relation.rd_att.clone_in(mcx)?)?);
+    let tupdesc = Some(::mcx::alloc_in(mcx, relation.rd_att.clone_in(mcx)?)?);
     execTuples_seams::make_single_tuple_table_slot::call(mcx, tupdesc, tts_cb)
 }
 
@@ -455,7 +455,7 @@ pub fn table_beginscan_strat<'mcx>(
     relation: &Relation<'mcx>,
     snapshot: Snapshot,
     nkeys: i32,
-    key: mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
+    key: ::mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
     allow_strat: bool,
     allow_sync: bool,
 ) -> PgResult<TableScanDesc<'mcx>> {
@@ -474,7 +474,7 @@ pub fn table_beginscan_catalog<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &Relation<'mcx>,
     nkeys: i32,
-    key: mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
+    key: ::mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
 ) -> PgResult<TableScanDesc<'mcx>> {
     let flags =
         SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE | SO_TEMP_SNAPSHOT;
@@ -499,7 +499,7 @@ pub fn table_beginscan_analyze<'mcx>(
         relation,
         None,
         0,
-        mcx::PgVec::new_in(mcx),
+        ::mcx::PgVec::new_in(mcx),
         None,
         flags,
     )
@@ -522,7 +522,7 @@ pub fn table_scan_analyze_next_block<'mcx>(
 pub fn table_scan_analyze_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
-    oldest_xmin: types_core::TransactionId,
+    oldest_xmin: ::types_core::TransactionId,
     liverows: &mut f64,
     deadrows: &mut f64,
     slot: &mut SlotData<'mcx>,
@@ -625,7 +625,7 @@ pub fn table_beginscan_parallel<'mcx>(
         relation,
         snapshot,
         0,
-        mcx::PgVec::new_in(mcx),
+        ::mcx::PgVec::new_in(mcx),
         Some(pscan),
         flags,
     )
@@ -730,8 +730,8 @@ pub fn table_index_fetch_tuple_check<'mcx>(
 pub fn table_index_delete_tuples<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    delstate: &mut types_tableam::tableam::TmIndexDeleteOp<'mcx>,
-) -> PgResult<types_core::TransactionId> {
+    delstate: &mut ::types_tableam::tableam::TmIndexDeleteOp<'mcx>,
+) -> PgResult<::types_core::TransactionId> {
     let routine = am(rel);
     (routine.index_delete_tuples)(mcx, rel, delstate)
 }
@@ -784,7 +784,7 @@ pub fn table_beginscan_tid<'mcx>(
     snapshot: Snapshot,
 ) -> PgResult<TableScanDesc<'mcx>> {
     let flags = SO_TYPE_TIDSCAN;
-    (am(rel).scan_begin)(mcx, rel, snapshot, 0, mcx::PgVec::new_in(mcx), None, flags)
+    (am(rel).scan_begin)(mcx, rel, snapshot, 0, ::mcx::PgVec::new_in(mcx), None, flags)
 }
 
 /// `table_beginscan_bm(rel, snapshot, nkeys, key)` (tableam.h inline) — set up a
@@ -794,7 +794,7 @@ pub fn table_beginscan_tid<'mcx>(
 pub fn table_beginscan_bm<'mcx>(
     mcx: Mcx<'mcx>,
     rel: Relation<'mcx>,
-    snapshot: Option<std::rc::Rc<snapshot::SnapshotData>>,
+    snapshot: Option<std::rc::Rc<::snapshot::SnapshotData>>,
 ) -> PgResult<TableScanDesc<'mcx>> {
     let flags = SO_TYPE_BITMAPSCAN | SO_ALLOW_PAGEMODE;
     (am(&rel).scan_begin)(
@@ -802,7 +802,7 @@ pub fn table_beginscan_bm<'mcx>(
         &rel,
         snapshot.map(|s| (*s).clone()),
         0,
-        mcx::PgVec::new_in(mcx),
+        ::mcx::PgVec::new_in(mcx),
         None,
         flags,
     )
@@ -847,9 +847,9 @@ pub fn table_rescan<'mcx>(
 pub fn table_beginscan_sampling<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &Relation<'mcx>,
-    snapshot: Option<std::rc::Rc<snapshot::SnapshotData>>,
+    snapshot: Option<std::rc::Rc<::snapshot::SnapshotData>>,
     nkeys: i32,
-    key: mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
+    key: ::mcx::PgVec<'mcx, ScanKeyData<'mcx>>,
     allow_strat: bool,
     allow_sync: bool,
     allow_pagemode: bool,
@@ -892,7 +892,7 @@ pub fn table_rescan_set_params<'mcx>(
 pub fn table_scan_sample_next_block<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
-    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+    scanstate: &mut dyn ::types_tableam::tableam::SampleScanDriver,
 ) -> PgResult<bool> {
     // We don't expect direct calls to table_scan_sample_next_block with valid
     // CheckXidAlive for catalog or regular tables. See detailed comments in
@@ -914,7 +914,7 @@ pub fn table_scan_sample_next_block<'mcx>(
 pub fn table_scan_sample_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     scan: &mut TableScanDescData<'mcx>,
-    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+    scanstate: &mut dyn ::types_tableam::tableam::SampleScanDriver,
     slot: &mut SlotData<'mcx>,
 ) -> PgResult<bool> {
     // We don't expect direct calls to table_scan_sample_next_tuple with valid
@@ -936,7 +936,7 @@ pub fn table_scan_sample_next_tuple<'mcx>(
 pub fn table_beginscan_tidrange<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    snapshot: Option<std::rc::Rc<snapshot::SnapshotData>>,
+    snapshot: Option<std::rc::Rc<::snapshot::SnapshotData>>,
     mintid: &ItemPointerData,
     maxtid: &ItemPointerData,
 ) -> PgResult<TableScanDesc<'mcx>> {
@@ -947,7 +947,7 @@ pub fn table_beginscan_tidrange<'mcx>(
         rel,
         snapshot.map(|s| (*s).clone()),
         0,
-        mcx::PgVec::new_in(mcx),
+        ::mcx::PgVec::new_in(mcx),
         None,
         flags,
     )?;
@@ -1023,7 +1023,7 @@ pub fn table_tuple_insert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
 ) -> PgResult<()> {
@@ -1038,7 +1038,7 @@ pub fn table_tuple_insert_speculative<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slot: &mut SlotData<'mcx>,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
     spec_token: u32,
@@ -1065,7 +1065,7 @@ pub fn table_multi_insert<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     slots: &mut [&mut SlotData<'mcx>],
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     options: i32,
     bistate: Option<&mut BulkInsertStateData>,
 ) -> PgResult<()> {
@@ -1096,7 +1096,7 @@ pub fn table_tuple_delete<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     tid: &ItemPointerData,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     snapshot: &Snapshot,
     crosscheck: &Snapshot,
     wait: bool,
@@ -1114,7 +1114,7 @@ pub fn table_tuple_update<'mcx>(
     rel: &Relation<'mcx>,
     otid: &ItemPointerData,
     slot: &mut SlotData<'mcx>,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     snapshot: &Snapshot,
     crosscheck: &Snapshot,
     wait: bool,
@@ -1146,9 +1146,9 @@ pub fn table_tuple_lock<'mcx>(
     tid: &ItemPointerData,
     snapshot: &Snapshot,
     slot: &mut SlotData<'mcx>,
-    cid: types_core::xact::CommandId,
+    cid: ::types_core::xact::CommandId,
     mode: LockTupleMode,
-    wait_policy: types_tableam::tableam::LockWaitPolicy,
+    wait_policy: ::types_tableam::tableam::LockWaitPolicy,
     flags: u8,
     tmfd: &mut TM_FailureData,
 ) -> PgResult<TM_Result> {

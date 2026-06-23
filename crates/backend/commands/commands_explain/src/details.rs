@@ -17,8 +17,8 @@ use alloc::format;
 
 use alloc::vec::Vec;
 
-use types_core::instrument::{Instrumentation, WalUsage};
-use types_error::PgResult;
+use ::types_core::instrument::{Instrumentation, WalUsage};
+use ::types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 
 use ::nodes::nodehash::HashState;
@@ -36,8 +36,8 @@ fn bytes_to_kilobytes(b: i64) -> i64 {
 }
 
 /// `elapsed_time(starttime)` (explain.c:1163) — seconds since `starttime`.
-pub fn elapsed_time(starttime: &types_core::instrument::instr_time) -> f64 {
-    let mut endtime = types_core::instrument::instr_time::default();
+pub fn elapsed_time(starttime: &::types_core::instrument::instr_time) -> f64 {
+    let mut endtime = ::types_core::instrument::instr_time::default();
     instr_time::instr_time_set_current(&mut endtime);
     endtime.subtract(*starttime);
     endtime.get_double()
@@ -72,7 +72,7 @@ pub fn ExplainQueryParameters(es: &mut ExplainState<'_>, param_str: Option<&str>
 /// (zeros are printed); in text only positive counters print.
 pub fn peek_buffer_usage(
     es: &ExplainState<'_>,
-    usage: Option<&types_core::instrument::BufferUsage>,
+    usage: Option<&::types_core::instrument::BufferUsage>,
 ) -> bool {
     let usage = match usage {
         Some(u) => u,

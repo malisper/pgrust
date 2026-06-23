@@ -17,11 +17,11 @@
 //! `num_relids` seams (the C mutual recursion between clausesel.c and
 //! selfuncs.c), which are already installed by their owners.
 
-use mcx::Mcx;
-use types_core::primitive::{InvalidOid, Oid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{JoinType, NodeId, PlannerInfo, SpecialJoinInfo};
 
 use joinpath_seams as jp;

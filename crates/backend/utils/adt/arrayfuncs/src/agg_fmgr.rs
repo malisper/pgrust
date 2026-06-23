@@ -32,12 +32,12 @@
 //! node nodeAgg stamps (threaded through `function_call_invoke_datum_owned`), so
 //! the polymorphic `anynonarray` input resolves to the concrete element type.
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use types_core::{Oid, OidIsValid};
-use datum::array_build::ArrayBuildState;
-use datum::datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::array_build::ArrayBuildState;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::construct;
@@ -68,7 +68,7 @@ impl ArrayAggInternal {
     /// A carrier wrapping an already-built `state` (e.g. one produced by
     /// `array_agg_deserialize_state`), with a leaked agg context backing its
     /// by-ref element copies.
-    fn from_state(state: datum::array_build::ArrayBuildState) -> Box<ArrayAggInternal> {
+    fn from_state(state: ::datum::array_build::ArrayBuildState) -> Box<ArrayAggInternal> {
         let ctx: &'static MemoryContext =
             Box::leak(Box::new(MemoryContext::new("array_agg state")));
         Box::new(ArrayAggInternal { ctx, state })
@@ -154,8 +154,8 @@ fn fc_array_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
     // arg1_typeid = get_fn_expr_argtype(fcinfo->flinfo, 1);
     let arg1_typeid = fn_expr_argtype(fcinfo, 1);
     if !OidIsValid(arg1_typeid) {
-        return Err(types_error::PgError::error("could not determine input data type")
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+        return Err(::types_error::PgError::error("could not determine input data type")
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
     }
 
     // AggCheckCallContext: the leaked context inside ArrayAggInternal models the
@@ -200,8 +200,8 @@ fn fc_array_agg_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
 /// by-ref copy path (`PG_DETOAST_DATUM_COPY` / `datumCopy`) consumes.
 fn elem_datum<'mcx>(
     fcinfo: &FunctionCallInfoBaseData,
-    state: &datum::array_build::ArrayBuildState,
-    ctx_mcx: mcx::Mcx<'mcx>,
+    state: &::datum::array_build::ArrayBuildState,
+    ctx_mcx: ::mcx::Mcx<'mcx>,
 ) -> PgResult<Datum> {
     // For a by-value element, the boundary populates the by-value word.
     if state.typbyval {
@@ -218,24 +218,24 @@ fn elem_datum<'mcx>(
     match fcinfo.ref_arg(1) {
         // Varlena (`typlen == -1`) and fixed-length by-ref (`typlen > 0`) images
         // ride the `Varlena` lane verbatim — copy them as-is.
-        Some(fmgr::boundary::RefPayload::Varlena(b)) => {
+        Some(::fmgr::boundary::RefPayload::Varlena(b)) => {
             construct::byref_image_to_datum(ctx_mcx, b.as_slice())
         }
         // A composite element (`record`/row type) is a varlena-framed
         // `HeapTupleHeader` image; copy its flat bytes verbatim like a varlena.
-        Some(fmgr::boundary::RefPayload::Composite(b)) => {
+        Some(::fmgr::boundary::RefPayload::Composite(b)) => {
             construct::byref_image_to_datum(ctx_mcx, b.as_slice())
         }
         // `cstring` (`typlen == -2`) elements: `accumArrayResult`'s by-ref copy
         // reads a NUL-terminated image, so append the terminator the `Cstring`
         // lane drops.
-        Some(fmgr::boundary::RefPayload::Cstring(s)) => {
+        Some(::fmgr::boundary::RefPayload::Cstring(s)) => {
             let mut img = s.clone().into_bytes();
             img.push(0);
             construct::byref_image_to_datum(ctx_mcx, &img)
         }
         // No by-ref payload seeded: same diagnostic the other by-ref accessors use.
-        _ => Err(types_error::PgError::error(
+        _ => Err(::types_error::PgError::error(
             "array_agg_transfn: arg 1 has no by-reference payload on the call frame \
              (the dispatcher did not seed ref_args[1] for a by-ref element)",
         )),
@@ -285,7 +285,7 @@ fn fc_array_agg_finalfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
 /// aggcontext, repo-wide by-ref-free TODO).
 struct ArrayAggArrInternal {
     ctx: &'static MemoryContext,
-    state: datum::array_build::ArrayBuildStateArr,
+    state: ::datum::array_build::ArrayBuildStateArr,
 }
 
 /// Take the `internal` `ArrayBuildStateArr` transition state out of `args[0]`.
@@ -312,8 +312,8 @@ fn fc_array_agg_array_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult
     // arg1_typeid = get_fn_expr_argtype(fcinfo->flinfo, 1);  (the array type)
     let arg1_typeid = fn_expr_argtype(fcinfo, 1);
     if !OidIsValid(arg1_typeid) {
-        return Err(types_error::PgError::error("could not determine input data type")
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+        return Err(::types_error::PgError::error("could not determine input data type")
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
     }
 
     // AggCheckCallContext: the leaked context inside ArrayAggArrInternal models
@@ -344,7 +344,7 @@ fn fc_array_agg_array_transfn(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult
         let bytes = match fcinfo.ref_arg(1) {
             Some(RefPayload::Varlena(b)) => b.as_slice().to_vec(),
             _ => {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "array_agg_array_transfn: arg 1 has no by-reference payload on the call frame \
                      (the dispatcher did not seed ref_args[1] for an anyarray element)",
                 ))
@@ -407,7 +407,7 @@ fn take_array_arr_state_at(
 /// A fresh `ArrayAggArrInternal` carrier with a leaked agg context whose `state`
 /// is overwritten by a combine/deserialize result.
 fn new_arr_carrier(
-    state: datum::array_build::ArrayBuildStateArr,
+    state: ::datum::array_build::ArrayBuildStateArr,
 ) -> Box<ArrayAggArrInternal> {
     let ctx: &'static MemoryContext =
         Box::leak(Box::new(MemoryContext::new("array_agg_array state")));
@@ -434,7 +434,7 @@ fn fc_array_agg_array_combine(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult
         // state1 == NULL: copy state2's data into a fresh agg-context state.
         None => {
             let s2 = &state2.state;
-            let copy = datum::array_build::ArrayBuildStateArr {
+            let copy = ::datum::array_build::ArrayBuildStateArr {
                 data: s2.data.clone(),
                 nullbitmap: s2.nullbitmap.clone(),
                 nbytes: s2.nbytes,
@@ -462,13 +462,13 @@ fn fc_array_agg_array_combine(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult
 /// Append `src`'s items onto `dst` (the `state2->nitems > 0` branch of
 /// `array_agg_array_combine`), checking dimensional compatibility.
 fn combine_arr_states(
-    dst: &mut datum::array_build::ArrayBuildStateArr,
-    src: &datum::array_build::ArrayBuildStateArr,
+    dst: &mut ::datum::array_build::ArrayBuildStateArr,
+    src: &::datum::array_build::ArrayBuildStateArr,
 ) -> PgResult<()> {
     // Check the states are compatible (same dims ignoring the first).
     let dim_err = || {
-        types_error::PgError::error("cannot accumulate arrays of different dimensionality")
-            .with_sqlstate(types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+        ::types_error::PgError::error("cannot accumulate arrays of different dimensionality")
+            .with_sqlstate(::types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR)
     };
     if dst.ndims != src.ndims {
         return Err(dim_err());
@@ -595,8 +595,8 @@ fn fc_array_agg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum
 /// `dst` and `src` share the same element type. For by-ref types the backing
 /// boxes are cloned so `dst` owns stable storage and `dst.dvalues` point at it.
 fn append_state(
-    dst: &mut datum::array_build::ArrayBuildState,
-    src: &datum::array_build::ArrayBuildState,
+    dst: &mut ::datum::array_build::ArrayBuildState,
+    src: &::datum::array_build::ArrayBuildState,
 ) {
     if src.nelems == 0 {
         return;
@@ -657,8 +657,8 @@ fn arg_bytea<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("array_agg_deserialize: by-ref `bytea` arg missing from by-ref lane");
-    if image.len() >= datum::varlena::VARHDRSZ {
-        &image[datum::varlena::VARHDRSZ..]
+    if image.len() >= ::datum::varlena::VARHDRSZ {
+        &image[::datum::varlena::VARHDRSZ..]
     } else {
         &[]
     }
@@ -667,9 +667,9 @@ fn arg_bytea<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
 /// `PG_RETURN_BYTEA_P(image)` — a by-ref `bytea` result with 4-byte varlena
 /// framing.
 fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, payload: Vec<u8>) -> Datum {
-    let mut image = Vec::with_capacity(payload.len() + datum::varlena::VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(
-        payload.len() + datum::varlena::VARHDRSZ,
+    let mut image = Vec::with_capacity(payload.len() + ::datum::varlena::VARHDRSZ);
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(
+        payload.len() + ::datum::varlena::VARHDRSZ,
     ));
     image.extend_from_slice(&payload);
     fcinfo.set_ref_result(RefPayload::Varlena(image));

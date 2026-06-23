@@ -12,10 +12,10 @@
 //! reconciles `saved_columns` (column-constraint specs + default overrides +
 //! generated-column conflicts) against the merged column list at the end.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::{InvalidOid, Oid};
-use types_core::AttrNumber;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_core::AttrNumber;
 use types_error::{PgError, PgResult, ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS,
@@ -23,30 +23,30 @@ use types_error::{PgError, PgResult, ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYP
 use ::nodes::ddlnodes::{Constraint, ConstrType};
 use ::nodes::nodes::{Node, NodePtr};
 use ::nodes::rawnodes::ColumnDef;
-use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
+use ::types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
     RELPERSISTENCE_TEMP};
-use types_tuple::heaptuple::MaxHeapAttributeNumber;
+use ::types_tuple::heaptuple::MaxHeapAttributeNumber;
 
-use next::attmap::{free_attrmap, make_attrmap};
-use common_relation::relation_open;
+use ::next::attmap::{free_attrmap, make_attrmap};
+use ::common_relation::relation_open;
 use toast_compression::{get_compression_method_name,
     INVALID_COMPRESSION_METHOD};
 use pg_constraint::{NotNullConstraint, RelationGetNotNullConstraints};
-use nodes_core::bitmapset::{bms_add_member, bms_is_member};
-use nodes_core::makefuncs::make_column_def;
-use equalfuncs_seams::equal_node;
-use rewritemanip_seams::map_variable_attnos_node;
-use adt_format_type::format_type_with_typemod;
-use lsyscache::collation_constraint_language_cast::get_collation_name;
+use ::nodes_core::bitmapset::{bms_add_member, bms_is_member};
+use ::nodes_core::makefuncs::make_column_def;
+use ::equalfuncs_seams::equal_node;
+use ::rewritemanip_seams::map_variable_attnos_node;
+use ::adt_format_type::format_type_with_typemod;
+use ::lsyscache::collation_constraint_language_cast::get_collation_name;
 use ::nodes::bitmapset::Bitmapset;
-use types_storage::lock::NoLock;
+use ::types_storage::lock::NoLock;
 
-use tupdesc::TupleDescGetDefault;
+use ::tupdesc::TupleDescGetDefault;
 use aclchk_seams as aclchk_seam;
 use objectaddress_seams as objaddr_seam;
-use nodes_core::read::string_to_node;
-use miscinit::GetUserId;
-use types_acl::ACLCHECK_NOT_OWNER;
+use ::nodes_core::read::string_to_node;
+use ::miscinit::GetUserId;
+use ::types_acl::ACLCHECK_NOT_OWNER;
 
 use tablecmds_seams::{self as seam, MergeAttributesResult};
 

@@ -36,14 +36,14 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::partition::{PartitionBoundInfoData, PartitionKeyData, PartitionRangeDatumKind};
 use ::nodes::primnodes::{
     BoolExpr, BoolExprType, BoolTestType, Const, Expr, NullTest, NullTestType, ScalarArrayOpExpr,
 };
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId, Relids};
 use types_tuple::heaptuple::Datum;
 
@@ -51,12 +51,12 @@ use partprune_seams as partprune_seams;
 
 // --- catalog / strategy constants (mirrored from the C headers) ----------------
 
-use types_core::catalog::{BOOLOID, BOOL_BTREE_FAM_OID, BOOL_HASH_FAM_OID};
-use hash::hash::HASHEXTENDED_PROC;
+use ::types_core::catalog::{BOOLOID, BOOL_BTREE_FAM_OID, BOOL_HASH_FAM_OID};
+use ::hash::hash::HASHEXTENDED_PROC;
 use types_partition::{
     BTORDER_PROC, PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
 };
-use types_scan::scankey::{
+use ::types_scan::scankey::{
     BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTGreaterStrategyNumber,
     BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy,
 };
@@ -247,10 +247,10 @@ fn bms_add_range(set: &mut Bitmapset, lo: i32, hi: i32) {
 /// tree via `expression_tree_walker` over a transient `Node` wrapper (same model
 /// as var.c's `pull_varnos`).
 fn pull_exec_paramids(expr: &Expr) -> Bitmapset {
-    use nodes_core::node_walker::{expression_tree_walker, node_expr_wrapper};
+    use ::nodes_core::node_walker::{expression_tree_walker, node_expr_wrapper};
     use ::nodes::nodes::Node;
 
-    let scratch = mcx::MemoryContext::new("pull_exec_paramids");
+    let scratch = ::mcx::MemoryContext::new("pull_exec_paramids");
     let mut result = Bitmapset::new();
     let wrapped = node_expr_wrapper(expr, scratch.mcx());
     pull_exec_paramids_walker(&wrapped, &mut result);
@@ -278,9 +278,9 @@ use ::nodes::partprune_carrier::{
     PartitionPruneStepOp as CarrierStepOp, PartitionedRelPruneInfo as CarrierRelPruneInfo, RawBms,
 };
 
-use relnode::find_base_rel;
-use appendinfo::adjust_appendrel_attrs_multilevel;
-use appendinfo_seams::find_appinfos_by_relids;
+use ::relnode::find_base_rel;
+use ::appendinfo::adjust_appendrel_attrs_multilevel;
+use ::appendinfo_seams::find_appinfos_by_relids;
 
 /// `IS_PARTITIONED_REL(rel)` (pathnodes.h macro): `rel->part_scheme != NULL`.
 #[inline]
@@ -371,8 +371,8 @@ fn make_partition_pruneinfo<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     parentrel: RelId,
-    subpaths: &[pathnodes::PathId],
-    prunequal_ids: &[pathnodes::NodeId],
+    subpaths: &[::pathnodes::PathId],
+    prunequal_ids: &[::pathnodes::NodeId],
 ) -> PgResult<i32> {
     let mcx = run.mcx();
 
@@ -397,7 +397,7 @@ fn make_partition_pruneinfo<'mcx>(
     for &pathid in subpaths {
         let pathrel: RelId = root.path(pathid).base().parent;
         // We don't consider partitioned joins here.
-        if root.rel(pathrel).reloptkind == pathnodes::RELOPT_OTHER_MEMBER_REL {
+        if root.rel(pathrel).reloptkind == ::pathnodes::RELOPT_OTHER_MEMBER_REL {
             let mut prel = pathrel;
             let mut partrelids: Bitmapset = Bitmapset::new();
             // Traverse up to the topmost partitioned parent (stop at parentrel).
@@ -416,7 +416,7 @@ fn make_partition_pruneinfo<'mcx>(
                 if prel == parentrel {
                     break; // don't traverse above parentrel
                 }
-                if root.rel(prel).reloptkind != pathnodes::RELOPT_OTHER_MEMBER_REL {
+                if root.rel(prel).reloptkind != ::pathnodes::RELOPT_OTHER_MEMBER_REL {
                     break;
                 }
             }
@@ -546,7 +546,7 @@ fn make_partitionedrel_pruneinfo<'mcx>(
                     let mut translated: Vec<Expr<'mcx>> = Vec::with_capacity(cur_prunequal.len());
                     for cl in core::mem::take(&mut cur_prunequal) {
                         translated.push(
-                            appendinfo::adjust_appendrel_attrs(
+                            ::appendinfo::adjust_appendrel_attrs(
                                 root, cl, &appinfos,
                             )?,
                         );
@@ -763,7 +763,7 @@ fn get_matching_partitions_seam<'mcx>(
     context: &mut ::nodes::partition::PartitionPruneContext<'mcx>,
     pruning_steps: &[::nodes::partprune_carrier::PartitionPruneStep<'mcx>],
     estate: &mut ::nodes::EStateData<'mcx>,
-) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<::mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     get_matching_partitions_exec(mcx, context, pruning_steps, estate)
 }
 
@@ -773,8 +773,8 @@ fn make_partition_pruneinfo_seam<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     parentrel: RelId,
-    subpaths: &[pathnodes::PathId],
-    prunequal: &[pathnodes::NodeId],
+    subpaths: &[::pathnodes::PathId],
+    prunequal: &[::pathnodes::NodeId],
 ) -> PgResult<i32> {
     make_partition_pruneinfo(run, root, parentrel, subpaths, prunequal)
 }
@@ -915,10 +915,10 @@ fn collect_prune_inputs_with_clauses<'mcx>(
         let has_default = r.boundinfo.is_some();
         let has_partition_qual = !r.partition_qual.is_empty();
         // First partexpr per key column (linitial(rel->partexprs[i])).
-        let partexpr_ids: Vec<pathnodes::NodeId> =
+        let partexpr_ids: Vec<::pathnodes::NodeId> =
             r.partexprs.iter().map(|v| v[0]).collect();
-        let restrict_ids: Vec<pathnodes::RinfoId> = r.baserestrictinfo.clone();
-        let partqual_ids: Vec<pathnodes::NodeId> = r.partition_qual.clone();
+        let restrict_ids: Vec<::pathnodes::RinfoId> = r.baserestrictinfo.clone();
+        let partqual_ids: Vec<::pathnodes::NodeId> = r.partition_qual.clone();
         (relid_index, nparts, has_default, has_partition_qual, partexpr_ids, restrict_ids, partqual_ids)
     };
 
@@ -1012,8 +1012,8 @@ fn collect_prune_inputs_with_clauses<'mcx>(
         mcx,
         part_scheme,
         partexprs,
-        partkey: mcx::PgBox::into_inner(partkey),
-        boundinfo: Box::new(mcx::PgBox::into_inner(boundinfo)),
+        partkey: ::mcx::PgBox::into_inner(partkey),
+        boundinfo: Box::new(::mcx::PgBox::into_inner(boundinfo)),
         nparts,
         has_default,
         has_partition_qual,
@@ -2449,7 +2449,7 @@ fn get_matching_partitions_exec<'mcx>(
     context: &mut ::nodes::partition::PartitionPruneContext<'mcx>,
     pruning_steps: &[::nodes::partprune_carrier::PartitionPruneStep<'mcx>],
     estate: &mut ::nodes::EStateData<'mcx>,
-) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<::mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     let num_steps = pruning_steps.len();
     let nparts = context.nparts;
 
@@ -2524,11 +2524,11 @@ fn exec_build_hash_key<'mcx>(
     context: &::nodes::partition::PartitionPruneContext<'mcx>,
 ) -> PgResult<PartitionKeyData<'mcx>> {
     let partnatts = context.partnatts;
-    let supfuncs: &Vec<types_core::fmgr::FmgrInfo> = context
+    let supfuncs: &Vec<::types_core::fmgr::FmgrInfo> = context
         .partsupfunc
         .0
         .as_ref()
-        .and_then(|b| b.downcast_ref::<Vec<types_core::fmgr::FmgrInfo>>())
+        .and_then(|b| b.downcast_ref::<Vec<::types_core::fmgr::FmgrInfo>>())
         .ok_or_else(|| {
             PgError::error("get_matching_partitions: hash partkey support funcs unavailable")
         })?;
@@ -2536,18 +2536,18 @@ fn exec_build_hash_key<'mcx>(
     let mut key = PartitionKeyData {
         strategy: context.strategy,
         partnatts: partnatts as i16,
-        partattrs: mcx::slice_in(mcx, &[])?,
-        partexprs: mcx::slice_in(mcx, &[])?,
-        partopfamily: mcx::slice_in(mcx, &[])?,
-        partopcintype: mcx::slice_in(mcx, &[])?,
-        partsupfunc: mcx::slice_in(mcx, supfuncs.as_slice())?,
-        partcollation: mcx::slice_in(mcx, context.partcollation.as_slice())?,
-        parttypid: mcx::slice_in(mcx, &[])?,
-        parttypmod: mcx::slice_in(mcx, &[])?,
-        parttyplen: mcx::slice_in(mcx, &[])?,
-        parttypbyval: mcx::slice_in(mcx, &[])?,
-        parttypalign: mcx::slice_in(mcx, &[])?,
-        parttypcoll: mcx::slice_in(mcx, &[])?,
+        partattrs: ::mcx::slice_in(mcx, &[])?,
+        partexprs: ::mcx::slice_in(mcx, &[])?,
+        partopfamily: ::mcx::slice_in(mcx, &[])?,
+        partopcintype: ::mcx::slice_in(mcx, &[])?,
+        partsupfunc: ::mcx::slice_in(mcx, supfuncs.as_slice())?,
+        partcollation: ::mcx::slice_in(mcx, context.partcollation.as_slice())?,
+        parttypid: ::mcx::slice_in(mcx, &[])?,
+        parttypmod: ::mcx::slice_in(mcx, &[])?,
+        parttyplen: ::mcx::slice_in(mcx, &[])?,
+        parttypbyval: ::mcx::slice_in(mcx, &[])?,
+        parttypalign: ::mcx::slice_in(mcx, &[])?,
+        parttypcoll: ::mcx::slice_in(mcx, &[])?,
     };
     // Silence "field never read" lints in the minimal key; only the three fields
     // above are read by compute_partition_hash_value.
@@ -2791,8 +2791,8 @@ fn raw_bms_to_vec(raw: &::nodes::partprune_carrier::RawBms) -> Vec<i32> {
 fn owned_bms_to_exec<'mcx>(
     mcx: Mcx<'mcx>,
     set: &Bitmapset,
-) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
-    let mut result: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
+) -> PgResult<Option<::mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
+    let mut result: Option<::mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
     for &member in set.iter() {
         let cur = result.take();
         result = Some(nodes_core_seams::bms_add_member::call(
@@ -2808,18 +2808,18 @@ fn empty_partkey<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PartitionKeyData<'mcx>> {
     Ok(PartitionKeyData {
         strategy: ::nodes::partition::PartitionStrategy::List,
         partnatts: 0,
-        partattrs: mcx::slice_in(mcx, &[])?,
-        partexprs: mcx::slice_in(mcx, &[])?,
-        partopfamily: mcx::slice_in(mcx, &[])?,
-        partopcintype: mcx::slice_in(mcx, &[])?,
-        partsupfunc: mcx::slice_in(mcx, &[])?,
-        partcollation: mcx::slice_in(mcx, &[])?,
-        parttypid: mcx::slice_in(mcx, &[])?,
-        parttypmod: mcx::slice_in(mcx, &[])?,
-        parttyplen: mcx::slice_in(mcx, &[])?,
-        parttypbyval: mcx::slice_in(mcx, &[])?,
-        parttypalign: mcx::slice_in(mcx, &[])?,
-        parttypcoll: mcx::slice_in(mcx, &[])?,
+        partattrs: ::mcx::slice_in(mcx, &[])?,
+        partexprs: ::mcx::slice_in(mcx, &[])?,
+        partopfamily: ::mcx::slice_in(mcx, &[])?,
+        partopcintype: ::mcx::slice_in(mcx, &[])?,
+        partsupfunc: ::mcx::slice_in(mcx, &[])?,
+        partcollation: ::mcx::slice_in(mcx, &[])?,
+        parttypid: ::mcx::slice_in(mcx, &[])?,
+        parttypmod: ::mcx::slice_in(mcx, &[])?,
+        parttyplen: ::mcx::slice_in(mcx, &[])?,
+        parttypbyval: ::mcx::slice_in(mcx, &[])?,
+        parttypalign: ::mcx::slice_in(mcx, &[])?,
+        parttypcoll: ::mcx::slice_in(mcx, &[])?,
     })
 }
 
@@ -3274,7 +3274,7 @@ fn bms_to_relids(set: &Bitmapset) -> Relids {
     for &m in set.iter() {
         words[m as usize / 64] |= 1u64 << (m as usize % 64);
     }
-    Some(Box::new(pathnodes::Bitmapset { words }))
+    Some(Box::new(::pathnodes::Bitmapset { words }))
 }
 
 // --- thin seam wrappers (lsyscache / nodeFuncs / makefuncs) --------------------
@@ -3317,7 +3317,7 @@ fn negate_clause<'mcx>(expr: &Expr<'mcx>) -> PgResult<Expr<'mcx>> {
     prepqual_seams::negate_clause::call(expr.clone())
 }
 fn make_bool_const<'mcx>(value: bool, isnull: bool) -> Expr<'mcx> {
-    Expr::Const(nodes_core::makefuncs::make_bool_const(value, isnull))
+    Expr::Const(::nodes_core::makefuncs::make_bool_const(value, isnull))
 }
 fn make_opclause<'mcx>(
     opno: Oid,
@@ -3328,7 +3328,7 @@ fn make_opclause<'mcx>(
     opcollid: Oid,
     inputcollid: Oid,
 ) -> Expr<'mcx> {
-    nodes_core::makefuncs::make_opclause(
+    ::nodes_core::makefuncs::make_opclause(
         opno, opresulttype, opretset, leftop, Some(rightop), opcollid, inputcollid,
     )
 }
@@ -3387,7 +3387,7 @@ fn deconstruct_const_array<'mcx>(
             return Ok(None);
         }
 
-        let elem_expr = nodes_core::makefuncs::make_const(
+        let elem_expr = ::nodes_core::makefuncs::make_const(
             mcx,
             elemtype,
             -1,
@@ -3403,7 +3403,7 @@ fn deconstruct_const_array<'mcx>(
     Ok(Some(elem_exprs))
 }
 
-use pathnodes::planner_run::planner_rt_fetch;
+use ::pathnodes::planner_run::planner_rt_fetch;
 
 #[cfg(test)]
 mod tests {

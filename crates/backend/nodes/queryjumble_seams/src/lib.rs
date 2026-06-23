@@ -1,7 +1,7 @@
 //! Seam declarations for the `backend-nodes-queryjumble` unit
 //! (`nodes/queryjumble.c`): the query-id machinery portalcmds invokes.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::portalcmds::{JumbleState, Query};
 
 /// The canonical field-bearing `Query` (the simple-query / parse-analysis tree).

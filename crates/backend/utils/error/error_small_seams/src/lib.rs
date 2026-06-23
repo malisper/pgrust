@@ -5,7 +5,7 @@
 //! then a call panics loudly. Both calls are unreachable under the boot
 //! default `log_destination = stderr`.
 
-use types_error::PgError;
+use ::types_error::PgError;
 
 seam_core::seam!(
     /// `write_csvlog(edata)` (`utils/error/csvlog.c`) — format the error as a

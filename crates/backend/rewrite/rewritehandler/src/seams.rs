@@ -16,10 +16,10 @@
 //!    contract is installed as a precise K1 panic boundary.
 
 use mcx::{Mcx, PgBox, PgString};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use types_storage::lock::NoLock;
+use ::types_storage::lock::NoLock;
 
 use crate::{
     build_column_default, expand_generated_columns_in_expr, get_view_query, relation_is_updatable,
@@ -94,7 +94,7 @@ pub fn init_seams() {
 /// matches `(relation)->rd_options ? ... : false`.
 fn view_options_of(view: &rel::Relation<'_>) -> types_reloptions::relopts::ViewOptions {
     let relid = view.rd_id;
-    let scratch = mcx::MemoryContext::new("RelationViewOptions");
+    let scratch = ::mcx::MemoryContext::new("RelationViewOptions");
     let smcx = scratch.mcx();
     let token =
         match syscache_seams::fetch_class_reloptions::call(smcx, relid) {
@@ -161,7 +161,7 @@ fn seam_acquire_rewrite_locks_inplace<'mcx>(
 fn seam_query_rewrite_legacy<'mcx>(
     _mcx: Mcx<'mcx>,
     _query: ::nodes::portalcmds::Query,
-) -> PgResult<mcx::PgVec<'mcx, ::nodes::portalcmds::Query>> {
+) -> PgResult<::mcx::PgVec<'mcx, ::nodes::portalcmds::Query>> {
     panic!(
         "rewriteHandler legacy query_rewrite over portalcmds::Query reached: \
          blocked on K1 Query-unification debt; use query_rewrite_canonical once \
@@ -174,9 +174,9 @@ fn seam_query_rewrite_legacy<'mcx>(
 fn seam_query_rewrite_canonical<'mcx>(
     mcx: Mcx<'mcx>,
     parsetree: ::nodes::copy_query::Query<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, ::nodes::copy_query::Query<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, ::nodes::copy_query::Query<'mcx>>> {
     let results = crate::QueryRewrite(mcx, parsetree)?;
-    let mut out = mcx::PgVec::new_in(mcx);
+    let mut out = ::mcx::PgVec::new_in(mcx);
     for q in results {
         out.push(q);
     }
@@ -204,7 +204,7 @@ fn seam_build_generation_expression<'mcx>(
     attrno: i32,
 ) -> PgResult<PgBox<'mcx, Expr<'static>>> {
     let expr = crate::build_generation_expression(mcx, rel, attrno)?;
-    mcx::alloc_in(mcx, expr)
+    ::mcx::alloc_in(mcx, expr)
 }
 
 fn seam_expand_generated_columns_in_expr<'mcx>(
@@ -234,7 +234,7 @@ fn seam_expand_generated_columns_in_expr_arena(
     relid: Oid,
     varno: i32,
 ) -> PgResult<Vec<pathnodes::NodeId>> {
-    let ctx = mcx::MemoryContext::new("expand_generated_columns_in_expr arena");
+    let ctx = ::mcx::MemoryContext::new("expand_generated_columns_in_expr arena");
     let mcx = ctx.mcx();
     let rel = table::table_open(mcx, relid, NoLock)?;
     for &id in nodes {

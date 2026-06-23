@@ -25,14 +25,14 @@
 //!   * datetime.c / isoweek.c — the pure calendar conversions `date2j`,
 //!     `date2isoweek`, `date2isoyear`, `date2isoyearday`.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult};
 use types_datetime::{HOURS_PER_DAY, MONTHS_PER_YEAR, SECS_PER_HOUR, SECS_PER_MINUTE};
 use types_error::{
     ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_INVALID_DATETIME_FORMAT,
 };
-use types_core::Oid;
-use types_datetime::fsec_t;
+use ::types_core::Oid;
+use ::types_datetime::fsec_t;
 
 use crate::case::{
     asc_tolower_z, asc_toupper_z, get_th, str_initcap_z, str_tolower_z, str_toupper_z,
@@ -68,7 +68,7 @@ fn loc_abbrev_days<'mcx>(mcx: Mcx<'mcx>) -> Option<Vec<Vec<u8>>> {
 /// The localized-name seams return arena-allocated `PgVec<PgVec<u8>>`; the DCH
 /// engine consumes them as plain `Vec<Vec<u8>>` (NUL-free owned names), so copy
 /// the bytes out.
-fn pgvec_of_pgvec_to_vec(a: mcx::PgVec<'_, mcx::PgVec<'_, u8>>) -> Vec<Vec<u8>> {
+fn pgvec_of_pgvec_to_vec(a: ::mcx::PgVec<'_, ::mcx::PgVec<'_, u8>>) -> Vec<Vec<u8>> {
     a.iter().map(|e| e.to_vec()).collect()
 }
 
@@ -846,7 +846,7 @@ fn loc_day_abbrev<'mcx>(mcx: Mcx<'mcx>, wday: i32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     // The localized-name seams are not installed in `cargo test` (no provider),
     // so these exercises use the C-locale fallback paths (no `s_tm` suffix),

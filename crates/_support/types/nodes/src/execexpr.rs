@@ -16,14 +16,14 @@
 //! table in `execExprInterp.c`).
 
 use mcx::{MemoryContext, PgBox, PgString, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, Oid};
-use datum::datum::NullableDatum;
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::TupleDescData;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::datum::datum::NullableDatum;
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::TupleDescData;
 
 use crate::execnodes::{EcxtId, Opaque, SlotId};
-use types_slot::TupleSlotKind;
+use ::types_slot::TupleSlotKind;
 use crate::fmgr::FunctionCallInfoBaseData;
 use crate::nodes::NodeTag;
 use crate::planstate::{PlanStateLink, PlanStateNode};
@@ -283,9 +283,9 @@ pub struct ExprEvalRowtypeCache {
 pub use crate::primnodes::VarReturningType;
 
 /// `CompareType` (nodes/cmptype.h) — abstract comparison result requested of a
-/// `RowCompare`. Canonically defined in `types_tableam::amapi`; re-exported here
+/// `RowCompare`. Canonically defined in `::types_tableam::amapi`; re-exported here
 /// so the executor and access-method layers share one type.
-pub use types_tableam::amapi::CompareType;
+pub use ::types_tableam::amapi::CompareType;
 
 /// `MinMaxOp` (nodes/primnodes.h) — GREATEST vs LEAST. Mirrored locally.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -499,7 +499,7 @@ pub struct ArraySubWorkspace {
 impl Default for ArraySubWorkspace {
     fn default() -> Self {
         ArraySubWorkspace {
-            refelemtype: types_core::primitive::InvalidOid,
+            refelemtype: ::types_core::primitive::InvalidOid,
             refattrlength: 0,
             refelemlength: 0,
             refelembyval: false,

@@ -11,9 +11,9 @@
 
 #![allow(non_snake_case)]
 
-use types_core::CommandId;
-use types_error::PgResult;
-use types_tuple::heaptuple::HeapTupleHeaderData;
+use ::types_core::CommandId;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::HeapTupleHeaderData;
 
 seam_core::seam!(
     /// `HeapTupleHeaderAdjustCmax(tup, &cmax, &iscombo)` (combocid.c) — given a

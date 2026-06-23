@@ -7,8 +7,8 @@
 //!
 //! DO NOT EDIT BY HAND — values copied verbatim from schemapg.h.
 
-use types_core::primitive::Oid;
-use relcache_entry::OwnedAttr;
+use ::types_core::primitive::Oid;
+use ::relcache_entry::OwnedAttr;
 
 /// `ATTNULLABLE_VALID` (`access/tupdesc.h`) — a valid not-null constraint.
 const ATTNULLABLE_VALID: i8 = b'v' as i8;

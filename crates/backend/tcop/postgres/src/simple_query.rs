@@ -29,14 +29,14 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgVec};
-use types_core::cmdtag::CommandTag;
-use types_dest::dest::CommandDest;
+use ::types_core::cmdtag::CommandTag;
+use ::types_dest::dest::CommandDest;
 use types_error::{PgResult, ERROR, LOG};
 use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::{CmdType, Node};
 use ::nodes::parsestmt::RawStmt;
-use parsenodes::RawParseMode;
+use ::parsenodes::RawParseMode;
 
 use utils_error::{ereport, errcode, errfinish, errhidestmt, errmsg, errstart};
 
@@ -110,7 +110,7 @@ pub fn pg_analyze_and_rewrite_fixedparams<'mcx>(
     mcx: Mcx<'mcx>,
     parsetree: &RawStmt<'mcx>,
     query_string: &str,
-    param_types: &[types_core::primitive::Oid],
+    param_types: &[::types_core::primitive::Oid],
 ) -> PgResult<PgVec<'mcx, Query<'mcx>>> {
     // (1) Perform parse analysis.
     if log_parser_stats() {
@@ -142,7 +142,7 @@ pub fn pg_analyze_and_rewrite_varparams<'mcx>(
     mcx: Mcx<'mcx>,
     parsetree: &RawStmt<'mcx>,
     query_string: &str,
-    arg_types: &[types_core::primitive::Oid],
+    arg_types: &[::types_core::primitive::Oid],
 ) -> PgResult<parser_analyze_seams::AnalyzedVarparams<'mcx>> {
     // (1) Perform parse analysis.
     if log_parser_stats() {
@@ -156,13 +156,13 @@ pub fn pg_analyze_and_rewrite_varparams<'mcx>(
     //   for (int i = 0; i < *numParams; i++) { ptype = (*paramTypes)[i];
     //       if (ptype == InvalidOid || ptype == UNKNOWNOID) ereport(ERROR, ...); }
     // The resolved `*numParams`-length array is the shared VarParamState Vec.
-    const UNKNOWNOID: types_core::primitive::Oid = 705; // pg_type.h UNKNOWNOID
+    const UNKNOWNOID: ::types_core::primitive::Oid = 705; // pg_type.h UNKNOWNOID
     {
         let resolved = parstate.param_types.borrow();
         for (i, &ptype) in resolved.iter().enumerate() {
-            if ptype == types_core::primitive::InvalidOid || ptype == UNKNOWNOID {
+            if ptype == ::types_core::primitive::InvalidOid || ptype == UNKNOWNOID {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::error::ERRCODE_INDETERMINATE_DATATYPE)
+                    .errcode(::types_error::error::ERRCODE_INDETERMINATE_DATATYPE)
                     .errmsg(alloc::format!(
                         "could not determine data type of parameter ${}",
                         i + 1
@@ -182,8 +182,8 @@ pub fn pg_analyze_and_rewrite_varparams<'mcx>(
     // Return the rewritten list + the resolved parameter OID array (C returns the
     // list and writes back *paramTypes/*numParams; the carrier holds the array).
     let resolved = parstate.param_types.borrow();
-    let mut arg_types_out: PgVec<'mcx, types_core::primitive::Oid> =
-        mcx::vec_with_capacity_in(mcx, resolved.len())?;
+    let mut arg_types_out: PgVec<'mcx, ::types_core::primitive::Oid> =
+        ::mcx::vec_with_capacity_in(mcx, resolved.len())?;
     for &t in resolved.iter() {
         arg_types_out.push(t);
     }
@@ -192,7 +192,7 @@ pub fn pg_analyze_and_rewrite_varparams<'mcx>(
     // pg_rewrite_query yields a `PgVec<Query>`; the varparams contract wants a
     // `PgVec<Node>` (the rewritten `List *` of `Query *`, wrapped as nodes — the
     // PREPARE/plancache consumer reads `Node::Query`).
-    let mut query_nodes: PgVec<'mcx, Node<'mcx>> = mcx::vec_with_capacity_in(mcx, query_list.len())?;
+    let mut query_nodes: PgVec<'mcx, Node<'mcx>> = ::mcx::vec_with_capacity_in(mcx, query_list.len())?;
     for q in query_list {
         query_nodes.push(Node::mk_query(mcx, q)?);
     }
@@ -412,7 +412,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
             && !is_transaction_exit_stmt(&parsetree.stmt)
         {
             if errstart(ERROR, None) {
-                errcode(types_error::error::ERRCODE_IN_FAILED_SQL_TRANSACTION)?;
+                errcode(::types_error::error::ERRCODE_IN_FAILED_SQL_TRANSACTION)?;
                 errmsg(
                     "current transaction is aborted, commands ignored until end of \
                      transaction block",
@@ -428,7 +428,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
             // must still not fall through, so surface a minimal error rather
             // than continue executing the aborted statement.
             return Err(ereport(ERROR)
-                .errcode(types_error::error::ERRCODE_IN_FAILED_SQL_TRANSACTION)
+                .errcode(::types_error::error::ERRCODE_IN_FAILED_SQL_TRANSACTION)
                 .errmsg(
                     "current transaction is aborted, commands ignored until end of \
                      transaction block",
@@ -640,7 +640,7 @@ pub fn start_xact_command() -> PgResult<()> {
         xact_seams::start_transaction_command::call()?;
         globals::set_xact_started(true);
     } else if (transam_xact::MyXactFlags()
-        & types_core::xact::XACT_FLAGS_PIPELINING)
+        & ::types_core::xact::XACT_FLAGS_PIPELINING)
         != 0
     {
         // When the first Execute message completes, following commands run in
@@ -705,7 +705,7 @@ pub fn is_transaction_exit_stmt(parsetree: &Node<'_>) -> bool {
 /// statement(s) should be logged per the `log_statement` GUC. The list is the
 /// raw parsetrees (`RawStmt`); `GetCommandLogLevel` inspects each `stmt`.
 pub fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> PgResult<bool> {
-    use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_NONE};
+    use ::guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_NONE};
     let log_statement = log_statement_guc();
 
     if log_statement == LOGSTMT_NONE {
@@ -733,7 +733,7 @@ pub fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> PgResult<bool>
 pub fn check_log_statement_planned(
     stmt_list: &[::nodes::nodeindexscan::PlannedStmt<'_>],
 ) -> PgResult<bool> {
-    use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_MOD, LOGSTMT_NONE};
+    use ::guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_MOD, LOGSTMT_NONE};
     let log_statement = log_statement_guc();
 
     if log_statement == LOGSTMT_NONE {
@@ -790,22 +790,22 @@ pub fn drop_unnamed_stmt() -> PgResult<()> {
 // ===========================================================================
 
 fn log_parser_stats() -> bool {
-    guc_tables::vars::log_parser_stats.read()
+    ::guc_tables::vars::log_parser_stats.read()
 }
 
 fn log_statement_stats() -> bool {
-    guc_tables::vars::log_statement_stats.read()
+    ::guc_tables::vars::log_statement_stats.read()
 }
 
 fn log_statement_guc() -> i32 {
-    guc_tables::vars::log_statement.read()
+    ::guc_tables::vars::log_statement.read()
 }
 
 // ===========================================================================
 // CommandTag model bridge
 // ===========================================================================
 
-/// Bridge `types_core::cmdtag::CommandTag` (the newtype `CreateCommandTag`
+/// Bridge `::types_core::cmdtag::CommandTag` (the newtype `CreateCommandTag`
 /// returns) to `portal::CommandTag` (the bare `i32` the portal /
 /// QueryCompletion / dest seams carry). They are two views of the same C
 /// `CommandTag` enumerator.

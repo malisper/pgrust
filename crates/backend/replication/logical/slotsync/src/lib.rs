@@ -23,40 +23,40 @@
 
 use std::cell::Cell;
 
-use types_core::primitive::{Oid, Size, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
-use types_core::catalog::DATABASE_RELATION_ID as DatabaseRelationId;
-use types_error::error::{DEBUG1, ERROR, LOG};
-use types_error::pg_error::{PgError, PgResult};
+use ::types_core::primitive::{Oid, Size, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
+use ::types_core::catalog::DATABASE_RELATION_ID as DatabaseRelationId;
+use ::types_error::error::{DEBUG1, ERROR, LOG};
+use ::types_error::pg_error::{PgError, PgResult};
 use types_error::{
     ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ErrorLevel, SqlState,
 };
-use types_core::xact::{
+use ::types_core::xact::{
     FirstNormalTransactionId, InvalidTransactionId, InvalidXLogRecPtr,
 };
-use wal::xlog_consts::WalLevel;
+use ::wal::xlog_consts::WalLevel;
 
 use replication_slot_2::{
     ReplicationSlotHandle, ReplicationSlotInvalidationCause, ReplicationSlotPersistency,
 };
-use replication_slot_2::ReplicationSlotInvalidationCause::RS_INVAL_NONE;
+use ::replication_slot_2::ReplicationSlotInvalidationCause::RS_INVAL_NONE;
 use types_walreceiver::{WalRcvExecStatus, WalReceiverConn};
-use types_storage::lock::AccessShareLock;
-use types_storage::storage::{
+use ::types_storage::lock::AccessShareLock;
+use ::types_storage::storage::{
     LWLockMode, LW_EXCLUSIVE, LW_SHARED, PROC_ARRAY_LOCK, REPLICATION_SLOT_ALLOCATION_LOCK,
     REPLICATION_SLOT_CONTROL_LOCK,
 };
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
-use types_pgstat::wait_event::{
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN, WAIT_EVENT_REPLICATION_SLOTSYNC_SHUTDOWN,
 };
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
-use s_lock::Spinlock;
+use ::s_lock::Spinlock;
 
 // Owner seam crate aliases.
 use slot_seams as slot;
-use replication_libpqwalreceiver::walrcv_table as libpqwalrcv;
+use ::replication_libpqwalreceiver::walrcv_table as libpqwalrcv;
 use walreceiver_seams as walrcv;
 use walsender_seams as walsnd;
 use replication_snapbuild_seams as snapbuild;
@@ -174,7 +174,7 @@ fn ctx_is_initialized() -> bool {
 fn ctx_spin_acquire() {
     let lock = &ctx().mutex;
     if lock.tas() != 0 {
-        s_lock::s_lock(lock, None, 0, None);
+        ::s_lock::s_lock(lock, None, 0, None);
     }
 }
 /// `SpinLockRelease(&SlotSyncCtx->mutex)`.
@@ -1248,7 +1248,7 @@ fn signal_handler_for_config_reload(_postgres_signal_arg: i32) {
 /// merged interrupt unit, `StatementCancelHandler`/`die`/`FloatExceptionHandler`
 /// from tcop's postgres.c, `procsignal_sigusr1_handler` from procsignal.c).
 fn setup_signal_handlers() -> PgResult<()> {
-    use signal::SigHandler;
+    use ::signal::SigHandler;
     let pqsignal = port_pqsignal_seams::pqsignal::call;
 
     // pqsignal(SIGHUP, SignalHandlerForConfigReload);

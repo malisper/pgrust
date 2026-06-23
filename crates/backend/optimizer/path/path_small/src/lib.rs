@@ -19,7 +19,7 @@
 //!
 //! # Arena model
 //!
-//! Everything is shaped over the [`PlannerInfo`](pathnodes::PlannerInfo)
+//! Everything is shaped over the [`PlannerInfo`](::pathnodes::PlannerInfo)
 //! arena. Clause lists are [`RinfoId`] handles (the C `RestrictInfo *` lists);
 //! `root.rinfo(id)` recovers the `RestrictInfo`, whose `.clause` is a
 //! [`NodeId`] into the expression arena (`root.node(id)` -> `&Expr`). Rels are
@@ -32,7 +32,7 @@
 //! `get_oprrest`, equalfuncs.c `equal`), and tidpath.c likewise crosses through
 //! pathnode.c (`create_tidscan_path` / `create_tidrangescan_path` / `add_path`),
 //! restrictinfo.c, equivclass.c, var.c and clauses.c. Allocating functions take
-//! an [`Mcx`](mcx::Mcx) and return [`PgResult`](types_error::PgResult): each
+//! an [`Mcx`](mcx::Mcx) and return [`PgResult`](::types_error::PgResult): each
 //! `palloc` in C can `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`.
 
 extern crate alloc;
@@ -41,11 +41,11 @@ extern crate std;
 
 use alloc::vec::Vec;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
-use types_core::primitive::{AttrNumber, Index, Oid};
+use ::types_core::primitive::{AttrNumber, Index, Oid};
 use ::nodes::primnodes::{Expr, NullTestType, Var, AND_EXPR, NOT_EXPR, OR_EXPR};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     EcId, EmId, JoinType, NodeId, RelId, Relids, RestrictInfo, RinfoId, PlannerInfo,
     SpecialJoinInfo, JOIN_INNER, RTE_RELATION,
@@ -1275,7 +1275,7 @@ fn make_bare_restrictinfo(clause: NodeId) -> RestrictInfo {
 }
 
 /* ==========================================================================
- * Relids / Bitmapset helpers over `pathnodes::Relids`.
+ * Relids / Bitmapset helpers over `::pathnodes::Relids`.
  * ====================================================================== */
 
 /// `bms_copy(a)` — fresh owned copy of a `Relids`.
@@ -1792,7 +1792,7 @@ fn expr_as_rinfo(root: &mut PlannerInfo, arg: Expr) -> RinfoId {
     root.alloc_rinfo(rinfo)
 }
 
-/// `bms_del_member(a, x)` over `pathnodes::Relids`: remove a single
+/// `bms_del_member(a, x)` over `::pathnodes::Relids`: remove a single
 /// member, via the `relids_del_members` set-difference seam with a locally-built
 /// singleton (`Bitmapset` is a public word-storage struct; the singleton has
 /// the canonical layout, see [`bms_get_singleton_member`]).
@@ -1809,12 +1809,12 @@ fn relids_make_singleton(x: i32) -> Relids {
     let bitnum = (x % BITS_PER_BITMAPWORD) as u32;
     let mut words = alloc::vec![0u64; wordnum + 1];
     words[wordnum] = 1u64 << bitnum;
-    Some(alloc::boxed::Box::new(pathnodes::Bitmapset { words }))
+    Some(alloc::boxed::Box::new(::pathnodes::Bitmapset { words }))
 }
 
 /// `ereport(ERROR, ...)` for the one elog site in tidpath.c.
-fn elog_error(msg: &str) -> types_error::PgError {
-    types_error::PgError::error(msg)
+fn elog_error(msg: &str) -> ::types_error::PgError {
+    ::types_error::PgError::error(msg)
 }
 
 /* ==========================================================================

@@ -36,29 +36,29 @@
 use catalog_namespace::{
     get_collation_oid, NameListToString, QualifiedNameGetCreationNamespace,
 };
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use types_acl::{ACLCHECK_OK, ACL_CREATE};
-use types_catalog::catalog::COLLATION_RELATION_ID;
-use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
-use types_core::primitive::{Oid, OidIsValid};
-use types_core::NAMESPACE_RELATION_ID;
+use ::types_catalog::catalog::COLLATION_RELATION_ID;
+use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::types_core::NAMESPACE_RELATION_ID;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE, WARNING,
 };
-use locale::CollProvider;
+use ::locale::CollProvider;
 use ::nodes::parsenodes::OBJECT_SCHEMA;
 use parsenodes::{DefElem, Node};
-use types_tuple::heaptuple::DEFAULT_COLLATION_OID;
-use types_wchar::encoding::{pg_valid_be_encoding, PG_SQL_ASCII};
+use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
+use ::types_wchar::encoding::{pg_valid_be_encoding, PG_SQL_ASCII};
 
 use collationcmds_seams as seam;
-use collationcmds_seams::CollationCreateArgs;
-use define_seams::DefElemArg;
+use ::collationcmds_seams::CollationCreateArgs;
+use ::define_seams::DefElemArg;
 
-use transam_xact_seams::command_counter_increment;
+use ::transam_xact_seams::command_counter_increment;
 use aclchk_seams::{
     aclcheck_error, object_aclcheck,
 };
@@ -66,7 +66,7 @@ use pg_locale_seams::{get_collation_actual_version, pg_newlocale_from_collation}
 use miscinit_seams::{get_user_id, is_binary_upgrade, superuser};
 use mbutils_seams::{get_database_encoding, get_database_encoding_name};
 
-pub use collationcmds_seams::CollationRow as PgCollationRow;
+pub use ::collationcmds_seams::CollationRow as PgCollationRow;
 
 /// `ACLCHECK_NOT_OWNER` mapped from the aclchk enum (collationcmds never reaches
 /// this code path directly; `aclcheck_error_not_owner_collation` raises it).
@@ -155,7 +155,7 @@ fn defel_arg<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<Option<DefElemAr
 
 /// `defGetString(def)` (define.c) — owns its result in `mcx`.
 fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<String> {
-    let s = define_seams::def_get_string::call(
+    let s = ::define_seams::def_get_string::call(
         mcx,
         defel.defname.clone().unwrap_or_default(),
         defel_arg(mcx, defel)?,
@@ -165,7 +165,7 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<String> {
 
 /// `defGetBoolean(def)` (define.c).
 fn def_get_boolean<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem) -> PgResult<bool> {
-    define_seams::def_get_boolean::call(
+    ::define_seams::def_get_boolean::call(
         defel.defname.clone().unwrap_or_default(),
         defel_arg(mcx, defel)?,
     )
@@ -299,7 +299,7 @@ pub fn DefineCollation<'mcx>(
             .map(|n| match n {
                 Node::String(s) => Ok(s.sval.clone()),
                 _ => Err(PgError::error("collation name must be a string").with_sqlstate(
-                    types_error::ERRCODE_SYNTAX_ERROR,
+                    ::types_error::ERRCODE_SYNTAX_ERROR,
                 )),
             })
             .collect::<PgResult<_>>()?;
@@ -1161,7 +1161,7 @@ pub fn init_seams() {
     // `pg_import_system_collations` static helpers — these bodies live in
     // collationcmds.c itself, so this unit installs them.
     seam::elog_debug1::set(|msg| {
-        let _ = ereport(types_error::DEBUG1).errmsg(msg.to_string());
+        let _ = ereport(::types_error::DEBUG1).errmsg(msg.to_string());
         Ok(())
     });
     // `enumerate_icu_locales` / `get_icu_locale_comment` are entirely under
@@ -1188,7 +1188,7 @@ fn enumerate_libc_locales() -> PgResult<Vec<String>> {
         Some(s) => s,
         None => {
             return Err(PgError::error("could not execute command \"locale -a\"")
-                .with_sqlstate(types_error::ERRCODE_IO_ERROR));
+                .with_sqlstate(::types_error::ERRCODE_IO_ERROR));
         }
     };
 
@@ -1198,7 +1198,7 @@ fn enumerate_libc_locales() -> PgResult<Vec<String>> {
             PipeReadLine::Line(bytes) => {
                 if bytes.last() != Some(&b'\n') {
                     let shown = String::from_utf8_lossy(&bytes);
-                    let _ = ereport(types_error::DEBUG1)
+                    let _ = ereport(::types_error::DEBUG1)
                         .errmsg(format!("skipping locale with too-long name: \"{shown}\""));
                     continue;
                 }

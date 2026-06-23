@@ -13,10 +13,10 @@
 //! counterpart in this profile and are not ported; if/when ICU is enabled they
 //! land with the ICU subsystem (`UCollator`/`UConverter`/`UChar` are external).
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
 use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use locale::PgLocale;
+use ::locale::PgLocale;
 
 /// `create_pg_locale_icu(collid, context)` (`pg_locale_icu.c:142`).
 ///

@@ -1,5 +1,5 @@
 //! Inward seam declarations owned by `optimizer/util/pathnode.c`, arena-shaped
-//! over [`pathnodes::PlannerInfo`] (`RelId`/`PathId`/`RinfoId`/`EcId`
+//! over [`::pathnodes::PlannerInfo`] (`RelId`/`PathId`/`RinfoId`/`EcId`
 //! handles + the `rel()`/`path()`/`rinfo()` accessors).
 //!
 //! pathnode.c is the planner's path cost-domination engine and the
@@ -27,9 +27,9 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use types_core::primitive::{AttrNumber, Cost, Index, Oid};
-use types_error::PgResult;
-use pathnodes::optimizer_plan::CostSelector;
+use ::types_core::primitive::{AttrNumber, Cost, Index, Oid};
+use ::types_error::PgResult;
+use ::pathnodes::optimizer_plan::CostSelector;
 use pathnodes::{
     AggSplit, AggStrategy, CmdType, IndexClause, IndexOptInfo, LimitOption, NodeId, PathId, PathKey,
     PathTarget, PlanRowMarkId, PlannerInfo, RelId, Relids, RinfoId, ScanDirection, SetOpCmd,
@@ -130,7 +130,7 @@ seam_core::seam!(
     /// `create_seqscan_path(root, rel, required_outer, parallel_workers)`.
     pub fn create_seqscan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
         parallel_workers: i32,
@@ -140,7 +140,7 @@ seam_core::seam!(
     /// `create_samplescan_path(root, rel, required_outer)`.
     pub fn create_samplescan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
@@ -149,7 +149,7 @@ seam_core::seam!(
     /// `create_index_path(...)` (pathnode.c:1051).
     pub fn create_index_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         index: Box<IndexOptInfo>,
         indexclauses: Vec<IndexClause>,
         indexorderbys: Vec<NodeId>,
@@ -166,7 +166,7 @@ seam_core::seam!(
     /// `create_bitmap_heap_path(...)` (pathnode.c:1100).
     pub fn create_bitmap_heap_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         bitmapqual: PathId,
         required_outer: &Relids,
@@ -178,7 +178,7 @@ seam_core::seam!(
     /// `create_bitmap_and_path(root, rel, bitmapquals)` (pathnode.c:1133).
     pub fn create_bitmap_and_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         bitmapquals: Vec<PathId>,
     ) -> PgResult<PathId>
@@ -187,7 +187,7 @@ seam_core::seam!(
     /// `create_bitmap_or_path(root, rel, bitmapquals)` (pathnode.c:1185).
     pub fn create_bitmap_or_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         bitmapquals: Vec<PathId>,
     ) -> PgResult<PathId>
@@ -196,7 +196,7 @@ seam_core::seam!(
     /// `create_tidscan_path(root, rel, tidquals, required_outer)`.
     pub fn create_tidscan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         tidquals: Vec<NodeId>,
         required_outer: &Relids,
@@ -206,7 +206,7 @@ seam_core::seam!(
     /// `create_tidrangescan_path(root, rel, tidrangequals, required_outer)`.
     pub fn create_tidrangescan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         tidrangequals: Vec<NodeId>,
         required_outer: &Relids,
@@ -246,7 +246,7 @@ seam_core::seam!(
     /// `create_subqueryscan_path(...)` (pathnode.c:2223).
     pub fn create_subqueryscan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         subpath: PathId,
         subroot_subpath: Option<PathId>,
@@ -259,7 +259,7 @@ seam_core::seam!(
     /// `create_functionscan_path(root, rel, pathkeys, required_outer)`.
     pub fn create_functionscan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         pathkeys: Vec<PathKey>,
         required_outer: &Relids,
@@ -269,7 +269,7 @@ seam_core::seam!(
     /// `create_tablefuncscan_path(root, rel, required_outer)`.
     pub fn create_tablefuncscan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
@@ -278,7 +278,7 @@ seam_core::seam!(
     /// `create_valuesscan_path(root, rel, required_outer)`.
     pub fn create_valuesscan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
@@ -287,7 +287,7 @@ seam_core::seam!(
     /// `create_ctescan_path(root, rel, pathkeys, required_outer)`.
     pub fn create_ctescan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         pathkeys: Vec<PathKey>,
         required_outer: &Relids,
@@ -297,7 +297,7 @@ seam_core::seam!(
     /// `create_namedtuplestorescan_path(root, rel, required_outer)`.
     pub fn create_namedtuplestorescan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
@@ -306,7 +306,7 @@ seam_core::seam!(
     /// `create_resultscan_path(root, rel, required_outer)`.
     pub fn create_resultscan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
@@ -315,7 +315,7 @@ seam_core::seam!(
     /// `create_worktablescan_path(root, rel, required_outer)`.
     pub fn create_worktablescan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         required_outer: &Relids,
     ) -> PgResult<PathId>
@@ -330,7 +330,7 @@ seam_core::seam!(
     /// `root == NULL` dummy-path case; `rows < 0` means "compute from subpaths".
     pub fn create_append_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         have_root: bool,
         rel: RelId,
         subpaths: Vec<PathId>,
@@ -391,7 +391,7 @@ seam_core::seam!(
     /// `create_gather_merge_path(...)` (pathnode.c:2097).
     pub fn create_gather_merge_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         subpath: PathId,
         target: Option<Box<PathTarget>>,
@@ -404,7 +404,7 @@ seam_core::seam!(
     /// `create_gather_path(...)` (pathnode.c:2179).
     pub fn create_gather_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         subpath: PathId,
         target: Option<Box<PathTarget>>,
@@ -421,7 +421,7 @@ seam_core::seam!(
     /// `create_foreignscan_path(...)` (pathnode.c:2442).
     pub fn create_foreignscan_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         target: Option<Box<PathTarget>>,
         rows: f64,
@@ -526,7 +526,7 @@ seam_core::seam!(
     /// `create_incremental_sort_path(...)` (pathnode.c:3170).
     pub fn create_incremental_sort_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
         subpath: PathId,
         pathkeys: Vec<PathKey>,
@@ -547,7 +547,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `create_group_path(...)` (pathnode.c:3265).
     pub fn create_group_path<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
@@ -569,7 +569,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `create_agg_path(...)` (pathnode.c:3378).
     pub fn create_agg_path<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
@@ -588,14 +588,14 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         rel: RelId,
         target: Box<PathTarget>,
-        mmaggregates: Vec<pathnodes::MinMaxAggInfo>,
+        mmaggregates: Vec<::pathnodes::MinMaxAggInfo>,
         quals: Vec<NodeId>,
     ) -> PgResult<PathId>
 );
 seam_core::seam!(
     /// `create_windowagg_path(...)` (pathnode.c:3715).
     pub fn create_windowagg_path<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
@@ -693,7 +693,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `create_unique_path(root, rel, subpath, sjinfo)` (pathnode.c:1730).
     pub fn create_unique_path<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
@@ -705,7 +705,7 @@ seam_core::seam!(
     /// (pathnode.c:4242).
     pub fn reparameterize_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         path: PathId,
         required_outer: &Relids,
         loop_count: f64,
@@ -753,7 +753,7 @@ seam_core::seam!(
     /// analyzejoins.c (which owns the `Query`-distinctness machinery + the
     /// `PlannerRun` sub-`Query` resolver). `uniq_exprs` are arena `Var` handles.
     pub fn subquery_is_distinct_for<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         rel: RelId,
         uniq_exprs: &[NodeId],
@@ -765,7 +765,7 @@ seam_core::seam!(
     /// (selfuncs.c). Estimates the number of distinct groups. Installed by
     /// selfuncs.c.
     pub fn estimate_num_groups_simple<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         group_exprs: &[NodeId],
         input_rows: f64,
@@ -775,7 +775,7 @@ seam_core::seam!(
     /// `reparameterize_path_by_child(root, path, child_rel)` (pathnode.c:4408).
     pub fn reparameterize_path_by_child<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         child_rel: RelId,
@@ -807,7 +807,7 @@ seam_core::seam!(
  *    pathkeys_contained_in) + miscadmin.c CHECK_FOR_INTERRUPTS.
  * ==================================================================== */
 
-use pathnodes::QualCost;
+use ::pathnodes::QualCost;
 
 /// `PathKeysComparison` — `compare_pathkeys` result (pathkeys.h `PathKeysComparison`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -881,16 +881,16 @@ seam_core::seam!(
         root: &PlannerInfo,
         rel: RelId,
         required_outer: &Relids,
-    ) -> Option<pathnodes::ParamPathInfo>
+    ) -> Option<::pathnodes::ParamPathInfo>
 );
 seam_core::seam!(
     /// `get_baserel_parampathinfo(root, baserel, required_outer)`.
     pub fn get_baserel_parampathinfo<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         baserel: RelId,
         required_outer: &Relids,
-    ) -> Option<Box<pathnodes::ParamPathInfo>>
+    ) -> Option<Box<::pathnodes::ParamPathInfo>>
 );
 seam_core::seam!(
     /// `get_appendrel_parampathinfo(appendrel, required_outer)`.
@@ -898,7 +898,7 @@ seam_core::seam!(
         root: &mut PlannerInfo,
         appendrel: RelId,
         required_outer: &Relids,
-    ) -> Option<Box<pathnodes::ParamPathInfo>>
+    ) -> Option<Box<::pathnodes::ParamPathInfo>>
 );
 seam_core::seam!(
     /// `get_joinrel_parampathinfo(root, joinrel, outer_path, inner_path, sjinfo,
@@ -906,14 +906,14 @@ seam_core::seam!(
     /// (possibly trimmed) restrict-clause list.
     pub fn get_joinrel_parampathinfo<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         joinrel: RelId,
         outer_path: PathId,
         inner_path: PathId,
         sjinfo: &SpecialJoinInfo,
         required_outer: &Relids,
         restrict_clauses: Vec<RinfoId>,
-    ) -> (Option<Box<pathnodes::ParamPathInfo>>, Vec<RinfoId>)
+    ) -> (Option<Box<::pathnodes::ParamPathInfo>>, Vec<RinfoId>)
 );
 seam_core::seam!(
     /// `path->param_info->ppi_clauses` serial set — the `Bitmapset` of clause
@@ -980,7 +980,7 @@ seam_core::seam!(
  *     PathNode). ------------------------------------------------------------ */
 seam_core::seam!(pub fn cost_seqscan(root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(pub fn cost_samplescan<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     path: PathId,
     rel: RelId,
@@ -994,7 +994,7 @@ seam_core::seam!(
     /// the parse/range-table the cost estimator walks.
     pub fn cost_index<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         path: PathId,
         loop_count: f64,
         partial_path: bool,
@@ -1017,11 +1017,11 @@ seam_core::seam!(
     pub fn cost_tidscan(root: &mut PlannerInfo, path: PathId, rel: RelId, tidquals: &[NodeId])
 );
 seam_core::seam!(
-    pub fn cost_tidrangescan<'mcx>(run: &pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId, tidrangequals: &[NodeId])
+    pub fn cost_tidrangescan<'mcx>(run: &::pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId, tidrangequals: &[NodeId])
 );
-seam_core::seam!(pub fn cost_subqueryscan<'mcx>(run: &pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId, subpath: PathId, trivial_pathtarget: bool));
-seam_core::seam!(pub fn cost_functionscan<'mcx>(run: &pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId));
-seam_core::seam!(pub fn cost_tablefuncscan<'mcx>(run: &pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId));
+seam_core::seam!(pub fn cost_subqueryscan<'mcx>(run: &::pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId, subpath: PathId, trivial_pathtarget: bool));
+seam_core::seam!(pub fn cost_functionscan<'mcx>(run: &::pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId));
+seam_core::seam!(pub fn cost_tablefuncscan<'mcx>(run: &::pathnodes::planner_run::PlannerRun<'mcx>, root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(pub fn cost_valuesscan(root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(pub fn cost_ctescan(root: &mut PlannerInfo, path: PathId, rel: RelId));
 seam_core::seam!(pub fn cost_namedtuplestorescan(root: &mut PlannerInfo, path: PathId, rel: RelId));
@@ -1092,7 +1092,7 @@ seam_core::seam!(
     /// input_disabled_nodes, input_startup_cost, input_total_cost, input_tuples,
     /// width, comparison_cost, sort_mem, limit_tuples)`.
     pub fn cost_incremental_sort<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         pathkeys: &[PathKey],
@@ -1105,14 +1105,14 @@ seam_core::seam!(
         comparison_cost: Cost,
         sort_mem: i32,
         limit_tuples: f64,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 seam_core::seam!(
     /// `cost_group(path, root, numGroupCols, numGroups, quals,
     /// input_disabled_nodes, input_startup_cost, input_total_cost,
     /// input_tuples)`.
     pub fn cost_group<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         num_group_cols: i32,
@@ -1129,7 +1129,7 @@ seam_core::seam!(
     /// quals, input_disabled_nodes, input_startup_cost, input_total_cost,
     /// input_tuples, input_width)`.
     pub fn cost_agg<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         aggstrategy: AggStrategy,
@@ -1154,7 +1154,7 @@ seam_core::seam!(
     /// expressions into the arena), so the seam is fallible (OOM + the examine
     /// path's `ereport`s).
     pub fn cost_windowagg<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
         window_funcs: &[NodeId],
@@ -1163,7 +1163,7 @@ seam_core::seam!(
         input_startup_cost: Cost,
         input_total_cost: Cost,
         input_tuples: f64,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 seam_core::seam!(
     /// `cost_recursive_union(runion, nrterm, rterm)` — fills the RecursiveUnion
@@ -1180,28 +1180,28 @@ seam_core::seam!(
     pub fn final_cost_nestloop(
         root: &mut PlannerInfo,
         path: PathId,
-        workspace: &pathnodes::optimizer_plan::JoinCostWorkspace,
-        extra: &pathnodes::optimizer_plan::JoinPathExtraData,
+        workspace: &::pathnodes::optimizer_plan::JoinCostWorkspace,
+        extra: &::pathnodes::optimizer_plan::JoinPathExtraData,
     )
 );
 seam_core::seam!(
     /// `final_cost_mergejoin(root, path, workspace, extra)`.
     pub fn final_cost_mergejoin<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
-        workspace: &pathnodes::optimizer_plan::JoinCostWorkspace,
-        extra: &pathnodes::optimizer_plan::JoinPathExtraData,
+        workspace: &::pathnodes::optimizer_plan::JoinCostWorkspace,
+        extra: &::pathnodes::optimizer_plan::JoinPathExtraData,
     )
 );
 seam_core::seam!(
     /// `final_cost_hashjoin(root, path, workspace, extra)`.
     pub fn final_cost_hashjoin<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         path: PathId,
-        workspace: &pathnodes::optimizer_plan::JoinCostWorkspace,
-        extra: &pathnodes::optimizer_plan::JoinPathExtraData,
+        workspace: &::pathnodes::optimizer_plan::JoinCostWorkspace,
+        extra: &::pathnodes::optimizer_plan::JoinPathExtraData,
     )
 );
 
@@ -1217,7 +1217,7 @@ seam_core::seam!(
     /// Returns whether a `UniquePath` could be created (the C non-NULL test);
     /// the path itself is cached on the rel by the owner.
     pub fn can_create_unique_path<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         sjinfo: &SpecialJoinInfo,
@@ -1230,7 +1230,7 @@ seam_core::seam!(
     /// because it `create_append_path`/`add_path`/`set_cheapest`s.
     pub fn install_dummy_append_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: RelId,
     ) -> PgResult<()>
 );

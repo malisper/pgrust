@@ -15,9 +15,9 @@
 //! An `oprrest`/`oprjoin` OID with no ported estimator is seam-and-panic
 //! (mirror-PG-and-panic): the operator's selectivity function is unported.
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
 
 use plancat_ext_seams as ext;
@@ -260,7 +260,7 @@ pub fn call_func_selectivity_support<'mcx>(
 }
 
 /// Map the wire `int16` jointype back to the planner [`JoinType`] enum.
-pub(crate) fn jointype_from_i16(jt: i16) -> pathnodes::JoinType {
+pub(crate) fn jointype_from_i16(jt: i16) -> ::pathnodes::JoinType {
     use pathnodes::{
         JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_SEMI,
         JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER,

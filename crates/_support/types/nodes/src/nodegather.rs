@@ -10,7 +10,7 @@
 //! [`crate::nodegathermerge`].
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use execparallel::{ParallelExecutorInfo, TupleQueueReaderHandle};
 
 use crate::bitmapset::Bitmapset;
@@ -68,7 +68,7 @@ impl Gather<'_> {
             single_copy: self.single_copy,
             invisible: self.invisible,
             initParam: match &self.initParam {
-                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
         })

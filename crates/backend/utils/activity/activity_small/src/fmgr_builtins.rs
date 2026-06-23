@@ -16,9 +16,9 @@
 //! OIDs / nargs (0) / strict (false; no args) / retset (false) are transcribed
 //! exactly from `pg_proc.dat`.
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::resolution::BuiltinFunction;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::resolution::BuiltinFunction;
 use fmgr::{FunctionCallInfoBaseData, PgFnNative};
 
 use crate::pgstat_bgwriter::pgstat_fetch_stat_bgwriter;

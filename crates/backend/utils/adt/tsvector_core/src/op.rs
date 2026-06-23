@@ -16,20 +16,20 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_ZERO_LENGTH_CHARACTER_STRING, ERROR,
 };
-use tsearch::tsearch::{
+use ::tsearch::tsearch::{
     CheckCondition, ExecPhraseData, QueryItem, QueryOperand, QueryOperator, TSTernaryValue,
     WordEntry, WordEntryPos, LIMITPOS, MAXENTRYPOS, MAXNUMPOS, MAXSTRPOS, OP_AND, OP_NOT, OP_OR,
     OP_PHRASE, QI_VAL, TS_EXEC_EMPTY, TS_EXEC_PHRASE_NO_POS, TS_EXEC_SKIP_NOT, WEP_GETPOS,
     WEP_GETWEIGHT, WEP_SETPOS, WEP_SETWEIGHT,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use postgres_seams as tcop;
 use array_more_seams as arr;
@@ -38,12 +38,12 @@ use mbutils_seams as mb;
 
 use ext::{ArrayElem, SrfRow, TupleSource};
 
-use types_ri_triggers::TriggerDataRef;
+use ::types_ri_triggers::TriggerDataRef;
 
 use spi::{SPI_fnumber, SPI_getbinval, SPI_gettypeid, SPI_ERROR_NOATTRIBUTE};
-use coerce::IsBinaryCoercible;
-use parse::ts_parse::{parsetext, ParsedText};
-use detoast::pg_detoast_datum_packed;
+use ::coerce::IsBinaryCoercible;
+use ::parse::ts_parse::{parsetext, ParsedText};
+use ::detoast::pg_detoast_datum_packed;
 
 use crate::access::{
     arrptr, lexeme, posdatalen, posdataptr, posvecptr_off, set_arrptr, set_tsv_size, set_varsize,
@@ -55,7 +55,7 @@ extern crate alloc;
 use TSTernaryValue::{TS_MAYBE, TS_NO, TS_YES};
 
 /// `DATAHDRSIZE` (`offsetof(TSVectorData, entries)`).
-const DATAHDRSIZE: usize = tsearch::tsearch::DATAHDRSIZE;
+const DATAHDRSIZE: usize = ::tsearch::tsearch::DATAHDRSIZE;
 
 /// `TSVECTOROID` (pg_type.dat).
 const TSVECTOROID: u32 = 3614;
@@ -1896,7 +1896,7 @@ fn tsquery_requires_match_at(items: &[QueryItem], cur: usize) -> PgResult<bool> 
 
 /// `ts_match_vq` (tsvector_op.c:2213) — `tsvector @@ tsquery`.
 pub fn ts_match_vq(vec: &[u8], query: &[u8]) -> PgResult<bool> {
-    use ts_small::util::{get_operand, get_query, tsq_size};
+    use ::ts_small::util::{get_operand, get_query, tsq_size};
 
     if tsq_size(query) == 0 {
         return Ok(false);

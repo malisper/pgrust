@@ -16,12 +16,12 @@
 //! `oidvectorrecv`/`oidvectorsend` remain unregistered (they need the
 //! `array_recv`/`array_send` fcinfo-sharing path).
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
-use stringinfo::StringInfo;
+use ::types_core::Oid;
+use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -142,7 +142,7 @@ fn fc_oidvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResu
     // `oidvector_header_and_oids_bytes`).
     let (ndim, dataoffset, elemtype, oids) =
         arrayfuncs::construct::oidvector_header_and_oids_bytes(m.mcx(), &bytes)?;
-    let values: Vec<types_core::Oid> = oids.iter().copied().collect();
+    let values: Vec<::types_core::Oid> = oids.iter().copied().collect();
     Ok(ret_cstring(
         fcinfo,
         crate::oidvectorout(ndim, dataoffset, elemtype, &values)?,

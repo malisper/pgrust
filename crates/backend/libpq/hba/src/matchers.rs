@@ -16,8 +16,8 @@ use ifaddr::{self as ifaddr, AddressFamily};
 use acl_seams as acl;
 use user_seams as user;
 use walsender_seams as walsender;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use net::{ipCmpSameHost, AuthToken, IPCompareMethod, Port, SockAddr};
 
 use crate::{
@@ -295,8 +295,8 @@ pub(crate) fn check_hostname(port: &mut Port, hostname: &[u8]) -> PgResult<bool>
 
     // Lookup IP from host name and check against original IP.
     // ret = getaddrinfo(port->remote_hostname, NULL, NULL, &gai_result);
-    let mut gai_result: Vec<net::PgAddrInfo> = Vec::new();
-    let hint = net::AddrInfoHint::default(); // hints == NULL in C
+    let mut gai_result: Vec<::net::PgAddrInfo> = Vec::new();
+    let hint = ::net::AddrInfoHint::default(); // hints == NULL in C
     let ret = ip::pg_getaddrinfo_all(
         Some(remote_hostname),
         None,
@@ -327,7 +327,7 @@ pub(crate) fn check_hostname(port: &mut Port, hostname: &[u8]) -> PgResult<bool>
         report_plain(
             crate::DEBUG2,
             "check_hostname",
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!(
                 "pg_hba.conf host name \"{h}\" rejected because address resolution did not return a match with IP address of client"
             ),
@@ -408,7 +408,7 @@ pub(crate) fn check_same_host_or_net(
         report_plain(
             LOG,
             "check_same_host_or_net",
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             "error enumerating network interfaces".to_string(),
         )?;
         return Ok(false);

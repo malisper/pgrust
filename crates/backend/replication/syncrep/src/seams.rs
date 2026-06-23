@@ -9,15 +9,15 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::primitive::XLogRecPtr;
-use types_error::PgResult;
+use ::types_core::primitive::XLogRecPtr;
+use ::types_error::PgResult;
 
 use syncrep_seams as own;
-use guc_tables::hooks;
-use guc_tables::vars;
-use guc_tables::GucVarAccessors;
-use guc_tables::GucHookExtra;
-use types_guc::GucSource;
+use ::guc_tables::hooks;
+use ::guc_tables::vars;
+use ::guc_tables::GucVarAccessors;
+use ::guc_tables::GucHookExtra;
+use ::types_guc::GucSource;
 
 use crate::{
     assign_synchronous_commit, assign_synchronous_standby_names, check_synchronous_standby_names,

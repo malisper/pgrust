@@ -34,22 +34,22 @@ use types_error::{
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_UNTRANSLATABLE_CHARACTER, ERROR,
 };
-use types_wchar::encoding::{
+use ::types_wchar::encoding::{
     pg_enc, pg_valid_be_encoding, pg_valid_encoding, pg_valid_fe_encoding,
     PG_ENCODING_IS_CLIENT_ONLY, PG_SQL_ASCII, PG_UTF8,
 };
-use types_wchar::wchar::PgWChar;
+use ::types_wchar::wchar::PgWChar;
 
 use common_wchar::{
     pg_encoding_max_length, pg_encoding_mblen_or_incomplete, pg_wchar_table,
 };
 
-use types_tuple::heaptuple::NameData;
+use ::types_tuple::heaptuple::NameData;
 
 // Outward seams.
-use transam_xact_seams::is_transaction_state;
-use catalog_namespace::FindDefaultConversionProc;
-use name::namein;
+use ::transam_xact_seams::is_transaction_state;
+use ::catalog_namespace::FindDefaultConversionProc;
+use ::name::namein;
 use fmgr_seams::{convert_via_proc, convert_via_proc_counted};
 use encnames_seams::{pg_char_to_encoding, pg_encoding_to_char};
 
@@ -965,7 +965,7 @@ pub type MbcharacterIncrementer = fn(&mut [u8]) -> bool;
 pub fn pg_database_encoding_character_incrementer() -> MbcharacterIncrementer {
     match database_encoding() {
         PG_UTF8 => pg_utf8_increment,
-        x if x == types_wchar::encoding::PG_EUC_JP => pg_eucjp_increment,
+        x if x == ::types_wchar::encoding::PG_EUC_JP => pg_eucjp_increment,
         _ => pg_generic_charinc,
     }
 }
@@ -1292,14 +1292,14 @@ fn elog_error<T>(message: &str) -> PgResult<T> {
 /// `bytea`/`name` validation error for `pg_convert*` / `length_in_encoding`:
 /// "invalid {kind} encoding name \"{name}\"" with `ERRCODE_INVALID_PARAMETER_VALUE`.
 /// `kind` is "source"/"destination"/"" (the bare "invalid encoding name" form).
-fn invalid_encoding_name_error(kind: &str, name: &str) -> types_error::PgError {
+fn invalid_encoding_name_error(kind: &str, name: &str) -> ::types_error::PgError {
     let prefix = if kind.is_empty() {
         "invalid encoding name".to_string()
     } else {
         format!("invalid {kind} encoding name")
     };
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+        .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
         .errmsg(format!("{prefix} \"{name}\""))
         .into_error()
 }
@@ -1309,7 +1309,7 @@ fn name_str(name: &NameData) -> &str {
     std::str::from_utf8(name.name_str()).unwrap_or("")
 }
 
-fn too_long_error(len: usize) -> types_error::PgError {
+fn too_long_error(len: usize) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
         .errmsg("out of memory")
@@ -1419,7 +1419,7 @@ pub fn init_seams() {
     seams::pg_any_to_server::set(pg_any_to_server);
     seams::pg_get_client_encoding::set(pg_get_client_encoding);
     seams::pg_encoding_mblen::set(|encoding, mbstr| {
-        common_wchar::pg_encoding_mblen(encoding, mbstr).unwrap_or(1)
+        ::common_wchar::pg_encoding_mblen(encoding, mbstr).unwrap_or(1)
     });
     seams::pg_encoding_is_client_only::set(PG_ENCODING_IS_CLIENT_ONLY);
     seams::pg_unicode_to_server::set(pg_unicode_to_server);

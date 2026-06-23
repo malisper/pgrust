@@ -20,7 +20,7 @@
 //! # Genuine externals
 //!
 //! * `PGLC_localeconv()` (`pg_locale.c`): the monetary `struct lconv` snapshot,
-//!   via the [`pg_locale`](pg_locale_seams::pglc_localeconv)
+//!   via the [`pg_locale`](::pg_locale_seams::pglc_localeconv)
 //!   seam (owner not yet ported, panics until installed).
 //! * `float8_mul` / `float8_div` (`utils/float.h`): via the
 //!   [`float`](float_seams) seam (owner not yet ported).
@@ -30,19 +30,19 @@
 //!   directly.
 
 use float_seams as float_seam;
-use adt_numeric::convert::{int64_to_numeric, set_var_from_num};
-use adt_numeric::kernel_transcendental::numericvar_to_int64;
-use adt_numeric::ops_sql::{numeric_div, numeric_mul, numeric_round};
-use pg_locale_seams::pglc_localeconv as pglc_localeconv_seam;
+use ::adt_numeric::convert::{int64_to_numeric, set_var_from_num};
+use ::adt_numeric::kernel_transcendental::numericvar_to_int64;
+use ::adt_numeric::ops_sql::{numeric_div, numeric_mul, numeric_round};
+use ::pg_locale_seams::pglc_localeconv as pglc_localeconv_seam;
 use mcx::{Mcx, PgVec};
-use pgstrcasecmp::pg_toupper as pg_toupper_full;
+use ::pgstrcasecmp::pg_toupper as pg_toupper_full;
 use types_cash::{Cash, CashLconv};
 use types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_DIVISION_BY_ZERO, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
     ERRCODE_PROTOCOL_VIOLATION,
 };
-use types_numeric::var::NumericSign;
+use ::types_numeric::var::NumericSign;
 
 pub mod fmgr_builtins;
 
@@ -544,7 +544,7 @@ fn starts_with(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
 /// thread the C "return 0" through the unit value.
 #[inline]
 fn errsave(escontext: Option<&mut SoftErrorContext>, err: PgError) -> PgResult<()> {
-    types_error::ereturn(escontext, (), err)
+    ::types_error::ereturn(escontext, (), err)
 }
 
 // ===========================================================================

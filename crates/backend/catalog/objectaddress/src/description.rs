@@ -14,11 +14,11 @@ use alloc::string::{String, ToString};
 
 use mcx::{Mcx, PgString};
 use types_core::{Oid, OidIsValid, InvalidOid};
-use types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::catalog_dependency::ObjectAddress;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 
 use crate::consts::*;
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_TOASTVALUE, RELKIND_VIEW,

@@ -9,20 +9,20 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
-use types_core::SubTransactionId;
-use types_error::PgResult;
-use types_storage::file::File;
+use ::types_core::SubTransactionId;
+use ::types_error::PgResult;
+use ::types_storage::file::File;
 
 /// One directory entry as returned by [`list_dir`] — mirrors the parts of
 /// `struct dirent` + `struct stat` that the `pg_ls_*` callers read.
 pub struct DirEntryInfo<'mcx> {
     /// `de->d_name` — the entry's file name.
-    pub name: mcx::PgString<'mcx>,
+    pub name: ::mcx::PgString<'mcx>,
     /// `attrib.st_size` — file size in bytes.
     pub size: i64,
     /// `attrib.st_mtime` converted via `time_t_to_timestamptz` — last
     /// modification time.
-    pub modification: types_core::TimestampTz,
+    pub modification: ::types_core::TimestampTz,
     /// `S_ISDIR(attrib.st_mode)` — is the entry a directory?
     pub isdir: bool,
     /// `S_ISREG(attrib.st_mode)` — is the entry a regular file?
@@ -37,11 +37,11 @@ pub struct StatInfo {
     /// `fst.st_size`.
     pub size: i64,
     /// `time_t_to_timestamptz(fst.st_atime)`.
-    pub access: types_core::TimestampTz,
+    pub access: ::types_core::TimestampTz,
     /// `time_t_to_timestamptz(fst.st_mtime)`.
-    pub modification: types_core::TimestampTz,
+    pub modification: ::types_core::TimestampTz,
     /// `time_t_to_timestamptz(fst.st_ctime)` (Unix status-change time).
-    pub change: types_core::TimestampTz,
+    pub change: ::types_core::TimestampTz,
     /// `S_ISDIR(fst.st_mode)`.
     pub isdir: bool,
 }
@@ -158,7 +158,7 @@ seam_core::seam!(
     /// `pg_file_exists(name)` (`storage/file/fd.c`) — true if the path exists
     /// and is not a directory. May `ereport(ERROR)` for an access error other
     /// than `ENOENT`/`ENOTDIR`/`EACCES`, surfaced as `Err`.
-    pub fn pg_file_exists(name: &str) -> types_error::PgResult<bool>
+    pub fn pg_file_exists(name: &str) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -380,22 +380,22 @@ seam_core::seam!(
     /// (`errno == ENOENT`); raises `FATAL` on any other open failure and
     /// `ERROR` on a read failure, exactly as the timeline.c callers expect.
     pub fn read_file_or_absent<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         path: &str,
-    ) -> types_error::PgResult<Option<mcx::PgVec<'mcx, u8>>>
+    ) -> ::types_error::PgResult<Option<::mcx::PgVec<'mcx, u8>>>
 );
 
 seam_core::seam!(
     /// Probe whether the file at `path` exists (`AllocateFile(path, "r")` then
     /// `FreeFile`). `true` if it could be opened, `false` if `errno == ENOENT`,
     /// `FATAL` on any other open failure.
-    pub fn file_exists(path: &str) -> types_error::PgResult<bool>
+    pub fn file_exists(path: &str) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
     /// `set_max_safe_fds()` (fd.c): probe how many files can be opened and set
     /// `max_safe_fds`. `ereport(FATAL)` when too few are available.
-    pub fn set_max_safe_fds() -> types_error::PgResult<()>
+    pub fn set_max_safe_fds() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -504,7 +504,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `void fsync_fname(const char *fname, bool isdir)` (`fd.c`). Errors are
     /// handled internally at `data_sync_elevel(ERROR)`, carried on `Err`.
-    pub fn fsync_fname(fname: &str, isdir: bool) -> types_error::PgResult<()>
+    pub fn fsync_fname(fname: &str, isdir: bool) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -513,7 +513,7 @@ seam_core::seam!(
     /// `enableFsync` is off. Walk/fsync failures `ereport` at
     /// `data_sync_elevel`, carried on `Err`. Called by `StartupXLOG` on the
     /// crash-recovery path.
-    pub fn sync_data_directory() -> types_error::PgResult<()>
+    pub fn sync_data_directory() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -543,7 +543,7 @@ seam_core::seam!(
     /// `AllocateDir(dirname)` + `ReadDir()` loop collapsed: return the entry
     /// names in `dirname` (excluding `.`/`..`). Can `ereport(ERROR)` if the
     /// directory cannot be opened (C `AllocateDir`/`ReadDir`), carried on `Err`.
-    pub fn read_dir_names(dirname: &str) -> types_error::PgResult<Vec<String>>
+    pub fn read_dir_names(dirname: &str) -> ::types_error::PgResult<Vec<String>>
 );
 
 seam_core::seam!(
@@ -567,13 +567,13 @@ seam_core::seam!(
 seam_core::seam!(
     /// `InitFileAccess()` (fd.c): initialize the virtual file descriptor cache.
     /// `Err` carries its `ereport` surface.
-    pub fn init_file_access() -> types_error::PgResult<()>
+    pub fn init_file_access() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `InitTemporaryFileAccess()` (fd.c): set up temporary-file accounting
     /// (after pgstat). `Err` carries its `ereport` surface.
-    pub fn init_temporary_file_access() -> types_error::PgResult<()>
+    pub fn init_temporary_file_access() -> ::types_error::PgResult<()>
 );
 
 /// Result of `access(path, F_OK)` (postinit.c database-directory check).
@@ -592,7 +592,7 @@ seam_core::seam!(
     /// database directory exists. Returns the classified outcome (the C `== -1`
     /// + `errno` branch). `Err` is reserved for the seam's own failure surface
     /// (none expected; OS errno is returned in [`AccessResult::Other`]).
-    pub fn access_f_ok(path: &str) -> types_error::PgResult<AccessResult>
+    pub fn access_f_ok(path: &str) -> ::types_error::PgResult<AccessResult>
 );
 
 seam_core::seam!(
@@ -614,7 +614,7 @@ seam_core::seam!(
     /// temporary file in a temp tablespace, registered with the current
     /// resource owner. `interXact` keeps it open across transaction end.
     /// Returns the VFD (`> 0`); open failures `ereport(ERROR)`, carried on `Err`.
-    pub fn open_temporary_file(inter_xact: bool) -> types_error::PgResult<File>
+    pub fn open_temporary_file(inter_xact: bool) -> ::types_error::PgResult<File>
 );
 
 seam_core::seam!(
@@ -631,7 +631,7 @@ seam_core::seam!(
     /// count read (`>= 0`) on success or a negative value on an OS read error
     /// (C returns `-1` with `errno` set); buffile reports `Err` on `< 0`.
     pub fn file_read(file: File, buf: &mut [u8], offset: i64, wait_event_info: u32)
-        -> types_error::PgResult<isize>
+        -> ::types_error::PgResult<isize>
 );
 
 seam_core::seam!(
@@ -642,14 +642,14 @@ seam_core::seam!(
     /// fd.c failure (e.g. enlarging the temp-file accounting beyond the limit)
     /// is itself an `ereport(ERROR)`, carried on `Err`.
     pub fn file_write(file: File, buf: &[u8], offset: i64, wait_event_info: u32)
-        -> types_error::PgResult<isize>
+        -> ::types_error::PgResult<isize>
 );
 
 seam_core::seam!(
     /// `off_t FileSize(File file)` (fd.c) — the current size of the underlying
     /// OS file. Returns the size (`>= 0`) or a negative value on a stat error
     /// (C returns `-1` with `errno` set).
-    pub fn file_size(file: File) -> types_error::PgResult<i64>
+    pub fn file_size(file: File) -> ::types_error::PgResult<i64>
 );
 
 seam_core::seam!(
@@ -657,7 +657,7 @@ seam_core::seam!(
     /// (fd.c) — truncate the underlying OS file to `offset`. Returns `0` on
     /// success or a negative value on failure (C returns `-1` with `errno`).
     pub fn file_truncate(file: File, offset: i64, wait_event_info: u32)
-        -> types_error::PgResult<i32>
+        -> ::types_error::PgResult<i32>
 );
 
 seam_core::seam!(
@@ -675,7 +675,7 @@ seam_core::seam!(
     /// inspects `errno` to decide whether to tolerate the failure or raise its
     /// own `ereport`. `Err` is reserved for the VFD-allocation `ereport(ERROR)`.
     pub fn path_name_open_file(file_name: &str, file_flags: i32)
-        -> types_error::PgResult<File>
+        -> ::types_error::PgResult<File>
 );
 
 seam_core::seam!(
@@ -686,7 +686,7 @@ seam_core::seam!(
     /// file")`, carried on `Err`. The modification time is returned unconverted
     /// (seconds since the epoch) so the caller can compare it against a
     /// `time_t` cutoff exactly as the C does.
-    pub fn lstat_mtime(path: &str) -> types_error::PgResult<Option<i64>>
+    pub fn lstat_mtime(path: &str) -> ::types_error::PgResult<Option<i64>>
 );
 
 seam_core::seam!(
@@ -697,7 +697,7 @@ seam_core::seam!(
     /// other `readlink` failure is the C `ereport(ERROR, errcode_for_file_access,
     /// "could not read symbolic link")`, carried on `Err`. The target is returned
     /// as `String` (paths are valid UTF-8 in practice).
-    pub fn read_link(path: &str) -> types_error::PgResult<Option<String>>
+    pub fn read_link(path: &str) -> ::types_error::PgResult<Option<String>>
 );
 
 seam_core::seam!(
@@ -728,8 +728,8 @@ seam_core::seam!(
     /// `errcode_for_file_access` `ereport(ERROR)`s.
     pub fn create_db_dir_and_version_file(
         dbpath: &str,
-        dbid: types_core::Oid,
-        tsid: types_core::Oid,
+        dbid: ::types_core::Oid,
+        tsid: ::types_core::Oid,
         is_redo: bool,
     ) -> PgResult<()>
 );

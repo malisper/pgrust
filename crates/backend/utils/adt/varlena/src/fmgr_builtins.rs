@@ -23,11 +23,11 @@
 //! `name_pattern.rs` name<->text family are registered here — the boot-critical
 //! comparator subset. The rest of `varlena.c`'s broad fmgr surface is deferred.
 
-use types_core::Oid;
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -222,7 +222,7 @@ fn arg_cstring<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
 #[inline]
 fn ret_varlena(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
     image.extend_from_slice(&bytes);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)
@@ -1654,7 +1654,7 @@ pub fn register_varlena_format_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datum::NullableDatum;
+    use ::datum::NullableDatum;
 
     fn register() {
         // The fmgr builtin table is thread-local in the test harness, so each

@@ -49,25 +49,25 @@ pub mod fmgr_builtins;
 
 use alloc::boxed::Box;
 
-use twophase_rmgr::TWOPHASE_RM_PGSTAT_ID;
-use activity_pgstat::entry_ref::PgStat_EntryRef;
-use activity_pgstat::kind_info::KindInfoBuilder;
-use activity_pgstat::pgstat_core;
-use activity_pgstat::registry;
-use activity_pgstat::shmem;
+use ::twophase_rmgr::TWOPHASE_RM_PGSTAT_ID;
+use ::activity_pgstat::entry_ref::PgStat_EntryRef;
+use ::activity_pgstat::kind_info::KindInfoBuilder;
+use ::activity_pgstat::pgstat_core;
+use ::activity_pgstat::registry;
+use ::activity_pgstat::shmem;
 use pgstat_backend::{pgstat_flush_backend, PGSTAT_BACKEND_FLUSH_IO};
-use pgstat_database::pgstat_prep_database_pending;
+use ::pgstat_database::pgstat_prep_database_pending;
 use activity_xact as xact;
 use init_small_seams::{my_backend_type, my_database_id};
-use types_core::init::BackendType;
-use types_core::primitive::{InvalidOid, Oid};
-use types_core::TimestampTz;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{
+use ::types_core::init::BackendType;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{
     PgStat_Counter, PgStat_StatTabEntry, PgStat_TableStatus, PgStat_TableXactStatus,
     PGSTAT_KIND_RELATION,
 };
-use types_pgstat::pgstat_internal::{PgStat_HashKey, PgStat_KindInfo, PgStatShared_Relation};
+use ::types_pgstat::pgstat_internal::{PgStat_HashKey, PgStat_KindInfo, PgStatShared_Relation};
 
 // ---------------------------------------------------------------------------
 // Small helpers reproducing C macros / globals.
@@ -177,10 +177,10 @@ pub fn pgstat_copy_relation_stats(
 }
 
 // `pgstat_init_relation` lives in the pgstat owner crate
-// (`activity_pgstat::pgstat_relation`) and is installed from
+// (`::activity_pgstat::pgstat_relation`) and is installed from
 // there (it is the relation-open gate, on the inward boot path, with no
 // dependency on this crate). Re-export it for completeness.
-pub use activity_pgstat::pgstat_relation::pgstat_init_relation;
+pub use ::activity_pgstat::pgstat_relation::pgstat_init_relation;
 
 /// Port of `void pgstat_assoc_relation(Relation rel)` — prepare for statistics
 /// for this relation to be collected (ensure a reference to the stats entry
@@ -343,7 +343,7 @@ pub fn pgstat_report_analyze(
     resetcounter: bool,
     starttime: TimestampTz,
 ) -> PgResult<()> {
-    use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+    use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
     if !pgstat_track_counts() {
         return Ok(());
@@ -643,7 +643,7 @@ fn count_field(
     relid: Oid,
     relisshared: bool,
     pgstat_enabled: bool,
-    f: impl FnOnce(&mut types_pgstat::activity_pgstat::PgStat_TableCounts),
+    f: impl FnOnce(&mut ::types_pgstat::activity_pgstat::PgStat_TableCounts),
 ) -> PgResult<()> {
     if let Some(key) = should_count_relation(relid, relisshared, pgstat_enabled)? {
         pgstat_core::pgstat_with_pending_mut::<PgStat_TableStatus, ()>(key, |pgstat_info| {
@@ -742,7 +742,7 @@ pub fn find_tabstat_entry(rel_id: Oid) -> Option<PgStat_TableStatus> {
 /// table's level-1 `PgStat_TableXactStatus` node is owned by its pending block's
 /// `trans` head (with `nest_level == 1` and `upper == None`, the C asserts).
 pub fn AtEOXact_PgStat_Relations(
-    xact_state: &mut types_pgstat::activity_pgstat::PgStat_SubXactStatus,
+    xact_state: &mut ::types_pgstat::activity_pgstat::PgStat_SubXactStatus,
     isCommit: bool,
 ) {
     for &key in &xact_state.first {
@@ -798,7 +798,7 @@ pub fn AtEOXact_PgStat_Relations(
 /// The level node has already been popped from the stack by the caller, so
 /// `pgstat_get_xact_stack_level(nestDepth - 1)` reaches/creates the parent.
 pub fn AtEOSubXact_PgStat_Relations(
-    xact_state: &mut types_pgstat::activity_pgstat::PgStat_SubXactStatus,
+    xact_state: &mut ::types_pgstat::activity_pgstat::PgStat_SubXactStatus,
     isCommit: bool,
     nestDepth: i32,
 ) -> PgResult<()> {
@@ -940,7 +940,7 @@ impl TwoPhasePgStatRecord {
 /// generate 2PC records for all the pending transaction-dependent relation
 /// stats.
 pub fn AtPrepare_PgStat_Relations(
-    xact_state: &mut types_pgstat::activity_pgstat::PgStat_SubXactStatus,
+    xact_state: &mut ::types_pgstat::activity_pgstat::PgStat_SubXactStatus,
 ) -> PgResult<()> {
     for &key in &xact_state.first {
         // Build the record from the table's level-1 node + identity.
@@ -982,7 +982,7 @@ pub fn AtPrepare_PgStat_Relations(
 /// *xact_state)` — unlink the transaction stats state from the nontransactional
 /// state.
 pub fn PostPrepare_PgStat_Relations(
-    xact_state: &mut types_pgstat::activity_pgstat::PgStat_SubXactStatus,
+    xact_state: &mut ::types_pgstat::activity_pgstat::PgStat_SubXactStatus,
 ) {
     for &key in &xact_state.first {
         // tabstat = trans->parent; tabstat->trans = NULL;
@@ -996,7 +996,7 @@ pub fn PostPrepare_PgStat_Relations(
 /// void *recdata, uint32 len)` — load the saved counts into local pgstats state
 /// (COMMIT PREPARED).
 pub fn pgstat_twophase_postcommit(
-    _xid: types_core::primitive::TransactionId,
+    _xid: ::types_core::primitive::TransactionId,
     _info: u16,
     recdata: &[u8],
 ) -> PgResult<()> {
@@ -1028,7 +1028,7 @@ pub fn pgstat_twophase_postcommit(
 /// *recdata, uint32 len)` — load the saved counts as aborted (ROLLBACK
 /// PREPARED).
 pub fn pgstat_twophase_postabort(
-    _xid: types_core::primitive::TransactionId,
+    _xid: ::types_core::primitive::TransactionId,
     _info: u16,
     recdata: &[u8],
 ) -> PgResult<()> {
@@ -1133,7 +1133,7 @@ pub fn pgstat_relation_flush_cb(entry_ref: &mut PgStat_EntryRef, nowait: bool) -
         .pending
         .as_mut()
         .expect("pgstat_relation_flush_cb: database pending missing after prep")
-        .downcast_mut::<types_pgstat::activity_pgstat::PgStat_StatDBEntry>()
+        .downcast_mut::<::types_pgstat::activity_pgstat::PgStat_StatDBEntry>()
         .expect("pgstat_relation_flush_cb: database pending is not a PgStat_StatDBEntry");
     dbentry.tuples_returned += lstats.counts.tuples_returned;
     dbentry.tuples_fetched += lstats.counts.tuples_fetched;
@@ -1296,7 +1296,7 @@ fn relation_kind_info() -> PgStat_KindInfo {
 /// Register `PGSTAT_KIND_RELATION` and install the `pgstat_relation.c` outward
 /// seams.
 ///
-/// Must run before `activity_pgstat::init_seams()` seals the
+/// Must run before `::activity_pgstat::init_seams()` seals the
 /// per-kind table.
 pub fn init_seams() {
     // Register the per-relation pg_stat_get_* SQL accessors (pgstatfuncs.c).
@@ -1312,7 +1312,7 @@ pub fn init_seams() {
             .read_var_cb(|header, bytes| {
                 // SAFETY: header points at a live PgStatShared_Relation body.
                 let sh = unsafe { &mut *(header as *mut PgStatShared_Relation) };
-                sh.stats = activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                sh.stats = ::activity_pgstat::kind_info::pgstat_deserialize_pod::<
                     PgStat_StatTabEntry,
                 >(bytes);
                 Ok(())
@@ -1320,7 +1320,7 @@ pub fn init_seams() {
             .write_var_cb(|header| {
                 // SAFETY: header points at a live PgStatShared_Relation body.
                 let sh = unsafe { &*(header as *const PgStatShared_Relation) };
-                activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
+                ::activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
             }),
     );
 

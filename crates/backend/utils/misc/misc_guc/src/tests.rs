@@ -9,7 +9,7 @@
 
 use std::sync::Mutex;
 
-use types_core::BOOTSTRAP_SUPERUSERID;
+use ::types_core::BOOTSTRAP_SUPERUSERID;
 use types_error::{ErrorLevel, ERROR};
 use types_guc::{PGC_POSTMASTER, PGC_SIGHUP, PGC_S_OVERRIDE, PGC_USERSET};
 
@@ -189,7 +189,7 @@ fn guc_stack_save_rollback_and_commit() {
         "work_mem",
         Some("65536"),
         PGC_USERSET,
-        types_guc::PGC_S_SESSION,
+        ::types_guc::PGC_S_SESSION,
         BOOTSTRAP_SUPERUSERID,
         crate::GUC_ACTION_SAVE,
         true,
@@ -210,7 +210,7 @@ fn guc_stack_save_rollback_and_commit() {
         "work_mem",
         Some("65536"),
         PGC_USERSET,
-        types_guc::PGC_S_SESSION,
+        ::types_guc::PGC_S_SESSION,
         BOOTSTRAP_SUPERUSERID,
         crate::GUC_ACTION_SAVE,
         true,
@@ -338,8 +338,8 @@ fn command_line_value_reaches_max_stack_depth_assign_hook() {
     let rc = set_config_option_global(
         "max_stack_depth",
         Some("6000"),
-        types_guc::PGC_SUSET,
-        types_guc::PGC_S_ARGV,
+        ::types_guc::PGC_SUSET,
+        ::types_guc::PGC_S_ARGV,
         BOOTSTRAP_SUPERUSERID,
         crate::GUC_ACTION_SET,
         true,
@@ -438,7 +438,7 @@ fn enum_seqscan_set_reset() {
         "enable_seqscan",
         Some("off"),
         PGC_USERSET,
-        types_guc::PGC_S_SESSION,
+        ::types_guc::PGC_S_SESSION,
         BOOTSTRAP_SUPERUSERID,
         crate::GUC_ACTION_SET,
         true,
@@ -454,7 +454,7 @@ fn enum_seqscan_set_reset() {
         "enable_seqscan",
         None,
         PGC_USERSET,
-        types_guc::PGC_S_SESSION,
+        ::types_guc::PGC_S_SESSION,
         BOOTSTRAP_SUPERUSERID,
         crate::GUC_ACTION_SET,
         true,

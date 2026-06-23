@@ -2,9 +2,9 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId, RELOPT_JOINREL, RELOPT_OTHER_JOINREL};
 
 use joinrels::{is_dummy_rel, mark_dummy_rel};
@@ -19,7 +19,7 @@ use crate::add_paths_to_append_rel;
 /// itself sub-partitioned, e.g. in a nested partitionwise join) recurses and has
 /// `set_cheapest` run on its grandchildren.
 #[inline]
-fn is_join_rel(rel: &pathnodes::RelOptInfo) -> bool {
+fn is_join_rel(rel: &::pathnodes::RelOptInfo) -> bool {
     rel.reloptkind == RELOPT_JOINREL || rel.reloptkind == RELOPT_OTHER_JOINREL
 }
 
@@ -27,7 +27,7 @@ fn is_join_rel(rel: &pathnodes::RelOptInfo) -> bool {
 /// bound info, at least one partition, and the per-partition rel array. (The
 /// macro's `&& !IS_DUMMY_REL` conjunct is applied at the callsite as in C.)
 #[inline]
-fn is_partitioned_rel(rel: &pathnodes::RelOptInfo) -> bool {
+fn is_partitioned_rel(rel: &::pathnodes::RelOptInfo) -> bool {
     rel.part_scheme.is_some()
         && rel.boundinfo.is_some()
         && rel.nparts > 0

@@ -1,15 +1,15 @@
 //! `optimizer/util/paramassign.c` — assigning PARAM_EXEC slots during planning.
 //!
-//! Ported 1:1 over the arena+handle model of [`pathnodes::PlannerInfo`].
+//! Ported 1:1 over the arena+handle model of [`::pathnodes::PlannerInfo`].
 //! This module manages the three planner data structures paramassign owns:
 //!
 //! * `root->glob->paramExecTypes` — the global PARAM_EXEC slot type list
-//!   (`param_exec_types` on [`pathnodes::PlannerGlobal`]).
+//!   (`param_exec_types` on [`::pathnodes::PlannerGlobal`]).
 //! * `root->plan_params` — `PlannerParamItem`s this query level supplies to a
-//!   lower subquery (interned as [`pathnodes::NodeId`] handles into the
+//!   lower subquery (interned as [`::pathnodes::NodeId`] handles into the
 //!   node arena, resolved via `planner_param_item`).
 //! * `root->curOuterParams` — not-yet-assigned `NestLoopParam`s (interned as
-//!   [`pathnodes::NodeId`] handles, resolved via `nestloop_param`).
+//!   [`::pathnodes::NodeId`] handles, resolved via `nestloop_param`).
 //!
 //! Node operators that would create a dependency cycle are reached through seam
 //! crates (`exprType`/`exprTypmod`/`exprCollation` via nodeFuncs's
@@ -26,12 +26,12 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use joininfo::placeholder::{
+use ::joininfo::placeholder::{
     find_placeholder_info, get_placeholder_nulling_relids,
 };
-use rewrite_core::increment::IncrementVarSublevelsUp;
+use ::rewrite_core::increment::IncrementVarSublevelsUp;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{primitive::InvalidOid, Index, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::{CmdType, Node};
@@ -39,13 +39,13 @@ use ::nodes::primnodes::{
     Aggref, Expr, ExprRelids, GroupingFunc, MergeSupportFunc, Param, ParamKind, PlaceHolderVar,
     ReturningExpr, Var,
 };
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     Bitmapset, NestLoopParamNode, NodeId, PlannerGlobal, PlannerInfo, PlannerParamItem, Relids,
 };
 
 // Seam modules (call via `::call(...)`).
-use equalfuncs_seams::equal_expr;
+use ::equalfuncs_seams::equal_expr;
 use nodeFuncs_seams::{exprLocation, expr_type_info};
 use relnode_seams::{
     relids_equal, relids_intersect, relids_is_member, relids_is_subset, relids_overlap,
@@ -109,7 +109,7 @@ fn ascend_mut(root: &mut PlannerInfo, levelsup: Index) -> &mut PlannerInfo {
 /// Wrap an `Expr` as a `Node`, run `IncrementVarSublevelsUp`, and unwrap. C:
 /// `IncrementVarSublevelsUp((Node *) expr, delta, min)`.
 fn increment_expr_sublevels<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     e: Expr<'mcx>,
     delta: i32,
     min: i32,

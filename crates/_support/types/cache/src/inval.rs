@@ -1,12 +1,12 @@
 //! Invalidation callback vocabulary (`utils/inval.h`).
 
-use types_core::Oid;
+use ::types_core::Oid;
 
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`.
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`.
 // The cache-invalidation callback `arg` is a plain machine word that C passes
 // as `(Datum) 0` and hands back verbatim; it carries no deformed value, so it
 // stays the audited bare word rather than the canonical `Datum<'mcx>` enum.
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 
 /// `SyscacheCallbackFunction` — `void (*)(Datum arg, int cacheid, uint32
 /// hashvalue)`. By convention a zero `hashvalue` means "flush the whole

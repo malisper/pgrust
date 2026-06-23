@@ -20,8 +20,8 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use core::any::Any;
 
-use mcx::PgVec;
-use types_core::PgWChar;
+use ::mcx::PgVec;
+use ::types_core::PgWChar;
 
 /// C: `pg_regoff_t` (`regex/regex.h`) — a match offset, in characters.
 pub type pg_regoff_t = i64;

@@ -11,13 +11,13 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_dest::CommandDest;
+use ::mcx::Mcx;
+use ::types_dest::CommandDest;
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
 use portal::{CommandTag, QueryCompletion};
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(
     /// `DestReceiver *CreateDestReceiver(CommandDest dest)` (tcop/dest.c) —
@@ -34,7 +34,7 @@ seam_core::seam!(
     /// (printtup -> dest router) unported; scaffolded slot.
     pub fn set_remote_dest_receiver_params(
         receiver: DestReceiverHandle,
-        portal: &portal::Portal,
+        portal: &::portal::Portal,
     ) -> types_error::PgResult<()>
 );
 

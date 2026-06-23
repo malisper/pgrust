@@ -1152,7 +1152,7 @@ unsafe extern "C" fn method_is_empty(context: MemoryContext) -> bool {
 
 unsafe extern "C" fn method_stats(
     context: MemoryContext,
-    _printfunc: pg_ffi_fgram::MemoryStatsPrintFunc,
+    _printfunc: ::pg_ffi_fgram::MemoryStatsPrintFunc,
     _passthru: *mut c_void,
     totals: *mut MemoryContextCounters,
     _print_to_stderr: bool,

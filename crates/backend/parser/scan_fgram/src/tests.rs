@@ -2,7 +2,7 @@
 //! location) matches what PostgreSQL's flex scanner produces.
 
 use super::*;
-use mb_fgram::SetDatabaseEncoding;
+use ::mb_fgram::SetDatabaseEncoding;
 use std::sync::Mutex;
 
 /// Serialize tests touching process-global database encoding.

@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 // `clippy::result_large_err`: every fallible constructor returns the shared
-// `error_fgram::PgResult` (== `Result<_, PgError>`). `PgError`'s size is
+// `::error_fgram::PgResult` (== `Result<_, PgError>`). `PgError`'s size is
 // fixed by that crate and is the project-wide error contract these ports must
 // match; boxing it locally would diverge from every sibling crate's signatures.
 #![allow(clippy::result_large_err)]
@@ -31,7 +31,7 @@
 
 use core::ffi::{c_char, c_int};
 
-use error_fgram::PgResult;
+use ::error_fgram::PgResult;
 use mmgr_fgram::{palloc0, MemoryContextScope, PgMemoryContext};
 use pg_ffi_fgram::{BitString, Boolean, Float, Integer, StringNode};
 

@@ -21,8 +21,8 @@ use sink::{
     bbsink_cleanup, bbsink_end_archive, bbsink_end_backup, bbsink_end_manifest,
     bbsink_manifest_contents,
 };
-use mcx::MemoryContext;
-use types_core::primitive::BLCKSZ;
+use ::mcx::MemoryContext;
+use ::types_core::primitive::BLCKSZ;
 
 // --- Simulated clock and seam bookkeeping. ---
 

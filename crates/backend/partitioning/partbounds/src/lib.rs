@@ -27,8 +27,8 @@ mod qual;
 mod satisfies_hash_partition;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::Oid;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::ddlnodes::PartitionBoundSpec;
 use ::nodes::nodes::Node;
@@ -501,7 +501,7 @@ fn make_one_partition_rbound<'mcx>(
     mcx: Mcx<'mcx>,
     key: &PartitionKeyData<'_>,
     index: i32,
-    datum_nodes: &[mcx::PgBox<'_, Node<'_>>],
+    datum_nodes: &[::mcx::PgBox<'_, Node<'_>>],
     lower: bool,
 ) -> PgResult<PartitionRangeBound<'mcx>> {
     debug_assert!(!datum_nodes.is_empty());
@@ -1129,8 +1129,8 @@ fn get_rel_name<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {
 /// `ERRCODE_INVALID_OBJECT_DEFINITION` (`42P17`) for the conflict/overlap
 /// errors, matching C.
 fn invalid_object_def(msg: String) -> PgError {
-    PgError::new(types_error::ERROR, msg)
-        .with_sqlstate(types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
+    PgError::new(::types_error::ERROR, msg)
+        .with_sqlstate(::types_error::ERRCODE_INVALID_OBJECT_DEFINITION)
 }
 
 /// An `ERRCODE_INVALID_OBJECT_DEFINITION` error carrying both a primary message
@@ -1412,10 +1412,10 @@ fn range_datum_location(
 /// bytes (length then `memcmp`), exactly as `datumIsEqual` does for a flat
 /// pass-by-reference value. `typbyval`/`typlen` are implied by the image arm.
 fn datum_image_is_equal(
-    a: &pathnodes::DatumImage,
-    b: &pathnodes::DatumImage,
+    a: &::pathnodes::DatumImage,
+    b: &::pathnodes::DatumImage,
 ) -> bool {
-    use pathnodes::DatumImage;
+    use ::pathnodes::DatumImage;
     match (a, b) {
         (DatumImage::ByVal(x), DatumImage::ByVal(y)) => x == y,
         (DatumImage::Bytes(x), DatumImage::Bytes(y)) => x == y,
@@ -1437,8 +1437,8 @@ fn partition_bounds_equal(
     _partnatts: i32,
     _parttyplen: &[i16],
     _parttypbyval: &[bool],
-    b1: &pathnodes::PartitionBoundInfoData,
-    b2: &pathnodes::PartitionBoundInfoData,
+    b1: &::pathnodes::PartitionBoundInfoData,
+    b2: &::pathnodes::PartitionBoundInfoData,
 ) -> bool {
     // PARTITION_STRATEGY_HASH = 'h'.
     const PARTITION_STRATEGY_HASH: i8 = b'h' as i8;
@@ -1518,15 +1518,15 @@ fn partition_bounds_equal(
 /// bounds are not mergeable (mirroring C's `return NULL` for HASH) and report
 /// `Ok(None)`.
 fn partition_bounds_merge(
-    root: &mut pathnodes::PlannerInfo,
-    rel1: pathnodes::RelId,
-    rel2: pathnodes::RelId,
-    jointype: pathnodes::JoinType,
+    root: &mut ::pathnodes::PlannerInfo,
+    rel1: ::pathnodes::RelId,
+    rel2: ::pathnodes::RelId,
+    jointype: ::pathnodes::JoinType,
 ) -> PgResult<
     Option<(
-        pathnodes::PartitionBoundInfoData,
-        std::vec::Vec<Option<pathnodes::RelId>>,
-        std::vec::Vec<Option<pathnodes::RelId>>,
+        ::pathnodes::PartitionBoundInfoData,
+        std::vec::Vec<Option<::pathnodes::RelId>>,
+        std::vec::Vec<Option<::pathnodes::RelId>>,
     )>,
 > {
     merge::partition_bounds_merge(root, rel1, rel2, jointype)
@@ -1581,8 +1581,8 @@ fn get_qual_from_partbound_seam<'mcx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::PgVec;
-    use types_core::primitive::ParseLoc;
+    use ::mcx::PgVec;
+    use ::types_core::primitive::ParseLoc;
     use ::nodes::ddlnodes::PartitionBoundSpec;
     use ::nodes::partition::PartitionStrategy;
 

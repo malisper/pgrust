@@ -20,9 +20,9 @@
 //! in [`crate::nodeagg`].
 
 use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, Index, Oid};
-use types_error::PgResult;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, Index, Oid};
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 
 use crate::execexpr::ExprState;
@@ -225,7 +225,7 @@ fn clone_opt_vec<'b, T: Copy>(
     match src {
         None => Ok(None),
         Some(v) => {
-            let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
             for x in v.iter() {
                 out.push(*x);
             }
@@ -241,7 +241,7 @@ fn clone_opt_expr_vec<'b>(
     match src {
         None => Ok(None),
         Some(v) => {
-            let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
             for x in v.iter() {
                 // Deep-copy via `clone_in`, not the derived `Expr::clone`
                 // (which panics on a `SubPlan` arm).
@@ -258,7 +258,7 @@ fn clone_opt_box_expr<'b>(
 ) -> PgResult<Option<PgBox<'b, Expr<'b>>>> {
     match src {
         None => Ok(None),
-        Some(b) => Ok(Some(mcx::alloc_in(mcx, (**b).clone_in(mcx)?)?)),
+        Some(b) => Ok(Some(::mcx::alloc_in(mcx, (**b).clone_in(mcx)?)?)),
     }
 }
 

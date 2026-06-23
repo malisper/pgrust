@@ -19,17 +19,17 @@
 //!
 //! Here `PlannerInfo.agginfos` / `aggtransinfos` are `Vec<NodeId>` of handles
 //! into `PlannerInfo.node_arena`
-//! ([`ArenaNode::AggInfo`](pathnodes::ArenaNode::AggInfo) /
-//! [`AggTransInfo`](pathnodes::ArenaNode::AggTransInfo)), and
+//! ([`ArenaNode::AggInfo`](::pathnodes::ArenaNode::AggInfo) /
+//! [`AggTransInfo`](::pathnodes::ArenaNode::AggTransInfo)), and
 //! `AggInfo.aggrefs` is a `Vec<NodeId>` of handles into the same arena
-//! ([`ArenaNode::Expr`](pathnodes::ArenaNode::Expr)`(Expr::Aggref)`). The
+//! ([`ArenaNode::Expr`](::pathnodes::ArenaNode::Expr)`(Expr::Aggref)`). The
 //! producer deep-clones each canonical `Aggref` into the arena (via
 //! `Expr::clone_in` — keystone #280; a shallow `Aggref::clone()` panics on its
 //! context-allocated `TargetEntry`-list children) with its `aggno` / `aggtransno`
 //! / `aggtranstype` already filled, and stores the handle. Reading
 //! `PlannerInfo::node` then yields the one shared `Aggref` exactly as C reads
 //! the `Aggref *`. This is the carrier decision documented on
-//! [`pathnodes::AggInfo`].
+//! [`::pathnodes::AggInfo`].
 //!
 //! The C *also* mutates the `Aggref` in the **source** expression tree in place;
 //! the walker entry here takes the clause by shared `&Expr` (it is reached from
@@ -66,10 +66,10 @@ use alloc::vec::Vec;
 
 use prepagg_seams as seam;
 
-use types_core::catalog::INTERNALOID;
-use types_core::primitive::{Oid, Size};
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::types_core::catalog::INTERNALOID;
+use ::types_core::primitive::{Oid, Size};
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use ::nodes::nodeagg::{
     AggSplit, AGGSPLITOP_COMBINE, AGGSPLITOP_DESERIALIZE, AGGSPLITOP_SERIALIZE, AGGSPLITOP_SKIPFINAL,
 };
@@ -1185,7 +1185,7 @@ fn clone_targetentry_into_arena<'mcx>(
     );
     let expr_clone = expr_src.clone_in(mcx)?;
     let expr_id = root.alloc_node(expr_clone);
-    let te_node = pathnodes::TargetEntryNode {
+    let te_node = ::pathnodes::TargetEntryNode {
         expr: expr_id,
         resno: tle.resno,
         resname: tle

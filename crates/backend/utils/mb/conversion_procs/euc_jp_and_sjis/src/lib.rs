@@ -22,14 +22,14 @@
 //! number of source bytes consumed (`sjis - start` / `mic - start` /
 //! `euc - start`).
 
-use error_fgram::PgResult;
+use ::error_fgram::PgResult;
 use mb_fgram::{
     check_encoding_conversion_args, report_invalid_encoding, report_untranslatable_char,
 };
-use conv_string_helpers::ConversionResult;
-use conv_string_helpers::make_conversion_builtin;
-use common_wchar::pg_encoding_verifymbchar;
-use types_wchar::encoding::{pg_enc, PG_EUC_JP, PG_MULE_INTERNAL, PG_SJIS};
+use ::conv_string_helpers::ConversionResult;
+use ::conv_string_helpers::make_conversion_builtin;
+use ::common_wchar::pg_encoding_verifymbchar;
+use ::types_wchar::encoding::{pg_enc, PG_EUC_JP, PG_MULE_INTERNAL, PG_SJIS};
 
 mod tables;
 use tables::IBMKANJI;

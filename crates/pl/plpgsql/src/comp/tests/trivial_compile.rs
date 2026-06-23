@@ -10,12 +10,12 @@
 //! read needs (that table is installed at backend boot, not in this unit test).
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use comp::ProcCompileFacts;
-use plpgsql::PLpgSQL_trigtype;
+use ::comp::ProcCompileFacts;
+use ::plpgsql::PLpgSQL_trigtype;
 
 #[test]
 fn trivial_block_reaches_catalog_boundary() {
-    comp::init_seams();
+    ::comp::init_seams();
 
     let facts = ProcCompileFacts {
         proname: "trivial".to_string(),
@@ -37,7 +37,7 @@ fn trivial_block_reaches_catalog_boundary() {
     };
 
     let res = catch_unwind(AssertUnwindSafe(|| {
-        comp::plpgsql_compile_from_source(&facts)
+        ::comp::plpgsql_compile_from_source(&facts)
     }));
 
     let err = res.expect_err("without the syscache owner, the compile stops at pg_type_form");

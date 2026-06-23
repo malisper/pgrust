@@ -23,7 +23,7 @@
 //! difference for the immutable Const bounds a range partition carries.
 
 use mcx::{Mcx, PgBox};
-use types_core::primitive::{Oid, OidIsValid};
+use ::types_core::primitive::{Oid, OidIsValid};
 
 /// `RECORDOID` (pg_type.h) — the pseudo-type for an anonymous record.
 const RECORDOID: Oid = 2249;
@@ -35,7 +35,7 @@ use ::nodes::partition::{
 };
 use ::nodes::primnodes::{Const, Expr};
 
-use nodes_core::makefuncs::{
+use ::nodes_core::makefuncs::{
     make_ands_explicit, make_bool_const, make_bool_expr, make_const, make_is_not_null,
     make_opclause, make_relabel_type, make_var,
 };
@@ -123,7 +123,7 @@ fn const_of<'mcx>(mcx: Mcx<'mcx>, n: &Node<'_>) -> PgResult<Const<'mcx>> {
 }
 
 fn elog(msg: &str) -> PgError {
-    utils_error::ereport(types_error::ERROR)
+    utils_error::ereport(::types_error::ERROR)
         .errmsg_internal(msg.to_string())
         .into_error()
 }
@@ -405,7 +405,7 @@ fn get_qual_for_hash<'mcx>(
     // fexpr = makeFuncExpr(F_SATISFIES_HASH_PARTITION, BOOLOID, args,
     //                      InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
     const F_SATISFIES_HASH_PARTITION: Oid = 5028;
-    let fexpr = nodes_core::makefuncs::make_func_expr(
+    let fexpr = ::nodes_core::makefuncs::make_func_expr(
         F_SATISFIES_HASH_PARTITION,
         BOOLOID,
         args,
@@ -618,7 +618,7 @@ fn get_qual_for_range<'mcx>(
             let bnode = read_seams::string_to_node::call(mcx, &text)?;
             let bspec: PgBox<'mcx, PartitionBoundSpec<'mcx>> =
                 match PgBox::into_inner(bnode).into_partitionboundspec() {
-                    Some(spec) => mcx::alloc_in(mcx, spec)?,
+                    Some(spec) => ::mcx::alloc_in(mcx, spec)?,
                     None => return Err(elog("expected PartitionBoundSpec")),
                 };
 
@@ -913,11 +913,11 @@ pub fn qual_from_partbound_seam<'mcx, 'p>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     parent: &rel::RelationData<'p>,
-) -> PgResult<mcx::PgVec<'mcx, Node<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, Node<'mcx>>> {
     // datum = SysCacheGetAttr(RELOID, relid, relpartbound, &isnull); if isnull,
     // my_qual stays NIL.
     let text = syscache_seams::pg_class_relpartbound_text::call(relid)?;
-    let mut out = mcx::PgVec::new_in(mcx);
+    let mut out = ::mcx::PgVec::new_in(mcx);
     let Some(text) = text else {
         return Ok(out);
     };
@@ -926,7 +926,7 @@ pub fn qual_from_partbound_seam<'mcx, 'p>(
     let bound_node = read_seams::string_to_node::call(mcx, &text)?;
     let bound: PgBox<'mcx, PartitionBoundSpec<'mcx>> =
         match PgBox::into_inner(bound_node).into_partitionboundspec() {
-            Some(spec) => mcx::alloc_in(mcx, spec)?,
+            Some(spec) => ::mcx::alloc_in(mcx, spec)?,
             None => return Err(elog("invalid relpartbound: stringToNode did not yield a PartitionBoundSpec")),
         };
 
@@ -934,7 +934,7 @@ pub fn qual_from_partbound_seam<'mcx, 'p>(
     // locked by the caller (generate_partition_qual holds it across this seam),
     // so we re-acquire a NoLock handle to obtain an aliasable `Relation` for the
     // partition-key lookup, then drop it (NoLock release is a no-op).
-    use types_storage::lock::NoLock;
+    use ::types_storage::lock::NoLock;
     let parent_rel =
         common_relation_seams::relation_open::call(mcx, parent.rd_id, NoLock)?;
     let key = partcache_seams::relation_get_partition_key::call(

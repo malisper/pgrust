@@ -16,10 +16,10 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::{AttrNumber, Index, Oid, TimestampTz, INVALID_OID};
-use types_error::PgResult;
-use opclass::TypeName;
-use rel::Relation;
+use ::types_core::primitive::{AttrNumber, Index, Oid, TimestampTz, INVALID_OID};
+use ::types_error::PgResult;
+use ::opclass::TypeName;
+use ::rel::Relation;
 
 use crate::bitmapset::Bitmapset;
 use crate::nodes::{Node, NodePtr};
@@ -94,7 +94,7 @@ impl QueryCompletionHandle {
 /// carried as its integer value (the generated `cmdtaglist.h` order).
 /// Canonically defined in `types_core` (shared with the matview/plancache
 /// layers, which do not depend on `types-nodes`).
-pub use types_core::cmdtag::CommandTag;
+pub use ::types_core::cmdtag::CommandTag;
 
 /// `ProcessUtilityContext` (`tcop/utility.h`) — identifies the nesting /
 /// atomicity context a utility statement is executed in. Discriminants follow
@@ -968,7 +968,7 @@ impl RawStmt<'_> {
     /// parse tree is copied via `Node::clone_in`.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<RawStmt<'b>> {
         Ok(RawStmt {
-            stmt: mcx::alloc_in(mcx, self.stmt.clone_in(mcx)?)?,
+            stmt: ::mcx::alloc_in(mcx, self.stmt.clone_in(mcx)?)?,
             stmt_location: self.stmt_location,
             stmt_len: self.stmt_len,
         })
@@ -980,12 +980,12 @@ impl RawStmt<'_> {
 pub struct PrepareStmt<'mcx> {
     /// `char *name` — name of plan, arbitrary (`None` / empty = the protocol
     /// unnamed statement, which PREPARE rejects).
-    pub name: Option<mcx::PgString<'mcx>>,
+    pub name: Option<::mcx::PgString<'mcx>>,
     /// `List *argtypes` — type names for parameters. Each is a concrete
     /// `TypeName` (the real fields the grammar's `makeTypeName` produced:
     /// `names`/`typeOid`/`setof`/`pct_type`/`typemod`/`location`); the PREPARE
     /// driver never inspects them, it hands each straight to `typenameTypeId`.
-    pub argtypes: mcx::PgVec<'mcx, TypeName>,
+    pub argtypes: ::mcx::PgVec<'mcx, TypeName>,
     /// `Node *query` — the query itself (as a raw parse tree).
     pub query: Option<PgBox<'mcx, Node<'mcx>>>,
 }
@@ -995,7 +995,7 @@ impl PrepareStmt<'_> {
     /// `char *`, `argtypes` a `List *` of `TypeName` (lifetime-free, plain
     /// clone), and `query` the raw parse tree (`Node::clone_in`).
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PrepareStmt<'b>> {
-        let mut argtypes = mcx::vec_with_capacity_in(mcx, self.argtypes.len())?;
+        let mut argtypes = ::mcx::vec_with_capacity_in(mcx, self.argtypes.len())?;
         for t in self.argtypes.iter() {
             argtypes.push(t.clone());
         }
@@ -1006,7 +1006,7 @@ impl PrepareStmt<'_> {
             },
             argtypes,
             query: match &self.query {
-                Some(q) => Some(mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
+                Some(q) => Some(::mcx::alloc_in(mcx, q.clone_in(mcx)?)?),
                 None => None,
             },
         })
@@ -1017,9 +1017,9 @@ impl PrepareStmt<'_> {
 #[derive(Debug)]
 pub struct ExecuteStmt<'mcx> {
     /// `char *name` — the name of the prepared statement.
-    pub name: Option<mcx::PgString<'mcx>>,
+    pub name: Option<::mcx::PgString<'mcx>>,
     /// `List *params` — values to assign to parameters (raw parser output).
-    pub params: mcx::PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
+    pub params: ::mcx::PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
 }
 
 impl ExecuteStmt<'_> {
@@ -1027,9 +1027,9 @@ impl ExecuteStmt<'_> {
     /// `char *`; `params` is a `List *` of raw parse trees, each copied via
     /// `Node::clone_in`.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<ExecuteStmt<'b>> {
-        let mut params = mcx::vec_with_capacity_in(mcx, self.params.len())?;
+        let mut params = ::mcx::vec_with_capacity_in(mcx, self.params.len())?;
         for p in self.params.iter() {
-            params.push(mcx::alloc_in(mcx, p.clone_in(mcx)?)?);
+            params.push(::mcx::alloc_in(mcx, p.clone_in(mcx)?)?);
         }
         Ok(ExecuteStmt {
             name: match &self.name {
@@ -1046,7 +1046,7 @@ impl ExecuteStmt<'_> {
 pub struct DeallocateStmt<'mcx> {
     /// `char *name` — the name of the prepared statement (`None` == DEALLOCATE
     /// ALL).
-    pub name: Option<mcx::PgString<'mcx>>,
+    pub name: Option<::mcx::PgString<'mcx>>,
     /// `bool isall` — true if DEALLOCATE ALL (kept for parity; the driver
     /// branches on `name`).
     pub isall: bool,
@@ -1085,7 +1085,7 @@ impl IntoClause<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<IntoClause<'b>> {
         Ok(IntoClause {
             skipData: self.skipData,
-            node: mcx::alloc_in(mcx, self.node.clone_in(mcx)?)?,
+            node: ::mcx::alloc_in(mcx, self.node.clone_in(mcx)?)?,
         })
     }
 }

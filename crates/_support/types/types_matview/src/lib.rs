@@ -17,12 +17,12 @@
 use std::string::String;
 use std::vec::Vec;
 
-use types_core::primitive::Oid;
-use types_tuple::access::RangeVar;
+use ::types_core::primitive::Oid;
+use ::types_tuple::access::RangeVar;
 
 /// `ObjectAddress` (`catalog/objectaddress.h`), re-exported for matview's
 /// command-entry-point return values.
-pub use types_catalog::catalog_dependency::ObjectAddress;
+pub use ::types_catalog::catalog_dependency::ObjectAddress;
 
 // ---------------------------------------------------------------------------
 // CommandTag / QueryCompletion (tcop/cmdtag.h)
@@ -32,7 +32,7 @@ pub use types_catalog::catalog_dependency::ObjectAddress;
 /// enumerator carried by value. Canonically defined in `types_core` (shared
 /// with the parser/plancache layers); the `UNKNOWN` /
 /// `REFRESH_MATERIALIZED_VIEW` / `SELECT` associated constants live there.
-pub use types_core::cmdtag::CommandTag;
+pub use ::types_core::cmdtag::CommandTag;
 
 /// `typedef struct QueryCompletion` (`tcop/cmdtag.h`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,7 +115,7 @@ impl QueryDescHandle {
 // in-crate by `backend-commands-matview` and registered into the
 // `backend-tcop-dest` value-router (mirroring `createas.c`'s `DR_intorel`), so its
 // callbacks take the real `nodes::tuptable::SlotData` /
-// `types_tuple::heaptuple::TupleDescData` directly.
+// `::types_tuple::heaptuple::TupleDescData` directly.
 
 // ---------------------------------------------------------------------------
 // Read-out value bundles the in-crate logic branches on.

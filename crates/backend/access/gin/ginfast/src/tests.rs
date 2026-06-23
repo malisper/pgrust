@@ -2,7 +2,7 @@
 //! no buffer manager.
 
 use super::page;
-use gin::GinMetaPageData;
+use ::gin::GinMetaPageData;
 
 /// `read_meta`/`write_meta`/`meta_to_bytes` round-trip the metapage fields at
 /// the C struct offsets.

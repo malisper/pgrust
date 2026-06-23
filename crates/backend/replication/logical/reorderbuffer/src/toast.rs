@@ -22,8 +22,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::TransactionId;
-use types_core::Oid;
+use ::types_core::primitive::TransactionId;
+use ::types_core::Oid;
 
 use crate::{ReorderBuffer, ReorderBufferChange};
 

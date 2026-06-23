@@ -5,14 +5,14 @@
 //! `SnapshotData`/`RunningTransactionsData` (types in `snapshot` /
 //! `types_storage`).
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 use types_core::{
     FirstNormalTransactionId, InvalidLocalTransactionId, InvalidTransactionId, Oid, ProcNumber,
     TransactionId, TransactionIdIsNormal, TransactionIdIsValid, XLogRecPtr, INVALID_PROC_NUMBER,
 };
-use types_error::PgResult;
-use snapshot::SnapshotData;
-use types_storage::storage::{
+use ::types_error::PgResult;
+use ::snapshot::SnapshotData;
+use ::types_storage::storage::{
     subxids_array_status, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM, PROC_XMIN_FLAGS,
     SUBXIDS_IN_ARRAY, SUBXIDS_IN_SUBTRANS,
 };
@@ -65,7 +65,7 @@ fn transaction_id_advance(dest: TransactionId) -> TransactionId {
 /// so each call recomputes the snapshot from scratch (behaviour-preserving:
 /// reuse only changes performance, never the resulting xmin/xmax/xip/subxip).
 pub fn GetSnapshotData() -> PgResult<SnapshotData> {
-    let mut snapshot = SnapshotData::sentinel(snapshot::snapshot::SnapshotType::SNAPSHOT_MVCC);
+    let mut snapshot = SnapshotData::sentinel(::snapshot::snapshot::SnapshotType::SNAPSHOT_MVCC);
 
     let mut count: usize = 0;
     let mut subcount: i32 = 0;
@@ -490,7 +490,7 @@ pub fn GetRunningTransactionData(
     // across calls; here a per-call context owns the `xids` PgVec for the
     // callback's duration (behaviour-preserving: the callback consumes it before
     // returning).
-    let ctx = mcx::MemoryContext::new("GetRunningTransactionData");
+    let ctx = ::mcx::MemoryContext::new("GetRunningTransactionData");
     let mcx = ctx.mcx();
     let total_max_cached_subxids = crate::shmem_model::GetMaxSnapshotSubxidCount();
 
@@ -517,7 +517,7 @@ pub fn GetRunningTransactionData(
 }
 
 fn get_running_transaction_data_locked<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     total_max_cached_subxids: i32,
     f: &mut dyn FnMut(
         &RunningTransactionsData<'_>,
@@ -525,7 +525,7 @@ fn get_running_transaction_data_locked<'mcx>(
     ) -> PgResult<XLogRecPtr>,
 ) -> PgResult<XLogRecPtr> {
     let mut xids: PgVec<'mcx, TransactionId> =
-        mcx::vec_with_capacity_in(mcx, total_max_cached_subxids as usize)?;
+        ::mcx::vec_with_capacity_in(mcx, total_max_cached_subxids as usize)?;
 
     let mut count: i32 = 0;
     let mut subcount: i32 = 0;
@@ -839,13 +839,13 @@ pub fn ProcArrayClearLogicalDecodingFlag() {
 /// `limitXmin`. Returns an `mcx`-allocated array (the C `InvalidVirtualTransactionId`
 /// terminator is dropped).
 pub fn GetConflictingVirtualXIDs<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     limit_xmin: TransactionId,
     db_oid: Oid,
 ) -> PgResult<PgVec<'mcx, VirtualTransactionId>> {
     let max_procs = PROC_ARRAY.with(|pa| pa.borrow().as_ref().unwrap().maxProcs);
     let mut vxids: PgVec<'mcx, VirtualTransactionId> =
-        mcx::vec_with_capacity_in(mcx, max_procs as usize)?;
+        ::mcx::vec_with_capacity_in(mcx, max_procs as usize)?;
 
     lwlock::lwlock_acquire_proc_array::call(LWLockMode::LW_SHARED)?;
 
@@ -859,7 +859,7 @@ pub fn GetConflictingVirtualXIDs<'mcx>(
             continue;
         }
 
-        if !(db_oid != types_core::InvalidOid) || proc::proc_database_id::call(pgprocno) == db_oid {
+        if !(db_oid != ::types_core::InvalidOid) || proc::proc_database_id::call(pgprocno) == db_oid {
             // !OidIsValid(dbOid) || proc->databaseId == dbOid
             // Fetch xmin just once.
             let pxmin = proc::proc_xmin::call(pgprocno);

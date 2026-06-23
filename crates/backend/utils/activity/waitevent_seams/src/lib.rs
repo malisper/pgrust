@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::uint32;
+use ::types_core::uint32;
 
 seam_core::seam!(
     /// `pgstat_report_wait_start(wait_event_info)` (`utils/wait_event.h`) —
@@ -23,7 +23,7 @@ seam_core::seam!(
     /// `WaitEventCustomShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn wait_event_custom_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn wait_event_custom_shmem_size() -> types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(

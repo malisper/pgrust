@@ -4,7 +4,7 @@
 //! tests once their owners land.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 fn de<'mcx>(mcx: Mcx<'mcx>, txt: &str) -> Vec<DefElem<'mcx>> {
     deserialize_deflist(mcx, txt).unwrap()

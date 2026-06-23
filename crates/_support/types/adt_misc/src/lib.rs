@@ -2,7 +2,7 @@
 //! row/step structs that appear in the crate's ported logic and in the seam
 //! declarations of its unported callees.
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// One row of `pg_get_keywords()` (misc.c:417): the keyword name, its category
 /// letter/description and its bare-label flag/description. Assembled from

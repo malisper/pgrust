@@ -20,7 +20,7 @@ extern crate alloc;
 use alloc::string::String;
 
 // Re-export the shared scalar already homed in types-core.
-pub use types_core::primitive::{pg_time_t, TimestampTz};
+pub use ::types_core::primitive::{pg_time_t, TimestampTz};
 
 /// `DateADT` (`utils/date.h`) — days since `POSTGRES_EPOCH_JDATE`.
 pub type DateADT = i32;

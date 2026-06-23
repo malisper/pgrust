@@ -8,8 +8,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::Expr;
 
 /// The `(typid, typmod, collation)` triple `exprType`/`exprTypmod`/
@@ -23,7 +23,7 @@ pub struct ExprTypeInfo {
     /// `exprCollation(expr)`.
     pub collation: Oid,
 }
-use fmgr::ExternalFnExpr;
+use ::fmgr::ExternalFnExpr;
 
 seam_core::seam!(
     /// `exprType(expr)` / `exprTypmod(expr)` / `exprCollation(expr)`

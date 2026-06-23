@@ -17,7 +17,7 @@
 //! the four GIN dispatch seams over the `anyarray_ops` OIDs and routes each to
 //! the ported [`crate::ginarrayproc`] body, passing the real Rust references the
 //! C out-parameters stand for. The element keys travel as the canonical unified
-//! `types_tuple::Datum` value (via `deconstruct_array_v`), so by-reference
+//! `::types_tuple::Datum` value (via `deconstruct_array_v`), so by-reference
 //! element types (`text[]`, …) carry real `ByRef` bytes, not a dangling word.
 //!
 //! For `fmgr_info` to resolve the `internal`-language prosrc names at all (else
@@ -31,7 +31,7 @@
 //! out loudly (a user-defined opclass would need a `Datum::Internal` fmgr arm).
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use types_tuple::heaptuple::Datum;
 
@@ -164,7 +164,7 @@ fn vardata_any(image: &[u8]) -> &[u8] {
 /// No-op (returns the input slice) while the flag is off — every stored value is
 /// already 4B.
 #[inline]
-fn unpack_short_to_4b<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<mcx::PgVec<'mcx, u8>> {
+fn unpack_short_to_4b<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     // VARATT_IS_1B (short header) and not VARATT_IS_1B_E (0x01, external).
     let short = matches!(image.first(), Some(&h) if h != 0x01 && (h & 0x01) == 0x01);
     if short {
@@ -172,7 +172,7 @@ fn unpack_short_to_4b<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<mcx::PgVec
         let total_1b = ((image[0] >> 1) & 0x7F) as usize;
         let data_size = total_1b.saturating_sub(1);
         let new_size = data_size + VARHDRSZ;
-        let mut out: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, new_size)?;
+        let mut out: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, new_size)?;
         // SET_VARSIZE(out, new_size): a plain 4-byte header (low 2 bits 00).
         let word = (new_size as u32) << 2;
         for &b in &word.to_ne_bytes() {
@@ -183,7 +183,7 @@ fn unpack_short_to_4b<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<mcx::PgVec
         }
         Ok(out)
     } else {
-        let mut out: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, image.len())?;
+        let mut out: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, image.len())?;
         for &b in image {
             out.push(b);
         }
@@ -217,7 +217,7 @@ fn decode_map_item_operand(bytes: &[u8]) -> Vec<i32> {
 /// the shared front half of `ginarrayextract` / `ginqueryarrayextract`
 /// (`get_typlenbyvalalign(ARR_ELEMTYPE(array))` + `deconstruct_array`). The
 /// element type is read from the array header (`ARR_ELEMTYPE`); the elements
-/// travel as the canonical `types_tuple::Datum` so by-reference keys keep their
+/// travel as the canonical `::types_tuple::Datum` so by-reference keys keep their
 /// bytes.
 fn deconstruct_query_or_value<'mcx>(
     mcx: Mcx<'mcx>,
@@ -257,7 +257,7 @@ fn deconstruct_query_or_value<'mcx>(
 /// `**nullFlags` out-params), or `None` (no keys) for the placeholder path.
 fn dispatch_extract_value<'mcx>(
     mcx: Mcx<'mcx>,
-    flinfo: &types_core::fmgr::FmgrInfo,
+    flinfo: &::types_core::fmgr::FmgrInfo,
     _collation: Oid,
     value: Datum<'mcx>,
 ) -> PgResult<Option<(PgVec<'mcx, Datum<'mcx>>, PgVec<'mcx, bool>)>> {
@@ -351,7 +351,7 @@ fn hash_keys_to_datums<'mcx>(
 /// neither).
 fn dispatch_extract_query<'mcx>(
     mcx: Mcx<'mcx>,
-    flinfo: &types_core::fmgr::FmgrInfo,
+    flinfo: &::types_core::fmgr::FmgrInfo,
     _collation: Oid,
     query: Datum<'mcx>,
     strategy: u16,
@@ -422,9 +422,9 @@ fn dispatch_extract_query<'mcx>(
 
             // The same map for every entry (C aliases one `map_item_operand`).
             let map_blob = encode_map_item_operand(&ext.map_item_operand);
-            let mut extra_data: PgVec<'mcx, Option<mcx::PgVec<'mcx, u8>>> = PgVec::new_in(mcx);
+            let mut extra_data: PgVec<'mcx, Option<::mcx::PgVec<'mcx, u8>>> = PgVec::new_in(mcx);
             for _ in 0..ext.entries.len() {
-                let mut slot: mcx::PgVec<'mcx, u8> = PgVec::new_in(mcx);
+                let mut slot: ::mcx::PgVec<'mcx, u8> = PgVec::new_in(mcx);
                 for &b in &map_blob {
                     slot.push(b);
                 }
@@ -461,7 +461,7 @@ fn dispatch_jsonb_extract_query<'mcx>(
     strategy: u16,
     path_ops: bool,
 ) -> PgResult<GinExtractQueryResult<'mcx>> {
-    use types_jsonb::jsonb_gin::GinJsonbQuery;
+    use ::types_jsonb::jsonb_gin::GinJsonbQuery;
 
     // Call the matching value core through the seam, given a `GinJsonbQuery`.
     let call = |mcx: Mcx<'mcx>, jq: GinJsonbQuery| -> PgResult<_> {
@@ -529,7 +529,7 @@ fn dispatch_jsonb_extract_query<'mcx>(
 /// `partial_matches` are empty (the jsonb opclasses set neither).
 fn marshal_jsonb_query_extraction<'mcx>(
     mcx: Mcx<'mcx>,
-    ext: types_jsonb::jsonb_gin::GinQueryExtraction,
+    ext: ::types_jsonb::jsonb_gin::GinQueryExtraction,
     path_ops: bool,
 ) -> PgResult<GinExtractQueryResult<'mcx>> {
     let nentries = ext.entries.len();
@@ -621,7 +621,7 @@ fn dispatch_consistent_bool(key: &mut GinScanKey) -> bool {
                 .unwrap_or_default();
             // Transient per-call scratch context (C's GIN scan tempCtx): the body
             // allocates getquery()/check_tri here; the result is a scalar.
-            let scratch = mcx::MemoryContext::new("gin_tsquery_consistent");
+            let scratch = ::mcx::MemoryContext::new("gin_tsquery_consistent");
             let qimage = match unpack_short_to_4b(scratch.mcx(), key.query.as_ref_bytes()) {
                 Ok(q) => q,
                 Err(e) => std::panic::panic_any(e),
@@ -668,11 +668,11 @@ fn dispatch_consistent_bool(key: &mut GinScanKey) -> bool {
 /// was stored.
 fn decode_jsonb_extra_node(
     key: &GinScanKey,
-) -> Option<types_jsonb::jsonb_gin::JsonPathGinNode> {
+) -> Option<::types_jsonb::jsonb_gin::JsonPathGinNode> {
     key.extra_data
         .first()
         .and_then(|o| o.as_ref())
-        .and_then(|b| types_jsonb::jsonb_gin::JsonPathGinNode::decode_extra_data(b))
+        .and_then(|b| ::types_jsonb::jsonb_gin::JsonPathGinNode::decode_extra_data(b))
 }
 
 /// Route to the boolean `gin_consistent_jsonb` / `gin_consistent_jsonb_path`
@@ -682,7 +682,7 @@ fn jsonb_consistent_bool(
     check: &[bool],
     strategy: u16,
     nkeys: i32,
-    node: Option<&types_jsonb::jsonb_gin::JsonPathGinNode>,
+    node: Option<&::types_jsonb::jsonb_gin::JsonPathGinNode>,
 ) -> PgResult<(bool, bool)> {
     if path_ops {
         jsonb_gin_seams::gin_consistent_jsonb_path::call(
@@ -730,7 +730,7 @@ fn dispatch_consistent_tri(key: &mut GinScanKey) -> GinTernaryValue {
                 .and_then(|o| o.as_ref())
                 .map(|b| decode_map_item_operand(b))
                 .unwrap_or_default();
-            let scratch = mcx::MemoryContext::new("gin_tsquery_triconsistent");
+            let scratch = ::mcx::MemoryContext::new("gin_tsquery_triconsistent");
             let qimage = match unpack_short_to_4b(scratch.mcx(), key.query.as_ref_bytes()) {
                 Ok(q) => q,
                 Err(e) => std::panic::panic_any(e),
@@ -786,7 +786,7 @@ fn dispatch_consistent_tri(key: &mut GinScanKey) -> GinTernaryValue {
 /// proc (anyarray_ops / jsonb_ops set `canPartialMatch=false`), so any other OID
 /// bottoms out loudly.
 fn dispatch_compare_partial<'mcx>(
-    _flinfo: &types_core::fmgr::FmgrInfo,
+    _flinfo: &::types_core::fmgr::FmgrInfo,
     _collation: Oid,
     query_key: Datum<'mcx>,
     idatum: Datum<'mcx>,

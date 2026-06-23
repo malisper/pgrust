@@ -7,7 +7,7 @@
 //! nodeFunctionscan → [`crate::ExecMakeTableFunctionResult`]. Each fills a
 //! materialize tuplestore via `InitMaterializedSRF`; their walk cores
 //! (`AllocateDir`/`ReadDir`/`stat` + the per-entry filtering) are ported in
-//! [`misc2::admin`]. Here we only marshal the executor-frame
+//! [`::misc2::admin`]. Here we only marshal the executor-frame
 //! arguments and dispatch to those cores.
 //!
 //! These register in the executor-frame SRF table (the by-OID builtin registry's
@@ -15,12 +15,12 @@
 //! these record functions need — the WONTFIX dual-home, same as
 //! `pg_tablespace_databases`).
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
-use misc2::admin;
+use ::misc2::admin;
 
 use crate::register_srf;
 

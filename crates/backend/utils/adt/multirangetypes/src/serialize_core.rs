@@ -15,10 +15,10 @@
 
 use core::alloc::Layout;
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::Oid;
-use datum::datum::Datum;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::Oid;
+use ::datum::datum::Datum;
 use types_error::{PgError, PgResult};
 use types_rangetypes::{
     MultirangeType, MultirangeTypeP, RangeBound, RangeType, RangeTypeP, RANGE_EMPTY, RANGE_LB_INC,
@@ -233,8 +233,8 @@ fn range_has_ubound(flags: u8) -> bool {
 /// returned. The buffer is leaked into `mcx` (freed when the context is reset),
 /// mirroring how C hands a palloc'd pointer back to the caller.
 fn palloc0<'mcx>(mcx: Mcx<'mcx>, size: usize) -> PgResult<*mut u8> {
-    use mcx::Allocator;
-    mcx::check_alloc_size(size)?;
+    use ::mcx::Allocator;
+    ::mcx::check_alloc_size(size)?;
     // Over-align to 8 bytes (MAXALIGN): palloc returns MAXALIGN'd memory, which
     // the bound-payload alignment math relies on.
     let layout = Layout::from_size_align(size.max(1), 8).expect("valid layout");
@@ -576,7 +576,7 @@ pub fn multirange_constructor2<'mcx>(
         return Err(PgError::error(
             "multiranges cannot be constructed from multidimensional arrays".to_string(),
         )
-        .with_sqlstate(types_error::error::ERRCODE_CARDINALITY_VIOLATION));
+        .with_sqlstate(::types_error::error::ERRCODE_CARDINALITY_VIOLATION));
     }
 
     let rngtypid = array_seams::array_get_elemtype::call(mcx, range_array)?;
@@ -614,7 +614,7 @@ pub fn multirange_constructor2<'mcx>(
                 return Err(PgError::error(
                     "multirange values cannot contain null members".to_string(),
                 )
-                .with_sqlstate(types_error::error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
+                .with_sqlstate(::types_error::error::ERRCODE_NULL_VALUE_NOT_ALLOWED));
             }
             // Copy the element's verbatim varlena bytes into a live `mcx` image
             // and hand its real pointer word to `datum_get_range_type_p`, which
@@ -858,7 +858,7 @@ pub fn multirange_deserialize<'mcx>(
     if range_count > 0 {
         // C: *ranges = palloc(range_count * sizeof(RangeType *)). Mirror the
         // MaxAllocSize gate on that request.
-        mcx::check_alloc_size((range_count as usize) * core::mem::size_of::<RangeTypeP<'mcx>>())?;
+        ::mcx::check_alloc_size((range_count as usize) * core::mem::size_of::<RangeTypeP<'mcx>>())?;
         let mut ranges = Vec::with_capacity(range_count as usize);
         let mut i = 0;
         while i < range_count {
@@ -886,7 +886,7 @@ pub fn multirange_canonicalize<'mcx>(
     // comparator can ereport(ERROR), so we sort fallibly: capture the first
     // error and bail.
     if input_range_count > 0 {
-        let mut cmp_err: Option<types_error::PgError> = None;
+        let mut cmp_err: Option<::types_error::PgError> = None;
         merge_sort_by(ranges, &mut |a, b| {
             if cmp_err.is_some() {
                 return core::cmp::Ordering::Equal;

@@ -7,8 +7,8 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `boot_yylex_init(&scanner)` (bootscanner.l): initialize a reentrant

@@ -2,13 +2,13 @@
 //! `set()` calls; each closure marshals at the boundary and delegates to the
 //! real `resowner.c` routine in `lib.rs`.
 
-use datum::Datum;
-use types_error::PgResult;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use types_resowner::{
     ResourceOwner, RESOURCE_RELEASE_AFTER_LOCKS, RESOURCE_RELEASE_BEFORE_LOCKS,
     RESOURCE_RELEASE_LOCKS,
 };
-use types_storage::lock::LOCALLOCKTAG;
+use ::types_storage::lock::LOCALLOCKTAG;
 
 use crate::{
     AuxProcessResourceOwner, CreateAuxProcessResourceOwner, CurrentResourceOwner,
@@ -81,18 +81,18 @@ fn release_buffer_io(res: Datum) {
     let _ = bm::release_buffer_io::call(res.as_i32());
 }
 
-static BUFFER_PIN_DESC: types_resowner::ResourceOwnerDesc = types_resowner::ResourceOwnerDesc {
+static BUFFER_PIN_DESC: ::types_resowner::ResourceOwnerDesc = ::types_resowner::ResourceOwnerDesc {
     name: None, // "buffer pin" — printed via DebugPrint when present
     release_phase: RESOURCE_RELEASE_BEFORE_LOCKS,
-    release_priority: types_resowner::RELEASE_PRIO_BUFFER_PINS,
+    release_priority: ::types_resowner::RELEASE_PRIO_BUFFER_PINS,
     ReleaseResource: Some(release_buffer_pin),
     DebugPrint: None,
 };
 
-static BUFFER_IO_DESC: types_resowner::ResourceOwnerDesc = types_resowner::ResourceOwnerDesc {
+static BUFFER_IO_DESC: ::types_resowner::ResourceOwnerDesc = ::types_resowner::ResourceOwnerDesc {
     name: None, // "buffer io"
     release_phase: RESOURCE_RELEASE_BEFORE_LOCKS,
-    release_priority: types_resowner::RELEASE_PRIO_BUFFER_IOS,
+    release_priority: ::types_resowner::RELEASE_PRIO_BUFFER_IOS,
     ReleaseResource: Some(release_buffer_io),
     DebugPrint: None,
 };
@@ -122,10 +122,10 @@ fn print_relation_ref(res: Datum) -> Option<String> {
     Some(format!("relation with OID {relid}"))
 }
 
-static RELCACHE_DESC: types_resowner::ResourceOwnerDesc = types_resowner::ResourceOwnerDesc {
+static RELCACHE_DESC: ::types_resowner::ResourceOwnerDesc = ::types_resowner::ResourceOwnerDesc {
     name: None, // "relcache reference" — rendered via DebugPrint below
     release_phase: RESOURCE_RELEASE_BEFORE_LOCKS,
-    release_priority: types_resowner::RELEASE_PRIO_RELCACHE_REFS,
+    release_priority: ::types_resowner::RELEASE_PRIO_RELCACHE_REFS,
     ReleaseResource: Some(release_relation_ref),
     DebugPrint: Some(print_relation_ref),
 };
@@ -169,10 +169,10 @@ fn print_snapshot_ref(res: Datum) -> Option<String> {
     Some(format!("snapshot with reg_id {}", res.as_u64()))
 }
 
-static SNAPSHOT_DESC: types_resowner::ResourceOwnerDesc = types_resowner::ResourceOwnerDesc {
+static SNAPSHOT_DESC: ::types_resowner::ResourceOwnerDesc = ::types_resowner::ResourceOwnerDesc {
     name: None, // "snapshot reference" — rendered via DebugPrint below
     release_phase: RESOURCE_RELEASE_AFTER_LOCKS,
-    release_priority: types_resowner::RELEASE_PRIO_SNAPSHOT_REFS,
+    release_priority: ::types_resowner::RELEASE_PRIO_SNAPSHOT_REFS,
     ReleaseResource: Some(release_leaked_snapshot),
     DebugPrint: Some(print_snapshot_ref),
 };
@@ -192,7 +192,7 @@ fn snapshot_target_owner(on_top: bool) -> Option<ResourceOwner> {
 /// Get the current resource owner, erroring if there is none (the bufmgr
 /// remember/forget seams require `CurrentResourceOwner != NULL`).
 fn current_or_err() -> PgResult<ResourceOwner> {
-    CurrentResourceOwner().ok_or_else(|| types_error::PgError::error("CurrentResourceOwner is NULL"))
+    CurrentResourceOwner().ok_or_else(|| ::types_error::PgError::error("CurrentResourceOwner is NULL"))
 }
 
 pub fn install() {
@@ -537,10 +537,10 @@ pub fn install() {
 /// own `ReleaseCachedPlan` through `resource_owner_release_all_plan_refs`'s
 /// returned list, so the desc callback here is a no-op marker (the release is
 /// driven by the returned id list, matching the seam contract).
-static PLANCACHE_DESC: types_resowner::ResourceOwnerDesc = types_resowner::ResourceOwnerDesc {
+static PLANCACHE_DESC: ::types_resowner::ResourceOwnerDesc = ::types_resowner::ResourceOwnerDesc {
     name: None,
     release_phase: RESOURCE_RELEASE_AFTER_LOCKS,
-    release_priority: types_resowner::RELEASE_PRIO_PLANCACHE_REFS,
+    release_priority: ::types_resowner::RELEASE_PRIO_PLANCACHE_REFS,
     ReleaseResource: None,
     DebugPrint: None,
 };

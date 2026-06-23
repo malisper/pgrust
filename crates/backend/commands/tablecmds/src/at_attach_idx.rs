@@ -21,20 +21,20 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::{Oid, OidIsValid};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::{Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_TABLE_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use rel::Relation;
-use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock};
-use types_tuple::access::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
+use ::rel::Relation;
+use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock};
+use ::types_tuple::access::{RELKIND_INDEX, RELKIND_PARTITIONED_INDEX};
 
-use common_relation::relation_open;
-use utils_error::ereport;
+use ::common_relation::relation_open;
+use ::utils_error::ereport;
 
 use partition_seams as partition_seam;
 use index_seams as index_seam;
@@ -43,7 +43,7 @@ use lsyscache_seams as lsyscache;
 
 use crate::helpers::{object_address_set, RelationRelationId};
 
-type AccessRangeVar = types_tuple::access::RangeVar;
+type AccessRangeVar = ::types_tuple::access::RangeVar;
 
 /// `struct AttachIndexCallbackState` (tablecmds.c) — mutable state threaded
 /// through `RangeVarCallbackForAttachIndex`.
@@ -96,7 +96,7 @@ fn RangeVarCallbackForAttachIndex(
     };
     if relkind != RELKIND_PARTITIONED_INDEX && relkind != RELKIND_INDEX {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg(format!(
                 "\"{}\" is not an index",
                 &rv.relname

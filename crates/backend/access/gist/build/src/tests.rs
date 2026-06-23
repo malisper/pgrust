@@ -1,7 +1,7 @@
 //! Unit tests for the GiST build engine's pure byte-level helpers.
 
 use crate::gistbuildbuffers::{index_tuple_size, BUFFER_PAGE_DATA_OFFSET, DATA_SIZE};
-use types_core::primitive::BLCKSZ;
+use ::types_core::primitive::BLCKSZ;
 
 #[test]
 fn buffer_page_data_offset_is_eight() {

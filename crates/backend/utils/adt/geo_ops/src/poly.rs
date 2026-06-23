@@ -4,11 +4,11 @@
 //! stands in for the toastable varlena `POLYGON`; the fmgr shims
 //! (`poly_in`/`poly_out`/`poly_recv`/`poly_send`) live in [`crate::io`].
 
-use types_core::geo::{Point, BOX, CIRCLE, LSEG};
-use types_error::PgResult;
+use ::types_core::geo::{Point, BOX, CIRCLE, LSEG};
+use ::types_error::PgResult;
 
-use postgres_seams::check_for_interrupts;
-use stack_depth_seams::check_stack_depth;
+use ::postgres_seams::check_for_interrupts;
+use ::stack_depth_seams::check_stack_depth;
 
 use crate::f8::{float8_div, float8_gt, float8_lt, float8_pl};
 use crate::lseg::{lseg_contain_point, lseg_interpt_lseg};

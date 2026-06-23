@@ -6,7 +6,7 @@
 //! caller's context (C: `stringToNode` palloc's in `CurrentMemoryContext`).
 
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 
 seam_core::seam!(

@@ -33,14 +33,14 @@
 use core::cell::RefCell;
 
 use mcx::{Mcx, MemoryContext};
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     AUTH_ID_RELATION_ID, AUTH_MEM_RELATION_ID, DATABASE_RELATION_ID, EVENT_TRIGGER_RELATION_ID,
     OPERATOR_CLASS_RELATION_ID, OPERATOR_FAMILY_RELATION_ID, PARAMETER_ACL_RELATION_ID,
     PROCEDURE_RELATION_ID, RELATION_RELATION_ID, TABLE_SPACE_RELATION_ID,
 };
-use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
-use types_catalog::pg_event_trigger::PgEventTriggerInsertRow;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
+use ::types_catalog::pg_event_trigger::PgEventTriggerInsertRow;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use objectaddress_seams as objectaddress_seams;
 use types_error::{
     PgError, PgResult, ERROR, ERRCODE_DUPLICATE_OBJECT,
@@ -48,7 +48,7 @@ use types_error::{
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT,
 };
-use types_evtcache::EventTriggerEvent;
+use ::types_evtcache::EventTriggerEvent;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{ObjectType, OBJECT_EVENT_TRIGGER};
 
@@ -58,7 +58,7 @@ mod fmgr_builtins;
 
 use evtcache_seams as evtcache_seams;
 use init_small_seams as init_small_seams;
-use guc_tables::vars;
+use ::guc_tables::vars;
 
 use aclchk_seams as aclchk_seams;
 use indexing_seams as indexing_seams;
@@ -66,7 +66,7 @@ use objectaccess_seams as objectaccess_seams;
 use arrayfuncs_seams as arrayfuncs_seams;
 use varlena_seams as varlena_seams;
 use syscache_seams as syscache_seams;
-use utils_error::ereport;
+use ::utils_error::ereport;
 use funcapi_seams as funcapi_seams;
 
 use ::nodes::parsestmt::CommandTag;
@@ -318,7 +318,7 @@ pub fn event_trigger_undo_inhibit_command_collection() {
 /// C: `bool event_triggers = true;` (event_trigger.c:86) is the
 /// `conf->variable` for the `event_triggers` entry in guc_tables.c. This unit
 /// owns that global, so it owns its backing store here and installs the
-/// matching [`GucVarAccessors`](guc_tables::GucVarAccessors)
+/// matching [`GucVarAccessors`](::guc_tables::GucVarAccessors)
 /// into the GUC engine's [`vars::event_triggers`] slot from [`init_seams`].
 /// Seeded to the C `boot_val` (`true`).
 mod gucs {
@@ -532,7 +532,7 @@ pub fn event_trigger_sql_drop_add_object(
 pub fn pg_event_trigger_table_rewrite_oid() -> PgResult<Oid> {
     let oid = CURRENT_STATE.with(|s| s.borrow().last().map(|st| st.table_rewrite_oid));
     match oid {
-        Some(o) if types_core::primitive::OidIsValid(o) => Ok(o),
+        Some(o) if ::types_core::primitive::OidIsValid(o) => Ok(o),
         _ => Err(ereport(ERROR)
             .errcode(ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED)
             .errmsg(
@@ -943,10 +943,10 @@ fn event_trigger_get_tag(parsetree: &Node, event: EventTriggerEvent) -> PgResult
 /// the trigger's tag set (when specified).
 fn filter_event_trigger(
     tag: CommandTag,
-    item: &types_evtcache::EventTriggerCacheItem<'_>,
+    item: &::types_evtcache::EventTriggerCacheItem<'_>,
 ) -> bool {
     // Filter by session replication role (we never see disabled items here).
-    let session_replica = guc_tables::vars::SessionReplicationRole.read()
+    let session_replica = ::guc_tables::vars::SessionReplicationRole.read()
         == SESSION_REPLICATION_ROLE_REPLICA;
     if session_replica {
         if item.enabled == TRIGGER_FIRES_ON_ORIGIN {
@@ -1087,7 +1087,7 @@ pub fn EventTriggerOnLogin() -> PgResult<()> {
     // single-user mode / via GUC; we also need a valid database connection.
     if !init_small_seams::is_under_postmaster::call()
         || !vars::event_triggers.read()
-        || !types_core::primitive::OidIsValid(
+        || !::types_core::primitive::OidIsValid(
             tablespace_globals_seams::MyDatabaseId::call()?,
         )
         || !init_small_seams::my_database_has_login_event_triggers::call()
@@ -1116,7 +1116,7 @@ pub fn EventTriggerOnLogin() -> PgResult<()> {
         // acquire it conditionally.
         let my_database_id = tablespace_globals_seams::MyDatabaseId::call()?;
         let got = lmgr_seams::conditional_lock_shared_object::call(
-            types_catalog::catalog::DATABASE_RELATION_ID,
+            ::types_catalog::catalog::DATABASE_RELATION_ID,
             my_database_id,
             0,
             types_storage::lock::AccessExclusiveLock,
@@ -1448,12 +1448,12 @@ pub fn event_trigger_collect_simple_command_publication(
 fn opclass_name_list<'mcx>(
     mcx: Mcx<'mcx>,
     names: &[opclass::StringNode],
-) -> PgResult<mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, names.len())?;
+) -> PgResult<::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
+    let mut out = ::mcx::vec_with_capacity_in(mcx, names.len())?;
     for n in names {
-        let sval = mcx::PgString::from_str_in(n.sval.as_deref().unwrap_or(""), mcx)?;
+        let sval = ::mcx::PgString::from_str_in(n.sval.as_deref().unwrap_or(""), mcx)?;
         let node = Node::mk_string(mcx, ::nodes::value::StringNode { sval })?;
-        out.push(mcx::alloc_in(mcx, node)?);
+        out.push(::mcx::alloc_in(mcx, node)?);
     }
     Ok(out)
 }
@@ -1489,7 +1489,7 @@ pub fn event_trigger_collect_simple_command_opfamily(
         let ddl = ::nodes::ddlnodes::CreateOpFamilyStmt {
             opfamilyname: opclass_name_list(mcx, &stmt.opfamilyname)?,
             amname: match &stmt.amname {
-                Some(a) => Some(mcx::PgString::from_str_in(a, mcx)?),
+                Some(a) => Some(::mcx::PgString::from_str_in(a, mcx)?),
                 None => None,
             },
         };
@@ -1549,11 +1549,11 @@ pub fn event_trigger_collect_create_opclass(
             opclassname: opclass_name_list(mcx, &stmt.opclassname)?,
             opfamilyname: opclass_name_list(mcx, &stmt.opfamilyname)?,
             amname: match &stmt.amname {
-                Some(a) => Some(mcx::PgString::from_str_in(a, mcx)?),
+                Some(a) => Some(::mcx::PgString::from_str_in(a, mcx)?),
                 None => None,
             },
             datatype: None,
-            items: mcx::PgVec::new_in(mcx),
+            items: ::mcx::PgVec::new_in(mcx),
             isDefault: stmt.isDefault,
         };
         let copied = Node::mk_create_op_class_stmt(mcx, ddl)?;
@@ -1615,11 +1615,11 @@ pub fn event_trigger_collect_alter_opfam(
         let ddl = ::nodes::ddlnodes::AlterOpFamilyStmt {
             opfamilyname: opclass_name_list(mcx, &stmt.opfamilyname)?,
             amname: match &stmt.amname {
-                Some(a) => Some(mcx::PgString::from_str_in(a, mcx)?),
+                Some(a) => Some(::mcx::PgString::from_str_in(a, mcx)?),
                 None => None,
             },
             isDrop: stmt.isDrop,
-            items: mcx::PgVec::new_in(mcx),
+            items: ::mcx::PgVec::new_in(mcx),
         };
         let copied = Node::mk_alter_op_family_stmt(mcx, ddl)?;
         // SAFETY: see the opfamily collector above.
@@ -2080,12 +2080,12 @@ pub fn CreateEventTrigger<'mcx>(
     }
 
     /* Find and validate the trigger function. */
-    let mut names: Vec<mcx::PgString<'mcx>> = Vec::new();
+    let mut names: Vec<::mcx::PgString<'mcx>> = Vec::new();
     for n in stmt.funcname.iter() {
         let s = n.as_string().ok_or_else(|| {
             PgError::error("CreateEventTrigger: funcname element is not a String node")
         })?;
-        names.push(mcx::PgString::from_str_in(s.sval.as_str(), mcx)?);
+        names.push(::mcx::PgString::from_str_in(s.sval.as_str(), mcx)?);
     }
     let funcoid = func::LookupFuncName(mcx, &names, 0, &[], false)?;
     let funcrettype = lsyscache::function::get_func_rettype(funcoid)?;
@@ -2238,7 +2238,7 @@ fn insert_event_trigger_tuple<'mcx>(
         mcx,
         &myself,
         &referenced,
-        types_catalog::catalog_dependency::DEPENDENCY_NORMAL,
+        ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL,
     )?;
 
     /* Depend on extension, if any. */
@@ -2521,7 +2521,7 @@ pub fn init_seams() {
     // fences' `vars::event_triggers.read()`) reach it. Mirrors C's
     // build_guc_variables wiring `&event_triggers` at startup, before any
     // statement runs.
-    vars::event_triggers.install(guc_tables::GucVarAccessors {
+    vars::event_triggers.install(::guc_tables::GucVarAccessors {
         get: gucs::event_triggers,
         set: gucs::set_event_triggers,
     });

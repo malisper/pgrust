@@ -8,9 +8,9 @@
 
 use std::path::Path;
 
-use utils_error::ereport;
-use types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
-use types_core::primitive::MAXPGPATH;
+use ::utils_error::ereport;
+use ::types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+use ::types_core::primitive::MAXPGPATH;
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{ErrorLocation, PgResult, ERROR, LOG};
 use types_storage::{

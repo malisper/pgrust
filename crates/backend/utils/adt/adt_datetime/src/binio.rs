@@ -23,7 +23,7 @@
 //! raw pointers, `bytea`, `StringInfo`, `extern "C"`, `c_int`, or
 //! `pg_ffi_fgram`.
 
-use pgtime::pg_tm;
+use ::pgtime::pg_tm;
 use types_datetime::{Interval, TimeTzADT, TZDISP_LIMIT, USECS_PER_DAY};
 use types_error::{
     ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
@@ -291,7 +291,7 @@ mod tests {
         let g = crate::settings::DATE_ORDER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        crate::settings::set_date_style(types_datetime::USE_ISO_DATES);
+        crate::settings::set_date_style(::types_datetime::USE_ISO_DATES);
         g
     }
 

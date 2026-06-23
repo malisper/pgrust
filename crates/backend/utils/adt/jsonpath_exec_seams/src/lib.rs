@@ -29,8 +29,8 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use types_core::Oid;
-use datum::Datum;
+use ::types_core::Oid;
+use ::datum::Datum;
 
 // The `compareDatetime` cross-type comparison, the `parse_datetime` text
 // parser, and the `executeDateTimeMethod` cast switch are no longer seamed:

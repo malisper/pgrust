@@ -19,7 +19,7 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_core::fmgr::PgAbiValues;
+use ::types_core::fmgr::PgAbiValues;
 
 /// `Pg_magic_struct` (`fmgr.h`) — a module's magic block. `len` is
 /// `sizeof(Pg_magic_struct)` in C; `name`/`version` are `NULL` unless the

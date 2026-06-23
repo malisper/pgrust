@@ -13,19 +13,19 @@
 
 use lwlock_seams as lwlock;
 use lmgr_proc_seams as seams;
-use types_core::InvalidLocalTransactionId;
-use types_core::xact::XidStatus;
+use ::types_core::InvalidLocalTransactionId;
+use ::types_core::xact::XidStatus;
 use types_core::{LocalTransactionId, Oid, ProcNumber, TimestampTz, TransactionId, XLogRecPtr};
-use types_error::PgResult;
-use types_storage::latch::LatchHandle;
-use types_storage::storage::{
+use ::types_error::PgResult;
+use ::types_storage::latch::LatchHandle;
+use ::types_storage::storage::{
     LWLockWaitState, ProcWaitStatus, VirtualTransactionId, DELAY_CHKPT_COMPLETE, DELAY_CHKPT_START,
     PGPROC_MAX_CACHED_SUBXIDS,
 };
 use types_storage::{proclist_node, LWLockMode};
 
 use crate::proc_shmem::{with_my_proc, with_my_proc_ref, with_proc_by_number, with_proc_global};
-use types_storage::lock::VirtualXactExamineOutcome;
+use ::types_storage::lock::VirtualXactExamineOutcome;
 
 // `lwWaiting`/`lwWaitMode` are stored as the raw `uint8` C fields; these map
 // them to/from the typed seam values.
@@ -101,7 +101,7 @@ fn set_proc_latch(procno: ProcNumber) {
     );
 }
 
-fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&types_storage::latch::Latch)) {
+fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&::types_storage::latch::Latch)) {
     crate::proc_shmem::with_proc_latch(procno, f);
 }
 
@@ -214,7 +214,7 @@ fn vxid_lock_table_insert_my_proc(
 fn vxid_lock_table_cleanup_my_proc() -> PgResult<(bool, LocalTransactionId)> {
     let my_procno = crate::proc_shmem::my_proc_number();
     with_my_proc(|p| {
-        debug_assert_ne!(p.vxid.procNumber, types_core::INVALID_PROC_NUMBER);
+        debug_assert_ne!(p.vxid.procNumber, ::types_core::INVALID_PROC_NUMBER);
 
         // LWLockAcquire(&MyProc->fpInfoLock, LW_EXCLUSIVE); released on drop.
         let _guard = lwlock::lwlock_acquire::call(
@@ -372,7 +372,7 @@ fn proc_init_prepared(
     owner: Oid,
     databaseid: Oid,
 ) -> PgResult<()> {
-    use types_storage::storage::{LWLockWaitState, PROC_WAIT_STATUS_OK};
+    use ::types_storage::storage::{LWLockWaitState, PROC_WAIT_STATUS_OK};
 
     // Clone the caller's VXID when it has a valid lxid (so
     // TwoPhaseGetXidByVirtualXID() can find it); otherwise the caller is the
@@ -382,10 +382,10 @@ fn proc_init_prepared(
 
     with_proc_by_number(pgprocno, |proc| {
         // MemSet(proc, 0, sizeof(PGPROC)); dlist_node_init(&proc->links).
-        *proc = types_storage::storage::PGPROC::new_zeroed();
+        *proc = ::types_storage::storage::PGPROC::new_zeroed();
         proc.waitStatus = PROC_WAIT_STATUS_OK;
 
-        if my_lxid != types_core::InvalidLocalTransactionId {
+        if my_lxid != ::types_core::InvalidLocalTransactionId {
             proc.vxid.lxid = my_lxid;
             proc.vxid.procNumber = my_procnumber;
         } else {
@@ -394,17 +394,17 @@ fn proc_init_prepared(
                     || !init_small_seams::is_postmaster_environment::call()
             );
             proc.vxid.lxid = xid;
-            proc.vxid.procNumber = types_core::INVALID_PROC_NUMBER;
+            proc.vxid.procNumber = ::types_core::INVALID_PROC_NUMBER;
         }
 
         proc.xid = xid;
-        debug_assert_eq!(proc.xmin, types_core::InvalidTransactionId);
+        debug_assert_eq!(proc.xmin, ::types_core::InvalidTransactionId);
         proc.delayChkptFlags = 0;
         proc.statusFlags = 0;
         proc.pid = 0;
         proc.databaseId = databaseid;
         proc.roleId = owner;
-        proc.tempNamespaceId = types_core::InvalidOid;
+        proc.tempNamespaceId = ::types_core::InvalidOid;
         proc.isRegularBackend = false;
         proc.lwWaiting = LWLockWaitState::LW_WS_NOT_WAITING as u8;
         proc.lwWaitMode = 0;
@@ -429,7 +429,7 @@ fn proc_init_prepared(
     // C; GetSnapshotData/ProcArrayInstallRestoredXmin read them cross-process).
     // The closure above set proc.xmin=Invalid (asserted), statusFlags=0,
     // databaseId=databaseid.
-    crate::proc_shmem::set_proc_xmin_shared(pgprocno, types_core::InvalidTransactionId);
+    crate::proc_shmem::set_proc_xmin_shared(pgprocno, ::types_core::InvalidTransactionId);
     crate::proc_shmem::set_proc_database_id_shared(pgprocno, databaseid);
     crate::proc_shmem::set_proc_status_flags_shared(pgprocno, 0);
     // Mirror the dummy proc's xid + vxid.lxid into the genuinely-shared per-proc
@@ -437,22 +437,22 @@ fn proc_init_prepared(
     // this prepared transaction sees its xid/vxid. The fast-path VXID fields are
     // zeroed (MemSet on the slot): a recovered/2PC dummy holds no fast-path VXID
     // lock (its localTransactionId is a normal, locked XID).
-    let (dummy_lxid, dummy_procno) = if my_lxid != types_core::InvalidLocalTransactionId {
+    let (dummy_lxid, dummy_procno) = if my_lxid != ::types_core::InvalidLocalTransactionId {
         (my_lxid, my_procnumber)
     } else {
-        (xid, types_core::INVALID_PROC_NUMBER)
+        (xid, ::types_core::INVALID_PROC_NUMBER)
     };
     crate::proc_shmem::set_proc_vxid_lxid_shared(pgprocno, dummy_lxid);
     crate::proc_shmem::set_proc_vxid_procno_shared(pgprocno, dummy_procno);
     crate::proc_shmem::set_proc_xid_shared(pgprocno, xid);
     crate::proc_shmem::set_proc_fp_vxid_lock_shared(pgprocno, false);
-    crate::proc_shmem::set_proc_fp_local_xid_shared(pgprocno, types_core::InvalidLocalTransactionId);
+    crate::proc_shmem::set_proc_fp_local_xid_shared(pgprocno, ::types_core::InvalidLocalTransactionId);
 
     Ok(())
 }
 
 fn gxact_load_subxact_data(pgprocno: ProcNumber, children: &[TransactionId]) -> PgResult<()> {
-    use types_storage::storage::PGPROC_MAX_CACHED_SUBXIDS;
+    use ::types_storage::storage::PGPROC_MAX_CACHED_SUBXIDS;
 
     with_proc_by_number(pgprocno, |proc| {
         let mut nsubxacts = children.len();
@@ -575,7 +575,7 @@ fn set_delay_chkpt_complete(on: bool) {
 
 // --- wait-queue PGPROC accessors (proc_waitqueue family; own state) ---------
 
-fn pgproc_number(proc: &types_storage::storage::PGPROC) -> ProcNumber {
+fn pgproc_number(proc: &::types_storage::storage::PGPROC) -> ProcNumber {
     crate::proc_shmem::proc_number_of(proc)
 }
 
@@ -584,7 +584,7 @@ fn proc_lock_group_leader(procno: ProcNumber) -> ProcNumber {
     // wait-queue seam contract returns INVALID_PROC_NUMBER for a NULL leader.
     // Read from the genuinely-shared lockGroupLeader array (cross-process).
     crate::proc_shmem::proc_lock_group_leader_shared(procno)
-        .unwrap_or(types_core::INVALID_PROC_NUMBER)
+        .unwrap_or(::types_core::INVALID_PROC_NUMBER)
 }
 
 fn proc_lock_group_members(leader: ProcNumber) -> Vec<ProcNumber> {
@@ -596,7 +596,7 @@ fn proc_lock_group_members(leader: ProcNumber) -> Vec<ProcNumber> {
     crate::proc_lifecycle::lock_group_members_iter(leader)
 }
 
-fn set_proc_held_locks(procno: ProcNumber, mask: types_storage::lock::LOCKMASK) {
+fn set_proc_held_locks(procno: ProcNumber, mask: ::types_storage::lock::LOCKMASK) {
     // heldLocks is read cross-process by JoinWaitQueue's wait-queue walk, so the
     // canonical store is the genuinely-shared array (the fork-private PGPROC field
     // is kept in sync for any same-process reader).
@@ -604,11 +604,11 @@ fn set_proc_held_locks(procno: ProcNumber, mask: types_storage::lock::LOCKMASK) 
     with_proc_by_number(procno, |p| p.heldLocks = mask);
 }
 
-fn proc_held_locks(procno: ProcNumber) -> types_storage::lock::LOCKMASK {
+fn proc_held_locks(procno: ProcNumber) -> ::types_storage::lock::LOCKMASK {
     crate::proc_shmem::proc_held_locks_shared(procno)
 }
 
-fn proc_wait_lock_mode(procno: ProcNumber) -> types_storage::lock::LOCKMODE {
+fn proc_wait_lock_mode(procno: ProcNumber) -> ::types_storage::lock::LOCKMODE {
     // The backend releasing a conflicting lock reads this cross-process to decide
     // whether the waiter can be granted; read the canonical shared word.
     crate::proc_shmem::proc_wait_lock_mode_shared(procno)
@@ -622,9 +622,9 @@ fn proc_wait_status(procno: ProcNumber) -> ProcWaitStatus {
 
 fn set_proc_wait_fields(
     procno: ProcNumber,
-    lock: types_storage::lock::LOCKTAG,
+    lock: ::types_storage::lock::LOCKTAG,
     holder: ProcNumber,
-    lockmode: types_storage::lock::LOCKMODE,
+    lockmode: ::types_storage::lock::LOCKMODE,
 ) {
     // `MyProc->{waitLock = lock; waitProcLock = proclock; waitLockMode =
     //  lockmode; waitStatus = PROC_WAIT_STATUS_WAITING;}` — waitLock/waitProcLock
@@ -636,14 +636,14 @@ fn set_proc_wait_fields(
     crate::proc_shmem::set_proc_wait_lock_mode_shared(procno, lockmode);
     crate::proc_shmem::set_proc_wait_status_shared(
         procno,
-        types_storage::storage::PROC_WAIT_STATUS_WAITING,
+        ::types_storage::storage::PROC_WAIT_STATUS_WAITING,
     );
     crate::proc_shmem::set_proc_wait_lock_shared(procno, Some(lock));
     with_proc_by_number(procno, |p| {
         p.waitLock = Some(lock);
         p.waitProcLock = Some(holder);
         p.waitLockMode = lockmode;
-        p.waitStatus = types_storage::storage::PROC_WAIT_STATUS_WAITING;
+        p.waitStatus = ::types_storage::storage::PROC_WAIT_STATUS_WAITING;
     });
 }
 
@@ -700,7 +700,7 @@ fn proc_is_waiting_on_lock(procno: ProcNumber) -> bool {
     crate::proc_shmem::proc_wait_lock_shared(procno).is_some()
 }
 
-fn proc_wait_lock_tag(procno: ProcNumber) -> types_storage::lock::LOCKTAG {
+fn proc_wait_lock_tag(procno: ProcNumber) -> ::types_storage::lock::LOCKTAG {
     // `MyProc->waitLock->tag` — the LOCKTAG identifying the awaited lock. Read the
     // canonical shared word (cross-process visible). Panics if not waiting,
     // mirroring the C deref of a NULL waitLock.

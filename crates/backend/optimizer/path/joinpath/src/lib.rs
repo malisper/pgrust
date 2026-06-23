@@ -17,7 +17,7 @@
 //! # Arena model
 //!
 //! Path inputs are [`PathId`] handles into the
-//! [`PlannerInfo`](pathnodes::PlannerInfo) arena (the C `Path *`);
+//! [`PlannerInfo`](::pathnodes::PlannerInfo) arena (the C `Path *`);
 //! `root.path(id)` / `root.rel(id)` / `root.rinfo(id)` recover the node. The
 //! path constructors allocate into the arena and return the new `PathId`;
 //! `add_path` consumes a `PathId` into the joinrel. The entire enumeration
@@ -26,8 +26,8 @@
 //! restrictinfo.c / lsyscache.c / execAmi.c / FDW + extension hooks / the
 //! bundled memoize cache-key analysis), plus the `relids_*` set algebra.
 //!
-//! Allocating functions take an [`Mcx`](mcx::Mcx) and return
-//! [`PgResult`](types_error::PgResult): in C every `palloc` can
+//! Allocating functions take an [`Mcx`](::mcx::Mcx) and return
+//! [`PgResult`](::types_error::PgResult): in C every `palloc` can
 //! `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`, and that OOM channel is part of the
 //! C failure surface. Transient lists (clause/pathkey working sets) are charged
 //! to the passed context, fallibly.
@@ -37,21 +37,21 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use joinpath_seams as jp;
 use relnode_seams as bms;
 use lsyscache_seams as lsc;
 
-use pathnodes::optimizer_plan::{CostSelector, JoinPathExtraData, SemiAntiJoinFactors};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::optimizer_plan::{CostSelector, JoinPathExtraData, SemiAntiJoinFactors};
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     JoinType, NodeId, PathId, PathKey, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId,
     SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI,
     JOIN_RIGHT_SEMI, JOIN_SEMI, JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER, RELOPT_OTHER_JOINREL,
 };
 
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_core::primitive::{InvalidOid, Oid};
 
 /// The join-method enable GUCs (`optimizer/cost.h`: `enable_mergejoin`,
 /// `enable_hashjoin`, `enable_material`, `enable_parallel_hash`,
@@ -134,7 +134,7 @@ fn clone_relids(a: &Relids) -> Relids {
 /// Charge a copy of a pathkey slice to `mcx` (the owned-tree analogue of the C
 /// code re-using a `List *` of pathkeys), OOM-fallibly.
 fn charged_pathkeys<'mcx>(mcx: Mcx<'mcx>, src: &[PathKey]) -> PgResult<PgVec<'mcx, PathKey>> {
-    let mut v = mcx::vec_with_capacity_in(mcx, src.len())?;
+    let mut v = ::mcx::vec_with_capacity_in(mcx, src.len())?;
     for pk in src {
         v.push(pk.clone());
     }
@@ -209,8 +209,8 @@ pub fn add_paths_to_joinrel<'mcx>(
     };
 
     let mut extra = JoinPathExtra {
-        restrictlist: mcx::slice_in(mcx, restrictlist)?,
-        mergeclause_list: mcx::vec_with_capacity_in(mcx, 0)?,
+        restrictlist: ::mcx::slice_in(mcx, restrictlist)?,
+        mergeclause_list: ::mcx::vec_with_capacity_in(mcx, 0)?,
         inner_unique: false,
         sjinfo: sjinfo.clone(),
         semifactors: SemiAntiJoinFactors {
@@ -419,8 +419,8 @@ fn paraminfo_get_equal_hashops<'mcx>(
     innerrel: RelId,
     ph_lateral_vars: &[NodeId],
 ) -> PgResult<Option<(PgVec<'mcx, NodeId>, PgVec<'mcx, Oid>, bool)>> {
-    let mut param_exprs: PgVec<'mcx, NodeId> = mcx::vec_with_capacity_in(mcx, 0)?;
-    let mut operators: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut param_exprs: PgVec<'mcx, NodeId> = ::mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut operators: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let mut binary_mode = false;
 
     let outer_relids = clone_relids(&root.rel(outerrel).relids);
@@ -470,7 +470,7 @@ fn paraminfo_get_equal_hashops<'mcx>(
 
     // Now add any lateral vars to the cache key too. C: list_concat of
     // ph_lateral_vars and innerrel->lateral_vars (in that order).
-    let inner_lateral = mcx::slice_in(mcx, &root.rel(innerrel).lateral_vars)?;
+    let inner_lateral = ::mcx::slice_in(mcx, &root.rel(innerrel).lateral_vars)?;
     let lateral_iter = ph_lateral_vars.iter().chain(inner_lateral.iter());
     for &expr in lateral_iter {
         // Reject if there are any volatile functions in lateral vars.
@@ -516,7 +516,7 @@ fn extract_lateral_vars_from_PHVs<'mcx>(
     root: &mut PlannerInfo,
     innerrelids: &Relids,
 ) -> PgResult<PgVec<'mcx, NodeId>> {
-    let mut ph_lateral_vars: PgVec<'mcx, NodeId> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut ph_lateral_vars: PgVec<'mcx, NodeId> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
     // Nothing to find if the query has no LATERAL RTEs.
     if !root.hasLateralRTEs {
@@ -528,7 +528,7 @@ fn extract_lateral_vars_from_PHVs<'mcx>(
         return Ok(ph_lateral_vars);
     }
 
-    let placeholders = mcx::slice_in(mcx, &root.placeholder_list)?;
+    let placeholders = ::mcx::slice_in(mcx, &root.placeholder_list)?;
     for &phid in placeholders.iter() {
         let (ph_lateral, ph_eval_at, phexpr) = {
             let phinfo = root.phinfo(phid);
@@ -659,7 +659,7 @@ fn get_memoize_path<'mcx>(
     }
     // …nor in any of its base restrict clauses.
     {
-        let baserestrict = mcx::slice_in(mcx, &root.rel(innerrel).baserestrictinfo)?;
+        let baserestrict = ::mcx::slice_in(mcx, &root.rel(innerrel).baserestrictinfo)?;
         for &rinfo in baserestrict.iter() {
             if jp::contain_volatile_functions_rinfo::call(root, rinfo) {
                 return Ok(None);
@@ -668,7 +668,7 @@ fn get_memoize_path<'mcx>(
     }
     // …nor in the parameterized path's restrict clauses.
     if let Some(k) = &inner_param_keys {
-        let clauses = mcx::slice_in(mcx, &k.ppi_clauses)?;
+        let clauses = ::mcx::slice_in(mcx, &k.ppi_clauses)?;
         for &rinfo in clauses.iter() {
             if jp::contain_volatile_functions_rinfo::call(root, rinfo) {
                 return Ok(None);
@@ -958,7 +958,7 @@ fn try_mergejoin_path<'mcx>(
         );
         if contained {
             // C: `outersortkeys = NIL` (no pfree; charge stays until reset).
-            outersortkeys = mcx::vec_with_capacity_in(mcx, 0)?;
+            outersortkeys = ::mcx::vec_with_capacity_in(mcx, 0)?;
         } else {
             outer_presorted_keys = n;
         }
@@ -966,7 +966,7 @@ fn try_mergejoin_path<'mcx>(
     if !innersortkeys.is_empty()
         && jp::pathkeys_contained_in::call(&innersortkeys, &root.path(inner_path).base().pathkeys)
     {
-        innersortkeys = mcx::vec_with_capacity_in(mcx, 0)?;
+        innersortkeys = ::mcx::vec_with_capacity_in(mcx, 0)?;
     }
 
     let materialized_extra = extra.materialize(root);
@@ -1046,7 +1046,7 @@ fn try_partial_mergejoin_path<'mcx>(
             &root.path(outer_path).base().pathkeys,
         );
         if contained {
-            outersortkeys = mcx::vec_with_capacity_in(mcx, 0)?;
+            outersortkeys = ::mcx::vec_with_capacity_in(mcx, 0)?;
         } else {
             outer_presorted_keys = n;
         }
@@ -1054,7 +1054,7 @@ fn try_partial_mergejoin_path<'mcx>(
     if !innersortkeys.is_empty()
         && jp::pathkeys_contained_in::call(&innersortkeys, &root.path(inner_path).base().pathkeys)
     {
-        innersortkeys = mcx::vec_with_capacity_in(mcx, 0)?;
+        innersortkeys = ::mcx::vec_with_capacity_in(mcx, 0)?;
     }
 
     let materialized_extra = extra.materialize(root);
@@ -1305,7 +1305,7 @@ fn sort_inner_and_outer<'mcx>(
         if root.path(inner_path).base().parallel_safe {
             cheapest_safe_inner = Some(inner_path);
         } else if save_jointype != JOIN_UNIQUE_INNER {
-            let pathlist = mcx::slice_in(mcx, &root.rel(innerrel).pathlist)?;
+            let pathlist = ::mcx::slice_in(mcx, &root.rel(innerrel).pathlist)?;
             cheapest_safe_inner = jp::get_cheapest_parallel_safe_total_inner::call(root, &pathlist);
         }
     }
@@ -1316,7 +1316,7 @@ fn sort_inner_and_outer<'mcx>(
     for l in 0..all_pathkeys.len() {
         // Make a pathkey list with this guy first.
         let outerkeys: PgVec<'mcx, PathKey> = if l != 0 {
-            let mut v = mcx::vec_with_capacity_in(mcx, all_pathkeys.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, all_pathkeys.len())?;
             v.push(all_pathkeys[l].clone());
             for (i, pk) in all_pathkeys.iter().enumerate() {
                 if i != l {
@@ -1442,7 +1442,7 @@ fn generate_mergejoin_paths<'mcx>(
         inner_cheapest_total,
         merge_pathkeys,
         &mergeclauses,
-        mcx::vec_with_capacity_in(mcx, 0)?,
+        ::mcx::vec_with_capacity_in(mcx, 0)?,
         charged_pathkeys(mcx, &innersortkeys)?,
         jointype,
         extra,
@@ -1480,7 +1480,7 @@ fn generate_mergejoin_paths<'mcx>(
         // Truncate trialsortkeys to sortkeycnt.
         trialsortkeys.truncate(sortkeycnt);
 
-        let pathlist = mcx::slice_in(mcx, &root.rel(innerrel).pathlist)?;
+        let pathlist = ::mcx::slice_in(mcx, &root.rel(innerrel).pathlist)?;
         let innerpath = jp::get_cheapest_path_for_pathkeys::call(
             root,
             &pathlist,
@@ -1519,8 +1519,8 @@ fn generate_mergejoin_paths<'mcx>(
                     innerpath,
                     merge_pathkeys,
                     &newclauses,
-                    mcx::vec_with_capacity_in(mcx, 0)?,
-                    mcx::vec_with_capacity_in(mcx, 0)?,
+                    ::mcx::vec_with_capacity_in(mcx, 0)?,
+                    ::mcx::vec_with_capacity_in(mcx, 0)?,
                     jointype,
                     extra,
                     is_partial,
@@ -1572,8 +1572,8 @@ fn generate_mergejoin_paths<'mcx>(
                         innerpath,
                         merge_pathkeys,
                         &newclauses,
-                        mcx::vec_with_capacity_in(mcx, 0)?,
-                        mcx::vec_with_capacity_in(mcx, 0)?,
+                        ::mcx::vec_with_capacity_in(mcx, 0)?,
+                        ::mcx::vec_with_capacity_in(mcx, 0)?,
                         jointype,
                         extra,
                         is_partial,
@@ -1636,7 +1636,7 @@ fn match_unsorted_outer<'mcx>(
         }
         other => {
             // elog(ERROR, "unrecognized join type: %d", jointype)
-            return Err(types_error::PgError::error(alloc::format!(
+            return Err(::types_error::PgError::error(alloc::format!(
                 "unrecognized join type: {other}"
             )));
         }
@@ -1670,7 +1670,7 @@ fn match_unsorted_outer<'mcx>(
         }
     }
 
-    let outer_pathlist = mcx::slice_in(mcx, &root.rel(outerrel).pathlist)?;
+    let outer_pathlist = ::mcx::slice_in(mcx, &root.rel(outerrel).pathlist)?;
     for &outerpath_orig in outer_pathlist.iter() {
         let mut outerpath = outerpath_orig;
 
@@ -1710,7 +1710,7 @@ fn match_unsorted_outer<'mcx>(
             )?;
         } else if nestjoinOK {
             // Nestloop on each parameterized inner path.
-            let inner_params = mcx::slice_in(mcx, &root.rel(innerrel).cheapest_parameterized_paths)?;
+            let inner_params = ::mcx::slice_in(mcx, &root.rel(innerrel).cheapest_parameterized_paths)?;
             for &innerpath in inner_params.iter() {
                 try_nestloop_path(
                     root,
@@ -1808,7 +1808,7 @@ fn match_unsorted_outer<'mcx>(
             if save_jointype == JOIN_UNIQUE_INNER {
                 return Ok(());
             }
-            let pathlist = mcx::slice_in(mcx, &root.rel(innerrel).pathlist)?;
+            let pathlist = ::mcx::slice_in(mcx, &root.rel(innerrel).pathlist)?;
             inner_cheapest_total = jp::get_cheapest_parallel_safe_total_inner::call(root, &pathlist);
         }
 
@@ -1837,7 +1837,7 @@ fn consider_parallel_mergejoin<'mcx>(
     extra: &JoinPathExtra,
     inner_cheapest_total: PathId,
 ) -> PgResult<()> {
-    let partial = mcx::slice_in(mcx, &root.rel(outerrel).partial_pathlist)?;
+    let partial = ::mcx::slice_in(mcx, &root.rel(outerrel).partial_pathlist)?;
     for &outerpath in partial.iter() {
         let merge_pathkeys = {
             let outer_pk = charged_pathkeys(mcx, &root.path(outerpath).base().pathkeys)?;
@@ -1898,14 +1898,14 @@ fn consider_parallel_nestloop<'mcx>(
         }
     }
 
-    let partial = mcx::slice_in(mcx, &root.rel(outerrel).partial_pathlist)?;
+    let partial = ::mcx::slice_in(mcx, &root.rel(outerrel).partial_pathlist)?;
     for &outerpath in partial.iter() {
         let pathkeys = {
             let outer_pk = charged_pathkeys(mcx, &root.path(outerpath).base().pathkeys)?;
             jp::build_join_pathkeys::call(root, joinrel, jointype, &outer_pk)?
         };
 
-        let inner_params = mcx::slice_in(mcx, &root.rel(innerrel).cheapest_parameterized_paths)?;
+        let inner_params = ::mcx::slice_in(mcx, &root.rel(innerrel).cheapest_parameterized_paths)?;
         for &innerpath_orig in inner_params.iter() {
             let mut innerpath = innerpath_orig;
 
@@ -1965,11 +1965,11 @@ fn hash_inner_and_outer<'mcx>(
     let isouterjoin = is_outer_join(jointype);
 
     // Build the single hashclauses list usable for this pair.
-    let mut hashclauses: PgVec<'mcx, RinfoId> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut hashclauses: PgVec<'mcx, RinfoId> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let joinrel_relids = clone_relids(&root.rel(joinrel).relids);
     let outer_relids = clone_relids(&root.rel(outerrel).relids);
     let inner_relids = clone_relids(&root.rel(innerrel).relids);
-    let restrictlist = mcx::slice_in(mcx, &extra.restrictlist)?;
+    let restrictlist = ::mcx::slice_in(mcx, &extra.restrictlist)?;
     for &restrictinfo in restrictlist.iter() {
         // For outer joins only use own join clauses.
         if isouterjoin && rinfo_is_pushed_down(root, restrictinfo, &joinrel_relids) {
@@ -2085,14 +2085,14 @@ fn hash_inner_and_outer<'mcx>(
             )?;
         }
 
-        let outer_params = mcx::slice_in(mcx, &root.rel(outerrel).cheapest_parameterized_paths)?;
+        let outer_params = ::mcx::slice_in(mcx, &root.rel(outerrel).cheapest_parameterized_paths)?;
         for &outerpath in outer_params.iter() {
             // Can't use an outer path parameterized by the inner rel.
             if path_param_by_rel(root, outerpath, innerrel) {
                 continue;
             }
 
-            let inner_params = mcx::slice_in(mcx, &root.rel(innerrel).cheapest_parameterized_paths)?;
+            let inner_params = ::mcx::slice_in(mcx, &root.rel(innerrel).cheapest_parameterized_paths)?;
             for &innerpath in inner_params.iter() {
                 // Can't use an inner path parameterized by the outer rel.
                 if path_param_by_rel(root, innerpath, outerrel) {
@@ -2155,7 +2155,7 @@ fn hash_inner_and_outer<'mcx>(
         } else if root.path(cheapest_total_inner).base().parallel_safe {
             cheapest_safe_inner = Some(cheapest_total_inner);
         } else if save_jointype != JOIN_UNIQUE_INNER {
-            let pathlist = mcx::slice_in(mcx, &root.rel(innerrel).pathlist)?;
+            let pathlist = ::mcx::slice_in(mcx, &root.rel(innerrel).pathlist)?;
             cheapest_safe_inner = jp::get_cheapest_parallel_safe_total_inner::call(root, &pathlist);
         }
 
@@ -2191,7 +2191,7 @@ fn select_mergejoin_clauses<'mcx>(
     jointype: JoinType,
     mergejoin_allowed: &mut bool,
 ) -> PgResult<PgVec<'mcx, RinfoId>> {
-    let mut result_list: PgVec<'mcx, RinfoId> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result_list: PgVec<'mcx, RinfoId> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let isouterjoin = is_outer_join(jointype);
     let mut have_nonmergeable_joinclause = false;
 
@@ -2368,7 +2368,7 @@ fn clause_is_opexpr_with_two_args(root: &PlannerInfo, rinfo: RinfoId) -> bool {
 // values, so producing a node handle interns a clone into the node arena (hence
 // the `&mut PlannerInfo`). Reached on the Memoize path
 // (`paraminfo_get_equal_hashops`).
-fn opexpr_arg<'mcx>(mcx: mcx::Mcx<'mcx>, root: &mut PlannerInfo, rinfo: RinfoId, n: i32) -> PgResult<NodeId> {
+fn opexpr_arg<'mcx>(mcx: ::mcx::Mcx<'mcx>, root: &mut PlannerInfo, rinfo: RinfoId, n: i32) -> PgResult<NodeId> {
     let clause = root.rinfo(rinfo).clause;
     // copyObject shape: the arg may be a correlated SubPlan whose derived
     // `Expr::clone` panics; deep-copy through `clone_in` (also drops the `&root`

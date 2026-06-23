@@ -4,7 +4,7 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::{InvalidOid, Oid};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_storage::{
     SharedInvalCatalogMsg, SharedInvalCatcacheMsg, SharedInvalRelSyncMsg, SharedInvalRelcacheMsg,
     SharedInvalSnapshotMsg, SharedInvalidationMessage,

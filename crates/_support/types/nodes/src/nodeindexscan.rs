@@ -6,7 +6,7 @@
 //! read them.
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;
 use crate::primnodes::TargetEntry;

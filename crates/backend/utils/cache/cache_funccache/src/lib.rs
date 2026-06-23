@@ -39,19 +39,19 @@ use alloc::format;
 use core::cell::RefCell;
 
 use mcx::{Mcx, McxOwned, MemoryContext, PgHashMap, PgVec};
-use types_core::primitive::{InvalidOid, Oid, Size};
+use ::types_core::primitive::{InvalidOid, Oid, Size};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, WARNING};
 use types_funccache::{
     CachedFunction, CachedFunctionHashKey, CachedFunctionKeyId, CachedFunctionRef, ProcCompileInfo,
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID,
     ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYNONARRAYOID, ANYRANGEOID,
     INT4OID, RECORDARRAYOID, RECORDOID,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use hashfn::{hash_bytes, hash_combine};
 
 use tupdesc::{equalRowTypes, hashRowType, CreateTupleDescCopy};
@@ -106,7 +106,7 @@ struct CfuncState<'mcx> {
     table: PgHashMap<'mcx, CachedFunctionKeyId, PgVec<'mcx, CachedFunctionHashEntry<'mcx>>>,
 }
 
-mcx::bind!(CfuncTy => CfuncState<'mcx>);
+::mcx::bind!(CfuncTy => CfuncState<'mcx>);
 
 thread_local! {
     /// `static HTAB *cfunc_hashtable = NULL;` — `None` is the NULL table
@@ -169,7 +169,7 @@ fn cfunc_hash(k: &CachedFunctionHashKey) -> u32 {
 
     if k.nargs > 0 {
         let nargs = (k.nargs as usize).min(k.argtypes.len());
-        let mut arg_bytes = [0u8; core::mem::size_of::<Oid>() * types_core::FUNC_MAX_ARGS];
+        let mut arg_bytes = [0u8; core::mem::size_of::<Oid>() * ::types_core::FUNC_MAX_ARGS];
         let mut m = 0usize;
         for &arg in &k.argtypes[..nargs] {
             arg_bytes[m..m + 4].copy_from_slice(&arg.to_le_bytes());
@@ -306,7 +306,7 @@ fn relocate_key<'mcx>(
 
     let callResultType = match callResultType {
         Some(src) => match CreateTupleDescCopy(mcx, &src) {
-            Ok(copy) => mcx::alloc_in(mcx, copy).ok(),
+            Ok(copy) => ::mcx::alloc_in(mcx, copy).ok(),
             Err(_) => None,
         },
         None => None,
@@ -405,7 +405,7 @@ fn compute_function_hashkey<'mcx>(
     // polymorphic argument types to the real types for the call.
     if proc.pronargs > 0 {
         let nargs = proc.pronargs as usize;
-        if nargs > types_core::FUNC_MAX_ARGS || nargs > hashkey.argtypes.len() {
+        if nargs > ::types_core::FUNC_MAX_ARGS || nargs > hashkey.argtypes.len() {
             return Err(PgError::error("pg_proc pronargs is out of range"));
         }
         if proc.proargtypes.len() < nargs {
@@ -589,7 +589,7 @@ pub fn cached_function_compile<'mcx>(
     fcinfo: &'mcx FunctionCallInfoBaseData<'mcx>,
     mut function: Option<CachedFunctionRef>,
     ccallback: CompileCallback,
-    dcallback: types_funccache::CachedFunctionDeleteCallback,
+    dcallback: ::types_funccache::CachedFunctionDeleteCallback,
     cacheEntrySize: Size,
     includeResultType: bool,
     forValidator: bool,
@@ -727,7 +727,7 @@ pub type CompileCallback = for<'mcx> fn(
 
 /// `elog(WARNING, ...)` — non-fatal cache-consistency warning.
 fn elog_warning(msg: &str) {
-    let _ = utils_error::elog(WARNING, msg);
+    let _ = ::utils_error::elog(WARNING, msg);
 }
 
 // ===========================================================================
@@ -763,7 +763,7 @@ fn cfunc_use_count_impl(cfunc: plpgsql::CachedFunction) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_tuple::heaptuple::{ANYARRAYOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYRANGEOID};
+    use ::types_tuple::heaptuple::{ANYARRAYOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYRANGEOID};
 
     #[test]
     fn validation_mode_substitutes_polymorphic_types() {

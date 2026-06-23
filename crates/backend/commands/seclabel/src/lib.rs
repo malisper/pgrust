@@ -47,25 +47,25 @@
 use std::sync::Mutex;
 
 use heaptuple::{heap_form_tuple, heap_getattr, heap_modify_tuple};
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
 use table::{table_close, table_open};
-use catalog_catalog::IsSharedRelation;
-use indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
+use ::catalog_catalog::IsSharedRelation;
+use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 use objectaddress_seams::{
     check_object_ownership, get_object_address, ResolvedObjectAddress,
 };
 use seclabel_seams as seam;
-use utils_error::ereport;
-use miscinit_seams::get_user_id;
-use mcx::Mcx;
-use types_catalog::catalog::{
+use ::utils_error::ereport;
+use ::miscinit_seams::get_user_id;
+use ::mcx::Mcx;
+use ::types_catalog::catalog::{
     SEC_LABEL_OBJECT_INDEX_ID, SEC_LABEL_RELATION_ID, SHARED_SEC_LABEL_OBJECT_INDEX_ID,
     SHARED_SEC_LABEL_RELATION_ID,
 };
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::fmgr::{F_INT4EQ, F_OIDEQ, F_TEXTEQ};
-use types_core::primitive::Oid;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ, F_TEXTEQ};
+use ::types_core::primitive::Oid;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
@@ -84,9 +84,9 @@ use ::nodes::parsenodes::{
     OBJECT_TYPE, OBJECT_USER_MAPPING, OBJECT_VIEW,
 };
 use parsenodes::{Node, SecLabelStmt};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
-use types_tuple::access::{
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
+use ::types_tuple::access::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_VIEW,
 };
@@ -720,7 +720,7 @@ fn object_node(stmt: &SecLabelStmt) -> &Node {
 }
 
 /// Decode an arena [`::nodes::ddlnodes::SecLabelStmt`] into the flat
-/// [`parsenodes::SecLabelStmt`] that [`ExecSecLabelStmt`] consumes, then
+/// [`::parsenodes::SecLabelStmt`] that [`ExecSecLabelStmt`] consumes, then
 /// run it. This is the bridge from the utility dispatcher's arena parse tree to
 /// the old-model command body, mirroring the COMMENT seam adapter
 /// (`arena_commentstmt_to_owned`). The arena `object` node is lowered through
@@ -802,8 +802,8 @@ pub fn init_seams() {
 
     // user.c DROP ROLE: `DeleteSharedSecurityLabel(roleid, AuthIdRelationId)`.
     user_seams::delete_shared_security_label::set(|roleid| {
-        let ctx = mcx::MemoryContext::new("DeleteSharedSecurityLabel");
-        DeleteSharedSecurityLabel(ctx.mcx(), roleid, types_core::AUTH_ID_RELATION_ID)
+        let ctx = ::mcx::MemoryContext::new("DeleteSharedSecurityLabel");
+        DeleteSharedSecurityLabel(ctx.mcx(), roleid, ::types_core::AUTH_ID_RELATION_ID)
     });
 }
 

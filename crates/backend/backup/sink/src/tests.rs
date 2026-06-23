@@ -3,7 +3,7 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Event {
@@ -320,7 +320,7 @@ fn set_buffer_rejects_oversized_allocation() {
     let mcx = ctx.mcx();
     let log = RefCell::new(Vec::new());
     let mut sink = Bbsink::new(mcx, Box::new(RecordingOps { log: &log, mcx }), None);
-    assert!(sink.set_buffer(mcx, mcx::MAX_ALLOC_SIZE + 1).is_err());
+    assert!(sink.set_buffer(mcx, ::mcx::MAX_ALLOC_SIZE + 1).is_err());
     assert!(!sink.has_buffer());
 }
 

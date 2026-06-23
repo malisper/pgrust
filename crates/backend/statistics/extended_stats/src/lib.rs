@@ -34,13 +34,13 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, MemoryContext};
-use types_core::primitive::Oid;
-use types_core::AttrNumber;
+use ::types_core::primitive::Oid;
+use ::types_core::AttrNumber;
 use types_error::{PgError, PgResult};
-use rel::Relation;
+use ::rel::Relation;
 use statistics::{StatsBuildData, VacAttrStats, MAX_STATISTICS_TARGET};
 
-use types_catalog::pg_statistic_ext::{
+use ::types_catalog::pg_statistic_ext::{
     Anum_pg_statistic_ext_oid, Anum_pg_statistic_ext_stxkeys, Anum_pg_statistic_ext_stxkind,
     Anum_pg_statistic_ext_stxname, Anum_pg_statistic_ext_stxnamespace,
     Anum_pg_statistic_ext_stxrelid, Anum_pg_statistic_ext_stxstattarget,
@@ -54,15 +54,15 @@ use types_catalog::pg_statistic_ext::{
 use statistics::{
     STATS_EXT_DEPENDENCIES, STATS_EXT_EXPRESSIONS, STATS_EXT_MCV, STATS_EXT_NDISTINCT,
 };
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
 use table::{table_close, table_open};
 use analyze_rt_seams as rt;
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, WARNING};
 
 use ::nodes::primnodes::Expr;
@@ -74,7 +74,7 @@ fn here(funcname: &'static str) -> ErrorLocation {
     ErrorLocation::new("../src/backend/statistics/extended_stats.c", 0, funcname)
 }
 
-use types_core::fmgr::F_OIDEQ;
+use ::types_core::fmgr::F_OIDEQ;
 
 /// `default_statistics_target` GUC (guc_tables.c). Read from the real GUC slot
 /// (installed by analyze), exactly as `statext_compute_stattarget` does in C.
@@ -745,7 +745,7 @@ fn make_build_data<'mcx>(
         })
         .collect();
 
-    let mut values: Vec<Vec<types_tuple::Datum<'mcx>>> = Vec::with_capacity(nkeys);
+    let mut values: Vec<Vec<::types_tuple::Datum<'mcx>>> = Vec::with_capacity(nkeys);
     let mut nulls: Vec<Vec<bool>> = Vec::with_capacity(nkeys);
 
     // All analyzed columns share the relation's tuple descriptor; take it from
@@ -761,7 +761,7 @@ fn make_build_data<'mcx>(
     for idx in 0..ncolumns {
         let k = stat.columns[idx];
 
-        let mut colvals: Vec<types_tuple::Datum<'mcx>> = Vec::with_capacity(numrows as usize);
+        let mut colvals: Vec<::types_tuple::Datum<'mcx>> = Vec::with_capacity(numrows as usize);
         let mut colnulls: Vec<bool> = Vec::with_capacity(numrows as usize);
         for i in 0..numrows as usize {
             let (val, isnull) = heaptuple::heap_getattr(
@@ -815,12 +815,12 @@ fn statext_store<'mcx>(
     mcv: Option<&[u8]>,
     exprs: Option<Datum<'mcx>>,
 ) -> PgResult<()> {
-    use table::table_open as topen;
+    use ::table::table_open as topen;
 
     let pg_stextdata = topen(mcx, StatisticExtDataRelationId, RowExclusiveLock)?;
 
-    let mut values: Vec<types_tuple::Datum<'mcx>> =
-        vec![types_tuple::Datum::null(); Natts_pg_statistic_ext_data];
+    let mut values: Vec<::types_tuple::Datum<'mcx>> =
+        vec![::types_tuple::Datum::null(); Natts_pg_statistic_ext_data];
     let mut nulls: Vec<bool> = vec![true; Natts_pg_statistic_ext_data];
 
     // basic info
@@ -832,17 +832,17 @@ fn statext_store<'mcx>(
 
     if let Some(bytes) = ndistinct {
         values[(Anum_pg_statistic_ext_data_stxdndistinct - 1) as usize] =
-            types_tuple::Datum::from_byref_bytes_in(mcx, bytes)?;
+            ::types_tuple::Datum::from_byref_bytes_in(mcx, bytes)?;
         nulls[(Anum_pg_statistic_ext_data_stxdndistinct - 1) as usize] = false;
     }
     if let Some(bytes) = dependencies {
         values[(Anum_pg_statistic_ext_data_stxddependencies - 1) as usize] =
-            types_tuple::Datum::from_byref_bytes_in(mcx, bytes)?;
+            ::types_tuple::Datum::from_byref_bytes_in(mcx, bytes)?;
         nulls[(Anum_pg_statistic_ext_data_stxddependencies - 1) as usize] = false;
     }
     if let Some(bytes) = mcv {
         values[(Anum_pg_statistic_ext_data_stxdmcv - 1) as usize] =
-            types_tuple::Datum::from_byref_bytes_in(mcx, bytes)?;
+            ::types_tuple::Datum::from_byref_bytes_in(mcx, bytes)?;
         nulls[(Anum_pg_statistic_ext_data_stxdmcv - 1) as usize] = false;
     }
     if let Some(d) = exprs {

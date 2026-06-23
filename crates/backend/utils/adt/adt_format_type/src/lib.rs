@@ -23,22 +23,22 @@ use core::fmt::Write;
 
 use mcx::{Mcx, PgString};
 use types_core::{InvalidOid, OidIsValid, Oid, BITS_PER_BYTE};
-use datum::VARHDRSZ;
+use ::datum::VARHDRSZ;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use types_format_type::TypeFormInfo;
-use types_tuple::heaptuple::{
+use ::types_format_type::TypeFormInfo;
+use ::types_tuple::heaptuple::{
     BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, INTERVALOID,
     JSONOID, NUMERICOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, TYPSTORAGE_PLAIN,
     VARBITOID, VARCHAROID,
 };
 
-use namespace_seams::type_is_visible;
-use numeric_seams::numeric_maximum_size;
-use ruleutils_seams::quote_qualified_identifier;
-use lsyscache_seams::get_namespace_name_or_temp;
-use syscache_seams::type_form;
-use fmgr_seams::typmod_out;
-use mbutils_seams::pg_database_encoding_max_length;
+use ::namespace_seams::type_is_visible;
+use ::numeric_seams::numeric_maximum_size;
+use ::ruleutils_seams::quote_qualified_identifier;
+use ::lsyscache_seams::get_namespace_name_or_temp;
+use ::syscache_seams::type_form;
+use ::fmgr_seams::typmod_out;
+use ::mbutils_seams::pg_database_encoding_max_length;
 
 /// `utils/fmgroids.h`: `F_ARRAY_SUBSCRIPT_HANDLER` — proc OID of the generic
 /// array subscript handler (`pg_proc.dat`, oid 6179). Used by
@@ -376,7 +376,7 @@ pub fn format_type_be<'mcx>(mcx: Mcx<'mcx>, type_oid: Oid) -> PgResult<PgString<
 /// `String`, freeing the scratch context on return. It carries no formatting
 /// logic of its own — a thin owned-result wrapper over [`format_type_be`].
 pub fn format_type_be_str(type_oid: Oid) -> PgResult<alloc::string::String> {
-    let scratch = mcx::MemoryContext::new("format_type_be_str");
+    let scratch = ::mcx::MemoryContext::new("format_type_be_str");
     let name = format_type_be(scratch.mcx(), type_oid)?;
     Ok(alloc::string::String::from(name.as_str()))
 }
@@ -389,7 +389,7 @@ pub fn format_type_be_str(type_oid: Oid) -> PgResult<alloc::string::String> {
 /// owned `String`. Identical to [`format_type_be_str`] — a thin owned-result
 /// wrapper over [`format_type_be`] with no formatting logic of its own.
 pub fn format_type_be_owned(type_oid: Oid) -> PgResult<alloc::string::String> {
-    let scratch = mcx::MemoryContext::new("format_type_be_owned");
+    let scratch = ::mcx::MemoryContext::new("format_type_be_owned");
     let name = format_type_be(scratch.mcx(), type_oid)?;
     Ok(alloc::string::String::from(name.as_str()))
 }

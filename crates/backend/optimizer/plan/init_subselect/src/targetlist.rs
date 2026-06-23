@@ -5,9 +5,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId, Relids};
 
 use relnode_seams as bms;
@@ -43,7 +43,7 @@ pub fn build_base_rel_tlists(root: &mut PlannerInfo, run: &PlannerRun<'_>) -> Pg
     // straight from the arena and call the by-ref `pull_var_clause` — avoids a
     // deep node copy (a shallow `Expr::clone` panics on an `Aggref`, whose args
     // are a context-allocated `TargetEntry` list).
-    let expr_ids: Vec<pathnodes::NodeId> = root
+    let expr_ids: Vec<::pathnodes::NodeId> = root
         .processed_tlist
         .iter()
         .map(|&te| root.targetentry(te).expr)
@@ -159,7 +159,7 @@ pub fn rebuild_joinclause_attr_needed(
             Some(r) => r,
             None => continue,
         };
-        if root.rel(brel).reloptkind != pathnodes::RELOPT_BASEREL {
+        if root.rel(brel).reloptkind != ::pathnodes::RELOPT_BASEREL {
             continue;
         }
 

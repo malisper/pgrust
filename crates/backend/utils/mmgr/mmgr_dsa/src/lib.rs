@@ -25,7 +25,7 @@
 //! `thread_local` registry (the established backend-local pattern, as in the
 //! ported `dsm.c`).
 
-use types_core::Size;
+use ::types_core::Size;
 use types_error::{PgError, PgResult};
 
 pub use types_dsa::{

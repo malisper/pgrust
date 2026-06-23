@@ -7,7 +7,7 @@
 #![allow(unused_doc_comments)]
 extern crate alloc;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use execparallel::{DestReceiverHandle, ShmMqAttachHandle, TupleQueueReaderHandle};
 
 /// `CreateTupleQueueReader(handle)`.

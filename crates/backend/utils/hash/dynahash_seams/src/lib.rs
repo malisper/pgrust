@@ -5,12 +5,12 @@
 //! `init_seams()`. Entry pointers are raw (`*mut u8` for the C `void *` user
 //! entry, `*mut HTAB` for the per-backend table handle) because shared hash
 //! tables live in genuinely shared memory; the `HTAB`/`HASHHDR` bodies are
-//! defined in `hash::hsearch` (owned by that crate).
+//! defined in `::hash::hsearch` (owned by that crate).
 
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
-use hash::hsearch::{HASHACTION, HASHCTL, HASH_SEQ_STATUS, HTAB};
+use ::types_error::PgResult;
+use ::hash::hsearch::{HASHACTION, HASHCTL, HASH_SEQ_STATUS, HTAB};
 
 seam_core::seam!(
     /// `hash_create(tabname, nelem, info, flags)` (dynahash.c) — create (or,

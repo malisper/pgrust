@@ -30,25 +30,25 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgHashMap, PgVec};
-use types_catalog::pg_inherits::{
+use ::types_catalog::pg_inherits::{
     Anum_pg_inherits_inhparent, Anum_pg_inherits_inhrelid, FormData_pg_inherits, Natts_pg_inherits,
     PgInheritsInsertRow, InheritsParentIndexId, InheritsRelationId, InheritsRelidSeqnoIndexId,
 };
-use types_core::fmgr::F_OIDEQ;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_core::xact::InvalidTransactionId;
-use types_core::TransactionId;
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::xact::InvalidTransactionId;
+use ::types_core::TransactionId;
 use types_error::{ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING};
 use rel::{Relation, RelationData};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
-use types_tuple::access::RELKIND_PARTITIONED_TABLE;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderChoice, ItemPointerData};
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
+use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderChoice, ItemPointerData};
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
-use utils_error::ereport;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
+use ::utils_error::ereport;
 use genam_seams as genam_seams;
 use table as table;
 use indexing_seams as indexing_seams;
@@ -544,7 +544,7 @@ pub fn next_inheritance_seqno_checked<'mcx>(
 
     if dup_parent {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_DUPLICATE_TABLE)
+            .errcode(::types_error::ERRCODE_DUPLICATE_TABLE)
             .errmsg(format!(
                 "relation \"{parent_name}\" would be inherited from more than once"
             ))
@@ -755,7 +755,7 @@ pub fn MarkInheritDetached<'mcx>(
             // newtup = heap_copytuple(inheritsTuple);
             // GETSTRUCT(newtup)->inhdetachpending = true;
             // CatalogTupleUpdate(catalogRelation, &inheritsTuple->t_self, newtup);
-            let update = types_catalog::pg_inherits::PgInheritsUpdateRow {
+            let update = ::types_catalog::pg_inherits::PgInheritsUpdateRow {
                 inhrelid: row.form.inhrelid,
                 inhparent: row.form.inhparent,
                 inhseqno: row.form.inhseqno,
@@ -779,7 +779,7 @@ pub fn MarkInheritDetached<'mcx>(
 
     if !found {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_UNDEFINED_TABLE)
+            .errcode(::types_error::ERRCODE_UNDEFINED_TABLE)
             .errmsg(format!(
                 "relation \"{}\" is not a partition of relation \"{}\"",
                 child_rel.name(),

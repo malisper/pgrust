@@ -34,12 +34,12 @@
 //! * `type_in_list_does_not_exist_skipping`   — C 205-232 (static)
 //! * `does_not_exist_skipping`                — C 242-524 (static)
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, MemoryContext};
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::{Oid, OidIsValid};
-use types_core::catalog::NAMESPACE_RELATION_ID;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::types_core::catalog::NAMESPACE_RELATION_ID;
 use types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 use ::nodes::parsenodes::{
     ObjectType, OBJECT_ACCESS_METHOD, OBJECT_AGGREGATE, OBJECT_AMOP, OBJECT_AMPROC,
@@ -56,27 +56,27 @@ use ::nodes::parsenodes::{
     OBJECT_VIEW,
 };
 use parsenodes::{DropStmt, Node, ObjectWithArgs, StringNode, TypeName};
-use types_storage::lock::{AccessExclusiveLock, NoLock};
+use ::types_storage::lock::{AccessExclusiveLock, NoLock};
 
-use aclchk_seams::object_ownercheck;
-use dependency_seams::perform_multiple_deletions;
-use namespace_seams::is_temp_namespace;
+use ::aclchk_seams::object_ownercheck;
+use ::dependency_seams::perform_multiple_deletions;
+use ::namespace_seams::is_temp_namespace;
 use objectaddress_seams::{
     check_object_ownership, get_object_address, get_object_namespace, ResolvedObjectAddress,
 };
 use parse_type_seams::{
     lookup_type_name_oid, type_name_list_to_string, typename_to_string_node,
 };
-use lsyscache_seams::get_func_prokind;
-use miscinit_seams::get_user_id;
-use transam_xact_seams::set_xact_accessed_temp_namespace;
+use ::lsyscache_seams::get_func_prokind;
+use ::miscinit_seams::get_user_id;
+use ::transam_xact_seams::set_xact_accessed_temp_namespace;
 
 use catalog_namespace::{
     makeRangeVarFromNameList, LookupNamespaceNoError, NameListToString, RangeVarGetRelid,
 };
 
-const NOTICE: ErrorLevel = types_error::error::NOTICE;
-const ERROR: ErrorLevel = types_error::error::ERROR;
+const NOTICE: ErrorLevel = ::types_error::error::NOTICE;
+const ERROR: ErrorLevel = ::types_error::error::ERROR;
 
 /// `NamespaceRelationId` (`catalog/pg_namespace.h`).
 const NamespaceRelationId: Oid = NAMESPACE_RELATION_ID;
@@ -108,7 +108,7 @@ pub fn init_seams() {
 
 /// Outward-seam adapter for `RemoveObjects(stmt)` (utility.c `ExecDropStmt`
 /// default leg): decode the rich [`::nodes::nodes::Node`] `DropStmt` into the
-/// flat [`parsenodes::DropStmt`] the ported body consumes, then run it.
+/// flat [`::parsenodes::DropStmt`] the ported body consumes, then run it.
 /// `mcx` is threaded for parity but `remove_objects` runs in its own context.
 fn remove_objects_seam(_mcx: Mcx<'_>, stmt: &::nodes::nodes::Node<'_>) -> PgResult<()> {
     let ds = match stmt.as_dropstmt() {

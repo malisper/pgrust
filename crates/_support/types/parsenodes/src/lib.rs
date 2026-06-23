@@ -16,7 +16,7 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-use types_core::Oid;
+use ::types_core::Oid;
 use ::nodes::parsenodes::{DropBehavior, ObjectType};
 
 /// `int ParseLoc` (`nodes/parsenodes.h`) — token location, `-1` if unknown.

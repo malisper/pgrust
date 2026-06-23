@@ -47,7 +47,7 @@ fn setup(max_backends: i32, nbuffers: i32, my_proc_number: i32) -> std::sync::Mu
     }
 
     // Build the live GUC store from boot values so get_int/get_enum resolve.
-    misc_guc::initialize_guc_options();
+    ::misc_guc::initialize_guc_options();
     guard
 }
 
@@ -55,8 +55,8 @@ fn setup(max_backends: i32, nbuffers: i32, my_proc_number: i32) -> std::sync::Mu
 /// machinery (which pulls in the parallel-mode / ACL seams). The live store is
 /// exactly the C `*conf->variable` that `AioShmemInit` reads.
 fn seed_int(name: &str, value: i32) {
-    use misc_guc::registry::GucVariable;
-    misc_guc::live::with_store_mut(|reg| {
+    use ::misc_guc::registry::GucVariable;
+    ::misc_guc::live::with_store_mut(|reg| {
         if let Some(GucVariable::Int(c)) = reg.find_option_mut(name) {
             c.value = Some(value);
         } else {
@@ -68,8 +68,8 @@ fn seed_int(name: &str, value: i32) {
 
 /// Seed the io_method enum GUC's live value.
 fn seed_enum(name: &str, value: i32) {
-    use misc_guc::registry::GucVariable;
-    misc_guc::live::with_store_mut(|reg| {
+    use ::misc_guc::registry::GucVariable;
+    ::misc_guc::live::with_store_mut(|reg| {
         if let Some(GucVariable::Enum(c)) = reg.find_option_mut(name) {
             c.value = Some(value);
         } else {

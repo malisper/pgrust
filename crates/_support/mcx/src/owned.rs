@@ -22,7 +22,7 @@
 
 use core::mem::ManuallyDrop;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::{Mcx, MemoryContext};
 

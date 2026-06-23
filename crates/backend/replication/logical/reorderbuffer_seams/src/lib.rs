@@ -9,11 +9,11 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use types_core::primitive::{RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::primitive::{RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
 use types_logical::{ReorderBufferHandle, ReorderBufferStats, TxnHandle};
-use types_storage::sinval::SharedInvalidationMessage;
-use types_storage::RelFileLocator;
-use types_tuple::ItemPointerData;
+use ::types_storage::sinval::SharedInvalidationMessage;
+use ::types_storage::RelFileLocator;
+use ::types_tuple::ItemPointerData;
 
 seam_core::seam!(
     /// `ResolveCminCmaxDuringDecoding(tuplecid_data, snapshot, htup, buffer,
@@ -24,10 +24,10 @@ seam_core::seam!(
     /// the C `bool` return with the resolved out-parameters.
     pub fn resolve_cmin_cmax_during_decoding(
         snapshot: snapshot::SnapshotData,
-        htup: types_tuple::heaptuple::HeapTupleData<'_>,
-        buffer: types_storage::storage::Buffer,
-        cmin: types_core::CommandId,
-        cmax: types_core::CommandId,
+        htup: ::types_tuple::heaptuple::HeapTupleData<'_>,
+        buffer: ::types_storage::storage::Buffer,
+        cmin: ::types_core::CommandId,
+        cmax: ::types_core::CommandId,
     ) -> types_error::PgResult<snapshot::snapshot::ResolveCminCmaxResult>
 );
 
@@ -94,9 +94,9 @@ seam_core::seam!(
         lsn: XLogRecPtr,
         locator: RelFileLocator,
         tid: ItemPointerData,
-        cmin: types_core::CommandId,
-        cmax: types_core::CommandId,
-        combocid: types_core::CommandId,
+        cmin: ::types_core::CommandId,
+        cmax: ::types_core::CommandId,
+        combocid: ::types_core::CommandId,
     )
 );
 seam_core::seam!(
@@ -105,7 +105,7 @@ seam_core::seam!(
         rb: ReorderBufferHandle,
         xid: TransactionId,
         lsn: XLogRecPtr,
-        cid: types_core::CommandId,
+        cid: ::types_core::CommandId,
     )
 );
 seam_core::seam!(
@@ -258,7 +258,7 @@ pub struct DecodedTuple {
     /// `tuple.t_self`.
     pub t_self: ItemPointerData,
     /// `tuple.t_tableOid`.
-    pub t_table_oid: types_core::Oid,
+    pub t_table_oid: ::types_core::Oid,
     /// The contiguous tuple image (header + nulls bitmap + user data).
     pub data: Vec<u8>,
 }
@@ -314,7 +314,7 @@ seam_core::seam!(
         lsn: XLogRecPtr,
         cascade: bool,
         restart_seqs: bool,
-        relids: Vec<types_core::Oid>,
+        relids: Vec<::types_core::Oid>,
     )
 );
 seam_core::seam!(
@@ -480,33 +480,33 @@ seam_core::seam!(
     /// `RelidByRelfilenumber` and kept the relation open). The plugin then
     /// `RelationIdGetRelation`s the OID.
     pub fn resolve_relation_handle(
-        relation: types_logical::RelationHandle,
-    ) -> types_core::primitive::Oid
+        relation: ::types_logical::RelationHandle,
+    ) -> ::types_core::primitive::Oid
 );
 seam_core::seam!(
     /// Resolve the `i`-th relation OID of a `RelationsHandle` (the truncate
     /// callback's `relations[]`). `nrelations` is carried alongside in the
     /// callback args.
     pub fn resolve_relations_handle(
-        relations: types_logical::RelationsHandle,
+        relations: ::types_logical::RelationsHandle,
         index: i32,
-    ) -> types_core::primitive::Oid
+    ) -> ::types_core::primitive::Oid
 );
 seam_core::seam!(
     /// Resolve a `ChangeHandle` to the decoded-change payload the output plugin
     /// reads. Valid only for the duration of the synchronous callback the owner
     /// is driving (the change is kept live by `ReorderBufferProcessTXN`).
-    pub fn resolve_change_handle(change: types_logical::ChangeHandle) -> ResolvedChange
+    pub fn resolve_change_handle(change: ::types_logical::ChangeHandle) -> ResolvedChange
 );
 seam_core::seam!(
     /// Resolve a `PrefixHandle` (the logical-message `prefix` `const char *`) to
     /// its bytes. Valid only for the duration of the in-flight message callback.
-    pub fn resolve_prefix_handle(prefix: types_logical::PrefixHandle) -> Vec<u8>
+    pub fn resolve_prefix_handle(prefix: ::types_logical::PrefixHandle) -> Vec<u8>
 );
 seam_core::seam!(
     /// Resolve a `MessageHandle` (the logical-message body `const char *`) to
     /// its bytes. Valid only for the duration of the in-flight message callback.
-    pub fn resolve_message_handle(message: types_logical::MessageHandle) -> Vec<u8>
+    pub fn resolve_message_handle(message: ::types_logical::MessageHandle) -> Vec<u8>
 );
 
 // -------------------------------------------------------------------------
@@ -522,17 +522,17 @@ seam_core::seam!(
 seam_core::seam!(
     /// `txn->xid` — the transaction id of the `TxnHandle` carried into an
     /// output-plugin callback.
-    pub fn txn_xid(txn: types_logical::TxnHandle) -> types_core::primitive::TransactionId
+    pub fn txn_xid(txn: ::types_logical::TxnHandle) -> ::types_core::primitive::TransactionId
 );
 seam_core::seam!(
     /// `txn->gid` — the two-phase commit GID bytes (NUL-stripped) for a prepared
     /// transaction, or an empty vec when unset (the plugin only reads this in the
     /// 2PC callbacks where C guarantees it is non-NULL).
-    pub fn txn_gid(txn: types_logical::TxnHandle) -> Vec<u8>
+    pub fn txn_gid(txn: ::types_logical::TxnHandle) -> Vec<u8>
 );
 seam_core::seam!(
     /// `txn->xact_time.commit_time` / `prepare_time` (same union storage) — the
     /// transaction's commit/prepare timestamp, read by the plugin when
     /// `include-timestamp` is enabled.
-    pub fn txn_xact_time(txn: types_logical::TxnHandle) -> types_core::primitive::TimestampTz
+    pub fn txn_xact_time(txn: ::types_logical::TxnHandle) -> ::types_core::primitive::TimestampTz
 );

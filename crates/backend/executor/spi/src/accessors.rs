@@ -12,10 +12,10 @@
 use crate::backbone::set_spi_result;
 use crate::result_code::SPI_ERROR_NOATTRIBUTE;
 use heaptuple::{heap_getattr, Datum, FormedTuple};
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{InvalidOid, Oid};
-use types_error::PgResult;
-use types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, TupleDescData};
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, TupleDescData};
 
 /// `true` when a 1-based `fnumber` is out of range for `tupdesc`, mirroring C's
 /// shared guard in `SPI_getbinval` / `SPI_gettype` / `SPI_gettypeid` /
@@ -123,7 +123,7 @@ pub fn SPI_getvalue<'mcx>(
     tuple: &FormedTuple<'_>,
     tupdesc: &TupleDescData<'_>,
     fnumber: i32,
-) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, u8>>> {
     // SPI_result = 0;
     set_spi_result(0);
 

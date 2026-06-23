@@ -5,12 +5,12 @@
 //! caller must have copied the tree earlier. The repo's mutator model
 //! (`&mut Node -> bool`) is exactly this in-place convention, so the C
 //! `expression_tree_walker`-shaped mutator maps directly onto
-//! [`nodes_core::node_walker::expression_tree_walker_mut`] /
+//! [`::nodes_core::node_walker::expression_tree_walker_mut`] /
 //! [`query_tree_mutator`].
 
 #![allow(non_snake_case)]
 
-use nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
+use ::nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::ExprRelids;

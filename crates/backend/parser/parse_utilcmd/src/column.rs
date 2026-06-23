@@ -13,8 +13,8 @@
 
 use mcx::{Mcx, PgString, PgVec};
 
-use utils_error::ereport;
-use types_core::Oid;
+use ::utils_error::ereport;
+use ::types_core::Oid;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR};
 
 use ::nodes::ddlnodes::{
@@ -42,8 +42,8 @@ use crate::fk_check_attrs::transformConstraintAttrs;
 use alloc::string::ToString;
 
 use parse_type::{typenameType, typeTypeCollation, typeTypeId, LookupCollation};
-use types_core::OidIsValid;
-use types_error::ERRCODE_DATATYPE_MISMATCH;
+use ::types_core::OidIsValid;
+use ::types_error::ERRCODE_DATATYPE_MISMATCH;
 
 /// `transformColumnDefinition` — transform one column definition.
 pub fn transformColumnDefinition<'mcx>(
@@ -56,7 +56,7 @@ pub fn transformColumnDefinition<'mcx>(
     // pointer at entry and mutates it in place. Since nothing reads cxt.columns
     // until all columns are processed, we keep the (owned) `column` local and
     // push the finished node at the end (equivalent).
-    let column_node = mcx::PgBox::into_inner(column);
+    let column_node = ::mcx::PgBox::into_inner(column);
     let column_tag = column_node.node_tag();
     let mut column = match column_node.into_columndef() {
         Some(c) => c,
@@ -103,7 +103,7 @@ pub fn transformColumnDefinition<'mcx>(
     // Do necessary work on the column type declaration (catalog-bound: verify
     // the type + any COLLATE via the seam).
     if column.typeName.is_some() {
-        let column_node = mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?)?)?;
+        let column_node = ::mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?)?)?;
         crate::coltype::transformColumnType(mcx, &cxt.pstate, column_node.as_ref())?;
     }
 
@@ -130,7 +130,7 @@ pub fn transformColumnDefinition<'mcx>(
 
         let snamenode = A_Const {
             // snamenode->val.node.type = T_String; snamenode->val.sval.sval = qstring;
-            val: Some(mcx::alloc_in(
+            val: Some(::mcx::alloc_in(
                 mcx,
                 Node::mk_string(mcx, ::nodes::value::StringNode { sval: qstring })?,
             )?),
@@ -138,12 +138,12 @@ pub fn transformColumnDefinition<'mcx>(
             location: -1,
         };
         let castnode = TypeCast {
-            arg: Some(mcx::alloc_in(mcx, Node::mk_a_const(mcx, snamenode)?)?),
-            typeName: Some(mcx::alloc_in(mcx, system_type_name(mcx, "regclass")?)?),
+            arg: Some(::mcx::alloc_in(mcx, Node::mk_a_const(mcx, snamenode)?)?),
+            typeName: Some(::mcx::alloc_in(mcx, system_type_name(mcx, "regclass")?)?),
             location: -1,
         };
         let mut funccall_args: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-        funccall_args.push(mcx::alloc_in(mcx, Node::mk_type_cast(mcx, castnode)?)?);
+        funccall_args.push(::mcx::alloc_in(mcx, Node::mk_type_cast(mcx, castnode)?)?);
         let funccallnode = FuncCall {
             funcname: system_func_name(mcx, "nextval")?,
             args: funccall_args,
@@ -160,13 +160,13 @@ pub fn transformColumnDefinition<'mcx>(
         let constraint = Constraint {
             contype: CONSTR_DEFAULT,
             location: -1,
-            raw_expr: Some(mcx::alloc_in(mcx, Node::mk_func_call(mcx, funccallnode)?)?),
+            raw_expr: Some(::mcx::alloc_in(mcx, Node::mk_func_call(mcx, funccallnode)?)?),
             cooked_expr: None,
             ..default_constraint(mcx)
         };
         column
             .constraints
-            .push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, constraint)?)?);
+            .push(::mcx::alloc_in(mcx, Node::mk_constraint(mcx, constraint)?)?);
 
         // have a not-null constraint added later
         need_notnull = true;
@@ -322,7 +322,7 @@ pub fn transformColumnDefinition<'mcx>(
                         .into_error());
                 }
                 // column->raw_default = constraint->raw_expr;
-                column.raw_default = match mcx::PgBox::into_inner(constraint).into_constraint() {
+                column.raw_default = match ::mcx::PgBox::into_inner(constraint).into_constraint() {
                     Some(c) => c.raw_expr,
                     None => None,
                 };
@@ -344,7 +344,7 @@ pub fn transformColumnDefinition<'mcx>(
                 }
 
                 // ctype = typenameType(...); typeOid = ctype->oid (catalog seam).
-                let column_node = mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?)?)?;
+                let column_node = ::mcx::alloc_in(mcx, Node::mk_column_def(mcx, column.clone_in(mcx)?)?)?;
                 let type_oid =
                     crate::coltype::transformColumnType(mcx, &cxt.pstate, column_node.as_ref())?;
 
@@ -359,7 +359,7 @@ pub fn transformColumnDefinition<'mcx>(
                         .into_error());
                 }
 
-                let (options, generated_when) = match mcx::PgBox::into_inner(constraint).into_constraint() {
+                let (options, generated_when) = match ::mcx::PgBox::into_inner(constraint).into_constraint() {
                     Some(c) => (c.options, c.generated_when),
                     None => (PgVec::new_in(mcx), 0),
                 };
@@ -401,7 +401,7 @@ pub fn transformColumnDefinition<'mcx>(
                         .errposition(parser_errposition(&cxt.pstate, location))
                         .into_error());
                 }
-                let (generated_kind, raw_expr) = match mcx::PgBox::into_inner(constraint).into_constraint() {
+                let (generated_kind, raw_expr) = match ::mcx::PgBox::into_inner(constraint).into_constraint() {
                     Some(c) => (c.generated_kind, c.raw_expr),
                     None => (0, None),
                 };
@@ -536,7 +536,7 @@ pub fn transformColumnDefinition<'mcx>(
     if need_notnull && !(saw_nullable && column.is_not_null) {
         column.is_not_null = true;
         let nn = make_not_null_constraint(mcx, &colname)?;
-        cxt.nnconstraints.push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
+        cxt.nnconstraints.push(::mcx::alloc_in(mcx, Node::mk_constraint(mcx, nn)?)?);
     }
 
     // If needed, generate ALTER FOREIGN TABLE ... per-column FDW options.
@@ -547,7 +547,7 @@ pub fn transformColumnDefinition<'mcx>(
         // column and rewrap it as a `Node::List` so `ATExecAlterColumnGenericOptions`
         // can read it in phase 2.
         let fdwopts = core::mem::replace(&mut column.fdwoptions, PgVec::new_in(mcx));
-        let def_node = mcx::alloc_in(mcx, Node::mk_list(mcx, fdwopts)?)?;
+        let def_node = ::mcx::alloc_in(mcx, Node::mk_list(mcx, fdwopts)?)?;
         let altercmd = AlterTableCmd {
             subtype: AT_AlterColumnGenericOptions,
             name: match &column.colname {
@@ -563,7 +563,7 @@ pub fn transformColumnDefinition<'mcx>(
         };
         let relation = clone_relation_opt(cxt)?;
         let mut cmds: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-        cmds.push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, altercmd)?)?);
+        cmds.push(::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, altercmd)?)?);
         let stmt = AlterTableStmt {
             relation,
             cmds,
@@ -571,12 +571,12 @@ pub fn transformColumnDefinition<'mcx>(
             missing_ok: false,
         };
         cxt.alist
-            .push(mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, stmt)?)?);
+            .push(::mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, stmt)?)?);
     }
 
     // Finally, the (mutated) column itself goes into cxt.columns.
     cxt.columns
-        .push(mcx::alloc_in(mcx, Node::mk_column_def(mcx, column)?)?);
+        .push(::mcx::alloc_in(mcx, Node::mk_column_def(mcx, column)?)?);
 
     Ok(())
 }
@@ -609,7 +609,7 @@ fn opt_clone_str(
 fn clone_relation_opt<'mcx>(cxt: &CreateStmtContext<'mcx>) -> PgResult<Option<NodePtr<'mcx>>> {
     let mcx = cxt.mcx;
     match cxt.relation.as_deref() {
-        Some(n) => Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
+        Some(n) => Ok(Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -618,7 +618,7 @@ fn conflicting_null(
     cxt: &CreateStmtContext<'_>,
     colname: &str,
     location: i32,
-) -> types_error::PgError {
+) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_SYNTAX_ERROR)
         .errmsg(alloc::format!(

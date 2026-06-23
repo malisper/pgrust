@@ -27,9 +27,9 @@
 use mcx::{Mcx, PgString, PgVec};
 use types_core::{ForkNumber, Oid, RelFileNumber, RepOriginId, TimestampTz, TransactionId, XLogRecPtr, INVALID_PROC_NUMBER, InvalidOid, InvalidRepOriginId, InvalidTransactionId};
 use types_error::{PgError, PgResult};
-use types_storage::sinval::SharedInvalMessages;
-use types_storage::RelFileLocator;
-use wal::rmgr::XLogReaderState;
+use ::types_storage::sinval::SharedInvalMessages;
+use ::types_storage::RelFileLocator;
+use ::wal::rmgr::XLogReaderState;
 use wal::{
     xact_completion_apply_feedback, xact_completion_force_sync_commit,
     xact_completion_relcache_init_file_inval, XACT_XINFO_HAS_DBINFO, XACT_XINFO_HAS_DROPPED_STATS,
@@ -40,7 +40,7 @@ use wal::{
     XLOG_XACT_PREPARE,
 };
 
-use rmgrdesc_next::standby_desc_invalidations;
+use ::rmgrdesc_next::standby_desc_invalidations;
 use timestamp_seams as timestamp_seams;
 use common_relpath_seams as relpath_seams;
 
@@ -330,7 +330,7 @@ fn parsed_xlocators<'mcx>(
     data: &[u8],
 ) -> PgResult<PgVec<'mcx, RelFileLocator>> {
     let n = validate_count(data, parsed.nrels, parsed.xlocators_offset, SIZE_OF_REL_FILE_LOCATOR)?;
-    let mut out = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, n)?;
     for i in 0..n {
         out.push(rellocator_at(data, parsed.xlocators_offset, i)?);
     }

@@ -22,10 +22,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{Index, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{Index, Oid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::{CoercionForm, Expr};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
 

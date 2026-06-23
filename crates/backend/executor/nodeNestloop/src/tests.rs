@@ -1,8 +1,8 @@
 //! Tests for nodeNestloop pure (non-seam) logic: the `TupIsNull` predicate
 //! over the EState slot arena and the filtered-tuple instrumentation counters.
 
-use mcx::MemoryContext;
-use types_core::instrument::Instrumentation;
+use ::mcx::MemoryContext;
+use ::types_core::instrument::Instrumentation;
 use ::nodes::executor::{TupleTableSlot, TTS_FLAG_EMPTY};
 use nodes::{EStateData, NestLoopStateData, TupleSlotKind};
 
@@ -58,7 +58,7 @@ fn instr_counters_bump_only_with_instrumentation() {
     assert!(node.js.ps.instrument.is_none());
 
     // With instrument: each call adds 1 to the respective counter.
-    node.js.ps.instrument = Some(mcx::alloc_in(ctx.mcx(), Instrumentation::default()).unwrap());
+    node.js.ps.instrument = Some(::mcx::alloc_in(ctx.mcx(), Instrumentation::default()).unwrap());
     instr_count_filtered1(&mut node);
     instr_count_filtered1(&mut node);
     instr_count_filtered2(&mut node);

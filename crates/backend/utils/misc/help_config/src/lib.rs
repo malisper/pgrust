@@ -27,7 +27,7 @@
 
 use std::fmt::Write as _;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use guc_tables::{
     all_settings, config_group_names, GucContext_Names, GucDefaultValue, GucEnumSetting,
     GucSetting,
@@ -282,7 +282,7 @@ fn type_error() -> PgError {
 mod tests {
     use super::*;
 
-    use guc_tables::GucEnumOptions;
+    use ::guc_tables::GucEnumOptions;
 
     fn find_option(name: &str) -> Option<GucSetting> {
         all_settings().find(|setting| setting.name() == name)

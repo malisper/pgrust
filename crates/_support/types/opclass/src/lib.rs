@@ -13,7 +13,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// `T_CreateOpClassStmt` (nodes/nodetags.h) — values verified against
 /// PostgreSQL 18.3.

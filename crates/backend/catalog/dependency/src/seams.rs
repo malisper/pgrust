@@ -5,9 +5,9 @@
 //! engine.
 
 use dependency_seams as seams;
-use mcx::MemoryContext;
-use types_catalog::catalog_dependency::{DependencyType, ObjectAddress, ObjectAddresses};
-use types_error::PgResult;
+use ::mcx::MemoryContext;
+use ::types_catalog::catalog_dependency::{DependencyType, ObjectAddress, ObjectAddresses};
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::DropBehavior;
 
@@ -75,7 +75,7 @@ fn seam_perform_multiple_deletions(
     behavior: DropBehavior,
     flags: i32,
 ) -> PgResult<()> {
-    let addrs = types_catalog::catalog_dependency::ObjectAddresses {
+    let addrs = ::types_catalog::catalog_dependency::ObjectAddresses {
         refs: objects.to_vec(),
         extras: Vec::new(),
         numrefs: objects.len() as i32,

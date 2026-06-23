@@ -40,7 +40,7 @@ use std::collections::VecDeque;
 
 use ipc_shmem_seams as shmem;
 
-use utils_error::errno::current_errno;
+use ::utils_error::errno::current_errno;
 use utils_error::{elog, ereport, PgError, PgResult};
 use types_error::{
     ErrorLocation, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR,
@@ -54,7 +54,7 @@ fn here(funcname: &str) -> ErrorLocation {
 
 /// `dlog(level, msg)` for a sub-ERROR level (DEBUG/LOG), which never returns an
 /// `Err`; the `Result` is discarded to mirror C's `void` `dlog()`.
-fn dlog(level: types_error::ErrorLevel, message: String) {
+fn dlog(level: ::types_error::ErrorLevel, message: String) {
     let _ = elog(level, message);
 }
 
@@ -66,7 +66,7 @@ use slru::{
 };
 use lwlock::{LWLockAcquire, LWLockAcquireMain, LWLockRelease, MainLWLockGuard};
 
-use init_small::globals;
+use ::init_small::globals;
 
 use multixact_seams as mx_seams;
 use transam_seams as transam_seams;
@@ -85,15 +85,15 @@ use twophase_seams as twophase_seams;
 use mcx::{Mcx, MemoryContext, PgVec};
 
 use types_core::{MultiXactId, MultiXactOffset, Oid, Size, TransactionId, BLCKSZ as BLCKSZ_U32};
-use types_storage::storage::{LWLockMode, LW_EXCLUSIVE, MULTI_XACT_GEN_LOCK, MULTI_XACT_TRUNCATION_LOCK};
+use ::types_storage::storage::{LWLockMode, LW_EXCLUSIVE, MULTI_XACT_GEN_LOCK, MULTI_XACT_TRUNCATION_LOCK};
 use types_storage::{
     LWTRANCHE_MULTIXACTMEMBER_BUFFER, LWTRANCHE_MULTIXACTMEMBER_SLRU,
     LWTRANCHE_MULTIXACTOFFSET_BUFFER, LWTRANCHE_MULTIXACTOFFSET_SLRU,
 };
-use types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler};
-use wal::rmgr::XLogReaderState;
-use wal::wal::{RM_MULTIXACT_ID, XLR_INFO_MASK};
-use xlog_records::multixact::{
+use ::types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler};
+use ::wal::rmgr::XLogReaderState;
+use ::wal::wal::{RM_MULTIXACT_ID, XLR_INFO_MASK};
+use ::xlog_records::multixact::{
     xl_multixact_create, xl_multixact_truncate, MultiXactMember, MultiXactStatus,
     MAX_MULTI_XACT_STATUS, SIZE_OF_MULTI_XACT_CREATE, SIZE_OF_MULTI_XACT_TRUNCATE,
     XLOG_MULTIXACT_CREATE_ID, XLOG_MULTIXACT_TRUNCATE_ID, XLOG_MULTIXACT_ZERO_MEM_PAGE,
@@ -2789,7 +2789,7 @@ pub fn init_seams() {
             Ok(true)
         } else {
             match detail {
-                Some(d) => Err(types_error::PgError::error(d)),
+                Some(d) => Err(::types_error::PgError::error(d)),
                 None => Ok(false),
             }
         }
@@ -2804,7 +2804,7 @@ pub fn init_seams() {
             Ok(true)
         } else {
             match detail {
-                Some(d) => Err(types_error::PgError::error(d)),
+                Some(d) => Err(::types_error::PgError::error(d)),
                 None => Ok(false),
             }
         }
@@ -2823,7 +2823,7 @@ fn get_multi_xact_id_members_seam<'mcx>(
 ) -> PgResult<PgVec<'mcx, MultiXactMember>> {
     let members = GetMultiXactIdMembers(multi, allow_old, only_lockers)?;
     let members = members.unwrap_or_default();
-    let mut out = mcx::vec_with_capacity_in(mcx, members.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, members.len())?;
     for m in members {
         out.push(m);
     }

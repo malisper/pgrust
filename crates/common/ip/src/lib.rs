@@ -7,10 +7,10 @@
 //!
 //! The C API hands back a `struct addrinfo *` linked list freed with
 //! `pg_freeaddrinfo_all`, and `getnameinfo` writes into caller `char` buffers.
-//! Here the list is an owned `Vec<net::PgAddrInfo>` (dropping it is
+//! Here the list is an owned `Vec<::net::PgAddrInfo>` (dropping it is
 //! `pg_freeaddrinfo_all`), and the name-info out-buffers are optional `String`s
 //! filled only when requested. The socket address is carried in
-//! `net::SockAddr` whose `addr` field is the platform
+//! `::net::SockAddr` whose `addr` field is the platform
 //! `struct sockaddr_storage` bytes and `salen` the valid length, exactly as C.
 //!
 //! These functions never ereport; they return the resolver's `EAI_*` code.

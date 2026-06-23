@@ -32,15 +32,15 @@
 extern crate alloc;
 
 use nodeTidrangescan_seams as seam;
-use mcx::vec_with_capacity_in;
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
+use ::mcx::vec_with_capacity_in;
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
 use ::nodes::execnodes::{EStateData, ScanStateData};
 use ::nodes::executor::TTS_FLAG_EMPTY;
 use ::nodes::nodetidrangescan::TidRangeScan;
 use ::nodes::primnodes::Expr;
-use types_tuple::heaptuple::{ItemPointerData, SelfItemPointerAttributeNumber};
-use mcx::PgBox;
+use ::types_tuple::heaptuple::{ItemPointerData, SelfItemPointerAttributeNumber};
+use ::mcx::PgBox;
 use ::nodes::execexpr::ExprState;
 use tidrange::{OperandSide, TidExprType, TidOpExpr, TidRangeScanState};
 

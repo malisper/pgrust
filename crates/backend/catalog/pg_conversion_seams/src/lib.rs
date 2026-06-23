@@ -4,9 +4,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `FindDefaultConversion(connamespace, for_encoding, to_encoding)`

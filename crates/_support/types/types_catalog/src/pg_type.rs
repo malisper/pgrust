@@ -12,7 +12,7 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_core::primitive::{InvalidOid, Oid};
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_type.h CATALOG / DECLARE_*).

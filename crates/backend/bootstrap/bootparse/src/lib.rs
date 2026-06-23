@@ -21,7 +21,7 @@
 use std::cell::RefCell;
 use std::io::Read;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgString, PgVec};
 use types_error::{ErrorLocation, PgResult};
 use types_error::{DEBUG4, ERROR, FATAL};
@@ -687,7 +687,7 @@ fn boot_declare_index_stmt(mcx: Mcx<'static>, p: &mut Parser, unique: bool) -> P
 
     /* stmt->relation = makeRangeVar(NULL, tablename, -1); */
     let range_var = make_range_var(mcx, &tablename)?;
-    let relation_node = mcx::alloc_in(mcx, nodes::nodes::Node::mk_range_var(mcx, range_var)?)?;
+    let relation_node = ::mcx::alloc_in(mcx, nodes::nodes::Node::mk_range_var(mcx, range_var)?)?;
 
     let stmt = nodes::ddlnodes::IndexStmt {
         idxname: Some(PgString::from_str_in(&idxname, mcx)?),
@@ -825,7 +825,7 @@ fn boot_index_param<'mcx>(
     let string_node = nodes::value::StringNode {
         sval: PgString::from_str_in(&opclass_name, mcx)?,
     };
-    opclass.push(mcx::alloc_in(
+    opclass.push(::mcx::alloc_in(
         mcx,
         nodes::nodes::Node::mk_string(mcx, string_node)?,
     )?);
@@ -841,7 +841,7 @@ fn boot_index_param<'mcx>(
         nulls_ordering: nodes::rawnodes::SortByNulls::SORTBY_NULLS_DEFAULT,
     };
 
-    mcx::alloc_in(mcx, nodes::nodes::Node::mk_index_elem(mcx, elem)?)
+    ::mcx::alloc_in(mcx, nodes::nodes::Node::mk_index_elem(mcx, elem)?)
 }
 
 /* =========================================================================

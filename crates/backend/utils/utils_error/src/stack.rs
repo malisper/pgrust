@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::cell::Cell;
 
-use types_dest::CommandDest;
+use ::types_dest::CommandDest;
 use types_error::{
     ErrorField, ErrorLocation, ErrorLevel, PgError, PgResult, SqlState, ERROR, FATAL, PANIC,
 };
@@ -819,7 +819,7 @@ pub fn GetErrorContextStack() -> Option<String> {
         // Zero-init scratch entry. assoc_context = CurrentMemoryContext has no
         // counterpart in the owned model (no palloc arena); the entry's context
         // String accumulates in-place.
-        let mut error = PgError::new(types_error::LOG, String::new());
+        let mut error = PgError::new(::types_error::LOG, String::new());
         error.saved_errno = Some(errno::current_errno());
         error.domain = Some("postgres".to_owned());
         error.context_domain = Some("postgres".to_owned());
@@ -859,7 +859,7 @@ pub fn GetErrorContextStack() -> Option<String> {
 /// error_occurred flag is set; `false` is returned (skip everything) unless
 /// details are wanted, in which case a frame is pushed at LOG level (the
 /// "all is well" signal `errsave_finish` looks for).
-pub fn errsave_start(context: Option<&mut types_error::SoftErrorContext>, domain: Option<&str>) -> bool {
+pub fn errsave_start(context: Option<&mut ::types_error::SoftErrorContext>, domain: Option<&str>) -> bool {
     let Some(escontext) = context else {
         return errstart(ERROR, domain);
     };
@@ -877,13 +877,13 @@ pub fn errsave_start(context: Option<&mut types_error::SoftErrorContext>, domain
             st.frames.clear();
             return true;
         }
-        let mut error = PgError::new(types_error::LOG, String::new());
+        let mut error = PgError::new(::types_error::LOG, String::new());
         error.saved_errno = Some(errno::current_errno());
         let domain = domain.unwrap_or("postgres");
         error.domain = Some(domain.to_owned());
         error.context_domain = Some(domain.to_owned());
         // Select default errcode based on the assumed elevel of ERROR.
-        error.sqlstate = types_error::ERRCODE_INTERNAL_ERROR;
+        error.sqlstate = ::types_error::ERRCODE_INTERNAL_ERROR;
         st.frames.push(Frame {
             error,
             output_to_server: false,
@@ -905,7 +905,7 @@ pub fn errsave_start(context: Option<&mut types_error::SoftErrorContext>, domain
 /// if errsave_start punted to errstart (frame level >= ERROR), else package
 /// the details into the save context and pop.
 pub fn errsave_finish(
-    context: Option<&mut types_error::SoftErrorContext>,
+    context: Option<&mut ::types_error::SoftErrorContext>,
     filename: Option<&str>,
     lineno: i32,
     funcname: Option<&str>,

@@ -23,14 +23,14 @@
 
 use alloc::vec::Vec;
 
-use types_core::ProcNumber;
-use types_error::PgResult;
-use types_storage::lock::{
+use ::types_core::ProcNumber;
+use ::types_error::PgResult;
+use ::types_storage::lock::{
     AccessExclusiveLock, LOCKMASK, LOCKMODE, LOCKTAG, LOCKBIT_ON,
     LOCKTAG_RELATION, LOCKTAG_VIRTUALTRANSACTION, NoLock,
 };
-use types_storage::storage::NUM_LOCK_PARTITIONS;
-use types_storage::LWLockMode;
+use ::types_storage::storage::NUM_LOCK_PARTITIONS;
+use ::types_storage::LWLockMode;
 
 use crate::state;
 use crate::tables;
@@ -117,7 +117,7 @@ fn check_for_session_and_xact_locks() -> PgResult<()> {
         e.1 |= xact;
         if e.0 && e.1 {
             return Err(pg_error_internal(
-                types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
+                ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED,
                 "cannot PREPARE while holding both session-level and \
                  transaction-level locks on the same object"
                     .into(),
@@ -194,7 +194,7 @@ pub(crate) fn AtPrepare_Locks() -> PgResult<()> {
 
 /// `PostPrepare_Locks(xid)` (lock.c) — transfer this backend's locks to the
 /// prepared transaction's dummy PGPROC and drop the LOCALLOCK entries.
-pub(crate) fn PostPrepare_Locks(xid: types_core::primitive::TransactionId) -> PgResult<()> {
+pub(crate) fn PostPrepare_Locks(xid: ::types_core::primitive::TransactionId) -> PgResult<()> {
     let newproc = twophase::two_phase_get_dummy_proc_number::call(xid, false)?;
     let myproc = proc::my_proc_number::call();
 
@@ -279,7 +279,7 @@ pub(crate) fn PostPrepare_Locks(xid: types_core::primitive::TransactionId) -> Pg
             }
             if release_mask != hold_mask {
                 return Err(pg_error_internal(
-                    types_error::ERRCODE_INTERNAL_ERROR,
+                    ::types_error::ERRCODE_INTERNAL_ERROR,
                     "we seem to have dropped a bit somewhere".into(),
                 ));
             }
@@ -311,7 +311,7 @@ pub(crate) fn PostPrepare_Locks(xid: types_core::primitive::TransactionId) -> Pg
 /// prepared transaction's lock at recovery startup, granting it unconditionally
 /// to the dummy PGPROC.
 pub(crate) fn lock_twophase_recover(
-    xid: types_core::primitive::TransactionId,
+    xid: ::types_core::primitive::TransactionId,
     _info: u16,
     recdata: &[u8],
 ) -> PgResult<()> {
@@ -322,7 +322,7 @@ pub(crate) fn lock_twophase_recover(
 
     if !tables::is_valid_lockmethodid(lockmethodid as u16) {
         return Err(pg_error_internal(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("unrecognized lock method: {lockmethodid}"),
         ));
     }
@@ -361,7 +361,7 @@ pub(crate) fn lock_twophase_recover(
 /// standby startup, acquire the prepared xact's AccessExclusiveLocks on
 /// relations via the standby lock machinery.
 pub(crate) fn lock_twophase_standby_recover(
-    xid: types_core::primitive::TransactionId,
+    xid: ::types_core::primitive::TransactionId,
     _info: u16,
     recdata: &[u8],
 ) -> PgResult<()> {
@@ -372,7 +372,7 @@ pub(crate) fn lock_twophase_standby_recover(
 
     if !tables::is_valid_lockmethodid(lockmethodid as u16) {
         return Err(pg_error_internal(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("unrecognized lock method: {lockmethodid}"),
         ));
     }
@@ -390,7 +390,7 @@ pub(crate) fn lock_twophase_standby_recover(
 /// `lock_twophase_postcommit(xid, info, recdata, len)` (lock.c) — release the
 /// prepared transaction's lock on COMMIT PREPARED.
 pub(crate) fn lock_twophase_postcommit(
-    xid: types_core::primitive::TransactionId,
+    xid: ::types_core::primitive::TransactionId,
     _info: u16,
     recdata: &[u8],
 ) -> PgResult<()> {
@@ -400,7 +400,7 @@ pub(crate) fn lock_twophase_postcommit(
 
     if !tables::is_valid_lockmethodid(lockmethodid as u16) {
         return Err(pg_error_internal(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("unrecognized lock method: {lockmethodid}"),
         ));
     }
@@ -412,7 +412,7 @@ pub(crate) fn lock_twophase_postcommit(
 /// `lock_twophase_postabort(xid, info, recdata, len)` (lock.c) — identical to
 /// the COMMIT PREPARED case.
 pub(crate) fn lock_twophase_postabort(
-    xid: types_core::primitive::TransactionId,
+    xid: ::types_core::primitive::TransactionId,
     info: u16,
     recdata: &[u8],
 ) -> PgResult<()> {
@@ -431,20 +431,20 @@ pub(crate) fn GetLockConflicts<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     locktag: &LOCKTAG,
     lockmode: LOCKMODE,
-) -> PgResult<mcx::PgVec<'mcx, types_storage::storage::VirtualTransactionId>> {
-    use types_storage::storage::VirtualTransactionId;
+) -> PgResult<mcx::PgVec<'mcx, ::types_storage::storage::VirtualTransactionId>> {
+    use ::types_storage::storage::VirtualTransactionId;
 
     let lockmethodid = locktag.locktag_lockmethodid;
     if !tables::is_valid_lockmethodid(lockmethodid as u16) {
         return Err(pg_error_internal(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("unrecognized lock method: {lockmethodid}"),
         ));
     }
     let num_modes = tables::num_lock_modes(lockmethodid as u16);
     if lockmode <= 0 || lockmode > num_modes {
         return Err(pg_error_internal(
-            types_error::ERRCODE_INTERNAL_ERROR,
+            ::types_error::ERRCODE_INTERNAL_ERROR,
             format!("unrecognized lock mode: {lockmode}"),
         ));
     }
@@ -504,9 +504,9 @@ pub(crate) fn GetLockConflicts<'mcx>(
 /// primary PROCLOCK table is scanned.
 pub(crate) fn GetLockStatusData<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, types_storage::lock::LockInstanceData>> {
-    use types_storage::lock::LockInstanceData;
-    use types_storage::storage::VirtualTransactionId;
+) -> PgResult<mcx::PgVec<'mcx, ::types_storage::lock::LockInstanceData>> {
+    use ::types_storage::lock::LockInstanceData;
+    use ::types_storage::storage::VirtualTransactionId;
 
     // Acquire all partition locks in partition-number order.
     let mut guards = Vec::with_capacity(NUM_LOCK_PARTITIONS as usize);
@@ -632,7 +632,7 @@ pub(crate) fn blocking_pids<'mcx>(
     // itself when in a group; INVALID_PROC_NUMBER when not).
     let group_procs: Vec<ProcNumber> = {
         let leader = proc::proc_lock_group_leader::call(blocked_procno);
-        if leader == types_core::INVALID_PROC_NUMBER {
+        if leader == ::types_core::INVALID_PROC_NUMBER {
             alloc::vec![blocked_procno]
         } else {
             proc::proc_lock_group_members::call(leader)
@@ -649,7 +649,7 @@ pub(crate) fn blocking_pids<'mcx>(
         let blocked_wait_mode = proc::proc_wait_lock_mode::call(member);
         let blocked_leader_pid = {
             let leader = proc::proc_lock_group_leader::call(member);
-            let lp = if leader == types_core::INVALID_PROC_NUMBER {
+            let lp = if leader == ::types_core::INVALID_PROC_NUMBER {
                 member
             } else {
                 leader

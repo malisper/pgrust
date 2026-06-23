@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use mcx::{vec_with_capacity_in, MemoryContext};
 use ::nodes::executor::TupleTableSlot;
-use samplescan::TsmRoutine;
+use ::samplescan::TsmRoutine;
 
 thread_local! {
     /// Queue of `table_scan_sample_next_block` verdicts.
@@ -39,7 +39,7 @@ fn log(s: &'static str) {
 
 /// A leaked, thread-lived `MemoryContext` for minting boxes whose `'mcx`
 /// outlives any per-test context.
-fn static_mcx() -> mcx::Mcx<'static> {
+fn static_mcx() -> ::mcx::Mcx<'static> {
     thread_local! {
         static CTX: &'static MemoryContext =
             Box::leak(Box::new(MemoryContext::new("test-samplescan")));
@@ -114,7 +114,7 @@ fn install() {
     pg_prng_uint32_global::set(|| Ok(PRNG_SEED.with(|s| *s.borrow())));
     hashfloat8::set(|_| Ok(0));
 
-    get_tsm_routine_oid::set(|_mcx, _handler| mcx::alloc_in(static_mcx(), zeroed_tsm_routine()));
+    get_tsm_routine_oid::set(|_mcx, _handler| ::mcx::alloc_in(static_mcx(), zeroed_tsm_routine()));
     tsm_has_init_sample_scan::set(|_| Ok(false));
     tsm_init_sample_scan::set(|_, _| Ok(()));
     tsm_begin_sample_scan::set(|_, _, _| {
@@ -278,7 +278,7 @@ fn init_rejects_null_repeatable_with_2202g() {
     let ctx = MemoryContext::new("t");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state(&mut estate);
-    st.repeatable = Some(mcx::alloc_in(static_mcx(), Default::default()).unwrap());
+    st.repeatable = Some(::mcx::alloc_in(static_mcx(), Default::default()).unwrap());
     EVAL_ISNULL.with(|n| *n.borrow_mut() = true);
     let err = tablesample_init(&mut st, &mut estate).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_TABLESAMPLE_REPEAT);
@@ -296,7 +296,7 @@ fn init_rejects_null_arg_with_2202h() {
     let mut st = empty_state(&mut estate);
     // One-element args list -> the single arg evaluates to NULL.
     st.args
-        .push(mcx::alloc_in(static_mcx(), Default::default()).unwrap());
+        .push(::mcx::alloc_in(static_mcx(), Default::default()).unwrap());
     EVAL_ISNULL.with(|n| *n.borrow_mut() = true);
     let err = tablesample_init(&mut st, &mut estate).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_TABLESAMPLE_ARGUMENT);
@@ -309,7 +309,7 @@ fn init_begins_scan_and_sets_begun() {
     let ctx = MemoryContext::new("t");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state(&mut estate);
-    st.tsmroutine = Some(mcx::alloc_in(static_mcx(), zeroed_tsm_routine()).unwrap());
+    st.tsmroutine = Some(::mcx::alloc_in(static_mcx(), zeroed_tsm_routine()).unwrap());
     st.ss.ss_ScanTupleSlot = Some(estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap());
     // no args, no REPEATABLE -> use the init seed.
     st.seed = 0x1234;
@@ -346,7 +346,7 @@ fn end_scan_skips_endscan_when_no_scan_desc() {
     let ctx = MemoryContext::new("t");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state(&mut estate);
-    st.tsmroutine = Some(mcx::alloc_in(static_mcx(), zeroed_tsm_routine()).unwrap());
+    st.tsmroutine = Some(::mcx::alloc_in(static_mcx(), zeroed_tsm_routine()).unwrap());
     ExecEndSampleScan(&mut st).unwrap();
     // No scan descriptor present -> table_endscan is skipped.
     assert!(!log_snapshot().contains(&"table_endscan"));
@@ -359,7 +359,7 @@ fn end_scan_calls_tsm_end_when_present() {
     let ctx = MemoryContext::new("t");
     let mut estate = EStateData::new_in(ctx.mcx());
     let mut st = empty_state(&mut estate);
-    st.tsmroutine = Some(mcx::alloc_in(static_mcx(), zeroed_tsm_routine()).unwrap());
+    st.tsmroutine = Some(::mcx::alloc_in(static_mcx(), zeroed_tsm_routine()).unwrap());
     ExecEndSampleScan(&mut st).unwrap();
     // tsm->EndSampleScan present -> the EndSampleScan callback is invoked.
     assert!(log_snapshot().contains(&"tsm_end_sample_scan"));

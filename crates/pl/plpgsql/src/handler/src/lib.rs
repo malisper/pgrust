@@ -34,11 +34,11 @@
 
 mod seam;
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::fmgr::FunctionCallInfoBaseData;
-use fmgr::BuiltinFunction;
-use parsenodes::InlineCodeBlock;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::fmgr::FunctionCallInfoBaseData;
+use ::fmgr::BuiltinFunction;
+use ::parsenodes::InlineCodeBlock;
 use plpgsql::{
     int32, PLpgSQL_resolve_option, PLPGSQL_XCHECK_ALL, PLPGSQL_XCHECK_NONE,
     PLPGSQL_XCHECK_SHADOWVAR, PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT, PLPGSQL_XCHECK_TOOMANYROWS,
@@ -59,7 +59,7 @@ use exec::{FunctionCallArg, FunctionResult};
 // ---------------------------------------------------------------------------
 
 use core::cell::{Cell, OnceCell, RefCell};
-use datum::VARHDRSZ;
+use ::datum::VARHDRSZ;
 
 thread_local! {
     /// Backend-lifetime context for the EXCEPTION handler's SQLSTATE/SQLERRM
@@ -256,8 +256,8 @@ struct ExtraChecksBitmask(int32);
 /// validate the comma-separated keyword list and produce the bitmask `extra`.
 fn extra_checks_guc_check_hook(
     newval: &mut Option<String>,
-    extra: &mut Option<guc_tables::GucHookExtra>,
-    _source: types_guc::GucSource,
+    extra: &mut Option<::guc_tables::GucHookExtra>,
+    _source: ::types_guc::GucSource,
 ) -> PgResult<bool> {
     // A NULL value (the C `newval == NULL`) cannot occur for these GUCs (boot
     // value "none"); treat it as "none".
@@ -271,7 +271,7 @@ fn extra_checks_guc_check_hook(
         Err(detail) => {
             // C: GUC_check_errdetail("%s", detail) + return false. Surface the
             // detail through the check-error channel the GUC layer reads.
-            misc_guc::GUC_check_errdetail(detail);
+            ::misc_guc::GUC_check_errdetail(detail);
             Ok(false)
         }
     }
@@ -280,7 +280,7 @@ fn extra_checks_guc_check_hook(
 /// `GucStringAssignFn` for `plpgsql.extra_warnings`.
 fn extra_warnings_guc_assign_hook(
     _newval: Option<&str>,
-    extra: Option<&guc_tables::GucHookExtra>,
+    extra: Option<&::guc_tables::GucHookExtra>,
 ) {
     if let Some(b) = extra.and_then(|e| e.downcast_ref::<ExtraChecksBitmask>()) {
         plpgsql_extra_warnings_assign_hook(b.0);
@@ -290,7 +290,7 @@ fn extra_warnings_guc_assign_hook(
 /// `GucStringAssignFn` for `plpgsql.extra_errors`.
 fn extra_errors_guc_assign_hook(
     _newval: Option<&str>,
-    extra: Option<&guc_tables::GucHookExtra>,
+    extra: Option<&::guc_tables::GucHookExtra>,
 ) {
     if let Some(b) = extra.and_then(|e| e.downcast_ref::<ExtraChecksBitmask>()) {
         plpgsql_extra_errors_assign_hook(b.0);
@@ -356,10 +356,10 @@ pub fn _pg_init() {
 
 /// `static const struct config_enum_entry variable_conflict_options[]`
 /// (pl_handler.c).
-static VARIABLE_CONFLICT_OPTIONS: &[types_guc::config_enum_entry] = &[
-    types_guc::config_enum_entry { name: "error", val: 0, hidden: false },
-    types_guc::config_enum_entry { name: "use_variable", val: 1, hidden: false },
-    types_guc::config_enum_entry { name: "use_column", val: 2, hidden: false },
+static VARIABLE_CONFLICT_OPTIONS: &[::types_guc::config_enum_entry] = &[
+    ::types_guc::config_enum_entry { name: "error", val: 0, hidden: false },
+    ::types_guc::config_enum_entry { name: "use_variable", val: 1, hidden: false },
+    ::types_guc::config_enum_entry { name: "use_column", val: 2, hidden: false },
 ];
 
 /// The custom-GUC registration block of `_PG_init` (the five
@@ -368,8 +368,8 @@ static VARIABLE_CONFLICT_OPTIONS: &[types_guc::config_enum_entry] = &[
 /// the still-loud xact-callback / rendezvous seams. Idempotent via
 /// [`PG_INIT_INITED`]-adjacent guard in the caller.
 pub fn register_custom_gucs() {
-    use misc_guc::custom;
-    use guc_tables::GucVarAccessors;
+    use ::misc_guc::custom;
+    use ::guc_tables::GucVarAccessors;
     use types_guc::{GUC_LIST_INPUT, PGC_SUSET, PGC_USERSET};
 
     // DefineCustomEnumVariable("plpgsql.variable_conflict", …)
@@ -468,8 +468,8 @@ pub fn register_custom_gucs() {
 /// flat image; a `Cstring` is the NUL-excluded text bytes. The `Expanded` /
 /// `Internal` arms are never a PL/pgSQL scalar argument/value (no flat image),
 /// so they degrade to `None` (treated as by-value — C never reaches them here).
-fn ref_payload_image(p: Option<&fmgr::boundary::RefPayload>) -> Option<std::vec::Vec<u8>> {
-    use fmgr::boundary::RefPayload;
+fn ref_payload_image(p: Option<&::fmgr::boundary::RefPayload>) -> Option<std::vec::Vec<u8>> {
+    use ::fmgr::boundary::RefPayload;
     match p {
         Some(RefPayload::Varlena(b)) => Some(b.clone()),
         Some(RefPayload::Composite(b)) => Some(b.clone()),
@@ -529,7 +529,7 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<D
         let result: FunctionResult = if seam::called_as_trigger(fcinfo) {
             // PointerGetDatum(plpgsql_exec_trigger(func, trigdata))
             let trigdata = seam::take_trigger_data(fcinfo);
-            let d = exec::plpgsql_exec_trigger(&func, trigdata)?;
+            let d = ::exec::plpgsql_exec_trigger(&func, trigdata)?;
             FunctionResult {
                 value: d,
                 isnull: false,
@@ -538,7 +538,7 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<D
             }
         } else if seam::called_as_event_trigger(fcinfo) {
             let trigdata = seam::take_event_trigger_data(fcinfo);
-            exec::plpgsql_exec_event_trigger(&func, trigdata)?;
+            ::exec::plpgsql_exec_event_trigger(&func, trigdata)?;
             // no return value in this case
             FunctionResult {
                 value: Datum::null(),
@@ -547,7 +547,7 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<D
                 rettype: 0,
             }
         } else {
-            exec::plpgsql_exec_function(
+            ::exec::plpgsql_exec_function(
                 &func,
                 &args,
                 None,
@@ -568,7 +568,7 @@ pub fn plpgsql_call_handler(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<D
         // directly (`byref == None`).
         let ret = match result.byref {
             Some(image) if !result.isnull => {
-                fcinfo.set_ref_result(fmgr::boundary::RefPayload::Varlena(image));
+                fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Varlena(image));
                 Datum::from_usize(0)
             }
             _ => result.value,
@@ -638,7 +638,7 @@ pub fn plpgsql_inline_handler(codeblock: InlineCodeBlock) -> PgResult<()> {
     // Result-native; a body SQL error arrives as `Err` and propagates with `?`
     // (the DO-block PG_CATCH resource flush is the SPI/executor substrate, still
     // owned by the surrounding bracket).
-    let _result = exec::plpgsql_exec_function(
+    let _result = ::exec::plpgsql_exec_function(
         &func,
         &[],
         simple_eval_estate,
@@ -766,14 +766,14 @@ const LIBRARY: &str = "plpgsql";
 /// `plpgsql_inline_handler` / `plpgsql_validator`) named by the
 /// `pg_proc.probin = '$libdir/plpgsql'` rows the extension creates resolve here
 /// (api_version 1). Returns `None` for an unknown symbol.
-fn lookup(function: &str) -> Option<fmgr::LoadedExternalFunc> {
-    let user_fn: fmgr::fmgr::PGFunction = match function {
+fn lookup(function: &str) -> Option<::fmgr::LoadedExternalFunc> {
+    let user_fn: ::fmgr::fmgr::PGFunction = match function {
         "plpgsql_call_handler" => Some(plpgsql_call_handler_pg),
         "plpgsql_inline_handler" => Some(plpgsql_inline_handler_pg),
         "plpgsql_validator" => Some(plpgsql_validator_pg),
         _ => return None,
     };
-    Some(fmgr::LoadedExternalFunc {
+    Some(::fmgr::LoadedExternalFunc {
         user_fn,
         api_version: 1,
     })
@@ -801,7 +801,7 @@ fn register_handler_builtins() {
             retset: false,
             func: None,
         },
-        plpgsql_call_handler_native as fmgr::PgFnNative,
+        plpgsql_call_handler_native as ::fmgr::PgFnNative,
     )]);
     // `plpgsql_inline_handler` / `plpgsql_validator` are Result-native: their
     // cores already return `PgResult`, so they register the native callable and
@@ -816,7 +816,7 @@ fn register_handler_builtins() {
                 retset: false,
                 func: None,
             },
-            plpgsql_inline_handler_native as fmgr::PgFnNative,
+            plpgsql_inline_handler_native as ::fmgr::PgFnNative,
         ),
         (
             BuiltinFunction {
@@ -827,7 +827,7 @@ fn register_handler_builtins() {
                 retset: false,
                 func: None,
             },
-            plpgsql_validator_native as fmgr::PgFnNative,
+            plpgsql_validator_native as ::fmgr::PgFnNative,
         ),
     ]);
 }
@@ -849,18 +849,18 @@ pub fn init_seams() {
     // layered below SPI and reaches the SPI plan surface through this seam; the
     // handler (the top layer, with SPI access) installs it. The exec-seams
     // bridge types map 1:1 to the SPI `spi_eval_expr` value types.
-    plpgsql_exec_seams::exec_eval_expr_via_spi::set(
+    ::plpgsql_exec_seams::exec_eval_expr_via_spi::set(
         |query: String,
          parse_mode,
          parse_state,
-         datum_snapshot: Vec<Option<plpgsql_exec_seams::EvalParamValue>>,
+         datum_snapshot: Vec<Option<::plpgsql_exec_seams::EvalParamValue>>,
          maxtuples,
          read_only| {
-            let mut resolve = |dno: i32| -> PgResult<spi::EvalParamValue> {
+            let mut resolve = |dno: i32| -> PgResult<::spi::EvalParamValue> {
                 // setup_param_list reads estate->datums[dno]; the snapshot carries
                 // the value the caller (exec) read out of the live execstate.
                 match datum_snapshot.get(dno as usize).and_then(|o| o.as_ref()) {
-                    Some(v) => Ok(spi::EvalParamValue {
+                    Some(v) => Ok(::spi::EvalParamValue {
                         value: v.value,
                         isnull: v.isnull,
                         typeid: v.typeid,
@@ -868,12 +868,12 @@ pub fn init_seams() {
                         // the param-bind reconstructs the rich `Datum::ByRef`.
                         byref: v.byref.clone(),
                     }),
-                    None => Err(types_error::PgError::error(format!(
+                    None => Err(::types_error::PgError::error(format!(
                         "PL/pgSQL expression references datum {dno} that is not a scalar variable"
                     ))),
                 }
             };
-            let r = spi::spi_eval_expr(
+            let r = ::spi::spi_eval_expr(
                 &query,
                 parse_mode,
                 parse_state,
@@ -881,7 +881,7 @@ pub fn init_seams() {
                 read_only,
                 &mut resolve,
             )?;
-            Ok(plpgsql_exec_seams::EvalExprResult {
+            Ok(::plpgsql_exec_seams::EvalExprResult {
                 value: r.value,
                 isnull: r.isnull,
                 byref: r.byref,
@@ -894,9 +894,9 @@ pub fn init_seams() {
     // Install the final RAISE `ereport(stmt->elog_level, ...)` (pl_exec.c): drive
     // the elog report cycle with the assembled fields. A non-ERROR level reports
     // a message to the client and returns Ok; an ERROR throws (Err).
-    plpgsql_exec_seams::raise_ereport::set(
-        |report: plpgsql_exec_seams::RaiseEreport| {
-            use utils_error::ereport;
+    ::plpgsql_exec_seams::raise_ereport::set(
+        |report: ::plpgsql_exec_seams::RaiseEreport| {
+            use ::utils_error::ereport;
             use types_error::{ErrorLocation, ErrorLevel, SqlState};
 
             let mut b = ereport(ErrorLevel(report.elog_level));
@@ -914,19 +914,19 @@ pub fn init_seams() {
             }
             // err_generic_string(PG_DIAG_*, value) for the diagnostics fields.
             if let Some(v) = report.column {
-                b = b.err_generic_string(types_error::PG_DIAG_COLUMN_NAME, v)?;
+                b = b.err_generic_string(::types_error::PG_DIAG_COLUMN_NAME, v)?;
             }
             if let Some(v) = report.constraint {
-                b = b.err_generic_string(types_error::PG_DIAG_CONSTRAINT_NAME, v)?;
+                b = b.err_generic_string(::types_error::PG_DIAG_CONSTRAINT_NAME, v)?;
             }
             if let Some(v) = report.datatype {
-                b = b.err_generic_string(types_error::PG_DIAG_DATATYPE_NAME, v)?;
+                b = b.err_generic_string(::types_error::PG_DIAG_DATATYPE_NAME, v)?;
             }
             if let Some(v) = report.table {
-                b = b.err_generic_string(types_error::PG_DIAG_TABLE_NAME, v)?;
+                b = b.err_generic_string(::types_error::PG_DIAG_TABLE_NAME, v)?;
             }
             if let Some(v) = report.schema {
-                b = b.err_generic_string(types_error::PG_DIAG_SCHEMA_NAME, v)?;
+                b = b.err_generic_string(::types_error::PG_DIAG_SCHEMA_NAME, v)?;
             }
             // errcontext(): the PL/pgSQL error-context line for a non-ERROR
             // report, supplied by the executor (the ERROR path attaches its own
@@ -950,7 +950,7 @@ pub fn init_seams() {
     // USING option text. The plpgsql value crosses as a bare word; for a
     // by-value type that is the value itself (a by-ref result is the separate
     // by-ref-Datum keystone, which the output function would dereference).
-    plpgsql_exec_seams::convert_value_to_string::set(
+    ::plpgsql_exec_seams::convert_value_to_string::set(
         |value: usize, byref: Option<Vec<u8>>, valtype| {
             let cxt = mcx::MemoryContext::new("PL/pgSQL convert_value_to_string");
             let mcx = cxt.mcx();
@@ -960,7 +960,7 @@ pub fn init_seams() {
             // varlena/cstring image is carried out-of-band in `byref`; build the
             // canonical by-ref Datum so the output function reads the real value
             // (C: the Datum *is* the pointer). A by-value type uses the bare word.
-            use types_tuple::heaptuple::Datum as CanonDatum;
+            use ::types_tuple::heaptuple::Datum as CanonDatum;
             let datum = match byref {
                 Some(image) if typisvarlena => CanonDatum::ByRef(mcx::slice_in(mcx, &image)?),
                 Some(image) => {
@@ -998,7 +998,7 @@ pub fn init_seams() {
 
     // Install `plpgsql_recognize_err_condition` (pl_comp.c) — bridge to the
     // compiler's real body (the exception-label table + SQLSTATE parse).
-    plpgsql_exec_seams::recognize_err_condition::set(
+    ::plpgsql_exec_seams::recognize_err_condition::set(
         |condname: String, allow_sqlstate| {
             comp::plpgsql_recognize_err_condition(&condname, allow_sqlstate)
         },
@@ -1013,9 +1013,9 @@ pub fn init_seams() {
     // target type (target typinput, with the target typmod). The no-op relabel
     // case (valtype == reqtype, unconstrained typmod) is handled in-crate and
     // never reaches here.
-    plpgsql_exec_seams::exec_cast_value_via_spi::set(
+    ::plpgsql_exec_seams::exec_cast_value_via_spi::set(
         |value: usize, value_byref, isnull, valtype, _valtypmod, reqtype, reqtypmod| {
-            use plpgsql_exec_seams::CastValueResult;
+            use ::plpgsql_exec_seams::CastValueResult;
             if isnull {
                 // A NULL normally stays NULL across an I/O coercion (the cast is
                 // strict). But when the target is a DOMAIN, C's do_cast_value
@@ -1048,7 +1048,7 @@ pub fn init_seams() {
             // Rebuild the canonical source `Datum`: a by-reference source carries
             // its image in `value_byref` (the bare `value` word is `0` then); a
             // by-value source is the bare scalar word.
-            use types_tuple::heaptuple::Datum as CastDatum;
+            use ::types_tuple::heaptuple::Datum as CastDatum;
             let src_datum = match &value_byref {
                 Some(image) => CastDatum::ByRef(mcx::slice_in(mcx, image)?),
                 None => CastDatum::from_usize(value),
@@ -1189,13 +1189,13 @@ pub fn init_seams() {
             // its owned varlena / cstring image, `datumCopy`'d out of `mcx` so it
             // outlives this working context (mirrors the SPI receiver capture).
             let out = match result {
-                types_tuple::heaptuple::Datum::ByVal(w) => {
+                ::types_tuple::heaptuple::Datum::ByVal(w) => {
                     CastValueResult { value: w, isnull: false, byref: None }
                 }
-                types_tuple::heaptuple::Datum::ByRef(b) => {
+                ::types_tuple::heaptuple::Datum::ByRef(b) => {
                     CastValueResult { value: 0, isnull: false, byref: Some(b.as_slice().to_vec()) }
                 }
-                types_tuple::heaptuple::Datum::Cstring(ref sct) => {
+                ::types_tuple::heaptuple::Datum::Cstring(ref sct) => {
                     CastValueResult {
                         value: 0,
                         isnull: false,
@@ -1215,17 +1215,17 @@ pub fn init_seams() {
     // Install `exec_stmt_execsql` core (pl_exec.c): the SPI plan surface for an
     // embedded DML / SELECT statement (the bridge types map 1:1 to the SPI
     // spi_execsql value types, like exec_eval_expr_via_spi).
-    plpgsql_exec_seams::exec_execsql_via_spi::set(
+    ::plpgsql_exec_seams::exec_execsql_via_spi::set(
         |query: String,
          parse_mode,
          parse_state,
-         datum_snapshot: Vec<Option<plpgsql_exec_seams::EvalParamValue>>,
+         datum_snapshot: Vec<Option<::plpgsql_exec_seams::EvalParamValue>>,
          read_only,
          into,
          tcount| {
-            let mut resolve = |dno: i32| -> PgResult<spi::EvalParamValue> {
+            let mut resolve = |dno: i32| -> PgResult<::spi::EvalParamValue> {
                 match datum_snapshot.get(dno as usize).and_then(|o| o.as_ref()) {
-                    Some(v) => Ok(spi::EvalParamValue {
+                    Some(v) => Ok(::spi::EvalParamValue {
                         value: v.value,
                         isnull: v.isnull,
                         typeid: v.typeid,
@@ -1233,12 +1233,12 @@ pub fn init_seams() {
                         // the param-bind reconstructs the rich `Datum::ByRef`.
                         byref: v.byref.clone(),
                     }),
-                    None => Err(types_error::PgError::error(format!(
+                    None => Err(::types_error::PgError::error(format!(
                         "PL/pgSQL embedded SQL references datum {dno} that is not a scalar variable"
                     ))),
                 }
             };
-            let r = spi::spi_execsql(
+            let r = ::spi::spi_execsql(
                 &query,
                 parse_mode,
                 parse_state,
@@ -1247,14 +1247,14 @@ pub fn init_seams() {
                 tcount,
                 &mut resolve,
             )?;
-            Ok(plpgsql_exec_seams::ExecsqlResult {
+            Ok(::plpgsql_exec_seams::ExecsqlResult {
                 code: r.code,
                 processed: r.processed,
                 returned_tuptable: r.returned_tuptable,
                 first_row: r
                     .first_row
                     .into_iter()
-                    .map(|c| plpgsql_exec_seams::ExecsqlColumn {
+                    .map(|c| ::plpgsql_exec_seams::ExecsqlColumn {
                         value: c.value,
                         isnull: c.isnull,
                         typeid: c.typeid,
@@ -1274,27 +1274,27 @@ pub fn init_seams() {
     // and hands back every result row's columns (the materialize-all analogue of
     // C's portal-fetch loop; SPI_cursor_open is a separate keystone, so this
     // collects all rows up front — the observable iteration is identical).
-    plpgsql_exec_seams::exec_run_select_via_spi::set(
+    ::plpgsql_exec_seams::exec_run_select_via_spi::set(
         |query: String,
          parse_mode,
          parse_state,
-         datum_snapshot: Vec<Option<plpgsql_exec_seams::EvalParamValue>>,
+         datum_snapshot: Vec<Option<::plpgsql_exec_seams::EvalParamValue>>,
          read_only,
          must_return_tuples| {
-            let mut resolve = |dno: i32| -> PgResult<spi::EvalParamValue> {
+            let mut resolve = |dno: i32| -> PgResult<::spi::EvalParamValue> {
                 match datum_snapshot.get(dno as usize).and_then(|o| o.as_ref()) {
-                    Some(v) => Ok(spi::EvalParamValue {
+                    Some(v) => Ok(::spi::EvalParamValue {
                         value: v.value,
                         isnull: v.isnull,
                         typeid: v.typeid,
                         byref: v.byref.clone(),
                     }),
-                    None => Err(types_error::PgError::error(format!(
+                    None => Err(::types_error::PgError::error(format!(
                         "PL/pgSQL FOR-query references datum {dno} that is not a scalar variable"
                     ))),
                 }
             };
-            let r = spi::spi_execsql_collect(
+            let r = ::spi::spi_execsql_collect(
                 &query,
                 parse_mode,
                 parse_state,
@@ -1302,7 +1302,7 @@ pub fn init_seams() {
                 must_return_tuples,
                 &mut resolve,
             )?;
-            Ok(plpgsql_exec_seams::RunSelectResult {
+            Ok(::plpgsql_exec_seams::RunSelectResult {
                 code: r.code,
                 processed: r.processed,
                 returned_tuptable: r.returned_tuptable,
@@ -1311,7 +1311,7 @@ pub fn init_seams() {
                     .into_iter()
                     .map(|row| {
                         row.into_iter()
-                            .map(|c| plpgsql_exec_seams::ExecsqlColumn {
+                            .map(|c| ::plpgsql_exec_seams::ExecsqlColumn {
                                 value: c.value,
                                 isnull: c.isnull,
                                 typeid: c.typeid,
@@ -1330,28 +1330,28 @@ pub fn init_seams() {
     // (pl_exec.c): the SPI one-shot surface for a dynamic EXECUTE query string,
     // with already-evaluated USING params. Runs SELECT / DML / utility; INTO
     // collects the first row, FOR-IN-EXECUTE collects every row.
-    plpgsql_exec_seams::exec_dynexecute_via_spi::set(
+    ::plpgsql_exec_seams::exec_dynexecute_via_spi::set(
         |query: String,
-         params: Vec<plpgsql_exec_seams::DynUsingParam>,
+         params: Vec<::plpgsql_exec_seams::DynUsingParam>,
          read_only,
          into,
          collect_all,
          tcount,
          must_return_tuples| {
-            let using: Vec<spi::EvalParamValue> = params
+            let using: Vec<::spi::EvalParamValue> = params
                 .into_iter()
-                .map(|p| spi::EvalParamValue {
+                .map(|p| ::spi::EvalParamValue {
                     value: p.value,
                     isnull: p.isnull,
                     typeid: p.typeid,
                     byref: p.byref,
                 })
                 .collect();
-            let r = spi::spi_execsql_dynamic(
+            let r = ::spi::spi_execsql_dynamic(
                 &query, &using, read_only, into, collect_all, tcount, must_return_tuples,
             )?;
-            let map_col = |c: spi::ExecsqlColumn| {
-                plpgsql_exec_seams::ExecsqlColumn {
+            let map_col = |c: ::spi::ExecsqlColumn| {
+                ::plpgsql_exec_seams::ExecsqlColumn {
                     value: c.value,
                     isnull: c.isnull,
                     typeid: c.typeid,
@@ -1360,7 +1360,7 @@ pub fn init_seams() {
                     byref: c.byref,
                 }
             };
-            Ok(plpgsql_exec_seams::DynExecResult {
+            Ok(::plpgsql_exec_seams::DynExecResult {
                 code: r.code,
                 processed: r.processed,
                 returned_tuptable: r.returned_tuptable,
@@ -1381,28 +1381,28 @@ pub fn init_seams() {
     // with SPI access) installs them — thin marshal + delegate, no behavior.
 
     // `SPI_cursor_open_with_paramlist` over a static OPEN query.
-    plpgsql_exec_seams::spi_cursor_open::set(
+    ::plpgsql_exec_seams::spi_cursor_open::set(
         |curname: Option<String>,
          query: String,
          parse_mode,
          parse_state,
          cursor_options,
          read_only,
-         datum_snapshot: Vec<Option<plpgsql_exec_seams::EvalParamValue>>| {
-            let mut resolve = |dno: i32| -> PgResult<spi::EvalParamValue> {
+         datum_snapshot: Vec<Option<::plpgsql_exec_seams::EvalParamValue>>| {
+            let mut resolve = |dno: i32| -> PgResult<::spi::EvalParamValue> {
                 match datum_snapshot.get(dno as usize).and_then(|o| o.as_ref()) {
-                    Some(v) => Ok(spi::EvalParamValue {
+                    Some(v) => Ok(::spi::EvalParamValue {
                         value: v.value,
                         isnull: v.isnull,
                         typeid: v.typeid,
                         byref: v.byref.clone(),
                     }),
-                    None => Err(types_error::PgError::error(format!(
+                    None => Err(::types_error::PgError::error(format!(
                         "PL/pgSQL cursor query references datum {dno} that is not a scalar variable"
                     ))),
                 }
             };
-            spi::spi_cursor_open_plpgsql(
+            ::spi::spi_cursor_open_plpgsql(
                 curname.as_deref(),
                 &query,
                 parse_mode,
@@ -1415,22 +1415,22 @@ pub fn init_seams() {
     );
 
     // `SPI_cursor_parse_open` over an OPEN ... FOR EXECUTE dynamic query string.
-    plpgsql_exec_seams::spi_cursor_open_execute::set(
+    ::plpgsql_exec_seams::spi_cursor_open_execute::set(
         |curname: Option<String>,
          query: String,
-         params: Vec<plpgsql_exec_seams::DynUsingParam>,
+         params: Vec<::plpgsql_exec_seams::DynUsingParam>,
          cursor_options,
          read_only| {
-            let using: Vec<spi::EvalParamValue> = params
+            let using: Vec<::spi::EvalParamValue> = params
                 .into_iter()
-                .map(|p| spi::EvalParamValue {
+                .map(|p| ::spi::EvalParamValue {
                     value: p.value,
                     isnull: p.isnull,
                     typeid: p.typeid,
                     byref: p.byref,
                 })
                 .collect();
-            spi::spi_cursor_parse_open(
+            ::spi::spi_cursor_parse_open(
                 curname.as_deref(),
                 &query,
                 &using,
@@ -1441,33 +1441,33 @@ pub fn init_seams() {
     );
 
     // `SPI_cursor_find(name)` — does a cursor of this name exist?
-    plpgsql_exec_seams::spi_cursor_find::set(|name: String| {
-        spi::spi_cursor_find(&name)
+    ::plpgsql_exec_seams::spi_cursor_find::set(|name: String| {
+        ::spi::spi_cursor_find(&name)
     });
 
     // `SPI_scroll_cursor_fetch` / `SPI_scroll_cursor_move` (FETCH / MOVE).
-    plpgsql_exec_seams::spi_cursor_fetch_move::set(
+    ::plpgsql_exec_seams::spi_cursor_fetch_move::set(
         |name: String,
-         direction: plpgsql_exec_seams::CursorFetchDirection,
+         direction: ::plpgsql_exec_seams::CursorFetchDirection,
          count: i64,
          is_move: bool| {
-            use plpgsql_exec_seams::CursorFetchDirection as CFD;
-            use portal::FetchDirection as PFD;
+            use ::plpgsql_exec_seams::CursorFetchDirection as CFD;
+            use ::portal::FetchDirection as PFD;
             let dir = match direction {
                 CFD::Forward => PFD::FETCH_FORWARD,
                 CFD::Backward => PFD::FETCH_BACKWARD,
                 CFD::Absolute => PFD::FETCH_ABSOLUTE,
                 CFD::Relative => PFD::FETCH_RELATIVE,
             };
-            let r = spi::spi_cursor_fetch_move(&name, dir, count, is_move)?;
-            Ok(plpgsql_exec_seams::CursorFetchResult {
+            let r = ::spi::spi_cursor_fetch_move(&name, dir, count, is_move)?;
+            Ok(::plpgsql_exec_seams::CursorFetchResult {
                 processed: r.processed,
                 rows: r
                     .rows
                     .into_iter()
                     .map(|row| {
                         row.into_iter()
-                            .map(|c| plpgsql_exec_seams::ExecsqlColumn {
+                            .map(|c| ::plpgsql_exec_seams::ExecsqlColumn {
                                 value: c.value,
                                 isnull: c.isnull,
                                 typeid: c.typeid,
@@ -1483,8 +1483,8 @@ pub fn init_seams() {
     );
 
     // `SPI_cursor_close(portal)` (CLOSE).
-    plpgsql_exec_seams::spi_cursor_close::set(|name: String| {
-        spi::spi_cursor_close_by_name(&name)
+    ::plpgsql_exec_seams::spi_cursor_close::set(|name: String| {
+        ::spi::spi_cursor_close_by_name(&name)
     });
 
     // Install the array-iteration leg of `exec_stmt_foreach_a` (pl_exec.c). The
@@ -1493,25 +1493,25 @@ pub fn init_seams() {
     // steps `get_element_type` / `DatumGetArrayTypePCopy` / the slice range
     // check / `array_create_iterator` + the full `array_iterate` loop, and
     // materializes every element/slice as a `ForeachItem` in iteration order.
-    plpgsql_exec_seams::foreach_iterate_via_array::set(
+    ::plpgsql_exec_seams::foreach_iterate_via_array::set(
         foreach_iterate_via_array_impl,
     );
     // `get_element_type` for exec_stmt_foreach_a's loop-variable array-ness check.
-    plpgsql_exec_seams::foreach_get_element_type::set(|typid: types_core::Oid| {
+    ::plpgsql_exec_seams::foreach_get_element_type::set(|typid: types_core::Oid| {
         lsyscache_seams::get_element_type::call(typid)
     });
 
     // `plpgsql_check_asserts` GUC read for exec_stmt_assert. The GUC variable is
     // owned in this unit (pl_handler.c); the executor reads it through the seam.
-    plpgsql_exec_seams::plpgsql_check_asserts::set(plpgsql_check_asserts);
+    ::plpgsql_exec_seams::plpgsql_check_asserts::set(plpgsql_check_asserts);
 
     // `plpgsql_extra_warnings` / `plpgsql_extra_errors` live-GUC reads for the
     // executor's runtime too-many-rows / strict-multi-assignment checks.
-    plpgsql_exec_seams::plpgsql_extra_warnings::set(plpgsql_extra_warnings);
-    plpgsql_exec_seams::plpgsql_extra_errors::set(plpgsql_extra_errors);
+    ::plpgsql_exec_seams::plpgsql_extra_warnings::set(plpgsql_extra_warnings);
+    ::plpgsql_exec_seams::plpgsql_extra_errors::set(plpgsql_extra_errors);
 
     // `type_is_rowtype` for exec_stmt_return's composite-result test.
-    plpgsql_exec_seams::type_is_rowtype::set(|typid: types_core::Oid| {
+    ::plpgsql_exec_seams::type_is_rowtype::set(|typid: types_core::Oid| {
         lsyscache_seams::type_is_rowtype::call(typid)
     });
 
@@ -1522,9 +1522,9 @@ pub fn init_seams() {
     // execTuples (BlessTupleDesc), heaptuple (heap_form_tuple /
     // HeapTupleGetDatum) and the compiler's backend-lifetime rowtupdesc table —
     // forms the composite Datum image.
-    plpgsql_exec_seams::form_row_composite_datum::set(
-        |fields: Vec<plpgsql_exec_seams::ExecsqlColumn>, rowtupdesc_handle: u64| {
-            use types_tuple::heaptuple::Datum as CanonDatum;
+    ::plpgsql_exec_seams::form_row_composite_datum::set(
+        |fields: Vec<::plpgsql_exec_seams::ExecsqlColumn>, rowtupdesc_handle: u64| {
+            use ::types_tuple::heaptuple::Datum as CanonDatum;
 
             let cxt = mcx::MemoryContext::new("PL/pgSQL make_tuple_from_row");
             let mcx = cxt.mcx();
@@ -1540,8 +1540,8 @@ pub fn init_seams() {
             // the long-lived row->rowtupdesc).
             let formed = comp::rowtupdesc_table::with_rowtupdesc(
                 rowtupdesc_handle,
-                |td: &mut types_tuple::heaptuple::TupleDescData<'static>|
-                 -> PgResult<plpgsql_exec_seams::RowCompositeDatum> {
+                |td: &mut ::types_tuple::heaptuple::TupleDescData<'static>|
+                 -> PgResult<::plpgsql_exec_seams::RowCompositeDatum> {
                     // BlessTupleDesc's guard: only an anonymous RECORD descriptor
                     // is registered; a named-composite descriptor keeps its id.
                     // RECORDOID (2249) — an anonymous composite descriptor.
@@ -1551,7 +1551,7 @@ pub fn init_seams() {
                     let natts = td.natts as usize;
                     // make_tuple_from_row: natts != row->nfields → NULL.
                     if natts != fields.len() {
-                        return Err(types_error::PgError::error(
+                        return Err(::types_error::PgError::error(
                             "row not compatible with its own tupdesc",
                         ));
                     }
@@ -1568,7 +1568,7 @@ pub fn init_seams() {
                         }
                         // fieldtypeid != atttypid → make_tuple_from_row NULL.
                         if f.typeid != att.atttypid {
-                            return Err(types_error::PgError::error(
+                            return Err(::types_error::PgError::error(
                                 "row not compatible with its own tupdesc",
                             ));
                         }
@@ -1588,7 +1588,7 @@ pub fn init_seams() {
                         mcx, td, &values, &nulls,
                     )
                     .map_err(|e| {
-                        types_error::PgError::error(format!("heap_form_tuple failed: {e:?}"))
+                        ::types_error::PgError::error(format!("heap_form_tuple failed: {e:?}"))
                     })?;
                     // HeapTupleGetDatum: set the composite-Datum header fields
                     // (datum length / typeid / typmod) and serialize the flat
@@ -1597,7 +1597,7 @@ pub fn init_seams() {
                         heaptuple::heap_copy_tuple_as_datum(
                             mcx, &tuple, td,
                         )?;
-                    Ok(plpgsql_exec_seams::RowCompositeDatum {
+                    Ok(::plpgsql_exec_seams::RowCompositeDatum {
                         image: composite.to_datum_image(),
                         typeid: td.tdtypeid,
                         typmod: td.tdtypmod,
@@ -1609,7 +1609,7 @@ pub fn init_seams() {
                 // handle == 0 / out-of-range: C's "row variable has no tupdesc"
                 // (the executor already guards handle == 0 before calling, so an
                 // out-of-range handle is the only path here).
-                None => Err(types_error::PgError::error("row variable has no tupdesc")),
+                None => Err(::types_error::PgError::error("row variable has no tupdesc")),
             }
         },
     );
@@ -1618,14 +1618,14 @@ pub fn init_seams() {
     // (pl_exec.c keystone #215). The executor unit is layered below xact; the
     // handler (top layer) bridges to the now-ported xact subxact engine. These
     // are thin delegations — no behavior is added.
-    plpgsql_exec_seams::begin_internal_subtransaction::set(|| {
+    ::plpgsql_exec_seams::begin_internal_subtransaction::set(|| {
         // BeginInternalSubTransaction(NULL).
         transam_xact::BeginInternalSubTransaction(None)
     });
-    plpgsql_exec_seams::release_current_subtransaction::set(|| {
+    ::plpgsql_exec_seams::release_current_subtransaction::set(|| {
         transam_xact::ReleaseCurrentSubTransaction()
     });
-    plpgsql_exec_seams::rollback_and_release_current_subtransaction::set(|| {
+    ::plpgsql_exec_seams::rollback_and_release_current_subtransaction::set(|| {
         // xact's AbortSubTransaction drives AtEOSubXact_SPI(false, mySubid)
         // through the installed seam, restoring the SPI connection (modern PG
         // dropped the explicit SPI_restore_connection call here).
@@ -1639,10 +1639,10 @@ pub fn init_seams() {
     // restore, the outer statement's relation refs / buffer pins (opened under
     // the portal's resource owner) are later forgotten under the wrong owner.
     // `ResourceOwner::NULL` (the C NULL owner) round-trips faithfully.
-    plpgsql_exec_seams::current_resource_owner::set(|| {
+    ::plpgsql_exec_seams::current_resource_owner::set(|| {
         resowner_seams::CurrentResourceOwner::call()
     });
-    plpgsql_exec_seams::set_current_resource_owner::set(|owner| {
+    ::plpgsql_exec_seams::set_current_resource_owner::set(|owner| {
         resowner_seams::set_CurrentResourceOwner::call(owner)
     });
 
@@ -1652,12 +1652,12 @@ pub fn init_seams() {
     // `CurrentMemoryContext`, then `exec_assign_value(..., TEXTOID, -1)` stores
     // it into the target variable (assign_simple_var copies it into the
     // function's datum context with datumCopy). The PL/pgSQL executor here
-    // carries scalar values as bare machine words (`datum::Datum`), so a
+    // carries scalar values as bare machine words (`::datum::Datum`), so a
     // by-reference `text` must cross as a pointer word at a header-ful varlena
     // whose bytes outlive the call. Build that header-ful varlena in a
     // backend-lifetime context (mirroring the palloc) and return the pointer
     // word; the target var keeps it (these short error strings are bounded).
-    plpgsql_exec_seams::cstring_to_text_datum::set(|s: String| {
+    ::plpgsql_exec_seams::cstring_to_text_datum::set(|s: String| {
         // A leaked, backend-lifetime context: the produced `text` outlives this
         // call (it is stored into a PL/pgSQL variable), exactly as C's
         // CStringGetTextDatum palloc lives in the function's execution context.
@@ -1671,7 +1671,7 @@ pub fn init_seams() {
         let mut image = mcx::vec_with_capacity_in::<u8>(ctx.mcx(), bytes.len() + VARHDRSZ)?;
         image.extend_from_slice(&[0u8; VARHDRSZ]);
         image.extend_from_slice(bytes);
-        let varlena = datum::Varlena::from_image(image);
+        let varlena = ::datum::Varlena::from_image(image);
         // DatumGetPointer view: the address of the header-ful varlena image. The
         // image lives in the leaked backend-lifetime context; forget the owning
         // wrapper so its Drop never deallocates (the bytes must persist for the
@@ -1694,7 +1694,7 @@ pub fn init_seams() {
     // value crosses the PL/pgSQL scalar boundary as a bare-word pointer at a
     // fixed 64-byte NUL-padded `NameData` buffer (the raw-name convention), in a
     // backend-lifetime context like the SQLERRM text image above.
-    plpgsql_exec_seams::cstring_to_name_datum::set(|s: String| {
+    ::plpgsql_exec_seams::cstring_to_name_datum::set(|s: String| {
         const NAMEDATALEN: usize = 64;
         let bytes = s.as_bytes();
         // namein truncates at NAMEDATALEN-1 and NUL-pads to NAMEDATALEN.
@@ -1705,13 +1705,13 @@ pub fn init_seams() {
     });
 
     // `get_namespace_name(nspoid)` for TG_TABLE_SCHEMA — delegate to lsyscache.
-    plpgsql_exec_seams::get_namespace_name::set(|nspoid| {
+    ::plpgsql_exec_seams::get_namespace_name::set(|nspoid| {
         let ctx = mcx::MemoryContext::new("PL/pgSQL nspname scratch");
         let r = lsyscache_seams::get_namespace_name::call(ctx.mcx(), nspoid)?
             .map(|s| s.as_str().to_string());
         match r {
             Some(s) => Ok(s),
-            None => Err(types_error::PgError::error(format!(
+            None => Err(::types_error::PgError::error(format!(
                 "cache lookup failed for namespace {nspoid}"
             ))),
         }
@@ -1720,7 +1720,7 @@ pub fn init_seams() {
     // `construct_array(elems, n, TEXTOID, -1, false, 'i')` for the TG_ARGV
     // text[] promise. Each element is a header-ful `text` varlena; the resulting
     // array varlena rides a bare-word pointer in a backend-lifetime context.
-    plpgsql_exec_seams::construct_text_array_datum::set(|elems| {
+    ::plpgsql_exec_seams::construct_text_array_datum::set(|elems| {
         const TEXTOID: types_core::Oid = 25;
         const TYPALIGN_INT: u8 = b'i';
         let ctx: &'static mcx::MemoryContext = PLPGSQL_ERRVAR_CONTEXT.with(|c| {
@@ -1733,7 +1733,7 @@ pub fn init_seams() {
         // varlena image in `mcx`) per argument; a NULL element rides the nulls
         // bitmap. The images live in the leaked context, so the pointers stay
         // valid through construct_md_array (which copies the bytes in).
-        let mut datums: Vec<datum::datum::Datum> = Vec::with_capacity(elems.len());
+        let mut datums: Vec<::datum::datum::Datum> = Vec::with_capacity(elems.len());
         let mut nulls: Vec<bool> = Vec::with_capacity(elems.len());
         for e in &elems {
             match e {
@@ -1741,13 +1741,13 @@ pub fn init_seams() {
                     let mut image = mcx::vec_with_capacity_in::<u8>(mcx, bytes.len() + VARHDRSZ)?;
                     image.extend_from_slice(&[0u8; VARHDRSZ]);
                     image.extend_from_slice(bytes);
-                    let image = datum::Varlena::from_image(image).into_image();
-                    datums.push(datum::datum::Datum::from_usize(image.as_ptr() as usize));
+                    let image = ::datum::Varlena::from_image(image).into_image();
+                    datums.push(::datum::datum::Datum::from_usize(image.as_ptr() as usize));
                     core::mem::forget(image);
                     nulls.push(false);
                 }
                 None => {
-                    datums.push(datum::datum::Datum::from_usize(0));
+                    datums.push(::datum::datum::Datum::from_usize(0));
                     nulls.push(true);
                 }
             }
@@ -1758,7 +1758,7 @@ pub fn init_seams() {
         // (pl_exec.c PLPGSQL_PROMISE_TG_ARGV: lbs[0] = 0); that is exactly why
         // C builds it with construct_md_array rather than construct_array.
         let lbs = [0i32];
-        let arr = arrayfuncs::construct::construct_md_array(
+        let arr = ::arrayfuncs::construct::construct_md_array(
             mcx,
             &datums,
             if has_nulls { Some(&nulls) } else { None },
@@ -1796,7 +1796,7 @@ pub fn init_seams() {
 /// (dfmgr's builtin-library path). Runs the custom-GUC registration slice
 /// (`DefineCustom*Variable` + `MarkGUCPrefixReserved("plpgsql")`) once per
 /// backend, matching C's `_PG_init` reserving the `plpgsql` prefix at load time.
-fn builtin_pg_init() -> types_error::PgResult<()> {
+fn builtin_pg_init() -> ::types_error::PgResult<()> {
     ensure_custom_gucs_registered();
     Ok(())
 }
@@ -1823,7 +1823,7 @@ fn foreach_iterate_via_array_impl(
     arrtype: types_core::Oid,
     arrtypmod: i32,
     slice: i32,
-) -> PgResult<plpgsql_exec_seams::ForeachIterateResult> {
+) -> PgResult<::plpgsql_exec_seams::ForeachIterateResult> {
     use plpgsql_exec_seams::{ForeachItem, ForeachIterateResult};
     use arrayfuncs::{foundation, sql::ArrayIterateItem};
 
@@ -1837,10 +1837,10 @@ fn foreach_iterate_via_array_impl(
     if elem_type == 0 {
         let tyname = format_type_seams::format_type_be_owned::call(arrtype)
             .unwrap_or_else(|_| format!("type {arrtype}"));
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "FOREACH expression must yield an array, not type {tyname}"
         ))
-        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
+        .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH));
     }
 
     // arr = DatumGetArrayTypePCopy(value); — detoast the on-disk array image into
@@ -1852,10 +1852,10 @@ fn foreach_iterate_via_array_impl(
     // Slice dimension must be less than or equal to array dimension
     //   if (stmt->slice < 0 || stmt->slice > ARR_NDIM(arr))
     if slice < 0 || slice > ndim {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "slice dimension ({slice}) is out of the valid range 0..{ndim}"
         ))
-        .with_sqlstate(types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR));
+        .with_sqlstate(::types_error::ERRCODE_ARRAY_SUBSCRIPT_ERROR));
     }
 
     // Identify iterator result type
@@ -1874,7 +1874,7 @@ fn foreach_iterate_via_array_impl(
     let elem_typlen = mstate.typlen;
 
     // array_iterator = array_create_iterator(arr, stmt->slice, NULL);
-    let mut iterator = arrayfuncs::sql::array_create_iterator(
+    let mut iterator = ::arrayfuncs::sql::array_create_iterator(
         mcx,
         &arr_bytes_detoasted,
         slice,
@@ -1884,7 +1884,7 @@ fn foreach_iterate_via_array_impl(
     // while (array_iterate(array_iterator, &value, &isnull)) { ... }
     let mut items: Vec<ForeachItem> = Vec::new();
     while let Some(item) =
-        arrayfuncs::sql::array_iterate(mcx, &mut iterator)?
+        ::arrayfuncs::sql::array_iterate(mcx, &mut iterator)?
     {
         match item {
             ArrayIterateItem::Scalar { value, isnull } => {
@@ -1952,7 +1952,7 @@ fn foreach_byref_element_image(buf: &[u8], off: usize, typlen: i16) -> Vec<u8> {
     }
     let total = if typlen == -1 {
         // VARSIZE_ANY(DatumGetPointer(src)).
-        arrayfuncs::foundation::varsize_any(buf, off)
+        ::arrayfuncs::foundation::varsize_any(buf, off)
     } else if typlen == -2 {
         // strlen(cstring) + 1 (include the terminating NUL).
         buf[off..]

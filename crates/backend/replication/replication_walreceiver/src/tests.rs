@@ -3,7 +3,7 @@
 
 use super::*;
 
-use types_walreceiver::WalRcvState;
+use ::types_walreceiver::WalRcvState;
 
 #[test]
 fn wakeup_enum_indices_match_c() {

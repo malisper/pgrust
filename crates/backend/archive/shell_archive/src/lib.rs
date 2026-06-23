@@ -26,8 +26,8 @@ extern crate alloc;
 
 use alloc::format;
 
-use utils_error::ereport;
-use mcx::MemoryContext;
+use ::utils_error::ereport;
+use ::mcx::MemoryContext;
 use types_error::{ErrorLocation, PgResult};
 use types_error::{DEBUG1, DEBUG3, FATAL, LOG};
 use types_pgarch::{ArchiveModuleCallbacks, ArchiveModuleState};
@@ -52,7 +52,7 @@ fn here() -> ErrorLocation {
 }
 
 /// Emit a non-throwing report (`ereport` at `< ERROR`).
-fn emit(builder: utils_error::ErrorBuilder) {
+fn emit(builder: ::utils_error::ErrorBuilder) {
     let _ = builder.finish(here());
 }
 

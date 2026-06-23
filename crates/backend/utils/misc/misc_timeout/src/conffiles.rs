@@ -12,8 +12,8 @@
 use std::path::{Component, Path, PathBuf};
 
 use utils_error::{ereport, PgError, PgResult};
-use init_small_seams::data_dir;
-use conffiles_seams::ConfFilesInDir;
+use ::init_small_seams::data_dir;
+use ::conffiles_seams::ConfFilesInDir;
 use types_error::{ErrorLevel, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OUT_OF_MEMORY, ERROR};
 
 /// `AbsoluteConfigLocation(location, calling_file)` — given a possibly-relative

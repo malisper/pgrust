@@ -8,8 +8,8 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgVec};
-use types_cluster::ParseState;
-use types_error::PgResult;
+use ::types_cluster::ParseState;
+use ::types_error::PgResult;
 use ::nodes::primnodes::SubscriptingRef;
 use ::nodes::rawnodes::A_Indices;
 

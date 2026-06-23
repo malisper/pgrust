@@ -14,13 +14,13 @@
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::jointype::{Join, JoinType};
 use ::nodes::nodeindexscan::{Plan, Scan};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, TargetEntry};
 
-use nodes_core::read::{self, Token};
+use ::nodes_core::read::{self, Token};
 
 use crate::{
     elog_error, read_bitmapset_opt_field, read_bool_field, read_enum_field, read_float_field,
@@ -44,17 +44,17 @@ fn next_tok<'a>() -> PgResult<Token<'a>> {
 
 /// `READ_STRING_FIELD` via `nullable_string` (`<>` = NULL/None; `""` = empty;
 /// else debackslash).
-fn read_string<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<mcx::PgString<'mcx>>> {
+fn read_string<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Option<::mcx::PgString<'mcx>>> {
     let _label = next_tok()?;
     let v = next_tok()?;
     if v.bytes.is_empty() {
         return Ok(None);
     }
     if v.bytes == b"\"\"" {
-        return Ok(Some(mcx::PgString::from_str_in("", mcx)?));
+        return Ok(Some(::mcx::PgString::from_str_in("", mcx)?));
     }
     let s = read::debackslash(v.bytes);
-    Ok(Some(mcx::PgString::from_str_in(&s, mcx)?))
+    Ok(Some(::mcx::PgString::from_str_in(&s, mcx)?))
 }
 
 /// `READ_NODE_FIELD` over a single child `Node *` (`<>` = NULL/None).
@@ -1613,9 +1613,9 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodes_core::read::string_to_node;
-    use outfuncs::nodeToString;
-    use mcx::MemoryContext;
+    use ::nodes_core::read::string_to_node;
+    use ::outfuncs::nodeToString;
+    use ::mcx::MemoryContext;
 
     extern crate std;
 
@@ -1656,7 +1656,7 @@ mod tests {
         let ctx = MemoryContext::new("windowagg");
         let mcx = ctx.mcx();
         let mut w = ::nodes::nodewindowagg::WindowAgg::default();
-        w.winname = Some(mcx::PgString::from_str_in("w", mcx).unwrap());
+        w.winname = Some(::mcx::PgString::from_str_in("w", mcx).unwrap());
         w.winref = 1;
         w.partNumCols = 1;
         let mut pc = PgVec::new_in(mcx);
@@ -1685,7 +1685,7 @@ mod tests {
         let mut tf = ::nodes::primnodes::TableFunc::default();
         tf.functype = ::nodes::primnodes::TableFuncType::TFT_XMLTABLE;
         let mut names = PgVec::new_in(mcx);
-        names.push(mcx::PgString::from_str_in("c1", mcx).unwrap());
+        names.push(::mcx::PgString::from_str_in("c1", mcx).unwrap());
         tf.colnames = Some(names);
         let mut types = PgVec::new_in(mcx);
         types.push(23u32);
@@ -1718,7 +1718,7 @@ mod tests {
             testexpr: None,
             paramIds: PgVec::new_in(mcx),
             plan_id: 7,
-            plan_name: Some(mcx::PgString::from_str_in("InitPlan 1", mcx).unwrap()),
+            plan_name: Some(::mcx::PgString::from_str_in("InitPlan 1", mcx).unwrap()),
             firstColType: 23,
             firstColTypmod: -1,
             firstColCollation: 0,
@@ -1800,7 +1800,7 @@ mod tests {
         let mut m = ::nodes::nodeforeigncustom::Material {
             plan: ::nodes::nodeindexscan::Plan::default(),
         };
-        m.plan.lefttree = Some(mcx::alloc_in(mcx, child).unwrap());
+        m.plan.lefttree = Some(::mcx::alloc_in(mcx, child).unwrap());
         let text = assert_framed_round_trip(&Node::mk_material(mcx, m)?);
         assert!(text.starts_with("{MATERIAL :plan.disabled_nodes 0"), "{text}");
         assert!(text.contains(":plan.lefttree {SEQSCAN"), "{text}");

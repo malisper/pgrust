@@ -4,9 +4,9 @@
 //! `LimitOption` / `LimitStateCond` enums consumed by `nodeLimit.c`.
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::int64;
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::int64;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 
 use crate::execexpr::ExprState;
 use crate::execnodes::{PlanStateData, SlotId};

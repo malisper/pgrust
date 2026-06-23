@@ -4,17 +4,17 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{Cost, Oid};
+use ::mcx::Mcx;
+use ::types_core::primitive::{Cost, Oid};
 use ::nodes::primnodes::Expr;
 use pathnodes::{NodeId, PathId, PathNode, PlannerInfo, RelId, Relids, RinfoId};
 
-use nodes_core::makefuncs::make_orclause;
-use equalfuncs_seams::equal_expr;
-use costsize_seams::cost_bitmap_tree_node;
-use clauses::contain_volatile_functions;
+use ::nodes_core::makefuncs::make_orclause;
+use ::equalfuncs_seams::equal_expr;
+use ::costsize_seams::cost_bitmap_tree_node;
+use ::clauses::contain_volatile_functions;
 use pathnode_seams as pathnode;
-use predtest_seams::predicate_implied_by;
+use ::predtest_seams::predicate_implied_by;
 use restrictinfo_seams as restrictinfo;
 use lsyscache_seams as lsyscache;
 
@@ -51,7 +51,7 @@ fn clone_exprs_in(exprs: &[Expr<'_>], mcx: Mcx<'_>) -> Result<Vec<Expr<'static>>
 pub fn build_paths_for_OR<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     clauses: &[RinfoId],
     other_clauses: &[RinfoId],
@@ -413,7 +413,7 @@ fn node_uses_relid(
     mcx: Mcx<'_>,
     root: &mut PlannerInfo,
     op: &Expr,
-    relid: types_core::primitive::Index,
+    relid: ::types_core::primitive::Index,
 ) -> Result<bool, types_error::PgError> {
     let id = root.alloc_node(op.clone_in(mcx)?);
     let varnos = joinpath_seams::pull_varnos::call(root, id);
@@ -431,7 +431,7 @@ fn node_uses_relid(
 pub fn make_bitmap_paths_for_or_group<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     ri: RinfoId,
     other_clauses: &[RinfoId],
@@ -506,7 +506,7 @@ pub fn make_bitmap_paths_for_or_group<'mcx>(
 pub fn generate_bitmap_or_paths<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     clauses: &[RinfoId],
     other_clauses: &[RinfoId],
@@ -700,7 +700,7 @@ pub struct PathClauseUsage {
 pub fn choose_bitmap_and<'mcx>(
     _mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     paths: Vec<PathId>,
 ) -> Result<PathId, types_error::PgError> {

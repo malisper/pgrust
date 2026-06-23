@@ -10,8 +10,8 @@
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, MAX_FORKNUM};
-use types_core::BLCKSZ;
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, MAX_FORKNUM};
+use ::types_core::BLCKSZ;
 
 use crate::file::File;
 use crate::relfilelocator::RelFileLocatorBackend;

@@ -8,7 +8,7 @@ use super::syncscan::*;
 // `ss_search`/`ss_scan_locations_t` are crate-private; re-expose just enough for
 // the tests through this module's parent visibility.
 use crate::syncscan::test_support::{fresh_locations, search};
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, InvalidOid};
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, InvalidOid};
 
 #[test]
 fn report_interval_matches_c() {

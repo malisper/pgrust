@@ -38,15 +38,15 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use types_tuple::Datum;
+use ::mcx::Mcx;
+use ::types_tuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
 use ::nodes::primnodes::Expr;
-use nodes_core::nodefuncs::{expr_typmod, relabel_to_typmod};
-use clauses::estimate_expression_value;
+use ::nodes_core::nodefuncs::{expr_typmod, relabel_to_typmod};
+use ::clauses::estimate_expression_value;
 
-use types_numeric::var::{GenerateSeriesNumericFctx, NumericSign};
+use ::types_numeric::var::{GenerateSeriesNumericFctx, NumericSign};
 use types_numeric::{
     is_valid_numeric_typmod, numeric_is_nan, numeric_is_special, numeric_typmod_precision,
     numeric_typmod_scale,
@@ -407,7 +407,7 @@ pub fn generate_series_numeric_support<'mcx>(
 /// `F_GENERATE_SERIES_NUMERIC_SUPPORT`).
 pub const GENERATE_SERIES_NUMERIC_SUPPORT: types_core::Oid = 6357;
 
-/// The [`SupportRowsFn`](clauses::support_rows::SupportRowsFn)
+/// The [`SupportRowsFn`](::clauses::support_rows::SupportRowsFn)
 /// adapter for `generate_series_numeric_support`: decompose the request's
 /// (const-folded) `FuncExpr` `node` into its argument list and run the kernel in
 /// a transient context. Mirrors the C dispatch reading `((FuncExpr *)
@@ -420,7 +420,7 @@ fn generate_series_numeric_support_rows(
     let Expr::FuncExpr(fexpr) = node else {
         return Ok(None);
     };
-    let cx = mcx::MemoryContext::new("generate_series_numeric_support rows");
+    let cx = ::mcx::MemoryContext::new("generate_series_numeric_support rows");
     // Re-home the call's argument Exprs into the transient context (C reads
     // `((FuncExpr *) req->node)->args` directly; the kernel folds owned clones).
     let mut args: alloc::vec::Vec<Expr> = alloc::vec::Vec::with_capacity(fexpr.args.len());
@@ -433,7 +433,7 @@ fn generate_series_numeric_support_rows(
 /// Register the `generate_series_numeric_support` `SupportRequestRows` kernel
 /// under its pg_proc OID. Called from this crate's `init_seams`.
 pub fn register_series_support_rows() {
-    clauses::support_rows::register_support_rows(
+    ::clauses::support_rows::register_support_rows(
         GENERATE_SERIES_NUMERIC_SUPPORT,
         generate_series_numeric_support_rows,
     );
@@ -470,7 +470,7 @@ fn numeric_bytes_from_datum<'a>(d: &'a Datum<'a>) -> &'a [u8] {
     }
     // Legacy by-value pointer Datum (the c2rust model): chase the pointer.
     unsafe {
-        use datum::VARHDRSZ;
+        use ::datum::VARHDRSZ;
         let ptr = d.as_usize() as *const u8;
         let header = core::slice::from_raw_parts(ptr, VARHDRSZ);
         let word = u32::from_ne_bytes([header[0], header[1], header[2], header[3]]);

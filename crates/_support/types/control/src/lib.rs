@@ -13,7 +13,7 @@ use types_core::{
     TransactionId, XLogRecPtr,
 };
 
-pub use types_core::FullTransactionId;
+pub use ::types_core::FullTransactionId;
 
 // ===========================================================================
 // Constants (catalog/pg_control.h, access/xlogdefs.h).

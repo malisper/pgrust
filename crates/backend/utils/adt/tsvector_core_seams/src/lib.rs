@@ -5,9 +5,9 @@
 //! support functions call into this unit; the owner installs these from its
 //! `init_seams()` when it lands. Until then a call panics loudly.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgResult, SoftErrorContext};
-use tsearch::tsearch::{CheckCondition, QueryItem, TSTernaryValue, TsVectorParseStateHandle};
+use ::tsearch::tsearch::{CheckCondition, QueryItem, TSTernaryValue, TsVectorParseStateHandle};
 
 // ===========================================================================
 // tsvector_parser.c — the shared tsvector/tsquery value tokenizer.

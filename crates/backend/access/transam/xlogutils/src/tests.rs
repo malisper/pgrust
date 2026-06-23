@@ -12,7 +12,7 @@
 use super::*;
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use types_core::primitive::{ProcNumber, FSM_FORKNUM, MAIN_FORKNUM};
+use ::types_core::primitive::{ProcNumber, FSM_FORKNUM, MAIN_FORKNUM};
 
 /// `reachedConsistency` test global.
 static REACHED_CONSISTENCY: AtomicBool = AtomicBool::new(false);

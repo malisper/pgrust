@@ -17,17 +17,17 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use utils_error::ereport;
-use mcx::Mcx;
-use types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use types_error::PgResult;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::types_error::PgResult;
 use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::JsonbValue;
-use types_jsonb::jsonb::{
+use ::types_jsonb::jsonb::{
     jbvType, json_container_is_array, json_container_is_scalar, JsonbIteratorToken,
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
 use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb};
 use funcapi_seams as funcapi;
@@ -390,7 +390,7 @@ fn put_element_rows<'mcx>(
                     varlena_seams::bytes_to_varlena_v::call(mcx, bytes)?
                 } else {
                     // jsonb: bytes already a full varlena (VARHDRSZ + payload).
-                    let mut v = mcx::vec_with_capacity_in::<u8>(mcx, bytes.len())?;
+                    let mut v = ::mcx::vec_with_capacity_in::<u8>(mcx, bytes.len())?;
                     v.extend_from_slice(bytes);
                     Datum::ByRef(v)
                 };

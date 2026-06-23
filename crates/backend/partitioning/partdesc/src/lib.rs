@@ -50,7 +50,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 
 use mcx::{Mcx, MemoryContext, PgBox};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_core::{InvalidOid, TransactionId};
 use types_error::{PgError, PgResult};
 use ::nodes::ddlnodes::PartitionBoundSpec;
@@ -192,11 +192,11 @@ pub fn RelationBuildPartitionDesc<'mcx>(
         let nparts = inhoids.len() as i32;
 
         /* Allocate working arrays for OIDs, leaf flags, and boundspecs. */
-        let mut oids: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, nparts as usize)?;
-        let mut is_leaf: mcx::PgVec<'mcx, bool> =
-            mcx::vec_with_capacity_in(mcx, nparts as usize)?;
-        let mut boundspecs: mcx::PgVec<'mcx, PgBox<'mcx, PartitionBoundSpec<'mcx>>> =
-            mcx::vec_with_capacity_in(mcx, nparts as usize)?;
+        let mut oids: ::mcx::PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, nparts as usize)?;
+        let mut is_leaf: ::mcx::PgVec<'mcx, bool> =
+            ::mcx::vec_with_capacity_in(mcx, nparts as usize)?;
+        let mut boundspecs: ::mcx::PgVec<'mcx, PgBox<'mcx, PartitionBoundSpec<'mcx>>> =
+            ::mcx::vec_with_capacity_in(mcx, nparts as usize)?;
 
         /* Collect bound spec nodes for each partition. */
         let mut restart = false;
@@ -310,7 +310,7 @@ pub fn RelationBuildPartitionDesc<'mcx>(
                 nparts,
                 oids,
                 is_leaf,
-                mcx::vec_with_capacity_in(mcx, 0)?,
+                ::mcx::vec_with_capacity_in(mcx, 0)?,
                 None,
                 detached_exist,
                 detached_xmin,
@@ -325,8 +325,8 @@ pub fn RelationBuildPartitionDesc<'mcx>(
     let mut partdesc = PartitionDescData {
         nparts,
         detached_exist,
-        oids: mcx::vec_with_capacity_in(mcx, 0)?,
-        is_leaf: mcx::vec_with_capacity_in(mcx, 0)?,
+        oids: ::mcx::vec_with_capacity_in(mcx, 0)?,
+        is_leaf: ::mcx::vec_with_capacity_in(mcx, 0)?,
         boundinfo: None,
         last_found_datum_index: 0,
         last_found_part_index: 0,
@@ -345,10 +345,10 @@ pub fn RelationBuildPartitionDesc<'mcx>(
         partdesc.last_found_count = 0;
 
         // partdesc->oids = palloc(nparts * sizeof(Oid));
-        let mut new_oids: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, nparts as usize)?;
+        let mut new_oids: ::mcx::PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, nparts as usize)?;
         new_oids.resize(nparts as usize, InvalidOid);
-        let mut new_is_leaf: mcx::PgVec<'mcx, bool> =
-            mcx::vec_with_capacity_in(mcx, nparts as usize)?;
+        let mut new_is_leaf: ::mcx::PgVec<'mcx, bool> =
+            ::mcx::vec_with_capacity_in(mcx, nparts as usize)?;
         new_is_leaf.resize(nparts as usize, false);
 
         /*
@@ -379,7 +379,7 @@ pub fn RelationBuildPartitionDesc<'mcx>(
         && TransactionIdIsValid(detached_xmin);
 
     // return partdesc;
-    mcx::alloc_in(mcx, partdesc)
+    ::mcx::alloc_in(mcx, partdesc)
 }
 
 /// `castNode(PartitionBoundSpec, stringToNode(TextDatumGetCString(boundDatum)))`
@@ -393,7 +393,7 @@ fn parse_boundspec<'mcx>(
 ) -> PgResult<PgBox<'mcx, PartitionBoundSpec<'mcx>>> {
     let node = read_seams::string_to_node::call(mcx, text)?;
     match PgBox::into_inner(node).into_partitionboundspec() {
-        Some(spec) => mcx::alloc_in(mcx, spec),
+        Some(spec) => ::mcx::alloc_in(mcx, spec),
         None => Err(elog_error(alloc::string::String::from(
             "invalid relpartbound: stringToNode did not yield a PartitionBoundSpec",
         ))),
@@ -451,7 +451,7 @@ impl PartitionDirectoryData {
     /// descriptor and to re-project it on lookup).
     fn mcx(&self) -> Mcx<'static> {
         // SAFETY: extend the borrow of the heap-pinned context to 'static.
-        // Sound by the same construction as `mcx::McxOwned`: the box's address
+        // Sound by the same construction as `::mcx::McxOwned`: the box's address
         // is stable across moves of `self`, `pdir_hash` is dropped before `ctx`
         // (field order), and the 'static descriptors never leave this type at
         // 'static — `PartitionDirectoryLookup` re-shortens every read.
@@ -530,7 +530,7 @@ pub fn PartitionDirectoryLookup<'mcx>(
             // 'static (this function returns only the re-projected copy).
             let c: PgBox<'static, PartitionDescData<'static>> = {
                 let cloned = PartitionDescData::clone_in(&built, dir_mcx)?;
-                mcx::alloc_in(dir_mcx, cloned)?
+                ::mcx::alloc_in(dir_mcx, cloned)?
             };
             c
         };
@@ -546,7 +546,7 @@ pub fn PartitionDirectoryLookup<'mcx>(
         .get(&relid)
         .ok_or_else(|| PgError::error("PartitionDirectoryLookup: descriptor missing after insert"))?;
     let reproj = PartitionDescData::clone_in(cached, mcx)?;
-    mcx::alloc_in(mcx, reproj)
+    ::mcx::alloc_in(mcx, reproj)
 }
 
 /* ---------------------------------------------------------------------------

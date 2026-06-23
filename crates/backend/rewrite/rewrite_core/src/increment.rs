@@ -14,11 +14,11 @@
 #![allow(non_snake_case)]
 
 use alloc::string::ToString;
-use nodes_core::node_walker::{
+use ::nodes_core::node_walker::{
     expression_tree_walker_mut, query_or_expression_tree_mutator, query_tree_mutator,
     range_table_mutator,
 };
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgError, PgResult, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node};

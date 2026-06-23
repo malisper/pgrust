@@ -4,8 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::parsenodes::RoleSpec;
 
 seam_core::seam!(
@@ -62,5 +62,5 @@ seam_core::seam!(
 seam_core::seam!(
     /// `initialize_acl()` (acl.c): set up the ACL framework (role membership
     /// cache). `Err` carries its `ereport` surface.
-    pub fn initialize_acl() -> types_error::PgResult<()>
+    pub fn initialize_acl() -> ::types_error::PgResult<()>
 );

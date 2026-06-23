@@ -67,9 +67,9 @@ use alloc::vec::Vec;
 use mcx::{Mcx, PgBox};
 
 use utils_error::{ereport, PgResult};
-use types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 
-use types_core::primitive::{OffsetNumber, Oid};
+use ::types_core::primitive::{OffsetNumber, Oid};
 use types_core::{InvalidOid, INDEX_MAX_KEYS};
 use gin::{
     GinNullCategory, GinScanEntryData, GinScanKey, GinScanOpaqueData, GinState, TBMIterateResult,
@@ -77,20 +77,20 @@ use gin::{
     GIN_CAT_NULL_KEY, GIN_SEARCH_MODE_ALL, GIN_SEARCH_MODE_DEFAULT, GIN_SEARCH_MODE_EVERYTHING,
     GIN_SEARCH_MODE_INCLUDE_EMPTY,
 };
-use rel::Relation;
-use types_scan::scankey::{InvalidStrategy, ScanKeyData, SK_ISNULL};
-use types_storage::storage::InvalidBuffer;
-use types_tableam::amopaque::AmOpaque;
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber};
+use ::rel::Relation;
+use ::types_scan::scankey::{InvalidStrategy, ScanKeyData, SK_ISNULL};
+use ::types_storage::storage::InvalidBuffer;
+use ::types_tableam::amopaque::AmOpaque;
+use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber};
 
 use bufmgr_seams as bufmgr;
 
 use ginutil as ginutil;
 use ginutil_seams as sx;
-use core_probe::ginlogic::ginInitConsistentFunction;
-use pgstat_seams::pgstat_count_index_scan;
+use ::core_probe::ginlogic::ginInitConsistentFunction;
+use ::pgstat_seams::pgstat_count_index_scan;
 
 #[cfg(test)]
 mod tests;
@@ -119,7 +119,7 @@ fn erase_ginscan<'mcx>(
     mcx: Mcx<'mcx>,
     so: GinScanOpaqueData<'mcx>,
 ) -> PgResult<PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx>> {
-    let boxed: PgBox<'mcx, GinScanOpaqueData<'mcx>> = mcx::alloc_in(mcx, so)?;
+    let boxed: PgBox<'mcx, GinScanOpaqueData<'mcx>> = ::mcx::alloc_in(mcx, so)?;
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn AmOpaque` vtable (the A0 erase pattern).
@@ -168,11 +168,11 @@ pub fn ginbeginscan<'mcx>(
     //     temporary context", ALLOCSET_DEFAULT_SIZES);
     // so->keyCtx = AllocSetContextCreate(CurrentMemoryContext, "Gin scan key
     //     context", ALLOCSET_DEFAULT_SIZES);
-    let temp_ctx = mcx::leak_in(mcx::alloc_in(
+    let temp_ctx = ::mcx::leak_in(::mcx::alloc_in(
         mcx,
         mcx.context().new_child("Gin scan temporary context"),
     )?);
-    let key_ctx = mcx::leak_in(mcx::alloc_in(
+    let key_ctx = ::mcx::leak_in(::mcx::alloc_in(
         mcx,
         mcx.context().new_child("Gin scan key context"),
     )?);
@@ -304,13 +304,13 @@ fn new_scan_entry<'mcx>(
         list: Vec::new(),
         nlist: 0,
         // scanEntry->offset = InvalidOffsetNumber;
-        offset: types_tuple::heaptuple::INVALID_OFFSET_NUMBER,
+        offset: ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER,
         // scanEntry->isFinished = false; scanEntry->reduceResult = false;
         isFinished: false,
         reduceResult: false,
         predictNumberResult: 0,
         // scanEntry->btree — a zeroed GinBtreeData (filled by ginget.c).
-        btree: gin::GinBtreeData::default(),
+        btree: ::gin::GinBtreeData::default(),
     }
 }
 
@@ -392,8 +392,8 @@ fn ginFillScanKey<'mcx>(
         additionalEntries: Vec::new(),
         nadditional: 0,
         entryRes: alloc::vec![0i8; nQueryValues as usize + 1],
-        boolConsistentFn: gin::GinBoolConsistentKind::Shim,
-        triConsistentFn: gin::GinTriConsistentKind::Shim,
+        boolConsistentFn: ::gin::GinBoolConsistentKind::Shim,
+        triConsistentFn: ::gin::GinTriConsistentKind::Shim,
         consistent_fmgr_oid: InvalidOid,
         tri_consistent_fmgr_oid: InvalidOid,
         collation: InvalidOid,
@@ -839,6 +839,6 @@ fn relation_get_index_scan<'mcx>(
 /// `ReleaseBuffer(buffer)` (bufmgr.c). `ginget.c` (ported) pins posting-tree
 /// buffers into a scan entry's `buffer`; `ginFreeScanKeys` releases any valid
 /// pin here on rescan / endscan (ginscan.c:250-251), exactly as ginbtree does.
-fn release_buffer(buffer: types_storage::storage::Buffer) {
+fn release_buffer(buffer: ::types_storage::storage::Buffer) {
     bufmgr::release_buffer::call(buffer)
 }

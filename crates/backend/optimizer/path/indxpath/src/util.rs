@@ -3,7 +3,7 @@
 //! inline node classifiers (`is_notclause`/`get_notclausearg`/
 //! `restriction_is_or_clause`/`is_andclause`).
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use ::nodes::primnodes::{BoolExprType, Expr};
 use pathnodes::{PlannerInfo, Relids, RinfoId};
 
@@ -125,12 +125,12 @@ pub fn relids_add_member(a: Relids, x: i32) -> Relids {
         words.resize(wnum + 1, 0);
     }
     words[wnum] |= 1u64 << (x % BITS_PER_BITMAPWORD);
-    Some(Box::new(pathnodes::Bitmapset { words }))
+    Some(Box::new(::pathnodes::Bitmapset { words }))
 }
 
 /// `bms_copy(a)` over the planner `Relids`.
 pub fn relids_copy(a: &Relids) -> Relids {
-    a.as_ref().map(|b| Box::new(pathnodes::Bitmapset { words: b.words.clone() }))
+    a.as_ref().map(|b| Box::new(::pathnodes::Bitmapset { words: b.words.clone() }))
 }
 
 /// `bms_equal(a, b)` over the planner `Relids`.
@@ -175,7 +175,7 @@ pub fn relids_add_members(a: Relids, b: &Relids) -> Relids {
     for (i, &w) in bw.iter().enumerate() {
         words[i] |= w;
     }
-    Some(Box::new(pathnodes::Bitmapset { words }))
+    Some(Box::new(::pathnodes::Bitmapset { words }))
 }
 
 /// `bms_is_subset(a, b)` over the planner `Relids`.

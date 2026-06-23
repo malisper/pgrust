@@ -460,7 +460,7 @@ fn rescan_with_changed_params_drops_store_and_rescans_child() {
         alloc_in(
             mcx,
             Bitmapset {
-                words: mcx::slice_in(mcx, &[1u64]).unwrap(),
+                words: ::mcx::slice_in(mcx, &[1u64]).unwrap(),
             },
         )
         .unwrap(),

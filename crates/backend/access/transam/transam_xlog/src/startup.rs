@@ -36,13 +36,13 @@ use utils_error::{ereport, PgError, PgResult};
 use control::{DBState, FirstNormalUnloggedLSN};
 use types_core::{TimeLineID, TransactionId, XLogRecPtr};
 use types_error::{ErrorLocation, FATAL, LOG, NOTICE, PANIC};
-use wal::wal::RM_XLOG_ID;
-use wal::xlog_consts::{
+use ::wal::wal::RM_XLOG_ID;
+use ::wal::xlog_consts::{
     RecoveryState, WalLevel, CHECKPOINT_END_OF_RECOVERY, CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE,
     CHECKPOINT_WAIT, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, XLOG_BLCKSZ,
 };
 
-use init_small::globals;
+use ::init_small::globals;
 
 use crate::insert::{
     LocalSetXLogInsertAllowed, WALInsertLockAcquire, WALInsertLockAcquireExclusive,
@@ -88,7 +88,7 @@ fn loc(lineno: i32, func: &str) -> ErrorLocation {
 /// `str_time(tnow)` (xlog.c) — render a `pg_time_t` for the startup log
 /// messages. The C helper uses `pg_strftime` into a static buffer; the message
 /// is purely cosmetic, so render the epoch seconds directly.
-fn str_time(t: types_core::pg_time_t) -> String {
+fn str_time(t: ::types_core::pg_time_t) -> String {
     t.to_string()
 }
 
@@ -495,7 +495,7 @@ pub fn StartupXLOG() -> PgResult<()> {
         let ctl = &mut *xlog_ctl();
         ctl.lastSegSwitchTime = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as types_core::pg_time_t)
+            .map(|d| d.as_secs() as ::types_core::pg_time_t)
             .unwrap_or(0);
         ctl.lastSegSwitchLSN = end_of_log;
     }
@@ -680,7 +680,7 @@ pub fn SeedTransamVariablesFromCheckpoint() -> PgResult<()> {
 /// (`ArchiveRecoveryRequested == false`) it is faithfully skipped, exactly as in
 /// C. The boundary for hot standby is surfaced precisely.
 fn startup_xlog_redo_phase(
-    _check_point: &control::CheckPoint,
+    _check_point: &::control::CheckPoint,
     _was_shutdown: bool,
     have_backup_label: bool,
     have_tblspc_map: bool,
@@ -817,7 +817,7 @@ pub fn PerformRecoveryXLogAction() -> PgResult<bool> {
 /// in place of a full checkpoint).
 pub fn CreateEndOfRecoveryRecord() -> PgResult<()> {
     if !RecoveryInProgress() {
-        return ereport(types_error::ERROR)
+        return ereport(::types_error::ERROR)
             .errmsg("can only be used to end recovery")
             .finish(loc(7446, "CreateEndOfRecoveryRecord"))
             .map(|_| ());
@@ -883,13 +883,13 @@ pub fn CreateOverwriteContrecordRecord(
     new_tli: TimeLineID,
 ) -> PgResult<XLogRecPtr> {
     if !RecoveryInProgress() {
-        return ereport(types_error::ERROR)
+        return ereport(::types_error::ERROR)
             .errmsg("can only be used at end of recovery")
             .finish(loc(7513, "CreateOverwriteContrecordRecord"))
             .map(|_| 0);
     }
     if page_ptr % XLOG_BLCKSZ as u64 != 0 {
-        return ereport(types_error::ERROR)
+        return ereport(::types_error::ERROR)
             .errmsg(format!(
                 "invalid position for missing continuation record {}",
                 page_ptr
@@ -908,7 +908,7 @@ pub fn CreateOverwriteContrecordRecord(
     }
     let recptr = shmem::GetXLogInsertRecPtr();
     if recptr != start_pos {
-        return ereport(types_error::ERROR)
+        return ereport(::types_error::ERROR)
             .errmsg(format!(
                 "invalid WAL insert position {} for OVERWRITE_CONTRECORD",
                 recptr
@@ -947,7 +947,7 @@ pub fn CreateOverwriteContrecordRecord(
     // Check the record was inserted to the right place.
     let proc_last = crate::insert::proc_last_rec_ptr();
     if proc_last != start_pos {
-        return ereport(types_error::ERROR)
+        return ereport(::types_error::ERROR)
             .errmsg(format!(
                 "OVERWRITE_CONTRECORD was inserted to unexpected position {}",
                 proc_last
@@ -1037,7 +1037,7 @@ fn enable_hot_standby() -> bool {
 /// initialization. Called at the start of crash recovery, at a point where no
 /// other process writes fresh WAL data.
 pub fn RemoveTempXlogFiles() -> PgResult<()> {
-    use wal::xlog_consts::XLOGDIR;
+    use ::wal::xlog_consts::XLOGDIR;
 
     // elog(DEBUG2, "removing all temporary WAL segments");
 
@@ -1067,7 +1067,7 @@ pub fn RemoveTempXlogFiles() -> PgResult<()> {
 /// (and create if missing) `pg_wal`, `pg_wal/archive_status`, and
 /// `pg_wal/summaries`.
 pub fn ValidateXLOGDirectoryStructure() -> PgResult<()> {
-    use wal::xlog_consts::XLOGDIR;
+    use ::wal::xlog_consts::XLOGDIR;
 
     // Check for pg_wal; if it doesn't exist, error out.
     if !dir_exists(XLOGDIR) {

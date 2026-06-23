@@ -14,7 +14,7 @@ extern crate alloc;
 extern crate std;
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// `pg_str_endswith` — whether `str` has the suffix `end`.
 pub fn pg_str_endswith(s: &str, end: &str) -> bool {
@@ -254,7 +254,7 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     #[test]
     fn detects_suffixes() {

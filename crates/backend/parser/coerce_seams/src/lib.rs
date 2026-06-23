@@ -4,11 +4,11 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::parsestmt::ParseState;
 use ::nodes::primnodes::{CoercionForm, Expr};
-use parsenodes::CoercionContext;
+use ::parsenodes::CoercionContext;
 
 /// `CoercionPathType` (parser/parse_coerce.h): the kind of coercion pathway
 /// `find_coercion_pathway` resolved between two types.
@@ -75,12 +75,12 @@ seam_core::seam!(
     /// `false`). `Err` carries the inconsistent-polymorphic-types
     /// `ereport(ERROR)` surface.
     pub fn enforce_generic_type_consistency(
-        actual_arg_types: &[types_core::Oid],
-        declared_arg_types: &mut [types_core::Oid],
+        actual_arg_types: &[::types_core::Oid],
+        declared_arg_types: &mut [::types_core::Oid],
         nargs: i32,
-        rettype: types_core::Oid,
+        rettype: ::types_core::Oid,
         allow_poly: bool,
-    ) -> PgResult<types_core::Oid>
+    ) -> PgResult<::types_core::Oid>
 );
 
 seam_core::seam!(
@@ -92,8 +92,8 @@ seam_core::seam!(
     /// `errdetail_internal`. `AggregateCreate` consumes it for the transtype /
     /// mtranstype / result-type validations.
     pub fn check_valid_polymorphic_signature(
-        ret_type: types_core::Oid,
-        declared_arg_types: &[types_core::Oid],
+        ret_type: ::types_core::Oid,
+        declared_arg_types: &[::types_core::Oid],
         nargs: i32,
     ) -> PgResult<Option<String>>
 );
@@ -104,8 +104,8 @@ seam_core::seam!(
     /// one `internal` argument. Returns `None` (C `NULL`) when valid, else
     /// `Some(detail)`. `AggregateCreate` consumes it for the result-type check.
     pub fn check_valid_internal_signature(
-        ret_type: types_core::Oid,
-        declared_arg_types: &[types_core::Oid],
+        ret_type: ::types_core::Oid,
+        declared_arg_types: &[::types_core::Oid],
         nargs: i32,
     ) -> PgResult<Option<String>>
 );

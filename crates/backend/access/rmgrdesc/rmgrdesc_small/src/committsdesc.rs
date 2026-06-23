@@ -1,9 +1,9 @@
 //! `committsdesc.c` — rmgr descriptor routines for
 //! `access/transam/commit_ts.c`.
 
-use mcx::PgString;
-use types_core::uint8;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_core::uint8;
+use ::types_error::PgResult;
 use wal::{xl_commit_ts_truncate, DecodedXLogRecord, XLR_INFO_MASK};
 
 use crate::util::{appendf, read_i64, record_truncated};
@@ -47,7 +47,7 @@ pub fn commit_ts_identify(info: uint8) -> Option<&'static str> {
 /// rmgr table invokes `rm_desc`.
 pub fn commit_ts_desc_seam(
     buf: &mut PgString<'_>,
-    record: &wal::rmgr::XLogReaderState<'_>,
+    record: &::wal::rmgr::XLogReaderState<'_>,
 ) -> PgResult<()> {
     let record = record
         .record

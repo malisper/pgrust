@@ -339,7 +339,7 @@ pub(crate) fn ereport_commerror_replication_timeout() {
 /// `WalSndSignals()` body — install the walsender signal handlers
 /// (`pqsignal(...)` block), mirroring `WalReceiverMain`'s setup.
 pub(crate) fn install_walsnd_signals() {
-    use signal::SigHandler;
+    use ::signal::SigHandler;
     let pqsignal = port_pqsignal_seams::pqsignal::call;
 
     fn config_reload(_sig: i32) {

@@ -39,7 +39,7 @@
 
 use mcx::{Mcx, PgBox, PgString};
 
-use types_core::InvalidOid;
+use ::types_core::InvalidOid;
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
@@ -51,11 +51,11 @@ use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
 use ::nodes::primnodes::{CoercionForm, CollateExpr, Expr, NextValueExpr, TargetEntry};
 use ::nodes::rawnodes::RangeTblRef;
 
-use nodes_core::bitmapset::{bms_add_member, bms_is_member, bms_next_member};
-use nodes_core::makefuncs::make_target_entry;
-use nodes_core::nodefuncs::{expr_collation, expr_type};
-use rewrite_core::change::ChangeVarNodes;
-use rewrite_core::replace::{ReplaceVarsFromTargetList, ReplaceVarsNoMatchOption};
+use ::nodes_core::bitmapset::{bms_add_member, bms_is_member, bms_next_member};
+use ::nodes_core::makefuncs::make_target_entry;
+use ::nodes_core::nodefuncs::{expr_collation, expr_type};
+use ::rewrite_core::change::ChangeVarNodes;
+use ::rewrite_core::replace::{ReplaceVarsFromTargetList, ReplaceVarsNoMatchOption};
 
 mod engine;
 mod seams;
@@ -112,7 +112,7 @@ pub fn build_column_default<'mcx>(
             seqid,
             typeId: atttype,
         });
-        return Ok(Some(mcx::alloc_in(mcx, nve)?));
+        return Ok(Some(::mcx::alloc_in(mcx, nve)?));
     }
 
     // If relation has a default for this column, fetch that expression.
@@ -179,7 +179,7 @@ pub fn build_column_default<'mcx>(
         .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
     };
 
-    Ok(Some(mcx::alloc_in(mcx, coerced.clone_in(mcx)?)?))
+    Ok(Some(::mcx::alloc_in(mcx, coerced.clone_in(mcx)?)?))
 }
 
 /// The catalog default / type default seams return a `Node`; in our split model
@@ -642,28 +642,28 @@ const ALL_EVENTS: i32 =
 /// C `bms_make_singleton(col)`), or `None` for the relation-level probe; the
 /// `outer_reloids` recursion guard starts empty.
 pub fn relation_is_updatable(
-    reloid: types_core::Oid,
+    reloid: ::types_core::Oid,
     include_triggers: bool,
     include_col: Option<i32>,
 ) -> PgResult<i32> {
-    let ctx = mcx::MemoryContext::new("relation_is_updatable");
+    let ctx = ::mcx::MemoryContext::new("relation_is_updatable");
     let mcx = ctx.mcx();
     let include_cols = match include_col {
-        Some(col) => Some(nodes_core::bitmapset::bms_make_singleton(mcx, col)?),
+        Some(col) => Some(::nodes_core::bitmapset::bms_make_singleton(mcx, col)?),
         None => None,
     };
-    let mut outer_reloids: Vec<types_core::Oid> = Vec::new();
+    let mut outer_reloids: Vec<::types_core::Oid> = Vec::new();
     relation_is_updatable_internal(mcx, reloid, &mut outer_reloids, include_triggers, include_cols.as_deref())
 }
 
 fn relation_is_updatable_internal<'mcx>(
     mcx: Mcx<'mcx>,
-    reloid: types_core::Oid,
-    outer_reloids: &mut Vec<types_core::Oid>,
+    reloid: ::types_core::Oid,
+    outer_reloids: &mut Vec<::types_core::Oid>,
     include_triggers: bool,
     include_cols: Option<&::nodes::bitmapset::Bitmapset<'_>>,
 ) -> PgResult<i32> {
-    use nodes_core::bitmapset::{bms_int_members, bms_is_empty};
+    use ::nodes_core::bitmapset::{bms_int_members, bms_is_empty};
 
     let mut events = 0;
 
@@ -889,11 +889,11 @@ pub fn expand_generated_columns_in_expr<'mcx>(
 
     // rte = makeNode(RangeTblEntry); eref name doesn't matter.
     let mut rte = RangeTblEntry::new_in(mcx);
-    rte.eref = Some(mcx::alloc_in(
+    rte.eref = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::Alias {
             aliasname: Some(PgString::from_str_in(&rel.name(), mcx)?),
-            colnames: mcx::PgVec::new_in(mcx),
+            colnames: ::mcx::PgVec::new_in(mcx),
         },
     )?);
     rte.rtekind = RTEKind::RTE_RELATION;
@@ -962,7 +962,7 @@ fn rt_fetch<'a, 'mcx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     /// Build a minimal view `Query` selecting two plain Var columns from a
     /// single base relation (RTE 1), as the parser emits for `SELECT a, b FROM t`.
@@ -977,10 +977,10 @@ mod tests {
         q.rtable.push(base);
 
         // jointree: FROM (RangeTblRef 1)
-        let mut fromlist = mcx::PgVec::new_in(mcx);
-        fromlist.push(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 }).unwrap()).unwrap());
+        let mut fromlist = ::mcx::PgVec::new_in(mcx);
+        fromlist.push(::mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 }).unwrap()).unwrap());
         q.jointree = Some(
-            mcx::alloc_in(
+            ::mcx::alloc_in(
                 mcx,
                 ::nodes::rawnodes::FromExpr {
                     fromlist,
@@ -992,7 +992,7 @@ mod tests {
 
         // targetList: a (varattno 1), b (varattno 2), both plain Vars of RTE 1.
         for attno in 1..=2 {
-            let var = nodes_core::makefuncs::make_var(1, attno, 23, -1, InvalidOid, 0);
+            let var = ::nodes_core::makefuncs::make_var(1, attno, 23, -1, InvalidOid, 0);
             let tle =
                 make_target_entry(mcx, Expr::Var(var), attno, Some("c"), false).unwrap();
             q.targetList.push(tle);
@@ -1018,7 +1018,7 @@ mod tests {
         let mut q = simple_view_query(mcx);
         // Adding a DISTINCT clause makes it non-auto-updatable.
         q.distinctClause
-            .push(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 }).unwrap()).unwrap());
+            .push(::mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 }).unwrap()).unwrap());
         let detail = view_query_is_auto_updatable(&q, false).unwrap();
         assert_eq!(
             detail,

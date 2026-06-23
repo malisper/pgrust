@@ -252,7 +252,7 @@ pub fn interval_in_safe(
                 dterr,
                 str,
                 "interval",
-                &types_datetime::DateTimeErrorExtra::default(),
+                &::types_datetime::DateTimeErrorExtra::default(),
             ),
         );
     }
@@ -332,7 +332,7 @@ pub fn EncodeSpecialInterval(itv: &Interval, str: &mut String) {
 /// `anytimestamp_typmod_check`).
 pub fn intervaltypmodin(tl: &[i32]) -> DtResult<i32> {
     use crate::timestamp::invalid_parameter;
-    use types_datetime::INTERVAL_TYPMOD;
+    use ::types_datetime::INTERVAL_TYPMOD;
     // C: the valid-mask switch (timestamp.c:1147-1175).
     const VALID_RANGES: [i32; 14] = [
         INTERVAL_MASK(YEAR),
@@ -892,7 +892,7 @@ fn float8_fits_in_int64(num: f64) -> bool {
 ///
 /// (`utils/adt/timestamp.c`)
 pub fn interval_mul(span: &Interval, factor: f64) -> DtResult<Interval> {
-    use types_datetime::SECS_PER_DAY;
+    use ::types_datetime::SECS_PER_DAY;
 
     let mut result = Interval {
         time: 0,
@@ -983,8 +983,8 @@ pub fn interval_mul(span: &Interval, factor: f64) -> DtResult<Interval> {
 ///
 /// (`utils/adt/timestamp.c`)
 pub fn interval_div(span: &Interval, factor: f64) -> DtResult<Interval> {
-    use types_datetime::SECS_PER_DAY;
-    use types_error::ERRCODE_DIVISION_BY_ZERO;
+    use ::types_datetime::SECS_PER_DAY;
+    use ::types_error::ERRCODE_DIVISION_BY_ZERO;
 
     let mut result = Interval {
         time: 0,

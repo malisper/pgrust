@@ -39,8 +39,8 @@
 // the correspondence.
 #![allow(clippy::needless_range_loop)]
 
-use mcx::Mcx;
-use types_core::AttrNumber;
+use ::mcx::Mcx;
+use ::types_core::AttrNumber;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use statistics::{
     MVDependencies, MVDependency, StatsBuildData, STATS_DEPS_MAGIC, STATS_DEPS_TYPE_BASIC,
@@ -737,7 +737,7 @@ pub fn pg_dependencies_out(mcx: Mcx<'_>, data: &[u8]) -> PgResult<Vec<u8>> {
 pub fn pg_dependencies_send<'mcx>(
     mcx: Mcx<'mcx>,
     v: &[u8],
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     varlena::bytea::byteasend(mcx, v)
 }
 

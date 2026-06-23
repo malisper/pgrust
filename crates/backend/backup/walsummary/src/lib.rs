@@ -57,14 +57,14 @@
 
 use mcx::{Mcx, PgVec};
 
-use utils_error::ereport;
-use utils_error::errno::sqlstate_for_file_access;
-use types_blkreftable::BlockRefTableReader;
+use ::utils_error::ereport;
+use ::utils_error::errno::sqlstate_for_file_access;
+use ::types_blkreftable::BlockRefTableReader;
 use types_core::{InvalidXLogRecPtr, TimeLineID, XLogRecPtr};
 use types_error::{ErrorLocation, PgError, PgResult, DEBUG2};
-use types_pgstat::wait_event::{WAIT_EVENT_WAL_SUMMARY_READ, WAIT_EVENT_WAL_SUMMARY_WRITE};
-use types_storage::file::File;
-use types_walsummarizer::WalSummaryFile;
+use ::types_pgstat::wait_event::{WAIT_EVENT_WAL_SUMMARY_READ, WAIT_EVENT_WAL_SUMMARY_WRITE};
+use ::types_storage::file::File;
+use ::types_walsummarizer::WalSummaryFile;
 
 use walsummary_seams as walsummary_seams;
 use fd_seams as fd;

@@ -48,9 +48,9 @@ use init_small_seams as globals;
 use sort_storage_seams as tuplestore;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_tuple::heaptuple::Datum;
-use types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED};
+use ::types_core::fmgr::FmgrInfo;
+use ::types_tuple::heaptuple::Datum;
+use ::types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED};
 use types_error::{PgError, PgResult};
 use nodes::{
     EStateData, EcxtId, SlotId, TableFuncRoutineKind, TableFuncScan, TableFuncScanState,
@@ -273,7 +273,7 @@ fn routine_get_value<'mcx>(
     state: &mut TableFuncScanState<'mcx>,
     kind: TableFuncRoutineKind,
     colnum: i32,
-    typid: types_core::primitive::Oid,
+    typid: ::types_core::primitive::Oid,
     typmod: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
@@ -447,7 +447,7 @@ fn eval_passing_args<'mcx>(
     Ok(args)
 }
 
-/// Convert a `types_tuple::Datum` (the `ExecEvalExpr` result) into the carrier
+/// Convert a `::types_tuple::Datum` (the `ExecEvalExpr` result) into the carrier
 /// pair the jsonpath `JsonTableVariable` / `JsonPathVariable` uses: a bare
 /// machine word for pass-by-value types, or the full header-ful varlena image
 /// for pass-by-reference types (`text` / `jsonb` / `numeric` …), which
@@ -535,7 +535,7 @@ fn json_table_get_value<'mcx>(
         Some(colvalexpr) => {
             // Pass the row pattern value via CaseTestExpr, saving/restoring the
             // econtext's caseValue around the evaluation.
-            let row_value = Datum::ByRef(mcx::slice_in(estate.es_query_cxt, &row.value)?);
+            let row_value = Datum::ByRef(::mcx::slice_in(estate.es_query_cxt, &row.value)?);
 
             let (saved_datum, saved_isnull) = {
                 let ec = estate.ecxt_mut(econtext);
@@ -689,7 +689,7 @@ pub fn ExecInitTableFuncScan<'mcx>(
 
     // Capture the column count and per-column type info before the descriptor
     // moves into the scan slot (C reads them back off the shared pointer).
-    let (natts, in_types): (i32, PgVec<'mcx, types_core::primitive::Oid>) = match tupdesc.as_deref()
+    let (natts, in_types): (i32, PgVec<'mcx, ::types_core::primitive::Oid>) = match tupdesc.as_deref()
     {
         Some(td) => {
             let mut types = vec_with_capacity_in(mcx, td.natts as usize)?;
@@ -1054,7 +1054,7 @@ fn tfuncInitialize<'mcx>(
                     colfilter_owned.as_str()
                 }
                 None => {
-                    colfilter_owned = mcx::PgString::from_str_in(
+                    colfilter_owned = ::mcx::PgString::from_str_in(
                         &scan_slot_attname(tstate, colno, estate)?,
                         mcx,
                     )?;
@@ -1268,12 +1268,12 @@ fn scan_slot_attname<'mcx>(
 fn scan_slot_descriptor<'mcx>(
     tstate: &TableFuncScanState<'mcx>,
     estate: &EStateData<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     execTuples::exec_scan_slot_descriptor::call(estate.es_query_cxt, &tstate.ss, estate)
 }
 
 /// `NameStr(name)` — the name's bytes up to the first NUL, as a `String`.
-fn name_str(name: &types_tuple::heaptuple::NameData) -> alloc::string::String {
+fn name_str(name: &::types_tuple::heaptuple::NameData) -> alloc::string::String {
     alloc::string::String::from_utf8_lossy(name.name_str()).into_owned()
 }
 
@@ -1298,9 +1298,9 @@ fn list_or_empty<'a, T>(list: &'a Option<PgVec<'_, T>>) -> &'a [T] {
 
 /// `scanstate->ns_names = tf->ns_names` — copy the namespace-name list.
 fn clone_ns_names<'mcx>(
-    list: &Option<PgVec<'_, Option<mcx::PgString<'_>>>>,
+    list: &Option<PgVec<'_, Option<::mcx::PgString<'_>>>>,
     mcx: Mcx<'mcx>,
-) -> PgResult<PgVec<'mcx, Option<mcx::PgString<'mcx>>>> {
+) -> PgResult<PgVec<'mcx, Option<::mcx::PgString<'mcx>>>> {
     let mut out = PgVec::new_in(mcx);
     if let Some(v) = list {
         out = vec_with_capacity_in(mcx, v.len())?;

@@ -12,19 +12,19 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
-use stringinfo::StringInfo;
-use tsearch::tsearch::{
+use ::stringinfo::StringInfo;
+use ::tsearch::tsearch::{
     WordEntry, WordEntryPos, DATAHDRSIZE, MAXENTRYPOS, MAXNUMPOS, MAXSTRLEN, MAXSTRPOS, WEP_GETPOS,
     WEP_GETWEIGHT,
 };
 
 use pqformat as pq;
-use ts_small::util::oom;
-use utils_error::ereport;
+use ::ts_small::util::oom;
+use ::utils_error::ereport;
 use mbutils_seams as mb;
 
 use crate::access::{
@@ -36,7 +36,7 @@ use crate::parser;
 extern crate alloc;
 
 /// `MaxAllocSize` (memutils.h).
-const MAX_ALLOC_SIZE: usize = mcx::MAX_ALLOC_SIZE;
+const MAX_ALLOC_SIZE: usize = ::mcx::MAX_ALLOC_SIZE;
 
 /// `WordEntryIN` (tsvector.c) — the internal build record while parsing /
 /// constructing a `tsvector`: a [`WordEntry`] (must be first, see
@@ -88,7 +88,7 @@ fn uniquePos(a: &mut [WordEntryPos], l: i32) -> i32 {
             }
         } else if WEP_GETWEIGHT(a[ptr]) > WEP_GETWEIGHT(a[res]) {
             let w = WEP_GETWEIGHT(a[ptr]);
-            tsearch::tsearch::WEP_SETWEIGHT(&mut a[res], w);
+            ::tsearch::tsearch::WEP_SETWEIGHT(&mut a[res], w);
         }
         ptr += 1;
     }
@@ -209,7 +209,7 @@ pub fn tsvectorin<'mcx>(
 }
 
 fn tsvectorin_build(
-    state: tsearch::tsearch::TsVectorParseStateHandle,
+    state: ::tsearch::tsearch::TsVectorParseStateHandle,
     buf: &[u8],
     mut escontext: Option<&mut SoftErrorContext>,
 ) -> PgResult<Option<Vec<u8>>> {

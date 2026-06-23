@@ -21,7 +21,7 @@
 //! The page-content manipulation runs in-crate against the page bytes (read out
 //! / written back through the bufmgr `with_buffer_page` boundary, exactly as
 //! the sibling `ginbtree` / `gindatapage` crates do). The posting-tree leaf
-//! vacuum itself ([`gindatapage::ginVacuumPostingTreeLeaf`])
+//! vacuum itself ([`::gindatapage::ginVacuumPostingTreeLeaf`])
 //! is the data-page owner's; we re-drive it, passing a closure that routes each
 //! decoded segment back into [`ginVacuumItemPointers`] against the running
 //! [`GinVacuumState`] (no registry, no pointer round-trip).
@@ -50,7 +50,7 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
 use page::{
@@ -58,9 +58,9 @@ use page::{
     PageIndexTupleDelete, PageIsNew, PageMut, PageRef,
 };
 use utils_error::{ereport, PgResult};
-use types_error::error::ERROR;
+use ::types_error::error::ERROR;
 
-use core_probe::ginpostinglist::{ginCompressPostingList, ginPostingListDecode};
+use ::core_probe::ginpostinglist::{ginCompressPostingList, ginPostingListDecode};
 use gindatapage::{
     gin_page_get_flags, gin_page_get_rightlink, gin_page_set_flags, gin_page_set_rightlink,
     ginVacuumPostingTreeLeaf, GinDataPageGetPostingItem,
@@ -69,19 +69,19 @@ use gindatapage::{
     GinPageRightMost, GinDataLeafPageGetPostingListSize, gin_page_get_maxoff,
     PostingItemGetBlockNumber,
 };
-use ginentrypage::GinFormTuple;
+use ::ginentrypage::GinFormTuple;
 use ginutil::{gintuple_get_attrnum, gintuple_get_key, initGinState, ginUpdateStats};
 
-use types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Oid, TransactionId};
+use ::types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Oid, TransactionId};
 use types_core::{InvalidBlockNumber, XLogRecPtr};
 use gin::{
     GinMaxItemSize, GinMetaPageData, GinState, GinStatsData, GIN_DELETED, GIN_EXCLUSIVE, GIN_LIST,
     GIN_METAPAGE_BLKNO, GIN_ROOT_BLKNO, GIN_SHARE, GIN_UNLOCK,
 };
-use rel::Relation;
-use types_storage::storage::{Buffer, InvalidBuffer};
-use types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_storage::storage::{Buffer, InvalidBuffer};
+use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
+use ::types_tuple::heaptuple::{
     IndexTupleData, ItemPointerData, BlockIdData, FIRST_OFFSET_NUMBER as FirstOffsetNumber,
     INVALID_OFFSET_NUMBER as InvalidOffsetNumber,
 };
@@ -96,7 +96,7 @@ mod tests;
 // ===========================================================================
 
 /// `RM_GIN_ID` (rmgrlist.h).
-const RM_GIN_ID: types_core::RmgrId = 13;
+const RM_GIN_ID: ::types_core::RmgrId = 13;
 /// `XLOG_GIN_VACUUM_PAGE` info byte (ginxlog.h).
 const XLOG_GIN_VACUUM_PAGE: u8 = 0x40;
 /// `XLOG_GIN_DELETE_PAGE` info byte (ginxlog.h).
@@ -529,7 +529,7 @@ fn xlog_register_data(data: &[u8]) -> PgResult<()> {
 fn xlog_register_buffer(block_id: u8, buffer: Buffer, flags: u8) -> PgResult<()> {
     xloginsert_seams::xlog_register_buffer::call(block_id, buffer, flags)
 }
-fn xlog_insert_record(rmid: types_core::RmgrId, info: u8) -> PgResult<XLogRecPtr> {
+fn xlog_insert_record(rmid: ::types_core::RmgrId, info: u8) -> PgResult<XLogRecPtr> {
     xloginsert_seams::xlog_insert_record::call(rmid, info)
 }
 

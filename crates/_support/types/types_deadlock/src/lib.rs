@@ -39,7 +39,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_storage::lock::{LOCKMASK, LOCKMODE, LOCKTAG, MAX_LOCKMODES};
+use ::types_storage::lock::{LOCKMASK, LOCKMODE, LOCKTAG, MAX_LOCKMODES};
 
 // ===========================================================================
 // DeadLockState (lock.h) — the detector's result.

@@ -28,16 +28,16 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{InvalidOid, Oid};
-use types_network::inet_struct;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_network::inet_struct;
 use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, NodeId, PlannerInfo};
 
-use nodes_core::makefuncs::{make_const, make_opclause};
-use adt_network::planner::{network_scan_first, network_scan_last};
-use network_seams::inet::datum_get_inet_pp;
-use lsyscache_seams::get_opfamily_member_for_cmptype;
-use fmgr_support_seams::index_support_registry as reg;
+use ::nodes_core::makefuncs::{make_const, make_opclause};
+use ::adt_network::planner::{network_scan_first, network_scan_last};
+use ::network_seams::inet::datum_get_inet_pp;
+use ::lsyscache_seams::get_opfamily_member_for_cmptype;
+use ::fmgr_support_seams::index_support_registry as reg;
 
 // The canonical unified `Datum` (the by-reference inet varlena image), carried
 // on `Const.constvalue` and produced for the new bound `Const`s here.

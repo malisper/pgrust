@@ -2,13 +2,13 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, OpExpr};
 use pathnodes::{EmId, IndexOptInfo, NodeId, PathKey, PlannerInfo};
 
-use var_seams::contain_var_clause;
+use ::var_seams::contain_var_clause;
 use lsyscache_seams as lsyscache;
 
 use crate::operand::match_index_to_operand;
@@ -46,7 +46,7 @@ pub fn match_pathkeys_to_index(
         let mut found = false;
 
         // Pathkey must request default sort order for the target opfamily.
-        // PathKey.pk_cmptype is the `pathnodes::CompareType` (= i32);
+        // PathKey.pk_cmptype is the `::pathnodes::CompareType` (= i32);
         // COMPARE_LT == 1 (primnodes CompareType).
         const COMPARE_LT_I32: i32 = 1;
         if pathkey.pk_cmptype != COMPARE_LT_I32 || pathkey.pk_nulls_first {
@@ -110,7 +110,7 @@ pub fn match_pathkeys_to_index(
 /// Collect the EC members to consider for the target relation: regular members
 /// plus all child members (the iterator restricts to the target relids, which we
 /// honor via the `em_relids` check at the call site).
-fn collect_ec_members(root: &PlannerInfo, ec_id: pathnodes::EcId) -> Vec<EmId> {
+fn collect_ec_members(root: &PlannerInfo, ec_id: ::pathnodes::EcId) -> Vec<EmId> {
     let ec = root.ec(ec_id);
     let mut members: Vec<EmId> = ec.ec_members.clone();
     for childlist in &ec.ec_childmembers {
@@ -212,7 +212,7 @@ fn contain_volatile(node: &Expr) -> bool {
 }
 
 /// `bms_equal(a, b)` over the planner `Relids`.
-fn relids_equal(a: &pathnodes::Relids, b: &pathnodes::Relids) -> bool {
+fn relids_equal(a: &::pathnodes::Relids, b: &::pathnodes::Relids) -> bool {
     let aw: &[u64] = match a {
         None => &[],
         Some(x) => &x.words,

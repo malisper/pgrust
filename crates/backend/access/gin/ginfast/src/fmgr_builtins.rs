@@ -14,7 +14,7 @@
 //! crate's [`crate::init_seams`]. OID / nargs / strict / retset are transcribed
 //! exactly from `pg_proc.dat` (`provolatile => 'v'`, strict, not retset).
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `gin_clean_pending_list(regclass)` (OID 3789) → int8.

@@ -2,18 +2,18 @@
 //! the C function (~337 lines) is large enough to body-port independently of
 //! the prologue/act/epilogue helpers.
 
-use mcx::Mcx;
-use types_core::xact::CommandId;
+use ::mcx::Mcx;
+use ::types_core::xact::CommandId;
 use types_error::{
     PgError, PgResult, ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
-use types_tableam::tableam::{
+use ::types_tableam::tableam::{
     LockTupleExclusive, LockTupleMode, Snapshot, TM_FailureData, TM_Result,
 };
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::delete::{ExecDeleteAct, ExecDeleteEpilogue, ExecDeletePrologue};
 use crate::lifecycle::ExecProcessReturning;
@@ -76,7 +76,7 @@ seam_core::seam!(
     pub fn ri_relation_relid(
         estate: &EStateData<'_>,
         result_rel_info: RriId
-    ) -> types_core::Oid
+    ) -> ::types_core::Oid
 );
 
 
@@ -122,7 +122,7 @@ seam_core::seam!(
     pub fn slot_set_table_oid<'mcx>(
         estate: &mut EStateData<'mcx>,
         slot: SlotId,
-        relid: types_core::Oid,
+        relid: ::types_core::Oid,
     )
 );
 
@@ -145,7 +145,7 @@ seam_core::seam!(
         estate: &mut EStateData<'mcx>,
         mtstate: &mut ModifyTableState<'mcx>,
         result_rel_info: RriId,
-        rti: types_core::primitive::Index,
+        rti: ::types_core::primitive::Index,
     ) -> PgResult<SlotId>
 );
 

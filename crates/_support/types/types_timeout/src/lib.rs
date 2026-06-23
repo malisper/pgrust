@@ -7,7 +7,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use types_core::TimestampTz;
+use ::types_core::TimestampTz;
 
 /// `TimeoutId` (`utils/timeout.h`) — predefined timeout reasons.
 #[repr(u32)]

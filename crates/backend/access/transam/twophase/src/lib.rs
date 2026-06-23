@@ -19,9 +19,9 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, PgError, PgResult, ERROR, PANIC, WARNING};
-use types_core::xact::{InvalidTransactionId, InvalidXLogRecPtr, TransactionIdIsValid};
+use ::types_core::xact::{InvalidTransactionId, InvalidXLogRecPtr, TransactionIdIsValid};
 use types_core::{Oid, ProcNumber, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
 use ::wal::wal::RelFileLocator;
 use ::wal::xact_records::{XactLogAbortRecordArgs, XactLogCommitRecordArgs, XlXactOrigin};
@@ -66,7 +66,7 @@ fn here() -> ErrorLocation {
 
 /// Raise a built `ERROR`-level report as a typed `Err` (the C `ereport(ERROR)`
 /// longjmp analog).
-fn raise<T>(b: utils_error::ErrorBuilder) -> PgResult<T> {
+fn raise<T>(b: ::utils_error::ErrorBuilder) -> PgResult<T> {
     Err(b.into_error().with_error_location(here()))
 }
 
@@ -327,7 +327,7 @@ impl Default for SaveState {
 /// Out-of-memory `PgError` for a failed `try_reserve` on data-derived growth.
 fn oom_msg(what: &str) -> PgError {
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+        .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
         .errmsg(alloc::format!("out of memory {}", what))
         .into_error()
 }
@@ -496,7 +496,7 @@ pub fn end_prepare(
 
     if total_len > MAX_ALLOC_SIZE {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+            .errcode(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
             .errmsg("two-phase state file maximum length exceeded"));
     }
 
@@ -793,7 +793,7 @@ pub fn mark_as_preparing(
 ) -> PgResult<usize> {
     if gid.len() >= GIDSIZE {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(alloc::format!(
                 "transaction identifier \"{}\" is too long",
                 gid
@@ -802,7 +802,7 @@ pub fn mark_as_preparing(
 
     if state.max_prepared_xacts == 0 {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errcode(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg("prepared transactions are disabled")
             .errhint("Set \"max_prepared_transactions\" to a nonzero value."));
     }
@@ -818,7 +818,7 @@ pub fn mark_as_preparing(
         for i in 0..state.num_prep_xacts() {
             if state.prep_xact(i).gid() == gid {
                 return raise(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_DUPLICATE_OBJECT)
+                    .errcode(::types_error::ERRCODE_DUPLICATE_OBJECT)
                     .errmsg(alloc::format!(
                         "transaction identifier \"{}\" is already in use",
                         gid
@@ -830,7 +830,7 @@ pub fn mark_as_preparing(
             Some(idx) => idx,
             None => {
                 return raise(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+                    .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
                     .errmsg("maximum number of prepared transactions reached")
                     .errhint(alloc::format!(
                         "Increase \"max_prepared_transactions\" (currently {}).",
@@ -944,7 +944,7 @@ pub fn lock_gxact(
 
             if locking_backend != INVALID_PROC_NUMBER {
                 return raise(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                    .errcode(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                     .errmsg(alloc::format!(
                         "prepared transaction with identifier \"{}\" is busy",
                         gid
@@ -953,14 +953,14 @@ pub fn lock_gxact(
 
             if user != owner && !miscinit::superuser_arg::call(user)? {
                 return raise(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
+                    .errcode(::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE)
                     .errmsg("permission denied to finish prepared transaction")
                     .errhint("Must be superuser or the user that prepared the transaction."));
             }
 
             if my_database_id != proc::proc_database_id::call(pgprocno) {
                 return raise(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg("prepared transaction belongs to another database")
                     .errhint("Connect to the database where the transaction was prepared to finish it."));
             }
@@ -978,7 +978,7 @@ pub fn lock_gxact(
     match outcome? {
         Some(i) => Ok(i),
         None => raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+            .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
             .errmsg(alloc::format!(
                 "prepared transaction with identifier \"{}\" does not exist",
                 gid
@@ -991,7 +991,7 @@ pub fn lock_gxact(
 pub fn remove_gxact(state: &mut TwoPhaseStateData, slot: usize) -> PgResult<()> {
     if slot >= state.num_prep_xacts() {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INTERNAL_ERROR)
+            .errcode(::types_error::ERRCODE_INTERNAL_ERROR)
             .errmsg("failed to find entry in GlobalTransaction array"));
     }
     // Swap-remove from prepXacts[]: move the last active entry into `slot` and
@@ -1119,7 +1119,7 @@ pub fn two_phase_get_gxact(
     match result {
         Some(i) => Ok(i),
         None => raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INTERNAL_ERROR)
+            .errcode(::types_error::ERRCODE_INTERNAL_ERROR)
             .errmsg(alloc::format!(
                 "failed to find GlobalTransaction for xid {}",
                 xid
@@ -1184,7 +1184,7 @@ pub fn read_twophase_file(xid: TransactionId, missing_ok: bool) -> PgResult<Opti
         maxalign(TwoPhaseFileHeader::wire_len()) + maxalign(SIZEOF_TWOPHASE_RECORD_ON_DISK) + 4;
     if st_size < lower_bound || (st_size as u32) > MAX_ALLOC_SIZE {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg(alloc::format!(
                 "incorrect size of two-phase state file: {} bytes",
                 st_size
@@ -1194,24 +1194,24 @@ pub fn read_twophase_file(xid: TransactionId, missing_ok: bool) -> PgResult<Opti
     let crc_offset = st_size - 4;
     if crc_offset != maxalign(crc_offset) {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg("incorrect alignment of CRC offset for two-phase state file"));
     }
 
     let hdr = TwoPhaseFileHeader::from_bytes(&buf).ok_or_else(|| {
         ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg("two-phase state file too short for header")
             .into_error()
     })?;
     if hdr.magic != TWOPHASE_MAGIC {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg("invalid magic number stored in two-phase state file"));
     }
     if hdr.total_len as usize != st_size {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg("invalid size stored in two-phase state file"));
     }
 
@@ -1221,7 +1221,7 @@ pub fn read_twophase_file(xid: TransactionId, missing_ok: bool) -> PgResult<Opti
     let file_crc = u32::from_le_bytes(buf[crc_offset..crc_offset + 4].try_into().unwrap());
     if !eq_crc32c(calc, file_crc) {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg(
                 "calculated CRC checksum does not match value stored in two-phase state file",
             ));
@@ -1238,7 +1238,7 @@ pub fn read_twophase_file(xid: TransactionId, missing_ok: bool) -> PgResult<Opti
 /// one record at `lsn`, validates it is an `RM_XACT_ID`/`XLOG_XACT_PREPARE`
 /// record, and returns its rmgr data bytes.
 pub fn xlog_read_twophase_data(lsn: XLogRecPtr) -> PgResult<Vec<u8>> {
-    use types_logical::XLogReaderRoutineHandle;
+    use ::types_logical::XLogReaderRoutineHandle;
 
     // XLogReaderAllocate(wal_segment_size, NULL, XL_ROUTINE(...), NULL).
     let wal_segment_size = wal::wal_segment_size::call();
@@ -1248,7 +1248,7 @@ pub fn xlog_read_twophase_data(lsn: XLogRecPtr) -> PgResult<Vec<u8>> {
     )
     .ok_or_else(|| {
         ereport(ERROR)
-            .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+            .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
             .errmsg("out of memory")
             .errdetail("Failed while allocating a WAL reading processor.")
             .into_error()
@@ -1318,7 +1318,7 @@ pub fn standby_transaction_id_is_prepared(
     };
     let hdr = TwoPhaseFileHeader::from_bytes(&buf).ok_or_else(|| {
         ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg("corrupted two-phase state file header")
             .into_error()
     })?;
@@ -1348,7 +1348,7 @@ pub fn process_records(buf: &[u8], mut off: usize, xid: TransactionId, phase: u8
     loop {
         let record = TwoPhaseRecordOnDisk::from_bytes(&buf[off..]).ok_or_else(|| {
             ereport(ERROR)
-                .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+                .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
                 .errmsg("truncated two-phase record")
                 .into_error()
         })?;
@@ -1435,7 +1435,7 @@ pub fn decode_rels(buf: &[u8], base: usize, n: usize) -> Vec<RelFileLocator> {
 
 /// Decode an `xl_xact_stats_item[]` segment (16 bytes each:
 /// `{ int kind; Oid dboid; uint32 objid_lo; uint32 objid_hi; }`) from `bytes`.
-fn decode_stats_items(bytes: &[u8], n: usize) -> Vec<types_core::xact::XlXactStatsItem> {
+fn decode_stats_items(bytes: &[u8], n: usize) -> Vec<::types_core::xact::XlXactStatsItem> {
     let mut v = Vec::with_capacity(n);
     for i in 0..n {
         let o = i * SIZEOF_XL_XACT_STATS_ITEM;
@@ -1444,7 +1444,7 @@ fn decode_stats_items(bytes: &[u8], n: usize) -> Vec<types_core::xact::XlXactSta
         let objid_lo = u32::from_le_bytes(bytes[o + 8..o + 12].try_into().unwrap());
         let objid_hi = u32::from_le_bytes(bytes[o + 12..o + 16].try_into().unwrap());
         let objid = ((objid_hi as u64) << 32) | objid_lo as u64;
-        v.push(types_core::xact::XlXactStatsItem { kind, dboid, objid });
+        v.push(::types_core::xact::XlXactStatsItem { kind, dboid, objid });
     }
     v
 }
@@ -1456,7 +1456,7 @@ fn decode_gid(buf: &[u8], layout: &BufferLayout, hdr: &TwoPhaseFileHeader) -> Pg
         .map(String::from)
         .map_err(|_| {
             ereport(ERROR)
-                .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+                .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
                 .errmsg("invalid UTF-8 in two-phase GID")
                 .into_error()
         })
@@ -1514,7 +1514,7 @@ pub fn finish_prepared_transaction(
     let buf = if ondisk_at_lock {
         read_twophase_file(xid, false)?.ok_or_else(|| {
             ereport(ERROR)
-                .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+                .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
                 .errmsg("two-phase state file disappeared")
                 .into_error()
         })?
@@ -1524,7 +1524,7 @@ pub fn finish_prepared_transaction(
 
     let hdr = TwoPhaseFileHeader::from_bytes(&buf).ok_or_else(|| {
         ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg("corrupted two-phase state buffer")
             .into_error()
     })?;
@@ -1666,7 +1666,7 @@ fn record_transaction_commit_prepared(
     xid: TransactionId,
     children: &[TransactionId],
     rels: &[RelFileLocator],
-    dropped_stats: Vec<types_core::xact::XlXactStatsItem>,
+    dropped_stats: Vec<::types_core::xact::XlXactStatsItem>,
     invalmsgs_bytes: &[u8],
     ninvalmsgs: i32,
     initfileinval: bool,
@@ -1735,7 +1735,7 @@ fn record_transaction_abort_prepared(
     xid: TransactionId,
     children: &[TransactionId],
     rels: &[RelFileLocator],
-    dropped_stats: Vec<types_core::xact::XlXactStatsItem>,
+    dropped_stats: Vec<::types_core::xact::XlXactStatsItem>,
     gid: &str,
     ctx: FinishContext,
 ) -> PgResult<()> {
@@ -1809,7 +1809,7 @@ pub fn prepare_redo_add(
 
     let hdr = TwoPhaseFileHeader::from_bytes(buf).ok_or_else(|| {
         ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg("corrupted prepare record header")
             .into_error()
     })?;
@@ -1835,7 +1835,7 @@ pub fn prepare_redo_add(
         Some(idx) => idx,
         None => {
             return raise(ereport(ERROR)
-                .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+                .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
                 .errmsg("maximum number of prepared transactions reached")
                 .errhint(alloc::format!(
                     "Increase \"max_prepared_transactions\" (currently {}).",
@@ -1934,7 +1934,7 @@ pub fn process_two_phase_buffer(
     let buf = if fromdisk {
         read_twophase_file(xid, false)?.ok_or_else(|| {
             ereport(ERROR)
-                .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+                .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
                 .errmsg("two-phase state file disappeared")
                 .into_error()
         })?
@@ -1944,13 +1944,13 @@ pub fn process_two_phase_buffer(
 
     let hdr = TwoPhaseFileHeader::from_bytes(&buf).ok_or_else(|| {
         ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg("corrupted two-phase state buffer")
             .into_error()
     })?;
     if hdr.xid != xid {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
             .errmsg(alloc::format!(
                 "corrupted two-phase state for transaction {}",
                 xid
@@ -2112,7 +2112,7 @@ pub fn recover_prepared_transactions(
 
             let hdr = TwoPhaseFileHeader::from_bytes(&buf).ok_or_else(|| {
                 ereport(ERROR)
-                    .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+                    .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
                     .errmsg("corrupted two-phase state buffer")
                     .into_error()
             })?;
@@ -2231,7 +2231,7 @@ pub fn lookup_gxact(
                 let buf = if ondisk {
                     read_twophase_file(xid, false)?.ok_or_else(|| {
                         ereport(ERROR)
-                            .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+                            .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
                             .errmsg("two-phase state file disappeared")
                             .into_error()
                     })?
@@ -2241,7 +2241,7 @@ pub fn lookup_gxact(
                 };
                 let hdr = TwoPhaseFileHeader::from_bytes(&buf).ok_or_else(|| {
                     ereport(ERROR)
-                        .errcode(types_error::ERRCODE_DATA_CORRUPTED)
+                        .errcode(::types_error::ERRCODE_DATA_CORRUPTED)
                         .errmsg("corrupted two-phase state buffer")
                         .into_error()
                 })?;
@@ -2265,7 +2265,7 @@ pub fn two_phase_transaction_gid(subid: Oid, xid: TransactionId) -> PgResult<Str
     debug_assert!(subid != 0);
     if !TransactionIdIsValid(xid) {
         return raise(ereport(ERROR)
-            .errcode(types_error::ERRCODE_PROTOCOL_VIOLATION)
+            .errcode(::types_error::ERRCODE_PROTOCOL_VIOLATION)
             .errmsg("invalid two-phase transaction ID"));
     }
     Ok(alloc::format!("pg_gid_{}_{}", subid, xid))
@@ -2344,9 +2344,9 @@ fn two_phase_file_path(xid: TransactionId) -> String {
 /// ReadNextFullTransactionId(), xid)` (transam.h:380, twophase.c:938) — recover
 /// the full xid (epoch) for a bare `xid` that is known to precede-or-equal the
 /// next full xid.
-fn adjust_to_full_transaction_id(xid: TransactionId) -> types_core::FullTransactionId {
-    use types_core::xact::TransactionIdIsNormal;
-    use types_core::FullTransactionId;
+fn adjust_to_full_transaction_id(xid: TransactionId) -> ::types_core::FullTransactionId {
+    use ::types_core::xact::TransactionIdIsNormal;
+    use ::types_core::FullTransactionId;
 
     // Special transaction ID.
     if !TransactionIdIsNormal(xid) {
@@ -2379,7 +2379,7 @@ use fd as fd;
 use fd_seams as fd_seams;
 
 /// fd-access ereport at `here()` with the live errno's SQLSTATE.
-fn file_access_error<T>(level: types_error::ErrorLevel, msg: String) -> PgResult<T> {
+fn file_access_error<T>(level: ::types_error::ErrorLevel, msg: String) -> PgResult<T> {
     Err(ereport(level)
         .errcode_for_file_access()
         .errmsg(msg)
@@ -2522,7 +2522,7 @@ fn seam_remove_twophase_file(xid: TransactionId, give_warning: bool) -> PgResult
     if rc != 0 {
         // rc is -errno; C: if (errno != ENOENT || giveWarning) ereport(WARNING).
         let errno = -rc;
-        if errno != utils_error::errno::ENOENT || give_warning {
+        if errno != ::utils_error::errno::ENOENT || give_warning {
             return file_access_error(
                 WARNING,
                 alloc::format!("could not remove file \"{}\": %m", path),

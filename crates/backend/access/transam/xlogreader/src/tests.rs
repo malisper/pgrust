@@ -1,11 +1,11 @@
 //! Unit tests for the xlogreader decode core.
 
 use super::*;
-use mcx::MemoryContext;
-use wal::rmgr::XLogReaderState;
+use ::mcx::MemoryContext;
+use ::wal::rmgr::XLogReaderState;
 
 /// Build a reader wired to a context arena, with a fixed segment size.
-fn reader_in<'mcx>(arena: mcx::Mcx<'mcx>, segsize: i32) -> XLogReaderState<'mcx> {
+fn reader_in<'mcx>(arena: ::mcx::Mcx<'mcx>, segsize: i32) -> XLogReaderState<'mcx> {
     let mut state = XLogReaderState {
         decode_arena: Some(arena),
         ..Default::default()
@@ -89,8 +89,8 @@ fn validate_page_header_rejects_bad_magic() {
 // --- Handle-based logical-decoding registry (handle.rs) ---
 
 use std::sync::Once;
-use types_logical::XLogReaderRoutineHandle;
-use wal::rmgr::XLogReaderRoutine;
+use ::types_logical::XLogReaderRoutineHandle;
+use ::wal::rmgr::XLogReaderRoutine;
 
 /// Install a routine resolver for the handle tests (stands in for xlogutils'
 /// routine, which is the downstream contract keystone). All-None is fine: the

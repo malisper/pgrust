@@ -44,10 +44,10 @@
 
 use std::sync::Mutex;
 
-use guc_tables::consts::{HUGE_PAGES_ON, HUGE_PAGES_TRY, SHMEM_TYPE_MMAP};
-use types_core::Size;
+use ::guc_tables::consts::{HUGE_PAGES_ON, HUGE_PAGES_TRY, SHMEM_TYPE_MMAP};
+use ::types_core::Size;
 use types_error::{PgError, PgResult, ERROR, FATAL};
-use types_storage::storage::{dsm_handle, PGShmemHeader, PGShmemMagic};
+use ::types_storage::storage::{dsm_handle, PGShmemHeader, PGShmemMagic};
 
 /// `IPCProtection` (`port/sysv_shmem.c`) — access/modify by user only.
 const IPC_PROTECTION: libc::c_int = 0o600;
@@ -367,7 +367,7 @@ pub fn GetHugePageSize() -> (Size, i32) {
             }
         }
 
-        let huge_page_size = guc_tables::vars::huge_page_size.read();
+        let huge_page_size = ::guc_tables::vars::huge_page_size.read();
         let hugepagesize_local: Size = if huge_page_size != 0 {
             // If huge page size is requested explicitly, use that.
             (huge_page_size as Size) * 1024
@@ -410,7 +410,7 @@ fn pg_ceil_log2_64(num: i64) -> i32 {
 /// memory segment. Returns the mapped address and the (possibly rounded-up)
 /// actual size.
 fn create_anonymous_segment(size: Size) -> PgResult<(*mut libc::c_void, Size)> {
-    let huge_pages = guc_tables::vars::huge_pages.read();
+    let huge_pages = ::guc_tables::vars::huge_pages.read();
 
     let mut allocsize = size;
     let mut ptr: *mut libc::c_void = MAP_FAILED();
@@ -559,8 +559,8 @@ fn anonymous_shmem_detach(_status: i32, _arg: types_tuple::Datum<'static>) -> Pg
 pub fn PGSharedMemoryCreate(
     mut size: Size,
 ) -> PgResult<(*mut PGShmemHeader, *mut PGShmemHeader)> {
-    let huge_pages = guc_tables::vars::huge_pages.read();
-    let shared_memory_type = guc_tables::vars::shared_memory_type.read();
+    let huge_pages = ::guc_tables::vars::huge_pages.read();
+    let shared_memory_type = ::guc_tables::vars::shared_memory_type.read();
 
     // We use the data directory's ID info to positively identify shmem segments
     // associated with this data dir, and as seeds for searching for a free key.
@@ -810,7 +810,7 @@ std::thread_local! {
 /// rejected.
 fn check_huge_page_size(
     newval: &mut i32,
-    _extra: &mut Option<guc_tables::GucHookExtra>,
+    _extra: &mut Option<::guc_tables::GucHookExtra>,
     _source: types_guc::GucSource,
 ) -> PgResult<bool> {
     // !(MAP_HUGE_MASK && MAP_HUGE_SHIFT): not Linux, so reject non-zero.

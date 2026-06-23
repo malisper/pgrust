@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use brin_tuple::{brin_copy_tuple, brin_tuples_equal, BrinTupleImage};
 use bufmgr_seams::{
@@ -24,16 +24,16 @@ use page::{
     PageGetExactFreeSpace, PageGetFreeSpace, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
     PageIndexTupleDeleteNoCompact, PageIndexTupleOverwrite, PageIsNew, PageMut, PageRef,
 };
-use utils_error::PgResult;
-use types_core::primitive::{BlockNumber, OffsetNumber, Size};
-use rel::Relation;
-use types_storage::buf::{
+use ::utils_error::PgResult;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Size};
+use ::rel::Relation;
+use ::types_storage::buf::{
     Buffer, InvalidBuffer, BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     FIRST_OFFSET_NUMBER as FirstOffsetNumber, INVALID_OFFSET_NUMBER as InvalidOffsetNumber,
 };
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::brin_internal::{
     brin_tuple_get_blkno, buffer_is_valid, elog_failed_add_new_page, elog_failed_replace,

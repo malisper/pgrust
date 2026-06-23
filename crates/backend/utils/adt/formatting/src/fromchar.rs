@@ -9,10 +9,10 @@
 //! `Vec<u8>` (NUL-free) elements. The only externals reached are the locale
 //! case routines in [`crate::case`], which themselves seam into pg_locale.c.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult, SoftErrorContext};
 use types_error::{ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_INVALID_DATETIME_FORMAT};
-use types_core::Oid;
+use ::types_core::Oid;
 
 use crate::case::{pg_ascii_tolower, str_tolower, str_toupper};
 use crate::parse::is_c_space;
@@ -20,10 +20,10 @@ use crate::tables::*;
 
 /// Local `errsave` helper mirroring C's `errsave(escontext, ...)` for code that
 /// already holds a complete [`PgError`]: routes through the shared
-/// [`types_error::ereturn`] (soft-error context => save and return `()`;
+/// [`::types_error::ereturn`] (soft-error context => save and return `()`;
 /// no context => propagate as a hard error).
 fn errsave(escontext: Option<&mut SoftErrorContext>, err: PgError) -> PgResult<()> {
-    types_error::ereturn(escontext, (), err)
+    ::types_error::ereturn(escontext, (), err)
 }
 
 /// Result of a from-char parse step that advances the input cursor.  We mirror

@@ -6,7 +6,7 @@
 //! # Model
 //!
 //! * The recursion engine is
-//!   [`nodes_core::nodefuncs::expression_tree_mutator`]
+//!   [`::nodes_core::nodefuncs::expression_tree_mutator`]
 //!   (`ece_generic_processing`); errors thread through the non-`Result` mutator
 //!   callback via a captured error slot.
 //! * `eval_const_expressions_context`: this model has no `PlannerInfo` and no
@@ -29,7 +29,7 @@ use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::{
@@ -37,15 +37,15 @@ use ::nodes::primnodes::{
     NullTestType, ScalarArrayOpExpr,
 };
 
-use nodes_core::makefuncs::{make_andclause, make_bool_const, make_const, make_null_const};
-use nodes_core::nodefuncs::{
+use ::nodes_core::makefuncs::{make_andclause, make_bool_const, make_const, make_null_const};
+use ::nodes_core::nodefuncs::{
     apply_relabel_type, expr_collation, expr_type, expr_typmod, expression_tree_mutator,
     expression_tree_walker, fix_opfuncids, set_opfuncid, set_sa_opfuncid,
 };
 
-use prepqual_seams::negate_clause as negate_clause_seam;
+use ::prepqual_seams::negate_clause as negate_clause_seam;
 use clauses_seams as clauses_seam;
-use clauses_seams::PgProcSimple;
+use ::clauses_seams::PgProcSimple;
 use lsyscache_seams as lsyscache;
 
 use crate::grounded::contain_mutable_functions;
@@ -662,7 +662,7 @@ fn arm_boolexpr<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<
 /// `make_orclause` returns `Expr` already in this repo.
 #[inline]
 fn make_orclause_<'mcx>(args: Vec<Expr<'mcx>>) -> Expr<'mcx> {
-    nodes_core::makefuncs::make_orclause(args)
+    ::nodes_core::makefuncs::make_orclause(args)
 }
 
 #[inline]
@@ -1030,7 +1030,7 @@ fn arm_fieldselect<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResu
                 fselect.resulttypmod,
                 fselect.resultcollid,
             )? {
-                let mut newvar = nodes_core::makefuncs::make_var(
+                let mut newvar = ::nodes_core::makefuncs::make_var(
                     v.varno,
                     fselect.fieldnum,
                     fselect.resulttype,
@@ -1599,7 +1599,7 @@ fn inline_function<'mcx>(
     // ExecInitFunc raises the real "permission denied for function" error.
     // FmgrHookIsNeeded(funcid) (clauses.c:4602) installs no hooks in this tree.
     let aclresult = aclchk_seams::object_aclcheck::call(
-        types_core::catalog::PROCEDURE_RELATION_ID,
+        ::types_core::catalog::PROCEDURE_RELATION_ID,
         funcid,
         miscinit_seams::get_user_id::call(),
         types_acl::ACL_EXECUTE,
@@ -1859,7 +1859,7 @@ fn fmgr_fold<'mcx>(
     // execute fails identically (object_aclcheck(ProcedureRelationId, funcid,
     // GetUserId(), ACL_EXECUTE) -> aclcheck_error(OBJECT_FUNCTION)).
     let aclresult = aclchk_seams::object_aclcheck::call(
-        types_core::catalog::PROCEDURE_RELATION_ID,
+        ::types_core::catalog::PROCEDURE_RELATION_ID,
         funcid,
         miscinit_seams::get_user_id::call(),
         types_acl::ACL_EXECUTE,

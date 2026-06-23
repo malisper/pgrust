@@ -8,7 +8,7 @@
 
 extern crate alloc;
 use alloc::string::String;
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_aggregate.h CATALOG / DECLARE_*).

@@ -11,15 +11,15 @@
 //! dispatch resolves them. OIDs / nargs / strict / retset are transcribed
 //! exactly from `pg_proc.dat`.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
-use types_error::PgResult;
-// The composite-Datum builder cores produce `types_tuple::Datum` (the `'mcx`
+use ::types_core::Oid;
+use ::types_error::PgResult;
+// The composite-Datum builder cores produce `::types_tuple::Datum` (the `'mcx`
 // column-value carrier), distinct from the bare fmgr ABI word `Datum`.
-use types_tuple::Datum as DatumV;
+use ::types_tuple::Datum as DatumV;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

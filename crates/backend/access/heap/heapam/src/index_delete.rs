@@ -15,17 +15,17 @@
 //! and walk it with the `backend-storage-page` line-pointer accessors, exactly
 //! mirroring C's direct `Page` pointer reads.
 
-use mcx::Mcx;
-use types_core::primitive::{
+use ::mcx::Mcx;
+use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, TransactionId,
 };
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_nbtree::{TmIndexDelete, TmIndexDeleteOp};
-use rel::Relation;
-use snapshot::snapshot::{SnapshotData, SnapshotType};
-use types_storage::buf::BUFFER_LOCK_SHARE;
+use ::rel::Relation;
+use ::snapshot::snapshot::{SnapshotData, SnapshotType};
+use ::types_storage::buf::BUFFER_LOCK_SHARE;
 use types_storage::{Buffer, InvalidBuffer};
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     HeapTupleHeaderData, ItemPointerData, HEAP_HOT_UPDATED, HEAP_MOVED,
     HEAP_ONLY_TUPLE, HEAP_XMAX_INVALID, INVALID_OFFSET_NUMBER, FIRST_OFFSET_NUMBER,
 };
@@ -51,14 +51,14 @@ use bufmgr_seams as bufmgr_seam;
 ))]
 use catalog_seams as catalog_seam;
 
-use heapam_visibility::htup::{
+use ::heapam_visibility::htup::{
     HeapTupleHeaderGetXmin, HeapTupleHeaderGetXvac, HeapTupleHeaderXminInvalid,
 };
-use types_tuple::heaptuple::HeapTupleHeaderXminCommitted;
+use ::types_tuple::heaptuple::HeapTupleHeaderXminCommitted;
 
 // htup_details.h IsHotUpdated/IsHeapOnly use this crate's GetUpdateXid for the
 // chain advance.
-use heapam_visibility::HeapTupleHeaderGetUpdateXid;
+use ::heapam_visibility::HeapTupleHeaderGetUpdateXid;
 
 /// `InvalidTransactionId`.
 const InvalidTransactionId: TransactionId = 0;
@@ -261,7 +261,7 @@ fn index_delete_check_htid(
     debug_assert!(OffsetNumberIsValid(idxoffnum));
 
     if indexpagehoffnum > maxoff {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "heap tid from index tuple ({},{}) points past end of heap page line pointer array at offset {} of block {} in index \"{}\"",
             ItemPointerGetBlockNumber(htid),
             indexpagehoffnum,
@@ -273,7 +273,7 @@ fn index_delete_check_htid(
 
     let iid = PageGetItemId(page, indexpagehoffnum)?;
     if !ItemIdIsUsed(&iid) {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "heap tid from index tuple ({},{}) points to unused heap page item at offset {} of block {} in index \"{}\"",
             ItemPointerGetBlockNumber(htid),
             indexpagehoffnum,
@@ -291,7 +291,7 @@ fn index_delete_check_htid(
         let htup = heapam_seam::heap_page_tuple_header::call(mcx, buf, indexpagehoffnum)?;
 
         if HeapTupleHeaderIsHeapOnly(&htup) {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "heap tid from index tuple ({},{}) points to heap-only tuple at offset {} of block {} in index \"{}\"",
                 ItemPointerGetBlockNumber(htid),
                 indexpagehoffnum,
@@ -1102,14 +1102,14 @@ fn bottomup_sort_and_shrink(delstate: &mut TmIndexDeleteOp) -> i32 {
 mod tests {
     use super::*;
     use mcx::{MemoryContext, PgVec};
-    use types_nbtree::TmIndexStatus;
+    use ::types_nbtree::TmIndexStatus;
 
     fn tid(blk: BlockNumber, off: OffsetNumber) -> ItemPointerData {
         ItemPointerData::new(blk, off)
     }
 
     fn make_op<'mcx>(
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
         entries: &[(BlockNumber, OffsetNumber, bool, i16)],
         bottomup: bool,
     ) -> TmIndexDeleteOp<'mcx> {

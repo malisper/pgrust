@@ -26,10 +26,10 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::Index;
+use ::mcx::Mcx;
+use ::types_core::primitive::Index;
 use types_error::{PgError, PgResult};
-use pathnodes::planner_run::{planner_subplan_get_plan, PlannerRun};
+use ::pathnodes::planner_run::{planner_subplan_get_plan, PlannerRun};
 use pathnodes::{PathId, PlannerInfo, RelId, TargetEntryNode, UPPERREL_FINAL};
 
 use pathnode_seams as pathnode;
@@ -77,12 +77,12 @@ pub fn set_subquery_pathlist<'mcx>(
     let mut safety_info = crate::pushdown::PushdownSafetyInfo::new(subquery.targetList.len());
     safety_info.unsafe_leaky = security_barrier;
 
-    let mut run_cond_attrs: pathnodes::Relids = None;
+    let mut run_cond_attrs: ::pathnodes::Relids = None;
 
     // The baserestrictinfo clauses are arena RestrictInfos; materialize the
     // (rinfo_id, clause NodeId, pseudoconstant) triples up front so we can read
     // them while mutating the subquery.
-    let baserestrict: Vec<(pathnodes::RinfoId, bool)> = root
+    let baserestrict: Vec<(::pathnodes::RinfoId, bool)> = root
         .rel(rel)
         .baserestrictinfo
         .iter()
@@ -93,7 +93,7 @@ pub fn set_subquery_pathlist<'mcx>(
         && crate::pushdown::subquery_is_pushdown_safe(mcx, &subquery, &subquery, &mut safety_info)?
     {
         // OK to consider pushing down individual quals (C:2585).
-        let mut upperrestrictlist: Vec<pathnodes::RinfoId> = Vec::new();
+        let mut upperrestrictlist: Vec<::pathnodes::RinfoId> = Vec::new();
         for (rinfo_id, pseudoconstant) in baserestrict.iter().copied() {
             if pseudoconstant {
                 // Don't push pseudoconstants; keep a gating qual above (C:2595).
@@ -200,7 +200,7 @@ pub fn set_subquery_pathlist<'mcx>(
 
     // Stash the subroot inside the rel (C: rel->subroot = subroot). The size-est
     // and import steps below read it back out (mirrors prepunion / costsize).
-    root.rel_mut(rel).subroot = pathnodes::Subroot(Some(alloc::boxed::Box::new(subroot)));
+    root.rel_mut(rel).subroot = ::pathnodes::Subroot(Some(alloc::boxed::Box::new(subroot)));
 
     // sub_final_rel = fetch_upper_rel(rel->subroot, UPPERREL_FINAL, NULL); if it
     // is dummy (constraint exclusion proved the subquery empty), produce an
@@ -288,7 +288,7 @@ fn compute_trivial_pathtarget(
     rti: Index,
     subquery_tlist_len: usize,
 ) -> bool {
-    let exprs: Vec<pathnodes::NodeId> = match root.rel(rel).reltarget.as_deref() {
+    let exprs: Vec<::pathnodes::NodeId> = match root.rel(rel).reltarget.as_deref() {
         Some(t) => t.exprs.clone(),
         None => Vec::new(),
     };
@@ -320,7 +320,7 @@ fn wrap_subquery_subpath<'mcx>(
     rel: RelId,
     sub_id: PathId,
     trivial_pathtarget: bool,
-    required_outer: &pathnodes::Relids,
+    required_outer: &::pathnodes::Relids,
 ) -> PgResult<PathId> {
     let imported_id = {
         let subroot = root.rel_mut(rel).subroot.0.take().expect("subroot vanished");
@@ -365,13 +365,13 @@ fn wrap_subquery_subpath<'mcx>(
 fn make_tlist_from_pathtarget_ids(
     root: &mut PlannerInfo,
     path: PathId,
-) -> Vec<pathnodes::NodeId> {
-    let (exprs, sortgrouprefs): (Vec<pathnodes::NodeId>, Vec<u32>) =
+) -> Vec<::pathnodes::NodeId> {
+    let (exprs, sortgrouprefs): (Vec<::pathnodes::NodeId>, Vec<u32>) =
         match root.path(path).base().pathtarget.as_deref() {
             Some(t) => (t.exprs.clone(), t.sortgrouprefs.clone()),
             None => (Vec::new(), Vec::new()),
         };
-    let mut out: Vec<pathnodes::NodeId> = Vec::with_capacity(exprs.len());
+    let mut out: Vec<::pathnodes::NodeId> = Vec::with_capacity(exprs.len());
     for (i, expr_id) in exprs.into_iter().enumerate() {
         // C make_tlist_from_pathtarget (tlist.c:645-650): copy
         // target->sortgrouprefs[i] into the TLE's ressortgroupref when present.
@@ -382,7 +382,7 @@ fn make_tlist_from_pathtarget_ids(
         let ressortgroupref = sortgrouprefs.get(i).copied().unwrap_or(0) as _;
         out.push(root.alloc_targetentry(TargetEntryNode {
             expr: expr_id,
-            resno: (i + 1) as types_core::primitive::AttrNumber,
+            resno: (i + 1) as ::types_core::primitive::AttrNumber,
             resname: None,
             ressortgroupref,
             resorigtbl: 0,
@@ -407,7 +407,7 @@ pub fn set_cte_pathlist<'mcx>(
     rti: Index,
 ) -> PgResult<()> {
     // RangeTblEntry for this CTE scan.
-    let rte = pathnodes::planner_run::planner_rt_fetch(run, root, rti);
+    let rte = ::pathnodes::planner_run::planner_rt_fetch(run, root, rti);
     let ctename = rte
         .ctename
         .as_ref()
@@ -473,10 +473,10 @@ pub fn set_cte_pathlist<'mcx>(
     // Collect first (borrowing the run), then intern (borrowing root mutably).
     struct PendingTle<'mcx> {
         expr: nodes::primnodes::Expr<'mcx>,
-        resno: types_core::primitive::AttrNumber,
+        resno: ::types_core::primitive::AttrNumber,
         ressortgroupref: Index,
-        resorigtbl: types_core::primitive::Oid,
-        resorigcol: types_core::primitive::AttrNumber,
+        resorigtbl: ::types_core::primitive::Oid,
+        resorigcol: ::types_core::primitive::AttrNumber,
         resjunk: bool,
     }
     let (cte_plan_rows, pending) = {
@@ -573,7 +573,7 @@ pub fn set_worktable_pathlist<'mcx>(
     rel: RelId,
     rti: Index,
 ) -> PgResult<()> {
-    let rte = pathnodes::planner_run::planner_rt_fetch(run, root, rti);
+    let rte = ::pathnodes::planner_run::planner_rt_fetch(run, root, rti);
     let ctename = rte
         .ctename
         .as_ref()

@@ -11,8 +11,8 @@
 //! arrive as byte offsets into `lex.input`, so the C `const char *` pointer
 //! arithmetic becomes index arithmetic.
 
-use utils_error::ereport;
-use types_error::error::{ERROR, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNTRANSLATABLE_CHARACTER};
+use ::utils_error::ereport;
+use ::types_error::error::{ERROR, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNTRANSLATABLE_CHARACTER};
 use types_error::{PgError, PgResult, SoftErrorContext};
 use types_json::{JsonLexContext, JsonParseErrorType, JsonTokenType};
 

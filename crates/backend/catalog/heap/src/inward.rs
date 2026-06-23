@@ -10,9 +10,9 @@
 
 extern crate alloc;
 
-use heap_seams::HeapCreateWithCatalogArgs;
-use mcx::MemoryContext;
-use types_error::PgResult;
+use ::heap_seams::HeapCreateWithCatalogArgs;
+use ::mcx::MemoryContext;
+use ::types_error::PgResult;
 
 use crate::heap_create_with_catalog;
 
@@ -20,7 +20,7 @@ use crate::heap_create_with_catalog;
 /// fields the callers supply: NIL `cooked_constraints`, NULL `typaddress`).
 /// The `reloptions` `RelOptionsToken` carries the already-built `text[]` varlena
 /// image (`is_null` ⇒ SQL NULL).
-fn heap_create_with_catalog_seam(args: HeapCreateWithCatalogArgs<'_>) -> PgResult<types_core::Oid> {
+fn heap_create_with_catalog_seam(args: HeapCreateWithCatalogArgs<'_>) -> PgResult<::types_core::Oid> {
     let ctx = MemoryContext::new("heap_create_with_catalog");
     let mcx = ctx.mcx();
 
@@ -66,21 +66,21 @@ fn heap_create_with_catalog_seam(args: HeapCreateWithCatalogArgs<'_>) -> PgResul
 /// OID passed as `relrewrite` for the rebuild bookkeeping.
 #[allow(clippy::too_many_arguments)]
 fn heap_create_with_catalog_transient_seam<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     new_heap_name: &str,
-    namespaceid: types_core::Oid,
-    new_tablespace: types_core::Oid,
-    owner: types_core::Oid,
-    new_access_method: types_core::Oid,
+    namespaceid: ::types_core::Oid,
+    new_tablespace: ::types_core::Oid,
+    owner: ::types_core::Oid,
+    new_access_method: ::types_core::Oid,
     old_heap: &rel::Relation<'_>,
     relpersistence: u8,
     mapped: bool,
     reloptions: types_cluster::RelOptionsToken,
-    old_heap_oid: types_core::Oid,
-) -> PgResult<types_core::Oid> {
-    use types_core::InvalidOid;
+    old_heap_oid: ::types_core::Oid,
+) -> PgResult<::types_core::Oid> {
+    use ::types_core::InvalidOid;
     use ::nodes::primnodes::OnCommitAction;
-    use types_tuple::access::RELKIND_RELATION;
+    use ::types_tuple::access::RELKIND_RELATION;
 
     let reloptions: Option<alloc::vec::Vec<u8>> = if reloptions.is_null {
         None
@@ -113,9 +113,9 @@ fn heap_create_with_catalog_transient_seam<'mcx>(
         attr.atthasmissing = false;
     }
     if let Some(constr) = transient_desc.constr.as_mut() {
-        constr.defval = mcx::PgVec::new_in(mcx);
+        constr.defval = ::mcx::PgVec::new_in(mcx);
         constr.num_defval = 0;
-        constr.missing = mcx::PgVec::new_in(mcx);
+        constr.missing = ::mcx::PgVec::new_in(mcx);
     }
 
     heap_create_with_catalog(
@@ -146,16 +146,16 @@ fn heap_create_with_catalog_transient_seam<'mcx>(
 /// Seam body for `heap_drop_with_catalog(relid)` (dependency.c's `doDeletion`
 /// `OCLASS_CLASS` relation arm). The inward seam carries no `mcx`, so allocate
 /// a scratch context for the catalog scans / deletes.
-fn heap_drop_with_catalog_seam(relid: types_core::Oid) -> PgResult<()> {
+fn heap_drop_with_catalog_seam(relid: ::types_core::Oid) -> PgResult<()> {
     let ctx = MemoryContext::new("heap_drop_with_catalog");
     crate::heap_drop_with_catalog(ctx.mcx(), relid)
 }
 
 /// Seam body for `RemoveAttributeById(relid, attnum)` (dependency.c's
 /// `doDeletion` `OCLASS_CLASS` column arm). The inward seam carries no `mcx`.
-fn remove_attribute_by_id_seam(relid: types_core::Oid, attnum: i32) -> PgResult<()> {
+fn remove_attribute_by_id_seam(relid: ::types_core::Oid, attnum: i32) -> PgResult<()> {
     let ctx = MemoryContext::new("RemoveAttributeById");
-    crate::RemoveAttributeById(ctx.mcx(), relid, attnum as types_core::AttrNumber)
+    crate::RemoveAttributeById(ctx.mcx(), relid, attnum as ::types_core::AttrNumber)
 }
 
 /// Seam body for `RelationClearMissing(rel)` (the ALTER ... DROP DEFAULT path).
@@ -165,16 +165,16 @@ fn relation_clear_missing_seam(rel: &rel::Relation<'_>) -> PgResult<()> {
 }
 
 fn set_attribute_has_default_seam(
-    relid: types_core::Oid,
-    attnum: types_core::AttrNumber,
+    relid: ::types_core::Oid,
+    attnum: ::types_core::AttrNumber,
 ) -> PgResult<Option<i8>> {
     let ctx = MemoryContext::new("SetAttributeHasDefault");
     crate::SetAttributeHasDefault(ctx.mcx(), relid, attnum)
 }
 
 fn clear_attribute_has_default_seam(
-    relid: types_core::Oid,
-    attnum: types_core::AttrNumber,
+    relid: ::types_core::Oid,
+    attnum: ::types_core::AttrNumber,
 ) -> PgResult<bool> {
     let ctx = MemoryContext::new("ClearAttributeHasDefault");
     crate::ClearAttributeHasDefault(ctx.mcx(), relid, attnum)
@@ -184,8 +184,8 @@ fn clear_attribute_has_default_seam(
 /// returns `(atttypid, atttypmod, attcollation)` of the system column.
 fn system_attribute_definition_seam(
     attno: i32,
-) -> PgResult<(types_core::Oid, i32, types_core::Oid)> {
-    let att = crate::SystemAttributeDefinition(attno as types_core::AttrNumber)?;
+) -> PgResult<(::types_core::Oid, i32, ::types_core::Oid)> {
+    let att = crate::SystemAttributeDefinition(attno as ::types_core::AttrNumber)?;
     Ok((att.atttypid, att.atttypmod, att.attcollation))
 }
 
@@ -199,7 +199,7 @@ fn system_attribute_by_name_seam(attname: &str) -> PgResult<Option<i32>> {
 /// atttypmod, attcollation)` a field-reference resolver needs (expandedrecord.c).
 fn system_attribute_by_name_fields(
     attname: &str,
-) -> Option<(i32, types_core::Oid, i32, types_core::Oid)> {
+) -> Option<(i32, ::types_core::Oid, i32, ::types_core::Oid)> {
     crate::SystemAttributeByName(attname.as_bytes())
         .map(|att| (att.attnum as i32, att.atttypid, att.atttypmod, att.attcollation))
 }
@@ -213,28 +213,28 @@ pub fn init_seams() {
     plancat_ext_seams::system_attribute_by_name::set(
         system_attribute_by_name_seam,
     );
-    heap_seams::system_attribute_by_name::set(system_attribute_by_name_fields);
-    heap_seams::heap_create_with_catalog::set(heap_create_with_catalog_seam);
-    heap_seams::heap_create_with_catalog_transient::set(
+    ::heap_seams::system_attribute_by_name::set(system_attribute_by_name_fields);
+    ::heap_seams::heap_create_with_catalog::set(heap_create_with_catalog_seam);
+    ::heap_seams::heap_create_with_catalog_transient::set(
         heap_create_with_catalog_transient_seam,
     );
-    heap_seams::heap_drop_with_catalog::set(heap_drop_with_catalog_seam);
-    heap_seams::copy_statistics::set(|mcx, fromrelid, torelid| {
+    ::heap_seams::heap_drop_with_catalog::set(heap_drop_with_catalog_seam);
+    ::heap_seams::copy_statistics::set(|mcx, fromrelid, torelid| {
         crate::CopyStatistics(mcx, fromrelid, torelid)
     });
-    heap_seams::check_attribute_names_types::set(check_attribute_names_types_seam);
-    heap_seams::check_attribute_type::set(check_attribute_type_seam);
+    ::heap_seams::check_attribute_names_types::set(check_attribute_names_types_seam);
+    ::heap_seams::check_attribute_type::set(check_attribute_type_seam);
     // Low-level relation-create seams `index_create` (catalog/index.c) calls
     // directly. Their owner signatures match the seam signatures exactly, so
     // they install without a wrapper.
-    heap_seams::heap_create::set(crate::heap_create);
-    heap_seams::InsertPgClassTuple::set(crate::create::InsertPgClassTuple);
+    ::heap_seams::heap_create::set(crate::heap_create);
+    ::heap_seams::InsertPgClassTuple::set(crate::create::InsertPgClassTuple);
 
     // Attribute-mutate inward seams (dependency.c / ALTER paths). The bodies
     // are real; their writable-pg_attribute-carrier sub-seams panic until that
     // keystone lands (mirror-and-panic).
-    heap_seams::RemoveAttributeById::set(remove_attribute_by_id_seam);
-    heap_seams::relation_clear_missing::set(relation_clear_missing_seam);
+    ::heap_seams::RemoveAttributeById::set(remove_attribute_by_id_seam);
+    ::heap_seams::relation_clear_missing::set(relation_clear_missing_seam);
     syscache_seams::set_attribute_has_default::set(
         set_attribute_has_default_seam,
     );
@@ -255,9 +255,9 @@ pub fn init_seams() {
     // Catalog-row delete helpers that `index_drop` (catalog/index.c) calls to
     // clean up a dropped index's pg_class / pg_attribute / pg_statistic rows.
     // The inward seams carry no `mcx`; the shims allocate a scratch context.
-    heap_seams::DeleteRelationTuple::set(delete_relation_tuple_seam);
-    heap_seams::DeleteAttributeTuples::set(delete_attribute_tuples_seam);
-    heap_seams::RemoveStatistics::set(remove_statistics_seam);
+    ::heap_seams::DeleteRelationTuple::set(delete_relation_tuple_seam);
+    ::heap_seams::DeleteAttributeTuples::set(delete_attribute_tuples_seam);
+    ::heap_seams::RemoveStatistics::set(remove_statistics_seam);
 
     // TRUNCATE FK-check tail (tablecmds.c's `ExecuteTruncateGuts`). `find_fks`
     // carries `mcx` and matches the owner signature; `check_fks` does not, so its
@@ -274,28 +274,28 @@ pub fn init_seams() {
 
 /// Seam body for `heap_truncate_check_FKs(relids, tempTables)` (catalog/heap.c).
 /// The owner seam carries no `mcx`; allocate a scratch context for the scans.
-fn heap_truncate_check_fks_seam(relids: &[types_core::Oid], temp_tables: bool) -> PgResult<()> {
+fn heap_truncate_check_fks_seam(relids: &[::types_core::Oid], temp_tables: bool) -> PgResult<()> {
     let ctx = MemoryContext::new("heap_truncate_check_FKs");
     crate::heap_truncate_check_FKs(ctx.mcx(), relids, temp_tables)
 }
 
 /// Seam body for `DeleteRelationTuple(relid)` (catalog/heap.c). The inward seam
 /// carries no `mcx`.
-fn delete_relation_tuple_seam(relid: types_core::Oid) -> PgResult<()> {
+fn delete_relation_tuple_seam(relid: ::types_core::Oid) -> PgResult<()> {
     let ctx = MemoryContext::new("DeleteRelationTuple");
     crate::DeleteRelationTuple(ctx.mcx(), relid)
 }
 
 /// Seam body for `DeleteAttributeTuples(relid)` (catalog/heap.c). The inward
 /// seam carries no `mcx`.
-fn delete_attribute_tuples_seam(relid: types_core::Oid) -> PgResult<()> {
+fn delete_attribute_tuples_seam(relid: ::types_core::Oid) -> PgResult<()> {
     let ctx = MemoryContext::new("DeleteAttributeTuples");
     crate::DeleteAttributeTuples(ctx.mcx(), relid)
 }
 
 /// Seam body for `RemoveStatistics(relid, attnum)` (catalog/heap.c). The inward
 /// seam carries no `mcx`.
-fn remove_statistics_seam(relid: types_core::Oid, attnum: i16) -> PgResult<()> {
+fn remove_statistics_seam(relid: ::types_core::Oid, attnum: i16) -> PgResult<()> {
     let ctx = MemoryContext::new("RemoveStatistics");
     crate::RemoveStatistics(ctx.mcx(), relid, attnum)
 }
@@ -303,8 +303,8 @@ fn remove_statistics_seam(relid: types_core::Oid, attnum: i16) -> PgResult<()> {
 /// Seam body for `CheckAttributeNamesTypes` (catalog/heap.c). The descriptor
 /// crosses by reference; the real validator reads its `attrs`.
 fn check_attribute_names_types_seam<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    tupdesc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
+    tupdesc: &::types_tuple::heaptuple::TupleDescData<'mcx>,
     relkind: u8,
     flags: i32,
 ) -> PgResult<()> {
@@ -316,11 +316,11 @@ fn check_attribute_names_types_seam<'mcx>(
 /// `containing_rowtypes = NIL`, `flags = 0`. The inward seam carries no `mcx`.
 fn check_attribute_type_seam(
     attname: &str,
-    atttypid: types_core::Oid,
-    attcollation: types_core::Oid,
+    atttypid: ::types_core::Oid,
+    attcollation: ::types_core::Oid,
 ) -> PgResult<()> {
     let ctx = MemoryContext::new("CheckAttributeType");
-    let mut containing_rowtypes: alloc::vec::Vec<types_core::Oid> = alloc::vec::Vec::new();
+    let mut containing_rowtypes: alloc::vec::Vec<::types_core::Oid> = alloc::vec::Vec::new();
     crate::CheckAttributeType(
         ctx.mcx(),
         attname,

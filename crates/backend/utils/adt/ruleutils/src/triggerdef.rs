@@ -15,7 +15,7 @@
 use alloc::format;
 use alloc::string::String;
 use mcx::{Mcx, PgString};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 
 use crate::{
@@ -245,8 +245,8 @@ pub fn pg_get_triggerdef_worker<'mcx>(
         mcx,
         trig.tgfoid,
         0,
-        mcx::PgVec::new_in(mcx),
-        mcx::PgVec::new_in(mcx),
+        ::mcx::PgVec::new_in(mcx),
+        ::mcx::PgVec::new_in(mcx),
         false,
         false,
         false,

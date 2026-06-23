@@ -7,9 +7,9 @@
 //! C reads each baserel's RTE (`root->simple_rte_array[rti]`, a `RangeTblEntry
 //! *`) to pull the laterally-referenced Vars/PHVs from the RTE's lateral parse
 //! subtrees. This repo's `PlannerInfo.simple_rte_array` carries opaque
-//! [`RangeTblEntryId`](pathnodes::RangeTblEntryId) handles, resolved to a
+//! [`RangeTblEntryId`](::pathnodes::RangeTblEntryId) handles, resolved to a
 //! borrowed `&RangeTblEntry<'mcx>` through the established
-//! [`PlannerRun`](pathnodes::planner_run::PlannerRun) resolver
+//! [`PlannerRun`](::pathnodes::planner_run::PlannerRun) resolver
 //! (`run.resolve_rte`). So `find_lateral_references` and the family take an
 //! additional `run: &PlannerRun<'mcx>` parameter alongside `&mut PlannerInfo`,
 //! exactly as `jointree.rs`/`quals.rs` do. (`rebuild_lateral_attr_needed` does
@@ -36,7 +36,7 @@ use alloc::vec::Vec;
 
 use ::nodes::parsenodes::RTEKind;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, Relids, RELOPT_BASEREL};
 
 use joininfo as joininfo;
@@ -88,7 +88,7 @@ pub fn find_lateral_references<'mcx>(root: &mut PlannerInfo, run: &mut PlannerRu
 fn extract_lateral_references<'mcx>(
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
-    rel_id: pathnodes::RelId,
+    rel_id: ::pathnodes::RelId,
     rtindex: i32,
 ) -> types_error::PgResult<()> {
     let rte_id = root.simple_rte_array[rtindex as usize];
@@ -324,7 +324,7 @@ pub fn create_lateral_join_info(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
 
         // Consider each laterally-referenced Var or PHV. Snapshot the handles to
         // avoid holding a borrow of root across find_placeholder_info.
-        let lv: Vec<pathnodes::NodeId> = root.rel(rel_id).lateral_vars.clone();
+        let lv: Vec<::pathnodes::NodeId> = root.rel(rel_id).lateral_vars.clone();
         for nid in lv {
             // Deep-copy via `Expr::clone_in` (a derived `Expr::clone` panics on
             // a context-allocated child such as a PHV's contained expr).
@@ -365,7 +365,7 @@ pub fn create_lateral_join_info(root: &mut PlannerInfo, run: &PlannerRun<'_>) {
     // If it's due to be evaluated at a join, mark its source(s) as indirect
     // lateral dependencies of each baserel in the join, ie put them into
     // lateral_relids but not direct_lateral_relids.
-    let phinfo_ids: Vec<pathnodes::PhInfoId> = root.placeholder_list.clone();
+    let phinfo_ids: Vec<::pathnodes::PhInfoId> = root.placeholder_list.clone();
     for phinfo_id in phinfo_ids {
         // PHV is uninteresting if it has no lateral refs.
         if bms::relids_is_empty::call(&root.phinfo(phinfo_id).ph_lateral) {

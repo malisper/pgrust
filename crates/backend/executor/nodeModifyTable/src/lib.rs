@@ -77,7 +77,7 @@ pub mod merge_matched;
 pub mod partition_init;
 pub mod update;
 
-use types_tableam::tableam::{LockTupleMode, TM_FailureData, TU_UpdateIndexes};
+use ::types_tableam::tableam::{LockTupleMode, TM_FailureData, TU_UpdateIndexes};
 use ::nodes::SlotId;
 
 /// `ModifyTableContext` (executor/nodeModifyTable.c) — per-operation working
@@ -183,12 +183,12 @@ pub fn init_seams() {
     //   oldtupdata.t_tableOid = (relkind == RELKIND_VIEW) ? InvalidOid
     //                                                     : RelationGetRelid(rel);
     exec::datum_get_wholerow_heap_tuple::set(|mcx, datum, tableoid| {
-        use types_tuple::heaptuple::{Datum, FormedTuple};
+        use ::types_tuple::heaptuple::{Datum, FormedTuple};
         let mut formed = match datum {
             Datum::Composite(t) => t.clone_in(mcx)?,
             other => FormedTuple::from_datum_image(mcx, &other.as_varlena_bytes())?,
         };
-        formed.tuple.t_self = types_tuple::heaptuple::ItemPointerData::invalid();
+        formed.tuple.t_self = ::types_tuple::heaptuple::ItemPointerData::invalid();
         formed.tuple.t_tableOid = tableoid;
         Ok(formed)
     });
@@ -424,7 +424,7 @@ pub fn init_seams() {
             inslot,
             cid,
             mode,
-            types_tableam::tableam::LockWaitPolicy::LockWaitBlock,
+            ::types_tableam::tableam::LockWaitPolicy::LockWaitBlock,
             0,
             tmfd,
         )
@@ -452,20 +452,20 @@ pub fn init_seams() {
             let rel = crate::exec::relation_alias(estate, rri);
             let mcx = estate.es_query_cxt;
             let flags = if find_last_version {
-                types_tableam::tableam::TUPLE_LOCK_FLAG_FIND_LAST_VERSION
+                ::types_tableam::tableam::TUPLE_LOCK_FLAG_FIND_LAST_VERSION
             } else {
                 0
             };
             // delete_exec's local LockWaitPolicy mirror → the tableam enum.
             let wait = match wait {
                 delete_exec::LockWaitPolicy::LockWaitBlock => {
-                    types_tableam::tableam::LockWaitPolicy::LockWaitBlock
+                    ::types_tableam::tableam::LockWaitPolicy::LockWaitBlock
                 }
                 delete_exec::LockWaitPolicy::LockWaitSkip => {
-                    types_tableam::tableam::LockWaitPolicy::LockWaitSkip
+                    ::types_tableam::tableam::LockWaitPolicy::LockWaitSkip
                 }
                 delete_exec::LockWaitPolicy::LockWaitError => {
-                    types_tableam::tableam::LockWaitPolicy::LockWaitError
+                    ::types_tableam::tableam::LockWaitPolicy::LockWaitError
                 }
             };
             let inslot = estate.slot_data_mut(slot);
@@ -498,7 +498,7 @@ pub fn init_seams() {
         let (datum, isnull) = execTuples_seams::slot_getsysattr::call(
             mcx,
             s,
-            types_tuple::heaptuple::MinTransactionIdAttributeNumber,
+            ::types_tuple::heaptuple::MinTransactionIdAttributeNumber,
         )?;
         Ok((datum.as_u32(), isnull))
     });

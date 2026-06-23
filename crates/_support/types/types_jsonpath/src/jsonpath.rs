@@ -7,10 +7,10 @@
 
 use alloc::vec::Vec;
 
-use types_jsonb::jsonb::jbvType;
+use ::types_jsonb::jsonb::jbvType;
 
 /// `VARHDRSZ`, the varlena length-header size in bytes.
-pub use datum::VARHDRSZ;
+pub use ::datum::VARHDRSZ;
 
 // ---------------------------------------------------------------------------
 // JsonPath: the top-level on-disk datum (jsonpath.h).

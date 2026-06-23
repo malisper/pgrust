@@ -4,8 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::instrument::instr_time;
-use types_pgstat::activity_pgstat::{IOContext, IOObject, IOOp};
+use ::types_core::instrument::instr_time;
+use ::types_pgstat::activity_pgstat::{IOContext, IOObject, IOOp};
 
 seam_core::seam!(
     /// `pgstat_prepare_io_time(track_io_timing)` — capture the I/O start time

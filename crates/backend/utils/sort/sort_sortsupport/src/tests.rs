@@ -12,11 +12,11 @@ use std::string::ToString;
 use std::sync::Mutex;
 use std::vec::Vec;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 // `super::*` re-exports the canonical `types_tuple::...::Datum` used at the
 // `apply_sort_comparator` boundary. The fmgr-builtin lane (`cmp_builtin`'s
-// return) still speaks the transitional bare-word `datum::Datum`.
-use datum::Datum as ShimDatum;
+// return) still speaks the transitional bare-word `::datum::Datum`.
+use ::datum::Datum as ShimDatum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
 use super::*;

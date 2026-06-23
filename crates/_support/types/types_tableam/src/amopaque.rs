@@ -190,7 +190,7 @@ mod tests {
     }
 
     fn erase<'mcx>(mcx: Mcx<'mcx>) -> PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx> {
-        let boxed: PgBox<'mcx, McxBearing<'mcx>> = mcx::alloc_in(
+        let boxed: PgBox<'mcx, McxBearing<'mcx>> = ::mcx::alloc_in(
             mcx,
             McxBearing {
                 marker: core::marker::PhantomData,
@@ -199,7 +199,7 @@ mod tests {
         )
         .unwrap();
         // The same unsize-through-raw-pointer pattern the rest of the repo uses
-        // for `PgBox<'mcx, dyn Any>` (no `CoerceUnsized` on stable). `mcx::PgBox`
+        // for `PgBox<'mcx, dyn Any>` (no `CoerceUnsized` on stable). `::mcx::PgBox`
         // is `allocator_api2::boxed::Box`, which supports `?Sized` payloads.
         let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
         // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast

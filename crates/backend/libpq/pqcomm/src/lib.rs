@@ -31,21 +31,21 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{McxOwned, Mcx, MemoryContext, PgString, PgVec};
 use types_core::{pgsocket, PGINVALID_SOCKET, STATUS_ERROR, STATUS_OK};
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 use types_error::{
     ErrorLocation, PgResult, COMMERROR, ERRCODE_CONNECTION_DOES_NOT_EXIST,
     ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG,
 };
-use waiteventset_seams::WaitEventSet;
+use ::waiteventset_seams::WaitEventSet;
 use net::{AddrInfoHint, ClientSocket, PgAddrInfo, Port, SockAddr, SockError, SockResult};
-use types_storage::latch::LatchHandle;
-use types_storage::waiteventset::{
+use ::types_storage::latch::LatchHandle;
+use ::types_storage::waiteventset::{
     WaitEvent, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_CLOSED, WL_SOCKET_WRITEABLE,
 };
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 pub mod config;
 
@@ -135,7 +135,7 @@ struct PqCommAlloc<'mcx> {
     sock_paths: PgVec<'mcx, PgString<'mcx>>,
 }
 
-mcx::bind!(PqCommAllocTy => PqCommAlloc<'mcx>);
+::mcx::bind!(PqCommAllocTy => PqCommAlloc<'mcx>);
 
 thread_local! {
     static PQ: RefCell<PqCommState> = const { RefCell::new(PqCommState::new()) };

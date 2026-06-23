@@ -15,10 +15,10 @@
 //! `palloc`/`repalloc` in the current memory context, and `pstrdup`s each entry
 //! name into that same context; `pgfnames`'s result is handed back to the
 //! caller (who later `pgfnames_cleanup`s it). Mirroring that, [`pgfnames`]
-//! charges its growing name list to the caller-supplied [`mcx::Mcx`] via a
-//! fallible [`mcx::PgVec`] (so `palloc` OOM is a recoverable [`PgError`], not an
+//! charges its growing name list to the caller-supplied [`::mcx::Mcx`] via a
+//! fallible [`::mcx::PgVec`] (so `palloc` OOM is a recoverable [`PgError`], not an
 //! abort) and returns it. [`rmtree`]'s deferred-subdirectory list is a
-//! function-local context whose [`mcx::PgVec`] is reclaimed by scope drop — one
+//! function-local context whose [`::mcx::PgVec`] is reclaimed by scope drop — one
 //! open directory handle at a time, exactly like the C.
 //!
 //! ## Error reporting
@@ -38,7 +38,7 @@ use std::fs;
 use std::io;
 
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// The list of names returned by [`pgfnames`], charged to the caller's context.
 pub type PgFileNames<'mcx> = PgVec<'mcx, PgString<'mcx>>;
@@ -63,7 +63,7 @@ pub fn pgfnames<'mcx>(mcx: Mcx<'mcx>, path: &str) -> PgResult<Option<PgFileNames
 
     // filenames = palloc(fnsize * sizeof(char *)); grows by repalloc.
     // 200 entries "enough for many small dbs", matching the C initial fnsize.
-    let mut filenames: PgFileNames<'mcx> = mcx::vec_with_capacity_in(mcx, 200)?;
+    let mut filenames: PgFileNames<'mcx> = ::mcx::vec_with_capacity_in(mcx, 200)?;
 
     for entry in entries {
         let entry = match entry {
@@ -97,7 +97,7 @@ fn push_name<'mcx>(
     if filenames.len() == filenames.capacity() {
         let want = filenames.capacity().saturating_mul(2).max(1);
         let request = want.saturating_mul(core::mem::size_of::<PgString<'mcx>>());
-        mcx::check_alloc_size(request)?;
+        ::mcx::check_alloc_size(request)?;
         filenames
             .try_reserve(want - filenames.len())
             .map_err(|_| mcx.oom(request))?;
@@ -148,7 +148,7 @@ fn rmtree_in(mcx: Mcx<'_>, path: &str, rmtopdir: bool) -> bool {
     // dirnames = palloc(sizeof(char *) * dirnames_capacity);  (cap 8)
     // OOM here is the palloc abort path: report failure and stop, like C would
     // have ERRORed out of the whole rmtree.
-    let mut dirnames: PgVec<'_, String> = match mcx::vec_with_capacity_in(mcx, 8) {
+    let mut dirnames: PgVec<'_, String> = match ::mcx::vec_with_capacity_in(mcx, 8) {
         Ok(v) => v,
         Err(_) => return false,
     };

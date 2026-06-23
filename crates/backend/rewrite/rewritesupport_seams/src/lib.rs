@@ -4,8 +4,8 @@
 //! The owning unit (rewriteSupport.c, not yet ported) installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `get_rewrite_oid(relid, rulename, missing_ok)` (rewriteSupport.c): the

@@ -16,11 +16,11 @@
 //! copy; a cache miss (a negative entry) is `Ok(None)`.
 
 use mcx::{Mcx, PgVec};
-use cache::SysCacheKey;
-use types_core::Oid;
-use types_error::PgResult;
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::TupleDescData;
+use ::cache::SysCacheKey;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(
     /// `InitCatCache(id, reloid, indexoid, nkeys, key, nbuckets)`
@@ -199,9 +199,9 @@ seam_core::seam!(
     pub fn prepare_to_invalidate_cache_tuple<'mcx>(
         mcx: Mcx<'mcx>,
         relation: &rel::RelationData<'_>,
-        tuple: &types_tuple::HeapTupleData<'_>,
+        tuple: &::types_tuple::HeapTupleData<'_>,
         tuple_data: &[u8],
-        newtuple: Option<&types_tuple::HeapTupleData<'_>>,
+        newtuple: Option<&::types_tuple::HeapTupleData<'_>>,
         newtuple_data: Option<&[u8]>,
     ) -> PgResult<PgVec<'mcx, types_storage::PrepareToInvalidateCacheTuple>>
 );

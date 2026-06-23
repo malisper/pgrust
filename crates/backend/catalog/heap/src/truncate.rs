@@ -21,16 +21,16 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use genam_seams::ScannedConstraintFk;
-use lsyscache::relation::{get_rel_name, get_rel_relhastriggers, get_rel_relkind};
-use utils_error::ereport;
+use ::genam_seams::ScannedConstraintFk;
+use ::lsyscache::relation::{get_rel_name, get_rel_relhastriggers, get_rel_relkind};
+use ::utils_error::ereport;
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{Oid, OidIsValid};
+use ::types_core::primitive::{Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use types_catalog::pg_constraint::CONSTRAINT_FOREIGN;
-use types_tuple::access::RELKIND_PARTITIONED_TABLE;
-use rel::Relation;
-use types_storage::lock::{AccessExclusiveLock, NoLock};
+use ::types_catalog::pg_constraint::CONSTRAINT_FOREIGN;
+use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
+use ::rel::Relation;
+use ::types_storage::lock::{AccessExclusiveLock, NoLock};
 
 /// `list_member_oid(list, datum)`.
 fn list_member_oid(list: &[Oid], datum: Oid) -> bool {
@@ -51,7 +51,7 @@ pub fn heap_truncate_find_FKs<'mcx>(
     // re-runs the seqscan after each parent-constraint pass; the rows are stable
     // under the caller's locks, so a single fetch + in-memory passes is faithful.
     let rows: Vec<ScannedConstraintFk> =
-        genam_seams::scan_pg_constraint_truncate_fks::call()?;
+        ::genam_seams::scan_pg_constraint_truncate_fks::call()?;
 
     let mut result: Vec<Oid> = Vec::new();
     // oids = list_copy(relationIds);
@@ -128,7 +128,7 @@ pub fn heap_truncate_find_FKs<'mcx>(
     result.sort_unstable();
     result.dedup();
 
-    let mut out: PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, result.len())?;
+    let mut out: PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, result.len())?;
     for relid in result {
         out.push(relid);
     }

@@ -16,10 +16,10 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 use mcx::{alloc_in, vec_with_capacity_in, MemoryContext, Mcx, PgBox, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
-use types_sortsupport::SortSupportData;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
+use ::types_sortsupport::SortSupportData;
 
 use crate::execnodes::{PlanStateData, SlotId};
 use crate::nodeagg::{TupleHashIterator, TupleHashTable};
@@ -223,7 +223,7 @@ pub struct SetOpStateData<'mcx> {
     /// `TupleHashTable hashtable` — hash table with one entry per group.
     pub hashtable: Option<Box<TupleHashTable<'mcx>>>,
     /// `MemoryContext tableContext` — memory context containing the hash table.
-    /// `mcx::MemoryContext` owns its allocation domain and resets on drop, so
+    /// `::mcx::MemoryContext` owns its allocation domain and resets on drop, so
     /// `MemoryContextDelete`/`Reset` are native (drop / `reset`).
     pub tableContext: Option<MemoryContext>,
     /// `bool table_filled` — hash table filled yet?

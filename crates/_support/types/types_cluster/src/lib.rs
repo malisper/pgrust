@@ -151,9 +151,9 @@ pub use ::nodes::parsestmt::ParseState;
 
 /// `struct VacuumCutoffs` (`commands/vacuum.h`): the freeze/cutoff values
 /// `vacuum_get_cutoffs` computes and `cluster`/`copy_table_data` consume.
-/// Canonically defined in `types_vacuum::vacuum`; re-exported here so existing
+/// Canonically defined in `::types_vacuum::vacuum`; re-exported here so existing
 /// `types_cluster::VacuumCutoffs` paths keep working.
-pub use types_vacuum::vacuum::VacuumCutoffs;
+pub use ::types_vacuum::vacuum::VacuumCutoffs;
 
 /* ----------------------------------------------------------------
  * catalog/index.h: reindex_relation flag bits + ReindexParams
@@ -186,7 +186,7 @@ pub struct ReindexParams {
     /// `bits32 options` — `REINDEXOPT_*` (CLUSTER passes 0).
     pub options: i32,
     /// `Oid tablespaceOid` — `InvalidOid` for "keep".
-    pub tablespace_oid: types_core::Oid,
+    pub tablespace_oid: ::types_core::Oid,
 }
 
 /* ----------------------------------------------------------------

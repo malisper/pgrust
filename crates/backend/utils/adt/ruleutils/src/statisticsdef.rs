@@ -16,10 +16,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgString};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 
-use types_catalog::pg_statistic_ext::{
+use ::types_catalog::pg_statistic_ext::{
     STATS_EXT_DEPENDENCIES, STATS_EXT_MCV, STATS_EXT_NDISTINCT,
 };
 
@@ -174,7 +174,7 @@ pub fn pg_get_statisticsobj_worker<'mcx>(
         let attname = lsyscache_seams::get_attname::call(
             mcx,
             stxrelid,
-            attnum as types_core::AttrNumber,
+            attnum as ::types_core::AttrNumber,
             false,
         )?
         .ok_or_else(|| {

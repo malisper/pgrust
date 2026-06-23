@@ -4,7 +4,7 @@
 //! `PlannedStmt` is **not** a `Node` enum variant in the trimmed model, so it
 //! cannot route through `parse_node_string` (which returns a `Node`). This
 //! module supplies a dedicated reader that drives the shared `pg_strtok` cursor
-//! itself (via `read.c`'s [`with_strtok`](nodes_core::read::with_strtok)),
+//! itself (via `read.c`'s [`with_strtok`](::nodes_core::read::with_strtok)),
 //! reads the opening `{ PLANNEDSTMT`, and reverses the dummy-`PlannedStmt`
 //! serialization `ExecSerializePlan`/`out_dummy_plannedstmt`
 //! (`backend-nodes-outfuncs/src/serialize_plan.rs`) emits — **field for field,
@@ -20,7 +20,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::{CmdType, Node};
 use ::nodes::parsenodes::{RTEPermissionInfo, RangeTblEntry};
@@ -29,7 +29,7 @@ use ::nodes::partprune_carrier::{
     PartitionPruneStepOp, PartitionedRelPruneInfo, RawBms,
 };
 
-use nodes_core::read;
+use ::nodes_core::read;
 
 use crate::{
     elog_error, next_token, read_bitmapset_field, read_bitmapset_opt_field, read_bool_field,

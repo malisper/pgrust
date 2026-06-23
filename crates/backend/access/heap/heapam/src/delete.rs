@@ -26,25 +26,25 @@
 //! families (the heapam LOCK family + multixact.c); they are reached through
 //! honest seams that panic until those owners land.
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, MultiXactId, OffsetNumber, Oid, TransactionId};
-use types_core::xact::{CommandId, InvalidCommandId};
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, MultiXactId, OffsetNumber, Oid, TransactionId};
+use ::types_core::xact::{CommandId, InvalidCommandId};
 use types_error::{
     PgResult, ERRCODE_INVALID_TRANSACTION_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
-use utils_error::ereport;
-use types_tuple::heaptuple::Datum;
+use ::utils_error::ereport;
+use ::types_tuple::heaptuple::Datum;
 use rel::{Relation, RelationData};
-use types_storage::lock::XLTW_Oper;
+use ::types_storage::lock::XLTW_Oper;
 use types_storage::{Buffer, InvalidBuffer};
-use types_tableam::tableam::{LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result};
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::{
+use ::types_tableam::tableam::{LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result};
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleField3, HeapTupleHeaderChoice, HeapTupleHeaderData, ItemPointerData,
     FirstLowInvalidHeapAttributeNumber, HEAP_COMBOCID, HEAP_HASEXTERNAL, HEAP_KEYS_UPDATED,
     HEAP_MOVED, HEAP_HOT_UPDATED, HEAP_XMAX_INVALID,
 };
-use xlog_records::multixact::MultiXactStatus;
+use ::xlog_records::multixact::MultiXactStatus;
 
 use page::{
     ItemPointerEquals, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid,
@@ -52,14 +52,14 @@ use page::{
     PageSetPrunable,
 };
 
-use heapam_visibility::htup::{
+use ::heapam_visibility::htup::{
     HeapTupleHeaderGetRawXmax, HEAP_LOCK_MASK, HEAP_XMAX_IS_LOCKED_ONLY,
 };
 use heapam_visibility::{
     HeapTupleHeaderGetUpdateXid as HtupGetUpdateXid, HeapTupleHeaderIsOnlyLocked,
     HeapTupleSatisfiesUpdate, HeapTupleSatisfiesVisibility,
 };
-use transam::TransactionIdEquals;
+use ::transam::TransactionIdEquals;
 
 use crate::{
     compute_infobits, xmax_infomask_changed, GetMultiXactIdHintBits, UpdateXmaxHintBits,
@@ -80,18 +80,18 @@ use pgstat_seams as pgstat_seam;
 use relcache_seams as relcache_seam;
 use combocid_seams as combocid_seam;
 
-use types_storage::bufpage::SizeofHeapTupleHeader;
-use wal::wal::{RM_HEAP_ID, XLOG_INCLUDE_ORIGIN};
-use wal::xloginsert::REGBUF_STANDARD;
+use ::types_storage::bufpage::SizeofHeapTupleHeader;
+use ::wal::wal::{RM_HEAP_ID, XLOG_INCLUDE_ORIGIN};
+use ::wal::xloginsert::REGBUF_STANDARD;
 
-use rmgrdesc_next::heapdesc::XLOG_HEAP_DELETE;
-use xlog_records::heapam_xlog::{
+use ::rmgrdesc_next::heapdesc::XLOG_HEAP_DELETE;
+use ::xlog_records::heapam_xlog::{
     xl_heap_delete, xl_heap_header, SizeOfHeapDelete, SizeOfHeapHeader,
     XLH_DELETE_ALL_VISIBLE_CLEARED, XLH_DELETE_CONTAINS_OLD_KEY, XLH_DELETE_CONTAINS_OLD_TUPLE,
     XLH_DELETE_IS_PARTITION_MOVE,
 };
 
-use heaptuple::heap_tuple_to_disk_image;
+use ::heaptuple::heap_tuple_to_disk_image;
 
 // ---------------------------------------------------------------------------
 // heapam-local vocabulary (htup_details.h / heapam.h / pg_class.h / rel.h /
@@ -205,7 +205,7 @@ pub fn heap_delete<'mcx>(
              * Sleep until concurrent transaction ends -- except when there's a
              * single locker and it's our own transaction.
              */
-            if (infomask & types_tuple::heaptuple::HEAP_XMAX_IS_MULTI) != 0 {
+            if (infomask & ::types_tuple::heaptuple::HEAP_XMAX_IS_MULTI) != 0 {
                 let conflict = heapam_seam::does_multi_xact_id_conflict::call(
                     xwait as MultiXactId,
                     infomask,
@@ -474,7 +474,7 @@ pub fn heap_delete<'mcx>(
         // Write the stamped header back into the on-page tuple.
         let item = page_bytes
             .get_mut(off..off + len)
-            .ok_or_else(|| types_error::PgError::error("item storage is outside page"))?;
+            .ok_or_else(|| ::types_error::PgError::error("item storage is outside page"))?;
         header_image.write_on_page(item)?;
         Ok(())
     })?;
@@ -671,11 +671,11 @@ pub fn compute_new_xmax_infomask<'mcx>(
     mut mode: LockTupleMode,
     is_update: bool,
 ) -> PgResult<(TransactionId, u16, u16)> {
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         HEAP_XMAX_COMMITTED, HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK,
         HEAP_XMAX_LOCK_ONLY,
     };
-    use heapam_visibility::htup::HEAP_LOCKED_UPGRADED;
+    use ::heapam_visibility::htup::HEAP_LOCKED_UPGRADED;
 
     debug_assert!(xact_seam::transaction_id_is_current_transaction_id::call(add_to_xmax));
 
@@ -879,7 +879,7 @@ pub fn compute_new_xmax_infomask<'mcx>(
 
 /// `HEAP_XMAX_SHR_LOCK` (htup_details.h).
 const HEAP_XMAX_SHR_LOCK: u16 =
-    types_tuple::heaptuple::HEAP_XMAX_EXCL_LOCK | types_tuple::heaptuple::HEAP_XMAX_KEYSHR_LOCK;
+    ::types_tuple::heaptuple::HEAP_XMAX_EXCL_LOCK | ::types_tuple::heaptuple::HEAP_XMAX_KEYSHR_LOCK;
 
 /// `HEAP_XMAX_IS_SHR_LOCKED(infomask)` (htup_details.h).
 fn HEAP_XMAX_IS_SHR_LOCKED(infomask: u16) -> bool {
@@ -888,20 +888,20 @@ fn HEAP_XMAX_IS_SHR_LOCKED(infomask: u16) -> bool {
 
 /// `HEAP_XMAX_IS_EXCL_LOCKED(infomask)` (htup_details.h).
 fn HEAP_XMAX_IS_EXCL_LOCKED(infomask: u16) -> bool {
-    (infomask & HEAP_LOCK_MASK) == types_tuple::heaptuple::HEAP_XMAX_EXCL_LOCK
+    (infomask & HEAP_LOCK_MASK) == ::types_tuple::heaptuple::HEAP_XMAX_EXCL_LOCK
 }
 
 /// `HEAP_XMAX_IS_KEYSHR_LOCKED(infomask)` (htup_details.h).
 fn HEAP_XMAX_IS_KEYSHR_LOCKED(infomask: u16) -> bool {
-    (infomask & HEAP_LOCK_MASK) == types_tuple::heaptuple::HEAP_XMAX_KEYSHR_LOCK
+    (infomask & HEAP_LOCK_MASK) == ::types_tuple::heaptuple::HEAP_XMAX_KEYSHR_LOCK
 }
 
 /// `HEAP_XMAX_BITS` (htup_details.h).
-const HEAP_XMAX_BITS: u16 = types_tuple::heaptuple::HEAP_XMAX_COMMITTED
+const HEAP_XMAX_BITS: u16 = ::types_tuple::heaptuple::HEAP_XMAX_COMMITTED
     | HEAP_XMAX_INVALID
-    | types_tuple::heaptuple::HEAP_XMAX_IS_MULTI
-    | heapam_visibility::htup::HEAP_LOCK_MASK
-    | types_tuple::heaptuple::HEAP_XMAX_LOCK_ONLY;
+    | ::types_tuple::heaptuple::HEAP_XMAX_IS_MULTI
+    | ::heapam_visibility::htup::HEAP_LOCK_MASK
+    | ::types_tuple::heaptuple::HEAP_XMAX_LOCK_ONLY;
 
 // ===========================================================================
 // ExtractReplicaIdentity — shared with the UPDATE side (heapam.c, static).
@@ -969,7 +969,7 @@ pub fn ExtractReplicaIdentity<'mcx>(
      * nulls elsewhere.  While we're at it, assert that the replica identity
      * columns aren't null.
      */
-    let columns = heaptuple::heap_deform_tuple(mcx, &tp.tuple, desc, &tp.data)?;
+    let columns = ::heaptuple::heap_deform_tuple(mcx, &tp.tuple, desc, &tp.data)?;
     let mut values: Vec<Datum> = Vec::with_capacity(columns.len());
     let mut nulls: Vec<bool> = Vec::with_capacity(columns.len());
     for (v, n) in columns {
@@ -989,7 +989,7 @@ pub fn ExtractReplicaIdentity<'mcx>(
         }
     }
 
-    let key_tuple = heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)
+    let key_tuple = ::heaptuple::heap_form_tuple(mcx, desc, &values, &nulls)
         .map_err(map_heaptuple_error)?;
 
     // C `bms_free(idattrs)` — the owned PgBox is dropped at scope end.
@@ -1022,7 +1022,7 @@ fn read_on_page_tuple<'mcx>(
     tid: ItemPointerData,
 ) -> PgResult<FormedTuple<'mcx>> {
     let offnum = ItemPointerGetOffsetNumber(&tid);
-    let mut out: Option<(HeapTupleHeaderData<'mcx>, mcx::PgVec<'mcx, u8>, u32)> = None;
+    let mut out: Option<(HeapTupleHeaderData<'mcx>, ::mcx::PgVec<'mcx, u8>, u32)> = None;
     bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
         let page = PageRef::new(page_bytes)?;
         let item_id = PageGetItemId(&page, offnum)?;
@@ -1041,7 +1041,7 @@ fn read_on_page_tuple<'mcx>(
         // `FormedTuple.data` is the user-data area `item[t_hoff..t_len]`.
         let t_hoff = hdr.t_hoff as usize;
         let data_start = t_hoff.min(item.len());
-        let mut data = mcx::PgVec::new_in(mcx);
+        let mut data = ::mcx::PgVec::new_in(mcx);
         for &b in &item[data_start..] {
             data.push(b);
         }
@@ -1049,13 +1049,13 @@ fn read_on_page_tuple<'mcx>(
         Ok(())
     })?;
     let (hdr, data, t_len) = out.expect("with_buffer_page closure must have run");
-    let tuple = mcx::alloc_in(
+    let tuple = ::mcx::alloc_in(
         mcx,
         HeapTupleData {
             t_len,
             t_self: tid,
             t_tableOid: rel_id,
-            t_data: Some(mcx::alloc_in(mcx, hdr)?),
+            t_data: Some(::mcx::alloc_in(mcx, hdr)?),
         },
     )?;
     Ok(FormedTuple { tuple, data })
@@ -1162,7 +1162,7 @@ fn TransactionIdDidCommit(xid: TransactionId) -> PgResult<bool> {
 /// `RelationIsAccessibleInLogicalDecoding(relation)` (utils/rel.h).
 pub(crate) fn relation_is_accessible_in_logical_decoding(relation: &RelationData<'_>) -> bool {
     let wal = transam_xlog_seams::wal_level::call();
-    let xlog_logical_info_active = wal >= wal::WalLevel::Logical;
+    let xlog_logical_info_active = wal >= ::wal::WalLevel::Logical;
     xlog_logical_info_active
         && relcache_seam::relation_needs_wal::call(relation)
         && (catalog_seam::is_catalog_relation::call(relation)
@@ -1172,7 +1172,7 @@ pub(crate) fn relation_is_accessible_in_logical_decoding(relation: &RelationData
 /// `RelationIsLogicallyLogged(relation)` (utils/rel.h).
 fn relation_is_logically_logged(relation: &RelationData<'_>) -> bool {
     let wal = transam_xlog_seams::wal_level::call();
-    let xlog_logical_info_active = wal >= wal::WalLevel::Logical;
+    let xlog_logical_info_active = wal >= ::wal::WalLevel::Logical;
     xlog_logical_info_active
         && relcache_seam::relation_needs_wal::call(relation)
         && !catalog_seam::is_catalog_relation::call(relation)
@@ -1223,7 +1223,7 @@ fn HeapTupleHeaderClearHotUpdated(hdr: &mut HeapTupleHeaderData<'_>) {
 fn HeapTupleHeaderSetMovedPartitions(hdr: &mut HeapTupleHeaderData<'_>) {
     // MovedPartitionsBlockNumber = InvalidBlockNumber, ip_blkid bits, with
     // MovedPartitionsOffsetNumber == 0xfffd.
-    hdr.t_ctid.ip_blkid = types_tuple::heaptuple::BlockIdData::new(MovedPartitionsBlockNumber);
+    hdr.t_ctid.ip_blkid = ::types_tuple::heaptuple::BlockIdData::new(MovedPartitionsBlockNumber);
     hdr.t_ctid.ip_posid = MovedPartitionsOffsetNumber;
 }
 
@@ -1236,17 +1236,17 @@ const MovedPartitionsOffsetNumber: OffsetNumber = 0xfffd;
 /// arm materialized as an owned copy).
 fn clone_formed<'mcx>(mcx: Mcx<'mcx>, tp: &FormedTuple<'mcx>) -> PgResult<FormedTuple<'mcx>> {
     let hdr = data_ref_formed(tp).clone();
-    let mut data = mcx::PgVec::new_in(mcx);
+    let mut data = ::mcx::PgVec::new_in(mcx);
     for &b in tp.data.iter() {
         data.push(b);
     }
-    let tuple = mcx::alloc_in(
+    let tuple = ::mcx::alloc_in(
         mcx,
         HeapTupleData {
             t_len: tp.tuple.t_len,
             t_self: tp.tuple.t_self,
             t_tableOid: tp.tuple.t_tableOid,
-            t_data: Some(mcx::alloc_in(mcx, hdr)?),
+            t_data: Some(::mcx::alloc_in(mcx, hdr)?),
         },
     )?;
     Ok(FormedTuple { tuple, data })
@@ -1260,15 +1260,15 @@ fn data_ref_formed<'a, 'mcx>(tp: &'a FormedTuple<'mcx>) -> &'a HeapTupleHeaderDa
 }
 
 /// `elog(ERROR, msg)` builder.
-fn elog_error(msg: &str) -> types_error::PgError {
+fn elog_error(msg: &str) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg.to_string()).into_error()
 }
 
 /// Map [`HeapTupleError`] from `heap_form_tuple` to the `PgError` C raises.
 fn map_heaptuple_error(
-    err: heaptuple::HeapTupleError,
-) -> types_error::PgError {
-    use heaptuple::HeapTupleError;
+    err: ::heaptuple::HeapTupleError,
+) -> ::types_error::PgError {
+    use ::heaptuple::HeapTupleError;
     match err {
         HeapTupleError::Pg(e) => e,
         other => ereport(ERROR)
@@ -1320,7 +1320,7 @@ mod tests {
     /// exact lock pattern (htup_details.h).
     #[test]
     fn xmax_locked_predicates_match_c() {
-        use types_tuple::heaptuple::{HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_KEYSHR_LOCK};
+        use ::types_tuple::heaptuple::{HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_KEYSHR_LOCK};
         assert!(HEAP_XMAX_IS_EXCL_LOCKED(HEAP_XMAX_EXCL_LOCK));
         assert!(!HEAP_XMAX_IS_EXCL_LOCKED(HEAP_XMAX_KEYSHR_LOCK));
         assert!(HEAP_XMAX_IS_KEYSHR_LOCKED(HEAP_XMAX_KEYSHR_LOCK));
@@ -1333,8 +1333,8 @@ mod tests {
     /// `HeapTupleHeaderClearHotUpdated` clears the HOT-updated infomask2 bit.
     #[test]
     fn header_mutators_match_c() {
-        use mcx::MemoryContext;
-        use types_tuple::heaptuple::{
+        use ::mcx::MemoryContext;
+        use ::types_tuple::heaptuple::{
             BlockIdData, HeapTupleFields, ItemPointerData,
         };
         let ctx = MemoryContext::new("delete_header_mutators");
@@ -1349,7 +1349,7 @@ mod tests {
             t_infomask2: HEAP_HOT_UPDATED,
             t_infomask: 0,
             t_hoff: 24,
-            t_bits: mcx::PgVec::new_in(mcx),
+            t_bits: ::mcx::PgVec::new_in(mcx),
         };
 
         HeapTupleHeaderSetCmax(&mut hdr, 9, true);

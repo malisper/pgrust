@@ -10,7 +10,7 @@
 //! `'static` carrier the storage unit builds (`tuplestore_begin_heap_hold` via
 //! `Tuplestorestate::begin_static`) borrows nothing from a caller's `'mcx`.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::Tuplestorestate;
 
 seam_core::seam!(

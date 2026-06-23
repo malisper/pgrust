@@ -14,13 +14,13 @@
 //!   `store_view_query`, `table_finish_bulk_insert`, `execute_query`. These
 //!   panic loudly until their owners land and install them.
 
-use mcx::Mcx;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_error::PgResult;
 use ::nodes::ddlnodes::{CreateTableAsStmt, ExecuteStmt, IntoClause as DdlIntoClause};
 use ::nodes::params::ParamListInfo;
 use ::nodes::parsestmt::{DestReceiverHandle, IntoClause};
-use portal::QueryCompletion;
+use ::portal::QueryCompletion;
 
 seam_core::seam!(
     /// `GetIntoRelEFlags(intoClause)` (createas.c) — the executor eflags for a
@@ -149,7 +149,7 @@ seam_core::seam!(
     pub fn create_ctas_relation<'mcx>(
         mcx: Mcx<'mcx>,
         into: ::nodes::ddlnodes::IntoClause<'mcx>,
-        attr_list: mcx::PgVec<'mcx, mcx::PgBox<'mcx, ::nodes::nodes::Node<'mcx>>>,
+        attr_list: ::mcx::PgVec<'mcx, ::mcx::PgBox<'mcx, ::nodes::nodes::Node<'mcx>>>,
         relkind: u8,
         is_matview: bool,
     ) -> PgResult<ObjectAddress>

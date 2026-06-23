@@ -4,9 +4,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
-use types_core::Oid;
-use types_error::PgResult;
-use parsenodes::Node;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::parsenodes::Node;
 
 seam_core::seam!(
     /// `oidparse(node)` (oid.c): parse the OID literal carried by a parser

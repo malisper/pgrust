@@ -3,7 +3,7 @@
 //! These routines operate purely over `TargetEntry` / `SortGroupClause` /
 //! `PathTarget`. Structural expression equality (`equal()`) crosses to the
 //! not-yet-ported equalfuncs.c via the
-//! [`equalfuncs_seams::equal_expr`] seam.
+//! [`::equalfuncs_seams::equal_expr`] seam.
 //!
 //! # Arena adaptation
 //!
@@ -30,11 +30,11 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use nodes_core::makefuncs::make_target_entry;
-use nodes_core::nodefuncs::{expr_collation, expr_type};
-use equalfuncs_seams::equal_expr;
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Index, Oid};
+use ::nodes_core::makefuncs::make_target_entry;
+use ::nodes_core::nodefuncs::{expr_collation, expr_type};
+use ::equalfuncs_seams::equal_expr;
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::{Expr, TargetEntry, Var};
 use ::nodes::rawnodes::SortGroupClause;
@@ -220,7 +220,7 @@ pub fn apply_tlist_labeling<'mcx>(
     for (dest_tle, src_tle) in dest_tlist.iter_mut().zip(src_tlist.iter()) {
         assert_eq!(dest_tle.resno, src_tle.resno);
         dest_tle.resname = match &src_tle.resname {
-            Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
+            Some(s) => Some(::mcx::PgString::from_str_in(s.as_str(), mcx)?),
             None => None,
         };
         dest_tle.ressortgroupref = src_tle.ressortgroupref;
@@ -548,14 +548,14 @@ pub fn make_tlist_from_pathtarget<'mcx>(
 // ===========================================================================
 
 /// A single-member `Relids` (`bms_make_singleton`) built without an `mcx`.
-fn bms_make_singleton_relids(x: i32) -> pathnodes::Relids {
+fn bms_make_singleton_relids(x: i32) -> ::pathnodes::Relids {
     debug_assert!(x > 0);
     let bit = x as usize;
     let wordnum = bit / 64;
     let bitnum = bit % 64;
     let mut words = alloc::vec![0u64; wordnum + 1];
     words[wordnum] = 1u64 << bitnum;
-    Some(alloc::boxed::Box::new(pathnodes::Bitmapset { words }))
+    Some(alloc::boxed::Box::new(::pathnodes::Bitmapset { words }))
 }
 
 /// `IS_SRF_CALL(node)` (tlist.c:32) — a top-level set-returning FuncExpr/OpExpr.
@@ -914,7 +914,7 @@ fn split_pathtarget_walker(node: &Expr, context: &mut SplitPathtargetContext) ->
         context.current_sgref = 0;
 
         // expression_tree_walker over the SRF's children.
-        nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child| {
+        ::nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child| {
             split_pathtarget_walker(child, context)
         });
 
@@ -953,7 +953,7 @@ fn split_pathtarget_walker(node: &Expr, context: &mut SplitPathtargetContext) ->
 
     // Scalar (non-set) expression: recurse into its inputs.
     context.current_sgref = 0;
-    nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child| {
+    ::nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child| {
         split_pathtarget_walker(child, context)
     })
 }

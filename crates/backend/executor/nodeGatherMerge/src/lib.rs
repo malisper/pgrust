@@ -60,7 +60,7 @@ use postgres_seams as tcop_postgres;
 use sortsupport_seams as sortsupport;
 
 use mcx::{alloc_in, Mcx, PgBox};
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 /// The one canonical value type. The binary heap's `bh_nodes` (owned by
 /// `types-nodes`) carries it, and the sort-key comparison edge
 /// (`ApplySortComparator` / `sortsupport::apply_sort_comparator`) takes it too.
@@ -75,17 +75,17 @@ use ::nodes::nodemergeappend::BinaryHeap;
 use nodes::{
     Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind,
 };
-use types_sortsupport::SortSupportData;
+use ::types_sortsupport::SortSupportData;
 use types_tuple::heaptuple::FormedMinimalTuple;
 
 /// Decode a flat C `MinimalTuple` byte image (the tuple-queue wire bytes) into
 /// the payload-bearing [`FormedMinimalTuple`] carrier.
 fn mintuple_from_flat<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     blob: &[u8],
-) -> types_error::PgResult<FormedMinimalTuple<'mcx>> {
-    use heaptuple::flat::MinimalTupleFlatError;
-    match heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
+) -> ::types_error::PgResult<FormedMinimalTuple<'mcx>> {
+    use ::heaptuple::flat::MinimalTupleFlatError;
+    match ::heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
         Ok(mtup) => Ok(mtup),
         Err(MinimalTupleFlatError::Pg(err)) => Err(err),
         Err(other) => panic!("minimal_tuple_from_flat on a tuple-queue image failed: {other:?}"),
@@ -228,8 +228,8 @@ pub fn ExecInitGatherMerge<'mcx>(
     let num_cols = node.numCols;
     let num_cols_usize =
         usize::try_from(num_cols).map_err(|_| elog_error("GatherMerge has a negative numCols"))?;
-    let mut gm_sortkeys: mcx::PgVec<'mcx, SortSupportData<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, num_cols_usize)?;
+    let mut gm_sortkeys: ::mcx::PgVec<'mcx, SortSupportData<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, num_cols_usize)?;
     if num_cols != 0 {
         //   gm_state->gm_nkeys = node->numCols;
         //   gm_state->gm_sortkeys = palloc0(sizeof(SortSupportData) * node->numCols);
@@ -281,9 +281,9 @@ pub fn ExecInitGatherMerge<'mcx>(
             pei: None,
             nworkers_launched: 0,
             nreaders: 0,
-            gm_slots: mcx::vec_with_capacity_in(mcx, 0)?,
-            reader: mcx::vec_with_capacity_in(mcx, 0)?,
-            gm_tuple_buffers: mcx::vec_with_capacity_in(mcx, 0)?,
+            gm_slots: ::mcx::vec_with_capacity_in(mcx, 0)?,
+            reader: ::mcx::vec_with_capacity_in(mcx, 0)?,
+            gm_tuple_buffers: ::mcx::vec_with_capacity_in(mcx, 0)?,
             gm_heap: None,
         },
     )?;
@@ -400,8 +400,8 @@ pub fn ExecGatherMerge<'mcx>(
                 node.nreaders = nworkers_launched;
                 let nreaders = usize::try_from(nworkers_launched)
                     .map_err(|_| elog_error("GatherMerge nreaders is negative"))?;
-                let mut reader: mcx::PgVec<'mcx, execparallel::TupleQueueReaderHandle> =
-                    mcx::vec_with_capacity_in(mcx, nreaders)?;
+                let mut reader: ::mcx::PgVec<'mcx, execparallel::TupleQueueReaderHandle> =
+                    ::mcx::vec_with_capacity_in(mcx, nreaders)?;
                 {
                     let pei = node
                         .pei
@@ -420,7 +420,7 @@ pub fn ExecGatherMerge<'mcx>(
                 //   node->nreaders = 0;
                 //   node->reader = NULL;
                 node.nreaders = 0;
-                node.reader = mcx::vec_with_capacity_in(mcx, 0)?;
+                node.reader = ::mcx::vec_with_capacity_in(mcx, 0)?;
             }
         }
 
@@ -652,23 +652,23 @@ fn gather_merge_setup<'mcx>(
 
     // Allocate gm_slots for the number of workers + one more slot for leader.
     //   gm_state->gm_slots = palloc0((nreaders + 1) * sizeof(TupleTableSlot *));
-    let mut gm_slots: mcx::PgVec<'mcx, Option<SlotId>> =
-        mcx::vec_with_capacity_in(mcx, nreaders_usize + 1)?;
+    let mut gm_slots: ::mcx::PgVec<'mcx, Option<SlotId>> =
+        ::mcx::vec_with_capacity_in(mcx, nreaders_usize + 1)?;
     for _ in 0..(nreaders_usize + 1) {
         gm_slots.push(None);
     }
 
     // Allocate the tuple slot and tuple array for each worker.
     //   gm_state->gm_tuple_buffers = palloc0(nreaders * sizeof(GMReaderTupleBuffer));
-    let mut gm_tuple_buffers: mcx::PgVec<'mcx, GMReaderTupleBuffer<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, nreaders_usize)?;
+    let mut gm_tuple_buffers: ::mcx::PgVec<'mcx, GMReaderTupleBuffer<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, nreaders_usize)?;
 
     //   for (i = 0; i < nreaders; i++) { ... }
     for i in 0..nreaders_usize {
         // Allocate the tuple array with length MAX_TUPLE_STORE.
         //   gm_state->gm_tuple_buffers[i].tuple = palloc0(sizeof(MinimalTuple) * MAX_TUPLE_STORE);
-        let mut tuple: mcx::PgVec<'mcx, Option<FormedMinimalTuple<'mcx>>> =
-            mcx::vec_with_capacity_in(mcx, MAX_TUPLE_STORE as usize)?;
+        let mut tuple: ::mcx::PgVec<'mcx, Option<FormedMinimalTuple<'mcx>>> =
+            ::mcx::vec_with_capacity_in(mcx, MAX_TUPLE_STORE as usize)?;
         for _ in 0..MAX_TUPLE_STORE {
             tuple.push(None);
         }

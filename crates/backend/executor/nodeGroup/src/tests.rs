@@ -304,15 +304,15 @@ fn make_group_plan<'mcx>(mcx: Mcx<'mcx>, with_having: bool) -> PgResult<Node<'mc
     let mut g = Group {
         plan: Default::default(),
         numCols: 1,
-        grpColIdx: mcx::vec_with_capacity_in(mcx, 1)?,
-        grpOperators: mcx::vec_with_capacity_in(mcx, 1)?,
-        grpCollations: mcx::vec_with_capacity_in(mcx, 1)?,
+        grpColIdx: ::mcx::vec_with_capacity_in(mcx, 1)?,
+        grpOperators: ::mcx::vec_with_capacity_in(mcx, 1)?,
+        grpCollations: ::mcx::vec_with_capacity_in(mcx, 1)?,
     };
     g.grpColIdx.push(1);
     g.grpOperators.push(96); // BooleanEqualOperator OID, arbitrary
     g.grpCollations.push(0);
     if with_having {
-        let mut list = mcx::vec_with_capacity_in(mcx, 1)?;
+        let mut list = ::mcx::vec_with_capacity_in(mcx, 1)?;
         list.push(::nodes::primnodes::Expr::Const(
             ::nodes::primnodes::Const::default(),
         ));

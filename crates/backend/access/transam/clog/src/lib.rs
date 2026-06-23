@@ -29,9 +29,9 @@
 
 use std::cell::RefCell;
 
-use utils_error::errno::current_errno;
+use ::utils_error::errno::current_errno;
 use utils_error::{PgError, PgResult};
-use types_error::PANIC;
+use ::types_error::PANIC;
 
 use slru::{
     SimpleLruAutotuneBuffers, SimpleLruInit, SimpleLruReadPage, SimpleLruReadPage_ReadOnly,
@@ -39,10 +39,10 @@ use slru::{
     SimpleLruZeroPage, SlruCtlData, SlruScanDirCbReportPresence, SlruScanDirectory, SlruSyncFileTag,
     SlruPagePrecedesUnitTests, SLRU_MAX_ALLOWED_BUFFERS,
 };
-use transam::TransactionIdPrecedes;
+use ::transam::TransactionIdPrecedes;
 use lwlock::{LWLockAcquire, LWLockConditionalAcquire, LWLockRelease};
 
-use init_small::globals;
+use ::init_small::globals;
 
 use clog_seams as clog_seams;
 use varsup_seams as varsup_seams;
@@ -52,20 +52,20 @@ use lmgr_proc_seams as proc_seams;
 use waitevent_seams as waitevent_seams;
 use guc_seams as guc_seams;
 
-use types_core::xact::{
+use ::types_core::xact::{
     FirstNormalTransactionId, InvalidTransactionId, InvalidXLogRecPtr, MaxTransactionId, XidStatus,
     TRANSACTION_STATUS_ABORTED, TRANSACTION_STATUS_COMMITTED, TRANSACTION_STATUS_IN_PROGRESS,
     TRANSACTION_STATUS_SUB_COMMITTED,
 };
 use types_core::{Oid, Size, TransactionId, XLogRecPtr, BLCKSZ, INVALID_PROC_NUMBER};
-use types_guc::guc::{PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE};
-use types_pgstat::wait_event::WAIT_EVENT_XACT_GROUP_UPDATE;
-use types_storage::storage::{LWLockMode, LW_EXCLUSIVE};
-use types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler};
+use ::types_guc::guc::{PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE};
+use ::types_pgstat::wait_event::WAIT_EVENT_XACT_GROUP_UPDATE;
+use ::types_storage::storage::{LWLockMode, LW_EXCLUSIVE};
+use ::types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler};
 use types_storage::{LWTRANCHE_XACT_BUFFER, LWTRANCHE_XACT_SLRU};
-use wal::rmgr::XLogReaderState;
-use wal::rmgrdesc::xl_clog_truncate;
-use wal::wal::{CLOG_TRUNCATE, CLOG_ZEROPAGE, RM_CLOG_ID};
+use ::wal::rmgr::XLogReaderState;
+use ::wal::rmgrdesc::xl_clog_truncate;
+use ::wal::wal::{CLOG_TRUNCATE, CLOG_ZEROPAGE, RM_CLOG_ID};
 
 // ---------------------------------------------------------------------------
 // CLOG page size / status-bit constants (clog.c #defines).
@@ -791,7 +791,7 @@ pub fn CLOGShmemInit() -> PgResult<()> {
 
 /// `check_transaction_buffers` — GUC check_hook for `transaction_buffers`.
 pub fn check_transaction_buffers(newval: i32) -> (bool, Option<String>) {
-    slru::check_slru_buffers("transaction_buffers", newval)
+    ::slru::check_slru_buffers("transaction_buffers", newval)
 }
 
 /// `BootStrapCLOG()` — create and zero the first CLOG page during bootstrap.
@@ -1008,7 +1008,7 @@ pub fn clog_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
         .as_ref()
         .expect("clog_redo dispatched on a decoded record");
     // uint8 info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
-    let info = decoded.info() & !wal::wal::XLR_INFO_MASK;
+    let info = decoded.info() & !::wal::wal::XLR_INFO_MASK;
 
     // Backup blocks are not used in clog records.
     debug_assert!(decoded.max_block_id() < 0);
@@ -1086,7 +1086,7 @@ pub fn init_seams() {
     fn check_hook(
         newval: &mut i32,
         _extra: &mut Option<guc_tables::GucHookExtra>,
-        _source: types_guc::guc::GucSource,
+        _source: ::types_guc::guc::GucSource,
     ) -> PgResult<bool> {
         let (ok, detail) = check_transaction_buffers(*newval);
         if ok {
@@ -1095,7 +1095,7 @@ pub fn init_seams() {
             // C sets GUC_check_errdetail and returns false; carry the detail on
             // Err per the GUC check-hook contract (mirrors subtrans).
             match detail {
-                Some(d) => Err(types_error::PgError::error(d)),
+                Some(d) => Err(::types_error::PgError::error(d)),
                 None => Ok(false),
             }
         }

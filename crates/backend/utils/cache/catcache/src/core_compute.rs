@@ -10,8 +10,8 @@
 //! resolved bytes / scalar directly rather than dereferencing a pointer.
 
 use cache::catcache::{CatKey, CCFastKind};
-use types_core::Oid;
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`:
+use ::types_core::Oid;
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`:
 // these fast hash/equality functions consume the by-value scalar key word (C's
 // `DatumGetChar/Int16/Int32`) directly. Pass-by-value scalar keys stay the
 // audited bare word, not the canonical `types_tuple::Datum<'mcx>` enum (which is
@@ -25,8 +25,8 @@ use types_core::Oid;
 // these compute functions feed/compare against those fields verbatim. Migrating
 // to canonical `Datum<'mcx>` here would diverge from that out-of-scope
 // types-cache contract. The crate's deformed-tuple values are already canonical.
-use datum::Datum as ScalarWord;
-use types_error::PgResult;
+use ::datum::Datum as ScalarWord;
+use ::types_error::PgResult;
 
 /* ----------------------------------------------------------------------------
  * `RegProcedure` OIDs for the supported catcache key equality operators

@@ -25,12 +25,12 @@
 //! bytes ride the by-ref lane as `Varlena`, exactly as `oidrecv` does.
 //! `uuid_send` returns `bytea`: its full varlena image rides the result lane.
 
-use types_datetime::Interval;
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::types_datetime::Interval;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 use types_uuid::{pg_uuid_t, UUID_LEN};
 
 // ---------------------------------------------------------------------------
@@ -348,8 +348,8 @@ pub fn register_uuid_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datum::NullableDatum;
-    use fmgr::FunctionCallInfoBaseData;
+    use ::datum::NullableDatum;
+    use ::fmgr::FunctionCallInfoBaseData;
 
     /// Build a raw 16-byte `uuid` image from its canonical text via the
     /// registered `uuid_in` path (proving the in-function too).

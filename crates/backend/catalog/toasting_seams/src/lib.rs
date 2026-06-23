@@ -4,11 +4,11 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_cluster::RelOptionsToken;
-use types_core::Oid;
-use types_error::PgResult;
-use types_storage::lock::LOCKMODE;
+use ::mcx::Mcx;
+use ::types_cluster::RelOptionsToken;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
     /// `NewHeapCreateToastTable(relOid, reloptions, lockmode, toastOid)`

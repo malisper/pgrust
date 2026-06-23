@@ -20,10 +20,10 @@ use alloc::format;
 use core::ffi::c_char;
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use locale::{CollProvider, PgLocaleStruct};
-use types_tuple::heaptuple::DEFAULT_COLLATION_OID;
+use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 
 use pg_locale_catalog_seams as catalog;
 
@@ -73,7 +73,7 @@ extern "C" {
 }
 
 /// The `RegexWcClass` ctype predicates, single-byte (`PG_REGEX_STRATEGY_LIBC_1BYTE`).
-use pg_locale_seams::RegexWcClass;
+use ::pg_locale_seams::RegexWcClass;
 
 /// `iswXXX_l((wint_t) c, info.lt)` — wide ctype predicate
 /// (`PG_REGEX_STRATEGY_LIBC_WIDE`).
@@ -375,7 +375,7 @@ pub fn strnxfrm_libc<'mcx>(
     // SAFETY: srcp is NUL-terminated; null dest with size 0 is permitted.
     let needed = unsafe { strxfrm_l(core::ptr::null_mut(), srcp, 0, locale.handle()) };
 
-    let mut out = mcx::vec_with_capacity_in::<u8>(mcx, needed + 1)?;
+    let mut out = ::mcx::vec_with_capacity_in::<u8>(mcx, needed + 1)?;
     // Reserve `needed + 1` (room for the NUL strxfrm writes), fill, then trim.
     out.resize(needed + 1, 0u8);
     // SAFETY: out has needed+1 bytes; srcp NUL-terminated.
@@ -419,7 +419,7 @@ pub fn get_collation_actual_version_libc<'mcx>(
             core::ffi::CStr::from_ptr(p)
         };
         let bytes = ver.to_bytes();
-        let mut out = mcx::vec_with_capacity_in::<u8>(mcx, bytes.len())?;
+        let mut out = ::mcx::vec_with_capacity_in::<u8>(mcx, bytes.len())?;
         out.extend_from_slice(bytes);
         return Ok(Some(out));
     }
@@ -447,7 +447,7 @@ fn report_newlocale_failure(localename: &str) -> PgError {
         save_errno = libc::ENOENT;
     }
 
-    let mut err = PgError::new(types_error::ERROR, format!(
+    let mut err = PgError::new(::types_error::ERROR, format!(
         "could not create locale \"{localename}\": {}",
         os_error_string(save_errno)
     ))

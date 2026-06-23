@@ -10,10 +10,10 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use replication_applyparallel::ParallelApplyWorkerInfo;
-use replication_launcher::LogicalRepWorkerType;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::replication_applyparallel::ParallelApplyWorkerInfo;
+use ::replication_launcher::LogicalRepWorkerType;
 
 seam_core::seam!(
     /// `AtEOXact_ApplyLauncher(isCommit)` — wake/forget logical-rep launcher
@@ -109,12 +109,12 @@ seam_core::seam!(
     /// `ApplyLauncherShmemSize()` (ipci.c `CalculateShmemSize` accumulator) —
     /// shared-memory bytes this subsystem needs. Infallible in C, so the seam
     /// returns a bare `Size`.
-    pub fn apply_launcher_shmem_size() -> types_core::Size
+    pub fn apply_launcher_shmem_size() -> ::types_core::Size
 );
 
 seam_core::seam!(
     /// `ApplyLauncherShmemInit()` (ipci.c `CreateOrAttachShmemStructs`) — allocate-or-attach
     /// this subsystem's shared-memory structures. `Err` carries the C
     /// out-of-shared-memory `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn apply_launcher_shmem_init() -> types_error::PgResult<()>
+    pub fn apply_launcher_shmem_init() -> ::types_error::PgResult<()>
 );

@@ -4,7 +4,7 @@
 //! The seam vocabulary (`execparallel`) is the frozen shared boundary the
 //! already-merged `backend-executor-execParallel` consumes; the adapters here
 //! bridge it to the runtime's [`runtime::DsaAreaHandle`] + `u64` `DsaPointer` +
-//! [`dsm_core::DsmSegmentId`].
+//! [`::dsm_core::DsmSegmentId`].
 //!
 //! The seams are infallible and carry no `Mcx`; the allocator's true surface is
 //! fallible and allocates DSM segments. The adapters therefore source the DSA
@@ -15,7 +15,7 @@
 
 use std::cell::Cell;
 
-use dsm_core::dsm::DsmSegmentId;
+use ::dsm_core::dsm::DsmSegmentId;
 use dsa_seams as seam;
 use mcx::{Mcx, MemoryContext};
 use types_dsa::{DsaHandle, DSA_DEFAULT_INIT_SEGMENT_SIZE, DSA_MAX_SEGMENT_SIZE};

@@ -9,10 +9,10 @@
 //! type-cache lookup through the typcache seams. This family owns and installs
 //! the inward `range_cmp_bounds` and `range_get_typcache` seams.
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::{Oid, OidIsValid};
-use datum::datum::Datum;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::datum::datum::Datum;
 use types_error::{PgError, PgResult};
 use types_rangetypes::{RangeBound, RangeTypeP, RANGE_EMPTY};
 
@@ -74,7 +74,7 @@ pub(crate) fn elem_word_to_canon<'mcx>(
     let image = unsafe {
         crate::range_repr_serialize::byref_elem_headerful_image(ptr, elem.typlen)
     };
-    Ok(CanonDatum::ByRef(mcx::slice_in(mcx, &image).map_err(|_| {
+    Ok(CanonDatum::ByRef(::mcx::slice_in(mcx, &image).map_err(|_| {
         PgError::error(
             "range element compare: out of memory copying by-reference element image",
         )
@@ -85,7 +85,7 @@ pub(crate) fn elem_word_to_canon<'mcx>(
 /// bound words, threading by-reference elements onto the proper fmgr lane (see
 /// [`elem_word_to_canon`]). Returns the `int4` comparison result.
 fn cmp_elem_words(typcache: &TypeCacheEntry, a: Datum, b: Datum) -> PgResult<i32> {
-    let scratch = mcx::MemoryContext::new_bump("range element cmp");
+    let scratch = ::mcx::MemoryContext::new_bump("range element cmp");
     let mcx = scratch.mcx();
     let av = elem_word_to_canon(mcx, typcache, a)?;
     let bv = elem_word_to_canon(mcx, typcache, b)?;
@@ -155,7 +155,7 @@ const TYPECACHE_RANGE_INFO: i32 = 0x00800;
 /// `rngelemtype == NULL` "type %u is not a range type" guard, caching the entry
 /// in `fcinfo->flinfo->fn_extra`. `lookup_type_cache` is owned by the
 /// genuinely-unported `backend-utils-cache-typcache`; its `lookup_type_cache_entry`
-/// seam hands back the range-bearing `cache::TypeCacheEntry`
+/// seam hands back the range-bearing `::cache::TypeCacheEntry`
 /// (`rng_cmp_proc_finfo` / `rng_collation` / `rngelemtype` carried), the same
 /// seam the sibling `multirangetypes::multirange_get_typcache` consumes. The
 /// owned model re-looks-up each call (the cache is the typcache's own job) and
@@ -640,7 +640,7 @@ pub fn bounds_adjacent_seam(
     bound_a: RangeBound,
     bound_b: RangeBound,
 ) -> PgResult<bool> {
-    let scratch = mcx::MemoryContext::new_bump("bounds_adjacent probe");
+    let scratch = ::mcx::MemoryContext::new_bump("bounds_adjacent probe");
     bounds_adjacent(scratch.mcx(), typcache, bound_a, bound_b)
 }
 
@@ -655,6 +655,6 @@ pub fn range_adjacent_internal_seam(
     r1: RangeTypeP<'_>,
     r2: RangeTypeP<'_>,
 ) -> PgResult<bool> {
-    let scratch = mcx::MemoryContext::new_bump("range_adjacent probe");
+    let scratch = ::mcx::MemoryContext::new_bump("range_adjacent probe");
     range_adjacent_internal(scratch.mcx(), typcache, r1, r2)
 }

@@ -21,11 +21,11 @@
 //! seam rather than getting its own slot.
 
 use mcx::{PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 
-use json_seams::escape_json;
-use xml_seams::escape_xml;
+use ::json_seams::escape_json;
+use ::xml_seams::escape_xml;
 
 // OR-able flags for ExplainXMLTag()
 const X_OPENING: i32 = 0;
@@ -517,9 +517,9 @@ pub fn ExplainRestoreGroup(
 /// `ExplainCreateWorkersState(num_workers)` — allocate the per-worker output
 /// redirection state for an ANALYZE'd parallel plan node.
 pub fn ExplainCreateWorkersState<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     num_workers: i32,
-) -> PgResult<types_explain::ExplainWorkersState<'mcx>> {
+) -> PgResult<::types_explain::ExplainWorkersState<'mcx>> {
     let n = num_workers.max(0) as usize;
     let mut worker_inited: PgVec<'mcx, bool> = PgVec::new_in(mcx);
     let mut worker_str: PgVec<'mcx, PgString<'mcx>> = PgVec::new_in(mcx);
@@ -534,7 +534,7 @@ pub fn ExplainCreateWorkersState<'mcx>(
         worker_str.push(PgString::new_in(mcx));
         worker_state_save.push(0);
     }
-    Ok(types_explain::ExplainWorkersState {
+    Ok(::types_explain::ExplainWorkersState {
         num_workers,
         worker_inited,
         worker_str,
@@ -629,7 +629,7 @@ pub fn ExplainCloseWorker(n: i32, es: &mut ExplainState<'_>) -> PgResult<()> {
 }
 
 /// `ExplainFlushWorkersState(es)` — print per-worker info for the current node,
-/// then drop the [`types_explain::ExplainWorkersState`].
+/// then drop the [`::types_explain::ExplainWorkersState`].
 pub fn ExplainFlushWorkersState(es: &mut ExplainState<'_>) -> PgResult<()> {
     // Take the workers_state out so we can read its buffers while appending to
     // `es.str` (the C reads `wstate->worker_str[i]` while writing `es->str`).

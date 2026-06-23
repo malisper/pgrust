@@ -34,12 +34,12 @@
 //!   seam crate exists).
 
 use mcx::{vec_with_capacity_in, MemoryContext, Mcx, PgVec};
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, InvalidBuffer, OffsetNumber, RmgrId, Size, TransactionId,
     BLCKSZ,
 };
-use types_core::xact::{FirstNormalFullTransactionId, FullTransactionId};
-use types_error::error::{DEBUG1, LOG};
+use ::types_core::xact::{FirstNormalFullTransactionId, FullTransactionId};
+use ::types_error::error::{DEBUG1, LOG};
 use types_error::{PgError, PgResult};
 use types_nbtree::{
     xl_btree_delete, xl_btree_mark_page_halfdead, xl_btree_metadata, xl_btree_newroot,
@@ -51,11 +51,11 @@ use types_nbtree::{
     XLOG_BTREE_MARK_PAGE_HALFDEAD, XLOG_BTREE_META_CLEANUP, XLOG_BTREE_NEWROOT,
     XLOG_BTREE_REUSE_PAGE, XLOG_BTREE_UNLINK_PAGE, XLOG_BTREE_UNLINK_PAGE_META, XLOG_BTREE_VACUUM,
 };
-use rel::Relation;
-use types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
-use types_storage::storage::Buffer;
-use types_tuple::heaptuple::{BlockIdData, IndexTupleData, IndexTupleSize, ItemPointerData};
-use wal::xloginsert::{REGBUF_STANDARD, REGBUF_WILL_INIT};
+use ::rel::Relation;
+use ::types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
+use ::types_storage::storage::Buffer;
+use ::types_tuple::heaptuple::{BlockIdData, IndexTupleData, IndexTupleSize, ItemPointerData};
+use ::wal::xloginsert::{REGBUF_STANDARD, REGBUF_WILL_INIT};
 
 use page::{
     PageGetContents, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageGetSpecialPointer,
@@ -989,7 +989,7 @@ pub(crate) fn _bt_allocbuf<'mcx>(
      */
     let buf = bufmgr::extend_buffered_rel_locked::call(
         rel,
-        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        ::types_core::primitive::ForkNumber::MAIN_FORKNUM,
     )?;
 
     /* Initialize the new page before returning it */
@@ -1403,8 +1403,8 @@ fn serialize_offsets(offs: &[OffsetNumber]) -> std::vec::Vec<u8> {
 
 /// `_bt_delitems_cmp(a, b)` — restore `deltids` to leaf-page-wise order via id.
 fn _bt_delitems_cmp(
-    a: &types_nbtree::TmIndexDelete,
-    b: &types_nbtree::TmIndexDelete,
+    a: &::types_nbtree::TmIndexDelete,
+    b: &::types_nbtree::TmIndexDelete,
 ) -> std::cmp::Ordering {
     debug_assert!(a.id != b.id);
     a.id.cmp(&b.id)
@@ -1417,7 +1417,7 @@ pub fn bt_delitems_delete_check<'mcx>(
     rel: &Relation<'mcx>,
     buf: Buffer,
     heap_rel: &Relation<'mcx>,
-    mut delstate: types_nbtree::TmIndexDeleteOp<'mcx>,
+    mut delstate: ::types_nbtree::TmIndexDeleteOp<'mcx>,
 ) -> PgResult<()> {
     {
         /*
@@ -1596,7 +1596,7 @@ fn item_pointer_compare(a: &ItemPointerData, b: &ItemPointerData) -> i32 {
 fn table_index_delete_tuples<'mcx>(
     mcx: Mcx<'mcx>,
     heap_rel: &Relation<'mcx>,
-    delstate: &mut types_nbtree::TmIndexDeleteOp<'mcx>,
+    delstate: &mut ::types_nbtree::TmIndexDeleteOp<'mcx>,
 ) -> PgResult<TransactionId> {
     table_tableam_seams::table_index_delete_tuples::call(mcx, heap_rel, delstate)
 }
@@ -2623,7 +2623,7 @@ fn _bt_pendingfsm_add<'mcx>(
 /// `btbuildempty()`'s metapage construction: smgr bulk-write an empty metapage
 /// into the INIT fork.
 pub fn build_empty_metapage<'mcx>(index: &Relation<'mcx>, allequalimage: bool) -> PgResult<()> {
-    use types_core::primitive::ForkNumber;
+    use ::types_core::primitive::ForkNumber;
 
     with_temp_mcx(|mcx| {
         let mut bulkstate =

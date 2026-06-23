@@ -11,9 +11,9 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_core::primitive::{Buffer, TimeLineID, XLogRecPtr, XLogSegNo};
-use types_error::PgResult;
-use wal::rmgr::XLogReaderState;
+use ::types_core::primitive::{Buffer, TimeLineID, XLogRecPtr, XLogSegNo};
+use ::types_error::PgResult;
+use ::wal::rmgr::XLogReaderState;
 use wal::{DecodedBkpBlock, ReadAheadRecordInfo};
 
 use xlogreader_seams as seam;
@@ -22,7 +22,7 @@ use xlogreader_seams as seam;
 pub use seam::XLogBlockTag;
 
 /// Re-export of the bufmgr write-page seam used by `RestoreBlockImage`.
-pub use bufmgr_seams::with_buffer_page;
+pub use ::bufmgr_seams::with_buffer_page;
 
 /// `XLogReadAhead` seam adapter: the seam returns the `Copy` header facts of
 /// the newly decoded record (the decode-queue tail). On success our internal

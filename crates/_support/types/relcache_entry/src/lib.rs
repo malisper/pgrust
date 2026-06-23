@@ -19,12 +19,12 @@
 //! `Default` produces the all-zero entry the C `AllocateRelationDesc`
 //! `palloc0`s before filling; the build family fills it.
 
-use types_core::primitive::{AttrNumber, Oid, ProcNumber, RegProcedure};
-use types_core::xact::SubTransactionId;
+use ::types_core::primitive::{AttrNumber, Oid, ProcNumber, RegProcedure};
+use ::types_core::xact::SubTransactionId;
 use types_core::{InvalidOid, INVALID_PROC_NUMBER};
-use types_error::PgResult;
-use types_storage::lock::LockRelId;
-use types_storage::RelFileLocator;
+use ::types_error::PgResult;
+use ::types_storage::lock::LockRelId;
+use ::types_storage::RelFileLocator;
 
 /// `IndexAttrBitmapKind` (`utils/relcache.h`) — which attribute bitmap
 /// `RelationGetIndexAttrBitmap` should return.
@@ -105,7 +105,7 @@ pub struct FormPgIndex {
 }
 
 /// An owned `TupleDesc` mirror for the entry (`rd_att`). The lifetime-bearing
-/// [`types_tuple::heaptuple::TupleDescData`] is materialized at projection
+/// [`::types_tuple::heaptuple::TupleDescData`] is materialized at projection
 /// time; the entry stores the owned attribute rows. (Build family fills this.)
 #[derive(Clone, Debug, Default)]
 pub struct OwnedTupleDesc {
@@ -132,7 +132,7 @@ impl OwnedTupleDesc {
     /// `TupleDescAttr(rd_att, i)` (`access/tupdesc.h`) over the OWNED attribute
     /// rows — the `i`-th [`OwnedAttr`] (0-based). The entry stores attributes in
     /// owned form; this is the owned-side analog of
-    /// [`types_tuple::heaptuple::TupleDescData::attr`].
+    /// [`::types_tuple::heaptuple::TupleDescData::attr`].
     pub fn attr(&self, i: usize) -> &OwnedAttr {
         &self.attrs[i]
     }
@@ -144,7 +144,7 @@ impl OwnedTupleDesc {
     }
 
     /// Materialize the owned tuple descriptor into the cross-unit borrowed
-    /// [`types_tuple::heaptuple::TupleDescData`], allocated in `mcx`. This is the
+    /// [`::types_tuple::heaptuple::TupleDescData`], allocated in `mcx`. This is the
     /// owned->borrowed projection the relcache build family performed for
     /// `rd_att` (`CreateTupleDescCopyConstr(RelationGetDescr(rel))`-shaped): the
     /// full `Form_pg_attribute[]` is built from the owned rows, fed through
@@ -164,7 +164,7 @@ impl OwnedTupleDesc {
         &self,
         mcx: mcx::Mcx<'mcx>,
         relid: Oid,
-    ) -> PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>> {
+    ) -> PgResult<mcx::PgBox<'mcx, ::types_tuple::heaptuple::TupleDescData<'mcx>>> {
         let attrs = self.build_form_attrs(relid);
         let mut td = tupdesc::CreateTupleDesc(mcx, &attrs)?;
         // `CreateTupleDesc` re-derives each `CompactAttribute.attnullability`
@@ -202,10 +202,10 @@ impl OwnedTupleDesc {
     pub fn build_form_attrs(
         &self,
         relid: Oid,
-    ) -> Vec<types_tuple::heaptuple::FormData_pg_attribute> {
+    ) -> Vec<::types_tuple::heaptuple::FormData_pg_attribute> {
         self.attrs
             .iter()
-            .map(|a| types_tuple::heaptuple::FormData_pg_attribute {
+            .map(|a| ::types_tuple::heaptuple::FormData_pg_attribute {
                 attrelid: relid,
                 attname: name_data(&a.attname),
                 atttypid: a.atttypid,
@@ -234,8 +234,8 @@ impl OwnedTupleDesc {
 
 /// `namestrcpy` into a fixed `NameData` (NUL-padded, truncated to NAMEDATALEN).
 /// Mirrors the build family's `name_data` helper.
-fn name_data(s: &str) -> types_tuple::heaptuple::NameData {
-    let mut nd = types_tuple::heaptuple::NameData::default();
+fn name_data(s: &str) -> ::types_tuple::heaptuple::NameData {
+    let mut nd = ::types_tuple::heaptuple::NameData::default();
     let bytes = s.as_bytes();
     let n = bytes.len().min(nd.data.len() - 1);
     nd.data[..n].copy_from_slice(&bytes[..n]);
@@ -272,7 +272,7 @@ pub struct OwnedTupleConstr {
 
 impl OwnedTupleConstr {
     /// Project the owned `rd_att->constr` into the borrowed cross-unit
-    /// [`types_tuple::heaptuple::TupleConstr`] allocated in `mcx`. The
+    /// [`::types_tuple::heaptuple::TupleConstr`] allocated in `mcx`. The
     /// owned->borrowed half of the C `CreateTupleDescCopyConstr`: each
     /// `OwnedAttrDefault.adbin` cstring and `OwnedConstrCheck.ccbin`/`ccname`
     /// becomes a `PgString`; each `OwnedAttrMissing.am_value` image is
@@ -281,9 +281,9 @@ impl OwnedTupleConstr {
     pub fn project_in<'mcx>(
         &self,
         mcx: mcx::Mcx<'mcx>,
-    ) -> PgResult<mcx::PgBox<'mcx, types_tuple::heaptuple::TupleConstr<'mcx>>> {
-        use types_tuple::heaptuple::Datum;
-        use types_tuple::heaptuple::{AttrDefault, AttrMissing, ConstrCheck};
+    ) -> PgResult<mcx::PgBox<'mcx, ::types_tuple::heaptuple::TupleConstr<'mcx>>> {
+        use ::types_tuple::heaptuple::Datum;
+        use ::types_tuple::heaptuple::{AttrDefault, AttrMissing, ConstrCheck};
 
         let mut defval = mcx::vec_with_capacity_in(mcx, self.defval.len())?;
         for d in &self.defval {
@@ -316,7 +316,7 @@ impl OwnedTupleConstr {
             });
         }
 
-        let constr = types_tuple::heaptuple::TupleConstr {
+        let constr = ::types_tuple::heaptuple::TupleConstr {
             num_defval: defval.len() as u16,
             num_check: check.len() as u16,
             defval,
@@ -356,7 +356,7 @@ pub struct OwnedConstrCheck {
 
 /// `struct AttrMissing` (`access/tupdesc.h`) — one column's fast-default
 /// "missing" value, the owned (lifetime-free) mirror of
-/// [`types_tuple::heaptuple::AttrMissing`]. C stores `am_value` as a `Datum`;
+/// [`::types_tuple::heaptuple::AttrMissing`]. C stores `am_value` as a `Datum`;
 /// the owned entry keeps the value's lifetime-free image (or `None` when
 /// `am_present` is false), re-materialized into a `Datum<'mcx>` when the entry's
 /// tuple descriptor is projected (`project_in`).
@@ -366,7 +366,7 @@ pub struct OwnedAttrMissing {
     pub am_present: bool,
     /// `Datum am_value` — the value's lifetime-free image, or `None` when not
     /// present.
-    pub am_value: Option<types_tuple::heaptuple::MissingValueImage>,
+    pub am_value: Option<::types_tuple::heaptuple::MissingValueImage>,
 }
 
 /// The genbki bootstrap schema for one nailed catalog: the hardcoded
@@ -682,7 +682,7 @@ pub struct RelationData {
     /// `RegProcedure *rd_support` — support-procedure OIDs.
     pub rd_support: Vec<RegProcedure>,
     /// `FmgrInfo *rd_supportinfo` — lazily-filled support-proc lookup info.
-    pub rd_supportinfo: Vec<types_core::fmgr::FmgrInfo>,
+    pub rd_supportinfo: Vec<::types_core::fmgr::FmgrInfo>,
     /// `int16 *rd_indoption` — per-column AM flags.
     pub rd_indoption: Vec<i16>,
     /// `Oid *rd_exclops` / `rd_exclprocs` / `rd_exclstrats` — exclusion info.
@@ -798,7 +798,7 @@ impl RelationData {
     /// `relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP`. The entry
     /// stores `relpersistence` as `i8`; `RELPERSISTENCE_TEMP` is `u8`.
     pub fn uses_local_buffers(&self) -> bool {
-        self.rd_rel.relpersistence == types_tuple::access::RELPERSISTENCE_TEMP as i8
+        self.rd_rel.relpersistence == ::types_tuple::access::RELPERSISTENCE_TEMP as i8
     }
 
     /// `RelationIsMapped(relation)` (utils/rel.h): true if the relation uses the
@@ -806,7 +806,7 @@ impl RelationData {
     /// InvalidRelFileNumber`. The entry stores `relkind` as `i8`; the
     /// `RELKIND_*` constants are `u8`.
     pub fn is_mapped(&self) -> bool {
-        use types_tuple::access::{
+        use ::types_tuple::access::{
             RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_SEQUENCE, RELKIND_TOASTVALUE,
         };
         let relkind = self.rd_rel.relkind;
@@ -815,7 +815,7 @@ impl RelationData {
             || relkind == RELKIND_SEQUENCE as i8
             || relkind == RELKIND_TOASTVALUE as i8
             || relkind == RELKIND_MATVIEW as i8;
-        has_storage && self.rd_rel.relfilenode == types_core::primitive::InvalidRelFileNumber
+        has_storage && self.rd_rel.relfilenode == ::types_core::primitive::InvalidRelFileNumber
     }
 
     /// `indexRelation->rd_index->indnkeyatts` — the index's number of key
@@ -836,8 +836,8 @@ impl RelationData {
         if idx >= self.rd_att.attrs.len() || idx >= self.rd_opcintype.len() {
             return false;
         }
-        self.rd_att.attr(idx).atttypid == types_tuple::heaptuple::CSTRINGOID
-            && self.rd_opcintype[idx] == types_tuple::heaptuple::NAMEOID
+        self.rd_att.attr(idx).atttypid == ::types_tuple::heaptuple::CSTRINGOID
+            && self.rd_opcintype[idx] == ::types_tuple::heaptuple::NAMEOID
     }
 
     /// `RelationGetDescr(relation)` deep-copied into `mcx` — the table slot's
@@ -848,7 +848,7 @@ impl RelationData {
     pub fn rd_att_clone_in<'b>(
         &self,
         mcx: mcx::Mcx<'b>,
-    ) -> PgResult<mcx::PgBox<'b, types_tuple::heaptuple::TupleDescData<'b>>> {
+    ) -> PgResult<mcx::PgBox<'b, ::types_tuple::heaptuple::TupleDescData<'b>>> {
         self.rd_att.project_in(mcx, self.rd_id)
     }
 }

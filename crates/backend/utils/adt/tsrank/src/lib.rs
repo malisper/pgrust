@@ -36,7 +36,7 @@ pub fn init_seams() {
 use types_error::{
     PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
 };
-use tsearch::tsearch::{
+use ::tsearch::tsearch::{
     ExecPhraseData, QueryItem, QueryOperand, QueryOperator, TSTernaryValue, MAXENTRYPOS, OP_AND,
     OP_PHRASE, QI_OPR, QI_VAL, TS_EXEC_EMPTY, WEP_GETPOS, WEP_GETWEIGHT, WEP_SETPOS, WordEntryPos,
 };

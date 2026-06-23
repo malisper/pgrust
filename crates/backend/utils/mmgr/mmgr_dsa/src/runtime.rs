@@ -16,11 +16,11 @@
 use core::cell::RefCell;
 use core::mem::size_of;
 
-use dsm_core::dsm::{self, DsmSegmentId};
+use ::dsm_core::dsm::{self, DsmSegmentId};
 use lwlock_seams as lwlock_seams;
-use init_small_seams::my_proc_number;
+use ::init_small_seams::my_proc_number;
 use freepage_seams as fpm_seams;
-use types_core::Size;
+use ::types_core::Size;
 // `Datum` here is the transitional bare-word shim type (`datum::Datum`),
 // retained ONLY at the audited DSM-cursor ABI edge this crate touches: the
 // `on_dsm_detach` / `on_shmem_exit` callback registry in the still-unmigrated
@@ -40,7 +40,7 @@ use types_dsa::{
     INVALID_DSA_POINTER,
 };
 use types_error::{PgError, PgResult};
-use types_freepage::FreePageManager;
+use ::types_freepage::FreePageManager;
 use types_storage::{dsm_handle, LWLock, LWLockMode, DSM_HANDLE_INVALID};
 
 use crate::{
@@ -49,7 +49,7 @@ use crate::{
 };
 
 /// `FPM_PAGE_SIZE` (freepage.h) — 4 kB pages.
-pub const FPM_PAGE_SIZE: Size = types_freepage::FPM_PAGE_SIZE;
+pub const FPM_PAGE_SIZE: Size = ::types_freepage::FPM_PAGE_SIZE;
 
 /// `DSA_NUM_SIZE_CLASSES = lengthof(dsa_size_classes)`.
 const DSA_NUM_SIZE_CLASSES: usize = DSA_SIZE_CLASSES.len();
@@ -852,7 +852,7 @@ pub fn dsa_allocate_extended(
 fn oom(flags: i32, size: Size) -> PgResult<DsaPointer> {
     if flags & DSA_ALLOC_NO_OOM == 0 {
         Err(PgError::error("out of memory")
-            .with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
+            .with_sqlstate(::types_error::ERRCODE_OUT_OF_MEMORY)
             .with_detail(format!("Failed on DSA request of size {size}.")))
     } else {
         Ok(INVALID_DSA_POINTER)

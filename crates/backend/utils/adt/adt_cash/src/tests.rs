@@ -7,9 +7,9 @@
 //! arithmetic cores are the real owner, installed via its `init_seams()`.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::Once;
-use types_cash::CashLconv;
+use ::types_cash::CashLconv;
 
 static INIT: Once = Once::new();
 

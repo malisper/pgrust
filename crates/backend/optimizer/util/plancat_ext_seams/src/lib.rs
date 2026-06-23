@@ -34,10 +34,10 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{CmdType, NodeId, PlannerInfo, RelId, Relids};
 
 /* ==========================================================================
@@ -293,7 +293,7 @@ seam_core::seam!(
         args: &[NodeId],
         inputcollid: Oid,
         jointype: i16,
-        sjinfo: Option<&pathnodes::SpecialJoinInfo>,
+        sjinfo: Option<&::pathnodes::SpecialJoinInfo>,
     ) -> PgResult<f64>
 );
 seam_core::seam!(
@@ -309,7 +309,7 @@ seam_core::seam!(
         is_join: bool,
         var_relid: i32,
         jointype: i16,
-        sjinfo: Option<&pathnodes::SpecialJoinInfo>,
+        sjinfo: Option<&::pathnodes::SpecialJoinInfo>,
     ) -> PgResult<Option<f64>>
 );
 

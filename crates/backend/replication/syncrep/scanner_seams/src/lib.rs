@@ -12,7 +12,7 @@
 //! panics loudly.
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// Opaque token standing in for C's reentrant `yyscan_t` (a `void *`) while the
 /// scanner runtime (`syncrep_scanner.l`) owns the live scanner state — the

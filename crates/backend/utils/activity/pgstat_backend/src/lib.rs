@@ -30,20 +30,20 @@
 use core::cell::{Cell, RefCell};
 
 use instrument::{pgWalUsage, WalUsageAccumDiff};
-use activity_pgstat::kind_info::KindInfoBuilder;
-use activity_pgstat::registry;
-use activity_pgstat::shmem;
-use pgstat_io::pgstat_tracks_io_op;
+use ::activity_pgstat::kind_info::KindInfoBuilder;
+use ::activity_pgstat::registry;
+use ::activity_pgstat::shmem;
+use ::pgstat_io::pgstat_tracks_io_op;
 use init_small_seams::{my_backend_type, my_proc_number};
-use types_core::init::BackendType;
-use types_core::instrument::{instr_time, WalUsage};
+use ::types_core::init::BackendType;
+use ::types_core::instrument::{instr_time, WalUsage};
 use types_core::{bits32, InvalidOid, ProcNumber, TimestampTz};
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{
     IOContext, IOObject, IOOp, PgStat_Backend, PgStat_BackendPending, PgStat_Counter,
     PgStat_PendingIO, IOCONTEXT_NUM_TYPES, IOOBJECT_NUM_TYPES, IOOP_NUM_TYPES, PGSTAT_KIND_BACKEND,
 };
-use types_pgstat::pgstat_internal::{
+use ::types_pgstat::pgstat_internal::{
     PgStat_KindInfo, PgStatShared_Backend, PgStatShared_Common,
 };
 
@@ -305,7 +305,7 @@ pub fn pgstat_reset_backend_stats(backend_pid: i32) -> PgResult<()> {
     }
 
     // pgstat_reset(PGSTAT_KIND_BACKEND, InvalidOid, procNumber);
-    activity_pgstat::pgstat_core::pgstat_reset(
+    ::activity_pgstat::pgstat_core::pgstat_reset(
         PGSTAT_KIND_BACKEND,
         InvalidOid,
         proc_number as u64,
@@ -485,7 +485,7 @@ pub fn pgstat_create_backend(procnum: ProcNumber) -> PgResult<()> {
         false,
     )?
     .ok_or_else(|| {
-        types_error::PgError::error(
+        ::types_error::PgError::error(
             "pgstat_create_backend: pgstat_get_entry_ref_locked returned NULL",
         )
     })?;

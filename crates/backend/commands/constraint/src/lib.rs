@@ -71,21 +71,21 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
-use types_core::Oid;
-use datum::Datum;
+use ::types_core::Oid;
+use ::datum::Datum;
 use types_error::{PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERROR};
 use ::nodes::execnodes::SlotId;
-use snapshot::snapshot::{SnapshotData, SnapshotType};
-use types_storage::lock::LOCKMODE;
-use types_tableam::amapi::IndexUniqueCheck;
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tuple::heaptuple::Datum as DatumV;
-use types_tuple::heaptuple::ItemPointerData;
-use types_ri_triggers::TriggerDataRef;
+use ::snapshot::snapshot::{SnapshotData, SnapshotType};
+use ::types_storage::lock::LOCKMODE;
+use ::types_tableam::amapi::IndexUniqueCheck;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tuple::heaptuple::Datum as DatumV;
+use ::types_tuple::heaptuple::ItemPointerData;
+use ::types_ri_triggers::TriggerDataRef;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use indexam as indexam;
 use table_tableam as tableam;
@@ -155,7 +155,7 @@ fn TRIGGER_FIRED_BEFORE(event: u32) -> bool {
 const ROW_EXCLUSIVE_LOCK: LOCKMODE = 3;
 
 /// `INDEX_MAX_KEYS` as a `usize`, for the `values`/`isnull` index arrays.
-const INDEX_MAX_KEYS: usize = types_core::fmgr::INDEX_MAX_KEYS as usize;
+const INDEX_MAX_KEYS: usize = ::types_core::fmgr::INDEX_MAX_KEYS as usize;
 
 /// `unique_key_recheck` (constraint.c:38) — trigger function to do a deferred
 /// uniqueness check (this now also does deferred exclusion-constraint checks, so
@@ -404,7 +404,7 @@ pub fn unique_key_recheck(
 /// Build a `TRIGGER_PROTOCOL_VIOLATED` (`ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED`,
 /// SQLSTATE `39P01`) error with the given message — the SQLSTATE/text the three
 /// `ereport(ERROR)` protocol checks in `constraint.c` raise.
-fn trigger_protocol_error(message: String) -> types_error::PgError {
+fn trigger_protocol_error(message: String) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED)
         .errmsg(message)
@@ -437,7 +437,7 @@ mod tests {
     fn trigger_protocol_sqlstate_is_39p01() {
         assert_eq!(
             ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED,
-            types_error::make_sqlstate(*b"39P01")
+            ::types_error::make_sqlstate(*b"39P01")
         );
     }
 

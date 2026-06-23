@@ -48,7 +48,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
 use types_acl::{
     AclResult, ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, ACL_CREATE_TEMP, ACL_MAINTAIN,
@@ -64,14 +64,14 @@ use types_core::{
 // Residual bare-word `Datum` (the `datum` newtype) survives ONLY at the
 // `CacheRegisterSyscacheCallback` ABI edge: the `cache_register_syscache_callback`
 // seam takes its opaque callback token by the bare-word contract
-// (`arg: ScalarWord`, where `ScalarWord = datum::Datum`), owned by the
+// (`arg: ScalarWord`, where `ScalarWord = ::datum::Datum`), owned by the
 // out-of-batch `backend-utils-cache-inval-seams` crate, so it stays on the shim
 // until that contract migrates. The `before_shmem_exit` edge already rides the
-// canonical `types_tuple::Datum<'static>`. This crate's own logic constructs/reads
+// canonical `::types_tuple::Datum<'static>`. This crate's own logic constructs/reads
 // no scalars, so there is nothing else to move onto the canonical
 // `types_tuple::heaptuple::Datum<'mcx>` enum; the token here
 // is `(Datum) 0` in C, i.e. `Datum::null()`.
-use datum::Datum;
+use ::datum::Datum;
 use types_error::{
     ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_LOCK_NOT_AVAILABLE,
@@ -80,12 +80,12 @@ use types_error::{
 };
 use types_namespace::{FuncArgInfo, FuncCandidate, ProcRow};
 use ::nodes::parsenodes::{OBJECT_INDEX, OBJECT_SCHEMA};
-use types_tuple::access::{
+use ::types_tuple::access::{
     RangeVar, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
 use types_syscache::{AUTHMEMROLEMEM, AUTHOID, DATABASEOID, NAMESPACEOID};
-use types_storage::lock::{
+use ::types_storage::lock::{
     AccessShareLock, ShareLock, ShareUpdateExclusiveLock, LOCKMODE, NoLock,
 };
 use index_seams as index_seams;
@@ -94,7 +94,7 @@ pub use types_namespace::{
     FuncCandidateList, SearchPathMatcher, TempNamespaceStatus, RVR_MISSING_OK, RVR_NOWAIT,
     RVR_SKIP_LOCKED,
 };
-pub use types_namespace::namespace::{
+pub use ::types_namespace::namespace::{
     TEMP_NAMESPACE_IDLE, TEMP_NAMESPACE_IN_USE, TEMP_NAMESPACE_NOT_TEMP,
 };
 
@@ -157,7 +157,7 @@ pub fn init_seams() {
     // scratch context (the only outputs are the by-value Oid and the lock taken).
     matview_deps_seams::rangevar_get_relid_extended::set(
         |schemaname, relname, lockmode| {
-            let ctx = mcx::MemoryContext::new("RangeVarGetRelidMaintainsTable");
+            let ctx = ::mcx::MemoryContext::new("RangeVarGetRelidMaintainsTable");
             let relation = RangeVar {
                 schemaname,
                 relname,
@@ -348,8 +348,8 @@ fn seam_at_eoxact_namespace(is_commit: bool, parallel: bool) {
 /// Seam shim: same pattern as `seam_at_eoxact_namespace`.
 fn seam_at_eosubxact_namespace(
     is_commit: bool,
-    my_subid: types_core::SubTransactionId,
-    parent_subid: types_core::SubTransactionId,
+    my_subid: ::types_core::SubTransactionId,
+    parent_subid: ::types_core::SubTransactionId,
 ) {
     crate::AtEOSubXact_Namespace(is_commit, my_subid, parent_subid)
         .expect("AtEOSubXact_Namespace");
@@ -359,7 +359,7 @@ fn seam_at_eosubxact_namespace(
 /// the consumer); the implementation expects `NameList` (`&[Option<String>]`)
 /// plus an `Mcx` for the cross-database check in the 3-part case. Convert
 /// here and use a scratch memory context.
-fn seam_get_ts_config_oid(names: &[&str], missing_ok: bool) -> types_error::PgResult<types_core::Oid> {
+fn seam_get_ts_config_oid(names: &[&str], missing_ok: bool) -> ::types_error::PgResult<::types_core::Oid> {
     let names_owned: Vec<Option<String>> = names.iter().map(|s| Some(s.to_string())).collect();
     let scratch = MemoryContext::new("get_ts_config_oid seam");
     crate::get_ts_config_oid(scratch.mcx(), &names_owned, missing_ok)
@@ -367,14 +367,14 @@ fn seam_get_ts_config_oid(names: &[&str], missing_ok: bool) -> types_error::PgRe
 
 /// Seam shim: the implementation is infallible (`bool`); the seam carries the
 /// per-owner error channel, so wrap in `Ok`.
-fn seam_is_temp_namespace(namespace_id: types_core::Oid) -> types_error::PgResult<bool> {
+fn seam_is_temp_namespace(namespace_id: ::types_core::Oid) -> ::types_error::PgResult<bool> {
     Ok(crate::isTempNamespace(namespace_id))
 }
 
 /// Seam shim: the seam has no `Mcx`; the implementation needs one for the
 /// transient catalog copies the ACL/lookup makes. Use a scratch context, same
 /// pattern as `seam_get_ts_config_oid`.
-fn seam_lookup_creation_namespace(nspname: &str) -> types_error::PgResult<types_core::Oid> {
+fn seam_lookup_creation_namespace(nspname: &str) -> ::types_error::PgResult<::types_core::Oid> {
     let scratch = MemoryContext::new("LookupCreationNamespace seam");
     crate::LookupCreationNamespace(scratch.mcx(), nspname)
 }
@@ -527,7 +527,7 @@ fn list_member_oid(list: &[Oid], oid: Oid) -> bool {
 }
 
 /// `object_aclcheck(NamespaceRelationId, nspid, roleid, mode)`.
-fn namespace_aclcheck(nspid: Oid, roleid: Oid, mode: types_acl::AclMode) -> PgResult<AclResult> {
+fn namespace_aclcheck(nspid: Oid, roleid: Oid, mode: ::types_acl::AclMode) -> PgResult<AclResult> {
     aclchk_seams::object_aclcheck::call(NAMESPACE_RELATION_ID, nspid, roleid, mode)
 }
 
@@ -837,7 +837,7 @@ pub fn RangeVarGetRelidForReindexIndex(
 /* ===========================================================================
  * K1 owned-tree `RangeVar` node bridges + the three sequence.c-facing seams.
  *
- * The namespace owner still consumes `types_tuple::access::RangeVar` (the
+ * The namespace owner still consumes `::types_tuple::access::RangeVar` (the
  * non-lifetime, owned-string struct that `RangeVarGetRelid{,Extended}` and
  * `RangeVarGetAndCheckCreationNamespace` operate on). The K1 owned-tree node
  * `::nodes::rawnodes::RangeVar<'mcx>` carries the same fields; we copy
@@ -892,7 +892,7 @@ fn seam_vacuum_range_var_get_relid_extended(
     lockmode: i32,
     rvr_opts: i32,
 ) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("vacuum RangeVarGetRelidExtended");
+    let scratch = ::mcx::MemoryContext::new("vacuum RangeVarGetRelidExtended");
     let rv = rangevar_from_node(&relation);
     // rvr_opts carries the RVR_* flag bits (non-negative); the owner signature
     // types `flags` as u32.
@@ -904,7 +904,7 @@ fn seam_vacuum_range_var_get_relid_extended(
 fn seam_range_var_get_and_check_creation_namespace(
     relation: &::nodes::rawnodes::RangeVar<'_>,
 ) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("RangeVarGetAndCheckCreationNamespace");
+    let scratch = ::mcx::MemoryContext::new("RangeVarGetAndCheckCreationNamespace");
     let mut rv = rangevar_from_node(relation);
     let mut existing_relid: Oid = InvalidOid;
     RangeVarGetAndCheckCreationNamespace(
@@ -927,7 +927,7 @@ fn seam_range_var_get_relid_owns_seq(
     relation: &::nodes::rawnodes::RangeVar<'_>,
     missing_ok: bool,
 ) -> PgResult<Oid> {
-    let scratch = mcx::MemoryContext::new("RangeVarGetRelidOwnsSeq");
+    let scratch = ::mcx::MemoryContext::new("RangeVarGetRelidOwnsSeq");
     let mcx = scratch.mcx();
     let rv = rangevar_from_node(relation);
     let flags = if missing_ok { RVR_MISSING_OK } else { 0 };
@@ -942,7 +942,7 @@ fn seam_range_var_get_relid_owns_seq(
     RangeVarGetRelidExtended(
         mcx,
         &rv,
-        types_storage::lock::ShareRowExclusiveLock,
+        ::types_storage::lock::ShareRowExclusiveLock,
         flags,
         Some(&mut callback),
     )
@@ -3428,7 +3428,7 @@ pub fn makeRangeVarFromNameList(names: NameList) -> PgResult<RangeVar> {
     // makeRangeVar(NULL, NULL, -1) — permanent, inheritance-enabled template.
     let mut rel = RangeVar {
         inh: true,
-        relpersistence: types_tuple::access::RELPERSISTENCE_PERMANENT,
+        relpersistence: ::types_tuple::access::RELPERSISTENCE_PERMANENT,
         location: -1,
         ..RangeVar::default()
     };
@@ -4435,7 +4435,7 @@ pub fn AtEOXact_Namespace(isCommit: bool, parallel: bool) -> PgResult<()> {
         if isCommit {
             ipc_seams::before_shmem_exit::call(
                 RemoveTempRelationsCallback,
-                types_tuple::Datum::null(),
+                ::types_tuple::Datum::null(),
             )?;
         } else {
             STATE.with(|s| {
@@ -4528,7 +4528,7 @@ fn RemoveTempRelations(tempNamespaceId: Oid) -> PgResult<()> {
 /// `RemoveTempRelationsCallback` — remove temp relations at backend exit
 /// (registered as a `before_shmem_exit` callback; the C `(code, arg)`
 /// parameters are unused).
-pub fn RemoveTempRelationsCallback(_code: i32, _arg: types_tuple::Datum<'static>) -> PgResult<()> {
+pub fn RemoveTempRelationsCallback(_code: i32, _arg: ::types_tuple::Datum<'static>) -> PgResult<()> {
     if OidIsValid(my_temp_namespace()) {
         /* should always be true */
         /* Need to ensure we have a usable transaction. */

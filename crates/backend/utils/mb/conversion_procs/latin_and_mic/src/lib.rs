@@ -22,12 +22,12 @@
 
 #![allow(clippy::result_large_err)]
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use conv_string_helpers::{latin2mic, mic2latin, ConversionResult};
-use conv_string_helpers::make_conversion_builtin;
-use mbutils_seams::check_encoding_conversion_args;
-use types_wchar::encoding::{pg_enc, PG_LATIN1, PG_LATIN3, PG_LATIN4, PG_MULE_INTERNAL};
-use types_wchar::wchar::{LC_ISO8859_1, LC_ISO8859_3, LC_ISO8859_4};
+use ::conv_string_helpers::make_conversion_builtin;
+use ::mbutils_seams::check_encoding_conversion_args;
+use ::types_wchar::encoding::{pg_enc, PG_LATIN1, PG_LATIN3, PG_LATIN4, PG_MULE_INTERNAL};
+use ::types_wchar::wchar::{LC_ISO8859_1, LC_ISO8859_3, LC_ISO8859_4};
 
 /// `latin1_to_mic` (latin_and_mic.c): convert a LATIN1 (ISO-8859-1) string to
 /// MULE_INTERNAL.

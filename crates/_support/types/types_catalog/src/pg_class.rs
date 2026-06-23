@@ -15,7 +15,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{Oid, TransactionId};
+use ::types_core::primitive::{Oid, TransactionId};
 
 /* ==========================================================================
  * Catalog relation + index OIDs (pg_class.h CATALOG / DECLARE_*).

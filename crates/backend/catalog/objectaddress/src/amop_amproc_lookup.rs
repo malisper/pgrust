@@ -7,10 +7,10 @@
 //! [`crate::resolve::get_catalog_object_by_oid`] oid-index scan followed by
 //! `heap_getattr` on the fixed columns. Mirrors [`crate::trigger_lookup`].
 
-use mcx::MemoryContext;
-use types_core::Oid;
+use ::mcx::MemoryContext;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
-use types_storage::lock::AccessShareLock;
+use ::types_storage::lock::AccessShareLock;
 
 use syscache_seams::{AmopDescriptionRow, AmprocDescriptionRow};
 

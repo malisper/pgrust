@@ -13,7 +13,7 @@
 //! This is the partitionwise-join leg, distinct from the tuple-routing leg in
 //! `lib.rs`. It operates entirely on the planner-side value model: the input
 //! bounds come from `RelOptInfo::boundinfo` (the flat
-//! `pathnodes::PartitionBoundInfoData` with `DatumImage` datums), the
+//! `::pathnodes::PartitionBoundInfoData` with `DatumImage` datums), the
 //! per-key comparison support functions/collations come from the join rel's
 //! shared `PartitionScheme`, and the partition-to-partition pairings are
 //! returned as `RelId`s instead of `RelOptInfo *`.
@@ -27,8 +27,8 @@ use types_error::{PgError, PgResult};
 use pathnodes::{DatumImage, JoinType, PartitionBoundInfoData, PlannerInfo, RelId};
 use pathnodes::{JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_SEMI};
 
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::Oid;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::Oid;
 use types_tuple::heaptuple::Datum;
 
 use partbounds_seams as seams;
@@ -61,7 +61,7 @@ fn is_outer_join(jointype: JoinType) -> bool {
 /// throwaway call context (mirroring `call_cmp` in `lib.rs`), then dispatches
 /// the partition comparison support function by its stamped OID.
 fn cmp_images(finfo: &FmgrInfo, collation: Oid, a: &DatumImage, b: &DatumImage) -> PgResult<i32> {
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     let ctx = MemoryContext::new("partition_merge_cmp");
     let da = image_to_datum(ctx.mcx(), a)?;
     let db = image_to_datum(ctx.mcx(), b)?;
@@ -70,7 +70,7 @@ fn cmp_images(finfo: &FmgrInfo, collation: Oid, a: &DatumImage, b: &DatumImage) 
 }
 
 /// Rebuild a live `Datum` from a planner-layer [`DatumImage`] inside `mcx`.
-fn image_to_datum<'mcx>(mcx: mcx::Mcx<'mcx>, img: &DatumImage) -> PgResult<Datum<'mcx>> {
+fn image_to_datum<'mcx>(mcx: ::mcx::Mcx<'mcx>, img: &DatumImage) -> PgResult<Datum<'mcx>> {
     match img {
         DatumImage::ByVal(w) => Ok(Datum::from_usize(*w)),
         DatumImage::Bytes(bytes) => Datum::from_byref_bytes_in(mcx, bytes),

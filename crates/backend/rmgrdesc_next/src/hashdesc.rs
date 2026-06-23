@@ -1,10 +1,10 @@
 //! `access/rmgrdesc/hashdesc.c` — rmgr descriptor routines for hash indexes.
 
 use crate::{appendf, GFmt};
-use mcx::PgString;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_error::PgResult;
 use wal::{DecodedXLogRecord, XLR_INFO_MASK};
-use xlog_records::hash_xlog::{xl_hash_add_ovfl_page, xl_hash_delete,
+use ::xlog_records::hash_xlog::{xl_hash_add_ovfl_page, xl_hash_delete,
                                     xl_hash_init_bitmap_page, xl_hash_init_meta_page,
                                     xl_hash_insert, xl_hash_move_page_contents,
                                     xl_hash_split_allocate_page, xl_hash_split_complete,
@@ -152,7 +152,7 @@ pub fn hash_identify(info: u8) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::test_support::record;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");

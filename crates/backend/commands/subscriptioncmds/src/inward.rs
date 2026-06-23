@@ -8,7 +8,7 @@
 //! obtain an `Mcx` for the ported body (the established bridging idiom, cf.
 //! `backend-commands-publicationcmds::init_seams`).
 
-use utils_error::PgError;
+use ::utils_error::PgError;
 use ::nodes::nodes::Node;
 
 use subscriptioncmds_seams as s;
@@ -39,7 +39,7 @@ fn create_subscription_seam<'mcx>(
     pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &Node<'mcx>,
     is_top_level: bool,
-) -> utils_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+) -> ::utils_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
     let cs = stmt
         .as_createsubscriptionstmt()
         .ok_or_else(|| PgError::error("create_subscription_seam: statement is not a CreateSubscriptionStmt"))?;
@@ -53,7 +53,7 @@ fn alter_subscription_seam<'mcx>(
     pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &Node<'mcx>,
     is_top_level: bool,
-) -> utils_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
+) -> ::utils_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
     let as_ = stmt
         .as_altersubscriptionstmt()
         .ok_or_else(|| PgError::error("alter_subscription_seam: statement is not an AlterSubscriptionStmt"))?;
@@ -66,7 +66,7 @@ fn drop_subscription_seam<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     stmt: &Node<'mcx>,
     is_top_level: bool,
-) -> utils_error::PgResult<()> {
+) -> ::utils_error::PgResult<()> {
     let ds = stmt
         .as_dropsubscriptionstmt()
         .ok_or_else(|| PgError::error("drop_subscription_seam: statement is not a DropSubscriptionStmt"))?;

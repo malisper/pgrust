@@ -15,7 +15,7 @@
 
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use nodes::{EStateData, FunctionScanState, SlotId, TableFuncScanState};
 
 /// `ExecScanAccessMtd` — the access method `ExecScan` re-enters to get the
@@ -50,7 +50,7 @@ seam_core::seam!(
     pub fn exec_assign_scan_projection_info<'mcx>(
         scanstate: &mut ::nodes::execnodes::ScanStateData<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -162,7 +162,7 @@ seam_core::seam!(
     pub fn exec_scan_rescan_ss<'mcx>(
         node: &mut ::nodes::execnodes::ScanStateData<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 // --- Subquery-scan-specialized entry point --------------------------------

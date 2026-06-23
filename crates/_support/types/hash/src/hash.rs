@@ -1,7 +1,7 @@
 //! Constants from `src/include/access/hash.h` (PostgreSQL 18.3), trimmed to the
 //! items the hash opclass validator consumes.
 
-use types_core::uint16;
+use ::types_core::uint16;
 
 /// `StrategyNumber` (`access/stratnum.h`) — `typedef uint16 StrategyNumber`.
 pub type StrategyNumber = uint16;

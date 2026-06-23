@@ -1,7 +1,7 @@
 //! `ident_inet` (`auth.c:1670`) + `interpret_ident_response` (`auth.c:1589`) —
 //! Ident (RFC 1413) authentication.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgResult, LOG};
 use net::{AddrInfoHint, PgAddrInfo, Port, SockAddr};
 

@@ -20,7 +20,7 @@
 //!   (and from signal handlers), so the [`Latch`] storage is owned by this
 //!   crate in a process-global, append-only registry of synchronized values
 //!   (atomic fields); consumers name a latch with
-//!   [`types_storage::latch::LatchHandle`]. C never frees a latch (both
+//!   [`::types_storage::latch::LatchHandle`]. C never frees a latch (both
 //!   backing allocations are process-lifetime), so the registry has no
 //!   removal. [`allocate_latch`] is the analogue of the C caller's variable
 //!   declaration — registry growth is std allocation, not a palloc path.
@@ -54,8 +54,8 @@ use std::sync::{Arc, RwLock};
 use waiteventset_seams::{self as wes_seams, WaitEventSet};
 use types_core::{pgsocket, ProcNumber, PGINVALID_SOCKET};
 use types_error::{PgError, PgResult, PANIC};
-use types_storage::latch::{Latch, LatchHandle, LatchKind};
-use types_storage::waiteventset::{
+use ::types_storage::latch::{Latch, LatchHandle, LatchKind};
+use ::types_storage::waiteventset::{
     WaitEvent, WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_MASK, WL_TIMEOUT,
 };
 
@@ -63,7 +63,7 @@ use types_storage::waiteventset::{
 const LatchWaitSetLatchPos: i32 = 0;
 const LatchWaitSetPostmasterDeathPos: i32 = 1;
 
-/// The single `Latch` representation lives in `types_storage::latch::Latch`
+/// The single `Latch` representation lives in `::types_storage::latch::Latch`
 /// (the C `struct Latch`, all fields atomic): both the latch unit's own
 /// registry latches and the `Latch` embedded in each `PGPROC` (`procLatch`,
 /// owned by the proc unit) use it, so a procno-derived handle resolves to the
@@ -476,7 +476,7 @@ fn wait_latch_my_latch(
     wake_events: u32,
     timeout: i64,
     wait_event_info: u32,
-) -> types_error::PgResult<u32> {
+) -> ::types_error::PgResult<u32> {
     WaitLatch(my_latch(), wake_events, timeout, wait_event_info)
 }
 
@@ -488,7 +488,7 @@ fn wait_latch_seam(
     wake_events: u32,
     timeout: i64,
     wait_event_info: u32,
-) -> types_error::PgResult<i32> {
+) -> ::types_error::PgResult<i32> {
     WaitLatch(Some(latch), wake_events, timeout, wait_event_info).map(|v| v as i32)
 }
 
@@ -534,9 +534,9 @@ fn wait_latch_no_latch(
 /// the returned `u32` bitmask narrows to the seam's `i32`.
 fn wait_latch_or_socket_seam(
     wake_events: i32,
-    sock: types_core::pgsocket,
+    sock: ::types_core::pgsocket,
     timeout: i64,
-    wait_event_info: types_core::uint32,
+    wait_event_info: ::types_core::uint32,
 ) -> i32 {
     WaitLatchOrSocket(
         my_latch(),

@@ -31,7 +31,7 @@
 //!
 //! `backend_progress.c` writes the `st_progress_*` fields of its own backend
 //! entry through the `with_my_beentry` seam, which hands out the trimmed
-//! `types_pgstat::backend_status::PgBackendStatus` (changecount + progress
+//! `::types_pgstat::backend_status::PgBackendStatus` (changecount + progress
 //! fields). The full in-segment entry stores those fields with a plain `i32`
 //! changecount under the C protocol; the seam copies the four progress/changecount
 //! fields into the trimmed view, runs the consumer's callback (which does its own
@@ -42,7 +42,7 @@
 //! # Build configuration
 //!
 //! This build defines `USE_SSL` (OpenSSL) but NOT `ENABLE_GSS` (matching the
-//! repo's trimmed `net::Port`, which has no GSS state). The SSL paths are
+//! repo's trimmed `::net::Port`, which has no GSS state). The SSL paths are
 //! compiled unconditionally; GSS is treated as always-off.
 
 #![allow(non_snake_case)]
@@ -52,16 +52,16 @@ use core::cell::{Cell, RefCell};
 use core::sync::atomic::{fence, AtomicPtr, AtomicUsize, Ordering};
 
 use ipc_shmem::{add_size, mul_size, ShmemInitStruct};
-use ascii::ascii_safe_strlcpy;
-use utils_error::PgResult;
-use mbutils::pg_mbcliplen;
+use ::ascii::ascii_safe_strlcpy;
+use ::utils_error::PgResult;
+use ::mbutils::pg_mbcliplen;
 
-use types_core::init::BackendType;
+use ::types_core::init::BackendType;
 use types_core::{
     int64, InvalidOid, Oid, ProcNumber, Size, TimestampTz, TransactionId, INVALID_PROC_NUMBER,
 };
-use net::SockAddr;
-use types_pgstat::backend_progress::{ProgressCommandType, PGSTAT_NUM_PROGRESS_PARAM};
+use ::net::SockAddr;
+use ::types_pgstat::backend_progress::{ProgressCommandType, PGSTAT_NUM_PROGRESS_PARAM};
 
 mod globals;
 

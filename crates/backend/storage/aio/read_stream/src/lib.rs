@@ -35,12 +35,12 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use types_core::primitive::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber};
+use ::types_core::primitive::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber};
 use types_error::{PgError, PgResult};
 use support::{BufferAccessStrategyRing, LocalBufferManager};
-use rel::Relation;
-use types_storage::buf::BufferAccessStrategy;
-use types_storage::storage::{BufferIsValid, InvalidBuffer};
+use ::rel::Relation;
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_storage::storage::{BufferIsValid, InvalidBuffer};
 
 use bufmgr::{BufferManager, ReadOp};
 use bufmgr_seams as bufmgr_seams;
@@ -186,7 +186,7 @@ pub struct ReadStream<'mcx> {
     forknum: ForkNumber,
     /// `IOContextForStrategy(stream->ios[].op.strategy)` — the pg_stat_io context
     /// this stream's reads are accounted under (IOCONTEXT_NORMAL when no ring).
-    io_context: types_storage::buf::IOContext,
+    io_context: ::types_storage::buf::IOContext,
 }
 
 impl<'mcx> ReadStream<'mcx> {
@@ -677,7 +677,7 @@ impl<'mcx> ReadStream<'mcx> {
         // strategy from begin time. The transitional caller only needs whether a
         // ring is in use (io_context != NORMAL).
         let has_strategy =
-            self.io_context != types_storage::buf::IOContext::IOCONTEXT_NORMAL;
+            self.io_context != ::types_storage::buf::IOContext::IOCONTEXT_NORMAL;
         let blocknum = self.read_stream_get_block(None);
         (blocknum, has_strategy)
     }
@@ -740,8 +740,8 @@ fn read_stream_begin_impl<'mcx>(
     flags: i32,
     strategy: BufferAccessStrategy,
     rel: &'mcx Relation<'mcx>,
-    spc_oid: types_core::Oid,
-    rel_number: types_core::Oid,
+    spc_oid: ::types_core::Oid,
+    rel_number: ::types_core::Oid,
     is_catalog_rel: bool,
     is_temp: bool,
     persistence: u8,
@@ -754,7 +754,7 @@ fn read_stream_begin_impl<'mcx>(
     // IOContextForStrategy(strategy) — the pg_stat_io context for this stream's
     // reads (IOCONTEXT_NORMAL when no ring).
     let io_context = {
-        use types_storage::buf::{BufferAccessStrategyType as Bas, IOContext};
+        use ::types_storage::buf::{BufferAccessStrategyType as Bas, IOContext};
         match &strategy {
             None => IOContext::IOCONTEXT_NORMAL,
             Some(s) => match s.borrow().btype {
@@ -770,7 +770,7 @@ fn read_stream_begin_impl<'mcx>(
     let tablespace_id = spc_oid;
     let my_database_id = init_small_seams::my_database_id::call();
     let my_database_tablespace = init_small_seams::my_database_table_space::call();
-    let oid_is_valid = my_database_id != types_core::InvalidOid;
+    let oid_is_valid = my_database_id != ::types_core::InvalidOid;
 
     let mut max_ios: i32 = if !oid_is_valid
         || is_catalog_rel
@@ -912,7 +912,7 @@ pub fn read_stream_begin_relation<'mcx>(
     let spc_oid = rel.rd_locator.spcOid;
     let rel_number = rel.rd_locator.relNumber;
     let is_catalog_rel = catalog_catalog::IsCatalogRelation(rel);
-    let is_temp = rel.rd_backend != types_core::primitive::INVALID_PROC_NUMBER;
+    let is_temp = rel.rd_backend != ::types_core::primitive::INVALID_PROC_NUMBER;
     read_stream_begin_impl(
         flags,
         strategy,

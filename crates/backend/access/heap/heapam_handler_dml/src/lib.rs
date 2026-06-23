@@ -31,30 +31,30 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::primitive::TransactionId;
-use types_core::xact::{CommandId, InvalidTransactionId};
+use ::mcx::Mcx;
+use ::types_core::primitive::TransactionId;
+use ::types_core::xact::{CommandId, InvalidTransactionId};
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_T_R_SERIALIZATION_FAILURE};
-use rel::Relation;
-use types_slot::SlotData;
-use types_storage::lock::XLTW_Oper;
+use ::rel::Relation;
+use ::types_slot::SlotData;
+use ::types_storage::lock::XLTW_Oper;
 use types_storage::{Buffer, RelFileLocator};
-use types_tableam::tableam::{
+use ::types_tableam::tableam::{
     BulkInsertStateData, LockTupleMode, LockWaitPolicy, Snapshot, TM_FailureData, TM_Result,
     TU_UpdateIndexes, TUPLE_LOCK_FLAG_FIND_LAST_VERSION, TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS,
 };
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::{HeapTupleHeaderData, ItemPointerData};
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::{HeapTupleHeaderData, ItemPointerData};
 
 use heapam as heapam;
-use heapam_seams::HeapUpdateResult;
-use heapam_visibility::htup::{
+use ::heapam_seams::HeapUpdateResult;
+use ::heapam_visibility::htup::{
     HeapTupleHeaderGetXmin, HeapTupleHeaderIsSpeculative, ItemPointerEquals, SpecTokenOffsetNumber,
 };
-use heapam_visibility::HeapTupleHeaderGetUpdateXid;
-use heapam_visibility::HeapTupleSatisfiesVisibility;
-use snapshot::SnapshotData;
-use types_storage::buf::{BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
+use ::heapam_visibility::HeapTupleHeaderGetUpdateXid;
+use ::heapam_visibility::HeapTupleSatisfiesVisibility;
+use ::snapshot::SnapshotData;
+use ::types_storage::buf::{BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 use execTuples_seams as slot_seam;
 use bufmgr_seams as bufmgr_seam;
 use page::{
@@ -71,7 +71,7 @@ fn header<'a, 'mcx>(td: &'a FormedTuple<'mcx>) -> &'a HeapTupleHeaderData<'mcx> 
 
 /// `HEAP_ONLY_TUPLE` (htup_details.h) — `t_infomask2` bit marking a heap-only
 /// tuple.
-const HEAP_ONLY_TUPLE: u16 = types_tuple::heaptuple::HEAP_ONLY_TUPLE;
+const HEAP_ONLY_TUPLE: u16 = ::types_tuple::heaptuple::HEAP_ONLY_TUPLE;
 
 // ===========================================================================
 // tuple_insert
@@ -221,8 +221,8 @@ fn heapam_multi_insert<'mcx>(
     //     slots[i]->tts_tableOid = RelationGetRelid(relation);
     //     tuple->t_tableOid = slots[i]->tts_tableOid;
     // }
-    let mut tuples: mcx::PgVec<'mcx, FormedTuple<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, slots.len())?;
+    let mut tuples: ::mcx::PgVec<'mcx, FormedTuple<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, slots.len())?;
     for slot in slots.iter_mut() {
         let (mut tuple, _should_free) =
             slot_seam::exec_fetch_slot_heap_tuple::call(mcx, slot, true)?;
@@ -374,7 +374,7 @@ fn transaction_id_is_current_transaction_id(xid: TransactionId) -> bool {
 /// (pin only) at store time, and so do we.
 fn materialize_on_page_formed<'mcx>(
     mcx: Mcx<'mcx>,
-    rel_id: types_core::primitive::Oid,
+    rel_id: ::types_core::primitive::Oid,
     buffer: Buffer,
     tid: ItemPointerData,
 ) -> PgResult<FormedTuple<'mcx>> {
@@ -572,7 +572,7 @@ fn heapam_tuple_lock<'mcx>(
                                         "could not obtain lock on row in relation \"{}\"",
                                         relation.rd_rel.relname.as_str(),
                                     ))
-                                    .with_sqlstate(types_error::ERRCODE_LOCK_NOT_AVAILABLE)
+                                    .with_sqlstate(::types_error::ERRCODE_LOCK_NOT_AVAILABLE)
                                     .into());
                                 }
                             }
@@ -609,7 +609,7 @@ fn heapam_tuple_lock<'mcx>(
                     // version was deleted, so do nothing. (C: tuple->t_data ==
                     // NULL, buffer invalid.)
                     None => {
-                        debug_assert!(!types_storage::BufferIsValid(fetch_buffer));
+                        debug_assert!(!::types_storage::BufferIsValid(fetch_buffer));
                         return Ok(TM_Result::TM_Deleted);
                     }
                     Some(t) => t,

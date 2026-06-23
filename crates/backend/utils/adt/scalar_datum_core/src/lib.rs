@@ -43,10 +43,10 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{slice_in, Mcx, PgVec};
-use types_core::primitive::Size;
+use ::types_core::primitive::Size;
 // `ExpandedObjectRef` is the `&[u8]`-over-a-varlena-image handle (NOT the Datum
 // shim); the canonical value enum is `types_tuple::…::Datum`. The bare-word
-// newtype `datum::Datum` is imported under the alias `ScalarWord` solely
+// newtype `::datum::Datum` is imported under the alias `ScalarWord` solely
 // for the audited DSM-cursor ABI edge (`datum_restore` / `datum_serialize`)
 // whose seam contract still carries a bare machine word for the not-yet-migrated
 // nbtree array (de)serialize and params.c restore callers; every value-model
@@ -386,7 +386,7 @@ fn byval_words(
 //
 // These functions are the audited bare-machine-word edge the prompt sanctions
 // (fmgr-return / DSM-cursor): the seam contract carries a `ScalarWord`
-// (`datum::Datum`, C's plain `usize` machine word) for callers that have
+// (`::datum::Datum`, C's plain `usize` machine word) for callers that have
 // not yet migrated to the `Datum` enum — nbtree array (de)serialize and
 // params.c restore (`datum_serialize` / `datum_restore`, a `*mut u8` DSM
 // cursor). The value-model lane above and the `*_v` enum seams below are the
@@ -623,7 +623,7 @@ pub unsafe fn datum_restore_v(cursor: *mut u8) -> (Datum<'static>, bool, *mut u8
 /// wire path's `dsa_top_mcx`.
 fn restore_top_mcx() -> Mcx<'static> {
     use core::cell::Cell;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     thread_local! {
         static TOP: Cell<Option<&'static MemoryContext>> = const { Cell::new(None) };
     }
@@ -822,7 +822,7 @@ pub fn init_seams() {
 /// C's `char *start_address`); the seams thread it as they read/write.
 fn install_execparallel_support_datum_seams() {
     use execParallel_support_seams as sup;
-    use execparallel::SerializeCursor;
+    use ::execparallel::SerializeCursor;
 
     // `datumEstimateSpace(prm->value, prm->isnull, typByVal, typLen)`.
     sup::datum_estimate_space::set(|prm| {
@@ -870,7 +870,7 @@ fn install_execparallel_support_datum_seams() {
         // SAFETY: `cursor` addresses a `datum_serialize_v` image.
         let (value, isnull, advanced) = unsafe { datum_restore_v(cursor.0 as *mut u8) };
         (
-            execparallel::RestoredParam { value, isnull },
+            ::execparallel::RestoredParam { value, isnull },
             SerializeCursor(advanced as usize),
         )
     });

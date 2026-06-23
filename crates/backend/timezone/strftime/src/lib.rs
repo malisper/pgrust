@@ -423,7 +423,7 @@ fn isleap_sum(a: i32, b: i32) -> bool {
 /// Install the seams owned by this crate.
 pub fn init_seams() {
     strftime_seams::pg_strftime::set(
-        |buf: &mut [u8], format: &str, t: &pgtime::pg_tm| {
+        |buf: &mut [u8], format: &str, t: &::pgtime::pg_tm| {
             // The seam takes &str; the implementation requires &CStr.
             // Build a CString from the format string; if it contains an
             // interior NUL the format is malformed and we return 0 (overflow).

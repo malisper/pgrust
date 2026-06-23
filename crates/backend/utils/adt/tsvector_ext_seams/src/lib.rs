@@ -22,12 +22,12 @@
 //! through the carrier seams here and calls the real `backend-executor-spi`
 //! accessors directly.
 
-use types_error::PgResult;
-use types_ri_triggers::TriggerDataRef;
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_error::PgResult;
+use ::types_ri_triggers::TriggerDataRef;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::TupleDescData;
 
-use parse::ts_parse::ParsedText;
+use ::parse::ts_parse::ParsedText;
 
 // ===========================================================================
 // Carrier types appearing in the seam signatures below.

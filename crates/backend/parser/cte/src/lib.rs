@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
-// Every fallible function returns the shared `types_error::PgResult` (==
+// Every fallible function returns the shared `::types_error::PgResult` (==
 // `Result<_, PgError>`); `PgError`'s size is fixed by `types-error`, so we accept
 // the large-`Err` lint crate-wide, like every sibling parser crate.
 #![allow(clippy::result_large_err)]
@@ -36,7 +36,7 @@
 //! mutates) is modelled here with an owned working collection ([`CteState`])
 //! that holds the CTEs + per-CTE sort metadata, indexed in lockstep; the
 //! topological sort reorders them, the walkers borrow the CTE subqueries
-//! read-only via [`nodes_core::node_walker::raw_expression_tree_walker`]
+//! read-only via [`::nodes_core::node_walker::raw_expression_tree_walker`]
 //! and mutate only the scratch state, and the `p_ctenamespace` clones are
 //! refreshed after each `analyzeCTE` to preserve the forward-visibility-of-
 //! analyzed-columns invariant ([`refresh_ctenamespace_entry`]).
@@ -51,7 +51,7 @@
 //! Analyzed expression nodes live in the single `Node::Expr(Expr)` arm. The
 //! cycle-mark value/default are stored back as `Node::Expr` after
 //! `transformExpr`; the node-level `exprType`/`exprTypmod`/`exprCollation`/
-//! `exprLocation` reach the `Expr`-level [`nodes_core::nodefuncs`]
+//! `exprLocation` reach the `Expr`-level [`::nodes_core::nodefuncs`]
 //! accessors through that arm. The coerce / collate seam helpers take `Expr`
 //! values, so the cycle-mark exprs are threaded as `Expr` through those calls
 //! and re-wrapped into `Node::Expr` for storage.
@@ -83,14 +83,14 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
 
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_core::primitive::{InvalidOid, Oid};
 use types_error::{
     PgError, PgResult, ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_DUPLICATE_ALIAS, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_RECURSION, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERROR,
 };
-use types_tuple::heaptuple::{DEFAULT_COLLATION_OID, TEXTOID, UNKNOWNOID};
+use ::types_tuple::heaptuple::{DEFAULT_COLLATION_OID, TEXTOID, UNKNOWNOID};
 
 use ::nodes::copy_query::Query;
 use ::nodes::jointype::JoinType;
@@ -102,9 +102,9 @@ use ::nodes::rawnodes::{
 };
 use ::nodes::value::StringNode;
 
-use nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
-use nodes_core::node_walker::raw_expression_tree_walker;
-use utils_error::ereport;
+use ::nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
+use ::nodes_core::node_walker::raw_expression_tree_walker;
+use ::utils_error::ereport;
 
 /// `TYPECACHE_EQ_OPR` (typcache.h) — request the equality operator of a type.
 /// (Consumed only inside the `lookup_type_cache_eq_opr` seam; kept here as
@@ -285,7 +285,7 @@ fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<PgBox<'mcx, Node<
     let node = Node::mk_string(mcx, StringNode {
         sval: PgString::from_str_in(s, mcx)?,
     })?;
-    mcx::alloc_in(mcx, node)
+    ::mcx::alloc_in(mcx, node)
 }
 
 /// `strVal(node)` — read a `String` node's contents (`""` for a non-String).
@@ -820,7 +820,7 @@ fn analyzeCTE<'mcx>(
         cycle_clause.cycle_mark_value = wrap_expr_node(mcx, mark_value)?;
         cycle_clause.cycle_mark_default = wrap_expr_node(mcx, mark_default)?;
 
-        cte.cycle_clause = Some(mcx::alloc_in(
+        cte.cycle_clause = Some(::mcx::alloc_in(
             mcx,
             ::nodes::nodes::Node::mk_cte_cycle_clause(mcx, cycle_clause)?,
         )?);
@@ -1202,7 +1202,7 @@ pub fn analyzeCTETargetList<'mcx>(
         .try_reserve(cte.aliascolnames.len())
         .map_err(|_| out_of_memory())?;
     for n in cte.aliascolnames.iter() {
-        ctecolnames.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+        ctecolnames.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
     cte.ctecolnames = ctecolnames;
     cte.ctecoltypes.clear();
@@ -1325,7 +1325,7 @@ fn wrap_expr_node<'mcx>(
     e: Option<Expr<'mcx>>,
 ) -> PgResult<Option<PgBox<'mcx, Node<'mcx>>>> {
     match e {
-        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?)),
+        Some(expr) => Ok(Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, expr)?)?)),
         None => Ok(None),
     }
 }

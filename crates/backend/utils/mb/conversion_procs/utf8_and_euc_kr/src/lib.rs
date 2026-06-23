@@ -22,10 +22,10 @@ extern crate alloc;
 mod fmgr_builtins;
 mod tables;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use conv_string_helpers::{ConversionResult, LocalToUtf, UtfToLocal};
-use mbutils_seams::check_encoding_conversion_args;
-use types_wchar::encoding::{pg_enc, PG_EUC_KR, PG_UTF8};
+use ::mbutils_seams::check_encoding_conversion_args;
+use ::types_wchar::encoding::{pg_enc, PG_EUC_KR, PG_UTF8};
 
 /// `euc_kr_to_utf8` (utf8_and_euc_kr.c): convert PG_EUC_KR <-> PG_UTF8.
 pub fn euc_kr_to_utf8(

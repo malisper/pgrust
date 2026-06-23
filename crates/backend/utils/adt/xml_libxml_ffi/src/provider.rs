@@ -37,7 +37,7 @@ use types_error::{
     ERRCODE_INVALID_XML_DOCUMENT, ERRCODE_OUT_OF_MEMORY,
 };
 use ::nodes::primnodes::XmlOptionType;
-use types_xml::XmlBinaryType;
+use ::types_xml::XmlBinaryType;
 
 use adt_xml as owner;
 use xml_libxml_seams as seams;
@@ -417,7 +417,7 @@ std::thread_local! {
 fn flush_xml_warnings() {
     let warnings = XML_ERR_CTX.with(|c| std::mem::take(&mut c.borrow_mut().pending_warnings));
     for w in warnings {
-        let _ = elog_seams::ereport_msg::call(types_error::WARNING, w, None);
+        let _ = elog_seams::ereport_msg::call(::types_error::WARNING, w, None);
     }
 }
 
@@ -669,7 +669,7 @@ fn xml_err_detail() -> String {
 
 /// Build the `PgError` for a failed libxml operation, attaching the buffered
 /// libxml diagnostics as `errdetail` — port of `xml_ereport`.
-fn xml_ereport(msg: &str, sqlstate: types_error::SqlState) -> PgError {
+fn xml_ereport(msg: &str, sqlstate: ::types_error::SqlState) -> PgError {
     let detail = xml_err_detail();
     let mut e = PgError::error(msg.to_string()).with_sqlstate(sqlstate);
     if !detail.is_empty() {
@@ -1054,7 +1054,7 @@ fn serialize_with_options(
             xmlFreeParserCtxt(ctxt);
             if doc.is_null() {
                 return Err(PgError::error("not an XML document")
-                    .with_sqlstate(types_error::ERRCODE_NOT_AN_XML_DOCUMENT));
+                    .with_sqlstate(::types_error::ERRCODE_NOT_AN_XML_DOCUMENT));
             }
         } else {
             let version_c = version_bytes.as_ref().map(|v| cstr(v));
@@ -1084,7 +1084,7 @@ fn serialize_with_options(
                     xmlKeepBlanksDefault(save);
                     xmlFreeDoc(doc);
                     return Err(PgError::error("not an XML document")
-                        .with_sqlstate(types_error::ERRCODE_NOT_AN_XML_DOCUMENT));
+                        .with_sqlstate(::types_error::ERRCODE_NOT_AN_XML_DOCUMENT));
                 }
             }
             xmlKeepBlanksDefault(save);

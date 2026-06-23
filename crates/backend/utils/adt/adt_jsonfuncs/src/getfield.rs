@@ -25,18 +25,18 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgVec};
-use types_error::error::ERROR;
-use types_error::PgResult;
+use ::types_error::error::ERROR;
+use ::types_error::PgResult;
 use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::{
+use ::types_jsonb::jsonb::{
     is_a_jsonb_scalar, jbvType, json_container_is_array, json_container_is_object,
     json_container_is_scalar, json_container_size,
 };
 
-use adt_jsonb::JsonbToCString;
+use ::adt_jsonb::JsonbToCString;
 use jsonb_util::{
     getIthJsonbValueFromContainer, getKeyJsonValueFromContainer, JsonbValueToJsonb,
 };
@@ -1025,7 +1025,7 @@ fn cstring_to_text_with_len(input: &[u8], start: usize, len: usize) -> Vec<u8> {
 /// Copy `src` into a `PgVec` charged to the caller's context (the C
 /// `cstring_to_text*` palloc that yields the returned `text`).
 fn slice_to_pgvec<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
-    let mut out = mcx::vec_with_capacity_in::<u8>(mcx, src.len())?;
+    let mut out = ::mcx::vec_with_capacity_in::<u8>(mcx, src.len())?;
     out.extend_from_slice(src);
     Ok(out)
 }
@@ -1057,6 +1057,6 @@ fn parse_full_i32(s: &[u8]) -> Option<i32> {
 }
 
 /// `elog(ERROR, msg)`: an internal error with no SQLSTATE override.
-fn elog_error(msg: &str) -> types_error::PgError {
+fn elog_error(msg: &str) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg).into_error()
 }

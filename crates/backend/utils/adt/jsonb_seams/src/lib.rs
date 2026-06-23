@@ -37,9 +37,9 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgResult, SoftErrorContext};
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
 seam_core::seam!(
     /// `jsonb_from_cstring(char *json, int len, bool unique_keys, ...)` — run

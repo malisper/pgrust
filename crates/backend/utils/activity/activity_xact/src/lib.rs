@@ -38,12 +38,12 @@ use transam_xact_seams as xact_seams;
 use pgstat_seams as pgstat_seams;
 use activity_shmem_seams as shmem_seams;
 use stat_seams as stat_seams;
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::primitive::Oid;
-use types_core::xact::XlXactStatsItem;
+use ::types_core::primitive::Oid;
+use ::types_core::xact::XlXactStatsItem;
 use types_error::{ErrorLocation, PgError, PgResult, WARNING};
-pub use types_pgstat::activity_pgstat::{
+pub use ::types_pgstat::activity_pgstat::{
     PgStat_Kind, PgStat_PendingDroppedStatsItem, PgStat_SubXactStatus,
 };
 
@@ -71,11 +71,11 @@ pub fn init_seams() {
     xact_stat_seams::post_prepare_pgstat::set(PostPrepare_PgStat);
 
     // pgstat_get_transactional_drops: seam uses wal::XlXactStatsItem
-    // while the impl uses types_core::xact::XlXactStatsItem. Both types are
+    // while the impl uses ::types_core::xact::XlXactStatsItem. Both types are
     // structurally identical (same fields, same layout) — convert field-by-field.
     xact_stat_seams::pgstat_get_transactional_drops::set(|mcx, is_commit| {
         let core_items = pgstat_get_transactional_drops(mcx, is_commit)?;
-        let mut wal_items = mcx::vec_with_capacity_in(mcx, core_items.len())?;
+        let mut wal_items = ::mcx::vec_with_capacity_in(mcx, core_items.len())?;
         for it in core_items.iter() {
             wal_items.push(wal::XlXactStatsItem {
                 kind: it.kind,
@@ -138,7 +138,7 @@ thread_local! {
 /// `MemoryContextAlloc(TopTransactionContext, ...)`'s out-of-memory
 /// `ereport(ERROR)` for the thread-local stack's growth.
 fn oom(request: usize) -> PgError {
-    mcx::oom_named("TopTransactionContext", request)
+    ::mcx::oom_named("TopTransactionContext", request)
 }
 
 /// Called from access/transam/xact.c at top-level transaction commit/abort.

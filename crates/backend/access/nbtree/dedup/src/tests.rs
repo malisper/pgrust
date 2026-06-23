@@ -7,7 +7,7 @@
 
 use super::*;
 use page::{ItemPointerSetBlockNumber, ItemPointerSetOffsetNumber};
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 /// Build a minimal plain non-pivot index tuple of the given MAXALIGN'd key size
 /// whose single heap TID is `tid`.

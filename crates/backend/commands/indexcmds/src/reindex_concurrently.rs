@@ -20,24 +20,24 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERROR};
-use utils_error::ereport;
-use types_storage::lock::LOCKTAG;
+use ::utils_error::ereport;
+use ::types_storage::lock::LOCKTAG;
 
-use types_catalog::catalog::RELATION_RELATION_ID;
-use types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::catalog::RELATION_RELATION_ID;
+use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::nodes::ddlnodes::ReindexStmt;
 use ::nodes::parsenodes::DropBehavior;
 
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
 
 use misc_guc::{at_eoxact_guc, NewGUCNestLevel};
-use guc_seams::restrict_search_path;
+use ::guc_seams::restrict_search_path;
 use miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
 
 use indexam_seams as indexam_seam;
@@ -75,10 +75,10 @@ const PROGRESS_CREATEIDX_PHASE_WAIT_5: i64 = 9;
 const PROGRESS_CREATEIDX_PHASE_VALIDATE_IDXSCAN: i64 = 11;
 
 // commands/progress.h PROGRESS_COMMAND_CREATE_INDEX.
-use activity_small::backend_progress::{
+use ::activity_small::backend_progress::{
     pgstat_progress_end_command, pgstat_progress_start_command, pgstat_progress_update_param,
 };
-use types_pgstat::backend_progress::ProgressCommandType;
+use ::types_pgstat::backend_progress::ProgressCommandType;
 
 const RELPERSISTENCE_TEMP_U8: u8 = b't';
 // pg_tablespace.h GLOBALTABLESPACE_OID (the shared "pg_global" tablespace).
@@ -126,7 +126,7 @@ pub(crate) fn ReindexRelationConcurrently<'mcx>(
     let mut index_ids: Vec<ReindexIndexInfo> = Vec::new();
     let mut new_index_ids: Vec<ReindexIndexInfo> = Vec::new();
     // (lockrelid) entries, plus the parallel locktag list for the wait phases.
-    let mut relation_locks: Vec<types_storage::lock::LockRelId> = Vec::new();
+    let mut relation_locks: Vec<::types_storage::lock::LockRelId> = Vec::new();
     let mut lock_tags: Vec<LOCKTAG> = Vec::new();
 
     let relkind = lsyscache::get_rel_relkind::call(relation_oid)?;
@@ -139,7 +139,7 @@ pub(crate) fn ReindexRelationConcurrently<'mcx>(
 
             if catalog_seam::is_catalog_relation_oid::call(relation_oid) {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!("cannot reindex system catalogs concurrently"))
                     .into_error());
             }
@@ -165,7 +165,7 @@ pub(crate) fn ReindexRelationConcurrently<'mcx>(
                     .map(|s| s.as_str().to_string())
                     .unwrap_or_default();
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!("cannot move system relation \"{name}\""))
                     .into_error());
             }
@@ -239,7 +239,7 @@ pub(crate) fn ReindexRelationConcurrently<'mcx>(
 
             if catalog_seam::is_catalog_relation_oid::call(heap_id) {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!("cannot reindex system catalogs concurrently"))
                     .into_error());
             }
@@ -250,7 +250,7 @@ pub(crate) fn ReindexRelationConcurrently<'mcx>(
                 && !get_index_isvalid(mcx, relation_oid)?
             {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!("cannot reindex invalid index on TOAST table"))
                     .into_error());
             }
@@ -273,7 +273,7 @@ pub(crate) fn ReindexRelationConcurrently<'mcx>(
                     .unwrap_or_default();
                 heap_relation.close(NO_LOCK)?;
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                    .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                     .errmsg(format!("cannot move system relation \"{name}\""))
                     .into_error());
             }
@@ -293,7 +293,7 @@ pub(crate) fn ReindexRelationConcurrently<'mcx>(
         _ => {
             // Partitioned table / index or any other unsupported relkind.
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                 .errmsg(format!("cannot reindex this type of relation concurrently"))
                 .into_error());
         }
@@ -307,7 +307,7 @@ pub(crate) fn ReindexRelationConcurrently<'mcx>(
     // It's not a shared catalog, so refuse to move it to a shared tablespace.
     if params.tablespace_oid == GLOBALTABLESPACE_OID {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "cannot move non-shared relation to tablespace \"pg_global\""
             ))
@@ -656,7 +656,7 @@ fn get_index_isvalid(_mcx: Mcx<'_>, indexoid: Oid) -> PgResult<bool> {
 }
 
 fn warn_skip_invalid(mcx: Mcx<'_>, cell_oid: Oid) -> PgResult<()> {
-    use types_error::WARNING;
+    use ::types_error::WARNING;
     let nsp = lsyscache::get_rel_namespace::call(cell_oid)?;
     let nspname = lsyscache::get_namespace_name::call(mcx, nsp)?
         .map(|s| s.as_str().to_string())
@@ -665,7 +665,7 @@ fn warn_skip_invalid(mcx: Mcx<'_>, cell_oid: Oid) -> PgResult<()> {
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
     ereport(WARNING)
-        .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .errcode(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
         .errmsg(format!(
             "skipping reindex of invalid index \"{nspname}.{relname}\""
         ))
@@ -675,7 +675,7 @@ fn warn_skip_invalid(mcx: Mcx<'_>, cell_oid: Oid) -> PgResult<()> {
 }
 
 fn warn_skip_exclusion(mcx: Mcx<'_>, cell_oid: Oid) -> PgResult<()> {
-    use types_error::WARNING;
+    use ::types_error::WARNING;
     let nsp = lsyscache::get_rel_namespace::call(cell_oid)?;
     let nspname = lsyscache::get_namespace_name::call(mcx, nsp)?
         .map(|s| s.as_str().to_string())
@@ -684,7 +684,7 @@ fn warn_skip_exclusion(mcx: Mcx<'_>, cell_oid: Oid) -> PgResult<()> {
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
     ereport(WARNING)
-        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(format!(
             "cannot reindex exclusion constraint index \"{nspname}.{relname}\" concurrently, skipping"
         ))

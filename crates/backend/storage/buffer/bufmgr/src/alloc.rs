@@ -5,7 +5,7 @@
 //!
 //! F2a (this stage): the allocate-or-evict half of the buffer pool. Victim
 //! selection runs through the buffer-support clock sweep
-//! ([`support::ClockSweep`]) over THIS manager's
+//! ([`::support::ClockSweep`]) over THIS manager's
 //! descriptor array (reached by the support code through the F1-installed
 //! header/freelist seams). The dirty-victim flush rides the `flush_one_buffer`
 //! seam (installed by the flush owner in F5 — panic-until-owner). The mapping
@@ -26,16 +26,16 @@
 #![allow(dead_code)]
 
 use support::{BufferAccessStrategyRing, ClockSweep};
-use types_core::primitive::{BlockNumber, Buffer, ForkNumber};
+use ::types_core::primitive::{BlockNumber, Buffer, ForkNumber};
 use types_error::{PgError, PgResult};
-use types_storage::buf::{
+use ::types_storage::buf::{
     buftag, IOContext, PgAioWaitRef, BM_CHECKPOINT_NEEDED, BM_DIRTY, BM_IO_ERROR,
     BM_IO_IN_PROGRESS, BM_JUST_DIRTIED, BM_PERMANENT, BM_PIN_COUNT_WAITER, BM_TAG_VALID,
     BM_VALID, BUF_FLAG_MASK, BUF_REFCOUNT_ONE, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE,
 };
-use types_storage::storage::LWLockMode;
-use types_storage::RelFileLocatorBackend;
-use types_tuple::access::RELPERSISTENCE_PERMANENT;
+use ::types_storage::storage::LWLockMode;
+use ::types_storage::RelFileLocatorBackend;
+use ::types_tuple::access::RELPERSISTENCE_PERMANENT;
 
 use crate::mgr::BufferManager;
 
@@ -58,7 +58,7 @@ use lwlock as lwlock;
 // genuinely backend-private state (NOT shmem), so a thread-local is the correct
 // ownership. When `None` (the default no-ring strategy), victim selection runs
 // the plain global clock sweep, exactly as before.
-type ActiveStrategy = types_storage::buf::BufferAccessStrategy;
+type ActiveStrategy = ::types_storage::buf::BufferAccessStrategy;
 
 std::thread_local! {
     static ACTIVE_STRATEGY: core::cell::RefCell<ActiveStrategy> =
@@ -91,7 +91,7 @@ impl Drop for ActiveStrategyGuard {
 /// `BUF_STATE_GET_REFCOUNT(buf_state)` (buf_internals.h).
 #[inline]
 fn buf_state_get_refcount(buf_state: u32) -> u32 {
-    buf_state & types_storage::buf::BUF_REFCOUNT_MASK
+    buf_state & ::types_storage::buf::BUF_REFCOUNT_MASK
 }
 
 /// `BUF_STATE_GET_USAGECOUNT(buf_state)` (buf_internals.h).
@@ -556,18 +556,18 @@ impl BufferManager {
             if buf_state & BM_IO_ERROR != 0 {
                 let tag = self.desc_tag(buf_id);
                 let rlocator = RelFileLocatorBackend {
-                    locator: types_storage::RelFileLocator {
+                    locator: ::types_storage::RelFileLocator {
                         spcOid: tag.spcOid,
                         dbOid: tag.dbOid,
                         relNumber: tag.relNumber,
                     },
-                    backend: types_core::primitive::INVALID_PROC_NUMBER,
+                    backend: ::types_core::primitive::INVALID_PROC_NUMBER,
                 };
                 let path = relpath_str(rlocator, tag.forkNum);
                 let block = tag.blockNum;
                 utils_error::emit_error_report_for(
-                    &utils_error::ereport(types_error::error::WARNING)
-                        .errcode(types_error::error::ERRCODE_IO_ERROR)
+                    &utils_error::ereport(::types_error::error::WARNING)
+                        .errcode(::types_error::error::ERRCODE_IO_ERROR)
                         .errmsg_internal(format!("could not write block {block} of {path}"))
                         .errdetail("Multiple failures --- write error might be permanent.")
                         .into_error(),

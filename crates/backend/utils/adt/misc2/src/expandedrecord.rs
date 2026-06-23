@@ -23,7 +23,7 @@
 //!     flat tuple, so a deconstructed-from-flat field carries no separate
 //!     allocation to reclaim — the `fstartptr..fendptr` range check becomes the
 //!     `field_owns_storage` flag set when we copy a value into the record);
-//!   * `MemoryContext` slots -> owned [`mcx::MemoryContext`] children.
+//!   * `MemoryContext` slots -> owned [`::mcx::MemoryContext`] children.
 //!
 //! Construction/field-fetch allocate in the expanded object's own context, so
 //! they take `Mcx`; ereport sites surface as `PgResult`.
@@ -39,15 +39,15 @@
 //! core.
 
 use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
-use types_tuple::heaptuple::{FormedTuple, Datum};
-use types_tuple::heaptuple::{TupleDescData, BITMAPLEN, RECORDOID};
+use ::types_tuple::heaptuple::{FormedTuple, Datum};
+use ::types_tuple::heaptuple::{TupleDescData, BITMAPLEN, RECORDOID};
 
 use heaptuple as heaptuple;
 
 /// `SizeofHeapTupleHeader` == `offsetof(HeapTupleHeaderData, t_bits)`.
-use types_tuple::heap::SizeofHeapTupleHeader;
+use ::types_tuple::heap::SizeofHeapTupleHeader;
 
 /// `MAXALIGN(len)` (`c.h`): round up to the 8-byte MAXIMUM_ALIGNOF boundary.
 #[inline]
@@ -241,7 +241,7 @@ fn assign_record_type_typmod(tupdesc: &mut TupleDescData<'_>) -> PgResult<()> {
 /// typcache-resident `domain_check_input` engine. We route through that same
 /// engine seam directly (the owned model carries no `extra` memoization handle).
 fn domain_check(
-    value: &types_tuple::heaptuple::Datum<'_>,
+    value: &::types_tuple::heaptuple::Datum<'_>,
     isnull: bool,
     domain_type: Oid,
 ) -> PgResult<()> {
@@ -831,8 +831,8 @@ pub fn datum_get_expanded_record<'mcx>(
 fn datum_header_type(tup: &FormedTuple<'_>) -> (Oid, i32) {
     let hdr = tup.tuple.t_data.as_ref().expect("datum has t_data");
     (
-        types_tuple::heaptuple::HeapTupleHeaderGetTypeId(hdr),
-        types_tuple::heaptuple::HeapTupleHeaderGetTypMod(hdr),
+        ::types_tuple::heaptuple::HeapTupleHeaderGetTypeId(hdr),
+        ::types_tuple::heaptuple::HeapTupleHeaderGetTypMod(hdr),
     )
 }
 
@@ -1002,7 +1002,7 @@ pub fn expanded_record_lookup_field<'mcx>(
 }
 
 /// `namestrcmp(&attr->attname, fieldname) == 0` (name.c).
-fn name_eq(name: &types_tuple::heaptuple::NameData, s: &str) -> bool {
+fn name_eq(name: &::types_tuple::heaptuple::NameData, s: &str) -> bool {
     // name_str() returns the NameData content up to the first NUL.
     name.name_str() == s.as_bytes()
 }
@@ -1482,7 +1482,7 @@ fn check_domain_for_new_tuple<'mcx>(
     let Some(tuple) = tuple else {
         ensure_short_term_cxt(erh);
         domain_check(
-            &types_tuple::heaptuple::Datum::null(),
+            &::types_tuple::heaptuple::Datum::null(),
             true,
             erh.er_decltypeid,
         )?;
@@ -1522,7 +1522,7 @@ fn tuple_has_external(tup: &FormedTuple<'_>) -> bool {
     tup.tuple
         .t_data
         .as_ref()
-        .map(|h| (h.t_infomask & types_tuple::heaptuple::HEAP_HASEXTERNAL) != 0)
+        .map(|h| (h.t_infomask & ::types_tuple::heaptuple::HEAP_HASEXTERNAL) != 0)
         .unwrap_or(false)
 }
 
@@ -1533,6 +1533,6 @@ fn tuple_has_external(tup: &FormedTuple<'_>) -> bool {
 /// the consumer; until then this is a structural placeholder, never read here.
 fn expanded_record_get_ro_datum<'mcx>(
     _erh: &ExpandedRecordHeader<'_>,
-) -> types_tuple::heaptuple::Datum<'mcx> {
-    types_tuple::heaptuple::Datum::null()
+) -> ::types_tuple::heaptuple::Datum<'mcx> {
+    ::types_tuple::heaptuple::Datum::null()
 }

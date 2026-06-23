@@ -44,18 +44,18 @@ use types_core::{
     XLogRecPtr, INVALID_PROC_NUMBER,
 };
 use types_error::{ErrorLocation, DEBUG1, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, LOG};
-use types_guc::PGC_SIGHUP;
-use types_pgstat::wait_event::{
+use ::types_guc::PGC_SIGHUP;
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_LOGICAL_APPLY_SEND_DATA, WAIT_EVENT_LOGICAL_PARALLEL_APPLY_MAIN,
     WAIT_EVENT_LOGICAL_PARALLEL_APPLY_STATE_CHANGE,
 };
-use types_storage::lock::{AccessExclusiveLock, AccessShareLock, LOCKMODE};
-use types_storage::ProcSignalReason;
+use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, LOCKMODE};
+use ::types_storage::ProcSignalReason;
 
 use worker_seams as worker;
 use launcher_seams as launcher;
 
-pub use procsignal::SendProcSignal;
+pub use ::procsignal::SendProcSignal;
 
 // ---------------------------------------------------------------------------
 // File-private constants (match the C #defines exactly).
@@ -1347,7 +1347,7 @@ pub fn pa_reset_subtrans() {
 /// `LogicalRepStreamAbortData` (`replication/logicalproto.h`) — the abort
 /// message data `pa_stream_abort` reads. Canonically defined in the
 /// apply-protocol crate (`proto`); re-exported here.
-pub use proto::LogicalRepStreamAbortData;
+pub use ::proto::LogicalRepStreamAbortData;
 
 /// `void pa_stream_abort(LogicalRepStreamAbortData *abort_data)`.
 pub fn pa_stream_abort(abort_data: &LogicalRepStreamAbortData) -> PgResult<()> {

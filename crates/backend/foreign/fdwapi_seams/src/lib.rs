@@ -15,8 +15,8 @@
 //! The owning unit (the FDW-provider/fmgr layer) installs this from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::FdwRoutine;
 
 seam_core::seam!(

@@ -36,11 +36,11 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use core::cell::RefCell;
 
-use mcx::MemoryContext;
-use types_core::primitive::XLogRecPtr;
+use ::mcx::MemoryContext;
+use ::types_core::primitive::XLogRecPtr;
 use types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
-use wal::rmgr::XLogReaderState;
-use wal::xlog_consts::XLOG_BLCKSZ;
+use ::wal::rmgr::XLogReaderState;
+use ::wal::xlog_consts::XLOG_BLCKSZ;
 
 use xlogreader_seams as seam;
 
@@ -121,7 +121,7 @@ pub fn XLogReaderAllocate(
     state.routine = seam::xlog_reader_routine_for_handle::call(xl_routine);
 
     // Permanently allocate readBuf (XLOG_BLCKSZ, MAXALIGN'd by the arena).
-    state.readBuf = match mcx::vec_with_capacity_in(arena, XLOG_BLCKSZ) {
+    state.readBuf = match ::mcx::vec_with_capacity_in(arena, XLOG_BLCKSZ) {
         Ok(mut v) => {
             v.resize(XLOG_BLCKSZ, 0);
             Some(v)
@@ -137,8 +137,8 @@ pub fn XLogReaderAllocate(
     // private_data stays None (the logical-decoding caller passes NULL).
 
     // errormsg_buf = palloc(MAX_ERRORMSG_LEN + 1); start empty.
-    state.errormsg_buf = match mcx::vec_with_capacity_in::<u8>(arena, MAX_ERRORMSG_LEN + 1) {
-        Ok(_) => Some(mcx::PgString::new_in(arena)),
+    state.errormsg_buf = match ::mcx::vec_with_capacity_in::<u8>(arena, MAX_ERRORMSG_LEN + 1) {
+        Ok(_) => Some(::mcx::PgString::new_in(arena)),
         Err(_) => return free_partial(ctx),
     };
     state.errormsg_deferred = false;
@@ -264,7 +264,7 @@ pub fn reader_EndRecPtr(handle: XLogReaderHandle) -> XLogRecPtr {
 /// `XLogRecGetFullXid(reader)` (xlogreader.c:2187) for the handle reader — the
 /// `FullTransactionId` of the reader's current record. Delegates to the
 /// value-typed [`crate::XLogRecGetFullXid`]; only safe during replay.
-pub fn XLogRecGetFullXid(handle: XLogReaderHandle) -> types_core::FullTransactionId {
+pub fn XLogRecGetFullXid(handle: XLogReaderHandle) -> ::types_core::FullTransactionId {
     with_reader(handle, |state| crate::XLogRecGetFullXid(state))
 }
 
@@ -306,7 +306,7 @@ pub fn xlog_rec_get_rmid(handle: XLogReaderHandle) -> u8 {
 }
 
 /// `XLogRecGetXid(reader->record)`.
-pub fn xlog_rec_get_xid(handle: XLogReaderHandle) -> types_core::primitive::TransactionId {
+pub fn xlog_rec_get_xid(handle: XLogReaderHandle) -> ::types_core::primitive::TransactionId {
     with_reader(handle, |state| {
         state
             .record
@@ -317,7 +317,7 @@ pub fn xlog_rec_get_xid(handle: XLogReaderHandle) -> types_core::primitive::Tran
 }
 
 /// `XLogRecGetTopXid(reader->record)`.
-pub fn xlog_rec_get_top_xid(handle: XLogReaderHandle) -> types_core::primitive::TransactionId {
+pub fn xlog_rec_get_top_xid(handle: XLogReaderHandle) -> ::types_core::primitive::TransactionId {
     with_reader(handle, |state| {
         state
             .record
@@ -328,7 +328,7 @@ pub fn xlog_rec_get_top_xid(handle: XLogReaderHandle) -> types_core::primitive::
 }
 
 /// `XLogRecGetOrigin(reader->record)`.
-pub fn xlog_rec_get_origin(handle: XLogReaderHandle) -> types_core::primitive::RepOriginId {
+pub fn xlog_rec_get_origin(handle: XLogReaderHandle) -> ::types_core::primitive::RepOriginId {
     with_reader(handle, |state| {
         state
             .record

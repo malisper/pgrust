@@ -14,8 +14,8 @@
 //! | `MultiXactShmemSize`/`Init`     | `backend-access-transam-multixact-seams`    |
 //! | `TwoPhaseShmemSize`/`Init`      | `backend-access-transam-twophase-seams`     |
 
-use types_core::Size;
-use types_error::PgResult;
+use ::types_core::Size;
+use ::types_error::PgResult;
 
 pub fn varsup_shmem_size() -> PgResult<Size> {
     varsup_seams::varsup_shmem_size::call()

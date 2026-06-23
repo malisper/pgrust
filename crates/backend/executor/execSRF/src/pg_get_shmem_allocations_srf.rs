@@ -11,7 +11,7 @@
 //! under its `pg_proc` OID so `srf_invoke_by_oid` resolves it (the executor-frame
 //! counterpart of a `fmgr_builtins[]` row).
 
-use types_core::Oid;
+use ::types_core::Oid;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 

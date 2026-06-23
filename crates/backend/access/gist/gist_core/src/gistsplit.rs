@@ -19,15 +19,15 @@
 
 use alloc::vec::Vec;
 use utils_error::{ereport, PgResult};
-use mcx::Mcx;
-use types_core::primitive::{InvalidBlockNumber, InvalidOid, OffsetNumber};
-use types_error::error::{DEBUG1, ERRCODE_INTERNAL_ERROR};
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidBlockNumber, InvalidOid, OffsetNumber};
+use ::types_error::error::{DEBUG1, ERRCODE_INTERNAL_ERROR};
 use gist::{
     GistEntryVector, GistSplitVector, GISTENTRY, GISTSTATE, GIST_SPLITVEC,
 };
-use rel::Relation;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
+use ::rel::Relation;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
 
 use crate::gistutil::{
     gistKeyIsEQ, gistMakeUnionItVec, gistMakeUnionKey, gistdentryinit, gistDeCompressAtt,
@@ -464,11 +464,11 @@ fn gist_user_picksplit<'mcx>(
         // Hack for compatibility with old picksplit API: a trailing
         // InvalidOffsetNumber means "the last entry".
         let last_l = v.splitVector.spl_left.len() - 1;
-        if v.splitVector.spl_left[last_l] == types_tuple::heaptuple::INVALID_OFFSET_NUMBER {
+        if v.splitVector.spl_left[last_l] == ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER {
             v.splitVector.spl_left[last_l] = (entryvec.n - 1) as OffsetNumber;
         }
         let last_r = v.splitVector.spl_right.len() - 1;
-        if v.splitVector.spl_right[last_r] == types_tuple::heaptuple::INVALID_OFFSET_NUMBER {
+        if v.splitVector.spl_right[last_r] == ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER {
             v.splitVector.spl_right[last_r] = (entryvec.n - 1) as OffsetNumber;
         }
     }
@@ -581,7 +581,7 @@ fn gist_split_half(v: &mut GIST_SPLITVEC<'_>, len: i32) {
 pub fn gistSplitByKey<'mcx>(
     mcx: Mcx<'mcx>,
     r: &Relation<'mcx>,
-    page_blkno: types_core::primitive::BlockNumber,
+    page_blkno: ::types_core::primitive::BlockNumber,
     itup: &[&[u8]],
     len: i32,
     giststate: &GISTSTATE<'mcx>,

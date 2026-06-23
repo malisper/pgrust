@@ -17,7 +17,7 @@
 //! `xloginsert` seams, since `xloginsert` depends on this crate's seams) and on
 //! the ported `XLogCtl`/`ControlFile` shmem region. The GUC globals they read
 //! (`wal_level`, `full_page_writes`, `MaxConnections`, …) are modeled through
-//! `guc_tables::vars`, exactly as the rest of the crate
+//! `::guc_tables::vars`, exactly as the rest of the crate
 //! reads its GUCs.
 
 #![allow(non_snake_case)]
@@ -26,17 +26,17 @@ extern crate std;
 
 use alloc::vec;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use types_core::{Oid, TimeLineID, XLogRecPtr};
-use types_storage::storage::LW_EXCLUSIVE;
-use wal::wal::{RM_XLOG_ID, XLOG_MARK_UNIMPORTANT};
-use wal::xlog_consts::WalLevel;
+use ::types_storage::storage::LW_EXCLUSIVE;
+use ::wal::wal::{RM_XLOG_ID, XLOG_MARK_UNIMPORTANT};
+use ::wal::xlog_consts::WalLevel;
 
 use xloginsert_seams as xloginsert;
 use lwlock as lwlock;
 use timestamp_seams as timestamp;
-use init_small::globals;
-use guc_tables::vars;
+use ::init_small::globals;
+use ::guc_tables::vars;
 
 use crate::insert::{WALInsertLockAcquireExclusive, WALInsertLockRelease};
 use crate::shmem::{self, RecoveryInProgress, UpdateControlFile};

@@ -17,8 +17,8 @@
 //! (opacity-inherited-never-introduced; parse trees are owned, not aliased).
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::primitive::{Index, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{Index, Oid};
+use ::types_error::PgResult;
 
 use crate::jointype::JoinType;
 use crate::nodelimit::LimitOption;
@@ -189,7 +189,7 @@ pub(crate) fn copy_opt_node<'b>(
     mcx: Mcx<'b>,
 ) -> PgResult<Option<NodePtr<'b>>> {
     match n {
-        Some(n) => Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
+        Some(n) => Ok(Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -199,9 +199,9 @@ pub(crate) fn copy_node_vec<'b>(
     v: &PgVec<'_, NodePtr<'_>>,
     mcx: Mcx<'b>,
 ) -> PgResult<PgVec<'b, NodePtr<'b>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for n in v.iter() {
-        out.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+        out.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
     Ok(out)
 }
@@ -216,7 +216,7 @@ pub(crate) fn copy_opt_str<'b>(s: &Option<PgString<'_>>, mcx: Mcx<'b>) -> PgResu
 
 /// Deep-copy a `PgVec<Oid>`/`PgVec<i32>` scalar list into `mcx`.
 fn copy_scalar_vec<'b, T: Copy>(v: &PgVec<'_, T>, mcx: Mcx<'b>) -> PgResult<PgVec<'b, T>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for x in v.iter() {
         out.push(*x);
     }
@@ -276,7 +276,7 @@ impl RangeVar<'_> {
             inh: self.inh,
             relpersistence: self.relpersistence,
             alias: match &self.alias {
-                Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+                Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
                 None => None,
             },
             location: self.location,
@@ -332,12 +332,12 @@ impl JoinExpr<'_> {
             rarg: copy_opt_node(&self.rarg, mcx)?,
             usingClause: copy_node_vec(&self.usingClause, mcx)?,
             join_using_alias: match &self.join_using_alias {
-                Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+                Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
                 None => None,
             },
             quals: copy_opt_node(&self.quals, mcx)?,
             alias: match &self.alias {
-                Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+                Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
                 None => None,
             },
             rtindex: self.rtindex,
@@ -469,7 +469,7 @@ impl RangeTblFunction<'_> {
             funccoltypmods: copy_scalar_vec(&self.funccoltypmods, mcx)?,
             funccolcollations: copy_scalar_vec(&self.funccolcollations, mcx)?,
             funcparams: match &self.funcparams {
-                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
         })
@@ -692,7 +692,7 @@ impl CommonTableExpr<'_> {
             ctematerialized: self.ctematerialized,
             ctequery: copy_opt_node(&self.ctequery, mcx)?,
             search_clause: match &self.search_clause {
-                Some(s) => Some(mcx::alloc_in(mcx, s.clone_in(mcx)?)?),
+                Some(s) => Some(::mcx::alloc_in(mcx, s.clone_in(mcx)?)?),
                 None => None,
             },
             cycle_clause: copy_opt_node(&self.cycle_clause, mcx)?,
@@ -969,7 +969,7 @@ impl TypeCast<'_> {
         Ok(TypeCast {
             arg: copy_opt_node(&self.arg, mcx)?,
             typeName: match &self.typeName {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             location: self.location,
@@ -1035,7 +1035,7 @@ impl FuncCall<'_> {
             agg_order: copy_node_vec(&self.agg_order, mcx)?,
             agg_filter: copy_opt_node(&self.agg_filter, mcx)?,
             over: match &self.over {
-                Some(w) => Some(mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
+                Some(w) => Some(::mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
                 None => None,
             },
             agg_within_group: self.agg_within_group,
@@ -1257,7 +1257,7 @@ impl RangeSubselect<'_> {
             lateral: self.lateral,
             subquery: copy_opt_node(&self.subquery, mcx)?,
             alias: match &self.alias {
-                Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+                Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
                 None => None,
             },
         })
@@ -1290,7 +1290,7 @@ impl RangeFunction<'_> {
             is_rowsfrom: self.is_rowsfrom,
             functions: copy_node_vec(&self.functions, mcx)?,
             alias: match &self.alias {
-                Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+                Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
                 None => None,
             },
             coldeflist: copy_node_vec(&self.coldeflist, mcx)?,
@@ -1375,7 +1375,7 @@ impl ColumnDef<'_> {
         Ok(ColumnDef {
             colname: copy_opt_str(&self.colname, mcx)?,
             typeName: match &self.typeName {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             compression: copy_opt_str(&self.compression, mcx)?,
@@ -1389,12 +1389,12 @@ impl ColumnDef<'_> {
             cooked_default: copy_opt_node(&self.cooked_default, mcx)?,
             identity: self.identity,
             identitySequence: match &self.identitySequence {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
             generated: self.generated,
             collClause: match &self.collClause {
-                Some(c) => Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
+                Some(c) => Some(::mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
                 None => None,
             },
             collOid: self.collOid,
@@ -1475,7 +1475,7 @@ impl OnConflictClause<'_> {
         Ok(OnConflictClause {
             action: self.action,
             infer: match &self.infer {
-                Some(i) => Some(mcx::alloc_in(mcx, i.clone_in(mcx)?)?),
+                Some(i) => Some(::mcx::alloc_in(mcx, i.clone_in(mcx)?)?),
                 None => None,
             },
             targetList: copy_node_vec(&self.targetList, mcx)?,
@@ -1618,7 +1618,7 @@ impl RangeTableFuncCol<'_> {
         Ok(RangeTableFuncCol {
             colname: copy_opt_str(&self.colname, mcx)?,
             typeName: match &self.typeName {
-                Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+                Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
                 None => None,
             },
             for_ordinality: self.for_ordinality,
@@ -1660,7 +1660,7 @@ impl RangeTableFunc<'_> {
             namespaces: copy_node_vec(&self.namespaces, mcx)?,
             columns: copy_node_vec(&self.columns, mcx)?,
             alias: match &self.alias {
-                Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+                Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
                 None => None,
             },
             location: self.location,
@@ -1696,21 +1696,21 @@ impl InsertStmt<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<InsertStmt<'b>> {
         Ok(InsertStmt {
             relation: match &self.relation {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
             cols: copy_node_vec(&self.cols, mcx)?,
             selectStmt: copy_opt_node(&self.selectStmt, mcx)?,
             onConflictClause: match &self.onConflictClause {
-                Some(o) => Some(mcx::alloc_in(mcx, o.clone_in(mcx)?)?),
+                Some(o) => Some(::mcx::alloc_in(mcx, o.clone_in(mcx)?)?),
                 None => None,
             },
             returningClause: match &self.returningClause {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
             withClause: match &self.withClause {
-                Some(w) => Some(mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
+                Some(w) => Some(::mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
                 None => None,
             },
             r#override: self.r#override,
@@ -1738,17 +1738,17 @@ impl DeleteStmt<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<DeleteStmt<'b>> {
         Ok(DeleteStmt {
             relation: match &self.relation {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
             usingClause: copy_node_vec(&self.usingClause, mcx)?,
             whereClause: copy_opt_node(&self.whereClause, mcx)?,
             returningClause: match &self.returningClause {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
             withClause: match &self.withClause {
-                Some(w) => Some(mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
+                Some(w) => Some(::mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
                 None => None,
             },
         })
@@ -1777,18 +1777,18 @@ impl UpdateStmt<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<UpdateStmt<'b>> {
         Ok(UpdateStmt {
             relation: match &self.relation {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
             targetList: copy_node_vec(&self.targetList, mcx)?,
             whereClause: copy_opt_node(&self.whereClause, mcx)?,
             fromClause: copy_node_vec(&self.fromClause, mcx)?,
             returningClause: match &self.returningClause {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
             withClause: match &self.withClause {
-                Some(w) => Some(mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
+                Some(w) => Some(::mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
                 None => None,
             },
         })
@@ -1817,18 +1817,18 @@ impl MergeStmt<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<MergeStmt<'b>> {
         Ok(MergeStmt {
             relation: match &self.relation {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
             sourceRelation: copy_opt_node(&self.sourceRelation, mcx)?,
             joinCondition: copy_opt_node(&self.joinCondition, mcx)?,
             mergeWhenClauses: copy_node_vec(&self.mergeWhenClauses, mcx)?,
             returningClause: match &self.returningClause {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
             withClause: match &self.withClause {
-                Some(w) => Some(mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
+                Some(w) => Some(::mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
                 None => None,
             },
         })
@@ -1905,17 +1905,17 @@ impl SelectStmt<'_> {
             limitOption: self.limitOption,
             lockingClause: copy_node_vec(&self.lockingClause, mcx)?,
             withClause: match &self.withClause {
-                Some(w) => Some(mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
+                Some(w) => Some(::mcx::alloc_in(mcx, w.clone_in(mcx)?)?),
                 None => None,
             },
             op: self.op,
             all: self.all,
             larg: match &self.larg {
-                Some(l) => Some(mcx::alloc_in(mcx, l.clone_in(mcx)?)?),
+                Some(l) => Some(::mcx::alloc_in(mcx, l.clone_in(mcx)?)?),
                 None => None,
             },
             rarg: match &self.rarg {
-                Some(r) => Some(mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
+                Some(r) => Some(::mcx::alloc_in(mcx, r.clone_in(mcx)?)?),
                 None => None,
             },
         })

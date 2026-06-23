@@ -481,7 +481,7 @@ mod tests {
         assert_eq!(pg_enc2gettext_tbl.len(), _PG_LAST_ENCODING_ as usize);
         assert_eq!(
             PG_ENC2ICU_TBL.len(),
-            (pg_ffi_fgram::PG_ENCODING_BE_LAST + 1) as usize
+            (::pg_ffi_fgram::PG_ENCODING_BE_LAST + 1) as usize
         );
     }
 }

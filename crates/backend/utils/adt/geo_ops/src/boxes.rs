@@ -4,8 +4,8 @@
 //! axes ([`BOX`]). The fmgr shims (`box_in`/`box_out`/`box_recv`/`box_send`)
 //! live in [`crate::io`].
 
-use types_core::geo::{Point, BOX, CIRCLE, LSEG};
-use types_error::PgResult;
+use ::types_core::geo::{Point, BOX, CIRCLE, LSEG};
+use ::types_error::PgResult;
 
 use crate::f8::{float8_div, float8_gt, float8_max, float8_mi, float8_min, float8_mul, float8_pl};
 use crate::lseg::statlseg_construct;

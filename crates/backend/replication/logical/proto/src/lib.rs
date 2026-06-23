@@ -27,29 +27,29 @@ use cache_syscache::{
 };
 use fmgr_seams as fmgr_seams;
 use mcx::{slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use cache::SysCacheKey;
-use types_catalog::catalog::PG_CATALOG_NAMESPACE;
-pub use types_catalog::pg_publication::PublishGencolsType;
+use ::cache::SysCacheKey;
+use ::types_catalog::catalog::PG_CATALOG_NAMESPACE;
+pub use ::types_catalog::pg_publication::PublishGencolsType;
 use types_core::{
     GIDSIZE, InvalidTransactionId, InvalidXLogRecPtr, Oid, OidIsValid, TimestampTz, TransactionId,
     TransactionIdIsValid, XLogRecPtr,
 };
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`
 // to disambiguate from the canonical per-attribute value enum below. Used only
 // at the `SearchSysCache*` key edge, where the cache-key currency
 // (`SysCacheKey::Value`) is an audited bare word (C: `Datum key1..key4`).
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult};
 use ::nodes::Bitmapset;
-use rel::RelationData;
-use stringinfo::StringInfo;
+use ::rel::RelationData;
+use ::stringinfo::StringInfo;
 // The canonical per-attribute value model (C's per-column `Datum`): a by-value
 // scalar word (`ByVal`) or the verbatim by-reference bytes (`ByRef`).
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, FormData_pg_attribute};
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, FormData_pg_attribute};
 use types_tuple::{ATTRIBUTE_GENERATED_STORED, REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_FULL,
     REPLICA_IDENTITY_INDEX};
-use wal::reorderbuffer::ReorderBufferTXN;
+use ::wal::reorderbuffer::ReorderBufferTXN;
 
 #[cfg(test)]
 mod tests;

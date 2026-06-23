@@ -12,17 +12,17 @@
 //! [`crate::init_seams`].
 //!
 //! In the owned model an expanded datum crosses as the typed
-//! [`datum::ExpandedObjectRef`] handle (C's `ExpandedObjectHeader *`
+//! [`::datum::ExpandedObjectRef`] handle (C's `ExpandedObjectHeader *`
 //! reached through `DatumGetEOHP`), not raw `&[u8]`. The method dispatch
 //! (`eoh_methods->get_flat_size` / `->flatten_into`) is owned by the concrete
 //! expanded type; the keystone routes a flatten request to whichever expanded
 //! type produced the datum.
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 use types_tuple::heaptuple::Datum;
-use datum::expandeddatum::{VARTAG_EXPANDED_RO, VARTAG_EXPANDED_RW};
-use datum::ExpandedObjectRef;
-use types_error::PgResult;
+use ::datum::expandeddatum::{VARTAG_EXPANDED_RO, VARTAG_EXPANDED_RW};
+use ::datum::ExpandedObjectRef;
+use ::types_error::PgResult;
 
 /// `EOH_HEADER_MAGIC` (`utils/expandeddatum.h`): the phony varlena length word
 /// (`-1`) stamped into `ExpandedObjectHeader.vl_len_`. `VARATT_IS_EXPANDED_HEADER`
@@ -153,7 +153,7 @@ pub fn datum_get_eohp(datum: &[u8]) -> ExpandedObjectRef<'_> {
 /// `EXPANDED_POINTER_SIZE` long each, differing only in the `va_tag` byte
 /// (`VARTAG_EXPANDED_RW` vs `_RO`), exactly as the two `memcpy`s do.
 pub fn eoh_init_header<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     eohptr: &[u8],
 ) -> PgResult<(PgVec<'mcx, u8>, PgVec<'mcx, u8>)> {
     assert_eq!(
@@ -170,11 +170,11 @@ pub fn eoh_init_header<'mcx>(
 /// assemble one `varattrib_1b_e` external TOAST-pointer image — `va_header =
 /// 0x01`, `va_tag = tag`, then the `varatt_expanded` payload.
 fn build_expanded_pointer<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     tag: u8,
     payload: &[u8],
 ) -> PgResult<PgVec<'mcx, u8>> {
-    let mut img = mcx::vec_with_capacity_in(mcx, VARHDRSZ_EXTERNAL + payload.len())?;
+    let mut img = ::mcx::vec_with_capacity_in(mcx, VARHDRSZ_EXTERNAL + payload.len())?;
     img.push(0x01); // VARATT_IS_1B_E marker
     img.push(tag); // va_tag
     for &b in payload {
@@ -209,7 +209,7 @@ fn build_expanded_pointer<'mcx>(
 /// `VARTAG_EXPANDED_RO`. `Ok(None)` signals "return the input unchanged" (the C
 /// `return d` branch) so the caller need not reallocate.
 pub fn make_expanded_object_read_only_internal<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     datum: &[u8],
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     // Nothing to do if not a read-write expanded-object pointer.
@@ -219,7 +219,7 @@ pub fn make_expanded_object_read_only_internal<'mcx>(
     }
     // Return the built-in read-only pointer instead of the given pointer: same
     // eohptr payload, R/O tag.
-    let mut ro = mcx::vec_with_capacity_in(mcx, datum.len())?;
+    let mut ro = ::mcx::vec_with_capacity_in(mcx, datum.len())?;
     for &b in datum {
         ro.push(b);
     }
@@ -238,7 +238,7 @@ pub fn make_expanded_object_read_only_internal<'mcx>(
 /// R/O image (R/W input) or signals "unchanged" (`Ok(None)`), in which case the
 /// original datum is returned.
 pub fn make_expanded_object_read_only_internal_v<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     d: &Datum<'_>,
 ) -> PgResult<Datum<'mcx>> {
     let bytes: &[u8] = match d {
@@ -283,7 +283,7 @@ pub fn make_expanded_object_read_only_internal_v<'mcx>(
 /// `MemoryContextSetParent(eohptr->eoh_context, new_parent)` — an in-place
 /// reparent of a live context.
 ///
-/// The owned [`mcx::MemoryContext`] expresses context lifespan through Rust
+/// The owned [`::mcx::MemoryContext`] expresses context lifespan through Rust
 /// ownership (a child context is *held* by its owner and reclaimed by `Drop`),
 /// not through a callable in-place `MemoryContextSetParent` on a context reached
 /// from a decoded datum-pointer handle. Faithfully reparenting an expanded
@@ -314,7 +314,7 @@ pub fn transfer_expanded_object(_datum: &[u8]) -> ! {
 /// ```
 ///
 /// Delete an expanded object (must be referenced by a R/W pointer) by deleting
-/// its private `eoh_context`. In the owned [`mcx::MemoryContext`] model context
+/// its private `eoh_context`. In the owned [`::mcx::MemoryContext`] model context
 /// deletion is `Drop` (dropping the owned `MemoryContext` value cascades to its
 /// children); there is no `MemoryContextDelete` callable on a context reached
 /// from a decoded datum-pointer handle. Deleting an expanded object therefore

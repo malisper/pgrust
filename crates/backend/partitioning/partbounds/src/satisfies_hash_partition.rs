@@ -13,11 +13,11 @@
 //! (returning `false`) rather than short-circuited by the strict wrapper.
 
 use mcx::{Mcx, MemoryContext};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 use ::nodes::partition::{PartitionKeyData, PartitionStrategy};
-use types_storage::lock::AccessShareLock;
+use ::types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::Datum;
 
 use crate::{hash_combine64, HASH_PARTITION_SEED};
@@ -33,7 +33,7 @@ use fmgr_seams as fmgr;
 
 /// `errcode(ERRCODE_INVALID_PARAMETER_VALUE)` + `errmsg(msg)`.
 fn invalid_parameter(msg: impl Into<String>) -> PgError {
-    PgError::error(msg.into()).with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+    PgError::error(msg.into()).with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
 /// `format_type_be(oid)` for an error message (best-effort: a lookup failure
@@ -283,6 +283,6 @@ pub fn register() {
             retset: false,
             func: None,
         },
-        fc_satisfies_hash_partition as fmgr::PgFnNative,
+        fc_satisfies_hash_partition as ::fmgr::PgFnNative,
     )]);
 }

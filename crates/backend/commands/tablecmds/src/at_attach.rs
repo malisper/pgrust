@@ -31,14 +31,14 @@
 
 use mcx::{Mcx, PgVec};
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_attribute::{
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attcollation, Anum_pg_attribute_attgenerated, Anum_pg_attribute_attidentity,
     Anum_pg_attribute_attinhcount, Anum_pg_attribute_attisdropped, Anum_pg_attribute_attislocal,
     Anum_pg_attribute_attnotnull, Anum_pg_attribute_atttypid, Anum_pg_attribute_atttypmod,
     AttributeRelationId, PgAttributeUpdateRow,
 };
-use types_core::primitive::{Oid, OidIsValid};
+use ::types_core::primitive::{Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_TABLE,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -48,23 +48,23 @@ use ::nodes::ddlnodes::{AlterTableType, PartitionBoundSpec, PartitionCmd};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, NullTest, NullTestType, Var};
 use rel::{Relation, RelationData};
-use types_storage::lock::{
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock,
 };
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
     RELPERSISTENCE_TEMP,
 };
-use types_tuple::heaptuple::ATTNULLABLE_VALID;
+use ::types_tuple::heaptuple::ATTNULLABLE_VALID;
 
-use common_relation::relation_open;
-use table::table_openrv;
+use ::common_relation::relation_open;
+use ::table::table_openrv;
 use indexing_seams as indexing_seam;
-use nodes_core::makefuncs::{make_ands_explicit, make_ands_implicit, make_var};
+use ::nodes_core::makefuncs::{make_ands_explicit, make_ands_implicit, make_var};
 use cache_syscache::{
     SearchSysCacheCopyAttName, SearchSysCacheExistsAttName, SysCacheGetAttrNotNull, ATTNAME,
 };
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::helpers::{here, object_address_set, RelationRelationId};
 use crate::at_phase::{
@@ -90,14 +90,14 @@ const PRS2_NEW_VARNO: i32 = 2;
 
 /// Wrap a freshly built `Expr` as a `Node` (implicit-AND list element),
 /// allocating the opaque node in `mcx`.
-fn enode<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr<'mcx>) -> PgResult<Node<'mcx>> {
+fn enode<'mcx>(mcx: ::mcx::Mcx<'mcx>, e: Expr<'mcx>) -> PgResult<Node<'mcx>> {
     Node::mk_expr(mcx, e)
 }
 
-/// Convert a rich parse-node `RangeVar` to the trimmed `types_tuple::access`
+/// Convert a rich parse-node `RangeVar` to the trimmed `::types_tuple::access`
 /// shape `table_openrv` consumes (mirrors `at_fk::to_access_range_var`).
-fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),
         relname: rv.relname.as_deref().unwrap_or("").into(),
@@ -323,7 +323,7 @@ pub(crate) fn ATExecAttachPartition<'mcx>(
     // (tablecmds.c:20266 / 20444).
     let mut pstate = small1::make_parsestate(mcx, None)?;
     if let Some(qs) = query_string {
-        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(qs, mcx)?);
+        pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(qs, mcx)?);
     }
     partbounds_seams::check_new_partition_bound::call(
         mcx,
@@ -471,8 +471,8 @@ fn AttachPartitionEnsureIndexes<'mcx>(
     rel: &Relation<'mcx>,
     attachrel: &Relation<'mcx>,
 ) -> PgResult<()> {
-    use transam_xact::CommandCounterIncrement;
-    use types_core::primitive::InvalidOid;
+    use ::transam_xact::CommandCounterIncrement;
+    use ::types_core::primitive::InvalidOid;
 
     let idxes = relcache::derived::RelationGetIndexList(rel.rd_id)?;
     let attach_rel_idxs =
@@ -684,7 +684,7 @@ pub(crate) fn CloneRowTriggersToPartition<'mcx>(
     parent: &Relation<'mcx>,
     partition: &Relation<'mcx>,
 ) -> PgResult<()> {
-    use types_catalog::pg_trigger as pt;
+    use ::types_catalog::pg_trigger as pt;
 
     // ScanKeyInit(&key, Anum_pg_trigger_tgrelid, ..., RelationGetRelid(parent));
     // systable_beginscan(pg_trigger, TriggerRelidNameIndexId, tgrelid = parent).
@@ -723,7 +723,7 @@ pub(crate) fn CloneRowTriggersToPartition<'mcx>(
                 // qual = map_partition_varattnos(qual, PRS2_OLD_VARNO, partition, parent);
                 // qual = map_partition_varattnos(qual, PRS2_NEW_VARNO, partition, parent);
                 let mut exprs: PgVec<'mcx, Node<'mcx>> = PgVec::new_in(mcx);
-                exprs.push(mcx::PgBox::into_inner(node));
+                exprs.push(::mcx::PgBox::into_inner(node));
                 let exprs = partition_seams::map_partition_varattnos::call(
                     mcx,
                     exprs,
@@ -773,7 +773,7 @@ pub(crate) fn CloneRowTriggersToPartition<'mcx>(
         let trig_stmt = ::nodes::ddlnodes::CreateTrigStmt {
             replace: false,
             isconstraint: OidIsValid(trig.tgconstraint),
-            trigname: Some(mcx::PgString::from_str_in(&trig.tgname, mcx)?),
+            trigname: Some(::mcx::PgString::from_str_in(&trig.tgname, mcx)?),
             relation: None,
             funcname: PgVec::new_in(mcx),
             args: trigargs,
@@ -810,13 +810,13 @@ pub(crate) fn CloneRowTriggersToPartition<'mcx>(
 
 /// `TRIGGER_FOR_BEFORE(type)` (pg_trigger.h).
 fn trigger_for_before(tgtype: i16) -> bool {
-    use types_catalog::pg_trigger as pt;
+    use ::types_catalog::pg_trigger as pt;
     (tgtype & pt::TRIGGER_TYPE_TIMING_MASK) == pt::TRIGGER_TYPE_BEFORE
 }
 
 /// `TRIGGER_FOR_AFTER(type)` (pg_trigger.h).
 fn trigger_for_after(tgtype: i16) -> bool {
-    use types_catalog::pg_trigger as pt;
+    use ::types_catalog::pg_trigger as pt;
     (tgtype & pt::TRIGGER_TYPE_TIMING_MASK) == pt::TRIGGER_TYPE_AFTER
 }
 
@@ -825,12 +825,12 @@ fn make_string_node<'mcx>(
     mcx: Mcx<'mcx>,
     s: &str,
 ) -> PgResult<::nodes::nodes::NodePtr<'mcx>> {
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         Node::mk_string(
             mcx,
             ::nodes::value::StringNode {
-                sval: mcx::PgString::from_str_in(s, mcx)?,
+                sval: ::mcx::PgString::from_str_in(s, mcx)?,
             },
         )?,
     )
@@ -852,7 +852,7 @@ fn make_string_node<'mcx>(
 fn FindTriggerIncompatibleWithInheritance<'mcx>(
     attachrel: &Relation<'mcx>,
 ) -> PgResult<Option<String>> {
-    use types_catalog::pg_trigger as pt;
+    use ::types_catalog::pg_trigger as pt;
 
     // A relation with no triggers yields an empty scan ⇒ none incompatible.
     let trigs =
@@ -881,7 +881,7 @@ pub(crate) fn ATExecAddInherit<'mcx>(
     mcx: Mcx<'mcx>,
     child_rel: &Relation<'mcx>,
     parent: &::nodes::rawnodes::RangeVar<'mcx>,
-    _lockmode: types_storage::lock::LOCKMODE,
+    _lockmode: ::types_storage::lock::LOCKMODE,
 ) -> PgResult<ObjectAddress> {
     // A self-exclusive lock is needed here. See the similar case in
     // MergeAttributes() for a full explanation.
@@ -889,7 +889,7 @@ pub(crate) fn ATExecAddInherit<'mcx>(
     let parent_rel = table_openrv(
         mcx,
         &access_rv,
-        types_storage::lock::ShareUpdateExclusiveLock,
+        ::types_storage::lock::ShareUpdateExclusiveLock,
     )?;
 
     // Must be owner of both parent and child -- child was checked by the
@@ -1057,9 +1057,9 @@ fn StoreCatalogInheritance1<'mcx>(
     let parentobject = object_address_set(RelationRelationId, parent_oid);
     let childobject = object_address_set(RelationRelationId, relation_id);
     let dep = if child_is_partition {
-        types_catalog::catalog_dependency::DEPENDENCY_AUTO
+        ::types_catalog::catalog_dependency::DEPENDENCY_AUTO
     } else {
-        types_catalog::catalog_dependency::DEPENDENCY_NORMAL
+        ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL
     };
     dependency_seams::record_dependency_on::call(childobject, parentobject, dep)?;
 
@@ -1123,7 +1123,7 @@ fn MergeAttributesIntoExisting<'mcx>(
         }
         if parent_att.attcollation != child_attcollation {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_COLLATION_MISMATCH)
+                .errcode(::types_error::ERRCODE_COLLATION_MISMATCH)
                 .errmsg(format!(
                     "child table \"{}\" has different collation for column \"{}\"",
                     child_rel.name(),
@@ -1269,7 +1269,7 @@ fn QueuePartitionConstraintValidation<'mcx>(
             .into_iter()
             .next()
             .ok_or_else(|| elog("QueuePartitionConstraintValidation: empty partConstraint"))?;
-        wqueue[idx].partition_constraint = Some(mcx::alloc_in(mcx, first)?);
+        wqueue[idx].partition_constraint = Some(::mcx::alloc_in(mcx, first)?);
         wqueue[idx].validate_default = validate_default;
     } else if scanrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
         // Recurse to each partition.
@@ -1371,7 +1371,7 @@ fn ConstraintImpliedByRelConstraint<'mcx>(
             };
             // cexpr = stringToNode(ccbin);
             let cnode = read_seams::string_to_node::call(mcx, ccbin.as_str())?;
-            let cexpr = mcx::PgBox::into_inner(cnode)
+            let cexpr = ::mcx::PgBox::into_inner(cnode)
                 .into_expr()
                 .ok_or_else(|| elog("CHECK constraint ccbin did not parse to an Expr"))?;
             // eval_const_expressions + canonicalize_qual.

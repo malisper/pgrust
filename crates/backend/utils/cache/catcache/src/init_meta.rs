@@ -21,15 +21,15 @@ use std::thread_local;
 
 use mcx::{McxOwned, MemoryContext, PgBox, PgVec};
 use cache::catcache::CacheIdx;
-use types_core::Oid;
-use types_core::catalog::{C_COLLATION_OID, OIDOID};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, InvalidOid};
-use types_error::PgResult;
-use types_error::pg_error::PgError;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::AccessShareLock;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_core::Oid;
+use ::types_core::catalog::{C_COLLATION_OID, OIDOID};
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, InvalidOid};
+use ::types_error::PgResult;
+use ::types_error::pg_error::PgError;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::AccessShareLock;
+use ::types_tuple::heaptuple::TupleDescData;
 
 use crate::core_compute;
 use crate::{find_cache_by_id, with_arena};
@@ -58,18 +58,18 @@ const TYPEOID: i32 = 82;
 struct TupdescStore<'mcx> {
     /// The store's own `CacheMemoryContext` handle (where the descriptors and
     /// the vector live).
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     /// `(cache->id, cache->cc_tupdesc)` pairs.
     descs: PgVec<'mcx, (i32, PgBox<'mcx, TupleDescData<'mcx>>)>,
 }
 
 impl<'mcx> TupdescStore<'mcx> {
-    fn new(mcx: mcx::Mcx<'mcx>) -> Self {
+    fn new(mcx: ::mcx::Mcx<'mcx>) -> Self {
         TupdescStore { mcx, descs: PgVec::new_in(mcx) }
     }
 }
 
-mcx::bind!(TupdescStoreTy => TupdescStore<'mcx>);
+::mcx::bind!(TupdescStoreTy => TupdescStore<'mcx>);
 
 thread_local! {
     /// The `CacheMemoryContext` analog co-owning every cache's `cc_tupdesc`.
@@ -133,7 +133,7 @@ pub(crate) fn catalog_cache_initialize_cache(cache_idx: CacheIdx) -> PgResult<()
         let mcx = store.mcx;
         // CreateTupleDescCopyConstr(RelationGetDescr(relation)) into the store.
         let copied = tupdesc::CreateTupleDescCopyConstr(mcx, &relation.rd_att)?;
-        let boxed = mcx::alloc_in(mcx, copied)?;
+        let boxed = ::mcx::alloc_in(mcx, copied)?;
         // Replace any stale entry for this id (a cache is initialized once,
         // but a reset can clear and reload it).
         store.descs.retain(|(id, _)| *id != cache_id);
@@ -180,7 +180,7 @@ pub(crate) fn catalog_cache_initialize_cache(cache_idx: CacheIdx) -> PgResult<()
             if cc_keyno[i] < 0 {
                 // elog(FATAL, "sys attributes are not supported in caches");
                 return Err(PgError::new(
-                    types_error::error::FATAL,
+                    ::types_error::error::FATAL,
                     "sys attributes are not supported in caches",
                 ));
             }

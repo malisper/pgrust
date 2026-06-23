@@ -10,15 +10,15 @@ extern crate alloc;
 
 use super::*;
 use alloc::vec;
-use mcx::MemoryContext;
-use snapshot::snapshot::{GlobalVisStateHandle, SnapshotData, SnapshotType};
-use types_tuple::heaptuple::{
+use ::mcx::MemoryContext;
+use ::snapshot::snapshot::{GlobalVisStateHandle, SnapshotData, SnapshotType};
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleField3, HeapTupleFields, HeapTupleHeaderChoice, HeapTupleHeaderData,
     ItemPointerData,
 };
 
 fn header<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     infomask: u16,
     xmin: TransactionId,
     xmax: TransactionId,
@@ -33,12 +33,12 @@ fn header<'mcx>(
         t_infomask2: 0,
         t_infomask: infomask,
         t_hoff: 0,
-        t_bits: mcx::PgVec::new_in(mcx),
+        t_bits: ::mcx::PgVec::new_in(mcx),
     }
 }
 
 fn tuple<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     infomask: u16,
     xmin: TransactionId,
     xmax: TransactionId,
@@ -47,7 +47,7 @@ fn tuple<'mcx>(
         t_len: 32,
         t_self: ItemPointerData::new(0, 1),
         t_tableOid: 12345,
-        t_data: Some(mcx::alloc_in(mcx, header(mcx, infomask, xmin, xmax)).unwrap()),
+        t_data: Some(::mcx::alloc_in(mcx, header(mcx, infomask, xmin, xmax)).unwrap()),
     }
 }
 

@@ -5,7 +5,7 @@
 //! owned [`Expr`](::nodes::primnodes::Expr) tree (the same model
 //! `clauses.c` is ported onto — `negate_clause` is the `BoolExpr NOT_EXPR`
 //! arm's helper there). Lists are `Vec<Expr>`; node builders come from
-//! [`nodes_core::makefuncs`] (`makefuncs.c`), never redefined here.
+//! [`::nodes_core::makefuncs`] (`makefuncs.c`), never redefined here.
 //!
 //! prepqual is self-contained boolean canonicalization. Its only genuine
 //! externals are the `lsyscache` operator-negator lookup `get_negator`
@@ -37,10 +37,10 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use nodes_core::makefuncs::{
+use ::nodes_core::makefuncs::{
     make_andclause, make_bool_const, make_notclause, make_orclause,
 };
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::{

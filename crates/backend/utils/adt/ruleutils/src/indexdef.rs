@@ -13,7 +13,7 @@
 use alloc::format;
 use alloc::string::String;
 use mcx::{Mcx, PgString};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use types_tuple::heaptuple::Datum;
 

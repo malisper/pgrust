@@ -12,30 +12,30 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use mcx::{Mcx, MemoryContext, PgString};
-use types_core::primitive::Oid;
-use utils_error::ereport;
+use ::types_core::primitive::Oid;
+use ::utils_error::ereport;
 use types_error::{ERROR, PgError, PgResult};
 use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR};
-use types_catalog::catalog::TABLE_SPACE_RELATION_ID;
+use ::types_catalog::catalog::TABLE_SPACE_RELATION_ID;
 use ::nodes::ddlnodes::DefElem;
 use ::nodes::nodes::ntag;
-use rel::Relation;
-use types_scan::scankey::{ScanKeyData, StrategyNumber};
-use types_scan::sdir::ScanDirection;
-use types_storage::lock::LOCKMODE;
-use types_tableam::relscan::TableScanDesc;
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_scan::scankey::{ScanKeyData, StrategyNumber};
+use ::types_scan::sdir::ScanDirection;
+use ::types_storage::lock::LOCKMODE;
+use ::types_tableam::relscan::TableScanDesc;
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use pg_tablespace_seams::{self as cat, TablespaceTuple};
 use heaptuple::{
     heap_copytuple, heap_form_tuple, heap_getattr, heap_modify_tuple,
 };
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use table_seams as table_seam;
 use table_tableam::{table_beginscan_catalog, table_endscan};
-use heapam::scan::heap_getnext;
-use indexing::keystone::{
+use ::heapam::scan::heap_getnext;
+use ::indexing::keystone::{
     CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate,
 };
 use reloptions_seams as reloptions_seam;
@@ -58,7 +58,7 @@ const BT_EQUAL_STRATEGY_NUMBER: StrategyNumber = 3;
 /// image), not a `Datum::Cstring` — matching the proven `pg_database` name-key
 /// path.
 fn name_key_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
-    let mut bytes: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, s.len() + 1)?;
+    let mut bytes: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, s.len() + 1)?;
     for &b in s.as_bytes() {
         bytes.push(b);
     }
@@ -68,9 +68,9 @@ fn name_key_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
 
 /// `namein(s)` image — a `NAMEDATALEN`-byte NUL-padded `NameData` Datum.
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
-    use types_core::fmgr::NAMEDATALEN;
+    use ::types_core::fmgr::NAMEDATALEN;
     let len = NAMEDATALEN as usize;
-    let mut image: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, len)?;
+    let mut image: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, len)?;
     let src = s.as_bytes();
     let take = core::cmp::min(src.len(), len - 1);
     for &b in &src[..take] {
@@ -91,13 +91,13 @@ fn name_str(bytes: &[u8]) -> &str {
 /// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, proc, arg)`.
 fn eq_key<'mcx>(
     attno: i32,
-    proc: types_core::primitive::RegProcedure,
+    proc: ::types_core::primitive::RegProcedure,
     arg: Datum<'mcx>,
 ) -> PgResult<ScanKeyData<'mcx>> {
     let mut key = ScanKeyData::empty();
     ScanKeyInit(
         &mut key,
-        attno as types_core::AttrNumber,
+        attno as ::types_core::AttrNumber,
         BT_EQUAL_STRATEGY_NUMBER,
         proc,
         arg,
@@ -140,9 +140,9 @@ fn scan_tablespace_by_name<'mcx>(
     rel: &Relation<'mcx>,
     name: &str,
 ) -> PgResult<Option<TablespaceTuple>> {
-    use types_core::fmgr::F_NAMEEQ;
+    use ::types_core::fmgr::F_NAMEEQ;
     let key = eq_key(ANUM_SPCNAME, F_NAMEEQ, name_key_datum(mcx, name)?)?;
-    let mut keys: mcx::PgVec<'mcx, ScanKeyData<'mcx>> = mcx::vec_with_capacity_in(mcx, 1)?;
+    let mut keys: ::mcx::PgVec<'mcx, ScanKeyData<'mcx>> = ::mcx::vec_with_capacity_in(mcx, 1)?;
     keys.push(key);
 
     let mut scan: TableScanDesc<'mcx> = table_beginscan_catalog(mcx, rel, 1, keys)?;
@@ -165,7 +165,7 @@ fn scan_tablespace_by_name<'mcx>(
 /// `table_beginscan_catalog(rel, 0, NULL) + heap_getnext` loop returning every
 /// row's `oid` in scan order.
 fn scan_all_tablespace_oids<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<Vec<Oid>> {
-    let keys: mcx::PgVec<'mcx, ScanKeyData<'mcx>> = mcx::PgVec::new_in(mcx);
+    let keys: ::mcx::PgVec<'mcx, ScanKeyData<'mcx>> = ::mcx::PgVec::new_in(mcx);
     let mut scan: TableScanDesc<'mcx> = table_beginscan_catalog(mcx, rel, 0, keys)?;
 
     let mut out: Vec<Oid> = Vec::new();
@@ -185,9 +185,9 @@ fn scan_tablespace_name_by_oid<'mcx>(
     rel: &Relation<'mcx>,
     spc_oid: Oid,
 ) -> PgResult<Option<PgString<'mcx>>> {
-    use types_core::fmgr::F_OIDEQ;
+    use ::types_core::fmgr::F_OIDEQ;
     let key = eq_key(ANUM_OID, F_OIDEQ, Datum::from_oid(spc_oid))?;
-    let mut keys: mcx::PgVec<'mcx, ScanKeyData<'mcx>> = mcx::vec_with_capacity_in(mcx, 1)?;
+    let mut keys: ::mcx::PgVec<'mcx, ScanKeyData<'mcx>> = ::mcx::vec_with_capacity_in(mcx, 1)?;
     keys.push(key);
 
     let mut scan: TableScanDesc<'mcx> = table_beginscan_catalog(mcx, rel, 1, keys)?;
@@ -210,8 +210,8 @@ fn scan_tablespace_name_by_oid<'mcx>(
 // ===========================================================================
 
 /// `def_get_string` projection of a `DefElem`'s value node (define.c).
-fn defel_arg(def: &DefElem<'_>) -> PgResult<Option<define_seams::DefElemArg>> {
-    use define_seams::DefElemArg;
+fn defel_arg(def: &DefElem<'_>) -> PgResult<Option<::define_seams::DefElemArg>> {
+    use ::define_seams::DefElemArg;
     let Some(node) = def.arg.as_deref() else {
         return Ok(None);
     };
@@ -327,7 +327,7 @@ fn insert_tablespace_tuple<'mcx>(
     nulls[idx(ANUM_SPCACL)] = true;
     match new_options {
         Some(bytes) => {
-            let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+            let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
             for b in bytes {
                 buf.push(b);
             }
@@ -407,7 +407,7 @@ fn update_tablespace_options<'mcx, 'a>(
     let idx = |attno: i32| (attno - 1) as usize;
     match &new_bytes {
         Some(bytes) => {
-            let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, bytes.len())?;
+            let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, bytes.len())?;
             for &b in bytes.iter() {
                 buf.push(b);
             }
@@ -484,7 +484,7 @@ fn transform_options_bytes<'mcx, 'a>(
             let defname = def.defname.as_deref().unwrap_or("");
             // bare "name" means "name=true".
             let value: String = if def.arg.is_some() {
-                define_seams::def_get_string::call(
+                ::define_seams::def_get_string::call(
                     mcx,
                     defname.to_string(),
                     defel_arg(def)?,
@@ -536,7 +536,7 @@ fn fetch_tuple_by_tid<'mcx>(
     rel: &Relation<'mcx>,
     handle: ItemPointerData,
 ) -> PgResult<FormedTuple<'mcx>> {
-    let keys: mcx::PgVec<'mcx, ScanKeyData<'mcx>> = mcx::PgVec::new_in(mcx);
+    let keys: ::mcx::PgVec<'mcx, ScanKeyData<'mcx>> = ::mcx::PgVec::new_in(mcx);
     let mut scan: TableScanDesc<'mcx> = table_beginscan_catalog(mcx, rel, 0, keys)?;
     let mut found: Option<FormedTuple<'mcx>> = None;
     while let Some(tup) = heap_getnext(mcx, &mut scan, ScanDirection::ForwardScanDirection)? {

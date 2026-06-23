@@ -28,21 +28,21 @@
 
 use mcx::{Mcx, PgString, PgVec};
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERROR};
 use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableType, Constraint, ConstrType, IndexStmt,
 };
 use ::nodes::nodes::{Node, NodePtr};
-use rel::Relation;
-use types_storage::lock::{AccessShareLock, LOCKMODE, NoLock};
+use ::rel::Relation;
+use ::types_storage::lock::{AccessShareLock, LOCKMODE, NoLock};
 
-use common_relation::relation_open;
-use transam_xact::CommandCounterIncrement;
-use objectaddress::consts::ConstraintRelationId;
+use ::common_relation::relation_open;
+use ::transam_xact::CommandCounterIncrement;
+use ::objectaddress::consts::ConstraintRelationId;
 use pg_inherits::{find_all_inheritors, find_inheritance_children};
-use stack_depth::check_stack_depth;
+use ::stack_depth::check_stack_depth;
 
 use crate::at_phase::{
     AlteredTableInfo, AlterTableUtilityContext, NewConstraint, ATGetQueueEntry, ATSimplePermissions,
@@ -154,7 +154,7 @@ pub fn ATPrepAddPrimaryKey<'mcx>(
         // This column is not already not-null, so add it to the queue.
         // nnconstr = makeNotNullConstraint(column);
         let nnconstr = make_not_null_constraint(mcx, colname)?;
-        let nndef = mcx::alloc_in(mcx, Node::mk_constraint(mcx, nnconstr)?)?;
+        let nndef = ::mcx::alloc_in(mcx, Node::mk_constraint(mcx, nnconstr)?)?;
 
         // newcmd = makeNode(AlterTableCmd);
         // newcmd->subtype = AT_AddConstraint;
@@ -183,7 +183,7 @@ pub fn ATPrepAddPrimaryKey<'mcx>(
 fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &str) -> PgResult<Constraint<'mcx>> {
     let mut keys: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     let sval = PgString::from_str_in(colname, mcx)?;
-    keys.push(mcx::alloc_in(
+    keys.push(::mcx::alloc_in(
         mcx,
         Node::mk_string(mcx, ::nodes::value::StringNode { sval })?,
     )?);
@@ -281,7 +281,7 @@ pub fn ATExecSetNotNull<'mcx>(
         lsyscache_seams::get_attnum::call(rel.rd_id, col_name)?;
     if attnum == 0 {
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+            .errcode(::types_error::ERRCODE_UNDEFINED_COLUMN)
             .errmsg(format!(
                 "column \"{col_name}\" of relation \"{}\" does not exist",
                 rel.name()
@@ -292,7 +292,7 @@ pub fn ATExecSetNotNull<'mcx>(
     // Prevent them from altering a system attribute.
     if attnum <= 0 {
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!("cannot alter system column \"{col_name}\""))
             .into_error());
     }
@@ -308,7 +308,7 @@ pub fn ATExecSetNotNull<'mcx>(
         // Don't let a NO INHERIT constraint be changed into inherit.
         if con_form.connoinherit && recurse {
             return Err(utils_error::ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
                     "cannot change NO INHERIT status of NOT NULL constraint \"{}\" on relation \"{}\"",
                     con_form.conname_str(),
@@ -324,7 +324,7 @@ pub fn ATExecSetNotNull<'mcx>(
             let mut newcount = con_form.coninhcount;
             if pg_add_s16_overflow(con_form.coninhcount, 1, &mut newcount) {
                 return Err(utils_error::ereport(ERROR)
-                    .errcode(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+                    .errcode(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
                     .errmsg("too many inheritance parents".to_string())
                     .into_error());
             }
@@ -347,9 +347,9 @@ pub fn ATExecSetNotNull<'mcx>(
             let constr_rel = relation_open(
                 mcx,
                 ConstraintRelationId,
-                types_storage::lock::RowExclusiveLock,
+                ::types_storage::lock::RowExclusiveLock,
             )?;
-            let fields = types_catalog::pg_constraint::ConstraintFieldUpdate {
+            let fields = ::types_catalog::pg_constraint::ConstraintFieldUpdate {
                 conname: con_form.conname,
                 connamespace: con_form.connamespace,
                 conislocal: con_form.conislocal,
@@ -426,7 +426,7 @@ pub fn ATExecSetNotNull<'mcx>(
 
     // cooked = AddRelationNewConstraints(rel, NIL, list_make1(constraint),
     //     false, !recursing, false, NULL);
-    let constr_node = mcx::alloc_in(mcx, Node::mk_constraint(mcx, constraint.clone_in(mcx)?)?)?;
+    let constr_node = ::mcx::alloc_in(mcx, Node::mk_constraint(mcx, constraint.clone_in(mcx)?)?)?;
     let new_constraints = [constr_node];
     let cooked = heap::AddRelationNewConstraints(
         mcx,
@@ -570,7 +570,7 @@ pub fn ATExecAddIndexConstraint<'mcx>(
     stmt: &IndexStmt<'mcx>,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
-    use types_tuple::access::RELKIND_PARTITIONED_TABLE;
+    use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
     let index_oid = stmt.indexOid;
 
@@ -583,7 +583,7 @@ pub fn ATExecAddIndexConstraint<'mcx>(
     // so let's punt for now.
     if rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(
                 "ALTER TABLE / ADD CONSTRAINT USING INDEX is not supported on partitioned tables"
                     .to_string(),
@@ -616,7 +616,7 @@ pub fn ATExecAddIndexConstraint<'mcx>(
         Some(n) => {
             let cn = n.as_str().to_string();
             if cn != index_name {
-                utils_error::ereport(types_error::NOTICE)
+                utils_error::ereport(::types_error::NOTICE)
                     .errmsg(format!(
                         "ALTER TABLE / ADD CONSTRAINT USING INDEX will rename index \"{index_name}\" to \"{cn}\""
                     ))
@@ -635,9 +635,9 @@ pub fn ATExecAddIndexConstraint<'mcx>(
 
     // Note we currently don't support EXCLUSION constraints here.
     let constraint_type = if stmt.primary {
-        types_catalog::pg_constraint::CONSTRAINT_PRIMARY
+        ::types_catalog::pg_constraint::CONSTRAINT_PRIMARY
     } else {
-        types_catalog::pg_constraint::CONSTRAINT_UNIQUE
+        ::types_catalog::pg_constraint::CONSTRAINT_UNIQUE
     };
 
     // Create the catalog entries for the constraint.
@@ -712,12 +712,12 @@ pub fn ATExecAddConstraint<'mcx>(
                 Some(name) => {
                     if pg_constraint::ConstraintNameIsUsed(
                         mcx,
-                        types_catalog::pg_constraint::ConstraintCategory::Relation,
+                        ::types_catalog::pg_constraint::ConstraintCategory::Relation,
                         rel.rd_id,
                         name.as_str(),
                     )? {
                         return Err(utils_error::ereport(ERROR)
-                            .errcode(types_error::ERRCODE_DUPLICATE_OBJECT)
+                            .errcode(::types_error::ERRCODE_DUPLICATE_OBJECT)
                             .errmsg(format!(
                                 "constraint \"{}\" for relation \"{}\" already exists",
                                 name.as_str(),
@@ -824,7 +824,7 @@ pub fn ATAddCheckNNConstraint<'mcx>(
 
     // newcons = AddRelationNewConstraints(rel, NIL, list_make1(copyObject(constr)),
     //     recursing || is_readd, !recursing, is_readd, NULL);
-    let constr_copy = mcx::alloc_in(mcx, Node::mk_constraint(mcx, constr.clone_in(mcx)?)?)?;
+    let constr_copy = ::mcx::alloc_in(mcx, Node::mk_constraint(mcx, constr.clone_in(mcx)?)?)?;
     let new_constraints = [constr_copy];
     let newcons = heap::AddRelationNewConstraints(
         mcx,
@@ -862,7 +862,7 @@ pub fn ATAddCheckNNConstraint<'mcx>(
                 // The cooked-constraint carrier rides the cooked expr Node on
                 // `raw_expr` (see backend-catalog-heap make_cooked_node).
                 qual: match &ccon.raw_expr {
-                    Some(n) => Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?),
+                    Some(n) => Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?),
                     None => None,
                 },
             };
@@ -974,8 +974,8 @@ pub fn ATAddCheckNNConstraint<'mcx>(
 /// ADD PRIMARY KEY) and `tab->verify_new_notnull` is set, phase 3 rescans the
 /// existing rows.
 pub fn at_verify_not_null<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
-    use execTuples::exec_init_slots::ExecDropSingleTupleTableSlot;
-    use execTuples::slot_deform::slot_getattr;
+    use ::execTuples::exec_init_slots::ExecDropSingleTupleTableSlot;
+    use ::execTuples::slot_deform::slot_getattr;
 
     // oldrel = table_open(tab->relid, NoLock);
     let oldrel = relation_open(mcx, relid, NoLock)?;
@@ -989,7 +989,7 @@ pub fn at_verify_not_null<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
     for i in 0..new_tup_desc.natts {
         let att = new_tup_desc.attr(i as usize);
         if att.attnotnull && !att.attisdropped {
-            if att.attgenerated == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL {
+            if att.attgenerated == ::types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL {
                 has_virtual_notnull = true;
             } else {
                 notnull_attrs.push(att.attnum);
@@ -1045,7 +1045,7 @@ pub fn at_verify_not_null<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<()> {
                     table_tableam::table_endscan(scan)?;
                     ExecDropSingleTupleTableSlot(slot)?;
                     return utils_error::ereport(ERROR)
-                        .errcode(types_error::ERRCODE_NOT_NULL_VIOLATION)
+                        .errcode(::types_error::ERRCODE_NOT_NULL_VIOLATION)
                         .errmsg(format!(
                             "column \"{attname}\" of relation \"{relname}\" contains null values"
                         ))

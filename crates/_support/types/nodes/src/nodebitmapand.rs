@@ -11,7 +11,7 @@
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::execnodes::PlanStateData;
 use crate::nodeindexscan::Plan;
@@ -50,7 +50,7 @@ impl BitmapAnd<'_> {
     /// Deep copy into `mcx` (C: `copyObject` shape). Fallible: copying
     /// allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<BitmapAnd<'b>> {
-        let mut bitmapplans = mcx::vec_with_capacity_in(mcx, self.bitmapplans.len())?;
+        let mut bitmapplans = ::mcx::vec_with_capacity_in(mcx, self.bitmapplans.len())?;
         for child in self.bitmapplans.iter() {
             bitmapplans.push(child.clone_in(mcx)?);
         }

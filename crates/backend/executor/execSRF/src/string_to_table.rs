@@ -18,8 +18,8 @@
 use core::any::Any;
 
 use mcx::{Mcx, PgBox};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::execexpr::ExprDoneCond;
 use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::heaptuple::Datum;
@@ -61,7 +61,7 @@ struct TableFctx {
 /// Erase a `'static` cross-call state value into the `FuncCallContext.user_fctx`
 /// carrier (C: `funcctx->user_fctx = palloc(...)`).
 fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
-    let boxed = mcx::alloc_in(mcx, v).expect("alloc user_fctx");
+    let boxed = ::mcx::alloc_in(mcx, v).expect("alloc user_fctx");
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn Any` vtable.

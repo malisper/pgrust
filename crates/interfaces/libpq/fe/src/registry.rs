@@ -286,7 +286,7 @@ fn open_socket(o: &ResolvedOptions) -> Result<Box<dyn Transport>, TransportError
 
 fn seam_exec_status(s: ExecStatusType) -> SeamExecStatus {
     // The local result status IS the seam enum (both re-export
-    // types_libpqwalreceiver::ExecStatusType), so this is the identity.
+    // ::types_libpqwalreceiver::ExecStatusType), so this is the identity.
     s
 }
 

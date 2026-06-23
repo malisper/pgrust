@@ -16,10 +16,10 @@
 //! **address identity** and rewrites wait queues in place. Because that graph is
 //! cyclic and identity-compared, it cannot be modeled by owned trees; the
 //! idiomatic faithful model of shared memory is an **arena of fixed-identity
-//! slots** addressed by [`types_deadlock::ProcId`] / [`types_deadlock::LockId`] /
-//! [`types_deadlock::ProcLockId`]. A slot id is the exact analogue of an absolute
+//! slots** addressed by [`::types_deadlock::ProcId`] / [`::types_deadlock::LockId`] /
+//! [`::types_deadlock::ProcLockId`]. A slot id is the exact analogue of an absolute
 //! shmem address: `Copy`, identity-comparable, and stable for the slot's lifetime.
-//! The arena is [`types_deadlock::LockSpace`]; the detector takes `&mut LockSpace`
+//! The arena is [`::types_deadlock::LockSpace`]; the detector takes `&mut LockSpace`
 //! because it runs while holding all partition locks (exclusive access).
 //!
 //! # What is in-crate vs. a seam

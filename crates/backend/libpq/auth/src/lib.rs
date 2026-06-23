@@ -41,7 +41,7 @@ mod radius;
 mod tests;
 
 use utils_error::{elog, ereport};
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{ErrorLocation, PgResult, DEBUG5, ERROR, FATAL, LOG};
 use types_core::{
     uaBSD, uaCert, uaGSS, uaIdent, uaImplicitReject, uaLDAP, uaMD5, uaOAuth, uaPAM, uaPassword,
@@ -634,7 +634,7 @@ pub fn CheckCertAuth(port: &Port) -> PgResult<i32> {
 
     // clientCertCN = 0, clientCertDN = 1.
     let peer_username: Option<&str> = match hba.clientcertname {
-        net::clientCertDN => port.peer_dn.as_deref(),
+        ::net::clientCertDN => port.peer_dn.as_deref(),
         _ /* clientCertCN */ => port.peer_cn.as_deref(),
     };
 
@@ -677,7 +677,7 @@ pub fn CheckCertAuth(port: &Port) -> PgResult<i32> {
         && hba.auth_method != uaCert
     {
         match hba.clientcertname {
-            net::clientCertDN => {
+            ::net::clientCertDN => {
                 ereport(LOG)
                     .errmsg(format!(
                         "certificate validation (clientcert=verify-full) failed for user \"{user_name}\": DN mismatch"
@@ -738,9 +738,9 @@ pub(crate) fn getnameinfo_remote_numeric(port: &Port) -> String {
     host
 }
 
-/// Build a `net::SockAddr` from the connection's remote address.
-pub(crate) fn raddr_sockaddr(port: &Port) -> net::SockAddr {
-    net::SockAddr { addr: port.raddr.addr, salen: port.raddr.salen }
+/// Build a `::net::SockAddr` from the connection's remote address.
+pub(crate) fn raddr_sockaddr(port: &Port) -> ::net::SockAddr {
+    ::net::SockAddr { addr: port.raddr.addr, salen: port.raddr.salen }
 }
 
 /// `gai_strerror(errcode)`.
@@ -757,11 +757,11 @@ pub(crate) fn gai_strerror(errcode: i32) -> String {
 
 /// A short-lived `MemoryContext`, the idiomatic stand-in for the implicit
 /// `CurrentMemoryContext` C uses to build a `StringInfoData` message buffer.
-pub(crate) struct MemCtx(mcx::MemoryContext);
+pub(crate) struct MemCtx(::mcx::MemoryContext);
 
 impl MemCtx {
     pub(crate) fn new(name: &'static str) -> Self {
-        MemCtx(mcx::MemoryContext::new(name))
+        MemCtx(::mcx::MemoryContext::new(name))
     }
     pub(crate) fn mcx(&self) -> Mcx<'_> {
         self.0.mcx()
@@ -880,10 +880,10 @@ fn log_connection_authorization_entry() -> bool {
 }
 
 /// `MyClientConnectionInfo.authn_id`.
-fn client_authn_id_entry(mcx: Mcx<'_>) -> PgResult<Option<mcx::PgString<'_>>> {
+fn client_authn_id_entry(mcx: Mcx<'_>) -> PgResult<Option<::mcx::PgString<'_>>> {
     let info = miscinit::client_connection_info();
     match info.authn_id {
-        Some(id) => Ok(Some(mcx::PgString::from_str_in(&id, mcx)?)),
+        Some(id) => Ok(Some(::mcx::PgString::from_str_in(&id, mcx)?)),
         None => Ok(None),
     }
 }

@@ -30,7 +30,7 @@ fn a_var(varattno: i16) -> Expr {
 }
 
 /// Build a SELECT `TargetEntry` for `varattno` at result position `resno`.
-fn a_tle<'mcx>(mcx: mcx::Mcx<'mcx>, varattno: i16, resno: i16, resjunk: bool) -> TargetEntry<'mcx> {
+fn a_tle<'mcx>(mcx: ::mcx::Mcx<'mcx>, varattno: i16, resno: i16, resjunk: bool) -> TargetEntry<'mcx> {
     TargetEntry {
         expr: Some(alloc_in(mcx, a_var(varattno)).unwrap()),
         resno,
@@ -52,7 +52,7 @@ fn select_targetlist_is_cloned_into_processed_tlist() {
     parse.commandType = CmdType::CMD_SELECT;
     parse.resultRelation = 0;
     let mut t0 = a_tle(mcx, 1, 1, false);
-    t0.resname = Some(mcx::PgString::from_str_in("a", mcx).unwrap());
+    t0.resname = Some(::mcx::PgString::from_str_in("a", mcx).unwrap());
     parse.targetList.push(t0);
     parse.targetList.push(a_tle(mcx, 2, 2, false));
 
@@ -103,10 +103,10 @@ fn empty_select_targetlist_yields_empty_processed_tlist() {
 fn get_plan_rowmark_resolves_rti() {
     let cx = MemoryContext::new("preptlist-test");
     let mcx = cx.mcx();
-    let mut run = pathnodes::planner_run::PlannerRun::new(mcx);
+    let mut run = ::pathnodes::planner_run::PlannerRun::new(mcx);
 
     // Empty rowMarks (the plain SELECT path) finds nothing.
-    let empty: alloc::vec::Vec<pathnodes::PlanRowMarkId> = alloc::vec::Vec::new();
+    let empty: alloc::vec::Vec<::pathnodes::PlanRowMarkId> = alloc::vec::Vec::new();
     assert!(get_plan_rowmark(&run, &empty, 1).is_none());
 
     // A FOR-UPDATE/SHARE rowmark for rti=3 is interned as a handle in
@@ -136,7 +136,7 @@ fn extract_update_colnos_collects_and_renumbers() {
     // resno=3 (col 3), resjunk; resno=2 (col 2); resno=5 (col 5).
     let ids = alloc::vec![
         root.alloc_targetentry(TargetEntryNode {
-            expr: pathnodes::NodeId(0),
+            expr: ::pathnodes::NodeId(0),
             resno: 3,
             resname: None,
             ressortgroupref: 0,
@@ -145,7 +145,7 @@ fn extract_update_colnos_collects_and_renumbers() {
             resjunk: false,
         }),
         root.alloc_targetentry(TargetEntryNode {
-            expr: pathnodes::NodeId(0),
+            expr: ::pathnodes::NodeId(0),
             resno: 2,
             resname: Some(String::from("j")),
             ressortgroupref: 0,
@@ -154,7 +154,7 @@ fn extract_update_colnos_collects_and_renumbers() {
             resjunk: true,
         }),
         root.alloc_targetentry(TargetEntryNode {
-            expr: pathnodes::NodeId(0),
+            expr: ::pathnodes::NodeId(0),
             resno: 5,
             resname: None,
             ressortgroupref: 0,

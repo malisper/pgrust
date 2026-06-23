@@ -7,7 +7,7 @@
 
 use super::*;
 use mcx::{MemoryContext, PgVec};
-use types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
+use ::types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
 
 fn name(s: &str) -> NameData {
     let mut n = NameData::default();

@@ -22,13 +22,13 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgBox};
-use types_core::primitive::InvalidOid;
-use types_error::PgResult;
+use ::types_core::primitive::InvalidOid;
+use ::types_error::PgResult;
 use ::nodes::queryenvironment::{
     EphemeralNamedRelationData, EphemeralNamedRelationMetadataData, QueryEnvironment,
 };
-use types_storage::lock::NoLock;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_storage::lock::NoLock;
+use ::types_tuple::heaptuple::TupleDescData;
 
 /// Install this crate's seam implementations. This unit owns no seams.
 pub fn init_seams() {}
@@ -163,7 +163,7 @@ pub fn ENRMetadataGetTupDesc<'e, 'mcx>(
         // tupdesc = relation->rd_att;
         // table_close(relation, NoLock);
         let relation = table::table_open(mcx, enrmd.reliddesc, NoLock)?;
-        let tupdesc = mcx::alloc_in(mcx, relation.rd_att.clone_in(mcx)?)?;
+        let tupdesc = ::mcx::alloc_in(mcx, relation.rd_att.clone_in(mcx)?)?;
         table::table_close(relation, NoLock)?;
         Ok(Some(EnrTupleDesc::Owned(tupdesc)))
     }

@@ -11,8 +11,8 @@
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
-use types_acl::acl::{ACL_DELETE, ACL_UPDATE};
-use utils_error::ereport;
+use ::types_acl::acl::{ACL_DELETE, ACL_UPDATE};
+use ::utils_error::ereport;
 use types_error::{PgResult, ERRCODE_DUPLICATE_ALIAS, ERRCODE_SYNTAX_ERROR, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::CmdType;
@@ -89,7 +89,7 @@ pub fn transformDeleteStmt<'mcx>(
     qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, PgVec::new_in(mcx));
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, PgVec::new_in(mcx));
     let qual_node = opt_expr_to_node(mcx, qual)?;
-    qry.jointree = Some(mcx::alloc_in(
+    qry.jointree = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
@@ -177,7 +177,7 @@ pub fn transformUpdateStmt<'mcx>(
     qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, PgVec::new_in(mcx));
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, PgVec::new_in(mcx));
     let qual_node = opt_expr_to_node(mcx, qual)?;
-    qry.jointree = Some(mcx::alloc_in(
+    qry.jointree = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
@@ -218,7 +218,7 @@ pub(crate) fn transformUpdateTargetList<'mcx>(
             mcx,
             pstate,
             {
-                let mut v = mcx::vec_with_capacity_in(mcx, orig_targets.len())?;
+                let mut v = ::mcx::vec_with_capacity_in(mcx, orig_targets.len())?;
                 for rt in orig_targets.iter() {
                     v.push(rt.clone_in(mcx)?);
                 }
@@ -298,8 +298,8 @@ pub(crate) fn transformUpdateTargetList<'mcx>(
                 .and_then(|nsi| nsi.p_names.as_deref())
                 .and_then(|alias| alias.aliasname.as_deref())
                 .unwrap_or("");
-            let mut e = utils_error::ereport(types_error::ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+            let mut e = ::utils_error::ereport(::types_error::ERROR)
+                .errcode(::types_error::ERRCODE_UNDEFINED_COLUMN)
                 .errmsg_internal(alloc::format!(
                     "column \"{}\" of relation \"{}\" does not exist",
                     colname,
@@ -347,7 +347,7 @@ pub(crate) fn transformUpdateTargetList<'mcx>(
         ));
     }
 
-    let mut out = mcx::vec_with_capacity_in(mcx, tlist.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, tlist.len())?;
     for te in tlist {
         out.push(te);
     }
@@ -367,18 +367,18 @@ pub(crate) fn clone_target_nsitem<'mcx>(
         .ok_or_else(|| elog_error("clone_target_nsitem: p_target_nsitem must be set"))?;
 
     let p_names = match target.p_names.as_deref() {
-        Some(a) => Some(mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
+        Some(a) => Some(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?),
         None => None,
     };
     let p_rte = match target.p_rte.as_deref() {
-        Some(rte) => Some(mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
+        Some(rte) => Some(::mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
         None => None,
     };
     let p_perminfo = match target.p_perminfo.as_deref() {
-        Some(pi) => Some(mcx::alloc_in(mcx, pi.clone_in(mcx)?)?),
+        Some(pi) => Some(::mcx::alloc_in(mcx, pi.clone_in(mcx)?)?),
         None => None,
     };
-    let mut p_nscolumns = mcx::vec_with_capacity_in(mcx, target.p_nscolumns.len())?;
+    let mut p_nscolumns = ::mcx::vec_with_capacity_in(mcx, target.p_nscolumns.len())?;
     for c in target.p_nscolumns.iter() {
         p_nscolumns.push(*c);
     }
@@ -428,17 +428,17 @@ fn addNSItemForReturning<'mcx>(
             .clone_in(mcx)?;
         let colnames = eref.colnames;
 
-        let mut nscolumns = mcx::vec_with_capacity_in(mcx, target.p_nscolumns.len())?;
+        let mut nscolumns = ::mcx::vec_with_capacity_in(mcx, target.p_nscolumns.len())?;
         for c in target.p_nscolumns.iter() {
             nscolumns.push(*c);
         }
 
         let rte_box = match target.p_rte.as_deref() {
-            Some(rte) => Some(mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
+            Some(rte) => Some(::mcx::alloc_in(mcx, rte.clone_in(mcx)?)?),
             None => None,
         };
         let perminfo_box = match target.p_perminfo.as_deref() {
-            Some(pi) => Some(mcx::alloc_in(mcx, pi.clone_in(mcx)?)?),
+            Some(pi) => Some(::mcx::alloc_in(mcx, pi.clone_in(mcx)?)?),
             None => None,
         };
 
@@ -453,7 +453,7 @@ fn addNSItemForReturning<'mcx>(
     // build the nsitem, copying most fields from the target relation
     let names = nodes_core::makefuncs::make_alias(mcx, aliasname, colnames)?;
     let nsitem = ::nodes::parsestmt::ParseNamespaceItem {
-        p_names: Some(mcx::alloc_in(mcx, names)?),
+        p_names: Some(::mcx::alloc_in(mcx, names)?),
         p_rte: rte_box,
         p_rtindex: rtindex,
         p_perminfo: perminfo_box,
@@ -558,13 +558,13 @@ pub(crate) fn transformReturningClause<'mcx>(
     if qry.returningOldAlias.is_none()
         && parser_relation::refnameNamespaceItem(pstate, None, "old", -1, false)?.is_none()
     {
-        qry.returningOldAlias = Some(mcx::PgString::from_str_in("old", mcx)?);
+        qry.returningOldAlias = Some(::mcx::PgString::from_str_in("old", mcx)?);
         addNSItemForReturning(mcx, pstate, "old", VarReturningType::VAR_RETURNING_OLD)?;
     }
     if qry.returningNewAlias.is_none()
         && parser_relation::refnameNamespaceItem(pstate, None, "new", -1, false)?.is_none()
     {
-        qry.returningNewAlias = Some(mcx::PgString::from_str_in("new", mcx)?);
+        qry.returningNewAlias = Some(::mcx::PgString::from_str_in("new", mcx)?);
         addNSItemForReturning(mcx, pstate, "new", VarReturningType::VAR_RETURNING_NEW)?;
     }
 
@@ -575,7 +575,7 @@ pub(crate) fn transformReturningClause<'mcx>(
 
     // transform RETURNING expressions identically to a SELECT targetlist. The
     // grammar makes returningClause->exprs a target_list (list of ResTarget).
-    let mut res_targets = mcx::vec_with_capacity_in(mcx, rc.exprs.len())?;
+    let mut res_targets = ::mcx::vec_with_capacity_in(mcx, rc.exprs.len())?;
     for n in rc.exprs.iter() {
         match n.as_ref().as_restarget() {
             Some(rt) => res_targets.push(rt.clone_in(mcx)?),

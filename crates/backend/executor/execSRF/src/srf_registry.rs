@@ -5,7 +5,7 @@
 //! the `resultinfo` field carries the live `ReturnSetInfo` for the latter. The
 //! owned model has two `FunctionCallInfoBaseData` homes (WONTFIX dual-home,
 //! DESIGN_DEBT): the by-OID builtin registry (`fmgr_core`) holds
-//! `fmgr::PGFunction`s whose frame's `resultinfo` is a tag-only carrier.
+//! `::fmgr::PGFunction`s whose frame's `resultinfo` is a tag-only carrier.
 //! An SRF dispatched through it can never see a LIVE `ReturnSetInfo`.
 //!
 //! This table is the executor-frame counterpart of `fmgr_builtins[]`: it maps a
@@ -24,9 +24,9 @@ extern crate alloc;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use utils_error::ereport;
-use types_core::Oid;
-use types_error::error::ERRCODE_UNDEFINED_FUNCTION;
+use ::utils_error::ereport;
+use ::types_core::Oid;
+use ::types_error::error::ERRCODE_UNDEFINED_FUNCTION;
 use types_error::{PgResult, ERROR};
 use ::nodes::execexpr::SrfFunction;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
@@ -96,7 +96,7 @@ pub fn srf_name_is_builtin(proname: &str) -> bool {
 /// The outcome of dispatching one SRF call frame: either a builtin
 /// executor-frame `PGFunction` produced a per-call (or in-frame materialize)
 /// `Datum` result, or a USER (plpgsql/SQL) function ran the SFRM_Materialize
-/// protocol through the fmgr path and filled a [`fmgr::mat_srf::MatSrfSink`]
+/// protocol through the fmgr path and filled a [`::fmgr::mat_srf::MatSrfSink`]
 /// with the whole tuplestore.
 pub enum SrfDispatch<'mcx> {
     /// A builtin executor-frame SRF ran over the live frame (its `resultinfo`
@@ -107,7 +107,7 @@ pub enum SrfDispatch<'mcx> {
     /// through the fmgr dispatch (`function_call_invoke_datum` ->
     /// fmgr_sql / plpgsql_call_handler) and filled the materialize sink with the
     /// complete row set + column-type descriptor.
-    Materialized(fmgr::mat_srf::MatSrfSink),
+    Materialized(::fmgr::mat_srf::MatSrfSink),
 }
 
 /// `FunctionCallInvoke(fcinfo)` for a set-returning function (execSRF.c) —
@@ -151,7 +151,7 @@ pub fn srf_invoke_by_oid<'mcx>(
 /// setting `finfo->fn_addr` to the built-in's address for a `LANGUAGE internal`
 /// pg_proc row — the dual-home bridge resolving the USER OID to the shared core.
 fn resolve_internal_srf_core(foid: Oid) -> Option<SrfFunction> {
-    use fmgr::resolution::ProcLanguage;
+    use ::fmgr::resolution::ProcLanguage;
 
     let scratch = mcx::MemoryContext::new("resolve_internal_srf_core");
     let proc =
@@ -221,7 +221,7 @@ fn dispatch_user_setof<'mcx>(
     // Push the live materialize sink (C: point fcinfo->resultinfo at the
     // ReturnSetInfo) for the duration of the call; the RAII guard pops it even
     // if the callee `ereport(ERROR)`s (unwinds).
-    let guard = fmgr::mat_srf::push(allowed_modes);
+    let guard = ::fmgr::mat_srf::push(allowed_modes);
 
     // Carry the caller's `expectedDesc` (the FunctionScan coldeflist) columns
     // into the sink so a `RETURNS [SETOF] record` SQL function can resolve its
@@ -232,12 +232,12 @@ fn dispatch_user_setof<'mcx>(
     // descriptor at deform time.
     if let Some(rsi) = fcinfo.resultinfo.as_ref() {
         if let Some(exp) = rsi.expectedDesc.as_deref() {
-            let cols: alloc::vec::Vec<fmgr::mat_srf::MatDescCol> = (0..exp
+            let cols: alloc::vec::Vec<::fmgr::mat_srf::MatDescCol> = (0..exp
                 .natts
                 .max(0) as usize)
                 .map(|i| {
                     let a = &exp.attrs[i];
-                    fmgr::mat_srf::MatDescCol {
+                    ::fmgr::mat_srf::MatDescCol {
                         name: alloc::string::String::from_utf8_lossy(a.attname.name_str())
                             .into_owned(),
                         typid: a.atttypid,
@@ -246,7 +246,7 @@ fn dispatch_user_setof<'mcx>(
                     }
                 })
                 .collect();
-            fmgr::mat_srf::with_top(|sink| {
+            ::fmgr::mat_srf::with_top(|sink| {
                 if let Some(sink) = sink {
                     sink.expected_desc_cols = cols;
                 }

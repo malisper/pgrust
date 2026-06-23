@@ -1,6 +1,6 @@
 //! Tuple-conversion-map vocabulary (`access/tupconvert.h`), trimmed.
 
-use mcx::PgBox;
+use ::mcx::PgBox;
 
 use crate::attmap::AttrMap;
 use crate::heaptuple::TupleDesc;

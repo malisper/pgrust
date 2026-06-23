@@ -57,17 +57,17 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use statistics::{AnalyzeAttrFetchFunc, VacAttrStats, STATISTIC_NUM_SLOTS};
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
-use types_selfuncs::STATISTIC_KIND_MCELEM;
+use ::types_selfuncs::STATISTIC_KIND_MCELEM;
 
 use detoast_seams::{detoast_attr, pg_varsize_any};
-use vacuumlazy_seams::vacuum_delay_point;
-use vacuum_seams::check_for_interrupts;
-use tsvector_core::access::{arrptr, lexeme, tsv_size};
+use ::vacuumlazy_seams::vacuum_delay_point;
+use ::vacuum_seams::check_for_interrupts;
+use ::tsvector_core::access::{arrptr, lexeme, tsv_size};
 
 /// `TEXTOID` (pg_type.dat) — element type of the MCELEM `text` values.
 const TEXTOID: types_core::Oid = 25;

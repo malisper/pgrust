@@ -21,9 +21,9 @@
 //! the C, and the per-backend process globals are modelled as one
 //! `thread_local!` cell.
 //!
-//! Memory discipline is plain [`mcx::Mcx`] / [`mcx::PgVec`] (the base crate's
+//! Memory discipline is plain [`::mcx::Mcx`] / [`::mcx::PgVec`] (the base crate's
 //! `FreeIn`/charged-spine model is intentionally dropped): the dispatcher owns
-//! one [`mcx::MemoryContext`] ("CacheInvalidation") holding the persistent
+//! one [`::mcx::MemoryContext`] ("CacheInvalidation") holding the persistent
 //! state, and per-call snapshots are ordinary `PgVec`/`Vec` allocations.
 //!
 //! Family modules:
@@ -46,8 +46,8 @@ use std::cell::{Cell, RefCell};
 
 use mcx::{bind, Mcx, McxOwned, MemoryContext, PgVec};
 use cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
-use types_core::Oid;
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`.
+use ::types_core::Oid;
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`.
 // The callback `arg` is C's opaque `Datum arg` registration cookie: inval.c
 // stores it verbatim and hands it back to the user callback untouched, never
 // deforming it. It therefore stays the audited bare word rather than the
@@ -55,7 +55,7 @@ use types_core::Oid;
 // / `RelcacheCallbackFunction` signatures in `types-cache`, whose `arg` is this
 // same bare word. (Datum unification: opaque-passthrough cookies keep the
 // scalar word; only deformed tuple values move to the canonical enum.)
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 
 // Outward seams to other owners.
 use catalog_seams as catalog_seams;
@@ -81,7 +81,7 @@ pub mod registration;
 /// the logical-decoding RelationSyncCache invalidation callback. (Unlike the
 /// syscache/relcache callback types, this one is not yet in `types-cache`, so
 /// inval.c — its owner — defines it here.)
-pub type RelSyncCallbackFunction = fn(arg: ScalarWord, relid: types_core::Oid);
+pub type RelSyncCallbackFunction = fn(arg: ScalarWord, relid: ::types_core::Oid);
 
 /* ------------------------------------------------------------------------
  *  Subgroup indices (inval.c: CatCacheMsgs / RelCacheMsgs)

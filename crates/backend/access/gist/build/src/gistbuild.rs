@@ -30,17 +30,17 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use gist_core::gist_page::{
+use ::gist_core::gist_page::{
     gist_page_flags, gistcheckpage, gistfillbuffer, gistinitpage, set_gist_page_rightlink,
     GISTInitBuffer, GistPageIsLeaf,
 };
-use gist_core::gistutil::{
+use ::gist_core::gistutil::{
     gistCompressValues, gistFormTuple, gistNewBuffer, gistchoose, gistextractpage, gistfillitupvec,
     gistgetadjusted, gistjoinvector, gistunion, initGISTstate,
 };
-use gist_core::gist_insert::{gistdoinsert, gistplacetopage, gistSplit, PlaceToPage};
+use ::gist_core::gist_insert::{gistdoinsert, gistplacetopage, gistSplit, PlaceToPage};
 
 use indexam_seams as indexam;
 use table_tableam_seams as tableam;
@@ -54,7 +54,7 @@ use page::{
 use bulkwrite_seams as bulk;
 use miscinit_seams as miscinit;
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, OffsetNumber, RegProcedure, Size,
     BLCKSZ,
 };
@@ -63,13 +63,13 @@ use gist::{
     GistSortedBuildLevelState, GISTSTATE, F_LEAF, GIST_DEFAULT_FILLFACTOR, GIST_ROOT_BLKNO,
     GIST_SORTED_BUILD_PAGE_NUM, GIST_SORTSUPPORT_PROC, GistBuildLSN, SplitPageLayout,
 };
-use rel::Relation;
-use types_storage::buf::BUFFER_LOCK_EXCLUSIVE;
-use types_storage::buf::BUFFER_LOCK_SHARE;
-use types_storage::Buffer;
-use types_tableam::amapi::IndexBuildResult;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_storage::buf::BUFFER_LOCK_EXCLUSIVE;
+use ::types_storage::buf::BUFFER_LOCK_SHARE;
+use ::types_storage::Buffer;
+use ::types_tableam::amapi::IndexBuildResult;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::gistbuildbuffers::{
     gistFreeBuildBuffers, gistGetNodeBuffer, gistInitBuildBuffers, gistPopItupFromNodeBuffer,
@@ -77,7 +77,7 @@ use crate::gistbuildbuffers::{
     buffer_overflowed, index_tuple_size, level_has_buffers,
 };
 
-use gist::GISTBuildBuffers;
+use ::gist::GISTBuildBuffers;
 
 /// `BUFFERING_MODE_SWITCH_CHECK_STEP` (gistbuild.c:52) — step of index tuples
 /// for checking whether to switch to buffering build mode.
@@ -137,7 +137,7 @@ struct GISTBuildState<'mcx> {
     parentMap: std::collections::HashMap<BlockNumber, BlockNumber>,
 
     /// `Tuplesortstate *sortstate` — state data for tuplesort.c (sorted build).
-    sortstate: Option<mcx::PgBox<'mcx, nodes::nodesort::Tuplesortstate<'mcx>>>,
+    sortstate: Option<::mcx::PgBox<'mcx, nodes::nodesort::Tuplesortstate<'mcx>>>,
 
     /// `BlockNumber pages_allocated` — # of pages allocated by the sorted build.
     pages_allocated: BlockNumber,
@@ -231,7 +231,7 @@ pub fn gistbuild<'mcx>(
             work_mem,
             nodes::nodesort::TUPLESORT_NONE,
         )?;
-        state.sortstate = Some(mcx::alloc_in(mcx, sortstate)?);
+        state.sortstate = Some(::mcx::alloc_in(mcx, sortstate)?);
 
         // Scan the table, adding all tuples to the tuplesort.
         reltuples = {
@@ -439,7 +439,7 @@ fn gist_indexsortbuild<'mcx>(state: &mut GISTBuildState<'mcx>) -> PgResult<()> {
 /// `PageSetLSN(page, lsn)` (bufpage.h) over an owned page byte image: the LSN is
 /// the 8-byte `pd_lsn` at offset 0 (`PageXLogRecPtr`), stored as
 /// `(xlogid:u32, xrecoff:u32)`.
-fn set_page_lsn_bytes(page: &mut [u8], lsn: types_core::XLogRecPtr) {
+fn set_page_lsn_bytes(page: &mut [u8], lsn: ::types_core::XLogRecPtr) {
     let xlogid = (lsn >> 32) as u32;
     let xrecoff = (lsn & 0xffff_ffff) as u32;
     page[0..4].copy_from_slice(&xlogid.to_ne_bytes());
@@ -542,7 +542,7 @@ fn gist_indexsortbuild_levelstate_flush<'mcx>(
         let lenlist = list.len() as i32;
         let num = itvec.len() as i32;
         dist = alloc::vec![SplitPageLayout {
-            block: gist::gistxlogPage { blkno: 0, num },
+            block: ::gist::gistxlogPage { blkno: 0, num },
             list,
             lenlist,
             itup: Some(union_tuple),
@@ -928,7 +928,7 @@ fn gistProcessItup<'mcx>(
             let pref = PageRef::new(&page)?;
             let iid = PageGetItemId(&pref, childoffnum)?;
             let it = PageGetItem(&pref, &iid)?;
-            (item_pointer_block_from_itup(it), mcx::slice_in(state.mcx, it)?)
+            (item_pointer_block_from_itup(it), ::mcx::slice_in(state.mcx, it)?)
         };
 
         if level > 1 {
@@ -1127,7 +1127,7 @@ fn gistbufferinginserttuples<'mcx>(
 
         // Create an array of all the downlink tuples and update the parent map.
         let ndownlinks = splitinfo.len();
-        let mut downlinks: alloc::vec::Vec<mcx::PgVec<'mcx, u8>> =
+        let mut downlinks: alloc::vec::Vec<::mcx::PgVec<'mcx, u8>> =
             alloc::vec::Vec::with_capacity(ndownlinks);
         for si in splitinfo.into_iter() {
             // Remember the parent of each new child page in the parent map. (If

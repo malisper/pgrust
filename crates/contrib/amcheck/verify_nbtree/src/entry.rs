@@ -9,17 +9,17 @@
 //! (`palloc_btree_page` / `PageGetItemIdCareful` / `BTreeTupleGetHeapTIDCareful`
 //! / `bt_mkscankey_pivotsearch`).
 
-use types_core::primitive::{BlockNumber, OffsetNumber, Oid};
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid};
 use types_error::{PgError, PgResult};
-use types_error::error::ERRCODE_INDEX_CORRUPTED;
+use ::types_error::error::ERRCODE_INDEX_CORRUPTED;
 use types_nbtree::{BTScanInsert, BTREE_METAPAGE, P_HIKEY, P_NONE};
-use rel::Relation;
-use types_storage::bufpage::{ItemIdData, SizeOfPageHeaderData};
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_storage::bufpage::{ItemIdData, SizeOfPageHeaderData};
+use ::types_tuple::heaptuple::{
     item_pointer_is_valid, IndexTuple, ItemPointerData,
 };
 
-use verify_common_seams::BTCallbackState;
+use ::verify_common_seams::BTCallbackState;
 
 use nbtree_core_seams as nbtcore;
 use bufmgr_seams as bufmgr;
@@ -38,7 +38,7 @@ use crate::{BtreeCheckState, BtreeLastVisibleEntry, BtreeLevel, Page};
 // ===========================================================================
 
 /// `InvalidBtreeLevel` (verify_nbtree.c): `((uint32) InvalidBlockNumber)`.
-const INVALID_BTREE_LEVEL: u32 = types_core::primitive::InvalidBlockNumber;
+const INVALID_BTREE_LEVEL: u32 = ::types_core::primitive::InvalidBlockNumber;
 
 /// `BTREE_MAGIC` (`access/nbtree.h`).
 const BTREE_MAGIC: u32 = 0x053162;
@@ -47,7 +47,7 @@ const BTREE_VERSION: u32 = 4;
 /// `BTREE_MIN_VERSION` (`access/nbtree.h`).
 const BTREE_MIN_VERSION: u32 = 2;
 /// `MaxIndexTuplesPerPage` (`access/itup.h`).
-const MAX_INDEX_TUPLES_PER_PAGE: u32 = types_nbtree::MaxIndexTuplesPerPage as u32;
+const MAX_INDEX_TUPLES_PER_PAGE: u32 = ::types_nbtree::MaxIndexTuplesPerPage as u32;
 
 /// `MAXALIGN(SizeOfPageHeaderData)` = 24. `BTPageGetMeta(p) = PageGetContents(p)`
 /// = `page + MAXALIGN(SizeOfPageHeaderData)`. The metapage fields begin here.
@@ -94,8 +94,8 @@ fn page_get_lsn_bytes(page: &[u8]) -> u64 {
 
 /// `IndexTupleSize(itup)` from raw on-page bytes (the trimmed `IndexTuple`
 /// carrier reports the same value off its header).
-fn index_tuple_size_bytes(item: &[u8]) -> types_core::Size {
-    types_tuple::heaptuple::IndexTupleSize(&index_tuple_header(item))
+fn index_tuple_size_bytes(item: &[u8]) -> ::types_core::Size {
+    ::types_tuple::heaptuple::IndexTupleSize(&index_tuple_header(item))
 }
 
 // ===========================================================================
@@ -112,11 +112,11 @@ pub fn bt_index_check(indrelid: Oid, heapallindexed: bool, checkunique: bool) ->
         checkunique,
     };
 
-    verify_common_seams::amcheck_lock_relation_and_check::call(
+    ::verify_common_seams::amcheck_lock_relation_and_check::call(
         indrelid,
-        types_core::catalog::BTREE_AM_OID,
+        ::types_core::catalog::BTREE_AM_OID,
         bt_index_check_callback,
-        types_storage::lock::AccessShareLock,
+        ::types_storage::lock::AccessShareLock,
         args,
     )
 }
@@ -137,11 +137,11 @@ pub fn bt_index_parent_check(
         checkunique,
     };
 
-    verify_common_seams::amcheck_lock_relation_and_check::call(
+    ::verify_common_seams::amcheck_lock_relation_and_check::call(
         indrelid,
-        types_core::catalog::BTREE_AM_OID,
+        ::types_core::catalog::BTREE_AM_OID,
         bt_index_check_callback,
-        types_storage::lock::ShareLock,
+        ::types_storage::lock::ShareLock,
         args,
     )
 }
@@ -158,7 +158,7 @@ pub fn bt_index_check_callback<'mcx>(
     if !smgr::smgrexists::call(
         indrel.rd_locator,
         indrel.rd_backend,
-        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        ::types_core::primitive::ForkNumber::MAIN_FORKNUM,
     )? {
         return Err(PgError::error(format!(
             "index \"{}\" lacks a main relation fork",
@@ -257,10 +257,10 @@ fn bt_check_every_level_inner<'mcx, 'a: 'mcx>(
         indexinfo: None,
         snapshot: None,
         target: None,
-        targetblock: types_core::primitive::InvalidBlockNumber,
+        targetblock: ::types_core::primitive::InvalidBlockNumber,
         targetlsn: 0,
         lowkey: None,
-        prevrightlink: types_core::primitive::InvalidBlockNumber,
+        prevrightlink: ::types_core::primitive::InvalidBlockNumber,
         previncompletesplit: false,
         filter: None,
         heaptuplespresent: 0,
@@ -270,7 +270,7 @@ fn bt_check_every_level_inner<'mcx, 'a: 'mcx>(
         // Size Bloom filter based on the estimated number of tuples in the index.
         let total_pages =
             relcache_seams::relation_get_number_of_blocks::call(rel)? as i64;
-        let total_elems = (total_pages * (types_nbtree::MaxTIDsPerBTreePage as i64 / 3))
+        let total_elems = (total_pages * (::types_nbtree::MaxTIDsPerBTreePage as i64 / 3))
             .max(rel.rd_rel.reltuples as i64);
         // Generate a random seed to avoid repetition: pg_prng_uint64. The PRNG is
         // a GUC/global not modeled here; use a fixed seed (the Bloom filter's
@@ -319,7 +319,7 @@ fn bt_check_every_level_inner<'mcx, 'a: 'mcx>(
             "cannot verify that tuples from index \"{}\" can each be found by an independent index search",
             rel.name()
         ))
-        .with_sqlstate(types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .with_sqlstate(::types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .with_hint("Only B-Tree version 4 indexes support rootdescend verification."));
     }
 
@@ -345,7 +345,7 @@ fn bt_check_every_level_inner<'mcx, 'a: 'mcx>(
     while current.leftmost != P_NONE {
         current = bt_check_level_from_leftmost(&mut state, current)?;
 
-        if current.leftmost == types_core::primitive::InvalidBlockNumber {
+        if current.leftmost == ::types_core::primitive::InvalidBlockNumber {
             return Err(PgError::error(format!(
                 "index \"{}\" has no valid pages on level below {} or first level",
                 rel.name(),
@@ -394,7 +394,7 @@ pub fn bt_check_level_from_leftmost<'mcx>(
     let mut current: BlockNumber = level.leftmost;
 
     let mut nextleveldown = BtreeLevel {
-        leftmost: types_core::primitive::InvalidBlockNumber,
+        leftmost: ::types_core::primitive::InvalidBlockNumber,
         level: INVALID_BTREE_LEVEL,
         istruerootlevel: false,
     };
@@ -404,7 +404,7 @@ pub fn bt_check_level_from_leftmost<'mcx>(
     // that context (state_mcx); the C MemoryContextSwitchTo/Reset is mirrored by
     // dropping the per-iteration page at the end of each loop iteration.
 
-    state.prevrightlink = types_core::primitive::InvalidBlockNumber;
+    state.prevrightlink = ::types_core::primitive::InvalidBlockNumber;
     state.previncompletesplit = false;
 
     loop {
@@ -445,7 +445,7 @@ pub fn bt_check_level_from_leftmost<'mcx>(
             }
             // else: ereport DEBUG1 "concurrently deleted" — not modeled.
             goto_nextpage = true;
-        } else if nextleveldown.leftmost == types_core::primitive::InvalidBlockNumber {
+        } else if nextleveldown.leftmost == ::types_core::primitive::InvalidBlockNumber {
             // Check first valid page meets caller's expectations (readonly).
             if state.readonly {
                 if !crate::linkage::bt_leftmost_ignoring_half_dead(
@@ -896,7 +896,7 @@ pub(crate) fn page_get_item_id_careful_bytes<'mcx>(
 
     // ItemIdGetOffset + ItemIdGetLength > BLCKSZ - MAXALIGN(sizeof(BTPageOpaqueData)).
     // MAXALIGN(sizeof(BTPageOpaqueData)) = MAXALIGN(16) = 16.
-    if lp_off + lp_len > (types_core::BLCKSZ as u32 - 16) {
+    if lp_off + lp_len > (::types_core::BLCKSZ as u32 - 16) {
         return Err(PgError::error(format!(
             "line pointer points past end of tuple space in index \"{}\"",
             state.rel.name()
@@ -950,8 +950,8 @@ pub fn BTreeTupleGetHeapTIDCareful<'mcx>(
         .as_ref()
         .expect("BTreeTupleGetHeapTIDCareful: itup must be set");
     // BTreeTupleIsPivot: INDEX_ALT_TID_MASK set and BT_IS_POSTING clear.
-    let is_pivot = (hdr.t_info & types_nbtree::INDEX_ALT_TID_MASK) != 0
-        && (hdr.t_tid.ip_posid & types_nbtree::BT_IS_POSTING) == 0;
+    let is_pivot = (hdr.t_info & ::types_nbtree::INDEX_ALT_TID_MASK) != 0
+        && (hdr.t_tid.ip_posid & ::types_nbtree::BT_IS_POSTING) == 0;
 
     if is_pivot && nonpivot {
         return Err(PgError::error(format!(
@@ -980,7 +980,7 @@ pub fn BTreeTupleGetHeapTIDCareful<'mcx>(
         // callers that reach here for posting tuples treat the header t_tid as
         // the first heap TID, matching the on-page layout).
         Some(hdr.t_tid)
-    } else if (hdr.t_tid.ip_posid & types_nbtree::BT_PIVOT_HEAP_TID_ATTR) != 0 {
+    } else if (hdr.t_tid.ip_posid & ::types_nbtree::BT_PIVOT_HEAP_TID_ATTR) != 0 {
         // Pivot with explicit heap TID: the value lives in the trailing payload,
         // which the header-only carrier does not retain. Report present-but-zero
         // is unsafe; treat as present via a sentinel valid TID is also unsafe.

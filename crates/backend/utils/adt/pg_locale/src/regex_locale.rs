@@ -10,11 +10,11 @@
 //! engine also handles the LIBC `is_default` ASCII-forcing for toupper/tolower
 //! before the seam, so this code is the raw provider `info.lt` reach.
 
-use types_core::primitive::PgWChar;
-use locale::CollProvider;
+use ::types_core::primitive::PgWChar;
+use ::locale::CollProvider;
 
 use pg_locale_builtin_seams as builtin;
-use pg_locale_seams::RegexWcClass;
+use ::pg_locale_seams::RegexWcClass;
 use mbutils_seams as mb;
 
 use crate::cache::{resolve, LocaleInfo};
@@ -29,7 +29,7 @@ fn libc_is_wide() -> bool {
 
 /// `pg_wc_is<class>(c)` for the active non-C-strategy `collation`
 /// (`regc_pg_locale.c`).
-pub fn regex_wc_isclass(collation: types_core::primitive::Oid, class: RegexWcClass, c: PgWChar) -> bool {
+pub fn regex_wc_isclass(collation: ::types_core::primitive::Oid, class: RegexWcClass, c: PgWChar) -> bool {
     let entry = match resolve(collation) {
         Ok(e) => e,
         // C cannot reach here with an unresolvable collation (the engine resolved
@@ -52,7 +52,7 @@ pub fn regex_wc_isclass(collation: types_core::primitive::Oid, class: RegexWcCla
 }
 
 /// `pg_wc_toupper(c)` for the active non-C-strategy `collation`.
-pub fn regex_wc_toupper(collation: types_core::primitive::Oid, c: PgWChar) -> PgWChar {
+pub fn regex_wc_toupper(collation: ::types_core::primitive::Oid, c: PgWChar) -> PgWChar {
     let entry = match resolve(collation) {
         Ok(e) => e,
         Err(_) => return c,
@@ -69,7 +69,7 @@ pub fn regex_wc_toupper(collation: types_core::primitive::Oid, c: PgWChar) -> Pg
 }
 
 /// `pg_wc_tolower(c)` for the active non-C-strategy `collation`.
-pub fn regex_wc_tolower(collation: types_core::primitive::Oid, c: PgWChar) -> PgWChar {
+pub fn regex_wc_tolower(collation: ::types_core::primitive::Oid, c: PgWChar) -> PgWChar {
     let entry = match resolve(collation) {
         Ok(e) => e,
         Err(_) => return c,

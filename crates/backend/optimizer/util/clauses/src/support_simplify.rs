@@ -29,8 +29,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 
 /// A decomposed `SupportRequestSimplify` kernel: the request's argument list and

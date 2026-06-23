@@ -8,27 +8,27 @@
 //! a seam; callers keep the function's OID and dispatch by OID. The eager
 //! lookup-failure surface of `fmgr_info` is preserved by [`fmgr_info_check`].
 
-use cache::DefElemString;
+use ::cache::DefElemString;
 use types_core::{AttrNumber, Oid};
-use datum::varlena::Bytea;
-use types_error::PgResult;
-use array::ArrayElementDatum;
+use ::datum::varlena::Bytea;
+use ::types_error::PgResult;
+use ::array::ArrayElementDatum;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_reloptions::local_relopts;
+use ::types_reloptions::local_relopts;
 // Migration target: the canonical per-attribute value enum. The former
 // transitional `Datum<'mcx>` alias resolved to this exact type, so every
 // seam that carried a typed per-attribute value (the deformed-slot/`Datum`
 // readers) now names the canonical `Datum<'mcx>` enum directly.
 use types_tuple::heaptuple::Datum;
-// The bare-word `Datum` shim (`datum::Datum(usize)`), still named at the
+// The bare-word `Datum` shim (`::datum::Datum(usize)`), still named at the
 // raw-fmgr-ABI dispatch seams (`FunctionCallN` / `Oid*FunctionCall`) whose owner
 // `backend-utils-fmgr-core` and all consumers have NOT yet migrated off the
 // shim word. Those seams carry the literal call-frame `Datum` word — a by-value
 // scalar or a pointer token decoded by the owner — an
 // audited ABI/storage edge that must stay a bare word until its owner migrates.
 // Migrating the contract here ahead of the owner would diverge it from the
-// landed `datum::Datum`-typed `set()` closures and every consumer.
-use datum::Datum as DatumWord;
+// landed `::datum::Datum`-typed `set()` closures and every consumer.
+use ::datum::Datum as DatumWord;
 
 seam_core::seam!(
     /// `(fcinfo->flinfo->fn_oid, fcinfo->flinfo->fn_expr)` — the function OID
@@ -40,7 +40,7 @@ seam_core::seam!(
     /// in the call's context. Pure read, no allocation.
     pub fn fn_oid_and_expr<'mcx>(
         fcinfo: &'mcx FunctionCallInfoBaseData<'mcx>,
-    ) -> (types_core::Oid, Option<&'mcx ::nodes::nodes::Node<'mcx>>)
+    ) -> (::types_core::Oid, Option<&'mcx ::nodes::nodes::Node<'mcx>>)
 );
 
 seam_core::seam!(
@@ -57,7 +57,7 @@ seam_core::seam!(
     /// Pure read; the `Rc`-backed `FnExprErased` clone is a cheap handle bump.
     pub fn fn_oid_and_fn_expr_erased<'mcx>(
         fcinfo: &'mcx FunctionCallInfoBaseData<'mcx>,
-    ) -> (types_core::Oid, Option<types_core::fmgr::FnExprErased>)
+    ) -> (::types_core::Oid, Option<::types_core::fmgr::FnExprErased>)
 );
 
 seam_core::seam!(
@@ -193,7 +193,7 @@ seam_core::seam!(
     /// stamp the call-expression node `expr` onto a resolved `FmgrInfo` so the
     /// later `get_fn_expr_*` readers can recover the declared argument/result
     /// types (load-bearing for polymorphic / by-ref / ordered-set transition and
-    /// finalize functions). `types_core::FmgrInfo.fn_expr` carries the node
+    /// finalize functions). `::types_core::FmgrInfo.fn_expr` carries the node
     /// erased (`FnExprErased`); the owner (which depends on `types-nodes`) boxes
     /// the owned `Expr` into it. C stores the bare `Node *`; the owned model
     /// shares the node value through a refcounted box. Takes `Mcx` because the
@@ -202,7 +202,7 @@ seam_core::seam!(
     /// which is an allocating, fallible step.
     pub fn fmgr_info_set_expr<'mcx, 'e>(
         mcx: mcx::Mcx<'mcx>,
-        finfo: &mut types_core::fmgr::FmgrInfo,
+        finfo: &mut ::types_core::fmgr::FmgrInfo,
         expr: &::nodes::primnodes::Expr<'e>,
     ) -> PgResult<()>
 );
@@ -358,7 +358,7 @@ seam_core::seam!(
     pub fn fmgr_info<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         function_id: Oid,
-    ) -> PgResult<types_core::fmgr::FmgrInfo>
+    ) -> PgResult<::types_core::fmgr::FmgrInfo>
 );
 
 seam_core::seam!(
@@ -431,7 +431,7 @@ seam_core::seam!(
         str: Option<&str>,
         typioparam: Oid,
         typmod: i32,
-        escontext: Option<&mut types_error::SoftErrorContext>,
+        escontext: Option<&mut ::types_error::SoftErrorContext>,
     ) -> PgResult<types_tuple::heaptuple::Datum<'mcx>>
 );
 
@@ -461,7 +461,7 @@ seam_core::seam!(
     /// raises.
     pub fn output_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        flinfo: &types_core::fmgr::FmgrInfo,
+        flinfo: &::types_core::fmgr::FmgrInfo,
         val: &types_tuple::heaptuple::Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
@@ -475,7 +475,7 @@ seam_core::seam!(
     /// strict-null `elog` and whatever the send function raises.
     pub fn send_function_call<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        flinfo: &types_core::fmgr::FmgrInfo,
+        flinfo: &::types_core::fmgr::FmgrInfo,
         val: &types_tuple::heaptuple::Datum<'_>,
     ) -> PgResult<mcx::PgVec<'mcx, u8>>
 );
@@ -512,7 +512,7 @@ seam_core::seam!(
         coltype: Oid,
         column_data: Option<&str>,
         atttypmod: i32,
-        escontext: Option<&mut types_error::SoftErrorContext>,
+        escontext: Option<&mut ::types_error::SoftErrorContext>,
     ) -> PgResult<Option<Datum<'mcx>>>
 );
 
@@ -593,13 +593,13 @@ seam_core::seam!(
     /// `main_arg` is the raw `Datum` word `BackgroundWorker.bgw_main_arg`
     /// carries through the postmaster's DSM worker slot (`bgw_main_arg
     /// (Datum)`, an 8-byte stored word in that ABI layout). It stays the
-    /// bare-word `datum::Datum` at this storage/ABI edge: the
+    /// bare-word `::datum::Datum` at this storage/ABI edge: the
     /// `types-bgworker` model owns the field and is not part of this
     /// migration, and the loader hands the word straight to a C-ABI
     /// `bgworker_main_type` entry point with no enum classification available.
     pub fn call_bgworker_entrypoint(
         worker: types_bgworker::BackgroundWorker,
-        main_arg: datum::Datum,
+        main_arg: ::datum::Datum,
     ) -> PgResult<()>
 );
 
@@ -813,7 +813,7 @@ seam_core::seam!(
         str_: &str,
         typioparam: Oid,
         typmod: i32,
-        escontext: Option<&mut types_error::SoftErrorContext>,
+        escontext: Option<&mut ::types_error::SoftErrorContext>,
     ) -> PgResult<Option<DatumWord>>
 );
 
@@ -829,7 +829,7 @@ seam_core::seam!(
         typoid: Oid,
         typmod: i32,
         str_: &[u8],
-        escontext: &mut types_error::SoftErrorContext,
+        escontext: &mut ::types_error::SoftErrorContext,
     ) -> PgResult<bool>
 );
 
@@ -1058,7 +1058,7 @@ seam_core::seam!(
     pub fn function_call_invoke(
         fn_oid: Oid,
         collation: Oid,
-        args: &[datum::NullableDatum],
+        args: &[::datum::NullableDatum],
     ) -> PgResult<(DatumWord, bool)>
 );
 
@@ -1100,7 +1100,7 @@ seam_core::seam!(
         collation: Oid,
         args: &[Datum<'mcx>],
         args_null: &[bool],
-        fn_expr: Option<types_core::fmgr::FnExprErased>,
+        fn_expr: Option<::types_core::fmgr::FnExprErased>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 
@@ -1129,7 +1129,7 @@ seam_core::seam!(
         collation: Oid,
         args: &[Datum<'mcx>],
         args_null: &[bool],
-        fn_expr: Option<types_core::fmgr::FnExprErased>,
+        fn_expr: Option<::types_core::fmgr::FnExprErased>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 
@@ -1148,8 +1148,8 @@ seam_core::seam!(
         collation: Oid,
         args: &[Datum<'mcx>],
         args_null: &[bool],
-        fn_expr: Option<types_core::fmgr::FnExprErased>,
-        escontext: &mut types_error::SoftErrorContext,
+        fn_expr: Option<::types_core::fmgr::FnExprErased>,
+        escontext: &mut ::types_error::SoftErrorContext,
     ) -> PgResult<Option<(Datum<'mcx>, bool)>>
 );
 
@@ -1174,7 +1174,7 @@ seam_core::seam!(
         collation: Oid,
         args: Vec<Datum<'mcx>>,
         args_null: Vec<bool>,
-        fn_expr: Option<types_core::fmgr::FnExprErased>,
+        fn_expr: Option<::types_core::fmgr::FnExprErased>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 
@@ -1202,7 +1202,7 @@ seam_core::seam!(
         collation: Oid,
         args: Vec<Datum<'mcx>>,
         args_null: Vec<bool>,
-        fn_expr: Option<types_core::fmgr::FnExprErased>,
+        fn_expr: Option<::types_core::fmgr::FnExprErased>,
     ) -> PgResult<(Datum<'mcx>, bool, Option<Datum<'mcx>>)>
 );
 

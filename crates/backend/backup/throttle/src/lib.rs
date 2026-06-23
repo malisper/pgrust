@@ -55,12 +55,12 @@ use sink::{
 };
 use throttle_seams::{check_for_interrupts, get_current_timestamp};
 use latch_seams::{reset_latch_my_latch, wait_latch_my_latch};
-use mcx::Mcx;
-use types_core::primitive::{Size, TimeLineID, TimestampTz, XLogRecPtr};
+use ::mcx::Mcx;
+use ::types_core::primitive::{Size, TimeLineID, TimestampTz, XLogRecPtr};
 use types_datetime::{TimeOffset, USECS_PER_SEC};
-use types_error::PgResult;
-use types_pgstat::wait_event::WAIT_EVENT_BASE_BACKUP_THROTTLE;
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::types_error::PgResult;
+use ::types_pgstat::wait_event::WAIT_EVENT_BASE_BACKUP_THROTTLE;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
 /// How frequently to throttle, as a fraction of the specified rate-second
 /// (C `#define THROTTLING_FREQUENCY 8`).

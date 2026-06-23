@@ -42,17 +42,17 @@ use execTuples_seams as execTuples;
 use execUtils_seams as execUtils;
 use postgres_seams as tcop;
 use transam_parallel as parallel;
-use transam_parallel::shared_dsm_object;
+use ::transam_parallel::shared_dsm_object;
 use nodes_core_seams as bitmapset;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use execparallel::{
     DsmSegmentHandle, ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
     SerializeCursor,
 };
 use ::nodes::execnodes::ScanDirection;
 use nodes::{EStateData, SeqScan, SeqScanState, SlotId, TupleTableSlot};
-use types_tableam::relscan::{ParallelBlockTableScanDescData, ParallelTableScanDesc};
+use ::types_tableam::relscan::{ParallelBlockTableScanDescData, ParallelTableScanDesc};
 
 // ===========================================================================
 // Access/recheck method types.
@@ -758,7 +758,7 @@ pub fn ExecSeqScanEstimate<'mcx>(
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // node->pscan_len = table_parallelscan_estimate(rel, estate->es_snapshot);
-    let snapshot: types_tableam::Snapshot = estate.es_snapshot.as_ref().map(|rc| (**rc).clone());
+    let snapshot: ::types_tableam::Snapshot = estate.es_snapshot.as_ref().map(|rc| (**rc).clone());
     let rel = node
         .ss
         .ss_currentRelation
@@ -798,7 +798,7 @@ pub fn ExecSeqScanInitializeDSM<'mcx>(
     // in-place header `&mut` and the snapshot-tail `&mut [u8]` (the bytes at
     // `phs_snapshot_off`) are both valid; the AM init fills the header and the
     // snapshot serializes into the tail.
-    let snapshot: types_tableam::Snapshot = estate.es_snapshot.as_ref().map(|rc| (**rc).clone());
+    let snapshot: ::types_tableam::Snapshot = estate.es_snapshot.as_ref().map(|rc| (**rc).clone());
     let plan_node_id = node
         .ss
         .ps
@@ -947,7 +947,7 @@ pub fn ExecSeqScanInitializeWorker<'mcx>(
 /// (a NULL would be a crash), so a missing descriptor / non-parallel scan
 /// panics loudly.
 fn parallel_scandesc_rs_parallel(
-    slot: &Option<types_tableam::relscan::TableScanDesc<'_>>,
+    slot: &Option<::types_tableam::relscan::TableScanDesc<'_>>,
 ) -> ParallelTableScanDesc {
     let scan = slot
         .as_ref()

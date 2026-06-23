@@ -14,13 +14,13 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use mcx::PgBox;
-use types_error::PgResult;
+use ::mcx::PgBox;
+use ::types_error::PgResult;
 use ::nodes::execexpr::ExprState;
 use ::nodes::execnodes::{EStateData, EcxtId};
 use tidrange::{OperandSide, TidRangeScanState};
 use ::nodes::nodetidrangescan::TidRangeScan;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 // --- node factory / makeNode / plan-state links ---
 

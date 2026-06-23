@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
-// Every fallible function here returns the project-wide `types_error::PgResult`
+// Every fallible function here returns the project-wide `::types_error::PgResult`
 // (== `Result<_, PgError>`). `PgError` is a large owned struct, so the un-boxed
 // `Err` variant is large; the un-boxed `PgResult` return type is the
 // project-wide error contract these ports must match (matching the sibling
@@ -39,17 +39,17 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 
-use utils_error::elog;
+use ::utils_error::elog;
 
 use types_error::{PgResult, DEBUG1, ERROR};
 use fsm::{
     FSMPageData, LeafNodesPerPage, NodesPerPage, NonLeafNodesPerPage, SlotsPerFSMPage,
 };
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, BLCKSZ,
 };
-use rel::Relation;
-use types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
+use ::rel::Relation;
+use ::types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 use types_storage::{Buffer, BufferIsValid, InvalidBuffer, RelFileLocator};
 
 use bufmgr_seams as bufmgr;

@@ -3,7 +3,7 @@
 extern crate std;
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use ::nodes::value::StringNode;
 
 /// Build a `Node::String` value node.

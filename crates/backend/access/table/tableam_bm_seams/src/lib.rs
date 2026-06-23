@@ -9,10 +9,10 @@
 
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::tuptable::SlotData;
-use rel::Relation;
-use types_tableam::relscan::{TableScanDesc, TableScanDescData};
+use ::rel::Relation;
+use ::types_tableam::relscan::{TableScanDesc, TableScanDescData};
 
 seam_core::seam!(
     /// `table_beginscan_bm(rel, snapshot, 0, NULL)` (access/tableam.h): set up

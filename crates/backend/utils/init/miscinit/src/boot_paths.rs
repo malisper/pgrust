@@ -573,8 +573,8 @@ const CONFIG_PG_VERSION: &str = crate::PG_VERSION;
 /// `get_configdata(my_exec_path, &configdata_len)` (`common/config_info.c`):
 /// build the 23 `(name, setting)` rows the `pg_config` program prints, derived
 /// from the running executable's location. Faithful field-for-field port.
-pub fn get_configdata(my_exec_path: &str) -> Vec<misc_more2::ConfigDataRow> {
-    use misc_more2::ConfigDataRow;
+pub fn get_configdata(my_exec_path: &str) -> Vec<::misc_more2::ConfigDataRow> {
+    use ::misc_more2::ConfigDataRow;
 
     fn row(name: &str, setting: String) -> ConfigDataRow {
         ConfigDataRow {
@@ -812,7 +812,7 @@ fn find_my_exec(argv0: &str) -> PgResult<String> {
 /// "could not locate my own executable path" message, which we surface as the
 /// returned `FATAL` error so the boot exits cleanly.
 pub fn resolve_standalone_paths(argv0: &str) -> PgResult<()> {
-    use init_small::globals;
+    use ::init_small::globals;
 
     // my_exec_path[0] == '\0' ?
     let cur = globals::my_exec_path();
@@ -995,9 +995,9 @@ pub fn convert_and_check_filename<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     filename: &str,
 ) -> PgResult<mcx::PgString<'mcx>> {
-    use guc_tables::vars::Log_directory;
-    use types_catalog::catalog::ROLE_PG_READ_SERVER_FILES;
-    use types_error::ERRCODE_INSUFFICIENT_PRIVILEGE;
+    use ::guc_tables::vars::Log_directory;
+    use ::types_catalog::catalog::ROLE_PG_READ_SERVER_FILES;
+    use ::types_error::ERRCODE_INSUFFICIENT_PRIVILEGE;
 
     // char *filename = text_to_cstring(arg); canonicalize_path(filename);
     let filename = canonicalize_path(filename);
@@ -1012,7 +1012,7 @@ pub fn convert_and_check_filename<'mcx>(
     if is_absolute_path(&filename) {
         // Absolute paths are allowed if within DataDir or Log_directory, even
         // though Log_directory might be outside DataDir.
-        let data_dir = init_small::globals::DataDir().unwrap_or_default();
+        let data_dir = ::init_small::globals::DataDir().unwrap_or_default();
         let log_directory = Log_directory.read().unwrap_or_default();
 
         let in_data_dir = path_is_prefix_of_path_pub(&data_dir, &filename)?;
@@ -1041,10 +1041,10 @@ pub fn convert_and_check_filename<'mcx>(
 /// exactly as the C `pg_ls_dir_files(fcinfo, XLOGDIR, ...)` callers pass them.
 pub fn wal_or_log_subdir<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    which: backend_common_path_seams::WellKnownDir,
+    which: ::backend_common_path_seams::WellKnownDir,
 ) -> mcx::PgString<'mcx> {
-    use backend_common_path_seams::WellKnownDir;
-    use guc_tables::vars::Log_directory;
+    use ::backend_common_path_seams::WellKnownDir;
+    use ::guc_tables::vars::Log_directory;
 
     let path: String = match which {
         WellKnownDir::LogDir => Log_directory.read().unwrap_or_default(),
@@ -1066,7 +1066,7 @@ pub fn temp_tablespace_path<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     tblspc: types_core::Oid,
 ) -> mcx::PgString<'mcx> {
-    use types_storage::file::{PG_TBLSPC_DIR, PG_TEMP_FILES_DIR, TABLESPACE_VERSION_DIRECTORY};
+    use ::types_storage::file::{PG_TBLSPC_DIR, PG_TEMP_FILES_DIR, TABLESPACE_VERSION_DIRECTORY};
     // C: DEFAULTTABLESPACE_OID (1663) and GLOBALTABLESPACE_OID (1664) map to
     // the cluster's base directory; other tablespaces live under pg_tblspc.
     const DEFAULTTABLESPACE_OID: types_core::Oid = 1663;

@@ -36,7 +36,7 @@
 //! - the `wtParam` `Param`-slot deposit that publishes this state to descendant
 //!   `WorkTableScan` nodes → nodeWorktablescan.
 //!
-//! `mcx::MemoryContext` owns its allocation domain and resets on drop, so the
+//! `::mcx::MemoryContext` owns its allocation domain and resets on drop, so the
 //! C `AllocSetContextCreate` / `MemoryContextReset` / `MemoryContextDelete` of
 //! `tempContext`/`tableContext` are native (`new_child` / `reset` / drop).
 
@@ -57,7 +57,7 @@ use postgres_seams as tcop_postgres;
 use init_small_seams as globals;
 use sort_storage_seams as tuplestore;
 
-use mcx::PgBox;
+use ::mcx::PgBox;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execnodes::RecursiveUnionSharedState;
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
@@ -164,7 +164,7 @@ fn build_hash_table<'mcx>(
         .expect("build_hash_table: outerPlanState is NULL");
     let desc: types_tuple::heaptuple::TupleDesc<'mcx> =
         match execTuples::exec_get_result_type::call(outer.ps_head()) {
-            Some(d) => Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
+            Some(d) => Some(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?),
             None => None,
         };
 
@@ -548,7 +548,7 @@ pub fn ExecInitRecursiveUnion<'mcx>(
     {
         let result_tupdesc: types_tuple::heaptuple::TupleDesc<'mcx> =
             match rustate.ps.ps_ResultTupleDesc.as_deref() {
-                Some(td) => Some(mcx::alloc_in(mcx, td.clone_in(mcx)?)?),
+                Some(td) => Some(::mcx::alloc_in(mcx, td.clone_in(mcx)?)?),
                 None => None,
             };
         shared_mut(plan.wtParam, estate)?.result_tupdesc = result_tupdesc;

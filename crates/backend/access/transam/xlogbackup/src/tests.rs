@@ -5,7 +5,7 @@
 
 use super::*;
 use localtime::{state, tzparse};
-use types_core::MAXPGPATH;
+use ::types_core::MAXPGPATH;
 
 /// Substring search over the raw bytes, mirroring C `strstr` over the
 /// `char *` returned by `build_backup_content`.

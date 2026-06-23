@@ -57,16 +57,16 @@ extern crate alloc;
 
 use core::cell::RefCell;
 
-use tcop_dest::ReceiverVtable;
-use mcx::Mcx;
-use types_dest::CommandDest;
+use ::tcop_dest::ReceiverVtable;
+use ::mcx::Mcx;
+use ::types_dest::CommandDest;
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
-use portal::Portal;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::TupleDescData;
+use ::portal::Portal;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::TupleDescData;
 
 /// Which receive variant `tstoreStartupReceiver` selected, mirroring the C
 /// `myState->pub.receiveSlot = tstoreReceiveSlot_X` assignment.
@@ -194,7 +194,7 @@ fn receiver_unregister(token: u64) {
 /// state so `dest_destroy`/`Set…Params` can find the slot.
 pub fn CreateTuplestoreDestReceiver() -> DestReceiverHandle {
     let token = receiver_register(TStoreState::new());
-    let dr = tcop_dest::register_dest_receiver(
+    let dr = ::tcop_dest::register_dest_receiver(
         CommandDest::Tuplestore,
         ReceiverVtable {
             rStartup: tstore_startup_receiver,

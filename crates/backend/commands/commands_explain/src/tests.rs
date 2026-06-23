@@ -48,7 +48,7 @@ fn result_node_text_with_costs() {
 
     let mut ps = PlanStateData::default();
     // planstate->plan = (Plan *) node;
-    ps.plan = Some(mcx::leak_in(plan_node));
+    ps.plan = Some(::mcx::leak_in(plan_node));
     let result_state = ResultState {
         ps,
         resconstantqual: None,
@@ -99,7 +99,7 @@ fn nested_result_recursion_text() {
 
     // Inner plan-state.
     let mut inner_ps = PlanStateData::default();
-    inner_ps.plan = Some(mcx::leak_in(inner_plan));
+    inner_ps.plan = Some(::mcx::leak_in(inner_plan));
     let inner_state = PlanStateNode::Result(
         alloc_in(
             mcx,
@@ -115,7 +115,7 @@ fn nested_result_recursion_text() {
 
     // Outer plan-state with lefttree = inner.
     let mut outer_ps = PlanStateData::default();
-    outer_ps.plan = Some(mcx::leak_in(outer_plan));
+    outer_ps.plan = Some(::mcx::leak_in(outer_plan));
     outer_ps.lefttree = Some(alloc_in(mcx, inner_state).unwrap());
     let planstate = PlanStateNode::Result(
         alloc_in(
@@ -174,7 +174,7 @@ fn target_rel_valuesscan_alias_text() {
         alloc_in(
             mcx,
             Alias {
-                aliasname: Some(mcx::PgString::from_str_in("v", mcx).unwrap()),
+                aliasname: Some(::mcx::PgString::from_str_in("v", mcx).unwrap()),
                 colnames: PgVec::new_in(mcx),
             },
         )
@@ -212,7 +212,7 @@ fn parse_option_list_costs_off_format_json() {
             Some(define_seams::DefElemArg::String(s)) => s,
             other => panic!("unexpected string arg: {other:?}"),
         };
-        mcx::PgString::from_str_in(&s, mcx)
+        ::mcx::PgString::from_str_in(&s, mcx)
     });
 
     let ctx = MemoryContext::new("explain-opt-test");
@@ -234,11 +234,11 @@ fn parse_option_list_costs_off_format_json() {
 
 /// Build a string-valued `DefElem` option node (`name = 'val'`).
 #[cfg(test)]
-fn mk_defelem<'mcx>(mcx: mcx::Mcx<'mcx>, name: &str, val: &str) -> PgBox<'mcx, Node<'mcx>> {
+fn mk_defelem<'mcx>(mcx: ::mcx::Mcx<'mcx>, name: &str, val: &str) -> PgBox<'mcx, Node<'mcx>> {
     let arg = alloc_in(
         mcx,
         Node::mk_string(mcx, ::nodes::value::StringNode {
-            sval: mcx::PgString::from_str_in(val, mcx).unwrap(),
+            sval: ::mcx::PgString::from_str_in(val, mcx).unwrap(),
         }),
     )
     .unwrap();
@@ -246,7 +246,7 @@ fn mk_defelem<'mcx>(mcx: mcx::Mcx<'mcx>, name: &str, val: &str) -> PgBox<'mcx, N
         mcx,
         Node::mk_def_elem(mcx, ::nodes::ddlnodes::DefElem {
             defnamespace: None,
-            defname: Some(mcx::PgString::from_str_in(name, mcx).unwrap()),
+            defname: Some(::mcx::PgString::from_str_in(name, mcx).unwrap()),
             arg: Some(arg),
             defaction: ::nodes::ddlnodes::DEFELEM_UNSPEC,
             location: -1,

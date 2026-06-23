@@ -17,9 +17,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::any::Any;
 
-use types_core::Oid;
-use types_error::PgResult;
-use types_tuple::Datum;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_tuple::Datum;
 
 /// C: `JsonTokenType` (`src/common/jsonapi.h`). The discriminant order matches
 /// the C enum (the integer is observable only in `json_typeof`'s otherwise-

@@ -7,9 +7,9 @@
 //! (the dictionary cache calls the template's registered C functions
 //! `dispell_init` / `dispell_lexize`).
 
-use define_seams::DefElemArg;
+use ::define_seams::DefElemArg;
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use tsearch::{DictISpell, TSLexeme};
 
 seam_core::seam!(

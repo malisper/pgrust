@@ -4,11 +4,11 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::lock::LOCKMODE;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
     /// `sequence_open(relationId, lockmode)` (access/sequence.c): open+lock a

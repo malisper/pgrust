@@ -10,7 +10,7 @@
 //! nentry int4)` row.
 //!
 //! The owned port drives the same cores —
-//! [`tsvector_core::op::ts_stat_sql`] (the SPI-fed stat-tree
+//! [`::tsvector_core::op::ts_stat_sql`] (the SPI-fed stat-tree
 //! build, the SPI cursor walk itself behind the `exec_stat_query` seam installed
 //! by `backend-executor-spi`), [`ts_setup_firstcall`] and the repeated
 //! [`ts_process_call`] tree walk — over the materialize-mode SRF protocol:
@@ -19,15 +19,15 @@
 //!
 //! Registered from [`register_ts_stat`] (called by `init_seams`).
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 
 use ::funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
-use tsvector_core::op::{ts_process_call, ts_setup_firstcall, ts_stat_sql};
+use ::tsvector_core::op::{ts_process_call, ts_setup_firstcall, ts_stat_sql};
 
 use crate::register_srf;
 

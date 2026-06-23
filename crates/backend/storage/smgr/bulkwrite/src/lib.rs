@@ -22,25 +22,25 @@
 //!
 //! ## Owned model (vs the C-ABI port)
 //! C's `BulkWriteBuffer` (a pointer into a writer-owned `BLCKSZ` page) is the
-//! safe owned page workspace [`mcx::PgVec<u8>`]: `smgr_bulk_get_buf` hands back
+//! safe owned page workspace [`::mcx::PgVec<u8>`]: `smgr_bulk_get_buf` hands back
 //! a zeroed page, the caller fills it, and `smgr_bulk_write` takes ownership
 //! back. The opaque `BulkWriteState *` is the type-erased
-//! [`bulkwrite_seams::BulkWriteState`] carrier; the real
+//! [`::bulkwrite_seams::BulkWriteState`] carrier; the real
 //! engine state is [`BulkWriteEngine`], which this crate boxes into it.
 
 use page::{PageMut, PageSetChecksumInplace};
 use smgr as smgr;
 use utils_error::{ereport, PgError, PgResult};
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{BlockNumber, ForkNumber, XLogRecPtr};
-use types_core::BLCKSZ;
-use types_error::ERRCODE_OUT_OF_MEMORY;
-use rel::Relation;
-use types_storage::RelFileLocatorBackend;
+use ::types_core::primitive::{BlockNumber, ForkNumber, XLogRecPtr};
+use ::types_core::BLCKSZ;
+use ::types_error::ERRCODE_OUT_OF_MEMORY;
+use ::rel::Relation;
+use ::types_storage::RelFileLocatorBackend;
 
-use transam_xlog_seams::get_redo_rec_ptr as get_redo_rec_ptr_seam;
-use xloginsert_seams::log_newpages as log_newpages_seam;
-use lmgr_proc_seams::set_delay_chkpt_start as set_delay_chkpt_start_seam;
+use ::transam_xlog_seams::get_redo_rec_ptr as get_redo_rec_ptr_seam;
+use ::xloginsert_seams::log_newpages as log_newpages_seam;
+use ::lmgr_proc_seams::set_delay_chkpt_start as set_delay_chkpt_start_seam;
 use bulkwrite_seams::{self as seam, BulkWriteState};
 
 /// `MAX_PENDING_WRITES` (bulk_write.c:47) == `XLR_MAX_BLOCK_ID` (32).
@@ -53,7 +53,7 @@ const RELPERSISTENCE_PERMANENT: u8 = types_tuple::access::RELPERSISTENCE_PERMANE
 /// One queued page write (`PendingWrite` in bulk_write.c).
 ///
 /// The page workspace handed out by `smgr_bulk_get_buf` is an `'mcx`-bound
-/// [`mcx::PgVec`]; the engine, however, is type-erased through `dyn Any`
+/// [`::mcx::PgVec`]; the engine, however, is type-erased through `dyn Any`
 /// (which is `'static`), so the engine cannot retain `'mcx` borrows. The page
 /// bytes are therefore copied into an owned `Vec<u8>` on the way into the queue
 /// (the same `BLCKSZ` page image, no behavioral difference — the original C
@@ -145,7 +145,7 @@ pub fn smgr_bulk_get_buf<'mcx>(
     // MemoryContextAllocAligned(bulkstate->memcxt, BLCKSZ, PG_IO_ALIGN_SIZE, 0);
     // The owned model returns a zeroed page; alignment is not a correctness
     // requirement for the buffered write path.
-    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, BLCKSZ)?;
+    let mut buf: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, BLCKSZ)?;
     buf.resize(BLCKSZ, 0u8);
     Ok(buf)
 }
@@ -196,7 +196,7 @@ pub fn smgr_bulk_finish<'mcx>(mut bulkstate: BulkWriteState<'mcx>) -> PgResult<(
     let (is_temp, use_wal, smgr_rlocator, forknum, start_redo) = {
         let engine = engine_ref(&bulkstate)?;
         (
-            engine.smgr.backend != types_core::primitive::INVALID_PROC_NUMBER,
+            engine.smgr.backend != ::types_core::primitive::INVALID_PROC_NUMBER,
             engine.use_wal,
             engine.smgr,
             engine.forknum,
@@ -360,7 +360,7 @@ fn engine_mut<'a>(state: &'a mut BulkWriteState<'_>) -> PgResult<&'a mut BulkWri
 }
 
 fn oom(what: &str) -> PgError {
-    ereport(types_error::ERROR)
+    ereport(::types_error::ERROR)
         .errcode(ERRCODE_OUT_OF_MEMORY)
         .errmsg_internal(format!("out of memory allocating {what}"))
         .into_error()

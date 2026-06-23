@@ -43,10 +43,10 @@ use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use types_error::{PgError, PgResult, ERROR};
 use ::nodes::nodehashjoin::BufFile;
 use nodes::{EStateData, SlotId};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::TupleDescData;
 
-use heaptuple::flat;
+use ::heaptuple::flat;
 use heaptuple as heaptuple;
 use tablespace_seams as tablespace;
 use execTuples_seams as execTuples;
@@ -147,7 +147,7 @@ pub struct TuplestorestateState<'mcx> {
     writepos_offset: i64,
 }
 
-mcx::bind!(pub TuplestorestateBind => TuplestorestateState<'mcx>);
+::mcx::bind!(pub TuplestorestateBind => TuplestorestateState<'mcx>);
 /// The self-owned engine bundle (context + state); stored type-erased in the
 /// [`::nodes::Tuplestorestate`] carrier.
 pub type OwnedStore = McxOwned<TuplestorestateBind>;
@@ -332,7 +332,7 @@ pub fn tuplestore_begin_heap<'mcx>(
         EXEC_FLAG_REWIND
     };
     let carrier = tuplestore_begin_common(mcx, eflags, interXact, maxKBytes)?;
-    mcx::alloc_in(mcx, carrier)
+    ::mcx::alloc_in(mcx, carrier)
 }
 
 /// Held-cursor variant of `tuplestore_begin_heap(randomAccess, false, work_mem)`
@@ -565,7 +565,7 @@ fn puttuple_common_inner(
             }
 
             let mcx = state.mcx();
-            let blob = mcx::slice_in(mcx, tuple).map_err(|_| oom("tuplestore puttuple"))?;
+            let blob = ::mcx::slice_in(mcx, tuple).map_err(|_| oom("tuplestore puttuple"))?;
             state.memtuples.push(Some(blob));
             state.memtupcount += 1;
 
@@ -753,7 +753,7 @@ fn inmem_blob<'mcx>(
     let src = state.memtuples[idx as usize]
         .as_ref()
         .ok_or_else(|| PgError::error("tuplestore: read of released in-memory tuple"))?;
-    mcx::slice_in(mcx, src).map_err(|_| oom("tuplestore gettuple"))
+    ::mcx::slice_in(mcx, src).map_err(|_| oom("tuplestore gettuple"))
 }
 
 /// `tuplestore_gettupleslot(state, forward, copy, slot)`: fetch a MinimalTuple
@@ -1138,7 +1138,7 @@ fn readtup_heap<'mcx>(
     let tuplen = tupbodylen + MINIMAL_TUPLE_DATA_OFFSET;
 
     let mut tuple: PgVec<'mcx, u8> =
-        mcx::vec_with_capacity_in(mcx, tuplen).map_err(|_| oom("tuplestore readtup"))?;
+        ::mcx::vec_with_capacity_in(mcx, tuplen).map_err(|_| oom("tuplestore readtup"))?;
     tuple.resize(tuplen, 0);
     tuple[0..4].copy_from_slice(&(tuplen as u32).to_ne_bytes());
 
@@ -1196,7 +1196,7 @@ fn elog_err(msg: &'static str) -> PgError {
 
 fn oom(what: &'static str) -> PgError {
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+        .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
         .errmsg("out of memory")
         .errdetail_internal(what)
         .into_error()

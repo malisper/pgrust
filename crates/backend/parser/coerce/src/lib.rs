@@ -25,19 +25,19 @@ use ::nodes::primnodes::{
     ArrayCoerceExpr, CaseTestExpr, CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr,
     Const, ConvertRowtypeExpr, Expr, RowExpr,
 };
-use parsenodes::CoercionContext;
-use types_tuple::heaptuple::Datum as TupleDatum;
-use types_tuple::heaptuple::{
+use ::parsenodes::CoercionContext;
+use ::types_tuple::heaptuple::Datum as TupleDatum;
+use ::types_tuple::heaptuple::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
     ANYNONARRAYOID, ANYOID, ANYRANGEOID, BOOLOID, INT4OID, INTERVALOID, INT2VECTOROID, OIDVECTOROID,
     RECORDARRAYOID, RECORDOID, TEXTARRAYOID, TEXTOID, UNKNOWNOID,
 };
 
-use nodes_core::makefuncs::{
+use ::nodes_core::makefuncs::{
     make_const, make_func_expr, make_null_const, make_relabel_type,
 };
-use nodes_core::nodefuncs::{
+use ::nodes_core::nodefuncs::{
     apply_relabel_type, expr_collation as exprCollation, expr_type as exprType,
     expr_typmod as exprTypmod, expression_returns_set,
 };
@@ -48,9 +48,9 @@ use ::nodes::parsestmt::ParseState;
 use parse_type as parse_type;
 
 // Outward seam aliases.
-use pg_inherits_seams::type_inherits_from;
-use small1_seams::parser_errposition;
-use format_type_seams::format_type_be_str;
+use ::pg_inherits_seams::type_inherits_from;
+use ::small1_seams::parser_errposition;
+use ::format_type_seams::format_type_be_str;
 use lsyscache_seams as lsyscache;
 use syscache_seams as syscache;
 use typcache_seams as typcache;
@@ -82,7 +82,7 @@ const TYPCATEGORY_INVALID: u8 = b'\0';
 // CoercionPathType in parse_coerce.h).
 // ===========================================================================
 
-pub use coerce_seams::CoercionPathType;
+pub use ::coerce_seams::CoercionPathType;
 
 // ===========================================================================
 // ABI predicates ported from the C macros (postgres.h / pg_type.h).
@@ -369,7 +369,7 @@ pub fn coerce_type<'mcx>(
     // to the normal coercion path, exactly as a NULL C return does.
     if let Some(param) = node.as_param() {
         if let Some(pstate) = pstate.as_deref() {
-            let hooked = small1_seams::coerce_param_hook::call(
+            let hooked = ::small1_seams::coerce_param_hook::call(
                 pstate,
                 param,
                 targetTypeId,
@@ -512,7 +512,7 @@ pub fn coerce_type<'mcx>(
     }
 
     // caller blew it
-    Err(types_error::PgError::error(format!(
+    Err(::types_error::PgError::error(format!(
         "failed to find conversion function from {} to {}",
         format_type_be(inputTypeId)?,
         format_type_be(targetTypeId)?
@@ -549,7 +549,7 @@ thread_local! {
     /// take no explicit `Mcx` (the parse_func.c / clauses.c callers mirroring
     /// the C signatures, which allocate in `CurrentMemoryContext`). The Expr
     /// trees these seams return are embedded in long-lived Query/Plan
-    /// structures and can carry context-allocated `mcx::PgBox`/`PgVec` children
+    /// structures and can carry context-allocated `::mcx::PgBox`/`PgVec` children
     /// (e.g. an `Aggref` argument-`TargetEntry` list, whose `expr` is a
     /// `PgBox<Expr>`). A transient `MemoryContext::new(..)` freed on return
     /// would leave those children's allocator dangling, so dropping the owning
@@ -911,7 +911,7 @@ fn hide_coercion_node(node: Expr) -> PgResult<Expr> {
             Expr::CoerceToDomain(c)
         }
         _ => {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "unsupported node type: {}",
                 node_tag_int(&node)
             ))
@@ -951,7 +951,7 @@ fn build_coercion_expression<'mcx>(
         let proc = match procrow {
             Some(p) => p,
             None => {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "cache lookup failed for function {funcId}"
                 ))
                 .with_sqlstate(ERRCODE_INTERNAL_ERROR));
@@ -1039,7 +1039,7 @@ fn build_coercion_expression<'mcx>(
             let elemexpr = match elemexpr {
                 Some(e) => e,
                 None => {
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "failed to coerce array element type as expected",
                     )
                     .with_sqlstate(ERRCODE_INTERNAL_ERROR));
@@ -1071,7 +1071,7 @@ fn build_coercion_expression<'mcx>(
             };
             Ok(Expr::CoerceViaIO(iocoerce).erase_lifetime())
         }
-        other => Err(types_error::PgError::error(format!(
+        other => Err(::types_error::PgError::error(format!(
             "unsupported pathtype {} in build_coercion_expression",
             other as i32
         ))
@@ -1165,7 +1165,7 @@ fn coerce_record_to_complex<'mcx>(
         let cexpr = match cexpr {
             Some(c) => c,
             None => {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "cannot cast type {} to {}",
                     format_type_be(RECORDOID)?,
                     format_type_be(targetTypeId)?
@@ -1226,7 +1226,7 @@ fn record_cast_error<'mcx>(
     _detail: Option<&str>,
 ) -> PgResult<Expr<'static>> {
     let _ = (pstate, location);
-    Err(types_error::PgError::error(format!(
+    Err(::types_error::PgError::error(format!(
         "cannot cast type {} to {}",
         format_type_be(RECORDOID)?,
         format_type_be(targetTypeId)?
@@ -1239,12 +1239,12 @@ fn record_cast_error_detail(
     targetTypeId: Oid,
     _location: i32,
     detail: String,
-) -> types_error::PgError {
+) -> ::types_error::PgError {
     match (format_type_be(RECORDOID), format_type_be(targetTypeId)) {
-        (Ok(rec), Ok(tgt)) => types_error::PgError::error(format!("cannot cast type {rec} to {tgt}"))
+        (Ok(rec), Ok(tgt)) => ::types_error::PgError::error(format!("cannot cast type {rec} to {tgt}"))
             .with_detail(detail)
             .with_sqlstate(ERRCODE_CANNOT_COERCE),
-        _ => types_error::PgError::error("cannot cast type record")
+        _ => ::types_error::PgError::error("cannot cast type record")
             .with_sqlstate(ERRCODE_CANNOT_COERCE),
     }
 }
@@ -1260,7 +1260,7 @@ pub fn coerce_to_boolean<'mcx>(
     node: Expr<'static>,
     constructName: &str,
 ) -> PgResult<Expr<'static>> {
-    use nodes_core::nodefuncs::expr_location;
+    use ::nodes_core::nodefuncs::expr_location;
     let inputTypeId = exprType(Some(&node))?;
     let mut node = node;
     let mut pstate = pstate;
@@ -1287,7 +1287,7 @@ pub fn coerce_to_boolean<'mcx>(
                     Some(ps) => parser_errposition::call(ps, node_location)?,
                     None => 0,
                 };
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "argument of {constructName} must be type {}, not type {}",
                     "boolean",
                     format_type_be(inputTypeId)?
@@ -1303,7 +1303,7 @@ pub fn coerce_to_boolean<'mcx>(
             Some(ps) => parser_errposition::call(ps, expr_location(Some(&node))?)?,
             None => 0,
         };
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "argument of {constructName} must not return a set"
         ))
         .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
@@ -1323,7 +1323,7 @@ pub fn coerce_to_specific_type_typmod<'mcx>(
     targetTypmod: i32,
     constructName: &str,
 ) -> PgResult<Expr<'static>> {
-    use nodes_core::nodefuncs::expr_location;
+    use ::nodes_core::nodefuncs::expr_location;
     let inputTypeId = exprType(Some(&node))?;
     let mut node = node;
     let mut pstate = pstate;
@@ -1350,7 +1350,7 @@ pub fn coerce_to_specific_type_typmod<'mcx>(
                     Some(ps) => parser_errposition::call(ps, node_location)?,
                     None => 0,
                 };
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "argument of {constructName} must be type {}, not type {}",
                     format_type_be(targetTypeId)?,
                     format_type_be(inputTypeId)?
@@ -1366,7 +1366,7 @@ pub fn coerce_to_specific_type_typmod<'mcx>(
             Some(ps) => parser_errposition::call(ps, expr_location(Some(&node))?)?,
             None => 0,
         };
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "argument of {constructName} must not return a set"
         ))
         .with_sqlstate(ERRCODE_DATATYPE_MISMATCH)
@@ -1439,7 +1439,7 @@ pub fn parser_coercion_errposition(
     if coerce_location >= 0 {
         parser_errposition::call(pstate, coerce_location)
     } else {
-        use nodes_core::nodefuncs::expr_location;
+        use ::nodes_core::nodefuncs::expr_location;
         parser_errposition::call(pstate, expr_location(input_expr)?)
     }
 }
@@ -1493,14 +1493,14 @@ pub fn select_common_type<'mcx>(
                     None => return Ok(InvalidOid),
                     Some(ctx) => {
                         // C: parser_errposition(pstate, exprLocation(nexpr))
-                        let mut e = types_error::PgError::error(format!(
+                        let mut e = ::types_error::PgError::error(format!(
                             "{ctx} types {} and {} cannot be matched",
                             format_type_be(ptype)?,
                             format_type_be(ntype)?
                         ))
                         .with_sqlstate(ERRCODE_DATATYPE_MISMATCH);
                         if let Some(ps) = pstate {
-                            use nodes_core::nodefuncs::expr_location;
+                            use ::nodes_core::nodefuncs::expr_location;
                             let pos = parser_errposition::call(ps, expr_location(Some(nexpr))?)?;
                             if pos > 0 {
                                 e = e.with_cursor_position(pos);
@@ -1559,7 +1559,7 @@ fn select_common_type_from_oids(nargs: i32, typeids: &[Oid], noerror: bool) -> P
                 if noerror {
                     return Ok(InvalidOid);
                 }
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "argument types {} and {} cannot be matched",
                     format_type_be(ptype)?,
                     format_type_be(ntype)?
@@ -1610,7 +1610,7 @@ pub fn coerce_to_common_type<'mcx>(
         )?;
         Ok(r.expect("coerce_type returned NULL in coerce_to_common_type"))
     } else {
-        Err(types_error::PgError::error(format!(
+        Err(::types_error::PgError::error(format!(
             "{context} could not convert type {} to {}",
             format_type_be(inputTypeId)?,
             format_type_be(targetTypeId)?
@@ -2083,7 +2083,7 @@ pub fn enforce_generic_type_consistency(
             if array_typeid == ANYARRAYOID {
                 if n_poly_args != 1 || (rettype != ANYARRAYOID && is_polymorphic_type_family1(rettype))
                 {
-                    return Err(types_error::PgError::error(
+                    return Err(::types_error::PgError::error(
                         "cannot determine element type of \"anyarray\" argument",
                     )
                     .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
@@ -2147,14 +2147,14 @@ pub fn enforce_generic_type_consistency(
         }
 
         if have_anynonarray && elem_typeid != ANYELEMENTOID && type_is_array_domain(elem_typeid)? {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "type matched to anynonarray is an array type: {}",
                 format_type_be(elem_typeid)?
             ))
             .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
         }
         if have_anyenum && elem_typeid != ANYELEMENTOID && !lsyscache::type_is_enum::call(elem_typeid)? {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "type matched to anyenum is not an enum type: {}",
                 format_type_be(elem_typeid)?
             ))
@@ -2202,7 +2202,7 @@ pub fn enforce_generic_type_consistency(
                 n_anycompatible_args as i32,
                 &anycompatible_actual_types,
             )? {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "arguments of anycompatible family cannot be cast to a common type",
                 )
                 .with_sqlstate(ERRCODE_DATATYPE_MISMATCH));
@@ -2220,7 +2220,7 @@ pub fn enforce_generic_type_consistency(
                     return Err(could_not_determine_named("anycompatiblerange")?);
                 }
                 if anycompatible_range_typelem != anycompatible_typeid {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "anycompatiblerange type {} does not match anycompatible type {}",
                         format_type_be(anycompatible_range_typeid)?,
                         format_type_be(anycompatible_typeid)?
@@ -2234,7 +2234,7 @@ pub fn enforce_generic_type_consistency(
                     return Err(could_not_determine_named("anycompatiblemultirange")?);
                 }
                 if anycompatible_range_typelem != anycompatible_typeid {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "anycompatiblemultirange type {} does not match anycompatible type {}",
                         format_type_be(anycompatible_multirange_typeid)?,
                         format_type_be(anycompatible_typeid)?
@@ -2244,7 +2244,7 @@ pub fn enforce_generic_type_consistency(
             }
 
             if have_anycompatible_nonarray && type_is_array_domain(anycompatible_typeid)? {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "type matched to anycompatiblenonarray is an array type: {}",
                     format_type_be(anycompatible_typeid)?
                 ))
@@ -2369,77 +2369,77 @@ pub fn enforce_generic_type_consistency(
 
 // --- enforce_generic_type_consistency error helpers -----------------------
 
-fn not_all_alike(name: &str, a: Oid, b: Oid) -> PgResult<types_error::PgError> {
-    Ok(types_error::PgError::error(format!(
+fn not_all_alike(name: &str, a: Oid, b: Oid) -> PgResult<::types_error::PgError> {
+    Ok(::types_error::PgError::error(format!(
         "arguments declared \"{name}\" are not all alike"
     ))
     .with_detail(format!("{} versus {}", format_type_be(a)?, format_type_be(b)?))
     .with_sqlstate(ERRCODE_DATATYPE_MISMATCH))
 }
 
-fn not_an_array(name: &str, t: Oid) -> PgResult<types_error::PgError> {
-    Ok(types_error::PgError::error(format!(
+fn not_an_array(name: &str, t: Oid) -> PgResult<::types_error::PgError> {
+    Ok(::types_error::PgError::error(format!(
         "argument declared {name} is not an array but type {}",
         format_type_be(t)?
     ))
     .with_sqlstate(ERRCODE_DATATYPE_MISMATCH))
 }
 
-fn not_a_range(name: &str, t: Oid) -> PgResult<types_error::PgError> {
-    Ok(types_error::PgError::error(format!(
+fn not_a_range(name: &str, t: Oid) -> PgResult<::types_error::PgError> {
+    Ok(::types_error::PgError::error(format!(
         "argument declared {name} is not a range type but type {}",
         format_type_be(t)?
     ))
     .with_sqlstate(ERRCODE_DATATYPE_MISMATCH))
 }
 
-fn not_a_multirange(name: &str, t: Oid) -> PgResult<types_error::PgError> {
-    Ok(types_error::PgError::error(format!(
+fn not_a_multirange(name: &str, t: Oid) -> PgResult<::types_error::PgError> {
+    Ok(::types_error::PgError::error(format!(
         "argument declared {name} is not a multirange type but type {}",
         format_type_be(t)?
     ))
     .with_sqlstate(ERRCODE_DATATYPE_MISMATCH))
 }
 
-fn not_consistent(a_name: &str, b_name: &str, a: Oid, b: Oid) -> PgResult<types_error::PgError> {
-    Ok(types_error::PgError::error(format!(
+fn not_consistent(a_name: &str, b_name: &str, a: Oid, b: Oid) -> PgResult<::types_error::PgError> {
+    Ok(::types_error::PgError::error(format!(
         "argument declared {a_name} is not consistent with argument declared {b_name}"
     ))
     .with_detail(format!("{} versus {}", format_type_be(a)?, format_type_be(b)?))
     .with_sqlstate(ERRCODE_DATATYPE_MISMATCH))
 }
 
-fn could_not_determine(_kind: &str) -> PgResult<types_error::PgError> {
-    Ok(types_error::PgError::error(
+fn could_not_determine(_kind: &str) -> PgResult<::types_error::PgError> {
+    Ok(::types_error::PgError::error(
         "could not determine polymorphic type because input has type unknown",
     )
     .with_sqlstate(ERRCODE_DATATYPE_MISMATCH))
 }
 
-fn could_not_determine_named(name: &str) -> PgResult<types_error::PgError> {
-    Ok(types_error::PgError::error(format!(
+fn could_not_determine_named(name: &str) -> PgResult<::types_error::PgError> {
+    Ok(::types_error::PgError::error(format!(
         "could not determine polymorphic type {name} because input has type unknown"
     ))
     .with_sqlstate(ERRCODE_DATATYPE_MISMATCH))
 }
 
-fn could_not_determine_named_internal(name: &str) -> PgResult<types_error::PgError> {
-    Ok(types_error::PgError::error(format!(
+fn could_not_determine_named_internal(name: &str) -> PgResult<::types_error::PgError> {
+    Ok(::types_error::PgError::error(format!(
         "could not determine polymorphic type {name} because input has type unknown"
     ))
     .with_sqlstate(ERRCODE_DATATYPE_MISMATCH))
 }
 
-fn could_not_find_array(t: Oid) -> PgResult<types_error::PgError> {
-    Ok(types_error::PgError::error(format!(
+fn could_not_find_array(t: Oid) -> PgResult<::types_error::PgError> {
+    Ok(::types_error::PgError::error(format!(
         "could not find array type for data type {}",
         format_type_be(t)?
     ))
     .with_sqlstate(ERRCODE_UNDEFINED_OBJECT))
 }
 
-fn internal_err(msg: &str) -> types_error::PgError {
-    types_error::PgError::error(msg).with_sqlstate(ERRCODE_INTERNAL_ERROR)
+fn internal_err(msg: &str) -> ::types_error::PgError {
+    ::types_error::PgError::error(msg).with_sqlstate(ERRCODE_INTERNAL_ERROR)
 }
 
 // ===========================================================================
@@ -2507,7 +2507,7 @@ pub fn check_valid_internal_signature(
     declared_arg_types: &[Oid],
     nargs: i32,
 ) -> Option<String> {
-    use types_tuple::heaptuple::INTERNALOID;
+    use ::types_tuple::heaptuple::INTERNALOID;
     if ret_type == INTERNALOID {
         for i in 0..nargs as usize {
             if declared_arg_types[i] == ret_type {
@@ -2639,7 +2639,7 @@ pub fn find_coercion_pathway(
             c if c == COERCION_CODE_ASSIGNMENT => CoercionContext::COERCION_ASSIGNMENT,
             c if c == COERCION_CODE_EXPLICIT => CoercionContext::COERCION_EXPLICIT,
             other => {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "unrecognized castcontext: {}",
                     other as i32
                 ))
@@ -2660,7 +2660,7 @@ pub fn find_coercion_pathway(
                     result = CoercionPathType::Relabeltype;
                 }
                 other => {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "unrecognized castmethod: {}",
                         other as i32
                     ))
@@ -2752,7 +2752,7 @@ fn typeIsOfTypedTable(reltypeId: Oid, reloftypeId: Oid) -> PgResult<bool> {
     }
     match syscache::search_relation_reloftype::call(relid)? {
         Some(reloftype) => Ok(reloftype == reloftypeId),
-        None => Err(types_error::PgError::error(format!(
+        None => Err(::types_error::PgError::error(format!(
             "cache lookup failed for relation {relid}"
         ))
         .with_sqlstate(ERRCODE_INTERNAL_ERROR)),
@@ -2846,7 +2846,7 @@ fn seam_coerce_type<'mcx>(
         cformat,
         location,
     )?
-    .ok_or_else(|| types_error::PgError::error("coerce_type returned NULL"))
+    .ok_or_else(|| ::types_error::PgError::error("coerce_type returned NULL"))
 }
 
 /// `find_coercion_pathway(target, source, COERCION_EXPLICIT, &funcid)`.
@@ -2888,7 +2888,7 @@ fn seam_enforce_generic_type_consistency(
 // signatures consumed by parse_expr.c / parse_oper.c. ParseState carries no
 // `Mcx`, so the durable backend-lifetime `COERCE_NODE_CONTEXT` (see its
 // doc-comment) backs the produced Expr tree: it can embed context-allocated
-// `mcx::PgBox`/`PgVec` children (e.g. an `Aggref` argument-`TargetEntry` list),
+// `::mcx::PgBox`/`PgVec` children (e.g. an `Aggref` argument-`TargetEntry` list),
 // which a transient context freed on return would dangle.
 fn seam_coerce_to_boolean<'mcx>(
     pstate: &mut ParseState<'mcx>,

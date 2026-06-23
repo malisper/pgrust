@@ -8,8 +8,8 @@
 
 use mcx::{Mcx, PgString, PgVec};
 use types_core::{Oid, SubTransactionId};
-use types_error::PgResult;
-use types_tuple::Datum;
+use ::types_error::PgResult;
+use ::types_tuple::Datum;
 use types_ri_triggers::{ResultColumn, SpiExecResult, SpiPlanPtr};
 
 /// One row of the `ts_rewrite(query, text)` SPI result: the `target`

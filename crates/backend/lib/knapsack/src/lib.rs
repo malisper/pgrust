@@ -24,17 +24,17 @@
 //!
 //! Here `DiscreteKnapsack` takes the caller's context `mcx` (the analogue of
 //! C's `CurrentMemoryContext` at entry, where the result must end up) and
-//! creates a private child [`mcx::MemoryContext`] (`local_ctx`) for all scratch
+//! creates a private child [`::mcx::MemoryContext`] (`local_ctx`) for all scratch
 //! allocations. The scratch arrays and every working bitmapset are allocated in
 //! `local_ctx.mcx()`; the result is `bms_copy`'d into the caller's `mcx`, and
 //! `local_ctx` is dropped at function exit, reclaiming everything — exactly
 //! mirroring `MemoryContextDelete(local_ctx)`.
 
-use nodes_core::bitmapset::{
+use ::nodes_core::bitmapset::{
     bms_add_member, bms_copy, bms_del_member, bms_make_singleton, bms_replace_members,
 };
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::bitmapset::Bitmapset;
 
 /// DiscreteKnapsack

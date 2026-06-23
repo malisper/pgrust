@@ -10,16 +10,16 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Oid, OidIsValid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Oid, OidIsValid};
+use ::types_error::PgResult;
 use ::nodes::ddlnodes::{PartitionElem, PartitionSpec};
 use ::nodes::nodes::Node;
 use ::nodes::partition::PartitionStrategy;
 use ::nodes::primnodes::Expr;
 use ::nodes::parsestmt::ParseExprKind;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use crate::helpers::here;
 use types_error::{
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_INDETERMINATE_COLLATION, ERRCODE_INVALID_OBJECT_DEFINITION,
@@ -30,7 +30,7 @@ use types_error::{
 const PARTITION_MAX_KEYS: usize = 32;
 /* pg_am OIDs (pg_am_d.h). */
 const HASH_AM_OID: Oid = 405;
-use types_core::catalog::BTREE_AM_OID;
+use ::types_core::catalog::BTREE_AM_OID;
 /* FirstLowInvalidHeapAttributeNumber (sysattr.h). */
 const FirstLowInvalidHeapAttributeNumber: i32 = -7;
 /* BITS_PER_BITMAPWORD (nodes/bitmapset.h): 64 on LP64. */
@@ -38,7 +38,7 @@ const BITS_PER_BITMAPWORD: i32 = 64;
 
 use pathnodes::{Bitmapset, Relids};
 
-/// `bms_is_member(x, a)` over the `pathnodes::Bitmapset` word storage
+/// `bms_is_member(x, a)` over the `::pathnodes::Bitmapset` word storage
 /// `pull_varattnos` produces (distinct from the `nodes` planner-relids
 /// set the nodes-core ops use).
 fn bms_is_member(x: i32, a: Option<&Bitmapset>) -> bool {
@@ -154,8 +154,8 @@ fn transformPartitionSpec<'mcx>(
     parser_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, true, true, true)?;
 
     /* take care of any partition expressions */
-    let mut new_params: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, partspec.partParams.len())?;
+    let mut new_params: ::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, partspec.partParams.len())?;
     for l in partspec.partParams.iter() {
         let pelem = match l.as_partitionelem() {
             Some(pe) => pe,
@@ -180,10 +180,10 @@ fn transformPartitionSpec<'mcx>(
                 .expect("transformExpr of a non-NULL partition expression")
                 .clone_in(mcx)?;
             parse_collate::assign_expr_collations(Some(&pstate), &mut transformed_expr)?;
-            new_elem.expr = Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, transformed_expr)?)?);
+            new_elem.expr = Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, transformed_expr)?)?);
         }
 
-        new_params.push(mcx::alloc_in(mcx, Node::mk_partition_elem(mcx, new_elem)?)?);
+        new_params.push(::mcx::alloc_in(mcx, Node::mk_partition_elem(mcx, new_elem)?)?);
     }
 
     Ok(PartitionSpec {
@@ -503,7 +503,7 @@ fn resolve_opclass<'mcx>(
                 )
             };
             return ereport(ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+                .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
                 .errmsg(errmsg)
                 .errhint(hint)
                 .finish(here("ComputePartitionAttrs"))
@@ -561,7 +561,7 @@ pub fn define_relation_partspec<'mcx>(
      */
     let mut pstate = small1::make_parsestate(mcx, None)?;
     if let Some(qs) = query_string {
-        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(qs, mcx)?);
+        pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(qs, mcx)?);
     }
     let nsitem = parser_relation::addRangeTableEntryForRelation(
         mcx,
@@ -587,10 +587,10 @@ pub fn define_relation_partspec<'mcx>(
     let partexprs_node = if partexprs.is_empty() {
         None
     } else {
-        let mut cells: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, partexprs.len())?;
+        let mut cells: ::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
+            ::mcx::vec_with_capacity_in(mcx, partexprs.len())?;
         for e in partexprs.into_iter() {
-            cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?);
+            cells.push(::mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?);
         }
         Some(Node::mk_list(mcx, cells)?)
     };

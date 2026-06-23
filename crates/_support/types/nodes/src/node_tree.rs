@@ -24,14 +24,14 @@
 //!
 //! Node-local value-leaf field types that are not the Rust primitives / `mcx`
 //! containers already covered by `backend-nodes-node-support` opt into
-//! `PgNodeCopy`/`PgNodeEqual` here via [`node_support::pg_scalar_eq!`]
+//! `PgNodeCopy`/`PgNodeEqual` here via [`::node_support::pg_scalar_eq!`]
 //! (a flat `Clone` copy + `==` equality — the analogue of
 //! `COPY_SCALAR_FIELD`/`COMPARE_SCALAR_FIELD`). The `NodeTag` newtype is opted in
 //! so any future generated node carrying a `NodeTag` data field copies/compares
 //! it as a scalar.
 
 // `NodeTag` is `Clone + PartialEq` and lifetime-free: a node-local scalar leaf.
-node_support::pg_scalar_eq!(crate::nodes::NodeTag);
+::node_support::pg_scalar_eq!(crate::nodes::NodeTag);
 
 include!(concat!(env!("OUT_DIR"), "/node_tree.rs"));
 
@@ -44,7 +44,7 @@ mod out_read_derive_tests {
     //! family opting into the stage on `main` (the converted leaves are all
     //! `special_read_write`/custom for now).
     use alloc::string::String;
-    use macros::PgNode;
+    use ::macros::PgNode;
     use node_support::{PgNodeOut, PgNodeRead, ReadCursor};
     use mcx::{MemoryContext, PgString};
 
@@ -56,10 +56,10 @@ mod out_read_derive_tests {
         Green = 1,
         Blue = 7,
     }
-    node_support::pg_scalar_eq!(Color);
+    ::node_support::pg_scalar_eq!(Color);
     // A real Rust `enum` rebuilds from the discriminant via the table form (the
     // `as`-cast form `pg_scalar_enum_out_read!` is for integer ALIASES only).
-    node_support::pg_node_enum_out_read!(
+    ::node_support::pg_node_enum_out_read!(
         Color { Color::Red => 0, Color::Green => 1, Color::Blue => 7 }
     );
 

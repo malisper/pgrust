@@ -14,8 +14,8 @@
 //!                   PointerGetDatum(&recheck));
 //! ```
 //!
-//! over the GiST-typed by-pointer structs ([`gist::GISTENTRY`],
-//! [`gist::GistEntryVector`], [`gist::GIST_SPLITVEC`]) — *not* a
+//! over the GiST-typed by-pointer structs ([`::gist::GISTENTRY`],
+//! [`::gist::GistEntryVector`], [`::gist::GIST_SPLITVEC`]) — *not* a
 //! generic fmgr-by-pointer-Datum path. We model it as one typed seam per
 //! support-procedure kind, each taking the proc OID (resolved by the GiST core
 //! via `index_getprocinfo(rel, col + 1, GIST_*_PROC).fn_oid`) plus the typed
@@ -35,10 +35,10 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgBox};
-use types_core::primitive::{uint16, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{uint16, Oid};
+use ::types_error::PgResult;
 use gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
-use types_sortsupport::SortSupportData;
+use ::types_sortsupport::SortSupportData;
 use types_tuple::heaptuple::Datum;
 
 /// `StrategyNumber` (access/stratnum.h) — the comparison strategy the scan key

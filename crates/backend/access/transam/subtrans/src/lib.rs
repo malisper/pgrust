@@ -48,7 +48,7 @@ use types_core::{
     FirstNormalTransactionId, InvalidTransactionId, MaxTransactionId, Size, TransactionId, BLCKSZ,
 };
 use types_error::{ErrorLocation, ERROR};
-use types_storage::sync::SyncRequestHandler;
+use ::types_storage::sync::SyncRequestHandler;
 use types_storage::{LWTRANCHE_SUBTRANS_BUFFER, LWTRANCHE_SUBTRANS_SLRU, LW_EXCLUSIVE};
 
 /// `SUBTRANS_XACTS_PER_PAGE` — number of subtransaction parent slots per page:
@@ -308,8 +308,8 @@ pub fn SUBTRANSShmemInit() -> PgResult<()> {
         guc_seams::set_config_option::call(
             "subtransaction_buffers",
             &buf,
-            types_guc::guc::GucContext::PGC_POSTMASTER,
-            types_guc::guc::GucSource::PGC_S_DYNAMIC_DEFAULT,
+            ::types_guc::guc::GucContext::PGC_POSTMASTER,
+            ::types_guc::guc::GucSource::PGC_S_DYNAMIC_DEFAULT,
         )?;
 
         // We prefer to report this value's source as PGC_S_DYNAMIC_DEFAULT.
@@ -321,8 +321,8 @@ pub fn SUBTRANSShmemInit() -> PgResult<()> {
             guc_seams::set_config_option::call(
                 "subtransaction_buffers",
                 &buf,
-                types_guc::guc::GucContext::PGC_POSTMASTER,
-                types_guc::guc::GucSource::PGC_S_OVERRIDE,
+                ::types_guc::guc::GucContext::PGC_POSTMASTER,
+                ::types_guc::guc::GucSource::PGC_S_OVERRIDE,
             )?;
         }
     }
@@ -350,7 +350,7 @@ pub fn SUBTRANSShmemInit() -> PgResult<()> {
 /// GUC `check_hook` for `subtransaction_buffers` (`check_subtrans_buffers`).
 pub fn check_subtrans_buffers(newval: i32) -> PgResult<bool> {
     let (ok, detail) =
-        slru::check_slru_buffers("subtransaction_buffers", newval);
+        ::slru::check_slru_buffers("subtransaction_buffers", newval);
     if ok {
         Ok(true)
     } else {
@@ -578,7 +578,7 @@ fn with_ctl<R>(f: impl FnOnce(&mut SubTransState) -> R) -> R {
 pub fn init_seams() {
     use subtrans_seams as seams;
     use guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
-    use types_guc::guc::GucSource;
+    use ::types_guc::guc::GucSource;
 
     seams::sub_trans_get_parent::set(|xid| with_ctl(|st| SubTransGetParent(st, xid)));
     seams::sub_trans_set_parent::set(|xid, parent| with_ctl(|st| SubTransSetParent(st, xid, parent)));

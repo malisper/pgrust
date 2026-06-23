@@ -1,10 +1,10 @@
 //! `access/rmgrdesc/gindesc.c` — rmgr descriptor routines for GIN indexes.
 
 use crate::{appendf, u16_at, u8_at};
-use mcx::PgString;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_error::PgResult;
 use wal::{DecodedXLogRecord, XLR_INFO_MASK};
-use xlog_records::ginxlog::{ginxlogDeleteListPages, ginxlogInsert,
+use ::xlog_records::ginxlog::{ginxlogDeleteListPages, ginxlogInsert,
                                   ginxlogInsertDataInternal, ginxlogInsertEntry,
                                   ginxlogRecompressDataLeaf, ginxlogSplit, GinPostingList,
                                   shortalign, SIZEOF_GINXLOG_RECOMPRESS_DATA_LEAF,
@@ -185,8 +185,8 @@ pub fn gin_identify(info: u8) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::test_support::record;
-    use mcx::MemoryContext;
-    use wal::DecodedBkpBlock;
+    use ::mcx::MemoryContext;
+    use ::wal::DecodedBkpBlock;
 
     #[test]
     fn insert_internal_with_children() {

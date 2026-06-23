@@ -10,8 +10,8 @@ use ::nodes::nodeindexonlyscan::{
     IndexScanDesc, IndexScanInstrumentation, ParallelIndexScanDesc,
 };
 use ::nodes::IndexOnlyScanState;
-use types_scan::sdir::ScanDirection;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_scan::sdir::ScanDirection;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
     /// `get_actual_variable_endpoint(heapRel, indexRel, indexscandir, scankeys,
@@ -40,7 +40,7 @@ seam_core::seam!(
         typ_len: i16,
         typ_byval: bool,
     ) -> types_error::PgResult<
-        Option<types_tuple::heaptuple::Datum<'mcx>>,
+        Option<::types_tuple::heaptuple::Datum<'mcx>>,
     >
 );
 
@@ -76,9 +76,9 @@ seam_core::seam!(
     pub fn index_insert<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         index_relation: &rel::Relation<'mcx>,
-        values: &[types_tuple::heaptuple::Datum<'mcx>],
+        values: &[::types_tuple::heaptuple::Datum<'mcx>],
         isnull: &[bool],
-        heap_t_ctid: &types_tuple::heaptuple::ItemPointerData,
+        heap_t_ctid: &::types_tuple::heaptuple::ItemPointerData,
         heap_relation: &rel::Relation<'mcx>,
         check_unique: types_tableam::amapi::IndexUniqueCheck,
         index_unchanged: bool,
@@ -129,7 +129,7 @@ seam_core::seam!(
     pub fn index_opclass_options<'mcx>(
         indrel: &rel::Relation<'mcx>,
         attnum: types_core::primitive::AttrNumber,
-        attoptions: types_tuple::Datum<'mcx>,
+        attoptions: ::types_tuple::Datum<'mcx>,
         validate: bool,
     ) -> types_error::PgResult<std::option::Option<std::vec::Vec<u8>>>
 );

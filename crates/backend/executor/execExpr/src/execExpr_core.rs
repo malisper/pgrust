@@ -23,8 +23,8 @@ use mcx::{Mcx, PgBox, PgVec};
 // The canonical unified value type (Datum-unification keystone) — what
 // `ExprEvalStepData::ConstVal { value }` carries, and the value the interpreter
 // eval seam (`exec_eval_*_switch_context`) returns.
-use types_tuple::heaptuple::Datum as DatumV;
-use types_error::PgResult;
+use ::types_tuple::heaptuple::Datum as DatumV;
+use ::types_error::PgResult;
 use ::nodes::execexpr::{
     ExprEvalOp, ExprEvalRowtypeCache, ExprEvalStep, ExprEvalStepData, ExprSetupInfo, ExprState,
     ProjectionInfo, ResultCell, ResultCellId, VarReturningType, EEO_FLAG_HAS_NEW, EEO_FLAG_HAS_OLD,
@@ -37,9 +37,9 @@ use ::nodes::primnodes::{
 };
 use ::nodes::execnodes::EStateLink;
 use nodes::{EStateData, EcxtId, SlotId};
-use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
+use ::types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
-use execExpr_seams::HashJoinQualKind;
+use ::execExpr_seams::HashJoinQualKind;
 
 /// `#define INNER_VAR (-1)` (primnodes.h special varnos).
 const INNER_VAR: i32 = -1;
@@ -70,7 +70,7 @@ fn make_expr_state<'mcx>() -> ExprState<'mcx> {
 /// or any step pushed.
 fn ensure_result_arena<'mcx>(mcx: Mcx<'mcx>, state: &mut ExprState<'mcx>) -> PgResult<()> {
     if state.result_cells.cells.is_none() {
-        let mut cells = mcx::vec_with_capacity_in(mcx, 1)?;
+        let mut cells = ::mcx::vec_with_capacity_in(mcx, 1)?;
         // cell 0 == STATE_RESULT_CELL (the ExprState's own resvalue/resnull).
         cells.push(ResultCell::default());
         state.result_cells.cells = Some(cells);
@@ -124,7 +124,7 @@ pub fn expr_eval_push_step<'mcx>(
     s: ExprEvalStep<'mcx>,
 ) -> PgResult<()> {
     if es.steps.is_none() {
-        es.steps = Some(mcx::vec_with_capacity_in(mcx, 0)?);
+        es.steps = Some(::mcx::vec_with_capacity_in(mcx, 0)?);
     }
     let step_size = core::mem::size_of::<ExprEvalStep<'mcx>>();
     if es.steps_alloc == 0 {
@@ -586,7 +586,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                     expr_eval_push_step(mcx, state, scratch)?;
                 }
                 other => {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "unrecognized paramkind: {}",
                         other as i32
                     )));
@@ -610,7 +610,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // aggstate->aggs after compilation (planner-set aggno makes the
             // collection-order divergence behaviorally inert).
             if state.found_aggs.is_none() {
-                state.found_aggs = Some(mcx::vec_with_capacity_in(mcx, 1)?);
+                state.found_aggs = Some(::mcx::vec_with_capacity_in(mcx, 1)?);
             }
             state
                 .found_aggs
@@ -637,7 +637,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // whether to carry the cols; without the threaded parent we carry
             // the cols (the common grouping-sets case), matching the EXPLAIN
             // semantics. The interpreter consults the parent at runtime.
-            let mut clauses = mcx::vec_with_capacity_in(mcx, grp.cols.len())?;
+            let mut clauses = ::mcx::vec_with_capacity_in(mcx, grp.cols.len())?;
             for &c in &grp.cols {
                 clauses.push(c);
             }
@@ -744,7 +744,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 STATE_RESULT_CELL // unused for NOT
             };
 
-            let mut adjust_jumps: PgVec<'mcx, usize> = mcx::vec_with_capacity_in(mcx, nargs)?;
+            let mut adjust_jumps: PgVec<'mcx, usize> = ::mcx::vec_with_capacity_in(mcx, nargs)?;
             for (off, arg) in boolexpr.args.iter().enumerate() {
                 // Evaluate argument into our output variable.
                 exec_init_expr_rec(mcx, arg, state, resv)?;
@@ -830,7 +830,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             };
 
             let mut adjust_jumps: PgVec<'mcx, usize> =
-                mcx::vec_with_capacity_in(mcx, caseexpr.args.len())?;
+                ::mcx::vec_with_capacity_in(mcx, caseexpr.args.len())?;
 
             for when in &caseexpr.args {
                 // Make testexpr result available to CaseTestExpr nodes within
@@ -916,7 +916,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         etag::T_CoalesceExpr => {
             let coalesce = node.expect_coalesceexpr();
             let mut adjust_jumps: PgVec<'mcx, usize> =
-                mcx::vec_with_capacity_in(mcx, coalesce.args.len())?;
+                ::mcx::vec_with_capacity_in(mcx, coalesce.args.len())?;
             for e in &coalesce.args {
                 // evaluate argument directly into result datum
                 exec_init_expr_rec(mcx, e, state, resv)?;
@@ -1088,11 +1088,11 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 minmaxexpr.minmaxtype,
             )?;
             if cmp_proc == types_core::InvalidOid {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "could not identify a comparison function for type {}",
                     minmaxexpr.minmaxtype
                 ))
-                .with_sqlstate(types_error::ERRCODE_UNDEFINED_FUNCTION));
+                .with_sqlstate(::types_error::ERRCODE_UNDEFINED_FUNCTION));
             }
 
             // Perform function lookup.
@@ -1103,7 +1103,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             //   InitFunctionCallInfoData(*fcinfo, finfo, 2,
             //                            minmaxexpr->inputcollid, NULL, NULL);
             let flinfo = fmgr_seams::fmgr_info::call(mcx, cmp_proc)?;
-            let fcinfo_data = mcx::alloc_in(
+            let fcinfo_data = ::mcx::alloc_in(
                 mcx,
                 ::nodes::fmgr::FunctionCallInfoBaseData {
                     flinfo: Some(flinfo.clone()),
@@ -1120,8 +1120,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // Allocate space to store arguments (the C `scratch.d.minmax.values`
             // / `nulls` Datum/bool workspace), pre-sized to `nelems` so the
             // interpreter can index `values[off]`/`nulls[off]`.
-            let mut values: PgVec<'mcx, DatumV<'mcx>> = mcx::vec_with_capacity_in(mcx, nelems)?;
-            let mut nulls: PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, nelems)?;
+            let mut values: PgVec<'mcx, DatumV<'mcx>> = ::mcx::vec_with_capacity_in(mcx, nelems)?;
+            let mut nulls: PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, nelems)?;
             for _ in 0..nelems {
                 values.push(DatumV::null());
                 nulls.push(false);
@@ -1133,7 +1133,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // `arg_cells`, which the interpreter gathers into `values`/`nulls`
             // immediately before the comparison loop.
             let mut arg_cells: PgVec<'mcx, ::nodes::execexpr::ResultCellId> =
-                mcx::vec_with_capacity_in(mcx, nelems)?;
+                ::mcx::vec_with_capacity_in(mcx, nelems)?;
             for e in &minmaxexpr.args {
                 let cell = crate::execExpr_core::new_result_cell(mcx, state)?;
                 exec_init_expr_rec(mcx, e, state, cell)?;
@@ -1158,7 +1158,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                             ::nodes::execexpr::MinMaxOp::IS_LEAST
                         }
                     },
-                    finfo: Some(mcx::alloc_in(mcx, flinfo)?),
+                    finfo: Some(::mcx::alloc_in(mcx, flinfo)?),
                     fcinfo_data: Some(fcinfo_data),
                 },
             };
@@ -1184,7 +1184,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // interpreter gathers these cells into elemvalues/elemnulls just
             // before fabricating the array (mirroring C's per-element write into
             // &scratch.d.arrayexpr.elemvalues[elemoff]).
-            let mut elem_cells = mcx::vec_with_capacity_in(mcx, nelems as usize)?;
+            let mut elem_cells = ::mcx::vec_with_capacity_in(mcx, nelems as usize)?;
             for e in &arrayexpr.elements {
                 let cell = new_result_cell(mcx, state)?;
                 exec_init_expr_rec(mcx, e, state, cell)?;
@@ -1220,7 +1220,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
             // Build tupdesc to describe result tuples. (`TupleDesc` is
             // `Option<PgBox<TupleDescData>>`; both arms produce a present box.)
-            let tupdesc: PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>> =
+            let tupdesc: PgBox<'mcx, ::types_tuple::heaptuple::TupleDescData<'mcx>> =
                 if rowexpr.row_typeid == RECORDOID {
                     // generic record, use types of given expressions
                     let mut td = execTuples_seams::exec_type_from_expr_list::call(
@@ -1266,7 +1266,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // columns beyond the args list (and dropped columns) carry the
             // STATE_RESULT_CELL sentinel and read as NULL (the interpreter forces
             // elemnulls[i] = true for them).
-            let mut elem_cells: PgVec<ResultCellId> = mcx::vec_with_capacity_in(mcx, nelems)?;
+            let mut elem_cells: PgVec<ResultCellId> = ::mcx::vec_with_capacity_in(mcx, nelems)?;
 
             // Set up evaluation, skipping any deleted columns.
             for i in 0..nelems {
@@ -1285,10 +1285,10 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                         let want = format_type_seams::format_type_be_owned::call(
                             att.atttypid,
                         )?;
-                        return Err(types_error::PgError::error(format!(
+                        return Err(::types_error::PgError::error(format!(
                             "ROW() column has type {got} instead of type {want}"
                         ))
-                        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
+                        .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH));
                     }
                     // Evaluate column expr into its workspace cell.
                     let cell = new_result_cell(mcx, state)?;
@@ -1330,7 +1330,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             debug_assert_eq!(rcexpr.inputcollids.len(), nopers);
 
             let mut adjust_jumps: PgVec<'mcx, usize> =
-                mcx::vec_with_capacity_in(mcx, nopers)?;
+                ::mcx::vec_with_capacity_in(mcx, nopers)?;
 
             // forfive(l_left_expr, largs, l_right_expr, rargs, l_opno, opnos,
             //         l_opfamily, opfamilies, l_inputcollid, inputcollids)
@@ -1356,7 +1356,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                     BTORDER_PROC,
                 )?;
                 if proc == types_core::InvalidOid {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "missing support function {}({},{}) in opfamily {}",
                         BTORDER_PROC, lefttype, righttype, opfamily
                     )));
@@ -1368,7 +1368,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 //   fmgr_info(proc, finfo); fmgr_info_set_expr((Node *) node, finfo);
                 //   InitFunctionCallInfoData(*fcinfo, finfo, 2, inputcollid, NULL, NULL);
                 let finfo = fmgr_seams::fmgr_info::call(mcx, proc)?;
-                let fcinfo_data = mcx::alloc_in(
+                let fcinfo_data = ::mcx::alloc_in(
                     mcx,
                     ::nodes::fmgr::FunctionCallInfoBaseData {
                         flinfo: Some(finfo.clone()),
@@ -1388,7 +1388,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 // arg_cells, which the interpreter gathers into the call frame
                 // immediately before the comparison.
                 let mut arg_cells: PgVec<'mcx, ::nodes::execexpr::ResultCellId> =
-                    mcx::vec_with_capacity_in(mcx, 2)?;
+                    ::mcx::vec_with_capacity_in(mcx, 2)?;
                 let lcell = new_result_cell(mcx, state)?;
                 exec_init_expr_rec(mcx, left_expr, state, lcell)?;
                 arg_cells.push(lcell);
@@ -1401,7 +1401,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                     resvalue: resv,
                     resnull: resv,
                     d: ExprEvalStepData::RowCompareStep {
-                        finfo: Some(mcx::alloc_in(mcx, finfo)?),
+                        finfo: Some(::mcx::alloc_in(mcx, finfo)?),
                         fcinfo_data: Some(fcinfo_data),
                         arg_cells: Some(arg_cells),
                         // fn_addr stays None — the interpreter re-resolves by
@@ -1490,7 +1490,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             let (out_func, _typisvarlena) =
                 lsyscache_seams::get_type_output_info::call(src_type)?;
             let finfo_out = fmgr_seams::fmgr_info::call(mcx, out_func)?;
-            let fcinfo_data_out = mcx::alloc_in(
+            let fcinfo_data_out = ::mcx::alloc_in(
                 mcx,
                 ::nodes::fmgr::FunctionCallInfoBaseData {
                     flinfo: Some(finfo_out.clone()),
@@ -1530,7 +1530,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // IoCoerce frame's `context` stays None until that lands (only the
             // EEOP_IOCOERCE_SAFE path reads it; the common EEOP_IOCOERCE path
             // never does).
-            let fcinfo_data_in = mcx::alloc_in(
+            let fcinfo_data_in = ::mcx::alloc_in(
                 mcx,
                 ::nodes::fmgr::FunctionCallInfoBaseData {
                     flinfo: Some(finfo_in.clone()),
@@ -1566,9 +1566,9 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 resvalue: resv,
                 resnull: resv,
                 d: ExprEvalStepData::IoCoerce {
-                    finfo_out: Some(mcx::alloc_in(mcx, finfo_out)?),
+                    finfo_out: Some(::mcx::alloc_in(mcx, finfo_out)?),
                     fcinfo_data_out: Some(fcinfo_data_out),
-                    finfo_in: Some(mcx::alloc_in(mcx, finfo_in)?),
+                    finfo_in: Some(::mcx::alloc_in(mcx, finfo_in)?),
                     fcinfo_data_in: Some(fcinfo_data_in),
                 },
             };
@@ -1590,8 +1590,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 lsyscache_seams::get_element_type::call(acoerce.resulttype)?
                     .unwrap_or(types_core::InvalidOid);
             if resultelemtype == types_core::InvalidOid {
-                return Err(types_error::PgError::error("target type is not an array")
-                    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+                return Err(::types_error::PgError::error("target type is not an array")
+                    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
             }
 
             // C: Construct a sub-expression for the per-element coercion; don't
@@ -1651,7 +1651,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             } else {
                 expr_eval_push_step(mcx, &mut elemstate, done_return_step(STATE_RESULT_CELL))?;
                 exec_ready_expr(&mut elemstate)?;
-                Some(mcx::alloc_in(mcx, elemstate)?)
+                Some(::mcx::alloc_in(mcx, elemstate)?)
             };
 
             // C: scratch.opcode = EEOP_ARRAYCOERCE;
@@ -1687,8 +1687,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // interpreter fills them at runtime from the typcache. They are
             // out-of-line in C for space; here each is its own boxed
             // ExprEvalRowtypeCache on the step payload.
-            let incache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
-            let outcache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+            let incache = ::mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+            let outcache = ::mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
 
             // C: ExecInitExprRec(convert->arg, state, resv, resnull);
             let arg = convert.arg.as_deref().expect("ConvertRowtypeExpr.arg present");
@@ -1745,7 +1745,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // front; DEFORM writes each, the newval sub-exprs target their
             // field's cell, and FORM gathers them all into heap_form_tuple.
             let mut col_cells: PgVec<ResultCellId> =
-                mcx::vec_with_capacity_in(mcx, ncolumns as usize)?;
+                ::mcx::vec_with_capacity_in(mcx, ncolumns as usize)?;
             for _ in 0..ncolumns {
                 col_cells.push(new_result_cell(mcx, state)?);
             }
@@ -1758,8 +1758,8 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // owned model the rowtype lookup goes through the internally-cached
             // typcache seam (the void* cacheptr cannot round-trip), so the cache
             // carries no cross-step state — give each step its own default box.
-            let deform_rowcache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
-            let form_rowcache = mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+            let deform_rowcache = ::mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
+            let form_rowcache = ::mcx::alloc_in(mcx, ExprEvalRowtypeCache::default())?;
 
             // /* emit code to evaluate the composite input value */
             // ExecInitExprRec(fstore->arg, state, resv, resnull);
@@ -1794,7 +1794,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 // if (fieldnum <= 0 || fieldnum > ncolumns)
                 //     elog(ERROR, "field number %d is out of range in FieldStore", ...);
                 if fieldnum <= 0 || fieldnum as i32 > ncolumns {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "field number {fieldnum} is out of range in FieldStore"
                     )));
                 }
@@ -1939,7 +1939,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // compiled with their own EState back-link (reached through
             // `es_link`, as the SubPlan compile does).
             if state.es_link.is_none() {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "WindowFunc found in non-WindowAgg plan node",
                 ));
             }
@@ -1954,7 +1954,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
             let arg_refs: PgVec<'mcx, Option<&Expr>> = {
                 let mut v: PgVec<'mcx, Option<&Expr>> =
-                    mcx::vec_with_capacity_in(mcx, wfunc.args.len())?;
+                    ::mcx::vec_with_capacity_in(mcx, wfunc.args.len())?;
                 for a in &wfunc.args {
                     v.push(Some(a));
                 }
@@ -2003,7 +2003,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
 
             // makeNode(WindowFuncExprState); wfstate->wfunc = wfunc.
             let wfstate = ::nodes::nodewindowagg::WindowFuncExprState {
-                wfunc: Some(mcx::alloc_in(mcx, wfunc.clone_in(mcx)?)?),
+                wfunc: Some(::mcx::alloc_in(mcx, wfunc.clone_in(mcx)?)?),
                 args: arg_states,
                 aggfilter: aggfilter_state,
                 // wfuncno is assigned by ExecInitWindowAgg's dedup loop.
@@ -2013,14 +2013,14 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // winstate->funcs = lappend(winstate->funcs, wfstate) — collected on
             // the discovery channel; funcidx is the append position.
             if state.found_window_funcs.is_none() {
-                state.found_window_funcs = Some(mcx::vec_with_capacity_in(mcx, 1)?);
+                state.found_window_funcs = Some(::mcx::vec_with_capacity_in(mcx, 1)?);
             }
             let funcs = state
                 .found_window_funcs
                 .as_mut()
                 .expect("found_window_funcs just initialized");
             let funcidx = funcs.len() as i32;
-            funcs.push(mcx::alloc_in(mcx, wfstate)?);
+            funcs.push(::mcx::alloc_in(mcx, wfstate)?);
 
             let scratch = ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_WINDOW_FUNC,
@@ -2212,13 +2212,13 @@ pub fn exec_init_expr<'mcx, 'e>(
     // opcode-emission recursion off that `'mcx` copy — so the input `node` only
     // needs to be valid for the call (an independent `'e`), matching C's read-only
     // use of the passed expression (a plan-tree node the executor only reads).
-    let node: &Expr<'mcx> = &*mcx::leak_in(mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
+    let node: &Expr<'mcx> = &*::mcx::leak_in(::mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
 
     let mut state = make_expr_state();
     // C `state->expr = node` — retain the original expression on the ExprState
     // (read back by callers like JSON_TABLE's PASSING-args loop, which derives
     // each variable's exprType/exprTypmod from state->expr).
-    state.expr = Some(mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
+    state.expr = Some(::mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
     // C `state->parent = parent` reaches the EState via `parent->state`; the
     // owned model defers parent stamping to `stamp_expr_parents`, so we stamp
     // the non-owning EState back-link here (a parent IS present at this entry —
@@ -2237,7 +2237,7 @@ pub fn exec_init_expr<'mcx, 'e>(
     // expression into the parent head (see `drain_found_subplan_ids`).
     drain_found_subplan_ids(mcx, parent, &mut state)?;
 
-    mcx::alloc_in(mcx, state)
+    ::mcx::alloc_in(mcx, state)
 }
 
 /// `ExecInitExprWithParams(node, ext_params)` (execExpr.c).
@@ -2251,7 +2251,7 @@ pub fn exec_init_expr_with_params<'mcx, 'e>(
 
     // Clone the read-only input into `'mcx` and drive the opcode recursion off
     // that copy (see `exec_init_expr`); the input `node` only needs `'e`.
-    let node: &Expr<'mcx> = &*mcx::leak_in(mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
+    let node: &Expr<'mcx> = &*::mcx::leak_in(::mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
 
     let mut state = make_expr_state();
     state.ext_params = 0;
@@ -2262,7 +2262,7 @@ pub fn exec_init_expr_with_params<'mcx, 'e>(
     expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
     exec_ready_expr(&mut state)?;
 
-    mcx::alloc_in(mcx, state)
+    ::mcx::alloc_in(mcx, state)
 }
 
 /// Drain the SubPlan-discovery channel from a freshly compiled `ExprState` into
@@ -2283,7 +2283,7 @@ pub(crate) fn drain_found_subplan_ids<'mcx>(
         return Ok(());
     }
     if parent.sub_plan_ids.is_none() {
-        parent.sub_plan_ids = Some(mcx::vec_with_capacity_in(mcx, ids.len())?);
+        parent.sub_plan_ids = Some(::mcx::vec_with_capacity_in(mcx, ids.len())?);
     }
     let v = parent.sub_plan_ids.as_mut().expect("just initialized");
     v.try_reserve(ids.len()).map_err(|_| mcx.oom(0))?;
@@ -2344,7 +2344,7 @@ pub fn exec_init_qual_no_parent<'mcx>(
 
     exec_create_expr_setup_steps_list(mcx, &mut state, qual)?;
 
-    let mut adjust_jumps: PgVec<'mcx, usize> = mcx::vec_with_capacity_in(mcx, qual.len())?;
+    let mut adjust_jumps: PgVec<'mcx, usize> = ::mcx::vec_with_capacity_in(mcx, qual.len())?;
     for node in qual {
         exec_init_expr_rec(mcx, node, &mut state, STATE_RESULT_CELL)?;
         let scratch = ExprEvalStep {
@@ -2371,7 +2371,7 @@ pub fn exec_init_qual_no_parent<'mcx>(
     expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
     exec_ready_expr(&mut state)?;
 
-    Ok(Some(mcx::alloc_in(mcx, state)?))
+    Ok(Some(::mcx::alloc_in(mcx, state)?))
 }
 
 /// `ExecPrepareQual(qual, estate)` (execExpr.c) — prepare a standalone qual with
@@ -2424,7 +2424,7 @@ pub fn exec_init_expr_list<'mcx>(
 ) -> PgResult<PgVec<'mcx, Option<ExprState<'mcx>>>> {
     let mcx = estate.es_query_cxt;
     let mut result: PgVec<'mcx, Option<ExprState<'mcx>>> =
-        mcx::vec_with_capacity_in(mcx, nodes.len())?;
+        ::mcx::vec_with_capacity_in(mcx, nodes.len())?;
     for e in nodes {
         match e {
             None => result.push(None),
@@ -2448,7 +2448,7 @@ pub fn exec_init_expr_list_no_parent<'mcx>(
 ) -> PgResult<PgVec<'mcx, Option<ExprState<'mcx>>>> {
     let mcx = estate.es_query_cxt;
     let mut result: PgVec<'mcx, Option<ExprState<'mcx>>> =
-        mcx::vec_with_capacity_in(mcx, nodes.len())?;
+        ::mcx::vec_with_capacity_in(mcx, nodes.len())?;
     for e in nodes {
         match e {
             None => result.push(None),
@@ -2565,7 +2565,7 @@ pub fn exec_init_expr_no_parent<'mcx>(
 
     let mut state = make_expr_state();
     // C `state->expr = node` (ExecInitExpr).
-    state.expr = Some(mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
+    state.expr = Some(::mcx::alloc_in(mcx, node.clone_in(mcx)?)?);
     state.ext_params = 0;
     ensure_result_arena(mcx, &mut state)?;
 
@@ -2574,7 +2574,7 @@ pub fn exec_init_expr_no_parent<'mcx>(
     expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
     exec_ready_expr(&mut state)?;
 
-    mcx::alloc_in(mcx, state)
+    ::mcx::alloc_in(mcx, state)
 }
 
 /// `ExecInitExpr(node, NULL)` (execExpr.c) compiled into a **bare
@@ -2637,7 +2637,7 @@ pub fn exec_init_expr_no_parent_box<'mcx>(
     expr_eval_push_step(mcx, &mut state, done_return_step(STATE_RESULT_CELL))?;
     exec_ready_expr(&mut state)?;
 
-    mcx::alloc_in(mcx, state)
+    ::mcx::alloc_in(mcx, state)
 }
 
 /// `ExecInitExprList(wfunc->args, state->parent)` for a window function's
@@ -2653,7 +2653,7 @@ pub fn exec_init_expr_list_for_window<'mcx>(
     }
     let mcx = estate.es_query_cxt;
     let mut out: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> =
-        mcx::vec_with_capacity_in(mcx, nodes.len())?;
+        ::mcx::vec_with_capacity_in(mcx, nodes.len())?;
     for e in nodes {
         // Window function args are never NULL list elements.
         let node = e.expect("window function argument list element is NULL");
@@ -2669,7 +2669,7 @@ pub fn exec_prepare_expr_list<'a, 'mcx>(
 ) -> PgResult<PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>>> {
     let mcx = estate.es_query_cxt;
     let mut result: PgVec<'mcx, PgBox<'mcx, ExprState<'mcx>>> =
-        mcx::vec_with_capacity_in(mcx, expr_list.len())?;
+        ::mcx::vec_with_capacity_in(mcx, expr_list.len())?;
     for e in expr_list {
         result.push(exec_prepare_expr(e, estate)?);
     }
@@ -2823,7 +2823,7 @@ pub fn exec_build_projection_info_impl<'mcx>(
     // ExecReadyExpr(state);
     exec_ready_expr(state)?;
 
-    mcx::alloc_in(mcx, proj_info)
+    ::mcx::alloc_in(mcx, proj_info)
 }
 
 /// `ExecBuildProjectionInfo(targetList, econtext, slot, parent, inputDesc)`
@@ -2918,7 +2918,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
             saw_junk = true;
         } else {
             if saw_junk {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "subplan target list is out of order".to_string(),
                 ));
             }
@@ -2928,7 +2928,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
 
     // We should have one targetColnos entry per non-junk column.
     if n_assignable_cols != target_colnos.len() as i32 {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "targetColnos does not match subplan target list".to_string(),
         ));
     }
@@ -2992,7 +2992,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
 
         // ExecCheckPlanOutput-equivalent sanity checks.
         if targetattnum <= 0 || targetattnum > natts {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "table row type and query-specified row type do not match: \
                  Query has too many columns."
                     .to_string(),
@@ -3000,7 +3000,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
         }
         let attr = rel_desc.attr((targetattnum - 1) as usize);
         if attr.attisdropped {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "table row type and query-specified row type do not match: \
                  Query provides a value for a dropped column at ordinal position {}.",
                 targetattnum
@@ -3012,7 +3012,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
             .expect("ExecBuildUpdateProjection: NULL tlist expr");
         let expr_typid = nodeFuncs_seams::expr_type_info::call(tle_expr)?.typid;
         if expr_typid != attr.atttypid {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "table row type and query-specified row type do not match: \
                  Table has type oid {} at ordinal position {}, but query expects type oid {}.",
                 attr.atttypid, targetattnum, expr_typid
@@ -3095,7 +3095,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
     // ExecReadyExpr(state);
     exec_ready_expr(state)?;
 
-    mcx::alloc_in(mcx, proj_info)
+    ::mcx::alloc_in(mcx, proj_info)
 }
 
 /// `ExecBuildUpdateProjection(...)` (execExpr.c) — seam-facing variant that
@@ -3416,7 +3416,7 @@ pub fn eval_const_test(
     // its own per-query memory context. The seam has no ambient Mcx, so root a
     // fresh standalone context here, mirroring CreateExecutorState() allocating
     // its "ExecutorState" context under CurrentMemoryContext.
-    let cx = mcx::MemoryContext::new("ExecutorState");
+    let cx = ::mcx::MemoryContext::new("ExecutorState");
     let mcx = cx.mcx();
     let mut estate = EStateData::new_in(mcx);
 
@@ -3527,7 +3527,7 @@ pub fn evaluate_expr_fallback(
     // per-query memory context (the owned-model equivalent of CreateExecutorState
     // rooting an "ExecutorState" context under CurrentMemoryContext). The seam
     // has no ambient Mcx, so root a fresh standalone context here.
-    let cx = mcx::MemoryContext::new("ExecutorState");
+    let cx = ::mcx::MemoryContext::new("ExecutorState");
     let mcx = cx.mcx();
     let mut estate = EStateData::new_in(mcx);
 
@@ -3600,8 +3600,8 @@ thread_local! {
     /// outlives the per-tuple context the value is computed in). The owned value
     /// `ParamListInfoData` carries `Datum<'static>`, so the copy target is this
     /// leaked, never-reset context.
-    static PREPARED_PARAM_CONTEXT: &'static mcx::MemoryContext =
-        Box::leak(Box::new(mcx::MemoryContext::new("PreparedParams")));
+    static PREPARED_PARAM_CONTEXT: &'static ::mcx::MemoryContext =
+        Box::leak(Box::new(::mcx::MemoryContext::new("PreparedParams")));
 }
 
 /// `EvaluateParams` leaf (prepare.c): for the `i`-th prepared `ExprState`, set
@@ -3725,9 +3725,9 @@ pub fn exec_init_hashjoin_qual<'mcx>(
             // element is an `OpExpr` (`Node::Expr`). Materialize the `Expr`
             // slice ExecInitQual expects.
             let exprs: PgVec<'mcx, Expr> = match hj.hashclauses.as_deref() {
-                None => mcx::vec_with_capacity_in(mcx, 0)?,
+                None => ::mcx::vec_with_capacity_in(mcx, 0)?,
                 Some(list) => {
-                    let mut out = mcx::vec_with_capacity_in(mcx, list.len())?;
+                    let mut out = ::mcx::vec_with_capacity_in(mcx, list.len())?;
                     for n in list.iter() {
                         if let Some(e) = n.as_expr() {
                             // A hashclause `OpExpr` may carry context-allocated

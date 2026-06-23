@@ -14,7 +14,7 @@
 #![allow(dead_code)]
 #![allow(non_upper_case_globals)]
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /* ---------------------------------------------------------------------------
  * Catalog relation OIDs (pg_*_d.h *RelationId)

@@ -23,10 +23,10 @@
 //! (`expr->func->cur_estate`), which the executor owns; the seam carries the
 //! `dno` plus the executor's opaque execstate handle.
 
-use types_core::Oid;
-use types_error::PgResult;
-use plpgsql::int32;
-use types_resowner::ResourceOwner;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::plpgsql::int32;
+use ::types_resowner::ResourceOwner;
 
 /// The `(typeId, typMod, collation)` triple filled by
 /// `plpgsql_exec_get_datum_type_info`.
@@ -643,7 +643,7 @@ seam_core::seam!(
 // ===========================================================================
 
 /// `FetchDirection` (`nodes/parsenodes.h`) as it crosses the cursor seam — the
-/// fetch/move direction of a `FETCH`/`MOVE`. Mirrors `plpgsql::FetchDirection`
+/// fetch/move direction of a `FETCH`/`MOVE`. Mirrors `::plpgsql::FetchDirection`
 /// (same `repr(i32)` values) so the executor passes it without depending on the
 /// portal crate; the SPI installer maps it onto `portal::FetchDirection`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

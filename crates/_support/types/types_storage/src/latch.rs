@@ -9,7 +9,7 @@
 //! explicit `LatchHandle` parameter — the caller obtains it from its own
 //! state when globals.c lands (AGENTS.md "no ambient-global seams").
 
-use types_core::ProcNumber;
+use ::types_core::ProcNumber;
 
 /// Identity of a `Latch *`. In C a latch is reached by raw pointer, and the
 /// two backing allocations are distinct address spaces: backend-private /
@@ -83,7 +83,7 @@ impl LatchHandle {
 
 use core::sync::atomic::{AtomicBool, AtomicI32};
 
-use types_core::sig_atomic_t;
+use ::types_core::sig_atomic_t;
 
 /// `struct Latch` (`storage/latch.h`).
 ///

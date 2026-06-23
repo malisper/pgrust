@@ -1,5 +1,5 @@
 use super::*;
-use nodes_core::bitmapset::bms_next_member;
+use ::nodes_core::bitmapset::bms_next_member;
 
 /// Collect every member of a set in ascending order via `bms_next_member`,
 /// the analogue of iterating with `bms_next_member` in C.

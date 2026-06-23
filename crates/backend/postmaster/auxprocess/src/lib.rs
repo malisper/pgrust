@@ -28,8 +28,8 @@
 //! Two steps live in ported, directly-callable crates and are invoked directly
 //! (genuine reuse, not a seam):
 //!
-//!  * `InitAuxiliaryProcess()` -> [`lmgr_proc::InitAuxiliaryProcess`]
-//!  * `ProcSignalInit(NULL, 0)` -> [`procsignal::ProcSignalInit`]
+//!  * `InitAuxiliaryProcess()` -> [`::lmgr_proc::InitAuxiliaryProcess`]
+//!  * `ProcSignalInit(NULL, 0)` -> [`::procsignal::ProcSignalInit`]
 //!    (no cancel key for an aux process; `MyProcNumber`/`MyProcPid` come from the
 //!    globals seams, matching the postinit.c caller convention)
 //!
@@ -44,10 +44,10 @@
 //! single-threaded startup. Nothing is silently stubbed.
 
 use types_error::{PgError, PgResult};
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
-use procsignal::ProcSignalInit;
-use lmgr_proc::proc_lifecycle::InitAuxiliaryProcess;
+use ::procsignal::ProcSignalInit;
+use ::lmgr_proc::proc_lifecycle::InitAuxiliaryProcess;
 
 /// `AuxiliaryProcessMainCommon`
 ///

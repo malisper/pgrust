@@ -13,8 +13,8 @@ use super::*;
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
 use types_copy::{CopyParseOptions, CopyParseState};
 use rel::{FormData_pg_class, Relation, RelationData};
-use types_storage::storage::RelFileLocator;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_storage::storage::RelFileLocator;
+use ::types_tuple::heaptuple::TupleDescData;
 
 fn opts(csv: bool) -> CopyParseOptions {
     CopyParseOptions {
@@ -77,13 +77,13 @@ fn test_relation<'mcx>(mcx: Mcx<'mcx>) -> Relation<'mcx> {
             relfrozenxid: 0,
             relminmxid: 0,
         },
-        rd_att: mcx::alloc_in(mcx, td).unwrap(),
+        rd_att: ::mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,
         rd_index: None,
-        rd_opcintype: mcx::PgVec::new_in(mcx),
-        rd_opfamily: mcx::PgVec::new_in(mcx),
-        rd_indoption: mcx::PgVec::new_in(mcx),
-        rd_indcollation: mcx::PgVec::new_in(mcx),
+        rd_opcintype: ::mcx::PgVec::new_in(mcx),
+        rd_opfamily: ::mcx::PgVec::new_in(mcx),
+        rd_indoption: ::mcx::PgVec::new_in(mcx),
+        rd_indcollation: ::mcx::PgVec::new_in(mcx),
         rd_trigdesc: None,
         pgstat_enabled: false,
     };
@@ -101,7 +101,7 @@ fn state_with_line<'mcx>(
     CopyParseState {
         opts: opts(csv),
         rel: test_relation(mcx),
-        attnumlist: mcx::PgVec::new_in(mcx),
+        attnumlist: ::mcx::PgVec::new_in(mcx),
         copy_src: CopySource::COPY_FILE,
         copy_file: None,
         fe_msgbuf: None,
@@ -131,9 +131,9 @@ fn state_with_line<'mcx>(
         attribute_cursor: 0,
         max_fields,
         raw_fields: vec![None; max_fields.max(0) as usize],
-        in_functions: mcx::PgVec::new_in(mcx),
-        typioparams: mcx::PgVec::new_in(mcx),
-        defexprs: mcx::PgVec::new_in(mcx),
+        in_functions: ::mcx::PgVec::new_in(mcx),
+        typioparams: ::mcx::PgVec::new_in(mcx),
+        defexprs: ::mcx::PgVec::new_in(mcx),
         convert_select_flags: None,
         force_notnull_flags: Vec::new(),
         force_null_flags: Vec::new(),

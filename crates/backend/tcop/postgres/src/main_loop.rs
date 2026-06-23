@@ -42,12 +42,12 @@ extern crate alloc;
 use alloc::string::String;
 
 use mcx::{Mcx, MemoryContext};
-use types_dest::dest::CommandDest;
+use ::types_dest::dest::CommandDest;
 use types_error::{PgResult, ERROR, FATAL};
-use stringinfo::StringInfo;
-use types_timeout::TimeoutId;
+use ::stringinfo::StringInfo;
+use ::types_timeout::TimeoutId;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::globals;
 
@@ -95,7 +95,7 @@ const EOF: i32 = -1;
 /// `PQ_SMALL_MESSAGE_LIMIT` (libpq.h): cap for short fixed-shape messages.
 const PQ_SMALL_MESSAGE_LIMIT: i32 = 10000;
 /// `PQ_LARGE_MESSAGE_LIMIT` (libpq.h): `MaxAllocSize - 1`.
-const PQ_LARGE_MESSAGE_LIMIT: i32 = mcx::MAX_ALLOC_SIZE as i32 - 1;
+const PQ_LARGE_MESSAGE_LIMIT: i32 = ::mcx::MAX_ALLOC_SIZE as i32 - 1;
 
 // ===========================================================================
 // SocketBackend — postgres.c:351
@@ -120,7 +120,7 @@ fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
         // frontend disconnected
         if xact::IsTransactionState() {
             return Err(ereport(ERROR)
-                .errcode(types_error::error::ERRCODE_CONNECTION_FAILURE)
+                .errcode(::types_error::error::ERRCODE_CONNECTION_FAILURE)
                 .errmsg(
                     "unexpected EOF on client connection with an open transaction",
                 )
@@ -182,7 +182,7 @@ fn SocketBackend(in_buf: &mut StringInfo<'_>) -> PgResult<i32> {
             // Garbage from the frontend: probably lost message-boundary sync.
             // Fatal, no good recovery.
             return Err(ereport(FATAL)
-                .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+                .errcode(::types_error::error::ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg(alloc::format!("invalid frontend message type {other}"))
                 .into_error());
         }
@@ -328,12 +328,12 @@ fn forbidden_in_wal_sender(firstchar: i32) -> PgResult<()> {
     if walsender_seams::am_walsender::call() {
         if firstchar == pqmsg::FUNCTION_CALL {
             return Err(ereport(ERROR)
-                .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+                .errcode(::types_error::error::ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg("fastpath function calls not supported in a replication connection")
                 .into_error());
         } else {
             return Err(ereport(ERROR)
-                .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+                .errcode(::types_error::error::ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg("extended query protocol not supported in a replication connection")
                 .into_error());
         }
@@ -382,7 +382,7 @@ struct LoopState {
 ///
 /// `mcx` is the (about-to-be-reset) MessageContext; the C switches into it
 /// before `FlushErrorState`.
-fn error_recovery(mcx: Mcx<'_>, err: types_error::PgError, state: &mut LoopState) -> PgResult<()> {
+fn error_recovery(mcx: Mcx<'_>, err: ::types_error::PgError, state: &mut LoopState) -> PgResult<()> {
     // error_context_stack = NULL — the ambient callback chain is retired
     // (backend-utils-error divergence #10); nothing to reset.
 
@@ -428,7 +428,7 @@ fn error_recovery(mcx: Mcx<'_>, err: types_error::PgError, state: &mut LoopState
     pqcomm::pq_comm_reset();
 
     // Report the error to the client and/or server log.
-    utils_error::emit_error_report_for(&err);
+    ::utils_error::emit_error_report_for(&err);
 
     // valgrind_report_error_query(debug_query_string) — valgrind-only, skipped.
 
@@ -460,7 +460,7 @@ fn error_recovery(mcx: Mcx<'_>, err: types_error::PgError, state: &mut LoopState
 
     // Now return to the MessageContext and clear ErrorContext for next time.
     // (We already operate in `mcx`.)
-    utils_error::FlushErrorState();
+    ::utils_error::FlushErrorState();
     let _ = mcx;
 
     // If we were handling an extended-query message, initiate skip till Sync.
@@ -476,7 +476,7 @@ fn error_recovery(mcx: Mcx<'_>, err: types_error::PgError, state: &mut LoopState
     // message boundaries; we can't safely read more.
     if pqcomm::pq_is_reading_msg() {
         return Err(ereport(FATAL)
-            .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+            .errcode(::types_error::error::ERRCODE_PROTOCOL_VIOLATION)
             .errmsg("terminating connection because protocol synchronization was lost")
             .into_error());
     }
@@ -506,7 +506,7 @@ fn error_recovery(mcx: Mcx<'_>, err: types_error::PgError, state: &mut LoopState
 /// propagates so the backend exits exactly as C does.
 fn run_error_recovery(
     mcx: Mcx<'_>,
-    err: types_error::PgError,
+    err: ::types_error::PgError,
     state: &mut LoopState,
 ) -> PgResult<()> {
     // Re-arming bound: C relies on AbortTransaction being re-entrant-safe and
@@ -539,7 +539,7 @@ fn run_error_recovery(
             // payload channels as the per-iteration catch_unwind) and re-run
             // recovery on it — an ERROR-level second pass.
             Err(payload) => {
-                pending = match payload.downcast::<types_error::PgError>() {
+                pending = match payload.downcast::<::types_error::PgError>() {
                     Ok(e) => *e,
                     Err(payload) => {
                         let msg = payload
@@ -549,9 +549,9 @@ fn run_error_recovery(
                                 payload.downcast_ref::<&str>().map(|s| s.to_string())
                             });
                         match msg {
-                            Some(m) => types_error::PgError::error(m),
+                            Some(m) => ::types_error::PgError::error(m),
                             None => {
-                                types_error::PgError::error("error recovery panicked")
+                                ::types_error::PgError::error("error recovery panicked")
                             }
                         }
                     }
@@ -563,7 +563,7 @@ fn run_error_recovery(
     // Could not settle the transaction after repeated attempts: unrecoverable,
     // mirror C's PANIC-during-recovery process exit.
     Err(ereport(FATAL)
-        .errcode(types_error::error::ERRCODE_INTERNAL_ERROR)
+        .errcode(::types_error::error::ERRCODE_INTERNAL_ERROR)
         .errmsg("error recovery failed to settle the transaction; terminating backend")
         .into_error())
 }
@@ -788,7 +788,7 @@ fn dispatch_message<'mcx>(
                 }
                 other => {
                     return Err(ereport(ERROR)
-                        .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+                        .errcode(::types_error::error::ERRCODE_PROTOCOL_VIOLATION)
                         .errmsg(alloc::format!("invalid DESCRIBE message subtype {other}"))
                         .into_error());
                 }
@@ -835,7 +835,7 @@ fn dispatch_message<'mcx>(
 
         other => {
             return Err(ereport(FATAL)
-                .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+                .errcode(::types_error::error::ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg(alloc::format!("invalid frontend message type {other}"))
                 .into_error());
         }
@@ -885,7 +885,7 @@ fn dispatch_close_message<'mcx>(
         }
         other => {
             return Err(ereport(ERROR)
-                .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+                .errcode(::types_error::error::ERRCODE_PROTOCOL_VIOLATION)
                 .errmsg(alloc::format!("invalid CLOSE message subtype {other}"))
                 .into_error());
         }
@@ -982,7 +982,7 @@ pub fn PostgresMain(dbname: Option<&str>, username: Option<&str>) -> ! {
         // escaped all of `postgres_main_inner` is unrecoverable for this
         // backend (C `ereport(FATAL)`).
         Err(payload) => {
-            let mut err = match payload.downcast::<types_error::PgError>() {
+            let mut err = match payload.downcast::<::types_error::PgError>() {
                 Ok(e) => *e,
                 Err(payload) => {
                     let msg = payload
@@ -995,12 +995,12 @@ pub fn PostgresMain(dbname: Option<&str>, username: Option<&str>) -> ! {
                                 let (code, msg) = rest.split_at(5);
                                 let mut chars = [0u8; 5];
                                 chars.copy_from_slice(code.as_bytes());
-                                types_error::PgError::error(msg[1..].to_string())
-                                    .with_sqlstate(types_error::make_sqlstate(chars))
+                                ::types_error::PgError::error(msg[1..].to_string())
+                                    .with_sqlstate(::types_error::make_sqlstate(chars))
                             }
-                            _ => types_error::PgError::error(m),
+                            _ => ::types_error::PgError::error(m),
                         },
-                        None => types_error::PgError::error("backend setup path panicked"),
+                        None => ::types_error::PgError::error("backend setup path panicked"),
                     }
                 }
             };
@@ -1021,7 +1021,7 @@ pub fn PostgresMain(dbname: Option<&str>, username: Option<&str>) -> ! {
             // or a setup-phase FATAL/panic). Report it and exit cleanly (status
             // 1), mirroring the C where an unrecoverable FATAL ends the process
             // without provoking postmaster crash recovery.
-            utils_error::emit_error_report_for(&err);
+            ::utils_error::emit_error_report_for(&err);
             ipc_seams::proc_exit::call(1)
         }
     }
@@ -1083,7 +1083,7 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
         walsender_seams::wal_snd_signals::call();
     }
     if !am_walsender_signals {
-        use signal::SigHandler;
+        use ::signal::SigHandler;
         let pqsignal = port_pqsignal_seams::pqsignal::call;
 
         // pqsignal(SIGHUP, SignalHandlerForConfigReload);
@@ -1262,9 +1262,9 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
             event_trigger_seams::event_trigger_on_login::call()
         })) {
             Ok(r) => r,
-            Err(payload) => match payload.downcast::<types_error::PgError>() {
+            Err(payload) => match payload.downcast::<::types_error::PgError>() {
                 Ok(err) => Err(*err),
-                Err(_) => Err(types_error::PgError::error(
+                Err(_) => Err(::types_error::PgError::error(
                     "login event trigger path panicked",
                 )),
             },
@@ -1295,7 +1295,7 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
             // Mirror invoke_pgfunction (backend-utils-fmgr-core): a builtin
             // (or any ereport) that panicked with the full structured
             // `PgError` value keeps every ErrorData field (hint/detail/...).
-            Err(payload) => match payload.downcast::<types_error::PgError>() {
+            Err(payload) => match payload.downcast::<::types_error::PgError>() {
                 Ok(err) => Err(*err),
                 Err(payload) => {
                     // Legacy string channel: honor a `PGRUST-SQLSTATE:`
@@ -1310,12 +1310,12 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
                                 let (code, msg) = rest.split_at(5);
                                 let mut chars = [0u8; 5];
                                 chars.copy_from_slice(code.as_bytes());
-                                types_error::PgError::error(msg[1..].to_string())
-                                    .with_sqlstate(types_error::make_sqlstate(chars))
+                                ::types_error::PgError::error(msg[1..].to_string())
+                                    .with_sqlstate(::types_error::make_sqlstate(chars))
                             }
-                            _ => types_error::PgError::error(m),
+                            _ => ::types_error::PgError::error(m),
                         },
-                        None => types_error::PgError::error("unported path panicked"),
+                        None => ::types_error::PgError::error("unported path panicked"),
                     };
                     Err(pgerr)
                 }
@@ -1408,13 +1408,13 @@ fn run_one_iteration<'mcx>(mcx: Mcx<'mcx>, state: &mut LoopState) -> PgResult<()
 /// and leak it to a `&'mcx str`, mirroring the C query string that lives in
 /// `MessageContext` for the message's lifetime.
 fn leak_str_in<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<&'mcx str> {
-    let mut v: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+    let mut v: ::mcx::PgVec<'mcx, u8> = ::mcx::PgVec::new_in(mcx);
     v.try_reserve(bytes.len()).map_err(|_| mcx.oom(bytes.len()))?;
     v.extend_from_slice(bytes);
     let leaked: &'mcx [u8] = allocator_api2::boxed::Box::leak(v.into_boxed_slice());
     core::str::from_utf8(leaked).map_err(|_| {
         ereport(ERROR)
-            .errcode(types_error::error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+            .errcode(::types_error::error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
             .errmsg("invalid byte sequence in query string")
             .into_error()
     })

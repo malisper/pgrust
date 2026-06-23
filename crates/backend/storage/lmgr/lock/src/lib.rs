@@ -19,7 +19,7 @@
 //!     context-free seams (`grant_lock` / `lock_check_conflicts` / the
 //!     `lock_wait_queue_*` family / `proclock_hold_mask` / ...) which reach the
 //!     ambient table by `(LOCKTAG, ProcNumber)`.
-//!   * **deadlock.c** models the graph in its own `types_deadlock::LockSpace`
+//!   * **deadlock.c** models the graph in its own `::types_deadlock::LockSpace`
 //!     arena; lock.c only answers `get_lock_method_table(&LockSpace, LockId)`
 //!     and `get_lockmode_name` over that vocabulary.
 //!
@@ -42,9 +42,9 @@ mod tables;
 // hand a subtransaction's locks to its parent (commit) or release them (abort).
 pub use locking::{LockReassignCurrentOwner, LockReleaseCurrentOwner};
 
-use types_core::Size;
-use types_error::PgResult;
-use types_storage::lock::{LOCKMETHODID, LOCKMODE, LOCKTAG};
+use ::types_core::Size;
+use ::types_error::PgResult;
+use ::types_storage::lock::{LOCKMETHODID, LOCKMODE, LOCKTAG};
 
 // ===========================================================================
 // GUC variables owned by lock.c (`int max_locks_per_xact`,
@@ -85,9 +85,9 @@ pub fn max_locks_per_xact() -> i32 {
 fn nlockents() -> PgResult<i64> {
     let max_backends = init_small_seams::max_backends::call() as Size;
     let max_prepared = init_small_seams::max_prepared_xacts::call() as Size;
-    let sum = ipc_shmem_seams::add_size::call(max_backends, max_prepared)?;
+    let sum = ::ipc_shmem_seams::add_size::call(max_backends, max_prepared)?;
     let total =
-        ipc_shmem_seams::mul_size::call(max_locks_per_xact_get() as Size, sum)?;
+        ::ipc_shmem_seams::mul_size::call(max_locks_per_xact_get() as Size, sum)?;
     Ok(total as i64)
 }
 
@@ -98,7 +98,7 @@ fn nlockents() -> PgResult<i64> {
 fn total_procs() -> usize {
     let max_backends = init_small_seams::max_backends::call() as usize;
     let max_prepared = init_small_seams::max_prepared_xacts::call() as usize;
-    let num_aux = types_storage::storage::NUM_AUXILIARY_PROCS as usize;
+    let num_aux = ::types_storage::storage::NUM_AUXILIARY_PROCS as usize;
     max_backends + num_aux + max_prepared
 }
 
@@ -107,7 +107,7 @@ fn total_procs() -> usize {
 /// model these are this backend's `thread_local`s; we simply (re)initialize
 /// them empty (matching `ShmemInitHash` for a fresh segment + `SpinLockInit`).
 pub fn LockManagerShmemInit() -> PgResult<()> {
-    use ipc_shmem_seams::shmem_init_struct;
+    use ::ipc_shmem_seams::shmem_init_struct;
 
     // The C `ShmemInitHash` table sizes: `max_table_size` LOCK entries, 2x that
     // PROCLOCK entries (lock.c `InitLocks`). Our flat arena pre-sizes the LOCK /
@@ -136,12 +136,12 @@ pub fn InitLockManagerAccess() -> PgResult<()> {
 /// `hash_estimate_size` of the LOCK table + the PROCLOCK table (2× entries) +
 /// a 10% safety margin.
 pub fn LockManagerShmemSize() -> PgResult<Size> {
-    use ipc_shmem_seams::add_size;
-    use dynahash_seams::hash_estimate_size;
+    use ::ipc_shmem_seams::add_size;
+    use ::dynahash_seams::hash_estimate_size;
 
     let max_table_size = nlockents()?;
     let lock_sz = hash_estimate_size::call(max_table_size, core::mem::size_of::<
-        types_storage::lock::LOCK,
+        ::types_storage::lock::LOCK,
     >());
     let mut size = add_size::call(0, lock_sz)?;
 
@@ -149,7 +149,7 @@ pub fn LockManagerShmemSize() -> PgResult<Size> {
     let proclock_entries = max_table_size.saturating_mul(2);
     let proclock_sz = hash_estimate_size::call(
         proclock_entries,
-        core::mem::size_of::<types_storage::lock::PROCLOCK>(),
+        core::mem::size_of::<::types_storage::lock::PROCLOCK>(),
     );
     size = add_size::call(size, proclock_sz)?;
 
@@ -199,7 +199,7 @@ pub fn get_lockmode_name(lockmethodid: LOCKMETHODID, mode: LOCKMODE) -> alloc::s
 pub fn conflict_tab(
     lockmethodid: u8,
     mode: LOCKMODE,
-) -> types_storage::lock::LOCKMASK {
+) -> ::types_storage::lock::LOCKMASK {
     tables::conflict_tab_for(lockmethodid as LOCKMETHODID, mode)
 }
 
@@ -208,26 +208,26 @@ pub fn conflict_tab(
 // ===========================================================================
 
 /// `GetLocksMethodTable(lock)` (lock.c), expressed over deadlock.c's
-/// `LockSpace` arena: build the `types_deadlock::LockMethodData` for the lock's
+/// `LockSpace` arena: build the `::types_deadlock::LockMethodData` for the lock's
 /// method (number of modes, conflict table, mode names).
 pub fn get_lock_method_table(
-    space: &types_deadlock::LockSpace,
-    lock: types_deadlock::LockId,
-) -> types_deadlock::LockMethodData {
+    space: &::types_deadlock::LockSpace,
+    lock: ::types_deadlock::LockId,
+) -> ::types_deadlock::LockMethodData {
     let tag = space.lock(lock).tag;
     let lockmethodid = tag.locktag_lockmethodid as LOCKMETHODID;
 
     let conflicts = tables::lock_conflicts();
-    let mut conflict_tab = [0i32; types_storage::lock::MAX_LOCKMODES];
+    let mut conflict_tab = [0i32; ::types_storage::lock::MAX_LOCKMODES];
     for (i, c) in conflicts.iter().enumerate() {
         conflict_tab[i] = *c;
     }
-    let mut lock_mode_names = [""; types_storage::lock::MAX_LOCKMODES];
+    let mut lock_mode_names = [""; ::types_storage::lock::MAX_LOCKMODES];
     for (i, n) in tables::LOCK_MODE_NAMES.iter().enumerate() {
         lock_mode_names[i] = n;
     }
 
-    types_deadlock::LockMethodData {
+    ::types_deadlock::LockMethodData {
         num_lock_modes: tables::num_lock_modes(lockmethodid),
         conflict_tab,
         lock_mode_names,
@@ -245,11 +245,11 @@ pub fn get_lockmode_name_deadlock(
 
 // ===========================================================================
 // deadlock.c bridge: project the live shared LOCK/PROCLOCK graph into a
-// `types_deadlock::LockSpace` arena (the C `DeadLockCheck` read of shared
+// `::types_deadlock::LockSpace` arena (the C `DeadLockCheck` read of shared
 // memory under all partition LWLocks).
 // ===========================================================================
 
-/// Build the `types_deadlock::LockSpace` arena from the live shared lock table,
+/// Build the `::types_deadlock::LockSpace` arena from the live shared lock table,
 /// returning it plus the `ProcId` for `my_proc`. The caller (proc.c
 /// `CheckDeadLock`) holds all lock partition LWLocks, so the snapshot is a
 /// consistent picture of the wait-for graph.
@@ -267,10 +267,10 @@ pub fn get_lockmode_name_deadlock(
 ///   * per lock: `tag`, the holder `PROCLOCK`s (`my_proc` + `hold_mask`), and the
 ///     ordered `wait_procs` queue.
 pub fn build_dead_lock_space(
-    my_proc: types_core::ProcNumber,
-) -> (types_deadlock::LockSpace, types_deadlock::ProcId) {
+    my_proc: ::types_core::ProcNumber,
+) -> (::types_deadlock::LockSpace, ::types_deadlock::ProcId) {
     use lmgr_proc_seams as proc;
-    use types_core::INVALID_PROC_NUMBER;
+    use ::types_core::INVALID_PROC_NUMBER;
     use types_deadlock::{LockId, LockSlot, LockSpace, ProcId, ProcLockSlot, ProcSlot};
 
     let n_procs = total_procs();
@@ -280,7 +280,7 @@ pub fn build_dead_lock_space(
     // wait fields (wait_lock / wait_lock_mode / is_on_wait_queue) are filled in
     // below from the shared wait queues; here we record the proc-private fields.
     for n in 0..n_procs {
-        let procno = n as types_core::ProcNumber;
+        let procno = n as ::types_core::ProcNumber;
         let mut slot = ProcSlot::new(proc::proc_pid::call(procno));
         slot.status_flags = proc::proc_status_flags::call(procno);
         slot.wait_lock_mode = proc::proc_wait_lock_mode::call(procno);
@@ -361,7 +361,7 @@ pub fn build_dead_lock_space(
 /// (the C `DeadLockCheck` queue rearrangement + `ProcLockWakeup`).
 pub fn apply_soft_deadlock_wait_order(
     lock: LOCKTAG,
-    new_order: alloc::vec::Vec<types_core::ProcNumber>,
+    new_order: alloc::vec::Vec<::types_core::ProcNumber>,
 ) {
     state::with_shared(|s| s.waitq_set_order(&lock, &new_order));
     locking::proc_lock_wakeup_for_tag(&lock);
@@ -422,7 +422,7 @@ pub fn init_seams() {
     // F1 release-all / session / introspection.
     seams::lock_release_all::set(locking::LockReleaseAll);
     seams::lock_release_all_user::set(|| {
-        locking::LockReleaseAll(types_storage::lock::USER_LOCKMETHOD, true)
+        locking::LockReleaseAll(::types_storage::lock::USER_LOCKMETHOD, true)
     });
     seams::lock_release_session::set(|lockmethodid| {
         // The C is infallible (no ereport on a valid method id from advisory

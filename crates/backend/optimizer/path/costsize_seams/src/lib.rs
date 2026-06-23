@@ -10,7 +10,7 @@
 
 extern crate alloc;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use pathnodes::{PathId as IxPathId, PlannerInfo as IxPlannerInfo, RelId as IxRelId};
 
 seam_core::seam!(
@@ -32,7 +32,7 @@ seam_core::seam!(
     /// them. The bitmapqual crosses as its `PathId` arena handle.
     pub fn create_partial_bitmap_paths<'mcx>(
         root: &mut IxPlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         rel: IxRelId,
         bitmapqual: IxPathId,
     ) -> PgResult<()>
@@ -64,7 +64,7 @@ seam_core::seam!(
  * `&PlannerInfo`, primitive scalars).
  * ======================================================================== */
 
-use types_core::primitive::{Cost, Oid, Selectivity};
+use ::types_core::primitive::{Cost, Oid, Selectivity};
 use pathnodes::{NodeId, PathId, PlannerInfo, RelId, RinfoId, SpecialJoinInfo};
 
 /// `GetTablespacePageCosts` output (`utils/cache/spccache.c`).
@@ -104,7 +104,7 @@ seam_core::seam!(
     /// `clauselist_selectivity(root, clauses, varRelid, jointype, sjinfo)` over
     /// a list of clause-expr handles (the C `List *RestrictInfo*`).
     pub fn clauselist_selectivity<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         clauses: &[NodeId],
         var_relid: i32,
@@ -121,7 +121,7 @@ seam_core::seam!(
     /// consult; `set_baserel_size_estimates` passes `rel->baserestrictinfo`
     /// through it, exactly as C does.
     pub fn clauselist_selectivity_rinfos<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         clauses: &[RinfoId],
         var_relid: i32,
@@ -132,7 +132,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `clause_selectivity(root, clause, varRelid, jointype, sjinfo)`.
     pub fn clause_selectivity<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         clause: NodeId,
         var_relid: i32,
@@ -153,7 +153,7 @@ seam_core::seam!(
     /// call sites (`initial_cost_mergejoin` / `final_cost_mergejoin`) already
     /// thread both. Returns `PgResult` because the stats path can `ereport`.
     pub fn mergejoinscansel<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         clause: NodeId,
         opfamily: Oid,
@@ -182,9 +182,9 @@ seam_core::seam!(
     /// re-figure an `IncrementalSort` plan node's cost via `cost_incremental_sort`
     /// over a dummy stack `Path`. Returns `(startup_cost, total_cost)`.
     pub fn cost_incremental_sort_label<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
-        pathkeys: &[pathnodes::PathKey],
+        pathkeys: &[::pathnodes::PathKey],
         n_presorted_cols: i32,
         input_disabled_nodes: i32,
         input_startup_cost: Cost,
@@ -203,7 +203,7 @@ seam_core::seam!(
     /// call site (`final_cost_hashjoin`) already threads both. Returns
     /// `PgResult` because the stats path can `ereport`.
     pub fn estimate_hash_bucket_stats<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         hashkey: NodeId,
         nbuckets: f64,
@@ -221,7 +221,7 @@ seam_core::seam!(
     /// already holds `run` + `&mut root`. Fallible because the stats path can
     /// `ereport`.
     pub fn estimate_multivariate_bucketsize<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         inner_rel: RelId,
         hashclauses: &[RinfoId],
@@ -324,7 +324,7 @@ seam_core::seam!(
     /// planner node arena).
     pub fn amcostestimate<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         path: PathId,
         loop_count: f64,
     ) -> AmCostEstimate
@@ -443,7 +443,7 @@ seam_core::seam!(
     /// `tablesample` clause node (the same RTE-projection contract as
     /// `rte_relid` / `rte_functions_exprcost`).
     pub fn rte_tablesample_tsmhandler<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         rel: RelId,
     ) -> Oid
@@ -454,7 +454,7 @@ seam_core::seam!(
     /// threaded so the owner can `planner_rt_fetch` the RTE's owned funcexprs
     /// (the same RTE-projection contract as `rte_relid`).
     pub fn rte_functions_exprcost<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         rel: RelId,
     ) -> (Cost, Cost)
@@ -462,7 +462,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `cost_qual_eval_node((Node *) rte->tablefunc, root)` (cost_tablefuncscan).
     pub fn rte_tablefunc_exprcost<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         rel: RelId,
     ) -> (Cost, Cost)
@@ -472,7 +472,7 @@ seam_core::seam!(
     /// over `rte->functions`. `run` is threaded so the owner can
     /// `planner_rt_fetch` the RTE's owned funcexprs.
     pub fn rte_function_max_set_rows<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         rel: RelId,
     ) -> f64
@@ -483,7 +483,7 @@ seam_core::seam!(
     /// the RTE through the planner run, so `run` is threaded (matching the
     /// `backend-optimizer-rte-seams` RTE-projection contract).
     pub fn rte_cte_self_reference<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         rel: RelId,
     ) -> bool
@@ -495,7 +495,7 @@ seam_core::seam!(
     /// through the planner run, so `run` is threaded (matching the
     /// `backend-optimizer-rte-seams` RTE-projection contract).
     pub fn rte_enrtuples<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         rel: RelId,
     ) -> f64
@@ -508,7 +508,7 @@ seam_core::seam!(
     /// threaded (matching the `backend-optimizer-rte-seams` RTE-projection
     /// contract — `planner_rt_fetch(run, root, rti)->relid`).
     pub fn rte_relid<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         rel: RelId,
     ) -> Oid
@@ -538,7 +538,7 @@ seam_core::seam!(
     /// owner can deep-copy the WindowFunc args (which may carry an `Aggref`, as in
     /// `SUM(SUM(x)) OVER ...`) via `clone_in` — a plain `.clone()` panics.
     pub fn windowfunc_cost<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         wfunc: NodeId,
     ) -> (Cost, Cost)
@@ -553,7 +553,7 @@ seam_core::seam!(
     /// [`PlannerRun`] and re-interns stripped grouping expressions into the
     /// arena), so the seam is fallible.
     pub fn windowclause_cost_info<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         winclause: NodeId,
         input_tuples: f64,
@@ -568,7 +568,7 @@ seam_core::seam!(
     /// removal of FK-matched clauses from the restrictlist — is routed to the
     /// owner. Returns `(fkselec, remaining_clause_handles)`.
     pub fn get_foreign_key_join_selectivity<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         outer_rel: RelId,
         inner_rel: RelId,
@@ -592,11 +592,11 @@ seam_core::seam!(
     /// one was generated.
     pub fn find_derived_clause_for_ec_member(
         root: &mut PlannerInfo,
-        ec: pathnodes::EcId,
-        em: pathnodes::EmId,
+        ec: ::pathnodes::EcId,
+        em: ::pathnodes::EmId,
     ) -> Option<RinfoId>
 );
 
 /// Re-exported so installers can name the carrier types without importing the
 /// optimizer crate.
-pub use pathnodes::QualCost;
+pub use ::pathnodes::QualCost;

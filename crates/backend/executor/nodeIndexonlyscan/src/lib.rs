@@ -44,14 +44,14 @@ use storage_shm_toc_seams as shm_toc;
 use predicate_seams as predicate;
 use postgres_seams as tcop_postgres;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
 use ::nodes::nodeindexonlyscan::{
     IndexOnlyScan, IndexOnlyScanState, ParallelIndexScanDescHandle,
 };
 use nodes::{EStateData, InvalidBuffer, SlotId, TupleSlotKind};
-use types_scan::sdir::ScanDirection;
+use ::types_scan::sdir::ScanDirection;
 
 /// `EXEC_FLAG_EXPLAIN_ONLY` (`executor/executor.h`) — "EXPLAIN, no ANALYZE".
 pub const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
@@ -361,8 +361,8 @@ fn StoreIndexTuple<'mcx>(
             .as_ref()
             .ok_or_else(|| elog("index-only scan: no index tuple descriptor"))?;
         let columns = indextuple::index_deform_tuple::call(mcx, itup.as_slice(), itupdesc)?;
-        let mut values = mcx::vec_with_capacity_in(mcx, columns.len())?;
-        let mut isnull = mcx::vec_with_capacity_in(mcx, columns.len())?;
+        let mut values = ::mcx::vec_with_capacity_in(mcx, columns.len())?;
+        let mut isnull = ::mcx::vec_with_capacity_in(mcx, columns.len())?;
         for (value, null) in columns.iter() {
             values.push(value.clone());
             isnull.push(*null);
@@ -598,7 +598,7 @@ pub fn ExecInitIndexOnlyScan<'mcx>(
     node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
-) -> PgResult<mcx::PgBox<'mcx, IndexOnlyScanState<'mcx>>> {
+) -> PgResult<::mcx::PgBox<'mcx, IndexOnlyScanState<'mcx>>> {
     let mcx: Mcx<'mcx> = estate.es_query_cxt;
 
     // IndexOnlyScan *node — the enclosing plan-tree node (the C `IndexOnlyScan
@@ -936,7 +936,7 @@ pub fn ExecIndexOnlyScanInitializeWorker<'mcx>(
     //         OffsetToPointer(piscan, piscan->ps_offset_ins);
     if instrument {
         let shared = indexam::index_scan_resolve_shared_info::call(piscan)?;
-        node.ioss_SharedInfo = Some(mcx::alloc_in(mcx, shared)?);
+        node.ioss_SharedInfo = Some(::mcx::alloc_in(mcx, shared)?);
     }
 
     if !parallel_aware {
@@ -992,7 +992,7 @@ pub fn ExecIndexOnlyScanRetrieveInstrumentation<'mcx>(
     let copy = ::nodes::SharedIndexScanInstrumentation {
         num_workers: shared.num_workers,
         winstrument: {
-            let mut v = mcx::vec_with_capacity_in(mcx, shared.winstrument.len())?;
+            let mut v = ::mcx::vec_with_capacity_in(mcx, shared.winstrument.len())?;
             for w in shared.winstrument.iter() {
                 v.push(*w);
             }
@@ -1001,7 +1001,7 @@ pub fn ExecIndexOnlyScanRetrieveInstrumentation<'mcx>(
             v.into_iter().collect::<alloc::vec::Vec<_>>()
         },
     };
-    node.ioss_SharedInfo = Some(mcx::alloc_in(mcx, copy)?);
+    node.ioss_SharedInfo = Some(::mcx::alloc_in(mcx, copy)?);
     Ok(())
 }
 

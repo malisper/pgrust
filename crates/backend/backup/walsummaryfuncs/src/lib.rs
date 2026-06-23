@@ -15,7 +15,7 @@
 //! row through `materialized_srf_putvalues` (the funcapi-owned
 //! `heap_form_tuple` + `tuplestore_puttuple` against `rsi->setDesc` /
 //! `rsi->setResult`). The row values are built on the canonical
-//! `types_tuple::Datum` (the C `Int64GetDatum` / `LSNGetDatum` /
+//! `::types_tuple::Datum` (the C `Int64GetDatum` / `LSNGetDatum` /
 //! `ObjectIdGetDatum` / `Int16GetDatum` / `BoolGetDatum` word builders). The
 //! `(Datum) 0` return is the null word.
 //!
@@ -52,7 +52,7 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use walsummary_seams as walsummary;
 use postgres_seams as tcop;
@@ -60,11 +60,11 @@ use funcapi_seams as funcapi;
 use common_blkreftable as blkreftable;
 
 use types_core::{TimeLineID, XLogRecPtr};
-use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
+use ::types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
 use types_error::{PgError, PgResult};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_tuple::Datum;
-use types_walsummarizer::WalSummaryFile;
+use ::types_tuple::Datum;
+use ::types_walsummarizer::WalSummaryFile;
 
 /// `NUM_WS_ATTS` — output columns of `pg_available_wal_summaries`.
 const NUM_WS_ATTS: usize = 3;
@@ -97,8 +97,8 @@ pub fn pg_available_wal_summaries<'mcx>(
     let wslist = walsummary::get_wal_summaries::call(
         mcx,
         0,                            // tli = 0 (any)
-        types_core::InvalidXLogRecPtr, // start_lsn (unbounded)
-        types_core::InvalidXLogRecPtr, // end_lsn (unbounded)
+        ::types_core::InvalidXLogRecPtr, // start_lsn (unbounded)
+        ::types_core::InvalidXLogRecPtr, // end_lsn (unbounded)
     )?;
 
     // foreach(lc, wslist) { WalSummaryFile *ws = lfirst(lc); ... }
@@ -196,7 +196,7 @@ pub fn pg_wal_summary_contents<'mcx>(
         // If the limit block is not InvalidBlockNumber, emit an extra row with
         // that block number and limit_block = true.
         //   if (BlockNumberIsValid(limit_block)) { ... }
-        if limit_block != types_core::InvalidBlockNumber {
+        if limit_block != ::types_core::InvalidBlockNumber {
             // values[4] = Int64GetDatum((int64) limit_block);
             // values[5] = BoolGetDatum(true);
             values[4] = Datum::from_i64(limit_block as i64);

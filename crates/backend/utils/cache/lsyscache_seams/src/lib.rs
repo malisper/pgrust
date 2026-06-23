@@ -6,10 +6,10 @@
 
 use mcx::{Mcx, PgString, PgVec};
 use types_core::{AttrNumber, Oid};
-// `datum::Datum` (the bare machine word) is retained ONLY at this unit's
+// `::datum::Datum` (the bare machine word) is retained ONLY at this unit's
 // two genuine bare-word edges, each flagged `BARE-WORD EDGE` at its decl below:
 //   * `get_attstatsslot_mcv` — its MCV value array mirrors `AttStatsSlot.values`
-//     (`types_selfuncs`, still `PgVec<datum::Datum>`) and each element is
+//     (`types_selfuncs`, still `PgVec<::datum::Datum>`) and each element is
 //     fed straight into the `function_call1_coll` fmgr edge (arg still the
 //     bare-word `Datum`); migrating it alone would diverge from those two
 //     still-bare-word contracts (the execTuples canonical-carrier follow-on,
@@ -18,12 +18,12 @@ use types_core::{AttrNumber, Oid};
 //     (the `OidFunctionCall0` result kept opaque, per fmgr `oid_function_call0`),
 //     a pointer, NOT a SQL value: it has no by-value/by-reference shape to move
 //     onto the canonical enum without inventing opacity.
-use datum::Datum;
+use ::datum::Datum;
 // Canonical unified value (the Datum-unification keystone). Used for the
 // by-reference `attoptions` (`text[]`) value, which cannot ride the bare scalar
 // word; the owner already returns this canonical type.
 use types_tuple::heaptuple::Datum as DatumV;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_selfuncs::{AttStatsSlot, StatsTuple};
 use array::{ArrayElementIoData, ArrayIoFuncSelector};
 
@@ -75,7 +75,7 @@ seam_core::seam!(
     /// [`AttStatsSlot::values`] carries.
     ///
     /// The shared `AttStatsSlot.values` (`types_selfuncs`, still
-    /// `PgVec<datum::Datum>`) holds a by-reference element as an in-buffer
+    /// `PgVec<::datum::Datum>`) holds a by-reference element as an in-buffer
     /// offset that is not dereferenceable by a consumer; re-typing it (and
     /// migrating its ~6-crate / 47-site consumer set) is the deferred
     /// "stats argument-detoast" campaign. Until then, consumers that must decode
@@ -117,7 +117,7 @@ seam_core::seam!(
 
 /// `IOFuncSelector` (`lsyscache.h`): which I/O function `get_type_io_data`
 /// resolves. Canonical definition in `types-core::fmgr`.
-pub use types_core::fmgr::IOFuncSelector;
+pub use ::types_core::fmgr::IOFuncSelector;
 
 /// The output of `get_type_io_data` (lsyscache.c): the `pg_type` storage
 /// parameters plus the resolved I/O proc OID and its I/O parameter OID.
@@ -168,7 +168,7 @@ seam_core::seam!(
     /// detoast `ereport(ERROR)`s plus OOM from the copy.
     ///
     /// BARE-WORD EDGE (Datum unification): the MCV `values` array is the
-    /// bare-word `datum::Datum` because it mirrors `AttStatsSlot.values`
+    /// bare-word `::datum::Datum` because it mirrors `AttStatsSlot.values`
     /// (still bare-word) and each element flows straight into the bare-word
     /// `function_call1_coll` fmgr edge in `ExecHashBuildSkewHash`. Threading the
     /// canonical carrier here is the execTuples canonical-carrier follow-on
@@ -275,7 +275,7 @@ seam_core::seam!(
     pub fn get_attname<'mcx>(
         mcx: Mcx<'mcx>,
         relid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
         missing_ok: bool,
     ) -> PgResult<Option<PgString<'mcx>>>
 );
@@ -284,7 +284,7 @@ seam_core::seam!(
     /// `get_attnum(relid, attname)` (lsyscache.c): the attribute's number, or
     /// `InvalidAttrNumber` (0) if no such attribute. `Err` carries the
     /// syscache machinery's `ereport(ERROR)`s.
-    pub fn get_attnum(relid: Oid, attname: &str) -> PgResult<types_core::AttrNumber>
+    pub fn get_attnum(relid: Oid, attname: &str) -> PgResult<::types_core::AttrNumber>
 );
 
 seam_core::seam!(
@@ -1007,7 +1007,7 @@ seam_core::seam!(
     pub fn get_typdefault<'mcx>(
         mcx: Mcx<'mcx>,
         typid: Oid,
-    ) -> PgResult<Option<mcx::PgBox<'mcx, nodes::nodes::Node<'mcx>>>>
+    ) -> PgResult<Option<::mcx::PgBox<'mcx, nodes::nodes::Node<'mcx>>>>
 );
 
 // ---- statistics (pg_statistic) --------------------------------------------

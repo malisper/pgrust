@@ -17,8 +17,8 @@ use gzip_seams::{DeflateOutcome, GzipStreamHandle};
 use sink::{
     bbsink_begin_archive, bbsink_begin_backup, bbsink_end_archive, BbsinkState, TablespaceInfo,
 };
-use mcx::MemoryContext;
-use types_core::primitive::BLCKSZ;
+use ::mcx::MemoryContext;
+use ::types_core::primitive::BLCKSZ;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Event {
@@ -33,7 +33,7 @@ type Log<'a> = &'a RefCell<Vec<Event>>;
 /// Leaf sink that records every callback and captures the output bytes.
 struct RecordingOps<'a, 'mcx> {
     log: Log<'a>,
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
 }
 
 impl<'a, 'mcx> BbsinkOps<'mcx> for RecordingOps<'a, 'mcx> {

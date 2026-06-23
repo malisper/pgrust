@@ -16,11 +16,11 @@
 //! arg, all strict, none retset).
 
 use types_core::{Oid, TimestampTz};
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::resolution::BuiltinFunction;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::resolution::BuiltinFunction;
 use fmgr::{FunctionCallInfoBaseData, PgFnNative};
-use types_pgstat::activity_pgstat::{PgStat_StatTabEntry, PgStat_TableStatus};
+use ::types_pgstat::activity_pgstat::{PgStat_StatTabEntry, PgStat_TableStatus};
 
 /// `PG_GETARG_OID(0)` → `DatumGetObjectId`: the relation OID argument.
 #[inline]

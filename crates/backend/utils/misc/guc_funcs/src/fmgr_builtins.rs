@@ -32,12 +32,12 @@
 
 use alloc::string::String;
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED};
 
 // ---------------------------------------------------------------------------

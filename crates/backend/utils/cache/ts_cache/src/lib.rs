@@ -22,8 +22,8 @@
 
 use std::cell::RefCell;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use indexam_seams as indexam_seams;
 use table::{table_close, table_open};
@@ -39,23 +39,23 @@ use error_seams as error_seams;
 use fmgr_seams as fmgr_seams;
 use init_small_seams as init_small_seams;
 use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgHashMap, PgVec};
-use cache::SysCacheKey;
-use types_core::fmgr::F_OIDEQ;
+use ::cache::SysCacheKey;
+use ::types_core::fmgr::F_OIDEQ;
 use types_core::{InvalidOid, Oid, OidIsValid};
 // The migrated by-value tuple surface uses the canonical
 // `types_tuple::...::Datum<'mcx>` enum directly. The bare-word newtype
-// `datum::Datum` (here aliased `ScalarWord`) survives only at the
+// `::datum::Datum` (here aliased `ScalarWord`) survives only at the
 // audited ABI edges where an *unchanged* cross-crate contract still speaks the
 // plain scalar word: the syscache key (`SysCacheKey::Value`), the scankey
 // argument (`ScanKeyData::sk_argument`), the syscache-invalidation callback
 // `arg` (`SyscacheCallbackFunction`), and the opaque per-template `dictData`
 // `void *` word returned by the dictionary-init fmgr seam.
-use datum::Datum as ScalarWord;
+use ::datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, NOTICE};
 use types_guc::{GucSource, PGC_S_TEST};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_scan::sdir::ForwardScanDirection;
-use types_storage::lock::AccessShareLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_scan::sdir::ForwardScanDirection;
+use ::types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
 /// `MAXTOKENTYPE` / `MAXDICTSPERTT` — arbitrary limits on the workspace size
@@ -176,7 +176,7 @@ struct TsCacheState<'mcx> {
     ts_current_config_cache: Oid,
 }
 
-mcx::bind!(TsCacheStateTy => TsCacheState<'mcx>);
+::mcx::bind!(TsCacheStateTy => TsCacheState<'mcx>);
 
 thread_local! {
     static STATE: RefCell<Option<McxOwned<TsCacheStateTy>>> = const { RefCell::new(None) };
@@ -637,7 +637,7 @@ pub struct TSDictTemplateInfo<'mcx> {
     pub lexize_oid: Oid,
     /// `deserialize_deflist(pg_ts_dict.dictinitoption)` — the `(defname, arg)`
     /// option list the template's `*_init` method consumes.
-    pub options: PgVec<'mcx, cache::deflist::DefElemString<'mcx>>,
+    pub options: PgVec<'mcx, ::cache::deflist::DefElemString<'mcx>>,
 }
 
 /// Read the template OID + lexize-method OID + decoded init options for a

@@ -4,13 +4,13 @@
 //! owner; `acldefault_sql` is its SQL-callable wrapper.
 
 use crate::acl_ops::allocacl;
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_acl::{
     AclItem, AclMode, ACL_ALTER_SYSTEM, ACL_CONNECT, ACL_CREATE, ACL_CREATE_TEMP, ACL_DELETE,
     ACL_EXECUTE, ACL_ID_PUBLIC, ACL_INSERT, ACL_MAINTAIN, ACL_NO_RIGHTS, ACL_REFERENCES,
     ACL_SELECT, ACL_SET, ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::parsenodes::ObjectType;
 

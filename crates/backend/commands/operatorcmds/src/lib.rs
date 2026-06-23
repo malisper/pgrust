@@ -19,19 +19,19 @@
 //! tuple I/O) cross to their still-unported owners through `-seams` crates,
 //! each of which panics until the owner lands. No silent stubs.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
-use utils_error::ereport;
-use types_error::pg_error::ErrorLocation;
+use ::utils_error::ereport;
+use ::types_error::pg_error::ErrorLocation;
 use types_error::{
     PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERROR, WARNING,
 };
 
-use catalog_namespace::QualifiedNameGetCreationNamespace;
+use ::catalog_namespace::QualifiedNameGetCreationNamespace;
 use define::{defGetBoolean, defGetQualifiedName, defGetTypeName};
-use parse_oper::op_signature_string;
+use ::parse_oper::op_signature_string;
 
 use aclchk_seams::{aclcheck_error, object_aclcheck, object_ownercheck};
 use pg_operator_seams::{
@@ -40,19 +40,19 @@ use pg_operator_seams::{
     OperatorAttrUpdate, OperatorCreateArgs, OperatorValidateParamsArgs,
 };
 use functioncmds_seams::{lookup_func_name, name_list_to_string};
-use parse_type_seams::typename_type_id;
-use format_type_seams::format_type_be_owned;
+use ::parse_type_seams::typename_type_id;
+use ::format_type_seams::format_type_be_owned;
 use lsyscache_seams::{get_element_type, get_func_rettype, get_namespace_name};
-use miscinit_seams::get_user_id;
-use superuser_seams::superuser;
+use ::miscinit_seams::get_user_id;
+use ::superuser_seams::superuser;
 
 use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE, ACL_USAGE};
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     NAMESPACE_RELATION_ID, OPERATOR_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID,
 };
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::catalog::{FirstGenbkiObjectId, INT4OID, INTERNALOID, OIDOID};
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::catalog::{FirstGenbkiObjectId, INT4OID, INTERNALOID, OIDOID};
+use ::types_core::primitive::{InvalidOid, Oid};
 use ::nodes::parsenodes::{OBJECT_FUNCTION, OBJECT_OPERATOR, OBJECT_SCHEMA, OBJECT_TYPE};
 use parsenodes::{AlterOperatorStmt, DefElem, Node, TypeName};
 
@@ -111,7 +111,7 @@ fn to_resolver_typename(tn: &TypeName) -> opclass::TypeName {
 /// `aclcheck_error_type(aclerr, typeOid)` (aclchk.c): for a type whose ACL
 /// check failed, render the (element-)type name and raise. Always raises (the
 /// only way callers reach it).
-fn aclcheck_error_type(aclerr: types_acl::AclResult, type_oid: Oid) -> PgResult<()> {
+fn aclcheck_error_type(aclerr: ::types_acl::AclResult, type_oid: Oid) -> PgResult<()> {
     let element_type = get_element_type::call(type_oid)?.unwrap_or(InvalidOid);
     let name = format_type_be_owned::call(if OidIsValid(element_type) {
         element_type
@@ -776,7 +776,7 @@ pub fn AlterOperator(stmt: &AlterOperatorStmt) -> PgResult<ObjectAddress> {
 /// `backend-catalog-pg-operator-seams` (so dependency.c can call it across a
 /// cycle) but its C lives here, so this crate is its installer.
 pub fn init_seams() {
-    pg_operator_seams::RemoveOperatorById::set(RemoveOperatorById);
+    ::pg_operator_seams::RemoveOperatorById::set(RemoveOperatorById);
 
     // ProcessUtilitySlow dispatch target (utility.c): ALTER OPERATOR. Decode the
     // rich `AlterOperatorStmt` into the flat parsenodes form the ported
@@ -786,7 +786,7 @@ pub fn init_seams() {
 
 /// Outward-seam adapter for `AlterOperator(stmt)` (utility.c `ProcessUtilitySlow`
 /// `T_AlterOperatorStmt`): decode the rich `AlterOperatorStmt` into the flat
-/// [`parsenodes::AlterOperatorStmt`] and run the ported [`AlterOperator`]
+/// [`::parsenodes::AlterOperatorStmt`] and run the ported [`AlterOperator`]
 /// body.
 fn alter_operator_seam<'mcx>(
     _mcx: Mcx<'mcx>,
@@ -815,12 +815,12 @@ fn alter_operator_seam<'mcx>(
         None => None,
     };
 
-    let mut options: Vec<parsenodes::Node> = Vec::with_capacity(aos.options.len());
+    let mut options: Vec<::parsenodes::Node> = Vec::with_capacity(aos.options.len());
     for n in aos.options.iter() {
         options.push(rich_node_to_parse(n)?);
     }
 
-    let pn = parsenodes::AlterOperatorStmt { opername, options };
+    let pn = ::parsenodes::AlterOperatorStmt { opername, options };
 
     AlterOperator(&pn)
 }

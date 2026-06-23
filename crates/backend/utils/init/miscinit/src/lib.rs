@@ -16,7 +16,7 @@
 use std::cell::{Cell, RefCell};
 
 use mcx::{Mcx, MemoryContext, PgString};
-use types_core::catalog::BOOTSTRAP_SUPERUSERID;
+use ::types_core::catalog::BOOTSTRAP_SUPERUSERID;
 use types_core::{
     BackendType, ProcessingMode, UserAuth, InvalidOid, Oid, SECURITY_LOCAL_USERID_CHANGE,
     SECURITY_NOFORCE_RLS, SECURITY_RESTRICTED_OPERATION, uaReject,
@@ -747,10 +747,10 @@ fn load_libraries(mcx: Mcx<'_>, libraries: Option<&str>, gucname: &str, restrict
         Some(list) => list,
         None => {
             // syntax error in list
-            utils_error::ereport(types_error::LOG)
-                .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+            utils_error::ereport(::types_error::LOG)
+                .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
                 .errmsg(format!("invalid list syntax in parameter \"{gucname}\""))
-                .finish(types_error::ErrorLocation::new(MISCINIT_C, line!() as i32, "load_libraries"))?;
+                .finish(::types_error::ErrorLocation::new(MISCINIT_C, line!() as i32, "load_libraries"))?;
             return Ok(());
         }
     };
@@ -904,7 +904,7 @@ pub fn init_seams() {
     // (the `plan_cache_mode` member is installed by plancache itself).
     backendstate_pc_seams::get_user_id::set(|| Ok(GetUserId()));
     backendstate_pc_seams::row_security::set(|| {
-        Ok((guc_tables::vars::row_security.get().get)())
+        Ok((::guc_tables::vars::row_security.get().get)())
     });
     s::in_local_user_id_change::set(InLocalUserIdChange);
     s::get_backend_type_desc::set(GetBackendTypeDesc);

@@ -19,8 +19,8 @@
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
 
-use utils_error::ereport;
-use types_core::Oid;
+use ::utils_error::ereport;
+use ::types_core::Oid;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
     NOTICE,
@@ -31,7 +31,7 @@ use ::nodes::ddlnodes::{CreateStmt, RuleStmt};
 use ::nodes::nodes::{ntag, Node};
 
 use small1::{free_parsestate, make_parsestate, parser_errposition};
-use types_storage::lock::NoLock;
+use ::types_storage::lock::NoLock;
 
 use crate::column::transformColumnDefinition;
 use crate::constraint::{transformCheckConstraints, transformTableConstraint};
@@ -144,13 +144,13 @@ pub fn transformCreateStmt<'mcx>(
     let ispartitioned = stmt.partspec.is_some();
     let oftype = stmt.ofTypename.is_some();
     let relation_clone = match stmt.relation.as_deref() {
-        Some(n) => Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?),
+        Some(n) => Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?),
         None => None,
     };
     let inh_relations = {
         let mut v: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
         for n in stmt.inhRelations.iter() {
-            v.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+            v.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
         }
         v
     };
@@ -174,7 +174,7 @@ pub fn transformCreateStmt<'mcx>(
         pkey: None,
         ispartitioned,
         partbound: match stmt.partbound.as_deref() {
-            Some(n) => Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?),
+            Some(n) => Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?),
             None => None,
         },
         ofType: oftype,
@@ -182,7 +182,7 @@ pub fn transformCreateStmt<'mcx>(
 
     // grammar enforces: !stmt->ofTypename || !stmt->inhRelations
     if let Some(of_typename) = stmt.ofTypename.as_deref() {
-        let of = mcx::alloc_in(mcx, of_typename.clone_in(mcx)?)?;
+        let of = ::mcx::alloc_in(mcx, of_typename.clone_in(mcx)?)?;
         transformOfType(&mut cxt, of)?;
     }
 
@@ -246,7 +246,7 @@ pub fn transformCreateStmt<'mcx>(
     let stmt_out = match foreign_extra {
         Some((servername, options)) => {
             let cft = ::nodes::ddlnodes::CreateForeignTableStmt {
-                base: mcx::alloc_in(mcx, stmt)?,
+                base: ::mcx::alloc_in(mcx, stmt)?,
                 servername,
                 options,
             };
@@ -254,7 +254,7 @@ pub fn transformCreateStmt<'mcx>(
         }
         None => Node::mk_create_stmt(mcx, stmt)?,
     };
-    result.push(mcx::alloc_in(mcx, stmt_out)?);
+    result.push(::mcx::alloc_in(mcx, stmt_out)?);
     let alist = core::mem::replace(&mut cxt.alist, PgVec::new_in(mcx));
     result.extend(alist);
     result.extend(save_alist);
@@ -314,7 +314,7 @@ fn range_var_get_and_check_creation_namespace<'mcx>(
     let mut existing_relid: Oid = INVALID_OID;
 
     // The catalog-namespace function operates on the value-typed
-    // `types_tuple::access::RangeVar` (no `'mcx`); bridge the node's
+    // `::types_tuple::access::RangeVar` (no `'mcx`); bridge the node's
     // `rawnodes::RangeVar` across, then propagate the (possibly temp-promoted)
     // `relpersistence` back onto the node.
     let mut access_rv = match relation.node_tag() {
@@ -339,9 +339,9 @@ fn range_var_get_and_check_creation_namespace<'mcx>(
 }
 
 /// Bridge a node `rawnodes::RangeVar` to the value-typed
-/// `types_tuple::access::RangeVar` the catalog-namespace API consumes.
-fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+/// `::types_tuple::access::RangeVar` the catalog-namespace API consumes.
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().into()),
         schemaname: rv.schemaname.as_ref().map(|s| s.as_str().into()),
         relname: rv.relname.as_ref().map_or_else(alloc::string::String::new, |s| s.as_str().into()),
@@ -365,8 +365,8 @@ pub fn transformRuleStmt<'mcx>(
 ) -> PgResult<(PgVec<'mcx, Query<'mcx>>, Option<Node<'mcx>>)> {
     use ::nodes::nodes::CmdType;
     use ::nodes::parsestmt::ParseExprKind::EXPR_KIND_WHERE;
-    use types_storage::lock::AccessShareLock;
-    use types_tuple::access::{RangeVar as AccessRangeVar, RELKIND_MATVIEW};
+    use ::types_storage::lock::AccessShareLock;
+    use ::types_tuple::access::{RangeVar as AccessRangeVar, RELKIND_MATVIEW};
 
     let stmt = stmt.clone_in(mcx)?;
 
@@ -388,12 +388,12 @@ pub fn transformRuleStmt<'mcx>(
     let rel = table::table_openrv(
         mcx,
         &rel_rv,
-        types_storage::lock::AccessExclusiveLock,
+        ::types_storage::lock::AccessExclusiveLock,
     )?;
 
     if rel.rd_rel.relkind == RELKIND_MATVIEW {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("rules on materialized views are not supported")
             .into_error());
     }
@@ -596,7 +596,7 @@ pub fn transformRuleStmt<'mcx>(
                 };
                 if sub_qry.setOperations.is_some() && where_clause.is_some() {
                     return Err(ereport(ERROR)
-                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                         .errmsg("conditional UNION/INTERSECT/EXCEPT statements are not implemented")
                         .into_error());
                 }
@@ -692,13 +692,13 @@ pub fn transformRuleStmt<'mcx>(
                 };
                 if cte_used(PRS2_OLD_VARNO) {
                     return Err(ereport(ERROR)
-                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                         .errmsg("cannot refer to OLD within WITH query")
                         .into_error());
                 }
                 if cte_used(PRS2_NEW_VARNO) {
                     return Err(ereport(ERROR)
-                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                         .errmsg("cannot refer to NEW within WITH query")
                         .into_error());
                 }
@@ -716,7 +716,7 @@ pub fn transformRuleStmt<'mcx>(
                 if sub_qry_mut.setOperations.is_some() {
                     // Can't-happen case (rejected above), but guard anyway.
                     return Err(ereport(ERROR)
-                        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                         .errmsg("conditional UNION/INTERSECT/EXCEPT statements are not implemented")
                         .into_error());
                 }
@@ -727,7 +727,7 @@ pub fn transformRuleStmt<'mcx>(
                     },
                 )?;
                 if let Some(jt) = sub_qry_mut.jointree.as_mut() {
-                    jt.fromlist.push(mcx::alloc_in(mcx, rtr)?);
+                    jt.fromlist.push(::mcx::alloc_in(mcx, rtr)?);
                 }
             }
 

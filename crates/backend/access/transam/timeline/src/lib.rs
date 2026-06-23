@@ -36,14 +36,14 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use utils_error::errno::current_errno;
-use utils_error::ereport;
+use ::utils_error::errno::current_errno;
+use ::utils_error::ereport;
 use types_error::{ErrorLocation, PgResult, ERROR, FATAL};
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{TimeLineID, XLogRecPtr, InvalidXLogRecPtr};
-use wal::TimeLineHistoryEntry;
-use wal::xlog_consts::XLOGDIR;
-use types_pgstat::wait_event::{
+use ::wal::TimeLineHistoryEntry;
+use ::wal::xlog_consts::XLOGDIR;
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_TIMELINE_HISTORY_FILE_SYNC, WAIT_EVENT_TIMELINE_HISTORY_FILE_WRITE,
     WAIT_EVENT_TIMELINE_HISTORY_READ, WAIT_EVENT_TIMELINE_HISTORY_SYNC,
     WAIT_EVENT_TIMELINE_HISTORY_WRITE,

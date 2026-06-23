@@ -25,7 +25,7 @@
 
 extern crate alloc;
 
-use transam_parallel::shared_dsm_object;
+use ::transam_parallel::shared_dsm_object;
 use transam_parallel as parallel_sup;
 use execAmi_seams as execAmi;
 use execExpr_seams as execExpr;
@@ -42,7 +42,7 @@ use lsyscache_seams as lsyscache;
 use sort_storage_seams as sts;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{Oid, OidIsValid};
+use ::types_core::primitive::{Oid, OidIsValid};
 use types_error::{PgError, PgResult};
 use ::nodes::nodehashjoin::{
     BufFile, HashJoin, HashJoinState, HashJoinTableData, JoinType, ParallelHashJoinState,
@@ -52,7 +52,7 @@ use ::nodes::nodehashjoin::{
 };
 use ::nodes::primnodes::Expr;
 use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
-use types_tuple::heaptuple::FormedMinimalTuple;
+use ::types_tuple::heaptuple::FormedMinimalTuple;
 
 /// Serialize a [`FormedMinimalTuple`] to its contiguous C `MinimalTuple` byte
 /// image (the flat blob, `t_len` first) — the form the batch temp file / shared
@@ -62,8 +62,8 @@ fn mintuple_to_flat<'mcx>(
     mcx: Mcx<'mcx>,
     mtup: &FormedMinimalTuple<'_>,
 ) -> PgResult<PgVec<'mcx, u8>> {
-    use heaptuple::flat::MinimalTupleFlatError;
-    match heaptuple::flat::minimal_tuple_to_flat(mcx, mtup) {
+    use ::heaptuple::flat::MinimalTupleFlatError;
+    match ::heaptuple::flat::minimal_tuple_to_flat(mcx, mtup) {
         Ok(blob) => Ok(blob),
         Err(MinimalTupleFlatError::Pg(err)) => Err(err),
         Err(other) => panic!("minimal_tuple_to_flat failed: {other:?}"),
@@ -76,8 +76,8 @@ fn mintuple_from_flat<'mcx>(
     mcx: Mcx<'mcx>,
     blob: &[u8],
 ) -> PgResult<FormedMinimalTuple<'mcx>> {
-    use heaptuple::flat::MinimalTupleFlatError;
-    match heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
+    use ::heaptuple::flat::MinimalTupleFlatError;
+    match ::heaptuple::flat::minimal_tuple_from_flat(mcx, blob) {
         Ok(mtup) => Ok(mtup),
         Err(MinimalTupleFlatError::Pg(err)) => Err(err),
         Err(other) => panic!("minimal_tuple_from_flat on a batch-file image failed: {other:?}"),
@@ -790,7 +790,7 @@ pub fn ExecInitHashJoin<'mcx>(
 /// `Vec<Expr>` for `ExecBuildHash32Expr`. Each hash key is an expression node
 /// (`Node::Expr`); anything else is a planner invariant violation.
 fn node_list_to_exprs<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     nodes: Option<&[::nodes::nodes::Node<'mcx>]>,
 ) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
     let nodes = nodes.unwrap_or(&[]);
@@ -919,7 +919,7 @@ fn exec_get_result_type_of<'mcx>(
     child: &Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
     mcx: Mcx<'mcx>,
     _estate: &mut EStateData<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     match child.as_deref() {
         // main's `exec_get_result_type` borrows the node's own result descriptor
         // (`&PlanStateData` → `Option<&TupleDescData>`); clone it into `mcx` so the
@@ -936,9 +936,9 @@ fn exec_get_result_type_of<'mcx>(
 /// Deep-copy a tuple descriptor into `mcx` (so the same source type can seed
 /// several owned slots, as C re-uses the shared `TupleDesc` pointer).
 fn clone_desc<'mcx>(
-    desc: &types_tuple::heaptuple::TupleDesc<'mcx>,
+    desc: &::types_tuple::heaptuple::TupleDesc<'mcx>,
     mcx: Mcx<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     match desc {
         Some(d) => Ok(Some(alloc_in(mcx, d.as_ref().clone_in(mcx)?)?)),
         None => Ok(None),
@@ -1445,7 +1445,7 @@ fn ExecHashJoinSaveTuple<'mcx>(
     node: &mut HashJoinState<'mcx>,
     side: BatchFileSide,
     batchno: i32,
-    tuple: &types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
+    tuple: &::types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
     hashvalue: u32,
 ) -> PgResult<()> {
     // The batch file is lazily created in spillCxt (NOT batchCxt) on the first
@@ -1515,7 +1515,7 @@ fn ExecHashJoinGetSavedTuple<'mcx>(
     // leading word is t_len (the on-disk record is exactly the flat C image), so
     // the body reads into blob[4..].
     let mcx = estate.es_query_cxt;
-    let mut blob: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, t_len as usize)?;
+    let mut blob: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, t_len as usize)?;
     blob.resize(t_len as usize, 0u8);
     blob[0..4].copy_from_slice(&t_len.to_ne_bytes());
     {

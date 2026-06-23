@@ -16,37 +16,37 @@ use alloc::string::{String, ToString};
 
 use mcx::{Mcx, PgString, PgVec};
 
-use utils_error::ereport;
-use types_core::Oid;
+use ::utils_error::ereport;
+use ::types_core::Oid;
 use types_error::{PgResult, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
-use types_storage::lock::{AccessShareLock, NoLock};
+use ::types_storage::lock::{AccessShareLock, NoLock};
 
 use types_acl::{ACLCHECK_OK, ACL_SELECT, ACL_USAGE};
 use ::nodes::ddlnodes::CommentStmt;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{OBJECT_COLUMN, OBJECT_TABCONSTRAINT, OBJECT_TYPE};
 use ::nodes::rawnodes::{ColumnDef, TypeName};
-use types_tuple::pg_type::FormData_pg_type;
+use ::types_tuple::pg_type::FormData_pg_type;
 
 use common_relation::{relation_open, relation_openrv};
-use toast_compression::get_compression_method_name;
-use table::table_close;
+use ::toast_compression::get_compression_method_name;
+use ::table::table_close;
 use aclchk::{aclcheck_error, object_aclcheck, pg_class_aclcheck};
-use objectaddress::resolve::get_relkind_objtype;
-use pg_class::errdetail_relkind_not_supported;
+use ::objectaddress::resolve::get_relkind_objtype;
+use ::pg_class::errdetail_relkind_not_supported;
 use pg_constraint::{
     get_relation_constraint_oid, NotNullConstraint, RelationGetNotNullConstraints,
 };
-use pg_depend::getIdentitySequence;
-use comment::GetComment;
-use commands_sequence::sequence_options;
+use ::pg_depend::getIdentitySequence;
+use ::comment::GetComment;
+use ::commands_sequence::sequence_options;
 use parse_type::{raw_typename_to_parse, typenameType};
 use small1::{
     cancel_parser_errposition_callback, parser_errposition, setup_parser_errposition_callback,
 };
-use adt_format_type::format_type_be;
-use cache_typcache::lookup_rowtype_tupdesc;
-use miscinit::GetUserId;
+use ::adt_format_type::format_type_be;
+use ::cache_typcache::lookup_rowtype_tupdesc;
+use ::miscinit::GetUserId;
 
 use crate::core::{make_string, CreateStmtContext, NodePtr};
 use crate::serial::generateSerialExtraStmts;
@@ -89,11 +89,11 @@ const CREATE_TABLE_LIKE_STATISTICS: u32 = 1 << 7;
 const CREATE_TABLE_LIKE_STORAGE: u32 = 1 << 8;
 
 /// Bridge a node `rawnodes::RangeVar` to the value-typed
-/// `types_tuple::access::RangeVar` that `relation_openrv` consumes.
+/// `::types_tuple::access::RangeVar` that `relation_openrv` consumes.
 pub(crate) fn access_range_var(
     rv: &::nodes::rawnodes::RangeVar<'_>,
-) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().into()),
         schemaname: rv.schemaname.as_ref().map(|s| s.as_str().into()),
         relname: rv
@@ -131,12 +131,12 @@ pub fn transformTableLikeClause<'mcx>(
         .relation
         .as_deref()
         .ok_or_else(|| {
-            types_error::PgError::error("transformTableLikeClause: NULL LIKE relation")
+            ::types_error::PgError::error("transformTableLikeClause: NULL LIKE relation")
         })?;
     let src_rv = src_rv_node
         .as_rangevar()
         .ok_or_else(|| {
-            types_error::PgError::error("transformTableLikeClause: LIKE relation not a RangeVar")
+            ::types_error::PgError::error("transformTableLikeClause: LIKE relation not a RangeVar")
         })?;
     let src_location = src_rv.location;
     let access_rv = access_range_var(src_rv);
@@ -148,7 +148,7 @@ pub fn transformTableLikeClause<'mcx>(
     // as the cursor position, but only when the error has none of its own
     // (C: `if (edata->cursorpos == 0)`).
     setup_parser_errposition_callback(&cxt.pstate, src_location);
-    let attach_errpos = |mut e: types_error::PgError| -> types_error::PgError {
+    let attach_errpos = |mut e: ::types_error::PgError| -> ::types_error::PgError {
         if e.cursor_position().is_none() {
             let pos = parser_errposition(&cxt.pstate, src_location);
             if pos > 0 {
@@ -243,7 +243,7 @@ pub fn transformTableLikeClause<'mcx>(
             generateSerialExtraStmts(
                 cxt,
                 &mut def,
-                types_core::primitive::InvalidOid,
+                ::types_core::primitive::InvalidOid,
                 seq_options,
                 true,
                 false,
@@ -281,7 +281,7 @@ pub fn transformTableLikeClause<'mcx>(
         }
 
         cxt.columns
-            .push(mcx::alloc_in(mcx, Node::mk_column_def(mcx, def)?)?);
+            .push(::mcx::alloc_in(mcx, Node::mk_column_def(mcx, def)?)?);
     }
 
     // Reproduce not-null constraints, if any, regardless of options.
@@ -317,7 +317,7 @@ pub fn transformTableLikeClause<'mcx>(
             }
 
             cxt.nnconstraints
-                .push(mcx::alloc_in(mcx, Node::mk_constraint(mcx, constr)?)?);
+                .push(::mcx::alloc_in(mcx, Node::mk_constraint(mcx, constr)?)?);
         }
     }
 
@@ -333,7 +333,7 @@ pub fn transformTableLikeClause<'mcx>(
             | CREATE_TABLE_LIKE_STATISTICS)
         != 0
     {
-        let mut tlc_node = mcx::alloc_in(mcx, table_like_clause.clone_in(mcx)?)?;
+        let mut tlc_node = ::mcx::alloc_in(mcx, table_like_clause.clone_in(mcx)?)?;
         if let Some(t) = tlc_node.as_tablelikeclause_mut() {
             t.relationOid = relid;
         }
@@ -362,10 +362,10 @@ fn make_column_comment_stmt<'mcx>(
     object.push(make_string(mcx, colname)?);
     let stmt = CommentStmt {
         objtype: OBJECT_COLUMN,
-        object: Some(mcx::alloc_in(mcx, Node::mk_list(mcx, object)?)?),
+        object: Some(::mcx::alloc_in(mcx, Node::mk_list(mcx, object)?)?),
         comment: Some(PgString::from_str_in(comment, mcx)?),
     };
-    mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, stmt)?)
+    ::mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, stmt)?)
 }
 
 /// Build a `CommentStmt` on a table constraint: `OBJECT_TABCONSTRAINT`, object =
@@ -383,10 +383,10 @@ fn make_tabconstraint_comment_stmt<'mcx>(
     object.push(make_string(mcx, conname)?);
     let stmt = CommentStmt {
         objtype: OBJECT_TABCONSTRAINT,
-        object: Some(mcx::alloc_in(mcx, Node::mk_list(mcx, object)?)?),
+        object: Some(::mcx::alloc_in(mcx, Node::mk_list(mcx, object)?)?),
         comment: Some(PgString::from_str_in(comment, mcx)?),
     };
-    mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, stmt)?)
+    ::mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, stmt)?)
 }
 
 /// The new table's `(schemaname, relname)` (`cxt->relation`), mirroring the C
@@ -439,7 +439,7 @@ pub fn transformOfType<'mcx>(
         let mut n =
             make_column_def(mcx, attname, attr.atttypid, attr.atttypmod, attr.attcollation)?;
         n.is_from_type = true;
-        cxt.columns.push(mcx::alloc_in(mcx, Node::mk_column_def(mcx, n)?)?);
+        cxt.columns.push(::mcx::alloc_in(mcx, Node::mk_column_def(mcx, n)?)?);
     }
     // `ReleaseTupleDesc(tupdesc)` — the owned copy drops here.
     drop(tupdesc);
@@ -496,7 +496,7 @@ fn make_column_def<'mcx>(
 ) -> PgResult<ColumnDef<'mcx>> {
     Ok(ColumnDef {
         colname: Some(PgString::from_str_in(colname, mcx)?),
-        typeName: Some(mcx::alloc_in(mcx, make_type_name_from_oid(mcx, type_oid, typmod))?),
+        typeName: Some(::mcx::alloc_in(mcx, make_type_name_from_oid(mcx, type_oid, typmod))?),
         compression: None,
         inhcount: 0,
         is_local: true,

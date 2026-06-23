@@ -20,7 +20,7 @@
 //! directly. The genuinely-external substrate of `macaddr_sortsupport` —
 //! installing the comparator / abbrev callbacks into the live `SortSupportData`
 //! node, the HyperLogLog cardinality estimator, and the `trace_sort` GUC —
-//! crosses [`mac_seams::sortsupport`] (called here, installed
+//! crosses [`::mac_seams::sortsupport`] (called here, installed
 //! by the unported tuplesort / `lib/hyperloglog` owner — a loud panic until it
 //! lands). The pure comparator ([`macaddr_fast_cmp`]) and abbreviated-key packing
 //! ([`macaddr_abbrev_convert_bits`]) are in-crate.
@@ -33,13 +33,13 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mac_seams::sortsupport;
+use ::mac_seams::sortsupport;
 use hashfn::{hash_bytes, hash_bytes_extended};
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
-use types_network::macaddr;
+use ::types_network::macaddr;
 
 #[cfg(test)]
 mod tests;
@@ -172,7 +172,7 @@ impl<'a> MsgCursor<'a> {
     fn get_byte(&mut self) -> PgResult<u8> {
         if self.cursor >= self.data.len() {
             return Err(PgError::error("insufficient data left in message")
-                .with_sqlstate(types_error::ERRCODE_INVALID_BINARY_REPRESENTATION));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_BINARY_REPRESENTATION));
         }
         let b = self.data[self.cursor];
         self.cursor += 1;
@@ -351,7 +351,7 @@ pub fn macaddr_fast_cmp(arg1: &macaddr, arg2: &macaddr) -> i32 {
 /// low end, leaving two zero padding bytes; on a 32-bit machine only the first
 /// `SIZEOF_DATUM` bytes are copied. Minus the HyperLogLog `addHyperLogLog` side
 /// effect and `uss->input_count` / `estimating` bookkeeping, which live behind
-/// the [`mac_seams::sortsupport`] registrar.
+/// the [`::mac_seams::sortsupport`] registrar.
 pub fn macaddr_abbrev_convert_bits(authoritative: &macaddr) -> usize {
     let src = macaddr_bytes(authoritative);
     let mut res_bytes = [0u8; SIZEOF_DATUM];
@@ -382,7 +382,7 @@ pub fn macaddr_abbrev_convert_bits(authoritative: &macaddr) -> usize {
 /// allocating the `macaddr_sortsupport_state` in `ssup_cxt`, the HyperLogLog
 /// estimator, and the `trace_sort` LOG lines — belongs to the tuplesort /
 /// `lib/hyperloglog` subsystems and is delegated to the
-/// [`mac_seams::sortsupport::register`] seam. The pure
+/// [`::mac_seams::sortsupport::register`] seam. The pure
 /// comparator is [`macaddr_fast_cmp`] and the pure key packing is
 /// [`macaddr_abbrev_convert_bits`]. Returns whether a registrar was wired (the
 /// default is a faithful no-op, as if sortsupport were never registered).

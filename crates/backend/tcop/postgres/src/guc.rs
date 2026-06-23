@@ -20,13 +20,13 @@
 
 use std::cell::Cell;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, FATAL};
-use types_guc::guc::{GucContext, GucSource};
-use types_startup::DispatchOption;
+use ::types_guc::guc::{GucContext, GucSource};
+use ::types_startup::DispatchOption;
 
-use guc_tables::vars;
-use guc_tables::GucHookExtra;
+use ::guc_tables::vars;
+use ::guc_tables::GucHookExtra;
 
 use crate::globals;
 
@@ -172,12 +172,12 @@ pub fn forbidden_in_wal_sender(firstchar: u8) -> PgResult<()> {
             return Err(PgError::error(
                 "fastpath function calls not supported in a replication connection",
             )
-            .with_sqlstate(types_error::ERRCODE_PROTOCOL_VIOLATION));
+            .with_sqlstate(::types_error::ERRCODE_PROTOCOL_VIOLATION));
         } else {
             return Err(PgError::error(
                 "extended query protocol not supported in a replication connection",
             )
-            .with_sqlstate(types_error::ERRCODE_PROTOCOL_VIOLATION));
+            .with_sqlstate(::types_error::ERRCODE_PROTOCOL_VIOLATION));
         }
     }
     Ok(())
@@ -562,7 +562,7 @@ fn split_identifier_string(rawstring: &str) -> Option<Vec<alloc::string::String>
 /// Install the GUC check/assign hook fns owned by postgres.c into the GUC
 /// tables' typed slots, and the `restrict_nonsystem_relation_kind` reader seam.
 pub fn install_guc_hooks() {
-    use guc_tables::hooks;
+    use ::guc_tables::hooks;
     hooks::check_client_connection_check_interval.install(check_client_connection_check_interval);
     hooks::check_stage_log_stats.install(check_stage_log_stats);
     hooks::check_log_stats.install(check_log_stats);

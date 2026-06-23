@@ -8,14 +8,14 @@
 
 use std::cell::Cell;
 
-use inval_seams::cache_register_syscache_callback as inval_seam;
-use syscache_seams::search_authid_rolsuper;
-use miscinit_seams::get_user_id;
-use init_small::globals::IsUnderPostmaster;
+use ::inval_seams::cache_register_syscache_callback as inval_seam;
+use ::syscache_seams::search_authid_rolsuper;
+use ::miscinit_seams::get_user_id;
+use ::init_small::globals::IsUnderPostmaster;
 use types_core::{Oid, BOOTSTRAP_SUPERUSERID, INVALID_OID};
-use datum::Datum;
-use types_error::PgResult;
-use types_syscache::AUTHOID;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::types_syscache::AUTHOID;
 
 thread_local! {
     /// `static Oid last_roleid` — `InvalidOid` means the cache is not valid.

@@ -10,10 +10,10 @@
 use std::cell::Cell;
 
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
-use types_storage::latch::LatchHandle;
+use ::types_storage::latch::LatchHandle;
 
 use crate::{SetMyBackendType, PG_VERSION};
-use types_core::BackendType;
+use ::types_core::BackendType;
 
 thread_local! {
     /// `static Latch LocalLatchData;` — the process-local latch the backend uses
@@ -167,7 +167,7 @@ pub fn checkDataDir() -> PgResult<()> {
             FATAL,
             format!("specified data directory \"{data_dir}\" is not a directory"),
         )
-        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
+        .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
     }
 
     use std::os::unix::fs::MetadataExt;
@@ -182,7 +182,7 @@ pub fn checkDataDir() -> PgResult<()> {
             FATAL,
             format!("data directory \"{data_dir}\" has wrong ownership"),
         )
-        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
+        .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
     }
 
     // Check permissions. Only 0700 and 0750 are allowed; 0750 grants group
@@ -195,7 +195,7 @@ pub fn checkDataDir() -> PgResult<()> {
             FATAL,
             format!("data directory \"{data_dir}\" has invalid permissions"),
         )
-        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
+        .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
     }
 
     // Reset creation modes and mask based on the mode of the data directory.

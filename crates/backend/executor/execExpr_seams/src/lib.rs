@@ -22,7 +22,7 @@ pub enum ProjectionKind {
 
 /// One read of a projection-result-slot attribute: its `Datum` plus is-null.
 /// Canonical definition in `types-tuple`.
-pub use types_tuple::heaptuple::SlotAttr;
+pub use ::types_tuple::heaptuple::SlotAttr;
 
 /// Classification of `subplan->testexpr` for the hashed-subplan init path
 /// (`IsA(testexpr, OpExpr)` / `is_andclause(testexpr)` / else). The `ncols`
@@ -145,7 +145,7 @@ seam_core::seam!(
         node: &mut SubPlanState<'mcx>,
         estate: &mut EStateData<'mcx>,
         econtext: ::nodes::EcxtId,
-    ) -> types_error::PgResult<(types_tuple::Datum<'mcx>, bool)>
+    ) -> types_error::PgResult<(::types_tuple::Datum<'mcx>, bool)>
 );
 
 seam_core::seam!(
@@ -239,7 +239,7 @@ seam_core::seam!(
     pub fn exec_build_projection_info<'mcx>(
         planstate: &mut ::nodes::execnodes::PlanStateData<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-        input_desc: Option<&types_tuple::heaptuple::TupleDescData<'_>>,
+        input_desc: Option<&::types_tuple::heaptuple::TupleDescData<'_>>,
     ) -> types_error::PgResult<mcx::PgBox<'mcx, ::nodes::execexpr::ProjectionInfo<'mcx>>>
 );
 
@@ -378,7 +378,7 @@ seam_core::seam!(
         state: &mut ::nodes::execexpr::ExprState<'mcx>,
         econtext: ::nodes::EcxtId,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<(types_tuple::Datum<'mcx>, bool)>
+    ) -> types_error::PgResult<(::types_tuple::Datum<'mcx>, bool)>
 );
 
 seam_core::seam!(
@@ -406,7 +406,7 @@ seam_core::seam!(
         state: &mut ::nodes::execexpr::ExprState<'mcx>,
         econtext: ::nodes::EcxtId,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<(types_tuple::heaptuple::ItemPointerData, bool)>
+    ) -> types_error::PgResult<(::types_tuple::heaptuple::ItemPointerData, bool)>
 );
 
 seam_core::seam!(
@@ -418,7 +418,7 @@ seam_core::seam!(
         state: &mut ::nodes::execexpr::ExprState<'mcx>,
         econtext: ::nodes::EcxtId,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<(types_tuple::Datum<'mcx>, bool)>
+    ) -> types_error::PgResult<(::types_tuple::Datum<'mcx>, bool)>
 );
 
 seam_core::seam!(
@@ -824,7 +824,7 @@ seam_core::seam!(
     #[allow(clippy::too_many_arguments)]
     pub fn exec_build_param_set_equal<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        desc: &::types_tuple::heaptuple::TupleDescData<'mcx>,
         lops: ::nodes::TupleSlotKind,
         rops: ::nodes::TupleSlotKind,
         eqfunctions: &[types_core::Oid],
@@ -853,7 +853,7 @@ seam_core::seam!(
     pub fn exec_build_hash32_expr<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         es_link: ::nodes::execnodes::EStateLink,
-        desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        desc: &::types_tuple::heaptuple::TupleDescData<'mcx>,
         ops: ::nodes::TupleSlotKind,
         hashfunc_oids: &[types_core::Oid],
         collations: &[types_core::Oid],
@@ -876,7 +876,7 @@ seam_core::seam!(
     #[allow(clippy::too_many_arguments)]
     pub fn exec_build_hash32_from_attrs<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        desc: &::types_tuple::heaptuple::TupleDescData<'mcx>,
         ops: ::nodes::TupleSlotKind,
         hashfunctions: &[types_core::fmgr::FmgrInfo],
         collations: &[types_core::Oid],
@@ -898,8 +898,8 @@ seam_core::seam!(
     #[allow(clippy::too_many_arguments)]
     pub fn exec_build_grouping_equal<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        ldesc: &types_tuple::heaptuple::TupleDescData<'mcx>,
-        rdesc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+        ldesc: &::types_tuple::heaptuple::TupleDescData<'mcx>,
+        rdesc: &::types_tuple::heaptuple::TupleDescData<'mcx>,
         lops: ::nodes::TupleSlotKind,
         rops: ::nodes::TupleSlotKind,
         num_cols: i32,

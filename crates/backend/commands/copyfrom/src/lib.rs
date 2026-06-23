@@ -4,7 +4,7 @@
 //! This is the **driver** half of the COPY FROM module (the byte-exact input
 //! codec lives in the sibling `backend-commands-copyfromparse` parser crate,
 //! reached directly). The driver constructs and owns the
-//! [`CopyParseState`](types_copy::CopyParseState) (the repo's owned-value model
+//! [`CopyParseState`](::types_copy::CopyParseState) (the repo's owned-value model
 //! of the C `CopyFromStateData`), drives `NextCopyFrom` per row, and inserts the
 //! produced tuples into the target relation through the regular executor
 //! machinery (an owned [`EStateData`], a `ResultRelInfo`, `table_tuple_insert`,
@@ -28,8 +28,8 @@
 //! # By-reference input values (resolved)
 //!
 //! `NextCopyFrom` returns each field as an
-//! [`AttrValue`](types_copy::AttrValue) whose `datum` is the canonical rich
-//! `types_tuple::Datum<'mcx>` (`ByVal`/`ByRef`/`Cstring`/… arms) — the same type
+//! [`AttrValue`](::types_copy::AttrValue) whose `datum` is the canonical rich
+//! `::types_tuple::Datum<'mcx>` (`ByVal`/`ByRef`/`Cstring`/… arms) — the same type
 //! the target slot's `tts_values` carry. A pass-by-value type (`int4`, `oid`, …)
 //! rides the `ByVal` word; a pass-by-reference value (`text`, `varchar`, every
 //! varlena) rides the `ByRef`/`Cstring` arm verbatim. The input-function seam
@@ -44,20 +44,20 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_copy::{
     AttrValue, CopyFileHandle, CopyGetDataResult, CopyLogVerbosityChoice, CopyOnErrorChoice,
     CopyParseOptions, CopyParseState, CopySource, EolType, INPUT_BUF_SIZE, RAW_BUF_SIZE,
 };
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum as RichDatum;
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use nodes::{RriId, SlotId};
-use rel::Relation;
+use ::rel::Relation;
 
 use copyfromparse as parse;
 
@@ -368,7 +368,7 @@ fn copy_get_data_frontend_impl(
             return Err(PgError::error(
                 "unexpected EOF on client connection with an open transaction",
             )
-            .with_sqlstate(types_error::ERRCODE_CONNECTION_FAILURE));
+            .with_sqlstate(::types_error::ERRCODE_CONNECTION_FAILURE));
         }
         let maxmsglen = match mtype {
             PQMSG_COPY_DATA => PQ_LARGE_MESSAGE_LIMIT,
@@ -377,7 +377,7 @@ fn copy_get_data_frontend_impl(
                 return Err(PgError::error(format!(
                     "unexpected message type 0x{other:02X} during COPY from stdin"
                 ))
-                .with_sqlstate(types_error::ERRCODE_PROTOCOL_VIOLATION))
+                .with_sqlstate(::types_error::ERRCODE_PROTOCOL_VIOLATION))
             }
         };
         let mut msg = stringinfo::StringInfo::new_in(mcx);
@@ -385,7 +385,7 @@ fn copy_get_data_frontend_impl(
             return Err(PgError::error(
                 "unexpected EOF on client connection with an open transaction",
             )
-            .with_sqlstate(types_error::ERRCODE_CONNECTION_FAILURE));
+            .with_sqlstate(::types_error::ERRCODE_CONNECTION_FAILURE));
         }
         match mtype {
             PQMSG_COPY_DATA => {
@@ -422,7 +422,7 @@ fn copy_get_data_frontend_impl(
                     .trim_end_matches('\0')
                     .to_string();
                 return Err(PgError::error(format!("COPY from stdin failed: {m}"))
-                    .with_sqlstate(types_error::ERRCODE_QUERY_CANCELED));
+                    .with_sqlstate(::types_error::ERRCODE_QUERY_CANCELED));
             }
             // Flush/Sync: ignore and read the next message.
             PQMSG_FLUSH | PQMSG_SYNC => continue,
@@ -459,7 +459,7 @@ pub(crate) fn receive_copy_begin_impl(mcx: Mcx<'_>, natts: i32, binary: bool) ->
  * The owned driver state.
  *
  * The C `CopyFromStateData` is split in this repo: the parse-relevant subset is
- * `types_copy::CopyParseState` (owned by, and threaded through, the parser);
+ * `::types_copy::CopyParseState` (owned by, and threaded through, the parser);
  * the executor extras the driver needs (range table, perminfos, the owned
  * EState) live alongside it here.
  * =========================================================================== */
@@ -470,9 +470,9 @@ pub struct CopyFromStateData<'mcx> {
     /// The parse-relevant cstate the parser drives.
     pub cstate: CopyParseState<'mcx>,
     /// `List *range_table` (== `pstate->p_rtable`).
-    pub range_table: mcx::PgVec<'mcx, ::nodes::RangeTblEntry<'mcx>>,
+    pub range_table: ::mcx::PgVec<'mcx, ::nodes::RangeTblEntry<'mcx>>,
     /// `List *rteperminfos` (== `pstate->p_rteperminfos`).
-    pub rteperminfos: mcx::PgVec<'mcx, ::nodes::RTEPermissionInfo<'mcx>>,
+    pub rteperminfos: ::mcx::PgVec<'mcx, ::nodes::RTEPermissionInfo<'mcx>>,
     /// `bool volatile_defexprs`.
     pub volatile_defexprs: bool,
     /// `cstate->opts.freeze` (CopyFormatOptions). Carried so `CopyFrom` can fire
@@ -494,7 +494,7 @@ pub struct CopyFromStateData<'mcx> {
     /// and compile them into `cstate.defexprs` (+ build `defmap`/`num_defaults`)
     /// in `CopyFrom`, before the row loop. This is a faithful split of the same
     /// C steps — no behavior change, only the allocation context differs.
-    pub raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ::nodes::Expr<'mcx>>>>,
+    pub raw_defexprs: ::mcx::PgVec<'mcx, Option<::mcx::PgBox<'mcx, ::nodes::Expr<'mcx>>>>,
 }
 
 /* ===========================================================================
@@ -515,17 +515,17 @@ pub fn BeginCopyFrom<'mcx>(
     rel: Relation<'mcx>,
     opts: CopyParseOptions,
     file_encoding_opt: i32,
-    attnumlist: mcx::PgVec<'mcx, AttrNumber>,
-    range_table: mcx::PgVec<'mcx, ::nodes::RangeTblEntry<'mcx>>,
-    rteperminfos: mcx::PgVec<'mcx, ::nodes::RTEPermissionInfo<'mcx>>,
+    attnumlist: ::mcx::PgVec<'mcx, AttrNumber>,
+    range_table: ::mcx::PgVec<'mcx, ::nodes::RangeTblEntry<'mcx>>,
+    rteperminfos: ::mcx::PgVec<'mcx, ::nodes::RTEPermissionInfo<'mcx>>,
     freeze: bool,
     filename: Option<&str>,
     is_program: bool,
     data_source_cb: Option<CopyDataSourceCb>,
-    where_clause: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>,
-    force_notnull_flags: mcx::PgVec<'mcx, bool>,
-    force_null_flags: mcx::PgVec<'mcx, bool>,
-    convert_select_flags: Option<mcx::PgVec<'mcx, bool>>,
+    where_clause: ::mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>,
+    force_notnull_flags: ::mcx::PgVec<'mcx, bool>,
+    force_null_flags: ::mcx::PgVec<'mcx, bool>,
+    convert_select_flags: Option<::mcx::PgVec<'mcx, bool>>,
 ) -> PgResult<CopyFromStateData<'mcx>> {
     let binary = opts.binary;
 
@@ -538,20 +538,20 @@ pub fn BeginCopyFrom<'mcx>(
     // #159 plan-layer keystone; if any column is missing from the column list
     // and is not generated, we'd need a default — which we cannot build yet, so
     // we raise rather than silently insert a wrong value (see below).
-    let mut in_functions: mcx::PgVec<'mcx, fmgr::FmgrInfo> =
-        mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
-    let mut typioparams: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
-    let mut defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> =
-        mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
+    let mut in_functions: ::mcx::PgVec<'mcx, ::fmgr::FmgrInfo> =
+        ::mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
+    let mut typioparams: ::mcx::PgVec<'mcx, Oid> = ::mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
+    let mut defexprs: ::mcx::PgVec<'mcx, Option<::mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> =
+        ::mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
     // Raw (unplanned) default Exprs carried to CopyFrom (see CopyFromStateData).
-    let mut raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ::nodes::Expr>>> =
-        mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
+    let mut raw_defexprs: ::mcx::PgVec<'mcx, Option<::mcx::PgBox<'mcx, ::nodes::Expr>>> =
+        ::mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
 
     for attnum in 1..=num_phys_attrs {
         let att = &rel.rd_att.attrs[attnum - 1];
         if att.attisdropped {
             // We don't need info for dropped attributes; install a placeholder.
-            in_functions.push(fmgr::FmgrInfo::empty());
+            in_functions.push(::fmgr::FmgrInfo::empty());
             typioparams.push(0);
             defexprs.push(None);
             raw_defexprs.push(None);
@@ -610,7 +610,7 @@ pub fn BeginCopyFrom<'mcx>(
                         mcx, owned,
                     )?
                     .clone_in(mcx)?;
-                raw = Some(mcx::alloc_in(mcx, planned)?);
+                raw = Some(::mcx::alloc_in(mcx, planned)?);
             }
         }
         raw_defexprs.push(raw);
@@ -636,17 +636,17 @@ pub fn BeginCopyFrom<'mcx>(
             file_encoding,
             database_encoding,
         )?;
-        if proc == types_core::InvalidOid {
+        if proc == ::types_core::InvalidOid {
             return Err(PgError::error(format!(
                 "default conversion function for encoding \"{}\" to \"{}\" does not exist",
                 encnames_seams::pg_encoding_to_char::call(file_encoding),
                 encnames_seams::pg_encoding_to_char::call(database_encoding),
             ))
-            .with_sqlstate(types_error::ERRCODE_UNDEFINED_FUNCTION));
+            .with_sqlstate(::types_error::ERRCODE_UNDEFINED_FUNCTION));
         }
         proc
     } else {
-        types_core::InvalidOid
+        ::types_core::InvalidOid
     };
 
     // Build the parse state. raw_buf is RAW_BUF_SIZE+1; the codec fills it.
@@ -715,7 +715,7 @@ pub fn BeginCopyFrom<'mcx>(
     if cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_STOP {
         let details_wanted =
             cstate.opts.on_error != CopyOnErrorChoice::COPY_ON_ERROR_IGNORE;
-        cstate.escontext = Some(types_error::SoftErrorContext::new(details_wanted));
+        cstate.escontext = Some(::types_error::SoftErrorContext::new(details_wanted));
     } else {
         cstate.escontext = None;
     }
@@ -754,7 +754,7 @@ pub fn BeginCopyFrom<'mcx>(
         progress_type = PROGRESS_COPY_TYPE_PIPE;
         // C: if (whereToSendOutput == DestRemote) ReceiveCopyBegin(cstate);
         //    else cstate->copy_file = stdin;
-        if utils_error::config::where_to_send_output() == types_dest::CommandDest::Remote {
+        if ::utils_error::config::where_to_send_output() == types_dest::CommandDest::Remote {
             // ReceiveCopyBegin: send the CopyInResponse and switch the source to
             // the libpq frontend (COPY_FRONTEND).
             cstate.copy_file = Some(register_source(CopySourceReader::Frontend {
@@ -1044,8 +1044,8 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         // ExecInitRangeTable(estate, cstate->range_table, cstate->rteperminfos,
         //                    bms_make_singleton(1));
         let unpruned = nodes_core::bitmapset::bms_make_singleton(mcx, 1)?;
-        let range_table = core::mem::replace(&mut state.range_table, mcx::PgVec::new_in(mcx));
-        let perminfos = core::mem::replace(&mut state.rteperminfos, mcx::PgVec::new_in(mcx));
+        let range_table = core::mem::replace(&mut state.range_table, ::mcx::PgVec::new_in(mcx));
+        let perminfos = core::mem::replace(&mut state.rteperminfos, ::mcx::PgVec::new_in(mcx));
         execUtils::ExecInitRangeTable(
             estate,
             range_table,
@@ -1088,7 +1088,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         //   mtstate->operation = CMD_INSERT; mtstate->mt_nrels = 1;
         //   mtstate->resultRelInfo = resultRelInfo;
         //   mtstate->rootResultRelInfo = resultRelInfo;
-        let mut mtstate_rels: mcx::PgVec<'mcx, RriId> = mcx::PgVec::new_in(mcx);
+        let mut mtstate_rels: ::mcx::PgVec<'mcx, RriId> = ::mcx::PgVec::new_in(mcx);
         mtstate_rels.push(rri);
         let mut mtstate: ::nodes::ModifyTableState<'mcx> =
             ::nodes::ModifyTableState {
@@ -1103,7 +1103,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 mt_epqstate: ::nodes::execnodes::EPQState::default(),
                 fireBSTriggers: true,
                 mt_resultOidAttno: 0,
-                mt_lastResultOid: types_core::primitive::InvalidOid,
+                mt_lastResultOid: ::types_core::primitive::InvalidOid,
                 mt_lastResultIndex: 0,
                 mt_resultOidHash: None,
                 mt_root_tuple_slot: None,
@@ -1140,7 +1140,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         // ExecPrepareExpr (= expression_planner + ExecInitExpr(node, NULL)) and,
         // if the column is not copied from input, record it in `defmap`.
         {
-            let raw = core::mem::replace(&mut state.raw_defexprs, mcx::PgVec::new_in(mcx));
+            let raw = core::mem::replace(&mut state.raw_defexprs, ::mcx::PgVec::new_in(mcx));
             for (i, maybe) in raw.into_iter().enumerate() {
                 let defexpr = match maybe {
                     Some(e) => e,
@@ -1180,8 +1180,8 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         // the owned ExecInitQual ignores `parent` anyway (it threads only the
         // EState back-link).
         if !state.cstate.where_clause.is_empty() {
-            let qual: mcx::PgVec<'mcx, ::nodes::primnodes::Expr> =
-                core::mem::replace(&mut state.cstate.where_clause, mcx::PgVec::new_in(mcx));
+            let qual: ::mcx::PgVec<'mcx, ::nodes::primnodes::Expr> =
+                core::mem::replace(&mut state.cstate.where_clause, ::mcx::PgVec::new_in(mcx));
             state.cstate.qualexpr =
                 execExpr_seams::exec_init_qual_no_parent::call(
                     Some(&qual[..]),
@@ -1216,7 +1216,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         // CopyFrom tuple routing (copyfrom.c:978-981).
         //   if (cstate->rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
         //       proute = ExecSetupPartitionTupleRouting(estate, cstate->rel);
-        let mut proute: Option<mcx::PgBox<'mcx, ::nodes::PartitionTupleRouting<'mcx>>> =
+        let mut proute: Option<::mcx::PgBox<'mcx, ::nodes::PartitionTupleRouting<'mcx>>> =
             if relkind == RELKIND_PARTITIONED_TABLE {
                 let rel = relation_alias(estate, rri);
                 Some(
@@ -1305,7 +1305,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                         "skipped more than REJECT_LIMIT ({}) rows due to data type incompatibility",
                         state.cstate.opts.reject_limit
                     ))
-                    .with_sqlstate(types_error::ERRCODE_INVALID_TEXT_REPRESENTATION)
+                    .with_sqlstate(::types_error::ERRCODE_INVALID_TEXT_REPRESENTATION)
                     .add_context(copy_from_error_context(&state.cstate)));
                 }
 
@@ -1513,7 +1513,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                 // ExecARInsertTriggers; the recheck list is only used by deferred
                 // unique-index checks, which the AR queue replays — pass the
                 // produced OID list straight through.
-                let recheck_indexes: mcx::PgVec<'mcx, Oid> =
+                let recheck_indexes: ::mcx::PgVec<'mcx, Oid> =
                     if estate.result_rel(result_rel_info).ri_NumIndices > 0 {
                         execIndexing_seams::exec_insert_index_tuples::call(
                             mcx,
@@ -1527,7 +1527,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                             false,
                         )?
                     } else {
-                        mcx::PgVec::new_in(mcx)
+                        ::mcx::PgVec::new_in(mcx)
                     };
 
                 // AFTER ROW INSERT Triggers (copyfrom.c:1441-1443) — unconditional
@@ -1569,7 +1569,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             } else {
                 format!("{n} rows were skipped due to data type incompatibility")
             };
-            ereport(types_error::NOTICE)
+            ereport(::types_error::NOTICE)
                 .errmsg(msg)
                 .finish(here("CopyFrom"))?;
         }
@@ -1736,14 +1736,14 @@ fn receive_function_call_impl<'mcx>(
 /// the established `fmgr_out_to_datum` bridge (jsonfuncs/populate.rs).
 fn fmgr_out_to_datum<'mcx>(
     mcx: Mcx<'mcx>,
-    out: fmgr::FmgrOut<'mcx>,
+    out: ::fmgr::FmgrOut<'mcx>,
 ) -> PgResult<RichDatum<'mcx>> {
-    use fmgr::boundary::RefPayload;
+    use ::fmgr::boundary::RefPayload;
     match out {
-        fmgr::FmgrOut::ByVal(d) => Ok(d),
-        fmgr::FmgrOut::Ref(payload) => match payload {
+        ::fmgr::FmgrOut::ByVal(d) => Ok(d),
+        ::fmgr::FmgrOut::Ref(payload) => match payload {
             RefPayload::Varlena(b) => {
-                let mut v = mcx::vec_with_capacity_in::<u8>(mcx, b.len())?;
+                let mut v = ::mcx::vec_with_capacity_in::<u8>(mcx, b.len())?;
                 v.extend_from_slice(&b);
                 Ok(RichDatum::ByRef(v))
             }

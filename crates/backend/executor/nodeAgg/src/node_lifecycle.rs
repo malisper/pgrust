@@ -4,9 +4,9 @@
 //! per-trans build that reads the catalog for each aggregate).
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{Oid, OidIsValid, INVALID_OID};
-use types_tuple::heaptuple::Datum;
-use types_error::PgResult;
+use ::types_core::primitive::{Oid, OidIsValid, INVALID_OID};
+use ::types_tuple::heaptuple::Datum;
+use ::types_error::PgResult;
 use ::nodes::nodeagg::{
     Aggref, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
@@ -14,8 +14,8 @@ use crate::aggstate::{AggStateData, AggStatePerTransData};
 use ::nodes::nodes::Node;
 use nodes::{Bitmapset, EStateData, SlotId};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_core::fmgr::FmgrInfo;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_tuple::heaptuple::TupleDescData;
 
 extern crate alloc;
 
@@ -224,7 +224,7 @@ pub fn find_cols<'mcx>(
     // `Vec<Expr>`; iterate and walk each as a wrapped `Node`. The wrappers are
     // built in a scratch context that is freed when the walk returns (the
     // walker only read-borrows them).
-    let scratch = mcx::MemoryContext::new("find_cols scratch");
+    let scratch = ::mcx::MemoryContext::new("find_cols scratch");
     let swx = scratch.mcx();
     if let Some(tlist) = agg.plan.targetlist.as_ref() {
         for te in tlist.iter() {
@@ -336,7 +336,7 @@ fn walk_children<'mcx, 'n>(
     context: &mut FindColsContext<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    let mut err: Option<types_error::PgError> = None;
+    let mut err: Option<::types_error::PgError> = None;
     nodes_core_seams::expression_tree_walker::call(node, &mut |child| {
         if err.is_some() {
             return true;
@@ -362,7 +362,7 @@ pub fn find_hash_columns<'mcx>(
     estate: &mut EStateData<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
-    use types_core::primitive::AttrNumber;
+    use ::types_core::primitive::AttrNumber;
 
     // scanDesc = aggstate->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
     let scan_desc = crate::exec_init_agg::scan_tuple_desc(aggstate, estate)?;
@@ -1062,7 +1062,7 @@ fn build_deserialfn_call_frame_owned<'mcx>(
 fn exec_type_from_tl_owned<'mcx>(
     aggref: &Aggref<'mcx>,
     mcx: Mcx<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     // ExecTypeFromTL takes a &[TargetEntry]; materialize a contiguous copy of
     // the aggref's args (which are stored as PgBox<TargetEntry>).
     let mut tl: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
@@ -1079,7 +1079,7 @@ fn exec_type_from_tl_owned<'mcx>(
 /// execTuples; the unit already declares `exec_init_extra_tuple_slot`.
 fn exec_init_extra_tuple_slot_minimal<'mcx>(
     estate: &mut EStateData<'mcx>,
-    desc: &types_tuple::heaptuple::TupleDesc<'mcx>,
+    desc: &::types_tuple::heaptuple::TupleDesc<'mcx>,
 ) -> PgResult<SlotId> {
     let desc_clone = clone_tuple_desc(desc, estate.es_query_cxt)?;
     execTuples_seams::exec_init_extra_tuple_slot::call(
@@ -1094,7 +1094,7 @@ fn exec_init_extra_tuple_slot_minimal<'mcx>(
 fn sortgroupclause_tle_resno_and_collation<'mcx>(
     sortcl: &::nodes::nodeagg::SortGroupClauseAgg,
     aggref: &Aggref<'mcx>,
-) -> PgResult<(types_core::primitive::AttrNumber, Oid)> {
+) -> PgResult<(::types_core::primitive::AttrNumber, Oid)> {
     // get_sortgroupclause_tle: the TargetEntry whose ressortgroupref matches.
     let args = aggref
         .args
@@ -1165,9 +1165,9 @@ fn exec_tuples_match_prepare_owned<'mcx>(
 /// Deep-copy a `TupleDesc` (the C reads a shared `TupleDesc` pointer; the owned
 /// seams take an owned `TupleDesc`, so clone it for each consumer).
 fn clone_tuple_desc<'mcx>(
-    desc: &types_tuple::heaptuple::TupleDesc<'mcx>,
+    desc: &::types_tuple::heaptuple::TupleDesc<'mcx>,
     mcx: Mcx<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     match desc {
         Some(d) => Ok(Some(alloc_in(mcx, d.clone_in(mcx)?)?)),
         None => Ok(None),

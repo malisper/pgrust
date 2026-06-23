@@ -28,14 +28,14 @@
 
 use utils_error::{ereport, PgResult};
 use types_error::{ERROR, LOG, WARNING};
-use types_error::error::{ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE};
-use types_core::catalog::{
+use ::types_error::error::{ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_core::catalog::{
     BOOTSTRAP_SUPERUSERID, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
-use types_core::primitive::{InvalidRelFileNumber, Oid, ProcNumber, RegProcedure};
-use types_core::xact::InvalidSubTransactionId;
+use ::types_core::primitive::{InvalidRelFileNumber, Oid, ProcNumber, RegProcedure};
+use ::types_core::xact::InvalidSubTransactionId;
 use types_core::{InvalidOid, INVALID_PROC_NUMBER};
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_TOASTVALUE,
 };
@@ -326,7 +326,7 @@ fn finish_relcache_entries() -> PgResult<()> {
                     // this corrupt-initfile-entry reload path leaves rd_options
                     // NULL rather than re-deriving it.
                     crate::build::RelationParseRelOptions(r, None)?;
-                    Ok::<bool, utils_error::PgError>(r.rd_rel.relowner == InvalidOid)
+                    Ok::<bool, ::utils_error::PgError>(r.rd_rel.relowner == InvalidOid)
                 })?;
                 if bad {
                     let relname = with_rel(rd, |r| r.rd_rel.relname.clone());
@@ -456,7 +456,7 @@ pub fn load_critical_index(indexoid: Oid, heapoid: Oid) -> PgResult<()> {
 pub fn RelationBuildLocalRelation<'mcx>(
     relname: &str,
     relnamespace: Oid,
-    tup_desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
+    tup_desc: &::types_tuple::heaptuple::TupleDescData<'mcx>,
     relid: Oid,
     accessmtd: Oid,
     reltablespace: Oid,
@@ -464,7 +464,7 @@ pub fn RelationBuildLocalRelation<'mcx>(
     mapped_relation: bool,
     relpersistence: i8,
     relkind: i8,
-    relfilenumber: types_core::RelFileNumber,
+    relfilenumber: ::types_core::RelFileNumber,
 ) -> PgResult<Oid> {
     // int natts = tupDesc->natts; Assert(natts >= 0);
     let natts = tup_desc.natts;
@@ -758,7 +758,7 @@ pub fn RelationSetNewRelfilenumber(relation: Oid, persistence: i8) -> PgResult<(
 
     // --- RELKIND storage dispatch (OWN). The AM/storage create are owner
     // seams; the table-AM leg also hands back the new freeze/minmxid. ---
-    let mut freeze_xid: u32 = types_core::xact::InvalidTransactionId;
+    let mut freeze_xid: u32 = ::types_core::xact::InvalidTransactionId;
     let mut minmulti: u32 = 0; // InvalidMultiXactId
     if relkind_has_table_am(relkind) {
         // C: table_relation_set_new_filelocator(relation, &newrlocator,
@@ -1179,7 +1179,7 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
         rel.rd_att.tdtypeid = if rel.rd_rel.reltype != 0 {
             rel.rd_rel.reltype
         } else {
-            types_tuple::heaptuple::RECORDOID
+            ::types_tuple::heaptuple::RECORDOID
         };
         rel.rd_att.tdtypmod = -1;
         for _ in 0..natts {
@@ -1286,7 +1286,7 @@ pub fn load_relcache_init_file(shared: bool) -> PgResult<bool> {
             if amsupport > 0 {
                 let nsupport = natts * amsupport as i32;
                 rel.rd_supportinfo =
-                    (0..nsupport).map(|_| types_core::fmgr::FmgrInfo::default()).collect();
+                    (0..nsupport).map(|_| ::types_core::fmgr::FmgrInfo::default()).collect();
             } else {
                 rel.rd_supportinfo = Vec::new();
             }
@@ -1623,7 +1623,7 @@ fn unlink_initfile(initfilename: &str, elevel: i32) -> PgResult<()> {
     if let Err(missing) = xunit::unlink_file_result(initfilename) {
         if !missing {
             // ENOENT is ignored; any other failure reports at elevel.
-            let err = ereport(types_error::ErrorLevel(elevel))
+            let err = ereport(::types_error::ErrorLevel(elevel))
                 .errcode_for_file_access()
                 .errmsg(format!("could not remove cache file \"{initfilename}\""))
                 .into_error();
@@ -1663,8 +1663,8 @@ const TypeRelationId: Oid = 1247;
 mod xunit {
     use super::*;
 
-    use types_storage::lock::AccessShareLock;
-    use types_storage::storage::{LWLockMode, REL_CACHE_INIT_LOCK};
+    use ::types_storage::lock::AccessShareLock;
+    use ::types_storage::storage::{LWLockMode, REL_CACHE_INIT_LOCK};
 
     /// `ENOENT` (POSIX): the `errno` value the C `unlink` path treats as
     /// "already gone" (a non-error). The fd `unlink_file` seam reports failures
@@ -1687,7 +1687,7 @@ mod xunit {
     }
     pub(super) fn RelationMapUpdateMapLocal(
         relid: Oid,
-        relfilenumber: types_core::RelFileNumber,
+        relfilenumber: ::types_core::RelFileNumber,
         shared: bool,
     ) -> PgResult<()> {
         // C: RelationMapUpdateMap(relid, relfilenumber, shared_relation, true)
@@ -1783,8 +1783,8 @@ mod xunit {
                 relfrozenxid: f.relfrozenxid,
                 relminmxid: f.relminmxid,
             }),
-            None => Err(ereport(types_error::FATAL)
-                .errcode(types_error::error::ERRCODE_UNDEFINED_OBJECT)
+            None => Err(ereport(::types_error::FATAL)
+                .errcode(::types_error::error::ERRCODE_UNDEFINED_OBJECT)
                 .errmsg_internal(format!("cache lookup failed for relation {relid}"))
                 .into_error()),
         }
@@ -1792,7 +1792,7 @@ mod xunit {
 
     // ---- xact ----
 
-    pub(super) fn GetCurrentSubTransactionId() -> types_core::xact::SubTransactionId {
+    pub(super) fn GetCurrentSubTransactionId() -> ::types_core::xact::SubTransactionId {
         // C: GetCurrentSubTransactionId().
         transam_xact_seams::get_current_sub_transaction_id::call()
     }

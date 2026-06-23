@@ -355,7 +355,7 @@ impl<'a> Scanner<'a> {
             }
             InitialRule::Operator => self.lex_operator(),
             InitialRule::Param => {
-                use error_fgram::SoftErrorContext;
+                use ::error_fgram::SoftErrorContext;
                 self.set_yylloc();
                 let digits = &self.yytext()[1..];
                 let s = std::str::from_utf8(digits).unwrap_or("\u{FFFF}");

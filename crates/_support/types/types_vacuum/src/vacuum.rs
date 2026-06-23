@@ -3,7 +3,7 @@
 //! and the per-page prune/freeze result.
 
 use types_core::{bits32, MultiXactId, OffsetNumber, Oid, TransactionId};
-use types_storage::bufpage::MaxHeapTuplesPerPage;
+use ::types_storage::bufpage::MaxHeapTuplesPerPage;
 
 /// `typedef enum VacOptValue` (`commands/vacuum.h`) — tri-state for the
 /// `index_cleanup` / `truncate` VACUUM options. Discriminants match the C enum.

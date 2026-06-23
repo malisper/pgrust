@@ -17,12 +17,12 @@
 //! NULL logic, and writes the `Option<text>` result back (a `None` result is
 //! `PG_RETURN_NULL()`).
 
-use fmgr::boundary::RefPayload;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -62,9 +62,9 @@ fn ret_text_opt(fcinfo: &mut FunctionCallInfoBaseData, s: Option<String>) -> Dat
         Some(s) => {
             // cstring_to_text: prepend the 4-byte varlena header (header-ful).
             let payload = s.into_bytes();
-            let mut img = Vec::with_capacity(datum::varlena::VARHDRSZ + payload.len());
-            img.extend_from_slice(&datum::varlena::set_varsize_4b(
-                datum::varlena::VARHDRSZ + payload.len(),
+            let mut img = Vec::with_capacity(::datum::varlena::VARHDRSZ + payload.len());
+            img.extend_from_slice(&::datum::varlena::set_varsize_4b(
+                ::datum::varlena::VARHDRSZ + payload.len(),
             ));
             img.extend_from_slice(&payload);
             fcinfo.set_ref_result(RefPayload::Varlena(img));

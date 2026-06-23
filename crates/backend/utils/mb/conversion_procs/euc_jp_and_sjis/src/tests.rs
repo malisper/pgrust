@@ -1,5 +1,5 @@
 use super::*;
-use types_wchar::encoding::PG_UTF8;
+use ::types_wchar::encoding::PG_UTF8;
 
 #[test]
 fn hiragana_round_trips_between_euc_jp_and_sjis() {

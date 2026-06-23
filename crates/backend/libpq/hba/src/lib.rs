@@ -40,12 +40,12 @@ mod views;
 
 use std::cell::RefCell;
 
-pub(crate) use utils_error::ereport;
+pub(crate) use ::utils_error::ereport;
 use types_error::{
     ErrorLocation, PgResult, SqlState, DEBUG2, ERRCODE_CONFIG_FILE_ERROR,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_REGULAR_EXPRESSION, LOG,
 };
-use net::HbaLine;
+use ::net::HbaLine;
 
 pub(crate) use auth_seams as auth_seams;
 pub(crate) use hba_seams as hba_seams;
@@ -133,9 +133,9 @@ pub struct IdentLine {
     /// `char *usermap`.
     pub usermap: String,
     /// `AuthToken *system_user`.
-    pub system_user: net::AuthToken,
+    pub system_user: ::net::AuthToken,
     /// `AuthToken *pg_user`.
-    pub pg_user: net::AuthToken,
+    pub pg_user: ::net::AuthToken,
 }
 
 /// `struct TokenizedAuthLine` (`libpq/hba.h`) — one line lexed from an auth
@@ -143,7 +143,7 @@ pub struct IdentLine {
 #[derive(Clone, Debug, Default)]
 pub struct TokenizedAuthLine {
     /// `List *fields` — list of lists of `AuthToken`.
-    pub fields: Vec<Vec<net::AuthToken>>,
+    pub fields: Vec<Vec<::net::AuthToken>>,
     /// `char *file_name`.
     pub file_name: String,
     /// `int line_num`.
@@ -158,7 +158,7 @@ pub struct TokenizedAuthLine {
 /// `check_network_callback`.
 pub(crate) struct CheckNetworkData {
     /// `IPCompareMethod method` — test method.
-    pub method: net::IPCompareMethod,
+    pub method: ::net::IPCompareMethod,
     /// `bool result` — set to true if match.
     pub result: bool,
 }
@@ -203,7 +203,7 @@ pub(crate) fn set_parsed_ident_lines(new: Vec<IdentLine>) {
 
 /// `t->string` as bytes (C `string` is non-null after `make_auth_token`; the
 /// `palloc0` zero state is the empty string).
-pub(crate) fn tok_str(t: &net::AuthToken) -> &[u8] {
+pub(crate) fn tok_str(t: &::net::AuthToken) -> &[u8] {
     match &t.string {
         Some(s) => s.as_bytes(),
         None => b"",
@@ -211,27 +211,27 @@ pub(crate) fn tok_str(t: &net::AuthToken) -> &[u8] {
 }
 
 /// `token_has_regexp(t)` (hba.c:69).
-pub(crate) fn token_has_regexp(t: &net::AuthToken) -> bool {
+pub(crate) fn token_has_regexp(t: &::net::AuthToken) -> bool {
     t.regex.is_some()
 }
 
 /// `token_is_member_check(t)` (hba.c:70).
-pub(crate) fn token_is_member_check(t: &net::AuthToken) -> bool {
+pub(crate) fn token_is_member_check(t: &::net::AuthToken) -> bool {
     !t.quoted && tok_str(t).first() == Some(&b'+')
 }
 
 /// `token_is_keyword(t, k)` (hba.c:71).
-pub(crate) fn token_is_keyword(t: &net::AuthToken, k: &[u8]) -> bool {
+pub(crate) fn token_is_keyword(t: &::net::AuthToken, k: &[u8]) -> bool {
     !t.quoted && tok_str(t) == k
 }
 
 /// `token_matches(t, k)` (hba.c:72).
-pub(crate) fn token_matches(t: &net::AuthToken, k: &[u8]) -> bool {
+pub(crate) fn token_matches(t: &::net::AuthToken, k: &[u8]) -> bool {
     tok_str(t) == k
 }
 
 /// `token_matches_insensitive(t, k)` (hba.c:73).
-pub(crate) fn token_matches_insensitive(t: &net::AuthToken, k: &[u8]) -> bool {
+pub(crate) fn token_matches_insensitive(t: &::net::AuthToken, k: &[u8]) -> bool {
     pg_strcasecmp(tok_str(t), k) == 0
 }
 
@@ -323,7 +323,7 @@ pub(crate) fn line_context(line_num: i32, file_name: &str) -> String {
 /// Emit a config-file `ereport(elevel, (errcode(F0000), errmsg(msg),
 /// [errhint], errcontext(...)))`.
 pub(crate) fn report_config(
-    elevel: types_error::ErrorLevel,
+    elevel: ::types_error::ErrorLevel,
     funcname: &'static str,
     msg: String,
     hint: Option<&str>,
@@ -343,7 +343,7 @@ pub(crate) fn report_config(
 /// Emit `ereport(elevel, (errcode(code), errmsg(msg)))` (no errcontext, no
 /// hint) — the plain log/error reports.
 pub(crate) fn report_plain(
-    elevel: types_error::ErrorLevel,
+    elevel: ::types_error::ErrorLevel,
     funcname: &'static str,
     sqlstate: SqlState,
     msg: String,
@@ -354,7 +354,7 @@ pub(crate) fn report_plain(
 /// Emit `ereport(elevel, (errcode_for_file_access(), errmsg(msg)))` with the
 /// errno-derived SQLSTATE and `%m` expansion (the file-open/read reports).
 pub(crate) fn report_file_access(
-    elevel: types_error::ErrorLevel,
+    elevel: ::types_error::ErrorLevel,
     funcname: &'static str,
     save_errno: i32,
     msg: String,
@@ -423,7 +423,7 @@ impl MemCtx {
 
 // Keep the otherwise-unused error-level / errcode imports referenced so the
 // module-wide `use` list documents the report vocabulary in one place.
-const _: (SqlState, SqlState, SqlState, types_error::ErrorLevel, types_error::ErrorLevel) = (
+const _: (SqlState, SqlState, SqlState, ::types_error::ErrorLevel, ::types_error::ErrorLevel) = (
     ERRCODE_INTERNAL_ERROR,
     ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_REGULAR_EXPRESSION,

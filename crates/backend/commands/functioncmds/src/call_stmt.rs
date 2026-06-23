@@ -14,20 +14,20 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::Node;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::portalcmds::ParamListInfo;
 use ::nodes::primnodes::{Expr, FuncExpr};
-use types_tuple::heaptuple::TupleDesc;
-use types_tuple::Datum;
+use ::types_tuple::heaptuple::TupleDesc;
+use ::types_tuple::Datum;
 
-use types_acl::acl::ACLCHECK_OK;
-use types_acl::ACL_EXECUTE;
+use ::types_acl::acl::ACLCHECK_OK;
+use ::types_acl::ACL_EXECUTE;
 use types_error::{ERRCODE_TOO_MANY_ARGUMENTS, ERROR};
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 /// `RECORDOID` (pg_type.h).
 const RECORDOID: Oid = 2249;
@@ -250,12 +250,12 @@ pub fn ExecuteCallStmt<'mcx>(
 fn clone_funcexpr_erased<'mcx>(
     mcx: Mcx<'mcx>,
     fexpr: &FuncExpr<'mcx>,
-) -> PgResult<types_core::fmgr::FnExprErased> {
+) -> PgResult<::types_core::fmgr::FnExprErased> {
     let cloned = Expr::FuncExpr(fexpr.clone()).clone_in(mcx)?;
     // Erase the `'mcx`-arena clone into the `'static` `fn_expr` carrier via the
     // sanctioned from_node_erased boundary (read back transiently by exprType /
     // polymorphic resolution).
-    Ok(types_core::fmgr::FnExprErased::from_node_erased::<
+    Ok(::types_core::fmgr::FnExprErased::from_node_erased::<
         Expr<'_>,
         Expr<'static>,
     >(cloned))

@@ -19,7 +19,7 @@
 //! - **PgResult instead of longjmp**: functions whose C bodies can
 //!   `ereport(ERROR)`-or-higher (here only via callees: ProcessConfigFile,
 //!   WaitEventSet calls, plus FATAL paths) return
-//!   `types_error::PgResult`; FATAL (like every severity >= ERROR)
+//!   `::types_error::PgResult`; FATAL (like every severity >= ERROR)
 //!   propagates as `Err(PgError)` if `errfinish` returns it, per the settled
 //!   AGENTS.md convention.
 //! - **Cross-unit calls**: direct deps where acyclic (elog, interrupt,
@@ -44,7 +44,7 @@
 //!   the child belongs to the child-launch machinery that owns that context
 //!   value.
 //! - `MyBackendType = B_LOGGER` ports as the globals.c owner seam **plus**
-//!   `utils_error::config::set_am_syslogger(true)` (elog's
+//!   `::utils_error::config::set_am_syslogger(true)` (elog's
 //!   per-backend mirror of `MyBackendType == B_LOGGER`).
 //! - The `WIN32` paths (`pipeThread`, `_setmode`, CRLF) and the
 //!   `EXEC_BACKEND` `syslogger_fdget`/`syslogger_fdopen` re-open-via-fd path
@@ -63,19 +63,19 @@ use std::ptr;
 use interrupt::{
     ConfigReloadPending, SetConfigReloadPending, SignalHandlerForConfigReload,
 };
-use utils_error::config as elog_config;
+use ::utils_error::config as elog_config;
 use utils_error::{ereport, errno};
-use waiteventset_seams::WaitEventSet;
-use types_core::init::BackendType;
+use ::waiteventset_seams::WaitEventSet;
+use ::types_core::init::BackendType;
 use types_core::{pg_time_t, MAXPGPATH, PGINVALID_SOCKET};
 use types_error::{
     PgResult, DEBUG1, FATAL, LOG, LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG,
     LOG_DESTINATION_STDERR,
 };
-use types_pgstat::wait_event::WAIT_EVENT_SYSLOGGER_MAIN;
-use signal::SigHandler;
-use types_storage::latch::LatchHandle;
-use types_storage::waiteventset::{WL_LATCH_SET, WL_SOCKET_READABLE};
+use ::types_pgstat::wait_event::WAIT_EVENT_SYSLOGGER_MAIN;
+use ::signal::SigHandler;
+use ::types_storage::latch::LatchHandle;
+use ::types_storage::waiteventset::{WL_LATCH_SET, WL_SOCKET_READABLE};
 
 pub mod config;
 
@@ -83,7 +83,7 @@ pub mod config;
 /// available in Rust and is left unset, as `elog()` in the elog crate does).
 macro_rules! here {
     () => {
-        types_error::ErrorLocation {
+        ::types_error::ErrorLocation {
             filename: Some(file!().to_string()),
             lineno: line!() as i32,
             funcname: None,
@@ -506,7 +506,7 @@ pub fn SysLoggerMain(
         }
 
         // Sleep until there's something to do.
-        let mut occurred = [types_storage::waiteventset::WaitEvent::default(); 1];
+        let mut occurred = [::types_storage::waiteventset::WaitEvent::default(); 1];
         let noccurred = wes.wait(cur_timeout, &mut occurred, WAIT_EVENT_SYSLOGGER_MAIN)?;
 
         if noccurred == 1 && occurred[0].events == WL_SOCKET_READABLE {
@@ -926,7 +926,7 @@ pub fn write_syslogger_file(buffer: &[u8], destination: i32) {
     // the postmaster's original stderr, or to /dev/null, but never to our
     // input pipe. (%m expanded here; the C write_stderr's printf does it.)
     if rc != buffer.len() {
-        utils_error::write_stderr(&errno::replace_percent_m(
+        ::utils_error::write_stderr(&errno::replace_percent_m(
             "could not write to log file: %m\n",
             errno::current_errno(),
         ));
@@ -1434,7 +1434,7 @@ fn sys_logger_main_entry(startup_data: &types_startup::StartupData) -> ! {
     match SysLoggerMain(startup_slice, start_time, mode_mask, my_latch) {
         Ok(()) => unreachable!("SysLoggerMain returned Ok; it only exits via proc_exit"),
         Err(err) => {
-            utils_error::emit_error_report_for(&err);
+            ::utils_error::emit_error_report_for(&err);
             dsm_core_seams::proc_exit::call(
                 1,
                 init_small_seams::my_proc_pid::call(),

@@ -8,9 +8,9 @@
 
 extern crate alloc;
 
-use mcx::MemoryContext;
-use types_error::PgError;
-use types_vacuum::vacuumlazy::{PruneAndFreezeArgs, PruneAndFreezeOut};
+use ::mcx::MemoryContext;
+use ::types_error::PgError;
+use ::types_vacuum::vacuumlazy::{PruneAndFreezeArgs, PruneAndFreezeOut};
 
 use pruneheap_seams as pruneheap_seam;
 use vacuumlazy_seams as vacuumlazy_seam;
@@ -61,7 +61,7 @@ pub fn init_seams() {
 
 /// Bridge the `PruneAndFreezeArgs`/`PruneAndFreezeOut` value contract (the
 /// merged driver passes the relation by OID) onto the owned-reference engine.
-fn prune_and_freeze_seam(args: PruneAndFreezeArgs) -> types_error::PgResult<PruneAndFreezeOut> {
+fn prune_and_freeze_seam(args: PruneAndFreezeArgs) -> ::types_error::PgResult<PruneAndFreezeOut> {
     let ctx = MemoryContext::new("heap_page_prune_and_freeze");
     let mcx = ctx.mcx();
 

@@ -14,11 +14,11 @@
 //!
 //! # Ownership
 //!
-//! The table owns each [`Portal`](portal::Portal) record (the
+//! The table owns each [`Portal`](::portal::Portal) record (the
 //! `Rc<RefCell<PortalData>>` open handle — the same shared, interior-mutable
 //! alias the whole portal subsystem uses, cf. `types-rel`'s `Relation`). The
 //! portal's subsidiary memory arenas (`portalContext`, `holdContext`) are real
-//! owned [`mcx::MemoryContext`] values; deleting one is dropping it,
+//! owned [`::mcx::MemoryContext`] values; deleting one is dropping it,
 //! `MemoryContextDeleteChildren` is `reset()`. The planned-statement list
 //! (`stmts`) is the real owned `Vec<PlannedStmt>`. Objects owned by other
 //! subsystems (the resource owner, the cached plan, snapshots, the cleanup
@@ -33,13 +33,13 @@ use std::collections::HashMap;
 
 use utils_error::{elog, ereport};
 use mcx::{MemoryContext, PgString, PgVec};
-use types_core::SubTransactionId;
+use ::types_core::SubTransactionId;
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_CURSOR, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_CURSOR_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING,
 };
 use ::nodes::nodeindexscan::PlannedStmt;
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 use portal::{
     CachedPlanHandle, CommandTag, PgCursorRow, Portal, PortalCleanupHook, PortalData,
     PortalStatus, PortalStrategy, QueryCompletion, ResourceOwner, CMDTAG_SELECT, CMDTAG_UNKNOWN,
@@ -300,7 +300,7 @@ fn portal_handles() -> PgResult<Vec<Portal>> {
     let n = with_table(|t| t.map_or(0, |m| m.len()));
     // Charge the scratch sizing to the per-call context (mirrors the C scan
     // scratch in CurrentMemoryContext), surfacing OOM as a recoverable error.
-    let mut keys: PgVec<PgString> = mcx::vec_with_capacity_in(mcx, n)?;
+    let mut keys: PgVec<PgString> = ::mcx::vec_with_capacity_in(mcx, n)?;
     let raw: Vec<Portal> = with_table(|t| t.map_or_else(Vec::new, |m| m.values_cloned()));
     for p in &raw {
         keys.push(PgString::from_str_in(&p.borrow().name, mcx)?);
@@ -660,7 +660,7 @@ fn copy_param_list_into_portal(
 /// executor/portal memory) into its `holdContext` so it survives the executor
 /// shutdown, storing the copy back on the portal.
 fn copy_tup_desc_into_hold_context(portal: &Portal) -> PgResult<()> {
-    let copy: Option<types_tuple::heaptuple::TupleDescData<'static>> = {
+    let copy: Option<::types_tuple::heaptuple::TupleDescData<'static>> = {
         let p = portal.borrow();
         match &p.tupDesc {
             None => None,
@@ -680,8 +680,8 @@ fn copy_tup_desc_into_hold_context(portal: &Portal) -> PgResult<()> {
                 // marker, like `holdStore`.
                 Some(unsafe {
                     core::mem::transmute::<
-                        types_tuple::heaptuple::TupleDescData<'_>,
-                        types_tuple::heaptuple::TupleDescData<'static>,
+                        ::types_tuple::heaptuple::TupleDescData<'_>,
+                        ::types_tuple::heaptuple::TupleDescData<'static>,
                     >(copied)
                 })
             }
@@ -765,9 +765,9 @@ pub fn PortalCreateHoldStore(portal: &Portal) -> PgResult<()> {
 /// same lifetime relationship).
 pub fn portal_set_tup_desc(
     portal: &Portal,
-    tupdesc: Option<&types_tuple::heaptuple::TupleDescData<'_>>,
+    tupdesc: Option<&::types_tuple::heaptuple::TupleDescData<'_>>,
 ) -> PgResult<()> {
-    let copy: Option<types_tuple::heaptuple::TupleDescData<'static>> = match tupdesc {
+    let copy: Option<::types_tuple::heaptuple::TupleDescData<'static>> = match tupdesc {
         None => None,
         Some(td) => {
             let p = portal.borrow();
@@ -784,8 +784,8 @@ pub fn portal_set_tup_desc(
             // "portal-context-lived", mirroring `stmts`/`holdStore`.
             Some(unsafe {
                 core::mem::transmute::<
-                    types_tuple::heaptuple::TupleDescData<'_>,
-                    types_tuple::heaptuple::TupleDescData<'static>,
+                    ::types_tuple::heaptuple::TupleDescData<'_>,
+                    ::types_tuple::heaptuple::TupleDescData<'static>,
                 >(copied)
             })
         }
@@ -798,7 +798,7 @@ pub fn portal_set_tup_desc(
 /// store it, under a single portal borrow. `build` is the caller's
 /// `ExecCleanTypeFromTL(pstmt->planTree->targetlist)` /
 /// `UtilityTupleDescriptor(pstmt->utilityStmt)` leg: given the portalContext's
-/// [`Mcx`](mcx::Mcx) and the portal's primary statement list, it produces the
+/// [`Mcx`](::mcx::Mcx) and the portal's primary statement list, it produces the
 /// descriptor allocated in that context.
 ///
 /// This exists because the descriptor a `PortalStart` leg builds is bound to
@@ -810,9 +810,9 @@ pub fn portal_set_tup_desc(
 pub fn set_result_tup_desc_with(
     portal: &Portal,
     build: &mut dyn for<'m> FnMut(
-        mcx::Mcx<'m>,
+        ::mcx::Mcx<'m>,
         &[::nodes::nodeindexscan::PlannedStmt<'m>],
-    ) -> PgResult<types_tuple::heaptuple::TupleDesc<'m>>,
+    ) -> PgResult<::types_tuple::heaptuple::TupleDesc<'m>>,
 ) -> PgResult<()> {
     let mut p = portal.borrow_mut();
     let ctx = p.portalContext.as_ref().ok_or_else(|| {
@@ -826,12 +826,12 @@ pub fn set_result_tup_desc_with(
     // allocated in `ctx` (the portalContext), which this `PortalData` owns and
     // drops with the `tupDesc` field — so extending the result to the field's
     // `'static` marker is sound, exactly as `portal_set_tup_desc` argues.
-    let ctx_ptr: *const mcx::MemoryContext = &**ctx;
+    let ctx_ptr: *const ::mcx::MemoryContext = &**ctx;
     let mcx = unsafe { (*ctx_ptr).mcx() };
     let stmts: &[::nodes::nodeindexscan::PlannedStmt<'static>] =
         p.stmts.as_deref().unwrap_or(&[]);
     let built = build(mcx, stmts)?;
-    let copy: Option<types_tuple::heaptuple::TupleDescData<'static>> = match built {
+    let copy: Option<::types_tuple::heaptuple::TupleDescData<'static>> = match built {
         None => None,
         Some(b) => {
             // The built descriptor already lives in `ctx` (the portalContext);
@@ -840,8 +840,8 @@ pub fn set_result_tup_desc_with(
             let owned = (*b).clone_in(mcx)?;
             Some(unsafe {
                 core::mem::transmute::<
-                    types_tuple::heaptuple::TupleDescData<'_>,
-                    types_tuple::heaptuple::TupleDescData<'static>,
+                    ::types_tuple::heaptuple::TupleDescData<'_>,
+                    ::types_tuple::heaptuple::TupleDescData<'static>,
                 >(owned)
             })
         }
@@ -1503,7 +1503,7 @@ const PG_CURSOR_COLS: usize = 6;
 /// `InitMaterializedSRF`-prepared tuplestore via `tuplestore_putvalues`. C builds
 /// `values[6]`/`nulls[6]` per portal and appends; mirrored faithfully here.
 pub fn pg_cursor<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<Datum<'mcx>> {
     // C:
@@ -1516,7 +1516,7 @@ pub fn pg_cursor<'mcx>(
     // append (the C `hash_seq_search` walk; our portal table is borrowed below
     // and the append can `ereport`, so collect first).
     let portals = portal_handles()?;
-    let mut rows: PgVec<PgCursorRow> = mcx::vec_with_capacity_in(mcx, portals.len())?;
+    let mut rows: PgVec<PgCursorRow> = ::mcx::vec_with_capacity_in(mcx, portals.len())?;
     for portal in &portals {
         let p = portal.borrow();
         // report only "visible" entries
@@ -1649,7 +1649,7 @@ pub fn ForgetPortalSnapshots() -> PgResult<()> {
 
 // ===========================================================================
 // Seam implementations called by the cyclic portalcmds (cursor command) unit.
-// The portal crosses as the shared `portal::Portal` open handle.
+// The portal crosses as the shared `::portal::Portal` open handle.
 // ===========================================================================
 
 /// `MemoryContextDeleteChildren(portal->portalContext)` (mcxt.c:542) — delete
@@ -1744,8 +1744,8 @@ pub fn with_active_portal<R>(f: impl FnOnce(Option<&Portal>) -> R) -> R {
 
 /// `ErrorLocation` for an `ereport(...).finish(...)` site
 /// (`__FILE__`/`__LINE__`/`__func__`).
-fn errloc(lineno: i32, funcname: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new("portalmem.c", lineno, funcname)
+fn errloc(lineno: i32, funcname: &'static str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new("portalmem.c", lineno, funcname)
 }
 
 pub use seams_install::init_seams;

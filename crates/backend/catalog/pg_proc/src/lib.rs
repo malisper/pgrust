@@ -47,60 +47,60 @@
 
 mod fmgr_builtins;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-use types_catalog::pg_proc::{
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_proc::{
     ProcFormFields, ProcedureRelationId, PgProcInsertRow,
     PROKIND_AGGREGATE, PROKIND_FUNCTION, PROKIND_PROCEDURE, PROKIND_WINDOW, PROARGMODE_IN,
     PROARGMODE_INOUT, PROARGMODE_OUT, PROARGMODE_TABLE, PROARGMODE_VARIADIC, SQLlanguageId,
 };
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_storage::lock::RowExclusiveLock;
-use types_tuple::heaptuple::{
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_storage::lock::RowExclusiveLock;
+use ::types_tuple::heaptuple::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
     ANYNONARRAYOID, ANYOID, ANYRANGEOID, RECORDOID, VOIDOID,
 };
-use types_catalog::pg_type::TYPTYPE_PSEUDO;
+use ::types_catalog::pg_type::TYPTYPE_PSEUDO;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 
-use table::table_open;
+use ::table::table_open;
 use dependency::{
     add_exact_object_address, new_object_addresses, record_object_address_dependencies,
 };
-use objectaccess::invoke_object_post_create_hook;
-use pg_depend::deleteDependencyRecordsFor;
-use pg_shdepend::recordDependencyOnOwner;
+use ::objectaccess::invoke_object_post_create_hook;
+use ::pg_depend::deleteDependencyRecordsFor;
+use ::pg_shdepend::recordDependencyOnOwner;
 use coerce::{check_valid_internal_signature, check_valid_polymorphic_signature};
 
 use transam_xact_seams as xact_seams;
 use aclchk_seams as aclchk_seams;
 use indexing_seams as indexing_seams;
-use pg_depend_seams::recordDependencyOnCurrentExtension;
+use ::pg_depend_seams::recordDependencyOnCurrentExtension;
 use pg_proc_seams as seam;
 use pg_proc_seams::{DefaultCompat, RecordTypeChange};
-use format_type_seams::format_type_be_str;
-use regproc_seams::format_procedure;
+use ::format_type_seams::format_type_be_str;
+use ::regproc_seams::format_procedure;
 use lsyscache_seams::{get_element_type, get_typtype};
 use syscache_seams as seam_syscache;
 
-use types_acl::ACLCHECK_NOT_OWNER;
-use parsenodes::Node;
+use ::types_acl::ACLCHECK_NOT_OWNER;
+use ::parsenodes::Node;
 
 /// `FUNC_MAX_ARGS` (pg_config_manual.h:43).
 const FUNC_MAX_ARGS: i32 = 100;
 
 /// Relation OIDs the dependency records reference.
-const NamespaceRelationId: Oid = types_catalog::catalog::NAMESPACE_RELATION_ID; // 2615
-const LanguageRelationId: Oid = types_catalog::catalog::LANGUAGE_RELATION_ID; // 2612
-const TypeRelationId: Oid = types_catalog::catalog::TYPE_RELATION_ID; // 1247
-const TransformRelationId: Oid = types_catalog::catalog::TRANSFORM_RELATION_ID; // 3576
+const NamespaceRelationId: Oid = ::types_catalog::catalog::NAMESPACE_RELATION_ID; // 2615
+const LanguageRelationId: Oid = ::types_catalog::catalog::LANGUAGE_RELATION_ID; // 2612
+const TypeRelationId: Oid = ::types_catalog::catalog::TYPE_RELATION_ID; // 1247
+const TransformRelationId: Oid = ::types_catalog::catalog::TRANSFORM_RELATION_ID; // 3576
 
 /// `OBJECT_FUNCTION` (parsenodes.h `ObjectType`).
 const OBJECT_FUNCTION: nodes::parsenodes::ObjectType =
@@ -173,7 +173,7 @@ pub fn ProcedureCreate(
     prosrc: &str,
     probin: Option<&str>,
     prosqlbody: Option<String>,
-    prosqlbody_refs: Vec<types_catalog::catalog_dependency::ObjectAddress>,
+    prosqlbody_refs: Vec<::types_catalog::catalog_dependency::ObjectAddress>,
     prokind: i8,
     security_definer: bool,
     isLeakProof: bool,
@@ -193,7 +193,7 @@ pub fn ProcedureCreate(
     pronargdefaults: i32,
     // The defaults' referenced objects, recorded against the new function
     // (`recordDependencyOnExpr`'s reference half) — mirrors `prosqlbody_refs`.
-    parameterDefaultsRefs: Vec<types_catalog::catalog_dependency::ObjectAddress>,
+    parameterDefaultsRefs: Vec<::types_catalog::catalog_dependency::ObjectAddress>,
     trftypes: Option<Vec<Oid>>,
     trfoids: Vec<Oid>,
     proconfig: Option<Vec<String>>,
@@ -616,7 +616,7 @@ pub fn ProcedureCreate(
         )?;
         proacl_present = proacl.is_some();
         let proacl_bytes: Option<Vec<u8>> = match &proacl {
-            Some(types_tuple::heaptuple::Datum::ByRef(b)) => {
+            Some(::types_tuple::heaptuple::Datum::ByRef(b)) => {
                 Some(b[..].to_vec())
             }
             _ => None,
@@ -1283,7 +1283,7 @@ fn match_prosrc_to_literal(
 /// OIDOID, ...)` then collect the elements into a `Vec<Oid>` (the idiomatic
 /// owned-list analog of the C `List *`). The input `datum` is the OID array's
 /// detoasted on-disk image (the caller passes the array bytes).
-pub fn oid_array_to_list<'mcx>(mcx: mcx::Mcx<'mcx>, datum: &[u8]) -> PgResult<Vec<Oid>> {
+pub fn oid_array_to_list<'mcx>(mcx: ::mcx::Mcx<'mcx>, datum: &[u8]) -> PgResult<Vec<Oid>> {
     // deconstruct_array_builtin(array, OIDOID, &values, NULL, &nelems);
     let pairs = arrayfuncs::construct::deconstruct_array_builtin(
         mcx,
@@ -1471,7 +1471,7 @@ fn procedure_create_from_args(
 /// `prosupport`, and the existing `proconfig` it merges SET items onto).
 fn alter_function_begin(
     objtype: i32,
-    func: parsenodes::Node,
+    func: ::parsenodes::Node,
 ) -> PgResult<functioncmds_seams::AlterFunctionTarget> {
     let ctx = MemoryContext::new("AlterFunction");
     let mcx = ctx.mcx();

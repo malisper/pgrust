@@ -7,7 +7,7 @@
 //!
 //! The owner is `backend-optimizer-util-paramassign`; it installs every seam
 //! here from its `init_seams()`. All entries operate over the lifetime-free
-//! arena+handle model of [`pathnodes::PlannerInfo`]: `Var`/`Param`/
+//! arena+handle model of [`::pathnodes::PlannerInfo`]: `Var`/`Param`/
 //! `PlaceHolderVar` are real node VALUES; `root->glob->paramExecTypes`,
 //! `root->plan_params`, and `root->curOuterParams` are the three planner data
 //! structures paramassign manages.
@@ -21,7 +21,7 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use ::nodes::primnodes::{Param, PlaceHolderVar, Var};
 use pathnodes::{NodeId, PlannerInfo, Relids};
 
@@ -68,7 +68,7 @@ seam_core::seam!(
     pub fn identify_current_nestloop_params<'mcx>(
         mcx: Mcx<'mcx>,
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         leftrelids: &Relids,
         outerrelids: &Relids,
     ) -> types_error::PgResult<alloc::vec::Vec<NodeId>>

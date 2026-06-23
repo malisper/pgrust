@@ -13,7 +13,7 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `truncate_identifier(ident, len, warn)` (scansup.c:93) — truncate an

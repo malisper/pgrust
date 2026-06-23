@@ -5,7 +5,7 @@
 //! until then a call panics loudly. The `ConditionVariable` data shape lives
 //! in `types-condvar` so owning structures can embed it.
 
-use condvar::ConditionVariable;
+use ::condvar::ConditionVariable;
 
 seam_core::seam!(
     /// `ConditionVariableTimedSleep(cv, timeout, wait_event_info)` — wait for

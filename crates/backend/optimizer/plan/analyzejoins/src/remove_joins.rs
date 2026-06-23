@@ -20,7 +20,7 @@
 //! `update_eclasses`, clause/targetlist/attr_needed transfer, row-mark transfer,
 //! and a `ChangeVarNodesExtended` substitution over `root->parse`, the
 //! `processed_tlist`/`processed_groupClause`, and the planner relid sets). The
-//! `root->parse` `Query` is resolved off its [`pathnodes::QueryId`] through
+//! `root->parse` `Query` is resolved off its [`::pathnodes::QueryId`] through
 //! the [`PlannerRun`] store and walked as a real `Node::Query` value; the
 //! callback skips `RangeTblRef`s so the trailing `remove_rel_from_joinlist` can
 //! still find them by their original relid. The arena `RestrictInfo`/`EM` relid
@@ -28,9 +28,9 @@
 
 use alloc::vec::Vec;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     JoinlistNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_INNER,
 };
@@ -159,7 +159,7 @@ fn remove_rel_from_query<'mcx>(
             sjinf.commute_below_r = relids::del_member(sjinf.commute_below_r.take(), oj);
         } else {
             /* sjinfo == NULL (subst > 0, self-join): rename in semi_rhs_exprs. */
-            let semi_rhs: Vec<pathnodes::NodeId> =
+            let semi_rhs: Vec<::pathnodes::NodeId> =
                 root.join_info_list[idx].semi_rhs_exprs.clone();
             crate::change_relids::change_relids_in_node_list(
                 mcx,
@@ -175,8 +175,8 @@ fn remove_rel_from_query<'mcx>(
      * any no-longer-needed placeholders entirely (left-join removal only — for
      * self-join elimination the PHV is renamed onto the remaining relation).
      */
-    let ph_ids: Vec<pathnodes::PhInfoId> = root.placeholder_list.clone();
-    let mut kept: Vec<pathnodes::PhInfoId> = Vec::with_capacity(ph_ids.len());
+    let ph_ids: Vec<::pathnodes::PhInfoId> = root.placeholder_list.clone();
+    let mut kept: Vec<::pathnodes::PhInfoId> = Vec::with_capacity(ph_ids.len());
     for ph_id in ph_ids {
         let (ph_needed, ph_eval_at, phid) = {
             let phinfo = root.phinfo(ph_id);
@@ -256,7 +256,7 @@ fn remove_rel_from_query<'mcx>(
      */
     let n_ecs = root.eq_classes.len();
     for ec_i in 0..n_ecs {
-        let ec_id = pathnodes::EcId(ec_i as u32);
+        let ec_id = ::pathnodes::EcId(ec_i as u32);
         // C: `if (member(relid) || (sjinfo == NULL || member(ojrelid)))`.
         let touched = relids::is_member(relid, &root.ec(ec_id).ec_relids)
             || sjinfo.is_none()
@@ -293,7 +293,7 @@ fn remove_rel_from_query<'mcx>(
         }
 
         if subst > 0 {
-            let lateral_vars: Vec<pathnodes::NodeId> =
+            let lateral_vars: Vec<::pathnodes::NodeId> =
                 root.rel(otherrel).lateral_vars.clone();
             crate::change_relids::change_relids_in_node_list(
                 mcx,
@@ -417,11 +417,11 @@ fn remove_rel_from_restrictinfo(
 fn remove_rel_from_eclass<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
-    ec_id: pathnodes::EcId,
+    ec_id: ::pathnodes::EcId,
     sjinfo: Option<&SpecialJoinInfo>,
     relid: i32,
     subst: i32,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     let ojrelid = sjinfo.map(|s| s.ojrelid as i32);
 
     /* Fix up the EC's overall relids. */
@@ -438,8 +438,8 @@ fn remove_rel_from_eclass<'mcx>(
      * Fix up the member expressions. Any non-const member that ends with empty
      * em_relids must be a Var/PHV of the removed relation; drop it.
      */
-    let members: Vec<pathnodes::EmId> = root.ec(ec_id).ec_members.clone();
-    let mut new_members: Vec<pathnodes::EmId> = Vec::with_capacity(members.len());
+    let members: Vec<::pathnodes::EmId> = root.ec(ec_id).ec_members.clone();
+    let mut new_members: Vec<::pathnodes::EmId> = Vec::with_capacity(members.len());
     for em_id in members {
         let touched = {
             let em = root.em(em_id);
@@ -569,7 +569,7 @@ pub fn remove_useless_self_joins<'mcx>(
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
     joinlist: Vec<JoinlistNode>,
-) -> types_error::PgResult<Vec<JoinlistNode>> {
+) -> ::types_error::PgResult<Vec<JoinlistNode>> {
     // C: `if (!enable_self_join_elimination || joinlist == NIL ||
     //        (list_length(joinlist) == 1 && !IsA(linitial(joinlist), List)))
     //         return joinlist;`
@@ -628,7 +628,7 @@ fn remove_self_joins_recurse<'mcx>(
     run: &mut PlannerRun<'mcx>,
     joinlist: &[JoinlistNode],
     mut to_remove: Relids,
-) -> types_error::PgResult<Relids> {
+) -> ::types_error::PgResult<Relids> {
     let result_relation = run.resolve(root.parse).resultRelation;
     let merge_target = run.resolve(root.parse).mergeTargetRelation;
 
@@ -638,7 +638,7 @@ fn remove_self_joins_recurse<'mcx>(
         match node {
             JoinlistNode::Rel(varno) => {
                 let rti = *varno as types_core::Index;
-                if rte::rte_rtekind::call(run, root, rti) == pathnodes::RTE_RELATION
+                if rte::rte_rtekind::call(run, root, rti) == ::pathnodes::RTE_RELATION
                     && rte::rte_relkind::call(run, root, rti)
                         == types_tuple::access::RELKIND_RELATION as i8
                     && !rte::rte_has_tablesample::call(run, root, rti)
@@ -719,7 +719,7 @@ fn remove_self_joins_one_group<'mcx>(
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
     group: &Relids,
-) -> types_error::PgResult<Relids> {
+) -> ::types_error::PgResult<Relids> {
     let mut result: Relids = None;
 
     let mut r: i32 = -1;
@@ -769,8 +769,8 @@ fn remove_self_joins_one_group<'mcx>(
 
             // Row-mark equivalence: can't remove if the rels have row marks of
             // different strength.
-            let mut kmark: Option<pathnodes::PlanRowMarkId> = None;
-            let mut rmark: Option<pathnodes::PlanRowMarkId> = None;
+            let mut kmark: Option<::pathnodes::PlanRowMarkId> = None;
+            let mut rmark: Option<::pathnodes::PlanRowMarkId> = None;
             for &rm_id in &root.rowMarks {
                 let rti = run.resolve_rowmark(rm_id).rti as i32;
                 if rti == r {
@@ -871,7 +871,7 @@ fn split_selfjoin_quals<'mcx>(
     root: &PlannerInfo,
     run: &PlannerRun<'mcx>,
     joinquals: &[RinfoId],
-) -> types_error::PgResult<(Vec<RinfoId>, Vec<RinfoId>)> {
+) -> ::types_error::PgResult<(Vec<RinfoId>, Vec<RinfoId>)> {
     let mcx = run.mcx();
     let mut sjoinquals: Vec<RinfoId> = Vec::new();
     let mut ojoinquals: Vec<RinfoId> = Vec::new();
@@ -945,7 +945,7 @@ fn change_expr_relids_standalone<'mcx>(
     expr: &mut Expr<'mcx>,
     from: i32,
     to: i32,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     let owned = core::mem::replace(expr, dummy_expr());
     let mut node = ::nodes::nodes::Node::mk_expr(mcx, owned)?;
     rewrite_core::change::ChangeVarNodes(&mut node, from, to, 0, mcx);
@@ -970,7 +970,7 @@ fn match_unique_clauses<'mcx>(
     outer: RelId,
     uclauses: &[RinfoId],
     relid: i32,
-) -> types_error::PgResult<bool> {
+) -> ::types_error::PgResult<bool> {
     let outer_relid = root.rel(outer).relid as i32;
     debug_assert!(outer_relid > 0 && relid > 0);
     let mcx = run.mcx();
@@ -1133,16 +1133,16 @@ fn add_non_redundant_clauses<'mcx>(
 fn update_eclasses<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
-    ec: pathnodes::EcId,
+    ec: ::pathnodes::EcId,
     from: i32,
     to: i32,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     let mcx = run.mcx();
     debug_assert!(root.ec(ec).ec_childmembers.iter().all(|v| v.is_empty()));
 
     // --- members ---
     let members = root.ec(ec).ec_members.clone();
-    let mut new_members: Vec<pathnodes::EmId> = Vec::new();
+    let mut new_members: Vec<::pathnodes::EmId> = Vec::new();
     for em_id in members {
         if !relids::is_member(from, &root.em(em_id).em_relids) {
             new_members.push(em_id);
@@ -1245,12 +1245,12 @@ fn update_eclasses<'mcx>(
 fn remove_self_join_rel<'mcx>(
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
-    kmark: Option<pathnodes::PlanRowMarkId>,
-    rmark: Option<pathnodes::PlanRowMarkId>,
+    kmark: Option<::pathnodes::PlanRowMarkId>,
+    rmark: Option<::pathnodes::PlanRowMarkId>,
     to_keep: RelId,
     to_remove: RelId,
     restrictlist: &[RinfoId],
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     let mcx = run.mcx();
     let keep_relid = root.rel(to_keep).relid as i32;
     let remove_relid = root.rel(to_remove).relid as i32;
@@ -1325,14 +1325,14 @@ fn remove_self_join_rel<'mcx>(
         if ei < 0 {
             break;
         }
-        let ec_id = pathnodes::EcId(ei as u32);
+        let ec_id = ::pathnodes::EcId(ei as u32);
         update_eclasses(root, run, ec_id, remove_relid, keep_relid)?;
         let cur = relids::copy(&root.rel(to_keep).eclass_indexes);
         root.rel_mut(to_keep).eclass_indexes = relids::add_member(cur, ei);
     }
 
     // Transfer the targetlist (reltarget->exprs) and attr_needed flags.
-    let remove_exprs: Vec<pathnodes::NodeId> = root
+    let remove_exprs: Vec<::pathnodes::NodeId> = root
         .rel(to_remove)
         .reltarget
         .as_ref()

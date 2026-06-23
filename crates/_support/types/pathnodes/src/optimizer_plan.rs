@@ -6,7 +6,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use types_core::primitive::{Cardinality, Cost, Selectivity};
+use ::types_core::primitive::{Cardinality, Cost, Selectivity};
 
 use crate::{Relids, RestrictInfo, SpecialJoinInfo};
 

@@ -1,4 +1,4 @@
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 use super::*;
 

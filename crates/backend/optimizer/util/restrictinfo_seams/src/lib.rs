@@ -1,5 +1,5 @@
 //! Seam declarations for `optimizer/util/restrictinfo.c`, arena-shaped over
-//! [`pathnodes::PlannerInfo`] (the `RinfoId`/`NodeId` handles).
+//! [`::pathnodes::PlannerInfo`] (the `RinfoId`/`NodeId` handles).
 //!
 //! indxpath.c builds derived index quals by wrapping freshly-constructed
 //! expression nodes in `RestrictInfo`s. `make_restrictinfo` runs the
@@ -58,7 +58,7 @@ seam_core::seam!(
     pub fn restriction_is_securely_promotable(
         root: &PlannerInfo,
         rinfo: RinfoId,
-        rel: pathnodes::RelId
+        rel: ::pathnodes::RelId
     ) -> bool
 );
 
@@ -70,7 +70,7 @@ seam_core::seam!(
     pub fn join_clause_is_movable_to(
         root: &PlannerInfo,
         rinfo: RinfoId,
-        baserel: pathnodes::RelId
+        baserel: ::pathnodes::RelId
     ) -> bool
 );
 
@@ -81,7 +81,7 @@ seam_core::seam!(
     /// `all_query_rels`.
     pub fn find_childrel_parents(
         root: &PlannerInfo,
-        rel: pathnodes::RelId
+        rel: ::pathnodes::RelId
     ) -> Relids
 );
 
@@ -94,7 +94,7 @@ seam_core::seam!(
     /// `PlanRowMarkId` handle to its `PlanRowMark.rti` in the run's store
     /// (`root.rowMarks` carries handles, not values).
     pub fn has_plan_rowmark<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &PlannerInfo,
         rtindex: u32
     ) -> bool

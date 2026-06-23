@@ -24,20 +24,20 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{BlockNumber, Oid, OffsetNumber, TransactionId};
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::lock::{AccessShareLock, NoLock};
-use types_storage::storage::Buffer;
-use types_tuple::heaptuple::{Datum as TupleDatum, DeformedColumn};
-use types_tuple::heaptuple::{
+use ::types_core::primitive::{BlockNumber, Oid, OffsetNumber, TransactionId};
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::lock::{AccessShareLock, NoLock};
+use ::types_storage::storage::Buffer;
+use ::types_tuple::heaptuple::{Datum as TupleDatum, DeformedColumn};
+use ::types_tuple::heaptuple::{
     BlockIdData, FormData_pg_attribute, ItemPointerData, NameData,
 };
-use types_tuple::pg_type::FormData_pg_type;
+use ::types_tuple::pg_type::FormData_pg_type;
 use types_nbtree::{TmIndexDelete, TmIndexDeleteOp, TmIndexStatus};
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple};
-use tupdesc::CreateTupleDesc;
+use ::tupdesc::CreateTupleDesc;
 use heapam_seams as heapam_seam;
 use table_seams as table_seam;
 use table_tableam::{table_beginscan_catalog, table_endscan};
@@ -46,11 +46,11 @@ use page::{ItemIdIsDead, PageGetItem, PageGetItemId, PageRef};
 
 use crate::scan::heap_getnext;
 
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_scan::sdir::ScanDirection;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_scan::sdir::ScanDirection;
 
 // Catalog OIDs / Anum constants (re-exported from the catalog type crate).
-use types_catalog::pg_type::{
+use ::types_catalog::pg_type::{
     Anum_pg_type_oid, Anum_pg_type_typalign, Anum_pg_type_typanalyze, Anum_pg_type_typarray,
     Anum_pg_type_typbasetype, Anum_pg_type_typbyval, Anum_pg_type_typcategory,
     Anum_pg_type_typcollation, Anum_pg_type_typdelim, Anum_pg_type_typelem,
@@ -88,7 +88,7 @@ pub fn index_compute_xid_horizon_for_tuples<'mcx>(
     // A private arena for the delstate arrays + page snapshot (C palloc's the
     // deltids/status arrays in the caller's context; we use a scratch context
     // and clone the horizon scalar back out).
-    let scratch = mcx::MemoryContext::new("index_compute_xid_horizon_for_tuples");
+    let scratch = ::mcx::MemoryContext::new("index_compute_xid_horizon_for_tuples");
     let mcx = scratch.mcx();
 
     // ipage = BufferGetPage(ibuf);
@@ -245,11 +245,11 @@ fn pg_type_form_from_columns(cols: &[DeformedColumn<'_>]) -> PgResult<FormData_p
 /// of every `pg_index` row with `indisclustered`. The per-row aclcheck stays
 /// in cluster.c's `get_tables_to_cluster`.
 pub fn scan_indisclustered<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, (Oid, Oid)>> {
-    use types_catalog::pg_index::{
+    use ::types_catalog::pg_index::{
         Anum_pg_index_indexrelid, Anum_pg_index_indisclustered, Anum_pg_index_indrelid,
         IndexRelationId,
     };
-    use types_core::fmgr::{FmgrInfo, F_BOOLEQ};
+    use ::types_core::fmgr::{FmgrInfo, F_BOOLEQ};
 
     // indRelation = table_open(IndexRelationId, AccessShareLock);
     let rel = table_seam::table_open::call(mcx, IndexRelationId, AccessShareLock)?;
@@ -260,8 +260,8 @@ pub fn scan_indisclustered<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, (Oid, O
     entry.sk_flags = 0;
     entry.sk_attno = Anum_pg_index_indisclustered;
     entry.sk_strategy = BTEqualStrategyNumber;
-    entry.sk_subtype = types_core::InvalidOid;
-    entry.sk_collation = types_core::InvalidOid;
+    entry.sk_subtype = ::types_core::InvalidOid;
+    entry.sk_collation = ::types_core::InvalidOid;
     entry.sk_func = FmgrInfo {
         fn_oid: F_BOOLEQ,
         ..Default::default()
@@ -309,8 +309,8 @@ pub fn scan_typed_table_dependencies<'mcx>(
     mcx: Mcx<'mcx>,
     type_oid: Oid,
 ) -> PgResult<PgVec<'mcx, Oid>> {
-    use types_catalog::pg_class::{Anum_pg_class_oid, Anum_pg_class_reloftype, RelationRelationId};
-    use types_core::fmgr::{FmgrInfo, F_OIDEQ};
+    use ::types_catalog::pg_class::{Anum_pg_class_oid, Anum_pg_class_reloftype, RelationRelationId};
+    use ::types_core::fmgr::{FmgrInfo, F_OIDEQ};
 
     // classRel = table_open(RelationRelationId, AccessShareLock);
     let rel = table_seam::table_open::call(mcx, RelationRelationId, AccessShareLock)?;
@@ -321,8 +321,8 @@ pub fn scan_typed_table_dependencies<'mcx>(
     entry.sk_flags = 0;
     entry.sk_attno = Anum_pg_class_reloftype;
     entry.sk_strategy = BTEqualStrategyNumber;
-    entry.sk_subtype = types_core::InvalidOid;
-    entry.sk_collation = types_core::InvalidOid;
+    entry.sk_subtype = ::types_core::InvalidOid;
+    entry.sk_collation = ::types_core::InvalidOid;
     entry.sk_func = FmgrInfo {
         fn_oid: F_OIDEQ,
         ..Default::default()
@@ -372,7 +372,7 @@ pub fn insert_one_tuple<'mcx>(
 
     // tuple = heap_form_tuple(tupDesc, values, Nulls);
     let mut tuple = heap_form_tuple(mcx, &tup_desc, values, nulls)
-        .map_err(|e| types_error::PgError::error(alloc::format!("heap_form_tuple: {e:?}")))?;
+        .map_err(|e| ::types_error::PgError::error(alloc::format!("heap_form_tuple: {e:?}")))?;
 
     // pfree(tupDesc) — the owned descriptor drops at end of scope.
     // simple_heap_insert(boot_reldesc, tuple);

@@ -16,7 +16,7 @@
 //!
 //! ### Residual (genuinely blocked field read)
 //! [`index_info_serial_flags`] is seam-and-panic: the AM `ambuild` callback
-//! receives the type-erased `types_tableam::amapi::IndexInfo` (matching the
+//! receives the type-erased `::types_tableam::amapi::IndexInfo` (matching the
 //! hash / spgist siblings and the `table_index_build_scan` seam contract),
 //! whose `payload: Option<Box<dyn Any>>` exposes no `ii_Unique` /
 //! `ii_NullsNotDistinct`. The btree serial spool setup needs those two flags
@@ -39,15 +39,15 @@
 //! whose ports are not present. These are NOT silently stubbed: they panic
 //! loudly (sanctioned mirror-and-panic, never a placeholder stub-panic).
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult};
 use ::nodes::TUPLESORT_NONE;
-use rel::Relation;
-use types_tableam::amapi::IndexBuildResult;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_tableam::amapi::IndexBuildResult;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use activity_small::backend_progress::{
+use ::activity_small::backend_progress::{
     pgstat_progress_update_multi_param, pgstat_progress_update_param,
 };
 use tuplesort_seams as tuplesort;

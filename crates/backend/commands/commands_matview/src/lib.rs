@@ -26,14 +26,14 @@
 
 use std::cell::{Cell, RefCell};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgBox, PgString, PgVec};
 
 use matview_deps_seams as seam;
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::Oid;
-use types_core::xact::CommandId;
-use types_dest::CommandDest;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::Oid;
+use ::types_core::xact::CommandId;
+use ::types_dest::CommandDest;
 use types_error::{
     PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR,
@@ -43,13 +43,13 @@ use ::nodes::copy_query::Query;
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
-use rel::Relation;
-use types_storage::lock::{
+use ::rel::Relation;
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, ExclusiveLock, NoLock, RowExclusiveLock,
 };
-use types_tableam::tableam::BulkInsertStateData;
-use types_tuple::access::{RELKIND_MATVIEW, RELPERSISTENCE_TEMP};
-use types_tuple::heaptuple::{MaxHeapAttributeNumber, TupleDescData};
+use ::types_tableam::tableam::BulkInsertStateData;
+use ::types_tuple::access::{RELKIND_MATVIEW, RELPERSISTENCE_TEMP};
+use ::types_tuple::heaptuple::{MaxHeapAttributeNumber, TupleDescData};
 
 use indexam::{index_close, index_open};
 use table::{table_close, table_open};
@@ -668,7 +668,7 @@ pub fn CreateTransientRelDestReceiver(transientoid: Oid) -> PgResult<DestReceive
 /// so the run owner (`refresh_matview_datafill`) threads the arena in here.
 fn receiver_setup_run<'mcx>(token: u64, mcx: Mcx<'mcx>) -> PgResult<()> {
     let transientoid = receiver_transientoid(token);
-    let state = mcx::leak_in(mcx::alloc_in(
+    let state = ::mcx::leak_in(::mcx::alloc_in(
         mcx,
         TransientRelStateData {
             transientoid,
@@ -712,7 +712,7 @@ fn transientrel_startup<'mcx>(
     st.transientrel = Some(transientrel);
     st.output_cid = transam_xact::GetCurrentCommandId(true)?;
     st.ti_options = TABLE_INSERT_SKIP_FSM | TABLE_INSERT_FROZEN;
-    st.bistate = Some(mcx::alloc_in(
+    st.bistate = Some(::mcx::alloc_in(
         mcx,
         heapam::GetBulkInsertState()?,
     )?);
@@ -1299,12 +1299,12 @@ pub fn init_seams() {
     use matview_seams as s;
 
     s::ExecRefreshMatView::set(|stmt, query_string, qc| {
-        let ctx = mcx::MemoryContext::new("ExecRefreshMatView");
+        let ctx = ::mcx::MemoryContext::new("ExecRefreshMatView");
         ExecRefreshMatView(ctx.mcx(), &stmt, &query_string, qc)
     });
     s::RefreshMatViewByOid::set(
         |matview_oid, is_create, skip_data, concurrent, query_string, qc| {
-            let ctx = mcx::MemoryContext::new("RefreshMatViewByOid");
+            let ctx = ::mcx::MemoryContext::new("RefreshMatViewByOid");
             RefreshMatViewByOid(
                 ctx.mcx(),
                 matview_oid,
@@ -1317,7 +1317,7 @@ pub fn init_seams() {
         },
     );
     s::SetMatViewPopulatedState::set(|relation, newstate| {
-        let ctx = mcx::MemoryContext::new("SetMatViewPopulatedState");
+        let ctx = ::mcx::MemoryContext::new("SetMatViewPopulatedState");
         SetMatViewPopulatedState(ctx.mcx(), relation, newstate)
     });
     s::MatViewIncrementalMaintenanceIsEnabled::set(MatViewIncrementalMaintenanceIsEnabled);
@@ -1336,7 +1336,7 @@ pub fn init_seams() {
 /// Dispatch-shape adapter for `utility_out_seams::exec_refresh_mat_view`.
 /// Mirrors createas's `exec_create_table_as_utility`: downcast the utility
 /// `Node` to its `RefreshMatViewStmt` variant, project the parse node onto the
-/// value-shaped `types_matview::RefreshMatViewStmt` that `ExecRefreshMatView`
+/// value-shaped `::types_matview::RefreshMatViewStmt` that `ExecRefreshMatView`
 /// consumes, then marshal the `QueryCompletion` in/out.
 fn exec_refresh_mat_view_utility<'mcx>(
     mcx: Mcx<'mcx>,
@@ -1356,7 +1356,7 @@ fn exec_refresh_mat_view_utility<'mcx>(
     let owned = RefreshMatViewStmt {
         concurrent: rmv.concurrent,
         skipData: rmv.skip_data,
-        relation: types_tuple::access::RangeVar {
+        relation: ::types_tuple::access::RangeVar {
             catalogname: rel_node.catalogname.as_ref().map(|s| s.as_str().to_string()),
             schemaname: rel_node.schemaname.as_ref().map(|s| s.as_str().to_string()),
             relname: rel_node
@@ -1373,7 +1373,7 @@ fn exec_refresh_mat_view_utility<'mcx>(
     // The out-seam carries the portal `QueryCompletion`; `ExecRefreshMatView`
     // consumes the matview-crate one (same `{commandTag, nprocessed}` shape).
     let qc_in = qc.as_deref().map(|q| QueryCompletion {
-        commandTag: types_core::cmdtag::CommandTag(q.commandTag),
+        commandTag: ::types_core::cmdtag::CommandTag(q.commandTag),
         nprocessed: q.nprocessed,
     });
     let (address, qc_out) = ExecRefreshMatView(mcx, &owned, query_string, qc_in)?;

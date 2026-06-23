@@ -26,14 +26,14 @@ use hashfn::{
     hash_bytes as hash_any, hash_bytes_extended as hash_any_extended,
     hash_bytes_uint32 as hash_uint32, hash_bytes_uint32_extended as hash_uint32_extended,
 };
-use types_core::Oid;
-use datum::Datum;
+use ::types_core::Oid;
+use ::datum::Datum;
 use types_error::{PgResult, ERRCODE_INDETERMINATE_COLLATION, ERROR};
 use fmgr::{FunctionCallInfoBaseData, PgFnNative};
 
-use oid_seams::check_valid_oidvector;
+use ::oid_seams::check_valid_oidvector;
 use pg_locale_seams::{collation_is_deterministic, pg_strxfrm};
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 /// `get_float8_nan()` (utils/float.h) — `f64::NAN`. Inlined as in the sibling
 /// hash-adjacent ports (the float seam owner is not a dependency here).
@@ -278,7 +278,7 @@ pub fn hashnameextended(key: &[u8], seed: u64) -> u64 {
 // ===========================================================================
 
 /// The shared indeterminate-collation hard error (hashfunc.c:278-281 / 333-336).
-fn indeterminate_collation() -> types_error::PgError {
+fn indeterminate_collation() -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INDETERMINATE_COLLATION)
         .errmsg("could not determine which collation to use for string hashing")
@@ -555,9 +555,9 @@ fn builtin(
     name: &str,
     nargs: i16,
     func: PgFnNative,
-) -> (fmgr::BuiltinFunction, PgFnNative) {
+) -> (::fmgr::BuiltinFunction, PgFnNative) {
     (
-        fmgr::BuiltinFunction {
+        ::fmgr::BuiltinFunction {
             foid,
             name: name.to_string(),
             nargs,

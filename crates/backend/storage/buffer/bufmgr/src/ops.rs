@@ -10,9 +10,9 @@
 //! `resowner_enlarge` seams (bufmgr-defined `ResourceOwnerDesc` callbacks,
 //! installed by resowner when it ports — panic-until-owner).
 
-use types_core::primitive::Buffer;
+use ::types_core::primitive::Buffer;
 use types_error::{PgError, PgResult};
-use types_storage::buf::{
+use ::types_storage::buf::{
     BM_PERMANENT, BM_PIN_COUNT_WAITER, BM_VALID, BUF_REFCOUNT_ONE, BUF_REFCOUNT_MASK,
     BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE, BM_MAX_USAGE_COUNT, BM_LOCKED,
 };

@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
-// Every fallible function returns the shared `types_error::PgResult`, the
+// Every fallible function returns the shared `::types_error::PgResult`, the
 // project-wide error contract; we accept the large-`Err` lint crate-wide.
 #![allow(clippy::result_large_err)]
 // The C declares locals up top and assigns later; keep that decl-then-assign
@@ -101,35 +101,35 @@
 
 use std::rc::Rc;
 
-use mcx::MemoryContext;
-use types_acl::acl::{AclResult::AclcheckOk as ACLCHECK_OK, ACL_SELECT, ACL_UPDATE};
-use types_catalog::catalog::{
+use ::mcx::MemoryContext;
+use ::types_acl::acl::{AclResult::AclcheckOk as ACLCHECK_OK, ACL_SELECT, ACL_UPDATE};
+use ::types_catalog::catalog::{
     ANUM_PG_LARGEOBJECT_LOID, ANUM_PG_LARGEOBJECT_PAGENO, LARGE_OBJECT_LOID_PN_INDEX_ID,
     LARGE_OBJECT_RELATION_ID,
 };
-use types_core::fmgr::{F_INT4GE, F_OIDEQ};
-use types_core::primitive::{AttrNumber, Oid};
-use types_core::xact::InvalidSubTransactionId;
+use ::types_core::fmgr::{F_INT4GE, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_core::xact::InvalidSubTransactionId;
 use types_core::{int64, uint64};
 use types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use ::nodes::parsenodes::DropBehavior;
-use types_scan::scankey::{BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, ScanKeyData};
-use types_scan::sdir::ScanDirection;
-use types_storage::large_object::{
+use ::types_scan::scankey::{BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, ScanKeyData};
+use ::types_scan::sdir::ScanDirection;
+use ::types_storage::large_object::{
     LargeObjectDesc, IFS_RDLOCK, IFS_WRLOCK, LOBLKSIZE, MAX_LARGE_OBJECT_SIZE,
 };
-use types_storage::lock::{NoLock, RowExclusiveLock};
+use ::types_storage::lock::{NoLock, RowExclusiveLock};
 use types_tuple::heaptuple::Datum;
 
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
-use indexam_seams::index_open;
-use table::table_open;
+use ::indexam_seams::index_open;
+use ::table::table_open;
 use indexing_seams as indexing;
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 /* ===========================================================================
  * Aliases / constants spelled as the C macros so the port reads 1:1 against
@@ -241,7 +241,7 @@ fn int4_ge_key<'mcx>(attno: AttrNumber, value: i32) -> PgResult<ScanKeyData<'mcx
 /// replaced by a per-operation open in `mcx` (see the crate docs); the lock is
 /// `RowExclusiveLock` "since we might either read or write".
 fn open_lo_relation<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
 ) -> PgResult<(rel::Relation<'mcx>, rel::Relation<'mcx>)> {
     // lo_heap_r = table_open(LargeObjectRelationId, RowExclusiveLock);
     let lo_heap_r = table_open(mcx, LargeObjectRelationId, RowExclusiveLock)?;

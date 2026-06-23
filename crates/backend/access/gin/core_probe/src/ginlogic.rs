@@ -22,11 +22,11 @@
 //! until the fmgr GIN-call dispatcher installs them). There is no
 //! `ereport`/`elog` anywhere in `ginlogic.c`, so this module raises no errors.
 
-use types_core::OidIsValid;
-use tsearch::gin::{GinTernaryValue, GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_EVERYTHING, GIN_TRUE};
+use ::types_core::OidIsValid;
+use ::tsearch::gin::{GinTernaryValue, GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_EVERYTHING, GIN_TRUE};
 
-pub use gin::GinState;
-pub use tsearch::backend_access_gin_ginlogic::{
+pub use ::gin::GinState;
+pub use ::tsearch::backend_access_gin_ginlogic::{
     GinBoolConsistentKind, GinScanKey, GinTriConsistentKind,
 };
 

@@ -10,7 +10,7 @@
 #![allow(non_snake_case)]
 #![forbid(unsafe_code)]
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// `typstorage` value `TYPSTORAGE_PLAIN` (`pg_type.h`): never toasted.
 pub const TYPSTORAGE_PLAIN: i8 = b'p' as i8;

@@ -55,7 +55,7 @@ impl<'a> Scanner<'a> {
         // encoding; it operates within a memory context and returns a palloc'd
         // result. We bridge through a transient owned context, then copy out
         // the bytes (the C caller stores the palloc'd pointer in yylval->str).
-        use mmgr_fgram::OwnedMemoryContext;
+        use ::mmgr_fgram::OwnedMemoryContext;
         let ctx = OwnedMemoryContext::alloc_set(None, "scan-ident", 1024, 8192, 8192)
             .map_err(|_| self.lexerr("out of memory"))?;
         let scope = ctx.scope();
@@ -196,7 +196,7 @@ impl<'a> Scanner<'a> {
     /// the soft "error_occurred" path it becomes an `FCONST` carrying the
     /// original text, else an `ICONST` with the value.
     fn process_integer_literal(&self, token: &[u8], _base: i32) -> Token {
-        use error_fgram::SoftErrorContext;
+        use ::error_fgram::SoftErrorContext;
         let s = std::str::from_utf8(token).unwrap_or("\u{FFFF}");
         let mut escontext = SoftErrorContext::new(false);
         let result = numutils_fgram::pg_strtoint32_safe(s, Some(&mut escontext));

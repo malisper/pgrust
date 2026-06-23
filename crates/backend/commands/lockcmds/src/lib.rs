@@ -37,15 +37,15 @@
 //! * `LockViewRecurse`                 — C 244-274 (static)
 //! * `LockTableAclCheck`               — C 279-299 (static)
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, MemoryContext};
 
-use types_acl::acl::{
+use ::types_acl::acl::{
     AclMode, AclResult, ACLCHECK_OK, ACL_DELETE, ACL_INSERT, ACL_MAINTAIN, ACL_SELECT,
     ACL_TRUNCATE, ACL_UPDATE,
 };
-use types_core::primitive::{Oid, OidIsValid};
-use types_core::catalog::RELPERSISTENCE_TEMP;
+use ::types_core::primitive::{Oid, OidIsValid};
+use ::types_core::catalog::RELPERSISTENCE_TEMP;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
@@ -53,16 +53,16 @@ use types_error::{
 use ::nodes::ddlnodes::LockStmt;
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::Node;
-use types_tuple::access::RangeVar;
-use types_storage::lock::{AccessShareLock, RowExclusiveLock, NoLock, LOCKMODE};
-use types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW};
+use ::types_tuple::access::RangeVar;
+use ::types_storage::lock::{AccessShareLock, RowExclusiveLock, NoLock, LOCKMODE};
+use ::types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW};
 
-use nodes_core::node_walker::{
+use ::nodes_core::node_walker::{
     expression_tree_walker, query_tree_walker, QTW_IGNORE_JOINALIASES,
 };
 
-use objectaddress_seams::get_relkind_objtype;
-use pg_class::errdetail_relkind_not_supported;
+use ::objectaddress_seams::get_relkind_objtype;
+use ::pg_class::errdetail_relkind_not_supported;
 
 use aclchk_seams as aclchk;
 use pg_inherits_seams as pg_inherits;
@@ -523,7 +523,7 @@ fn lock_table_acl_check(reloid: Oid, lockmode: LOCKMODE, userid: Oid) -> PgResul
 
 /// `(RangeVar *) lfirst(p)` — re-encode a parse-node `RangeVar` (the
 /// arena-lifetimed `::nodes::rawnodes::RangeVar`) into the
-/// `RangeVarGetRelidExtended` argument type (`types_tuple::access::RangeVar`,
+/// `RangeVarGetRelidExtended` argument type (`::types_tuple::access::RangeVar`,
 /// the trimmed name-only view the namespace resolver and its callback consume).
 /// Mirrors the conversion `backend-parser-relation` performs for the same
 /// resolver entry point.

@@ -19,15 +19,15 @@ use alloc::vec::Vec;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use equalfuncs_seams::equal_expr;
-use mcx::Mcx;
+use ::equalfuncs_seams::equal_expr;
+use ::mcx::Mcx;
 
 use inherit_predtest_seams as own_seam;
 use lsyscache_seams as lsyscache;
 use arrayfuncs_seams as arrayfuncs;
 use pathnode_seams as pathnode;
 
-use types_core::primitive::{InvalidOid, Oid};
+use ::types_core::primitive::{InvalidOid, Oid};
 use ::nodes::primnodes::{
     BoolExprType, BoolTestType, CompareType, Const, Expr, NullTestType, OpExpr,
 };
@@ -43,8 +43,8 @@ thread_local! {
     /// this leaked, never-reset context to outlive the per-run `mcx` (mirrors
     /// `makefuncs::CONST_VALUE_CONTEXT` / parser-coerce's `CONST_VALUE_CONTEXT`).
     /// By-value elements carry a bare word and need no re-home.
-    static CONST_VALUE_CONTEXT: &'static mcx::MemoryContext =
-        Box::leak(Box::new(mcx::MemoryContext::new("predtest const value")));
+    static CONST_VALUE_CONTEXT: &'static ::mcx::MemoryContext =
+        Box::leak(Box::new(::mcx::MemoryContext::new("predtest const value")));
 }
 
 /// `Mcx<'static>` for the backend-lifetime [`CONST_VALUE_CONTEXT`].
@@ -380,7 +380,7 @@ pub fn predicate_implied_by(
     clause_list: &[NodeId],
     weak: bool,
 ) -> bool {
-    let cx = mcx::MemoryContext::new("predicate_implied_by transient");
+    let cx = ::mcx::MemoryContext::new("predicate_implied_by transient");
     let predicate = resolve_nodes(cx.mcx(), root, predicate_list)
         .unwrap_or_else(|e| panic!("predicate_implied_by: {e:?}"));
     let clause = resolve_nodes(cx.mcx(), root, clause_list)
@@ -476,7 +476,7 @@ pub fn predicate_refuted_by(
     clause_list: &[NodeId],
     weak: bool,
 ) -> bool {
-    let cx = mcx::MemoryContext::new("predicate_refuted_by transient");
+    let cx = ::mcx::MemoryContext::new("predicate_refuted_by transient");
     let predicate = resolve_nodes(cx.mcx(), root, predicate_list)
         .unwrap_or_else(|e| panic!("predicate_refuted_by: {e:?}"));
     let clause = resolve_nodes(cx.mcx(), root, clause_list)
@@ -1759,7 +1759,7 @@ fn lookup_proof_cache<'mcx>(
         lsyscache::get_op_index_interpretation::call(mcx, pred_op)?
     } else {
         /* no point in looking */
-        mcx::PgVec::new_in(mcx)
+        ::mcx::PgVec::new_in(mcx)
     };
 
     'pred_loop: for pred_op_info in pred_op_infos.iter() {

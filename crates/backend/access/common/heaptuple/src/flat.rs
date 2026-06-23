@@ -31,9 +31,9 @@
 //! bytes are never fabricated.
 
 use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgVec};
-use types_error::PgError;
+use ::types_error::PgError;
 
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     MinimalTupleData, TupleDescData, BITMAPLEN, HEAP_HASNULL, HEAP_NATTS_MASK,
     MINIMAL_TUPLE_OFFSET,
 };

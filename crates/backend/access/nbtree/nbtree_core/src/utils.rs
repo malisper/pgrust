@@ -5,7 +5,7 @@
 //! operating on the repo's owned runtime structs: real [`Relation`],
 //! `&mut BTScanOpaqueData<'mcx>`, [`ScanKeyData`], [`BTArrayKeyInfo`],
 //! [`BTReadPageState`], over `'mcx`, with canonical
-//! [`Datum`](types_tuple::heaptuple::Datum) values.
+//! [`Datum`](::types_tuple::heaptuple::Datum) values.
 //!
 //! # Chosen signatures (no `IndexScanDesc` in this repo)
 //!
@@ -67,11 +67,11 @@ use alloc::boxed::Box;
 use alloc::format;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::fmgr::FmgrInfo;
-use types_core::primitive::{AttrNumber, BlockNumber, OffsetNumber, Oid, Size};
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::primitive::{AttrNumber, BlockNumber, OffsetNumber, Oid, Size};
 use types_error::{PgError, PgResult};
-use types_error::error::{ERRCODE_PROGRAM_LIMIT_EXCEEDED, DEBUG1, ERROR};
-use utils_error::ereport;
+use ::types_error::error::{ERRCODE_PROGRAM_LIMIT_EXCEEDED, DEBUG1, ERROR};
+use ::utils_error::ereport;
 
 use types_nbtree::{
     BTArrayKeyInfo, BTCycleId, BTReadPageState, BTScanInsert, BTScanInsertData, BTScanOpaqueData,
@@ -80,19 +80,19 @@ use types_nbtree::{
     BTP_HALF_DEAD, BTP_HAS_GARBAGE, BTP_LEAF, BTREE_NOVAC_VERSION, BTREE_VERSION, INDEX_ALT_TID_MASK,
     MAX_BT_CYCLE_ID, MaxIndexTuplesPerPage, P_FIRSTKEY, P_HIKEY, P_NONE,
 };
-use rel::Relation;
-use types_scan::scankey::{
+use ::rel::Relation;
+use ::types_scan::scankey::{
     ScanKeyData, StrategyNumber, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber,
     BTGreaterStrategyNumber, BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy,
     SK_BT_DESC, SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_NULLS_FIRST, SK_BT_SKIP, SK_ISNULL, SK_ROW_END,
     SK_ROW_HEADER, SK_ROW_MEMBER, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
-use types_scan::sdir::{
+use ::types_scan::sdir::{
     ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward, ScanDirectionIsNoMovement,
 };
-use types_storage::storage::Buffer;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{IndexTupleData, IndexTupleSize, ItemPointerData};
+use ::types_storage::storage::Buffer;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{IndexTupleData, IndexTupleSize, ItemPointerData};
 
 use page::{
     ItemIdIsDead, ItemPointerCompare, ItemPointerEquals, ItemPointerGetBlockNumber,
@@ -300,7 +300,7 @@ struct PageOpaque {
 fn read_ipd(bytes: &[u8]) -> ItemPointerData {
     debug_assert!(bytes.len() >= 6);
     ItemPointerData {
-        ip_blkid: types_tuple::heaptuple::BlockIdData {
+        ip_blkid: ::types_tuple::heaptuple::BlockIdData {
             bi_hi: u16::from_ne_bytes([bytes[0], bytes[1]]),
             bi_lo: u16::from_ne_bytes([bytes[2], bytes[3]]),
         },
@@ -2988,7 +2988,7 @@ fn bt_unlockbuf<'mcx>(rel: &Relation<'mcx>, buf: Buffer) {
 fn page_item_id(
     page: &[u8],
     offnum: OffsetNumber,
-) -> PgResult<types_storage::bufpage::ItemIdData> {
+) -> PgResult<::types_storage::bufpage::ItemIdData> {
     let p = PageRef::new(page)?;
     PageGetItemId(&p, offnum)
 }
@@ -2999,7 +2999,7 @@ fn page_item_id(
 fn set_page_item_id(
     page: &mut [u8],
     offnum: OffsetNumber,
-    iid: &types_storage::bufpage::ItemIdData,
+    iid: &::types_storage::bufpage::ItemIdData,
 ) -> PgResult<()> {
     // SizeOfPageHeaderData == 24; line pointers are 4-byte structs packed after
     // the header, 1-based by offnum.
@@ -3053,7 +3053,7 @@ fn set_page_btpo_flags_garbage(page: &mut [u8]) -> PgResult<()> {
 #[derive(Clone, Copy)]
 struct BTOneVacInfo {
     /// `LockRelId relid` — global identifier of an index.
-    relid: types_storage::lock::LockRelId,
+    relid: ::types_storage::lock::LockRelId,
     /// `BTCycleId cycleid` — cycle ID for its active VACUUM.
     cycleid: BTCycleId,
 }
@@ -3080,8 +3080,8 @@ std::thread_local! {
 
 /// `rel->rd_lockInfo.lockRelId` (`RelationInitLockInfo`): `relId = rd_id`,
 /// `dbId = rd_locator.dbOid` (`InvalidOid` for a shared relation).
-fn lock_rel_id(rel: &Relation<'_>) -> types_storage::lock::LockRelId {
-    types_storage::lock::LockRelId {
+fn lock_rel_id(rel: &Relation<'_>) -> ::types_storage::lock::LockRelId {
+    ::types_storage::lock::LockRelId {
         relId: rel.rd_id,
         dbId: rel.rd_locator.dbOid,
     }
@@ -3090,10 +3090,10 @@ fn lock_rel_id(rel: &Relation<'_>) -> types_storage::lock::LockRelId {
 /// Acquire `BtreeVacuumLock` in the given mode (RAII release on drop / explicit
 /// `release()`), keyed by this backend's `ProcNumber`.
 fn acquire_btree_vacuum_lock(
-    mode: types_storage::LWLockMode,
+    mode: ::types_storage::LWLockMode,
 ) -> PgResult<lwlock::MainLWLockGuard> {
     lwlock::LWLockAcquireMain(
-        types_storage::storage::BTREE_VACUUM_LOCK,
+        ::types_storage::storage::BTREE_VACUUM_LOCK,
         mode,
         init_small_seams::my_proc_number::call(),
     )
@@ -3105,7 +3105,7 @@ pub fn bt_vacuum_cycleid(rel: &Relation) -> PgResult<BTCycleId> {
     let mut result: BTCycleId = 0;
 
     // Share lock is enough since this is a read-only operation.
-    let guard = acquire_btree_vacuum_lock(types_storage::LW_SHARED)?;
+    let guard = acquire_btree_vacuum_lock(::types_storage::LW_SHARED)?;
 
     let target = lock_rel_id(rel);
     BTVACINFO.with(|cell| {
@@ -3129,7 +3129,7 @@ pub fn bt_vacuum_cycleid(rel: &Relation) -> PgResult<BTCycleId> {
 /// `_bt_start_vacuum()` — assign a cycle ID to a just-starting VACUUM operation.
 /// Returns the cycle ID it was assigned.
 pub fn bt_start_vacuum(rel: &Relation) -> PgResult<BTCycleId> {
-    let guard = acquire_btree_vacuum_lock(types_storage::LW_EXCLUSIVE)?;
+    let guard = acquire_btree_vacuum_lock(::types_storage::LW_EXCLUSIVE)?;
 
     let target = lock_rel_id(rel);
 
@@ -3205,7 +3205,7 @@ pub fn bt_start_vacuum(rel: &Relation) -> PgResult<BTCycleId> {
 /// `_bt_end_vacuum()` — mark a btree VACUUM operation as done (deregister it
 /// from the `btvacinfo` shmem array). Deliberately silent if no entry is found.
 pub fn bt_end_vacuum(rel: &Relation) {
-    let guard = acquire_btree_vacuum_lock(types_storage::LW_EXCLUSIVE)
+    let guard = acquire_btree_vacuum_lock(::types_storage::LW_EXCLUSIVE)
         .expect("BtreeVacuumLock acquisition failed in _bt_end_vacuum");
 
     let target = lock_rel_id(rel);
@@ -3277,9 +3277,9 @@ pub fn bt_shmem_init() -> PgResult<()> {
                 max_vacuums,
                 vacuums: alloc::vec![
                     BTOneVacInfo {
-                        relid: types_storage::lock::LockRelId {
-                            relId: types_core::primitive::InvalidOid,
-                            dbId: types_core::primitive::InvalidOid,
+                        relid: ::types_storage::lock::LockRelId {
+                            relId: ::types_core::primitive::InvalidOid,
+                            dbId: ::types_core::primitive::InvalidOid,
                         },
                         cycleid: 0,
                     };
@@ -3299,9 +3299,9 @@ pub fn bt_shmem_init() -> PgResult<()> {
                     max_vacuums,
                     vacuums: alloc::vec![
                         BTOneVacInfo {
-                            relid: types_storage::lock::LockRelId {
-                                relId: types_core::primitive::InvalidOid,
-                                dbId: types_core::primitive::InvalidOid,
+                            relid: ::types_storage::lock::LockRelId {
+                                relId: ::types_core::primitive::InvalidOid,
+                                dbId: ::types_core::primitive::InvalidOid,
                             },
                             cycleid: 0,
                         };
@@ -3845,12 +3845,12 @@ pub fn bt_allequalimage_dbg<'mcx>(
 
     if debugmessage {
         if allequalimage {
-            let _ = utils_error::elog(
+            let _ = ::utils_error::elog(
                 DEBUG1,
                 format!("index \"{}\" can safely use deduplication", rel_name(rel)),
             );
         } else {
-            let _ = utils_error::elog(
+            let _ = ::utils_error::elog(
                 DEBUG1,
                 format!("index \"{}\" cannot use deduplication", rel_name(rel)),
             );

@@ -36,11 +36,11 @@
 
 use std::string::{String, ToString};
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -197,7 +197,7 @@ fn fc_tsvectorrecv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
-        return Err(types_error::PgError::error("out of memory"));
+        return Err(::types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     let mut buf = StringInfo::from_vec(data);

@@ -16,9 +16,9 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::instrument::Instrumentation;
-use types_core::primitive::{AttrNumber, Oid};
-use types_error::PgResult;
+use ::types_core::instrument::Instrumentation;
+use ::types_core::primitive::{AttrNumber, Oid};
+use ::types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 use ::nodes::nodeindexscan::{Plan, PlannedStmt};
 use ::nodes::nodes::{ntag, CmdType, Node};
@@ -100,7 +100,7 @@ pub fn ExplainPrintPlan<'es, 'p>(
     invisible_gather_skipped: bool,
 ) -> PgResult<()> {
     // es->pstmt = queryDesc->plannedstmt; es->rtable = ...->rtable;
-    es.pstmt = Some(mcx::alloc_in(mcx, pstmt.clone_in(mcx)?)?);
+    es.pstmt = Some(::mcx::alloc_in(mcx, pstmt.clone_in(mcx)?)?);
     es.rtable = match &pstmt.rtable {
         Some(rt) => {
             let mut out = vec_with_capacity_in(mcx, rt.len())?;
@@ -265,7 +265,7 @@ fn explain_pre_scan_node<'es, 'p>(
     planstate: &PlanStateNode<'p>,
     acc: Option<PgBox<'es, ::nodes::bitmapset::Bitmapset<'es>>>,
 ) -> PgResult<Option<PgBox<'es, ::nodes::bitmapset::Bitmapset<'es>>>> {
-    use nodes_core::bitmapset::{bms_add_member, bms_add_members};
+    use ::nodes_core::bitmapset::{bms_add_member, bms_add_members};
 
     let plan_node: &Node<'p> = match planstate.ps_head().plan {
         Some(p) => p,
@@ -530,7 +530,7 @@ pub fn ExplainNode<'es, 'p>(
         .as_ref()
         .map(|w| w.len() as i32);
     es.workers_state = if num_workers.is_some() && es.analyze && !es.hide_workers {
-        Some(mcx::alloc_in(
+        Some(::mcx::alloc_in(
             mcx,
             fmt::ExplainCreateWorkersState(mcx, num_workers.unwrap())?,
         )?)
@@ -866,7 +866,7 @@ pub fn ExplainNode<'es, 'p>(
         Some(i) if es.analyze => {
             if i.running {
                 if !i.starttime.is_zero() {
-                    return Err(error_fgram::ereport(types_error::ERROR)
+                    return Err(error_fgram::ereport(::types_error::ERROR)
                         .errmsg_internal("InstrEndLoop called on running node")
                         .into_error());
                 }
@@ -1027,12 +1027,12 @@ pub fn ExplainNode<'es, 'p>(
             for e in rcq.iter() {
                 exprs.push(e.clone_in(mcx)?);
             }
-            let anded = nodes_core::makefuncs::make_ands_explicit(exprs);
+            let anded = ::nodes_core::makefuncs::make_ands_explicit(exprs);
             let node = Node::mk_expr(mcx, anded)?;
 
             let useprefix = es.rtable_size > 1 || es.verbose;
 
-            let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+            let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
             let es_pstmt = es
                 .pstmt
                 .as_deref()
@@ -1066,11 +1066,11 @@ pub fn ExplainNode<'es, 'p>(
             for e in rc.iter() {
                 exprs.push(e.clone_in(mcx)?);
             }
-            let anded = nodes_core::makefuncs::make_ands_explicit(exprs);
+            let anded = ::nodes_core::makefuncs::make_ands_explicit(exprs);
             let node = Node::mk_expr(mcx, anded)?;
 
             let useprefix = es.rtable_size > 1 || es.verbose;
-            let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+            let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
             let es_pstmt = es
                 .pstmt
                 .as_deref()
@@ -1192,11 +1192,11 @@ pub fn ExplainNode<'es, 'p>(
                 if let Some(functions) = fs.functions.as_ref() {
                     for rtfunc in functions.iter() {
                         if let Some(fe) = rtfunc.funcexpr.as_ref() {
-                            fexprs.push(mcx::alloc_in(mcx, fe.clone_in(mcx)?)?);
+                            fexprs.push(::mcx::alloc_in(mcx, fe.clone_in(mcx)?)?);
                         }
                     }
                 }
-                let list_node = mcx::alloc_in(mcx, Node::mk_list(mcx, fexprs)?)?;
+                let list_node = ::mcx::alloc_in(mcx, Node::mk_list(mcx, fexprs)?)?;
                 show_expression(
                     es,
                     mcx,
@@ -1432,9 +1432,9 @@ pub fn ExplainNode<'es, 'p>(
                 agg_ancestors
                     .try_reserve(ancestors.len() + 1)
                     .map_err(|_| mcx.oom(0))?;
-                agg_ancestors.push(mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
+                agg_ancestors.push(::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
                 for a in ancestors.iter() {
-                    agg_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+                    agg_ancestors.push(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
                 }
 
                 let child_plan = planstate
@@ -1512,7 +1512,7 @@ pub fn ExplainNode<'es, 'p>(
             let numcols = ma.numCols;
             // Clone the MergeAppend node into the 'es arena so the context plan
             // and the 'es-allocated key arrays share one lifetime.
-            let ma_node: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+            let ma_node: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
             let ma_head = ma_node.plan_head();
             show_sort_group_keys(
                 es,
@@ -1758,9 +1758,9 @@ pub fn ExplainNode<'es, 'p>(
         fmt::ExplainOpenGroup("Plans", Some("Plans"), false, es)?;
         let mut v: PgVec<'es, PgBox<'es, Node<'es>>> = PgVec::new_in(mcx);
         v.try_reserve(ancestors.len() + 1).map_err(|_| mcx.oom(0))?;
-        v.push(mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
+        v.push(::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
         for a in ancestors.iter() {
-            v.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+            v.push(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
         }
         v
     } else {
@@ -1883,7 +1883,7 @@ fn show_plan_tlist<'es, 'p>(
     // `deparse_expr_for_plan` seam (same as show_scan_qual / show_sort_group_keys).
     let useprefix = es.rtable_size > 1;
 
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
@@ -1941,7 +1941,7 @@ fn show_scan_qual<'es, 'p>(
     for e in qual.iter() {
         exprs.push(e.clone_in(mcx)?);
     }
-    let anded = nodes_core::makefuncs::make_ands_explicit(exprs);
+    let anded = ::nodes_core::makefuncs::make_ands_explicit(exprs);
     let node = Node::mk_expr(mcx, anded)?;
 
     let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
@@ -1950,7 +1950,7 @@ fn show_scan_qual<'es, 'p>(
     //                                    ancestors); exprstr =
     // deparse_expression(node, context, useprefix, false). Folded into one
     // ruleutils seam (the deparse_namespace is owner-private).
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
@@ -1987,7 +1987,7 @@ fn show_tablesample<'es, 'p>(
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
 
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
@@ -2107,7 +2107,7 @@ fn show_modifytable_info<'es, 'p>(
     if let PlanStateNode::ModifyTable(mtstate) = planstate {
         // Collect (ri_RangeTableIndex, ri_has_fdw_routine) for each result rel,
         // resolving RriId -> ResultRelInfo through the EState pool back-pointer.
-        let mut targets: alloc::vec::Vec<(types_core::primitive::Index, bool)> =
+        let mut targets: alloc::vec::Vec<(::types_core::primitive::Index, bool)> =
             alloc::vec::Vec::new();
         if !es.es_result_rel_pool_ptr.is_null() {
             // SAFETY: aliases EState.es_result_rel_pool for the synchronous walk.
@@ -2145,7 +2145,7 @@ fn show_modifytable_info<'es, 'p>(
                                     PgBox<'_, ::nodes::bitmapset::Bitmapset<'_>>,
                                 >)
                         };
-                        nodes_core::bitmapset::bms_is_member(
+                        ::nodes_core::bitmapset::bms_is_member(
                             rti as i32,
                             unpruned.as_deref(),
                         )
@@ -2243,7 +2243,7 @@ fn show_modifytable_info<'es, 'p>(
                             if i.running {
                                 if !i.starttime.is_zero() {
                                     return Err(error_fgram::ereport(
-                                        types_error::ERROR,
+                                        ::types_error::ERROR,
                                     )
                                     .errmsg_internal(
                                         "InstrEndLoop called on running node",
@@ -2314,12 +2314,12 @@ fn show_upper_qual<'es, 'p>(
     if exprs.is_empty() {
         return Ok(());
     }
-    let anded = nodes_core::makefuncs::make_ands_explicit(exprs);
+    let anded = ::nodes_core::makefuncs::make_ands_explicit(exprs);
     let node = Node::mk_expr(mcx, anded)?;
 
     let useprefix = es.rtable_size > 1 || es.verbose;
 
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
@@ -2376,9 +2376,9 @@ fn build_cond_list<'es>(
     }
     if cloned.len() > 1 {
         let wrapped = if is_and {
-            nodes_core::makefuncs::make_andclause(cloned)
+            ::nodes_core::makefuncs::make_andclause(cloned)
         } else {
-            nodes_core::makefuncs::make_orclause(cloned)
+            ::nodes_core::makefuncs::make_orclause(cloned)
         };
         Ok(alloc::vec![wrapped])
     } else {
@@ -2402,12 +2402,12 @@ fn show_scan_qual_owned<'es, 'p>(
     if exprs.is_empty() {
         return Ok(());
     }
-    let anded = nodes_core::makefuncs::make_ands_explicit(exprs);
+    let anded = ::nodes_core::makefuncs::make_ands_explicit(exprs);
     let node = Node::mk_expr(mcx, anded)?;
 
     let useprefix = matches!(plan_node.node_tag(), ntag::T_SubqueryScan) || es.verbose;
 
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
@@ -2476,7 +2476,7 @@ fn show_expression<'es, 'p>(
     // useprefix = es->verbose (the only caller, TableFuncScan, passes
     // es->verbose).
     let useprefix = es.verbose;
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
@@ -2581,7 +2581,7 @@ fn explain_one_subplan<'es, 'p>(
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
     relationship: &str,
 ) -> PgResult<()> {
-    use nodes_core::bitmapset::{bms_add_member, bms_is_member};
+    use ::nodes_core::bitmapset::{bms_add_member, bms_is_member};
 
     let Some(sp) = sps.subplan.as_deref() else {
         return Ok(());
@@ -2605,9 +2605,9 @@ fn explain_one_subplan<'es, 'p>(
     child_ancestors
         .try_reserve(ancestors.len() + 1)
         .map_err(|_| mcx.oom(0))?;
-    child_ancestors.push(mcx::alloc_in(mcx, sub_node)?);
+    child_ancestors.push(::mcx::alloc_in(mcx, sub_node)?);
     for a in ancestors.iter() {
-        child_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        child_ancestors.push(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
     }
 
     // ExplainNode(sps->planstate, ancestors, relationship, sp->plan_name, es).
@@ -2832,9 +2832,9 @@ fn show_window_def<'es, 'p>(
     child_ancestors
         .try_reserve(ancestors.len() + 1)
         .map_err(|_| mcx.oom(0))?;
-    child_ancestors.push(mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
+    child_ancestors.push(::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?);
     for a in ancestors.iter() {
-        child_ancestors.push(mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
+        child_ancestors.push(::mcx::alloc_in(mcx, a.clone_in(mcx)?)?);
     }
 
     // The key columns refer to the tlist of the child plan.
@@ -2898,8 +2898,8 @@ fn show_window_def<'es, 'p>(
             .as_deref()
             .expect("EXPLAIN: es->pstmt must be set before deparse")
             .clone_in(mcx)?;
-        let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
-        let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+        let es_pstmt: PgBox<'es, PlannedStmt<'es>> = ::mcx::alloc_in(mcx, es_pstmt)?;
+        let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
         // Wrap the offset Exprs as Nodes for the deparse seam.
         let start_node = match wagg.startOffset.as_deref() {
             Some(e) => Some(Node::mk_expr(mcx, e.clone_in(mcx)?)?),
@@ -2949,13 +2949,13 @@ fn show_window_keys<'es, 'p>(
 ) -> PgResult<()> {
     let useprefix = es.rtable_size > 1 || es.verbose;
 
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
         .expect("EXPLAIN: es->pstmt must be set before deparse")
         .clone_in(mcx)?;
-    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
+    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = ::mcx::alloc_in(mcx, es_pstmt)?;
 
     let tlist = context_plan_head.targetlist.as_ref();
 
@@ -3018,13 +3018,13 @@ fn show_sort_group_keys<'es, 'p>(
 
     // Clone the context plan into the formatting arena (matches es->pstmt's
     // 'es plan-tree copy), as the qual/Filter deparse does above.
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
         .expect("EXPLAIN: es->pstmt must be set before deparse")
         .clone_in(mcx)?;
-    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
+    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = ::mcx::alloc_in(mcx, es_pstmt)?;
 
     let mut result: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     // resultPresorted: the first nPresortedKeys keys (Incremental Sort).
@@ -3198,13 +3198,13 @@ fn show_memoize_info<'es>(
     // Set up deparsing context: context plan = the Memoize node itself
     // (set_deparse_context_plan(es->deparse_cxt, plan, ancestors)). Clone into
     // the formatting arena, matching show_sort_group_keys.
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, plan_node.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
         .expect("EXPLAIN: es->pstmt must be set before deparse")
         .clone_in(mcx)?;
-    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
+    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = ::mcx::alloc_in(mcx, es_pstmt)?;
 
     // Build the comma-separated "Cache Key" string from param_exprs.
     let mut keystr = alloc::string::String::new();
@@ -3450,13 +3450,13 @@ fn show_grouping_set_keys<'es, 'p>(
     // Deparse context: the child plan, cloned into the 'es formatting arena
     // (matching es->pstmt), as show_sort_group_keys / show_qual do.
     let useprefix = es.rtable_size > 1 || es.verbose;
-    let plan_owned: PgBox<'es, Node<'es>> = mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
+    let plan_owned: PgBox<'es, Node<'es>> = ::mcx::alloc_in(mcx, context_plan.clone_in(mcx)?)?;
     let es_pstmt = es
         .pstmt
         .as_deref()
         .expect("EXPLAIN: es->pstmt must be set before deparse")
         .clone_in(mcx)?;
-    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = mcx::alloc_in(mcx, es_pstmt)?;
+    let es_pstmt: PgBox<'es, PlannedStmt<'es>> = ::mcx::alloc_in(mcx, es_pstmt)?;
     let tlist = context_plan_head.targetlist.as_ref();
 
     for gset in gsets.iter() {
@@ -3520,14 +3520,14 @@ fn show_sortorder_options<'p>(
     mcx: Mcx<'_>,
     buf: &mut alloc::string::String,
     sortexpr: &::nodes::primnodes::Expr,
-    sort_operator: types_core::primitive::Oid,
-    collation: types_core::primitive::Oid,
+    sort_operator: ::types_core::primitive::Oid,
+    collation: ::types_core::primitive::Oid,
     nulls_first: bool,
 ) -> PgResult<()> {
-    use types_core::primitive::InvalidOid;
+    use ::types_core::primitive::InvalidOid;
 
     // Oid sortcoltype = exprType(sortexpr);
-    let sortcoltype = nodes_core::nodefuncs::expr_type(Some(sortexpr))?;
+    let sortcoltype = ::nodes_core::nodefuncs::expr_type(Some(sortexpr))?;
 
     // typentry = lookup_type_cache(sortcoltype, TYPECACHE_LT_OPR | TYPECACHE_GT_OPR);
     let (lt_opr, gt_opr) =

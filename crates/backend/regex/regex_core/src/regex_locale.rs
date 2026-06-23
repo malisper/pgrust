@@ -24,11 +24,11 @@
 
 use core::cell::Cell;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{Oid, PgWChar, C_COLLATION_OID, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INDETERMINATE_COLLATION};
-use locale::CollProvider;
+use ::locale::CollProvider;
 
 use pg_locale_seams as pg_locale_seams;
 use mbutils_seams as mb_seams;

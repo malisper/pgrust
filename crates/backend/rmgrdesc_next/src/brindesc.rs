@@ -1,10 +1,10 @@
 //! `access/rmgrdesc/brindesc.c` — rmgr descriptor routines for BRIN indexes.
 
 use crate::appendf;
-use mcx::PgString;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_error::PgResult;
 use wal::{DecodedXLogRecord, XLR_INFO_MASK};
-use xlog_records::brin_xlog::{xl_brin_createidx, xl_brin_desummarize, xl_brin_insert,
+use ::xlog_records::brin_xlog::{xl_brin_createidx, xl_brin_desummarize, xl_brin_insert,
                                     xl_brin_revmap_extend, xl_brin_samepage_update,
                                     xl_brin_update};
 
@@ -84,7 +84,7 @@ pub fn brin_identify(info: u8) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::test_support::record;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");

@@ -17,13 +17,13 @@
 //! from its `init_seams()` when it lands; until then a call panics loudly
 //! (mirror-pg-and-panic).
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
 use types_selfuncs::{ConstNodeInfo, EstimationInfo, StatsTuple, VariableStatData};
 
@@ -46,7 +46,7 @@ seam_core::seam!(
     ///
     /// `estinfo` mirrors the C `EstimationInfo *estinfo` out-parameter: callers
     /// that pass `Some(&mut info)` receive estimation flags back (the owner ORs
-    /// in [`types_selfuncs::SELFLAG_USED_DEFAULT`] when it falls back on a
+    /// in [`::types_selfuncs::SELFLAG_USED_DEFAULT`] when it falls back on a
     /// default), exactly as C does. `None` mirrors C `NULL` (the `pgset`
     /// argument is always `NULL` in the repo's callers, so it is omitted).
     ///
@@ -121,7 +121,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn statistic_proc_security_check(
         vardata: &VariableStatData,
-        func_oid: types_core::primitive::Oid,
+        func_oid: ::types_core::primitive::Oid,
     ) -> PgResult<bool>
 );
 

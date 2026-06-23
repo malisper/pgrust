@@ -31,7 +31,7 @@ use execScan_seams as execScan;
 use execTuples_seams as execTuples;
 use execUtils_seams as execUtils;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use nodes::{EStateData, SlotId, SubqueryScan, SubqueryScanState};
 
 // ===========================================================================

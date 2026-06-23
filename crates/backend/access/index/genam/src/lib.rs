@@ -25,7 +25,7 @@
 //!   passed pointer); the index, exactly as in C, via `index_open(indexId,
 //!   AccessShareLock)`.
 //! * The live state is stored lifetime-erased inside the descriptor (see
-//!   `types_scan::genam::SysScanDescData`), which owns `scan_cx` so the erased
+//!   `::types_scan::genam::SysScanDescData`), which owns `scan_cx` so the erased
 //!   borrows never dangle.
 //!
 //! ## The heap-fetch leg
@@ -53,19 +53,19 @@ extern crate alloc;
 mod decode;
 
 use mcx::{Mcx, MemoryContext, PgVec};
-use types_core::primitive::{AttrNumber, Oid};
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TRANSACTION_STATE, ERROR};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use ::nodes::tuptable::SlotData;
 use rel::{Relation, RelationData};
-use types_scan::genam::{SysScanDescData, SysScanLive};
-use types_scan::scankey::ScanKeyData;
-use types_tableam::scankey::ScanKeyData as TableScanKeyData;
-use types_scan::sdir::{ScanDirection, ForwardScanDirection};
-use snapshot::SnapshotData;
-use types_storage::lock::{AccessShareLock, NoLock};
-use types_tableam::relscan::{IndexScanDesc, TableScanDesc};
-use types_tuple::heaptuple::FormedTuple;
+use ::types_scan::genam::{SysScanDescData, SysScanLive};
+use ::types_scan::scankey::ScanKeyData;
+use ::types_tableam::scankey::ScanKeyData as TableScanKeyData;
+use ::types_scan::sdir::{ScanDirection, ForwardScanDirection};
+use ::snapshot::SnapshotData;
+use ::types_storage::lock::{AccessShareLock, NoLock};
+use ::types_tableam::relscan::{IndexScanDesc, TableScanDesc};
+use ::types_tuple::heaptuple::FormedTuple;
 
 use genam_seams as seam;
 use heapam_handler_dml_seams as heapam_handler_dml;
@@ -249,7 +249,7 @@ fn convert_scan_keys<'mcx>(
     let indkey = relcache::rd_index_indkey::call(irel)?
         .expect("systable scan over a relation that is not an index (rd_index == NULL)");
 
-    let mut out = mcx::vec_with_capacity_in(mcx, keys.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, keys.len())?;
     for key in keys {
         let mut found: Option<AttrNumber> = None;
         for (j, &col) in indkey.iter().enumerate() {
@@ -407,7 +407,7 @@ fn clone_keys_in<'mcx>(
     mcx: Mcx<'mcx>,
     keys: &[ScanKeyData<'_>],
 ) -> PgResult<PgVec<'mcx, TableScanKeyData<'mcx>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, keys.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, keys.len())?;
     for key in keys {
         out.push(key.clone_in(mcx)?);
     }
@@ -644,7 +644,7 @@ fn systable_inplace_update<'mcx>(
     index_ok: bool,
     keys: &[ScanKeyData<'_>],
     mutate: &mut dyn FnMut(&mut [u8]) -> PgResult<bool>,
-) -> PgResult<Option<types_tuple::heaptuple::ItemPointerData>> {
+) -> PgResult<Option<::types_tuple::heaptuple::ItemPointerData>> {
     // For now, we don't allow parallel updates.
     if transam_xact_seams::is_in_parallel_mode::call() {
         return Err(ereport(ERROR)
@@ -816,8 +816,8 @@ fn systable_beginscan_ordered(
     }
     // ... but we only throw a warning about violating IgnoreSystemIndexes.
     if miscinit::get_ignore_system_indexes::call() {
-        utils_error::elog(
-            types_error::WARNING,
+        ::utils_error::elog(
+            ::types_error::WARNING,
             format!(
                 "using index \"{}\" despite IgnoreSystemIndexes",
                 index_relation.name()
@@ -954,11 +954,11 @@ fn systable_endscan_ordered(mut sysscan: SysScanDescData) -> PgResult<()> {
 fn build_index_value_description<'mcx>(
     mcx: Mcx<'mcx>,
     index_relation: &Relation<'_>,
-    values: &[types_tuple::heaptuple::Datum<'mcx>],
+    values: &[::types_tuple::heaptuple::Datum<'mcx>],
     isnull: &[bool],
-) -> PgResult<Option<mcx::PgString<'mcx>>> {
+) -> PgResult<Option<::mcx::PgString<'mcx>>> {
     use types_acl::{ACL_SELECT, ACLCHECK_OK, RLS_ENABLED};
-    use types_core::primitive::InvalidAttrNumber;
+    use ::types_core::primitive::InvalidAttrNumber;
 
     // indnkeyatts = IndexRelationGetNumberOfKeyAttributes(indexRelation).
     let indnkeyatts = match relcache::rd_index_indnkeyatts::call(index_relation)? {
@@ -982,7 +982,7 @@ fn build_index_value_description<'mcx>(
     // key columns then return None to avoid leaking data.
     //
     // First check if RLS is enabled for the relation. If so, return None.
-    if misc_more::check_enable_rls::call(indrelid, types_core::primitive::InvalidOid, true)?
+    if misc_more::check_enable_rls::call(indrelid, ::types_core::primitive::InvalidOid, true)?
         == RLS_ENABLED
     {
         return Ok(None);
@@ -1011,7 +1011,7 @@ fn build_index_value_description<'mcx>(
         }
     }
 
-    let mut buf = mcx::PgString::new_in(mcx);
+    let mut buf = ::mcx::PgString::new_in(mcx);
 
     // appendStringInfo(&buf, "(%s)=(", pg_get_indexdef_columns(indexrelid, true)).
     //

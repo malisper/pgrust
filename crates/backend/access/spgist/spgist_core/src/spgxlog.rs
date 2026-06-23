@@ -42,19 +42,19 @@ use page::{
 };
 
 use mcx::{Mcx, MemoryContext};
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
-use types_storage::Buffer;
-use types_error::error::PANIC;
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
+use ::types_storage::Buffer;
+use ::types_error::error::PANIC;
 use types_error::{PgError, PgResult};
 use spgist::{
     SpGistState, SpGistTypeDesc, spgConfigOut, SPGIST_DEAD, SPGIST_LEAF, SPGIST_LIVE, SPGIST_NULLS,
     SPGIST_PLACEHOLDER, SPGIST_REDIRECT,
 };
-use types_storage::bufpage::SizeOfPageHeaderData;
-use wal::rmgr::XLogReaderState;
-use wal::xlogutils::in_hot_standby;
-use wal::XLogRedoAction;
-use xlog_records::spgxlog::{
+use ::types_storage::bufpage::SizeOfPageHeaderData;
+use ::wal::rmgr::XLogReaderState;
+use ::wal::xlogutils::in_hot_standby;
+use ::wal::XLogRedoAction;
+use ::xlog_records::spgxlog::{
     spgxlogAddLeaf, spgxlogAddNode, spgxlogMoveLeafs, spgxlogPickSplit, spgxlogSplitTuple,
     spgxlogState, spgxlogVacuumLeaf, spgxlogVacuumRedirect, spgxlogVacuumRoot,
     SIZE_OF_SPGXLOG_ADD_LEAF, SIZE_OF_SPGXLOG_ADD_NODE, SIZE_OF_SPGXLOG_MOVE_LEAFS,

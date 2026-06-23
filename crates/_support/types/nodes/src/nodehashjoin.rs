@@ -8,8 +8,8 @@
 //! consumed here), and the parallel-hash barrier-phase constants.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 use crate::nodeindexscan::Plan;
 use crate::nodes::Node;
@@ -69,7 +69,7 @@ impl<'mcx> HashJoin<'mcx> {
         ) -> PgResult<Option<PgVec<'b, Node<'b>>>> {
             match l {
                 Some(v) => {
-                    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+                    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
                     for n in v.iter() {
                         out.push(n.clone_in(mcx)?);
                     }
@@ -78,11 +78,11 @@ impl<'mcx> HashJoin<'mcx> {
                 None => Ok(None),
             }
         }
-        let mut hashoperators = mcx::vec_with_capacity_in(mcx, self.hashoperators.len())?;
+        let mut hashoperators = ::mcx::vec_with_capacity_in(mcx, self.hashoperators.len())?;
         for o in self.hashoperators.iter() {
             hashoperators.push(*o);
         }
-        let mut hashcollations = mcx::vec_with_capacity_in(mcx, self.hashcollations.len())?;
+        let mut hashcollations = ::mcx::vec_with_capacity_in(mcx, self.hashcollations.len())?;
         for o in self.hashcollations.iter() {
             hashcollations.push(*o);
         }
@@ -141,7 +141,7 @@ impl<'mcx> Hash<'mcx> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Hash<'b>> {
         let hashkeys = match &self.hashkeys {
             Some(v) => {
-                let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+                let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
                 for n in v.iter() {
                     out.push(n.clone_in(mcx)?);
                 }

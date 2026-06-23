@@ -14,7 +14,7 @@
 //! `record` set via the `ReturnSetInfo`/materialized-SRF path, which is not
 //! expressible through the scalar fmgr-builtin boundary.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -22,7 +22,7 @@ use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 // ---------------------------------------------------------------------------
 
 /// Bridge the value core's `types_tuple::Datum` (a by-value bool word) back to
-/// the fmgr boundary's `datum::Datum`.
+/// the fmgr boundary's `::datum::Datum`.
 #[inline]
 fn ret_bool(v: types_tuple::Datum<'static>) -> Datum {
     Datum::from_bool(v.as_bool())

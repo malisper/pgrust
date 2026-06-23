@@ -23,8 +23,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 
 /// A decomposed `SupportRequestCost` kernel: the function OID and the call's

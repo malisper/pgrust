@@ -17,12 +17,12 @@
 //! owns the transition buffer. The final functions return `Option<f64>`
 //! (`Ok(None)` is SQL NULL).
 
-use arrayfuncs::construct::construct_array;
-use arrayfuncs::foundation::{
+use ::arrayfuncs::construct::construct_array;
+use ::arrayfuncs::foundation::{
     self, arr_dim, arr_elemtype, arr_hasnull, arr_ndim, fetch_att, FLOAT8OID,
 };
 use mcx::{Mcx, PgVec};
-use datum::Datum;
+use ::datum::Datum;
 use types_error::{PgError, PgResult};
 
 use crate::{float8_pl, float_overflow_error, get_float8_nan};

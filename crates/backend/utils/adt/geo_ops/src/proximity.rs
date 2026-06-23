@@ -5,8 +5,8 @@
 //! differently-typed objects, plus the internal closest-point helpers
 //! (`lseg_closept_*`, `box_closept_*`, `box_interpt_lseg`).
 
-use types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
-use types_error::PgResult;
+use ::types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
+use ::types_error::PgResult;
 
 use crate::boxes::{box_cn, box_contain_lseg, box_contain_point, box_ov};
 use crate::f8::{float8_lt, float8_max, float8_mi, float8_min};

@@ -22,8 +22,8 @@ use conv_string_helpers::{
 };
 use mbutils_seams::{report_invalid_encoding, report_untranslatable_char};
 use common_wchar::{pg_utf8_islegal, pg_utf_mblen_private};
-use types_error::PgResult;
-use types_wchar::encoding::{pg_enc, PG_LATIN1, PG_UTF8};
+use ::types_error::PgResult;
+use ::types_wchar::encoding::{pg_enc, PG_LATIN1, PG_UTF8};
 
 /// `HIGHBIT` / `IS_HIGHBIT_SET` (mb/pg_wchar.h).
 const HIGHBIT: u8 = 0x80;

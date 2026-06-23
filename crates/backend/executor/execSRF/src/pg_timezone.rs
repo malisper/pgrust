@@ -10,22 +10,22 @@
 //! `pg_tzenumerate_*` / `timestamp2tm` walk and the
 //! `pg_get_next_timezone_abbrev` / `pg_interpret_timezone_abbrev` walk, plus the
 //! `itmin2interval` `utc_offset` construction) live in
-//! [`adt_datetime::tz_views`].
+//! [`::adt_datetime::tz_views`].
 //!
 //! Here those cores are driven over the executor frame in materialize mode.
 //! Registered from [`register_pg_timezone_srfs`] (called by `init_seams`); they
 //! bypass the by-OID builtin registry whose tag-only `resultinfo` cannot carry
 //! the live `ReturnSetInfo` (the WONTFIX dual-home).
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::heaptuple::Datum;
 
-use adt_datetime::Interval;
-use types_datetime::USECS_PER_SEC;
+use ::adt_datetime::Interval;
+use ::types_datetime::USECS_PER_SEC;
 use ::funcapi::srf_support::{materialized_srf_putvalues, InitMaterializedSRF};
 
 use crate::register_srf;
@@ -80,7 +80,7 @@ fn pg_timezone_names<'mcx>(
         .fn_mcxt
         .expect("pg_timezone_names: fn_mcxt set by ExecMakeTableFunctionResult");
 
-    let rows = adt_datetime::tz_views::pg_timezone_names_rows()?;
+    let rows = ::adt_datetime::tz_views::pg_timezone_names_rows()?;
 
     // C: InitMaterializedSRF(fcinfo, 0). The owned model takes the executor's
     // already-resolved `(text, text, interval, bool)` descriptor via
@@ -116,7 +116,7 @@ fn pg_timezone_abbrevs_zone<'mcx>(
         .fn_mcxt
         .expect("pg_timezone_abbrevs_zone: fn_mcxt set by ExecMakeTableFunctionResult");
 
-    let rows = adt_datetime::tz_views::pg_timezone_abbrevs_zone_rows();
+    let rows = ::adt_datetime::tz_views::pg_timezone_abbrevs_zone_rows();
 
     // C drives this as a value-per-call SRF; the owned model materializes the
     // (fixed, known up front) row set. The descriptor `(abbrev, utc_offset,
@@ -153,7 +153,7 @@ fn pg_timezone_abbrevs_abbrevs<'mcx>(
         .expect("pg_timezone_abbrevs_abbrevs: fn_mcxt set by ExecMakeTableFunctionResult");
 
     let rows =
-        adt_datetime::tz_abbrev_install::pg_timezone_abbrevs_abbrevs_rows()?;
+        ::adt_datetime::tz_abbrev_install::pg_timezone_abbrevs_abbrevs_rows()?;
 
     InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC)?;
 

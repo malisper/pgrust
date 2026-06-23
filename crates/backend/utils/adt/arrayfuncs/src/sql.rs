@@ -4,16 +4,16 @@
 //! `array_iterate` / `array_free_iterator`), and `array_map`.
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use array::ArrayElementDatum;
-use types_core::Oid;
-use datum::datum::Datum;
+use ::array::ArrayElementDatum;
+use ::types_core::Oid;
+use ::datum::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_ARRAY_ELEMENT_ERROR, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION, ERROR,
 };
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::construct;
 use crate::element_slice;
@@ -46,9 +46,9 @@ pub fn array_larger<'mcx>(
     collation: Oid,
 ) -> PgResult<PgVec<'mcx, u8>> {
     if ops::array_cmp(array1, array2, collation)? > 0 {
-        mcx::slice_in(mcx, array1)
+        ::mcx::slice_in(mcx, array1)
     } else {
-        mcx::slice_in(mcx, array2)
+        ::mcx::slice_in(mcx, array2)
     }
 }
 
@@ -66,9 +66,9 @@ pub fn array_smaller<'mcx>(
     collation: Oid,
 ) -> PgResult<PgVec<'mcx, u8>> {
     if ops::array_cmp(array1, array2, collation)? < 0 {
-        mcx::slice_in(mcx, array1)
+        ::mcx::slice_in(mcx, array1)
     } else {
-        mcx::slice_in(mcx, array2)
+        ::mcx::slice_in(mcx, array2)
     }
 }
 
@@ -440,13 +440,13 @@ fn array_replace_internal<'mcx>(
 
     // Return input array unmodified if it is empty.
     if nitems <= 0 {
-        return mcx::slice_in(mcx, array);
+        return ::mcx::slice_in(mcx, array);
     }
 
     // We can't remove elements from multi-dimensional arrays.
     if remove && ndim > 1 {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("removing elements from multidimensional arrays is not supported")
             .into_error());
     }
@@ -564,7 +564,7 @@ fn array_replace_internal<'mcx>(
 
     // If nothing changed, return the input array unmodified (C returns `array`).
     if !changed {
-        return mcx::slice_in(mcx, array);
+        return ::mcx::slice_in(mcx, array);
     }
 
     let nresult = out_values.len() as i32;
@@ -1256,7 +1256,7 @@ fn dims_vec(a: &[u8]) -> Vec<i32> {
 /// a live pointer into an `mcx`-owned varlena image in the Datum word (datum.c's
 /// `Datum` contract), so the deref is sound.
 fn datum_as_byte_window<'a>(value: Datum) -> &'a [u8] {
-    use datum::varlena::VARHDRSZ;
+    use ::datum::varlena::VARHDRSZ;
     unsafe {
         let p = value.as_usize() as *const u8;
         // Read the leading header word to compute VARSIZE_ANY, then return the
@@ -1270,7 +1270,7 @@ fn datum_as_byte_window<'a>(value: Datum) -> &'a [u8] {
 #[cfg(test)]
 mod iterator_tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     use std::sync::{Mutex, MutexGuard};
 
     /// `array_get_n_items` is a process-global seam (`OnceLock`-backed). The

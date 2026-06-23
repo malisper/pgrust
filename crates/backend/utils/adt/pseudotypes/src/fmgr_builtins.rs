@@ -29,11 +29,11 @@ extern crate std;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -83,7 +83,7 @@ fn arg_image(fcinfo: &FunctionCallInfoBaseData) -> Vec<u8> {
 fn buf_from<'a>(image: &[u8], m: &'a mcx::MemoryContext) -> PgResult<StringInfo<'a>> {
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(image.len()).is_err() {
-        return Err(types_error::PgError::error("out of memory"));
+        return Err(::types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(image);
     Ok(StringInfo::from_vec(data))
@@ -333,7 +333,7 @@ fn fc_out_delegate(
     pseudotype: &str,
 ) -> PgResult<Datum> {
     let native = fmgr_core::native_builtin(target_oid).ok_or_else(|| {
-        types_error::PgError::error(alloc::format!(
+        ::types_error::PgError::error(alloc::format!(
             "{pseudotype}: concrete output function (OID {target_oid}) is not registered"
         ))
     })?;

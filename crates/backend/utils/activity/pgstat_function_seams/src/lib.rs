@@ -11,9 +11,9 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::PgStat_FunctionCallUsage;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::PgStat_FunctionCallUsage;
 
 seam_core::seam!(
     /// `pgstat_init_function_usage(FunctionCallInfo fcinfo,

@@ -27,7 +27,7 @@
 //! `bool nulls[]`): the crate selects the columns and renders the LSN text; the
 //! owner converts to the canonical slot/`Datum` form and emits the wire frames.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// A column type for one of the two `DestRemoteSimple` result sets
 /// (`basebackup_copy.c`'s `TupleDescInitBuiltinEntry` calls). Mirrors the

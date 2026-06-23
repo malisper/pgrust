@@ -15,7 +15,7 @@ use cache::catcache::{
     ArenaCatCList, ArenaCatCTup, ArenaCatCache, CacheIdx, CatCInProgress, CatCacheArena, CatKey,
     ClIdx, CtIdx, FetchedCatalogTuple, CATCACHE_MAXKEYS, CT_MAGIC,
 };
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 
 use crate::core_compute::HASH_INDEX;

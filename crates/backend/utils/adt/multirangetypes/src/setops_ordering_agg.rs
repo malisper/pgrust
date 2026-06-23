@@ -7,11 +7,11 @@
 //! `RangeType`s (C: an `ArrayBuildState` of range datums) and assemble the
 //! result through the inward `make_multirange` seam in the finalfn.
 
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::Oid;
-use datum::datum::Datum;
-use types_error::error::ERRCODE_UNDEFINED_FUNCTION;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::Oid;
+use ::datum::datum::Datum;
+use ::types_error::error::ERRCODE_UNDEFINED_FUNCTION;
 use types_error::{PgError, PgResult};
 use types_rangetypes::{
     MultirangeTypeP, RangeTypeP, RANGE_EMPTY, RANGE_LB_INF, RANGE_LB_NULL, RANGE_UB_INF,
@@ -536,7 +536,7 @@ fn elem_hash(
     rangetyp: &TypeCacheEntry,
     bound: Datum,
 ) -> PgResult<types_tuple::heaptuple::Datum<'static>> {
-    let scratch = mcx::MemoryContext::new_bump("multirange element hash");
+    let scratch = ::mcx::MemoryContext::new_bump("multirange element hash");
     let mcx = scratch.mcx();
     let canon = range_seams::range_elem_word_to_canon::call(mcx, rangetyp, bound)?;
     let r = fmgr_seams::function_call1_coll_datum::call(
@@ -560,7 +560,7 @@ fn elem_hash_extended(
     bound: Datum,
     seed: Datum,
 ) -> PgResult<types_tuple::heaptuple::Datum<'static>> {
-    let scratch = mcx::MemoryContext::new_bump("multirange element hash extended");
+    let scratch = ::mcx::MemoryContext::new_bump("multirange element hash extended");
     let mcx = scratch.mcx();
     let canon = range_seams::range_elem_word_to_canon::call(mcx, rangetyp, bound)?;
     let seed_canon =
@@ -580,7 +580,7 @@ fn elem_hash_extended(
 fn could_not_identify_hash_fn(type_id: Oid) -> PgError {
     // `format_type_be` needs a context for the palloc'd name; a transient
     // context suffices and is dropped with this builder.
-    let cx = mcx::MemoryContext::new("hash_multirange error");
+    let cx = ::mcx::MemoryContext::new("hash_multirange error");
     let name = match format_type_seams::format_type_be::call(cx.mcx(), type_id) {
         Ok(s) => s.as_str().to_string(),
         Err(_) => type_id.to_string(),

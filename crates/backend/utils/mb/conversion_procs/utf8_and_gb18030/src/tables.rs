@@ -1,6 +1,6 @@
 // Generated from postgres .map files for utf8_and_gb18030.c.
 
-use types_wchar::pg_mb_radix_tree;
+use ::types_wchar::pg_mb_radix_tree;
 
 const GB18030_TO_UNICODE_TREE_TABLE: [u32; 32795] = [
     0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,

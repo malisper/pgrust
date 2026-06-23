@@ -4,7 +4,7 @@
 //! Each function is a 1:1 transcription of the same-named `clauses.c` routine.
 //! Catalog reads funnel through `backend-utils-cache-lsyscache-seams` (and the
 //! outward clauses/var seams); the generic recursion engine comes from
-//! `nodes_core::nodefuncs`.
+//! `::nodes_core::nodefuncs`.
 
 use alloc::vec::Vec;
 
@@ -17,11 +17,11 @@ use ::nodes::primnodes::{
     SubLinkType,
 };
 
-use nodes_core::bitmapset as bms;
-use nodes_core::bitmapset::BMS_Membership;
-use nodes_core::multibitmapset as mbms;
-use nodes_core::multibitmapset::MultiBitmapset;
-use nodes_core::nodefuncs::{
+use ::nodes_core::bitmapset as bms;
+use ::nodes_core::bitmapset::BMS_Membership;
+use ::nodes_core::multibitmapset as mbms;
+use ::nodes_core::multibitmapset::MultiBitmapset;
+use ::nodes_core::nodefuncs::{
     check_functions_in_node_ref, expression_tree_walker, expression_tree_walker as etw,
     set_opfuncid,
 };
@@ -263,7 +263,7 @@ pub fn expression_returns_set_rows(clause: Option<&Expr>) -> PgResult<f64> {
             // `rank() over (order by sum(a)+sum(b))`). Resolve the funcid by
             // catalog lookup without mutating/cloning the node — the same
             // read-only precedent as `find_nonnullable_rels` below.
-            let funcid = nodes_core::nodefuncs::resolved_opfuncid(expr.opno, expr.opfuncid)?;
+            let funcid = ::nodes_core::nodefuncs::resolved_opfuncid(expr.opno, expr.opfuncid)?;
             let rows = clauses_seam::get_function_rows::call(funcid, clause)?;
             return Ok(clamp_row_est(rows));
         }
@@ -356,7 +356,7 @@ fn contain_mutable_functions_walker(node: Option<&Expr>) -> PgResult<bool> {
             None => false,
         };
         for arg in &ctor.args {
-            let typid = nodes_core::nodefuncs::expr_type(Some(arg))?;
+            let typid = ::nodes_core::nodefuncs::expr_type(Some(arg))?;
             let immutable = if is_jsonb {
                 clauses_seam::to_jsonb_is_immutable::call(typid)?
             } else {
@@ -468,7 +468,7 @@ fn contain_volatile_functions_in_query(
     query: &::nodes::copy_query::Query,
 ) -> PgResult<bool> {
     let mut err: Option<PgError> = None;
-    let aborted = nodes_core::node_walker::query_tree_walker(
+    let aborted = ::nodes_core::node_walker::query_tree_walker(
         query,
         &mut |n| match contain_volatile_functions_node(n) {
             Ok(b) => b,
@@ -768,7 +768,7 @@ fn max_parallel_hazard_walker_query(
 
     // Recurse into subselects: query_tree_walker(query, walker, context, 0).
     // The callback is the Node walker, which re-dispatches Query vs Expr.
-    nodes_core::node_walker::query_tree_walker(
+    ::nodes_core::node_walker::query_tree_walker(
         query,
         &mut |n| max_parallel_hazard_walker_node(n, context, err),
         0,
@@ -1100,7 +1100,7 @@ fn find_nonnullable_rels_walker<'mcx>(
         // Resolve opfuncid without cloning the node — its args may carry an
         // owned-subtree child (SubPlan/SubLink) whose derived `Expr::clone`
         // panics. (C's set_opfuncid scribbles the field in place; we read-only.)
-        let opfuncid = nodes_core::nodefuncs::resolved_opfuncid(op.opno, op.opfuncid)?;
+        let opfuncid = ::nodes_core::nodefuncs::resolved_opfuncid(op.opno, op.opfuncid)?;
         if lsyscache::func_strict::call(opfuncid)? {
             result = find_nonnullable_rels_list(mcx, &op.args, false)?;
         }
@@ -1234,7 +1234,7 @@ fn find_nonnullable_vars_walker<'mcx>(
     node: Option<&Expr>,
     top_level: bool,
 ) -> PgResult<MultiBitmapset<'mcx>> {
-    let mut result: MultiBitmapset<'mcx> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: MultiBitmapset<'mcx> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let Some(node) = node else { return Ok(result) };
 
     if let Some(var) = node.as_var() {
@@ -1326,7 +1326,7 @@ fn find_nonnullable_vars_list<'mcx>(
     args: &[Expr],
     top_level: bool,
 ) -> PgResult<MultiBitmapset<'mcx>> {
-    let mut result: MultiBitmapset<'mcx> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: MultiBitmapset<'mcx> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     for a in args {
         let sub = find_nonnullable_vars_walker(mcx, Some(a), top_level)?;
         result = mbms::mbms_add_members(mcx, result, &sub)?;
@@ -1340,7 +1340,7 @@ fn nonnullable_vars_intersect<'mcx>(
     args: &[Expr],
     top_level: bool,
 ) -> PgResult<MultiBitmapset<'mcx>> {
-    let mut result: MultiBitmapset<'mcx> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: MultiBitmapset<'mcx> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let mut first = true;
     for a in args {
         let subresult = find_nonnullable_vars_walker(mcx, Some(a), top_level)?;
@@ -1368,7 +1368,7 @@ pub fn find_forced_null_vars<'mcx>(
     mcx: Mcx<'mcx>,
     node: Option<&Expr>,
 ) -> PgResult<MultiBitmapset<'mcx>> {
-    let mut result: MultiBitmapset<'mcx> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: MultiBitmapset<'mcx> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     let Some(node) = node else { return Ok(result) };
     // Check single-clause cases using subroutine.
     if let Some(var) = find_forced_null_var(Some(node)).and_then(|n| n.as_var()) {
@@ -1392,7 +1392,7 @@ fn find_forced_null_vars_list<'mcx>(
     mcx: Mcx<'mcx>,
     args: &[Expr],
 ) -> PgResult<MultiBitmapset<'mcx>> {
-    let mut result: MultiBitmapset<'mcx> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut result: MultiBitmapset<'mcx> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     for a in args {
         let sub = find_forced_null_vars(mcx, Some(a))?;
         result = mbms::mbms_add_members(mcx, result, &sub)?;
@@ -1445,7 +1445,7 @@ pub(crate) fn is_strict_saop<'mcx>(
     // deep-copy `args`, panicking if a child is an `Aggref`/`SubPlan`/`SubLink`
     // (derived `Expr::clone` traps). Resolve it read-only via catalog lookup,
     // the same precedent as `expression_returns_set_rows` / `find_nonnullable_rels`.
-    let opfuncid = nodes_core::nodefuncs::resolved_opfuncid(expr.opno, expr.opfuncid)?;
+    let opfuncid = ::nodes_core::nodefuncs::resolved_opfuncid(expr.opno, expr.opfuncid)?;
     if !lsyscache::func_strict::call(opfuncid)? {
         return Ok(false);
     }
@@ -1587,7 +1587,7 @@ fn convert_saop_to_hashed_saop_walker<'mcx>(
 
     // Recurse into children (the mutator rebuilds the node with each child
     // transformed — equivalent to C's expression_tree_walker recursion).
-    nodes_core::nodefuncs::expression_tree_mutator(node, &mut |child| {
+    ::nodes_core::nodefuncs::expression_tree_mutator(node, &mut |child| {
         convert_saop_to_hashed_saop_walker(mcx, child, err)
     })
 }

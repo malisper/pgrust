@@ -17,7 +17,7 @@ use sink::{
     bbsink_begin_archive, bbsink_begin_backup, bbsink_end_archive, BbsinkState, TablespaceInfo,
 };
 use zstd_seams::{ZstdCctxHandle, ZstdEndDirective, ZstdStreamOutcome};
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 const FOOTER: &[u8] = b"ZE";
 
@@ -33,7 +33,7 @@ type Log<'a> = &'a RefCell<Vec<Event>>;
 
 struct RecordingOps<'a, 'mcx> {
     log: Log<'a>,
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
 }
 
 impl<'a, 'mcx> BbsinkOps<'mcx> for RecordingOps<'a, 'mcx> {

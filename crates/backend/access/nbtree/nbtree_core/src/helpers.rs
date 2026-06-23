@@ -7,13 +7,13 @@
 //! raw struct cast).
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::primitive::{BlockNumber, OffsetNumber};
-use types_error::PgResult;
+use ::types_core::primitive::{BlockNumber, OffsetNumber};
+use ::types_error::PgResult;
 use types_nbtree::{
     BTCycleId, BT_IS_POSTING, BT_OFFSET_MASK, BT_PIVOT_HEAP_TID_ATTR, INDEX_ALT_TID_MASK,
 };
-use types_storage::storage::Buffer;
-use types_tuple::heaptuple::{
+use ::types_storage::storage::Buffer;
+use ::types_tuple::heaptuple::{
     BlockIdData, IndexTupleData, IndexTupleSize, ItemPointerData,
 };
 

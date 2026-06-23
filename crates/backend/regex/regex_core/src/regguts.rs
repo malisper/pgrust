@@ -24,7 +24,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::PgWChar;
+use ::types_core::PgWChar;
 
 use crate::regex_consts::NUM_CCLASSES;
 
@@ -641,7 +641,7 @@ pub struct RegexT {
     /// `re_csize` -- sizeof(character)
     pub re_csize: i32,
     /// `re_collation` -- collation that defines LC_CTYPE behavior
-    pub re_collation: types_core::Oid,
+    pub re_collation: ::types_core::Oid,
     /// `re_guts` -- the engine-owned innards (C: `char *re_guts`)
     pub re_guts: Option<alloc::boxed::Box<Guts>>,
     /// `re_fns` -- the manipulation-function table (C: `char *re_fns`)

@@ -20,9 +20,9 @@ use core::cell::RefCell;
 use std::sync::Once;
 
 use mcx::{MemoryContext, PgVec};
-use types_core::Oid;
-use types_tuple::heaptuple::Datum as TupleDatum;
-use types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, TupleDescData};
+use ::types_core::Oid;
+use ::types_tuple::heaptuple::Datum as TupleDatum;
+use ::types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, TupleDescData};
 
 // --- per-thread script the installed test seams read --------------------------
 

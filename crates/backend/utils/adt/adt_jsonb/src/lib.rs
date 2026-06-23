@@ -12,7 +12,7 @@
 //!
 //! Outputs that the C builds in `CurrentMemoryContext` are returned as
 //! `PgVec<'mcx, u8>` allocated in a caller-supplied [`Mcx`]; Datums are the
-//! canonical [`types_tuple::Datum`]. Genuinely-external operations are routed
+//! canonical [`::types_tuple::Datum`]. Genuinely-external operations are routed
 //! through per-owner seams: the JSON lexer/parser
 //! ([`jsonb_seams::parse_to_jsonb`]), `OidFunctionCall1`
 //! ([`oid_function_call1`](jsonb_seams::oid_function_call1)),
@@ -40,15 +40,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
-use types_error::error::{
+use ::types_core::Oid;
+use ::types_error::error::{
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_PROTOCOL_VIOLATION,
 };
 use types_error::{PgError, PgResult, SoftErrorContext};
 use types_json::{JsonTokenType, JsonTypeCategory};
-use types_tuple::heaptuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
-use types_tuple::Datum;
+use ::types_tuple::heaptuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
+use ::types_tuple::Datum;
 
 use jsonb_util::{
     json_container_is_array, json_container_is_object, json_container_is_scalar, jbvType,
@@ -144,7 +144,7 @@ fn seam_oid_function_call1<'mcx>(
     fmgr_seams::function_call1_coll_datum::call(
         mcx,
         outfuncoid,
-        types_core::InvalidOid,
+        ::types_core::InvalidOid,
         val.clone_in(mcx)?,
     )
 }
@@ -2078,7 +2078,7 @@ fn unknown_token() -> PgError {
 /// `escontext` an over-length string raises a hard `Err`.
 pub fn checkStringLen(len: usize, escontext: Option<&mut SoftErrorContext>) -> PgResult<bool> {
     if len > JENTRY_OFFLENMASK {
-        return types_error::ereturn(
+        return ::types_error::ereturn(
             escontext,
             false,
             PgError::error("string too long to represent as jsonb string")

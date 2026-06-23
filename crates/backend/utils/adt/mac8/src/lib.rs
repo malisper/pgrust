@@ -318,7 +318,7 @@ impl<'a> MsgCursor<'a> {
     fn get_byte(&mut self) -> PgResult<u8> {
         if self.cursor >= self.data.len() {
             return Err(PgError::error("insufficient data left in message")
-                .with_sqlstate(types_error::ERRCODE_INVALID_BINARY_REPRESENTATION));
+                .with_sqlstate(::types_error::ERRCODE_INVALID_BINARY_REPRESENTATION));
         }
         let b = self.data[self.cursor];
         self.cursor += 1;

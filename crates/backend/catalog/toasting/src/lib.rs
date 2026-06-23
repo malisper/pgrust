@@ -9,28 +9,28 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::Mcx;
-use types_cluster::RelOptionsToken;
-use types_core::primitive::{AttrNumber, Oid};
+use ::mcx::Mcx;
+use ::types_cluster::RelOptionsToken;
+use ::types_core::primitive::{AttrNumber, Oid};
 use types_core::{InvalidOid, OidIsValid, PG_TOAST_NAMESPACE, RELATION_RELATION_ID};
 // The toast-table `reloptions` parameter travels as the opaque
 // [`RelOptionsToken`] forwarded into the `heap_create_with_catalog` seam.
 // The separate `index_create` seam still takes the canonical unified
 // `Datum<'mcx>` for its own `reloptions` field, so this crate constructs
 // `Datum::null()` for the toast index.
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult};
 use ::nodes::execnodes::IndexInfo;
 use ::nodes::primnodes::OnCommitAction;
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
-use rel::Relation;
-use types_storage::lock::{
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
+use ::rel::Relation;
+use ::types_storage::lock::{
     LOCKMODE, AccessExclusiveLock, NoLock, RowExclusiveLock, ShareLock,
 };
-use types_tuple::access::{
+use ::types_tuple::access::{
     RangeVar, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
-use types_tuple::heaptuple::{INT4OID, OIDOID};
+use ::types_tuple::heaptuple::{INT4OID, OIDOID};
 
 use table as table;
 use toastdesc_seams as toastdesc_seams;
@@ -296,7 +296,7 @@ fn create_toast_table<'mcx>(
         allow_system_table_mods: true,
         is_internal: true,
         relrewrite: OIDOldToast,
-        cooked_constraints: mcx::PgVec::new_in(mcx),
+        cooked_constraints: ::mcx::PgVec::new_in(mcx),
     })?;
     assert!(toast_relid != InvalidOid); // Assert(toast_relid != InvalidOid);
 
@@ -309,7 +309,7 @@ fn create_toast_table<'mcx>(
     // Create unique index on chunk_id, chunk_seq.  The slice access routines
     // use both columns; we want it unique to guard against duplicate TOAST
     // chunk OIDs.
-    let mut ii_index_attr_numbers = [0 as AttrNumber; types_core::fmgr::INDEX_MAX_KEYS as usize];
+    let mut ii_index_attr_numbers = [0 as AttrNumber; ::types_core::fmgr::INDEX_MAX_KEYS as usize];
     ii_index_attr_numbers[0] = 1;
     ii_index_attr_numbers[1] = 2;
     let indexInfo = IndexInfo {
@@ -479,7 +479,7 @@ fn makeRangeVar(relname: &str, location: i32) -> RangeVar {
         schemaname: None,
         relname: String::from(relname),
         inh: true,
-        relpersistence: types_core::RELPERSISTENCE_PERMANENT,
+        relpersistence: ::types_core::RELPERSISTENCE_PERMANENT,
         location,
     }
 }

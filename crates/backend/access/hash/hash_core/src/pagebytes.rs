@@ -10,13 +10,13 @@
 //!
 //! No raw pointers, no `extern "C"`, no `unsafe`.
 
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, RegProcedure, BLCKSZ};
-use types_error::PgResult;
-use hash::hashpage::{
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, RegProcedure, BLCKSZ};
+use ::types_error::PgResult;
+use ::hash::hashpage::{
     HashMetaPageData, BYTE_TO_BIT, HASHO_PAGE_ID, HASH_MAGIC, HASH_MAX_BITMAPS,
     HASH_MAX_SPLITPOINTS, HASH_VERSION, InvalidBucket, LH_BITMAP_PAGE, LH_META_PAGE,
 };
-use types_tuple::heaptuple::{BlockIdData, ItemPointerData};
+use ::types_tuple::heaptuple::{BlockIdData, ItemPointerData};
 
 use ::page::PageInit;
 

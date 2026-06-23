@@ -1,7 +1,7 @@
 //! Unit tests for the pure (no-seam) pathkey comparison helpers.
 
 use super::*;
-use pathnode_seams::PathKeysComparison;
+use ::pathnode_seams::PathKeysComparison;
 
 fn pk(ec: u32) -> PathKey {
     PathKey {

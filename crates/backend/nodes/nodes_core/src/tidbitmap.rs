@@ -44,13 +44,13 @@
 
 use core::sync::atomic::Ordering;
 
-use hashfn::murmurhash32;
+use ::hashfn::murmurhash32;
 use types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
-use execparallel::DsaAreaHandle;
+use ::execparallel::DsaAreaHandle;
 use ::nodes::bitmapset::bitmapword;
-use types_storage::bufpage::MaxHeapTuplesPerPage;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_storage::bufpage::MaxHeapTuplesPerPage;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 // ===========================================================================
 // Macro-equivalent constants/helpers (tidbitmap.c / bitmapset.h)

@@ -14,7 +14,7 @@
 use std::cmp::Ordering;
 
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 
 use pg_locale_seams as locale;
@@ -198,7 +198,7 @@ pub fn text_larger<'mcx>(
     collid: Oid,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let winner = if text_cmp(t1, t2, collid)? > 0 { t1 } else { t2 };
-    mcx::slice_in(mcx, winner)
+    ::mcx::slice_in(mcx, winner)
 }
 
 /// C: `text_smaller(PG_FUNCTION_ARGS)`.
@@ -211,5 +211,5 @@ pub fn text_smaller<'mcx>(
     collid: Oid,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let winner = if text_cmp(t1, t2, collid)? < 0 { t1 } else { t2 };
-    mcx::slice_in(mcx, winner)
+    ::mcx::slice_in(mcx, winner)
 }

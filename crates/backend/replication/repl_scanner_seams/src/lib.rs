@@ -13,8 +13,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_error::PgResult;
-use replication::repl_token::Token;
+use ::types_error::PgResult;
+use ::replication::repl_token::Token;
 
 seam_core::seam!(
     /// Lex an entire replication-command string into its token stream

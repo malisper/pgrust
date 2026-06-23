@@ -24,8 +24,8 @@ mod store;
 
 use core::cell::Cell;
 
-use datum::Datum;
-use types_error::PgError;
+use ::datum::Datum;
+use ::types_error::PgError;
 use fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
 
 /// The simple (suffix-free, directory-free) module name.
@@ -368,7 +368,7 @@ fn fc_pg_stat_statements(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn fc_pg_stat_statements_info(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
     match srf::pg_stat_statements_info(fcinfo) {
         Ok(image) => {
-            fcinfo.set_ref_result(fmgr::boundary::RefPayload::Composite(image));
+            fcinfo.set_ref_result(::fmgr::boundary::RefPayload::Composite(image));
             fcinfo.isnull = false;
             Datum::null()
         }
@@ -404,7 +404,7 @@ fn lookup(function: &str) -> Option<LoadedExternalFunc> {
 
 /// `_PG_init` (pg_stat_statements.c:384). Runs when the module is loaded via
 /// `shared_preload_libraries`. Registers GUCs, installs hooks.
-fn pg_init() -> types_error::PgResult<()> {
+fn pg_init() -> ::types_error::PgResult<()> {
     // In order to create our shared memory area, we have to be loaded via
     // shared_preload_libraries. If not, fall out without hooking into the main
     // system. (We still allow the SQL functions to be created.)
@@ -428,8 +428,8 @@ fn pg_init() -> types_error::PgResult<()> {
 /// The custom-GUC registration block of `_PG_init` (split out so it can run once
 /// the GUC store is up, mirroring `backend-pl-plpgsql-handler`).
 fn register_custom_gucs() {
-    use misc_guc::custom;
-    use guc_tables::GucVarAccessors;
+    use ::misc_guc::custom;
+    use ::guc_tables::GucVarAccessors;
     use types_guc::{PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET};
 
     fn get_max() -> i32 {
@@ -549,18 +549,18 @@ fn register_custom_gucs() {
 }
 
 /// `track_options[]` (pg_stat_statements.c:287).
-static TRACK_OPTIONS: &[types_guc::config_enum_entry] = &[
-    types_guc::config_enum_entry {
+static TRACK_OPTIONS: &[::types_guc::config_enum_entry] = &[
+    ::types_guc::config_enum_entry {
         name: "none",
         val: PGSS_TRACK_NONE,
         hidden: false,
     },
-    types_guc::config_enum_entry {
+    ::types_guc::config_enum_entry {
         name: "top",
         val: PGSS_TRACK_TOP,
         hidden: false,
     },
-    types_guc::config_enum_entry {
+    ::types_guc::config_enum_entry {
         name: "all",
         val: PGSS_TRACK_ALL,
         hidden: false,

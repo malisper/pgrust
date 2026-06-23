@@ -13,7 +13,7 @@
 //! into these functions at run time.
 //!
 //! Per-connection OpenSSL objects (`port->ssl`, `port->peer`) are not fields of
-//! [`net::Port`]; the FFI provider owns them, keyed by the connection's
+//! [`::net::Port`]; the FFI provider owns them, keyed by the connection's
 //! socket (the `port_token`). This crate keeps a thread-local `sock -> Ssl`
 //! map so the `be_tls_get_*` accessors can locate the live `SSL *` (the C reads
 //! `port->ssl` directly).
@@ -24,14 +24,14 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use utils_error::ereport;
-use guc_tables::vars;
+use ::utils_error::ereport;
+use ::guc_tables::vars;
 use types_error::{
     ErrorLocation, PgResult, COMMERROR, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_PROTOCOL_VIOLATION,
     FATAL, LOG,
 };
 use mcx::{Mcx, PgString};
-use net::Port;
+use ::net::Port;
 
 use be_secure_openssl_ffi_seams as ffi;
 use ffi::{
@@ -287,7 +287,7 @@ fn be_tls_init_inner(
     ssl_min_protocol_version: i32,
     ssl_max_protocol_version: i32,
     is_server_start: bool,
-    level: utils_error::ErrorLevel,
+    level: ::utils_error::ErrorLevel,
 ) -> PgResult<Result<bool, ()>> {
     // The file-scope GUC strings (read once; `read()` yields `Option<String>`,
     // an empty/NULL GUC behaves like the C empty `char[0]` test).
@@ -857,7 +857,7 @@ pub fn be_tls_write(port: &mut Port, buf: &[u8]) -> TlsIo {
 }
 
 /* ========================================================================= *
- *  Peer-cert handle stash (the C `port->peer`, not a field of net::Port)
+ *  Peer-cert handle stash (the C `port->peer`, not a field of ::net::Port)
  * ========================================================================= */
 
 thread_local! {
@@ -904,7 +904,7 @@ fn default_openssl_tls_init(context: SslCtx, is_server_start: bool) {
 /// Invoked by OpenSSL's private-key load; runs `ssl_passphrase_command`.
 /// Returns the passphrase bytes (the C return value is its length). The
 /// provider copies them into OpenSSL's `buf` of capacity `size`.
-pub fn ssl_external_passwd_cb<'mcx>(mcx: Mcx<'mcx>, size: i32) -> PgResult<mcx::PgVec<'mcx, u8>> {
+pub fn ssl_external_passwd_cb<'mcx>(mcx: Mcx<'mcx>, size: i32) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     const PROMPT: &str = "Enter PEM pass phrase:";
     let is_server_start = SSL_IS_SERVER_START.with(|c| *c.borrow());
     // run_ssl_passphrase_command(prompt, ssl_is_server_start, buf, size)
@@ -919,7 +919,7 @@ pub fn ssl_external_passwd_cb<'mcx>(mcx: Mcx<'mcx>, size: i32) -> PgResult<mcx::
 /// `info_cb(const SSL *ssl, int type, int args)` — copy SSL info messages into
 /// the log. `desc` is `SSL_state_string_long(ssl)`, supplied by the provider.
 pub fn info_cb(type_: i32, args: i32, desc: &str) {
-    use types_error::DEBUG4;
+    use ::types_error::DEBUG4;
     // SSL_CB_* constants (openssl/ssl.h).
     const SSL_CB_HANDSHAKE_START: i32 = 0x10;
     const SSL_CB_HANDSHAKE_DONE: i32 = 0x20;

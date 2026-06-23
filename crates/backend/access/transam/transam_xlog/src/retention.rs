@@ -15,10 +15,10 @@
 
 #![allow(non_snake_case)]
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 
 use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
-use wal::xlog_consts::WALAvailability;
+use ::wal::xlog_consts::WALAvailability;
 
 use crate::{
     ConvertToXSegs, IsPartialXLogFileName, IsXLogFileName, XLByteToSeg, XLogFromFileName,
@@ -235,7 +235,7 @@ pub fn UpdateCheckPointDistanceEstimateCore(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wal::xlog_consts::DEFAULT_XLOG_SEG_SIZE;
+    use ::wal::xlog_consts::DEFAULT_XLOG_SEG_SIZE;
 
     const SEG: i32 = DEFAULT_XLOG_SEG_SIZE;
     const SEG64: u64 = DEFAULT_XLOG_SEG_SIZE as u64;

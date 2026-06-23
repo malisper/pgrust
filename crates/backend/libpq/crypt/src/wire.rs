@@ -15,8 +15,8 @@
 //! `&mut Option<String>` API. The adapters are thin: no logic lives here.
 
 use mcx::{Mcx, PgString};
-use authid::PasswordType;
-use types_error::PgResult;
+use ::authid::PasswordType;
+use ::types_error::PgResult;
 
 use crate::{
     encrypt_password, get_password_type, get_role_password, md5_crypt_verify, plain_crypt_verify,

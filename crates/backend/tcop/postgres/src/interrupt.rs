@@ -14,7 +14,7 @@
 #![allow(non_snake_case)]
 
 use utils_error::{errcode, errdetail, errfinish, errhint, errmsg, errstart};
-use types_dest::dest::CommandDest;
+use ::types_dest::dest::CommandDest;
 use types_error::{
     ErrorLevel, PgResult, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_CONNECTION_FAILURE,
     ERRCODE_DATABASE_DROPPED, ERRCODE_FLOATING_POINT_EXCEPTION,
@@ -22,11 +22,11 @@ use types_error::{
     ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_QUERY_CANCELED, ERRCODE_T_R_SERIALIZATION_FAILURE,
     ERRCODE_TRANSACTION_TIMEOUT, DEBUG1, ERROR, FATAL,
 };
-use types_storage::ProcSignalReason;
-use types_storage::storage::{PROCSIG_RECOVERY_CONFLICT_FIRST, PROCSIG_RECOVERY_CONFLICT_LAST};
-use types_timeout::TimeoutId;
+use ::types_storage::ProcSignalReason;
+use ::types_storage::storage::{PROCSIG_RECOVERY_CONFLICT_FIRST, PROCSIG_RECOVERY_CONFLICT_LAST};
+use ::types_timeout::TimeoutId;
 
-use init_small::globals as g;
+use ::init_small::globals as g;
 
 use crate::globals;
 
@@ -169,7 +169,7 @@ pub fn quickdie(_postgres_signal_arg: i32) -> ! {
 
     // If we're aborting out of client auth, don't risk trying to send anything
     // to the client.
-    if utils_error::config::client_auth_in_progress()
+    if ::utils_error::config::client_auth_in_progress()
         && globals::where_to_send_output() == CommandDest::Remote
     {
         globals::set_where_to_send_output(CommandDest::None);
@@ -186,7 +186,7 @@ pub fn quickdie(_postgres_signal_arg: i32) -> ! {
         pmsignal::QuitSignalReason::PMQUIT_NOT_SENT => {
             // Hmm, SIGQUIT arrived out of the blue.
             let _ = quickdie_report(
-                types_error::WARNING,
+                ::types_error::WARNING,
                 ERRCODE_ADMIN_SHUTDOWN,
                 "terminating connection because of unexpected SIGQUIT signal",
                 None,
@@ -196,8 +196,8 @@ pub fn quickdie(_postgres_signal_arg: i32) -> ! {
         pmsignal::QuitSignalReason::PMQUIT_FOR_CRASH => {
             // A crash-and-restart cycle is in progress.
             let _ = quickdie_report(
-                types_error::WARNING_CLIENT_ONLY,
-                types_error::ERRCODE_CRASH_SHUTDOWN,
+                ::types_error::WARNING_CLIENT_ONLY,
+                ::types_error::ERRCODE_CRASH_SHUTDOWN,
                 "terminating connection because of crash of another server process",
                 Some(
                     "The postmaster has commanded this server process to roll back \
@@ -213,7 +213,7 @@ pub fn quickdie(_postgres_signal_arg: i32) -> ! {
         pmsignal::QuitSignalReason::PMQUIT_FOR_STOP => {
             // Immediate-mode stop.
             let _ = quickdie_report(
-                types_error::WARNING_CLIENT_ONLY,
+                ::types_error::WARNING_CLIENT_ONLY,
                 ERRCODE_ADMIN_SHUTDOWN,
                 "terminating connection due to immediate shutdown command",
                 None,
@@ -235,7 +235,7 @@ fn libc_sigquit() -> libc::c_int {
 /// One of `quickdie`'s `ereport(WARNING[_CLIENT_ONLY], ...)` reports.
 fn quickdie_report(
     level: ErrorLevel,
-    code: types_error::SqlState,
+    code: ::types_error::SqlState,
     msg: &str,
     detail: Option<&str>,
     hint: Option<&str>,
@@ -259,7 +259,7 @@ fn quickdie_report(
 /// abort transaction and exit at soonest convenient time. Async-signal-safe.
 pub fn die(_postgres_signal_arg: i32) {
     // Don't joggle the elbow of proc_exit.
-    if !utils_error::config::proc_exit_inprogress() {
+    if !::utils_error::config::proc_exit_inprogress() {
         g::SetInterruptPending(true);
         g::SetProcDiePending(true);
     }
@@ -287,7 +287,7 @@ pub fn die(_postgres_signal_arg: i32) {
 /// signal from postmaster: abort current transaction at soonest convenient time.
 pub fn StatementCancelHandler(_postgres_signal_arg: i32) {
     // Don't joggle the elbow of proc_exit.
-    if !utils_error::config::proc_exit_inprogress() {
+    if !::utils_error::config::proc_exit_inprogress() {
         g::SetInterruptPending(true);
         g::SetQueryCancelPending(true);
     }
@@ -516,7 +516,7 @@ fn alloc_unrecognized(reason: ProcSignalReason) -> alloc::string::String {
 fn ProcessRecoveryConflictInterrupts() -> PgResult<()> {
     // We don't need to worry about joggling the elbow of proc_exit, because
     // proc_exit_prepare() holds interrupts, so ProcessInterrupts() won't call us.
-    debug_assert!(!utils_error::config::proc_exit_inprogress());
+    debug_assert!(!::utils_error::config::proc_exit_inprogress());
     debug_assert_eq!(g::InterruptHoldoffCount(), 0);
     debug_assert!(globals::recovery_conflict_pending());
 
@@ -567,12 +567,12 @@ pub fn ProcessInterrupts() -> PgResult<()> {
         g::SetQueryCancelPending(false); // ProcDie trumps QueryCancel
         lock_error_cleanup();
         // As in quickdie, don't risk sending to client during auth.
-        if utils_error::config::client_auth_in_progress()
+        if ::utils_error::config::client_auth_in_progress()
             && globals::where_to_send_output() == CommandDest::Remote
         {
             globals::set_where_to_send_output(CommandDest::None);
         }
-        if utils_error::config::client_auth_in_progress() {
+        if ::utils_error::config::client_auth_in_progress() {
             return die_fatal(
                 ERRCODE_QUERY_CANCELED,
                 "canceling authentication due to timeout".to_string(),
@@ -790,7 +790,7 @@ pub fn ProcessInterrupts() -> PgResult<()> {
 }
 
 /// `ereport(FATAL, (errcode(code), errmsg(msg)))`.
-fn die_fatal(code: types_error::SqlState, msg: alloc::string::String) -> PgResult<()> {
+fn die_fatal(code: ::types_error::SqlState, msg: alloc::string::String) -> PgResult<()> {
     if errstart(FATAL, None) {
         errcode(code)?;
         errmsg(&msg)?;
@@ -801,7 +801,7 @@ fn die_fatal(code: types_error::SqlState, msg: alloc::string::String) -> PgResul
 }
 
 /// `ereport(ERROR, (errcode(code), errmsg(msg)))`.
-fn die_error(code: types_error::SqlState, msg: alloc::string::String) -> PgResult<()> {
+fn die_error(code: ::types_error::SqlState, msg: alloc::string::String) -> PgResult<()> {
     if errstart(ERROR, None) {
         errcode(code)?;
         errmsg(&msg)?;

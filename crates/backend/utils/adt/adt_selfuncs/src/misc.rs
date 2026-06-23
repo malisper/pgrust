@@ -2,14 +2,14 @@
 //! decode `scalararraysel_containment` uses), `estimate_array_length`, and
 //! `estimate_num_groups`.
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid};
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{NodeId, PlannerInfo, RelId, Relids};
 use types_selfuncs::{ConstNodeInfo, EstimationInfo, VariableStatData, SELFLAG_USED_DEFAULT};
-use statistics::STATS_EXT_NDISTINCT;
+use ::statistics::STATS_EXT_NDISTINCT;
 
 use lsyscache_seams as lsc;
 
@@ -159,12 +159,12 @@ pub(crate) fn estimate_multivariate_bucketsize<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
     _inner: RelId,
-    hashclauses: &[pathnodes::RinfoId],
-) -> PgResult<(f64, alloc::vec::Vec<pathnodes::RinfoId>)> {
+    hashclauses: &[::pathnodes::RinfoId],
+) -> PgResult<(f64, alloc::vec::Vec<::pathnodes::RinfoId>)> {
     let mcx: Mcx<'mcx> = run.mcx();
     // C: `List *clauses = list_copy(hashclauses);`
-    let mut clauses: alloc::vec::Vec<pathnodes::RinfoId> = hashclauses.to_vec();
-    let mut otherclauses: alloc::vec::Vec<pathnodes::RinfoId> = alloc::vec::Vec::new();
+    let mut clauses: alloc::vec::Vec<::pathnodes::RinfoId> = hashclauses.to_vec();
+    let mut otherclauses: alloc::vec::Vec<::pathnodes::RinfoId> = alloc::vec::Vec::new();
     let mut ndistinct = 1.0f64;
 
     // Nothing to do for a single clause.
@@ -177,7 +177,7 @@ pub(crate) fn estimate_multivariate_bucketsize<'mcx>(
         // to `origin_rinfos` (the RestrictInfo that produced each varinfo). We
         // process all clauses of one base relation per outer iteration.
         let mut varinfos: alloc::vec::Vec<GroupVarInfo<'mcx>> = alloc::vec::Vec::new();
-        let mut origin_rinfos: alloc::vec::Vec<pathnodes::RinfoId> = alloc::vec::Vec::new();
+        let mut origin_rinfos: alloc::vec::Vec<::pathnodes::RinfoId> = alloc::vec::Vec::new();
         let mut group_relid: i32 = -1;
         let mut group_rel: Option<RelId> = None;
 
@@ -185,7 +185,7 @@ pub(crate) fn estimate_multivariate_bucketsize<'mcx>(
         // removing each clause we classify (either approve into varinfos or push
         // to otherclauses). Clauses for a *different* base rel than the group are
         // left in place for the next outer iteration.
-        let mut remaining: alloc::vec::Vec<pathnodes::RinfoId> = alloc::vec::Vec::new();
+        let mut remaining: alloc::vec::Vec<::pathnodes::RinfoId> = alloc::vec::Vec::new();
         for rinfo_id in core::mem::take(&mut clauses).into_iter() {
             // Inner side of the join (outer_is_left because clause_sides_match_join
             // ran on the hash clauses).
@@ -776,7 +776,7 @@ fn estimate_multivariate_ndistinct<'run, 'g>(
 
     // Make sure we found an item.
     let item_ndistinct = item_ndistinct
-        .ok_or_else(|| types_error::PgError::error("corrupt MVNDistinct entry"))?;
+        .ok_or_else(|| ::types_error::PgError::error("corrupt MVNDistinct entry"))?;
 
     // Form the output varinfo list, keeping only unmatched ones.
     let old = core::mem::take(varinfos);

@@ -7,7 +7,7 @@
 
 use mcx::{Mcx, PgString, PgVec};
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgResult, ERRCODE_INVALID_SCHEMA_DEFINITION, ERROR};
 
 use ::nodes::nodes::{ntag, Node};
@@ -34,7 +34,7 @@ pub fn transformCreateSchemaStmtElements<'mcx>(
 
     // Run through each schema element, separating statements by type.
     for element in schema_elts {
-        let mut element = mcx::alloc_in(mcx, element.clone_in(mcx)?)?;
+        let mut element = ::mcx::alloc_in(mcx, element.clone_in(mcx)?)?;
         match element.node_tag() {
             ntag::T_CreateSeqStmt => {
                 let elp = element.as_createseqstmt_mut().unwrap();
@@ -92,7 +92,7 @@ pub fn transformCreateSchemaStmtElements<'mcx>(
 /// `PgVec<Node>`).
 fn extend_unbox<'mcx>(dst: &mut PgVec<'mcx, Node<'mcx>>, src: PgVec<'mcx, NodePtr<'mcx>>) {
     for boxed in src {
-        dst.push(mcx::PgBox::into_inner(boxed));
+        dst.push(::mcx::PgBox::into_inner(boxed));
     }
 }
 

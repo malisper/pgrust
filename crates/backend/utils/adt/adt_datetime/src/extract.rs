@@ -5,7 +5,7 @@
 //! These are the `timestamp_part_common` / `timestamptz_part_common` /
 //! `interval_part_common` cores (the shared `date_part` float8 path PLUS the
 //! `retnumeric` path used by SQL `EXTRACT`, returning a
-//! [`adt_numeric::NumericVar`]), and the `*_trunc` cores.
+//! [`::adt_numeric::NumericVar`]), and the `*_trunc` cores.
 //!
 //! Fmgr `Datum` shims are NOT ported.  The `units` string is decoded with the
 //! shared decode engine ([`crate::decode::DecodeUnits`] /
@@ -15,11 +15,11 @@
 //! Idiomatic surface: plain `i32`/`i64`/`f64`, owned values, `Result`, `&str`.
 //! No raw pointers, `extern "C"`, `c_int`, `libc`, or `pg_ffi_fgram`.
 
-use pgtime::pg_tm;
-use mcx::Mcx;
-use adt_numeric::kernel_transcendental::int64_to_numericvar;
-use adt_numeric::kernel_var::{add_var, div_var, round_var, select_div_scale, sub_var};
-use types_numeric::var::NumericVar;
+use ::pgtime::pg_tm;
+use ::mcx::Mcx;
+use ::adt_numeric::kernel_transcendental::int64_to_numericvar;
+use ::adt_numeric::kernel_var::{add_var, div_var, round_var, select_div_scale, sub_var};
+use ::types_numeric::var::NumericVar;
 use types_datetime::{
     pg_itm, Interval, DAYS_PER_MONTH, DTK_CENTURY, DTK_DAY, DTK_DECADE, DTK_DOW, DTK_DOY, DTK_EPOCH,
     DTK_HOUR, DTK_ISODOW, DTK_ISOYEAR, DTK_JULIAN, DTK_MICROSEC, DTK_MILLENNIUM, DTK_MILLISEC,
@@ -180,7 +180,7 @@ fn non_finite_interval_part(
 /// Convert the infinite-input float8 result to the requested representation,
 /// matching the C `retnumeric` handling (`±Infinity`/NULL).
 fn non_finite_result<'mcx>(mcx: Mcx<'mcx>, r: f64, retnumeric: bool) -> ExtractResult<'mcx> {
-    use types_numeric::var::NumericSign;
+    use ::types_numeric::var::NumericSign;
     if r == 0.0 {
         ExtractResult::Null
     } else if retnumeric {
@@ -875,7 +875,7 @@ pub fn interval_trunc(lowunits: &str, interval: &Interval) -> DtResult<Interval>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adt_numeric::io::get_str_from_var;
+    use ::adt_numeric::io::get_str_from_var;
 
     fn ts(s: &str) -> Timestamp {
         crate::timestamp::timestamp_in(s, -1).unwrap()
@@ -897,7 +897,7 @@ mod tests {
 
     #[test]
     fn extract_year_from_timestamp() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let t = ts("2024-06-15 10:30:45");
         assert_eq!(as_f64(timestamp_part(mcx, t, "year", false).unwrap()), 2024.0);
@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn extract_dow_from_timestamp() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let t = ts("2024-06-15 10:30:45");
         assert_eq!(as_f64(timestamp_part(mcx, t, "dow", false).unwrap()), 6.0);
@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn extract_epoch_from_timestamp() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let t = ts("1970-01-01 00:00:00");
         assert_eq!(as_f64(timestamp_part(mcx, t, "epoch", false).unwrap()), 0.0);
@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn extract_hour_from_interval() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let i = crate::interval::interval_in("3 days 04:05:06", -1).unwrap();
         assert_eq!(as_f64(interval_part(mcx, &i, "hour", false).unwrap()), 4.0);
@@ -940,7 +940,7 @@ mod tests {
 
     #[test]
     fn extract_second_numeric_from_timestamp() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let t = ts("2024-06-15 10:30:45.5");
         assert_eq!(
@@ -954,7 +954,7 @@ mod tests {
         let _guard = crate::settings::DATE_ORDER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        crate::settings::set_date_style(types_datetime::USE_ISO_DATES);
+        crate::settings::set_date_style(::types_datetime::USE_ISO_DATES);
         let t = ts("2024-06-15 10:30:45.5");
         let r = timestamp_trunc("day", t).unwrap();
         assert_eq!(
@@ -968,7 +968,7 @@ mod tests {
         let _guard = crate::settings::DATE_ORDER_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        crate::settings::set_date_style(types_datetime::USE_ISO_DATES);
+        crate::settings::set_date_style(::types_datetime::USE_ISO_DATES);
         let t = ts("2024-06-15 10:30:45");
         let r = timestamp_trunc("month", t).unwrap();
         assert_eq!(
@@ -996,7 +996,7 @@ mod tests {
 
     #[test]
     fn timestamp_part_units_unsupported_is_0a000() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let t = ts("2024-06-15 10:30:45");
         let err = timestamp_part(mcx, t, "timezone", false).unwrap_err();
@@ -1009,7 +1009,7 @@ mod tests {
 
     #[test]
     fn timestamptz_part_reserv_non_epoch_is_0a000() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let t = crate::timestamp::timestamptz_in("2024-06-15 10:30:45+00", -1).unwrap();
         let err = timestamptz_part(mcx, t, "now", false).unwrap_err();
@@ -1022,7 +1022,7 @@ mod tests {
 
     #[test]
     fn timestamp_part_reserv_non_epoch_is_0a000() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let t = ts("2024-06-15 10:30:45");
         let err = timestamp_part(mcx, t, "now", false).unwrap_err();
@@ -1035,7 +1035,7 @@ mod tests {
 
     #[test]
     fn timestamp_part_unrecognized_is_22023() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let t = ts("2024-06-15 10:30:45");
         let err = timestamp_part(mcx, t, "fortnight", false).unwrap_err();
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[test]
     fn interval_part_units_unsupported_is_0a000() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let i = crate::interval::interval_in("3 days 04:05:06", -1).unwrap();
         let err = interval_part(mcx, &i, "timezone", false).unwrap_err();
@@ -1061,7 +1061,7 @@ mod tests {
 
     #[test]
     fn interval_part_reserv_non_epoch_is_22023() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let i = crate::interval::interval_in("3 days 04:05:06", -1).unwrap();
         let err = interval_part(mcx, &i, "now", false).unwrap_err();
@@ -1071,7 +1071,7 @@ mod tests {
 
     #[test]
     fn interval_part_unrecognized_is_22023() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let i = crate::interval::interval_in("3 days 04:05:06", -1).unwrap();
         let err = interval_part(mcx, &i, "fortnight", false).unwrap_err();
@@ -1084,8 +1084,8 @@ mod tests {
 
     #[test]
     fn non_finite_timestamp_part_sqlstates() {
-        use types_datetime::DT_NOEND;
-        let ctx = mcx::MemoryContext::new("test");
+        use ::types_datetime::DT_NOEND;
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let err = timestamp_part(mcx, DT_NOEND, "now", false).unwrap_err();
         assert_eq!(
@@ -1111,7 +1111,7 @@ mod tests {
 
     #[test]
     fn non_finite_interval_part_sqlstates() {
-        let ctx = mcx::MemoryContext::new("test");
+        let ctx = ::mcx::MemoryContext::new("test");
         let mcx = ctx.mcx();
         let inf = inf_interval();
         let err = interval_part(mcx, &inf, "julian", false).unwrap_err();

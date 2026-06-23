@@ -10,9 +10,9 @@
 
 use std::sync::{Mutex, MutexGuard, Once};
 
-use adt_numeric::io::numeric_in;
-use adt_numeric::ops_sql::numeric_cmp;
-use mcx::MemoryContext;
+use ::adt_numeric::io::numeric_in;
+use ::adt_numeric::ops_sql::numeric_cmp;
+use ::mcx::MemoryContext;
 
 use super::*;
 

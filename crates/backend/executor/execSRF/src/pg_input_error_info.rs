@@ -17,8 +17,8 @@
 //! tuple against the call's expected descriptor (C: `get_call_result_type`,
 //! reached here through `rsinfo.expectedDesc`).
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 

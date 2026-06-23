@@ -24,33 +24,33 @@
 
 use mcx::{Mcx, PgVec};
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
-use types_catalog::pg_constraint::{
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
+use ::types_catalog::pg_constraint::{
     CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
 };
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
 use ::nodes::parsenodes::DropBehavior;
-use rel::Relation;
-use types_storage::lock::{
+use ::rel::Relation;
+use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, LOCKMODE, NoLock, RowExclusiveLock,
 };
 
-use heaptuple::heap_deform_tuple;
-use common_relation::relation_open;
-use scankey::ScanKeyInit;
-use transam_xact::CommandCounterIncrement;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::heaptuple::heap_deform_tuple;
+use ::common_relation::relation_open;
+use ::scankey::ScanKeyInit;
+use ::transam_xact::CommandCounterIncrement;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use indexing_seams as indexing_seam;
-use objectaddress::consts::ConstraintRelationId;
+use ::objectaddress::consts::ConstraintRelationId;
 use pg_inherits::{find_all_inheritors, find_inheritance_children};
-use lsyscache_seams::get_attname;
-use relcache::derived::{IndexAttrBitmapKind, RelationGetIndexAttrBitmap};
-use stack_depth::check_stack_depth;
+use ::lsyscache_seams::get_attname;
+use ::relcache::derived::{IndexAttrBitmapKind, RelationGetIndexAttrBitmap};
+use ::stack_depth::check_stack_depth;
 
 /// `FirstLowInvalidHeapAttributeNumber` (`access/sysattr.h`) = -7. The offset
 /// applied to attribute numbers stored in the index-attribute bitmaps.
@@ -236,7 +236,7 @@ pub fn dropconstraint_internal<'mcx>(
         // carried on the trimmed FormData_pg_index here (out-of-lane carrier
         // widen). The fast path (valid PK) is fully covered by the bitmap.
         if pkattrs.is_empty() && rel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE {
-            let pkindex = relcache::derived::RelationGetPrimaryKeyIndex(
+            let pkindex = ::relcache::derived::RelationGetPrimaryKeyIndex(
                 rel.rd_id, true,
             )?;
             if OidIsValid(pkindex) {
@@ -292,14 +292,14 @@ pub fn dropconstraint_internal<'mcx>(
             mcx,
             cache_syscache::ATTNUM,
             &tuple,
-            types_catalog::pg_attribute::Anum_pg_attribute_attidentity as i32,
+            ::types_catalog::pg_attribute::Anum_pg_attribute_attidentity as i32,
         )?
         .as_char();
         let attnotnull = cache_syscache::SysCacheGetAttrNotNull(
             mcx,
             cache_syscache::ATTNUM,
             &tuple,
-            types_catalog::pg_attribute::Anum_pg_attribute_attnotnull as i32,
+            ::types_catalog::pg_attribute::Anum_pg_attribute_attnotnull as i32,
         )?
         .as_bool();
 
@@ -390,7 +390,7 @@ pub fn dropconstraint_internal<'mcx>(
         // constraint name.  Each lookup yields the child constraint's form plus
         // the heap TID we write the coninhcount/conislocal update at.
         let (mut childcon, child_tid, child_conoid): (
-            types_catalog::pg_constraint::FormData_pg_constraint,
+            ::types_catalog::pg_constraint::FormData_pg_constraint,
             types_tuple::heaptuple::ItemPointerData,
             Oid,
         ) = if parent_contype == CONSTRAINT_NOTNULL {
@@ -506,11 +506,11 @@ pub fn dropconstraint_internal<'mcx>(
 /// bookkeeping fields, carrying through every other column from `childcon`.
 fn update_constraint_inhcount<'mcx>(
     mcx: Mcx<'mcx>,
-    childcon: &types_catalog::pg_constraint::FormData_pg_constraint,
+    childcon: &::types_catalog::pg_constraint::FormData_pg_constraint,
     tid: types_tuple::heaptuple::ItemPointerData,
 ) -> PgResult<()> {
     let conrel = relation_open(mcx, ConstraintRelationId, RowExclusiveLock)?;
-    let fields = types_catalog::pg_constraint::ConstraintFieldUpdate {
+    let fields = ::types_catalog::pg_constraint::ConstraintFieldUpdate {
         conname: childcon.conname,
         connamespace: childcon.connamespace,
         conislocal: childcon.conislocal,
@@ -551,10 +551,10 @@ pub fn ATExecDropNotNull<'mcx>(
     // We resolve attnum via the live descriptor (equivalent to the syscache
     // attname lookup): a column with this name must exist.
     let attnum: AttrNumber =
-        lsyscache_seams::get_attnum::call(rel.rd_id, col_name)?;
+        ::lsyscache_seams::get_attnum::call(rel.rd_id, col_name)?;
     if attnum == 0 {
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+            .errcode(::types_error::ERRCODE_UNDEFINED_COLUMN)
             .errmsg(format!(
                 "column \"{col_name}\" of relation \"{}\" does not exist",
                 rel.name()
@@ -564,7 +564,7 @@ pub fn ATExecDropNotNull<'mcx>(
 
     // ObjectAddressSubSet(address, RelationRelationId, RelationGetRelid(rel), attnum);
     let address = ObjectAddress {
-        classId: objectaddress::consts::RelationRelationId,
+        classId: ::objectaddress::consts::RelationRelationId,
         objectId: rel.rd_id,
         objectSubId: attnum as i32,
     };
@@ -588,14 +588,14 @@ pub fn ATExecDropNotNull<'mcx>(
         mcx,
         cache_syscache::ATTNUM,
         &att_tuple,
-        types_catalog::pg_attribute::Anum_pg_attribute_attnotnull as i32,
+        ::types_catalog::pg_attribute::Anum_pg_attribute_attnotnull as i32,
     )?
     .as_bool();
     let att_attidentity = cache_syscache::SysCacheGetAttrNotNull(
         mcx,
         cache_syscache::ATTNUM,
         &att_tuple,
-        types_catalog::pg_attribute::Anum_pg_attribute_attidentity as i32,
+        ::types_catalog::pg_attribute::Anum_pg_attribute_attidentity as i32,
     )?
     .as_char();
 
@@ -612,7 +612,7 @@ pub fn ATExecDropNotNull<'mcx>(
     // Prevent them from altering a system attribute.
     if attnum <= 0 {
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!("cannot alter system column \"{col_name}\""))
             .into_error());
     }
@@ -620,7 +620,7 @@ pub fn ATExecDropNotNull<'mcx>(
     // if (attTup->attidentity) ereport(...identity column...)
     if att_attidentity != 0 {
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+            .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
             .errmsg(format!(
                 "column \"{col_name}\" of relation \"{}\" is an identity column",
                 rel.name()
@@ -633,7 +633,7 @@ pub fn ATExecDropNotNull<'mcx>(
         let parent_id = partition_seams::get_partition_parent::call(rel.rd_id, false)?;
         let parent = relation_open(mcx, parent_id, AccessShareLock)?;
         let parent_attnum =
-            lsyscache_seams::get_attnum::call(parent_id, col_name)?;
+            ::lsyscache_seams::get_attnum::call(parent_id, col_name)?;
         let parent_att = parent.rd_att.attr((parent_attnum - 1) as usize);
         let parent_notnull = parent_att.attnotnull;
         if parent_notnull {
@@ -776,7 +776,7 @@ pub(crate) fn QueueFKConstraintValidation<'mcx>(
     fkrel: &Relation<'mcx>,
     pkrelid: Oid,
     conoid: Oid,
-    conform: &types_catalog::pg_constraint::FormData_pg_constraint,
+    conform: &::types_catalog::pg_constraint::FormData_pg_constraint,
     constr_name: &str,
     lockmode: LOCKMODE,
 ) -> PgResult<()> {
@@ -787,7 +787,7 @@ pub(crate) fn QueueFKConstraintValidation<'mcx>(
     // points directly at the referenced (root) table.
     if fkrel.rd_rel.relkind == RELKIND_RELATION && conform.confrelid == pkrelid {
         let newcon = NewConstraint {
-            name: Some(mcx::PgString::from_str_in(constr_name, mcx)?),
+            name: Some(::mcx::PgString::from_str_in(constr_name, mcx)?),
             contype: CONSTR_FOREIGN_I32,
             refrelid: conform.confrelid,
             refindid: conform.conindid,
@@ -802,7 +802,7 @@ pub(crate) fn QueueFKConstraintValidation<'mcx>(
     // recurse and handle every unvalidated constraint that is a child of this
     // constraint (tablecmds.c:13043).
     if fkrel.rd_rel.relkind == RELKIND_PARTITIONED_TABLE
-        || lsyscache_seams::get_rel_relkind::call(conform.confrelid)?
+        || ::lsyscache_seams::get_rel_relkind::call(conform.confrelid)?
             == RELKIND_PARTITIONED_TABLE
     {
         // ScanKeyInit(&pkey, Anum_pg_constraint_conparentid, BTEqual, F_OIDEQ, con->oid);
@@ -816,16 +816,16 @@ pub(crate) fn QueueFKConstraintValidation<'mcx>(
         let mut key = ScanKeyData::empty();
         ScanKeyInit(
             &mut key,
-            types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
+            ::types_catalog::pg_constraint::Anum_pg_constraint_conparentid,
             BTEqualStrategyNumber,
-            types_core::fmgr::F_OIDEQ,
+            ::types_core::fmgr::F_OIDEQ,
             types_tuple::heaptuple::Datum::from_oid(conoid),
         )?;
         let keys = [key];
 
         let mut scan = genam_seams::systable_beginscan::call(
             &conrel,
-            types_catalog::pg_constraint::ConstraintParentIndexId,
+            ::types_catalog::pg_constraint::ConstraintParentIndexId,
             true,
             None,
             &keys,
@@ -841,11 +841,11 @@ pub(crate) fn QueueFKConstraintValidation<'mcx>(
         {
             let cols = heap_deform_tuple(mcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
             let child_oid = cols
-                [types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1]
+                [::types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1]
                 .0
                 .as_oid();
             let child_validated = cols
-                [types_catalog::pg_constraint::Anum_pg_constraint_convalidated as usize - 1]
+                [::types_catalog::pg_constraint::Anum_pg_constraint_convalidated as usize - 1]
                 .0
                 .as_bool();
             children.push((child_oid, child_validated));
@@ -968,7 +968,7 @@ fn QueueCheckConstraintValidation<'mcx>(
         mcx, rel.rd_id, constr_name,
     )?;
     let cnode = read_seams::string_to_node::call(mcx, &conbin)?;
-    let cexpr = mcx::PgBox::into_inner(cnode).into_expr().ok_or_else(|| {
+    let cexpr = ::mcx::PgBox::into_inner(cnode).into_expr().ok_or_else(|| {
         utils_error::ereport(ERROR)
             .errmsg_internal("CHECK constraint conbin did not parse to an Expr".to_string())
             .into_error()
@@ -984,10 +984,10 @@ fn QueueCheckConstraintValidation<'mcx>(
             .errmsg_internal("expand_generated_columns_in_expr returned None".to_string())
             .into_error()
     })?;
-    let qual_node = mcx::alloc_in(mcx, ::nodes::nodes::Node::mk_expr(mcx, expanded.clone_in(mcx)?)?)?;
+    let qual_node = ::mcx::alloc_in(mcx, ::nodes::nodes::Node::mk_expr(mcx, expanded.clone_in(mcx)?)?)?;
 
     let newcon = NewConstraint {
-        name: Some(mcx::PgString::from_str_in(constr_name, mcx)?),
+        name: Some(::mcx::PgString::from_str_in(constr_name, mcx)?),
         contype: CONSTR_CHECK_I32,
         refrelid: InvalidOid,
         refindid: InvalidOid,
@@ -1060,7 +1060,7 @@ fn QueueNNConstraintValidation<'mcx>(
 
     // colname = get_attname(RelationGetRelid(rel), attnum, false): the child
     // column may have a different attnum, so children are searched by name.
-    let colname = lsyscache_seams::get_attname::call(mcx, rel.rd_id, attnum, false)?
+    let colname = ::lsyscache_seams::get_attname::call(mcx, rel.rd_id, attnum, false)?
         .ok_or_else(|| {
             utils_error::ereport(ERROR)
                 .errmsg_internal(format!(

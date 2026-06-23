@@ -4,7 +4,7 @@
 //! The owning unit (`backend-utils-adt-float`) installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `float8_mul(a, b)` (`utils/float.h`): IEEE multiply with PostgreSQL's
@@ -83,13 +83,13 @@ seam_core::seam!(
 seam_core::seam!(
     /// `float_overflow_error()` (float.c:85): the shared overflow `ereport`.
     /// Owner: `backend-utils-adt-float`.
-    pub fn float_overflow_error() -> types_error::PgError
+    pub fn float_overflow_error() -> ::types_error::PgError
 );
 
 seam_core::seam!(
     /// `float_underflow_error()` (float.c:93): the shared underflow `ereport`.
     /// Owner: `backend-utils-adt-float`.
-    pub fn float_underflow_error() -> types_error::PgError
+    pub fn float_underflow_error() -> ::types_error::PgError
 );
 
 // ---------------------------------------------------------------------------

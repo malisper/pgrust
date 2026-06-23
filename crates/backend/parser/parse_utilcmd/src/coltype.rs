@@ -6,11 +6,11 @@
 //! `backend-parser-parse-type` and `format_type_be` in
 //! `backend-utils-adt-format-type`, all cycle-free direct dependencies.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use parse_type::{typenameType, LookupCollation, typeTypeCollation, Type};
-use adt_format_type::format_type_be;
-use utils_error::ereport;
+use ::adt_format_type::format_type_be;
+use ::utils_error::ereport;
 use types_core::{Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERROR};
 use ::nodes::nodes::{ntag, Node};

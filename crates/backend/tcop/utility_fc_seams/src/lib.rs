@@ -7,8 +7,8 @@
 //! `ProcessUtility`. The owning unit installs this from its `init_seams()`
 //! when it lands; until then a call panics loudly.
 
-use types_error::PgResult;
-use types_foreigncmds::ImportPlannedStmt;
+use ::types_error::PgResult;
+use ::types_foreigncmds::ImportPlannedStmt;
 use ::nodes::nodes::Node;
 
 seam_core::seam!(

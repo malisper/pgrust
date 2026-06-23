@@ -22,11 +22,11 @@
 
 use std::string::{String, ToString};
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 const VARHDRSZ: usize = 4;
 
@@ -167,7 +167,7 @@ fn fc_tsqueryrecv(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     let m = scratch_mcx();
     let mut data = mcx::PgVec::new_in(m.mcx());
     if data.try_reserve(src.len()).is_err() {
-        return Err(types_error::PgError::error("out of memory"));
+        return Err(::types_error::PgError::error("out of memory"));
     }
     data.extend_from_slice(src);
     let mut buf = StringInfo::from_vec(data);
@@ -306,7 +306,7 @@ fn fc_gtsquery_support_via_dispatch(
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
     let foid = fcinfo.flinfo.as_ref().map(|fi| fi.fn_oid).unwrap_or(0);
-    Err(types_error::PgError::error(format!(
+    Err(::types_error::PgError::error(format!(
         "GIST tsquery_ops support function (OID {foid}) must be invoked through \
          the GiST opclass dispatch, not the fmgr frame"
     )))

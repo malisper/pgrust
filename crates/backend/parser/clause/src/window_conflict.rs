@@ -14,10 +14,10 @@ use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WINDOWING_ERROR, ERROR,
 };
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use types_acl::acl::ACL_SELECT;
-use types_tuple::heaptuple::{INT8OID, UNKNOWNOID};
+use ::types_acl::acl::ACL_SELECT;
+use ::types_tuple::heaptuple::{INT8OID, UNKNOWNOID};
 
 use ::nodes::nodes::{ntag, Node, NodePtr, ONCONFLICT_UPDATE};
 use ::nodes::parsestmt::{ParseExprKind, ParseState};
@@ -39,12 +39,12 @@ use ParseExprKind::{
     EXPR_KIND_WINDOW_PARTITION,
 };
 
-use parsenodes::CoercionContext::COERCION_IMPLICIT;
+use ::parsenodes::CoercionContext::COERCION_IMPLICIT;
 
-use nodes_core::nodefuncs::{expr_collation, expr_location, expr_type};
+use ::nodes_core::nodefuncs::{expr_collation, expr_location, expr_type};
 
-use vars::tlist::get_sortgroupclause_expr;
-use parse_expr::transformExpr;
+use ::vars::tlist::get_sortgroupclause_expr;
+use ::parse_expr::transformExpr;
 use coerce::{can_coerce_type, coerce_to_specific_type};
 
 use adt_format_type as format_type;
@@ -705,7 +705,7 @@ pub fn transformOnConflictArbiter<'mcx>(
             /* Make sure the rel as a whole is marked for SELECT access */
             perminfo.requiredPerms |= ACL_SELECT;
             /* Mark the constrained columns as requiring SELECT access */
-            let merged = nodes_core::bitmapset::bms_add_members(
+            let merged = ::nodes_core::bitmapset::bms_add_members(
                 mcx,
                 perminfo.selectedCols.take(),
                 conattnos.as_deref(),
@@ -742,16 +742,16 @@ fn copy_opt_pgstr<'mcx>(
 }
 
 /// An empty `PgVec<NodePtr>` (the C `NIL`).
-fn empty_node_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>> {
-    mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 0)
+fn empty_node_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::mcx::PgVec<'mcx, NodePtr<'mcx>>> {
+    ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 0)
 }
 
 /// `copyObject` over a `List *` of nodes (deep-copy each cell into `mcx`).
 fn copy_node_ptr_vec<'mcx>(
     mcx: Mcx<'mcx>,
-    list: &mcx::PgVec<'mcx, NodePtr<'mcx>>,
-) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, list.len())?;
+    list: &::mcx::PgVec<'mcx, NodePtr<'mcx>>,
+) -> PgResult<::mcx::PgVec<'mcx, NodePtr<'mcx>>> {
+    let mut v = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, list.len())?;
     for n in list.iter() {
         let cell = alloc_in(mcx, n.clone_in(mcx)?)?;
         v.try_reserve(1).map_err(|_| mcx.oom(0))?;
@@ -765,8 +765,8 @@ fn copy_node_ptr_vec<'mcx>(
 fn sortgroupclauses_to_node_vec<'mcx>(
     mcx: Mcx<'mcx>,
     clauses: &[SortGroupClause],
-) -> PgResult<mcx::PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, clauses.len())?;
+) -> PgResult<::mcx::PgVec<'mcx, NodePtr<'mcx>>> {
+    let mut v = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, clauses.len())?;
     for cl in clauses.iter() {
         let cell = alloc_in(mcx, Node::mk_sort_group_clause(mcx, *cl)?)?;
         v.try_reserve(1).map_err(|_| mcx.oom(0))?;
@@ -779,7 +779,7 @@ fn sortgroupclauses_to_node_vec<'mcx>(
 /// `transformSortClause` (the grammar produces a `List *` of `SortBy` nodes).
 fn node_vec_as_sortby<'mcx>(
     mcx: Mcx<'mcx>,
-    list: &mcx::PgVec<'mcx, NodePtr<'mcx>>,
+    list: &::mcx::PgVec<'mcx, NodePtr<'mcx>>,
 ) -> PgResult<Vec<::nodes::rawnodes::SortBy<'mcx>>> {
     let mut out = Vec::with_capacity(list.len());
     for n in list.iter() {
@@ -796,17 +796,17 @@ fn node_vec_as_sortby<'mcx>(
 }
 
 /// Bridge a collation-name `List *` of `String` value nodes from the
-/// raw-grammar [`Node`] vocabulary to the parser's own `parsenodes::Node`
+/// raw-grammar [`Node`] vocabulary to the parser's own `::parsenodes::Node`
 /// vocabulary that `LookupCollation` consumes (a collation name list only ever
 /// contains `String` value nodes).
 fn node_vec_to_collnames(
-    list: &mcx::PgVec<'_, NodePtr<'_>>,
-) -> PgResult<Vec<parsenodes::Node>> {
+    list: &::mcx::PgVec<'_, NodePtr<'_>>,
+) -> PgResult<Vec<::parsenodes::Node>> {
     let mut out = Vec::with_capacity(list.len());
     for n in list.iter() {
         match n.node_tag() {
-            ntag::T_String => out.push(parsenodes::Node::String(
-                parsenodes::StringNode {
+            ntag::T_String => out.push(::parsenodes::Node::String(
+                ::parsenodes::StringNode {
                     sval: Some(String::from(n.expect_string().sval.as_str())),
                 },
             )),
@@ -823,7 +823,7 @@ fn node_vec_to_collnames(
 /// Convert an opclass name `List *` of `String` value nodes into the
 /// `Vec<opclass::StringNode>` `get_opclass_oid` expects.
 fn node_vec_to_opclass_names(
-    list: &mcx::PgVec<'_, NodePtr<'_>>,
+    list: &::mcx::PgVec<'_, NodePtr<'_>>,
 ) -> Vec<opclass::StringNode> {
     let mut out = Vec::with_capacity(list.len());
     for n in list.iter() {

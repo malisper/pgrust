@@ -36,7 +36,7 @@ use types_acl::{
     ACL_EXECUTE, ACL_INSERT, ACL_MAINTAIN, ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT, ACL_SET,
     ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
 };
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_tuple::heaptuple::Datum as TupDatum;
 use types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR,
@@ -44,24 +44,24 @@ use types_error::{
     ERRCODE_UNDEFINED_TABLE, ERROR,
 };
 use ::nodes::parsenodes::ObjectType;
-use snapshot::SnapshotData;
+use ::snapshot::SnapshotData;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
-use objectaddress::consts::{
+use ::objectaddress::consts::{
     CollationRelationId, DatabaseRelationId, ForeignDataWrapperRelationId, ForeignServerRelationId,
     LanguageRelationId,
     LargeObjectMetadataRelationId, LargeObjectRelationId, NamespaceRelationId, ProcedureRelationId,
     RelationRelationId, TableSpaceRelationId, TypeRelationId,
 };
-use objectaddress::properties::{
+use ::objectaddress::properties::{
     get_object_attnum_acl, get_object_attnum_oid, get_object_attnum_owner,
     get_object_catcache_oid, get_object_class_descr, get_object_oid_index, get_object_type,
 };
 
 use user_seams::{has_privs_of_role, superuser_arg};
-use adt_acl::acl_ops::aclmask;
-use adt_acl::acldefault::acldefault;
+use ::adt_acl::acl_ops::aclmask;
+use ::adt_acl::acldefault::acldefault;
 
 // `ACL_ALL_RIGHTS_SCHEMA` (`utils/acl.h`).
 const ACL_ALL_RIGHTS_SCHEMA: AclMode = ACL_USAGE | ACL_CREATE;
@@ -884,7 +884,7 @@ pub fn pg_attribute_aclcheck_all_ext(
             }
         } else {
             result = ACLCHECK_NO_PRIV;
-            if how == types_acl::ACLMASK_ALL {
+            if how == ::types_acl::ACLMASK_ALL {
                 break; /* fail on any failure */
             }
         }
@@ -1006,12 +1006,12 @@ pub fn object_ownercheck(
 /// `systable_beginscan(get_object_oid_index(classid), oid = objectid)`, then
 /// `heap_getattr(get_object_attnum_owner(classid))`.
 fn scan_owner_for_catalog(mcx: Mcx<'_>, classid: Oid, objectid: Oid) -> PgResult<Oid> {
-    use scankey::ScanKeyInit;
+    use ::scankey::ScanKeyInit;
     use genam_seams as genam;
-    use table::table_open;
-    use types_core::fmgr::F_OIDEQ;
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    use types_storage::lock::AccessShareLock;
+    use ::table::table_open;
+    use ::types_core::fmgr::F_OIDEQ;
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_storage::lock::AccessShareLock;
     use types_tuple::heaptuple::Datum;
 
     let oid_attnum = get_object_attnum_oid(classid)?;
@@ -1094,12 +1094,12 @@ fn get_default_acl_internal<'mcx>(
     nsp_oid: Oid,
     objtype: i8,
 ) -> PgResult<Option<&'mcx [AclItem]>> {
-    use objectaddress::consts::Anum_pg_default_acl_defaclacl;
+    use ::objectaddress::consts::Anum_pg_default_acl_defaclacl;
     use cache_syscache::{
         ReleaseSysCache, SearchSysCache3, SysCacheGetAttr, DEFACLROLENSPOBJ,
     };
-    use cache::SysCacheKey;
-    use datum::Datum as KeyDatum;
+    use ::cache::SysCacheKey;
+    use ::datum::Datum as KeyDatum;
 
     let tuple = SearchSysCache3(
         mcx,
@@ -1151,12 +1151,12 @@ pub fn get_user_default_acl<'mcx>(
     owner_id: Oid,
     nsp_oid: Oid,
 ) -> PgResult<Option<TupDatum<'mcx>>> {
-    use objectaddress::consts::{
+    use ::objectaddress::consts::{
         DEFACLOBJ_FUNCTION, DEFACLOBJ_LARGEOBJECT, DEFACLOBJ_NAMESPACE, DEFACLOBJ_RELATION,
         DEFACLOBJ_SEQUENCE, DEFACLOBJ_TYPE,
     };
-    use adt_acl::acl_ops::{aclequal, aclitemsort, aclmerge};
-    use adt_acl::acldefault::acldefault;
+    use ::adt_acl::acl_ops::{aclequal, aclitemsort, aclmerge};
+    use ::adt_acl::acldefault::acldefault;
 
     // Use NULL during bootstrap, since pg_default_acl probably isn't there yet.
     if miscinit_seams::is_bootstrap_processing_mode::call() {
@@ -1198,7 +1198,7 @@ pub fn get_user_default_acl<'mcx>(
     // This requires sorting both arrays to get an accurate comparison.
     aclitemsort(result);
     // Sort a private copy of the default so callers that share it are unaffected.
-    let mut def_sorted: mcx::PgVec<AclItem> = mcx::slice_in(mcx, def_acl)?;
+    let mut def_sorted: ::mcx::PgVec<AclItem> = ::mcx::slice_in(mcx, def_acl)?;
     aclitemsort(&mut def_sorted);
     if aclequal(result, &def_sorted) {
         return Ok(None);
@@ -1400,7 +1400,7 @@ pub fn has_createrole_privilege(roleid: Oid) -> PgResult<bool> {
 pub fn init_seams() {
     use aclchk_seams as seam;
 
-    user_seams::has_createrole_privilege::set(has_createrole_privilege);
+    ::user_seams::has_createrole_privilege::set(has_createrole_privilege);
 
     seam::object_aclcheck::set(|classid, objectid, roleid, mode| {
         let ctx = MemoryContext::new("object_aclcheck");
@@ -1588,13 +1588,13 @@ pub fn init_seams() {
             let items = grant_exec::decode_acl(mcx, raw)?;
 
             // nmembers = aclmembers(acl, &members);
-            let members = adt_acl::acl_ops::aclmembers(mcx, items)?;
-            let mut new_members: mcx::PgVec<Oid> =
-                mcx::vec_with_capacity_in(mcx, members.len())?;
+            let members = ::adt_acl::acl_ops::aclmembers(mcx, items)?;
+            let mut new_members: ::mcx::PgVec<Oid> =
+                ::mcx::vec_with_capacity_in(mcx, members.len())?;
             for m in members.iter() {
                 new_members.push(*m);
             }
-            let old_members: mcx::PgVec<Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+            let old_members: ::mcx::PgVec<Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
 
             // updateAclDependencies(classId, objectId, objsubId, ownerId,
             //                       0, NULL, nmembers, members);

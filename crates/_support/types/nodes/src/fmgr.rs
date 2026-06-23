@@ -4,9 +4,9 @@ use alloc::vec::Vec;
 
 use alloc::string::String;
 
-use types_core::fmgr::FmgrInfo;
-use types_core::Oid;
-use datum::NullableDatum;
+use ::types_core::fmgr::FmgrInfo;
+use ::types_core::Oid;
+use ::datum::NullableDatum;
 
 use crate::funcapi::ReturnSetInfo;
 use crate::nodes::Node;
@@ -79,7 +79,7 @@ impl FmgrArgRef {
 /// (the executor gathers the per-argument result cells into it just before
 /// dispatch). `flinfo`/`context` are by-value/by-reference node links: C's
 /// `FmgrInfo *flinfo` is the resolved (lifetime-free, OID-keyed)
-/// `types_core::fmgr::FmgrInfo` carried by value (`None` is the C NULL frame),
+/// `::types_core::fmgr::FmgrInfo` carried by value (`None` is the C NULL frame),
 /// and C's `fmNodePtr context` borrows the call's context node (`None` is C's
 /// NULL — set only by trigger/SRF/aggregate dispatch).
 ///
@@ -128,7 +128,7 @@ pub struct FunctionCallInfoBaseData<'mcx> {
     /// CHANNEL for C's `flinfo->fn_extra` (the value-per-call SRF keystone,
     /// #349). C holds the cross-call [`FuncCallContext`] on the *caller's*
     /// `FmgrInfo` (`flinfo->fn_extra`, a `void *`); the owned `flinfo`
-    /// ([`types_core::fmgr::FmgrInfo`]) is `std`/lifetime-free and cannot name a
+    /// ([`::types_core::fmgr::FmgrInfo`]) is `std`/lifetime-free and cannot name a
     /// `'mcx`-bound `FuncCallContext` (the std/`no_std` + lifetime divergence,
     /// #327 — WONTFIX-to-unify). So the `'mcx` `FuncCallContext` is threaded
     /// through *this* call frame, the place where both the callee and the

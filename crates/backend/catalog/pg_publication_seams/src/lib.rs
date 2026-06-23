@@ -17,16 +17,16 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_publication::{
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_publication::{
     Publication, PublicationPartOpt, PublicationTableRow, PublishGencolsType,
 };
-use types_core::Oid;
-use types_error::PgResult;
-use mcx::PgBox;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::mcx::PgBox;
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::nodes::Node;
-use rel::Relation;
+use ::rel::Relation;
 
 /* ==========================================================================
  * Lookups returning a decoded `Publication`.
@@ -171,7 +171,7 @@ seam_core::seam!(
     pub fn pub_collist_validate<'mcx>(
         mcx: Mcx<'mcx>,
         targetrel: &Relation<'mcx>,
-        columns: &[mcx::PgBox<'mcx, Node<'mcx>>],
+        columns: &[::mcx::PgBox<'mcx, Node<'mcx>>],
     ) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>>
 );
 
@@ -211,7 +211,7 @@ seam_core::seam!(
         pubid: Oid,
         targetrel: &Relation<'mcx>,
         where_clause: Option<&Node<'mcx>>,
-        columns: Option<&[mcx::PgBox<'mcx, Node<'mcx>>]>,
+        columns: Option<&[::mcx::PgBox<'mcx, Node<'mcx>>]>,
         if_not_exists: bool,
     ) -> PgResult<ObjectAddress>
 );

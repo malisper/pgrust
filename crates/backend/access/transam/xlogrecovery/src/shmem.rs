@@ -26,12 +26,12 @@ extern crate std;
 use core::cell::Cell;
 use core::mem::size_of;
 
-use condvar::condition_variable::ConditionVariable;
+use ::condvar::condition_variable::ConditionVariable;
 use types_core::{Size, TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
-use types_storage::latch::{Latch, LatchHandle};
-use types_storage::storage::Spinlock;
-use wal::wal::RecoveryPauseState;
-use wal::xlogrecovery_carriers::XLogSource;
+use ::types_storage::latch::{Latch, LatchHandle};
+use ::types_storage::storage::Spinlock;
+use ::wal::wal::RecoveryPauseState;
+use ::wal::xlogrecovery_carriers::XLogSource;
 
 use latch as latch;
 use startup_seams as startup;
@@ -40,7 +40,7 @@ use walreceiverfuncs_seams as walrcv;
 use ipc_shmem_seams as shmem;
 use condition_variable_seams as condvar;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 // ===========================================================================
 // XLogRecoveryCtlData — shared-memory state for WAL recovery
@@ -260,7 +260,7 @@ pub fn recovery_wakeup_latch_handle() -> LatchHandle {
 /// wired recovery `OwnLatch`/`SetLatch` families. It stays in the *local*
 /// handle space (the `PROC_TAG` bit clear), distinct from the per-PGPROC
 /// `procLatch` space (`LatchHandle::proc`).
-const RECOVERY_WAKEUP_LATCH_ID: usize = types_storage::latch::PROC_TAG - 1;
+const RECOVERY_WAKEUP_LATCH_ID: usize = ::types_storage::latch::PROC_TAG - 1;
 
 // ===========================================================================
 // Shmem state accessors (the genuine shmem reads/writes, under info_lck where
@@ -586,7 +586,7 @@ pub(crate) fn check_for_standby_trigger() -> bool {
 
     if startup::is_promote_signaled::call() && check_promote_signal() {
         // ereport(LOG, errmsg("received promote request"))
-        let _ = utils_error::elog(types_error::LOG, "received promote request");
+        let _ = utils_error::elog(::types_error::LOG, "received promote request");
         remove_promote_signal_files();
         startup::reset_promote_signaled::call();
         set_promote_is_triggered();
@@ -660,7 +660,7 @@ pub fn startup_request_wal_receiver_restart() {
     {
         // ereport(LOG, errmsg("WAL receiver process shutdown requested"))
         let _ = utils_error::elog(
-            types_error::LOG,
+            ::types_error::LOG,
             "WAL receiver process shutdown requested",
         );
         PENDING_WAL_RCV_RESTART.with(|c| c.set(true));

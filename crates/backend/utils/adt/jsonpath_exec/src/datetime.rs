@@ -26,26 +26,26 @@
 extern crate alloc;
 
 use utils_error::{ereport, PgError, PgResult};
-use types_core::Oid;
-use datum::Datum;
+use ::types_core::Oid;
+use ::datum::Datum;
 use types_error::{
     SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_ARGUMENT_FOR_SQL_JSON_DATETIME_FUNCTION, ERROR,
 };
-use types_tuple::heaptuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
+use ::types_tuple::heaptuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
 
 use types_datetime::{fsec_t, DateADT, TimeADT, TimeTzADT, Timestamp, TimestampTz};
-use types_datetime::POSTGRES_EPOCH_JDATE;
-use pgtime::pg_tm;
+use ::types_datetime::POSTGRES_EPOCH_JDATE;
+use ::pgtime::pg_tm;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use crate::seam::DateTimeValue;
 
 // The jsonpath JsonPathItemType discriminants the cast switch needs. These
 // mirror `jpiDate`/`jpiTime`/`jpiTimeTz`/`jpiTimestamp`/`jpiTimestampTz` from
-// `adt_jsonpath::JsonPathItemType`.
-use adt_jsonpath::JsonPathItemType;
+// `::adt_jsonpath::JsonPathItemType`.
+use ::adt_jsonpath::JsonPathItemType;
 
 // ---------------------------------------------------------------------------
 // parse_datetime (formatting.c:4216) wrapper — text -> DateTimeValue.
@@ -67,7 +67,7 @@ pub fn parse_datetime(
     collid: Oid,
     throw_error: bool,
 ) -> PgResult<Option<DateTimeValue>> {
-    use formatting::ParseDatetimeResult as R;
+    use ::formatting::ParseDatetimeResult as R;
 
     let mut tz: i32 = 0;
     let mut escontext = if throw_error {
@@ -76,7 +76,7 @@ pub fn parse_datetime(
         Some(SoftErrorContext::new(false))
     };
 
-    let parsed = formatting::parse_datetime(
+    let parsed = ::formatting::parse_datetime(
         mcx,
         datetime,
         template,
@@ -152,7 +152,7 @@ fn check_timezone_is_used_for_cast(use_tz: bool, type1: &str, type2: &str) -> Pg
 /// `TimeTzADT` (using the session-zone offset on the current date).
 fn cast_time_to_timetz(time: TimeADT, use_tz: bool) -> PgResult<TimeTzADT> {
     check_timezone_is_used_for_cast(use_tz, "time", "timetz")?;
-    Ok(adt_datetime::date::time_timetz(time))
+    Ok(::adt_datetime::date::time_timetz(time))
 }
 
 // ---------------------------------------------------------------------------
@@ -162,13 +162,13 @@ fn cast_time_to_timetz(time: TimeADT, use_tz: bool) -> PgResult<TimeTzADT> {
 
 /// C: `cmpDateToTimestamp` (jsonpath_exec.c:3687).
 fn cmp_date_to_timestamp(date1: DateADT, ts2: Timestamp, _use_tz: bool) -> i32 {
-    adt_datetime::date::date_cmp_timestamp_internal(date1, ts2)
+    ::adt_datetime::date::date_cmp_timestamp_internal(date1, ts2)
 }
 
 /// C: `cmpDateToTimestampTz` (jsonpath_exec.c:3696).
 fn cmp_date_to_timestamptz(date1: DateADT, tstz2: TimestampTz, use_tz: bool) -> PgResult<i32> {
     check_timezone_is_used_for_cast(use_tz, "date", "timestamptz")?;
-    Ok(adt_datetime::date::date_cmp_timestamptz_internal(
+    Ok(::adt_datetime::date::date_cmp_timestamptz_internal(
         date1, tstz2,
     ))
 }
@@ -177,7 +177,7 @@ fn cmp_date_to_timestamptz(date1: DateADT, tstz2: TimestampTz, use_tz: bool) -> 
 fn cmp_timestamp_to_timestamptz(ts1: Timestamp, tstz2: TimestampTz, use_tz: bool) -> PgResult<i32> {
     check_timezone_is_used_for_cast(use_tz, "timestamp", "timestamptz")?;
     Ok(
-        adt_datetime::timestamp::timestamp_cmp_timestamptz_internal(ts1, tstz2),
+        ::adt_datetime::timestamp::timestamp_cmp_timestamptz_internal(ts1, tstz2),
     )
 }
 
@@ -222,10 +222,10 @@ impl DtOperand {
 /// (`*cast_error = true`), else `Ok(Some(cmp))`. Throws when a cast requires
 /// timezone usage and `use_tz` is false.
 pub fn compare_datetime(val1: DtOperand, val2: DtOperand, use_tz: bool) -> PgResult<Option<i32>> {
-    use adt_datetime::date::date_cmp;
-    use adt_datetime::time::time_cmp;
-    use adt_datetime::timestamp::timestamp_cmp;
-    use adt_datetime::timetz::timetz_cmp;
+    use ::adt_datetime::date::date_cmp;
+    use ::adt_datetime::time::time_cmp;
+    use ::adt_datetime::timestamp::timestamp_cmp;
+    use ::adt_datetime::timetz::timetz_cmp;
 
     // The comparator, deferred so the `*cast_error`/return-early arms can short
     // circuit exactly as the C switch does.
@@ -345,15 +345,15 @@ pub fn datetime_method_cast(
     datetime_cstr: &str,
     throw_error: bool,
 ) -> PgResult<Option<DateTimeValue>> {
-    use adt_datetime::date::{
+    use ::adt_datetime::date::{
         date2timestamp, date2timestamptz, time_timetz, timestamp_date, timestamptz_date,
     };
-    use adt_datetime::time::AdjustTimeForTypmod;
-    use adt_datetime::timestamp::{
+    use ::adt_datetime::time::AdjustTimeForTypmod;
+    use ::adt_datetime::timestamp::{
         timestamp2timestamptz, timestamp_time, timestamptz_time,
         timestamptz_timetz, timestamptz2timestamp, AdjustTimestampForTypmod,
     };
-    use adt_datetime::timetz::timetz_time;
+    use ::adt_datetime::timetz::timetz_time;
     use JsonPathItemType::*;
 
     let typid = parsed.typid;
@@ -480,7 +480,7 @@ pub fn datetime_method_cast(
                     // C: get the tz explicitly since JsonbValue keeps it separate.
                     let date: DateADT = value.as_i32();
                     let (y, m, d) =
-                        adt_datetime::calendar::j2date(date + POSTGRES_EPOCH_JDATE);
+                        ::adt_datetime::calendar::j2date(date + POSTGRES_EPOCH_JDATE);
                     let mut tm = pg_tm {
                         tm_year: y,
                         tm_mon: m,
@@ -490,7 +490,7 @@ pub fn datetime_method_cast(
                         tm_sec: 0,
                         ..Default::default()
                     };
-                    tz = adt_datetime::decode::DetermineTimeZoneOffset(
+                    tz = ::adt_datetime::decode::DetermineTimeZoneOffset(
                         &mut tm,
                         &state_pgtz::session_timezone(),
                     );
@@ -503,12 +503,12 @@ pub fn datetime_method_cast(
                     let ts: Timestamp = value.as_i64();
                     let mut tm = pg_tm::default();
                     let mut fsec: fsec_t = 0;
-                    if adt_datetime::timestamp::timestamp2tm(
+                    if ::adt_datetime::timestamp::timestamp2tm(
                         ts, None, &mut tm, &mut fsec, None, None,
                     )
                     .is_ok()
                     {
-                        tz = adt_datetime::decode::DetermineTimeZoneOffset(
+                        tz = ::adt_datetime::decode::DetermineTimeZoneOffset(
                             &mut tm,
                             &state_pgtz::session_timezone(),
                         );
@@ -590,16 +590,16 @@ fn timestamp_precision_invalid(target: JsonPathItemType) -> PgResult<PgError> {
 /// `anytime_typmod_check` itself; here we reproduce it at the jsonpath_exec
 /// call site, identically gated on `typmod > MAX_TIME_PRECISION`.
 fn anytime_typmod_check_warn(istz: bool, typmod: i32) -> PgResult<i32> {
-    use adt_datetime::time::anytime_typmod_check;
-    use types_datetime::MAX_TIME_PRECISION;
+    use ::adt_datetime::time::anytime_typmod_check;
+    use ::types_datetime::MAX_TIME_PRECISION;
     if typmod > MAX_TIME_PRECISION {
-        ereport(types_error::WARNING)
-            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+        ereport(::types_error::WARNING)
+            .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(alloc::format!(
                 "TIME({typmod}){} precision reduced to maximum allowed, {MAX_TIME_PRECISION}",
                 if istz { " WITH TIME ZONE" } else { "" }
             ))
-            .finish(types_error::ErrorLocation::new(
+            .finish(::types_error::ErrorLocation::new(
                 "date.c",
                 83,
                 "anytime_typmod_check",
@@ -613,16 +613,16 @@ fn anytime_typmod_check_warn(istz: bool, typmod: i32) -> PgResult<i32> {
 /// %d")` deferred by the leaf datetime core, identically gated on
 /// `typmod > MAX_TIMESTAMP_PRECISION`.
 fn anytimestamp_typmod_check_warn(istz: bool, typmod: i32) -> PgResult<i32> {
-    use adt_datetime::timestamp::anytimestamp_typmod_check;
-    use types_datetime::MAX_TIMESTAMP_PRECISION;
+    use ::adt_datetime::timestamp::anytimestamp_typmod_check;
+    use ::types_datetime::MAX_TIMESTAMP_PRECISION;
     if typmod > MAX_TIMESTAMP_PRECISION {
-        ereport(types_error::WARNING)
-            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+        ereport(::types_error::WARNING)
+            .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg(alloc::format!(
                 "TIMESTAMP({typmod}){} precision reduced to maximum allowed, {MAX_TIMESTAMP_PRECISION}",
                 if istz { " WITH TIME ZONE" } else { "" }
             ))
-            .finish(types_error::ErrorLocation::new(
+            .finish(::types_error::ErrorLocation::new(
                 "timestamp.c",
                 136,
                 "anytimestamp_typmod_check",

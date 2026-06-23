@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use ::nodes::executor::TupleTableSlot;
 use ::nodes::primnodes::{OpExpr, Var};
 
@@ -101,14 +101,14 @@ fn install() {
     // process-lived context so the returned `PgBox<'mcx, ExprState<'mcx>>` outlives
     // any per-test `'mcx`.
     exec_init_expr::set(|_tidstate, _node, _qual_index, _side, _estate| {
-        mcx::alloc_in(expr_state_mcx(), ExprState::default())
+        ::mcx::alloc_in(expr_state_mcx(), ExprState::default())
     });
 }
 
 /// A leaked, thread-lived `MemoryContext` used to mint `ExprState` boxes in the
 /// `exec_init_expr` test seam (it is `'static`, so the boxes satisfy any
 /// per-test `'mcx`). `MemoryContext` is not `Sync`, so it is held per-thread.
-fn expr_state_mcx() -> mcx::Mcx<'static> {
+fn expr_state_mcx() -> ::mcx::Mcx<'static> {
     thread_local! {
         static CTX: &'static MemoryContext =
             Box::leak(Box::new(MemoryContext::new("test-exprstate")));
@@ -157,7 +157,7 @@ fn set_bounds<'mcx>(
     for &(exprtype, inclusive) in bounds {
         v.push(TidOpExpr {
             exprtype,
-            exprstate: Some(mcx::alloc_in(mcx, ExprState::default()).unwrap()),
+            exprstate: Some(::mcx::alloc_in(mcx, ExprState::default()).unwrap()),
             inclusive,
         });
     }
@@ -165,7 +165,7 @@ fn set_bounds<'mcx>(
 }
 
 /// A minimal `ExprContext` charged to `mcx` (mirrors `ExecAssignExprContext`).
-fn make_expr_context<'mcx>(mcx: mcx::Mcx<'mcx>) -> ::nodes::execnodes::ExprContext<'mcx> {
+fn make_expr_context<'mcx>(mcx: ::mcx::Mcx<'mcx>) -> ::nodes::execnodes::ExprContext<'mcx> {
     use types_tuple::heaptuple::Datum;
     ::nodes::execnodes::ExprContext {
         ecxt_scantuple: None,
@@ -175,8 +175,8 @@ fn make_expr_context<'mcx>(mcx: mcx::Mcx<'mcx>) -> ::nodes::execnodes::ExprConte
         ecxt_newtuple: None,
         ecxt_per_query_memory: mcx,
         ecxt_per_tuple_memory: mcx.context().new_child("ExprContext"),
-        ecxt_aggvalues: mcx::PgVec::new_in(mcx),
-        ecxt_aggnulls: mcx::PgVec::new_in(mcx),
+        ecxt_aggvalues: ::mcx::PgVec::new_in(mcx),
+        ecxt_aggnulls: ::mcx::PgVec::new_in(mcx),
         caseValue_datum: Datum::null(),
         caseValue_isNull: true,
         domainValue_datum: Datum::null(),
@@ -495,8 +495,8 @@ fn init_builds_bounds_from_quals() {
     let mut estate = EStateData::new_in(ctx.mcx());
     let node = make_tid_range_scan(&estate, 2);
     let mcx = estate.es_query_cxt;
-    let plan_node = mcx::leak_in(
-        mcx::alloc_in(mcx, ::nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
+    let plan_node = ::mcx::leak_in(
+        ::mcx::alloc_in(mcx, ::nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
     );
     let st = ExecInitTidRangeScan(&node, plan_node, &mut estate, 0).unwrap();
     assert_eq!(st.trss_tidexprs.len(), 2);
@@ -523,8 +523,8 @@ fn init_errors_on_non_opexpr_qual() {
         },
         tidrangequals: Some(quals),
     };
-    let plan_node = mcx::leak_in(
-        mcx::alloc_in(mcx, ::nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
+    let plan_node = ::mcx::leak_in(
+        ::mcx::alloc_in(mcx, ::nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
     );
     assert!(ExecInitTidRangeScan(&node, plan_node, &mut estate, 0).is_err());
 }

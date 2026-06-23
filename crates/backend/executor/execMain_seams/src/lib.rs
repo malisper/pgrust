@@ -44,7 +44,7 @@ seam_core::seam!(
         estate: &mut ::nodes::EStateData<'mcx>,
         paramid: i32,
         plan_id: i32,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -54,7 +54,7 @@ seam_core::seam!(
     pub fn clear_param_execplan<'mcx>(
         estate: &mut ::nodes::EStateData<'mcx>,
         paramid: i32,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -75,7 +75,7 @@ seam_core::seam!(
         econtext: ::nodes::EcxtId,
         paramid: i32,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -89,7 +89,7 @@ seam_core::seam!(
     pub fn link_subplan_planstate<'mcx>(
         estate: &::nodes::EStateData<'mcx>,
         plan_id: i32,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -104,7 +104,7 @@ seam_core::seam!(
         estate: &mut ::nodes::EStateData<'mcx>,
         rti: types_core::primitive::Index,
         slot: ::nodes::SlotId,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -125,7 +125,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         econtext: &::nodes::ExprContext<'mcx>,
         param_id: i32,
-    ) -> types_error::PgResult<Option<::nodes::FetchedCursorParam<'mcx>>>
+    ) -> ::types_error::PgResult<Option<::nodes::FetchedCursorParam<'mcx>>>
 );
 
 seam_core::seam!(
@@ -144,7 +144,7 @@ seam_core::seam!(
         estate: &::nodes::EStateData<'mcx>,
         scan_tuple_slot: Option<::nodes::SlotId>,
         index_only_tid: Option<types_tuple::heaptuple::ItemPointerData>,
-    ) -> types_error::PgResult<::nodes::ScanTidOutcome>
+    ) -> ::types_error::PgResult<::nodes::ScanTidOutcome>
 );
 
 seam_core::seam!(
@@ -162,7 +162,7 @@ seam_core::seam!(
         result_relation_index: types_core::primitive::Index,
         partition_root_rri: Option<::nodes::RriId>,
         instrument_options: i32,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 /// Outcome of the EvalPlanQual branch of `ExecScanFetch` (execScan.h).
@@ -196,7 +196,7 @@ seam_core::seam!(
         scanstate: &mut ::nodes::execnodes::ScanStateData<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
         scanrelid: types_core::primitive::Index,
-    ) -> types_error::PgResult<EpqScanFetch>
+    ) -> ::types_error::PgResult<EpqScanFetch>
 );
 
 seam_core::seam!(
@@ -214,7 +214,7 @@ seam_core::seam!(
         tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
         modified_cols: Option<&::nodes::Bitmapset<'_>>,
         maxfieldlen: i32,
-    ) -> types_error::PgResult<Option<mcx::PgString<'mcx>>>
+    ) -> ::types_error::PgResult<Option<mcx::PgString<'mcx>>>
 );
 
 seam_core::seam!(
@@ -231,7 +231,7 @@ seam_core::seam!(
         result_rel_info: ::nodes::RriId,
         slot: ::nodes::SlotId,
         emit_error: bool,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -246,7 +246,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         relid: types_core::primitive::Oid,
         part_constraint: &[::nodes::primnodes::Expr],
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -265,7 +265,7 @@ seam_core::seam!(
         default_relname: &str,
         part_relid: types_core::primitive::Oid,
         part_constraint: &[::nodes::primnodes::Expr],
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -296,7 +296,7 @@ seam_core::seam!(
         verify_new_notnull: bool,
         partition_constraint: &[::nodes::primnodes::Expr],
         validate_default: bool,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -312,7 +312,7 @@ seam_core::seam!(
         resultoid: types_core::Oid,
         missing_ok: bool,
         update_cache: bool,
-    ) -> types_error::PgResult<Option<::nodes::RriId>>
+    ) -> ::types_error::PgResult<Option<::nodes::RriId>>
 );
 
 seam_core::seam!(
@@ -329,7 +329,7 @@ seam_core::seam!(
         operation: ::nodes::nodes::CmdType,
         on_conflict_action: ::nodes::nodes::OnConflictAction,
         merge_action_cmds: &[::nodes::nodes::CmdType],
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -352,7 +352,7 @@ seam_core::seam!(
         plan: &::nodes::nodeindexscan::PlannedStmt<'mcx>,
         source_text: &str,
         copy_receiver: u64,
-    ) -> types_error::PgResult<::nodes::querydesc::QueryDesc>
+    ) -> ::types_error::PgResult<::nodes::querydesc::QueryDesc>
 );
 
 seam_core::seam!(
@@ -377,7 +377,7 @@ seam_core::seam!(
         instrument_option: i32,
         eflags: i32,
         dest: ::nodes::parsestmt::DestReceiverHandle,
-    ) -> types_error::PgResult<::nodes::querydesc::QueryDesc>
+    ) -> ::types_error::PgResult<::nodes::querydesc::QueryDesc>
 );
 
 seam_core::seam!(
@@ -391,7 +391,7 @@ seam_core::seam!(
     /// `EState` interior — `es_processed`, `already_executed`).
     pub fn executor_run_copy(
         query_desc: &mut ::nodes::querydesc::QueryDesc,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -401,7 +401,7 @@ seam_core::seam!(
     /// (`FreeQueryDesc` frees it; the bundle drops with the value).
     pub fn end_copy_query(
         query_desc: ::nodes::querydesc::QueryDesc,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -411,9 +411,9 @@ seam_core::seam!(
     /// `PersistHoldablePortal`'s call.)
     pub fn executor_run(
         query_desc: &mut ::nodes::querydesc::QueryDesc,
-        direction: types_scan::sdir::ScanDirection,
+        direction: ::types_scan::sdir::ScanDirection,
         count: u64,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -421,7 +421,7 @@ seam_core::seam!(
     /// after-query cleanup (AFTER triggers etc.). Can `ereport(ERROR)`.
     pub fn executor_finish(
         query_desc: &mut ::nodes::querydesc::QueryDesc,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -429,7 +429,7 @@ seam_core::seam!(
     /// its per-query state. Can `ereport(ERROR)`.
     pub fn executor_end(
         query_desc: &mut ::nodes::querydesc::QueryDesc,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -437,7 +437,7 @@ seam_core::seam!(
     /// start of the query so it can be re-run. Can `ereport(ERROR)`.
     pub fn executor_rewind(
         query_desc: &mut ::nodes::querydesc::QueryDesc,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -445,7 +445,7 @@ seam_core::seam!(
     /// surface) — free a finished `QueryDesc` (consumes it).
     pub fn free_query_desc(
         query_desc: ::nodes::querydesc::QueryDesc,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -454,7 +454,7 @@ seam_core::seam!(
     /// practice, but the index-AM probe path can error), so fallible.
     pub fn exec_supports_backward_scan(
         plan: &::nodes::nodeindexscan::PlannedStmt<'_>,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -470,7 +470,7 @@ seam_core::seam!(
     pub fn exec_check_permissions_select(
         rels: &[(types_core::Oid, u8, &[i16])],
         ereport_on_violation: bool,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -486,7 +486,7 @@ seam_core::seam!(
     /// `pg_attribute_aclcheck`), which can `ereport(ERROR)`.
     pub fn exec_check_one_rel_perms_view(
         perminfo: &::nodes::RTEPermissionInfo<'_>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -501,7 +501,7 @@ seam_core::seam!(
         result_rel_info: ::nodes::RriId,
         slot: ::nodes::SlotId,
         plan_slot: Option<::nodes::SlotId>,
-    ) -> types_error::PgResult<Option<::nodes::SlotId>>
+    ) -> ::types_error::PgResult<Option<::nodes::SlotId>>
 );
 
 seam_core::seam!(
@@ -513,7 +513,7 @@ seam_core::seam!(
         estate: &mut ::nodes::EStateData<'mcx>,
         result_rel_info: ::nodes::RriId,
         slot: ::nodes::SlotId,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -524,7 +524,7 @@ seam_core::seam!(
         estate: &mut ::nodes::EStateData<'mcx>,
         result_rel_info: ::nodes::RriId,
         slot: ::nodes::SlotId,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -537,7 +537,7 @@ seam_core::seam!(
         kind: i32,
         result_rel_info: ::nodes::RriId,
         slot: ::nodes::SlotId,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -546,7 +546,7 @@ seam_core::seam!(
     pub fn exec_get_returning_slot<'mcx>(
         estate: &mut ::nodes::EStateData<'mcx>,
         result_rel_info: ::nodes::RriId,
-    ) -> types_error::PgResult<::nodes::SlotId>
+    ) -> ::types_error::PgResult<::nodes::SlotId>
 );
 
 seam_core::seam!(
@@ -558,7 +558,7 @@ seam_core::seam!(
     pub fn exec_get_child_to_root_map<'mcx>(
         estate: &mut ::nodes::EStateData<'mcx>,
         result_rel_info: ::nodes::RriId,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -572,7 +572,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
         result_rel_info: ::nodes::RriId,
-    ) -> types_error::PgResult<
+    ) -> ::types_error::PgResult<
         Option<(
             mcx::PgBox<'mcx, types_tuple::attmap::AttrMap<'mcx>>,
             types_tuple::heaptuple::TupleDesc<'mcx>,
@@ -588,7 +588,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
         result_rel_info: ::nodes::RriId,
-    ) -> types_error::PgResult<mcx::PgVec<'mcx, ::nodes::RriId>>
+    ) -> ::types_error::PgResult<mcx::PgVec<'mcx, ::nodes::RriId>>
 );
 
 seam_core::seam!(
@@ -598,7 +598,7 @@ seam_core::seam!(
     pub fn exec_update_lock_mode<'mcx>(
         estate: &mut ::nodes::EStateData<'mcx>,
         result_rel_info: ::nodes::RriId,
-    ) -> types_error::PgResult<types_tableam::tableam::LockTupleMode>
+    ) -> ::types_error::PgResult<types_tableam::tableam::LockTupleMode>
 );
 
 seam_core::seam!(
@@ -613,7 +613,7 @@ seam_core::seam!(
         result_rel_info: ::nodes::RriId,
         rti: types_core::primitive::Index,
         inputslot: ::nodes::SlotId,
-    ) -> types_error::PgResult<Option<::nodes::SlotId>>
+    ) -> ::types_error::PgResult<Option<::nodes::SlotId>>
 );
 
 seam_core::seam!(
@@ -624,7 +624,7 @@ seam_core::seam!(
         epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
         result_rel_info: ::nodes::RriId,
         rti: types_core::primitive::Index,
-    ) -> types_error::PgResult<::nodes::SlotId>
+    ) -> ::types_error::PgResult<::nodes::SlotId>
 );
 
 seam_core::seam!(
@@ -639,7 +639,7 @@ seam_core::seam!(
         estate: &mut ::nodes::EStateData<'mcx>,
         result_rel_info: ::nodes::RriId,
         rti: types_core::primitive::Index,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -655,7 +655,7 @@ seam_core::seam!(
         estate: &mut ::nodes::EStateData<'mcx>,
         epq_param: i32,
         result_relations: &[types_core::primitive::Index],
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -669,7 +669,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
         subplan: Option<&'mcx ::nodes::nodes::Node<'mcx>>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -693,7 +693,7 @@ seam_core::seam!(
         estate: &mut ::nodes::EStateData<'mcx>,
         row_marks: &[mcx::PgBox<'mcx, ::nodes::nodes::Node<'mcx>>],
         subplan: Option<&'mcx ::nodes::nodes::Node<'mcx>>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -706,7 +706,7 @@ seam_core::seam!(
     pub fn eval_plan_qual_begin_lockrows<'mcx>(
         parentestate: &mut ::nodes::EStateData<'mcx>,
         epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -719,7 +719,7 @@ seam_core::seam!(
         parentestate: &mut ::nodes::EStateData<'mcx>,
         epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
         slot: ::nodes::SlotId,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -729,7 +729,7 @@ seam_core::seam!(
     /// canonical `EPQState` by mutable reference. Fallible on `ereport(ERROR)`.
     pub fn eval_plan_qual_next<'mcx>(
         epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
-    ) -> types_error::PgResult<Option<::nodes::SlotId>>
+    ) -> ::types_error::PgResult<Option<::nodes::SlotId>>
 );
 
 seam_core::seam!(
@@ -742,7 +742,7 @@ seam_core::seam!(
     pub fn eval_plan_qual_end<'mcx>(
         parentestate: &mut ::nodes::EStateData<'mcx>,
         epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 // ===========================================================================
@@ -774,7 +774,7 @@ seam_core::seam!(
         scanstate: &mut CteScanState<'mcx>,
         plan: &CteScan<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -785,7 +785,7 @@ seam_core::seam!(
         scanstate: &mut CteScanState<'mcx>,
         plan: &CteScan<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -795,7 +795,7 @@ seam_core::seam!(
     pub fn cte_tuplestore_begin_heap_leader<'mcx>(
         scanstate: &mut CteScanState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -807,7 +807,7 @@ seam_core::seam!(
     pub fn cte_tuplestore_alloc_read_pointer_follower<'mcx>(
         scanstate: &mut CteScanState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -816,7 +816,7 @@ seam_core::seam!(
     pub fn cte_leader_eof_cte<'mcx>(
         node: &CteScanState<'mcx>,
         estate: &::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -825,7 +825,7 @@ seam_core::seam!(
         node: &mut CteScanState<'mcx>,
         value: bool,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -834,7 +834,7 @@ seam_core::seam!(
     pub fn cte_tuplestore_select_read_pointer<'mcx>(
         node: &mut CteScanState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -842,7 +842,7 @@ seam_core::seam!(
     pub fn cte_tuplestore_ateof<'mcx>(
         node: &CteScanState<'mcx>,
         estate: &::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -852,7 +852,7 @@ seam_core::seam!(
         node: &mut CteScanState<'mcx>,
         forward: bool,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -863,7 +863,7 @@ seam_core::seam!(
         node: &mut CteScanState<'mcx>,
         forward: bool,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -872,7 +872,7 @@ seam_core::seam!(
     pub fn cte_tuplestore_puttupleslot<'mcx>(
         node: &mut CteScanState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -880,7 +880,7 @@ seam_core::seam!(
     pub fn cte_tuplestore_rescan<'mcx>(
         node: &mut CteScanState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -888,7 +888,7 @@ seam_core::seam!(
     pub fn cte_tuplestore_clear<'mcx>(
         node: &mut CteScanState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -898,7 +898,7 @@ seam_core::seam!(
     /// cannot be expressed in safe Rust at the dispatch site.
     pub fn cte_leader_is_self<'mcx>(
         node: &CteScanState<'mcx>,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -908,7 +908,7 @@ seam_core::seam!(
     pub fn cte_tuplestore_end<'mcx>(
         node: &mut CteScanState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -919,7 +919,7 @@ seam_core::seam!(
     pub fn cte_exec_proc_node<'mcx>(
         node: &mut CteScanState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 seam_core::seam!(
@@ -929,7 +929,7 @@ seam_core::seam!(
     pub fn cte_copy_tuple_to_scan_slot<'mcx>(
         node: &mut CteScanState<'mcx>,
         estate: &mut ::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -939,7 +939,7 @@ seam_core::seam!(
     pub fn cte_leader_cteplanstate_chgparam_set<'mcx>(
         node: &CteScanState<'mcx>,
         estate: &::nodes::EStateData<'mcx>,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 // ===========================================================================
@@ -959,9 +959,9 @@ seam_core::seam!(
 // ===========================================================================
 
 use std::cell::Cell;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::querydesc::QueryDesc;
-use types_scan::sdir::ScanDirection;
+use ::types_scan::sdir::ScanDirection;
 
 /// `ExecutorStart_hook_type` (executor.h): `void (*)(QueryDesc *queryDesc, int
 /// eflags)`. The hook returns a bool in PG18 (`ExecutorStart`'s `bool` return);

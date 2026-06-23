@@ -8,11 +8,11 @@
 //! checks) is ported faithfully in [`classify_network_function`]. The index
 //! condition `OpExpr` tree construction (catalog lookups, `makeConst`,
 //! `make_opclause`) is genuinely external (planner / catalog / nodes) and crosses
-//! the [`network_seams::planner`] seam.
+//! the [`::network_seams::planner`] seam.
 
-use network_seams::planner;
-use types_error::PgResult;
-use types_network::inet_struct;
+use ::network_seams::planner;
+use ::types_error::PgResult;
+use ::types_network::inet_struct;
 
 use crate::{inet_set_masklen, network_broadcast, network_network};
 
@@ -103,7 +103,7 @@ pub fn classify_network_function(func: Option<NetworkFunc>, indexarg: i32) -> Op
 /// `OpExpr` tree construction (`get_opfamily_member_for_cmptype`, `makeConst`,
 /// `make_opclause`, using [`network_scan_first`] / [`network_scan_last`]) is
 /// genuinely external (planner / catalog / nodes subsystems) and is delegated to
-/// the [`network_seams::planner::network_subset_support`] seam,
+/// the [`::network_seams::planner::network_subset_support`] seam,
 /// which models "did we derive index conditions" (declining is always a valid
 /// planner answer).
 pub fn network_subset_support() -> bool {

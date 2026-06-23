@@ -15,11 +15,11 @@
 //! `fcinfo->flinfo->fn_oid` (the latter is forwarded to
 //! `CheckFunctionValidatorAccess`).
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writer.

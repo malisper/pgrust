@@ -4,7 +4,7 @@
 //! `ExecFindMatchingSubPlans`, `find_matching_subplans_recurse`.
 
 use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::executor::EXEC_FLAG_EXPLAIN_GENERIC;
 use ::nodes::partition::{
@@ -623,7 +623,7 @@ pub(crate) fn InitPartitionPruneContext<'mcx>(
     // context->stepcmpfuncs = palloc0(sizeof(FmgrInfo) * n_steps * partnatts);
     let cmp_len = (n_steps * partnatts) as usize;
     let mut stepcmpfuncs = vec_with_capacity_in(mcx, cmp_len)?;
-    stepcmpfuncs.resize(cmp_len, types_core::fmgr::FmgrInfo::default());
+    stepcmpfuncs.resize(cmp_len, ::types_core::fmgr::FmgrInfo::default());
     context.stepcmpfuncs = stepcmpfuncs;
 
     // context->ppccontext = CurrentMemoryContext;
@@ -1169,7 +1169,7 @@ pub(crate) fn find_matching_subplans_recurse<'mcx>(
 
 /// `OidIsValid(oid)`.
 fn oid_is_valid(oid: Oid) -> bool {
-    types_core::primitive::OidIsValid(oid)
+    ::types_core::primitive::OidIsValid(oid)
 }
 
 /// Deep-clone a pruning-step list (C: the steps are aliased from the plan; the

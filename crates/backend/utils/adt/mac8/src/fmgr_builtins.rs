@@ -19,8 +19,8 @@
 //! varlena header (they are fixed-length by-ref, not varlena), so the image is
 //! header-less and symmetric on the arg and result lanes.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_network::{macaddr, macaddr8};
 
@@ -293,7 +293,7 @@ pub fn register_mac8_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datum::NullableDatum;
+    use ::datum::NullableDatum;
 
     fn in_macaddr8(s: &str) -> Vec<u8> {
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);

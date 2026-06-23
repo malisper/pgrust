@@ -11,9 +11,9 @@ use format_type_seams as format_type_seams;
 use lsyscache_seams as lsyscache_seams;
 use typcache_seams as typcache_seams;
 use fmgr_seams as fmgr_seams;
-use mcx::Mcx;
-use cache::typcache::TypeCacheEntry;
-use types_core::primitive::Oid;
+use ::mcx::Mcx;
+use ::cache::typcache::TypeCacheEntry;
+use ::types_core::primitive::Oid;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION,
@@ -52,7 +52,7 @@ pub struct RangeIOData {
 
 /// `IOFuncSelector` (fmgr.h): which element I/O direction `get_range_io_data`
 /// resolves. Canonical definition in `types-core::fmgr`.
-pub use types_core::fmgr::IOFuncSelector;
+pub use ::types_core::fmgr::IOFuncSelector;
 
 /// `TYPECACHE_RANGE_INFO` (typcache.h): the flag selecting the range-info fields
 /// (`rngelemtype` / `rng_collation` / `rng_cmp_proc_finfo` /
@@ -108,7 +108,7 @@ pub fn get_range_io_data(rngtypid: Oid, func: IOFuncSelector) -> PgResult<RangeI
         //            errmsg("no binary {input,output} function available for
         //            type %s", format_type_be(cache->typcache->rngelemtype->type_id)));
         let elem_oid = rngelemtype.type_id;
-        let cx = mcx::MemoryContext::new("get_range_io_data error");
+        let cx = ::mcx::MemoryContext::new("get_range_io_data error");
         let name = match format_type_seams::format_type_be::call(cx.mcx(), elem_oid) {
             Ok(s) => s.as_str().to_string(),
             Err(_) => elem_oid.to_string(),
@@ -463,7 +463,7 @@ pub fn range_in_seam<'mcx>(
 /// `bounds_adjacent` / `range_adjacent` adapters).
 pub fn range_out_seam(range: RangeTypeP<'_>) -> PgResult<String> {
     let cache = get_range_io_data(range.rangetypid(), IOFuncSelector::Output)?;
-    let scratch = mcx::MemoryContext::new_bump("range_out element output");
+    let scratch = ::mcx::MemoryContext::new_bump("range_out element output");
     range_out(scratch.mcx(), &cache, range)
 }
 
@@ -484,7 +484,7 @@ pub fn range_recv_seam<'mcx>(
 /// against a private scratch context dropped on return.
 pub fn range_send_seam(range: RangeTypeP<'_>) -> PgResult<Vec<u8>> {
     let cache = get_range_io_data(range.rangetypid(), IOFuncSelector::Send)?;
-    let scratch = mcx::MemoryContext::new_bump("range_send element send");
+    let scratch = ::mcx::MemoryContext::new_bump("range_send element send");
     range_send(scratch.mcx(), &cache, range)
 }
 

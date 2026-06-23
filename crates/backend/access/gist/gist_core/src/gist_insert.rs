@@ -36,22 +36,22 @@ use page::{
 };
 use utils_error::{ereport, PgResult};
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, Size, TransactionId, XLogRecPtr,
 };
-use types_core::xact::InvalidTransactionId;
-use types_error::error::{ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
+use ::types_core::xact::InvalidTransactionId;
+use ::types_error::error::{ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
 use gist::{
     gistxlogPage, GISTInsertStack, GISTInsertState, GISTPageSplitInfo, GISTSTATE, GistBuildLSN,
     GistSplitVector, SplitPageLayout, F_LEAF, GIST_MAX_SPLIT_PAGES, GIST_ROOT_BLKNO,
 };
-use rel::Relation;
-use types_storage::buf::BufferIsValid;
-use types_storage::storage::Buffer;
-use types_tableam::amapi::IndexUniqueCheck;
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
+use ::rel::Relation;
+use ::types_storage::buf::BufferIsValid;
+use ::types_storage::storage::Buffer;
+use ::types_tableam::amapi::IndexUniqueCheck;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
 
 use crate::gist_page::{
     gist_page_get_nsn, gist_page_rightlink, gist_page_set_nsn, gistcheckpage, gistfillbuffer,
@@ -98,7 +98,7 @@ fn page_modify<R>(buf: Buffer, f: impl FnOnce(&mut [u8]) -> PgResult<R>) -> PgRe
     slot.expect("page_modify produced a value")
 }
 
-fn edit_failed() -> types_error::PgError {
+fn edit_failed() -> ::types_error::PgError {
     ereport(ERROR)
         .errmsg_internal("gist page edit failed")
         .into_error()
@@ -206,7 +206,7 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
         // gistjoinvector(itvec, &tlen, itup, ntup)
         let mut addvec: Vec<PgVec<'mcx, u8>> = Vec::with_capacity(itup.len());
         for it in itup {
-            addvec.push(mcx::slice_in(mcx, it)?);
+            addvec.push(::mcx::slice_in(mcx, it)?);
         }
         gistjoinvector(&mut itvec, &addvec)?;
 
@@ -231,7 +231,7 @@ pub fn gistplacetopage<'mcx>(args: PlaceToPage<'mcx, '_>) -> PgResult<PlaceToPag
         let mut pages: Vec<alloc::vec::Vec<u8>> = Vec::with_capacity(dist.len());
 
         let mut oldrlink = InvalidBlockNumber;
-        let mut oldnsn: gist::GistNSN = 0;
+        let mut oldnsn: ::gist::GistNSN = 0;
 
         // Set up pages. The original page becomes the new leftmost page (unless
         // root-split, where the original becomes the new root and ALL dist halves
@@ -616,9 +616,9 @@ fn restore_dist_from_chain<'mcx>(
     *dist = full;
 }
 
-/// Build a [`types_storage::bufpage::PageTemp`] from an existing byte image.
-fn page_temp_from_bytes(bytes: &[u8]) -> PgResult<types_storage::bufpage::PageTemp> {
-    let mut temp = types_storage::bufpage::PageTemp::new(bytes.len() as Size)?;
+/// Build a [`::types_storage::bufpage::PageTemp`] from an existing byte image.
+fn page_temp_from_bytes(bytes: &[u8]) -> PgResult<::types_storage::bufpage::PageTemp> {
+    let mut temp = ::types_storage::bufpage::PageTemp::new(bytes.len() as Size)?;
     temp.as_mut_bytes().copy_from_slice(bytes);
     Ok(temp)
 }
@@ -695,10 +695,10 @@ pub fn gistSplit<'mcx>(
     } else {
         let list = gistfillitupvec(mcx, &rvectup)?;
         let lenlist = list.len() as i32;
-        let attr_owned: Vec<types_tuple::heaptuple::Datum<'mcx>> = v
+        let attr_owned: Vec<::types_tuple::heaptuple::Datum<'mcx>> = v
             .spl_rattr
             .iter()
-            .map(|d| d.clone().unwrap_or(types_tuple::heaptuple::Datum::ByVal(0)))
+            .map(|d| d.clone().unwrap_or(::types_tuple::heaptuple::Datum::ByVal(0)))
             .collect();
         let itupd = gistFormTuple(mcx, giststate, r, &attr_owned, &v.spl_risnull, false)?;
         res = alloc::vec![SplitPageLayout {
@@ -722,10 +722,10 @@ pub fn gistSplit<'mcx>(
     } else {
         let list = gistfillitupvec(mcx, &lvectup)?;
         let lenlist = list.len() as i32;
-        let attr_owned: Vec<types_tuple::heaptuple::Datum<'mcx>> = v
+        let attr_owned: Vec<::types_tuple::heaptuple::Datum<'mcx>> = v
             .spl_lattr
             .iter()
-            .map(|d| d.clone().unwrap_or(types_tuple::heaptuple::Datum::ByVal(0)))
+            .map(|d| d.clone().unwrap_or(::types_tuple::heaptuple::Datum::ByVal(0)))
             .collect();
         let itupd = gistFormTuple(mcx, giststate, r, &attr_owned, &v.spl_lisnull, false)?;
         let left = SplitPageLayout {
@@ -1097,7 +1097,7 @@ fn gistFindPath<'mcx>(
     struct Node {
         blkno: BlockNumber,
         downlinkoffnum: OffsetNumber,
-        lsn: gist::GistNSN,
+        lsn: ::gist::GistNSN,
         parent: Option<usize>,
     }
     let mut nodes: Vec<Node> = Vec::new();
@@ -1240,7 +1240,7 @@ fn gistformdownlink<'mcx>(
             let ituple = PageGetItem(&pref, &id)?;
             match downlink.as_ref() {
                 None => {
-                    downlink = Some(mcx::slice_in(mcx, &ituple[..index_tuple_size(ituple)])?);
+                    downlink = Some(::mcx::slice_in(mcx, &ituple[..index_tuple_size(ituple)])?);
                 }
                 Some(dl) => {
                     let dl_slice = dl.as_slice();
@@ -1269,7 +1269,7 @@ fn gistformdownlink<'mcx>(
                 let pref = PageRef::new(&pp)?;
                 let id = PageGetItemId(&pref, off)?;
                 let it = PageGetItem(&pref, &id)?;
-                mcx::slice_in(mcx, &it[..index_tuple_size(it)])?
+                ::mcx::slice_in(mcx, &it[..index_tuple_size(it)])?
             };
             lock_buffer::call(state.stack[parent].buffer, GIST_UNLOCK)?;
             dl
@@ -1394,7 +1394,7 @@ fn gistfixsplit<'mcx>(
     r: &Relation<'mcx>,
     _heap_rel: &Relation<'mcx>,
 ) -> PgResult<()> {
-    let _ = ereport(types_error::error::LOG).errmsg(alloc::format!(
+    let _ = ereport(::types_error::error::LOG).errmsg(alloc::format!(
         "fixing incomplete split in index \"{}\", block {}",
         r.name(),
         state.stack[stack_idx].blkno

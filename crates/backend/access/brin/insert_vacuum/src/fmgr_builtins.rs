@@ -12,10 +12,10 @@
 //! so by-OID dispatch resolves them. OIDs / nargs / strict / retset are
 //! transcribed exactly from `pg_proc.dat`.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

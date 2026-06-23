@@ -15,13 +15,13 @@
 //! machinery `cursor.rs` uses for an externally-declared cursor, but here the
 //! portal is created from the prepared plan instead of looked up by name.
 
-use utils_error::ereport;
-use mcx::MemoryContext;
+use ::utils_error::ereport;
+use ::mcx::MemoryContext;
 use types_error::{PgResult, ERROR};
 use portal::{
     CommandTag, FetchDirection, Portal, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
 };
-use types_resowner::ResourceOwner;
+use ::types_resowner::ResourceOwner;
 
 use spi_seams::{TsRewriteResult, TsRewriteRow};
 
@@ -141,7 +141,7 @@ fn run_stat_cursor(command: &str) -> PgResult<Vec<Vec<u8>>> {
             && coerce_seams::is_binary_coercible::call(col1_type, TSVECTOROID)?;
         if !coercible {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
                 .errmsg("ts_stat query must return one tsvector column")
                 .into_error());
         }
@@ -265,7 +265,7 @@ fn spi_cursor_open(plan: types_ri_triggers::SpiPlanPtr) -> PgResult<Portal> {
         // ereport(ERROR, (errcode(ERRCODE_INVALID_CURSOR_DEFINITION),
         //         errmsg("cannot open multi-query plan as cursor")));
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_CURSOR_DEFINITION)
+            .errcode(::types_error::ERRCODE_INVALID_CURSOR_DEFINITION)
             .errmsg("cannot open multi-query plan as cursor")
             .into_error());
     }
@@ -278,7 +278,7 @@ fn spi_cursor_open(plan: types_ri_triggers::SpiPlanPtr) -> PgResult<Portal> {
     if !returns_tuples {
         let cmdtag = plancache_seams::plansource_command_tag::call(CachedPlanSourceHandle(source))?;
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_CURSOR_DEFINITION)
+            .errcode(::types_error::ERRCODE_INVALID_CURSOR_DEFINITION)
             .errmsg(format!(
                 "cannot open {} query as cursor",
                 command_tag_name(cmdtag.0)
@@ -313,9 +313,9 @@ fn spi_cursor_open(plan: types_ri_triggers::SpiPlanPtr) -> PgResult<Portal> {
     // would record the cplan handle; ts_rewrite's path is always unsaved, but
     // honor `saved` for faithfulness.
     let portal_cplan = if saved {
-        portal::CachedPlanHandle(cplan)
+        ::portal::CachedPlanHandle(cplan)
     } else {
-        portal::CachedPlanHandle::NULL
+        ::portal::CachedPlanHandle::NULL
     };
     portalmem::portal_define_query_list::call(
         &portal,
@@ -358,7 +358,7 @@ fn spi_cursor_open(plan: types_ri_triggers::SpiPlanPtr) -> PgResult<Portal> {
         if !utility_seams::command_is_read_only::call(pstmt)? {
             let tag = utility_seams::planned_stmt_command_tag::call(pstmt)?;
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
                 .errmsg(format!(
                     "{} is not allowed in a non-volatile function",
                     command_tag_name(tag.0)
@@ -456,7 +456,7 @@ fn portal_result_shape(portal: &Portal) -> (i32, types_core::Oid, types_core::Oi
 /// plain SELECT has a `resultDesc` and passes `SPI_is_cursor_plan`), else
 /// `GetCommandTagName(commandTag)`.
 fn command_tag_name(tag: CommandTag) -> &'static str {
-    if tag == portal::CMDTAG_SELECT {
+    if tag == ::portal::CMDTAG_SELECT {
         "SELECT INTO"
     } else {
         cmdtag::get_command_tag_name(tag)

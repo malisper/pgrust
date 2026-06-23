@@ -26,12 +26,12 @@ use mcx::{Mcx, PgBox};
 use ::nodes::execexpr::{SubscriptHandler, SubscriptRoutines};
 use ::nodes::nodes::Node;
 use array::{ArrayElementIoData, ArrayIoFuncSelector};
-use cache::typcache::{PgRangeRow, PgTypeRow};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::cache::typcache::{PgRangeRow, PgTypeRow};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
 };
-use types_tuple::pg_type::FormData_pg_type;
+use ::types_tuple::pg_type::FormData_pg_type;
 
 /// `TYPTYPE_*` (`catalog/pg_type.h`).
 const TYPTYPE_DOMAIN: i8 = b'd' as i8;
@@ -970,12 +970,12 @@ pub fn get_typdefault<'mcx>(mcx: Mcx<'mcx>, typid: Oid) -> PgResult<Option<PgBox
 /// ```
 pub fn get_type_sendreceive_byval(
     type_oid: Oid,
-) -> PgResult<lsyscache_seams::TypeSendReceive> {
+) -> PgResult<::lsyscache_seams::TypeSendReceive> {
     let pt = match syscache::pg_type_form::call(type_oid)? {
         Some(t) => t,
         None => return cache_lookup_failed_for_type(type_oid),
     };
-    Ok(lsyscache_seams::TypeSendReceive {
+    Ok(::lsyscache_seams::TypeSendReceive {
         typbyval: pt.typbyval,
         typsend: pt.typsend,
         typreceive: pt.typreceive,

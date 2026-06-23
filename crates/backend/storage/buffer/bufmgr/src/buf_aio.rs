@@ -31,19 +31,19 @@ extern crate alloc;
 
 use alloc::format;
 
-use types_core::primitive::{BlockNumber, ForkNumber};
+use ::types_core::primitive::{BlockNumber, ForkNumber};
 use types_error::{PgError, PgResult};
-use types_storage::buf::{
+use ::types_storage::buf::{
     BM_IO_ERROR, BM_VALID, BUF_REFCOUNT_ONE, PgAioWaitRef, BM_IO_IN_PROGRESS,
 };
-use types_storage::storage::Buffer;
+use ::types_storage::storage::Buffer;
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 
-use methods::aio::{
+use ::methods::aio::{
     pgaio_io_get_distilled_result, pgaio_io_owner, pgaio_io_set_distilled_result,
 };
-use methods::aio_callback::pgaio_io_get_handle_data;
-use methods::aio_target::pgaio_io_get_target_data;
+use ::methods::aio_callback::pgaio_io_get_handle_data;
+use ::methods::aio_target::pgaio_io_get_target_data;
 use methods::{PgAioResult, PgAioResultStatus, PgAioTargetData};
 use bufmgr_seams as sb;
 use page as page;
@@ -81,7 +81,7 @@ fn target_smgr(td: &PgAioTargetData) -> (RelFileLocatorBackend, ForkNumber, Bloc
     let backend = if td.is_temp {
         lmgr_proc_seams::my_proc_number::call()
     } else {
-        types_core::primitive::INVALID_PROC_NUMBER
+        ::types_core::primitive::INVALID_PROC_NUMBER
     };
     let rlocator = RelFileLocatorBackend { locator, backend };
     let fork = ForkNumber::from_i32(td.fork as i32).unwrap_or(ForkNumber::MAIN_FORKNUM);
@@ -143,7 +143,7 @@ pub fn pgaio_perform_io_syscall(ioh_index: u32) -> PgResult<i64> {
             })?;
         }
 
-        total_bytes += types_core::primitive::BLCKSZ as i64;
+        total_bytes += ::types_core::primitive::BLCKSZ as i64;
     }
 
     Ok(total_bytes)
@@ -223,9 +223,9 @@ fn buffer_readv_complete_one(
 
     // PIV_LOG_LOG: only log (to the server log) on checksum errors here; the
     // definer reports the user-facing message in buffer_readv_report.
-    let mut piv_flags = types_storage::bufpage::PIV_LOG_LOG;
+    let mut piv_flags = ::types_storage::bufpage::PIV_LOG_LOG;
     if flags & READ_BUFFERS_IGNORE_CHECKSUM_FAILURES != 0 {
-        piv_flags |= types_storage::bufpage::PIV_IGNORE_CHECKSUM_FAILURE;
+        piv_flags |= ::types_storage::bufpage::PIV_IGNORE_CHECKSUM_FAILURE;
     }
 
     if !failed {
@@ -286,8 +286,8 @@ fn buffer_readv_complete_one(
                 format!("ignoring checksum failure in block {blocknum} of relation \"{path}\"")
             };
             utils_error::emit_error_report_for(
-                &utils_error::ereport(types_error::error::LOG_SERVER_ONLY)
-                    .errcode(types_error::error::ERRCODE_DATA_CORRUPTED)
+                &utils_error::ereport(::types_error::error::LOG_SERVER_ONLY)
+                    .errcode(::types_error::error::ERRCODE_DATA_CORRUPTED)
                     .errmsg_internal(msg)
                     .into_error(),
             );
@@ -336,7 +336,7 @@ fn buffer_readv_complete(ioh: usize, cb_data: u8, is_temp: bool) -> PgResult<()>
             r.error_data = (-raw) as u32;
             r.result = 0;
         } else {
-            let blocks = raw / (types_core::primitive::BLCKSZ as i32);
+            let blocks = raw / (::types_core::primitive::BLCKSZ as i32);
             debug_assert!(blocks <= td.nblocks as i32);
             r.result = blocks;
             if blocks == 0 {
@@ -655,8 +655,8 @@ fn buffer_readv_report(ioh: usize, elevel: i32) -> PgResult<()> {
     let _ = affected_count;
 
     utils_error::emit_error_report_for(
-        &utils_error::ereport(types_error::error::ErrorLevel(elevel))
-            .errcode(types_error::error::ERRCODE_DATA_CORRUPTED)
+        &utils_error::ereport(::types_error::error::ErrorLevel(elevel))
+            .errcode(::types_error::error::ERRCODE_DATA_CORRUPTED)
             .errmsg_internal(msg)
             .into_error(),
     );
@@ -666,12 +666,12 @@ fn buffer_readv_report(ioh: usize, elevel: i32) -> PgResult<()> {
 /// Read the `READ_BUFFERS_*` flag bitmask (`cb_data`) the handle's readv
 /// callback `cb_id` was registered with.
 fn readv_cb_data(ioh: usize, cb_id: u8) -> u8 {
-    methods::aio_callback::pgaio_io_get_callback_data_for(ioh, cb_id)
+    ::methods::aio_callback::pgaio_io_get_callback_data_for(ioh, cb_id)
 }
 
 /// The handle's wait reference (for the stage callback's io_wref stamp).
 fn aio_wref_of(ioh: usize) -> PgAioWaitRef {
-    let w = methods::aio::pgaio_io_get_wref(ioh);
+    let w = ::methods::aio::pgaio_io_get_wref(ioh);
     PgAioWaitRef {
         aio_index: w.aio_index,
         generation_upper: w.generation_upper,

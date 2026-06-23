@@ -3,7 +3,7 @@
 //! body-port independently of the rest of the node lifecycle.
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{Index, InvalidOid};
+use ::types_core::primitive::{Index, InvalidOid};
 use types_error::{PgError, PgResult};
 use ::nodes::modifytable::{
     MergeAction, OnConflictAction, ResultRelHash, ONCONFLICT_NONE,
@@ -13,7 +13,7 @@ use ::nodes::primnodes::TargetEntry;
 use nodes::{
     EPQState, EStateData, ModifyTable, ModifyTableState, PlanStateData, ResultRelInfo, RriId,
 };
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
 
@@ -182,7 +182,7 @@ pub fn ExecInitModifyTable<'mcx>(
         result_rel_info.push(id);
     }
 
-    let mut mtstate = mcx::alloc_in(
+    let mut mtstate = ::mcx::alloc_in(
         mcx,
         ModifyTableState {
             ps,
@@ -651,7 +651,7 @@ pub fn ExecInitModifyTable<'mcx>(
 
         // OnConflictSetState *onconfl = makeNode(OnConflictSetState);
         // resultRelInfo->ri_onConflict = onconfl;
-        let onconfl = mcx::alloc_in(
+        let onconfl = ::mcx::alloc_in(
             mcx,
             ::nodes::modifytable::OnConflictSetState {
                 type_: ::nodes::nodes::T_OnConflictSetState,
@@ -712,7 +712,7 @@ pub fn ExecInitModifyTable<'mcx>(
             let prev = hash.entries.insert(hashkey, i as i32);
             debug_assert!(prev.is_none());
         }
-        mtstate.mt_resultOidHash = Some(mcx::alloc_in(mcx, hash)?);
+        mtstate.mt_resultOidHash = Some(::mcx::alloc_in(mcx, hash)?);
     } else {
         mtstate.mt_resultOidHash = None;
     }
@@ -946,7 +946,7 @@ fn relation_relkind<'mcx>(estate: &EStateData<'mcx>, rri: RriId) -> PgResult<u8>
 fn relation_get_relid<'mcx>(
     estate: &EStateData<'mcx>,
     rri: RriId,
-) -> PgResult<types_core::Oid> {
+) -> PgResult<::types_core::Oid> {
     let rel = estate
         .result_rel(rri)
         .ri_RelationDesc

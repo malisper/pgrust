@@ -43,11 +43,11 @@
 //! statics, compiled only into the `s_lock_test` binary, never the server) is
 //! not ported; the in-crate tests cover the same ground.
 
-pub use types_storage::storage::Spinlock;
+pub use ::types_storage::storage::Spinlock;
 
-use utils_error::elog;
-use types_error::PANIC;
-use types_pgstat::wait_event::WAIT_EVENT_SPIN_DELAY;
+use ::utils_error::elog;
+use ::types_error::PANIC;
+use ::types_pgstat::wait_event::WAIT_EVENT_SPIN_DELAY;
 
 /// Minimum value `spins_per_delay` is allowed to converge to.
 ///

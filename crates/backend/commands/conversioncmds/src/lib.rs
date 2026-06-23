@@ -26,22 +26,22 @@ use mcx::{Mcx, PgString};
 use utils_error::{ereport, PgResult};
 use types_error::{ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_UNDEFINED_OBJECT, ERROR};
 
-use types_acl::acl::{ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE};
-use types_catalog::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::Oid;
+use ::types_acl::acl::{ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE};
+use ::types_catalog::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID};
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::Oid;
 use ::nodes::parsenodes::{CreateConversionStmt, ObjectType};
-use types_tuple::heaptuple::{BOOLOID, CSTRINGOID, INT4OID, INTERNALOID};
-use types_wchar::encoding::PG_SQL_ASCII;
+use ::types_tuple::heaptuple::{BOOLOID, CSTRINGOID, INT4OID, INTERNALOID};
+use ::types_wchar::encoding::PG_SQL_ASCII;
 
 use catalog_namespace::{NameListToString, QualifiedNameGetCreationNamespace};
 use aclchk_seams::{aclcheck_error, object_aclcheck};
-use pg_conversion_seams::conversion_create;
-use parse_func_seams::lookup_func_name;
+use ::pg_conversion_seams::conversion_create;
+use ::parse_func_seams::lookup_func_name;
 use lsyscache_seams::{get_func_rettype, get_namespace_name};
-use fmgr_seams::conversion_proc_empty_input_test;
-use miscinit_seams::get_user_id;
-use encnames_seams::pg_char_to_encoding;
+use ::fmgr_seams::conversion_proc_empty_input_test;
+use ::miscinit_seams::get_user_id;
+use ::encnames_seams::pg_char_to_encoding;
 
 /// `static const Oid funcargs[]` — the conversion procedure's argument types:
 /// `{INT4OID, INT4OID, CSTRINGOID, INTERNALOID, INT4OID, BOOLOID}`.
@@ -196,13 +196,13 @@ pub fn CreateConversionCommand(mcx: Mcx<'_>, stmt: &CreateConversionStmt) -> PgR
 /// [`::nodes::parsenodes::CreateConversionStmt`] (the `List *` of `String`
 /// name components flattened to `Vec<String>`) and run `CreateConversionCommand`.
 fn create_conversion_command_seam<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let ccs = match stmt.as_createconversionstmt() {
         Some(s) => s,
         None => {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "create_conversion_command_seam: statement is not a CreateConversionStmt",
             ))
         }
@@ -218,7 +218,7 @@ fn create_conversion_command_seam<'mcx>(
             match n.as_string() {
                 Some(s) => out.push(s.sval.as_str().to_string()),
                 None => {
-                    return Err(types_error::PgError::error(format!(
+                    return Err(::types_error::PgError::error(format!(
                         "CREATE CONVERSION: {what} element is not a String"
                     )))
                 }

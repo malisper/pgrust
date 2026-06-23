@@ -33,7 +33,7 @@
 //! * The C `preprocess_targetlist(PlannerInfo *root)` reads `root->parse` (the
 //!   top `Query`) and writes `root->processed_tlist`/`root->update_colnos`.
 //!   `PlannerInfo` is lifetime-free here and the top `Query` lives in the
-//!   [`PlannerRun`](pathnodes::planner_run::PlannerRun) store behind
+//!   [`PlannerRun`](::pathnodes::planner_run::PlannerRun) store behind
 //!   `root.parse`'s `QueryId`. The planner driver resolves it
 //!   (`run.resolve_mut(root.parse)`) and threads the `&mut Query` alongside
 //!   `&mut PlannerInfo`; the two are distinct objects so there's no aliasing
@@ -68,15 +68,15 @@
 
 extern crate alloc;
 
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 use types_core::{INT4OID, InvalidOid, Oid};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::CmdType;
 use ::nodes::primnodes::Expr;
 use pathnodes::{NodeId, PlanRowMarkId, PlannerInfo, TargetEntryNode};
-use rel::Relation;
-use types_tuple::heaptuple::Datum;
+use ::rel::Relation;
+use ::types_tuple::heaptuple::Datum;
 
 // ===========================================================================
 // preprocess_targetlist (preptlist.c:64) — SELECT core
@@ -108,12 +108,12 @@ pub fn preprocess_targetlist<'mcx>(
         // C: target_rte = rt_fetch(result_relation, range_table). Sanity-check
         // it is a real relation, else parser/rewriter messed up.
         let target_rte = parse.rtable.get(result_relation - 1).ok_or_else(|| {
-            types_error::PgError::error(alloc::format!(
+            ::types_error::PgError::error(alloc::format!(
                 "preprocess_targetlist: result relation {result_relation} out of range",
             ))
         })?;
         if target_rte.rtekind != ::nodes::parsenodes::RTEKind::RTE_RELATION {
-            return Err(types_error::PgError::error(alloc::string::String::from(
+            return Err(::types_error::PgError::error(alloc::string::String::from(
                 "result relation must be a regular relation",
             )));
         }
@@ -299,8 +299,8 @@ pub fn preprocess_targetlist<'mcx>(
             // TIDOID, -1, InvalidOid, 0) labeled "ctid%u" (C:240-254).
             let var = nodes_core::makefuncs::make_var(
                 rc.rti as i32,
-                types_tuple::heaptuple::SelfItemPointerAttributeNumber,
-                types_tuple::heaptuple::TIDOID,
+                ::types_tuple::heaptuple::SelfItemPointerAttributeNumber,
+                ::types_tuple::heaptuple::TIDOID,
                 -1,
                 InvalidOid,
                 0,
@@ -324,7 +324,7 @@ pub fn preprocess_targetlist<'mcx>(
             // Reached for a ROW_MARK_COPY mark (a non-relation / view RTE):
             // makeWholeRowVar(rt_fetch(rc->rti, range_table), rc->rti, 0, false).
             let rte = parse.rtable.get((rc.rti - 1) as usize).ok_or_else(|| {
-                types_error::PgError::error(alloc::format!(
+                ::types_error::PgError::error(alloc::format!(
                     "preprocess_targetlist: ROW_MARK_COPY rti {} out of range",
                     rc.rti
                 ))
@@ -602,7 +602,7 @@ fn expand_insert_targetlist<'mcx>(
     // inserted NULL entries above).
     while let Some(old_tle) = parse.targetList.get(tlist_pos) {
         if !old_tle.resjunk {
-            return Err(types_error::PgError::error(alloc::string::String::from(
+            return Err(::types_error::PgError::error(alloc::string::String::from(
                 "targetlist is not sorted correctly",
             )));
         }
@@ -819,7 +819,7 @@ fn expand_insert_targetlist_owned<'mcx>(
             "expand_insert_targetlist_owned: resjunk action targetList entry is a TargetEntry",
         );
         if !old_tle.resjunk {
-            return Err(types_error::PgError::error(alloc::string::String::from(
+            return Err(::types_error::PgError::error(alloc::string::String::from(
                 "targetlist is not sorted correctly",
             )));
         }
@@ -877,7 +877,7 @@ fn extract_update_targetlist_colnos_owned<'mcx>(
 /// run's PlanRowMark store (`preprocess_rowmarks` interns the marks there), so
 /// each handle is resolved through `run.resolve_rowmark(id)` to read its `rti`.
 pub fn get_plan_rowmark<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rowmarks: &[PlanRowMarkId],
     rtindex: u32,
 ) -> Option<PlanRowMarkId> {
@@ -899,7 +899,7 @@ pub fn get_plan_rowmark<'mcx>(
 /// so a `SELECT ... FOR UPDATE/SHARE` over a relation with partial indexes sees
 /// its rowmark and treats the rel as a target relation.
 fn seam_has_plan_rowmark<'mcx>(
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     root: &PlannerInfo,
     rtindex: u32,
 ) -> bool {

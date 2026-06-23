@@ -9,8 +9,8 @@
 //! `ConflictsWithRelationFastPath` is true (which is conservatively false until
 //! F3) — panics precisely if it is ever hit.
 
-use types_error::PgResult;
-use types_storage::lock::LOCKTAG;
+use ::types_error::PgResult;
+use ::types_storage::lock::LOCKTAG;
 
 /// `FastPathTransferRelationLocks(lockMethodTable, locktag, hashcode)` (lock.c)
 /// — migrate any fast-path locks held by other backends on `locktag` into the

@@ -14,9 +14,9 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use types_plancache::InvalItemKey;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::types_plancache::InvalItemKey;
 
 seam_core::seam!(
     /// `expression_planner_with_deps(expr, &relationOids, &invalItems)`

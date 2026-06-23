@@ -58,14 +58,14 @@
 //! * `assign_createrole_self_grant`           — C 2569-2583 (GUC assign hook)
 
 use user_seams as seam;
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use authid::{
     AuthIdUpdate, AuthMemForm, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord, PasswordType,
     STATUS_OK,
 };
-use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
-use types_core::primitive::{InvalidOid, Oid, OidIsValid, TimestampTz};
+use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid, TimestampTz};
 use types_core::{
     AUTH_ID_OID_INDEX_ID, AUTH_ID_RELATION_ID, AUTH_MEM_OID_INDEX_ID, AUTH_MEM_RELATION_ID,
     BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, ROLE_PG_DATABASE_OWNER,
@@ -83,9 +83,9 @@ use parsenodes::{
     ROLESPEC_CURRENT_ROLE, ROLESTMT_GROUP, ROLESTMT_ROLE, ROLESTMT_USER,
 };
 
-const NOTICE: ErrorLevel = types_error::error::NOTICE;
-const WARNING: ErrorLevel = types_error::error::WARNING;
-const ERROR: ErrorLevel = types_error::error::ERROR;
+const NOTICE: ErrorLevel = ::types_error::error::NOTICE;
+const WARNING: ErrorLevel = ::types_error::error::WARNING;
+const ERROR: ErrorLevel = ::types_error::error::ERROR;
 
 /* -------------------------------------------------------------------------
  * Constants borrowed from PostgreSQL headers.
@@ -2755,7 +2755,7 @@ fn get_createrole_self_grant_options() -> (u32, bool, bool, bool) {
 /// recorded by `check_createrole_self_grant`'s `GUC_check_errdetail`).
 fn check_createrole_self_grant_hook(
     newval: &mut Option<String>,
-    extra: &mut Option<guc_tables::GucHookExtra>,
+    extra: &mut Option<::guc_tables::GucHookExtra>,
     _source: types_guc::GucSource,
 ) -> PgResult<bool> {
     /* C copies `*newval`, which is never NULL for this GUC (boot_val ""). */
@@ -2775,7 +2775,7 @@ fn check_createrole_self_grant_hook(
 /// from `extra` and update the `_enabled` / `_options` backing store.
 fn assign_createrole_self_grant_hook(
     _newval: Option<&str>,
-    extra: Option<&guc_tables::GucHookExtra>,
+    extra: Option<&::guc_tables::GucHookExtra>,
 ) {
     /* The paired check hook always produces a `u32` extra. */
     let options = extra
@@ -2826,7 +2826,7 @@ pub fn init_seams() {
      * to the varlena owner. The result strings are copied into owned `String`s,
      * so the varlena owner's transient mcx may be dropped immediately. */
     seam::split_identifier_string::set(|rawstring| {
-        let ctx = mcx::MemoryContext::new("split_identifier_string");
+        let ctx = ::mcx::MemoryContext::new("split_identifier_string");
         let mcx = ctx.mcx();
         let res = varlena_seams::split_identifier_string::call(
             mcx, &rawstring, ',',
@@ -2889,7 +2889,7 @@ pub fn init_seams() {
     seam::call_check_password_hook::set(|username, password, password_type, validuntil| {
         match CHECK_PASSWORD_HOOK.with(|h| h.get()) {
             Some(hook) => hook(&username, &password, password_type, validuntil),
-            None => Err(types_error::PgError::error(
+            None => Err(::types_error::PgError::error(
                 "call_check_password_hook: no check_password_hook installed",
             )),
         }
@@ -2914,7 +2914,7 @@ pub fn init_seams() {
  * dispatch-owned `ParseState`. Each adapter converts the arena statement into
  * the owned `parsenodes` form (see [`convert`]) and calls the driver.
  * `CreateRole`/`AlterRole` take `pstate` only for error positioning; the
- * dispatch `ParseState` and `parsenodes::ParseState` are the one
+ * dispatch `ParseState` and `::parsenodes::ParseState` are the one
  * re-exported type, so it is passed straight through.
  * ------------------------------------------------------------------------- */
 

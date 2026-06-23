@@ -13,7 +13,7 @@
 //! # Arena model
 //!
 //! The C pointer graph is modelled over the
-//! [`PlannerInfo`](pathnodes::PlannerInfo) arena. `RelOptInfo`s are
+//! [`PlannerInfo`](::pathnodes::PlannerInfo) arena. `RelOptInfo`s are
 //! [`RelId`] handles into `rel_arena`; expression/`TargetEntry`/
 //! `ForeignKeyOptInfo`/`StatisticExtInfo` nodes are [`NodeId`] handles into
 //! `node_arena` (resolved via `root.node`/`targetentry`/`foreign_key`/
@@ -33,10 +33,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, NullTest, Var};
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     ForeignKeyOptInfo, IndexOptInfo, NodeId, PlannerInfo, RelId, Relids, StatisticExtInfo,
     TargetEntryNode, CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_UPDATE,
@@ -89,7 +89,7 @@ const INDOPTION_DESC: i16 = 0x0001;
 const INDOPTION_NULLS_FIRST: i16 = 0x0002;
 
 /// `BLCKSZ` (pg_config.h).
-const BLCKSZ: i32 = types_core::primitive::BLCKSZ as i32;
+const BLCKSZ: i32 = ::types_core::primitive::BLCKSZ as i32;
 /// `SizeOfPageHeaderData` (storage/bufpage.h) = 24.
 const SizeOfPageHeaderData: i32 = 24;
 /// `SizeofHeapTupleHeader` (access/htup_details.h) = 23.
@@ -239,7 +239,7 @@ pub fn get_relation_info<'mcx>(
     if !has_table_am
         && !(relkind == RELKIND_FOREIGN_TABLE || relkind == RELKIND_PARTITIONED_TABLE)
     {
-        return Err(types_error::PgError::error(alloc::format!(
+        return Err(::types_error::PgError::error(alloc::format!(
             "cannot open relation \"{}\"",
             relation.rd_rel.relname.as_str()
         )));
@@ -249,7 +249,7 @@ pub fn get_relation_info<'mcx>(
     if relation.rd_rel.relpersistence != RELPERSISTENCE_PERMANENT
         && transam_xlog_seams::recovery_in_progress::call()
     {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "cannot access temporary or unlogged relations during recovery",
         ));
     }
@@ -323,7 +323,7 @@ pub fn get_relation_info<'mcx>(
         // For each index, get the same lock the executor will need.
         // C: `lmode = root->simple_rte_array[varno]->rellockmode`
         // (`planner_rt_fetch(varno, root)->rellockmode`).
-        let lmode = pathnodes::planner_run::planner_rt_fetch(run, root, varno).rellockmode;
+        let lmode = ::pathnodes::planner_run::planner_rt_fetch(run, root, varno).rellockmode;
 
         // table-AM bitmap capability (the table-AM half of amhasgetbitmap).
         let table_bitmap = ext::table_has_scan_bitmap::call(relation_object_id)?;
@@ -507,7 +507,7 @@ pub fn get_relation_info<'mcx>(
         // Check if access to foreign tables is restricted.
         if ext::foreign_table_access_restricted::call() {
             debug_assert!(relation_object_id >= FirstNormalObjectId);
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "access to non-system foreign table is restricted",
             ));
         }
@@ -675,7 +675,7 @@ pub fn infer_arbiter_indexes<'mcx>(
             _ => unreachable!(),
         };
         if attno == 0 {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "whole row unique index inference specifications are not supported",
             ));
         }
@@ -690,7 +690,7 @@ pub fn infer_arbiter_indexes<'mcx>(
         index_oid_from_constraint =
             lsyscache_seams::get_constraint_index::call(onconflict.constraint)?;
         if index_oid_from_constraint == InvalidOid {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "constraint in ON CONFLICT clause has no associated index",
             ));
         }
@@ -711,7 +711,7 @@ pub fn infer_arbiter_indexes<'mcx>(
         // "ON constraint_name" variant.
         if index_oid_from_constraint == idx.indexrelid {
             if idx.indisexclusion && onconflict.action_is_update {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "ON CONFLICT DO UPDATE not supported with exclusion constraints",
                 ));
             }
@@ -796,7 +796,7 @@ pub fn infer_arbiter_indexes<'mcx>(
     }
 
     if results.is_empty() {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "there is no unique or exclusion constraint matching the ON CONFLICT specification",
         ));
     }
@@ -1088,7 +1088,7 @@ pub fn relation_excluded_by_constraints<'mcx>(
     }
 
     // Skip further tests depending on constraint_exclusion.
-    let ce = guc_tables::vars::constraint_exclusion.read();
+    let ce = ::guc_tables::vars::constraint_exclusion.read();
     let reloptkind = root.rel(rel).reloptkind;
     match ce {
         CONSTRAINT_EXCLUSION_OFF => return Ok(false),
@@ -1243,7 +1243,7 @@ pub fn build_physical_tlist<'mcx>(
                 }
             }
         }
-        other => Err(types_error::PgError::error(alloc::format!(
+        other => Err(::types_error::PgError::error(alloc::format!(
             "unsupported RTE kind {} in build_physical_tlist",
             other
         ))),
@@ -1290,7 +1290,7 @@ fn build_index_tlist(
         } else {
             // Expression column.
             if indexpr_pos >= index.indexprs.len() {
-                return Err(types_error::PgError::error(alloc::string::String::from("wrong number of index expressions")));
+                return Err(::types_error::PgError::error(alloc::string::String::from("wrong number of index expressions")));
             }
             indexvar = index.indexprs[indexpr_pos];
             indexpr_pos += 1;
@@ -1301,7 +1301,7 @@ fn build_index_tlist(
     }
 
     if indexpr_pos != index.indexprs.len() {
-        return Err(types_error::PgError::error(alloc::string::String::from("wrong number of index expressions")));
+        return Err(::types_error::PgError::error(alloc::string::String::from("wrong number of index expressions")));
     }
 
     Ok(tlist)
@@ -1396,7 +1396,7 @@ pub fn restriction_selectivity<'mcx>(
     }
     let result = ext::call_oprrest::call(run, root, oprrest, operatorid, args, inputcollid, var_relid)?;
     if !(0.0..=1.0).contains(&result) {
-        return Err(types_error::PgError::error(alloc::format!(
+        return Err(::types_error::PgError::error(alloc::format!(
             "invalid restriction selectivity: {}",
             result
         )));
@@ -1413,7 +1413,7 @@ pub fn join_selectivity<'mcx>(
     args: &[NodeId],
     inputcollid: Oid,
     jointype: i16,
-    sjinfo: Option<&pathnodes::SpecialJoinInfo>,
+    sjinfo: Option<&::pathnodes::SpecialJoinInfo>,
 ) -> PgResult<f64> {
     let oprjoin = lsyscache::get_oprjoin::call(operatorid)?;
     if oprjoin == InvalidOid {
@@ -1421,7 +1421,7 @@ pub fn join_selectivity<'mcx>(
     }
     let result = ext::call_oprjoin::call(run, root, oprjoin, operatorid, args, inputcollid, jointype, sjinfo)?;
     if !(0.0..=1.0).contains(&result) {
-        return Err(types_error::PgError::error(alloc::format!(
+        return Err(::types_error::PgError::error(alloc::format!(
             "invalid join selectivity: {}",
             result
         )));
@@ -1440,7 +1440,7 @@ pub fn function_selectivity<'mcx>(
     is_join: bool,
     var_relid: i32,
     jointype: i16,
-    sjinfo: Option<&pathnodes::SpecialJoinInfo>,
+    sjinfo: Option<&::pathnodes::SpecialJoinInfo>,
 ) -> PgResult<f64> {
     let prosupport = lsyscache::get_func_support::call(funcid)?;
     // No support function ⇒ historical default 0.3333333.
@@ -1454,7 +1454,7 @@ pub fn function_selectivity<'mcx>(
         None => Ok(0.3333333),
         Some(sel) => {
             if !(0.0..=1.0).contains(&sel) {
-                return Err(types_error::PgError::error(alloc::format!(
+                return Err(::types_error::PgError::error(alloc::format!(
                     "invalid function selectivity: {}",
                     sel
                 )));
@@ -1590,13 +1590,13 @@ pub fn has_row_triggers<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     rti: Index,
-    event: pathnodes::CmdType,
+    event: ::pathnodes::CmdType,
 ) -> PgResult<bool> {
     let relid = rte::rte_relid::call(run, root, rti);
     match event {
         CMD_INSERT | CMD_UPDATE | CMD_DELETE => ext::relation_has_row_triggers::call(relid, event),
         CMD_MERGE => Ok(false),
-        other => Err(types_error::PgError::error(alloc::format!(
+        other => Err(::types_error::PgError::error(alloc::format!(
             "unrecognized CmdType: {}",
             other
         ))),
@@ -1608,7 +1608,7 @@ pub fn has_transition_tables<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &PlannerInfo,
     rti: Index,
-    event: pathnodes::CmdType,
+    event: ::pathnodes::CmdType,
 ) -> PgResult<bool> {
     debug_assert_eq!(rte::rte_rtekind::call(run, root, rti), RTE_RELATION);
     // Foreign tables cannot have transition tables.
@@ -1621,7 +1621,7 @@ pub fn has_transition_tables<'mcx>(
             ext::relation_has_transition_tables::call(relid, event)
         }
         CMD_MERGE => Ok(false),
-        other => Err(types_error::PgError::error(alloc::format!(
+        other => Err(::types_error::PgError::error(alloc::format!(
             "unrecognized CmdType: {}",
             other
         ))),
@@ -1888,8 +1888,8 @@ fn seam_join_selectivity<'mcx>(
     operatorid: Oid,
     args: &[Expr],
     inputcollid: Oid,
-    jointype: pathnodes::JoinType,
-    sjinfo: Option<&pathnodes::SpecialJoinInfo>,
+    jointype: ::pathnodes::JoinType,
+    sjinfo: Option<&::pathnodes::SpecialJoinInfo>,
 ) -> PgResult<f64> {
     let arg_ids = intern_args(root, args, run.mcx())?;
     join_selectivity(run, root, operatorid, &arg_ids, inputcollid, jointype as i16, sjinfo)
@@ -1903,8 +1903,8 @@ fn seam_function_selectivity<'mcx>(
     inputcollid: Oid,
     is_join: bool,
     var_relid: i32,
-    jointype: pathnodes::JoinType,
-    sjinfo: Option<&pathnodes::SpecialJoinInfo>,
+    jointype: ::pathnodes::JoinType,
+    sjinfo: Option<&::pathnodes::SpecialJoinInfo>,
 ) -> PgResult<f64> {
     let arg_ids = intern_args(root, args, run.mcx())?;
     function_selectivity(

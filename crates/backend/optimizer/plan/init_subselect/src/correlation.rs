@@ -9,7 +9,7 @@
 //! `SS_identify_outer_params`. They operate over this repo's lifetime-free
 //! [`Expr`] (the owned unified primnode enum), so the C
 //! `expression_tree_mutator` over `Node *` becomes
-//! [`expression_tree_mutator`](nodes_core::nodefuncs::expression_tree_mutator)
+//! [`expression_tree_mutator`](::nodes_core::nodefuncs::expression_tree_mutator)
 //! over `Expr`.
 //!
 //! `process_sublinks_mutator` calls `make_subplan` (in [`crate::subplan`]),
@@ -24,14 +24,14 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
-use pathnodes::PlannerInfo;
+use ::pathnodes::planner_run::PlannerRun;
+use ::pathnodes::PlannerInfo;
 
-use nodes_core::makefuncs::{make_andclause, make_orclause};
-use nodes_core::nodefuncs::expression_tree_mutator;
+use ::nodes_core::makefuncs::{make_andclause, make_orclause};
+use ::nodes_core::nodefuncs::expression_tree_mutator;
 use relnode_seams as bms;
 
 use crate::subplan::make_subplan;
@@ -125,7 +125,7 @@ fn replace_correlation_vars_mutator<'mcx>(
     // mutate `root`, the recursion needs `&mut`. `expression_tree_mutator` is
     // infallible (`FnMut(Expr) -> Expr`), so we stash any error and surface it
     // after the walk, mirroring how other crates bridge fallible mutators.
-    let mut err: Option<types_error::PgError> = None;
+    let mut err: Option<::types_error::PgError> = None;
     let result = expression_tree_mutator(node, &mut |child: Expr| {
         if err.is_some() {
             return child;
@@ -135,7 +135,7 @@ fn replace_correlation_vars_mutator<'mcx>(
             Err(e) => {
                 err = Some(e);
                 // Return a harmless placeholder; the error short-circuits below.
-                Expr::Const(nodes_core::makefuncs::make_bool_const(true, false))
+                Expr::Const(::nodes_core::makefuncs::make_bool_const(true, false))
             }
         }
     });
@@ -280,7 +280,7 @@ fn process_sublinks_mutator<'mcx>(
     // definitely not at top qual level anymore.
     //
     // expression_tree_mutator(node, process_sublinks_mutator, &locContext)
-    let mut err: Option<types_error::PgError> = None;
+    let mut err: Option<::types_error::PgError> = None;
     let result = expression_tree_mutator(node, &mut |child: Expr| {
         if err.is_some() {
             return child;
@@ -292,7 +292,7 @@ fn process_sublinks_mutator<'mcx>(
             Ok(c) => c,
             Err(e) => {
                 err = Some(e);
-                Expr::Const(nodes_core::makefuncs::make_bool_const(true, false))
+                Expr::Const(::nodes_core::makefuncs::make_bool_const(true, false))
             }
         }
     });
@@ -323,7 +323,7 @@ pub fn SS_identify_outer_params(root: &mut PlannerInfo) {
 
     // Scan all query levels above this one. `root.parent_root` is the owned box
     // chain (C `PlannerInfo *parent_root`); we walk it by reference.
-    let mut outer_params: pathnodes::Relids = None;
+    let mut outer_params: ::pathnodes::Relids = None;
     let mut proot_opt = root.parent_root.as_deref();
     while let Some(proot) = proot_opt {
         // Include ordinary Var/PHV/Aggref/GroupingFunc/ReturningExpr params.

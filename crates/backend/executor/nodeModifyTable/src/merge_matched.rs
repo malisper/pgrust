@@ -2,8 +2,8 @@
 //! `merge` family because the C function (~535 lines) is large enough to
 //! body-port independently of the rest of the MERGE path.
 
-use mcx::Mcx;
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
+use ::mcx::Mcx;
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
 use types_error::{
     PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
     ERRCODE_T_R_SERIALIZATION_FAILURE,
@@ -12,12 +12,12 @@ use ::nodes::nodes::CmdType;
 use ::nodes::modifytable::{MergeMatchKind, MERGE_WHEN_MATCHED, MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
     MERGE_WHEN_NOT_MATCHED_BY_TARGET};
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
-use types_tableam::tableam::{
+use ::types_tableam::tableam::{
     LockWaitPolicy, Snapshot, TM_Result, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 };
 use snapshot::{SnapshotData, SnapshotType};
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::lifecycle::ExecProcessReturning;
 use crate::{ModifyTableContext, UpdateContext};
@@ -282,9 +282,9 @@ pub fn ExecMergeMatched<'mcx>(
             let mut result: TM_Result;
             let mut update_cxt = UpdateContext {
                 crossPartUpdate: false,
-                updateIndexes: types_tableam::tableam::TU_UpdateIndexes::TU_None,
+                updateIndexes: ::types_tableam::tableam::TU_UpdateIndexes::TU_None,
                 // C: zero-initialized stack field, overwritten by ExecUpdateAct.
-                lockmode: types_tableam::tableam::LockTupleMode::LockTupleKeyShare,
+                lockmode: ::types_tableam::tableam::LockTupleMode::LockTupleKeyShare,
             };
 
             // Test condition, if any. In the absence of any condition, we
@@ -359,11 +359,11 @@ pub fn ExecMergeMatched<'mcx>(
                     // exactly the fields any consumer reads (`mas_action`'s
                     // commandType/matchKind/overriding), mirroring how
                     // ExecInitMerge builds the pooled state.
-                    mtstate.mt_merge_action = Some(mcx::alloc_in(
+                    mtstate.mt_merge_action = Some(::mcx::alloc_in(
                         mcx,
                         ::nodes::modifytable::MergeActionState {
                             type_: ::nodes::nodes::T_MergeActionState,
-                            mas_action: Some(mcx::alloc_in(
+                            mas_action: Some(::mcx::alloc_in(
                                 mcx,
                                 ::nodes::modifytable::MergeAction {
                                     matchKind: action_match_kind,
@@ -465,11 +465,11 @@ pub fn ExecMergeMatched<'mcx>(
                     // mtstate->mt_merge_action = relaction; (see the CMD_UPDATE
                     // arm — materialize an owned MergeActionState for the active
                     // action so consumers attribute the running WHEN clause.)
-                    mtstate.mt_merge_action = Some(mcx::alloc_in(
+                    mtstate.mt_merge_action = Some(::mcx::alloc_in(
                         mcx,
                         ::nodes::modifytable::MergeActionState {
                             type_: ::nodes::nodes::T_MergeActionState,
-                            mas_action: Some(mcx::alloc_in(
+                            mas_action: Some(::mcx::alloc_in(
                                 mcx,
                                 ::nodes::modifytable::MergeAction {
                                     matchKind: action_match_kind,
@@ -937,13 +937,13 @@ fn finish<'mcx>(
 }
 
 /// `RelationGetRelid(resultRelInfo->ri_RelationDesc)`.
-fn relation_oid(estate: &EStateData<'_>, rri: RriId) -> types_core::Oid {
+fn relation_oid(estate: &EStateData<'_>, rri: RriId) -> ::types_core::Oid {
     estate
         .result_rel(rri)
         .ri_RelationDesc
         .as_ref()
         .map(|r| r.rd_id)
-        .unwrap_or(types_core::INVALID_OID)
+        .unwrap_or(::types_core::INVALID_OID)
 }
 
 /// An `alias()` of `ri_RelationDesc` (shared, no release authority).

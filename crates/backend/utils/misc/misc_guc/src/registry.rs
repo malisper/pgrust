@@ -21,7 +21,7 @@ use types_error::{
     ERRCODE_INVALID_TRANSACTION_STATE, ERRCODE_UNDEFINED_OBJECT, ERROR, LOG, WARNING,
 };
 use types_acl::{AclResult, ACL_SET};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_guc::{
     GucContext, GucSource, GUC_ALLOW_IN_PARALLEL, GUC_IS_NAME, GUC_NO_RESET, GUC_UNIT, PGC_BACKEND,
     PGC_INTERNAL, PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET, PGC_SU_BACKEND, PGC_S_CLIENT,
@@ -29,7 +29,7 @@ use types_guc::{
     PGC_S_GLOBAL, PGC_S_OVERRIDE, PGC_S_SESSION, PGC_S_USER, PGC_USERSET,
 };
 
-use guc_tables::GucHookExtra;
+use ::guc_tables::GucHookExtra;
 
 use crate::enum_lookup::{
     config_enum_get_options, config_enum_lookup_by_name, config_enum_lookup_by_value,
@@ -39,7 +39,7 @@ use crate::model::{
     config_var_val, config_var_value, GucStack, SharedExtra, GUC_NEEDS_REPORT, GUC_PENDING_RESTART,
     GUC_LOCAL, GUC_SAVE, GUC_SET, GUC_SET_LOCAL,
 };
-use types_guc::GUC_REPORT;
+use ::types_guc::GUC_REPORT;
 use crate::name::{guc_name_eq, MAP_OLD_GUC_NAMES};
 use crate::units::{
     convert_int_from_base_unit, convert_real_from_base_unit, get_config_unit_name, parse_int,
@@ -142,14 +142,14 @@ impl GucRegistry {
             config_group::CUSTOM_OPTIONS,
             Some("GUC placeholder variable"),
             None,
-            types_guc::GUC_NO_SHOW_ALL
-                | types_guc::GUC_NOT_IN_SAMPLE
-                | types_guc::GUC_CUSTOM_PLACEHOLDER,
+            ::types_guc::GUC_NO_SHOW_ALL
+                | ::types_guc::GUC_NOT_IN_SAMPLE
+                | ::types_guc::GUC_CUSTOM_PLACEHOLDER,
             config_type::PGC_STRING,
         );
         let var = GucVariable::String(config_string {
             gen,
-            variable: &guc_tables::vars::GucPlaceholderVariable,
+            variable: &::guc_tables::vars::GucPlaceholderVariable,
             value: None,
             boot_val: None,
             check_hook: None,
@@ -372,7 +372,7 @@ fn check_can_set(
     }
 
     // GUC_NOT_WHILE_SEC_REST (guc.c:3629).
-    if record.flags & types_guc::GUC_NOT_WHILE_SEC_REST != 0 {
+    if record.flags & ::types_guc::GUC_NOT_WHILE_SEC_REST != 0 {
         if crate::seam::in_local_user_id_change::call() {
             return Ok(AccessCheck::Reject(err(
                 ERRCODE_INSUFFICIENT_PRIVILEGE,
@@ -1925,7 +1925,7 @@ fn reject(elevel: ErrorLevel, e: PgError) -> PgResult<i32> {
         // Below ERROR the C ereport(elevel) is emitted (if interesting), and the
         // set returns 0.
         if message_level_is_interesting(elevel) {
-            utils_error::emit_error_report_for(&e);
+            ::utils_error::emit_error_report_for(&e);
         }
         Ok(0)
     }
@@ -1936,7 +1936,7 @@ fn reject(elevel: ErrorLevel, e: PgError) -> PgResult<i32> {
 /// reset_source. The stack/parallel/report bookkeeping is part of the stack
 /// subsystem (deferred).
 pub fn reset_all_options(reg: &mut GucRegistry) {
-    use types_guc::GUC_NO_RESET_ALL;
+    use ::types_guc::GUC_NO_RESET_ALL;
     for var in reg.iter_mut() {
         let flags = var.gen().flags;
         let ctx = var.gen().context;

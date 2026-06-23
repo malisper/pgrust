@@ -2,8 +2,8 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_error::PgError;
+use ::mcx::Mcx;
+use ::types_error::PgError;
 use pathnodes::{
     EcId, IndexClause, IndexOptInfo, NodeId, PathId, PlannerInfo, RelId, Relids,
     BackwardScanDirection, ForwardScanDirection,
@@ -34,7 +34,7 @@ use crate::util::{relids_add_members, relids_copy, relids_is_subset, relids_unio
 pub fn create_index_paths<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
 ) -> Result<(), PgError> {
     // Skip the whole mess if no indexes.
@@ -45,7 +45,7 @@ pub fn create_index_paths<'mcx>(
     // Bitmap paths are collected and then dealt with at the end.
     let mut bitindexpaths: Vec<PathId> = Vec::new();
     let mut bitjoinpaths: Vec<PathId> = Vec::new();
-    let mut joinorclauses: Vec<pathnodes::RinfoId> = Vec::new();
+    let mut joinorclauses: Vec<::pathnodes::RinfoId> = Vec::new();
 
     // Examine each index in turn.
     let nindexes = root.rel(rel).indexlist.len();
@@ -198,7 +198,7 @@ fn path_req_outer(root: &PlannerInfo, path: PathId) -> Relids {
 pub fn consider_index_join_clauses<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     rclauseset: &IndexClauseSet,
@@ -254,7 +254,7 @@ pub fn consider_index_join_clauses<'mcx>(
 pub fn consider_index_join_outer_rels<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     rclauseset: &IndexClauseSet,
@@ -344,7 +344,7 @@ pub fn consider_index_join_outer_rels<'mcx>(
 pub fn get_join_index_paths<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     rclauseset: &IndexClauseSet,
@@ -436,7 +436,7 @@ pub fn eclass_already_used(
 pub fn get_index_paths<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     clauses: &IndexClauseSet,
@@ -469,7 +469,7 @@ pub fn get_index_paths<'mcx>(
                 let p = root.path(ipath);
                 let base = p.base();
                 let sel = match p {
-                    pathnodes::PathNode::IndexPath(ip) => ip.indexselectivity,
+                    ::pathnodes::PathNode::IndexPath(ip) => ip.indexselectivity,
                     _ => 1.0,
                 };
                 (base.pathkeys.is_empty(), sel)
@@ -506,7 +506,7 @@ pub fn get_index_paths<'mcx>(
 pub fn build_index_paths<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    run: &pathnodes::planner_run::PlannerRun<'mcx>,
+    run: &::pathnodes::planner_run::PlannerRun<'mcx>,
     rel: RelId,
     index: &IndexOptInfo,
     clauses: &IndexClauseSet,
@@ -579,7 +579,7 @@ pub fn build_index_paths<'mcx>(
 
     let mut orderbyclauses: Vec<NodeId> = Vec::new();
     let mut orderbyclausecols: Vec<i32> = Vec::new();
-    let useful_pathkeys: Vec<pathnodes::PathKey>;
+    let useful_pathkeys: Vec<::pathnodes::PathKey>;
 
     if index_is_ordered && pathkeys_possibly_useful {
         let index_pathkeys = build_index_pathkeys(root, mcx, index, ForwardScanDirection);
@@ -732,6 +732,6 @@ fn relids_del_member(a: Relids, x: i32) -> Relids {
     if words.is_empty() {
         None
     } else {
-        Some(alloc::boxed::Box::new(pathnodes::Bitmapset { words }))
+        Some(alloc::boxed::Box::new(::pathnodes::Bitmapset { words }))
     }
 }

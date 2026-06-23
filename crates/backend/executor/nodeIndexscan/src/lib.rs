@@ -70,13 +70,13 @@ use ::nodes::nodebitmapindexscan::IndexArrayKeyInfo;
 use ::nodes::nodeindexscan::IndexScan;
 use ::nodes::primnodes::Expr;
 use nodes::{EStateData, EcxtId, PlanStateData, SlotId};
-use types_scan::scankey::{
+use ::types_scan::scankey::{
     ScanKeyData, StrategyNumber, InvalidStrategy, SK_ISNULL, SK_ORDER_BY, SK_ROW_END, SK_ROW_HEADER,
     SK_ROW_MEMBER, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,
 };
-use types_scan::sdir::ScanDirection;
-use types_sortsupport::SortSupportData;
-use types_tuple::heaptuple::Datum;
+use ::types_scan::sdir::ScanDirection;
+use ::types_sortsupport::SortSupportData;
+use ::types_tuple::heaptuple::Datum;
 
 /// `EXEC_FLAG_EXPLAIN_ONLY` (executor/executor.h) — "EXPLAIN, no ANALYZE".
 pub const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
@@ -805,7 +805,7 @@ pub fn ExecInitIndexScan<'mcx>(
         let states = execExpr::exec_init_expr_list::call(&orig, &mut indexstate.ss.ps, estate)?;
         indexstate.indexorderbyorig.clear();
         for st in states.into_iter().flatten() {
-            indexstate.indexorderbyorig.push(mcx::alloc_in(mcx, st)?);
+            indexstate.indexorderbyorig.push(::mcx::alloc_in(mcx, st)?);
         }
     }
 
@@ -962,7 +962,7 @@ fn exec_index_build_scan_keys_into<'mcx>(
     let n_scan_keys = quals.len();
 
     // Allocate array for ScanKey structs: one per qual.
-    let mut scan_keys: PgVec<ScanKeyData> = mcx::vec_with_capacity_in(mcx, n_scan_keys)?;
+    let mut scan_keys: PgVec<ScanKeyData> = ::mcx::vec_with_capacity_in(mcx, n_scan_keys)?;
     for _ in 0..n_scan_keys {
         scan_keys.push(ScanKeyData::empty());
     }
@@ -972,7 +972,7 @@ fn exec_index_build_scan_keys_into<'mcx>(
     let mut n_runtime_keys = *out.num_runtime_keys as usize;
 
     // array_keys: as large as it could possibly be (one per qual).
-    let mut array_keys: PgVec<IndexArrayKeyInfo> = mcx::vec_with_capacity_in(mcx, n_scan_keys)?;
+    let mut array_keys: PgVec<IndexArrayKeyInfo> = ::mcx::vec_with_capacity_in(mcx, n_scan_keys)?;
     let mut n_array_keys: usize = 0;
 
     let indnkeyatts = index.indnkeyatts();
@@ -1369,8 +1369,8 @@ fn exec_index_eval_array_keys_into<'mcx>(
         // elem_values holds the canonical per-element Datums deconstructed from
         // the array; sk_argument takes the first element directly (canonical).
         let mut elem_values: PgVec<Datum<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, num_elems)?;
-        let mut elem_nulls: PgVec<bool> = mcx::vec_with_capacity_in(mcx, num_elems)?;
+            ::mcx::vec_with_capacity_in(mcx, num_elems)?;
+        let mut elem_nulls: PgVec<bool> = ::mcx::vec_with_capacity_in(mcx, num_elems)?;
         for (d, n) in pairs.iter() {
             elem_values.push(d.clone_in(mcx)?);
             elem_nulls.push(*n);
@@ -1649,7 +1649,7 @@ pub fn ExecIndexScanInitializeWorker<'mcx>(
 
     if instrument {
         let shared = indexam::index_scan_resolve_shared_info::call(piscan)?;
-        node.iss_SharedInfo = Some(mcx::alloc_in(mcx, shared)?);
+        node.iss_SharedInfo = Some(::mcx::alloc_in(mcx, shared)?);
     }
 
     if !parallel_aware {
@@ -1698,7 +1698,7 @@ pub fn ExecIndexScanRetrieveInstrumentation<'mcx>(
         num_workers: shared.num_workers,
         winstrument,
     };
-    node.iss_SharedInfo = Some(mcx::alloc_in(mcx, copy)?);
+    node.iss_SharedInfo = Some(::mcx::alloc_in(mcx, copy)?);
     Ok(())
 }
 
@@ -1833,7 +1833,7 @@ fn plan_node_id(node: &IndexScanState<'_>) -> PgResult<i32> {
 fn relation_get_descr<'mcx>(
     estate: &EStateData<'mcx>,
     node: &IndexScanState<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     let mcx = estate.es_query_cxt;
     let rel = node
         .ss

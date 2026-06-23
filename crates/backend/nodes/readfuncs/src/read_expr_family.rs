@@ -6,7 +6,7 @@
 //! exact order the OUT side wrote them.
 //!
 //! The family-private field readers below mirror the `READ_*_FIELD` macros using
-//! the public `nodes_core::read` tokenizer (`pg_strtok` / `node_read` /
+//! the public `::nodes_core::read` tokenizer (`pg_strtok` / `node_read` /
 //! `debackslash`) and the crate-level helpers (`read_int_field`, `read_oid_field`,
 //! …). They do not reuse `lib.rs`'s private `read_string_field` / Expr-list
 //! readers because those are not exported; the local copies are byte-identical.
@@ -16,7 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgString};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{
     self as pn, ArrayCoerceExpr, ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr,
@@ -30,7 +30,7 @@ use ::nodes::primnodes::{
     SetToDefault, SubscriptingRef, WindowFunc, XmlExprOp, XmlOptionType,
 };
 
-use nodes_core::read;
+use ::nodes_core::read;
 
 use crate::{
     atoi_i64, atoui_u64, elog_error, read_bool_field, read_enum_field, read_int_field,
@@ -1183,7 +1183,7 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::primnodes::SubLink<'m
                 // The sub-`Query` is read into `mcx`; box it in `mcx` and keep the
                 // `'mcx` lifetime to match the `SubLink<'mcx>.subselect` field (no
                 // `'static` erasure — the node is arena-bound to `mcx`).
-                Some(mcx::alloc_in(mcx, q)?)
+                Some(::mcx::alloc_in(mcx, q)?)
             }
             None => {
                 return Err(elog_error(
@@ -1433,9 +1433,9 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodes_core::read::string_to_node;
-    use outfuncs::out_node;
-    use mcx::MemoryContext;
+    use ::nodes_core::read::string_to_node;
+    use ::outfuncs::out_node;
+    use ::mcx::MemoryContext;
     use ::nodes::primnodes::{Expr, Var, VarReturningType};
 
     extern crate std;
@@ -1483,7 +1483,7 @@ mod tests {
         let mcx = ctx.mcx();
 
         let te = ::nodes::primnodes::TargetEntry {
-            expr: Some(mcx::alloc_in(mcx, Expr::Var(mk_var()?)).expect("alloc")),
+            expr: Some(::mcx::alloc_in(mcx, Expr::Var(mk_var()?)).expect("alloc")),
             resno: 1,
             resname: None,
             ressortgroupref: 1,
@@ -1523,9 +1523,9 @@ mod tests {
         };
         let node = Node::mk_expr(mcx, Expr::Aggref(aggref))?;
 
-        let text = outfuncs::nodeToString(mcx, &node).expect("out");
+        let text = ::outfuncs::nodeToString(mcx, &node).expect("out");
         let parsed = string_to_node(mcx, text.as_str()).expect("read");
-        let text2 = outfuncs::nodeToString(mcx, &parsed).expect("re-out");
+        let text2 = ::outfuncs::nodeToString(mcx, &parsed).expect("re-out");
         assert_eq!(text.as_str(), text2.as_str(), "Aggref round-trip not stable");
 
         let parsed = PgBox::into_inner(parsed);
@@ -1628,9 +1628,9 @@ mod tests {
         });
         let node = Node::mk_expr(mcx, sublink)?;
 
-        let text = outfuncs::nodeToString(mcx, &node).expect("out");
+        let text = ::outfuncs::nodeToString(mcx, &node).expect("out");
         let parsed = string_to_node(mcx, text.as_str()).expect("read");
-        let text2 = outfuncs::nodeToString(mcx, &parsed).expect("re-out");
+        let text2 = ::outfuncs::nodeToString(mcx, &parsed).expect("re-out");
         assert_eq!(text.as_str(), text2.as_str(), "SubLink round-trip not stable");
 
         let parsed = PgBox::into_inner(parsed);

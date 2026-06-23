@@ -5,7 +5,7 @@
 //! `init_params` fills this struct on the stack as it processes a CREATE/ALTER
 //! SEQUENCE option list, so it derives `Default` + `Clone`.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// `FormData_pg_sequence` (`catalog/pg_sequence.h`):
 ///

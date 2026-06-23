@@ -6,8 +6,8 @@
 //! ResourceOwner; resource owners dissolve into RAII owner values here
 //! (docs/query-lifecycle-raii.md), so those parameters drop out.
 
-use types_core::SubTransactionId;
-use types_error::PgResult;
+use ::types_core::SubTransactionId;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `GetPortalByName(name)` (portalmem.c) lending the named cursor's live
@@ -81,13 +81,13 @@ seam_core::seam!(
         name: &str,
         allow_dup: bool,
         dup_silent: bool,
-    ) -> types_error::PgResult<portal::Portal>
+    ) -> ::types_error::PgResult<portal::Portal>
 );
 
 seam_core::seam!(
     /// `CreateNewPortal()` (portalmem.c:235) — create an unnamed portal with a
     /// generated nonconflicting name. Allocates / can `ereport(ERROR)`.
-    pub fn create_new_portal() -> types_error::PgResult<portal::Portal>
+    pub fn create_new_portal() -> ::types_error::PgResult<portal::Portal>
 );
 
 seam_core::seam!(
@@ -96,7 +96,7 @@ seam_core::seam!(
     pub fn portal_set_visible(
         portal: &portal::Portal,
         value: bool,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -113,7 +113,7 @@ seam_core::seam!(
         portal: &portal::Portal,
         source_text: &str,
         plan: nodes::nodeindexscan::PlannedStmt<'_>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -136,7 +136,7 @@ seam_core::seam!(
         command_tag: portal::CommandTag,
         stmts: &[nodes::nodeindexscan::PlannedStmt<'_>],
         cplan: portal::CachedPlanHandle,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -147,31 +147,31 @@ seam_core::seam!(
     pub fn copy_param_list_into_portal(
         portal: &portal::Portal,
         params: nodes::portalcmds::ParamListInfo,
-    ) -> types_error::PgResult<nodes::portalcmds::ParamListInfo>
+    ) -> ::types_error::PgResult<nodes::portalcmds::ParamListInfo>
 );
 
 seam_core::seam!(
     /// `GetPortalByName(name)` (portalmem.c) — look up an open portal by name;
     /// `None` when absent (the C returns NULL / an invalid portal).
-    pub fn get_portal_by_name(name: &str) -> types_error::PgResult<Option<portal::Portal>>
+    pub fn get_portal_by_name(name: &str) -> ::types_error::PgResult<Option<portal::Portal>>
 );
 
 seam_core::seam!(
     /// `PortalHashTableDeleteAll()` (portalmem.c) — `CLOSE ALL`: drop every
     /// open portal. Runs portal cleanup hooks; can `ereport(ERROR)`.
-    pub fn portal_hash_table_delete_all() -> types_error::PgResult<()>
+    pub fn portal_hash_table_delete_all() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `PortalDrop(portal, isTopCommit)` (portalmem.c) — drop a portal (runs
     /// its cleanup hook). Can `ereport(ERROR)`.
-    pub fn portal_drop(portal: &portal::Portal, is_top_commit: bool) -> types_error::PgResult<()>
+    pub fn portal_drop(portal: &portal::Portal, is_top_commit: bool) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `MarkPortalActive(portal)` (portalmem.c) — check for improper portal
     /// reentrancy and set status to PORTAL_ACTIVE. Can `ereport(ERROR)`.
-    pub fn mark_portal_active(portal: &portal::Portal) -> types_error::PgResult<()>
+    pub fn mark_portal_active(portal: &portal::Portal) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -181,13 +181,13 @@ seam_core::seam!(
     /// result tuple descriptor into its hold context (owned by portalmem) so it
     /// survives the executor shutdown, storing the copy back on the portal.
     /// Fallible: copying allocates.
-    pub fn copy_tup_desc_into_hold_context(portal: &portal::Portal) -> types_error::PgResult<()>
+    pub fn copy_tup_desc_into_hold_context(portal: &portal::Portal) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `MarkPortalFailed(portal)` (portalmem.c) — set status to PORTAL_FAILED
     /// (error-abort path). Can `ereport(ERROR)`.
-    pub fn mark_portal_failed(portal: &portal::Portal) -> types_error::PgResult<()>
+    pub fn mark_portal_failed(portal: &portal::Portal) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -199,15 +199,15 @@ seam_core::seam!(
     /// not an ambient setter pair.
     pub fn with_portal_globals(
         portal: &portal::Portal,
-        f: &mut dyn FnMut() -> types_error::PgResult<()>,
-    ) -> types_error::PgResult<()>
+        f: &mut dyn FnMut() -> ::types_error::PgResult<()>,
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `MemoryContextDeleteChildren(portal->portalContext)` (mcxt.c, reached
     /// via portalmem which owns the portal context) — release subsidiary
     /// memory of the portal's context.
-    pub fn memory_context_delete_children(portal: &portal::Portal) -> types_error::PgResult<()>
+    pub fn memory_context_delete_children(portal: &portal::Portal) -> ::types_error::PgResult<()>
 );
 
 // --- backend-utils-init-postinit consumer (portalmem.c) ---
@@ -215,5 +215,5 @@ seam_core::seam!(
 seam_core::seam!(
     /// `EnablePortalManager()` (portalmem.c): set up the portal hashtable and
     /// memory context. `Err` carries its OOM surface.
-    pub fn enable_portal_manager() -> types_error::PgResult<()>
+    pub fn enable_portal_manager() -> ::types_error::PgResult<()>
 );

@@ -6,10 +6,10 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use types_cluster::CopyForClusterResult;
+use ::types_cluster::CopyForClusterResult;
 use types_core::{MultiXactId, TransactionId};
-use types_error::PgResult;
-use rel::Relation;
+use ::types_error::PgResult;
+use ::rel::Relation;
 
 seam_core::seam!(
     /// `table_relation_copy_for_cluster(OldHeap, NewHeap, OldIndex, use_sort,

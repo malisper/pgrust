@@ -10,8 +10,8 @@
 //! `array_in` for these identifier-only literals (strip the braces, split on
 //! commas, trim ASCII whitespace) without an fmgr dispatch.
 
-use adt_misc::CatalogForeignKeyRow;
-use types_core::Oid;
+use ::adt_misc::CatalogForeignKeyRow;
+use ::types_core::Oid;
 
 /// `sys_fk_relationships[]` (catalog/system_fk_info.h): one row per system
 /// catalog foreign-key relationship. Columns: referencing catalog OID,

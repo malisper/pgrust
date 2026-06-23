@@ -13,16 +13,16 @@ use crate::keystone::{
     C_LANGUAGE_ID, INTERNAL_LANGUAGE_ID, OBJECT_AGGREGATE, OBJECT_FUNCTION, OBJECT_PROCEDURE,
     SQL_LANGUAGE_ID,
 };
-use catalog_namespace::QualifiedNameGetCreationNamespace;
+use ::catalog_namespace::QualifiedNameGetCreationNamespace;
 use functioncmds_seams::{
     self as seam, AlterFunctionChanges, ProcedureCreateArgs,
 };
 use lsyscache_seams as lsc;
 use guc_seams as guc_seam;
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use types_acl::{ACLCHECK_OK, ACL_CREATE, ACL_USAGE};
-use types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::catalog_dependency::ObjectAddress;
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INTERNAL_ERROR,
@@ -154,7 +154,7 @@ pub struct InterpretedParameters {
     /// `pg_node_tree` text plus its object references — mirrors the prosqlbody
     /// path (`interpret_sql_body` serializes up front, `ProcedureCreate` just
     /// stores the text). `text: None` when there are no defaults.
-    pub parameter_defaults: functioncmds_seams::CookedParameterDefaults,
+    pub parameter_defaults: ::functioncmds_seams::CookedParameterDefaults,
     pub variadic_arg_type: Oid,
     pub required_result_type: Oid,
 }
@@ -192,8 +192,8 @@ pub fn interpret_function_parameter_list<'mcx>(
     /* Cooked DEFAULT-expression nodes accumulate here (one per defaulted input
      * parameter), in mcx, until they are serialized into the `proargdefaults`
      * `List` after the scan. */
-    let mut parameter_defaults: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
-        mcx::PgVec::new_in(mcx);
+    let mut parameter_defaults: ::mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+        ::mcx::PgVec::new_in(mcx);
 
     /* Scan the list and extract data into work arrays */
     let cells: Vec<&FunctionParameter> = parameters
@@ -443,7 +443,7 @@ pub fn interpret_function_parameter_list<'mcx>(
             parameter_defaults
                 .try_reserve(1)
                 .map_err(|_| mcx.oom(1))?;
-            parameter_defaults.push(mcx::alloc_in(mcx, def)?);
+            parameter_defaults.push(::mcx::alloc_in(mcx, def)?);
             have_defaults = true;
         } else {
             if isinput && have_defaults {

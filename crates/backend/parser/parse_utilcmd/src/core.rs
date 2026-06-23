@@ -14,8 +14,8 @@
 //! the arena `Mcx` so subroutines can allocate new accumulator vectors / nodes.
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 use ::nodes::parsestmt::ParseState;
 use ::nodes::value::StringNode;
@@ -25,7 +25,7 @@ pub type NodePtr<'mcx> = PgBox<'mcx, Node<'mcx>>;
 
 /// `makeString(str)` (`nodes/value.h`) — wrap a string in a `String` value node.
 pub fn make_string<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         Node::mk_string(mcx, StringNode {
             sval: PgString::from_str_in(s, mcx)?,

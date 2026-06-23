@@ -13,7 +13,7 @@
 //! those calls stays in this crate.
 //!
 //! The C `Relation` (`struct RelationData *`) crosses as a
-//! [`rel::Relation`] handle: the relcache owner copies the consumed slice
+//! [`::rel::Relation`] handle: the relcache owner copies the consumed slice
 //! of its entry into the caller's `mcx`, and this unit arms the handle with the
 //! close path (`relation_close`: relcache `RelationClose` then the lock
 //! release). `Drop` on the handle is the abort path
@@ -21,11 +21,11 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::primitive::{Oid, OidIsValid};
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use rel::{Relation, RelationData};
-use types_storage::lock::{AccessShareLock, NoLock, LOCKMODE, MAX_LOCKMODES};
+use ::types_storage::lock::{AccessShareLock, NoLock, LOCKMODE, MAX_LOCKMODES};
 
 /// Install this unit's seam implementations (the `relation_open` family
 /// declared in `backend-access-common-relation-seams`).
@@ -64,13 +64,13 @@ fn relation_closer(relid: Oid, lockmode: LOCKMODE) -> PgResult<()> {
 /// refcount). A `None` here would mean the entry vanished between the two
 /// lookups, which cannot happen within a single open — treated as the same
 /// `could not open relation` error C raises for the copy path.
-fn relation_id_get_relation_cell(relationId: Oid) -> PgResult<rel::RelcacheCell> {
+fn relation_id_get_relation_cell(relationId: Oid) -> PgResult<::rel::RelcacheCell> {
     match relcache_seams::relation_id_get_relation_cell::call(relationId)? {
         // Erase the concrete `Rc<RefCell<RelationData>>` to the handle's
         // type-erased `Rc<dyn Any>` pin (lossless `Rc` unsizing coercion). The
         // `strong_count` pin rides along; the concrete cell is recovered by
         // downcast at the typed accessors.
-        Some(cell) => Ok(cell as rel::RelcacheCell),
+        Some(cell) => Ok(cell as ::rel::RelcacheCell),
         None => Err(
             PgError::error(format!("could not open relation with OID {relationId}"))
                 .with_sqlstate(ERRCODE_INTERNAL_ERROR),
@@ -83,7 +83,7 @@ fn relation_id_get_relation_cell(relationId: Oid) -> PgResult<rel::RelcacheCell>
 /// `relation_open` / `try_relation_open`: the lock-held-by-me self-check, the
 /// temp-namespace flag, and `pgstat_init_relation`.
 fn finish_open<'mcx>(
-    cell: rel::RelcacheCell,
+    cell: ::rel::RelcacheCell,
     data: RelationData<'mcx>,
     lockmode: LOCKMODE,
     check_bootstrap: bool,
@@ -99,7 +99,7 @@ fn finish_open<'mcx>(
 /// "caller must already hold a lock" assertion — which guards opens of
 /// *existing* relations — does not apply.
 fn finish_open_inner<'mcx>(
-    cell: rel::RelcacheCell,
+    cell: ::rel::RelcacheCell,
     data: RelationData<'mcx>,
     lockmode: LOCKMODE,
     check_bootstrap: bool,

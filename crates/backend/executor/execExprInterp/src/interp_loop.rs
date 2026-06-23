@@ -55,7 +55,7 @@
 // step-payload values (`ConstVal`, `HashDatumInitValue`) carry, and what the
 // interpreter loop's cell helpers now operate on directly.
 use types_tuple::heaptuple::Datum;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::execexpr::ExprEvalOp::*;
 
 use ::nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ExprState, ResultCell, ResultCellId};

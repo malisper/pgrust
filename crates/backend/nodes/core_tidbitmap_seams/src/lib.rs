@@ -9,8 +9,8 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
-use execparallel::DsaAreaHandle;
+use ::types_error::PgResult;
+use ::execparallel::DsaAreaHandle;
 use tidbitmap::{dsa_pointer, TBMIterateOutcome, TBMIterator, TIDBitmap};
 
 seam_core::seam!(

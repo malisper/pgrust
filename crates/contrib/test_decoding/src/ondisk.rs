@@ -6,10 +6,10 @@
 //! `change->data.tp.newtuple->tuple` points its `t_data` at. We rebuild a
 //! deformable [`FormedTuple`] from it so `heap_getattr` can read each column.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::FormedTuple;
 
-use reorderbuffer_seams::DecodedTuple;
+use ::reorderbuffer_seams::DecodedTuple;
 
 /// Rebuild a deformable [`FormedTuple`] from the decoded on-disk tuple image.
 /// `read_on_page_full` decodes the fixed header, captures the null bitmap, and

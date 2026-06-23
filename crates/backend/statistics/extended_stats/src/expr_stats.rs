@@ -15,11 +15,11 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
-use rel::Relation;
+use ::rel::Relation;
 use statistics::{
     AnalyzeAttrFetchFunc, VacAttrStats, STATISTIC_NUM_SLOTS,
     Anum_pg_statistic_starelid, Anum_pg_statistic_staattnum, Anum_pg_statistic_stainherit,
@@ -31,15 +31,15 @@ use statistics::{
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
 use table::{table_close, table_open};
-use table_tableam::table_slot_create;
+use ::table_tableam::table_slot_create;
 use execExpr_seams as expr_seam;
 use execTuples_seams as slot_seam;
 use execUtils_seams as exec_util_seam;
-use arrayfuncs::construct::construct_md_array_values;
-use scalar_datum_core::datum_copy_v;
-use attoptcache::get_attribute_options;
-use lsyscache_seams::get_rel_type_id;
-use types_storage::lock::RowExclusiveLock;
+use ::arrayfuncs::construct::construct_md_array_values;
+use ::scalar_datum_core::datum_copy_v;
+use ::attoptcache::get_attribute_options;
+use ::lsyscache_seams::get_rel_type_id;
+use ::types_storage::lock::RowExclusiveLock;
 
 use commands_analyze_seams as analyze;
 
@@ -54,13 +54,13 @@ const INVALID_ATTR_NUMBER: i32 = 0;
 pub fn decode_stxexprs<'mcx>(mcx: Mcx<'mcx>, exprs_string: &str) -> PgResult<Vec<Expr<'mcx>>> {
     // exprs = (List *) stringToNode(exprsString);
     let node = read_seams::string_to_node::call(mcx, exprs_string)?;
-    let node = mcx::PgBox::into_inner(node);
+    let node = ::mcx::PgBox::into_inner(node);
 
     let mut out: Vec<Expr<'mcx>> = Vec::new();
     match node.into_list() {
         Some(elems) => {
             for elem in elems {
-                let inner = mcx::PgBox::into_inner(elem);
+                let inner = ::mcx::PgBox::into_inner(elem);
                 if let Some(e) = inner.into_expr() {
                     out.push(e);
                 }
@@ -69,7 +69,7 @@ pub fn decode_stxexprs<'mcx>(mcx: Mcx<'mcx>, exprs_string: &str) -> PgResult<Vec
         None => {
             // Defensive: a bare expression node (not wrapped in a List).
             let node = read_seams::string_to_node::call(mcx, exprs_string)?;
-            if let Some(e) = mcx::PgBox::into_inner(node).into_expr() {
+            if let Some(e) = ::mcx::PgBox::into_inner(node).into_expr() {
                 out.push(e);
             }
         }
@@ -338,7 +338,7 @@ pub fn serialize_expr_stats<'mcx>(
                     .collect();
                 // construct_array_builtin(numdatums, nnum, FLOAT4OID): float4 is
                 // pass-by-value, length 4, 'i' alignment.
-                let arry = arrayfuncs::construct::construct_array_values(
+                let arry = ::arrayfuncs::construct::construct_array_values(
                     mcx, &numdatums[..], FLOAT4OID, 4, true, b'i',
                 )?;
                 values[i] = Datum::ByRef(arry);
@@ -351,7 +351,7 @@ pub fn serialize_expr_stats<'mcx>(
         i = Anum_pg_statistic_stavalues1 - 1;
         for k in 0..STATISTIC_NUM_SLOTS {
             if stats.numvalues[k] > 0 {
-                let arry = arrayfuncs::construct::construct_array_values(
+                let arry = ::arrayfuncs::construct::construct_array_values(
                     mcx,
                     &stats.stavalues[k][..],
                     stats.statypid[k],

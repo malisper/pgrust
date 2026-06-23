@@ -54,7 +54,7 @@ const EXEC_FLAG_BACKWARD: i32 = 0x0008;
 /// `EXEC_FLAG_MARK` (executor/executor.h) — need mark/restore.
 const EXEC_FLAG_MARK: i32 = 0x0010;
 
-use types_storage::lock::NoLock;
+use ::types_storage::lock::NoLock;
 
 /// `elog(ERROR, msg)` — plain internal error.
 fn elog(message: &'static str) -> PgError {
@@ -590,7 +590,7 @@ pub fn ExecBitmapIndexScanRetrieveInstrumentation<'mcx>(
     //
     // The clone reproduces the `memcpy` of exactly `num_workers` slots.
     let copy = clone_shared_info(mcx, shared)?;
-    node.biss_SharedInfo = Some(mcx::alloc_in(mcx, copy)?);
+    node.biss_SharedInfo = Some(::mcx::alloc_in(mcx, copy)?);
 
     Ok(())
 }

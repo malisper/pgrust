@@ -19,8 +19,8 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use types_core::instrument::{instr_time, BufferUsage};
+use ::mcx::Mcx;
+use ::types_core::instrument::{instr_time, BufferUsage};
 use types_error::{PgError, PgResult};
 use types_explain::{ExplainFormat, ExplainState};
 use ::nodes::nodeindexscan::PlannedStmt;
@@ -28,12 +28,12 @@ use ::nodes::nodes::{ntag, Node};
 use ::nodes::params::ParamListInfo;
 use ::nodes::parsestmt::IntoClause;
 use ::nodes::queryenvironment::QueryEnvironment;
-use types_scan::sdir::{ForwardScanDirection, NoMovementScanDirection};
+use ::types_scan::sdir::{ForwardScanDirection, NoMovementScanDirection};
 
 use createas_seams as createas_s;
 use explain_format as fmt;
 use explain_seams as seams;
-use explain_seams::Bookkeeping;
+use ::explain_seams::Bookkeeping;
 use execMain_seams as execmain_s;
 use instrument as instr;
 use mmgr_fgram as mmgr;
@@ -68,7 +68,7 @@ mod tests;
 /// anyway), so we re-raise the message under our error world.
 fn bridge_mmgr<T>(r: Result<T, mmgr_error::PgError>) -> PgResult<T> {
     r.map_err(|e| {
-        error_fgram::ereport(types_error::ERROR)
+        error_fgram::ereport(::types_error::ERROR)
             .errmsg(e.message().to_string())
             .into_error()
     })
@@ -401,7 +401,7 @@ fn explain_one_plan<'mcx>(
     //   else if (es->serialize != NONE) dest = CreateExplainSerializeDestReceiver(es);
     //   else dest = None_Receiver;
     let serialize =
-        es.serialize != types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_NONE;
+        es.serialize != ::types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_NONE;
     let dest = match into {
         // `create_into_rel_dest_receiver_setup` builds the DR_intorel receiver AND
         // binds its run-state with `into` (the owned-model stand-in for C storing
@@ -415,7 +415,7 @@ fn explain_one_plan<'mcx>(
         None if serialize => {
             // format: EXPLAIN_SERIALIZE_TEXT -> 0 (wire text), BINARY -> 1.
             let fmt: i16 =
-                if es.serialize == types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_BINARY {
+                if es.serialize == ::types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_BINARY {
                     1
                 } else {
                     0
@@ -473,7 +473,7 @@ fn explain_one_plan<'mcx>(
     let serialize_metrics = if serialize {
         printtup_s::get_serialization_metrics::call(dest)
     } else {
-        types_core::instrument::SerializeMetrics::default()
+        ::types_core::instrument::SerializeMetrics::default()
     };
 
     // dest->rDestroy(dest): the discard receiver has no destroy side effect.
@@ -621,10 +621,10 @@ fn bytes_to_kilobytes(b: u64) -> u64 {
 /// about query output volume (the SERIALIZE option's collected metrics).
 fn explain_print_serialize(
     es: &mut ExplainState<'_>,
-    metrics: &types_core::instrument::SerializeMetrics,
+    metrics: &::types_core::instrument::SerializeMetrics,
 ) -> PgResult<()> {
     // We shouldn't get called for EXPLAIN_SERIALIZE_NONE.
-    let format = if es.serialize == types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_TEXT {
+    let format = if es.serialize == ::types_explain::ExplainSerializeOption::EXPLAIN_SERIALIZE_TEXT {
         "text"
     } else {
         // Assert(es->serialize == EXPLAIN_SERIALIZE_BINARY);

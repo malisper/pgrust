@@ -21,7 +21,7 @@
 //!
 //! `lpad`/`rpad`/`translate`/`repeat` build a worst-case working buffer (the C
 //! `ret = palloc(bytelen)` / `result = palloc(tlen)`) charged to the caller's
-//! [`Mcx`] via [`mcx::vec_with_capacity_in`], exactly mirroring the C palloc in
+//! [`Mcx`] via [`::mcx::vec_with_capacity_in`], exactly mirroring the C palloc in
 //! the current memory context. The trim variants and `chr`/`ascii` allocate
 //! only the returned value itself.
 //!
@@ -55,11 +55,11 @@ pub fn init_seams() {
 use formatting::{str_casefold, str_initcap, str_tolower, str_toupper};
 use common_wchar::{pg_encoding_max_length, pg_utf8_islegal};
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
-use types_wchar::encoding::PG_UTF8;
+use ::types_wchar::encoding::PG_UTF8;
 
 use postgres_seams as tcop;
 use mbutils_seams as mb;
@@ -260,7 +260,7 @@ pub fn lpad<'mcx>(
     // ret = (text *) palloc(bytelen); — worst-case buffer charged to the
     // caller's context.
     let cap = (bytelen - VARHDRSZ).max(0) as usize;
-    let mut ret: PgVec<u8> = mcx::vec_with_capacity_in(mcx, cap)?;
+    let mut ret: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, cap)?;
 
     let mut m = len - s1len;
 
@@ -339,7 +339,7 @@ pub fn rpad<'mcx>(
     }
 
     let cap = (bytelen - VARHDRSZ).max(0) as usize;
-    let mut ret: PgVec<u8> = mcx::vec_with_capacity_in(mcx, cap)?;
+    let mut ret: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, cap)?;
 
     let mut m = len - s1len;
 
@@ -409,7 +409,7 @@ fn dotrim<'mcx>(
             // inefficient checks in the inner loops. C: palloc(stringlen *
             // sizeof(char *)).
             let mut stringchars: PgVec<(usize, usize)> =
-                mcx::vec_with_capacity_in(mcx, stringlen as usize)?;
+                ::mcx::vec_with_capacity_in(mcx, stringlen as usize)?;
             {
                 let mut p: usize = 0;
                 let mut len = stringlen as usize;
@@ -422,7 +422,7 @@ fn dotrim<'mcx>(
             }
 
             let mut setchars: PgVec<(usize, usize)> =
-                mcx::vec_with_capacity_in(mcx, setlen as usize)?;
+                ::mcx::vec_with_capacity_in(mcx, setlen as usize)?;
             {
                 let mut p: usize = 0;
                 let mut len = setlen as usize;
@@ -522,7 +522,7 @@ fn dotrim<'mcx>(
     }
 
     // Return selected portion of string
-    mcx::slice_in(mcx, &string[start..start + stringlen as usize])
+    ::mcx::slice_in(mcx, &string[start..start + stringlen as usize])
 }
 
 /// C: `dobyteatrim` — common implementation for the bytea trim variants. Returns
@@ -538,7 +538,7 @@ fn dobyteatrim<'mcx>(
     let setlen = set.len() as i32;
 
     if stringlen <= 0 || setlen <= 0 {
-        return mcx::slice_in(mcx, string);
+        return ::mcx::slice_in(mcx, string);
     }
 
     let mut m = stringlen;
@@ -584,7 +584,7 @@ fn dobyteatrim<'mcx>(
         }
     }
 
-    mcx::slice_in(mcx, &string[ptr as usize..ptr as usize + m as usize])
+    ::mcx::slice_in(mcx, &string[ptr as usize..ptr as usize + m as usize])
 }
 
 /// C: `byteatrim` — `btrim(bytea, bytea)`.
@@ -643,7 +643,7 @@ pub fn translate<'mcx>(
 
     let mut m = s.len() as i32;
     if m <= 0 {
-        return mcx::slice_in(mcx, string);
+        return ::mcx::slice_in(mcx, string);
     }
     // source walks `string`; source_end == s.len().
     let mut source: usize = 0;
@@ -666,7 +666,7 @@ pub fn translate<'mcx>(
     }
 
     let cap = (bytelen - VARHDRSZ).max(0) as usize;
-    let mut result: PgVec<u8> = mcx::vec_with_capacity_in(mcx, cap)?;
+    let mut result: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, cap)?;
 
     while m > 0 {
         let source_len = pg_mblen_range(&s[source..source_end]) as usize;
@@ -803,7 +803,7 @@ pub fn chr<'mcx>(mcx: Mcx<'mcx>, arg: i32) -> PgResult<PgVec<'mcx, u8>> {
             bytes = 2;
         }
 
-        let mut wch: PgVec<u8> = mcx::vec_with_capacity_in(mcx, bytes)?;
+        let mut wch: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, bytes)?;
         for _ in 0..bytes {
             wch.push(0);
         }
@@ -843,7 +843,7 @@ pub fn chr<'mcx>(mcx: Mcx<'mcx>, arg: i32) -> PgResult<PgVec<'mcx, u8>> {
             .with_sqlstate(ERRCODE_PROGRAM_LIMIT_EXCEEDED));
         }
 
-        let mut buf: PgVec<u8> = mcx::vec_with_capacity_in(mcx, 1)?;
+        let mut buf: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, 1)?;
         buf.push(cvalue as u8);
         Ok(buf)
     }
@@ -868,7 +868,7 @@ pub fn repeat<'mcx>(mcx: Mcx<'mcx>, string: &[u8], mut count: i32) -> PgResult<P
     }
 
     let cap = (tlen - VARHDRSZ).max(0) as usize;
-    let mut result: PgVec<u8> = mcx::vec_with_capacity_in(mcx, cap)?;
+    let mut result: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, cap)?;
 
     for _ in 0..count {
         result.extend_from_slice(sp);

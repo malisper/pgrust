@@ -19,7 +19,7 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// Projection of a `DefElem`'s `arg` value node (`nodes/value.h`) — the
 /// variants `defGetString`/`defGetBoolean`/etc. switch on. `None` for the

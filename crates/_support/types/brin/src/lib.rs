@@ -13,11 +13,11 @@ extern crate alloc;
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::{AttrNumber, BlockNumber};
-use types_error::PgResult;
-use rel::Relation;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::TupleDescData;
-use types_typcache::TypeCacheEntry;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::TupleDescData;
+use ::types_typcache::TypeCacheEntry;
 
 // ---------------------------------------------------------------------------
 // On-disk BrinTuple header layout (brin_tuple.h).
@@ -132,13 +132,13 @@ pub struct MinmaxMultiOpaque {
     /// `extra_procinfos[MINMAX_MAX_PROCNUMS]`: the resolved distance-support
     /// function `Oid` (`InvalidOid` marks an uninitialized slot).
     pub extra_procinfos:
-        [core::cell::Cell<types_core::primitive::Oid>; MINMAX_MULTI_MAX_PROCNUMS],
+        [core::cell::Cell<::types_core::primitive::Oid>; MINMAX_MULTI_MAX_PROCNUMS],
     /// `cached_subtype`.
-    pub cached_subtype: core::cell::Cell<types_core::primitive::Oid>,
+    pub cached_subtype: core::cell::Cell<::types_core::primitive::Oid>,
     /// `strategy_procinfos[BTMaxStrategyNumber]`: each slot's resolved
     /// comparison function `Oid` (`InvalidOid` marks an uninitialized slot).
     pub strategy_procinfos:
-        [core::cell::Cell<types_core::primitive::Oid>; BT_MAX_STRATEGY_NUMBER],
+        [core::cell::Cell<::types_core::primitive::Oid>; BT_MAX_STRATEGY_NUMBER],
 }
 
 /// `MinmaxOpaque` (`brin_minmax.c`): the per-attribute strategy-procinfo cache.
@@ -154,10 +154,10 @@ pub struct MinmaxMultiOpaque {
 #[derive(Debug, Default)]
 pub struct MinmaxOpaque {
     /// `cached_subtype`.
-    pub cached_subtype: core::cell::Cell<types_core::primitive::Oid>,
+    pub cached_subtype: core::cell::Cell<::types_core::primitive::Oid>,
     /// `strategy_procinfos[BTMaxStrategyNumber]`: each slot's resolved
     /// comparison function `Oid` (`InvalidOid` marks an uninitialized slot).
-    pub strategy_procinfos: [core::cell::Cell<types_core::primitive::Oid>; BT_MAX_STRATEGY_NUMBER],
+    pub strategy_procinfos: [core::cell::Cell<::types_core::primitive::Oid>; BT_MAX_STRATEGY_NUMBER],
 }
 
 /// `InclusionOpaque` (`brin_inclusion.c`): the per-attribute support- and
@@ -180,15 +180,15 @@ pub struct InclusionOpaque {
     /// `extra_procinfos[INCLUSION_MAX_PROCNUMS]`: each optional support
     /// procedure's resolved function `Oid` (`InvalidOid` marks an
     /// uninitialized slot).
-    pub extra_procinfos: [core::cell::Cell<types_core::primitive::Oid>; INCLUSION_MAX_PROCNUMS],
+    pub extra_procinfos: [core::cell::Cell<::types_core::primitive::Oid>; INCLUSION_MAX_PROCNUMS],
     /// `extra_proc_missing[INCLUSION_MAX_PROCNUMS]`: a support procedure looked
     /// up and found absent (do not search again).
     pub extra_proc_missing: [core::cell::Cell<bool>; INCLUSION_MAX_PROCNUMS],
     /// `cached_subtype`.
-    pub cached_subtype: core::cell::Cell<types_core::primitive::Oid>,
+    pub cached_subtype: core::cell::Cell<::types_core::primitive::Oid>,
     /// `strategy_procinfos[RTMaxStrategyNumber]`: each slot's resolved
     /// comparison function `Oid` (`InvalidOid` marks an uninitialized slot).
-    pub strategy_procinfos: [core::cell::Cell<types_core::primitive::Oid>; RT_MAX_STRATEGY_NUMBER],
+    pub strategy_procinfos: [core::cell::Cell<::types_core::primitive::Oid>; RT_MAX_STRATEGY_NUMBER],
 }
 
 /// `BloomOpaque` (`brin_bloom.c`): the per-attribute hash-procinfo cache.
@@ -204,7 +204,7 @@ pub struct InclusionOpaque {
 pub struct BloomOpaque {
     /// `extra_procinfos[BLOOM_MAX_PROCNUMS]`: the resolved hash function `Oid`
     /// (`InvalidOid` marks an uninitialized slot).
-    pub extra_procinfos: [core::cell::Cell<types_core::primitive::Oid>; BLOOM_MAX_PROCNUMS],
+    pub extra_procinfos: [core::cell::Cell<::types_core::primitive::Oid>; BLOOM_MAX_PROCNUMS],
 }
 
 /// `BrinDesc` (`brin_internal.h`): descriptor that enables decoding a BRIN
@@ -304,14 +304,14 @@ pub enum BrinMemValue<'mcx> {
 #[derive(Debug)]
 pub struct MinmaxMultiRanges<'mcx> {
     /// `typid`: the indexed column's type Oid.
-    pub typid: types_core::primitive::Oid,
+    pub typid: ::types_core::primitive::Oid,
     /// `colloid`: the collation Oid.
-    pub colloid: types_core::primitive::Oid,
+    pub colloid: ::types_core::primitive::Oid,
     /// `attno`: the indexed attribute number (1-based).
     pub attno: AttrNumber,
     /// `cmp`: the cached less-than comparison function `Oid` (`InvalidOid` when
     /// not yet resolved).
-    pub cmp: types_core::primitive::Oid,
+    pub cmp: ::types_core::primitive::Oid,
     /// `nranges`: number of regular ranges in `values`.
     pub nranges: i32,
     /// `nsorted`: number of `nvalues` point values that are sorted.

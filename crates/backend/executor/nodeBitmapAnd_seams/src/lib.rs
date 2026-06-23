@@ -10,11 +10,11 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodebitmapand::BitmapAnd;
 use ::nodes::nodes::Node;
 use nodes::{EStateData, PlanStateNode};
-use tidbitmap::TIDBitmap;
+use ::tidbitmap::TIDBitmap;
 
 seam_core::seam!(
     /// `ExecInitBitmapAnd(node, estate, eflags)` (nodeBitmapAnd.c): begin all of

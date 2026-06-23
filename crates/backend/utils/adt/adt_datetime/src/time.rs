@@ -17,11 +17,11 @@
 //!
 //! Idiomatic surface: plain `i32`/`i64`/`f64`, owned values, `Option`,
 //! `Result`, `&str`.  No raw pointers, `extern "C"`, `c_int`, `libc`, or
-//! `CStr`/`CString`.  Fallible cores return [`types_error::PgResult`].
+//! `CStr`/`CString`.  Fallible cores return [`::types_error::PgResult`].
 
 
-use mcx::Mcx;
-use types_numeric::var::NumericVar;
+use ::mcx::Mcx;
+use ::types_numeric::var::NumericVar;
 use types_datetime::{
     Interval, HOURS_PER_DAY, MAX_TIME_PRECISION, MINS_PER_HOUR, SECS_PER_MINUTE, USECS_PER_DAY,
     USECS_PER_SEC,
@@ -33,14 +33,14 @@ use types_error::{
 use types_datetime::{fsec_t, TimeADT};
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
-use pgtime::pg_tm;
+use ::pgtime::pg_tm;
 
 use crate::decode::{DecodeTimeOnly, DecodeUnits, ParseDateTime};
 use crate::encode::EncodeTimeOnly;
 use crate::numeric_helpers::int64_div_fast_to_numericvar;
 use crate::settings::date_style;
 
-const MAXDATEFIELDS: usize = types_datetime::MAXDATEFIELDS as usize;
+const MAXDATEFIELDS: usize = ::types_datetime::MAXDATEFIELDS as usize;
 
 // ---------------------------------------------------------------------------
 // tm2time / time2tm
@@ -200,12 +200,12 @@ pub fn time_in_safe(
     let mut fsec: fsec_t = 0;
     let mut dtype: i32 = 0;
     let mut tz: i32 = 0;
-    let mut extra = types_datetime::DateTimeErrorExtra::default();
+    let mut extra = ::types_datetime::DateTimeErrorExtra::default();
 
     // C time_in: workbuf[MAXDATELEN + 1] (date.c:1454).
     let mut dterr = ParseDateTime(
         str,
-        types_datetime::MAXDATELEN as usize + 1,
+        ::types_datetime::MAXDATELEN as usize + 1,
         &mut field,
         &mut ftype,
         MAXDATEFIELDS,

@@ -13,15 +13,15 @@
 
 use latch_seams as latch_seams;
 use lwlock_seams as lwlock_seams;
-use postgres_seams::check_for_interrupts;
-use types_core::ProcNumber;
+use ::postgres_seams::check_for_interrupts;
+use ::types_core::ProcNumber;
 use types_error::{PgError, PgResult};
-use types_storage::lock::LOCKMASK;
-use types_storage::storage::{
+use ::types_storage::lock::LOCKMASK;
+use ::types_storage::storage::{
     LOCK_MANAGER_LWLOCK_OFFSET, NUM_LOCK_PARTITIONS, PGPROC,
 };
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
-use types_storage::LWLockMode;
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
+use ::types_storage::LWLockMode;
 
 use crate::proc_lifecycle;
 use crate::proc_shmem;
@@ -41,7 +41,7 @@ pub fn set_my_proc_recovery_conflict_pending(value: bool) {
 /// `ProcGlobal->statusFlags[MyProc->pgxactoff]` mirror is kept in sync, exactly
 /// as C does.
 pub fn set_my_proc_in_vacuum_flags(is_wraparound: bool) -> PgResult<()> {
-    use types_storage::storage::{PROC_IN_VACUUM, PROC_VACUUM_FOR_WRAPAROUND};
+    use ::types_storage::storage::{PROC_IN_VACUUM, PROC_VACUUM_FOR_WRAPAROUND};
 
     // LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
     lwlock_seams::lwlock_acquire_proc_array::call(LWLockMode::LW_EXCLUSIVE)?;
@@ -82,7 +82,7 @@ pub fn set_my_proc_in_vacuum_flags(is_wraparound: bool) -> PgResult<()> {
 /// LWLockRelease(ProcArrayLock);
 /// ```
 pub fn set_indexsafe_procflags() -> PgResult<()> {
-    use types_storage::storage::PROC_IN_SAFE_IC;
+    use ::types_storage::storage::PROC_IN_SAFE_IC;
 
     // This should only be called before installing xid or xmin in MyProc;
     // otherwise concurrent processes could see an Xmin that moves backwards.
@@ -111,7 +111,7 @@ pub fn set_indexsafe_procflags() -> PgResult<()> {
 /// parallel-vacuum worker must carry ONLY the `PROC_IN_VACUUM` flag (we don't
 /// support parallel vacuum for autovacuum). Used in the worker entry `Assert`.
 pub fn my_proc_status_flags_is_in_vacuum_only() -> bool {
-    use types_storage::storage::PROC_IN_VACUUM;
+    use ::types_storage::storage::PROC_IN_VACUUM;
     proc_shmem::proc_status_flags_shared(proc_shmem::my_proc_number()) == PROC_IN_VACUUM
 }
 

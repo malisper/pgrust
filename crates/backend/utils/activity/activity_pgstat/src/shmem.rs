@@ -20,12 +20,12 @@
 use core::sync::atomic::Ordering;
 
 use types_core::{Oid, Size};
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::PgStat_Kind;
-use types_pgstat::pgstat_internal::{
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::PgStat_Kind;
+use ::types_pgstat::pgstat_internal::{
     PgStat_HashKey, PgStat_ShmemControl, PgStatShared_Common, PgStatShared_HashEntry,
 };
-use types_storage::storage::INVALID_DSA_POINTER;
+use ::types_storage::storage::INVALID_DSA_POINTER;
 use types_storage::{
     DshashKeyKind, DshashParameters, DsaArea, DshashTable, LW_EXCLUSIVE, LW_SHARED,
     LWTRANCHE_PGSTATS_DATA, LWTRANCHE_PGSTATS_DSA,
@@ -607,7 +607,7 @@ pub fn pgstat_lock_entry_shared(entry_ref: &PgStat_EntryRef, nowait: bool) -> Pg
 
 fn pgstat_lock_entry_mode(
     entry_ref: &PgStat_EntryRef,
-    mode: types_storage::LWLockMode,
+    mode: ::types_storage::LWLockMode,
     nowait: bool,
 ) -> PgResult<bool> {
     if entry_ref.shared_stats.is_null() {

@@ -9,7 +9,7 @@
 //! returns the broken-down `(year, month, day)` by value instead of writing
 //! through out-pointers.
 
-use types_datetime::MONTHS_PER_YEAR;
+use ::types_datetime::MONTHS_PER_YEAR;
 
 /// Number of days in each month, indexed `[isleap][month-1]`.  The trailing
 /// `0` slot mirrors the C `day_tab[2][13]` shape (13 columns per row).

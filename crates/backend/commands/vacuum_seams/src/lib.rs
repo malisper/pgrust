@@ -18,17 +18,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use types_core::{bits32, MultiXactId, Oid, TransactionId};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use rel::{FormData_pg_class, Relation};
-use types_tuple::heaptuple::ItemPointerData;
-use types_vacuum::vacuum::VacuumParams;
-use types_storage::buf::BufferAccessStrategy;
-use types_vacuum::vacuumlazy::{TidStore, UpdateRelStatsArgs};
-use types_vacuum::vacuumparallel::{
+use ::types_tuple::heaptuple::ItemPointerData;
+use ::types_vacuum::vacuum::VacuumParams;
+use ::types_storage::buf::BufferAccessStrategy;
+use ::types_vacuum::vacuumlazy::{TidStore, UpdateRelStatsArgs};
+use ::types_vacuum::vacuumparallel::{
     IndexBulkDeleteResult, IndexVacuumInfo, VacDeadItemsInfo, VacuumSharedCostState,
 };
 use alloc::sync::Arc;
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 // =======================================================================
 // DTO structs that cross the outward seams (small value snapshots; the
@@ -99,7 +99,7 @@ seam_core::seam!(
     /// and its state live in the VACUUM driver; `callback_state_handle`
     /// identifies the state. Infallible (a pure membership test).
     pub fn vacuum_tid_is_dead(
-        tid: types_tuple::heaptuple::ItemPointerData,
+        tid: ::types_tuple::heaptuple::ItemPointerData,
         callback_state_handle: u64,
     ) -> bool
 );
@@ -115,7 +115,7 @@ seam_core::seam!(
     /// `memset(&params, 0, sizeof(VacuumParams)); vacuum_get_cutoffs(OldHeap,
     /// &params, &cutoffs)` (vacuum.c): freeze/cutoff computation for CLUSTER.
     pub fn vacuum_get_cutoffs(
-        old_heap: &rel::Relation<'_>,
+        old_heap: &::rel::Relation<'_>,
     ) -> PgResult<types_cluster::VacuumCutoffs>
 );
 
@@ -170,8 +170,8 @@ seam_core::seam!(pub fn search_syscache_class<'mcx>(
 // `find_all_inheritors` -> backend-catalog-pg-inherits-seams (owner-installed).
 seam_core::seam!(pub fn unlock_relation_oid(relid: Oid, lockmode: i32) -> PgResult<()>);
 // `relation_close` -> backend-access-table-table-seams (owner-installed).
-seam_core::seam!(pub fn lock_relation_id_for_session(rel: types_storage::lock::LockRelId, lockmode: i32) -> PgResult<()>);
-seam_core::seam!(pub fn unlock_relation_id_for_session(rel: types_storage::lock::LockRelId, lockmode: i32) -> PgResult<()>);
+seam_core::seam!(pub fn lock_relation_id_for_session(rel: ::types_storage::lock::LockRelId, lockmode: i32) -> PgResult<()>);
+seam_core::seam!(pub fn unlock_relation_id_for_session(rel: ::types_storage::lock::LockRelId, lockmode: i32) -> PgResult<()>);
 
 // ---- get_all_vacuum_rels seqscan --------------------------------------
 seam_core::seam!(pub fn scan_all_pg_class<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<PgClassScanRow<'mcx>>>);
@@ -247,7 +247,7 @@ seam_core::seam!(pub fn check_for_interrupts() -> PgResult<()>);
 seam_core::seam!(pub fn injection_point(name: String) -> PgResult<()>);
 // `cluster_rel_for_vacuum_full` -> backend-commands-cluster-seams::cluster_rel
 //   (vacuum opens the held relation NoLock and calls the real cluster_rel).
-seam_core::seam!(pub fn table_relation_vacuum<'mcx>(mcx: mcx::Mcx<'mcx>, rel: Relation<'mcx>, params: VacuumParams, bstrategy: BufferAccessStrategy) -> PgResult<()>);
+seam_core::seam!(pub fn table_relation_vacuum<'mcx>(mcx: ::mcx::Mcx<'mcx>, rel: Relation<'mcx>, params: VacuumParams, bstrategy: BufferAccessStrategy) -> PgResult<()>);
 seam_core::seam!(pub fn at_eoxact_guc(is_commit: bool, nestlevel: i32) -> PgResult<()>);
 // `get_user_id_and_sec_context` -> backend-utils-init-miscinit-seams.
 seam_core::seam!(pub fn set_user_id_and_sec_context(userid: Oid, sec_context: i32) -> PgResult<()>);
@@ -437,11 +437,11 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `FreeAccessStrategy(strategy)`.
-    pub fn free_access_strategy_pv(strategy: types_storage::buf::BufferAccessStrategy) -> PgResult<()>
+    pub fn free_access_strategy_pv(strategy: ::types_storage::buf::BufferAccessStrategy) -> PgResult<()>
 );
 seam_core::seam!(
     /// `GetAccessStrategyWithSize(BAS_VACUUM, ring_size)` — worker's own ring.
-    pub fn get_access_strategy_with_size_basvac(ring_size: i32) -> PgResult<types_storage::buf::BufferAccessStrategy>
+    pub fn get_access_strategy_with_size_basvac(ring_size: i32) -> PgResult<::types_storage::buf::BufferAccessStrategy>
 );
 seam_core::seam!(
     /// `GetAccessStrategyBufferCount(bstrategy)` — number of buffers in the

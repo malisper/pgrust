@@ -2,7 +2,7 @@
 //! `fix_infomask_from_infobits`, the header predicates, and the freeze applier.
 
 use super::*;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK, HEAP_XMAX_LOCK_ONLY,
 };
 

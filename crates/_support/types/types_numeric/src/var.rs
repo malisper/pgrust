@@ -2,7 +2,7 @@
 //!
 //! [`NumericVar`]`<'mcx>` is the idiomatic analogue of C's `NumericVar`: the
 //! computation-time representation operated on by `add_var`/`mul_var`/`div_var`/
-//! etc. Its digit buffer is a *charged* `mcx::PgVec<'mcx, NumericDigit>`, so the
+//! etc. Its digit buffer is a *charged* `::mcx::PgVec<'mcx, NumericDigit>`, so the
 //! `'mcx` lifetime (the memory context that owns the digits) threads through
 //! every numeric family — this is the keystone lifetime.
 //!
@@ -10,7 +10,7 @@
 //! [`NumericAggState`], [`GenerateSeriesNumericFctx`]) live here too: they bear
 //! charged buffers and so also carry `'mcx`.
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 
 use crate::{NumericDigit, NUMERIC_NEG, NUMERIC_NINF, NUMERIC_PINF, NUMERIC_POS};
 
@@ -114,7 +114,7 @@ pub struct NumericVar<'mcx> {
 impl<'mcx> NumericVar<'mcx> {
     /// A zero value (`0`, weight 0, dscale 0, no digits) in context `mcx`.
     #[inline]
-    pub fn zero(mcx: mcx::Mcx<'mcx>) -> Self {
+    pub fn zero(mcx: ::mcx::Mcx<'mcx>) -> Self {
         NumericVar {
             sign: NumericSign::Pos,
             weight: 0,
@@ -126,7 +126,7 @@ impl<'mcx> NumericVar<'mcx> {
 
     /// A special value (`NaN`/`PInf`/`NInf`); panics on a finite sign.
     #[inline]
-    pub fn special(mcx: mcx::Mcx<'mcx>, sign: NumericSign) -> Self {
+    pub fn special(mcx: ::mcx::Mcx<'mcx>, sign: NumericSign) -> Self {
         debug_assert!(sign.is_special());
         NumericVar {
             sign,
@@ -190,7 +190,7 @@ pub struct NumericSumAccum<'mcx> {
 impl<'mcx> NumericSumAccum<'mcx> {
     /// A fresh, all-zero accumulator backed by context `mcx`.
     #[inline]
-    pub fn new(mcx: mcx::Mcx<'mcx>) -> Self {
+    pub fn new(mcx: ::mcx::Mcx<'mcx>) -> Self {
         NumericSumAccum {
             ndigits: 0,
             weight: 0,
@@ -233,7 +233,7 @@ pub struct NumericAggState<'mcx> {
 impl<'mcx> NumericAggState<'mcx> {
     /// A fresh transition state backed by context `mcx`.
     #[inline]
-    pub fn new(mcx: mcx::Mcx<'mcx>, calc_sum_x2: bool) -> Self {
+    pub fn new(mcx: ::mcx::Mcx<'mcx>, calc_sum_x2: bool) -> Self {
         NumericAggState {
             calc_sum_x2,
             n: 0,

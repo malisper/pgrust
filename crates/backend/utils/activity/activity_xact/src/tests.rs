@@ -8,8 +8,8 @@
 use std::cell::RefCell;
 use std::sync::Once;
 
-use mcx::MemoryContext;
-use types_error::PgResult;
+use ::mcx::MemoryContext;
+use ::types_error::PgResult;
 
 use super::*;
 

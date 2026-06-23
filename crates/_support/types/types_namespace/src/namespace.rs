@@ -1,7 +1,7 @@
 //! `catalog/namespace.h` API vocabulary.
 
-use mcx::PgVec;
-use types_core::Oid;
+use ::mcx::PgVec;
+use ::types_core::Oid;
 
 /// `RVR_MISSING_OK` (`catalog/namespace.h`).
 pub const RVR_MISSING_OK: u32 = 1 << 0;

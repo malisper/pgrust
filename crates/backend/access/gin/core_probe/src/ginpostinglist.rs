@@ -27,10 +27,10 @@
 //! `TIDBitmap` is owned by the `tidbitmap` subsystem, reached through the
 //! `tbm_add_tuples` seam (the bitmap is the real `TIDBitmap` carrier).
 
-use types_error::PgResult;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use nodes_core_seams::tbm_add_tuples;
+use ::nodes_core_seams::tbm_add_tuples;
 
 /// `MaxHeapTuplesPerPageBits` (ginpostinglist.c:81) — bits used to encode the
 /// offset-number portion of an item pointer.

@@ -23,12 +23,12 @@
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
-use opclass::AMOP_SEARCH;
+use ::opclass::AMOP_SEARCH;
 
 // The opclass-form / member-row mirror types carried across the syscache seams
 // live in `types-hash` (shared by every AM validator); re-export so callers and
 // tests can name them through this crate as well.
-pub use hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
+pub use ::hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 
 use amvalidate_seams as amvalidate_seams;
 use regproc_seams as regproc_seams;
@@ -382,7 +382,7 @@ pub fn gistvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
 /// `OpFamilyMember` (`amapi.h`), mutated in place by [`gistadjustmembers`].
 /// Canonical definition lives in `opclass`; re-exported here so this
 /// crate names the same type (no duplicate definition).
-pub use opclass::OpFamilyMember;
+pub use ::opclass::OpFamilyMember;
 
 /// `gistadjustmembers(opfamilyoid, opclassoid, operators, functions)` —
 /// prechecking function for adding operators/functions to a GiST opfamily.

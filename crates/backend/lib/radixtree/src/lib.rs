@@ -44,7 +44,7 @@ use std::ptr::{self, NonNull};
 use std::slice;
 
 use lwlock_seams as lwlock;
-use lmgr_proc_seams::my_proc_number;
+use ::lmgr_proc_seams::my_proc_number;
 use dsa_seams as dsa;
 
 use types_core::{BlockNumber, OffsetNumber, Size};
@@ -54,7 +54,7 @@ use types_dsa::{
 use types_error::{PgError, PgResult};
 use ::nodes::bitmapset::{bitmapword, BITS_PER_BITMAPWORD};
 use types_storage::{DsaArea, LWLock, LWLockMode, LW_EXCLUSIVE, LW_SHARED};
-use types_vacuum::vacuumlazy::{TidStore, TidStoreIterHandle};
+use ::types_vacuum::vacuumlazy::{TidStore, TidStoreIterHandle};
 
 // ===========================================================================
 // Radix-tree constants (radixtree.h).
@@ -1319,7 +1319,7 @@ impl SharedRadixTree {
         debug_assert_ne!(area_handle, DSA_HANDLE_INVALID);
         debug_assert_ne!(handle, INVALID_DSA_POINTER);
 
-        let area = dsa::dsa_attach::call(area_handle as types_storage::dsa_handle)?;
+        let area = dsa::dsa_attach::call(area_handle as ::types_storage::dsa_handle)?;
         let control = shared_control(area, handle)?;
         if unsafe { control.as_ref().magic } != RT_RADIX_TREE_MAGIC {
             return Err(PgError::error("invalid TidStore shared radix tree"));

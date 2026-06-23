@@ -29,13 +29,13 @@
 //! `hashoidvector` and `oidvectorout` consume it.
 //!
 //! No `extern "C"`, no `*mut`/`*const`, no `libc`; soft errors flow through
-//! `backend-utils-error` / `types_error::SoftErrorContext`.
+//! `backend-utils-error` / `::types_error::SoftErrorContext`.
 
 pub mod fmgr_builtins;
 
 use types_core::{Oid, OIDOID};
 use types_error::{PgError, PgResult, SoftErrorContext, ERRCODE_DATATYPE_MISMATCH};
-use parsenodes::Node;
+use ::parsenodes::Node;
 
 // ===========================================================================
 // USER I/O ROUTINES

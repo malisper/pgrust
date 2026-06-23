@@ -39,14 +39,14 @@ pub mod planner_run;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     AttrNumber, BlockNumber, Cardinality, Cost, Index, Selectivity, Size,
 };
-pub use types_core::primitive::Oid;
-pub use types_core::fmgr::FmgrInfo;
+pub use ::types_core::primitive::Oid;
+pub use ::types_core::fmgr::FmgrInfo;
 pub use ::nodes::nodes::NodeTag;
 pub use ::nodes::primnodes::Expr;
-pub use hash::hsearch::HTAB;
+pub use ::hash::hsearch::HTAB;
 
 /* ==========================================================================
  * Custom join-search private state + the planner's saved-context token.

@@ -1,14 +1,14 @@
 //! Shared helpers used across the jsonfuncs modules: `JsonbValueAsText`
 //! (jsonfuncs.c:1805) and the internal-context name.
 
-use adt_jsonb::JsonbToCString;
-use adt_numeric::io::numeric_out;
-use utils_error::ereport;
-use types_error::error::ERROR;
+use ::adt_jsonb::JsonbToCString;
+use ::adt_numeric::io::numeric_out;
+use ::utils_error::ereport;
+use ::types_error::error::ERROR;
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
-use types_jsonb::jsonb::jbvType;
+use ::types_jsonb::jsonb::jbvType;
 
 /// The internal context name charged for this crate's one-shot text-output
 /// buffers, matching the C source unit name.
@@ -56,14 +56,14 @@ pub fn JsonbValueAsText<'mcx>(mcx: Mcx<'mcx>, v: &JsonbValue) -> PgResult<Option
             // v->val.boolean ? cstring_to_text_with_len("true", 4)
             //                : cstring_to_text_with_len("false", 5)
             let s: &[u8] = if *b { b"true" } else { b"false" };
-            let mut out = mcx::vec_with_capacity_in::<u8>(mcx, s.len())?;
+            let mut out = ::mcx::vec_with_capacity_in::<u8>(mcx, s.len())?;
             out.extend_from_slice(s);
             Ok(Some(out))
         }
 
         (jbvType::jbvString, JsonbValueData::String(s)) => {
             // cstring_to_text_with_len(v->val.string.val, v->val.string.len)
-            let mut out = mcx::vec_with_capacity_in::<u8>(mcx, s.len())?;
+            let mut out = ::mcx::vec_with_capacity_in::<u8>(mcx, s.len())?;
             out.extend_from_slice(s);
             Ok(Some(out))
         }
@@ -73,7 +73,7 @@ pub fn JsonbValueAsText<'mcx>(mcx: Mcx<'mcx>, v: &JsonbValue) -> PgResult<Option
             // return cstring_to_text(DatumGetCString(cstr));
             let s = numeric_out(mcx, num)?;
             let bytes = s.as_bytes();
-            let mut out = mcx::vec_with_capacity_in::<u8>(mcx, bytes.len())?;
+            let mut out = ::mcx::vec_with_capacity_in::<u8>(mcx, bytes.len())?;
             out.extend_from_slice(bytes);
             Ok(Some(out))
         }

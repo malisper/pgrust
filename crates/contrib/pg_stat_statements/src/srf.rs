@@ -3,15 +3,15 @@
 //!
 //! pgss's SQL functions are resolved as bare `PGFunction`s through the
 //! dynamic-loader builtin-library registry; a SETOF function reached this way
-//! runs in **materialize mode** via the `fmgr::mat_srf` sink (the
+//! runs in **materialize mode** via the `::fmgr::mat_srf` sink (the
 //! `dispatch_user_setof` path in execSRF). So the view function reads the
 //! caller's expected descriptor (for the API-version column count) and appends
 //! each row to the sink, rather than using `InitMaterializedSRF`.
 
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
-use fmgr::mat_srf::{self, MatCell};
-use fmgr::FunctionCallInfoBaseData;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
+use ::fmgr::mat_srf::{self, MatCell};
+use ::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 use crate::shmem::{self, entry_ref, pgss_hash, pgss_ref};
@@ -41,7 +41,7 @@ pub(crate) fn pg_stat_statements_internal(
     api_version: PgssVersion,
     showtext: bool,
 ) -> PgResult<()> {
-    use utils_error::ereport;
+    use ::utils_error::ereport;
     use types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
 
     let userid = miscinit::GetUserId();
@@ -268,7 +268,7 @@ fn resolve_api_version(requested: PgssVersion, natts: usize) -> PgResult<PgssVer
         // 1.1 should have been requested as 1.0 (legacy entry point).
         Some(PgssVersion::V1_1) if requested == PgssVersion::V1_0 => Ok(PgssVersion::V1_1),
         Some(ver) if ver == requested => Ok(ver),
-        _ => Err(types_error::PgError::error(
+        _ => Err(::types_error::PgError::error(
             "incorrect number of output arguments",
         )),
     }
@@ -318,7 +318,7 @@ fn push_numeric(row: &mut Vec<MatCell>, mcx: mcx::Mcx<'_>, s: &str) -> PgResult<
 pub(crate) fn pg_stat_statements_info(
     _fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Vec<u8>> {
-    use utils_error::ereport;
+    use ::utils_error::ereport;
     use types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
 
     if !shmem::is_initialized() {

@@ -10,9 +10,9 @@
 
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
-use types_core::primitive::{Oid, TimestampTz};
-use types_storage::storage::{dsa_pointer, dshash_table_handle};
-use types_storage::LWLock;
+use ::types_core::primitive::{Oid, TimestampTz};
+use ::types_storage::storage::{dsa_pointer, dshash_table_handle};
+use ::types_storage::LWLock;
 
 use crate::activity_pgstat::{
     PgStat_ArchiverStats, PgStat_CheckpointerStats, PgStat_FetchConsistency, PgStat_IO,
@@ -169,7 +169,7 @@ pub struct PgStatShared_Backend {
 /// `stats.stats[i]`; `locks[0]` also protects `stats.stat_reset_timestamp`.
 #[derive(Debug, Default)]
 pub struct PgStatShared_IO {
-    pub locks: [LWLock; types_core::init::BACKEND_NUM_TYPES],
+    pub locks: [LWLock; ::types_core::init::BACKEND_NUM_TYPES],
     pub stats: PgStat_IO,
 }
 

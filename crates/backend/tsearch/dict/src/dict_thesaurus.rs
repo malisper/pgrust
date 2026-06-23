@@ -5,7 +5,7 @@
 //! `nextentry`/`nextvariant` pointers and stashes a raw `LexemeInfo *` in
 //! `DictSubState.private_state`. This port replaces every pointer with an
 //! `Option<usize>` index into the carrying
-//! [`DictThesaurus`](tsearch::DictThesaurus)'s `arena`, reproducing
+//! [`DictThesaurus`](::tsearch::DictThesaurus)'s `arena`, reproducing
 //! `findVariant` / `matchIdSubst` / `checkMatch` 1:1.
 
 use alloc::format;
@@ -14,13 +14,13 @@ use alloc::vec::Vec;
 
 use define_seams::{def_get_string, DefElemArg};
 use dict_seams::{get_ts_dict_oid_from_name, subdict_lexize};
-use ts_locale_seams::readfile;
-use ts_utils_seams::get_tsearch_config_filename;
-use mbutils_seams::pg_mblen_range;
+use ::ts_locale_seams::readfile;
+use ::ts_utils_seams::get_tsearch_config_filename;
+use ::mbutils_seams::pg_mblen_range;
 
 use mcx::{Mcx, PgString, PgVec};
 use types_core::{uint16, uint32};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use tsearch::{
     DictThesaurus, LexemeInfo, OwnedTSLexeme, TSLexeme, TheLexeme, TheSubstitute, ThesaurusSubState,
     DT_USEASIS, TSL_ADDPOS,

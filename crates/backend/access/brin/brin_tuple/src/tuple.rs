@@ -7,7 +7,7 @@ use brin::{
     BRIN_PLACEHOLDER_MASK, SIZE_OF_BRIN_TUPLE,
 };
 use types_core::{BlockNumber, Size};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 use types_typcache::{TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN};
 

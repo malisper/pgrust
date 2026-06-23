@@ -5,17 +5,17 @@
 //! The embedded `JoinState`/`PlanState` head reuses [`crate::jointype::JoinStateData`]
 //! / [`PlanStateData`], the leading `Join` plan base reuses
 //! [`crate::jointype::Join`], the comparison support reuses
-//! [`types_sortsupport::SortSupportData`], and the executor-pool aliases follow
+//! [`::types_sortsupport::SortSupportData`], and the executor-pool aliases follow
 //! the owned model ([`SlotId`] for `TupleTableSlot *`, [`EcxtId`] for
 //! `ExprContext *`).
 
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_error::PgResult;
-use types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::types_core::primitive::Oid;
 use types_tuple::heaptuple::Datum;
-use types_sortsupport::SortSupportData;
+use ::types_sortsupport::SortSupportData;
 
 use crate::execexpr::ExprState;
 use crate::execnodes::{EcxtId, PlanStateData, SlotId};

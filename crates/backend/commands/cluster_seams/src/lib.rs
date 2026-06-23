@@ -8,12 +8,12 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_cluster::ClusterParams;
+use ::mcx::Mcx;
+use ::types_cluster::ClusterParams;
 use types_core::{MultiXactId, Oid, TransactionId};
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::lock::LOCKMODE;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::lock::LOCKMODE;
 
 seam_core::seam!(
     /// `cluster_rel(OldHeap, indexOid, params)` (cluster.c): cluster one

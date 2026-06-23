@@ -59,8 +59,8 @@ pub fn init_seams() {
     // CurrentMemoryContext, so a private scratch context is faithful.
     functioncmds_seams::record_support_dependency::set(
         |func_oid, new_support| {
-            use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-            use types_catalog::pg_proc::ProcedureRelationId;
+            use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+            use ::types_catalog::pg_proc::ProcedureRelationId;
             let depender = ObjectAddress {
                 classId: ProcedureRelationId,
                 objectId: func_oid,
@@ -121,7 +121,7 @@ pub fn init_seams() {
 fn aclcheck_error_language_seam(
     aclresult: types_acl::AclResult,
     objname: String,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     aclchk_seams::aclcheck_error::call(
         aclresult,
         nodes::parsenodes::ObjectType::Language,
@@ -138,9 +138,9 @@ fn alter_function_seam<'mcx>(
     _mcx: mcx::Mcx<'mcx>,
     pstate: &mut nodes::parsestmt::ParseState<'mcx>,
     stmt: &nodes::nodes::Node<'mcx>,
-) -> types_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
-    use parse_type::rich_node_to_parse;
-    use types_error::PgError;
+) -> ::types_error::PgResult<::types_catalog::catalog_dependency::ObjectAddress> {
+    use ::parse_type::rich_node_to_parse;
+    use ::types_error::PgError;
 
     let afs = match stmt.as_alterfunctionstmt() {
         Some(s) => s,
@@ -178,9 +178,9 @@ fn alter_function_seam<'mcx>(
 fn create_transform_seam<'mcx>(
     _mcx: mcx::Mcx<'mcx>,
     stmt: &nodes::nodes::Node<'mcx>,
-) -> types_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
-    use parse_type::rich_node_to_parse;
-    use types_error::PgError;
+) -> ::types_error::PgResult<::types_catalog::catalog_dependency::ObjectAddress> {
+    use ::parse_type::rich_node_to_parse;
+    use ::types_error::PgError;
 
     let cts = match stmt.as_createtransformstmt() {
         Some(s) => s,
@@ -224,9 +224,9 @@ fn create_function_seam<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     pstate: &mut nodes::parsestmt::ParseState<'mcx>,
     stmt: &nodes::nodes::Node<'mcx>,
-) -> types_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
-    use parse_type::rich_node_to_parse;
-    use types_error::PgError;
+) -> ::types_error::PgResult<::types_catalog::catalog_dependency::ObjectAddress> {
+    use ::parse_type::rich_node_to_parse;
+    use ::types_error::PgError;
 
     let cfs = match stmt.as_createfunctionstmt() {
         Some(s) => s,
@@ -307,9 +307,9 @@ fn create_function_seam<'mcx>(
 fn create_cast_seam<'mcx>(
     _mcx: mcx::Mcx<'mcx>,
     stmt: &nodes::nodes::Node<'mcx>,
-) -> types_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
-    use parse_type::rich_node_to_parse;
-    use types_error::PgError;
+) -> ::types_error::PgResult<::types_catalog::catalog_dependency::ObjectAddress> {
+    use ::parse_type::rich_node_to_parse;
+    use ::types_error::PgError;
 
     let ccs = match stmt.as_createcaststmt() {
         Some(s) => s,

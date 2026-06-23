@@ -5,10 +5,10 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::partition::PartitionDescData;
 use ::nodes::Opaque;
-use rel::Relation;
+use ::rel::Relation;
 
 seam_core::seam!(
     /// `DestroyPartitionDirectory(pdir)` (partdesc.c): release the partition

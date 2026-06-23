@@ -1,7 +1,7 @@
 //! Reorder-buffer vocabulary (`replication/reorderbuffer.h`), trimmed to the
 //! fields the logical-replication protocol writers consume.
 
-use mcx::PgVec;
+use ::mcx::PgVec;
 use types_core::{TimestampTz, TransactionId, XLogRecPtr};
 
 /// `RBTXN_IS_PREPARED` (`replication/reorderbuffer.h`): this transaction is a

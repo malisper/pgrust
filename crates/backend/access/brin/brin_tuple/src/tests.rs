@@ -4,13 +4,13 @@
 
 extern crate std;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use brin::{
     BrinDesc, BrinOpcInfo, BRIN_EMPTY_RANGE_MASK, BRIN_NULLS_MASK, BRIN_PLACEHOLDER_MASK,
     SIZE_OF_BRIN_TUPLE,
 };
-use types_core::NAMEDATALEN;
-use types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
+use ::types_core::NAMEDATALEN;
+use ::types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
 use types_typcache::{TypeCacheEntry, TYPSTORAGE_PLAIN};
 
 use crate::internal::{bitmaplen, maxalign, BrinTupleImage};
@@ -28,9 +28,9 @@ fn int4_typcache() -> TypeCacheEntry {
     }
 }
 
-fn index_tupdesc<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> mcx::PgBox<'mcx, TupleDescData<'mcx>> {
-    let mut compact_attrs = mcx::vec_with_capacity_in(mcx, natts).unwrap();
-    let mut attrs = mcx::vec_with_capacity_in(mcx, natts).unwrap();
+fn index_tupdesc<'mcx>(mcx: ::mcx::Mcx<'mcx>, natts: usize) -> ::mcx::PgBox<'mcx, TupleDescData<'mcx>> {
+    let mut compact_attrs = ::mcx::vec_with_capacity_in(mcx, natts).unwrap();
+    let mut attrs = ::mcx::vec_with_capacity_in(mcx, natts).unwrap();
     for i in 0..natts {
         compact_attrs.push(CompactAttribute {
             attcacheoff: -1,
@@ -68,7 +68,7 @@ fn index_tupdesc<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> mcx::PgBox<'mcx, Tu
             attcollation: 0,
         });
     }
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         TupleDescData {
             natts: natts as i32,
@@ -83,9 +83,9 @@ fn index_tupdesc<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> mcx::PgBox<'mcx, Tu
     .unwrap()
 }
 
-fn make_index_rel<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> rel::Relation<'mcx> {
+fn make_index_rel<'mcx>(mcx: ::mcx::Mcx<'mcx>, natts: usize) -> ::rel::Relation<'mcx> {
     use rel::{FormData_pg_class, RelationData};
-    use types_storage::RelFileLocator;
+    use ::types_storage::RelFileLocator;
     let rd = RelationData {
         rd_id: 1,
         rd_locator: RelFileLocator {
@@ -93,9 +93,9 @@ fn make_index_rel<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> rel::Relation<'mcx
             dbOid: 0,
             relNumber: 0,
         },
-        rd_backend: types_core::INVALID_PROC_NUMBER,
+        rd_backend: ::types_core::INVALID_PROC_NUMBER,
         rd_rel: FormData_pg_class {
-            relname: mcx::PgString::from_str_in("brinidx", mcx).unwrap(),
+            relname: ::mcx::PgString::from_str_in("brinidx", mcx).unwrap(),
             relnamespace: 0,
             relowner: 0,
             relrowsecurity: false,
@@ -121,23 +121,23 @@ fn make_index_rel<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> rel::Relation<'mcx
         rd_att: index_tupdesc(mcx, natts),
         rd_options: None,
         rd_index: None,
-        rd_opcintype: mcx::PgVec::new_in(mcx),
-        rd_opfamily: mcx::PgVec::new_in(mcx),
-        rd_indoption: mcx::PgVec::new_in(mcx),
-        rd_indcollation: mcx::PgVec::new_in(mcx),
+        rd_opcintype: ::mcx::PgVec::new_in(mcx),
+        rd_opfamily: ::mcx::PgVec::new_in(mcx),
+        rd_indoption: ::mcx::PgVec::new_in(mcx),
+        rd_indcollation: ::mcx::PgVec::new_in(mcx),
         rd_trigdesc: None,
         pgstat_enabled: false,
     };
-    rel::Relation::open(rd, None)
+    ::rel::Relation::open(rd, None)
 }
 
-fn brin_desc<'mcx>(mcx: mcx::Mcx<'mcx>, natts: usize) -> BrinDesc<'mcx> {
-    let mut bd_info = mcx::vec_with_capacity_in(mcx, natts).unwrap();
+fn brin_desc<'mcx>(mcx: ::mcx::Mcx<'mcx>, natts: usize) -> BrinDesc<'mcx> {
+    let mut bd_info = ::mcx::vec_with_capacity_in(mcx, natts).unwrap();
     for _ in 0..natts {
-        let mut typcache = mcx::vec_with_capacity_in(mcx, 1).unwrap();
+        let mut typcache = ::mcx::vec_with_capacity_in(mcx, 1).unwrap();
         typcache.push(int4_typcache());
         bd_info.push(
-            mcx::alloc_in(
+            ::mcx::alloc_in(
                 mcx,
                 BrinOpcInfo {
                     oi_nstored: 1,

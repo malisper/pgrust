@@ -7,13 +7,13 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::LocalTransactionId;
-use types_core::Oid;
-use types_core::ProcNumber;
-use types_core::TimestampTz;
-use types_core::TransactionId;
+use ::types_core::LocalTransactionId;
+use ::types_core::Oid;
+use ::types_core::ProcNumber;
+use ::types_core::TimestampTz;
+use ::types_core::TransactionId;
 use types_deadlock::{LockId, LockSpace};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_storage::{proclist_node, LWLockMode, LWLockWaitState, VirtualTransactionId};
 
 seam_core::seam!(
@@ -141,7 +141,7 @@ seam_core::seam!(
     /// `MyProc->vxid.procNumber = value` — stamp the proc's vxid proc number
     /// (standby.c does this for the Startup process before
     /// `VirtualXactLockTableInsert`).
-    pub fn set_my_proc_vxid_proc_number(value: types_core::ProcNumber)
+    pub fn set_my_proc_vxid_proc_number(value: ::types_core::ProcNumber)
 );
 
 seam_core::seam!(
@@ -171,9 +171,9 @@ seam_core::seam!(
     /// `MyProc`-private PGPROC storage. `Err` carries the LWLock acquire's
     /// `elog(ERROR, "too many LWLocks taken")`.
     pub fn vxid_lock_table_insert_my_proc(
-        vxid_proc_number: types_core::ProcNumber,
+        vxid_proc_number: ::types_core::ProcNumber,
         lxid: LocalTransactionId,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -189,7 +189,7 @@ seam_core::seam!(
     /// (the lock was transferred to the main table). `Err` carries the LWLock
     /// acquire's `elog(ERROR, "too many LWLocks taken")`.
     pub fn vxid_lock_table_cleanup_my_proc(
-    ) -> types_error::PgResult<(bool, LocalTransactionId)>
+    ) -> ::types_error::PgResult<(bool, LocalTransactionId)>
 );
 
 seam_core::seam!(
@@ -217,8 +217,8 @@ seam_core::seam!(
         target: ProcNumber,
         vxid: VirtualTransactionId,
         wait: bool,
-        transfer: &mut dyn FnMut() -> types_error::PgResult<()>,
-    ) -> types_error::PgResult<types_storage::lock::VirtualXactExamineOutcome>
+        transfer: &mut dyn FnMut() -> ::types_error::PgResult<()>,
+    ) -> ::types_error::PgResult<::types_storage::lock::VirtualXactExamineOutcome>
 );
 
 seam_core::seam!(
@@ -251,7 +251,7 @@ seam_core::seam!(
     /// `&GetPGProcByNumber(procno)->procLatch` — the process latch embedded
     /// in a backend's PGPROC entry, as a handle usable with the latch seams
     /// (`set_latch` to wake that backend). Pure array lookup; infallible.
-    pub fn proc_latch(procno: ProcNumber) -> types_storage::latch::LatchHandle
+    pub fn proc_latch(procno: ProcNumber) -> ::types_storage::latch::LatchHandle
 );
 
 seam_core::seam!(
@@ -263,7 +263,7 @@ seam_core::seam!(
     /// `Latch *`), instead of the latch unit's own registry. A callback shape
     /// (not a returned reference) keeps the shmem borrow contained
     /// (AGENTS.md: seams never return `&'static mut`).
-    pub fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&types_storage::latch::Latch))
+    pub fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&::types_storage::latch::Latch))
 );
 
 // ---- dummy-PGPROC stand-up for prepared transactions (twophase.c) ----
@@ -276,10 +276,10 @@ seam_core::seam!(
     /// shared-memory writes; cannot `ereport`.
     pub fn proc_init_prepared(
         pgprocno: ProcNumber,
-        xid: types_core::TransactionId,
+        xid: ::types_core::TransactionId,
         owner: Oid,
         databaseid: Oid,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -288,8 +288,8 @@ seam_core::seam!(
     /// `subxids`, setting the overflow flag when the count exceeds the cache.
     pub fn gxact_load_subxact_data(
         pgprocno: ProcNumber,
-        children: &[types_core::TransactionId],
-    ) -> types_error::PgResult<()>
+        children: &[::types_core::TransactionId],
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -307,7 +307,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `GetPGProcByNumber(pgprocno)->xid` — the dummy PGPROC's running xid, read
     /// by `pg_prepared_xact`. Plain shared-memory read.
-    pub fn proc_xid(pgprocno: ProcNumber) -> types_core::TransactionId
+    pub fn proc_xid(pgprocno: ProcNumber) -> ::types_core::TransactionId
 );
 
 seam_core::seam!(
@@ -321,7 +321,7 @@ seam_core::seam!(
     /// `UINT32_ACCESS_ONCE(GetPGProcByNumber(pgprocno)->xmin)` — an arbitrary
     /// proc's advertised xmin, read by `ProcArrayInstall{Imported,Restored}Xmin`
     /// and `GetConflictingVirtualXIDs`. Plain shared-memory read.
-    pub fn proc_xmin(pgprocno: ProcNumber) -> types_core::TransactionId
+    pub fn proc_xmin(pgprocno: ProcNumber) -> ::types_core::TransactionId
 );
 
 seam_core::seam!(
@@ -338,7 +338,7 @@ seam_core::seam!(
     /// kept in sync) so concurrent index builds / `WaitForOlderSnapshots` may
     /// ignore this backend during a CONCURRENTLY build of a non-expressional,
     /// non-partial index. `Err` carries the LWLock `ereport(ERROR)` surface.
-    pub fn set_indexsafe_procflags() -> types_error::PgResult<()>
+    pub fn set_indexsafe_procflags() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -401,7 +401,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `GetNumberFromPGProc(proc)` — the proc's index in `ProcGlobal->allProcs`.
-    pub fn pgproc_number(proc: &types_storage::storage::PGPROC) -> ProcNumber
+    pub fn pgproc_number(proc: &::types_storage::storage::PGPROC) -> ProcNumber
 );
 
 seam_core::seam!(
@@ -420,22 +420,22 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// Set `GetPGProcByNumber(procno)->heldLocks`.
-    pub fn set_proc_held_locks(procno: ProcNumber, mask: types_storage::lock::LOCKMASK)
+    pub fn set_proc_held_locks(procno: ProcNumber, mask: ::types_storage::lock::LOCKMASK)
 );
 
 seam_core::seam!(
     /// Read `GetPGProcByNumber(procno)->heldLocks`.
-    pub fn proc_held_locks(procno: ProcNumber) -> types_storage::lock::LOCKMASK
+    pub fn proc_held_locks(procno: ProcNumber) -> ::types_storage::lock::LOCKMASK
 );
 
 seam_core::seam!(
     /// Read `GetPGProcByNumber(procno)->waitLockMode`.
-    pub fn proc_wait_lock_mode(procno: ProcNumber) -> types_storage::lock::LOCKMODE
+    pub fn proc_wait_lock_mode(procno: ProcNumber) -> ::types_storage::lock::LOCKMODE
 );
 
 seam_core::seam!(
     /// Read `GetPGProcByNumber(procno)->waitStatus`.
-    pub fn proc_wait_status(procno: ProcNumber) -> types_storage::storage::ProcWaitStatus
+    pub fn proc_wait_status(procno: ProcNumber) -> ::types_storage::storage::ProcWaitStatus
 );
 
 seam_core::seam!(
@@ -444,9 +444,9 @@ seam_core::seam!(
     /// (`lock` keyed by its LOCKTAG, `holder` the owning backend's ProcNumber).
     pub fn set_proc_wait_fields(
         procno: ProcNumber,
-        lock: types_storage::lock::LOCKTAG,
+        lock: ::types_storage::lock::LOCKTAG,
         holder: ProcNumber,
-        lockmode: types_storage::lock::LOCKMODE,
+        lockmode: ::types_storage::lock::LOCKMODE,
     )
 );
 
@@ -470,7 +470,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ProcWakeup`'s state reset: clear `waitLock`/`waitProcLock`, set
     /// `waitStatus = status`, and `pg_atomic_write_u64(&MyProc->waitStart, 0)`.
-    pub fn wakeup_proc_clear_wait(procno: ProcNumber, status: types_storage::storage::ProcWaitStatus)
+    pub fn wakeup_proc_clear_wait(procno: ProcNumber, status: ::types_storage::storage::ProcWaitStatus)
 );
 
 seam_core::seam!(
@@ -486,7 +486,7 @@ seam_core::seam!(
 
 seam_core::seam!(
     /// `MyProc->waitLock->tag` — the LOCKTAG of the lock the proc awaits.
-    pub fn proc_wait_lock_tag(procno: ProcNumber) -> types_storage::lock::LOCKTAG
+    pub fn proc_wait_lock_tag(procno: ProcNumber) -> ::types_storage::lock::LOCKTAG
 );
 
 seam_core::seam!(
@@ -533,7 +533,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `&MyProc->procLatch` (`storage/proc.c`) — this backend's PGPROC shared
     /// latch, the latch `SwitchToSharedLatch` points `MyLatch` at.
-    pub fn my_proc_latch() -> types_storage::latch::LatchHandle
+    pub fn my_proc_latch() -> ::types_storage::latch::LatchHandle
 );
 
 seam_core::seam!(
@@ -546,7 +546,7 @@ seam_core::seam!(
     /// `InitProcess()` (proc.c): initialize the per-backend `PGPROC` entry,
     /// claiming a slot from the shared `ProcGlobal` free list. `ereport(FATAL)`
     /// when no slot is available ("sorry, too many clients already").
-    pub fn init_process() -> types_error::PgResult<()>
+    pub fn init_process() -> ::types_error::PgResult<()>
 );
 
 // --- backend-utils-init-postinit consumers (proc.c) ---
@@ -555,7 +555,7 @@ seam_core::seam!(
     /// `InitProcessPhase2()` (proc.c): add MyProc to the ProcArray; after this
     /// the backend is visible to others. `Err` carries its `ereport` surface.
     /// Takes `Mcx` to thread the owner's memory-context-scoped body.
-    pub fn init_process_phase2(mcx: mcx::Mcx<'_>) -> types_error::PgResult<()>
+    pub fn init_process_phase2(mcx: mcx::Mcx<'_>) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -586,7 +586,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `MyProc->databaseId = dboid` (proc.c): mark this backend's PGPROC entry
     /// with the database OID.
-    pub fn set_my_proc_database_id(dboid: types_core::Oid)
+    pub fn set_my_proc_database_id(dboid: ::types_core::Oid)
 );
 
 seam_core::seam!(
@@ -600,7 +600,7 @@ seam_core::seam!(
     /// `ProcGlobalShmemSize()` (proc.c) — shared-memory bytes for the PGPROC
     /// array. `Err` carries the `add_size`/`mul_size` overflow `ereport`.
     /// Owner unported; scaffolded slot.
-    pub fn proc_global_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn proc_global_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );
 
 seam_core::seam!(
@@ -608,7 +608,7 @@ seam_core::seam!(
     /// in shared memory (postmaster/standalone only, the C `!IsUnderPostmaster`
     /// arm of `CreateOrAttachShmemStructs`). `Err` carries the out-of-shmem
     /// `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn init_proc_global() -> types_error::PgResult<()>
+    pub fn init_proc_global() -> ::types_error::PgResult<()>
 );
 
 // --- clog group-commit PGPROC / ProcGlobal accessors (proc.h) ---------------
@@ -647,9 +647,9 @@ seam_core::seam!(
     /// clogGroupMemberLsn = lsn`).
     pub fn set_my_proc_clog_group_member_data(
         xid: TransactionId,
-        status: types_core::xact::XidStatus,
+        status: ::types_core::xact::XidStatus,
         pageno: i64,
-        lsn: types_core::XLogRecPtr,
+        lsn: ::types_core::XLogRecPtr,
     )
 );
 
@@ -679,7 +679,7 @@ seam_core::seam!(
     /// group member is requesting, applied by the leader.
     pub fn proc_clog_group_member_update(
         procno: ProcNumber,
-    ) -> (TransactionId, types_core::xact::XidStatus, types_core::XLogRecPtr)
+    ) -> (TransactionId, ::types_core::xact::XidStatus, ::types_core::XLogRecPtr)
 );
 
 seam_core::seam!(
@@ -932,14 +932,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `ProcGlobal->checkpointerProc = MyProcNumber` (proc.c) — the checkpointer
     /// advertises its own proc number at startup. Plain shmem write.
-    pub fn set_checkpointer_proc_to_self() -> types_error::PgResult<()>
+    pub fn set_checkpointer_proc_to_self() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `ProcGlobal->walwriterProc = MyProcNumber` (proc.c) — the walwriter
     /// advertises its own proc number at startup so backends can wake it while
     /// it is sleeping (`WalWriterMain`). Plain shmem write.
-    pub fn set_walwriter_proc_to_self() -> types_error::PgResult<()>
+    pub fn set_walwriter_proc_to_self() -> ::types_error::PgResult<()>
 );
 
 // ---- sync-rep PGPROC fields (read/written by syncrep.c over the queue) ----
@@ -963,15 +963,15 @@ seam_core::seam!(
 );
 seam_core::seam!(
     /// `MyProc->waitLSN`.
-    pub fn my_proc_wait_lsn() -> types_core::primitive::XLogRecPtr
+    pub fn my_proc_wait_lsn() -> ::types_core::primitive::XLogRecPtr
 );
 seam_core::seam!(
     /// `MyProc->waitLSN = lsn`.
-    pub fn set_my_proc_wait_lsn(lsn: types_core::primitive::XLogRecPtr)
+    pub fn set_my_proc_wait_lsn(lsn: ::types_core::primitive::XLogRecPtr)
 );
 seam_core::seam!(
     /// `GetPGProcByNumber(procno)->waitLSN`.
-    pub fn proc_wait_lsn(procno: ProcNumber) -> types_core::primitive::XLogRecPtr
+    pub fn proc_wait_lsn(procno: ProcNumber) -> ::types_core::primitive::XLogRecPtr
 );
 seam_core::seam!(
     /// Read `GetPGProcByNumber(procno)->syncRepLinks` — the intrusive sync-rep

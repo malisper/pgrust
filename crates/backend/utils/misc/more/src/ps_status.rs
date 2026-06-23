@@ -19,10 +19,10 @@
 
 use std::cell::RefCell;
 
-use init_small::globals::IsUnderPostmaster;
-use guc_tables::vars;
-use miscinit_seams::get_backend_type_desc;
-use init_small_seams::my_backend_type;
+use ::init_small::globals::IsUnderPostmaster;
+use ::guc_tables::vars;
+use ::miscinit_seams::get_backend_type_desc;
+use ::init_small_seams::my_backend_type;
 
 /// `#define DEFAULT_UPDATE_PROCESS_TITLE true` (ps_status.h on the
 /// CLOBBER_ARGV/setproctitle platforms; the GUC boot value is also `true`).

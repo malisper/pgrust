@@ -9,7 +9,7 @@
 //!
 //! `jsonpath.c` builds its flattened/printed result into a `StringInfo`
 //! allocated in the current memory context. The faithful analog here is a
-//! [`mcx::PgVec`]`<u8>` (the context-charged byte spine == `StringInfoData.data`)
+//! [`::mcx::PgVec`]`<u8>` (the context-charged byte spine == `StringInfoData.data`)
 //! whose every growth is fallible (`try_reserve`, guarded against
 //! [`MAX_ALLOC_SIZE`]) so OOM / over-`MaxAllocSize` surfaces as a recoverable
 //! [`PgError`] rather than aborting. The flatten output is raw binary (numeric
@@ -60,14 +60,14 @@ use types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_SYNTAX_ERROR,
 };
-use fmgr::ExternalFnExpr;
+use ::fmgr::ExternalFnExpr;
 use types_tuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
 
-pub use types_jsonpath::jsonpath::{
+pub use ::types_jsonpath::jsonpath::{
     jsp_is_scalar, JsonPathItemType, JSONPATH_HDRSZ, JSONPATH_LAX, JSONPATH_VERSION,
     JSP_REGEX_DOTALL, JSP_REGEX_ICASE, JSP_REGEX_MLINE, JSP_REGEX_QUOTE, JSP_REGEX_WSPACE,
 };
-pub use types_jsonpath::parse::{
+pub use ::types_jsonpath::parse::{
     JsonPathNumeric, JsonPathParseItem, JsonPathParseResult, JsonPathParseValue, JsonPathSubscript,
     JsonPathVariable,
 };
@@ -1943,7 +1943,7 @@ fn strncmp_eq(varname: &[u8], name: &[u8], len: usize) -> bool {
 /// so the single `ereturn` (the unimplemented XQuery `'x'` flag) surfaces as a
 /// plain recoverable `Err` here. Logic/branch order is 1:1 with the C.
 pub fn jspConvertRegexFlags(xflags: u32) -> PgResult<i32> {
-    use regex_core::regex_consts::{
+    use ::regex_core::regex_consts::{
         REG_ADVANCED, REG_ICASE, REG_NLANCH, REG_NLSTOP, REG_QUOTE,
     };
 

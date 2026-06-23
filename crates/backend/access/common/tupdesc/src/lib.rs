@@ -1,6 +1,6 @@
 //! `backend-access-common-tupdesc` — the tuple-descriptor support code of
 //! `src/backend/access/common/tupdesc.c` over the owned, `mcx`-allocated
-//! [`types_tuple::heaptuple::TupleDescData`] vocabulary.
+//! [`::types_tuple::heaptuple::TupleDescData`] vocabulary.
 //!
 //! # Owned-value / `mcx` model vs. the C ABI
 //!
@@ -48,12 +48,12 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::primitive::{AttrNumber, InvalidOid};
+use ::types_core::primitive::{AttrNumber, InvalidOid};
 use types_core::{Oid, FLOAT8PASSBYVAL};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::nodes::Node;
 use types_tuple::tupdesc::PgTypeInfo;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     AttrDefault, AttrMissing, CompactAttribute, ConstrCheck, FormData_pg_attribute, NameData,
     TupleConstr, TupleDescData, ALIGNOF_DOUBLE, ALIGNOF_INT, ALIGNOF_SHORT, ATTNULLABLE_UNKNOWN,
     ATTNULLABLE_UNRESTRICTED, ATTNULLABLE_VALID, BOOLOID, DEFAULT_COLLATION_OID, INT4OID, INT8OID,
@@ -61,7 +61,7 @@ use types_tuple::heaptuple::{
     TYPALIGN_DOUBLE, TYPALIGN_INT, TYPALIGN_SHORT, TYPSTORAGE_EXTENDED, TYPSTORAGE_PLAIN,
 };
 
-const NAMEDATALEN: usize = types_core::NAMEDATALEN as usize;
+const NAMEDATALEN: usize = ::types_core::NAMEDATALEN as usize;
 
 /// `CreateTemplateTupleDesc(natts)` (`access/common/tupdesc.c`).
 ///
@@ -883,7 +883,7 @@ fn hash_uint32(k: u32) -> u32 {
 
 /// Borrow the bytes of an `Option<PgString>` as `&[u8]` for comparison (`None`
 /// reads as empty; C only reaches `strcmp` on present strings).
-fn opt_str<'a>(s: &'a Option<mcx::PgString<'_>>) -> &'a [u8] {
+fn opt_str<'a>(s: &'a Option<::mcx::PgString<'_>>) -> &'a [u8] {
     match s {
         Some(s) => s.as_bytes(),
         None => &[],
@@ -939,11 +939,11 @@ fn tuple_desc_init_entry_seam(
 /// `PgString`) over [`BuildDescFromLists`] (names as `&str`).
 fn build_desc_from_lists_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    names: &[mcx::PgString<'_>],
+    names: &[::mcx::PgString<'_>],
     types: &[Oid],
     typmods: &[i32],
     collations: &[Oid],
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     let name_refs: alloc::vec::Vec<&str> = names.iter().map(|s| s.as_str()).collect();
     let desc = BuildDescFromLists(mcx, &name_refs, types, typmods, collations)?;
     Ok(Some(alloc_in(mcx, desc)?))

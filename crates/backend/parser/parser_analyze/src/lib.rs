@@ -19,7 +19,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgBox, PgVec};
 use types_error::{PgResult, ERROR};
 use ::nodes::copy_query::{Query, QuerySource};
@@ -45,7 +45,7 @@ pub use setop::makeSortGroupClauseForSetOp;
 
 /// `ereport(ERROR, errmsg_internal(...))` shorthand for the panics-as-errors in
 /// logic this unit owns.
-fn elog_error(msg: impl Into<alloc::string::String>) -> types_error::PgError {
+fn elog_error(msg: impl Into<alloc::string::String>) -> ::types_error::PgError {
     ereport(ERROR).errmsg_internal(msg.into()).into_error()
 }
 
@@ -98,12 +98,12 @@ pub fn parse_analyze_fixedparams<'mcx>(
     mcx: Mcx<'mcx>,
     parse_tree: &RawStmt<'mcx>,
     source_text: &str,
-    param_types: &[types_core::primitive::Oid],
+    param_types: &[::types_core::primitive::Oid],
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = small1::make_parsestate(mcx, None)?;
 
     // Assert(sourceText != NULL); pstate->p_sourcetext = sourceText;
-    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+    pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(source_text, mcx)?);
 
     // if (numParams > 0) setup_parse_fixed_parameters(pstate, paramTypes, numParams);
     if !param_types.is_empty() {
@@ -142,7 +142,7 @@ pub fn parse_analyze_sql_function<'mcx>(
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = small1::make_parsestate(mcx, None)?;
 
-    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+    pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(source_text, mcx)?);
 
     // sql_fn_parser_setup(pstate, pinfo): install the SQL-function hooks.
     small1::setup_parse_sql_function(&mut pstate, pinfo);
@@ -169,7 +169,7 @@ pub fn parse_analyze_plpgsql_expr<'mcx>(
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = small1::make_parsestate(mcx, None)?;
 
-    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+    pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(source_text, mcx)?);
 
     // plpgsql_parser_setup(pstate, expr): install the PL/pgSQL parser hooks +
     // ref-hook state.
@@ -201,12 +201,12 @@ pub fn parse_analyze_varparams<'mcx>(
     mcx: Mcx<'mcx>,
     parse_tree: &RawStmt<'mcx>,
     source_text: &str,
-    arg_types: &[types_core::primitive::Oid],
+    arg_types: &[::types_core::primitive::Oid],
 ) -> PgResult<(Query<'mcx>, ::nodes::parsestmt::VarParamState)> {
     let mut pstate = small1::make_parsestate(mcx, None)?;
 
     // Assert(sourceText != NULL); pstate->p_sourcetext = sourceText;
-    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+    pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(source_text, mcx)?);
 
     // setup_parse_variable_parameters(pstate, paramTypes, numParams);
     //
@@ -247,8 +247,8 @@ pub fn parse_analyze_varparams<'mcx>(
 
 /// `IsPolymorphicType(typid)` (pg_type.h) — the pseudo-types a SQL function with
 /// an unquoted body may not have as an argument.
-fn is_polymorphic_type(typid: types_core::primitive::Oid) -> bool {
-    use types_core::primitive::Oid;
+fn is_polymorphic_type(typid: ::types_core::primitive::Oid) -> bool {
+    use ::types_core::primitive::Oid;
     // ANYELEMENT/ANYARRAY/ANYNONARRAY/ANYENUM/ANYRANGE/ANYMULTIRANGE +
     // ANYCOMPATIBLE family (pg_type.dat).
     const ANYELEMENTOID: Oid = 2283;
@@ -289,7 +289,7 @@ fn transform_one_body_stmt<'mcx>(
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = small1::make_parsestate(mcx, None)?;
     if let Some(s) = query_string {
-        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(s, mcx)?);
+        pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(s, mcx)?);
     }
     small1::setup_parse_sql_function(&mut pstate, pinfo.clone());
     let q = transformStmt(mcx, &mut pstate, stmt)?;
@@ -304,7 +304,7 @@ fn transform_one_body_stmt<'mcx>(
             None => "statement",
         };
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg(format!(
                 "{tagname} is not yet supported in unquoted SQL function body"
             ))
@@ -326,7 +326,7 @@ pub fn interpret_sql_body<'mcx>(
     mcx: Mcx<'mcx>,
     funcname: String,
     sql_body_in: &Node<'mcx>,
-    parameter_types: Vec<types_core::primitive::Oid>,
+    parameter_types: Vec<::types_core::primitive::Oid>,
     in_parameter_names: Vec<String>,
     query_string: Option<String>,
 ) -> PgResult<functioncmds_seams::InterpretedSqlBody> {
@@ -336,7 +336,7 @@ pub fn interpret_sql_body<'mcx>(
     for (i, &typ) in parameter_types.iter().enumerate() {
         if is_polymorphic_type(typ) {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_INVALID_FUNCTION_DEFINITION)
+                .errcode(::types_error::ERRCODE_INVALID_FUNCTION_DEFINITION)
                 .errmsg(
                     "SQL function with unquoted function body cannot have \
                      polymorphic arguments",
@@ -352,7 +352,7 @@ pub fn interpret_sql_body<'mcx>(
     let argnames_opt = if nargs > 0 { Some(argnames) } else { None };
     let pinfo = ::nodes::parsestmt::SqlFnParseInfo::new(
         funcname,
-        types_core::InvalidOid,
+        ::types_core::InvalidOid,
         parameter_types,
         argnames_opt,
     );
@@ -370,15 +370,15 @@ pub fn interpret_sql_body<'mcx>(
             },
             None => &outer[..],
         };
-        let mut transformed = mcx::PgVec::new_in(mcx);
+        let mut transformed = ::mcx::PgVec::new_in(mcx);
         for stmt in stmts {
             let q = transform_one_body_stmt(mcx, &pinfo, qstr, stmt.as_ref())?;
-            transformed.push(mcx::alloc_in(mcx, Node::mk_query(mcx, q)?)?);
+            transformed.push(::mcx::alloc_in(mcx, Node::mk_query(mcx, q)?)?);
         }
         // *sql_body_out = (Node *) list_make1(transformed_stmts);
         let inner = Node::mk_list(mcx, transformed)?;
-        let mut outer_vec = mcx::PgVec::new_in(mcx);
-        outer_vec.push(mcx::alloc_in(mcx, inner)?);
+        let mut outer_vec = ::mcx::PgVec::new_in(mcx);
+        outer_vec.push(::mcx::alloc_in(mcx, inner)?);
         Node::mk_list(mcx, outer_vec)?
     } else {
         // q = transformStmt(pstate, sql_body_in); *sql_body_out = (Node *) q;
@@ -424,7 +424,7 @@ pub fn interpret_sql_body<'mcx>(
 fn transform_parameter_default<'mcx>(
     mcx: Mcx<'mcx>,
     defexpr: &Node<'mcx>,
-    toid: types_core::primitive::Oid,
+    toid: ::types_core::primitive::Oid,
     location: i32,
     query_string: Option<String>,
 ) -> PgResult<Node<'mcx>> {
@@ -432,7 +432,7 @@ fn transform_parameter_default<'mcx>(
 
     let mut pstate = small1::make_parsestate(mcx, None)?;
     if let Some(s) = query_string.as_deref() {
-        pstate.p_sourcetext = Some(mcx::PgString::from_str_in(s, mcx)?);
+        pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(s, mcx)?);
     }
 
     // def = transformExpr(pstate, fp->defexpr, EXPR_KIND_FUNCTION_DEFAULT);
@@ -467,7 +467,7 @@ fn transform_parameter_default<'mcx>(
         || vars::var::contain_var_clause(&cooked)
     {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_INVALID_COLUMN_REFERENCE)
+            .errcode(::types_error::ERRCODE_INVALID_COLUMN_REFERENCE)
             .errmsg("cannot use table references in parameter default value")
             .errposition(small1::parser_errposition(&pstate, location))
             .into_error());
@@ -494,7 +494,7 @@ fn cook_parameter_defaults<'mcx>(
     let mut elems: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     elems.try_reserve(defaults.len()).map_err(|_| mcx.oom(defaults.len()))?;
     for d in defaults {
-        elems.push(mcx::alloc_in(mcx, d.clone_in(mcx)?)?);
+        elems.push(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?);
     }
     let list = Node::mk_list(mcx, elems)?;
 
@@ -527,10 +527,10 @@ fn check_defaults_compatible(
     old_proargdefaults: String,
     old_nargdefaults: i16,
     new_proargdefaults: String,
-) -> PgResult<pg_proc_seams::DefaultCompat> {
-    use pg_proc_seams::DefaultCompat;
+) -> PgResult<::pg_proc_seams::DefaultCompat> {
+    use ::pg_proc_seams::DefaultCompat;
 
-    let scratch = mcx::MemoryContext::new("check_defaults_compatible");
+    let scratch = ::mcx::MemoryContext::new("check_defaults_compatible");
     let mcx = scratch.mcx();
 
     let old_node = nodes_core::read::string_to_node(mcx, &old_proargdefaults)?;
@@ -580,7 +580,7 @@ pub fn parse_sub_analyze<'mcx>(
     let mut pstate = small1::make_parsestate(mcx, Some(parent_pstate))?;
 
     pstate.p_parent_cte = match parent_cte {
-        Some(c) => Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
+        Some(c) => Some(::mcx::alloc_in(mcx, c.clone_in(mcx)?)?),
         None => None,
     };
     pstate.p_locked_from_parent = locked_from_parent;
@@ -626,7 +626,7 @@ pub fn parse_sub_analyze<'mcx>(
 
     small1::free_parsestate(pstate)?;
 
-    mcx::alloc_in(mcx, Node::mk_query(mcx, query)?)
+    ::mcx::alloc_in(mcx, Node::mk_query(mcx, query)?)
 }
 
 /// Merge SELECT/INSERT/UPDATE permission marks recorded on a cloned parent
@@ -636,7 +636,7 @@ pub fn parse_sub_analyze<'mcx>(
 /// (superset) clone's column sets transfers the marks: the clone started as a
 /// copy of the live parent's lists and only added members.
 fn merge_perminfo_marks<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     dst: &mut ParseState<'mcx>,
     src: &ParseState<'mcx>,
 ) -> PgResult<()> {
@@ -653,13 +653,13 @@ fn merge_perminfo_marks<'mcx>(
         }
         dst.p_rteperminfos[i].requiredPerms |= s.requiredPerms;
         if let Some(c) = s.selectedCols.as_deref() {
-            dst.p_rteperminfos[i].selectedCols = Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
+            dst.p_rteperminfos[i].selectedCols = Some(::mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
         }
         if let Some(c) = s.insertedCols.as_deref() {
-            dst.p_rteperminfos[i].insertedCols = Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
+            dst.p_rteperminfos[i].insertedCols = Some(::mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
         }
         if let Some(c) = s.updatedCols.as_deref() {
-            dst.p_rteperminfos[i].updatedCols = Some(mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
+            dst.p_rteperminfos[i].updatedCols = Some(::mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
         }
     }
     Ok(())
@@ -775,12 +775,12 @@ fn transformOptionalSelectInto<'mcx>(
 
             let into = leaf.intoClause.as_ref().map(|i| i.clone_in(mcx)).transpose()?;
             let into = match into {
-                Some(n) => Some(mcx::alloc_in(mcx, n)?),
+                Some(n) => Some(::mcx::alloc_in(mcx, n)?),
                 None => None,
             };
 
             let ctas = ::nodes::ddlnodes::CreateTableAsStmt {
-                query: Some(mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select_copy)?)?),
+                query: Some(::mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select_copy)?)?),
                 into,
                 objtype: ::nodes::parsenodes::OBJECT_TABLE,
                 is_select_into: true,
@@ -802,8 +802,8 @@ fn transformOptionalSelectInto<'mcx>(
 /// fresh `ExplainStmt` so the executor (`ExplainQuery`) reads the analyzed query.
 /// Project a `DefElem`-arg value node into the `def_get_boolean` seam's
 /// `DefElemArg` (mirrors the EXPLAIN driver's `def_elem_arg`).
-fn def_elem_arg(node: &Node<'_>) -> define_seams::DefElemArg {
-    use define_seams::DefElemArg;
+fn def_elem_arg(node: &Node<'_>) -> ::define_seams::DefElemArg {
+    use ::define_seams::DefElemArg;
     match node.node_tag() {
         ntag::T_Integer => DefElemArg::Integer(node.expect_integer().ival as i64),
         ntag::T_Float => DefElemArg::Float(String::from(node.expect_float().fval.as_str())),
@@ -833,7 +833,7 @@ fn transformExplainStmt<'mcx>(
                         .arg
                         .as_deref()
                         .map(def_elem_arg);
-                    generic_plan = define_seams::def_get_boolean::call(
+                    generic_plan = ::define_seams::def_get_boolean::call(
                         "generic_plan".to_string(),
                         arg,
                     )?;
@@ -867,11 +867,11 @@ fn transformExplainStmt<'mcx>(
     // represent the command as a utility Query wrapping a fresh ExplainStmt that
     // carries the transformed inner Query (mirrors C's `stmt->query = <Query>`).
     let mut new_stmt = stmt.clone_in(mcx)?;
-    new_stmt.query = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, transformed)?)?);
+    new_stmt.query = Some(::mcx::alloc_in(mcx, Node::mk_query(mcx, transformed)?)?);
 
     let mut result = Query::new(mcx);
     result.commandType = CmdType::CMD_UTILITY;
-    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_explain_stmt(mcx, new_stmt)?)?);
+    result.utilityStmt = Some(::mcx::alloc_in(mcx, Node::mk_explain_stmt(mcx, new_stmt)?)?);
     Ok(result)
 }
 
@@ -886,7 +886,7 @@ fn transformCreateTableAsStmt<'mcx>(
     pstate: &mut ParseState<'mcx>,
     stmt: &::nodes::ddlnodes::CreateTableAsStmt<'mcx>,
 ) -> PgResult<Query<'mcx>> {
-    use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
+    use ::types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 
     /* transform contained query, not allowing SELECT INTO */
     let inner = stmt
@@ -962,16 +962,16 @@ fn transformCreateTableAsStmt<'mcx>(
             .as_deref_mut()
             .and_then(Node::as_intoclause_mut)
             .expect("transformCreateTableAsStmt: stmt->into is not an IntoClause");
-        into.viewQuery = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, view_query)?)?);
+        into.viewQuery = Some(::mcx::alloc_in(mcx, Node::mk_query(mcx, view_query)?)?);
     }
 
     /* stmt->query = (Node *) query */
-    new_stmt.query = Some(mcx::alloc_in(mcx, Node::mk_query(mcx, query)?)?);
+    new_stmt.query = Some(::mcx::alloc_in(mcx, Node::mk_query(mcx, query)?)?);
 
     /* represent the command as a utility Query */
     let mut result = Query::new(mcx);
     result.commandType = CmdType::CMD_UTILITY;
-    result.utilityStmt = Some(mcx::alloc_in(mcx, Node::mk_create_table_as_stmt(mcx, new_stmt)?)?);
+    result.utilityStmt = Some(::mcx::alloc_in(mcx, Node::mk_create_table_as_stmt(mcx, new_stmt)?)?);
     Ok(result)
 }
 
@@ -1037,7 +1037,7 @@ pub fn transformStmt<'mcx>(
             // Query around the original parse tree.
             let mut q = Query::new(mcx);
             q.commandType = CmdType::CMD_UTILITY;
-            q.utilityStmt = Some(mcx::alloc_in(mcx, parse_tree.clone_in(mcx)?)?);
+            q.utilityStmt = Some(::mcx::alloc_in(mcx, parse_tree.clone_in(mcx)?)?);
             q
         }
     };
@@ -1134,7 +1134,7 @@ pub fn init_seams() {
     // The redefinition default-type compatibility check (pg_proc.c:549-573): owned
     // here because it `stringToNode`s both serialized `proargdefaults` and
     // `exprType`s the elements.
-    pg_proc_seams::check_defaults_compatible::set(check_defaults_compatible);
+    ::pg_proc_seams::check_defaults_compatible::set(check_defaults_compatible);
     // `if (post_parse_analyze_hook) (*post_parse_analyze_hook)(pstate, query,
     // jstate);` (analyze.c:127/169/206). The hook is a per-backend `fn` pointer
     // extensions install; it is NULL by default. With no extension loaded the C
@@ -1223,9 +1223,9 @@ pub(crate) fn sgc_vec_to_nodes<'mcx>(
     mcx: Mcx<'mcx>,
     v: Vec<::nodes::rawnodes::SortGroupClause>,
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for sgc in v {
-        out.push(mcx::alloc_in(mcx, Node::mk_sort_group_clause(mcx, sgc)?)?);
+        out.push(::mcx::alloc_in(mcx, Node::mk_sort_group_clause(mcx, sgc)?)?);
     }
     Ok(out)
 }
@@ -1235,7 +1235,7 @@ pub(crate) fn node_vec_to_pgvec<'mcx>(
     mcx: Mcx<'mcx>,
     v: Vec<NodePtr<'mcx>>,
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for n in v {
         out.push(n);
     }
@@ -1249,7 +1249,7 @@ pub(crate) fn opt_expr_to_node<'mcx>(
     e: Option<::nodes::primnodes::Expr<'static>>,
 ) -> PgResult<Option<NodePtr<'mcx>>> {
     match e {
-        Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?)),
+        Some(expr) => Ok(Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?)),
         None => Ok(None),
     }
 }
@@ -1262,7 +1262,7 @@ pub(crate) fn opt_expr_to_box<'mcx>(
     e: Option<::nodes::primnodes::Expr<'static>>,
 ) -> PgResult<Option<PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>> {
     match e {
-        Some(expr) => Ok(Some(mcx::alloc_in(mcx, expr.clone_in(mcx)?)?)),
+        Some(expr) => Ok(Some(::mcx::alloc_in(mcx, expr.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -1273,9 +1273,9 @@ pub(crate) fn cte_vec_to_nodes<'mcx>(
     mcx: Mcx<'mcx>,
     v: PgVec<'mcx, ::nodes::rawnodes::CommonTableExpr<'mcx>>,
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for cte in v {
-        out.push(mcx::alloc_in(mcx, Node::mk_common_table_expr(mcx, cte)?)?);
+        out.push(::mcx::alloc_in(mcx, Node::mk_common_table_expr(mcx, cte)?)?);
     }
     Ok(out)
 }

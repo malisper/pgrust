@@ -23,7 +23,7 @@
 //! As in the sibling `geo_spgist.c` port, the fmgr entry points take owned
 //! working structs that mirror the C `spg*In`/`spg*Out` field set; `palloc`'d
 //! output arrays become owned `Vec`s; `Datum` payloads are pre-decoded to
-//! [`types_core::geo`] forms.  The `void *traversalValue` round-trips a `BOX`.
+//! [`::types_core::geo`] forms.  The `void *traversalValue` round-trips a `BOX`.
 //!
 //! The geometric point predicates (`point_left`/`right`/`above`/`below`/
 //! `horiz`/`vert`/`eq`, `box_contain_pt`, all owned by the unported `geo_ops.c`)
@@ -37,10 +37,10 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::result_large_err)]
 
-use types_core::geo::{Point, SpgKey, BOX};
+use ::types_core::geo::{Point, SpgKey, BOX};
 use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 
-use spg_proc_seams::spg_key_orderbys_distances;
+use ::spg_proc_seams::spg_key_orderbys_distances;
 use geo_ops_seams::{
     box_contain_pt, point_above, point_below, point_eq, point_horiz, point_left, point_right,
     point_vert,
@@ -613,14 +613,14 @@ fn unrecognized_strategy(strategy: i32, func: &'static str, line: i32) -> PgErro
 // `spg_*::call(proc_oid, &in, &mut out)`. We install our arm keyed on the
 // quad-tree opclass support-proc OIDs (pg_proc.dat). The seam crosses the
 // `spgist::spg*In/Out` structs whose `Datum` fields carry the `point`/
-// `box` images; these dispatch wrappers decode them to the `types_core::geo`
+// `box` images; these dispatch wrappers decode them to the `::types_core::geo`
 // working structs (the honest `DatumGetPointP` / `DatumGetBoxP`), run the
 // unchanged opclass body, and re-encode the output Datums (`PointPGetDatum`).
 // This is exactly the geo_spgist.c idiom (decoded working structs internally).
 // ===========================================================================
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
 use spgist as spgt;
 use types_tuple::heaptuple::Datum;
 
@@ -651,7 +651,7 @@ fn datum_get_box(datum: &Datum<'_>) -> BOX {
 /// `PointPGetDatum(p)` — encode a point as a by-reference `Datum` in `mcx`.
 #[inline]
 fn point_get_datum<'mcx>(mcx: Mcx<'mcx>, p: &Point) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &p.to_datum_bytes())?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &p.to_datum_bytes())?))
 }
 
 /// Decode a typed scankey array into the opclass' `SpgScanKey` working form.
@@ -726,7 +726,7 @@ pub const F_SPG_BOX_QUAD_LEAF_CONSISTENT: Oid = 5016;
 
 /// `BoxPGetDatum(b)` — encode a `box` into a by-reference index-context `Datum`.
 fn box_get_datum<'mcx>(mcx: Mcx<'mcx>, b: &BOX) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &b.to_datum_bytes())?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &b.to_datum_bytes())?))
 }
 
 /// Decode a typed scankey array into the box opclass' [`boxq::SpgScanKey`]
@@ -740,7 +740,7 @@ fn decode_box_scankeys(
         .map(|sk| {
             let sk_subtype = sk.sk_subtype;
             let bbox = if sk_subtype == boxq::POLYGONOID {
-                geo_ops_seams::poly_query_boundbox::call(
+                ::geo_ops_seams::poly_query_boundbox::call(
                     sk.sk_argument.as_ref_bytes(),
                 )
             } else {

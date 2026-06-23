@@ -9,7 +9,7 @@
 
 use std::sync::Once;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use ::nodes::primnodes::{
     BoolExpr, BoolExprType, Const, Expr, NullTest, NullTestType, Var,
 };

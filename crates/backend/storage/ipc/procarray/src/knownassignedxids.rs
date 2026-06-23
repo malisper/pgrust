@@ -14,11 +14,11 @@ use types_core::{
     TransactionIdIsNormal, TransactionIdIsValid,
 };
 use types_error::{ErrorLevel, PgError, PgResult, DEBUG1, DEBUG3, DEBUG4, LOG};
-use types_storage::storage::{
+use ::types_storage::storage::{
     RunningTransactionsData, SUBXIDS_IN_ARRAY, SUBXIDS_IN_SUBTRANS, SUBXIDS_MISSING,
 };
-use types_storage::LWLockMode::LW_EXCLUSIVE;
-use wal::xlogutils::{STANDBY_INITIALIZED, STANDBY_SNAPSHOT_PENDING, STANDBY_SNAPSHOT_READY};
+use ::types_storage::LWLockMode::LW_EXCLUSIVE;
+use ::wal::xlogutils::{STANDBY_INITIALIZED, STANDBY_SNAPSHOT_PENDING, STANDBY_SNAPSHOT_READY};
 
 use subtrans_seams as subtrans;
 use transam_seams as transam;
@@ -28,7 +28,7 @@ use xlogutils_seams as xlogutils;
 use standby_seams as standby;
 use lwlock_seams as lwlock;
 use timestamp_seams as timestamp;
-use utils_error::elog;
+use ::utils_error::elog;
 use snapmgr_pc_seams as snapmgr_pc;
 
 use crate::membership::MaintainLatestCompletedXidRecovery;
@@ -73,7 +73,7 @@ fn full_transaction_id_retreat(dest: &mut FullTransactionId) {
     dest.value -= 1;
 
     // In contrast to 32bit XIDs don't step over the "actual" special xids.
-    if dest.value < types_core::FirstNormalFullTransactionId.value {
+    if dest.value < ::types_core::FirstNormalFullTransactionId.value {
         return;
     }
 
@@ -127,7 +127,7 @@ const KAX_COMPRESS_IDLE_INTERVAL: i64 = 1000;
 // thread-local per the forked-child convention.
 thread_local! {
     static TRANSACTION_ENDS_COUNTER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-    static LAST_COMPRESS_TS: std::cell::Cell<types_core::TimestampTz> = const { std::cell::Cell::new(0) };
+    static LAST_COMPRESS_TS: std::cell::Cell<::types_core::TimestampTz> = const { std::cell::Cell::new(0) };
 }
 
 /// `KnownAssignedXidsCompress(KAXCompressReason reason, bool haveLock)`

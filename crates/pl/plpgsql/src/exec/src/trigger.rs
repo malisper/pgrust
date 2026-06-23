@@ -4,20 +4,20 @@
 //! before-trigger result-tuple handoff.
 //!
 //! These all bottom out in the expanded-record substrate
-//! (`misc2::expandedrecord`) reached through the call-scoped
+//! (`::misc2::expandedrecord`) reached through the call-scoped
 //! [`crate::erh_table`] side-table, and in the trigger-manager data accessors
 //! (`trigger_seams`) which resolve off the firing path's
 //! per-call side-channel.
 
 use trigger_seams as trig;
-use misc2::expandedrecord as er;
+use ::misc2::expandedrecord as er;
 use mcx::{Mcx, MemoryContext};
 use plpgsql::{
     int32, Datum, ExpandedRecordHeader as ErhHandle, PLpgSQL_datum, PLpgSQL_execstate,
     PLpgSQL_function, PLpgSQL_promise_type, PLpgSQL_rc, PLpgSQL_var,
 };
 use types_ri_triggers::{TriggerDataRef, TupleTableSlotRef};
-use types_tuple::heaptuple::{Datum as RichDatum, FormedTuple};
+use ::types_tuple::heaptuple::{Datum as RichDatum, FormedTuple};
 
 /// The current-trigger marker handle (`TriggerData(0)`), the only value the
 /// trigger-data accessors key off (the rich payload rides the firing path's
@@ -25,7 +25,7 @@ use types_tuple::heaptuple::{Datum as RichDatum, FormedTuple};
 const TRIG_CURRENT: TriggerDataRef = TriggerDataRef(0);
 
 /// `RECORDOID` (`catalog/pg_type_d.h`) — the anonymous-composite pseudo-type.
-const RECORDOID: plpgsql::Oid = 2249;
+const RECORDOID: ::plpgsql::Oid = 2249;
 
 // ---- TriggerEvent bit tests (commands/trigger.h) --------------------------
 const TRIGGER_EVENT_INSERT: u32 = 0x0000;
@@ -73,7 +73,7 @@ fn fired_by_delete(ev: u32) -> bool {
 /// register it in the [`crate::erh_table`] side-table, and return its handle.
 /// (The C `make_expanded_record_from_tupdesc(tupdesc, estate->datum_context)`.)
 fn build_erh_from_tupdesc(
-    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    tupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
 ) -> types_error::PgResult<ErhHandle> {
     let ctx = Box::new(MemoryContext::new("PL/pgSQL expanded record"));
     let header: ExpandedRecordHeader<'static> = {
@@ -353,11 +353,11 @@ pub fn exec_move_row_into_record_impl(
                     0,
                 )?;
             }
-            let boxed: mcx::PgBox<'static, types_tuple::heaptuple::TupleDescData<'static>> =
-                mcx::PgBox::try_new_in(td, mcx).map_err(|_| mcx.oom(0))?;
+            let boxed: ::mcx::PgBox<'static, ::types_tuple::heaptuple::TupleDescData<'static>> =
+                ::mcx::PgBox::try_new_in(td, mcx).map_err(|_| mcx.oom(0))?;
             let blessed =
                 execTuples::exectype_tupoutput::BlessTupleDesc(mcx, Some(boxed))?;
-            let td_ref: &types_tuple::heaptuple::TupleDescData<'static> =
+            let td_ref: &::types_tuple::heaptuple::TupleDescData<'static> =
                 blessed.as_ref().expect("blessed tupdesc");
             er::make_expanded_record_from_tupdesc(mcx, td_ref)?
         };
@@ -377,7 +377,7 @@ pub fn exec_move_row_into_record_impl(
             .map(|td| td.natts as usize)
             .unwrap_or(columns.len());
         let strict_multiassignment_level =
-            crate::extra_check_level(plpgsql::PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT);
+            crate::extra_check_level(::plpgsql::PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT);
 
         let mut values: Vec<RichDatum<'static>> = Vec::with_capacity(target_natts);
         let mut nulls: Vec<bool> = Vec::with_capacity(target_natts);
@@ -403,7 +403,7 @@ pub fn exec_move_row_into_record_impl(
                     if c.isnull {
                         values.push(RichDatum::null());
                     } else if let Some(image) = &c.byref {
-                        let slice = mcx::slice_in(mcx, image)?;
+                        let slice = ::mcx::slice_in(mcx, image)?;
                         values.push(RichDatum::ByRef(slice));
                     } else {
                         values.push(RichDatum::from_usize(c.value));
@@ -503,7 +503,7 @@ fn set_rec_erh(estate: &mut PLpgSQL_execstate, dno: int32, handle: Option<ErhHan
 /// apply (deposited on the firing path's return-tuple channel).
 pub fn plpgsql_exec_trigger_impl(
     func: &PLpgSQL_function,
-    _trigdata: plpgsql::TriggerData,
+    _trigdata: ::plpgsql::TriggerData,
 ) -> types_error::PgResult<Datum> {
     // Save any outer call's live expanded-record table (a trigger that fires a
     // query that fires another trigger nests here); restored before return so the
@@ -516,7 +516,7 @@ pub fn plpgsql_exec_trigger_impl(
     let mut estate = crate::plpgsql_estate_setup(func, None, None, None);
 
     // estate.trigdata = trigdata (the current-trigger marker).
-    estate.trigdata = Some(plpgsql::TriggerData(0));
+    estate.trigdata = Some(::plpgsql::TriggerData(0));
 
     // Push this frame onto the live error_context_stack (see
     // plpgsql_exec_function); pops on scope exit.
@@ -692,7 +692,7 @@ fn null_stored_generated_in_new(
         let mut v = Vec::new();
         for i in 0..tupdesc.natts as usize {
             if tupdesc.attr(i).attgenerated
-                == types_tuple::access::ATTRIBUTE_GENERATED_STORED
+                == ::types_tuple::access::ATTRIBUTE_GENERATED_STORED
             {
                 v.push((i + 1) as i32);
             }

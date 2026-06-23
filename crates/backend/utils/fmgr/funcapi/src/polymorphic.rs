@@ -5,14 +5,14 @@
 //! argument types, substitute them into a declared-argument array or a result
 //! `TupleDesc`, and classify a type OID into a [`TypeFuncClass`].
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use ::nodes::funcapi::{PolymorphicActuals, TypeFuncClass};
 use ::nodes::nodes::Node;
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     TupleDesc, ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
     ANYNONARRAYOID, ANYRANGEOID, CSTRINGOID, RECORDOID, VOIDOID,
@@ -46,7 +46,7 @@ impl CallExpr {
     /// Build a [`CallExpr`] from the erased `FmgrInfo.fn_expr` carrier (the
     /// `get_call_result_type` route). `tag` is unused on this side — the erased
     /// `Expr` carries its own kind.
-    pub fn from_erased(erased: types_core::fmgr::FnExprErased) -> Self {
+    pub fn from_erased(erased: ::types_core::fmgr::FnExprErased) -> Self {
         Self {
             external: fmgr::ExternalFnExpr {
                 tag: 0,
@@ -62,7 +62,7 @@ impl CallExpr {
     pub fn from_node<'mcx>(mcx: mcx::Mcx<'mcx>, node: &Node<'mcx>) -> PgResult<Self> {
         let tag = node.tag().0;
         let erased = match node.as_expr() {
-            Some(e) => Some(types_core::fmgr::FnExprErased::from_node_erased::<
+            Some(e) => Some(::types_core::fmgr::FnExprErased::from_node_erased::<
                 ::nodes::primnodes::Expr,
                 ::nodes::primnodes::Expr,
             >(e.clone_in(mcx)?)),
@@ -124,7 +124,7 @@ const PROARGMODE_TABLE: u8 = b't';
 
 /// C `elog(ERROR, "could not determine polymorphic type")` — `elog` defaults
 /// to `ERRCODE_INTERNAL_ERROR` (elog.c).
-fn could_not_determine_polymorphic_type() -> types_error::PgError {
+fn could_not_determine_polymorphic_type() -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INTERNAL_ERROR)
         .errmsg("could not determine polymorphic type")
@@ -525,7 +525,7 @@ pub fn resolve_polymorphic_tupdesc<'mcx>(
         // C: NameStr(att->attname) — the descriptor's column name.
         let attname_bytes = td.attr(i as usize).attname.name_str().to_vec();
         let attname = core::str::from_utf8(&attname_bytes).ok();
-        let attno = (i + 1) as types_core::AttrNumber;
+        let attno = (i + 1) as ::types_core::AttrNumber;
 
         match atttypid {
             ANYELEMENTOID | ANYNONARRAYOID | ANYENUMOID => {

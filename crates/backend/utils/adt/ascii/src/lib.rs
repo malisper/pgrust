@@ -17,7 +17,7 @@
 //! | `ascii_safe_strlcpy`| [`ascii_safe_strlcpy`]      | safe ASCII-only `strlcpy`              |
 //!
 //! `text` is pass-by-reference; at the fmgr boundary
-//! ([`fmgr::boundary`]) its referent is carried as an owned
+//! ([`::fmgr::boundary`]) its referent is carried as an owned
 //! [`RefPayload::Varlena`] holding the content bytes. The ASCII
 //! transliteration is a byte-for-byte 1:1 mapping, so the output `text` is
 //! exactly as long as the input (C `encode_to_ascii` rewrites the detoasted
@@ -33,8 +33,8 @@ use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_UNDEFINED_OBJECT,
 };
-use fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
-use types_wchar::encoding::{
+use ::fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
+use ::types_wchar::encoding::{
     pg_enc, pg_valid_encoding, PG_LATIN1, PG_LATIN2, PG_LATIN9, PG_WIN1250,
 };
 

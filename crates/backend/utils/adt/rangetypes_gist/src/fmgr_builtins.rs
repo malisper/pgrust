@@ -37,8 +37,8 @@
 //! OIDs / nargs / strict / retset are transcribed exactly from `pg_proc.dat`
 //! (every row is `proisstrict => 't'` — the default — and not retset).
 
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// The shared fmgr-frame entry point for every range/multirange GiST opclass
@@ -55,7 +55,7 @@ fn fc_gist_support_via_dispatch(fcinfo: &mut FunctionCallInfoBaseData) -> PgResu
         .as_ref()
         .map(|fi| fi.fn_oid)
         .unwrap_or(0);
-    Err(types_error::PgError::error(format!(
+    Err(::types_error::PgError::error(format!(
         "range/multirange GiST support function (OID {foid}) must be invoked \
          through the typed opclass dispatch (backend-access-gist-dispatch-seams), \
          not the fmgr frame; the owned GiST access method dispatches these by \

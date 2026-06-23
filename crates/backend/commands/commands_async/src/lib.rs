@@ -46,7 +46,7 @@ use slru::{
     SlruScanDirectory, SLRU_PAGES_PER_SEGMENT,
 };
 use lwlock::{main_lock_ref, LWLockAcquire, LWLockRelease};
-use init_small::globals;
+use ::init_small::globals;
 
 use types_async::{
     AsyncQueueControl, AsyncQueueEntry, AsyncQueueEntryEmptySize, InvalidPid, ListenActionKind,
@@ -57,10 +57,10 @@ use types_async::{
 use types_core::{
     InvalidOid, Oid, ProcNumber, Size, TransactionId, INVALID_PROC_NUMBER,
 };
-use types_storage::storage::{
+use ::types_storage::storage::{
     LW_EXCLUSIVE, LW_SHARED, NOTIFY_QUEUE_LOCK, NOTIFY_QUEUE_TAIL_LOCK,
 };
-use types_storage::sync::SyncRequestHandler;
+use ::types_storage::sync::SyncRequestHandler;
 
 // Seam aliases (cycle partners / unported owners).
 use transam_parallel as parallel_seams;
@@ -88,10 +88,10 @@ const FirstNormalTransactionId: TransactionId = 3;
 const FrozenTransactionId: TransactionId = 2;
 
 // The two fixed NOTIFY LWLocks (`NotifyQueueLock` / `NotifyQueueTailLock`).
-fn notify_queue_lock() -> &'static types_storage::storage::LWLock {
+fn notify_queue_lock() -> &'static ::types_storage::storage::LWLock {
     main_lock_ref(NOTIFY_QUEUE_LOCK)
 }
-fn notify_queue_tail_lock() -> &'static types_storage::storage::LWLock {
+fn notify_queue_tail_lock() -> &'static ::types_storage::storage::LWLock {
     main_lock_ref(NOTIFY_QUEUE_TAIL_LOCK)
 }
 
@@ -281,10 +281,10 @@ fn QUEUE_FIRST_LISTENER() -> ProcNumber {
 fn set_QUEUE_FIRST_LISTENER(v: ProcNumber) {
     with_queue(|q| q.header().firstListener = v);
 }
-fn QUEUE_LAST_FILL_WARN() -> types_core::TimestampTz {
+fn QUEUE_LAST_FILL_WARN() -> ::types_core::TimestampTz {
     with_queue(|q| q.header().lastQueueFillWarn)
 }
-fn set_QUEUE_LAST_FILL_WARN(v: types_core::TimestampTz) {
+fn set_QUEUE_LAST_FILL_WARN(v: ::types_core::TimestampTz) {
     with_queue(|q| q.header().lastQueueFillWarn = v);
 }
 fn QUEUE_BACKEND_PID(i: ProcNumber) -> i32 {
@@ -553,8 +553,8 @@ pub fn AsyncShmemInit() -> PgResult<()> {
         notify_buffers(),
         0,
         "pg_notify",
-        types_storage::storage::LWTRANCHE_NOTIFY_BUFFER,
-        types_storage::storage::LWTRANCHE_NOTIFY_SLRU,
+        ::types_storage::storage::LWTRANCHE_NOTIFY_BUFFER,
+        ::types_storage::storage::LWTRANCHE_NOTIFY_SLRU,
         SyncRequestHandler::SYNC_HANDLER_NONE,
         true,
     )?;
@@ -850,10 +850,10 @@ pub fn PreCommit_Notify() -> PgResult<()> {
         // transaction-scoped); `keep()` consumes the RAII guard without
         // releasing, leaving the lock for the normal end-of-xact lock cleanup.
         lmgr_seams::lock_shared_object::call(
-            types_async::DatabaseRelationId,
+            ::types_async::DatabaseRelationId,
             InvalidOid,
             0,
-            types_storage::lock::AccessExclusiveLock,
+            ::types_storage::lock::AccessExclusiveLock,
         )?
         .keep();
 
@@ -1338,7 +1338,7 @@ fn SignalBackends() -> PgResult<()> {
         // SendProcSignal(pid, PROCSIG_NOTIFY_INTERRUPT, procnos[i]) < 0 => DEBUG3
         if procsignal_seams::send_proc_signal::call(
             pid,
-            types_storage::ProcSignalReason::PROCSIG_NOTIFY_INTERRUPT,
+            ::types_storage::ProcSignalReason::PROCSIG_NOTIFY_INTERRUPT,
             procnos[k],
         ) < 0
         {
@@ -2136,12 +2136,12 @@ pub fn init_seams() {
     {
         fn check_notify_buffers_hook(
             newval: &mut i32,
-            _extra: &mut Option<guc_tables::GucHookExtra>,
+            _extra: &mut Option<::guc_tables::GucHookExtra>,
             _source: types_guc::guc::GucSource,
-        ) -> types_error::PgResult<bool> {
+        ) -> ::types_error::PgResult<bool> {
             Ok(check_notify_buffers(newval))
         }
-        guc_tables::hooks::check_notify_buffers
+        ::guc_tables::hooks::check_notify_buffers
             .install(check_notify_buffers_hook);
     }
 

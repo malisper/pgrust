@@ -18,7 +18,7 @@
 use core::cell::RefCell;
 use std::collections::HashMap;
 
-use types_core::primitive::Buffer;
+use ::types_core::primitive::Buffer;
 
 /// `PrivateRefCountEntry` (bufmgr.c) — the per-backend pin record for one
 /// buffer. Crate-local: this repo has no shared `PrivateRefCountEntry` type, and

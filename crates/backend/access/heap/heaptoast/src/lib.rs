@@ -15,7 +15,7 @@
 //!   * a tuple travels as [`FormedTuple`] (owned header + user-data area); a
 //!     per-attribute value is the unified [`Datum`] enum (`ByVal` scalar / `ByRef`
 //!     verbatim datum bytes, varlena header included);
-//!   * relations cross as [`rel::Relation`] handles; `rel.h` field
+//!   * relations cross as [`::rel::Relation`] handles; `rel.h` field
 //!     reads are plain field reads on the trimmed `RelationData` (foreign
 //!     seams that key on the relation still take `rd_id`);
 //!   * the TOAST pass context is the transparent owned
@@ -42,37 +42,37 @@ use heaptuple::{
     heap_compute_data_size, heap_deform_tuple, heap_form_tuple, nocachegetattr, FormedTuple,
     HeapTupleError,
 };
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{AttrNumber, Oid};
-use rel::Relation;
+use ::rel::Relation;
 // The one canonical per-attribute value type (the unified enum). The old
 // `Datum` alias / bare-word `datum::Datum` newtype are gone from
 // this crate entirely: every value site (deform/form, ScanKey args, fastgetattr
 // reads) is the canonical `Datum<'mcx>` enum, including `ScanKeyData.sk_argument`
 // and the args threaded into `ScanKeyInit`.
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
-use types_scan::scankey::{
+use ::types_scan::scankey::{
     BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, BTLessEqualStrategyNumber, ScanKeyData,
 };
-use types_scan::sdir::ForwardScanDirection;
-use types_storage::lock::AccessShareLock;
-use types_tuple::heap::SizeofHeapTupleHeader;
-use types_tuple::heaptuple::{
+use ::types_scan::sdir::ForwardScanDirection;
+use ::types_storage::lock::AccessShareLock;
+use ::types_tuple::heap::SizeofHeapTupleHeader;
+use ::types_tuple::heaptuple::{
     HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, HeapTupleHeaderHasExternal,
     HeapTupleHeaderSetNatts, TupleDescData, BITMAPLEN, HEAP2_XACT_MASK, HEAP_HASEXTERNAL,
     HEAP_HASNULL, HEAP_HASVARWIDTH, HEAP_XACT_MASK, MaxHeapAttributeNumber,
     MaxTupleAttributeNumber, TYPSTORAGE_EXTENDED,
 };
-use types_tuple::toast_helper::{
+use ::types_tuple::toast_helper::{
     ToastAttrInfo, ToastTupleContext, TOASTCOL_INCOMPRESSIBLE, TOAST_HAS_NULLS,
     TOAST_NEEDS_CHANGE,
 };
 
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use detoast_seams as detoast_seams;
 use toast_internals_seams as toast_internals_seams;
 use genam_seams as genam_seams;
@@ -596,7 +596,7 @@ pub fn heap_tuple_header_get_datum<'mcx>(
     // (with its composite-Datum header fields, set by heap_form_tuple) is the
     // Datum image directly. C: return PointerGetDatum(tuple).
     if !HeapTupleHeaderHasExternal(header) {
-        let datum = heaptuple::heap_tuple_to_disk_image(mcx, &tuple)
+        let datum = ::heaptuple::heap_tuple_to_disk_image(mcx, &tuple)
             .map(Datum::ByRef)?;
         return Ok((tuple, datum));
     }
@@ -611,7 +611,7 @@ pub fn heap_tuple_header_get_datum<'mcx>(
     let tup_desc =
         typcache_seams::lookup_rowtype_tupdesc::call(mcx, type_id, typmod)?;
     let flattened = toast_flatten_tuple_to_datum(mcx, &tuple, &tup_desc)?;
-    let datum = heaptuple::heap_tuple_to_disk_image(mcx, &flattened)
+    let datum = ::heaptuple::heap_tuple_to_disk_image(mcx, &flattened)
         .map(Datum::ByRef)?;
     Ok((flattened, datum))
 }

@@ -21,11 +21,11 @@ extern crate alloc;
 
 mod tables;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use conv_string_helpers::{ConversionResult, LocalToUtf, UtfToLocal};
-use conv_string_helpers::make_conversion_builtin;
-use mbutils_seams::check_encoding_conversion_args;
-use types_wchar::encoding::{pg_enc, PG_BIG5, PG_UTF8};
+use ::conv_string_helpers::make_conversion_builtin;
+use ::mbutils_seams::check_encoding_conversion_args;
+use ::types_wchar::encoding::{pg_enc, PG_BIG5, PG_UTF8};
 
 /// `big5_to_utf8` (utf8_and_big5.c): convert PG_BIG5 <-> PG_UTF8.
 pub fn big5_to_utf8(

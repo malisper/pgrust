@@ -28,11 +28,11 @@
 
 extern crate alloc;
 
-use types_core::Oid;
+use ::types_core::Oid;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
-use types_storage::lock::AccessShareLock;
-use types_error::PgResult;
+use ::types_storage::lock::AccessShareLock;
+use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 
 use ::funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
@@ -57,8 +57,8 @@ pub(crate) fn register_pg_partition_ancestors() {
 /// `RELKIND_HAS_PARTITIONS(relkind)` (`catalog/pg_class.h`) — true for a
 /// partitioned table or partitioned index.
 fn relkind_has_partitions(relkind: u8) -> bool {
-    relkind == types_tuple::access::RELKIND_PARTITIONED_TABLE
-        || relkind == types_tuple::access::RELKIND_PARTITIONED_INDEX
+    relkind == ::types_tuple::access::RELKIND_PARTITIONED_TABLE
+        || relkind == ::types_tuple::access::RELKIND_PARTITIONED_INDEX
 }
 
 /// `check_rel_can_be_partition(relid)` (partitionfuncs.c): whether `relid` can

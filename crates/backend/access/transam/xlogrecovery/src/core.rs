@@ -24,13 +24,13 @@ use alloc::vec::Vec;
 
 use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
 use types_core::{InvalidTransactionId, InvalidXLogRecPtr};
-use wal::wal::TimeLineHistoryEntry;
-use wal::xlog_consts::MAXFNAMELEN;
+use ::wal::wal::TimeLineHistoryEntry;
+use ::wal::xlog_consts::MAXFNAMELEN;
 
 /// `RecoveryPauseState` (access/xlogrecovery.h) — re-exported from the canonical
 /// home in `wal` so the backend-local entry points and the shared region
 /// name the same type.
-pub use wal::wal::RecoveryPauseState;
+pub use ::wal::wal::RecoveryPauseState;
 
 // ===========================================================================
 // Seam carrier types (the recovery-driver seam vocabulary). These travel
@@ -40,7 +40,7 @@ pub use wal::wal::RecoveryPauseState;
 // the recovery crate's API and the seam decls share one vocabulary.
 // ===========================================================================
 
-pub use wal::xlogrecovery_carriers::{
+pub use ::wal::xlogrecovery_carriers::{
     DecodedBlockTag, EndOfWalRecoveryInfo, InitWalRecoveryResult, ReadRecordResult, RecordRef,
     XLogPageReadResult, XLogSource,
 };

@@ -19,7 +19,7 @@
 //! loudly until then. The seam-signature types live in `types_copy`.
 //!
 //! Allocating C functions (every leg can `palloc`, every conversion / input
-//! function can `ereport(ERROR)`) return `types_error::PgResult<T>`, matching
+//! function can `ereport(ERROR)`) return `::types_error::PgResult<T>`, matching
 //! the C failure surface; the infallible read accessors (`relation_natts` etc.)
 //! still carry `PgResult` because the underlying `RelationGetDescr` /
 //! `list_length` are reached through catalog state whose lookup can error in
@@ -30,10 +30,10 @@
 use types_copy::{
     AttrInfo, AttrValue, CopyGetDataResult, CopyParseState, EncodingConversionResult,
 };
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_tuple::heaptuple::Datum;
-use types_error::PgResult;
-use rel::Relation;
+use ::types_error::PgResult;
+use ::rel::Relation;
 
 /* ===========================================================================
  * Data source read (CopyGetData) — copyfromparse.c:244-349.

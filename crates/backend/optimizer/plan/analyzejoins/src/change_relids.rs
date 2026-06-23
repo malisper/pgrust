@@ -19,7 +19,7 @@
 //! callback's RestrictInfo branch as a direct, index-based recursion over the
 //! arena, holding `&mut PlannerInfo` throughout (re-borrowing per step), and
 //! drops into the standard expression walker
-//! ([`rewrite_core::change::ChangeVarNodes`]) only for the leaf clause
+//! ([`::rewrite_core::change::ChangeVarNodes`]) only for the leaf clause
 //! `Expr`, which it detaches from the arena, walks standalone (plain
 //! Var/PHV/RangeTblRef adjustment needs no `PlannerInfo`), and reattaches.
 //!
@@ -34,7 +34,7 @@ use ::nodes::nodes::Node;
 use ::nodes::primnodes::Expr;
 use pathnodes::{EmId, NodeId, PlannerInfo, RinfoId};
 
-use rewrite_core::change::ChangeVarNodes;
+use ::rewrite_core::change::ChangeVarNodes;
 
 use crate::relids;
 
@@ -64,7 +64,7 @@ pub struct ReplaceRelidContext {
 pub(crate) fn change_relids_in_phinfo_inline_phexpr<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
-    phid: pathnodes::PhInfoId,
+    phid: ::pathnodes::PhInfoId,
     ctx: ReplaceRelidContext,
 ) -> types_error::PgResult<()> {
     // Take the inline phexpr out (leaving None) — `Expr` deep-clones only via
@@ -299,11 +299,11 @@ pub fn change_relids_in_em<'mcx>(
 /// must skip RangeTblRefs so the later `remove_rel_from_joinlist` can still find
 /// them by their original relid.
 pub fn change_relids_in_query(
-    run: &mut pathnodes::planner_run::PlannerRun<'_>,
-    parse: pathnodes::QueryId,
+    run: &mut ::pathnodes::planner_run::PlannerRun<'_>,
+    parse: ::pathnodes::QueryId,
     ctx: ReplaceRelidContext,
 ) -> types_error::PgResult<()> {
-    use rewrite_core::change::{
+    use ::rewrite_core::change::{
         ChangeVarNodesContext, ChangeVarNodesExtended,
     };
     use ::nodes::nodes::ntag;
@@ -364,12 +364,12 @@ pub fn change_relids_in_query(
 /// wrapping each interned RTE in a one-element slice. `sublevels_up` starts at 0,
 /// exactly as for the `parse` walk.
 pub fn change_relids_in_simple_rte_array<'mcx>(
-    run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
-    simple_rte_array: &[pathnodes::RangeTblEntryId],
+    run: &mut ::pathnodes::planner_run::PlannerRun<'mcx>,
+    simple_rte_array: &[::pathnodes::RangeTblEntryId],
     ctx: ReplaceRelidContext,
 ) {
-    use nodes_core::node_walker::range_table_mutator;
-    use rewrite_core::change::{ChangeVarNodes_walker, ChangeVarNodesContext};
+    use ::nodes_core::node_walker::range_table_mutator;
+    use ::rewrite_core::change::{ChangeVarNodes_walker, ChangeVarNodesContext};
 
     let mcx = run.mcx();
     // simple_rte_array[0] is the unused RT-index-0 slot (a sentinel handle); the
@@ -388,7 +388,7 @@ pub fn change_relids_in_simple_rte_array<'mcx>(
             sublevels_up: 0,
             mcx,
         };
-        let mut cb: Option<rewrite_core::change::ChangeVarNodesCallback> = None;
+        let mut cb: Option<::rewrite_core::change::ChangeVarNodesCallback> = None;
         range_table_mutator(
             core::slice::from_mut(&mut rte),
             &mut |n| ChangeVarNodes_walker(n, &mut context, &mut cb),
@@ -409,10 +409,10 @@ pub fn change_relids_in_simple_rte_array<'mcx>(
 pub fn change_relids_in_node_list<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,
-    ids: &[pathnodes::NodeId],
+    ids: &[::pathnodes::NodeId],
     ctx: ReplaceRelidContext,
 ) -> types_error::PgResult<()> {
-    use pathnodes::ArenaNode;
+    use ::pathnodes::ArenaNode;
     for &id in ids {
         match &root.node_arena[id.index()] {
             ArenaNode::Expr(_) => change_relids_in_node(mcx, root, id, ctx)?,

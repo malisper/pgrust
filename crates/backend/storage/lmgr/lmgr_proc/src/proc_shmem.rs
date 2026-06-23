@@ -21,9 +21,9 @@ use core::cell::RefCell;
 use core::mem::size_of;
 
 use types_core::{Oid, ProcNumber, Size, TransactionId, INVALID_PROC_NUMBER};
-use types_error::PgResult;
-use types_storage::latch::LatchHandle;
-use types_storage::storage::{
+use ::types_error::PgResult;
+use ::types_storage::latch::LatchHandle;
+use ::types_storage::storage::{
     FreeListId, XidCacheStatus, FP_LOCK_SLOTS_PER_GROUP, LWTRANCHE_LOCK_FASTPATH,
     NUM_AUXILIARY_PROCS, NUM_LOCK_PARTITIONS, NUM_SPECIAL_WORKER_PROCS, PGPROC, PROC_HDR,
     PROC_WAIT_STATUS_OK,
@@ -118,7 +118,7 @@ pub fn ProcGlobalShmemSize() -> Size {
 
     // ProcGlobal + the ProcStructLock spinlock word (`slock_t`).
     size = add_size(size, size_of::<PROC_HDR>());
-    size = add_size(size, size_of::<types_storage::storage::Spinlock>());
+    size = add_size(size, size_of::<::types_storage::storage::Spinlock>());
 
     size = add_size(size, PGProcShmemSize());
     size = add_size(size, FastPathLockShmemSize());
@@ -539,7 +539,7 @@ static SHARED_ALL_PROCS_COUNT: AtomicUsize = AtomicUsize::new(0);
 // (exactly like the pid words / freelists / advertised aux procs). The
 // PGPROC array's other fields stay process-local; only the latch — the one
 // field designed for cross-process mutation — is promoted to real shmem.
-static SHARED_PROC_LATCHES: AtomicPtr<types_storage::latch::Latch> =
+static SHARED_PROC_LATCHES: AtomicPtr<::types_storage::latch::Latch> =
     AtomicPtr::new(core::ptr::null_mut());
 
 /// Length of [`SHARED_PROC_LATCHES`] (== total_procs), for bounds checks.
@@ -560,14 +560,14 @@ static SHARED_PROC_LATCH_COUNT: AtomicUsize = AtomicUsize::new(0);
 // end-of-recovery `RequestCheckpoint`/`CheckpointerMain` CV handshake once the
 // shared `procLatch` lets the initial wakeup through. So `cvWaitLink` lives in
 // genuine shmem, like the latch words above.
-static SHARED_CV_WAIT_LINKS: AtomicPtr<types_storage::proclist_node> =
+static SHARED_CV_WAIT_LINKS: AtomicPtr<::types_storage::proclist_node> =
     AtomicPtr::new(core::ptr::null_mut());
 
 /// Length of [`SHARED_CV_WAIT_LINKS`] (== total_procs), for bounds checks.
 static SHARED_CV_WAIT_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// `&proc->cvWaitLink` over the genuinely-shared array (read).
-pub(crate) fn cv_wait_link_read(procno: ProcNumber) -> types_storage::proclist_node {
+pub(crate) fn cv_wait_link_read(procno: ProcNumber) -> ::types_storage::proclist_node {
     let base = SHARED_CV_WAIT_LINKS.load(AtomicOrdering::Relaxed);
     let count = SHARED_CV_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
     assert!(
@@ -583,7 +583,7 @@ pub(crate) fn cv_wait_link_read(procno: ProcNumber) -> types_storage::proclist_n
 }
 
 /// `proc->cvWaitLink = node` over the genuinely-shared array (write).
-pub(crate) fn cv_wait_link_write(procno: ProcNumber, node: types_storage::proclist_node) {
+pub(crate) fn cv_wait_link_write(procno: ProcNumber, node: ::types_storage::proclist_node) {
     let base = SHARED_CV_WAIT_LINKS.load(AtomicOrdering::Relaxed);
     let count = SHARED_CV_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
     assert!(
@@ -612,7 +612,7 @@ pub(crate) fn cv_wait_link_write(procno: ProcNumber, node: types_storage::procli
 // wait-list spinlock as the panic unwinds with `LW_FLAG_LOCKED` held). So these
 // three fields live in genuine shmem, mirroring `cvWaitLink`. `lwWaiting` and
 // `lwWaitMode` are single bytes (`LWLockWaitState` / `LWLockMode` discriminants).
-static SHARED_LW_WAIT_LINKS: AtomicPtr<types_storage::proclist_node> =
+static SHARED_LW_WAIT_LINKS: AtomicPtr<::types_storage::proclist_node> =
     AtomicPtr::new(core::ptr::null_mut());
 /// Length of [`SHARED_LW_WAIT_LINKS`] (== total_procs), for bounds checks.
 static SHARED_LW_WAIT_LINK_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -622,7 +622,7 @@ static SHARED_LW_WAITING: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 static SHARED_LW_WAIT_MODE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 
 /// `&proc->lwWaitLink` over the genuinely-shared array (read).
-pub(crate) fn lw_wait_link_read(procno: ProcNumber) -> types_storage::proclist_node {
+pub(crate) fn lw_wait_link_read(procno: ProcNumber) -> ::types_storage::proclist_node {
     let base = SHARED_LW_WAIT_LINKS.load(AtomicOrdering::Relaxed);
     let count = SHARED_LW_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
     assert!(
@@ -637,7 +637,7 @@ pub(crate) fn lw_wait_link_read(procno: ProcNumber) -> types_storage::proclist_n
 }
 
 /// `proc->lwWaitLink = node` over the genuinely-shared array (write).
-pub(crate) fn lw_wait_link_write(procno: ProcNumber, node: types_storage::proclist_node) {
+pub(crate) fn lw_wait_link_write(procno: ProcNumber, node: ::types_storage::proclist_node) {
     let base = SHARED_LW_WAIT_LINKS.load(AtomicOrdering::Relaxed);
     let count = SHARED_LW_WAIT_LINK_COUNT.load(AtomicOrdering::Relaxed);
     assert!(
@@ -709,7 +709,7 @@ pub(crate) fn lw_wait_mode_write(procno: ProcNumber, v: u8) {
 /// Pointer to the genuinely-shared `ProcStructLock` spinlock word. Set by
 /// [`InitProcGlobal`], NULL until then. C: `slock_t *ProcStructLock` placed by
 /// `ShmemInitStruct`.
-static SHARED_PROC_STRUCT_LOCK: AtomicPtr<types_storage::storage::Spinlock> =
+static SHARED_PROC_STRUCT_LOCK: AtomicPtr<::types_storage::storage::Spinlock> =
     AtomicPtr::new(core::ptr::null_mut());
 
 // ---- genuinely-shared proc freelists (the four `PROC_HDR` dlist heads + the
@@ -1284,7 +1284,7 @@ fn shared_lock_group_leader_slot(procno: ProcNumber) -> &'static AtomicI32 {
 /// (-1) encodes NULL.
 pub(crate) fn proc_lock_group_leader_shared(procno: ProcNumber) -> Option<ProcNumber> {
     let raw = shared_lock_group_leader_slot(procno).load(AtomicOrdering::Relaxed);
-    if raw == types_core::INVALID_PROC_NUMBER {
+    if raw == ::types_core::INVALID_PROC_NUMBER {
         None
     } else {
         Some(raw)
@@ -1294,7 +1294,7 @@ pub(crate) fn proc_lock_group_leader_shared(procno: ProcNumber) -> Option<ProcNu
 /// `ProcGlobal->allProcs[procno].lockGroupLeader = leader` — write the canonical
 /// (shared) word, visible to every process (the parallel leader/member set).
 pub(crate) fn set_proc_lock_group_leader_shared(procno: ProcNumber, leader: Option<ProcNumber>) {
-    let raw = leader.unwrap_or(types_core::INVALID_PROC_NUMBER);
+    let raw = leader.unwrap_or(::types_core::INVALID_PROC_NUMBER);
     shared_lock_group_leader_slot(procno).store(raw, AtomicOrdering::Relaxed);
 }
 
@@ -1598,7 +1598,7 @@ fn shared_waiting_slot(procno: ProcNumber) -> &'static core::sync::atomic::Atomi
 /// LOCKTAG, or `None` when the backend is not queued on a heavyweight lock. This
 /// is the cross-process source of truth for `dlist_node_is_detached(&proc->links)`
 /// and `proc->waitLock` reads in the wakeup / deadlock paths.
-pub(crate) fn proc_wait_lock_shared(procno: ProcNumber) -> Option<types_storage::lock::LOCKTAG> {
+pub(crate) fn proc_wait_lock_shared(procno: ProcNumber) -> Option<::types_storage::lock::LOCKTAG> {
     if shared_waiting_slot(procno).load(AtomicOrdering::Relaxed) == 0 {
         return None;
     }
@@ -1615,7 +1615,7 @@ pub(crate) fn proc_wait_lock_shared(procno: ProcNumber) -> Option<types_storage:
             WAIT_LOCK_WIRE,
         );
     }
-    Some(types_storage::lock::LOCKTAG {
+    Some(::types_storage::lock::LOCKTAG {
         locktag_field1: u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]),
         locktag_field2: u32::from_ne_bytes([buf[4], buf[5], buf[6], buf[7]]),
         locktag_field3: u32::from_ne_bytes([buf[8], buf[9], buf[10], buf[11]]),
@@ -1630,7 +1630,7 @@ pub(crate) fn proc_wait_lock_shared(procno: ProcNumber) -> Option<types_storage:
 /// it (`None`) when the backend leaves the wait queue.
 pub(crate) fn set_proc_wait_lock_shared(
     procno: ProcNumber,
-    tag: Option<types_storage::lock::LOCKTAG>,
+    tag: Option<::types_storage::lock::LOCKTAG>,
 ) {
     let idx = procno as usize;
     let count = SHARED_PROC_WAIT_LOCK_COUNT.load(AtomicOrdering::Relaxed);
@@ -1856,7 +1856,7 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
         // proc, so we must stamp the -1 sentinel explicitly.
         for k in 0..total_procs {
             // SAFETY: `lgl_ptr` addresses `total_procs` writable `i32` shmem words.
-            unsafe { lgl_ptr.add(k).write(types_core::INVALID_PROC_NUMBER) };
+            unsafe { lgl_ptr.add(k).write(::types_core::INVALID_PROC_NUMBER) };
         }
     }
     SHARED_PROC_LOCK_GROUP_LEADER.store(lgl_ptr, AtomicOrdering::Relaxed);
@@ -2149,9 +2149,9 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     SHARED_PROC_STATUS_FLAGS.store(sf_ptr, AtomicOrdering::Relaxed);
 
     // ProcStructLock spinlock word
-    let lock_size = size_of::<types_storage::storage::Spinlock>();
+    let lock_size = size_of::<::types_storage::storage::Spinlock>();
     let (lock_ptr, lock_found) = shmem::shmem_init_struct::call("ProcStructLock", lock_size)?;
-    let lock_ptr = lock_ptr as *mut types_storage::storage::Spinlock;
+    let lock_ptr = lock_ptr as *mut ::types_storage::storage::Spinlock;
     if !lock_found {
         // SpinLockInit(ProcStructLock): store the free (zero) word.
         // SAFETY: `lock_ptr` addresses a writable `Spinlock` word in shmem.
@@ -2177,10 +2177,10 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     SHARED_AUX_PROCS.store(aux_ptr, AtomicOrdering::Relaxed);
 
     // Per-PGPROC `procLatch` words (genuinely shared for cross-process wakeup).
-    let latch_size = mul_size(total_procs, size_of::<types_storage::latch::Latch>());
+    let latch_size = mul_size(total_procs, size_of::<::types_storage::latch::Latch>());
     let (latch_ptr, latch_found) =
         shmem::shmem_init_struct::call("PGPROC procLatch words", latch_size)?;
-    let latch_ptr = latch_ptr as *mut types_storage::latch::Latch;
+    let latch_ptr = latch_ptr as *mut ::types_storage::latch::Latch;
     if !latch_found {
         // Zero the block (C's MemSet of the PGPROC array), then `InitSharedLatch`
         // each one: cleared (is_set=0, maybe_sleeping=0, owner_pid=0) and marked
@@ -2199,10 +2199,10 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
 
     // Per-PGPROC `cvWaitLink` nodes (genuinely shared so a CV broadcast in one
     // process walks the same wait queue the waiter linked itself onto).
-    let cv_size = mul_size(total_procs, size_of::<types_storage::proclist_node>());
+    let cv_size = mul_size(total_procs, size_of::<::types_storage::proclist_node>());
     let (cv_ptr, cv_found) =
         shmem::shmem_init_struct::call("PGPROC cvWaitLink nodes", cv_size)?;
-    let cv_ptr = cv_ptr as *mut types_storage::proclist_node;
+    let cv_ptr = cv_ptr as *mut ::types_storage::proclist_node;
     if !cv_found {
         // Zero (`proclist_node { next: 0, prev: 0 }`) — not linked into any
         // queue, matching C's MemSet of the PGPROC block.
@@ -2215,10 +2215,10 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     // Per-PGPROC `lwWaitLink` nodes + `lwWaiting`/`lwWaitMode` bytes (genuinely
     // shared so an LWLock release in one process walks the same wait queue the
     // waiter linked itself onto, and reads the waiter's true wait state).
-    let lw_size = mul_size(total_procs, size_of::<types_storage::proclist_node>());
+    let lw_size = mul_size(total_procs, size_of::<::types_storage::proclist_node>());
     let (lw_ptr, lw_found) =
         shmem::shmem_init_struct::call("PGPROC lwWaitLink nodes", lw_size)?;
-    let lw_ptr = lw_ptr as *mut types_storage::proclist_node;
+    let lw_ptr = lw_ptr as *mut ::types_storage::proclist_node;
     if !lw_found {
         // Zero (`proclist_node { next: 0, prev: 0 }`), matching C's MemSet.
         // SAFETY: `lw_ptr` addresses `lw_size` writable shmem bytes.
@@ -2297,7 +2297,7 @@ pub(crate) fn spin_lock_release_proc_struct_lock() {
 /// `ProcStructLock` — the genuinely-shared spinlock word placed by
 /// [`InitProcGlobal`]. Panics if it has not run (caller bug, mirroring the C
 /// deref of the `ProcStructLock` pointer before it is set).
-fn proc_struct_lock() -> &'static types_storage::storage::Spinlock {
+fn proc_struct_lock() -> &'static ::types_storage::storage::Spinlock {
     let p = SHARED_PROC_STRUCT_LOCK.load(AtomicOrdering::Relaxed);
     assert!(
         !p.is_null(),
@@ -2755,7 +2755,7 @@ pub fn InitProcGlobal() -> PgResult<()> {
     // Header", ...) + Assert(!found). Here the crate owns the value; a second
     // call would mean the header already existed.)
     if proc_global_initialized() {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "InitProcGlobal: \"Proc Header\" already existed",
         ));
     }
@@ -2896,9 +2896,9 @@ pub fn InitProcGlobal() -> PgResult<()> {
         // are initialized to INVALID_PROC_NUMBER in C; INVALID_PROC_NUMBER is
         // -1, so set them explicitly to match.
         proc.procArrayGroupNext =
-            types_storage::storage::pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32);
+            ::types_storage::storage::pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32);
         proc.clogGroupNext =
-            types_storage::storage::pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32);
+            ::types_storage::storage::pg_atomic_uint32::new(INVALID_PROC_NUMBER as u32);
 
         // waitStatus is PROC_WAIT_STATUS_OK by new_zeroed.
         debug_assert_eq!(proc.waitStatus, PROC_WAIT_STATUS_OK);
@@ -2970,7 +2970,7 @@ pub(crate) fn proc_latch_handle(procNumber: ProcNumber) -> LatchHandle {
 /// behind the `with_proc_latch` seam). The proc unit owns the `allProcs`
 /// array; the latch unit applies its own `SetLatch`/`OwnLatch`/`DisownLatch`
 /// algorithm inside the callback.
-pub(crate) fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&types_storage::latch::Latch)) {
+pub(crate) fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&::types_storage::latch::Latch)) {
     // Reach `&proc->procLatch` through the genuinely-shared `SHARED_PROC_LATCHES`
     // array placed in real shmem by InitProcGlobal — NOT the per-process
     // `allProcs` `Vec` (whose `procLatch` writes would be invisible to other
@@ -2995,6 +2995,6 @@ pub(crate) fn with_proc_latch(procno: ProcNumber, f: &mut dyn FnMut(&types_stora
     // length. We only touch the all-atomic `Latch` through a shared reference;
     // its fields are mutated concurrently/cross-process exactly as C's
     // `volatile` latch is.
-    let latch: &types_storage::latch::Latch = unsafe { &*base.add(idx) };
+    let latch: &::types_storage::latch::Latch = unsafe { &*base.add(idx) };
     f(latch);
 }

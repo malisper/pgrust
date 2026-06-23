@@ -11,7 +11,7 @@ extern crate std;
 use super::shmem::*;
 use core::mem::{align_of, size_of};
 
-use wal::wal::RecoveryPauseState;
+use ::wal::wal::RecoveryPauseState;
 
 use ipc_shmem_seams as shmem_seam;
 use condition_variable_seams as condvar_seam;

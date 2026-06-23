@@ -22,18 +22,18 @@
 #![allow(non_upper_case_globals)]
 
 use replication_slot as slot;
-use activity_pgstat::kind_info::KindInfoBuilder;
-use activity_pgstat::registry;
-use activity_pgstat::shmem;
+use ::activity_pgstat::kind_info::KindInfoBuilder;
+use ::activity_pgstat::registry;
+use ::activity_pgstat::shmem;
 use utils_error::{ereport, elog};
-use types_core::primitive::InvalidOid;
+use ::types_core::primitive::InvalidOid;
 use types_error::{PgResult, ErrorLocation, ERROR, ERRCODE_INVALID_PARAMETER_VALUE};
-use types_logical::ReorderBufferStats;
-use types_pgstat::activity_pgstat::{PgStat_StatReplSlotEntry, PGSTAT_KIND_REPLSLOT};
-use types_pgstat::pgstat_internal::{
+use ::types_logical::ReorderBufferStats;
+use ::types_pgstat::activity_pgstat::{PgStat_StatReplSlotEntry, PGSTAT_KIND_REPLSLOT};
+use ::types_pgstat::pgstat_internal::{
     PgStat_HashKey, PgStat_KindInfo, PgStatShared_Common, PgStatShared_ReplSlot,
 };
-use types_tuple::heaptuple::NameData;
+use ::types_tuple::heaptuple::NameData;
 
 const REPLSLOT_C: &str = "pgstat_replslot.c";
 
@@ -74,7 +74,7 @@ pub fn pgstat_reset_replslot(name: &str) -> PgResult<()> {
     // Reset stats if it is a logical slot. Nothing to do for physical slots as
     // we collect stats only for logical slots.
     if slot::snapshot_is_logical(&snap) {
-        activity_pgstat::pgstat_core::pgstat_reset(
+        ::activity_pgstat::pgstat_core::pgstat_reset(
             PGSTAT_KIND_REPLSLOT,
             InvalidOid,
             snap.slotno as u64,
@@ -299,7 +299,7 @@ fn pgstat_replslot_from_serialized_name_cb(name: &str) -> Option<PgStat_HashKey>
 
 /// Port of `void pgstat_replslot_reset_timestamp_cb(PgStatShared_Common
 /// *header, TimestampTz ts)`.
-fn pgstat_replslot_reset_timestamp_cb(header: &mut PgStatShared_Common, ts: types_core::TimestampTz) {
+fn pgstat_replslot_reset_timestamp_cb(header: &mut PgStatShared_Common, ts: ::types_core::TimestampTz) {
     // ((PgStatShared_ReplSlot *) header)->stats.stat_reset_timestamp = ts;
     // SAFETY: the kind table only ever hands this cb a header that is the
     // PgStatShared_Common embedded as the first field of a PgStatShared_ReplSlot.
@@ -353,7 +353,7 @@ fn replslot_kind_info() -> PgStat_KindInfo {
 /// Register `PGSTAT_KIND_REPLSLOT` and install the slot.c → pgstat outward
 /// seams.
 ///
-/// Must run before `activity_pgstat::init_seams()` seals the
+/// Must run before `::activity_pgstat::init_seams()` seals the
 /// per-kind table.
 pub fn init_seams() {
     // Register the variable kind's callbacks in pgstat_kind_builtin_infos[].
@@ -367,7 +367,7 @@ pub fn init_seams() {
             .read_var_cb(|header, bytes| {
                 // SAFETY: header points at a live PgStatShared_ReplSlot body.
                 let sh = unsafe { &mut *(header as *mut PgStatShared_ReplSlot) };
-                sh.stats = activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                sh.stats = ::activity_pgstat::kind_info::pgstat_deserialize_pod::<
                     PgStat_StatReplSlotEntry,
                 >(bytes);
                 Ok(())
@@ -375,7 +375,7 @@ pub fn init_seams() {
             .write_var_cb(|header| {
                 // SAFETY: header points at a live PgStatShared_ReplSlot body.
                 let sh = unsafe { &*(header as *const PgStatShared_ReplSlot) };
-                activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
+                ::activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
             }),
     );
 

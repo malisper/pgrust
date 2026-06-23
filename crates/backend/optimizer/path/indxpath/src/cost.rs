@@ -3,9 +3,9 @@
 
 use core::cmp::Ordering;
 
-use types_core::primitive::{Cost, Index};
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::{Cost, Index};
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PathId, PlannerInfo, RelId, Relids, JOIN_SEMI};
 
 use costsize_seams as costsize;
@@ -60,7 +60,7 @@ pub fn adjust_rowcount_for_semijoins<'mcx>(
     // Snapshot the matching semijoins first: estimate_num_groups needs `&mut
     // root` (it re-interns stripped grouping expressions into the node arena),
     // which can't be borrowed while iterating `root.join_info_list`.
-    let mut candidates: alloc::vec::Vec<(Relids, alloc::vec::Vec<pathnodes::NodeId>)> =
+    let mut candidates: alloc::vec::Vec<(Relids, alloc::vec::Vec<::pathnodes::NodeId>)> =
         alloc::vec::Vec::new();
     for sjinfo in &root.join_info_list {
         if sjinfo.jointype == JOIN_SEMI
@@ -235,7 +235,7 @@ pub fn bitmap_and_cost_est<'mcx>(
     run: &PlannerRun<'mcx>,
     rel: RelId,
     paths: alloc::vec::Vec<PathId>,
-) -> Result<Cost, types_error::PgError> {
+) -> Result<Cost, ::types_error::PgError> {
     let apath_id = pathnode::create_bitmap_and_path::call(root, run, rel, paths)?;
     bitmap_scan_cost_est(run, root, rel, apath_id)
 }

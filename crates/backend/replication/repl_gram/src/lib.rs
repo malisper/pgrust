@@ -15,12 +15,12 @@
 //!    names the production it implements.
 //!  * **Tokens.** The scanner (`repl_scanner.l`) is a separate unit. The grammar
 //!    obtains the token stream through the
-//!    [`replication_lex_all`](repl_scanner_seams::replication_lex_all)
+//!    [`replication_lex_all`](::repl_scanner_seams::replication_lex_all)
 //!    seam (panics until the scanner lands) and consumes it left-to-right with
 //!    one token of lookahead, exactly as Bison drives `replication_yylex`.
 //!  * **Error reporting.** `repl_gram.y`'s `ereport(ERROR, ERRCODE_SYNTAX_ERROR,
 //!    ...)` (via `replication_yyerror`) and unwind becomes a recoverable
-//!    [`PgError`](utils_error::PgError) carrying `ERRCODE_SYNTAX_ERROR`,
+//!    [`PgError`](::utils_error::PgError) carrying `ERRCODE_SYNTAX_ERROR`,
 //!    returned to the caller.
 //!  * **`psprintf("%s.%s", ...)`** for the dotted `var_name` of `SHOW a.b.c` is
 //!    ordinary string formatting, ported inline.
@@ -36,12 +36,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 
 use parsenodes::{Boolean, DefElem, Integer, Node, StringNode, DEFELEM_UNSPEC};
-use replication::repl_token::Token;
-use replication::replnodes::{
+use ::replication::repl_token::Token;
+use ::replication::replnodes::{
     AlterReplicationSlotCmd, BaseBackupCmd, CreateReplicationSlotCmd, DropReplicationSlotCmd,
     ReadReplicationSlotCmd, ReplCommand, ReplicationKind, StartReplicationCmd, TimeLineHistoryCmd,
     VariableShowStmt,

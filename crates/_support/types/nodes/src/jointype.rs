@@ -2,7 +2,7 @@
 //! base (`nodes/plannodes.h`), trimmed to what the join executor nodes consume.
 
 use mcx::{Mcx, PgBox, PgVec, vec_with_capacity_in};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::nodeindexscan::Plan;
 use crate::primnodes::Expr;

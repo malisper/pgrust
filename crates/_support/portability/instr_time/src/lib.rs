@@ -1,9 +1,9 @@
 //! The OS-clock half of `portability/instr_time.h`. The `instr_time` type and
 //! its pure-arithmetic `INSTR_TIME_*` operations live in
-//! `types_core::instrument` (dependency-free); this crate holds only the
+//! `::types_core::instrument` (dependency-free); this crate holds only the
 //! pieces that need libc.
 
-use types_core::instrument::{instr_time, NS_PER_S};
+use ::types_core::instrument::{instr_time, NS_PER_S};
 
 /// `pg_clock_gettime_ns()` — read `PG_INSTR_CLOCK` and convert to nanosecond
 /// ticks (`tv_sec * NS_PER_S + tv_nsec`). PG picks `CLOCK_MONOTONIC_RAW` on

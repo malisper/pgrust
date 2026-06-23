@@ -6,7 +6,7 @@
 
 #![allow(non_upper_case_globals)]
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /* ---- pg_authid (`pg_authid_d.h`) ---- */
 

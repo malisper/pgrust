@@ -41,7 +41,7 @@
 //! (they resolve a `dsa_pointer` via `dsa_get_address(area, ...)` and run
 //! `equalRowTypes` / `hashRowType` over the addressed `TupleDesc`).
 //!
-//! The ported dshash (`backend-lib-dshash` over `types_storage::DshashParameters`
+//! The ported dshash (`backend-lib-dshash` over `::types_storage::DshashParameters`
 //! / `DshashKeyKind`) deliberately supports **only** the two built-in key sets
 //! (`String`, `Binary`) — "function pointers can't be shared between backends"
 //! — and has no variant for a caller-supplied compare/hash taking the
@@ -60,17 +60,17 @@ use std::sync::atomic::AtomicU32;
 
 use mcx::{Mcx, MemoryContext, PgBox};
 use types_error::{PgResult, ERROR};
-use utils_error::ereport;
-use types_storage::storage::{dsm_handle, shm_toc_estimator, DSM_HANDLE_INVALID};
+use ::utils_error::ereport;
+use ::types_storage::storage::{dsm_handle, shm_toc_estimator, DSM_HANDLE_INVALID};
 use types_storage::{
     dshash_table_handle, DsaArea, DshashKeyKind, DshashParameters, DshashTable,
     LWTRANCHE_PER_SESSION_DSA, LWTRANCHE_PER_SESSION_RECORD_TYPE,
     LWTRANCHE_PER_SESSION_RECORD_TYPMOD,
 };
 use execparallel::{DsmSegmentHandle, SerializeCursor};
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 
-use dsm_core::dsm::{
+use ::dsm_core::dsm::{
     self, dsm_segment_address, dsm_segment_handle, DsmSegment, DsmSegmentId,
     DSM_CREATE_NULL_IF_MAXSEGMENTS,
 };
@@ -79,7 +79,7 @@ use shm_toc::{
     shm_toc_initialize_estimator, ShmToc,
 };
 use dsa_seams as dsa;
-use mcxt_seams::top_memory_context;
+use ::mcxt_seams::top_memory_context;
 use dshash_seams as dshash;
 
 /// `SESSION_MAGIC` — magic number for the per-session DSM TOC (session.c:29).
@@ -699,7 +699,7 @@ fn detach_session() -> PgResult<()> {
         dsm::dsm_detach(seg_id)?;
     }
     if !area.is_null() {
-        dsa::dsa_detach::call(execparallel::DsaAreaHandle(area as usize));
+        dsa::dsa_detach::call(::execparallel::DsaAreaHandle(area as usize));
     }
     CURRENT_SESSION.with(|s| {
         let mut b = s.borrow_mut();

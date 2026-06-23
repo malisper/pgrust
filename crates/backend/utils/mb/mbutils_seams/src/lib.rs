@@ -20,8 +20,8 @@
 //! invalid byte sequences) and palloc out-of-memory.
 
 use mcx::{Mcx, PgVec};
-use types_core::PgWChar;
-use types_error::PgResult;
+use ::types_core::PgWChar;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `pg_verifymbstr(mbstr, len, noError)` (`utils/mb/mbutils.c`): verify
@@ -148,13 +148,13 @@ seam_core::seam!(
 seam_core::seam!(
     /// `SetDatabaseEncoding(encoding)` (mbutils.c): set the server (database)
     /// encoding. `Err` carries its `ereport` surface.
-    pub fn set_database_encoding(encoding: i32) -> types_error::PgResult<()>
+    pub fn set_database_encoding(encoding: i32) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
     /// `InitializeClientEncoding()` (mbutils.c): finalize the client_encoding
     /// conversion setup. `Err` carries its `ereport` surface.
-    pub fn initialize_client_encoding() -> types_error::PgResult<()>
+    pub fn initialize_client_encoding() -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -251,7 +251,7 @@ seam_core::seam!(
     pub fn find_default_conversion_proc(
         for_encoding: i32,
         to_encoding: i32,
-    ) -> PgResult<types_core::primitive::Oid>
+    ) -> PgResult<::types_core::primitive::Oid>
 );
 
 seam_core::seam!(
@@ -267,7 +267,7 @@ seam_core::seam!(
     /// `no_error = false` the conversion procedure raises (carried on `Err`).
     pub fn pg_do_encoding_conversion_buf<'mcx>(
         mcx: Mcx<'mcx>,
-        proc: types_core::primitive::Oid,
+        proc: ::types_core::primitive::Oid,
         src_encoding: i32,
         dest_encoding: i32,
         src: &[u8],

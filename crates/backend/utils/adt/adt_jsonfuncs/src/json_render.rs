@@ -18,18 +18,18 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use types_json::{ArrayForJson, CompositeFieldForJson};
-use types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId};
-use types_tuple::Datum;
+use ::types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId};
+use ::types_tuple::Datum;
 
-use heaptuple::heap_deform_tuple;
-use arrayfuncs::foundation;
+use ::heaptuple::heap_deform_tuple;
+use ::arrayfuncs::foundation;
 use varlena_seams as varlena_seams;
-use lsyscache::type_::get_typlenbyvalalign;
-use cache_typcache::lookup_rowtype_tupdesc;
+use ::lsyscache::type_::get_typlenbyvalalign;
+use ::cache_typcache::lookup_rowtype_tupdesc;
 use fmgr_seams as fmgr_seams;
 
 use crate::categorize::json_categorize_type;
@@ -58,7 +58,7 @@ pub fn extract_variadic_array<'mcx>(
 
     // deconstruct_array(array_in, element_type, typlen, typbyval, typalign,
     // &args_res, &nulls_res, &nargs): the canonical-value element walk.
-    let elems = arrayfuncs::construct::deconstruct_array_values(
+    let elems = ::arrayfuncs::construct::deconstruct_array_values(
         mcx,
         &v,
         element_type,
@@ -80,7 +80,7 @@ pub fn deconstruct_text_array_with_dims(
     arr: &[u8],
 ) -> PgResult<(i32, Vec<i32>, Vec<Option<Vec<u8>>>)> {
     let (ndim, dims, elems) =
-        arrayfuncs::construct::deconstruct_text_array_with_dims_bytes(arr)?;
+        ::arrayfuncs::construct::deconstruct_text_array_with_dims_bytes(arr)?;
     // Map each `ArrayElem { value, is_null }` to `Option<Vec<u8>>` (the C
     // `in_nulls[i] ? NULL : in_datums[i]` distinction the jsonb_object cores read).
     let out = elems
@@ -115,7 +115,7 @@ pub fn cast_function_call<'mcx>(
     let jsontext = fmgr_seams::function_call1_coll_datum::call(
         mcx,
         outfuncoid,
-        types_core::InvalidOid,
+        ::types_core::InvalidOid,
         val.clone_in(mcx)?,
     )?;
     // DatumGetTextPP + VARDATA_ANY/VARSIZE_ANY_EXHDR: detoast the text varlena
@@ -207,7 +207,7 @@ pub fn deconstruct_array<'mcx>(mcx: Mcx<'mcx>, array: &Datum<'mcx>) -> PgResult<
                     // the length from the element header.
                     foundation::att_addlength_pointer(p, elmlen, &v, p) - p
                 };
-                Datum::ByRef(mcx::slice_in(mcx, &v[p..p + len])?)
+                Datum::ByRef(::mcx::slice_in(mcx, &v[p..p + len])?)
             };
             elements.push(d);
             nulls.push(false);
@@ -330,7 +330,7 @@ pub fn walk_composite<'mcx>(
     // image (the inverse of `to_datum_image`).
     let tuple = match composite.as_composite() {
         Some(t) => t.clone_in(mcx)?,
-        None => types_tuple::FormedTuple::from_datum_image(mcx, composite.as_ref_bytes())?,
+        None => ::types_tuple::FormedTuple::from_datum_image(mcx, composite.as_ref_bytes())?,
     };
     let td = tuple
         .tuple
@@ -372,7 +372,7 @@ pub fn walk_composite<'mcx>(
 
         // if (isnull) { JSONTYPE_NULL, InvalidOid } else json_categorize_type(...)
         let (tcategory, outfuncoid) = if is_null {
-            (types_json::JsonTypeCategory::JSONTYPE_NULL, types_core::InvalidOid)
+            (::types_json::JsonTypeCategory::JSONTYPE_NULL, ::types_core::InvalidOid)
         } else {
             json_categorize_type(att.atttypid, false)?
         };

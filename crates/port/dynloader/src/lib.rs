@@ -28,11 +28,11 @@
 //! therefore intentionally a PARTIAL port (it is not marked complete in
 //! `CATALOG.tsv`), exactly mirroring the `TD-DFMGR-DYNLOADER` design debt.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen};
 use types_error::{PgResult, ERROR};
-use fmgr::LoadedExternalFunc;
-use types_logical::CallbackInvocation;
+use ::fmgr::LoadedExternalFunc;
+use ::types_logical::CallbackInvocation;
 
 /// `stat(libname, &stat_buf)` (`dfmgr.c` `internal_load_library`) — read the
 /// file's device/inode so `SAME_INODE` can detect the same file reached by a
@@ -93,7 +93,7 @@ fn stat_identity(libname: &str) -> PgResult<FileIdentity> {
 /// ```
 /// so the session/transaction aborts cleanly and the backend stays alive,
 /// instead of panicking and poisoning the cluster (TD-DFMGR-DYNLOADER).
-fn no_c_abi_error(libname: &str) -> types_error::PgError {
+fn no_c_abi_error(libname: &str) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode_for_file_access()
         .errmsg(format!(

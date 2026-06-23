@@ -8,16 +8,16 @@
 //!
 //! # Lifetime keystone
 //!
-//! The in-memory working type is [`types_numeric::var::NumericVar`]`<'mcx>`,
-//! whose digit buffer is a *charged* `mcx::PgVec<'mcx, NumericDigit>`. The
+//! The in-memory working type is [`::types_numeric::var::NumericVar`]`<'mcx>`,
+//! whose digit buffer is a *charged* `::mcx::PgVec<'mcx, NumericDigit>`. The
 //! `'mcx` lifetime (the memory context that owns the digits) threads through
 //! every family. There is no ambient `CurrentMemoryContext` in this repo, so
-//! every allocating core takes an explicit `mcx::Mcx<'mcx>`.
+//! every allocating core takes an explicit `::mcx::Mcx<'mcx>`.
 //!
 //! # Errors
 //!
 //! Hard errors mirror the C `ereport(ERROR, ...)` sites as
-//! [`types_error::PgError`] via [`types_error::PgResult`], with the same
+//! [`::types_error::PgError`] via [`::types_error::PgResult`], with the same
 //! SQLSTATEs.
 //!
 //! # Family decomposition
@@ -48,8 +48,8 @@ pub mod random;
 pub mod series_srf;
 
 use mcx::{Mcx, PgVec};
-use types_error::PgError;
-use types_numeric::NumericDigit;
+use ::types_error::PgError;
+use ::types_numeric::NumericDigit;
 
 /// Re-export the on-disk ABI surface under a single path.
 pub mod on_disk {
@@ -70,9 +70,9 @@ pub mod on_disk {
 pub(crate) fn alloc_digits<'mcx>(
     mcx: Mcx<'mcx>,
     n: usize,
-) -> types_error::PgResult<PgVec<'mcx, NumericDigit>> {
-    use types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
-    let mut v = mcx::vec_with_capacity_in::<NumericDigit>(mcx, n).map_err(|_| {
+) -> ::types_error::PgResult<PgVec<'mcx, NumericDigit>> {
+    use ::types_error::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE;
+    let mut v = ::mcx::vec_with_capacity_in::<NumericDigit>(mcx, n).map_err(|_| {
         PgError::error("value overflows numeric format")
             .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)
     })?;
@@ -135,7 +135,7 @@ pub fn init_seams() {
 /// `numeric()` length-coercion kernel only reads the argument list.
 #[allow(clippy::too_many_arguments)]
 fn numeric_support_simplify<'mcx>(
-    _mcx: mcx::Mcx<'mcx>,
+    _mcx: ::mcx::Mcx<'mcx>,
     _funcid: types_core::primitive::Oid,
     _result_type: types_core::primitive::Oid,
     _result_collid: types_core::primitive::Oid,
@@ -143,6 +143,6 @@ fn numeric_support_simplify<'mcx>(
     args: &[nodes::primnodes::Expr<'mcx>],
     _funcvariadic: bool,
     _estimate: bool,
-) -> types_error::PgResult<Option<nodes::primnodes::Expr<'mcx>>> {
+) -> ::types_error::PgResult<Option<nodes::primnodes::Expr<'mcx>>> {
     series_srf::numeric_support(args)
 }

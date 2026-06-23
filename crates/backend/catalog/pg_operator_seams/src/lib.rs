@@ -13,10 +13,10 @@
 
 #![allow(non_snake_case)]
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_catalog::pg_operator::FormPgOperator;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_catalog::pg_operator::FormPgOperator;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `RemoveOperatorById(operOid)` (operatorcmds.c): the per-class

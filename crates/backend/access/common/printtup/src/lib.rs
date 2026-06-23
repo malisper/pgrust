@@ -18,7 +18,7 @@
 //! the buffer identically without it.
 //!
 //! The per-column descriptor (`TupleDesc`) is the reused owned
-//! [`types_tuple::heaptuple::TupleDescData`]: `TupleDescAttr` / `natts` /
+//! [`::types_tuple::heaptuple::TupleDescData`]: `TupleDescAttr` / `natts` /
 //! `attbyval` are pure in-process reads done directly. C's
 //! `myState->attrinfo == typeinfo` identity check compares the descriptor
 //! *pointer*; the owned model records the borrowed descriptor's address as an
@@ -51,13 +51,13 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{FmgrInfo, Oid};
-use types_dest::dest::CommandDest;
+use ::types_dest::dest::CommandDest;
 use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, PgError};
 use ::nodes::tuptable::SlotData;
-use stringinfo::StringInfo;
-use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData};
+use ::stringinfo::StringInfo;
+use ::types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData};
 
 use pqformat::{
     pq_beginmessage_reuse, pq_endmessage_reuse, pq_sendbytes, pq_sendcountedtext, pq_sendint16,
@@ -382,7 +382,7 @@ pub fn printtup_emit<'mcx>(
     buf: &mut StringInfo<'mcx>,
     typeinfo: &TupleDescData,
     formats: Option<&[i16]>,
-    columns: &[types_tuple::heaptuple::DeformedColumn<'mcx>],
+    columns: &[::types_tuple::heaptuple::DeformedColumn<'mcx>],
 ) -> PgResult<bool> {
     let natts = typeinfo.natts;
 
@@ -524,7 +524,7 @@ pub fn debugtup<'mcx>(
 pub fn debugtup_emit<'mcx>(
     mcx: Mcx<'mcx>,
     typeinfo: &TupleDescData,
-    columns: &[types_tuple::heaptuple::DeformedColumn<'mcx>],
+    columns: &[::types_tuple::heaptuple::DeformedColumn<'mcx>],
 ) -> PgResult<(String, bool)> {
     let natts = typeinfo.natts;
     let mut out = String::new();
@@ -970,13 +970,13 @@ pub fn send_describe_portal<'mcx>(
             // SendRowDescriptionMessage(&row_description_buf, portal->tupDesc,
             //                           FetchPortalTargetList(portal),
             //                           portal->formats);
-            let mut buf = pqformat::pq_beginmessage(mcx, PqMsg_RowDescription)?;
+            let mut buf = ::pqformat::pq_beginmessage(mcx, PqMsg_RowDescription)?;
             // SendRowDescriptionMessage re-begins the message on the same buffer
             // (pq_beginmessage_reuse) and ends it (pq_endmessage_reuse).
             SendRowDescriptionMessage(&mut buf, tupdesc, &targetlist, formats.as_deref())?;
             Ok(())
         }
-        None => pqformat::pq_putemptymessage(PqMsg_NoData),
+        None => ::pqformat::pq_putemptymessage(PqMsg_NoData),
     }
 }
 
@@ -1000,7 +1000,7 @@ pub fn send_describe_statement<'mcx>(
     //   for (i = 0; i < psrc->num_params; i++)
     //       pq_sendint32(&row_description_buf, (int) psrc->param_types[i]);
     //   pq_endmessage_reuse(&row_description_buf);
-    let mut buf = pqformat::pq_beginmessage(mcx, PqMsg_ParameterDescription)?;
+    let mut buf = ::pqformat::pq_beginmessage(mcx, PqMsg_ParameterDescription)?;
     pq_sendint16(&mut buf, param_types.len() as u16)?;
     for &ptype in param_types {
         pq_sendint32(&mut buf, ptype)?;
@@ -1013,11 +1013,11 @@ pub fn send_describe_statement<'mcx>(
             let tlist = targetlist_info_from_nodes(targetlist);
             // SendRowDescriptionMessage(&row_description_buf, psrc->resultDesc,
             //                           tlist, NULL);
-            let mut buf = pqformat::pq_beginmessage(mcx, PqMsg_RowDescription)?;
+            let mut buf = ::pqformat::pq_beginmessage(mcx, PqMsg_RowDescription)?;
             SendRowDescriptionMessage(&mut buf, tupdesc, &tlist, None)?;
             Ok(())
         }
-        None => pqformat::pq_putemptymessage(PqMsg_NoData),
+        None => ::pqformat::pq_putemptymessage(PqMsg_NoData),
     }
 }
 
@@ -1032,7 +1032,7 @@ pub fn send_describe_statement<'mcx>(
 // possible"), so it lives here alongside printtup rather than in a new crate.
 // ===========================================================================
 
-use types_core::instrument::SerializeMetrics;
+use ::types_core::instrument::SerializeMetrics;
 
 /// `SerializeDestReceiver` (explain_dr.c) private state. The C `DestReceiver
 /// pub` head is the router registration; the fields below are the rest of the

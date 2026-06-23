@@ -16,18 +16,18 @@
 use alloc::format;
 use alloc::string::String;
 
-use mcx::Mcx;
-use types_core::primitive::{TimestampTz, TransactionId};
+use ::mcx::Mcx;
+use ::types_core::primitive::{TimestampTz, TransactionId};
 use types_core::{InvalidTransactionId, InvalidXLogRecPtr};
 use types_error::{PgError, LOG};
-use wal::wal::{RM_XACT_ID, RM_XLOG_ID, XLR_INFO_MASK};
-use wal::xact::{
+use ::wal::wal::{RM_XACT_ID, RM_XLOG_ID, XLR_INFO_MASK};
+use ::wal::xact::{
     XLOG_XACT_ABORT, XLOG_XACT_ABORT_PREPARED, XLOG_XACT_COMMIT, XLOG_XACT_COMMIT_PREPARED,
     XLOG_XACT_OPMASK,
 };
-use wal::rmgrdesc::xl_restore_point;
+use ::wal::rmgrdesc::xl_restore_point;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::core::{lsn_fmt, RecordRef, RecoveryPauseState, RecoveryTargetType, XLogRecoveryState};
 use crate::replay::get_record_timestamp;
@@ -36,8 +36,8 @@ use crate::walrecovery::reader_state;
 use timestamp_seams as timestamp_seam;
 
 #[inline]
-fn loc(lineno: i32, func: &str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new("xlogrecovery.c", lineno, func)
+fn loc(lineno: i32, func: &str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new("xlogrecovery.c", lineno, func)
 }
 
 /// `timestamptz_to_str(t)` rendered to an owned `String` for a log message; the

@@ -225,8 +225,8 @@ fn install_collationcmds_locale_seams() {
 /// fires these from InitializeGUCOptions / SET; the bodies live in
 /// [`crate::setup`].
 fn install_guc_hooks() {
-    use guc_tables::hooks;
-    use types_guc::guc::GucSource;
+    use ::guc_tables::hooks;
+    use ::types_guc::guc::GucSource;
 
     hooks::check_locale_monetary.install(|newval, _extra, _source| {
         let value = newval.as_deref().unwrap_or("");
@@ -293,8 +293,8 @@ fn install_guc_var_accessors() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_core::catalog::C_COLLATION_OID;
-    use locale::CollProvider;
+    use ::types_core::catalog::C_COLLATION_OID;
+    use ::locale::CollProvider;
 
     #[test]
     fn builtin_locale_encoding_matches_c() {
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn builtin_validate_locale_canonicalizes() {
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
         assert_eq!(
             builtin_validate_locale(mcx, PG_UTF8, "C.UTF8").unwrap().as_str(),
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn icu_paths_report_feature_not_supported() {
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         assert_eq!(
             icu_language_tag(ctx.mcx(), "en-US").unwrap_err().sqlstate(),
             ERRCODE_FEATURE_NOT_SUPPORTED
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn c_collation_resolves_without_catalog() {
         // C: pg_newlocale_from_collation(C_COLLATION_OID) returns &c_locale.
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         let loc = pg_newlocale_from_collation(ctx.mcx(), C_COLLATION_OID).unwrap();
         assert!(loc.collate_is_c);
         assert!(loc.ctype_is_c);
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn invalid_oid_reports_cache_lookup_failed() {
-        let err = collation_is_c(types_core::primitive::InvalidOid).unwrap_err();
+        let err = collation_is_c(::types_core::primitive::InvalidOid).unwrap_err();
         assert_eq!(err.message(), "cache lookup failed for collation 0");
     }
 
@@ -406,7 +406,7 @@ mod tests {
         // lc_time defaults to "C": cache_locale_time succeeds and the localized
         // name arrays are None (DCH uses its built-in English names).
         cache_locale_time().unwrap();
-        let ctx = mcx::MemoryContext::new("t");
+        let ctx = ::mcx::MemoryContext::new("t");
         assert!(localized_full_months(ctx.mcx()).is_none());
         assert!(localized_abbrev_days(ctx.mcx()).is_none());
     }

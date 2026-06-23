@@ -68,7 +68,7 @@ extern crate alloc;
 use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use types_error::{PgError, PgResult};
 
 /*

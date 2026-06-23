@@ -20,10 +20,10 @@
 //! no `CritSectionCount` seam.
 #![allow(dead_code)]
 
-use types_core::primitive::{BlockNumber, ForkNumber, InvalidBlockNumber};
+use ::types_core::primitive::{BlockNumber, ForkNumber, InvalidBlockNumber};
 use types_error::{PgError, PgResult};
-use types_storage::buf::buftag;
-use types_storage::storage::LWLockMode;
+use ::types_storage::buf::buftag;
+use ::types_storage::storage::LWLockMode;
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 
 use support::{buf_table_hash_code, buf_table_hash_partition};
@@ -112,7 +112,7 @@ impl BufferManager {
         // once per fork; the support `DropRelationLocalBuffers` takes the whole
         // `forkNum[]`/`firstDelBlock[]` slices in one scan, so the seam carries
         // them directly (installed by the localbuf owner — panic-until-owner).
-        if smgr_reln.backend != types_core::primitive::INVALID_PROC_NUMBER {
+        if smgr_reln.backend != ::types_core::primitive::INVALID_PROC_NUMBER {
             if smgr_reln.backend == lmgr_proc_seams::my_proc_number::call() {
                 bufmgr_seams::drop_relation_local_buffers::call(
                     smgr_reln.locator,
@@ -219,7 +219,7 @@ impl BufferManager {
 
         // If it's a local relation, it's localbuf.c's problem (bufmgr.c:4676).
         for reln in smgr_reln.iter() {
-            if reln.backend != types_core::primitive::INVALID_PROC_NUMBER {
+            if reln.backend != ::types_core::primitive::INVALID_PROC_NUMBER {
                 if reln.backend == lmgr_proc_seams::my_proc_number::call() {
                     bufmgr_seams::drop_relation_all_local_buffers::call(
                         reln.locator,
@@ -413,7 +413,7 @@ impl BufferManager {
     /// dropped without being written (used when the database directory tree is
     /// being destroyed). Local buffers need not be considered — by assumption
     /// the target database is not our own.
-    pub fn DropDatabaseBuffers(&self, dbid: types_core::Oid) -> PgResult<()> {
+    pub fn DropDatabaseBuffers(&self, dbid: ::types_core::Oid) -> PgResult<()> {
         for buf_id in 0..self.nbuffers() as usize {
             // As in DropRelationBuffers, an unlocked precheck should be safe and
             // saves some cycles.

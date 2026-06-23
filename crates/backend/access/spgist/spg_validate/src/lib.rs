@@ -23,7 +23,7 @@
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
-use opclass::AMOP_SEARCH;
+use ::opclass::AMOP_SEARCH;
 use spgist::{
     spgConfigIn, spgConfigOut, SPGISTNProc, SPGIST_CHOOSE_PROC, SPGIST_COMPRESS_PROC,
     SPGIST_CONFIG_PROC, SPGIST_INNER_CONSISTENT_PROC, SPGIST_LEAF_CONSISTENT_PROC,
@@ -32,7 +32,7 @@ use spgist::{
 
 // The opclass-form / member-row mirror types carried across the syscache seams
 // live in `types-hash` (shared by every AM validator); re-export them.
-pub use hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
+pub use ::hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 
 use amvalidate_seams as amvalidate_seams;
 use spg_core_seams as spg_core_seams;
@@ -369,7 +369,7 @@ pub fn spgvalidate(mcx: Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
 /// `spgadjustmembers` reads only `number` and rewrites the
 /// hard/family/`refobjid` dependency flags; the remaining C fields are present
 /// but untouched here.
-pub use opclass::OpFamilyMember;
+pub use ::opclass::OpFamilyMember;
 
 /// `spgadjustmembers(opfamilyoid, opclassoid, operators, functions)`
 /// (spgvalidate.c:322) — prechecking for adding operators/functions to an

@@ -6,8 +6,8 @@
 //! until then a call panics loudly. Snapshots cross as trimmed owned
 //! `SnapshotData` values.
 
-use types_core::CommandId;
-use types_error::PgResult;
+use ::types_core::CommandId;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `HistoricSnapshotActive()` (snapmgr.c): true when a historic MVCC
@@ -30,7 +30,7 @@ seam_core::seam!(
     /// built by `SnapBuildInitialSnapshot`. Fallible (file/allocation).
     pub fn export_snapshot(
         snapshot: snapshot::SnapshotData,
-    ) -> types_error::PgResult<std::string::String>
+    ) -> ::types_error::PgResult<std::string::String>
 );
 
 seam_core::seam!(
@@ -39,8 +39,8 @@ seam_core::seam!(
     /// `ereport(ERROR)` (snapshot import/allocation paths), carried on
     /// `Err`.
     pub fn get_catalog_snapshot(
-        relid: types_core::primitive::Oid,
-    ) -> types_error::PgResult<snapshot::SnapshotData>
+        relid: ::types_core::primitive::Oid,
+    ) -> ::types_error::PgResult<snapshot::SnapshotData>
 );
 
 seam_core::seam!(
@@ -52,8 +52,8 @@ seam_core::seam!(
     /// where the historic snapshot would hide a newer pg_class tuple). Can
     /// `ereport(ERROR)`, carried on `Err`.
     pub fn get_non_historic_catalog_snapshot(
-        relid: types_core::primitive::Oid,
-    ) -> types_error::PgResult<snapshot::SnapshotData>
+        relid: ::types_core::primitive::Oid,
+    ) -> ::types_error::PgResult<snapshot::SnapshotData>
 );
 
 seam_core::seam!(
@@ -62,7 +62,7 @@ seam_core::seam!(
     /// snapshots are copied), so fallible on OOM.
     pub fn register_snapshot(
         snapshot: snapshot::SnapshotData,
-    ) -> types_error::PgResult<snapshot::SnapshotData>
+    ) -> ::types_error::PgResult<snapshot::SnapshotData>
 );
 
 seam_core::seam!(
@@ -85,7 +85,7 @@ seam_core::seam!(
     /// owned model returns the bytes. Fallible on OOM for the buffer.
     pub fn serialize_snapshot(
         snapshot: &snapshot::SnapshotData,
-    ) -> types_error::PgResult<std::vec::Vec<u8>>
+    ) -> ::types_error::PgResult<std::vec::Vec<u8>>
 );
 
 seam_core::seam!(
@@ -93,7 +93,7 @@ seam_core::seam!(
     /// its serialized form. C pallocs the snapshot, so fallible on OOM.
     pub fn restore_snapshot(
         bytes: &[u8],
-    ) -> types_error::PgResult<snapshot::SnapshotData>
+    ) -> ::types_error::PgResult<snapshot::SnapshotData>
 );
 
 seam_core::seam!(
@@ -185,7 +185,7 @@ seam_core::seam!(
     /// subtransaction-overflow recheck (`SubTransGetTopmostTransaction` ->
     /// `TransactionIdDidCommit`), carried on `Err`.
     pub fn xid_in_mvcc_snapshot(
-        xid: types_core::TransactionId,
+        xid: ::types_core::TransactionId,
         snapshot: &snapshot::SnapshotData,
     ) -> PgResult<bool>
 );

@@ -2,7 +2,7 @@
 
 use core::cell::UnsafeCell;
 
-use types_storage::storage::{proclist_head, Spinlock};
+use ::types_storage::storage::{proclist_head, Spinlock};
 
 /// The `wakeup` field of a [`ConditionVariable`]: a `proclist_head` that, per
 /// `condition_variable.c`'s protocol, is mutated only while the CV's `mutex`

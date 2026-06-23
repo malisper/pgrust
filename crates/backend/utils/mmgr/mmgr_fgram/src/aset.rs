@@ -1101,7 +1101,7 @@ fn context_name(context: MemoryContext) -> String {
 }
 
 fn out_of_memory() -> PgError {
-    PgError::error("out of memory").with_sqlstate(pg_ffi_fgram::ERRCODE_OUT_OF_MEMORY)
+    PgError::error("out of memory").with_sqlstate(::pg_ffi_fgram::ERRCODE_OUT_OF_MEMORY)
 }
 
 #[inline]

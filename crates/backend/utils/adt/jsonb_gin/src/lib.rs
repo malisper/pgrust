@@ -21,7 +21,7 @@
 //! routes the jsonb GIN support-proc OIDs to these seams with the `Datum`
 //! marshaling. The cross-boundary vocabulary ([`GinEntries`],
 //! [`JsonPathGinNode`], [`GinQueryExtraction`], [`GinJsonbQuery`]) lives in
-//! [`types_jsonb::jsonb_gin`].
+//! [`::types_jsonb::jsonb_gin`].
 
 #![no_std]
 #![allow(non_camel_case_types)]
@@ -44,19 +44,19 @@ use adt_jsonpath::{
     jsonpath_is_lax, jspGetArg, jspGetBool, jspGetLeftArg, jspGetNext, jspGetNumeric,
     jspGetRightArg, jspGetString, jspInit, JsonPathItem,
 };
-use mcx::Mcx;
-use types_error::error::{ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
+use ::mcx::Mcx;
+use ::types_error::error::{ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
 use types_error::{PgError, PgResult};
-use types_jsonb::jsonb::{
+use ::types_jsonb::jsonb::{
     GinTernaryValue, JsonbContainsStrategyNumber, JsonbExistsAllStrategyNumber,
     JsonbExistsAnyStrategyNumber, JsonbExistsStrategyNumber, JsonbJsonpathExistsStrategyNumber,
     JsonbJsonpathPredicateStrategyNumber, GIN_FALSE, GIN_MAYBE, GIN_TRUE, JGINFLAG_BOOL,
     JGINFLAG_HASHED, JGINFLAG_KEY, JGINFLAG_NULL, JGINFLAG_NUM, JGINFLAG_STR, JGIN_MAXLENGTH,
 };
-pub use types_jsonb::jsonb_gin::{
+pub use ::types_jsonb::jsonb_gin::{
     GinEntries, GinJsonbQuery, GinQueryExtraction, JsonPathGinNode, JsonPathGinNodeType, JspQuery,
 };
-use types_jsonpath::jsonpath::{jsp_is_scalar, JsonPathItemType};
+use ::types_jsonpath::jsonpath::{jsp_is_scalar, JsonPathItemType};
 
 mod fmgr_builtins;
 
@@ -297,9 +297,9 @@ pub fn make_scalar_key<'mcx>(
 /// context). The scratch `NumericVar` lives in `mcx`; the rendered `String` is
 /// owned.
 fn numeric_normalize<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<String> {
-    use adt_numeric::convert::set_var_from_num;
-    use adt_numeric::io::get_str_from_var;
-    use adt_numeric::on_disk::var::NumericSign;
+    use ::adt_numeric::convert::set_var_from_num;
+    use ::adt_numeric::io::get_str_from_var;
+    use ::adt_numeric::on_disk::var::NumericSign;
 
     let x = set_var_from_num(mcx, num)?;
 

@@ -17,7 +17,7 @@ use aio_seams_2 as aio_seams;
 use dsm_core_seams as ipc_seams;
 use utils_error::{elog, ereport};
 use types_core::{Oid, SubTransactionId};
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 use types_error::{
     ErrorLevel, ErrorLocation, PgResult, DEBUG2, ERRCODE_INSUFFICIENT_RESOURCES, FATAL, LOG, PANIC,
     WARNING,
@@ -780,7 +780,7 @@ pub fn BasicOpenFilePerm(
     file_mode: u32,
 ) -> PgResult<StdFile> {
     match BasicOpenFilePermFd(file_name, file_flags, file_mode)? {
-        -1 => ereport(types_error::ERROR)
+        -1 => ereport(::types_error::ERROR)
             .errcode_for_file_access()
             .errmsg("could not open file: %m")
             .finish(here("BasicOpenFilePerm"))
@@ -933,8 +933,8 @@ pub fn seam_last_errno() -> i32 {
 /// Inward-seam adapter for `access_f_ok` — `access(path, F_OK)` (InitPostgres).
 pub fn seam_access_f_ok(
     path: &str,
-) -> PgResult<fd_seams::AccessResult> {
-    use fd_seams::AccessResult;
+) -> PgResult<::fd_seams::AccessResult> {
+    use ::fd_seams::AccessResult;
     let cpath = path_to_cstring(Path::new(path));
     // SAFETY: cpath is NUL-terminated; access(2) probe for existence.
     let rc = unsafe { libc::access(cpath.as_ptr(), libc::F_OK) };

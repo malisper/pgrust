@@ -4,7 +4,7 @@
 //! table.
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::execexpr::ExprState;
 use crate::execnodes::{EcxtId, ScanStateData};

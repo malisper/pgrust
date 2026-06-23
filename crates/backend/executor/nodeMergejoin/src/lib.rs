@@ -139,8 +139,8 @@ fn MJExamineQuals<'mcx>(
     let n_clauses = node.mergeclauses.len();
 
     // clauses = (MergeJoinClause) palloc0(nClauses * sizeof(MergeJoinClauseData));
-    let mut clauses: mcx::PgVec<'mcx, MergeJoinClauseData<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, n_clauses)?;
+    let mut clauses: ::mcx::PgVec<'mcx, MergeJoinClauseData<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, n_clauses)?;
 
     for i_clause in 0..n_clauses {
         // OpExpr *qual = (OpExpr *) lfirst(cl);
@@ -1264,7 +1264,7 @@ pub fn ExecInitMergeJoin<'mcx>(
     /// clone an owned TupleDesc copy into `mcx` (each slot owns its copy).
     fn clone_desc<'mcx>(
         src: &types_tuple::heaptuple::TupleDesc<'mcx>,
-        mcx: mcx::Mcx<'mcx>,
+        mcx: ::mcx::Mcx<'mcx>,
     ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
         Ok(match src {
             Some(d) => Some(alloc_in(mcx, d.clone_in(mcx)?)?),

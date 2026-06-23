@@ -27,13 +27,13 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::result_large_err)]
 
-use mcx::MemoryContext;
-use pgstrcasecmp::pg_strncasecmp;
+use ::mcx::MemoryContext;
+use ::pgstrcasecmp::pg_strncasecmp;
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use types_error::{
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNTRANSLATABLE_CHARACTER,
 };
-use types_jsonpath::parse::JsonPathString;
+use ::types_jsonpath::parse::JsonPathString;
 
 /// The bison token kinds emitted by the scanner. These mirror the
 /// `enum yytokentype` produced by bison from `jsonpath_gram.y`; the names match

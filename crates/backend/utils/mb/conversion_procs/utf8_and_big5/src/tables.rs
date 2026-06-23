@@ -2,7 +2,7 @@
 //! Verified byte-for-byte against the C `.map` files.
 
 use alloc::vec::Vec;
-use types_wchar::pg_mb_radix_tree;
+use ::types_wchar::pg_mb_radix_tree;
 
 // Generated from postgres-18.3/src/backend/utils/mb/Unicode/*.map.
 

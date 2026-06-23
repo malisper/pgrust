@@ -26,16 +26,16 @@ use dependency::{
     add_exact_object_address, new_object_addresses, record_object_address_dependencies,
 };
 use pg_depend::{deleteDependencyRecordsFor, recordDependencyOnCurrentExtension};
-use pg_shdepend::recordDependencyOnOwner;
+use ::pg_shdepend::recordDependencyOnOwner;
 
-use mcx::Mcx;
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-use types_catalog::pg_language::{LanguageRelationId, PgLanguageInsertRow};
+use ::mcx::Mcx;
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_language::{LanguageRelationId, PgLanguageInsertRow};
 use types_core::{InvalidOid, Oid, OidIsValid, INTERNALOID, OIDOID, PROCEDURE_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use ::nodes::ddlnodes::CreatePLangStmt;
-use types_storage::lock::RowExclusiveLock;
+use ::types_storage::lock::RowExclusiveLock;
 
 /// `LANGUAGE_HANDLEROID` — OID of the `language_handler` pseudotype
 /// (`pg_type.dat`, OID 2280).
@@ -60,12 +60,12 @@ fn namestrcpy(src: &str) -> [u8; NAMEDATALEN] {
 fn name_list_strings<'mcx>(
     mcx: Mcx<'mcx>,
     names: &[::nodes::nodes::NodePtr<'_>],
-) -> PgResult<mcx::PgVec<'mcx, mcx::PgString<'mcx>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, names.len())?;
+) -> PgResult<::mcx::PgVec<'mcx, ::mcx::PgString<'mcx>>> {
+    let mut out = ::mcx::vec_with_capacity_in(mcx, names.len())?;
     for n in names.iter() {
         let s = match n.as_string() {
-            Some(s) => mcx::PgString::from_str_in(s.sval.as_str(), mcx)?,
-            None => mcx::PgString::from_str_in("", mcx)?,
+            Some(s) => ::mcx::PgString::from_str_in(s.sval.as_str(), mcx)?,
+            None => ::mcx::PgString::from_str_in("", mcx)?,
         };
         out.push(s);
     }

@@ -11,7 +11,7 @@
 //! ## Datum model boundary (the by-reference legs)
 //!
 //! In this port a [`Datum`] is the canonical bare machine word
-//! (`datum::Datum`). The histogram-bin boundary values arrive as the
+//! (`::datum::Datum`). The histogram-bin boundary values arrive as the
 //! `Datum`s of an [`crate::ineq`] `AttStatsSlot`, which `get_attstatsslot`
 //! deconstructs through `deconstruct_array` — and for a *pass-by-reference*
 //! element type (`numeric`, `text`/`varchar`/`bpchar`/`name`, `bytea`,
@@ -37,10 +37,10 @@
 //! exactly as the C does — that is the faithful "don't know how to convert"
 //! path, distinct from the by-reference deref blocker above.
 
-use types_core::primitive::Oid;
-use datum::datum::Datum;
+use ::types_core::primitive::Oid;
+use ::datum::datum::Datum;
 
-use adt_datetime::date2timestamp_no_overflow;
+use ::adt_datetime::date2timestamp_no_overflow;
 
 /* ---------------------------------------------------------------------------
  * Type OIDs (catalog/pg_type_d.h). Defined locally as several other adt crates

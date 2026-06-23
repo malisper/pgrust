@@ -17,7 +17,7 @@
 //!
 //! Both share the segment/directory/bucket-chain machinery, reproduced here
 //! byte-for-byte over raw pointers ([`HASHELEMENT`]/`HASHBUCKET`/`HASHSEGMENT`/
-//! `HASHHDR`/`HTAB`, owned by [`hash::hsearch`]).
+//! `HASHHDR`/`HTAB`, owned by [`::hash::hsearch`]).
 //!
 //! ## Memory
 //!
@@ -52,17 +52,17 @@ use core::ptr;
 use core::sync::atomic::AtomicI32;
 
 use utils_error::{elog, PgError, PgResult};
-use types_core::Size;
+use ::types_core::Size;
 use types_error::{ERROR, FATAL, PANIC, WARNING};
-use hash::hsearch::{
+use ::hash::hsearch::{
     HashCompareFunc, HashCopyFunc, HashValueFunc, HASHACTION, HASHBUCKET, HASHCTL,
     HASHELEMENT, HASHHDR, HASHSEGMENT, HASH_ALLOC, HASH_ATTACH, HASH_BLOBS, HASH_COMPARE,
     HASH_DIRSIZE, HASH_ELEM, HASH_FIXED_SIZE, HASH_FUNCTION, HASH_KEYCOPY,
     HASH_PARTITION, HASH_SEGMENT, HASH_SHARED_MEM, HASH_STRINGS, HASH_SEQ_STATUS, HTAB,
     NO_MAX_DSIZE, NUM_FREELISTS,
 };
-use hash::hsearch::HASHACTION::{HASH_ENTER, HASH_ENTER_NULL, HASH_FIND, HASH_REMOVE};
-use types_storage::storage::Spinlock;
+use ::hash::hsearch::HASHACTION::{HASH_ENTER, HASH_ENTER_NULL, HASH_FIND, HASH_REMOVE};
+use ::types_storage::storage::Spinlock;
 
 mod seam;
 pub use seam::init_seams;

@@ -7,10 +7,10 @@
 #![allow(non_camel_case_types)]
 
 use ilist::{dlist_head, dlist_node};
-use types_storage::LWLock;
-use types_core::primitive::{BlockNumber, OffsetNumber, Oid, ProcNumber};
-use types_core::TransactionId;
-use types_core::VirtualTransactionId;
+use ::types_storage::LWLock;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid, ProcNumber};
+use ::types_core::TransactionId;
+use ::types_core::VirtualTransactionId;
 
 /// `SerCommitSeqNo` — commit sequence number (predicate_internals.h).
 pub type SerCommitSeqNo = u64;
@@ -281,7 +281,7 @@ pub const fn maxalign(len: usize) -> usize {
 // ---------------------------------------------------------------------------
 
 /// `InvalidBlockNumber`.
-pub const InvalidBlockNumber: BlockNumber = types_core::primitive::InvalidBlockNumber;
+pub const InvalidBlockNumber: BlockNumber = ::types_core::primitive::InvalidBlockNumber;
 /// `InvalidOffsetNumber` (storage/off.h) — 0.
 pub const InvalidOffsetNumber: OffsetNumber = 0;
 
@@ -417,4 +417,4 @@ pub unsafe fn SxactIsOnFinishedList(sxact: *const SERIALIZABLEXACT) -> bool {
 }
 
 /// `INVALID_PROC_NUMBER`.
-pub const INVALID_PROC_NUMBER: ProcNumber = types_core::primitive::INVALID_PROC_NUMBER;
+pub const INVALID_PROC_NUMBER: ProcNumber = ::types_core::primitive::INVALID_PROC_NUMBER;

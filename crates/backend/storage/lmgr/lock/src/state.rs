@@ -41,10 +41,10 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicPtr, Ordering};
 use std::collections::HashMap;
 
-use types_core::primitive::INVALID_PROC_NUMBER;
-use types_core::ProcNumber;
-use types_storage::storage::NUM_LOCK_PARTITIONS;
-use types_storage::lock::{LOCALLOCK, LOCALLOCKTAG, LOCKMASK, LOCKTAG, MAX_LOCKMODES};
+use ::types_core::primitive::INVALID_PROC_NUMBER;
+use ::types_core::ProcNumber;
+use ::types_storage::storage::NUM_LOCK_PARTITIONS;
+use ::types_storage::lock::{LOCALLOCK, LOCALLOCKTAG, LOCKMASK, LOCKTAG, MAX_LOCKMODES};
 
 /// `FAST_PATH_STRONG_LOCK_HASH_BITS` / `FAST_PATH_STRONG_LOCK_HASH_PARTITIONS`
 /// (lock.c).
@@ -1300,7 +1300,7 @@ thread_local! {
 
     /// `awaitedOwner` (lock.c backend-private) — the resource owner recorded
     /// for the awaited lock.
-    pub(crate) static AWAITED_OWNER: RefCell<Option<types_storage::lock::ResourceOwnerHandle>> =
+    pub(crate) static AWAITED_OWNER: RefCell<Option<::types_storage::lock::ResourceOwnerHandle>> =
         RefCell::new(None);
 
     /// `IsRelationExtensionLockHeld` (lock.c, asserts-only) — whether the

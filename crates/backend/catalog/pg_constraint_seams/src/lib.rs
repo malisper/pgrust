@@ -9,9 +9,9 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use types_ri_triggers::{FkConstraintRow, PeriodOpers};
 
 seam_core::seam!(
@@ -152,11 +152,11 @@ seam_core::seam!(
         old_nsp_id: Oid,
         new_nsp_id: Oid,
         is_type: bool,
-        objs_moved: &mut types_catalog::catalog_dependency::ObjectAddresses,
+        objs_moved: &mut ::types_catalog::catalog_dependency::ObjectAddresses,
     ) -> PgResult<()>
 );
 
-pub use types_catalog::pg_constraint::ConstraintCategory;
+pub use ::types_catalog::pg_constraint::ConstraintCategory;
 
 seam_core::seam!(
     /// `ConstraintNameIsUsed(conCat, objId, conname)` (pg_constraint.c): is the

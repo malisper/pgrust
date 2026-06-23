@@ -1,7 +1,7 @@
 use super::*;
 
 use mcx::{slice_in, MemoryContext, PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use wal::{DecodedXLogRecord, XLogRecord, XLR_INFO_MASK};
 
 /// Build a `DecodedXLogRecord` carrying `info` and `data` as its main data
@@ -10,7 +10,7 @@ fn render(
     info: u8,
     data: &[u8],
     f: impl FnOnce(&mut PgString<'_>, &DecodedXLogRecord<'_>) -> PgResult<()>,
-) -> Result<String, types_error::PgError> {
+) -> Result<String, ::types_error::PgError> {
     let ctx = MemoryContext::new("rmgrdesc-test");
     let record = DecodedXLogRecord::new(
         XLogRecord::new(0, 0, 0, info, 0, 0),
@@ -237,7 +237,7 @@ fn relmap() {
 fn rmgrdesc_utils_array() {
     fn render_buf(
         f: impl FnOnce(&mut PgString<'_>) -> PgResult<()>,
-    ) -> Result<String, types_error::PgError> {
+    ) -> Result<String, ::types_error::PgError> {
         let ctx = MemoryContext::new("rmgrdesc-test");
         let mut buf = PgString::new_in(ctx.mcx());
         f(&mut buf)?;

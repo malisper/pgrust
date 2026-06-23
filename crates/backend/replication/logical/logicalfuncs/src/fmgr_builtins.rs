@@ -17,8 +17,8 @@
 //! SRFs (set-returning, materialize-mode) are NOT registered here — they live in
 //! the executor-frame SRF home.
 
-use types_core::XLogRecPtr;
-use datum::Datum;
+use ::types_core::XLogRecPtr;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------

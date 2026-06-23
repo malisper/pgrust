@@ -19,8 +19,8 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
 use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::ddlnodes::{CoercionContext, PLAssignStmt};
@@ -30,8 +30,8 @@ use ::nodes::primnodes::CoercionForm;
 use ::nodes::rawnodes::{ColumnRef, SelectStmt};
 use ::nodes::value::StringNode;
 
-use nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
-use utils_error::ereport;
+use ::nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
+use ::utils_error::ereport;
 
 use crate::select::{distinct_all_marker, sortby_list};
 use crate::{
@@ -87,11 +87,11 @@ pub fn transformPLAssignStmt<'mcx>(
      * the indirection list.
      */
     // cref->fields = list_make1(makeString(stmt->name));
-    let mut cref_fields: mcx::PgVec<'mcx, NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut cref_fields: ::mcx::PgVec<'mcx, NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
     cref_fields.try_reserve(1).map_err(|_| mcx.oom(1))?;
-    cref_fields.push(mcx::alloc_in(
+    cref_fields.push(::mcx::alloc_in(
         mcx,
-        Node::mk_string(mcx, StringNode { sval: mcx::PgString::from_str_in(name, mcx)? })?,
+        Node::mk_string(mcx, StringNode { sval: ::mcx::PgString::from_str_in(name, mcx)? })?,
     )?);
 
     // The indirection list we work with: the raw list, or (when peeling names)
@@ -107,7 +107,7 @@ pub fn transformPLAssignStmt<'mcx>(
         .try_reserve(stmt.indirection.len())
         .map_err(|_| mcx.oom(stmt.indirection.len()))?;
     for n in stmt.indirection.iter() {
-        indirection.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+        indirection.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
     }
     let mut ind_start: usize = 0;
 
@@ -125,7 +125,7 @@ pub fn transformPLAssignStmt<'mcx>(
             }
             // cref->fields = lappend(cref->fields, ind);
             cref_fields.try_reserve(1).map_err(|_| mcx.oom(1))?;
-            cref_fields.push(mcx::alloc_in(mcx, ind.clone_in(mcx)?)?);
+            cref_fields.push(::mcx::alloc_in(mcx, ind.clone_in(mcx)?)?);
             // indirection = list_delete_first(indirection);
             ind_start += 1;
         }
@@ -171,16 +171,16 @@ pub fn transformPLAssignStmt<'mcx>(
 
     /* make FOR UPDATE/FOR SHARE info available to addRangeTableEntry */
     pstate.p_locking_clause = {
-        let mut v = mcx::vec_with_capacity_in(mcx, sstmt.lockingClause.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, sstmt.lockingClause.len())?;
         for n in sstmt.lockingClause.iter() {
-            v.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+            v.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
         }
         v
     };
 
     /* make WINDOW info available for window functions, too */
     pstate.p_windowdefs = {
-        let mut v = mcx::vec_with_capacity_in(mcx, sstmt.windowClause.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, sstmt.windowClause.len())?;
         for n in sstmt.windowClause.iter() {
             match n.as_ref().as_windowdef() {
                 Some(w) => v.push(w.clone_in(mcx)?),
@@ -195,7 +195,7 @@ pub fn transformPLAssignStmt<'mcx>(
 
     /* initially transform the targetlist as if in SELECT */
     let target_list = {
-        let mut tl = mcx::vec_with_capacity_in(mcx, sstmt.targetList.len())?;
+        let mut tl = ::mcx::vec_with_capacity_in(mcx, sstmt.targetList.len())?;
         for n in sstmt.targetList.iter() {
             match n.as_ref().as_restarget() {
                 Some(rt) => tl.push(rt.clone_in(mcx)?),
@@ -249,11 +249,11 @@ pub fn transformPLAssignStmt<'mcx>(
         // as a `PgVec` plus a start-cell index. We build the peeled tail into a
         // fresh PgVec (C passed the post-peel `indirection` with `list_head` as
         // the starting cell).
-        let mut ind_vec: mcx::PgVec<'mcx, NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+        let mut ind_vec: ::mcx::PgVec<'mcx, NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
         let tail = &indirection[ind_start..];
         ind_vec.try_reserve(tail.len()).map_err(|_| mcx.oom(tail.len()))?;
         for n in tail {
-            ind_vec.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+            ind_vec.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
         }
 
         // (Node *) tle->expr — wrap the TargetEntry's Expr as a Node for the rhs.
@@ -261,7 +261,7 @@ pub fn transformPLAssignStmt<'mcx>(
             .expr
             .take()
             .ok_or_else(|| elog_error("transformPLAssignStmt: NULL source expr for indirection"))?;
-        let rhs_node = Node::mk_expr(mcx, mcx::PgBox::into_inner(rhs_expr))?;
+        let rhs_node = Node::mk_expr(mcx, ::mcx::PgBox::into_inner(rhs_expr))?;
 
         // C passes `target` (a Node *) as the basenode; re-wrap our Expr value.
         let target_node = Node::mk_expr(mcx, target.clone_in(mcx)?)?;
@@ -282,7 +282,7 @@ pub fn transformPLAssignStmt<'mcx>(
             target_location,
         )?;
         // tle->expr = (Expr *) <assigned node>
-        tle.expr = Some(mcx::PgBox::new_in(
+        tle.expr = Some(::mcx::PgBox::new_in(
             assigned
                 .into_expr()
                 .ok_or_else(|| elog_error("transformAssignmentIndirection did not return an Expr"))?,
@@ -310,7 +310,7 @@ pub fn transformPLAssignStmt<'mcx>(
             .take()
             .ok_or_else(|| elog_error("transformPLAssignStmt: NULL source expr"))?;
         let orig_location = expr_location(Some(orig_expr.as_ref()))?;
-        let orig = mcx::PgBox::into_inner(orig_expr);
+        let orig = ::mcx::PgBox::into_inner(orig_expr);
 
         // tle->expr = coerce_to_target_type(pstate, orig_expr, type_id,
         //     targettype, targettypmod, COERCION_PLPGSQL, COERCE_IMPLICIT_CAST, -1);
@@ -328,7 +328,7 @@ pub fn transformPLAssignStmt<'mcx>(
 
         match coerced {
             // Parser-arena `'static` result re-cloned into the TLE's `mcx`.
-            Some(e) => tle.expr = Some(mcx::PgBox::new_in(e.clone_in(mcx)?, mcx)),
+            Some(e) => tle.expr = Some(::mcx::PgBox::new_in(e.clone_in(mcx)?, mcx)),
             None => {
                 // With COERCION_PLPGSQL, this error is probably unreachable.
                 let targettype_name =
@@ -336,7 +336,7 @@ pub fn transformPLAssignStmt<'mcx>(
                 let type_id_name =
                     format_type_seams::format_type_be::call(mcx, type_id)?;
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_DATATYPE_MISMATCH)
+                    .errcode(::types_error::ERRCODE_DATATYPE_MISMATCH)
                     .errmsg(format!(
                         "variable \"{}\" is of type {} but expression is of type {}",
                         name,
@@ -449,7 +449,7 @@ pub fn transformPLAssignStmt<'mcx>(
 
     /* transform window clauses after we have seen all window functions */
     let windowdefs = {
-        let mut v = mcx::vec_with_capacity_in(mcx, pstate.p_windowdefs.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, pstate.p_windowdefs.len())?;
         for w in pstate.p_windowdefs.iter() {
             v.push(w.clone_in(mcx)?);
         }
@@ -462,16 +462,16 @@ pub fn transformPLAssignStmt<'mcx>(
         &mut tlist,
     )?;
     qry.windowClause = {
-        let mut v = mcx::vec_with_capacity_in(mcx, window_clause.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, window_clause.len())?;
         for wc in window_clause {
-            v.push(mcx::alloc_in(mcx, Node::mk_window_clause(mcx, wc)?)?);
+            v.push(::mcx::alloc_in(mcx, Node::mk_window_clause(mcx, wc)?)?);
         }
         v
     };
 
     /* Put the (possibly clause-modified) target list back into the Query. */
     qry.targetList = {
-        let mut v = mcx::vec_with_capacity_in(mcx, tlist.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, tlist.len())?;
         for te in tlist {
             v.push(te);
         }
@@ -483,11 +483,11 @@ pub fn transformPLAssignStmt<'mcx>(
     qry.distinctClause = sgc_vec_to_nodes(mcx, distinct_clause)?;
 
     /* qry->rtable / rteperminfos / jointree */
-    qry.rtable = core::mem::replace(&mut pstate.p_rtable, mcx::PgVec::new_in(mcx));
-    qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, mcx::PgVec::new_in(mcx));
-    let joinlist = core::mem::replace(&mut pstate.p_joinlist, mcx::PgVec::new_in(mcx));
+    qry.rtable = core::mem::replace(&mut pstate.p_rtable, ::mcx::PgVec::new_in(mcx));
+    qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, ::mcx::PgVec::new_in(mcx));
+    let joinlist = core::mem::replace(&mut pstate.p_joinlist, ::mcx::PgVec::new_in(mcx));
     let qual_node = opt_expr_to_node(mcx, qual)?;
-    qry.jointree = Some(mcx::alloc_in(
+    qry.jointree = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
@@ -501,7 +501,7 @@ pub fn transformPLAssignStmt<'mcx>(
     qry.hasAggs = pstate.p_hasAggs;
 
     /* foreach lockingClause: transformLockingClause(pstate, qry, lc, false) */
-    let locking = core::mem::replace(&mut pstate.p_locking_clause, mcx::PgVec::new_in(mcx));
+    let locking = core::mem::replace(&mut pstate.p_locking_clause, ::mcx::PgVec::new_in(mcx));
     for lc_node in locking.iter() {
         match lc_node.as_ref().as_lockingclause() {
             Some(lc) => {

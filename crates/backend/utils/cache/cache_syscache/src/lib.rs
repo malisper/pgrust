@@ -33,18 +33,18 @@ use catcache_seams as catcache_seams;
 use inval_seams as inval_seams;
 use lsyscache_seams as lsyscache_seams;
 use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgVec};
-use cache::SysCacheKey;
+use ::cache::SysCacheKey;
 use types_core::{AttrNumber, Oid, OidIsValid, InvalidOid};
 use types_error::{PgError, PgResult};
-use types_storage::lock::{
+use ::types_storage::lock::{
     InplaceUpdateTupleLock, DEFAULT_LOCKMETHOD, LOCKMODE, LOCKTAG, LOCKTAG_TUPLE,
 };
-use types_tuple::heaptuple::{Datum, DeformedColumn, FormedTuple};
-// `datum::Datum` (the bare-word shim) survives only at the unmigrated
+use ::types_tuple::heaptuple::{Datum, DeformedColumn, FormedTuple};
+// `::datum::Datum` (the bare-word shim) survives only at the unmigrated
 // cross-crate contract edge `SysCacheKey::Value`'s search-key word (C:
 // `Datum key1..key4`), audited `types-cache` vocabulary not in this batch.
-use datum::Datum as KeyDatum;
-use types_tuple::heaptuple::{
+use ::datum::Datum as KeyDatum;
+use ::types_tuple::heaptuple::{
     HeapTupleHeaderGetNatts, ItemPointerData, TupleDescData,
 };
 
@@ -78,7 +78,7 @@ struct SysCacheState<'mcx> {
     sys_cache_supporting_rel_oid: PgVec<'mcx, Oid>,
 }
 
-mcx::bind!(SysCacheStateTy => SysCacheState<'mcx>);
+::mcx::bind!(SysCacheStateTy => SysCacheState<'mcx>);
 
 thread_local! {
     static STATE: RefCell<Option<McxOwned<SysCacheStateTy>>> = const { RefCell::new(None) };
@@ -1097,7 +1097,7 @@ pub fn init_seams() {
         init_small_seams::my_database_id::call()
     });
     pg_locale_catalog_seams::get_namespace_name::set(|nspid| {
-        let scratch = mcx::MemoryContext::new("get_namespace_name (pg_locale)");
+        let scratch = ::mcx::MemoryContext::new("get_namespace_name (pg_locale)");
         let name = lsyscache_seams::get_namespace_name::call(
             scratch.mcx(),
             nspid,
@@ -1380,8 +1380,8 @@ pub fn init_seams() {
 
 /// Map plancache's `SysCacheId` to the genbki `SysCacheIdentifier` integer
 /// (`catalog/syscache_ids.h`).
-fn syscache_id_for(which: types_plancache::SysCacheId) -> types_error::PgResult<i32> {
-    use types_plancache::SysCacheId;
+fn syscache_id_for(which: ::types_plancache::SysCacheId) -> ::types_error::PgResult<i32> {
+    use ::types_plancache::SysCacheId;
     Ok(match which {
         SysCacheId::ProcOid => cacheinfo::PROCOID,
         SysCacheId::TypeOid => cacheinfo::TYPEOID,

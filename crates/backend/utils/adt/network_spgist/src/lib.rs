@@ -37,7 +37,7 @@
 //! structs and `palloc` their output arrays. As in the sibling SP-GiST opclasses
 //! (`backend-access-spg-quadtree` / `-kdtree` / `backend-access-spg-text`), the
 //! bodies here operate directly on the owned [`spgist`] vocabulary structs,
-//! with the `inet`/`cidr` payloads carried inside [`types_tuple::Datum::ByRef`]
+//! with the `inet`/`cidr` payloads carried inside [`::types_tuple::Datum::ByRef`]
 //! varlena images. "Allocate an output array" becomes "fill an owned `Vec`".
 //!
 //! `DatumGetInetPP(d)` becomes [`inet_struct::from_datum_bytes`] over the
@@ -55,16 +55,16 @@
 //! quad-tree / k-d-tree / text opclasses.
 
 use adt_network::{bitncmp, bitncommon, cidr_set_masklen_internal};
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use types_network::{inet_struct, PGSQL_AF_INET};
 use spgist::{
     spgChooseIn, spgChooseOut, spgChooseOutMatchNode, spgChooseOutResult, spgChooseOutSplitTuple,
     spgConfigIn, spgConfigOut, spgInnerConsistentIn, spgInnerConsistentOut, spgLeafConsistentIn,
     spgLeafConsistentOut, spgPickSplitIn, spgPickSplitOut,
 };
-use types_scan::scankey as types_scan_scankey;
+use ::types_scan::scankey as types_scan_scankey;
 use types_tuple::heaptuple::Datum;
 
 // ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ fn ip_addr(val: &inet_struct) -> &[u8; 16] {
 /// `ip_maxbits(inetptr)` (utils/inet.h) — 128 for IPv6, else 32.
 #[inline]
 fn ip_maxbits(val: &inet_struct) -> i32 {
-    if val.family == types_network::PGSQL_AF_INET6 {
+    if val.family == ::types_network::PGSQL_AF_INET6 {
         128
     } else {
         32
@@ -198,7 +198,7 @@ fn inet_get_datum<'mcx>(mcx: Mcx<'mcx>, p: &inet_struct) -> PgResult<Datum<'mcx>
     let mut img = Vec::with_capacity(total);
     img.extend_from_slice(&((total as u32) << 2).to_le_bytes());
     img.extend_from_slice(&payload);
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &img)?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &img)?))
 }
 
 // ===========================================================================
@@ -427,7 +427,7 @@ pub fn inet_spg_inner_consistent<'mcx>(
                     }
                 }
                 RTGreaterEqualStrategyNumber | RTGreaterStrategyNumber => {
-                    if ip_family(&argument) == types_network::PGSQL_AF_INET6 as i32 {
+                    if ip_family(&argument) == ::types_network::PGSQL_AF_INET6 as i32 {
                         w &= 1 << 1;
                     }
                 }
@@ -831,7 +831,7 @@ fn inet_spg_consistent_bitmap(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_network::PGSQL_AF_INET6;
+    use ::types_network::PGSQL_AF_INET6;
 
     /// Build a v4 `inet_struct` from `a.b.c.d/bits`.
     fn v4(a: u8, b: u8, c: u8, d: u8, bits: u8) -> inet_struct {
@@ -886,7 +886,7 @@ mod tests {
 
     #[test]
     fn choose_family_split_no_prefix() {
-        let owned = mcx::MemoryContext::new("t");
+        let owned = ::mcx::MemoryContext::new("t");
         let mcx = owned.mcx();
         let val = v4(10, 0, 0, 1, 32);
         let in_ = spgChooseIn {
@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn choose_split_on_family_mismatch() {
-        let owned = mcx::MemoryContext::new("t");
+        let owned = ::mcx::MemoryContext::new("t");
         let mcx = owned.mcx();
         let val = v6(&[0x20, 0x01], 64);
         let prefix = v4(10, 0, 0, 0, 8);
@@ -956,8 +956,8 @@ mod tests {
     /// returning the boolean bitmap result.
     #[test]
     fn leaf_consistent_eq() {
-        use types_scan::scankey::ScanKeyData;
-        let owned = mcx::MemoryContext::new("t");
+        use ::types_scan::scankey::ScanKeyData;
+        let owned = ::mcx::MemoryContext::new("t");
         let mcx = owned.mcx();
         let leaf = v4(127, 0, 0, 1, 32);
 

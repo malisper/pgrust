@@ -2,7 +2,7 @@
 //! Verified byte-for-byte against the C `.map` files.
 
 use alloc::vec::Vec;
-use types_wchar::pg_mb_radix_tree;
+use ::types_wchar::pg_mb_radix_tree;
 use types_wchar::{pg_local_to_utf_combined, pg_utf_to_local_combined};
 
 

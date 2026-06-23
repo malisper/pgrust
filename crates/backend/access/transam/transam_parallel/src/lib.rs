@@ -12,7 +12,7 @@
 //! ## Identity model
 //!
 //! The live `ParallelContext` is named across the seam by
-//! [`execparallel::ParallelContextHandle`] (execParallel.c consumes it);
+//! [`::execparallel::ParallelContextHandle`] (execParallel.c consumes it);
 //! the contents the parallel subsystem maintains behind that handle live in a
 //! per-backend registry here. C's `pcxt_list` `dlist` of live contexts becomes
 //! an ordered list of handles over a slab of contexts.
@@ -47,7 +47,7 @@ use std::cell::Cell;
 use std::cell::RefCell;
 use std::ptr::NonNull;
 
-use dsm_core::dsm::{
+use ::dsm_core::dsm::{
     dsm_create, dsm_segment_address, dsm_segment_handle as dsm_seg_handle, DsmSegment, DsmSegmentId,
     DSM_CREATE_NULL_IF_MAXSEGMENTS,
 };
@@ -55,7 +55,7 @@ use shm_toc::{shm_toc_estimate, ShmToc};
 use utils_error::{elog, ereport, PgResult};
 use mcx::{Allocator, Mcx};
 use types_core::{pid_t, ProcNumber, Size, SubTransactionId, XLogRecPtr, INVALID_PROC_NUMBER};
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 use types_error::{
     ERRCODE_ADMIN_SHUTDOWN, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
@@ -71,7 +71,7 @@ use types_parallel::{
 };
 
 use shm_mq_seams as shmmq;
-use types_storage::storage::shm_toc_estimator;
+use ::types_storage::storage::shm_toc_estimator;
 
 use parallel_rt_seams as rt;
 
@@ -441,14 +441,14 @@ fn seg_id_of(seg: DsmSegmentHandle) -> DsmSegmentId {
 
 /// `shm_toc_lookup(toc, PARALLEL_KEY_FIXED, false)` missing — the corruption
 /// path C handles with `elog(ERROR)`.
-fn missing_fixed_key() -> types_error::PgError {
+fn missing_fixed_key() -> ::types_error::PgError {
     ereport(ERROR)
         .errmsg("could not find fixed parallel state in shm TOC")
         .into_error()
 }
 
 /// `shm_toc_lookup(toc, PARALLEL_KEY_ERROR_QUEUE, false)` missing.
-fn missing_error_queue_key() -> types_error::PgError {
+fn missing_error_queue_key() -> ::types_error::PgError {
     ereport(ERROR)
         .errmsg("could not find parallel error queue in shm TOC")
         .into_error()
@@ -480,7 +480,7 @@ fn estimator_slot_of(_e: ShmTocEstimatorHandle) -> usize {
 pub fn shm_toc_estimate_chunk(e: ShmTocEstimatorHandle, sz: Size) {
     with_globals(|g| {
         let c = g.get_mut(ParallelContextHandle(estimator_slot_of(e)));
-        shm_toc::shm_toc_estimate_chunk(&mut c.estimator, sz)
+        ::shm_toc::shm_toc_estimate_chunk(&mut c.estimator, sz)
             .expect("shm_toc_estimate_chunk overflow");
     });
 }
@@ -489,7 +489,7 @@ pub fn shm_toc_estimate_chunk(e: ShmTocEstimatorHandle, sz: Size) {
 pub fn shm_toc_estimate_keys(e: ShmTocEstimatorHandle, nkeys: i32) {
     with_globals(|g| {
         let c = g.get_mut(ParallelContextHandle(estimator_slot_of(e)));
-        shm_toc::shm_toc_estimate_keys(&mut c.estimator, nkeys as Size)
+        ::shm_toc::shm_toc_estimate_keys(&mut c.estimator, nkeys as Size)
             .expect("shm_toc_estimate_keys overflow");
     });
 }
@@ -501,7 +501,7 @@ pub fn shm_toc_estimate_keys(e: ShmTocEstimatorHandle, nkeys: i32) {
 pub fn pcxt_estimate_chunk(pcxt: ParallelContextHandle, size: Size) -> PgResult<()> {
     with_globals(|g| {
         let c = g.get_mut(pcxt);
-        shm_toc::shm_toc_estimate_chunk(&mut c.estimator, size)
+        ::shm_toc::shm_toc_estimate_chunk(&mut c.estimator, size)
     })
 }
 
@@ -510,7 +510,7 @@ pub fn pcxt_estimate_chunk(pcxt: ParallelContextHandle, size: Size) -> PgResult<
 pub fn pcxt_estimate_keys(pcxt: ParallelContextHandle, keys: Size) -> PgResult<()> {
     with_globals(|g| {
         let c = g.get_mut(pcxt);
-        shm_toc::shm_toc_estimate_keys(&mut c.estimator, keys)
+        ::shm_toc::shm_toc_estimate_keys(&mut c.estimator, keys)
     })
 }
 
@@ -700,7 +700,7 @@ fn read_entrypoint(chunk: SerializeCursor) -> PgResult<(String, String)> {
 /// Offset of the `plan_node_id` flexible array past the
 /// `SharedExecutorInstrumentation` header (the four leading `int`s).
 const SEI_PLAN_NODE_ID_OFFSET: usize =
-    execparallel::SHARED_EXEC_INSTRUMENTATION_HEADER_SIZE;
+    ::execparallel::SHARED_EXEC_INSTRUMENTATION_HEADER_SIZE;
 
 /// `instrumentation = shm_toc_allocate(...); instrumentation->{...} = ...` —
 /// write the `repr(C)` `SharedExecutorInstrumentation` header in place. The
@@ -787,7 +787,7 @@ pub fn store_jit_instrumentation_header(
     let arr_off = jit_instr_offset();
     let arr = (chunk.0 + arr_off) as *mut u8;
     let arr_len = (num_workers as usize)
-        .saturating_mul(core::mem::size_of::<execparallel::JitInstrumentation>());
+        .saturating_mul(core::mem::size_of::<::execparallel::JitInstrumentation>());
     // SAFETY: the chunk was sized `arr_off + num_workers * sizeof(JitInstrumentation)`.
     unsafe { core::ptr::write_bytes(arr, 0, arr_len) };
     JitInstrumentationHandle(chunk.0)
@@ -961,7 +961,7 @@ pub fn create_parallel_context<'mcx>(
     // Account the allocation against the caller's context so OOM carries
     // ERRCODE_OUT_OF_MEMORY and the context name (mcx.oom), like every other
     // allocating function (AGENTS "Memory allocation").
-    mcx::check_alloc_size(core::mem::size_of::<ParallelContext>())?;
+    ::mcx::check_alloc_size(core::mem::size_of::<ParallelContext>())?;
 
     // We might be running in a short-lived memory context.
     let oldcontext = rt::switch_to_top_transaction_context::call()?;
@@ -1052,7 +1052,7 @@ fn establish_parallel_segment(
             // C: pcxt->private_memory = MemoryContextAlloc(TopMemoryContext,
             // segsize). Fallible: OOM on the caller-controlled segsize carries
             // ERRCODE_OUT_OF_MEMORY (the context's oom), not a process abort.
-            mcx::check_alloc_size(segsize)?;
+            ::mcx::check_alloc_size(segsize)?;
             let layout = Layout::from_size_align(segsize, PRIVATE_SEG_ALIGN)
                 .expect("valid private-segment layout");
             let ptr = top
@@ -1287,7 +1287,7 @@ pub fn initialize_parallel_dsm<'mcx>(mcx: Mcx<'mcx>, pcxt: ParallelContextHandle
         let seg = with_globals(|g| g.get(pcxt).seg);
         let request = (nworkers as usize)
             .saturating_mul(core::mem::size_of::<ParallelWorkerInfo>());
-        mcx::check_alloc_size(request)?;
+        ::mcx::check_alloc_size(request)?;
         let mut workers: Vec<ParallelWorkerInfo> = Vec::new();
         workers
             .try_reserve(nworkers as usize)
@@ -2211,7 +2211,7 @@ pub fn parallel_worker_main(main_arg: Datum<'static>) -> PgResult<()> {
 /// leader's `dsm_create` so the mapping outlives the (short-lived) caller.
 fn worker_attach_segment(handle: dsm_handle) -> PgResult<Option<DsmSegment>> {
     let top = mcxt_seams::top_memory_context::call();
-    dsm_core::dsm::dsm_attach(handle, top)
+    ::dsm_core::dsm::dsm_attach(handle, top)
 }
 
 /// `shm_toc_lookup(toc, key, false)` on the worker-attached segment — a real
@@ -2425,8 +2425,8 @@ fn install_worker_state_seams() {
                 let mcx = mcxt_seams::top_memory_context::call();
                 execParallel_seams::ParallelQueryMain::call(
                     mcx,
-                    execparallel::DsmSegmentHandle(seg.0),
-                    execparallel::ShmTocHandle(toc),
+                    ::execparallel::DsmSegmentHandle(seg.0),
+                    ::execparallel::ShmTocHandle(toc),
                 )
             }
             other => Err(ereport(ERROR)
@@ -2552,7 +2552,7 @@ fn install_execparallel_support_pcxt_seams() {
     // &add)`. C `elog(ERROR, "plan node %d not found")` on miss.
     sup::report_instr_to_dsm::set(|sei, plan_node_id, worker, add| {
         let (i, header) = sei_find_plan_node_slot(sei, plan_node_id)
-            .ok_or_else(|| types_error::PgError::error(std::format!("plan node {plan_node_id} not found")))?;
+            .ok_or_else(|| ::types_error::PgError::error(std::format!("plan node {plan_node_id} not found")))?;
         let array_base = sei.0 + header.instrument_offset as usize;
         let slot = i * header.num_workers + worker;
         // SAFETY: the leader sized the chunk for `num_workers * num_plan_nodes`
@@ -2569,7 +2569,7 @@ fn install_execparallel_support_pcxt_seams() {
     // `array[i * num_workers ..][.. num_workers]`.
     sup::retrieve_instr_from_dsm::set(|sei, plan_node_id| {
         let (i, header) = sei_find_plan_node_slot(sei, plan_node_id)
-            .ok_or_else(|| types_error::PgError::error(std::format!("plan node {plan_node_id} not found")))?;
+            .ok_or_else(|| ::types_error::PgError::error(std::format!("plan node {plan_node_id} not found")))?;
         let array_base = sei.0 + header.instrument_offset as usize;
         let base_slot = i * header.num_workers;
         let mut out = std::vec::Vec::with_capacity(header.num_workers as usize);
@@ -2588,7 +2588,7 @@ fn install_execparallel_support_pcxt_seams() {
 /// `dsm-core` segment API, plus the per-session-handle byte read/write into the
 /// real DSM chunk.
 fn install_dsm_helper_seams() {
-    use dsm_core::dsm as dsm_core;
+    use ::dsm_core::dsm as dsm_core;
 
     // `dsm_detach((dsm_segment *) seg)` — drop the segment's mapping and run its
     // on-detach callbacks. Mirrors the leader/worker explicit detach.
@@ -2667,8 +2667,8 @@ mod dsm_substrate_tests {
 
     use std::sync::{Mutex, Once};
 
-    use dsm_core::dsm::{dsm_segment_address, dsm_segment_map_length};
-    use dsm_core::test_bringup::dsm_test_bringup;
+    use ::dsm_core::dsm::{dsm_segment_address, dsm_segment_map_length};
+    use ::dsm_core::test_bringup::dsm_test_bringup;
 
     use super::*;
 
@@ -2941,7 +2941,7 @@ mod dsm_substrate_tests {
     fn shared_dsm_object_place_init_and_worker_attach_over_real_dsm() {
         use core::sync::atomic::Ordering;
         use shared_dsm_object::{attach, estimate, place_and_init, SharedDsmObject, SharedView};
-        use types_storage::storage::{pg_atomic_uint64, Spinlock};
+        use ::types_storage::storage::{pg_atomic_uint64, Spinlock};
 
         // A `repr(C)` per-node shared object shaped like `ParallelTableScanDescData`:
         // a launch-once leader-write scalar, an in-segment spinlock, and a shared
@@ -3071,7 +3071,7 @@ mod dsm_substrate_tests {
     /// in-segment lookups) — no emulation tokens, no fabricated ids.
     #[test]
     fn worker_attaches_to_leader_segment_and_resolves_real_chunk() {
-        use dsm_core::dsm::{
+        use ::dsm_core::dsm::{
             dsm_create, dsm_detach, dsm_pin_segment, dsm_segment_handle, dsm_unpin_segment,
         };
 
@@ -3188,11 +3188,11 @@ mod dsm_substrate_tests {
     /// exactly as the shm_mq unit-test harness does.
     fn install_shm_mq_seam_layer_once() {
         INSTALL_SHM_MQ.call_once(|| {
-            use types_storage::latch::LatchHandle;
-            use types_storage::waiteventset::WL_LATCH_SET;
+            use ::types_storage::latch::LatchHandle;
+            use ::types_storage::waiteventset::WL_LATCH_SET;
 
             // The real OPTION (i) registry-backed seam layer.
-            shm_mq::init_seams();
+            ::shm_mq::init_seams();
 
             // shm_mq allocates the handle + on_dsm_detach record in the
             // TopMemoryContext; the bring-up's thread-local stand-in is installed
@@ -3216,7 +3216,7 @@ mod dsm_substrate_tests {
 
     #[test]
     fn leader_worker_error_queue_roundtrip_over_real_dsm() -> PgResult<()> {
-        use dsm_core::dsm::{
+        use ::dsm_core::dsm::{
             dsm_create, dsm_detach, dsm_pin_segment, dsm_segment_handle, dsm_unpin_segment,
         };
         use shm_mq::{
@@ -3374,7 +3374,7 @@ mod dsm_substrate_tests {
     /// leader as receiver and the worker as sender (the C tuple-flow direction).
     #[test]
     fn tuple_queue_roundtrip_over_real_dsm() -> PgResult<()> {
-        use dsm_core::dsm::{dsm_create, dsm_detach};
+        use ::dsm_core::dsm::{dsm_create, dsm_detach};
         use shm_mq::{
             shm_mq_attach as real_attach, shm_mq_send as real_send, ShmMq, SHM_MQ_SUCCESS,
         };

@@ -1,7 +1,7 @@
 //! Install this crate's inward seams (`backend-storage-file-fileset-seams`) to
 //! the real `fileset.c` functions. Marshal-and-delegate only.
 //!
-//! The seam contract passes a [`FileSetHandle`](execparallel::FileSetHandle),
+//! The seam contract passes a [`FileSetHandle`](::execparallel::FileSetHandle),
 //! which (per its `types-execparallel` doc) is a real `FileSet *` reinterpreted
 //! as `usize` — an inherited-opacity handle, never an invented token. The
 //! adapters resolve it back to a borrow of the live `FileSet` body and call the
@@ -11,8 +11,8 @@
 
 use fileset_seams as seams;
 use sharedfileset_seams as shared_seams;
-use execparallel::FileSetHandle;
-use types_storage::fileset::FileSet;
+use ::execparallel::FileSetHandle;
+use ::types_storage::fileset::FileSet;
 
 /// Resolve a [`FileSetHandle`] (a `FileSet *` carried as `usize`) to a shared
 /// borrow of the live `FileSet`.

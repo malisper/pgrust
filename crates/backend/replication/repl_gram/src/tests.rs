@@ -2,7 +2,7 @@
 //! `replication_yyparse` body without the scanner driver).
 
 use super::*;
-use replication::repl_token::Token;
+use ::replication::repl_token::Token;
 
 fn parse(toks: Vec<Token>) -> PgResult<ReplCommand> {
     parse_tokens(toks)

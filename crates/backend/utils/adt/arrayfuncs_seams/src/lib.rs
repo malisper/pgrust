@@ -12,13 +12,13 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_core::Oid;
-use datum::array_build::ArrayBuildStateAny;
-use datum::datum::Datum;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::datum::array_build::ArrayBuildStateAny;
+use ::datum::datum::Datum;
+use ::types_error::PgResult;
 use nodes::{EStateData, EcxtId};
 use types_namespace::{CharArrayDatum, OidArrayDatum, TextArrayDatum};
-use types_tuple::heaptuple::Datum as DatumV;
+use ::types_tuple::heaptuple::Datum as DatumV;
 
 /// The `ArrayBuildStateAny *` threaded between the array-accumulation seams.
 /// `None` is the C `NULL` (no accumulator yet / empty result).
@@ -238,7 +238,7 @@ seam_core::seam!(
     pub fn deconstruct_tid_array<'mcx>(
         mcx: Mcx<'mcx>,
         array: &[u8],
-    ) -> PgResult<PgVec<'mcx, (types_tuple::heaptuple::ItemPointerData, bool)>>
+    ) -> PgResult<PgVec<'mcx, (::types_tuple::heaptuple::ItemPointerData, bool)>>
 );
 
 seam_core::seam!(
@@ -330,7 +330,7 @@ seam_core::seam!(
     /// canonical unified value type: split a detoasted array `Datum` into its
     /// per-element `(Datum<'mcx>, isnull)` pairs, in order, given the element
     /// type's storage attributes. The `compute_array_stats` (array_typanalyze.c)
-    /// path needs the elements as `types_tuple::Datum<'mcx>` — they are tracked
+    /// path needs the elements as `::types_tuple::Datum<'mcx>` — they are tracked
     /// in the Lossy-Counting table and ultimately datumCopy'd into the
     /// `VacAttrStats` MCELEM slot, which is `Vec<Datum<'mcx>>`. The owner
     /// detoasts internally (`DatumGetArrayTypeP`). C result arrays are palloc'd

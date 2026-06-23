@@ -14,11 +14,11 @@
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_error::PgResult;
-use types_parallel::shared_dsm_object::SharedRef;
-use types_parallel::SharedDsmObject;
-use types_storage::storage::pg_atomic_uint32;
-use types_storage::LWLock;
+use ::types_error::PgResult;
+use ::types_parallel::shared_dsm_object::SharedRef;
+use ::types_parallel::SharedDsmObject;
+use ::types_storage::storage::pg_atomic_uint32;
+use ::types_storage::LWLock;
 
 use crate::bitmapset::Bitmapset;
 use crate::execnodes::{PlanStateData, SlotId};
@@ -415,14 +415,14 @@ impl Append<'_> {
     /// Deep copy of the plan node (and its subplan list) into `mcx`
     /// (C: `copyObject` shape). Fallible: copying allocates.
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<Append<'b>> {
-        let mut appendplans = mcx::vec_with_capacity_in(mcx, self.appendplans.len())?;
+        let mut appendplans = ::mcx::vec_with_capacity_in(mcx, self.appendplans.len())?;
         for child in self.appendplans.iter() {
             appendplans.push(child.clone_in(mcx)?);
         }
         Ok(Append {
             plan: self.plan.clone_in(mcx)?,
             apprelids: match &self.apprelids {
-                Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
+                Some(b) => Some(::mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                 None => None,
             },
             appendplans: appendplans.into_iter().collect(),

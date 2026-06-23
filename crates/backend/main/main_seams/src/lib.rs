@@ -5,7 +5,7 @@
 
 #![allow(non_snake_case)]
 
-use types_startup::DispatchOption;
+use ::types_startup::DispatchOption;
 
 seam_core::seam!(
     /// `parse_dispatch_option(name)` (main.c): map a must-be-first option name

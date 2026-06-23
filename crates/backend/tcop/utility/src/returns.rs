@@ -7,11 +7,11 @@
 //! [`utility_out_seams`] (aliased `rt`).
 
 use utility_out_seams as rt;
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodes::ntag;
 use ::nodes::nodes::Node;
 use ::nodes::nodes::{CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UTILITY};
-use types_tuple::heaptuple::TupleDesc;
+use ::types_tuple::heaptuple::TupleDesc;
 
 use crate::consts::RECORDOID;
 

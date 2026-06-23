@@ -30,7 +30,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 // ---------------------------------------------------------------------------
 // Driver-side dictionary-protocol / headline-tsquery types

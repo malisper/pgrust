@@ -8,8 +8,8 @@
 use super::*;
 use std::sync::{Mutex, MutexGuard, Once};
 
-use types_core::fmgr::FmgrInfo;
-use datum::datum::Datum;
+use ::types_core::fmgr::FmgrInfo;
+use ::datum::datum::Datum;
 
 static SEAM_LOCK: Mutex<()> = Mutex::new(());
 

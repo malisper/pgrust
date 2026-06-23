@@ -9,9 +9,9 @@
 //! The owning units install these from their `init_seams()` when they land;
 //! until then a call panics loudly.
 
-use cache::typcache::{DomainCheckConstraintRow, DomainCtxHandle, DomainLevelScan, ExprStateHandle};
-use types_core::Oid;
-use types_error::PgResult;
+use ::cache::typcache::{DomainCheckConstraintRow, DomainCtxHandle, DomainLevelScan, ExprStateHandle};
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use types_tuple::heaptuple::Datum;
 

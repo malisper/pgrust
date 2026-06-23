@@ -14,9 +14,9 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use types_storage::buf::{BM_LOCKED, BUF_REFCOUNT_MASK, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE};
+use ::types_storage::buf::{BM_LOCKED, BUF_REFCOUNT_MASK, BUF_USAGECOUNT_MASK, BUF_USAGECOUNT_ONE};
 use types_core::{BlockNumber, ForkNumber, Oid, ProcNumber, RelFileNumber};
-use types_storage::RelFileLocator;
+use ::types_storage::RelFileLocator;
 
 /// The crate-wide test guard. Locking it serializes any test that installs the
 /// process-global seams / mutates the process-global backing state.

@@ -2,7 +2,7 @@
 
 extern crate alloc;
 
-use types_core::fmgr::FmgrInfo;
+use ::types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum;
 

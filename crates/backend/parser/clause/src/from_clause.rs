@@ -60,15 +60,15 @@ use types_error::{
     ERRCODE_INVALID_TABLESAMPLE_ARGUMENT, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use types_error::error::ERRCODE_DUPLICATE_ALIAS;
-use utils_error::ereport;
+use ::types_error::error::ERRCODE_DUPLICATE_ALIAS;
+use ::utils_error::ereport;
 
-use types_acl::acl::AclMode;
-use types_storage::lock::{NoLock, RowExclusiveLock};
+use ::types_acl::acl::AclMode;
+use ::types_storage::lock::{NoLock, RowExclusiveLock};
 
-use types_tuple::heaptuple::{FLOAT8OID, INTERNALOID};
+use ::types_tuple::heaptuple::{FLOAT8OID, INTERNALOID};
 
-use types_core::primitive::AttrNumber;
+use ::types_core::primitive::AttrNumber;
 use ::nodes::jointype::JoinType;
 use ::nodes::nodes::{ntag, CmdType, Node, NodePtr};
 use ::nodes::parsenodes::RTEKind;
@@ -93,15 +93,15 @@ use ::nodes::rawnodes::{
     RangeTableSample, RangeTblRef, RangeVar, ResTarget,
 };
 
-use parsenodes::CoercionContext;
+use ::parsenodes::CoercionContext;
 
-use nodes_core::makefuncs::{
+use ::nodes_core::makefuncs::{
     make_a_expr, make_const, make_func_call, make_json_format, make_relabel_type, make_var,
 };
-use nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
+use ::nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
 
-use vars::var::contain_vars_of_level;
-use parse_expr::transformExpr;
+use ::vars::var::contain_vars_of_level;
+use ::parse_expr::transformExpr;
 use parse_collate::{assign_expr_collations, assign_list_collations};
 use coerce::{coerce_to_specific_type, coerce_type, select_common_type, select_common_typmod};
 use parser_relation::{
@@ -111,9 +111,9 @@ use parser_relation::{
     checkNameSpaceConflicts, isLockedRefname, markNullableIfNeeded, markVarForSelectPriv,
     parserOpenTable, scanNameSpaceForCTE, scanNameSpaceForENR,
 };
-use coerce::coerce_to_specific_type_typmod;
-use parse_type::typenameTypeIdAndMod;
-use table::table_close;
+use ::coerce::coerce_to_specific_type_typmod;
+use ::parse_type::typenameTypeIdAndMod;
+use ::table::table_close;
 
 use parse_func_seams as parse_func;
 use tablesample_core_seams as tsmapi;
@@ -121,7 +121,7 @@ use parser_analyze_seams as analyze;
 use target_seams as parse_target;
 use lsyscache_seams as lsyscache;
 
-use samplescan::TsmRoutine;
+use ::samplescan::TsmRoutine;
 
 use crate::{elog_error, errpos, str_val, transformWhereClause};
 
@@ -381,7 +381,7 @@ fn transformJoinUsingClause<'mcx>(
         markVarForSelectPriv(mcx, pstate, rvar)?;
 
         /* Now create the lvar = rvar join condition */
-        let mut name = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 1)?;
+        let mut name = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 1)?;
         name.push(make_string_node(mcx, "=")?);
         let e = make_a_expr(
             A_Expr_Kind::AEXPR_OP,
@@ -403,7 +403,7 @@ fn transformJoinUsingClause<'mcx>(
          * makeBoolExpr(AND_EXPR, andargs, -1): the raw operator tree's args are
          * raw `A_Expr` nodes, so this is a raw `BoolExpr` carried as a `Node`.
          */
-        let mut args = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, andargs.len())?;
+        let mut args = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, andargs.len())?;
         for a in andargs.into_iter() {
             args.push(alloc_in(mcx, a)?);
         }
@@ -424,7 +424,7 @@ fn transformJoinUsingClause<'mcx>(
         .ok_or_else(|| elog_error("transformJoinUsingClause: transformExpr returned NULL"))?;
 
     let result =
-        coerce::coerce_to_boolean(mcx, Some(pstate), result, "JOIN/USING")?;
+        ::coerce::coerce_to_boolean(mcx, Some(pstate), result, "JOIN/USING")?;
 
     Ok(result)
 }
@@ -625,7 +625,7 @@ fn transformRangeFunction<'mcx>(
                     let last_srf = clone_opt_node(mcx, pstate.p_last_srf.as_deref())?;
 
                     let newfc_name = system_func_name(mcx, "unnest")?;
-                    let mut newfc_args = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 1)?;
+                    let mut newfc_args = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 1)?;
                     newfc_args.push(alloc_in(mcx, (**arg).clone_in(mcx)?)?);
                     let newfc = make_func_call(
                         mcx,
@@ -750,10 +750,10 @@ fn transformRangeFunction<'mcx>(
     /*
      * OK, build an RTE and nsitem for the function.
      */
-    let funcnames_strs: Vec<mcx::PgString<'mcx>> = {
+    let funcnames_strs: Vec<::mcx::PgString<'mcx>> = {
         let mut v = Vec::with_capacity(funcnames.len());
         for n in funcnames.iter() {
-            v.push(mcx::PgString::from_str_in(n, mcx)?);
+            v.push(::mcx::PgString::from_str_in(n, mcx)?);
         }
         v
     };
@@ -787,9 +787,9 @@ fn transformRangeTableFunc<'mcx>(
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
-    use types_core::catalog::INT4OID;
-    use types_error::error::ERRCODE_INVALID_TABLE_DEFINITION;
-    use types_tuple::heaptuple::{TEXTOID, XMLOID};
+    use ::types_core::catalog::INT4OID;
+    use ::types_error::error::ERRCODE_INVALID_TABLE_DEFINITION;
+    use ::types_tuple::heaptuple::{TEXTOID, XMLOID};
 
     let mut tf = TableFunc::default();
 
@@ -842,13 +842,13 @@ fn transformRangeTableFunc<'mcx>(
     tf.ordinalitycol = -1;
 
     // Process column specs.
-    let mut colnames: PgVec<'mcx, mcx::PgString<'mcx>> = PgVec::new_in(mcx);
+    let mut colnames: PgVec<'mcx, ::mcx::PgString<'mcx>> = PgVec::new_in(mcx);
     let mut coltypes: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut coltypmods: PgVec<'mcx, i32> = PgVec::new_in(mcx);
     let mut colcollations: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
-    let mut colexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, Expr>>> = PgVec::new_in(mcx);
-    let mut coldefexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, Expr>>> = PgVec::new_in(mcx);
-    let mut notnulls: Option<mcx::PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
+    let mut colexprs: PgVec<'mcx, Option<::mcx::PgBox<'mcx, Expr>>> = PgVec::new_in(mcx);
+    let mut coldefexprs: PgVec<'mcx, Option<::mcx::PgBox<'mcx, Expr>>> = PgVec::new_in(mcx);
+    let mut notnulls: Option<::mcx::PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
     let mut names: Vec<String> = Vec::new();
 
     for (colno, col) in rtf.columns.iter().enumerate() {
@@ -859,7 +859,7 @@ fn transformRangeTableFunc<'mcx>(
             .map(|s| s.to_string())
             .unwrap_or_default();
 
-        colnames.push(mcx::PgString::from_str_in(rawc_name.as_str(), mcx)?);
+        colnames.push(::mcx::PgString::from_str_in(rawc_name.as_str(), mcx)?);
 
         // Determine the type/typmod. FOR ORDINALITY columns are INTEGER per
         // spec; the others are user-specified.
@@ -887,7 +887,7 @@ fn transformRangeTableFunc<'mcx>(
                     .errposition(errpos(pstate, rawc.location))
                     .into_error());
             }
-            let tn_pn = parse_type::raw_typename_to_parse(type_name)?;
+            let tn_pn = ::parse_type::raw_typename_to_parse(type_name)?;
             let (id, md) = typenameTypeIdAndMod(mcx, Some(&*pstate), &tn_pn)?;
             typid = id;
             typmod = md;
@@ -898,7 +898,7 @@ fn transformRangeTableFunc<'mcx>(
         colcollations.push(lsyscache::get_typcollation::call(typid)?);
 
         // Transform the PATH and DEFAULT expressions.
-        let colexpr: Option<mcx::PgBox<'mcx, Expr<'mcx>>> = if let Some(ce) = rawc.colexpr.as_deref() {
+        let colexpr: Option<::mcx::PgBox<'mcx, Expr<'mcx>>> = if let Some(ce) = rawc.colexpr.as_deref() {
             let t = transformExpr(
                 pstate,
                 Some(ce.clone_in(mcx)?),
@@ -915,7 +915,7 @@ fn transformRangeTableFunc<'mcx>(
             None
         };
 
-        let coldefexpr: Option<mcx::PgBox<'mcx, Expr<'mcx>>> = if let Some(cde) = rawc.coldefexpr.as_deref() {
+        let coldefexpr: Option<::mcx::PgBox<'mcx, Expr<'mcx>>> = if let Some(cde) = rawc.coldefexpr.as_deref() {
             let t = transformExpr(
                 pstate,
                 Some(cde.clone_in(mcx)?),
@@ -937,7 +937,7 @@ fn transformRangeTableFunc<'mcx>(
         coldefexprs.push(coldefexpr);
 
         if rawc.is_not_null {
-            notnulls = Some(nodes_core::bitmapset::bms_add_member(
+            notnulls = Some(::nodes_core::bitmapset::bms_add_member(
                 mcx,
                 notnulls.take(),
                 colno as i32,
@@ -967,8 +967,8 @@ fn transformRangeTableFunc<'mcx>(
 
     // Namespaces, if any, also need to be transformed.
     if !rtf.namespaces.is_empty() {
-        let mut ns_uris: PgVec<'mcx, mcx::PgBox<'mcx, Expr>> = PgVec::new_in(mcx);
-        let mut ns_names: PgVec<'mcx, Option<mcx::PgString<'mcx>>> = PgVec::new_in(mcx);
+        let mut ns_uris: PgVec<'mcx, ::mcx::PgBox<'mcx, Expr>> = PgVec::new_in(mcx);
+        let mut ns_names: PgVec<'mcx, Option<::mcx::PgString<'mcx>>> = PgVec::new_in(mcx);
         let mut default_ns_seen = false;
         let mut seen_names: Vec<String> = Vec::new();
 
@@ -1005,7 +1005,7 @@ fn transformRangeTableFunc<'mcx>(
                         }
                     }
                     seen_names.push(rn_s.clone());
-                    ns_names.push(Some(mcx::PgString::from_str_in(rn_s.as_str(), mcx)?));
+                    ns_names.push(Some(::mcx::PgString::from_str_in(rn_s.as_str(), mcx)?));
                 }
                 None => {
                     if default_ns_seen {
@@ -1062,8 +1062,8 @@ struct JsonTableParseContext {
 /// handles with `JSON_QUERY()` rather than `JSON_VALUE()`.
 fn isCompositeType(typid: Oid) -> PgResult<bool> {
     use parsenodes::{TYPTYPE_COMPOSITE, TYPTYPE_DOMAIN};
-    use types_tuple::heaptuple::{JSONBOID, JSONOID};
-    use types_tuple::heaptuple::RECORDOID;
+    use ::types_tuple::heaptuple::{JSONBOID, JSONOID};
+    use ::types_tuple::heaptuple::RECORDOID;
 
     let typtype = lsyscache::get_typtype::call(typid)? as i8;
     let type_is_array = lsyscache::get_element_type::call(typid)?.is_some();
@@ -1154,7 +1154,7 @@ fn makeJsonTablePathScan<'mcx>(
     colMax: i32,
     childplan: Option<Node<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
-    use types_tuple::Datum;
+    use ::types_tuple::Datum;
 
     // Assert(IsA(pathspec->string, A_Const));
     // pathstring = castNode(A_Const, pathspec->string)->val.sval.sval;
@@ -1192,7 +1192,7 @@ fn makeJsonTablePathScan<'mcx>(
     let value_node = Node::mk_const(mcx, value)?;
 
     let name = match pathspec.name.as_deref() {
-        Some(n) => Some(mcx::PgString::from_str_in(&n.to_string(), mcx)?),
+        Some(n) => Some(::mcx::PgString::from_str_in(&n.to_string(), mcx)?),
         None => None,
     };
 
@@ -1255,7 +1255,7 @@ fn transformJsonTableColumn<'mcx>(
         .as_deref()
         .ok_or_else(|| elog_error("transformJsonTableColumn: column without name"))?
         .to_string();
-    let column_name = mcx::PgString::from_str_in(&jtc_name, mcx)?;
+    let column_name = ::mcx::PgString::from_str_in(&jtc_name, mcx)?;
 
     // context_item = makeJsonValueExpr((Expr *) contextItemExpr, NULL,
     //                                  makeJsonFormat(JS_FORMAT_DEFAULT,
@@ -1346,7 +1346,7 @@ fn make_string_const<'mcx>(
     let str_node = Node::mk_string(
         mcx,
         ::nodes::value::StringNode {
-            sval: mcx::PgString::from_str_in(s, mcx)?,
+            sval: ::mcx::PgString::from_str_in(s, mcx)?,
         },
     )?;
     let a_const = ::nodes::rawnodes::A_Const {
@@ -1405,7 +1405,7 @@ fn transformJsonTableColumns<'mcx>(
                 .colnames
                 .get_or_insert_with(|| PgVec::new_in(mcx));
             colnames.try_reserve(1).map_err(|_| mcx.oom(0))?;
-            colnames.push(mcx::PgString::from_str_in(&name, mcx)?);
+            colnames.push(::mcx::PgString::from_str_in(&name, mcx)?);
         }
 
         let typid: Oid;
@@ -1424,7 +1424,7 @@ fn transformJsonTableColumns<'mcx>(
                 }
                 ordinality_found = true;
                 colexpr = None;
-                typid = types_core::catalog::INT4OID;
+                typid = ::types_core::catalog::INT4OID;
                 typmod = -1;
             }
             JsonTableColumnType::JTC_REGULAR
@@ -1435,7 +1435,7 @@ fn transformJsonTableColumns<'mcx>(
                         let tn = rawc.type_name.as_deref().ok_or_else(|| {
                             elog_error("transformJsonTableColumns: JTC_REGULAR without typeName")
                         })?;
-                        let tn_pn = parse_type::raw_typename_to_parse(tn)?;
+                        let tn_pn = ::parse_type::raw_typename_to_parse(tn)?;
                         typenameTypeIdAndMod(mcx, Some(&*pstate), &tn_pn)?
                     };
                     // Promote to JTC_FORMATTED if the type is better handled by
@@ -1558,7 +1558,7 @@ fn transformJsonTableNestedColumns<'mcx>(
         let mut pathspec = pathspec_src.clone_in(mcx)?;
         if pathspec.name.is_none() {
             let gen = generateJsonTablePathName(cxt);
-            pathspec.name = Some(mcx::PgString::from_str_in(&gen, mcx)?);
+            pathspec.name = Some(::mcx::PgString::from_str_in(&gen, mcx)?);
         }
 
         let nested = transformJsonTableColumns(
@@ -1622,7 +1622,7 @@ fn transformJsonTable<'mcx>(
     let mut root_path = root_path_src.clone_in(mcx)?;
     if root_path.name.is_none() {
         let gen = generateJsonTablePathName(&mut cxt);
-        root_path.name = Some(mcx::PgString::from_str_in(&gen, mcx)?);
+        root_path.name = Some(::mcx::PgString::from_str_in(&gen, mcx)?);
     } else {
         // cxt.pathNames = list_make1(rootPathSpec->name)
         cxt.pathNames
@@ -1698,7 +1698,7 @@ fn transformJsonTable<'mcx>(
             .ok_or_else(|| elog_error("transformJsonTable: tf->docexpr is NULL"))?
             .as_jsonexpr()
             .ok_or_else(|| elog_error("transformJsonTable: tf->docexpr is not a JsonExpr"))?;
-        let mut pv: PgVec<'mcx, mcx::PgBox<'mcx, Expr>> = PgVec::new_in(mcx);
+        let mut pv: PgVec<'mcx, ::mcx::PgBox<'mcx, Expr>> = PgVec::new_in(mcx);
         pv.try_reserve(je.passing_values.len())
             .map_err(|_| mcx.oom(0))?;
         for e in je.passing_values.iter() {
@@ -1741,10 +1741,10 @@ fn transformRangeTableSample<'mcx>(
      * has the same name, one dummy INTERNAL argument, and a result type of
      * tsm_handler.
      */
-    let method_names: Vec<mcx::PgString<'mcx>> = {
+    let method_names: Vec<::mcx::PgString<'mcx>> = {
         let mut v = Vec::with_capacity(rts.method.len());
         for n in rts.method.iter() {
-            v.push(mcx::PgString::from_str_in(str_val(n).unwrap_or(""), mcx)?);
+            v.push(::mcx::PgString::from_str_in(str_val(n).unwrap_or(""), mcx)?);
         }
         v
     };
@@ -1779,7 +1779,7 @@ fn transformRangeTableSample<'mcx>(
     }
 
     /* OK, run the handler to get TsmRoutine, for argument type info */
-    let tsm: mcx::PgBox<'mcx, TsmRoutine> = tsmapi::get_tsm_routine_oid::call(mcx, handler_oid)?;
+    let tsm: ::mcx::PgBox<'mcx, TsmRoutine> = tsmapi::get_tsm_routine_oid::call(mcx, handler_oid)?;
 
     let mut tablesample = TableSampleClause {
         tsmhandler: handler_oid,
@@ -2683,13 +2683,13 @@ fn markRelsAsNulledBy<'mcx>(
     /* lfirst(lc) = bms_add_member((Bitmapset *) lfirst(lc), jindex) */
     let idx = (varno - 1) as usize;
     let cur = core::mem::replace(&mut pstate.p_nullingrels[idx], empty_bitmapset(mcx)?);
-    let cur_opt: Option<mcx::PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> =
+    let cur_opt: Option<::mcx::PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> =
         if cur.words.is_empty() {
             None
         } else {
             Some(alloc_in(mcx, cur)?)
         };
-    let updated = nodes_core::bitmapset::bms_add_member(mcx, cur_opt, jindex)?;
+    let updated = ::nodes_core::bitmapset::bms_add_member(mcx, cur_opt, jindex)?;
     pstate.p_nullingrels[idx] = updated.clone_in(mcx)?;
     Ok(())
 }
@@ -2737,7 +2737,7 @@ fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
     alloc_in(
         mcx,
         Node::mk_string(mcx, ::nodes::value::StringNode {
-            sval: mcx::PgString::from_str_in(s, mcx)?,
+            sval: ::mcx::PgString::from_str_in(s, mcx)?,
         })?,
     )
 }
@@ -2745,7 +2745,7 @@ fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
 /// `SystemFuncName("unnest")` — `list_make2(makeString("pg_catalog"),
 /// makeString(name))` (parser/parse_func.c).
 fn system_func_name<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 2)?;
+    let mut v = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, 2)?;
     v.push(make_string_node(mcx, "pg_catalog")?);
     v.push(make_string_node(mcx, name)?);
     Ok(v)
@@ -2907,7 +2907,7 @@ fn copy_node_pgvec<'mcx>(
     mcx: Mcx<'mcx>,
     list: &PgVec<'_, NodePtr<'_>>,
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, list.len())?;
+    let mut v = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, list.len())?;
     for n in list.iter() {
         v.push(alloc_in(mcx, (**n).clone_in(mcx)?)?);
     }
@@ -2919,7 +2919,7 @@ fn strings_to_node_pgvec<'mcx>(
     mcx: Mcx<'mcx>,
     strings: &[String],
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, strings.len())?;
+    let mut v = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, strings.len())?;
     for s in strings.iter() {
         v.push(make_string_node(mcx, s)?);
     }
@@ -2931,7 +2931,7 @@ fn nodes_to_pgvec<'mcx>(
     mcx: Mcx<'mcx>,
     nodes: Vec<Node<'mcx>>,
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, nodes.len())?;
+    let mut v = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, nodes.len())?;
     for n in nodes.into_iter() {
         v.push(alloc_in(mcx, n)?);
     }
@@ -2940,7 +2940,7 @@ fn nodes_to_pgvec<'mcx>(
 
 /// `int` list → `PgVec<i32>` (`list_make_int` image).
 fn ints_to_pgvec<'mcx>(mcx: Mcx<'mcx>, ints: &[i32]) -> PgResult<PgVec<'mcx, i32>> {
-    let mut v = mcx::vec_with_capacity_in::<i32>(mcx, ints.len())?;
+    let mut v = ::mcx::vec_with_capacity_in::<i32>(mcx, ints.len())?;
     for &i in ints.iter() {
         v.push(i);
     }
@@ -2952,7 +2952,7 @@ fn nscolumns_to_pgvec<'mcx>(
     mcx: Mcx<'mcx>,
     cols: &[ParseNamespaceColumn],
 ) -> PgResult<PgVec<'mcx, ParseNamespaceColumn>> {
-    let mut v = mcx::vec_with_capacity_in::<ParseNamespaceColumn>(mcx, cols.len())?;
+    let mut v = ::mcx::vec_with_capacity_in::<ParseNamespaceColumn>(mcx, cols.len())?;
     for c in cols.iter() {
         v.push(*c);
     }
@@ -2964,7 +2964,7 @@ fn clone_nscolumns_pgvec<'mcx>(
     mcx: Mcx<'mcx>,
     cols: &PgVec<'_, ParseNamespaceColumn>,
 ) -> PgResult<PgVec<'mcx, ParseNamespaceColumn>> {
-    let mut v = mcx::vec_with_capacity_in::<ParseNamespaceColumn>(mcx, cols.len())?;
+    let mut v = ::mcx::vec_with_capacity_in::<ParseNamespaceColumn>(mcx, cols.len())?;
     for c in cols.iter() {
         v.push(*c);
     }
@@ -3004,7 +3004,7 @@ fn clone_namespace<'mcx>(
     mcx: Mcx<'mcx>,
     namespace: &[ParseNamespaceItem<'_>],
 ) -> PgResult<PgVec<'mcx, ParseNamespaceItem<'mcx>>> {
-    let mut v = mcx::vec_with_capacity_in::<ParseNamespaceItem<'mcx>>(mcx, namespace.len())?;
+    let mut v = ::mcx::vec_with_capacity_in::<ParseNamespaceItem<'mcx>>(mcx, namespace.len())?;
     for ns in namespace.iter() {
         v.push(clone_nsitem(mcx, ns)?);
     }
@@ -3043,7 +3043,7 @@ fn funcexprs_as_list_node<'mcx>(
     mcx: Mcx<'mcx>,
     funcexprs: &[NodePtr<'mcx>],
 ) -> PgResult<Node<'mcx>> {
-    let mut v = mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, funcexprs.len())?;
+    let mut v = ::mcx::vec_with_capacity_in::<NodePtr<'mcx>>(mcx, funcexprs.len())?;
     for n in funcexprs.iter() {
         v.push(alloc_in(mcx, (**n).clone_in(mcx)?)?);
     }

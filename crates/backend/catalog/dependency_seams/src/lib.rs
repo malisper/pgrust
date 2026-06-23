@@ -4,9 +4,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_catalog::catalog_dependency::{ObjectAddress, ObjectAddresses};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::catalog_dependency::{ObjectAddress, ObjectAddresses};
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::parsenodes::DropBehavior;
 
 /// `PERFORM_DELETION_INTERNAL` (`catalog/dependency.h`) — internal action.
@@ -115,7 +115,7 @@ seam_core::seam!(
     pub fn record_object_address_dependencies(
         depender: ObjectAddress,
         refs: &mut ObjectAddresses,
-        behavior: types_catalog::catalog_dependency::DependencyType,
+        behavior: ::types_catalog::catalog_dependency::DependencyType,
     ) -> PgResult<()>
 );
 
@@ -128,8 +128,8 @@ seam_core::seam!(
         depender: ObjectAddress,
         expr: &::nodes::nodes::Node<'mcx>,
         rel_id: Oid,
-        behavior: types_catalog::catalog_dependency::DependencyType,
-        self_behavior: types_catalog::catalog_dependency::DependencyType,
+        behavior: ::types_catalog::catalog_dependency::DependencyType,
+        self_behavior: ::types_catalog::catalog_dependency::DependencyType,
         reverse_self: bool,
     ) -> PgResult<()>
 );
@@ -144,7 +144,7 @@ seam_core::seam!(
         depender: ObjectAddress,
         expr: &::nodes::nodes::Node<'mcx>,
         rtable: &[::nodes::parsenodes::RangeTblEntry<'mcx>],
-        behavior: types_catalog::catalog_dependency::DependencyType,
+        behavior: ::types_catalog::catalog_dependency::DependencyType,
     ) -> PgResult<()>
 );
 
@@ -157,7 +157,7 @@ seam_core::seam!(
         class_id: Oid,
         object_id: Oid,
         ref_class_id: Oid,
-        deptype: types_catalog::catalog_dependency::DependencyType,
+        deptype: ::types_catalog::catalog_dependency::DependencyType,
     ) -> PgResult<i64>
 );
 
@@ -168,7 +168,7 @@ seam_core::seam!(
     pub fn record_dependency_on(
         depender: ObjectAddress,
         referenced: ObjectAddress,
-        behavior: types_catalog::catalog_dependency::DependencyType,
+        behavior: ::types_catalog::catalog_dependency::DependencyType,
     ) -> PgResult<()>
 );
 
@@ -179,6 +179,6 @@ seam_core::seam!(
     /// the catalog-scan `ereport(ERROR)`s.
     pub fn sequence_is_owned(
         seq_id: Oid,
-        deptype: types_catalog::catalog_dependency::DependencyType,
+        deptype: ::types_catalog::catalog_dependency::DependencyType,
     ) -> PgResult<Option<(Oid, i32)>>
 );

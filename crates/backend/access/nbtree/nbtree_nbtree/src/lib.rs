@@ -27,20 +27,20 @@ use types_amapi::{
 // carrier (A0) the dispatch layer hands the callbacks. nbtree's `IndexUniqueCheck`
 // / `IndexBulkDeleteResult` (from `types_nbtree`) are structurally identical to
 // the vtable's `types_tableam` ones but distinct types; the adapters convert.
-use types_tableam::amapi::{
+use ::types_tableam::amapi::{
     AmCostEstimate, IndexAMProperty, IndexBuildResult, IndexPath,
     IndexUniqueCheck as AmIndexUniqueCheck, OpFamilyMember, PlannerInfo, TIDBitmap as AmTIDBitmap,
 };
-use types_tableam::index_info_carrier::IndexInfoCarrier;
-use types_tableam::amopaque::{tags, AmOpaqueType};
-use types_tableam::genam::{
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_tableam::amopaque::{tags, AmOpaqueType};
+use ::types_tableam::genam::{
     IndexBulkDeleteResult as AmIndexBulkDeleteResult, IndexVacuumInfo,
 };
-use types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
-use snapshot::snapshot::IsMVCCSnapshot;
-use types_core::primitive::{BlockNumber, OffsetNumber, Oid, Size};
-use types_core::InvalidOid;
-use types_error::PgResult;
+use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
+use ::snapshot::snapshot::IsMVCCSnapshot;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid, Size};
+use ::types_core::InvalidOid;
+use ::types_error::PgResult;
 use types_nbtree::{
     BTParallelScanDescData, BTPS_State, BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsPinned,
     BTScanPosIsValid, BTVacState, BTVacuumPosting, BTCycleId, IndexBulkDeleteResult,
@@ -48,28 +48,28 @@ use types_nbtree::{
     BTP_LEAF, BTP_SPLIT_END, BTREE_METAPAGE, MaxIndexTuplesPerPage, MaxTIDsPerBTreePage, P_FIRSTKEY,
     P_HIKEY, P_NONE,
 };
-use rel::Relation;
-use types_scan::scankey::{
+use ::rel::Relation;
+use ::types_scan::scankey::{
     ScanKeyData, StrategyNumber, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber,
     BTGreaterStrategyNumber, BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy,
     SK_BT_MAXVAL, SK_BT_MINVAL, SK_BT_SKIP, SK_ISNULL, SK_SEARCHNULL,
 };
-use types_storage::storage::LWLockMode;
-use types_scan::sdir::ScanDirection;
-use types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_storage::storage::LWLockMode;
+use ::types_scan::sdir::ScanDirection;
+use ::types_storage::storage::{Buffer, BufferIsValid, InvalidBuffer};
+use ::types_tuple::heaptuple::ItemPointerData;
 // The canonical unified value type (Datum-unification keystone). Used for
 // own-logic scalar construction at the value-consuming `datum_*_v` seams.
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 
-use indextuple_seams::index_form_tuple;
+use ::indextuple_seams::index_form_tuple;
 use indexam_seams as parallel;
 use build_seams as buildhelp;
 use nbtree_core_seams as core;
 use condition_variable_seams as condvar;
 use lwlock_seams as lwlock;
 use datum_seams as datumser;
-use nodes_core_seams::tbm_add_tuple;
+use ::nodes_core_seams::tbm_add_tuple;
 use read_stream as readstream;
 use bufmgr_seams as bufmgr;
 use freespace_seams as indexfsm;
@@ -114,12 +114,12 @@ pub struct NbtScan<'mcx> {
 /// `NbtScan` is the concrete type stored in `IndexScanDescData.opaque` (C's
 /// `void *opaque`); the A0 carrier downcasts to it in every AM adapter.
 impl<'mcx> AmOpaqueType<'mcx> for NbtScan<'mcx> {
-    const TAG: types_tableam::amopaque::AmOpaqueTag = tags::NBT_SCAN;
+    const TAG: ::types_tableam::amopaque::AmOpaqueTag = tags::NBT_SCAN;
 }
 
 /// `IndexVacuumInfo` (`access/genam.h`) — the subset `btvacuumscan` /
 /// `btvacuumpage` read directly. Projected out of the unified
-/// [`types_tableam::genam::IndexVacuumInfo`] by the vacuum adapters.
+/// [`::types_tableam::genam::IndexVacuumInfo`] by the vacuum adapters.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NbtVacuumInfo {
     /// `analyze_only`.
@@ -146,7 +146,7 @@ impl NbtVacuumInfo {
 }
 
 /// Convert nbtree's `IndexBulkDeleteResult` (`types_nbtree`) to the vtable's
-/// (`types_tableam::genam`); structurally identical, distinct types.
+/// (`::types_tableam::genam`); structurally identical, distinct types.
 fn to_am_bulkdelete(s: IndexBulkDeleteResult) -> AmIndexBulkDeleteResult {
     AmIndexBulkDeleteResult {
         num_pages: s.num_pages,
@@ -714,14 +714,14 @@ fn relation_get_index_scan<'mcx>(
 fn erase_nbtscan<'mcx>(
     mcx: Mcx<'mcx>,
     nbtscan: NbtScan<'mcx>,
-) -> PgResult<mcx::PgBox<'mcx, dyn types_tableam::amopaque::AmOpaque<'mcx> + 'mcx>> {
-    let boxed: mcx::PgBox<'mcx, NbtScan<'mcx>> = mcx::alloc_in(mcx, nbtscan)?;
-    let (ptr, alloc) = mcx::PgBox::into_raw_with_allocator(boxed);
+) -> PgResult<::mcx::PgBox<'mcx, dyn ::types_tableam::amopaque::AmOpaque<'mcx> + 'mcx>> {
+    let boxed: ::mcx::PgBox<'mcx, NbtScan<'mcx>> = ::mcx::alloc_in(mcx, nbtscan)?;
+    let (ptr, alloc) = ::mcx::PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn AmOpaque` vtable (the A0 erase pattern).
     Ok(unsafe {
-        mcx::PgBox::from_raw_in(
-            ptr as *mut (dyn types_tableam::amopaque::AmOpaque<'mcx> + 'mcx),
+        ::mcx::PgBox::from_raw_in(
+            ptr as *mut (dyn ::types_tableam::amopaque::AmOpaque<'mcx> + 'mcx),
             alloc,
         )
     })
@@ -972,10 +972,10 @@ pub fn btrescan<'mcx>(
     // Allocate tuple workspace arrays, if needed for an index-only scan and not
     // already done in a previous rescan call.
     if scan.xs_want_itup && scan.opaque.currTuples.is_none() {
-        let mut curr = vec_with_capacity_in(mcx, types_core::primitive::BLCKSZ)?;
-        curr.resize(types_core::primitive::BLCKSZ, 0u8);
-        let mut mark = vec_with_capacity_in(mcx, types_core::primitive::BLCKSZ)?;
-        mark.resize(types_core::primitive::BLCKSZ, 0u8);
+        let mut curr = vec_with_capacity_in(mcx, ::types_core::primitive::BLCKSZ)?;
+        curr.resize(::types_core::primitive::BLCKSZ, 0u8);
+        let mut mark = vec_with_capacity_in(mcx, ::types_core::primitive::BLCKSZ)?;
+        mark.resize(::types_core::primitive::BLCKSZ, 0u8);
         scan.opaque.currTuples = Some(curr);
         scan.opaque.markTuples = Some(mark);
     }
@@ -1191,7 +1191,7 @@ pub fn btestimateparallelscan(rel: &Relation, nkeys: i32, _norderbys: i32) -> Pg
 /// `offsetof(BTParallelScanDescData, btps_arrElems)`.
 #[inline]
 fn BTParallelScanDescData_offsetof_btps_arrElems() -> Size {
-    types_nbtree::BTPARALLEL_HEADER_SIZE
+    ::types_nbtree::BTPARALLEL_HEADER_SIZE
 }
 
 /// `add_size(s1, s2)` (shmem.c) — overflow-checked size addition. The C version
@@ -1199,7 +1199,7 @@ fn BTParallelScanDescData_offsetof_btps_arrElems() -> Size {
 /// error via a checked add.
 fn add_size(s1: Size, s2: Size) -> PgResult<Size> {
     s1.checked_add(s2)
-        .ok_or_else(|| types_error::PgError::error("requested shared memory size overflows size_t"))
+        .ok_or_else(|| ::types_error::PgError::error("requested shared memory size overflows size_t"))
 }
 
 /// `_bt_parallel_serialize_arrays()` — serialize parallel array state. Caller
@@ -1339,10 +1339,10 @@ pub fn btinitparallelscan(amtarget: usize) -> PgResult<()> {
         unsafe { &mut *(amtarget as *mut BTParallelScanDescData) };
     lwlock::lwlock_initialize::call(
         &mut bt_target.btps_lock,
-        types_storage::storage::LWTRANCHE_PARALLEL_BTREE_SCAN,
+        ::types_storage::storage::LWTRANCHE_PARALLEL_BTREE_SCAN,
     );
-    bt_target.btps_nextScanPage = types_core::primitive::InvalidBlockNumber;
-    bt_target.btps_lastCurrPage = types_core::primitive::InvalidBlockNumber;
+    bt_target.btps_nextScanPage = ::types_core::primitive::InvalidBlockNumber;
+    bt_target.btps_lastCurrPage = ::types_core::primitive::InvalidBlockNumber;
     bt_target.btps_pageStatus = BTPS_State::BTPARALLEL_NOT_INITIALIZED;
     condvar::condition_variable_init::call(&mut bt_target.btps_cv);
     Ok(())
@@ -1355,8 +1355,8 @@ pub fn btparallelrescan(scan: &mut NbtScan) -> PgResult<()> {
     // it for consistency.
     with_btscan(parallel_handle, |btscan| -> PgResult<()> {
         let guard = acquire_btps_lock(btscan)?;
-        btscan.btps_nextScanPage = types_core::primitive::InvalidBlockNumber;
-        btscan.btps_lastCurrPage = types_core::primitive::InvalidBlockNumber;
+        btscan.btps_nextScanPage = ::types_core::primitive::InvalidBlockNumber;
+        btscan.btps_lastCurrPage = ::types_core::primitive::InvalidBlockNumber;
         btscan.btps_pageStatus = BTPS_State::BTPARALLEL_NOT_INITIALIZED;
         guard.release()
     })
@@ -1369,7 +1369,7 @@ pub fn btparallelrescan(scan: &mut NbtScan) -> PgResult<()> {
 /// `MyProcNumber` — the caller's per-backend proc number, read through the
 /// init-small seam (passed explicitly to the LWLock seam per the no-ambient
 /// rule).
-fn my_proc_number() -> types_core::ProcNumber {
+fn my_proc_number() -> ::types_core::ProcNumber {
     init_small_seams::my_proc_number::call()
 }
 
@@ -1383,11 +1383,11 @@ fn my_proc_number() -> types_core::ProcNumber {
 fn acquire_btps_lock(
     btscan: &BTParallelScanDescData,
 ) -> PgResult<lwlock::LWLockGuard<'static>> {
-    let lock_ptr: *const types_storage::storage::LWLock = &btscan.btps_lock;
+    let lock_ptr: *const ::types_storage::storage::LWLock = &btscan.btps_lock;
     // SAFETY: the lock lives in the DSM struct for the whole scan; the guard's
     // synthetic 'static borrow never outlives `btscan` in practice (every call
     // site releases it before the closure returns).
-    let lock: &'static types_storage::storage::LWLock = unsafe { &*lock_ptr };
+    let lock: &'static ::types_storage::storage::LWLock = unsafe { &*lock_ptr };
     lwlock::lwlock_acquire::call(lock, LWLockMode::LW_EXCLUSIVE, my_proc_number())
 }
 
@@ -1408,8 +1408,8 @@ fn bt_parallel_seize_core<'mcx>(
     parallel_handle: u64,
     first: bool,
 ) -> PgResult<(bool, BlockNumber, BlockNumber)> {
-    let mut next_scan_page = types_core::primitive::InvalidBlockNumber;
-    let mut last_curr_page = types_core::primitive::InvalidBlockNumber;
+    let mut next_scan_page = ::types_core::primitive::InvalidBlockNumber;
+    let mut last_curr_page = ::types_core::primitive::InvalidBlockNumber;
 
     // Reset so->currPos, and initialize moreLeft/moreRight.
     BTScanPosInvalidate(&mut so.currPos);
@@ -1507,7 +1507,7 @@ fn bt_parallel_release_core<'mcx>(
     next_scan_page: BlockNumber,
     curr_page: BlockNumber,
 ) -> PgResult<()> {
-    debug_assert!(next_scan_page != types_core::primitive::InvalidBlockNumber);
+    debug_assert!(next_scan_page != ::types_core::primitive::InvalidBlockNumber);
 
     with_btscan(parallel_handle, |btscan| -> PgResult<()> {
         let guard = acquire_btps_lock(btscan)?;
@@ -1588,8 +1588,8 @@ fn bt_parallel_primscan_schedule_core<'mcx>(
         if btscan.btps_lastCurrPage == curr_page
             && btscan.btps_pageStatus == BTPS_State::BTPARALLEL_IDLE
         {
-            btscan.btps_nextScanPage = types_core::primitive::InvalidBlockNumber;
-            btscan.btps_lastCurrPage = types_core::primitive::InvalidBlockNumber;
+            btscan.btps_nextScanPage = ::types_core::primitive::InvalidBlockNumber;
+            btscan.btps_lastCurrPage = ::types_core::primitive::InvalidBlockNumber;
             btscan.btps_pageStatus = BTPS_State::BTPARALLEL_NEED_PRIMSCAN;
 
             // Serialize scan's current array keys.
@@ -1752,7 +1752,7 @@ fn btvacuumscan<'mcx>(
             | readstream::READ_STREAM_USE_BATCHING,
         None,
         rel,
-        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        ::types_core::primitive::ForkNumber::MAIN_FORKNUM,
         readstream::block_range_read_stream_cb(p.clone()),
         0,
     )?;
@@ -1767,7 +1767,7 @@ fn btvacuumscan<'mcx>(
         };
         num_pages = bufmgr::relation_get_number_of_blocks_in_fork::call(
             rel,
-            types_core::primitive::ForkNumber::MAIN_FORKNUM,
+            ::types_core::primitive::ForkNumber::MAIN_FORKNUM,
         )?;
         if let Some(g) = guard {
             g.release()?;

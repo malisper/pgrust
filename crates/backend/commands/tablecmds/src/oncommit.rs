@@ -9,10 +9,10 @@
 
 use std::cell::RefCell;
 
-use transam_xact::GetCurrentSubTransactionId;
-use types_core::primitive::Oid;
-use types_core::SubTransactionId;
-use types_error::PgResult;
+use ::transam_xact::GetCurrentSubTransactionId;
+use ::types_core::primitive::Oid;
+use ::types_core::SubTransactionId;
+use ::types_error::PgResult;
 use ::nodes::primnodes::OnCommitAction;
 use ::nodes::primnodes::OnCommitAction::{
     ONCOMMIT_DELETE_ROWS, ONCOMMIT_DROP, ONCOMMIT_NOOP, ONCOMMIT_PRESERVE_ROWS,

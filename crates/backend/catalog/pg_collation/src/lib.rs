@@ -40,27 +40,27 @@
 #![allow(clippy::result_large_err)]
 
 use mcx::{Mcx, MemoryContext};
-use types_catalog::catalog::NAMESPACE_RELATION_ID;
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-use types_catalog::pg_collation as cat;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_storage::lock::{NoLock, ShareRowExclusiveLock};
+use ::types_catalog::catalog::NAMESPACE_RELATION_ID;
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_collation as cat;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_storage::lock::{NoLock, ShareRowExclusiveLock};
 use types_tuple::heaptuple::Datum;
 
-use utils_error::ereport;
-use types_error::pg_error::ErrorLocation;
+use ::utils_error::ereport;
+use ::types_error::pg_error::ErrorLocation;
 use types_error::{PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR, NOTICE};
 
-use heaptuple::heap_form_tuple;
-use catalog_catalog::GetNewOidWithIndex;
-use indexing::keystone::CatalogTupleInsert;
+use ::heaptuple::heap_form_tuple;
+use ::catalog_catalog::GetNewOidWithIndex;
+use ::indexing::keystone::CatalogTupleInsert;
 use pg_depend::{
     checkMembershipInCurrentExtension, recordDependencyOn, recordDependencyOnCurrentExtension,
 };
-use pg_shdepend::recordDependencyOnOwner;
+use ::pg_shdepend::recordDependencyOnOwner;
 use cache_syscache::{GetSysCacheOid, COLLNAMEENCNSP};
-use cache::syscache::SysCacheKey;
-use datum::Datum as ScalarWord;
+use ::cache::syscache::SysCacheKey;
+use ::datum::Datum as ScalarWord;
 
 use table_seams as table_seams;
 use objectaccess_seams as objectaccess_seams;
@@ -115,7 +115,7 @@ fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
 /// NUL-padded `NameData` by-reference Datum image.
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
     const NAMEDATALEN: usize = 64;
-    let mut image: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, NAMEDATALEN)?;
+    let mut image: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, NAMEDATALEN)?;
     let src = s.as_bytes();
     let take = core::cmp::min(src.len(), NAMEDATALEN - 1);
     for &b in &src[..take] {

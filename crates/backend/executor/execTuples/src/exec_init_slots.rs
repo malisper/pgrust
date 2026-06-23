@@ -17,14 +17,14 @@
 //! the same payload-bearing slot; the operating routines (clear/copy/
 //! getsysattr/getallattrs/all-null store/set-descriptor) run the real slot ops.
 
-use mcx::Mcx;
-use types_core::primitive::AttrNumber;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::AttrNumber;
+use ::types_error::PgResult;
 use ::nodes::execnodes::{EStateData, PlanStateData, ScanStateData};
 use ::nodes::tuptable::SlotData;
 use nodes::{SlotId, TupleSlotKind};
-use types_tuple::heaptuple::DeformedColumn;
-use types_tuple::heaptuple::{TupleDesc, TupleDescData};
+use ::types_tuple::heaptuple::DeformedColumn;
+use ::types_tuple::heaptuple::{TupleDesc, TupleDescData};
 
 // ===========================================================================
 //  ExecAllocTableSlot
@@ -101,13 +101,13 @@ pub fn ExecDropSingleTupleTableSlot(mut slot: SlotData<'_>) -> PgResult<()> {
 fn seam_slot_getallattrs<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, DeformedColumn<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, DeformedColumn<'mcx>>> {
     // slot_getallattrs(slot): deform every column into tts_values/tts_isnull.
     crate::slot_deform::slot_getallattrs(mcx, slot)?;
     // Copy out (value, isnull) per attribute (C reads slot->tts_values[i]).
     let base = slot.base();
     let nvalid = base.tts_nvalid as usize;
-    let mut cols: mcx::PgVec<'mcx, DeformedColumn<'mcx>> = mcx::vec_with_capacity_in(mcx, nvalid)?;
+    let mut cols: ::mcx::PgVec<'mcx, DeformedColumn<'mcx>> = ::mcx::vec_with_capacity_in(mcx, nvalid)?;
     for i in 0..nvalid {
         let value = base.tts_values[i].clone_in(mcx)?;
         cols.push((value, base.tts_isnull[i]));
@@ -127,7 +127,7 @@ fn seam_slot_getallattrs<'mcx>(
 fn seam_slot_getallattrs_by_id<'mcx>(
     estate: &mut EStateData<'mcx>,
     slot: SlotId,
-) -> PgResult<mcx::PgVec<'mcx, DeformedColumn<'mcx>>> {
+) -> PgResult<::mcx::PgVec<'mcx, DeformedColumn<'mcx>>> {
     let mcx = estate.es_query_cxt;
     let slot_data = estate.slot_data_mut(slot);
     // slot_getallattrs(slot): deform every column into tts_values/tts_isnull.
@@ -135,7 +135,7 @@ fn seam_slot_getallattrs_by_id<'mcx>(
     // Copy out (value, isnull) per attribute (C reads slot->tts_values[i]).
     let base = slot_data.base();
     let nvalid = base.tts_nvalid as usize;
-    let mut cols: mcx::PgVec<'mcx, DeformedColumn<'mcx>> = mcx::vec_with_capacity_in(mcx, nvalid)?;
+    let mut cols: ::mcx::PgVec<'mcx, DeformedColumn<'mcx>> = ::mcx::vec_with_capacity_in(mcx, nvalid)?;
     for i in 0..nvalid {
         let value = base.tts_values[i].clone_in(mcx)?;
         cols.push((value, base.tts_isnull[i]));
@@ -199,7 +199,7 @@ fn seam_exec_init_result_slot<'mcx>(
     // C shares the descriptor pointer into the slot; the owned slot needs its
     // own `'mcx` copy (the slot pins/holds the descriptor), so clone it.
     let desc = match planstate.ps_ResultTupleDesc.as_deref() {
-        Some(d) => Some(mcx::alloc_in(estate.es_query_cxt, d.clone_in(estate.es_query_cxt)?)?),
+        Some(d) => Some(::mcx::alloc_in(estate.es_query_cxt, d.clone_in(estate.es_query_cxt)?)?),
         None => None,
     };
     let slot = exec_alloc_table_slot(estate, desc, tts_ops)?;
@@ -304,7 +304,7 @@ fn seam_slot_getsysattr<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
     attnum: AttrNumber,
-) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
     crate::slot_ops_vtables::slot_getsysattr(mcx, &*slot, attnum)
 }
 
@@ -419,7 +419,7 @@ fn seam_exec_alloc_table_slot<'mcx>(
 /// Seam `exec_store_minimal_tuple` — `ExecStoreMinimalTuple`.
 fn seam_exec_store_minimal_tuple<'mcx>(
     estate: &mut EStateData<'mcx>,
-    mtup: types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
+    mtup: ::types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
     slot: SlotId,
     should_free: bool,
 ) -> PgResult<()> {
@@ -432,7 +432,7 @@ fn seam_exec_store_minimal_tuple<'mcx>(
 /// holds it directly, not as a pool `SlotId`), so this adapter forwards straight
 /// to the owner body, which performs the buffer-pin management.
 fn seam_exec_store_buffer_heap_tuple<'mcx>(
-    tuple: types_tuple::heaptuple::FormedTuple<'mcx>,
+    tuple: ::types_tuple::heaptuple::FormedTuple<'mcx>,
     slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     buffer: types_storage::buf::Buffer,
 ) -> PgResult<()> {
@@ -440,7 +440,7 @@ fn seam_exec_store_buffer_heap_tuple<'mcx>(
 }
 
 fn seam_exec_store_heap_tuple<'mcx>(
-    tuple: types_tuple::heaptuple::FormedTuple<'mcx>,
+    tuple: ::types_tuple::heaptuple::FormedTuple<'mcx>,
     slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
@@ -448,8 +448,8 @@ fn seam_exec_store_heap_tuple<'mcx>(
 }
 
 fn seam_exec_force_store_heap_tuple_payload<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    tuple: types_tuple::heaptuple::FormedTuple<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
+    tuple: ::types_tuple::heaptuple::FormedTuple<'mcx>,
     slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
@@ -460,7 +460,7 @@ fn seam_exec_force_store_heap_tuple_payload<'mcx>(
 /// Like the buffer store but transfers an existing pin (the `heap_fetch`
 /// `userbuf` in `heapam_fetch_row_version`). Forwards to the owner body.
 fn seam_exec_store_pinned_buffer_heap_tuple<'mcx>(
-    tuple: types_tuple::heaptuple::FormedTuple<'mcx>,
+    tuple: ::types_tuple::heaptuple::FormedTuple<'mcx>,
     slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     buffer: types_storage::buf::Buffer,
 ) -> PgResult<()> {
@@ -479,8 +479,8 @@ fn seam_exec_clear_tuple_payload<'mcx>(
 /// shouldFree)` over the payload-bearing `&mut SlotData` held directly (the
 /// standalone tuplestore fetch / `RunFromStore` path, no EState pool).
 fn seam_exec_store_minimal_tuple_payload<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    mtup: types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
+    mtup: ::types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
     slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
@@ -492,9 +492,9 @@ fn seam_exec_store_minimal_tuple_payload<'mcx>(
 /// resjunk columns. `pquery.c`'s `PortalStart` `PORTAL_ONE_RETURNING` /
 /// `PORTAL_ONE_MOD_WITH` legs use it.
 fn seam_exec_clean_type_from_tl<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     target_list: &[::nodes::primnodes::TargetEntry<'mcx>],
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     crate::exectype_tupoutput::ExecCleanTypeFromTL(mcx, target_list)
 }
 
@@ -503,11 +503,11 @@ fn seam_exec_clean_type_from_tl<'mcx>(
 /// table-AM DML vtable callbacks hold directly. Forwards to the owner body,
 /// which dispatches on the slot kind.
 fn seam_exec_fetch_slot_heap_tuple<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     materialize: bool,
 ) -> PgResult<(
-    types_tuple::heaptuple::FormedTuple<'mcx>,
+    ::types_tuple::heaptuple::FormedTuple<'mcx>,
     bool,
 )> {
     crate::slot_store_fetch::ExecFetchSlotHeapTuple(mcx, slot, materialize)
@@ -516,7 +516,7 @@ fn seam_exec_fetch_slot_heap_tuple<'mcx>(
 /// Seam `exec_force_store_minimal_tuple` — `ExecForceStoreMinimalTuple`.
 fn seam_exec_force_store_minimal_tuple<'mcx>(
     slot: SlotId,
-    mtup: types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
+    mtup: ::types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
     should_free: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -534,7 +534,7 @@ fn seam_exec_copy_slot_minimal_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     estate: &EStateData<'mcx>,
     slot: SlotId,
-) -> PgResult<types_tuple::heaptuple::FormedMinimalTuple<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::FormedMinimalTuple<'mcx>> {
     // ExecCopySlotMinimalTuple over the (immutable) source slot.
     crate::slot_ops_vtables::exec_copy_slot_minimal_tuple_ref(mcx, estate.slot_data(slot), 0)
 }
@@ -544,7 +544,7 @@ fn seam_exec_copy_slot_minimal_tuple_extra<'mcx>(
     estate: &mut EStateData<'mcx>,
     slot: SlotId,
     extra: usize,
-) -> PgResult<types_tuple::heaptuple::FormedMinimalTuple<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::FormedMinimalTuple<'mcx>> {
     let mcx = estate.es_query_cxt;
     crate::slot_ops_vtables::exec_copy_slot_minimal_tuple_ref(mcx, estate.slot_data(slot), extra)
 }
@@ -555,7 +555,7 @@ fn seam_exec_fetch_slot_minimal_tuple<'mcx>(
     estate: &mut EStateData<'mcx>,
     slot: SlotId,
 ) -> PgResult<(
-    types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
+    ::types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
     bool,
 )> {
     crate::slot_store_fetch::ExecFetchSlotMinimalTuple(mcx, estate.slot_data_mut(slot))
@@ -568,15 +568,15 @@ fn seam_exec_fetch_slot_minimal_tuple_copy<'mcx>(
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
     slot: SlotId,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     // tuple = ExecFetchSlotMinimalTuple(slot, &shouldFree);  /* C copies tuple->t_len bytes */
     let (mtup, _should_free) =
         crate::slot_store_fetch::ExecFetchSlotMinimalTuple(mcx, estate.slot_data_mut(slot))?;
     // The flat blob is exactly the `tuple->t_len` bytes shm_mq ships. A fresh
     // materialized minimal tuple is structurally well-formed, so the only
     // possible failure is the allocation `ereport(ERROR)` (OOM).
-    use heaptuple::flat::MinimalTupleFlatError;
-    match heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup) {
+    use ::heaptuple::flat::MinimalTupleFlatError;
+    match ::heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup) {
         Ok(blob) => Ok(blob),
         Err(MinimalTupleFlatError::Pg(err)) => Err(err),
         Err(other) => panic!("minimal_tuple_to_flat on a slot tuple failed: {other:?}"),
@@ -590,10 +590,10 @@ fn seam_exec_fetch_slot_minimal_tuple_copy<'mcx>(
 fn seam_exec_fetch_slot_minimal_tuple_copy_standalone<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut ::nodes::SlotData<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     let (mtup, _should_free) = crate::slot_store_fetch::ExecFetchSlotMinimalTuple(mcx, slot)?;
-    use heaptuple::flat::MinimalTupleFlatError;
-    match heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup) {
+    use ::heaptuple::flat::MinimalTupleFlatError;
+    match ::heaptuple::flat::minimal_tuple_to_flat(mcx, &mtup) {
         Ok(blob) => Ok(blob),
         Err(MinimalTupleFlatError::Pg(err)) => Err(err),
         Err(other) => panic!("minimal_tuple_to_flat on a slot tuple failed: {other:?}"),
@@ -606,7 +606,7 @@ fn seam_exec_fetch_slot_minimal_tuple_copy_standalone<'mcx>(
 //  the live `&mut SlotData` and thread `mcx`).
 // ===========================================================================
 
-use types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
 
 /// Seam `exec_materialize_slot` — `ExecMaterializeSlot`.
 fn seam_exec_materialize_slot<'mcx>(estate: &mut EStateData<'mcx>, slot: SlotId) -> PgResult<()> {
@@ -777,7 +777,7 @@ fn seam_cur_tuple_getattr<'mcx>(
         .expect("cur_tuple_getattr: node->curTuple is NULL");
     // result = heap_getattr(node->curTuple, attnum, tdesc, &isNull);
     let (value, isnull) =
-        heaptuple::heap_getattr(mcx, cur, attnum as i32, tdesc)?;
+        ::heaptuple::heap_getattr(mcx, cur, attnum as i32, tdesc)?;
     Ok(execTuples_seams::SlotAttr { value, isnull })
 }
 
@@ -860,7 +860,7 @@ fn seam_exec_scan_slot_descriptor<'mcx>(
         .ss_ScanTupleSlot
         .expect("exec_scan_slot_descriptor: scan slot not initialized");
     match estate.slot_data(slot).base().tts_tupleDescriptor.as_deref() {
-        Some(d) => Ok(Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
+        Some(d) => Ok(Some(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -873,7 +873,7 @@ fn seam_exec_slot_descriptor<'mcx>(
     slot: ::nodes::SlotId,
 ) -> PgResult<TupleDesc<'mcx>> {
     match estate.slot_data(slot).base().tts_tupleDescriptor.as_deref() {
-        Some(d) => Ok(Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
+        Some(d) => Ok(Some(::mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
         None => Ok(None),
     }
 }
@@ -894,7 +894,7 @@ fn seam_exec_slot_descriptor<'mcx>(
 /// ```
 fn seam_execute_attr_map_slot_explicit<'mcx>(
     estate: &mut EStateData<'mcx>,
-    attr_map: &types_tuple::attmap::AttrMap<'mcx>,
+    attr_map: &::types_tuple::attmap::AttrMap<'mcx>,
     in_slot: SlotId,
     out_slot: SlotId,
 ) -> PgResult<SlotId> {
@@ -968,8 +968,8 @@ fn seam_execute_attr_map_slot<'mcx>(
             .ri_ChildToRootMap
             .as_ref()
             .expect("execute_attr_map_slot: ri_ChildToRootMap is NULL (caller must run ExecGetChildToRootMap first)");
-        types_tuple::attmap::AttrMap {
-            attnums: mcx::slice_in(mcx, &map.attrMap.attnums)?,
+        ::types_tuple::attmap::AttrMap {
+            attnums: ::mcx::slice_in(mcx, &map.attrMap.attnums)?,
         }
     };
     seam_execute_attr_map_slot_explicit(estate, &attr_map, in_slot, out_slot)
@@ -1010,13 +1010,13 @@ fn seam_pad_name_cstring_columns<'mcx>(
             .position(|&b| b == 0)
             .unwrap_or(cstr_bytes.len());
         let s = String::from_utf8_lossy(&cstr_bytes[..end]);
-        let mut name = types_tuple::heaptuple::NameData::default();
+        let mut name = ::types_tuple::heaptuple::NameData::default();
         name.namestrcpy(&s);
         // slot->tts_values[attnum] = NameGetDatum(name): a fixed-length
         // pass-by-reference Name is the NAMEDATALEN-byte image carried as a
         // by-reference Datum.
-        let name_datum = types_tuple::heaptuple::Datum::ByRef(
-            mcx::slice_in(mcx, &name.data)?,
+        let name_datum = ::types_tuple::heaptuple::Datum::ByRef(
+            ::mcx::slice_in(mcx, &name.data)?,
         );
         base.tts_values[idx] = name_datum;
     }
@@ -1119,7 +1119,7 @@ fn seam_slot_getattr_standalone<'mcx>(
     mcx: Mcx<'mcx>,
     slot: &mut SlotData<'mcx>,
     attnum: AttrNumber,
-) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
     crate::slot_deform::slot_getattr(mcx, slot, attnum)
 }
 

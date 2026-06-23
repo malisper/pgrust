@@ -91,7 +91,7 @@ pub unsafe fn dlist_pop_head_node(head: *mut dlist_head) -> *mut dlist_node {
 #[macro_export]
 macro_rules! dlist_container {
     ($Type:ty, $member:ident, $ptr:expr) => {{
-        let __ptr: *mut ilist::dlist_node = $ptr;
+        let __ptr: *mut ::ilist::dlist_node = $ptr;
         (__ptr as *mut u8).sub(core::mem::offset_of!($Type, $member)) as *mut $Type
     }};
 }
@@ -101,7 +101,7 @@ macro_rules! dlist_container {
 #[macro_export]
 macro_rules! dlist_head_element {
     ($Type:ty, $member:ident, $head:expr) => {{
-        let __head: *mut ilist::dlist_head = $head;
+        let __head: *mut ::ilist::dlist_head = $head;
         $crate::dlist_container!($Type, $member, (*__head).head.next)
     }};
 }

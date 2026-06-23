@@ -11,7 +11,7 @@
 //! returned [`DshashEntryGuard`] holds the partition lock.
 
 use types_storage::{dshash_table_handle, DsaArea, DshashParameters, DshashTable};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `dshash_create(dsa_area *area, const dshash_parameters *params,

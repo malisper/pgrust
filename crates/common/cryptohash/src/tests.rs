@@ -2,7 +2,7 @@
 //! raw-pointer seam contract, against standard NIST / RFC vectors.
 
 use super::*;
-use crypto::pg_cryptohash_type;
+use ::crypto::pg_cryptohash_type;
 
 /// Run `data` through the dispatcher for `type_` and return the digest.
 fn digest(type_: pg_cryptohash_type, data: &[u8], digest_len: usize) -> Vec<u8> {

@@ -32,17 +32,17 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use tablespace_seams::prepare_temp_tablespaces;
-use fd::temp_files::{
+use ::tablespace_seams::prepare_temp_tablespaces;
+use ::fd::temp_files::{
     GetTempTablespaces, PathNameCreateTemporaryDir, PathNameCreateTemporaryFile,
     PathNameDeleteTemporaryFile, PathNameOpenTemporaryFile, TempTablespacePath,
 };
 use init_small_seams::{my_database_table_space, my_proc_pid};
-use hashfn::hash_bytes;
-use types_core::Oid;
-use types_error::PgResult;
-use types_storage::file::File;
-use types_storage::fileset::{FileSet, FILESET_MAX_TABLESPACES};
+use ::hashfn::hash_bytes;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_storage::file::File;
+use ::types_storage::fileset::{FileSet, FILESET_MAX_TABLESPACES};
 
 mod seams;
 pub mod sharedfileset;
@@ -52,7 +52,7 @@ pub use seams::init_seams;
 const INVALID_OID: Oid = 0;
 
 /// `PG_TEMP_FILE_PREFIX` (`storage/fd.h`).
-use types_storage::file::PG_TEMP_FILE_PREFIX;
+use ::types_storage::file::PG_TEMP_FILE_PREFIX;
 
 /// `static uint32 counter` in `FileSetInit` (fileset.c:54).
 ///
@@ -147,7 +147,7 @@ pub fn FileSetDeleteAll(fileset: &FileSet) -> PgResult<()> {
     // LOG message on IO error.
     for i in 0..fileset.ntablespaces as usize {
         let dirpath = FileSetPath(fileset, fileset.tablespaces[i]);
-        fd::temp_files::PathNameDeleteTemporaryDir(&dirpath)?;
+        ::fd::temp_files::PathNameDeleteTemporaryDir(&dirpath)?;
     }
     Ok(())
 }

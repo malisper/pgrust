@@ -29,7 +29,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
@@ -40,7 +40,7 @@ use ::nodes::primnodes::{CoercionForm, Expr, FuncExpr, ParamKind, TargetEntry};
 use ::nodes::rawnodes::RangeTblRef;
 use parsenodes::{CoercionContext, RawParseMode};
 
-use nodes_core::nodefuncs::expr_type;
+use ::nodes_core::nodefuncs::expr_type;
 use clauses_seams as clauses_seam;
 
 /// `VOIDOID` / `RECORDOID` / `INT4OID` (pg_type.dat).
@@ -94,8 +94,8 @@ pub fn inline_set_returning_function_sql_body<'mcx>(
     // Re-home prosrc into the mcx arena and leak the binding to 'mcx so
     // raw_parser (which borrows its source for 'mcx) can hold it.
     let prosrc_mcx: &'mcx str = {
-        let boxed = mcx::alloc_in(mcx, prosrc)?;
-        mcx::leak_in(boxed).as_str()
+        let boxed = ::mcx::alloc_in(mcx, prosrc)?;
+        ::mcx::leak_in(boxed).as_str()
     };
 
     // ---- parse / rewrite the body (clauses.c:5197/5224) -------------------
@@ -110,7 +110,7 @@ pub fn inline_set_returning_function_sql_body<'mcx>(
         //   AcquireRewriteLocks(querytree, true, false);
         //   querytree_list = pg_rewrite_query(querytree);
         //   if (list_length(querytree_list) != 1) goto fail;
-        let n = nodes_core::read::string_to_node(mcx, body.as_str())?;
+        let n = ::nodes_core::read::string_to_node(mcx, body.as_str())?;
         let query = match extract_single_body_query(mcx, &n)? {
             Some(q) => q,
             None => return Ok(None),
@@ -181,7 +181,7 @@ pub fn inline_set_returning_function_sql_body<'mcx>(
     // (This logic should match ExecInitFunctionScan.) `rettupdesc` is the C
     // `TupleDesc` (`Option<PgBox<TupleDescData>>`); `None` is the C NULL.
     let functypclass: TypeFuncClass;
-    let rettupdesc: types_tuple::heaptuple::TupleDesc<'mcx>;
+    let rettupdesc: ::types_tuple::heaptuple::TupleDesc<'mcx>;
     if !rtfunc.funccolnames.is_empty() {
         functypclass = TypeFuncClass::Record;
         let names: Vec<&str> = rtfunc
@@ -199,7 +199,7 @@ pub fn inline_set_returning_function_sql_body<'mcx>(
             &typmods,
             &collations,
         )?;
-        rettupdesc = Some(mcx::alloc_in(mcx, desc)?);
+        rettupdesc = Some(::mcx::alloc_in(mcx, desc)?);
     } else {
         // get_expr_result_type((Node *) fexpr, NULL, &rettupdesc).
         let fexpr_node = Node::mk_expr(mcx, Expr::FuncExpr(fexpr.clone()))?;
@@ -313,7 +313,7 @@ pub fn check_sql_fn_retval_public<'mcx>(
     mcx: Mcx<'mcx>,
     query_list: &mut [Query<'mcx>],
     rettype: Oid,
-    rettupdesc: Option<&types_tuple::heaptuple::TupleDescData<'mcx>>,
+    rettupdesc: Option<&::types_tuple::heaptuple::TupleDescData<'mcx>>,
     prokind: u8,
     insert_dropped_cols: bool,
 ) -> PgResult<bool> {
@@ -331,7 +331,7 @@ fn check_sql_fn_retval<'mcx>(
     mcx: Mcx<'mcx>,
     query_list: &mut [Query<'mcx>],
     rettype: Oid,
-    rettupdesc: Option<&types_tuple::heaptuple::TupleDescData<'mcx>>,
+    rettupdesc: Option<&::types_tuple::heaptuple::TupleDescData<'mcx>>,
     prokind: u8,
     insert_dropped_cols: bool,
 ) -> PgResult<bool> {
@@ -355,7 +355,7 @@ fn check_sql_stmt_retval<'mcx>(
     mcx: Mcx<'mcx>,
     query_list: &mut [Query<'mcx>],
     rettype: Oid,
-    rettupdesc: Option<&types_tuple::heaptuple::TupleDescData<'mcx>>,
+    rettupdesc: Option<&::types_tuple::heaptuple::TupleDescData<'mcx>>,
     prokind: u8,
     insert_dropped_cols: bool,
 ) -> PgResult<bool> {
@@ -616,18 +616,18 @@ fn finish_tlist_coercion<'mcx>(
         .filter(|tle| !tle.resjunk)
         .map(|tle| tle.resname.as_deref().unwrap_or(""))
         .collect();
-    let make_colnames = |mcx: Mcx<'mcx>| -> PgResult<mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
-        let mut colnames: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, names.len())?;
+    let make_colnames = |mcx: Mcx<'mcx>| -> PgResult<::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
+        let mut colnames: ::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
+            ::mcx::vec_with_capacity_in(mcx, names.len())?;
         for name in &names {
-            let sval = mcx::PgString::from_str_in(name, mcx)?;
+            let sval = ::mcx::PgString::from_str_in(name, mcx)?;
             let node = Node::mk_string(mcx, ::nodes::value::StringNode { sval })?;
-            colnames.push(mcx::alloc_in(mcx, node)?);
+            colnames.push(::mcx::alloc_in(mcx, node)?);
         }
         Ok(colnames)
     };
-    let eref = nodes_core::makefuncs::make_alias(mcx, "*SELECT*", make_colnames(mcx)?)?;
-    let alias = nodes_core::makefuncs::make_alias(mcx, "*SELECT*", make_colnames(mcx)?)?;
+    let eref = ::nodes_core::makefuncs::make_alias(mcx, "*SELECT*", make_colnames(mcx)?)?;
+    let alias = ::nodes_core::makefuncs::make_alias(mcx, "*SELECT*", make_colnames(mcx)?)?;
 
     // Move the original query out, build a subquery RTE around it.
     let lower = core::mem::replace(&mut query_list[parse_idx], Query::new(mcx));
@@ -636,9 +636,9 @@ fn finish_tlist_coercion<'mcx>(
 
     let mut rte = RangeTblEntry::new_in(mcx);
     rte.rtekind = RTEKind::RTE_SUBQUERY;
-    rte.subquery = Some(mcx::alloc_in(mcx, lower)?);
-    rte.eref = Some(mcx::alloc_in(mcx, eref)?);
-    rte.alias = Some(mcx::alloc_in(mcx, alias)?);
+    rte.subquery = Some(::mcx::alloc_in(mcx, lower)?);
+    rte.eref = Some(::mcx::alloc_in(mcx, eref)?);
+    rte.alias = Some(::mcx::alloc_in(mcx, alias)?);
     rte.lateral = false;
     rte.inh = false;
     rte.inFromCl = true;
@@ -651,18 +651,18 @@ fn finish_tlist_coercion<'mcx>(
     newquery.targetList = vec_to_pgvec(mcx, upper_tlist)?;
     newquery.hasRowSecurity = has_row_security;
 
-    let mut rtable: mcx::PgVec<'mcx, RangeTblEntry<'mcx>> = mcx::vec_with_capacity_in(mcx, 1)?;
+    let mut rtable: ::mcx::PgVec<'mcx, RangeTblEntry<'mcx>> = ::mcx::vec_with_capacity_in(mcx, 1)?;
     rtable.push(rte);
     newquery.rtable = rtable;
 
     // jointree = makeFromExpr(list_make1(makeNode(RangeTblRef){rtindex=1}), NULL).
     let rtr = RangeTblRef { rtindex: 1 };
     let rtr_node = Node::mk_range_tbl_ref(mcx, rtr)?;
-    let mut fromlist: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, 1)?;
-    fromlist.push(mcx::alloc_in(mcx, rtr_node)?);
-    let fromexpr = nodes_core::makefuncs::make_from_expr(fromlist, None);
-    newquery.jointree = Some(mcx::alloc_in(mcx, fromexpr)?);
+    let mut fromlist: ::mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, 1)?;
+    fromlist.push(::mcx::alloc_in(mcx, rtr_node)?);
+    let fromexpr = ::nodes_core::makefuncs::make_from_expr(fromlist, None);
+    newquery.jointree = Some(::mcx::alloc_in(mcx, fromexpr)?);
 
     query_list[parse_idx] = newquery;
     Ok(is_tuple_result)
@@ -714,13 +714,13 @@ fn coerce_fn_result_column<'mcx>(
         };
         parse_collate::assign_expr_collations_in(mcx, &mut cast)?;
         // src_tle->expr = cast_result.
-        tlist[src_index].expr = Some(mcx::alloc_in(mcx, cast)?);
+        tlist[src_index].expr = Some(::mcx::alloc_in(mcx, cast)?);
         // Make a Var referencing the possibly-modified TLE.
-        let var = nodes_core::makefuncs::make_var_from_target_entry(1, &tlist[src_index])?;
+        let var = ::nodes_core::makefuncs::make_var_from_target_entry(1, &tlist[src_index])?;
         new_tle_expr = Expr::Var(var);
     } else {
         // Any casting must happen in the upper tlist.
-        let var = nodes_core::makefuncs::make_var_from_target_entry(1, &tlist[src_index])?;
+        let var = ::nodes_core::makefuncs::make_var_from_target_entry(1, &tlist[src_index])?;
         let vartype = var.vartype;
         let var_expr = Expr::Var(var);
         let cast = coerce::coerce_to_target_type(
@@ -747,7 +747,7 @@ fn coerce_fn_result_column<'mcx>(
     }
 
     let resno = (upper_tlist.len() + 1) as i16;
-    let new_tle = nodes_core::makefuncs::make_target_entry(
+    let new_tle = ::nodes_core::makefuncs::make_target_entry(
         mcx,
         new_tle_expr,
         resno,
@@ -774,13 +774,13 @@ fn push_null_column<'mcx>(
         consttypmod: -1,
         constcollid: InvalidOid,
         constlen: 4,
-        constvalue: types_tuple::heaptuple::Datum::null(),
+        constvalue: ::types_tuple::heaptuple::Datum::null(),
         constisnull: true,
         constbyval: true,
         location: -1,
     };
     let resno = (upper_tlist.len() + 1) as i16;
-    let tle = nodes_core::makefuncs::make_target_entry(
+    let tle = ::nodes_core::makefuncs::make_target_entry(
         mcx,
         Expr::Const(null_const),
         resno,
@@ -894,7 +894,7 @@ fn substitute_actual_srf_parameters<'mcx>(
     let mut err: Option<PgError> = None;
     // query_tree_mutator over the body Query; the mutator handles Query and
     // Param nodes (clauses.c:5371). flags=0.
-    nodes_core::node_walker::query_tree_mutator(
+    ::nodes_core::node_walker::query_tree_mutator(
         query,
         &mut |node| srf_param_mutator(node, nargs, args, &mut sublevels_up, &mut err, mcx),
         0,
@@ -924,7 +924,7 @@ fn srf_param_mutator<'mcx>(
     if node.node_tag() == ntag::T_Query {
         *sublevels_up += 1;
         let q = node.expect_query_mut();
-        nodes_core::node_walker::query_tree_mutator(
+        ::nodes_core::node_walker::query_tree_mutator(
             q,
             &mut |n| srf_param_mutator(n, nargs, args, sublevels_up, err, mcx),
             0,
@@ -975,7 +975,7 @@ fn srf_param_mutator<'mcx>(
         }
     }
     // Otherwise recurse into the node's children.
-    nodes_core::node_walker::expression_tree_walker_mut(
+    ::nodes_core::node_walker::expression_tree_walker_mut(
         node,
         &mut |child| srf_param_mutator(child, nargs, args, sublevels_up, err, mcx),
         mcx,
@@ -985,7 +985,7 @@ fn srf_param_mutator<'mcx>(
 /// `IsPolymorphicType(typid)` (catalog/pg_type.h) — the union of polymorphic
 /// type families 1 and 2.
 fn is_polymorphic_type(typid: Oid) -> bool {
-    use types_tuple::heaptuple::{
+    use ::types_tuple::heaptuple::{
         ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
         ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
         ANYNONARRAYOID, ANYRANGEOID,
@@ -1007,8 +1007,8 @@ fn is_polymorphic_type(typid: Oid) -> bool {
 fn vec_to_pgvec<'mcx>(
     mcx: Mcx<'mcx>,
     v: Vec<TargetEntry<'mcx>>,
-) -> PgResult<mcx::PgVec<'mcx, TargetEntry<'mcx>>> {
-    let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
+) -> PgResult<::mcx::PgVec<'mcx, TargetEntry<'mcx>>> {
+    let mut out = ::mcx::vec_with_capacity_in(mcx, v.len())?;
     for e in v {
         out.push(e);
     }

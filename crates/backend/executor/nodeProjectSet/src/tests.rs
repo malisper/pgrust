@@ -279,7 +279,7 @@ fn plain_const() -> Expr {
 /// expressions (each `te->expr`).
 fn make_projectset_plan<'mcx>(mcx: Mcx<'mcx>, exprs: &[Expr]) -> PgResult<Node<'mcx>> {
     let mut plan = ProjectSetPlan::default();
-    let mut tl = mcx::vec_with_capacity_in(mcx, exprs.len())?;
+    let mut tl = ::mcx::vec_with_capacity_in(mcx, exprs.len())?;
     for e in exprs {
         let mut te = TargetEntry::default();
         te.expr = Some(alloc_in(mcx, e.clone())?);

@@ -13,10 +13,10 @@
 //! The jsonpath evaluation each row pattern needs is done in-crate via
 //! [`crate::executeJsonPathPublic`].
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use utils_error::{ereport, PgError, PgResult};
-use types_error::ERROR;
+use ::types_error::ERROR;
 
 use crate::seam;
 use seam::{JsonTablePlan, JsonTableVariable};

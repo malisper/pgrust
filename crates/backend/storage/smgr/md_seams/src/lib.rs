@@ -7,8 +7,8 @@
 //! these from its `init_seams()` when it lands; until then a call panics
 //! loudly.
 
-use types_error::PgResult;
-use types_storage::sync::{FileTag, FileTagOpResult};
+use ::types_error::PgResult;
+use ::types_storage::sync::{FileTag, FileTagOpResult};
 
 seam_core::seam!(
     /// `mdsyncfiletag(const FileTag *ftag, char *path)` (md.c) — fsync the

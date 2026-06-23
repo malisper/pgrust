@@ -11,9 +11,9 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use types_core::primitive::{AttrNumber, Cost, Index, InvalidOid, Oid};
+use ::types_core::primitive::{AttrNumber, Cost, Index, InvalidOid, Oid};
 use types_error::{PgError, PgResult};
-use pathnodes::optimizer_plan::{JoinCostWorkspace, JoinPathExtraData};
+use ::pathnodes::optimizer_plan::{JoinCostWorkspace, JoinPathExtraData};
 use pathnodes::{
     AggPath, AggSplit, AggStrategy, AppendPath, BitmapAndPath, BitmapHeapPath, BitmapOrPath,
     CmdType, ForeignPath, GatherMergePath, GatherPath, GroupPath, GroupResultPath, GroupingSetsPath,
@@ -28,8 +28,8 @@ use pathnodes::{
 };
 
 use pathnode_seams as seam;
-use pathnodes::planner_run::PlannerRun;
-use pathnode_seams::AggClauseCostsLite;
+use ::pathnodes::planner_run::PlannerRun;
+use ::pathnode_seams::AggClauseCostsLite;
 use relnode_seams as bms;
 use lsyscache_seams as seam_lsys;
 use pathnode_seams as seam_pk;
@@ -37,7 +37,7 @@ use pathnode_seams as seam_ix;
 use pathnode_seams as seam_aj;
 use pathnode_seams as seam_sf;
 use appendinfo_seams as seam_ai;
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use crate::{clamp_row_est, compare_path_costs, oom, CostSelector};
 
@@ -121,14 +121,14 @@ const T_SET_OP: NodeTag = NodeTag(371);
 const T_LOCK_ROWS: NodeTag = NodeTag(372);
 const T_LIMIT: NodeTag = NodeTag(373);
 
-const AGG_PLAIN: AggStrategy = pathnodes::AGG_PLAIN;
-const AGG_SORTED: AggStrategy = pathnodes::AGG_SORTED;
-const AGG_HASHED: AggStrategy = pathnodes::AGG_HASHED;
-const AGG_MIXED: AggStrategy = pathnodes::AGG_MIXED;
-const SETOP_SORTED: SetOpStrategy = pathnodes::SETOP_SORTED;
-const RELOPT_BASEREL: u32 = pathnodes::RELOPT_BASEREL;
-const CMD_UPDATE: CmdType = pathnodes::CMD_UPDATE;
-const CMD_MERGE: CmdType = pathnodes::CMD_MERGE;
+const AGG_PLAIN: AggStrategy = ::pathnodes::AGG_PLAIN;
+const AGG_SORTED: AggStrategy = ::pathnodes::AGG_SORTED;
+const AGG_HASHED: AggStrategy = ::pathnodes::AGG_HASHED;
+const AGG_MIXED: AggStrategy = ::pathnodes::AGG_MIXED;
+const SETOP_SORTED: SetOpStrategy = ::pathnodes::SETOP_SORTED;
+const RELOPT_BASEREL: u32 = ::pathnodes::RELOPT_BASEREL;
+const CMD_UPDATE: CmdType = ::pathnodes::CMD_UPDATE;
+const CMD_MERGE: CmdType = ::pathnodes::CMD_MERGE;
 
 /// `PATH_REQ_OUTER` of a borrowed [`Path`] — `param_info ? ppi_req_outer : NULL`.
 #[inline]
@@ -1303,7 +1303,7 @@ fn default_sjinfo() -> SpecialJoinInfo {
         min_righthand: None,
         syn_lefthand: None,
         syn_righthand: None,
-        jointype: pathnodes::JOIN_INNER,
+        jointype: ::pathnodes::JOIN_INNER,
         ojrelid: 0,
         commute_above_l: None,
         commute_above_r: None,
@@ -1743,7 +1743,7 @@ pub fn create_groupingsets_path<'mcx>(
     subpath: PathId,
     having_qual: Vec<NodeId>,
     mut aggstrategy: AggStrategy,
-    rollups: Vec<pathnodes::RollupData>,
+    rollups: Vec<::pathnodes::RollupData>,
     agg_costs: Option<AggClauseCostsLite>,
 ) -> PgResult<PathId> {
     let sp: Path = root.path(subpath).base().clone();
@@ -2279,10 +2279,10 @@ const T_UNIQUE_PATH: NodeTag = NodeTag(295);
 
 /// `IS_OTHER_REL(rel)` (pathnodes.h).
 #[inline]
-fn is_other_rel_kind(reloptkind: pathnodes::RelOptKind) -> bool {
-    reloptkind == pathnodes::RELOPT_OTHER_MEMBER_REL
-        || reloptkind == pathnodes::RELOPT_OTHER_JOINREL
-        || reloptkind == pathnodes::RELOPT_OTHER_UPPER_REL
+fn is_other_rel_kind(reloptkind: ::pathnodes::RelOptKind) -> bool {
+    reloptkind == ::pathnodes::RELOPT_OTHER_MEMBER_REL
+        || reloptkind == ::pathnodes::RELOPT_OTHER_JOINREL
+        || reloptkind == ::pathnodes::RELOPT_OTHER_UPPER_REL
 }
 
 /// `create_unique_path(root, rel, subpath, sjinfo)` (pathnode.c:1730).
@@ -3176,7 +3176,7 @@ pub fn reparameterize_path_by_child<'mcx>(
                 child_rel,
                 child_top_parent,
             )?;
-            let new_ppi = pathnodes::ParamPathInfo {
+            let new_ppi = ::pathnodes::ParamPathInfo {
                 ppi_req_outer: bms::relids_copy::call(&required_outer),
                 ppi_rows: old_ppi.ppi_rows,
                 ppi_clauses: new_clauses,

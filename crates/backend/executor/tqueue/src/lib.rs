@@ -29,11 +29,11 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use utils_error::ereport;
-use types_dest::CommandDest;
+use ::utils_error::ereport;
+use ::types_dest::CommandDest;
 use types_error::{ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
 use execparallel::{DestReceiverHandle, ShmMqAttachHandle, TupleQueueReaderHandle};
-use types_parallel::ShmMqResult;
+use ::types_parallel::ShmMqResult;
 
 use shm_mq_seams as shmmq;
 
@@ -82,7 +82,7 @@ mod registry {
     use core::cell::RefCell;
 
     use super::{TQueueDestReceiver, TupleQueueReader};
-    use execparallel::TupleQueueReaderHandle;
+    use ::execparallel::TupleQueueReaderHandle;
 
     struct Receivers {
         slots: alloc::vec::Vec<Option<TQueueDestReceiver>>,
@@ -329,7 +329,7 @@ fn tqueue_router_shutdown(_mcx: mcx::Mcx<'_>, state: u64) -> PgResult<()> {
 /// (mirroring copyto). The router's `state` token is the `RECEIVERS` registry
 /// token — C's `(TQueueDestReceiver *) self` stand-in. The returned handle is the
 /// router's `DestReceiver *` id, the same one the executor's `dest->receiveSlot`
-/// dispatch resolves; it is carried as a `execparallel::DestReceiverHandle`
+/// dispatch resolves; it is carried as a `::execparallel::DestReceiverHandle`
 /// (the parallel-executor's home for the live `DestReceiver *`).
 pub fn CreateTupleQueueDestReceiver(handle: ShmMqAttachHandle) -> DestReceiverHandle {
     let self_ = TQueueDestReceiver {

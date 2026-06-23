@@ -13,10 +13,10 @@
 
 use std::sync::atomic::Ordering;
 
-use types_core::primitive::{BlockNumber, Buffer, OffsetNumber, XLogRecPtr, BLCKSZ};
+use ::types_core::primitive::{BlockNumber, Buffer, OffsetNumber, XLogRecPtr, BLCKSZ};
 use types_error::{PgError, PgResult};
-use types_storage::buf::{BM_DIRTY, BM_JUST_DIRTIED, BM_LOCKED};
-use types_storage::RelFileLocator;
+use ::types_storage::buf::{BM_DIRTY, BM_JUST_DIRTIED, BM_LOCKED};
+use ::types_storage::RelFileLocator;
 
 use crate::mgr::BufferManager;
 
@@ -154,7 +154,7 @@ impl BufferManager {
     pub fn BufferGetTag(
         &self,
         buffer: Buffer,
-    ) -> PgResult<(RelFileLocator, types_core::primitive::ForkNumber, BlockNumber)> {
+    ) -> PgResult<(RelFileLocator, ::types_core::primitive::ForkNumber, BlockNumber)> {
         // Assert(BufferIsPinned(buffer)).
         // if (BufferIsLocal(buffer))
         //     bufHdr = GetLocalBufferDescriptor(-buffer - 1); (bufmgr.c:4018).
@@ -457,7 +457,7 @@ impl BufferManager {
 #[inline]
 fn fsm_contents_offset() -> usize {
     const MAXIMUM_ALIGNOF: usize = 8;
-    let len = types_storage::bufpage::SizeOfPageHeaderData;
+    let len = ::types_storage::bufpage::SizeOfPageHeaderData;
     (len + (MAXIMUM_ALIGNOF - 1)) & !(MAXIMUM_ALIGNOF - 1)
 }
 
@@ -480,14 +480,14 @@ mod tests {
         let bm = mk();
         // Pin + take the exclusive content lock (LWLockHeldByMe debug_assert).
         let _ = bm.pin_buffer_for_test(0, false);
-        bm.LockBuffer(1, types_storage::buf::BUFFER_LOCK_EXCLUSIVE)
+        bm.LockBuffer(1, ::types_storage::buf::BUFFER_LOCK_EXCLUSIVE)
             .unwrap();
         assert_eq!(bm.read_state(0) & BM_DIRTY, 0);
         bm.MarkBufferDirty(1).unwrap();
         assert_ne!(bm.read_state(0) & BM_DIRTY, 0);
         // BM_JUST_DIRTIED also set.
         assert_ne!(bm.read_state(0) & BM_JUST_DIRTIED, 0);
-        bm.LockBuffer(1, types_storage::buf::BUFFER_LOCK_UNLOCK)
+        bm.LockBuffer(1, ::types_storage::buf::BUFFER_LOCK_UNLOCK)
             .unwrap();
     }
 
@@ -516,7 +516,7 @@ mod tests {
         install_stubs();
         let bm = mk();
         let _ = bm.pin_buffer_for_test(0, false);
-        bm.LockBuffer(1, types_storage::buf::BUFFER_LOCK_EXCLUSIVE)
+        bm.LockBuffer(1, ::types_storage::buf::BUFFER_LOCK_EXCLUSIVE)
             .unwrap();
         // A fresh (all-zero) page is "new".
         assert!(bm.page_is_new(1).unwrap());
@@ -526,7 +526,7 @@ mod tests {
         bm.page_set_lsn(1, 0x1234_5678).unwrap();
         assert_eq!(bm.page_get_lsn(1).unwrap(), 0x1234_5678);
         assert_eq!(bm.BufferGetLSNAtomic(1).unwrap(), 0x1234_5678);
-        bm.LockBuffer(1, types_storage::buf::BUFFER_LOCK_UNLOCK)
+        bm.LockBuffer(1, ::types_storage::buf::BUFFER_LOCK_UNLOCK)
             .unwrap();
     }
 

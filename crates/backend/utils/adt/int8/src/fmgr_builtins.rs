@@ -18,11 +18,11 @@
 //! the planner *prosupport* functions are NOT registered here — see the crate
 //! docs for why (they are the pqformat / executor / planner layers' frames).
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

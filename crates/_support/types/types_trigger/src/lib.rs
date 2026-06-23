@@ -16,8 +16,8 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 /// `Trigger` (`utils/reltrigger.h`): one trigger as the relcache materializes it
 /// from a `pg_trigger` row. The leading `tgoid` is the trigger's own OID; the
@@ -244,7 +244,7 @@ impl<'mcx> TriggerDesc<'mcx> {
     /// An empty `TriggerDesc` (no triggers, all flags false) allocated in
     /// `mcx` — the shape `RelationBuildTriggers` starts from before it populates
     /// the array and flags. (C `palloc0`s the struct.)
-    pub fn new_in(mcx: mcx::Mcx<'mcx>) -> Self {
+    pub fn new_in(mcx: ::mcx::Mcx<'mcx>) -> Self {
         TriggerDesc {
             triggers: PgVec::new_in(mcx),
             numtriggers: 0,

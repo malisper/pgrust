@@ -28,12 +28,12 @@
 use std::string::{String, ToString};
 use std::vec::Vec;
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -83,7 +83,7 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a str {
         .and_then(|p| p.as_varlena())
         .expect("misc2 fn: text arg missing from by-ref lane");
     // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
-    let bytes = &image[datum::varlena::VARHDRSZ..];
+    let bytes = &image[::datum::varlena::VARHDRSZ..];
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     core::str::from_utf8(&bytes[..end]).expect("misc2 fn: text arg not valid UTF-8")
 }
@@ -132,17 +132,17 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, s: String) -> Datum {
 /// `VARHDRSZ`. The `ByVal(0)` arm is the cores' `Datum::null()` (the
 /// missing-file / not-a-partition NULL); other `ByVal` words are real scalars
 /// (an `oid`). A non-zero scalar therefore returns the word as-is.
-fn ret_value_datum(fcinfo: &mut FunctionCallInfoBaseData, d: types_tuple::Datum<'_>) -> Datum {
+fn ret_value_datum(fcinfo: &mut FunctionCallInfoBaseData, d: ::types_tuple::Datum<'_>) -> Datum {
     match d {
-        types_tuple::Datum::ByRef(bytes) => {
+        ::types_tuple::Datum::ByRef(bytes) => {
             // Header-ful everywhere: the by-ref image (full varlena, header
             // included) crosses verbatim onto the by-ref lane.
             fcinfo.set_ref_result(RefPayload::Varlena(bytes.as_slice().to_vec()));
             Datum::from_usize(0)
         }
-        types_tuple::Datum::ByVal(0) => ret_null(fcinfo),
-        types_tuple::Datum::ByVal(w) => Datum::from_usize(w),
-        types_tuple::Datum::Cstring(s) => {
+        ::types_tuple::Datum::ByVal(0) => ret_null(fcinfo),
+        ::types_tuple::Datum::ByVal(w) => Datum::from_usize(w),
+        ::types_tuple::Datum::Cstring(s) => {
             fcinfo.set_ref_result(RefPayload::Cstring(s));
             Datum::from_usize(0)
         }
@@ -156,24 +156,24 @@ fn ret_value_datum(fcinfo: &mut FunctionCallInfoBaseData, d: types_tuple::Datum<
 /// `HeapTupleGetDatum`) onto the fmgr frame's by-reference `Composite` lane.
 ///
 /// `HeapTupleGetDatum` hands back the self-describing composite-Datum byte image
-/// as a [`types_tuple::Datum::ByRef`]; the boundary's `RefPayload::Composite`
+/// as a [`::types_tuple::Datum::ByRef`]; the boundary's `RefPayload::Composite`
 /// carries exactly that image and is read back as a `Datum::Composite` (the row,
 /// not raw varlena bytes) by the dispatch result mapper — so a downstream
 /// consumer sees a composite value and routes it to the record output function,
 /// matching C's `PG_RETURN_DATUM(HeapTupleGetDatum(tuple))`. A `Datum::Composite`
 /// arm (a live formed tuple) flattens via `to_datum_image`. `ByVal(0)` is the
 /// cores' `Datum::null()` (the `missing_ok` missing-file path).
-fn ret_composite_datum(fcinfo: &mut FunctionCallInfoBaseData, d: types_tuple::Datum<'_>) -> Datum {
+fn ret_composite_datum(fcinfo: &mut FunctionCallInfoBaseData, d: ::types_tuple::Datum<'_>) -> Datum {
     match d {
-        types_tuple::Datum::ByRef(bytes) => {
+        ::types_tuple::Datum::ByRef(bytes) => {
             fcinfo.set_ref_result(RefPayload::Composite(bytes.as_slice().to_vec()));
             Datum::from_usize(0)
         }
-        types_tuple::Datum::Composite(t) => {
+        ::types_tuple::Datum::Composite(t) => {
             fcinfo.set_ref_result(RefPayload::Composite(t.to_datum_image()));
             Datum::from_usize(0)
         }
-        types_tuple::Datum::ByVal(0) => ret_null(fcinfo),
+        ::types_tuple::Datum::ByVal(0) => ret_null(fcinfo),
         _ => panic!("misc2 fmgr: unexpected Datum arm from composite-returning core"),
     }
 }
@@ -678,7 +678,7 @@ fn fc_pg_isolation_test_session_is_blocked(
     let elems = arrayfuncs::construct::deconstruct_array_builtin(
         m.mcx(),
         &array,
-        types_tuple::heaptuple::INT4OID,
+        ::types_tuple::heaptuple::INT4OID,
     )?;
     let mut interesting: alloc::vec::Vec<i32> = alloc::vec::Vec::with_capacity(elems.len());
     for (d, isnull) in elems.iter() {
@@ -787,7 +787,7 @@ fn fc_binary_upgrade_logical_slot_has_caught_up(fcinfo: &mut FunctionCallInfoBas
 // cores take; `ret_record` serializes a `FormedTuple` result back onto the lane.
 // ===========================================================================
 
-use types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::FormedTuple;
 
 /// `PG_GETARG_HEAPTUPLEHEADER(i)` → the composite arg's [`FormedTuple`],
 /// reconstructed from its flat `HeapTupleHeader` Datum image on the by-ref lane.
@@ -1034,12 +1034,12 @@ fn arg_tid<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
-) -> types_tuple::Datum<'mcx> {
+) -> ::types_tuple::Datum<'mcx> {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("tid fn: by-ref ItemPointer arg missing from by-ref lane");
-    types_tuple::Datum::ByRef(
+    ::types_tuple::Datum::ByRef(
         mcx::slice_in(mcx, image).expect("tid fn: out of memory copying ItemPointer image"),
     )
 }
@@ -1106,7 +1106,7 @@ fn fc_tidsend(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Da
 /// Shared `(tid, tid) -> bool` operator adapter.
 fn fc_tid_cmp_bool(
     fcinfo: &mut FunctionCallInfoBaseData,
-    f: fn(types_tuple::Datum<'_>, types_tuple::Datum<'_>) -> types_error::PgResult<bool>,
+    f: fn(::types_tuple::Datum<'_>, ::types_tuple::Datum<'_>) -> types_error::PgResult<bool>,
 ) -> types_error::PgResult<Datum> {
     let m = scratch_mcx();
     let a1 = arg_tid(m.mcx(), fcinfo, 0);
@@ -1656,9 +1656,9 @@ mod tests {
     use super::*;
     use std::vec;
     use std::vec::Vec;
-    use heaptuple::heap_form_tuple;
-    use types_tuple::heaptuple::Datum as CanonDatum;
-    use types_tuple::heaptuple::{
+    use ::heaptuple::heap_form_tuple;
+    use ::types_tuple::heaptuple::Datum as CanonDatum;
+    use ::types_tuple::heaptuple::{
         CompactAttribute, FormData_pg_attribute, TupleDescData,
     };
 
@@ -1754,8 +1754,8 @@ mod tests {
         setup();
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 2, 0, None, None);
         fcinfo.args = vec![
-            datum::NullableDatum::value(Datum::null()),
-            datum::NullableDatum::value(Datum::null()),
+            ::datum::NullableDatum::value(Datum::null()),
+            ::datum::NullableDatum::value(Datum::null()),
         ];
         fcinfo.ref_args = vec![
             Some(RefPayload::Composite(a.to_vec())),
@@ -1804,7 +1804,7 @@ mod tests {
         // Reconstruct exactly as the fmgr-core bridge does for a composite
         // result/argument.
         let rebuilt =
-            types_tuple::heaptuple::FormedTuple::from_datum_image(
+            ::types_tuple::heaptuple::FormedTuple::from_datum_image(
                 m.mcx(),
                 &image,
             )
@@ -1812,11 +1812,11 @@ mod tests {
 
         let hdr = rebuilt.tuple.t_data.as_ref().expect("header");
         assert_eq!(
-            types_tuple::heaptuple::HeapTupleHeaderGetTypeId(hdr),
+            ::types_tuple::heaptuple::HeapTupleHeaderGetTypeId(hdr),
             TEST_ROWTYPE_OID
         );
         assert_eq!(
-            types_tuple::heaptuple::HeapTupleHeaderGetTypMod(hdr),
+            ::types_tuple::heaptuple::HeapTupleHeaderGetTypMod(hdr),
             -1
         );
         // The user-data area (the int4 word) is preserved byte-for-byte.
@@ -1830,7 +1830,7 @@ mod tests {
     fn call_tidin(s: &str) -> Vec<u8> {
         setup();
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
-        fcinfo.args = vec![datum::NullableDatum::value(Datum::null())];
+        fcinfo.args = vec![::datum::NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Cstring(s.to_string()))];
         let native = fmgr_core::native_builtin(48).expect("tidin registered");
         native(&mut fcinfo).expect("tidin returned Err");
@@ -1845,7 +1845,7 @@ mod tests {
     fn call_tidout(image: &[u8]) -> String {
         setup();
         let mut fcinfo = FunctionCallInfoBaseData::new(None, 1, 0, None, None);
-        fcinfo.args = vec![datum::NullableDatum::value(Datum::null())];
+        fcinfo.args = vec![::datum::NullableDatum::value(Datum::null())];
         fcinfo.ref_args = vec![Some(RefPayload::Varlena(image.to_vec()))];
         let native = fmgr_core::native_builtin(49).expect("tidout registered");
         native(&mut fcinfo).expect("tidout returned Err");
@@ -1876,8 +1876,8 @@ mod tests {
             setup();
             let mut fcinfo = FunctionCallInfoBaseData::new(None, 2, 0, None, None);
             fcinfo.args = vec![
-                datum::NullableDatum::value(Datum::null()),
-                datum::NullableDatum::value(Datum::null()),
+                ::datum::NullableDatum::value(Datum::null()),
+                ::datum::NullableDatum::value(Datum::null()),
             ];
             fcinfo.ref_args =
                 vec![Some(RefPayload::Varlena(x.to_vec())), Some(RefPayload::Varlena(y.to_vec()))];

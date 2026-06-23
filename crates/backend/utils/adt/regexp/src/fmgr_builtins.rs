@@ -22,10 +22,10 @@
 //! none are retset — the set-returning `regexp_matches` / `regexp_split_to_table`
 //! are NOT registered here).
 
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use mcx::{Mcx, PgVec};
@@ -111,7 +111,7 @@ fn ret_i32(v: i32) -> PgResult<Datum> {
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, v: PgVec<'_, u8>) -> PgResult<Datum> {
     let payload = v.as_slice();
     let mut image = Vec::with_capacity(payload.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(payload.len() + VARHDRSZ));
     image.extend_from_slice(payload);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Ok(Datum::from_usize(0))
@@ -127,8 +127,8 @@ fn ret_null(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 /// A scratch context for cores that allocate their result / scratch through
 /// `Mcx`. The owning `MemoryContext` is dropped by the caller after the bytes
 /// are copied out.
-fn scratch_mcx() -> mcx::MemoryContext {
-    mcx::MemoryContext::new("regexp fmgr scratch")
+fn scratch_mcx() -> ::mcx::MemoryContext {
+    ::mcx::MemoryContext::new("regexp fmgr scratch")
 }
 
 // ---------------------------------------------------------------------------
@@ -586,7 +586,7 @@ fn fc_regexp_substr(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 /// (no match) is `PG_RETURN_NULL()`.
 fn ret_text_array(
     fcinfo: &mut FunctionCallInfoBaseData,
-    m: &mcx::MemoryContext,
+    m: &::mcx::MemoryContext,
     result: Option<PgVec<'_, Option<PgVec<'_, u8>>>>,
 ) -> PgResult<Datum> {
     match result {
@@ -636,7 +636,7 @@ fn fc_regexp_match_no_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<D
 /// element payload is wrapped as a non-NULL element.
 fn ret_text_array_nonnull(
     fcinfo: &mut FunctionCallInfoBaseData,
-    m: &mcx::MemoryContext,
+    m: &::mcx::MemoryContext,
     elems: PgVec<'_, PgVec<'_, u8>>,
 ) -> PgResult<Datum> {
     let views: Vec<Option<&[u8]>> = elems.iter().map(|e| Some(e.as_slice())).collect();

@@ -50,12 +50,12 @@ extern crate alloc;
 use alloc::vec::Vec;
 use std::collections::HashMap;
 
-use types_core::primitive::{InvalidRepOriginId, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
-use types_core::xact::{CommandId, InvalidCommandId, InvalidTransactionId, InvalidXLogRecPtr};
-use snapshot::SnapshotData;
-use types_storage::sinval::SharedInvalidationMessage;
-use types_storage::RelFileLocator;
-use types_tuple::ItemPointerData;
+use ::types_core::primitive::{InvalidRepOriginId, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::xact::{CommandId, InvalidCommandId, InvalidTransactionId, InvalidXLogRecPtr};
+use ::snapshot::SnapshotData;
+use ::types_storage::sinval::SharedInvalidationMessage;
+use ::types_storage::RelFileLocator;
+use ::types_tuple::ItemPointerData;
 
 mod registry;
 mod replay;
@@ -188,7 +188,7 @@ pub enum ReorderBufferChangeType {
 /// into which `decode.c`'s `DecodeXLogTuple` `memcpy`s the WAL tuple bytes. The
 /// reorder buffer holds these across many WAL records and replays them later, so
 /// they outlive any single `'mcx` arena — hence an owned (`'static`) byte buffer
-/// rather than an `'mcx`-bound [`types_tuple::FormedTuple`]. The fixed
+/// rather than an `'mcx`-bound [`::types_tuple::FormedTuple`]. The fixed
 /// `HeapTupleData` fields (`t_len`/`t_self`/`t_tableOid`) are carried explicitly;
 /// `tuple.t_data` points at the inline `data` block, modeled here as the owned
 /// `data` `Vec<u8>` (the full on-disk tuple image: header + nulls bitmap +
@@ -200,7 +200,7 @@ pub struct ReorderBufferTupleBuf {
     /// `tuple.t_self` — item pointer (origin of the tuple).
     pub t_self: ItemPointerData,
     /// `tuple.t_tableOid` — table OID.
-    pub t_table_oid: types_core::Oid,
+    pub t_table_oid: ::types_core::Oid,
     /// The contiguous tuple image (`header` + `data[]` in C): the
     /// `HeapTupleHeaderData` bytes followed by the nulls bitmap and user-data
     /// area, exactly as `DecodeXLogTuple` lays it out. Owned by the reorder
@@ -227,7 +227,7 @@ pub enum ReorderBufferChangeData {
     Truncate {
         cascade: bool,
         restart_seqs: bool,
-        relids: Vec<types_core::Oid>,
+        relids: Vec<::types_core::Oid>,
     },
     /// `msg` — REORDER_BUFFER_CHANGE_MESSAGE.
     Msg {
@@ -349,7 +349,7 @@ pub struct ReorderBufferTXN {
     pub tuplecid_hash: Option<crate::snapshot::TupleCidHash>,
     /// `HTAB *toast_hash` — `chunk_id -> ReorderBufferToastEnt` reassembly hash
     /// built lazily by `ReorderBufferToastAppendChunk`; `None` == C NULL.
-    pub toast_hash: Option<HashMap<types_core::Oid, crate::toast::ReorderBufferToastEnt>>,
+    pub toast_hash: Option<HashMap<::types_core::Oid, crate::toast::ReorderBufferToastEnt>>,
     /// `dlist_head subtxns`— xids of non-aborted subtransactions.
     pub subtxns: Vec<TransactionId>,
     /// `uint32 nsubtxns`.
@@ -922,13 +922,13 @@ impl ReorderBuffer {
         &mut self,
         xid: TransactionId,
         lsn: XLogRecPtr,
-        kind: reorderbuffer_seams::DecodedChangeKind,
+        kind: ::reorderbuffer_seams::DecodedChangeKind,
         rlocator: RelFileLocator,
-        oldtuple: Option<reorderbuffer_seams::DecodedTuple>,
-        newtuple: Option<reorderbuffer_seams::DecodedTuple>,
+        oldtuple: Option<::reorderbuffer_seams::DecodedTuple>,
+        newtuple: Option<::reorderbuffer_seams::DecodedTuple>,
         toast_insert: bool,
     ) {
-        use reorderbuffer_seams::DecodedChangeKind as K;
+        use ::reorderbuffer_seams::DecodedChangeKind as K;
         let action = match kind {
             K::Insert => ReorderBufferChangeType::Insert,
             K::Update => ReorderBufferChangeType::Update,
@@ -962,7 +962,7 @@ impl ReorderBuffer {
         lsn: XLogRecPtr,
         cascade: bool,
         restart_seqs: bool,
-        relids: Vec<types_core::Oid>,
+        relids: Vec<::types_core::Oid>,
     ) {
         let mut change = ReorderBufferChange::alloc();
         change.action = ReorderBufferChangeType::Truncate;
@@ -1552,7 +1552,7 @@ impl ReorderBuffer {
     pub(crate) fn toast_hash_take(
         &mut self,
         xid: TransactionId,
-    ) -> Option<HashMap<types_core::Oid, toast::ReorderBufferToastEnt>> {
+    ) -> Option<HashMap<::types_core::Oid, toast::ReorderBufferToastEnt>> {
         self.by_txn.get_mut(&xid).and_then(|t| t.toast_hash.take())
     }
 
@@ -1809,12 +1809,12 @@ impl ReorderBuffer {
 // Free functions
 // ---------------------------------------------------------------------------
 
-/// Convert a [`DecodedTuple`](reorderbuffer_seams::DecodedTuple)
+/// Convert a [`DecodedTuple`](::reorderbuffer_seams::DecodedTuple)
 /// image conveyed over the queue seam into the owner's
 /// [`ReorderBufferTupleBuf`]. decode.c `DecodeXLogTuple`s the WAL tuple bytes
 /// into the reorder buffer's own context; both sides carry the same fields.
 fn decoded_tuple_to_buf(
-    t: reorderbuffer_seams::DecodedTuple,
+    t: ::reorderbuffer_seams::DecodedTuple,
 ) -> ReorderBufferTupleBuf {
     ReorderBufferTupleBuf {
         t_len: t.t_len,
@@ -1830,8 +1830,8 @@ fn decoded_tuple_to_buf(
 /// resolution). Same fields on both sides.
 fn buf_to_decoded_tuple(
     buf: &ReorderBufferTupleBuf,
-) -> reorderbuffer_seams::DecodedTuple {
-    reorderbuffer_seams::DecodedTuple {
+) -> ::reorderbuffer_seams::DecodedTuple {
+    ::reorderbuffer_seams::DecodedTuple {
         t_len: buf.t_len,
         t_self: buf.t_self,
         t_table_oid: buf.t_table_oid,
@@ -1865,7 +1865,7 @@ pub(crate) fn change_size(change: &ReorderBufferChange) -> usize {
     // decoded image in ReorderBufferTupleBuf (t_len + the contiguous bytes).
     let heap_tuple_data = core::mem::size_of::<ItemPointerData>()
         + core::mem::size_of::<u32>()
-        + core::mem::size_of::<types_core::Oid>();
+        + core::mem::size_of::<::types_core::Oid>();
     match &change.data {
         ReorderBufferChangeData::Tp {
             oldtuple, newtuple, ..
@@ -1892,7 +1892,7 @@ pub(crate) fn change_size(change: &ReorderBufferChange) -> usize {
                 + core::mem::size_of::<TransactionId>() * snap.subxcnt.max(0) as usize
         }
         ReorderBufferChangeData::Truncate { relids, .. } => {
-            base + core::mem::size_of::<types_core::Oid>() * relids.len()
+            base + core::mem::size_of::<::types_core::Oid>() * relids.len()
         }
         ReorderBufferChangeData::CommandId(_)
         | ReorderBufferChangeData::TupleCid { .. }

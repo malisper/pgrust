@@ -9,9 +9,9 @@
 //! resolves them. OIDs / nargs / strict / retset are transcribed exactly from
 //! `pg_proc.dat`.
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------

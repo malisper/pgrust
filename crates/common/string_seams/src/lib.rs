@@ -3,7 +3,7 @@
 //! lands; until then a call panics loudly.
 
 use mcx::{Mcx, PgString};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `pg_clean_ascii(str, alloc_flags)` (`common/string.c`) — return a copy

@@ -5,8 +5,8 @@ use crate::{
     is_utf16_surrogate_first, is_utf16_surrogate_second, is_valid_unicode_codepoint,
     surrogate_pair_to_codepoint, PgWchar,
 };
-use scan_fgram::UnicodeToServerSeam;
-use scansup_fgram::scanner_isspace;
+use ::scan_fgram::UnicodeToServerSeam;
+use ::scansup_fgram::scanner_isspace;
 
 /// An error raised while de-escaping a `U&'...'`/`U&"..."` literal.
 #[derive(Clone, Debug)]

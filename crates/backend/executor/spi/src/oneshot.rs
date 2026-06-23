@@ -17,8 +17,8 @@
 
 use std::cell::RefCell;
 
-use mcx::MemoryContext;
-use types_error::PgResult;
+use ::mcx::MemoryContext;
+use ::types_error::PgResult;
 
 use crate::execsql::{spi_execsql_dynamic, ExecsqlColumn};
 use crate::result_code::SPI_ERROR_ARGUMENT;

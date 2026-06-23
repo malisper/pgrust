@@ -18,19 +18,19 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use activity_pgstat::entry_ref::PgStat_EntryRef;
-use activity_pgstat::kind_info::KindInfoBuilder;
-use activity_pgstat::pgstat_core;
-use activity_pgstat::registry;
-use activity_pgstat::shmem;
+use ::activity_pgstat::entry_ref::PgStat_EntryRef;
+use ::activity_pgstat::kind_info::KindInfoBuilder;
+use ::activity_pgstat::pgstat_core;
+use ::activity_pgstat::registry;
+use ::activity_pgstat::shmem;
 use activity_xact as xact;
-use types_core::primitive::{InvalidOid, Oid};
-use types_error::PgResult;
-use replication::conflict::{ConflictType, CONFLICT_NUM_TYPES};
-use types_pgstat::activity_pgstat::{
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_error::PgResult;
+use ::replication::conflict::{ConflictType, CONFLICT_NUM_TYPES};
+use ::types_pgstat::activity_pgstat::{
     PgStat_BackendSubEntry, PgStat_StatSubEntry, PGSTAT_KIND_SUBSCRIPTION,
 };
-use types_pgstat::pgstat_internal::{
+use ::types_pgstat::pgstat_internal::{
     PgStat_KindInfo, PgStatShared_Common, PgStatShared_Subscription,
 };
 
@@ -193,7 +193,7 @@ pub fn pgstat_subscription_flush_cb(entry_ref: &mut PgStat_EntryRef, nowait: boo
 /// *header, TimestampTz ts)`.
 fn pgstat_subscription_reset_timestamp_cb(
     header: &mut PgStatShared_Common,
-    ts: types_core::TimestampTz,
+    ts: ::types_core::TimestampTz,
 ) {
     // ((PgStatShared_Subscription *) header)->stats.stat_reset_timestamp = ts;
     // SAFETY: the kind table only hands this cb the PgStatShared_Common embedded
@@ -228,7 +228,7 @@ fn subscription_kind_info() -> PgStat_KindInfo {
 /// Register `PGSTAT_KIND_SUBSCRIPTION` and install the subscription outward
 /// seam.
 ///
-/// Must run before `activity_pgstat::init_seams()` seals the
+/// Must run before `::activity_pgstat::init_seams()` seals the
 /// per-kind table.
 pub fn init_seams() {
     registry::register(
@@ -239,7 +239,7 @@ pub fn init_seams() {
             .read_var_cb(|header, bytes| {
                 // SAFETY: header points at a live PgStatShared_Subscription body.
                 let sh = unsafe { &mut *(header as *mut PgStatShared_Subscription) };
-                sh.stats = activity_pgstat::kind_info::pgstat_deserialize_pod::<
+                sh.stats = ::activity_pgstat::kind_info::pgstat_deserialize_pod::<
                     PgStat_StatSubEntry,
                 >(bytes);
                 Ok(())
@@ -247,7 +247,7 @@ pub fn init_seams() {
             .write_var_cb(|header| {
                 // SAFETY: header points at a live PgStatShared_Subscription body.
                 let sh = unsafe { &*(header as *const PgStatShared_Subscription) };
-                activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
+                ::activity_pgstat::kind_info::pgstat_serialize_pod(&sh.stats)
             }),
     );
 

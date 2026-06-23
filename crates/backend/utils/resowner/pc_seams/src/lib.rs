@@ -13,8 +13,8 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use types_error::PgResult;
-use types_plancache::ResourceOwnerHandle;
+use ::types_error::PgResult;
+use ::types_plancache::ResourceOwnerHandle;
 
 seam_core::seam!(
     /// `ResourceOwnerEnlarge(owner)`.

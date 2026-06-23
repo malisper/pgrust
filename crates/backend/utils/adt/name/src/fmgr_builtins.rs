@@ -19,11 +19,11 @@
 //! (needs the array carrier) are NOT registered.
 
 use types_core::{Oid, NAMEDATALEN};
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
-use types_tuple::heaptuple::NameData;
+use ::stringinfo::StringInfo;
+use ::types_tuple::heaptuple::NameData;
 
 use crate::{btnamecmp, nameconcatoid, namein, nameout, namerecv, namesend};
 use crate::{current_schema, current_schemas, current_user, session_user};

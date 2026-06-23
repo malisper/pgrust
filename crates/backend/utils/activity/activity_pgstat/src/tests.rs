@@ -8,11 +8,11 @@ use crate::entry_ref::{
 use crate::kind_info::{KindInfoBuilder, PgStat_KindCallbacks, PgStat_KindInfoTable};
 use crate::registry;
 
-use types_pgstat::activity_pgstat::{
+use ::types_pgstat::activity_pgstat::{
     PgStat_Kind, PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BGWRITER, PGSTAT_KIND_CHECKPOINTER,
     PGSTAT_KIND_RELATION,
 };
-use types_pgstat::pgstat_internal::{PgStat_HashKey, PgStat_KindInfo};
+use ::types_pgstat::pgstat_internal::{PgStat_HashKey, PgStat_KindInfo};
 
 fn dummy_info(name: &'static str, fixed: bool) -> PgStat_KindInfo {
     PgStat_KindInfo {
@@ -155,7 +155,7 @@ fn init_seams_registers_three_fixed_kinds_proof_of_shape() {
         assert!(full.cb.read_fixed_cb.is_some(), "{:?} read_fixed_cb", kind);
         assert!(full.cb.write_fixed_cb.is_some(), "{:?} write_fixed_cb", kind);
         assert!(full.info.shared_data_len > 0, "{:?} shared_data_len", kind);
-        let snap = types_pgstat::pgstat_internal::PgStat_Snapshot::default();
+        let snap = ::types_pgstat::pgstat_internal::PgStat_Snapshot::default();
         let blob = full.cb.write_fixed_cb.as_ref().unwrap()(&snap);
         assert_eq!(
             blob.len(),
@@ -171,7 +171,7 @@ fn init_seams_registers_three_fixed_kinds_proof_of_shape() {
 #[test]
 fn serialize_pod_round_trips_stats_struct() {
     use crate::kind_info::{pgstat_deserialize_pod, pgstat_serialize_pod};
-    use types_pgstat::activity_pgstat::PgStat_ArchiverStats;
+    use ::types_pgstat::activity_pgstat::PgStat_ArchiverStats;
 
     let mut a = PgStat_ArchiverStats::default();
     a.archived_count = 42;
@@ -192,13 +192,13 @@ fn serialize_pod_round_trips_stats_struct() {
 /// would not line up with C, silently corrupting restored counters.
 #[test]
 fn ondisk_stats_struct_sizes_match_c_layout() {
-    use types_pgstat::activity_pgstat as a;
-    use types_pgstat::pgstat_internal::SLRU_NUM_ELEMENTS;
+    use ::types_pgstat::activity_pgstat as a;
+    use ::types_pgstat::pgstat_internal::SLRU_NUM_ELEMENTS;
 
     assert_eq!(core::mem::size_of::<a::PgStat_ArchiverStats>(), 136, "archiver");
     assert_eq!(
         core::mem::size_of::<
-            types_pgstat::backend_utils_activity_pgstat_bgwriter::PgStat_BgWriterStats,
+            ::types_pgstat::backend_utils_activity_pgstat_bgwriter::PgStat_BgWriterStats,
         >(),
         32,
         "bgwriter"

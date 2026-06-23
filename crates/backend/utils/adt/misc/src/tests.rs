@@ -8,7 +8,7 @@
 
 use super::*;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::Mutex;
 
 static SEAM_LOCK: Mutex<()> = Mutex::new(());
@@ -227,7 +227,7 @@ fn install_encoding_seam() {
     });
 }
 
-fn parts_to_vecs(parts: Vec<mcx::PgVec<'_, u8>>) -> Vec<Vec<u8>> {
+fn parts_to_vecs(parts: Vec<::mcx::PgVec<'_, u8>>) -> Vec<Vec<u8>> {
     parts.into_iter().map(|p| p.to_vec()).collect()
 }
 

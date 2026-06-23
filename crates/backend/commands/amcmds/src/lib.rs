@@ -31,7 +31,7 @@
 //! objectaccess).
 
 use mcx::{Mcx, PgString};
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 
 use utils_error::{ereport, PgResult};
 use types_error::{
@@ -40,22 +40,22 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 
-use types_catalog::catalog::{ACCESS_METHOD_RELATION_ID, PROCEDURE_RELATION_ID};
+use ::types_catalog::catalog::{ACCESS_METHOD_RELATION_ID, PROCEDURE_RELATION_ID};
 use types_core::{
     InvalidOid, Oid, OidIsValid, INDEX_AM_HANDLEROID, INTERNALOID, TABLE_AM_HANDLEROID,
 };
 use ::nodes::parsenodes::CreateAmStmt;
-use types_storage::lock::RowExclusiveLock;
+use ::types_storage::lock::RowExclusiveLock;
 
 use table::{table_close, table_open};
-use indexing_seams::catalog_tuple_insert_pg_am;
-use objectaccess_seams::invoke_object_post_create_hook;
+use ::indexing_seams::catalog_tuple_insert_pg_am;
+use ::objectaccess_seams::invoke_object_post_create_hook;
 use pg_depend_seams::{recordDependencyOn, recordDependencyOnCurrentExtension};
-use parse_func_seams::lookup_func_name;
-use format_type_seams::format_type_be;
+use ::parse_func_seams::lookup_func_name;
+use ::format_type_seams::format_type_be;
 use lsyscache_seams::{get_func_name, get_func_rettype};
 use syscache_seams::{get_am_oid_by_name, search_am_by_name, search_am_name};
-use miscinit_seams::superuser;
+use ::miscinit_seams::superuser;
 
 /// `AMTYPE_INDEX` — index access method (`catalog/pg_am.h`).
 const AMTYPE_INDEX: u8 = b'i';
@@ -307,7 +307,7 @@ fn create_access_method_seam<'mcx>(
     let cas = match stmt.as_createamstmt() {
         Some(s) => s,
         None => {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "create_access_method_seam: statement is not a CreateAmStmt",
             ))
         }
@@ -319,7 +319,7 @@ fn create_access_method_seam<'mcx>(
         match n.as_string() {
             Some(s) => handler_name.push(s.sval.as_str().to_string()),
             None => {
-                return Err(types_error::PgError::error(
+                return Err(::types_error::PgError::error(
                     "CREATE ACCESS METHOD: handler name element is not a String",
                 ))
             }
@@ -347,11 +347,11 @@ pub fn init_seams() {
         // needs an `Mcx` for the wrong-type error message's transient name
         // copy, which is materialized into the `PgError` before this scratch
         // context drops.
-        let scratch = mcx::MemoryContext::new("amcmds get_index_am_oid");
+        let scratch = ::mcx::MemoryContext::new("amcmds get_index_am_oid");
         get_index_am_oid(scratch.mcx(), amname, missing_ok)
     });
     amcmds_seams::get_am_oid::set(|amname, missing_ok| {
-        let scratch = mcx::MemoryContext::new("amcmds get_am_oid");
+        let scratch = ::mcx::MemoryContext::new("amcmds get_am_oid");
         get_am_oid(scratch.mcx(), amname, missing_ok)
     });
 
@@ -360,7 +360,7 @@ pub fn init_seams() {
     // own `-seams` shim, which carries no mcx (the body needs one only for the
     // transient wrong-type error name copy — same scratch pattern as above).
     tablecmds_seams::get_table_am_oid::set(|amname, missing_ok| {
-        let scratch = mcx::MemoryContext::new("amcmds get_table_am_oid");
+        let scratch = ::mcx::MemoryContext::new("amcmds get_table_am_oid");
         get_table_am_oid(scratch.mcx(), amname, missing_ok)
     });
 }

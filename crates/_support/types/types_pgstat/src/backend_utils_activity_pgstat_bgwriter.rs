@@ -1,8 +1,8 @@
 //! Bgwriter statistics types (`pgstat.h`, `utils/pgstat_internal.h`).
 
 use crate::activity_pgstat::PgStat_Counter;
-use types_core::primitive::TimestampTz;
-use types_storage::LWLock;
+use ::types_core::primitive::TimestampTz;
+use ::types_storage::LWLock;
 
 /// `PgStat_BgWriterStats` (`pgstat.h`). Field order matches C exactly.
 ///

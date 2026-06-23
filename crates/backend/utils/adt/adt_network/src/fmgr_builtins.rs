@@ -25,10 +25,10 @@
 //! header-stripped text payload bytes on the by-ref lane, matching the
 //! `text`/`bytea` family convention.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_network::inet_struct;
+use ::types_network::inet_struct;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -543,7 +543,7 @@ pub fn register_network_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datum::NullableDatum;
+    use ::datum::NullableDatum;
 
     /// Build an `inet` image via the registered `inet_in` (OID 910).
     fn inet_in(s: &str) -> Vec<u8> {

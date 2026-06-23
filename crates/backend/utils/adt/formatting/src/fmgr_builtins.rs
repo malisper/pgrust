@@ -19,12 +19,12 @@
 //! them to the `*_boundary` marshal entries (whose `numeric` varlena ->
 //! `NumericVar` decode is the same one the executor uses).
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FmgrArg, FunctionCallInfoBaseData, PgFnNative};
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult};
 
 use crate::fmgr_boundary::{
@@ -32,7 +32,7 @@ use crate::fmgr_boundary::{
     int8_to_char_boundary, interval_to_char_boundary, timestamp_to_char_boundary,
     timestamptz_to_char_boundary,
 };
-use types_datetime::Interval;
+use ::types_datetime::Interval;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -100,8 +100,8 @@ fn arg_text_payload(fcinfo: &FunctionCallInfoBaseData, i: usize) -> RefPayload {
 
 /// A scratch context for the result `text` allocation (C charges it to
 /// `CurrentMemoryContext`; this repo carries no ambient context).
-fn scratch_mcx() -> mcx::MemoryContext {
-    mcx::MemoryContext::new("to_char fmgr scratch")
+fn scratch_mcx() -> ::mcx::MemoryContext {
+    ::mcx::MemoryContext::new("to_char fmgr scratch")
 }
 
 /// Drive one `to_char(scalar, text)` overload: take the owned `text` format
@@ -117,7 +117,7 @@ where
         Mcx<'mcx>,
         &FmgrArg<'_, '_>,
         Oid,
-    ) -> Result<mcx::PgVec<'mcx, u8>, PgError>,
+    ) -> Result<::mcx::PgVec<'mcx, u8>, PgError>,
 {
     let collid = fcinfo.fncollation;
     let fmt_payload = arg_text_payload(fcinfo, 1);
@@ -140,7 +140,7 @@ where
         Mcx<'mcx>,
         &FmgrArg<'_, '_>,
         Oid,
-    ) -> Result<Option<mcx::PgVec<'mcx, u8>>, PgError>,
+    ) -> Result<Option<::mcx::PgVec<'mcx, u8>>, PgError>,
 {
     let collid = fcinfo.fncollation;
     let fmt_payload = arg_text_payload(fcinfo, 1);

@@ -43,7 +43,7 @@
 //!   `inner_reduced`, `unreduced_side`) are the `'mcx`-arena
 //!   [`Bitmapset`](::nodes::Bitmapset), matching what
 //!   `find_nonnullable_rels` returns and what `bms_overlap` consumes. Forced-null
-//!   Var sets are [`MultiBitmapset`](nodes_core::multibitmapset).
+//!   Var sets are [`MultiBitmapset`](::nodes_core::multibitmapset).
 //! * `remove_nulling_relids((Node *) root->parse, …)` becomes
 //!   [`rewrite_core::remove_nulling_relids_in_query`] over the `&mut
 //!   Query`. `remove_nulling_relids((Node *) root->append_rel_list, …)` walks
@@ -94,20 +94,20 @@ pub use result_rtes::{get_nullingrels, NullingrelInfo};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use nodes_core::bitmapset::{bms_add_members, bms_overlap};
-use nodes_core::multibitmapset::{mbms_add_members, mbms_overlap_sets, MultiBitmapset};
-use clauses::grounded::{
+use ::nodes_core::bitmapset::{bms_add_members, bms_overlap};
+use ::nodes_core::multibitmapset::{mbms_add_members, mbms_overlap_sets, MultiBitmapset};
+use ::clauses::grounded::{
     find_forced_null_vars, find_nonnullable_rels, find_nonnullable_vars,
 };
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::copy_query::Query;
 use ::nodes::jointype::JoinType;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::RTEKind;
 use ::nodes::primnodes::ExprRelids;
-use pathnodes::PlannerInfo;
+use ::pathnodes::PlannerInfo;
 
 /// C `Relids` = `Bitmapset *`: the `'mcx`-arena relid set (NULL/empty = `None`).
 type Relids<'mcx> = Option<PgBox<'mcx, Bitmapset<'mcx>>>;
@@ -246,9 +246,9 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
     // joinaliasvars/joinleftcols/joinrightcols start empty (MERGE: no USING).
     joinrte.join_using_alias = None;
     joinrte.alias = None;
-    joinrte.eref = Some(mcx::alloc_in(
+    joinrte.eref = Some(::mcx::alloc_in(
         mcx,
-        nodes_core::makefuncs::make_alias(mcx, "*MERGE*", mcx::PgVec::new_in(mcx))?,
+        ::nodes_core::makefuncs::make_alias(mcx, "*MERGE*", ::mcx::PgVec::new_in(mcx))?,
     )?);
     joinrte.lateral = false;
     joinrte.inh = false;
@@ -265,23 +265,23 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
         let jt = parse
             .jointree
             .as_deref_mut()
-            .ok_or_else(|| types_error::PgError::error("MERGE Query has no jointree"))?;
+            .ok_or_else(|| ::types_error::PgError::error("MERGE Query has no jointree"))?;
         jt.quals.take()
     };
-    let mut target_fromlist: mcx::PgVec<'_, NodePtr<'_>> = mcx::PgVec::new_in(mcx);
-    target_fromlist.push(mcx::alloc_in(
+    let mut target_fromlist: ::mcx::PgVec<'_, NodePtr<'_>> = ::mcx::PgVec::new_in(mcx);
+    target_fromlist.push(::mcx::alloc_in(
         mcx,
         Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef {
             rtindex: parse.mergeTargetRelation,
         })?,
     )?);
-    let target = nodes_core::makefuncs::make_from_expr(target_fromlist, target_quals);
+    let target = ::nodes_core::makefuncs::make_from_expr(target_fromlist, target_quals);
 
     // Source rel (expect exactly one -- see transformMergeStmt()).
     let source: NodePtr<'_> = {
         let jt = parse.jointree.as_deref_mut().unwrap();
         if jt.fromlist.len() != 1 {
-            return Err(types_error::PgError::error(
+            return Err(::types_error::PgError::error(
                 "MERGE jointree fromlist does not have exactly one entry",
             ));
         }
@@ -295,7 +295,7 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
     } else if let Some(j) = (*source).as_joinexpr() {
         j.rtindex
     } else {
-        return Err(types_error::PgError::error(alloc::format!(
+        return Err(::types_error::PgError::error(alloc::format!(
             "unrecognized source node type: {}",
             (*source).node_tag().0
         )));
@@ -303,15 +303,15 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
 
     // Join the source and target. quals = parse->mergeJoinCondition.
     let join_quals: Option<NodePtr<'_>> = match parse.mergeJoinCondition.as_deref() {
-        Some(expr) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?),
+        Some(expr) => Some(::mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?),
         None => None,
     };
     let joinexpr = ::nodes::rawnodes::JoinExpr {
         jointype,
         isNatural: false,
-        larg: Some(mcx::alloc_in(mcx, Node::mk_from_expr(mcx, target)?)?),
+        larg: Some(::mcx::alloc_in(mcx, Node::mk_from_expr(mcx, target)?)?),
         rarg: Some(source),
-        usingClause: mcx::PgVec::new_in(mcx),
+        usingClause: ::mcx::PgVec::new_in(mcx),
         join_using_alias: None,
         quals: join_quals,
         alias: None,
@@ -321,8 +321,8 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
     // Make the new join be the sole entry in the query's jointree.
     {
         let jt = parse.jointree.as_deref_mut().unwrap();
-        let mut new_fromlist: mcx::PgVec<'_, NodePtr<'_>> = mcx::PgVec::new_in(mcx);
-        new_fromlist.push(mcx::alloc_in(mcx, Node::mk_join_expr(mcx, joinexpr)?)?);
+        let mut new_fromlist: ::mcx::PgVec<'_, NodePtr<'_>> = ::mcx::PgVec::new_in(mcx);
+        new_fromlist.push(::mcx::alloc_in(mcx, Node::mk_join_expr(mcx, joinexpr)?)?);
         jt.fromlist = new_fromlist;
         jt.quals = None;
     }
@@ -359,7 +359,7 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
             let mut node = Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
             rewrite_core::add_nulling_relids(&mut node, Some(&source_relids), &added, mcx);
             if let Some(e) = node.into_expr() {
-                parse.mergeJoinCondition = Some(mcx::alloc_in(mcx, e)?);
+                parse.mergeJoinCondition = Some(::mcx::alloc_in(mcx, e)?);
             }
         }
 
@@ -373,7 +373,7 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
                         &added,
                         mcx,
                     );
-                    action.qual = Some(mcx::alloc_in(mcx, qnode)?);
+                    action.qual = Some(::mcx::alloc_in(mcx, qnode)?);
                 }
                 // add_nulling_relids((Node *) action->targetList, ...): walk
                 // each TargetEntry node in place (descends into tle->expr).
@@ -403,7 +403,7 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
     // Otherwise the join condition is no longer needed.
     if by_source {
         let src_rte = &parse.rtable[(sourcerti - 1) as usize];
-        let mut var = nodes_core::makefuncs::make_whole_row_var(
+        let mut var = ::nodes_core::makefuncs::make_whole_row_var(
             src_rte, sourcerti, 0, false,
         )?;
         var.varnullingrels =
@@ -424,9 +424,9 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
             Some(r) => Some(r?),
             None => None,
         };
-        let combined = nodes_core::makefuncs::make_and_qual(Some(ntest), orig);
+        let combined = ::nodes_core::makefuncs::make_and_qual(Some(ntest), orig);
         parse.mergeJoinCondition = match combined {
-            Some(e) => Some(mcx::alloc_in(mcx, e)?),
+            Some(e) => Some(::mcx::alloc_in(mcx, e)?),
             None => None,
         };
     } else {
@@ -460,7 +460,7 @@ pub fn reduce_outer_joins<'mcx>(
 
     // planner.c shouldn't have called me if no outer joins.
     if !state1.contains_outer {
-        return Err(types_error::PgError::error("so where are the outer joins?"));
+        return Err(::types_error::PgError::error("so where are the outer joins?"));
     }
 
     let mut state2 = ReduceOuterJoinsPass2State {
@@ -474,7 +474,7 @@ pub fn reduce_outer_joins<'mcx>(
         let mut jt_node = Node::mk_from_expr(mcx, core::mem::replace(
             &mut *jt,
             ::nodes::rawnodes::FromExpr {
-                fromlist: mcx::PgVec::new_in(mcx),
+                fromlist: ::mcx::PgVec::new_in(mcx),
                 quals: None,
             },
         ))?;
@@ -536,12 +536,12 @@ fn remove_nulling_relids_in_append_rel_list<'mcx>(
 ) -> PgResult<()> {
     // Collect the NodeIds first (borrow of append_rel_list) to avoid holding it
     // while we mutate the node_arena.
-    let mut ids: Vec<pathnodes::NodeId> = Vec::new();
+    let mut ids: Vec<::pathnodes::NodeId> = Vec::new();
     for appinfo in root.append_rel_list.iter() {
         for &id in appinfo.translated_vars.iter() {
             // A NULL element (dropped parent column) is NodeId::default() (0) and
             // resolves to nothing; skip it (C's `lfirst` over a NULL is a no-op).
-            if id == pathnodes::NodeId::default() {
+            if id == ::pathnodes::NodeId::default() {
                 continue;
             }
             ids.push(id);
@@ -605,7 +605,7 @@ fn reduce_outer_joins_pass1<'mcx>(
         ntag::T_RangeTblRef => {
             let r = jtnode.expect_rangetblref();
             let varno = r.rtindex;
-            result.relids = Some(nodes_core::bitmapset::bms_make_singleton(mcx, varno)?);
+            result.relids = Some(::nodes_core::bitmapset::bms_make_singleton(mcx, varno)?);
         }
         ntag::T_FromExpr => {
             let f = jtnode.expect_fromexpr();
@@ -642,7 +642,7 @@ fn reduce_outer_joins_pass1<'mcx>(
             result.sub_states.push(Box::new(sub_state));
         }
         _ => {
-            return Err(types_error::PgError::error("unrecognized node type"));
+            return Err(::types_error::PgError::error("unrecognized node type"));
         }
     }
 
@@ -672,7 +672,7 @@ fn reduce_outer_joins_pass2<'mcx>(
     // because it's only called on subtrees marked as contains_outer.
     match jtnode.node_tag() {
         ntag::T_RangeTblRef => {
-            return Err(types_error::PgError::error("reached base rel"));
+            return Err(::types_error::PgError::error("reached base rel"));
         }
         ntag::T_FromExpr => {
             // Scan quals to see if we can add any constraints.
@@ -721,7 +721,7 @@ fn reduce_outer_joins_pass2<'mcx>(
             )?;
         }
         _ => {
-            return Err(types_error::PgError::error("unrecognized node type"));
+            return Err(::types_error::PgError::error("unrecognized node type"));
         }
     }
     Ok(())
@@ -784,7 +784,7 @@ fn reduce_outer_joins_pass2_joinexpr<'mcx>(
             // JOIN_RIGHT_SEMI or JOIN_RIGHT_ANTI yet.
         }
         _ => {
-            return Err(types_error::PgError::error("unrecognized join type"));
+            return Err(::types_error::PgError::error("unrecognized join type"));
         }
     }
 
@@ -990,7 +990,7 @@ fn expr_relids_add_member(mut a: ExprRelids, x: i32) -> ExprRelids {
 /// An empty `MultiBitmapset` (C `NIL`).
 #[inline]
 fn empty_mbms<'mcx>(mcx: Mcx<'mcx>) -> MultiBitmapset<'mcx> {
-    mcx::PgVec::new_in(mcx)
+    ::mcx::PgVec::new_in(mcx)
 }
 
 // ===========================================================================

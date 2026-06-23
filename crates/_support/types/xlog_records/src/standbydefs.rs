@@ -2,7 +2,7 @@
 
 use crate::bytes::{bool_at, i32_at, u32_at};
 use types_core::{Oid, TransactionId};
-use types_storage::sinval::SharedInvalMessages;
+use ::types_storage::sinval::SharedInvalMessages;
 
 /// `xl_standby_lock` (`storage/lockdefs.h`):
 /// `{TransactionId xid; Oid dbOid; Oid relOid;}`.

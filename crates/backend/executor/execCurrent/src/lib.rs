@@ -46,7 +46,7 @@ use lsyscache_seams as lsyscache;
 use portalmem_seams as portalmem;
 
 use mcx::{Mcx, PgString};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_CURSOR_STATE,
     ERRCODE_UNDEFINED_CURSOR, ERRCODE_UNDEFINED_OBJECT,
@@ -60,7 +60,7 @@ use ::nodes::nodes::{
     T_SeqScanState, T_SubqueryScanState, T_TidRangeScanState, T_TidScanState,
 };
 use nodes::{CurrentOfExpr, EStateData, ExprContext, PlanStateNode};
-use types_tuple::heaptuple::{item_pointer_is_valid, REFCURSOROID};
+use ::types_tuple::heaptuple::{item_pointer_is_valid, REFCURSOROID};
 
 /// `PORTAL_ONE_SELECT` (`utils/portal.h`, the first `PortalStrategy`
 /// enumerator) — the only strategy `execCurrentOf` accepts.
@@ -86,7 +86,7 @@ fn exec_current_of_seam<'mcx>(
     econtext: ::nodes::EcxtId,
     table_oid: Oid,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<types_tuple::heaptuple::ItemPointerData>> {
+) -> PgResult<Option<::types_tuple::heaptuple::ItemPointerData>> {
     // mcx is Copy; copy it out before borrowing the ExprContext pool.
     let mcx = estate.es_query_cxt;
     let econtext_ref: &ExprContext = estate.ecxt(econtext);

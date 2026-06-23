@@ -14,11 +14,11 @@
 
 use be_secure_common_seams as my_seams;
 use fd_seams as fd_seams;
-use fd_seams::PipeReadLine;
+use ::fd_seams::PipeReadLine;
 use utils_error::{ereport, ErrorLevel};
 use guc_tables::{vars, GucVarAccessors};
-use percentrepl::replace_percent_placeholders;
-use string::pg_strip_crlf;
+use ::percentrepl::replace_percent_placeholders;
+use ::string::pg_strip_crlf;
 use mcx::{Mcx, PgVec};
 use types_error::{ErrorLocation, PgResult, ERRCODE_CONFIG_FILE_ERROR, ERROR, FATAL, LOG};
 
@@ -118,7 +118,7 @@ pub fn run_ssl_passphrase_command<'mcx>(
         PipeReadLine::Line(bytes) => {
             // fgets copied data into buf (up to size-1 bytes).
             let n = bytes.len().min((size - 1).max(0) as usize);
-            buf = mcx::slice_in(mcx, &bytes[..n])?;
+            buf = ::mcx::slice_in(mcx, &bytes[..n])?;
         }
         PipeReadLine::Eof => {
             // fgets returned NULL but !ferror: nothing read, fall through.
@@ -240,7 +240,7 @@ pub fn check_ssl_key_file_permissions(
 /// emit and return `Ok(())`; `ERROR`/`FATAL`/`PANIC` propagate as `Err`.
 fn report<F>(level: ErrorLevel, funcname: &'static str, build: F) -> PgResult<()>
 where
-    F: FnOnce(utils_error::ErrorBuilder) -> utils_error::ErrorBuilder,
+    F: FnOnce(::utils_error::ErrorBuilder) -> ::utils_error::ErrorBuilder,
 {
     build(ereport(level)).finish(ErrorLocation::new(FILENAME, 0, funcname))
 }

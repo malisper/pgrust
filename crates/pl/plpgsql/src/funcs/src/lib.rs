@@ -26,16 +26,16 @@
 
 use core::cell::RefCell;
 
-use spi_seams::spi_freeplan;
-use nodes_core::bitmapset::{bms_add_member, bms_copy, bms_free, bms_is_member};
-use funccache_seams::cfunc_use_count;
-use mcxt_seams::MemoryContextDelete;
+use ::spi_seams::spi_freeplan;
+use ::nodes_core::bitmapset::{bms_add_member, bms_copy, bms_free, bms_is_member};
+use ::funccache_seams::cfunc_use_count;
+use ::mcxt_seams::MemoryContextDelete;
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
-use types_logical::MemoryContextHandle;
+use ::types_error::PgResult;
+use ::types_logical::MemoryContextHandle;
 use ::nodes::bitmapset::Bitmapset;
 use plpgsql::*;
-use types_ri_triggers::SpiPlanPtr;
+use ::types_ri_triggers::SpiPlanPtr;
 
 /// A locally-built `Bitmapset` of datum numbers (`local_dnos`), owned in the
 /// compile-time `Mcx` arena. C's NULL set maps to `None`.

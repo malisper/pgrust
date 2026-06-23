@@ -1,7 +1,7 @@
 //! `set_dummy_rel_pathlist` (allpaths.c:2215).
 
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId};
 
 use pathnode_seams as pathnode;

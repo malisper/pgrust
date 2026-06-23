@@ -5,7 +5,7 @@
 //! comparator's NULL ordering, the compare-result inversion, and the in-crate
 //! binary-heap structure.
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 #[test]
 fn invert_compare_result_matches_c() {

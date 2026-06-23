@@ -54,10 +54,10 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use nodes_core::makefuncs::{make_alias, make_var_from_target_entry};
-use nodes_core::nodefuncs::expression_tree_mutator;
+use ::nodes_core::makefuncs::{make_alias, make_var_from_target_entry};
+use ::nodes_core::nodefuncs::expression_tree_mutator;
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
-use types_core::primitive::Index;
+use ::types_core::primitive::Index;
 use types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::jointype::JoinType;
@@ -212,12 +212,12 @@ fn convert_VALUES_to_ANY<'mcx>(
     // Finally, build ScalarArrayOpExpr at the top of the 'exprs' list.
     // make_SAOP_expr(opno, leftop, exprType(rightop),
     //                linitial_oid(rte->colcollations), inputcollid, exprs, false)
-    let coltype = nodes_core::nodefuncs::expr_type(Some(rightop))?;
+    let coltype = ::nodes_core::nodefuncs::expr_type(Some(rightop))?;
     let arraycollid = rte
         .colcollations
         .first()
         .copied()
-        .unwrap_or(types_core::primitive::InvalidOid);
+        .unwrap_or(::types_core::primitive::InvalidOid);
     clauses::fold::make_SAOP_expr(
         mcx,
         opno,
@@ -316,9 +316,9 @@ fn convert_testexpr_mutator<'mcx>(
 /// the error is propagated immediately after, so this value is never observed.
 fn child_placeholder<'mcx>() -> Expr<'mcx> {
     Expr::CaseTestExpr(::nodes::primnodes::CaseTestExpr {
-        typeId: types_core::primitive::InvalidOid,
+        typeId: ::types_core::primitive::InvalidOid,
         typeMod: -1,
-        collation: types_core::primitive::InvalidOid,
+        collation: ::types_core::primitive::InvalidOid,
     })
 }
 
@@ -702,7 +702,7 @@ fn simplify_EXISTS_query<'mcx>(
         let keep = match &folded {
             Some(Expr::Const(limit_const)) => {
                 // Assert(limit->consttype == INT8OID)
-                debug_assert!(limit_const.consttype == types_core::catalog::INT8OID);
+                debug_assert!(limit_const.consttype == ::types_core::catalog::INT8OID);
                 // !limit->constisnull && DatumGetInt64(limit->constvalue) <= 0
                 !(!limit_const.constisnull && datum_get_int64(&limit_const.constvalue) <= 0)
             }
@@ -713,7 +713,7 @@ fn simplify_EXISTS_query<'mcx>(
         if !keep {
             // Restore the (possibly folded) limitCount and bail.
             query.limitCount = match folded {
-                Some(e) => Some(mcx::alloc_in(mcx, e)?),
+                Some(e) => Some(::mcx::alloc_in(mcx, e)?),
                 None => None,
             };
             return Ok(false);

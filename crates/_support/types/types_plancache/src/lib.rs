@@ -23,7 +23,7 @@
 #![no_std]
 #![allow(non_camel_case_types)]
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 /// `PlanCacheMode` — values for the `plan_cache_mode` GUC (`plancache.h`).
 pub type PlanCacheMode = i32;
@@ -61,7 +61,7 @@ pub const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
 /// stores by value (it never inspects the tag). The full tag table is owned by
 /// `tcop/cmdtag.c`; canonically defined in `types_core` and carried through by
 /// value here.
-pub use types_core::cmdtag::CommandTag;
+pub use ::types_core::cmdtag::CommandTag;
 
 macro_rules! opaque_handle {
     ($(#[$m:meta])* $name:ident, $null_name:ident) => {

@@ -15,7 +15,7 @@
 //!   * `ginInsertValue`    — the public entry point: place-to-page + finish-split
 //!
 //! This is the abstract layer that dispatches each *page action* through the
-//! [`gin::GinBtreeData`] method table. Those callbacks
+//! [`::gin::GinBtreeData`] method table. Those callbacks
 //! (`findChildPage` / `getLeftMostChild` / `isMoveRight` / `findChildPtr` /
 //! `beginPlaceToPage` / `execPlaceToPage` / `prepareDownlink` / `fillRoot`) are
 //! filled by the tree-specific page crates `ginentrypage.c` (entry tree) and
@@ -48,23 +48,23 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
 use page::{PageGetSpecialPointer, PageRef};
 use utils_error::{ereport, PgResult};
-use types_error::error::{DEBUG1, ERROR};
+use ::types_error::error::{DEBUG1, ERROR};
 
-use types_core::primitive::{BlockNumber, OffsetNumber};
+use ::types_core::primitive::{BlockNumber, OffsetNumber};
 use types_core::{InvalidBlockNumber, RmgrId};
 use gin::{
     BeginPlaceToPageResult, GinBtreeData, GinBtreeStack, GinInsertPayload, GinPlaceToPageRC,
     GinStatsData, PtpWorkspace, GIN_DATA, GIN_EXCLUSIVE, GIN_INCOMPLETE_SPLIT, GIN_LEAF,
     GIN_SHARE, GIN_UNLOCK,
 };
-use rel::Relation;
-use types_storage::storage::{Buffer, InvalidBuffer};
-use types_tuple::heaptuple::INVALID_OFFSET_NUMBER as InvalidOffsetNumber;
+use ::rel::Relation;
+use ::types_storage::storage::{Buffer, InvalidBuffer};
+use ::types_tuple::heaptuple::INVALID_OFFSET_NUMBER as InvalidOffsetNumber;
 
 #[cfg(test)]
 mod tests;
@@ -95,7 +95,7 @@ const REGBUF_STANDARD: u8 = 0x04;
 const REGBUF_FORCE_IMAGE: u8 = 0x01;
 
 /// `BLCKSZ`.
-const BLCKSZ: usize = types_core::BLCKSZ;
+const BLCKSZ: usize = ::types_core::BLCKSZ;
 
 // ===========================================================================
 // init_seams — this crate owns no inward seams.
@@ -713,7 +713,7 @@ fn ginPlaceToPage<'mcx>(
                 let newl_opaque = gin_opaque_from_page(&newlpage)?;
                 gin_init_page(
                     &mut root_tmp,
-                    (newl_opaque.flags & !(GIN_LEAF | gin::GIN_COMPRESSED)) as u32,
+                    (newl_opaque.flags & !(GIN_LEAF | ::gin::GIN_COMPRESSED)) as u32,
                     BLCKSZ,
                 )?;
 
@@ -1176,7 +1176,7 @@ fn gin_new_buffer<'mcx>(index: &Relation<'mcx>) -> PgResult<Buffer> {
 
 /// `PredicateLockPageSplit(index, oldblkno, newblkno)` — the `predicate.c` seam.
 fn predicate_lock_page_split(
-    index_oid: types_core::Oid,
+    index_oid: ::types_core::Oid,
     old_blkno: BlockNumber,
     new_blkno: BlockNumber,
 ) -> PgResult<()> {
@@ -1201,13 +1201,13 @@ fn xlog_register_buffer(block_id: u8, buffer: Buffer, flags: u8) -> PgResult<()>
 }
 
 /// `XLogInsert(rmid, info)`.
-fn xlog_insert_record(rmid: RmgrId, info: u8) -> PgResult<types_core::XLogRecPtr> {
+fn xlog_insert_record(rmid: RmgrId, info: u8) -> PgResult<::types_core::XLogRecPtr> {
     xloginsert_seams::xlog_insert_record::call(rmid, info)
 }
 
 /// `BlockIdSet(&bid, blkno)` → on-disk `BlockIdData` bytes (`bi_hi`, `bi_lo`).
 fn block_id_bytes(blkno: BlockNumber) -> [u8; 4] {
-    let bid = types_tuple::heaptuple::BlockIdData::new(blkno);
+    let bid = ::types_tuple::heaptuple::BlockIdData::new(blkno);
     let mut out = [0u8; 4];
     out[0..2].copy_from_slice(&bid.bi_hi.to_ne_bytes());
     out[2..4].copy_from_slice(&bid.bi_lo.to_ne_bytes());
@@ -1249,7 +1249,7 @@ fn gin_init_page(page: &mut [u8], flags: u32, page_size: usize) -> PgResult<()> 
     ::page::PageInit(
         page,
         page_size,
-        core::mem::size_of::<gin::GinPageOpaqueData>(),
+        core::mem::size_of::<::gin::GinPageOpaqueData>(),
     )?;
     // GinPageGetOpaque(page)->flags = flags; rightlink = InvalidBlockNumber.
     set_page_rightlink(page, InvalidBlockNumber)?;

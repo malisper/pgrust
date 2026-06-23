@@ -37,8 +37,8 @@ use pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgtext};
 use mcx::{Mcx, PgString, PgVec};
 use datum::{Bytea, Datum};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
-use types_rangetypes::RangeTypeP;
-use stringinfo::StringInfo;
+use ::types_rangetypes::RangeTypeP;
+use ::stringinfo::StringInfo;
 
 // ===========================================================================
 // Dummy error helpers (the PSEUDOTYPE_DUMMY_* macro expansions).
@@ -97,7 +97,7 @@ pub fn cstring_recv<'mcx>(mcx: Mcx<'mcx>, buf: &mut StringInfo<'_>) -> PgResult<
 /// strlen(str))`, `PG_RETURN_BYTEA_P(pq_endtypsend(&buf))`.
 pub fn cstring_send<'mcx>(mcx: Mcx<'mcx>, str: &str) -> PgResult<Bytea<'mcx>> {
     let mut buf = pq_begintypsend(mcx)?;
-    pqformat::pq_sendtext(&mut buf, str.as_bytes())?;
+    ::pqformat::pq_sendtext(&mut buf, str.as_bytes())?;
     Ok(pq_endtypsend(buf))
 }
 

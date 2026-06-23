@@ -42,7 +42,7 @@ use execUtils_seams as execUtils;
 use nodes_core_seams as bitmapset;
 use postgres_seams as tcop_postgres;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::execnodes::ScanStateData;
 use ::nodes::nodectescan::CteScanState;
 use ::nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;

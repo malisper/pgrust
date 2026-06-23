@@ -10,10 +10,10 @@
 //! strict / retset are transcribed from `pg_proc.dat` (every row here is
 //! `proisstrict => 't'`, none `proretset`).
 
-use mcx::MemoryContext;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::mcx::MemoryContext;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::pg_lsn;
@@ -237,7 +237,7 @@ const CURRENT_TRIGGER: types_ri_triggers::TriggerDataRef = types_ri_triggers::Tr
 fn fc_suppress_redundant_updates_trigger(
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Datum> {
-    let m = mcx::MemoryContext::new("suppress_redundant_updates_trigger fmgr scratch");
+    let m = ::mcx::MemoryContext::new("suppress_redundant_updates_trigger fmgr scratch");
     let mcx = m.mcx();
 
     let rettuple = crate::trigfuncs::suppress_redundant_updates_trigger(mcx, CURRENT_TRIGGER)?;

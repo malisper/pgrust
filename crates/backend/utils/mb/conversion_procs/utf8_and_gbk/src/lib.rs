@@ -21,9 +21,9 @@ mod tables;
 use conv_string_helpers::{
     check_encoding_conversion_args, ConversionResult, LocalToUtf, UtfToLocal,
 };
-use conv_string_helpers::make_conversion_builtin;
-use types_error::PgResult;
-use types_wchar::encoding::{pg_enc, PG_GBK, PG_UTF8};
+use ::conv_string_helpers::make_conversion_builtin;
+use ::types_error::PgResult;
+use ::types_wchar::encoding::{pg_enc, PG_GBK, PG_UTF8};
 
 /// `gbk_to_utf8` — convert a GBK string to UTF-8.
 pub fn gbk_to_utf8(

@@ -14,10 +14,10 @@
 
 #![allow(non_snake_case)]
 
-use nodes_core::makefuncs::make_var;
-use nodes_core::nodefuncs::{expr_collation, expr_type};
-use equalfuncs_seams::equal_expr;
-use indxpath::operand::strip_phvs_in_index_operand;
+use ::nodes_core::makefuncs::make_var;
+use ::nodes_core::nodefuncs::{expr_collation, expr_type};
+use ::equalfuncs_seams::equal_expr;
+use ::indxpath::operand::strip_phvs_in_index_operand;
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, PlannerInfo};
@@ -31,8 +31,8 @@ const INDEX_VAR: i32 = -3;
 /// Convert an indexqual expression to a `Var` referencing the index column.
 ///
 /// `root` is needed to resolve the arena handles the trimmed [`IndexOptInfo`]
-/// carries: `index.indexprs` is a list of [`pathnodes::NodeId`] expression
-/// handles, and `index.rel` is a [`pathnodes::RelId`] whose `relid` (the
+/// carries: `index.indexprs` is a list of [`::pathnodes::NodeId`] expression
+/// handles, and `index.rel` is a [`::pathnodes::RelId`] whose `relid` (the
 /// underlying RT index) the simple-column case cross-checks against.
 pub fn fix_indexqual_operand<'mcx>(
     root: &PlannerInfo,

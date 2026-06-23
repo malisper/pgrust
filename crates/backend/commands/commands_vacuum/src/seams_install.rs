@@ -74,12 +74,12 @@ pub fn init_seams() {
     // open relation always has a name; a missing pg_class row is the C cache
     // lookup failure.
     vacuum::relation_get_relation_name::set(|relid| {
-        let cx = mcx::MemoryContext::new("vacuum_relation_get_relation_name");
+        let cx = ::mcx::MemoryContext::new("vacuum_relation_get_relation_name");
         let name: alloc::string::String = {
             match lsyscache_seams::get_rel_name::call(cx.mcx(), relid)? {
                 Some(name) => name.to_string(),
                 None => {
-                    return Err(types_error::PgError::error(alloc::format!(
+                    return Err(::types_error::PgError::error(alloc::format!(
                         "cache lookup failed for relation {relid}"
                     )))
                 }
@@ -93,7 +93,7 @@ pub fn init_seams() {
     // held) to read the relcache fields the macro needs, then drop the handle.
     vacuum::relation_is_other_temp::set(|relid| {
         use relcache_seams as relcache;
-        let cx = mcx::MemoryContext::new("vacuum_relation_is_other_temp");
+        let cx = ::mcx::MemoryContext::new("vacuum_relation_is_other_temp");
         let rel = table_seam::table_open::call(cx.mcx(), relid, NoLock)?;
         let other_temp = relcache::rd_rel_relpersistence::call(&rel)?
             == types_tuple::access::RELPERSISTENCE_TEMP as i8
@@ -123,12 +123,12 @@ pub fn init_seams() {
     });
     // vac_open_indexes: `RelationGetIndexList(rel)` by OID (relcache.c).
     vacuum::relation_get_index_list::set(|relid| {
-        relcache::derived::RelationGetIndexList(relid)
+        ::relcache::derived::RelationGetIndexList(relid)
     });
     // expandTableLikeClause INCLUDING STATISTICS: `RelationGetStatExtList(rel)`
     // by OID (relcache.c).
     vacuum::relation_get_stat_ext_list::set(|relid| {
-        relcache::derived::RelationGetStatExtList(relid)
+        ::relcache::derived::RelationGetStatExtList(relid)
     });
     // vac_open_indexes: `index_open(indexoid, lockmode)` (indexam.c). C's
     // `vac_open_indexes` holds each opened index `Relation *` in `Irel[]` (one
@@ -147,7 +147,7 @@ pub fn init_seams() {
     // vacuum_open_relation fix).
     vacuum::index_open::set(|indexoid, lockmode| {
         use indexam_seams as indexam;
-        let cx = mcx::MemoryContext::new("vacuum_index_open");
+        let cx = ::mcx::MemoryContext::new("vacuum_index_open");
         let irel = indexam::index_open::call(cx.mcx(), indexoid, lockmode)?;
         let indisready = irel.rd_index.as_ref().is_some_and(|i| i.indisready);
         // Release this open's relcache pin (rd_refcnt -> back down) but keep the
@@ -168,7 +168,7 @@ pub fn init_seams() {
     // a non-`NoLock` lockmode) unlocked, matching C's `index_close(rel,lockmode)`.
     vacuum::index_close::set(|indexoid, lockmode| {
         use indexam_seams as indexam;
-        let cx = mcx::MemoryContext::new("vacuum_index_close");
+        let cx = ::mcx::MemoryContext::new("vacuum_index_close");
         let irel = indexam::index_open::call(cx.mcx(), indexoid, NoLock)?;
         // indexam.c `index_close(relation, lockmode)` is just `relation_close`
         // (the relcache pin decrement + conditional lock release); the index-kind
@@ -178,10 +178,10 @@ pub fn init_seams() {
     // vacuum_get_cutoffs: the autovacuum freeze-max-age GUCs (autovacuum.c owns
     // the `conf->variable` backing + installs the GucVarAccessors; read the slot).
     vacuum::autovacuum_freeze_max_age::set(|| {
-        Ok(guc_tables::vars::autovacuum_freeze_max_age.read())
+        Ok(::guc_tables::vars::autovacuum_freeze_max_age.read())
     });
     vacuum::autovacuum_multixact_freeze_max_age::set(|| {
-        Ok(guc_tables::vars::autovacuum_multixact_freeze_max_age.read())
+        Ok(::guc_tables::vars::autovacuum_multixact_freeze_max_age.read())
     });
     vacuum::set_vacuum_cost_balance_local::set(crate::set_vacuum_cost_balance_local_impl);
     vacuum::add_vacuum_cost_balance_local::set(crate::add_vacuum_cost_balance_local_impl);
@@ -224,7 +224,7 @@ pub fn init_seams() {
     // bool (whether an aggressive freeze is needed), which the CLUSTER caller
     // discards, so we hand back just the populated cutoffs struct.
     vacuum::vacuum_get_cutoffs::set(|old_heap| {
-        use types_vacuum::vacuum::{VacuumCutoffs, VacuumParams};
+        use ::types_vacuum::vacuum::{VacuumCutoffs, VacuumParams};
         let params = VacuumParams::default();
         let mut cutoffs = VacuumCutoffs::default();
         crate::vacuum_get_cutoffs(old_heap.rd_id, params, &mut cutoffs)?;
@@ -278,7 +278,7 @@ pub fn init_seams() {
         // Count` (+1) stays held — the relcache-resource analog of the lock
         // guard's `.keep()`. The matching `relation_close(rel_handle, ...)` in
         // vacuum_rel releases it (rd_refcnt 1 -> 0). The lock is likewise kept.
-        let cx = mcx::MemoryContext::new("vacuum_open_relation");
+        let cx = ::mcx::MemoryContext::new("vacuum_open_relation");
         let opened = relation_seam::try_relation_open::call(cx.mcx(), relid, lmode)?;
         Ok(opened.map(|rel| {
             let oid = rel.rd_id;
@@ -394,7 +394,7 @@ pub fn init_seams() {
         // AmAutoVacuumWorkerProcess() (miscadmin.h): MyBackendType == B_AUTOVAC_WORKER.
         vacuum::am_autovacuum_worker_process::set(|| {
             Ok(miscinit_seams::my_backend_type::call()
-                == types_core::init::BackendType::AutovacWorker)
+                == ::types_core::init::BackendType::AutovacWorker)
         });
         vacuum::track_cost_delay_timing::set(|| Ok(vars::track_cost_delay_timing.read()));
         vacuum::vacuum_truncate::set(|| Ok(vars::vacuum_truncate.read()));
@@ -430,7 +430,7 @@ pub fn init_seams() {
 ///    same thread-locals `vacuum_delay_point` reads).
 fn install_autovacuum_ext_cost_seams() {
     use autovacuum_ext_seams as avext;
-    use guc_tables::vars;
+    use ::guc_tables::vars;
 
     avext::vacuum_cost_delay_guc::set(|| vars::VacuumCostDelay.read());
     avext::vacuum_cost_limit_guc::set(|| vars::VacuumCostLimit.read());
@@ -458,7 +458,7 @@ fn install_autovacuum_ext_cost_seams() {
     });
 }
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use ::nodes::nodes::Node;
 use ::nodes::parsestmt::ParseState;
 
@@ -480,11 +480,11 @@ fn exec_vacuum_arm<'mcx>(
 // --- signature adapters: the vacuumlazy-seams shapes differ slightly from the
 //     vacuum.c function signatures (lock mode pre-bound; out-params returned). ---
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::lock::{NoLock, RowExclusiveLock};
-use types_vacuum::vacuumlazy::UpdateRelStatsArgs;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::lock::{NoLock, RowExclusiveLock};
+use ::types_vacuum::vacuumlazy::UpdateRelStatsArgs;
 use table_seams as table_seam;
 
 /// `vac_open_indexes(rel, RowExclusiveLock, &nindexes, &indrels)` — open all the
@@ -531,7 +531,7 @@ fn vac_close_indexes_nolock<'mcx>(indrels: alloc::vec::Vec<Relation<'mcx>>) -> P
 /// releases its re-opened indexes with the same lock mode it opened them under.
 fn vac_close_indexes_lock_impl(
     indrels: alloc::vec::Vec<Oid>,
-    lockmode: types_storage::lock::LOCKMODE,
+    lockmode: ::types_storage::lock::LOCKMODE,
 ) -> PgResult<()> {
     crate::vac_close_indexes(&indrels, lockmode)
 }

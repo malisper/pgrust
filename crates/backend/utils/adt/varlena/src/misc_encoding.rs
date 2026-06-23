@@ -28,11 +28,11 @@
 //! DESIGN HINT) rather than routed through a seam.
 
 use mcx::{Mcx, PgVec};
-use types_core::PgWChar;
+use ::types_core::PgWChar;
 use types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR,
 };
-use types_wchar::encoding::PG_UTF8;
+use ::types_wchar::encoding::PG_UTF8;
 
 use mbutils_seams as mb;
 use unicode_category_seams as ucat;
@@ -443,7 +443,7 @@ pub fn levenshtein_closest_match<'mcx>(
 
     // C:6504-6508 getClosestMatch -> state->match.
     match best {
-        Some(b) => Ok(Some(mcx::slice_in(mcx, b)?)),
+        Some(b) => Ok(Some(::mcx::slice_in(mcx, b)?)),
         None => Ok(None),
     }
 }
@@ -551,7 +551,7 @@ fn input_to_wchars<'mcx>(
     size: usize,
 ) -> PgResult<PgVec<'mcx, PgWChar>> {
     // C:6621-6628 convert to pg_wchar.
-    let mut input_chars = mcx::vec_with_capacity_in(mcx, size)?;
+    let mut input_chars = ::mcx::vec_with_capacity_in(mcx, size)?;
     let mut p = input;
     for _ in 0..size {
         input_chars.push(utf8_to_unicode(p));
@@ -592,7 +592,7 @@ pub fn unicode_normalize_func<'mcx>(
     }
 
     // C:6644-6653 allocate result and write each char as UTF-8.
-    let mut result = mcx::vec_with_capacity_in(mcx, out_size)?;
+    let mut result = ::mcx::vec_with_capacity_in(mcx, out_size)?;
     for &wp in output_chars.iter() {
         let mut buf = [0u8; 4];
         unicode_to_utf8(wp, &mut buf);
@@ -703,7 +703,7 @@ pub fn unistr<'mcx>(mcx: Mcx<'mcx>, t: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     // C:6776 initStringInfo(&str); (the working buffer is charged to mcx; the
     // result is the same buffer handed back, so no copy-out is needed — C
     // copies because the StringInfo is freed, but our buffer IS the payload.)
-    let mut str: PgVec<u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut str: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
 
     // C:6778 while (len > 0)
     while pos < total {

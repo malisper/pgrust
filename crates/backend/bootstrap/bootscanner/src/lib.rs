@@ -16,9 +16,9 @@
 //! token numbers and keep the C `int` type via [`core::ffi::c_int`].
 
 use utils_error::{PgError, PgResult};
-use guc_file::DeescapeQuotedString;
+use ::guc_file::DeescapeQuotedString;
 use core::ffi::c_int;
-use types_error::ERROR;
+use ::types_error::ERROR;
 
 pub const ID: c_int = 258;
 pub const COMMA: c_int = 259;

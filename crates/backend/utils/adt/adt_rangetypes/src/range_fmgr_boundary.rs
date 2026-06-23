@@ -19,10 +19,10 @@
 //! (`AggCheckCallContext`), the sanctioned seam-and-panic for an unported dep.
 
 use fmgr_core::{get_fn_expr_argtype, get_fn_expr_rettype};
-use mcx::Mcx;
-use datum::Datum;
+use ::mcx::Mcx;
+use ::datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
-use fmgr::FunctionCallInfoBaseData;
+use ::fmgr::FunctionCallInfoBaseData;
 use types_rangetypes::{
     RangeBound, RangeType, RangeTypeP, RANGE_EMPTY, RANGE_LB_INC, RANGE_LB_INF, RANGE_UB_INC,
     RANGE_UB_INF,
@@ -125,7 +125,7 @@ fn stage_elem_arg<'mcx>(
 fn materialize_byref_word<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum> {
     use allocator_api2::alloc::Allocator;
     use core::alloc::Layout;
-    mcx::check_alloc_size(image.len())?;
+    ::mcx::check_alloc_size(image.len())?;
     let layout = Layout::from_size_align(image.len().max(1), 8)
         .expect("valid by-ref element image layout");
     let block = mcx.allocate(layout).map_err(|_| mcx.oom(image.len()))?;
@@ -187,7 +187,7 @@ fn range_type_get_oid(r: RangeTypeP<'_>) -> types_core::primitive::Oid {
 /// `Datum` is the null placeholder word; the caller reads the referent from
 /// `fcinfo->ref_result`.
 fn return_range_p(fcinfo: &mut FunctionCallInfoBaseData, range: RangeTypeP<'_>) -> Datum {
-    fcinfo.set_ref_result(fmgr::RefPayload::Varlena(
+    fcinfo.set_ref_result(::fmgr::RefPayload::Varlena(
         crate::range_repr_serialize::range_to_varlena_bytes(range),
     ));
     Datum::null()
@@ -247,7 +247,7 @@ pub fn range_out<'mcx>(
     let cache = get_range_io_data(range_type_get_oid(range), IOFuncSelector::Output)?;
     let output_str = range_out_kernel(mcx, &cache, range)?;
     // PG_RETURN_CSTRING(output_str): by-ref cstring result.
-    fcinfo.set_ref_result(fmgr::RefPayload::Cstring(output_str));
+    fcinfo.set_ref_result(::fmgr::RefPayload::Cstring(output_str));
     Ok(Datum::null())
 }
 
@@ -279,7 +279,7 @@ pub fn range_send<'mcx>(
     let cache = get_range_io_data(range_type_get_oid(range), IOFuncSelector::Send)?;
     let bytes = range_send_kernel(mcx, &cache, range)?;
     // PG_RETURN_BYTEA_P(...): by-ref bytea result.
-    fcinfo.set_ref_result(fmgr::RefPayload::Varlena(bytes));
+    fcinfo.set_ref_result(::fmgr::RefPayload::Varlena(bytes));
     Ok(Datum::null())
 }
 
@@ -394,9 +394,9 @@ fn return_elem<'mcx>(
                 .map(|e| e.type_id)
                 .unwrap_or_default();
             let payload = if lsyscache_seams::type_is_rowtype::call(elem_oid)? {
-                fmgr::RefPayload::Composite(b.as_slice().to_vec())
+                ::fmgr::RefPayload::Composite(b.as_slice().to_vec())
             } else {
-                fmgr::RefPayload::Varlena(b.as_slice().to_vec())
+                ::fmgr::RefPayload::Varlena(b.as_slice().to_vec())
             };
             fcinfo.set_ref_result(payload);
             Ok(Datum::null())

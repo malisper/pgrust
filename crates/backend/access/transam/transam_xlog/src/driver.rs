@@ -20,15 +20,15 @@
 
 extern crate std;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
-use types_storage::storage::{LW_EXCLUSIVE, LW_SHARED};
-use wal::xlog_consts::{RecoveryState, XLOG_BLCKSZ};
+use ::types_storage::storage::{LW_EXCLUSIVE, LW_SHARED};
+use ::wal::xlog_consts::{RecoveryState, XLOG_BLCKSZ};
 
 use fd_seams as fd;
 use lwlock as lwlock;
-use init_small::globals;
-use guc_tables::vars;
+use ::init_small::globals;
+use ::guc_tables::vars;
 
 use crate::shmem::{
     self, logwrt_result, refresh_xlog_write_result, wal_segment_size, xlog_ctl, XLogCtlData,
@@ -206,7 +206,7 @@ pub fn CheckXLogRemoved(segno: XLogSegNo, tli: TimeLineID) -> PgResult<()> {
 
     if segno <= last_removed_seg_no {
         let filename = XLogFileName(tli, segno, wal_segment_size());
-        return Err(utils_error::PgError::error(std::format!(
+        return Err(::utils_error::PgError::error(std::format!(
             "requested WAL segment {filename} has already been removed"
         )));
     }

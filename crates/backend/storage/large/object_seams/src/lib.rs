@@ -9,12 +9,12 @@
 //! `init_seams()`; until those consumers land a call panics loudly.
 //!
 //! The open descriptor crosses as the owned
-//! [`types_storage::large_object::LargeObjectDesc`]; read/write buffers cross as
+//! [`::types_storage::large_object::LargeObjectDesc`]; read/write buffers cross as
 //! owned slices (the C `char *buf` + `int nbytes`).
 
 use types_core::{int64, Oid};
-use types_error::PgResult;
-use types_storage::large_object::LargeObjectDesc;
+use ::types_error::PgResult;
+use ::types_storage::large_object::LargeObjectDesc;
 
 seam_core::seam!(
     /// `close_lo_relation(isCommit)` (inv_api.c): clean up the single

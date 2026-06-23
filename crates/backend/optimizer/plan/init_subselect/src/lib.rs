@@ -1,10 +1,10 @@
 //! `backend/optimizer/plan/initsplan.c` — target list, group by, qualification
 //! and joininfo initialization, ported 1:1 over this repo's planner arena +
-//! [`PlannerRun`](pathnodes::planner_run::PlannerRun) resolver model.
+//! [`PlannerRun`](::pathnodes::planner_run::PlannerRun) resolver model.
 //!
-//! Every `RelOptInfo *` is a [`RelId`](pathnodes::RelId), every
-//! `RestrictInfo *` a [`RinfoId`](pathnodes::RinfoId), and every
-//! expression a [`NodeId`](pathnodes::NodeId) into the planner node arena.
+//! Every `RelOptInfo *` is a [`RelId`](::pathnodes::RelId), every
+//! `RestrictInfo *` a [`RinfoId`](::pathnodes::RinfoId), and every
+//! expression a [`NodeId`](::pathnodes::NodeId) into the planner node arena.
 //! `Relids` set algebra is reached through `backend-optimizer-util-relnode`
 //! seams; equivclass / joininfo / lsyscache / nodeFuncs through their seam
 //! crates; and the parse tree (`parse->jointree`/`rtable`/`targetList`) through
@@ -24,7 +24,7 @@
 
 extern crate alloc;
 
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, Relids, SpecialJoinInfo};
 
 pub mod baserels;
@@ -49,7 +49,7 @@ pub mod subplan;
 /// takes effect here too, rather than a never-written local mirror.
 #[inline]
 pub fn enable_material() -> bool {
-    guc_tables::vars::enable_material.read()
+    ::guc_tables::vars::enable_material.read()
 }
 
 /* ==========================================================================
@@ -59,7 +59,7 @@ pub fn enable_material() -> bool {
 /// `int from_collapse_limit` (GUC) backing storage (optimizer.h extern;
 /// allocgocon.c `conf->variable`). FROM-list collapse threshold; boot_val 8.
 /// This is the owner-held `conf->variable` the GUC engine reads/writes through
-/// the installed [`GucVarAccessors`](guc_tables::GucVarAccessors).
+/// the installed [`GucVarAccessors`](::guc_tables::GucVarAccessors).
 pub static mut FROM_COLLAPSE_LIMIT: i32 = 8;
 /// `int join_collapse_limit` (GUC) backing storage. Explicit-JOIN collapse
 /// threshold; boot_val 8. Owner-held `conf->variable` for the GUC engine.
@@ -131,7 +131,7 @@ pub enum JtNodeKind<'mcx> {
     /// `JoinExpr` — carries its `jointype`, `rtindex`, and an owned clone of its
     /// `quals` (implicit-AND list).
     JoinExpr {
-        jointype: pathnodes::JoinType,
+        jointype: ::pathnodes::JoinType,
         rtindex: i32,
         quals: alloc::vec::Vec<nodes::primnodes::Expr<'mcx>>,
     },

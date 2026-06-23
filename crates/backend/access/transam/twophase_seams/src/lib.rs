@@ -3,8 +3,8 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 use types_core::{Oid, RepOriginId, Size, TimestampTz, TransactionId, XLogRecPtr};
-use types_error::PgResult;
-pub use wal::xact_records::StartPrepareArgs;
+use ::types_error::PgResult;
+pub use ::wal::xact_records::StartPrepareArgs;
 
 seam_core::seam!(
     /// `StandbyTransactionIdIsPrepared(xid)` — true if `xid` is a prepared
@@ -28,7 +28,7 @@ seam_core::seam!(
     pub fn two_phase_get_dummy_proc_number(
         xid: TransactionId,
         lock_held: bool,
-    ) -> PgResult<types_core::ProcNumber>
+    ) -> PgResult<::types_core::ProcNumber>
 );
 
 seam_core::seam!(
@@ -39,7 +39,7 @@ seam_core::seam!(
     /// xact shares the vxid (caller re-invokes to lock them all). Consumed by
     /// lock.c's `XactLockForVirtualXact`.
     pub fn two_phase_get_xid_by_virtual_xid(
-        vxid: (types_core::ProcNumber, u32),
+        vxid: (::types_core::ProcNumber, u32),
     ) -> PgResult<(TransactionId, bool)>
 );
 

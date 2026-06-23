@@ -4,7 +4,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use snapshot::SnapshotData;
+use ::snapshot::SnapshotData;
 
 /// `SysScanDescData` (`access/genam.h`).
 ///

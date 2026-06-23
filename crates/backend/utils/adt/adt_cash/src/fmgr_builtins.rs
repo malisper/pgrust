@@ -11,8 +11,8 @@
 //! dispatch resolves them. OIDs / nargs / strict / retset are transcribed from
 //! `pg_proc.dat` (all rows here are `proisstrict => 't'` and not `proretset`).
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------

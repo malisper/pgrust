@@ -7,18 +7,18 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use bufmgr_seams::with_buffer_page;
+use ::bufmgr_seams::with_buffer_page;
 use page::{
     ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid, ItemPointerSet,
     ItemPointerSetInvalid,
 };
 use utils_error::{ereport, PgError};
-use types_error::error::ERROR;
-use types_core::primitive::{BlockNumber, OffsetNumber};
-use types_error::PgResult;
-use rel::Relation;
-use types_storage::buf::Buffer;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_error::error::ERROR;
+use ::types_core::primitive::{BlockNumber, OffsetNumber};
+use ::types_error::PgResult;
+use ::rel::Relation;
+use ::types_storage::buf::Buffer;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::brin_page::{CONTENTS_OFFSET, SIZEOF_ITEM_POINTER_DATA};
 
@@ -169,7 +169,7 @@ fn edit_failed() -> PgError {
 /// `BufferIsValid(buffer)`.
 #[inline]
 pub fn buffer_is_valid(buffer: Buffer) -> bool {
-    types_storage::buf::BufferIsValid(buffer)
+    ::types_storage::buf::BufferIsValid(buffer)
 }
 
 /// `MAXALIGN(x)`.
@@ -252,7 +252,7 @@ pub fn encode_xl_brin_desummarize(
 /// index: inconsistent range map"))`.
 pub fn corrupted_inconsistent() -> PgError {
     ereport(ERROR)
-        .errcode(types_error::error::ERRCODE_INDEX_CORRUPTED)
+        .errcode(::types_error::error::ERRCODE_INDEX_CORRUPTED)
         .errmsg("corrupted BRIN index: inconsistent range map")
         .into_error()
 }
@@ -260,7 +260,7 @@ pub fn corrupted_inconsistent() -> PgError {
 /// The `errmsg_internal` variant (brin_revmap.c:258).
 pub fn corrupted_inconsistent_internal() -> PgError {
     ereport(ERROR)
-        .errcode(types_error::error::ERRCODE_INDEX_CORRUPTED)
+        .errcode(::types_error::error::ERRCODE_INDEX_CORRUPTED)
         .errmsg_internal("corrupted BRIN index: inconsistent range map")
         .into_error()
 }
@@ -276,7 +276,7 @@ pub fn elog_revmap_does_not_cover(heap_blk: BlockNumber) -> PgError {
 /// type 0x%04X in BRIN index \"%s\" block %u", ...))`.
 pub fn unexpected_page_type(page_ty: u16, relname: &str, blkno: BlockNumber) -> PgError {
     ereport(ERROR)
-        .errcode(types_error::error::ERRCODE_INDEX_CORRUPTED)
+        .errcode(::types_error::error::ERRCODE_INDEX_CORRUPTED)
         .errmsg(format!(
             "unexpected page type 0x{page_ty:04X} in BRIN index \"{relname}\" block {blkno}"
         ))
@@ -287,7 +287,7 @@ pub fn unexpected_page_type(page_ty: u16, relname: &str, blkno: BlockNumber) -> 
 /// size %zu exceeds maximum %zu for index \"%s\"", ...))`.
 pub fn index_row_size_error(sz: usize, max: usize, relname: &str) -> PgError {
     ereport(ERROR)
-        .errcode(types_error::error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
+        .errcode(::types_error::error::ERRCODE_PROGRAM_LIMIT_EXCEEDED)
         .errmsg(format!(
             "index row size {sz} exceeds maximum {max} for index \"{relname}\""
         ))
@@ -311,7 +311,7 @@ pub fn elog_failed_add_new_page() -> PgError {
 /// OOM during a fallible page-item copy (AGENTS.md: no abort on OOM).
 pub fn oom_error() -> PgError {
     ereport(ERROR)
-        .errcode(types_error::error::ERRCODE_OUT_OF_MEMORY)
+        .errcode(::types_error::error::ERRCODE_OUT_OF_MEMORY)
         .errmsg("out of memory")
         .into_error()
 }

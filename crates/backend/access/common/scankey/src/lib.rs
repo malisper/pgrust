@@ -11,11 +11,11 @@
 #![allow(non_snake_case)]
 
 use fmgr_seams as fmgr_seams;
-use types_core::catalog::C_COLLATION_OID;
-use types_core::fmgr::FmgrInfo;
+use ::types_core::catalog::C_COLLATION_OID;
+use ::types_core::fmgr::FmgrInfo;
 use types_core::{AttrNumber, InvalidOid, Oid, RegProcedure};
-use types_error::PgResult;
-use types_scan::scankey::{ScanKeyData, StrategyNumber, SK_SEARCHNOTNULL, SK_SEARCHNULL};
+use ::types_error::PgResult;
+use ::types_scan::scankey::{ScanKeyData, StrategyNumber, SK_SEARCHNOTNULL, SK_SEARCHNULL};
 use types_tuple::heaptuple::Datum;
 
 /// `ScanKeyEntryInitialize(entry, flags, attributeNumber, strategy, subtype,
@@ -116,6 +116,6 @@ pub fn ScanKeyInit<'mcx>(
     // cross the seam (it embeds the C function pointer); the lookup half runs
     // behind the seam and the carrier records the resolved function's OID.
     fmgr_seams::fmgr_info_check::call(procedure)?;
-    entry.sk_func = types_core::fmgr::FmgrInfo { fn_oid: procedure, ..Default::default() };
+    entry.sk_func = ::types_core::fmgr::FmgrInfo { fn_oid: procedure, ..Default::default() };
     Ok(())
 }

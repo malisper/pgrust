@@ -33,28 +33,28 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::{Expr, NOT_EXPR, OR_EXPR};
-use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{
     Bitmapset, JoinType, NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
 };
 
 use statistics::{MVDependencies, MVDependency, STATS_EXT_DEPENDENCIES};
 
-use types_catalog::pg_statistic_ext::{
+use ::types_catalog::pg_statistic_ext::{
     Anum_pg_statistic_ext_data_stxddependencies, Anum_pg_statistic_ext_data_stxdinherit,
     Anum_pg_statistic_ext_data_stxoid, StatisticExtDataRelationId,
     StatisticExtDataStxoidInhIndexId,
 };
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::AccessShareLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::Datum;
 
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
-use table::table_open;
+use ::table::table_open;
 use dependencies as deps;
 
 use nodeFuncs_seams as nodefuncs;
@@ -62,8 +62,8 @@ use path_small_seams as sel_seam;
 use relnode_seams as bms;
 use lsyscache_seams as lsyscache;
 
-use types_core::fmgr::F_OIDEQ;
-use types_core::primitive::Oid;
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::primitive::Oid;
 
 /// `get_oprrest(F_EQSEL)` — the equality-selectivity estimator's pg_proc OID
 /// (pg_proc.dat: `eqsel` = 101). dependencies.c only accepts `=`.
@@ -659,7 +659,7 @@ fn statext_dependencies_load(
         &mut skey[1],
         Anum_pg_statistic_ext_data_stxdinherit,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_BOOLEQ,
+        ::types_core::fmgr::F_BOOLEQ,
         Datum::from_bool(inh),
     )?;
 

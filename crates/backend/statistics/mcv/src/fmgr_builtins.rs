@@ -15,9 +15,9 @@
 //! table (C: `fmgr_builtins[]`). OIDs / nargs / strict / retset are transcribed
 //! exactly from `pg_proc.dat` (all strict, none retset).
 
-use mcx::MemoryContext;
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::mcx::MemoryContext;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 const VARHDRSZ: usize = 4;
@@ -57,7 +57,7 @@ fn ret_cstring(fcinfo: &mut FunctionCallInfoBaseData, mut bytes: Vec<u8>) -> Dat
 fn ret_bytea(fcinfo: &mut FunctionCallInfoBaseData, payload: &[u8]) -> Datum {
     let total = payload.len() + VARHDRSZ;
     let mut img = Vec::with_capacity(total);
-    img.extend_from_slice(&datum::varlena::set_varsize_4b(total));
+    img.extend_from_slice(&::datum::varlena::set_varsize_4b(total));
     img.extend_from_slice(payload);
     fcinfo.set_ref_result(RefPayload::Varlena(img));
     Datum::from_usize(0)

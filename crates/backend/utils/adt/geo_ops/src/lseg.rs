@@ -3,8 +3,8 @@
 //! The fmgr shims (`lseg_in`/`lseg_out`/`lseg_recv`/`lseg_send`) live in
 //! [`crate::io`].
 
-use types_core::geo::{Point, LINE, LSEG};
-use types_error::PgResult;
+use ::types_core::geo::{Point, LINE, LSEG};
+use ::types_error::PgResult;
 
 use crate::f8::{float8_div, float8_pl};
 use crate::line::{line_construct, line_interpt_line};

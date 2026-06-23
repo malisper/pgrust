@@ -20,9 +20,9 @@
 //! tag-only `resultinfo` cannot carry it, which is why these are registered
 //! here and NOT in `register_jsonfuncs_builtins` (jsonfuncs fmgr_builtins.rs).
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
@@ -153,7 +153,7 @@ fn put_jsonb_path_rows<'mcx>(
     mcx: Mcx<'mcx>,
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     images: Vec<Vec<u8>>,
-) -> types_error::PgResult<()> {
+) -> ::types_error::PgResult<()> {
     use ::funcapi::srf_support::{
         materialized_srf_putvalues, InitMaterializedSRF,
     };
@@ -167,7 +167,7 @@ fn put_jsonb_path_rows<'mcx>(
     for image in images {
         // jsonb: `image` is already a full varlena (VARHDRSZ + payload), the form
         // a by-ref `jsonb` column value carries (cf. put_element_rows).
-        let mut v = mcx::vec_with_capacity_in::<u8>(mcx, image.len())?;
+        let mut v = ::mcx::vec_with_capacity_in::<u8>(mcx, image.len())?;
         v.extend_from_slice(&image);
         let values: [Datum<'mcx>; 1] = [Datum::ByRef(v)];
         let nulls = [false];

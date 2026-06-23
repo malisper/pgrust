@@ -22,8 +22,8 @@
 //! | `SyncScanShmemSize`/`Init`      | `backend-access-common-syncscan-seams`|
 //! | `BTreeShmemSize`/`Init`         | `backend-access-nbtree-seams`         |
 
-use types_core::Size;
-use types_error::PgResult;
+use ::types_core::Size;
+use ::types_error::PgResult;
 
 pub fn buffer_manager_shmem_size() -> PgResult<Size> {
     bufmgr_seams::buffer_manager_shmem_size::call()

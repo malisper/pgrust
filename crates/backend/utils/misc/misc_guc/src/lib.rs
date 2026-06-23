@@ -61,7 +61,7 @@ pub mod units;
 #[cfg(test)]
 mod tests;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     PgError, PgResult, SqlState, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, WARNING,
 };
@@ -94,7 +94,7 @@ pub use units::{
 /// `PgError`.
 pub(crate) fn alloc_err(_e: alloc::collections::TryReserveError) -> PgError {
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_OUT_OF_MEMORY)
+        .errcode(::types_error::ERRCODE_OUT_OF_MEMORY)
         .errmsg("out of memory")
         .into_error()
 }
@@ -267,7 +267,7 @@ pub fn at_start_guc() {
                 guc_nest_level()
             ))
             .into_error();
-        utils_error::emit_error_report_for(&e);
+        ::utils_error::emit_error_report_for(&e);
     }
     set_guc_nest_level(1);
 }
@@ -305,7 +305,7 @@ pub fn at_eoxact_guc(is_commit: bool, nest_level: i32) {
 pub fn ParseLongOption<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     string: &str,
-) -> types_error::PgResult<(mcx::PgString<'mcx>, Option<mcx::PgString<'mcx>>)> {
+) -> ::types_error::PgResult<(mcx::PgString<'mcx>, Option<mcx::PgString<'mcx>>)> {
     // equal_pos = strcspn(string, "="): byte offset of the first '=', or the
     // whole length if none.
     let bytes = string.as_bytes();
@@ -334,7 +334,7 @@ pub fn ParseLongOption<'mcx>(
 // Tier-A seam install (this crate is guc.c's home).
 // ---------------------------------------------------------------------------
 
-use types_core::BOOTSTRAP_SUPERUSERID;
+use ::types_core::BOOTSTRAP_SUPERUSERID;
 use types_guc::{
     GucContext, GucSource, PGC_BACKEND, PGC_INTERNAL, PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET,
     PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE,
@@ -525,12 +525,12 @@ fn restrict_search_path() -> PgResult<()> {
     set_config_option_global(
         "search_path",
         Some(GUC_SAFE_SEARCH_PATH),
-        types_guc::PGC_USERSET,
-        types_guc::PGC_S_SESSION,
+        ::types_guc::PGC_USERSET,
+        ::types_guc::PGC_S_SESSION,
         srole,
         GUC_ACTION_SAVE,
         true,
-        types_error::ErrorLevel(0),
+        ::types_error::ErrorLevel(0),
         false,
     )
     .map(|_| ())
@@ -546,12 +546,12 @@ fn set_search_path_save(value: &str) -> PgResult<()> {
     set_config_option_global(
         "search_path",
         Some(value),
-        types_guc::PGC_USERSET,
-        types_guc::PGC_S_SESSION,
+        ::types_guc::PGC_USERSET,
+        ::types_guc::PGC_S_SESSION,
         srole,
         GUC_ACTION_SAVE,
         true,
-        types_error::ErrorLevel(0),
+        ::types_error::ErrorLevel(0),
         false,
     )
     .map(|_| ())
@@ -575,7 +575,7 @@ pub fn init_seams() {
     // `parse_int(vac_buffer_size, &result, GUC_UNIT_KB, &hintmsg)`; guc.c owns
     // parse_int. The seam returns `(ok, result, hintmsg)`.
     vacuum_seams::parse_int_kb::set(|value| {
-        match units::parse_int(&value, types_guc::GUC_UNIT_KB) {
+        match units::parse_int(&value, ::types_guc::GUC_UNIT_KB) {
             ParseNum::Ok(v) => Ok((true, v, None)),
             ParseNum::Err { hint } => Ok((
                 false,
@@ -701,11 +701,11 @@ pub fn init_seams() {
             name,
             Some(value),
             context,
-            types_guc::PGC_S_SESSION,
+            ::types_guc::PGC_S_SESSION,
             srole,
             GUC_ACTION_SAVE,
             true,
-            types_error::ErrorLevel(0),
+            ::types_error::ErrorLevel(0),
             false,
         )
         .map(|_| ())
@@ -777,14 +777,14 @@ pub fn init_seams() {
                         let context = if miscinit_seams::superuser::call(
                             scratch.mcx(),
                         )? {
-                            types_guc::PGC_SUSET
+                            ::types_guc::PGC_SUSET
                         } else {
-                            types_guc::PGC_USERSET
+                            ::types_guc::PGC_USERSET
                         };
                         guc_array::ProcessGUCArray(
                             set_items,
                             context,
-                            types_guc::PGC_S_SESSION,
+                            ::types_guc::PGC_S_SESSION,
                             GUC_ACTION_SAVE,
                         )?;
                     }
@@ -797,7 +797,7 @@ pub fn init_seams() {
             let result = fmgr_seams::function_call_invoke_datum::call(
                 mcx,
                 language_validator,
-                types_core::primitive::InvalidOid,
+                ::types_core::primitive::InvalidOid,
                 &[types_tuple::heaptuple::Datum::from_oid(retval)],
                 &[],
                 None,
@@ -885,7 +885,7 @@ pub(crate) fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> 
         if !process_config::valid_custom_variable_name(name) {
             if !skip_errors {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INVALID_NAME)
+                    .errcode(::types_error::ERRCODE_INVALID_NAME)
                     .errmsg(format!("invalid configuration parameter name \"{name}\""))
                     .errdetail(
                         "Custom parameter names must be two or more simple identifiers separated by dots.",
@@ -902,7 +902,7 @@ pub(crate) fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> 
         if custom::is_reserved_class_prefix(class) {
             if !skip_errors {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_INVALID_NAME)
+                    .errcode(::types_error::ERRCODE_INVALID_NAME)
                     .errmsg(format!("invalid configuration parameter name \"{name}\""))
                     .errdetail(format!("\"{class}\" is a reserved prefix."))
                     .into_error());
@@ -917,7 +917,7 @@ pub(crate) fn assignable_custom_variable_name(name: &str, skip_errors: bool) -> 
     // Unrecognized single-part name.
     if !skip_errors {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_UNDEFINED_OBJECT)
+            .errcode(::types_error::ERRCODE_UNDEFINED_OBJECT)
             .errmsg(format!("unrecognized configuration parameter \"{name}\""))
             .into_error());
     }
@@ -967,7 +967,7 @@ pub fn validate_auto_config_value(name: &str, value: Option<&str>) -> PgResult<(
             || (gen.flags & GUC_DISALLOW_IN_AUTO_FILE) != 0
         {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_CANT_CHANGE_RUNTIME_PARAM)
+                .errcode(::types_error::ERRCODE_CANT_CHANGE_RUNTIME_PARAM)
                 .errmsg(format!("parameter \"{name}\" cannot be changed"))
                 .into_error());
         }
@@ -1002,7 +1002,7 @@ pub fn validate_auto_config_value(name: &str, value: Option<&str>) -> PgResult<(
     if let Some(value) = value {
         if value.contains('\n') {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
                 .errmsg("parameter value for ALTER SYSTEM must not contain a newline")
                 .into_error());
         }
@@ -1032,7 +1032,7 @@ pub fn escape_single_quotes_ascii(src: &str) -> String {
 /// A parallel transfer cannot proceed without it — surface the project's error.
 pub(crate) fn guc_store_uninitialized() -> PgError {
     ereport(ERROR)
-        .errcode(types_error::ERRCODE_INTERNAL_ERROR)
+        .errcode(::types_error::ERRCODE_INTERNAL_ERROR)
         .errmsg("GUC state transfer attempted before the GUC store was initialized")
         .into_error()
 }

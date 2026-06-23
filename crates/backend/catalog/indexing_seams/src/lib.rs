@@ -3,20 +3,20 @@
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly. Open relations cross as
-//! `&rel::RelationData`; pg_depend tuples cross as the deformed
+//! `&::rel::RelationData`; pg_depend tuples cross as the deformed
 //! `FormData_pg_depend` row (the caller-shaped projection precedent) — the
 //! owner forms the heap tuple against the pg_depend descriptor.
 
-use types_catalog::catalog_dependency::FormData_pg_depend;
-use types_catalog::pg_sequence::FormData_pg_sequence;
-use types_catalog::catalog_shdepend::FormData_pg_shdepend;
-use types_catalog::opclasscmds_catalog::{
+use ::types_catalog::catalog_dependency::FormData_pg_depend;
+use ::types_catalog::pg_sequence::FormData_pg_sequence;
+use ::types_catalog::catalog_shdepend::FormData_pg_shdepend;
+use ::types_catalog::opclasscmds_catalog::{
     FormData_pg_amop, FormData_pg_amproc, FormData_pg_opclass, FormData_pg_opfamily,
 };
-use types_core::Oid;
-use types_error::PgResult;
-use rel::RelationData;
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::rel::RelationData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 seam_core::seam!(
     /// `CatalogTupleDelete(rel, tid)` (catalog/indexing.c): delete the
@@ -49,7 +49,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn catalog_tuples_multi_insert_pg_depend<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
         forms: &[FormData_pg_depend],
     ) -> PgResult<()>
 );
@@ -256,7 +256,7 @@ seam_core::seam!(
     /// heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuples_multi_insert_pg_shdepend<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
         forms: &[FormData_pg_shdepend],
     ) -> PgResult<()>
 );
@@ -268,7 +268,7 @@ seam_core::seam!(
     /// the mutated `PgClassForm` (indexing.c).
     pub fn catalog_tuple_update_pg_class<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'_>,
+        rel: &::rel::Relation<'_>,
         tid: ItemPointerData,
         form: &types_cluster::PgClassForm,
     ) -> PgResult<()>
@@ -295,7 +295,7 @@ seam_core::seam!(
     /// the mutated `PgIndexForm` (indexing.c).
     pub fn catalog_tuple_update_pg_index<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'_>,
+        rel: &::rel::Relation<'_>,
         tid: ItemPointerData,
         form: &types_cluster::PgIndexForm,
     ) -> PgResult<()>
@@ -307,14 +307,14 @@ seam_core::seam!(
     /// `*_with_info_*` calls and pass it to [`catalog_close_indexes`].
     pub fn catalog_open_indexes<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
     ) -> PgResult<types_cluster::CatalogIndexState<'mcx>>
 );
 seam_core::seam!(
     /// `CatalogTupleUpdateWithInfo(rel, &tup->t_self, tup, indstate)`.
     pub fn catalog_tuple_update_with_info_pg_class<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
         tid: ItemPointerData,
         form: &types_cluster::PgClassForm,
         indstate: &mut types_cluster::CatalogIndexState<'mcx>,
@@ -343,7 +343,7 @@ seam_core::seam!(
     /// mutation `ereport(ERROR)`s.
     pub fn append_attribute_tuples<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        index_relation: &rel::Relation<'mcx>,
+        index_relation: &::rel::Relation<'mcx>,
         attopts: Option<&[Option<std::vec::Vec<u8>>]>,
         stattargets: Option<&[Option<i16>]>,
     ) -> PgResult<()>
@@ -515,7 +515,7 @@ seam_core::seam!(
     /// surface.
     pub fn deform_lo_page(
         rel: &RelationData<'_>,
-        tuple: &types_tuple::heaptuple::FormedTuple<'_>,
+        tuple: &::types_tuple::heaptuple::FormedTuple<'_>,
     ) -> PgResult<LoPageRow>
 );
 
@@ -583,7 +583,7 @@ seam_core::seam!(
     /// mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_constraint(
         rel: &RelationData<'_>,
-        row: &types_catalog::pg_constraint::PgConstraintInsertRow,
+        row: &::types_catalog::pg_constraint::PgConstraintInsertRow,
     ) -> PgResult<Oid>
 );
 
@@ -598,7 +598,7 @@ seam_core::seam!(
     pub fn catalog_tuple_update_pg_constraint(
         rel: &RelationData<'_>,
         tid: ItemPointerData,
-        fields: &types_catalog::pg_constraint::ConstraintFieldUpdate,
+        fields: &::types_catalog::pg_constraint::ConstraintFieldUpdate,
     ) -> PgResult<()>
 );
 
@@ -611,7 +611,7 @@ seam_core::seam!(
     pub fn catalog_tuple_update_pg_trigger(
         rel: &RelationData<'_>,
         tid: ItemPointerData,
-        fields: &types_catalog::pg_trigger::TriggerFieldUpdate,
+        fields: &::types_catalog::pg_trigger::TriggerFieldUpdate,
     ) -> PgResult<()>
 );
 
@@ -623,8 +623,8 @@ seam_core::seam!(
     /// carries the heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_cast<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_cast::PgCastInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_cast::PgCastInsertRow,
     ) -> PgResult<Oid>
 );
 
@@ -639,8 +639,8 @@ seam_core::seam!(
     /// heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_transform<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_transform::PgTransformInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_transform::PgTransformInsertRow,
         replace_oid: Oid,
         replace_tid: ItemPointerData,
     ) -> PgResult<Oid>
@@ -654,8 +654,8 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_inherits<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_inherits::PgInheritsInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_inherits::PgInheritsInsertRow,
     ) -> PgResult<()>
 );
 
@@ -670,9 +670,9 @@ seam_core::seam!(
     /// tuple's `tid`. `Err` carries the heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_inherits<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
         tid: ItemPointerData,
-        row: &types_catalog::pg_inherits::PgInheritsUpdateRow,
+        row: &::types_catalog::pg_inherits::PgInheritsUpdateRow,
     ) -> PgResult<()>
 );
 
@@ -685,8 +685,8 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_conversion<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_conversion::PgConversionInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_conversion::PgConversionInsertRow,
     ) -> PgResult<Oid>
 );
 
@@ -697,8 +697,8 @@ seam_core::seam!(
     /// returned. `Err` carries the heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_range<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_range::PgRangeInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_range::PgRangeInsertRow,
     ) -> PgResult<()>
 );
 
@@ -710,8 +710,8 @@ seam_core::seam!(
     /// heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_enum<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_enum::PgEnumInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_enum::PgEnumInsertRow,
     ) -> PgResult<()>
 );
 
@@ -724,8 +724,8 @@ seam_core::seam!(
     /// carries the heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_language<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_language::PgLanguageInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_language::PgLanguageInsertRow,
     ) -> PgResult<Oid>
 );
 
@@ -740,9 +740,9 @@ seam_core::seam!(
     /// heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_language<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        oldtup: &types_tuple::heaptuple::FormedTuple<'mcx>,
-        row: &types_catalog::pg_language::PgLanguageInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        oldtup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
+        row: &::types_catalog::pg_language::PgLanguageInsertRow,
     ) -> PgResult<()>
 );
 
@@ -753,7 +753,7 @@ seam_core::seam!(
     /// Returned to the `pg_type.c` port so its forced-OID / binary-upgrade /
     /// new-OID branch (`TypeShellMake` / `TypeCreate`) keeps the OID-assignment
     /// decision in the owner. `Err` carries the index-probe error surface.
-    pub fn get_new_oid_with_index_pg_type<'mcx>(rel: &rel::Relation<'mcx>) -> PgResult<Oid>
+    pub fn get_new_oid_with_index_pg_type<'mcx>(rel: &::rel::Relation<'mcx>) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -768,7 +768,7 @@ seam_core::seam!(
     /// carries the heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_type(
         rel: &RelationData<'_>,
-        row: &types_catalog::pg_type::PgTypeInsertRow,
+        row: &::types_catalog::pg_type::PgTypeInsertRow,
     ) -> PgResult<()>
 );
 
@@ -783,7 +783,7 @@ seam_core::seam!(
     /// rewrite. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_type(
         rel: &RelationData<'_>,
-        row: &types_catalog::pg_type::PgTypeInsertRow,
+        row: &::types_catalog::pg_type::PgTypeInsertRow,
     ) -> PgResult<()>
 );
 
@@ -810,7 +810,7 @@ seam_core::seam!(
     /// the port so its even/odd-OID sort-order selection logic (`EnumValuesCreate`
     /// / `AddEnumLabel`) can inspect the candidate before forming the tuple.
     /// `Err` carries the index-probe error surface.
-    pub fn get_new_oid_with_index_pg_enum<'mcx>(rel: &rel::Relation<'mcx>) -> PgResult<Oid>
+    pub fn get_new_oid_with_index_pg_enum<'mcx>(rel: &::rel::Relation<'mcx>) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -823,8 +823,8 @@ seam_core::seam!(
     /// mutation `ereport(ERROR)`s.
     pub fn catalog_tuples_multi_insert_pg_enum<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        rows: &[types_catalog::pg_enum::PgEnumInsertRow],
+        rel: &::rel::Relation<'mcx>,
+        rows: &[::types_catalog::pg_enum::PgEnumInsertRow],
     ) -> PgResult<()>
 );
 
@@ -836,9 +836,9 @@ seam_core::seam!(
     /// indexing.c). `Err` carries the heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_enum<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
         tid: ItemPointerData,
-        row: &types_catalog::pg_enum::PgEnumInsertRow,
+        row: &::types_catalog::pg_enum::PgEnumInsertRow,
     ) -> PgResult<()>
 );
 
@@ -996,7 +996,7 @@ seam_core::seam!(
         oidcol: i16,
         object_id: Oid,
         locktuple: bool,
-    ) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'mcx>>>
+    ) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'mcx>>>
 );
 
 seam_core::seam!(
@@ -1024,7 +1024,7 @@ seam_core::seam!(
         object_id: Oid,
         objsubid: i32,
         is_relation_attr: bool,
-    ) -> PgResult<Option<types_tuple::heaptuple::Datum<'mcx>>>
+    ) -> PgResult<Option<::types_tuple::heaptuple::Datum<'mcx>>>
 );
 
 /* ---- pg_db_role_setting catalog-tuple decode / mutators ------------------- *
@@ -1046,7 +1046,7 @@ seam_core::seam!(
     /// entries. `Err` carries the detoast error surface.
     pub fn decode_db_role_setting_setconfig<'mcx>(
         rel: &RelationData<'mcx>,
-        tuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
+        tuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
     ) -> PgResult<Option<Vec<String>>>
 );
 
@@ -1088,7 +1088,7 @@ seam_core::seam!(
     /// `Err` carries the heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_rewrite<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
         rulename: &str,
         ev_class: Oid,
         ev_type: u8,
@@ -1108,8 +1108,8 @@ seam_core::seam!(
     /// heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_rewrite<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        oldtup: &types_tuple::heaptuple::FormedTuple<'mcx>,
+        rel: &::rel::Relation<'mcx>,
+        oldtup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
         ev_type: u8,
         is_instead: bool,
         ev_qual: &str,
@@ -1125,8 +1125,8 @@ seam_core::seam!(
     /// `oldtup->t_self`. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_rewrite_enabled<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        oldtup: &types_tuple::heaptuple::FormedTuple<'mcx>,
+        rel: &::rel::Relation<'mcx>,
+        oldtup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
         ev_enabled: u8,
     ) -> PgResult<()>
 );
@@ -1139,8 +1139,8 @@ seam_core::seam!(
     /// the heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_rewrite_name<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        oldtup: &types_tuple::heaptuple::FormedTuple<'mcx>,
+        rel: &::rel::Relation<'mcx>,
+        oldtup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
         new_name: &str,
     ) -> PgResult<()>
 );
@@ -1152,7 +1152,7 @@ seam_core::seam!(
     /// Returned to the `pg_proc.c` port (`ProcedureCreate`'s new-row branch) so
     /// the OID-assignment decision stays in the owner. `Err` carries the
     /// index-probe error surface.
-    pub fn get_new_oid_with_index_pg_proc<'mcx>(rel: &rel::Relation<'mcx>) -> PgResult<Oid>
+    pub fn get_new_oid_with_index_pg_proc<'mcx>(rel: &::rel::Relation<'mcx>) -> PgResult<Oid>
 );
 
 seam_core::seam!(
@@ -1167,8 +1167,8 @@ seam_core::seam!(
     /// `row.fields.oid`. `Err` carries the heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_proc<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_proc::PgProcInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_proc::PgProcInsertRow,
     ) -> PgResult<()>
 );
 
@@ -1184,9 +1184,9 @@ seam_core::seam!(
     /// heap/index-mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_proc<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        oldtup: &types_tuple::heaptuple::FormedTuple<'mcx>,
-        row: &types_catalog::pg_proc::PgProcInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        oldtup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
+        row: &::types_catalog::pg_proc::PgProcInsertRow,
     ) -> PgResult<()>
 );
 
@@ -1202,8 +1202,8 @@ seam_core::seam!(
     /// mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_statistic_ext<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_statistic_ext::PgStatisticExtInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_statistic_ext::PgStatisticExtInsertRow,
     ) -> PgResult<Oid>
 );
 
@@ -1224,7 +1224,7 @@ seam_core::seam!(
     /// `typacl = aclnewowner(old_acl, old_owner, new_owner)`, then
     /// `CatalogTupleUpdate`. The owner reads the held tuple's old owner/ACL.
     pub fn catalog_tuple_update_typowner_typacl_pg_type(
-        rel: &rel::RelationData<'_>,
+        rel: &::rel::RelationData<'_>,
         type_oid: Oid,
         new_owner_id: Oid,
     ) -> PgResult<()>
@@ -1234,7 +1234,7 @@ seam_core::seam!(
     /// `AlterTypeNamespaceInternal`'s single-row write (typecmds.c:4233): set
     /// `typnamespace = nsp_oid` on the held tuple, then `CatalogTupleUpdate`.
     pub fn catalog_tuple_update_typnamespace_pg_type(
-        rel: &rel::RelationData<'_>,
+        rel: &::rel::RelationData<'_>,
         type_oid: Oid,
         nsp_oid: Oid,
     ) -> PgResult<()>
@@ -1245,7 +1245,7 @@ seam_core::seam!(
     /// single-row write (typecmds.c:2806/3014/2885): set `typnotnull = not_null`
     /// on the held tuple, then `CatalogTupleUpdate`.
     pub fn catalog_tuple_update_typnotnull_pg_type(
-        rel: &rel::RelationData<'_>,
+        rel: &::rel::RelationData<'_>,
         type_oid: Oid,
         not_null: bool,
     ) -> PgResult<()>
@@ -1257,7 +1257,7 @@ seam_core::seam!(
     /// sets `nulls[Anum_pg_type_* - 1] = true` (the ALTER ... DROP DEFAULT and
     /// NULL-constant arms) — then `CatalogTupleUpdate`.
     pub fn catalog_tuple_update_typdefault_pg_type(
-        rel: &rel::RelationData<'_>,
+        rel: &::rel::RelationData<'_>,
         type_oid: Oid,
         default_value: Option<String>,
         default_bin: Option<String>,
@@ -1271,9 +1271,9 @@ seam_core::seam!(
     /// `CatalogTupleUpdate`. Returns the row's `typarray` OID so the caller can
     /// recurse to the array type.
     pub fn catalog_tuple_update_attrs_pg_type(
-        rel: &rel::RelationData<'_>,
+        rel: &::rel::RelationData<'_>,
         type_oid: Oid,
-        attr: types_catalog::pg_type::TypeAttrUpdate,
+        attr: ::types_catalog::pg_type::TypeAttrUpdate,
     ) -> PgResult<Oid>
 );
 
@@ -1289,8 +1289,8 @@ seam_core::seam!(
     /// mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_aggregate<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_aggregate::PgAggregateInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_aggregate::PgAggregateInsertRow,
     ) -> PgResult<()>
 );
 
@@ -1306,10 +1306,10 @@ seam_core::seam!(
     /// heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_aggregate<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        oldtup: &types_tuple::heaptuple::FormedTuple<'mcx>,
-        row: &types_catalog::pg_aggregate::PgAggregateInsertRow,
-        replaces: types_catalog::pg_aggregate::PgAggregateReplaces,
+        rel: &::rel::Relation<'mcx>,
+        oldtup: &::types_tuple::heaptuple::FormedTuple<'mcx>,
+        row: &::types_catalog::pg_aggregate::PgAggregateInsertRow,
+        replaces: ::types_catalog::pg_aggregate::PgAggregateReplaces,
     ) -> PgResult<()>
 );
 
@@ -1329,8 +1329,8 @@ seam_core::seam!(
     /// tuple). `Err` carries the heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_class<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_class::PgClassInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_class::PgClassInsertRow,
     ) -> PgResult<()>
 );
 
@@ -1347,8 +1347,8 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn catalog_insert_pg_attribute_tuples<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        rows: &[types_catalog::pg_attribute::PgAttributeInsertRow],
+        rel: &::rel::Relation<'mcx>,
+        rows: &[::types_catalog::pg_attribute::PgAttributeInsertRow],
     ) -> PgResult<()>
 );
 
@@ -1370,9 +1370,9 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_attribute<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        attr_tuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
-        row: &types_catalog::pg_attribute::PgAttributeUpdateRow,
+        rel: &::rel::Relation<'mcx>,
+        attr_tuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
+        row: &::types_catalog::pg_attribute::PgAttributeUpdateRow,
     ) -> PgResult<()>
 );
 
@@ -1395,8 +1395,8 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn catalog_tuple_update_relchecks_pg_class<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        class_tuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
+        rel: &::rel::Relation<'mcx>,
+        class_tuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
         new_relchecks: i16,
     ) -> PgResult<()>
 );
@@ -1414,10 +1414,10 @@ seam_core::seam!(
     /// mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_relowner_pg_class<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        class_tuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
-        new_owner_id: types_core::Oid,
-        new_acl: Option<types_tuple::heaptuple::Datum<'mcx>>,
+        rel: &::rel::Relation<'mcx>,
+        class_tuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
+        new_owner_id: ::types_core::Oid,
+        new_acl: Option<::types_tuple::heaptuple::Datum<'mcx>>,
     ) -> PgResult<()>
 );
 
@@ -1430,8 +1430,8 @@ seam_core::seam!(
     /// heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_attrdef<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_attrdef::PgAttrdefInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_attrdef::PgAttrdefInsertRow,
     ) -> PgResult<Oid>
 );
 
@@ -1448,8 +1448,8 @@ seam_core::seam!(
     /// `Err` carries the heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_policy<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_policy::PgPolicyInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_policy::PgPolicyInsertRow,
     ) -> PgResult<Oid>
 );
 
@@ -1465,8 +1465,8 @@ seam_core::seam!(
     /// carries the heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_event_trigger<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_event_trigger::PgEventTriggerInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_event_trigger::PgEventTriggerInsertRow,
     ) -> PgResult<Oid>
 );
 
@@ -1479,8 +1479,8 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_event_trigger_enabled<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        evt_tuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
+        rel: &::rel::Relation<'mcx>,
+        evt_tuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
         tgenabled: i8,
     ) -> PgResult<()>
 );
@@ -1494,9 +1494,9 @@ seam_core::seam!(
     /// `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_event_trigger_owner<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        evt_tuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
-        new_owner_id: types_core::Oid,
+        rel: &::rel::Relation<'mcx>,
+        evt_tuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
+        new_owner_id: ::types_core::Oid,
     ) -> PgResult<()>
 );
 
@@ -1517,8 +1517,8 @@ seam_core::seam!(
     /// mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_trigger<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_trigger::PgTriggerInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_trigger::PgTriggerInsertRow,
     ) -> PgResult<Oid>
 );
 
@@ -1550,9 +1550,9 @@ seam_core::seam!(
     /// carries the heap/index mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_update_pg_policy<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        policy_tuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
-        row: &types_catalog::pg_policy::PgPolicyUpdateRow,
+        rel: &::rel::Relation<'mcx>,
+        policy_tuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
+        row: &::types_catalog::pg_policy::PgPolicyUpdateRow,
     ) -> PgResult<()>
 );
 
@@ -1566,8 +1566,8 @@ seam_core::seam!(
     /// tuple. `Err` carries the heap/index mutation `ereport(ERROR)`s.
     pub fn rename_policy_tuple<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        policy_tuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
+        rel: &::rel::Relation<'mcx>,
+        policy_tuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
         newname: &str,
     ) -> PgResult<()>
 );
@@ -1585,8 +1585,8 @@ seam_core::seam!(
     /// mutation `ereport(ERROR)`s.
     pub fn catalog_tuple_insert_pg_index<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rel: &rel::Relation<'mcx>,
-        row: &types_catalog::pg_index::PgIndexInsertRow,
+        rel: &::rel::Relation<'mcx>,
+        row: &::types_catalog::pg_index::PgIndexInsertRow,
     ) -> PgResult<()>
 );
 
@@ -1603,14 +1603,14 @@ seam_core::seam!(
 seam_core::seam!(
     /// `GetNewOidWithIndex(pg_authid, AuthIdOidIndexId, Anum_pg_authid_oid)`.
     pub fn get_new_oid_with_index_pg_authid<'mcx>(
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
     ) -> PgResult<Oid>
 );
 seam_core::seam!(
     /// `GetNewOidWithIndex(pg_auth_members, AuthMemOidIndexId,
     /// Anum_pg_auth_members_oid)`.
     pub fn get_new_oid_with_index_pg_auth_members<'mcx>(
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
     ) -> PgResult<Oid>
 );
 seam_core::seam!(

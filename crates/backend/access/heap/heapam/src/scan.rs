@@ -38,29 +38,29 @@
 //! as the [`heapam_seam::heap_key_test`] seam from this crate's `init_seams()`.
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, Oid,
 };
 use types_error::{PgResult, ERROR, ERRCODE_FEATURE_NOT_SUPPORTED};
-use utils_error::ereport;
-use rel::Relation;
-use types_scan::sdir::{
+use ::utils_error::ereport;
+use ::rel::Relation;
+use ::types_scan::sdir::{
     ScanDirection, ScanDirectionIsBackward, ScanDirectionIsForward,
 };
-use snapshot::snapshot::IsMVCCSnapshot;
-use snapshot::SnapshotData;
-use types_storage::bufpage::{MaxHeapTuplesPerPage, MaxOffsetNumber};
-use types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
+use ::snapshot::snapshot::IsMVCCSnapshot;
+use ::snapshot::SnapshotData;
+use ::types_storage::bufpage::{MaxHeapTuplesPerPage, MaxOffsetNumber};
+use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
 use types_storage::{Buffer, InvalidBuffer};
-use types_tableam::amopaque::{tags, AmOpaque, AmOpaqueTag, AmOpaqueType};
-use types_tableam::relscan::{
+use ::types_tableam::amopaque::{tags, AmOpaque, AmOpaqueTag, AmOpaqueType};
+use ::types_tableam::relscan::{
     ParallelBlockTableScanWorkerData, ParallelTableScanDesc, TableScanDescData,
     SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TEMP_SNAPSHOT, SO_TYPE_BITMAPSCAN,
     SO_TYPE_SAMPLESCAN, SO_TYPE_SEQSCAN,
 };
-use types_tableam::scankey::ScanKeyData;
-use types_tuple::heaptuple::FormedTuple;
-use types_tuple::heaptuple::{FIRST_OFFSET_NUMBER as FirstOffsetNumber, ItemPointerData};
+use ::types_tableam::scankey::ScanKeyData;
+use ::types_tuple::heaptuple::FormedTuple;
+use ::types_tuple::heaptuple::{FIRST_OFFSET_NUMBER as FirstOffsetNumber, ItemPointerData};
 
 use page::{
     ItemPointerCompare, ItemPointerGetBlockNumberNoCheck,
@@ -72,7 +72,7 @@ use bufmgr_seams as bufmgr_seam;
 use predicate_seams as predicate_seam;
 use syncscan_seams as syncscan_seam;
 use fmgr_seams as fmgr_seam;
-use types_tableam::scankey::SK_ISNULL;
+use ::types_tableam::scankey::SK_ISNULL;
 use pruneheap_seams as prune_seam;
 use relcache_seams as relcache_seam;
 use pgstat_seams as pgstat_seam;
@@ -81,7 +81,7 @@ use transam_xact_seams as xact_seam;
 use snapmgr_seams as snapmgr_seam;
 use table_tableam as tableam;
 
-use heapam_visibility::HeapTupleSatisfiesVisibility;
+use ::heapam_visibility::HeapTupleSatisfiesVisibility;
 use core_tidbitmap_seams as tidbitmap_seam;
 use crate::fetch;
 
@@ -98,16 +98,16 @@ use crate::fetch;
 /// in-range xid is handed to predicate.c's `CheckForSerializableConflictOut`.
 pub fn HeapCheckForSerializableConflictOut(
     visible: bool,
-    relation_oid: types_core::primitive::Oid,
-    tuple: &types_tuple::heaptuple::HeapTupleData<'_>,
+    relation_oid: ::types_core::primitive::Oid,
+    tuple: &::types_tuple::heaptuple::HeapTupleData<'_>,
     buffer: Buffer,
     snapshot: &SnapshotData,
 ) -> PgResult<()> {
-    use types_core::xact::{
+    use ::types_core::xact::{
         TransactionIdEquals, TransactionIdIsValid, TransactionIdPrecedes,
     };
-    use snapshot::snapshot::HTSV_Result;
-    use heapam_visibility::htup::HeapTupleHeaderGetXmin;
+    use ::snapshot::snapshot::HTSV_Result;
+    use ::heapam_visibility::htup::HeapTupleHeaderGetXmin;
 
     // if (!CheckForSerializableConflictOutNeeded(relation, snapshot)) return;
     if !predicate_seam::check_for_serializable_conflict_out_needed::call(relation_oid, snapshot) {
@@ -117,7 +117,7 @@ pub fn HeapCheckForSerializableConflictOut(
     // HeapTupleSatisfiesVacuum(tuple, TransactionXmin, buffer)
     let transaction_xmin = snapmgr_pc_seams::transaction_xmin::call()?;
     let mut htup = tuple.clone();
-    let htsv = heapam_visibility::HeapTupleSatisfiesVacuum(
+    let htsv = ::heapam_visibility::HeapTupleSatisfiesVacuum(
         &mut htup,
         transaction_xmin,
         buffer,
@@ -129,7 +129,7 @@ pub fn HeapCheckForSerializableConflictOut(
         None => return Ok(()),
     };
 
-    let xid: types_core::primitive::TransactionId = match htsv {
+    let xid: ::types_core::primitive::TransactionId = match htsv {
         HTSV_Result::HEAPTUPLE_LIVE => {
             if visible {
                 return Ok(());
@@ -138,7 +138,7 @@ pub fn HeapCheckForSerializableConflictOut(
         }
         HTSV_Result::HEAPTUPLE_RECENTLY_DEAD | HTSV_Result::HEAPTUPLE_DELETE_IN_PROGRESS => {
             let x = if visible {
-                heapam_visibility::HeapTupleHeaderGetUpdateXid(hdr)?
+                ::heapam_visibility::HeapTupleHeaderGetUpdateXid(hdr)?
             } else {
                 HeapTupleHeaderGetXmin(hdr)
             };
@@ -407,7 +407,7 @@ fn initscan(
 fn relation_get_number_of_blocks(rel: &Relation<'_>) -> PgResult<BlockNumber> {
     bufmgr_seam::relation_get_number_of_blocks_in_fork::call(
         rel,
-        types_core::primitive::ForkNumber::MAIN_FORKNUM,
+        ::types_core::primitive::ForkNumber::MAIN_FORKNUM,
     )
 }
 
@@ -1105,7 +1105,7 @@ fn end_of_scan(sscan: &mut TableScanDescData<'_>) {
 pub(crate) fn heap_key_test<'mcx>(
     mcx: Mcx<'mcx>,
     tuple: &FormedTuple<'mcx>,
-    rel: &rel::RelationData<'mcx>,
+    rel: &::rel::RelationData<'mcx>,
     keys: &[ScanKeyData<'mcx>],
 ) -> PgResult<bool> {
     // RelationGetDescr(rel).
@@ -1131,7 +1131,7 @@ pub(crate) fn heap_key_test<'mcx>(
         let idx = (cur_key.sk_attno - 1) as usize;
         let (atp, isnull) = match deformed.get(idx) {
             Some((v, n)) => (v.clone(), *n),
-            None => (types_tuple::heaptuple::Datum::null(), true),
+            None => (::types_tuple::heaptuple::Datum::null(), true),
         };
 
         if isnull {
@@ -1158,8 +1158,8 @@ pub(crate) fn heap_key_test<'mcx>(
 
 /// `DatumGetBool(d)` — the low bit of the by-value word.
 #[inline]
-fn datum_get_bool(d: &types_tuple::heaptuple::Datum<'_>) -> bool {
-    use types_tuple::heaptuple::Datum;
+fn datum_get_bool(d: &::types_tuple::heaptuple::Datum<'_>) -> bool {
+    use ::types_tuple::heaptuple::Datum;
     match d {
         Datum::ByVal(w) => (*w & 1) != 0,
         // A boolean comparison result is always by-value; any other arm is a
@@ -1250,7 +1250,7 @@ pub fn heap_beginscan<'mcx>(
     // Allocate per-worker page-allocation state for a parallel scan.
     if sscan.rs_parallel.is_some() {
         heap_scan(&mut sscan).rs_parallelworkerdata =
-            Some(mcx::alloc_in(mcx, ParallelBlockTableScanWorkerData::default())?);
+            Some(::mcx::alloc_in(mcx, ParallelBlockTableScanWorkerData::default())?);
     } else {
         heap_scan(&mut sscan).rs_parallelworkerdata = None;
     }
@@ -1272,7 +1272,7 @@ fn erase_heap_scan<'mcx>(
     mcx: Mcx<'mcx>,
     heap: HeapScanDescData<'mcx>,
 ) -> PgResult<PgBox<'mcx, dyn AmOpaque<'mcx> + 'mcx>> {
-    let boxed: PgBox<'mcx, HeapScanDescData<'mcx>> = mcx::alloc_in(mcx, heap)?;
+    let boxed: PgBox<'mcx, HeapScanDescData<'mcx>> = ::mcx::alloc_in(mcx, heap)?;
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn AmOpaque` vtable.
@@ -1573,7 +1573,7 @@ fn BitmapHeapScanNextBlock<'mcx>(
         let mut visible: std::vec::Vec<(
             OffsetNumber,
             ItemPointerData,
-            types_core::primitive::TransactionId,
+            ::types_core::primitive::TransactionId,
         )> = std::vec::Vec::new();
         bufmgr_seam::with_buffer_page::call(buffer, &mut |page_bytes| {
             let page = PageRef::new(page_bytes)?;
@@ -1600,7 +1600,7 @@ fn BitmapHeapScanNextBlock<'mcx>(
                         .t_data
                         .as_ref()
                         .expect("bitmap lossy scan: normal line-pointer tuple has no t_data");
-                    let xmin = types_tuple::heaptuple::HeapTupleHeaderGetXmin(header);
+                    let xmin = ::types_tuple::heaptuple::HeapTupleHeaderGetXmin(header);
                     visible.push((offnum, loctup.tuple.t_self, xmin));
                 }
                 predicate_seam::heap_check_for_serializable_conflict_out::call(
@@ -1729,7 +1729,7 @@ fn block_number_is_valid(block_number: BlockNumber) -> bool {
 pub fn heapam_scan_sample_next_block<'mcx>(
     mcx: Mcx<'mcx>,
     sscan: &mut TableScanDescData<'mcx>,
-    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+    scanstate: &mut dyn ::types_tableam::tableam::SampleScanDriver,
 ) -> PgResult<bool> {
     let blockno: BlockNumber;
 
@@ -1818,7 +1818,7 @@ pub fn heapam_scan_sample_next_block<'mcx>(
 pub fn heapam_scan_sample_next_tuple<'mcx>(
     mcx: Mcx<'mcx>,
     sscan: &mut TableScanDescData<'mcx>,
-    scanstate: &mut dyn types_tableam::tableam::SampleScanDriver,
+    scanstate: &mut dyn ::types_tableam::tableam::SampleScanDriver,
     slot: &mut nodes::tuptable::SlotData<'mcx>,
 ) -> PgResult<bool> {
     let blockno = heap_scan(sscan).rs_cblock;
@@ -2129,6 +2129,6 @@ fn check_xid_alive_during_decoding() -> bool {
 
 /// `TransactionIdIsValid(xid)` — non-`InvalidTransactionId`.
 #[inline]
-fn transaction_id_is_valid(xid: types_core::primitive::TransactionId) -> bool {
+fn transaction_id_is_valid(xid: ::types_core::primitive::TransactionId) -> bool {
     xid != 0
 }

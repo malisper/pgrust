@@ -16,8 +16,8 @@ extern crate alloc;
 
 use numutils::{pg_ulltoa_n, MAX_UINT64_DIGITS};
 use mcx::{Mcx, PgString};
-use pgstrcasecmp::pg_strcasecmp;
-use types_error::PgResult;
+use ::pgstrcasecmp::pg_strcasecmp;
+use ::types_error::PgResult;
 use portal::{
     CommandTag, QueryCompletion, CMDTAG_INSERT, CMDTAG_UNKNOWN, COMPLETION_TAG_BUFSIZE,
 };
@@ -401,7 +401,7 @@ pub fn build_query_completion_string<'mcx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     use portal::{CMDTAG_DELETE, CMDTAG_MERGE, CMDTAG_SELECT, CMDTAG_UPDATE};
 
     /// The table must have exactly 193 entries (`grep -c '^PG_CMDTAG'

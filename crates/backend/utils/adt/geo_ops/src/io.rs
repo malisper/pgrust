@@ -12,7 +12,7 @@
 //! (including the `endptr_p` "report stopping point" behavior and the syntax
 //! errors).
 
-use types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
+use ::types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
 use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use float_seams::{float8in_internal_endptr, float8out_internal};
@@ -647,7 +647,7 @@ pub fn path_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgRes
         return ereturn(escontext, empty(), invalid_input("path", str));
     }
     let npts = npts as usize;
-    if let Err(err) = check_points_overflow(npts, types_core::geo::PATH_HEADER_SIZE) {
+    if let Err(err) = check_points_overflow(npts, ::types_core::geo::PATH_HEADER_SIZE) {
         return ereturn(escontext, empty(), err);
     }
 
@@ -708,7 +708,7 @@ pub fn path_out(path: &Path) -> String {
 pub fn path_recv(buf: &mut &[u8]) -> PgResult<Path> {
     let closed = getmsgbyte(buf)?;
     let npts = getmsgint32(buf)?;
-    let max = ((i32::MAX as usize - types_core::geo::PATH_HEADER_SIZE) / POINT_SIZE) as i64;
+    let max = ((i32::MAX as usize - ::types_core::geo::PATH_HEADER_SIZE) / POINT_SIZE) as i64;
     if npts <= 0 || (npts as i64) >= max {
         return Err(
             PgError::error("invalid number of points in external \"path\" value")
@@ -756,7 +756,7 @@ pub fn poly_in(str: &str, mut escontext: Option<&mut SoftErrorContext>) -> PgRes
         return ereturn(escontext, empty(), invalid_input("polygon", str));
     }
     let npts = npts as usize;
-    if let Err(err) = check_points_overflow(npts, types_core::geo::POLYGON_HEADER_SIZE) {
+    if let Err(err) = check_points_overflow(npts, ::types_core::geo::POLYGON_HEADER_SIZE) {
         return ereturn(escontext, empty(), err);
     }
 
@@ -793,7 +793,7 @@ pub fn poly_out(poly: &Polygon) -> String {
 /// box is recomputed.
 pub fn poly_recv(buf: &mut &[u8]) -> PgResult<Polygon> {
     let npts = getmsgint32(buf)?;
-    let max = ((i32::MAX as usize - types_core::geo::POLYGON_HEADER_SIZE) / POINT_SIZE) as i64;
+    let max = ((i32::MAX as usize - ::types_core::geo::POLYGON_HEADER_SIZE) / POINT_SIZE) as i64;
     if npts <= 0 || (npts as i64) >= max {
         return Err(
             PgError::error("invalid number of points in external \"polygon\" value")

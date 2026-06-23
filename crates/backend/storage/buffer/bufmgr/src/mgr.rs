@@ -23,11 +23,11 @@ use std::cell::Cell;
 use std::sync::atomic::Ordering;
 
 use support::{BufTable, BufferStrategyControl, StrategyShmemSize};
-use condvar::ConditionVariable;
-use types_core::Size;
-use types_core::primitive::{Buffer, BLCKSZ, INVALID_PROC_NUMBER};
-use types_storage::buf::{buftag, PgAioWaitRef, BM_LOCKED, FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST};
-use types_storage::storage::{
+use ::condvar::ConditionVariable;
+use ::types_core::Size;
+use ::types_core::primitive::{Buffer, BLCKSZ, INVALID_PROC_NUMBER};
+use ::types_storage::buf::{buftag, PgAioWaitRef, BM_LOCKED, FREENEXT_END_OF_LIST, FREENEXT_NOT_IN_LIST};
+use ::types_storage::storage::{
     pg_atomic_uint32, LWLock, LWLockMode, LWTRANCHE_BUFFER_CONTENT, BUFFER_MAPPING_LWLOCK_OFFSET,
     NUM_BUFFER_PARTITIONS,
 };
@@ -677,7 +677,7 @@ const SIZEOF_CKPT_SORT_ITEM: Size = 20;
 /// `PG_CACHE_LINE_SIZE` (pg_config_manual.h).
 const PG_CACHE_LINE_SIZE: Size = 128;
 /// `PG_IO_ALIGN_SIZE` (c.h).
-const PG_IO_ALIGN_SIZE: Size = types_storage::bufpage::PG_IO_ALIGN_SIZE;
+const PG_IO_ALIGN_SIZE: Size = ::types_storage::bufpage::PG_IO_ALIGN_SIZE;
 
 /// `BufferManagerShmemSize(void)` (buf_init.c) — shared-memory bytes the buffer
 /// pool needs: descriptors, data pages (+ I/O alignment padding), the freelist
@@ -709,7 +709,7 @@ pub fn BufferManagerShmemSize() -> types_error::PgResult<Size> {
         size,
         shmem::mul_size::call(
             nbuffers,
-            types_storage::storage::LWLOCK_PADDED_SIZE as Size,
+            ::types_storage::storage::LWLOCK_PADDED_SIZE as Size,
         )?,
     )?;
     size = shmem::add_size::call(size, PG_CACHE_LINE_SIZE)?;

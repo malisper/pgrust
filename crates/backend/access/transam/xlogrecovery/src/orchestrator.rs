@@ -32,13 +32,13 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use control::{CheckPoint as CtlCheckPoint, ControlFileData, DBState};
 use types_core::{InvalidXLogRecPtr, TimeLineID, XLogRecPtr};
 use types_error::{ErrorLocation, PgError, PgResult, DEBUG1, FATAL, LOG, PANIC, WARNING};
-use wal::xlog_consts::XLOG_BLCKSZ;
+use ::wal::xlog_consts::XLOG_BLCKSZ;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::core::{
     lsn_fmt, RecoveryTargetAction, RecoveryTargetTimeLineGoal, RecoveryTargetType,
@@ -115,7 +115,7 @@ fn read_recovery_signal_file(st: &mut XLogRecoveryState) -> PgResult<()> {
     // Check for old recovery API file: recovery.conf
     if file_exists(RECOVERY_COMMAND_FILE)? {
         ereport(FATAL)
-            .errcode(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .errcode(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .errmsg(format!(
                 "using recovery command file \"{RECOVERY_COMMAND_FILE}\" is not supported"
             ))
@@ -150,7 +150,7 @@ fn read_recovery_signal_file(st: &mut XLogRecoveryState) -> PgResult<()> {
     // We don't support standby mode in standalone backends.
     if st.standby_mode_requested && !init_small_seam::is_under_postmaster::call() {
         ereport(FATAL)
-            .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+            .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             .errmsg("standby mode is not supported by single-user servers")
             .finish(loc(1122, "readRecoverySignalFile"))?;
     }
@@ -180,7 +180,7 @@ fn validate_recovery_parameters(st: &mut XLogRecoveryState, mcx: Mcx<'_>) -> PgR
         }
     } else if st.recovery_restore_command.is_empty() {
         ereport(FATAL)
-            .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
             .errmsg("must specify \"restore_command\" when standby mode is not enabled")
             .finish(loc(1148, "validateRecoveryParameters"))?;
     }
@@ -213,7 +213,7 @@ fn validate_recovery_parameters(st: &mut XLogRecoveryState, mcx: Mcx<'_>) -> PgR
                 )?
             {
                 ereport(FATAL)
-                    .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errcode(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
                     .errmsg(format!("recovery target timeline {rtli} does not exist"))
                     .finish(loc(1186, "validateRecoveryParameters"))?;
             }
@@ -287,7 +287,7 @@ fn read_backup_label(
             if let Ok(tli_from_file) = rest.trim().parse::<TimeLineID>() {
                 if tli_from_walseg != tli_from_file {
                     return Err(PgError::new(FATAL, "invalid data in file \"backup_label\"")
-                        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                        .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
                         .with_detail(format!(
                             "Timeline ID parsed is {tli_from_file}, but expected {tli_from_walseg}."
                         )));
@@ -298,7 +298,7 @@ fn read_backup_label(
                 FATAL,
                 "this is an incremental backup, not a data directory",
             )
-            .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+            .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
             .with_hint("Use pg_combinebackup to reconstruct a valid data directory."));
         }
         // START TIME / LABEL lines are debug-only; ignored.
@@ -314,7 +314,7 @@ fn read_backup_label(
 
 fn backup_label_invalid() -> PgError {
     PgError::new(FATAL, "invalid data in file \"backup_label\"")
-        .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+        .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
 }
 
 /// Parse `START WAL LOCATION: %X/%X (file %08X%16s)` → (lsn, tli).
@@ -1072,11 +1072,11 @@ fn read_tablespace_map() -> PgResult<Option<Vec<(u32, String)>>> {
         // OID space PATH; de-escape backslashes.
         let (oid_s, path) = line.split_once(' ').ok_or_else(|| {
             PgError::new(FATAL, "invalid data in file \"tablespace_map\"")
-                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
         })?;
         let oid: u32 = oid_s.parse().map_err(|_| {
             PgError::new(FATAL, "invalid data in file \"tablespace_map\"")
-                .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
+                .with_sqlstate(::types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE)
         })?;
         out.push((oid, path.replace("\\\\", "\\")));
     }

@@ -6,13 +6,13 @@
 #![allow(clippy::too_many_arguments)]
 
 use mcx::{Mcx, PgVec};
-use types_cluster::RelOptionsToken;
-use types_core::primitive::{Oid, RelFileNumber, TransactionId};
-use types_error::PgResult;
+use ::types_cluster::RelOptionsToken;
+use ::types_core::primitive::{Oid, RelFileNumber, TransactionId};
+use ::types_error::PgResult;
 use ::nodes::nodes::NodePtr;
 use ::nodes::primnodes::OnCommitAction;
-use rel::Relation;
-use types_tuple::heaptuple::TupleDescData;
+use ::rel::Relation;
+use ::types_tuple::heaptuple::TupleDescData;
 
 /// Arguments to [`heap_create_with_catalog`], mirroring the C
 /// `heap_create_with_catalog(...)` parameter list (catalog/heap.c) trimmed to
@@ -88,7 +88,7 @@ seam_core::seam!(
     /// carried on `Err`.
     pub fn get_attr_default_oid(
         relid: Oid,
-        attnum: types_core::AttrNumber,
+        attnum: ::types_core::AttrNumber,
     ) -> PgResult<Oid>
 );
 

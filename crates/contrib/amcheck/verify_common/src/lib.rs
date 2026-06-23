@@ -12,17 +12,17 @@
 //! [`index_checkable`], invokes the AM's check callback, then unwinds the GUC
 //! nest level / userid and releases the locks.
 
-use types_core::init::SECURITY_RESTRICTED_OPERATION;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_core::catalog::{RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED};
-use types_tuple::access::RELKIND_INDEX;
-use types_error::error::{
+use ::types_core::init::SECURITY_RESTRICTED_OPERATION;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_core::catalog::{RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED};
+use ::types_tuple::access::RELKIND_INDEX;
+use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_READ_ONLY_SQL_TRANSACTION,
     ERRCODE_UNDEFINED_TABLE,
 };
 use types_error::{NOTICE, PgError, PgResult};
-use rel::Relation;
-use types_storage::lock::{LOCKMODE, ShareLock};
+use ::rel::Relation;
+use ::types_storage::lock::{LOCKMODE, ShareLock};
 
 use verify_common_seams::{BTCallbackState, IndexDoCheckCallback};
 
@@ -221,7 +221,7 @@ pub fn amcheck_lock_relation_and_check(
 
 /// Install every seam this crate owns.
 pub fn init_seams() {
-    verify_common_seams::amcheck_lock_relation_and_check::set(
+    ::verify_common_seams::amcheck_lock_relation_and_check::set(
         amcheck_lock_relation_and_check,
     );
 }

@@ -17,11 +17,11 @@
 #![allow(unused_doc_comments)]
 extern crate alloc;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use execparallel::{
     BackgroundWorkerHandle, DsmSegmentHandle, SerializeCursor, ShmMqAttachHandle, ShmMqHandle, Size,
 };
-use types_parallel::ShmMqResult;
+use ::types_parallel::ShmMqResult;
 
 /// `shm_mq_create(address + i * size, size)` for the `i`th queue carved out of
 /// the queue DSM chunk that starts at `chunk` (the real chunk address). Returns

@@ -6,10 +6,10 @@
 //! row, and all the dependency recording). pg_aggregate.c is not ported yet, so
 //! this seam panics until its owner lands — mirror-PG-and-panic.
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::Oid;
-use types_error::PgResult;
-use parsenodes::Node;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::parsenodes::Node;
 
 /// The argument bundle `DefineAggregate` passes to
 /// `AggregateCreate(...)` (pg_aggregate.c). Field order mirrors the C

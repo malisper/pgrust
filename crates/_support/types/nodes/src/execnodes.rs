@@ -23,13 +23,13 @@
 //! points instead.
 
 use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
-use types_core::primitive::{AttrNumber, Index, Oid};
-use types_core::fmgr::INDEX_MAX_KEYS;
-use types_core::xact::CommandId;
-use types_error::PgResult;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{TupleDesc, TupleDescData};
-use types_tuple::tupconvert::TupleConversionMap;
+use ::types_core::primitive::{AttrNumber, Index, Oid};
+use ::types_core::fmgr::INDEX_MAX_KEYS;
+use ::types_core::xact::CommandId;
+use ::types_error::PgResult;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{TupleDesc, TupleDescData};
+use ::types_tuple::tupconvert::TupleConversionMap;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::{ExprState, ProjectionInfo, SubPlanState};
@@ -45,7 +45,7 @@ use crate::nodes::NodeTag;
 /// Material node.
 pub const T_MaterialState: NodeTag = NodeTag(424);
 
-pub use types_scan::sdir::{
+pub use ::types_scan::sdir::{
     BackwardScanDirection, ForwardScanDirection, NoMovementScanDirection, ScanDirection,
     ScanDirectionIsBackward, ScanDirectionIsForward, ScanDirectionIsNoMovement,
 };
@@ -861,7 +861,7 @@ pub enum FetchedCursorParam<'mcx> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScanTidOutcome {
     /// A valid physical TID was extracted (C `*current_tid = ...; return true`).
-    Tid(types_tuple::heaptuple::ItemPointerData),
+    Tid(::types_tuple::heaptuple::ItemPointerData),
     /// The scan provided no physical tuple / null self-ctid — the C raises the
     /// "not a simply updatable scan" error (the caller turns this into that
     /// `ereport`, matching the C).
@@ -876,7 +876,7 @@ pub enum ScanTidOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CurrentOfTid {
     /// A row was identified; carries the row's TID.
-    Found(types_tuple::heaptuple::ItemPointerData),
+    Found(::types_tuple::heaptuple::ItemPointerData),
     /// The cursor is not currently scanning a row of this table.
     NotOnThisTable,
 }
@@ -948,7 +948,7 @@ pub struct ExecRowMark {
     /// `RowMarkType markType` — see `RowMarkType`.
     pub markType: RowMarkType,
     /// `ItemPointerData curCtid` — ctid of currently locked tuple, if any.
-    pub curCtid: types_tuple::heaptuple::ItemPointerData,
+    pub curCtid: ::types_tuple::heaptuple::ItemPointerData,
 }
 
 impl Default for RowMarkType {

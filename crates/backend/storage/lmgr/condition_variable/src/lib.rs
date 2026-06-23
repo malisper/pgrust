@@ -19,15 +19,15 @@ use latch_seams as latch_seams;
 use condition_variable_seams as cv_seams;
 use lmgr_proc_seams as proc_seams;
 use s_lock::{s_init_lock, s_lock_macro, Spinlock};
-use postgres_seams::check_for_interrupts;
-use init_small_seams::my_proc_number;
+use ::postgres_seams::check_for_interrupts;
+use ::init_small_seams::my_proc_number;
 use ::instr_time::instr_time_set_current;
-use condvar::ConditionVariable;
-use types_core::instrument::instr_time;
+use ::condvar::ConditionVariable;
+use ::types_core::instrument::instr_time;
 use types_core::{ProcNumber, INVALID_PROC_NUMBER};
-use types_error::PgResult;
-use types_storage::storage::{proclist_head, proclist_node};
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::types_error::PgResult;
+use ::types_storage::storage::{proclist_head, proclist_node};
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
 /// Identity of a `ConditionVariable`, standing in for the C pointer value held
 /// in `cv_sleep_target`. Two references compare equal iff they refer to the

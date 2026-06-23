@@ -63,8 +63,8 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-use pathnodes::RelId;
-use types_core::primitive::Cost;
+use ::pathnodes::RelId;
+use ::types_core::primitive::Cost;
 
 pub mod copy;
 pub mod cx;

@@ -49,7 +49,7 @@ pub struct SyntheticRte {
 impl Default for SyntheticRte {
     fn default() -> Self {
         SyntheticRte {
-            rtekind: pathnodes::RTE_RELATION,
+            rtekind: ::pathnodes::RTE_RELATION,
             relkind: 0,
             relid: types_core::primitive::Oid::default(),
             inh: false,
@@ -64,7 +64,7 @@ impl Default for SyntheticRte {
             security_barrier: false,
             values_lists_len: 0,
             lateral: false,
-            jointype: pathnodes::JOIN_INNER,
+            jointype: ::pathnodes::JOIN_INNER,
             enrtuples: 0.0,
         }
     }
@@ -157,13 +157,13 @@ fn install_once() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pathnodes::planner_run::PlannerRun;
-    use pathnodes::PlannerInfo;
+    use ::pathnodes::planner_run::PlannerRun;
+    use ::pathnodes::PlannerInfo;
 
     #[test]
     fn synthetic_projections_round_trip() {
         let mut a = SyntheticRte::default();
-        a.rtekind = pathnodes::RTE_RELATION;
+        a.rtekind = ::pathnodes::RTE_RELATION;
         a.relid = 1259u32;
         a.relkind = b'r' as i8;
         a.inh = true;
@@ -191,7 +191,7 @@ mod tests {
         let run = PlannerRun::new(cx.mcx());
 
         // RT index 1 (relation).
-        assert_eq!(rte_rtekind::call(&run, &root, 1), pathnodes::RTE_RELATION);
+        assert_eq!(rte_rtekind::call(&run, &root, 1), ::pathnodes::RTE_RELATION);
         assert_eq!(rte_relid::call(&run, &root, 1), 1259);
         assert_eq!(rte_relkind::call(&run, &root, 1), b'r' as i8);
         assert!(rte_inh::call(&run, &root, 1));

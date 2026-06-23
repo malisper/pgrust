@@ -33,11 +33,11 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use utils_error::ereport;
-use mcx::Mcx;
-use types_acl::acl::{AclResult, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
-use types_core::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID};
-use types_core::primitive::{InvalidOid, Oid, FUNC_MAX_ARGS};
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::types_acl::acl::{AclResult, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
+use ::types_core::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID};
+use ::types_core::primitive::{InvalidOid, Oid, FUNC_MAX_ARGS};
 use types_tuple::heaptuple::Datum as CanonDatum;
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_PARAMETER_VALUE,
@@ -45,7 +45,7 @@ use types_error::{
     ERRCODE_PROTOCOL_VIOLATION, ERRCODE_UNDEFINED_FUNCTION, ERROR, LOG,
 };
 use ::nodes::parsenodes::ObjectType;
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 use transam_xact_seams as xact_seam;
 use aclchk_seams as aclchk_seam;
@@ -59,7 +59,7 @@ use miscinit_seams as miscinit_seam;
 use mbutils_seams as mbutils_seam;
 use snapmgr_seams as snapmgr_seam;
 
-use types_core::fmgr::FmgrInfo;
+use ::types_core::fmgr::FmgrInfo;
 
 /// `PqMsg_FunctionCallResponse` (`libpq/protocol.h`) — the message-type byte
 /// of the fast-path function-call reply.

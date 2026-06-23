@@ -55,24 +55,24 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use mcx::{MemoryContext, Mcx};
-use types_core::primitive::{BlockNumber, OffsetNumber, TransactionId, XLogRecPtr, Oid, BLCKSZ};
+use ::types_core::primitive::{BlockNumber, OffsetNumber, TransactionId, XLogRecPtr, Oid, BLCKSZ};
 use types_error::{PgError, PgResult, PANIC};
-use types_storage::storage::ReadBufferMode;
-use types_storage::RelFileLocator;
-use types_storage::buf::{Buffer, BufferIsValid, InvalidBuffer};
-use types_storage::sinval::SharedInvalidationMessage;
-use types_storage::bufpage::SizeofHeapTupleHeader;
-use types_tuple::heaptuple::{
+use ::types_storage::storage::ReadBufferMode;
+use ::types_storage::RelFileLocator;
+use ::types_storage::buf::{Buffer, BufferIsValid, InvalidBuffer};
+use ::types_storage::sinval::SharedInvalidationMessage;
+use ::types_storage::bufpage::SizeofHeapTupleHeader;
+use ::types_tuple::heaptuple::{
     BlockIdData, HeapTupleField3, HeapTupleFields, HeapTupleHeaderChoice, HeapTupleHeaderData,
     ItemPointerData, HEAP_KEYS_UPDATED, HEAP_MOVED, HEAP_XACT_MASK, HEAP_XMAX_COMMITTED,
     HEAP_XMAX_EXCL_LOCK, HEAP_XMAX_INVALID, HEAP_XMAX_IS_MULTI, HEAP_XMAX_KEYSHR_LOCK,
     HEAP_XMAX_LOCK_ONLY, HEAP_XMIN_FROZEN,
 };
-use types_vacuum::vacuum::HeapTupleFreeze;
-use wal::rmgr::XLogReaderState;
-use wal::XLogRedoAction;
+use ::types_vacuum::vacuum::HeapTupleFreeze;
+use ::wal::rmgr::XLogReaderState;
+use ::wal::XLogRedoAction;
 
-use xlog_records::heapam_xlog::{
+use ::xlog_records::heapam_xlog::{
     xl_heap_confirm, xl_heap_delete, xl_heap_header, xl_heap_inplace, xl_heap_insert, xl_heap_lock,
     xl_heap_lock_updated, xl_heap_multi_insert, xl_heap_prune, xl_heap_update, xl_heap_visible,
     xl_multi_insert_tuple, SizeOfHeapHeader, SizeOfMultiInsertTuple,
@@ -88,16 +88,16 @@ use page::{
     PageGetMaxOffsetNumber, PageInit, PageIsNew, PageMut, PageRef, PageSetAllVisible, PageSetLSN,
     PageSetPrunable,
 };
-use types_storage::bufpage::{PAI_IS_HEAP, PAI_OVERWRITE};
+use ::types_storage::bufpage::{PAI_IS_HEAP, PAI_OVERWRITE};
 
 use xlogutils::{
     standby_state, XLogInitBufferForRedo, XLogReadBufferForRedo, XLogReadBufferForRedoExtended,
 };
-use wal::xlogutils::in_hot_standby;
-use freespace::XLogRecordPageWithFreeSpace;
+use ::wal::xlogutils::in_hot_standby;
+use ::freespace::XLogRecordPageWithFreeSpace;
 
 // opcode + flag constants live in the ported heapdesc (heapam_xlog.h).
-use rmgrdesc_next::heapdesc::{
+use ::rmgrdesc_next::heapdesc::{
     XLHL_KEYS_UPDATED, XLHL_XMAX_EXCL_LOCK, XLHL_XMAX_IS_MULTI, XLHL_XMAX_KEYSHR_LOCK,
     XLHL_XMAX_LOCK_ONLY, XLHP_CLEANUP_LOCK, XLHP_HAS_CONFLICT_HORIZON, XLHP_HAS_DEAD_ITEMS,
     XLHP_HAS_NOW_UNUSED_ITEMS, XLHP_HAS_REDIRECTIONS, XLHP_IS_CATALOG_REL, XLOG_HEAP2_LOCK_UPDATED,
@@ -107,12 +107,12 @@ use rmgrdesc_next::heapdesc::{
     XLOG_HEAP_INIT_PAGE, XLOG_HEAP_INPLACE, XLOG_HEAP_INSERT, XLOG_HEAP_LOCK, XLOG_HEAP_OPMASK,
     XLOG_HEAP_TRUNCATE, XLOG_HEAP_UPDATE,
 };
-use rmgrdesc_next::heapdesc::heap_xlog_deserialize_prune_and_freeze;
+use ::rmgrdesc_next::heapdesc::heap_xlog_deserialize_prune_and_freeze;
 
 use bufmask_seams as bufmask;
 use pruneheap_seams as pruneheap;
 use rewriteheap_seams as rewrite;
-use xlogreader_seams::xlog_rec_get_block_tag_extended;
+use ::xlogreader_seams::xlog_rec_get_block_tag_extended;
 use bufmgr_seams as bufmgr;
 use standby_seams as standby;
 use inval_seams as inval;
@@ -832,7 +832,7 @@ fn new_tuple_header<'mcx>(mcx: Mcx<'mcx>, xlhdr: &xl_heap_header) -> HeapTupleHe
         t_infomask2: xlhdr.t_infomask2,
         t_infomask: xlhdr.t_infomask,
         t_hoff: xlhdr.t_hoff,
-        t_bits: mcx::PgVec::new_in(mcx),
+        t_bits: ::mcx::PgVec::new_in(mcx),
     }
 }
 

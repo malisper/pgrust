@@ -22,14 +22,14 @@
 //! [`serialize_page`] / [`deserialize_page`] convert to/from the on-temp-file
 //! `BLCKSZ` block for [`ReadTempFileBlock`] / [`WriteTempFileBlock`].
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use buffile_seams as buffile;
 
-use types_core::primitive::{BlockNumber, InvalidBlockNumber, BLCKSZ};
-use types_error::PgResult;
+use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, BLCKSZ};
+use ::types_error::PgResult;
 use gist::{GISTBuildBuffers, GISTNodeBuffer, GISTNodeBufferPage, SharedNodeBuffer};
-use rel::Relation;
+use ::rel::Relation;
 
 use alloc::rc::Rc;
 use core::cell::RefCell;
@@ -345,7 +345,7 @@ fn gistPlaceItupToPage(page: &mut GISTNodeBufferPage, itup: &[u8]) {
 fn gistGetItupFromPage<'mcx>(
     mcx: Mcx<'mcx>,
     page: &mut GISTNodeBufferPage,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     // Page shouldn't be empty.
     debug_assert!(!page_is_empty(page));
 
@@ -354,7 +354,7 @@ fn gistGetItupFromPage<'mcx>(
     let itupsz = index_tuple_size(&page.tupledata[off..]);
 
     // Make a copy of the tuple.
-    let out = mcx::slice_in(mcx, &page.tupledata[off..off + itupsz])?;
+    let out = ::mcx::slice_in(mcx, &page.tupledata[off..off + itupsz])?;
 
     // Mark the space used by the tuple as free.
     page.freespace += maxalign(itupsz) as u32;
@@ -446,7 +446,7 @@ pub fn gistPopItupFromNodeBuffer<'mcx>(
     mcx: Mcx<'mcx>,
     gfbb: &mut GISTBuildBuffers<'mcx>,
     node_buffer: &SharedNodeBuffer,
-) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, u8>>> {
     // If node buffer is empty then return false.
     if node_buffer.borrow().blocksCount <= 0 {
         return Ok(None);
@@ -549,7 +549,7 @@ pub fn gistFreeBuildBuffers(gfbb: &mut GISTBuildBuffers<'_>) -> PgResult<()> {
 // gistRelocateBuildBuffersOnSplit (gistbuildbuffers.c:532)
 // ===========================================================================
 
-use gist_core::gistutil::{gistDeCompressAtt, gistgetadjusted, gistpenalty};
+use ::gist_core::gistutil::{gistDeCompressAtt, gistgetadjusted, gistpenalty};
 use gist::{GISTENTRY, GISTPageSplitInfo, GISTSTATE};
 
 use bufmgr_seams as bufmgr;
@@ -594,7 +594,7 @@ pub fn gistRelocateBuildBuffersOnSplit<'mcx>(
     // Make a copy of the old buffer, as we're going to reuse it as the buffer
     // for the new left page (which is on the same block as the old page). The
     // copy is a temporary buffer (isTemp == true), never in the hash table.
-    debug_assert!(blocknum != gist::GIST_ROOT_BLKNO);
+    debug_assert!(blocknum != ::gist::GIST_ROOT_BLKNO);
     let old_buf: SharedNodeBuffer = {
         let nb = node_buffer.borrow();
         Rc::new(RefCell::new(GISTNodeBuffer {
@@ -734,7 +734,7 @@ pub fn gistRelocateBuildBuffersOnSplit<'mcx>(
 fn ReadTempFileBlock(gfbb: &mut GISTBuildBuffers<'_>, blknum: i64, buf: &mut [u8]) -> PgResult<()> {
     let pfile = gfbb.pfile.as_mut().expect("gfbb temp file open");
     if buffile::buf_file_seek_block::call(pfile, blknum)? != 0 {
-        return Err(types_error::PgError::error(&alloc::format!(
+        return Err(::types_error::PgError::error(&alloc::format!(
             "could not seek to block {blknum} in temporary file"
         )));
     }
@@ -746,7 +746,7 @@ fn ReadTempFileBlock(gfbb: &mut GISTBuildBuffers<'_>, blknum: i64, buf: &mut [u8
 fn WriteTempFileBlock(gfbb: &mut GISTBuildBuffers<'_>, blknum: i64, buf: &[u8]) -> PgResult<()> {
     let pfile = gfbb.pfile.as_mut().expect("gfbb temp file open");
     if buffile::buf_file_seek_block::call(pfile, blknum)? != 0 {
-        return Err(types_error::PgError::error(&alloc::format!(
+        return Err(::types_error::PgError::error(&alloc::format!(
             "could not seek to block {blknum} in temporary file"
         )));
     }

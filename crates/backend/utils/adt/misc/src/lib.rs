@@ -33,7 +33,7 @@ use types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_INVALID_PARAMETER_VALUE,
 };
-use types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, UNKNOWNOID};
+use ::types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, UNKNOWNOID};
 
 pub use adt_misc::{CatalogForeignKeyRow, KeywordRow, TypeBaseStep};
 
@@ -42,14 +42,14 @@ use misc_seams::{
     tablespace_databases as tablespace_databases_seam,
     tablespace_location as tablespace_location_seam,
 };
-use rewritehandler_seams::relation_is_updatable as relation_is_updatable_seam;
-use format_type_seams::format_type_be as format_type_be_seam;
-use ruleutils_seams::generate_collation_name as generate_collation_name_seam;
-use timestamp_seams::get_current_timestamp as get_current_timestamp_seam;
-use lsyscache_seams::type_is_collatable as type_is_collatable_seam;
-use fmgr_seams::input_is_valid_by_type as input_is_valid_by_type_seam;
-use miscinit_seams::check_for_interrupts as check_for_interrupts_seam;
-use parse_type_seams::parse_type_string as parse_type_string_seam;
+use ::rewritehandler_seams::relation_is_updatable as relation_is_updatable_seam;
+use ::format_type_seams::format_type_be as format_type_be_seam;
+use ::ruleutils_seams::generate_collation_name as generate_collation_name_seam;
+use ::timestamp_seams::get_current_timestamp as get_current_timestamp_seam;
+use ::lsyscache_seams::type_is_collatable as type_is_collatable_seam;
+use ::fmgr_seams::input_is_valid_by_type as input_is_valid_by_type_seam;
+use ::miscinit_seams::check_for_interrupts as check_for_interrupts_seam;
+use ::parse_type_seams::parse_type_string as parse_type_string_seam;
 use latch_seams::{
     reset_latch_my_latch as reset_latch_my_latch_seam, wait_latch_my_latch as wait_latch_my_latch_seam,
 };
@@ -165,7 +165,7 @@ pub fn current_database<'mcx>(mcx: Mcx<'mcx>, my_database_id: Oid) -> PgResult<P
     // Reproduce the always-valid contract: a missing name is an internal error.
     match dbcommands::get_database_name(mcx, my_database_id)? {
         Some(name) => {
-            let mut out = mcx::vec_with_capacity_in(mcx, name.as_bytes().len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, name.as_bytes().len())?;
             out.extend_from_slice(name.as_bytes());
             Ok(out)
         }
@@ -186,7 +186,7 @@ pub fn current_query<'mcx>(
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     match debug_query_string {
         Some(q) => {
-            let mut out = mcx::vec_with_capacity_in(mcx, q.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, q.len())?;
             out.extend_from_slice(q);
             Ok(Some(out))
         }
@@ -283,7 +283,7 @@ pub fn pg_get_keywords() -> Vec<KeywordRow> {
     use keywords::{
         GetScanKeyword, ScanKeywordBareLabel, ScanKeywordCategories, ScanKeywords,
     };
-    use types_core::keywords::KeywordCategory;
+    use ::types_core::keywords::KeywordCategory;
 
     let n = ScanKeywords.num_keywords();
     let mut rows = Vec::with_capacity(n);
@@ -428,7 +428,7 @@ pub fn pg_collation_for<'mcx>(
         return Ok(None);
     }
     let name = generate_collation_name_seam::call(mcx, collid)?;
-    let mut out = mcx::vec_with_capacity_in(mcx, name.as_bytes().len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, name.as_bytes().len())?;
     out.extend_from_slice(name.as_bytes());
     Ok(Some(out))
 }
@@ -648,7 +648,7 @@ pub fn parse_ident<'mcx>(
     // The code below scribbles on qualname_str, so we copy it (misc.c:865). The
     // quoted-unescape loop mutates the working buffer in place, exactly like the
     // C memmove; keep it as an mcx-charged PgVec we index into.
-    let mut buf: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, qualname.len())?;
+    let mut buf: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, qualname.len())?;
     buf.extend_from_slice(qualname);
 
     let mut parts: Vec<PgVec<'mcx, u8>> = Vec::new();
@@ -717,7 +717,7 @@ pub fn parse_ident<'mcx>(
             // accumArrayResult(CStringGetTextDatum(curname)) (misc.c:915). The
             // terminator at endp truncates curname; the identifier bytes are
             // buf[curname..endp].
-            let mut part = mcx::vec_with_capacity_in(mcx, endp - curname)?;
+            let mut part = ::mcx::vec_with_capacity_in(mcx, endp - curname)?;
             part.extend_from_slice(&buf[curname..endp]);
             parts.push(part);
             missing_ident = false;
@@ -742,7 +742,7 @@ pub fn parse_ident<'mcx>(
             );
             // cstring_to_text_with_len(downname, len) (misc.c:938): the first len
             // bytes of the downcased name.
-            let mut part = mcx::vec_with_capacity_in(mcx, len)?;
+            let mut part = ::mcx::vec_with_capacity_in(mcx, len)?;
             part.extend_from_slice(&downname[..len]);
             parts.push(part);
             missing_ident = false;
@@ -880,5 +880,5 @@ pub fn any_value_transfn<T>(state: T) -> T {
 /// `seams-init::init_all`.
 pub fn init_seams() {
     fmgr_builtins::register_misc_builtins();
-    misc_seams::catalog_foreign_keys::set(|| Ok(build_sys_fk_rows()));
+    ::misc_seams::catalog_foreign_keys::set(|| Ok(build_sys_fk_rows()));
 }

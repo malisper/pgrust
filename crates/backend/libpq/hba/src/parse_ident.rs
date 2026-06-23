@@ -8,7 +8,7 @@
 
 use acl_seams as acl;
 use types_error::{ErrorLevel, PgResult};
-use net::AuthToken;
+use ::net::AuthToken;
 
 use crate::matchers::check_role;
 use crate::token::{copy_auth_token, free_auth_token, make_auth_token, regcomp_auth_token, regexec_auth_token};
@@ -144,9 +144,9 @@ pub(crate) fn check_ident_usermap(
                     errstr.unwrap_or_default()
                 );
                 crate::report_plain(
-                    types_error::LOG,
+                    ::types_error::LOG,
                     "check_ident_usermap",
-                    types_error::ERRCODE_INVALID_REGULAR_EXPRESSION,
+                    ::types_error::ERRCODE_INVALID_REGULAR_EXPRESSION,
                     msg,
                 )?;
                 error_p = true;
@@ -177,9 +177,9 @@ pub(crate) fn check_ident_usermap(
                     "regular expression \"{sys_pat}\" has no subexpressions as requested by backreference in \"{pg_str}\""
                 );
                 crate::report_plain(
-                    types_error::LOG,
+                    ::types_error::LOG,
                     "check_ident_usermap",
-                    types_error::ERRCODE_INVALID_REGULAR_EXPRESSION,
+                    ::types_error::ERRCODE_INVALID_REGULAR_EXPRESSION,
                     msg,
                 )?;
                 error_p = true;

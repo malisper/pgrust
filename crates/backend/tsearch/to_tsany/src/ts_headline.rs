@@ -15,17 +15,17 @@ use parse::{
     generateHeadline, hlparsetext, prsd_headline, HeadlineParsedText, QueryItem, QueryOperand,
     QueryOperator, TSQuery,
 };
-use tsearchcmds_seams::deserialize_deflist;
-use adt_jsonfuncs::iterate::{
+use ::tsearchcmds_seams::deserialize_deflist;
+use ::adt_jsonfuncs::iterate::{
     transform_json_string_values, transform_jsonb_string_values,
 };
 use ts_cache::{
     getTSCurrentConfig, lookup_ts_config_cache, lookup_ts_parser_cache,
 };
 use mcx::{Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 /// `VARHDRSZ`.
 const VARHDRSZ: usize = 4;

@@ -11,11 +11,11 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
-use types_nbtree::BTScanInsert;
-use rel::Relation;
-use types_tableam::amapi::IndexBuildResult;
-use types_tableam::index_info_carrier::IndexInfoCarrier;
+use ::types_error::PgResult;
+use ::types_nbtree::BTScanInsert;
+use ::rel::Relation;
+use ::types_tableam::amapi::IndexBuildResult;
+use ::types_tableam::index_info_carrier::IndexInfoCarrier;
 
 seam_core::seam!(
     /// `btbuild(heap, index, indexInfo)` (nbtsort.c): the btree AM's `ambuild`

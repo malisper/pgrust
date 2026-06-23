@@ -6,8 +6,8 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
-use tsearch::StopList;
+use ::types_error::PgResult;
+use ::tsearch::StopList;
 
 seam_core::seam!(
     /// `get_tsearch_config_filename(basename, extension)` (ts_utils.c): build

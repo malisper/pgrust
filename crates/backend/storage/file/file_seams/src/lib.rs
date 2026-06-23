@@ -80,7 +80,7 @@ seam_core::seam!(
     /// `data_sync_elevel(int elevel)` (`storage/file/fd.c`) — the severity to
     /// report data-sync failures at: the given level if `data_sync_retry`,
     /// otherwise PANIC.
-    pub fn data_sync_elevel(elevel: types_error::ErrorLevel) -> types_error::ErrorLevel
+    pub fn data_sync_elevel(elevel: ::types_error::ErrorLevel) -> ::types_error::ErrorLevel
 );
 
 seam_core::seam!(

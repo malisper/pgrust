@@ -30,7 +30,7 @@
 //! owner's seam.
 
 use core::cell::Cell;
-use types_storage::lock::DeadLockState;
+use ::types_storage::lock::DeadLockState;
 
 thread_local! {
     /// `int DeadlockTimeout = 1000;` — proc.c GUC backing (milliseconds).

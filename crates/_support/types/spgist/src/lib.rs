@@ -5,13 +5,13 @@
 //! role `types-gin` plays for GIN and `types-brin` plays for BRIN. The C structs
 //! are translated field-for-field and re-homed onto the owned memory model:
 //!
-//! * `Datum` becomes the owned [`types_tuple::Datum`] value;
+//! * `Datum` becomes the owned [`::types_tuple::Datum`] value;
 //! * `MemoryContext` becomes [`mcx::Mcx`];
 //! * `Relation` becomes the index relation `Oid` (the page bytes are reached
 //!   through the bufmgr seam, exactly as `types-gin`/`types-gist` do);
-//! * `TupleDesc` becomes the owned [`types_tuple::heaptuple::TupleDesc`];
+//! * `TupleDesc` becomes the owned [`::types_tuple::heaptuple::TupleDesc`];
 //! * `ScanKey` (a `ScanKeyData *` array) becomes a [`Vec`] of the owned
-//!   [`types_scan::scankey::ScanKeyData`];
+//!   [`::types_scan::scankey::ScanKeyData`];
 //! * `Datum *nodeLabels` / `Datum *datums` and the various `int *` / `double **`
 //!   working arrays become [`Vec`]s;
 //! * `void *traversalValue` (opclass-specific opaque traverse state) becomes an
@@ -39,10 +39,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{BlockNumber, Oid, TransactionId};
-use types_scan::scankey::ScanKeyData;
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{ItemPointerData, TupleDesc};
+use ::types_core::primitive::{BlockNumber, Oid, TransactionId};
+use ::types_scan::scankey::ScanKeyData;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{ItemPointerData, TupleDesc};
 
 // ===========================================================================
 // access/spgist.h — opclass support function numbers.

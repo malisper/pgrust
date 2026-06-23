@@ -3,7 +3,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::Node;
 use ::nodes::parsestmt::CommandTag;
@@ -171,5 +171,5 @@ seam_core::seam!(
     /// ERRCODE_READ_ONLY_SQL_TRANSACTION)` "cannot execute <cmdname> during
     /// recovery" when `RecoveryInProgress()`. `pg_notify` calls it with
     /// `"NOTIFY"`. Errors out on `Err`.
-    pub fn prevent_command_during_recovery(cmdname: &str) -> types_error::PgResult<()>
+    pub fn prevent_command_during_recovery(cmdname: &str) -> ::types_error::PgResult<()>
 );

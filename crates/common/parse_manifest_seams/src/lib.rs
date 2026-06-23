@@ -12,7 +12,7 @@
 //! A parser error (the C `error_cb`, which `ereport(ERROR)`s) surfaces as
 //! `Err`.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use parse_manifest::{JsonManifestParseIncrementalStateHandle, ParsedManifestChunk};
 
 seam_core::seam!(

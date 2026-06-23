@@ -18,13 +18,13 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 use parse::{ParsedText, ParsedWord};
-use tsvector_core::access::{
+use ::tsvector_core::access::{
     set_tsv_size, set_varsize, shortalign, strptr_off, SIZEOF_NPOS, SIZEOF_WEP, SIZEOF_WORDENTRY,
 };
-use tsearch::tsearch::DATAHDRSIZE;
-use utils_error::ereport;
+use ::tsearch::tsearch::DATAHDRSIZE;
+use ::utils_error::ereport;
 use types_error::{PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
-use tsearch::tsearch::{WordEntry, WordEntryPos, LIMITPOS, MAXENTRYPOS, MAXNUMPOS, MAXSTRPOS};
+use ::tsearch::tsearch::{WordEntry, WordEntryPos, LIMITPOS, MAXENTRYPOS, MAXNUMPOS, MAXSTRPOS};
 
 /// `compareWORD(a, b)` (to_tsany.c:57): order by `tsCompareString` over the
 /// lexeme bytes, then by `pos.pos`.
@@ -166,7 +166,7 @@ pub fn make_tsvector(prs: &mut ParsedText) -> PgResult<Vec<u8>> {
     }
 
     if lenstr > MAXSTRPOS as usize {
-        return Err(ereport(types_error::ERROR)
+        return Err(ereport(::types_error::ERROR)
             .errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)
             .errmsg(alloc::format!(
                 "string is too long for tsvector ({} bytes, max {} bytes)",
@@ -197,7 +197,7 @@ pub fn make_tsvector(prs: &mut ParsedText) -> PgResult<Vec<u8>> {
         let count = apos.get(i).map(|a| a[0] as usize).unwrap_or(0);
         if count > 0 {
             if count > 0xFFFF {
-                return Err(types_error::PgError::error("positions array too long"));
+                return Err(::types_error::PgError::error("positions array too long"));
             }
             entry.set_haspos(1);
             stroff = shortalign(stroff);
@@ -208,8 +208,8 @@ pub fn make_tsvector(prs: &mut ParsedText) -> PgResult<Vec<u8>> {
             // wptr = POSDATAPTR; WEP_SETWEIGHT(0); WEP_SETPOS(apos[j+1]).
             for j in 0..count {
                 let mut wep: WordEntryPos = 0;
-                tsearch::tsearch::WEP_SETWEIGHT(&mut wep, 0);
-                tsearch::tsearch::WEP_SETPOS(&mut wep, apos[i][j + 1]);
+                ::tsearch::tsearch::WEP_SETWEIGHT(&mut wep, 0);
+                ::tsearch::tsearch::WEP_SETPOS(&mut wep, apos[i][j + 1]);
                 let off = strbuf_off + stroff + SIZEOF_NPOS + j * SIZEOF_WEP;
                 out[off..off + SIZEOF_WEP].copy_from_slice(&wep.to_ne_bytes());
             }

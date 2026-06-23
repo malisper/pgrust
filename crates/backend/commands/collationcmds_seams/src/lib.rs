@@ -23,8 +23,8 @@
 //! `get_collation_oid` / `QualifiedNameGetCreationNamespace` / `NameListToString`.
 
 use mcx::{Mcx, PgString};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 /// The `pg_collation` form fields collationcmds reads back from the syscache
 /// (`SearchSysCache1(COLLOID, ...)`). All text columns are owned `Option<String>`

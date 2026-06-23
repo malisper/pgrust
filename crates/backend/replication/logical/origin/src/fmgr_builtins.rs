@@ -27,7 +27,7 @@
 //! The set-returning sibling 6014 `pg_show_replication_origin_status` is an SRF
 //! and is left to its own (materialized-SRF) registration.
 
-use datum::Datum;
+use ::datum::Datum;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use types_core::{Oid, TimestampTz, XLogRecPtr};

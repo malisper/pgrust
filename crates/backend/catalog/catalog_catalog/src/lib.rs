@@ -21,13 +21,13 @@
 //! OID generator, table/index open, relpath + `access()`, miscadmin/xact-mode
 //! globals); each caller's own control flow is ported 1:1.
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_COLUMN, ERROR, LOG,
 };
-use types_core::catalog::AUTH_ID_OID_INDEX_ID;
-use types_catalog::catalog::{
+use ::types_core::catalog::AUTH_ID_OID_INDEX_ID;
+use ::types_catalog::catalog::{
     ANUM_PG_CLASS_OID, AUTH_ID_RELATION_ID, AUTH_ID_ROLNAME_INDEX_ID,
     AUTH_MEM_GRANTOR_INDEX_ID, AUTH_MEM_MEM_ROLE_INDEX_ID, AUTH_MEM_OID_INDEX_ID,
     AUTH_MEM_RELATION_ID, AUTH_MEM_ROLE_MEM_INDEX_ID, CLASS_OID_INDEX_ID, DATABASE_NAME_INDEX_ID,
@@ -47,14 +47,14 @@ use types_catalog::catalog::{
     SUBSCRIPTION_OBJECT_INDEX_ID, SUBSCRIPTION_RELATION_ID, TABLESPACE_NAME_INDEX_ID,
     TABLESPACE_OID_INDEX_ID, TABLE_SPACE_RELATION_ID, TS_DICTIONARY_RELATION_ID,
 };
-use types_catalog::catalog_dependency::DEPEND_RELATION_ID;
-use types_catalog::catalog_shdepend::SHARED_DEPEND_RELATION_ID;
-use types_cluster::PgClassForm;
-use types_core::fmgr::F_OIDEQ;
-use types_core::primitive::{
+use ::types_catalog::catalog_dependency::DEPEND_RELATION_ID;
+use ::types_catalog::catalog_shdepend::SHARED_DEPEND_RELATION_ID;
+use ::types_cluster::PgClassForm;
+use ::types_core::fmgr::F_OIDEQ;
+use ::types_core::primitive::{
     AttrNumber, InvalidOid, Oid, ProcNumber, RelFileNumber, INVALID_PROC_NUMBER, MAIN_FORKNUM,
 };
-use types_core::catalog::{
+use ::types_core::catalog::{
     OIDOID, PG_TOAST_NAMESPACE, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP,
     RELPERSISTENCE_UNLOGGED,
 };
@@ -63,24 +63,24 @@ use types_core::catalog::{
 // the canonical value.
 use types_tuple::heaptuple::Datum;
 use rel::{FormData_pg_class, Relation, RelationData};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use snapshot::snapshot::{SnapshotData, SnapshotType};
-use types_storage::lock::RowExclusiveLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::snapshot::snapshot::{SnapshotData, SnapshotType};
+use ::types_storage::lock::RowExclusiveLock;
 
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use indexam_seams as indexam_seams;
 use table_seams as table_seams;
 use parallel_rt_seams as parallel_rt_seams;
 use varsup_seams as varsup_seams;
-use catalog_namespace::isTempToastNamespace;
+use ::catalog_namespace::isTempToastNamespace;
 use backend_common_relpath_seams as relpath_seams;
 use fd_seams as fd_seams;
 use syscache_seams as syscache_seams;
 use miscinit_seams as miscinit_seams;
 use init_small_seams as init_small_seams;
 use superuser_seams as superuser_seams;
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 /// Parameters to determine when to emit a log message in [`GetNewOidWithIndex`].
 const GETNEWOID_LOG_THRESHOLD: u64 = 1_000_000;
@@ -413,7 +413,7 @@ pub fn GetNewOidWithIndex(
      */
     debug_assert!(
         !init_small_seams::is_binary_upgrade::call()
-            || relation.rd_id != types_catalog::catalog::TYPE_RELATION_ID
+            || relation.rd_id != ::types_catalog::catalog::TYPE_RELATION_ID
     );
 
     /* SnapshotAny — see notes above */
@@ -451,7 +451,7 @@ pub fn GetNewOidWithIndex(
             Some(&snapshot_any),
             &keys,
         )?;
-        let scratch = mcx::MemoryContext::new("GetNewOidWithIndex probe");
+        let scratch = ::mcx::MemoryContext::new("GetNewOidWithIndex probe");
         collides = genam_seams::systable_getnext::call(scratch.mcx(), scan.desc_mut())?.is_some();
         drop(scratch);
         scan.end()?;
@@ -652,7 +652,7 @@ pub fn pg_nextoid(reloid: Oid, attname: &str, idxoid: Oid) -> PgResult<Oid> {
             .into_error());
     }
 
-    let scratch = mcx::MemoryContext::new("pg_nextoid");
+    let scratch = ::mcx::MemoryContext::new("pg_nextoid");
     let mcx = scratch.mcx();
 
     /*
@@ -836,7 +836,7 @@ pub fn init_seams() {
 /// `pg_class` is `None`. The transient `relpath` allocation is done in a
 /// short-lived context that is dropped before returning the scalar result.
 fn get_new_relfilenumber_seam(reltablespace: Oid, relpersistence: i8) -> PgResult<RelFileNumber> {
-    let cx = mcx::MemoryContext::new("GetNewRelFileNumber");
+    let cx = ::mcx::MemoryContext::new("GetNewRelFileNumber");
     GetNewRelFileNumber(cx.mcx(), reltablespace, None, relpersistence as u8)
 }
 

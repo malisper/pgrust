@@ -8,8 +8,8 @@
 //! `bootstrap.c` itself depends on `lsyscache.c`; the call therefore crosses a
 //! cycle and must route through this seam.
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 /// Result of [`boot_get_type_io_data`] — mirrors the out-params of the C
 /// `boot_get_type_io_data(typid, typlen, typbyval, typalign, typdelim,

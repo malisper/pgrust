@@ -33,18 +33,18 @@
 //!   `cte_plan_ids` index + the run's subroot store (populated by
 //!   `SS_process_ctes`); see [`examine_cte_subroot`].
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Index, InvalidOid, Oid, OidIsValid};
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Index, InvalidOid, Oid, OidIsValid};
 use types_error::{PgError, PgResult};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::parsenodes::RTEKind;
 use ::nodes::primnodes::{Expr, Var};
-use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{NodeId, PlanId, PlannerInfo, RelId, Relids, SpecialJoinInfo};
 use types_selfuncs::{StatsTuple, StatsTupleFreeFunc, VariableStatData};
 
 use aclchk_seams as aclchk;
-use nodes_core::bitmapset as colbms;
+use ::nodes_core::bitmapset as colbms;
 use equalfuncs_seams as eq;
 use nodeFuncs_seams as nf;
 use joinpath_seams as jp;
@@ -65,14 +65,14 @@ const STATS_EXT_EXPRESSIONS: i8 = b'e' as i8;
 /// `contain_placeholder_walker(node)` (selfuncs.c) — lightweight check for any
 /// `PlaceHolderVar` anywhere in the expression. `PlaceHolderVar` is an `Expr`
 /// variant in this model but is not handled by the generic
-/// [`expression_tree_walker`](nodes_core::nodefuncs::expression_tree_walker),
+/// [`expression_tree_walker`](::nodes_core::nodefuncs::expression_tree_walker),
 /// so the PHV test is done here and the walker recurses into the rest.
 fn contain_placeholder(node: &Expr<'_>) -> bool {
     if node.is_placeholdervar() {
         return true;
     }
     let mut found = false;
-    nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr<'_>| {
+    ::nodes_core::nodefuncs::expression_tree_walker(Some(node), &mut |child: &Expr<'_>| {
         if contain_placeholder(child) {
             found = true;
             return true; // abort
@@ -93,7 +93,7 @@ fn strip_all_phvs_mutator<'mcx>(node: Expr<'mcx>) -> Expr<'mcx> {
             .expect("strip_all_phvs_mutator: PlaceHolderVar has no phexpr");
         return strip_all_phvs_mutator(inner);
     }
-    nodes_core::nodefuncs::expression_tree_mutator(node, &mut strip_all_phvs_mutator)
+    ::nodes_core::nodefuncs::expression_tree_mutator(node, &mut strip_all_phvs_mutator)
 }
 
 /// `strip_all_phvs_deep(root, node)` (selfuncs.c) — deeply strip all
@@ -138,7 +138,7 @@ pub(crate) fn examine_variable<'mcx, 'run>(
     // be an Aggref (e.g. a HAVING `count(*) > 1`), whose context-allocated
     // TargetEntry args a bare derived `.clone()` panics on.
     let node_expr = root.node(node_id).clone_in(mcx)?;
-    vardata.vartype = nodes_core::nodefuncs::expr_type(Some(&node_expr))?;
+    vardata.vartype = ::nodes_core::nodefuncs::expr_type(Some(&node_expr))?;
 
     // PlaceHolderVars are transparent for statistics lookup; strip them first.
     let mut basenode = strip_all_phvs_deep(root, &node_expr, mcx)?;
@@ -214,8 +214,8 @@ pub(crate) fn examine_variable<'mcx, 'run>(
         None => node_expr.clone_in(mcx)?,
     };
     vardata.var = root.alloc_node(final_node.clone_in(mcx)?);
-    vardata.atttype = nodes_core::nodefuncs::expr_type(Some(&final_node))?;
-    vardata.atttypmod = nodes_core::nodefuncs::expr_typmod(Some(&final_node))?;
+    vardata.atttype = ::nodes_core::nodefuncs::expr_type(Some(&final_node))?;
+    vardata.atttypmod = ::nodes_core::nodefuncs::expr_typmod(Some(&final_node))?;
 
     if let Some(onerel) = onerel {
         // We have an expression in vars of a single relation. Try to match it
@@ -405,7 +405,7 @@ pub(crate) fn examine_indexcol_variable<'mcx, 'run>(
     mcx: Mcx<'mcx>,
     run: &PlannerRun<'run>,
     root: &PlannerInfo,
-    index: &pathnodes::IndexOptInfo,
+    index: &::pathnodes::IndexOptInfo,
     indexcol: usize,
     vardata: &mut VariableStatData,
 ) -> PgResult<()> {
@@ -445,7 +445,7 @@ fn examine_subquery_variable<'mcx, 'run>(
     rtekind: RTEKind,
     vardata: &mut VariableStatData,
 ) -> PgResult<()> {
-    use types_core::primitive::InvalidAttrNumber;
+    use ::types_core::primitive::InvalidAttrNumber;
 
     // Punt if it's a whole-row var rather than a plain column reference.
     if var.varattno == InvalidAttrNumber {
@@ -653,7 +653,7 @@ fn all_rows_selectable<'mcx, 'run>(
     varno: u32,
     varattnos: Option<&Bitmapset<'mcx>>,
 ) -> PgResult<bool> {
-    use types_acl::acl::{AclMaskHow, AclResult, ACL_SELECT};
+    use ::types_acl::acl::{AclMaskHow, AclResult, ACL_SELECT};
 
     // find_base_rel_noerr(root, varno) == simple_rel_array[varno].
     let rel = root
@@ -771,7 +771,7 @@ fn navigate_to_inh_root<'mcx, 'run>(
         let parent_colnos = appinfo.parent_colnos.clone();
         let parent_relid = appinfo.parent_relid;
 
-        let mut parent_varattnos: Option<mcx::PgBox<'mcx, Bitmapset<'mcx>>> = None;
+        let mut parent_varattnos: Option<::mcx::PgBox<'mcx, Bitmapset<'mcx>>> = None;
         let mut varattno = -1i32;
         loop {
             varattno = colbms::bms_next_member(attnos.as_ref(), varattno);
@@ -997,7 +997,7 @@ fn getrte_perminfo_checkasuser<'run>(
 /// `List *` of `SortGroupClause` directly; here each entry is a
 /// `Node::SortGroupClause`.
 fn sort_group_list(
-    nodes: &[mcx::PgBox<'_, ::nodes::nodes::Node<'_>>],
+    nodes: &[::mcx::PgBox<'_, ::nodes::nodes::Node<'_>>],
 ) -> alloc::vec::Vec<::nodes::rawnodes::SortGroupClause> {
     nodes
         .iter()
@@ -1096,7 +1096,7 @@ pub fn seam_statext_clause_attnums_selectable<'mcx>(
     attnums: &[i32],
     exprs: &[Expr<'mcx>],
 ) -> PgResult<bool> {
-    use mcx::PgBox;
+    use ::mcx::PgBox;
 
     // Build clause_attnums in the offset (pull_varattnos) style from the
     // individual-Var attnums.

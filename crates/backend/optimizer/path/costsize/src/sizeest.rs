@@ -1,8 +1,8 @@
 //! Per-RTE-kind size estimators (costsize.c:5328-6248) + `set_rel_width` /
 //! `set_pathtarget_cost_width` / `get_expr_width`.
 
-use types_core::primitive::{Cost, Oid};
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::{Cost, Oid};
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PathTarget, PlannerInfo, RelId};
 
 use costsize_seams as cz;
@@ -70,8 +70,8 @@ pub fn set_function_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut Plan
 /// length of the VALUES RTE's `values_lists`.
 pub fn set_values_size_estimates<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: RelId) {
     debug_assert!(root.rel(rel).relid > 0);
-    let relid = root.rel(rel).relid as types_core::primitive::Index;
-    let rte = pathnodes::planner_run::planner_rt_fetch(run, root, relid);
+    let relid = root.rel(rel).relid as ::types_core::primitive::Index;
+    let rte = ::pathnodes::planner_run::planner_rt_fetch(run, root, relid);
     debug_assert!(rte.rtekind as u32 == RTE_VALUES);
     let tuples = rte.values_lists.len() as f64;
     root.rel_mut(rel).tuples = tuples;
@@ -144,7 +144,7 @@ pub fn set_subquery_size_estimates<'mcx>(
     // FINAL upper rel was created while the subquery was planned, so read it
     // directly off `subroot.upper_rels` (a costsize->relnode dep would cycle
     // through rte-seams).
-    let sub_final_rel = subroot.upper_rels[pathnodes::UPPERREL_FINAL as usize]
+    let sub_final_rel = subroot.upper_rels[::pathnodes::UPPERREL_FINAL as usize]
         .first()
         .copied()
         .expect("set_subquery_size_estimates: subroot has no UPPERREL_FINAL rel");

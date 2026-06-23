@@ -24,8 +24,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 /// Frame-option flag bits (`nodes/parsenodes.h`).
 const FRAMEOPTION_NONDEFAULT: i32 = 0x00001;

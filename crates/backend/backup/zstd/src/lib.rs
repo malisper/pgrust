@@ -41,12 +41,12 @@ use zstd_seams::{
     self as seam, ZstdCParameter, ZstdCctxHandle, ZstdEndDirective, ZstdResetDirective,
     ZstdStreamOutcome,
 };
-use utils_error::ereport;
-use mcx::Mcx;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
 use compression::{
     PgCompressSpecification, PG_COMPRESSION_OPTION_LONG_DISTANCE, PG_COMPRESSION_OPTION_WORKERS,
 };
-use types_core::primitive::{Size, TimeLineID, XLogRecPtr, BLCKSZ};
+use ::types_core::primitive::{Size, TimeLineID, XLogRecPtr, BLCKSZ};
 use types_error::{
     ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERROR,
 };
@@ -86,7 +86,7 @@ pub fn bbsink_zstd_new<'mcx>(
 }
 
 impl<'mcx> BbsinkZstd<'mcx> {
-    fn compress_error(name: String, line: i32) -> types_error::PgError {
+    fn compress_error(name: String, line: i32) -> ::types_error::PgError {
         ereport(ERROR)
             .errcode(ERRCODE_INTERNAL_ERROR)
             .errmsg(alloc::format!("could not compress data: {name}"))

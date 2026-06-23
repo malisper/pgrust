@@ -12,27 +12,27 @@
 use alloc::string::String;
 
 use heaptuple::{heap_form_tuple, heap_getattr};
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
 use table::{table_close, table_open};
-use indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert};
-use cache_syscache::SearchSysCache1;
-use mcx::MemoryContext;
-use cache::syscache::SysCacheKey;
-use types_catalog::catalog::{
+use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert};
+use ::cache_syscache::SearchSysCache1;
+use ::mcx::MemoryContext;
+use ::cache::syscache::SysCacheKey;
+use ::types_catalog::catalog::{
     ANUM_PG_REPLICATION_ORIGIN_RONAME, ANUM_PG_REPLICATION_ORIGIN_ROIDENT,
     NATTS_PG_REPLICATION_ORIGIN, REPLICATION_ORIGIN_IDENT_INDEX, REPLICATION_ORIGIN_RELATION_ID,
 };
-use types_core::fmgr::F_OIDEQ;
+use ::types_core::fmgr::F_OIDEQ;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessShareLock, ExclusiveLock, NoLock, RowExclusiveLock};
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessShareLock, ExclusiveLock, NoLock, RowExclusiveLock};
 use types_tuple::heaptuple::Datum;
 
 use crate::core::PG_UINT16_MAX;
 
-use cache_syscache::cacheinfo::{REPLORIGIDENT, REPLORIGNAME};
+use ::cache_syscache::cacheinfo::{REPLORIGIDENT, REPLORIGNAME};
 
 /// `replorigin_create`'s catalog work (origin.c lines 282-361): open
 /// `pg_replication_origin` under `ExclusiveLock`, scan with a dirty snapshot
@@ -303,7 +303,7 @@ pub fn lock_shared_object_origin(roident: Oid) -> PgResult<()> {
         REPLICATION_ORIGIN_RELATION_ID,
         roident,
         0,
-        types_storage::lock::AccessExclusiveLock,
+        ::types_storage::lock::AccessExclusiveLock,
     )
 }
 
@@ -314,7 +314,7 @@ pub fn unlock_shared_object_origin(roident: Oid) -> PgResult<()> {
         REPLICATION_ORIGIN_RELATION_ID,
         roident,
         0,
-        types_storage::lock::AccessExclusiveLock,
+        ::types_storage::lock::AccessExclusiveLock,
     )
 }
 
@@ -339,7 +339,7 @@ const REPLICATION_ORIGIN_LOCK: usize = 40;
 /// `forget`-ed here, leaving the lock held (the abort-path `LWLockReleaseAll`
 /// is the leak backstop, exactly as in C).
 pub fn lwlock_acquire_replication_origin_lock(
-    mode: types_storage::LWLockMode,
+    mode: ::types_storage::LWLockMode,
 ) -> PgResult<()> {
     let guard = lwlock_seams::lwlock_acquire_main::call(
         REPLICATION_ORIGIN_LOCK,

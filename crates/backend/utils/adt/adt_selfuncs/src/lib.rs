@@ -59,7 +59,7 @@ pub mod tsmatchsel;
 
 /// `DEFAULT_INEQ_SEL` (selfuncs.h), re-exported from [`types_selfuncs`] for the
 /// entry-point dispatch.
-pub(crate) use types_selfuncs::DEFAULT_INEQ_SEL as DEFAULT_INEQ_SEL_FROM_TYPES;
+pub(crate) use ::types_selfuncs::DEFAULT_INEQ_SEL as DEFAULT_INEQ_SEL_FROM_TYPES;
 
 use selfuncs_seams as seams;
 

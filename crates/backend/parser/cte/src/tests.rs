@@ -7,13 +7,13 @@
 //! directly over the owned `nodes` tree.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::Once;
 
 use ::nodes::primnodes::Const;
 use ::nodes::rawnodes::{CTEMaterialize, RangeVar, RangeTblRef, SetOperationStmt};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::INT4OID;
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::INT4OID;
 
 // `parser_errposition` (parse_node.c, owned by parser-small1) is reached by the
 // error paths; install the real seam once for the suite.
@@ -72,14 +72,14 @@ fn union_select<'mcx>(
     all: bool,
 ) -> PgResult<SelectStmt<'mcx>> {
     let mut larg = empty_select(mcx);
-    larg.fromClause.push(mcx::alloc_in(mcx, rangevar(mcx, nonrec_from)?)?);
+    larg.fromClause.push(::mcx::alloc_in(mcx, rangevar(mcx, nonrec_from)?)?);
     let mut rarg = empty_select(mcx);
-    rarg.fromClause.push(mcx::alloc_in(mcx, rangevar(mcx, rec_from)?)?);
+    rarg.fromClause.push(::mcx::alloc_in(mcx, rangevar(mcx, rec_from)?)?);
     let mut top = empty_select(mcx);
     top.op = SetOperation::SETOP_UNION;
     top.all = all;
-    top.larg = Some(mcx::alloc_in(mcx, larg)?);
-    top.rarg = Some(mcx::alloc_in(mcx, rarg)?);
+    top.larg = Some(::mcx::alloc_in(mcx, larg)?);
+    top.rarg = Some(::mcx::alloc_in(mcx, rarg)?);
     Ok(top)
 }
 
@@ -88,7 +88,7 @@ fn cte<'mcx>(mcx: Mcx<'mcx>, name: &str, query: Node<'mcx>) -> PgResult<CommonTa
         ctename: Some(PgString::from_str_in(name, mcx)?),
         aliascolnames: PgVec::new_in(mcx),
         ctematerialized: CTEMaterialize::CTEMaterializeDefault,
-        ctequery: Some(mcx::alloc_in(mcx, query)?),
+        ctequery: Some(::mcx::alloc_in(mcx, query)?),
         search_clause: None,
         cycle_clause: None,
         location: 0,
@@ -108,7 +108,7 @@ fn with_clause<'mcx>(
 ) -> PgResult<WithClause<'mcx>> {
     let mut v: PgVec<'mcx, PgBox<'mcx, Node<'mcx>>> = PgVec::new_in(mcx);
     for c in ctes {
-        v.push(mcx::alloc_in(mcx, Node::CommonTableExpr(c))?);
+        v.push(::mcx::alloc_in(mcx, Node::CommonTableExpr(c))?);
     }
     Ok(WithClause {
         ctes: v,
@@ -179,7 +179,7 @@ fn dependency_graph_orders_forward_refs() {
 
     // CTE "a" references "b"; "b" has no deps. Safe order: b before a.
     let mut a_q = empty_select(mcx);
-    a_q.fromClause.push(mcx::alloc_in(mcx, rangevar(mcx, "b").unwrap()).unwrap());
+    a_q.fromClause.push(::mcx::alloc_in(mcx, rangevar(mcx, "b").unwrap()).unwrap());
     let a = cte(mcx, "a", Node::SelectStmt(a_q)).unwrap();
     let b = cte(mcx, "b", Node::SelectStmt(empty_select(mcx))).unwrap();
 
@@ -196,7 +196,7 @@ fn self_reference_marks_recursive() {
 
     // CTE "r" references itself -> cterecursive = true, no cross-deps.
     let mut r_q = empty_select(mcx);
-    r_q.fromClause.push(mcx::alloc_in(mcx, rangevar(mcx, "r").unwrap()).unwrap());
+    r_q.fromClause.push(::mcx::alloc_in(mcx, rangevar(mcx, "r").unwrap()).unwrap());
     let r = cte(mcx, "r", Node::SelectStmt(r_q)).unwrap();
 
     let (order, rec) = build_and_sort(mcx, &mut pstate, alloc::vec![r]).unwrap();
@@ -213,10 +213,10 @@ fn mutual_recursion_rejected() {
 
     // a -> b and b -> a: mutual recursion, no acyclic order exists.
     let mut a_q = empty_select(mcx);
-    a_q.fromClause.push(mcx::alloc_in(mcx, rangevar(mcx, "b").unwrap()).unwrap());
+    a_q.fromClause.push(::mcx::alloc_in(mcx, rangevar(mcx, "b").unwrap()).unwrap());
     let a = cte(mcx, "a", Node::SelectStmt(a_q)).unwrap();
     let mut b_q = empty_select(mcx);
-    b_q.fromClause.push(mcx::alloc_in(mcx, rangevar(mcx, "a").unwrap()).unwrap());
+    b_q.fromClause.push(::mcx::alloc_in(mcx, rangevar(mcx, "a").unwrap()).unwrap());
     let b = cte(mcx, "b", Node::SelectStmt(b_q)).unwrap();
 
     let err = build_and_sort(mcx, &mut pstate, alloc::vec![a, b]).unwrap_err();
@@ -258,7 +258,7 @@ fn recursive_query_must_be_union() {
 
     // A self-referential CTE whose top is a plain SELECT (no UNION) is rejected.
     let mut q = empty_select(mcx);
-    q.fromClause.push(mcx::alloc_in(mcx, rangevar(mcx, "r").unwrap()).unwrap());
+    q.fromClause.push(::mcx::alloc_in(mcx, rangevar(mcx, "r").unwrap()).unwrap());
     let err = check_recursion(mcx, &mut pstate, "r", Node::SelectStmt(q)).unwrap_err();
     assert_eq!(err.sqlstate(), ERRCODE_INVALID_RECURSION);
 }
@@ -303,7 +303,7 @@ fn int_te<'mcx>(mcx: Mcx<'mcx>, resno: i16, name: &str) -> PgResult<TargetEntry<
         location: -1,
     });
     Ok(TargetEntry {
-        expr: Some(mcx::alloc_in(mcx, c)?),
+        expr: Some(::mcx::alloc_in(mcx, c)?),
         resno,
         resname: Some(PgString::from_str_in(name, mcx)?),
         ressortgroupref: 0,
@@ -365,8 +365,8 @@ fn range_tbl_ref_detection() {
     let sos = SetOperationStmt {
         op: SetOperation::SETOP_UNION,
         all: false,
-        larg: Some(mcx::alloc_in(mcx, Node::RangeTblRef(RangeTblRef { rtindex: 1 })).unwrap()),
-        rarg: Some(mcx::alloc_in(mcx, Node::RangeTblRef(RangeTblRef { rtindex: 2 })).unwrap()),
+        larg: Some(::mcx::alloc_in(mcx, Node::RangeTblRef(RangeTblRef { rtindex: 1 })).unwrap()),
+        rarg: Some(::mcx::alloc_in(mcx, Node::RangeTblRef(RangeTblRef { rtindex: 2 })).unwrap()),
         colTypes: PgVec::new_in(mcx),
         colTypmods: PgVec::new_in(mcx),
         colCollations: PgVec::new_in(mcx),

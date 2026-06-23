@@ -31,27 +31,27 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
 use utils_error::{ereport, PgResult};
-use types_error::error::ERROR;
+use ::types_error::error::ERROR;
 
-use core_probe::ginpostinglist::{
+use ::core_probe::ginpostinglist::{
     ginCompareItemPointers, ginCompressPostingList, ginMergeItemPointers, ginPostingListDecode,
     ginPostingListDecodeAllSegments,
 };
-use types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
-use types_core::InvalidBlockNumber;
+use ::types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
+use ::types_core::InvalidBlockNumber;
 use gin::{
     BeginPlaceToPageResult, GinBtreeData, GinBtreeDataLeafInsertData, GinBtreeStack,
     GinInsertPayload, GinPlaceToPageRC, GinStatsData, PostingItem, PtpWorkspace,
     GIN_SEGMENT_ADDITEMS, GIN_SEGMENT_DELETE, GIN_SEGMENT_INSERT, GIN_SEGMENT_REPLACE,
     GIN_SEGMENT_UNMODIFIED,
 };
-use rel::Relation;
-use types_storage::storage::Buffer;
-use types_tuple::heaptuple::{
+use ::rel::Relation;
+use ::types_storage::storage::Buffer;
+use ::types_tuple::heaptuple::{
     ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber,
     INVALID_OFFSET_NUMBER as InvalidOffsetNumber,
 };
@@ -84,7 +84,7 @@ const GIN_POSTING_LIST_SEGMENT_MIN_SIZE: usize = 128;
 const MIN_TUPLES_PER_SEGMENT: usize = (GIN_POSTING_LIST_SEGMENT_MAX_SIZE - 2) / 6;
 
 /// `RM_GIN_ID` (rmgrlist.h) — GIN resource-manager id.
-const RM_GIN_ID: types_core::RmgrId = 13;
+const RM_GIN_ID: ::types_core::RmgrId = 13;
 /// `XLOG_GIN_CREATE_PTREE` (ginxlog.h).
 const XLOG_GIN_CREATE_PTREE: u8 = 0x10;
 /// `REGBUF_WILL_INIT` (xloginsert.h).
@@ -197,7 +197,7 @@ pub fn GinDataLeafPageGetItems(page: &[u8], advance_past: ItemPointerData) -> Ve
         // the posting-list area (unlike C's page-wide pointer), so guard on a
         // non-empty area before reading a segment header to avoid an out-of-slice
         // read that C never performs.
-        if types_tuple::heaptuple::item_pointer_is_valid(&advance_past) && !pl.is_empty() {
+        if ::types_tuple::heaptuple::item_pointer_is_valid(&advance_past) && !pl.is_empty() {
             let mut next_off = seg_off + size_of_segment(&pl[seg_off..]);
             while next_off < pl.len()
                 && ginCompareItemPointers(&read_posting_list_first(&pl[next_off..]), &advance_past)
@@ -232,7 +232,7 @@ pub fn GinDataLeafPageGetItemsToTbm(
         // Size len = GinDataLeafPageGetPostingListSize(page);
         let segment = posting_list_slice(page);
         let len = GinDataLeafPageGetPostingListSize(page);
-        core_probe::ginpostinglist::ginPostingListDecodeAllSegmentsToTbm(
+        ::core_probe::ginpostinglist::ginPostingListDecodeAllSegmentsToTbm(
             segment, len as i32, tbm,
         )
     } else {
@@ -547,7 +547,7 @@ fn dataBeginPlaceToPageLeaf(
     let mut remaining = ItemPointerData::new(0, InvalidOffsetNumber);
     let needsplit = leafRepackItems(&mut leaf, &mut remaining)?;
 
-    if types_tuple::heaptuple::item_pointer_is_valid(&remaining) {
+    if ::types_tuple::heaptuple::item_pointer_is_valid(&remaining) {
         if !append || ginCompareItemPointers(&max_old_item, &remaining) >= 0 {
             return Err(ereport(ERROR)
                 .errmsg("could not split GIN page; all old items didn't fit")
@@ -1074,7 +1074,7 @@ fn dataPrepareDownlink<'mcx>(
     let lpage = page_bytes(lbuf)?;
 
     let mut pitem = PostingItem {
-        child_blkno: types_tuple::heaptuple::BlockIdData::new(0),
+        child_blkno: ::types_tuple::heaptuple::BlockIdData::new(0),
         key: gin_data_page_get_right_bound(&lpage),
     };
     PostingItemSetBlockNumber(&mut pitem, lblkno);
@@ -1097,14 +1097,14 @@ fn ginDataFillRoot<'mcx>(
     rpage: &[u8],
 ) -> PgResult<()> {
     let mut li = PostingItem {
-        child_blkno: types_tuple::heaptuple::BlockIdData::new(0),
+        child_blkno: ::types_tuple::heaptuple::BlockIdData::new(0),
         key: gin_data_page_get_right_bound(lpage),
     };
     PostingItemSetBlockNumber(&mut li, lblkno);
     GinDataPageAddPostingItem(root, &li, InvalidOffsetNumber);
 
     let mut ri = PostingItem {
-        child_blkno: types_tuple::heaptuple::BlockIdData::new(0),
+        child_blkno: ::types_tuple::heaptuple::BlockIdData::new(0),
         key: gin_data_page_get_right_bound(rpage),
     };
     PostingItemSetBlockNumber(&mut ri, rblkno);
@@ -1780,7 +1780,7 @@ fn relation_needs_wal(index: &Relation<'_>) -> bool {
 }
 
 fn predicate_lock_page_split(
-    index_oid: types_core::Oid,
+    index_oid: ::types_core::Oid,
     old_blkno: BlockNumber,
     new_blkno: BlockNumber,
 ) -> PgResult<()> {
@@ -1805,6 +1805,6 @@ fn xlog_register_buf_data(block_id: u8, data: &[u8]) -> PgResult<()> {
     xloginsert_seams::xlog_register_buf_data::call(block_id, data)
 }
 
-fn xlog_insert_record(rmid: types_core::RmgrId, info: u8) -> PgResult<types_core::XLogRecPtr> {
+fn xlog_insert_record(rmid: ::types_core::RmgrId, info: u8) -> PgResult<::types_core::XLogRecPtr> {
     xloginsert_seams::xlog_insert_record::call(rmid, info)
 }

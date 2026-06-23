@@ -13,17 +13,17 @@
 //! they land.
 //!
 //! Every cross-arena expression is an [`Expr`] value (the lifetime-free
-//! `pathnodes::Expr`); relation/EC/EM/clause references are
+//! `::pathnodes::Expr`); relation/EC/EM/clause references are
 //! `RelId`/`EcId`/`EmId`/`RinfoId` handles.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{Index, Oid};
-use types_error::PgResult;
+use ::types_core::primitive::{Index, Oid};
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{EcId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
 /* ======================================================================

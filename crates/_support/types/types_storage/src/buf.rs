@@ -284,7 +284,7 @@ pub const MAX_BLOCK_NUMBER: BlockNumber = 0xFFFF_FFFE;
 #[derive(Clone, Debug, Default)]
 pub struct ExtendedRelation {
     /// The first newly-extended block.
-    pub first_block: types_core::BlockNumber,
+    pub first_block: ::types_core::BlockNumber,
     /// `victim_buffers[0 .. extended_by]`; index 0 is the page that
     /// `RelationAddBlocks` returns (exclusive-locked).
     pub victim_buffers: alloc::vec::Vec<Buffer>,

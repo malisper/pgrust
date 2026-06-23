@@ -3,7 +3,7 @@
 //! C's `PgStat_KindInfo` (`utils/pgstat_internal.h`) bundles two things: scalar
 //! metadata (sizes/offsets/flags/name) and a set of `*_cb` function pointers
 //! into the per-kind implementation files. The metadata half lives in
-//! `types_pgstat::pgstat_internal::PgStat_KindInfo` (callback-free, so it stays
+//! `::types_pgstat::pgstat_internal::PgStat_KindInfo` (callback-free, so it stays
 //! in the types vocabulary without a `PgResult` / owner dependency). This file
 //! holds the *function-pointer* half: [`PgStat_KindCallbacks`], plus the full
 //! per-kind descriptor [`PgStat_KindInfoFull`] that pairs them, and the builtin
@@ -40,10 +40,10 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::TimestampTz;
-use types_error::PgResult;
-use types_pgstat::activity_pgstat::{PgStat_Kind, PGSTAT_KIND_BUILTIN_MIN, PGSTAT_KIND_BUILTIN_SIZE};
-use types_pgstat::pgstat_internal::{
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_pgstat::activity_pgstat::{PgStat_Kind, PGSTAT_KIND_BUILTIN_MIN, PGSTAT_KIND_BUILTIN_SIZE};
+use ::types_pgstat::pgstat_internal::{
     PgStat_HashKey, PgStat_KindInfo, PgStat_ShmemControl, PgStat_Snapshot, PgStatShared_Common,
 };
 
@@ -231,7 +231,7 @@ impl core::fmt::Debug for PgStat_KindCallbacks {
 }
 
 /// One full per-kind descriptor: the scalar metadata
-/// (`types_pgstat::PgStat_KindInfo`) paired with its callbacks. Together these
+/// (`::types_pgstat::PgStat_KindInfo`) paired with its callbacks. Together these
 /// are exactly C's `PgStat_KindInfo` entry, split so the metadata can live in
 /// the callback-free types crate.
 #[derive(Debug)]

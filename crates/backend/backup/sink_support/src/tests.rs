@@ -21,9 +21,9 @@ use sink::{
     bbsink_end_archive, bbsink_end_backup, bbsink_manifest_contents, bbsink_begin_manifest,
     bbsink_end_manifest, TablespaceInfo,
 };
-use mcx::MemoryContext;
-use types_core::primitive::BLCKSZ;
-use types_pgstat::backend_status::PgBackendStatus;
+use ::mcx::MemoryContext;
+use ::types_core::primitive::BLCKSZ;
+use ::types_pgstat::backend_status::PgBackendStatus;
 
 // --- Shared backend status entry the installed seams operate on. ---
 

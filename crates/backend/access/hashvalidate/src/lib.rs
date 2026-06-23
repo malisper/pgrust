@@ -12,12 +12,12 @@
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_core::{Oid, OidIsValid, InvalidOid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
-use hash::hash::{
+use ::hash::hash::{
     HASHEXTENDED_PROC, HASHOPTIONS_PROC, HASHSTANDARD_PROC, HTEqualStrategyNumber,
     HTMaxStrategyNumber,
 };
 
-pub use hash::backend_access_hash_hashvalidate::{
+pub use ::hash::backend_access_hash_hashvalidate::{
     AmopRow, AmprocRow, OpFamilyMember, OpFamilyOpFuncGroup, OpclassForm,
 };
 

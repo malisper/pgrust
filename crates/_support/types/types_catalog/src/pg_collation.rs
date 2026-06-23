@@ -8,7 +8,7 @@
 //! layout. Field order is verified field-for-field against
 //! `FormData_pg_collation` in `pg_collation.h`.
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 // ---------------------------------------------------------------------------
 // Relation / index OIDs (catalog/pg_collation_d.h).

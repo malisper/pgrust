@@ -30,16 +30,16 @@ use catalog_namespace::{
     get_ts_config_oid, get_ts_dict_oid, get_ts_parser_oid, get_ts_template_oid, NameListToString,
     QualifiedNameGetCreationNamespace,
 };
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use mcx::{Mcx, MemoryContext, PgString};
 
 use types_acl::{AclResult, ACL_CREATE, ACLCHECK_NOT_OWNER, ACLCHECK_OK};
-use types_catalog::catalog::{
+use ::types_catalog::catalog::{
     NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, TS_CONFIG_RELATION_ID, TS_DICTIONARY_RELATION_ID,
     TS_PARSER_RELATION_ID, TS_TEMPLATE_RELATION_ID,
 };
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE,
@@ -47,13 +47,13 @@ use types_error::{
     ERRCODE_UNDEFINED_OBJECT, ERROR, NOTICE,
 };
 use ::nodes::nodes::{ntag, Node, NodePtr};
-use define_seams::DefElemArg;
+use ::define_seams::DefElemArg;
 use ::nodes::value::{Boolean, Float, Integer, StringNode};
 use ::nodes::ddlnodes::{
     AlterTSConfigurationStmt, AlterTSDictionaryStmt, DefElem, DEFELEM_UNSPEC,
 };
 use ::nodes::parsenodes::{OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY};
-use types_tuple::heaptuple::{INT4OID, INTERNALOID, TSQUERYOID, VOIDOID};
+use ::types_tuple::heaptuple::{INT4OID, INTERNALOID, TSQUERYOID, VOIDOID};
 
 use tsearchcmds_seams as seam;
 use tsearchcmds_seams::{
@@ -61,7 +61,7 @@ use tsearchcmds_seams::{
     TSTemplateForm,
 };
 
-use cache::DefElemString;
+use ::cache::DefElemString;
 
 /* C-spelling relation-id aliases used throughout (catalog/pg_*.h). */
 const TSParserRelationId: Oid = TS_PARSER_RELATION_ID;
@@ -1412,7 +1412,7 @@ fn make_def_elem<'mcx>(mcx: Mcx<'mcx>, name: &str, arg: Node<'mcx>) -> PgResult<
     Ok(DefElem {
         defnamespace: None,
         defname: Some(PgString::from_str_in(name, mcx)?),
-        arg: Some(mcx::alloc_in(mcx, arg)?),
+        arg: Some(::mcx::alloc_in(mcx, arg)?),
         defaction: DEFELEM_UNSPEC,
         location: -1,
     })
@@ -1656,7 +1656,7 @@ fn deserialize_deflist_strings<'mcx>(
     mcx: Mcx<'mcx>,
     txt: &str,
 ) -> PgResult<Vec<DefElemString<'mcx>>> {
-    use cache::deflist::DefElemValKind;
+    use ::cache::deflist::DefElemValKind;
     let list = deserialize_deflist(mcx, txt)?;
     let mut out: Vec<DefElemString> = Vec::with_capacity(list.len());
     for de in &list {
@@ -1805,10 +1805,10 @@ fn alter_ts_configuration_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResu
 }
 
 pub fn init_seams() {
-    tsearchcmds_seams::deserialize_deflist::set(deserialize_deflist_seam);
-    tsearchcmds_seams::RemoveTSConfigurationById::set(RemoveTSConfigurationById);
+    ::tsearchcmds_seams::deserialize_deflist::set(deserialize_deflist_seam);
+    ::tsearchcmds_seams::RemoveTSConfigurationById::set(RemoveTSConfigurationById);
     // GetTSConfigTuple (tsearchcmds.c:786): get_ts_config_oid + config_form_by_oid.
-    tsearchcmds_seams::get_ts_config_form::set(get_ts_config_form_impl);
+    ::tsearchcmds_seams::get_ts_config_form::set(get_ts_config_form_impl);
 
     // ProcessUtilitySlow dispatch arms (utility.c ALTER TEXT SEARCH DICTIONARY /
     // CONFIGURATION).
@@ -1824,18 +1824,18 @@ pub fn init_seams() {
 fn deserialize_deflist_seam<'mcx>(
     mcx: Mcx<'mcx>,
     txt: &[u8],
-) -> PgResult<mcx::PgVec<'mcx, DefElemString<'mcx>>> {
-    use types_tuple::heaptuple::Datum;
+) -> PgResult<::mcx::PgVec<'mcx, DefElemString<'mcx>>> {
+    use ::types_tuple::heaptuple::Datum;
 
     /* TextDatumGetCString(opt): wrap the verbatim varlena bytes as a by-ref
      * Datum and detoast + copy out the payload. */
-    let mut bytes = mcx::vec_with_capacity_in::<u8>(mcx, txt.len())?;
+    let mut bytes = ::mcx::vec_with_capacity_in::<u8>(mcx, txt.len())?;
     bytes.extend_from_slice(txt);
     let d = Datum::ByRef(bytes);
     let s = varlena_seams::text_to_cstring_v::call(mcx, &d)?;
 
     let pairs = deserialize_deflist_strings(mcx, s.as_str())?;
-    let mut out = mcx::vec_with_capacity_in::<DefElemString>(mcx, pairs.len())?;
+    let mut out = ::mcx::vec_with_capacity_in::<DefElemString>(mcx, pairs.len())?;
     for p in pairs {
         out.push(p);
     }

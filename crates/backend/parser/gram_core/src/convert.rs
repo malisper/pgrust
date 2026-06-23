@@ -18,7 +18,7 @@
 use core::ffi::c_char;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use backend_nodes_types::node_tags as tags;
 use pg_ffi_fgram::{List as RawList, Node as RawNode};
@@ -84,7 +84,7 @@ fn node_opt<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Option<NodePtr<'m
         return Ok(None);
     }
     let node = convert_node(mcx, n)?;
-    Ok(Some(mcx::alloc_in(mcx, node)?))
+    Ok(Some(::mcx::alloc_in(mcx, node)?))
 }
 
 /// `*mut List` of `*mut Node` → `PgVec<NodePtr>` (NULL list → empty vec).
@@ -93,7 +93,7 @@ fn node_list<'mcx>(mcx: Mcx<'mcx>, l: *mut RawList) -> PgResult<PgVec<'mcx, Node
         return Ok(PgVec::new_in(mcx));
     }
     let list: &RawList = unsafe { &*l };
-    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
     for cell in list.cells() {
         let np: *mut RawNode = cell.ptr();
         out.push(node_req(mcx, np)?);
@@ -123,14 +123,14 @@ fn node_list_nullable<'mcx>(
         return Ok(PgVec::new_in(mcx));
     }
     let list: &RawList = unsafe { &*l };
-    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
     for cell in list.cells() {
         let np: *mut RawNode = cell.ptr();
         match node_opt(mcx, np)? {
             Some(p) => out.push(p),
             // NULL cell == the NONE operand: encode as empty Node::List, which
             // `.as_typename()` treats as None (→ InvalidOid) in every consumer.
-            None => out.push(mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx))?)?),
+            None => out.push(::mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx))?)?),
         }
     }
     Ok(out)
@@ -152,13 +152,13 @@ fn distinct_clause_list<'mcx>(
         return Ok(PgVec::new_in(mcx));
     }
     let list: &RawList = unsafe { &*l };
-    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
     for cell in list.cells() {
         let np: *mut RawNode = cell.ptr();
         match node_opt(mcx, np)? {
             Some(p) => out.push(p),
             // NULL cell == the plain-DISTINCT marker: encode as empty Node::List.
-            None => out.push(mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx))?)?),
+            None => out.push(::mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx))?)?),
         }
     }
     Ok(out)
@@ -182,14 +182,14 @@ fn define_args_list<'mcx>(
         return Ok(PgVec::new_in(mcx));
     }
     let list: &RawList = unsafe { &*l };
-    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
     for cell in list.cells() {
         let np: *mut RawNode = cell.ptr();
         match node_opt(mcx, np)? {
             Some(p) => out.push(p),
             // NULL cell == the new-style `aggr_args` "no direct args" marker
             // (`NIL` first element); encode as an empty `Node::List`.
-            None => out.push(mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx))?)?),
+            None => out.push(::mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx))?)?),
         }
     }
     Ok(out)
@@ -217,17 +217,17 @@ fn sql_body_opt<'mcx>(mcx: Mcx<'mcx>, n: *mut RawNode) -> PgResult<Option<NodePt
         return node_opt(mcx, n);
     }
     let list: &RawList = unsafe { &*n.cast::<RawList>() };
-    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
     for cell in list.cells() {
         let np: *mut RawNode = cell.ptr();
         match node_opt(mcx, np)? {
             Some(p) => out.push(p),
             // NULL inner cell == empty BEGIN ATOMIC body (`list_make1(NIL)`):
             // encode as an empty `Node::List`.
-            None => out.push(mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx))?)?),
+            None => out.push(::mcx::alloc_in(mcx, Node::mk_list(mcx, PgVec::new_in(mcx))?)?),
         }
     }
-    Ok(Some(mcx::alloc_in(mcx, Node::mk_list(mcx, out)?)?))
+    Ok(Some(::mcx::alloc_in(mcx, Node::mk_list(mcx, out)?)?))
 }
 
 /// `*mut List` of `Oid` (int cells) → `PgVec<Oid>`.
@@ -236,7 +236,7 @@ fn oid_list<'mcx>(mcx: Mcx<'mcx>, l: *mut RawList) -> PgResult<PgVec<'mcx, u32>>
         return Ok(PgVec::new_in(mcx));
     }
     let list: &RawList = unsafe { &*l };
-    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
     for cell in list.cells() {
         out.push(cell.oid());
     }
@@ -249,7 +249,7 @@ fn int_list<'mcx>(mcx: Mcx<'mcx>, l: *mut RawList) -> PgResult<PgVec<'mcx, i32>>
         return Ok(PgVec::new_in(mcx));
     }
     let list: &RawList = unsafe { &*l };
-    let mut out = mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, list.len().max(0) as usize)?;
     for cell in list.cells() {
         out.push(cell.int());
     }
@@ -266,7 +266,7 @@ fn child_opt<'mcx, C, O>(
         return Ok(None);
     }
     let v = f(mcx, p)?;
-    Ok(Some(mcx::alloc_in(mcx, v)?))
+    Ok(Some(::mcx::alloc_in(mcx, v)?))
 }
 
 /// Convert a typed `*mut Child` (whose owned form is a [`Node`] arm) by

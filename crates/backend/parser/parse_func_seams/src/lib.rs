@@ -5,14 +5,14 @@
 //! then a call panics loudly.
 
 use mcx::{Mcx, PgString};
-use types_core::Oid;
-use types_error::PgResult;
-use types_namespace::FuncCandidateList;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_namespace::FuncCandidateList;
 use ::nodes::parsenodes::ObjectType;
 use ::nodes::primnodes::Expr;
-use opclass::ObjectWithArgs;
-use parsenodes::ObjectWithArgs as ParseObjectWithArgs;
-use parsenodes::ParseState;
+use ::opclass::ObjectWithArgs;
+use ::parsenodes::ObjectWithArgs as ParseObjectWithArgs;
+use ::parsenodes::ParseState;
 
 /// `FuncDetailCode` (parser/parse_func.h:23-31) — result code from
 /// `func_get_detail`.
@@ -45,17 +45,17 @@ pub struct FuncDetail<'mcx> {
     /// the `FuncDetailCode` return value.
     pub fdresult: FuncDetailCode,
     /// `*funcid` — the matched `pg_proc` OID (`InvalidOid` when not found).
-    pub funcid: types_core::Oid,
+    pub funcid: ::types_core::Oid,
     /// `*rettype` — the function's return type.
-    pub rettype: types_core::Oid,
+    pub rettype: ::types_core::Oid,
     /// `*retset` — whether it returns a set.
     pub retset: bool,
     /// `*nvargs` — number of variadic arguments folded into the array.
     pub nvargs: i32,
     /// `*vatype` — the variadic array element type (`InvalidOid` if none).
-    pub vatype: types_core::Oid,
+    pub vatype: ::types_core::Oid,
     /// `*true_typeids` — the function's true declared argument types.
-    pub true_typeids: mcx::PgVec<'mcx, types_core::Oid>,
+    pub true_typeids: ::mcx::PgVec<'mcx, ::types_core::Oid>,
 }
 
 seam_core::seam!(

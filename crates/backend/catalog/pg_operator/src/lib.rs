@@ -29,10 +29,10 @@
 
 use mcx::{Mcx, MemoryContext, PgVec};
 
-use types_acl::acl::{ACL_CREATE, ACLCHECK_NOT_OWNER, ACLCHECK_OK};
-use types_catalog::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID};
-use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-use types_catalog::pg_operator::{
+use ::types_acl::acl::{ACL_CREATE, ACLCHECK_NOT_OWNER, ACLCHECK_OK};
+use ::types_catalog::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID};
+use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
+use ::types_catalog::pg_operator::{
     Anum_pg_operator_oid, Anum_pg_operator_oprcanhash, Anum_pg_operator_oprcanmerge,
     Anum_pg_operator_oprcode, Anum_pg_operator_oprcom, Anum_pg_operator_oprjoin,
     Anum_pg_operator_oprkind, Anum_pg_operator_oprleft, Anum_pg_operator_oprname,
@@ -41,25 +41,25 @@ use types_catalog::pg_operator::{
     FormPgOperator, Natts_pg_operator, OperatorNameNspIndexId, OperatorOidIndexId,
     OperatorRelationId,
 };
-use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
-use types_core::primitive::{InvalidOid, Oid, RegProcedure};
+use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
+use ::types_core::primitive::{InvalidOid, Oid, RegProcedure};
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_INVALID_NAME, ERROR,
 };
 use ::nodes::parsenodes::{OBJECT_OPERATOR, OBJECT_SCHEMA};
 
-use utils_error::ereport;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
+use ::utils_error::ereport;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
-use catalog_catalog::GetNewOidWithIndex;
-use indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
+use ::catalog_catalog::GetNewOidWithIndex;
+use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 use objectaccess_seams as objectaccess_seams;
 
 use pg_operator_seams::{
@@ -113,7 +113,7 @@ fn ObjectAddressSet(class_id: Oid, object_id: Oid) -> ObjectAddress {
 /// over the column's on-disk bytes (the `name` type is fixed-length 64, stored
 /// inline).
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8; NAMEDATALEN]) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &image[..])?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &image[..])?))
 }
 
 /// `ScanKeyInit(&key, attno, BTEqualStrategyNumber, F_OIDEQ,
@@ -134,7 +134,7 @@ fn oid_key<'mcx>(attno: i16, value: Oid) -> PgResult<ScanKeyData<'mcx>> {
 /// CStringGetDatum(value))`. The name crosses as a NUL-terminated byte image
 /// (the genam owner's `nameeq` comparator interprets it).
 fn name_key<'mcx>(mcx: Mcx<'mcx>, attno: i16, value: &str) -> PgResult<ScanKeyData<'mcx>> {
-    let mut bytes: PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, value.len() + 1)?;
+    let mut bytes: PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, value.len() + 1)?;
     for &b in value.as_bytes() {
         bytes.push(b);
     }
@@ -187,7 +187,7 @@ fn operator_values<'mcx>(
     form: &FormPgOperator,
 ) -> PgResult<PgVec<'mcx, Datum<'mcx>>> {
     let mut values: PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, Natts_pg_operator as usize)?;
+        ::mcx::vec_with_capacity_in(mcx, Natts_pg_operator as usize)?;
     let oname = namestrcpy(&form.oprname);
     values.push(Datum::from_oid(form.oid)); /* oid */
     values.push(name_datum(mcx, &oname)?); /* oprname */
@@ -756,7 +756,7 @@ pub fn OperatorValidateParams(
         }
     }
 
-    if operResultType != types_core::catalog::BOOLOID {
+    if operResultType != ::types_core::catalog::BOOLOID {
         /* If it's not a boolean op, these things mustn't be set: */
         if hasNegator {
             return Err(invalid_func_def("only boolean operators can have negators"));
@@ -783,7 +783,7 @@ pub fn OperatorValidateParams(
 }
 
 /// `ereport(ERROR, errcode(ERRCODE_INVALID_FUNCTION_DEFINITION), errmsg(msg))`.
-fn invalid_func_def(msg: &'static str) -> types_error::PgError {
+fn invalid_func_def(msg: &'static str) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INVALID_FUNCTION_DEFINITION)
         .errmsg(msg)

@@ -7,7 +7,7 @@
 //! The lexer keeps the input as a borrowed `&[u8]` and tracks positions as
 //! `usize` byte offsets (C threads `char *` cursors into the immutable input).
 //! The recursive-descent driver is generic over a [`SaxSink`] trait so the same
-//! parse loop drives every consumer: the `types_json::JsonSemAction` boxed-
+//! parse loop drives every consumer: the `::types_json::JsonSemAction` boxed-
 //! closure table (`pg_parse_json` seam), the `jsonb_in_*` assembly callbacks
 //! (`parse_to_jsonb` seam), and pure validation / unique-key checking.
 //!
@@ -995,7 +995,7 @@ fn report_parse_error(ctx: JsonParseContext, lex: &JsonLexContext<'_>) -> JsonPa
 // ---------------------------------------------------------------------------
 
 /// `json_errdetail` (backend path) — the human-readable detail string. Operates
-/// over a `types_json::JsonLexContext` snapshot (the form the seam carries).
+/// over a `::types_json::JsonLexContext` snapshot (the form the seam carries).
 fn json_errdetail_tj(error: TjErr, lex: &TjLexContext) -> Vec<u8> {
     if error == TjErr::JSON_OUT_OF_MEMORY {
         return b"out of memory".to_vec();
@@ -1203,7 +1203,7 @@ fn unicode_to_server(ch: u32) -> Option<Vec<u8>> {
         let utf8len = pg_utf_mblen_private(&utf8str).unwrap_or(0) as usize;
         return Some(utf8str[..utf8len].to_vec());
     }
-    let ctx = mcx::MemoryContext::new("jsonapi-unicode");
+    let ctx = ::mcx::MemoryContext::new("jsonapi-unicode");
     let mcx = ctx.mcx();
     let out = match mbutils::pg_unicode_to_server_noerror(mcx, ch) {
         Ok(Some(bytes)) => Some(bytes.as_slice().to_vec()),
@@ -1293,7 +1293,7 @@ fn tj_err(e: JsonParseErrorType) -> TjErr {
     }
 }
 
-/// Build the `types_json::JsonLexContext` snapshot the SAX callbacks observe.
+/// Build the `::types_json::JsonLexContext` snapshot the SAX callbacks observe.
 fn snapshot(lex: &JsonLexContext<'_>) -> TjLexContext {
     TjLexContext {
         input: lex.input.to_vec(),
@@ -1313,7 +1313,7 @@ fn snapshot(lex: &JsonLexContext<'_>) -> TjLexContext {
 // Sink 1: the types_json closure table (the `pg_parse_json` seam).
 // ===========================================================================
 
-/// Adapter wrapping a borrowed `types_json::JsonSemAction`. Each fired callback
+/// Adapter wrapping a borrowed `::types_json::JsonSemAction`. Each fired callback
 /// returns `PgResult<()>`; an `Err` (raised `ereport`) is captured here and the
 /// parse abandoned with `JSON_SEM_ACTION_FAILED`, exactly as C's callbacks
 /// signal a raised error.
@@ -1326,7 +1326,7 @@ impl<'s, 'a> ClosureSink<'s, 'a> {
     fn dispatch_struct(
         &mut self,
         lex: &JsonLexContext<'_>,
-        which: for<'r> fn(&'r mut TjSem<'a>) -> &'r mut Option<types_json::JsonStructAction<'a>>,
+        which: for<'r> fn(&'r mut TjSem<'a>) -> &'r mut Option<::types_json::JsonStructAction<'a>>,
     ) -> JsonParseErrorType {
         if which(self.sem).is_some() {
             let snap = snapshot(lex);
@@ -1482,7 +1482,7 @@ struct JsonbSink<'m, 'mcx> {
     state: &'m mut adt_jsonb::JsonbInState,
     /// C `JsonbInState.escontext` — the soft-error sink threaded into the
     /// `numeric_in` / `checkStringLen` calls inside the scalar/field actions.
-    escontext: Option<&'m mut types_error::SoftErrorContext>,
+    escontext: Option<&'m mut ::types_error::SoftErrorContext>,
     raised: Option<PgError>,
 }
 
@@ -1566,7 +1566,7 @@ fn run_parse_to_jsonb<'mcx>(
     mcx: Mcx<'mcx>,
     json: &[u8],
     unique_keys: bool,
-    mut escontext: Option<&mut types_error::SoftErrorContext>,
+    mut escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<Option<PgVec<'mcx, u8>>> {
     let encoding = mbutils::GetDatabaseEncoding();
     let mut lex = make_json_lex_context_cstring_len(json, encoding, true);
@@ -1625,12 +1625,12 @@ struct UniqueSink<'m> {
     state: &'m mut adt_json::JsonUniqueParsingState,
 }
 
-fn tj_to_internal_err(e: types_json::JsonParseErrorType) -> JsonParseErrorType {
+fn tj_to_internal_err(e: ::types_json::JsonParseErrorType) -> JsonParseErrorType {
     // The json crate's unique callbacks return the types_json error enum;
     // they only ever return JSON_SUCCESS, so map that one and treat the rest as
     // SemActionFailed (defensive; unreachable in practice).
     match e {
-        types_json::JsonParseErrorType::JSON_SUCCESS => JsonParseErrorType::Success,
+        ::types_json::JsonParseErrorType::JSON_SUCCESS => JsonParseErrorType::Success,
         _ => JsonParseErrorType::SemActionFailed,
     }
 }
@@ -1714,7 +1714,7 @@ fn run_errsave_error(
     error: TjErr,
     json: &[u8],
     need_escapes: bool,
-    escontext: Option<&mut types_error::SoftErrorContext>,
+    escontext: Option<&mut ::types_error::SoftErrorContext>,
 ) -> PgResult<()> {
     let encoding = mbutils::GetDatabaseEncoding();
     // Re-lex with the SAME need_escapes the failing parse used so the lexer
@@ -1732,7 +1732,7 @@ fn run_errsave_error(
 }
 
 /// `json_lex_first(json, encoding)` — lex the first token, returning the result
-/// and a `types_json::JsonLexContext` snapshot (drives `json_get_first_token`).
+/// and a `::types_json::JsonLexContext` snapshot (drives `json_get_first_token`).
 fn run_json_lex_first(json: &[u8], encoding: i32) -> PgResult<(TjErr, TjLexContext)> {
     let mut lex = make_json_lex_context_cstring_len(json, encoding, false);
     let result = json_lex(&mut lex);

@@ -19,15 +19,15 @@
 //! installer of those seams lives in `backend-access-brin-minmax`, which
 //! dispatches the built-in `brin_bloom_*` support-procedure OIDs into the public
 //! bodies here. This is the BRIN F0-opclass S3-bloom stage; it reuses the
-//! [`brin::OpaqueOpcInfo`] carrier (its [`brin::BloomOpaque`]
+//! [`::brin::OpaqueOpcInfo`] carrier (its [`::brin::BloomOpaque`]
 //! variant).
 //!
 //! ## Carrier and fmgr-dispatch
 //!
 //! C's `BloomOpaque { FmgrInfo extra_procinfos[BLOOM_MAX_PROCNUMS]; }` lives in
 //! the `palloc0`'d tail of the `BrinOpcInfo` (`oi_opaque`, a `void *`). The repo
-//! models `oi_opaque` as the typed enum [`brin::OpaqueOpcInfo`]; bloom's
-//! variant is [`brin::BloomOpaque`], whose cached `FmgrInfo` is reduced to
+//! models `oi_opaque` as the typed enum [`::brin::OpaqueOpcInfo`]; bloom's
+//! variant is [`::brin::BloomOpaque`], whose cached `FmgrInfo` is reduced to
 //! the resolved function's `Oid` (the repo's fmgr-call seams re-resolve by OID).
 //! The AM dispatches the support procs through a `&BrinDesc` (immutable), so the
 //! cache slot is a `Cell` and fills lazily through the shared reference, matching
@@ -69,16 +69,16 @@ use alloc::vec;
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use brin::{BloomOpaque, BrinDesc, BrinOpcInfo, BrinValues, OpaqueOpcInfo, BLOOM_MAX_PROCNUMS};
-use types_core::primitive::{AttrNumber, BlockNumber, InvalidBlockNumber, Oid};
-use types_error::error::{
+use ::types_core::primitive::{AttrNumber, BlockNumber, InvalidBlockNumber, Oid};
+use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
 };
-use types_error::PgResult;
-use types_scan::scankey::{ScanKeyData, SK_ISNULL};
-use types_storage::bufpage::SizeOfPageHeaderData;
+use ::types_error::PgResult;
+use ::types_scan::scankey::{ScanKeyData, SK_ISNULL};
+use ::types_storage::bufpage::SizeOfPageHeaderData;
 use types_tuple::heaptuple::Datum;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use indexam_seams as indexam;
 use typcache_seams as typcache;
@@ -124,7 +124,7 @@ const PG_BRIN_BLOOM_SUMMARYOID: Oid = 4600;
 const BRIN_DEFAULT_PAGES_PER_RANGE: BlockNumber = 128;
 
 /// `MaxHeapTuplesPerPage` (htup_details.h) as an `i32` for the sizing math.
-const MAX_HEAP_TUPLES_PER_PAGE: i32 = types_storage::bufpage::MaxHeapTuplesPerPage as i32;
+const MAX_HEAP_TUPLES_PER_PAGE: i32 = ::types_storage::bufpage::MaxHeapTuplesPerPage as i32;
 
 /// `InvalidOid` (postgres_ext.h).
 const INVALID_OID: Oid = 0;
@@ -170,10 +170,10 @@ const fn bloom_max_filter_size() -> usize {
     // `sizeof(BrinSpecialSpace)` == MAXALIGN(1) == 8 (brin_page.h).
     const SIZEOF_BRIN_SPECIAL_SPACE: usize = 8;
     maxalign_down(
-        types_core::primitive::BLCKSZ
+        ::types_core::primitive::BLCKSZ
             - (maxalign(SizeOfPageHeaderData + SIZEOF_ITEM_ID_DATA)
                 + maxalign(SIZEOF_BRIN_SPECIAL_SPACE)
-                + brin::SIZE_OF_BRIN_TUPLE),
+                + ::brin::SIZE_OF_BRIN_TUPLE),
     )
 }
 
@@ -429,7 +429,7 @@ pub fn brin_bloom_opcinfo<'mcx>(
     let mut oi_typcache: PgVec<'mcx, _> = vec_with_capacity_in(mcx, 1)?;
     oi_typcache.push(tce);
 
-    mcx::alloc_in(
+    ::mcx::alloc_in(
         mcx,
         BrinOpcInfo {
             oi_nstored: 1,
@@ -524,7 +524,7 @@ pub fn brin_bloom_add_value<'mcx>(
     filter.add_value(hash_value, &mut updated);
 
     // column->bv_values[0] = PointerGetDatum(filter): re-serialize and store.
-    column.bv_values[0] = Datum::ByRef(mcx::slice_in(mcx, &filter.serialize())?);
+    column.bv_values[0] = Datum::ByRef(::mcx::slice_in(mcx, &filter.serialize())?);
 
     Ok(updated)
 }
@@ -618,7 +618,7 @@ pub fn brin_bloom_union<'mcx>(
     filter_a.nbits_set = filter_a.data[..nbytes].iter().map(|b| b.count_ones()).sum();
 
     // store the updated summary back into col_a
-    col_a.bv_values[0] = Datum::ByRef(mcx::slice_in(mcx, &filter_a.serialize())?);
+    col_a.bv_values[0] = Datum::ByRef(::mcx::slice_in(mcx, &filter_a.serialize())?);
 
     Ok(())
 }
@@ -688,7 +688,7 @@ pub fn brin_bloom_options() -> BloomOptions {
 }
 
 /// `pg_proc.dat` OID of the `brin_bloom_options` opclass-options support proc.
-pub const F_BRIN_BLOOM_OPTIONS: types_core::primitive::Oid = 4595;
+pub const F_BRIN_BLOOM_OPTIONS: ::types_core::primitive::Oid = 4595;
 
 /// `sizeof(BloomOptions)` in the C ABI: `int32 vl_len_` padded to 8, then two
 /// `double`s — 24 bytes, with `nDistinctPerRange` at offset 8 and
@@ -730,7 +730,7 @@ pub fn brin_bloom_fill_local_reloptions(relopts: &mut types_reloptions::local_re
 /// PG_RETURN_VOID()`. The `local_relopts` rides the fmgr `internal` lane; fill
 /// it in place and return void.
 pub fn fc_brin_bloom_options(
-    fcinfo: &mut fmgr::FunctionCallInfoBaseData,
+    fcinfo: &mut ::fmgr::FunctionCallInfoBaseData,
 ) -> PgResult<datum::Datum> {
     let relopts = fcinfo
         .ref_arg_mut(0)
@@ -769,7 +769,7 @@ pub fn brin_bloom_summary_send(summary: alloc::vec::Vec<u8>) -> alloc::vec::Vec<
 
 /// `ereport(ERROR, errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("cannot accept
 /// a value of type %s", "pg_brin_bloom_summary"))` (brin_bloom.c:782 / :824).
-fn cannot_accept_value() -> types_error::PgError {
+fn cannot_accept_value() -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(format!(

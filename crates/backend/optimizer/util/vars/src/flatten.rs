@@ -30,19 +30,19 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
+use ::nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
 use equivclass_ext_seams as equivclass_ext_seam;
-use rewrite_core::add_nulling_relids;
-use rewrite_core::increment::IncrementVarSublevelsUp;
-use rewrite_core::relids as expr_relids;
-use rewrite_core::walkers::checkExprHasSubLink;
-use mcx::Mcx;
+use ::rewrite_core::add_nulling_relids;
+use ::rewrite_core::increment::IncrementVarSublevelsUp;
+use ::rewrite_core::relids as expr_relids;
+use ::rewrite_core::walkers::checkExprHasSubLink;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::RTEKind;
 use ::nodes::primnodes::{CoercionForm, Expr, ExprRelids, RowExpr, Var};
-use pathnodes::PlannerInfo;
+use ::pathnodes::PlannerInfo;
 
 const INVALID_ATTR_NUMBER: i16 = 0;
 
@@ -306,7 +306,7 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                     }
                 }
             },
-            nodes_core::node_walker::QTW_IGNORE_JOINALIASES,
+            ::nodes_core::node_walker::QTW_IGNORE_JOINALIASES,
             mcx,
         );
         if let Some(e) = err {
@@ -617,10 +617,10 @@ fn seam_flatten_group_exprs<'mcx>(
     mcx: Mcx<'mcx>,
     query: &Query<'mcx>,
     node: &Node<'mcx>,
-) -> PgResult<mcx::PgBox<'mcx, Node<'mcx>>> {
+) -> PgResult<::mcx::PgBox<'mcx, Node<'mcx>>> {
     let owned = node.clone_in(mcx)?;
     let flattened = flatten_group_exprs(mcx, None, query, owned)?;
-    mcx::alloc_in(mcx, flattened)
+    ::mcx::alloc_in(mcx, flattened)
 }
 
 pub(crate) fn init_seams() {
@@ -759,7 +759,7 @@ fn flatten_group_exprs_mutator<'mcx>(
                     }
                 }
             },
-            nodes_core::node_walker::QTW_IGNORE_GROUPEXPRS,
+            ::nodes_core::node_walker::QTW_IGNORE_GROUPEXPRS,
             mcx,
         );
         if let Some(e) = err {
@@ -907,11 +907,11 @@ fn mark_nullable_by_grouping<'mcx>(
 /// Var/PHV fields) viewed as the `'mcx`-free [`Relids`] (`Bitmapset`) the
 /// PlannerInfo-facing seams (`make_placeholder_expr`) accept. Empty word vector
 /// maps to the empty (NULL) set.
-fn expr_relids_to_relids(er: &ExprRelids) -> pathnodes::Relids {
+fn expr_relids_to_relids(er: &ExprRelids) -> ::pathnodes::Relids {
     if er.words.iter().all(|&w| w == 0) {
         None
     } else {
-        Some(alloc::boxed::Box::new(pathnodes::Bitmapset {
+        Some(alloc::boxed::Box::new(::pathnodes::Bitmapset {
             words: er.words.clone(),
         }))
     }
@@ -919,7 +919,7 @@ fn expr_relids_to_relids(er: &ExprRelids) -> pathnodes::Relids {
 
 /// Convert an `'mcx` [`Bitmapset`] to the lifetime-free [`ExprRelids`] word
 /// vector (Var/PHV relids fields carry [`ExprRelids`]).
-fn bms_to_expr_relids(a: Option<&pathnodes::Bitmapset>) -> ExprRelids {
+fn bms_to_expr_relids(a: Option<&::pathnodes::Bitmapset>) -> ExprRelids {
     match a {
         None => ExprRelids { words: Vec::new() },
         Some(bms) => ExprRelids {

@@ -21,7 +21,7 @@
 
 #![allow(clippy::result_large_err)]
 
-use types_core::primitive::BlockNumber;
+use ::types_core::primitive::BlockNumber;
 
 // `PredicateLockPageCombine` is owned by predicate.c — re-homed to
 // `backend-storage-lmgr-predicate-seams::predicate_lock_page_combine`.

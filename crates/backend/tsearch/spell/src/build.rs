@@ -13,7 +13,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use regex::{RegcompResult, REG_ADVANCED, REG_NOSUB};
 
 use crate::{
@@ -262,7 +262,7 @@ impl<'mcx> IspellDict<'mcx> {
             )? {
                 RegcompResult::Compiled(c) => AffixReg::Regex(c),
                 RegcompResult::Failed(f) => {
-                    return Err(utils_error::ereport(types_error::ERROR)
+                    return Err(utils_error::ereport(::types_error::ERROR)
                         .errcode(ERRCODE_INVALID_REGULAR_EXPRESSION)
                         .errmsg(format!("invalid regular expression: {}", f.message))
                         .into_error());

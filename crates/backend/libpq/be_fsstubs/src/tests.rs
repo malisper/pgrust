@@ -3,7 +3,7 @@
 
 use crate::state::with_state;
 use crate::*;
-use types_error::ERRCODE_UNDEFINED_OBJECT;
+use ::types_error::ERRCODE_UNDEFINED_OBJECT;
 
 /// Reset the process-local cookie table between tests (the `thread_local!`
 /// state persists across tests on the same thread).

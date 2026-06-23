@@ -6,8 +6,8 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, CmdType, Node, NodePtr};
 use ::nodes::parsestmt::{ParseExprKind, ParseNamespaceColumn, ParseState};
@@ -74,8 +74,8 @@ pub fn transformSetOperationStmt<'mcx>(
             if let Some(into_node) = l.intoClause.as_deref() {
                 // C: parser_errposition(pstate,
                 //     exprLocation((Node *) leftmostSelect->intoClause)).
-                return Err(utils_error::ereport(types_error::ERROR)
-                    .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+                return Err(utils_error::ereport(::types_error::ERROR)
+                    .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
                     .errmsg("SELECT ... INTO is not allowed here".to_string())
                     .errposition(small1::parser_errposition(
                         pstate,
@@ -184,11 +184,11 @@ pub fn transformSetOperationStmt<'mcx>(
     let mut tlist: Vec<TargetEntry<'mcx>> = Vec::new();
     tlist.try_reserve(col_types.len()).map_err(|_| mcx.oom(col_types.len()))?;
     let mut targetvars: PgVec<'mcx, NodePtr<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, col_types.len())?;
+        ::mcx::vec_with_capacity_in(mcx, col_types.len())?;
     let mut targetnames: PgVec<'mcx, NodePtr<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, col_types.len())?;
+        ::mcx::vec_with_capacity_in(mcx, col_types.len())?;
     let mut sortnscolumns: PgVec<'mcx, ParseNamespaceColumn> =
-        mcx::vec_with_capacity_in(mcx, col_types.len())?;
+        ::mcx::vec_with_capacity_in(mcx, col_types.len())?;
 
     for i in 0..col_types.len() {
         let (resno, colname, varloc) = &left_cols[i];
@@ -212,28 +212,28 @@ pub fn transformSetOperationStmt<'mcx>(
         let tle = nodes_core::makefuncs::make_target_entry(
             mcx,
             Expr::Var(var.clone()),
-            resno_assigned as types_core::primitive::AttrNumber,
+            resno_assigned as ::types_core::primitive::AttrNumber,
             colname.as_deref(),
             false,
         )?;
         tlist.push(tle);
-        targetvars.push(mcx::alloc_in(mcx, Node::mk_var(mcx, var)?)?);
+        targetvars.push(::mcx::alloc_in(mcx, Node::mk_var(mcx, var)?)?);
         // makeString(colName): colName == pstrdup(lefttle->resname), never NULL
         // for a valid (non-resjunk) leftmost target entry.
         let sval = match colname {
-            Some(s) => mcx::PgString::from_str_in(s, mcx)?,
+            Some(s) => ::mcx::PgString::from_str_in(s, mcx)?,
             None => return Err(elog_error("set-op leftmost column has no name")),
         };
         let name_node = Node::mk_string(mcx, ::nodes::value::StringNode { sval })?;
-        targetnames.push(mcx::alloc_in(mcx, name_node)?);
+        targetnames.push(::mcx::alloc_in(mcx, name_node)?);
         sortnscolumns.push(ParseNamespaceColumn {
-            p_varno: leftmost_rti as types_core::primitive::Index,
+            p_varno: leftmost_rti as ::types_core::primitive::Index,
             p_varattno: *resno,
             p_vartype: col_type,
             p_vartypmod: col_typmod,
             p_varcollid: col_collation,
             p_varreturningtype: ::nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
-            p_varnosyn: leftmost_rti as types_core::primitive::Index,
+            p_varnosyn: leftmost_rti as ::types_core::primitive::Index,
             p_varattnosyn: *resno,
             p_dontexpand: false,
         });
@@ -286,7 +286,7 @@ pub fn transformSetOperationStmt<'mcx>(
         ));
     }
     qry.targetList = {
-        let mut v = mcx::vec_with_capacity_in(mcx, tlist.len())?;
+        let mut v = ::mcx::vec_with_capacity_in(mcx, tlist.len())?;
         for te in tlist {
             v.push(te);
         }
@@ -319,7 +319,7 @@ pub fn transformSetOperationStmt<'mcx>(
     qry.rtable = core::mem::replace(&mut pstate.p_rtable, PgVec::new_in(mcx));
     qry.rteperminfos = core::mem::replace(&mut pstate.p_rteperminfos, PgVec::new_in(mcx));
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, PgVec::new_in(mcx));
-    qry.jointree = Some(mcx::alloc_in(
+    qry.jointree = Some(::mcx::alloc_in(
         mcx,
         ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
@@ -348,7 +348,7 @@ pub fn transformSetOperationStmt<'mcx>(
     Ok(qry)
 }
 
-type AttrNumberish = types_core::primitive::AttrNumber;
+type AttrNumberish = ::types_core::primitive::AttrNumber;
 
 /// `transformSetOperationTree(pstate, stmt, isTopLevel, targetlist)` —
 /// recursively transform leaves and internal nodes of a set-op tree, returning
@@ -440,7 +440,7 @@ fn transformSetOperationTree<'mcx>(
         let rtr = ::nodes::rawnodes::RangeTblRef {
             rtindex: nsitem.p_rtindex,
         };
-        return mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr)?);
+        return ::mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr)?);
     }
 
     // Process an internal node (set operation node).
@@ -587,7 +587,7 @@ fn transformSetOperationTree<'mcx>(
 
         if op.op != SetOperation::SETOP_UNION || !op.all {
             let grpcl = makeSortGroupClauseForSetOp(rescoltype, recursive)?;
-            op.groupClauses.push(mcx::alloc_in(mcx, Node::mk_sort_group_clause(mcx, grpcl)?)?);
+            op.groupClauses.push(::mcx::alloc_in(mcx, Node::mk_sort_group_clause(mcx, grpcl)?)?);
         }
 
         // Construct a dummy tlist entry to return (SetToDefault carrier).
@@ -616,7 +616,7 @@ fn transformSetOperationTree<'mcx>(
         *tl = out_tl;
     }
 
-    mcx::alloc_in(mcx, Node::mk_set_operation_stmt(mcx, op)?)
+    ::mcx::alloc_in(mcx, Node::mk_set_operation_stmt(mcx, op)?)
 }
 
 /// Replace the `expr` of the (non-junk) targetlist entry with the given `resno`
@@ -627,7 +627,7 @@ fn update_leaf_tlist_expr<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     rti: i32,
-    resno: types_core::primitive::AttrNumber,
+    resno: ::types_core::primitive::AttrNumber,
     new_expr: Expr<'mcx>,
 ) -> PgResult<()> {
     let idx = (rti - 1) as usize;
@@ -641,7 +641,7 @@ fn update_leaf_tlist_expr<'mcx>(
     };
     for tle in sub.targetList.iter_mut() {
         if !tle.resjunk && tle.resno == resno {
-            tle.expr = Some(mcx::alloc_in(mcx, new_expr)?);
+            tle.expr = Some(::mcx::alloc_in(mcx, new_expr)?);
             return Ok(());
         }
     }
@@ -746,12 +746,12 @@ fn propagate_recursive_cte_columns<'mcx>(
                     .try_reserve(cte.ctecolnames.len())
                     .map_err(|_| mcx.oom(cte.ctecolnames.len()))?;
                 for n in cte.ctecolnames.iter() {
-                    ctecolnames.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+                    ctecolnames.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
                 }
                 entry.ctecolnames = ctecolnames;
-                entry.ctecoltypes = mcx::slice_in(mcx, &cte.ctecoltypes)?;
-                entry.ctecoltypmods = mcx::slice_in(mcx, &cte.ctecoltypmods)?;
-                entry.ctecolcollations = mcx::slice_in(mcx, &cte.ctecolcollations)?;
+                entry.ctecoltypes = ::mcx::slice_in(mcx, &cte.ctecoltypes)?;
+                entry.ctecoltypmods = ::mcx::slice_in(mcx, &cte.ctecoltypmods)?;
+                entry.ctecolcollations = ::mcx::slice_in(mcx, &cte.ctecolcollations)?;
             }
         }
         cur = ps.parentParseState.as_deref_mut();

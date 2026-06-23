@@ -30,13 +30,13 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
 };
-use opclass::IndexAmInfo;
-use types_scan::scankey::{InvalidStrategy, StrategyNumber};
-use types_tableam::amapi::{
+use ::opclass::IndexAmInfo;
+use ::types_scan::scankey::{InvalidStrategy, StrategyNumber};
+use ::types_tableam::amapi::{
     CompareType, IndexAmRoutine, COMPARE_GT, COMPARE_INVALID,
 };
 
@@ -44,7 +44,7 @@ use amapi_seams as sx;
 use amutils_seams as amutils_sx;
 use syscache_seams as syscache;
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 
 /// `BTREE_AM_OID` (catalog/pg_am.dat) — the built-in btree access method.
 const BTREE_AM_OID: Oid = 403;
@@ -127,9 +127,9 @@ pub fn GetIndexAmRoutine(amhandler: Oid) -> PgResult<IndexAmRoutine> {
     let routine = match amhandler {
         F_BTHANDLER => nbtree_nbtree::bthandler(),
         F_HASHHANDLER => entry::hashhandler(),
-        F_GISTHANDLER => gist_core::gisthandler(),
+        F_GISTHANDLER => ::gist_core::gisthandler(),
         F_GINHANDLER => ginutil::ginhandler(),
-        F_SPGHANDLER => spgist_core::spghandler(),
+        F_SPGHANDLER => ::spgist_core::spghandler(),
         F_BRINHANDLER => brin_scan::brinhandler(),
         // A handler the built-in fmgr table doesn't carry would be a
         // dynamically loaded extension AM, reached through the (unported)
@@ -170,7 +170,7 @@ pub fn GetIndexAmRoutineByAmId(amoid: Oid) -> PgResult<IndexAmRoutine> {
     };
 
     // if (!RegProcedureIsValid(amhandler)) ereport(ERROR, ...);
-    if amhandler == types_core::primitive::InvalidOid {
+    if amhandler == ::types_core::primitive::InvalidOid {
         return Err(PgError::error(format!(
             "index access method {amoid} does not have a handler"
         ))
@@ -202,24 +202,24 @@ fn am_reloptions<'mcx>(
     amoptions: Oid,
     reloptions: &[u8],
     validate: bool,
-) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, u8>>> {
     // The relcache hands us `rd_amhandler` as the dispatch OID; match it to the
     // built-in AM whose `*options` parser the C function pointer would reach.
     let opts: Option<std::vec::Vec<u8>> = match amoptions {
         F_BTHANDLER => {
-            nbtree_core::utils::btoptions(Some(reloptions), validate)?
+            ::nbtree_core::utils::btoptions(Some(reloptions), validate)?
         }
         F_HASHHANDLER => {
             hash_core::hashutil::hashoptions(Some(reloptions), validate)?
         }
         F_GISTHANDLER => {
-            gist_core::gistutil::gistoptions(Some(reloptions), validate)?
+            ::gist_core::gistutil::gistoptions(Some(reloptions), validate)?
         }
         F_GINHANDLER => {
             ginutil::ginoptions(Some(reloptions), validate, mcx)?
         }
         F_SPGHANDLER => {
-            spgist_core::spgoptions(Some(reloptions), validate)?
+            ::spgist_core::spgoptions(Some(reloptions), validate)?
         }
         F_BRINHANDLER => {
             brin_scan::brinoptions(Some(reloptions), validate)?
@@ -235,7 +235,7 @@ fn am_reloptions<'mcx>(
 
     // Copy the AM's `alloc::Vec` bytea payload into the seam's `mcx` arena.
     match opts {
-        Some(bytes) => Ok(Some(mcx::slice_in(mcx, &bytes)?)),
+        Some(bytes) => Ok(Some(::mcx::slice_in(mcx, &bytes)?)),
         None => Ok(None),
     }
 }
@@ -310,8 +310,8 @@ pub fn IndexAmTranslateCompareType(
         // allocation), so a transient context for the fmgr call suffices and
         // keeps this signature infallible-of-Mcx for its many callers.
         None if amoid == GIST_AM_OID => {
-            let tmp = mcx::MemoryContext::new("amapi:gisttranslatecmptype");
-            gist_core::gisttranslatecmptype(tmp.mcx(), cmpval, opfamily)?
+            let tmp = ::mcx::MemoryContext::new("amapi:gisttranslatecmptype");
+            ::gist_core::gisttranslatecmptype(tmp.mcx(), cmpval, opfamily)?
         }
         None => InvalidStrategy,
     };
@@ -349,7 +349,7 @@ pub fn IndexAmTranslateCompareType(
 /// or a future extension AM whose validator is reached through the (unported)
 /// dynamic-fmgr dispatch maps to the C `function amvalidate is not defined`
 /// error.
-pub fn amvalidate(mcx: mcx::Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
+pub fn amvalidate(mcx: ::mcx::Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
     // classtup = SearchSysCache1(CLAOID, ObjectIdGetDatum(opclassoid));
     // if (!HeapTupleIsValid(classtup)) elog(ERROR, "cache lookup failed for
     //     operator class %u", opclassoid);
@@ -403,7 +403,7 @@ pub fn amvalidate(mcx: mcx::Mcx<'_>, opclassoid: Oid) -> PgResult<bool> {
 /// integer value (the btree fast path returns the strategy number directly,
 /// which is numerically the compare type).
 fn compare_type_from_i32(v: i32) -> CompareType {
-    use types_tableam::amapi::CompareType::*;
+    use ::types_tableam::amapi::CompareType::*;
     match v {
         0 => COMPARE_INVALID,
         1 => COMPARE_LT,
@@ -480,7 +480,7 @@ fn am_has_adjustmembers(amoid: Oid) -> bool {
 /// The unified `IndexAmRoutine` vtable's `amadjustmembers` slot is not used here:
 /// the real callbacks live in the per-AM opclass-validator crates and several of
 /// them (hash, gin) carry a trimmed per-AM `OpFamilyMember` shape rather than the
-/// seam's canonical `opclass::OpFamilyMember`. We dispatch by `amoid` to
+/// seam's canonical `::opclass::OpFamilyMember`. We dispatch by `amoid` to
 /// the validator body directly. For the trimmed-shape AMs we marshal the shared
 /// fields the callback reads (`is_func`/`number`/`lefttype`/`righttype`) into the
 /// per-AM record, run it, and merge the three dependency fields it mutates back
@@ -491,15 +491,15 @@ fn am_adjust_members<'mcx>(
     amoid: Oid,
     opfamilyoid: Oid,
     opclassoid: Oid,
-    mut operators: mcx::PgVec<'mcx, opclass::OpFamilyMember>,
-    mut procedures: mcx::PgVec<'mcx, opclass::OpFamilyMember>,
+    mut operators: ::mcx::PgVec<'mcx, ::opclass::OpFamilyMember>,
+    mut procedures: ::mcx::PgVec<'mcx, ::opclass::OpFamilyMember>,
 ) -> PgResult<(
-    mcx::PgVec<'mcx, opclass::OpFamilyMember>,
-    mcx::PgVec<'mcx, opclass::OpFamilyMember>,
+    ::mcx::PgVec<'mcx, ::opclass::OpFamilyMember>,
+    ::mcx::PgVec<'mcx, ::opclass::OpFamilyMember>,
 )> {
     match amoid {
         // btree / GiST / SP-GiST callbacks already operate on the canonical
-        // `opclass::OpFamilyMember` — call them in place.
+        // `::opclass::OpFamilyMember` — call them in place.
         BTREE_AM_OID => {
             nbt_validate::btadjustmembers(
                 opfamilyoid,
@@ -570,7 +570,7 @@ type TrimmedMember = hash::backend_access_hash_hashvalidate::OpFamilyMember;
 /// Marshal the canonical seam members into the trimmed per-AM record, copying
 /// the fields the hash/GIN callbacks read (`is_func`/`number`/`lefttype`/
 /// `righttype`) plus the current dependency fields.
-fn to_trimmed(members: &[opclass::OpFamilyMember]) -> std::vec::Vec<TrimmedMember> {
+fn to_trimmed(members: &[::opclass::OpFamilyMember]) -> std::vec::Vec<TrimmedMember> {
     members
         .iter()
         .map(|m| TrimmedMember {
@@ -588,7 +588,7 @@ fn to_trimmed(members: &[opclass::OpFamilyMember]) -> std::vec::Vec<TrimmedMembe
 /// Merge the dependency fields the callback mutated (`ref_is_hard` /
 /// `ref_is_family` / `refobjid`) back into the canonical members; the callbacks
 /// touch nothing else, so `object`/`sortfamily` are preserved.
-fn merge_trimmed_deps(canonical: &mut [opclass::OpFamilyMember], trimmed: &[TrimmedMember]) {
+fn merge_trimmed_deps(canonical: &mut [::opclass::OpFamilyMember], trimmed: &[TrimmedMember]) {
     debug_assert_eq!(canonical.len(), trimmed.len());
     for (dst, src) in canonical.iter_mut().zip(trimmed.iter()) {
         dst.ref_is_hard = src.ref_is_hard;
@@ -673,7 +673,7 @@ fn get_index_am_routine_by_am_id_noerror(amoid: Oid) -> PgResult<Option<IndexAmR
     };
 
     // if (!RegProcedureIsValid(amhandler)) { if (noerror) return NULL; ... }
-    if amhandler == types_core::primitive::InvalidOid {
+    if amhandler == ::types_core::primitive::InvalidOid {
         return Ok(None);
     }
 
@@ -745,14 +745,14 @@ fn amutils_am_property(
     match req.amoid {
         BTREE_AM_OID => {
             // btproperty handles only AMPROP_RETURNABLE; everything else punts.
-            use nbtree_core::utils::IndexAMProperty as BtProp;
+            use ::nbtree_core::utils::IndexAMProperty as BtProp;
             let bt_prop = match req.prop {
                 amutils_sx::IndexAmProperty::Returnable => BtProp::AmpropReturnable,
                 _ => BtProp::Other,
             };
             let mut res = false;
             let mut isnull = false;
-            let handled = nbtree_core::utils::btproperty(
+            let handled = ::nbtree_core::utils::btproperty(
                 req.index_oid,
                 req.attno,
                 bt_prop,
@@ -763,24 +763,24 @@ fn amutils_am_property(
             Ok(if handled { Some((res, isnull)) } else { None })
         }
         GIST_AM_OID => {
-            use gist_core::gistutil::IndexAMProperty as GiProp;
+            use ::gist_core::gistutil::IndexAMProperty as GiProp;
             let gi_prop = match req.prop {
                 amutils_sx::IndexAmProperty::DistanceOrderable => GiProp::DistanceOrderable,
                 amutils_sx::IndexAmProperty::Returnable => GiProp::Returnable,
                 _ => GiProp::Other,
             };
             let (handled, res, isnull) =
-                gist_core::gistutil::gistproperty(req.index_oid, req.attno, gi_prop)?;
+                ::gist_core::gistutil::gistproperty(req.index_oid, req.attno, gi_prop)?;
             Ok(if handled { Some((res, isnull)) } else { None })
         }
         SPGIST_AM_OID => {
-            use spgist_core::IndexAMProperty as SpProp;
+            use ::spgist_core::IndexAMProperty as SpProp;
             let sp_prop = match req.prop {
                 amutils_sx::IndexAmProperty::DistanceOrderable => SpProp::DistanceOrderable,
                 _ => SpProp::Other,
             };
             let (handled, res, isnull) =
-                spgist_core::spgproperty(mcx, req.index_oid, req.attno, sp_prop)?;
+                ::spgist_core::spgproperty(mcx, req.index_oid, req.attno, sp_prop)?;
             Ok(if handled { Some((res, isnull)) } else { None })
         }
         // An AM that assigns amproperty = NULL in C never reaches here (the
@@ -796,7 +796,7 @@ fn amutils_am_property(
 /// `index_close(indexrel, AccessShareLock);`
 fn amutils_index_can_return(mcx: Mcx<'_>, index_oid: Oid, attno: i32) -> PgResult<bool> {
     use indexam as indexam;
-    use types_storage::lock::AccessShareLock;
+    use ::types_storage::lock::AccessShareLock;
 
     let indexrel = indexam::index_open(mcx, index_oid, AccessShareLock)?;
     let res = indexam::index_can_return(&indexrel, attno)?;
@@ -811,7 +811,7 @@ fn amutils_index_can_return(mcx: Mcx<'_>, index_oid: Oid, attno: i32) -> PgResul
 /// and gin (`ginbuildphasename`) assign a non-NULL `ambuildphasename` in C.
 fn amutils_am_buildphasename(amoid: Oid, phasenum: i64) -> PgResult<Option<String>> {
     let name: Option<&'static str> = match amoid {
-        BTREE_AM_OID => nbtree_core::utils::btbuildphasename(phasenum),
+        BTREE_AM_OID => ::nbtree_core::utils::btbuildphasename(phasenum),
         GIN_AM_OID => ginutil::ginbuildphasename(phasenum),
         // No other built-in AM assigns ambuildphasename; the caller gates on
         // has_ambuildphasename so this is unreachable for them.

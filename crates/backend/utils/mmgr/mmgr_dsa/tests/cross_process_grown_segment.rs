@@ -19,13 +19,13 @@
 
 use std::sync::Mutex;
 
-use dsm_core::dsm::{
+use ::dsm_core::dsm::{
     dsm_attach, dsm_create, dsm_pin_segment, dsm_reset_backend_local_segment_list_for_fork,
     dsm_segment_address, dsm_segment_handle,
 };
-use dsm_core::test_bringup::dsm_test_bringup;
-use lwlock::LWLockRegisterTranche;
-use mmgr_dsa::runtime::{
+use ::dsm_core::test_bringup::dsm_test_bringup;
+use ::lwlock::LWLockRegisterTranche;
+use ::mmgr_dsa::runtime::{
     dsa_allocate_extended, dsa_attach, dsa_attach_in_place, dsa_create_in_place_ext,
     dsa_get_address, dsa_get_handle,
 };
@@ -57,7 +57,7 @@ fn worker_reads_leader_bytes_from_on_demand_segment() {
 
     // Small initial segment so a couple of large allocations force a new
     // segment (index >= 1). Allow growth up to a few segments.
-    let area = mmgr_dsa::runtime::dsa_create_ext(
+    let area = ::mmgr_dsa::runtime::dsa_create_ext(
         TEST_TRANCHE_ID,
         DSA_MIN_SEGMENT_SIZE,
         DSA_MIN_SEGMENT_SIZE,
@@ -175,7 +175,7 @@ fn worker_in_place_reads_leader_bytes_from_on_demand_segment() {
 
     let area = dsa_create_in_place_ext(
         place_addr,
-        mmgr_dsa::runtime::dsa_minimum_size(),
+        ::mmgr_dsa::runtime::dsa_minimum_size(),
         TEST_TRANCHE_ID,
         Some(place_seg_id),
         DSA_DEFAULT_INIT_SEGMENT_SIZE,

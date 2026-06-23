@@ -21,7 +21,7 @@
 //! (`mirror-pg-and-panic`).
 
 use mcx::{Mcx, PgBox};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::Node;
 

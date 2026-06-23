@@ -25,17 +25,17 @@
 //! need `pgstat_get_beentry_by_proc_number`), and `pg_stat_reset_backend_stats`
 //! (needs `BackendPidGetProc` / `pgstat_tracks_backend_bktype`, unported).
 
-use datum::Datum;
-use types_error::PgResult;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_pgstat::activity_pgstat::{
+use ::types_pgstat::activity_pgstat::{
     PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BGWRITER, PGSTAT_KIND_CHECKPOINTER, PGSTAT_KIND_FUNCTION,
     PGSTAT_KIND_IO, PGSTAT_KIND_RELATION, PGSTAT_KIND_SLRU, PGSTAT_KIND_SUBSCRIPTION,
     PGSTAT_KIND_WAL,
 };
 
-use activity_pgstat::pgstat_core;
+use ::activity_pgstat::pgstat_core;
 
 mod composite;
 
@@ -77,7 +77,7 @@ fn arg_text(fcinfo: &FunctionCallInfoBaseData, i: usize) -> String {
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("pgstatfuncs fn: text arg missing from by-ref lane");
-    String::from_utf8_lossy(&image[datum::varlena::VARHDRSZ..]).into_owned()
+    String::from_utf8_lossy(&image[::datum::varlena::VARHDRSZ..]).into_owned()
 }
 
 /// `PG_RETURN_INT32(v)`.
@@ -169,10 +169,10 @@ fn fc_pg_stat_reset_shared(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum>
         "slru" => pgstat_core::pgstat_reset_of_kind(PGSTAT_KIND_SLRU)?,
         "wal" => pgstat_core::pgstat_reset_of_kind(PGSTAT_KIND_WAL)?,
         _ => {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "unrecognized reset target: \"{target}\""
             ))
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
             .with_hint(
                 "Target must be \"archiver\", \"bgwriter\", \"checkpointer\", \"io\", \
                  \"recovery_prefetch\", \"slru\", or \"wal\".",
@@ -222,7 +222,7 @@ fn fc_pg_stat_reset_slru(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
 fn fc_pg_stat_reset_replication_slot(fc: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
     if arg_isnull(fc, 0) {
         pgstat_core::pgstat_reset_of_kind(
-            types_pgstat::activity_pgstat::PGSTAT_KIND_REPLSLOT,
+            ::types_pgstat::activity_pgstat::PGSTAT_KIND_REPLSLOT,
         )?;
     } else {
         let target = arg_text(fc, 0);
@@ -240,10 +240,10 @@ fn fc_pg_stat_reset_subscription_stats(fc: &mut FunctionCallInfoBaseData) -> PgR
     } else {
         let subid = arg_oid(fc, 0);
         if !types_core::OidIsValid(subid) {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "invalid subscription OID {subid}"
             ))
-            .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
+            .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE));
         }
         pgstat_core::pgstat_reset(PGSTAT_KIND_SUBSCRIPTION, types_core::InvalidOid, subid as u64)?;
     }

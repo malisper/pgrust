@@ -8,15 +8,15 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::Oid;
-use types_error::PgResult;
-use types_namespace::FuncArgInfo;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_error::PgResult;
+use ::types_namespace::FuncArgInfo;
 // The canonical unified value type (Datum-unification keystone). The seam
 // signatures below take/return it (`ByVal`/`ByRef`) with the call frame's
 // `'mcx` lifetime; the bare-word `datum::Datum` shim is retained
 // elsewhere until cleanup.
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
 seam_core::seam!(
     /// `InitMaterializedSRF(fcinfo, flags)` (funcapi.c) — set up the calling
@@ -26,7 +26,7 @@ seam_core::seam!(
     pub fn InitMaterializedSRF<'mcx>(
         fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
         flags: u32,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -43,8 +43,8 @@ seam_core::seam!(
     /// tuplestore allocation), carried on `Err`.
     pub fn init_materialized_srf_with_desc<'mcx>(
         fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
-        setdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
-    ) -> types_error::PgResult<()>
+        setdesc: ::types_tuple::heaptuple::TupleDesc<'mcx>,
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -59,7 +59,7 @@ seam_core::seam!(
         rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
         values: &[Datum<'mcx>],
         nulls: &[bool],
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -103,7 +103,7 @@ seam_core::seam!(
     /// set `fcinfo.fn_mcxt` (per-query context) first.
     pub fn init_MultiFuncCall<'a, 'mcx>(
         fcinfo: &'a mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
-    ) -> types_error::PgResult<&'a mut nodes::funcapi::FuncCallContext<'mcx>>
+    ) -> ::types_error::PgResult<&'a mut nodes::funcapi::FuncCallContext<'mcx>>
 );
 
 seam_core::seam!(
@@ -113,7 +113,7 @@ seam_core::seam!(
     /// `init_MultiFuncCall` (the C contract violation, `fn_extra == NULL`).
     pub fn per_MultiFuncCall<'a, 'mcx>(
         fcinfo: &'a mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
-    ) -> types_error::PgResult<&'a mut nodes::funcapi::FuncCallContext<'mcx>>
+    ) -> ::types_error::PgResult<&'a mut nodes::funcapi::FuncCallContext<'mcx>>
 );
 
 seam_core::seam!(
@@ -125,7 +125,7 @@ seam_core::seam!(
     /// straight out of `fcinfo.fn_extra`.) Can carry an `Err` from the teardown.
     pub fn end_MultiFuncCall<'mcx>(
         fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
-    ) -> types_error::PgResult<()>
+    ) -> ::types_error::PgResult<()>
 );
 
 seam_core::seam!(
@@ -173,7 +173,7 @@ seam_core::seam!(
     pub fn srf_arg_lsn<'mcx>(
         fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
         n: usize,
-    ) -> types_core::XLogRecPtr
+    ) -> ::types_core::XLogRecPtr
 );
 
 seam_core::seam!(
@@ -204,7 +204,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
         n: usize,
-    ) -> PgResult<mcx::PgVec<'mcx, u8>>
+    ) -> PgResult<::mcx::PgVec<'mcx, u8>>
 );
 
 seam_core::seam!(
@@ -221,7 +221,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
         n: usize,
-    ) -> PgResult<types_tuple::heaptuple::FormedTuple<'mcx>>
+    ) -> PgResult<::types_tuple::heaptuple::FormedTuple<'mcx>>
 );
 
 seam_core::seam!(
@@ -234,7 +234,7 @@ seam_core::seam!(
     pub fn build_function_result_tupdesc_t<'mcx>(
         mcx: Mcx<'mcx>,
         proc_oid: Oid,
-    ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+    ) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>>
 );
 
 seam_core::seam!(
@@ -247,7 +247,7 @@ seam_core::seam!(
         mcx: Mcx<'mcx>,
         expr: Option<&nodes::nodes::Node<'mcx>>,
         no_error: bool,
-    ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>>
+    ) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>>
 );
 
 seam_core::seam!(

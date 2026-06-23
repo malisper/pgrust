@@ -68,7 +68,7 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_error::ERROR;
+    use ::types_error::ERROR;
 
     #[test]
     fn relkind_constants_match_postgres_header() {

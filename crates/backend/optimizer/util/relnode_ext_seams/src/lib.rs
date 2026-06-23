@@ -14,10 +14,10 @@
 
 extern crate alloc;
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{AppendRelInfo, PathId, PathTarget, PlannerInfo, RelId, RinfoId};
 
 /* ---- plancat.c / parse_relation.c (base-rel construction) -------------- */
@@ -97,7 +97,7 @@ seam_core::seam!(
         joinrel: RelId,
         outer_rel: RelId,
         inner_rel: RelId,
-        sjinfo: &pathnodes::SpecialJoinInfo,
+        sjinfo: &::pathnodes::SpecialJoinInfo,
     ) -> PgResult<()>
 );
 
@@ -114,8 +114,8 @@ seam_core::seam!(
     pub fn join_clause_is_movable_into_relids(
         root: &PlannerInfo,
         rinfo: RinfoId,
-        current_relids: &pathnodes::Relids,
-        join_and_required: &pathnodes::Relids,
+        current_relids: &::pathnodes::Relids,
+        join_and_required: &::pathnodes::Relids,
     ) -> bool
 );
 
@@ -144,7 +144,7 @@ seam_core::seam!(
         joinrel: RelId,
         outer_rel: RelId,
         inner_rel: RelId,
-        sjinfo: &pathnodes::SpecialJoinInfo,
+        sjinfo: &::pathnodes::SpecialJoinInfo,
         restrictlist: &[RinfoId],
     ) -> PgResult<()>
 );
@@ -166,7 +166,7 @@ seam_core::seam!(
         joinrel: RelId,
         outer_path: PathId,
         inner_path: PathId,
-        sjinfo: &pathnodes::SpecialJoinInfo,
+        sjinfo: &::pathnodes::SpecialJoinInfo,
         restrict_clauses: &[RinfoId],
     ) -> f64
 );

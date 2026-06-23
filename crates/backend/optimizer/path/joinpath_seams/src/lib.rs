@@ -1,5 +1,5 @@
 //! Seam declarations for the join-path enumerator (`optimizer/path/joinpath.c`),
-//! arena-shaped over [`pathnodes::PlannerInfo`] (`RelId`/`PathId`/`RinfoId`
+//! arena-shaped over [`::pathnodes::PlannerInfo`] (`RelId`/`PathId`/`RinfoId`
 //! handles + the `rel()`/`path()`/`rinfo()` accessors).
 //!
 //! joinpath.c generates the candidate join paths for a pair of relations. The
@@ -28,14 +28,14 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::nodes::NodeTag;
-use pathnodes::optimizer_plan::{
+use ::pathnodes::optimizer_plan::{
     CostSelector, JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors,
 };
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     JoinType, NodeId, PathId, PathKey, PhInfoId, PlannerInfo, RelId, Relids, RinfoId,
     SpecialJoinInfo,
@@ -68,7 +68,7 @@ seam_core::seam!(
     /// `create_nestloop_path(...)` — allocate the nestloop `Path` into the arena.
     pub fn create_nestloop_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         joinrel: RelId,
         jointype: JoinType,
         workspace: &JoinCostWorkspace,
@@ -84,7 +84,7 @@ seam_core::seam!(
     /// `create_mergejoin_path(...)` — allocate the mergejoin `Path`.
     pub fn create_mergejoin_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         joinrel: RelId,
         jointype: JoinType,
         workspace: &JoinCostWorkspace,
@@ -104,7 +104,7 @@ seam_core::seam!(
     /// `create_hashjoin_path(...)` — allocate the hashjoin `Path`.
     pub fn create_hashjoin_path<'mcx>(
         root: &mut PlannerInfo,
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         joinrel: RelId,
         jointype: JoinType,
         workspace: &JoinCostWorkspace,
@@ -121,7 +121,7 @@ seam_core::seam!(
     /// `create_unique_path(root, rel, subpath, sjinfo)` — allocate the unique
     /// `Path`; `None` when unique-ification is impossible (C `NULL`).
     pub fn create_unique_path<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         rel: RelId,
         subpath: PathId,
@@ -198,20 +198,20 @@ seam_core::seam!(
     /// cost path estimates the Memoize distinct-param count via
     /// `estimate_num_groups`, which examines exprs through the [`PlannerRun`]).
     pub fn initial_cost_nestloop<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         jointype: JoinType,
         outer_path: PathId,
         inner_path: PathId,
         extra: &JoinPathExtraData,
-    ) -> types_error::PgResult<JoinCostWorkspace>
+    ) -> ::types_error::PgResult<JoinCostWorkspace>
 );
 seam_core::seam!(
     /// `initial_cost_mergejoin(...)`. Threads `run` + `&mut root` (the
     /// incremental-sort source-cost path estimates group counts via
     /// `estimate_num_groups`).
     pub fn initial_cost_mergejoin<'mcx>(
-        run: &pathnodes::planner_run::PlannerRun<'mcx>,
+        run: &::pathnodes::planner_run::PlannerRun<'mcx>,
         root: &mut PlannerInfo,
         jointype: JoinType,
         mergeclauses: &[RinfoId],
@@ -221,7 +221,7 @@ seam_core::seam!(
         innersortkeys: &[PathKey],
         outer_presorted_keys: i32,
         extra: &JoinPathExtraData,
-    ) -> types_error::PgResult<JoinCostWorkspace>
+    ) -> ::types_error::PgResult<JoinCostWorkspace>
 );
 seam_core::seam!(
     /// `initial_cost_hashjoin(...)`.
@@ -478,7 +478,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `find_placeholder_info(root, (PlaceHolderVar *) node)` (placeholder.c) —
     /// the PlaceHolderInfo for a `PlaceHolderVar` node.
-    pub fn find_placeholder_info(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo, node: NodeId) -> PhInfoId
+    pub fn find_placeholder_info(mcx: ::mcx::Mcx<'_>, root: &mut PlannerInfo, node: NodeId) -> PhInfoId
 );
 seam_core::seam!(
     /// `lookup_type_cache(exprType((Node*) expr), TYPECACHE_HASH_PROC |

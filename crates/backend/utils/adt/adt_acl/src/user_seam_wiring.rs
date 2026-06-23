@@ -1,7 +1,7 @@
 //! Installs the `commands/user.c` role-membership / role-resolution seams
 //! (`user_seams`) onto acl.c's real implementations.
 //!
-//! The seam vocabulary uses the owned `parsenodes::RoleSpec` (the
+//! The seam vocabulary uses the owned `::parsenodes::RoleSpec` (the
 //! command driver's parse-node model); acl.c's resolvers take the canonical
 //! arena `::nodes::parsenodes::RoleSpec`. The two meet here: a `RoleSpec`
 //! converter (allocating `rolename` into the target context) bridges them, and
@@ -10,15 +10,15 @@
 use mcx::{Mcx, MemoryContext, PgString};
 use authid::{AuthIdForm, AuthMemForm};
 use cache::{AuthIdRow, AuthMembersFullRow};
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 
 use crate::role_membership;
 
 use ::nodes::parsenodes::RoleSpec as NRoleSpec;
 use ::nodes::parsenodes::RoleSpecType as NRoleSpecType;
-use parsenodes::RoleSpec as PRoleSpec;
-use parsenodes::RoleSpecType as PRoleSpecType;
+use ::parsenodes::RoleSpec as PRoleSpec;
+use ::parsenodes::RoleSpecType as PRoleSpecType;
 
 /// `AuthIdRow` (the syscache value projection) → `AuthIdForm` (the user.c
 /// vocabulary). Re-homes the owned strings; both carry the same columns.
@@ -102,7 +102,7 @@ fn authmem_list_by_role_seam<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Vec<
     Ok(rows.iter().map(authmem_row_to_form).collect())
 }
 
-/// Convert an owned `parsenodes::RoleSpec` into the canonical arena
+/// Convert an owned `::parsenodes::RoleSpec` into the canonical arena
 /// `::nodes::parsenodes::RoleSpec`, allocating `rolename` in `mcx`.
 fn role_spec_to_arena<'mcx>(mcx: Mcx<'mcx>, role: &PRoleSpec) -> PgResult<NRoleSpec<'mcx>> {
     let roletype = match role.roletype {

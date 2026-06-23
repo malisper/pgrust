@@ -26,11 +26,11 @@
 //! little-endian host; the image never touches disk here, only the in-process
 //! by-ref lane, so any self-consistent encoding round-trips).
 
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 use crate::{VarBit, VarBitRef};
 
@@ -110,7 +110,7 @@ fn arg_varbit_bytes(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
         let payload = &image[1..];
         let total = VARHDRSZ_4B + payload.len();
         let mut out = Vec::with_capacity(total);
-        out.extend_from_slice(&datum::varlena::set_varsize_4b(total));
+        out.extend_from_slice(&::datum::varlena::set_varsize_4b(total));
         out.extend_from_slice(payload);
         out
     } else {
@@ -140,7 +140,7 @@ fn decode_varbit(image: &[u8]) -> VarBitRef<'_> {
 fn encode_varbit(v: &VarBit<'_>) -> Vec<u8> {
     let total = VARBIT_PREFIX + v.data.len();
     let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(&datum::varlena::set_varsize_4b(total));
+    out.extend_from_slice(&::datum::varlena::set_varsize_4b(total));
     out.extend_from_slice(&v.bit_len.to_ne_bytes());
     out.extend_from_slice(&v.data);
     out
@@ -647,7 +647,7 @@ pub fn register_varbit_builtins() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datum::NullableDatum;
+    use ::datum::NullableDatum;
 
     /// Build an fcinfo with `nargs` slots, all by-value words null, ready for
     /// the caller to populate `ref_args` / scalar words.

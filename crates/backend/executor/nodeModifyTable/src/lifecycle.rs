@@ -8,8 +8,8 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use types_core::Oid;
+use ::mcx::Mcx;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
 use ::nodes::execexpr::ExprState;
 use ::nodes::nodes::CmdType;
@@ -17,7 +17,7 @@ use ::nodes::primnodes::Expr;
 use nodes::{
     EStateData, ModifyTableState, PartitionTupleRouting, RriId, SlotId, TargetEntry,
 };
-use rel::Relation;
+use ::rel::Relation;
 
 /// `MERGE_INSERT` (execnodes.h) — MERGE subcommand mask bit.
 const MERGE_INSERT: i32 = 0x01;
@@ -272,8 +272,8 @@ pub fn ExecInitGenerated<'mcx>(
     result_rel_info: RriId,
     cmdtype: CmdType,
 ) -> PgResult<()> {
-    use types_tuple::access::ATTRIBUTE_GENERATED_STORED;
-    use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
+    use ::types_tuple::access::ATTRIBUTE_GENERATED_STORED;
+    use ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 
     let mcx = estate.es_query_cxt;
     let rel = estate
@@ -311,8 +311,8 @@ pub fn ExecInitGenerated<'mcx>(
     };
 
     // ri_GeneratedExprs = palloc0(natts * sizeof(ExprState *));
-    let mut ri_generated_exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ExprState<'mcx>>>> =
-        mcx::PgVec::new_in(mcx);
+    let mut ri_generated_exprs: ::mcx::PgVec<'mcx, Option<::mcx::PgBox<'mcx, ExprState<'mcx>>>> =
+        ::mcx::PgVec::new_in(mcx);
     for _ in 0..natts {
         ri_generated_exprs.push(None);
     }
@@ -473,7 +473,7 @@ pub fn ExecComputeStoredGenerated<'mcx>(
 
     // Snapshot the per-attribute (attbyval, attlen) the datumCopy calls need, plus
     // natts, off the result relation's descriptor (TupleDescCompactAttr in C).
-    let (natts, attmeta): (usize, mcx::PgVec<'mcx, (bool, i16)>) = {
+    let (natts, attmeta): (usize, ::mcx::PgVec<'mcx, (bool, i16)>) = {
         let rel = estate
             .result_rel(result_rel_info)
             .ri_RelationDesc
@@ -481,7 +481,7 @@ pub fn ExecComputeStoredGenerated<'mcx>(
             .expect("result relation must be open");
         let tupdesc = &rel.rd_att;
         let n = tupdesc.natts as usize;
-        let mut meta = mcx::PgVec::new_in(mcx);
+        let mut meta = ::mcx::PgVec::new_in(mcx);
         for i in 0..n {
             let att = tupdesc.attr(i);
             meta.push((att.attbyval, att.attlen));
@@ -493,8 +493,8 @@ pub fn ExecComputeStoredGenerated<'mcx>(
     // slot_getallattrs(slot); memcpy(nulls, slot->tts_isnull, ...);
     let deformed = execTuples_seams::slot_getallattrs_by_id::call(estate, slot)?;
     debug_assert_eq!(deformed.len(), natts);
-    let mut values: mcx::PgVec<'mcx, types_tuple::Datum<'mcx>> = mcx::PgVec::new_in(mcx);
-    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::PgVec::new_in(mcx);
+    let mut values: ::mcx::PgVec<'mcx, ::types_tuple::Datum<'mcx>> = ::mcx::PgVec::new_in(mcx);
+    let mut nulls: ::mcx::PgVec<'mcx, bool> = ::mcx::PgVec::new_in(mcx);
     for (v, n) in deformed.iter() {
         values.push(v.clone_in(mcx)?);
         nulls.push(*n);
@@ -505,7 +505,7 @@ pub fn ExecComputeStoredGenerated<'mcx>(
 
         // if (ri_GeneratedExprs[i]) { ... } — select the array by cmdtype and take
         // out element i (an owned ExprState), leaving the slot for write-back.
-        let gen_state: Option<mcx::PgBox<'mcx, ExprState<'mcx>>> = {
+        let gen_state: Option<::mcx::PgBox<'mcx, ExprState<'mcx>>> = {
             let rri = estate.result_rel_mut(result_rel_info);
             let arr = if cmdtype == CmdType::CMD_UPDATE {
                 rri.ri_GeneratedExprsU.as_mut()

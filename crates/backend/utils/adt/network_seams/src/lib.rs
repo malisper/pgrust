@@ -21,9 +21,9 @@
 use types_network::{ResolvedName, SessionEndpoint};
 
 pub mod inet {
-    use mcx::Mcx;
-    use types_error::PgResult;
-    use types_network::inet_struct;
+    use ::mcx::Mcx;
+    use ::types_error::PgResult;
+    use ::types_network::inet_struct;
     // Canonical unified value (the Datum-unification keystone). The inet varlena
     // image rides the `Datum::ByRef` arm verbatim (header included), so the owner
     // can `PG_DETOAST_DATUM_PACKED` the bytes and decode the `inet_struct`.

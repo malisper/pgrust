@@ -8,11 +8,11 @@
 //! builtin table (C: `fmgr_builtins[]`), so by-OID dispatch resolves them.
 //! OIDs / nargs / strict / retset are transcribed exactly from `pg_proc.dat`.
 
-use datum::Datum;
-use types_error::PgResult;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

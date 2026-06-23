@@ -128,7 +128,7 @@ pub enum SessionEndpoint {
 // GiST inet_ops opclass key (network_gist.c)
 // ---------------------------------------------------------------------------
 
-use types_core::primitive::OffsetNumber;
+use ::types_core::primitive::OffsetNumber;
 
 /// `GistInetKey` (network_gist.c:79) — a GiST INET/CIDR index key.
 ///

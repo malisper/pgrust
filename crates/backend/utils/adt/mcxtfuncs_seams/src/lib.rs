@@ -35,8 +35,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::ProcNumber;
-use types_error::PgResult;
+use ::types_core::ProcNumber;
+use ::types_error::PgResult;
 
 /// `MemoryContext` — a `MemoryContextData *` in C, here an opaque cursor handle
 /// the (unported) `mcxt.c` owner mints and resolves. Used only as a dynahash

@@ -7,13 +7,13 @@
 //! nbtree port: plain owned Rust structs the hash crates manipulate, with the
 //! `HashScanPos*` invalidate/pinned/valid predicates as free functions.
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, OffsetNumber, RegProcedure, BLCKSZ, InvalidBlockNumber,
 };
 use types_core::{uint16, uint32};
-use types_core::primitive::BufferIsValid;
-use types_storage::storage::{Buffer, InvalidBuffer};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_core::primitive::BufferIsValid;
+use ::types_storage::storage::{Buffer, InvalidBuffer};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use alloc::vec::Vec;
 

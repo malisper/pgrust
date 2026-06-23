@@ -41,22 +41,22 @@
 
 use mcx::{Mcx, MemoryContext};
 use types_catalog as cat;
-use types_core::fmgr::F_OIDEQ;
+use ::types_core::fmgr::F_OIDEQ;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use rel::{Relation, RelationData};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
-use types_tuple::access::{
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
+use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
-use types_tuple::heaptuple::{Datum, FormedTuple};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
-use table::table_open;
+use ::table::table_open;
 
 use crate::keystone::{
     CatalogIndexState, CatalogOpenIndexes, CatalogTupleDelete, CatalogTupleInsert,
@@ -131,7 +131,7 @@ fn namestrcpy_image(src: &str) -> [u8; 64] {
 /// `NameGetDatum(&name)` over a 64-byte `NameData` image (a by-reference Datum
 /// over the on-disk `name` bytes).
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8; 64]) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &image[..])?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &image[..])?))
 }
 
 /// `CStringGetTextDatum(s)` — a `text` varlena image (4-byte header
@@ -140,7 +140,7 @@ fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>>
     let payload = s.as_bytes();
     let total = 4 + payload.len();
     let word = (total as u32) << 2;
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.extend_from_slice(&word.to_ne_bytes());
     buf.extend_from_slice(payload);
     Ok(Datum::ByRef(buf))
@@ -161,8 +161,8 @@ fn build_array_image<'mcx>(
     elmtype: Oid,
     elmlen: i32,
     align: u8,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
-    use arrayfuncs::foundation;
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
+    use ::arrayfuncs::foundation;
 
     let nelems = elems.len() as i32;
     // overhead (no nulls) = ARR_OVERHEAD_NONULLS(1).
@@ -178,7 +178,7 @@ fn build_array_image<'mcx>(
     }
     let total = overhead + nbytes;
 
-    let mut result: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut result: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     result.resize(total, 0);
     // SET_VARSIZE + ndim=1, dataoffset=0, elemtype; dims[0]=nelems; lbs[0]=1.
     foundation::set_header(&mut result, total, 1, 0, elmtype);
@@ -341,14 +341,14 @@ fn acl_new_owner_datum<'mcx>(
     old_owner: Oid,
     new_owner: Oid,
 ) -> PgResult<Datum<'mcx>> {
-    use types_acl::acl::AclItem;
+    use ::types_acl::acl::AclItem;
 
     // The acl column is a 1-D, no-nulls `aclitem[]` (16-byte fixed-width,
     // 'd'-aligned, by-reference elements). Read it through the canonical array
     // value lane (`deconstruct_array_values`), which yields each element as a
     // real `Datum::ByRef` carrying its verbatim 16 stored bytes — no
     // pointer-word surrogate, no hand-rolled stride walk.
-    let elems = arrayfuncs::construct::deconstruct_array_values_bytes(
+    let elems = ::arrayfuncs::construct::deconstruct_array_values_bytes(
         mcx,
         acl_bytes,
         ACLITEMOID,
@@ -383,13 +383,13 @@ fn acl_new_owner_datum<'mcx>(
     // `construct_array_values` lays out the 1-D, no-nulls `aclitem[]` varlena.
     let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(new_acl.len());
     for item in new_acl.iter() {
-        let mut buf = mcx::vec_with_capacity_in::<u8>(mcx, 16)?;
+        let mut buf = ::mcx::vec_with_capacity_in::<u8>(mcx, 16)?;
         buf.extend_from_slice(&item.ai_grantee.to_ne_bytes());
         buf.extend_from_slice(&item.ai_grantor.to_ne_bytes());
         buf.extend_from_slice(&item.ai_privs.to_ne_bytes());
         values.push(Datum::ByRef(buf));
     }
-    let bytes = arrayfuncs::construct::construct_array_values(
+    let bytes = ::arrayfuncs::construct::construct_array_values(
         mcx, &values, ACLITEMOID, 16, false, b'd',
     )?;
     Ok(Datum::ByRef(bytes))
@@ -471,7 +471,7 @@ fn update_pg_class_reloptions_seam<'mcx>(
         // repl_val[Anum_pg_class_reloptions - 1] = newOptions: the text[] varlena
         // rides as a Datum::ByRef carrying its verbatim image.
         Some(bytes) => {
-            let d = Datum::ByRef(mcx::slice_in(mcx, bytes)?);
+            let d = Datum::ByRef(::mcx::slice_in(mcx, bytes)?);
             set_col(&mut values, &mut nulls, &mut replaces, anum, d);
         }
         // repl_null[Anum_pg_class_reloptions - 1] = true.
@@ -766,7 +766,7 @@ fn update_default_partition_oid_catalog(parent_id: Oid, default_part_id: Oid) ->
 fn index_mark_invalid_catalog(index_relation_id: Oid) -> PgResult<bool> {
     let ctx = MemoryContext::new("index_mark_invalid_catalog");
     let mcx = ctx.mcx();
-    let pg_index = table_open(mcx, types_core::catalog::INDEX_RELATION_ID, RowExclusiveLock)?;
+    let pg_index = table_open(mcx, ::types_core::catalog::INDEX_RELATION_ID, RowExclusiveLock)?;
     let Some(oldtup) = fetch_by_oid(mcx, &pg_index, ANUM_PG_INDEX_INDEXRELID, index_relation_id)?
     else {
         pg_index.close(RowExclusiveLock)?;
@@ -795,7 +795,7 @@ fn index_mark_invalid_catalog(index_relation_id: Oid) -> PgResult<bool> {
 fn index_mark_valid_catalog(index_relation_id: Oid) -> PgResult<bool> {
     let ctx = MemoryContext::new("index_mark_valid_catalog");
     let mcx = ctx.mcx();
-    let pg_index = table_open(mcx, types_core::catalog::INDEX_RELATION_ID, RowExclusiveLock)?;
+    let pg_index = table_open(mcx, ::types_core::catalog::INDEX_RELATION_ID, RowExclusiveLock)?;
     let Some(oldtup) = fetch_by_oid(mcx, &pg_index, ANUM_PG_INDEX_INDEXRELID, index_relation_id)?
     else {
         pg_index.close(RowExclusiveLock)?;
@@ -1170,7 +1170,7 @@ fn reopen_self<'mcx>(mcx: Mcx<'mcx>, rel: &RelationData<'_>) -> PgResult<Relatio
     common_relation_seams::relation_open::call(
         mcx,
         rel.rd_id,
-        types_storage::lock::NoLock,
+        ::types_storage::lock::NoLock,
     )
 }
 
@@ -1179,10 +1179,10 @@ fn reopen_self<'mcx>(mcx: Mcx<'mcx>, rel: &RelationData<'_>) -> PgResult<Relatio
 /// non-null (true for pg_class's leading columns in a bootstrap row). Returns
 /// `None` if a preceding column is variable-length.
 fn fixed_attr_offset(
-    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
+    tupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
     anum: i16,
 ) -> Option<usize> {
-    use arrayfuncs::foundation;
+    use ::arrayfuncs::foundation;
     let mut off: usize = 0;
     for i in 0..(anum as usize - 1) {
         let att = tupdesc.attr(i);
@@ -1552,7 +1552,7 @@ fn set_pg_class_reloftype(relid: Oid, reloftype: Oid) -> PgResult<bool> {
 fn set_index_isreplident(index_oid: Oid, want: bool) -> PgResult<(bool, bool)> {
     let ctx = MemoryContext::new("set_index_isreplident");
     let mcx = ctx.mcx();
-    let pg_index = table_open(mcx, types_core::catalog::INDEX_RELATION_ID, RowExclusiveLock)?;
+    let pg_index = table_open(mcx, ::types_core::catalog::INDEX_RELATION_ID, RowExclusiveLock)?;
     let Some(oldtup) = fetch_by_oid(mcx, &pg_index, ANUM_PG_INDEX_INDEXRELID, index_oid)? else {
         pg_index.close(RowExclusiveLock)?;
         return Ok((false, false));
@@ -2012,7 +2012,7 @@ fn type_values<'mcx>(
         // image. On the `TypeCreate` path this is either NULL (the common case —
         // `isDependentType`, or `get_user_default_acl()` returned NULL) or a
         // default ACL from `ALTER DEFAULT PRIVILEGES`; serialize the bytes verbatim.
-        Some(image) => values.push(Datum::ByRef(mcx::slice_in(mcx, image)?)),
+        Some(image) => values.push(Datum::ByRef(::mcx::slice_in(mcx, image)?)),
         None => {
             values.push(Datum::null());
             nulls[(pt::Anum_pg_type_typacl - 1) as usize] = true;
@@ -2470,7 +2470,7 @@ fn insert_pg_namespace(
     match nspacl {
         Some(image) => {
             values[(ANUM_PG_NAMESPACE_NSPACL - 1) as usize] =
-                Datum::ByRef(mcx::slice_in(mcx, image)?)
+                Datum::ByRef(::mcx::slice_in(mcx, image)?)
         }
         None => nulls[(ANUM_PG_NAMESPACE_NSPACL - 1) as usize] = true,
     }
@@ -2535,7 +2535,7 @@ fn update_object_owner_tuple(
     lmgr_seams::unlock_tuple::call(
         rel.rd_id,
         oldtup.tuple.t_self,
-        types_storage::lock::InplaceUpdateTupleLock,
+        ::types_storage::lock::InplaceUpdateTupleLock,
     )?;
     r.close(RowExclusiveLock)
 }
@@ -2877,7 +2877,7 @@ fn decode_db_role_setting_setconfig<'mcx>(
 /// each is decoded by [`text_datum_to_string`]. Null elements are skipped (the
 /// C `TransformGUCArray` skip-null behaviour).
 fn decode_text_array(mcx: Mcx<'_>, bytes: &[u8]) -> PgResult<Vec<String>> {
-    use arrayfuncs::foundation;
+    use ::arrayfuncs::foundation;
 
     // C `DatumGetArrayTypeP` is `PG_DETOAST_DATUM`: a stored array column can be
     // short-packed (1-byte header), compressed, or external. The `ARR_*` header
@@ -3018,7 +3018,7 @@ fn deform_lo_page<'mcx>(
     tuple: &FormedTuple<'mcx>,
 ) -> PgResult<indexing_seams::LoPageRow> {
     use cat::catalog::{ANUM_PG_LARGEOBJECT_DATA, ANUM_PG_LARGEOBJECT_PAGENO};
-    use types_storage::large_object::LOBLKSIZE;
+    use ::types_storage::large_object::LOBLKSIZE;
 
     let ctx = MemoryContext::new("deform_lo_page");
     let mcx = ctx.mcx();
@@ -3095,7 +3095,7 @@ fn deform_lo_page<'mcx>(
 fn bytea_datum<'mcx>(mcx: Mcx<'mcx>, data: &[u8]) -> PgResult<Datum<'mcx>> {
     let total = 4 + data.len();
     let word = (total as u32) << 2;
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.extend_from_slice(&word.to_ne_bytes());
     buf.extend_from_slice(data);
     Ok(Datum::ByRef(buf))
@@ -3169,7 +3169,7 @@ fn catalog_tuple_insert_pg_largeobject_metadata(
     match lomacl {
         Some(image) => {
             values[(ANUM_PG_LARGEOBJECT_METADATA_LOMACL - 1) as usize] =
-                Datum::ByRef(mcx::slice_in(mcx, image)?)
+                Datum::ByRef(::mcx::slice_in(mcx, image)?)
         }
         None => nulls[(ANUM_PG_LARGEOBJECT_METADATA_LOMACL - 1) as usize] = true,
     }
@@ -3242,7 +3242,7 @@ fn get_catalog_object_by_oid<'mcx>(
             lmgr_seams::lock_tuple::call(
                 catalog.rd_id,
                 t.tuple.t_self,
-                types_storage::lock::InplaceUpdateTupleLock,
+                ::types_storage::lock::InplaceUpdateTupleLock,
             )?;
         }
     }
@@ -3271,7 +3271,7 @@ fn get_acl_datum<'mcx>(
         // The ACL is retrieved from pg_attribute.attacl via
         // SearchSysCacheCopyAttNum(objectId, objsubid) (objectaddress.c).
         use cache_syscache as syscache;
-        use cache::syscache::SysCacheKey;
+        use ::cache::syscache::SysCacheKey;
         let attnum = objsubid as i16;
         let tup = syscache::SearchSysCache2(
             mcx,
@@ -3298,14 +3298,14 @@ fn get_acl_datum<'mcx>(
     // rel = table_open(catalogId, AccessShareLock); the OID-keyed scan; then
     // heap_getattr(tup, Anum_acl, RelationGetDescr(rel), &isnull).
     let _ = objsubid;
-    let rel = table_open(mcx, catalog_id, types_storage::lock::AccessShareLock)?;
+    let rel = table_open(mcx, catalog_id, ::types_storage::lock::AccessShareLock)?;
     let tup = fetch_by_oid(mcx, &rel, anum_oid, object_id)?;
     let Some(tup) = tup else {
-        rel.close(types_storage::lock::AccessShareLock)?;
+        rel.close(::types_storage::lock::AccessShareLock)?;
         return Ok(None);
     };
     let (values, nulls) = deform(mcx, &rel, &tup)?;
-    rel.close(types_storage::lock::AccessShareLock)?;
+    rel.close(::types_storage::lock::AccessShareLock)?;
     let i = (anum_acl - 1) as usize;
     if nulls[i] {
         return Ok(None);

@@ -6,15 +6,15 @@
 use std::boxed::Box;
 
 use mcx::{Mcx, PgVec};
-use types_core::xact::CommandId;
-use types_core::TransactionId;
-use types_error::PgResult;
+use ::types_core::xact::CommandId;
+use ::types_core::TransactionId;
+use ::types_error::PgResult;
 use types_slot::{SlotData, TupleSlotKind};
-use rel::Relation;
-use types_scan::sdir::ScanDirection;
-use snapshot::SnapshotData;
-use types_storage::RelFileLocator;
-use types_tuple::heaptuple::ItemPointerData;
+use ::rel::Relation;
+use ::types_scan::sdir::ScanDirection;
+use ::snapshot::SnapshotData;
+use ::types_storage::RelFileLocator;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::relscan::{
     ParallelBlockTableScanDescData, ParallelTableScanDesc, TableScanDesc, TableScanDescData,
@@ -106,7 +106,7 @@ pub struct TmIndexDelete {
 #[derive(Clone, Copy, Debug)]
 pub struct TmIndexStatus {
     /// index AM page offset number
-    pub idxoffnum: types_core::primitive::OffsetNumber,
+    pub idxoffnum: ::types_core::primitive::OffsetNumber,
     /// currently known to be deletable?
     pub knowndeletable: bool,
     /// promising (duplicate) index tuple? (bottom-up only)
@@ -121,7 +121,7 @@ pub struct TmIndexStatus {
 #[derive(Clone, Debug)]
 pub struct TmIndexDeleteOp<'mcx> {
     /// index block number (for error reports)
-    pub iblknum: types_core::primitive::BlockNumber,
+    pub iblknum: ::types_core::primitive::BlockNumber,
     /// bottom-up (not simple) deletion?
     pub bottomup: bool,
     /// bottom-up space target
@@ -154,7 +154,7 @@ pub struct IndexFetchTableData<'mcx> {
     /// The AM-private payload, owned by the access method that created it and
     /// allocated in the scan's `mcx` arena (convention A). The `'mcx`-safe
     /// erased carrier with a tag-checked downcast (see [`crate::amopaque`]).
-    pub am_private: Option<mcx::PgBox<'mcx, dyn crate::amopaque::AmOpaque<'mcx> + 'mcx>>,
+    pub am_private: Option<::mcx::PgBox<'mcx, dyn crate::amopaque::AmOpaque<'mcx> + 'mcx>>,
 }
 
 /// `BulkInsertStateData` (`access/hio.h`) — state for bulk inserts, private to
@@ -171,14 +171,14 @@ pub struct IndexFetchTableData<'mcx> {
 #[derive(Clone, Debug, Default)]
 pub struct BulkInsertStateData {
     /// `strategy` — our BULKWRITE strategy object (NULL == `None`).
-    pub strategy: types_storage::buf::BufferAccessStrategy,
+    pub strategy: ::types_storage::buf::BufferAccessStrategy,
     /// `current_buf` — current insertion target page.
-    pub current_buf: types_storage::Buffer,
+    pub current_buf: ::types_storage::Buffer,
     /// `next_free` — bulk-extension state: next still-unused page from the last
     /// extension (`last_free..next_free` are further unused pages).
-    pub next_free: types_core::BlockNumber,
+    pub next_free: ::types_core::BlockNumber,
     /// `last_free` — bulk-extension state: last still-unused page.
-    pub last_free: types_core::BlockNumber,
+    pub last_free: ::types_core::BlockNumber,
     /// `already_extended_by` — pages this bulk insert has extended by so far.
     pub already_extended_by: u32,
 }
@@ -214,17 +214,17 @@ pub trait SampleScanDriver {
     /// [`Self::has_next_sample_block`] is `true`.
     fn next_sample_block(
         &mut self,
-        nblocks: types_core::primitive::BlockNumber,
-    ) -> types_core::primitive::BlockNumber;
+        nblocks: ::types_core::primitive::BlockNumber,
+    ) -> ::types_core::primitive::BlockNumber;
 
     /// `tsm->NextSampleTuple(scanstate, blockno, maxoffset)` — the next tuple
     /// offset on `blockno` the method wants checked (an invalid offset, i.e. `0`,
     /// ends the page).
     fn next_sample_tuple(
         &mut self,
-        blockno: types_core::primitive::BlockNumber,
-        maxoffset: types_core::primitive::OffsetNumber,
-    ) -> types_core::primitive::OffsetNumber;
+        blockno: ::types_core::primitive::BlockNumber,
+        maxoffset: ::types_core::primitive::OffsetNumber,
+    ) -> ::types_core::primitive::OffsetNumber;
 }
 
 /// `TableAmRoutine` (`access/tableam.h`) — the table-access-method API
@@ -505,7 +505,7 @@ pub struct TableAmRoutine {
     pub scan_analyze_next_block: for<'mcx> fn(
         mcx: Mcx<'mcx>,
         scan: &mut TableScanDescData<'mcx>,
-        next_buffer: &mut dyn FnMut() -> PgResult<types_storage::buf::Buffer>,
+        next_buffer: &mut dyn FnMut() -> PgResult<::types_storage::buf::Buffer>,
     ) -> PgResult<bool>,
 
     /// `scan_analyze_next_tuple(scan, OldestXmin, liverows, deadrows, slot)`

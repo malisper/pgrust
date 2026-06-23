@@ -23,14 +23,14 @@
 //! `SpiPlanPtr`/raw-tuptable keystone tracked in [`crate::exec`].
 
 use core::cell::RefCell;
-use mcx::Mcx;
-use types_core::Oid;
-use types_dest::dest::CommandDest;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::types_dest::dest::CommandDest;
+use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_tuple::heaptuple::TupleDescData;
 use types_xml::{SpiColumn, SpiResult, SpiRow};
 
 /// One raw column value retained from a received row: the bare-word datum value
@@ -174,9 +174,9 @@ fn spi_printtup<'mcx>(mcx: Mcx<'mcx>, state: u64, slot: &mut SlotData<'mcx>) -> 
             (0usize, None)
         } else {
             match value {
-                types_tuple::Datum::ByVal(w) => (*w, None),
-                types_tuple::Datum::ByRef(b) => (0usize, Some(b.as_slice().to_vec())),
-                types_tuple::Datum::Cstring(s) => (0usize, Some(s.as_bytes().to_vec())),
+                ::types_tuple::Datum::ByVal(w) => (*w, None),
+                ::types_tuple::Datum::ByRef(b) => (0usize, Some(b.as_slice().to_vec())),
+                ::types_tuple::Datum::Cstring(s) => (0usize, Some(s.as_bytes().to_vec())),
                 // Composite/Expanded/Internal are not produced as a scalar
                 // expression's first column on this path; flatten to the varlena
                 // image (matches the form-path `as_varlena_bytes`).
@@ -236,7 +236,7 @@ pub fn take_spi_result(receiver: DestReceiverHandle) -> SpiResult {
         // type-xml-facing `SpiRawValue` carrier so the xml row mapper can run
         // `map_sql_value_to_xml_value` (its XSD special-cases need the raw
         // Datum). NULL columns surface as `None`.
-        let raw_rows: Vec<types_xml::SpiRawRow> = taken
+        let raw_rows: Vec<::types_xml::SpiRawRow> = taken
             .raw_rows
             .into_iter()
             .map(|raw_row| {
@@ -246,7 +246,7 @@ pub fn take_spi_result(receiver: DestReceiverHandle) -> SpiResult {
                         if rc.isnull {
                             None
                         } else {
-                            Some(types_xml::SpiRawValue {
+                            Some(::types_xml::SpiRawValue {
                                 word: rc.value as u64,
                                 byref: rc.byref,
                             })

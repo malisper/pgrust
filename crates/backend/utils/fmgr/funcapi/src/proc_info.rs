@@ -16,29 +16,29 @@
 //! the C.
 
 use mcx::{Mcx, MemoryContext, PgString, PgVec};
-use types_core::primitive::AttrNumber;
-use types_core::Oid;
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`.
+use ::types_core::primitive::AttrNumber;
+use ::types_core::Oid;
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`.
 // The `proargnames` / `proargmodes` / `proallargtypes` parameters are the raw
 // `pg_proc` column words the SQL caller passes in (C: `Datum`), forwarded
 // untouched to the array owner's detoast/project seams (`text_array_datum`,
-// `char_array_datum`, `oid_array_datum` — all still `datum::Datum`); the
+// `char_array_datum`, `oid_array_datum` — all still `::datum::Datum`); the
 // `ScalarWord::null()` checks are the C `PointerGetDatum(NULL)` tests on those raw
 // words. funcapi never owns the bytes, so the word stays at this audited
 // column-input ABI edge until the arrayfuncs seams migrate.
-use datum::Datum as ScalarWord;
-use types_error::PgResult;
+use ::datum::Datum as ScalarWord;
+use ::types_error::PgResult;
 use types_namespace::{
     CharArrayDatum, FuncArgInfo, FuncProcAttrs, OidArrayDatum, TextArrayDatum,
 };
-use types_tuple::heaptuple::{TupleDesc, OIDOID, RECORDOID, TEXTOID};
+use ::types_tuple::heaptuple::{TupleDesc, OIDOID, RECORDOID, TEXTOID};
 
 use toastdesc_seams as toastdesc;
 use arrayfuncs_seams as arrayfuncs;
 use syscache_seams as syscache;
 
 /// `CHAROID` (`catalog/pg_type_d.h`) — the OID of the `"char"` type. Not in
-/// `types_tuple::heaptuple`, so spelled here as in the C header.
+/// `::types_tuple::heaptuple`, so spelled here as in the C header.
 const CHAROID: Oid = 18;
 
 // `pg_proc.h` `proargmode` codes (`PROARGMODE_*`). The raw projection carries
@@ -55,7 +55,7 @@ const PROKIND_PROCEDURE: u8 = b'p';
 /// `elog(ERROR, msg)` — internal error with the elog default errcode
 /// (`ERRCODE_INTERNAL_ERROR`), matching the `elog(ERROR, ...)` call sites here.
 fn elog_internal(msg: impl Into<String>) -> utils_error::PgError {
-    utils_error::ereport(types_error::ERROR)
+    utils_error::ereport(::types_error::ERROR)
         .errmsg(msg.into())
         .into_error()
 }
@@ -398,7 +398,7 @@ fn build_function_result_tupdesc_d_from_decoded<'mcx>(
             0,
         )?;
     }
-    Ok(Some(mcx::alloc_in(mcx, desc)?))
+    Ok(Some(::mcx::alloc_in(mcx, desc)?))
 }
 
 /// `record_type_change` body (pg_proc.c:455-477): when the replaced function
@@ -412,8 +412,8 @@ pub fn record_type_change(
     all_parameter_types: Option<Vec<Oid>>,
     parameter_modes: Option<Vec<i8>>,
     parameter_names: Option<Vec<Option<String>>>,
-) -> PgResult<pg_proc_seams::RecordTypeChange> {
-    use pg_proc_seams::RecordTypeChange;
+) -> PgResult<::pg_proc_seams::RecordTypeChange> {
+    use ::pg_proc_seams::RecordTypeChange;
 
     // The two descriptors are only compared (equalRowTypes returns a bool); a
     // private scratch context holds them for the duration of the call.
@@ -744,5 +744,5 @@ fn build_function_result_tupdesc_d_projected<'mcx>(
         )?;
     }
 
-    Ok(Some(mcx::alloc_in(mcx, desc)?))
+    Ok(Some(::mcx::alloc_in(mcx, desc)?))
 }

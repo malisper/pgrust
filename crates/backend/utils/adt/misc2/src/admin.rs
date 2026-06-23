@@ -27,7 +27,7 @@
 //! [`FunctionCallInfoBaseData`]. Independent of the keystone.
 
 use alloc::format;
-use mcx::Mcx;
+use ::mcx::Mcx;
 // The canonical unified value (Datum-unification keystone); these SQL-callable
 // builtins return / assemble the unified `Datum<'mcx>`. The varlena owner still
 // hands back the bare scalar word, bridged at `text_datum`/`bytes_to_varlena`.
@@ -37,7 +37,7 @@ use types_error::{
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_storage::lock as lk;
+use ::types_storage::lock as lk;
 
 use varlena_seams as varlena;
 
@@ -63,8 +63,8 @@ const DEFAULTTABLESPACE_OID: u32 = 1663;
 /// `RELKIND_HAS_PARTITIONS(relkind)` (`catalog/pg_class.h`) — true for a
 /// partitioned table or partitioned index.
 fn relkind_has_partitions(relkind: u8) -> bool {
-    relkind == types_tuple::access::RELKIND_PARTITIONED_TABLE
-        || relkind == types_tuple::access::RELKIND_PARTITIONED_INDEX
+    relkind == ::types_tuple::access::RELKIND_PARTITIONED_TABLE
+        || relkind == ::types_tuple::access::RELKIND_PARTITIONED_INDEX
 }
 
 // =====================================================================
@@ -83,7 +83,7 @@ fn read_binary_file<'mcx>(
     seek_offset: i64,
     bytes_to_read: i64,
     missing_ok: bool,
-) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, u8>>> {
     fd::read_server_file::call(mcx, filename, seek_offset, bytes_to_read, missing_ok)
 }
 
@@ -95,7 +95,7 @@ fn read_text_file<'mcx>(
     seek_offset: i64,
     bytes_to_read: i64,
     missing_ok: bool,
-) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, u8>>> {
     match read_binary_file(mcx, filename, seek_offset, bytes_to_read, missing_ok)? {
         Some(buf) => {
             // pg_verifymbstr(VARDATA(buf), VARSIZE(buf) - VARHDRSZ, false)
@@ -115,7 +115,7 @@ fn pg_read_file_common<'mcx>(
     bytes_to_read: i64,
     read_to_eof: bool,
     missing_ok: bool,
-) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, u8>>> {
     if read_to_eof {
         debug_assert_eq!(bytes_to_read, -1);
     } else if bytes_to_read < 0 {
@@ -135,7 +135,7 @@ fn pg_read_binary_file_common<'mcx>(
     bytes_to_read: i64,
     read_to_eof: bool,
     missing_ok: bool,
-) -> PgResult<Option<mcx::PgVec<'mcx, u8>>> {
+) -> PgResult<Option<::mcx::PgVec<'mcx, u8>>> {
     if read_to_eof {
         debug_assert_eq!(bytes_to_read, -1);
     } else if bytes_to_read < 0 {
@@ -151,7 +151,7 @@ fn pg_read_binary_file_common<'mcx>(
 /// `VARHDRSZ` header — `bytea` and `text` share the representation.
 fn bytes_to_varlena_datum<'mcx>(
     mcx: Mcx<'mcx>,
-    bytes: Option<mcx::PgVec<'mcx, u8>>,
+    bytes: Option<::mcx::PgVec<'mcx, u8>>,
 ) -> PgResult<Datum<'mcx>> {
     match bytes {
         Some(b) => Ok(varlena::bytes_to_varlena_v::call(mcx, &b[..])?),

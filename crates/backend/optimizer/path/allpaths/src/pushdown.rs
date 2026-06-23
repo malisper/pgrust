@@ -26,8 +26,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Index, Oid};
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node};
@@ -36,8 +36,8 @@ use ::nodes::primnodes::{Expr, OpExpr};
 use ::nodes::rawnodes::{SortGroupClause, WindowClause, SETOP_EXCEPT};
 use pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId};
 
-use nodes_core::makefuncs::make_and_qual;
-use nodes_core::nodefuncs::{
+use ::nodes_core::makefuncs::make_and_qual;
+use ::nodes_core::nodefuncs::{
     expr_collation, expr_type, expr_typmod, expression_returns_set, set_opfuncid,
 };
 
@@ -502,7 +502,7 @@ fn target_is_in_sort_list_clauses(
     tle: &::nodes::primnodes::TargetEntry<'_>,
     sort_list: &[SortGroupClause],
 ) -> bool {
-    clause::targetIsInSortList(tle, types_core::primitive::InvalidOid, sort_list)
+    clause::targetIsInSortList(tle, ::types_core::primitive::InvalidOid, sort_list)
 }
 
 /* ==========================================================================
@@ -655,7 +655,7 @@ pub(crate) fn subquery_push_qual<'mcx>(
                 .map(|b| (*b).clone_in(mcx))
                 .transpose()?;
             subquery.havingQual = make_and_qual(existing, new_qual)
-                .map(|e| mcx::alloc_in(mcx, e))
+                .map(|e| ::mcx::alloc_in(mcx, e))
                 .transpose()?;
         } else {
             let jt = subquery
@@ -669,7 +669,7 @@ pub(crate) fn subquery_push_qual<'mcx>(
                 .map(|e| e.clone_in(mcx))
                 .transpose()?;
             jt.quals = make_and_qual(existing, new_qual)
-                .map(|e| mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?))
+                .map(|e| ::mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?))
                 .transpose()?;
         }
         Ok(())
@@ -705,7 +705,7 @@ fn recurse_push_qual<'mcx>(
                 .transpose()?
                 .ok_or_else(|| PgError::error("recurse_push_qual: component has no subquery"))?;
             subquery_push_qual(mcx, &mut subquery, rte, rti, qual)?;
-            subrte.subquery = Some(mcx::alloc_in(mcx, subquery)?);
+            subrte.subquery = Some(::mcx::alloc_in(mcx, subquery)?);
             top.rtable[idx] = subrte;
             Ok(())
         }
@@ -853,7 +853,7 @@ fn find_window_run_conditions<'mcx>(
 
     // Check if there's a support function for 'wfunc'.
     let prosupport = lsyscache_seams::get_func_support::call(wfunc.winfnoid)?;
-    if prosupport == types_core::primitive::InvalidOid {
+    if prosupport == ::types_core::primitive::InvalidOid {
         return Ok(false);
     }
 
@@ -901,7 +901,7 @@ fn find_window_run_conditions<'mcx>(
         })
     };
     let mut runopexpr: Option<OpExpr> = None;
-    let mut runoperator = types_core::primitive::InvalidOid;
+    let mut runoperator = ::types_core::primitive::InvalidOid;
 
     for opinfo in opinfos.iter() {
         let cmptype = opinfo.cmptype;
@@ -1008,7 +1008,7 @@ fn relids_add_member(a: Relids, x: i32) -> Relids {
         words.resize(wnum + 1, 0);
     }
     words[wnum] |= 1u64 << bnum;
-    Some(alloc::boxed::Box::new(pathnodes::Bitmapset { words }))
+    Some(alloc::boxed::Box::new(::pathnodes::Bitmapset { words }))
 }
 
 /// `set_opfuncid(opexpr)` (nodeFuncs.c) over the owned OpExpr.
@@ -1104,8 +1104,8 @@ pub(crate) fn remove_unused_subquery_outputs<'mcx>(
         let ctype = expr_type(texpr)?;
         let ctypmod = expr_typmod(texpr)?;
         let ccoll = expr_collation(texpr)?;
-        let null_const = nodes_core::makefuncs::make_null_const(mcx, ctype, ctypmod, ccoll)?;
-        tle.expr = Some(mcx::alloc_in(mcx, Expr::Const(null_const))?);
+        let null_const = ::nodes_core::makefuncs::make_null_const(mcx, ctype, ctypmod, ccoll)?;
+        tle.expr = Some(::mcx::alloc_in(mcx, Expr::Const(null_const))?);
     }
 
     Ok(())

@@ -17,8 +17,8 @@
 //! `'$.a'::jsonpath` is only as live as that seam — but the fmgr dispatch entry
 //! must exist for the `internal lookup table` resolution to succeed.
 
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARHDRSZ` — the uncompressed 4-byte varlena length-word size.

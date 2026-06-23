@@ -15,7 +15,7 @@
 //! batched seams, which panic loudly until installed (mirror-PG-and-panic).
 //!
 //! Each seam signature mirrors the C failure surface: every operation that
-//! can `ereport` at ERROR/PANIC returns [`types_error::PgResult`].
+//! can `ereport` at ERROR/PANIC returns [`::types_error::PgResult`].
 
 #![allow(non_snake_case)]
 
@@ -25,8 +25,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use types_core::{Oid, RepOriginId, XLogRecPtr};
-use types_error::PgResult;
-use types_storage::LWLockMode;
+use ::types_error::PgResult;
+use ::types_storage::LWLockMode;
 
 // ---------------------------------------------------------------------------
 // ReplicationOriginLock — one of the fixed individual LWLocks in the shared

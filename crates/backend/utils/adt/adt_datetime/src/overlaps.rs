@@ -13,7 +13,7 @@
 
 use core::cmp::Ordering;
 
-use types_datetime::TimeTzADT;
+use ::types_datetime::TimeTzADT;
 use types_datetime::{TimeADT, Timestamp};
 
 use crate::time::time_cmp;
@@ -156,7 +156,7 @@ pub fn overlaps_timetz(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_datetime::USECS_PER_HOUR;
+    use ::types_datetime::USECS_PER_HOUR;
 
     fn ts(hours: i64) -> Timestamp {
         hours * USECS_PER_HOUR

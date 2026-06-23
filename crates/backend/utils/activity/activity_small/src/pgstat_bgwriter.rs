@@ -16,20 +16,20 @@ use crate::changecount::{
     pgstat_end_changecount_write,
 };
 use lwlock_seams::{lwlock_acquire, lwlock_initialize};
-use init_small_seams::my_proc_number;
+use ::init_small_seams::my_proc_number;
 use pgstat_seams::{
     assert_is_up, shmem_is_shutdown, snapshot_fixed, with_shmem_bgwriter, with_snapshot_bgwriter,
 };
-use stat_seams::pgstat_flush_io;
-use types_core::TimestampTz;
-use types_error::PgResult;
-use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
+use ::stat_seams::pgstat_flush_io;
+use ::types_core::TimestampTz;
+use ::types_error::PgResult;
+use ::types_pgstat::backend_utils_activity_pgstat_bgwriter::{
     PgStatShared_BgWriter, PgStat_BgWriterStats,
 };
-use types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
+use ::types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
 use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
-pub use types_pgstat::activity_pgstat::PGSTAT_KIND_BGWRITER;
+pub use ::types_pgstat::activity_pgstat::PGSTAT_KIND_BGWRITER;
 
 thread_local! {
     /// `PgStat_BgWriterStats PendingBgWriterStats = {0};` — backend-local

@@ -20,9 +20,9 @@
 //! `date2j` calendar seam (shared with the DCH producer). `DateTimeParseError`
 //! (the DTERR -> ereport/errsave mapper) is pure logic and is ported in-crate.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult, SoftErrorContext};
-use pgtime::pg_tm;
+use ::pgtime::pg_tm;
 use types_datetime::{TzHandle, YmdDate};
 use types_datetime::{
     DateTimeErrorExtra, Interval, TimeTzADT, DAYS_PER_MONTH, DTERR_BAD_FORMAT, DTERR_BAD_TIMEZONE,
@@ -41,7 +41,7 @@ use types_error::{
     ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
 };
 use types_datetime::{fsec_t, DateADT, TimeADT, Timestamp};
-use types_core::Oid;
+use ::types_core::Oid;
 
 use crate::cache::dch_cache_fetch;
 use crate::dch::{dch_to_char, FmtTm, FmtTz, TmToChar};
@@ -51,7 +51,7 @@ use crate::tables::*;
 /// Local `errsave` helper mirroring C's `errsave(escontext, ...)`: routes a
 /// complete [`PgError`] through the shared soft-error context discipline.
 fn errsave(escontext: Option<&mut SoftErrorContext>, err: PgError) -> PgResult<()> {
-    types_error::ereturn(escontext, (), err)
+    ::types_error::ereturn(escontext, (), err)
 }
 
 /// C: `ZERO_tm` (formatting.c) — a zeroed `pg_tm` with `mday`/`mon` set to 1.
@@ -73,13 +73,13 @@ fn date2j(year: i32, month: i32, day: i32) -> i32 {
 fn timestamp2tm(
     dt: Timestamp,
     want_tz: bool,
-) -> Result<types_datetime::Timestamp2TmResult, ()> {
+) -> Result<::types_datetime::Timestamp2TmResult, ()> {
     timestamp_seams::timestamp2tm::call(dt, want_tz)
 }
 fn tm2timestamp(tm: &pg_tm, fsec: fsec_t, tz: Option<i32>) -> Result<Timestamp, ()> {
     timestamp_seams::tm2timestamp::call(tm, fsec, tz)
 }
-fn interval2itm(span: Interval) -> types_datetime::pg_itm {
+fn interval2itm(span: Interval) -> ::types_datetime::pg_itm {
     timestamp_seams::interval2itm::call(span)
 }
 fn tm2time(tm: &pg_tm, fsec: fsec_t) -> TimeADT {
@@ -123,7 +123,7 @@ fn validate_date(fmask: i32, is2digits: bool, bc: bool, tm: &mut pg_tm) -> i32 {
 /// C: `TIMESTAMP_NOT_FINITE(t)` — `t == DT_NOBEGIN || t == DT_NOEND`.
 #[inline]
 fn timestamp_not_finite(t: Timestamp) -> bool {
-    t == types_datetime::DT_NOBEGIN || t == types_datetime::DT_NOEND
+    t == ::types_datetime::DT_NOBEGIN || t == ::types_datetime::DT_NOEND
 }
 
 /// C: `INTERVAL_NOT_FINITE(i)` — true when the interval is ±infinity.

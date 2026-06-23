@@ -3,7 +3,7 @@
 //! (`ReplicationSlotIndex`) and current name; slot.c holds the relevant locks
 //! when it calls these.
 
-use types_tuple::heaptuple::NameData;
+use ::types_tuple::heaptuple::NameData;
 
 seam_core::seam!(
     /// `void pgstat_create_replslot(ReplicationSlot *slot)` (pgstat_replslot.c).

@@ -24,8 +24,8 @@
 
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
-use sink::TablespaceInfo;
+use ::types_error::PgResult;
+use ::sink::TablespaceInfo;
 
 /// `enum tarError` (pgtar.h:19-25) — the result of `tarCreateHeader`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

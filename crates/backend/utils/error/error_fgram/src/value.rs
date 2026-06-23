@@ -85,11 +85,11 @@ impl PgError {
     }
 
     pub fn warning(message: impl Into<String>) -> Self {
-        Self::new(pg_ffi_fgram::WARNING, message)
+        Self::new(::pg_ffi_fgram::WARNING, message)
     }
 
     pub fn notice(message: impl Into<String>) -> Self {
-        Self::new(pg_ffi_fgram::NOTICE, message)
+        Self::new(::pg_ffi_fgram::NOTICE, message)
     }
 
     pub fn level(&self) -> ErrorLevel {

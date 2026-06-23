@@ -10,16 +10,16 @@
 //! own a private `MemoryContext` and re-open the relation in it.
 
 use mcx::{Mcx, MemoryContext};
-use types_catalog::opclasscmds_catalog as oc;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::opclasscmds_catalog as oc;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use rel::{Relation, RelationData};
-use types_storage::lock::RowExclusiveLock;
+use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_form_tuple;
-use table::table_open;
-use catalog_catalog::GetNewOidWithIndex;
+use ::heaptuple::heap_form_tuple;
+use ::table::table_open;
+use ::catalog_catalog::GetNewOidWithIndex;
 
 use crate::keystone::CatalogTupleInsert;
 
@@ -29,7 +29,7 @@ fn name_datum<'mcx>(mcx: Mcx<'mcx>, src: &str) -> PgResult<Datum<'mcx>> {
     for (i, &b) in src.as_bytes().iter().take(63).enumerate() {
         name[i] = b;
     }
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &name[..])?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &name[..])?))
 }
 
 /// `table_open(rel->rd_id, RowExclusiveLock)` — re-open the catalog in `mcx`.

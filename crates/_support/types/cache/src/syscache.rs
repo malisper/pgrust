@@ -5,15 +5,15 @@
 //! model cannot smuggle pointers through `Datum`, so a key crosses as this
 //! enum: by-value scalars keep the word, by-reference keys carry their bytes.
 
-// Bare-word machine-word `Datum` (`datum::Datum`), aliased `ScalarWord`.
+// Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`.
 // A by-value system-cache search key is the bare machine word C passes as
 // `Datum key1..key4` (`ObjectIdGetDatum`, `Int16GetDatum`, ...); it carries no
 // deformed value (by-reference keys travel as `Str`/`Bytes` here), so it stays
 // the audited bare word rather than the canonical `Datum<'mcx>` enum.
 use alloc::string::String;
-use datum::Datum as ScalarWord;
-use mcx::PgVec;
-use types_core::primitive::{AttrNumber, Oid as OidT};
+use ::datum::Datum as ScalarWord;
+use ::mcx::PgVec;
+use ::types_core::primitive::{AttrNumber, Oid as OidT};
 
 /// Projection of the `pg_index` row (`catalog/pg_index.h`) the relcache's
 /// `RelationInitIndexAccessInfo` consumes off `SearchSysCache1(INDEXRELID)`.
@@ -92,9 +92,9 @@ impl From<ScalarWord> for SysCacheKey<'static> {
 #[derive(Debug)]
 pub struct AuthIdRow<'mcx> {
     /// `oid` — the role's OID (`rform->oid`).
-    pub oid: types_core::Oid,
+    pub oid: ::types_core::Oid,
     /// `rolname` (`NameStr(rform->rolname)`).
-    pub rolname: mcx::PgString<'mcx>,
+    pub rolname: ::mcx::PgString<'mcx>,
     /// `rolsuper` — has superuser privilege.
     pub rolsuper: bool,
     /// `rolinherit` — inherits privileges of roles it is a member of.
@@ -114,9 +114,9 @@ pub struct AuthIdRow<'mcx> {
     /// `rolconnlimit` — per-role connection limit (`-1` means no limit).
     pub rolconnlimit: i32,
     /// `rolpassword` — `Some(text)` or `None` when SQL NULL.
-    pub rolpassword: Option<mcx::PgString<'mcx>>,
+    pub rolpassword: Option<::mcx::PgString<'mcx>>,
     /// `rolvaliduntil` — `Some(ts)` or `None` when SQL NULL.
-    pub rolvaliduntil: Option<types_core::primitive::TimestampTz>,
+    pub rolvaliduntil: Option<::types_core::primitive::TimestampTz>,
 }
 
 /// Result of the `get_role_password` `SearchSysCache1(AUTHNAME)` lookup
@@ -138,7 +138,7 @@ pub enum RolePasswordLookup {
         /// `TextDatumGetCString(rolpassword)` — the stored secret.
         shadow_pass: String,
         /// `DatumGetTimestampTz(rolvaliduntil)`; `None` when the column is null.
-        valid_until: Option<types_core::primitive::TimestampTz>,
+        valid_until: Option<::types_core::primitive::TimestampTz>,
     },
 }
 
@@ -149,7 +149,7 @@ pub enum RolePasswordLookup {
 pub struct AuthMembersRow {
     /// `roleid` (`Form_pg_auth_members->roleid`) — the role the member
     /// belongs to.
-    pub roleid: types_core::Oid,
+    pub roleid: ::types_core::Oid,
     /// `admin_option` — the grant carries WITH ADMIN OPTION.
     pub admin_option: bool,
     /// `inherit_option` — the grant is inherited (`WITH INHERIT TRUE`).
@@ -164,13 +164,13 @@ pub struct AuthMembersRow {
 #[derive(Clone, Copy, Debug)]
 pub struct AuthMembersFullRow {
     /// `oid` — the grant's OID.
-    pub oid: types_core::Oid,
+    pub oid: ::types_core::Oid,
     /// `roleid` — the role the grant is on.
-    pub roleid: types_core::Oid,
+    pub roleid: ::types_core::Oid,
     /// `member` — the member role.
-    pub member: types_core::Oid,
+    pub member: ::types_core::Oid,
     /// `grantor` — who granted the membership.
-    pub grantor: types_core::Oid,
+    pub grantor: ::types_core::Oid,
     /// `admin_option` — granted WITH ADMIN OPTION.
     pub admin_option: bool,
     /// `inherit_option` — exercise privileges without SET ROLE.
@@ -189,13 +189,13 @@ pub struct AuthMembersFullRow {
 #[derive(Debug)]
 pub struct ForeignDataWrapperFormRow<'mcx> {
     /// `fdwname` — name of the FDW (`NameStr(fdwform->fdwname)`).
-    pub fdwname: mcx::PgString<'mcx>,
+    pub fdwname: ::mcx::PgString<'mcx>,
     /// `fdwowner` — owning role OID.
-    pub fdwowner: types_core::Oid,
+    pub fdwowner: ::types_core::Oid,
     /// `fdwhandler` — OID of the handler function, or `InvalidOid`.
-    pub fdwhandler: types_core::Oid,
+    pub fdwhandler: ::types_core::Oid,
     /// `fdwvalidator` — OID of the validator function, or `InvalidOid`.
-    pub fdwvalidator: types_core::Oid,
+    pub fdwvalidator: ::types_core::Oid,
 }
 
 /// Projection of one `pg_foreign_server` row (`catalog/pg_foreign_server.h`)
@@ -206,11 +206,11 @@ pub struct ForeignDataWrapperFormRow<'mcx> {
 #[derive(Debug)]
 pub struct ForeignServerFormRow<'mcx> {
     /// `srvname` — name of the server (`NameStr(serverform->srvname)`).
-    pub srvname: mcx::PgString<'mcx>,
+    pub srvname: ::mcx::PgString<'mcx>,
     /// `srvowner` — owning role OID.
-    pub srvowner: types_core::Oid,
+    pub srvowner: ::types_core::Oid,
     /// `srvfdw` — the server's foreign-data wrapper OID.
-    pub srvfdw: types_core::Oid,
+    pub srvfdw: ::types_core::Oid,
 }
 
 /* ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ pub struct ForeignServerFormRow<'mcx> {
  * an opaque byte blob.
  * ------------------------------------------------------------------------- */
 
-use types_acl::AclItem;
+use ::types_acl::AclItem;
 
 /// `Form_pg_class` ACL/owner fields the table aclmask path reads
 /// (`pg_class_aclmask_ext`, aclchk.c). `relowner` + `relkind` drive aclchk's

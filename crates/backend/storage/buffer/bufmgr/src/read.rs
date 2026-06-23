@@ -42,17 +42,17 @@
 
 #![allow(dead_code)]
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, INVALID_PROC_NUMBER, BLCKSZ,
 };
 use types_error::{PgError, PgResult};
-use rel::Relation;
-use types_storage::buf::{
+use ::rel::Relation;
+use ::types_storage::buf::{
     buftag, IOContext, PgAioWaitRef, BM_TAG_VALID, BM_VALID, BUFFER_LOCK_EXCLUSIVE,
 };
-use types_storage::storage::{LWLockMode, ReadBufferMode};
+use ::types_storage::storage::{LWLockMode, ReadBufferMode};
 use types_storage::{PrefetchBufferResult, RelFileLocator, RelFileLocatorBackend};
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
 
@@ -403,7 +403,7 @@ impl BufferManager {
     pub fn PrefetchSharedBuffer(
         &self,
         rlocator: RelFileLocator,
-        backend: types_core::primitive::ProcNumber,
+        backend: ::types_core::primitive::ProcNumber,
         fork_num: ForkNumber,
         block_num: BlockNumber,
     ) -> PgResult<PrefetchBufferResult> {
@@ -705,7 +705,7 @@ impl BufferManager {
         sb::count_io_op_read::call(
             io_context,
             1,
-            types_core::primitive::BLCKSZ as u64,
+            ::types_core::primitive::BLCKSZ as u64,
         );
 
         // Verify the just-read page before marking it valid: the synchronous form
@@ -715,15 +715,15 @@ impl BufferManager {
         // and raises ERROR (bufmgr.c:7338).
         let verified = self.with_block(buf_id, |bytes| {
             let p = page::PageRef::new(bytes)?;
-            ::page::PageIsVerified(&p, block_num, types_storage::bufpage::PIV_LOG_LOG)
+            ::page::PageIsVerified(&p, block_num, ::types_storage::bufpage::PIV_LOG_LOG)
         })?;
         if !verified.0 {
             let path = relpath_str(rlocator, fork_num);
             if mode == ReadBufferMode::ZeroOnError {
                 // ereport(WARNING): invalid page ... zeroing out page.
                 utils_error::emit_error_report_for(
-                    &utils_error::ereport(types_error::error::WARNING)
-                        .errcode(types_error::error::ERRCODE_DATA_CORRUPTED)
+                    &utils_error::ereport(::types_error::error::WARNING)
+                        .errcode(::types_error::error::ERRCODE_DATA_CORRUPTED)
                         .errmsg_internal(format!(
                             "invalid page in block {block_num} of relation \"{path}\"; zeroing out page"
                         ))
@@ -736,15 +736,15 @@ impl BufferManager {
                 self.terminate_buffer_io(
                     buf_id,
                     false,
-                    types_storage::buf::BM_IO_ERROR,
+                    ::types_storage::buf::BM_IO_ERROR,
                     true,
                     false,
                 )?;
                 return Err(PgError::new(
-                    types_error::error::ERROR,
+                    ::types_error::error::ERROR,
                     format!("invalid page in block {block_num} of relation \"{path}\""),
                 )
-                .with_sqlstate(types_error::error::ERRCODE_DATA_CORRUPTED));
+                .with_sqlstate(::types_error::error::ERRCODE_DATA_CORRUPTED));
             }
         }
 
@@ -792,7 +792,7 @@ impl BufferManager {
         sb::count_io_op_temp::call(
             types_pgstat::activity_pgstat::IOOp::IOOP_READ,
             1,
-            types_core::primitive::BLCKSZ as u64,
+            ::types_core::primitive::BLCKSZ as u64,
         );
 
         // Verify the just-read page (the synchronous form of the RBM
@@ -801,15 +801,15 @@ impl BufferManager {
         let mut verified = (true, false);
         lb::local_buffer_with_page::call(buffer, &mut |bytes: &mut [u8]| {
             let p = page::PageRef::new(bytes)?;
-            verified = ::page::PageIsVerified(&p, block_num, types_storage::bufpage::PIV_LOG_LOG)?;
+            verified = ::page::PageIsVerified(&p, block_num, ::types_storage::bufpage::PIV_LOG_LOG)?;
             Ok(())
         })?;
         if !verified.0 {
             let path = relpath_str(rlocator, fork_num);
             if mode == ReadBufferMode::ZeroOnError {
                 utils_error::emit_error_report_for(
-                    &utils_error::ereport(types_error::error::WARNING)
-                        .errcode(types_error::error::ERRCODE_DATA_CORRUPTED)
+                    &utils_error::ereport(::types_error::error::WARNING)
+                        .errcode(::types_error::error::ERRCODE_DATA_CORRUPTED)
                         .errmsg_internal(format!(
                             "invalid page in block {block_num} of relation \"{path}\"; zeroing out page"
                         ))
@@ -825,13 +825,13 @@ impl BufferManager {
                 lb::terminate_local_buffer_io::call(
                     buffer,
                     false,
-                    types_storage::buf::BM_IO_ERROR,
+                    ::types_storage::buf::BM_IO_ERROR,
                 )?;
                 return Err(PgError::new(
-                    types_error::error::ERROR,
+                    ::types_error::error::ERROR,
                     format!("invalid page in block {block_num} of relation \"{path}\""),
                 )
-                .with_sqlstate(types_error::error::ERRCODE_DATA_CORRUPTED));
+                .with_sqlstate(::types_error::error::ERRCODE_DATA_CORRUPTED));
             }
         }
 
@@ -1342,7 +1342,7 @@ impl BufferManager {
         fork_num: ForkNumber,
         permanent: bool,
     ) -> PgResult<()> {
-        use types_storage::buf::BUFFER_LOCK_SHARE;
+        use ::types_storage::buf::BUFFER_LOCK_SHARE;
 
         // In general, we want to write WAL whenever wal_level > 'minimal', but
         // we can skip it when copying any fork of an unlogged relation other

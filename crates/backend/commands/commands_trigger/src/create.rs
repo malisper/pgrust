@@ -23,16 +23,16 @@
 //! (CONSTRAINT_TRIGGER) via the `create_constraint_entry` seam, then records
 //! the trigger→constraint dependency exactly like an internal constraint trigger.
 
-use mcx::Mcx;
-use types_acl::acl::{ACL_EXECUTE, ACL_TRIGGER, ACLCHECK_OK};
-use types_catalog::catalog_dependency::{
+use ::mcx::Mcx;
+use ::types_acl::acl::{ACL_EXECUTE, ACL_TRIGGER, ACLCHECK_OK};
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
     DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
 };
-use types_catalog::pg_trigger as pt;
-use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
-use types_core::Oid;
-use utils_error::ereport;
+use ::types_catalog::pg_trigger as pt;
+use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
+use ::types_core::Oid;
+use ::utils_error::ereport;
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_WRONG_OBJECT_TYPE,
@@ -41,19 +41,19 @@ use types_error::{
 use ::nodes::ddlnodes::CreateTrigStmt;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::OBJECT_FUNCTION;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_tuple::access::{
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
 };
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use aclchk_seams as aclchk;
 use indexing_seams as indexing;
 use pg_depend::{deleteDependencyRecordsFor, recordDependencyOn};
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 
 const InvalidOid: Oid = 0;
 /// `TRIGGEROID` (pg_type.h) — the `trigger` pseudo-type OID.
@@ -448,7 +448,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
         let attnum = parser_relation::attnameAttNum(&rel, &name, false)?;
         if attnum == 0 {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_UNDEFINED_COLUMN)
+                .errcode(::types_error::ERRCODE_UNDEFINED_COLUMN)
                 .errmsg(format!(
                     "column \"{name}\" of relation \"{relname}\" does not exist"
                 ))
@@ -457,7 +457,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
         let attnum = attnum as i16;
         if columns.contains(&attnum) {
             return Err(ereport(ERROR)
-                .errcode(types_error::ERRCODE_DUPLICATE_COLUMN)
+                .errcode(::types_error::ERRCODE_DUPLICATE_COLUMN)
                 .errmsg(format!("column \"{name}\" specified more than once"))
                 .into_error());
         }
@@ -614,7 +614,7 @@ pub fn CreateTriggerFiringOn<'mcx>(
             // Initialize our fabricated parse node by copying the original one,
             // then resetting fields that we pass separately.
             let mut child_stmt = stmt.clone_in(mcx)?;
-            child_stmt.funcname = mcx::PgVec::new_in(mcx);
+            child_stmt.funcname = ::mcx::PgVec::new_in(mcx);
             child_stmt.whenClause = None;
 
             // If there is a WHEN clause, create a modified copy of it.
@@ -662,7 +662,7 @@ fn map_when_to_partition<'mcx>(
 
     // map_partition_varattnos walks any node tree; wrap the single qual node in a
     // one-element list, map OLD then NEW varnos, and unwrap.
-    let mut exprs: mcx::PgVec<'mcx, Node<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut exprs: ::mcx::PgVec<'mcx, Node<'mcx>> = ::mcx::PgVec::new_in(mcx);
     exprs.push(node.clone_in(mcx)?);
     let exprs = partition_seams::map_partition_varattnos::call(
         mcx,
@@ -695,7 +695,7 @@ struct WhenTransform<'mcx> {
     when_clause: Option<Node<'mcx>>,
     /// `pstate->p_rtable` (the OLD/NEW RTEs) — needed by
     /// `recordDependencyOnExpr`. Empty when there is no WHEN clause.
-    when_rtable: mcx::PgVec<'mcx, ::nodes::parsenodes::RangeTblEntry<'mcx>>,
+    when_rtable: ::mcx::PgVec<'mcx, ::nodes::parsenodes::RangeTblEntry<'mcx>>,
 }
 
 /// `make_old_new_alias(name)` — an `Alias` with just `aliasname` set, for the
@@ -705,8 +705,8 @@ fn make_old_new_alias<'mcx>(
     name: &str,
 ) -> PgResult<::nodes::rawnodes::Alias<'mcx>> {
     Ok(::nodes::rawnodes::Alias {
-        aliasname: Some(mcx::PgString::from_str_in(name, mcx)?),
-        colnames: mcx::PgVec::new_in(mcx),
+        aliasname: Some(::mcx::PgString::from_str_in(name, mcx)?),
+        colnames: ::mcx::PgVec::new_in(mcx),
     })
 }
 
@@ -918,7 +918,7 @@ fn transform_trigger_when<'mcx>(
             None => Ok(WhenTransform {
                 qual: None,
                 when_clause: None,
-                when_rtable: mcx::PgVec::new_in(mcx),
+                when_rtable: ::mcx::PgVec::new_in(mcx),
             }),
             Some(node) => {
                 let qual = outfuncs::nodeToString(mcx, &node)?
@@ -927,7 +927,7 @@ fn transform_trigger_when<'mcx>(
                 Ok(WhenTransform {
                     qual: Some(qual),
                     when_clause: Some(node),
-                    when_rtable: mcx::PgVec::new_in(mcx),
+                    when_rtable: ::mcx::PgVec::new_in(mcx),
                 })
             }
         };
@@ -935,7 +935,7 @@ fn transform_trigger_when<'mcx>(
 
     // Set up a pstate to parse with.
     let mut pstate = small1::make_parsestate(mcx, None)?;
-    pstate.p_sourcetext = Some(mcx::PgString::from_str_in(query_string, mcx)?);
+    pstate.p_sourcetext = Some(::mcx::PgString::from_str_in(query_string, mcx)?);
 
     // Set up nsitems for OLD and NEW references.
     // 'OLD' must always have varno equal to 1 and 'NEW' equal to 2.
@@ -987,7 +987,7 @@ fn transform_trigger_when<'mcx>(
             return Ok(WhenTransform {
                 qual: None,
                 when_clause: None,
-                when_rtable: core::mem::replace(&mut pstate.p_rtable, mcx::PgVec::new_in(mcx)),
+                when_rtable: core::mem::replace(&mut pstate.p_rtable, ::mcx::PgVec::new_in(mcx)),
             })
         }
     };
@@ -1088,7 +1088,7 @@ fn transform_trigger_when<'mcx>(
     }
 
     // we'll need the rtable for recordDependencyOnExpr
-    let when_rtable = core::mem::replace(&mut pstate.p_rtable, mcx::PgVec::new_in(mcx));
+    let when_rtable = core::mem::replace(&mut pstate.p_rtable, ::mcx::PgVec::new_in(mcx));
     let qual = outfuncs::nodeToString(mcx, &when_node)?
         .as_str()
         .to_string();
@@ -1136,10 +1136,10 @@ fn feature_err(msg: &str) -> PgResult<ObjectAddress> {
 }
 
 /// Convert an owned-tree `rawnodes::RangeVar` to the resolved
-/// `types_tuple::access::RangeVar` that `RangeVarGetRelid` consumes (precedent:
+/// `::types_tuple::access::RangeVar` that `RangeVarGetRelid` consumes (precedent:
 /// policy.c's `to_access_range_var`).
-fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),
         relname: rv.relname.as_deref().unwrap_or("").into(),
@@ -1181,7 +1181,7 @@ fn scan_existing_trigger<'mcx>(
         pt::Anum_pg_trigger_tgname,
         BTEqualStrategyNumber,
         F_NAMEEQ,
-        Datum::ByRef(mcx::slice_in(mcx, trigname.as_bytes())?),
+        Datum::ByRef(::mcx::slice_in(mcx, trigname.as_bytes())?),
     )?;
     let keys = [k0, k1];
 
@@ -1217,11 +1217,11 @@ fn node_strval(node: &Node<'_>) -> PgResult<String> {
 fn funcname_strings<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateTrigStmt<'_>,
-) -> PgResult<Vec<mcx::PgString<'mcx>>> {
+) -> PgResult<Vec<::mcx::PgString<'mcx>>> {
     let mut out = Vec::new();
     for n in stmt.funcname.iter() {
         let s = node_strval(n)?;
-        out.push(mcx::PgString::from_str_in(&s, mcx)?);
+        out.push(::mcx::PgString::from_str_in(&s, mcx)?);
     }
     Ok(out)
 }
@@ -1258,7 +1258,7 @@ pub fn init_seams() {
                 false,
                 false,
             ),
-            None => Err(types_error::PgError::error(
+            None => Err(::types_error::PgError::error(
                 "create_trigger: parse tree is not a CreateTrigStmt",
             )),
         },
@@ -1268,7 +1268,7 @@ pub fn init_seams() {
     // CreateTrigger call (the FK / deferrable PK-UNIQUE recheck trigger).
     trigger_seams::create_unique_key_recheck_trigger::set(
         |rel_oid, constraint_oid, index_oid, is_primary, initdeferred| {
-            let ctx = mcx::MemoryContext::new("create_unique_key_recheck_trigger");
+            let ctx = ::mcx::MemoryContext::new("create_unique_key_recheck_trigger");
             let mcx = ctx.mcx();
 
             // Build the fixed CreateTrigStmt index.c fabricates.
@@ -1280,16 +1280,16 @@ pub fn init_seams() {
             let stmt = CreateTrigStmt {
                 replace: false,
                 isconstraint: true,
-                trigname: Some(mcx::PgString::from_str_in(trigname, mcx)?),
+                trigname: Some(::mcx::PgString::from_str_in(trigname, mcx)?),
                 relation: None,
-                funcname: mcx::PgVec::new_in(mcx),
-                args: mcx::PgVec::new_in(mcx),
+                funcname: ::mcx::PgVec::new_in(mcx),
+                args: ::mcx::PgVec::new_in(mcx),
                 row: true,
                 timing: pt::TRIGGER_TYPE_AFTER,
                 events: pt::TRIGGER_TYPE_INSERT | pt::TRIGGER_TYPE_UPDATE,
-                columns: mcx::PgVec::new_in(mcx),
+                columns: ::mcx::PgVec::new_in(mcx),
                 whenClause: None,
-                transitionRels: mcx::PgVec::new_in(mcx),
+                transitionRels: ::mcx::PgVec::new_in(mcx),
                 deferrable: true,
                 initdeferred,
                 constrrel: None,

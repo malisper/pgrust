@@ -4,9 +4,9 @@
 use alloc::vec::Vec;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
-use tsearch::tsearch::{
+use ::tsearch::tsearch::{
     QueryItem, QueryOperand, QueryOperator, HDRSIZETQ, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_OPR,
     QI_VAL,
 };
@@ -14,7 +14,7 @@ use tsearch::tsearch::{
 use postgres_seams as tcop;
 
 /// `MaxAllocSize` (`memutils.h`).
-const MAX_ALLOC_SIZE: usize = mcx::MAX_ALLOC_SIZE;
+const MAX_ALLOC_SIZE: usize = ::mcx::MAX_ALLOC_SIZE;
 
 /// `sizeof(QueryItem)` — the on-disk ABI record size (12 bytes).
 pub const QI_SIZE: usize = 12;
@@ -22,10 +22,10 @@ pub const QI_SIZE: usize = 12;
 /// Out-of-memory error for a guarded, data-derived allocation.
 pub fn oom() -> PgError {
     PgError::new(
-        types_error::ERROR,
+        ::types_error::ERROR,
         "out of memory",
     )
-    .with_sqlstate(types_error::ERRCODE_OUT_OF_MEMORY)
+    .with_sqlstate(::types_error::ERRCODE_OUT_OF_MEMORY)
 }
 
 /// `query->size` — the number of [`QueryItem`]s.
@@ -214,7 +214,7 @@ impl<'mcx> QTNode<'mcx> {
             // exactly the `len` operand bytes (no embedded NUL).
             let len = operand_length(&self.valnode) as usize;
             if len > 0 {
-                word = mcx::slice_in(mcx, &self.word[..len]).map_err(|_| oom())?;
+                word = ::mcx::slice_in(mcx, &self.word[..len]).map_err(|_| oom())?;
             }
             flags |= QTN_WORDFREE;
         } else {
@@ -319,7 +319,7 @@ fn qt2qtn_inner<'mcx>(
         let dist = operand_distance(&node.valnode) as usize;
         let len = operand_length(&node.valnode) as usize;
         // node->word = operand + in->qoperand.distance;
-        node.word = mcx::slice_in(mcx, &operand[dist..dist + len]).map_err(|_| oom())?;
+        node.word = ::mcx::slice_in(mcx, &operand[dist..dist + len]).map_err(|_| oom())?;
         // node->sign = ((uint32) 1) << (((unsigned int) valcrc) % 32);
         node.sign = 1u32 << ((operand_valcrc(&node.valnode) as u32) % 32);
     }

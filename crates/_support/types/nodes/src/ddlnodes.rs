@@ -20,8 +20,8 @@
 #![allow(non_snake_case)]
 
 use mcx::{Mcx, PgString, PgVec};
-use types_core::primitive::{AttrNumber, Oid, ParseLoc, RelFileNumber};
-use types_error::PgResult;
+use ::types_core::primitive::{AttrNumber, Oid, ParseLoc, RelFileNumber};
+use ::types_error::PgResult;
 
 use crate::nodes::NodePtr;
 use crate::parsenodes::{DropBehavior, ObjectType, RoleSpecType};
@@ -2985,14 +2985,14 @@ impl CreateForeignServerStmt<'_> {
 /// `CreateForeignTableStmt` (`nodes/parsenodes.h`) — CREATE FOREIGN TABLE.
 #[derive(Debug)]
 pub struct CreateForeignTableStmt<'mcx> {
-    pub base: mcx::PgBox<'mcx, CreateStmt<'mcx>>,
+    pub base: ::mcx::PgBox<'mcx, CreateStmt<'mcx>>,
     pub servername: Option<PgString<'mcx>>,
     pub options: PgVec<'mcx, NodePtr<'mcx>>,
 }
 impl CreateForeignTableStmt<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<CreateForeignTableStmt<'b>> {
         Ok(CreateForeignTableStmt {
-            base: mcx::alloc_in(mcx, self.base.clone_in(mcx)?)?,
+            base: ::mcx::alloc_in(mcx, self.base.clone_in(mcx)?)?,
             servername: copy_opt_str(&self.servername, mcx)?,
             options: copy_node_vec(&self.options, mcx)?,
         })
@@ -3105,13 +3105,13 @@ impl PublicationTable<'_> {
 pub struct PublicationObjSpec<'mcx> {
     pub pubobjtype: PublicationObjSpecType,
     pub name: Option<PgString<'mcx>>,
-    pub pubtable: Option<mcx::PgBox<'mcx, PublicationTable<'mcx>>>,
+    pub pubtable: Option<::mcx::PgBox<'mcx, PublicationTable<'mcx>>>,
     pub location: ParseLoc,
 }
 impl PublicationObjSpec<'_> {
     pub fn clone_in<'b>(&self, mcx: Mcx<'b>) -> PgResult<PublicationObjSpec<'b>> {
         let pubtable = match &self.pubtable {
-            Some(t) => Some(mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
+            Some(t) => Some(::mcx::alloc_in(mcx, t.clone_in(mcx)?)?),
             None => None,
         };
         Ok(PublicationObjSpec {

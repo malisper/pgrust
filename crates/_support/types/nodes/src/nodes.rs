@@ -5,7 +5,7 @@
 //! is this enum. Variants are added as the nodes' executor units are ported.
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 /// `NodeTag` (nodes/nodes.h) — the generated node-type enumeration. Node
 /// *identity* in the owned model is the dispatch enums' variants
@@ -593,7 +593,7 @@ mod node_accessor_tests {
     //! accessors and `ntag` consts over the opaque `Node`.
     use super::Node;
     use crate::nodes::ntag;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     #[test]
     fn expr_routed_accessor_const() {

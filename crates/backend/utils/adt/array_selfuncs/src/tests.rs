@@ -8,7 +8,7 @@
 use super::*;
 use std::sync::{Mutex, MutexGuard, Once};
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 static SEAM_LOCK: Mutex<()> = Mutex::new(());
 

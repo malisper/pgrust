@@ -19,9 +19,9 @@
 //! seams-init's `CONTRACT_RECONCILE_PENDING`. Every signature is lifetime-free
 //! over the arena handles, mirroring the C call exactly.
 
-use types_core::primitive::{Index, Oid};
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::types_core::primitive::{Index, Oid};
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PathId, PlannerInfo, RelId};
 
 seam_core::seam!(
@@ -94,7 +94,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &PlannerInfo,
         rti: Index,
-    ) -> types_error::PgResult<bool>
+    ) -> ::types_error::PgResult<bool>
 );
 
 // NOTE: the per-RTE / per-rel `is_parallel_safe` checks

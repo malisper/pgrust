@@ -3,7 +3,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `superuser()` (superuser.c): is the current session user a superuser?

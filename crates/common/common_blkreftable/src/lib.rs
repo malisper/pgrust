@@ -56,12 +56,12 @@ use types_blkreftable::{
 // Re-export the read-callback alias (defined in the carrier crate) as part of
 // this owner's public `create_block_ref_table_reader` API, so callers that only
 // depend on the owner can name it.
-pub use types_blkreftable::ReadCallback;
+pub use ::types_blkreftable::ReadCallback;
 use types_core::{
     uint16, uint32, BlockNumber, ForkNumber, InvalidBlockNumber, BITS_PER_BYTE,
 };
 use types_error::{PgError, PgResult};
-use types_storage::RelFileLocator;
+use ::types_storage::RelFileLocator;
 
 // ---------------------------------------------------------------------------
 // Constants (blkreftable.c).
@@ -661,7 +661,7 @@ pub fn block_ref_table_get_entry_blocks<'mcx>(
     match result {
         None => Ok(None),
         Some((limit_block, blocks)) => {
-            let mut out = mcx::vec_with_capacity_in(mcx, blocks.len())?;
+            let mut out = ::mcx::vec_with_capacity_in(mcx, blocks.len())?;
             out.extend_from_slice(&blocks);
             Ok(Some((limit_block, out)))
         }
@@ -703,7 +703,7 @@ pub fn write_block_ref_table<'mcx>(
     buffer.terminate();
 
     // Hand the serialized bytes back, allocated in mcx.
-    let mut out = mcx::vec_with_capacity_in(mcx, buffer.out.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, buffer.out.len())?;
     out.extend_from_slice(&buffer.out);
     Ok(out)
 }
@@ -895,7 +895,7 @@ pub fn block_ref_table_reader_get_blocks<'mcx>(
         reader.chunk_position = 0;
     }
 
-    let mut out = mcx::vec_with_capacity_in(mcx, blocks.len())?;
+    let mut out = ::mcx::vec_with_capacity_in(mcx, blocks.len())?;
     out.extend_from_slice(&blocks);
     Ok(out)
 }
@@ -1076,7 +1076,7 @@ mod tests {
         assert_eq!(got_fork, ForkNumber::MAIN_FORKNUM);
 
         // Drain blocks in small batches to exercise chunk_position resumption.
-        let mcx_ctx = mcx::MemoryContext::new("t");
+        let mcx_ctx = ::mcx::MemoryContext::new("t");
         let mut got: Vec<BlockNumber> = Vec::new();
         loop {
             let batch =

@@ -19,9 +19,9 @@
 //! ([`crate::index`]); the build family owns `RelationBuildDesc`.
 
 use utils_error::{elog, PgResult};
-use types_core::xact::{InvalidSubTransactionId, SubTransactionId};
-use types_core::primitive::Oid;
-use types_error::WARNING;
+use ::types_core::xact::{InvalidSubTransactionId, SubTransactionId};
+use ::types_core::primitive::Oid;
+use ::types_error::WARNING;
 
 use crate::core_entry_store::{
     self, cache_delete, cache_find_reldesc, cache_lookup, cache_seq_reldescs, with_rel,
@@ -42,7 +42,7 @@ const RELKIND_RELATION: i8 = b'r' as i8;
  * panic"). They are NOT own logic and are NOT stubbed silently.
  * ======================================================================== */
 mod xunit {
-    use utils_error::PgResult;
+    use ::utils_error::PgResult;
 
     /// `RelationMapInvalidateAll()` (relmapper.c) — reload the relation map.
     /// C reloads both the shared and local maps (`RelationMapInvalidate(true)`
@@ -66,7 +66,7 @@ mod xunit {
     /// handle. The smgr layer is a genuine cross-unit owner; the entry holds no
     /// `rd_smgr` field in the owned mirror, so this routes the relation's
     /// `RelFileLocatorBackend` to its owner (panics until smgr lands).
-    pub(super) fn relation_close_smgr(relation: types_core::primitive::Oid) {
+    pub(super) fn relation_close_smgr(relation: ::types_core::primitive::Oid) {
         let rlocator = crate::core_entry_store::with_rel(relation, |rd| {
             types_storage::RelFileLocatorBackend {
                 locator: rd.rd_locator,
@@ -87,7 +87,7 @@ mod xunit {
     }
 
     /// `GetCurrentSubTransactionId()` (xact.c).
-    pub(super) fn get_current_sub_transaction_id() -> types_core::xact::SubTransactionId {
+    pub(super) fn get_current_sub_transaction_id() -> ::types_core::xact::SubTransactionId {
         transam_xact_seams::get_current_sub_transaction_id::call()
     }
 }
@@ -235,7 +235,7 @@ pub fn RelationRebuildRelation(relation: Oid) -> PgResult<()> {
     // Between here and the end of the swap, don't do anything that could read
     // system catalogs (it must be free from invalidation processing).
 
-    if newrel_built == types_core::InvalidOid {
+    if newrel_built == ::types_core::InvalidOid {
         // We can validly get here if using a historic snapshot in which the
         // relation is still invisible; just leave it invalid and return.
         if xunit::historic_snapshot_active() {
@@ -622,12 +622,12 @@ fn relation_is_mapped(rd: &RelationData) -> bool {
         || relkind == (b'S' as i8) // RELKIND_SEQUENCE
         || relkind == (b't' as i8) // RELKIND_TOASTVALUE
         || relkind == (b'm' as i8); // RELKIND_MATVIEW
-    has_storage && rd.rd_rel.relfilenode == types_core::primitive::InvalidRelFileNumber
+    has_storage && rd.rd_rel.relfilenode == ::types_core::primitive::InvalidRelFileNumber
 }
 
 /// `elog(ERROR, "relation %u deleted while still in use", relid)`.
 fn elog_relation_deleted_in_use(relid: Oid) -> PgResult<()> {
-    Err(utils_error::ereport(types_error::ERROR)
+    Err(::utils_error::ereport(::types_error::ERROR)
         .errmsg_internal(format!("relation {relid} deleted while still in use"))
         .into_error())
 }
@@ -703,7 +703,7 @@ pub fn RelationForgetRelation(rid: Oid) -> PgResult<()> {
     });
 
     if refcnt_nonzero {
-        return Err(utils_error::ereport(types_error::ERROR)
+        return Err(::utils_error::ereport(::types_error::ERROR)
             .errmsg_internal(format!("relation {rid} is still open"))
             .into_error());
     }

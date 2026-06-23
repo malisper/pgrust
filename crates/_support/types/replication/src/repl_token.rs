@@ -12,7 +12,7 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_core::primitive::XLogRecPtr;
+use ::types_core::primitive::XLogRecPtr;
 
 /// A lexed replication-command token. Mirrors `replication_yylex()`'s `int`
 /// token code together with the matching `yylval` union member.

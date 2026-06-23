@@ -4,7 +4,7 @@
 //!
 //! # Why these are seams (the RTE/Query field-projection keystone)
 //!
-//! Architecturally [`pathnodes::PlannerInfo`] is `#![no_std]`,
+//! Architecturally [`::pathnodes::PlannerInfo`] is `#![no_std]`,
 //! lifetime-free, and `#[derive(Default)]`. It must stay that way: the planner
 //! threads it everywhere and giving it an `'mcx` lifetime (or an inline RTE
 //! arena) would force the lifetime through the entire optimizer. The real
@@ -16,14 +16,14 @@
 //! So the optimizer cannot dereference `root->simple_rte_array[rti]->field`
 //! directly the way C does — there is no value behind the handle inside this
 //! lifetime-free struct. The real `'mcx`-bound RTE values live in the
-//! planner-run resolver ([`pathnodes::planner_run::PlannerRun`], the #264
+//! planner-run resolver ([`::pathnodes::planner_run::PlannerRun`], the #264
 //! resolver), keyed by the `RangeTblEntryId` handles in `simple_rte_array`.
 //! Each field read therefore crosses a seam that threads the resolver as its
 //! first parameter:
 //! `for<'mcx> fn(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> T`
 //! where `T` is a `Copy` scalar, an owned `String`, a length, or another opaque
 //! handle ([`QueryId`]). The seam resolves the handle through
-//! [`planner_rt_fetch`](pathnodes::planner_run::planner_rt_fetch)`(run,
+//! [`planner_rt_fetch`](::pathnodes::planner_run::planner_rt_fetch)`(run,
 //! root, rti)` and projects the field.
 //!
 //! Nothing returns a borrowed or `'mcx`-owned subtree (only `Copy` scalars,
@@ -68,8 +68,8 @@
 //! [`synthetic::install_synthetic_rte_table`]; it installs the same seams
 //! against an in-memory RT-index space (the `run` parameter is ignored there).
 
-use types_core::primitive::Index;
-use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use ::types_core::primitive::Index;
+use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{JoinType, PlannerInfo, QueryId, RTEKind};
 
 /* ======================================================================
@@ -93,7 +93,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `root->simple_rte_array[rti]->relid` — the relation OID
     /// (allpaths.c / relnode.c).
-    pub fn rte_relid<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> types_core::primitive::Oid
+    pub fn rte_relid<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> ::types_core::primitive::Oid
 );
 seam_core::seam!(
     /// `root->simple_rte_array[rti]->inh` — inheritance requested?
@@ -111,7 +111,7 @@ seam_core::seam!(
     /// access as, or `InvalidOid` when the RTE has no permission info
     /// (`perminfoindex == 0`). `build_simple_rel` (relnode.c) reads this for the
     /// base relation's `rel->userid`.
-    pub fn rte_perminfo_checkasuser<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> types_core::primitive::Oid
+    pub fn rte_perminfo_checkasuser<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> ::types_core::primitive::Oid
 );
 seam_core::seam!(
     /// `root->simple_rte_array[rti]->subquery` (allpaths.c `set_subquery_pathlist`):
@@ -172,7 +172,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &PlannerInfo,
         rti: Index,
-    ) -> types_core::primitive::Oid
+    ) -> ::types_core::primitive::Oid
 );
 seam_core::seam!(
     /// `root->simple_rte_array[rti]->tablesample->args` — the TABLESAMPLE
@@ -235,7 +235,7 @@ seam_core::seam!(
     /// an opaque [`RangeTblEntryId`] handle. Equivalent to indexing
     /// `root->simple_rte_array[rti]` once the array is built; setrefs.c reads the
     /// flat `parse->rtable` list directly while flattening.
-    pub fn parse_rte<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> pathnodes::RangeTblEntryId
+    pub fn parse_rte<'mcx>(run: &PlannerRun<'mcx>, root: &PlannerInfo, rti: Index) -> ::pathnodes::RangeTblEntryId
 );
 seam_core::seam!(
     /// `list_length(root->parse->rteperminfos)` — number of `RTEPermissionInfo`
@@ -279,7 +279,7 @@ pub fn init_seams() {
     // treats as a signal to punt (return None here so the caller emits an empty
     // physical tlist). RESULT/GROUP expose no columns, so coltypes is empty and the
     // result is an empty Var list.
-    plancat_ext_seams::expand_rte_physical_tlist::set(|run, root, rti| {
+    ::plancat_ext_seams::expand_rte_physical_tlist::set(|run, root, rti| {
         // A function RTE's output columns are NOT in `rte->coltypes` (that field
         // is populated only for VALUES/CTE/TABLEFUNC/NAMEDTUPLESTORE). C's
         // expandRTE derives them from `rte->functions` via get_expr_result_type,
@@ -291,7 +291,7 @@ pub fn init_seams() {
             let rte = planner_rt_fetch(run, root, rti);
             if rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_FUNCTION {
                 Some(
-                    plancat_ext_seams::expand_function_rte_colvars::call(
+                    ::plancat_ext_seams::expand_function_rte_colvars::call(
                         run.mcx(),
                         rte,
                         rti,
@@ -304,8 +304,8 @@ pub fn init_seams() {
         if let Some(colvars) = colvars {
             return Ok(colvars.map(|vals| {
                 vals.into_iter()
-                    .map(|v| root.alloc_node(pathnodes::Expr::Var(v)))
-                    .collect::<alloc::vec::Vec<pathnodes::NodeId>>()
+                    .map(|v| root.alloc_node(::pathnodes::Expr::Var(v)))
+                    .collect::<alloc::vec::Vec<::pathnodes::NodeId>>()
             }));
         }
 
@@ -320,7 +320,7 @@ pub fn init_seams() {
             )
         };
 
-        let mut vars: alloc::vec::Vec<pathnodes::NodeId> = alloc::vec::Vec::new();
+        let mut vars: alloc::vec::Vec<::pathnodes::NodeId> = alloc::vec::Vec::new();
         let mut varattno: i32 = 0;
         for i in 0..coltypes.len() {
             let coltype = coltypes[i];
@@ -328,12 +328,12 @@ pub fn init_seams() {
             // OidIsValid(coltype): an invalid type is a dropped column, which
             // expandRTE emits as a NULL Const (a non-Var) → build_physical_tlist
             // punts on the whole rel.
-            if coltype == types_core::primitive::Oid::default() {
+            if coltype == ::types_core::primitive::Oid::default() {
                 return Ok(None);
             }
             let var = ::nodes::primnodes::Var {
                 varno: rti as i32,
-                varattno: varattno as types_core::primitive::AttrNumber,
+                varattno: varattno as ::types_core::primitive::AttrNumber,
                 vartype: coltype,
                 vartypmod: coltypmods[i],
                 varcollid: colcollations[i],
@@ -341,7 +341,7 @@ pub fn init_seams() {
                 location: -1,
                 ..Default::default()
             };
-            vars.push(root.alloc_node(pathnodes::Expr::Var(var)));
+            vars.push(root.alloc_node(::pathnodes::Expr::Var(var)));
         }
         Ok(Some(vars))
     });
@@ -360,12 +360,12 @@ pub fn init_seams() {
     // column. Note: unlike convert_*_sublink_to_join's generate_subquery_vars,
     // build_physical_tlist does NOT skip resjunk entries — it preserves resno
     // and resjunk so the physical tlist matches the subquery's output exactly.
-    plancat_ext_seams::subquery_physical_tlist::set(|run, root, rti| {
+    ::plancat_ext_seams::subquery_physical_tlist::set(|run, root, rti| {
         // Build the Var values while borrowing the RTE's inline subquery, then
         // drop that borrow before allocating into root's node arena.
         let vars: alloc::vec::Vec<(
             ::nodes::primnodes::Var,
-            types_core::primitive::AttrNumber,
+            ::types_core::primitive::AttrNumber,
             bool,
         )> = {
             let rte = planner_rt_fetch(run, root, rti);
@@ -386,13 +386,13 @@ pub fn init_seams() {
         };
 
         let mut out: alloc::vec::Vec<(
-            pathnodes::NodeId,
-            types_core::primitive::AttrNumber,
+            ::pathnodes::NodeId,
+            ::types_core::primitive::AttrNumber,
             bool,
         )> =
             alloc::vec::Vec::with_capacity(vars.len());
         for (var, resno, resjunk) in vars.into_iter() {
-            let vid = root.alloc_node(pathnodes::Expr::Var(var));
+            let vid = root.alloc_node(::pathnodes::Expr::Var(var));
             out.push((vid, resno, resjunk));
         }
         Ok(out)
@@ -458,7 +458,7 @@ pub fn init_seams() {
         // rte->perminfoindex - 1). perminfoindex == 0 ⇒ no permission info.
         let perminfoindex = planner_rt_fetch(run, root, rti).perminfoindex;
         if perminfoindex == 0 {
-            return types_core::primitive::Oid::default(); // InvalidOid
+            return ::types_core::primitive::Oid::default(); // InvalidOid
         }
         run.resolve(root.parse).rteperminfos[(perminfoindex - 1) as usize].checkAsUser
     });
@@ -482,7 +482,7 @@ pub fn init_seams() {
             .and_then(|n| n.as_tablesampleclause())
         {
             Some(tsc) => tsc.tsmhandler,
-            _ => types_core::primitive::Oid::default(),
+            _ => ::types_core::primitive::Oid::default(),
         }
     });
     rte_tablesample_args::set(|run, root, rti| {
@@ -553,7 +553,7 @@ pub fn init_seams() {
             .and_then(|n| n.as_tablesampleclause())
         {
             Some(tsc) => tsc.tsmhandler,
-            _ => types_core::primitive::Oid::default(),
+            _ => ::types_core::primitive::Oid::default(),
         }
     });
 
@@ -565,7 +565,7 @@ pub fn init_seams() {
     // OID 3313) leaves it NULL (sequential). Any other handler defaults to
     // sequential (false).
     costsize_seams::tsm_uses_random_access::set(|tsmhandler| {
-        const F_TSM_SYSTEM_HANDLER: types_core::primitive::Oid = 3314;
+        const F_TSM_SYSTEM_HANDLER: ::types_core::primitive::Oid = 3314;
         tsmhandler == F_TSM_SYSTEM_HANDLER
     });
 
@@ -672,26 +672,26 @@ pub fn init_seams() {
     // `root->parse->resultRelation` (plancat.c get_relation_foreign_keys,
     // analyzejoins.c remove_useless_self_joins). 0 for a non-DML query.
     // Resolved through the run store the same way the rte_* projections are.
-    plancat_ext_seams::parse_result_relation::set(|run, root| {
+    ::plancat_ext_seams::parse_result_relation::set(|run, root| {
         run.resolve(root.parse).resultRelation
     });
 
     // `root->simple_rte_array[varno]->rellockmode` (infer_arbiter_indexes) —
     // resolved through the same `planner_rt_fetch` RTE store as the other rte_*
     // projections. The field is `LOCKMODE` (i32).
-    plancat_ext_seams::rte_rellockmode::set(|run, root, rti| {
+    ::plancat_ext_seams::rte_rellockmode::set(|run, root, rti| {
         planner_rt_fetch(run, root, rti).rellockmode as i32
     });
 
     // `root->parse->onConflict` (infer_arbiter_indexes). Resolves the owned
     // `OnConflictExpr` and interns its arbiter sub-trees into `root`'s node arena
     // (the consumer reads `elem.expr` / `arbiter_where` via `root.node(..)`).
-    plancat_ext_seams::parse_onconflict::set(parse_onconflict);
+    ::plancat_ext_seams::parse_onconflict::set(parse_onconflict);
 
     // `equal(a, b)` over two arena node handles (infer_arbiter_indexes' index-
     // expression membership tests). Resolve both handles through `root`'s arena
     // and delegate to equalfuncs' `equal_expr`.
-    plancat_ext_seams::node_equal::set(|root, a, b| {
+    ::plancat_ext_seams::node_equal::set(|root, a, b| {
         equalfuncs_seams::equal_expr::call(root.node(a), root.node(b))
     });
 
@@ -709,7 +709,7 @@ fn parse_onconflict<'mcx>(
     run: &PlannerRun<'mcx>,
     root: &mut PlannerInfo,
 ) -> types_error::PgResult<
-    Option<plancat_ext_seams::OnConflictInfo>,
+    Option<::plancat_ext_seams::OnConflictInfo>,
 > {
     use plancat_ext_seams::{InferenceElemInfo, OnConflictInfo};
     use ::nodes::primnodes::Expr;
@@ -719,7 +719,7 @@ fn parse_onconflict<'mcx>(
     // Snapshot the parts we need out of the owned OnConflictExpr (an immutable
     // borrow of the run store); the arena interning below borrows `root` mutably,
     // so collect the cloned Exprs / collation/opclass scalars first.
-    let snapshot: Option<(Vec<(Expr, types_core::primitive::Oid, types_core::primitive::Oid)>, Vec<Expr>, types_core::primitive::Oid, bool)> = {
+    let snapshot: Option<(Vec<(Expr, ::types_core::primitive::Oid, ::types_core::primitive::Oid)>, Vec<Expr>, ::types_core::primitive::Oid, bool)> = {
         let parse = run.resolve(root.parse);
         match parse.onConflict.as_deref() {
             None => None,
@@ -727,7 +727,7 @@ fn parse_onconflict<'mcx>(
                 // Each arbiterElem is an InferenceElem wrapping the inference
                 // expression; clone the inner Expr (the Var / expression the loop
                 // examines) plus its collation/opclass.
-                let mut elems: Vec<(Expr, types_core::primitive::Oid, types_core::primitive::Oid)> =
+                let mut elems: Vec<(Expr, ::types_core::primitive::Oid, ::types_core::primitive::Oid)> =
                     Vec::with_capacity(oc.arbiterElems.len());
                 for np in oc.arbiterElems.iter() {
                     let infer = match (&**np).as_inferenceelem() {
@@ -786,7 +786,7 @@ fn parse_onconflict<'mcx>(
             inferopclass,
         })
         .collect();
-    let arbiter_where: Vec<pathnodes::NodeId> = arbiter_where
+    let arbiter_where: Vec<::pathnodes::NodeId> = arbiter_where
         .into_iter()
         .map(|e| root.alloc_node(e))
         .collect();

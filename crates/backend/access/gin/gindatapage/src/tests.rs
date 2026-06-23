@@ -1,9 +1,9 @@
 //! Tests for the GIN page-byte substrate.
 
 use super::*;
-use types_core::primitive::BLCKSZ;
+use ::types_core::primitive::BLCKSZ;
 use gin::{GIN_DATA, GIN_LEAF, GIN_META};
-use types_tuple::heaptuple::{BlockIdData, IndexTupleData, ItemPointerData};
+use ::types_tuple::heaptuple::{BlockIdData, IndexTupleData, ItemPointerData};
 
 fn fresh_data_leaf_page() -> Vec<u8> {
     let mut page = vec![0u8; BLCKSZ];
@@ -211,15 +211,15 @@ fn category_offset_and_roundtrip() {
     assert_eq!(GinCategoryOffset(&itup, false), 10);
 
     let mut bytes = vec![0u8; 16];
-    GinSetNullCategory(&itup, &mut bytes, true, gin::GIN_CAT_NULL_KEY);
+    GinSetNullCategory(&itup, &mut bytes, true, ::gin::GIN_CAT_NULL_KEY);
     assert_eq!(
         GinGetNullCategory(&itup, &bytes, true),
-        gin::GIN_CAT_NULL_KEY
+        ::gin::GIN_CAT_NULL_KEY
     );
 
-    GinSetNullCategory(&itup, &mut bytes, false, gin::GIN_CAT_EMPTY_QUERY);
+    GinSetNullCategory(&itup, &mut bytes, false, ::gin::GIN_CAT_EMPTY_QUERY);
     assert_eq!(
         GinGetNullCategory(&itup, &bytes, false),
-        gin::GIN_CAT_EMPTY_QUERY
+        ::gin::GIN_CAT_EMPTY_QUERY
     );
 }

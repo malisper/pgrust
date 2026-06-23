@@ -10,7 +10,7 @@
 //! These deconstruct/construct composite Datums and call per-column type I/O
 //! and comparison functions, so they take `Mcx` and surface `ereport`s as
 //! `PgResult`. A composite value crosses as the owned
-//! [`FormedTuple`](types_tuple::heaptuple::FormedTuple) —
+//! [`FormedTuple`](::types_tuple::heaptuple::FormedTuple) —
 //! the real `HeapTupleHeader`-backed struct C reaches through
 //! `PG_GETARG_HEAPTUPLEHEADER` / returns through `PG_RETURN_HEAPTUPLEHEADER`,
 //! not an opaque `Datum`. Independent of the keystone (does not touch expanded
@@ -44,17 +44,17 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use datum::varlena::VARHDRSZ;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::datum::varlena::VARHDRSZ;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERRCODE_INVALID_TEXT_REPRESENTATION,
 };
-use stringinfo::StringInfo;
-use types_tuple::heaptuple::{FormedTuple, Datum};
-use types_tuple::heaptuple::{
+use ::stringinfo::StringInfo;
+use ::types_tuple::heaptuple::{FormedTuple, Datum};
+use ::types_tuple::heaptuple::{
     FormData_pg_attribute, HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, TupleDescData,
 };
 
@@ -62,8 +62,8 @@ use heaptuple::{heap_deform_tuple, heap_form_tuple};
 use pqformat::{
     pq_begintypsend, pq_endtypsend, pq_getmsgbytes, pq_getmsgint, pq_sendbytes, pq_sendint32,
 };
-use datum_seams::datum_image_eq_v;
-use format_type_seams::format_type_be;
+use ::datum_seams::datum_image_eq_v;
+use ::format_type_seams::format_type_be;
 use typcache_seams::{
     lookup_rowtype_tupdesc, record_column_cmp, record_column_eq, record_column_hash,
     record_column_hash_extended,
@@ -71,7 +71,7 @@ use typcache_seams::{
 use fmgr_seams::{
     record_column_input, record_column_output, record_column_receive, record_column_send,
 };
-use stack_depth_seams::check_stack_depth;
+use ::stack_depth_seams::check_stack_depth;
 
 /// `RECORDOID` (`catalog/pg_type_d.h`): the pseudo-type OID of an anonymous
 /// composite / RECORD value.
@@ -310,7 +310,7 @@ pub fn record_in<'mcx>(
 ///
 /// Returns the textual representation as raw bytes (C's `cstring`, NUL
 /// excluded).
-pub fn record_out<'mcx>(mcx: Mcx<'mcx>, record: &FormedTuple<'_>) -> PgResult<mcx::PgVec<'mcx, u8>> {
+pub fn record_out<'mcx>(mcx: Mcx<'mcx>, record: &FormedTuple<'_>) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     check_stack_depth::call()?; // recurses for record-type columns
 
     // Extract type info from the tuple itself.
@@ -389,7 +389,7 @@ pub fn record_out<'mcx>(mcx: Mcx<'mcx>, record: &FormedTuple<'_>) -> PgResult<mc
 
     out.push(b')');
 
-    mcx::slice_in(mcx, &out)
+    ::mcx::slice_in(mcx, &out)
 }
 
 /// `record_recv(buf, typioparam, typmod)` — binary input routine for any
@@ -517,7 +517,7 @@ pub fn record_recv<'mcx>(
 pub fn record_send<'mcx>(
     mcx: Mcx<'mcx>,
     record: &FormedTuple<'_>,
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     check_stack_depth::call()?; // recurses for record-type columns
 
     let rec = record
@@ -573,7 +573,7 @@ pub fn record_send<'mcx>(
     // Cross out the bytea's payload bytes (header stripped), matching the
     // PG_RETURN_BYTEA_P contract callers see.
     let payload = bytea.data();
-    mcx::slice_in(mcx, payload)
+    ::mcx::slice_in(mcx, payload)
 }
 
 /// `record_cmp(record1, record2)` — internal three-way comparison engine shared
@@ -1110,9 +1110,9 @@ pub fn hash_record_extended<'mcx>(
 /// deform it into `(tupdesc, ncolumns, columns)`. Mirrors the per-function
 /// "extract type info from the tuple + heap_deform_tuple" preamble.
 type DeformedRecord<'mcx> = (
-    mcx::PgBox<'mcx, TupleDescData<'mcx>>,
+    ::mcx::PgBox<'mcx, TupleDescData<'mcx>>,
     usize,
-    mcx::PgVec<'mcx, (Datum<'mcx>, bool)>,
+    ::mcx::PgVec<'mcx, (Datum<'mcx>, bool)>,
 );
 
 fn deform_record<'mcx>(mcx: Mcx<'mcx>, record: &FormedTuple<'_>) -> PgResult<DeformedRecord<'mcx>> {
@@ -1173,8 +1173,8 @@ fn form_tuple<'mcx>(
 }
 
 /// Copy a borrowed byte slice into an `mcx`-allocated `PgVec`.
-fn slice_to_pgvec<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<mcx::PgVec<'mcx, u8>> {
-    mcx::slice_in(mcx, src)
+fn slice_to_pgvec<'mcx>(mcx: Mcx<'mcx>, src: &[u8]) -> PgResult<::mcx::PgVec<'mcx, u8>> {
+    ::mcx::slice_in(mcx, src)
 }
 
 /// The byte-image three-way comparison of two non-null column values, inlined
@@ -1253,6 +1253,6 @@ fn varlena_payload(b: &[u8]) -> (&[u8], usize) {
     } else {
         VARHDRSZ
     };
-    let total = heaptuple::varsize_any(b);
+    let total = ::heaptuple::varsize_any(b);
     (&b[hdr..total], total - hdr)
 }

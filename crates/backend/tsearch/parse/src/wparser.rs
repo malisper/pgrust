@@ -16,7 +16,7 @@
 //! the exact `(lexid, alias, descr)` / `(type, lexeme)` rows the SQL functions
 //! emit.
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 
 use crate::wparser_def::{self, TParser};
 

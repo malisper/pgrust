@@ -50,11 +50,11 @@ use xlogreader_seams as xlogreader;
 use bufmgr_seams as bufmgr;
 use smgr_seams as smgr;
 use timestamp_seams as timestamp;
-use utils_error::elog;
+use ::utils_error::elog;
 use funcapi_seams as funcapi;
 use init_small_seams as init_small;
 use mcx::{vec_with_capacity_in, Mcx, PgHashMap, PgVec};
-use types_core::init::BackendType;
+use ::types_core::init::BackendType;
 use types_core::{
     uint8, BlockNumber, BufferIsValid, ForkNumber::MAIN_FORKNUM, InvalidBuffer, InvalidOid,
     InvalidRelFileNumber, InvalidXLogRecPtr, XLogRecPtr, BLCKSZ, INVALID_PROC_NUMBER,
@@ -62,7 +62,7 @@ use types_core::{
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
 use types_tuple::heaptuple::Datum;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use wal::rmgr::XLogReaderState;
+use ::wal::rmgr::XLogReaderState;
 use wal::{
     xl_dbase_create_file_copy_rec, xl_smgr_create, xl_smgr_truncate, ReadAheadRecordInfo,
     RelFileLocator, XLogNextRecordResult, BKPBLOCK_WILL_INIT, RM_DBASE_ID, RM_SMGR_ID, RM_XLOG_ID,

@@ -2,7 +2,7 @@
 //! `*in`/`*out`/`*recv`/`*send` entry points; the comparison operators and the
 //! `enum_first`/`enum_last`/`enum_range` helpers are the operator/function
 //! entry points. Their bodies are the cores in [`crate`]; these wrappers
-//! re-shape them at the "Option 4" boundary ([`fmgr::boundary`]):
+//! re-shape them at the "Option 4" boundary ([`::fmgr::boundary`]):
 //!
 //!   * an enum value is a 4-byte pass-by-value type, so its `Datum` word is the
 //!     value's OID (`PG_GETARG_OID` / `PG_RETURN_OID`);
@@ -16,12 +16,12 @@
 //! The bare-word PGFunction registry (`fmgr_builtins[]` rows) is deferred.
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::{InvalidOid, Oid};
-use types_core::TransactionId;
-use types_tuple::Datum;
+use ::types_core::primitive::{InvalidOid, Oid};
+use ::types_core::TransactionId;
+use ::types_tuple::Datum;
 use types_error::{PgResult, SoftErrorContext};
-use fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
-use stringinfo::StringInfo;
+use ::fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
+use ::stringinfo::StringInfo;
 
 /// `PG_GETARG_OID(n)`: read a by-value OID argument (an enum value's `Datum`).
 fn arg_oid(arg: FmgrArg) -> Oid {

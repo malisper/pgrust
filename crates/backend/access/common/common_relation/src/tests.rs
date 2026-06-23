@@ -20,10 +20,10 @@ use std::sync::{Mutex, Once};
 use std::vec::Vec;
 
 use mcx::{MemoryContext, PgString};
-use types_core::primitive::InvalidOid;
-use types_storage::lock::AccessShareLock;
-use types_tuple::access::RangeVar;
-use types_tuple::heaptuple::TupleDescData;
+use ::types_core::primitive::InvalidOid;
+use ::types_storage::lock::AccessShareLock;
+use ::types_tuple::access::RangeVar;
+use ::types_tuple::heaptuple::TupleDescData;
 
 static CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Whether `relation_id_get_relation` returns `Some` (the relcache descriptor)
@@ -59,17 +59,17 @@ fn build_reldata(mcx: Mcx<'_>, relid: Oid) -> RelationData<'_> {
         tdtypmod: -1,
         tdrefcount: 1,
         constr: None,
-        compact_attrs: mcx::PgVec::new_in(mcx),
-        attrs: mcx::PgVec::new_in(mcx),
+        compact_attrs: ::mcx::PgVec::new_in(mcx),
+        attrs: ::mcx::PgVec::new_in(mcx),
     };
     RelationData {
         rd_id: relid,
-        rd_locator: types_storage::RelFileLocator {
+        rd_locator: ::types_storage::RelFileLocator {
             spcOid: 0,
             dbOid: 0,
             relNumber: 0,
         },
-        rd_backend: types_core::primitive::INVALID_PROC_NUMBER,
+        rd_backend: ::types_core::primitive::INVALID_PROC_NUMBER,
         rd_rel: rel::FormData_pg_class {
             relname: PgString::from_str_in("t", mcx).unwrap(),
             relnamespace: 0,
@@ -94,13 +94,13 @@ fn build_reldata(mcx: Mcx<'_>, relid: Oid) -> RelationData<'_> {
             relfrozenxid: 0,
             relminmxid: 0,
         },
-        rd_att: mcx::alloc_in(mcx, td).unwrap(),
+        rd_att: ::mcx::alloc_in(mcx, td).unwrap(),
         rd_options: None,
         rd_index: None,
-        rd_opcintype: mcx::PgVec::new_in(mcx),
-        rd_opfamily: mcx::PgVec::new_in(mcx),
-        rd_indoption: mcx::PgVec::new_in(mcx),
-        rd_indcollation: mcx::PgVec::new_in(mcx),
+        rd_opcintype: ::mcx::PgVec::new_in(mcx),
+        rd_opfamily: ::mcx::PgVec::new_in(mcx),
+        rd_indoption: ::mcx::PgVec::new_in(mcx),
+        rd_indcollation: ::mcx::PgVec::new_in(mcx),
         rd_trigdesc: None,
         pgstat_enabled: false,
     }

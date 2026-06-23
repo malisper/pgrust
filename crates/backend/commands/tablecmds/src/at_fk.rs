@@ -28,11 +28,11 @@
 
 use mcx::{Mcx, PgString, PgVec};
 
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_INTERNAL, DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
 };
-use types_catalog::pg_constraint::CONSTRAINT_FOREIGN;
-use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_catalog::pg_constraint::CONSTRAINT_FOREIGN;
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_FOREIGN_KEY, ERRCODE_INVALID_TABLE_DEFINITION,
@@ -43,27 +43,27 @@ use types_error::{
 use ::nodes::ddlnodes::{Constraint, ConstrType, CoercionContext, CreateTrigStmt};
 use ::nodes::rawnodes::RangeVar as DdlRangeVar;
 use ::nodes::nodes::{Node, NodePtr};
-use rel::Relation;
-use types_storage::lock::LOCKMODE;
-use types_tuple::access::{
+use ::rel::Relation;
+use ::types_storage::lock::LOCKMODE;
+use ::types_tuple::access::{
     ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
     RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
 
-use transam_xact::CommandCounterIncrement;
-use objectaddress::consts::{ConstraintRelationId, RelationRelationId};
-use types_catalog::pg_trigger::{
+use ::transam_xact::CommandCounterIncrement;
+use ::objectaddress::consts::{ConstraintRelationId, RelationRelationId};
+use ::types_catalog::pg_trigger::{
     Anum_pg_trigger_oid, Anum_pg_trigger_tgconstraint, Anum_pg_trigger_tgconstrrelid,
     Anum_pg_trigger_tgfoid, Anum_pg_trigger_tgrelid, Anum_pg_trigger_tgtype,
     TriggerConstraintIndexId, TriggerRelationId, TRIGGER_FOR_DELETE, TRIGGER_FOR_INSERT,
     TRIGGER_FOR_UPDATE,
 };
-use adt_ri_triggers::checks::ri_fkey_trigger_type;
+use ::adt_ri_triggers::checks::ri_fkey_trigger_type;
 use adt_ri_triggers::{RI_TRIGGER_FK, RI_TRIGGER_PK};
-use scankey::ScanKeyInit;
-use heaptuple::heap_deform_tuple;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessExclusiveLock, RowExclusiveLock, RowShareLock};
+use ::scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessExclusiveLock, RowExclusiveLock, RowShareLock};
 
 use crate::at_phase::{AlteredTableInfo, NewConstraint, ATGetQueueEntry, CheckAlterTableIsSafe};
 
@@ -356,8 +356,8 @@ fn transformFkeyCheckAttrs<'mcx>(
 fn findFkeyCast(
     target_type_id: Oid,
     source_type_id: Oid,
-) -> PgResult<(coerce_seams::CoercionPathType, Oid)> {
-    use coerce_seams::CoercionPathType;
+) -> PgResult<(::coerce_seams::CoercionPathType, Oid)> {
+    use ::coerce_seams::CoercionPathType;
     if target_type_id == source_type_id {
         Ok((CoercionPathType::Relabeltype, InvalidOid))
     } else {
@@ -384,7 +384,7 @@ fn findFkeyCast(
 /// `checkFkeyPermissions(rel, attnums, natts)` — REFERENCES privilege check on
 /// the referenced table (relation-level, or per-column).
 fn checkFkeyPermissions(rel: &Relation<'_>, attnums: &[AttrNumber], natts: i32) -> PgResult<()> {
-    use types_acl::acl::{ACLCHECK_OK, ACL_REFERENCES};
+    use ::types_acl::acl::{ACLCHECK_OK, ACL_REFERENCES};
     let roleid = miscinit::GetUserId();
 
     // Okay if we have relation-level REFERENCES permission.
@@ -400,7 +400,7 @@ fn checkFkeyPermissions(rel: &Relation<'_>, attnums: &[AttrNumber], natts: i32) 
         if r != ACLCHECK_OK {
             aclchk_seams::aclcheck_error::call(
                 r,
-                objectaddress::resolve::get_relkind_objtype(rel.rd_rel.relkind as u8),
+                ::objectaddress::resolve::get_relkind_objtype(rel.rd_rel.relkind as u8),
                 Some(rel.name().to_string()),
             )?;
         }
@@ -810,7 +810,7 @@ pub fn ATAddForeignKeyConstraint<'mcx>(
             // Look for an implicit cast from the FK type to the opcintype.
             let input_typeids = [pktype, fktype];
             let target_typeids = [opcintype, opcintype];
-            if coerce_seams::can_coerce_type::call(
+            if ::coerce_seams::can_coerce_type::call(
                 2,
                 &input_typeids,
                 &target_typeids,
@@ -1036,7 +1036,7 @@ fn addFkConstraint<'mcx>(
         .unwrap_or_default();
     let conname = if pg_constraint::ConstraintNameIsUsed(
         mcx,
-        types_catalog::pg_constraint::ConstraintCategory::Relation,
+        ::types_catalog::pg_constraint::ConstraintCategory::Relation,
         rel.rd_id,
         &constraintname,
     )? {
@@ -1345,7 +1345,7 @@ fn addFkRecurseReferencing<'mcx>(
             )?;
             // C carries fkconstraint on newcon->qual for the phase-3 validator;
             // the owned NewConstraint rides the constraint Node on `qual`.
-            let qual = mcx::alloc_in(
+            let qual = ::mcx::alloc_in(
                 mcx,
                 Node::mk_constraint(mcx, fkconstraint.clone_in(mcx)?)?,
             )?;
@@ -1684,7 +1684,7 @@ fn scan_fk_triggers_by_constraint<'mcx>(
         &mut key,
         Anum_pg_trigger_tgconstraint,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         types_tuple::heaptuple::Datum::from_oid(conoid),
     )?;
     let keys = [key];
@@ -2285,16 +2285,16 @@ fn RemoveInheritedConstraint<'mcx>(
     let mut key = ScanKeyData::empty();
     ScanKeyInit(
         &mut key,
-        types_catalog::pg_constraint::Anum_pg_constraint_conrelid,
+        ::types_catalog::pg_constraint::Anum_pg_constraint_conrelid,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         types_tuple::heaptuple::Datum::from_oid(conrelid),
     )?;
     let keys = [key];
 
     let mut scan = genam_seams::systable_beginscan::call(
         conrel,
-        types_catalog::pg_constraint::ConstraintRelidTypidNameIndexId,
+        ::types_catalog::pg_constraint::ConstraintRelidTypidNameIndexId,
         true,
         None,
         &keys,
@@ -2306,9 +2306,9 @@ fn RemoveInheritedConstraint<'mcx>(
     {
         let cols = heap_deform_tuple(mcx, &tup.tuple, &conrel.rd_att, &tup.data)?;
         let conform_oid =
-            cols[types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1].0.as_oid();
+            cols[::types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1].0.as_oid();
         let conform_parentid = cols
-            [types_catalog::pg_constraint::Anum_pg_constraint_conparentid as usize - 1]
+            [::types_catalog::pg_constraint::Anum_pg_constraint_conparentid as usize - 1]
             .0
             .as_oid();
         if conform_parentid != conoid {
@@ -2405,17 +2405,17 @@ fn CloneFkReferenced<'mcx>(
     let mut key0 = ScanKeyData::empty();
     ScanKeyInit(
         &mut key0,
-        types_catalog::pg_constraint::Anum_pg_constraint_confrelid,
+        ::types_catalog::pg_constraint::Anum_pg_constraint_confrelid,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_OIDEQ,
+        ::types_core::fmgr::F_OIDEQ,
         types_tuple::heaptuple::Datum::from_oid(parent_rel.rd_id),
     )?;
     let mut key1 = ScanKeyData::empty();
     ScanKeyInit(
         &mut key1,
-        types_catalog::pg_constraint::Anum_pg_constraint_contype,
+        ::types_catalog::pg_constraint::Anum_pg_constraint_contype,
         BTEqualStrategyNumber,
-        types_core::fmgr::F_CHAREQ,
+        ::types_core::fmgr::F_CHAREQ,
         types_tuple::heaptuple::Datum::from_char(CONSTRAINT_FOREIGN),
     )?;
     let keys = [key0, key1];
@@ -2435,7 +2435,7 @@ fn CloneFkReferenced<'mcx>(
     {
         let cols = heap_deform_tuple(mcx, &tup.tuple, &pg_constraint.rd_att, &tup.data)?;
         let conoid = cols
-            [types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1]
+            [::types_catalog::pg_constraint::Anum_pg_constraint_oid as usize - 1]
             .0
             .as_oid();
         clone.push(conoid);
@@ -2803,7 +2803,7 @@ fn CloneFkReferencing<'mcx>(
 /// constraint's form, naming `fk_attrs` from the FK relation's columns.
 fn build_clone_fkconstraint<'mcx>(
     mcx: Mcx<'mcx>,
-    constr_form: &types_catalog::pg_constraint::FormData_pg_constraint,
+    constr_form: &::types_catalog::pg_constraint::FormData_pg_constraint,
     fk_rel: &Relation<'mcx>,
     conkey: &[AttrNumber],
     numfks: usize,
@@ -2834,7 +2834,7 @@ fn build_clone_fkconstraint<'mcx>(
 /// the partition's column names (via the mapped conkey).
 fn build_clone_fkconstraint_referencing<'mcx>(
     mcx: Mcx<'mcx>,
-    constr_form: &types_catalog::pg_constraint::FormData_pg_constraint,
+    constr_form: &::types_catalog::pg_constraint::FormData_pg_constraint,
     part_rel: &Relation<'mcx>,
     mapped_conkey: &[AttrNumber],
     numfks: usize,
@@ -2865,14 +2865,14 @@ fn build_clone_fkconstraint_referencing<'mcx>(
 // Small helpers
 // ---------------------------------------------------------------------------
 
-use types_catalog::pg_trigger::{
+use ::types_catalog::pg_trigger::{
     TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_UPDATE,
 };
 
 /// `makeString(s)` as a `Node*`.
 fn make_string<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
     let sval = PgString::from_str_in(s, mcx)?;
-    mcx::alloc_in(mcx, Node::mk_string(mcx, ::nodes::value::StringNode { sval })?)
+    ::mcx::alloc_in(mcx, Node::mk_string(mcx, ::nodes::value::StringNode { sval })?)
 }
 
 /// `SystemFuncName(name)` — a `pg_catalog`-qualified function-name list.
@@ -2883,8 +2883,8 @@ fn system_func_name<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<PgVec<'mcx, No
     Ok(names)
 }
 
-fn to_access_range_var(rv: &DdlRangeVar<'_>) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &DdlRangeVar<'_>) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),
         relname: rv.relname.as_deref().unwrap_or("").into(),

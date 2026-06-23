@@ -20,8 +20,8 @@
 //! the owned model the executor's by-OID `function_call_invoke` dispatch builds
 //! the callee call frame inside fmgr-core, so the AggState back-pointer rides a
 //! thread-local channel deposited by the executor before dispatch
-//! ([`fmgr::fmgr::AggCallContextGuard`]) and is read back onto the callee
-//! frame's [`agg_context`](fmgr::FunctionCallInfoBaseData::agg_context).
+//! ([`::fmgr::fmgr::AggCallContextGuard`]) and is read back onto the callee
+//! frame's [`agg_context`](::fmgr::FunctionCallInfoBaseData::agg_context).
 //! The support function receives the low-level `fmgr`
 //! [`FunctionCallInfoBaseData`] (what every fmgr-called builtin gets), so these
 //! seams take `&FunctionCallInfoBaseData`; the installed bodies reconstruct the
@@ -30,8 +30,8 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
-use fmgr::FunctionCallInfoBaseData;
+use ::types_error::PgResult;
+use ::fmgr::FunctionCallInfoBaseData;
 use ::nodes::nodeagg::Aggref;
 use ::nodes::execnodes::{EcxtId, ExprContextCallbackFunction};
 

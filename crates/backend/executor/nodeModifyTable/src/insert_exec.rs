@@ -2,12 +2,12 @@
 //! family because the C function (~507 lines) is large enough to body-port
 //! independently of the rest of the insert path.
 
-use mcx::Mcx;
-use types_core::xact::CommandId;
+use ::mcx::Mcx;
+use ::types_core::xact::CommandId;
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::lifecycle::{ExecComputeStoredGenerated, ExecPrepareTupleRouting, ExecProcessReturning};
 use crate::ModifyTableContext;
@@ -37,7 +37,7 @@ use trigger_seams::{
 
 // `ExecCheckIndexConstraints` is owned by execIndexing; its seam is declared in
 // `backend-executor-execIndexing-seams` and called through that path below.
-use execIndexing_seams::exec_check_index_constraints;
+use ::execIndexing_seams::exec_check_index_constraints;
 
 seam_core::seam!(
     /// `GetCurrentTransactionId()` then
@@ -111,7 +111,7 @@ pub fn ExecInsert<'mcx>(
     let plan_slot = context.planSlot;
 
     // List *recheckIndexes = NIL;
-    let mut recheck_indexes: mcx::PgVec<'mcx, types_core::Oid> = mcx::vec_with_capacity_in(mcx, 0)?;
+    let mut recheck_indexes: ::mcx::PgVec<'mcx, ::types_core::Oid> = ::mcx::vec_with_capacity_in(mcx, 0)?;
     // TupleTableSlot *result = NULL;
     let mut result: Option<SlotId> = None;
 
@@ -167,7 +167,7 @@ pub fn ExecInsert<'mcx>(
         .ri_IndexRelationDescs
         .is_some();
     if relhasindex && !indexes_open {
-        execIndexing_seams::exec_open_indices::call(
+        ::execIndexing_seams::exec_open_indices::call(
             estate,
             result_rel_info,
             onconflict != ::nodes::modifytable::ONCONFLICT_NONE,
@@ -328,12 +328,12 @@ pub fn ExecInsert<'mcx>(
             //   ItemPointerSetInvalid(&invalidItemPtr);
             //   arbiterIndexes = resultRelInfo->ri_onConflictArbiterIndexes;
             let invalid_item_ptr = item_pointer_invalid();
-            let arbiter_indexes: mcx::PgVec<'mcx, types_core::Oid> = {
+            let arbiter_indexes: ::mcx::PgVec<'mcx, ::types_core::Oid> = {
                 let src = estate
                     .result_rel(result_rel_info)
                     .ri_onConflictArbiterIndexes
                     .as_ref();
-                let mut v = mcx::vec_with_capacity_in(mcx, src.map(|s| s.len()).unwrap_or(0))?;
+                let mut v = ::mcx::vec_with_capacity_in(mcx, src.map(|s| s.len()).unwrap_or(0))?;
                 if let Some(src) = src {
                     for &o in src.iter() {
                         v.push(o);
@@ -423,7 +423,7 @@ pub fn ExecInsert<'mcx>(
                 )?;
 
                 // insert index entries for tuple
-                recheck_indexes = execIndexing_seams::exec_insert_index_tuples::call(
+                recheck_indexes = ::execIndexing_seams::exec_insert_index_tuples::call(
                     mcx,
                     estate,
                     result_rel_info,
@@ -456,7 +456,7 @@ pub fn ExecInsert<'mcx>(
                 // (unless it aborts before we get there).
                 if spec_conflict {
                     // list_free(recheckIndexes); goto vlock;
-                    recheck_indexes = mcx::vec_with_capacity_in(mcx, 0)?;
+                    recheck_indexes = ::mcx::vec_with_capacity_in(mcx, 0)?;
                     let _ = &recheck_indexes;
                     continue;
                 }
@@ -474,7 +474,7 @@ pub fn ExecInsert<'mcx>(
 
             // insert index entries for tuple
             if estate.result_rel(result_rel_info).ri_NumIndices > 0 {
-                recheck_indexes = execIndexing_seams::exec_insert_index_tuples::call(
+                recheck_indexes = ::execIndexing_seams::exec_insert_index_tuples::call(
                     mcx,
                     estate,
                     result_rel_info,
@@ -507,7 +507,7 @@ pub fn ExecInsert<'mcx>(
             .map(|tc| tc.tcs_update_new_table)
             .unwrap_or(false);
     if cross_part_new_table {
-        trigger_seams::exec_ar_update_triggers::call(
+        ::trigger_seams::exec_ar_update_triggers::call(
             estate,
             result_rel_info,
             None,
@@ -678,7 +678,7 @@ fn instr_count_tuples2(mtstate: &mut ModifyTableState<'_>, delta: f64) {
 /// `ItemPointerSetInvalid(&p)` (itemptr.h): an invalid item pointer
 /// (`InvalidBlockNumber` / `InvalidOffsetNumber`).
 fn item_pointer_invalid() -> ItemPointerData {
-    ItemPointerData::new(types_core::primitive::InvalidBlockNumber, 0)
+    ItemPointerData::new(::types_core::primitive::InvalidBlockNumber, 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -686,13 +686,13 @@ fn item_pointer_invalid() -> ItemPointerData {
 // ---------------------------------------------------------------------------
 
 /// `RelationGetRelid(resultRelInfo->ri_RelationDesc)`.
-fn relation_oid(estate: &EStateData<'_>, rri: RriId) -> types_core::Oid {
+fn relation_oid(estate: &EStateData<'_>, rri: RriId) -> ::types_core::Oid {
     estate
         .result_rel(rri)
         .ri_RelationDesc
         .as_ref()
         .map(|r| r.rd_id)
-        .unwrap_or(types_core::INVALID_OID)
+        .unwrap_or(::types_core::INVALID_OID)
 }
 
 /// An `alias()` of `ri_RelationDesc` (shared, no release authority).

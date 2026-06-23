@@ -19,7 +19,7 @@
 
 use pglz::{pglz_compress, pglz_decompress_to_slice, PGLZ_MAX_OUTPUT};
 use mcx::{Mcx, PgVec};
-use datum::VARHDRSZ;
+use ::datum::VARHDRSZ;
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
 
 use toast_compression_seams as seams;
@@ -238,14 +238,14 @@ pub fn pglz_compress_datum<'mcx>(
 
     // No point in wasting a palloc cycle if value size is outside the allowed
     // range for compression. (PGLZ_strategy_default's window.)
-    let strategy = pglz::PGLZ_strategy_default();
+    let strategy = ::pglz::PGLZ_strategy_default();
     if valsize < strategy.min_input_size || valsize > strategy.max_input_size {
         return Ok(None);
     }
 
     // Figure out the maximum possible size of the pglz output, add the bytes
     // that will be needed for varlena overhead, and allocate that amount.
-    let mut tmp: PgVec<u8> = mcx::vec_with_capacity_in(mcx, PGLZ_MAX_OUTPUT(valsize as usize) + VARHDRSZ_COMPRESSED)?;
+    let mut tmp: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, PGLZ_MAX_OUTPUT(valsize as usize) + VARHDRSZ_COMPRESSED)?;
     tmp.resize(VARHDRSZ_COMPRESSED, 0);
 
     // pglz_compress(VARDATA_ANY(value), valsize, (char *) tmp + VARHDRSZ_COMPRESSED, NULL).
@@ -273,7 +273,7 @@ pub fn pglz_decompress_datum<'mcx>(
 
     // allocate memory for the uncompressed data:
     //   palloc(VARDATA_COMPRESSED_GET_EXTSIZE(value) + VARHDRSZ).
-    let mut result: PgVec<u8> = mcx::vec_with_capacity_in(mcx, extsize as usize + VARHDRSZ)?;
+    let mut result: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, extsize as usize + VARHDRSZ)?;
     result.resize(extsize as usize + VARHDRSZ, 0);
 
     // pglz_decompress((char *) value + VARHDRSZ_COMPRESSED,
@@ -301,7 +301,7 @@ pub fn pglz_decompress_datum_slice<'mcx>(
     slicelength: i32,
 ) -> PgResult<PgVec<'mcx, u8>> {
     // allocate memory for the uncompressed data: palloc(slicelength + VARHDRSZ).
-    let mut result: PgVec<u8> = mcx::vec_with_capacity_in(mcx, slicelength as usize + VARHDRSZ)?;
+    let mut result: PgVec<u8> = ::mcx::vec_with_capacity_in(mcx, slicelength as usize + VARHDRSZ)?;
     result.resize(slicelength as usize + VARHDRSZ, 0);
 
     // pglz_decompress((char *) value + VARHDRSZ_COMPRESSED,

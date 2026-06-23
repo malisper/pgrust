@@ -2,15 +2,15 @@
 //! of the `lifecycle` family because the C function (~420 lines) is large
 //! enough to body-port independently of the rest of the node lifecycle.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
-use types_tuple::access::{
+use ::types_tuple::access::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };
-use types_tuple::heaptuple::{Datum, FormedTuple, SlotAttr};
-use types_tuple::heaptuple::ItemPointerData;
+use ::types_tuple::heaptuple::{Datum, FormedTuple, SlotAttr};
+use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::lifecycle::{ExecLookupResultRelByOid, ExecProcessReturning};
 use crate::{
@@ -40,7 +40,7 @@ seam_core::seam!(
     /// its null flag. The slot payload is owned by the execTuples slot model.
     ///
     /// The result is the canonical
-    /// [`types_tuple::heaptuple::SlotAttr`], so a
+    /// [`::types_tuple::heaptuple::SlotAttr`], so a
     /// by-reference value (e.g. the 6-byte `ctid` `ItemPointerData` image) crosses
     /// intact as the `ByRef` arm — never collapsed onto a scalar word. The OID
     /// (`mt_resultOidAttno`) consumer reads `value.as_oid()` off the `ByVal` arm.
@@ -80,7 +80,7 @@ seam_core::seam!(
     /// `oldtupdata.t_data/t_len/t_self/t_tableOid` assembly (htup_details.h):
     /// reconstruct a tuple from a wholerow junk Datum, with `t_tableOid` set to
     /// `tableoid` (`InvalidOid` for a view) and `t_self` invalid. The carrier is
-    /// the data-bearing [`FormedTuple`](types_tuple::heaptuple::FormedTuple)
+    /// the data-bearing [`FormedTuple`](::types_tuple::heaptuple::FormedTuple)
     /// (header + user-data area) — a bare `HeapTupleData` header would drop the
     /// column data the wholerow Datum carries, which the downstream
     /// `ExecForceStoreHeapTuple` deform and the FDW/view trigger paths read. The
@@ -403,7 +403,7 @@ pub fn ExecModifyTable<'mcx>(
                 // oldtupdata.t_len = HeapTupleHeaderGetDatumLength(oldtupdata.t_data);
                 // ItemPointerSetInvalid(&(oldtupdata.t_self));
                 // Historically, view triggers see invalid t_tableOid.
-                let tableoid = if relkind == types_tuple::access::RELKIND_VIEW {
+                let tableoid = if relkind == ::types_tuple::access::RELKIND_VIEW {
                     INVALID_OID
                 } else {
                     relation_relid(estate, result_rel_info)

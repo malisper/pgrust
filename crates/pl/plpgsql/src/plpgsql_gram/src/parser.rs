@@ -20,14 +20,14 @@ use plpgsql_scanner::{
     K_STRICT, K_TABLE, K_TABLE_NAME, K_THEN, K_TYPE, K_USE_COLUMN, K_USE_VARIABLE, K_USING,
     K_VARIABLE_CONFLICT, K_WARNING, K_WHEN, K_WHILE,
 };
-use scan_fgram::tokens::{COLON_EQUALS, DOT_DOT, EQUALS_GREATER, ICONST, SCONST};
-use utils_error::ereport;
+use ::scan_fgram::tokens::{COLON_EQUALS, DOT_DOT, EQUALS_GREATER, ICONST, SCONST};
+use ::utils_error::ereport;
 use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_ALIAS,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_SYNTAX_ERROR,
     ERROR as ERROR_LEVEL,
 };
-use parsenodes::RawParseMode;
+use ::parsenodes::RawParseMode;
 use plpgsql::*;
 
 // ===========================================================================
@@ -3518,7 +3518,7 @@ impl<'mcx> Parser<'mcx> {
         for argc in 0..nfields {
             let argpos;
             let (tok1, tok2, arglocation, _l) = self.peek2()?;
-            if tok1 == scan_fgram::tokens::IDENT
+            if tok1 == ::scan_fgram::tokens::IDENT
                 && (tok2 == COLON_EQUALS || tok2 == EQUALS_GREATER)
             {
                 let save_lookup = self.identifier_lookup();
@@ -3786,12 +3786,12 @@ impl<'mcx> Parser<'mcx> {
     fn emit_shadowvar(&self, name: &str, loc: i32, _is_error: bool) -> PgResult<()> {
         let msg = format!("variable \"{name}\" shadows a previously defined variable");
         let err = self.scanner.positioned_error(
-            types_error::WARNING,
+            ::types_error::WARNING,
             ERRCODE_DUPLICATE_ALIAS,
             &msg,
             loc,
         );
-        utils_error::ThrowErrorData(err)
+        ::utils_error::ThrowErrorData(err)
     }
 
     /// The `extra_errors=shadowed_variables` ERROR variant of
@@ -3804,7 +3804,7 @@ impl<'mcx> Parser<'mcx> {
         // step) once this error has unwound out of `plpgsql_yyparse`; do NOT
         // transpose here, or the position is transposed twice.
         self.scanner.positioned_error(
-            types_error::ERROR,
+            ::types_error::ERROR,
             ERRCODE_DUPLICATE_ALIAS,
             &msg,
             loc,
@@ -3862,7 +3862,7 @@ impl<'mcx> Parser<'mcx> {
         // CREATE FUNCTION / DO query text, exactly as C's two-callback chain does
         // (this callback is registered on TOP, so it runs first / innermost).
         let scanorig_cb = scanorig.clone();
-        let cb_id = utils_error::push_emit_context_callback(Box::new(move |err: &mut PgError| {
+        let cb_id = ::utils_error::push_emit_context_callback(Box::new(move |err: &mut PgError| {
             err.internal_query = Some(scanorig_cb.clone());
             let errpos = err.cursor_position.unwrap_or(0);
             let internal = if body_pos > 0 && errpos > 0 {
@@ -3870,14 +3870,14 @@ impl<'mcx> Parser<'mcx> {
             } else {
                 body_pos
             };
-            err.internal_position = types_error::nonzero_position(internal);
+            err.internal_position = ::types_error::nonzero_position(internal);
             err.cursor_position = None;
         }));
 
         let result = comp_seam::check_sql_expr::call(stmt, parse_mode, location);
 
         // Restore `error_context_stack = syntax_errcontext.previous`.
-        utils_error::pop_emit_context_callback(cb_id);
+        ::utils_error::pop_emit_context_callback(cb_id);
 
         result.map_err(|err| {
             // The propagated-error path: same transposition, applied on unwind.

@@ -19,15 +19,15 @@
 
 extern crate alloc;
 
-use mcx::Mcx;
-use types_core::primitive::{Oid, RelFileNumber, InvalidOid};
-use types_error::PgResult;
-use types_storage::storage::RelFileLocator;
-use types_catalog::catalog::RELKIND_INDEX;
+use ::mcx::Mcx;
+use ::types_core::primitive::{Oid, RelFileNumber, InvalidOid};
+use ::types_error::PgResult;
+use ::types_storage::storage::RelFileLocator;
+use ::types_catalog::catalog::RELKIND_INDEX;
 use types_acl::{ACLCHECK_OK, ACL_CREATE};
 
-use common_relation::relation_open;
-use miscinit::GetUserId;
+use ::common_relation::relation_open;
+use ::miscinit::GetUserId;
 use crate::helpers::{here, RelationRelationId, TableSpaceRelationId};
 
 use aclchk_seams as aclchk_seam;
@@ -39,10 +39,10 @@ use relcache_seams as relcache_seam;
 use tablespace_seams as tablespace_seam;
 use tablespace_globals_seams as tablespace_globals_seam;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{ERRCODE_SYNTAX_ERROR, ERROR};
-use types_storage::lock::{LOCKMODE, NoLock};
-use transam_xact::CommandCounterIncrement;
+use ::types_storage::lock::{LOCKMODE, NoLock};
+use ::transam_xact::CommandCounterIncrement;
 
 /// `OidIsValid`.
 #[inline]
@@ -214,7 +214,7 @@ pub fn ATPrepSetAccessMethod<'mcx>(
     // NULL), set it to InvalidOid to reset the catalogued AM.
     let amoid = if let Some(name) = amname {
         tablecmds_seams::get_table_am_oid::call(name, false)?
-    } else if rel.rd_rel.relkind == types_catalog::catalog::RELKIND_PARTITIONED_TABLE {
+    } else if rel.rd_rel.relkind == ::types_catalog::catalog::RELKIND_PARTITIONED_TABLE {
         InvalidOid
     } else {
         let default_am = tablecmds_seams::default_table_access_method::call(mcx)?;
@@ -241,7 +241,7 @@ pub fn ATExecSetAccessMethodNoStorage<'mcx>(
     rel: &rel::Relation<'mcx>,
     new_access_method_id: Oid,
 ) -> PgResult<()> {
-    use types_core::primitive::OidIsValid;
+    use ::types_core::primitive::OidIsValid;
     let reloid = rel.rd_id;
 
     // pg_class open + SearchSysCacheCopy1(RELOID, reloid); oldAccessMethodId =
@@ -268,22 +268,22 @@ pub fn ATExecSetAccessMethodNoStorage<'mcx>(
     if !OidIsValid(old_access_method_id) && OidIsValid(new_access_method_id) {
         // New AM is defined and there was no dependency previously: record one.
         let referenced = crate::helpers::object_address_set(
-            types_catalog::opclasscmds_catalog::AccessMethodRelationId,
+            ::types_catalog::opclasscmds_catalog::AccessMethodRelationId,
             new_access_method_id,
         );
         pg_depend_seams::recordDependencyOn::call(
             mcx,
             &relobj,
             &referenced,
-            types_catalog::catalog_dependency::DEPENDENCY_NORMAL,
+            ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL,
         )?;
     } else if OidIsValid(old_access_method_id) && !OidIsValid(new_access_method_id) {
         // There was an AM defined and no new one: remove the existing dependency.
         pg_depend_seams::deleteDependencyRecordsForClass::call(
             RelationRelationId,
             reloid,
-            types_catalog::opclasscmds_catalog::AccessMethodRelationId,
-            types_catalog::catalog_dependency::DEPENDENCY_NORMAL.as_char(),
+            ::types_catalog::opclasscmds_catalog::AccessMethodRelationId,
+            ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL.as_char(),
         )?;
     } else {
         // Both valid: update the dependency.
@@ -291,7 +291,7 @@ pub fn ATExecSetAccessMethodNoStorage<'mcx>(
             mcx,
             RelationRelationId,
             reloid,
-            types_catalog::opclasscmds_catalog::AccessMethodRelationId,
+            ::types_catalog::opclasscmds_catalog::AccessMethodRelationId,
             old_access_method_id,
             new_access_method_id,
         )?;

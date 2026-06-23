@@ -37,7 +37,7 @@
 //! [`QueryId`]: crate::QueryId
 
 use mcx::{Mcx, PgVec};
-use types_core::primitive::Index;
+use ::types_core::primitive::Index;
 use ::nodes::copy_query::Query;
 use ::nodes::nodelockrows::PlanRowMark;
 use ::nodes::nodes::Node;
@@ -609,7 +609,7 @@ pub fn planner_subplan_get_plan<'a, 'mcx>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     use ::nodes::nodes::{ntag, CmdType};
 
     #[test]

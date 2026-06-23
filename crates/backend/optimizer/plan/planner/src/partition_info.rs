@@ -16,12 +16,12 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, Oid};
+use ::mcx::Mcx;
+use ::types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
 use pathnodes::{NodeId, PartitionBoundInfoData, PartitionScheme, PartitionSchemeData, PlannerInfo, RelId};
-use types_storage::lock::NoLock;
+use ::types_storage::lock::NoLock;
 use types_tuple::heaptuple::Datum;
 
 use plancat_ext_seams as plancat_ext;
@@ -57,7 +57,7 @@ pub(crate) fn init_seams() {
 /// raw stxexprs text) is the syscache projection; the node-vocabulary transforms
 /// (which plancat cannot reach without a `planner -> plancat` cycle) run here.
 fn get_stat_ext_keys_exprs<'run>(
-    run_mcx: mcx::Mcx<'run>,
+    run_mcx: ::mcx::Mcx<'run>,
     root: &mut PlannerInfo,
     stat_oid: Oid,
     varno: i32,
@@ -69,7 +69,7 @@ fn get_stat_ext_keys_exprs<'run>(
     // (`run_mcx`) before interning — `alloc_node` only `erase_lifetime`s, so a
     // node left in `scratch` is freed here and would be a UAF when the arena
     // entry is later dropped (with `PlannerInfo`).
-    let scratch = mcx::MemoryContext::new("get_stat_ext_keys_exprs");
+    let scratch = ::mcx::MemoryContext::new("get_stat_ext_keys_exprs");
     let mcx = scratch.mcx();
     let (keys, exprs_text) =
         syscache_seams::statext_keys_exprs_text::call(mcx, stat_oid)?
@@ -86,7 +86,7 @@ fn get_stat_ext_keys_exprs<'run>(
 
     // exprs = (List *) stringToNode(exprsString);
     let node = read_seams::string_to_node::call(mcx, exprs_text.as_str())?;
-    let elems = mcx::PgBox::into_inner(node).into_list().ok_or_else(|| {
+    let elems = ::mcx::PgBox::into_inner(node).into_list().ok_or_else(|| {
         PgError::error("get_stat_ext_keys_exprs: stxexprs stringToNode did not yield a List")
     })?;
 
@@ -96,7 +96,7 @@ fn get_stat_ext_keys_exprs<'run>(
     // fix_opfuncids((Node *) exprs);  — per element, as fix_opfuncids walks the tree.
     let mut ids: Vec<NodeId> = Vec::with_capacity(elems.len());
     for el in elems.into_iter() {
-        let expr = mcx::PgBox::into_inner(el).into_expr().ok_or_else(|| {
+        let expr = ::mcx::PgBox::into_inner(el).into_expr().ok_or_else(|| {
             PgError::error("get_stat_ext_keys_exprs: stxexprs element is not an Expr")
         })?;
         let mut folded =
@@ -174,7 +174,7 @@ fn get_stat_ext_data_kinds(
 /// (the sublink/Param machinery) cannot fire. Returns the implicit-AND clause
 /// items interned into the planner (`root`) arena, with Vars stamped to `varno`.
 fn process_check_constraint<'run>(
-    run_mcx: mcx::Mcx<'run>,
+    run_mcx: ::mcx::Mcx<'run>,
     root: &mut PlannerInfo,
     ccbin: &str,
     varno: i32,
@@ -185,12 +185,12 @@ fn process_check_constraint<'run>(
     // it does not copy the node's `PgVec`/`PgBox` allocations — so a node left in
     // `workcx` is freed when this function returns, and the later drop of the
     // `node_arena` entry (when `PlannerInfo` drops) would deallocate freed memory.
-    let workcx = mcx::MemoryContext::new("process_check_constraint");
+    let workcx = ::mcx::MemoryContext::new("process_check_constraint");
     let mcx = workcx.mcx();
 
     // cexpr = stringToNode(constr->check[i].ccbin);
     let node = read_seams::string_to_node::call(mcx, ccbin)?;
-    let cexpr = mcx::PgBox::into_inner(node)
+    let cexpr = ::mcx::PgBox::into_inner(node)
         .into_expr()
         .ok_or_else(|| PgError::error("process_check_constraint: ccbin is not an Expr"))?;
 
@@ -235,7 +235,7 @@ fn process_check_constraint<'run>(
 /// (lock already held by `get_relation_info`), read everything the C reads off
 /// the relcache entry, and close before returning.
 fn set_relation_partition_info<'run>(
-    run_mcx: mcx::Mcx<'run>,
+    run_mcx: ::mcx::Mcx<'run>,
     root: &mut PlannerInfo,
     rel: RelId,
     relid: Oid,
@@ -258,7 +258,7 @@ fn set_relation_partition_info<'run>(
     // durable planner-run arena, the same context `PlannerInfo` lives in) before
     // interning — exactly as `get_relation_info` does for index exprs/predicates
     // via `run.mcx()`. The relcache *reads* still use the transient `relcx`.
-    let relcx = mcx::MemoryContext::new("set_relation_partition_info");
+    let relcx = ::mcx::MemoryContext::new("set_relation_partition_info");
     let mcx = relcx.mcx();
 
     // We need not lock the relation since it was already locked by the caller.
@@ -310,7 +310,7 @@ fn set_relation_partition_info<'run>(
         // interleaved_parts is the C `Bitmapset *` of interleaved LIST-partition
         // indexes; translate to the planner `Relids` representation (same member
         // numbering, distinct Bitmapset type) by walking its set bits.
-        let interleaved: pathnodes::Relids = bi.interleaved_parts.as_ref().and_then(|b| {
+        let interleaved: ::pathnodes::Relids = bi.interleaved_parts.as_ref().and_then(|b| {
             // Both representations are a flat `bitmapword[]` with identical
             // member numbering; copy the words directly (trim trailing zeros so
             // the empty set normalizes to None, matching C's NULL Bitmapset).
@@ -321,25 +321,25 @@ fn set_relation_partition_info<'run>(
             if words.is_empty() {
                 None
             } else {
-                Some(alloc::boxed::Box::new(pathnodes::Bitmapset { words }))
+                Some(alloc::boxed::Box::new(::pathnodes::Bitmapset { words }))
             }
         });
         // Convert one full-boundinfo Datum into the `'mcx`-free `DatumImage`
         // used for `datumIsEqual`-style comparison. Bound datums are plain
         // scalars or flat by-ref values; map by-value words verbatim and by-ref
         // / cstring payloads to their raw bytes.
-        let datum_image = |d: &Datum<'_>| -> pathnodes::DatumImage {
+        let datum_image = |d: &Datum<'_>| -> ::pathnodes::DatumImage {
             match d {
-                Datum::ByVal(w) => pathnodes::DatumImage::ByVal(*w),
-                Datum::ByRef(b) => pathnodes::DatumImage::Bytes(b.to_vec()),
-                Datum::Cstring(s) => pathnodes::DatumImage::Bytes(s.clone().into_bytes()),
+                Datum::ByVal(w) => ::pathnodes::DatumImage::ByVal(*w),
+                Datum::ByRef(b) => ::pathnodes::DatumImage::Bytes(b.to_vec()),
+                Datum::Cstring(s) => ::pathnodes::DatumImage::Bytes(s.clone().into_bytes()),
                 // A partition bound never holds a composite/expanded/internal
                 // datum; fall back to the zero word (datumIsEqual on it is only
                 // reached if two bounds genuinely disagree elsewhere).
-                _ => pathnodes::DatumImage::ByVal(0),
+                _ => ::pathnodes::DatumImage::ByVal(0),
             }
         };
-        let datums: Vec<Vec<pathnodes::DatumImage>> = bi
+        let datums: Vec<Vec<::pathnodes::DatumImage>> = bi
             .datums
             .iter()
             .map(|row| row.iter().map(&datum_image).collect())
@@ -433,12 +433,12 @@ fn find_partition_scheme<'mcx>(
     // Did not find a matching partition scheme. Create one, copying the relevant
     // information from the relcache (we copy the array contents since the
     // relcache entry may not survive after we close the relation).
-    let mut partsupfunc: Vec<types_core::fmgr::FmgrInfo> = Vec::with_capacity(partnatts);
+    let mut partsupfunc: Vec<::types_core::fmgr::FmgrInfo> = Vec::with_capacity(partnatts);
     for i in 0..partnatts {
         // fmgr_info_copy(&part_scheme->partsupfunc[i], &partkey->partsupfunc[i], cxt).
         // The C `fmgr_info_copy` is `*dstinfo = *srcinfo; dstinfo->fn_extra = NULL`
         // — a flat copy that clears the opaque per-call cache. This `FmgrInfo`
-        // (`types_core::fmgr`) carries no `fn_extra` field (the cache is not
+        // (`::types_core::fmgr`) carries no `fn_extra` field (the cache is not
         // modelled), so the clone IS the faithful copy.
         partsupfunc.push(partkey.partsupfunc.as_slice()[i].clone());
     }
@@ -553,7 +553,7 @@ fn set_baserel_partition_key_exprs<'mcx, 'run>(
 /// not carry the open handle). Used by `get_relation_constraints` when
 /// `include_partition` and the rel is a partition.
 fn set_baserel_partition_constraint<'run>(
-    run_mcx: mcx::Mcx<'run>,
+    run_mcx: ::mcx::Mcx<'run>,
     root: &mut PlannerInfo,
     rel: RelId,
     relid: Oid,
@@ -563,7 +563,7 @@ fn set_baserel_partition_constraint<'run>(
         return Ok(());
     }
 
-    let relcx = mcx::MemoryContext::new("set_baserel_partition_constraint");
+    let relcx = ::mcx::MemoryContext::new("set_baserel_partition_constraint");
     let mcx = relcx.mcx();
 
     let relation =

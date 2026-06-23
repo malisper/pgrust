@@ -27,13 +27,13 @@ use alloc::format;
 use alloc::string::String;
 
 use mcx::{Mcx, MemoryContext, PgVec};
-use types_catalog::pg_publication::{PublicationDesc, PublishGencolsType};
-use types_core::primitive::Oid;
+use ::types_catalog::pg_publication::{PublicationDesc, PublishGencolsType};
+use ::types_core::primitive::Oid;
 use types_error::{PgResult, ERROR};
 use ::nodes::primnodes::Expr;
-use rel::Relation;
+use ::rel::Relation;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use common_relation_seams as relation_seam;
 use indexam_seams as indexam_seam;
@@ -370,12 +370,12 @@ fn decode_node_text_to_exprs(text: &str) -> PgResult<alloc::vec::Vec<Expr<'stati
     // now (correctly) rejects. Mirrors `pull_var_clause`'s result-context idiom.
     let mcx = nodexform_result_mcx();
     let node = read_seam::string_to_node::call(mcx, text)?;
-    let node = mcx::PgBox::into_inner(node);
+    let node = ::mcx::PgBox::into_inner(node);
     let mut out = alloc::vec::Vec::new();
     match node.into_list() {
         Some(elems) => {
             for elem in elems {
-                let inner = mcx::PgBox::into_inner(elem);
+                let inner = ::mcx::PgBox::into_inner(elem);
                 if let Some(e) = inner.into_expr() {
                     out.push(e);
                 }
@@ -396,7 +396,7 @@ fn decode_node_text_to_exprs(text: &str) -> PgResult<alloc::vec::Vec<Expr<'stati
 /// first decode was consumed by the `into_list` test).
 fn node_into_expr_fallback(text: &str) -> PgResult<Option<Expr<'static>>> {
     let node = read_seam::string_to_node::call(nodexform_result_mcx(), text)?;
-    Ok(mcx::PgBox::into_inner(node).into_expr())
+    Ok(::mcx::PgBox::into_inner(node).into_expr())
 }
 
 /// Process-/thread-lifetime context for decoded `pg_index.indexprs`/`indpred`

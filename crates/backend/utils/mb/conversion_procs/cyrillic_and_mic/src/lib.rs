@@ -30,20 +30,20 @@
 
 mod tables;
 
-use utils_error::PgResult;
+use ::utils_error::PgResult;
 use conv_string_helpers::{
     latin2mic, latin2mic_with_table, local2local, make_conversion_builtin, mic2latin,
     mic2latin_with_table, ConversionResult,
 };
-use mbutils_seams::check_encoding_conversion_args;
+use ::mbutils_seams::check_encoding_conversion_args;
 use tables::{
     ISO2KOI, ISO2WIN1251, ISO2WIN866, KOI2ISO, KOI2WIN1251, KOI2WIN866, WIN12512ISO, WIN12512KOI,
     WIN12512WIN866, WIN8662ISO, WIN8662KOI, WIN8662WIN1251,
 };
-use types_wchar::encoding::{
+use ::types_wchar::encoding::{
     pg_enc, PG_ISO_8859_5, PG_KOI8R, PG_MULE_INTERNAL, PG_WIN1251, PG_WIN866,
 };
-use types_wchar::wchar::LC_KOI8_R;
+use ::types_wchar::wchar::LC_KOI8_R;
 
 /// `koi8r_to_mic` (cyrillic_and_mic.c): KOI8-R -> MULE_INTERNAL.
 pub fn koi8r_to_mic(

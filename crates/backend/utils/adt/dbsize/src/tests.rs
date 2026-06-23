@@ -4,12 +4,12 @@
 //! function-pointer slots, so a [`SEAMS_ONCE`] installs a single shared mock set
 //! exactly once for the whole test binary; test-specific scenarios live in the
 //! [`STATE`] mutex the mocks read.  The numeric arithmetic is the REAL ported
-//! `backend-utils-adt-numeric` driven through an owned [`mcx::MemoryContext`].
+//! `backend-utils-adt-numeric` driven through an owned [`::mcx::MemoryContext`].
 //!
 //! Golden vectors are from `postgres-18.3/src/test/regress/expected/dbsize.out`.
 
 use super::*;
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 use std::sync::{Mutex, Once};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());

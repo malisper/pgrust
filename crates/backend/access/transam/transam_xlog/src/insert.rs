@@ -26,15 +26,15 @@ use core::cell::Cell;
 
 use utils_error::{PgError, PgResult};
 use types_core::{TimeLineID, XLogRecPtr};
-use types_storage::storage::{LWLock, LW_EXCLUSIVE};
-use wal::xlog_consts::{
+use ::types_storage::storage::{LWLock, LW_EXCLUSIVE};
+use ::wal::xlog_consts::{
     SIZE_OF_XLOG_LONG_PHD as SizeOfXLogLongPHD, SIZE_OF_XLOG_SHORT_PHD as SizeOfXLogShortPHD,
     XLOG_BLCKSZ,
 };
-use wal::wal::{RM_XLOG_ID, XLR_INFO_MASK, XLOG_MARK_UNIMPORTANT};
+use ::wal::wal::{RM_XLOG_ID, XLR_INFO_MASK, XLOG_MARK_UNIMPORTANT};
 
 use lwlock as lwlock;
-use init_small::globals;
+use ::init_small::globals;
 
 use crate::shmem::{
     self, redo_rec_ptr_cached, refresh_xlog_write_result, set_redo_rec_ptr_cached, wal_insert_locks,
@@ -226,7 +226,7 @@ unsafe fn insert_lock(i: usize) -> &'static LWLock {
 ///
 /// # Safety
 /// The lock array must have been allocated by `XLOGShmemInit`.
-unsafe fn inserting_at(i: usize) -> &'static types_storage::storage::pg_atomic_uint64 {
+unsafe fn inserting_at(i: usize) -> &'static ::types_storage::storage::pg_atomic_uint64 {
     let locks = wal_insert_locks();
     &(*locks.add(i)).l.insertingAt
 }

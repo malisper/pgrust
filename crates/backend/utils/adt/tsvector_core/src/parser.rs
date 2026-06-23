@@ -21,17 +21,17 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_SYNTAX_ERROR, ERROR,
 };
-use tsearch::tsearch::{
+use ::tsearch::tsearch::{
     WordEntryPos, LIMITPOS, P_TSV_IS_TSQUERY, P_TSV_IS_WEB, P_TSV_OPR_IS_DELIM, WEP_GETPOS,
     WEP_GETWEIGHT, WEP_SETPOS, WEP_SETWEIGHT, TsVectorParseStateHandle,
 };
 
-use ts_small::util::oom;
-use tsvector_core_seams::TsVectorToken;
+use ::ts_small::util::oom;
+use ::tsvector_core_seams::TsVectorToken;
 use mbutils_seams as mb;
 
 extern crate alloc;

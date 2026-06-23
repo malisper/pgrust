@@ -9,9 +9,9 @@
 
 #![allow(non_snake_case)]
 
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use opclass::{AlterOpFamilyStmt, CreateOpClassStmt, CreateOpFamilyStmt, OpFamilyMember};
 
 seam_core::seam!(

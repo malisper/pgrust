@@ -11,19 +11,19 @@
 
 use mcx::{Mcx, MemoryContext};
 use authid::{AuthIdUpdate, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord};
-use types_catalog::pg_authid as pa;
-use types_core::fmgr::F_OIDEQ;
+use ::types_catalog::pg_authid as pa;
+use ::types_core::fmgr::F_OIDEQ;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use rel::{Relation, RelationData};
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::RowExclusiveLock;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
 use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam;
-use table::table_open;
+use ::table::table_open;
 
 use crate::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 
@@ -36,7 +36,7 @@ fn name_datum<'mcx>(mcx: Mcx<'mcx>, src: &str) -> PgResult<Datum<'mcx>> {
         name[i] = b;
     }
     name[63] = 0;
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &name[..])?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &name[..])?))
 }
 
 /// `CStringGetTextDatum(s)` — a `text` varlena image carried as `Datum::ByRef`.
@@ -44,7 +44,7 @@ fn text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
     let payload = s.as_bytes();
     let total = 4 + payload.len();
     let word = (total as u32) << 2;
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.extend_from_slice(&word.to_ne_bytes());
     buf.extend_from_slice(payload);
     Ok(Datum::ByRef(buf))

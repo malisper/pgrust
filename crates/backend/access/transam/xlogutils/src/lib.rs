@@ -35,26 +35,26 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use utils_error::{elog, ereport, message_level_is_interesting};
-use types_error::error::{
+use ::types_error::error::{
     DEBUG1, DEBUG2, DEBUG3, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR, ERROR, PANIC, WARNING,
 };
-use types_error::ErrorLevel;
-use types_error::PgResult;
+use ::types_error::ErrorLevel;
+use ::types_error::PgResult;
 
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, Buffer, ForkNumber, Oid, TimeLineID, XLogRecPtr, XLogSegNo, BLCKSZ,
     INIT_FORKNUM, INVALID_PROC_NUMBER, InvalidBlockNumber,
 };
-use types_core::xact::InvalidXLogRecPtr;
+use ::types_core::xact::InvalidXLogRecPtr;
 use types_storage::{ReadBufferMode, RelFileLocator};
-use wal::rmgr::XLogReaderState;
+use ::wal::rmgr::XLogReaderState;
 use wal::{HotStandbyState, XLogRedoAction, BKPBLOCK_WILL_INIT, STANDBY_DISABLED, XLOG_BLCKSZ};
 
 use timeline_seams as timeline_seam;
 use transam_xlog_seams as xlog_seam;
 use transam_xlog_seams::{WalReadErrorInfo, WalReadOutcome};
 use xlogreader_seams as reader_seam;
-use xlogreader_seams::XLogBlockTag;
+use ::xlogreader_seams::XLogBlockTag;
 use xlogrecovery_seams as recovery_seam;
 use bufmgr_seams as buf_seam;
 use fd_seams as fd_seam;
@@ -749,7 +749,7 @@ pub fn read_local_xlog_page(
     read_local_xlog_page_guts(state, targetPagePtr, reqLen, targetRecPtr, cur_page, true)
 }
 
-/// The [`WALSegmentOpenCB`](wal::rmgr::WALSegmentOpenCB) adapter for
+/// The [`WALSegmentOpenCB`](::wal::rmgr::WALSegmentOpenCB) adapter for
 /// [`wal_segment_open`]. The CB takes `TimeLineID *tli_p` (in/out); the ported
 /// `wal_segment_open` takes the timeline by value (it only reads it — local
 /// pg_wal segment open never rewrites the caller's TLI), so the adapter just
@@ -762,7 +762,7 @@ fn wal_segment_open_cb(
     wal_segment_open(state, next_seg_no, *tli_p)
 }
 
-/// The [`XLogPageReadCB`](wal::rmgr::XLogPageReadCB) adapter for
+/// The [`XLogPageReadCB`](::wal::rmgr::XLogPageReadCB) adapter for
 /// [`read_local_xlog_page`]. The C callback takes `char *readBuf` as its last
 /// argument, which is the reader's own `state->readBuf`; in C the reader passes
 /// `state->readBuf` to `state->routine.page_read(...)` itself. Our value-typed
@@ -976,8 +976,8 @@ pub fn init_seams() {
     // bootstrap/2PC/SQL WAL readers forward). The handle is the C
     // `XLogReaderRoutine *`; the only routine the in-tree callers ever pass is
     // this stock one, so resolution is constant.
-    xlogreader_seams::xlog_reader_routine_for_handle::set(|_handle| {
-        wal::rmgr::XLogReaderRoutine {
+    ::xlogreader_seams::xlog_reader_routine_for_handle::set(|_handle| {
+        ::wal::rmgr::XLogReaderRoutine {
             page_read: Some(read_local_xlog_page_cb),
             segment_open: Some(wal_segment_open_cb),
             segment_close: Some(wal_segment_close),

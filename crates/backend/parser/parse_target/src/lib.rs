@@ -39,7 +39,7 @@ use types_error::{
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_COLUMN, ERROR,
 };
-use types_tuple::heaptuple::{RECORDOID, TEXTOID, UNKNOWNOID};
+use ::types_tuple::heaptuple::{RECORDOID, TEXTOID, UNKNOWNOID};
 
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::parsenodes::{
@@ -54,13 +54,13 @@ use ::nodes::primnodes::{
 use ::nodes::primnodes::XmlExprOp;
 use ::nodes::primnodes::JsonExprOp;
 use ::nodes::rawnodes::{A_Indirection, ColumnRef, ResTarget};
-use parsenodes::CoercionContext;
+use ::parsenodes::CoercionContext;
 
-use types_acl::acl::ACL_SELECT;
+use ::types_acl::acl::ACL_SELECT;
 
-use utils_error::ereport;
-use nodes_core::makefuncs::{make_null_const, make_target_entry, make_var};
-use nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
+use ::utils_error::ereport;
+use ::nodes_core::makefuncs::{make_null_const, make_target_entry, make_var};
+use ::nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
 
 use parser_relation as parse_relation;
 use coerce as parse_coerce;
@@ -101,7 +101,7 @@ fn raw_settodefault_to_prim(d: &::nodes::rawexprnodes::SetToDefault) -> SetToDef
 }
 
 /// `NameStr(attr->attname)` as a `&str`.
-fn attname_str(attr: &types_tuple::heaptuple::FormData_pg_attribute) -> &str {
+fn attname_str(attr: &::types_tuple::heaptuple::FormData_pg_attribute) -> &str {
     let bytes = attr.attname.name_str();
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     core::str::from_utf8(&bytes[..end]).unwrap_or("")
@@ -1206,8 +1206,8 @@ pub fn checkInsertTargets<'mcx>(
             // Check for duplicates, but only of whole columns.
             if col.indirection.is_empty() {
                 // whole column; must not have any other assignment.
-                if nodes_core::bitmapset::bms_is_member(attrno as i32, wholecols.as_deref())
-                    || nodes_core::bitmapset::bms_is_member(attrno as i32, partialcols.as_deref())
+                if ::nodes_core::bitmapset::bms_is_member(attrno as i32, wholecols.as_deref())
+                    || ::nodes_core::bitmapset::bms_is_member(attrno as i32, partialcols.as_deref())
                 {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_DUPLICATE_COLUMN)
@@ -1216,10 +1216,10 @@ pub fn checkInsertTargets<'mcx>(
                         .into_error());
                 }
                 wholecols =
-                    Some(nodes_core::bitmapset::bms_add_member(mcx, wholecols, attrno as i32)?);
+                    Some(::nodes_core::bitmapset::bms_add_member(mcx, wholecols, attrno as i32)?);
             } else {
                 // partial column; must not have any whole assignment.
-                if nodes_core::bitmapset::bms_is_member(attrno as i32, wholecols.as_deref()) {
+                if ::nodes_core::bitmapset::bms_is_member(attrno as i32, wholecols.as_deref()) {
                     return Err(ereport(ERROR)
                         .errcode(ERRCODE_DUPLICATE_COLUMN)
                         .errmsg(alloc::format!("column \"{name}\" specified more than once"))
@@ -1227,7 +1227,7 @@ pub fn checkInsertTargets<'mcx>(
                         .into_error());
                 }
                 partialcols =
-                    Some(nodes_core::bitmapset::bms_add_member(mcx, partialcols, attrno as i32)?);
+                    Some(::nodes_core::bitmapset::bms_add_member(mcx, partialcols, attrno as i32)?);
             }
 
             attrnos.try_reserve(1).map_err(|_| mcx.oom(1))?;
@@ -1414,7 +1414,7 @@ fn make_range_var_node<'mcx>(
             None => None,
         },
         inh: true,
-        relpersistence: types_tuple::access::RELPERSISTENCE_PERMANENT as i8,
+        relpersistence: ::types_tuple::access::RELPERSISTENCE_PERMANENT as i8,
         alias: None,
         location,
     })
@@ -1655,7 +1655,7 @@ fn ExpandRowReference<'mcx>(
         if make_target_entry {
             let resno = pstate.p_next_resno as AttrNumber;
             pstate.p_next_resno += 1;
-            let te = nodes_core::makefuncs::make_target_entry(
+            let te = ::nodes_core::makefuncs::make_target_entry(
                 mcx,
                 Expr::FieldSelect(fselect),
                 resno,
@@ -1716,7 +1716,7 @@ pub fn expandRecordVariable<'mcx>(
     pstate: &ParseState<'mcx>,
     var: &Var,
     levelsup: i32,
-) -> PgResult<types_tuple::heaptuple::TupleDescData<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDescData<'mcx>> {
     debug_assert!(var.vartype == RECORDOID);
 
     let netlevelsup = var.varlevelsup as i32 + levelsup;
@@ -1871,15 +1871,15 @@ pub fn expandRecordVariable<'mcx>(
 fn get_expr_result_tupdesc_node<'mcx>(
     mcx: Mcx<'mcx>,
     expr: &Node<'mcx>,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     funcapi::result_type::get_expr_result_tupdesc(mcx, Some(expr), false)
 }
 
 /// `Assert(tupleDesc)` — get_expr_result_tupdesc with no_error=false never
 /// returns NULL.
 fn unwrap_tupdesc<'mcx>(
-    td: types_tuple::heaptuple::TupleDesc<'mcx>,
-) -> types_tuple::heaptuple::TupleDescData<'mcx> {
+    td: ::types_tuple::heaptuple::TupleDesc<'mcx>,
+) -> ::types_tuple::heaptuple::TupleDescData<'mcx> {
     PgBox::into_inner(td.expect("get_expr_result_tupdesc returned NULL"))
 }
 
@@ -2420,9 +2420,9 @@ fn transform_target_entry_seam<'mcx>(
 fn figure_colname_seam<'mcx>(
     mcx: Mcx<'mcx>,
     node: &Node<'mcx>,
-) -> PgResult<mcx::PgString<'mcx>> {
+) -> PgResult<::mcx::PgString<'mcx>> {
     let name = FigureColname(Some(node)).unwrap_or_else(|| String::from("?column?"));
-    mcx::PgString::from_str_in(&name, mcx)
+    ::mcx::PgString::from_str_in(&name, mcx)
 }
 
 /// Seam adapter for `expand_record_variable` (declared in
@@ -2438,9 +2438,9 @@ fn expand_record_variable_seam<'mcx>(
     pstate: &mut ParseState<'mcx>,
     var: &Var,
     levelsup: i32,
-) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDesc<'mcx>> {
     let td = expandRecordVariable(mcx, pstate, var, levelsup)?;
-    Ok(Some(mcx::alloc_in(mcx, td)?))
+    Ok(Some(::mcx::alloc_in(mcx, td)?))
 }
 
 /// Install this crate's inward seams (owner of `backend-parser-target-seams`,

@@ -18,9 +18,9 @@ use alloc::vec::Vec;
 /// parallel-apply shared header keeps a copy (`ParallelApplyWorkerShared.fileset`)
 /// so the leader can hand the serialized-changes fileset to the parallel apply
 /// worker and re-use it for the next streaming transaction. Canonically defined
-/// in `types_storage::fileset` (the `storage/fileset.h` home); re-exported here
+/// in `::types_storage::fileset` (the `storage/fileset.h` home); re-exported here
 /// so existing `applyparallel::FileSet` paths keep working.
-pub use types_storage::fileset::FileSet;
+pub use ::types_storage::fileset::FileSet;
 
 /// `shm_mq_result` (`storage/shm_mq.h`) — outcome of a non-blocking send/receive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -26,9 +26,9 @@
 use utils_error::{errdetail_internal, errfinish, errmsg_internal, errstart};
 use mcx::{Mcx, PgString};
 use types_error::{PgResult, LOG};
-use types_timeout::TimeoutId;
+use ::types_timeout::TimeoutId;
 
-use init_small::globals as g;
+use ::init_small::globals as g;
 
 // `__FILE__` / `__LINE__` / `__func__` for `errfinish`.
 macro_rules! here {
@@ -329,7 +329,7 @@ pub fn log_disconnections() -> PgResult<()> {
         } else {
             alloc::format!(" port={remote_port}")
         };
-        utils_error::errmsg(&alloc::format!(
+        ::utils_error::errmsg(&alloc::format!(
             "disconnection: session time: {hours}:{minutes:02}:{seconds:02}.{msecs:03} \
              user={user_name} database={database_name} host={remote_host}{port_clause}"
         ))?;

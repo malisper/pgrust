@@ -26,10 +26,10 @@
 //! this executor-frame registration. The dual home mirrors the `json_record`
 //! family.
 
-use mcx::Mcx;
-use types_core::Oid;
-use datum::varlena::VARHDRSZ;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::datum::varlena::VARHDRSZ;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 

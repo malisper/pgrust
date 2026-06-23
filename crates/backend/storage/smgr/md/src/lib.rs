@@ -31,39 +31,39 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use relpath::relpathbackend as relpath_backend_fn;
+use ::relpath::relpathbackend as relpath_backend_fn;
 use fd as fd;
-use fd::vfd_core;
+use ::fd::vfd_core;
 use utils_error::{ereport, PgError, PgResult};
 use types_error::{DEBUG1, ERROR, FATAL, WARNING};
-use types_core::primitive::{
+use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, MaxBlockNumber, ProcNumber, INVALID_PROC_NUMBER,
     MAX_FORKNUM,
 };
 use types_core::{Oid, BLCKSZ};
-use types_error::ErrorLevel;
+use ::types_error::ErrorLevel;
 use types_error::{
     ERRCODE_DATA_CORRUPTED, ERRCODE_DISK_FULL, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
-use types_pgstat::wait_event::{
+use ::types_pgstat::wait_event::{
     WAIT_EVENT_DATA_FILE_EXTEND, WAIT_EVENT_DATA_FILE_FLUSH, WAIT_EVENT_DATA_FILE_IMMEDIATE_SYNC,
     WAIT_EVENT_DATA_FILE_PREFETCH, WAIT_EVENT_DATA_FILE_READ, WAIT_EVENT_DATA_FILE_SYNC,
     WAIT_EVENT_DATA_FILE_TRUNCATE, WAIT_EVENT_DATA_FILE_WRITE,
 };
-use types_storage::file::{File, FILE_EXTEND_METHOD_WRITE_ZEROS, IO_DIRECT_DATA};
-use types_storage::smgr::{
+use ::types_storage::file::{File, FILE_EXTEND_METHOD_WRITE_ZEROS, IO_DIRECT_DATA};
+use ::types_storage::smgr::{
     MdRelnState, MdfdVec, SMgrRelationData, EXTENSION_CREATE, EXTENSION_CREATE_RECOVERY,
     EXTENSION_DONT_OPEN, EXTENSION_FAIL, EXTENSION_RETURN_NULL, RELSEG_SIZE,
 };
-use types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
+use ::types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
 use types_storage::{RelFileLocator, RelFileLocatorBackend};
 
-use xlogrecovery_seams::in_recovery as in_recovery_seam;
-use binary_upgrade_seams::is_binary_upgrade as is_binary_upgrade_seam;
-use tablespace_seams::tablespace_create_dbspace as tablespace_create_dbspace_seam;
+use ::xlogrecovery_seams::in_recovery as in_recovery_seam;
+use ::binary_upgrade_seams::is_binary_upgrade as is_binary_upgrade_seam;
+use ::tablespace_seams::tablespace_create_dbspace as tablespace_create_dbspace_seam;
 use md_seams as md_seam;
-use sync_seams::register_sync_request as register_sync_request_seam;
+use ::sync_seams::register_sync_request as register_sync_request_seam;
 
 // ===========================================================================
 // md.c constants
@@ -73,7 +73,7 @@ use sync_seams::register_sync_request as register_sync_request_seam;
 const BLCKSZ_I64: i64 = BLCKSZ as i64;
 
 /// `PG_IOV_MAX` — md clamps each segment's block run to `lengthof(iov)`.
-const PG_IOV_MAX: usize = types_storage::smgr::PG_IOV_MAX;
+const PG_IOV_MAX: usize = ::types_storage::smgr::PG_IOV_MAX;
 
 // `errno` constants md.c branches on (`storage/fd.h` FILE_POSSIBLY_DELETED).
 const ENOENT: i32 = libc::ENOENT;
@@ -1750,7 +1750,7 @@ fn file_write_block(file: File, buffer: &[u8], seekpos: i64, wait_event: u32) ->
 
 /// The four-fork iterator (`for (forknum = 0; forknum <= MAX_FORKNUM; ...)`),
 /// since `ForkNumber` is a non-stepping enum.
-fn fork_iter() -> [ForkNumber; types_storage::smgr::SMGR_NFORKS] {
+fn fork_iter() -> [ForkNumber; ::types_storage::smgr::SMGR_NFORKS] {
     [
         ForkNumber::MAIN_FORKNUM,
         ForkNumber::FSM_FORKNUM,
@@ -1776,8 +1776,8 @@ fn elog_fatal<T>(msg: &str, func: &'static str) -> PgResult<T> {
 }
 
 /// Error location for md.c diagnostics.
-fn md_location(funcname: &'static str) -> types_error::ErrorLocation {
-    types_error::ErrorLocation::new("md.c", 0, funcname)
+fn md_location(funcname: &'static str) -> ::types_error::ErrorLocation {
+    ::types_error::ErrorLocation::new("md.c", 0, funcname)
 }
 
 // ===========================================================================

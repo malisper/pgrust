@@ -24,8 +24,8 @@
 //! yet carry for those shapes.
 
 use types_core::{TimestampTz, XLogRecPtr};
-use datum::Datum;
-use fmgr::boundary::RefPayload;
+use ::datum::Datum;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ fn ret_bool(v: bool) -> Datum {
 fn ret_text(fcinfo: &mut FunctionCallInfoBaseData, bytes: Vec<u8>) -> Datum {
     const VARHDRSZ: usize = 4;
     let mut image = Vec::with_capacity(bytes.len() + VARHDRSZ);
-    image.extend_from_slice(&datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
+    image.extend_from_slice(&::datum::varlena::set_varsize_4b(bytes.len() + VARHDRSZ));
     image.extend_from_slice(&bytes);
     fcinfo.set_ref_result(RefPayload::Varlena(image));
     Datum::from_usize(0)

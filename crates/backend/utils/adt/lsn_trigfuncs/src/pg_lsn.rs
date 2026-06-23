@@ -2,7 +2,7 @@
 //! `pg_lsn` datatype.
 //!
 //! The on-disk / wire representation of a `pg_lsn` value is an
-//! [`XLogRecPtr`](types_core::XLogRecPtr) (a 64-bit unsigned integer); the C
+//! [`XLogRecPtr`](::types_core::XLogRecPtr) (a 64-bit unsigned integer); the C
 //! code stores it as an `int8` `Datum` and renders it as `"%X/%X"` text. Every
 //! SQL-callable function `pg_lsn.c` owns is ported here with the original C
 //! name and logic / branch-order / message-text / SQLSTATE preserved 1:1.
@@ -15,16 +15,16 @@
 //! `numericvar_to_uint64`).
 
 use mcx::{Mcx, PgVec};
-use types_core::XLogRecPtr;
+use ::types_core::XLogRecPtr;
 use types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
 };
-use types_numeric::var::NumericSign;
+use ::types_numeric::var::NumericSign;
 
-use adt_numeric::convert::{numericvar_to_uint64, set_var_from_num};
-use adt_numeric::io::numeric_in;
-use adt_numeric::ops_sql::{numeric_add, numeric_sub};
+use ::adt_numeric::convert::{numericvar_to_uint64, set_var_from_num};
+use ::adt_numeric::io::numeric_in;
+use ::adt_numeric::ops_sql::{numeric_add, numeric_sub};
 use hashfn::{hash_bytes_uint32, hash_bytes_uint32_extended};
 
 /// `#define MAXPG_LSNLEN 17`
@@ -33,7 +33,7 @@ pub const MAXPG_LSNLEN: usize = 17;
 pub const MAXPG_LSNCOMPONENT: usize = 8;
 
 /// `InvalidXLogRecPtr` (== 0).
-pub const INVALID_XLOG_REC_PTR: XLogRecPtr = types_core::InvalidXLogRecPtr;
+pub const INVALID_XLOG_REC_PTR: XLogRecPtr = ::types_core::InvalidXLogRecPtr;
 
 // ---------------------------------------------------------------------------
 // Formatting and conversion routines
@@ -130,7 +130,7 @@ pub fn pg_lsn_recv(buf: &[u8]) -> PgResult<XLogRecPtr> {
         return Err(PgError::error(
             "insufficient data left in message",
         )
-        .with_sqlstate(types_error::ERRCODE_PROTOCOL_VIOLATION));
+        .with_sqlstate(::types_error::ERRCODE_PROTOCOL_VIOLATION));
     }
     let bytes: [u8; 8] = buf[..8].try_into().expect("checked len >= 8");
     Ok(u64::from_be_bytes(bytes))
@@ -227,7 +227,7 @@ pub fn pg_lsn_hash_extended(lsn: XLogRecPtr, seed: u64) -> u64 {
 ///
 /// `hashfunc.c` is not yet a crate of its own; this is a faithful copy of its
 /// sign-dependent fold delegating the final mix to the ported
-/// [`hashfn::hash_bytes_uint32`] (== `common/hashfn.c`'s `hash_uint32`).
+/// [`::hashfn::hash_bytes_uint32`] (== `common/hashfn.c`'s `hash_uint32`).
 ///
 /// ```c
 /// int64  val    = PG_GETARG_INT64(0);
@@ -325,7 +325,7 @@ pub fn pg_lsn_mi<'mcx>(
 /// integer, parsed via `numeric_in`, added to `nbytes`, and converted back to a
 /// `pg_lsn` via [`numeric_pg_lsn`].
 pub fn pg_lsn_pli(mcx: Mcx<'_>, lsn: XLogRecPtr, nbytes: &[u8]) -> PgResult<XLogRecPtr> {
-    if types_numeric::numeric_is_nan(nbytes) {
+    if ::types_numeric::numeric_is_nan(nbytes) {
         return Err(PgError::error("cannot add NaN to pg_lsn")
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
     }
@@ -349,7 +349,7 @@ pub fn pg_lsn_pli(mcx: Mcx<'_>, lsn: XLogRecPtr, nbytes: &[u8]) -> PgResult<XLog
 /// integer, parsed via `numeric_in`, has `nbytes` subtracted, and is converted
 /// back to a `pg_lsn` via [`numeric_pg_lsn`].
 pub fn pg_lsn_mii(mcx: Mcx<'_>, lsn: XLogRecPtr, nbytes: &[u8]) -> PgResult<XLogRecPtr> {
-    if types_numeric::numeric_is_nan(nbytes) {
+    if ::types_numeric::numeric_is_nan(nbytes) {
         return Err(PgError::error("cannot subtract NaN from pg_lsn")
             .with_sqlstate(ERRCODE_FEATURE_NOT_SUPPORTED));
     }
@@ -367,8 +367,8 @@ pub fn pg_lsn_mii(mcx: Mcx<'_>, lsn: XLogRecPtr, nbytes: &[u8]) -> PgResult<XLog
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adt_numeric::io::numeric_out;
-    use mcx::MemoryContext;
+    use ::adt_numeric::io::numeric_out;
+    use ::mcx::MemoryContext;
 
     /// Build an on-disk Numeric varlena from a decimal/special string.
     fn nbytes<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgVec<'mcx, u8> {

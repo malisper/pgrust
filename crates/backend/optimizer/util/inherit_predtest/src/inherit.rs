@@ -40,10 +40,10 @@
 
 use relnode_seams as relnode;
 
-use types_core::primitive::InvalidAttrNumber;
+use ::types_core::primitive::InvalidAttrNumber;
 use types_error::{PgError, PgResult};
 use pathnodes::{NodeId, PlannerInfo, RelId, Relids};
-use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
+use ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 
 /// `FirstLowInvalidHeapAttributeNumber` as `i32` (the offset applied to every
 /// attribute number so that system attributes map to non-negative bits).

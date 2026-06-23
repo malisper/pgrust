@@ -13,7 +13,7 @@
 
 use std::cell::Cell;
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 thread_local! {
     /// `volatile sig_atomic_t ConfigReloadPending = false;`

@@ -19,31 +19,31 @@
 
 use mcx::{Mcx, MemoryContext};
 
-use types_catalog::catalog::RELATION_RELATION_ID;
-use types_catalog::catalog_dependency::{
+use ::types_catalog::catalog::RELATION_RELATION_ID;
+use ::types_catalog::catalog_dependency::{
     InvalidObjectAddress, ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
 };
-use types_catalog::pg_attrdef::{
+use ::types_catalog::pg_attrdef::{
     Anum_pg_attrdef_adnum, Anum_pg_attrdef_adrelid, Anum_pg_attrdef_oid, AttrDefaultIndexId,
     AttrDefaultOidIndexId, AttrDefaultRelationId, FormData_pg_attrdef, PgAttrdefInsertRow,
 };
-use types_core::fmgr::{F_INT2EQ, F_OIDEQ};
-use types_core::primitive::{AttrNumber, InvalidOid, Oid};
+use ::types_core::fmgr::{F_INT2EQ, F_OIDEQ};
+use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::DropBehavior;
-use rel::RelationData;
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
-use types_tuple::heaptuple::{Datum, FormedTuple};
+use ::rel::RelationData;
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
+use ::types_tuple::heaptuple::{Datum, FormedTuple};
 
-use heaptuple::heap_deform_tuple;
+use ::heaptuple::heap_deform_tuple;
 use common_relation as relation;
-use scankey::ScanKeyInit;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
 use dependency_seams as dependency_seams;
-use dependency_seams::PERFORM_DELETION_INTERNAL;
+use ::dependency_seams::PERFORM_DELETION_INTERNAL;
 use indexing_seams as indexing_seams;
 use objectaccess_seams as objectaccess_seams;
 use nodes_core_seams as nodes_seams;
@@ -119,7 +119,7 @@ fn systable_scan_foreach(
             break;
         };
         let cols = heap_deform_tuple(smcx, &tup.tuple, &rel.rd_att, &tup.data)?;
-        let mut values: mcx::PgVec<'_, Datum<'_>> = mcx::vec_with_capacity_in(smcx, cols.len())?;
+        let mut values: ::mcx::PgVec<'_, Datum<'_>> = ::mcx::vec_with_capacity_in(smcx, cols.len())?;
         for (value, _null) in cols.iter() {
             values.push(value.clone());
         }
@@ -314,7 +314,7 @@ pub fn RemoveAttrDefaultById(attrdefId: Oid) -> PgResult<()> {
     /* Find the pg_attrdef tuple */
     let scankeys = [oid_key(Anum_pg_attrdef_oid, attrdefId)?];
 
-    let mut found: Option<(Oid, i16, types_tuple::heaptuple::ItemPointerData)> = None;
+    let mut found: Option<(Oid, i16, ::types_tuple::heaptuple::ItemPointerData)> = None;
     systable_scan_foreach(&attrdef_rel, AttrDefaultOidIndexId, &scankeys, |row| {
         found = Some((row.form.adrelid, row.form.adnum, row.htup.tuple.t_self));
         Ok(false)

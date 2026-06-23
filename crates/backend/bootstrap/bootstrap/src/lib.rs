@@ -21,19 +21,19 @@
 
 use std::cell::RefCell;
 
-use utils_error::ereport;
-use mcx::Mcx;
-use types_tuple::heaptuple::Datum as TupleDatum;
+use ::utils_error::ereport;
+use ::mcx::Mcx;
+use ::types_tuple::heaptuple::Datum as TupleDatum;
 use types_error::{ErrorLocation, PgError, PgResult};
 use types_error::{DEBUG4, ERROR, WARNING};
-use types_error::ERRCODE_SYNTAX_ERROR;
-use types_guc::guc::{PGC_INTERNAL, PGC_POSTMASTER, PGC_S_ARGV, PGC_S_DYNAMIC_DEFAULT};
+use ::types_error::ERRCODE_SYNTAX_ERROR;
+use ::types_guc::guc::{PGC_INTERNAL, PGC_POSTMASTER, PGC_S_ARGV, PGC_S_DYNAMIC_DEFAULT};
 use ::nodes::execnodes::IndexInfo;
 use rel::{Relation, RelationData};
-use signal::SigHandler;
-use types_startup::DispatchOption;
-use types_tuple::heaptuple::{FormData_pg_attribute, NameData, ATTRIBUTE_FIXED_PART_SIZE};
-use types_tuple::pg_type::FormData_pg_type;
+use ::signal::SigHandler;
+use ::types_startup::DispatchOption;
+use ::types_tuple::heaptuple::{FormData_pg_attribute, NameData, ATTRIBUTE_FIXED_PART_SIZE};
+use ::types_tuple::pg_type::FormData_pg_type;
 
 const FILE: &str = "bootstrap.c";
 
@@ -940,7 +940,7 @@ fn find_in_typ(type_: &str) -> Option<(usize, Oid)> {
 
 /// Result of [`boot_get_type_io_data`]. Defined in the seam crate so the
 /// across-cycle `lsyscache.c` caller and this owner share one type.
-pub use bootstrap_seams::BootTypeIoData;
+pub use ::bootstrap_seams::BootTypeIoData;
 
 /// `boot_get_type_io_data` — obtain type I/O information at bootstrap time.
 ///
@@ -1076,8 +1076,8 @@ pub fn build_indices(mcx: Mcx<'static>) -> PgResult<()> {
  * pure logic, ported in-crate.
  * ========================================================================= */
 
-fn make_range_var(relname: &str) -> types_tuple::access::RangeVar {
-    types_tuple::access::RangeVar {
+fn make_range_var(relname: &str) -> ::types_tuple::access::RangeVar {
+    ::types_tuple::access::RangeVar {
         catalogname: None,
         schemaname: None,
         relname: relname.to_string(),
@@ -1395,7 +1395,7 @@ impl Getopt {
  * ========================================================================= */
 
 pub fn init_seams() {
-    bootstrap_seams::boot_get_type_io_data::set(boot_get_type_io_data);
+    ::bootstrap_seams::boot_get_type_io_data::set(boot_get_type_io_data);
 }
 
 #[cfg(test)]

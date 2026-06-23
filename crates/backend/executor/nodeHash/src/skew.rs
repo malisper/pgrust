@@ -1,7 +1,7 @@
 //! The skew-optimization hashtable: build the skew bucket set from the outer
 //! relation's MCVs, look up / insert into it, and shrink it on demand.
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_core::{uint32, Size};
 // Datum-unification status (Wave 7): this crate's only canonical-Datum work is
 // already done — the `MultiExecPrivateHash` / `ExecHashTableInsert` hash path in
@@ -11,22 +11,22 @@ use types_core::{uint32, Size};
 // to migrate.
 //
 // The skew-MCV probe below flows through two seam ABI edges that are still bare
-// machine words (`datum::Datum`): lsyscache's `get_attstatsslot_mcv` hands
+// machine words (`::datum::Datum`): lsyscache's `get_attstatsslot_mcv` hands
 // back `PgVec<Datum>` MCV values (mirroring the still-bare-word
 // `AttStatsSlot.values`), and fmgr's `function_call1_coll` consumes/returns a
 // bare scalar word. These are the genuinely-sanctioned bare-word edges per the
-// datum-redesign plan: the unified `types_tuple::Datum<'mcx>` value type cannot
+// datum-redesign plan: the unified `::types_tuple::Datum<'mcx>` value type cannot
 // cross them until those owners (lsyscache `AttStatsSlot` + the fmgr arg)
 // migrate together — the execTuples canonical-carrier follow-on (#113). The MCV
 // word is read out of one bare-word seam and fed straight into the other, so it
 // stays a bare word; it is never forged into / out of the canonical type here.
-use datum::Datum as DatumWord;
-use types_error::PgResult;
+use ::datum::Datum as DatumWord;
+use ::types_error::PgResult;
 use ::nodes::nodehash::{
     Hash, HashJoinBuckets, HashJoinTupleData, HashJoinTupleLink, HashSkewBucket, HashState,
     HashJoinTableData, INVALID_SKEW_BUCKET_NO,
 };
-use types_tuple::heaptuple::HEAP_TUPLE_HAS_MATCH;
+use ::types_tuple::heaptuple::HEAP_TUPLE_HAS_MATCH;
 
 use crate::hash_table::{dense_alloc, ExecHashGetBucketAndBatch, ExecHashIncreaseNumBatches};
 use crate::{MaxAllocSize, SKEW_BUCKET_OVERHEAD, HJTUPLE_OVERHEAD, SKEW_MIN_OUTER_FRACTION};
@@ -54,7 +54,7 @@ pub fn ExecHashBuildSkewHash<'mcx>(
     mut mcvsToUse: i32,
 ) -> PgResult<()> {
     // Do nothing if planner didn't identify the outer relation's join key.
-    if !types_core::OidIsValid(node.skewTable) {
+    if !::types_core::OidIsValid(node.skewTable) {
         return Ok(());
     }
     // Also, do nothing if we don't have room for at least one skew bucket.
@@ -130,14 +130,14 @@ pub fn ExecHashBuildSkewHash<'mcx>(
     //       nbuckets * sizeof(HashSkewBucket *));
     //   hashtable->skewBucketNums = MemoryContextAllocZero(batchCxt,
     //       mcvsToUse * sizeof(int));
-    let mut skewBucket = mcx::vec_with_capacity_in::<Option<Box<HashSkewBucket>>>(
+    let mut skewBucket = ::mcx::vec_with_capacity_in::<Option<Box<HashSkewBucket>>>(
         mcx,
         nbuckets as usize,
     )?;
     for _ in 0..nbuckets {
         skewBucket.push(None);
     }
-    let mut skewBucketNums = mcx::vec_with_capacity_in::<i32>(mcx, mcvsToUse as usize)?;
+    let mut skewBucketNums = ::mcx::vec_with_capacity_in::<i32>(mcx, mcvsToUse as usize)?;
     for _ in 0..mcvsToUse {
         skewBucketNums.push(0);
     }
@@ -448,8 +448,8 @@ pub fn ExecHashRemoveNextSkewBucket<'mcx>(
     if hashtable.nSkewBuckets == 0 {
         hashtable.skewEnabled = false;
         // pfree(skewBucket) / pfree(skewBucketNums): clear the owned arrays.
-        hashtable.skewBucket = mcx::PgVec::new_in(mcx);
-        hashtable.skewBucketNums = mcx::PgVec::new_in(mcx);
+        hashtable.skewBucket = ::mcx::PgVec::new_in(mcx);
+        hashtable.skewBucketNums = ::mcx::PgVec::new_in(mcx);
         hashtable.spaceUsed -= hashtable.spaceUsedSkew;
         hashtable.spaceUsedSkew = 0;
     }

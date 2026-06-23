@@ -67,7 +67,7 @@
 //! until context reset) this is automatic and leak-free.
 
 // `clippy::result_large_err`: the allocating operations (insert) return the
-// shared `utils_error::PgResult` to model the C `elog(ERROR, ...)`
+// shared `::utils_error::PgResult` to model the C `elog(ERROR, ...)`
 // non-local exit faithfully (here, OOM from a `try_reserve`). `PgError`'s size
 // is fixed by that crate, and the un-boxed `PgResult` is the project-wide error
 // contract these ports must match; boxing it locally would diverge from every
@@ -79,7 +79,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use utils_error::elog;
+use ::utils_error::elog;
 use types_error::{PgResult, ERROR};
 
 /// Node color, mirroring C's `RBTColor` (`RBTBLACK = 0`, `RBTRED = 1`).

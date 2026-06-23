@@ -21,7 +21,7 @@
 #![no_std]
 #![allow(non_camel_case_types)]
 
-use types_core::Oid;
+use ::types_core::Oid;
 
 /// `MAXDIM` (array.h:75) — maximum number of array subscripts (arbitrary
 /// limit). C: `#define MAXDIM 6`.
@@ -156,7 +156,7 @@ pub struct ArrayElementStorage {
     pub typalign: u8,
 }
 
-use datum::datum::Datum;
+use ::datum::datum::Datum;
 
 #[cfg(test)]
 mod tests {

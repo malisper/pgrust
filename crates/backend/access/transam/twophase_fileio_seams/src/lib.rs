@@ -11,8 +11,8 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use types_core::TransactionId;
-use types_error::PgResult;
+use ::types_core::TransactionId;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `ReadTwoPhaseFile`'s raw read: `OpenTransientFile + fstat + read +

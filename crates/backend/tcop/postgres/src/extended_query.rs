@@ -52,11 +52,11 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use types_dest::dest::CommandDest;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::types_dest::dest::CommandDest;
 use types_error::{PgResult, ERROR, LOG};
-use stringinfo::StringInfo;
+use ::stringinfo::StringInfo;
 
 use utils_error::{ereport, errfinish, errhidestmt, errmsg, errstart};
 
@@ -180,7 +180,7 @@ pub fn exec_parse_message<'mcx>(
     // We only allow a single user statement in a prepared statement.
     if parsetree_list.len() > 1 {
         return Err(ereport(ERROR)
-            .errcode(types_error::error::ERRCODE_SYNTAX_ERROR)
+            .errcode(::types_error::error::ERRCODE_SYNTAX_ERROR)
             .errmsg("cannot insert multiple commands into a prepared statement")
             .into_error());
     }
@@ -246,7 +246,7 @@ pub fn exec_parse_message<'mcx>(
         psrc = plancache_seams::create_cached_plan_empty::call(
             mcx,
             query_string,
-            types_core::cmdtag::CommandTag(portal::CMDTAG_UNKNOWN),
+            ::types_core::cmdtag::CommandTag(portal::CMDTAG_UNKNOWN),
         )?;
         plancache_seams::complete_cached_plan::call(mcx, psrc, &[], &[])?;
     }
@@ -313,7 +313,7 @@ pub fn exec_bind_message<'mcx>(
         let psrc = globals::unnamed_stmt_psrc();
         if psrc == CachedPlanSourceHandle::NULL {
             return Err(ereport(ERROR)
-                .errcode(types_error::error::ERRCODE_UNDEFINED_PSTATEMENT)
+                .errcode(::types_error::error::ERRCODE_UNDEFINED_PSTATEMENT)
                 .errmsg("unnamed prepared statement does not exist")
                 .into_error());
         }
@@ -345,7 +345,7 @@ pub fn exec_bind_message<'mcx>(
 
     if num_pformats > 1 && num_pformats != num_params {
         return Err(ereport(ERROR)
-            .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+            .errcode(::types_error::error::ERRCODE_PROTOCOL_VIOLATION)
             .errmsg(format!(
                 "bind message has {num_pformats} parameter formats but {num_params} parameters"
             ))
@@ -355,7 +355,7 @@ pub fn exec_bind_message<'mcx>(
     let src_num_params = plancache_seams::plansource_num_params::call(psrc)?;
     if num_params != src_num_params {
         return Err(ereport(ERROR)
-            .errcode(types_error::error::ERRCODE_PROTOCOL_VIOLATION)
+            .errcode(::types_error::error::ERRCODE_PROTOCOL_VIOLATION)
             .errmsg(format!(
                 "bind message supplies {num_params} parameters, but prepared statement \"{stmt_name}\" requires {src_num_params}"
             ))
@@ -439,7 +439,7 @@ pub fn exec_bind_message<'mcx>(
                     };
                     let pstring = core::str::from_utf8(bytes).map_err(|_| {
                         ereport(ERROR)
-                            .errcode(types_error::error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
+                            .errcode(::types_error::error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
                             .errmsg("invalid byte sequence for encoding")
                             .into_error()
                     })?;
@@ -478,7 +478,7 @@ pub fn exec_bind_message<'mcx>(
                 }
             } else {
                 return Err(ereport(ERROR)
-                    .errcode(types_error::error::ERRCODE_INVALID_PARAMETER_VALUE)
+                    .errcode(::types_error::error::ERRCODE_INVALID_PARAMETER_VALUE)
                     .errmsg(format!("unsupported format code: {pformat}"))
                     .into_error());
             };
@@ -578,7 +578,7 @@ pub fn exec_execute_message<'mcx>(
 
     let portal = portalmem::get_portal_by_name::call(portal_name)?.ok_or_else(|| {
         ereport(ERROR)
-            .errcode(types_error::error::ERRCODE_UNDEFINED_CURSOR)
+            .errcode(::types_error::error::ERRCODE_UNDEFINED_CURSOR)
             .errmsg(format!("portal \"{portal_name}\" does not exist"))
             .into_error()
     })?;
@@ -684,7 +684,7 @@ pub fn exec_execute_message<'mcx>(
     let mut report_params = portal_params;
     if completed {
         if is_xact_command
-            || (xact::MyXactFlags() & types_core::xact::XACT_FLAGS_NEEDIMMEDIATECOMMIT) != 0
+            || (xact::MyXactFlags() & ::types_core::xact::XACT_FLAGS_NEEDIMMEDIATECOMMIT) != 0
         {
             // Transaction-control / immediate-commit statement: commit now.
             finish_xact_command()?;
@@ -695,7 +695,7 @@ pub fn exec_execute_message<'mcx>(
             xact_seams::command_counter_increment::call()?;
             // Set XACT_FLAGS_PIPELINING; disable statement timeout.
             xact::SetMyXactFlags(
-                xact::MyXactFlags() | types_core::xact::XACT_FLAGS_PIPELINING,
+                xact::MyXactFlags() | ::types_core::xact::XACT_FLAGS_PIPELINING,
             );
             logging::disable_statement_timeout();
         }
@@ -708,7 +708,7 @@ pub fn exec_execute_message<'mcx>(
             pqformat::pq_putemptymessage(PQMSG_PORTAL_SUSPENDED)?;
         }
         // Set XACT_FLAGS_PIPELINING whenever we suspend an Execute, too.
-        xact::SetMyXactFlags(xact::MyXactFlags() | types_core::xact::XACT_FLAGS_PIPELINING);
+        xact::SetMyXactFlags(xact::MyXactFlags() | ::types_core::xact::XACT_FLAGS_PIPELINING);
     }
     let _ = report_params;
 
@@ -742,7 +742,7 @@ pub fn exec_describe_statement_message<'mcx>(mcx: Mcx<'mcx>, stmt_name: &str) ->
         let psrc = globals::unnamed_stmt_psrc();
         if psrc == CachedPlanSourceHandle::NULL {
             return Err(ereport(ERROR)
-                .errcode(types_error::error::ERRCODE_UNDEFINED_PSTATEMENT)
+                .errcode(::types_error::error::ERRCODE_UNDEFINED_PSTATEMENT)
                 .errmsg("unnamed prepared statement does not exist")
                 .into_error());
         }
@@ -769,7 +769,7 @@ pub fn exec_describe_statement_message<'mcx>(mcx: Mcx<'mcx>, stmt_name: &str) ->
     let targetlist = if result_desc.is_some() {
         plancache_seams::cached_plan_get_target_list::call(mcx, psrc)?
     } else {
-        mcx::vec_with_capacity_in(mcx, 0)?
+        ::mcx::vec_with_capacity_in(mcx, 0)?
     };
 
     printtup_seams::send_describe_statement::call(
@@ -793,7 +793,7 @@ pub fn exec_describe_portal_message<'mcx>(mcx: Mcx<'mcx>, portal_name: &str) -> 
 
     let portal = portalmem::get_portal_by_name::call(portal_name)?.ok_or_else(|| {
         ereport(ERROR)
-            .errcode(types_error::error::ERRCODE_UNDEFINED_CURSOR)
+            .errcode(::types_error::error::ERRCODE_UNDEFINED_CURSOR)
             .errmsg(format!("portal \"{portal_name}\" does not exist"))
             .into_error()
     })?;
@@ -826,11 +826,11 @@ fn string_arg<'mcx>(mcx: Mcx<'mcx>, msg: &mut StringInfo<'mcx>) -> PgResult<Stri
 
 /// The `current transaction is aborted` ereport, with the abort-reason detail
 /// line appended (postgres.c, several sites).
-fn aborted_xact_error() -> types_error::PgError {
+fn aborted_xact_error() -> ::types_error::PgError {
     if errstart(ERROR, None) {
         let _ = (|| -> PgResult<()> {
-            utils_error::errcode(
-                types_error::error::ERRCODE_IN_FAILED_SQL_TRANSACTION,
+            ::utils_error::errcode(
+                ::types_error::error::ERRCODE_IN_FAILED_SQL_TRANSACTION,
             )?;
             errmsg(
                 "current transaction is aborted, commands ignored until end of transaction block",
@@ -842,7 +842,7 @@ fn aborted_xact_error() -> types_error::PgError {
         })();
     }
     ereport(ERROR)
-        .errcode(types_error::error::ERRCODE_IN_FAILED_SQL_TRANSACTION)
+        .errcode(::types_error::error::ERRCODE_IN_FAILED_SQL_TRANSACTION)
         .errmsg(
             "current transaction is aborted, commands ignored until end of transaction block",
         )

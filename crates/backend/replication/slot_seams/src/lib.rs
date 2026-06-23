@@ -16,7 +16,7 @@ use types_error::{PgResult, SqlState};
 use replication_slot_2::{
     ReplicationSlotHandle, ReplicationSlotInvalidationCause, ReplicationSlotPersistency,
 };
-use types_tuple::heaptuple::NameData;
+use ::types_tuple::heaptuple::NameData;
 
 seam_core::seam!(
     /// `bool ReplicationSlotValidateNameInternal(const char *name,
@@ -202,7 +202,7 @@ seam_core::seam!(
     /// `bool StandbySlotsHaveCaughtup(XLogRecPtr, int)` (slot.c:2901).
     pub fn standby_slots_have_caughtup(
         wait_for_lsn: XLogRecPtr,
-        elevel: types_error::ErrorLevel,
+        elevel: ::types_error::ErrorLevel,
     ) -> PgResult<bool>
 );
 
@@ -487,5 +487,5 @@ seam_core::seam!(
     /// `ReplicationSlotsShmemSize()` (ipci.c `CalculateShmemSize` accumulator) — shared-memory
     /// bytes this subsystem needs. `Err` carries the `add_size`/`mul_size`
     /// overflow `ereport(ERROR)`. Owner unported; scaffolded slot.
-    pub fn replication_slots_shmem_size() -> types_error::PgResult<types_core::Size>
+    pub fn replication_slots_shmem_size() -> ::types_error::PgResult<::types_core::Size>
 );

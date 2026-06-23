@@ -19,11 +19,11 @@
 //! Both callbacks can `ereport(ERROR)` (extension validation), so the seams
 //! return `PgResult<()>` mirroring the C `void` failure surface.
 
-use seam_core::seam;
-use types_cluster::ParseState;
-use types_error::PgResult;
-use types_explain::ExplainState;
-use parsenodes::DefElem;
+use ::seam_core::seam;
+use ::types_cluster::ParseState;
+use ::types_error::PgResult;
+use ::types_explain::ExplainState;
+use ::parsenodes::DefElem;
 
 /// `ExplainOptionHandler` (commands/explain_state.h) —
 /// `void (*)(ExplainState *, DefElem *, ParseState *)`. An opaque handle to the

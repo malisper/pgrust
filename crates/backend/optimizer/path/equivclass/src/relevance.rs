@@ -10,7 +10,7 @@ use pathnodes::{
     EcId, EmId, EquivalenceClass, EquivalenceMemberIterator, IndexClause, JoinDomain, PlannerInfo,
     RelId, Relids, RinfoId, RELOPT_OTHER_JOINREL, RELOPT_OTHER_MEMBER_REL, RELOPT_OTHER_UPPER_REL,
 };
-use types_core::primitive::Oid;
+use ::types_core::primitive::Oid;
 
 use relnode_seams as bms;
 use lsyscache_seams as cat;
@@ -27,7 +27,7 @@ pub(crate) fn oid_is_valid(oid: Oid) -> bool {
 }
 
 #[inline]
-pub(crate) fn is_other_rel(rel: &pathnodes::RelOptInfo) -> bool {
+pub(crate) fn is_other_rel(rel: &::pathnodes::RelOptInfo) -> bool {
     matches!(
         rel.reloptkind,
         RELOPT_OTHER_MEMBER_REL | RELOPT_OTHER_JOINREL | RELOPT_OTHER_UPPER_REL

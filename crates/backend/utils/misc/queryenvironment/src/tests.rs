@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use mcx::{PgString, PgVec};
 use ::nodes::queryenvironment::ENR_NAMED_TUPLESTORE;
-use types_tuple::heaptuple::{TupleDesc, TupleDescData};
+use ::types_tuple::heaptuple::{TupleDesc, TupleDescData};
 
 fn make_enr<'mcx>(mcx: Mcx<'mcx>, name: &str) -> EphemeralNamedRelationData<'mcx> {
     EphemeralNamedRelationData {
@@ -24,7 +24,7 @@ fn make_enr<'mcx>(mcx: Mcx<'mcx>, name: &str) -> EphemeralNamedRelationData<'mcx
 
 #[test]
 fn create_is_empty() {
-    let ctx = mcx::MemoryContext::new("test");
+    let ctx = ::mcx::MemoryContext::new("test");
     let env = create_queryEnv(ctx.mcx());
     assert!(env.namedRelList.is_empty());
     assert_eq!(ctx.used(), 0, "empty environment allocates nothing");
@@ -32,7 +32,7 @@ fn create_is_empty() {
 
 #[test]
 fn register_then_get() {
-    let ctx = mcx::MemoryContext::new("test");
+    let ctx = ::mcx::MemoryContext::new("test");
     let mut env = create_queryEnv(ctx.mcx());
     register_ENR(&mut env, make_enr(ctx.mcx(), "delta")).unwrap();
     assert!(ctx.used() > 0, "registered ENR is charged to the context");
@@ -46,7 +46,7 @@ fn register_then_get() {
 
 #[test]
 fn get_visible_metadata_borrows_md() {
-    let ctx = mcx::MemoryContext::new("test");
+    let ctx = ::mcx::MemoryContext::new("test");
     let mut env = create_queryEnv(ctx.mcx());
     register_ENR(&mut env, make_enr(ctx.mcx(), "trans")).unwrap();
 
@@ -64,7 +64,7 @@ fn get_visible_metadata_borrows_md() {
 
 #[test]
 fn unregister_removes_match() {
-    let ctx = mcx::MemoryContext::new("test");
+    let ctx = ::mcx::MemoryContext::new("test");
     let mut env = create_queryEnv(ctx.mcx());
     register_ENR(&mut env, make_enr(ctx.mcx(), "a")).unwrap();
     register_ENR(&mut env, make_enr(ctx.mcx(), "b")).unwrap();
@@ -80,7 +80,7 @@ fn unregister_removes_match() {
 
 #[test]
 fn get_enr_walk_order_preserved() {
-    let ctx = mcx::MemoryContext::new("test");
+    let ctx = ::mcx::MemoryContext::new("test");
     let mut env = create_queryEnv(ctx.mcx());
     let names = ["x", "y", "z"];
     for n in names {
@@ -96,7 +96,7 @@ fn get_enr_walk_order_preserved() {
 
 #[test]
 fn tupdesc_branch_uses_inline_descriptor() {
-    let ctx = mcx::MemoryContext::new("test");
+    let ctx = ::mcx::MemoryContext::new("test");
     let mcx = ctx.mcx();
     let mut md = EphemeralNamedRelationMetadataData {
         name: Some(PgString::from_str_in("d", mcx).unwrap()),
@@ -106,7 +106,7 @@ fn tupdesc_branch_uses_inline_descriptor() {
         enrtuples: 0.0,
     };
     let desc: TupleDesc = Some(
-        mcx::alloc_in(
+        ::mcx::alloc_in(
             mcx,
             TupleDescData {
                 natts: 0,
@@ -131,7 +131,7 @@ fn tupdesc_branch_uses_inline_descriptor() {
 
 #[test]
 fn environment_bytes_return_on_drop() {
-    let ctx = mcx::MemoryContext::new("per-query");
+    let ctx = ::mcx::MemoryContext::new("per-query");
     {
         let mut env = create_queryEnv(ctx.mcx());
         register_ENR(&mut env, make_enr(ctx.mcx(), "delta")).unwrap();

@@ -1,10 +1,10 @@
 //! `access/rmgrdesc/mxactdesc.c` — rmgr descriptor routines for multixacts.
 
 use crate::{appendf, i64_at};
-use mcx::PgString;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_error::PgResult;
 use wal::{DecodedXLogRecord, XLR_INFO_MASK};
-use xlog_records::multixact::{MultiXactMember, MultiXactStatus, xl_multixact_create,
+use ::xlog_records::multixact::{MultiXactMember, MultiXactStatus, xl_multixact_create,
                                     xl_multixact_truncate};
 
 // access/multixact.h
@@ -78,7 +78,7 @@ pub fn multixact_identify(info: u8) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::test_support::record;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
 
     fn desc(info: u8, data: &[u8]) -> String {
         let ctx = MemoryContext::new("test");

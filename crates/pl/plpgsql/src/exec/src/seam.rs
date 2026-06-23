@@ -17,9 +17,9 @@
 //! become thin delegations (or move into real in-crate bodies that call the
 //! now-reachable owner crates directly).
 
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use plpgsql::{
     int32, ExprContext, PLpgSQL_datum, PLpgSQL_datum_type, PLpgSQL_execstate, PLpgSQL_expr,
     PLpgSQL_var,
@@ -227,11 +227,11 @@ pub fn exec_move_row_from_datum_byref(
 
 /// `ereport(ERROR, ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)`
 /// (pl_exec.c) — the toplevel block fell through without RETURN.
-pub fn ereport_no_return_statement() -> types_error::PgError {
-    types_error::PgError::error(
+pub fn ereport_no_return_statement() -> ::types_error::PgError {
+    ::types_error::PgError::error(
         "control reached end of function without RETURN".to_string(),
     )
-    .with_sqlstate(types_error::ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)
+    .with_sqlstate(::types_error::ERRCODE_S_R_E_FUNCTION_EXECUTED_NO_RETURN_STATEMENT)
 }
 
 /// The set-returning-function result handoff of `plpgsql_exec_function`
@@ -354,57 +354,57 @@ pub fn reset_expr_context(_econtext: &ExprContext) {
 
 /// `ereport(ERROR, ERRCODE_CASE_NOT_FOUND)` — CASE with no matching WHEN and no
 /// ELSE (`exec_stmt_case`).
-pub fn ereport_case_not_found() -> types_error::PgError {
-    types_error::PgError::error("case not found".to_string())
+pub fn ereport_case_not_found() -> ::types_error::PgError {
+    ::types_error::PgError::error("case not found".to_string())
         .with_detail("CASE statement is missing ELSE part.".to_string())
-        .with_sqlstate(types_error::ERRCODE_CASE_NOT_FOUND)
+        .with_sqlstate(::types_error::ERRCODE_CASE_NOT_FOUND)
 }
 
 /// `ereport(ERROR, ERRCODE_ASSERT_FAILURE)` — an ASSERT condition was NULL or
 /// false (`exec_stmt_assert`). With a `message` expression that evaluated to a
 /// non-NULL string, C uses `errmsg_internal("%s", message)`; otherwise the
 /// fixed `errmsg("assertion failed")`.
-pub fn ereport_assert_failure(message: Option<String>) -> types_error::PgError {
+pub fn ereport_assert_failure(message: Option<String>) -> ::types_error::PgError {
     let msg = message.unwrap_or_else(|| "assertion failed".to_string());
-    types_error::PgError::error(msg).with_sqlstate(types_error::ERRCODE_ASSERT_FAILURE)
+    ::types_error::PgError::error(msg).with_sqlstate(::types_error::ERRCODE_ASSERT_FAILURE)
 }
 
 /// `ereport(ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED)` — a FOR(i) loop bound /
 /// step evaluated to NULL (`exec_stmt_fori`).
-pub fn ereport_for_bound_null(which: &str) -> types_error::PgError {
-    types_error::PgError::error(format!("{which} of FOR loop cannot be null"))
-        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
+pub fn ereport_for_bound_null(which: &str) -> ::types_error::PgError {
+    ::types_error::PgError::error(format!("{which} of FOR loop cannot be null"))
+        .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
 }
 
 /// `ereport(ERROR, ERRCODE_INVALID_PARAMETER_VALUE)` — FOR(i) BY step <= 0.
-pub fn ereport_for_step_nonpositive() -> types_error::PgError {
-    types_error::PgError::error(
+pub fn ereport_for_step_nonpositive() -> ::types_error::PgError {
+    ::types_error::PgError::error(
         "BY value of FOR loop must be greater than zero".to_string(),
     )
-    .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+    .with_sqlstate(::types_error::ERRCODE_INVALID_PARAMETER_VALUE)
 }
 
 /// `ereport(ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED)` — FOREACH over a NULL array
 /// (`exec_stmt_foreach_a`).
-pub fn ereport_foreach_null() -> types_error::PgError {
-    types_error::PgError::error("FOREACH expression must not be null".to_string())
-        .with_sqlstate(types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
+pub fn ereport_foreach_null() -> ::types_error::PgError {
+    ::types_error::PgError::error("FOREACH expression must not be null".to_string())
+        .with_sqlstate(::types_error::ERRCODE_NULL_VALUE_NOT_ALLOWED)
 }
 
 /// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH)` — `FOREACH ... SLICE` loop
 /// variable is not of an array type (`exec_stmt_foreach_a`).
-pub fn ereport_foreach_slice_var_not_array() -> types_error::PgError {
-    types_error::PgError::error(
+pub fn ereport_foreach_slice_var_not_array() -> ::types_error::PgError {
+    ::types_error::PgError::error(
         "FOREACH ... SLICE loop variable must be of an array type".to_string(),
     )
-    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+    .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
 }
 
 /// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH)` — non-slicing `FOREACH` loop
 /// variable is of an array type (`exec_stmt_foreach_a`).
-pub fn ereport_foreach_var_is_array() -> types_error::PgError {
-    types_error::PgError::error("FOREACH loop variable must not be of an array type".to_string())
-        .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+pub fn ereport_foreach_var_is_array() -> ::types_error::PgError {
+    ::types_error::PgError::error("FOREACH loop variable must not be of an array type".to_string())
+        .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
 }
 
 /// `get_element_type(typid)` (lsyscache.c) — the element type OID of an array
@@ -436,10 +436,10 @@ pub fn foreach_iterate(
 
 /// `ereport(ERROR, ERRCODE_DATATYPE_MISMATCH)` — RETURN of a non-composite from
 /// a function returning a tuple (`exec_stmt_return`).
-pub fn ereport_return_noncomposite() -> types_error::PgError {
-    types_error::PgError::error(
+pub fn ereport_return_noncomposite() -> ::types_error::PgError {
+    ::types_error::PgError::error(
         "cannot return non-composite value from function returning composite type"
             .to_string(),
     )
-    .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH)
+    .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH)
 }

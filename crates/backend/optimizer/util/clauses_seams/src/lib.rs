@@ -16,8 +16,8 @@
 
 #![allow(non_snake_case)]
 
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use types_tuple::heaptuple::Datum;
 

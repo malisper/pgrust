@@ -19,12 +19,12 @@
 //! lifetime of the segment — the same model `dsa.c`'s
 //! `dsa_on_dsm_detach_release_in_place` uses for its in-place control object.
 
-use dsm_core::dsm;
-use mcxt_seams::top_memory_context;
-use datum::Datum;
+use ::dsm_core::dsm;
+use ::mcxt_seams::top_memory_context;
+use ::datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
-use execparallel::DsmSegmentHandle;
-use types_storage::fileset::SharedFileSet;
+use ::execparallel::DsmSegmentHandle;
+use ::types_storage::fileset::SharedFileSet;
 
 /// The `DsmSegmentHandle` (a `dsm_segment *` carried as `usize`) carries the
 /// real [`dsm::DsmSegmentId`] (opacity-inherited; the handle value *is*

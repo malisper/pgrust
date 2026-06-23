@@ -5,7 +5,7 @@
 //! `examine_indexcol_variable`).
 //!
 //! These are reached across the dependency cycle through the costsize-owned
-//! `amcostestimate` seam ([`costsize_seams::amcostestimate`]),
+//! `amcostestimate` seam ([`::costsize_seams::amcostestimate`]),
 //! which `cost_index` (costsize.c) invokes for the index AM, and which each
 //! AM's vtable cost slot (e.g. nbtree's `btcostestimate_am`) delegates to.
 //! The dispatch on `index->relam` (here, btree) is done by the seam body.
@@ -18,23 +18,23 @@
 
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::PgResult;
-use types_error::PgError;
+use ::mcx::Mcx;
+use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
+use ::types_error::PgResult;
+use ::types_error::PgError;
 use ::nodes::primnodes::Expr;
 use pathnodes::{
     IndexOptInfo, NodeId, PathId, PathNode, PlannerInfo, RinfoId, JOIN_INNER,
 };
-use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
+use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS};
-use statistics::STATISTIC_KIND_CORRELATION;
-use types_scan::scankey::{BTEqualStrategyNumber, BTLessStrategyNumber};
+use ::statistics::STATISTIC_KIND_CORRELATION;
+use ::types_scan::scankey::{BTEqualStrategyNumber, BTLessStrategyNumber};
 
 use costsize_seams as cz;
-use costsize_seams::AmCostEstimate;
+use ::costsize_seams::AmCostEstimate;
 use path_small_seams as sel;
-use path_small_seams::ClauseListEntry;
+use ::path_small_seams::ClauseListEntry;
 use predtest_seams as predtest;
 use lsyscache_seams as lsc;
 use insert_vacuum_seams as brin_iv;
@@ -81,7 +81,7 @@ pub(crate) struct GenericCosts {
 /// `get_quals_from_indexclauses(indexclauses)` (selfuncs.c) — get the
 /// implicitly-ANDed list of index qual RestrictInfos from an `IndexPath`'s
 /// `indexclauses`. Returns the [`RinfoId`] list (the C `RestrictInfo *` list).
-fn get_quals_from_indexclauses(path: &pathnodes::IndexPath) -> Vec<RinfoId> {
+fn get_quals_from_indexclauses(path: &::pathnodes::IndexPath) -> Vec<RinfoId> {
     let mut result: Vec<RinfoId> = Vec::new();
     for iclause in &path.indexclauses {
         for &rinfo in &iclause.indexquals {
@@ -418,7 +418,7 @@ pub(crate) fn btcostestimate<'mcx, 'run>(
     path_id: PathId,
     loop_count: f64,
 ) -> PgResult<AmCostEstimate> {
-    let (index, indexclauses): (IndexOptInfo, Vec<pathnodes::IndexClause>) = {
+    let (index, indexclauses): (IndexOptInfo, Vec<::pathnodes::IndexClause>) = {
         let path = expect_index_path(root, path_id);
         let index = (**path
             .indexinfo
@@ -866,7 +866,7 @@ pub(crate) fn brincostestimate<'mcx, 'run>(
     /// hypothetical-index branch reads it.
     const REVMAP_PAGE_MAXITEMS: f64 = 1360.0;
 
-    let (index, indexclauses): (IndexOptInfo, Vec<pathnodes::IndexClause>) = {
+    let (index, indexclauses): (IndexOptInfo, Vec<::pathnodes::IndexClause>) = {
         let path = expect_index_path(root, path_id);
         let index = (**path
             .indexinfo
@@ -1147,7 +1147,7 @@ fn gincost_pattern<'mcx>(
     let nentries = result.query_values.len();
     let search_mode = result.search_mode;
 
-    if nentries == 0 && search_mode == gin::GIN_SEARCH_MODE_DEFAULT {
+    if nentries == 0 && search_mode == ::gin::GIN_SEARCH_MODE_DEFAULT {
         // No match is possible.
         return Ok(false);
     }
@@ -1163,9 +1163,9 @@ fn gincost_pattern<'mcx>(
         counts.search_entries += 1.0;
     }
 
-    if search_mode == gin::GIN_SEARCH_MODE_DEFAULT {
+    if search_mode == ::gin::GIN_SEARCH_MODE_DEFAULT {
         counts.att_has_normal_scan[indexcol] = true;
-    } else if search_mode == gin::GIN_SEARCH_MODE_INCLUDE_EMPTY {
+    } else if search_mode == ::gin::GIN_SEARCH_MODE_INCLUDE_EMPTY {
         // Treat "include empty" like an exact-match item.
         counts.att_has_normal_scan[indexcol] = true;
         counts.exact_entries += 1.0;
@@ -1373,7 +1373,7 @@ pub(crate) fn gincostestimate<'mcx>(
     path_id: PathId,
     loop_count: f64,
 ) -> PgResult<AmCostEstimate> {
-    let (index, indexclauses): (IndexOptInfo, Vec<pathnodes::IndexClause>) = {
+    let (index, indexclauses): (IndexOptInfo, Vec<::pathnodes::IndexClause>) = {
         let path = expect_index_path(root, path_id);
         let index = (**path
             .indexinfo
@@ -1393,7 +1393,7 @@ pub(crate) fn gincostestimate<'mcx>(
 
     // Obtain statistical information from the meta page, if possible. Else set
     // ginStats to zeroes, and we'll cope below.
-    let gin_stats: gin::GinStatsData = if !index.hypothetical {
+    let gin_stats: ::gin::GinStatsData = if !index.hypothetical {
         // Lock should have already been obtained in plancat.c.
         let index_rel = indexam::index_open::call(
             mcx,
@@ -1402,7 +1402,7 @@ pub(crate) fn gincostestimate<'mcx>(
         )?;
         let stats = gin::gin_get_stats::call(&index_rel)?;
         index_rel.close(types_storage::lock::NoLock)?;
-        gin::GinStatsData {
+        ::gin::GinStatsData {
             nPendingPages: stats.nPendingPages,
             nTotalPages: stats.nTotalPages,
             nEntryPages: stats.nEntryPages,
@@ -1411,7 +1411,7 @@ pub(crate) fn gincostestimate<'mcx>(
             ginVersion: stats.ginVersion,
         }
     } else {
-        gin::GinStatsData::default()
+        ::gin::GinStatsData::default()
     };
 
     // Assuming we got valid (nonzero) stats at all, nPendingPages can be
@@ -1721,7 +1721,7 @@ pub(crate) fn gincostestimate<'mcx>(
 }
 
 /// `&mut`-borrow the `IndexPath` for a `PathId`, panicking if it is not one.
-fn expect_index_path(root: &PlannerInfo, path_id: PathId) -> &pathnodes::IndexPath {
+fn expect_index_path(root: &PlannerInfo, path_id: PathId) -> &::pathnodes::IndexPath {
     match root.path(path_id) {
         PathNode::IndexPath(ip) => ip,
         _ => panic!("expect_index_path: path is not an IndexPath"),
@@ -1729,7 +1729,7 @@ fn expect_index_path(root: &PlannerInfo, path_id: PathId) -> &pathnodes::IndexPa
 }
 
 /// `&mut`-borrow the `IndexPath` for a `PathId`, panicking if it is not one.
-fn expect_index_path_mut(root: &mut PlannerInfo, path_id: PathId) -> &mut pathnodes::IndexPath {
+fn expect_index_path_mut(root: &mut PlannerInfo, path_id: PathId) -> &mut ::pathnodes::IndexPath {
     match root.path_mut(path_id) {
         PathNode::IndexPath(ip) => ip,
         _ => panic!("expect_index_path_mut: path is not an IndexPath"),

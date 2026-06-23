@@ -3,7 +3,7 @@
 //! arg` plancache passes is always 0, so the callback shapes drop it. The
 //! owning inval unit installs these; until then a call panics loudly.
 
-use types_error::PgResult;
+use ::types_error::PgResult;
 use types_plancache::{RelcacheCallbackFn, SyscacheCallbackFn};
 
 seam_core::seam!(

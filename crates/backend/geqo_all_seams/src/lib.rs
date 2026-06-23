@@ -1,6 +1,6 @@
 //! Planner-external seams consumed by the GEQO subsystem
 //! (`backend/optimizer/geqo/`), arena-shaped over
-//! [`pathnodes::PlannerInfo`].
+//! [`::pathnodes::PlannerInfo`].
 //!
 //! `geqo_eval`/`gimme_tree` reach back into the rest of the planner to build
 //! and cost candidate join relations and to decide whether a join is
@@ -19,7 +19,7 @@
 
 #![forbid(unsafe_code)]
 
-use pathnodes::planner_run::PlannerRun;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PathnodesMemoryContext, PlannerInfo, RelId};
 
 seam_core::seam!(

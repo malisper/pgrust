@@ -23,8 +23,8 @@ use alloc::string::ToString;
 
 use mcx::{Mcx, PgString, PgVec};
 
-use types_core::primitive::InvalidOid;
-use types_core::Oid;
+use ::types_core::primitive::InvalidOid;
+use ::types_core::Oid;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CommentStmt, ConstrType, CreateStatsStmt,
@@ -33,21 +33,21 @@ use ::nodes::ddlnodes::{
 use ::nodes::parsenodes::DROP_RESTRICT;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{OBJECT_TABCONSTRAINT, OBJECT_TABLE};
-use types_storage::lock::{AccessShareLock, NoLock};
+use ::types_storage::lock::{AccessShareLock, NoLock};
 
-use next::attmap::build_attrmap_by_name;
-use common_relation::relation_open;
-use tupdesc::TupleDescGetDefault;
+use ::next::attmap::build_attrmap_by_name;
+use ::common_relation::relation_open;
+use ::tupdesc::TupleDescGetDefault;
 use indexam::{index_close, index_open};
-use table::table_close;
-use comment::GetComment;
+use ::table::table_close;
+use ::comment::GetComment;
 use vacuum_seams as vacuum_seams;
-use outfuncs::nodeToString;
+use ::outfuncs::nodeToString;
 use read_seams as read_seams;
-use rewrite_core::replace::map_variable_attnos;
+use ::rewrite_core::replace::map_variable_attnos;
 use lsyscache_seams as lsyscache;
 use syscache_seams as syscache;
-use utils_error::ereport;
+use ::utils_error::ereport;
 
 use crate::cloned_index::generateClonedIndexStmt;
 use crate::column::default_constraint;
@@ -100,7 +100,7 @@ pub fn expandTableLikeClause<'mcx>(
     let relation_oid = tlc.relationOid;
 
     if relation_oid == InvalidOid {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "expandTableLikeClause called on untransformed LIKE clause",
         ));
     }
@@ -130,7 +130,7 @@ pub fn expandTableLikeClause<'mcx>(
     // build the attno map. relation_openrv(heapRel, NoLock) opens by name.
     let child_access_rv = crate::like::access_range_var(heap_rangevar);
     let childrel =
-        common_relation::relation_openrv(mcx, &child_access_rv, NoLock)?;
+        ::common_relation::relation_openrv(mcx, &child_access_rv, NoLock)?;
     let childrel_relkind = childrel.rd_rel.relkind;
 
     // build_attrmap_by_name(childrel, parent, false) — map parent attnos to the
@@ -159,7 +159,7 @@ pub fn expandTableLikeClause<'mcx>(
                 let mut this_default =
                     TupleDescGetDefault(mcx, &relation.rd_att, (parent_attno + 1) as i16)?
                         .ok_or_else(|| {
-                            types_error::PgError::error(format!(
+                            ::types_error::PgError::error(format!(
                                 "default expression not found for attribute {} of relation \"{}\"",
                                 parent_attno + 1,
                                 relname
@@ -200,7 +200,7 @@ pub fn expandTableLikeClause<'mcx>(
                     recurse: false,
                 };
                 atsubcmds
-                    .push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, atsubcmd)?)?);
+                    .push(::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, atsubcmd)?)?);
             }
         }
     }
@@ -281,13 +281,13 @@ pub fn expandTableLikeClause<'mcx>(
                 name: None,
                 num: 0,
                 newowner: None,
-                def: Some(mcx::alloc_in(mcx, Node::mk_constraint(mcx, n)?)?),
+                def: Some(::mcx::alloc_in(mcx, Node::mk_constraint(mcx, n)?)?),
                 behavior: DROP_RESTRICT,
                 missing_ok: false,
                 recurse: false,
             };
             atsubcmds
-                .push(mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, atsubcmd)?)?);
+                .push(::mcx::alloc_in(mcx, Node::mk_alter_table_cmd(mcx, atsubcmd)?)?);
 
             // Copy comment on constraint.
             if options & CREATE_TABLE_LIKE_COMMENTS != 0 {
@@ -307,10 +307,10 @@ pub fn expandTableLikeClause<'mcx>(
                         object.push(make_string(mcx, cn)?);
                         let stmt = CommentStmt {
                             objtype: OBJECT_TABCONSTRAINT,
-                            object: Some(mcx::alloc_in(mcx, Node::mk_list(mcx, object)?)?),
+                            object: Some(::mcx::alloc_in(mcx, Node::mk_list(mcx, object)?)?),
                             comment: Some(PgString::from_str_in(&comment, mcx)?),
                         };
-                        result.push(mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, stmt)?)?);
+                        result.push(::mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, stmt)?)?);
                     }
                 }
             }
@@ -321,12 +321,12 @@ pub fn expandTableLikeClause<'mcx>(
     // and put it at the FRONT of result (so it runs before the CommentStmts).
     if !atsubcmds.is_empty() {
         let atcmd = AlterTableStmt {
-            relation: Some(mcx::alloc_in(mcx, heap_rv.clone_in(mcx)?)?),
+            relation: Some(::mcx::alloc_in(mcx, heap_rv.clone_in(mcx)?)?),
             cmds: atsubcmds,
             objtype: OBJECT_TABLE,
             missing_ok: false,
         };
-        let atcmd_node = mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, atcmd)?)?;
+        let atcmd_node = ::mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, atcmd)?)?;
         // lcons(atcmd, result).
         let mut new_result: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
         new_result.push(atcmd_node);
@@ -360,7 +360,7 @@ pub fn expandTableLikeClause<'mcx>(
                 }
             }
 
-            result.push(mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, index_stmt)?)?);
+            result.push(::mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, index_stmt)?)?);
 
             index_close(parent_index, AccessShareLock)?;
         }
@@ -391,7 +391,7 @@ pub fn expandTableLikeClause<'mcx>(
                 }
             }
 
-            result.push(mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stats)?)?);
+            result.push(::mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stats)?)?);
         }
     }
 
@@ -414,7 +414,7 @@ fn generateClonedExtStatsStmt<'mcx>(
     heap_rv: &NodePtr<'mcx>,
     heap_relid: Oid,
     source_statsid: Oid,
-    attmap: &[types_core::AttrNumber],
+    attmap: &[::types_core::AttrNumber],
 ) -> PgResult<CreateStatsStmt<'mcx>> {
     debug_assert!(heap_relid != InvalidOid);
 
@@ -467,7 +467,7 @@ fn generateClonedExtStatsStmt<'mcx>(
             name: Some(name),
             expr: None,
         };
-        def_names.push(mcx::alloc_in(mcx, Node::mk_stats_elem(mcx, selem)?)?);
+        def_names.push(::mcx::alloc_in(mcx, Node::mk_stats_elem(mcx, selem)?)?);
     }
 
     // Now handle expressions, if there are any. The order (with respect to
@@ -480,7 +480,7 @@ fn generateClonedExtStatsStmt<'mcx>(
             Some(items) => {
                 let mut v = alloc::vec::Vec::with_capacity(items.len());
                 for it in items.iter() {
-                    v.push(mcx::alloc_in(mcx, it.clone_in(mcx)?)?);
+                    v.push(::mcx::alloc_in(mcx, it.clone_in(mcx)?)?);
                 }
                 v
             }
@@ -505,13 +505,13 @@ fn generateClonedExtStatsStmt<'mcx>(
                 name: None,
                 expr: Some(expr),
             };
-            def_names.push(mcx::alloc_in(mcx, Node::mk_stats_elem(mcx, selem)?)?);
+            def_names.push(::mcx::alloc_in(mcx, Node::mk_stats_elem(mcx, selem)?)?);
         }
     }
 
     // Finally, build the output node.
     let mut relations: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
-    relations.push(mcx::alloc_in(mcx, heap_rv.as_ref().clone_in(mcx)?)?);
+    relations.push(::mcx::alloc_in(mcx, heap_rv.as_ref().clone_in(mcx)?)?);
 
     Ok(CreateStatsStmt {
         defnames: PgVec::new_in(mcx),

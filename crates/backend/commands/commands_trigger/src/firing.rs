@@ -45,16 +45,16 @@
 
 use std::cell::RefCell;
 
-use mcx::Mcx;
-use types_storage::lock::{AccessExclusiveLock, NoLock};
-use types_core::primitive::Oid;
-use types_core::xact::CommandId;
-use datum::Datum;
+use ::mcx::Mcx;
+use ::types_storage::lock::{AccessExclusiveLock, NoLock};
+use ::types_core::primitive::Oid;
+use ::types_core::xact::CommandId;
+use ::datum::Datum;
 use types_error::{
     PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use utils_error::ereport;
+use ::utils_error::ereport;
 use ::nodes::trigger::{
     TriggerData, T_TriggerData, TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, AFTER_TRIGGER_2CTID,
     AFTER_TRIGGER_CP_UPDATE, AFTER_TRIGGER_DONE, AFTER_TRIGGER_FDW_FETCH, AFTER_TRIGGER_FDW_REUSE,
@@ -63,8 +63,8 @@ use ::nodes::trigger::{
     TRIGGER_EVENT_UPDATE,
 };
 use ::nodes::EStateData;
-use types_tuple::heaptuple::{HeapTuple, HeapTupleData, ItemPointerData};
-use types_trigger::Trigger;
+use ::types_tuple::heaptuple::{HeapTuple, HeapTupleData, ItemPointerData};
+use ::types_trigger::Trigger;
 
 use crate::queue::{
     after_trigger_check_state, with_after_triggers, EventList, SharedRecord,
@@ -125,9 +125,9 @@ struct CurrentTriggerSlots {
     relation: rel::Relation<'static>,
     /// `trigdata->tg_trigslot` payload — the OLD tuple (DELETE/UPDATE) or, for
     /// INSERT, the inserted tuple.
-    trigtuple: Option<types_tuple::heaptuple::FormedTuple<'static>>,
+    trigtuple: Option<::types_tuple::heaptuple::FormedTuple<'static>>,
     /// `trigdata->tg_newslot` payload — the NEW tuple (UPDATE), or NULL.
-    newtuple: Option<types_tuple::heaptuple::FormedTuple<'static>>,
+    newtuple: Option<::types_tuple::heaptuple::FormedTuple<'static>>,
     /// The firing query context (`estate->es_query_cxt`), `'static`-extended for
     /// the install/drop window of this side-channel. A trigger function that
     /// rebuilds and returns a row (`tsvector_update_trigger`'s
@@ -163,7 +163,7 @@ impl Drop for CurrentSlotsGuard {
 fn with_slot_tuple<R>(
     marker: u64,
     f: impl FnOnce(
-        &types_tuple::heaptuple::FormedTuple<'static>,
+        &::types_tuple::heaptuple::FormedTuple<'static>,
         &rel::Relation<'static>,
     ) -> R,
 ) -> Option<R> {
@@ -186,7 +186,7 @@ fn with_slot_tuple<R>(
 pub fn tg_slot_formed_tuple_impl<'mcx>(
     mcx: Mcx<'mcx>,
     slot: types_ri_triggers::TupleTableSlotRef,
-) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'mcx>>> {
+) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'mcx>>> {
     CURRENT_TRIGGER_SLOTS.with(|cell| {
         let b = cell.borrow();
         let Some(s) = b.as_ref() else {
@@ -225,8 +225,8 @@ pub fn slot_getattr_impl<'mcx>(
     mcx: Mcx<'mcx>,
     slot: types_ri_triggers::TupleTableSlotRef,
     attnum: i16,
-) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
-    type SlotDatum<'a> = types_tuple::heaptuple::Datum<'a>;
+) -> PgResult<(::types_tuple::heaptuple::Datum<'mcx>, bool)> {
+    type SlotDatum<'a> = ::types_tuple::heaptuple::Datum<'a>;
     let r = CURRENT_TRIGGER_SLOTS.with(|cell| -> PgResult<Option<(SlotDatum<'mcx>, bool)>> {
         let b = cell.borrow();
         let s = match b.as_ref() {
@@ -254,8 +254,8 @@ pub fn render_slot_columns_impl<'mcx>(
     mcx: Mcx<'mcx>,
     slot: types_ri_triggers::TupleTableSlotRef,
     attnums: &[i16],
-) -> PgResult<mcx::PgVec<'mcx, types_ri_triggers::ResultColumn<'mcx>>> {
-    let mut out: mcx::PgVec<'mcx, types_ri_triggers::ResultColumn<'mcx>> = mcx::PgVec::new_in(mcx);
+) -> PgResult<::mcx::PgVec<'mcx, types_ri_triggers::ResultColumn<'mcx>>> {
+    let mut out: ::mcx::PgVec<'mcx, types_ri_triggers::ResultColumn<'mcx>> = ::mcx::PgVec::new_in(mcx);
     for &attnum in attnums {
         // Attribute name + type OID from the slot relation's descriptor.
         let (name_bytes, atttypid) = CURRENT_TRIGGER_SLOTS.with(
@@ -288,7 +288,7 @@ pub fn render_slot_columns_impl<'mcx>(
             )
         };
 
-        let mut namebuf: mcx::PgVec<'mcx, u8> = mcx::PgVec::new_in(mcx);
+        let mut namebuf: ::mcx::PgVec<'mcx, u8> = ::mcx::PgVec::new_in(mcx);
         namebuf.extend_from_slice(&name_bytes);
         out.push(types_ri_triggers::ResultColumn {
             name: namebuf,
@@ -314,7 +314,7 @@ pub fn slot_is_current_xact_tuple_impl(slot: types_ri_triggers::TupleTableSlotRe
             .as_ref()
             .expect("slot_is_current_xact_tuple: tuple has no t_data");
         let xmin = match &hdr.t_choice {
-            types_tuple::heaptuple::HeapTupleHeaderChoice::THeap(f) => f.t_xmin,
+            ::types_tuple::heaptuple::HeapTupleHeaderChoice::THeap(f) => f.t_xmin,
             _ => 0,
         };
         transam_xact_seams::transaction_id_is_current_transaction_id::call(xmin)
@@ -327,8 +327,8 @@ pub fn slot_is_current_xact_tuple_impl(slot: types_ri_triggers::TupleTableSlotRe
 pub fn pk_datum_image_eq_impl<'mcx>(
     slot: types_ri_triggers::TupleTableSlotRef,
     attnum: i16,
-    oldvalue: &types_tuple::heaptuple::Datum<'mcx>,
-    newvalue: &types_tuple::heaptuple::Datum<'mcx>,
+    oldvalue: &::types_tuple::heaptuple::Datum<'mcx>,
+    newvalue: &::types_tuple::heaptuple::Datum<'mcx>,
 ) -> bool {
     let r = CURRENT_TRIGGER_SLOTS.with(|cell| -> Option<bool> {
         let b = cell.borrow();
@@ -370,7 +370,7 @@ pub fn tg_relation_tuple_satisfies_snapshot_self_impl(
         let live = heapam_visibility::HeapTupleSatisfiesVisibility(
             &mut htup,
             &mut snap,
-            types_storage::buf::InvalidBuffer,
+            ::types_storage::buf::InvalidBuffer,
         )?;
         Ok(Some(live))
     })?;
@@ -407,7 +407,7 @@ pub fn tg_relation_impl<'mcx>(
 fn resolve_slot<'a>(
     s: &'a CurrentTriggerSlots,
     marker: u64,
-) -> Option<&'a types_tuple::heaptuple::FormedTuple<'static>> {
+) -> Option<&'a ::types_tuple::heaptuple::FormedTuple<'static>> {
     match marker {
         x if x == crate::ri_accessors::SLOT_TRIG => s.trigtuple.as_ref(),
         x if x == crate::ri_accessors::SLOT_NEW => s.newtuple.as_ref(),
@@ -552,7 +552,7 @@ pub struct TriggerResultRel<'mcx> {
     /// per-query context so the live `Trigger` (carrying
     /// `tgconstraint`/`tgconstrrelid`/`tgconstrindid`, which the RI procs read)
     /// is available when building the firing `TriggerData`.
-    pub triggers: Vec<mcx::PgBox<'mcx, Trigger<'mcx>>>,
+    pub triggers: Vec<::mcx::PgBox<'mcx, Trigger<'mcx>>>,
 }
 
 /// `ExecGetTriggerResultRel(estate, relid, NULL)` for the firing path — open the
@@ -566,11 +566,11 @@ pub struct TriggerResultRel<'mcx> {
 fn trigger_result_rel_open(mcx: Mcx<'_>, relid: Oid) -> PgResult<TriggerResultRel<'_>> {
     let rel = table_seams::table_open::call(mcx, relid, NoLock)?;
     let relkind = rel.rd_rel.relkind as i8;
-    let mut triggers: Vec<mcx::PgBox<'_, Trigger<'_>>> = Vec::new();
+    let mut triggers: Vec<::mcx::PgBox<'_, Trigger<'_>>> = Vec::new();
     if let Some(td) = rel.rd_trigdesc.as_ref() {
         for t in td.triggers.iter() {
             let cloned = t.clone_in(mcx)?;
-            triggers.push(mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?);
+            triggers.push(::mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?);
         }
     }
     Ok(TriggerResultRel {
@@ -609,10 +609,10 @@ pub fn after_trigger_execute<'mcx>(
     // `LocTriggerData.tg_trigger = &(trigdesc->triggers[tgindx])` — the live
     // trigger (carries tgconstraint/tgconstrrelid/tgconstrindid the RI procs
     // read), cloned into the per-query context.
-    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+    let trigger_box: ::mcx::PgBox<'static, Trigger<'static>> = {
         let cloned = rel.triggers[tgindx].clone_in(mcx)?;
-        let boxed: mcx::PgBox<'mcx, Trigger<'mcx>> =
-            mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
+        let boxed: ::mcx::PgBox<'mcx, Trigger<'mcx>> =
+            ::mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
         // SAFETY: allocated in `mcx` (= es_query_cxt); the side-channel that
         // borrows it is installed/dropped within this call.
         unsafe { core::mem::transmute(boxed) }
@@ -622,17 +622,17 @@ pub fn after_trigger_execute<'mcx>(
     // FDW event on a foreign table (a regular-table event always sets at least
     // AFTER_TRIGGER_1CTID), so the FDW arm is gated on relkind.
     let mut trig_formed: Option<
-        types_tuple::heaptuple::FormedTuple<'static>,
+        ::types_tuple::heaptuple::FormedTuple<'static>,
     > = None;
     let mut new_formed: Option<
-        types_tuple::heaptuple::FormedTuple<'static>,
+        ::types_tuple::heaptuple::FormedTuple<'static>,
     > = None;
     // Buffer pins from the trigger-tuple re-fetch(es). C keeps the on-page tuple
     // in `tg_trigslot`/`tg_newslot` (BufferHeapTupleTableSlot), pinning the page
     // for the whole trigger call; the owned model copies the tuple out but must
     // retain the same pin so on-access pruning sees the page as non-cleanup-lockable
     // exactly as C does. Released after `exec_call_trigger_func` (= C's slot clear).
-    let mut held_buffers: Vec<types_storage::Buffer> = Vec::new();
+    let mut held_buffers: Vec<::types_storage::Buffer> = Vec::new();
     let tup_bits = event.ate_flags & AFTER_TRIGGER_TUP_BITS;
     let is_fdw = rel.relkind == RELKIND_FOREIGN_TABLE
         && (tup_bits == AFTER_TRIGGER_FDW_FETCH || tup_bits == AFTER_TRIGGER_FDW_REUSE);
@@ -644,7 +644,7 @@ pub fn after_trigger_execute<'mcx>(
         // source leaf partition (`ate_src_part`), tuple2 from the destination
         // leaf (`ate_dst_part`), each converted into the root partitioned
         // table's rowtype where the AFTER trigger fires.
-        let root_desc: types_tuple::heaptuple::TupleDescData<'_> = rel.relation.rd_att.clone_in(mcx)?;
+        let root_desc: ::types_tuple::heaptuple::TupleDescData<'_> = rel.relation.rd_att.clone_in(mcx)?;
         if item_pointer_is_valid(&event.ate_ctid1) {
             let (f, b) = fetch_trigger_tuple_cp(
                 mcx,
@@ -654,7 +654,7 @@ pub fn after_trigger_execute<'mcx>(
                 &event.ate_ctid1,
             )?;
             trig_formed = Some(f);
-            if types_storage::buf::BufferIsValid(b) {
+            if ::types_storage::buf::BufferIsValid(b) {
                 held_buffers.push(b);
             }
         }
@@ -667,7 +667,7 @@ pub fn after_trigger_execute<'mcx>(
                 &event.ate_ctid2,
             )?;
             new_formed = Some(f);
-            if types_storage::buf::BufferIsValid(b) {
+            if ::types_storage::buf::BufferIsValid(b) {
                 held_buffers.push(b);
             }
         }
@@ -678,7 +678,7 @@ pub fn after_trigger_execute<'mcx>(
         if item_pointer_is_valid(&event.ate_ctid1) {
             let (f, b) = fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid1)?;
             trig_formed = Some(f);
-            if types_storage::buf::BufferIsValid(b) {
+            if ::types_storage::buf::BufferIsValid(b) {
                 held_buffers.push(b);
             }
         }
@@ -686,7 +686,7 @@ pub fn after_trigger_execute<'mcx>(
         if has_ctid2 && item_pointer_is_valid(&event.ate_ctid2) {
             let (f, b) = fetch_trigger_tuple(mcx, rel.relid, &event.ate_ctid2)?;
             new_formed = Some(f);
-            if types_storage::buf::BufferIsValid(b) {
+            if ::types_storage::buf::BufferIsValid(b) {
                 held_buffers.push(b);
             }
         }
@@ -753,7 +753,7 @@ pub fn after_trigger_execute<'mcx>(
     let _role_guard = if save_rolid != evtshared.ats_rolid {
         miscinit::SetUserIdAndSecContext(
             evtshared.ats_rolid,
-            save_sec_context | types_core::init::SECURITY_LOCAL_USERID_CHANGE,
+            save_sec_context | ::types_core::init::SECURITY_LOCAL_USERID_CHANGE,
         );
         Some(RoleRestoreGuard {
             save_rolid,
@@ -778,8 +778,8 @@ pub fn after_trigger_execute<'mcx>(
     let tg_trigtuple: HeapTuple<'static> = match &trig_formed {
         Some(f) => {
             let copied: HeapTupleData<'mcx> = f.tuple.clone_in(mcx)?;
-            let boxed: mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
-                mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
+            let boxed: ::mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
+                ::mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
             // SAFETY: query-context lifetime extension, as above.
             Some(unsafe { core::mem::transmute(boxed) })
         }
@@ -788,8 +788,8 @@ pub fn after_trigger_execute<'mcx>(
     let tg_newtuple: HeapTuple<'static> = match &new_formed {
         Some(f) => {
             let copied: HeapTupleData<'mcx> = f.tuple.clone_in(mcx)?;
-            let boxed: mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
-                mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
+            let boxed: ::mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
+                ::mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
             Some(unsafe { core::mem::transmute(boxed) })
         }
         None => None,
@@ -839,11 +839,11 @@ pub fn after_trigger_execute<'mcx>(
     // `tg_trigslot`/`tg_newslot`, dropping their BufferHeapTupleTableSlot pins,
     // once the trigger has run). A Drop guard guarantees release on both the
     // success and unwind/Err paths, matching the slot lifecycle.
-    struct PinGuard(Vec<types_storage::Buffer>);
+    struct PinGuard(Vec<::types_storage::Buffer>);
     impl Drop for PinGuard {
         fn drop(&mut self) {
             for &b in &self.0 {
-                if types_storage::buf::BufferIsValid(b) {
+                if ::types_storage::buf::BufferIsValid(b) {
                     bufmgr_seams::release_buffer::call(b);
                 }
             }
@@ -893,8 +893,8 @@ fn fetch_trigger_tuple<'mcx>(
     relid: Oid,
     ctid: &ItemPointerData,
 ) -> PgResult<(
-    types_tuple::heaptuple::FormedTuple<'static>,
-    types_storage::Buffer,
+    ::types_tuple::heaptuple::FormedTuple<'static>,
+    ::types_storage::Buffer,
 )> {
     let rel = table_seams::table_open::call(mcx, relid, NoLock)?;
     let snapshot_any =
@@ -921,12 +921,12 @@ fn fetch_trigger_tuple<'mcx>(
         // side-channel slot payload that borrows this tuple is installed and
         // dropped within the enclosing `after_trigger_execute` call, which runs
         // inside the same query context, so the data outlives all reads.
-        let extended: types_tuple::heaptuple::FormedTuple<'static> =
+        let extended: ::types_tuple::heaptuple::FormedTuple<'static> =
             unsafe { core::mem::transmute(copied) };
         Ok((extended, fetched.userbuf))
     } else {
         // No tuple: drop any pin heap_fetch may have left, then ERROR as C does.
-        if types_storage::buf::BufferIsValid(fetched.userbuf) {
+        if ::types_storage::buf::BufferIsValid(fetched.userbuf) {
             bufmgr_seams::release_buffer::call(fetched.userbuf);
         }
         Err(PgError::error(
@@ -952,11 +952,11 @@ fn fetch_trigger_tuple_cp<'mcx>(
     mcx: Mcx<'mcx>,
     leaf_relid: Oid,
     root_relid: Oid,
-    root_desc: &types_tuple::heaptuple::TupleDescData<'_>,
+    root_desc: &::types_tuple::heaptuple::TupleDescData<'_>,
     ctid: &ItemPointerData,
 ) -> PgResult<(
-    types_tuple::heaptuple::FormedTuple<'static>,
-    types_storage::Buffer,
+    ::types_tuple::heaptuple::FormedTuple<'static>,
+    ::types_storage::Buffer,
 )> {
     // Fetch the on-leaf tuple by ctid (SnapshotAny), exactly as the non-CP path.
     // The leaf page stays pinned (C's `src_slot` BufferHeapTupleTableSlot) until
@@ -1003,7 +1003,7 @@ fn fetch_trigger_tuple_cp<'mcx>(
     // `after_trigger_execute`. The leaf page pin (`leaf_buf`) is carried back so
     // `after_trigger_execute` can hold it across the trigger call (C keeps
     // `src_slot`'s pin), then release it when the slot is cleared.
-    let extended: types_tuple::heaptuple::FormedTuple<'static> =
+    let extended: ::types_tuple::heaptuple::FormedTuple<'static> =
         unsafe { core::mem::transmute(result) };
     Ok((extended, leaf_buf))
 }
@@ -1047,7 +1047,7 @@ pub fn validate_foreign_key_constraint<'mcx>(
     // into `mcx` and extend its lifetime to 'static — the side-channel that
     // borrows it is installed and dropped within this call (same query-context
     // discipline as `after_trigger_execute`).
-    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+    let trigger_box: ::mcx::PgBox<'static, Trigger<'static>> = {
         let boxed = trigger_box_clone(mcx, conname, pkrel.rd_id, pkind_oid, constraint_oid)?;
         // SAFETY: allocated in `mcx`; borrowed only for this call's duration.
         unsafe { core::mem::transmute(boxed) }
@@ -1106,7 +1106,7 @@ pub fn validate_foreign_key_constraint<'mcx>(
     //   scan = table_beginscan(rel, snapshot, 0, NULL);
     // C's table_beginscan flags: SO_TYPE_SEQSCAN | SO_ALLOW_STRAT |
     // SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE.
-    use types_tableam::relscan::{
+    use ::types_tableam::relscan::{
         SO_ALLOW_PAGEMODE, SO_ALLOW_STRAT, SO_ALLOW_SYNC, SO_TYPE_SEQSCAN,
     };
     let flags = SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE;
@@ -1128,7 +1128,7 @@ pub fn validate_foreign_key_constraint<'mcx>(
             // The scanned row, deep-copied into `mcx`, rides the slot
             // side-channel as `tg_trigslot` so RI_FKey_check_ins' slot_getattr
             // reads its FK columns; its HeapTuple view is `tg_trigtuple`.
-            let formed_static: types_tuple::heaptuple::FormedTuple<'static> = {
+            let formed_static: ::types_tuple::heaptuple::FormedTuple<'static> = {
                 // SAFETY: `formed` is allocated in `mcx`; the side-channel that
                 // borrows it is installed and dropped within this loop iteration.
                 unsafe { core::mem::transmute(formed) }
@@ -1136,7 +1136,7 @@ pub fn validate_foreign_key_constraint<'mcx>(
 
             // Rebuild the synthetic Trigger + tg_relation for this row's
             // TriggerData (each is moved into the per-call channel).
-            let row_trigger: mcx::PgBox<'static, Trigger<'static>> = {
+            let row_trigger: ::mcx::PgBox<'static, Trigger<'static>> = {
                 let cloned = trigger_box_clone(mcx, conname, pkrel.rd_id, pkind_oid, constraint_oid)?;
                 unsafe { core::mem::transmute(cloned) }
             };
@@ -1146,8 +1146,8 @@ pub fn validate_foreign_key_constraint<'mcx>(
             };
             let tg_trigtuple: HeapTuple<'static> = {
                 let copied: HeapTupleData<'mcx> = formed_static.tuple.clone_in(mcx)?;
-                let boxed: mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
-                    mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
+                let boxed: ::mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
+                    ::mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
                 Some(unsafe { core::mem::transmute(boxed) })
             };
 
@@ -1210,7 +1210,7 @@ pub fn detach_partition_remove_check<'mcx>(
 ) -> PgResult<()> {
     // Synthetic Trigger carrying the constraint identity; the partition is the
     // referenced (PK) side, so its OID rides as tgconstrrelid.
-    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+    let trigger_box: ::mcx::PgBox<'static, Trigger<'static>> = {
         let boxed = trigger_box_clone(mcx, conname, partition.rd_id, pkind_oid, constraint_oid)?;
         // SAFETY: allocated in `mcx`; borrowed only for this call's duration.
         unsafe { core::mem::transmute(boxed) }
@@ -1256,10 +1256,10 @@ fn trigger_box_clone<'mcx>(
     pkrelid: Oid,
     pkind_oid: Oid,
     constraint_oid: Oid,
-) -> PgResult<mcx::PgBox<'mcx, Trigger<'mcx>>> {
+) -> PgResult<::mcx::PgBox<'mcx, Trigger<'mcx>>> {
     let trig = Trigger {
         tgoid: INVALID_OID,
-        tgname: mcx::PgString::from_str_in(conname, mcx)?,
+        tgname: ::mcx::PgString::from_str_in(conname, mcx)?,
         tgfoid: INVALID_OID,
         tgtype: 0,
         tgenabled: TRIGGER_FIRES_ON_ORIGIN,
@@ -1272,13 +1272,13 @@ fn trigger_box_clone<'mcx>(
         tginitdeferred: false,
         tgnargs: 0,
         tgnattr: 0,
-        tgattr: mcx::PgVec::new_in(mcx),
-        tgargs: mcx::PgVec::new_in(mcx),
+        tgattr: ::mcx::PgVec::new_in(mcx),
+        tgargs: ::mcx::PgVec::new_in(mcx),
         tgqual: None,
         tgoldtable: None,
         tgnewtable: None,
     };
-    mcx::PgBox::try_new_in(trig, mcx).map_err(|_| mcx.oom(0))
+    ::mcx::PgBox::try_new_in(trig, mcx).map_err(|_| mcx.oom(0))
 }
 
 // ===========================================================================
@@ -1568,7 +1568,7 @@ fn deferred_ddl(c_func: &str, c_line: u32) -> ! {
 fn bs_trigger_flag(
     estate: &EStateData<'_>,
     relinfo: ::nodes::RriId,
-    pick: fn(&types_trigger::TriggerDesc<'_>) -> bool,
+    pick: fn(&::types_trigger::TriggerDesc<'_>) -> bool,
 ) -> bool {
     estate
         .result_rel(relinfo)
@@ -1586,7 +1586,7 @@ fn exec_bs_insert_triggers_impl(estate: &mut EStateData<'_>, relinfo: ::nodes::R
         estate,
         relinfo,
         crate::queue::CmdType::Insert,
-        types_catalog::pg_trigger::TRIGGER_TYPE_INSERT,
+        ::types_catalog::pg_trigger::TRIGGER_TYPE_INSERT,
         TRIGGER_EVENT_INSERT,
     )
 }
@@ -1598,7 +1598,7 @@ fn exec_bs_update_triggers_impl(estate: &mut EStateData<'_>, relinfo: ::nodes::R
         estate,
         relinfo,
         crate::queue::CmdType::Update,
-        types_catalog::pg_trigger::TRIGGER_TYPE_UPDATE,
+        ::types_catalog::pg_trigger::TRIGGER_TYPE_UPDATE,
         TRIGGER_EVENT_UPDATE,
     )
 }
@@ -1610,7 +1610,7 @@ fn exec_bs_delete_triggers_impl(estate: &mut EStateData<'_>, relinfo: ::nodes::R
         estate,
         relinfo,
         crate::queue::CmdType::Delete,
-        types_catalog::pg_trigger::TRIGGER_TYPE_DELETE,
+        ::types_catalog::pg_trigger::TRIGGER_TYPE_DELETE,
         TRIGGER_EVENT_DELETE,
     )
 }
@@ -1631,7 +1631,7 @@ fn exec_before_statement_triggers(
     tg_event_op: i16,
     tg_event_bit: u32,
 ) -> PgResult<()> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_STATEMENT,
     };
 
@@ -1712,11 +1712,11 @@ fn fire_statement_trigger(
     let mcx = estate.es_query_cxt;
 
     // tg_trigger = &(trigdesc->triggers[tgindx]) — cloned into the query context.
-    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+    let trigger_box: ::mcx::PgBox<'static, Trigger<'static>> = {
         let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[tgindx];
         let cloned = trig.clone_in(mcx)?;
-        let boxed: mcx::PgBox<'_, Trigger<'_>> =
-            mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
+        let boxed: ::mcx::PgBox<'_, Trigger<'_>> =
+            ::mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
         // SAFETY: allocated in mcx (= es_query_cxt); the side-channel that borrows
         // it is installed/dropped within this call.
         unsafe { core::mem::transmute(boxed) }
@@ -1849,7 +1849,7 @@ struct TruncateTriggerState {
     /// `EState *estate` (`CreateExecutorState`), allocated in the truncate
     /// query context; transmuted to `'static` only to cross the two-call
     /// boundary — it never escapes a matched begin/end pair.
-    estate: mcx::PgBox<'static, EStateData<'static>>,
+    estate: ::mcx::PgBox<'static, EStateData<'static>>,
     /// The per-rel `ResultRelInfo` ids, in `rels` order (also held in
     /// `estate.es_opened_result_relations`).
     rri_ids: Vec<::nodes::RriId>,
@@ -1888,7 +1888,7 @@ fn exec_truncate_fire_before_triggers_impl(
     crate::queue::after_trigger_begin_query();
 
     // estate = CreateExecutorState();
-    let mut estate: mcx::PgBox<'_, EStateData<'_>> =
+    let mut estate: ::mcx::PgBox<'_, EStateData<'_>> =
         execUtils_seams::create_executor_state::call(mcx)?;
 
     let mut rri_ids: Vec<::nodes::RriId> = Vec::new();
@@ -1930,8 +1930,8 @@ fn exec_truncate_fire_before_triggers_impl(
     let state = TruncateTriggerState {
         estate: unsafe {
             core::mem::transmute::<
-                mcx::PgBox<'_, EStateData<'_>>,
-                mcx::PgBox<'static, EStateData<'static>>,
+                ::mcx::PgBox<'_, EStateData<'_>>,
+                ::mcx::PgBox<'static, EStateData<'static>>,
             >(estate)
         },
         rri_ids,
@@ -1984,7 +1984,7 @@ fn exec_bs_truncate_triggers(
     estate: &mut EStateData<'_>,
     relinfo: ::nodes::RriId,
 ) -> PgResult<()> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TRUNCATE,
     };
     use ::nodes::trigger::TRIGGER_EVENT_TRUNCATE;
@@ -2114,7 +2114,7 @@ fn exec_br_ir_insert_triggers<'mcx>(
     slot: ::nodes::SlotId,
     instead: bool,
 ) -> PgResult<bool> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_MATCHES,
         TRIGGER_TYPE_ROW,
     };
@@ -2138,7 +2138,7 @@ fn exec_br_ir_insert_triggers<'mcx>(
 
     // newtuple == NULL until first materialized (ExecFetchSlotHeapTuple(slot)).
     let mut newtuple: Option<
-        types_tuple::heaptuple::FormedTuple<'mcx>,
+        ::types_tuple::heaptuple::FormedTuple<'mcx>,
     > = None;
 
     for i in 0..numtriggers {
@@ -2252,7 +2252,7 @@ fn exec_br_ir_insert_triggers<'mcx>(
 /// partition.  Builds the `errdetail` from the trigger name and the partition
 /// relation's schema-qualified name.
 fn partition_move_in_before_trigger_error<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     estate: &EStateData<'mcx>,
     relinfo: ::nodes::RriId,
     tgname: &str,
@@ -2269,7 +2269,7 @@ fn partition_move_in_before_trigger_error<'mcx>(
             .map(|s| s.as_str().to_string())
             .unwrap_or_default();
     Ok(ereport(ERROR)
-        .errcode(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+        .errcode(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
         .errmsg(
             "moving row to another partition during a BEFORE FOR EACH ROW trigger is not supported",
         )
@@ -2288,10 +2288,10 @@ fn partition_move_in_before_trigger_error<'mcx>(
 /// value in a virtual generated column.  (Stored generated columns are
 /// overwritten later anyway, so they need no handling here.)
 fn check_modified_virtual_generated<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
-    tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
-    mut tuple: types_tuple::heaptuple::FormedTuple<'mcx>,
-) -> PgResult<types_tuple::heaptuple::FormedTuple<'mcx>> {
+    mcx: ::mcx::Mcx<'mcx>,
+    tupdesc: &::types_tuple::heaptuple::TupleDescData<'_>,
+    mut tuple: ::types_tuple::heaptuple::FormedTuple<'mcx>,
+) -> PgResult<::types_tuple::heaptuple::FormedTuple<'mcx>> {
     // if (!(tupdesc->constr && tupdesc->constr->has_generated_virtual)) return tuple;
     let has_virtual = tupdesc
         .constr
@@ -2303,7 +2303,7 @@ fn check_modified_virtual_generated<'mcx>(
 
     for i in 0..tupdesc.natts {
         if tupdesc.attr(i as usize).attgenerated
-            == types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL
+            == ::types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL
         {
             // if (!heap_attisnull(tuple, i + 1, tupdesc))
             if !heaptuple::heap_attisnull(
@@ -2315,7 +2315,7 @@ fn check_modified_virtual_generated<'mcx>(
                 //                                   &replCol, &replValue=0, &replIsnull=true);
                 let repl_cols = [i + 1];
                 let repl_values =
-                    [types_tuple::heaptuple::Datum::from_u64(0)];
+                    [::types_tuple::heaptuple::Datum::from_u64(0)];
                 let repl_isnull = [true];
                 tuple = heaptuple::heap_modify_tuple_by_cols(
                     mcx,
@@ -2338,8 +2338,8 @@ fn check_modified_virtual_generated<'mcx>(
 /// model as a data-bytes comparison: a trigger that returns its NEW row
 /// unchanged yields an identical user-data area; a modified row differs.
 fn formed_tuple_same(
-    a: &types_tuple::heaptuple::FormedTuple<'_>,
-    b: &types_tuple::heaptuple::FormedTuple<'_>,
+    a: &::types_tuple::heaptuple::FormedTuple<'_>,
+    b: &::types_tuple::heaptuple::FormedTuple<'_>,
 ) -> bool {
     a.data == b.data
 }
@@ -2356,16 +2356,16 @@ fn fire_row_insert_trigger<'mcx>(
     tgindx: usize,
     _tgoid: Oid,
     tg_event: u32,
-    trigtuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
-) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'static>>> {
+    trigtuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
+) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'static>>> {
     let mcx = estate.es_query_cxt;
 
     // tg_trigger = &(trigdesc->triggers[tgindx]) — cloned into the query context.
-    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+    let trigger_box: ::mcx::PgBox<'static, Trigger<'static>> = {
         let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[tgindx];
         let cloned = trig.clone_in(mcx)?;
-        let boxed: mcx::PgBox<'mcx, Trigger<'mcx>> =
-            mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
+        let boxed: ::mcx::PgBox<'mcx, Trigger<'mcx>> =
+            ::mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
         // SAFETY: allocated in mcx (= es_query_cxt); the side-channel that borrows
         // it is installed/dropped within this call.
         unsafe { core::mem::transmute(boxed) }
@@ -2396,15 +2396,15 @@ fn fire_row_insert_trigger<'mcx>(
     // tg_trigtuple = newtuple (the NEW row): the FormedTuple rides the slot
     // side-channel (so slot_getattr deforms it) and a HeapTuple view goes on
     // TriggerData.
-    let formed_static: types_tuple::heaptuple::FormedTuple<'static> = {
+    let formed_static: ::types_tuple::heaptuple::FormedTuple<'static> = {
         let copied = trigtuple.clone_in(mcx)?;
         // SAFETY: allocated in mcx; installed/dropped within this call.
         unsafe { core::mem::transmute(copied) }
     };
     let tg_trigtuple: HeapTuple<'static> = {
         let copied: HeapTupleData<'mcx> = formed_static.tuple.clone_in(mcx)?;
-        let boxed: mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
-            mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
+        let boxed: ::mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
+            ::mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
         Some(unsafe { core::mem::transmute(boxed) })
     };
 
@@ -2453,22 +2453,22 @@ fn fire_row_modify_trigger<'mcx>(
     _tgoid: Oid,
     tg_event: u32,
     _oldslot: ::nodes::SlotId,
-    trigtuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
+    trigtuple: &::types_tuple::heaptuple::FormedTuple<'mcx>,
     new: Option<(
         ::nodes::SlotId,
-        &types_tuple::heaptuple::FormedTuple<'mcx>,
+        &::types_tuple::heaptuple::FormedTuple<'mcx>,
     )>,
     // `LocTriggerData.tg_updatedcols` — the UPDATE's modified-column set
     // (`ExecGetAllUpdatedCols`), `None` for DELETE. Read by the
     // `tsvector_update_trigger` `updated_col` carrier seam (and any
     // column-specific WHEN-qual the trigger function inspects).
     updated_cols: Option<&::nodes::Bitmapset<'_>>,
-) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'static>>> {
+) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'static>>> {
     let mcx = estate.es_query_cxt;
 
     // tg_updatedcols = updatedCols — cloned into the query context and
     // `'static`-extended for the side-channel window.
-    let tg_updatedcols: Option<mcx::PgBox<'static, ::nodes::Bitmapset<'static>>> =
+    let tg_updatedcols: Option<::mcx::PgBox<'static, ::nodes::Bitmapset<'static>>> =
         match nodes_core::bitmapset::bms_copy(mcx, updated_cols)? {
             // SAFETY: allocated in mcx (= es_query_cxt); the TriggerData that
             // borrows it is installed/dropped within this call.
@@ -2477,11 +2477,11 @@ fn fire_row_modify_trigger<'mcx>(
         };
 
     // tg_trigger = &(trigdesc->triggers[tgindx]) — cloned into the query context.
-    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+    let trigger_box: ::mcx::PgBox<'static, Trigger<'static>> = {
         let trig = &estate.result_rel(relinfo).ri_TrigDesc.as_ref().unwrap().triggers[tgindx];
         let cloned = trig.clone_in(mcx)?;
-        let boxed: mcx::PgBox<'mcx, Trigger<'mcx>> =
-            mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
+        let boxed: ::mcx::PgBox<'mcx, Trigger<'mcx>> =
+            ::mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
         // SAFETY: allocated in mcx (= es_query_cxt); the side-channel that borrows
         // it is installed/dropped within this call.
         unsafe { core::mem::transmute(boxed) }
@@ -2511,28 +2511,28 @@ fn fire_row_modify_trigger<'mcx>(
 
     // tg_trigtuple = the OLD row (the slot side-channel carries the FormedTuple so
     // slot_getattr deforms it; a HeapTuple view goes on TriggerData).
-    let old_formed_static: types_tuple::heaptuple::FormedTuple<'static> = {
+    let old_formed_static: ::types_tuple::heaptuple::FormedTuple<'static> = {
         let copied = trigtuple.clone_in(mcx)?;
         unsafe { core::mem::transmute(copied) }
     };
     let tg_trigtuple: HeapTuple<'static> = {
         let copied: HeapTupleData<'mcx> = old_formed_static.tuple.clone_in(mcx)?;
-        let boxed: mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
-            mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
+        let boxed: ::mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
+            ::mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
         Some(unsafe { core::mem::transmute(boxed) })
     };
 
     // tg_newtuple / tg_newslot — only for UPDATE.
     let (new_formed_static, tg_newtuple, tg_newslot) = match new {
         Some((newslot, newtuple)) => {
-            let nf: types_tuple::heaptuple::FormedTuple<'static> = {
+            let nf: ::types_tuple::heaptuple::FormedTuple<'static> = {
                 let copied = newtuple.clone_in(mcx)?;
                 unsafe { core::mem::transmute(copied) }
             };
             let ntv: HeapTuple<'static> = {
                 let copied: HeapTupleData<'mcx> = nf.tuple.clone_in(mcx)?;
-                let boxed: mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
-                    mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
+                let boxed: ::mcx::PgBox<'mcx, HeapTupleData<'mcx>> =
+                    ::mcx::PgBox::try_new_in(copied, mcx).map_err(|_| mcx.oom(0))?;
                 Some(unsafe { core::mem::transmute(boxed) })
             };
             let _ = newslot;
@@ -2599,7 +2599,7 @@ thread_local! {
 /// the C `NULL` "do nothing".
 enum BeforeTriggerResult {
     /// `return NEW`/`return OLD`/`return <row>` — the row to apply.
-    Tuple(types_tuple::heaptuple::FormedTuple<'static>),
+    Tuple(::types_tuple::heaptuple::FormedTuple<'static>),
     /// `return NULL` — skip the operation ("do nothing").
     DoNothing,
 }
@@ -2613,7 +2613,7 @@ enum BeforeTriggerResult {
 /// (the firing path takes it back within the same call); the PL executor
 /// allocates it in the firing query context, satisfying this.
 pub fn set_before_trigger_result_tuple_impl<'mcx>(
-    tuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
+    tuple: Option<::types_tuple::heaptuple::FormedTuple<'mcx>>,
 ) {
     let v = match tuple {
         // SAFETY: the firing path takes this back within the same
@@ -2621,8 +2621,8 @@ pub fn set_before_trigger_result_tuple_impl<'mcx>(
         // context, which outlives that call.
         Some(t) => BeforeTriggerResult::Tuple(unsafe {
             core::mem::transmute::<
-                types_tuple::heaptuple::FormedTuple<'mcx>,
-                types_tuple::heaptuple::FormedTuple<'static>,
+                ::types_tuple::heaptuple::FormedTuple<'mcx>,
+                ::types_tuple::heaptuple::FormedTuple<'static>,
             >(t)
         }),
         None => BeforeTriggerResult::DoNothing,
@@ -2775,7 +2775,7 @@ pub fn tsv_tgarg_impl(_trigdata: types_ri_triggers::TriggerDataRef, i: i32) -> V
 pub fn tsv_tg_relation_tupdesc_impl<'mcx>(
     mcx: Mcx<'mcx>,
     _trigdata: types_ri_triggers::TriggerDataRef,
-) -> PgResult<types_tuple::heaptuple::TupleDescData<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::TupleDescData<'mcx>> {
     CURRENT_TRIGGER_SLOTS.with(|cell| {
         let b = cell.borrow();
         let s = b
@@ -2792,7 +2792,7 @@ pub fn tsv_tg_rettuple_impl<'mcx>(
     mcx: Mcx<'mcx>,
     _trigdata: types_ri_triggers::TriggerDataRef,
     which: TsvTupleSource,
-) -> PgResult<types_tuple::heaptuple::FormedTuple<'mcx>> {
+) -> PgResult<::types_tuple::heaptuple::FormedTuple<'mcx>> {
     CURRENT_TRIGGER_SLOTS.with(|cell| {
         let b = cell.borrow();
         let s = b.as_ref().ok_or_else(|| slot_no_payload("tsv_tg_rettuple"))?;
@@ -2816,7 +2816,7 @@ pub fn tsv_updated_col_impl(_trigdata: types_ri_triggers::TriggerDataRef, attnum
         };
         let bms = t.tg_updatedcols.as_deref();
         nodes_core::bitmapset::bms_is_member(
-            attnum - types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber as i32,
+            attnum - ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber as i32,
             bms,
         )
     })
@@ -2855,7 +2855,7 @@ pub fn tsv_make_and_install_tsvector_impl(
         let mcx = s.query_mcx;
 
         let datum =
-            types_tuple::heaptuple::Datum::from_byref_bytes_in(mcx, &image)?;
+            ::types_tuple::heaptuple::Datum::from_byref_bytes_in(mcx, &image)?;
         let repl_cols = [tsvector_attr_num];
         let repl_values = [datum];
         let repl_isnull = [false];
@@ -2914,7 +2914,7 @@ pub fn tsv_deposit_unmodified_rettuple_impl(
 fn decode_before_trigger_result<'mcx>(
     mcx: Mcx<'mcx>,
     _result: Datum,
-) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'static>>> {
+) -> PgResult<Option<::types_tuple::heaptuple::FormedTuple<'static>>> {
     let taken = BEFORE_TRIGGER_RESULT.with(|c| c.borrow_mut().take());
     match taken {
         Some(BeforeTriggerResult::DoNothing) => Ok(None),
@@ -3020,7 +3020,7 @@ fn trigger_enabled<'mcx>(
                 .tgattr[k];
             if nodes_core::bitmapset::bms_is_member(
                 attr as i32
-                    - types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber as i32,
+                    - ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber as i32,
                 modified_cols,
             ) {
                 modified = true;
@@ -3104,7 +3104,7 @@ fn build_trigger_when_predicate<'mcx>(
     estate: &mut EStateData<'mcx>,
     relinfo: ::nodes::RriId,
     tgindx: usize,
-) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<::mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     const PRS2_OLD_VARNO: i32 = 1;
     const PRS2_NEW_VARNO: i32 = 2;
     const INNER_VAR: i32 = -1;
@@ -3193,7 +3193,7 @@ fn change_var_nodes_expr(
                 if v.varlevelsup == 0 && v.varno == rt_index {
                     v.varno = new_index;
                     if v.varnosyn as i32 == rt_index {
-                        v.varnosyn = new_index as types_core::primitive::Index;
+                        v.varnosyn = new_index as ::types_core::primitive::Index;
                     }
                 }
                 Expr::Var(v)
@@ -3387,7 +3387,7 @@ fn transition_table_add_tuple<'mcx>(
 fn get_after_triggers_store_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
     target: TransitionTarget,
-    tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
+    tupdesc: ::types_tuple::heaptuple::TupleDesc<'mcx>,
 ) -> PgResult<::nodes::SlotId> {
     // Already created?  (cached on the table-data)
     let existing = crate::queue::with_after_triggers(|at| {
@@ -3504,7 +3504,7 @@ struct TransitionEnvGuard {
     new_target: Option<TransitionTarget>,
     /// The self-owned `'static` arena the env's ENR metadata is allocated in;
     /// dropped after the env (which holds the stores) is reclaimed.
-    _arena: std::boxed::Box<mcx::MemoryContext>,
+    _arena: std::boxed::Box<::mcx::MemoryContext>,
 }
 
 impl TransitionEnvGuard {
@@ -3517,11 +3517,11 @@ impl TransitionEnvGuard {
         // A self-owned 'static context for the env + its ENR metadata. The
         // tuplestores are already 'static (self-owned hold stores); the metadata
         // (name strings, list) lives here.
-        let arena = std::boxed::Box::new(mcx::MemoryContext::new("Trigger Transition Env"));
+        let arena = std::boxed::Box::new(::mcx::MemoryContext::new("Trigger Transition Env"));
         // SAFETY: `arena` is heap-pinned (Box) so its address is stable; the env
         // and its allocations live exactly as long as this guard, which strictly
         // wraps the trigger call. Treat its handle as 'static for the home.
-        let mcx: mcx::Mcx<'static> = unsafe { core::mem::transmute(arena.mcx()) };
+        let mcx: ::mcx::Mcx<'static> = unsafe { core::mem::transmute(arena.mcx()) };
 
         let mut env = queryenvironment::create_queryEnv(mcx);
 
@@ -3569,14 +3569,14 @@ impl Drop for TransitionEnvGuard {
             let mut idx = 0;
             if let Some(target) = self.new_target {
                 if let Some(Some(boxed)) = reldatas.get_mut(idx).map(core::mem::take) {
-                    let store = mcx::PgBox::into_inner(boxed);
+                    let store = ::mcx::PgBox::into_inner(boxed);
                     restore_transition_store(target, store);
                 }
                 idx += 1;
             }
             if let Some(target) = self.old_target {
                 if let Some(Some(boxed)) = reldatas.get_mut(idx).map(core::mem::take) {
-                    let store = mcx::PgBox::into_inner(boxed);
+                    let store = ::mcx::PgBox::into_inner(boxed);
                     restore_transition_store(target, store);
                 }
             }
@@ -3590,7 +3590,7 @@ impl Drop for TransitionEnvGuard {
 /// `name`/`reliddesc = relid`/`enrtype = ENR_NAMED_TUPLESTORE`/`enrtuples =
 /// tuplestore_tuple_count`.
 fn register_transition_enr(
-    mcx: mcx::Mcx<'static>,
+    mcx: ::mcx::Mcx<'static>,
     env: &mut ::nodes::queryenvironment::QueryEnvironment<'static>,
     relid: Oid,
     name: String,
@@ -3604,10 +3604,10 @@ fn register_transition_enr(
         None => return Ok(()),
     };
     let enrtuples = sort_storage::tuplestore::tuplestore_tuple_count(&mut store) as f64;
-    let boxed: mcx::PgBox<'static, ::nodes::Tuplestorestate<'static>> =
-        mcx::PgBox::try_new_in(store, mcx).map_err(|_| mcx.oom(0))?;
+    let boxed: ::mcx::PgBox<'static, ::nodes::Tuplestorestate<'static>> =
+        ::mcx::PgBox::try_new_in(store, mcx).map_err(|_| mcx.oom(0))?;
     let md = ::nodes::queryenvironment::EphemeralNamedRelationMetadataData {
-        name: Some(mcx::PgString::from_str_in(&name, mcx)?),
+        name: Some(::mcx::PgString::from_str_in(&name, mcx)?),
         reliddesc: relid,
         tupdesc: None,
         enrtype: ::nodes::queryenvironment::ENR_NAMED_TUPLESTORE,
@@ -3705,7 +3705,7 @@ fn ri_fk_enforcement_skip<'mcx>(
 
     // Materialize the OLD/NEW slots into FormedTuples for the side-channel.
     let old_formed: Option<
-        types_tuple::heaptuple::FormedTuple<'static>,
+        ::types_tuple::heaptuple::FormedTuple<'static>,
     > = match oldslot {
         Some(s) => {
             let (formed, _should_free) = {
@@ -3719,7 +3719,7 @@ fn ri_fk_enforcement_skip<'mcx>(
         None => None,
     };
     let new_formed: Option<
-        types_tuple::heaptuple::FormedTuple<'static>,
+        ::types_tuple::heaptuple::FormedTuple<'static>,
     > = match newslot {
         Some(s) => {
             let (formed, _should_free) = {
@@ -3738,10 +3738,10 @@ fn ri_fk_enforcement_skip<'mcx>(
         .ri_TrigDesc
         .as_ref()
         .expect("ri_fk_enforcement_skip: ri_TrigDesc is NULL");
-    let trigger_box: mcx::PgBox<'static, Trigger<'static>> = {
+    let trigger_box: ::mcx::PgBox<'static, Trigger<'static>> = {
         let cloned = trigdesc.triggers[trig_index].clone_in(mcx)?;
-        let boxed: mcx::PgBox<'mcx, Trigger<'mcx>> =
-            mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
+        let boxed: ::mcx::PgBox<'mcx, Trigger<'mcx>> =
+            ::mcx::PgBox::try_new_in(cloned, mcx).map_err(|_| mcx.oom(0))?;
         unsafe { core::mem::transmute(boxed) }
     };
     let rel = rri
@@ -3819,7 +3819,7 @@ fn after_trigger_save_event<'mcx>(
     tc: Option<&::nodes::modifytable::TransitionCaptureState>,
     is_crosspart_update: bool,
 ) -> PgResult<()> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES,
         TRIGGER_TYPE_ROW, TRIGGER_TYPE_UPDATE,
     };
@@ -4190,7 +4190,7 @@ fn after_trigger_save_event_stmt(
     modified_cols: Option<&::nodes::Bitmapset<'_>>,
     tc: Option<&::nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES,
         TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TRUNCATE, TRIGGER_TYPE_UPDATE,
     };
@@ -4271,7 +4271,7 @@ fn after_trigger_save_event_stmt(
                 for k in 0..trig.tgnattr as usize {
                     if nodes_core::bitmapset::bms_is_member(
                         trig.tgattr[k] as i32
-                            - types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber as i32,
+                            - ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber as i32,
                         modified_cols,
                     ) {
                         modified = true;
@@ -4326,7 +4326,7 @@ fn after_trigger_save_event_stmt(
 /// fires for UPDATE; the WHEN `tgqual` leg is handled by the caller as the
 /// #159-gated path.)
 fn trigger_enabled_no_qual(tgenabled: i8) -> bool {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_DISABLED, TRIGGER_FIRES_ON_ORIGIN, TRIGGER_FIRES_ON_REPLICA,
     };
     // `SESSION_REPLICATION_ROLE_REPLICA` (utils/guc.h).
@@ -4359,13 +4359,13 @@ fn exec_br_delete_triggers_impl<'mcx>(
     epqstate: &mut ::nodes::EPQState<'mcx>,
     relinfo: ::nodes::RriId,
     tupleid: Option<&ItemPointerData>,
-    fdw_trigtuple: Option<&types_tuple::heaptuple::FormedTuple<'mcx>>,
+    fdw_trigtuple: Option<&::types_tuple::heaptuple::FormedTuple<'mcx>>,
     epqslot: Option<&mut Option<::nodes::SlotId>>,
-    tmresult: Option<&mut types_tableam::tableam::TM_Result>,
-    tmfd: &mut types_tableam::tableam::TM_FailureData,
+    tmresult: Option<&mut ::types_tableam::tableam::TM_Result>,
+    tmfd: &mut ::types_tableam::tableam::TM_FailureData,
     is_merge_delete: bool,
 ) -> PgResult<bool> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW,
     };
 
@@ -4375,7 +4375,7 @@ fn exec_br_delete_triggers_impl<'mcx>(
     let slot = trigger_seams::exec_get_trigger_old_slot::call(estate, relinfo)?;
 
     // Assert(HeapTupleIsValid(fdw_trigtuple) ^ ItemPointerIsValid(tupleid));
-    let trigtuple: types_tuple::heaptuple::FormedTuple<'mcx> =
+    let trigtuple: ::types_tuple::heaptuple::FormedTuple<'mcx> =
         if let Some(fdw_tuple) = fdw_trigtuple {
             // trigtuple = fdw_trigtuple;
             // ExecForceStoreHeapTuple(trigtuple, slot, false);
@@ -4398,7 +4398,7 @@ fn exec_br_delete_triggers_impl<'mcx>(
                 epqstate,
                 relinfo,
                 tid,
-                types_tableam::tableam::LockTupleMode::LockTupleExclusive,
+                ::types_tableam::tableam::LockTupleMode::LockTupleExclusive,
                 slot,
                 /* do_epq_recheck */ !is_merge_delete,
                 Some(&mut epqslot_candidate),
@@ -4484,7 +4484,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
     relinfo: ::nodes::RriId,
     tupleid: Option<&ItemPointerData>,
-    fdw_trigtuple: Option<&types_tuple::heaptuple::FormedTuple<'mcx>>,
+    fdw_trigtuple: Option<&::types_tuple::heaptuple::FormedTuple<'mcx>>,
     tc: Option<&::nodes::TransitionCaptureState>,
     is_crosspart_update: bool,
 ) -> PgResult<()> {
@@ -4498,7 +4498,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
         return Err(PgError::error(
             "cannot collect transition tuples from child foreign tables",
         )
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
     }
 
     // if ((trigdesc && trigdesc->trig_delete_after_row) ||
@@ -4555,7 +4555,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
         // The tuple is materialized into `slot` below; this transition-capture
         // path doesn't run a trigger function over the page, so the re-fetch pin
         // is dropped immediately (the data already lives in `mcx`).
-        if types_storage::buf::BufferIsValid(fbuf) {
+        if ::types_storage::buf::BufferIsValid(fbuf) {
             bufmgr_seams::release_buffer::call(fbuf);
         }
         execTuples_seams::exec_force_store_formed_heap_tuple::call(
@@ -4603,9 +4603,9 @@ fn exec_ar_delete_triggers_impl<'mcx>(
 fn exec_ir_delete_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
     relinfo: ::nodes::RriId,
-    trigtuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
+    trigtuple: Option<::types_tuple::heaptuple::FormedTuple<'mcx>>,
 ) -> PgResult<bool> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW,
     };
 
@@ -4696,13 +4696,13 @@ fn exec_br_update_triggers_impl<'mcx>(
     epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
     relinfo: ::nodes::RriId,
     tupleid: Option<&ItemPointerData>,
-    fdw_trigtuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
+    fdw_trigtuple: Option<::types_tuple::heaptuple::FormedTuple<'mcx>>,
     newslot: ::nodes::SlotId,
-    tmresult: Option<&mut types_tableam::tableam::TM_Result>,
-    tmfd: &mut types_tableam::tableam::TM_FailureData,
+    tmresult: Option<&mut ::types_tableam::tableam::TM_Result>,
+    tmfd: &mut ::types_tableam::tableam::TM_FailureData,
     is_merge_update: bool,
 ) -> PgResult<bool> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW, TRIGGER_TYPE_UPDATE,
     };
 
@@ -4715,7 +4715,7 @@ fn exec_br_update_triggers_impl<'mcx>(
     let lockmode = trigger_seams::exec_update_lock_mode::call(estate, relinfo)?;
 
     // Assert(HeapTupleIsValid(fdw_trigtuple) ^ ItemPointerIsValid(tupleid));
-    let trigtuple: types_tuple::heaptuple::FormedTuple<'mcx> =
+    let trigtuple: ::types_tuple::heaptuple::FormedTuple<'mcx> =
         if let Some(fdw_tuple) = fdw_trigtuple {
             // trigtuple = fdw_trigtuple;
             // ExecForceStoreHeapTuple(fdw_trigtuple, oldslot, false);
@@ -4780,7 +4780,7 @@ fn exec_br_update_triggers_impl<'mcx>(
 
     // newtuple == NULL until first materialized (ExecFetchSlotHeapTuple(newslot)).
     let mut newtuple: Option<
-        types_tuple::heaptuple::FormedTuple<'mcx>,
+        ::types_tuple::heaptuple::FormedTuple<'mcx>,
     > = None;
 
     for i in 0..numtriggers {
@@ -4895,14 +4895,14 @@ fn get_tuple_for_trigger<'mcx>(
     _epqstate: &mut ::nodes::EPQState<'mcx>,
     relinfo: ::nodes::RriId,
     tid: &ItemPointerData,
-    lockmode: types_tableam::tableam::LockTupleMode,
+    lockmode: ::types_tableam::tableam::LockTupleMode,
     oldslot: ::nodes::SlotId,
     do_epq_recheck: bool,
     epqslot: Option<&mut Option<::nodes::SlotId>>,
-    mut tmresultp: Option<&mut types_tableam::tableam::TM_Result>,
-    tmfdp: &mut types_tableam::tableam::TM_FailureData,
+    mut tmresultp: Option<&mut ::types_tableam::tableam::TM_Result>,
+    tmfdp: &mut ::types_tableam::tableam::TM_FailureData,
 ) -> PgResult<bool> {
-    use types_tableam::tableam::TM_Result;
+    use ::types_tableam::tableam::TM_Result;
 
     // The firing path always passes epqslot != NULL; the no-epqslot branch
     // (table_tuple_fetch_row_version under SnapshotAny) is the AFTER-fetch leg,
@@ -4952,7 +4952,7 @@ fn get_tuple_for_trigger<'mcx>(
                     "tuple to be updated was already modified by an operation \
                      triggered by the current command",
                 )
-                .with_sqlstate(types_error::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION)
+                .with_sqlstate(::types_error::ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION)
                 .with_hint(
                     "Consider using an AFTER trigger instead of a BEFORE trigger \
                      to propagate changes to other rows.",
@@ -4984,7 +4984,7 @@ fn get_tuple_for_trigger<'mcx>(
                 return Err(PgError::error(
                     "could not serialize access due to concurrent update",
                 )
-                .with_sqlstate(types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
+                .with_sqlstate(::types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
             }
             Err(PgError::error(format!(
                 "unexpected table_tuple_lock status: {:?}",
@@ -4996,7 +4996,7 @@ fn get_tuple_for_trigger<'mcx>(
                 return Err(PgError::error(
                     "could not serialize access due to concurrent delete",
                 )
-                .with_sqlstate(types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
+                .with_sqlstate(::types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
             }
             // tuple was deleted
             Ok(false)
@@ -5032,10 +5032,10 @@ fn epq_recheck_unported() -> PgError {
 fn exec_ir_update_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
     relinfo: ::nodes::RriId,
-    trigtuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
+    trigtuple: Option<::types_tuple::heaptuple::FormedTuple<'mcx>>,
     newslot: ::nodes::SlotId,
 ) -> PgResult<bool> {
-    use types_catalog::pg_trigger::{
+    use ::types_catalog::pg_trigger::{
         TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW, TRIGGER_TYPE_UPDATE,
     };
 
@@ -5068,7 +5068,7 @@ fn exec_ir_update_triggers_impl<'mcx>(
 
     // newtuple == NULL until first materialized (ExecFetchSlotHeapTuple(newslot)).
     let mut newtuple: Option<
-        types_tuple::heaptuple::FormedTuple<'mcx>,
+        ::types_tuple::heaptuple::FormedTuple<'mcx>,
     > = None;
 
     for i in 0..numtriggers {
@@ -5155,7 +5155,7 @@ fn exec_ar_update_triggers_impl<'mcx>(
     src_partinfo: Option<::nodes::RriId>,
     _dst_partinfo: Option<::nodes::RriId>,
     tupleid: Option<&ItemPointerData>,
-    fdw_trigtuple: Option<&types_tuple::heaptuple::FormedTuple<'mcx>>,
+    fdw_trigtuple: Option<&::types_tuple::heaptuple::FormedTuple<'mcx>>,
     newslot: Option<::nodes::SlotId>,
     recheck_indexes: &[Oid],
     tc: Option<&mut ::nodes::modifytable::TransitionCaptureState>,
@@ -5172,7 +5172,7 @@ fn exec_ar_update_triggers_impl<'mcx>(
         return Err(PgError::error(
             "cannot collect transition tuples from child foreign tables",
         )
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
     }
 
     // if ((trigdesc && trigdesc->trig_update_after_row) ||
@@ -5260,7 +5260,7 @@ fn exec_ar_update_triggers_impl<'mcx>(
             // Materialized into `slot`; GetTupleForTrigger's re-fetch pin is not
             // needed past the store here (the caller fires the trigger via its own
             // path), so drop it now.
-            if types_storage::buf::BufferIsValid(fbuf) {
+            if ::types_storage::buf::BufferIsValid(fbuf) {
                 bufmgr_seams::release_buffer::call(fbuf);
             }
             execTuples_seams::exec_force_store_formed_heap_tuple::call(
@@ -5400,7 +5400,7 @@ fn make_transition_capture_state_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
     relinfo: ::nodes::RriId,
     cmd_type: ::nodes::nodes::CmdType,
-) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::modifytable::TransitionCaptureState>>> {
+) -> PgResult<Option<::mcx::PgBox<'mcx, ::nodes::modifytable::TransitionCaptureState>>> {
     use ::nodes::nodes::CmdType;
 
     // if (trigdesc == NULL) return NULL;
@@ -5522,7 +5522,7 @@ fn make_transition_capture_state_impl<'mcx>(
             }
         }
 
-        Ok::<_, types_error::PgError>((ins_idx, upd_idx, del_idx))
+        Ok::<_, ::types_error::PgError>((ins_idx, upd_idx, del_idx))
     })?;
 
     // Now build the TransitionCaptureState struct, in caller's context.
@@ -5536,7 +5536,7 @@ fn make_transition_capture_state_impl<'mcx>(
         tcs_update_private: upd_idx,
         tcs_delete_private: del_idx,
     };
-    Ok(Some(mcx::PgBox::try_new_in(state, _mcx).map_err(|_| _mcx.oom(0))?))
+    Ok(Some(::mcx::PgBox::try_new_in(state, _mcx).map_err(|_| _mcx.oom(0))?))
 }
 
 fn has_noncloned_pk_fkey_trigger_impl<'mcx>(
@@ -5581,7 +5581,7 @@ fn get_trigger_oid_impl(relid: Oid, trigname: &str, missing_ok: bool) -> PgResul
     // The C `get_trigger_oid` allocates in CurrentMemoryContext; the inward seam
     // carries no `mcx`, so wrap the scan in a scratch context (cf.
     // RemoveRewriteRuleById's install wrapper).
-    let ctx = mcx::MemoryContext::new("get_trigger_oid");
+    let ctx = ::mcx::MemoryContext::new("get_trigger_oid");
     get_trigger_oid_scan(ctx.mcx(), relid, trigname, missing_ok)
 }
 
@@ -5594,13 +5594,13 @@ fn get_trigger_oid_scan<'mcx>(
     trigname: &str,
     missing_ok: bool,
 ) -> PgResult<Oid> {
-    use scankey::ScanKeyInit;
+    use ::scankey::ScanKeyInit;
     use genam_seams as genam_seams;
-    use types_catalog::pg_trigger as pt;
-    use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    use types_storage::lock::AccessShareLock;
-    use types_tuple::heaptuple::Datum as ScanDatum;
+    use ::types_catalog::pg_trigger as pt;
+    use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_storage::lock::AccessShareLock;
+    use ::types_tuple::heaptuple::Datum as ScanDatum;
 
     // tgrel = table_open(TriggerRelationId, AccessShareLock);
     let tgrel =
@@ -5622,7 +5622,7 @@ fn get_trigger_oid_scan<'mcx>(
         pt::Anum_pg_trigger_tgname,
         BTEqualStrategyNumber,
         F_NAMEEQ,
-        ScanDatum::ByRef(mcx::slice_in(mcx, trigname.as_bytes())?),
+        ScanDatum::ByRef(::mcx::slice_in(mcx, trigname.as_bytes())?),
     )?;
     let keys = [k0, k1];
 
@@ -5734,7 +5734,7 @@ fn after_trigger_fire_deferred_impl() -> PgResult<()> {
     // (the C FireDeferred path pushes unconditionally when the queue is
     // non-empty), run the firing cycle, then PopActiveSnapshot(). delete_ok =
     // true (FireDeferred runs at top-of-commit, never inside a subxact).
-    let ctx = mcx::MemoryContext::new("AfterTriggerFireDeferred");
+    let ctx = ::mcx::MemoryContext::new("AfterTriggerFireDeferred");
     fire_global_event_cycle(
         ctx.mcx(),
         /* immediate_only */ false,
@@ -5772,7 +5772,7 @@ fn fire_global_event_cycle(
     delete_ok: bool,
     lazy_snapshot: bool,
 ) -> PgResult<()> {
-    let mut estate: mcx::PgBox<'_, EStateData<'_>> =
+    let mut estate: ::mcx::PgBox<'_, EStateData<'_>> =
         execUtils_seams::create_executor_state::call(mcx)?;
 
     let mut snapshot_pushed = false;
@@ -5897,7 +5897,7 @@ fn after_trigger_set_state_seam<'mcx>(stmt: &::nodes::nodes::Node<'mcx>) -> PgRe
             ))
         }
     };
-    let ctx = mcx::MemoryContext::new("AfterTriggerSetState");
+    let ctx = ::mcx::MemoryContext::new("AfterTriggerSetState");
     after_trigger_set_state(ctx.mcx(), css)
 }
 
@@ -5996,21 +5996,21 @@ fn resolve_constraint_trigger_oids<'mcx, 'n>(
     mcx: Mcx<'mcx>,
     stmt: &::nodes::ddlnodes::ConstraintsSetStmt<'n>,
 ) -> PgResult<Vec<Oid>> {
-    use scankey::ScanKeyInit;
+    use ::scankey::ScanKeyInit;
     use genam_seams as genam_seams;
-    use types_catalog::pg_constraint as pc;
-    use types_catalog::pg_trigger as pt;
-    use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
-    use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-    use types_storage::lock::AccessShareLock;
-    use types_tuple::heaptuple::Datum as ScanDatum;
+    use ::types_catalog::pg_constraint as pc;
+    use ::types_catalog::pg_trigger as pt;
+    use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
+    use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+    use ::types_storage::lock::AccessShareLock;
+    use ::types_tuple::heaptuple::Datum as ScanDatum;
 
     let mut conoidlist: Vec<Oid> = Vec::new();
 
     // conrel = table_open(ConstraintRelationId, AccessShareLock);
     let conrel = table_seams::table_open::call(
         mcx,
-        types_catalog::catalog::CONSTRAINT_RELATION_ID,
+        ::types_catalog::catalog::CONSTRAINT_RELATION_ID,
         AccessShareLock,
     )?;
 
@@ -6051,7 +6051,7 @@ fn resolve_constraint_trigger_oids<'mcx, 'n>(
                     schemaname,
                     relname
                 ))
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
             }
         }
 
@@ -6078,7 +6078,7 @@ fn resolve_constraint_trigger_oids<'mcx, 'n>(
                 pc::Anum_pg_constraint_conname,
                 BTEqualStrategyNumber,
                 F_NAMEEQ,
-                ScanDatum::ByRef(mcx::slice_in(mcx, relname.as_bytes())?),
+                ScanDatum::ByRef(::mcx::slice_in(mcx, relname.as_bytes())?),
             )?;
             let mut k1 = ScanKeyData::empty();
             ScanKeyInit(
@@ -6118,7 +6118,7 @@ fn resolve_constraint_trigger_oids<'mcx, 'n>(
                     return Err(PgError::error(format!(
                         "constraint \"{relname}\" is not deferrable"
                     ))
-                    .with_sqlstate(types_error::ERRCODE_WRONG_OBJECT_TYPE));
+                    .with_sqlstate(::types_error::ERRCODE_WRONG_OBJECT_TYPE));
                 }
                 found = true;
             }

@@ -20,8 +20,8 @@
 
 extern crate alloc;
 
-use types_core::AttrNumber;
-use types_error::PgResult;
+use ::types_core::AttrNumber;
+use ::types_error::PgResult;
 use ::nodes::execexpr::{ExprState, ProjectionInfo, SubPlanState};
 use ::nodes::execnodes::Opaque;
 use ::nodes::primnodes::{etag, Expr};
@@ -401,7 +401,7 @@ pub fn eval_testexpr_switch_context<'mcx>(
 // panic").
 
 /// `#define FUNC_MAX_ARGS 100` (pg_config_manual.h).
-const FUNC_MAX_ARGS: i32 = types_core::primitive::FUNC_MAX_ARGS as i32;
+const FUNC_MAX_ARGS: i32 = ::types_core::primitive::FUNC_MAX_ARGS as i32;
 
 /// `isAssignmentIndirectionExpr(expr)` (execExpr.c:3489) — recognize a nested
 /// assignment-indirection expression: `FieldStore`/`SubscriptingRef` whose
@@ -463,8 +463,8 @@ pub(crate) fn exec_init_func<'mcx>(
     scratch: &mut ::nodes::execexpr::ExprEvalStep<'mcx>,
     node: &Expr<'mcx>,
     args: &[Expr<'mcx>],
-    funcid: types_core::Oid,
-    inputcollid: types_core::Oid,
+    funcid: ::types_core::Oid,
+    inputcollid: ::types_core::Oid,
     state: &mut ExprState<'mcx>,
 ) -> PgResult<()> {
     use ::nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ResultCell};
@@ -505,10 +505,10 @@ pub(crate) fn exec_init_func<'mcx>(
         // C: ereport(ERROR, errcode(ERRCODE_TOO_MANY_ARGUMENTS),
         //            errmsg_plural("cannot pass more than %d argument(s) to a function",
         //                          ..., FUNC_MAX_ARGS, FUNC_MAX_ARGS));
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "cannot pass more than {FUNC_MAX_ARGS} arguments to a function"
         ))
-        .with_sqlstate(types_error::ERRCODE_TOO_MANY_ARGUMENTS));
+        .with_sqlstate(::types_error::ERRCODE_TOO_MANY_ARGUMENTS));
     }
 
     // C: scratch->d.func.finfo = palloc0(sizeof(FmgrInfo));
@@ -567,10 +567,10 @@ pub(crate) fn exec_init_func<'mcx>(
     //    if (flinfo->fn_retset) ereport(ERROR, ERRCODE_FEATURE_NOT_SUPPORTED,
     //        "set-valued function called in context that cannot accept a set");
     if flinfo.fn_retset {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "set-valued function called in context that cannot accept a set",
         )
-        .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+        .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
     }
 
     // C: Build code to evaluate arguments directly into the fcinfo struct.
@@ -682,8 +682,8 @@ pub(crate) fn exec_init_scalar_array_op<'mcx>(
     // C: Select the correct comparison function. For hashed NOT IN the opfuncid
     //    is the inequality function and negfuncid is the equality function we
     //    must use for hash probes.
-    let cmpfuncid = if opexpr.negfuncid != types_core::InvalidOid {
-        debug_assert!(opexpr.hashfuncid != types_core::InvalidOid);
+    let cmpfuncid = if opexpr.negfuncid != ::types_core::InvalidOid {
+        debug_assert!(opexpr.hashfuncid != ::types_core::InvalidOid);
         opexpr.negfuncid
     } else {
         opexpr.opfuncid
@@ -716,7 +716,7 @@ pub(crate) fn exec_init_scalar_array_op<'mcx>(
     objectaccess::invoke_function_execute_hook(cmpfuncid)?;
 
     // C: if (OidIsValid(opexpr->hashfuncid)) { ACL-check the hash function too. }
-    if opexpr.hashfuncid != types_core::InvalidOid {
+    if opexpr.hashfuncid != ::types_core::InvalidOid {
         let aclresult = aclchk_seams::object_aclcheck::call(
             parsenodes::ProcedureRelationId,
             opexpr.hashfuncid,
@@ -756,7 +756,7 @@ pub(crate) fn exec_init_scalar_array_op<'mcx>(
         },
     )?;
 
-    if opexpr.hashfuncid != types_core::InvalidOid {
+    if opexpr.hashfuncid != ::types_core::InvalidOid {
         // C (hashed path):
         //    ExecInitExprRec(scalararg, state, &fcinfo->args[0].value/.isnull);
         //    ExecInitExprRec(arrayarg, state, resv, resnull);
@@ -793,7 +793,7 @@ pub(crate) fn exec_init_scalar_array_op<'mcx>(
         // the step deconstructs; `array_cell` records that cell.
         scratch.opcode = ExprEvalOp::EEOP_SCALARARRAYOP;
         scratch.d = ExprEvalStepData::ScalarArrayOp {
-            element_type: types_core::InvalidOid,
+            element_type: ::types_core::InvalidOid,
             use_or: opexpr.useOr,
             typlen: 0,
             typbyval: false,
@@ -835,7 +835,7 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
     // `ExecInitExprWithParams`) leaves it `None`, so a SubPlan there errors
     // exactly as C's `!parent` branch does.
     if state.es_link.is_none() {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "SubPlan found with no parent plan",
         ));
     }
@@ -875,7 +875,7 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
                 // C: scratch.d.param.paramtype = exprType((Node *) arg);
                 // (declared "not actually used"). No exprType seam threaded
                 // here; carry InvalidOid.
-                paramtype: types_core::InvalidOid,
+                paramtype: ::types_core::InvalidOid,
             },
         };
         crate::execExpr_core::expr_eval_push_step(mcx, state, scratch)?;
@@ -1113,10 +1113,10 @@ pub(crate) fn exec_init_subscripting_ref<'mcx>(
         None => {
             // C: format_type_be(refcontainertype) for the error message.
             let typname = format_type_seams::format_type_be_owned::call(sbsref.refcontainertype)?;
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "cannot subscript type {typname} because it does not support subscripting"
             ))
-            .with_sqlstate(types_error::ERRCODE_DATATYPE_MISMATCH));
+            .with_sqlstate(::types_error::ERRCODE_DATATYPE_MISMATCH));
         }
     };
 
@@ -1258,10 +1258,10 @@ pub(crate) fn exec_init_subscripting_ref<'mcx>(
         //        "type %s does not support subscripted assignment");
         if methods.sbs_assign.is_none() {
             let typname = format_type_seams::format_type_be_owned::call(sbsref.refcontainertype)?;
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "type {typname} does not support subscripted assignment"
             ))
-            .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
+            .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED));
         }
 
         // C: if (isAssignmentIndirectionExpr(sbsref->refassgnexpr)) { ... OLD ... }
@@ -1269,10 +1269,10 @@ pub(crate) fn exec_init_subscripting_ref<'mcx>(
         let prev_cell = if nested {
             // C: if (!methods.sbs_fetch_old) ereport(ERROR, ...);
             let fetch_old = methods.sbs_fetch_old.ok_or_else(|| {
-                types_error::PgError::error(
+                ::types_error::PgError::error(
                     "type does not support subscripted assignment",
                 )
-                .with_sqlstate(types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
+                .with_sqlstate(::types_error::ERRCODE_FEATURE_NOT_SUPPORTED)
             })?;
             // The OLD step writes prevvalue/prevnull; alias them to an arena
             // cell so the nested CaseTestExpr can read them.
@@ -1585,17 +1585,17 @@ fn array_exec_setup<'mcx>(
     // C: if (sbsrefstate->numupper > MAXDIM) ereport(ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     //        "number of array dimensions (%d) exceeds the maximum allowed (%d)");
     if sbsrefstate.numupper > MAXDIM as i32 {
-        return Err(types_error::PgError::error(format!(
+        return Err(::types_error::PgError::error(format!(
             "number of array dimensions ({}) exceeds the maximum allowed ({})",
             sbsrefstate.numupper, MAXDIM
         ))
-        .with_sqlstate(types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
+        .with_sqlstate(::types_error::ERRCODE_PROGRAM_LIMIT_EXCEEDED));
     }
 
     // C: if (numlower != 0 && numupper != numlower)
     //        elog(ERROR, "upper and lower index lists are not same length");
     if sbsrefstate.numlower != 0 && sbsrefstate.numupper != sbsrefstate.numlower {
-        return Err(types_error::PgError::error(
+        return Err(::types_error::PgError::error(
             "upper and lower index lists are not same length",
         ));
     }

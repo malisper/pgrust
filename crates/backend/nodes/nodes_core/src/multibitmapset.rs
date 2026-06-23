@@ -27,7 +27,7 @@
 //! failure surface (the keystone's `bms_*` panic identically).
 
 use mcx::{Mcx, PgBox, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::bitmapset::Bitmapset;
 
 use crate::bitmapset;

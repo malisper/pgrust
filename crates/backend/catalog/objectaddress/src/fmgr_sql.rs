@@ -48,9 +48,9 @@
 //!   returns the resolved `ObjectAddress`.
 
 use mcx::{Mcx, PgString};
-use types_catalog::catalog_dependency::ObjectAddress;
-use types_core::primitive::OidIsValid;
-use types_core::Oid;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::types_core::primitive::OidIsValid;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use ::nodes::parsenodes::ObjectType;
 use ::nodes::parsenodes::{
@@ -115,7 +115,7 @@ pub fn textarray_to_strvaluelist<'mcx>(
 pub fn strlist_to_textarray<'mcx>(
     mcx: Mcx<'mcx>,
     list: &[Option<String>],
-) -> PgResult<mcx::PgVec<'mcx, u8>> {
+) -> PgResult<::mcx::PgVec<'mcx, u8>> {
     // The C builds `datums`/`nulls` (`CStringGetTextDatum(name)` per non-null
     // cell, `nulls[j] = true` per NULL) then `construct_md_array(..., TEXTOID,
     // -1, false, TYPALIGN_INT)`. The arrayfuncs `build_text_array_nullable` seam
@@ -423,13 +423,13 @@ pub fn pg_get_object_address<'mcx>(
         mcx,
         objtype,
         &objnode,
-        types_storage::lock::AccessShareLock,
+        ::types_storage::lock::AccessShareLock,
         false,
     )?;
 
     // We don't need the relcache entry, thank you very much.
     if let Some(relation) = resolved.relation {
-        relation.close(types_storage::lock::AccessShareLock)?;
+        relation.close(::types_storage::lock::AccessShareLock)?;
     }
 
     // The C builds a 3-column record tuple here (get_call_result_type +
@@ -489,8 +489,8 @@ pub fn pg_identify_object<'mcx>(
 ) -> PgResult<IdentifyObjectRow<'mcx>> {
     use ruleutils_seams as ruleutils;
     use lsyscache_seams as lsyscache;
-    use types_core::primitive::{InvalidAttrNumber, INVALID_OID};
-    use types_storage::lock::AccessShareLock;
+    use ::types_core::primitive::{InvalidAttrNumber, INVALID_OID};
+    use ::types_storage::lock::AccessShareLock;
 
     use crate::identity::get_object_identity;
     use crate::properties::{
@@ -537,7 +537,7 @@ pub fn pg_identify_object<'mcx>(
                 //                           RelationGetDescr(catalog), &isnull);
                 match heap_getattr(mcx, &objtup, nsp_attnum as i32, &catalog.rd_att)? {
                     None => {
-                        return Err(types_error::PgError::error(format!(
+                        return Err(::types_error::PgError::error(format!(
                             "invalid null namespace in object {}/{}/{}",
                             address.classId, address.objectId, address.objectSubId
                         )));
@@ -556,7 +556,7 @@ pub fn pg_identify_object<'mcx>(
                     //                          RelationGetDescr(catalog), &isnull);
                     match heap_getattr(mcx, &objtup, name_attnum as i32, &catalog.rd_att)? {
                         None => {
-                            return Err(types_error::PgError::error(format!(
+                            return Err(::types_error::PgError::error(format!(
                                 "invalid null name in object {}/{}/{}",
                                 address.classId, address.objectId, address.objectSubId
                             )));
@@ -585,7 +585,7 @@ pub fn pg_identify_object<'mcx>(
     row.type_ = match f2_get_object_type_description(mcx, &address, true)? {
         Some(s) => Some(s),
         None => {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "could not identify object type for {classid}/{objid}/{objsubid}"
             )));
         }
@@ -606,7 +606,7 @@ pub fn pg_identify_object<'mcx>(
             // `quote_identifier(NULL)` would crash, so a vanished namespace is
             // an `elog`-style error here.
             None => {
-                return Err(types_error::PgError::error(format!(
+                return Err(::types_error::PgError::error(format!(
                     "cache lookup failed for namespace {schema_oid}"
                 )));
             }
@@ -698,7 +698,7 @@ pub fn pg_identify_object_as_address<'mcx>(
     let type_ = match f2_get_object_type_description(mcx, &address, true)? {
         Some(s) => Some(s),
         None => {
-            return Err(types_error::PgError::error(format!(
+            return Err(::types_error::PgError::error(format!(
                 "could not identify object type for {classid}/{objid}/{objsubid}"
             )));
         }

@@ -4,9 +4,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_core::primitive::BlockNumber;
-use types_error::PgResult;
-use rel::Relation;
+use ::types_core::primitive::BlockNumber;
+use ::types_error::PgResult;
+use ::rel::Relation;
 
 seam_core::seam!(
     /// `RecordFreeIndexPage(rel, blkno)` (indexfsm.c): mark an index page as

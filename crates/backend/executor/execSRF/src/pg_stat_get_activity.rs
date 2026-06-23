@@ -23,11 +23,11 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::init::BackendType;
-use types_core::primitive::TimestampTz;
+use ::mcx::Mcx;
+use ::types_core::init::BackendType;
+use ::types_core::primitive::TimestampTz;
 use types_core::{Oid, OidIsValid};
-use types_error::PgResult;
+use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::heaptuple::Datum;
@@ -76,8 +76,8 @@ fn has_pgstat_permissions(role: Oid) -> PgResult<bool> {
 
 /// `TransactionIdIsValid(xid)`.
 #[inline]
-fn xid_is_valid(xid: types_core::TransactionId) -> bool {
-    xid != types_core::InvalidTransactionId
+fn xid_is_valid(xid: ::types_core::TransactionId) -> bool {
+    xid != ::types_core::InvalidTransactionId
 }
 
 /// Decode a NUL-terminated owned activity/name buffer (no trailing NUL kept) as
@@ -202,7 +202,7 @@ fn pg_stat_get_activity<'mcx>(
 
             // proc = BackendPidGetProc(st_procpid); if NULL and !B_BACKEND,
             //   proc = AuxiliaryPidGetProc(st_procpid).
-            let mut proc_no: Option<types_core::ProcNumber> =
+            let mut proc_no: Option<::types_core::ProcNumber> =
                 procarray_seams::backend_pid_get_proc_role::call(
                     beentry.st_procpid,
                 )
@@ -227,14 +227,14 @@ fn pg_stat_get_activity<'mcx>(
 
                 // leader = proc->lockGroupLeader;
                 let leader = lmgr_proc_seams::proc_lock_group_leader::call(procno);
-                let leader_pid = if leader != types_core::INVALID_PROC_NUMBER {
+                let leader_pid = if leader != ::types_core::INVALID_PROC_NUMBER {
                     lmgr_proc_seams::proc_pid::call(leader)
                 } else {
                     INVALID_PID
                 };
 
                 // Show the leader only for active parallel workers.
-                if leader != types_core::INVALID_PROC_NUMBER && leader_pid != beentry.st_procpid {
+                if leader != ::types_core::INVALID_PROC_NUMBER && leader_pid != beentry.st_procpid {
                     values[29] = Datum::from_i32(leader_pid);
                     nulls[29] = false;
                 } else if beentry.st_backend_type == BackendType::BgWorker {
@@ -406,7 +406,7 @@ fn numeric_in_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>> {
 /// `to_datum_bytes()` image behind a 4-byte varlena header, landing as a
 /// `Datum::ByRef`.
 fn inet_in_datum<'mcx>(mcx: Mcx<'mcx>, host: &str) -> PgResult<Datum<'mcx>> {
-    use datum::varlena::VARHDRSZ;
+    use ::datum::varlena::VARHDRSZ;
     // inet_in(host, NULL escontext) — a numeric host always parses, so the soft
     // path (None) is never taken; a parse failure is a hard ereport.
     let addr = adt_network::inet_in(host.as_bytes(), None)?
@@ -416,7 +416,7 @@ fn inet_in_datum<'mcx>(mcx: Mcx<'mcx>, host: &str) -> PgResult<Datum<'mcx>> {
     let mut img: Vec<u8> = Vec::with_capacity(total);
     img.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
     img.extend_from_slice(&payload);
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &img)?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &img)?))
 }
 
 /// Fill the client-address columns (12=client_addr inet, 13=client_hostname

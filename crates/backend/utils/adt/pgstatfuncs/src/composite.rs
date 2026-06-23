@@ -24,17 +24,17 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use mcx::Mcx;
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
-use fmgr::FunctionCallInfoBaseData;
-use replication::conflict::CONFLICT_NUM_TYPES;
-use types_tuple::heaptuple::NameData;
-use types_tuple::Datum as DatumV;
+use ::mcx::Mcx;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
+use ::fmgr::FunctionCallInfoBaseData;
+use ::replication::conflict::CONFLICT_NUM_TYPES;
+use ::types_tuple::heaptuple::NameData;
+use ::types_tuple::Datum as DatumV;
 
-use funcapi_seams::record_from_values;
+use ::funcapi_seams::record_from_values;
 
 const INT8OID: Oid = 20;
 const TEXTOID: Oid = 25;
@@ -44,8 +44,8 @@ const TIMESTAMPTZOID: Oid = 1184;
 /// A scratch context for the cores' transient allocations (C charges them to
 /// `CurrentMemoryContext`). The result composite image is copied out onto the
 /// fmgr frame's `Composite` lane before this context drops.
-fn scratch_mcx() -> mcx::MemoryContext {
-    mcx::MemoryContext::new("pgstat composite fmgr scratch")
+fn scratch_mcx() -> ::mcx::MemoryContext {
+    ::mcx::MemoryContext::new("pgstat composite fmgr scratch")
 }
 
 /// `CStringGetTextDatum(s)` → a `text` varlena `Datum`.
@@ -78,7 +78,7 @@ fn ret_record(
 /// `text_to_cstring(PG_GETARG_TEXT_P(i))`: a `text` arg's payload on the by-ref
 /// lane (header-ful image; skip the 4-byte varlena header), decoded as UTF-8.
 fn arg_text(fcinfo: &FunctionCallInfoBaseData, i: usize) -> alloc::string::String {
-    use datum::varlena::VARHDRSZ;
+    use ::datum::varlena::VARHDRSZ;
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())

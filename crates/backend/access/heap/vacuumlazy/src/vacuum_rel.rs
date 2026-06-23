@@ -8,10 +8,10 @@
 
 use utils_error::{ereport};
 use types_error::{ErrorLocation, INFO, LOG};
-use types_vacuum::vacuumparallel::IndexBulkDeleteResult;
+use ::types_vacuum::vacuumparallel::IndexBulkDeleteResult;
 use types_core::{BlockNumber, BLCKSZ};
-use types_error::PgResult;
-use types_vacuum::vacuum::{VacOptValue, VacuumParams};
+use ::types_error::PgResult;
+use ::types_vacuum::vacuum::{VacOptValue, VacuumParams};
 
 use crate::consts::{
     multi_xact_id_is_valid, multi_xact_id_precedes, multi_xact_id_precedes_or_equals,
@@ -145,7 +145,7 @@ pub fn heap_vacuum_rel<'mcx>(
     let new_rel_pages: BlockNumber;
     let mut new_rel_allvisible: BlockNumber;
     let mut new_rel_allfrozen: BlockNumber;
-    let starttime: types_core::TimestampTz;
+    let starttime: ::types_core::TimestampTz;
     let mut startreadtime: i64 = 0;
     let mut startwritetime: i64 = 0;
     let startwalusage = vl::pg_wal_usage::call()?;
@@ -355,7 +355,7 @@ pub fn heap_vacuum_rel<'mcx>(
     }
 
     /* Now actually update rel's pg_class entry. */
-    let (fz_updated, mm_updated) = vl::vac_update_relstats::call(types_vacuum::vacuumlazy::UpdateRelStatsArgs {
+    let (fz_updated, mm_updated) = vl::vac_update_relstats::call(::types_vacuum::vacuumlazy::UpdateRelStatsArgs {
         relation: vr.rel.rd_id,
         num_pages: new_rel_pages,
         num_tuples: vr.new_live_tuples,
@@ -420,8 +420,8 @@ fn emit_verbose_log<'mcx>(
     verbose: bool,
     orig_rel_pages: BlockNumber,
     new_rel_pages: BlockNumber,
-    starttime: types_core::TimestampTz,
-    endtime: types_core::TimestampTz,
+    starttime: ::types_core::TimestampTz,
+    endtime: ::types_core::TimestampTz,
     startreadtime: i64,
     startwritetime: i64,
     startwalusage: (i64, i64, u64, i64),

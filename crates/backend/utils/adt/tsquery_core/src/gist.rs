@@ -12,10 +12,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_error::PgResult;
+use ::types_error::PgResult;
 
 use crate::op::makeTSQuerySign;
-use tsearch::tsearch::{TSQuerySign, TSQS_SIGLEN};
+use ::tsearch::tsearch::{TSQuerySign, TSQS_SIGLEN};
 
 /// `RTContainsStrategyNumber` (`access/stratnum.h`).
 pub const RT_CONTAINS_STRATEGY_NUMBER: u16 = 7;
@@ -247,6 +247,6 @@ pub fn gtsquery_consistent_oldsig(
 }
 
 /// Out-of-memory error for a guarded allocation (mirrors the shared helper).
-fn oom() -> types_error::PgError {
+fn oom() -> ::types_error::PgError {
     ts_small::util::oom()
 }

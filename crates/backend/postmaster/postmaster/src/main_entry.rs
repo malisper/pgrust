@@ -34,7 +34,7 @@
 
 #![allow(non_snake_case)]
 
-use pqcomm::ListenServerPort;
+use ::pqcomm::ListenServerPort;
 use utils_error::{ereport};
 use types_error::{FATAL, LOG};
 
@@ -116,7 +116,7 @@ pub fn postmaster_death_watch_fd() -> i32 {
 /// postmaster.c's own (`postmaster_alive_fds`), so this seam (consumed by
 /// miscinit's InitPostmasterChild) is installed here. `Err` mirrors the C
 /// `ereport(FATAL, ... could not set ... FD_CLOEXEC ...)`.
-pub fn set_postmaster_death_watch_cloexec() -> types_error::PgResult<()> {
+pub fn set_postmaster_death_watch_cloexec() -> ::types_error::PgResult<()> {
     let fd = unsafe { POSTMASTER_ALIVE_FDS[POSTMASTER_FD_WATCH] };
     let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     if rc < 0 {
@@ -153,7 +153,7 @@ pub fn read_postmaster_death_watch() -> (isize, i32) {
 /// then the full `pqsignal(...)` handler set, then `InitializeWaitEventSupport()`,
 /// then `sigprocmask(SIG_SETMASK, &UnBlockSig, NULL)`.
 pub fn install_postmaster_signal_handlers() {
-    use signal::SigHandler;
+    use ::signal::SigHandler;
 
     // pqinitmask(); sigprocmask(SIG_SETMASK, &BlockSig, NULL);
     libpq_pqsignal::pqinitmask();
@@ -212,7 +212,7 @@ pub fn CloseServerPorts() {
     pm_mut().listen_sockets.clear();
 
     /* Next, remove any filesystem entries for Unix sockets. */
-    pqcomm::RemoveSocketFiles();
+    ::pqcomm::RemoveSocketFiles();
 
     /*
      * We don't do anything about socket lock files here; those are removed in a

@@ -10,9 +10,9 @@
 // so any crate invoking it must link `std`.
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_error::PgResult;
-use pathnodes::planner_run::PlannerRun;
+use ::mcx::Mcx;
+use ::types_error::PgResult;
+use ::pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId};
 
 seam_core::seam!(

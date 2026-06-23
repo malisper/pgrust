@@ -27,17 +27,17 @@
 
 mod tables;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use conv_string_helpers::{
     check_encoding_conversion_args, ConversionResult, LocalToUtf, UtfToLocal,
 };
-use conv_string_helpers::make_conversion_builtin;
+use ::conv_string_helpers::make_conversion_builtin;
 use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
-use types_wchar::encoding::{
+use ::types_wchar::encoding::{
     pg_enc, PG_UTF8, PG_WIN1250, PG_WIN1251, PG_WIN1252, PG_WIN1253, PG_WIN1254, PG_WIN1255,
     PG_WIN1256, PG_WIN1257, PG_WIN1258, PG_WIN866, PG_WIN874,
 };
-use types_wchar::pg_mb_radix_tree;
+use ::types_wchar::pg_mb_radix_tree;
 
 /// `win_to_utf8` — convert a WIN* string to UTF-8.
 ///

@@ -1,5 +1,5 @@
 use super::*;
-use error_fgram::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE;
+use ::error_fgram::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE;
 
 #[test]
 fn ascii_round_trips() {

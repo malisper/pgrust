@@ -6,9 +6,9 @@
 //! `values[]` / `nulls[]` arrays and inserted through
 //! `materialized_srf_putvalues` (the repo's `tuplestore_putvalues` analog).
 
-use arrayfuncs_seams::construct_text_array_bytes;
-use varlena_seams::cstring_to_text_v;
-use funcapi_seams::materialized_srf_putvalues;
+use ::arrayfuncs_seams::construct_text_array_bytes;
+use ::varlena_seams::cstring_to_text_v;
+use ::funcapi_seams::materialized_srf_putvalues;
 use mcx::{Mcx, PgString};
 use types_error::{PgResult, DEBUG3, ERROR};
 use types_core::{uaGSS, uaLDAP, uaOAuth, uaRADIUS, uaSSPI, UserAuth};
@@ -173,7 +173,7 @@ fn text_array_datum<'mcx>(mcx: Mcx<'mcx>, elems: &[String]) -> PgResult<Datum<'m
 /// `strlist_to_textarray` over the flattened AuthToken `string`s).
 fn token_strings_array<'mcx>(
     mcx: Mcx<'mcx>,
-    tokens: &[net::AuthToken],
+    tokens: &[::net::AuthToken],
 ) -> PgResult<Datum<'mcx>> {
     let strs: Vec<String> = tokens
         .iter()
@@ -189,7 +189,7 @@ fn numeric_host(addr: &[u8; 128], salen: i32) -> Option<String> {
     if salen <= 0 {
         return None;
     }
-    let sa = net::SockAddr { addr: *addr, salen: salen as u32 };
+    let sa = ::net::SockAddr { addr: *addr, salen: salen as u32 };
     let mut buffer = String::new();
     // Note: if pg_getnameinfo_all fails, it'll set buffer to "???", which we
     // want to return. (ip writes "???" on failure too.)

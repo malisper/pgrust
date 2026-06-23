@@ -7,7 +7,7 @@
 //! here because it needs a live shared-memory segment.
 
 use super::*;
-use types_pgstat::wait_event::WAIT_EVENT_SPIN_DELAY;
+use ::types_pgstat::wait_event::WAIT_EVENT_SPIN_DELAY;
 
 #[test]
 fn wait_event_type_matches_postgres_classes() {

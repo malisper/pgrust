@@ -1,6 +1,6 @@
 use super::*;
 use error_fgram::{ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_UNTRANSLATABLE_CHARACTER};
-use types_wchar::encoding::PG_UTF8;
+use ::types_wchar::encoding::PG_UTF8;
 
 #[test]
 fn converts_euc_cn_to_mic() {

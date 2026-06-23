@@ -24,10 +24,10 @@
 //! Return value: the number of *source* bytes consumed (`int4`), with the
 //! converted output written into `ref_args[3]`.
 
-use types_core::Oid;
-use datum::Datum;
-use types_error::PgResult;
-use fmgr::boundary::RefPayload;
+use ::types_core::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
+use ::fmgr::boundary::RefPayload;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `pg_proc.dat`: `euc_kr_to_utf8` OID.

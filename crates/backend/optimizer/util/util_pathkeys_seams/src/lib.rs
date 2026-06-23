@@ -1,5 +1,5 @@
 //! Seam declarations for `optimizer/util/pathkeys.c`, arena-shaped over
-//! [`pathnodes::PlannerInfo`].
+//! [`::pathnodes::PlannerInfo`].
 //!
 //! indxpath.c's `build_index_paths` asks pathkeys.c whether the query has
 //! useful pathkeys, builds the index's own ordering pathkeys, and truncates them

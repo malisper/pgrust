@@ -10,8 +10,8 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use types_core::primitive::{Oid, RepOriginId, TransactionId, XLogRecPtr};
-use types_error::PgResult;
+use ::types_core::primitive::{Oid, RepOriginId, TransactionId, XLogRecPtr};
+use ::types_error::PgResult;
 use types_logical::{LogicalDecodingContext, ReorderBufferCallback};
 
 // -------------------------------------------------------------------------
@@ -262,7 +262,7 @@ pub fn sql_srf_clear_rows() {
 /// caller (logicalfuncs / walsender) builds this from the `text[]` options.
 pub fn register_output_plugin_options(
     opts: Vec<(alloc::string::String, Option<alloc::string::String>)>,
-) -> types_logical::OutputPluginOptionsHandle {
+) -> ::types_logical::OutputPluginOptionsHandle {
     OPTION_LISTS.with(|s| {
         let mut s = s.borrow_mut();
         if s.is_empty() {
@@ -270,14 +270,14 @@ pub fn register_output_plugin_options(
             s.push(Vec::new());
         }
         s.push(opts);
-        types_logical::OutputPluginOptionsHandle(s.len() - 1)
+        ::types_logical::OutputPluginOptionsHandle(s.len() - 1)
     })
 }
 
 /// The `(key, value)` DefElem pairs of an `OutputPluginOptionsHandle`. The
 /// default handle (`0`) is the empty list.
 pub fn output_plugin_options_list(
-    handle: types_logical::OutputPluginOptionsHandle,
+    handle: ::types_logical::OutputPluginOptionsHandle,
 ) -> Vec<(alloc::string::String, Option<alloc::string::String>)> {
     OPTION_LISTS.with(|s| {
         let s = s.borrow();

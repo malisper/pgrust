@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use types_dest::CommandDest;
+use ::types_dest::CommandDest;
 use types_error::{
     unpack_sqlstate, ErrorLevel, PGErrorVerbosity, PgError, PgResult, SqlState, DEBUG1, DEBUG2,
     DEBUG3, DEBUG4, DEBUG5, ERROR, FATAL, INFO, LOG, LOG_DESTINATION_CSVLOG,
@@ -795,7 +795,7 @@ pub fn err_sendstring(buf: &mut Vec<u8>, s: &str) {
     buf.push(0);
 }
 
-fn send_field(buf: &mut Vec<u8>, code: types_error::ErrorField, value: &str) {
+fn send_field(buf: &mut Vec<u8>, code: ::types_error::ErrorField, value: &str) {
     buf.push(code.0 as u8);
     err_sendstring(buf, value);
 }

@@ -11,7 +11,7 @@
 //! # Model
 //!
 //! * The live `LogicalDecodingContext` is the single canonical
-//!   [`types_logical::LogicalDecodingContext`] (unified with `logical.c`); the
+//!   [`::types_logical::LogicalDecodingContext`] (unified with `logical.c`); the
 //!   handlers receive `&mut ctx`. `decode.c` reads `ctx->snapshot_builder`,
 //!   `ctx->reorder`, `ctx->slot->data.database` (the `slot_database` field),
 //!   `ctx->fast_forward`, `ctx->twophase`, the two filter-callback presence
@@ -43,21 +43,21 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 
-use types_core::primitive::{Oid, RepOriginId, TransactionId, XLogRecPtr};
+use ::types_core::primitive::{Oid, RepOriginId, TransactionId, XLogRecPtr};
 use utils_error::{ereport, PgError, PgResult};
 use types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
 use types_logical::{LogicalDecodingContext, XLogReaderHandle};
-use types_storage::sinval::{SharedInvalidationMessage, SharedInvalMessages};
-use wal::rmgr::XLogRecordBuffer;
+use ::types_storage::sinval::{SharedInvalidationMessage, SharedInvalMessages};
+use ::wal::rmgr::XLogRecordBuffer;
 use wal::{XLOG_LOGICAL_MESSAGE, XLR_INFO_MASK};
-use wal::rmgrdesc::{xl_logical_message, xl_parameter_change};
-use wal::xact::{
+use ::wal::rmgrdesc::{xl_logical_message, xl_parameter_change};
+use ::wal::xact::{
     XACT_XINFO_HAS_ORIGIN, XLOG_XACT_ABORT, XLOG_XACT_ABORT_PREPARED, XLOG_XACT_ASSIGNMENT,
     XLOG_XACT_COMMIT, XLOG_XACT_COMMIT_PREPARED, XLOG_XACT_INVALIDATIONS, XLOG_XACT_OPMASK,
     XLOG_XACT_PREPARE,
 };
 
-use xlog_records::heapam_xlog::{
+use ::xlog_records::heapam_xlog::{
     xl_heap_delete, xl_heap_insert, xl_heap_multi_insert, xl_heap_new_cid, xl_heap_truncate,
     xl_heap_update, xl_multi_insert_tuple, SizeOfHeapDelete, SizeOfHeapHeader,
     SizeOfHeapUpdate, SizeOfMultiInsertTuple, XLH_DELETE_CONTAINS_OLD_KEY,
@@ -65,12 +65,12 @@ use xlog_records::heapam_xlog::{
     XLH_INSERT_IS_SPECULATIVE, XLH_INSERT_LAST_IN_MULTI, XLH_INSERT_ON_TOAST_RELATION,
     XLH_UPDATE_CONTAINS_NEW_TUPLE, XLH_UPDATE_CONTAINS_OLD_KEY, XLH_UPDATE_CONTAINS_OLD_TUPLE,
 };
-use xlog_records::standbydefs::xl_running_xacts;
+use ::xlog_records::standbydefs::xl_running_xacts;
 
 use xactdesc::{
     parse_abort_record, parse_commit_record, parse_prepare_record, ParsedCommitAbort, ParsedPrepare,
 };
-use rmgr::GetRmgr;
+use ::rmgr::GetRmgr;
 
 use decode_seams as decode_seam;
 use logical_seams as logical_seam;
@@ -220,7 +220,7 @@ fn DecodeXLogTuple(data: &[u8]) -> DecodedTuple {
 fn commit_subxacts(data: &[u8], parsed: &ParsedCommitAbort) -> PgResult<Vec<TransactionId>> {
     let mut subxacts = Vec::with_capacity(parsed.nsubxacts.max(0) as usize);
     for i in 0..parsed.nsubxacts.max(0) as usize {
-        subxacts.push(xactdesc::subxact_at(
+        subxacts.push(::xactdesc::subxact_at(
             data,
             parsed.subxacts_offset,
             i,
@@ -233,7 +233,7 @@ fn commit_subxacts(data: &[u8], parsed: &ParsedCommitAbort) -> PgResult<Vec<Tran
 fn prepare_subxacts(data: &[u8], parsed: &ParsedPrepare) -> PgResult<Vec<TransactionId>> {
     let mut subxacts = Vec::with_capacity(parsed.nsubxacts.max(0) as usize);
     for i in 0..parsed.nsubxacts.max(0) as usize {
-        subxacts.push(xactdesc::subxact_at(
+        subxacts.push(::xactdesc::subxact_at(
             data,
             parsed.subxacts_offset,
             i,
@@ -1425,7 +1425,7 @@ fn shortalign(x: usize) -> usize {
 /// xactdesc parses the gid into the record at `parsed`'s position when
 /// `XACT_XINFO_HAS_GID` is set; we expose it as the NUL-stripped bytes.
 fn parsed_commit_gid<'a>(data: &'a [u8], parsed: &ParsedCommitAbort) -> &'a [u8] {
-    xactdesc::commit_abort_gid(data, parsed)
+    ::xactdesc::commit_abort_gid(data, parsed)
 }
 
 /// Decode an `XLOG_XACT_INVALIDATIONS` record body: `{int nmsgs;

@@ -10,11 +10,11 @@
 //! mutable statics are unsound in Rust.) The owning unit installs these from
 //! its `init_seams()` when it lands; until then a call panics loudly.
 
-use types_pgstat::activity_pgstat::{
+use ::types_pgstat::activity_pgstat::{
     PgStatShared_Archiver, PgStatShared_Checkpointer, PgStat_ArchiverStats,
     PgStat_CheckpointerStats,
 };
-use types_pgstat::backend_utils_activity_pgstat_bgwriter::{
+use ::types_pgstat::backend_utils_activity_pgstat_bgwriter::{
     PgStatShared_BgWriter, PgStat_BgWriterStats,
 };
 
@@ -261,7 +261,7 @@ seam_core::seam!(
     /// (palloc / dsa out-of-memory) and the per-kind `snapshot_cb`s'
     /// `LWLockAcquire` (`too many LWLocks taken`).
     pub fn snapshot_fixed(
-        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+        kind: ::types_pgstat::activity_pgstat::PgStat_Kind,
     ) -> types_error::PgResult<()>
 );
 
@@ -290,7 +290,7 @@ seam_core::seam!(
     /// `pgstat_get_entry_ref_locked` (palloc/dsa out-of-memory,
     /// `LWLockAcquire`'s `too many LWLocks taken`).
     pub fn pgstat_reset(
-        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+        kind: ::types_pgstat::activity_pgstat::PgStat_Kind,
         dboid: types_core::Oid,
         objid: u64,
     ) -> types_error::PgResult<()>
@@ -304,7 +304,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`s reachable through `pgstat_get_entry_ref_locked`
     /// (palloc/dsa out-of-memory, `LWLockAcquire`'s `too many LWLocks taken`).
     pub fn pgstat_reset_entry(
-        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+        kind: ::types_pgstat::activity_pgstat::PgStat_Kind,
         dboid: types_core::Oid,
         objid: u64,
         ts: types_core::TimestampTz,
@@ -323,7 +323,7 @@ seam_core::seam!(
     /// ported, so this seam panics until `pgstat.c`'s variable-snapshot path
     /// lands. `Err` carries the `palloc` / `dsa` / `LWLockAcquire` surface.
     pub fn pgstat_fetch_entry(
-        kind: types_pgstat::activity_pgstat::PgStat_Kind,
+        kind: ::types_pgstat::activity_pgstat::PgStat_Kind,
         dboid: types_core::Oid,
         objid: u64,
     ) -> types_error::PgResult<Option<Box<[u8]>>>
@@ -335,7 +335,7 @@ seam_core::seam!(
     /// the custom-kind registry; both hold `'static`-equivalent struct
     /// pointers). Callers only consult it for kinds that already resolved to
     /// a live entry, so the lookup cannot miss; infallible.
-    pub fn pgstat_get_kind_name(kind: types_pgstat::activity_pgstat::PgStat_Kind) -> &'static str
+    pub fn pgstat_get_kind_name(kind: ::types_pgstat::activity_pgstat::PgStat_Kind) -> &'static str
 );
 
 seam_core::seam!(

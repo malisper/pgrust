@@ -36,7 +36,7 @@
 use mcx::{Mcx, MemoryContext, PgVec};
 
 use utils_error::{ereport, PgResult};
-use types_error::pg_error::ErrorLocation;
+use ::types_error::pg_error::ErrorLocation;
 use types_error::{
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION,
@@ -44,11 +44,11 @@ use types_error::{
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE, WARNING,
 };
 
-use types_acl::acl::{ACLCHECK_OK, ACL_CREATE};
-use types_catalog::catalog_dependency::{
+use ::types_acl::acl::{ACLCHECK_OK, ACL_CREATE};
+use ::types_catalog::catalog_dependency::{
     InvalidObjectAddress, ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_NORMAL,
 };
-use types_catalog::pg_statistic_ext::{
+use ::types_catalog::pg_statistic_ext::{
     PgStatisticExtInsertRow, StatisticExtDataRelationId, StatisticExtRelationId,
     STATS_EXT_DEPENDENCIES, STATS_EXT_EXPRESSIONS, STATS_EXT_MCV, STATS_EXT_NDISTINCT,
 };
@@ -56,42 +56,42 @@ use types_core::{AttrNumber, Oid};
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::ObjectType;
 use ::nodes::ddlnodes::{AlterStatsStmt, CreateStatsStmt};
-use types_storage::lock::{NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
+use ::types_storage::lock::{NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 
-use table::table_open;
-use heaptuple::heap_modify_tuple;
-use outfuncs::nodeToString;
-use catalog_catalog::IsSystemRelation;
-use dependency::recordDependencyOnSingleRelExpr;
-use indexing::keystone::{CatalogTupleDelete, CatalogTupleUpdate};
-use inval::cache_invalidate::{
+use ::table::table_open;
+use ::heaptuple::heap_modify_tuple;
+use ::outfuncs::nodeToString;
+use ::catalog_catalog::IsSystemRelation;
+use ::dependency::recordDependencyOnSingleRelExpr;
+use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleUpdate};
+use ::inval::cache_invalidate::{
     CacheInvalidateRelcache, CacheInvalidateRelcacheByRelid,
 };
-use nodes_core::nodefuncs::expr_type as node_expr_type;
-use comment::CreateComments;
+use ::nodes_core::nodefuncs::expr_type as node_expr_type;
+use ::comment::CreateComments;
 
-use common_relation_seams::relation_openrv;
+use ::common_relation_seams::relation_openrv;
 use aclchk_seams::{aclcheck_error, object_aclcheck, object_ownercheck};
-use indexing_seams::catalog_tuple_insert_pg_statistic_ext;
+use ::indexing_seams::catalog_tuple_insert_pg_statistic_ext;
 use objectaccess_seams::{invoke_object_post_alter_hook, invoke_object_post_create_hook};
-use objectaddress_seams::get_relkind_objtype;
-use pg_depend_seams::recordDependencyOn;
-use pg_shdepend_seams::recordDependencyOnOwner;
-use indexcmds_seams::make_object_name;
-use nodes_core_seams::bms_next_member;
-use nodeFuncs_seams::equal;
-use var_seams::pull_varattnos;
-use format_type_seams::format_type_be;
+use ::objectaddress_seams::get_relkind_objtype;
+use ::pg_depend_seams::recordDependencyOn;
+use ::pg_shdepend_seams::recordDependencyOnOwner;
+use ::indexcmds_seams::make_object_name;
+use ::nodes_core_seams::bms_next_member;
+use ::nodeFuncs_seams::equal;
+use ::var_seams::pull_varattnos;
+use ::format_type_seams::format_type_be;
 use lsyscache_seams::{get_attgenerated, get_attname, get_namespace_name};
 use syscache_seams::{
     get_statext_oid, search_syscache_attname, statext_data_search_tuple, statext_exists,
     statext_get_relid, statext_search_tuple,
 };
-use typcache_seams::lookup_type_cache_lt_opr;
-use miscinit_seams::get_user_id;
-use guc_seams::allow_system_table_mods;
+use ::typcache_seams::lookup_type_cache_lt_opr;
+use ::miscinit_seams::get_user_id;
+use ::guc_seams::allow_system_table_mods;
 
 /* ===========================================================================
  * Constants (statistics.h / vacuum.h / c.h).
@@ -222,7 +222,7 @@ pub fn CreateStatistics<'mcx>(
          */
         // The seam opens a relation from the resolved (owned-String) RangeVar
         // form; build it from the parse-node RangeVar's fields.
-        let rv = types_tuple::access::RangeVar {
+        let rv = ::types_tuple::access::RangeVar {
             catalogname: rangevar.catalogname.as_ref().map(|s| s.as_str().to_string()),
             schemaname: rangevar.schemaname.as_ref().map(|s| s.as_str().to_string()),
             relname: rangevar.relname.as_ref().map(|s| s.as_str().to_string()).unwrap_or_default(),
@@ -257,7 +257,7 @@ pub fn CreateStatistics<'mcx>(
             let objtype = get_relkind_objtype::call(relkind);
             let relname = rel_name(&r);
             aclcheck_error::call(
-                types_acl::acl::ACLCHECK_NOT_OWNER,
+                ::types_acl::acl::ACLCHECK_NOT_OWNER,
                 objtype,
                 Some(relname),
             )?;
@@ -634,9 +634,9 @@ pub fn CreateStatistics<'mcx>(
      */
     let stxexprs_list: Option<Node<'mcx>> = if !stxexprs.is_empty() {
         let mut items: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
-            mcx::vec_with_capacity_in(mcx, stxexprs.len())?;
+            ::mcx::vec_with_capacity_in(mcx, stxexprs.len())?;
         for e in &stxexprs {
-            items.push(mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
+            items.push(::mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
         }
         Some(Node::mk_list(mcx, items)?)
     } else {
@@ -845,7 +845,7 @@ pub fn AlterStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterStatsStmt<'_>) -> PgRes
     if !object_ownercheck::call(StatisticExtRelationId, stxoid, get_user_id::call())? {
         let objname = catalog_namespace::NameListToString(mcx, &defnames)?;
         aclcheck_error::call(
-            types_acl::acl::ACLCHECK_NOT_OWNER,
+            ::types_acl::acl::ACLCHECK_NOT_OWNER,
             ObjectType::StatisticExt,
             Some(objname.as_str().to_string()),
         )?;
@@ -856,7 +856,7 @@ pub fn AlterStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterStatsStmt<'_>) -> PgRes
      * Int16GetDatum(newtarget); the default leaves the column NULL.
      */
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let natts = types_catalog::pg_statistic_ext::Natts_pg_statistic_ext;
+    let natts = ::types_catalog::pg_statistic_ext::Natts_pg_statistic_ext;
     let mut repl_val: Vec<Datum> = Vec::with_capacity(natts);
     let mut repl_null: Vec<bool> = Vec::with_capacity(natts);
     let mut repl_repl: Vec<bool> = Vec::with_capacity(natts);
@@ -866,7 +866,7 @@ pub fn AlterStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterStatsStmt<'_>) -> PgRes
         repl_repl.push(false);
     }
     let target_idx =
-        (types_catalog::pg_statistic_ext::Anum_pg_statistic_ext_stxstattarget - 1) as usize;
+        (::types_catalog::pg_statistic_ext::Anum_pg_statistic_ext_stxstattarget - 1) as usize;
     repl_repl[target_idx] = true;
     if !newtarget_default {
         repl_val[target_idx] = Datum::from_i16(newtarget as i16);
@@ -875,7 +875,7 @@ pub fn AlterStatistics<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterStatsStmt<'_>) -> PgRes
     }
 
     let mut newtup = heap_modify_tuple(mcx, &oldtup, &tupdesc, &repl_val, &repl_null, &repl_repl)
-        .map_err(types_error::PgError::from)?;
+        .map_err(::types_error::PgError::from)?;
 
     /* Update system catalog. */
     let otid = newtup.tuple.t_self;
@@ -1108,7 +1108,7 @@ fn range_var_get_relid_share_update_arm<'mcx>(
         ntag::T_RangeVar => (&*rel).expect_rangevar(),
         _ => panic!("range_var_get_relid_share_update: parse tree is not a RangeVar"),
     };
-    let rv = types_tuple::access::RangeVar {
+    let rv = ::types_tuple::access::RangeVar {
         catalogname: rangevar.catalogname.as_ref().map(|s| s.as_str().to_string()),
         schemaname: rangevar.schemaname.as_ref().map(|s| s.as_str().to_string()),
         relname: rangevar

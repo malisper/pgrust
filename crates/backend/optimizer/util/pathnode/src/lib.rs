@@ -16,9 +16,9 @@
 //!
 //! # Arena model
 //!
-//! Paths live in the [`PlannerInfo`](pathnodes::PlannerInfo) arena
+//! Paths live in the [`PlannerInfo`](::pathnodes::PlannerInfo) arena
 //! (`root.path_arena`, keyed by [`PathId`]). A constructor allocates its new
-//! [`PathNode`](pathnodes::PathNode) into the arena via
+//! [`PathNode`](::pathnodes::PathNode) into the arena via
 //! [`PlannerInfo::alloc_path`] and returns the [`PathId`] (the C constructor's
 //! freshly-`palloc`'d `Path *`); subpaths are referenced by their `PathId`. The
 //! rel's `pathlist`/`partial_pathlist`/cheapest-path fields hold the same
@@ -31,16 +31,16 @@
 //! expression walks (`clauses.c`/`tlist.c`) are reached through the seams in
 //! [`pathnode_seams`].
 //!
-//! Allocating functions return [`PgResult`](types_error::PgResult): in C every
+//! Allocating functions return [`PgResult`](::types_error::PgResult): in C every
 //! `palloc` can `ereport(ERROR, ERRCODE_OUT_OF_MEMORY)`.
 
 extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_core::primitive::Cost;
+use ::types_core::primitive::Cost;
 use types_error::{PgError, PgResult};
-use pathnodes::optimizer_plan::CostSelector;
+use ::pathnodes::optimizer_plan::CostSelector;
 use pathnodes::{Path, PathId, PathKey, PathNode, PlannerInfo, RelId, Relids};
 
 use pathnode_seams as seam;
@@ -763,7 +763,7 @@ pub fn init_seams() {
 /// (`apply_projection_to_path`, pathnode.c). `equal()` on two Lists compares
 /// length first, then element-wise; here each element is an `Expr` resolved
 /// from the planner node arena and compared via the equalfuncs.c `equal` seam.
-fn equal_exprs(root: &PlannerInfo, a: &[pathnodes::NodeId], b: &[pathnodes::NodeId]) -> bool {
+fn equal_exprs(root: &PlannerInfo, a: &[::pathnodes::NodeId], b: &[::pathnodes::NodeId]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -790,8 +790,8 @@ fn create_memoize_path_jp(
     root: &mut PlannerInfo,
     rel: RelId,
     subpath: PathId,
-    param_exprs: &[pathnodes::NodeId],
-    hash_operators: &[types_core::primitive::Oid],
+    param_exprs: &[::pathnodes::NodeId],
+    hash_operators: &[::types_core::primitive::Oid],
     singlerow: bool,
     binary_mode: bool,
     calls: f64,

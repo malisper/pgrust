@@ -4,32 +4,32 @@
 //! lock-acquisition callback.
 
 use mcx::{Mcx, MemoryContext};
-use types_acl::acl::ACLCHECK_NOT_OWNER;
-use types_catalog::pg_trigger as pt;
-use types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
-use types_core::Oid;
+use ::types_acl::acl::ACLCHECK_NOT_OWNER;
+use ::types_catalog::pg_trigger as pt;
+use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
+use ::types_core::Oid;
 use types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     NOTICE,
 };
-use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
-use types_tuple::access::{
+use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
+use ::types_tuple::access::{
     RangeVar, RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
 };
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_deform_tuple;
-use scankey::ScanKeyInit;
+use ::heaptuple::heap_deform_tuple;
+use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use aclchk_seams as aclchk;
 use indexing_seams as indexing;
 use utils_error::{elog, ereport};
 
-use heaptuple::FormedTuple;
-use types_catalog::catalog_dependency::ObjectAddress;
-use rel::Relation;
+use ::heaptuple::FormedTuple;
+use ::types_catalog::catalog_dependency::ObjectAddress;
+use ::rel::Relation;
 
 /// `OidIsValid` test (catalog/pg_class header inline).
 fn valid(oid: Oid) -> bool {
@@ -85,7 +85,7 @@ fn range_var_callback_for_rename_trigger(rv: &RangeVar, relid: Oid) -> PgResult<
     // you must own the table to rename one of its triggers
     let userid = miscinit::GetUserId();
     if !aclchk::object_ownercheck::call(
-        types_catalog::pg_class::RelationRelationId,
+        ::types_catalog::pg_class::RelationRelationId,
         relid,
         userid,
     )? {
@@ -429,7 +429,7 @@ fn name_str(image: &[u8]) -> String {
 /// `PointerGetDatum(name)` over a NUL-padded name — the by-ref convention
 /// `F_NAMEEQ` reads (precedent: create.rs's `tgname` scankey).
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, src: &str) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, src.as_bytes())?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, src.as_bytes())?))
 }
 
 /// Install the `renametrig` seam (commands/alter.c `ExecRenameStmt` dispatch).

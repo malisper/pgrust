@@ -3,7 +3,7 @@
 //!
 //! On init it imports the `DictFile`/`AffFile` and loads an optional
 //! `StopWords` list (building an [`IspellDict`] behind the spell unit's
-//! [`SpellHandle`](tsearch::SpellHandle)); on lexize it lowercases the
+//! [`SpellHandle`](::tsearch::SpellHandle)); on lexize it lowercases the
 //! token, normalizes it via `NINormalizeWord`, and drops stop words.
 //!
 //! The `IspellDict` build pipeline (`NIStartBuild` .. `NIFinishBuild`,
@@ -19,10 +19,10 @@ use spell_seams::{
     spell_sort_affixes, spell_sort_dictionary, spell_start_build,
 };
 use ts_utils_seams::{get_tsearch_config_filename, readstoplist, searchstoplist};
-use formatting_seams::str_tolower;
+use ::formatting_seams::str_tolower;
 use alloc::string::String;
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{Mcx, PgVec};
 use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use tsearch::{DictISpell, StopList, TSLexeme};
@@ -145,7 +145,7 @@ pub fn dispell_lexize<'mcx>(
 
 /// An `ereport(ERROR, ERRCODE_INVALID_PARAMETER_VALUE, errmsg(...))` for the
 /// ispell-option diagnostics.
-fn invalid_param(message: impl Into<alloc::string::String>) -> types_error::PgError {
+fn invalid_param(message: impl Into<alloc::string::String>) -> ::types_error::PgError {
     ereport(ERROR)
         .errcode(ERRCODE_INVALID_PARAMETER_VALUE)
         .errmsg(message)

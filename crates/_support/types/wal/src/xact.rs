@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use types_core::primitive::{Oid, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::primitive::{Oid, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
 use types_storage::{RelFileLocator, SharedInvalidationMessage};
 
 // --- record opcodes stored in xl_info, masked by XLOG_XACT_OPMASK ---
@@ -53,7 +53,7 @@ pub const fn xact_completion_apply_feedback(xinfo: u32) -> bool {
 /// (`{ int kind; Oid dboid; uint32 objid_lo; uint32 objid_hi; }`, 16 bytes;
 /// the 64-bit objid is reassembled from its two halves). Canonically defined in
 /// `types_core` (shared with the xact-system scalar vocabulary).
-pub use types_core::xact::XlXactStatsItem;
+pub use ::types_core::xact::XlXactStatsItem;
 
 /// `xl_xact_parsed_commit` (`access/xact.h`), the decoded form of a commit
 /// record.

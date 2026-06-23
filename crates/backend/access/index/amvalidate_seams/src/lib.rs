@@ -6,8 +6,8 @@
 //! then a call panics loudly.
 
 use types_amvalidate::index_amvalidate::{AmopRow, AmprocRow, OpFamilyOpFuncGroup};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_core::Oid;
+use ::types_error::PgResult;
 
 seam_core::seam!(
     /// `check_amproc_signature(funcid, restype, exact, minargs, maxargs, ...)`

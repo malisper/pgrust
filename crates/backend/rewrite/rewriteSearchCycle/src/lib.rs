@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
-// Every fallible function returns the shared `types_error::PgResult`; `PgError`'s
+// Every fallible function returns the shared `::types_error::PgResult`; `PgError`'s
 // size is fixed by `types-error`, so we accept the large-`Err` lint crate-wide,
 // like every sibling rewrite/parser crate.
 #![allow(clippy::result_large_err)]
@@ -38,12 +38,12 @@ use alloc::vec::Vec;
 
 use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 
-use types_core::primitive::{AttrNumber, InvalidAttrNumber, Oid};
-use types_core::InvalidOid;
-use datum::Datum as ScalarWord;
+use ::types_core::primitive::{AttrNumber, InvalidAttrNumber, Oid};
+use ::types_core::InvalidOid;
+use ::datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use types_tuple::heaptuple::Datum;
-use types_tuple::heaptuple::{BOOLOID, INT8OID, RECORDARRAYOID, RECORDOID};
+use ::types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::{BOOLOID, INT8OID, RECORDARRAYOID, RECORDOID};
 
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{CmdType, Node, NodePtr};
@@ -55,10 +55,10 @@ use ::nodes::primnodes::{
 use ::nodes::rawnodes::{Alias, FromExpr, RangeTblRef, SetOperation, SetOperationStmt};
 use ::nodes::value::StringNode;
 
-use nodes_core::makefuncs::{make_const, make_func_expr, make_opclause, make_var};
-use parser_analyze::makeSortGroupClauseForSetOp;
-use rewrite_core::increment::IncrementVarSublevelsUp;
-use utils_error::ereport;
+use ::nodes_core::makefuncs::{make_const, make_func_expr, make_opclause, make_var};
+use ::parser_analyze::makeSortGroupClauseForSetOp;
+use ::rewrite_core::increment::IncrementVarSublevelsUp;
+use ::utils_error::ereport;
 
 /// `F_ARRAY_CAT` (fmgroids.h) — the `array_cat(anyarray, anyarray)` function OID.
 const F_ARRAY_CAT: Oid = 383;
@@ -861,7 +861,7 @@ fn rte_subquery_tlist_resorig(rte: &RangeTblEntry<'_>) -> Vec<(Oid, AttrNumber)>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::MemoryContext;
+    use ::mcx::MemoryContext;
     use ::nodes::rawnodes::CommonTableExpr;
 
     /// Build a CTE shell with three output columns (a int4, b int4, c text) so

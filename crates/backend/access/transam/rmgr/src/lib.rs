@@ -17,20 +17,20 @@
 
 use std::cell::RefCell;
 
-use mcx::Mcx;
-use pgstrcasecmp::pg_strcasecmp;
-use types_core::RmgrId;
+use ::mcx::Mcx;
+use ::pgstrcasecmp::pg_strcasecmp;
+use ::types_core::RmgrId;
 use types_error::{ErrorLocation, PgError, PgResult, ERROR, LOG};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_tuple::Datum;
-use wal::rmgr::{
+use ::types_tuple::Datum;
+use ::wal::rmgr::{
     RmgrData, RmgrIdIsBuiltin, RmgrIdIsCustom, RM_MAX_CUSTOM_ID, RM_MIN_CUSTOM_ID,
     RM_N_BUILTIN_IDS, RM_N_IDS,
 };
 
 use brin_xlog_seams as brin_xlog;
 use gin_core_seams as ginxlog;
-use gist_core::gistxlog;
+use ::gist_core::gistxlog;
 use hash_xlog_seams as hash_xlog;
 use heapam_xlog_seams as heapam_xlog;
 use nbt_xlog_seams as nbtxlog;

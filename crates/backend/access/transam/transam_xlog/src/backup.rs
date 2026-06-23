@@ -28,11 +28,11 @@ use types_error::{
     ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERROR, LOG, NOTICE, WARNING,
 };
-use types_storage::storage::{LWLockMode, LW_SHARED};
-use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
-use types_tuple::Datum;
-use wal::wal::{BackupState, SessionBackupState, RM_XLOG_ID};
-use wal::xlog_consts::{
+use ::types_storage::storage::{LWLockMode, LW_SHARED};
+use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
+use ::types_tuple::Datum;
+use ::wal::wal::{BackupState, SessionBackupState, RM_XLOG_ID};
+use ::wal::xlog_consts::{
     CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE, CHECKPOINT_WAIT, MAXFNAMELEN,
 };
 
@@ -42,9 +42,9 @@ use dsm_core_seams as ipc;
 use latch_seams as latch;
 use lwlock as lwlock;
 use postgres_seams as tcop;
-use init_small::globals;
+use ::init_small::globals;
 
-use sink::TablespaceInfo;
+use ::sink::TablespaceInfo;
 
 use crate::control_funcs::RequestXLogSwitch;
 use crate::insert::{WALInsertLockAcquireExclusive, WALInsertLockRelease};
@@ -102,18 +102,18 @@ fn loc(line: i32, func: &'static str) -> ErrorLocation {
 
 /// `(pg_time_t) time(NULL)` — wall-clock seconds, as `do_pg_backup_start` /
 /// `do_pg_backup_stop` record in `state->starttime` / `state->stoptime`.
-fn wallclock_time() -> types_core::pg_time_t {
+fn wallclock_time() -> ::types_core::pg_time_t {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as types_core::pg_time_t)
+        .map(|d| d.as_secs() as ::types_core::pg_time_t)
         .unwrap_or(0)
 }
 
 /// `XLogIsNeeded()` (xlog.h): `wal_level >= WAL_LEVEL_REPLICA`.
 fn xlog_is_needed() -> bool {
     guc_tables::vars::wal_level.read()
-        >= wal::xlog_consts::WalLevel::Replica as i32
+        >= ::wal::xlog_consts::WalLevel::Replica as i32
 }
 
 /// Acquire `ControlFileLock` in the given mode, run `f`, release.
@@ -717,7 +717,7 @@ fn CleanupBackupHistory() -> PgResult<()> {
         if IsBackupHistoryFileName(&d_name)
             && xlogarchive::XLogArchiveCheckDone(&d_name)?
         {
-            ereport(types_error::DEBUG2)
+            ereport(::types_error::DEBUG2)
                 .errmsg(format!("removing WAL backup history file \"{d_name}\""))
                 .finish(loc(8786, "CleanupBackupHistory"))
                 .ok();
@@ -778,9 +778,9 @@ pub fn init_seams() {
     // walreceiver, the backup-stop archive wait) read it through this seam.
     xs::xlog_archive_mode::set(|| {
         match guc_tables::vars::XLogArchiveMode.read() {
-            0 => wal::xlog_consts::ArchiveMode::Off,
-            1 => wal::xlog_consts::ArchiveMode::On,
-            2 => wal::xlog_consts::ArchiveMode::Always,
+            0 => ::wal::xlog_consts::ArchiveMode::Off,
+            1 => ::wal::xlog_consts::ArchiveMode::On,
+            2 => ::wal::xlog_consts::ArchiveMode::Always,
             other => panic!("invalid archive_mode GUC value {other}"),
         }
     });

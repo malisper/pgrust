@@ -24,10 +24,10 @@
 
 #![allow(non_snake_case)]
 
-use types_error::PgResult;
-use types_logical::ResourceOwnerHandle;
+use ::types_error::PgResult;
+use ::types_logical::ResourceOwnerHandle;
 use ::nodes::parsestmt::ResourceOwnerHandle as ParsestmtResourceOwnerHandle;
-use portal::ResourceOwner;
+use ::portal::ResourceOwner;
 
 seam_core::seam!(
     /// Run `f` with `owner` installed as the current resource owner, restoring

@@ -7,8 +7,8 @@
 //! ([`Datum`]) and the relation crosses as its `Oid` (relations cross
 //! seams by OID; the relcache resolves them back to the live entry).
 
-use mcx::PgVec;
-use types_core::Oid;
+use ::mcx::PgVec;
+use ::types_core::Oid;
 
 use crate::common_heaptuple::Datum;
 

@@ -20,7 +20,7 @@
 //!   `MemoryContextDelete(es_query_cxt)` is the drop).
 //! - `ExprContext *` / `ResultRelInfo *` are pool ids ([`EcxtId`]/[`RriId`])
 //!   into EState-owned pools — see `types-::nodes::execnodes` for why.
-//! - `Relation` crosses as a [`rel::Relation`] handle: `es_relations`
+//! - `Relation` crosses as a [`::rel::Relation`] handle: `es_relations`
 //!   owns the opens (released at EState teardown or abort-path drop);
 //!   `ri_RelationDesc` and returned relations are aliases of those handles.
 //! - There is no ambient `CurrentMemoryContext`: C call sites that
@@ -66,24 +66,24 @@ use typcache_seams as typcache_seams;
 use mbutils_seams as mbutils_seams;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, McxOwned, MemoryContext, PgBox, PgVec};
-use types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, InvalidOid, Oid};
+use ::types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, InvalidOid, Oid};
 // The canonical unified value type (Datum-unification keystone) — what
 // `ExprContext.caseValue_datum`/`domainValue_datum` and the
 // `ExprContext_CB.arg` callback argument carry.
-use types_tuple::heaptuple::Datum;
+use ::types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::execnodes::{
     EStateData, EcxtId, ExprContext, ExprContextCallbackFunction, ExprContext_CB, RriId,
 };
 use ::nodes::nodes::CMD_UPDATE;
-use rel::Relation;
+use ::rel::Relation;
 use ::nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo, RTE_RELATION};
 use ::nodes::primnodes::{Expr, TargetEntry};
 use nodes::{PlanStateData, ScanStateData, SlotId, TupleSlotKind};
-use types_storage::lock::{AccessShareLock, NoLock};
-use types_tuple::heaptuple::{DeformedColumn, FormedTuple};
-use types_tuple::heaptuple::{
+use ::types_storage::lock::{AccessShareLock, NoLock};
+use ::types_tuple::heaptuple::{DeformedColumn, FormedTuple};
+use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderGetDatumLength, HeapTupleHeaderGetNatts,
     HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, ItemPointerData, TupleDescData,
     HEAP_HASNULL,
@@ -289,7 +289,7 @@ pub fn init_seams() {
 //				 Executor state and memory management functions
 // ===========================================================================
 
-mcx::bind!(pub EStateTy => EStateData<'mcx>);
+::mcx::bind!(pub EStateTy => EStateData<'mcx>);
 
 /// The `EState` together with its per-query "ExecutorState" memory context,
 /// movable as one value (the C `EState *` whose node lives inside
@@ -981,7 +981,7 @@ fn tlist_matches_tupdesc(
 pub fn ExecAssignScanType<'mcx>(
     estate: &mut EStateData<'mcx>,
     scanstate: &ScanStateData<'mcx>,
-    tup_desc: types_tuple::heaptuple::TupleDesc<'mcx>,
+    tup_desc: ::types_tuple::heaptuple::TupleDesc<'mcx>,
 ) -> PgResult<()> {
     let slot = scanstate
         .ss_ScanTupleSlot
@@ -1662,7 +1662,7 @@ pub fn ExecGetAllNullSlot(estate: &mut EStateData<'_>, rel_info: RriId) -> PgRes
 pub fn ExecGetChildToRootMap<'a, 'mcx>(
     estate: &'a mut EStateData<'mcx>,
     result_rel_info: RriId,
-) -> PgResult<Option<&'a types_tuple::tupconvert::TupleConversionMap<'mcx>>> {
+) -> PgResult<Option<&'a ::types_tuple::tupconvert::TupleConversionMap<'mcx>>> {
     // If we didn't already do so, compute the map for this child.
     if !estate.result_rel(result_rel_info).ri_ChildToRootMapValid {
         let root_rel_info = estate.result_rel(result_rel_info).ri_RootResultRelInfo;
@@ -1713,7 +1713,7 @@ pub fn ExecGetChildToRootMap<'a, 'mcx>(
 pub fn ExecGetRootToChildMap<'a, 'mcx>(
     estate: &'a mut EStateData<'mcx>,
     result_rel_info: RriId,
-) -> PgResult<Option<&'a types_tuple::tupconvert::TupleConversionMap<'mcx>>> {
+) -> PgResult<Option<&'a ::types_tuple::tupconvert::TupleConversionMap<'mcx>>> {
     // Mustn't get called for a non-child result relation.
     let root = estate
         .result_rel(result_rel_info)
@@ -1777,7 +1777,7 @@ fn ExecGetRootToChildMapOwned<'mcx>(
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'_>,
     result_rel_info: RriId,
-) -> PgResult<Option<PgBox<'mcx, types_tuple::attmap::AttrMap<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::types_tuple::attmap::AttrMap<'mcx>>>> {
     // Compute and cache the map on first use.
     ExecGetRootToChildMap(estate, result_rel_info)?;
     match estate
@@ -1786,10 +1786,10 @@ fn ExecGetRootToChildMapOwned<'mcx>(
         .as_deref()
     {
         Some(map) => {
-            let attnums = mcx::slice_in(mcx, &map.attrMap.attnums)?;
+            let attnums = ::mcx::slice_in(mcx, &map.attrMap.attnums)?;
             Ok(Some(alloc_in(
                 mcx,
-                types_tuple::attmap::AttrMap { attnums },
+                ::types_tuple::attmap::AttrMap { attnums },
             )?))
         }
         None => Ok(None),

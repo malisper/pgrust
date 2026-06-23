@@ -24,15 +24,15 @@
 //! keystone.
 
 use mcx::{MemoryContext, Mcx, PgVec};
-use types_core::Oid;
+use ::types_core::Oid;
 use types_error::{PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::CmdType;
 use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
 use ::nodes::parsestmt::{CachedPlanHandle, PlpgsqlExprParseState};
-use parsenodes::RawParseMode;
-use types_resowner::ResourceOwner;
-use types_tuple::Datum as RichDatum;
+use ::parsenodes::RawParseMode;
+use ::types_resowner::ResourceOwner;
+use ::types_tuple::Datum as RichDatum;
 
 use crate::backbone::set_spi_processed;
 use crate::dest_spi::{create_spi_dest_receiver, take_spi_raw_result, RawCol};
@@ -159,9 +159,9 @@ pub fn spi_eval_expr(
     //     fast path with NO callback, so no context line is added.
     // The syntax-position promotion (the `if` branch) still fires on both
     // phases.
-    let spi_error_decorate = |mut e: types_error::PgError,
+    let spi_error_decorate = |mut e: ::types_error::PgError,
                               add_query_context: bool|
-     -> types_error::PgError {
+     -> ::types_error::PgError {
         if e.cursor_position().unwrap_or(0) > 0 {
             let pos = e.cursor_position().unwrap();
             e = e
@@ -204,11 +204,11 @@ pub fn spi_eval_expr(
     // expression rather than the outer `select fn(...)` call.
     let query_cb = query.to_string();
     let prepare_cb_id =
-        utils_error::push_emit_context_callback(Box::new(move |e: &mut types_error::PgError| {
+        utils_error::push_emit_context_callback(Box::new(move |e: &mut ::types_error::PgError| {
             if e.cursor_position.unwrap_or(0) > 0 {
                 let pos = e.cursor_position.unwrap();
                 e.cursor_position = None;
-                e.internal_position = types_error::nonzero_position(pos);
+                e.internal_position = ::types_error::nonzero_position(pos);
                 e.internal_query = Some(query_cb.clone());
                 e.plpgsql_context_attached = false;
             }
@@ -248,7 +248,7 @@ pub fn spi_eval_expr(
     // maxtuples and SPI_processed == 0 leaves *isNull = true).
     let (typeid, value, isnull, byref) = match raw.first_col() {
         Some((typeid, col)) => (typeid, col.value, col.isnull, col.byref),
-        None => (types_core::InvalidOid, 0usize, true, None),
+        None => (::types_core::InvalidOid, 0usize, true, None),
     };
 
     Ok(EvalResult {
@@ -358,7 +358,7 @@ fn build_param_list(
             let v = resolve(dno)?;
             let value = match v.byref {
                 Some(image) if !v.isnull => {
-                    RichDatum::ByRef(mcx::slice_in(pmcx, &image)?)
+                    RichDatum::ByRef(::mcx::slice_in(pmcx, &image)?)
                 }
                 _ => RichDatum::from_usize(v.value),
             };
@@ -374,7 +374,7 @@ fn build_param_list(
                 value: RichDatum::null(),
                 isnull: true,
                 pflags: PARAM_FLAG_CONST,
-                ptype: types_core::InvalidOid,
+                ptype: ::types_core::InvalidOid,
             });
         }
     }
@@ -405,7 +405,7 @@ impl EvalRaw {
     fn first_col(&self) -> Option<(Oid, RawCol)> {
         let row = self.raw_rows.first()?;
         let col = row.first()?;
-        let typeid = self.columns.first().map(|c| c.typeid).unwrap_or(types_core::InvalidOid);
+        let typeid = self.columns.first().map(|c| c.typeid).unwrap_or(::types_core::InvalidOid);
         Some((typeid, col.clone()))
     }
 }
@@ -460,7 +460,7 @@ fn run_one_eval_stmt<'mcx>(
 ) -> PgResult<(u64, Vec<types_xml::SpiColumn>, Vec<Vec<RawCol>>)> {
     if stmt.commandType != CmdType::CMD_SELECT {
         return Err(utils_error::ereport(ERROR)
-            .errcode(types_error::ERRCODE_SYNTAX_ERROR)
+            .errcode(::types_error::ERRCODE_SYNTAX_ERROR)
             .errmsg("query is not a SELECT")
             .into_error());
     }

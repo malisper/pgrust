@@ -18,15 +18,15 @@
 //! inliner SQL leg — the SQL-function parse/rewrite path is not ported, so a
 //! reachable SQL SRF panics loudly there; no C-language SRF reaches it).
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_acl::{ACL_EXECUTE, ACLCHECK_OK};
-use types_catalog::pg_proc::PROKIND_FUNCTION;
-use types_core::catalog::{PROCEDURE_RELATION_ID, VOIDOID};
-use types_core::Oid;
-use types_error::PgResult;
+use ::types_catalog::pg_proc::PROKIND_FUNCTION;
+use ::types_core::catalog::{PROCEDURE_RELATION_ID, VOIDOID};
+use ::types_core::Oid;
+use ::types_error::PgResult;
 use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
 use ::nodes::primnodes::Expr;
-use pathnodes::PlannerInfo;
+use ::pathnodes::PlannerInfo;
 
 use clauses_seams as clauses_seam;
 

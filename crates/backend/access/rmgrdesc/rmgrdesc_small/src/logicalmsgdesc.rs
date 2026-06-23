@@ -1,9 +1,9 @@
 //! `logicalmsgdesc.c` — rmgr descriptor routines for
 //! `replication/logical/message.c`.
 
-use mcx::PgString;
-use types_core::uint8;
-use types_error::PgResult;
+use ::mcx::PgString;
+use ::types_core::uint8;
+use ::types_error::PgResult;
 use wal::{xl_logical_message, DecodedXLogRecord, XLR_INFO_MASK};
 
 use crate::util::{append_lossy, appendf, record_truncated};
@@ -61,7 +61,7 @@ pub fn logicalmsg_identify(info: uint8) -> Option<&'static str> {
 /// rmgr table invokes `rm_desc`.
 pub fn logicalmsg_desc_seam(
     buf: &mut PgString<'_>,
-    record: &wal::rmgr::XLogReaderState<'_>,
+    record: &::wal::rmgr::XLogReaderState<'_>,
 ) -> PgResult<()> {
     let record = record
         .record

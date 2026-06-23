@@ -7,7 +7,7 @@
 //! (`IsSystemClass`/`IsToastNamespace`/`IsCatalogRelationOid`).
 
 use super::*;
-use types_catalog::catalog::TYPE_RELATION_ID;
+use ::types_catalog::catalog::TYPE_RELATION_ID;
 
 /// Build a `PgClassForm` with just the namespace field set — the only field
 /// `IsSystemClass` reads on the toast branch.

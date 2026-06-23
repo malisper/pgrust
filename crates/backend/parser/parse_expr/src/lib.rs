@@ -55,7 +55,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::MemoryContext;
+use ::mcx::MemoryContext;
 
 use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
@@ -66,7 +66,7 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERROR, WARNING,
 };
-use types_sortsupport::COMPARE_EQ;
+use ::types_sortsupport::COMPARE_EQ;
 
 /// `RowCompareExpr.cmptype` is the [`::nodes::primnodes::CompareType`] enum;
 /// the intersection logic in [`make_row_comparison_op`] works with the bare
@@ -83,7 +83,7 @@ fn cmptype_to_enum(c: i32) -> ::nodes::primnodes::CompareType {
         _ => COMPARE_INVALID,
     }
 }
-use types_tuple::heaptuple::{
+use ::types_tuple::heaptuple::{
     BOOLOID, BYTEAOID, DATEOID, INT2VECTOROID, INT4OID, JSONBOID, NAMEOID, OIDVECTOROID, RECORDOID,
     REFCURSOROID, TEXTOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, UNKNOWNOID, XMLOID,
 };
@@ -109,11 +109,11 @@ const TYPCATEGORY_BITSTRING: u8 = b'V';
 const TYPTYPE_DOMAIN: u8 = b'd';
 /// `TYPTYPE_PSEUDO` (catalog/pg_type.h).
 const TYPTYPE_PSEUDO: u8 = b'p';
-use parse_target::FigureColname;
-use adt_xml::map_sql_identifier_to_xml_name;
-use types_tuple::heaptuple::MaxTupleAttributeNumber;
+use ::parse_target::FigureColname;
+use ::adt_xml::map_sql_identifier_to_xml_name;
+use ::types_tuple::heaptuple::MaxTupleAttributeNumber;
 
-use vars::var::contain_vars_of_level;
+use ::vars::var::contain_vars_of_level;
 
 use ::nodes::nodes::{self, ntag, Node};
 use ::nodes::parsestmt::{ParseExprKind, ParseState};
@@ -132,22 +132,22 @@ use ::nodes::rawnodes::{
     FuncCall, MultiAssignRef, TypeCast,
 };
 use ::nodes::rawexprnodes::RowExpr as RawRowExpr;
-use parsenodes::CoercionContext;
+use ::parsenodes::CoercionContext;
 
-use utils_error::ereport;
-use nodes_core::makefuncs::{
+use ::utils_error::ereport;
+use ::nodes_core::makefuncs::{
     make_bool_const, make_bool_expr, make_const, make_func_expr, make_json_behavior,
     make_json_constructor_expr, make_json_format, make_json_is_predicate, make_json_value_expr,
     make_target_entry,
 };
-use nodes_core::nodefuncs::{
+use ::nodes_core::nodefuncs::{
     expr_collation, expr_location, expr_type, expr_typmod, expression_returns_set,
 };
 
 use coerce_seams as coerce;
 use lsyscache_seams as lsyscache;
 use typcache_seams as typcache;
-use types_tuple::Datum;
+use ::types_tuple::Datum;
 
 use parser_relation::{
     colNameToVar, errorMissingColumn, errorMissingRTE, refnameNamespaceItem, scanNSItemForColumn,
@@ -210,7 +210,7 @@ fn str_val(node: &nodes::NodePtr<'_>) -> Option<String> {
 /// Convert a raw `List *opname` (a `PgVec` of boxed `String` value nodes) into a
 /// `Vec<String>` — the form `make_op`/`LookupOperName` consume. Non-`String`
 /// elements are skipped (operator name lists are always `String` value nodes).
-fn opname_strings(name: &mcx::PgVec<'_, nodes::NodePtr<'_>>) -> Vec<String> {
+fn opname_strings(name: &::mcx::PgVec<'_, nodes::NodePtr<'_>>) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(name.len());
     for n in name.iter() {
         if let Some(s) = str_val(n) {
@@ -234,7 +234,7 @@ fn parser_errposition(pstate: &ParseState<'_>, location: i32) -> i32 {
 /// reads `a->lexpr`/`a->rexpr`, then the transform consumes it). The owned model
 /// moves out of the `PgBox` (no clone), preserving the `'mcx` lifetime.
 fn boxed_node<'mcx>(child: Option<nodes::NodePtr<'mcx>>) -> Option<Node<'mcx>> {
-    child.map(|b| mcx::PgBox::into_inner(b))
+    child.map(|b| ::mcx::PgBox::into_inner(b))
 }
 
 // ===========================================================================
@@ -584,7 +584,7 @@ fn transform_expr_node<'mcx>(
 /// via `Node::mk_expr`) so this construction site is ready for the node-opaque
 /// flip (§6 `value_no_mcx` sub-sweep); today `mk_expr` ignores `mcx` so this is
 /// behavior-preserving.
-fn expr_to_node<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr<'static>) -> PgResult<Node<'mcx>> {
+fn expr_to_node<'mcx>(mcx: ::mcx::Mcx<'mcx>, e: Expr<'static>) -> PgResult<Node<'mcx>> {
     // The 'static parser-arena expr is deep-cloned into `mcx` for the Node.
     Ok(Node::mk_expr(mcx, e.clone_in(mcx)?)?)
 }
@@ -676,7 +676,7 @@ fn transformAExprOp<'mcx>(
         // s->subLinkType = ROWCOMPARE_SUBLINK; s->testexpr = lexpr;
         // s->operName = a->name; s->location = a->location;
         s.sub_link_type = ::nodes::primnodes::SubLinkType::RowCompare;
-        s.testexpr = lexpr.map(|l| mcx::alloc_in(mcx, l)).transpose()?;
+        s.testexpr = lexpr.map(|l| ::mcx::alloc_in(mcx, l)).transpose()?;
         s.oper_name = name;
         s.location = location;
         // result = transformExprRecurse(pstate, (Node *) s);
@@ -800,7 +800,7 @@ fn transformAExprIn<'mcx>(
     let mut rnonvars: Vec<Expr<'static>> = Vec::new();
     let mut has_rvars = false;
     for r in rexpr_list.into_iter() {
-        let rexpr = transformExprRecurse(pstate, Some(mcx::PgBox::into_inner(r)))?
+        let rexpr = transformExprRecurse(pstate, Some(::mcx::PgBox::into_inner(r)))?
             .ok_or_else(|| PgError::error("transformAExprIn: IN item is NULL"))?;
         // C appends the same `rexpr` pointer to both `rexprs` and one of
         // `rvars`/`rnonvars` (aliased list cells). In the owned-node model we
@@ -941,23 +941,23 @@ fn transformAExprIn<'mcx>(
 /// in `mcx` — a one-operator `A_Expr` wrapped as a `Node`, for the BETWEEN
 /// expansion. Mirrors `list_make1(makeString(op))` for the operator name.
 fn make_simple_a_expr<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     kind: A_Expr_Kind,
     op: &str,
     lexpr: Node<'mcx>,
     rexpr: Node<'mcx>,
     location: i32,
 ) -> PgResult<Node<'mcx>> {
-    let mut name: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut name: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
     let str_node = Node::mk_string(mcx, ::nodes::value::StringNode {
-        sval: mcx::PgString::from_str_in(op, mcx)?,
+        sval: ::mcx::PgString::from_str_in(op, mcx)?,
     })?;
-    name.push(mcx::alloc_in(mcx, str_node)?);
+    name.push(::mcx::alloc_in(mcx, str_node)?);
     Ok(Node::mk_a_expr(mcx, A_Expr {
         kind,
         name,
-        lexpr: Some(mcx::alloc_in(mcx, lexpr)?),
-        rexpr: Some(mcx::alloc_in(mcx, rexpr)?),
+        lexpr: Some(::mcx::alloc_in(mcx, lexpr)?),
+        rexpr: Some(::mcx::alloc_in(mcx, rexpr)?),
         rexpr_list_start: -1,
         rexpr_list_end: -1,
         location,
@@ -996,8 +996,8 @@ fn transformAExprBetween<'mcx>(
     if args.len() != 2 {
         return Err(PgError::error("transformAExprBetween: BETWEEN needs two bounds"));
     }
-    let cexpr = mcx::PgBox::into_inner(args.remove(1));
-    let bexpr = mcx::PgBox::into_inner(args.remove(0));
+    let cexpr = ::mcx::PgBox::into_inner(args.remove(1));
+    let bexpr = ::mcx::PgBox::into_inner(args.remove(0));
 
     // copyObject of a multiply-referenced subexpression.
     let clone = |n: &Node<'mcx>| -> PgResult<Node<'mcx>> { n.clone_in(mcx) };
@@ -1055,7 +1055,7 @@ fn transformAExprBetween<'mcx>(
 /// The `'mcx` context to allocate the synthesized BETWEEN A_Expr tree and clone
 /// the bound subexpressions into (C's `copyObject`). The tree lives at the query
 /// level; recover the query context from a pstate-allocated field.
-fn aexpr_clone_ctx<'mcx>(pstate: &ParseState<'mcx>) -> mcx::Mcx<'mcx> {
+fn aexpr_clone_ctx<'mcx>(pstate: &ParseState<'mcx>) -> ::mcx::Mcx<'mcx> {
     *pstate.p_rtable.allocator()
 }
 
@@ -1480,7 +1480,7 @@ fn transformCurrentOfExpr<'mcx>(
     let nsitem = pstate.p_target_nsitem.as_ref().ok_or_else(|| {
         PgError::error("transformCurrentOfExpr: CURRENT OF requires a target nsitem")
     })?;
-    cexpr.cvarno = nsitem.p_rtindex as types_core::Index;
+    cexpr.cvarno = nsitem.p_rtindex as ::types_core::Index;
 
     // Check whether the cursor name matches a REFCURSOR parameter; if so, replace
     // the raw name reference with a parameter reference (a hack for plpgsql's
@@ -1496,13 +1496,13 @@ fn transformCurrentOfExpr<'mcx>(
         if want_hooks {
             let mcx = aexpr_clone_ctx(pstate);
             // cref->fields = list_make1(makeString(cursor_name)); cref->location = -1;
-            let mut fields: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-            fields.push(mcx::alloc_in(
+            let mut fields: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
+            fields.push(::mcx::alloc_in(
                 mcx,
                 Node::mk_string(
                     mcx,
                     ::nodes::value::StringNode {
-                        sval: mcx::PgString::from_str_in(&cursor_name, mcx)?,
+                        sval: ::mcx::PgString::from_str_in(&cursor_name, mcx)?,
                     },
                 )?,
             )?);
@@ -1564,17 +1564,17 @@ fn transformCollateClause<'mcx>(
 
     // LookupCollation(pstate, c->collname, c->location). The collname is a
     // `List *` of `String` value nodes. The merged parse_type owner consumes the
-    // parser's own node vocabulary (`parsenodes::Node`), distinct from the
+    // parser's own node vocabulary (`::parsenodes::Node`), distinct from the
     // raw-grammar `::nodes::Node` this dispatcher carries; bridge the
     // String-only collname list across the two vocabularies (the only node kind
     // a collation name list ever contains).
-    let mut collname_pn: Vec<parsenodes::Node> = Vec::with_capacity(collname.len());
+    let mut collname_pn: Vec<::parsenodes::Node> = Vec::with_capacity(collname.len());
     for n in collname.into_iter() {
-        let other = mcx::PgBox::into_inner(n);
+        let other = ::mcx::PgBox::into_inner(n);
         let other_tag = other.node_tag().0;
         match other.into_string() {
-            Some(s) => collname_pn.push(parsenodes::Node::String(
-                parsenodes::StringNode {
+            Some(s) => collname_pn.push(::parsenodes::Node::String(
+                ::parsenodes::StringNode {
                     sval: Some(String::from(s.sval.as_str())),
                 },
             )),
@@ -1648,7 +1648,7 @@ fn transformCaseExpr<'mcx>(
     for w_ptr in c.args {
         // Each list element is a raw `Node::CaseWhen` (the grammar's
         // `makeNode(CaseWhen)`); pull out its raw `expr`/`result` children.
-        let w_node = mcx::PgBox::into_inner(w_ptr);
+        let w_node = ::mcx::PgBox::into_inner(w_ptr);
         let w_tag = w_node.node_tag();
         let w = match w_node.into_casewhen() {
             Some(w) => w,
@@ -1767,7 +1767,7 @@ fn transformCaseExpr<'mcx>(
 /// `make_row_comparison_op(pstate, opname, largs, rargs, location)`.
 fn make_row_comparison_op<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    opname: &mcx::PgVec<'_, nodes::NodePtr<'_>>,
+    opname: &::mcx::PgVec<'_, nodes::NodePtr<'_>>,
     largs: Vec<Expr<'static>>,
     rargs: Vec<Expr<'static>>,
     location: i32,
@@ -1849,7 +1849,7 @@ fn make_row_comparison_op<'mcx>(
     // Intersect the comparison types found in the opfamilies for each operator.
     let scratch = MemoryContext::new("make_row_comparison_op");
     let mut opinfo_lists: Vec<
-        mcx::PgVec<'_, lsyscache::OpIndexInterpretation>,
+        ::mcx::PgVec<'_, lsyscache::OpIndexInterpretation>,
     > = Vec::with_capacity(nopers);
     let mut common_cmptypes: Option<Vec<i32>> = None;
     for op in &opexprs {
@@ -1945,7 +1945,7 @@ fn make_row_comparison_op<'mcx>(
 /// already-transformed `RowExpr`s.
 fn make_row_distinct_op<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    opname: &mcx::PgVec<'_, nodes::NodePtr<'_>>,
+    opname: &::mcx::PgVec<'_, nodes::NodePtr<'_>>,
     lrow: RowExpr<'static>,
     rrow: RowExpr<'static>,
     location: i32,
@@ -1980,7 +1980,7 @@ fn make_row_distinct_op<'mcx>(
 /// `IS DISTINCT FROM` (a re-tagged `OpExpr`).
 fn make_distinct_op<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    opname: &mcx::PgVec<'_, nodes::NodePtr<'_>>,
+    opname: &::mcx::PgVec<'_, nodes::NodePtr<'_>>,
     ltree: Option<Expr<'static>>,
     rtree: Option<Expr<'static>>,
     location: i32,
@@ -2119,7 +2119,7 @@ fn transformTypeCast<'mcx>(
 /// to `(targetType, targetTypmod)` via the merged parse_type owner.
 ///
 /// The merged parse_type owner consumes the parser's own node vocabulary
-/// (`parsenodes::TypeName`/`Node`), distinct from the raw-grammar
+/// (`::parsenodes::TypeName`/`Node`), distinct from the raw-grammar
 /// `nodes` `TypeName`/`Node` this dispatcher carries. The `names`
 /// (qualified type name, `String` nodes) and `arrayBounds` (`Integer` nodes,
 /// whose values the lookup ignores — only `arrayBounds != NIL` matters) bridge
@@ -2138,32 +2138,32 @@ fn typename_type_id_and_mod<'mcx>(
     pstate: &ParseState<'mcx>,
     tn: &::nodes::rawnodes::TypeName<'mcx>,
 ) -> PgResult<(Oid, i32)> {
-    let mut typmods: Vec<parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
+    let mut typmods: Vec<::parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
     for tm in tn.typmods.iter() {
-        let bridged: parsenodes::Node = match tm.node_tag() {
+        let bridged: ::parsenodes::Node = match tm.node_tag() {
             // `IsA(tm, A_Const)`: the literal rides in `A_Const.val`.
             nodes::ntag::T_A_Const => {
                 let ac = tm.expect_a_const();
                 if let Some(i) = ac.val.as_deref().and_then(|v| v.as_integer()) {
-                    parsenodes::Node::Integer(parsenodes::Integer { ival: i.ival })
+                    ::parsenodes::Node::Integer(::parsenodes::Integer { ival: i.ival })
                 } else if let Some(f) = ac.val.as_deref().and_then(|v| v.as_float()) {
-                    parsenodes::Node::Float(parsenodes::Float {
+                    ::parsenodes::Node::Float(::parsenodes::Float {
                         fval: Some(String::from(f.fval.as_str())),
                     })
                 } else if let Some(s) = ac.val.as_deref().and_then(|v| v.as_string()) {
-                    parsenodes::Node::String(parsenodes::StringNode {
+                    ::parsenodes::Node::String(::parsenodes::StringNode {
                         sval: Some(String::from(s.sval.as_str())),
                     })
                 } else if let Some(b) = ac.val.as_deref().and_then(|v| v.as_boolean()) {
-                    parsenodes::Node::Boolean(parsenodes::Boolean { boolval: b.boolval })
+                    ::parsenodes::Node::Boolean(::parsenodes::Boolean { boolval: b.boolval })
                 } else if let Some(b) = ac.val.as_deref().and_then(|v| v.as_bitstring()) {
-                    parsenodes::Node::BitString(parsenodes::BitString {
+                    ::parsenodes::Node::BitString(::parsenodes::BitString {
                         bsval: Some(String::from(b.bsval.as_str())),
                     })
                 } else {
                     // SQL NULL constant or any other val: not a simple constant;
                     // carry an A_Star so the owner rejects it with the C error.
-                    parsenodes::Node::A_Star
+                    ::parsenodes::Node::A_Star
                 }
             }
             // `IsA(tm, ColumnRef)` with a single String field is an identifier
@@ -2172,28 +2172,28 @@ fn typename_type_id_and_mod<'mcx>(
                 let cr = tm.expect_columnref();
                 if cr.fields.len() == 1 {
                     if let Some(s) = cr.fields[0].as_string() {
-                        parsenodes::Node::String(parsenodes::StringNode {
+                        ::parsenodes::Node::String(::parsenodes::StringNode {
                             sval: Some(String::from(s.sval.as_str())),
                         })
                     } else {
-                        parsenodes::Node::A_Star
+                        ::parsenodes::Node::A_Star
                     }
                 } else {
-                    parsenodes::Node::A_Star
+                    ::parsenodes::Node::A_Star
                 }
             }
             // Anything else is not a simple constant or identifier; let the owner
             // raise the C "type modifiers must be simple constants or
             // identifiers" error.
-            _ => parsenodes::Node::A_Star,
+            _ => ::parsenodes::Node::A_Star,
         };
         typmods.push(bridged);
     }
-    let mut names: Vec<parsenodes::Node> = Vec::with_capacity(tn.names.len());
+    let mut names: Vec<::parsenodes::Node> = Vec::with_capacity(tn.names.len());
     for n in tn.names.iter() {
         if let Some(s) = n.as_string() {
-            names.push(parsenodes::Node::String(
-                parsenodes::StringNode {
+            names.push(::parsenodes::Node::String(
+                ::parsenodes::StringNode {
                     sval: Some(String::from(s.sval.as_str())),
                 },
             ));
@@ -2204,22 +2204,22 @@ fn typename_type_id_and_mod<'mcx>(
             )));
         }
     }
-    let mut array_bounds: Vec<parsenodes::Node> =
+    let mut array_bounds: Vec<::parsenodes::Node> =
         Vec::with_capacity(tn.arrayBounds.len());
     for n in tn.arrayBounds.iter() {
         // typeNameTypeId only tests `arrayBounds != NIL` (the bound values are
         // ignored by the lookup); carry the Integer bound through.
         if let Some(i) = n.as_integer() {
-            array_bounds.push(parsenodes::Node::Integer(
-                parsenodes::Integer { ival: i.ival },
+            array_bounds.push(::parsenodes::Node::Integer(
+                ::parsenodes::Integer { ival: i.ival },
             ));
         } else {
-            array_bounds.push(parsenodes::Node::Integer(
-                parsenodes::Integer { ival: -1 },
+            array_bounds.push(::parsenodes::Node::Integer(
+                ::parsenodes::Integer { ival: -1 },
             ));
         }
     }
-    let tn_pn = parsenodes::TypeName {
+    let tn_pn = ::parsenodes::TypeName {
         names,
         typeOid: tn.typeOid,
         setof: tn.setof,
@@ -2272,7 +2272,7 @@ fn transformArrayExpr<'mcx>(
     let A_ArrayExpr { elements, location, .. } = a;
     let mut newelems: Vec<Expr> = Vec::with_capacity(elements.len());
     for e in elements.into_iter() {
-        let e = mcx::PgBox::into_inner(e);
+        let e = ::mcx::PgBox::into_inner(e);
         let newe = if e.is_a_arrayexpr() {
             let sub = e.into_a_arrayexpr().unwrap();
             // Sub-array: recurse directly, passing down the target type.
@@ -2569,7 +2569,7 @@ fn transformColumnRef<'mcx>(
     // `None` falls through to the standard resolution below.
     if let Some(hook) = pstate.p_pre_columnref_hook {
         if let Some(node) = hook(pstate, &cref)? {
-            let node: Node<'mcx> = mcx::PgBox::into_inner(node);
+            let node: Node<'mcx> = ::mcx::PgBox::into_inner(node);
             return node_into_expr(node)
                 .map(|e| e.erase_lifetime())
                 .ok_or_else(|| {
@@ -2728,7 +2728,7 @@ fn resolve_columnref_finish<'mcx>(
     colname: Option<String>,
     cref: &ColumnRef<'mcx>,
     location: i32,
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
 ) -> PgResult<Node<'mcx>> {
     // Give the PostParseColumnRefHook, if any, a chance.
     if pstate.p_post_columnref_hook.is_some() {
@@ -2756,15 +2756,15 @@ fn resolve_columnref_finish<'mcx>(
             let rv = ::nodes::rawnodes::RangeVar {
                 catalogname: None,
                 schemaname: match &nspname {
-                    Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+                    Some(s) => Some(::mcx::PgString::from_str_in(s, mcx)?),
                     None => None,
                 },
                 relname: match &relname {
-                    Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
+                    Some(s) => Some(::mcx::PgString::from_str_in(s, mcx)?),
                     None => None,
                 },
                 inh: true,
-                relpersistence: types_core::catalog::RELPERSISTENCE_PERMANENT as i8,
+                relpersistence: ::types_core::catalog::RELPERSISTENCE_PERMANENT as i8,
                 alias: None,
                 location,
             };
@@ -2792,7 +2792,7 @@ fn resolve_columnref_finish<'mcx>(
 
 /// `NameListToString(fields)` (namespace.c) — render a dotted name list for the
 /// error messages. Only `String` and `A_Star` ('*') elements occur.
-fn namelist_to_string(fields: &mcx::PgVec<'_, nodes::NodePtr<'_>>) -> String {
+fn namelist_to_string(fields: &::mcx::PgVec<'_, nodes::NodePtr<'_>>) -> String {
     let mut out = String::new();
     for (i, n) in fields.iter().enumerate() {
         if i > 0 {
@@ -2822,7 +2822,7 @@ fn transformWholeRowRef<'mcx>(
     // relative to the ParseState `sublevels_up` levels up the parent chain (see
     // scanNSItemForColumn), so resolve the owning ParseState first.
     let (rte, p_rtindex, p_returning_type, names_is_eref, colnames_len, colnames) = {
-        let owner = parser_relation::nsitem_level(pstate, sublevels_up);
+        let owner = ::parser_relation::nsitem_level(pstate, sublevels_up);
         let nsitem = &owner.p_namespace[nsitem_index];
         let rte = nsitem
             .p_rte
@@ -2858,19 +2858,19 @@ fn transformWholeRowRef<'mcx>(
     if names_is_eref || p_returning_type != ::nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT
     {
         // Normal whole-row Var.
-        let mut var = make_whole_row_var(&rte, p_rtindex, sublevels_up as types_core::Index)?;
+        let mut var = make_whole_row_var(&rte, p_rtindex, sublevels_up as ::types_core::Index)?;
         var.varreturningtype = p_returning_type;
         // location is not filled in by makeWholeRowVar.
         var.location = location;
         // Mark Var if it's nulled by any outer joins.
-        parser_relation::markNullableIfNeeded(pstate, &mut var)?;
+        ::parser_relation::markNullableIfNeeded(pstate, &mut var)?;
         // Mark relation as requiring whole-row SELECT access.
-        parser_relation::markVarForSelectPriv(mcx, pstate, &var)?;
+        ::parser_relation::markVarForSelectPriv(mcx, pstate, &var)?;
         Ok(Node::mk_var(mcx, var)?)
     } else {
         // JOIN USING alias: expand into a RowExpr of the common columns.
-        let mut colvars: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-        parser_relation::expandRTE(
+        let mut colvars: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
+        ::parser_relation::expandRTE(
             mcx,
             &rte,
             p_rtindex,
@@ -2887,7 +2887,7 @@ fn transformWholeRowRef<'mcx>(
             if i >= colnames_len {
                 break;
             }
-            if let Some(e) = node_into_expr(mcx::PgBox::into_inner(cv)) {
+            if let Some(e) = node_into_expr(::mcx::PgBox::into_inner(cv)) {
                 args.push(e);
             }
         }
@@ -2927,13 +2927,13 @@ fn alias_eq(a: &::nodes::rawnodes::Alias<'_>, b: Option<&::nodes::rawnodes::Alia
 fn make_whole_row_var(
     rte: &::nodes::RangeTblEntry<'_>,
     varno: i32,
-    varlevelsup: types_core::Index,
+    varlevelsup: ::types_core::Index,
 ) -> PgResult<::nodes::primnodes::Var> {
     use ::nodes::parsenodes::RTEKind::*;
     let mk = |toid: Oid, varattno: i32, varcollid: Oid| {
-        nodes_core::makefuncs::make_var(
+        ::nodes_core::makefuncs::make_var(
             varno,
-            varattno as types_core::AttrNumber,
+            varattno as ::types_core::AttrNumber,
             toid,
             -1,
             varcollid,
@@ -2949,7 +2949,7 @@ fn make_whole_row_var(
                     .map(|s| String::from(s.as_str()))
                     .unwrap_or_default();
                 return Err(ereport(ERROR)
-                    .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                    .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                     .errmsg(alloc::format!(
                         "relation \"{}\" does not have a composite type",
                         relname
@@ -2968,7 +2968,7 @@ fn make_whole_row_var(
                         .map(|s| String::from(s.as_str()))
                         .unwrap_or_default();
                     return Err(ereport(ERROR)
-                        .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+                        .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
                         .errmsg(alloc::format!(
                             "relation \"{}\" does not have a composite type",
                             relname
@@ -3003,13 +3003,13 @@ fn make_whole_row_var(
 fn make_whole_row_var_func(
     rte: &::nodes::RangeTblEntry<'_>,
     varno: i32,
-    varlevelsup: types_core::Index,
+    varlevelsup: ::types_core::Index,
     allow_scalar: bool,
 ) -> PgResult<::nodes::primnodes::Var> {
     let mk = |toid: Oid, varattno: i32, varcollid: Oid| {
-        nodes_core::makefuncs::make_var(
+        ::nodes_core::makefuncs::make_var(
             varno,
-            varattno as types_core::AttrNumber,
+            varattno as ::types_core::AttrNumber,
             toid,
             -1,
             varcollid,
@@ -3058,7 +3058,7 @@ fn parse_func_on_whole_row<'mcx>(
     location: i32,
 ) -> PgResult<Option<Node<'mcx>>> {
     let mcx = aexpr_clone_ctx(pstate);
-    let funcname = [mcx::PgString::from_str_in(colname, mcx)?];
+    let funcname = [::mcx::PgString::from_str_in(colname, mcx)?];
     let arg = node_into_expr(whole)
         .ok_or_else(|| PgError::error("parse_func_on_whole_row: whole-row ref is not an expr"))?
         .erase_lifetime();
@@ -3097,7 +3097,7 @@ fn transformIndirection<'mcx>(
     let mut subscripts: Vec<A_Indices<'mcx>> = Vec::new();
 
     for n in indirection.into_iter() {
-        let n = mcx::PgBox::into_inner(n);
+        let n = ::mcx::PgBox::into_inner(n);
         let n_tag = n.node_tag();
         match n_tag {
             ntag::T_A_Indices => subscripts.push(n.into_a_indices().unwrap()),
@@ -3129,7 +3129,7 @@ fn transformIndirection<'mcx>(
                 }
 
                 let colname = String::from(s.sval.as_str());
-                let funcname = [mcx::PgString::from_str_in(&colname, mcx)?];
+                let funcname = [::mcx::PgString::from_str_in(&colname, mcx)?];
                 let newresult = func::ParseFuncOrColumn(
                     pstate,
                     &funcname,
@@ -3199,7 +3199,7 @@ fn unknown_attribute<'mcx>(
             .into_error())
     } else {
         Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_WRONG_OBJECT_TYPE)
+            .errcode(::types_error::ERRCODE_WRONG_OBJECT_TYPE)
             .errmsg(alloc::format!(
                 "column notation .{} applied to type {}, which is not a composite type",
                 attname,
@@ -3266,13 +3266,13 @@ fn transformFuncCall<'mcx>(
 /// `&[PgString]` form `ParseFuncOrColumn` consumes. Public so `analyze.c`'s
 /// `transformCallStmt` can build the procedure name list.
 pub fn clone_namelist_pgstrings<'mcx>(
-    name: &mcx::PgVec<'_, nodes::NodePtr<'_>>,
-    mcx: mcx::Mcx<'mcx>,
-) -> PgResult<Vec<mcx::PgString<'mcx>>> {
-    let mut out: Vec<mcx::PgString<'mcx>> = Vec::with_capacity(name.len());
+    name: &::mcx::PgVec<'_, nodes::NodePtr<'_>>,
+    mcx: ::mcx::Mcx<'mcx>,
+) -> PgResult<Vec<::mcx::PgString<'mcx>>> {
+    let mut out: Vec<::mcx::PgString<'mcx>> = Vec::with_capacity(name.len());
     for n in name.iter() {
         if let Some(s) = str_val(n) {
-            out.push(mcx::PgString::from_str_in(&s, mcx)?);
+            out.push(::mcx::PgString::from_str_in(&s, mcx)?);
         }
     }
     Ok(out)
@@ -3297,7 +3297,7 @@ fn transformRowExpr<'mcx>(
     // "something.*" entries; the raw-grammar RowExpr carries its fields as a
     // raw node list (C: r->args), passed straight through.
     let expr_kind = pstate.p_expr_kind;
-    let newargs_vec = parse_target::transformExpressionList(
+    let newargs_vec = ::parse_target::transformExpressionList(
         mcx,
         pstate,
         r.args,
@@ -3309,7 +3309,7 @@ fn transformRowExpr<'mcx>(
     // Disallow more columns than will fit in a tuple.
     if newargs.len() as i32 > MaxTupleAttributeNumber {
         return Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_TOO_MANY_COLUMNS)
+            .errcode(::types_error::ERRCODE_TOO_MANY_COLUMNS)
             .errmsg(alloc::format!(
                 "ROW expressions can have at most {} entries",
                 MaxTupleAttributeNumber
@@ -3522,7 +3522,7 @@ fn seam_transform_post_columnref_hook<'mcx>(
         // `use_variable` mode.
         ParseRefHookState::PlpgsqlExpr(_) => {
             match plpgsql_post_column_ref(pstate, &cref, node.as_ref())? {
-                Some(p) => Some(mcx::PgBox::into_inner(p)),
+                Some(p) => Some(::mcx::PgBox::into_inner(p)),
                 None => None,
             }
         }
@@ -3585,7 +3585,7 @@ fn post_columnref_hook_impl<'mcx>(
         }
         ParseRefHookState::PlpgsqlExpr(_) => {
             match plpgsql_post_column_ref(pstate, cref, var_node)? {
-                Some(p) => Some(mcx::PgBox::into_inner(p)),
+                Some(p) => Some(::mcx::PgBox::into_inner(p)),
                 None => None,
             }
         }
@@ -3597,7 +3597,7 @@ fn post_columnref_hook_impl<'mcx>(
     match result {
         Some(n) => {
             let mcx = aexpr_clone_ctx(pstate);
-            Ok(Some(mcx::alloc_in(mcx, n.clone_in(mcx)?)?))
+            Ok(Some(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?))
         }
         None => Ok(None),
     }
@@ -3687,7 +3687,7 @@ fn sql_fn_post_column_ref<'mcx>(
         let subfield = str_val(&cref.fields[subfield_idx])
             .ok_or_else(|| PgError::error("sql_fn_post_column_ref: subfield is not a String"))?;
         let mcx = aexpr_clone_ctx(pstate);
-        let funcname = [mcx::PgString::from_str_in(&subfield, mcx)?];
+        let funcname = [::mcx::PgString::from_str_in(&subfield, mcx)?];
         let last_srf = last_srf_expr(pstate);
         let res = func::ParseFuncOrColumn(
             pstate,
@@ -3860,7 +3860,7 @@ fn plpgsql_resolve_column_ref<'mcx>(
 
     let mcx = aexpr_clone_ctx(pstate);
     let node = Node::mk_expr(mcx, Expr::Param(param))?;
-    Ok(Some(mcx::alloc_in(mcx, node)?))
+    Ok(Some(::mcx::alloc_in(mcx, node)?))
 }
 
 /// `plpgsql_post_column_ref(pstate, cref, var)` (pl_comp.c:1011) — the PL/pgSQL
@@ -4057,7 +4057,7 @@ fn transformParamRef<'mcx>(
     match result {
         Some(param) => Ok(Expr::Param(param)),
         None => Err(ereport(ERROR)
-            .errcode(types_error::ERRCODE_UNDEFINED_PARAMETER)
+            .errcode(::types_error::ERRCODE_UNDEFINED_PARAMETER)
             .errmsg(alloc::format!("there is no parameter ${}", pref.number))
             .errposition(parser_errposition(pstate, pref.location))
             .into_error()),
@@ -4067,7 +4067,7 @@ fn transformParamRef<'mcx>(
 /// `count_nonjunk_tlist_entries(targetlist)` (parse_node.c) — the number of
 /// non-resjunk entries in a target list.
 fn count_nonjunk_tlist_entries(
-    targetlist: &mcx::PgVec<'_, ::nodes::primnodes::TargetEntry<'_>>,
+    targetlist: &::mcx::PgVec<'_, ::nodes::primnodes::TargetEntry<'_>>,
 ) -> usize {
     targetlist.iter().filter(|tle| !tle.resjunk).count()
 }
@@ -4248,18 +4248,18 @@ fn transformSubLink<'mcx>(
 
         // If the source was "x IN (select)", convert to "x = ANY (select)".
         let oper_name = if oper_name.is_empty() {
-            let mut v: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+            let mut v: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
             let str_node = Node::mk_string(mcx, ::nodes::value::StringNode {
-                sval: mcx::PgString::from_str_in("=", mcx)?,
+                sval: ::mcx::PgString::from_str_in("=", mcx)?,
             })?;
-            v.push(mcx::alloc_in(mcx, str_node)?);
+            v.push(::mcx::alloc_in(mcx, str_node)?);
             v
         } else {
             oper_name
         };
 
         // Transform lefthand expression, and convert to a list.
-        let lefthand = transformExprRecurse(pstate, testexpr.map(mcx::PgBox::into_inner))?;
+        let lefthand = transformExprRecurse(pstate, testexpr.map(::mcx::PgBox::into_inner))?;
         let left_list: Vec<Expr> = match lefthand {
             Some(Expr::RowExpr(r)) => r.args,
             Some(other) => vec![other],
@@ -4328,19 +4328,19 @@ fn transformSubLink<'mcx>(
 /// parameter is erased to `'static`; the data is unchanged and the backing
 /// arena outlives parse analysis in practice.
 fn query_into_static<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     qtree: &::nodes::copy_query::Query<'mcx>,
-) -> PgResult<mcx::PgBox<'static, ::nodes::copy_query::Query<'static>>> {
+) -> PgResult<::mcx::PgBox<'static, ::nodes::copy_query::Query<'static>>> {
     let owned: ::nodes::copy_query::Query<'mcx> = qtree.clone_in(mcx)?;
-    let boxed: mcx::PgBox<'mcx, ::nodes::copy_query::Query<'mcx>> =
-        mcx::alloc_in(mcx, owned)?;
+    let boxed: ::mcx::PgBox<'mcx, ::nodes::copy_query::Query<'mcx>> =
+        ::mcx::alloc_in(mcx, owned)?;
     // SAFETY: the embedded sub-Query lives inside the lifetime-free Expr tree
     // (SubLink.subselect: Option<PgBox<'static, Query<'static>>>, mirroring
     // SubPlanExpr(Box<SubPlan<'static>>)). The clone above made it fully owned
     // in `mcx`; this erases the 'mcx lifetime to the 'static notional lifetime
     // of the Expr tree — a transmute of the lifetime parameter only, the data
     // is unchanged (same convention as tlist_into_static in backend-parser-agg).
-    let boxed_static: mcx::PgBox<'static, ::nodes::copy_query::Query<'static>> =
+    let boxed_static: ::mcx::PgBox<'static, ::nodes::copy_query::Query<'static>> =
         unsafe { core::mem::transmute(boxed) };
     Ok(boxed_static)
 }
@@ -4380,7 +4380,7 @@ fn transformXmlExpr<'mcx>(
     // gram.y built the named args as a list of ResTarget. Transform each, and
     // break the names out as a separate list.
     for r_node in named_args.into_iter() {
-        let r_node = mcx::PgBox::into_inner(r_node);
+        let r_node = ::mcx::PgBox::into_inner(r_node);
         let Some(r) = r_node.into_restarget() else {
             return Err(PgError::error(
                 "transformXmlExpr: named_args element is not a ResTarget",
@@ -4446,7 +4446,7 @@ fn transformXmlExpr<'mcx>(
     // The other arguments are of varying types depending on the function.
     let mut new_args: Vec<Expr> = Vec::new();
     for (i, e) in args.into_iter().enumerate() {
-        let e = mcx::PgBox::into_inner(e);
+        let e = ::mcx::PgBox::into_inner(e);
         let newe = transformExprRecurse(pstate, Some(e))?
             .ok_or_else(|| PgError::error("transformXmlExpr: argument transformed to NULL"))?;
         let newe = match op {
@@ -4583,7 +4583,7 @@ fn transformXmlSerialize<'mcx>(
 /// `NAMEDATALEN` buffer with no varlena header (the canonical `name` framing),
 /// exactly as `convert_from`'s name arg reads it back.
 fn get_json_encoding_const<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     format: &Option<JsonFormat>,
 ) -> PgResult<Expr<'static>> {
     let encoding = match format {
@@ -4609,13 +4609,13 @@ fn get_json_encoding_const<'mcx>(
     };
 
     // namestrcpy into a NAMEDATALEN-byte NUL-padded buffer.
-    let namedatalen = types_core::NAMEDATALEN as usize;
+    let namedatalen = ::types_core::NAMEDATALEN as usize;
     let mut buf = alloc::vec![0u8; namedatalen];
     let bytes = enc.as_bytes();
     let n = bytes.len().min(namedatalen - 1);
     buf[..n].copy_from_slice(&bytes[..n]);
 
-    let value = Datum::ByRef(mcx::slice_in(mcx, &buf)?);
+    let value = Datum::ByRef(::mcx::slice_in(mcx, &buf)?);
 
     // makeConst(NAMEOID, -1, InvalidOid, NAMEDATALEN, NameGetDatum(encname),
     //           false, false)
@@ -4624,7 +4624,7 @@ fn get_json_encoding_const<'mcx>(
         NAMEOID,
         -1,
         InvalidOid,
-        types_core::NAMEDATALEN,
+        ::types_core::NAMEDATALEN,
         value,
         false,
         false,
@@ -4963,7 +4963,7 @@ fn transform_json_value_expr<'mcx>(
             .as_ref()
             .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
             .transpose()?
-            .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
+            .map(|n| ::mcx::alloc_in(aexpr_clone_ctx(pstate), n))
             .transpose()?,
     );
     let mut expr = transformExprRecurse(pstate, raw)?
@@ -5149,7 +5149,7 @@ fn transformJsonObjectConstructor<'mcx>(
                 .as_ref()
                 .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
                 .transpose()?
-                .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
+                .map(|n| ::mcx::alloc_in(aexpr_clone_ctx(pstate), n))
                 .transpose()?,
         );
         let key = transformExprRecurse(pstate, key_node)?
@@ -5247,7 +5247,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
     // runs its own child parsestate (mirroring C's make_parsestate/transformStmt
     // over a throwaway qpstate), so the real pstate is not polluted and the
     // analyzed Query is discarded after the column-count check.
-    let qcopy = mcx::alloc_in(mcx, query.as_ref().clone_in(mcx)?)?;
+    let qcopy = ::mcx::alloc_in(mcx, query.as_ref().clone_in(mcx)?)?;
     let qtree_node = parser_analyze_seams::parse_sub_analyze::call(
         mcx, &qcopy, pstate, None, false, true,
     )?;
@@ -5265,22 +5265,22 @@ fn transformJsonArrayQueryConstructor<'mcx>(
     }
 
     // colref->fields = list_make2(makeString("q"), makeString("a"));
-    let mut fields: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-    fields.push(mcx::alloc_in(
+    let mut fields: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
+    fields.push(::mcx::alloc_in(
         mcx,
         Node::mk_string(
             mcx,
             ::nodes::value::StringNode {
-                sval: mcx::PgString::from_str_in("q", mcx)?,
+                sval: ::mcx::PgString::from_str_in("q", mcx)?,
             },
         )?,
     )?);
-    fields.push(mcx::alloc_in(
+    fields.push(::mcx::alloc_in(
         mcx,
         Node::mk_string(
             mcx,
             ::nodes::value::StringNode {
-                sval: mcx::PgString::from_str_in("a", mcx)?,
+                sval: ::mcx::PgString::from_str_in("a", mcx)?,
             },
         )?,
     )?);
@@ -5291,8 +5291,8 @@ fn transformJsonArrayQueryConstructor<'mcx>(
             location: ctor.location,
         },
     )?;
-    let colref_ptr1 = mcx::alloc_in(mcx, colref)?;
-    let colref_ptr2 = mcx::alloc_in(mcx, colref_ptr1.as_ref().clone_in(mcx)?)?;
+    let colref_ptr1 = ::mcx::alloc_in(mcx, colref)?;
+    let colref_ptr2 = ::mcx::alloc_in(mcx, colref_ptr1.as_ref().clone_in(mcx)?)?;
 
     // No formatting necessary, so set formatted_expr to be the same as raw_expr.
     // agg->arg = makeJsonValueExpr((Expr *) colref, (Expr *) colref, ctor->format);
@@ -5309,42 +5309,42 @@ fn transformJsonArrayQueryConstructor<'mcx>(
     let constructor = ::nodes::rawexprnodes::JsonAggConstructor {
         output: ctor.output,
         agg_filter: None,
-        agg_order: mcx::PgVec::new_in(mcx),
+        agg_order: ::mcx::PgVec::new_in(mcx),
         over: None,
         location: ctor.location,
     };
 
     let agg = ::nodes::rawexprnodes::JsonArrayAgg {
-        constructor: Some(mcx::alloc_in(mcx, constructor)?),
-        arg: Some(mcx::alloc_in(mcx, arg)?),
+        constructor: Some(::mcx::alloc_in(mcx, constructor)?),
+        arg: Some(::mcx::alloc_in(mcx, arg)?),
         absent_on_null: ctor.absent_on_null,
     };
-    let agg_node = mcx::alloc_in(mcx, Node::mk_json_array_agg(mcx, agg)?)?;
+    let agg_node = ::mcx::alloc_in(mcx, Node::mk_json_array_agg(mcx, agg)?)?;
 
     // target->name = NULL; target->indirection = NIL; target->val = agg;
     let target = Node::mk_res_target(
         mcx,
         ::nodes::rawnodes::ResTarget {
             name: None,
-            indirection: mcx::PgVec::new_in(mcx),
+            indirection: ::mcx::PgVec::new_in(mcx),
             val: Some(agg_node),
             location: ctor.location,
         },
     )?;
 
     // alias->aliasname = "q"; alias->colnames = list_make1(makeString("a"));
-    let mut colnames: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-    colnames.push(mcx::alloc_in(
+    let mut colnames: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
+    colnames.push(::mcx::alloc_in(
         mcx,
         Node::mk_string(
             mcx,
             ::nodes::value::StringNode {
-                sval: mcx::PgString::from_str_in("a", mcx)?,
+                sval: ::mcx::PgString::from_str_in("a", mcx)?,
             },
         )?,
     )?);
     let alias = ::nodes::rawnodes::Alias {
-        aliasname: Some(mcx::PgString::from_str_in("q", mcx)?),
+        aliasname: Some(::mcx::PgString::from_str_in("q", mcx)?),
         colnames,
     };
 
@@ -5354,46 +5354,46 @@ fn transformJsonArrayQueryConstructor<'mcx>(
         ::nodes::rawnodes::RangeSubselect {
             lateral: false,
             subquery: Some(query),
-            alias: Some(mcx::alloc_in(mcx, alias)?),
+            alias: Some(::mcx::alloc_in(mcx, alias)?),
         },
     )?;
 
     // select->targetList = list_make1(target); select->fromClause = list_make1(range);
-    let mut target_list: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-    target_list.push(mcx::alloc_in(mcx, target)?);
-    let mut from_clause: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-    from_clause.push(mcx::alloc_in(mcx, range)?);
+    let mut target_list: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
+    target_list.push(::mcx::alloc_in(mcx, target)?);
+    let mut from_clause: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
+    from_clause.push(::mcx::alloc_in(mcx, range)?);
 
     let select = ::nodes::rawnodes::SelectStmt {
-        distinctClause: mcx::PgVec::new_in(mcx),
+        distinctClause: ::mcx::PgVec::new_in(mcx),
         intoClause: None,
         targetList: target_list,
         fromClause: from_clause,
         whereClause: None,
-        groupClause: mcx::PgVec::new_in(mcx),
+        groupClause: ::mcx::PgVec::new_in(mcx),
         groupDistinct: false,
         havingClause: None,
-        windowClause: mcx::PgVec::new_in(mcx),
-        valuesLists: mcx::PgVec::new_in(mcx),
-        sortClause: mcx::PgVec::new_in(mcx),
+        windowClause: ::mcx::PgVec::new_in(mcx),
+        valuesLists: ::mcx::PgVec::new_in(mcx),
+        sortClause: ::mcx::PgVec::new_in(mcx),
         limitOffset: None,
         limitCount: None,
         limitOption: ::nodes::nodelimit::LimitOption::default(),
-        lockingClause: mcx::PgVec::new_in(mcx),
+        lockingClause: ::mcx::PgVec::new_in(mcx),
         withClause: None,
         op: ::nodes::rawnodes::SetOperation::SETOP_NONE,
         all: false,
         larg: None,
         rarg: None,
     };
-    let select_node = mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select)?)?;
+    let select_node = ::mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select)?)?;
 
     // sublink->subLinkType = EXPR_SUBLINK; ... sublink->subselect = select;
     let sublink = ::nodes::rawexprnodes::SubLink {
         sub_link_type: ::nodes::primnodes::SubLinkType::Expr,
         sub_link_id: 0,
         testexpr: None,
-        oper_name: mcx::PgVec::new_in(mcx),
+        oper_name: ::mcx::PgVec::new_in(mcx),
         subselect: Some(select_node),
         location: ctor.location,
     };
@@ -5413,7 +5413,7 @@ fn transformJsonScalarExpr<'mcx>(
             .as_ref()
             .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
             .transpose()?
-            .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
+            .map(|n| ::mcx::alloc_in(aexpr_clone_ctx(pstate), n))
             .transpose()?,
     );
     let mut arg = transformExprRecurse(pstate, arg_node)?
@@ -5619,7 +5619,7 @@ fn transformJsonParseExpr<'mcx>(
                 .as_ref()
                 .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
                 .transpose()?
-                .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
+                .map(|n| ::mcx::alloc_in(aexpr_clone_ctx(pstate), n))
                 .transpose()?,
         );
 
@@ -5757,7 +5757,7 @@ fn transformJsonAggConstructor<'mcx>(
             aggfilter: aggfilter.map(Box::new),
             aggstar: false,
             aggvariadic: false,
-            aggkind: parsenodes::AGGKIND_NORMAL,
+            aggkind: ::parsenodes::AGGKIND_NORMAL,
             aggpresorted: false,
             // agglevelsup will be set by transformAggregateCall
             agglevelsup: 0,
@@ -5768,9 +5768,9 @@ fn transformJsonAggConstructor<'mcx>(
         };
 
         // transformAggregateCall(pstate, aggref, args, agg_ctor->agg_order, false)
-        let mut aggorder: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
+        let mut aggorder: ::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = ::mcx::PgVec::new_in(mcx);
         for n in agg_ctor.agg_order.iter() {
-            aggorder.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
+            aggorder.push(::mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
         }
         let finished = parse_agg_seams::transform_aggregate_call::call(
             pstate, aggref, args, aggorder, false,
@@ -5807,7 +5807,7 @@ fn transformJsonObjectAgg<'mcx>(
             .as_ref()
             .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
             .transpose()?
-            .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
+            .map(|n| ::mcx::alloc_in(aexpr_clone_ctx(pstate), n))
             .transpose()?,
     );
     let key = transformExprRecurse(pstate, key_node)?
@@ -5951,7 +5951,7 @@ fn transformJsonIsPredicate<'mcx>(
             .as_ref()
             .map(|p| p.clone_in(aexpr_clone_ctx(pstate)))
             .transpose()?
-            .map(|n| mcx::alloc_in(aexpr_clone_ctx(pstate), n))
+            .map(|n| ::mcx::alloc_in(aexpr_clone_ctx(pstate), n))
             .transpose()?,
     );
     let (expr, exprtype) = transform_json_parse_arg(pstate, raw, &pred.format)?;
@@ -6126,7 +6126,7 @@ fn transformJsonFuncExpr<'mcx>(
             .as_ref()
             .map(|p| p.clone_in(mcx))
             .transpose()?
-            .map(|n| mcx::alloc_in(mcx, n))
+            .map(|n| ::mcx::alloc_in(mcx, n))
             .transpose()?,
     );
     let path_spec = transformExprRecurse(pstate, path_node)?
@@ -6293,7 +6293,7 @@ struct RawJsonBehavior<'mcx> {
 /// Lift the raw `JsonBehavior` referenced by an `on_empty`/`on_error` NodePtr
 /// (it always points at a raw `T_JsonBehavior` node).
 fn raw_json_behavior<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     bp: &Option<nodes::NodePtr<'mcx>>,
 ) -> PgResult<Option<RawJsonBehavior<'mcx>>> {
     match bp {
@@ -6352,7 +6352,7 @@ fn invalid_behavior_err(
     detail_no_col: &str,
     detail_col: &str,
     location: i32,
-) -> types_error::PgError {
+) -> ::types_error::PgError {
     // C: `errdetail("... is allowed in %s for %s.", clause, <construct>)`.
     // The detail templates carry the literal `in this clause` placeholder for
     // the first `%s`; substitute the actual clause name ("ON ERROR"/"ON EMPTY").
@@ -6380,7 +6380,7 @@ fn transform_json_passing_args<'mcx>(
     pstate: &mut ParseState<'mcx>,
     construct_name: &str,
     format: JsonFormatType,
-    args: &mcx::PgVec<'mcx, nodes::NodePtr<'mcx>>,
+    args: &::mcx::PgVec<'mcx, nodes::NodePtr<'mcx>>,
     jsexpr: &mut JsonExpr<'static>,
 ) -> PgResult<()> {
     let mcx = aexpr_clone_ctx(pstate);
@@ -6446,7 +6446,7 @@ fn transform_json_behavior<'mcx>(
                     .as_ref()
                     .map(|p| p.clone_in(mcx))
                     .transpose()?
-                    .map(|n| mcx::alloc_in(mcx, n))
+                    .map(|n| ::mcx::alloc_in(mcx, n))
                     .transpose()?,
             );
             let e = transformExprRecurse(pstate, dnode)?
@@ -6460,7 +6460,7 @@ fn transform_json_behavior<'mcx>(
                     .into_error());
             }
             let enode = Node::mk_expr(mcx, e.clone_in(mcx)?)?;
-            if vars::var::contain_var_clause(&enode) {
+            if ::vars::var::contain_var_clause(&enode) {
                 return Err(ereport(ERROR)
                     .errcode(ERRCODE_DATATYPE_MISMATCH)
                     .errmsg("DEFAULT expression must not contain column references")
@@ -6699,7 +6699,7 @@ fn lsyscache_format_type_be(typid: Oid) -> PgResult<String> {
 /// `strcmp(catalogname, get_database_name(MyDatabaseId)) != 0` — the four-part
 /// column-ref catalog-name check (parse_expr.c:776). A NULL database name (no
 /// such database — impossible for `MyDatabaseId`) compares unequal.
-fn catalogname_differs_from_database(mcx: mcx::Mcx<'_>, catalogname: &str) -> PgResult<bool> {
+fn catalogname_differs_from_database(mcx: ::mcx::Mcx<'_>, catalogname: &str) -> PgResult<bool> {
     let dbname =
         dbcommands_seams::get_database_name::call(mcx, globals_seams::my_database_id::call())?;
     Ok(dbname.as_ref().map(|s| s.as_str()) != Some(catalogname))
@@ -6724,7 +6724,7 @@ fn assign_expr_collations<'mcx>(
 use parse_expr_seams as me;
 
 fn analyze_one_exec_param_impl<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     source_text: &str,
     raw_param: &Node<'mcx>,
     _param_index: i32,
@@ -6744,7 +6744,7 @@ fn analyze_one_exec_param_impl<'mcx>(
     // carrying only p_sourcetext is faithful. C `copyObject(params)` first
     // (the parser scribbles on its input) — `clone_in` is copyObject here.
     let mut pstate_box = small1::make_parsestate(mcx, None)?;
-    pstate_box.p_sourcetext = Some(mcx::PgString::from_str_in(source_text, mcx)?);
+    pstate_box.p_sourcetext = Some(::mcx::PgString::from_str_in(source_text, mcx)?);
     let pstate: &mut ParseState<'mcx> = &mut pstate_box;
 
     let raw = raw_param.clone_in(mcx)?;
@@ -6793,7 +6793,7 @@ fn analyze_one_exec_param_impl<'mcx>(
     assign_expr_collations(pstate, &mut coerced)?;
 
     Ok(me::AnalyzedExecParam {
-        expr: Some(mcx::alloc_in(mcx, coerced)?),
+        expr: Some(::mcx::alloc_in(mcx, coerced)?),
         coercion_failed: false,
         given_type_id,
         expr_location,
@@ -6894,7 +6894,7 @@ const MAXDIM: usize = 6;
 /// (arraysubs.c): transform the subscript expressions, splitting upper/lower
 /// bounds, coercing each to int4, and computing the result type.
 fn array_subscript_transform<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     mut sbsref: SubscriptingRef<'mcx>,
     indirection: &[A_Indices<'mcx>],
     pstate: &mut ParseState<'mcx>,
@@ -6936,7 +6936,7 @@ fn array_subscript_transform<'mcx>(
                     -1,
                     InvalidOid,
                     4,
-                    types_tuple::Datum::from_i32(1),
+                    ::types_tuple::Datum::from_i32(1),
                     false,
                     true,
                 )?).erase_lifetime())
@@ -7009,7 +7009,7 @@ fn array_subscript_transform<'mcx>(
 /// (jsonbsubs.c): transform the subscript expressions, coercing each to int4 or
 /// text (exactly one must be reachable), with no slice support.
 fn jsonb_subscript_transform<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     mut sbsref: SubscriptingRef<'mcx>,
     indirection: &[A_Indices<'mcx>],
     pstate: &mut ParseState<'mcx>,
@@ -7115,7 +7115,7 @@ fn jsonb_subscript_transform<'mcx>(
 /// `SubscriptHandler` (re-derived from `refcontainertype`) to the matching
 /// transform method body.
 fn subscripting_transform_impl<'mcx>(
-    mcx: mcx::Mcx<'mcx>,
+    mcx: ::mcx::Mcx<'mcx>,
     sbsref: SubscriptingRef<'mcx>,
     indirection: &[A_Indices<'mcx>],
     pstate: &mut ParseState<'mcx>,

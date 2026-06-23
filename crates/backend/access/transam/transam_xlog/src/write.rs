@@ -29,20 +29,20 @@ use core::cell::Cell;
 
 use utils_error::{PgError, PgResult};
 use types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
-use types_storage::storage::{pg_atomic_uint64, LW_EXCLUSIVE, LW_SHARED};
-use wal::xlog_consts::{WalSyncMethod, CHECKPOINT_CAUSE_XLOG, XLOG_BLCKSZ};
+use ::types_storage::storage::{pg_atomic_uint64, LW_EXCLUSIVE, LW_SHARED};
+use ::wal::xlog_consts::{WalSyncMethod, CHECKPOINT_CAUSE_XLOG, XLOG_BLCKSZ};
 
 use fd_seams as fd;
 use pgstat_io_seams as pgstat_io;
 use lwlock as lwlock;
-use init_small::globals;
+use ::init_small::globals;
 
 use xlogarchive as xlogarchive;
 use checkpointer_seams as checkpointer;
 use walsender_seams as walsender;
 use walreceiverfuncs_seams as walrcv;
 use timestamp_seams as timestamp;
-use guc_tables::vars;
+use ::guc_tables::vars;
 
 use crate::insert::XLogRecPtrToBufIdx;
 use crate::shmem::{
@@ -274,7 +274,7 @@ pub(crate) unsafe fn WaitXLogInsertionsToFinish(
 
 /// `&WALInsertLocks[i].l.lock`.
 #[inline]
-unsafe fn insert_lock(ctl: &XLogCtlData, i: usize) -> &'static types_storage::storage::LWLock {
+unsafe fn insert_lock(ctl: &XLogCtlData, i: usize) -> &'static ::types_storage::storage::LWLock {
     let locks = ctl.Insert.WALInsertLocks;
     &(*locks.add(i)).l.lock
 }
@@ -1136,7 +1136,7 @@ pub fn wal_read(
     startptr: XLogRecPtr,
     count: i32,
     tli: TimeLineID,
-) -> transam_xlog_seams::WalReadOutcome {
+) -> ::transam_xlog_seams::WalReadOutcome {
     use transam_xlog_seams::{WalReadErrorInfo, WalReadOutcome};
 
     let seg = wal_segment_size();

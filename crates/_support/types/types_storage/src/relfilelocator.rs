@@ -1,7 +1,7 @@
 //! `RelFileLocator` (`storage/relfilelocator.h`) — re-exported from
 //! [`crate::storage`], where the canonical definition lives.
 
-use types_core::ProcNumber;
+use ::types_core::ProcNumber;
 
 pub use crate::storage::{RelFileLocator, RelFileLocatorEquals};
 

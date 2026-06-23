@@ -11,10 +11,10 @@
 //! `transformGenericOptions`. OIDs / nargs / strict / retset are transcribed
 //! exactly from `pg_proc.dat`.
 
-use mcx::MemoryContext;
-use types_core::primitive::Oid;
-use datum::Datum;
-use types_error::PgResult;
+use ::mcx::MemoryContext;
+use ::types_core::primitive::Oid;
+use ::datum::Datum;
+use ::types_error::PgResult;
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// A scratch `CurrentMemoryContext` for the workers that allocate through `Mcx`.

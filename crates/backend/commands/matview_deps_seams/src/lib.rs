@@ -3,7 +3,7 @@
 //! `matview.c` is a thin driver over a wide set of subsystems. The relcache /
 //! table-AM / index-AM read-bundle the C inspects off its open `Relation`s is
 //! NOT here any more: the matview/index/transient relations are opened as real
-//! [`rel::Relation`] values (via the canonical
+//! [`::rel::Relation`] values (via the canonical
 //! `table::table_open` /
 //! `indexam::index_open`) and their `rd_rel`/`rd_att`
 //! fields are read directly in the ported body. `RelationGetIndexList`,
@@ -31,13 +31,13 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
-use types_core::primitive::Oid;
-use types_error::PgResult;
+use ::mcx::Mcx;
+use ::types_core::primitive::Oid;
+use ::types_error::PgResult;
 use types_matview::{IndexUsabilityInfo, MatViewRuleInfo, MatchMergeQual};
 use ::nodes::copy_query::Query;
 use ::nodes::parsestmt::DestReceiverHandle;
-use rel::Relation;
+use ::rel::Relation;
 
 // --- matview rewrite-rule shape (RuleLock-carrier keystone) --------------------
 
@@ -203,7 +203,7 @@ seam_core::seam!(
     /// faithful no-op for the only AM in the tree, matching
     /// `backend-commands-createas`.
     pub fn table_finish_bulk_insert<'mcx>(
-        rel: &rel::Relation<'mcx>,
+        rel: &::rel::Relation<'mcx>,
         options: i32,
     ) -> PgResult<()>
 );

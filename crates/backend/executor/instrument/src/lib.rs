@@ -10,7 +10,7 @@
 //! state: here `InstrStartParallelQuery` returns the snapshot as an owned
 //! [`ParallelQueryUsageSnapshot`] that `InstrEndParallelQuery` consumes.
 //!
-//! `instr_time` arithmetic lives on the type in `types_core::instrument`; the
+//! `instr_time` arithmetic lives on the type in `::types_core::instrument`; the
 //! monotonic-clock read (`INSTR_TIME_SET_CURRENT*`) comes from
 //! `instr_time`.
 
@@ -20,7 +20,7 @@ use std::cell::RefCell;
 
 use mcx::{vec_with_capacity_in, Mcx, PgVec};
 use instr_time::{instr_time_set_current_lazy, pg_clock_gettime_ns};
-use types_core::instrument::{
+use ::types_core::instrument::{
     BufferUsage, Instrumentation, InstrumentOption, WalUsage, INSTRUMENT_BUFFERS,
     INSTRUMENT_TIMER, INSTRUMENT_WAL,
 };
@@ -79,7 +79,7 @@ pub fn InstrAlloc<'mcx>(
 ) -> PgResult<PgVec<'mcx, Instrumentation>> {
     // C computes `(size_t) n * sizeof(Instrumentation)`: a negative `n`
     // sign-extends to a huge request and palloc's MaxAllocSize gate (now in
-    // `mcx::vec_with_capacity_in`) rejects it.
+    // `::mcx::vec_with_capacity_in`) rejects it.
     let n = n as isize as usize;
 
     // initialize all fields to zeroes, then modify as needed

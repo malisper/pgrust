@@ -13,10 +13,10 @@
 //! save/restore/read backend-variables machinery, and the inheritable-socket
 //! helpers) is not compiled on a Unix build and is not ported.
 
-use types_core::init::{BackendType, BACKEND_NUM_TYPES};
-use types_core::pid_t;
-use net::ClientSocket;
-use types_startup::StartupData;
+use ::types_core::init::{BackendType, BACKEND_NUM_TYPES};
+use ::types_core::pid_t;
+use ::net::ClientSocket;
+use ::types_startup::StartupData;
 
 /// `IsExternalConnectionBackend(backend_type)` (`miscadmin.h`):
 /// `backend_type == B_BACKEND || backend_type == B_WAL_SENDER`.
@@ -269,12 +269,12 @@ pub fn postmaster_child_launch(
 /// implementation. The seam was declared with a simplified signature covering
 /// non-backend children (syslogger and similar auxiliary processes) for which
 /// C always passes `startup_data == NULL, startup_data_len == 0`; those map to
-/// [`types_startup::StartupData::None`]. A non-empty slice cannot be decoded
+/// [`::types_startup::StartupData::None`]. A non-empty slice cannot be decoded
 /// through this seam (the seam lacks the `BackendStartupData` fields) and
 /// panics loudly so that the caller upgrades the seam declaration instead of
 /// silently receiving wrong data.
 fn postmaster_child_launch_seam_adapter(
-    child_type: types_core::init::BackendType,
+    child_type: ::types_core::init::BackendType,
     child_slot: i32,
     startup_data: &[u8],
 ) -> i32 {
@@ -283,7 +283,7 @@ fn postmaster_child_launch_seam_adapter(
         "postmaster_child_launch seam: non-empty &[u8] startup_data cannot \
          be decoded; extend the seam declaration to carry BackendStartupData"
     );
-    let mut sd = types_startup::StartupData::None;
+    let mut sd = ::types_startup::StartupData::None;
     postmaster_child_launch(child_type, child_slot, &mut sd, None)
 }
 

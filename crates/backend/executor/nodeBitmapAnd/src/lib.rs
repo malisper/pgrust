@@ -92,7 +92,7 @@ pub fn ExecInitBitmapAnd<'mcx>(
     );
 
     // BitmapAndState *bitmapandstate = makeNode(BitmapAndState);
-    let mut bitmapandstate = mcx::alloc_in(mcx, BitmapAndState::new_in(mcx))?;
+    let mut bitmapandstate = ::mcx::alloc_in(mcx, BitmapAndState::new_in(mcx))?;
 
     // Set up empty vector of subplan states.
     //   nplans = list_length(node->bitmapplans);
@@ -127,7 +127,7 @@ pub fn ExecInitBitmapAnd<'mcx>(
     // ExecQual or ExecProject.  They don't need any tuple slots either.
 
     //   return bitmapandstate;
-    mcx::alloc_in(mcx, PlanStateNode::BitmapAnd(bitmapandstate))
+    ::mcx::alloc_in(mcx, PlanStateNode::BitmapAnd(bitmapandstate))
 }
 
 /// `MultiExecBitmapAnd(node)` — retrieve the result bitmap from the node.

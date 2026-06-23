@@ -18,16 +18,16 @@
 
 #![allow(non_snake_case)]
 
-use mcx::Mcx;
+use ::mcx::Mcx;
 use types_catalog as cat;
-use types_error::PgResult;
-use rel::Relation;
+use ::types_error::PgResult;
+use ::rel::Relation;
 use types_tuple::heaptuple::Datum;
 
-use heaptuple::heap_form_tuple;
-use table::table_open;
-use catalog_catalog::GetNewOidWithIndex;
-use types_storage::lock::RowExclusiveLock;
+use ::heaptuple::heap_form_tuple;
+use ::table::table_open;
+use ::catalog_catalog::GetNewOidWithIndex;
+use ::types_storage::lock::RowExclusiveLock;
 
 use crate::keystone::{CatalogCloseIndexes, CatalogOpenIndexes, CatalogTupleInsert};
 
@@ -36,13 +36,13 @@ use crate::keystone::{CatalogCloseIndexes, CatalogOpenIndexes, CatalogTupleInser
 /// inline). The `InsertRow` carriers already hold the NUL-padded image
 /// (`namestrcpy` ran in the caller), so this wraps the bytes unchanged.
 fn name_datum<'mcx>(mcx: Mcx<'mcx>, image: &[u8; 64]) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &image[..])?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &image[..])?))
 }
 
 /// Wrap an already-built on-disk varlena image (an `aclitem[]` / `text[]`
 /// array, with its 4-byte length header) as a by-reference Datum, unchanged.
 fn bytes_datum<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<Datum<'mcx>> {
-    Ok(Datum::ByRef(mcx::slice_in(mcx, bytes)?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, bytes)?))
 }
 
 /// `CStringGetTextDatum(s)` — a `text` varlena image (4-byte header
@@ -52,7 +52,7 @@ fn cstring_to_text_datum<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<Datum<'mcx>>
     let payload = s.as_bytes();
     let total = 4 + payload.len();
     let word = (total as u32) << 2;
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.extend_from_slice(&word.to_ne_bytes());
     buf.extend_from_slice(payload);
     Ok(Datum::ByRef(buf))
@@ -75,9 +75,9 @@ fn catalog_tuple_insert_pg_class<'mcx>(
     use cat::pg_class as pc;
 
     // memset(values, 0, ...); memset(nulls, false, ...);
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
-    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut nulls: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
     for _ in 0..pc::Natts_pg_class {
         values.push(Datum::null());
         nulls.push(false);
@@ -171,7 +171,7 @@ fn catalog_insert_pg_attribute_tuples<'mcx>(
     }
 
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let mut tuples: mcx::PgVec<'mcx, FormedTuple<'mcx>> = mcx::vec_with_capacity_in(mcx, rows.len())?;
+    let mut tuples: ::mcx::PgVec<'mcx, FormedTuple<'mcx>> = ::mcx::vec_with_capacity_in(mcx, rows.len())?;
     for row in rows {
         let (values, nulls) = attribute_values(mcx, row)?;
         let tup = heap_form_tuple(mcx, &tupdesc, &values, &nulls)?;
@@ -261,12 +261,12 @@ fn append_attribute_tuples<'mcx>(
 fn attribute_values<'mcx>(
     mcx: Mcx<'mcx>,
     row: &cat::pg_attribute::PgAttributeInsertRow,
-) -> PgResult<(mcx::PgVec<'mcx, Datum<'mcx>>, mcx::PgVec<'mcx, bool>)> {
+) -> PgResult<(::mcx::PgVec<'mcx, Datum<'mcx>>, ::mcx::PgVec<'mcx, bool>)> {
     use cat::pg_attribute as pa;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
-    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    let mut nulls: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
     for _ in 0..pa::Natts_pg_attribute {
         values.push(Datum::null());
         nulls.push(false);
@@ -331,11 +331,11 @@ fn catalog_tuple_update_pg_attribute<'mcx>(
 ) -> PgResult<()> {
     use cat::pg_attribute as pa;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
-    let mut replaces: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
+    let mut replaces: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pa::Natts_pg_attribute)?;
     for _ in 0..pa::Natts_pg_attribute {
         values.push(Datum::null());
         isnull.push(false);
@@ -463,7 +463,7 @@ fn catalog_tuple_update_pg_attribute<'mcx>(
     // new_tuple = heap_modify_tuple(attr_tuple, RelationGetDescr(pg_attribute_rel),
     //                               values, isnull, replaces);
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let mut new_tuple = heaptuple::heap_modify_tuple(
+    let mut new_tuple = ::heaptuple::heap_modify_tuple(
         mcx, attr_tuple, &tupdesc, &values, &isnull, &replaces,
     )?;
     // CatalogTupleUpdate(pg_attribute_rel, &new_tuple->t_self, new_tuple);
@@ -487,11 +487,11 @@ fn catalog_tuple_update_relchecks_pg_class<'mcx>(
 ) -> PgResult<()> {
     use cat::pg_class as pc;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
-    let mut replaces: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut replaces: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
     for _ in 0..pc::Natts_pg_class {
         values.push(Datum::null());
         isnull.push(false);
@@ -507,7 +507,7 @@ fn catalog_tuple_update_relchecks_pg_class<'mcx>(
     // new_tuple = heap_modify_tuple(relTup, RelationGetDescr(pgrel),
     //                               values, isnull, replaces);
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let mut new_tuple = heaptuple::heap_modify_tuple(
+    let mut new_tuple = ::heaptuple::heap_modify_tuple(
         mcx, class_tuple, &tupdesc, &values, &isnull, &replaces,
     )?;
     // CatalogTupleUpdate(pgrel, &relTup->t_self, relTup);
@@ -531,11 +531,11 @@ fn catalog_tuple_update_relowner_pg_class<'mcx>(
 ) -> PgResult<()> {
     use cat::pg_class as pc;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
-    let mut replaces: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
+    let mut replaces: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pc::Natts_pg_class)?;
     for _ in 0..pc::Natts_pg_class {
         values.push(Datum::null());
         isnull.push(false);
@@ -557,7 +557,7 @@ fn catalog_tuple_update_relowner_pg_class<'mcx>(
     }
 
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let mut new_tuple = heaptuple::heap_modify_tuple(
+    let mut new_tuple = ::heaptuple::heap_modify_tuple(
         mcx, class_tuple, &tupdesc, &values, &isnull, &replaces,
     )?;
     crate::keystone::CatalogTupleUpdate(mcx, rel, class_tuple.tuple.t_self, &mut new_tuple)
@@ -583,9 +583,9 @@ fn catalog_tuple_insert_pg_attrdef<'mcx>(
     let attrdef_oid =
         GetNewOidWithIndex(rel, pd::AttrDefaultOidIndexId, pd::Anum_pg_attrdef_oid)?;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pd::Natts_pg_attrdef)?;
-    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pd::Natts_pg_attrdef)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pd::Natts_pg_attrdef)?;
+    let mut nulls: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pd::Natts_pg_attrdef)?;
     for _ in 0..pd::Natts_pg_attrdef {
         values.push(Datum::null());
         nulls.push(false);
@@ -623,7 +623,7 @@ fn buildint2vector<'mcx>(mcx: Mcx<'mcx>, int2s: &[i16]) -> PgResult<Datum<'mcx>>
     const HEADER: usize = 24;
     let n = int2s.len();
     let total = HEADER + n * core::mem::size_of::<i16>();
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     let vl_len: u32 = (total as u32) << 2;
     buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
@@ -651,7 +651,7 @@ fn buildoidvector<'mcx>(
     const HEADER: usize = 24;
     let n = oids.len();
     let total = HEADER + n * core::mem::size_of::<u32>();
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     let vl_len: u32 = (total as u32) << 2;
     buf[0..4].copy_from_slice(&vl_len.to_ne_bytes());
@@ -678,9 +678,9 @@ fn catalog_tuple_insert_pg_index<'mcx>(
 ) -> PgResult<()> {
     use cat::pg_index as pi;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pi::Natts_pg_index)?;
-    let mut nulls: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pi::Natts_pg_index)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pi::Natts_pg_index)?;
+    let mut nulls: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pi::Natts_pg_index)?;
     for _ in 0..pi::Natts_pg_index {
         values.push(Datum::null());
         nulls.push(false);
@@ -706,8 +706,8 @@ fn catalog_tuple_insert_pg_index<'mcx>(
 
     // values[indkey] = PointerGetDatum(buildint2vector(...)); the attnums are
     // AttrNumber (== int16).
-    let indkey_i16: mcx::PgVec<'mcx, i16> = {
-        let mut v: mcx::PgVec<'mcx, i16> = mcx::vec_with_capacity_in(mcx, row.indkey.len())?;
+    let indkey_i16: ::mcx::PgVec<'mcx, i16> = {
+        let mut v: ::mcx::PgVec<'mcx, i16> = ::mcx::vec_with_capacity_in(mcx, row.indkey.len())?;
         for a in &row.indkey {
             v.push(*a as i16);
         }
@@ -752,8 +752,8 @@ fn build_oid_array<'mcx>(
     oids: &[types_core::Oid],
 ) -> PgResult<Datum<'mcx>> {
     const OIDOID: types_core::Oid = 26;
-    let mut elems: mcx::PgVec<'mcx, datum::datum::Datum> =
-        mcx::vec_with_capacity_in(mcx, oids.len())?;
+    let mut elems: ::mcx::PgVec<'mcx, datum::datum::Datum> =
+        ::mcx::vec_with_capacity_in(mcx, oids.len())?;
     for &o in oids {
         elems.push(datum::datum::Datum::from_oid(o));
     }
@@ -773,7 +773,7 @@ fn namein_datum<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<Datum<'mcx>> {
     let len = bytes.len().min(NAMEDATALEN - 1);
     let mut image = [0u8; NAMEDATALEN];
     image[..len].copy_from_slice(&bytes[..len]);
-    Ok(Datum::ByRef(mcx::slice_in(mcx, &image[..])?))
+    Ok(Datum::ByRef(::mcx::slice_in(mcx, &image[..])?))
 }
 
 /// `CreatePolicy`'s pg_policy INSERT (commands/policy.c): allocate the OID,
@@ -789,9 +789,9 @@ fn catalog_tuple_insert_pg_policy<'mcx>(
     //                                Anum_pg_policy_oid);
     let policy_id = GetNewOidWithIndex(rel, pp::PolicyOidIndexId, pp::Anum_pg_policy_oid)?;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
     for _ in 0..pp::Natts_pg_policy {
         values.push(Datum::null());
         isnull.push(false);
@@ -855,10 +855,10 @@ fn catalog_tuple_insert_pg_event_trigger<'mcx>(
     //                              Anum_pg_event_trigger_oid);
     let trigoid = GetNewOidWithIndex(rel, pe::EventTriggerOidIndexId, pe::Anum_pg_event_trigger_oid)?;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
     for _ in 0..pe::Natts_pg_event_trigger {
         values.push(Datum::null());
         isnull.push(false);
@@ -907,12 +907,12 @@ fn catalog_tuple_update_pg_event_trigger_enabled<'mcx>(
 ) -> PgResult<()> {
     use cat::pg_event_trigger as pe;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
-    let mut replaces: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut replaces: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
     for _ in 0..pe::Natts_pg_event_trigger {
         values.push(Datum::null());
         isnull.push(false);
@@ -924,7 +924,7 @@ fn catalog_tuple_update_pg_event_trigger_enabled<'mcx>(
     values[i] = Datum::from_char(tgenabled);
 
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let mut new_tuple = heaptuple::heap_modify_tuple(
+    let mut new_tuple = ::heaptuple::heap_modify_tuple(
         mcx, evt_tuple, &tupdesc, &values, &isnull, &replaces,
     )?;
     crate::keystone::CatalogTupleUpdate(mcx, rel, evt_tuple.tuple.t_self, &mut new_tuple)
@@ -942,12 +942,12 @@ fn catalog_tuple_update_pg_event_trigger_owner<'mcx>(
 ) -> PgResult<()> {
     use cat::pg_event_trigger as pe;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
-    let mut replaces: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
+    let mut replaces: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pe::Natts_pg_event_trigger)?;
     for _ in 0..pe::Natts_pg_event_trigger {
         values.push(Datum::null());
         isnull.push(false);
@@ -959,7 +959,7 @@ fn catalog_tuple_update_pg_event_trigger_owner<'mcx>(
     values[i] = Datum::from_oid(new_owner_id);
 
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let mut new_tuple = heaptuple::heap_modify_tuple(
+    let mut new_tuple = ::heaptuple::heap_modify_tuple(
         mcx, evt_tuple, &tupdesc, &values, &isnull, &replaces,
     )?;
     crate::keystone::CatalogTupleUpdate(mcx, rel, evt_tuple.tuple.t_self, &mut new_tuple)
@@ -971,7 +971,7 @@ fn catalog_tuple_update_pg_event_trigger_owner<'mcx>(
 fn bytea_datum<'mcx>(mcx: Mcx<'mcx>, payload: &[u8]) -> PgResult<Datum<'mcx>> {
     let total = 4 + payload.len();
     let word = (total as u32) << 2;
-    let mut buf: mcx::PgVec<'mcx, u8> = mcx::vec_with_capacity_in(mcx, total)?;
+    let mut buf: ::mcx::PgVec<'mcx, u8> = ::mcx::vec_with_capacity_in(mcx, total)?;
     buf.resize(total, 0u8);
     buf[0..4].copy_from_slice(&word.to_ne_bytes());
     buf[4..].copy_from_slice(payload);
@@ -995,10 +995,10 @@ fn catalog_tuple_insert_pg_trigger<'mcx>(
         None => GetNewOidWithIndex(rel, pt::TriggerOidIndexId, pt::Anum_pg_trigger_oid)?,
     };
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pt::Natts_pg_trigger)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pt::Natts_pg_trigger)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pt::Natts_pg_trigger)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pt::Natts_pg_trigger)?;
     for _ in 0..pt::Natts_pg_trigger {
         values.push(Datum::null());
         isnull.push(false);
@@ -1062,11 +1062,11 @@ fn catalog_tuple_update_pg_policy<'mcx>(
 ) -> PgResult<()> {
     use cat::pg_policy as pp;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
-    let mut replaces: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut replaces: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
     for _ in 0..pp::Natts_pg_policy {
         values.push(Datum::null());
         isnull.push(false);
@@ -1104,7 +1104,7 @@ fn catalog_tuple_update_pg_policy<'mcx>(
     // new_tuple = heap_modify_tuple(policy_tuple, RelationGetDescr(pg_policy_rel),
     //                               values, isnull, replaces);
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let mut new_tuple = heaptuple::heap_modify_tuple(
+    let mut new_tuple = ::heaptuple::heap_modify_tuple(
         mcx, policy_tuple, &tupdesc, &values, &isnull, &replaces,
     )?;
     // CatalogTupleUpdate(pg_policy_rel, &new_tuple->t_self, new_tuple);
@@ -1121,11 +1121,11 @@ fn rename_policy_tuple<'mcx>(
 ) -> PgResult<()> {
     use cat::pg_policy as pp;
 
-    let mut values: mcx::PgVec<'mcx, Datum<'mcx>> =
-        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
-    let mut isnull: mcx::PgVec<'mcx, bool> = mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
-    let mut replaces: mcx::PgVec<'mcx, bool> =
-        mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut values: ::mcx::PgVec<'mcx, Datum<'mcx>> =
+        ::mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut isnull: ::mcx::PgVec<'mcx, bool> = ::mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
+    let mut replaces: ::mcx::PgVec<'mcx, bool> =
+        ::mcx::vec_with_capacity_in(mcx, pp::Natts_pg_policy)?;
     for _ in 0..pp::Natts_pg_policy {
         values.push(Datum::null());
         isnull.push(false);
@@ -1137,7 +1137,7 @@ fn rename_policy_tuple<'mcx>(
     values[pp::Anum_pg_policy_polname as usize - 1] = namein_datum(mcx, newname)?;
 
     let tupdesc = rel.rd_att_clone_in(mcx)?;
-    let mut new_tuple = heaptuple::heap_modify_tuple(
+    let mut new_tuple = ::heaptuple::heap_modify_tuple(
         mcx, policy_tuple, &tupdesc, &values, &isnull, &replaces,
     )?;
     crate::keystone::CatalogTupleUpdate(mcx, rel, policy_tuple.tuple.t_self, &mut new_tuple)

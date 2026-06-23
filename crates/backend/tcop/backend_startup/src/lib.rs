@@ -15,7 +15,7 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::too_many_arguments)]
 
-use utils_error::ereport;
+use ::utils_error::ereport;
 use mcx::{MemoryContext, Mcx};
 use types_core::{init::BackendType, ProtocolVersion, TimestampTz};
 use types_error::{
@@ -25,7 +25,7 @@ use types_error::{
 };
 use net::{Port, SockError};
 use types_startup::{BackendStartupData, CacState, StartupData};
-use types_timeout::TimeoutId;
+use ::types_timeout::TimeoutId;
 
 mod globals;
 
@@ -217,11 +217,11 @@ fn read_proc_port_names() -> (Option<String>, Option<String>) {
 /// C returns `void` and terminates on failure; the explicit-error model raises
 /// `Err` internally, and this wrapper drives the `FATAL` report cycle (which
 /// `proc_exit`s) to honor the C "does not return on failure" contract.
-fn backend_initialize(mcx: Mcx<'_>, client_sock: net::ClientSocket, cac: CacState) {
+fn backend_initialize(mcx: Mcx<'_>, client_sock: ::net::ClientSocket, cac: CacState) {
     if let Err(e) = backend_initialize_inner(mcx, client_sock, cac) {
         // ThrowErrorData on FATAL/ERROR runs the report cycle; FATAL proc_exits
         // and never returns.
-        let _ = utils_error::ThrowErrorData(e);
+        let _ = ::utils_error::ThrowErrorData(e);
         let my_pid = init_small_seams::my_proc_pid::call();
         dsm_core_seams::proc_exit::call(1, my_pid);
     }
@@ -229,7 +229,7 @@ fn backend_initialize(mcx: Mcx<'_>, client_sock: net::ClientSocket, cac: CacStat
 
 fn backend_initialize_inner(
     mcx: Mcx<'_>,
-    client_sock: net::ClientSocket,
+    client_sock: ::net::ClientSocket,
     cac: CacState,
 ) -> PgResult<()> {
     // ReserveExternalFD(): tell fd.c about the long-lived client FD.
@@ -242,7 +242,7 @@ fn backend_initialize_inner(
     }
 
     // ClientAuthInProgress = true;
-    utils_error::config::set_client_auth_in_progress(true);
+    ::utils_error::config::set_client_auth_in_progress(true);
 
     // port = MyProcPort = pq_init(client_sock);
     //
@@ -256,7 +256,7 @@ fn backend_initialize_inner(
     init_small_seams::set_my_proc_port::call(port);
 
     // whereToSendOutput = DestRemote; (now safe to ereport to client)
-    utils_error::config::set_where_to_send_output(types_dest::CommandDest::Remote);
+    ::utils_error::config::set_where_to_send_output(types_dest::CommandDest::Remote);
 
     // port->remote_host = ""; port->remote_port = "";
     with_proc_port(|port| {
@@ -597,7 +597,7 @@ fn process_startup_packet(mcx: Mcx<'_>, ssl_done: bool, gss_done: bool) -> PgRes
     //
     // The owned buffer carries the `len` real bytes; the implicit trailing NUL
     // is the slice boundary — the v3 scan never reads past `len`.
-    let buf: mcx::PgVec<'_, u8> = match read_bytes(mcx, len as usize)? {
+    let buf: ::mcx::PgVec<'_, u8> = match read_bytes(mcx, len as usize)? {
         Some(b) => b,
         None => {
             ereport(COMMERROR)
@@ -720,7 +720,7 @@ fn process_startup_packet(mcx: Mcx<'_>, ssl_done: bool, gss_done: bool) -> PgRes
     /* Could add additional special packet types here */
 
     // FrontendProtocol = Min(proto, PG_PROTOCOL_LATEST);
-    utils_error::config::set_frontend_protocol(min_u32(proto, PG_PROTOCOL_LATEST));
+    ::utils_error::config::set_frontend_protocol(min_u32(proto, PG_PROTOCOL_LATEST));
 
     // Check that the major protocol version is in range.
     if pg_protocol_major(proto) < pg_protocol_major(PG_PROTOCOL_EARLIEST)
@@ -977,7 +977,7 @@ fn send_negotiate_protocol_version(
     let mut buf =
         pqformat::pq_beginmessage(mcx, PQMSG_NEGOTIATE_PROTOCOL_VERSION)?;
     // pq_sendint32(&buf, FrontendProtocol);
-    let frontend_protocol = utils_error::config::frontend_protocol();
+    let frontend_protocol = ::utils_error::config::frontend_protocol();
     pqformat::pq_sendint32(&mut buf, frontend_protocol)?;
     // pq_sendint32(&buf, list_length(unrecognized_protocol_options));
     pqformat::pq_sendint32(&mut buf, unrecognized_protocol_options.len() as u32)?;
@@ -1144,11 +1144,11 @@ pub fn assign_log_connections(extra: u32) {
 /// `GUC_check_errdetail` text) on a syntax/keyword error.
 fn check_log_connections_slot(
     newval: &mut Option<String>,
-    extra: &mut Option<guc_tables::GucHookExtra>,
+    extra: &mut Option<::guc_tables::GucHookExtra>,
     _source: types_guc::GucSource,
 ) -> PgResult<bool> {
     let raw = newval.clone().unwrap_or_default();
-    let scratch = mcx::MemoryContext::new("check_log_connections");
+    let scratch = ::mcx::MemoryContext::new("check_log_connections");
     match check_log_connections(scratch.mcx(), &raw)? {
         Ok(flags) => {
             // Save the flags in *extra, for use by the assign function.
@@ -1166,7 +1166,7 @@ fn check_log_connections_slot(
 /// (`GucStringAssignFn`): `log_connections = *((int *) extra)`.
 fn assign_log_connections_slot(
     _newval: Option<&str>,
-    extra: Option<&guc_tables::GucHookExtra>,
+    extra: Option<&::guc_tables::GucHookExtra>,
 ) {
     if let Some(extra) = extra {
         if let Some(flags) = extra.downcast_ref::<u32>() {
@@ -1258,7 +1258,7 @@ fn with_proc_port<R>(f: impl FnOnce(&mut Port) -> R) -> R {
 /// `pq_getbytes(buf, n)` over the owned-buffer seam: `Ok(Some(bytes))` for the
 /// `n` bytes read, `Ok(None)` for the C `EOF` return. The buffer is allocated
 /// by the pqcomm owner in `mcx`.
-fn read_bytes(mcx: Mcx<'_>, n: usize) -> PgResult<Option<mcx::PgVec<'_, u8>>> {
+fn read_bytes(mcx: Mcx<'_>, n: usize) -> PgResult<Option<::mcx::PgVec<'_, u8>>> {
     pqcomm_seams::pq_getbytes::call(mcx, n)
 }
 

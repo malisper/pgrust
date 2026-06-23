@@ -9,10 +9,10 @@ extern crate alloc;
 use alloc::format;
 
 use mcx::{Mcx, MemoryContext};
-use types_catalog::pg_rewrite::RewriteRelationId;
-use types_core::Oid;
+use ::types_catalog::pg_rewrite::RewriteRelationId;
+use ::types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
-use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
+use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
 
 /// `RemoveRewriteRuleById(ruleOid)` (rewriteRemove.c): delete the `pg_rewrite`
 /// tuple for the rule, locking its event relation `AccessExclusiveLock` first

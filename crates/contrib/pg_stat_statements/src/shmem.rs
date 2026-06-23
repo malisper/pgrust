@@ -5,8 +5,8 @@
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use types_error::PgResult;
-use hash::hsearch::{HASHCTL, HASH_BLOBS, HASH_ELEM, HTAB};
+use ::types_error::PgResult;
+use ::hash::hsearch::{HASHCTL, HASH_BLOBS, HASH_ELEM, HTAB};
 
 use crate::{
     PgssEntry, PgssGlobalStats, PgssHashKey, PgssSharedState, ASSUMED_LENGTH_INIT,
