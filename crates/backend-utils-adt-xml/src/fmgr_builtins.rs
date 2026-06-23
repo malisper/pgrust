@@ -32,8 +32,14 @@ fn arg_text_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("xml fn: text arg missing from by-ref lane");
-    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
-    &image[types_datum::varlena::VARHDRSZ..]
+    // VARDATA_ANY: a short (1-byte, low-bit-set) header skips ONE byte, an
+    // ordinary 4-byte header skips VARHDRSZ. A stored `xml`/`text` value is
+    // short-packed under SHORT_VARLENA_PACKING=ON; a fixed 4-byte strip would
+    // front-truncate it by 3 bytes (`<value>` -> `lue>`). No-op while OFF.
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        _ => &image[types_datum::varlena::VARHDRSZ..],
+    }
 }
 
 /// `PG_RETURN_BOOL(b)`: the boolean result word.

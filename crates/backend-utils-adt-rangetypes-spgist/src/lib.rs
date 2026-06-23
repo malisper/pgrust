@@ -146,16 +146,53 @@ fn varsize_4b(bytes: &[u8]) -> usize {
 }
 
 /// `DatumGetRangeTypeP(datum)` — view a range `Datum::ByRef` image as a
-/// detoasted `RangeType *`. The handle borrows the `Datum`'s own bytes (which
-/// live for `'mcx`), mirroring the C macro's no-copy `PG_DETOAST_DATUM` on an
-/// already-plain varlena.
+/// detoasted `RangeType *`. C's macro is `PG_DETOAST_DATUM`, which un-packs a
+/// short (1-byte-header) on-disk image to the 4-byte form. The SP-GiST node
+/// tuples are never toasted (`longValuesOK = false`), so the leaf/prefix datums
+/// stay inline — BUT the LEAF datum that enters the dispatch is the indexed heap
+/// column value, which under `SHORT_VARLENA_PACKING`=ON is short-packed; reading
+/// the `RangeType` struct (`rangetypid` at `sizeof(RangeType)`, bounds past it)
+/// directly off a short image lands every field 3 bytes off -> wrong rangetypid.
+/// Un-pack a genuine short image (strict `VARSIZE_1B`) into a fresh 8-aligned
+/// 4-byte-header `mcx` buffer (mirroring gist-proc's `materialize_varlena`), so
+/// the fixed-offset reads land correctly and the base is `MAXALIGN(8)`-aligned
+/// (the alignment `range_serialize` produces, which the bound accounting assumes).
+/// While the flag is OFF every image is already plain 4B -> the handle borrows the
+/// `Datum`'s own bytes verbatim, behavior-preserving.
 #[inline]
-fn datum_get_range<'mcx>(d: &TDatum<'mcx>) -> RangeTypeP<'mcx> {
+fn datum_get_range<'mcx>(mcx: Mcx<'mcx>, d: &TDatum<'mcx>) -> PgResult<RangeTypeP<'mcx>> {
+    use allocator_api2::alloc::Allocator;
+    use core::alloc::Layout;
+
     let bytes = d.as_ref_bytes();
-    RangeTypeP {
-        ptr: bytes.as_ptr() as *const types_rangetypes::RangeType,
-        _marker: core::marker::PhantomData,
+    // VARATT_IS_1B (short header) and not VARATT_IS_1B_E (0x01, external).
+    let short = matches!(bytes.first(), Some(&h) if h != 0x01 && (h & 0x01) == 0x01);
+    if !short {
+        // Plain 4B (or empty): borrow verbatim, no allocation.
+        return Ok(RangeTypeP {
+            ptr: bytes.as_ptr() as *const types_rangetypes::RangeType,
+            _marker: core::marker::PhantomData,
+        });
     }
+    let total_1b = ((bytes[0] >> 1) & 0x7F) as usize;
+    let data_size = total_1b.saturating_sub(1);
+    let new_size = data_size + 4; // VARHDRSZ
+    mcx::check_alloc_size(new_size)?;
+    let layout =
+        Layout::from_size_align(new_size.max(1), 8).expect("valid RangeType image layout");
+    let block = mcx.allocate(layout).map_err(|_| mcx.oom(new_size))?;
+    let dst = block.as_ptr() as *mut u8;
+    // SAFETY: `dst` heads a freshly allocated `new_size`-byte region; write the
+    // 4-byte SET_VARSIZE word then copy the short payload past it.
+    unsafe {
+        let word = (new_size as u32) << 2; // low 2 bits 00 = plain 4B header
+        core::ptr::copy_nonoverlapping(word.to_ne_bytes().as_ptr(), dst, 4);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr().add(1), dst.add(4), data_size);
+    }
+    Ok(RangeTypeP {
+        ptr: dst as *const types_rangetypes::RangeType,
+        _marker: core::marker::PhantomData,
+    })
 }
 
 /// `RangeTypePGetDatum(range)` — encode a serialized `RangeType` as a
@@ -188,19 +225,24 @@ fn elem_datum(d: &TDatum<'_>) -> types_datum::Datum {
 }
 
 /// `RangeTypeGetOid(range)` over the by-reference image — the range type's own
-/// OID (the only directly-readable header field).
+/// OID (the only directly-readable header field). Un-packs a short header via
+/// `datum_get_range` (see its note).
 #[inline]
-fn range_get_oid(d: &TDatum<'_>) -> Oid {
-    datum_get_range(d).rangetypid()
+fn range_get_oid<'mcx>(mcx: Mcx<'mcx>, d: &TDatum<'mcx>) -> PgResult<Oid> {
+    Ok(datum_get_range(mcx, d)?.rangetypid())
 }
 
 /// `RangeIsEmpty(r)` (rangetypes.h:56) over a by-reference image:
-/// `(range_get_flags(r) & RANGE_EMPTY) != 0`.
+/// `(range_get_flags(r) & RANGE_EMPTY) != 0`. Un-packs a short header via
+/// `datum_get_range` (see its note).
 #[inline]
-fn range_is_empty(d: &TDatum<'_>) -> bool {
-    (backend_utils_adt_rangetypes::range_repr_serialize::range_get_flags(datum_get_range(d))
-        & RANGE_EMPTY)
-        != 0
+fn range_is_empty<'mcx>(mcx: Mcx<'mcx>, d: &TDatum<'mcx>) -> PgResult<bool> {
+    Ok(
+        (backend_utils_adt_rangetypes::range_repr_serialize::range_get_flags(datum_get_range(
+            mcx, d,
+        )?) & RANGE_EMPTY)
+            != 0,
+    )
 }
 
 // ===========================================================================
@@ -283,13 +325,13 @@ pub fn spg_range_quad_choose<'mcx>(
         return Ok(());
     }
 
-    let typcache = range_get_typcache(range_get_oid(in_range))?;
+    let typcache = range_get_typcache(range_get_oid(mcx, in_range)?)?;
 
     // A node with no centroid divides ranges purely on whether they're empty
     // or not. All empty ranges go to child node 0, all non-empty ranges go to
     // node 1.
     if !in_.hasPrefix {
-        let node_n = if range_is_empty(in_range) { 0 } else { 1 };
+        let node_n = if range_is_empty(mcx, in_range)? { 0 } else { 1 };
         out.result = spgChooseOutResult::MatchNode(spgChooseOutMatchNode {
             nodeN: node_n,
             levelAdd: 1,
@@ -299,8 +341,8 @@ pub fn spg_range_quad_choose<'mcx>(
     }
 
     // centroid = DatumGetRangeTypeP(in->prefixDatum);
-    let centroid = datum_get_range(&in_.prefixDatum);
-    let quadrant = get_quadrant(&typcache, centroid, datum_get_range(in_range))?;
+    let centroid = datum_get_range(mcx, &in_.prefixDatum)?;
+    let quadrant = get_quadrant(&typcache, centroid, datum_get_range(mcx, in_range)?)?;
 
     debug_assert!(quadrant as i32 <= in_.nNodes); // Assert(quadrant <= in->nNodes);
 
@@ -339,7 +381,7 @@ pub fn spg_range_quad_picksplit<'mcx>(
 ) -> PgResult<()> {
     let n_tuples = in_.nTuples();
 
-    let typcache = range_get_typcache(range_get_oid(&in_.datums[0]))?;
+    let typcache = range_get_typcache(range_get_oid(mcx, &in_.datums[0])?)?;
 
     // Allocate memory for bounds.
     // RangeBound *lowerBounds, *upperBounds; (length nTuples) — but only the
@@ -349,7 +391,7 @@ pub fn spg_range_quad_picksplit<'mcx>(
 
     // Deserialize bounds of ranges, count non-empty ranges.
     for i in 0..n_tuples as usize {
-        let (lower, upper, empty) = range_deserialize(&typcache, datum_get_range(&in_.datums[i]))?;
+        let (lower, upper, empty) = range_deserialize(&typcache, datum_get_range(mcx, &in_.datums[i])?)?;
         if !empty {
             lower_bounds.push(lower);
             upper_bounds.push(upper);
@@ -404,7 +446,7 @@ pub fn spg_range_quad_picksplit<'mcx>(
     // Assign ranges to corresponding nodes according to quadrants relative to
     // "centroid" range.
     for i in 0..n_tuples as usize {
-        let range = datum_get_range(&in_.datums[i]);
+        let range = datum_get_range(mcx, &in_.datums[i])?;
         let quadrant = get_quadrant(&typcache, centroid, range)?;
 
         out.leafTupleDatums.push(in_.datums[i].clone());
@@ -479,7 +521,7 @@ pub fn spg_range_quad_inner_consistent<'mcx>(
             // The only strategy when second argument of operator is not range
             // is RANGESTRAT_CONTAINS_ELEM.
             let empty = if strategy != RANGESTRAT_CONTAINS_ELEM {
-                range_is_empty(&in_.scankeys[i].sk_argument)
+                range_is_empty(mcx, &in_.scankeys[i].sk_argument)?
             } else {
                 false
             };
@@ -533,7 +575,7 @@ pub fn spg_range_quad_inner_consistent<'mcx>(
         }
     } else {
         // This node has a centroid. Fetch it.
-        let centroid_p = datum_get_range(&in_.prefixDatum);
+        let centroid_p = datum_get_range(mcx, &in_.prefixDatum)?;
         let typcache = range_get_typcache(centroid_p.rangetypid())?;
         let (centroid_lower, centroid_upper, _centroid_empty) =
             range_deserialize(&typcache, centroid_p)?;
@@ -583,7 +625,7 @@ pub fn spg_range_quad_inner_consistent<'mcx>(
 
                 strategy = RANGESTRAT_CONTAINS;
             } else {
-                let range = datum_get_range(&in_.scankeys[i].sk_argument);
+                let range = datum_get_range(mcx, &in_.scankeys[i].sk_argument)?;
                 let (l, u, e) = range_deserialize(&typcache, range)?;
                 lower = l;
                 upper = u;
@@ -712,7 +754,7 @@ pub fn spg_range_quad_inner_consistent<'mcx>(
                     which &= 1 << get_quadrant(
                         &typcache,
                         centroid_p,
-                        datum_get_range(&in_.scankeys[i].sk_argument),
+                        datum_get_range(mcx, &in_.scankeys[i].sk_argument)?,
                     )?;
                 }
                 _ => {
@@ -896,7 +938,7 @@ pub fn spg_range_quad_leaf_consistent<'mcx>(
     in_: &spgLeafConsistentIn<'mcx>,
     out: &mut spgLeafConsistentOut<'mcx>,
 ) -> PgResult<bool> {
-    let leaf_range = datum_get_range(&in_.leafDatum);
+    let leaf_range = datum_get_range(mcx, &in_.leafDatum)?;
 
     // all tests are exact
     out.recheck = false;
@@ -915,39 +957,39 @@ pub fn spg_range_quad_leaf_consistent<'mcx>(
         // Call the function corresponding to the scan strategy.
         res = match key.sk_strategy {
             RANGESTRAT_BEFORE => {
-                range_before_internal(&typcache, leaf_range, datum_get_range(&key.sk_argument))?
+                range_before_internal(&typcache, leaf_range, datum_get_range(mcx, &key.sk_argument)?)?
             }
             RANGESTRAT_OVERLEFT => {
-                range_overleft_internal(&typcache, leaf_range, datum_get_range(&key.sk_argument))?
+                range_overleft_internal(&typcache, leaf_range, datum_get_range(mcx, &key.sk_argument)?)?
             }
             RANGESTRAT_OVERLAPS => {
-                range_overlaps_internal(&typcache, leaf_range, datum_get_range(&key.sk_argument))?
+                range_overlaps_internal(&typcache, leaf_range, datum_get_range(mcx, &key.sk_argument)?)?
             }
             RANGESTRAT_OVERRIGHT => {
-                range_overright_internal(&typcache, leaf_range, datum_get_range(&key.sk_argument))?
+                range_overright_internal(&typcache, leaf_range, datum_get_range(mcx, &key.sk_argument)?)?
             }
             RANGESTRAT_AFTER => {
-                range_after_internal(&typcache, leaf_range, datum_get_range(&key.sk_argument))?
+                range_after_internal(&typcache, leaf_range, datum_get_range(mcx, &key.sk_argument)?)?
             }
             RANGESTRAT_ADJACENT => range_adjacent_internal(
                 mcx,
                 &typcache,
                 leaf_range,
-                datum_get_range(&key.sk_argument),
+                datum_get_range(mcx, &key.sk_argument)?,
             )?,
             RANGESTRAT_CONTAINS => {
-                range_contains_internal(&typcache, leaf_range, datum_get_range(&key.sk_argument))?
+                range_contains_internal(&typcache, leaf_range, datum_get_range(mcx, &key.sk_argument)?)?
             }
             RANGESTRAT_CONTAINED_BY => range_contained_by_internal(
                 &typcache,
                 leaf_range,
-                datum_get_range(&key.sk_argument),
+                datum_get_range(mcx, &key.sk_argument)?,
             )?,
             RANGESTRAT_CONTAINS_ELEM => {
                 range_contains_elem_internal(&typcache, leaf_range, elem_datum(&key.sk_argument))?
             }
             RANGESTRAT_EQ => {
-                range_eq_internal(&typcache, leaf_range, datum_get_range(&key.sk_argument))?
+                range_eq_internal(&typcache, leaf_range, datum_get_range(mcx, &key.sk_argument)?)?
             }
             other => {
                 return Err(unrecognized_range_strategy(other));

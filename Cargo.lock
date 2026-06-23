@@ -21464,6 +21464,7 @@ dependencies = [
 name = "backend-utils-adt-rangetypes-spgist"
 version = "0.0.0"
 dependencies = [
+ "allocator-api2",
  "backend-utils-adt-rangetypes",
  "mcx",
  "types-cache",

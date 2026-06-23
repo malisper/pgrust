@@ -19,3 +19,4 @@ types-datum = { path = "../types-datum" }
 types-cache = { path = "../types-cache" }
 backend-utils-adt-rangetypes = { path = "../backend-utils-adt-rangetypes" }
 types-spgist = { path = "../types-spgist" }
+allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }

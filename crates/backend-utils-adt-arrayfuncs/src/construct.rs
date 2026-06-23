@@ -3142,6 +3142,29 @@ pub fn oidvector_to_oids_bytes<'mcx>(
     read_fixed4_oid_array(mcx, &arr, dim1)
 }
 
+/// `DatumGetArrayTypeP(d)` + the three `oidvector` header fields
+/// (`ARR_NDIM`/`ARR_HASNULL-dataoffset`/`ARR_ELEMTYPE`) **and** the OID values,
+/// all read off the DETOASTED flat image. `oidvectorout` / `btoidvectorcmp` /
+/// `check_valid_oidvector` need the header fields; reading them off the RAW stored
+/// image breaks under `SHORT_VARLENA_PACKING`=ON, when a stored catalog oidvector
+/// (e.g. `pg_proc.proargtypes`, `pg_index.indclass`) arrives short-packed and the
+/// `ArrayType` header sits 3 bytes off (-> garbage ndim/elemtype -> "array is not
+/// a valid oidvector"). Detoast once (un-packs short -> 4B) and read both header
+/// and values off the flat image, mirroring C's `PG_GETARG_OIDVECTOR(_PP)`.
+/// Behavior-preserving while the flag is OFF (the image is already plain 4B).
+pub fn oidvector_header_and_oids_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    bytes: &[u8],
+) -> PgResult<(i32, i32, Oid, PgVec<'mcx, Oid>)> {
+    let arr = detoast_seam::detoast_attr::call(mcx, bytes)?;
+    let ndim = foundation::arr_ndim(&arr);
+    let dataoffset = foundation::arr_dataoffset_field(&arr);
+    let elemtype = foundation::arr_elemtype(&arr);
+    let dim1 = if ndim >= 1 { foundation::arr_dim(&arr, 0) } else { 0 };
+    let values = read_fixed4_oid_array(mcx, &arr, dim1)?;
+    Ok((ndim, dataoffset, elemtype, values))
+}
+
 /// Seam `int2vector_to_i16s_bytes` — `(int2vector *) DatumGetPointer(datum)`
 /// then `->values[0 .. ->dim1]`, reading the on-disk `int2vector` byte image
 /// directly.
@@ -3175,6 +3198,36 @@ pub fn int2vector_to_i16s_bytes<'mcx>(
         v.push(i16::from_ne_bytes([b[0], b[1]]));
     }
     Ok(v)
+}
+
+/// `DatumGetArrayTypeP(d)` + the three `int2vector` header fields **and** the
+/// `int16` values, all read off the DETOASTED flat image (the int2vector analog
+/// of [`oidvector_header_and_oids_bytes`]). `int2vectorout` needs the header for
+/// `check_valid_int2vector`; reading it off the RAW stored image breaks under
+/// `SHORT_VARLENA_PACKING`=ON (a short-packed stored `pg_index.indkey` etc. has
+/// its `ArrayType` header 3 bytes off). Detoast once (un-packs short -> 4B) and
+/// read both off the flat image. Behavior-preserving while the flag is OFF.
+pub fn int2vector_header_and_i16s_bytes<'mcx>(
+    mcx: Mcx<'mcx>,
+    bytes: &[u8],
+) -> PgResult<(i32, i32, Oid, PgVec<'mcx, i16>)> {
+    let arr = detoast_seam::detoast_attr::call(mcx, bytes)?;
+    let ndim = foundation::arr_ndim(&arr);
+    let dataoffset = foundation::arr_dataoffset_field(&arr);
+    let elemtype = foundation::arr_elemtype(&arr);
+    let dim1 = if ndim >= 1 { foundation::arr_dim(&arr, 0) } else { 0 };
+    let start = foundation::arr_data_ptr_off(&arr);
+    let n = dim1.max(0) as usize;
+    let mut v = mcx::vec_with_capacity_in::<i16>(mcx, n)?;
+    for i in 0..n {
+        let off = start + i * 2;
+        let b = arr.get(off..off + 2).ok_or_else(|| {
+            PgError::error("malformed array (truncated element data)")
+                .with_sqlstate(ERRCODE_ARRAY_SUBSCRIPT_ERROR)
+        })?;
+        v.push(i16::from_ne_bytes([b[0], b[1]]));
+    }
+    Ok((ndim, dataoffset, elemtype, v))
 }
 
 /// Seam `text_array_to_strings_bytes` —

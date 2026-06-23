@@ -142,20 +142,15 @@ fn fc_int2vectorin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResu
 }
 
 fn fc_int2vectorout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    use backend_utils_adt_arrayfuncs::foundation;
     let m = scratch_mcx();
     let bytes = arg_varlena(fcinfo, 0).to_vec();
     // check_valid_int2vector reads ndim / dataoffset (== ARR_HASNULL marker) /
     // elemtype off the array header; the values come from the short-aligned data
-    // region.
-    let ndim = foundation::arr_ndim(&bytes);
-    let dataoffset = foundation::arr_dataoffset_field(&bytes);
-    let elemtype = foundation::arr_elemtype(&bytes);
-    let values: Vec<i16> =
-        backend_utils_adt_arrayfuncs::construct::int2vector_to_i16s_bytes(m.mcx(), &bytes)?
-            .iter()
-            .copied()
-            .collect();
+    // region. Read the header AND values off the DETOASTED flat image (un-packs a
+    // short-packed stored int2vector to 4B first).
+    let (ndim, dataoffset, elemtype, ints) =
+        backend_utils_adt_arrayfuncs::construct::int2vector_header_and_i16s_bytes(m.mcx(), &bytes)?;
+    let values: Vec<i16> = ints.iter().copied().collect();
     Ok(ret_cstring(
         fcinfo,
         crate::int2vectorout(ndim, dataoffset, elemtype, &values)?,

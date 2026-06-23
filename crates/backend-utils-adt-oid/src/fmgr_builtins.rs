@@ -133,20 +133,16 @@ fn fc_oidvectorin(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResul
 }
 
 fn fc_oidvectorout(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    use backend_utils_adt_arrayfuncs::foundation;
     let m = scratch_mcx();
     let bytes = arg_varlena(fcinfo, 0).to_vec();
     // check_valid_oidvector reads ndim / dataoffset (== ARR_HASNULL marker) /
     // elemtype off the array header; the values come from the int-aligned data
-    // region.
-    let ndim = foundation::arr_ndim(&bytes);
-    let dataoffset = foundation::arr_dataoffset_field(&bytes);
-    let elemtype = foundation::arr_elemtype(&bytes);
-    let values: Vec<types_core::Oid> =
-        backend_utils_adt_arrayfuncs::construct::oidvector_to_oids_bytes(m.mcx(), &bytes)?
-            .iter()
-            .copied()
-            .collect();
+    // region. Read the header AND values off the DETOASTED flat image (un-packs a
+    // short-packed stored oidvector to 4B first — see
+    // `oidvector_header_and_oids_bytes`).
+    let (ndim, dataoffset, elemtype, oids) =
+        backend_utils_adt_arrayfuncs::construct::oidvector_header_and_oids_bytes(m.mcx(), &bytes)?;
+    let values: Vec<types_core::Oid> = oids.iter().copied().collect();
     Ok(ret_cstring(
         fcinfo,
         crate::oidvectorout(ndim, dataoffset, elemtype, &values)?,
@@ -160,17 +156,12 @@ fn arg_oidvector(
     fcinfo: &FunctionCallInfoBaseData,
     i: usize,
 ) -> types_error::PgResult<(i32, i32, Oid, Vec<Oid>)> {
-    use backend_utils_adt_arrayfuncs::foundation;
     let m = scratch_mcx();
     let bytes = arg_varlena(fcinfo, i).to_vec();
-    let ndim = foundation::arr_ndim(&bytes);
-    let dataoffset = foundation::arr_dataoffset_field(&bytes);
-    let elemtype = foundation::arr_elemtype(&bytes);
-    let values: Vec<Oid> =
-        backend_utils_adt_arrayfuncs::construct::oidvector_to_oids_bytes(m.mcx(), &bytes)?
-            .iter()
-            .copied()
-            .collect();
+    // Header AND values off the DETOASTED flat image (header-form-agnostic).
+    let (ndim, dataoffset, elemtype, oids) =
+        backend_utils_adt_arrayfuncs::construct::oidvector_header_and_oids_bytes(m.mcx(), &bytes)?;
+    let values: Vec<Oid> = oids.iter().copied().collect();
     Ok((ndim, dataoffset, elemtype, values))
 }
 
