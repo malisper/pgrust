@@ -1028,6 +1028,12 @@ pub fn init_seams() {
     });
     seams::set_commit_ts_limit::set(SetCommitTsLimit);
 
+    // `CommitTsParameterChange` (commit_ts.c) — invoked by `xlog_redo`'s
+    // `XLOG_PARAMETER_CHANGE` arm during recovery.
+    seams::commit_ts_parameter_change::set(|newvalue, oldvalue| {
+        with_commit_ts_state(|state| CommitTsParameterChange(state, newvalue, oldvalue))
+    });
+
     // vacuum's `vac_truncate_clog` commitTS truncation entry points.
     seams::truncate_commit_ts::set(|oldest| {
         with_commit_ts_state(|state| TruncateCommitTs(state, oldest))

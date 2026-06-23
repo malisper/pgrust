@@ -110,6 +110,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `CommitTsParameterChange(newvalue, oldvalue)` (commit_ts.c) — activate or
+    /// deactivate the commit-timestamp module when an `XLOG_PARAMETER_CHANGE`
+    /// WAL record is replayed during recovery (xlog.c:8634). Runs only in the
+    /// recovery process; the owner wraps its private `CommitTsState`. SLRU
+    /// activation/deactivation can `ereport(ERROR)`.
+    pub fn commit_ts_parameter_change(newvalue: bool, oldvalue: bool) -> PgResult<()>
+);
+
+seam_core::seam!(
     /// `CheckPointCommitTs()` (commit_ts.c) — flush all dirty commitTS SLRU pages
     /// to disk at a checkpoint (`CheckPointGuts`, xlog.c:7586). The SLRU writes
     /// can `ereport(ERROR)`.

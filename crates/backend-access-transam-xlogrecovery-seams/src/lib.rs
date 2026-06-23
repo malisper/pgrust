@@ -183,6 +183,17 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `InArchiveRecovery` (xlogrecovery.c:140 `bool InArchiveRecovery = false;`)
+    /// — true while the startup process is replaying WAL fetched from the
+    /// archive (as opposed to plain crash recovery off the local pg_wal). Set
+    /// when the recovery signal files request archive recovery; read by
+    /// `xlog_redo`'s `XLOG_PARAMETER_CHANGE` arm (xlog.c:8620) to decide whether
+    /// to track `minRecoveryPoint`. False before the recovery-state holder
+    /// exists (i.e. crash recovery / no recovery).
+    pub fn in_archive_recovery() -> bool
+);
+
+seam_core::seam!(
     /// `recoveryTargetTLI` (xlogrecovery.c global `TimeLineID`): the timeline the
     /// startup process is recovering toward (the latest active timeline per
     /// `pg_control`, or the configured recovery-target timeline). Read by

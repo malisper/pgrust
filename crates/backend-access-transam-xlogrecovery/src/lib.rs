@@ -183,6 +183,7 @@ pub fn init_seams() {
     // read by the WAL-startup driver (xlog.c `StartupXLOG`). Backed by the
     // startup process's per-backend recovery state.
     seams::archive_recovery_requested::set(orchestrator::archive_recovery_requested);
+    seams::in_archive_recovery::set(orchestrator::in_archive_recovery);
     seams::recovery_target_tli::set(orchestrator::recovery_target_tli);
     seams::reached_consistency::set(orchestrator::reached_consistency);
     seams::standby_mode::set(orchestrator::standby_mode);

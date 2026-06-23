@@ -142,9 +142,9 @@ pub fn xlog_redo(record: &mut XLogReaderState<'_>) -> PgResult<()> {
         // nothing to do here, handled in xlogrecovery_redo()
         Ok(())
     } else if info == XLOG_PARAMETER_CHANGE {
-        ext::xlog_redo_control_file_arm(info, record)
+        redo_parameter_change(record)
     } else if info == XLOG_FPW_CHANGE {
-        ext::xlog_redo_control_file_arm(info, record)
+        redo_fpw_change(record)
     } else if info == XLOG_CHECKPOINT_REDO {
         // nothing to do here, just for informational purposes
         Ok(())
@@ -323,29 +323,133 @@ fn recovery_restart_point(
     crate::shmem::spin_lock_release(&ctl.info_lck);
 }
 
-mod ext {
-    use super::*;
+// The xlog rmgr's file-static recovery variables (xlog.c). These exist only in
+// the recovery (startup) process and are touched solely from the redo path, so
+// a thread-local Cell faithfully models the C file-static storage.
+std::thread_local! {
+    /// `static XLogRecPtr LocalMinRecoveryPoint;` (xlog.c:671) — the startup
+    /// process's cached copy of `ControlFile->minRecoveryPoint`.
+    static LOCAL_MIN_RECOVERY_POINT: core::cell::Cell<XLogRecPtr> =
+        const { core::cell::Cell::new(0) };
+    /// `static TimeLineID LocalMinRecoveryPointTLI;` (xlog.c:672).
+    static LOCAL_MIN_RECOVERY_POINT_TLI: core::cell::Cell<TimeLineID> =
+        const { core::cell::Cell::new(0) };
+    /// `static bool lastFullPageWrites;` (xlog.c:242) — during recovery, tracks
+    /// the `full_page_writes` state as last seen in the WAL.
+    static LAST_FULL_PAGE_WRITES: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
 
-    macro_rules! deferred {
-        ($( $(#[$attr:meta])* pub fn $name:ident ( $($arg:ident : $argty:ty),* $(,)? ) $(-> $ret:ty)? ; )+) => {
-            $(
-                $(#[$attr])*
-                pub fn $name ( $($arg : $argty),* ) $(-> $ret)? {
-                    $( let _ = &$arg; )*
-                    panic!(concat!(
-                        "xlog_redo dependency not ported (xlog-redo-deps debt): ",
-                        stringify!($name)
-                    ))
-                }
-            )+
-        };
+/// `XLOG_PARAMETER_CHANGE` redo arm (xlog.c:8580-8642). Update our copy of the
+/// hot-standby parameters in `pg_control`, advance `minRecoveryPoint` while in
+/// archive recovery, propagate the commit-timestamp-tracking change, flush the
+/// control file, and re-check the required parameter values.
+fn redo_parameter_change(record: &mut XLogReaderState<'_>) -> PgResult<()> {
+    // XLogRecPtr lsn = record->EndRecPtr;
+    let lsn = record.EndRecPtr;
+
+    // memcpy(&xlrec, XLogRecGetData(record), sizeof(xl_parameter_change));
+    let data = record
+        .record
+        .as_ref()
+        .expect("xlog_redo dispatched on a decoded record")
+        .data();
+    let xlrec = types_wal::rmgrdesc::xl_parameter_change::from_bytes(data)
+        .expect("XLOG_PARAMETER_CHANGE record carries a sizeof(xl_parameter_change) image");
+
+    // The C hot-standby branch that invalidates obsolete logical replication
+    // slots (InvalidateObsoleteReplicationSlots for RS_INVAL_WAL_LEVEL) is
+    // skipped here: single-node crash recovery never enters hot standby, the
+    // same documented hot-standby divergence as the other redo arms.
+
+    // LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+    let control_file_lock = backend_storage_lmgr_lwlock::main_lock_ref(9 /* ControlFileLock */);
+    backend_storage_lmgr_lwlock::LWLockAcquire(
+        control_file_lock,
+        types_storage::storage::LW_EXCLUSIVE,
+        backend_utils_init_small::globals::MyProcNumber(),
+    )?;
+
+    let cf = crate::shmem::control_file_mut();
+    cf.MaxConnections = xlrec.max_connections();
+    cf.max_worker_processes = xlrec.max_worker_processes();
+    cf.max_wal_senders = xlrec.max_wal_senders();
+    cf.max_prepared_xacts = xlrec.max_prepared_xacts();
+    cf.max_locks_per_xact = xlrec.max_locks_per_xact();
+    cf.wal_level = xlrec.wal_level();
+    cf.wal_log_hints = xlrec.wal_log_hints();
+
+    // Update minRecoveryPoint to ensure that if recovery is aborted, we recover
+    // back up to this point before allowing hot standby again. The local copies
+    // cannot be updated as long as crash recovery is happening and we expect all
+    // the WAL to be replayed.
+    if backend_access_transam_xlogrecovery_seams::in_archive_recovery::call() {
+        let cf = crate::shmem::control_file_mut();
+        LOCAL_MIN_RECOVERY_POINT.with(|c| c.set(cf.minRecoveryPoint));
+        LOCAL_MIN_RECOVERY_POINT_TLI.with(|c| c.set(cf.minRecoveryPointTLI));
+    }
+    let local_min = LOCAL_MIN_RECOVERY_POINT.with(|c| c.get());
+    if local_min != crate::InvalidXLogRecPtr && local_min < lsn {
+        let (_replay_ptr, replay_tli) =
+            backend_access_transam_xlogrecovery_seams::get_xlog_replay_rec_ptr_tli::call();
+        let cf = crate::shmem::control_file_mut();
+        cf.minRecoveryPoint = lsn;
+        cf.minRecoveryPointTLI = replay_tli;
     }
 
-    deferred! {
-        /// The control-file / XLogCtl-shmem / multixact arms. These read the
-        /// replay timeline internally via `GetCurrentReplayRecPtr` (ambient
-        /// `XLogCtl` recovery state owned by xlogrecovery), exactly as the C
-        /// does — it is not a `xlog_redo` parameter.
-        pub fn xlog_redo_control_file_arm(info: u8, record: &mut XLogReaderState<'_>) -> PgResult<()>;
+    // CommitTsParameterChange(xlrec.track_commit_timestamp,
+    //                         ControlFile->track_commit_timestamp);
+    let old_track = crate::shmem::control_file_mut().track_commit_timestamp;
+    backend_access_transam_commit_ts_seams::commit_ts_parameter_change::call(
+        xlrec.track_commit_timestamp(),
+        old_track,
+    )?;
+    crate::shmem::control_file_mut().track_commit_timestamp = xlrec.track_commit_timestamp();
+
+    // UpdateControlFile();
+    crate::shmem::UpdateControlFile()?;
+
+    // LWLockRelease(ControlFileLock);
+    backend_storage_lmgr_lwlock::LWLockRelease(control_file_lock)?;
+
+    // Check to see if any parameter change gives a problem on recovery.
+    crate::startup::CheckRequiredParameterValues()?;
+    Ok(())
+}
+
+/// `XLOG_FPW_CHANGE` redo arm (xlog.c:8644-8666). Track the `full_page_writes`
+/// state recorded in the WAL, and remember the LSN of the last record that
+/// disabled it (so backup start/stop can detect that case).
+fn redo_fpw_change(record: &mut XLogReaderState<'_>) -> PgResult<()> {
+    // memcpy(&fpw, XLogRecGetData(record), sizeof(bool));
+    let data = record
+        .record
+        .as_ref()
+        .expect("xlog_redo dispatched on a decoded record")
+        .data();
+    let fpw = *data
+        .first()
+        .expect("XLOG_FPW_CHANGE record carries a 1-byte bool")
+        != 0;
+
+    // Update the LSN of the last replayed XLOG_FPW_CHANGE record so that
+    // do_pg_backup_start()/do_pg_backup_stop() can check whether
+    // full_page_writes has been disabled during online backup.
+    if !fpw {
+        let read_rec_ptr = record.ReadRecPtr;
+        // SAFETY: live shmem region.
+        let ctl = unsafe { &*crate::shmem::xlog_ctl() };
+        crate::shmem::spin_lock_acquire(&ctl.info_lck);
+        // SAFETY: info_lck held; live shmem region.
+        unsafe {
+            let ctl_mut = crate::shmem::xlog_ctl();
+            if (*ctl_mut).lastFpwDisableRecPtr < read_rec_ptr {
+                (*ctl_mut).lastFpwDisableRecPtr = read_rec_ptr;
+            }
+        }
+        crate::shmem::spin_lock_release(&ctl.info_lck);
     }
+
+    // Keep track of full_page_writes.
+    LAST_FULL_PAGE_WRITES.with(|c| c.set(fpw));
+    Ok(())
 }

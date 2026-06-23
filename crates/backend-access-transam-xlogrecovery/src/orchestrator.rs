@@ -974,6 +974,16 @@ pub(crate) fn archive_recovery_requested() -> bool {
     recovery_state_mut().archive_recovery_requested
 }
 
+/// `InArchiveRecovery` (xlogrecovery.c:140) read for the `in_archive_recovery`
+/// seam install (the startup process's per-backend recovery state). False
+/// before the recovery-state holder exists (crash recovery / no recovery).
+pub(crate) fn in_archive_recovery() -> bool {
+    if !recovery_state_is_set() {
+        return false;
+    }
+    recovery_state_mut().in_archive_recovery
+}
+
 /// `reachedConsistency` (xlogrecovery.c global) read for the
 /// `reached_consistency` seam install. False until recovery's replay loop has
 /// reached a consistent state (set in CheckRecoveryConsistency); also false
