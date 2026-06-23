@@ -53,7 +53,7 @@ use ::types_core::primitive::{AttrNumber, BlockNumber, OffsetNumber, Oid};
 use ::types_error::{PgError, PgResult};
 use ::types_nbtree::{
     BTScanInsert, BTScanInsertData, BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsPinned,
-    BTScanPosIsValid, BTScanPosItem, BTStack, BTStackData, BT_IS_POSTING, BT_OFFSET_MASK,
+    BTScanPosIsValid, BTStack, BTStackData, BT_IS_POSTING, BT_OFFSET_MASK,
     BT_PIVOT_HEAP_TID_ATTR, BTORDER_PROC, BTP_DELETED, BTP_HALF_DEAD, BTP_INCOMPLETE_SPLIT,
     BTP_LEAF, INDEX_ALT_TID_MASK, MaxTIDsPerBTreePage, P_FIRSTKEY, P_HIKEY, P_NONE,
 };
@@ -1777,11 +1777,19 @@ fn _bt_readpage<'mcx>(
     mut offnum: OffsetNumber,
     firstpage: bool,
 ) -> PgResult<bool> {
-    /* Snapshot the page bytes once (read under the held lock). */
-    let page_vec: PgVec<'mcx, u8> = bufmgr::buffer_get_page::call(mcx, so.currPos.buf)?;
-    let opaque = opaque_from_bytes(&page_vec)?;
-
     so.currPos.currPage = bufmgr::buffer_get_block_number::call(so.currPos.buf);
+    let buf = so.currPos.buf;
+    /*
+     * Borrow the leaf page in place for the whole of `_bt_readpage`, mirroring
+     * C's `Page page = BufferGetPage(so->currPos.buf)` pointer (valid while the
+     * buffer stays pinned and read-locked for the duration of this function).
+     * No owned 8 KiB snapshot is allocated for the page itself; only the
+     * `pstate.page` working copy that `_bt_set_startikey`/look-ahead read back
+     * out-of-line is materialized below.
+     */
+    bufmgr::buffer_with_page(buf, |page_bytes| {
+    let opaque = opaque_from_bytes(page_bytes)?;
+
     so.currPos.prevPage = opaque.btpo_prev;
     so.currPos.nextPage = opaque.btpo_next;
     /* delay setting so->currPos.lsn until _bt_drop_lock_and_maybe_pin */
@@ -1816,7 +1824,7 @@ fn _bt_readpage<'mcx>(
     /* initialize local variables */
     let indnatts = rel_natts(rel);
     let array_keys = so.numArrayKeys != 0;
-    let page = PageRef::new(&page_vec)?;
+    let page = PageRef::new(page_bytes)?;
     let minoff = P_FIRSTDATAKEY(&opaque);
     let maxoff = PageGetMaxOffsetNumber(&page);
 
@@ -1825,7 +1833,7 @@ fn _bt_readpage<'mcx>(
     pstate.minoff = minoff;
     pstate.maxoff = maxoff;
     pstate.finaltup = None;
-    pstate.page = clone_pgvec(mcx, &page_vec);
+    pstate.page = to_pgvec(mcx, page_bytes);
     pstate.firstpage = firstpage;
     pstate.forcenonrequired = false;
     pstate.startikey = 0;
@@ -1866,9 +1874,12 @@ fn _bt_readpage<'mcx>(
             bt_set_startikey(rel, so, &mut pstate)?;
         }
 
-        /* load items[] in ascending order */
+        /*
+         * load items[] in ascending order — `so.currPos.items` was allocated to
+         * its full `MaxTIDsPerBTreePage` size once at scan begin (mirroring C's
+         * fixed inline array), so we fill it in place with no allocation here.
+         */
         let mut item_index: i32 = 0;
-        ensure_items_capacity(mcx, so);
 
         offnum = offnum.max(minoff);
 
@@ -1972,9 +1983,8 @@ fn _bt_readpage<'mcx>(
             bt_set_startikey(rel, so, &mut pstate)?;
         }
 
-        /* load items[] in descending order */
+        /* load items[] in descending order (fixed buffer, filled in place) */
         let mut item_index: i32 = MaxTIDsPerBTreePage as i32;
-        ensure_items_capacity(mcx, so);
 
         offnum = offnum.min(maxoff);
 
@@ -2059,19 +2069,7 @@ fn _bt_readpage<'mcx>(
     debug_assert!(!pstate.forcenonrequired);
 
     Ok(so.currPos.firstItem <= so.currPos.lastItem)
-}
-
-/// Ensure `so.currPos.items` has `MaxTIDsPerBTreePage` slots (the C flexible
-/// array is fixed-size; here it's a `PgVec`). Idempotent.
-fn ensure_items_capacity<'mcx>(mcx: Mcx<'mcx>, so: &mut BTScanOpaqueData<'mcx>) {
-    if so.currPos.items.len() < MaxTIDsPerBTreePage {
-        let mut v: PgVec<'mcx, BTScanPosItem> =
-            vec_with_capacity_in(mcx, MaxTIDsPerBTreePage).expect("items alloc");
-        for _ in 0..MaxTIDsPerBTreePage {
-            v.push(BTScanPosItem::default());
-        }
-        so.currPos.items = v;
-    }
+    })
 }
 
 /// Copy a byte slice into an owned `PgVec<u8>`.
@@ -2079,11 +2077,6 @@ fn to_pgvec<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgVec<'mcx, u8> {
     let mut v: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, bytes.len()).expect("pgvec alloc");
     v.extend_from_slice(bytes);
     v
-}
-
-/// Clone a `PgVec<u8>` into a fresh `PgVec<u8>` over `mcx`.
-fn clone_pgvec<'mcx>(mcx: Mcx<'mcx>, src: &PgVec<'mcx, u8>) -> PgVec<'mcx, u8> {
-    to_pgvec(mcx, src.as_slice())
 }
 
 // ===========================================================================

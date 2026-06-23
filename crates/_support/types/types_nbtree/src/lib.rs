@@ -602,7 +602,18 @@ pub struct BTScanPosData<'mcx> {
 
 impl<'mcx> BTScanPosData<'mcx> {
     /// A fresh, invalidated position over `mcx`.
+    ///
+    /// Mirrors C, where `BTScanPosData` embeds a fixed inline
+    /// `items[MaxTIDsPerBTreePage]` array that is allocated exactly once, as
+    /// part of the single `palloc(sizeof(BTScanOpaqueData))` in `btbeginscan`.
+    /// We allocate the `items` buffer to its full `MaxTIDsPerBTreePage` size
+    /// here, once per scan position, so that `_bt_readpage` fills it in place
+    /// per page with no further allocation (rather than re-growing a `PgVec`
+    /// on every leaf-page visit).
     pub fn new(mcx: ::mcx::Mcx<'mcx>) -> Self {
+        let mut items: PgVec<'mcx, BTScanPosItem> =
+            ::mcx::vec_with_capacity_in(mcx, MaxTIDsPerBTreePage).expect("BTScanPos items alloc");
+        items.resize(MaxTIDsPerBTreePage, BTScanPosItem::default());
         BTScanPosData {
             buf: InvalidBuffer,
             currPage: InvalidBlockNumber,
@@ -616,7 +627,7 @@ impl<'mcx> BTScanPosData<'mcx> {
             firstItem: 0,
             lastItem: 0,
             itemIndex: 0,
-            items: PgVec::new_in(mcx),
+            items,
         }
     }
 }

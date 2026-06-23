@@ -891,7 +891,7 @@ fn _bt_doinsert_inner<'mcx>(
 /// `_bt_search_insert(rel, heaprel, insertstate)` — `_bt_search()` wrapper for
 /// inserts, with the rightmost-leaf fastpath optimization.
 fn _bt_search_insert<'mcx>(
-    mcx: Mcx<'mcx>,
+    _mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
     heaprel: &Relation<'mcx>,
     insertstate: &mut BTInsertStateData<'mcx>,
@@ -905,9 +905,6 @@ fn _bt_search_insert<'mcx>(
         insertstate.buf = read_buffer_unlocked(rel, relation_get_target_block(rel))?;
         if _bt_conditionallockbuf(rel, insertstate.buf) {
             crate::page::bt_checkpage(rel, insertstate.buf)?;
-            let page = bufmgr::buffer_get_page::call(mcx, insertstate.buf)?;
-            let opaque = opaque_from_page(&page)?;
-
             /*
              * Check if the page is still the rightmost leaf page and has enough
              * free space to accommodate the new tuple. Also check that the
@@ -915,13 +912,16 @@ fn _bt_search_insert<'mcx>(
              * tuple on the page. (We expect itup_key's scantid to be unset when
              * our caller is a checkingunique inserter.)
              */
-            if P_RIGHTMOST(&opaque)
-                && P_ISLEAF(&opaque)
-                && !P_IGNORE(&opaque)
-                && PageGetFreeSpace(&PageRef::new(&page)?) > insertstate.itemsz
-                && PageGetMaxOffsetNumber(&PageRef::new(&page)?) >= P_HIKEY
-                && crate::search::bt_compare(rel, &insertstate.itup_key, &page, P_HIKEY)? > 0
-            {
+            let suitable = bufmgr::buffer_with_page(insertstate.buf, |page| {
+                let opaque = opaque_from_page(page)?;
+                Ok(P_RIGHTMOST(&opaque)
+                    && P_ISLEAF(&opaque)
+                    && !P_IGNORE(&opaque)
+                    && PageGetFreeSpace(&PageRef::new(page)?) > insertstate.itemsz
+                    && PageGetMaxOffsetNumber(&PageRef::new(page)?) >= P_HIKEY
+                    && crate::search::bt_compare(rel, &insertstate.itup_key, page, P_HIKEY)? > 0)
+            })?;
+            if suitable {
                 /*
                  * Caller can use the fastpath optimization because cached block
                  * is still rightmost leaf page, which can fit caller's new tuple
@@ -1569,8 +1569,7 @@ fn _bt_insertonpg<'mcx>(
     postingoff: i32,
     split_only_page: bool,
 ) -> PgResult<()> {
-    let page = bufmgr::buffer_get_page::call(mcx, buf)?;
-    let opaque = opaque_from_page(&page)?;
+    let opaque = bufmgr::buffer_with_page(buf, |page| opaque_from_page(page))?;
     let isleaf = P_ISLEAF(&opaque);
     let isroot = P_ISROOT(&opaque);
     let isrightmost = P_RIGHTMOST(&opaque);
@@ -1591,14 +1590,14 @@ fn _bt_insertonpg<'mcx>(
 
     /* Do we need to split an existing posting list item? */
     if postingoff != 0 {
-        let (oposting_bytes, itemid_dead) = {
-            let pref = PageRef::new(&page)?;
+        let (oposting_bytes, itemid_dead) = bufmgr::buffer_with_page(buf, |page| {
+            let pref = PageRef::new(page)?;
             let itemid = PageGetItemId(&pref, newitemoff)?;
             let item = PageGetItem(&pref, &itemid)?;
             let mut v: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, item.len())?;
             v.extend_from_slice(item);
-            (v, ItemIdIsDead(&itemid))
-        };
+            Ok((v, ItemIdIsDead(&itemid)))
+        })?;
         debug_assert!(isleaf
             && itup_key.as_ref().unwrap().heapkeyspace
             && itup_key.as_ref().unwrap().allequalimage);
@@ -1629,7 +1628,9 @@ fn _bt_insertonpg<'mcx>(
     /*
      * Do we need to split the page to fit the item on it?
      */
-    if (PageGetFreeSpace(&PageRef::new(&page)?) as usize) < itemsz {
+    let needs_split =
+        bufmgr::buffer_with_page(buf, |page| Ok((PageGetFreeSpace(&PageRef::new(page)?) as usize) < itemsz))?;
+    if needs_split {
         debug_assert!(!split_only_page);
 
         /* split the buffer into left and right halves */
@@ -1668,8 +1669,7 @@ fn _bt_insertonpg<'mcx>(
             debug_assert!(cbuf != InvalidBuffer);
 
             metabuf = _bt_getbuf(mcx, rel, BTREE_METAPAGE, BT_WRITE)?;
-            let metapg = bufmgr::buffer_get_page::call(mcx, metabuf)?;
-            let m = meta_from_page(&metapg);
+            let m = bufmgr::buffer_with_page(metabuf, |metapg| Ok(meta_from_page(metapg)))?;
 
             if m.btm_fastlevel >= opaque.btpo_level {
                 /* no update wanted */
@@ -1725,7 +1725,7 @@ fn _bt_insertonpg<'mcx>(
                 meta_into_page(pg, &m);
                 Ok(())
             })?;
-            metad = Some(meta_from_page(&bufmgr::buffer_get_page::call(mcx, metabuf)?));
+            metad = Some(bufmgr::buffer_with_page(metabuf, |pg| Ok(meta_from_page(pg)))?);
             bufmgr::mark_buffer_dirty::call(metabuf);
         }
 
