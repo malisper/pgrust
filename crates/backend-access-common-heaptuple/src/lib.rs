@@ -694,6 +694,37 @@ fn varsize_short(b: &[u8]) -> usize {
     varsize_1b(b)
 }
 
+/// Un-pack a short (1-byte header) varlena image to the canonical 4-byte-header
+/// form, mirroring `detoast_attr`'s short arm (`SET_VARSIZE(new, data+VARHDRSZ);
+/// memcpy(VARDATA(new), VARDATA_SHORT(old), data)`). A 4-byte (or external/
+/// compressed) image passes through borrowed verbatim.
+///
+/// Used by the composite-`Datum` decode (`DatumGetHeapTupleHeader`): under
+/// `SHORT_VARLENA_PACKING`, `heap_form_tuple` may store a small composite/record
+/// value with a 1-byte header (composite types are packable: `typlen == -1`,
+/// `typstorage == 'x'`). The decoder reads the `HeapTupleHeader` at a FIXED
+/// 4-byte offset (`datum_len_`/`typmod`/`typeid` at 0/4/8, `t_hoff` at 22), so a
+/// short image must be un-packed first — exactly as C's `PG_DETOAST_DATUM`
+/// (`DatumGetHeapTupleHeader = (HeapTupleHeader) PG_DETOAST_DATUM(d)`) does.
+/// This crate sits below the detoast crate, so the (allocation-free) short→4B
+/// rewrite is open-coded here; external/compressed composite images are flattened
+/// upstream before reaching this decode.
+fn unpack_short_varlena(image: &[u8]) -> alloc::borrow::Cow<'_, [u8]> {
+    use alloc::borrow::Cow;
+    // A 1-byte-E (external TOAST) header is not a short inline value; leave it for
+    // the upstream detoast. Only un-pack a genuine short (1B, non-E) header.
+    if !image.is_empty() && varatt_is_short(image) && !varatt_is_1b_e(image) {
+        let data_size = varsize_short(image) - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let mut out = alloc::vec::Vec::with_capacity(new_size);
+        out.extend_from_slice(&set_varsize_4b(new_size));
+        out.extend_from_slice(&image[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(image)
+    }
+}
+
 /// The pass-by-value machine word for a [`Datum`] (C's `datum` in the byval
 /// arm). A by-value attribute must carry a `ByVal`; a `ByRef` here is a caller
 /// type error (the mirror of [`Datum::as_ref_bytes`]'s panic on `ByVal`) —
@@ -2686,7 +2717,7 @@ pub fn DatumGetHeapTupleHeader<'mcx>(
     mcx: Mcx<'mcx>,
     datum: &Datum<'_>,
 ) -> PgResult<FormedTuple<'mcx>> {
-    let image: &[u8] = match datum {
+    let raw_image: &[u8] = match datum {
         Datum::ByRef(b) => b,
         // A composite carried as a live tuple needs no byte decode — re-home it.
         Datum::Composite(t) => return t.clone_in(mcx),
@@ -2697,6 +2728,13 @@ pub fn DatumGetHeapTupleHeader<'mcx>(
             panic!("DatumGetHeapTupleHeader called on a non-composite Datum (Cstring/Expanded/Internal)")
         }
     };
+
+    // `DatumGetHeapTupleHeader = (HeapTupleHeader) PG_DETOAST_DATUM(d)`: under
+    // SHORT_VARLENA_PACKING a small stored composite can carry a 1-byte header, so
+    // un-pack it to the 4-byte form the fixed-offset header decode below assumes.
+    // (Behavior-preserving with the flag OFF — no stored composite is short yet.)
+    let unpacked = unpack_short_varlena(raw_image);
+    let image: &[u8] = &unpacked;
 
     if image.len() < SizeofHeapTupleHeader {
         return Err(PgError::error(

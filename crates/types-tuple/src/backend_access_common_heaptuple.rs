@@ -647,10 +647,39 @@ impl<'mcx> FormedTuple<'mcx> {
     /// `DatumTupleFields` (`datum_len_`/`datum_typmod`/`datum_typeid`) union arm
     /// a composite Datum always carries — `HeapTupleHeaderGetTypeId`/`...TypMod`
     /// read those fields back out. `t_len` is the image length.
-    pub fn from_datum_image(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<FormedTuple<'mcx>> {
+    pub fn from_datum_image(mcx: Mcx<'mcx>, raw_image: &[u8]) -> PgResult<FormedTuple<'mcx>> {
         use crate::heaptuple::{
             DatumTupleFields, HeapTupleData, HeapTupleHeaderChoice, HeapTupleHeaderData,
             ItemPointerData, BlockIdData, HEAP_HASNULL, ON_PAGE_HEADER_SIZE,
+        };
+
+        // `DatumGetHeapTupleHeader = (HeapTupleHeader) PG_DETOAST_DATUM(d)`: under
+        // SHORT_VARLENA_PACKING a small stored composite/record (packable:
+        // typlen == -1, typstorage == 'x') can carry a 1-byte ("short") varlena
+        // header. The header decode below reads the `HeapTupleHeader` at FIXED
+        // 4-byte offsets (datum_len_/typmod/typeid at 0/4/8, t_hoff at 22), so a
+        // short image must be un-packed to the 4-byte form first (mirroring C's
+        // detoast_attr short arm: SET_VARSIZE(new, data+VARHDRSZ);
+        // memcpy(VARDATA(new), VARDATA_SHORT(old), data)). A 4-byte / external /
+        // compressed image passes through verbatim (external/compressed composite
+        // images are flattened upstream). Behavior-preserving with the flag OFF.
+        const VARHDRSZ: usize = 4;
+        const VARHDRSZ_SHORT: usize = 1;
+        let owned_unpacked: alloc::vec::Vec<u8>;
+        let image: &[u8] = if raw_image
+            .first()
+            .is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01)
+        {
+            // VARATT_IS_1B && !VARATT_IS_1B_E: short inline header.
+            let data_size = ((raw_image[0] >> 1) & 0x7f) as usize - VARHDRSZ_SHORT;
+            let new_size = data_size + VARHDRSZ;
+            let mut out = alloc::vec::Vec::with_capacity(new_size);
+            out.extend_from_slice(&((new_size as u32) << 2).to_ne_bytes());
+            out.extend_from_slice(&raw_image[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+            owned_unpacked = out;
+            &owned_unpacked
+        } else {
+            raw_image
         };
 
         if image.len() < ON_PAGE_HEADER_SIZE {
