@@ -75,8 +75,29 @@ fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("acl fn: text arg missing from by-ref lane");
-    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
-    &image[types_datum::varlena::VARHDRSZ..]
+    // VARDATA_ANY: header-form-agnostic. A small stored value arrives with a
+    // 1-byte ("short") header under `SHORT_VARLENA_PACKING`; stripping a fixed
+    // `VARHDRSZ` off it would drop three payload bytes from the front. Skip ONE
+    // byte for a short (low-bit-set, non-external) header, else the 4-byte
+    // header (no-op while packing is off — every stored value is 4-byte).
+    vardata_any(image)
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image.
+/// Mirrors the canonical adt-core arg reader (`backend-utils-adt-varchar`): a
+/// short 1-byte header (`VARATT_IS_1B && !VARATT_IS_1B_E`) skips one byte; a
+/// 4-byte uncompressed header skips `VARHDRSZ`.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header (skip 1 byte).
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        // 4-byte uncompressed header (skip VARHDRSZ).
+        Some(_) if image.len() >= types_datum::varlena::VARHDRSZ => {
+            &image[types_datum::varlena::VARHDRSZ..]
+        }
+        _ => &[],
+    }
 }
 
 /// A `name` arg's fixed `NAMEDATALEN` buffer on the by-ref lane, NUL-trimmed
