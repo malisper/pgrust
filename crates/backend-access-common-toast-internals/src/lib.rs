@@ -262,10 +262,18 @@ pub fn toast_open_indexes<'mcx>(
 }
 
 /// `toast_close_indexes(toastidxs, num_indexes, lock)` — close the indexes
-/// opened by [`toast_open_indexes`]. In the owned model each `index_close` is
-/// the `Relation` handle's `Drop`; this consumes (drops) the vector.
-fn toast_close_indexes(toastidxs: PgVec<Relation<'_>>, _lock: LOCKMODE) -> PgResult<()> {
-    drop(toastidxs);
+/// opened by [`toast_open_indexes`]. C: `for (i...) index_close(toastidxs[i],
+/// lock);`. Each `index_close(rel, lock)` releases the relation lock when
+/// `lock != NoLock`, so we must consume each handle via `close(lock)` rather
+/// than drop it: the owned handle's `Drop` is the abort path, releasing the
+/// relcache reference with `NoLock` and leaving the lock to transaction-end
+/// cleanup. Closing with `lock` is what makes the toast-index AccessShareLock
+/// taken during a detoast read drop immediately, matching C (otherwise a
+/// `pg_toast_NNNN_index` AccessShareLock lingers for the whole transaction).
+fn toast_close_indexes(toastidxs: PgVec<Relation<'_>>, lock: LOCKMODE) -> PgResult<()> {
+    for idx in toastidxs.into_iter() {
+        idx.close(lock)?;
+    }
     Ok(())
 }
 
