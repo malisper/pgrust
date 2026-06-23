@@ -1281,12 +1281,46 @@ pub fn after_trigger_mark_events(
 // afterTriggerInvokeEvents (trigger.c:4698)
 // ===========================================================================
 
+/// Which after-trigger event list a firing pass walks: the per-query-level list
+/// (`query_stack[query_depth].events`) or the transaction-global deferred list
+/// (`afterTriggers.events`).  Both are mutated *in place* during firing — a
+/// trigger function (RI cascade DML run with `EXEC_FLAG_SKIP_TRIGGERS`) appends
+/// new events to, and `cancel_prior_stmt_triggers` retires prior events of, the
+/// SAME live list the loop is walking.  Mirrors the C single linked list that
+/// `afterTriggerInvokeEvents` iterates while it grows.
+#[derive(Clone, Copy)]
+enum EventListSel {
+    /// `afterTriggers.query_stack[query_depth].events` at a fixed depth.
+    QueryLevel(usize),
+    /// `afterTriggers.events` (the transaction-global deferred list).
+    Global,
+}
+
+impl EventListSel {
+    fn get<'a>(&self, at: &'a mut crate::queue::AfterTriggers) -> &'a mut EventList {
+        match *self {
+            EventListSel::QueryLevel(qd) => &mut at.query_stack[qd].events,
+            EventListSel::Global => &mut at.events,
+        }
+    }
+}
+
 /// `afterTriggerInvokeEvents(events, firing_id, estate, delete_ok)`
 /// (trigger.c:4698) — fire the events marked for the current firing cycle,
 /// caching the re-resolved relation/trigdesc per relation.  Returns true if no
 /// unfired events remain.
-pub fn after_trigger_invoke_events(
-    events: &mut EventList,
+///
+/// The pass walks the LIVE event list named by `sel`, re-reading its length on
+/// every iteration: C's `afterTriggerInvokeEvents` iterates the live linked list
+/// to its current tail, so when a fired trigger appends more events at the same
+/// level (RI/FK cascade DML run with `fire_triggers=false`), or retires earlier
+/// events via `cancel_prior_stmt_triggers`, those mutations are observed within
+/// the same pass.  We therefore never detach a snapshot of the list — flags and
+/// the shared record for index `i` are read under a short `with_after_triggers`
+/// borrow, the trigger fires with the borrow released (it re-enters the queue
+/// and runs SPI), then the event is marked DONE under another short borrow.
+fn after_trigger_invoke_events(
+    sel: EventListSel,
     firing_id: CommandId,
     estate: &mut EStateData<'_>,
     _delete_ok: bool,
@@ -1295,11 +1329,25 @@ pub fn after_trigger_invoke_events(
     let mut cur: Option<TriggerResultRel> = None;
     let mcx = estate.es_query_cxt;
 
-    let n = events.events.len();
-    for i in 0..n {
-        let flags = events.events[i].ate_flags;
-        let sidx = (flags & AFTER_TRIGGER_OFFSET) as usize;
-        let evtshared = events.shared[sidx].clone();
+    // Walk by index against the live list; re-read its length each iteration so
+    // events appended by a fired trigger (cascade DML) are picked up in this pass.
+    let mut i = 0usize;
+    loop {
+        // Read this event's flags + shared record, or stop if we've reached the
+        // (possibly grown) tail.
+        let read = with_after_triggers(|at| {
+            let events = sel.get(at);
+            if i >= events.events.len() {
+                return None;
+            }
+            let flags = events.events[i].ate_flags;
+            let sidx = (flags & AFTER_TRIGGER_OFFSET) as usize;
+            Some((flags, events.shared[sidx].clone()))
+        });
+        let (flags, evtshared) = match read {
+            None => break,
+            Some(v) => v,
+        };
 
         if (flags & AFTER_TRIGGER_IN_PROGRESS) != 0 && evtshared.ats_firing_id == firing_id {
             let need_reopen = cur
@@ -1315,14 +1363,32 @@ pub fn after_trigger_invoke_events(
                 return Err(fdw_tuple_fetch_unported());
             }
 
-            let event = events.events[i];
+            // Re-read the event record by value (the list may have been reallocated
+            // by appends since we read `flags`; the record at `i` is stable in queue
+            // order — earlier events are never removed, only flagged).
+            let event = with_after_triggers(|at| sel.get(at).events[i]);
+            // Fire it.  AFTER_TRIGGER_IN_PROGRESS stays set so a recursive scan of
+            // the list won't re-fire it.
             after_trigger_execute(mcx, rel, &event, &evtshared)?;
 
-            events.events[i].ate_flags &= !AFTER_TRIGGER_IN_PROGRESS;
-            events.events[i].ate_flags |= AFTER_TRIGGER_DONE;
-        } else if (events.events[i].ate_flags & AFTER_TRIGGER_DONE) == 0 {
-            all_fired = false;
+            // Mark the event done.
+            with_after_triggers(|at| {
+                let ev = &mut sel.get(at).events[i];
+                ev.ate_flags &= !AFTER_TRIGGER_IN_PROGRESS;
+                ev.ate_flags |= AFTER_TRIGGER_DONE;
+            });
+        } else if (flags & AFTER_TRIGGER_DONE) == 0 {
+            // Re-read DONE: cancel_prior_stmt_triggers (fired by a cascade
+            // substatement above) may have retired this event since we read `flags`.
+            let still_pending = with_after_triggers(|at| {
+                (sel.get(at).events[i].ate_flags & AFTER_TRIGGER_DONE) == 0
+            });
+            if still_pending {
+                all_fired = false;
+            }
         }
+
+        i += 1;
     }
 
     Ok(all_fired)
@@ -1345,27 +1411,29 @@ pub fn after_trigger_end_query(estate: &mut EStateData<'_>) -> PgResult<()> {
     }
 
     // Process all immediate-mode triggers, moving deferred ones to the global
-    // list. Loop in case a trigger queues more events at this level.
+    // list. Loop in case a trigger queues more events at this level (C: a fired
+    // trigger may append events to qs->events, e.g. an RI/FK cascade DML run with
+    // EXEC_FLAG_SKIP_TRIGGERS adding its AFTER ROW events to the current level).
+    let qd = with_after_triggers(|at| at.query_depth as usize);
+    let sel = EventListSel::QueryLevel(qd);
     loop {
-        let qd = with_after_triggers(|at| at.query_depth as usize);
+        // afterTriggerMarkEvents(&qs->events, &afterTriggers.events, true):
+        // mark this level's not-yet-scheduled events for the next firing cycle
+        // and move deferred ones to the global list. No trigger fires during the
+        // mark, so taking a working copy of both lists is safe; the invoke below
+        // then runs against the LIVE list so its appends/cancels are observed.
         let (mut events, mut move_list) = with_after_triggers(|at| {
             (
-                std::mem::take(&mut at.query_stack[qd].events),
+                std::mem::take(sel.get(at)),
                 std::mem::take(&mut at.events),
             )
         });
-
         let mark_result = after_trigger_mark_events(&mut events, Some(&mut move_list), true);
-
-        // Write the (mutated) lists back before propagating any error, so the
-        // queue state stays consistent for transaction abort.
         with_after_triggers(|at| {
             at.events = move_list;
-            at.query_stack[qd].events = events;
+            *sel.get(at) = events;
         });
-
         let found = mark_result?;
-
         if !found {
             break;
         }
@@ -1375,35 +1443,13 @@ pub fn after_trigger_end_query(estate: &mut EStateData<'_>) -> PgResult<()> {
             at.firing_counter += 1;
             id
         });
-        let mut events = with_after_triggers(|at| std::mem::take(&mut at.query_stack[qd].events));
-        let fire_result = after_trigger_invoke_events(&mut events, firing_id, estate, false);
-        // Firing a trigger could have queued MORE events at this same query
-        // depth (e.g. an RI/FK enforcement trigger's cascade DML, run with
-        // EXEC_FLAG_SKIP_TRIGGERS, appends its own AFTER ROW events here). C's
-        // afterTriggerInvokeEvents walks the live linked list to its current
-        // tail, so it sees those appends within the one call; our snapshot
-        // `events` Vec does not, so the appended events sit on the stack. Merge
-        // them back into `events` and, if any are not yet DONE, force another
-        // re-drive iteration (mark + invoke) so they fire too — with the
-        // CommandCounterIncrement inside the cascade SPI substatements giving
-        // each round visibility of the prior round's row changes.
-        let appended_unfired = with_after_triggers(|at| {
-            let appended = std::mem::take(&mut at.query_stack[qd].events);
-            let mut unfired = false;
-            for ev in appended.events {
-                let sidx = (ev.ate_flags & AFTER_TRIGGER_OFFSET) as usize;
-                if let Some(shared) = appended.shared.get(sidx).cloned() {
-                    if (ev.ate_flags & (AFTER_TRIGGER_DONE | AFTER_TRIGGER_IN_PROGRESS)) == 0 {
-                        unfired = true;
-                    }
-                    crate::queue::after_trigger_add_event(&mut events, ev, &shared);
-                }
-            }
-            at.query_stack[qd].events = events;
-            unfired
-        });
-        let all_fired = fire_result?;
-        if all_fired && !appended_unfired {
+
+        // Fire against the LIVE list: appended cascade events extend it (and are
+        // re-marked + fired on the next loop iteration) and cancel_prior_stmt_triggers
+        // retires superseded statement-trigger events in place — exactly as C's
+        // afterTriggerInvokeEvents walks the growing linked list.
+        let all_fired = after_trigger_invoke_events(sel, firing_id, estate, false)?;
+        if all_fired {
             break;
         }
     }
@@ -5690,25 +5736,14 @@ fn fire_global_event_cycle(
                 id
             });
 
-            // Take the list to fire; a deferred trigger function may itself
-            // perform DML whose own AfterTriggerEndQuery promotes new deferred
-            // events back onto afterTriggers.events while we hold the taken list,
-            // so re-append anything that arrived, exactly as AfterTriggerEndQuery
-            // does for its query-level list.
-            let mut events = with_after_triggers(|at| std::mem::take(&mut at.events));
-            let fire_result =
-                after_trigger_invoke_events(&mut events, firing_id, &mut estate, delete_ok);
-            with_after_triggers(|at| {
-                let appended = std::mem::take(&mut at.events);
-                for ev in appended.events {
-                    let sidx = (ev.ate_flags & AFTER_TRIGGER_OFFSET) as usize;
-                    if let Some(shared) = appended.shared.get(sidx).cloned() {
-                        crate::queue::after_trigger_add_event(&mut events, ev, &shared);
-                    }
-                }
-                at.events = events;
-            });
-            let all_fired = fire_result?;
+            // Fire against the LIVE global deferred list: a deferred trigger
+            // function may itself perform DML whose own AfterTriggerEndQuery
+            // promotes new deferred events back onto afterTriggers.events; the
+            // live-list walk observes those appends within the same pass (and
+            // re-fires them on the next loop iteration), exactly as C iterates the
+            // growing linked list.
+            let all_fired =
+                after_trigger_invoke_events(EventListSel::Global, firing_id, &mut estate, delete_ok)?;
             if all_fired {
                 break;
             }
