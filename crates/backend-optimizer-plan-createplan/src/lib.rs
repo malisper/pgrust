@@ -4629,11 +4629,46 @@ fn create_minmaxagg_plan_impl<'mcx>(
     };
 
     // Attach each aggregate's pre-built InitPlan SubPlan to the outer query level.
-    // (planagg.c: SS_make_initplan_from_plan appended these to root->init_plans.)
+    // (planagg.c: SS_make_initplan_from_plan, called from create_minmaxagg_plan,
+    // does `glob->subplans = lappend(glob->subplans, plan); splan->plan_id =
+    // list_length(glob->subplans); plan_name = "InitPlan N"; root->init_plans =
+    // lappend(root->init_plans, splan)`.) The `Plan` tree was interned into the
+    // run value store at preprocess time (build_minmax_agg_paths), but its
+    // attach + numbering is deferred to HERE — i.e. only when the MinMaxAggPath has
+    // actually won — so a losing optimization never occupies a glob.subplans slot
+    // and never bumps a sibling InitPlan/SubPlan's 1-based plan_id.
     for mminfo in &mmaggregates {
-        if let Some(nid) = mminfo.subplan_node {
-            root.init_plans.push(nid);
+        let (Some(nid), Some(pid)) = (mminfo.subplan_node, mminfo.subplan_plan_id) else {
+            continue;
+        };
+        // glob->subplans = lappend(...); plan_id = list_length(glob->subplans).
+        let plan_id = {
+            let glob = root
+                .glob
+                .as_mut()
+                .expect("create_minmaxagg_plan: root->glob is NULL");
+            glob.subplans.push(pid);
+            glob.subpaths.push(pid);
+            glob.subroots.push(pid);
+            glob.subplans.len() as i32
+        };
+        // Set the SubPlan's 1-based plan_id and "InitPlan N" name now that it is
+        // attached (left unset by build_initplan_subplan_node). The arena node is
+        // `Expr<'static>`; the name is allocated in the planner `mcx` (which
+        // outlives the run), so erase its lifetime to match — the same
+        // lifetime-only transmute the subplan store already relies on
+        // (`subplan_into_static`).
+        let plan_name: PgString<'static> = {
+            let s = PgString::from_str_in(&alloc::format!("InitPlan {plan_id}"), mcx)?;
+            // SAFETY: lifetime-parameter-only transmute of an owned PgString whose
+            // backing bytes live in the planner memory context for the run's life.
+            unsafe { core::mem::transmute::<PgString<'_>, PgString<'static>>(s) }
+        };
+        if let Expr::SubPlan(s) = root.node_mut(nid) {
+            s.0.plan_id = plan_id;
+            s.0.plan_name = Some(plan_name);
         }
+        root.init_plans.push(nid);
     }
 
     // tlist = build_path_tlist(root, &best_path->path).

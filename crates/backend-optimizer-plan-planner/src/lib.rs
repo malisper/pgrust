@@ -3040,15 +3040,17 @@ fn build_minmax_agg_paths<'mcx>(
             mcx, sub_plan, limit_count, pdis, pstartup, pathcost, psafe, pwidth,
         )?;
 
-        // SS_make_initplan_from_plan core (build + intern + SubPlan node), but
-        // WITHOUT appending to init_plans yet — create_minmaxagg_plan does that
-        // once the MinMaxAggPath has won. Consumes the subroot into the run's
-        // subplan store.
-        let subplan_nid =
+        // SS_make_initplan_from_plan core (build SubPlan node + intern the Plan
+        // tree into the run value store), but WITHOUT appending to init_plans /
+        // glob.subplans yet — create_minmaxagg_plan does both, plus the 1-based
+        // plan_id numbering, once the MinMaxAggPath has actually won. Consumes the
+        // subroot into the run's subplan store and hands back the reserved PlanId.
+        let (subplan_nid, subplan_pid) =
             backend_optimizer_plan_init_subselect::subplan::build_initplan_subplan_node(
                 mcx, root, run, subroot, limit_plan, &param,
             )?;
         aggs_list[i].subplan_node = Some(subplan_nid);
+        aggs_list[i].subplan_plan_id = Some(subplan_pid);
     }
 
     // create_minmaxagg_path(root, grouped_rel, create_pathtarget(root,

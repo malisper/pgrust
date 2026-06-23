@@ -1465,6 +1465,15 @@ pub struct MinMaxAggInfo {
     /// resulting `SubPlan` node is stashed here; `create_minmaxagg_plan` (run iff
     /// the MinMaxAggPath wins) appends it to `root.init_plans`. `None` until built.
     pub subplan_node: Option<NodeId>,
+    /// The [`PlanId`] handle the InitPlan `Plan` tree was interned under in the
+    /// run's value store (`run.intern_subplan`). The handle is reserved at
+    /// preprocess time, but the subplan is **not** attached to `glob.subplans`
+    /// until `create_minmaxagg_plan` runs (i.e. iff the MinMaxAggPath won) — so a
+    /// losing optimization leaves no entry in the numbered `glob.subplans` list
+    /// and never inflates another InitPlan/SubPlan's 1-based `plan_id` (C only
+    /// `lappend`s the subplan inside `SS_make_initplan_from_plan`, which it calls
+    /// from `create_minmaxagg_plan`). `None` until built.
+    pub subplan_plan_id: Option<PlanId>,
 }
 
 /// `MinMaxAggPath` — computation of MIN/MAX aggregates from indexes.

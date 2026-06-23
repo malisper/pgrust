@@ -481,7 +481,14 @@ fn build_subplan<'mcx>(
 
     let subpath = subpath.unwrap_or(PathId(0));
     let interned = run.intern_subplan(plan, subroot, subpath);
-    {
+    // C: splan->plan_id = list_length(root->glob->subplans) AFTER appending. The
+    // authoritative 1-based plan_id is `glob.subplans.len()`, NOT
+    // `run.subplan_len()`: the two normally agree, but the lifted MIN/MAX-agg
+    // optimization (build_minmax_agg_paths) can leave an *un-attached* subplan in
+    // the run's value store (interned but not pushed onto glob.subplans, because
+    // its MinMaxAggPath ultimately lost to a plain Agg). Counting glob.subplans
+    // ignores those orphans, matching C exactly.
+    let plan_id = {
         let glob = root
             .glob
             .as_mut()
@@ -489,8 +496,8 @@ fn build_subplan<'mcx>(
         glob.subplans.push(interned);
         glob.subpaths.push(interned);
         glob.subroots.push(interned);
-    }
-    let plan_id = run.subplan_len() as i32;
+        glob.subplans.len() as i32
+    };
     splan.plan_id = plan_id;
 
     if splan.parParam.is_empty() && !is_init_plan && !splan.useHashTable {
@@ -920,9 +927,12 @@ pub fn SS_process_ctes<'mcx>(
         initext::cost_subplan::call(root, &mut splan, &plan)?;
 
         // Add the subplan, its path, and its PlannerInfo to the global lists.
+        // plan_id = list_length(glob->subplans) after appending (C semantics);
+        // count glob.subplans, not run.subplan_len(), so an un-attached MIN/MAX-agg
+        // subplan in the run value store can't inflate the number.
         let subpath = subpath.unwrap_or(PathId(0));
         let interned = run.intern_subplan(plan, subroot, subpath);
-        {
+        let plan_id = {
             let glob = root
                 .glob
                 .as_mut()
@@ -930,8 +940,8 @@ pub fn SS_process_ctes<'mcx>(
             glob.subplans.push(interned);
             glob.subpaths.push(interned);
             glob.subroots.push(interned);
-        }
-        let plan_id = run.subplan_len() as i32;
+            glob.subplans.len() as i32
+        };
         splan.plan_id = plan_id;
 
         // Label for EXPLAIN.
@@ -1750,16 +1760,22 @@ pub fn SS_make_initplan_output_param(
 }
 
 /// Shared core of `SS_make_initplan_from_plan`: build the `SubPlan` node from a
-/// finished plan tree, intern the plan/subroot/subpath into the run + glob, and
-/// return the `SubPlan` [`types_pathnodes::NodeId`] in `root`'s node_arena
-/// (WITHOUT appending it to `root.init_plans`).
+/// finished plan tree, intern the plan/subroot/subpath into the run's value
+/// store, and return the `SubPlan` [`types_pathnodes::NodeId`] in `root`'s
+/// node_arena (WITHOUT appending it to `root.init_plans` OR to `glob.subplans`).
 ///
 /// Public so planagg's `build_minmax_agg_paths` (planner crate) can pre-build the
 /// per-aggregate InitPlan `SubPlan` at preprocess time, where it holds the
 /// `&mut PlannerRun` the intern needs (`create_minmaxagg_plan` runs under
 /// `create_plan`, which only has `&PlannerRun`). The caller stashes the returned
-/// NodeId on the `MinMaxAggInfo` and `create_minmaxagg_plan` appends it to
-/// `root.init_plans` once the MinMaxAggPath has won.
+/// `(NodeId, PlanId)` on the `MinMaxAggInfo`; `create_minmaxagg_plan` then both
+/// (a) appends the `Plan` tree to `glob.subplans` and assigns the SubPlan's
+/// 1-based `plan_id` + `InitPlan N` name, and (b) appends the SubPlan to
+/// `root.init_plans` — but only once the MinMaxAggPath has actually won. This
+/// matches C, where `SS_make_initplan_from_plan` (which does the `lappend` and
+/// `plan_id = list_length(glob->subplans)`) is called *from* `create_minmaxagg_plan`,
+/// so a losing MIN/MAX optimization never reserves a `glob.subplans` slot and never
+/// inflates a sibling InitPlan/SubPlan's `plan_id`.
 pub fn build_initplan_subplan_node<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
@@ -1767,7 +1783,7 @@ pub fn build_initplan_subplan_node<'mcx>(
     subroot: PlannerInfo,
     plan: Node<'mcx>,
     prm: &Param,
-) -> PgResult<types_pathnodes::NodeId> {
+) -> PgResult<(types_pathnodes::NodeId, types_pathnodes::PlanId)> {
     // Build the SubPlan node and fill in costs.
     let (first_col_type, first_col_typmod, first_col_collation) = get_first_col_type(&plan)?;
     let plan_parallel_safe = plan.plan_head().parallel_safe;
@@ -1796,31 +1812,32 @@ pub fn build_initplan_subplan_node<'mcx>(
     // plan; do it before interning).
     initext::cost_subplan::call(root, &mut node, &plan)?;
 
-    // Add the subplan and its PlannerInfo, plus a dummy path entry.
+    // Intern the InitPlan `Plan` tree (+ its PlannerInfo and a dummy path entry)
+    // into the run's value store, reserving its `PlanId` handle. We deliberately
+    // do NOT push it onto `glob.subplans` here, and leave `plan_id`/`plan_name`
+    // unset: that attach + numbering happens in `create_minmaxagg_plan` iff the
+    // MinMaxAggPath wins (mirroring C, where the `lappend(glob->subplans, ...)` +
+    // `plan_id = list_length(glob->subplans)` live inside `SS_make_initplan_from_plan`,
+    // called from `create_minmaxagg_plan`). If the optimization loses, the run
+    // value store simply holds an unreferenced entry — harmless, and crucially it
+    // never occupies a slot in the numbered `glob.subplans` list, so it cannot
+    // bump a sibling InitPlan/SubPlan's 1-based `plan_id`.
     let interned = run.intern_subplan(plan, subroot, PathId(0));
-    {
-        let glob = root
-            .glob
-            .as_mut()
-            .expect("build_initplan_subplan_node: root->glob is NULL");
-        glob.subplans.push(interned);
-        glob.subpaths.push(interned);
-        glob.subroots.push(interned);
-    }
-    let plan_id = run.subplan_len() as i32;
-    node.plan_id = plan_id;
-    node.plan_name = Some(PgString::from_str_in(
-        &alloc::format!("InitPlan {plan_id}"),
-        mcx,
-    )?);
 
-    Ok(root.alloc_node(Expr::SubPlan(SubPlanExpr(alloc::boxed::Box::new(
-        subplan_into_static(node),
-    )))))
+    Ok((
+        root.alloc_node(Expr::SubPlan(SubPlanExpr(alloc::boxed::Box::new(
+            subplan_into_static(node),
+        )))),
+        interned,
+    ))
 }
 
 /// `SS_make_initplan_from_plan(root, subroot, plan, prm)` (subselect.c): given a
-/// plan tree, make it an InitPlan.
+/// plan tree, make it an InitPlan and attach it to the current query level —
+/// `glob->subplans = lappend(glob->subplans, plan); splan->plan_id =
+/// list_length(glob->subplans); plan_name = "InitPlan N"; root->init_plans =
+/// lappend(root->init_plans, splan)`. (Unlike the lifted MIN/MAX-agg path, this
+/// caller knows the InitPlan is kept, so it attaches eagerly.)
 pub fn SS_make_initplan_from_plan<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
@@ -1829,7 +1846,31 @@ pub fn SS_make_initplan_from_plan<'mcx>(
     plan: Node<'mcx>,
     prm: &Param,
 ) -> PgResult<()> {
-    let nid = build_initplan_subplan_node(mcx, root, run, subroot, plan, prm)?;
+    let (nid, pid) = build_initplan_subplan_node(mcx, root, run, subroot, plan, prm)?;
+    // Attach to glob.subplans + assign the 1-based plan_id / "InitPlan N" name.
+    let plan_id = {
+        let glob = root
+            .glob
+            .as_mut()
+            .expect("SS_make_initplan_from_plan: root->glob is NULL");
+        glob.subplans.push(pid);
+        glob.subpaths.push(pid);
+        glob.subroots.push(pid);
+        glob.subplans.len() as i32
+    };
+    // The arena SubPlan is `Expr<'static>`; the name is allocated in the planner
+    // `mcx` (which outlives the run), so erase its lifetime to match — the same
+    // lifetime-only transmute the subplan store relies on (`subplan_into_static`).
+    let plan_name: PgString<'static> = {
+        let s = PgString::from_str_in(&alloc::format!("InitPlan {plan_id}"), mcx)?;
+        // SAFETY: lifetime-parameter-only transmute of an owned PgString whose
+        // backing bytes live in the planner memory context for the run's life.
+        unsafe { core::mem::transmute::<PgString<'_>, PgString<'static>>(s) }
+    };
+    if let Expr::SubPlan(s) = root.node_mut(nid) {
+        s.0.plan_id = plan_id;
+        s.0.plan_name = Some(plan_name);
+    }
     root.init_plans.push(nid);
     Ok(())
 }
