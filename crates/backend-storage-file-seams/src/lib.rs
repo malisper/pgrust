@@ -94,3 +94,21 @@ seam_core::seam!(
         elevel: ErrorLevel,
     ) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// The crash-safe `ALTER SYSTEM` config-file write tail of
+    /// `AlterSystemSetConfigFile` (guc.c): `BasicOpenFile(tmp_path, O_CREAT |
+    /// O_RDWR | O_TRUNC)`, then (in a `PG_TRY`) `write()` the already-rendered
+    /// `content`, `pg_fsync`, `close`, and `durable_rename(tmp_path, final_path,
+    /// ERROR)`. On any failure the temp fd is closed and the temp file is
+    /// `unlink`ed (ignoring its error) before the error is re-raised — exactly
+    /// C's `PG_CATCH`. The `content` (file header plus the rendered, escaped
+    /// `name = 'value'` lines) is built by the GUC owner; this seam owns only the
+    /// fd.c open/write/fsync/rename/cleanup sequence, so the temp fd never
+    /// crosses the seam. `Err` carries fd.c's `errcode_for_file_access` reports.
+    pub fn write_auto_conf_atomic(
+        tmp_path: &str,
+        final_path: &str,
+        content: &[u8],
+    ) -> PgResult<()>
+);

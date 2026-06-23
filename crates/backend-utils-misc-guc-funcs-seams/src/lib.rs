@@ -92,6 +92,16 @@ seam_core::seam!(
     pub fn has_privs_of_role(member: Oid, role: Oid) -> bool
 );
 
+seam_core::seam!(
+    /// `pg_parameter_aclcheck(name, roleid, mode) == ACLCHECK_OK` (catalog/aclchk.c):
+    /// whether `roleid` holds the `mode` privilege on the configuration
+    /// parameter `name`. `AlterSystemSetConfigFile` uses this with
+    /// `mode == ACL_ALTER_SYSTEM` to gate a non-superuser ALTER SYSTEM on the
+    /// target variable; `true` is the C `ACLCHECK_OK`. `mode` carries the raw
+    /// `AclMode` bits (`ACL_ALTER_SYSTEM = 1 << 13`).
+    pub fn pg_parameter_aclcheck_ok(name: String, roleid: Oid, mode: u64) -> PgResult<bool>
+);
+
 // --- SET TRANSACTION SNAPSHOT / SET TIME ZONE INTERVAL ----------------------
 
 // NOTE: `import_snapshot` was re-homed to `backend-utils-time-snapmgr-seams`

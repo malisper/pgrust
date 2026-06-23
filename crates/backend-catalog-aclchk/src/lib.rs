@@ -1442,6 +1442,13 @@ pub fn init_seams() {
         let ctx = MemoryContext::new("pg_parameter_aclcheck");
         pg_parameter_aclcheck(ctx.mcx(), &name, roleid, mode)
     });
+    // The guc_funcs.c-facing form (ALTER SYSTEM's non-superuser gate): returns
+    // whether the check is `ACLCHECK_OK`, with `mode` carried as raw `AclMode`
+    // bits.
+    backend_utils_misc_guc_funcs_seams::pg_parameter_aclcheck_ok::set(|name, roleid, mode| {
+        let ctx = MemoryContext::new("pg_parameter_aclcheck_ok");
+        Ok(pg_parameter_aclcheck(ctx.mcx(), &name, roleid, mode)? == ACLCHECK_OK)
+    });
     seam::pg_largeobject_aclcheck_snapshot::set(|lobj_oid, roleid, mode, snapshot| {
         let ctx = MemoryContext::new("pg_largeobject_aclcheck_snapshot");
         pg_largeobject_aclcheck_snapshot(ctx.mcx(), lobj_oid, roleid, mode, snapshot)

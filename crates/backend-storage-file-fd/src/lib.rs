@@ -233,6 +233,7 @@ pub fn init_seams() {
     file_seams::fsync_fname::set(seams::seam_fsync_fname);
     file_seams::data_sync_elevel::set(seams::seam_data_sync_elevel);
     file_seams::durable_rename::set(seams::seam_durable_rename);
+    file_seams::write_auto_conf_atomic::set(seams::write_auto_conf_atomic);
 
     // -- GUC var accessors (fd.c file-scope globals) ------------------------
     //

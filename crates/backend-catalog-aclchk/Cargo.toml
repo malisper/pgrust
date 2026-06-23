@@ -39,6 +39,7 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-catalog-namespace-seams = { path = "../backend-catalog-namespace-seams" }
 backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-utils-misc-guc-funcs-seams = { path = "../backend-utils-misc-guc-funcs-seams" }
 backend-access-table-table = { path = "../backend-access-table-table" }
 backend-access-common-scankey = { path = "../backend-access-common-scankey" }
 backend-access-index-genam-seams = { path = "../backend-access-index-genam-seams" }

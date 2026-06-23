@@ -1059,6 +1059,121 @@ pub fn seam_data_sync_elevel(elevel: ErrorLevel) -> ErrorLevel {
     vfd_core::data_sync_elevel(elevel)
 }
 
+/// The crash-safe `ALTER SYSTEM` config-file write tail of
+/// `AlterSystemSetConfigFile` (guc.c:4824-4863): `BasicOpenFile(tmp_path,
+/// O_CREAT | O_RDWR | O_TRUNC)`, then — inside a `PG_TRY`/`PG_CATCH` — write the
+/// already-rendered `content`, `pg_fsync` it, close the fd, and
+/// `durable_rename(tmp_path, final_path, ERROR)`. On any failure the temp fd is
+/// closed (if still open) and `tmp_path` is `unlink`ed (ignoring its error)
+/// before the error is re-raised. The content itself (the
+/// `write_auto_conf_file` header plus the rendered, escaped `name = 'value'`
+/// lines) is built by the GUC owner; this seam owns only the
+/// open/write/fsync/rename/cleanup.
+pub fn write_auto_conf_atomic(tmp_path: &str, final_path: &str, content: &[u8]) -> PgResult<()> {
+    // Tmpfd = BasicOpenFile(AutoConfTmpFileName, O_CREAT | O_RDWR | O_TRUNC);
+    // if (Tmpfd < 0) ereport(ERROR, (errcode_for_file_access(), ...));
+    let fd = match basic_open_file_flags(
+        tmp_path,
+        libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC | PG_BINARY,
+    ) {
+        Ok(fd) => fd,
+        Err(errno) => {
+            return Err(file_access_error(
+                ERROR,
+                errno,
+                format!("could not open file \"{tmp_path}\": %m"),
+            ));
+        }
+    };
+
+    // PG_TRY { write_auto_conf_file; close; durable_rename } PG_CATCH { close;
+    // unlink(tmp); re-throw }. Run the body, and on any Err do the cleanup.
+    match write_auto_conf_atomic_body(fd, tmp_path, final_path, content) {
+        Ok(()) => Ok(()),
+        Err((e, fd_still_open)) => {
+            // if (Tmpfd >= 0) close(Tmpfd);
+            if fd_still_open {
+                // SAFETY: `fd` is the live bare kernel fd returned by
+                // BasicOpenFile and still owned here; close it directly.
+                unsafe {
+                    libc::close(fd);
+                }
+            }
+            // (void) unlink(AutoConfTmpFileName);  -- ignore any error.
+            if let Ok(cpath) = std::ffi::CString::new(tmp_path) {
+                // SAFETY: cpath is a valid NUL-terminated path; the return value
+                // is intentionally ignored (C casts it to void).
+                unsafe {
+                    libc::unlink(cpath.as_ptr());
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+/// The `PG_TRY` body of [`write_auto_conf_atomic`]. Returns `Err((error,
+/// fd_still_open))` so the caller can run C's `PG_CATCH` cleanup: `fd_still_open`
+/// records whether the fd was already `close()`d (it is closed before the
+/// rename, mirroring `close(Tmpfd); Tmpfd = -1;`).
+fn write_auto_conf_atomic_body(
+    fd: i32,
+    tmp_path: &str,
+    final_path: &str,
+    content: &[u8],
+) -> Result<(), (PgError, bool)> {
+    // write_auto_conf_file: a single write of the rendered buffer. C writes the
+    // header then each line separately; the kernel-visible result is identical
+    // to one write of the concatenation, and the GUC owner concatenated it.
+    // errno = 0; if (write(fd, buf.data, buf.len) != buf.len) { if (errno == 0)
+    //   errno = ENOSPC; ereport(ERROR, ...); }
+    if !content.is_empty() {
+        // SAFETY: `fd` is the live bare kernel fd from BasicOpenFile.
+        let w = unsafe {
+            libc::write(fd, content.as_ptr() as *const libc::c_void, content.len())
+        };
+        if w != content.len() as isize {
+            let mut errno = if w < 0 { errno_now() } else { 0 };
+            if errno == 0 {
+                errno = libc::ENOSPC;
+            }
+            return Err((
+                file_access_error(
+                    ERROR,
+                    errno,
+                    format!("could not write to file \"{tmp_path}\": %m"),
+                ),
+                true,
+            ));
+        }
+    }
+
+    // if (pg_fsync(fd) != 0) ereport(ERROR, (errcode_for_file_access(),
+    //   errmsg("could not fsync file \"%s\": %m", filename)));
+    let fsync_rc = seam_pg_fsync(fd);
+    if fsync_rc != 0 {
+        let errno = -fsync_rc;
+        return Err((
+            file_access_error(
+                ERROR,
+                errno,
+                format!("could not fsync file \"{tmp_path}\": %m"),
+            ),
+            true,
+        ));
+    }
+
+    // close(Tmpfd); Tmpfd = -1;
+    // SAFETY: `fd` is the live bare kernel fd; closed exactly once here.
+    unsafe {
+        libc::close(fd);
+    }
+
+    // durable_rename(AutoConfTmpFileName, AutoConfFileName, ERROR);
+    sync_cleanup::durable_rename(Path::new(tmp_path), Path::new(final_path), ERROR)
+        .map_err(|e| (e, false))
+}
+
 /// `pg_file_exists(name)` (fd.c) — exists and not a directory.
 pub fn seam_pg_file_exists(name: &str) -> PgResult<bool> {
     sync_cleanup::pg_file_exists(Path::new(name))

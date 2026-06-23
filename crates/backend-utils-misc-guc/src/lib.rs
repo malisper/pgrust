@@ -940,6 +940,94 @@ fn check_guc_name_for_parameter_acl(name: &str) -> PgResult<()> {
     Ok(())
 }
 
+/// The `!resetall` validation block of `AlterSystemSetConfigFile` (guc.c:4676-
+/// 4742): look the target variable up (without creating a placeholder), reject
+/// parameters that can't live in `postgresql.auto.conf`, validate the proposed
+/// `value` if one is given, and (for an unknown name) check that the custom GUC
+/// would be assignable. Finally reject a value containing a newline. `value ==
+/// None` is the `VAR_SET_DEFAULT` / `VAR_RESET` case (a removal), which still
+/// validates the target. This is purely the GUC-engine half; the caller owns
+/// the superuser/ACL check, the file read/merge/write and the post-alter hook.
+pub fn validate_auto_config_value(name: &str, value: Option<&str>) -> PgResult<()> {
+    use types_guc::{config_type, PGC_S_FILE, GUC_DISALLOW_IN_AUTO_FILE, GUC_DISALLOW_IN_FILE};
+
+    // record = find_option(name, false, true, DEBUG5);  -- no placeholder.
+    // The lookup, the flag/context check and the parse_and_validate_value call
+    // all need the live record, so run them inside one store borrow.
+    let found = live::with_store(|reg| {
+        let Some(record) = reg.find_option(name) else {
+            return Ok::<bool, PgError>(false);
+        };
+        let gen = record.gen();
+
+        // Don't allow parameters that can't be set in configuration files to be
+        // set in PG_AUTOCONF_FILENAME file.
+        if gen.context == PGC_INTERNAL
+            || (gen.flags & GUC_DISALLOW_IN_FILE) != 0
+            || (gen.flags & GUC_DISALLOW_IN_AUTO_FILE) != 0
+        {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_CANT_CHANGE_RUNTIME_PARAM)
+                .errmsg(format!("parameter \"{name}\" cannot be changed"))
+                .into_error());
+        }
+
+        // If a value is specified, verify that it's sane.
+        if let Some(value) = value {
+            // parse_and_validate_value(record, value, PGC_S_FILE, ERROR, ...).
+            // The C wraps a false return in "invalid value for parameter"; the
+            // ported parse_and_validate_value already returns that error form
+            // (and the check-hook errors verbatim), so propagate it directly.
+            // The converted value / extra are discarded (guc_free in C).
+            let _ = registry::parse_and_validate_value(record, value, PGC_S_FILE)?;
+            // (record->vartype == PGC_STRING) guc_free path is a no-op here:
+            // the converted value is dropped when `_` falls out of scope.
+            let _ = config_type::PGC_STRING;
+        }
+        Ok(true)
+    })
+    .ok_or_else(guc_store_uninitialized)??;
+
+    if !found {
+        // Variable not known; check we'd be allowed to create it.  As an
+        // exception, skip this check for a RESET of an unknown custom GUC (so a
+        // reserved-prefix setting remains removable).
+        if value.is_some() || !process_config::valid_custom_variable_name(name) {
+            assignable_custom_variable_name(name, false)?;
+        }
+    }
+
+    // Reject values containing newlines: the config-file grammar has no embedded
+    // newline in string literals.
+    if let Some(value) = value {
+        if value.contains('\n') {
+            return Err(ereport(ERROR)
+                .errcode(types_error::ERRCODE_INVALID_PARAMETER_VALUE)
+                .errmsg("parameter value for ALTER SYSTEM must not contain a newline")
+                .into_error());
+        }
+    }
+
+    Ok(())
+}
+
+/// `escape_single_quotes_ascii(src)` (port/quotes.c): escape (by doubling) any
+/// single quote or backslash, as `postgresql.conf` string literals require
+/// (backslashes are escapes there). `write_auto_conf_file` quotes each value
+/// with this before emitting `name = 'value'`.
+pub fn escape_single_quotes_ascii(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for ch in src.chars() {
+        // SQL_STR_DOUBLE(c, escape_backslash=true): a single quote or backslash
+        // is doubled.
+        if ch == '\'' || ch == '\\' {
+            out.push(ch);
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// The live GUC store has not been built yet (`initialize_guc_options` not run).
 /// A parallel transfer cannot proceed without it — surface the project's error.
 pub(crate) fn guc_store_uninitialized() -> PgError {
