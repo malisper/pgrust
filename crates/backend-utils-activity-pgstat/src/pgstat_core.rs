@@ -123,11 +123,19 @@ pub fn pgstat_report_stat(mut force: bool) -> PgResult<i64> {
         }
     }
 
+    // C (`pgstat_report_stat`, pgstat.c:761): `nowait = !force`. A FORCED flush
+    // must take the shared-stats lock with a BLOCKING (not conditional) acquire
+    // so it always lands; only periodic (non-forced) reports use the
+    // conditional `nowait` acquire that may defer on contention. Passing `force`
+    // directly inverts this — under contention a forced flush (e.g.
+    // pg_stat_force_next_flush) would defer instead of landing.
+    let nowait = !force;
+
     // Flush per-entry (variable-numbered) pending data.
-    let partial = flush_pending_entries(force)?;
+    let partial = flush_pending_entries(nowait)?;
 
     // Flush static (fixed-numbered) kinds.
-    let partial_static = flush_static_kinds(force)?;
+    let partial_static = flush_static_kinds(nowait)?;
 
     if partial || partial_static {
         // Some entries could not be flushed (lock contention). Remember to
