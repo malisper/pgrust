@@ -54,11 +54,21 @@ pub const WIN32_STACK_RLIMIT: isize = 4 * 1024 * 1024;
 
 thread_local! {
     /// C: `int max_stack_depth = 100;` — the GUC value, in kilobytes.
-    static MAX_STACK_DEPTH: Cell<i32> = const { Cell::new(100) };
+    ///
+    /// INTENTIONAL DIVERGENCE FROM C: C initializes this to 100. pgrust uses more
+    /// stack per frame than upstream C (Rust frames + ~608 seam-crate indirections +
+    /// the panic-based ereport(ERROR) error model produce deeper call chains), so the
+    /// deep catalog queries that fit in 100kB on C overflow on pgrust (e.g. a stock
+    /// instance fails `\d` with "stack depth limit exceeded"). We default to 2048 (2MB),
+    /// the value recommended by PostgreSQL's own postgresql.conf.sample, matching the
+    /// `max_stack_depth` boot_val in guc-tables/src/tables.rs. (The regress harness
+    /// passes -c max_stack_depth=7000, so the suite is unaffected.)
+    static MAX_STACK_DEPTH: Cell<i32> = const { Cell::new(2048) };
 
     /// C: `static ssize_t max_stack_depth_bytes = 100 * (ssize_t) 1024;` — the
-    /// GUC value converted to bytes for fast checking.
-    static MAX_STACK_DEPTH_BYTES: Cell<isize> = const { Cell::new(100 * 1024) };
+    /// GUC value converted to bytes for fast checking. Kept consistent with the
+    /// raised `MAX_STACK_DEPTH` default above (intentional divergence; see there).
+    static MAX_STACK_DEPTH_BYTES: Cell<isize> = const { Cell::new(2048 * 1024) };
 
     /// C: `static char *stack_base_ptr = NULL;` — the reference stack address,
     /// installed by [`set_stack_base`]. `0` models C's `NULL`.
