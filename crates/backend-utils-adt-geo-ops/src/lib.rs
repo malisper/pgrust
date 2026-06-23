@@ -47,6 +47,31 @@ pub use types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
 // owned `Vec<Point>`.
 // ---------------------------------------------------------------------------
 
+/// `DatumGetPathP`/`DatumGetPolygonP` are `PG_DETOAST_DATUM`, which un-packs a
+/// short (1-byte header) varlena to the canonical 4-byte form. Under
+/// `SHORT_VARLENA_PACKING` a small `path`/`polygon` (toastable: typlen == -1,
+/// typstorage == 'x') can be heap-stored with a 1-byte header; the codecs below
+/// read `npts` at a FIXED 4-byte offset, so a short image must be un-packed
+/// first. Returns the un-packed bytes (or the input borrowed verbatim for a
+/// 4-byte / external / compressed image — the latter are detoasted upstream).
+/// Behavior-preserving with the flag OFF.
+fn unpack_short_geo(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    use std::borrow::Cow;
+    // VARATT_IS_1B && !VARATT_IS_1B_E (short inline header, low bit set, != 0x01).
+    if bytes.first().is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01) {
+        const VARHDRSZ: usize = 4;
+        const VARHDRSZ_SHORT: usize = 1;
+        let data_size = ((bytes[0] >> 1) & 0x7f) as usize - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let mut out = Vec::with_capacity(new_size);
+        out.extend_from_slice(&((new_size as u32) << 2).to_ne_bytes());
+        out.extend_from_slice(&bytes[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(bytes)
+    }
+}
+
 /// Safe-Rust representation of the varlena `PATH` type (geo_decls.h:115).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Path {
@@ -75,7 +100,9 @@ impl Path {
     ///
     /// Panics on a too-short image — a caller bug, exactly as C would misread a
     /// truncated detoasted pointer.
-    pub fn from_datum_image(bytes: &[u8]) -> Path {
+    pub fn from_datum_image(raw_bytes: &[u8]) -> Path {
+        let unpacked = unpack_short_geo(raw_bytes);
+        let bytes: &[u8] = &unpacked;
         let mut npts_b = [0u8; 4];
         npts_b.copy_from_slice(&bytes[4..8]);
         let npts = i32::from_ne_bytes(npts_b) as usize;
@@ -136,7 +163,9 @@ impl Polygon {
     ///
     /// Panics on a too-short image — a caller bug, exactly as C would misread a
     /// truncated detoasted pointer.
-    pub fn from_datum_image(bytes: &[u8]) -> Polygon {
+    pub fn from_datum_image(raw_bytes: &[u8]) -> Polygon {
+        let unpacked = unpack_short_geo(raw_bytes);
+        let bytes: &[u8] = &unpacked;
         // Skip the 4-byte varlena length word; read npts (int32, native order).
         let mut npts_b = [0u8; 4];
         npts_b.copy_from_slice(&bytes[4..8]);
