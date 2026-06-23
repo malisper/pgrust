@@ -794,10 +794,44 @@ mod imp {
         let _ = resolved;
         core::ptr::null_mut()
     }
-    pub unsafe fn getpwuid(_uid: uid_t) -> *mut passwd {
-        // No passwd database single-user wasm; mirror "no entry" (errno unset).
+    pub unsafe fn getpwuid(uid: uid_t) -> *mut passwd {
+        // There is no passwd database on wasm, but the single-user startup path
+        // (`get_user_name_or_exit` → `getpwuid(geteuid()).pw_name`) needs a
+        // bootstrap user name to proceed. Synthesize a fixed "postgres" entry
+        // for the lone wasm user (WASM_UID); any other uid reports "no entry".
+        if uid != WASM_UID {
+            set_errno(0);
+            return core::ptr::null_mut();
+        }
+        // Static NUL-terminated fields + a static `passwd` pointing at them. The
+        // wasm backend is single-threaded at startup, so a shared static is safe
+        // and matches the C contract (getpwuid returns a pointer into a static
+        // libc buffer the caller copies out immediately).
+        static PW_NAME: &[u8] = b"postgres\0";
+        static EMPTY: &[u8] = b"\0";
+        static SLASH: &[u8] = b"/\0";
+        static SHELL: &[u8] = b"/bin/sh\0";
+        static mut PW: passwd = passwd {
+            pw_name: core::ptr::null_mut(),
+            pw_passwd: core::ptr::null_mut(),
+            pw_uid: WASM_UID,
+            pw_gid: WASM_UID,
+            pw_gecos: core::ptr::null_mut(),
+            pw_dir: core::ptr::null_mut(),
+            pw_shell: core::ptr::null_mut(),
+        };
         set_errno(0);
-        core::ptr::null_mut()
+        // SAFETY: single-threaded startup; the statics outlive the returned
+        // pointer (they are 'static), and the caller copies pw_name out at once.
+        unsafe {
+            let p = core::ptr::addr_of_mut!(PW);
+            (*p).pw_name = PW_NAME.as_ptr() as *mut c_char;
+            (*p).pw_passwd = EMPTY.as_ptr() as *mut c_char;
+            (*p).pw_gecos = EMPTY.as_ptr() as *mut c_char;
+            (*p).pw_dir = SLASH.as_ptr() as *mut c_char;
+            (*p).pw_shell = SHELL.as_ptr() as *mut c_char;
+            p
+        }
     }
 
     /// `void *memcpy(void *dst, const void *src, size_t n)`.
@@ -1655,18 +1689,59 @@ mod imp {
         -1
     }
 
-    /// `int getpwuid_r(...)` — no passwd db; report "no entry".
+    /// `int getpwuid_r(...)` — synthesize the fixed "postgres" entry for the lone
+    /// wasm user (mirrors `getpwuid`); any other uid reports "no entry".
     /// # Safety
     /// Standard C `getpwuid_r` contract.
     pub unsafe fn getpwuid_r(
-        _uid: uid_t,
-        _pwd: *mut passwd,
-        _buf: *mut c_char,
-        _buflen: size_t,
+        uid: uid_t,
+        pwd: *mut passwd,
+        buf: *mut c_char,
+        buflen: size_t,
         result: *mut *mut passwd,
     ) -> c_int {
-        if !result.is_null() {
-            unsafe { *result = core::ptr::null_mut() };
+        if uid != WASM_UID || pwd.is_null() || buf.is_null() {
+            if !result.is_null() {
+                unsafe { *result = core::ptr::null_mut() };
+            }
+            return 0;
+        }
+        // Lay out "postgres\0" + a few empties in the caller's buffer.
+        const NAME: &[u8] = b"postgres\0";
+        const SLASH: &[u8] = b"/\0";
+        const SHELL: &[u8] = b"/bin/sh\0";
+        let need = NAME.len() + 1 /*passwd empty*/ + 1 /*gecos empty*/ + SLASH.len() + SHELL.len();
+        if (buflen as usize) < need {
+            return 34; // ERANGE
+        }
+        // SAFETY: buf has >= `need` bytes (checked); pwd is a valid passwd.
+        unsafe {
+            let mut p = buf as *mut u8;
+            let name_ptr = p;
+            core::ptr::copy_nonoverlapping(NAME.as_ptr(), p, NAME.len());
+            p = p.add(NAME.len());
+            let empty_ptr = p;
+            *p = 0;
+            p = p.add(1);
+            let gecos_ptr = p;
+            *p = 0;
+            p = p.add(1);
+            let dir_ptr = p;
+            core::ptr::copy_nonoverlapping(SLASH.as_ptr(), p, SLASH.len());
+            p = p.add(SLASH.len());
+            let shell_ptr = p;
+            core::ptr::copy_nonoverlapping(SHELL.as_ptr(), p, SHELL.len());
+
+            (*pwd).pw_name = name_ptr as *mut c_char;
+            (*pwd).pw_passwd = empty_ptr as *mut c_char;
+            (*pwd).pw_uid = WASM_UID;
+            (*pwd).pw_gid = WASM_UID;
+            (*pwd).pw_gecos = gecos_ptr as *mut c_char;
+            (*pwd).pw_dir = dir_ptr as *mut c_char;
+            (*pwd).pw_shell = shell_ptr as *mut c_char;
+            if !result.is_null() {
+                *result = pwd;
+            }
         }
         0
     }
