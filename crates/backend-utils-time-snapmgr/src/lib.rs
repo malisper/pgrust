@@ -826,15 +826,32 @@ pub fn UnregisterSnapshotNoOwner(snapshot: &SnapHandle) -> PgResult<()> {
     debug_assert!(with_state(|s| !registered_is_empty(s)));
 
     snapshot.borrow_mut().regd_count -= 1;
-    if snapshot.borrow().regd_count == 0 {
+    let regd = snapshot.borrow().regd_count;
+    if regd == 0 {
         with_state(|s| registered_remove(s, snapshot));
     }
 
-    let (regd, active) = {
-        let sd = snapshot.borrow();
-        (sd.regd_count, sd.active_count)
-    };
-    if regd == 0 && active == 0 {
+    // C frees and resets xmin when `regd_count == 0 && active_count == 0`. The
+    // `active_count == 0` clause guards C's `pfree` (don't free a snapshot still
+    // on the active stack) — in Rust the free is automatic (the live active-stack
+    // handle keeps its own `Rc`), so it needs no guard here. Critically, this
+    // function receives a snapshot VALUE round-tripped across the marshaling seam,
+    // whose `active_count` is STALE (snapshotted at register time): a snapshot
+    // that was the active snapshot when registered (e.g. the executor's
+    // `es_snapshot = RegisterSnapshot(queryDesc->snapshot)`) carries
+    // `active_count == 1` here even after its active-stack copy was popped. Gating
+    // the xmin reset on that stale count wrongly skips it, pinning `MyProc->xmin`
+    // at idle (the catalog/transaction-snapshot horizon stays advertised, holding
+    // back pruning and blocking concurrent `WaitForOlderSnapshots`). C never hits
+    // this because for a `copied` snapshot `RegisterSnapshot` returns the SAME
+    // object the active stack holds, so its `active_count` is always live. Drive
+    // the reset off the set-membership transition (`regd_count -> 0`) instead:
+    // `SnapshotResetXmin` is self-guarding — it early-returns while any snapshot
+    // is still genuinely active and recomputes the floor from the registered set —
+    // so firing it here is observably identical to C in both the still-active case
+    // (early-return; a later PopActiveSnapshot does the real reset) and the
+    // not-active case (reset fires now).
+    if regd == 0 {
         // FreeSnapshot: dropping the manager's last tracked reference reclaims
         // it (the caller's handle drops at its own scope end).
         SnapshotResetXmin()?;
