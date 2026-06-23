@@ -53,6 +53,36 @@ pub struct ReplaceRelidContext {
 /// `ChangeVarNodesWalkExpression((Node *) rinfo->clause, context)`: it adjusts
 /// `Var.varno` / `varnullingrels` / PHV rels / RangeTblRef etc. The arena `Expr`
 /// is lifetime-free, so it is wrapped as a `Node::Expr` for the standalone walk.
+/// `ChangeVarNodesExtended((Node *) phv->phexpr, relid, subst, …)` applied to a
+/// `PlaceHolderInfo`'s *inline* `ph_var.phexpr` (the source-of-truth carried in
+/// `PlaceHolderInfo.ph_var`). `change_relids_in_node` only re-points the separate
+/// `ph_var_phexpr` NodeId mirror; the inline `ph_var.phexpr` is what
+/// `rebuild_placeholder_attr_needed` (and other placeholder.c rebuilds) read via
+/// `clone_phinfo_phexpr`, so it must be re-pointed too, or a removed self-join
+/// relid survives there and `add_vars_to_attr_needed` -> `find_base_rel` panics
+/// with `no relation entry`.
+pub(crate) fn change_relids_in_phinfo_inline_phexpr<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    root: &mut PlannerInfo,
+    phid: types_pathnodes::PhInfoId,
+    ctx: ReplaceRelidContext,
+) -> types_error::PgResult<()> {
+    // Take the inline phexpr out (leaving None) — `Expr` deep-clones only via
+    // `clone_in`, so we move the Box to avoid a derived `Expr::clone`.
+    let taken = match root.phinfo_mut(phid).ph_var.phexpr.take() {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+    let mut node = Node::mk_expr(mcx, (*taken).clone_in(mcx)?)?;
+    ChangeVarNodes(&mut node, ctx.rt_index, ctx.new_index, 0, mcx);
+    let walked = node
+        .into_expr()
+        .unwrap_or_else(|| unreachable!("ChangeVarNodes returned a non-Expr for an Expr input"));
+    root.phinfo_mut(phid).ph_var.phexpr =
+        Some(alloc::boxed::Box::new(walked.erase_lifetime()));
+    Ok(())
+}
+
 pub(crate) fn change_relids_in_node<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     root: &mut PlannerInfo,

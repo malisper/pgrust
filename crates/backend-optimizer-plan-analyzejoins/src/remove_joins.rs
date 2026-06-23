@@ -237,6 +237,16 @@ fn remove_rel_from_query<'mcx>(
             phexpr_id,
             ReplaceRelidContext { rt_index: relid, new_index: subst },
         )?;
+        // Also re-point the *inline* `ph_var.phexpr` (the source-of-truth read
+        // by rebuild_placeholder_attr_needed et al.); the NodeId mirror above is
+        // a separate copy. Without this a removed self-join relid survives in the
+        // inline phexpr and `find_base_rel` later panics `no relation entry`.
+        crate::change_relids::change_relids_in_phinfo_inline_phexpr(
+            mcx,
+            root,
+            ph_id,
+            ReplaceRelidContext { rt_index: relid, new_index: subst },
+        )?;
         kept.push(ph_id);
     }
     root.placeholder_list = kept;
