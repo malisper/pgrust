@@ -100,11 +100,30 @@ fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
         .expect("regress fn: by-ref arg missing from by-ref lane")
 }
 
-/// `text_to_cstring(PG_GETARG_TEXT_PP(i))` — a `text` arg's `VARDATA_ANY`
-/// payload bytes (the header-ful image with its 4-byte length word skipped).
+/// `PG_GETARG_TEXT_PP(i)` / `PG_GETARG_BYTEA_PP(i)` — a `text`/`bytea` arg's
+/// `VARDATA_ANY` payload bytes. Header-form-agnostic: a small stored value
+/// arrives with a 1-byte ("short") header under `SHORT_VARLENA_PACKING`, and a
+/// fixed `VARHDRSZ` strip would drop three payload bytes from the front. Mirrors
+/// C `VARDATA_ANY`: skip ONE byte for a short (low-bit-set, non-external)
+/// header, else the 4-byte header. No-op while packing is off (every stored
+/// value is 4-byte) and correct once it is on.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    &arg_bytes(fcinfo, i)[types_datum::varlena::VARHDRSZ..]
+    varlena_payload(arg_bytes(fcinfo, i))
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image.
+#[inline]
+fn varlena_payload(image: &[u8]) -> &[u8] {
+    match image.first() {
+        // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header (skip 1 byte).
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        // 4-byte uncompressed header (skip VARHDRSZ).
+        Some(_) if image.len() >= types_datum::varlena::VARHDRSZ => {
+            &image[types_datum::varlena::VARHDRSZ..]
+        }
+        _ => &[],
+    }
 }
 
 /// `PG_RETURN_CSTRING(s)` — write a `cstring` result on the by-ref lane.
