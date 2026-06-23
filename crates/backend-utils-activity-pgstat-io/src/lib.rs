@@ -207,6 +207,21 @@ fn pgstat_count_io_op_time_wal_write_seam(start: instr_time, bytes_written: u32)
     );
 }
 
+/// The `pgstat_count_io_op_time` seam shape used by the workspace's WAL-read
+/// call site (recovery `XLogPageRead` -> `WALRead`):
+/// `pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ, start, 1,
+/// readbytes)` (xlogreader.c:1582).
+fn pgstat_count_io_op_time_wal_read_seam(start: instr_time, readbytes: u32) {
+    pgstat_count_io_op_time(
+        IOObject::IOOBJECT_WAL,
+        IOContext::IOCONTEXT_NORMAL,
+        IOOp::IOOP_READ,
+        start,
+        1,
+        readbytes as u64,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Flush (pgstat_io_flush_cb / pgstat_flush_io).
 // ---------------------------------------------------------------------------
@@ -670,6 +685,9 @@ pub fn init_seams() {
     backend_utils_activity_pgstat_io_seams::pgstat_prepare_io_time::set(pgstat_prepare_io_time_seam);
     backend_utils_activity_pgstat_io_seams::pgstat_count_io_op_time::set(
         pgstat_count_io_op_time_wal_write_seam,
+    );
+    backend_utils_activity_pgstat_io_seams::pgstat_count_io_op_time_wal_read::set(
+        pgstat_count_io_op_time_wal_read_seam,
     );
 
     // pgstat_flush_io: both the IO-seams (-> bool, walsender) and the stat-seams

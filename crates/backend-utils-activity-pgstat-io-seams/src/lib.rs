@@ -20,6 +20,15 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
+    /// start, 1, readbytes)` (xlogreader.c `WALRead`) — accumulate one WAL read
+    /// into pg_stat_io. Distinct from the WAL-write seam above: the recovery
+    /// `XLogPageRead` reads WAL pages and must record them as IOOP_READ (the
+    /// startup process's pg_stat_io `reads`), not IOOP_WRITE.
+    pub fn pgstat_count_io_op_time_wal_read(start: instr_time, readbytes: u32)
+);
+
+seam_core::seam!(
     /// `pgstat_flush_io(nowait)` (pgstat_io.c) — flush pending pg_stat_io
     /// counts to shared memory. Returns whether some stats were left unflushed
     /// (the walsender caller discards it).

@@ -2949,6 +2949,21 @@ fn fmgr_call_seam<'mcx>(
 
     // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658).
     let fn_expr = resolved.finfo.fn_expr.clone();
+    // C's `evaluate_expr` runs this call through the executor expression
+    // machinery (ExecInitExpr/ExecEvalExpr), and `ExecInitFunc` selects the
+    // EEOP_FUNCEXPR(_STRICT)_FUSAGE opcode whenever `pgstat_track_functions >
+    // flinfo->fn_stats`, so a function (or operator) const-folded at plan time
+    // records per-function execution stats exactly as it would at run time.
+    // This in-crate fast path bypasses the executor, so replicate the FUSAGE
+    // wrap here: `pgstat_init_function_usage` itself applies the
+    // track-functions gate (it sets `tracking=false` and becomes a no-op when
+    // stats are not wanted), matching `ExecEvalFuncExprFusage`'s init/call/end.
+    let fn_stats = resolved.finfo.fn_stats;
+    let fn_oid = resolved.finfo.fn_oid;
+    let mut fcusage =
+        backend_utils_activity_pgstat_function_seams::pgstat_init_function_usage::call(
+            fn_stats, fn_oid,
+        )?;
     let mut fcinfo = init_fcinfo(Some(resolved.finfo), inputcollid, nargs);
     fcinfo.ref_args = ref_args;
     fcinfo.debug_assert_ref_null_consistency();
@@ -2959,7 +2974,13 @@ fn fmgr_call_seam<'mcx>(
     // `evaluate_expr` folds into a NULL `Const` — the `function returned NULL`
     // self-test does NOT apply on this path.
     fcinfo.isnull = false;
+    // C's inline FUSAGE body has no PG_TRY: a propagating ERROR skips
+    // pgstat_end_function_usage, so propagate the call error first (the `?`).
     let word = function_call_invoke_with_expr(mcx, &resolved.resolution, &mut fcinfo, fn_expr)?;
+    backend_utils_activity_pgstat_function_seams::pgstat_end_function_usage::call(
+        &mut fcusage,
+        true,
+    )?;
     let const_is_null = fcinfo.isnull;
     let ref_result = fcinfo.take_ref_result();
     if const_is_null {

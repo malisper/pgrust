@@ -350,7 +350,7 @@ pub(crate) fn x_log_page_read(
         if r != XLOG_BLCKSZ as isize {
             let save_errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
 
-            pgstat_io_seam::pgstat_count_io_op_time::call(io_start, if r > 0 { r as u32 } else { 0 });
+            pgstat_io_seam::pgstat_count_io_op_time_wal_read::call(io_start, if r > 0 { r as u32 } else { 0 });
 
             let cur_file_tli = CUR_FILE_TLI.with(Cell::get);
             let read_seg_no = READ_SEG_NO.with(Cell::get);
@@ -389,7 +389,7 @@ pub(crate) fn x_log_page_read(
             }
         }
 
-        pgstat_io_seam::pgstat_count_io_op_time::call(io_start, r as u32);
+        pgstat_io_seam::pgstat_count_io_op_time_wal_read::call(io_start, r as u32);
 
         reader.seg.ws_tli = CUR_FILE_TLI.with(Cell::get);
 

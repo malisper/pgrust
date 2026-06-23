@@ -23069,6 +23069,7 @@ dependencies = [
  "backend-executor-functions-seams",
  "backend-nodes-nodeFuncs-seams",
  "backend-optimizer-util-clauses-seams",
+ "backend-utils-activity-pgstat-function-seams",
  "backend-utils-adt-arrayfuncs-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-syscache-seams",
