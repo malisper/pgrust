@@ -636,7 +636,7 @@ pub fn AlterSystemSetConfigFile(stmt: &VariableSetStmt) -> PgResult<()> {
 pub fn GetPGVariable<'mcx>(
     mcx: Mcx<'mcx>,
     name: &str,
-    dest: nodes::parsestmt::DestReceiverHandle,
+    dest: ::nodes::parsestmt::DestReceiverHandle,
 ) -> PgResult<()> {
     if guc_name_compare(name, "all") == Ordering::Equal {
         ShowAllGUCConfig(mcx, dest)
@@ -679,7 +679,7 @@ pub fn GetPGVariableResultDesc<'mcx>(mcx: Mcx<'mcx>, name: &str) -> PgResult<Tup
 fn ShowGUCConfigOption<'mcx>(
     mcx: Mcx<'mcx>,
     name: &str,
-    dest: nodes::parsestmt::DestReceiverHandle,
+    dest: ::nodes::parsestmt::DestReceiverHandle,
 ) -> PgResult<()> {
     // Get the value and canonical spelling of name
     // value = GetConfigOptionByName(name, &varname, false);
@@ -721,7 +721,7 @@ fn ShowGUCConfigOption<'mcx>(
 /// `ShowAllGUCConfig(dest)` (guc_funcs.c:455): the `SHOW ALL` command.
 fn ShowAllGUCConfig<'mcx>(
     mcx: Mcx<'mcx>,
-    dest: nodes::parsestmt::DestReceiverHandle,
+    dest: ::nodes::parsestmt::DestReceiverHandle,
 ) -> PgResult<()> {
     // need a tuple descriptor representing three TEXT columns
     // tupdesc = CreateTemplateTupleDesc(3);
@@ -1266,7 +1266,7 @@ pub fn InitializeShmemGUCs() -> PgResult<()> {
 /// guc_funcs.c's own function; its seam decl now lives on this crate's own
 /// `-seams` crate (`backend-utils-misc-guc-funcs-seams`), so the install is
 /// dir-owner-attributable and the guard re-asserts the contract. The
-/// Project a post-analyze `nodes::ddlnodes::VariableSetStmt` into the
+/// Project a post-analyze `::nodes::ddlnodes::VariableSetStmt` into the
 /// trimmed `parsenodes::VariableSetStmt` that `ExecSetVariableStmt` /
 /// `flatten_set_variable_args` consume. `kind` maps 1:1 across the two enums;
 /// `name` is copied; each `args` member is an `A_Const` literal whose inner
@@ -1278,8 +1278,8 @@ pub fn InitializeShmemGUCs() -> PgResult<()> {
 /// `nodes` universe into the `parsenodes` node that `SetPGVariable`
 /// / `flatten_set_variable_args` consume. Mirrors the per-arg arm of
 /// `variable_set_stmt_from_nodes`.
-fn set_arg_from_nodes(arg: &nodes::nodes::Node<'_>) -> PgResult<Node> {
-    use nodes::nodes::{ntag, Node as TnNode};
+fn set_arg_from_nodes(arg: &::nodes::nodes::Node<'_>) -> PgResult<Node> {
+    use ::nodes::nodes::{ntag, Node as TnNode};
 
     // The DefElem arg is an `A_Const` (a SET literal); read its inner value.
     let val_node: &TnNode = match arg.node_tag() {
@@ -1330,10 +1330,10 @@ fn set_arg_from_nodes(arg: &nodes::nodes::Node<'_>) -> PgResult<Node> {
 }
 
 fn variable_set_stmt_from_nodes(
-    s: &nodes::ddlnodes::VariableSetStmt<'_>,
+    s: &::nodes::ddlnodes::VariableSetStmt<'_>,
 ) -> PgResult<VariableSetStmt> {
-    use nodes::ddlnodes::VariableSetKind as TnKind;
-    use nodes::nodes::{ntag, Node as TnNode};
+    use ::nodes::ddlnodes::VariableSetKind as TnKind;
+    use ::nodes::nodes::{ntag, Node as TnNode};
 
     let kind = match s.kind {
         TnKind::VAR_SET_VALUE => VariableSetKind::SetValue,
@@ -1434,13 +1434,13 @@ fn variable_set_stmt_from_nodes(
 pub fn init_seams() {
     // `case T_VariableSetStmt: ExecSetVariableStmt(castNode(VariableSetStmt,
     // parsetree), isTopLevel)` (utility.c standard-processing arm). The
-    // dispatcher crosses the post-analyze `nodes::Node`; this body is the
+    // dispatcher crosses the post-analyze `::nodes::Node`; this body is the
     // castNode-equivalent (`Node::VariableSetStmt(s)`) plus a projection from
     // the `nodes` parse-tree node universe into the trimmed
     // `parsenodes::VariableSetStmt` that `ExecSetVariableStmt` consumes.
     utility_out_seams::exec_set_variable_stmt::set(|stmt, is_top_level| {
         match stmt.node_tag() {
-            nodes::nodes::ntag::T_VariableSetStmt => {
+            ::nodes::nodes::ntag::T_VariableSetStmt => {
                 let s = stmt.expect_variablesetstmt();
                 let projected = variable_set_stmt_from_nodes(s)?;
                 ExecSetVariableStmt(&projected, is_top_level)
@@ -1459,20 +1459,20 @@ pub fn init_seams() {
     });
     // `case T_AlterSystemStmt: AlterSystemSetConfigFile(castNode(AlterSystemStmt,
     // parsetree))` (utility.c). The dispatcher crosses the post-analyze
-    // `nodes::Node`; this body is the castNode-equivalent
+    // `::nodes::Node`; this body is the castNode-equivalent
     // (`Node::AlterSystemStmt(s)` → its embedded `VariableSetStmt`) plus the
     // projection into the trimmed `parsenodes::VariableSetStmt`
     // `AlterSystemSetConfigFile` consumes.
     utility_out_seams::alter_system_set_config_file::set(|stmt| {
         match stmt.node_tag() {
-            nodes::nodes::ntag::T_AlterSystemStmt => {
+            ::nodes::nodes::ntag::T_AlterSystemStmt => {
                 let s = stmt.expect_altersystemstmt();
                 let setstmt = s.setstmt.as_ref().ok_or_else(|| {
                     types_error::PgError::error(
                         "AlterSystemSetConfigFile: missing setstmt".to_string(),
                     )
                 })?;
-                if setstmt.node_tag() != nodes::nodes::ntag::T_VariableSetStmt {
+                if setstmt.node_tag() != ::nodes::nodes::ntag::T_VariableSetStmt {
                     return Err(types_error::PgError::error(format!(
                         "AlterSystemSetConfigFile: expected VariableSetStmt, got {:?}",
                         setstmt.node_tag()

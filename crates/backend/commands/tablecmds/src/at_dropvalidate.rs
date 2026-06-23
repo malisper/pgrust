@@ -34,7 +34,7 @@ use types_error::{
     PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
-use nodes::parsenodes::DropBehavior;
+use ::nodes::parsenodes::DropBehavior;
 use rel::Relation;
 use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, LOCKMODE, NoLock, RowExclusiveLock,
@@ -73,11 +73,11 @@ const RELKIND_PARTITIONED_TABLE: u8 = b'p';
 
 /// `NewConstraint.contype` is the `ConstrType` enum-as-i32; the FK value the
 /// validate-queue uses.
-const CONSTR_FOREIGN_I32: i32 = nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32;
+const CONSTR_FOREIGN_I32: i32 = ::nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32;
 
 /// `NewConstraint.contype` for a CHECK validation entry (the value
 /// `run_at_rewrite_table_scan` filters on to evaluate the qual per row).
-const CONSTR_CHECK_I32: i32 = nodes::ddlnodes::ConstrType::CONSTR_CHECK as i32;
+const CONSTR_CHECK_I32: i32 = ::nodes::ddlnodes::ConstrType::CONSTR_CHECK as i32;
 
 fn unported(what: &str) -> ! {
     panic!(
@@ -159,7 +159,7 @@ pub fn dropconstraint_internal<'mcx>(
     // At top level, permission check was done in ATPrepCmd, else do it.
     if recursing {
         ATSimplePermissions(
-            nodes::ddlnodes::AlterTableType::AT_DropConstraint,
+            ::nodes::ddlnodes::AlterTableType::AT_DropConstraint,
             rel,
             ATT_TABLE | ATT_PARTITIONED_TABLE | ATT_FOREIGN_TABLE,
         )?;
@@ -984,7 +984,7 @@ fn QueueCheckConstraintValidation<'mcx>(
             .errmsg_internal("expand_generated_columns_in_expr returned None".to_string())
             .into_error()
     })?;
-    let qual_node = mcx::alloc_in(mcx, nodes::nodes::Node::mk_expr(mcx, expanded.clone_in(mcx)?)?)?;
+    let qual_node = mcx::alloc_in(mcx, ::nodes::nodes::Node::mk_expr(mcx, expanded.clone_in(mcx)?)?)?;
 
     let newcon = NewConstraint {
         name: Some(mcx::PgString::from_str_in(constr_name, mcx)?),

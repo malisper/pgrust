@@ -24,7 +24,7 @@ extern crate alloc;
 use mcx::{Mcx, PgBox};
 use types_core::primitive::InvalidOid;
 use types_error::PgResult;
-use nodes::queryenvironment::{
+use ::nodes::queryenvironment::{
     EphemeralNamedRelationData, EphemeralNamedRelationMetadataData, QueryEnvironment,
 };
 use types_storage::lock::NoLock;

@@ -70,12 +70,12 @@ use datum::Datum as Word;
 // migrated seam returns all carry.
 use types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_INTERNAL_ERROR};
-use nodes::execexpr::SubPlanState;
-use nodes::primnodes::SubLinkType;
+use ::nodes::execexpr::SubPlanState;
+use ::nodes::primnodes::SubLinkType;
 use nodes::{Bitmapset, EStateData, EcxtId};
 
 type Astate<'mcx> = arrayfuncs::ArrayBuildStateAnyHandle<'mcx>;
-type HashTable<'mcx> = nodes::nodeagg::TupleHashTable<'mcx>;
+type HashTable<'mcx> = ::nodes::nodeagg::TupleHashTable<'mcx>;
 
 // ===========================================================================
 // postgres.h inline helpers (pure node-layer).
@@ -147,7 +147,7 @@ pub fn ExecSubPlan<'mcx>(
     }
 
     // Force forward-scan mode for evaluation
-    estate.es_direction = nodes::ScanDirection::ForwardScanDirection;
+    estate.es_direction = ::nodes::ScanDirection::ForwardScanDirection;
 
     // Select appropriate evaluation strategy
     let retval = if useHashTable {
@@ -649,7 +649,7 @@ fn build_subplan_hash_table<'mcx>(
         mcx,
         None, // C node->parent (PlanState) is not carried in the owned model.
         input_desc,
-        nodes::TupleSlotKind::Virtual,
+        ::nodes::TupleSlotKind::Virtual,
         ncols,
         key_col_idx,
         tab_eq_funcoids,
@@ -875,7 +875,7 @@ fn slotNoNulls<'mcx>(
 /// back-reference are resolved through seams (the owned model threads the parent
 /// state and estate explicitly).
 pub fn ExecInitSubPlan<'mcx>(
-    subplan: PgBox<'mcx, nodes::primnodes::SubPlan<'mcx>>,
+    subplan: PgBox<'mcx, ::nodes::primnodes::SubPlan<'mcx>>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<SubPlanState<'mcx>> {
     // sstate = makeNode(SubPlanState); sstate->subplan = subplan;
@@ -1068,7 +1068,7 @@ pub fn ExecSetParamPlan<'mcx>(
     }
 
     // Enforce forward scan direction regardless of caller.
-    estate.es_direction = nodes::ScanDirection::ForwardScanDirection;
+    estate.es_direction = ::nodes::ScanDirection::ForwardScanDirection;
 
     // Initialize ArrayBuildStateAny in caller's context, if needed.
     //   astate = initArrayResultAny(subplan->firstColType,
@@ -1284,7 +1284,7 @@ fn clone_int_list<'mcx>(
 #[inline]
 fn subplan_ref<'a, 'mcx>(
     node: &'a SubPlanState<'mcx>,
-) -> PgResult<&'a nodes::primnodes::SubPlan<'mcx>> {
+) -> PgResult<&'a ::nodes::primnodes::SubPlan<'mcx>> {
     node.subplan
         .as_deref()
         .ok_or_else(|| elog_internal("SubPlanState has no subplan"))
@@ -1316,7 +1316,7 @@ fn child_planstate_idx(node: &SubPlanState<'_>) -> PgResult<usize> {
 fn child_planstate<'a, 'mcx>(
     node: &SubPlanState<'mcx>,
     estate: &'a EStateData<'mcx>,
-) -> PgResult<&'a nodes::planstate::PlanStateNode<'mcx>> {
+) -> PgResult<&'a ::nodes::planstate::PlanStateNode<'mcx>> {
     let idx = child_planstate_idx(node)?;
     estate
         .es_subplanstates
@@ -1329,7 +1329,7 @@ fn child_planstate<'a, 'mcx>(
 fn child_planstate_mut<'a, 'mcx>(
     node: &SubPlanState<'mcx>,
     estate: &'a mut EStateData<'mcx>,
-) -> PgResult<&'a mut nodes::planstate::PlanStateNode<'mcx>> {
+) -> PgResult<&'a mut ::nodes::planstate::PlanStateNode<'mcx>> {
     let idx = child_planstate_idx(node)?;
     estate
         .es_subplanstates
@@ -1341,7 +1341,7 @@ fn child_planstate_mut<'a, 'mcx>(
 fn planstate_head_mut<'a, 'mcx>(
     node: &SubPlanState<'mcx>,
     estate: &'a mut EStateData<'mcx>,
-) -> PgResult<&'a mut nodes::execnodes::PlanStateData<'mcx>> {
+) -> PgResult<&'a mut ::nodes::execnodes::PlanStateData<'mcx>> {
     Ok(child_planstate_mut(node, estate)?.ps_head_mut())
 }
 
@@ -1384,7 +1384,7 @@ fn planstate_extparam_is_empty<'mcx>(node: &SubPlanState<'mcx>, estate: &EStateD
 fn take_subplanstate<'mcx>(
     estate: &mut EStateData<'mcx>,
     idx: usize,
-) -> PgResult<mcx::PgBox<'mcx, nodes::planstate::PlanStateNode<'mcx>>> {
+) -> PgResult<mcx::PgBox<'mcx, ::nodes::planstate::PlanStateNode<'mcx>>> {
     estate
         .es_subplanstates
         .get_mut(idx)
@@ -1396,7 +1396,7 @@ fn take_subplanstate<'mcx>(
 fn put_subplanstate<'mcx>(
     estate: &mut EStateData<'mcx>,
     idx: usize,
-    ps: mcx::PgBox<'mcx, nodes::planstate::PlanStateNode<'mcx>>,
+    ps: mcx::PgBox<'mcx, ::nodes::planstate::PlanStateNode<'mcx>>,
 ) {
     estate.es_subplanstates[idx] = Some(ps);
 }
@@ -1420,7 +1420,7 @@ fn exec_re_scan_child<'mcx>(
 fn exec_proc_node_child<'mcx>(
     node: &mut SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<nodes::SlotId>> {
+) -> PgResult<Option<::nodes::SlotId>> {
     let idx = child_planstate_idx(node)?;
     let mut ps = take_subplanstate(estate, idx)?;
     let r = exec_procnode::exec_proc_node::call(&mut ps, estate);
@@ -1528,7 +1528,7 @@ fn exec_param_execplan_pending(estate: &EStateData<'_>, paramid: i32) -> bool {
 fn exec_param_mut<'a, 'mcx>(
     estate: &'a mut EStateData<'mcx>,
     paramid: i32,
-) -> PgResult<&'a mut nodes::execnodes::ParamExecData<'mcx>> {
+) -> PgResult<&'a mut ::nodes::execnodes::ParamExecData<'mcx>> {
     estate
         .es_param_exec_vals
         .get_mut(paramid as usize)

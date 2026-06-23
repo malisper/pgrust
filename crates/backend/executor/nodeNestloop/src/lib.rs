@@ -40,9 +40,9 @@ use postgres_seams as tcop_postgres;
 
 use mcx::{alloc_in, PgBox};
 use types_error::{PgError, PgResult};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
-use nodes::jointype::{JOIN_ANTI, JOIN_INNER, JOIN_LEFT, JOIN_SEMI};
-use nodes::nodenestloop::{NestLoop, NestLoopStateData};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+use ::nodes::jointype::{JOIN_ANTI, JOIN_INNER, JOIN_LEFT, JOIN_SEMI};
+use ::nodes::nodenestloop::{NestLoop, NestLoopStateData};
 use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 
 /// Plain `elog(ERROR, ...)` for the "should not happen" internal diagnostics.
@@ -160,7 +160,7 @@ pub fn ExecNestLoop<'mcx>(
                         // By execution time set_join_references has reduced
                         // paramval to a simple OUTER_VAR Var.
                         let var = match &nlp.paramval {
-                            nodes::primnodes::Expr::Var(v) => v,
+                            ::nodes::primnodes::Expr::Var(v) => v,
                             _ => panic!("NestLoopParam paramval is not a Var at execution"),
                         };
                         debug_assert!(var.varattno > 0, "nlp->paramval->varattno > 0");
@@ -393,7 +393,7 @@ fn exec_nestloop_node<'mcx>(
 /// `ExecInitNestLoop(node, estate, eflags)` — create and initialize the
 /// nest-loop run-time state.
 pub fn ExecInitNestLoop<'mcx>(
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     mut eflags: i32,
 ) -> PgResult<PgBox<'mcx, NestLoopStateData<'mcx>>> {

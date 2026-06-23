@@ -1,7 +1,7 @@
 //! Tests for nodeSetOp pure (non-seam) logic: the per-group additional-space
 //! codec and the `ApplySortComparator` null arithmetic.
 
-use nodes::nodesetop::SetOpStatePerGroupData;
+use ::nodes::nodesetop::SetOpStatePerGroupData;
 
 use super::{read_pergroup, write_pergroup};
 

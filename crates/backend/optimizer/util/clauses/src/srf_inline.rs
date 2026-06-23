@@ -24,8 +24,8 @@ use types_catalog::pg_proc::PROKIND_FUNCTION;
 use types_core::catalog::{PROCEDURE_RELATION_ID, VOIDOID};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::parsenodes::{RangeTblEntry, RTEKind};
-use nodes::primnodes::Expr;
+use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
+use ::nodes::primnodes::Expr;
 use pathnodes::PlannerInfo;
 
 use clauses_seams as clauses_seam;
@@ -41,7 +41,7 @@ pub fn inline_set_returning_function<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     rte: &RangeTblEntry<'mcx>,
-) -> PgResult<Option<nodes::copy_query::Query<'mcx>>> {
+) -> PgResult<Option<::nodes::copy_query::Query<'mcx>>> {
     debug_assert_eq!(rte.rtekind, RTEKind::RTE_FUNCTION);
 
     // check_stack_depth();  -- a SQL SRF referring to itself would recurse; the
@@ -154,8 +154,8 @@ pub fn inline_set_returning_function<'mcx>(
 /// C's `IsA(rtfunc->funcexpr, FuncExpr)` gate: `Some(&FuncExpr)` only when the
 /// node is exactly a `Node::Expr(Expr::FuncExpr(..))`.
 fn rtfunc_funcexpr<'a, 'mcx>(
-    node: &'a nodes::nodes::NodePtr<'mcx>,
-) -> Option<&'a nodes::primnodes::FuncExpr<'mcx>> {
+    node: &'a ::nodes::nodes::NodePtr<'mcx>,
+) -> Option<&'a ::nodes::primnodes::FuncExpr<'mcx>> {
     let rtf = node.as_rangetblfunction()?;
     let fe = rtf.funcexpr.as_deref()?;
     fe.as_funcexpr()

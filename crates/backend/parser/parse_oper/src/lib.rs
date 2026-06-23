@@ -3,7 +3,7 @@
 //!
 //! Every public function and static helper of `parse_oper.c` is ported 1:1
 //! against the C source (branch order, error text, SQLSTATE), keyed on the
-//! repo's owned [`nodes::primnodes::Expr`] expression tree:
+//! repo's owned [`::nodes::primnodes::Expr`] expression tree:
 //!
 //!   * [`LookupOperName`], [`LookupOperWithArgs`], [`get_sort_group_operators`];
 //!   * [`oprid`], [`oprfuncid`] (accessors over a resolved operator row);
@@ -55,7 +55,7 @@ use types_error::{
     ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_INTERNAL_ERROR, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use nodes::primnodes::{Expr, OpExpr, ScalarArrayOpExpr};
+use ::nodes::primnodes::{Expr, OpExpr, ScalarArrayOpExpr};
 use parsenodes::ParseState;
 use types_tuple::heaptuple::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,

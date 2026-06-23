@@ -35,9 +35,9 @@ use nodes_core::nodefuncs;
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
-use nodes::nodes::CmdType;
-use nodes::primnodes::etag;
-use nodes::primnodes::{
+use ::nodes::nodes::CmdType;
+use ::nodes::primnodes::etag;
+use ::nodes::primnodes::{
     CoercionForm, Const, ConvertRowtypeExpr, Expr, Var, VarReturningType,
 };
 use pathnodes::planner_run::PlannerRun;
@@ -585,7 +585,7 @@ fn adjust_appendrel_attrs_mutator<'mcx>(
                             return Expr::Var(var);
                         }
 
-                        let rowexpr = nodes::primnodes::RowExpr {
+                        let rowexpr = ::nodes::primnodes::RowExpr {
                             args: fields,
                             row_typeid: var.vartype,
                             row_format: CoercionForm::COERCE_IMPLICIT_CAST,
@@ -947,11 +947,11 @@ pub fn adjust_child_relids(relids: &Relids, appinfos: &[AppendRelInfo]) -> Relid
 
 /// `adjust_child_relids` over an [`ExprRelids`] word set (PlaceHolderVar.phrels).
 fn adjust_child_relids_expr(
-    relids: &nodes::primnodes::ExprRelids,
+    relids: &::nodes::primnodes::ExprRelids,
     appinfos: &[AppendRelInfo],
-) -> nodes::primnodes::ExprRelids {
+) -> ::nodes::primnodes::ExprRelids {
     use rewrite_core::relids as er;
-    let mut result: Option<nodes::primnodes::ExprRelids> = None;
+    let mut result: Option<::nodes::primnodes::ExprRelids> = None;
     for appinfo in appinfos {
         if er::is_member(appinfo.parent_relid as i32, relids) {
             if result.is_none() {
@@ -1577,9 +1577,9 @@ fn adjust_targetlist_multilevel(
 /// Merge `b`'s members into `a` (ExprRelids), used to fold a Var's nullingrels
 /// into a translated Var. `Var.varnullingrels` is an [`ExprRelids`].
 fn expr_relids_add_all(
-    a: nodes::primnodes::ExprRelids,
-    b: &nodes::primnodes::ExprRelids,
-) -> nodes::primnodes::ExprRelids {
+    a: ::nodes::primnodes::ExprRelids,
+    b: &::nodes::primnodes::ExprRelids,
+) -> ::nodes::primnodes::ExprRelids {
     rewrite_core::relids::union(&a, b)
 }
 

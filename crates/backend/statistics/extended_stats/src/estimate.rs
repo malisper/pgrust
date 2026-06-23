@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::{PgError, PgResult};
-use nodes::primnodes::{Expr, NOT_EXPR, OR_EXPR};
+use ::nodes::primnodes::{Expr, NOT_EXPR, OR_EXPR};
 use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{
     Bitmapset, JoinType, NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,

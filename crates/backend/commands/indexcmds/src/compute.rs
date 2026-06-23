@@ -18,10 +18,10 @@ use types_amapi::{CompareType, COMPARE_EQ, COMPARE_OVERLAP};
 use types_core::primitive::Oid;
 use types_core::{InvalidOid, OidIsValid};
 use types_error::PgResult;
-use nodes::ddlnodes::IndexElem;
-use nodes::execnodes::IndexInfo;
-use nodes::nodes::{ntag, NodePtr};
-use nodes::primnodes::Expr;
+use ::nodes::ddlnodes::IndexElem;
+use ::nodes::execnodes::IndexInfo;
+use ::nodes::nodes::{ntag, NodePtr};
+use ::nodes::primnodes::Expr;
 use types_scan::scankey::{InvalidStrategy, StrategyNumber};
 
 use utils_error::ereport;
@@ -42,7 +42,7 @@ use lsyscache_seams as lsyscache;
 use syscache_seams as syscache;
 
 use types_catalog::pg_index::{INDOPTION_DESC, INDOPTION_NULLS_FIRST};
-use nodes::rawnodes::{SORTBY_DEFAULT, SORTBY_DESC, SORTBY_NULLS_DEFAULT, SORTBY_NULLS_FIRST};
+use ::nodes::rawnodes::{SORTBY_DEFAULT, SORTBY_DESC, SORTBY_NULLS_DEFAULT, SORTBY_NULLS_FIRST};
 
 use crate::{name_list, name_list_strings, opclass::GetOperatorFromCompareType, opclass::ResolveOpClass};
 

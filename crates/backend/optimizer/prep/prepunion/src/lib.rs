@@ -20,9 +20,9 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::Expr;
-use nodes::rawnodes::{SetOperation, SetOperationStmt, SortGroupClause};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::Expr;
+use ::nodes::rawnodes::{SetOperation, SetOperationStmt, SortGroupClause};
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     NodeId, PathId, PlannerInfo, RelId, Relids, TargetEntryNode, UPPERREL_FINAL, UPPERREL_SETOP,
@@ -42,13 +42,13 @@ use vars::tlist;
 /// Borrow the `Node` behind an `Option<NodePtr>` (`PgBox<Node>` is not a std
 /// `Box`, so `Option::as_deref` does not apply).
 #[inline]
-fn node_ref<'a, 'mcx>(opt: &'a Option<nodes::nodes::NodePtr<'mcx>>) -> Option<&'a Node<'mcx>> {
+fn node_ref<'a, 'mcx>(opt: &'a Option<::nodes::nodes::NodePtr<'mcx>>) -> Option<&'a Node<'mcx>> {
     opt.as_ref().map(|b| &**b)
 }
 
 /// `COERCE_IMPLICIT_CAST` (`primnodes.h`'s `CoercionForm`).
-const COERCE_IMPLICIT_CAST: nodes::primnodes::CoercionForm =
-    nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST;
+const COERCE_IMPLICIT_CAST: ::nodes::primnodes::CoercionForm =
+    ::nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST;
 
 /// `RTE_SUBQUERY` (`parsenodes.h`).
 const RTE_SUBQUERY: u32 = 1;

@@ -7,7 +7,7 @@
 
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 
 seam_core::seam!(
     /// `stringToNode(str)` (`nodes/read.c`): parse a `nodeToString` rendering

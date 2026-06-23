@@ -17,10 +17,10 @@
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::{PgError, PgResult};
-use nodes::nodes::Node;
-use nodes::parsestmt::DestReceiverHandle;
-use nodes::portalcmds::ParamListInfo;
-use nodes::primnodes::{Expr, FuncExpr};
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::DestReceiverHandle;
+use ::nodes::portalcmds::ParamListInfo;
+use ::nodes::primnodes::{Expr, FuncExpr};
 use types_tuple::heaptuple::TupleDesc;
 use types_tuple::Datum;
 
@@ -228,7 +228,7 @@ pub fn ExecuteCallStmt<'mcx>(
             mcx,
             dest,
             retdesc_opt,
-            nodes::TupleSlotKind::Virtual,
+            ::nodes::TupleSlotKind::Virtual,
         )?;
         execTuples_seams::do_tup_output::call(mcx, &mut tstate, &values, &nulls)?;
         execTuples_seams::end_tup_output::call(mcx, tstate)?;

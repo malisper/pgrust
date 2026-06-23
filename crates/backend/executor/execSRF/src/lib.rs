@@ -3,7 +3,7 @@
 //! This unit serves `nodeFunctionscan.c` and `nodeProjectSet.c`, providing the
 //! common code for calling set-returning functions through the `ReturnSetInfo`
 //! API. It is the #349 K2 keystone: the executor builds its OWN
-//! [`nodes::fmgr::FunctionCallInfoBaseData`] with a LIVE
+//! [`::nodes::fmgr::FunctionCallInfoBaseData`] with a LIVE
 //! `fcinfo.resultinfo = ReturnSetInfo` (+ `fn_extra` / `fn_mcxt` channels) and
 //! dispatches the SRF's `PGFunction` through it, letting the callee read
 //! `econtext`/`expectedDesc` and write `isDone`/`returnMode`/`setResult`/`setDesc`
@@ -21,7 +21,7 @@
 //! `nodes` frame.
 //!
 //! So this unit keeps a small executor-frame SRF table keyed by OID, holding
-//! [`nodes::execexpr::PGFunction`]s (the `for<'mcx> fn(&mut
+//! [`::nodes::execexpr::PGFunction`]s (the `for<'mcx> fn(&mut
 //! FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx>` whose frame DOES carry the
 //! live `ReturnSetInfo`). This is the faithful `FunctionCallInvoke`-with-
 //! `resultinfo` over the executor frame — it mirrors `fmgr_builtins[]` for the
@@ -46,13 +46,13 @@ use types_error::error::{
     ERRCODE_INTERNAL_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
 };
 use types_error::{PgResult, ERROR};
-use nodes::execexpr::{ExprDoneCond, SetExprState};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::{
+use ::nodes::execexpr::{ExprDoneCond, SetExprState};
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::{
     ReturnSetInfo, SetFunctionReturnMode, Tuplestorestate, SFRM_Materialize,
     SFRM_Materialize_Preferred, SFRM_Materialize_Random, SFRM_ValuePerCall,
 };
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use nodes::{EcxtId, EStateData, PlanStateData, SlotId, TupleSlotKind};
 use types_tuple::heaptuple::Datum;
 use types_tuple::heaptuple::TupleDescData;
@@ -553,15 +553,15 @@ fn init_sexpr<'mcx>(
                 .as_deref()
                 .expect("init_sexpr: sexpr->expr set by the caller")
                 .clone_in(per_query)?;
-            mcx::alloc_in(per_query, nodes::nodes::Node::mk_expr(per_query, e)?)?
+            mcx::alloc_in(per_query, ::nodes::nodes::Node::mk_expr(per_query, e)?)?
         };
         let resolved = funcapi::result_type::get_expr_result_type(
             per_query,
             Some(&expr_node),
         )?;
         match resolved.class {
-            Some(nodes::funcapi::TypeFuncClass::Composite)
-            | Some(nodes::funcapi::TypeFuncClass::CompositeDomain) => {
+            Some(::nodes::funcapi::TypeFuncClass::Composite)
+            | Some(::nodes::funcapi::TypeFuncClass::CompositeDomain) => {
                 // Composite data type, e.g. a table's row type.
                 sexpr.funcReturnsTuple = true;
                 let src = resolved
@@ -571,7 +571,7 @@ fn init_sexpr<'mcx>(
                 let copy = tupdesc::CreateTupleDescCopy(per_query, src)?;
                 sexpr.funcResultDesc = Some(mcx::alloc_in(per_query, copy)?);
             }
-            Some(nodes::funcapi::TypeFuncClass::Scalar) => {
+            Some(::nodes::funcapi::TypeFuncClass::Scalar) => {
                 // Base data type, i.e. scalar — build a 1-column descriptor.
                 let funcrettype = resolved.result_type_id.unwrap_or_default();
                 let td = tupdesc::CreateTemplateTupleDesc(per_query, 1)?;
@@ -585,7 +585,7 @@ fn init_sexpr<'mcx>(
                 sexpr.funcReturnsTuple = false;
                 sexpr.funcResultDesc = Some(td);
             }
-            Some(nodes::funcapi::TypeFuncClass::Record) => {
+            Some(::nodes::funcapi::TypeFuncClass::Record) => {
                 // Indeterminate rowtype — this will work if the function doesn't
                 // need an expectedDesc. Leave funcResultDesc = NULL but mark
                 // funcReturnsTuple = true: each produced row is returned whole as
@@ -653,7 +653,7 @@ fn init_expr_list<'mcx>(
     args: &[Expr<'mcx>],
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, nodes::execexpr::ExprState<'mcx>>> {
+) -> PgResult<mcx::PgVec<'mcx, ::nodes::execexpr::ExprState<'mcx>>> {
     let _ = parent;
     let refs: Vec<Option<&Expr<'mcx>>> = args.iter().map(Some).collect();
     let states =
@@ -662,7 +662,7 @@ fn init_expr_list<'mcx>(
     out.try_reserve(states.len()).map_err(|_| {
         estate
             .es_query_cxt
-            .oom(states.len() * core::mem::size_of::<nodes::execexpr::ExprState>())
+            .oom(states.len() * core::mem::size_of::<::nodes::execexpr::ExprState>())
     })?;
     for s in states.into_iter() {
         out.push(s.expect("SRF argument expression compiled to a non-NULL ExprState"));
@@ -1310,7 +1310,7 @@ fn exec_eval_func_args<'mcx>(
         // value. (The old `as_usize()` downgrade panicked on a by-ref arg —
         // the `pg_input_error_info('junk','bool')` wall.)
         use types_tuple::heaptuple::Datum as CanonDatum;
-        use nodes::fmgr::FmgrArgRef;
+        use ::nodes::fmgr::FmgrArgRef;
         match value {
             CanonDatum::ByVal(word) => {
                 fcinfo.args[i].value = datum::Datum::from_usize(word);

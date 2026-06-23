@@ -12,7 +12,7 @@
 //!
 //! `Tuplestorestate` is opaque in C (private to `tuplestore.c`), threaded
 //! everywhere as a `Tuplestorestate *`. The owned model carries it as the
-//! type-erased [`nodes::Tuplestorestate`] carrier; the concrete engine
+//! type-erased [`::nodes::Tuplestorestate`] carrier; the concrete engine
 //! state ([`TuplestorestateState`]) lives inside it, downcast here. The C
 //! `void **memtuples` (array of `palloc`'d `MinimalTuple` pointers) becomes a
 //! `PgVec<Option<PgVec<u8>>>` of flat `MinimalTuple` blobs (the byte-for-byte
@@ -41,7 +41,7 @@
 use utils_error::{elog, ereport};
 use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use types_error::{PgError, PgResult, ERROR};
-use nodes::nodehashjoin::BufFile;
+use ::nodes::nodehashjoin::BufFile;
 use nodes::{EStateData, SlotId};
 use types_tuple::heaptuple::Datum;
 use types_tuple::heaptuple::TupleDescData;
@@ -149,7 +149,7 @@ pub struct TuplestorestateState<'mcx> {
 
 mcx::bind!(pub TuplestorestateBind => TuplestorestateState<'mcx>);
 /// The self-owned engine bundle (context + state); stored type-erased in the
-/// [`nodes::Tuplestorestate`] carrier.
+/// [`::nodes::Tuplestorestate`] carrier.
 pub type OwnedStore = McxOwned<TuplestorestateBind>;
 
 impl<'mcx> TuplestorestateState<'mcx> {
@@ -202,7 +202,7 @@ impl Drop for TuplestorestateState<'_> {
 /// Downcast the carrier's type-erased payload to the engine bundle, running
 /// `f` against its state and owning context.
 fn with_store<R>(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
     f: impl for<'mcx> FnOnce(&mut TuplestorestateState<'mcx>, &MemoryContext) -> R,
 ) -> R {
     let any = carrier
@@ -228,7 +228,7 @@ fn with_store<R>(
 
 /// Immutable [`with_store`] for the read-only seams.
 fn with_store_ref<R>(
-    carrier: &nodes::Tuplestorestate<'_>,
+    carrier: &::nodes::Tuplestorestate<'_>,
     f: impl for<'mcx> FnOnce(&TuplestorestateState<'mcx>) -> R,
 ) -> R {
     let any = carrier
@@ -314,9 +314,9 @@ fn tuplestore_begin_common<'mcx>(
     eflags: i32,
     interXact: bool,
     maxKBytes: i32,
-) -> PgResult<nodes::Tuplestorestate<'mcx>> {
+) -> PgResult<::nodes::Tuplestorestate<'mcx>> {
     let owned = build_owned_store(eflags, interXact, maxKBytes)?;
-    nodes::Tuplestorestate::begin(mcx, owned)
+    ::nodes::Tuplestorestate::begin(mcx, owned)
 }
 
 /// `tuplestore_begin_heap(randomAccess, interXact, maxKBytes)`.
@@ -325,7 +325,7 @@ pub fn tuplestore_begin_heap<'mcx>(
     randomAccess: bool,
     interXact: bool,
     maxKBytes: i32,
-) -> PgResult<PgBox<'mcx, nodes::Tuplestorestate<'mcx>>> {
+) -> PgResult<PgBox<'mcx, ::nodes::Tuplestorestate<'mcx>>> {
     let eflags = if randomAccess {
         EXEC_FLAG_BACKWARD | EXEC_FLAG_REWIND
     } else {
@@ -348,19 +348,19 @@ pub fn tuplestore_begin_heap<'mcx>(
 /// failure, mirroring `palloc`.
 pub fn tuplestore_begin_heap_hold(
     randomAccess: bool,
-) -> PgResult<nodes::Tuplestorestate<'static>> {
+) -> PgResult<::nodes::Tuplestorestate<'static>> {
     let eflags = if randomAccess {
         EXEC_FLAG_BACKWARD | EXEC_FLAG_REWIND
     } else {
         EXEC_FLAG_REWIND
     };
     let owned = build_owned_store(eflags, false, init_small_seams::work_mem::call())?;
-    nodes::Tuplestorestate::begin_static(owned)
+    ::nodes::Tuplestorestate::begin_static(owned)
 }
 
 /// `tuplestore_set_eflags(state, eflags)`.
 pub fn tuplestore_set_eflags(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
     eflags: i32,
 ) -> PgResult<()> {
     with_store(carrier, |state, _ctx| {
@@ -379,7 +379,7 @@ pub fn tuplestore_set_eflags(
 
 /// `tuplestore_alloc_read_pointer(state, eflags)`.
 pub fn tuplestore_alloc_read_pointer(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
     eflags: i32,
 ) -> PgResult<i32> {
     with_store(carrier, |state, _ctx| {
@@ -411,7 +411,7 @@ pub fn tuplestore_alloc_read_pointer(
 }
 
 /// `tuplestore_clear(state)`.
-pub fn tuplestore_clear(carrier: &mut nodes::Tuplestorestate<'_>) {
+pub fn tuplestore_clear(carrier: &mut ::nodes::Tuplestorestate<'_>) {
     let r: PgResult<()> = with_store(carrier, |state, ctx| {
         tuplestore_updatemax(state, ctx)?;
         if let Some(file) = state.myfile.take() {
@@ -435,7 +435,7 @@ pub fn tuplestore_clear(carrier: &mut nodes::Tuplestorestate<'_>) {
 }
 
 /// `tuplestore_end(state)`: release resources. Consumes the carrier.
-pub fn tuplestore_end(mut carrier: PgBox<'_, nodes::Tuplestorestate<'_>>) {
+pub fn tuplestore_end(mut carrier: PgBox<'_, ::nodes::Tuplestorestate<'_>>) {
     let r: PgResult<()> = with_store(&mut carrier, |state, _ctx| {
         if let Some(file) = state.myfile.take() {
             buffile::buf_file_close::call(file)?;
@@ -450,7 +450,7 @@ pub fn tuplestore_end(mut carrier: PgBox<'_, nodes::Tuplestorestate<'_>>) {
 
 /// `tuplestore_select_read_pointer(state, ptr)`.
 pub fn tuplestore_select_read_pointer(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
     ptr: i32,
 ) -> PgResult<()> {
     with_store(carrier, |state, _ctx| select_read_pointer(state, ptr))
@@ -490,12 +490,12 @@ fn select_read_pointer(state: &mut TuplestorestateState<'_>, ptr: i32) -> PgResu
 }
 
 /// `tuplestore_tuple_count(state)`.
-pub fn tuplestore_tuple_count(carrier: &mut nodes::Tuplestorestate<'_>) -> i64 {
+pub fn tuplestore_tuple_count(carrier: &mut ::nodes::Tuplestorestate<'_>) -> i64 {
     with_store(carrier, |state, _ctx| state.tuples)
 }
 
 /// `tuplestore_ateof(state)`.
-pub fn tuplestore_ateof(carrier: &nodes::Tuplestorestate<'_>) -> bool {
+pub fn tuplestore_ateof(carrier: &::nodes::Tuplestorestate<'_>) -> bool {
     with_store_ref(carrier, |state| {
         state.readptr_ref(state.activeptr).eof_reached
     })
@@ -509,7 +509,7 @@ pub fn tuplestore_ateof(carrier: &nodes::Tuplestorestate<'_>) -> bool {
 /// MinimalTuple is formed from the live slot in `mcx` (the caller's
 /// `es_query_cxt`) via the execTuples seam, then copied into the store.
 pub fn tuplestore_puttupleslot<'mcx>(
-    carrier: &mut nodes::Tuplestorestate<'mcx>,
+    carrier: &mut ::nodes::Tuplestorestate<'mcx>,
     slot: SlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -522,7 +522,7 @@ pub fn tuplestore_puttupleslot<'mcx>(
 /// `tuplestore_putvalues(state, tdesc, values, isnull)`: form a MinimalTuple
 /// from the value/null arrays and append it.
 pub fn tuplestore_putvalues(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
     tdesc: &TupleDescData<'_>,
     values: &[Datum<'_>],
     isnull: &[bool],
@@ -539,7 +539,7 @@ pub fn tuplestore_putvalues(
 /// `tuplestore_puttuple_common(state, tuple)` over a flat blob already formed
 /// in the caller's context. Copies the blob into the store's context.
 fn tuplestore_puttuple_common(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
     tuple: &[u8],
 ) -> PgResult<()> {
     with_store(carrier, |state, ctx| puttuple_common_inner(state, ctx, tuple))
@@ -759,7 +759,7 @@ fn inmem_blob<'mcx>(
 /// `tuplestore_gettupleslot(state, forward, copy, slot)`: fetch a MinimalTuple
 /// into the pool slot resolved against `estate`.
 pub fn tuplestore_gettupleslot<'mcx>(
-    carrier: &mut nodes::Tuplestorestate<'mcx>,
+    carrier: &mut ::nodes::Tuplestorestate<'mcx>,
     forward: bool,
     copy: bool,
     slot: SlotId,
@@ -790,10 +790,10 @@ pub fn tuplestore_gettupleslot<'mcx>(
 /// in (the caller's hold context).
 pub fn tuplestore_gettupleslot_standalone<'s, 'm>(
     mcx: Mcx<'m>,
-    carrier: &mut nodes::Tuplestorestate<'s>,
+    carrier: &mut ::nodes::Tuplestorestate<'s>,
     forward: bool,
     copy: bool,
-    slot: &mut nodes::tuptable::SlotData<'m>,
+    slot: &mut ::nodes::tuptable::SlotData<'m>,
 ) -> PgResult<bool> {
     let got = with_store(carrier, |state, _ctx| tuplestore_gettuple(mcx, state, forward))?;
     match got {
@@ -813,7 +813,7 @@ pub fn tuplestore_gettupleslot_standalone<'s, 'm>(
 
 /// `tuplestore_advance(state, forward)`.
 pub fn tuplestore_advance(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
     forward: bool,
 ) -> PgResult<bool> {
     with_store(carrier, |state, _ctx| {
@@ -827,7 +827,7 @@ pub fn tuplestore_advance(
 
 /// `tuplestore_skiptuples(state, ntuples, forward)`.
 pub fn tuplestore_skiptuples(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
     ntuples: i64,
     forward: bool,
 ) -> PgResult<bool> {
@@ -918,7 +918,7 @@ fn dumptuples(state: &mut TuplestorestateState<'_>) -> PgResult<()> {
 }
 
 /// `tuplestore_rescan(state)`.
-pub fn tuplestore_rescan(carrier: &mut nodes::Tuplestorestate<'_>) -> PgResult<()> {
+pub fn tuplestore_rescan(carrier: &mut ::nodes::Tuplestorestate<'_>) -> PgResult<()> {
     with_store(carrier, |state, _ctx| {
         let activeptr = state.activeptr;
         debug_assert!(state.readptr(activeptr).eflags & EXEC_FLAG_REWIND != 0);
@@ -947,7 +947,7 @@ pub fn tuplestore_rescan(carrier: &mut nodes::Tuplestorestate<'_>) -> PgResult<(
 
 /// `tuplestore_copy_read_pointer(state, srcptr, destptr)`.
 pub fn tuplestore_copy_read_pointer(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
     srcptr: i32,
     destptr: i32,
 ) -> PgResult<()> {
@@ -998,7 +998,7 @@ pub fn tuplestore_copy_read_pointer(
 }
 
 /// `tuplestore_trim(state)`: remove no-longer-needed tuples.
-pub fn tuplestore_trim(carrier: &mut nodes::Tuplestorestate<'_>) -> PgResult<()> {
+pub fn tuplestore_trim(carrier: &mut ::nodes::Tuplestorestate<'_>) -> PgResult<()> {
     with_store(carrier, |state, ctx| {
         if state.eflags & EXEC_FLAG_REWIND != 0 {
             return Ok(());
@@ -1066,7 +1066,7 @@ fn tuplestore_updatemax(state: &mut TuplestorestateState<'_>, ctx: &MemoryContex
 /// statistics are the maximums and are not reset by calls to `tuplestore_trim()`
 /// or `tuplestore_clear()`. Returns `(max_storage_type, max_space)`.
 pub fn tuplestore_get_stats(
-    carrier: &mut nodes::Tuplestorestate<'_>,
+    carrier: &mut ::nodes::Tuplestorestate<'_>,
 ) -> PgResult<(&'static str, i64)> {
     with_store(carrier, |state, ctx| {
         tuplestore_updatemax(state, ctx)?;
@@ -1077,7 +1077,7 @@ pub fn tuplestore_get_stats(
 }
 
 /// `tuplestore_in_memory(state)`.
-pub fn tuplestore_in_memory(carrier: &nodes::Tuplestorestate<'_>) -> bool {
+pub fn tuplestore_in_memory(carrier: &::nodes::Tuplestorestate<'_>) -> bool {
     with_store_ref(carrier, |state| state.status == TSS_INMEM)
 }
 
@@ -1089,7 +1089,7 @@ pub fn tuplestore_in_memory(carrier: &nodes::Tuplestorestate<'_>) -> bool {
 /// tuplestore the `usedDisk`/`maxSpace` fields are current and a pure field read
 /// reports the same `(maxStorageType, maxSpaceUsed)` the `&mut` path would.
 pub fn tuplestore_get_stats_ref(
-    carrier: &nodes::Tuplestorestate<'_>,
+    carrier: &::nodes::Tuplestorestate<'_>,
 ) -> (&'static str, i64) {
     with_store_ref(carrier, |state| {
         let max_storage_type = if state.usedDisk { "Disk" } else { "Memory" };

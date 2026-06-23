@@ -42,12 +42,12 @@ use nodes_core::node_walker::{
 };
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
-use nodes::bitmapset::Bitmapset;
-use nodes::copy_query::Query;
-use nodes::jointype::JoinType;
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::parsenodes::RTEKind;
-use nodes::primnodes::ExprRelids;
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::copy_query::Query;
+use ::nodes::jointype::JoinType;
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::parsenodes::RTEKind;
+use ::nodes::primnodes::ExprRelids;
 use pathnodes::{NodeId, PlannerInfo};
 
 /// C `Relids` = `Bitmapset *`: the `'mcx`-arena relid set (NULL/empty = `None`).
@@ -57,7 +57,7 @@ type Relids<'mcx> = Option<PgBox<'mcx, Bitmapset<'mcx>>>;
 /// slot (the slot is always overwritten before being read again).
 #[inline]
 fn dummy_node<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Node<'mcx>> {
-    Ok(Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef { rtindex: 0 })?)
+    Ok(Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef { rtindex: 0 })?)
 }
 
 /// Convert an `'mcx`-arena [`Bitmapset`] relid set to the lifetime-free
@@ -256,7 +256,7 @@ fn jt_node_at<'a, 'mcx>(parse: &'a mut Query<'mcx>, path: &JtPath<'_, 'mcx>) -> 
 fn jt_fromexpr_at<'a, 'mcx>(
     parse: &'a mut Query<'mcx>,
     path: &JtPath<'_, 'mcx>,
-) -> &'a mut nodes::rawnodes::FromExpr<'mcx> {
+) -> &'a mut ::nodes::rawnodes::FromExpr<'mcx> {
     match path {
         JtPath::Top => parse
             .jointree
@@ -272,7 +272,7 @@ fn jt_fromexpr_at<'a, 'mcx>(
 fn jt_joinexpr_at<'a, 'mcx>(
     parse: &'a mut Query<'mcx>,
     path: &JtPath<'_, 'mcx>,
-) -> &'a mut nodes::rawnodes::JoinExpr<'mcx> {
+) -> &'a mut ::nodes::rawnodes::JoinExpr<'mcx> {
     jt_node_at(parse, path)
         .as_joinexpr_mut()
         .unwrap_or_else(|| unreachable!("jt_joinexpr_at: node is not a JoinExpr"))
@@ -302,7 +302,7 @@ fn jt_node_ref<'a, 'mcx>(parse: &'a Query<'mcx>, path: &JtPath<'_, 'mcx>) -> &'a
 fn jt_fromexpr_ref<'a, 'mcx>(
     parse: &'a Query<'mcx>,
     path: &JtPath<'_, 'mcx>,
-) -> &'a nodes::rawnodes::FromExpr<'mcx> {
+) -> &'a ::nodes::rawnodes::FromExpr<'mcx> {
     match path {
         JtPath::Top => parse
             .jointree
@@ -318,7 +318,7 @@ fn jt_fromexpr_ref<'a, 'mcx>(
 fn jt_joinexpr_ref<'a, 'mcx>(
     parse: &'a Query<'mcx>,
     path: &JtPath<'_, 'mcx>,
-) -> &'a nodes::rawnodes::JoinExpr<'mcx> {
+) -> &'a ::nodes::rawnodes::JoinExpr<'mcx> {
     jt_node_ref(parse, path)
         .as_joinexpr()
         .unwrap_or_else(|| unreachable!("jt_joinexpr_ref: node is not a JoinExpr"))
@@ -651,7 +651,7 @@ fn inner_collapse<'mcx>(
         let mut fromlist = mcx::PgVec::new_in(mcx);
         fromlist.try_reserve(1).map_err(|_| mcx.oom(1))?;
         fromlist.push(mcx::alloc_in(mcx, side)?);
-        Node::mk_from_expr(mcx, nodes::rawnodes::FromExpr { fromlist, quals })?
+        Node::mk_from_expr(mcx, ::nodes::rawnodes::FromExpr { fromlist, quals })?
     } else {
         // Merge any quals up to parent, return the surviving side.
         if let Some(pq) = parent_quals {
@@ -829,7 +829,7 @@ fn find_dependent_phvs_in_jointree_fromexpr<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     parse: &Query<'mcx>,
-    f: &nodes::rawnodes::FromExpr<'mcx>,
+    f: &::nodes::rawnodes::FromExpr<'mcx>,
     varno: i32,
 ) -> PgResult<bool> {
     if last_ph_id(root) == 0 {
@@ -872,7 +872,7 @@ fn find_dependent_phvs_check_rtes(
 
 /// Walk a `FromExpr`'s quals + fromlist children with `walker` (the
 /// `expression_tree_walker`/`query_tree_walker` `FromExpr` child set).
-fn walk_fromexpr(f: &nodes::rawnodes::FromExpr, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+fn walk_fromexpr(f: &::nodes::rawnodes::FromExpr, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
     for l in f.fromlist.iter() {
         if walker(l) {
             return true;
@@ -1105,7 +1105,7 @@ pub fn get_relids_in_jointree<'mcx>(
 /// `get_relids_in_jointree` applied to a `FromExpr` value (the C `(Node *) f`).
 fn get_relids_in_fromexpr<'mcx>(
     mcx: Mcx<'mcx>,
-    f: &nodes::rawnodes::FromExpr<'mcx>,
+    f: &::nodes::rawnodes::FromExpr<'mcx>,
     include_outer_joins: bool,
     include_inner_joins: bool,
 ) -> PgResult<Relids<'mcx>> {
@@ -1304,7 +1304,7 @@ fn get_nullingrels_recurse<'mcx>(
 /// `get_nullingrels_recurse` over a `FromExpr` value (the C `(Node *) f`).
 fn get_nullingrels_recurse_fromexpr<'mcx>(
     mcx: Mcx<'mcx>,
-    f: &nodes::rawnodes::FromExpr<'mcx>,
+    f: &::nodes::rawnodes::FromExpr<'mcx>,
     upper_nullingrels: Option<&Bitmapset<'mcx>>,
     info: &mut NullingrelInfo<'mcx>,
 ) -> PgResult<()> {

@@ -7,7 +7,7 @@
 //! `small1::parser_errposition`; kept local to avoid a dep on the
 //! whole small1 crate just for this helper.)
 
-use nodes::parsestmt::ParseState;
+use ::nodes::parsestmt::ParseState;
 
 /// `parser_errposition(pstate, location)` — byte offset → 1-based char position.
 pub fn parser_errposition(pstate: &ParseState<'_>, location: i32) -> i32 {

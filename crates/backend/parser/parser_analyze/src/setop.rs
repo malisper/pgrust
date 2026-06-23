@@ -8,11 +8,11 @@ use alloc::vec::Vec;
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::nodes::{ntag, CmdType, Node, NodePtr};
-use nodes::parsestmt::{ParseExprKind, ParseNamespaceColumn, ParseState};
-use nodes::primnodes::{Expr, SetToDefault, TargetEntry};
-use nodes::rawnodes::{
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{ntag, CmdType, Node, NodePtr};
+use ::nodes::parsestmt::{ParseExprKind, ParseNamespaceColumn, ParseState};
+use ::nodes::primnodes::{Expr, SetToDefault, TargetEntry};
+use ::nodes::rawnodes::{
     SelectStmt, SetOperation, SetOperationStmt, SortGroupClause,
 };
 
@@ -224,7 +224,7 @@ pub fn transformSetOperationStmt<'mcx>(
             Some(s) => mcx::PgString::from_str_in(s, mcx)?,
             None => return Err(elog_error("set-op leftmost column has no name")),
         };
-        let name_node = Node::mk_string(mcx, nodes::value::StringNode { sval })?;
+        let name_node = Node::mk_string(mcx, ::nodes::value::StringNode { sval })?;
         targetnames.push(mcx::alloc_in(mcx, name_node)?);
         sortnscolumns.push(ParseNamespaceColumn {
             p_varno: leftmost_rti as types_core::primitive::Index,
@@ -232,7 +232,7 @@ pub fn transformSetOperationStmt<'mcx>(
             p_vartype: col_type,
             p_vartypmod: col_typmod,
             p_varcollid: col_collation,
-            p_varreturningtype: nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
+            p_varreturningtype: ::nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT,
             p_varnosyn: leftmost_rti as types_core::primitive::Index,
             p_varattnosyn: *resno,
             p_dontexpand: false,
@@ -247,7 +247,7 @@ pub fn transformSetOperationStmt<'mcx>(
         pstate,
         &targetnames,
         sortnscolumns,
-        nodes::jointype::JoinType::JOIN_INNER,
+        ::nodes::jointype::JoinType::JOIN_INNER,
         0,
         targetvars,
         PgVec::new_in(mcx),
@@ -321,7 +321,7 @@ pub fn transformSetOperationStmt<'mcx>(
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, PgVec::new_in(mcx));
     qry.jointree = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::FromExpr {
+        ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
             quals: None,
         },
@@ -437,7 +437,7 @@ fn transformSetOperationTree<'mcx>(
             false,
         )?;
 
-        let rtr = nodes::rawnodes::RangeTblRef {
+        let rtr = ::nodes::rawnodes::RangeTblRef {
             rtindex: nsitem.p_rtindex,
         };
         return mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, rtr)?);
@@ -735,7 +735,7 @@ fn propagate_recursive_cte_columns<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     name: &str,
-    cte: &nodes::rawnodes::CommonTableExpr<'mcx>,
+    cte: &::nodes::rawnodes::CommonTableExpr<'mcx>,
 ) -> PgResult<()> {
     let mut cur: Option<&mut ParseState<'mcx>> = Some(pstate);
     while let Some(ps) = cur {
@@ -768,7 +768,7 @@ fn exprtype(e: &Expr) -> PgResult<Oid> {
 fn sortby_list<'mcx>(
     mcx: Mcx<'mcx>,
     list: &[NodePtr<'mcx>],
-) -> PgResult<Vec<nodes::rawnodes::SortBy<'mcx>>> {
+) -> PgResult<Vec<::nodes::rawnodes::SortBy<'mcx>>> {
     let mut out = Vec::new();
     out.try_reserve(list.len()).map_err(|_| mcx.oom(list.len()))?;
     for n in list {

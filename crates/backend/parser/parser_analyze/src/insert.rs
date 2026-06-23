@@ -14,11 +14,11 @@
 use mcx::{Mcx, PgVec};
 use types_core::{InvalidOid, Oid};
 use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
-use nodes::copy_query::Query;
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::Expr;
-use nodes::rawnodes::{InsertStmt, ResTarget, SelectStmt};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::Expr;
+use ::nodes::rawnodes::{InsertStmt, ResTarget, SelectStmt};
 
 use utils_error::ereport;
 
@@ -63,7 +63,7 @@ pub fn transformInsertStmt<'mcx>(
     let is_on_conflict_update = stmt
         .onConflictClause
         .as_deref()
-        .map(|c| c.action == nodes::nodes::OnConflictAction::ONCONFLICT_UPDATE)
+        .map(|c| c.action == ::nodes::nodes::OnConflictAction::ONCONFLICT_UPDATE)
         .unwrap_or(false);
 
     // The source can be: DEFAULT VALUES (selectStmt == None), a VALUES list, or
@@ -182,7 +182,7 @@ pub fn transformInsertStmt<'mcx>(
         .map(|r| r.perminfoindex)
         .unwrap_or(0);
 
-    let mut target_list: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+    let mut target_list: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
         mcx::vec_with_capacity_in(mcx, expr_list.len())?;
     debug_assert!(expr_list.len() <= icolumns.len());
 
@@ -242,7 +242,7 @@ pub fn transformInsertStmt<'mcx>(
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, PgVec::new_in(mcx));
     qry.jointree = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::FromExpr {
+        ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
             quals: None,
         },
@@ -269,9 +269,9 @@ fn transformInsertSelect<'mcx>(
     pstate: &mut ParseState<'mcx>,
     select_stmt_node: &Node<'mcx>,
     stmt: &InsertStmt<'mcx>,
-    sub_rtable: PgVec<'mcx, nodes::parsenodes::RangeTblEntry<'mcx>>,
-    sub_rteperminfos: PgVec<'mcx, nodes::parsenodes::RTEPermissionInfo<'mcx>>,
-    sub_namespace: PgVec<'mcx, nodes::parsestmt::ParseNamespaceItem<'mcx>>,
+    sub_rtable: PgVec<'mcx, ::nodes::parsenodes::RangeTblEntry<'mcx>>,
+    sub_rteperminfos: PgVec<'mcx, ::nodes::parsenodes::RTEPermissionInfo<'mcx>>,
+    sub_namespace: PgVec<'mcx, ::nodes::parsestmt::ParseNamespaceItem<'mcx>>,
     icolumns: &PgVec<'mcx, ResTarget<'mcx>>,
     attrnos: &PgVec<'mcx, i32>,
 ) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
@@ -329,7 +329,7 @@ fn transformInsertSelect<'mcx>(
     let rtindex = nsitem.p_rtindex;
     // Read the subquery's targetlist (stored in the just-added RTE) before
     // addNSItemToQuery consumes the nsitem.
-    let sub_target_list: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = {
+    let sub_target_list: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = {
         let rte = &pstate.p_rtable[(rtindex - 1) as usize];
         let subq = rte
             .subquery
@@ -531,7 +531,7 @@ pub fn transformInsertRow<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     exprlist: PgVec<'mcx, Expr<'static>>,
-    stmtcols: &PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
+    stmtcols: &PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
     icolumns: &PgVec<'mcx, ResTarget<'mcx>>,
     attrnos: &PgVec<'mcx, i32>,
     strip_indirection: bool,
@@ -638,7 +638,7 @@ fn count_rowexpr_columns<'mcx>(pstate: &ParseState<'mcx>, expr: &Expr) -> i32 {
                     var.varno,
                     var.varlevelsup as i32,
                 );
-                if rte.rtekind == nodes::parsenodes::RTEKind::RTE_SUBQUERY {
+                if rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_SUBQUERY {
                     // Subselect-in-FROM: examine sub-select's output expr.
                     if let Some(subquery) = rte.subquery.as_deref() {
                         if let Some(ste) = parser_relation::get_tle_by_resno(
@@ -666,7 +666,7 @@ fn count_rowexpr_columns<'mcx>(pstate: &ParseState<'mcx>, expr: &Expr) -> i32 {
 /// `PgVec<ResTarget>` for `checkInsertTargets`.
 fn copy_cols<'mcx>(
     mcx: Mcx<'mcx>,
-    cols: &PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
+    cols: &PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
 ) -> PgResult<PgVec<'mcx, ResTarget<'mcx>>> {
     let mut out: PgVec<'mcx, ResTarget<'mcx>> = mcx::vec_with_capacity_in(mcx, cols.len())?;
     for c in cols.iter() {
@@ -683,9 +683,9 @@ fn copy_cols<'mcx>(
 fn transformOnConflictClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    on_conflict_clause: &nodes::rawnodes::OnConflictClause<'mcx>,
-) -> PgResult<nodes::rawnodes::OnConflictExpr<'mcx>> {
-    use nodes::nodes::OnConflictAction;
+    on_conflict_clause: &::nodes::rawnodes::OnConflictClause<'mcx>,
+) -> PgResult<::nodes::rawnodes::OnConflictExpr<'mcx>> {
+    use ::nodes::nodes::OnConflictAction;
 
     let mut excl_rel_index: i32 = 0;
     let mut excl_rel_tlist: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
@@ -693,7 +693,7 @@ fn transformOnConflictClause<'mcx>(
     let mut on_conflict_where: Option<NodePtr<'mcx>> = None;
     // The EXCLUDED nsitem, created during the UPDATE prelude but only added to
     // the namespace (and later popped) once the arbiter clause is processed.
-    let mut stashed_excl_nsitem: Option<nodes::parsestmt::ParseNamespaceItem<'mcx>> = None;
+    let mut stashed_excl_nsitem: Option<::nodes::parsestmt::ParseNamespaceItem<'mcx>> = None;
 
     // If this is ON CONFLICT ... UPDATE, first create the range table entry for
     // the EXCLUDED pseudo relation, so that that will be present while
@@ -813,7 +813,7 @@ fn transformOnConflictClause<'mcx>(
         pstate.p_namespace.pop();
     }
 
-    Ok(nodes::rawnodes::OnConflictExpr {
+    Ok(::nodes::rawnodes::OnConflictExpr {
         action: on_conflict_clause.action,
         arbiterElems: arbiter_elems,
         arbiterWhere: arbiter_where,

@@ -7,11 +7,11 @@ use alloc::format;
 use mcx::Mcx;
 use types_acl::acl::ACL_SELECT_FOR_UPDATE;
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::nodes::Node;
-use nodes::parsenodes::RTEKind;
-use nodes::parsestmt::ParseState;
-use nodes::rawnodes::{
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::RTEKind;
+use ::nodes::parsestmt::ParseState;
+use ::nodes::rawnodes::{
     LockClauseStrength, LockWaitPolicy, LockingClause, RowMarkClause,
 };
 

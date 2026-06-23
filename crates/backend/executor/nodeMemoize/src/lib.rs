@@ -33,12 +33,12 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::{Oid, Size};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
-use nodes::execnodes::{EStateData, ScanStateData, SlotId};
-use nodes::nodememoize::{
+use ::nodes::execnodes::{EStateData, ScanStateData, SlotId};
+use ::nodes::nodememoize::{
     CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,
     MemoizeKeyAttr, MemoizeScanState,
 };
-use nodes::TupleSlotKind;
+use ::nodes::TupleSlotKind;
 use types_tuple::heaptuple::FormedMinimalTuple;
 // Datum-unification: the canonical unified value enum is this crate's internal
 // currency for every slot value. The execExpr eval leaf and the execTuples
@@ -839,7 +839,7 @@ pub fn ExecMemoize<'mcx>(
 
 /// `ExecInitMemoize(node, estate, eflags)` — initialize the node and subnodes.
 pub fn ExecInitMemoize<'mcx>(
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<alloc::boxed::Box<MemoizeScanState<'mcx>>> {
@@ -868,7 +868,7 @@ pub fn ExecInitMemoize<'mcx>(
     execTuples::exec_init_result_tuple_slot_tl::call(
         &mut mstate.ss.ps,
         estate,
-        nodes::TupleSlotKind::MinimalTuple,
+        ::nodes::TupleSlotKind::MinimalTuple,
     )?;
     mstate.ss.ps.ps_ProjInfo = None;
 
@@ -877,7 +877,7 @@ pub fn ExecInitMemoize<'mcx>(
     execUtils::exec_create_scan_slot_from_outer_plan::call(
         estate,
         &mut mstate.ss,
-        nodes::TupleSlotKind::MinimalTuple,
+        ::nodes::TupleSlotKind::MinimalTuple,
     )?;
 
     // Set the state machine to lookup the cache.
@@ -1107,7 +1107,7 @@ fn chgparam_has_non_key_difference(node: &MemoizeScanState) -> bool {
 /// vocabulary-crate definition (`sizeof(MemoizeEntry) + sizeof(MemoizeKey) +
 /// sizeof(MemoizeTuple) * ntuples`).
 pub fn ExecEstimateCacheEntryOverheadBytes(ntuples: f64) -> f64 {
-    nodes::nodememoize::exec_estimate_cache_entry_overhead_bytes(ntuples)
+    ::nodes::nodememoize::exec_estimate_cache_entry_overhead_bytes(ntuples)
 }
 
 // ===========================================================================
@@ -1648,11 +1648,11 @@ fn init_outer_plan<'mcx>(
 /// `castNode(MemoizeState, pstate)` then run [`ExecMemoize`], returning the
 /// result slot's id (the C `return slot`) or `None`.
 fn exec_memoize_node<'mcx>(
-    pstate: &mut nodes::planstate::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::planstate::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::planstate::PlanStateNode::Memoize(node) => node,
+        ::nodes::planstate::PlanStateNode::Memoize(node) => node,
         other => panic!("castNode(MemoizeState, pstate) failed: {other:?}"),
     };
     if ExecMemoize(node, estate)? {
@@ -1711,7 +1711,7 @@ fn make_memoize_state<'mcx>(
 /// `plan_node_id` DSM key is copied off the plan node.)
 fn init_plan_state_links<'mcx>(
     mstate: &mut MemoizeScanState<'mcx>,
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     mstate.ss.ps.plan = Some(plan_node);
@@ -1782,7 +1782,7 @@ fn init_hashkeydesc_and_slots<'mcx>(
     let mut param_exprs = mcx::vec_with_capacity_in(mcx, nkeys)?;
     for _ in 0..nkeys {
         // Placeholder ExprState; overwritten in build_eqfuncoids's per-key loop.
-        param_exprs.push(mcx::alloc_in(mcx, nodes::execexpr::ExprState::default())?);
+        param_exprs.push(mcx::alloc_in(mcx, ::nodes::execexpr::ExprState::default())?);
     }
     mstate.param_exprs = param_exprs;
 

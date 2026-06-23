@@ -22,10 +22,10 @@ use types_core::{Oid, OidIsValid};
 use types_error::pg_error::PgError;
 use types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERROR};
 
-use nodes::ddlnodes::{AlterSeqStmt, CreateSeqStmt, DefElem, DEFELEM_UNSPEC};
-use nodes::nodes::Node;
-use nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
-use nodes::value::StringNode;
+use ::nodes::ddlnodes::{AlterSeqStmt, CreateSeqStmt, DefElem, DEFELEM_UNSPEC};
+use ::nodes::nodes::Node;
+use ::nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
+use ::nodes::value::StringNode;
 
 use common_relation::relation_open;
 use catalog_namespace::{

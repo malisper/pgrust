@@ -51,7 +51,7 @@ use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::{AttrNumber, InvalidOid};
 use types_core::{Oid, FLOAT8PASSBYVAL};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 use types_tuple::tupdesc::PgTypeInfo;
 use types_tuple::heaptuple::{
     AttrDefault, AttrMissing, CompactAttribute, ConstrCheck, FormData_pg_attribute, NameData,

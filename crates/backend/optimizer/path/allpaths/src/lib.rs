@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     PathId, PlannerInfo, RelId, Relids, JOIN_ANTI, JOIN_SEMI, RELOPT_BASEREL, RTE_RELATION,
@@ -341,11 +341,11 @@ pub fn set_rel_size<'mcx>(
                 // Subqueries build their paths immediately (no param choice).
                 subquery::set_subquery_pathlist(mcx, run, root, rel, rti)?;
             }
-            RTE_FUNCTION => costsize::sizeest::set_function_size_estimates(run, root, rel),
+            RTE_FUNCTION => ::costsize::sizeest::set_function_size_estimates(run, root, rel),
             RTE_TABLEFUNC => {
-                costsize::sizeest::set_tablefunc_size_estimates(run, root, rel)
+                ::costsize::sizeest::set_tablefunc_size_estimates(run, root, rel)
             }
-            RTE_VALUES => costsize::sizeest::set_values_size_estimates(run, root, rel),
+            RTE_VALUES => ::costsize::sizeest::set_values_size_estimates(run, root, rel),
             RTE_CTE => {
                 if rte::rte_self_reference::call(run, root, rti) {
                     subquery::set_worktable_pathlist(run, root, rel, rti)?;
@@ -438,7 +438,7 @@ pub fn set_plain_rel_size<'mcx>(
     // Test partial indexes first (partial unique indexes can affect estimates).
     check_index_predicates(mcx, root, run, rel)?;
     // Mark rel with estimated output rows, width, etc.
-    costsize::sizeest::set_baserel_size_estimates(run, root, rel);
+    ::costsize::sizeest::set_baserel_size_estimates(run, root, rel);
     Ok(())
 }
 
@@ -602,7 +602,7 @@ pub fn set_tablesample_rel_size<'mcx>(
     root.rel_mut(rel).tuples = tuples;
 
     // Mark rel with estimated output rows, width, etc.
-    costsize::sizeest::set_baserel_size_estimates(run, root, rel);
+    ::costsize::sizeest::set_baserel_size_estimates(run, root, rel);
     Ok(())
 }
 
@@ -894,7 +894,7 @@ fn parallel_safe_glob_inputs(
 /// using clauses.c's hazard walker with `root->glob` state. Used for the RTE
 /// expr-list fields (`values_lists` / `functions`) whose elements live in the
 /// run arena as `Expr`, not as `root` node handles.
-fn expr_is_parallel_safe(root: &PlannerInfo, expr: &nodes::primnodes::Expr) -> bool {
+fn expr_is_parallel_safe(root: &PlannerInfo, expr: &::nodes::primnodes::Expr) -> bool {
     let (mh, pe, ids) = parallel_safe_glob_inputs(root);
     clauses::is_parallel_safe(mh, pe, ids, Some(expr))
         .expect("is_parallel_safe")

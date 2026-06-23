@@ -10,7 +10,7 @@ use mcx::{Mcx, PgString, PgVec};
 use utils_error::ereport;
 use types_error::{PgResult, ERRCODE_INVALID_SCHEMA_DEFINITION, ERROR};
 
-use nodes::nodes::{ntag, Node};
+use ::nodes::nodes::{ntag, Node};
 
 use crate::core::{CreateSchemaStmtContext, NodePtr};
 

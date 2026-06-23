@@ -40,10 +40,10 @@ use execUtils_seams as execUtils;
 use postgres_seams as tcop_postgres;
 use mcx::{alloc_in, vec_with_capacity_in, PgBox, PgVec};
 use types_error::PgResult;
-use nodes::execexpr::{ExprDoneCond, SetExprState};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
-use nodes::nodeprojectset::{ProjectSet as ProjectSetPlan, ProjectSetElem, ProjectSetState};
-use nodes::primnodes::Expr;
+use ::nodes::execexpr::{ExprDoneCond, SetExprState};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
+use ::nodes::nodeprojectset::{ProjectSet as ProjectSetPlan, ProjectSetElem, ProjectSetState};
+use ::nodes::primnodes::Expr;
 use nodes::{EStateData, PlanStateNode, SlotId};
 
 /// Name passed to `AllocSetContextCreate` for the per-tSRF argument context
@@ -320,12 +320,12 @@ fn exec_project_set_node<'mcx>(
 /// information for the ProjectSet node produced by the planner and initialize
 /// outer relations (child nodes).
 ///
-/// Takes the enclosing plan-tree [`Node`](nodes::nodes::Node); the state
+/// Takes the enclosing plan-tree [`Node`](::nodes::nodes::Node); the state
 /// is allocated in `estate.es_query_cxt` (C: `makeNode` in the per-query
 /// context during `ExecInitNode`). Panics if the node is not a `ProjectSet`
 /// (the C `castNode`).
 pub fn ExecInitProjectSet<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, ProjectSetState<'mcx>>> {

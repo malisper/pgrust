@@ -44,7 +44,7 @@
 use types_tuple::heaptuple::Datum as DatumV;
 // The table data structs live in the keystone (types-nodes) so the step payload
 // can carry the real typed table; this crate owns the simplehash algorithms.
-pub use nodes::saophash::{
+pub use ::nodes::saophash::{
     ScalarArrayOpExprHashEntry, ScalarArrayOpExprHashTable, SaophashHash,
 };
 

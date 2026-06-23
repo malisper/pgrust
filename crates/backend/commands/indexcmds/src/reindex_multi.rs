@@ -53,8 +53,8 @@ use types_catalog::pg_class::{
 use types_catalog::catalog::TABLESPACE_RELATION_ID;
 use types_core::catalog::{DATABASE_RELATION_ID, NAMESPACE_RELATION_ID};
 
-use nodes::ddlnodes::{ReindexObjectType, ReindexStmt};
-use nodes::parsenodes::{OBJECT_DATABASE, OBJECT_SCHEMA};
+use ::nodes::ddlnodes::{ReindexObjectType, ReindexStmt};
+use ::nodes::parsenodes::{OBJECT_DATABASE, OBJECT_SCHEMA};
 
 use tablespace::get_tablespace_name;
 
@@ -226,7 +226,7 @@ pub(crate) fn ReindexMultipleInternal<'mcx>(
                     .map(|s| s.as_str().to_string());
                 aclchk_seam::aclcheck_error::call(
                     aclresult,
-                    nodes::parsenodes::OBJECT_TABLESPACE,
+                    ::nodes::parsenodes::OBJECT_TABLESPACE,
                     tsname,
                 )?;
             }

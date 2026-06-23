@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
 use types_error::PgResult;
-use nodes::primnodes::{Expr, NullTest, Var};
+use ::nodes::primnodes::{Expr, NullTest, Var};
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     ForeignKeyOptInfo, IndexOptInfo, NodeId, PlannerInfo, RelId, Relids, StatisticExtInfo,
@@ -1027,7 +1027,7 @@ fn get_relation_constraints<'mcx>(
             let var = make_var(varno as i32, attno, typid, typmod, collation, 0);
             let ntest = Expr::NullTest(NullTest {
                 arg: Some(alloc::boxed::Box::new(var)),
-                nulltesttype: nodes::primnodes::NullTestType::IS_NOT_NULL,
+                nulltesttype: ::nodes::primnodes::NullTestType::IS_NOT_NULL,
                 argisrow: false,
                 // get_relation_constraints sets ntest->location = -1.
                 location: -1,
@@ -1682,7 +1682,7 @@ pub fn init_seams() {
     //   IsA(clause, Const) && (((Const *) clause)->constisnull ||
     //                          !DatumGetBool(((Const *) clause)->constvalue))
     ext::const_is_false_or_null::set(|root, node| match root.node(node) {
-        nodes::primnodes::Expr::Const(c) => c.constisnull || !c.constvalue.as_bool(),
+        ::nodes::primnodes::Expr::Const(c) => c.constisnull || !c.constvalue.as_bool(),
         _ => false,
     });
 

@@ -2,7 +2,7 @@
 //! `nodes/primnodes.h`), trimmed to what the command drivers consume.
 //!
 //! This is the *raw-parser* node model — owned, heap-allocated, distinct from
-//! the executor/plan-node dispatch enum in `nodes::nodes` (`Plan *`). C's
+//! the executor/plan-node dispatch enum in `::nodes::nodes` (`Plan *`). C's
 //! `Node *` over Value/DefElem/TypeName/statement nodes becomes the [`Node`]
 //! enum here; copies are plain Rust `.clone()` (raw parse trees are not
 //! context-allocated through `mcx` the way plan trees are).
@@ -17,7 +17,7 @@
 #![allow(non_upper_case_globals)]
 
 use types_core::Oid;
-use nodes::parsenodes::{DropBehavior, ObjectType};
+use ::nodes::parsenodes::{DropBehavior, ObjectType};
 
 /// `int ParseLoc` (`nodes/parsenodes.h`) — token location, `-1` if unknown.
 pub type ParseLoc = i32;
@@ -109,9 +109,9 @@ pub struct TypeName {
 // ---------------------------------------------------------------------------
 
 /// `typedef enum DefElemAction` (`nodes/parsenodes.h`). Canonically defined in
-/// `nodes::ddlnodes`; re-exported here so the two crates share one type.
-pub use nodes::ddlnodes::DefElemAction;
-pub use nodes::ddlnodes::{DEFELEM_ADD, DEFELEM_DROP, DEFELEM_SET, DEFELEM_UNSPEC};
+/// `::nodes::ddlnodes`; re-exported here so the two crates share one type.
+pub use ::nodes::ddlnodes::DefElemAction;
+pub use ::nodes::ddlnodes::{DEFELEM_ADD, DEFELEM_DROP, DEFELEM_SET, DEFELEM_UNSPEC};
 
 /// `typedef struct DefElem` (`nodes/parsenodes.h`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -181,9 +181,9 @@ pub struct FunctionParameter {
 // ---------------------------------------------------------------------------
 
 /// `typedef enum CoercionContext` (`nodes/primnodes.h`). Canonically defined in
-/// `nodes::ddlnodes`; re-exported here so the two crates share one type.
-pub use nodes::ddlnodes::CoercionContext;
-pub use nodes::ddlnodes::{
+/// `::nodes::ddlnodes`; re-exported here so the two crates share one type.
+pub use ::nodes::ddlnodes::CoercionContext;
+pub use ::nodes::ddlnodes::{
     COERCION_ASSIGNMENT, COERCION_EXPLICIT, COERCION_IMPLICIT, COERCION_PLPGSQL,
 };
 
@@ -272,7 +272,7 @@ pub struct AlterFunctionStmt {
 /// `NULL`-or-string comment text (`COMMENT ... IS NULL` drops the comment).
 #[derive(Clone, Debug)]
 pub struct CommentStmt {
-    pub objtype: nodes::parsenodes::ObjectType,
+    pub objtype: ::nodes::parsenodes::ObjectType,
     /// `Node *object` — the parser representation of the object to comment on.
     pub object: Option<Box<Node>>,
     /// `char *comment` — the comment text, or `None` for `IS NULL`.
@@ -404,8 +404,8 @@ pub struct CreateCastStmt {
 // ---------------------------------------------------------------------------
 
 /// `typedef enum RoleStmtType` (`nodes/parsenodes.h`). Canonically defined in
-/// `nodes::ddlnodes`; re-exported here so the two crates share one type.
-pub use nodes::ddlnodes::RoleStmtType;
+/// `::nodes::ddlnodes`; re-exported here so the two crates share one type.
+pub use ::nodes::ddlnodes::RoleStmtType;
 pub use RoleStmtType::{ROLESTMT_GROUP, ROLESTMT_ROLE, ROLESTMT_USER};
 
 /// `typedef struct CreateRoleStmt` (`nodes/parsenodes.h`).
@@ -494,10 +494,10 @@ pub struct DropStmt {
 }
 
 /// `typedef enum DiscardMode` (`nodes/parsenodes.h`) — `DISCARD { ALL | PLANS |
-/// SEQUENCES | TEMP }`. Canonically defined in `nodes::ddlnodes`;
+/// SEQUENCES | TEMP }`. Canonically defined in `::nodes::ddlnodes`;
 /// re-exported here so the two crates share one type.
-pub use nodes::ddlnodes::DiscardMode;
-pub use nodes::ddlnodes::{DISCARD_ALL, DISCARD_PLANS, DISCARD_SEQUENCES, DISCARD_TEMP};
+pub use ::nodes::ddlnodes::DiscardMode;
+pub use ::nodes::ddlnodes::{DISCARD_ALL, DISCARD_PLANS, DISCARD_SEQUENCES, DISCARD_TEMP};
 
 /// `typedef struct DiscardStmt` (`nodes/parsenodes.h`). The C `NodeTag type`
 /// header field carries no information for the dispatcher (it switches solely
@@ -555,7 +555,7 @@ pub struct ReassignOwnedStmt {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SecLabelStmt {
     /// Object's type.
-    pub objtype: nodes::parsenodes::ObjectType,
+    pub objtype: ::nodes::parsenodes::ObjectType,
     /// Qualified name of the object.
     pub object: Option<Box<Node>>,
     /// Label provider (or `None`).
@@ -565,13 +565,13 @@ pub struct SecLabelStmt {
 }
 
 /// `typedef struct ParseState` (`parser/parse_node.h`). Unified (K1 phase 4)
-/// onto the single canonical full struct in [`nodes::parsestmt`]. user.c
+/// onto the single canonical full struct in [`::nodes::parsestmt`]. user.c
 /// and parse-oper only pass the `ParseState *` through to
 /// `errorConflictingDefElem` / `parser_errposition` for error positioning (they
 /// read `p_sourcetext`); the parser (its owner) fills the rest. Re-exported for
 /// type identity — the struct now carries the full ~36-field set and an `'mcx`
 /// lifetime.
-pub use nodes::parsestmt::ParseState;
+pub use ::nodes::parsestmt::ParseState;
 
 // ---------------------------------------------------------------------------
 // The parse-tree Node enum (nodes/nodes.h `Node *` over the structs above)

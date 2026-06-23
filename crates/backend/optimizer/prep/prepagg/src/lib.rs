@@ -70,10 +70,10 @@ use types_core::catalog::INTERNALOID;
 use types_core::primitive::{Oid, Size};
 use datum::datum::Datum;
 use types_error::PgResult;
-use nodes::nodeagg::{
+use ::nodes::nodeagg::{
     AggSplit, AGGSPLITOP_COMBINE, AGGSPLITOP_DESERIALIZE, AGGSPLITOP_SERIALIZE, AGGSPLITOP_SKIPFINAL,
 };
-use nodes::primnodes::{Aggref, Expr};
+use ::nodes::primnodes::{Aggref, Expr};
 use pathnodes::{
     AggClauseCosts, AggInfo, AggTransInfo, NodeId, PlannerInfo, QualCost,
 };
@@ -1177,7 +1177,7 @@ fn as_aggref_mut<'a, 'mcx>(node: &'a mut Expr<'mcx>) -> &'a mut Aggref<'mcx> {
 /// `AggTransInfo.args` element form). Mirrors how `processed_tlist` interns TLEs.
 fn clone_targetentry_into_arena<'mcx>(
     root: &mut PlannerInfo,
-    tle: &nodes::primnodes::TargetEntry<'_>,
+    tle: &::nodes::primnodes::TargetEntry<'_>,
     mcx: mcx::Mcx<'mcx>,
 ) -> PgResult<NodeId> {
     let expr_src = tle.expr.as_deref().expect(

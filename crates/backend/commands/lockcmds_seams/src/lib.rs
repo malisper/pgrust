@@ -8,7 +8,7 @@
 //! from its `init_seams()`; until then a call panics loudly.
 
 use types_error::PgResult;
-use nodes::ddlnodes::LockStmt;
+use ::nodes::ddlnodes::LockStmt;
 
 seam_core::seam!(
     /// `LockTableCommand(lockstmt)` (lockcmds.c): resolve, permission-check, and

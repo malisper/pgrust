@@ -7,9 +7,9 @@
 //! state + the per-call step, including the overflow-stopping final value) is
 //! ported in `backend-utils-adt-int::series` / `backend-utils-adt-int8`, and the
 //! `SRF_FIRSTCALL_INIT` / `SRF_PERCALL_SETUP` / `SRF_RETURN_NEXT` /
-//! `SRF_RETURN_DONE` glue is `backend-utils-fmgr-funcapi::srf_support`.
+//! `SRF_RETURN_DONE` glue is `backend-utils-fmgr-::funcapi::srf_support`.
 //!
-//! Here those pieces are assembled into [`nodes::execexpr::PGFunction`]s
+//! Here those pieces are assembled into [`::nodes::execexpr::PGFunction`]s
 //! (the executor-frame ABI whose call frame carries the LIVE `ReturnSetInfo`)
 //! and registered in this unit's executor-frame SRF table from
 //! [`register_generate_series`] (called by `init_seams`). This is the
@@ -22,7 +22,7 @@
 use core::any::Any;
 
 use int::series::GenerateSeriesInt4;
-use funcapi::srf_support::{
+use ::funcapi::srf_support::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall,
 };
 use mcx::{Mcx, PgBox};
@@ -30,8 +30,8 @@ use types_core::Oid;
 use types_datetime::Interval;
 use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
 use types_error::{PgError, PgResult};
-use nodes::execexpr::ExprDoneCond;
-use nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
+use ::nodes::execexpr::ExprDoneCond;
+use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::heaptuple::Datum;
 
 use crate::register_srf;

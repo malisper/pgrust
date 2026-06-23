@@ -12,7 +12,7 @@
 
 #![allow(non_snake_case)]
 
-pub use nodes::execnodes::ScanStateData;
-pub use nodes::nodetidrangescan::{
+pub use ::nodes::execnodes::ScanStateData;
+pub use ::nodes::nodetidrangescan::{
     OperandSide, TidExprType, TidOpExpr, TidRangeScanState,
 };

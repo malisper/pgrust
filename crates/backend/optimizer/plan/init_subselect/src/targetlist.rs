@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId, Relids};
 
@@ -188,7 +188,7 @@ pub fn rebuild_joinclause_attr_needed(
             {
                 // Borrow the clause (only walked read-only by pull_var_clause);
                 // a derived `.clone()` would panic on a context-allocated child.
-                let clause: &nodes::primnodes::Expr = root.node(clause_id);
+                let clause: &::nodes::primnodes::Expr = root.node(clause_id);
                 let vars = eqext::pull_var_clause::call(
                     clause,
                     PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS | PVC_INCLUDE_PLACEHOLDERS,

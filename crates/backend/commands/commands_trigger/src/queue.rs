@@ -28,7 +28,7 @@ use std::cell::RefCell;
 
 use types_core::primitive::Oid;
 use types_core::xact::CommandId;
-use nodes::trigger::{
+use ::nodes::trigger::{
     AfterTriggerEventData, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_DONE,
     AFTER_TRIGGER_INITDEFERRED, AFTER_TRIGGER_IN_PROGRESS, AFTER_TRIGGER_OFFSET, TriggerFlags,
 };
@@ -160,13 +160,13 @@ pub struct TableData {
     /// UPDATE/DELETE, or `None`. Self-owned (`'static`) so it can live in the
     /// thread-local; the C store lives in `CurTransactionContext` under the
     /// (sub)transaction resource owner with the same end-of-query lifespan.
-    pub old_tuplestore: Option<nodes::Tuplestorestate<'static>>,
+    pub old_tuplestore: Option<::nodes::Tuplestorestate<'static>>,
     /// `Tuplestorestate *new_tuplestore` — "new" transition table for
     /// INSERT/UPDATE, or `None`.
-    pub new_tuplestore: Option<nodes::Tuplestorestate<'static>>,
+    pub new_tuplestore: Option<::nodes::Tuplestorestate<'static>>,
     /// `TupleTableSlot *storeslot` — slot for converting a child-partition tuple
     /// to the tuplestore's (root) format (`GetAfterTriggersStoreSlot`), or `None`.
-    pub storeslot: Option<nodes::SlotId>,
+    pub storeslot: Option<::nodes::SlotId>,
 }
 
 /// `AfterTriggersQueryData` (`commands/trigger.c`) — per-query-level data.
@@ -405,7 +405,7 @@ pub fn before_stmt_triggers_fired(relid: Oid, cmd_type: CmdType) -> Result<bool,
 /// the end, stopping at the first event that isn't an AS trigger for this
 /// relation+operation, and clear its IN_PROGRESS / set DONE.
 pub fn cancel_prior_stmt_triggers(relid: Oid, cmd_type: CmdType, tgevent: u32) {
-    use nodes::trigger::TRIGGER_EVENT_OPMASK;
+    use ::nodes::trigger::TRIGGER_EVENT_OPMASK;
     // TRIGGER_EVENT_ROW / TRIGGER_EVENT_BEFORE bit positions (trigger.h).
     const TRIGGER_EVENT_ROW: u32 = 1 << 2;
     const TRIGGER_EVENT_TIMINGMASK: u32 = (1 << 3) | (1 << 4); // BEFORE | INSTEAD

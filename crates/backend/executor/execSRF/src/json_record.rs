@@ -44,7 +44,7 @@
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 use crate::register_srf;
@@ -231,9 +231,9 @@ pub fn is_scalar_record_function(foid: Oid) -> bool {
 fn canon_arg_to_frame<'mcx>(
     val: &Datum<'mcx>,
     isnull: bool,
-) -> (datum::NullableDatum, Option<nodes::fmgr::FmgrArgRef>) {
+) -> (datum::NullableDatum, Option<::nodes::fmgr::FmgrArgRef>) {
     use datum::NullableDatum;
-    use nodes::fmgr::FmgrArgRef;
+    use ::nodes::fmgr::FmgrArgRef;
     if isnull {
         return (NullableDatum::null(), None);
     }

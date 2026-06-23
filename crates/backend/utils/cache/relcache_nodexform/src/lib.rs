@@ -30,7 +30,7 @@ use mcx::{Mcx, MemoryContext, PgVec};
 use types_catalog::pg_publication::{PublicationDesc, PublishGencolsType};
 use types_core::primitive::Oid;
 use types_error::{PgResult, ERROR};
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use rel::Relation;
 
 use utils_error::ereport;
@@ -56,7 +56,7 @@ const ACCESS_SHARE_LOCK: types_storage::lock::LOCKMODE = 1;
 /// in `mcx`) into a `Vec<i32>` (the `expr_attrs`/`pred_attrs` the
 /// `IndexAttrInfo` carries — already offset by
 /// `FirstLowInvalidHeapAttributeNumber`). `None` is the C empty/NULL set.
-fn bms_members(bms: Option<&nodes::bitmapset::Bitmapset<'_>>) -> alloc::vec::Vec<i32> {
+fn bms_members(bms: Option<&::nodes::bitmapset::Bitmapset<'_>>) -> alloc::vec::Vec<i32> {
     let mut out = alloc::vec::Vec::new();
     let mut i = -1;
     loop {

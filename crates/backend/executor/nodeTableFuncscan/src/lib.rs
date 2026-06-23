@@ -58,7 +58,7 @@ use nodes::{
 
 /// `EXEC_FLAG_MARK` (executor.h) — caller needs mark/restore support. A
 /// table-func scan never supports mark/restore (asserted away in init).
-use nodes::executor::EXEC_FLAG_MARK;
+use ::nodes::executor::EXEC_FLAG_MARK;
 
 /// Install this crate's implementations into its seam slots.
 ///
@@ -124,7 +124,7 @@ fn json_table_not_wired(what: &str) -> PgError {
 /// absence is a programming error — same as the C `GetJsonTableExecContext`
 /// magic check's precondition).
 fn json_exec_context(
-    opaque: &mut nodes::execnodes::Opaque,
+    opaque: &mut ::nodes::execnodes::Opaque,
 ) -> &mut jsonpath_exec::JsonTableExecContext {
     opaque
         .0
@@ -358,7 +358,7 @@ fn json_table_init_opaque<'mcx>(
     // tf = castNode(TableFuncScan, ps->plan)->tablefunc — the plan node aliases
     // the shared read-only plan tree (`'mcx`), so this borrow is independent of
     // `&mut state`.
-    let tf: &'mcx nodes::primnodes::TableFunc<'mcx> = match state.ss.ps.plan {
+    let tf: &'mcx ::nodes::primnodes::TableFunc<'mcx> = match state.ss.ps.plan {
         Some(p) => &p.expect_tablefuncscan().tablefunc,
         None => panic!("JsonTableInitOpaque: plan is not a TableFuncScan node"),
     };
@@ -378,7 +378,7 @@ fn json_table_init_opaque<'mcx>(
     let args = eval_passing_args(state, tf, estate)?;
 
     let cxt = jsonpath_exec::JsonTableInitOpaque(rootplan, args, ncols)?;
-    state.opaque = nodes::execnodes::Opaque(Some(alloc::boxed::Box::new(cxt)));
+    state.opaque = ::nodes::execnodes::Opaque(Some(alloc::boxed::Box::new(cxt)));
     Ok(())
 }
 
@@ -387,7 +387,7 @@ fn json_table_init_opaque<'mcx>(
 /// evaluate each PASSING expression and pair it with its name.
 fn eval_passing_args<'mcx>(
     state: &mut TableFuncScanState<'mcx>,
-    tf: &nodes::primnodes::TableFunc<'mcx>,
+    tf: &::nodes::primnodes::TableFunc<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<alloc::vec::Vec<jsonpath_exec::JsonTableVariable>> {
     let mut args: alloc::vec::Vec<jsonpath_exec::JsonTableVariable> = alloc::vec::Vec::new();
@@ -398,7 +398,7 @@ fn eval_passing_args<'mcx>(
     // je = castNode(JsonExpr, tf->docexpr) — the document JsonExpr carries the
     // PASSING argument names.
     let passing_names: &[alloc::string::String] = match tf.docexpr.as_deref() {
-        Some(nodes::primnodes::Expr::JsonExpr(je)) => &je.passing_names,
+        Some(::nodes::primnodes::Expr::JsonExpr(je)) => &je.passing_names,
         _ => panic!(
             "JsonTableInitOpaque: tf->docexpr is not a JsonExpr (required for JSON_TABLE PASSING)"
         ),
@@ -466,7 +466,7 @@ fn tuple_datum_to_carrier(
 /// `JsonTablePlan` vocabulary, extracting the on-disk jsonpath bytes from each
 /// path `Const`.
 fn build_json_table_plan(
-    node: &nodes::nodes::Node<'_>,
+    node: &::nodes::nodes::Node<'_>,
 ) -> PgResult<jsonpath_exec::JsonTablePlan> {
     if let Some(scan) = node.as_jsontablepathscan() {
         // planstate->path = DatumGetJsonPathP(scan->path->value->constvalue):
@@ -619,11 +619,11 @@ pub fn ExecTableFuncScan<'mcx>(
 /// The `PlanState.ExecProcNode` callback installed by [`ExecInitTableFuncScan`]:
 /// `castNode(TableFuncScanState, pstate)` then run [`ExecTableFuncScan`].
 fn exec_table_func_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::PlanStateNode::TableFuncScan(node) => node,
+        ::nodes::PlanStateNode::TableFuncScan(node) => node,
         other => panic!("castNode(TableFuncScanState, pstate) failed: {other:?}"),
     };
     ExecTableFuncScan(node, estate)
@@ -640,7 +640,7 @@ fn exec_table_func_scan_node<'mcx>(
 /// per-query context current during `ExecInitNode`), so initialization is
 /// fallible on OOM. The plan back-link aliases the shared, read-only plan tree.
 pub fn ExecInitTableFuncScan<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, TableFuncScanState<'mcx>>> {
@@ -708,7 +708,7 @@ pub fn ExecInitTableFuncScan<'mcx>(
         estate,
         &mut scanstate.ss,
         tupdesc,
-        nodes::TupleSlotKind::MinimalTuple,
+        ::nodes::TupleSlotKind::MinimalTuple,
     )?;
 
     // Initialize result type and projection.
@@ -1316,10 +1316,10 @@ fn clone_ns_names<'mcx>(
 
 /// `ExecInitExpr((Expr *) node, parent)` for an optional single expression.
 fn init_opt_expr<'mcx>(
-    node: &Option<PgBox<'_, nodes::primnodes::Expr>>,
-    parent: &mut nodes::execnodes::PlanStateData<'mcx>,
+    node: &Option<PgBox<'_, ::nodes::primnodes::Expr>>,
+    parent: &mut ::nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     match node {
         Some(e) => Ok(Some(execExpr::exec_init_expr::call(e, parent, estate)?)),
         None => Ok(None),
@@ -1329,11 +1329,11 @@ fn init_opt_expr<'mcx>(
 /// `ExecInitExprList(nodes, parent)` over an `Option<PgVec<Option<Expr>>>`
 /// list (NULL cells preserved).
 fn init_opt_expr_list<'mcx>(
-    list: &Option<PgVec<'mcx, Option<PgBox<'mcx, nodes::primnodes::Expr<'mcx>>>>>,
-    parent: &mut nodes::execnodes::PlanStateData<'mcx>,
+    list: &Option<PgVec<'mcx, Option<PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>>>,
+    parent: &mut ::nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<PgVec<'mcx, Option<nodes::execexpr::ExprState<'mcx>>>> {
-    let refs: alloc::vec::Vec<Option<&nodes::primnodes::Expr>> = match list {
+) -> PgResult<PgVec<'mcx, Option<::nodes::execexpr::ExprState<'mcx>>>> {
+    let refs: alloc::vec::Vec<Option<&::nodes::primnodes::Expr>> = match list {
         Some(v) => v.iter().map(|o| o.as_deref()).collect(),
         None => alloc::vec::Vec::new(),
     };
@@ -1343,11 +1343,11 @@ fn init_opt_expr_list<'mcx>(
 /// `ExecInitExprList(nodes, parent)` over an `Option<PgVec<Expr>>` list with no
 /// NULL cells, returning a list of `ExprState` (the `ns_uris` shape).
 fn init_expr_list_required<'mcx>(
-    list: &Option<PgVec<'mcx, PgBox<'mcx, nodes::primnodes::Expr<'mcx>>>>,
-    parent: &mut nodes::execnodes::PlanStateData<'mcx>,
+    list: &Option<PgVec<'mcx, PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>>,
+    parent: &mut ::nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<PgVec<'mcx, nodes::execexpr::ExprState<'mcx>>> {
-    let refs: alloc::vec::Vec<Option<&nodes::primnodes::Expr>> = match list {
+) -> PgResult<PgVec<'mcx, ::nodes::execexpr::ExprState<'mcx>>> {
+    let refs: alloc::vec::Vec<Option<&::nodes::primnodes::Expr>> = match list {
         Some(v) => v.iter().map(|e| Some(&**e)).collect(),
         None => alloc::vec::Vec::new(),
     };
@@ -1363,11 +1363,11 @@ fn init_expr_list_required<'mcx>(
 /// `ExecInitExprList(tf->passingvalexprs, parent)` — the PASSING list, kept as
 /// `Option<ExprState<'mcx>>` cells.
 fn init_expr_list_required_opt<'mcx>(
-    list: &Option<PgVec<'mcx, PgBox<'mcx, nodes::primnodes::Expr<'mcx>>>>,
-    parent: &mut nodes::execnodes::PlanStateData<'mcx>,
+    list: &Option<PgVec<'mcx, PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>>,
+    parent: &mut ::nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<PgVec<'mcx, Option<nodes::execexpr::ExprState<'mcx>>>> {
-    let refs: alloc::vec::Vec<Option<&nodes::primnodes::Expr>> = match list {
+) -> PgResult<PgVec<'mcx, Option<::nodes::execexpr::ExprState<'mcx>>>> {
+    let refs: alloc::vec::Vec<Option<&::nodes::primnodes::Expr>> = match list {
         Some(v) => v.iter().map(|e| Some(&**e)).collect(),
         None => alloc::vec::Vec::new(),
     };

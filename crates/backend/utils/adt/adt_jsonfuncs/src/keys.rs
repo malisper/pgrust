@@ -28,7 +28,7 @@ use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use types_jsonb::jsonb::{
     json_container_is_array, json_container_is_scalar, json_container_size, JsonbIteratorToken,
 };
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::Datum;
 
 use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext};
@@ -125,7 +125,7 @@ pub fn jsonb_object_keys<'mcx>(
     // type); bless the executor-supplied 1-column `expectedDesc`.
     funcapi::InitMaterializedSRF::call(
         fcinfo,
-        nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | nodes::funcapi::MAT_SRF_BLESS,
+        ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | ::nodes::funcapi::MAT_SRF_BLESS,
     )?;
     let nulls: [bool; 1] = [false];
 
@@ -252,7 +252,7 @@ pub fn json_object_keys<'mcx>(
     // type); bless the executor-supplied 1-column `expectedDesc`.
     funcapi::InitMaterializedSRF::call(
         fcinfo,
-        nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | nodes::funcapi::MAT_SRF_BLESS,
+        ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | ::nodes::funcapi::MAT_SRF_BLESS,
     )?;
     let nulls: [bool; 1] = [false];
 

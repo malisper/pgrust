@@ -24,8 +24,8 @@ use types_catalog::pg_publication::{
 use types_core::Oid;
 use types_error::PgResult;
 use mcx::PgBox;
-use nodes::bitmapset::Bitmapset;
-use nodes::nodes::Node;
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::nodes::Node;
 use rel::Relation;
 
 /* ==========================================================================

@@ -6,7 +6,7 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
-use nodes::parsestmt::DestReceiverHandle;
+use ::nodes::parsestmt::DestReceiverHandle;
 use portal::Portal;
 
 seam_core::seam!(

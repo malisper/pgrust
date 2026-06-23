@@ -4,8 +4,8 @@
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_error::PgResult;
-use nodes::nodes::{Node, NodePtr};
-use nodes::ddlnodes as dn;
+use ::nodes::nodes::{Node, NodePtr};
+use ::nodes::ddlnodes as dn;
 
 use crate::{
     elog_error, read_bool_field, read_char_field, read_enum_field, read_int64_field,
@@ -2240,17 +2240,17 @@ fn alter_table_type_from(code: i32) -> dn::AlterTableType {
         _ => dn::AlterTableType::AT_AddColumn,
     }
 }
-fn cmd_type_from(code: i32) -> nodes::nodes::CmdType {
+fn cmd_type_from(code: i32) -> ::nodes::nodes::CmdType {
     match code {
-        0 => nodes::nodes::CmdType::CMD_UNKNOWN,
-        1 => nodes::nodes::CmdType::CMD_SELECT,
-        2 => nodes::nodes::CmdType::CMD_UPDATE,
-        3 => nodes::nodes::CmdType::CMD_INSERT,
-        4 => nodes::nodes::CmdType::CMD_DELETE,
-        5 => nodes::nodes::CmdType::CMD_MERGE,
-        6 => nodes::nodes::CmdType::CMD_UTILITY,
-        7 => nodes::nodes::CmdType::CMD_NOTHING,
-        _ => nodes::nodes::CmdType::CMD_UNKNOWN,
+        0 => ::nodes::nodes::CmdType::CMD_UNKNOWN,
+        1 => ::nodes::nodes::CmdType::CMD_SELECT,
+        2 => ::nodes::nodes::CmdType::CMD_UPDATE,
+        3 => ::nodes::nodes::CmdType::CMD_INSERT,
+        4 => ::nodes::nodes::CmdType::CMD_DELETE,
+        5 => ::nodes::nodes::CmdType::CMD_MERGE,
+        6 => ::nodes::nodes::CmdType::CMD_UTILITY,
+        7 => ::nodes::nodes::CmdType::CMD_NOTHING,
+        _ => ::nodes::nodes::CmdType::CMD_UNKNOWN,
     }
 }
 fn coercion_context_from(code: i32) -> dn::CoercionContext {
@@ -2301,11 +2301,11 @@ fn discard_mode_from(code: i32) -> dn::DiscardMode {
         _ => dn::DiscardMode::DISCARD_ALL,
     }
 }
-fn drop_behavior_from(code: i32) -> nodes::parsenodes::DropBehavior {
+fn drop_behavior_from(code: i32) -> ::nodes::parsenodes::DropBehavior {
     match code {
-        0 => nodes::parsenodes::DropBehavior::Restrict,
-        1 => nodes::parsenodes::DropBehavior::Cascade,
-        _ => nodes::parsenodes::DropBehavior::Restrict,
+        0 => ::nodes::parsenodes::DropBehavior::Restrict,
+        1 => ::nodes::parsenodes::DropBehavior::Cascade,
+        _ => ::nodes::parsenodes::DropBehavior::Restrict,
     }
 }
 fn fetch_direction_from(code: i32) -> dn::FetchDirection {
@@ -2344,86 +2344,86 @@ fn import_foreign_schema_type_from(code: i32) -> dn::ImportForeignSchemaType {
         _ => dn::ImportForeignSchemaType::FDW_IMPORT_SCHEMA_ALL,
     }
 }
-fn object_type_from(code: i32) -> nodes::parsenodes::ObjectType {
+fn object_type_from(code: i32) -> ::nodes::parsenodes::ObjectType {
     match code {
-        0 => nodes::parsenodes::ObjectType::AccessMethod,
-        1 => nodes::parsenodes::ObjectType::Aggregate,
-        2 => nodes::parsenodes::ObjectType::Amop,
-        3 => nodes::parsenodes::ObjectType::Amproc,
-        4 => nodes::parsenodes::ObjectType::Attribute,
-        5 => nodes::parsenodes::ObjectType::Cast,
-        6 => nodes::parsenodes::ObjectType::Column,
-        7 => nodes::parsenodes::ObjectType::Collation,
-        8 => nodes::parsenodes::ObjectType::Conversion,
-        9 => nodes::parsenodes::ObjectType::Database,
-        10 => nodes::parsenodes::ObjectType::Default,
-        11 => nodes::parsenodes::ObjectType::Defacl,
-        12 => nodes::parsenodes::ObjectType::Domain,
-        13 => nodes::parsenodes::ObjectType::Domconstraint,
-        14 => nodes::parsenodes::ObjectType::EventTrigger,
-        15 => nodes::parsenodes::ObjectType::Extension,
-        16 => nodes::parsenodes::ObjectType::Fdw,
-        17 => nodes::parsenodes::ObjectType::ForeignServer,
-        18 => nodes::parsenodes::ObjectType::ForeignTable,
-        19 => nodes::parsenodes::ObjectType::Function,
-        20 => nodes::parsenodes::ObjectType::Index,
-        21 => nodes::parsenodes::ObjectType::Language,
-        22 => nodes::parsenodes::ObjectType::Largeobject,
-        23 => nodes::parsenodes::ObjectType::Matview,
-        24 => nodes::parsenodes::ObjectType::Opclass,
-        25 => nodes::parsenodes::ObjectType::Operator,
-        26 => nodes::parsenodes::ObjectType::Opfamily,
-        27 => nodes::parsenodes::ObjectType::ParameterAcl,
-        28 => nodes::parsenodes::ObjectType::Policy,
-        29 => nodes::parsenodes::ObjectType::Procedure,
-        30 => nodes::parsenodes::ObjectType::Publication,
-        31 => nodes::parsenodes::ObjectType::PublicationNamespace,
-        32 => nodes::parsenodes::ObjectType::PublicationRel,
-        33 => nodes::parsenodes::ObjectType::Role,
-        34 => nodes::parsenodes::ObjectType::Routine,
-        35 => nodes::parsenodes::ObjectType::Rule,
-        36 => nodes::parsenodes::ObjectType::Schema,
-        37 => nodes::parsenodes::ObjectType::Sequence,
-        38 => nodes::parsenodes::ObjectType::Subscription,
-        39 => nodes::parsenodes::ObjectType::StatisticExt,
-        40 => nodes::parsenodes::ObjectType::Tabconstraint,
-        41 => nodes::parsenodes::ObjectType::Table,
-        42 => nodes::parsenodes::ObjectType::Tablespace,
-        43 => nodes::parsenodes::ObjectType::Transform,
-        44 => nodes::parsenodes::ObjectType::Trigger,
-        45 => nodes::parsenodes::ObjectType::TsConfiguration,
-        46 => nodes::parsenodes::ObjectType::TsDictionary,
-        47 => nodes::parsenodes::ObjectType::TsParser,
-        48 => nodes::parsenodes::ObjectType::TsTemplate,
-        49 => nodes::parsenodes::ObjectType::Type,
-        50 => nodes::parsenodes::ObjectType::UserMapping,
-        51 => nodes::parsenodes::ObjectType::View,
-        _ => nodes::parsenodes::ObjectType::AccessMethod,
+        0 => ::nodes::parsenodes::ObjectType::AccessMethod,
+        1 => ::nodes::parsenodes::ObjectType::Aggregate,
+        2 => ::nodes::parsenodes::ObjectType::Amop,
+        3 => ::nodes::parsenodes::ObjectType::Amproc,
+        4 => ::nodes::parsenodes::ObjectType::Attribute,
+        5 => ::nodes::parsenodes::ObjectType::Cast,
+        6 => ::nodes::parsenodes::ObjectType::Column,
+        7 => ::nodes::parsenodes::ObjectType::Collation,
+        8 => ::nodes::parsenodes::ObjectType::Conversion,
+        9 => ::nodes::parsenodes::ObjectType::Database,
+        10 => ::nodes::parsenodes::ObjectType::Default,
+        11 => ::nodes::parsenodes::ObjectType::Defacl,
+        12 => ::nodes::parsenodes::ObjectType::Domain,
+        13 => ::nodes::parsenodes::ObjectType::Domconstraint,
+        14 => ::nodes::parsenodes::ObjectType::EventTrigger,
+        15 => ::nodes::parsenodes::ObjectType::Extension,
+        16 => ::nodes::parsenodes::ObjectType::Fdw,
+        17 => ::nodes::parsenodes::ObjectType::ForeignServer,
+        18 => ::nodes::parsenodes::ObjectType::ForeignTable,
+        19 => ::nodes::parsenodes::ObjectType::Function,
+        20 => ::nodes::parsenodes::ObjectType::Index,
+        21 => ::nodes::parsenodes::ObjectType::Language,
+        22 => ::nodes::parsenodes::ObjectType::Largeobject,
+        23 => ::nodes::parsenodes::ObjectType::Matview,
+        24 => ::nodes::parsenodes::ObjectType::Opclass,
+        25 => ::nodes::parsenodes::ObjectType::Operator,
+        26 => ::nodes::parsenodes::ObjectType::Opfamily,
+        27 => ::nodes::parsenodes::ObjectType::ParameterAcl,
+        28 => ::nodes::parsenodes::ObjectType::Policy,
+        29 => ::nodes::parsenodes::ObjectType::Procedure,
+        30 => ::nodes::parsenodes::ObjectType::Publication,
+        31 => ::nodes::parsenodes::ObjectType::PublicationNamespace,
+        32 => ::nodes::parsenodes::ObjectType::PublicationRel,
+        33 => ::nodes::parsenodes::ObjectType::Role,
+        34 => ::nodes::parsenodes::ObjectType::Routine,
+        35 => ::nodes::parsenodes::ObjectType::Rule,
+        36 => ::nodes::parsenodes::ObjectType::Schema,
+        37 => ::nodes::parsenodes::ObjectType::Sequence,
+        38 => ::nodes::parsenodes::ObjectType::Subscription,
+        39 => ::nodes::parsenodes::ObjectType::StatisticExt,
+        40 => ::nodes::parsenodes::ObjectType::Tabconstraint,
+        41 => ::nodes::parsenodes::ObjectType::Table,
+        42 => ::nodes::parsenodes::ObjectType::Tablespace,
+        43 => ::nodes::parsenodes::ObjectType::Transform,
+        44 => ::nodes::parsenodes::ObjectType::Trigger,
+        45 => ::nodes::parsenodes::ObjectType::TsConfiguration,
+        46 => ::nodes::parsenodes::ObjectType::TsDictionary,
+        47 => ::nodes::parsenodes::ObjectType::TsParser,
+        48 => ::nodes::parsenodes::ObjectType::TsTemplate,
+        49 => ::nodes::parsenodes::ObjectType::Type,
+        50 => ::nodes::parsenodes::ObjectType::UserMapping,
+        51 => ::nodes::parsenodes::ObjectType::View,
+        _ => ::nodes::parsenodes::ObjectType::AccessMethod,
     }
 }
-fn on_commit_action_from(code: i32) -> nodes::primnodes::OnCommitAction {
+fn on_commit_action_from(code: i32) -> ::nodes::primnodes::OnCommitAction {
     match code {
-        0 => nodes::primnodes::OnCommitAction::ONCOMMIT_NOOP,
-        1 => nodes::primnodes::OnCommitAction::ONCOMMIT_PRESERVE_ROWS,
-        2 => nodes::primnodes::OnCommitAction::ONCOMMIT_DELETE_ROWS,
-        3 => nodes::primnodes::OnCommitAction::ONCOMMIT_DROP,
-        _ => nodes::primnodes::OnCommitAction::ONCOMMIT_NOOP,
+        0 => ::nodes::primnodes::OnCommitAction::ONCOMMIT_NOOP,
+        1 => ::nodes::primnodes::OnCommitAction::ONCOMMIT_PRESERVE_ROWS,
+        2 => ::nodes::primnodes::OnCommitAction::ONCOMMIT_DELETE_ROWS,
+        3 => ::nodes::primnodes::OnCommitAction::ONCOMMIT_DROP,
+        _ => ::nodes::primnodes::OnCommitAction::ONCOMMIT_NOOP,
     }
 }
-fn partition_range_datum_kind_from(code: i32) -> nodes::partition::PartitionRangeDatumKind {
+fn partition_range_datum_kind_from(code: i32) -> ::nodes::partition::PartitionRangeDatumKind {
     match code {
-        -1 => nodes::partition::PartitionRangeDatumKind::MinValue,
-        0 => nodes::partition::PartitionRangeDatumKind::Value,
-        1 => nodes::partition::PartitionRangeDatumKind::MaxValue,
-        _ => nodes::partition::PartitionRangeDatumKind::MinValue,
+        -1 => ::nodes::partition::PartitionRangeDatumKind::MinValue,
+        0 => ::nodes::partition::PartitionRangeDatumKind::Value,
+        1 => ::nodes::partition::PartitionRangeDatumKind::MaxValue,
+        _ => ::nodes::partition::PartitionRangeDatumKind::MinValue,
     }
 }
-fn partition_strategy_from(code: i32) -> nodes::partition::PartitionStrategy {
+fn partition_strategy_from(code: i32) -> ::nodes::partition::PartitionStrategy {
     match code {
-        108 => nodes::partition::PartitionStrategy::List,
-        114 => nodes::partition::PartitionStrategy::Range,
-        104 => nodes::partition::PartitionStrategy::Hash,
-        _ => nodes::partition::PartitionStrategy::List,
+        108 => ::nodes::partition::PartitionStrategy::List,
+        114 => ::nodes::partition::PartitionStrategy::Range,
+        104 => ::nodes::partition::PartitionStrategy::Hash,
+        _ => ::nodes::partition::PartitionStrategy::List,
     }
 }
 fn publication_obj_spec_type_from(code: i32) -> dn::PublicationObjSpecType {
@@ -2445,14 +2445,14 @@ fn reindex_object_type_from(code: i32) -> dn::ReindexObjectType {
         _ => dn::ReindexObjectType::REINDEX_OBJECT_INDEX,
     }
 }
-fn role_spec_type_from(code: i32) -> nodes::parsenodes::RoleSpecType {
+fn role_spec_type_from(code: i32) -> ::nodes::parsenodes::RoleSpecType {
     match code {
-        0 => nodes::parsenodes::RoleSpecType::Cstring,
-        1 => nodes::parsenodes::RoleSpecType::CurrentRole,
-        2 => nodes::parsenodes::RoleSpecType::CurrentUser,
-        3 => nodes::parsenodes::RoleSpecType::SessionUser,
-        4 => nodes::parsenodes::RoleSpecType::Public,
-        _ => nodes::parsenodes::RoleSpecType::Cstring,
+        0 => ::nodes::parsenodes::RoleSpecType::Cstring,
+        1 => ::nodes::parsenodes::RoleSpecType::CurrentRole,
+        2 => ::nodes::parsenodes::RoleSpecType::CurrentUser,
+        3 => ::nodes::parsenodes::RoleSpecType::SessionUser,
+        4 => ::nodes::parsenodes::RoleSpecType::Public,
+        _ => ::nodes::parsenodes::RoleSpecType::Cstring,
     }
 }
 fn role_stmt_type_from(code: i32) -> dn::RoleStmtType {
@@ -2463,21 +2463,21 @@ fn role_stmt_type_from(code: i32) -> dn::RoleStmtType {
         _ => dn::RoleStmtType::ROLESTMT_ROLE,
     }
 }
-fn sort_by_dir_from(code: i32) -> nodes::rawnodes::SortByDir {
+fn sort_by_dir_from(code: i32) -> ::nodes::rawnodes::SortByDir {
     match code {
-        0 => nodes::rawnodes::SortByDir::SORTBY_DEFAULT,
-        1 => nodes::rawnodes::SortByDir::SORTBY_ASC,
-        2 => nodes::rawnodes::SortByDir::SORTBY_DESC,
-        3 => nodes::rawnodes::SortByDir::SORTBY_USING,
-        _ => nodes::rawnodes::SortByDir::SORTBY_DEFAULT,
+        0 => ::nodes::rawnodes::SortByDir::SORTBY_DEFAULT,
+        1 => ::nodes::rawnodes::SortByDir::SORTBY_ASC,
+        2 => ::nodes::rawnodes::SortByDir::SORTBY_DESC,
+        3 => ::nodes::rawnodes::SortByDir::SORTBY_USING,
+        _ => ::nodes::rawnodes::SortByDir::SORTBY_DEFAULT,
     }
 }
-fn sort_by_nulls_from(code: i32) -> nodes::rawnodes::SortByNulls {
+fn sort_by_nulls_from(code: i32) -> ::nodes::rawnodes::SortByNulls {
     match code {
-        0 => nodes::rawnodes::SortByNulls::SORTBY_NULLS_DEFAULT,
-        1 => nodes::rawnodes::SortByNulls::SORTBY_NULLS_FIRST,
-        2 => nodes::rawnodes::SortByNulls::SORTBY_NULLS_LAST,
-        _ => nodes::rawnodes::SortByNulls::SORTBY_NULLS_DEFAULT,
+        0 => ::nodes::rawnodes::SortByNulls::SORTBY_NULLS_DEFAULT,
+        1 => ::nodes::rawnodes::SortByNulls::SORTBY_NULLS_FIRST,
+        2 => ::nodes::rawnodes::SortByNulls::SORTBY_NULLS_LAST,
+        _ => ::nodes::rawnodes::SortByNulls::SORTBY_NULLS_DEFAULT,
     }
 }
 fn transaction_stmt_kind_from(code: i32) -> dn::TransactionStmtKind {
@@ -2660,8 +2660,8 @@ mod tests {
     use mcx::MemoryContext;
     use nodes_core::read::string_to_node;
     use outfuncs::nodeToString;
-    use nodes::nodes::Node;
-    use nodes::ddlnodes as dn;
+    use ::nodes::nodes::Node;
+    use ::nodes::ddlnodes as dn;
 
     use crate::ensure_seams_for_tests as ensure_seams;
 
@@ -2699,7 +2699,7 @@ mod tests {
         let ctx = MemoryContext::new("rs");
         let mcx = ctx.mcx();
         let rs = dn::RoleSpec {
-            roletype: nodes::parsenodes::RoleSpecType::Cstring,
+            roletype: ::nodes::parsenodes::RoleSpecType::Cstring,
             rolename: Some(PgString::from_str_in("alice", mcx).unwrap()),
             location: -1,
         };
@@ -2713,8 +2713,8 @@ mod tests {
         let mcx = ctx.mcx();
         let ds = dn::DropStmt {
             objects: PgVec::new_in(mcx),
-            removeType: nodes::parsenodes::ObjectType::Table,
-            behavior: nodes::parsenodes::DropBehavior::Restrict,
+            removeType: ::nodes::parsenodes::ObjectType::Table,
+            behavior: ::nodes::parsenodes::DropBehavior::Restrict,
             missing_ok: true,
             concurrent: false,
         };

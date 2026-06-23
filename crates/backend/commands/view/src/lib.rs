@@ -66,17 +66,17 @@ use types_error::{
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     NOTICE,
 };
-use nodes::copy_query::Query;
-use nodes::ddlnodes::{
+use ::nodes::copy_query::Query;
+use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableType, CreateStmt, DefElem, DefElemAction, ViewStmt,
     CASCADED_CHECK_OPTION, LOCAL_CHECK_OPTION,
 };
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsenodes::DROP_RESTRICT;
-use nodes::primnodes::OnCommitAction;
-use nodes::parsestmt::RawStmt;
-use nodes::rawnodes::{ColumnDef, RangeVar};
-use nodes::value::StringNode;
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsenodes::DROP_RESTRICT;
+use ::nodes::primnodes::OnCommitAction;
+use ::nodes::parsestmt::RawStmt;
+use ::nodes::rawnodes::{ColumnDef, RangeVar};
+use ::nodes::value::StringNode;
 use rel::Relation;
 use types_storage::lock::{AccessExclusiveLock, NoLock, LOCKMODE};
 use types_tuple::access::{

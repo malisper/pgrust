@@ -5,9 +5,9 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::parsestmt::DestReceiverHandle;
-use nodes::portalcmds::ParamListInfo;
+use ::nodes::copy_query::Query;
+use ::nodes::parsestmt::DestReceiverHandle;
+use ::nodes::portalcmds::ParamListInfo;
 use portal::{FetchDirection, Portal, PortalStrategy, QueryCompletion};
 use snapshot::SnapshotData;
 

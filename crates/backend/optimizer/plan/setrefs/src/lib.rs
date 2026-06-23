@@ -5,8 +5,8 @@
 //! record the objects the plan depends on (for plancache invalidation).
 //!
 //! Reconciled to this repo's model: the plan tree is the owned
-//! `nodes::nodes::Node<'mcx>` enum (one variant per plan subtype), and
-//! expressions are the lifetime-free `nodes::primnodes::Expr` enum. The
+//! `::nodes::nodes::Node<'mcx>` enum (one variant per plan subtype), and
+//! expressions are the lifetime-free `::nodes::primnodes::Expr` enum. The
 //! expression-fixing mutators (`fix_scan_expr`/`fix_join_expr`/`fix_upper_expr`)
 //! walk `Expr` via `nodes_core::nodefuncs::expression_tree_mutator`; the
 //! plan recursion (`set_plan_refs`) matches on `Node`. Genuine cross-subsystem
@@ -37,11 +37,11 @@ use nodes_core::makefuncs::{
 use equalfuncs::equal_expr;
 
 use types_core::primitive::{AttrNumber, Index, Oid};
-use nodes::nodes::Node;
-use nodes::nodes::ntag;
-use nodes::nodeagg::do_aggsplit_combine;
-use nodes::primnodes::{Const, Expr, Param, ParamKind, TargetEntry, Var, VarReturningType};
-use nodes::nodeindexscan::{Plan, Scan};
+use ::nodes::nodes::Node;
+use ::nodes::nodes::ntag;
+use ::nodes::nodeagg::do_aggsplit_combine;
+use ::nodes::primnodes::{Const, Expr, Param, ParamKind, TargetEntry, Var, VarReturningType};
+use ::nodes::nodeindexscan::{Plan, Scan};
 use pathnodes::{PlannerGlobal, PlannerInfo, Relids};
 
 use setrefs_seams as ext;
@@ -139,8 +139,8 @@ fn bms_make_singleton_relids(x: i32) -> pathnodes::Relids {
 }
 
 fn expr_relids_equal(
-    a: &nodes::primnodes::ExprRelids,
-    b: &nodes::primnodes::ExprRelids,
+    a: &::nodes::primnodes::ExprRelids,
+    b: &::nodes::primnodes::ExprRelids,
 ) -> bool {
     let n = core::cmp::max(a.words.len(), b.words.len());
     for i in 0..n {
@@ -155,8 +155,8 @@ fn expr_relids_equal(
 
 /// `bms_is_subset(a, b)` over `ExprRelids`: is every bit of `a` also set in `b`?
 fn expr_relids_is_subset(
-    a: &nodes::primnodes::ExprRelids,
-    b: &nodes::primnodes::ExprRelids,
+    a: &::nodes::primnodes::ExprRelids,
+    b: &::nodes::primnodes::ExprRelids,
 ) -> bool {
     for (i, &aw) in a.words.iter().enumerate() {
         let bw = b.words.get(i).copied().unwrap_or(0);
@@ -172,8 +172,8 @@ fn expr_relids_is_subset(
 /// `actual` is the input Var/PHV, `expected` is the matched subplan entry's.
 fn nullingrels_ok(
     nrm_match: NullingRelsMatch,
-    actual: &nodes::primnodes::ExprRelids,
-    expected: &nodes::primnodes::ExprRelids,
+    actual: &::nodes::primnodes::ExprRelids,
+    expected: &::nodes::primnodes::ExprRelids,
 ) -> bool {
     match nrm_match {
         NRM_SUBSET => expr_relids_is_subset(actual, expected),
@@ -223,14 +223,14 @@ pub fn set_plan_references<'mcx>(
     //    `AppendRelInfoCarrier` plan data the deparser reads (child->parent Var
     //    mapping for EXPLAIN of Append/MergeAppend nodes).
     {
-        let mut carriers: Vec<nodes::appendrel_carrier::AppendRelInfoCarrier> =
+        let mut carriers: Vec<::nodes::appendrel_carrier::AppendRelInfoCarrier> =
             Vec::with_capacity(root.append_rel_list.len());
         for appinfo in root.append_rel_list.iter_mut() {
             appinfo.parent_relid = appinfo.parent_relid.wrapping_add(rtoffset as u32);
             appinfo.child_relid = appinfo.child_relid.wrapping_add(rtoffset as u32);
             // Rather than adjust the translated_vars entries, just drop 'em.
             appinfo.translated_vars = Vec::new();
-            carriers.push(nodes::appendrel_carrier::AppendRelInfoCarrier {
+            carriers.push(::nodes::appendrel_carrier::AppendRelInfoCarrier {
                 parent_relid: appinfo.parent_relid,
                 child_relid: appinfo.child_relid,
                 num_child_cols: appinfo.num_child_cols,
@@ -310,8 +310,8 @@ fn add_rtes_to_flat_rtable<'mcx>(
     for i in 0..n {
         let rte = &run.rtable(parse)[i];
         let want = !recursing
-            || rte.rtekind == nodes::parsenodes::RTEKind::RTE_RELATION
-            || (rte.rtekind == nodes::parsenodes::RTEKind::RTE_SUBQUERY
+            || rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_RELATION
+            || (rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_SUBQUERY
                 && rte.relid != 0);
         if want {
             add_rte_to_flat_rtable(mcx, run, root, parse, i)?;
@@ -326,7 +326,7 @@ fn add_rtes_to_flat_rtable<'mcx>(
         let (is_sub, inh) = {
             let rte = &run.rtable(parse)[idx];
             (
-                rte.rtekind == nodes::parsenodes::RTEKind::RTE_SUBQUERY,
+                rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_SUBQUERY,
                 rte.inh,
             )
         };
@@ -395,8 +395,8 @@ fn add_rte_to_flat_rtable_core<'mcx>(
     mcx: Mcx<'mcx>,
     run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    mut newrte: nodes::parsenodes::RangeTblEntry<'mcx>,
-    src_perminfo: Option<nodes::parsenodes::RTEPermissionInfo<'mcx>>,
+    mut newrte: ::nodes::parsenodes::RangeTblEntry<'mcx>,
+    src_perminfo: Option<::nodes::parsenodes::RTEPermissionInfo<'mcx>>,
 ) -> PgResult<()> {
     // flat copy to duplicate all the scalar fields, then zap unneeded
     // sub-structure that the executor doesn't need.
@@ -425,8 +425,8 @@ fn add_rte_to_flat_rtable_core<'mcx>(
 
     // If it's a plain relation RTE (or a subquery that was once a view ref),
     // record the relation OID + add the new RT index to allRelids.
-    if rtekind == nodes::parsenodes::RTEKind::RTE_RELATION
-        || (rtekind == nodes::parsenodes::RTEKind::RTE_SUBQUERY && relid != 0)
+    if rtekind == ::nodes::parsenodes::RTEKind::RTE_RELATION
+        || (rtekind == ::nodes::parsenodes::RTEKind::RTE_SUBQUERY && relid != 0)
     {
         glob_mut(root)?.relation_oids.push(relid);
         let g = glob_mut(root)?;
@@ -481,9 +481,9 @@ fn flatten_rtes_in_query<'mcx>(
     mcx: Mcx<'mcx>,
     run: &mut pathnodes::planner_run::PlannerRun<'mcx>,
     root: &mut PlannerInfo,
-    query: &nodes::copy_query::Query<'mcx>,
+    query: &::nodes::copy_query::Query<'mcx>,
 ) -> PgResult<()> {
-    use nodes::parsenodes::RTEKind;
+    use ::nodes::parsenodes::RTEKind;
 
     // Add this query's relation / former-relation RTEs.
     for rte in query.rtable.iter() {
@@ -514,7 +514,7 @@ fn flatten_rtes_in_query<'mcx>(
     // *solely* inside a sublink contained in a query level that was itself
     // excluded as dead — a narrow, well-bounded gap (not a stub of the main
     // path).
-    let mut nested: Vec<nodes::copy_query::Query<'mcx>> = Vec::new();
+    let mut nested: Vec<::nodes::copy_query::Query<'mcx>> = Vec::new();
     for rte in query.rtable.iter() {
         if rte.rtekind == RTEKind::RTE_SUBQUERY {
             if let Some(sub) = rte.subquery.as_deref() {
@@ -588,9 +588,9 @@ fn offset_relid_set(relids: Relids, rtoffset: i32) -> Relids {
 /// returning a fresh packed bitmap. Used for `PartitionPruneInfo.relids` whose
 /// members are RT indexes (partprune.c `offset_relid_set`).
 fn offset_rawbms(
-    raw: &nodes::partprune_carrier::RawBms,
+    raw: &::nodes::partprune_carrier::RawBms,
     rtoffset: i32,
-) -> nodes::partprune_carrier::RawBms {
+) -> ::nodes::partprune_carrier::RawBms {
     if rtoffset == 0 {
         return raw.clone();
     }
@@ -602,7 +602,7 @@ fn offset_rawbms(
 }
 
 /// Unpack a `RawBms` into its set-bit member list.
-fn rawbms_members(raw: &nodes::partprune_carrier::RawBms) -> Vec<i32> {
+fn rawbms_members(raw: &::nodes::partprune_carrier::RawBms) -> Vec<i32> {
     let mut out = Vec::new();
     if let Some(words) = raw {
         for (wi, &word) in words.iter().enumerate() {
@@ -620,7 +620,7 @@ fn rawbms_members(raw: &nodes::partprune_carrier::RawBms) -> Vec<i32> {
 /// Pack member ints into a `RawBms` (`None` if empty).
 fn pack_rawbms(
     members: impl Iterator<Item = i32>,
-) -> nodes::partprune_carrier::RawBms {
+) -> ::nodes::partprune_carrier::RawBms {
     let members: Vec<i32> = members.collect();
     if members.is_empty() {
         return None;
@@ -655,7 +655,7 @@ fn register_partpruneinfo<'mcx>(
     // `EXISTS(...)` sublink in a join-pruning qual) whose derived `Expr::Clone`
     // panics by design. `fix_partprune_steps` below then resolves any
     // AlternativeSubPlan to the chosen subplan.
-    let mut pinfo = nodes::partprune_carrier::partpruneinfo_into_static(
+    let mut pinfo = ::nodes::partprune_carrier::partpruneinfo_into_static(
         root.partPruneInfos[part_prune_index as usize].clone_in(mcx)?,
     );
 
@@ -724,10 +724,10 @@ fn register_partpruneinfo<'mcx>(
 fn fix_partprune_steps<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    steps: &mut [nodes::partprune_carrier::PartitionPruneStep<'static>],
+    steps: &mut [::nodes::partprune_carrier::PartitionPruneStep<'static>],
     rtoffset: i32,
 ) -> PgResult<()> {
-    use nodes::partprune_carrier::PartitionPruneStep;
+    use ::nodes::partprune_carrier::PartitionPruneStep;
     for step in steps.iter_mut() {
         if let PartitionPruneStep::Op(op) = step {
             let exprs = core::mem::take(&mut op.exprs);
@@ -755,7 +755,7 @@ struct TlistVinfo {
     varno: i32,
     varattno: AttrNumber,
     resno: AttrNumber,
-    varnullingrels: nodes::primnodes::ExprRelids,
+    varnullingrels: ::nodes::primnodes::ExprRelids,
 }
 
 /// `indexed_tlist` (setrefs.c) — an index over a child tlist. We hold an owned
@@ -865,7 +865,7 @@ fn search_indexed_tlist_for_var(
 /// `search_indexed_tlist_for_phv(phv, itlist, newvarno, nrm_match)`
 /// (setrefs.c:2932).
 fn search_indexed_tlist_for_phv(
-    phv: &nodes::primnodes::PlaceHolderVar,
+    phv: &::nodes::primnodes::PlaceHolderVar,
     itlist: &IndexedTlist,
     newvarno: i32,
     nrm_match: NullingRelsMatch,
@@ -1070,7 +1070,7 @@ fn fix_param_node(root: &PlannerInfo, p: &Param) -> PgResult<Expr<'static>> {
 fn fix_alternative_subplan<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    asplan: nodes::primnodes::AlternativeSubPlan<'mcx>,
+    asplan: ::nodes::primnodes::AlternativeSubPlan<'mcx>,
     num_exec: f64,
 ) -> PgResult<Expr<'mcx>> {
     let mut best_idx: Option<usize> = None;
@@ -1097,12 +1097,12 @@ fn fix_alternative_subplan<'mcx>(
     // (the established `SubPlanExpr(Box<SubPlan<'static>>)` convention; the arena
     // outlives the read-only Expr tree).
     let mut subplans = asplan.subplans;
-    let chosen: PgBox<'mcx, nodes::primnodes::SubPlan<'mcx>> =
+    let chosen: PgBox<'mcx, ::nodes::primnodes::SubPlan<'mcx>> =
         subplans.swap_remove(best);
     // `SubPlanExpr<'mcx>` now carries the run lifetime directly (no forged
     // 'static): deep-clone the chosen child into `mcx` and wrap it.
-    let cloned: nodes::primnodes::SubPlan<'mcx> = chosen.clone_in(mcx)?;
-    Ok(Expr::SubPlan(nodes::primnodes::SubPlanExpr(ABox::new(
+    let cloned: ::nodes::primnodes::SubPlan<'mcx> = chosen.clone_in(mcx)?;
+    Ok(Expr::SubPlan(::nodes::primnodes::SubPlanExpr(ABox::new(
         cloned,
     ))))
 }
@@ -1110,7 +1110,7 @@ fn fix_alternative_subplan<'mcx>(
 /// `find_minmax_agg_replacement_param(root, aggref)` (setrefs.c:3520).
 fn find_minmax_agg_replacement_param(
     root: &PlannerInfo,
-    aggref: &nodes::primnodes::Aggref,
+    aggref: &::nodes::primnodes::Aggref,
 ) -> PgResult<Option<Param>> {
     // root->minmax_aggs != NIL && list_length(aggref->args) == 1
     let args_len = aggref.args.len();
@@ -1830,7 +1830,7 @@ fn set_param_references<'mcx>(
     root: &PlannerInfo,
     plan: &Plan<'mcx>,
     mcx: Mcx<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>> {
     // if (plan->lefttree->extParam)
     let lefttree = plan
         .lefttree
@@ -1851,7 +1851,7 @@ fn set_param_references<'mcx>(
     // The init_plans list carries NodeId handles into the SubPlan node space;
     // resolve each via `proot.node(id).as_subplan()` (same access as the
     // planner's safe_param_ids construction).
-    let mut init_set_param: Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> = None;
+    let mut init_set_param: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
     let mut proot: Option<&PlannerInfo> = Some(root);
     while let Some(p) = proot {
         for &ipl in &p.init_plans {
@@ -1892,8 +1892,8 @@ fn convert_combining_aggrefs<'mcx>(mcx: Mcx<'mcx>, node: Expr<'mcx>) -> PgResult
             // child_agg = flat copy of orig; parent_agg = copy with args=NIL,
             // aggfilter=NULL. Aggref is not Clone (only clone_in); deep-copy into
             // mcx, then erase the lifetime to the Expr arm's notional 'static.
-            let mut child_agg: nodes::primnodes::Aggref<'mcx> = orig.clone_in(mcx)?;
-            let mut parent_agg: nodes::primnodes::Aggref<'mcx> = orig.clone_in(mcx)?;
+            let mut child_agg: ::nodes::primnodes::Aggref<'mcx> = orig.clone_in(mcx)?;
+            let mut parent_agg: ::nodes::primnodes::Aggref<'mcx> = orig.clone_in(mcx)?;
             parent_agg.args = Vec::new(); // args=NIL
             parent_agg.aggfilter = None;
             // child keeps the original args/aggfilter (they were copied above).
@@ -1901,7 +1901,7 @@ fn convert_combining_aggrefs<'mcx>(mcx: Mcx<'mcx>, node: Expr<'mcx>) -> PgResult
             // mark_partial_aggref(child_agg, AGGSPLIT_INITIAL_SERIAL).
             ext::mark_partial_aggref::call(
                 &mut child_agg,
-                nodes::nodeagg::AGGSPLIT_INITIAL_SERIAL,
+                ::nodes::nodeagg::AGGSPLIT_INITIAL_SERIAL,
             )?;
 
             // parent_agg.args = list_make1(makeTargetEntry((Expr*) child_agg, 1,
@@ -1920,7 +1920,7 @@ fn convert_combining_aggrefs<'mcx>(mcx: Mcx<'mcx>, node: Expr<'mcx>) -> PgResult
 
             ext::mark_partial_aggref::call(
                 &mut parent_agg,
-                nodes::nodeagg::AGGSPLIT_FINAL_DESERIAL,
+                ::nodes::nodeagg::AGGSPLIT_FINAL_DESERIAL,
             )?;
             Ok(Expr::Aggref(parent_agg))
         }
@@ -1955,7 +1955,7 @@ fn convert_combining_aggrefs<'mcx>(mcx: Mcx<'mcx>, node: Expr<'mcx>) -> PgResult
 /// convention). Lifetime-parameter-only transmute of an owned value whose
 /// backing allocations live in the planner-run arena (outlives the read-only
 /// Expr tree). Mirrors init-subselect's `subplan_into_static`.
-fn erase_aggref(a: nodes::primnodes::Aggref) -> nodes::primnodes::Aggref {
+fn erase_aggref(a: ::nodes::primnodes::Aggref) -> ::nodes::primnodes::Aggref {
     // Aggref is lifetime-free in this model (args carry an explicit 'static),
     // so this is the identity; written as a function for documentation parity.
     a
@@ -2508,7 +2508,7 @@ fn fix_scan_common<'mcx>(
 /// (`PgVec<PgVec<Expr>>`, not Option).
 fn fix_scan_common_valuesscan<'mcx>(
     root: &mut PlannerInfo,
-    s: &mut nodes::nodevaluesscan::ValuesScan<'mcx>,
+    s: &mut ::nodes::nodevaluesscan::ValuesScan<'mcx>,
     rtoffset: i32,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
@@ -2530,7 +2530,7 @@ fn fix_scan_common_valuesscan<'mcx>(
 /// args + repeatable expressions.
 fn fix_tablesample<'mcx>(
     root: &mut PlannerInfo,
-    ts: &mut nodes::nodesamplescan::TableSampleClause<'mcx>,
+    ts: &mut ::nodes::nodesamplescan::TableSampleClause<'mcx>,
     rtoffset: i32,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
@@ -3071,9 +3071,9 @@ fn set_foreignscan_references<'mcx>(
     Ok(())
 }
 
-/// Convert a `nodes::bitmapset::Bitmapset` (Plan-side) to a `Relids`
+/// Convert a `::nodes::bitmapset::Bitmapset` (Plan-side) to a `Relids`
 /// (`pathnodes::Bitmapset`) for the offset helper, by copying words.
-fn bms_nodes_to_relids(b: Option<&nodes::bitmapset::Bitmapset>) -> Relids {
+fn bms_nodes_to_relids(b: Option<&::nodes::bitmapset::Bitmapset>) -> Relids {
     match b {
         None => None,
         Some(bms) => Some(ABox::new(pathnodes::Bitmapset {
@@ -3085,7 +3085,7 @@ fn bms_nodes_to_relids(b: Option<&nodes::bitmapset::Bitmapset>) -> Relids {
 fn relids_to_bms_node<'mcx>(
     r: Relids,
     mcx: Mcx<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>> {
     match r {
         None => Ok(None),
         Some(bms) => {
@@ -3095,7 +3095,7 @@ fn relids_to_bms_node<'mcx>(
             }
             Ok(Some(mcx::alloc_in(
                 mcx,
-                nodes::bitmapset::Bitmapset { words },
+                ::nodes::bitmapset::Bitmapset { words },
             )?))
         }
     }
@@ -3182,8 +3182,8 @@ fn set_subqueryscan_references<'mcx>(
 
 /// `trivial_subqueryscan(plan)` (setrefs.c:1476) — detect whether a SubqueryScan
 /// can be deleted from the plan tree (no qual, tlist regurgitates the child).
-fn trivial_subqueryscan(plan: &mut nodes::nodeindexscan::SubqueryScan<'_>) -> bool {
-    use nodes::nodeindexscan::SubqueryScanStatus;
+fn trivial_subqueryscan(plan: &mut ::nodes::nodeindexscan::SubqueryScan<'_>) -> bool {
+    use ::nodes::nodeindexscan::SubqueryScanStatus;
 
     if plan.scanstatus == SubqueryScanStatus::Trivial {
         return true;
@@ -3216,7 +3216,7 @@ fn trivial_subqueryscan(plan: &mut nodes::nodeindexscan::SubqueryScan<'_>) -> bo
         }
         match ptle.expr.as_deref() {
             // A Var referencing the matching subplan tlist element.
-            Some(nodes::primnodes::Expr::Var(var)) => {
+            Some(::nodes::primnodes::Expr::Var(var)) => {
                 debug_assert!(var.varno == scanrelid as i32);
                 debug_assert!(var.varlevelsup == 0);
                 if var.varattno != attrno {
@@ -3224,7 +3224,7 @@ fn trivial_subqueryscan(plan: &mut nodes::nodeindexscan::SubqueryScan<'_>) -> bo
                 }
             }
             // A Const equaling the subplan element.
-            Some(pe @ nodes::primnodes::Expr::Const(_)) => {
+            Some(pe @ ::nodes::primnodes::Expr::Const(_)) => {
                 match ctle.expr.as_deref() {
                     Some(ce) if equal_expr(pe, ce) => {}
                     _ => return false,
@@ -3369,7 +3369,7 @@ fn clean_up_removed_plan_level<'mcx>(
             }
         }
         // Clone the parent's initPlan SubPlans into the child's memory context.
-        let mut moved: PgVec<nodes::primnodes::SubPlan> = PgVec::new_in(mcx);
+        let mut moved: PgVec<::nodes::primnodes::SubPlan> = PgVec::new_in(mcx);
         for sp in parent_init.iter() {
             moved.push(sp.clone_in(mcx)?);
         }
@@ -3517,11 +3517,11 @@ fn set_modifytable_references<'mcx>(
 
             // Fix each action's targetList + qual.
             let action_lists = m.mergeActionLists.take().unwrap_or_else(|| PgVec::new_in(mcx));
-            let mut new_action_lists: PgVec<PgVec<nodes::modifytable::MergeAction>> =
+            let mut new_action_lists: PgVec<PgVec<::nodes::modifytable::MergeAction>> =
                 PgVec::new_in(mcx);
             for (li, alist) in action_lists.into_iter().enumerate() {
                 let resultrel = *result_rels.get(li).unwrap_or(&0) as Index;
-                let mut new_alist: PgVec<nodes::modifytable::MergeAction> = PgVec::new_in(mcx);
+                let mut new_alist: PgVec<::nodes::modifytable::MergeAction> = PgVec::new_in(mcx);
                 for mut action in alist.into_iter() {
                     // action->targetList = fix_join_expr(root, action->targetList,
                     //   NULL, itlist, resultrel, rtoffset, NRM_EQUAL, NUM_EXEC_TLIST).
@@ -3875,7 +3875,7 @@ fn extract_query_dependencies_walker(node: &Node, ctx: &mut ExtractDepsCtx) -> P
     // Assert(!IsA(node, PlaceHolderVar)); — PlaceHolderVars do not appear in
     // a not-yet-planned query tree.
     if let Some(query) = node.as_query() {
-        if query.commandType == nodes::nodes::CmdType::CMD_UTILITY {
+        if query.commandType == ::nodes::nodes::CmdType::CMD_UTILITY {
             // This logic must handle any utility command for which parse
             // analysis was nontrivial (cf. stmt_requires_parse_analysis).
             // Notably, CALL requires its own processing.
@@ -3915,7 +3915,7 @@ fn extract_query_dependencies_walker(node: &Node, ctx: &mut ExtractDepsCtx) -> P
 
         // Collect relation OIDs in this Query's rtable.
         for rte in query.rtable.iter() {
-            use nodes::parsenodes::RTEKind;
+            use ::nodes::parsenodes::RTEKind;
             if rte.rtekind == RTEKind::RTE_RELATION
                 || (rte.rtekind == RTEKind::RTE_SUBQUERY && rte.relid != 0)
                 || (rte.rtekind == RTEKind::RTE_NAMEDTUPLESTORE && rte.relid != 0)
@@ -3995,7 +3995,7 @@ fn utility_contains_query<'a, 'mcx>(parsetree: Option<&'a Node<'mcx>>) -> Option
     let node = qry?;
     match node.as_query() {
         Some(q) => {
-            if q.commandType == nodes::nodes::CmdType::CMD_UTILITY {
+            if q.commandType == ::nodes::nodes::CmdType::CMD_UTILITY {
                 // return UtilityContainsQuery(qry->utilityStmt);
                 utility_contains_query(q.utilityStmt.as_deref())
             } else {
@@ -4017,7 +4017,7 @@ fn utility_contains_query<'a, 'mcx>(parsetree: Option<&'a Node<'mcx>>) -> Option
 /// [`ExtractDepsCtx`] accumulators.
 fn extract_query_dependencies_value<'mcx, 'q>(
     _mcx: Mcx<'mcx>,
-    query_list: &[nodes::copy_query::Query<'q>],
+    query_list: &[::nodes::copy_query::Query<'q>],
 ) -> PgResult<ext::QueryDependenciesValue> {
     let mut ctx = ExtractDepsCtx {
         relation_oids: Vec::new(),

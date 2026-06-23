@@ -32,8 +32,8 @@ use mcx::{Mcx, PgVec};
 use types_core::{fmgr::INDEX_MAX_KEYS, Oid};
 use datum::Datum as DatumWord;
 use types_error::PgResult;
-use nodes::execnodes::{EStateData, IndexInfo, RriId, SlotId};
-use nodes::EcxtId;
+use ::nodes::execnodes::{EStateData, IndexInfo, RriId, SlotId};
+use ::nodes::EcxtId;
 use rel::Relation;
 use types_scan::sdir::ScanDirection;
 use types_scan::scankey::ScanKeyData;
@@ -1067,7 +1067,7 @@ fn index_check_exclusion_scan<'mcx>(
     index_info: &IndexInfo<'mcx>,
     econtext: EcxtId,
     slot: SlotId,
-    mut predicate: Option<&mut nodes::execexpr::ExprState<'mcx>>,
+    mut predicate: Option<&mut ::nodes::execexpr::ExprState<'mcx>>,
 ) -> PgResult<()> {
     // Scan all live tuples in the base relation.
     // snapshot = RegisterSnapshot(GetLatestSnapshot())
@@ -1307,8 +1307,8 @@ fn index_unchanged_by_update<'mcx>(
 /// Run [`index_expression_changed_walker`] over a `List *` of indexed
 /// expression trees (`RelationGetIndexExpressions` output).
 fn index_expressions_changed(
-    idx_exprs: Option<&[nodes::primnodes::Expr]>,
-    all_updated_cols: Option<&nodes::bitmapset::Bitmapset>,
+    idx_exprs: Option<&[::nodes::primnodes::Expr]>,
+    all_updated_cols: Option<&::nodes::bitmapset::Bitmapset>,
 ) -> bool {
     let Some(exprs) = idx_exprs else {
         return false;
@@ -1324,14 +1324,14 @@ fn index_expressions_changed(
 /// Indexed-expression helper for [`index_unchanged_by_update`]. Returns true
 /// when a `Var` that appears within `all_updated_cols` is located.
 fn index_expression_changed_walker(
-    node: Option<&nodes::primnodes::Expr>,
-    all_updated_cols: Option<&nodes::bitmapset::Bitmapset>,
+    node: Option<&::nodes::primnodes::Expr>,
+    all_updated_cols: Option<&::nodes::bitmapset::Bitmapset>,
 ) -> bool {
     let Some(node) = node else {
         return false;
     };
 
-    if let nodes::primnodes::Expr::Var(var) = node {
+    if let ::nodes::primnodes::Expr::Var(var) = node {
         if bms_is_member(
             var.varattno as i32 - FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER,
             all_updated_cols,
@@ -1470,7 +1470,7 @@ fn econtext_of<'mcx>(estate: &mut EStateData<'mcx>) -> EcxtId {
 /// `ExecQual(predicate, econtext)` — a `None` predicate is always-true.
 fn exec_qual_opt<'mcx>(
     estate: &mut EStateData<'mcx>,
-    predicate: Option<&mut nodes::execexpr::ExprState<'mcx>>,
+    predicate: Option<&mut ::nodes::execexpr::ExprState<'mcx>>,
     econtext: EcxtId,
 ) -> PgResult<bool> {
     match predicate {

@@ -1,5 +1,5 @@
 //! Bridge from the canonical `'mcx`-arena parse nodes
-//! (`nodes::ddlnodes`) that flow through utility dispatch to the owned
+//! (`::nodes::ddlnodes`) that flow through utility dispatch to the owned
 //! `parsenodes` role-statement model that `CreateRole`/`AlterRole`/
 //! `AlterRoleSet`/`DropRole`/`ReassignOwnedObjects` consume.
 //!
@@ -10,7 +10,7 @@
 //! `backend-catalog-pg-db-role-setting` does for `ALTER ROLE … SET`.
 
 use types_error::PgResult;
-use nodes::nodes::{ntag, Node as ANode};
+use ::nodes::nodes::{ntag, Node as ANode};
 
 use parsenodes as pn;
 
@@ -59,8 +59,8 @@ fn node_to_owned(node: &ANode<'_>) -> PgResult<pn::Node> {
     }
 }
 
-fn role_spec_to_owned(rs: &nodes::ddlnodes::RoleSpec<'_>) -> pn::RoleSpec {
-    use nodes::parsenodes::RoleSpecType as A;
+fn role_spec_to_owned(rs: &::nodes::ddlnodes::RoleSpec<'_>) -> pn::RoleSpec {
+    use ::nodes::parsenodes::RoleSpecType as A;
     let roletype = match rs.roletype {
         A::Cstring => pn::RoleSpecType::ROLESPEC_CSTRING,
         A::CurrentRole => pn::RoleSpecType::ROLESPEC_CURRENT_ROLE,
@@ -75,7 +75,7 @@ fn role_spec_to_owned(rs: &nodes::ddlnodes::RoleSpec<'_>) -> pn::RoleSpec {
     }
 }
 
-fn def_elem_to_owned(de: &nodes::ddlnodes::DefElem<'_>) -> PgResult<pn::DefElem> {
+fn def_elem_to_owned(de: &::nodes::ddlnodes::DefElem<'_>) -> PgResult<pn::DefElem> {
     let arg = match de.arg.as_deref() {
         Some(a) => Some(Box::new(node_to_owned(a)?)),
         None => None,
@@ -89,7 +89,7 @@ fn def_elem_to_owned(de: &nodes::ddlnodes::DefElem<'_>) -> PgResult<pn::DefElem>
     })
 }
 
-fn access_priv_to_owned(ap: &nodes::ddlnodes::AccessPriv<'_>) -> PgResult<pn::AccessPriv> {
+fn access_priv_to_owned(ap: &::nodes::ddlnodes::AccessPriv<'_>) -> PgResult<pn::AccessPriv> {
     let mut cols = Vec::with_capacity(ap.cols.len());
     for c in ap.cols.as_slice() {
         cols.push(node_to_owned(c)?);
@@ -100,7 +100,7 @@ fn access_priv_to_owned(ap: &nodes::ddlnodes::AccessPriv<'_>) -> PgResult<pn::Ac
     })
 }
 
-fn options_to_owned(opts: &[nodes::nodes::NodePtr<'_>]) -> PgResult<Vec<pn::Node>> {
+fn options_to_owned(opts: &[::nodes::nodes::NodePtr<'_>]) -> PgResult<Vec<pn::Node>> {
     let mut out = Vec::with_capacity(opts.len());
     for o in opts {
         out.push(node_to_owned(o)?);
@@ -109,7 +109,7 @@ fn options_to_owned(opts: &[nodes::nodes::NodePtr<'_>]) -> PgResult<Vec<pn::Node
 }
 
 pub fn create_role_stmt_to_owned(
-    s: &nodes::ddlnodes::CreateRoleStmt<'_>,
+    s: &::nodes::ddlnodes::CreateRoleStmt<'_>,
 ) -> PgResult<pn::CreateRoleStmt> {
     Ok(pn::CreateRoleStmt {
         stmt_type: s.stmt_type,
@@ -119,7 +119,7 @@ pub fn create_role_stmt_to_owned(
 }
 
 pub fn alter_role_stmt_to_owned(
-    s: &nodes::ddlnodes::AlterRoleStmt<'_>,
+    s: &::nodes::ddlnodes::AlterRoleStmt<'_>,
 ) -> PgResult<pn::AlterRoleStmt> {
     let role = match s.role.as_deref() {
         Some(r) => Some(Box::new(node_to_owned(r)?)),
@@ -133,7 +133,7 @@ pub fn alter_role_stmt_to_owned(
 }
 
 pub fn alter_role_set_stmt_to_owned(
-    s: &nodes::ddlnodes::AlterRoleSetStmt<'_>,
+    s: &::nodes::ddlnodes::AlterRoleSetStmt<'_>,
 ) -> PgResult<pn::AlterRoleSetStmt> {
     let role = match s.role.as_deref() {
         Some(r) => Some(Box::new(node_to_owned(r)?)),
@@ -151,7 +151,7 @@ pub fn alter_role_set_stmt_to_owned(
 }
 
 pub fn drop_role_stmt_to_owned(
-    s: &nodes::ddlnodes::DropRoleStmt<'_>,
+    s: &::nodes::ddlnodes::DropRoleStmt<'_>,
 ) -> PgResult<pn::DropRoleStmt> {
     let mut roles = Vec::with_capacity(s.roles.len());
     for r in s.roles.as_slice() {
@@ -164,7 +164,7 @@ pub fn drop_role_stmt_to_owned(
 }
 
 pub fn reassign_owned_stmt_to_owned(
-    s: &nodes::ddlnodes::ReassignOwnedStmt<'_>,
+    s: &::nodes::ddlnodes::ReassignOwnedStmt<'_>,
 ) -> PgResult<pn::ReassignOwnedStmt> {
     let mut roles = Vec::with_capacity(s.roles.len());
     for r in s.roles.as_slice() {
@@ -178,7 +178,7 @@ pub fn reassign_owned_stmt_to_owned(
 }
 
 pub fn grant_role_stmt_to_owned(
-    s: &nodes::ddlnodes::GrantRoleStmt<'_>,
+    s: &::nodes::ddlnodes::GrantRoleStmt<'_>,
 ) -> PgResult<pn::GrantRoleStmt> {
     let mut granted_roles = Vec::with_capacity(s.granted_roles.len());
     for r in s.granted_roles.as_slice() {
@@ -207,7 +207,7 @@ pub fn grant_role_stmt_to_owned(
 }
 
 pub fn drop_owned_stmt_to_owned(
-    s: &nodes::ddlnodes::DropOwnedStmt<'_>,
+    s: &::nodes::ddlnodes::DropOwnedStmt<'_>,
 ) -> PgResult<pn::DropOwnedStmt> {
     let mut roles = Vec::with_capacity(s.roles.len());
     for r in s.roles.as_slice() {
@@ -224,7 +224,7 @@ pub fn drop_owned_stmt_to_owned(
 /// extraction over `args` (`A_Const` nodes) is the GUC owner's concern, so the
 /// args are carried in owned-value form.
 fn variable_set_stmt_to_owned(node: &ANode<'_>) -> PgResult<pn::Node> {
-    use nodes::ddlnodes::VariableSetKind as A;
+    use ::nodes::ddlnodes::VariableSetKind as A;
     if node.node_tag() != ntag::T_VariableSetStmt {
         return Err(unrecognized(node));
     }

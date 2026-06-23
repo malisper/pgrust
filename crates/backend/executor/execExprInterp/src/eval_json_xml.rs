@@ -14,11 +14,11 @@ use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_NO_SQL_JSON_ITEM,
 };
-use nodes::execexpr::{
+use ::nodes::execexpr::{
     ExprEvalStepData, ExprState, JsonCoercionCacheId, JsonExprStateId, ResultCellId,
 };
-use nodes::execnodes::EcxtId;
-use nodes::EStateData;
+use ::nodes::execnodes::EcxtId;
+use ::nodes::EStateData;
 use types_tuple::heaptuple::Datum;
 use types_tuple::heaptuple::{JSONBOID, JSONOID, TEXTOID};
 
@@ -27,7 +27,7 @@ use jsonpath_exec::{
     JsonWrapper as PathJsonWrapper,
 };
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
-use nodes::primnodes::{JsonBehaviorType, JsonExprOp, JsonWrapper, XmlExprOp};
+use ::nodes::primnodes::{JsonBehaviorType, JsonExprOp, JsonWrapper, XmlExprOp};
 
 use crate::interp_loop::{read_cell, write_cell};
 
@@ -320,16 +320,16 @@ fn map_named_value<'mcx>(
     adt_xml::map_sql_value_to_xml_value_v(mcx, value, typid, xml_escape_strings)
 }
 
-/// Scalar snapshot of the [`XmlExpr`](nodes::primnodes::XmlExpr) fields the
+/// Scalar snapshot of the [`XmlExpr`](::nodes::primnodes::XmlExpr) fields the
 /// runtime evaluator needs, plus the positional-arg `exprType`s precomputed up
 /// front (`exprType(xexpr->args[i])`). Deliberately holds NO `Expr` subtrees: the
 /// arg nodes may carry context-allocated `Aggref`s whose derived `.clone()` is a
 /// trap (e.g. `xmlelement(... xmlagg(...))`), and C never copies them here.
 struct XmlExprSnapshot {
-    op: nodes::primnodes::XmlExprOp,
+    op: ::nodes::primnodes::XmlExprOp,
     name: Option<String>,
     arg_names: Vec<String>,
-    xmloption: nodes::primnodes::XmlOptionType,
+    xmloption: ::nodes::primnodes::XmlOptionType,
     indent: bool,
     arg_types: Vec<types_core::primitive::Oid>,
 }
@@ -357,7 +357,7 @@ pub fn ExecEvalJsonConstructor<'mcx>(
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    use nodes::primnodes::JsonConstructorType as Ct;
+    use ::nodes::primnodes::JsonConstructorType as Ct;
     let _ = econtext;
     let mcx = estate.es_query_cxt;
 
@@ -550,7 +550,7 @@ pub fn ExecEvalJsonIsPredicate<'mcx>(
     use types_jsonb::jsonb::{
         json_container_is_array, json_container_is_object, json_container_is_scalar,
     };
-    use nodes::primnodes::JsonValueType as Jt;
+    use ::nodes::primnodes::JsonValueType as Jt;
     let _ = estate;
 
     let (item_type, unique_keys, arg_type) = match &state.steps.as_ref().unwrap()[op].d {
@@ -1311,7 +1311,7 @@ fn pgstring_from_bytes<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<PgString<
 fn take_coercion_cache<'mcx>(
     state: &mut ExprState<'mcx>,
     id: JsonCoercionCacheId,
-) -> nodes::execexpr::JsonCoercionCache<'mcx> {
+) -> ::nodes::execexpr::JsonCoercionCache<'mcx> {
     let caches = state
         .json_coercion_caches
         .caches
@@ -1324,7 +1324,7 @@ fn take_coercion_cache<'mcx>(
 fn put_coercion_cache<'mcx>(
     state: &mut ExprState<'mcx>,
     id: JsonCoercionCacheId,
-    cache: nodes::execexpr::JsonCoercionCache<'mcx>,
+    cache: ::nodes::execexpr::JsonCoercionCache<'mcx>,
 ) {
     let caches = state.json_coercion_caches.caches.as_mut().unwrap();
     caches[id.0 as usize] = cache;

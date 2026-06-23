@@ -8,7 +8,7 @@
 //! `TupleHashTableData *`); `execnodes.h` exposes the full `TupleHashTableData`
 //! / `TupleHashEntryData` definitions. By the opacity-inherited rule the
 //! crossing type is therefore the real [`TupleHashTable`] /
-//! [`TupleHashEntryData`] struct from [`nodes::nodeagg`] — never an
+//! [`TupleHashEntryData`] struct from [`::nodes::nodeagg`] — never an
 //! invented `usize` handle, and never reached into through some owning node.
 //! Each seam mirrors its C counterpart's operand list, taking the table as
 //! `&mut TupleHashTable` exactly as C takes `TupleHashTable`.
@@ -31,10 +31,10 @@ use mcx::{Mcx, MemoryContext, PgBox};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
-use nodes::execexpr::ExprState;
-use nodes::execnodes::{PlanStateData, SlotId};
-use nodes::nodeagg::{TupleHashEntryData, TupleHashIterator, TupleHashTable};
-use nodes::planstate::PlanStateNode;
+use ::nodes::execexpr::ExprState;
+use ::nodes::execnodes::{PlanStateData, SlotId};
+use ::nodes::nodeagg::{TupleHashEntryData, TupleHashIterator, TupleHashTable};
+use ::nodes::planstate::PlanStateNode;
 use nodes::{EStateData, TupleSlotKind};
 
 seam_core::seam!(

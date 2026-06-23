@@ -2,15 +2,15 @@
 
 use mcx::{alloc_in, Mcx, PgBox};
 use types_error::{PgError, PgResult};
-use nodes::execnodes::{EStateData, PlanStateData};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
-use nodes::nodehash::{
+use ::nodes::execnodes::{EStateData, PlanStateData};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
+use ::nodes::nodehash::{
     Hash, HashState, ParallelHashJoinState, PHJ_BUILD_ALLOCATE, PHJ_BUILD_FREE,
     PHJ_BUILD_HASH_INNER, PHJ_BUILD_HASH_OUTER, PHJ_BUILD_RUN, PHJ_GROW_BATCHES_ELECT,
     PHJ_GROW_BATCHES_PHASE, PHJ_GROW_BUCKETS_ELECT, PHJ_GROW_BUCKETS_PHASE,
 };
-use nodes::ParallelHashGrowth;
-use nodes::nodes::Node;
+use ::nodes::ParallelHashGrowth;
+use ::nodes::nodes::Node;
 
 use crate::hash_table::{ExecHashIncreaseNumBuckets, ExecHashTableInsert};
 use crate::parallel::{
@@ -63,7 +63,7 @@ fn my_log2(num: i64) -> i32 {
 /// invariant). The caller holds `&mut HashJoinTableData`, so no aliasing copy
 /// of this resolution is live.
 unsafe fn resolve_parallel_state<'a, 'mcx>(
-    hashtable: &mut nodes::nodehash::HashJoinTableData<'mcx>,
+    hashtable: &mut ::nodes::nodehash::HashJoinTableData<'mcx>,
 ) -> &'a mut ParallelHashJoinState {
     // `parallel_state` holds the backend-local address of the
     // ParallelHashJoinState in the DSM segment (C's `ParallelHashJoinState *`),
@@ -149,7 +149,7 @@ pub fn MultiExecPrivateHash<'mcx>(
         .hash_expr
         .as_deref_mut()
         .expect("MultiExecPrivateHash: node->hash_expr is NULL")
-        as *mut nodes::execexpr::ExprState;
+        as *mut ::nodes::execexpr::ExprState;
 
     // Get all tuples from the node below the Hash node and insert into the
     // hash table (or temp files).
@@ -233,7 +233,7 @@ pub fn MultiExecPrivateHash<'mcx>(
     //   if (hashtable->spaceUsed > hashtable->spacePeak)
     //       hashtable->spacePeak = hashtable->spaceUsed;
     hashtable.spaceUsed += hashtable.nbuckets as usize
-        * core::mem::size_of::<*const nodes::nodehash::HashJoinTupleData<'_>>();
+        * core::mem::size_of::<*const ::nodes::nodehash::HashJoinTupleData<'_>>();
     if hashtable.spaceUsed > hashtable.spacePeak {
         hashtable.spacePeak = hashtable.spaceUsed;
     }
@@ -264,7 +264,7 @@ pub fn MultiExecParallelHash<'mcx>(
         .hash_expr
         .as_deref_mut()
         .expect("MultiExecParallelHash: node->hash_expr is NULL")
-        as *mut nodes::execexpr::ExprState;
+        as *mut ::nodes::execexpr::ExprState;
 
     // Synchronize the parallel hash table build. ...
     //   pstate = hashtable->parallel_state;
@@ -452,7 +452,7 @@ pub fn MultiExecParallelHash<'mcx>(
 /// `mcx`.
 pub fn ExecInitHash<'mcx>(
     mcx: Mcx<'mcx>,
-    node_enum: &'mcx nodes::nodes::Node<'mcx>,
+    node_enum: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, HashState<'mcx>>> {
@@ -558,9 +558,9 @@ pub fn ExecShutdownHash<'mcx>(mcx: Mcx<'mcx>, node: &mut HashState<'mcx>) -> PgR
     //   if (node->ps.instrument && !node->hinstrument)
     //       node->hinstrument = palloc0_object(HashInstrumentation);
     if node.ps.instrument.is_some() && node.hinstrument.is_none() {
-        node.hinstrument = Some(nodes::nodehash::HashInstrumentSlot::Local(alloc_in(
+        node.hinstrument = Some(::nodes::nodehash::HashInstrumentSlot::Local(alloc_in(
             mcx,
-            nodes::nodehash::HashInstrumentation::default(),
+            ::nodes::nodehash::HashInstrumentation::default(),
         )?));
     }
 

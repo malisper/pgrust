@@ -69,7 +69,7 @@ use types_nbtree::{
     BT_IS_POSTING, BT_OFFSET_MASK, BT_PIVOT_HEAP_TID_ATTR, INDEX_ALT_TID_MASK, P_FIRSTKEY, P_HIKEY,
     P_NONE,
 };
-use nodes::Tuplesortstate;
+use ::nodes::Tuplesortstate;
 use rel::Relation;
 use types_tuple::heaptuple::{
     IndexTupleData, IndexTupleSize, ItemPointerData, INDEX_SIZE_MASK, INVALID_OFFSET_NUMBER,
@@ -98,7 +98,7 @@ pub mod deferred;
 // bridged through the `backend-access-nbtree-build-seams::btbuild` seam, which
 // nbtsort installs here: the adapter passes the `IndexInfoCarrier` (#342)
 // through, and this installer downcasts it back to the real
-// `nodes::execnodes::IndexInfo<'mcx>` before invoking the serial build.
+// `::nodes::execnodes::IndexInfo<'mcx>` before invoking the serial build.
 // ===========================================================================
 
 /// Install this crate's inward seams.
@@ -109,7 +109,7 @@ pub fn init_seams() {
         // (tag-checked downcast — a NULL/wrong-type carrier is the C
         // NULL-pointer programming error).
         let info = index_info
-            .downcast_mut::<nodes::execnodes::IndexInfo<'_>>()
+            .downcast_mut::<::nodes::execnodes::IndexInfo<'_>>()
             .unwrap_or_else(|| {
                 panic!("btbuild: IndexInfoCarrier did not carry the expected IndexInfo")
             });

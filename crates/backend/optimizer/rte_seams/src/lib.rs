@@ -8,8 +8,8 @@
 //! lifetime-free, and `#[derive(Default)]`. It must stay that way: the planner
 //! threads it everywhere and giving it an `'mcx` lifetime (or an inline RTE
 //! arena) would force the lifetime through the entire optimizer. The real
-//! range-table entries — [`nodes::RangeTblEntry`]`<'mcx>` and the owning
-//! [`nodes::Query`]`<'mcx>` — are owned by the *Query* (the planner-entry
+//! range-table entries — [`::nodes::RangeTblEntry`]`<'mcx>` and the owning
+//! [`::nodes::Query`]`<'mcx>` — are owned by the *Query* (the planner-entry
 //! crate), not by `PlannerInfo`. `PlannerInfo` only holds opaque 1-based
 //! handles: `simple_rte_array: Vec<RangeTblEntryId>` and `parse: QueryId`.
 //!
@@ -183,7 +183,7 @@ seam_core::seam!(
         run: &PlannerRun<'mcx>,
         root: &PlannerInfo,
         rti: Index,
-    ) -> types_error::PgResult<alloc::vec::Vec<nodes::primnodes::Expr<'mcx>>>
+    ) -> types_error::PgResult<alloc::vec::Vec<::nodes::primnodes::Expr<'mcx>>>
 );
 seam_core::seam!(
     /// `root->simple_rte_array[rti]->tablefunc != NULL` — does this RTE carry a
@@ -289,7 +289,7 @@ pub fn init_seams() {
         // before alloc_node, same as the coltypes path below).
         let colvars = {
             let rte = planner_rt_fetch(run, root, rti);
-            if rte.rtekind == nodes::parsenodes::RTEKind::RTE_FUNCTION {
+            if rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_FUNCTION {
                 Some(
                     plancat_ext_seams::expand_function_rte_colvars::call(
                         run.mcx(),
@@ -331,7 +331,7 @@ pub fn init_seams() {
             if coltype == types_core::primitive::Oid::default() {
                 return Ok(None);
             }
-            let var = nodes::primnodes::Var {
+            let var = ::nodes::primnodes::Var {
                 varno: rti as i32,
                 varattno: varattno as types_core::primitive::AttrNumber,
                 vartype: coltype,
@@ -364,7 +364,7 @@ pub fn init_seams() {
         // Build the Var values while borrowing the RTE's inline subquery, then
         // drop that borrow before allocating into root's node arena.
         let vars: alloc::vec::Vec<(
-            nodes::primnodes::Var,
+            ::nodes::primnodes::Var,
             types_core::primitive::AttrNumber,
             bool,
         )> = {
@@ -494,7 +494,7 @@ pub fn init_seams() {
         {
             Some(tsc) => match &tsc.args {
                 Some(list) => {
-                    let mut out: alloc::vec::Vec<nodes::primnodes::Expr> =
+                    let mut out: alloc::vec::Vec<::nodes::primnodes::Expr> =
                         alloc::vec::Vec::with_capacity(list.len());
                     for a in list.iter() {
                         out.push(a.clone_in(mcx)?);
@@ -630,7 +630,7 @@ pub fn init_seams() {
         let mut startup = 0.0_f64;
         let mut per_tuple = 0.0_f64;
         if let Some(tf) = rte.tablefunc.as_deref().and_then(|n| n.as_table_func()) {
-            let mut add = |e: &nodes::primnodes::Expr| {
+            let mut add = |e: &::nodes::primnodes::Expr| {
                 let (s, pt) =
                     costsize::qualcost::cost_qual_eval_expr(Some(root), e);
                 startup += s;
@@ -712,7 +712,7 @@ fn parse_onconflict<'mcx>(
     Option<plancat_ext_seams::OnConflictInfo>,
 > {
     use plancat_ext_seams::{InferenceElemInfo, OnConflictInfo};
-    use nodes::primnodes::Expr;
+    use ::nodes::primnodes::Expr;
 
     let mcx = run.mcx();
 
@@ -767,7 +767,7 @@ fn parse_onconflict<'mcx>(
                 };
 
                 let action_is_update =
-                    oc.action == nodes::nodes::OnConflictAction::ONCONFLICT_UPDATE;
+                    oc.action == ::nodes::nodes::OnConflictAction::ONCONFLICT_UPDATE;
                 Some((elems, arbiter_where, oc.constraint, action_is_update))
             }
         }

@@ -770,7 +770,7 @@ pub fn gistprunepage<'mcx>(
         let mut offnum = FIRST_OFFSET_NUMBER;
         while offnum <= maxoff {
             let id = PageGetItemId(&pref, offnum)?;
-            if page::ItemIdIsDead(&id) {
+            if ::page::ItemIdIsDead(&id) {
                 deletable.push(offnum);
             }
             offnum += 1;

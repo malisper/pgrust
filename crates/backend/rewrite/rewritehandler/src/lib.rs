@@ -44,12 +44,12 @@ use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
 
-use nodes::copy_query::Query;
-use nodes::ddlnodes::CoercionContext;
-use nodes::nodes::{CmdType, Node};
-use nodes::parsenodes::{RTEKind, RangeTblEntry};
-use nodes::primnodes::{CoercionForm, CollateExpr, Expr, NextValueExpr, TargetEntry};
-use nodes::rawnodes::RangeTblRef;
+use ::nodes::copy_query::Query;
+use ::nodes::ddlnodes::CoercionContext;
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
+use ::nodes::primnodes::{CoercionForm, CollateExpr, Expr, NextValueExpr, TargetEntry};
+use ::nodes::rawnodes::RangeTblRef;
 
 use nodes_core::bitmapset::{bms_add_member, bms_is_member, bms_next_member};
 use nodes_core::makefuncs::make_target_entry;
@@ -210,7 +210,7 @@ fn node_into_expr(node: Node<'_>) -> PgResult<Expr> {
 pub fn view_has_instead_trigger(
     view: &Relation<'_>,
     event: CmdType,
-    merge_action_list: &[nodes::nodes::NodePtr<'_>],
+    merge_action_list: &[::nodes::nodes::NodePtr<'_>],
 ) -> PgResult<bool> {
     let trig = view.rd_trigdesc.as_deref();
     match event {
@@ -406,8 +406,8 @@ pub fn view_query_is_auto_updatable(
 pub(crate) fn view_cols_are_auto_updatable<'mcx>(
     mcx: Mcx<'mcx>,
     viewquery: &Query<'mcx>,
-    required_cols: Option<&nodes::bitmapset::Bitmapset<'_>>,
-    mut updatable_cols: Option<&mut Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>>,
+    required_cols: Option<&::nodes::bitmapset::Bitmapset<'_>>,
+    mut updatable_cols: Option<&mut Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>>,
     non_updatable_col: &mut Option<String>,
 ) -> PgResult<Option<&'static str>> {
     // The caller verified this view is auto-updatable -> single base relation.
@@ -452,10 +452,10 @@ pub(crate) fn view_cols_are_auto_updatable<'mcx>(
 /// Caller `relation_is_updatable` (and the next-slice `rewriteTargetView`).
 pub(crate) fn adjust_view_column_set<'mcx>(
     mcx: Mcx<'mcx>,
-    cols: Option<&nodes::bitmapset::Bitmapset<'_>>,
+    cols: Option<&::nodes::bitmapset::Bitmapset<'_>>,
     targetlist: &[TargetEntry<'mcx>],
-) -> PgResult<Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>> {
-    let mut result: Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> = None;
+) -> PgResult<Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>> {
+    let mut result: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
 
     let mut col = -1;
     loop {
@@ -517,7 +517,7 @@ pub(crate) fn adjust_view_column_set<'mcx>(
 pub fn error_view_not_updatable(
     view: &Relation<'_>,
     command: CmdType,
-    merge_action_list: &[nodes::nodes::NodePtr<'_>],
+    merge_action_list: &[::nodes::nodes::NodePtr<'_>],
     detail: Option<&str>,
 ) -> PgError {
     let name = view.name();
@@ -661,7 +661,7 @@ fn relation_is_updatable_internal<'mcx>(
     reloid: types_core::Oid,
     outer_reloids: &mut Vec<types_core::Oid>,
     include_triggers: bool,
-    include_cols: Option<&nodes::bitmapset::Bitmapset<'_>>,
+    include_cols: Option<&::nodes::bitmapset::Bitmapset<'_>>,
 ) -> PgResult<i32> {
     use nodes_core::bitmapset::{bms_int_members, bms_is_empty};
 
@@ -747,7 +747,7 @@ fn relation_is_updatable_internal<'mcx>(
 
         if view_query_is_auto_updatable(&viewquery, false)?.is_none() {
             // Determine which of the view's columns are updatable.
-            let mut updatable_cols: Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> =
+            let mut updatable_cols: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> =
                 None;
             view_cols_are_auto_updatable(
                 mcx,
@@ -891,7 +891,7 @@ pub fn expand_generated_columns_in_expr<'mcx>(
     let mut rte = RangeTblEntry::new_in(mcx);
     rte.eref = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::Alias {
+        ::nodes::rawnodes::Alias {
             aliasname: Some(PgString::from_str_in(&rel.name(), mcx)?),
             colnames: mcx::PgVec::new_in(mcx),
         },
@@ -982,7 +982,7 @@ mod tests {
         q.jointree = Some(
             mcx::alloc_in(
                 mcx,
-                nodes::rawnodes::FromExpr {
+                ::nodes::rawnodes::FromExpr {
                     fromlist,
                     quals: None,
                 },

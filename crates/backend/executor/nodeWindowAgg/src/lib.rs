@@ -66,9 +66,9 @@ use types_tuple::heaptuple::Datum;
 
 use types_core::primitive::{AttrNumber, Oid};
 
-use nodes::execnodes::{EcxtId, SlotId};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
-use nodes::nodewindowagg::*;
+use ::nodes::execnodes::{EcxtId, SlotId};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::nodes::nodewindowagg::*;
 use nodes::{EStateData, PlanStateNode};
 
 const INVALID_OID: Oid = 0;
@@ -97,7 +97,7 @@ fn check_component_fn_acl<'mcx>(mcx: mcx::Mcx<'mcx>, fnoid: Oid, agg_owner: Oid)
         let name = lsyscache::get_func_name::call(mcx, fnoid)?.map(|s| s.as_str().into());
         aclchk_seams::aclcheck_error::call(
             aclresult,
-            nodes::parsenodes::ObjectType::Function,
+            ::nodes::parsenodes::ObjectType::Function,
             name,
         )?;
     }
@@ -1404,9 +1404,9 @@ fn get_fn_expr_arg_stable(winstate: &WindowAggState<'_>, perfuncno: usize, argnu
         None => return false,
     };
     match arg {
-        nodes::primnodes::Expr::Const(_) => true,
-        nodes::primnodes::Expr::Param(p) => {
-            p.paramkind == nodes::primnodes::PARAM_EXTERN
+        ::nodes::primnodes::Expr::Const(_) => true,
+        ::nodes::primnodes::Expr::Param(p) => {
+            p.paramkind == ::nodes::primnodes::PARAM_EXTERN
         }
         _ => false,
     }
@@ -2623,14 +2623,14 @@ fn exec_window_agg_node<'mcx>(
 /// `ExecInitWindowAgg` — create the run-time information for a WindowAgg node
 /// and initialize its outer subtree.
 pub fn ExecInitWindowAgg<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, WindowAggState<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
     let wnode: &'mcx WindowAgg<'mcx> = match node.node_tag() {
-        nodes::nodes::ntag::T_WindowAgg => node.expect_windowagg(),
+        ::nodes::nodes::ntag::T_WindowAgg => node.expect_windowagg(),
         other => panic!("castNode(WindowAgg, node) failed: {other:?}"),
     };
 
@@ -2683,7 +2683,7 @@ pub fn ExecInitWindowAgg<'mcx>(
     execUtils::exec_create_scan_slot_from_outer_plan::call(
         estate,
         &mut winstate.ss,
-        nodes::TupleSlotKind::MinimalTuple,
+        ::nodes::TupleSlotKind::MinimalTuple,
     )?;
     let scan_slot = winstate.ss.ss_ScanTupleSlot.unwrap();
     let scanDesc = clone_slot_descriptor(estate, scan_slot, mcx)?;
@@ -2699,22 +2699,22 @@ pub fn ExecInitWindowAgg<'mcx>(
     winstate.first_part_slot = Some(execTuples::exec_init_extra_tuple_slot::call(
         estate,
         clone_desc(&scanDesc, mcx)?,
-        nodes::TupleSlotKind::MinimalTuple,
+        ::nodes::TupleSlotKind::MinimalTuple,
     )?);
     winstate.agg_row_slot = Some(execTuples::exec_init_extra_tuple_slot::call(
         estate,
         clone_desc(&scanDesc, mcx)?,
-        nodes::TupleSlotKind::MinimalTuple,
+        ::nodes::TupleSlotKind::MinimalTuple,
     )?);
     winstate.temp_slot_1 = Some(execTuples::exec_init_extra_tuple_slot::call(
         estate,
         clone_desc(&scanDesc, mcx)?,
-        nodes::TupleSlotKind::MinimalTuple,
+        ::nodes::TupleSlotKind::MinimalTuple,
     )?);
     winstate.temp_slot_2 = Some(execTuples::exec_init_extra_tuple_slot::call(
         estate,
         clone_desc(&scanDesc, mcx)?,
-        nodes::TupleSlotKind::MinimalTuple,
+        ::nodes::TupleSlotKind::MinimalTuple,
     )?);
 
     // create frame head and tail slots only if needed.
@@ -2727,7 +2727,7 @@ pub fn ExecInitWindowAgg<'mcx>(
             winstate.framehead_slot = Some(execTuples::exec_init_extra_tuple_slot::call(
                 estate,
                 clone_desc(&scanDesc, mcx)?,
-                nodes::TupleSlotKind::MinimalTuple,
+                ::nodes::TupleSlotKind::MinimalTuple,
             )?);
         }
         if ((frameOptions & FRAMEOPTION_END_CURRENT_ROW) != 0 && wnode.ordNumCols != 0)
@@ -2736,7 +2736,7 @@ pub fn ExecInitWindowAgg<'mcx>(
             winstate.frametail_slot = Some(execTuples::exec_init_extra_tuple_slot::call(
                 estate,
                 clone_desc(&scanDesc, mcx)?,
-                nodes::TupleSlotKind::MinimalTuple,
+                ::nodes::TupleSlotKind::MinimalTuple,
             )?);
         }
     }
@@ -2745,7 +2745,7 @@ pub fn ExecInitWindowAgg<'mcx>(
     execTuples::exec_init_result_tuple_slot_tl::call(
         &mut winstate.ss.ps,
         estate,
-        nodes::TupleSlotKind::Virtual,
+        ::nodes::TupleSlotKind::Virtual,
     )?;
     execUtils::exec_assign_projection_info::call(&mut winstate.ss.ps, estate, None)?;
 
@@ -2890,7 +2890,7 @@ pub fn ExecInitWindowAgg<'mcx>(
         // discovery-list WindowFuncExprState before borrowing perfunc (disjoint
         // fields, but the clone must precede the &mut perfunc borrow).
         let (resulttype_len, resulttype_byval) = lsyscache::get_typlenbyval::call(wintype)?;
-        let wfunc_clone: PgBox<'mcx, nodes::primnodes::WindowFunc> = {
+        let wfunc_clone: PgBox<'mcx, ::nodes::primnodes::WindowFunc> = {
             let w = winstate.funcs.as_ref().unwrap()[fi]
                 .wfunc
                 .as_ref()
@@ -3914,7 +3914,7 @@ fn node<'a, 'mcx>(winstate: &'a WindowAggState<'mcx>) -> &'a WindowAgg<'mcx> {
         .plan
         .expect("WindowAggState: plan back-pointer not set");
     match plan.node_tag() {
-        nodes::nodes::ntag::T_WindowAgg => plan.expect_windowagg(),
+        ::nodes::nodes::ntag::T_WindowAgg => plan.expect_windowagg(),
         other => panic!("WindowAggState.plan is not a WindowAgg: {other:?}"),
     }
 }
@@ -3983,7 +3983,7 @@ fn perfunc_winobj_argstate_mut<'a, 'mcx>(
     winstate: &'a mut WindowAggState<'mcx>,
     perfuncno: usize,
     argno: usize,
-) -> &'a mut nodes::execexpr::ExprState<'mcx> {
+) -> &'a mut ::nodes::execexpr::ExprState<'mcx> {
     // C: winobj->argstates == wfuncstate->args (the same arg-ExprState list).
     // The owned model keeps it on `winstate.funcs[perfuncno].args` (the single
     // owner; perfuncno == funcs index, no dedup), so resolve it there.
@@ -4003,7 +4003,7 @@ fn perfunc_winobj_argstate_mut<'a, 'mcx>(
 fn perfunc_wfuncstate<'a, 'mcx>(
     winstate: &'a WindowAggState<'mcx>,
     i: usize,
-) -> &'a nodes::nodewindowagg::WindowFuncExprState<'mcx> {
+) -> &'a ::nodes::nodewindowagg::WindowFuncExprState<'mcx> {
     &winstate
         .funcs
         .as_ref()
@@ -4013,7 +4013,7 @@ fn perfunc_wfuncstate<'a, 'mcx>(
 fn perfunc_wfuncstate_mut<'a, 'mcx>(
     winstate: &'a mut WindowAggState<'mcx>,
     i: usize,
-) -> &'a mut nodes::nodewindowagg::WindowFuncExprState<'mcx> {
+) -> &'a mut ::nodes::nodewindowagg::WindowFuncExprState<'mcx> {
     &mut winstate
         .funcs
         .as_mut()
@@ -4032,7 +4032,7 @@ fn wfuncstate_arg_mut<'a, 'mcx>(
     winstate: &'a mut WindowAggState<'mcx>,
     i: usize,
     argno: usize,
-) -> &'a mut nodes::execexpr::ExprState<'mcx> {
+) -> &'a mut ::nodes::execexpr::ExprState<'mcx> {
     perfunc_wfuncstate_mut(winstate, i)
         .args
         .as_mut()
@@ -4081,10 +4081,10 @@ fn reset_expr_context<'mcx>(
 // --- ExecInitWindowAgg sub-helpers --------------------------------------
 
 fn init_qual_from_plan<'mcx>(
-    qual: &Option<PgVec<'mcx, nodes::primnodes::Expr<'mcx>>>,
-    parent: &mut nodes::execnodes::PlanStateData<'mcx>,
+    qual: &Option<PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>>,
+    parent: &mut ::nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     match qual {
         None => execExpr::exec_init_qual::call(None, parent, estate),
         Some(list) => execExpr::exec_init_qual::call(Some(list.as_slice()), parent, estate),
@@ -4092,10 +4092,10 @@ fn init_qual_from_plan<'mcx>(
 }
 
 fn init_qual_from_list<'mcx>(
-    list: &Option<PgVec<'mcx, nodes::primnodes::Expr<'mcx>>>,
-    parent: &mut nodes::execnodes::PlanStateData<'mcx>,
+    list: &Option<PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>>,
+    parent: &mut ::nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     match list {
         None => execExpr::exec_init_qual::call(None, parent, estate),
         Some(l) => execExpr::exec_init_qual::call(Some(l.as_slice()), parent, estate),
@@ -4103,10 +4103,10 @@ fn init_qual_from_list<'mcx>(
 }
 
 fn init_expr_opt<'mcx>(
-    expr: &Option<PgBox<'mcx, nodes::primnodes::Expr<'mcx>>>,
-    parent: &mut nodes::execnodes::PlanStateData<'mcx>,
+    expr: &Option<PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>,
+    parent: &mut ::nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     match expr {
         None => Ok(None),
         Some(e) => {

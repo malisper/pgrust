@@ -13,7 +13,7 @@
 
 use types_error::PgResult;
 use types_evtcache::EventTriggerEvent;
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 
 seam_core::seam!(
     /// `EventTriggerCommonSetup` + `EventTriggerInvoke` (event_trigger.c) — the

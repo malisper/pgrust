@@ -14,9 +14,9 @@ use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
-use nodes::ddlnodes::TruncateStmt;
-use nodes::nodes::Node;
-use nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT, OBJECT_SEQUENCE};
+use ::nodes::ddlnodes::TruncateStmt;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT, OBJECT_SEQUENCE};
 use rel::Relation;
 use types_storage::lock::{AccessExclusiveLock, NoLock, LOCKMODE};
 use types_tuple::access::{

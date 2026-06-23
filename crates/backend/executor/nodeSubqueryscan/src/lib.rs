@@ -109,11 +109,11 @@ pub fn ExecSubqueryScan<'mcx>(
 /// The `PlanState.ExecProcNode` callback installed by [`ExecInitSubqueryScan`]:
 /// `castNode(SubqueryScanState, pstate)` then run [`ExecSubqueryScan`].
 fn exec_subquery_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::PlanStateNode::SubqueryScan(node) => node,
+        ::nodes::PlanStateNode::SubqueryScan(node) => node,
         other => panic!(
             "castNode(SubqueryScanState, pstate) failed: tag {}",
             other.tag()
@@ -128,7 +128,7 @@ fn exec_subquery_scan_node<'mcx>(
 /// fallible on OOM.
 pub fn ExecInitSubqueryScan<'mcx>(
     node: &'mcx SubqueryScan<'mcx>,
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<mcx::PgBox<'mcx, SubqueryScanState<'mcx>>> {

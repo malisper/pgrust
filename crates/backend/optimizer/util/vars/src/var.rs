@@ -37,8 +37,8 @@ use nodes_core::node_walker::{
     expression_tree_walker, node_expr_wrapper, query_or_expression_tree_walker, query_tree_walker,
 };
 use types_error::PgResult;
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::Expr;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::Expr;
 use pathnodes::{Bitmapset, NodeId, PlannerInfo, Relids};
 
 // `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h) = -7. var.c offsets
@@ -47,7 +47,7 @@ use pathnodes::{Bitmapset, NodeId, PlannerInfo, Relids};
 const FIRST_LOW_INVALID_HEAP_ATTRIBUTE_NUMBER: i32 = -7;
 
 /// `VAR_RETURNING_DEFAULT` (primnodes.h) — the default `varreturningtype`.
-use nodes::primnodes::VarReturningType;
+use ::nodes::primnodes::VarReturningType;
 
 // ===========================================================================
 // Relids word-vector algebra (nodes/bitmapset.c) — inline, faithful.
@@ -185,7 +185,7 @@ fn bms_join(a: Relids, b: Relids) -> Relids {
 /// `Var`/`PlaceHolderVar`) into a borrowable [`Relids`]. The two share the same
 /// `{ words: Vec<u64> }` representation; an empty `words` is the empty set
 /// (`None`).
-fn expr_relids_to_relids(er: &nodes::primnodes::ExprRelids) -> Relids {
+fn expr_relids_to_relids(er: &::nodes::primnodes::ExprRelids) -> Relids {
     if er.words.iter().all(|&w| w == 0) {
         None
     } else {
@@ -435,7 +435,7 @@ pub fn pull_vars_of_level<'mcx>(
 /// `extract_lateral_references`' `RTE_SUBQUERY` arm.
 pub fn pull_vars_of_level_query<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    query: &nodes::copy_query::Query,
+    query: &::nodes::copy_query::Query,
     levelsup: i32,
 ) -> PgResult<Vec<Expr<'mcx>>> {
     let mut context = PullVarsContext {
@@ -926,22 +926,22 @@ fn seam_var_varno(root: &PlannerInfo, node: NodeId) -> i32 {
 
 /// `pull_varattnos(node, varno, &varattnos)` (var.c) — installed seam. The
 /// existing `backend-optimizer-util-var-seams` contract takes the expression by
-/// value and `varno: u32`, accumulating into a `nodes::Bitmapset`
+/// value and `varno: u32`, accumulating into a `::nodes::Bitmapset`
 /// allocated in `mcx`; this bridges the lifetime-free word-set collector into
 /// that `mcx`-owned result.
 fn seam_pull_varattnos<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     node: &Expr,
     varno: u32,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     let wrapped = node_expr_wrapper(node, mcx);
     let relids = pull_varattnos(&wrapped, varno as i32, None);
     match relids {
         None => Ok(None),
         Some(bms) => {
-            // Materialize the word set into an mcx-owned `nodes::Bitmapset`
+            // Materialize the word set into an mcx-owned `::nodes::Bitmapset`
             // by adding each member through the canonical bms_add_member.
-            let mut acc: Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+            let mut acc: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
             let mut bit: i32 = -1;
             loop {
                 bit = next_member(&bms.words, bit);
@@ -973,16 +973,16 @@ fn next_member(words: &[u64], prevbit: i32) -> i32 {
 }
 
 /// Materialize a lifetime-free word-set [`Relids`] into an `mcx`-owned
-/// `nodes::Bitmapset` by adding each member through the canonical
+/// `::nodes::Bitmapset` by adding each member through the canonical
 /// `bms_add_member`. `None` → `None` (the empty set).
 fn relids_to_mcx_bitmapset<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     relids: Relids,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     match relids {
         None => Ok(None),
         Some(bms) => {
-            let mut acc: Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+            let mut acc: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
             let mut bit: i32 = -1;
             loop {
                 bit = next_member(&bms.words, bit);
@@ -1006,11 +1006,11 @@ fn seam_contain_var_clause(node: &Expr) -> bool {
 
 /// `pull_varnos(root, node)` (var.c) — installed seam over the rootless
 /// `&Expr`-only contract (matches a `root == NULL` call), returning the relids
-/// as an `mcx`-owned `nodes::Bitmapset`. Consumed by clauses.c.
+/// as an `mcx`-owned `::nodes::Bitmapset`. Consumed by clauses.c.
 fn seam_pull_varnos_expr<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     node: &Expr,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     let wrapped = node_expr_wrapper(node, mcx);
     let relids = pull_varnos(None, &wrapped);
     relids_to_mcx_bitmapset(mcx, relids)

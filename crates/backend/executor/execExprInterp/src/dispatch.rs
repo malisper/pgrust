@@ -31,13 +31,13 @@ use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use types_error::error::{ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_COLUMN};
 use types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
-use nodes::execexpr::{
+use ::nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, EEO_FLAG_DIRECT_THREADED,
     EEO_FLAG_INTERPRETER_INITIALIZED,
 };
-use nodes::execnodes::EcxtId;
-use nodes::executor::{TupleSlotKind, TupleTableSlot};
-use nodes::EStateData;
+use ::nodes::execnodes::EcxtId;
+use ::nodes::executor::{TupleSlotKind, TupleTableSlot};
+use ::nodes::EStateData;
 use types_tuple::heaptuple::TupleDescData;
 
 use crate::justs::{
@@ -526,7 +526,7 @@ fn var_attnum_type(op: &ExprEvalStep<'_>) -> (i32, Oid) {
 /// hard-panicking (the actual evaluation still binds the slot before use).
 fn slot_opt<'a, 'mcx>(
     estate: &'a EStateData<'mcx>,
-    slot: Option<nodes::execnodes::SlotId>,
+    slot: Option<::nodes::execnodes::SlotId>,
 ) -> Option<&'a TupleTableSlot<'mcx>> {
     slot.map(|id| estate.slot(id))
 }

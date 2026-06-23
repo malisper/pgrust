@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{InvalidOid, Oid};
 use types_network::inet_struct;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, NodeId, PlannerInfo};
 
 use nodes_core::makefuncs::{make_const, make_opclause};

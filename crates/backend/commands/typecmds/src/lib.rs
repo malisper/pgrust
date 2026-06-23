@@ -71,7 +71,7 @@ use types_error::{
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE, WARNING,
 };
-use nodes::parsenodes::OBJECT_FUNCTION;
+use ::nodes::parsenodes::OBJECT_FUNCTION;
 use parsenodes::{
     DefElem, Node, TypeName, COERCION_CODE_EXPLICIT, COERCION_METHOD_FUNCTION,
     PROVOLATILE_IMMUTABLE, PROVOLATILE_VOLATILE,
@@ -2420,8 +2420,8 @@ pub fn AssignTypeMultirangeArrayOid() -> PgResult<Oid> {
 /// `ColumnDef` nodes (the `(...)` after AS).
 pub fn DefineCompositeType<'mcx>(
     mcx: Mcx<'mcx>,
-    mut typevar: nodes::rawnodes::RangeVar<'mcx>,
-    coldeflist: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
+    mut typevar: ::nodes::rawnodes::RangeVar<'mcx>,
+    coldeflist: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
 ) -> PgResult<ObjectAddress> {
     /*
      * now set the parameters for keys/inheritance etc. All of these are
@@ -2462,10 +2462,10 @@ pub fn DefineCompositeType<'mcx>(
      *   DefineRelation(createStmt, RELKIND_COMPOSITE_TYPE, InvalidOid,
      *                  &address, NULL);
      */
-    let create_stmt = nodes::ddlnodes::CreateStmt {
+    let create_stmt = ::nodes::ddlnodes::CreateStmt {
         relation: Some(mcx::alloc_in(
             mcx,
-            nodes::nodes::Node::mk_range_var(mcx, typevar)?,
+            ::nodes::nodes::Node::mk_range_var(mcx, typevar)?,
         )?),
         tableElts: coldeflist,
         inhRelations: mcx::vec_with_capacity_in(mcx, 0)?,
@@ -2475,7 +2475,7 @@ pub fn DefineCompositeType<'mcx>(
         constraints: mcx::vec_with_capacity_in(mcx, 0)?,
         nnconstraints: mcx::vec_with_capacity_in(mcx, 0)?,
         options: mcx::vec_with_capacity_in(mcx, 0)?,
-        oncommit: nodes::primnodes::OnCommitAction::ONCOMMIT_NOOP,
+        oncommit: ::nodes::primnodes::OnCommitAction::ONCOMMIT_NOOP,
         tablespacename: None,
         accessMethod: None,
         if_not_exists: false,
@@ -2492,11 +2492,11 @@ pub fn DefineCompositeType<'mcx>(
     Ok(address)
 }
 
-/// Convert the parse-node [`RangeVar`](nodes::rawnodes::RangeVar) carried
+/// Convert the parse-node [`RangeVar`](::nodes::rawnodes::RangeVar) carried
 /// by a `CompositeTypeStmt` into the `access::RangeVar` shape the namespace
 /// resolver mutates (mirrors `view.c`'s `to_access_range_var`).
 fn composite_to_access_range_var(
-    rv: &nodes::rawnodes::RangeVar<'_>,
+    rv: &::nodes::rawnodes::RangeVar<'_>,
 ) -> types_tuple::access::RangeVar {
     types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().to_string()),
@@ -2538,7 +2538,7 @@ fn define_composite_type_seam<'mcx>(
     };
 
     /* Deep-copy the coldeflist ColumnDef nodes into a fresh PgVec. */
-    let mut coldeflist: mcx::PgVec<nodes::nodes::NodePtr> =
+    let mut coldeflist: mcx::PgVec<::nodes::nodes::NodePtr> =
         mcx::vec_with_capacity_in(mcx, cts.coldeflist.len())?;
     for n in cts.coldeflist.iter() {
         coldeflist.push(mcx::alloc_in(mcx, n.clone_in(mcx)?)?);
@@ -2567,11 +2567,11 @@ use types_catalog::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
 use types_catalog::pg_type::{
     TYPTYPE_COMPOSITE, TYPTYPE_DOMAIN as PGT_TYPTYPE_DOMAIN,
 };
-use nodes::ddlnodes::{ConstrType, CONSTR_CHECK, CONSTR_DEFAULT, CONSTR_NOTNULL, CONSTR_NULL};
-use nodes::nodes::Node as RichNode;
-use nodes::parsenodes::{DropBehavior, ObjectType, DROP_RESTRICT, OBJECT_DOMAIN, OBJECT_SCHEMA};
-use nodes::parsestmt::ParseExprKind;
-use nodes::primnodes::Expr;
+use ::nodes::ddlnodes::{ConstrType, CONSTR_CHECK, CONSTR_DEFAULT, CONSTR_NOTNULL, CONSTR_NULL};
+use ::nodes::nodes::Node as RichNode;
+use ::nodes::parsenodes::{DropBehavior, ObjectType, DROP_RESTRICT, OBJECT_DOMAIN, OBJECT_SCHEMA};
+use ::nodes::parsestmt::ParseExprKind;
+use ::nodes::primnodes::Expr;
 use types_catalog::pg_constraint::{ConstraintCategory, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL};
 use types_error::ERRCODE_INVALID_COLUMN_REFERENCE;
 
@@ -2700,8 +2700,8 @@ fn cook_default<'mcx>(
             type_id,
             atttypid,
             atttypmod,
-            nodes::ddlnodes::CoercionContext::COERCION_ASSIGNMENT,
-            nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+            ::nodes::ddlnodes::CoercionContext::COERCION_ASSIGNMENT,
+            ::nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
             -1,
         )?;
         expr = match coerced {
@@ -2738,10 +2738,10 @@ fn cook_default<'mcx>(
 /// `CoerceToDomainValue` prepared by [`domain_add_check_constraint`] (carried in
 /// `pstate.p_ref_hook_state`), with the reference's location propagated.
 fn replace_domain_constraint_value<'mcx>(
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
-    cref: &nodes::rawnodes::ColumnRef<'mcx>,
-) -> PgResult<Option<nodes::nodes::NodePtr<'mcx>>> {
-    use nodes::parsestmt::ParseRefHookState;
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
+    cref: &::nodes::rawnodes::ColumnRef<'mcx>,
+) -> PgResult<Option<::nodes::nodes::NodePtr<'mcx>>> {
+    use ::nodes::parsestmt::ParseRefHookState;
     if cref.fields.len() == 1 {
         if let Some(s) = cref.fields[0].as_string() {
             let colname = s.sval.as_str();
@@ -2817,7 +2817,7 @@ fn domain_add_check_constraint<'mcx>(
      * Set up a CoerceToDomainValue to represent the occurrence of VALUE in the
      * expression. It appears to have the type of the base type, not the domain.
      */
-    let dom_val = nodes::primnodes::CoerceToDomainValue {
+    let dom_val = ::nodes::primnodes::CoerceToDomainValue {
         typeId: base_type_oid,
         typeMod: typ_mod,
         collation: lsyscache_seams::get_typcollation::call(base_type_oid)?,
@@ -2825,7 +2825,7 @@ fn domain_add_check_constraint<'mcx>(
     };
     pstate.p_pre_columnref_hook = Some(replace_domain_constraint_value);
     pstate.p_ref_hook_state =
-        nodes::parsestmt::ParseRefHookState::DomainCheckValue(dom_val);
+        ::nodes::parsestmt::ParseRefHookState::DomainCheckValue(dom_val);
 
     let raw_expr = constr
         .raw_expr
@@ -2868,7 +2868,7 @@ fn domain_add_check_constraint<'mcx>(
 
     /* Store the constraint in pg_constraint. */
     let skip_validation = match constr_node.node_tag() {
-        nodes::nodes::ntag::T_Constraint => constr_node.expect_constraint().skip_validation,
+        ::nodes::nodes::ntag::T_Constraint => constr_node.expect_constraint().skip_validation,
         _ => unreachable!(),
     };
     let ccoid = pg_constraint::CreateConstraintEntry(
@@ -3768,7 +3768,7 @@ pub fn DefineDomain<'mcx>(
 /// The `default:` error arms of the `DefineDomain` constraint switch
 /// (typecmds.c:993-1045) — the unsupported constraint kinds for a domain.
 fn domain_constraint_kind_error(contype: ConstrType, cursorpos: i32) -> PgError {
-    use nodes::ddlnodes::{
+    use ::nodes::ddlnodes::{
         CONSTR_ATTR_DEFERRABLE, CONSTR_ATTR_DEFERRED, CONSTR_ATTR_ENFORCED, CONSTR_ATTR_IMMEDIATE,
         CONSTR_ATTR_NOT_DEFERRABLE, CONSTR_ATTR_NOT_ENFORCED, CONSTR_EXCLUSION, CONSTR_FOREIGN,
         CONSTR_GENERATED, CONSTR_IDENTITY, CONSTR_PRIMARY, CONSTR_UNIQUE,
@@ -3812,7 +3812,7 @@ fn domain_constraint_kind_error(contype: ConstrType, cursorpos: i32) -> PgError 
 /// true; constr->location = -1;` — the bare Constraint node `AlterDomainNotNull`
 /// builds for the SET NOT NULL path (typecmds.c:2778).
 fn make_constraint<'mcx>(mcx: Mcx<'mcx>, contype: ConstrType) -> PgResult<RichNode<'mcx>> {
-    RichNode::mk_constraint(mcx, nodes::ddlnodes::Constraint {
+    RichNode::mk_constraint(mcx, ::nodes::ddlnodes::Constraint {
         contype,
         conname: None,
         deferrable: false,
@@ -5025,7 +5025,7 @@ fn define_enum_seam<'mcx>(mcx: Mcx<'mcx>, stmt: &RichNode<'mcx>) -> PgResult<Obj
 /// `DefineRange`'s port does not consult it.
 fn define_range_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let crs = match stmt.as_createrangestmt() {
@@ -5087,10 +5087,10 @@ fn make_multirange_constructors_seam(
 /// `parser_errposition`, which `DefineType`'s port does not yet need).
 fn define_stmt_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    use nodes::parsenodes::{
+    use ::nodes::parsenodes::{
         OBJECT_AGGREGATE, OBJECT_COLLATION, OBJECT_OPERATOR, OBJECT_TSCONFIGURATION,
         OBJECT_TSDICTIONARY, OBJECT_TSPARSER, OBJECT_TSTEMPLATE, OBJECT_TYPE,
     };
@@ -5195,7 +5195,7 @@ fn define_stmt_seam<'mcx>(
 /// Decode a `List *` of `String`/NULL name elements (a possibly-qualified
 /// object name) into the `&[Option<String>]` (`NameList`) shape the
 /// `QualifiedNameGetCreationNamespace` callers consume.
-fn decode_name_list(defnames: &[nodes::nodes::NodePtr<'_>]) -> Vec<Option<String>> {
+fn decode_name_list(defnames: &[::nodes::nodes::NodePtr<'_>]) -> Vec<Option<String>> {
     defnames
         .iter()
         .map(|n| n.as_string().map(|s| s.sval.as_str().to_string()))
@@ -5209,7 +5209,7 @@ fn decode_name_list(defnames: &[nodes::nodes::NodePtr<'_>]) -> Vec<Option<String
 /// uncollatable-type error carries `parser_errposition(pstate, typeName->location)`.
 fn define_domain_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let cds = match stmt.as_createdomainstmt() {

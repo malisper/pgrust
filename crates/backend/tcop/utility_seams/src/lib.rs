@@ -4,9 +4,9 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::Node;
-use nodes::parsestmt::CommandTag;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::CommandTag;
 
 seam_core::seam!(
     /// `CreateCommandTag(parsetree)` (utility.c) — the `CommandTag` for a raw
@@ -57,12 +57,12 @@ seam_core::seam!(
     /// is a handle), so a per-call scratch context is sound.
     pub fn process_utility<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        pstmt: &nodes::nodeindexscan::PlannedStmt<'mcx>,
+        pstmt: &::nodes::nodeindexscan::PlannedStmt<'mcx>,
         query_string: &str,
         read_only_tree: bool,
-        context: nodes::parsestmt::ProcessUtilityContext,
-        params: nodes::portalcmds::ParamListInfo,
-        dest: nodes::parsestmt::DestReceiverHandle,
+        context: ::nodes::parsestmt::ProcessUtilityContext,
+        params: ::nodes::portalcmds::ParamListInfo,
+        dest: ::nodes::parsestmt::DestReceiverHandle,
         qc: &mut portal::QueryCompletion,
     ) -> PgResult<()>
 );
@@ -90,12 +90,12 @@ seam_core::seam!(
 #[allow(clippy::type_complexity)]
 pub type ProcessUtilityHook = for<'mcx> fn(
     mcx: mcx::Mcx<'mcx>,
-    pstmt: &nodes::nodeindexscan::PlannedStmt<'mcx>,
+    pstmt: &::nodes::nodeindexscan::PlannedStmt<'mcx>,
     query_string: &str,
     read_only_tree: bool,
-    context: nodes::parsestmt::ProcessUtilityContext,
-    params: nodes::portalcmds::ParamListInfo,
-    dest: nodes::parsestmt::DestReceiverHandle,
+    context: ::nodes::parsestmt::ProcessUtilityContext,
+    params: ::nodes::portalcmds::ParamListInfo,
+    dest: ::nodes::parsestmt::DestReceiverHandle,
     qc: &mut portal::QueryCompletion,
 ) -> PgResult<()>;
 
@@ -124,12 +124,12 @@ pub fn set_process_utility_hook(
 #[allow(clippy::too_many_arguments)]
 pub fn call_process_utility_hook<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    pstmt: &nodes::nodeindexscan::PlannedStmt<'mcx>,
+    pstmt: &::nodes::nodeindexscan::PlannedStmt<'mcx>,
     query_string: &str,
     read_only_tree: bool,
-    context: nodes::parsestmt::ProcessUtilityContext,
-    params: nodes::portalcmds::ParamListInfo,
-    dest: nodes::parsestmt::DestReceiverHandle,
+    context: ::nodes::parsestmt::ProcessUtilityContext,
+    params: ::nodes::portalcmds::ParamListInfo,
+    dest: ::nodes::parsestmt::DestReceiverHandle,
     qc: &mut portal::QueryCompletion,
 ) -> PgResult<()> {
     match PROCESS_UTILITY_HOOK.with(std::cell::Cell::get) {

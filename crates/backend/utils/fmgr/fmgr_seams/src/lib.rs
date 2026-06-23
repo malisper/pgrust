@@ -13,7 +13,7 @@ use types_core::{AttrNumber, Oid};
 use datum::varlena::Bytea;
 use types_error::PgResult;
 use array::ArrayElementDatum;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_reloptions::local_relopts;
 // Migration target: the canonical per-attribute value enum. The former
 // transitional `Datum<'mcx>` alias resolved to this exact type, so every
@@ -40,7 +40,7 @@ seam_core::seam!(
     /// in the call's context. Pure read, no allocation.
     pub fn fn_oid_and_expr<'mcx>(
         fcinfo: &'mcx FunctionCallInfoBaseData<'mcx>,
-    ) -> (types_core::Oid, Option<&'mcx nodes::nodes::Node<'mcx>>)
+    ) -> (types_core::Oid, Option<&'mcx ::nodes::nodes::Node<'mcx>>)
 );
 
 seam_core::seam!(
@@ -203,7 +203,7 @@ seam_core::seam!(
     pub fn fmgr_info_set_expr<'mcx, 'e>(
         mcx: mcx::Mcx<'mcx>,
         finfo: &mut types_core::fmgr::FmgrInfo,
-        expr: &nodes::primnodes::Expr<'e>,
+        expr: &::nodes::primnodes::Expr<'e>,
     ) -> PgResult<()>
 );
 

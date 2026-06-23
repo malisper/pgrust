@@ -20,9 +20,9 @@ use types_error::{
 
 use utils_error::ereport;
 
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::T_TransactionStmt;
-use nodes::parsestmt::ProcessUtilityContext;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::T_TransactionStmt;
+use ::nodes::parsestmt::ProcessUtilityContext;
 
 use transam_xact_seams as xact_seams;
 use dest_seams as dest_seams;
@@ -218,7 +218,7 @@ fn run_executor(
     _mcx: Mcx<'_>,
     stmt: &PlannedStmt<'_>,
     sql: &str,
-    dest: nodes::parsestmt::DestReceiverHandle,
+    dest: ::nodes::parsestmt::DestReceiverHandle,
 ) -> PgResult<()> {
     // qdesc = CreateQueryDesc(stmt, sql, GetActiveSnapshot(), NULL, dest, NULL, NULL, 0);
     let snap = snapmgr::get_active_snapshot::call()?;

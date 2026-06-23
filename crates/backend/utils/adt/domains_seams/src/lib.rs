@@ -12,7 +12,7 @@
 use cache::typcache::{DomainCheckConstraintRow, DomainCtxHandle, DomainLevelScan, ExprStateHandle};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use types_tuple::heaptuple::Datum;
 
 extern crate alloc;

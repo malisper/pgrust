@@ -7,13 +7,13 @@ use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::{Oid, OidIsValid, INVALID_OID};
 use types_tuple::heaptuple::Datum;
 use types_error::PgResult;
-use nodes::nodeagg::{
+use ::nodes::nodeagg::{
     Aggref, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
 use crate::aggstate::{AggStateData, AggStatePerTransData};
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 use nodes::{Bitmapset, EStateData, SlotId};
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_core::fmgr::FmgrInfo;
 use types_tuple::heaptuple::TupleDescData;
 
@@ -180,7 +180,7 @@ pub fn fetch_input_tuple<'mcx>(
     // mirroring C's per-kind copy_minimal_tuple dispatch.
     if let Some(s) = slot {
         if aggstate.sort_out.is_some()
-            && estate.slot_data_mut(s).kind() != nodes::TupleSlotKind::Virtual
+            && estate.slot_data_mut(s).kind() != ::nodes::TupleSlotKind::Virtual
         {
             execTuples_seams::slot_getallattrs_by_id::call(estate, s)?;
         }
@@ -268,14 +268,14 @@ pub fn find_cols<'mcx>(
 /// read-only plan tree the node-state aliases.
 fn agg_plan<'a, 'mcx>(
     aggstate: &'a AggStateData<'mcx>,
-) -> PgResult<&'a nodes::nodeagg::Agg<'mcx>> {
+) -> PgResult<&'a ::nodes::nodeagg::Agg<'mcx>> {
     let plan = aggstate
         .ss
         .ps
         .plan
         .expect("find_cols: ss.ps.plan is NULL");
     match plan.node_tag() {
-        nodes::nodes::ntag::T_Agg => Ok(plan.expect_agg()),
+        ::nodes::nodes::ntag::T_Agg => Ok(plan.expect_agg()),
         other => panic!("castNode(Agg, ss.ps.plan) failed: {other:?}"),
     }
 }
@@ -315,7 +315,7 @@ pub fn find_cols_walker<'mcx, 'n>(
     }
 
     // if (IsA(node, Aggref)) { is_aggref = true; walk; is_aggref = false; }
-    if matches!(node.as_expr(), Some(nodes::primnodes::Expr::Aggref(_))) {
+    if matches!(node.as_expr(), Some(::nodes::primnodes::Expr::Aggref(_))) {
         debug_assert!(!context.is_aggref);
         context.is_aggref = true;
         walk_children(node, context, mcx)?;
@@ -373,7 +373,7 @@ pub fn find_hash_columns<'mcx>(
 
     // List *outerTlist = outerPlanState(aggstate)->plan->targetlist;
     // Cloned into mcx so the hashTlist (list_nth of it) outlives this borrow.
-    let outer_tlist: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = {
+    let outer_tlist: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = {
         let outer = aggstate
             .ss
             .ps
@@ -537,7 +537,7 @@ pub fn find_hash_columns<'mcx>(
         }
 
         // and build a tuple descriptor for the hashtable
-        let mut hash_tlist: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+        let mut hash_tlist: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
             vec_with_capacity_in(mcx, numhash_grp_cols.max(0) as usize)?;
         let mut largest: i32 = 0;
         for i in 0..numhash_grp_cols as usize {
@@ -587,7 +587,7 @@ pub fn find_hash_columns<'mcx>(
         let hashslot = execTuples_seams::exec_alloc_table_slot::call(
             estate,
             hash_desc,
-            nodes::TupleSlotKind::MinimalTuple,
+            ::nodes::TupleSlotKind::MinimalTuple,
         )?;
 
         // Commit all per-hash outputs.
@@ -744,7 +744,7 @@ pub fn build_pertrans_for_aggref<'mcx>(
         //
         // Note that by construction, if there is a DISTINCT clause then the ORDER
         // BY clause is a prefix of it (see transformDistinctClause).
-        let sortlist: Option<&[nodes::nodeagg::SortGroupClauseAgg]>;
+        let sortlist: Option<&[::nodes::nodeagg::SortGroupClauseAgg]>;
         let num_sort_cols: i32;
         let num_distinct_cols: i32;
         if aggkind_is_ordered_set_lc(aggref.aggkind) {
@@ -802,7 +802,7 @@ pub fn build_pertrans_for_aggref<'mcx>(
             );
 
             // ORDER BY aggregates are not supported with partial aggregation
-            debug_assert!(!nodes::nodeagg::do_aggsplit_combine(aggstate.aggsplit));
+            debug_assert!(!::nodes::nodeagg::do_aggsplit_combine(aggstate.aggsplit));
 
             // If we have only one input, we need its len/byval info.
             //   if (numInputs == 1)
@@ -967,15 +967,15 @@ fn get_typlenbyval_owned(typid: Oid) -> PgResult<(i16, bool)> {
 /// discharging the `PlanStateLink` parent-outlives-child invariant.
 fn agg_state_context_link<'mcx>(
     aggstate: &AggStateData<'mcx>,
-) -> nodes::aggstate_carrier::AggStateContextLink {
-    nodes::aggstate_carrier::AggStateContextLink::from_ref(
-        aggstate as &(dyn nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+) -> ::nodes::aggstate_carrier::AggStateContextLink {
+    ::nodes::aggstate_carrier::AggStateContextLink::from_ref(
+        aggstate as &(dyn ::nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
     )
 }
 
 /// K1 (#324/#335): the C `(Node *) aggstate` context IS stored — `context` is a
 /// [`FmgrCallContext::Agg`] carrying the tag-checked
-/// [`AggStateContextLink`](nodes::aggstate_carrier::AggStateContextLink)
+/// [`AggStateContextLink`](::nodes::aggstate_carrier::AggStateContextLink)
 /// back-reference to the live `AggState` (the `PlanStateLink` discipline). The
 /// caller passes the link captured from the PgBox-allocated (address-stable, C
 /// `makeNode`-equivalent) `AggStateData`, so the aggregate support functions
@@ -985,7 +985,7 @@ fn new_agg_fcinfo<'mcx>(
     flinfo: FmgrInfo,
     nargs: i32,
     fncollation: Oid,
-    context: nodes::aggstate_carrier::AggStateContextLink,
+    context: ::nodes::aggstate_carrier::AggStateContextLink,
 ) -> PgResult<PgBox<'mcx, FunctionCallInfoBaseData<'mcx>>> {
     let mut args = vec_with_capacity_in_std(nargs as usize);
     for _ in 0..nargs {
@@ -994,7 +994,7 @@ fn new_agg_fcinfo<'mcx>(
     let fcinfo = FunctionCallInfoBaseData {
         flinfo: Some(flinfo),
         // C: InitFunctionCallInfoData(..., (Node *) aggstate, NULL)
-        context: Some(nodes::fmgr::FmgrCallContext::Agg(context)),
+        context: Some(::nodes::fmgr::FmgrCallContext::Agg(context)),
         resultinfo: None,
         fncollation,
         isnull: false,
@@ -1065,7 +1065,7 @@ fn exec_type_from_tl_owned<'mcx>(
 ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
     // ExecTypeFromTL takes a &[TargetEntry]; materialize a contiguous copy of
     // the aggref's args (which are stored as PgBox<TargetEntry>).
-    let mut tl: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+    let mut tl: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
         vec_with_capacity_in(mcx, list_len(&aggref.args))?;
     if let Some(args) = aggref.args.as_ref() {
         for tle in args.iter() {
@@ -1085,14 +1085,14 @@ fn exec_init_extra_tuple_slot_minimal<'mcx>(
     execTuples_seams::exec_init_extra_tuple_slot::call(
         estate,
         desc_clone,
-        nodes::TupleSlotKind::MinimalTuple,
+        ::nodes::TupleSlotKind::MinimalTuple,
     )
 }
 
 /// `tle = get_sortgroupclause_tle(sortcl, aggref->args)` then `tle->resno` and
 /// `exprCollation((Node *) tle->expr)` (nodes/nodeFuncs.c).
 fn sortgroupclause_tle_resno_and_collation<'mcx>(
-    sortcl: &nodes::nodeagg::SortGroupClauseAgg,
+    sortcl: &::nodes::nodeagg::SortGroupClauseAgg,
     aggref: &Aggref<'mcx>,
 ) -> PgResult<(types_core::primitive::AttrNumber, Oid)> {
     // get_sortgroupclause_tle: the TargetEntry whose ressortgroupref matches.
@@ -1204,7 +1204,7 @@ pub fn GetAggInitVal<'mcx>(
 /// `AggStateData` from the `PlanStateNode::Agg` carrier (the C
 /// `castNode(AggState, pstate)`) and run [`ExecAgg`].
 pub fn exec_agg_node<'mcx>(
-    pstate: &mut nodes::planstate::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::planstate::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let agg = pstate
@@ -1254,7 +1254,7 @@ pub fn ExecAgg<'mcx>(
 
 /// `aggstate->phase->aggstrategy` — strategy of the current phase. `phase` is
 /// the index of the active `AggStatePerPhaseData` in `phases`.
-fn current_phase_strategy(aggstate: &AggStateData<'_>) -> nodes::nodeagg::AggStrategy {
+fn current_phase_strategy(aggstate: &AggStateData<'_>) -> ::nodes::nodeagg::AggStrategy {
     let phases = aggstate
         .phases
         .as_ref()

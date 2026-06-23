@@ -15,7 +15,7 @@
 
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 use heaptuple::heap_form_tuple;

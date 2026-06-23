@@ -9,15 +9,15 @@ use std::mem::size_of;
 use std::sync::Once;
 
 use mcx::{Mcx, MemoryContext, PgBox, PgVec};
-use nodes::execnodes::{BackwardScanDirection, PlanStateData, ScanStateData};
-use nodes::executor::TTS_FLAG_EMPTY;
-use nodes::funcapi::Tuplestorestate;
-use nodes::nodes::Node;
-use nodes::Bitmapset;
+use ::nodes::execnodes::{BackwardScanDirection, PlanStateData, ScanStateData};
+use ::nodes::executor::TTS_FLAG_EMPTY;
+use ::nodes::funcapi::Tuplestorestate;
+use ::nodes::nodes::Node;
+use ::nodes::Bitmapset;
 
 use super::*;
-use nodes::TupleTableSlot;
-use nodes::tuptable::SlotData;
+use ::nodes::TupleTableSlot;
+use ::nodes::tuptable::SlotData;
 use nodes::{EStateData, SlotId};
 
 /// The fake tuplestore engine behind the opaque carrier: a row count plus the
@@ -228,7 +228,7 @@ fn mock_init_result_slot<'mcx>(
 
 fn mock_clear_tuple<'mcx>(
     estate: &mut EStateData<'mcx>,
-    slot: nodes::SlotId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<()> {
     estate.slot_mut(slot).tts_flags |= TTS_FLAG_EMPTY;
     Ok(())
@@ -236,8 +236,8 @@ fn mock_clear_tuple<'mcx>(
 
 fn mock_copy_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
-    dst: nodes::SlotId,
-    src: nodes::SlotId,
+    dst: ::nodes::SlotId,
+    src: ::nodes::SlotId,
 ) -> PgResult<()> {
     let src_flags = estate.slot(src).tts_flags;
     estate.slot_mut(dst).tts_flags = src_flags;

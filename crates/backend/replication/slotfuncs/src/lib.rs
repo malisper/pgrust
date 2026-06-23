@@ -48,7 +48,7 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::NameData;
 use types_tuple::Datum;
 use wal::WALAvailability;

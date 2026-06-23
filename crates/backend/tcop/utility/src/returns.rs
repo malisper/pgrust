@@ -8,9 +8,9 @@
 
 use utility_out_seams as rt;
 use types_error::PgResult;
-use nodes::nodes::ntag;
-use nodes::nodes::Node;
-use nodes::nodes::{CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UTILITY};
+use ::nodes::nodes::ntag;
+use ::nodes::nodes::Node;
+use ::nodes::nodes::{CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UTILITY};
 use types_tuple::heaptuple::TupleDesc;
 
 use crate::consts::RECORDOID;
@@ -124,14 +124,14 @@ pub fn UtilityTupleDescriptor<'mcx>(
 /// `Query` will send output to the destination. Ported for completeness; the C
 /// definition is compiled out behind `NOT_USED`.
 pub fn QueryReturnsTuples<'mcx>(
-    parsetree: &nodes::copy_query::Query<'mcx>,
+    parsetree: &::nodes::copy_query::Query<'mcx>,
 ) -> PgResult<bool> {
     let result = match parsetree.commandType {
         // case CMD_SELECT: return true;  /* returns tuples */
         CMD_SELECT => true,
         // case CMD_INSERT/UPDATE/DELETE/MERGE: the forms with RETURNING return
         // tuples; otherwise fall through to the default `false`.
-        CMD_INSERT | nodes::nodes::CMD_UPDATE | CMD_DELETE | CMD_MERGE => {
+        CMD_INSERT | ::nodes::nodes::CMD_UPDATE | CMD_DELETE | CMD_MERGE => {
             !parsetree.returningList.is_empty()
         }
         // case CMD_UTILITY: return UtilityReturnsTuples(parsetree->utilityStmt);

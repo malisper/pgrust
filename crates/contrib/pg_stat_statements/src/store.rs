@@ -15,7 +15,7 @@ use types_core::instrument::{instr_time, BufferUsage, WalUsage};
 use types_core::Oid;
 use types_error::PgResult;
 use hash::hsearch::{HASHACTION, HASH_ENTER, HASH_FIND, HASH_REMOVE};
-use nodes::querydesc::QueryDesc;
+use ::nodes::querydesc::QueryDesc;
 use types_scan::sdir::ScanDirection;
 
 use crate::shmem::{self, entry_ref, pgss_hash, pgss_ref};

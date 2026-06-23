@@ -25,9 +25,9 @@ use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
     ERROR, NOTICE,
 };
-use nodes::ddlnodes::AlterTableType::AT_DropColumn;
-use nodes::ddlnodes::AlterTableCmd;
-use nodes::parsenodes::DropBehavior;
+use ::nodes::ddlnodes::AlterTableType::AT_DropColumn;
+use ::nodes::ddlnodes::AlterTableCmd;
+use ::nodes::parsenodes::DropBehavior;
 use rel::Relation;
 use types_storage::lock::{NoLock, RowExclusiveLock, LOCKMODE};
 use types_tuple::access::{RELKIND_COMPOSITE_TYPE, RELKIND_PARTITIONED_TABLE};

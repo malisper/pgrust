@@ -3,8 +3,8 @@
 //! and returns one output tuple per group.
 
 use types_error::PgResult;
-use nodes::execexpr::ExprState;
-use nodes::nodeagg::{AGG_MIXED, AGG_PLAIN};
+use ::nodes::execexpr::ExprState;
+use ::nodes::nodeagg::{AGG_MIXED, AGG_PLAIN};
 use crate::aggstate::AggStateData;
 use nodes::{EStateData, SlotId};
 
@@ -438,7 +438,7 @@ fn phase_numsets(aggstate: &AggStateData<'_>) -> i32 {
 }
 
 /// `aggstate->phase->aggnode->aggstrategy`.
-fn phase_aggstrategy(aggstate: &AggStateData<'_>) -> nodes::nodeagg::AggStrategy {
+fn phase_aggstrategy(aggstate: &AggStateData<'_>) -> ::nodes::nodeagg::AggStrategy {
     let phases = aggstate
         .phases
         .as_ref()
@@ -479,7 +479,7 @@ fn phase_gset_length(aggstate: &AggStateData<'_>, idx: usize) -> i32 {
 /// `econtext->ecxt_outertuple` where econtext is the node's per-output-tuple
 /// context (`aggstate->ss.ps.ps_ExprContext`, addressed by `econtext_id`).
 fn econtext_outertuple_slot<'mcx>(
-    econtext_id: nodes::EcxtId,
+    econtext_id: ::nodes::EcxtId,
     estate: &EStateData<'mcx>,
 ) -> Option<SlotId> {
     estate.ecxt(econtext_id).ecxt_outertuple
@@ -511,7 +511,7 @@ fn set_tmpcontext_outertuple<'mcx>(
 /// (`ps_ExprContext`, addressed by `econtext_id`). The value is consumed by
 /// `prepare_projection_slot`.
 fn set_econtext_outertuple<'mcx>(
-    econtext_id: nodes::EcxtId,
+    econtext_id: ::nodes::EcxtId,
     estate: &mut EStateData<'mcx>,
     slot: Option<SlotId>,
 ) {

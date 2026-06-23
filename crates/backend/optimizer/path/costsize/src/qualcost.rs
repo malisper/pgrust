@@ -21,7 +21,7 @@
 //! numerically-identical result is a faithful behavioral port.
 
 use types_core::primitive::{InvalidOid, Oid};
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{PlannerInfo, QualCost};
 
 use costsize_seams as cz;

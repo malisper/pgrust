@@ -45,11 +45,11 @@ use types_error::{
     ErrorLocation, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INDETERMINATE_COLLATION, ERRCODE_SYNTAX_ERROR, ERROR, NOTICE,
 };
-use nodes::ddlnodes::{CreateTableAsStmt, IntoClause};
-use nodes::nodes::{CmdType, Node};
-use nodes::params::ParamListInfo;
-use nodes::parsestmt::DestReceiverHandle;
-use nodes::tuptable::SlotData;
+use ::nodes::ddlnodes::{CreateTableAsStmt, IntoClause};
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::params::ParamListInfo;
+use ::nodes::parsestmt::DestReceiverHandle;
+use ::nodes::tuptable::SlotData;
 use portal::QueryCompletion;
 use rel::Relation;
 use types_storage::lock::{AccessExclusiveLock, NoLock};
@@ -313,7 +313,7 @@ fn create_ctas_internal<'mcx>(
 /// the SELECT or view-definition targetlist when `WITH NO DATA` is used.
 fn create_ctas_nodata<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &nodes::copy_query::Query<'mcx>,
+    query: &::nodes::copy_query::Query<'mcx>,
     into: &IntoClause<'mcx>,
 ) -> PgResult<ObjectAddress> {
     /*
@@ -521,7 +521,7 @@ fn from_matview_qc(qc: types_matview::QueryCompletion) -> QueryCompletion {
 }
 
 /// `castNode(Query, stmt->query)`.
-fn stmt_query<'a, 'mcx>(stmt: &'a CreateTableAsStmt<'mcx>) -> &'a nodes::copy_query::Query<'mcx> {
+fn stmt_query<'a, 'mcx>(stmt: &'a CreateTableAsStmt<'mcx>) -> &'a ::nodes::copy_query::Query<'mcx> {
     match stmt.query.as_deref().and_then(Node::as_query) {
         Some(q) => q,
         _ => panic!("createas: stmt->query is not a Query"),
@@ -537,7 +537,7 @@ fn stmt_into<'a, 'mcx>(stmt: &'a CreateTableAsStmt<'mcx>) -> &'a IntoClause<'mcx
 }
 
 /// `query->commandType == CMD_UTILITY && IsA(query->utilityStmt, ExecuteStmt)`.
-fn query_is_execute_stmt(query: &nodes::copy_query::Query<'_>) -> bool {
+fn query_is_execute_stmt(query: &::nodes::copy_query::Query<'_>) -> bool {
     query.utilityStmt.as_deref().is_some_and(|n| n.is_executestmt())
 }
 
@@ -545,8 +545,8 @@ fn query_is_execute_stmt(query: &nodes::copy_query::Query<'_>) -> bool {
 /// `ExecuteStmt` (the `execute_query` seam takes it by value).
 fn execute_stmt_of<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &nodes::copy_query::Query<'mcx>,
-) -> PgResult<nodes::ddlnodes::ExecuteStmt<'mcx>> {
+    query: &::nodes::copy_query::Query<'mcx>,
+) -> PgResult<::nodes::ddlnodes::ExecuteStmt<'mcx>> {
     match query.utilityStmt.as_deref().and_then(Node::as_executestmt) {
         Some(estmt) => estmt.clone_in(mcx),
         _ => panic!("createas: query->utilityStmt is not an ExecuteStmt"),
@@ -897,7 +897,7 @@ fn intorel_destroy(_self: DestReceiverHandle) {
 
 /// `get_into_rel_eflags` inward seam impl over the trimmed `parsestmt::
 /// IntoClause` the prepare/explain callers carry. Only `skipData` matters.
-fn get_into_rel_eflags_seam(into: &nodes::parsestmt::IntoClause<'_>) -> PgResult<i32> {
+fn get_into_rel_eflags_seam(into: &::nodes::parsestmt::IntoClause<'_>) -> PgResult<i32> {
     let mut flags: i32 = 0;
     if into.skipData {
         flags |= EXEC_FLAG_WITH_NO_DATA;
@@ -923,7 +923,7 @@ fn exec_create_table_as_seam<'mcx>(
 /// returned `QueryCompletion` is written back into the dispatcher's slot.
 fn exec_create_table_as_utility<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &Node<'mcx>,
     params: ParamListInfo,
     qc: Option<&mut QueryCompletion>,
@@ -986,7 +986,7 @@ pub fn CreateIntoRelDestReceiverSetup<'mcx>(
 /// receiver handle's raw value for the EXPLAIN executor-start.
 fn create_into_rel_dest_receiver_setup_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    into: &nodes::parsestmt::IntoClause<'mcx>,
+    into: &::nodes::parsestmt::IntoClause<'mcx>,
 ) -> PgResult<u64> {
     let ddl_into = into
         .node

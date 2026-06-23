@@ -8,8 +8,8 @@ use utils_error::ereport;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::Oid;
 use types_error::{ErrorLocation, PgResult, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE};
-use nodes::nodes::Node;
-use nodes::rawnodes::RangeVar;
+use ::nodes::nodes::Node;
+use ::nodes::rawnodes::RangeVar;
 use types_tuple::access::RangeVar as AccessRangeVar;
 
 use catalog_namespace::LookupNamespaceNoError;

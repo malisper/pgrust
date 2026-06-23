@@ -1378,7 +1378,7 @@ pub fn heapam_tuple_tid_valid(
     tid: &ItemPointerData,
 ) -> bool {
     let nblocks = heap_scan(sscan).rs_nblocks;
-    page::ItemPointerIsValid(Some(tid))
+    ::page::ItemPointerIsValid(Some(tid))
         && ItemPointerGetBlockNumberNoCheck(tid) < nblocks
 }
 
@@ -1543,7 +1543,7 @@ fn BitmapHeapScanNextBlock<'mcx>(
             .expect("bitmap heap scan requires an MVCC snapshot");
         for &offnum in &tbmres.offsets {
             let mut tid = ItemPointerData::default();
-            page::ItemPointerSet(&mut tid, block, offnum);
+            ::page::ItemPointerSet(&mut tid, block, offnum);
             let res = fetch::heap_hot_search_buffer(
                 mcx,
                 tid,
@@ -1554,7 +1554,7 @@ fn BitmapHeapScanNextBlock<'mcx>(
                 true,
             )?;
             if res.found {
-                let off = page::ItemPointerGetOffsetNumber(&res.tid);
+                let off = ::page::ItemPointerGetOffsetNumber(&res.tid);
                 heap_scan(sscan).rs_vistuples[ntup as usize] = off;
                 ntup += 1;
             }

@@ -8,12 +8,12 @@ use std::cell::Cell;
 use std::sync::Once;
 
 use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
-use nodes::execnodes::{ExprContext, PlanStateData};
-use nodes::executor::TupleSlotKind;
-use nodes::nodes::Node;
+use ::nodes::execnodes::{ExprContext, PlanStateData};
+use ::nodes::executor::TupleSlotKind;
+use ::nodes::nodes::Node;
 
 use super::*;
-use nodes::TupleTableSlot;
+use ::nodes::TupleTableSlot;
 
 thread_local! {
     /// Value the next mock `ExecQual(resconstantqual)` should return.
@@ -162,14 +162,14 @@ fn mock_assign_projection_info<'mcx>(
 /// `ExecInitQual`: a `None`/empty list compiles to `None` (the C `NULL`
 /// always-true ExprState); otherwise an empty placeholder `ExprState`.
 fn mock_init_qual<'mcx>(
-    qual: Option<&[nodes::primnodes::Expr]>,
+    qual: Option<&[::nodes::primnodes::Expr]>,
     parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     let _ = parent;
     match qual {
         Some(q) if !q.is_empty() => {
-            Ok(Some(alloc_in(estate.es_query_cxt, nodes::execexpr::ExprState::default())?))
+            Ok(Some(alloc_in(estate.es_query_cxt, ::nodes::execexpr::ExprState::default())?))
         }
         _ => Ok(None),
     }
@@ -177,8 +177,8 @@ fn mock_init_qual<'mcx>(
 
 /// `ExecQual`: return the thread-local verdict (the constant qual gate).
 fn mock_qual<'mcx>(
-    _state: &mut nodes::execexpr::ExprState<'mcx>,
-    _econtext: nodes::EcxtId,
+    _state: &mut ::nodes::execexpr::ExprState<'mcx>,
+    _econtext: ::nodes::EcxtId,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     Ok(QUAL_RESULT.with(|c| c.get()))
@@ -221,8 +221,8 @@ fn make_result_plan<'mcx>(mcx: Mcx<'mcx>, with_constqual: bool) -> PgResult<Node
     let mut plan = ResultPlan::default();
     if with_constqual {
         let mut list = mcx::vec_with_capacity_in(mcx, 1)?;
-        list.push(nodes::primnodes::Expr::Const(
-            nodes::primnodes::Const::default(),
+        list.push(::nodes::primnodes::Expr::Const(
+            ::nodes::primnodes::Const::default(),
         ));
         plan.resconstantqual = Some(list);
     }

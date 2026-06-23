@@ -15,7 +15,7 @@
 //! Result cells. C threads `Datum *resvalue` / `bool *resnull` pointers per
 //! step, several steps aliasing one cell. The F0 model replaces the pointers
 //! with [`ResultCellId`] indices into the [`ExprState`]'s
-//! [`ResultCellArena`](nodes::execexpr::ResultCellArena): `op->resvalue`
+//! [`ResultCellArena`](::nodes::execexpr::ResultCellArena): `op->resvalue`
 //! and `op->resnull` carry the same id, and `*op->resvalue` / `*op->resnull`
 //! map to reading/writing that cell's `value` / `isnull`. The well-known
 //! [`STATE_RESULT_CELL`] aliases the `ExprState`'s own `resvalue`/`resnull`
@@ -34,7 +34,7 @@
 //!
 //! Blocked surfaces (genuinely-unported owners, seam-and-panic'd inline):
 //! - The fmgr call frame (`fcinfo->args[]` / `fcinfo->isnull`): the shared
-//!   [`FunctionCallInfoBaseData`](nodes::fmgr::FunctionCallInfoBaseData)
+//!   [`FunctionCallInfoBaseData`](::nodes::fmgr::FunctionCallInfoBaseData)
 //!   is trimmed to `resultinfo` only (the fmgr port widens it). Every arm that
 //!   reads `fcinfo->args[i].isnull` for a strict null-check or dispatches
 //!   `op->d.func.fn_addr(fcinfo)` is blocked on that widening — the same
@@ -56,11 +56,11 @@
 // interpreter loop's cell helpers now operate on directly.
 use types_tuple::heaptuple::Datum;
 use types_error::PgResult;
-use nodes::execexpr::ExprEvalOp::*;
+use ::nodes::execexpr::ExprEvalOp::*;
 
-use nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ExprState, ResultCell, ResultCellId};
-use nodes::execnodes::EcxtId;
-use nodes::EStateData;
+use ::nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ExprState, ResultCell, ResultCellId};
+use ::nodes::execnodes::EcxtId;
+use ::nodes::EStateData;
 
 use crate::dispatch::CheckOpSlotCompatibility;
 use crate::eval_agg;
@@ -79,7 +79,7 @@ use crate::eval_subscript;
 /// `ExprState` scalar fields; all other ids index the arena.
 #[inline]
 pub(crate) fn read_cell<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> (Datum<'mcx>, bool) {
-    if id == nodes::execexpr::STATE_RESULT_CELL {
+    if id == ::nodes::execexpr::STATE_RESULT_CELL {
         (state.resvalue.clone(), state.resnull)
     } else {
         let c = state.result_cells.get(id);
@@ -94,7 +94,7 @@ pub(crate) fn read_cell<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> (Dat
 /// carries an internal transition state, so it reports false.
 #[inline]
 pub(crate) fn cell_value_is_internal<'mcx>(state: &ExprState<'mcx>, id: ResultCellId) -> bool {
-    if id == nodes::execexpr::STATE_RESULT_CELL {
+    if id == ::nodes::execexpr::STATE_RESULT_CELL {
         state.resvalue.as_internal().is_some()
     } else {
         state.result_cells.peek(id).is_some_and(|c| c.value.as_internal().is_some())
@@ -109,7 +109,7 @@ pub(crate) fn write_cell<'mcx>(
     value: Datum<'mcx>,
     isnull: bool,
 ) {
-    if id == nodes::execexpr::STATE_RESULT_CELL {
+    if id == ::nodes::execexpr::STATE_RESULT_CELL {
         state.resvalue = value;
         state.resnull = isnull;
     } else {
@@ -754,7 +754,7 @@ pub fn ExecInterpExpr<'mcx>(
                 //    CompareType cmptype = op->d.rowcompare_final.cmptype;
                 //    *op->resnull = false;
                 //    switch (cmptype) { LT: <0; LE: <=0; GE: >=0; GT: >0 }
-                use nodes::execexpr::CompareType;
+                use ::nodes::execexpr::CompareType;
                 let cmptype = match &state.steps.as_ref().unwrap()[op].d {
                     ExprEvalStepData::RowCompareFinal { cmptype } => *cmptype,
                     _ => unreachable!("EEOP_ROWCOMPARE_FINAL: payload is not RowCompareFinal"),
@@ -1142,7 +1142,7 @@ pub fn ExecInterpExpr<'mcx>(
                 };
                 let any_null = if uses_nulls {
                     // strictnulls = &state->resnull (the single-column sort path).
-                    read_cell(state, nodes::execexpr::STATE_RESULT_CELL).1
+                    read_cell(state, ::nodes::execexpr::STATE_RESULT_CELL).1
                 } else {
                     arg_cells.iter().any(|&c| read_cell(state, c).1)
                 };
@@ -1432,7 +1432,7 @@ fn sysvar_slot(
     opcode: ExprEvalOp,
     econtext: EcxtId,
     estate: &EStateData<'_>,
-) -> nodes::SlotId {
+) -> ::nodes::SlotId {
     let ecxt = estate.ecxt(econtext);
     let (slot, name) = match opcode {
         ExprEvalOp::EEOP_INNER_SYSVAR => (ecxt.ecxt_innertuple, "ecxt_innertuple"),
@@ -1454,7 +1454,7 @@ fn input_slot(
     opcode: ExprEvalOp,
     econtext: EcxtId,
     estate: &EStateData<'_>,
-) -> nodes::SlotId {
+) -> ::nodes::SlotId {
     use ExprEvalOp::*;
     let ecxt = estate.ecxt(econtext);
     let (slot, name) = match opcode {

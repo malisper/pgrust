@@ -38,12 +38,12 @@
 
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Index;
-use nodes::copy_query::Query;
-use nodes::nodelockrows::PlanRowMark;
-use nodes::nodes::Node;
-use nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo};
-use nodes::primnodes::TargetEntry;
-use nodes::rawnodes::FromExpr;
+use ::nodes::copy_query::Query;
+use ::nodes::nodelockrows::PlanRowMark;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo};
+use ::nodes::primnodes::TargetEntry;
+use ::nodes::rawnodes::FromExpr;
 
 use crate::{
     PathId, PlanId, PlanRowMarkId, PlannerInfo, QueryId, RangeTblEntryId, RtePermInfoId,
@@ -451,7 +451,7 @@ impl<'mcx> PlannerRun<'mcx> {
     /// coexist with `&mut self.subplans[..]`). Pair with [`put_subplan`].
     #[inline]
     pub fn take_subplan(&mut self, id: PlanId) -> types_error::PgResult<Node<'mcx>> {
-        let placeholder = Node::mk_range_tbl_ref(self.mcx(), nodes::rawnodes::RangeTblRef { rtindex: 0 })?;
+        let placeholder = Node::mk_range_tbl_ref(self.mcx(), ::nodes::rawnodes::RangeTblRef { rtindex: 0 })?;
         Ok(core::mem::replace(&mut self.subplans[id.0 as usize], placeholder))
     }
 
@@ -564,7 +564,7 @@ pub fn planner_rowmark_fetch<'a, 'mcx>(
 }
 
 /// `planner_subplan_get_plan(root, subplan)` (subselect.c) — fetch the owned
-/// `Plan` tree a [`SubPlan`](nodes::primnodes::SubPlan) refers to.
+/// `Plan` tree a [`SubPlan`](::nodes::primnodes::SubPlan) refers to.
 ///
 /// C inline:
 /// ```c
@@ -610,7 +610,7 @@ pub fn planner_subplan_get_plan<'a, 'mcx>(
 mod tests {
     use super::*;
     use mcx::MemoryContext;
-    use nodes::nodes::{ntag, CmdType};
+    use ::nodes::nodes::{ntag, CmdType};
 
     #[test]
     fn intern_resolve_round_trips_many_queries() {
@@ -680,7 +680,7 @@ mod tests {
     fn rte_intern_resolve_round_trips() {
         // The RTE store is the value resolver behind simple_rte_array's
         // RangeTblEntryId handles; intern hands back dense, in-order ids.
-        use nodes::parsenodes::{RangeTblEntry, RTEKind};
+        use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
 
         let cx = MemoryContext::new("planner-run");
         let mut run = PlannerRun::new(cx.mcx());
@@ -711,7 +711,7 @@ mod tests {
         // The rowmark store is the value resolver behind PlannerInfo::rowMarks /
         // PlannerGlobal::finalrowmarks; intern hands back dense, in-order ids and
         // planner_rowmark_fetch walks root.rowMarks by list position.
-        use nodes::nodelockrows::{PlanRowMark, ROW_MARK_COPY, ROW_MARK_EXCLUSIVE};
+        use ::nodes::nodelockrows::{PlanRowMark, ROW_MARK_COPY, ROW_MARK_EXCLUSIVE};
 
         let cx = MemoryContext::new("planner-run");
         let mut run = PlannerRun::new(cx.mcx());
@@ -762,7 +762,7 @@ mod tests {
         // The simple_rte_array leg: setup_simple_rel_arrays interned each RTE
         // and recorded its id in simple_rte_array keyed by RT index (slot 0 is
         // the unused C placeholder; rti 1 is the first real entry).
-        use nodes::parsenodes::{RangeTblEntry, RTEKind};
+        use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
 
         let cx = MemoryContext::new("planner-run");
         let mut run = PlannerRun::new(cx.mcx());
@@ -786,7 +786,7 @@ mod tests {
         // indexes; build_subplan interns the plan tree + subroot + subpath,
         // appends the PlanId to glob.subplans, and sets plan_id = len. finalize
         // reads it back through planner_subplan_get_plan.
-        use nodes::noderesult::Result as ResultPlan;
+        use ::nodes::noderesult::Result as ResultPlan;
 
         let cx = MemoryContext::new("planner-run");
         let mut run = PlannerRun::new(cx.mcx());
@@ -838,7 +838,7 @@ mod tests {
     fn planner_rt_fetch_rtfetch_fallback() {
         // The rt_fetch fallback leg (simple_rte_array empty): resolve
         // root->parse to its Query and index rtable[rti-1] (1-based).
-        use nodes::parsenodes::{RangeTblEntry, RTEKind};
+        use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
 
         let cx = MemoryContext::new("planner-run");
         let mut run = PlannerRun::new(cx.mcx());

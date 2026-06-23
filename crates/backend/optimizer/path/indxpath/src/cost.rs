@@ -175,7 +175,7 @@ pub fn bitmap_scan_cost_est<'mcx>(
     rel: RelId,
     ipath: PathId,
 ) -> PgResult<Cost> {
-    use nodes::nodes::NodeTag;
+    use ::nodes::nodes::NodeTag;
     use pathnodes::{BitmapHeapPath, Path, PathNode};
 
     // PATH_REQ_OUTER(ipath): the required-outer relids of the bitmapqual.

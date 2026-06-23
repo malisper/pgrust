@@ -81,7 +81,7 @@ use relcache_seams::IndexAttrBitmapKind;
 use combocid_seams as combocid_seam;
 
 use heaptuple::{heap_deform_tuple, heap_getsysattr, heap_tuple_to_disk_image};
-use nodes::Bitmapset;
+use ::nodes::Bitmapset;
 use types_storage::bufpage::SizeofHeapTupleHeader;
 use wal::wal::{RM_HEAP_ID, XLOG_INCLUDE_ORIGIN};
 use wal::xloginsert::{REGBUF_KEEP_DATA, REGBUF_STANDARD, REGBUF_WILL_INIT};

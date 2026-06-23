@@ -26,7 +26,7 @@ use cache::syscache::{
 };
 use types_acl::AclItem;
 use types_catalog::pg_aggregate::{AggFormData, AggRow};
-use nodes::nodes::NodePtr;
+use ::nodes::nodes::NodePtr;
 use types_partition::PartrelTupleData;
 
 seam_core::seam!(

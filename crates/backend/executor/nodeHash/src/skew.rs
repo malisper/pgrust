@@ -22,7 +22,7 @@ use types_core::{uint32, Size};
 // stays a bare word; it is never forged into / out of the canonical type here.
 use datum::Datum as DatumWord;
 use types_error::PgResult;
-use nodes::nodehash::{
+use ::nodes::nodehash::{
     Hash, HashJoinBuckets, HashJoinTupleData, HashJoinTupleLink, HashSkewBucket, HashState,
     HashJoinTableData, INVALID_SKEW_BUCKET_NO,
 };
@@ -251,8 +251,8 @@ pub fn ExecHashGetSkewBucket<'mcx>(hashtable: &HashJoinTableData<'mcx>, hashvalu
 pub fn ExecHashSkewTableInsert<'mcx>(
     mcx: Mcx<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    slot: ::nodes::SlotId,
     hashvalue: uint32,
     bucketNumber: i32,
 ) -> PgResult<()> {
@@ -284,7 +284,7 @@ pub fn ExecHashSkewTableInsert<'mcx>(
     // ExecHashIncreaseNumBatches `mem::replace` on `tuples` from renumbering
     // (and corrupting) the live skew-bucket chains.
     hashtable.skew_tuples.try_reserve(1).map_err(|_| mcx.oom(hashTupleSize))?;
-    let idx = nodes::nodehash::SkewTupleIdx(hashtable.skew_tuples.len());
+    let idx = ::nodes::nodehash::SkewTupleIdx(hashtable.skew_tuples.len());
     hashtable.skew_tuples.push(hashTuple);
 
     // Push it onto the front of the skew bucket's list.

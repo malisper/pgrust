@@ -21,12 +21,12 @@
 
 use mcx::Mcx;
 use types_core::Oid;
-use nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
-use nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
+use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
+use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 
-use funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
+use ::funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
 use tsvector_core::op::{ts_process_call, ts_setup_firstcall, ts_stat_sql};
 
 use crate::register_srf;

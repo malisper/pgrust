@@ -79,7 +79,7 @@ use types_error::{
     ERRCODE_UNDEFINED_SCHEMA, ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use types_namespace::{FuncArgInfo, FuncCandidate, ProcRow};
-use nodes::parsenodes::{OBJECT_INDEX, OBJECT_SCHEMA};
+use ::nodes::parsenodes::{OBJECT_INDEX, OBJECT_SCHEMA};
 use types_tuple::access::{
     RangeVar, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_TOASTVALUE,
@@ -840,7 +840,7 @@ pub fn RangeVarGetRelidForReindexIndex(
  * The namespace owner still consumes `types_tuple::access::RangeVar` (the
  * non-lifetime, owned-string struct that `RangeVarGetRelid{,Extended}` and
  * `RangeVarGetAndCheckCreationNamespace` operate on). The K1 owned-tree node
- * `nodes::rawnodes::RangeVar<'mcx>` carries the same fields; we copy
+ * `::nodes::rawnodes::RangeVar<'mcx>` carries the same fields; we copy
  * them into the access struct so the existing core functions resolve it.
  * ======================================================================== */
 
@@ -848,7 +848,7 @@ pub fn RangeVarGetRelidForReindexIndex(
 /// `RangeVar` the namespace core consumes. `relname` is never NULL in a
 /// well-formed parse node; `alias` is irrelevant to the lookup (the core never
 /// reads it), so it is dropped.
-fn rangevar_from_node(rv: &nodes::rawnodes::RangeVar<'_>) -> RangeVar {
+fn rangevar_from_node(rv: &::nodes::rawnodes::RangeVar<'_>) -> RangeVar {
     RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().to_string()),
         schemaname: rv.schemaname.as_ref().map(|s| s.as_str().to_string()),
@@ -888,7 +888,7 @@ fn seam_range_var_get_relid_from_text(
 /// by-value `Oid` and the lock taken, neither context-bound) and the callback
 /// (NULL on this path).
 fn seam_vacuum_range_var_get_relid_extended(
-    relation: nodes::rawnodes::RangeVar<'_>,
+    relation: ::nodes::rawnodes::RangeVar<'_>,
     lockmode: i32,
     rvr_opts: i32,
 ) -> PgResult<Oid> {
@@ -902,7 +902,7 @@ fn seam_vacuum_range_var_get_relid_extended(
 /// `RangeVarGetAndCheckCreationNamespace(relation, NoLock, &existing_relid)`
 /// (sequence.c `DefineSequence` if_not_exists pre-check) over the K1 node.
 fn seam_range_var_get_and_check_creation_namespace(
-    relation: &nodes::rawnodes::RangeVar<'_>,
+    relation: &::nodes::rawnodes::RangeVar<'_>,
 ) -> PgResult<Oid> {
     let scratch = mcx::MemoryContext::new("RangeVarGetAndCheckCreationNamespace");
     let mut rv = rangevar_from_node(relation);
@@ -924,7 +924,7 @@ fn seam_range_var_get_and_check_creation_namespace(
 /// namespace's; this bridge only marshals (the callback's only input from the
 /// `RangeVar` is `relname`) and delegates to the tablecmds owner via its seam.
 fn seam_range_var_get_relid_owns_seq(
-    relation: &nodes::rawnodes::RangeVar<'_>,
+    relation: &::nodes::rawnodes::RangeVar<'_>,
     missing_ok: bool,
 ) -> PgResult<Oid> {
     let scratch = mcx::MemoryContext::new("RangeVarGetRelidOwnsSeq");
@@ -957,7 +957,7 @@ fn seam_range_var_get_relid_owns_seq(
 /// delegates to the tablecmds owner via its seam.
 pub fn RangeVarGetRelidOwnsRelation<'mcx>(
     mcx: Mcx<'mcx>,
-    relation: &nodes::rawnodes::RangeVar<'_>,
+    relation: &::nodes::rawnodes::RangeVar<'_>,
     lockmode: LOCKMODE,
 ) -> PgResult<Oid> {
     let rv = rangevar_from_node(relation);
@@ -4517,7 +4517,7 @@ fn RemoveTempRelations(tempNamespaceId: Oid) -> PgResult<()> {
         NAMESPACE_RELATION_ID,
         tempNamespaceId,
         0,
-        nodes::parsenodes::DROP_CASCADE,
+        ::nodes::parsenodes::DROP_CASCADE,
         PERFORM_DELETION_INTERNAL
             | PERFORM_DELETION_QUIETLY
             | PERFORM_DELETION_SKIP_ORIGINAL

@@ -43,10 +43,10 @@ use nodes_core_seams as bitmapset;
 use postgres_seams as tcop_postgres;
 
 use types_error::PgResult;
-use nodes::execnodes::ScanStateData;
-use nodes::nodectescan::CteScanState;
-use nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;
-use nodes::nodes::ntag;
+use ::nodes::execnodes::ScanStateData;
+use ::nodes::nodectescan::CteScanState;
+use ::nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;
+use ::nodes::nodes::ntag;
 use nodes::{
     EStateData, FunctionScanState, IndexOnlyScanState, SlotId, SubqueryScanState,
     TableFuncScanState,
@@ -83,7 +83,7 @@ impl<'mcx> ScanNode<'mcx> for IndexOnlyScanState<'mcx> {
     }
 }
 
-impl<'mcx> ScanNode<'mcx> for nodes::IndexScanState<'mcx> {
+impl<'mcx> ScanNode<'mcx> for ::nodes::IndexScanState<'mcx> {
     #[inline]
     fn ss(&mut self) -> &mut ScanStateData<'mcx> {
         &mut self.ss
@@ -111,7 +111,7 @@ impl<'mcx> ScanNode<'mcx> for NamedTuplestoreScanState<'mcx> {
     }
 }
 
-impl<'mcx> ScanNode<'mcx> for nodes::nodeworktablescan::WorkTableScanStateData<'mcx> {
+impl<'mcx> ScanNode<'mcx> for ::nodes::nodeworktablescan::WorkTableScanStateData<'mcx> {
     #[inline]
     fn ss(&mut self) -> &mut ScanStateData<'mcx> {
         &mut self.ss
@@ -789,7 +789,7 @@ fn exec_scan_indexonly<'mcx>(
 /// IndexRecheck)` for a plain index scan node. Like the index-only variant, the
 /// C returns the result `TupleTableSlot *`; this seam reports `!TupIsNull(slot)`.
 fn exec_scan_index<'mcx>(
-    node: &mut nodes::IndexScanState<'mcx>,
+    node: &mut ::nodes::IndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     access: execScan_seams::IndexScanAccessMtd,
     recheck: execScan_seams::IndexScanRecheckMtd,
@@ -861,7 +861,7 @@ fn exec_scan_namedtuplestore<'mcx>(
 /// node's own `WorkTableScanNext`, which stores the next tuple into
 /// `ss_ScanTupleSlot` and reports a `bool`.
 fn exec_scan_worktable<'mcx>(
-    node: &mut nodes::nodeworktablescan::WorkTableScanStateData<'mcx>,
+    node: &mut ::nodes::nodeworktablescan::WorkTableScanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     access: execScan_seams::WorkTableScanAccessMtd,
     recheck: execScan_seams::WorkTableScanRecheckMtd,
@@ -872,7 +872,7 @@ fn exec_scan_worktable<'mcx>(
 /// `exec_scan_rescan_worktable` seam — `ExecScanReScan(&node->ss)` for a
 /// work-table-scan node.
 fn exec_scan_rescan_worktable<'mcx>(
-    node: &mut nodes::nodeworktablescan::WorkTableScanStateData<'mcx>,
+    node: &mut ::nodes::nodeworktablescan::WorkTableScanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     exec_scan_rescan_ss(&mut node.ss, estate)
@@ -882,7 +882,7 @@ fn exec_scan_rescan_worktable<'mcx>(
 /// `ExecAssignScanProjectionInfo(&node->ss)` for a work-table-scan node. Same
 /// generic `ExecAssignScanProjectionInfo` over the node's [`ScanStateData`] head.
 fn exec_assign_scan_projection_info_worktable<'mcx>(
-    node: &mut nodes::nodeworktablescan::WorkTableScanStateData<'mcx>,
+    node: &mut ::nodes::nodeworktablescan::WorkTableScanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     exec_assign_scan_projection_info(&mut node.ss, estate)

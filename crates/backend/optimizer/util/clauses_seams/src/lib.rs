@@ -18,7 +18,7 @@
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use types_tuple::heaptuple::Datum;
 
 /// `Form_pg_proc` subset (`pg_proc.h`) that `clauses.c`'s folding engine reads:
@@ -81,7 +81,7 @@ seam_core::seam!(
     /// like any other node. A pure structural predicate, so infallible.
     ///
     /// INWARD: installed by `backend-optimizer-util-clauses::init_seams`.
-    pub fn contain_subplans<'mcx>(clause: &[nodes::primnodes::Expr<'mcx>]) -> bool
+    pub fn contain_subplans<'mcx>(clause: &[::nodes::primnodes::Expr<'mcx>]) -> bool
 );
 
 // ===========================================================================
@@ -199,9 +199,9 @@ seam_core::seam!(
     pub fn inline_set_returning_function_sql_body<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut pathnodes::PlannerInfo,
-        rte: &nodes::parsenodes::RangeTblEntry<'mcx>,
+        rte: &::nodes::parsenodes::RangeTblEntry<'mcx>,
         funcid: Oid,
-    ) -> PgResult<Option<nodes::copy_query::Query<'mcx>>>
+    ) -> PgResult<Option<::nodes::copy_query::Query<'mcx>>>
 );
 
 seam_core::seam!(
@@ -280,8 +280,8 @@ seam_core::seam!(
     pub fn inline_set_returning_function<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         root: &mut pathnodes::PlannerInfo,
-        rte: &nodes::parsenodes::RangeTblEntry<'mcx>,
-    ) -> PgResult<Option<nodes::copy_query::Query<'mcx>>>
+        rte: &::nodes::parsenodes::RangeTblEntry<'mcx>,
+    ) -> PgResult<Option<::nodes::copy_query::Query<'mcx>>>
 );
 
 seam_core::seam!(

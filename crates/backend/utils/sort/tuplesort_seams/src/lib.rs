@@ -4,7 +4,7 @@
 //!
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly. `Tuplesortstate` is type-erased
-//! ([`nodes::Tuplesortstate`]); only the tuplesort owner downcasts.
+//! ([`::nodes::Tuplesortstate`]); only the tuplesort owner downcasts.
 //!
 //! nodeSort never passes a parallel `SortCoordinate` (it always supplies the C
 //! `NULL`), so the begin seams omit that parameter — the parallel-coordinated

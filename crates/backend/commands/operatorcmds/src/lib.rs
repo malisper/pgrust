@@ -53,7 +53,7 @@ use types_catalog::catalog::{
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::catalog::{FirstGenbkiObjectId, INT4OID, INTERNALOID, OIDOID};
 use types_core::primitive::{InvalidOid, Oid};
-use nodes::parsenodes::{OBJECT_FUNCTION, OBJECT_OPERATOR, OBJECT_SCHEMA, OBJECT_TYPE};
+use ::nodes::parsenodes::{OBJECT_FUNCTION, OBJECT_OPERATOR, OBJECT_SCHEMA, OBJECT_TYPE};
 use parsenodes::{AlterOperatorStmt, DefElem, Node, TypeName};
 
 /// `INT2OID` / `FLOAT8OID` (catalog/pg_type.h) — used in the estimator-function
@@ -790,7 +790,7 @@ pub fn init_seams() {
 /// body.
 fn alter_operator_seam<'mcx>(
     _mcx: Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     use parse_type::{rich_node_to_parse, rich_objectwithargs_to_parse};
 

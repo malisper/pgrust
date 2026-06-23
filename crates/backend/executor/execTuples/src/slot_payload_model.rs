@@ -2,13 +2,13 @@
 //! four payload subtypes and the flag/TID/sizing helpers (executor/tuptable.h,
 //! execTuples.c `MakeTupleTableSlot` sizing).
 //!
-//! The owned types live in [`nodes::tuptable`]; this module owns the
+//! The owned types live in [`::nodes::tuptable`]; this module owns the
 //! per-kind sizing and the make/empty helpers that operate on them.
 
 use mcx::{vec_with_capacity_in, Mcx};
 use types_core::primitive::Size;
 use types_error::PgResult;
-use nodes::tuptable::{
+use ::nodes::tuptable::{
     BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotData,
     TupleTableSlotOps, VirtualTupleTableSlot, TTS_FLAG_FIXED,
 };

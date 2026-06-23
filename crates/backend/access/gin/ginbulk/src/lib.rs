@@ -40,7 +40,7 @@ use types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber};
 use types_error::PgError;
 use gin::{GinNullCategory, GinState, GinStatsData, GIN_CAT_NORM_KEY, GIN_LEAF};
 use rel::Relation;
-use nodes::execnodes::IndexInfo;
+use ::nodes::execnodes::IndexInfo;
 use types_tableam::amapi::IndexBuildResult;
 use types_tuple::heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;
@@ -728,7 +728,7 @@ fn relation_needs_wal(rel: &Relation<'_>) -> bool {
 // edge is bridged through the `ginbuild`/`ginbuildempty` seams, which this crate
 // installs here: the adapter passes the `IndexInfoCarrier` (#342) through, and
 // this installer downcasts it back to the real
-// `nodes::execnodes::IndexInfo<'mcx>` before invoking the build. Mirrors
+// `::nodes::execnodes::IndexInfo<'mcx>` before invoking the build. Mirrors
 // the GiST `gistbuild` and nbtree `btbuild` build-dispatch seams.
 // ===========================================================================
 

@@ -22,10 +22,10 @@ use types_error::{PgResult, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use types_storage::lock::{AccessShareLock, NoLock};
 
 use types_acl::{ACLCHECK_OK, ACL_SELECT, ACL_USAGE};
-use nodes::ddlnodes::CommentStmt;
-use nodes::nodes::Node;
-use nodes::parsenodes::{OBJECT_COLUMN, OBJECT_TABCONSTRAINT, OBJECT_TYPE};
-use nodes::rawnodes::{ColumnDef, TypeName};
+use ::nodes::ddlnodes::CommentStmt;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::{OBJECT_COLUMN, OBJECT_TABCONSTRAINT, OBJECT_TYPE};
+use ::nodes::rawnodes::{ColumnDef, TypeName};
 use types_tuple::pg_type::FormData_pg_type;
 
 use common_relation::{relation_open, relation_openrv};
@@ -91,7 +91,7 @@ const CREATE_TABLE_LIKE_STORAGE: u32 = 1 << 8;
 /// Bridge a node `rawnodes::RangeVar` to the value-typed
 /// `types_tuple::access::RangeVar` that `relation_openrv` consumes.
 pub(crate) fn access_range_var(
-    rv: &nodes::rawnodes::RangeVar<'_>,
+    rv: &::nodes::rawnodes::RangeVar<'_>,
 ) -> types_tuple::access::RangeVar {
     types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().into()),

@@ -19,7 +19,7 @@ use mcx::Mcx;
 use seam_core::seam;
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::ddlnodes::DefElem;
+use ::nodes::ddlnodes::DefElem;
 use rel::Relation;
 use types_storage::lock::LOCKMODE;
 use types_tuple::heaptuple::ItemPointerData;

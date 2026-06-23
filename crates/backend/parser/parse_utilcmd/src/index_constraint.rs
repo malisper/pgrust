@@ -21,10 +21,10 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 
-use nodes::ddlnodes::{IndexElem, IndexStmt, CONSTR_EXCLUSION, CONSTR_PRIMARY};
-use nodes::nodes::{ntag, Node};
-use nodes::parsestmt::ParseState;
-use nodes::rawnodes::{SORTBY_DEFAULT, SORTBY_NULLS_DEFAULT};
+use ::nodes::ddlnodes::{IndexElem, IndexStmt, CONSTR_EXCLUSION, CONSTR_PRIMARY};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsestmt::ParseState;
+use ::nodes::rawnodes::{SORTBY_DEFAULT, SORTBY_NULLS_DEFAULT};
 use types_core::primitive::{InvalidOid, OidIsValid};
 use types_core::catalog::BTREE_AM_OID;
 use types_core::Oid;
@@ -357,7 +357,7 @@ pub fn transform_index_constraint_catalog<'mcx>(
         if let Some(index_name) = indexname {
             // Grammar should only allow PRIMARY and UNIQUE constraints, and no
             // explicit column list (constraint->keys == NIL).
-            debug_assert!(contype == CONSTR_PRIMARY || contype == nodes::ddlnodes::CONSTR_UNIQUE);
+            debug_assert!(contype == CONSTR_PRIMARY || contype == ::nodes::ddlnodes::CONSTR_UNIQUE);
 
             // Must be ALTER, not CREATE, but grammar doesn't enforce that.
             if !isalter {
@@ -569,14 +569,14 @@ pub fn transform_index_constraint_catalog<'mcx>(
 
                     new_keys.push(mcx::alloc_in(
                         mcx,
-                        Node::mk_string(mcx, nodes::value::StringNode {
+                        Node::mk_string(mcx, ::nodes::value::StringNode {
                             sval: PgString::from_str_in(&attname, mcx)?,
                         })?,
                     )?);
                 } else {
                     new_including.push(mcx::alloc_in(
                         mcx,
-                        Node::mk_string(mcx, nodes::value::StringNode {
+                        Node::mk_string(mcx, ::nodes::value::StringNode {
                             sval: PgString::from_str_in(&attname, mcx)?,
                         })?,
                     )?);

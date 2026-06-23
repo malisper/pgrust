@@ -4,10 +4,10 @@
 //! # Owned, split Expr/Node model
 //!
 //! [`transformExprRecurse`] is the central per-node-kind dispatcher. The C
-//! `Node *expr` input is a raw-grammar [`nodes::nodes::Node`] (the
+//! `Node *expr` input is a raw-grammar [`::nodes::nodes::Node`] (the
 //! `A_Expr`/`A_Const`/`ColumnRef`/… vocabulary plus pass-through
 //! `Node::Expr(Expr)` leaves); the output is always an expression node, modeled
-//! as [`nodes::primnodes::Expr`]. A `List *` of nodes is a `PgVec<NodePtr>`
+//! as [`::nodes::primnodes::Expr`]. A `List *` of nodes is a `PgVec<NodePtr>`
 //! on the raw side and a `Vec<Expr>` on the typed side; a `NULL` pointer is
 //! `Option::None`. There is no `extern "C"` and no raw pointers.
 //!
@@ -68,11 +68,11 @@ use types_error::{
 };
 use types_sortsupport::COMPARE_EQ;
 
-/// `RowCompareExpr.cmptype` is the [`nodes::primnodes::CompareType`] enum;
+/// `RowCompareExpr.cmptype` is the [`::nodes::primnodes::CompareType`] enum;
 /// the intersection logic in [`make_row_comparison_op`] works with the bare
 /// `i32` cmptype carried by `OpIndexInterpretation`, so convert at the boundary.
-fn cmptype_to_enum(c: i32) -> nodes::primnodes::CompareType {
-    use nodes::primnodes::CompareType::*;
+fn cmptype_to_enum(c: i32) -> ::nodes::primnodes::CompareType {
+    use ::nodes::primnodes::CompareType::*;
     match c {
         1 => COMPARE_LT,
         2 => COMPARE_LE,
@@ -115,9 +115,9 @@ use types_tuple::heaptuple::MaxTupleAttributeNumber;
 
 use vars::var::contain_vars_of_level;
 
-use nodes::nodes::{self, ntag, Node};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::{
+use ::nodes::nodes::{self, ntag, Node};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::{
     Aggref, ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr, CaseWhen, CoalesceExpr,
     CoercionForm, CollateExpr, CurrentOfExpr, Expr, FuncExpr, JsonBehavior, JsonBehaviorType,
     JsonConstructorType, JsonEncoding, JsonExpr, JsonExprOp, JsonFormat,
@@ -127,11 +127,11 @@ use nodes::primnodes::{
     SubscriptingRef, WindowFunc, AND_EXPR, NOT_EXPR, OR_EXPR,
     XmlExpr as CookedXmlExpr, XmlExprOp,
 };
-use nodes::rawnodes::{
+use ::nodes::rawnodes::{
     A_Const, A_Expr, A_Expr_Kind, A_ArrayExpr, A_Indices, A_Indirection, ColumnRef, CollateClause,
     FuncCall, MultiAssignRef, TypeCast,
 };
-use nodes::rawexprnodes::RowExpr as RawRowExpr;
+use ::nodes::rawexprnodes::RowExpr as RawRowExpr;
 use parsenodes::CoercionContext;
 
 use utils_error::ereport;
@@ -675,7 +675,7 @@ fn transformAExprOp<'mcx>(
             .unwrap_or_else(|| unreachable!("is_expr_sublink guard"));
         // s->subLinkType = ROWCOMPARE_SUBLINK; s->testexpr = lexpr;
         // s->operName = a->name; s->location = a->location;
-        s.sub_link_type = nodes::primnodes::SubLinkType::RowCompare;
+        s.sub_link_type = ::nodes::primnodes::SubLinkType::RowCompare;
         s.testexpr = lexpr.map(|l| mcx::alloc_in(mcx, l)).transpose()?;
         s.oper_name = name;
         s.location = location;
@@ -949,7 +949,7 @@ fn make_simple_a_expr<'mcx>(
     location: i32,
 ) -> PgResult<Node<'mcx>> {
     let mut name: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-    let str_node = Node::mk_string(mcx, nodes::value::StringNode {
+    let str_node = Node::mk_string(mcx, ::nodes::value::StringNode {
         sval: mcx::PgString::from_str_in(op, mcx)?,
     })?;
     name.push(mcx::alloc_in(mcx, str_node)?);
@@ -1160,7 +1160,7 @@ fn transformAExprNullIf<'mcx>(
 
 fn transformBoolExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    a: nodes::rawexprnodes::BoolExpr<'mcx>,
+    a: ::nodes::rawexprnodes::BoolExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let opname = match a.boolop {
         AND_EXPR => "AND",
@@ -1219,7 +1219,7 @@ fn transformMergeSupportFunc<'mcx>(
 
 fn transformCoalesceExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    c: nodes::rawexprnodes::CoalesceExpr<'mcx>,
+    c: ::nodes::rawexprnodes::CoalesceExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let last_srf = clone_last_srf(pstate);
     let location = c.location;
@@ -1252,7 +1252,7 @@ fn transformCoalesceExpr<'mcx>(
 
 fn transformMinMaxExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    m: nodes::rawexprnodes::MinMaxExpr<'mcx>,
+    m: ::nodes::rawexprnodes::MinMaxExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let funcname = if m.op == MinMaxOp::IS_GREATEST {
         "GREATEST"
@@ -1293,7 +1293,7 @@ fn transformMinMaxExpr<'mcx>(
 /// model detects "a new SRF was recorded" by node-tag / location difference.
 fn srf_check(
     pstate: &ParseState<'_>,
-    last_srf: &Option<(nodes::nodes::NodeTag, i32)>,
+    last_srf: &Option<(::nodes::nodes::NodeTag, i32)>,
     construct: &str,
 ) -> PgResult<()> {
     let now = pstate
@@ -1323,7 +1323,7 @@ fn srf_check(
 }
 
 /// Snapshot `p_last_srf` as a (tag, location) identity for [`srf_check`].
-fn clone_last_srf(pstate: &ParseState<'_>) -> Option<(nodes::nodes::NodeTag, i32)> {
+fn clone_last_srf(pstate: &ParseState<'_>) -> Option<(::nodes::nodes::NodeTag, i32)> {
     pstate
         .p_last_srf
         .as_ref()
@@ -1408,7 +1408,7 @@ fn transformBooleanTest<'mcx>(
 /// the raw node shape.
 fn transformBooleanTestRaw<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    b: nodes::rawexprnodes::BooleanTest<'mcx>,
+    b: ::nodes::rawexprnodes::BooleanTest<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let clausename = match b.booltesttype {
         BoolTestType::IS_TRUE => "IS TRUE",
@@ -1438,7 +1438,7 @@ fn transformBooleanTestRaw<'mcx>(
 /// `primnodes::NullTest`.
 fn transformNullTestRaw<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    n: nodes::rawexprnodes::NullTest<'mcx>,
+    n: ::nodes::rawexprnodes::NullTest<'mcx>,
 ) -> PgResult<Expr<'static>> {
     // n->arg = (Expr *) transformExprRecurse(pstate, (Node *) n->arg);
     let arg = transformExprRecurse(pstate, boxed_node(n.arg))?;
@@ -1456,7 +1456,7 @@ fn transformNullTestRaw<'mcx>(
 /// and return the (now cooked) NamedArgExpr unchanged otherwise.
 fn transformNamedArgExprRaw<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    na: nodes::rawexprnodes::NamedArgExpr<'mcx>,
+    na: ::nodes::rawexprnodes::NamedArgExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
     // na->arg = (Expr *) transformExprRecurse(pstate, (Node *) na->arg);
     let arg = transformExprRecurse(pstate, boxed_node(na.arg))?;
@@ -1501,12 +1501,12 @@ fn transformCurrentOfExpr<'mcx>(
                 mcx,
                 Node::mk_string(
                     mcx,
-                    nodes::value::StringNode {
+                    ::nodes::value::StringNode {
                         sval: mcx::PgString::from_str_in(&cursor_name, mcx)?,
                     },
                 )?,
             )?);
-            let cref = nodes::rawnodes::ColumnRef { fields, location: -1 };
+            let cref = ::nodes::rawnodes::ColumnRef { fields, location: -1 };
 
             // pre hook, then post hook only if pre returned nothing (C order).
             let mut node = if pstate.p_pre_columnref_hook.is_some() {
@@ -1519,8 +1519,8 @@ fn transformCurrentOfExpr<'mcx>(
             }
 
             if let Some(node) = node {
-                if let Some(nodes::primnodes::Expr::Param(p)) = node.as_ref().as_expr() {
-                    if p.paramkind == nodes::primnodes::PARAM_EXTERN
+                if let Some(::nodes::primnodes::Expr::Param(p)) = node.as_ref().as_expr() {
+                    if p.paramkind == ::nodes::primnodes::PARAM_EXTERN
                         && p.paramtype == REFCURSOROID
                     {
                         // Matches: convert CURRENT OF to a param reference.
@@ -1565,7 +1565,7 @@ fn transformCollateClause<'mcx>(
     // LookupCollation(pstate, c->collname, c->location). The collname is a
     // `List *` of `String` value nodes. The merged parse_type owner consumes the
     // parser's own node vocabulary (`parsenodes::Node`), distinct from the
-    // raw-grammar `nodes::Node` this dispatcher carries; bridge the
+    // raw-grammar `::nodes::Node` this dispatcher carries; bridge the
     // String-only collname list across the two vocabularies (the only node kind
     // a collation name list ever contains).
     let mut collname_pn: Vec<parsenodes::Node> = Vec::with_capacity(collname.len());
@@ -1609,7 +1609,7 @@ fn transformCollateClause<'mcx>(
 /// `transformCaseExpr(pstate, c)`.
 fn transformCaseExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    c: nodes::rawexprnodes::CaseExpr<'mcx>,
+    c: ::nodes::rawexprnodes::CaseExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let last_srf = clone_last_srf(pstate);
     let case_location = c.location;
@@ -2136,7 +2136,7 @@ fn transformTypeCast<'mcx>(
 /// the owner, mirroring C `typenameTypeMod`.
 fn typename_type_id_and_mod<'mcx>(
     pstate: &ParseState<'mcx>,
-    tn: &nodes::rawnodes::TypeName<'mcx>,
+    tn: &::nodes::rawnodes::TypeName<'mcx>,
 ) -> PgResult<(Oid, i32)> {
     let mut typmods: Vec<parsenodes::Node> = Vec::with_capacity(tn.typmods.len());
     for tm in tn.typmods.iter() {
@@ -2487,7 +2487,7 @@ fn is_rowexpr(n: Option<&Node<'_>>) -> bool {
 /// into a ROWCOMPARE sublink. The raw-grammar SubLink is [`Node::SubLink`].
 fn is_expr_sublink(n: Option<&Node<'_>>) -> bool {
     n.and_then(|n| n.as_sublink())
-        .is_some_and(|s| s.sub_link_type == nodes::primnodes::SubLinkType::Expr)
+        .is_some_and(|s| s.sub_link_type == ::nodes::primnodes::SubLinkType::Expr)
 }
 fn is_rowexpr_expr_opt(e: Option<&Expr>) -> bool {
     matches!(e, Some(Expr::RowExpr(_)))
@@ -2753,7 +2753,7 @@ fn resolve_columnref_finish<'mcx>(
         }
         CrErr::NoRte => {
             // makeRangeVar(nspname, relname, location).
-            let rv = nodes::rawnodes::RangeVar {
+            let rv = ::nodes::rawnodes::RangeVar {
                 catalogname: None,
                 schemaname: match &nspname {
                     Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
@@ -2855,7 +2855,7 @@ fn transformWholeRowRef<'mcx>(
         )
     };
 
-    if names_is_eref || p_returning_type != nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT
+    if names_is_eref || p_returning_type != ::nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT
     {
         // Normal whole-row Var.
         let mut var = make_whole_row_var(&rte, p_rtindex, sublevels_up as types_core::Index)?;
@@ -2904,7 +2904,7 @@ fn transformWholeRowRef<'mcx>(
 /// `nsitem->p_names == nsitem->p_rte->eref` proxy: the two `Alias`es are equal
 /// in contents (aliasname + colnames). For ordinary nsitems p_names is a clone
 /// of eref; for a JOIN USING alias it is the (distinct) using-alias.
-fn alias_eq(a: &nodes::rawnodes::Alias<'_>, b: Option<&nodes::rawnodes::Alias<'_>>) -> bool {
+fn alias_eq(a: &::nodes::rawnodes::Alias<'_>, b: Option<&::nodes::rawnodes::Alias<'_>>) -> bool {
     let Some(b) = b else { return false };
     if a.aliasname.as_deref() != b.aliasname.as_deref() {
         return false;
@@ -2925,11 +2925,11 @@ fn alias_eq(a: &nodes::rawnodes::Alias<'_>, b: Option<&nodes::rawnodes::Alias<'_
 /// `RangeTblFunction.funcexpr` `Node` (the trimmed `expr_type` only covers
 /// `Expr`); those are routed to the funcapi seam (mirror-PG-and-panic).
 fn make_whole_row_var(
-    rte: &nodes::RangeTblEntry<'_>,
+    rte: &::nodes::RangeTblEntry<'_>,
     varno: i32,
     varlevelsup: types_core::Index,
-) -> PgResult<nodes::primnodes::Var> {
-    use nodes::parsenodes::RTEKind::*;
+) -> PgResult<::nodes::primnodes::Var> {
+    use ::nodes::parsenodes::RTEKind::*;
     let mk = |toid: Oid, varattno: i32, varcollid: Oid| {
         nodes_core::makefuncs::make_var(
             varno,
@@ -3001,11 +3001,11 @@ fn make_whole_row_var(
 /// allows it (`allowScalar = true` on the parse side), return the scalar output
 /// column as-is; else fall back to RECORD.
 fn make_whole_row_var_func(
-    rte: &nodes::RangeTblEntry<'_>,
+    rte: &::nodes::RangeTblEntry<'_>,
     varno: i32,
     varlevelsup: types_core::Index,
     allow_scalar: bool,
-) -> PgResult<nodes::primnodes::Var> {
+) -> PgResult<::nodes::primnodes::Var> {
     let mk = |toid: Oid, varattno: i32, varcollid: Oid| {
         nodes_core::makefuncs::make_var(
             varno,
@@ -3344,7 +3344,7 @@ fn transformMultiAssignRef<'mcx>(
     pstate: &mut ParseState<'mcx>,
     maref: MultiAssignRef<'mcx>,
 ) -> PgResult<Expr<'static>> {
-    use nodes::primnodes::{Param, ParamKind, SubLinkType};
+    use ::nodes::primnodes::{Param, ParamKind, SubLinkType};
 
     let mcx = aexpr_clone_ctx(pstate);
 
@@ -3507,7 +3507,7 @@ fn seam_transform_post_columnref_hook<'mcx>(
     cref: ColumnRef<'mcx>,
     node: Option<Node<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
-    use nodes::parsestmt::ParseRefHookState;
+    use ::nodes::parsestmt::ParseRefHookState;
 
     let result = match &pstate.p_ref_hook_state {
         ParseRefHookState::SqlFunction(pinfo) => {
@@ -3573,9 +3573,9 @@ fn seam_transform_post_columnref_hook<'mcx>(
 fn post_columnref_hook_impl<'mcx>(
     pstate: &mut ParseState<'mcx>,
     cref: &ColumnRef<'mcx>,
-    var: Option<nodes::nodes::NodePtr<'mcx>>,
-) -> PgResult<Option<nodes::nodes::NodePtr<'mcx>>> {
-    use nodes::parsestmt::ParseRefHookState;
+    var: Option<::nodes::nodes::NodePtr<'mcx>>,
+) -> PgResult<Option<::nodes::nodes::NodePtr<'mcx>>> {
+    use ::nodes::parsestmt::ParseRefHookState;
 
     let var_node: Option<&Node<'mcx>> = var.as_deref();
     let result: Option<Node<'mcx>> = match &pstate.p_ref_hook_state {
@@ -3610,7 +3610,7 @@ fn post_columnref_hook_impl<'mcx>(
 /// overrides a real table-column reference (returns `None` when `var` is set).
 fn sql_fn_post_column_ref<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    pinfo: &nodes::parsestmt::SqlFnParseInfo,
+    pinfo: &::nodes::parsestmt::SqlFnParseInfo,
     cref: &ColumnRef<'mcx>,
     var: Option<&Node<'mcx>>,
 ) -> PgResult<Option<Node<'mcx>>> {
@@ -3647,7 +3647,7 @@ fn sql_fn_post_column_ref<'mcx>(
     };
 
     // The resolved Param (if any) and whether a trailing subfield remains.
-    let (param, has_subfield): (Option<nodes::primnodes::Param>, bool) = if nnames == 3 {
+    let (param, has_subfield): (Option<::nodes::primnodes::Param>, bool) = if nnames == 3 {
         // Three-part name: first part must match the function name; second part
         // is the parameter, third is a field reference.
         if name1 != pinfo.fname {
@@ -3711,10 +3711,10 @@ fn sql_fn_post_column_ref<'mcx>(
 /// `Param` node for the given 1-based parameter number, using the function's
 /// argument types and (optionally) its input collation.
 fn sql_fn_make_param(
-    pinfo: &nodes::parsestmt::SqlFnParseInfo,
+    pinfo: &::nodes::parsestmt::SqlFnParseInfo,
     paramno: i32,
     location: i32,
-) -> PgResult<nodes::primnodes::Param> {
+) -> PgResult<::nodes::primnodes::Param> {
     let paramtype = pinfo.argtypes[(paramno - 1) as usize];
     let mut paramcollid = lsyscache::get_typcollation::call(paramtype)?;
 
@@ -3723,8 +3723,8 @@ fn sql_fn_make_param(
         paramcollid = pinfo.collation;
     }
 
-    Ok(nodes::primnodes::Param {
-        paramkind: nodes::primnodes::PARAM_EXTERN,
+    Ok(::nodes::primnodes::Param {
+        paramkind: ::nodes::primnodes::PARAM_EXTERN,
         paramid: paramno,
         paramtype,
         paramtypmod: -1,
@@ -3736,10 +3736,10 @@ fn sql_fn_make_param(
 /// `sql_fn_resolve_param_name` (executor/functions.c:515) — search the function's
 /// argument names for `paramname`; on a match, build the corresponding `Param`.
 fn sql_fn_resolve_param_name(
-    pinfo: &nodes::parsestmt::SqlFnParseInfo,
+    pinfo: &::nodes::parsestmt::SqlFnParseInfo,
     paramname: &str,
     location: i32,
-) -> PgResult<Option<nodes::primnodes::Param>> {
+) -> PgResult<Option<::nodes::primnodes::Param>> {
     let Some(argnames) = pinfo.argnames.as_ref() else {
         return Ok(None);
     };
@@ -3766,9 +3766,9 @@ fn sql_fn_resolve_param_name(
 /// raise the "column reference is ambiguous" error.)
 fn plpgsql_pre_column_ref<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    cref: &nodes::rawnodes::ColumnRef<'mcx>,
-) -> PgResult<Option<nodes::nodes::NodePtr<'mcx>>> {
-    use nodes::parsestmt::{ParseRefHookState, PlpgsqlResolveOption};
+    cref: &::nodes::rawnodes::ColumnRef<'mcx>,
+) -> PgResult<Option<::nodes::nodes::NodePtr<'mcx>>> {
+    use ::nodes::parsestmt::{ParseRefHookState, PlpgsqlResolveOption};
 
     let ParseRefHookState::PlpgsqlExpr(state) = &pstate.p_ref_hook_state else {
         return Ok(None);
@@ -3792,9 +3792,9 @@ fn plpgsql_pre_column_ref<'mcx>(
 /// A name that does not resolve to a variable returns `None` (C returning NULL).
 fn plpgsql_resolve_column_ref<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    state: &nodes::parsestmt::PlpgsqlExprParseState,
-    cref: &nodes::rawnodes::ColumnRef<'mcx>,
-) -> PgResult<Option<nodes::nodes::NodePtr<'mcx>>> {
+    state: &::nodes::parsestmt::PlpgsqlExprParseState,
+    cref: &::nodes::rawnodes::ColumnRef<'mcx>,
+) -> PgResult<Option<::nodes::nodes::NodePtr<'mcx>>> {
     // Build the candidate down-cased lookup name(s). The plpgsql scanner already
     // down-cased identifiers in the namespace; match the same way. For a single
     // field `var`; for two fields `block.var` (and also try the bare `var`,
@@ -3846,8 +3846,8 @@ fn plpgsql_resolve_column_ref<'mcx>(
     if !OidIsValid(paramcollid) && OidIsValid(state.input_collation) {
         paramcollid = state.input_collation;
     }
-    let param = nodes::primnodes::Param {
-        paramkind: nodes::primnodes::PARAM_EXTERN,
+    let param = ::nodes::primnodes::Param {
+        paramkind: ::nodes::primnodes::PARAM_EXTERN,
         paramid: info.dno + 1,
         paramtype: info.typeid,
         paramtypmod: info.typmod,
@@ -3878,10 +3878,10 @@ fn plpgsql_resolve_column_ref<'mcx>(
 ///     stands.
 fn plpgsql_post_column_ref<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    cref: &nodes::rawnodes::ColumnRef<'mcx>,
+    cref: &::nodes::rawnodes::ColumnRef<'mcx>,
     var: Option<&Node<'mcx>>,
-) -> PgResult<Option<nodes::nodes::NodePtr<'mcx>>> {
-    use nodes::parsestmt::{ParseRefHookState, PlpgsqlResolveOption};
+) -> PgResult<Option<::nodes::nodes::NodePtr<'mcx>>> {
+    use ::nodes::parsestmt::{ParseRefHookState, PlpgsqlResolveOption};
 
     let ParseRefHookState::PlpgsqlExpr(state) = &pstate.p_ref_hook_state else {
         return Ok(None);
@@ -3928,9 +3928,9 @@ fn plpgsql_post_column_ref<'mcx>(
 /// post hook and the variable-vs-column ambiguity would go undetected).
 fn plpgsql_post_column_ref_marker<'mcx>(
     _pstate: &mut ParseState<'mcx>,
-    _cref: &nodes::rawnodes::ColumnRef<'mcx>,
-    var: Option<nodes::nodes::NodePtr<'mcx>>,
-) -> PgResult<Option<nodes::nodes::NodePtr<'mcx>>> {
+    _cref: &::nodes::rawnodes::ColumnRef<'mcx>,
+    var: Option<::nodes::nodes::NodePtr<'mcx>>,
+) -> PgResult<Option<::nodes::nodes::NodePtr<'mcx>>> {
     // Unreachable: the dispatch is by ref-hook arm, not by this function pointer.
     Ok(var)
 }
@@ -3946,12 +3946,12 @@ fn plpgsql_post_column_ref_marker<'mcx>(
 /// record AND a RETURNING alias — raise the ambiguity error.
 pub fn setup_parse_plpgsql_expr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    state: nodes::parsestmt::PlpgsqlExprParseState,
+    state: ::nodes::parsestmt::PlpgsqlExprParseState,
 ) {
     pstate.p_pre_columnref_hook = Some(plpgsql_pre_column_ref);
     pstate.p_post_columnref_hook =
-        Some(plpgsql_post_column_ref_marker as nodes::parsestmt::PostParseColumnRefHook<'_>);
-    pstate.p_ref_hook_state = nodes::parsestmt::ParseRefHookState::PlpgsqlExpr(state);
+        Some(plpgsql_post_column_ref_marker as ::nodes::parsestmt::PostParseColumnRefHook<'_>);
+    pstate.p_ref_hook_state = ::nodes::parsestmt::ParseRefHookState::PlpgsqlExpr(state);
 }
 
 // ===========================================================================
@@ -3982,20 +3982,20 @@ fn seam_transform_column_ref_hook_currentof<'mcx>(
 /// as C does.
 fn transformParamRef<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    pref: &nodes::rawnodes::ParamRef,
+    pref: &::nodes::rawnodes::ParamRef,
 ) -> PgResult<Expr<'static>> {
-    use nodes::parsestmt::ParseRefHookState;
+    use ::nodes::parsestmt::ParseRefHookState;
 
-    // The small1 paramref hooks take a `nodes::params::ParamRef`; bridge
+    // The small1 paramref hooks take a `::nodes::params::ParamRef`; bridge
     // from the raw-node `ParamRef` (same fields).
-    let hook_pref = nodes::params::ParamRef {
+    let hook_pref = ::nodes::params::ParamRef {
         number: pref.number,
         location: pref.location,
     };
 
     // if (pstate->p_paramref_hook != NULL) result = pstate->p_paramref_hook(...)
     // else result = NULL;
-    let result: Option<nodes::primnodes::Param> = match &pstate.p_ref_hook_state {
+    let result: Option<::nodes::primnodes::Param> = match &pstate.p_ref_hook_state {
         ParseRefHookState::FixedParams(parstate) => Some(
             small1::fixed_paramref_hook(pstate, parstate, &hook_pref)?,
         ),
@@ -4032,8 +4032,8 @@ fn transformParamRef<'mcx>(
                     if !OidIsValid(paramcollid) && OidIsValid(state.input_collation) {
                         paramcollid = state.input_collation;
                     }
-                    let param = nodes::primnodes::Param {
-                        paramkind: nodes::primnodes::PARAM_EXTERN,
+                    let param = ::nodes::primnodes::Param {
+                        paramkind: ::nodes::primnodes::PARAM_EXTERN,
                         paramid: info.dno + 1,
                         paramtype: info.typeid,
                         paramtypmod: info.typmod,
@@ -4067,7 +4067,7 @@ fn transformParamRef<'mcx>(
 /// `count_nonjunk_tlist_entries(targetlist)` (parse_node.c) — the number of
 /// non-resjunk entries in a target list.
 fn count_nonjunk_tlist_entries(
-    targetlist: &mcx::PgVec<'_, nodes::primnodes::TargetEntry<'_>>,
+    targetlist: &mcx::PgVec<'_, ::nodes::primnodes::TargetEntry<'_>>,
 ) -> usize {
     targetlist.iter().filter(|tle| !tle.resjunk).count()
 }
@@ -4080,9 +4080,9 @@ fn count_nonjunk_tlist_entries(
 /// [`Expr::SubLink`].
 fn transformSubLink<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    sublink: nodes::rawexprnodes::SubLink<'mcx>,
+    sublink: ::nodes::rawexprnodes::SubLink<'mcx>,
 ) -> PgResult<Expr<'static>> {
-    use nodes::primnodes::{Param, ParamKind, SubLinkType};
+    use ::nodes::primnodes::{Param, ParamKind, SubLinkType};
 
     let mcx = aexpr_clone_ctx(pstate);
 
@@ -4177,7 +4177,7 @@ fn transformSubLink<'mcx>(
     pstate.p_hasSubLinks = true;
 
     // Destructure the raw SubLink.
-    let nodes::rawexprnodes::SubLink {
+    let ::nodes::rawexprnodes::SubLink {
         sub_link_type,
         sub_link_id,
         testexpr,
@@ -4202,7 +4202,7 @@ fn transformSubLink<'mcx>(
     // Check that we got a SELECT. Anything else should be impossible given
     // restrictions of the grammar, but check anyway.
     let qtree = match qtree_node.as_ref().as_query() {
-        Some(q) if q.commandType == nodes::nodes::CmdType::CMD_SELECT => q,
+        Some(q) if q.commandType == ::nodes::nodes::CmdType::CMD_SELECT => q,
         _ => {
             return Err(PgError::error(
                 "unexpected non-SELECT command in SubLink",
@@ -4216,7 +4216,7 @@ fn transformSubLink<'mcx>(
     // SubPlanExpr — see tlist_into_static / query_into_static).
     let analyzed_subselect = Some(query_into_static(mcx, qtree)?);
 
-    let mut out = nodes::primnodes::SubLink {
+    let mut out = ::nodes::primnodes::SubLink {
         subLinkType: sub_link_type,
         subLinkId: sub_link_id,
         testexpr: None,
@@ -4249,7 +4249,7 @@ fn transformSubLink<'mcx>(
         // If the source was "x IN (select)", convert to "x = ANY (select)".
         let oper_name = if oper_name.is_empty() {
             let mut v: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
-            let str_node = Node::mk_string(mcx, nodes::value::StringNode {
+            let str_node = Node::mk_string(mcx, ::nodes::value::StringNode {
                 sval: mcx::PgString::from_str_in("=", mcx)?,
             })?;
             v.push(mcx::alloc_in(mcx, str_node)?);
@@ -4329,10 +4329,10 @@ fn transformSubLink<'mcx>(
 /// arena outlives parse analysis in practice.
 fn query_into_static<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    qtree: &nodes::copy_query::Query<'mcx>,
-) -> PgResult<mcx::PgBox<'static, nodes::copy_query::Query<'static>>> {
-    let owned: nodes::copy_query::Query<'mcx> = qtree.clone_in(mcx)?;
-    let boxed: mcx::PgBox<'mcx, nodes::copy_query::Query<'mcx>> =
+    qtree: &::nodes::copy_query::Query<'mcx>,
+) -> PgResult<mcx::PgBox<'static, ::nodes::copy_query::Query<'static>>> {
+    let owned: ::nodes::copy_query::Query<'mcx> = qtree.clone_in(mcx)?;
+    let boxed: mcx::PgBox<'mcx, ::nodes::copy_query::Query<'mcx>> =
         mcx::alloc_in(mcx, owned)?;
     // SAFETY: the embedded sub-Query lives inside the lifetime-free Expr tree
     // (SubLink.subselect: Option<PgBox<'static, Query<'static>>>, mirroring
@@ -4340,7 +4340,7 @@ fn query_into_static<'mcx>(
     // in `mcx`; this erases the 'mcx lifetime to the 'static notional lifetime
     // of the Expr tree — a transmute of the lifetime parameter only, the data
     // is unchanged (same convention as tlist_into_static in backend-parser-agg).
-    let boxed_static: mcx::PgBox<'static, nodes::copy_query::Query<'static>> =
+    let boxed_static: mcx::PgBox<'static, ::nodes::copy_query::Query<'static>> =
         unsafe { core::mem::transmute(boxed) };
     Ok(boxed_static)
 }
@@ -4357,9 +4357,9 @@ fn seam_transform_grouping_func<'mcx>(
 /// transforming each named/positional argument and applying the per-op coercions.
 fn transformXmlExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    x: nodes::rawexprnodes::XmlExpr<'mcx>,
+    x: ::nodes::rawexprnodes::XmlExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
-    let nodes::rawexprnodes::XmlExpr {
+    let ::nodes::rawexprnodes::XmlExpr {
         op,
         name,
         named_args,
@@ -4509,9 +4509,9 @@ fn transformXmlExpr<'mcx>(
 /// (text-castable).
 fn transformXmlSerialize<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    xs: nodes::rawexprnodes::XmlSerialize<'mcx>,
+    xs: ::nodes::rawexprnodes::XmlSerialize<'mcx>,
 ) -> PgResult<Expr<'static>> {
-    let nodes::rawexprnodes::XmlSerialize {
+    let ::nodes::rawexprnodes::XmlSerialize {
         xmloption,
         expr,
         type_name,
@@ -4570,7 +4570,7 @@ fn transformXmlSerialize<'mcx>(
 // ===========================================================================
 // SQL/JSON constructor / predicate transforms (parse_expr.c).
 //
-// These turn the raw-grammar SQL/JSON nodes (`nodes::rawexprnodes`
+// These turn the raw-grammar SQL/JSON nodes (`::nodes::rawexprnodes`
 // `Json*`) into cooked `primnodes::Expr` (`JsonConstructorExpr` /
 // `JsonIsPredicate`). The constructor's underlying json[b]_build_* function call
 // is NOT resolved here — `JsonConstructorExpr.func` stays `None` and the
@@ -4718,7 +4718,7 @@ fn check_json_output_format<'mcx>(
 /// Resolves the RETURNING type/typmod and the default-or-checked FORMAT.
 fn transform_json_output<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    output: Option<&nodes::rawexprnodes::JsonOutput<'mcx>>,
+    output: Option<&::nodes::rawexprnodes::JsonOutput<'mcx>>,
     allow_format: bool,
 ) -> PgResult<JsonReturning> {
     let Some(output) = output else {
@@ -4785,7 +4785,7 @@ fn transform_json_output<'mcx>(
 /// `transformJsonConstructorOutput(pstate, output, args)` (parse_expr.c:3569).
 fn transform_json_constructor_output<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    output: Option<&nodes::rawexprnodes::JsonOutput<'mcx>>,
+    output: Option<&::nodes::rawexprnodes::JsonOutput<'mcx>>,
     args: &[Expr],
 ) -> PgResult<JsonReturning> {
     let mut returning = transform_json_output(pstate, output, true)?;
@@ -4953,7 +4953,7 @@ fn exprs_identical_placeholder(e: &Expr) -> bool {
 fn transform_json_value_expr<'mcx>(
     pstate: &mut ParseState<'mcx>,
     construct_name: &str,
-    ve: &nodes::rawexprnodes::JsonValueExpr<'mcx>,
+    ve: &::nodes::rawexprnodes::JsonValueExpr<'mcx>,
     default_format: JsonFormatType,
     mut targettype: Oid,
     isarg: bool,
@@ -5134,7 +5134,7 @@ fn exprs_eq_ptr(_a: &Expr, _b: &Expr) -> bool {
 /// `transformJsonObjectConstructor(pstate, ctor)` (parse_expr.c:3735).
 fn transformJsonObjectConstructor<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    ctor: nodes::rawexprnodes::JsonObjectConstructor<'mcx>,
+    ctor: ::nodes::rawexprnodes::JsonObjectConstructor<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let mut args: Vec<Expr> = Vec::new();
 
@@ -5189,7 +5189,7 @@ fn transformJsonObjectConstructor<'mcx>(
 /// `transformJsonArrayConstructor(pstate, ctor)` (parse_expr.c:4031).
 fn transformJsonArrayConstructor<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    ctor: nodes::rawexprnodes::JsonArrayConstructor<'mcx>,
+    ctor: ::nodes::rawexprnodes::JsonArrayConstructor<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let mut args: Vec<Expr> = Vec::new();
 
@@ -5235,7 +5235,7 @@ fn transformJsonArrayConstructor<'mcx>(
 /// normal `transformSubLink` path.
 fn transformJsonArrayQueryConstructor<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    ctor: nodes::rawexprnodes::JsonArrayQueryConstructor<'mcx>,
+    ctor: ::nodes::rawexprnodes::JsonArrayQueryConstructor<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
 
@@ -5270,7 +5270,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
         mcx,
         Node::mk_string(
             mcx,
-            nodes::value::StringNode {
+            ::nodes::value::StringNode {
                 sval: mcx::PgString::from_str_in("q", mcx)?,
             },
         )?,
@@ -5279,14 +5279,14 @@ fn transformJsonArrayQueryConstructor<'mcx>(
         mcx,
         Node::mk_string(
             mcx,
-            nodes::value::StringNode {
+            ::nodes::value::StringNode {
                 sval: mcx::PgString::from_str_in("a", mcx)?,
             },
         )?,
     )?);
     let colref = Node::mk_column_ref(
         mcx,
-        nodes::rawnodes::ColumnRef {
+        ::nodes::rawnodes::ColumnRef {
             fields,
             location: ctor.location,
         },
@@ -5296,7 +5296,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
 
     // No formatting necessary, so set formatted_expr to be the same as raw_expr.
     // agg->arg = makeJsonValueExpr((Expr *) colref, (Expr *) colref, ctor->format);
-    let arg = nodes::rawexprnodes::JsonValueExpr {
+    let arg = ::nodes::rawexprnodes::JsonValueExpr {
         raw_expr: Some(colref_ptr1),
         formatted_expr: Some(colref_ptr2),
         format: ctor.format,
@@ -5306,7 +5306,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
     // agg->constructor->agg_order = NIL;
     // agg->constructor->output = ctor->output;
     // agg->constructor->location = ctor->location;
-    let constructor = nodes::rawexprnodes::JsonAggConstructor {
+    let constructor = ::nodes::rawexprnodes::JsonAggConstructor {
         output: ctor.output,
         agg_filter: None,
         agg_order: mcx::PgVec::new_in(mcx),
@@ -5314,7 +5314,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
         location: ctor.location,
     };
 
-    let agg = nodes::rawexprnodes::JsonArrayAgg {
+    let agg = ::nodes::rawexprnodes::JsonArrayAgg {
         constructor: Some(mcx::alloc_in(mcx, constructor)?),
         arg: Some(mcx::alloc_in(mcx, arg)?),
         absent_on_null: ctor.absent_on_null,
@@ -5324,7 +5324,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
     // target->name = NULL; target->indirection = NIL; target->val = agg;
     let target = Node::mk_res_target(
         mcx,
-        nodes::rawnodes::ResTarget {
+        ::nodes::rawnodes::ResTarget {
             name: None,
             indirection: mcx::PgVec::new_in(mcx),
             val: Some(agg_node),
@@ -5338,12 +5338,12 @@ fn transformJsonArrayQueryConstructor<'mcx>(
         mcx,
         Node::mk_string(
             mcx,
-            nodes::value::StringNode {
+            ::nodes::value::StringNode {
                 sval: mcx::PgString::from_str_in("a", mcx)?,
             },
         )?,
     )?);
-    let alias = nodes::rawnodes::Alias {
+    let alias = ::nodes::rawnodes::Alias {
         aliasname: Some(mcx::PgString::from_str_in("q", mcx)?),
         colnames,
     };
@@ -5351,7 +5351,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
     // range->lateral = false; range->subquery = ctor->query; range->alias = alias;
     let range = Node::mk_range_subselect(
         mcx,
-        nodes::rawnodes::RangeSubselect {
+        ::nodes::rawnodes::RangeSubselect {
             lateral: false,
             subquery: Some(query),
             alias: Some(mcx::alloc_in(mcx, alias)?),
@@ -5364,7 +5364,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
     let mut from_clause: mcx::PgVec<'mcx, nodes::NodePtr<'mcx>> = mcx::PgVec::new_in(mcx);
     from_clause.push(mcx::alloc_in(mcx, range)?);
 
-    let select = nodes::rawnodes::SelectStmt {
+    let select = ::nodes::rawnodes::SelectStmt {
         distinctClause: mcx::PgVec::new_in(mcx),
         intoClause: None,
         targetList: target_list,
@@ -5378,10 +5378,10 @@ fn transformJsonArrayQueryConstructor<'mcx>(
         sortClause: mcx::PgVec::new_in(mcx),
         limitOffset: None,
         limitCount: None,
-        limitOption: nodes::nodelimit::LimitOption::default(),
+        limitOption: ::nodes::nodelimit::LimitOption::default(),
         lockingClause: mcx::PgVec::new_in(mcx),
         withClause: None,
-        op: nodes::rawnodes::SetOperation::SETOP_NONE,
+        op: ::nodes::rawnodes::SetOperation::SETOP_NONE,
         all: false,
         larg: None,
         rarg: None,
@@ -5389,8 +5389,8 @@ fn transformJsonArrayQueryConstructor<'mcx>(
     let select_node = mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select)?)?;
 
     // sublink->subLinkType = EXPR_SUBLINK; ... sublink->subselect = select;
-    let sublink = nodes::rawexprnodes::SubLink {
-        sub_link_type: nodes::primnodes::SubLinkType::Expr,
+    let sublink = ::nodes::rawexprnodes::SubLink {
+        sub_link_type: ::nodes::primnodes::SubLinkType::Expr,
         sub_link_id: 0,
         testexpr: None,
         oper_name: mcx::PgVec::new_in(mcx),
@@ -5405,7 +5405,7 @@ fn transformJsonArrayQueryConstructor<'mcx>(
 /// `transformJsonScalarExpr(pstate, jsexpr)` (parse_expr.c:4223).
 fn transformJsonScalarExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    jsexpr: nodes::rawexprnodes::JsonScalarExpr<'mcx>,
+    jsexpr: ::nodes::rawexprnodes::JsonScalarExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let arg_node = boxed_node(
         jsexpr
@@ -5440,7 +5440,7 @@ fn transformJsonScalarExpr<'mcx>(
 /// `transformJsonReturning(pstate, output, fname)` (parse_expr.c:4134).
 fn transform_json_returning<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    output: Option<&nodes::rawexprnodes::JsonOutput<'mcx>>,
+    output: Option<&::nodes::rawexprnodes::JsonOutput<'mcx>>,
     fname: &str,
 ) -> PgResult<JsonReturning> {
     let mut returning = transform_json_output(pstate, output, false)?;
@@ -5470,7 +5470,7 @@ fn transform_json_returning<'mcx>(
 /// `transformJsonSerializeExpr(pstate, expr)` (parse_expr.c:4246).
 fn transformJsonSerializeExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    jsexpr: nodes::rawexprnodes::JsonSerializeExpr<'mcx>,
+    jsexpr: ::nodes::rawexprnodes::JsonSerializeExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let arg_ve = jsexpr
         .expr
@@ -5601,7 +5601,7 @@ fn transform_json_parse_arg<'mcx>(
 /// `transformJsonParseExpr(pstate, jsexpr)` (parse_expr.c:4174).
 fn transformJsonParseExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    jsexpr: nodes::rawexprnodes::JsonParseExpr<'mcx>,
+    jsexpr: ::nodes::rawexprnodes::JsonParseExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let returning = transform_json_returning(pstate, jsexpr.output.as_deref(), "JSON()")?;
 
@@ -5680,7 +5680,7 @@ const F_JSONB_OBJECT_AGG_UNIQUE_STRICT: Oid = 6290;
 #[allow(clippy::too_many_arguments)]
 fn transformJsonAggConstructor<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    agg_ctor: &nodes::rawexprnodes::JsonAggConstructor<'mcx>,
+    agg_ctor: &::nodes::rawexprnodes::JsonAggConstructor<'mcx>,
     returning: JsonReturning,
     args: Vec<Expr<'static>>,
     aggfnoid: Oid,
@@ -5761,7 +5761,7 @@ fn transformJsonAggConstructor<'mcx>(
             aggpresorted: false,
             // agglevelsup will be set by transformAggregateCall
             agglevelsup: 0,
-            aggsplit: nodes::nodeagg::AGGSPLIT_SIMPLE, // planner might change this
+            aggsplit: ::nodes::nodeagg::AGGSPLIT_SIMPLE, // planner might change this
             aggno: -1, // planner will set aggno and aggtransno
             aggtransno: -1,
             location: agg_ctor.location,
@@ -5795,7 +5795,7 @@ fn transformJsonAggConstructor<'mcx>(
 /// variant by `RETURNING json/jsonb` + ABSENT ON NULL + WITH UNIQUE.
 fn transformJsonObjectAgg<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    agg: nodes::rawexprnodes::JsonObjectAgg<'mcx>,
+    agg: ::nodes::rawexprnodes::JsonObjectAgg<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let kv = agg
         .arg
@@ -5881,7 +5881,7 @@ fn transformJsonObjectAgg<'mcx>(
 /// calling the underlying `json[b]_agg*` aggregate.
 fn transformJsonArrayAgg<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    agg: nodes::rawexprnodes::JsonArrayAgg<'mcx>,
+    agg: ::nodes::rawexprnodes::JsonArrayAgg<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let arg_ve = agg
         .arg
@@ -5942,7 +5942,7 @@ fn transformJsonArrayAgg<'mcx>(
 /// `transformJsonIsPredicate(pstate, pred)` (parse_expr.c:4111).
 fn transformJsonIsPredicate<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    pred: nodes::rawexprnodes::JsonIsPredicate<'mcx>,
+    pred: ::nodes::rawexprnodes::JsonIsPredicate<'mcx>,
 ) -> PgResult<Expr<'static>> {
     // transformJsonParseArg: recurse + coerce the subject to text/json/jsonb,
     // applying the bytea -> text conversion for bytea input. Mirrors C exactly.
@@ -5983,7 +5983,7 @@ fn transformJsonIsPredicate<'mcx>(
 /// though JSON_TABLE itself reaches the cooked node via parse_jsontable.c.
 fn transformJsonFuncExpr<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    func: nodes::rawexprnodes::JsonFuncExpr<'mcx>,
+    func: ::nodes::rawexprnodes::JsonFuncExpr<'mcx>,
 ) -> PgResult<Expr<'static>> {
     let mcx = aexpr_clone_ctx(pstate);
 
@@ -7122,7 +7122,7 @@ fn subscripting_transform_impl<'mcx>(
     is_slice: bool,
     _is_assignment: bool,
 ) -> PgResult<SubscriptingRef<'mcx>> {
-    use nodes::execexpr::SubscriptHandler;
+    use ::nodes::execexpr::SubscriptHandler;
     let routines = lsyscache::get_subscripting_routines::call(sbsref.refcontainertype)?
         .expect("subscripting_transform: refcontainertype is not subscriptable");
     match routines.0.handler {

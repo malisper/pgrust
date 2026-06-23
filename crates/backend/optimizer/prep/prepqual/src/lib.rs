@@ -2,7 +2,7 @@
 //! qualification expressions.
 //!
 //! 1:1 port of PostgreSQL 18.3 `prepqual.c` over this repo's lifetime-free
-//! owned [`Expr`](nodes::primnodes::Expr) tree (the same model
+//! owned [`Expr`](::nodes::primnodes::Expr) tree (the same model
 //! `clauses.c` is ported onto — `negate_clause` is the `BoolExpr NOT_EXPR`
 //! arm's helper there). Lists are `Vec<Expr>`; node builders come from
 //! [`nodes_core::makefuncs`] (`makefuncs.c`), never redefined here.
@@ -43,7 +43,7 @@ use nodes_core::makefuncs::{
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
-use nodes::primnodes::{
+use ::nodes::primnodes::{
     BoolTestType, BooleanTest, Expr, NullTest, NullTestType, AND_EXPR, NOT_EXPR, OR_EXPR,
 };
 

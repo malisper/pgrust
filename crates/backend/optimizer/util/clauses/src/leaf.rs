@@ -15,7 +15,7 @@
 //! `cpu_operator_cost` not yet seamed). They belong to those units and are
 //! ported with them, not here.
 
-use nodes::primnodes::{CoercionForm, Expr};
+use ::nodes::primnodes::{CoercionForm, Expr};
 
 use arrayfuncs_seams as arrayfuncs_seam;
 

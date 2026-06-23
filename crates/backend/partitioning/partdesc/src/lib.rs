@@ -32,7 +32,7 @@
 //!     rel, PartitionDesc pd}`) is modeled by an owned [`PartitionDirectoryData`]
 //!     holding its own long-lived `MemoryContext` and a `BTreeMap<Oid,
 //!     PgBox<PartitionDescData>>`. The cached descriptor is a deep
-//!     [`clone_in`](nodes::partition::PartitionDescData::clone_in) into
+//!     [`clone_in`](::nodes::partition::PartitionDescData::clone_in) into
 //!     the directory's context (the owned analogue of the C refcount pin that
 //!     keeps the relcache descriptor alive); a lookup re-projects it into the
 //!     caller's context. The directory crosses the executor's `Opaque` handle
@@ -53,9 +53,9 @@ use mcx::{Mcx, MemoryContext, PgBox};
 use types_core::primitive::Oid;
 use types_core::{InvalidOid, TransactionId};
 use types_error::{PgError, PgResult};
-use nodes::ddlnodes::PartitionBoundSpec;
-use nodes::partition::{PartitionBoundInfo, PartitionDescData, PartitionKeyData};
-use nodes::Opaque;
+use ::nodes::ddlnodes::PartitionBoundSpec;
+use ::nodes::partition::{PartitionBoundInfo, PartitionDescData, PartitionKeyData};
+use ::nodes::Opaque;
 use rel::{Relation, RelationData};
 
 use partitioning_core_seams as core_seam;

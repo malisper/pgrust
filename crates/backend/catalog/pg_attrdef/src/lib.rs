@@ -30,8 +30,8 @@ use types_catalog::pg_attrdef::{
 use types_core::fmgr::{F_INT2EQ, F_OIDEQ};
 use types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult};
-use nodes::nodes::Node;
-use nodes::parsenodes::DropBehavior;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::DropBehavior;
 use rel::RelationData;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};

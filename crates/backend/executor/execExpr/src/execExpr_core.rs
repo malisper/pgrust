@@ -25,17 +25,17 @@ use mcx::{Mcx, PgBox, PgVec};
 // eval seam (`exec_eval_*_switch_context`) returns.
 use types_tuple::heaptuple::Datum as DatumV;
 use types_error::PgResult;
-use nodes::execexpr::{
+use ::nodes::execexpr::{
     ExprEvalOp, ExprEvalRowtypeCache, ExprEvalStep, ExprEvalStepData, ExprSetupInfo, ExprState,
     ProjectionInfo, ResultCell, ResultCellId, VarReturningType, EEO_FLAG_HAS_NEW, EEO_FLAG_HAS_OLD,
     EEO_FLAG_IS_QUAL, EEO_FLAG_NEW_IS_NULL, EEO_FLAG_OLD_IS_NULL, STATE_RESULT_CELL,
 };
-use nodes::execnodes::PlanStateData;
-use nodes::nodehashjoin::HashJoinState;
-use nodes::primnodes::{
+use ::nodes::execnodes::PlanStateData;
+use ::nodes::nodehashjoin::HashJoinState;
+use ::nodes::primnodes::{
     etag, BoolExprType, Const, Expr, NullTestType, ParamKind, VarReturningType as VrtKind,
 };
-use nodes::execnodes::EStateLink;
+use ::nodes::execnodes::EStateLink;
 use nodes::{EStateData, EcxtId, SlotId};
 use types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
@@ -176,7 +176,7 @@ fn exec_ready_expr<'mcx>(state: &mut ExprState<'mcx>) -> PgResult<()> {
 fn expr_setup_walker<'a, 'mcx>(
     node: &'a Expr<'mcx>,
     info: &mut ExprSetupInfo,
-    multiexprs: &mut Vec<&'a nodes::primnodes::SubPlan<'mcx>>,
+    multiexprs: &mut Vec<&'a ::nodes::primnodes::SubPlan<'mcx>>,
 ) {
     match node.expr_tag() {
         etag::T_Var => {
@@ -286,7 +286,7 @@ fn expr_setup_walker<'a, 'mcx>(
         // expression_tree_walker recurses into subplan->args.
         etag::T_SubPlan => {
             let sub = &node.expect_subplan().0;
-            if sub.subLinkType == nodes::primnodes::SubLinkType::MultiExpr {
+            if sub.subLinkType == ::nodes::primnodes::SubLinkType::MultiExpr {
                 multiexprs.push(sub);
             }
             for arg in sub.args.iter() {
@@ -304,7 +304,7 @@ fn expr_setup_walker<'a, 'mcx>(
 fn descend_opt<'a, 'mcx>(
     node: Option<&'a Expr<'mcx>>,
     info: &mut ExprSetupInfo,
-    multiexprs: &mut Vec<&'a nodes::primnodes::SubPlan<'mcx>>,
+    multiexprs: &mut Vec<&'a ::nodes::primnodes::SubPlan<'mcx>>,
 ) {
     if let Some(n) = node {
         expr_setup_walker(n, info, multiexprs);
@@ -315,7 +315,7 @@ fn descend_opt<'a, 'mcx>(
 fn descend_list<'a, 'mcx>(
     list: &'a [Expr<'mcx>],
     info: &mut ExprSetupInfo,
-    multiexprs: &mut Vec<&'a nodes::primnodes::SubPlan<'mcx>>,
+    multiexprs: &mut Vec<&'a ::nodes::primnodes::SubPlan<'mcx>>,
 ) {
     for n in list {
         expr_setup_walker(n, info, multiexprs);
@@ -364,7 +364,7 @@ fn exec_push_expr_setup_steps<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
     info: &ExprSetupInfo,
-    multiexprs: &[&nodes::primnodes::SubPlan<'mcx>],
+    multiexprs: &[&::nodes::primnodes::SubPlan<'mcx>],
 ) -> PgResult<()> {
     let last = &info.last_attnums;
     for (opcode, last_var) in [
@@ -400,7 +400,7 @@ fn exec_push_expr_setup_steps<'mcx>(
     // is ignored, parked on the ExprState's own result cell.
     let _ = info.multiexpr_subplans;
     for subplan in multiexprs {
-        debug_assert!(subplan.subLinkType == nodes::primnodes::SubLinkType::MultiExpr);
+        debug_assert!(subplan.subLinkType == ::nodes::primnodes::SubLinkType::MultiExpr);
         crate::execExpr_func_subscript::exec_init_sub_plan_expr(
             mcx,
             subplan,
@@ -430,7 +430,7 @@ fn exec_create_expr_setup_steps<'mcx>(
 fn exec_create_expr_setup_steps_tlist<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
-    target_list: &[nodes::TargetEntry<'mcx>],
+    target_list: &[::nodes::TargetEntry<'mcx>],
 ) -> PgResult<()> {
     let mut info = ExprSetupInfo::default();
     let mut multiexprs = Vec::new();
@@ -991,7 +991,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
         // ----- T_BooleanTest -----
         etag::T_BooleanTest => {
             let btest = node.expect_booleantest();
-            use nodes::primnodes::BoolTestType;
+            use ::nodes::primnodes::BoolTestType;
             // Evaluate argument directly into result datum.
             let arg = btest.arg.as_deref().expect("BooleanTest.arg present");
             exec_init_expr_rec(mcx, arg, state, resv)?;
@@ -1105,7 +1105,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             let flinfo = fmgr_seams::fmgr_info::call(mcx, cmp_proc)?;
             let fcinfo_data = mcx::alloc_in(
                 mcx,
-                nodes::fmgr::FunctionCallInfoBaseData {
+                ::nodes::fmgr::FunctionCallInfoBaseData {
                     flinfo: Some(flinfo.clone()),
                     context: None,
                     resultinfo: None,
@@ -1132,7 +1132,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // gives each argument its own result cell and records it in
             // `arg_cells`, which the interpreter gathers into `values`/`nulls`
             // immediately before the comparison loop.
-            let mut arg_cells: PgVec<'mcx, nodes::execexpr::ResultCellId> =
+            let mut arg_cells: PgVec<'mcx, ::nodes::execexpr::ResultCellId> =
                 mcx::vec_with_capacity_in(mcx, nelems)?;
             for e in &minmaxexpr.args {
                 let cell = crate::execExpr_core::new_result_cell(mcx, state)?;
@@ -1151,11 +1151,11 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                     arg_cells: Some(arg_cells),
                     nelems: nelems as i32,
                     op: match minmaxexpr.op {
-                        nodes::primnodes::MinMaxOp::IS_GREATEST => {
-                            nodes::execexpr::MinMaxOp::IS_GREATEST
+                        ::nodes::primnodes::MinMaxOp::IS_GREATEST => {
+                            ::nodes::execexpr::MinMaxOp::IS_GREATEST
                         }
-                        nodes::primnodes::MinMaxOp::IS_LEAST => {
-                            nodes::execexpr::MinMaxOp::IS_LEAST
+                        ::nodes::primnodes::MinMaxOp::IS_LEAST => {
+                            ::nodes::execexpr::MinMaxOp::IS_LEAST
                         }
                     },
                     finfo: Some(mcx::alloc_in(mcx, flinfo)?),
@@ -1370,7 +1370,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 let finfo = fmgr_seams::fmgr_info::call(mcx, proc)?;
                 let fcinfo_data = mcx::alloc_in(
                     mcx,
-                    nodes::fmgr::FunctionCallInfoBaseData {
+                    ::nodes::fmgr::FunctionCallInfoBaseData {
                         flinfo: Some(finfo.clone()),
                         context: None,
                         resultinfo: None,
@@ -1387,7 +1387,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
                 // gives each argument its own result cell and records it in
                 // arg_cells, which the interpreter gathers into the call frame
                 // immediately before the comparison.
-                let mut arg_cells: PgVec<'mcx, nodes::execexpr::ResultCellId> =
+                let mut arg_cells: PgVec<'mcx, ::nodes::execexpr::ResultCellId> =
                     mcx::vec_with_capacity_in(mcx, 2)?;
                 let lcell = new_result_cell(mcx, state)?;
                 exec_init_expr_rec(mcx, left_expr, state, lcell)?;
@@ -1492,7 +1492,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             let finfo_out = fmgr_seams::fmgr_info::call(mcx, out_func)?;
             let fcinfo_data_out = mcx::alloc_in(
                 mcx,
-                nodes::fmgr::FunctionCallInfoBaseData {
+                ::nodes::fmgr::FunctionCallInfoBaseData {
                     flinfo: Some(finfo_out.clone()),
                     context: None,
                     resultinfo: None,
@@ -1532,7 +1532,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // never does).
             let fcinfo_data_in = mcx::alloc_in(
                 mcx,
-                nodes::fmgr::FunctionCallInfoBaseData {
+                ::nodes::fmgr::FunctionCallInfoBaseData {
                     flinfo: Some(finfo_in.clone()),
                     context: None,
                     resultinfo: None,
@@ -1886,14 +1886,14 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // `Expr::SubPlan` now carries `Box<SubPlan<'mcx>>` (the `'mcx`-threaded
             // Expr enum); the SubPlan tree is the same `'mcx` arena, so it is
             // borrowed directly (the former `'static`→`'mcx` transmute is gone).
-            let sub: &nodes::primnodes::SubPlan<'mcx> = &subplan.0;
+            let sub: &::nodes::primnodes::SubPlan<'mcx> = &subplan.0;
             // C (execExpr.c T_SubPlan): real execution of a MULTIEXPR SubPlan has
             // already been hoisted to a setup step (ExecPushExprSetupSteps), so
             // here we only emit a dummy NULL in case this tlist element is
             // assigned somewhere. Running it inline here would set the params
             // AFTER the PARAM_MULTIEXPR columns (placed earlier in the tlist)
             // already read them — an off-by-one across rows.
-            if sub.subLinkType == nodes::primnodes::SubLinkType::MultiExpr {
+            if sub.subLinkType == ::nodes::primnodes::SubLinkType::MultiExpr {
                 let scratch = ExprEvalStep {
                     opcode: ExprEvalOp::EEOP_CONST,
                     resvalue: resv,
@@ -2002,7 +2002,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             }
 
             // makeNode(WindowFuncExprState); wfstate->wfunc = wfunc.
-            let wfstate = nodes::nodewindowagg::WindowFuncExprState {
+            let wfstate = ::nodes::nodewindowagg::WindowFuncExprState {
                 wfunc: Some(mcx::alloc_in(mcx, wfunc.clone_in(mcx)?)?),
                 args: arg_states,
                 aggfilter: aggfilter_state,
@@ -2037,7 +2037,7 @@ pub(crate) fn exec_init_expr_rec<'mcx>(
             // No need to initialize a full JsonExprState for JSON_TABLE(),
             // because the upstream caller tfuncFetchRows() is only interested
             // in the value of formatted_expr (the document). (execExpr.c:2493)
-            if jsexpr.op == nodes::primnodes::JsonExprOp::JSON_TABLE_OP {
+            if jsexpr.op == ::nodes::primnodes::JsonExprOp::JSON_TABLE_OP {
                 let formatted_expr = jsexpr
                     .formatted_expr
                     .as_deref()
@@ -2694,7 +2694,7 @@ pub fn exec_prepare_expr_list<'a, 'mcx>(
 /// varlena — `get_typlen(exprType) == -1`).
 pub fn exec_build_projection_info_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    target_list: &[nodes::TargetEntry<'mcx>],
+    target_list: &[::nodes::TargetEntry<'mcx>],
     econtext: EcxtId,
     slot: Option<SlotId>,
     input_desc: Option<&TupleDescData<'_>>,
@@ -2733,7 +2733,7 @@ pub fn exec_build_projection_info_impl<'mcx>(
         let tle_expr = tle.expr.as_deref();
 
         // If tlist expression is a safe non-system Var, use ASSIGN_*_VAR.
-        let mut variable: Option<&nodes::Var> = None;
+        let mut variable: Option<&::nodes::Var> = None;
         let mut attnum: i32 = 0;
         let mut is_safe_var = false;
 
@@ -2844,7 +2844,7 @@ pub fn exec_build_projection_info<'mcx>(
     // plan tree is borrowed (`&'mcx Node`, never copied into the state), so the
     // target-list slice outlives this call independently of the `&mut estate`
     // borrow. `NIL` (modeled as `None`) is an empty tlist → a no-op projection.
-    let target_list: &[nodes::TargetEntry<'mcx>] = planstate
+    let target_list: &[::nodes::TargetEntry<'mcx>] = planstate
         .plan
         .as_deref()
         .expect("ExecBuildProjectionInfo: PlanState has no plan")
@@ -2883,7 +2883,7 @@ pub fn exec_build_projection_info<'mcx>(
 /// returned [`ProjectionInfo`]'s `pi_state`.
 pub fn exec_build_update_projection_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    target_list: &[nodes::TargetEntry<'mcx>],
+    target_list: &[::nodes::TargetEntry<'mcx>],
     eval_target_list: bool,
     target_colnos: &[i32],
     rel_desc: &TupleDescData<'_>,
@@ -2934,7 +2934,7 @@ pub fn exec_build_update_projection_impl<'mcx>(
     }
 
     // Build a bitmapset of the columns in targetColnos.
-    let mut assigned_cols: Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+    let mut assigned_cols: Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
     for &targetattnum in target_colnos {
         assigned_cols = Some(nodes_core_seams::bms_add_member::call(
             mcx,
@@ -3107,9 +3107,9 @@ pub fn exec_build_update_projection_impl<'mcx>(
 /// `ResultRelInfo` in `types-nodes`. Until then it routes loudly; the modify
 /// family reaches [`exec_build_update_projection_impl`] with explicit args.
 pub fn exec_build_update_projection<'mcx>(
-    mtstate: &mut nodes::ModifyTableState<'mcx>,
+    mtstate: &mut ::nodes::ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
+    result_rel_info: ::nodes::RriId,
     update_colnos: &[i32],
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
@@ -3117,7 +3117,7 @@ pub fn exec_build_update_projection<'mcx>(
     // subplan->targetlist — the UPDATE subplan's (already-evaluated) target list.
     // Borrowed off the plan tree, which outlives this call independently of the
     // `&mut estate` borrow.
-    let target_list: &[nodes::TargetEntry<'mcx>] = mtstate
+    let target_list: &[::nodes::TargetEntry<'mcx>] = mtstate
         .ps
         .plan
         .as_deref()
@@ -3349,7 +3349,7 @@ pub fn exec_project_info<'mcx>(
     // ExecStoreVirtualTuple): clear TTS_FLAG_EMPTY and set tts_nvalid to the
     // descriptor's column count.
     let result = estate.slot_mut(slot);
-    result.tts_flags &= !nodes::tuptable::TTS_FLAG_EMPTY;
+    result.tts_flags &= !::nodes::tuptable::TTS_FLAG_EMPTY;
     let natts = result
         .tts_tupleDescriptor
         .as_ref()
@@ -3609,7 +3609,7 @@ thread_local! {
 /// `value = ExecEvalExprSwitchContext(n, GetPerTupleExprContext(estate),
 /// &prm->isnull)`.
 pub fn eval_exec_param_into_list<'mcx>(
-    param_li: &mut nodes::params::ParamListInfoData<'static>,
+    param_li: &mut ::nodes::params::ParamListInfoData<'static>,
     exprstate: &mut ExprState<'mcx>,
     param_index: i32,
     ptype: types_core::Oid,
@@ -3631,12 +3631,12 @@ pub fn eval_exec_param_into_list<'mcx>(
     // Deep-copy the computed value out of the per-tuple context into the param
     // list's backend-lifetime storage (`Datum<'static>`). For a by-value datum
     // this is a word copy; for by-reference it re-allocs the bytes.
-    let owned_value: nodes::params::Datum<'static> =
+    let owned_value: ::nodes::params::Datum<'static> =
         PREPARED_PARAM_CONTEXT.with(|c| value.clone_in(c.mcx()))?;
 
     let prm = &mut param_li.params[param_index as usize];
     prm.ptype = ptype;
-    prm.pflags = nodes::params::PARAM_FLAG_CONST;
+    prm.pflags = ::nodes::params::PARAM_FLAG_CONST;
     prm.value = owned_value;
     prm.isnull = isnull;
 

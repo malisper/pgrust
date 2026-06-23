@@ -62,7 +62,7 @@ use types_tuple::heaptuple::ItemPointerData;
 use types_tuple::pg_type::FormData_pg_type;
 use types_tuple::{Datum, FormedTuple, TupleDesc};
 
-use nodes::rawnodes::RangeVar;
+use ::nodes::rawnodes::RangeVar;
 use rel::Relation;
 
 use statistics::{
@@ -238,7 +238,7 @@ fn std_analyze_data(attrtypid: Oid) -> PgResult<StdAnalyzeData> {
 /// `BuildIndexInfo` result; the C `vacattrstats` array of index attrs becomes
 /// the owned `Vec<VacAttrStats>`.
 struct AnlIndexData<'mcx> {
-    indexInfo: nodes::execnodes::IndexInfo<'mcx>,
+    indexInfo: ::nodes::execnodes::IndexInfo<'mcx>,
     /// fraction of rows for partial index
     tupleFract: f64,
     /// index attrs to analyze
@@ -539,7 +539,7 @@ fn do_analyze_rel<'mcx>(
                 .map(|e| !e.is_empty())
                 .unwrap_or(false);
             if has_exprs && va_cols.is_empty() {
-                let exprs: Vec<nodes::primnodes::Expr> = thisdata
+                let exprs: Vec<::nodes::primnodes::Expr> = thisdata
                     .indexInfo
                     .ii_Expressions
                     .as_ref()
@@ -849,7 +849,7 @@ fn compute_index_stats<'mcx>(
         estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
 
         // Execution state for the predicate.
-        let predicate_src: Option<Vec<nodes::primnodes::Expr>> = thisdata
+        let predicate_src: Option<Vec<::nodes::primnodes::Expr>> = thisdata
             .indexInfo
             .ii_Predicate
             .as_ref()
@@ -858,9 +858,9 @@ fn compute_index_stats<'mcx>(
             expr_seam::exec_prepare_qual::call(predicate_src.as_deref(), &mut estate)?;
 
         // Compiled ii_ExpressionsState (the C "first time through" setup).
-        let mut expr_states: PgVec<'mcx, mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>> =
+        let mut expr_states: PgVec<'mcx, mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>> =
             if let Some(exprs) = thisdata.indexInfo.ii_Expressions.as_ref() {
-                let exprs: Vec<nodes::primnodes::Expr> = exprs.iter().cloned().collect();
+                let exprs: Vec<::nodes::primnodes::Expr> = exprs.iter().cloned().collect();
                 expr_seam::exec_prepare_expr_list::call(&exprs, &mut estate)?
             } else {
                 mcx::vec_with_capacity_in(mcx, 0)?
@@ -975,7 +975,7 @@ fn examine_attribute<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
     attnum: i32,
-    index_expr: Option<&nodes::primnodes::Expr>,
+    index_expr: Option<&::nodes::primnodes::Expr>,
 ) -> PgResult<Option<VacAttrStats<'mcx>>> {
     let attr = onerel.rd_att.attr((attnum - 1) as usize);
 
@@ -1098,7 +1098,7 @@ fn examine_attribute<'mcx>(
 pub fn examine_expression<'mcx>(
     mcx: Mcx<'mcx>,
     onerel: &Relation<'mcx>,
-    expr: &nodes::primnodes::Expr,
+    expr: &::nodes::primnodes::Expr,
     stattarget: i32,
 ) -> PgResult<Option<VacAttrStats<'mcx>>> {
     // Create the VacAttrStats struct.
@@ -2599,11 +2599,11 @@ fn run_compute_stats<'mcx>(
 /// mirroring the heapam-handler's local form. Evaluates plain key columns from
 /// the slot and index expressions from the prepared states.
 fn form_index_datum<'mcx>(
-    index_info: &nodes::execnodes::IndexInfo<'mcx>,
-    expr_states: &mut PgVec<'mcx, mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>,
-    slot: nodes::SlotId,
-    econtext: nodes::EcxtId,
-    estate: &mut nodes::EStateData<'mcx>,
+    index_info: &::nodes::execnodes::IndexInfo<'mcx>,
+    expr_states: &mut PgVec<'mcx, mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>,
+    slot: ::nodes::SlotId,
+    econtext: ::nodes::EcxtId,
+    estate: &mut ::nodes::EStateData<'mcx>,
 ) -> PgResult<(Vec<Datum<'mcx>>, [bool; INDEX_MAX_KEYS])> {
     let n = index_info.ii_NumIndexAttrs as usize;
     let mut values: Vec<Datum<'mcx>> = Vec::with_capacity(n);
@@ -2876,7 +2876,7 @@ fn clone_tupdesc<'mcx>(mcx: Mcx<'mcx>, rel: &Relation<'mcx>) -> PgResult<TupleDe
 
 fn slot_copy_heap_tuple<'mcx>(
     mcx: Mcx<'mcx>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
 ) -> PgResult<FormedTuple<'mcx>> {
     // ExecCopySlotHeapTuple over a standalone slot.
     execTuples::slot_store_fetch::ExecCopySlotHeapTuple(mcx, slot)

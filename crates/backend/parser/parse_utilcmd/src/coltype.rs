@@ -13,8 +13,8 @@ use adt_format_type::format_type_be;
 use utils_error::ereport;
 use types_core::{Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERROR};
-use nodes::nodes::{ntag, Node};
-use nodes::parsestmt::ParseState;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsestmt::ParseState;
 
 use crate::errpos::parser_errposition;
 
@@ -53,7 +53,7 @@ pub fn transformColumnType<'mcx>(
     if let Some(coll_clause) = column.collClause.as_deref() {
         // `LookupCollation` consumes the parser's own node vocabulary
         // (`parsenodes::Node`), distinct from the raw-grammar
-        // `nodes::Node` this crate carries; bridge the String-only
+        // `::nodes::Node` this crate carries; bridge the String-only
         // collname list (the only node kind a collation name list contains).
         let mut collname_pn: alloc::vec::Vec<parsenodes::Node> =
             alloc::vec::Vec::with_capacity(coll_clause.collname.len());
@@ -96,7 +96,7 @@ pub fn transformColumnType<'mcx>(
     Ok(ctype.oid)
 }
 
-/// Bridge the owned-tree raw-grammar `nodes::rawnodes::TypeName<'mcx>`
+/// Bridge the owned-tree raw-grammar `::nodes::rawnodes::TypeName<'mcx>`
 /// (carried in a `ColumnDef`) into the resolver-facing
 /// `parsenodes::TypeName` that `typenameType`/`LookupTypeName` consume.
 /// Mirrors parse_type's `raw_typename_to_parse` / parse_expr's
@@ -107,7 +107,7 @@ pub fn transformColumnType<'mcx>(
 /// need their `Integer` bound (else `-1`) for `LookupTypeName` to resolve the
 /// array type.
 pub(crate) fn raw_typename_to_parse(
-    tn: &nodes::rawnodes::TypeName<'_>,
+    tn: &::nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<parsenodes::TypeName> {
     use alloc::string::ToString;
     use alloc::vec::Vec;

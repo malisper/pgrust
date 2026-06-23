@@ -77,7 +77,7 @@ use types_core::Oid;
 use types_tuple::heaptuple::Datum as DatumV;
 use types_error::{PgError, PgResult, ERROR};
 use types_network::inet_struct;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     NodeId, PlannerInfo, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_SEMI,

@@ -23,8 +23,8 @@
 use mcx::Mcx;
 use types_error::PgResult;
 use types_core::primitive::Index;
-use nodes::modifytable::{ONCONFLICT_NONE, ONCONFLICT_UPDATE};
-use nodes::nodes::{CmdType, OnConflictAction};
+use ::nodes::modifytable::{ONCONFLICT_NONE, ONCONFLICT_UPDATE};
+use ::nodes::nodes::{CmdType, OnConflictAction};
 use nodes::{EStateData, ModifyTableState, RriId};
 
 extern crate alloc;
@@ -104,7 +104,7 @@ pub fn ExecInitPartitionWithCheckOptions<'mcx>(
         Some(lists) if !lists.is_empty() => lists[0].as_slice(),
         _ => return Ok(()),
     };
-    let mut cloned_wcos: alloc::vec::Vec<nodes::rawnodes::WithCheckOption<'mcx>> =
+    let mut cloned_wcos: alloc::vec::Vec<::nodes::rawnodes::WithCheckOption<'mcx>> =
         alloc::vec::Vec::with_capacity(ref_wco_list.len());
     for wco_node in ref_wco_list {
         let wco = wco_node.as_withcheckoption().ok_or_else(|| {
@@ -167,7 +167,7 @@ pub fn ExecInitPartitionWithCheckOptions<'mcx>(
     // `WithCheckOption` Node so the (working) per-rel `exec_init_with_check_options`
     // seam — the same one ExecInitModifyTable uses — can ExecInitQual each qual and
     // store ri_WithCheckOptions / ri_WithCheckOptionExprs.
-    let mut remapped_wco_nodes: mcx::PgVec<'mcx, nodes::nodes::Node<'mcx>> =
+    let mut remapped_wco_nodes: mcx::PgVec<'mcx, ::nodes::nodes::Node<'mcx>> =
         mcx::vec_with_capacity_in(mcx, cloned_wcos.len())?;
     for mut wco in cloned_wcos {
         if let Some(qual) = wco.qual.take() {
@@ -182,7 +182,7 @@ pub fn ExecInitPartitionWithCheckOptions<'mcx>(
                 )?;
             wco.qual = Some(mapped_qual);
         }
-        remapped_wco_nodes.push(nodes::nodes::Node::mk_with_check_option(mcx, wco)?);
+        remapped_wco_nodes.push(::nodes::nodes::Node::mk_with_check_option(mcx, wco)?);
     }
 
     // ExecInitQual each wco->qual and store ri_WithCheckOptions /
@@ -220,7 +220,7 @@ pub fn ExecInitPartitionReturning<'mcx>(
         Some(lists) if !lists.is_empty() => lists[0].as_slice(),
         _ => return Ok(()),
     };
-    let mut returning_list: mcx::PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+    let mut returning_list: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
         mcx::vec_with_capacity_in(mcx, ref_returning_list.len())?;
     for tle in ref_returning_list {
         returning_list.push(tle.clone_in(mcx)?);
@@ -299,7 +299,7 @@ pub fn ExecInitPartitionReturning<'mcx>(
     // the up-front stamp_modifytable_expr_parents pass, so stamp it here with the
     // recorded ModifyTableState back-link.
     if let Some(link) = mtstate.mt_self_link {
-        nodes::planstate::stamp_result_rel_expr_parents(estate, leaf_part_rri, link);
+        ::nodes::planstate::stamp_result_rel_expr_parents(estate, leaf_part_rri, link);
     }
     Ok(())
 }
@@ -493,7 +493,7 @@ fn ExecInitPartitionOnConflictUpdate<'mcx>(
         .as_ref()
         .map(|l| l.as_slice())
         .unwrap_or(&[]);
-    let mut onconflset_init: mcx::PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+    let mut onconflset_init: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
         mcx::vec_with_capacity_in(mcx, ref_set.len())?;
     for tle in ref_set {
         onconflset_init.push(tle.clone_in(mcx)?);
@@ -603,7 +603,7 @@ fn ExecInitPartitionOnConflictUpdate<'mcx>(
     //       ExecInitQual((List *) clause, &mtstate->ps); }
     let oc_where_clause = match node.onConflictWhere.as_deref() {
         Some(ref_where) if !ref_where.is_empty() => {
-            let mut clause: mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>> =
+            let mut clause: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
                 mcx::vec_with_capacity_in(mcx, ref_where.len())?;
             for e in ref_where {
                 clause.push(e.clone_in(mcx)?);
@@ -645,8 +645,8 @@ fn ExecInitPartitionOnConflictUpdate<'mcx>(
     // leaf_part_rri->ri_onConflict = onconfl;
     let onconfl = mcx::alloc_in(
         mcx,
-        nodes::modifytable::OnConflictSetState {
-            type_: nodes::nodes::T_OnConflictSetState,
+        ::nodes::modifytable::OnConflictSetState {
+            type_: ::nodes::nodes::T_OnConflictSetState,
             oc_Existing: Some(oc_existing),
             oc_ProjSlot: oc_proj_slot,
             oc_ProjInfo: oc_proj_info,
@@ -677,7 +677,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
     }
 
     // List *firstMergeActionList = linitial(node->mergeActionLists);
-    let ref_merge_action_list: &'mcx mcx::PgVec<'mcx, nodes::modifytable::MergeAction<'mcx>> =
+    let ref_merge_action_list: &'mcx mcx::PgVec<'mcx, ::nodes::modifytable::MergeAction<'mcx>> =
         match node.mergeActionLists.as_ref() {
             Some(lists) if !lists.is_empty() => &lists[0],
             _ => return Ok(()),
@@ -733,8 +733,8 @@ pub fn ExecInitPartitionMerge<'mcx>(
     //                           &found_whole_row);
     //   leaf_part_rri->ri_MergeJoinCondition =
     //       ExecInitQual((List *) joinCondition, &mtstate->ps);
-    let mapped_join_condition: Option<mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>>> = {
-        let ref_join_condition: Option<&'mcx [nodes::primnodes::Expr]> = node
+    let mapped_join_condition: Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> = {
+        let ref_join_condition: Option<&'mcx [::nodes::primnodes::Expr]> = node
             .mergeJoinConditions
             .as_ref()
             .and_then(|jc| jc.first())
@@ -743,7 +743,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
         match ref_join_condition {
             None => None,
             Some(jc) => {
-                let mut cloned: mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>> =
+                let mut cloned: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
                     mcx::vec_with_capacity_in(mcx, jc.len())?;
                 for e in jc {
                     cloned.push(e.clone_in(mcx)?);
@@ -782,8 +782,8 @@ pub fn ExecInitPartitionMerge<'mcx>(
 
         // INSERT/UPDATE: clone + remap the action's targetList; UPDATE also
         // remaps updateColnos via the part_attmap.
-        let target_list: mcx::PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = {
-            let mut tl: mcx::PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+        let target_list: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = {
+            let mut tl: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
                 mcx::vec_with_capacity_in(
                     mcx,
                     action.targetList.as_ref().map(|t| t.len()).unwrap_or(0),
@@ -796,7 +796,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
             tl
         };
 
-        let mas_proj: Option<mcx::PgBox<'mcx, nodes::execexpr::ProjectionInfo<'mcx>>>;
+        let mas_proj: Option<mcx::PgBox<'mcx, ::nodes::execexpr::ProjectionInfo<'mcx>>>;
 
         match command_type {
             CmdType::CMD_INSERT => {
@@ -874,11 +874,11 @@ pub fn ExecInitPartitionMerge<'mcx>(
         //                           &found_whole_row);
         //   action_state->mas_whenqual =
         //       ExecInitQual((List *) action->qual, &mtstate->ps);
-        let mapped_qual: Option<mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>>> =
+        let mapped_qual: Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> =
             match action.qual.as_ref() {
                 None => None,
                 Some(q) => {
-                    let mut cloned: mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>> =
+                    let mut cloned: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
                         mcx::vec_with_capacity_in(mcx, q.len())?;
                     for e in q.iter() {
                         cloned.push(e.clone_in(mcx)?);
@@ -909,7 +909,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
         // matchKind), matching merge.rs::ExecInitMerge.
         let mas_action = mcx::alloc_in(
             mcx,
-            nodes::modifytable::MergeAction {
+            ::nodes::modifytable::MergeAction {
                 matchKind: match_kind,
                 commandType: command_type,
                 overriding: action.overriding,
@@ -920,8 +920,8 @@ pub fn ExecInitPartitionMerge<'mcx>(
         )?;
         let action_state = mcx::alloc_in(
             mcx,
-            nodes::modifytable::MergeActionState {
-                type_: nodes::nodes::T_MergeActionState,
+            ::nodes::modifytable::MergeActionState {
+                type_: ::nodes::nodes::T_MergeActionState,
                 mas_action: Some(mas_action),
                 mas_proj,
                 mas_whenqual,
@@ -948,7 +948,7 @@ pub fn ExecInitPartitionMerge<'mcx>(
     // stamp the leaf's ri_MergeJoinCondition / ri_MergeActions here with the
     // recorded ModifyTableState back-link (mirrors ExecInitPartitionReturning).
     if let Some(link) = mtstate.mt_self_link {
-        nodes::planstate::stamp_result_rel_expr_parents(estate, leaf_part_rri, link);
+        ::nodes::planstate::stamp_result_rel_expr_parents(estate, leaf_part_rri, link);
     }
 
     Ok(())

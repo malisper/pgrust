@@ -42,7 +42,7 @@ use hash::hsearch::{
     HASHCTL, HASHHDR, HASH_ALLOC, HASH_DIRSIZE, HASH_ELEM, HASH_SEQ_STATUS, HASH_SHARED_MEM,
     HASH_STRINGS, HTAB,
 };
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_storage::{
     HugePagesStatus, PGShmemHeader, LW_EXCLUSIVE, LW_SHARED, SHMEM_INDEX_LOCK,
 };

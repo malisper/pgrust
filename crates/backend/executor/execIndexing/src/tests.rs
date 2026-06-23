@@ -31,7 +31,7 @@ fn index_expression_changed_walker_null_is_false() {
 #[test]
 fn index_expression_changed_walker_matches_updated_var() {
     use nodes_core::bitmapset::bms_add_member;
-    use nodes::primnodes::{Expr, Var};
+    use ::nodes::primnodes::{Expr, Var};
 
     let ctx = mcx::MemoryContext::new("t");
     let mcx = ctx.mcx();

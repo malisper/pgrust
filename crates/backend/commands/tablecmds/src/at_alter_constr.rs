@@ -17,7 +17,7 @@ use types_catalog::catalog_dependency::ObjectAddress;
 use types_catalog::pg_constraint::{CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL};
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
-use nodes::ddlnodes::ATAlterConstraint;
+use ::nodes::ddlnodes::ATAlterConstraint;
 use rel::Relation;
 use types_storage::lock::{LOCKMODE, NoLock, RowExclusiveLock};
 use types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
@@ -42,9 +42,9 @@ fn make_fk_constraint<'mcx>(
     fk_matchtype: i8,
     fk_upd_action: i8,
     fk_del_action: i8,
-) -> PgResult<nodes::ddlnodes::Constraint<'mcx>> {
-    use nodes::ddlnodes::ConstrType;
-    Ok(nodes::ddlnodes::Constraint {
+) -> PgResult<::nodes::ddlnodes::Constraint<'mcx>> {
+    use ::nodes::ddlnodes::ConstrType;
+    Ok(::nodes::ddlnodes::Constraint {
         contype: ConstrType::CONSTR_FOREIGN,
         conname: Some(mcx::PgString::from_str_in(conname, mcx)?),
         deferrable: false,
@@ -591,7 +591,7 @@ fn ATExecAlterConstrEnforceability<'mcx>(
                         name_str(&currcon.conname),
                         mcx,
                     )?),
-                    contype: nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32,
+                    contype: ::nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32,
                     refrelid: currcon.confrelid,
                     refindid: currcon.conindid,
                     conid: conoid,

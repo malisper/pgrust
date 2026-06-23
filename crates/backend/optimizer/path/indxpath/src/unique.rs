@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use types_core::primitive::Oid;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{
     EquivalenceClass, EquivalenceMember, IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId,
 };

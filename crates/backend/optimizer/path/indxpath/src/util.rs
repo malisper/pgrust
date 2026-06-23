@@ -4,7 +4,7 @@
 //! `restriction_is_or_clause`/`is_andclause`).
 
 use types_core::primitive::Oid;
-use nodes::primnodes::{BoolExprType, Expr};
+use ::nodes::primnodes::{BoolExprType, Expr};
 use pathnodes::{PlannerInfo, Relids, RinfoId};
 
 /// `InvalidOid`.

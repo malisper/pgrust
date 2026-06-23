@@ -69,26 +69,26 @@ use types_storage::lock::{NoLock, RowExclusiveLock};
 use types_tuple::heaptuple::{FLOAT8OID, INTERNALOID};
 
 use types_core::primitive::AttrNumber;
-use nodes::jointype::JoinType;
-use nodes::nodes::{ntag, CmdType, Node, NodePtr};
-use nodes::parsenodes::RTEKind;
-use nodes::parsestmt::{
+use ::nodes::jointype::JoinType;
+use ::nodes::nodes::{ntag, CmdType, Node, NodePtr};
+use ::nodes::parsenodes::RTEKind;
+use ::nodes::parsestmt::{
     ParseExprKind, ParseNamespaceColumn, ParseNamespaceItem, ParseState,
 };
-use nodes::nodesamplescan::TableSampleClause;
-use nodes::primnodes::{
+use ::nodes::nodesamplescan::TableSampleClause;
+use ::nodes::primnodes::{
     AND_EXPR, CaseTestExpr, CoercionForm, Expr, JsonTablePathScan, JsonTableSiblingJoin, TableFunc,
     TFT_JSON_TABLE, TFT_XMLTABLE, Var, VarReturningType,
 };
-use nodes::rawexprnodes::{
+use ::nodes::rawexprnodes::{
     JsonFuncExpr, JsonOutput, JsonTable, JsonTableColumn, JsonTablePathSpec,
     JsonValueExpr as RawJsonValueExpr,
 };
-use nodes::primnodes::{
+use ::nodes::primnodes::{
     JsonBehaviorType, JsonEncoding, JsonExprOp, JsonFormatType, JsonReturning, JsonTableColumnType,
     JsonWrapper, JsonQuotes,
 };
-use nodes::rawnodes::{
+use ::nodes::rawnodes::{
     A_Expr_Kind, Alias, JoinExpr, RangeFunction, RangeSubselect, RangeTableFunc,
     RangeTableSample, RangeTblRef, RangeVar, ResTarget,
 };
@@ -407,7 +407,7 @@ fn transformJoinUsingClause<'mcx>(
         for a in andargs.into_iter() {
             args.push(alloc_in(mcx, a)?);
         }
-        Node::mk_bool_expr(mcx, nodes::rawexprnodes::BoolExpr {
+        Node::mk_bool_expr(mcx, ::nodes::rawexprnodes::BoolExpr {
             boolop: AND_EXPR,
             args,
             location: -1,
@@ -848,7 +848,7 @@ fn transformRangeTableFunc<'mcx>(
     let mut colcollations: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
     let mut colexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, Expr>>> = PgVec::new_in(mcx);
     let mut coldefexprs: PgVec<'mcx, Option<mcx::PgBox<'mcx, Expr>>> = PgVec::new_in(mcx);
-    let mut notnulls: Option<mcx::PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> = None;
+    let mut notnulls: Option<mcx::PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
     let mut names: Vec<String> = Vec::new();
 
     for (colno, col) in rtf.columns.iter().enumerate() {
@@ -1345,11 +1345,11 @@ fn make_string_const<'mcx>(
 ) -> PgResult<NodePtr<'mcx>> {
     let str_node = Node::mk_string(
         mcx,
-        nodes::value::StringNode {
+        ::nodes::value::StringNode {
             sval: mcx::PgString::from_str_in(s, mcx)?,
         },
     )?;
-    let a_const = nodes::rawnodes::A_Const {
+    let a_const = ::nodes::rawnodes::A_Const {
         val: Some(alloc_in(mcx, str_node)?),
         isnull: false,
         location,
@@ -2610,7 +2610,7 @@ fn buildMergedJoinVar<'mcx>(
              * Here we must build a COALESCE expression to ensure that the
              * join output is non-null if either input is.
              */
-            let c = nodes::primnodes::CoalesceExpr {
+            let c = ::nodes::primnodes::CoalesceExpr {
                 coalescetype: outcoltype,
                 /* coalescecollid will get set below */
                 coalescecollid: InvalidOid,
@@ -2683,7 +2683,7 @@ fn markRelsAsNulledBy<'mcx>(
     /* lfirst(lc) = bms_add_member((Bitmapset *) lfirst(lc), jindex) */
     let idx = (varno - 1) as usize;
     let cur = core::mem::replace(&mut pstate.p_nullingrels[idx], empty_bitmapset(mcx)?);
-    let cur_opt: Option<mcx::PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> =
+    let cur_opt: Option<mcx::PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> =
         if cur.words.is_empty() {
             None
         } else {
@@ -2695,8 +2695,8 @@ fn markRelsAsNulledBy<'mcx>(
 }
 
 /// An empty `Bitmapset` value (the C `NULL` / lazy-list NULL cell).
-fn empty_bitmapset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::bitmapset::Bitmapset<'mcx>> {
-    Ok(nodes::bitmapset::Bitmapset {
+fn empty_bitmapset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::bitmapset::Bitmapset<'mcx>> {
+    Ok(::nodes::bitmapset::Bitmapset {
         words: PgVec::new_in(mcx),
     })
 }
@@ -2736,7 +2736,7 @@ pub fn setNamespaceLateralState(
 fn make_string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
     alloc_in(
         mcx,
-        Node::mk_string(mcx, nodes::value::StringNode {
+        Node::mk_string(mcx, ::nodes::value::StringNode {
             sval: mcx::PgString::from_str_in(s, mcx)?,
         })?,
     )

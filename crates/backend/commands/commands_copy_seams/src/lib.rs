@@ -10,7 +10,7 @@ use mcx::{Mcx, PgVec};
 use types_copy::CopyFormatOptions;
 use types_core::primitive::AttrNumber;
 use types_error::PgResult;
-use nodes::nodes::NodePtr;
+use ::nodes::nodes::NodePtr;
 use rel::Relation;
 use types_tuple::heaptuple::TupleDesc;
 
@@ -23,7 +23,7 @@ seam_core::seam!(
     /// `Err` carries the option-validation `ereport(ERROR)`s.
     pub fn process_copy_options<'mcx>(
         mcx: Mcx<'mcx>,
-        pstate: Option<&nodes::copy_query::ParseState<'mcx>>,
+        pstate: Option<&::nodes::copy_query::ParseState<'mcx>>,
         is_from: bool,
         options: Option<&[NodePtr<'mcx>]>,
     ) -> PgResult<CopyFormatOptions<'mcx>>

@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use nodes_core::makefuncs::{make_andclause, make_orclause};
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::primnodes::{Expr, OpExpr};
+use ::nodes::primnodes::{Expr, OpExpr};
 use pathnodes::{
     NodeId, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId, VOLATILITY_UNKNOWN,
 };
@@ -14,7 +14,7 @@ use types_core::primitive::Index;
 use crate::bms;
 use crate::ext_seam;
 
-use nodes::primnodes::{AND_EXPR, OR_EXPR};
+use ::nodes::primnodes::{AND_EXPR, OR_EXPR};
 const INVALID_OID: types_core::primitive::Oid = 0;
 
 /// `is_orclause(node)` (clauses.h).
@@ -307,7 +307,7 @@ fn make_sub_restrictinfos<'mcx>(
 /// embedded as [`Expr::RestrictInfo`] (the [`RinfoRef`] handle); an AND clause
 /// returns the rebuilt bare AND clause (no RestrictInfo above it).
 ///
-/// [`RinfoRef`]: nodes::primnodes::RinfoRef
+/// [`RinfoRef`]: ::nodes::primnodes::RinfoRef
 fn make_sub_restrictinfos_expr<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,

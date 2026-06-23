@@ -24,11 +24,11 @@ use types_core::{Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_UNDEFINED_COLUMN, ERROR};
 use types_storage::lock::{AccessShareLock, NoLock};
 
-use nodes::ddlnodes::{AlterSeqStmt, AlterTableCmd, AlterTableType::*, ConstrType, DEFELEM_UNSPEC};
-use nodes::nodes::{ntag, Node};
-use nodes::parsestmt::ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM;
-use nodes::ddlnodes::DefElem;
-use nodes::rawnodes::{RangeVar, TypeName};
+use ::nodes::ddlnodes::{AlterSeqStmt, AlterTableCmd, AlterTableType::*, ConstrType, DEFELEM_UNSPEC};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsestmt::ParseExprKind::EXPR_KIND_ALTER_COL_TRANSFORM;
+use ::nodes::ddlnodes::DefElem;
+use ::nodes::rawnodes::{RangeVar, TypeName};
 
 use common_relation::relation_open;
 use table::table_close;
@@ -122,8 +122,8 @@ fn make_def_elem_node<'mcx>(
 fn make_bare_column_def<'mcx>(
     mcx: Mcx<'mcx>,
     colname: &str,
-) -> PgResult<nodes::rawnodes::ColumnDef<'mcx>> {
-    Ok(nodes::rawnodes::ColumnDef {
+) -> PgResult<::nodes::rawnodes::ColumnDef<'mcx>> {
+    Ok(::nodes::rawnodes::ColumnDef {
         colname: Some(PgString::from_str_in(colname, mcx)?),
         typeName: None,
         compression: None,
@@ -150,7 +150,7 @@ fn make_bare_column_def<'mcx>(
 /// subcommand carrying `def`.
 fn make_alter_cmd<'mcx>(
     mcx: Mcx<'mcx>,
-    subtype: nodes::ddlnodes::AlterTableType,
+    subtype: ::nodes::ddlnodes::AlterTableType,
     def: NodePtr<'mcx>,
 ) -> PgResult<NodePtr<'mcx>> {
     mcx::alloc_in(
@@ -163,7 +163,7 @@ fn make_alter_cmd<'mcx>(
                 num: 0,
                 newowner: None,
                 def: Some(def),
-                behavior: nodes::parsenodes::DROP_RESTRICT,
+                behavior: ::nodes::parsenodes::DROP_RESTRICT,
                 missing_ok: false,
                 recurse: false,
             },

@@ -75,10 +75,10 @@ use types_error::{
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_WRONG_OBJECT_TYPE,
 };
-use nodes::ddlnodes::{AlterPolicyStmt, CreatePolicyStmt, RoleSpec};
-use nodes::nodes::Node;
-use nodes::parsenodes::RoleSpecType;
-use nodes::parsestmt::ParseExprKind;
+use ::nodes::ddlnodes::{AlterPolicyStmt, CreatePolicyStmt, RoleSpec};
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::RoleSpecType;
+use ::nodes::parsestmt::ParseExprKind;
 use rel::{Relation, RelationData};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{
@@ -752,14 +752,14 @@ pub fn CreatePolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &CreatePolicyStmt<'mcx>) -> PgRe
     // Fix up collation information. The parser-arena `'static` quals are
     // brought into `mcx` (collation assignment mutates in place at `'mcx`, tying
     // pstate+expr to one lifetime; `Expr` is invariant so `clone_in` is required).
-    let mut qual: Option<nodes::primnodes::Expr<'mcx>> = match qual {
+    let mut qual: Option<::nodes::primnodes::Expr<'mcx>> = match qual {
         Some(e) => Some(e.clone_in(mcx)?),
         None => None,
     };
     if let Some(e) = qual.as_mut() {
         assign_expr_collations(Some(&qual_pstate), e)?;
     }
-    let mut with_check_qual: Option<nodes::primnodes::Expr<'mcx>> = match with_check_qual {
+    let mut with_check_qual: Option<::nodes::primnodes::Expr<'mcx>> = match with_check_qual {
         Some(e) => Some(e.clone_in(mcx)?),
         None => None,
     };
@@ -889,9 +889,9 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
     let target_table = relation::relation_open(mcx, table_id, NoLock)?;
 
     // Parse the using policy clause.
-    let mut qual: Option<nodes::primnodes::Expr<'mcx>> = None;
+    let mut qual: Option<::nodes::primnodes::Expr<'mcx>> = None;
     let mut qual_node: Option<Node<'mcx>> = None;
-    let mut qual_pstate: Option<mcx::PgBox<'mcx, nodes::parsestmt::ParseState<'mcx>>> = None;
+    let mut qual_pstate: Option<mcx::PgBox<'mcx, ::nodes::parsestmt::ParseState<'mcx>>> = None;
     if stmt.qual.is_some() {
         let mut pstate = analyze_seams::make_parsestate::call(mcx, None)?;
         let nsitem = addRangeTableEntryForRelation(
@@ -913,7 +913,7 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
         )?;
         // Bring the parser-arena `'static` qual into `mcx` for the in-place
         // collation pass (pstate+expr share one invariant `'mcx`).
-        let mut q: Option<nodes::primnodes::Expr<'mcx>> = match q {
+        let mut q: Option<::nodes::primnodes::Expr<'mcx>> = match q {
             Some(e) => Some(e.clone_in(mcx)?),
             None => None,
         };
@@ -925,8 +925,8 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
     }
 
     // Parse the with-check policy clause.
-    let mut with_check_qual: Option<nodes::primnodes::Expr<'mcx>> = None;
-    let mut with_check_pstate: Option<mcx::PgBox<'mcx, nodes::parsestmt::ParseState<'mcx>>> =
+    let mut with_check_qual: Option<::nodes::primnodes::Expr<'mcx>> = None;
+    let mut with_check_pstate: Option<mcx::PgBox<'mcx, ::nodes::parsestmt::ParseState<'mcx>>> =
         None;
     if stmt.with_check.is_some() {
         let mut pstate = analyze_seams::make_parsestate::call(mcx, None)?;
@@ -949,7 +949,7 @@ pub fn AlterPolicy<'mcx>(mcx: Mcx<'mcx>, stmt: &AlterPolicyStmt<'mcx>) -> PgResu
         )?;
         // Bring the parser-arena `'static` qual into `mcx` for the in-place
         // collation pass (pstate+expr share one invariant `'mcx`).
-        let mut q: Option<nodes::primnodes::Expr<'mcx>> = match q {
+        let mut q: Option<::nodes::primnodes::Expr<'mcx>> = match q {
             Some(e) => Some(e.clone_in(mcx)?),
             None => None,
         };
@@ -1369,7 +1369,7 @@ fn expect_range_var(node: Option<&Node<'_>>, funcname: &'static str) -> PgResult
 
 /// Convert an owned-tree `rawnodes::RangeVar` to a resolved
 /// `types_tuple::access::RangeVar` (precedent: lockcmds `to_access_range_var`).
-fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> RangeVar {
     RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),
@@ -1385,8 +1385,8 @@ fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> RangeVar {
 fn to_parsenodes_rolespec<'mcx>(
     mcx: Mcx<'mcx>,
     spec: &RoleSpec<'mcx>,
-) -> PgResult<nodes::parsenodes::RoleSpec<'mcx>> {
-    Ok(nodes::parsenodes::RoleSpec {
+) -> PgResult<::nodes::parsenodes::RoleSpec<'mcx>> {
+    Ok(::nodes::parsenodes::RoleSpec {
         roletype: spec.roletype,
         rolename: match &spec.rolename {
             Some(s) => Some(s.clone_in(mcx)?),
@@ -1411,7 +1411,7 @@ fn clone_clause<'mcx>(
 /// dependency walkers).
 fn wrap_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    e: &nodes::primnodes::Expr,
+    e: &::nodes::primnodes::Expr,
 ) -> PgResult<Node<'mcx>> {
     Ok(Node::mk_expr(mcx, e.clone_in(mcx)?)?)
 }
@@ -1419,7 +1419,7 @@ fn wrap_expr<'mcx>(
 /// As [`wrap_expr`] but returning an owned `Node` value.
 fn wrap_expr_owned<'mcx>(
     mcx: Mcx<'mcx>,
-    e: &nodes::primnodes::Expr,
+    e: &::nodes::primnodes::Expr,
 ) -> PgResult<Node<'mcx>> {
     Ok(Node::mk_expr(mcx, e.clone_in(mcx)?)?)
 }
@@ -1428,7 +1428,7 @@ fn wrap_expr_owned<'mcx>(
 /// transformed `Expr` to its `pg_node_tree` text (`None` when the qual is NULL).
 fn node_to_string_opt<'mcx>(
     mcx: Mcx<'mcx>,
-    qual: Option<&nodes::primnodes::Expr>,
+    qual: Option<&::nodes::primnodes::Expr>,
 ) -> PgResult<Option<String>> {
     match qual {
         Some(e) => {

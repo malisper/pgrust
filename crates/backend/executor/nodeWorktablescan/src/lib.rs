@@ -50,9 +50,9 @@ use sort_storage_seams as tuplestore;
 
 use mcx::{alloc_in, PgBox};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::execnodes::{EStateData, RecursiveUnionSharedState};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
-use nodes::nodeworktablescan::{WorkTableScan, WorkTableScanStateData};
+use ::nodes::execnodes::{EStateData, RecursiveUnionSharedState};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::nodes::nodeworktablescan::{WorkTableScan, WorkTableScanStateData};
 use nodes::{SlotId, Tuplestorestate, TupleSlotKind};
 
 fn internal(msg: &str) -> PgError {
@@ -199,11 +199,11 @@ pub fn ExecWorkTableScan<'mcx>(
 /// The `PlanState.ExecProcNode` callback installed by [`ExecInitWorkTableScan`]:
 /// `castNode(WorkTableScanState, pstate)` then run [`ExecWorkTableScan`].
 fn exec_work_table_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::PlanStateNode::WorkTableScan(node) => node,
+        ::nodes::PlanStateNode::WorkTableScan(node) => node,
         other => panic!("castNode(WorkTableScanState, pstate) failed: {other:?}"),
     };
     ExecWorkTableScan(node, estate)
@@ -279,7 +279,7 @@ fn exec_assign_scan_type_from_rustate<'mcx>(
 /// fallible on OOM. Projection info is *not* initialized here — see
 /// [`ExecWorkTableScan`] for details.
 pub fn ExecInitWorkTableScan<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, WorkTableScanStateData<'mcx>>> {
@@ -413,7 +413,7 @@ pub fn ExecReScanWorkTableScan<'mcx>(
 /// `RecursiveUnionStateData` into the side-table; the `RecursiveUnion` executor
 /// (`ExecRecursiveUnion`) then reads/swaps them through the side-table too.
 pub fn publish_wtparam_slot<'mcx>(
-    rustate: &mut nodes::noderecursiveunion::RecursiveUnionStateData<'mcx>,
+    rustate: &mut ::nodes::noderecursiveunion::RecursiveUnionStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
     wt_param: i32,
 ) -> PgResult<()> {

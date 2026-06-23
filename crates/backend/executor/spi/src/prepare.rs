@@ -35,10 +35,10 @@ use utils_error::ereport;
 use mcx::{MemoryContext, Mcx, PgVec};
 use types_core::Oid;
 use types_error::{PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::CmdType;
-use nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
-use nodes::parsestmt::CachedPlanHandle;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::CmdType;
+use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
+use ::nodes::parsestmt::CachedPlanHandle;
 use types_resowner::ResourceOwner;
 use types_ri_triggers::{ResultColumn, SpiExecResult, SpiPlanPtr};
 use types_tuple::Datum;
@@ -216,7 +216,7 @@ fn prepare_plan<'mcx>(
             argtypes,
             argtypes.len() as i32,
             false, // has_parser_setup
-            nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
+            ::nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
             false, // fixed_result
         )?;
 

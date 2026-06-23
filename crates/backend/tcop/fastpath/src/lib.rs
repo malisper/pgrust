@@ -44,7 +44,7 @@ use types_error::{
     ERRCODE_IN_FAILED_SQL_TRANSACTION, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_PROTOCOL_VIOLATION, ERRCODE_UNDEFINED_FUNCTION, ERROR, LOG,
 };
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 use stringinfo::StringInfo;
 
 use transam_xact_seams as xact_seam;

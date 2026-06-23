@@ -8,8 +8,8 @@ use dependency_seams as seams;
 use mcx::MemoryContext;
 use types_catalog::catalog_dependency::{DependencyType, ObjectAddress, ObjectAddresses};
 use types_error::PgResult;
-use nodes::nodes::Node;
-use nodes::parsenodes::DropBehavior;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::DropBehavior;
 
 pub use seams::{
     PERFORM_DELETION_CONCURRENTLY, PERFORM_DELETION_CONCURRENT_LOCK, PERFORM_DELETION_INTERNAL,
@@ -114,7 +114,7 @@ fn seam_record_dependency_on_single_rel_expr(
 fn seam_record_dependency_on_expr(
     depender: ObjectAddress,
     expr: &Node<'_>,
-    rtable: &[nodes::parsenodes::RangeTblEntry<'_>],
+    rtable: &[::nodes::parsenodes::RangeTblEntry<'_>],
     behavior: DependencyType,
 ) -> PgResult<()> {
     crate::recordDependencyOnExpr(&depender, expr, rtable, behavior)

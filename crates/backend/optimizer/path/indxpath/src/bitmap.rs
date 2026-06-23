@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_core::primitive::{Cost, Oid};
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{NodeId, PathId, PathNode, PlannerInfo, RelId, Relids, RinfoId};
 
 use nodes_core::makefuncs::make_orclause;
@@ -662,7 +662,7 @@ pub fn orarg_clause_owned<'mcx>(
 /// Is this grouped OR arm itself an OR clause (a sub-OR `BoolExpr`)? Looks
 /// through the arm's `RestrictInfo` handle to its underlying clause.
 fn orarg_is_or_clause(root: &PlannerInfo, orarg: &Expr<'static>) -> bool {
-    use nodes::primnodes::BoolExprType;
+    use ::nodes::primnodes::BoolExprType;
     matches!(orarg_clause(root, orarg).as_boolexpr(), Some(b) if b.boolop == BoolExprType::OR_EXPR)
 }
 

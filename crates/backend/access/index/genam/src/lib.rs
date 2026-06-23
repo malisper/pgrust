@@ -56,7 +56,7 @@ use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TRANSACTION_STATE, ERROR};
 use utils_error::ereport;
-use nodes::tuptable::SlotData;
+use ::nodes::tuptable::SlotData;
 use rel::{Relation, RelationData};
 use types_scan::genam::{SysScanDescData, SysScanLive};
 use types_scan::scankey::ScanKeyData;

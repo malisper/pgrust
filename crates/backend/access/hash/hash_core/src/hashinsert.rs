@@ -74,7 +74,7 @@ pub fn _hash_doinsert<'mcx>(
         // Check whether the item can fit on a hash page at all.
         let max_item = with_page_ref(metabuf, |p| {
             Ok(crate::pagebytes::hash_max_item_size(
-                page::PageGetPageSize(p),
+                ::page::PageGetPageSize(p),
             ))
         })?;
         if itemsz > max_item {

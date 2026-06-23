@@ -17,9 +17,9 @@
 use mcx::Mcx;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_error::PgResult;
-use nodes::ddlnodes::{CreateTableAsStmt, ExecuteStmt, IntoClause as DdlIntoClause};
-use nodes::params::ParamListInfo;
-use nodes::parsestmt::{DestReceiverHandle, IntoClause};
+use ::nodes::ddlnodes::{CreateTableAsStmt, ExecuteStmt, IntoClause as DdlIntoClause};
+use ::nodes::params::ParamListInfo;
+use ::nodes::parsestmt::{DestReceiverHandle, IntoClause};
 use portal::QueryCompletion;
 
 seam_core::seam!(
@@ -104,8 +104,8 @@ seam_core::seam!(
     /// Returns the (possibly filled) `QueryCompletion`.
     pub fn run_ctas_executor<'mcx>(
         mcx: Mcx<'mcx>,
-        query: nodes::copy_query::Query<'mcx>,
-        into: nodes::ddlnodes::IntoClause<'mcx>,
+        query: ::nodes::copy_query::Query<'mcx>,
+        into: ::nodes::ddlnodes::IntoClause<'mcx>,
         query_string: &str,
         params: ParamListInfo,
         dest: DestReceiverHandle,
@@ -128,7 +128,7 @@ seam_core::seam!(
     /// `pstate->p_sourcetext`. Panics until installed.
     pub fn jumble_and_post_analyze<'mcx>(
         mcx: Mcx<'mcx>,
-        query: &nodes::copy_query::Query<'mcx>,
+        query: &::nodes::copy_query::Query<'mcx>,
         query_string: &str,
     ) -> PgResult<()>
 );
@@ -148,8 +148,8 @@ seam_core::seam!(
     /// panics until tablecmds.c/view.c land and install it.
     pub fn create_ctas_relation<'mcx>(
         mcx: Mcx<'mcx>,
-        into: nodes::ddlnodes::IntoClause<'mcx>,
-        attr_list: mcx::PgVec<'mcx, mcx::PgBox<'mcx, nodes::nodes::Node<'mcx>>>,
+        into: ::nodes::ddlnodes::IntoClause<'mcx>,
+        attr_list: mcx::PgVec<'mcx, mcx::PgBox<'mcx, ::nodes::nodes::Node<'mcx>>>,
         relkind: u8,
         is_matview: bool,
     ) -> PgResult<ObjectAddress>

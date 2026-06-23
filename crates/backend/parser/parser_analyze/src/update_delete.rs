@@ -14,11 +14,11 @@ use mcx::{Mcx, PgVec};
 use types_acl::acl::{ACL_DELETE, ACL_UPDATE};
 use utils_error::ereport;
 use types_error::{PgResult, ERRCODE_DUPLICATE_ALIAS, ERRCODE_SYNTAX_ERROR, ERROR};
-use nodes::copy_query::Query;
-use nodes::nodes::CmdType;
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::VarReturningType;
-use nodes::rawnodes::{DeleteStmt, ResTarget, ReturningOptionKind, UpdateStmt};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::CmdType;
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::VarReturningType;
+use ::nodes::rawnodes::{DeleteStmt, ResTarget, ReturningOptionKind, UpdateStmt};
 
 use crate::select::opt_node_to_owned;
 use crate::{cte_vec_to_nodes, elog_error, opt_expr_to_node};
@@ -91,7 +91,7 @@ pub fn transformDeleteStmt<'mcx>(
     let qual_node = opt_expr_to_node(mcx, qual)?;
     qry.jointree = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::FromExpr {
+        ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
             quals: qual_node,
         },
@@ -179,7 +179,7 @@ pub fn transformUpdateStmt<'mcx>(
     let qual_node = opt_expr_to_node(mcx, qual)?;
     qry.jointree = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::FromExpr {
+        ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
             quals: qual_node,
         },
@@ -199,8 +199,8 @@ pub fn transformUpdateStmt<'mcx>(
 pub(crate) fn transformUpdateTargetList<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    orig_tlist: &PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
+    orig_tlist: &PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     /* the clause owner threads the target list as an owned Vec<ResTarget> */
     let mut orig_targets: Vec<ResTarget<'mcx>> = Vec::new();
     orig_targets
@@ -213,7 +213,7 @@ pub(crate) fn transformUpdateTargetList<'mcx>(
         }
     }
 
-    let mut tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> =
+    let mut tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> =
         parse_target::transformTargetList(
             mcx,
             pstate,
@@ -360,7 +360,7 @@ pub(crate) fn transformUpdateTargetList<'mcx>(
 pub(crate) fn clone_target_nsitem<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
-) -> PgResult<nodes::parsestmt::ParseNamespaceItem<'mcx>> {
+) -> PgResult<::nodes::parsestmt::ParseNamespaceItem<'mcx>> {
     let target = pstate
         .p_target_nsitem
         .as_deref()
@@ -383,7 +383,7 @@ pub(crate) fn clone_target_nsitem<'mcx>(
         p_nscolumns.push(*c);
     }
 
-    Ok(nodes::parsestmt::ParseNamespaceItem {
+    Ok(::nodes::parsestmt::ParseNamespaceItem {
         p_names,
         p_rte,
         p_rtindex: target.p_rtindex,
@@ -452,7 +452,7 @@ fn addNSItemForReturning<'mcx>(
 
     // build the nsitem, copying most fields from the target relation
     let names = nodes_core::makefuncs::make_alias(mcx, aliasname, colnames)?;
-    let nsitem = nodes::parsestmt::ParseNamespaceItem {
+    let nsitem = ::nodes::parsestmt::ParseNamespaceItem {
         p_names: Some(mcx::alloc_in(mcx, names)?),
         p_rte: rte_box,
         p_rtindex: rtindex,
@@ -476,7 +476,7 @@ pub(crate) fn transformReturningClause<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     qry: &mut Query<'mcx>,
-    returning_clause: Option<&nodes::rawnodes::ReturningClause<'mcx>>,
+    returning_clause: Option<&::nodes::rawnodes::ReturningClause<'mcx>>,
     expr_kind: ParseExprKind,
 ) -> PgResult<()> {
     let Some(rc) = returning_clause else {

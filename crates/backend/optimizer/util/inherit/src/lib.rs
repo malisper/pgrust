@@ -39,9 +39,9 @@ use types_core::primitive::{Index, InvalidAttrNumber};
 use types_core::catalog::OIDOID;
 use types_core::InvalidOid;
 use types_error::{PgError, PgResult};
-use nodes::nodelockrows::{PlanRowMark, RowMarkType, ROW_MARK_COPY};
-use nodes::parsenodes::{RangeTblEntry, RTEKind};
-use nodes::primnodes::Expr;
+use ::nodes::nodelockrows::{PlanRowMark, RowMarkType, ROW_MARK_COPY};
+use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{
     AppendRelInfo, NodeId, PlanRowMarkId, PlannerInfo, RelId, Relids,
@@ -321,8 +321,8 @@ fn push_rowmark_junk_var(root: &mut PlannerInfo, var: &Expr, resname: &str) {
 /// Convert the i32-alias `LockClauseStrength` (`PlanRowMark.strength`) to the
 /// `rawnodes::LockClauseStrength` enum the planner's `select_rowmark_type`
 /// speaks. Repr values match (`lockoptions.h`, verified 0..=4).
-fn lock_clause_strength_from_i32(s: i32) -> nodes::rawnodes::LockClauseStrength {
-    use nodes::rawnodes::LockClauseStrength as L;
+fn lock_clause_strength_from_i32(s: i32) -> ::nodes::rawnodes::LockClauseStrength {
+    use ::nodes::rawnodes::LockClauseStrength as L;
     match s {
         0 => L::LCS_NONE,
         1 => L::LCS_FORKEYSHARE,
@@ -524,7 +524,7 @@ fn relids_del_member(a: Relids, x: i32) -> Relids {
 /// (member numbers offset by `FirstLowInvalidHeapAttributeNumber`) into a
 /// planner `Relids` (same numbering, distinct `Bitmapset` type), by walking its
 /// set bits.  `None`/empty maps to `None`.
-fn updated_bitmapset_to_relids(bms: Option<&nodes::Bitmapset<'_>>) -> Relids {
+fn updated_bitmapset_to_relids(bms: Option<&::nodes::Bitmapset<'_>>) -> Relids {
     let mut out: Relids = None;
     if let Some(b) = bms {
         for (wi, &word) in b.words.iter().enumerate() {
@@ -607,7 +607,7 @@ fn expand_single_inheritance_child<'mcx>(
     };
 
     let child_tupdesc = &childrel.rd_att;
-    let mut child_colnames: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+    let mut child_colnames: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
         mcx::PgVec::new_in(mcx);
     for cattno in 0..(child_tupdesc.natts as usize) {
         let att = child_tupdesc.attr(cattno);
@@ -635,7 +635,7 @@ fn expand_single_inheritance_child<'mcx>(
     // clone the second.
     let eref_alias = {
         let a = &*alias_box;
-        let mut colnames2: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+        let mut colnames2: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
             mcx::PgVec::new_in(mcx);
         for cn in a.colnames.iter() {
             colnames2.push(make_string_node(mcx, &node_string_value(cn))?);
@@ -768,10 +768,10 @@ fn expand_single_inheritance_child<'mcx>(
 fn make_string_node<'mcx>(
     mcx: Mcx<'mcx>,
     s: &str,
-) -> PgResult<nodes::nodes::NodePtr<'mcx>> {
-    let node = nodes::nodes::Node::mk_string(
+) -> PgResult<::nodes::nodes::NodePtr<'mcx>> {
+    let node = ::nodes::nodes::Node::mk_string(
         mcx,
-        nodes::value::StringNode {
+        ::nodes::value::StringNode {
             sval: mcx::PgString::from_str_in(s, mcx)?,
         },
     )?;
@@ -780,7 +780,7 @@ fn make_string_node<'mcx>(
 
 /// Read the `String` value out of a value-node `NodePtr` (the parser's
 /// `makeString` colname). Empty when the node is not a String.
-fn node_string_value(np: &nodes::nodes::NodePtr<'_>) -> alloc::string::String {
+fn node_string_value(np: &::nodes::nodes::NodePtr<'_>) -> alloc::string::String {
     match (**np).as_string() {
         Some(s) => s.sval.as_str().to_string(),
         None => alloc::string::String::new(),
@@ -801,7 +801,7 @@ pub fn get_rel_all_updated_cols<'mcx>(
         &run.resolve(root.parse).rteperminfos,
         rte,
     )?;
-    // Convert the RTEPermissionInfo bitmapset (`nodes::Bitmapset`, words:
+    // Convert the RTEPermissionInfo bitmapset (`::nodes::Bitmapset`, words:
     // PgVec<u64>) into a planner `Relids` by walking its set bits.
     let mut updated_cols: Relids = None;
     if let Some(bms) = run.resolve(root.parse).rteperminfos[perminfo_idx]
@@ -1041,7 +1041,7 @@ pub fn apply_child_basequals<'mcx>(
             // Pseudoconstant: no Vars at this level and no volatile functions.
             // clone_in: the derived `Expr::clone` panics on an owned-subtree
             // child (a child qual may carry a SubPlan, e.g. an EXISTS in an OR).
-            let node = nodes::nodes::Node::mk_expr(run.mcx(), onecq.clone_in(run.mcx())?)?;
+            let node = ::nodes::nodes::Node::mk_expr(run.mcx(), onecq.clone_in(run.mcx())?)?;
             let pseudoconstant = !vars::var::contain_vars_of_level(&node, 0)
                 && !clauses::grounded::contain_volatile_functions(Some(
                     &onecq,
@@ -1116,7 +1116,7 @@ pub fn apply_child_basequals<'mcx>(
 
 /// `DatumGetBool(((Const *) childqual)->constvalue)` — whether a boolean `Const`
 /// is TRUE.
-fn const_bool_is_true(c: &nodes::primnodes::Const) -> bool {
+fn const_bool_is_true(c: &::nodes::primnodes::Const) -> bool {
     c.constvalue.as_bool()
 }
 

@@ -15,8 +15,8 @@ use nodes_core::node_walker::{
     expression_tree_walker, query_or_expression_tree_walker, query_tree_walker,
     QTW_IGNORE_CTE_SUBQUERIES, QTW_IGNORE_RT_SUBQUERIES,
 };
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::ParamKind;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::ParamKind;
 
 use crate::relids;
 

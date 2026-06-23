@@ -15,10 +15,10 @@ use alloc::vec::Vec;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
-use nodes::jointype::{Join, JoinType};
-use nodes::nodeindexscan::{Plan, Scan};
-use nodes::nodes::Node;
-use nodes::primnodes::{Expr, TargetEntry};
+use ::nodes::jointype::{Join, JoinType};
+use ::nodes::nodeindexscan::{Plan, Scan};
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{Expr, TargetEntry};
 
 use nodes_core::read::{self, Token};
 
@@ -329,7 +329,7 @@ fn read_expr_box_pgvec<'mcx>(
 /// `'mcx`-carrying `SubPlan<'mcx>` (the `Plan.initPlan` element type; distinct
 /// from the lifetime-free `Expr::SubPlan` carrier). The opening `{`/LABEL is
 /// consumed by the caller.
-pub(crate) fn read_subplan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::primnodes::SubPlan<'mcx>> {
+pub(crate) fn read_subplan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::primnodes::SubPlan<'mcx>> {
     let subLinkType = crate::read_expr_family::sublink_type_from(read_enum_field()?);
     let testexpr = read_expr_box_opt(mcx)?;
     let paramIds = read_int_list_pgvec(mcx)?;
@@ -346,7 +346,7 @@ pub(crate) fn read_subplan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::primnodes::S
     let args = read_expr_box_pgvec(mcx)?;
     let startup_cost = read_float_field()?;
     let per_call_cost = read_float_field()?;
-    Ok(nodes::primnodes::SubPlan {
+    Ok(::nodes::primnodes::SubPlan {
         subLinkType,
         testexpr,
         paramIds,
@@ -372,7 +372,7 @@ pub(crate) fn read_subplan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::primnodes::S
 /// and read by `read_subplan`).
 fn read_initplan_list<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<Option<PgVec<'mcx, nodes::primnodes::SubPlan<'mcx>>>> {
+) -> PgResult<Option<PgVec<'mcx, ::nodes::primnodes::SubPlan<'mcx>>>> {
     let _label = next_tok()?; // :initPlan
     let open = next_tok()?;
     if open.bytes.is_empty() {
@@ -411,15 +411,15 @@ fn read_initplan_list<'mcx>(
 /// caller; this reads the `:subplans` field into a `Vec<PgBox<SubPlan>>`.
 pub(crate) fn read_alternative_subplan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::primnodes::AlternativeSubPlan<'mcx>> {
+) -> PgResult<::nodes::primnodes::AlternativeSubPlan<'mcx>> {
     let _label = next_tok()?; // :subplans
     let open = next_tok()?;
-    let mut subplans: alloc::vec::Vec<PgBox<'mcx, nodes::primnodes::SubPlan<'mcx>>> =
+    let mut subplans: alloc::vec::Vec<PgBox<'mcx, ::nodes::primnodes::SubPlan<'mcx>>> =
         alloc::vec::Vec::new();
     if open.bytes.is_empty() {
         // `<>` — C NIL (an empty AlternativeSubPlan is not expected, but mirror
         // the NIL form defensively).
-        return Ok(nodes::primnodes::AlternativeSubPlan { subplans });
+        return Ok(::nodes::primnodes::AlternativeSubPlan { subplans });
     }
     if open.bytes != b"(" {
         return Err(elog_error("expected '(' for AlternativeSubPlan subplans list"));
@@ -444,7 +444,7 @@ pub(crate) fn read_alternative_subplan<'mcx>(
             return Err(elog_error("did not find '}' at end of SubPlan in AlternativeSubPlan"));
         }
     }
-    Ok(nodes::primnodes::AlternativeSubPlan { subplans })
+    Ok(::nodes::primnodes::AlternativeSubPlan { subplans })
 }
 
 /// `readXxxCols`: read the `:fldname` label, then a `( v0 v1 ...)` token run of
@@ -603,8 +603,8 @@ fn join_type_from(code: i32) -> JoinType {
     }
 }
 
-fn scan_dir_from(code: i32) -> nodes::execnodes::ScanDirection {
-    use nodes::execnodes::ScanDirection;
+fn scan_dir_from(code: i32) -> ::nodes::execnodes::ScanDirection {
+    use ::nodes::execnodes::ScanDirection;
     match code {
         -1 => ScanDirection::BackwardScanDirection,
         1 => ScanDirection::ForwardScanDirection,
@@ -612,8 +612,8 @@ fn scan_dir_from(code: i32) -> nodes::execnodes::ScanDirection {
     }
 }
 
-fn agg_strategy_from(code: i32) -> nodes::nodeagg::AggStrategy {
-    use nodes::nodeagg::AggStrategy;
+fn agg_strategy_from(code: i32) -> ::nodes::nodeagg::AggStrategy {
+    use ::nodes::nodeagg::AggStrategy;
     match code {
         1 => AggStrategy::AggSorted,
         2 => AggStrategy::AggHashed,
@@ -622,8 +622,8 @@ fn agg_strategy_from(code: i32) -> nodes::nodeagg::AggStrategy {
     }
 }
 
-fn cmd_type_from(code: i32) -> nodes::nodes::CmdType {
-    use nodes::nodes::CmdType;
+fn cmd_type_from(code: i32) -> ::nodes::nodes::CmdType {
+    use ::nodes::nodes::CmdType;
     match code {
         1 => CmdType::CMD_SELECT,
         2 => CmdType::CMD_UPDATE,
@@ -636,16 +636,16 @@ fn cmd_type_from(code: i32) -> nodes::nodes::CmdType {
     }
 }
 
-fn limit_option_from(code: i32) -> nodes::nodelimit::LimitOption {
-    use nodes::nodelimit::LimitOption;
+fn limit_option_from(code: i32) -> ::nodes::nodelimit::LimitOption {
+    use ::nodes::nodelimit::LimitOption;
     match code {
         1 => LimitOption::LIMIT_OPTION_WITH_TIES,
         _ => LimitOption::LIMIT_OPTION_COUNT,
     }
 }
 
-fn subquery_scan_status_from(code: i32) -> nodes::nodeindexscan::SubqueryScanStatus {
-    use nodes::nodeindexscan::SubqueryScanStatus;
+fn subquery_scan_status_from(code: i32) -> ::nodes::nodeindexscan::SubqueryScanStatus {
+    use ::nodes::nodeindexscan::SubqueryScanStatus;
     match code {
         1 => SubqueryScanStatus::Trivial,
         2 => SubqueryScanStatus::Nontrivial,
@@ -657,8 +657,8 @@ fn subquery_scan_status_from(code: i32) -> nodes::nodeindexscan::SubqueryScanSta
 // Per-node readers (fields in the exact order the OUT side wrote them).
 // ---------------------------------------------------------------------------
 
-fn read_seqscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeseqscan::SeqScan<'mcx>> {
-    Ok(nodes::nodeseqscan::SeqScan {
+fn read_seqscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodeseqscan::SeqScan<'mcx>> {
+    Ok(::nodes::nodeseqscan::SeqScan {
         scan: read_scan_fields(mcx)?,
     })
 }
@@ -671,7 +671,7 @@ fn read_seqscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeseqscan::SeqScan<'m
 /// `_readTableFuncScan` — scan fields then the framed `tablefunc` child.
 fn read_tablefuncscan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodetablefuncscan::TableFuncScan<'mcx>> {
+) -> PgResult<::nodes::nodetablefuncscan::TableFuncScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     // READ_NODE_FIELD(tablefunc): a framed TABLEFUNC node (never NULL in a
     // serialized plan).
@@ -696,12 +696,12 @@ fn read_tablefuncscan<'mcx>(
             ))
         }
     };
-    Ok(nodes::nodetablefuncscan::TableFuncScan { scan, tablefunc })
+    Ok(::nodes::nodetablefuncscan::TableFuncScan { scan, tablefunc })
 }
 
 fn read_samplescan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodesamplescan::SampleScan<'mcx>> {
+) -> PgResult<::nodes::nodesamplescan::SampleScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     // READ_NODE_FIELD(tablesample): a framed TABLESAMPLECLAUSE, or `<>` → None.
     let _label = next_tok()?;
@@ -721,7 +721,7 @@ fn read_samplescan<'mcx>(
             }
         },
     };
-    Ok(nodes::nodesamplescan::SampleScan { scan, tablesample })
+    Ok(::nodes::nodesamplescan::SampleScan { scan, tablesample })
 }
 
 /// `_readFunctionScan` (readfuncs.funcs.c): `READ_SCAN_FIELDS()`, the
@@ -730,7 +730,7 @@ fn read_samplescan<'mcx>(
 /// the `funcordinality` flag. Reads in the exact order `_outFunctionScan` wrote.
 fn read_functionscan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodefunctionscan::FunctionScan<'mcx>> {
+) -> PgResult<::nodes::nodefunctionscan::FunctionScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     // READ_NODE_FIELD(functions): a List of RangeTblFunction, or NIL → None.
     let _label = next_tok()?;
@@ -770,42 +770,42 @@ fn read_functionscan<'mcx>(
         },
     };
     let funcordinality = read_bool_field()?;
-    Ok(nodes::nodefunctionscan::FunctionScan {
+    Ok(::nodes::nodefunctionscan::FunctionScan {
         scan,
         functions,
         funcordinality,
     })
 }
 
-fn read_material<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeforeigncustom::Material<'mcx>> {
-    Ok(nodes::nodeforeigncustom::Material {
+fn read_material<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodeforeigncustom::Material<'mcx>> {
+    Ok(::nodes::nodeforeigncustom::Material {
         plan: read_plan_fields(mcx)?,
     })
 }
 
-fn read_projectset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeprojectset::ProjectSet<'mcx>> {
-    Ok(nodes::nodeprojectset::ProjectSet {
+fn read_projectset<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodeprojectset::ProjectSet<'mcx>> {
+    Ok(::nodes::nodeprojectset::ProjectSet {
         plan: read_plan_fields(mcx)?,
     })
 }
 
-fn read_result<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::noderesult::Result<'mcx>> {
+fn read_result<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::noderesult::Result<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let resconstantqual = read_expr_pgvec_opt(mcx)?;
-    Ok(nodes::noderesult::Result {
+    Ok(::nodes::noderesult::Result {
         plan,
         resconstantqual,
     })
 }
 
-fn read_append<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeappend::Append<'mcx>> {
+fn read_append<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodeappend::Append<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let apprelids = read_bitmapset_opt_field(mcx)?;
     let appendplans = read_node_vec(mcx)?;
     let nasyncplans = read_int_field()?;
     let first_partial_plan = read_int_field()?;
     let part_prune_index = read_int_field()?;
-    Ok(nodes::nodeappend::Append {
+    Ok(::nodes::nodeappend::Append {
         plan,
         apprelids,
         appendplans,
@@ -815,20 +815,20 @@ fn read_append<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeappend::Append<'mcx>
     })
 }
 
-fn read_bitmapand<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodebitmapand::BitmapAnd<'mcx>> {
+fn read_bitmapand<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodebitmapand::BitmapAnd<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let bitmapplans = read_node_vec(mcx)?;
-    Ok(nodes::nodebitmapand::BitmapAnd { plan, bitmapplans })
+    Ok(::nodes::nodebitmapand::BitmapAnd { plan, bitmapplans })
 }
 
-fn read_gather<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodegather::Gather<'mcx>> {
+fn read_gather<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodegather::Gather<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let num_workers = read_int_field()?;
     let rescan_param = read_int_field()?;
     let single_copy = read_bool_field()?;
     let invisible = read_bool_field()?;
     let initParam = read_bitmapset_opt_field(mcx)?;
-    Ok(nodes::nodegather::Gather {
+    Ok(::nodes::nodegather::Gather {
         plan,
         num_workers,
         rescan_param,
@@ -840,7 +840,7 @@ fn read_gather<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodegather::Gather<'mcx>
 
 fn read_gathermerge<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodegathermerge::GatherMerge<'mcx>> {
+) -> PgResult<::nodes::nodegathermerge::GatherMerge<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let num_workers = read_int_field()?;
     let rescan_param = read_int_field()?;
@@ -850,7 +850,7 @@ fn read_gathermerge<'mcx>(
     let collations = read_oid_cols(numCols as usize)?;
     let nullsFirst = read_bool_cols(numCols as usize)?;
     let initParam = read_bitmapset_opt_field(mcx)?;
-    Ok(nodes::nodegathermerge::GatherMerge {
+    Ok(::nodes::nodegathermerge::GatherMerge {
         plan,
         num_workers,
         rescan_param,
@@ -865,7 +865,7 @@ fn read_gathermerge<'mcx>(
 
 fn read_mergeappend<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodemergeappend::MergeAppend<'mcx>> {
+) -> PgResult<::nodes::nodemergeappend::MergeAppend<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let apprelids = read_bitmapset_opt_field(mcx)?;
     let mergeplans = read_node_vec(mcx)?;
@@ -875,7 +875,7 @@ fn read_mergeappend<'mcx>(
     let collations = read_oid_cols(numCols as usize)?;
     let nullsFirst = read_bool_cols(numCols as usize)?;
     let part_prune_index = read_int_field()?;
-    Ok(nodes::nodemergeappend::MergeAppend {
+    Ok(::nodes::nodemergeappend::MergeAppend {
         plan,
         apprelids,
         mergeplans,
@@ -890,7 +890,7 @@ fn read_mergeappend<'mcx>(
 
 fn read_recursiveunion<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::noderecursiveunion::RecursiveUnion<'mcx>> {
+) -> PgResult<::nodes::noderecursiveunion::RecursiveUnion<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let wtParam = read_int_field()?;
     let numCols = read_int_field()?;
@@ -898,7 +898,7 @@ fn read_recursiveunion<'mcx>(
     let dupOperators = into_pgvec(mcx, read_oid_cols(numCols as usize)?)?;
     let dupCollations = into_pgvec(mcx, read_oid_cols(numCols as usize)?)?;
     let numGroups = read_long_field()?;
-    Ok(nodes::noderecursiveunion::RecursiveUnion {
+    Ok(::nodes::noderecursiveunion::RecursiveUnion {
         plan,
         wtParam,
         numCols,
@@ -909,13 +909,13 @@ fn read_recursiveunion<'mcx>(
     })
 }
 
-fn read_group<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodegroup::Group<'mcx>> {
+fn read_group<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodegroup::Group<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let numCols = read_int_field()?;
     let grpColIdx = into_pgvec(mcx, read_attrnumber_cols(numCols as usize)?)?;
     let grpOperators = into_pgvec(mcx, read_oid_cols(numCols as usize)?)?;
     let grpCollations = into_pgvec(mcx, read_oid_cols(numCols as usize)?)?;
-    Ok(nodes::nodegroup::Group {
+    Ok(::nodes::nodegroup::Group {
         plan,
         numCols,
         grpColIdx,
@@ -924,7 +924,7 @@ fn read_group<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodegroup::Group<'mcx>> {
     })
 }
 
-fn read_setop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodesetop::SetOp<'mcx>> {
+fn read_setop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodesetop::SetOp<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let cmd = read_enum_field()?;
     let strategy = read_enum_field()?;
@@ -934,7 +934,7 @@ fn read_setop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodesetop::SetOp<'mcx>> {
     let cmpCollations = into_pgvec(mcx, read_oid_cols(numCols as usize)?)?;
     let cmpNullsFirst = into_pgvec(mcx, read_bool_cols(numCols as usize)?)?;
     let numGroups = read_long_field()?;
-    Ok(nodes::nodesetop::SetOp {
+    Ok(::nodes::nodesetop::SetOp {
         plan,
         cmd,
         strategy,
@@ -947,13 +947,13 @@ fn read_setop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodesetop::SetOp<'mcx>> {
     })
 }
 
-fn read_unique<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeunique::Unique<'mcx>> {
+fn read_unique<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodeunique::Unique<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let numCols = read_int_field()?;
     let uniqColIdx = into_pgvec_opt(mcx, read_attrnumber_cols(numCols as usize)?)?;
     let uniqOperators = into_pgvec_opt(mcx, read_oid_cols(numCols as usize)?)?;
     let uniqCollations = into_pgvec_opt(mcx, read_oid_cols(numCols as usize)?)?;
-    Ok(nodes::nodeunique::Unique {
+    Ok(::nodes::nodeunique::Unique {
         plan,
         numCols,
         uniqColIdx,
@@ -962,14 +962,14 @@ fn read_unique<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeunique::Unique<'mcx>
     })
 }
 
-fn read_sort<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodesort::Sort<'mcx>> {
+fn read_sort<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodesort::Sort<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let numCols = read_int_field()?;
     let sortColIdx = into_pgvec(mcx, read_attrnumber_cols(numCols as usize)?)?;
     let sortOperators = into_pgvec(mcx, read_oid_cols(numCols as usize)?)?;
     let collations = into_pgvec(mcx, read_oid_cols(numCols as usize)?)?;
     let nullsFirst = into_pgvec(mcx, read_bool_cols(numCols as usize)?)?;
-    Ok(nodes::nodesort::Sort {
+    Ok(::nodes::nodesort::Sort {
         plan,
         numCols,
         sortColIdx,
@@ -981,7 +981,7 @@ fn read_sort<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodesort::Sort<'mcx>> {
 
 fn read_incrementalsort<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodeincrementalsort::IncrementalSort<'mcx>> {
+) -> PgResult<::nodes::nodeincrementalsort::IncrementalSort<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let numCols = read_int_field()?;
     let sortColIdx = into_pgvec(mcx, read_attrnumber_cols(numCols as usize)?)?;
@@ -989,8 +989,8 @@ fn read_incrementalsort<'mcx>(
     let collations = into_pgvec(mcx, read_oid_cols(numCols as usize)?)?;
     let nullsFirst = into_pgvec(mcx, read_bool_cols(numCols as usize)?)?;
     let nPresortedCols = read_int_field()?;
-    Ok(nodes::nodeincrementalsort::IncrementalSort {
-        sort: nodes::nodesort::Sort {
+    Ok(::nodes::nodeincrementalsort::IncrementalSort {
+        sort: ::nodes::nodesort::Sort {
             plan,
             numCols,
             sortColIdx,
@@ -1002,7 +1002,7 @@ fn read_incrementalsort<'mcx>(
     })
 }
 
-fn read_limit<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodelimit::Limit<'mcx>> {
+fn read_limit<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodelimit::Limit<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let limitOffset = read_expr_box_opt(mcx)?;
     let limitCount = read_expr_box_opt(mcx)?;
@@ -1011,7 +1011,7 @@ fn read_limit<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodelimit::Limit<'mcx>> {
     let uniqColIdx = into_pgvec_opt(mcx, read_attrnumber_cols(uniqNumCols as usize)?)?;
     let uniqOperators = into_pgvec_opt(mcx, read_oid_cols(uniqNumCols as usize)?)?;
     let uniqCollations = into_pgvec_opt(mcx, read_oid_cols(uniqNumCols as usize)?)?;
-    Ok(nodes::nodelimit::Limit {
+    Ok(::nodes::nodelimit::Limit {
         plan,
         limitOffset,
         limitCount,
@@ -1023,7 +1023,7 @@ fn read_limit<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodelimit::Limit<'mcx>> {
     })
 }
 
-fn read_agg<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeagg::Agg<'mcx>> {
+fn read_agg<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodeagg::Agg<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let aggstrategy = agg_strategy_from(read_enum_field()?);
     let aggsplit = read_enum_field()?; // AggSplit = i32
@@ -1104,7 +1104,7 @@ fn read_agg<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeagg::Agg<'mcx>> {
             }
         },
     };
-    Ok(nodes::nodeagg::Agg {
+    Ok(::nodes::nodeagg::Agg {
         plan,
         aggstrategy,
         aggsplit,
@@ -1123,7 +1123,7 @@ fn read_agg<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeagg::Agg<'mcx>> {
 /// `_readWindowAgg` — reads the fields `out_windowagg` wrote, in order.
 fn read_windowagg<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodewindowagg::WindowAgg<'mcx>> {
+) -> PgResult<::nodes::nodewindowagg::WindowAgg<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let winname = read_string(mcx)?;
     let winref = read_uint_field()?;
@@ -1146,7 +1146,7 @@ fn read_windowagg<'mcx>(
     let inRangeAsc = read_bool_field()?;
     let inRangeNullsFirst = read_bool_field()?;
     let topWindow = read_bool_field()?;
-    Ok(nodes::nodewindowagg::WindowAgg {
+    Ok(::nodes::nodewindowagg::WindowAgg {
         plan,
         winname,
         winref,
@@ -1179,7 +1179,7 @@ fn read_windowagg<'mcx>(
 /// framed list element).
 fn read_nestloopparam_body<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodenestloop::NestLoopParam> {
+) -> PgResult<::nodes::nodenestloop::NestLoopParam> {
     let paramno = read_int_field()?;
     // READ_NODE_FIELD(paramval): typed `Var *` but may be a framed `{VAR ...}`
     // or, for lateral-PHV nestloops, a `{PLACEHOLDERVAR ...}`. Read the generic
@@ -1203,10 +1203,10 @@ fn read_nestloopparam_body<'mcx>(
             return Err(elog_error("readNestLoopParam: paramval is NULL"));
         }
     };
-    Ok(nodes::nodenestloop::NestLoopParam { paramno, paramval })
+    Ok(::nodes::nodenestloop::NestLoopParam { paramno, paramval })
 }
 
-fn read_nestloop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodenestloop::NestLoop<'mcx>> {
+fn read_nestloop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodenestloop::NestLoop<'mcx>> {
     let join = read_join_fields(mcx)?;
     // READ_NODE_FIELD(nestParams): `List *` of `NestLoopParam`. `<>` (NIL) is the
     // empty list; otherwise the bare `({NESTLOOPPARAM ...} ...)` list form. Each
@@ -1248,10 +1248,10 @@ fn read_nestloop<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodenestloop::NestLoop
             nestParams.push(p);
         }
     }
-    Ok(nodes::nodenestloop::NestLoop { join, nestParams })
+    Ok(::nodes::nodenestloop::NestLoop { join, nestParams })
 }
 
-fn read_mergejoin<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodemergejoin::MergeJoin<'mcx>> {
+fn read_mergejoin<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodemergejoin::MergeJoin<'mcx>> {
     let join = read_join_fields(mcx)?;
     let skip_mark_restore = read_bool_field()?;
     let mergeclauses = read_expr_alloc_vec(mcx)?;
@@ -1260,7 +1260,7 @@ fn read_mergejoin<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodemergejoin::MergeJ
     let mergeCollations = read_oid_cols(nclauses)?;
     let mergeReversals = read_bool_cols(nclauses)?;
     let mergeNullsFirst = read_bool_cols(nclauses)?;
-    Ok(nodes::nodemergejoin::MergeJoin {
+    Ok(::nodes::nodemergejoin::MergeJoin {
         join,
         skip_mark_restore,
         mergeclauses,
@@ -1271,13 +1271,13 @@ fn read_mergejoin<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodemergejoin::MergeJ
     })
 }
 
-fn read_hashjoin<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodehashjoin::HashJoin<'mcx>> {
+fn read_hashjoin<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodehashjoin::HashJoin<'mcx>> {
     let join = read_join_fields(mcx)?;
     let hashclauses = read_node_pgvec_opt(mcx)?;
     let hashoperators = read_oidlist(mcx)?;
     let hashcollations = read_oidlist(mcx)?;
     let hashkeys = read_node_pgvec_opt(mcx)?;
-    Ok(nodes::nodehashjoin::HashJoin {
+    Ok(::nodes::nodehashjoin::HashJoin {
         join,
         hashclauses,
         hashoperators,
@@ -1286,14 +1286,14 @@ fn read_hashjoin<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodehashjoin::HashJoin
     })
 }
 
-fn read_hash<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodehashjoin::Hash<'mcx>> {
+fn read_hash<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodehashjoin::Hash<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let hashkeys = read_node_pgvec_opt(mcx)?;
     let skewTable = read_oid_field()?;
     let skewColumn = read_int_field()? as i16;
     let skewInherit = read_bool_field()?;
     let rows_total = read_float_field()?;
-    Ok(nodes::nodehashjoin::Hash {
+    Ok(::nodes::nodehashjoin::Hash {
         plan,
         hashkeys,
         skewTable,
@@ -1303,7 +1303,7 @@ fn read_hash<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodehashjoin::Hash<'mcx>> 
     })
 }
 
-fn read_memoize<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodememoize::Memoize<'mcx>> {
+fn read_memoize<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodememoize::Memoize<'mcx>> {
     let plan = read_plan_fields(mcx)?;
     let numKeys = read_int_field()?;
     let hashOperators = into_pgvec(mcx, read_oid_cols(numKeys as usize)?)?;
@@ -1317,7 +1317,7 @@ fn read_memoize<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodememoize::Memoize<'m
     // plan.plan_node_id maintained by the executor); the wire format does not
     // carry it (C's Memoize has no such field), so mirror plan.plan_node_id.
     let plan_node_id = plan.plan_node_id;
-    Ok(nodes::nodememoize::Memoize {
+    Ok(::nodes::nodememoize::Memoize {
         plan,
         plan_node_id,
         numKeys,
@@ -1331,7 +1331,7 @@ fn read_memoize<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodememoize::Memoize<'m
     })
 }
 
-fn read_indexscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeindexscan::IndexScan<'mcx>> {
+fn read_indexscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodeindexscan::IndexScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let indexid = read_oid_field()?;
     let indexqual = read_expr_pgvec_opt(mcx)?;
@@ -1340,7 +1340,7 @@ fn read_indexscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeindexscan::IndexS
     let indexorderbyorig = read_expr_pgvec_opt(mcx)?;
     let indexorderbyops = read_oidlist_opt(mcx)?;
     let indexorderdir = scan_dir_from(read_enum_field()?);
-    Ok(nodes::nodeindexscan::IndexScan {
+    Ok(::nodes::nodeindexscan::IndexScan {
         scan,
         indexid,
         indexqual,
@@ -1354,7 +1354,7 @@ fn read_indexscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeindexscan::IndexS
 
 fn read_indexonlyscan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodeindexonlyscan::IndexOnlyScan<'mcx>> {
+) -> PgResult<::nodes::nodeindexonlyscan::IndexOnlyScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let indexid = read_oid_field()?;
     let indexqual = read_expr_pgvec_opt(mcx)?;
@@ -1362,7 +1362,7 @@ fn read_indexonlyscan<'mcx>(
     let indexorderby = read_expr_pgvec_opt(mcx)?;
     let indextlist = read_te_pgvec_opt(mcx)?;
     let indexorderdir = scan_dir_from(read_enum_field()?);
-    Ok(nodes::nodeindexonlyscan::IndexOnlyScan {
+    Ok(::nodes::nodeindexonlyscan::IndexOnlyScan {
         scan,
         indexid,
         indexqual,
@@ -1375,13 +1375,13 @@ fn read_indexonlyscan<'mcx>(
 
 fn read_bitmapindexscan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodebitmapindexscan::BitmapIndexScan<'mcx>> {
+) -> PgResult<::nodes::nodebitmapindexscan::BitmapIndexScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let indexid = read_oid_field()?;
     let isshared = read_bool_field()?;
     let indexqual = read_expr_pgvec_opt(mcx)?;
     let indexqualorig = read_expr_pgvec_opt(mcx)?;
-    Ok(nodes::nodebitmapindexscan::BitmapIndexScan {
+    Ok(::nodes::nodebitmapindexscan::BitmapIndexScan {
         scan,
         indexid,
         isshared,
@@ -1392,27 +1392,27 @@ fn read_bitmapindexscan<'mcx>(
 
 fn read_bitmapheapscan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodebitmapheapscan::BitmapHeapScan<'mcx>> {
+) -> PgResult<::nodes::nodebitmapheapscan::BitmapHeapScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let bitmapqualorig = read_expr_pgvec(mcx)?;
-    Ok(nodes::nodebitmapheapscan::BitmapHeapScan {
+    Ok(::nodes::nodebitmapheapscan::BitmapHeapScan {
         scan,
         bitmapqualorig,
     })
 }
 
-fn read_tidscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodeindexscan::TidScan<'mcx>> {
+fn read_tidscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodeindexscan::TidScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let tidquals = read_expr_pgvec_opt(mcx)?;
-    Ok(nodes::nodeindexscan::TidScan { scan, tidquals })
+    Ok(::nodes::nodeindexscan::TidScan { scan, tidquals })
 }
 
 fn read_tidrangescan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodetidrangescan::TidRangeScan<'mcx>> {
+) -> PgResult<::nodes::nodetidrangescan::TidRangeScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let tidrangequals = read_expr_pgvec_opt(mcx)?;
-    Ok(nodes::nodetidrangescan::TidRangeScan {
+    Ok(::nodes::nodetidrangescan::TidRangeScan {
         scan,
         tidrangequals,
     })
@@ -1420,11 +1420,11 @@ fn read_tidrangescan<'mcx>(
 
 fn read_subqueryscan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodeindexscan::SubqueryScan<'mcx>> {
+) -> PgResult<::nodes::nodeindexscan::SubqueryScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let subplan = read_node_opt(mcx)?;
     let scanstatus = subquery_scan_status_from(read_enum_field()?);
-    Ok(nodes::nodeindexscan::SubqueryScan {
+    Ok(::nodes::nodeindexscan::SubqueryScan {
         scan,
         subplan,
         scanstatus,
@@ -1433,17 +1433,17 @@ fn read_subqueryscan<'mcx>(
 
 fn read_worktablescan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodeworktablescan::WorkTableScan<'mcx>> {
+) -> PgResult<::nodes::nodeworktablescan::WorkTableScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let wtParam = read_int_field()?;
-    Ok(nodes::nodeworktablescan::WorkTableScan { scan, wtParam })
+    Ok(::nodes::nodeworktablescan::WorkTableScan { scan, wtParam })
 }
 
-fn read_ctescan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodectescan::CteScan<'mcx>> {
+fn read_ctescan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodectescan::CteScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let ctePlanId = read_int_field()?;
     let cteParam = read_int_field()?;
-    Ok(nodes::nodectescan::CteScan {
+    Ok(::nodes::nodectescan::CteScan {
         scan,
         ctePlanId,
         cteParam,
@@ -1452,13 +1452,13 @@ fn read_ctescan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodectescan::CteScan<'m
 
 fn read_namedtuplestorescan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodenamedtuplestorescan::NamedTuplestoreScan<'mcx>> {
+) -> PgResult<::nodes::nodenamedtuplestorescan::NamedTuplestoreScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let enrname = read_string(mcx)?;
-    Ok(nodes::nodenamedtuplestorescan::NamedTuplestoreScan { scan, enrname })
+    Ok(::nodes::nodenamedtuplestorescan::NamedTuplestoreScan { scan, enrname })
 }
 
-fn read_valuesscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodevaluesscan::ValuesScan<'mcx>> {
+fn read_valuesscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::nodevaluesscan::ValuesScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     // values_lists: `List *` of (`List *` of Expr) — `node_read` of `(` ... `)`
     // where each element is a `(` {..} `)` expr sublist. The sublists are
@@ -1515,12 +1515,12 @@ fn read_valuesscan<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::nodevaluesscan::Valu
             }
         }
     }
-    Ok(nodes::nodevaluesscan::ValuesScan { scan, values_lists })
+    Ok(::nodes::nodevaluesscan::ValuesScan { scan, values_lists })
 }
 
 fn read_foreignscan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::nodeforeigncustom::ForeignScan<'mcx>> {
+) -> PgResult<::nodes::nodeforeigncustom::ForeignScan<'mcx>> {
     let scan = read_scan_fields(mcx)?;
     let operation = cmd_type_from(read_enum_field()?);
     let resultRelation = read_uint_field()?;
@@ -1533,7 +1533,7 @@ fn read_foreignscan<'mcx>(
     let fs_relids = read_bitmapset_opt_field(mcx)?;
     let fs_base_relids = read_bitmapset_opt_field(mcx)?;
     let fsSystemCol = read_bool_field()?;
-    Ok(nodes::nodeforeigncustom::ForeignScan {
+    Ok(::nodes::nodeforeigncustom::ForeignScan {
         scan,
         operation,
         resultRelation,
@@ -1639,8 +1639,8 @@ mod tests {
         let ctx = MemoryContext::new("seqscan");
         let mcx = ctx.mcx();
         // An empty-child SeqScan: all Plan fields default, scanrelid set.
-        let mut s = nodes::nodeseqscan::SeqScan {
-            scan: nodes::nodeindexscan::Scan::default(),
+        let mut s = ::nodes::nodeseqscan::SeqScan {
+            scan: ::nodes::nodeindexscan::Scan::default(),
         };
         s.scan.scanrelid = 3;
         let text = assert_framed_round_trip(&Node::mk_seq_scan(mcx, s)?);
@@ -1655,7 +1655,7 @@ mod tests {
         // exercises the now-filled WRITE_STRING_FIELD(winname) and the arrays.
         let ctx = MemoryContext::new("windowagg");
         let mcx = ctx.mcx();
-        let mut w = nodes::nodewindowagg::WindowAgg::default();
+        let mut w = ::nodes::nodewindowagg::WindowAgg::default();
         w.winname = Some(mcx::PgString::from_str_in("w", mcx).unwrap());
         w.winref = 1;
         w.partNumCols = 1;
@@ -1682,8 +1682,8 @@ mod tests {
         // {TABLEFUNC ...} child round-trip through both families.
         let ctx = MemoryContext::new("tablefuncscan");
         let mcx = ctx.mcx();
-        let mut tf = nodes::primnodes::TableFunc::default();
-        tf.functype = nodes::primnodes::TableFuncType::TFT_XMLTABLE;
+        let mut tf = ::nodes::primnodes::TableFunc::default();
+        tf.functype = ::nodes::primnodes::TableFuncType::TFT_XMLTABLE;
         let mut names = PgVec::new_in(mcx);
         names.push(mcx::PgString::from_str_in("c1", mcx).unwrap());
         tf.colnames = Some(names);
@@ -1692,8 +1692,8 @@ mod tests {
         tf.coltypes = Some(types);
         tf.ordinalitycol = -1;
         tf.location = 7;
-        let mut s = nodes::nodetablefuncscan::TableFuncScan {
-            scan: nodes::nodeindexscan::Scan::default(),
+        let mut s = ::nodes::nodetablefuncscan::TableFuncScan {
+            scan: ::nodes::nodeindexscan::Scan::default(),
             tablefunc: alloc_in(mcx, tf).unwrap(),
         };
         s.scan.scanrelid = 4;
@@ -1713,8 +1713,8 @@ mod tests {
         // (read), and the byte-stable round-trip across both.
         let ctx = std::boxed::Box::leak(std::boxed::Box::new(MemoryContext::new("initplan")));
         let mcx = ctx.mcx();
-        let sp = nodes::primnodes::SubPlan {
-            subLinkType: nodes::primnodes::SubLinkType::Exists,
+        let sp = ::nodes::primnodes::SubPlan {
+            subLinkType: ::nodes::primnodes::SubLinkType::Exists,
             testexpr: None,
             paramIds: PgVec::new_in(mcx),
             plan_id: 7,
@@ -1733,8 +1733,8 @@ mod tests {
         };
         let mut init = PgVec::new_in(mcx);
         init.push(sp);
-        let mut s = nodes::nodeseqscan::SeqScan {
-            scan: nodes::nodeindexscan::Scan::default(),
+        let mut s = ::nodes::nodeseqscan::SeqScan {
+            scan: ::nodes::nodeindexscan::Scan::default(),
         };
         s.scan.plan.initPlan = Some(init);
         s.scan.scanrelid = 1;
@@ -1766,7 +1766,7 @@ mod tests {
         // and funcordinality — exercises the framed RANGETBLFUNCTION list bridge.
         let ctx = MemoryContext::new("funcscan");
         let mcx = ctx.mcx();
-        let rtf = nodes::rawnodes::RangeTblFunction {
+        let rtf = ::nodes::rawnodes::RangeTblFunction {
             funcexpr: None,
             funccolcount: 2,
             funccolnames: PgVec::new_in(mcx),
@@ -1777,8 +1777,8 @@ mod tests {
         };
         let mut funcs = PgVec::new_in(mcx);
         funcs.push(rtf);
-        let mut fs = nodes::nodefunctionscan::FunctionScan {
-            scan: nodes::nodeindexscan::Scan::default(),
+        let mut fs = ::nodes::nodefunctionscan::FunctionScan {
+            scan: ::nodes::nodeindexscan::Scan::default(),
             functions: Some(funcs),
             funcordinality: true,
         };
@@ -1794,11 +1794,11 @@ mod tests {
         // A Plan-only node (no extra fields) with a child SeqScan in lefttree.
         let ctx = MemoryContext::new("mat");
         let mcx = ctx.mcx();
-        let child = Node::mk_seq_scan(mcx, nodes::nodeseqscan::SeqScan {
-            scan: nodes::nodeindexscan::Scan::default(),
+        let child = Node::mk_seq_scan(mcx, ::nodes::nodeseqscan::SeqScan {
+            scan: ::nodes::nodeindexscan::Scan::default(),
         });
-        let mut m = nodes::nodeforeigncustom::Material {
-            plan: nodes::nodeindexscan::Plan::default(),
+        let mut m = ::nodes::nodeforeigncustom::Material {
+            plan: ::nodes::nodeindexscan::Plan::default(),
         };
         m.plan.lefttree = Some(mcx::alloc_in(mcx, child).unwrap());
         let text = assert_framed_round_trip(&Node::mk_material(mcx, m)?);
@@ -1832,8 +1832,8 @@ mod tests {
             }
             o
         };
-        let s = nodes::nodesort::Sort {
-            plan: nodes::nodeindexscan::Plan::default(),
+        let s = ::nodes::nodesort::Sort {
+            plan: ::nodes::nodeindexscan::Plan::default(),
             numCols: 2,
             sortColIdx: mk_i16(&[1, 2])?,
             sortOperators: mk_u32(&[97, 521])?,
@@ -1852,7 +1852,7 @@ mod tests {
         let ctx = MemoryContext::new("nestloop");
         let mcx = ctx.mcx();
         // NIL nestParams → `<>`.
-        let mut nl = nodes::nodenestloop::NestLoop::default();
+        let mut nl = ::nodes::nodenestloop::NestLoop::default();
         nl.join.jointype = JoinType::JOIN_INNER;
         let text = assert_framed_round_trip(&Node::mk_nest_loop(mcx, nl)?);
         assert!(text.starts_with("{NESTLOOP :join.plan.disabled_nodes 0"), "{text}");
@@ -1866,24 +1866,24 @@ mod tests {
         // hand-rolled list reader (read), byte-stable across both.
         let ctx = std::boxed::Box::leak(std::boxed::Box::new(MemoryContext::new("nestloop")));
         let mcx = ctx.mcx();
-        let mut v1 = nodes::primnodes::Var::default();
+        let mut v1 = ::nodes::primnodes::Var::default();
         v1.varno = 1;
         v1.varattno = 2;
         v1.vartype = 23;
-        let mut v2 = nodes::primnodes::Var::default();
+        let mut v2 = ::nodes::primnodes::Var::default();
         v2.varno = 1;
         v2.varattno = 5;
         v2.vartype = 25;
-        let mut nl = nodes::nodenestloop::NestLoop::default();
+        let mut nl = ::nodes::nodenestloop::NestLoop::default();
         nl.join.jointype = JoinType::JOIN_LEFT;
         nl.nestParams = std::vec![
-            nodes::nodenestloop::NestLoopParam {
+            ::nodes::nodenestloop::NestLoopParam {
                 paramno: 0,
-                paramval: nodes::primnodes::Expr::Var(v1),
+                paramval: ::nodes::primnodes::Expr::Var(v1),
             },
-            nodes::nodenestloop::NestLoopParam {
+            ::nodes::nodenestloop::NestLoopParam {
                 paramno: 1,
-                paramval: nodes::primnodes::Expr::Var(v2),
+                paramval: ::nodes::primnodes::Expr::Var(v2),
             },
         ];
         let text = assert_framed_round_trip(&Node::mk_nest_loop(mcx, nl)?);
@@ -1905,12 +1905,12 @@ mod tests {
                 assert_eq!(nl.nestParams[0].paramno, 0);
                 assert_eq!(nl.nestParams[1].paramno, 1);
                 let pv0 = match &nl.nestParams[0].paramval {
-                    nodes::primnodes::Expr::Var(v) => v,
+                    ::nodes::primnodes::Expr::Var(v) => v,
                     _ => panic!("expected Var paramval"),
                 };
                 assert_eq!(pv0.varattno, 2);
                 let pv1 = match &nl.nestParams[1].paramval {
-                    nodes::primnodes::Expr::Var(v) => v,
+                    ::nodes::primnodes::Expr::Var(v) => v,
                     _ => panic!("expected Var paramval"),
                 };
                 assert_eq!(pv1.vartype, 25);

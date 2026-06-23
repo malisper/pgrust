@@ -61,7 +61,7 @@ use types_core::instrument::{instr_time, BufferUsage};
 use types_dest::dest::CommandDest;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use types_explain::{ExplainSerializeOption, ExplainState};
-use nodes::tuptable::SlotData;
+use ::nodes::tuptable::SlotData;
 use stringinfo::StringInfo;
 use types_tuple::heaptuple::TupleDescData;
 

@@ -15,11 +15,11 @@
 use std::sync::Once;
 
 use mcx::MemoryContext;
-use nodes::nodes::Node;
-use nodes::primnodes::Var;
-use nodes::rawnodes::RangeTblFunction;
-use nodes::nodefunctionscan::FunctionScan;
-use nodes::value::StringNode;
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::Var;
+use ::nodes::rawnodes::RangeTblFunction;
+use ::nodes::nodefunctionscan::FunctionScan;
+use ::nodes::value::StringNode;
 use nodes::{EcxtId, PlanStateNode};
 
 use super::*;
@@ -59,7 +59,7 @@ fn install() {
     execSRF::exec_init_table_function_result::set(|_expr, _econtext, _parent, estate| {
         mcx::alloc_in(
             estate.es_query_cxt,
-            nodes::execexpr::SetExprState::default(),
+            ::nodes::execexpr::SetExprState::default(),
         )
     });
 
@@ -96,7 +96,7 @@ fn simple_function_scan<'mcx>(mcx: mcx::Mcx<'mcx>) -> Node<'mcx> {
     let funcexpr = mcx::alloc_in(mcx, Node::mk_var(mcx, Var::default())).unwrap();
 
     // funccolnames = list_make1(makeString("c")).
-    let mut funccolnames: PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+    let mut funccolnames: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
     funccolnames.push(
         mcx::alloc_in(
             mcx,
@@ -185,7 +185,7 @@ fn plan_state_node_function_scan_downcast() {
     let mut ps = mcx::alloc_in(mcx, PlanStateNode::FunctionScan(scanstate)).unwrap();
 
     // tag() is T_FunctionScanState.
-    assert_eq!(ps.tag(), nodes::nodefunctionscan::T_FunctionScanState);
+    assert_eq!(ps.tag(), ::nodes::nodefunctionscan::T_FunctionScanState);
     // The node is a relation-scan node: as_scan_state() reaches its ScanState.
     assert!(ps.as_scan_state().is_some());
     // castNode(FunctionScanState, node) recovers the concrete state.
@@ -230,7 +230,7 @@ fn runtime_srf_call_hits_documented_k2_seam_boundary() {
     // Give the scan a scan slot so FunctionNext reaches the SRF call.
     let qcxt = estate.es_query_cxt;
     let slot = estate
-        .make_slot(nodes::TupleTableSlot::new_in(qcxt))
+        .make_slot(::nodes::TupleTableSlot::new_in(qcxt))
         .unwrap();
     scanstate.ss.ss_ScanTupleSlot = Some(slot);
 

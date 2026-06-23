@@ -17,8 +17,8 @@ use utils_error::ereport;
 use types_error::{ERROR, PgError, PgResult};
 use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR};
 use types_catalog::catalog::TABLE_SPACE_RELATION_ID;
-use nodes::ddlnodes::DefElem;
-use nodes::nodes::ntag;
+use ::nodes::ddlnodes::DefElem;
+use ::nodes::nodes::ntag;
 use rel::Relation;
 use types_scan::scankey::{ScanKeyData, StrategyNumber};
 use types_scan::sdir::ScanDirection;
@@ -235,7 +235,7 @@ fn defel_arg(def: &DefElem<'_>) -> PgResult<Option<define_seams::DefElemArg>> {
 }
 
 /// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case.
-fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+fn defel_type_name_to_string(tn: &::nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
     if tn.names.is_empty() {
         return Err(ereport(ERROR)
             .errmsg_internal("DefElem TypeName carries no name")
@@ -246,7 +246,7 @@ fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<Str
         if i != 0 {
             out.push('.');
         }
-        let node: &nodes::nodes::Node = name;
+        let node: &::nodes::nodes::Node = name;
         match node.node_tag() {
             ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
             other => {
@@ -266,13 +266,13 @@ fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<Str
 }
 
 /// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case.
-fn defel_name_list_to_string(names: &[nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
+fn defel_name_list_to_string(names: &[::nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
     let mut out = String::new();
     for (i, name) in names.iter().enumerate() {
         if i != 0 {
             out.push('.');
         }
-        let node: &nodes::nodes::Node = name;
+        let node: &::nodes::nodes::Node = name;
         match node.node_tag() {
             ntag::T_String => out.push_str(node.expect_string().sval.as_str()),
             ntag::T_A_Star => out.push('*'),

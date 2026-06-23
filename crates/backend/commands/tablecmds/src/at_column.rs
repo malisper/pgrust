@@ -52,11 +52,11 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
-use nodes::ddlnodes::AlterTableType;
-use nodes::nodes::{ntag, Node};
+use ::nodes::ddlnodes::AlterTableType;
+use ::nodes::nodes::{ntag, Node};
 use rel::Relation;
 use types_storage::lock::{NoLock, RowExclusiveLock, ShareLock, LOCKMODE};
-use nodes::parsenodes::DROP_RESTRICT;
+use ::nodes::parsenodes::DROP_RESTRICT;
 use statistics::MAX_STATISTICS_TARGET;
 use types_tuple::access::{
     ATTRIBUTE_GENERATED_STORED, ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_INDEX, RELKIND_MATVIEW,
@@ -144,7 +144,7 @@ fn relation_mark_replica_identity<'mcx>(
 pub fn ATExecReplicaIdentity<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    stmt: &nodes::ddlnodes::ReplicaIdentityStmt<'_>,
+    stmt: &::nodes::ddlnodes::ReplicaIdentityStmt<'_>,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
     let identity_type = stmt.identity_type;
@@ -389,7 +389,7 @@ pub fn ATExecColumnDefault<'mcx>(
         //   AddRelationNewConstraints(rel, list_make1(rawEnt), NIL,
         //                             false, true, false, NULL);
         let raw_default_ptr = mcx::alloc_in(mcx, new_default.clone_in(mcx)?)?;
-        let raw_defaults: [(AttrNumber, nodes::nodes::NodePtr<'mcx>, i8); 1] =
+        let raw_defaults: [(AttrNumber, ::nodes::nodes::NodePtr<'mcx>, i8); 1] =
             [(attnum, raw_default_ptr, 0)];
         seam::add_relation_new_constraints::call(
             mcx,
@@ -858,7 +858,7 @@ pub fn ATExecDropOf<'mcx>(
 pub fn ATExecAddOf<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    of_typename: &nodes::rawnodes::TypeName<'mcx>,
+    of_typename: &::nodes::rawnodes::TypeName<'mcx>,
     _lockmode: LOCKMODE,
 ) -> PgResult<ObjectAddress> {
     use types_catalog::catalog_dependency::DEPENDENCY_NORMAL;

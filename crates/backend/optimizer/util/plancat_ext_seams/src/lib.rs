@@ -36,7 +36,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{CmdType, NodeId, PlannerInfo, RelId, Relids};
 
@@ -455,9 +455,9 @@ seam_core::seam!(
     /// emits a non-Var there) so build_physical_tlist punts.
     pub fn expand_function_rte_colvars<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        rte: &nodes::parsenodes::RangeTblEntry<'mcx>,
+        rte: &::nodes::parsenodes::RangeTblEntry<'mcx>,
         rti: Index,
-    ) -> PgResult<Option<Vec<nodes::primnodes::Var>>>
+    ) -> PgResult<Option<Vec<::nodes::primnodes::Var>>>
 );
 
 /* ---- triggers / generated columns (has_*_triggers etc.) ------------- */

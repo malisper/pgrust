@@ -59,7 +59,7 @@ use types_storage::storage::{
 use types_storage::storage::LWTRANCHE_LAUNCHER_HASH;
 use types_error::{PgError, PgResult};
 use types_guc::PGC_SIGHUP;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_pgstat::wait_event::{
     WAIT_EVENT_BGWORKER_SHUTDOWN, WAIT_EVENT_BGWORKER_STARTUP, WAIT_EVENT_LOGICAL_LAUNCHER_MAIN,
 };

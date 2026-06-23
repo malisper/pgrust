@@ -19,9 +19,9 @@ use mcx::{Mcx, PgVec, PgString};
 use types_core::primitive::{Oid, InvalidOid, OidIsValid};
 use types_error::PgResult;
 use types_error::{ERROR, NOTICE, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NO_DATA_FOUND};
-use nodes::nodes::{Node, NodePtr};
-use nodes::ddlnodes::{AlterTableCmd, AlterTableType};
-use nodes::parsenodes::{
+use ::nodes::nodes::{Node, NodePtr};
+use ::nodes::ddlnodes::{AlterTableCmd, AlterTableType};
+use ::nodes::parsenodes::{
     DropBehavior, OBJECT_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_TABLESPACE,
 };
 use types_tuple::heaptuple::Datum;
@@ -68,7 +68,7 @@ fn roleSpecsToIds<'mcx>(
             .expect("AlterTableMoveAllStmt.roles element is a RoleSpec");
         // `get_rolespec_oid` reads the `parsenodes::RoleSpec` view (same
         // `roletype` / `rolename`); reproject the `ddlnodes::RoleSpec` node.
-        let view = nodes::parsenodes::RoleSpec {
+        let view = ::nodes::parsenodes::RoleSpec {
             roletype: rolespec.roletype,
             rolename: match &rolespec.rolename {
                 Some(s) => Some(PgString::from_str_in(s.as_str(), mcx)?),
@@ -96,7 +96,7 @@ fn name_str(col: &(Datum<'_>, bool)) -> String {
 /// tablespace OID.
 pub fn AlterTableMoveAll<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::ddlnodes::AlterTableMoveAllStmt<'mcx>,
+    stmt: &::nodes::ddlnodes::AlterTableMoveAllStmt<'mcx>,
 ) -> PgResult<Oid> {
     let role_oids = roleSpecsToIds(mcx, &stmt.roles)?;
 

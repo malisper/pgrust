@@ -82,7 +82,7 @@ use types_core::catalog::{
     BOOLOID, BTREE_AM_OID, INT4OID, INT8OID, INTERNALOID, VOIDOID,
 };
 use types_error::PgResult;
-use nodes::parsenodes::OBJECT_SCHEMA;
+use ::nodes::parsenodes::OBJECT_SCHEMA;
 use opclass::{
     AlterOpFamilyStmt, CreateOpClassItem, CreateOpClassStmt, CreateOpFamilyStmt,
     ObjectWithArgs, OpFamilyMember, StringNode, TypeName, AMOP_ORDER, AMOP_SEARCH,
@@ -1807,7 +1807,7 @@ fn dropOperators(
             ACCESS_METHOD_OPERATOR_RELATION_ID,
             amopid,
             0,
-            nodes::parsenodes::DROP_RESTRICT,
+            ::nodes::parsenodes::DROP_RESTRICT,
             0,
         )?;
     }
@@ -1843,7 +1843,7 @@ fn dropProcedures(
             ACCESS_METHOD_PROCEDURE_RELATION_ID,
             amprocid,
             0,
-            nodes::parsenodes::DROP_RESTRICT,
+            ::nodes::parsenodes::DROP_RESTRICT,
             0,
         )?;
     }

@@ -29,11 +29,11 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
-use nodes::copy_query::Query;
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::RangeTblEntry;
-use nodes::primnodes::{Expr, OpExpr};
-use nodes::rawnodes::{SortGroupClause, WindowClause, SETOP_EXCEPT};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::RangeTblEntry;
+use ::nodes::primnodes::{Expr, OpExpr};
+use ::nodes::rawnodes::{SortGroupClause, WindowClause, SETOP_EXCEPT};
 use pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId};
 
 use nodes_core::makefuncs::make_and_qual;
@@ -237,7 +237,7 @@ fn node_as_expr<'a, 'b>(node: &'a Node<'b>) -> Option<&'a Expr<'b>> {
 /// Collect the `SortGroupClause`s out of a `PgVec<NodePtr>` (distinctClause /
 /// partitionClause / orderClause are all SortGroupClause lists).
 fn sortgroupclause_list<'mcx>(
-    list: &[nodes::nodes::NodePtr<'mcx>],
+    list: &[::nodes::nodes::NodePtr<'mcx>],
 ) -> Vec<SortGroupClause> {
     let mut out = Vec::with_capacity(list.len());
     for n in list.iter() {
@@ -377,7 +377,7 @@ fn check_output_expressions<'mcx>(
     // functions, which is independent of nullingrels). `resno`/`resjunk`/
     // `ressortgroupref` are untouched by the flattener, so the DISTINCT-ON and
     // window checks below correctly use the original TargetEntry.
-    let tlist: &[nodes::primnodes::TargetEntry<'_>] = &subquery.targetList;
+    let tlist: &[::nodes::primnodes::TargetEntry<'_>] = &subquery.targetList;
     let mut flattened_exprs: Vec<Option<Expr>> = Vec::with_capacity(tlist.len());
     if subquery.hasGroupRTE {
         for tle in tlist.iter() {
@@ -448,7 +448,7 @@ fn check_output_expressions<'mcx>(
 
 /// `compare_tlist_datatypes(tlist, colTypes, safetyInfo)` (allpaths.c:3849).
 fn compare_tlist_datatypes(
-    tlist: &[nodes::primnodes::TargetEntry<'_>],
+    tlist: &[::nodes::primnodes::TargetEntry<'_>],
     col_types: &[Oid],
     safety_info: &mut PushdownSafetyInfo,
 ) -> PgResult<()> {
@@ -472,7 +472,7 @@ fn compare_tlist_datatypes(
 
 /// `targetIsInAllPartitionLists(tle, query)` (allpaths.c:3882).
 fn target_is_in_all_partition_lists(
-    tle: &nodes::primnodes::TargetEntry<'_>,
+    tle: &::nodes::primnodes::TargetEntry<'_>,
     query: &Query<'_>,
 ) -> bool {
     for wc_node in query.windowClause.iter() {
@@ -491,15 +491,15 @@ fn target_is_in_all_partition_lists(
 /// (distinctClause). Extracts the `SortGroupClause`s then defers to the parser
 /// helper.
 fn target_is_in_sort_list(
-    tle: &nodes::primnodes::TargetEntry<'_>,
-    sort_list: &[nodes::nodes::NodePtr<'_>],
+    tle: &::nodes::primnodes::TargetEntry<'_>,
+    sort_list: &[::nodes::nodes::NodePtr<'_>],
 ) -> bool {
     let scl = sortgroupclause_list(sort_list);
     target_is_in_sort_list_clauses(tle, &scl)
 }
 
 fn target_is_in_sort_list_clauses(
-    tle: &nodes::primnodes::TargetEntry<'_>,
+    tle: &::nodes::primnodes::TargetEntry<'_>,
     sort_list: &[SortGroupClause],
 ) -> bool {
     clause::targetIsInSortList(tle, types_core::primitive::InvalidOid, sort_list)
@@ -952,7 +952,7 @@ fn find_window_run_conditions<'mcx>(
     if let Some(runopexpr) = runopexpr {
         // C builds a `WindowFuncRunCondition` node, appends it to
         // `wfunc->runCondition`, and records `attno` in `run_cond_attrs`.
-        let wfuncrc = nodes::primnodes::WindowFuncRunCondition {
+        let wfuncrc = ::nodes::primnodes::WindowFuncRunCondition {
             opno: runoperator,
             inputcollid: runopexpr.inputcollid,
             wfunc_left,

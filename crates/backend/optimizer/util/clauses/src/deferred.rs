@@ -7,7 +7,7 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 
 /// `contain_mutable_functions_after_planning(expr)` (clauses.c:488):
 /// `expression_planner()` (default-argument insertion + function inlining +

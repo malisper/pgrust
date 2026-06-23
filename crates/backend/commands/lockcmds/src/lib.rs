@@ -50,9 +50,9 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
 };
-use nodes::ddlnodes::LockStmt;
-use nodes::copy_query::Query;
-use nodes::nodes::Node;
+use ::nodes::ddlnodes::LockStmt;
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::Node;
 use types_tuple::access::RangeVar;
 use types_storage::lock::{AccessShareLock, RowExclusiveLock, NoLock, LOCKMODE};
 use types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW};
@@ -522,12 +522,12 @@ fn lock_table_acl_check(reloid: Oid, lockmode: LOCKMODE, userid: Oid) -> PgResul
 }
 
 /// `(RangeVar *) lfirst(p)` — re-encode a parse-node `RangeVar` (the
-/// arena-lifetimed `nodes::rawnodes::RangeVar`) into the
+/// arena-lifetimed `::nodes::rawnodes::RangeVar`) into the
 /// `RangeVarGetRelidExtended` argument type (`types_tuple::access::RangeVar`,
 /// the trimmed name-only view the namespace resolver and its callback consume).
 /// Mirrors the conversion `backend-parser-relation` performs for the same
 /// resolver entry point.
-fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> RangeVar {
     RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),

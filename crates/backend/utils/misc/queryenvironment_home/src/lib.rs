@@ -33,7 +33,7 @@
 #![allow(non_snake_case)]
 
 use std::cell::RefCell;
-use nodes::queryenvironment::QueryEnvironment;
+use ::nodes::queryenvironment::QueryEnvironment;
 
 thread_local! {
     /// The stack of live query environments. The top entry is the env for the

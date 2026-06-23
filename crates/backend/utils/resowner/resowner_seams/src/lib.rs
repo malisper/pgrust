@@ -26,7 +26,7 @@
 
 use types_error::PgResult;
 use types_logical::ResourceOwnerHandle;
-use nodes::parsestmt::ResourceOwnerHandle as ParsestmtResourceOwnerHandle;
+use ::nodes::parsestmt::ResourceOwnerHandle as ParsestmtResourceOwnerHandle;
 use portal::ResourceOwner;
 
 seam_core::seam!(

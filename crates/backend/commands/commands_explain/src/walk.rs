@@ -20,10 +20,10 @@ use types_core::instrument::Instrumentation;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
-use nodes::nodeindexscan::{Plan, PlannedStmt};
-use nodes::nodes::{ntag, CmdType, Node};
-use nodes::parsenodes::RTEKind;
-use nodes::planstate::PlanStateNode;
+use ::nodes::nodeindexscan::{Plan, PlannedStmt};
+use ::nodes::nodes::{ntag, CmdType, Node};
+use ::nodes::parsenodes::RTEKind;
+use ::nodes::planstate::PlanStateNode;
 
 use explain_format as fmt;
 use ruleutils_seams as ruleutils_s;
@@ -62,7 +62,7 @@ fn resolve_subplan_planstate<'p>(
 fn resolve_initplan_state<'p>(
     es: &ExplainState<'_>,
     plan_id: i32,
-) -> Option<&'p nodes::execexpr::SubPlanState<'p>> {
+) -> Option<&'p ::nodes::execexpr::SubPlanState<'p>> {
     if es.es_initplan_ptr.is_null() || plan_id <= 0 {
         return None;
     }
@@ -73,7 +73,7 @@ fn resolve_initplan_state<'p>(
     // SAFETY: as `resolve_subplan_planstate`, but over `EState.es_initplan`.
     let slice = unsafe {
         core::slice::from_raw_parts(
-            es.es_initplan_ptr as *const Option<nodes::execexpr::SubPlanState<'p>>,
+            es.es_initplan_ptr as *const Option<::nodes::execexpr::SubPlanState<'p>>,
             es.es_initplan_len,
         )
     };
@@ -263,8 +263,8 @@ fn explain_pre_scan_node<'es, 'p>(
     es: &ExplainState<'es>,
     mcx: Mcx<'es>,
     planstate: &PlanStateNode<'p>,
-    acc: Option<PgBox<'es, nodes::bitmapset::Bitmapset<'es>>>,
-) -> PgResult<Option<PgBox<'es, nodes::bitmapset::Bitmapset<'es>>>> {
+    acc: Option<PgBox<'es, ::nodes::bitmapset::Bitmapset<'es>>>,
+) -> PgResult<Option<PgBox<'es, ::nodes::bitmapset::Bitmapset<'es>>>> {
     use nodes_core::bitmapset::{bms_add_member, bms_add_members};
 
     let plan_node: &Node<'p> = match planstate.ps_head().plan {
@@ -707,7 +707,7 @@ pub fn ExplainNode<'es, 'p>(
             // "Partial"/"Finalize" prefix from DO_AGGSPLIT_* of agg->aggsplit.
             // The verbose per-node Agg detail (show_agg_keys / show_hashagg_info)
             // is emitted later in the detail pass; here we only set the name.
-            use nodes::nodeagg::{
+            use ::nodes::nodeagg::{
                 do_aggsplit_combine, do_aggsplit_skipfinal, AGG_HASHED, AGG_MIXED, AGG_PLAIN,
                 AGG_SORTED,
             };
@@ -744,8 +744,8 @@ pub fn ExplainNode<'es, 'p>(
             let s = plan_node.expect_setop();
             sname = "SetOp";
             let (pn, st) = match s.strategy {
-                nodes::nodesetop::SETOP_SORTED => ("SetOp", "Sorted"),
-                nodes::nodesetop::SETOP_HASHED => ("HashSetOp", "Hashed"),
+                ::nodes::nodesetop::SETOP_SORTED => ("SetOp", "Sorted"),
+                ::nodes::nodesetop::SETOP_HASHED => ("HashSetOp", "Hashed"),
                 _ => ("SetOp ???", "???"),
             };
             strategy = Some(st);
@@ -1022,7 +1022,7 @@ pub fn ExplainNode<'es, 'p>(
             .and_then(|r| r.resconstantqual.as_ref())
             .filter(|q| !q.is_empty())
         {
-            let mut exprs: alloc::vec::Vec<nodes::primnodes::Expr<'es>> =
+            let mut exprs: alloc::vec::Vec<::nodes::primnodes::Expr<'es>> =
                 alloc::vec::Vec::with_capacity(rcq.len());
             for e in rcq.iter() {
                 exprs.push(e.clone_in(mcx)?);
@@ -1061,7 +1061,7 @@ pub fn ExplainNode<'es, 'p>(
         //                 planstate, ancestors, es). useprefix = rtable>1||verbose.
         let wagg = plan_node.expect_windowagg();
         if let Some(rc) = wagg.runConditionOrig.as_ref().filter(|q| !q.is_empty()) {
-            let mut exprs: alloc::vec::Vec<nodes::primnodes::Expr<'es>> =
+            let mut exprs: alloc::vec::Vec<::nodes::primnodes::Expr<'es>> =
                 alloc::vec::Vec::with_capacity(rc.len());
             for e in rc.iter() {
                 exprs.push(e.clone_in(mcx)?);
@@ -1927,7 +1927,7 @@ fn show_scan_qual<'es, 'p>(
     mcx: Mcx<'es>,
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
-    qual: Option<&PgVec<'p, nodes::primnodes::Expr>>,
+    qual: Option<&PgVec<'p, ::nodes::primnodes::Expr>>,
     qlabel: &str,
 ) -> PgResult<()> {
     let Some(qual) = qual.filter(|q| !q.is_empty()) else {
@@ -1936,7 +1936,7 @@ fn show_scan_qual<'es, 'p>(
     // node = (Node *) make_ands_explicit(qual);
     // Deep-clone via clone_in: a qual may carry a SubPlan / Aggref child, on
     // which a bare derived `Expr::clone()` panics (clone-in convention).
-    let mut exprs: alloc::vec::Vec<nodes::primnodes::Expr<'es>> =
+    let mut exprs: alloc::vec::Vec<::nodes::primnodes::Expr<'es>> =
         alloc::vec::Vec::with_capacity(qual.len());
     for e in qual.iter() {
         exprs.push(e.clone_in(mcx)?);
@@ -1977,7 +1977,7 @@ fn show_tablesample<'es, 'p>(
     mcx: Mcx<'es>,
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
-    tsc: &nodes::nodesamplescan::TableSampleClause<'p>,
+    tsc: &::nodes::nodesamplescan::TableSampleClause<'p>,
 ) -> PgResult<()> {
     // useprefix = es->rtable_size > 1;
     let useprefix = es.rtable_size > 1;
@@ -2080,7 +2080,7 @@ fn show_modifytable_info<'es, 'p>(
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
 ) -> PgResult<()> {
-    use nodes::nodes::OnConflictAction;
+    use ::nodes::nodes::OnConflictAction;
 
     let node = plan_node.expect_modifytable();
 
@@ -2111,10 +2111,10 @@ fn show_modifytable_info<'es, 'p>(
             alloc::vec::Vec::new();
         if !es.es_result_rel_pool_ptr.is_null() {
             // SAFETY: aliases EState.es_result_rel_pool for the synchronous walk.
-            let pool: &[nodes::execnodes::ResultRelInfo<'_>] = unsafe {
+            let pool: &[::nodes::execnodes::ResultRelInfo<'_>] = unsafe {
                 core::slice::from_raw_parts(
                     es.es_result_rel_pool_ptr
-                        as *const nodes::execnodes::ResultRelInfo<'_>,
+                        as *const ::nodes::execnodes::ResultRelInfo<'_>,
                     es.es_result_rel_pool_len,
                 )
             };
@@ -2138,11 +2138,11 @@ fn show_modifytable_info<'es, 'p>(
                     } else {
                         // SAFETY: aliases EState.es_unpruned_relids for the walk.
                         let unpruned: &Option<
-                            PgBox<'_, nodes::bitmapset::Bitmapset<'_>>,
+                            PgBox<'_, ::nodes::bitmapset::Bitmapset<'_>>,
                         > = unsafe {
                             &*(es.es_unpruned_relids_ptr
                                 as *const Option<
-                                    PgBox<'_, nodes::bitmapset::Bitmapset<'_>>,
+                                    PgBox<'_, ::nodes::bitmapset::Bitmapset<'_>>,
                                 >)
                         };
                         nodes_core::bitmapset::bms_is_member(
@@ -2308,7 +2308,7 @@ fn show_upper_qual<'es, 'p>(
     mcx: Mcx<'es>,
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
-    exprs: alloc::vec::Vec<nodes::primnodes::Expr<'es>>,
+    exprs: alloc::vec::Vec<::nodes::primnodes::Expr<'es>>,
     qlabel: &str,
 ) -> PgResult<()> {
     if exprs.is_empty() {
@@ -2342,8 +2342,8 @@ fn show_upper_qual<'es, 'p>(
 /// Aggref children). Returns an empty vec for `None`.
 fn clone_expr_qual<'es>(
     mcx: Mcx<'es>,
-    qual: Option<&PgVec<'_, nodes::primnodes::Expr<'_>>>,
-) -> PgResult<alloc::vec::Vec<nodes::primnodes::Expr<'es>>> {
+    qual: Option<&PgVec<'_, ::nodes::primnodes::Expr<'_>>>,
+) -> PgResult<alloc::vec::Vec<::nodes::primnodes::Expr<'es>>> {
     let mut out = alloc::vec::Vec::new();
     if let Some(q) = qual {
         out.reserve(q.len());
@@ -2363,13 +2363,13 @@ fn clone_expr_qual<'es>(
 /// list to that very clause).
 fn build_cond_list<'es>(
     mcx: Mcx<'es>,
-    quals: Option<&PgVec<'_, nodes::primnodes::Expr<'_>>>,
+    quals: Option<&PgVec<'_, ::nodes::primnodes::Expr<'_>>>,
     is_and: bool,
-) -> PgResult<alloc::vec::Vec<nodes::primnodes::Expr<'es>>> {
+) -> PgResult<alloc::vec::Vec<::nodes::primnodes::Expr<'es>>> {
     let Some(quals) = quals.filter(|q| !q.is_empty()) else {
         return Ok(alloc::vec::Vec::new());
     };
-    let mut cloned: alloc::vec::Vec<nodes::primnodes::Expr<'es>> =
+    let mut cloned: alloc::vec::Vec<::nodes::primnodes::Expr<'es>> =
         alloc::vec::Vec::with_capacity(quals.len());
     for e in quals.iter() {
         cloned.push(e.clone_in(mcx)?);
@@ -2396,7 +2396,7 @@ fn show_scan_qual_owned<'es, 'p>(
     mcx: Mcx<'es>,
     plan_node: &Node<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
-    exprs: alloc::vec::Vec<nodes::primnodes::Expr<'es>>,
+    exprs: alloc::vec::Vec<::nodes::primnodes::Expr<'es>>,
     qlabel: &str,
 ) -> PgResult<()> {
     if exprs.is_empty() {
@@ -2537,7 +2537,7 @@ fn ExplainMemberNodes<'es, 'p>(
 fn ExplainSubPlans<'es, 'p>(
     es: &mut ExplainState<'es>,
     mcx: Mcx<'es>,
-    plans: &PgVec<'p, nodes::execexpr::SubPlanState<'p>>,
+    plans: &PgVec<'p, ::nodes::execexpr::SubPlanState<'p>>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
     relationship: &str,
 ) -> PgResult<()> {
@@ -2577,7 +2577,7 @@ fn ExplainSubPlansByInitPlanIds<'es, 'p>(
 fn explain_one_subplan<'es, 'p>(
     es: &mut ExplainState<'es>,
     mcx: Mcx<'es>,
-    sps: &nodes::execexpr::SubPlanState<'p>,
+    sps: &::nodes::execexpr::SubPlanState<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
     relationship: &str,
 ) -> PgResult<()> {
@@ -2597,7 +2597,7 @@ fn explain_one_subplan<'es, 'p>(
     // ancestor so ruleutils can find subplan-parameter referents.
     let sub_node = Node::mk_expr(
         mcx,
-        nodes::primnodes::Expr::SubPlan(nodes::primnodes::SubPlanExpr::from_subplan(
+        ::nodes::primnodes::Expr::SubPlan(::nodes::primnodes::SubPlanExpr::from_subplan(
             mcx, sp,
         )?),
     )?;
@@ -2734,7 +2734,7 @@ fn explain_scan_target_switch<'es, 'p>(
         ),
         ntag::T_NestLoop | ntag::T_MergeJoin | ntag::T_HashJoin => {
             // explain.c:1716 — interpolate the join type into the node name.
-            use nodes::jointype::JoinType;
+            use ::nodes::jointype::JoinType;
             let tag = plan_node.node_tag();
             let jointype = match tag {
                 ntag::T_NestLoop => plan_node.expect_nestloop().join.jointype,
@@ -2770,7 +2770,7 @@ fn explain_scan_target_switch<'es, 'p>(
         ntag::T_SetOp => {
             // explain.c:1763 — interpolate the set-operation command into the
             // node name (TEXT) or emit it as a "Command" property.
-            use nodes::nodesetop::{
+            use ::nodes::nodesetop::{
                 SETOPCMD_EXCEPT, SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL,
             };
             let setopcmd = match plan_node.expect_setop().cmd {
@@ -3349,7 +3349,7 @@ fn show_grouping_sets<'es, 'p>(
     mcx: Mcx<'es>,
     context_plan: &Node<'p>,
     context_plan_head: &Plan<'p>,
-    agg: &nodes::nodeagg::Agg<'p>,
+    agg: &::nodes::nodeagg::Agg<'p>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
 ) -> PgResult<()> {
     // C sets up the deparse context once here; in the seam model the context is
@@ -3404,11 +3404,11 @@ fn show_grouping_set_keys<'es, 'p>(
     mcx: Mcx<'es>,
     context_plan: &Node<'p>,
     context_plan_head: &Plan<'p>,
-    aggnode: &nodes::nodeagg::Agg<'p>,
-    sortnode: Option<&nodes::nodesort::Sort<'p>>,
+    aggnode: &::nodes::nodeagg::Agg<'p>,
+    sortnode: Option<&::nodes::nodesort::Sort<'p>>,
     ancestors: &PgVec<'es, PgBox<'es, Node<'es>>>,
 ) -> PgResult<()> {
-    use nodes::nodeagg::AggStrategy;
+    use ::nodes::nodeagg::AggStrategy;
 
     let gsets = aggnode
         .grouping_sets
@@ -3519,7 +3519,7 @@ fn show_grouping_set_keys<'es, 'p>(
 fn show_sortorder_options<'p>(
     mcx: Mcx<'_>,
     buf: &mut alloc::string::String,
-    sortexpr: &nodes::primnodes::Expr,
+    sortexpr: &::nodes::primnodes::Expr,
     sort_operator: types_core::primitive::Oid,
     collation: types_core::primitive::Oid,
     nulls_first: bool,

@@ -1,5 +1,5 @@
 //! `_read<Type>` readers for the `primnodes.h` expression family. Each reader
-//! reconstructs the post-analysis [`nodes::primnodes::Expr`] form (carried
+//! reconstructs the post-analysis [`::nodes::primnodes::Expr`] form (carried
 //! by `Node::Expr`) — that is what `readfuncs.c` builds for every framed `{LABEL
 //! ...}` whose tag is a primitive-expression node, both for the executor and the
 //! raw-grammar variants (they share the same LABEL). Fields are read in the
@@ -17,8 +17,8 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgString};
 use types_error::PgResult;
-use nodes::nodes::Node;
-use nodes::primnodes::{
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{
     self as pn, ArrayCoerceExpr, ArrayExpr, BoolTestType, BooleanTest, CaseExpr, CaseTestExpr,
     CaseWhen, CoalesceExpr, CoerceToDomain, CoerceToDomainValue, CoerceViaIO, CoercionForm,
     CollateExpr, CompareType, ConvertRowtypeExpr, CurrentOfExpr, Expr, FieldSelect, FieldStore,
@@ -592,12 +592,12 @@ fn read_window_func<'mcx>(mcx: Mcx<'mcx>) -> PgResult<WindowFunc> {
 
 fn read_window_func_run_condition<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::primnodes::WindowFuncRunCondition<'mcx>> {
+) -> PgResult<::nodes::primnodes::WindowFuncRunCondition<'mcx>> {
     let opno = read_oid_field()?;
     let inputcollid = read_oid_field()?;
     let wfunc_left = read_bool_field()?;
     let arg = read_opt_box_expr(mcx)?;
-    Ok(nodes::primnodes::WindowFuncRunCondition {
+    Ok(::nodes::primnodes::WindowFuncRunCondition {
         opno,
         inputcollid,
         wfunc_left,
@@ -1158,7 +1158,7 @@ fn read_returning_expr<'mcx>(mcx: Mcx<'mcx>) -> PgResult<ReturningExpr> {
     })
 }
 
-fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::primnodes::SubLink<'mcx>> {
+fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<::nodes::primnodes::SubLink<'mcx>> {
     let sub_link_type = sublink_type_from(read_enum_field()?);
     let sub_link_id = read_int_field()?;
     let testexpr = read_opt_box_expr(mcx)?;
@@ -1173,7 +1173,7 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::primnodes::SubLink<'mcx
     // framed `{QUERY ...}` child into an mcx-owned `Node::Query`; box it and
     // re-erase the lifetime parameter to the lifetime-free `Expr` tree's
     // 'static notional lifetime (the exact idiom SubLink::clone_in uses; cf.
-    // clone_sublink in types-nodes::primnodes). A `<>` (NULL) → None.
+    // clone_sublink in types-::nodes::primnodes). A `<>` (NULL) → None.
     let _label = next_token()?; // skip :subselect
     let sub = read::node_read(mcx, None)?;
     let subselect = match sub {
@@ -1193,7 +1193,7 @@ fn read_sublink<'mcx>(mcx: Mcx<'mcx>) -> PgResult<nodes::primnodes::SubLink<'mcx
         },
     };
     let location = read_location_field()?;
-    Ok(nodes::primnodes::SubLink {
+    Ok(::nodes::primnodes::SubLink {
         subLinkType: sub_link_type,
         subLinkId: sub_link_id,
         testexpr,
@@ -1254,7 +1254,7 @@ fn read_aggref_args_field<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Vec<pn::TargetEntry<
 /// framed `SortGroupClause` reconstructed via `node_read`. `<>`/`()` → empty.
 fn read_sortgroupclause_list_field<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<Vec<nodes::rawnodes::SortGroupClause>> {
+) -> PgResult<Vec<::nodes::rawnodes::SortGroupClause>> {
     let _label = next_token()?;
     let elements = match read::node_read(mcx, None)? {
         None => return Ok(Vec::new()),
@@ -1412,14 +1412,14 @@ pub(crate) fn try_read<'mcx>(mcx: Mcx<'mcx>, label: &[u8]) -> Option<PgResult<No
         b"SUBPLAN" => crate::read_plan_family::read_subplan(mcx).and_then(|sp| {
             Node::mk_expr(
                 mcx,
-                Expr::SubPlan(nodes::primnodes::SubPlanExpr(Box::new(sp))),
+                Expr::SubPlan(::nodes::primnodes::SubPlanExpr(Box::new(sp))),
             )
         }),
         b"ALTERNATIVESUBPLAN" => {
             crate::read_plan_family::read_alternative_subplan(mcx).and_then(|asp| {
                 Node::mk_expr(
                     mcx,
-                    Expr::AlternativeSubPlan(nodes::primnodes::AlternativeSubPlanExpr(
+                    Expr::AlternativeSubPlan(::nodes::primnodes::AlternativeSubPlanExpr(
                         Box::new(asp),
                     )),
                 )
@@ -1436,7 +1436,7 @@ mod tests {
     use nodes_core::read::string_to_node;
     use outfuncs::out_node;
     use mcx::MemoryContext;
-    use nodes::primnodes::{Expr, Var, VarReturningType};
+    use ::nodes::primnodes::{Expr, Var, VarReturningType};
 
     extern crate std;
     use std::string::ToString;
@@ -1482,7 +1482,7 @@ mod tests {
             std::boxed::Box::leak(std::boxed::Box::new(MemoryContext::new("read-aggref-test")));
         let mcx = ctx.mcx();
 
-        let te = nodes::primnodes::TargetEntry {
+        let te = ::nodes::primnodes::TargetEntry {
             expr: Some(mcx::alloc_in(mcx, Expr::Var(mk_var()?)).expect("alloc")),
             resno: 1,
             resname: None,
@@ -1491,7 +1491,7 @@ mod tests {
             resorigcol: 0,
             resjunk: false,
         };
-        let sgc = nodes::rawnodes::SortGroupClause {
+        let sgc = ::nodes::rawnodes::SortGroupClause {
             tleSortGroupRef: 1,
             eqop: 96,
             sortop: 97,
@@ -1499,7 +1499,7 @@ mod tests {
             nulls_first: false,
             hashable: true,
         };
-        let aggref = nodes::primnodes::Aggref {
+        let aggref = ::nodes::primnodes::Aggref {
             aggfnoid: 2147,
             aggtype: 20,
             aggcollid: 0,
@@ -1507,7 +1507,7 @@ mod tests {
             aggtranstype: 20,
             aggargtypes: std::vec![23],
             aggdirectargs: std::vec::Vec::new(),
-            args: std::vec![nodes::primnodes::targetentry_into_static(te)],
+            args: std::vec![::nodes::primnodes::targetentry_into_static(te)],
             aggorder: std::vec::Vec::new(),
             aggdistinct: std::vec![sgc],
             aggfilter: None,
@@ -1611,12 +1611,12 @@ mod tests {
         )));
         let mcx = ctx.mcx();
 
-        let q = nodes::copy_query::Query::new(mcx);
+        let q = ::nodes::copy_query::Query::new(mcx);
         let subselect = Some(
-            nodes::primnodes::query_box_into_static(q, mcx).expect("erase"),
+            ::nodes::primnodes::query_box_into_static(q, mcx).expect("erase"),
         );
-        let sublink = Expr::SubLink(nodes::primnodes::SubLink {
-            subLinkType: nodes::primnodes::SubLinkType::Any,
+        let sublink = Expr::SubLink(::nodes::primnodes::SubLink {
+            subLinkType: ::nodes::primnodes::SubLinkType::Any,
             subLinkId: 3,
             testexpr: Some(std::boxed::Box::new(Expr::Var(mk_var()?))),
             // ANY sublink carries an operName like `("=")`; it must survive the
@@ -1680,7 +1680,7 @@ mod tests {
     fn raw_nulltest_out_text() {
         let ctx = MemoryContext::new("raw-nulltest");
         let mcx = ctx.mcx();
-        let n = nodes::rawexprnodes::NullTest {
+        let n = ::nodes::rawexprnodes::NullTest {
             arg: None,
             nulltesttype: NullTestType::IS_NOT_NULL,
             argisrow: false,
@@ -1701,7 +1701,7 @@ mod tests {
     fn raw_currentof_out_text() {
         let ctx = MemoryContext::new("raw-cof");
         let mcx = ctx.mcx();
-        let n = nodes::rawexprnodes::CurrentOfExpr {
+        let n = ::nodes::rawexprnodes::CurrentOfExpr {
             cvarno: 3,
             cursor_name: Some(PgString::from_str_in("c1", mcx).unwrap()),
             cursor_param: 0,

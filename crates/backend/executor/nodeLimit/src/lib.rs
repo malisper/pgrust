@@ -39,9 +39,9 @@ use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use types_error::{
     ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE, ERRCODE_INVALID_ROW_COUNT_IN_RESULT_OFFSET_CLAUSE,
 };
-use nodes::execnodes::ScanDirectionIsForward;
-use nodes::executor::EXEC_FLAG_MARK;
-use nodes::nodelimit::{
+use ::nodes::execnodes::ScanDirectionIsForward;
+use ::nodes::executor::EXEC_FLAG_MARK;
+use ::nodes::nodelimit::{
     Limit, LimitStateData, LimitStateCond, LIMIT_OPTION_COUNT, LIMIT_OPTION_WITH_TIES,
 };
 use nodes::{EStateData, PlanStateNode, SlotId};
@@ -504,7 +504,7 @@ fn compute_tuples_needed(node: &LimitStateData<'_>) -> int64 {
 /// Allocated in `estate.es_query_cxt` (C: `makeNode` in the per-query context),
 /// so fallible on OOM. Panics if `node` is not a `Limit` (the C `castNode`).
 pub fn ExecInitLimit<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, LimitStateData<'mcx>>> {

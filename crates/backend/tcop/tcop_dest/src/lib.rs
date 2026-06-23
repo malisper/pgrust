@@ -79,9 +79,9 @@ use core::cell::RefCell;
 use mcx::Mcx;
 use types_dest::CommandDest;
 use types_error::PgResult;
-use nodes::nodes::CmdType;
-use nodes::parsestmt::DestReceiverHandle;
-use nodes::tuptable::SlotData;
+use ::nodes::nodes::CmdType;
+use ::nodes::parsestmt::DestReceiverHandle;
+use ::nodes::tuptable::SlotData;
 use portal::{CommandTag, QueryCompletion};
 use types_tuple::heaptuple::TupleDescData;
 

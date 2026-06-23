@@ -261,7 +261,7 @@ pub fn _hash_checkpage<'mcx>(
         let pref = PageRef::new(page)?;
 
         // Additionally check that the special area looks sane.
-        if page::PageGetSpecialSize(&pref) as usize
+        if ::page::PageGetSpecialSize(&pref) as usize
             != maxalign(SIZEOF_HASH_PAGE_OPAQUE_DATA)
         {
             result = Err(PgError::new(ERROR, "index contains corrupted page"));
@@ -530,7 +530,7 @@ pub fn _hash_kill_items<'mcx>(scan: &mut HashScan<'mcx>) -> PgResult<()> {
                     let mut iid = iid;
                     ItemIdMarkDead(&mut iid);
                     let mut pmut = PageMut::new(page)?;
-                    page::PageSetItemId(&mut pmut, offnum, iid)?;
+                    ::page::PageSetItemId(&mut pmut, offnum, iid)?;
                     killedsomething = true;
                     break; // out of inner search loop
                 }

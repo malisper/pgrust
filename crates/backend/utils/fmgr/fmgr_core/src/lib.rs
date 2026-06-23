@@ -40,7 +40,7 @@ use fmgr::{
     ProcLanguage, ResolvedFmgrInfo, TRACK_FUNC_ALL, TRACK_FUNC_OFF, TRACK_FUNC_PL,
 };
 use types_guc::GucContext;
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 
 pub mod builtin_canonical;
 
@@ -2161,10 +2161,10 @@ fn oid_input_function_call_out<'mcx>(
 /// node available — the readers then fall through to the tag-only seams). The
 /// downcast targets the one concrete type the setter ever boxes; a mismatch
 /// maps to the same `None` fall-through.
-fn external_expr(ext: &fmgr::ExternalFnExpr) -> Option<&nodes::primnodes::Expr<'static>> {
+fn external_expr(ext: &fmgr::ExternalFnExpr) -> Option<&::nodes::primnodes::Expr<'static>> {
     ext.node
         .as_ref()?
-        .downcast_ref::<nodes::primnodes::Expr>()
+        .downcast_ref::<::nodes::primnodes::Expr>()
 }
 
 /// Port of `get_fn_expr_rettype` (C: `if (!flinfo || !flinfo->fn_expr) return
@@ -2448,18 +2448,18 @@ fn fmgr_info_resolve(mcx: Mcx<'_>, function_id: Oid) -> PgResult<types_core::fmg
 /// crate depends on `types-nodes` and supplies the concrete `Expr`). C stores
 /// the bare `Node *`; the owned model shares the node through the refcounted
 /// erased box. The downcast type used by the readers below is exactly this
-/// `nodes::primnodes::Expr`.
+/// `::nodes::primnodes::Expr`.
 fn fmgr_info_set_expr_seam<'mcx, 'e>(
     mcx: mcx::Mcx<'mcx>,
     finfo: &mut types_core::fmgr::FmgrInfo,
-    expr: &nodes::primnodes::Expr<'e>,
+    expr: &::nodes::primnodes::Expr<'e>,
 ) -> types_error::PgResult<()> {
     // clone_in: the call node may be an OpExpr/FuncExpr carrying an Aggref (a
     // HAVING qual operator), whose context-allocated TargetEntry args a bare
     // derived `.clone()` panics on.
     finfo.fn_expr = Some(types_core::fmgr::FnExprErased::from_node_erased::<
-        nodes::primnodes::Expr,
-        nodes::primnodes::Expr,
+        ::nodes::primnodes::Expr,
+        ::nodes::primnodes::Expr,
     >(expr.clone_in(mcx)?));
     Ok(())
 }
@@ -2471,14 +2471,14 @@ fn fmgr_info_set_expr_seam<'mcx, 'e>(
 /// impossible (only `fmgr_info_set_expr_seam` writes the slot) but maps to the
 /// same `None` fall-through.
 fn fcinfo_fn_expr<'a>(
-    fcinfo: &'a nodes::fmgr::FunctionCallInfoBaseData<'_>,
-) -> Option<&'a nodes::primnodes::Expr<'static>> {
+    fcinfo: &'a ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
+) -> Option<&'a ::nodes::primnodes::Expr<'static>> {
     fcinfo
         .flinfo
         .as_ref()?
         .fn_expr
         .as_ref()?
-        .downcast_ref::<nodes::primnodes::Expr>()
+        .downcast_ref::<::nodes::primnodes::Expr>()
 }
 
 /// `get_fn_expr_argtype(fcinfo->flinfo, argnum)` (fmgr.h) — the `get_fn_expr_argtype`
@@ -2486,7 +2486,7 @@ fn fcinfo_fn_expr<'a>(
 /// return InvalidOid; return get_call_expr_argtype(flinfo->fn_expr, argnum);`.
 /// The `IsA` dispatch lives in nodeFuncs (it knows the `Expr` field shapes).
 fn get_fn_expr_argtype_seam(
-    fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     argnum: i32,
 ) -> PgResult<Oid> {
     match fcinfo_fn_expr(fcinfo) {
@@ -2502,7 +2502,7 @@ fn get_fn_expr_argtype_seam(
 /// exprType(flinfo->fn_expr);`. `exprType` is the nodeFuncs `expr_type_info`
 /// read.
 fn get_fn_expr_rettype_seam(
-    fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'_>,
 ) -> PgResult<Oid> {
     match fcinfo_fn_expr(fcinfo) {
         None => Ok(InvalidOid),
@@ -2903,7 +2903,7 @@ fn fmgr_call_seam<'mcx>(
     inputcollid: Oid,
     args: Vec<(types_tuple::heaptuple::Datum<'mcx>, bool, Oid)>,
     rettype: Oid,
-    fn_expr: Option<&nodes::primnodes::Expr>,
+    fn_expr: Option<&::nodes::primnodes::Expr>,
 ) -> PgResult<(types_tuple::heaptuple::Datum<'mcx>, bool)> {
     let _ = rettype; // result classification rides the callee's `ref_result` arm.
     let mut resolved = fmgr_info(mcx, funcid)?;
@@ -2921,8 +2921,8 @@ fn fmgr_call_seam<'mcx>(
         resolved.finfo.fn_expr = Some(Box::new(FnExpr::External(fmgr::ExternalFnExpr {
             tag: 0,
             node: Some(types_core::fmgr::FnExprErased::from_node_erased::<
-                nodes::primnodes::Expr,
-                nodes::primnodes::Expr,
+                ::nodes::primnodes::Expr,
+                ::nodes::primnodes::Expr,
             >(expr.clone_in(mcx)?)),
         })));
     }
@@ -4276,7 +4276,7 @@ fn convert_via_proc_counted_seam<'mcx>(
 // ===========================================================================
 // Frame-widening seams (`PG_GETARG_*` / `PG_RETURN_*` / `PG_NARGS` /
 // `PG_ARGISNULL` / call mcx / fn_expr readers) over the executor's
-// `nodes::fmgr::FunctionCallInfoBaseData<'mcx>` frame. The frame's
+// `::nodes::fmgr::FunctionCallInfoBaseData<'mcx>` frame. The frame's
 // `args[i].value` is a bare-word `datum::Datum`; only by-value scalar
 // arguments can be decoded here (the by-reference `PG_GETARG_{NAME,TEXT_PP,
 // VARLENA_PP,CSTRING}` readers need a by-reference channel the trimmed nodes
@@ -4284,14 +4284,14 @@ fn convert_via_proc_counted_seam<'mcx>(
 // ===========================================================================
 
 /// `PG_NARGS()` (fmgr.h): `fcinfo->nargs`.
-fn pg_nargs_seam(fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'_>) -> i32 {
+fn pg_nargs_seam(fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'_>) -> i32 {
     fcinfo.nargs as i32
 }
 
 /// `PG_ARGISNULL(n)` (fmgr.h): `fcinfo->args[n].isnull`. A read past `nargs` is
 /// C undefined behaviour; the safe port treats a missing slot as NULL.
 fn pg_argisnull_seam(
-    fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     n: usize,
 ) -> bool {
     fcinfo.args.get(n).map_or(true, |a| a.isnull)
@@ -4299,7 +4299,7 @@ fn pg_argisnull_seam(
 
 /// `PG_GETARG_OID(n)` (fmgr.h): `DatumGetObjectId(fcinfo->args[n].value)`.
 fn pg_getarg_oid_seam(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     n: usize,
 ) -> Oid {
     fcinfo.args[n].value.as_oid()
@@ -4307,7 +4307,7 @@ fn pg_getarg_oid_seam(
 
 /// `PG_GETARG_INT16(n)` (fmgr.h): `DatumGetInt16(fcinfo->args[n].value)`.
 fn pg_getarg_int16_seam(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     n: usize,
 ) -> types_core::AttrNumber {
     fcinfo.args[n].value.as_i16()
@@ -4315,7 +4315,7 @@ fn pg_getarg_int16_seam(
 
 /// `PG_GETARG_INT64(n)` (fmgr.h): `DatumGetInt64(fcinfo->args[n].value)`.
 fn pg_getarg_int64_seam(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     n: usize,
 ) -> i64 {
     fcinfo.args[n].value.as_i64()
@@ -4323,7 +4323,7 @@ fn pg_getarg_int64_seam(
 
 /// `PG_GETARG_BOOL(n)` (fmgr.h): `DatumGetBool(fcinfo->args[n].value)`.
 fn pg_getarg_bool_seam(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     n: usize,
 ) -> bool {
     fcinfo.args[n].value.as_bool()
@@ -4332,7 +4332,7 @@ fn pg_getarg_bool_seam(
 /// `PG_GETARG_DATUM(n)` (fmgr.h): the raw argument word `fcinfo->args[n].value`,
 /// taken as given with no detoasting.
 fn pg_getarg_datum_seam(
-    fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     n: usize,
 ) -> Datum {
     fcinfo.args[n].value
@@ -4352,10 +4352,10 @@ fn pg_getarg_datum_seam(
 /// is by-value/empty (C: dereferencing a non-pointer `Datum` — a wiring bug, not
 /// a data path). Shared by the four by-ref readers below.
 fn getarg_ref<'a>(
-    fcinfo: &'a nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &'a ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     n: usize,
     macro_name: &str,
-) -> &'a nodes::fmgr::FmgrArgRef {
+) -> &'a ::nodes::fmgr::FmgrArgRef {
     fcinfo.ref_arg(n).unwrap_or_else(|| {
         panic!(
             "{macro_name}: arg {n} has no by-reference payload on the executor \
@@ -4369,13 +4369,13 @@ fn getarg_ref<'a>(
 /// call's context (`fn_mcxt`) as the `Bytea` C's `PG_DETOAST_DATUM_PACKED`
 /// returns.
 fn pg_getarg_text_pp_seam<'mcx>(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
     n: usize,
 ) -> PgResult<datum::varlena::Bytea<'mcx>> {
     let mcx = pg_call_mcx_seam(fcinfo);
     let bytes = match getarg_ref(fcinfo, n, "PG_GETARG_TEXT_PP") {
-        nodes::fmgr::FmgrArgRef::Varlena(b) => b.as_slice(),
-        nodes::fmgr::FmgrArgRef::Cstring(_) => panic!(
+        ::nodes::fmgr::FmgrArgRef::Varlena(b) => b.as_slice(),
+        ::nodes::fmgr::FmgrArgRef::Cstring(_) => panic!(
             "PG_GETARG_TEXT_PP: arg {n} is a cstring, not a varlena (a wiring bug)"
         ),
     };
@@ -4419,7 +4419,7 @@ fn pg_getarg_text_pp_seam<'mcx>(
 /// (possibly-detoasted) full varlena image of arg `n` (array / `text[]` /
 /// `bytea`). Identical marshalling to [`pg_getarg_text_pp_seam`].
 fn pg_getarg_varlena_pp_seam<'mcx>(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
     n: usize,
 ) -> PgResult<datum::varlena::Bytea<'mcx>> {
     pg_getarg_text_pp_seam(fcinfo, n)
@@ -4430,12 +4430,12 @@ fn pg_getarg_varlena_pp_seam<'mcx>(
 /// NUL-padded buffer) or, for an `unknown`-literal coerced in, a `cstring`; both
 /// resolve to the NUL-trimmed text.
 fn pg_getarg_name_seam(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     n: usize,
 ) -> String {
     match getarg_ref(fcinfo, n, "PG_GETARG_NAME") {
-        nodes::fmgr::FmgrArgRef::Cstring(s) => s.clone(),
-        nodes::fmgr::FmgrArgRef::Varlena(b) => {
+        ::nodes::fmgr::FmgrArgRef::Cstring(s) => s.clone(),
+        ::nodes::fmgr::FmgrArgRef::Varlena(b) => {
             // C: a `Name` is the (up to) NAMEDATALEN-byte buffer, NUL-trimmed.
             let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
             String::from_utf8_lossy(&b[..end]).into_owned()
@@ -4447,15 +4447,15 @@ fn pg_getarg_name_seam(
 /// `unknown`-typed literal arrives as (fmgr.h): the NUL-terminated C string of
 /// arg `n`, returned as a `&'mcx str` allocated in the call's context.
 fn pg_getarg_cstring_seam<'mcx>(
-    fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
     n: usize,
 ) -> &'mcx str {
     let mcx = pg_call_mcx_seam(fcinfo);
     let s = match getarg_ref(fcinfo, n, "PG_GETARG_CSTRING") {
-        nodes::fmgr::FmgrArgRef::Cstring(s) => s.clone(),
+        ::nodes::fmgr::FmgrArgRef::Cstring(s) => s.clone(),
         // A varlena-imaged arg read as a cstring: its NUL-excluded text (the
         // `unknown`-literal path can present either shape).
-        nodes::fmgr::FmgrArgRef::Varlena(b) => {
+        ::nodes::fmgr::FmgrArgRef::Varlena(b) => {
             let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
             String::from_utf8_lossy(&b[..end]).into_owned()
         }
@@ -4474,7 +4474,7 @@ fn pg_getarg_cstring_seam<'mcx>(
 
 /// `PG_RETURN_INT64(v)` (fmgr.h): `fcinfo->isnull = false; return Int64GetDatum(v);`.
 fn pg_return_int64_seam(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     v: i64,
 ) -> Datum {
     fcinfo.isnull = false;
@@ -4483,7 +4483,7 @@ fn pg_return_int64_seam(
 
 /// `PG_RETURN_DATUM(v)` (fmgr.h): `fcinfo->isnull = false; return v;`.
 fn pg_return_datum_seam(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     v: Datum,
 ) -> Datum {
     fcinfo.isnull = false;
@@ -4492,7 +4492,7 @@ fn pg_return_datum_seam(
 
 /// `PG_RETURN_BOOL(b)` (fmgr.h): `fcinfo->isnull = false; return BoolGetDatum(b);`.
 fn pg_return_bool_seam(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     b: bool,
 ) -> Datum {
     fcinfo.isnull = false;
@@ -4501,7 +4501,7 @@ fn pg_return_bool_seam(
 
 /// `PG_RETURN_NULL()` (fmgr.h): `fcinfo->isnull = true; return (Datum) 0;`.
 fn pg_return_null_seam(
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'_>,
 ) -> Datum {
     fcinfo.isnull = true;
     Datum::null()
@@ -4512,7 +4512,7 @@ fn pg_return_null_seam(
 /// context is a caller-contract violation (the dispatcher must seed it before a
 /// call whose callee allocates), so this is an invariant panic, not an error.
 fn pg_call_mcx_seam<'mcx>(
-    fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
 ) -> Mcx<'mcx> {
     fcinfo
         .fn_mcxt
@@ -4523,7 +4523,7 @@ fn pg_call_mcx_seam<'mcx>(
 /// funcvariadic : false` over the frame's stamped `fn_expr` (`None` → C's
 /// `flinfo == NULL || fn_expr == NULL` fall-through, `false`).
 fn get_fn_expr_variadic_seam(
-    fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'_>,
 ) -> bool {
     match fcinfo_fn_expr(fcinfo) {
         None => false,
@@ -4535,7 +4535,7 @@ fn get_fn_expr_variadic_seam(
 /// indexed call-expression argument is a `Const` or external `Param` (`None`
 /// `fn_expr` → C's `false` fall-through).
 fn get_fn_expr_arg_stable_seam(
-    fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'_>,
     argnum: i32,
 ) -> bool {
     match fcinfo_fn_expr(fcinfo) {
@@ -4555,8 +4555,8 @@ fn get_fn_expr_arg_stable_seam(
 /// degrading only polymorphic result-type resolution. See DESIGN_DEBT
 /// TD-FMGR-FN-OID-AND-EXPR-NODE.
 fn fn_oid_and_expr_seam<'mcx>(
-    fcinfo: &'mcx nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
-) -> (Oid, Option<&'mcx nodes::nodes::Node<'mcx>>) {
+    fcinfo: &'mcx ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+) -> (Oid, Option<&'mcx ::nodes::nodes::Node<'mcx>>) {
     let fn_oid = fcinfo.flinfo.as_ref().map_or(InvalidOid, |f| f.fn_oid);
     (fn_oid, None)
 }
@@ -4570,7 +4570,7 @@ fn fn_oid_and_expr_seam<'mcx>(
 /// `primnodes::Expr` that `exprType` / `get_call_expr_argtype` /
 /// `exprInputCollation` resolve against. `None` is C's NULL `fn_expr`.
 fn fn_oid_and_fn_expr_erased_seam(
-    fcinfo: &nodes::fmgr::FunctionCallInfoBaseData<'_>,
+    fcinfo: &::nodes::fmgr::FunctionCallInfoBaseData<'_>,
 ) -> (Oid, Option<types_core::fmgr::FnExprErased>) {
     let fn_oid = fcinfo.flinfo.as_ref().map_or(InvalidOid, |f| f.fn_oid);
     let erased = fcinfo

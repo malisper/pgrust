@@ -1,7 +1,7 @@
 //! The serial in-memory hash table: create / size / build / probe / grow /
 //! reset, plus the dense allocator and the memory-limit helper.
 //!
-//! OWNED-MODEL TRANSLATION (see `nodes::nodehash`): C carves each
+//! OWNED-MODEL TRANSLATION (see `::nodes::nodehash`): C carves each
 //! `HashJoinTupleData` header + its inline `MinimalTuple` out of the
 //! dense-allocation chunk byte buffers in `batchCxt` and chains them by raw
 //! pointer; the owned model stores every in-memory tuple once in the table's
@@ -14,14 +14,14 @@
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::{uint32, Size};
 use types_error::PgResult;
-use nodes::nodehash::{
+use ::nodes::nodehash::{
     BucketAndBatch, HashJoinBuckets, HashJoinTupleData, HashJoinTupleLink, HashMemoryChunkData,
     HashMemoryChunkLink, HashChunkIdx, HashJoinState, HashState, HashJoinTableData, HashTupleIdx,
     HashTupleRef,
     INVALID_SKEW_BUCKET_NO, HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD,
 };
-use nodes::nodehash::Hash as HashPlan;
-use nodes::nodehash::ParallelHashJoinState;
+use ::nodes::nodehash::Hash as HashPlan;
+use ::nodes::nodehash::ParallelHashJoinState;
 use types_tuple::heaptuple::FormedMinimalTuple;
 use types_tuple::heaptuple::{MinimalTupleData, HEAP_TUPLE_HAS_MATCH};
 
@@ -183,7 +183,7 @@ fn alloc_empty_bucket_indices<'mcx>(
 pub fn ExecHashTableCreate<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut HashState<'mcx>,
-    estate: &nodes::EStateData<'mcx>,
+    estate: &::nodes::EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, HashJoinTableData<'mcx>>> {
     // node = (Hash *) state->ps.plan;  outerNode = outerPlan(node);
     //
@@ -346,7 +346,7 @@ pub fn ExecHashTableCreate<'mcx>(
         // has already created the SharedHashJoinBatch objects and the hash table
         // for batch 0. One backend is elected to do that now if necessary.
         if barrier::BarrierPhase::call(&pstate.build_barrier)
-            == nodes::nodehash::PHJ_BUILD_ELECT
+            == ::nodes::nodehash::PHJ_BUILD_ELECT
             && barrier::BarrierArriveAndWait::call(
                 &mut pstate.build_barrier,
                 WAIT_EVENT_HASH_BUILD_ELECT,
@@ -354,7 +354,7 @@ pub fn ExecHashTableCreate<'mcx>(
         {
             pstate.nbatch = nbatch;
             pstate.space_allowed = space_allowed;
-            pstate.growth = nodes::nodehash::ParallelHashGrowth::PHJ_GROWTH_OK;
+            pstate.growth = ::nodes::nodehash::ParallelHashGrowth::PHJ_GROWTH_OK;
 
             // Set up the shared state for coordinating batches.
             crate::parallel::ExecParallelHashJoinSetUpBatches(mcx, &mut hashtable, nbatch)?;
@@ -1024,8 +1024,8 @@ fn empty_mintuple<'mcx>(mcx: Mcx<'mcx>) -> PgResult<FormedMinimalTuple<'mcx>> {
 pub fn ExecHashTableInsert<'mcx>(
     mcx: Mcx<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    slot: ::nodes::SlotId,
     hashvalue: uint32,
 ) -> PgResult<()> {
     // bool shouldFree;
@@ -1216,7 +1216,7 @@ fn ref_clear_match(ht: &mut HashJoinTableData<'_>, r: HashTupleRef) {
 /// outer tuple; returns `true` when a match was found.
 pub fn ExecScanHashBucket<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let hashvalue = hjstate.hj_CurHashValue;
@@ -1235,7 +1235,7 @@ pub fn ExecScanHashBucket<'mcx>(
         .hashclauses
         .as_deref_mut()
         .expect("ExecScanHashBucket: hashclauses must be compiled by init")
-        as *mut nodes::execexpr::ExprState;
+        as *mut ::nodes::execexpr::ExprState;
 
     let ht_ref = hjstate
         .hj_HashTable
@@ -1337,7 +1337,7 @@ pub fn ExecPrepHashTableForUnmatched<'mcx>(hjstate: &mut HashJoinState<'mcx>) {
 /// (nodeHash.c:2190) — return the next unmatched inner tuple (serial path).
 pub fn ExecScanHashTableForUnmatched<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let hash_tuple_slot = hjstate

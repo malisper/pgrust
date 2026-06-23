@@ -66,15 +66,15 @@ use types_catalog::pg_publication::{
 };
 use types_core::catalog::FirstNormalObjectId;
 use types_core::primitive::{AttrNumber, InvalidOid, Oid, ParseLoc};
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     AlterPublicationStmt, CreatePublicationStmt, DefElem, PublicationObjSpec, PublicationTable,
     AP_AddObjects, AP_DropObjects, AP_SetObjects, PUBLICATIONOBJ_TABLE,
     PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA, PUBLICATIONOBJ_TABLES_IN_SCHEMA,
 };
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::{DROP_CASCADE, ObjectType};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::Expr;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::{DROP_CASCADE, ObjectType};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::Expr;
 use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock,
 };
@@ -382,7 +382,7 @@ fn defel_arg(defel: &DefElem) -> PgResult<Option<DefElemArg>> {
 /// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case
 /// (parse_type.c). A reloption-style `def->arg` `TypeName` is always a parsed
 /// identifier carrying `names`.
-fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+fn defel_type_name_to_string(tn: &::nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
     if tn.names.is_empty() {
         return Err(ereport(ERROR)
             .errmsg_internal("DefElem TypeName carries no name")
@@ -413,7 +413,7 @@ fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<Str
 }
 
 /// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case.
-fn defel_name_list_to_string(names: &[nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
+fn defel_name_list_to_string(names: &[::nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
     let mut out = String::new();
     for (i, name) in names.iter().enumerate() {
         if i != 0 {
@@ -1173,14 +1173,14 @@ fn TransformPubWhereClauses<'mcx>(
          * clause is brought into `mcx` for the in-place collation pass (pstate+
          * expr share one invariant `'mcx`), then erased back to the parser-arena
          * `'static` the `expand_generated_columns_in_expr` seam expects. */
-        let mut whereclause: Option<nodes::primnodes::Expr<'mcx>> = match whereclause {
+        let mut whereclause: Option<::nodes::primnodes::Expr<'mcx>> = match whereclause {
             Some(e) => Some(e.clone_in(mcx)?),
             None => None,
         };
         if let Some(expr) = whereclause.as_mut() {
             parse_collate::assign_expr_collations(Some(&pstate), expr)?;
         }
-        let whereclause: Option<nodes::primnodes::Expr<'static>> =
+        let whereclause: Option<::nodes::primnodes::Expr<'static>> =
             whereclause.map(|e| e.erase_lifetime());
 
         /*
@@ -1277,7 +1277,7 @@ fn CheckPubRelationColumnList<'mcx>(
 /// `RangeVar` of a `PublicationTable.relation` node.
 fn pubtable_rangevar<'a, 'mcx>(
     t: &'a PublicationTable<'mcx>,
-) -> PgResult<&'a nodes::rawnodes::RangeVar<'mcx>> {
+) -> PgResult<&'a ::nodes::rawnodes::RangeVar<'mcx>> {
     match t.relation.as_deref().and_then(|n| n.as_rangevar()) {
         Some(rv) => Ok(rv),
         None => Err(PgError::error(
@@ -1289,7 +1289,7 @@ fn pubtable_rangevar<'a, 'mcx>(
 /// Bridge the parser-model `RangeVar<'mcx>` to the `table_open` substrate's
 /// `types_tuple::access::RangeVar` (the relation-open layer predates the node
 /// model and carries the plain owned struct).
-fn to_access_rangevar(rv: &nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
+fn to_access_rangevar(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
     types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.to_string()),
         schemaname: rv.schemaname.as_deref().map(|s| s.to_string()),
@@ -2871,7 +2871,7 @@ fn relation_has_generated_virtual<'mcx>(relation: &rel::Relation<'mcx>) -> bool 
 // ---------------------------------------------------------------------------
 
 /// Enumerate the members of an optional `Bitmapset` (ascending) into a `Vec`.
-fn bitmapset_members(bms: Option<&nodes::bitmapset::Bitmapset<'_>>) -> Vec<i32> {
+fn bitmapset_members(bms: Option<&::nodes::bitmapset::Bitmapset<'_>>) -> Vec<i32> {
     let mut out = Vec::new();
     let mut i = -1;
     loop {
@@ -2931,11 +2931,11 @@ fn errloc(funcname: &'static str) -> types_error::ErrorLocation {
 /// (the established bridging idiom, cf. `backend-commands-foreigncmds`).
 /// Outward-seam adapter for `CreatePublication` (utility.c:1845,
 /// `T_CreatePublicationStmt`): downcast the arena
-/// [`nodes::nodes::Node`] and run the ported body.
+/// [`::nodes::nodes::Node`] and run the ported body.
 fn create_publication_seam<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let cps = match stmt.as_createpublicationstmt() {
         Some(s) => s,
@@ -2953,7 +2953,7 @@ fn create_publication_seam<'mcx>(
 fn alter_publication_seam<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<()> {
     let aps = match stmt.as_alterpublicationstmt() {
         Some(s) => s,

@@ -303,7 +303,7 @@ fn writeListPage(
             workspace.extend_from_slice(&t[..this_size]);
             size += this_size;
             let mut pm = PageMut::new(page)?;
-            let l = page::PageAddItemExtended(&mut pm, &t[..this_size], off, 0)?;
+            let l = ::page::PageAddItemExtended(&mut pm, &t[..this_size], off, 0)?;
             if l == 0 {
                 return Err(PgError::error("failed to add item to index page"));
             }
@@ -340,7 +340,7 @@ fn writeListPage(
     let mut freesize: i32 = 0;
     bufmgr::with_buffer_page::call(buffer, &mut |page: &mut [u8]| {
         let pr = PageRef::new(page)?;
-        freesize = page::PageGetExactFreeSpace(&pr) as i32;
+        freesize = ::page::PageGetExactFreeSpace(&pr) as i32;
         Ok(())
     })?;
 
@@ -534,7 +534,7 @@ pub fn ginHeapTupleFastInsert<'mcx>(
             for t in &collector.tuples {
                 let tupsize = index_tuple_size(t);
                 let mut pm = PageMut::new(page)?;
-                let l = page::PageAddItemExtended(&mut pm, &t[..tupsize], o, 0)?;
+                let l = ::page::PageAddItemExtended(&mut pm, &t[..tupsize], o, 0)?;
                 if l == 0 {
                     return Err(PgError::error("failed to add item to index page"));
                 }
@@ -544,7 +544,7 @@ pub fn ginHeapTupleFastInsert<'mcx>(
             // metadata->tailFreeSize = PageGetExactFreeSpace(page).
             let pr = PageRef::new(page)?;
             metadata.tailFreeSize =
-                page::PageGetExactFreeSpace(&pr) as u32;
+                ::page::PageGetExactFreeSpace(&pr) as u32;
             Ok(())
         })?;
         bufmgr::mark_buffer_dirty::call(buffer);
@@ -1022,7 +1022,7 @@ pub fn gin_clean_pending_list<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<u
         ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
         ERRCODE_WRONG_OBJECT_TYPE,
     };
-    use nodes::parsenodes::ObjectType;
+    use ::nodes::parsenodes::ObjectType;
     use types_storage::lock::RowExclusiveLock;
     use types_tuple::access::RELKIND_INDEX;
 

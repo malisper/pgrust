@@ -333,7 +333,7 @@ pub fn heap_page_prune_opt<'mcx>(
     let (is_full, free) = {
         let bytes = bufmgr_seam::buffer_get_page::call(mcx, buffer)?;
         let page = PageRef::new(bytes.as_slice())?;
-        (PageIsFull(&page), page::PageGetHeapFreeSpace(&page))
+        (PageIsFull(&page), ::page::PageGetHeapFreeSpace(&page))
     };
 
     if is_full || free < minfree {
@@ -346,7 +346,7 @@ pub fn heap_page_prune_opt<'mcx>(
         let (is_full, free) = {
             let bytes = bufmgr_seam::buffer_get_page::call(mcx, buffer)?;
             let page = PageRef::new(bytes.as_slice())?;
-            (PageIsFull(&page), page::PageGetHeapFreeSpace(&page))
+            (PageIsFull(&page), ::page::PageGetHeapFreeSpace(&page))
         };
 
         if is_full || free < minfree {
@@ -525,7 +525,7 @@ pub fn heap_page_prune_and_freeze<'mcx>(
             let infomask_before = htup.t_infomask;
 
             let mut tup = HeapTupleData {
-                t_len: page::ItemIdGetLength(&itemid) as u32,
+                t_len: ::page::ItemIdGetLength(&itemid) as u32,
                 t_self: ItemPointerData::default(),
                 t_tableOid: reltableoid,
                 t_data: Some(mcx::alloc_in(mcx, htup)?),
@@ -539,7 +539,7 @@ pub fn heap_page_prune_and_freeze<'mcx>(
             let infomask_after = tup.t_data.as_ref().unwrap().t_infomask;
             if infomask_after != infomask_before {
                 // On-page infomask byte offset = item start + 20 (read_on_page).
-                let item_off = page::ItemIdGetOffset(&itemid) as usize;
+                let item_off = ::page::ItemIdGetOffset(&itemid) as usize;
                 hint_updates.push((item_off + 20, infomask_after));
             }
 

@@ -19,7 +19,7 @@
 
 use mcx::Mcx;
 use seam_core::seam;
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 use types_tuple::heaptuple::TupleDesc;
 
 /* ===========================================================================
@@ -98,7 +98,7 @@ seam!(
     /// (prepare.c) — the raw parse tree `GetCommandLogLevel` looks through.
     /// Returns the cached raw parse-tree node, or `None`; a cache read, so
     /// infallible.
-    pub fn execute_stmt_raw_parse_tree<'mcx>(stmt: &Node<'mcx>) -> Option<nodes::nodes::NodePtr<'mcx>>
+    pub fn execute_stmt_raw_parse_tree<'mcx>(stmt: &Node<'mcx>) -> Option<::nodes::nodes::NodePtr<'mcx>>
 );
 
 /* ===========================================================================
@@ -119,19 +119,19 @@ seam!(
  * `clone_in`, exactly as the C handlers `copyObject` when they must.
  * ======================================================================== */
 
-use nodes::parsestmt::{ParseState, ProcessUtilityContext};
-use nodes::portalcmds::ParamListInfo;
-use nodes::parsestmt::DestReceiverHandle;
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsestmt::{ParseState, ProcessUtilityContext};
+use ::nodes::portalcmds::ParamListInfo;
+use ::nodes::parsestmt::DestReceiverHandle;
+use ::nodes::parsenodes::ObjectType;
 use portal::QueryCompletion;
 use types_error::PgResult;
 use types_core::primitive::Oid;
 use types_core::init::BackendType;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_storage::lock::LOCKMODE;
-use nodes::nodes::NodePtr;
-use nodes::ddlnodes::CreateStmt;
-use nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::NodePtr;
+use ::nodes::ddlnodes::CreateStmt;
+use ::nodes::nodeindexscan::PlannedStmt;
 
 /* ---- recursion / readOnlyTree / transaction-state helpers ---- */
 
@@ -216,7 +216,7 @@ seam!(
     pub fn process_utility_slow<'mcx>(
         mcx: Mcx<'mcx>,
         pstate: &mut ParseState<'mcx>,
-        pstmt: &nodes::nodeindexscan::PlannedStmt<'mcx>,
+        pstmt: &::nodes::nodeindexscan::PlannedStmt<'mcx>,
         query_string: &str,
         context: ProcessUtilityContext,
         params: ParamListInfo,

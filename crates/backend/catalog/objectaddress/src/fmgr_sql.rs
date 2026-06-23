@@ -52,8 +52,8 @@ use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::OidIsValid;
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
-use nodes::parsenodes::ObjectType;
-use nodes::parsenodes::{
+use ::nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::{
     OBJECT_ACCESS_METHOD, OBJECT_AGGREGATE, OBJECT_AMOP, OBJECT_AMPROC, OBJECT_ATTRIBUTE,
     OBJECT_CAST, OBJECT_COLLATION, OBJECT_COLUMN, OBJECT_CONVERSION, OBJECT_DATABASE, OBJECT_DEFACL,
     OBJECT_DEFAULT, OBJECT_DOMAIN, OBJECT_DOMCONSTRAINT, OBJECT_EVENT_TRIGGER, OBJECT_EXTENSION,

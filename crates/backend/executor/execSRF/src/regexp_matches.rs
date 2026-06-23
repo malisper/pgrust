@@ -20,12 +20,12 @@ use core::any::Any;
 
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
-use nodes::execexpr::ExprDoneCond;
+use ::nodes::execexpr::ExprDoneCond;
 use types_error::PgResult;
-use nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
+use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::heaptuple::Datum;
 
-use funcapi::srf_support::{
+use ::funcapi::srf_support::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall,
 };
 

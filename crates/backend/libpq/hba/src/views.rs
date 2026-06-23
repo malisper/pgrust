@@ -16,7 +16,7 @@ use net::{
     clientCertCA, clientCertOff, ctHost, ctHostGSS, ctHostNoGSS, ctHostNoSSL, ctHostSSL, ctLocal,
     ipCmpAll, ipCmpMask, ipCmpSameHost, ipCmpSameNet, HbaLine,
 };
-use nodes::funcapi::ReturnSetInfo;
+use ::nodes::funcapi::ReturnSetInfo;
 use types_tuple::heaptuple::Datum;
 
 use crate::loaders::{hba_authname, hba_file_name, ident_file_name};

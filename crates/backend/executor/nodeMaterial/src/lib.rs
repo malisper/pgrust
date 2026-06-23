@@ -30,12 +30,12 @@ use init_small_seams as globals;
 use sort_storage_seams as tuplestore;
 use mcx::{alloc_in, PgBox};
 use types_error::PgResult;
-use nodes::execnodes::ScanDirectionIsForward;
+use ::nodes::execnodes::ScanDirectionIsForward;
 use nodes::{
     EStateData, Material, MaterialState, PlanStateNode, SlotId, TupleSlotKind,
 };
 
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 
 /// Install this crate's implementations into its seam slots.
 ///
@@ -201,13 +201,13 @@ fn exec_material_node<'mcx>(
 /// per-query context current during `ExecInitNode`), so initialization is
 /// fallible on OOM.
 ///
-/// Takes the enclosing plan-tree [`Node`](nodes::nodes::Node) (the C
+/// Takes the enclosing plan-tree [`Node`](::nodes::nodes::Node) (the C
 /// `Material *` is the same pointer, via struct embedding): the state's plan
 /// back-link aliases the shared, read-only plan tree exactly as C's
 /// `matstate->ss.ps.plan = (Plan *) node` does. Panics if the node is not a
 /// `Material` (the C `castNode`).
 pub fn ExecInitMaterial<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     mut eflags: i32,
 ) -> PgResult<PgBox<'mcx, MaterialState<'mcx>>> {

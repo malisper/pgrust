@@ -55,10 +55,10 @@ use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_core::{InvalidOid, OidIsValid};
 use types_error::PgResult;
-use nodes::ddlnodes::{IndexElem, IndexStmt};
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::Expr;
-use nodes::rawnodes::RangeVar;
+use ::nodes::ddlnodes::{IndexElem, IndexStmt};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::Expr;
+use ::nodes::rawnodes::RangeVar;
 use rel::Relation;
 
 use utils_error::ereport;
@@ -112,7 +112,7 @@ use hash::hash::HTEqualStrategyNumber;
 use types_scan::scankey::BTEqualStrategyNumber;
 
 use types_acl::acl::{ACL_CREATE, ACLCHECK_OK};
-use nodes::parsenodes::{OBJECT_SCHEMA, OBJECT_TABLESPACE};
+use ::nodes::parsenodes::{OBJECT_SCHEMA, OBJECT_TABLESPACE};
 use types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLESPACE_RELATION_ID};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::catalog::{NAMESPACE_RELATION_ID, RELATION_RELATION_ID};
@@ -196,7 +196,7 @@ pub(crate) fn node_sval<'a>(node: &'a Node<'_>) -> &'a str {
 
 /// A list of `Node::String` (the C `List *` of `String` nodes) rendered as a
 /// `NameList` (`&[Option<String>]`) for the namespace helpers.
-pub(crate) fn name_list(names: &PgVec<'_, nodes::nodes::NodePtr<'_>>) -> Vec<Option<String>> {
+pub(crate) fn name_list(names: &PgVec<'_, ::nodes::nodes::NodePtr<'_>>) -> Vec<Option<String>> {
     names
         .iter()
         .map(|n| Some(node_sval(n).to_string()))
@@ -205,7 +205,7 @@ pub(crate) fn name_list(names: &PgVec<'_, nodes::nodes::NodePtr<'_>>) -> Vec<Opt
 
 /// The same list rendered as `Vec<String>` for `compatible_oper_opid`.
 pub(crate) fn name_list_strings(
-    names: &PgVec<'_, nodes::nodes::NodePtr<'_>>,
+    names: &PgVec<'_, ::nodes::nodes::NodePtr<'_>>,
 ) -> Vec<String> {
     names.iter().map(|n| node_sval(n).to_string()).collect()
 }
@@ -635,7 +635,7 @@ pub fn DefineIndex<'mcx>(
 
     // Check for system and generated columns used in expressions / predicates.
     if index_info.ii_Expressions.is_some() || index_info.ii_Predicate.is_some() {
-        let mut indexattrs: Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+        let mut indexattrs: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
         if let Some(exprs) = index_info.ii_Expressions.as_ref() {
             for e in exprs.iter() {
                 indexattrs = bms_union_opt(mcx, indexattrs, var_seam::pull_varattnos::call(mcx, e, 1)?)?;
@@ -1239,7 +1239,7 @@ use types_cluster::{
     ReindexParams, REINDEXOPT_CONCURRENTLY, REINDEXOPT_REPORT_PROGRESS, REINDEXOPT_VERBOSE,
     REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
 };
-use nodes::ddlnodes::{DefElem, ReindexObjectType, ReindexStmt};
+use ::nodes::ddlnodes::{DefElem, ReindexObjectType, ReindexStmt};
 use types_storage::lock::{AccessExclusiveLock, ShareLock, ShareUpdateExclusiveLock};
 use types_tuple::access::RELKIND_PARTITIONED_INDEX;
 
@@ -1322,7 +1322,7 @@ fn reindex_stmt_rangevar<'a, 'mcx>(stmt: &'a ReindexStmt<'mcx>) -> &'a RangeVar<
 /// resolve the target tablespace, and dispatch to the per-kind subroutine.
 pub fn ExecReindex<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &ReindexStmt<'mcx>,
     is_top_level: bool,
 ) -> PgResult<()> {
@@ -1536,11 +1536,11 @@ fn define_index_partition_keycheck<'mcx>(
     rel: &Relation<'mcx>,
     stmt: &IndexStmt<'mcx>,
     exclusion: bool,
-    index_info: &nodes::execnodes::IndexInfo<'mcx>,
+    index_info: &::nodes::execnodes::IndexInfo<'mcx>,
     collation_ids: &[Oid],
     opclass_ids: &[Oid],
 ) -> PgResult<()> {
-    use nodes::partition::PartitionStrategy;
+    use ::nodes::partition::PartitionStrategy;
 
     let key = partcache_seam::relation_get_partition_key::call(mcx, rel.alias())?
         .ok_or_else(|| elog_error("DefineIndex: partitioned table has no partition key"))?;
@@ -1844,9 +1844,9 @@ fn virtual_gencol_error_expr(stmt: &IndexStmt<'_>) -> utils_error::PgError {
 /// `Option<PgBox<Bitmapset>>` (the C `Bitmapset *`, NULL == empty).
 fn bms_union_opt<'mcx>(
     mcx: Mcx<'mcx>,
-    a: Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>,
-    b: Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
+    a: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>,
+    b: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>,
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     match (a, b) {
         (None, x) => Ok(x),
         (x, None) => Ok(x),
@@ -1998,7 +1998,7 @@ pub fn init_seams() {
 /// `T_ReindexStmt` arm of `ProcessUtilitySlow`. Unwrap the node and dispatch.
 fn exec_reindex_dispatch_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     parsetree: &Node<'mcx>,
     is_top_level: bool,
 ) -> PgResult<()> {
@@ -2015,7 +2015,7 @@ fn exec_reindex_dispatch_arm<'mcx>(
 /// namespace owner.
 fn utility_range_var_get_relid_owns_relation<'mcx>(
     mcx: Mcx<'mcx>,
-    relation: nodes::nodes::NodePtr<'mcx>,
+    relation: ::nodes::nodes::NodePtr<'mcx>,
     lockmode: types_storage::lock::LOCKMODE,
 ) -> PgResult<Oid> {
     let rv = match relation.node_tag() {
@@ -2035,7 +2035,7 @@ fn utility_range_var_get_relid_owns_relation<'mcx>(
 fn create_index_count_partitions<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
-    stmt: nodes::nodes::NodePtr<'mcx>,
+    stmt: ::nodes::nodes::NodePtr<'mcx>,
     lockmode: types_storage::lock::LOCKMODE,
 ) -> PgResult<i32> {
     let index_stmt = match stmt.node_tag() {
@@ -2101,7 +2101,7 @@ fn create_index_count_partitions<'mcx>(
 fn define_index_dispatch_arm<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
-    stmt: nodes::nodes::NodePtr<'mcx>,
+    stmt: ::nodes::nodes::NodePtr<'mcx>,
     nparts: i32,
     is_alter_table: bool,
 ) -> PgResult<ObjectAddress> {
@@ -2174,7 +2174,7 @@ fn reloptions_view_defel(
 /// (parse_type.c). A reloptions `def->arg` `TypeName` is always a parsed
 /// identifier carrying `names` (never an internal `typeOid`-only node), so the
 /// `format_type_be` fallback is unreachable here.
-fn type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+fn type_name_to_string(tn: &::nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
     if tn.names.is_empty() {
         return Err(elog_error(
             "reloption TypeName carries no name (internal typeOid-only form unsupported here)",
@@ -2202,7 +2202,7 @@ fn type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
 
 /// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case:
 /// `'.'`-joined `String` cells, `A_Star` rendered as `*`.
-fn name_list_to_string(names: &[nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
+fn name_list_to_string(names: &[::nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
     let mut out = String::new();
     for (i, name) in names.iter().enumerate() {
         if i != 0 {
@@ -2221,7 +2221,7 @@ fn name_list_to_string(names: &[nodes::nodes::NodePtr<'_>]) -> PgResult<String> 
 /// Build the reloptions-crate `DefElem` view list from a parser option list (a
 /// `List *` of `DefElem` — `IndexStmt.options` or `IndexElem.opclassopts`).
 fn reloptions_view_list(
-    options: &[nodes::nodes::NodePtr<'_>],
+    options: &[::nodes::nodes::NodePtr<'_>],
 ) -> PgResult<Vec<common_reloptions::DefElem>> {
     options
         .iter()
@@ -2243,7 +2243,7 @@ fn reloptions_view_list(
 /// option parser; the caller lowers the bytes onto the `Datum::ByRef` lane.
 fn transform_index_reloptions_byref<'mcx>(
     mcx: Mcx<'mcx>,
-    options: &[nodes::nodes::NodePtr<'mcx>],
+    options: &[::nodes::nodes::NodePtr<'mcx>],
     amhandler: Oid,
 ) -> PgResult<PgVec<'mcx, u8>> {
     let def_list = reloptions_view_list(options)?;
@@ -2265,7 +2265,7 @@ fn transform_index_reloptions_byref<'mcx>(
 /// `Datum::ByRef` lane that `index_create` / `AppendAttributeTuples` consume.
 pub(crate) fn transform_attoptions_byref<'mcx>(
     mcx: Mcx<'mcx>,
-    opclassopts: &[nodes::nodes::NodePtr<'mcx>],
+    opclassopts: &[::nodes::nodes::NodePtr<'mcx>],
 ) -> PgResult<PgVec<'mcx, u8>> {
     let def_list = reloptions_view_list(opclassopts)?;
     let bytes = common_reloptions::transformRelOptionsBytes(

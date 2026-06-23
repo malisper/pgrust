@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::primnodes::{Expr, ExprRelids};
+use ::nodes::primnodes::{Expr, ExprRelids};
 
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
@@ -189,7 +189,7 @@ pub fn setup_simple_rel_arrays<'mcx>(
      * call `intern_rte` (which needs `&mut run`) while holding the `&run`
      * borrow that `rtable()` returns, so collect first.
      */
-    let mut cloned: Vec<nodes::parsenodes::RangeTblEntry<'mcx>> =
+    let mut cloned: Vec<::nodes::parsenodes::RangeTblEntry<'mcx>> =
         Vec::with_capacity((size as usize).saturating_sub(1));
     for rte in run.rtable(root.parse).iter() {
         cloned.push(rte.clone_in(mcx)?);

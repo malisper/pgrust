@@ -37,9 +37,9 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
 };
-use nodes::copy_query::Query;
-use nodes::nodes::{CmdType, Node};
-use nodes::parsenodes::RTEKind;
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::parsenodes::RTEKind;
 use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
 use types_tuple::access::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
@@ -55,7 +55,7 @@ const NAMEDATALEN: usize = 64;
 /// Faithful field copy of an owned-tree `RangeVar` node into the access-layer
 /// `RangeVar` the namespace core consumes (mirrors `to_access_range_var` in the
 /// sibling command crates).
-fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
     types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().to_string()),
         schemaname: rv.schemaname.as_ref().map(|s| s.as_str().to_string()),
@@ -240,7 +240,7 @@ fn cmdtype_ev_type(evtype: CmdType) -> u8 {
 /// `Node::Query` for `nodeToString` / `recordDependencyOnExpr`, mirroring C's
 /// `(Node *) action` cast over the existing list pointer.
 fn action_as_list_node<'mcx>(mcx: Mcx<'mcx>, action: &[Query<'mcx>]) -> PgResult<Node<'mcx>> {
-    let mut items: PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+    let mut items: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
         mcx::vec_with_capacity_in(mcx, action.len())?;
     for q in action.iter() {
         items.push(mcx::alloc_in(mcx, Node::mk_query(mcx, q.clone_in(mcx)?)?)?);
@@ -263,7 +263,7 @@ fn get_rel_name_or_empty<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> {
 /// RULE`.
 pub fn DefineRule<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::ddlnodes::RuleStmt<'_>,
+    stmt: &::nodes::ddlnodes::RuleStmt<'_>,
     query_string: &str,
 ) -> PgResult<ObjectAddress> {
     /* Parse analysis. */
@@ -626,7 +626,7 @@ const PRS2_NEW_VARNO: i32 = 2;
 /// `resultDesc`.
 fn checkRuleResultList<'mcx>(
     mcx: Mcx<'mcx>,
-    target_list: &[nodes::primnodes::TargetEntry<'_>],
+    target_list: &[::nodes::primnodes::TargetEntry<'_>],
     result_desc: &types_tuple::heaptuple::TupleDescData<'_>,
     is_select: bool,
     require_column_name_match: bool,

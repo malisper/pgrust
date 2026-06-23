@@ -2,12 +2,12 @@
 //! (`nodes/queryjumble.c`): the query-id machinery portalcmds invokes.
 
 use types_error::PgResult;
-use nodes::portalcmds::{JumbleState, Query};
+use ::nodes::portalcmds::{JumbleState, Query};
 
 /// The canonical field-bearing `Query` (the simple-query / parse-analysis tree).
 /// Distinct from the opaque [`Query`] token above (the DECLARE-CURSOR
 /// pass-through); the canonical path jumbles this one.
-use nodes::copy_query::Query as CanonicalQuery;
+use ::nodes::copy_query::Query as CanonicalQuery;
 
 seam_core::seam!(
     /// `IsQueryIdEnabled()` (queryjumble.c) — true if query-id computation is

@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use types_core::Oid;
 use types_error::{PgError, PgResult};
-use nodes::primnodes::XmlOptionType;
+use ::nodes::primnodes::XmlOptionType;
 use types_xml::{
     RelationColumn, RelationInfo, SpiColumn, SpiResult, TypeInfo, XmlBinaryType,
 };

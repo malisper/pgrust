@@ -76,7 +76,7 @@ use mcx::MemoryContext;
 use types_core::Oid;
 use datum::Datum;
 use types_error::{PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERROR};
-use nodes::execnodes::SlotId;
+use ::nodes::execnodes::SlotId;
 use snapshot::snapshot::{SnapshotData, SnapshotType};
 use types_storage::lock::LOCKMODE;
 use types_tableam::amapi::IndexUniqueCheck;

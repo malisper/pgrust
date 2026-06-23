@@ -15,11 +15,11 @@ use cache_syscache::{
 };
 
 use crate::consts::*;
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 // The two metadata tables refer to object types by their C names
 // (`OBJECT_ACCESS_METHOD`, …); these are the re-exported aliases of the
 // `ObjectType` enum variants.
-use nodes::parsenodes::{
+use ::nodes::parsenodes::{
     OBJECT_ACCESS_METHOD, OBJECT_AGGREGATE, OBJECT_AMOP, OBJECT_AMPROC, OBJECT_CAST,
     OBJECT_COLLATION, OBJECT_COLUMN, OBJECT_CONVERSION, OBJECT_DATABASE, OBJECT_DEFACL,
     OBJECT_DEFAULT, OBJECT_DOMCONSTRAINT, OBJECT_EVENT_TRIGGER, OBJECT_EXTENSION, OBJECT_FDW,

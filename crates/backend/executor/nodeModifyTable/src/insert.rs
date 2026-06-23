@@ -188,7 +188,7 @@ seam_core::seam!(
         estate: &mut EStateData<'mcx>,
         mtstate: &mut ModifyTableState<'mcx>,
         result_rel_info: RriId,
-        insert_target_list: &[nodes::primnodes::TargetEntry<'mcx>],
+        insert_target_list: &[::nodes::primnodes::TargetEntry<'mcx>],
     ) -> PgResult<()>
 );
 
@@ -487,7 +487,7 @@ pub fn ExecInitInsertProjection<'mcx>(
         let subplan = node_plan
             .outer_plan()
             .expect("ExecInitInsertProjection: outerPlan(node) is NULL");
-        let empty: &[nodes::primnodes::TargetEntry<'_>] = &[];
+        let empty: &[::nodes::primnodes::TargetEntry<'_>] = &[];
         let subplan_tlist = subplan
             .plan_head()
             .targetlist

@@ -613,8 +613,8 @@ pub fn init_seams() {
     }
 }
 
-use nodes::nodes::Node as UtilNode;
-use nodes::parsestmt::ParseState as UtilParseState;
+use ::nodes::nodes::Node as UtilNode;
+use ::nodes::parsestmt::ParseState as UtilParseState;
 
 /// `case T_CreatedbStmt: createdb(pstate, stmt)` (utility.c). The dispatch carries
 /// the parse tree as `&Node` and supplies the working `mcx`; `createdb` opens its

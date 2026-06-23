@@ -46,7 +46,7 @@ use types_jsonb::jsonb::{
 use types_jsonfuncs::{
     ColumnIOUnion, JsonHashEntry, TypeCat, NAMEDATALEN,
 };
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, RECORDOID};
 use types_tuple::heaptuple::FormedTuple;
 use types_tuple::Datum;

@@ -71,9 +71,9 @@ extern crate alloc;
 use types_core::primitive::AttrNumber;
 use types_core::{INT4OID, InvalidOid, Oid};
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::nodes::CmdType;
-use nodes::primnodes::Expr;
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::CmdType;
+use ::nodes::primnodes::Expr;
 use pathnodes::{NodeId, PlanRowMarkId, PlannerInfo, TargetEntryNode};
 use rel::Relation;
 use types_tuple::heaptuple::Datum;
@@ -93,7 +93,7 @@ pub fn preprocess_targetlist<'mcx>(
     // The FOR-UPDATE/SHARE PlanRowMark values (resolved by the caller from
     // root->rowMarks; PlanRowMark is a Copy value, so passing the resolved slice
     // avoids threading the `&PlannerRun` registry through this owner).
-    rowmarks: &[nodes::nodelockrows::PlanRowMark],
+    rowmarks: &[::nodes::nodelockrows::PlanRowMark],
 ) -> PgResult<()> {
     let result_relation = parse.resultRelation;
     let command_type = parse.commandType;
@@ -112,7 +112,7 @@ pub fn preprocess_targetlist<'mcx>(
                 "preprocess_targetlist: result relation {result_relation} out of range",
             ))
         })?;
-        if target_rte.rtekind != nodes::parsenodes::RTEKind::RTE_RELATION {
+        if target_rte.rtekind != ::nodes::parsenodes::RTEKind::RTE_RELATION {
             return Err(types_error::PgError::error(alloc::string::String::from(
                 "result relation must be a regular relation",
             )));
@@ -235,7 +235,7 @@ pub fn preprocess_targetlist<'mcx>(
             // We walk each qual Expr and each targetList TLE's expr in turn,
             // unioning the pulled Vars (equivalent to walking the concatenated
             // C List node). qual comes first to match list_concat_copy order.
-            let mut vars: alloc::vec::Vec<nodes::primnodes::Expr> = alloc::vec::Vec::new();
+            let mut vars: alloc::vec::Vec<::nodes::primnodes::Expr> = alloc::vec::Vec::new();
             {
                 let action = parse.mergeActionList[ai]
                     .as_mergeaction()
@@ -257,7 +257,7 @@ pub fn preprocess_targetlist<'mcx>(
                         "preprocess_targetlist: MERGE action targetList entry is a TargetEntry",
                     );
                     if let Some(expr) = tle.expr.as_deref() {
-                        let node = nodes::nodes::Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
+                        let node = ::nodes::nodes::Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
                         for v in vars::pull_var_clause(
                             mcx,
                             &node,
@@ -273,7 +273,7 @@ pub fn preprocess_targetlist<'mcx>(
 
         // C 229-244: same treatment for parse->mergeJoinCondition.
         if let Some(cond) = parse.mergeJoinCondition.as_deref() {
-            let node = nodes::nodes::Node::mk_expr(mcx, cond.clone_in(mcx)?)?;
+            let node = ::nodes::nodes::Node::mk_expr(mcx, cond.clone_in(mcx)?)?;
             let vars = vars::pull_var_clause(
                 mcx,
                 &node,
@@ -287,7 +287,7 @@ pub fn preprocess_targetlist<'mcx>(
     // EvalPlanQual). For each PlanRowMark add resjunk Vars the executor's
     // EvalPlanQual / row locking needs (ctid for a TID-fetchable mark; whole-row
     // for a ROW_MARK_COPY mark; tableoid for an inheritance parent).
-    const ROW_MARK_COPY: i32 = nodes::execnodes::RowMarkType::Copy as u32 as i32;
+    const ROW_MARK_COPY: i32 = ::nodes::execnodes::RowMarkType::Copy as u32 as i32;
     for rc in rowmarks {
         // Child rels use the same junk attrs as their parents (C:237-238).
         if rc.rti != rc.prti {
@@ -306,7 +306,7 @@ pub fn preprocess_targetlist<'mcx>(
                 0,
             );
             let resname = alloc::format!("ctid{}", rc.rowmarkId);
-            let expr_id = root.alloc_node(nodes::primnodes::Expr::Var(var));
+            let expr_id = root.alloc_node(::nodes::primnodes::Expr::Var(var));
             let resno = (tlist.len() + 1) as AttrNumber;
             let te = TargetEntryNode {
                 expr: expr_id,
@@ -332,7 +332,7 @@ pub fn preprocess_targetlist<'mcx>(
             let var =
                 nodes_core::makefuncs::make_whole_row_var(rte, rc.rti as i32, 0, false)?;
             let resname = alloc::format!("wholerow{}", rc.rowmarkId);
-            let expr_id = root.alloc_node(nodes::primnodes::Expr::Var(var));
+            let expr_id = root.alloc_node(::nodes::primnodes::Expr::Var(var));
             let resno = (tlist.len() + 1) as AttrNumber;
             let te = TargetEntryNode {
                 expr: expr_id,
@@ -368,10 +368,10 @@ pub fn preprocess_targetlist<'mcx>(
 
         // pull_var_clause((Node *) parse->returningList, ...) — run over each
         // RETURNING TargetEntry's expr (equivalent to walking the C List).
-        let mut vars: alloc::vec::Vec<nodes::primnodes::Expr> = alloc::vec::Vec::new();
+        let mut vars: alloc::vec::Vec<::nodes::primnodes::Expr> = alloc::vec::Vec::new();
         for tle in parse.returningList.iter() {
             if let Some(expr) = tle.expr.as_deref() {
-                let node = nodes::nodes::Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
+                let node = ::nodes::nodes::Node::mk_expr(mcx, expr.clone_in(mcx)?)?;
                 for v in vars::pull_var_clause(mcx, &node, flags)? {
                     vars.push(v);
                 }
@@ -445,7 +445,7 @@ fn materialize_tlist<'mcx>(
 /// Build a [`TargetEntryNode`] mirroring an owned [`TargetEntry`], with its expr
 /// already allocated into the arena under `expr_id`.
 fn target_entry_node_from(
-    tle: &nodes::primnodes::TargetEntry<'_>,
+    tle: &::nodes::primnodes::TargetEntry<'_>,
     expr_id: NodeId,
 ) -> TargetEntryNode {
     TargetEntryNode {
@@ -667,7 +667,7 @@ pub fn extract_update_targetlist_colnos(
 fn merge_add_junk_vars(
     root: &mut PlannerInfo,
     tlist: &mut alloc::vec::Vec<NodeId>,
-    vars: alloc::vec::Vec<nodes::primnodes::Expr>,
+    vars: alloc::vec::Vec<::nodes::primnodes::Expr>,
     result_relation: i32,
 ) -> PgResult<()> {
     for var in vars.into_iter() {
@@ -716,15 +716,15 @@ fn expand_insert_targetlist_owned<'mcx>(
     parse: &Query<'mcx>,
     action_idx: usize,
     rel: &Relation<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>> {
-    use nodes::nodes::Node;
+) -> PgResult<mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
+    use ::nodes::nodes::Node;
 
     let action = parse.mergeActionList[action_idx]
         .as_mergeaction()
         .expect("expand_insert_targetlist_owned: mergeActionList entry is a MergeAction");
     let old_tlist = &action.targetList;
 
-    let mut new_tlist: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+    let mut new_tlist: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
         mcx::PgVec::new_in(mcx);
 
     let numattrs = rel.rd_att.natts;
@@ -736,7 +736,7 @@ fn expand_insert_targetlist_owned<'mcx>(
         let att_tup = rel.rd_att.attr((attrno - 1) as usize);
 
         // Try to consume the next supplied TLE if it matches this attribute.
-        let mut matched: Option<nodes::primnodes::TargetEntry<'mcx>> = None;
+        let mut matched: Option<::nodes::primnodes::TargetEntry<'mcx>> = None;
         if let Some(old_node) = old_tlist.get(tlist_pos) {
             let old_tle = old_node.as_targetentry().expect(
                 "expand_insert_targetlist_owned: action targetList entry is a TargetEntry",
@@ -747,7 +747,7 @@ fn expand_insert_targetlist_owned<'mcx>(
             }
         }
 
-        let new_tle: nodes::primnodes::TargetEntry<'mcx> = match matched {
+        let new_tle: ::nodes::primnodes::TargetEntry<'mcx> = match matched {
             Some(tle) => tle,
             None => {
                 // Didn't find a matching tlist entry; make a NULL one.

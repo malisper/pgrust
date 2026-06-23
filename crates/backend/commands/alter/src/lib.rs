@@ -61,7 +61,7 @@ use types_catalog::catalog_dependency::{ObjectAddress, ObjectAddresses, DEPENDEN
 use cache::SysCacheKey;
 use types_core::primitive::{InvalidOid, OidIsValid};
 use types_core::Oid;
-use nodes::parsenodes::{
+use ::nodes::parsenodes::{
     ObjectType, OBJECT_AGGREGATE, OBJECT_ATTRIBUTE, OBJECT_COLLATION, OBJECT_COLUMN,
     OBJECT_CONVERSION, OBJECT_DATABASE, OBJECT_DOMAIN, OBJECT_DOMCONSTRAINT, OBJECT_EVENT_TRIGGER,
     OBJECT_EXTENSION, OBJECT_FDW, OBJECT_FOREIGN_SERVER, OBJECT_FOREIGN_TABLE, OBJECT_FUNCTION,
@@ -165,7 +165,7 @@ fn role_spec_oid(mcx: Mcx<'_>, node: &Node) -> PgResult<Oid> {
     let rs = node
         .as_rolespec()
         .ok_or_else(|| PgError::error("RoleSpec node expected for newowner"))?;
-    use nodes::parsenodes::RoleSpecType as NRT;
+    use ::nodes::parsenodes::RoleSpecType as NRT;
     use parsenodes::RoleSpecType as PRT;
     let roletype = match rs.roletype {
         PRT::ROLESPEC_CSTRING => NRT::Cstring,
@@ -174,7 +174,7 @@ fn role_spec_oid(mcx: Mcx<'_>, node: &Node) -> PgResult<Oid> {
         PRT::ROLESPEC_SESSION_USER => NRT::SessionUser,
         PRT::ROLESPEC_PUBLIC => NRT::Public,
     };
-    let view = nodes::parsenodes::RoleSpec {
+    let view = ::nodes::parsenodes::RoleSpec {
         roletype,
         rolename: match &rs.rolename {
             Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
@@ -1235,18 +1235,18 @@ fn read_attr_oid<'mcx>(
     Ok(read_attr(mcx, rel, tup, anum)?.as_oid())
 }
 
-/// Convert the owned-tree `nodes::ddlnodes::RenameStmt` (the form carried
+/// Convert the owned-tree `::nodes::ddlnodes::RenameStmt` (the form carried
 /// by the `tcop/utility.c` `Node` dispatch tree) into the heap-owned
 /// `parsenodes::RenameStmt` that [`ExecRenameStmt`] and its per-object
 /// drivers (`RenameRelation` / `renameatt` / `RenameConstraint` / …) consume.
 ///
 /// `renameType` / `relationType` / `behavior` / `missing_ok` are the shared
-/// `nodes::parsenodes` scalar types (re-exported by `parsenodes`), so
+/// `::nodes::parsenodes` scalar types (re-exported by `parsenodes`), so
 /// they copy directly. `relation` is the `RangeVar` the column/rule/trigger lives
 /// in (precedent: policy / lockcmds `to_access_range_var`); `object` is the
 /// generic name node converted via `rich_node_to_parse`.
 fn renamestmt_to_parsenodes(
-    stmt: &nodes::ddlnodes::RenameStmt<'_>,
+    stmt: &::nodes::ddlnodes::RenameStmt<'_>,
 ) -> PgResult<RenameStmt> {
     let relation = match stmt.relation.as_ref().and_then(|n| n.as_rangevar()) {
         Some(rv) => Some(types_tuple::access::RangeVar {
@@ -1285,7 +1285,7 @@ fn renamestmt_to_parsenodes(
 /// the post-command event-trigger fire), so this arm drops it.
 fn exec_rename_stmt_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    parsetree: &nodes::nodes::Node<'mcx>,
+    parsetree: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<()> {
     let Some(stmt) = parsetree.as_renamestmt() else {
         panic!("exec_rename_stmt: parse tree is not a RenameStmt");
@@ -1301,7 +1301,7 @@ fn exec_rename_stmt_arm<'mcx>(
 /// event-trigger fire (`EventTriggerCollectSimpleCommand`).
 fn exec_rename_stmt_slow_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    parsetree: &nodes::nodes::Node<'mcx>,
+    parsetree: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let Some(stmt) = parsetree.as_renamestmt() else {
         panic!("exec_rename_stmt_slow: parse tree is not a RenameStmt");
@@ -1320,7 +1320,7 @@ fn exec_rename_stmt_slow_arm<'mcx>(
 
 /// Lower a live `RangeVar *relation` (`Option<NodePtr>` at a `T_RangeVar`).
 fn lower_alter_relation(
-    relation: &Option<nodes::nodes::NodePtr<'_>>,
+    relation: &Option<::nodes::nodes::NodePtr<'_>>,
 ) -> Option<types_tuple::access::RangeVar> {
     relation
         .as_ref()
@@ -1337,7 +1337,7 @@ fn lower_alter_relation(
 
 /// Lower an opaque live `Node *object` to the owned `parsenodes::Node`.
 fn lower_alter_object(
-    object: &Option<nodes::nodes::NodePtr<'_>>,
+    object: &Option<::nodes::nodes::NodePtr<'_>>,
 ) -> PgResult<Option<Box<Node>>> {
     match object.as_ref() {
         Some(n) => Ok(Some(Box::new(
@@ -1351,9 +1351,9 @@ fn lower_alter_object(
 /// `parsenodes::Node::RoleSpec` (`role_spec_oid` reads `roletype` /
 /// `rolename`).
 fn lower_alter_rolespec(
-    newowner: &Option<nodes::nodes::NodePtr<'_>>,
+    newowner: &Option<::nodes::nodes::NodePtr<'_>>,
 ) -> PgResult<Option<Box<Node>>> {
-    use nodes::parsenodes::RoleSpecType as NRT;
+    use ::nodes::parsenodes::RoleSpecType as NRT;
     use parsenodes::RoleSpecType as PRT;
     match newowner.as_ref() {
         None => Ok(None),
@@ -1378,7 +1378,7 @@ fn lower_alter_rolespec(
 }
 
 fn alter_object_schema_stmt_to_parsenodes(
-    stmt: &nodes::ddlnodes::AlterObjectSchemaStmt<'_>,
+    stmt: &::nodes::ddlnodes::AlterObjectSchemaStmt<'_>,
 ) -> PgResult<AlterObjectSchemaStmt> {
     Ok(AlterObjectSchemaStmt {
         objectType: stmt.objectType,
@@ -1390,7 +1390,7 @@ fn alter_object_schema_stmt_to_parsenodes(
 }
 
 fn alter_object_depends_stmt_to_parsenodes(
-    stmt: &nodes::ddlnodes::AlterObjectDependsStmt<'_>,
+    stmt: &::nodes::ddlnodes::AlterObjectDependsStmt<'_>,
 ) -> PgResult<AlterObjectDependsStmt> {
     Ok(AlterObjectDependsStmt {
         objectType: stmt.objectType,
@@ -1402,7 +1402,7 @@ fn alter_object_depends_stmt_to_parsenodes(
 }
 
 fn alter_owner_stmt_to_parsenodes(
-    stmt: &nodes::ddlnodes::AlterOwnerStmt<'_>,
+    stmt: &::nodes::ddlnodes::AlterOwnerStmt<'_>,
 ) -> PgResult<AlterOwnerStmt> {
     Ok(AlterOwnerStmt {
         objectType: stmt.objectType,
@@ -1418,7 +1418,7 @@ fn alter_owner_stmt_to_parsenodes(
 /// invalid and event_trigger.c is unported.
 fn exec_alter_object_schema_stmt_slow_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    parsetree: &nodes::nodes::Node<'mcx>,
+    parsetree: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let Some(stmt) = parsetree.as_alterobjectschemastmt() else {
         return Err(PgError::error(
@@ -1433,7 +1433,7 @@ fn exec_alter_object_schema_stmt_slow_arm<'mcx>(
 /// … [NO] DEPENDS ON EXTENSION.
 fn exec_alter_object_depends_stmt_slow_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    parsetree: &nodes::nodes::Node<'mcx>,
+    parsetree: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let Some(stmt) = parsetree.as_alterobjectdependsstmt() else {
         return Err(PgError::error(
@@ -1450,7 +1450,7 @@ fn exec_alter_object_depends_stmt_slow_arm<'mcx>(
 /// command to record).
 fn exec_alter_owner_stmt_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    parsetree: &nodes::nodes::Node<'mcx>,
+    parsetree: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<()> {
     let Some(stmt) = parsetree.as_alterownerstmt() else {
         return Err(PgError::error(
@@ -1466,7 +1466,7 @@ fn exec_alter_owner_stmt_arm<'mcx>(
 /// TO.
 fn exec_alter_owner_stmt_slow_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    parsetree: &nodes::nodes::Node<'mcx>,
+    parsetree: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let Some(stmt) = parsetree.as_alterownerstmt() else {
         return Err(PgError::error(

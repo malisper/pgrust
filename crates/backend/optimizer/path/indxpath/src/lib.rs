@@ -110,7 +110,7 @@ pub fn init_seams() {
 
     use pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
     use types_core::primitive::Oid;
-    use nodes::primnodes::Expr;
+    use ::nodes::primnodes::Expr;
     use types_error::PgResult;
 
     // create_index_paths / check_index_predicates allocate; the registry seam

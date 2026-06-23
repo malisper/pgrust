@@ -34,8 +34,8 @@ use types_core::{Oid, OidIsValid};
 // returns the canonical value verbatim.
 use types_tuple::heaptuple::Datum as DatumV;
 use types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::{ExtractedVariadicArgs, TypeFuncClass};
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::{ExtractedVariadicArgs, TypeFuncClass};
 use types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::{TupleDesc, RECORDOID, TEXTOID, UNKNOWNOID};
 

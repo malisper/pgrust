@@ -9,8 +9,8 @@
 //! `copyObjectImpl` again.
 //!
 //! In the owned-tree rewrite that generated switch + per-node copy logic *is*
-//! the central [`nodes::node_tree::Node::copy_node_in`] dispatch: a `match` over
-//! every variant of the unified [`nodes::node_tree::Node`] enum delegating each
+//! the central [`::nodes::node_tree::Node::copy_node_in`] dispatch: a `match` over
+//! every variant of the unified [`::nodes::node_tree::Node`] enum delegating each
 //! arm to that struct's `#[derive(PgNode)]`/`copy_node_in` copy, which recurses into
 //! its child links through the same central dispatch. C's `copyObject` allocates
 //! into `CurrentMemoryContext`; the owned-tree analogue re-homes ALL allocation
@@ -20,7 +20,7 @@
 //! This crate is therefore a **thin wrapper**: it exposes the `copyObject`
 //! public API and wires the centralized
 //! [`copyfuncs_seams::copy_object`] seam — every call delegates
-//! directly to [`nodes::node_tree::Node::copy_node_in`]. No per-node copy logic is
+//! directly to [`::nodes::node_tree::Node::copy_node_in`]. No per-node copy logic is
 //! reimplemented here, and the crate declares zero local seams.
 
 #![no_std]
@@ -32,7 +32,7 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::node_tree::Node;
+use ::nodes::node_tree::Node;
 
 /// `copyObjectImpl(from)` — implementation of `copyObject()`; see
 /// `nodes/nodes.h`. Deep-copies an arbitrary `Node` tree into the destination
@@ -85,8 +85,8 @@ mod tests {
     use std::sync::Mutex;
 
     use mcx::{MemoryContext, PgString};
-    use nodes::node_tree::Node;
-    use nodes::value::Float;
+    use ::nodes::node_tree::Node;
+    use ::nodes::value::Float;
 
     // Installing the process-global seam mutates a `static mut`; serialize the
     // tests that touch it so they cannot race.

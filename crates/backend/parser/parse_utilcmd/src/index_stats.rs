@@ -14,9 +14,9 @@ use types_core::Oid;
 use types_error::{PgResult, ERRCODE_INVALID_COLUMN_REFERENCE, ERROR};
 use types_storage::lock::{AccessShareLock, NoLock};
 
-use nodes::ddlnodes::{IndexElem, StatsElem};
-use nodes::nodes::Node;
-use nodes::parsestmt::ParseExprKind::{
+use ::nodes::ddlnodes::{IndexElem, StatsElem};
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::ParseExprKind::{
     EXPR_KIND_INDEX_EXPRESSION, EXPR_KIND_INDEX_PREDICATE, EXPR_KIND_STATS_EXPRESSION,
 };
 
@@ -72,7 +72,7 @@ pub fn transformIndexStmt<'mcx>(
             transformWhereClause(mcx, &mut pstate, clause, EXPR_KIND_INDEX_PREDICATE, "WHERE")?;
         // Bring the parser-arena `'static` qual into `mcx` for the in-place
         // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
-        let mut where_expr: Option<nodes::primnodes::Expr<'mcx>> = match where_expr {
+        let mut where_expr: Option<::nodes::primnodes::Expr<'mcx>> = match where_expr {
             Some(e) => Some(e.clone_in(mcx)?),
             None => None,
         };
@@ -119,7 +119,7 @@ pub fn transformIndexStmt<'mcx>(
 /// The per-`IndexElem` expression transform from `transformIndexStmt`.
 fn transform_index_elem_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     ielem: &mut IndexElem<'mcx>,
 ) -> PgResult<()> {
     if ielem.expr.is_none() {
@@ -138,7 +138,7 @@ fn transform_index_elem_expr<'mcx>(
     let t = transformExpr(pstate, expr, EXPR_KIND_INDEX_EXPRESSION)?;
     // Bring the parser-arena `'static` result into `mcx` for the in-place
     // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
-    let mut t: Option<nodes::primnodes::Expr<'mcx>> = match t {
+    let mut t: Option<::nodes::primnodes::Expr<'mcx>> = match t {
         Some(e) => Some(e.clone_in(mcx)?),
         None => None,
     };
@@ -219,7 +219,7 @@ pub fn transformStatsStmt<'mcx>(
 /// The per-`StatsElem` expression transform from `transformStatsStmt`.
 fn transform_stats_elem_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     selem: &mut StatsElem<'mcx>,
 ) -> PgResult<()> {
     if selem.expr.is_none() {
@@ -230,7 +230,7 @@ fn transform_stats_elem_expr<'mcx>(
     let t = transformExpr(pstate, expr, EXPR_KIND_STATS_EXPRESSION)?;
     // Bring the parser-arena `'static` result into `mcx` for the in-place
     // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
-    let mut t: Option<nodes::primnodes::Expr<'mcx>> = match t {
+    let mut t: Option<::nodes::primnodes::Expr<'mcx>> = match t {
         Some(e) => Some(e.clone_in(mcx)?),
         None => None,
     };

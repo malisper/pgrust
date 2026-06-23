@@ -32,7 +32,7 @@
 //! [`PathNode::path_head`](pathnodes::PathNode::path_head) recovers the
 //! embedded base `Path` (the C up-cast to `Path *`); the variant recovers the
 //! concrete subtype. The produced plan tree is an owned
-//! [`Node<'mcx>`](nodes::nodes::Node) allocated in `mcx`, so the dispatch
+//! [`Node<'mcx>`](::nodes::nodes::Node) allocated in `mcx`, so the dispatch
 //! threads `Mcx<'mcx>` exactly where the C `palloc`s the new `Plan`.
 //!
 //! Because [`PlannerInfo`] is lifetime-free it cannot hold the `'mcx` query /
@@ -63,44 +63,44 @@ use alloc::vec::Vec;
 
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_error::{PgError, PgResult};
-use nodes::nodeindexscan::{Plan, Scan};
-use nodes::noderesult::Result as ResultNode;
-use nodes::nodeforeigncustom::Material as MaterialNode;
-use nodes::nodesort::Sort;
-use nodes::nodememoize::Memoize;
-use nodes::nodelimit::Limit as LimitNode;
-use nodes::nodelockrows::LockRows as LockRowsNode;
-use nodes::nodeprojectset::ProjectSet as ProjectSetNode;
-use nodes::nodes::{ntag, Node, NodeTag};
-use nodes::nodectescan::CteScan;
-use nodes::nodefunctionscan::FunctionScan;
-use nodes::nodetablefuncscan::TableFuncScan;
-use nodes::primnodes::TableFunc;
-use nodes::nodeindexscan::{SubqueryScan, SubqueryScanStatus, TidScan};
-use nodes::nodenamedtuplestorescan::NamedTuplestoreScan;
-use nodes::nodesamplescan::{SampleScan, TableSampleClause};
-use nodes::nodeseqscan::SeqScan;
-use nodes::nodeindexscan::IndexScan;
-use nodes::nodeindexonlyscan::IndexOnlyScan;
-use nodes::nodetidrangescan::TidRangeScan;
-use nodes::nodevaluesscan::ValuesScan;
-use nodes::nodeworktablescan::WorkTableScan;
-use nodes::primnodes::{Expr, OpExpr, TargetEntry};
-use nodes::jointype::{Join as JoinBase, JoinType as NodeJoinType};
-use nodes::nodenestloop::{NestLoop, NestLoopParam};
-use nodes::nodehashjoin::{Hash as HashNode, HashJoin};
-use nodes::nodemergejoin::MergeJoin;
-use nodes::nodeappend::Append as AppendNode;
-use nodes::nodemergeappend::MergeAppend as MergeAppendNode;
-use nodes::bitmapset::Bitmapset;
-use nodes::nodegroup::Group as GroupNode;
-use nodes::nodeunique::Unique as UniqueNode;
-use nodes::nodesetop::SetOp as SetOpNode;
-use nodes::noderecursiveunion::RecursiveUnion as RecursiveUnionNode;
-use nodes::nodegather::Gather as GatherNode;
-use nodes::nodegathermerge::GatherMerge as GatherMergeNode;
-use nodes::nodeincrementalsort::IncrementalSort as IncrementalSortNode;
-use nodes::rawnodes::RangeTblFunction;
+use ::nodes::nodeindexscan::{Plan, Scan};
+use ::nodes::noderesult::Result as ResultNode;
+use ::nodes::nodeforeigncustom::Material as MaterialNode;
+use ::nodes::nodesort::Sort;
+use ::nodes::nodememoize::Memoize;
+use ::nodes::nodelimit::Limit as LimitNode;
+use ::nodes::nodelockrows::LockRows as LockRowsNode;
+use ::nodes::nodeprojectset::ProjectSet as ProjectSetNode;
+use ::nodes::nodes::{ntag, Node, NodeTag};
+use ::nodes::nodectescan::CteScan;
+use ::nodes::nodefunctionscan::FunctionScan;
+use ::nodes::nodetablefuncscan::TableFuncScan;
+use ::nodes::primnodes::TableFunc;
+use ::nodes::nodeindexscan::{SubqueryScan, SubqueryScanStatus, TidScan};
+use ::nodes::nodenamedtuplestorescan::NamedTuplestoreScan;
+use ::nodes::nodesamplescan::{SampleScan, TableSampleClause};
+use ::nodes::nodeseqscan::SeqScan;
+use ::nodes::nodeindexscan::IndexScan;
+use ::nodes::nodeindexonlyscan::IndexOnlyScan;
+use ::nodes::nodetidrangescan::TidRangeScan;
+use ::nodes::nodevaluesscan::ValuesScan;
+use ::nodes::nodeworktablescan::WorkTableScan;
+use ::nodes::primnodes::{Expr, OpExpr, TargetEntry};
+use ::nodes::jointype::{Join as JoinBase, JoinType as NodeJoinType};
+use ::nodes::nodenestloop::{NestLoop, NestLoopParam};
+use ::nodes::nodehashjoin::{Hash as HashNode, HashJoin};
+use ::nodes::nodemergejoin::MergeJoin;
+use ::nodes::nodeappend::Append as AppendNode;
+use ::nodes::nodemergeappend::MergeAppend as MergeAppendNode;
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::nodegroup::Group as GroupNode;
+use ::nodes::nodeunique::Unique as UniqueNode;
+use ::nodes::nodesetop::SetOp as SetOpNode;
+use ::nodes::noderecursiveunion::RecursiveUnion as RecursiveUnionNode;
+use ::nodes::nodegather::Gather as GatherNode;
+use ::nodes::nodegathermerge::GatherMerge as GatherMergeNode;
+use ::nodes::nodeincrementalsort::IncrementalSort as IncrementalSortNode;
+use ::nodes::rawnodes::RangeTblFunction;
 use mcx::PgString;
 use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{
@@ -109,11 +109,11 @@ use pathnodes::{
     RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION,
     UNIQUE_PATH_HASH, UNIQUE_PATH_NOOP, UNIQUE_PATH_SORT,
 };
-use nodes::nodebitmapand::BitmapAnd;
-use nodes::nodebitmapheapscan::BitmapHeapScan;
-use nodes::nodebitmapindexscan::BitmapIndexScan;
-use nodes::nodebitmapor::BitmapOr;
-use nodes::nodeagg::AGGSPLIT_SIMPLE;
+use ::nodes::nodebitmapand::BitmapAnd;
+use ::nodes::nodebitmapheapscan::BitmapHeapScan;
+use ::nodes::nodebitmapindexscan::BitmapIndexScan;
+use ::nodes::nodebitmapor::BitmapOr;
+use ::nodes::nodeagg::AGGSPLIT_SIMPLE;
 use types_core::primitive::{AttrNumber, Index, InvalidOid, Oid};
 use types_tuple::access::RELKIND_FOREIGN_TABLE;
 
@@ -1359,7 +1359,7 @@ fn create_seqscan_plan<'mcx>(
     debug_assert!(scan_relid > 0);
     debug_assert_eq!(
         planner_rt_fetch(run, root, scan_relid).rtekind,
-        nodes::parsenodes::RTEKind::RTE_RELATION
+        ::nodes::parsenodes::RTEKind::RTE_RELATION
     );
 
     let has_param_info = root.path(best_path).base().param_info.is_some();
@@ -1678,7 +1678,7 @@ fn create_indexscan_plan<'mcx>(
     debug_assert!(scan_relid > 0);
     debug_assert_eq!(
         planner_rt_fetch(run, root, scan_relid).rtekind,
-        nodes::parsenodes::RTEKind::RTE_RELATION
+        ::nodes::parsenodes::RTEKind::RTE_RELATION
     );
     // check the scan direction is valid
     debug_assert!(indexscandir == 1 || indexscandir == -1);
@@ -1894,7 +1894,7 @@ fn create_bitmap_scan_plan<'mcx>(
     debug_assert!(baserelid > 0);
     debug_assert_eq!(
         planner_rt_fetch(run, root, baserelid).rtekind,
-        nodes::parsenodes::RTEKind::RTE_RELATION
+        ::nodes::parsenodes::RTEKind::RTE_RELATION
     );
 
     // Process the bitmapqual tree into a Plan tree and qual lists.
@@ -2354,7 +2354,7 @@ fn create_valuesscan_plan<'mcx>(
     // The RTE's values_lists is a List<List<Node>>; resolve each row's column
     // expressions into the owned ValuesScan `PgVec<PgVec<Expr<'mcx>>>` carrier.
     let rte = planner_rt_fetch(run, root, scan_relid);
-    debug_assert_eq!(rte.rtekind, nodes::parsenodes::RTEKind::RTE_VALUES);
+    debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_VALUES);
     let mut values_lists: PgVec<'mcx, PgVec<'mcx, Expr<'mcx>>> =
         vec_with_capacity_in(mcx, rte.values_lists.len())?;
     for row_node in rte.values_lists.iter() {
@@ -2437,7 +2437,7 @@ fn create_resultscan_plan<'mcx>(
     debug_assert!(scan_relid > 0);
     debug_assert_eq!(
         planner_rt_fetch(run, root, scan_relid).rtekind,
-        nodes::parsenodes::RTEKind::RTE_RESULT
+        ::nodes::parsenodes::RTEKind::RTE_RESULT
     );
 
     let has_param_info = root.path(best_path).base().param_info.is_some();
@@ -2697,7 +2697,7 @@ fn create_samplescan_plan<'mcx>(
     // it should be a base rel with a tablesample clause...
     debug_assert!(scan_relid > 0);
     let rte = planner_rt_fetch(run, root, scan_relid);
-    debug_assert_eq!(rte.rtekind, nodes::parsenodes::RTEKind::RTE_RELATION);
+    debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_RELATION);
     // tsc = rte->tablesample; Assert(tsc != NULL);
     let tsc_node = rte
         .tablesample
@@ -2836,7 +2836,7 @@ fn create_tidscan_plan<'mcx>(
     debug_assert!(scan_relid > 0);
     debug_assert_eq!(
         planner_rt_fetch(run, root, scan_relid).rtekind,
-        nodes::parsenodes::RTEKind::RTE_RELATION
+        ::nodes::parsenodes::RTEKind::RTE_RELATION
     );
 
     // The qpqual list must contain all restrictions not enforced by the
@@ -3004,7 +3004,7 @@ fn create_tidrangescan_plan<'mcx>(
     debug_assert!(scan_relid > 0);
     debug_assert_eq!(
         planner_rt_fetch(run, root, scan_relid).rtekind,
-        nodes::parsenodes::RTEKind::RTE_RELATION
+        ::nodes::parsenodes::RTEKind::RTE_RELATION
     );
 
     // The qpqual list must contain all restrictions not enforced by the
@@ -3095,7 +3095,7 @@ fn create_functionscan_plan<'mcx>(
     // it should be a function base rel...
     debug_assert!(scan_relid > 0);
     let rte = planner_rt_fetch(run, root, scan_relid);
-    debug_assert_eq!(rte.rtekind, nodes::parsenodes::RTEKind::RTE_FUNCTION);
+    debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_FUNCTION);
     let funcordinality = rte.funcordinality;
     // functions = rte->functions (List<RangeTblFunction>). Resolve each into an
     // owned RangeTblFunction.
@@ -3196,7 +3196,7 @@ fn create_tablefuncscan_plan<'mcx>(
     // it should be a function base rel...
     debug_assert!(scan_relid > 0);
     let rte = planner_rt_fetch(run, root, scan_relid);
-    debug_assert_eq!(rte.rtekind, nodes::parsenodes::RTEKind::RTE_TABLEFUNC);
+    debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_TABLEFUNC);
 
     // tablefunc = rte->tablefunc — resolve into an owned TableFunc.
     let mut tablefunc: TableFunc<'mcx> = match rte.tablefunc.as_deref().and_then(|n| n.as_table_func())
@@ -3319,7 +3319,7 @@ fn create_namedtuplestorescan_plan<'mcx>(
     let rte = planner_rt_fetch(run, root, scan_relid);
     debug_assert_eq!(
         rte.rtekind,
-        nodes::parsenodes::RTEKind::RTE_NAMEDTUPLESTORE
+        ::nodes::parsenodes::RTEKind::RTE_NAMEDTUPLESTORE
     );
     let enrname: Option<PgString<'mcx>> = match &rte.enrname {
         Some(n) => Some(n.clone_in(mcx)?),
@@ -3371,7 +3371,7 @@ fn create_ctescan_plan<'mcx>(
 
     debug_assert!(scan_relid > 0);
     let rte = planner_rt_fetch(run, root, scan_relid);
-    debug_assert_eq!(rte.rtekind, nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_CTE);
     debug_assert!(!rte.self_reference);
 
     // Find the referenced CTE, locate its SubPlan, and pull out the CTE param
@@ -3425,7 +3425,7 @@ fn create_worktablescan_plan<'mcx>(
 
     debug_assert!(scan_relid > 0);
     let rte = planner_rt_fetch(run, root, scan_relid);
-    debug_assert_eq!(rte.rtekind, nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_CTE);
     debug_assert!(rte.self_reference);
 
     // Find the worktable param ID, which is in the plan level processing the
@@ -4112,7 +4112,7 @@ fn make_sort<'mcx>(
 /// locating the sort columns by `tleSortGroupRef` in the child's targetlist.
 fn make_sort_from_sortclauses<'mcx>(
     mcx: Mcx<'mcx>,
-    sortcls: &[nodes::rawnodes::SortGroupClause],
+    sortcls: &[::nodes::rawnodes::SortGroupClause],
     lefttree: Node<'mcx>,
 ) -> PgResult<Sort<'mcx>> {
     // Convert list-ish representation to arrays wanted by executor, reading the
@@ -4145,7 +4145,7 @@ fn make_sort_from_sortclauses<'mcx>(
 /// sort ordering info is taken from the `SortGroupClause` entries.
 fn make_sort_from_groupcols<'mcx>(
     mcx: Mcx<'mcx>,
-    groupcls: &[nodes::rawnodes::SortGroupClause],
+    groupcls: &[::nodes::rawnodes::SortGroupClause],
     grp_col_idx: &[AttrNumber],
     lefttree: Node<'mcx>,
 ) -> PgResult<Sort<'mcx>> {
@@ -4441,7 +4441,7 @@ fn make_limit<'mcx>(
     lefttree: Node<'mcx>,
     limit_offset: Option<PgBox<'mcx, Expr<'mcx>>>,
     limit_count: Option<PgBox<'mcx, Expr<'mcx>>>,
-    limit_option: nodes::nodelimit::LimitOption,
+    limit_option: ::nodes::nodelimit::LimitOption,
     uniq_num_cols: i32,
     uniq_col_idx: Option<PgVec<'mcx, AttrNumber>>,
     uniq_operators: Option<PgVec<'mcx, Oid>>,
@@ -4497,7 +4497,7 @@ fn create_limit_plan<'mcx>(
         let parse = run.resolve(root.parse);
         // parse->sortClause is a List of SortGroupClause node handles; resolve
         // each to its value, then match it to parse->targetList.
-        let sort_clauses: Vec<nodes::rawnodes::SortGroupClause> = parse
+        let sort_clauses: Vec<::nodes::rawnodes::SortGroupClause> = parse
             .sortClause
             .iter()
             .map(|np| {
@@ -4586,7 +4586,7 @@ pub fn make_minmax_subplan_limit<'mcx>(
         subplan,
         None, // limitOffset
         limit_count,
-        nodes::nodelimit::LimitOption::LIMIT_OPTION_COUNT,
+        ::nodes::nodelimit::LimitOption::LIMIT_OPTION_COUNT,
         0,
         None,
         None,
@@ -4742,7 +4742,7 @@ fn create_lockrows_plan<'mcx>(
 fn make_lockrows<'mcx>(
     mcx: Mcx<'mcx>,
     lefttree: Node<'mcx>,
-    row_marks: Option<PgVec<'mcx, nodes::nodelockrows::PlanRowMark>>,
+    row_marks: Option<PgVec<'mcx, ::nodes::nodelockrows::PlanRowMark>>,
     epq_param: i32,
 ) -> PgResult<LockRowsNode<'mcx>> {
     let tlist = clone_plan_tlist(mcx, &lefttree)?;
@@ -4861,8 +4861,8 @@ fn make_modifytable<'mcx>(
     row_marks: Vec<NodeId>,
     onconflict: Option<OnConflictPlanData<'mcx>>,
     epq_param: i32,
-) -> PgResult<nodes::modifytable::ModifyTable<'mcx>> {
-    use nodes::modifytable::ModifyTable;
+) -> PgResult<::nodes::modifytable::ModifyTable<'mcx>> {
+    use ::nodes::modifytable::ModifyTable;
 
     // Assert(operation == CMD_MERGE || (operation == CMD_UPDATE ?
     //   list_length(resultRelations) == list_length(updateColnosLists) :
@@ -4982,7 +4982,7 @@ fn make_modifytable<'mcx>(
             Some(rel_id) => root.rel(rel_id).fdwroutine.is_some(),
             None => {
                 let rte = planner_rt_fetch(run, root, rti);
-                rte.rtekind == nodes::parsenodes::RTEKind::RTE_RELATION
+                rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_RELATION
                     && rte.relkind == RELKIND_FOREIGN_TABLE as i8
             }
         };
@@ -5018,7 +5018,7 @@ fn make_modifytable<'mcx>(
         oc_excl_rel_tlist,
     ) = match onconflict {
         None => (
-            nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
+            ::nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
             None,
             None,
             None,
@@ -5043,7 +5043,7 @@ fn make_modifytable<'mcx>(
     // inherited target, one entry for the single-rel case). The Var references
     // are fixed up later by setrefs.c.
     let merge_action_lists_field: Option<
-        PgVec<'mcx, PgVec<'mcx, nodes::modifytable::MergeAction<'mcx>>>,
+        PgVec<'mcx, PgVec<'mcx, ::nodes::modifytable::MergeAction<'mcx>>>,
     > = if merge_action_lists.is_empty() {
         None
     } else {
@@ -5123,8 +5123,8 @@ fn resolve_merge_action<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     action_id: NodeId,
-) -> PgResult<nodes::modifytable::MergeAction<'mcx>> {
-    use nodes::modifytable::MergeAction as ExecMergeAction;
+) -> PgResult<::nodes::modifytable::MergeAction<'mcx>> {
+    use ::nodes::modifytable::MergeAction as ExecMergeAction;
     let src = root.merge_action(action_id);
 
     // qual: a single `Expr` arena handle (or NULL marker) -> the implicit-AND
@@ -5195,7 +5195,7 @@ fn resolve_wco_node<'mcx>(
         Some(s) => Some(mcx::PgString::from_str_in(s, mcx)?),
         None => None,
     };
-    let wco = nodes::rawnodes::WithCheckOption {
+    let wco = ::nodes::rawnodes::WithCheckOption {
         kind: src.kind,
         relname,
         polname,
@@ -5210,7 +5210,7 @@ fn resolve_wco_node<'mcx>(
 /// [`resolve_onconflict_plan_data`] (which needs `&mut PlannerInfo` for
 /// `infer_arbiter_indexes`) and consumed by `make_modifytable`.
 struct OnConflictPlanData<'mcx> {
-    action: nodes::nodes::OnConflictAction,
+    action: ::nodes::nodes::OnConflictAction,
     arbiter_indexes: PgVec<'mcx, Oid>,
     on_conflict_set: PgVec<'mcx, TargetEntry<'mcx>>,
     on_conflict_cols: PgVec<'mcx, i32>,
@@ -5309,8 +5309,8 @@ fn resolve_onconflict_plan_data<'mcx>(
 }
 
 /// Map the path-layer `CmdType` (raw `u32`) to the plan-node `CmdType`.
-fn cmdtype_path_to_node(op: pathnodes::CmdType) -> nodes::nodes::CmdType {
-    use nodes::nodes::CmdType as N;
+fn cmdtype_path_to_node(op: pathnodes::CmdType) -> ::nodes::nodes::CmdType {
+    use ::nodes::nodes::CmdType as N;
     match op {
         pathnodes::CMD_UNKNOWN => N::CMD_UNKNOWN,
         pathnodes::CMD_SELECT => N::CMD_SELECT,
@@ -5329,11 +5329,11 @@ fn cmdtype_path_to_node(op: pathnodes::CmdType) -> nodes::nodes::CmdType {
 /// distinct Rust types.
 fn limit_option_to_node(
     opt: pathnodes::LimitOption,
-) -> nodes::nodelimit::LimitOption {
+) -> ::nodes::nodelimit::LimitOption {
     if opt == pathnodes::LIMIT_OPTION_WITH_TIES {
-        nodes::nodelimit::LIMIT_OPTION_WITH_TIES
+        ::nodes::nodelimit::LIMIT_OPTION_WITH_TIES
     } else {
-        nodes::nodelimit::LIMIT_OPTION_COUNT
+        ::nodes::nodelimit::LIMIT_OPTION_COUNT
     }
 }
 
@@ -5351,22 +5351,22 @@ fn make_agg<'mcx>(
     mcx: Mcx<'mcx>,
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     qual: Option<PgVec<'mcx, Expr<'mcx>>>,
-    aggstrategy: nodes::nodeagg::AggStrategy,
-    aggsplit: nodes::nodeagg::AggSplit,
+    aggstrategy: ::nodes::nodeagg::AggStrategy,
+    aggsplit: ::nodes::nodeagg::AggSplit,
     num_group_cols: i32,
     grp_col_idx: Vec<AttrNumber>,
     grp_operators: Vec<Oid>,
     grp_collations: Vec<Oid>,
     grouping_sets: Option<PgVec<'mcx, PgVec<'mcx, i32>>>,
-    chain: Option<PgVec<'mcx, PgBox<'mcx, nodes::nodeagg::Agg<'mcx>>>>,
+    chain: Option<PgVec<'mcx, PgBox<'mcx, ::nodes::nodeagg::Agg<'mcx>>>>,
     d_num_groups: f64,
     transition_space: u64,
     lefttree: Option<Node<'mcx>>,
-) -> PgResult<nodes::nodeagg::Agg<'mcx>> {
+) -> PgResult<::nodes::nodeagg::Agg<'mcx>> {
     // Reduce to long, but 'ware overflow! (clamp_cardinality_to_long).
     let num_groups = costsize::clamp_cardinality_to_long::call(d_num_groups);
 
-    let mut node = nodes::nodeagg::Agg::default();
+    let mut node = ::nodes::nodeagg::Agg::default();
     node.aggstrategy = aggstrategy;
     node.aggsplit = aggsplit;
     node.num_cols = num_group_cols;
@@ -5434,8 +5434,8 @@ fn oid_vec_to_field<'mcx>(
 /// the plan-node `AggStrategy` (types-nodes). Same C enum, distinct Rust types.
 fn aggstrategy_path_to_node(
     s: pathnodes::AggStrategy,
-) -> nodes::nodeagg::AggStrategy {
-    use nodes::nodeagg::AggStrategy as NS;
+) -> ::nodes::nodeagg::AggStrategy {
+    use ::nodes::nodeagg::AggStrategy as NS;
     match s {
         pathnodes::AGG_PLAIN => NS::AggPlain,
         pathnodes::AGG_SORTED => NS::AggSorted,
@@ -5482,7 +5482,7 @@ fn create_agg_plan<'mcx>(
     // derive the grouping-column arrays from the *subplan's* targetlist (C reads
     // subplan->targetlist for extract_grouping_cols/collations). For a plain
     // aggregate (count(*)) groupClause is NIL, so all three arrays are empty.
-    let group_clauses: Vec<nodes::rawnodes::SortGroupClause> =
+    let group_clauses: Vec<::nodes::rawnodes::SortGroupClause> =
         group_clause_ids.iter().map(|&id| *root.sortgroupclause(id)).collect();
     let num_group_cols = group_clauses.len() as i32;
 
@@ -5498,7 +5498,7 @@ fn create_agg_plan<'mcx>(
     // The path layer carries AggStrategy/AggSplit as the raw C enum integers
     // (types-pathnodes u32); the plan node uses the typed (types-nodes) forms.
     let aggstrategy = aggstrategy_path_to_node(aggstrategy);
-    let aggsplit = aggsplit as nodes::nodeagg::AggSplit;
+    let aggsplit = aggsplit as ::nodes::nodeagg::AggSplit;
 
     let mut plan = make_agg(
         mcx,
@@ -5543,7 +5543,7 @@ fn create_agg_dispatch_plan<'mcx>(
 /// `root->grouping_map`.
 fn remap_group_col_idx(
     root: &PlannerInfo,
-    group_clause: &[nodes::rawnodes::SortGroupClause],
+    group_clause: &[::nodes::rawnodes::SortGroupClause],
 ) -> Vec<AttrNumber> {
     let grouping_map = &root.grouping_map;
     debug_assert!(!grouping_map.is_empty());
@@ -5583,7 +5583,7 @@ fn create_groupingsets_plan<'mcx>(
 
     // Compute the mapping from tleSortGroupRef to column index in the child's
     // tlist. First, identify max SortGroupRef in groupClause, for array sizing.
-    let processed_group_clause: Vec<nodes::rawnodes::SortGroupClause> = root
+    let processed_group_clause: Vec<::nodes::rawnodes::SortGroupClause> = root
         .processed_groupClause
         .iter()
         .map(|&id| *root.sortgroupclause(id))
@@ -5614,7 +5614,7 @@ fn create_groupingsets_plan<'mcx>(
 
     // Resolve each rollup's groupClause handles into owned SortGroupClause lists
     // up front (the C `rollup->groupClause` Lists).
-    let rollup_group_clauses: Vec<Vec<nodes::rawnodes::SortGroupClause>> = rollups
+    let rollup_group_clauses: Vec<Vec<::nodes::rawnodes::SortGroupClause>> = rollups
         .iter()
         .map(|r| r.groupClause.iter().map(|&id| *root.sortgroupclause(id)).collect())
         .collect();
@@ -5622,7 +5622,7 @@ fn create_groupingsets_plan<'mcx>(
     // Generate the side nodes that describe the other sort and group operations
     // besides the top one. We don't worry about accurate cost estimates in the
     // side nodes; only the topmost Agg node's costs will be shown by EXPLAIN.
-    let mut chain: Vec<PgBox<'mcx, nodes::nodeagg::Agg<'mcx>>> = Vec::new();
+    let mut chain: Vec<PgBox<'mcx, ::nodes::nodeagg::Agg<'mcx>>> = Vec::new();
     if rollups.len() > 1 {
         let mut is_first_sort = rollups[0].is_hashed;
 
@@ -5651,11 +5651,11 @@ fn create_groupingsets_plan<'mcx>(
             }
 
             let strat = if rollup.is_hashed {
-                nodes::nodeagg::AggStrategy::AggHashed
+                ::nodes::nodeagg::AggStrategy::AggHashed
             } else if rollup.gsets.first().map(|g| g.is_empty()).unwrap_or(true) {
-                nodes::nodeagg::AggStrategy::AggPlain
+                ::nodes::nodeagg::AggStrategy::AggPlain
             } else {
-                nodes::nodeagg::AggStrategy::AggSorted
+                ::nodes::nodeagg::AggStrategy::AggSorted
             };
 
             let num_group_cols = rollup.gsets.first().map(|g| g.len()).unwrap_or(0) as i32;
@@ -5916,25 +5916,25 @@ fn clone_node_tlist_vec<'mcx>(
 /// data-dependent cases (CustomScan flags, dummy Append) inspecting the
 /// `PathNode` variant.
 pub fn is_projection_capable_path(root: &PlannerInfo, path: PathId) -> bool {
-    use nodes::nodes as ntag;
+    use ::nodes::nodes as ntag;
     let node = root.path(path);
     let pathtype = node.base().pathtype;
 
     // T_Hash / T_Material / T_Memoize / T_Sort / T_IncrementalSort / T_Unique /
     // T_SetOp / T_LockRows / T_Limit / T_ModifyTable / T_MergeAppend /
     // T_RecursiveUnion — these can't project.
-    if pathtype == nodes::nodehashjoin::T_Hash
+    if pathtype == ::nodes::nodehashjoin::T_Hash
         || pathtype == ntag::T_Material
-        || pathtype == nodes::nodememoize::T_Memoize
+        || pathtype == ::nodes::nodememoize::T_Memoize
         || pathtype == ntag::T_Sort
-        || pathtype == nodes::nodeincrementalsort::T_IncrementalSort
-        || pathtype == nodes::nodeunique::T_Unique
+        || pathtype == ::nodes::nodeincrementalsort::T_IncrementalSort
+        || pathtype == ::nodes::nodeunique::T_Unique
         || pathtype == ntag::T_SetOp
         || pathtype == ntag::T_LockRows
         || pathtype == ntag::T_Limit
-        || pathtype == nodes::modifytable::T_ModifyTable
+        || pathtype == ::nodes::modifytable::T_ModifyTable
         || pathtype == ntag::T_MergeAppend
-        || pathtype == nodes::noderecursiveunion::T_RecursiveUnion
+        || pathtype == ::nodes::noderecursiveunion::T_RecursiveUnion
     {
         return false;
     }
@@ -5950,7 +5950,7 @@ pub fn is_projection_capable_path(root: &PlannerInfo, path: PathId) -> bool {
         // Result, which can. IS_DUMMY_APPEND(p): IsA(p, AppendPath) && subpaths==NIL.
         return matches!(node, PathNode::AppendPath(ap) if ap.subpaths.is_empty());
     }
-    if pathtype == nodes::nodeprojectset::T_ProjectSet {
+    if pathtype == ::nodes::nodeprojectset::T_ProjectSet {
         // ProjectSet projects, but say "no" so the planner won't replace its
         // tlist; the SRFs must stay at top level.
         return false;
@@ -6498,7 +6498,7 @@ fn create_hashjoin_plan<'mcx>(
                 };
                 if let Some(var) = node.as_var() {
                     let rte = planner_rt_fetch(run, root, var.varno as u32);
-                    if rte.rtekind == nodes::parsenodes::RTEKind::RTE_RELATION {
+                    if rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_RELATION {
                         skew_table = rte.relid;
                         skew_column = var.varattno;
                         skew_inherit = rte.inh;
@@ -7503,7 +7503,7 @@ fn create_gating_plan<'mcx>(
 fn resolve_sort_group_clauses(
     root: &PlannerInfo,
     ids: &[NodeId],
-) -> Vec<nodes::rawnodes::SortGroupClause> {
+) -> Vec<::nodes::rawnodes::SortGroupClause> {
     ids.iter().map(|&id| *root.sortgroupclause(id)).collect()
 }
 
@@ -7606,7 +7606,7 @@ fn make_windowagg<'mcx>(
     qual: Option<PgVec<'mcx, Expr<'mcx>>>,
     top_window: bool,
     lefttree: Node<'mcx>,
-) -> PgResult<nodes::nodewindowagg::WindowAgg<'mcx>> {
+) -> PgResult<::nodes::nodewindowagg::WindowAgg<'mcx>> {
     // node->runConditionOrig is a duplicate of runCondition for EXPLAIN.
     let run_condition_orig = match &run_condition {
         Some(v) => {
@@ -7625,7 +7625,7 @@ fn make_windowagg<'mcx>(
     plan.righttree = None;
     plan.qual = qual;
 
-    Ok(nodes::nodewindowagg::WindowAgg {
+    Ok(::nodes::nodewindowagg::WindowAgg {
         plan,
         winname: win_name,
         winref: wc.winref,
@@ -7785,7 +7785,7 @@ fn create_windowagg_plan<'mcx>(
 fn make_unique_from_sortclauses<'mcx>(
     mcx: Mcx<'mcx>,
     lefttree: Node<'mcx>,
-    distinct_list: &[nodes::rawnodes::SortGroupClause],
+    distinct_list: &[::nodes::rawnodes::SortGroupClause],
 ) -> PgResult<UniqueNode<'mcx>> {
     let num_cols = distinct_list.len() as i32;
     debug_assert!(num_cols > 0);
@@ -8034,7 +8034,7 @@ fn create_unique_plan<'mcx>(
             mcx,
             agg_tlist,
             None, // qual = NIL
-            nodes::nodeagg::AggStrategy::AggHashed,
+            ::nodes::nodeagg::AggStrategy::AggHashed,
             AGGSPLIT_SIMPLE,
             num_group_cols as i32,
             group_col_idx,
@@ -8050,7 +8050,7 @@ fn create_unique_plan<'mcx>(
     } else {
         // Create an ORDER BY list to sort the input compatibly, deriving the
         // SortGroupClause for each IN-clause operator.
-        let mut sort_list: Vec<nodes::rawnodes::SortGroupClause> =
+        let mut sort_list: Vec<::nodes::rawnodes::SortGroupClause> =
             Vec::with_capacity(in_operators.len());
         for (group_col_pos, &in_oper) in in_operators.iter().enumerate() {
             let sortop = lsyscache::get_ordering_op_for_equality_op::call(in_oper, false)?;
@@ -8088,7 +8088,7 @@ fn create_unique_plan<'mcx>(
                 assign_sort_group_ref(tle_idx, sub_tlist)
             };
 
-            sort_list.push(nodes::rawnodes::SortGroupClause {
+            sort_list.push(::nodes::rawnodes::SortGroupClause {
                 tleSortGroupRef: sortref,
                 eqop,
                 sortop,
@@ -8157,12 +8157,12 @@ fn create_upper_unique_plan<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn make_setop<'mcx>(
     mcx: Mcx<'mcx>,
-    cmd: nodes::nodesetop::SetOpCmd,
-    strategy: nodes::nodesetop::SetOpStrategy,
+    cmd: ::nodes::nodesetop::SetOpCmd,
+    strategy: ::nodes::nodesetop::SetOpStrategy,
     tlist: Option<PgVec<'mcx, TargetEntry<'mcx>>>,
     lefttree: Node<'mcx>,
     righttree: Node<'mcx>,
-    group_list: &[nodes::rawnodes::SortGroupClause],
+    group_list: &[::nodes::rawnodes::SortGroupClause],
     num_groups: i64,
 ) -> PgResult<SetOpNode<'mcx>> {
     let num_cols = group_list.len() as i32;
@@ -8182,7 +8182,7 @@ fn make_setop<'mcx>(
     for sortcl in group_list {
         let tle = util_tlist::get_sortgroupclause_tle(sortcl, plan_tlist)?;
         cmp_col_idx.push(tle.resno);
-        if strategy == nodes::nodesetop::SETOP_HASHED {
+        if strategy == ::nodes::nodesetop::SETOP_HASHED {
             cmp_operators.push(sortcl.eqop);
         } else {
             cmp_operators.push(sortcl.sortop);
@@ -8240,8 +8240,8 @@ fn create_setop_plan<'mcx>(
 
     let mut plan = make_setop(
         mcx,
-        cmd as nodes::nodesetop::SetOpCmd,
-        strategy as nodes::nodesetop::SetOpStrategy,
+        cmd as ::nodes::nodesetop::SetOpCmd,
+        strategy as ::nodes::nodesetop::SetOpStrategy,
         tlist,
         leftplan,
         rightplan,
@@ -8263,7 +8263,7 @@ fn make_recursive_union<'mcx>(
     lefttree: Node<'mcx>,
     righttree: Node<'mcx>,
     wt_param: i32,
-    distinct_list: &[nodes::rawnodes::SortGroupClause],
+    distinct_list: &[::nodes::rawnodes::SortGroupClause],
     num_groups: i64,
 ) -> PgResult<RecursiveUnionNode<'mcx>> {
     let num_cols = distinct_list.len() as i32;
@@ -8694,7 +8694,7 @@ fn minmax_replacement_param_impl(
     idx: usize,
     aggfnoid: Oid,
     cur_target_expr: &Expr,
-) -> PgResult<Option<nodes::primnodes::Param>> {
+) -> PgResult<Option<::nodes::primnodes::Param>> {
     let mminfo = root.minmax_agg_info(root.minmax_aggs[idx]);
     if mminfo.aggfnoid != aggfnoid {
         return Ok(None);

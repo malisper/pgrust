@@ -9,7 +9,7 @@ use types_amapi::CompareType;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::ddlnodes::IndexStmt;
+use ::nodes::ddlnodes::IndexStmt;
 
 /// `DefineIndex(...)` (indexcmds.c) parameters, bundled to keep the seam call
 /// readable. Mirrors the C positional arguments one-for-one.

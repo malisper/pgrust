@@ -21,7 +21,7 @@
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 use crate::register_srf;

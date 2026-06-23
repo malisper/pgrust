@@ -22,8 +22,8 @@
 
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::Node;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::Node;
 
 seam_core::seam!(
     /// `(PlannedStmt *) stringToNode(pstmtspace)` (execParallel.c

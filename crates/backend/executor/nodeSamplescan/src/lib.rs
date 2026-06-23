@@ -31,8 +31,8 @@ use types_error::{
     PgError, PgResult, ERRCODE_INVALID_TABLESAMPLE_ARGUMENT, ERRCODE_INVALID_TABLESAMPLE_REPEAT,
     ERRCODE_OUT_OF_MEMORY,
 };
-use nodes::execnodes::{EStateData, ScanStateData};
-use nodes::executor::TTS_FLAG_EMPTY;
+use ::nodes::execnodes::{EStateData, ScanStateData};
+use ::nodes::executor::TTS_FLAG_EMPTY;
 use samplescan::{SampleScan, SampleScanState, TableSampleClause};
 
 // ===========================================================================
@@ -312,7 +312,7 @@ fn sample_clause<'a, 'mcx>(node: &'a SampleScan<'mcx>) -> Option<&'a TableSample
 /// those references) through [`seam::init_plan_state_links`].
 pub fn ExecInitSampleScan<'mcx>(
     node: &SampleScan<'mcx>,
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<SampleScanState<'mcx>> {
@@ -580,14 +580,14 @@ fn out_of_memory(what: &str) -> PgError {
 /// tag-checked `downcast_sample_scan_state_*` helpers.
 pub fn erase_sample_scan_state<'mcx>(
     boxed: mcx::PgBox<'mcx, SampleScanState<'mcx>>,
-) -> mcx::PgBox<'mcx, dyn nodes::samplescanstate_carrier::SampleScanStateLive<'mcx> + 'mcx> {
+) -> mcx::PgBox<'mcx, dyn ::nodes::samplescanstate_carrier::SampleScanStateLive<'mcx> + 'mcx> {
     let (ptr, alloc) = mcx::PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn SampleScanStateLive` vtable (the established erase
     // pattern, identical to `erase_agg_state`).
     unsafe {
         mcx::PgBox::from_raw_in(
-            ptr as *mut (dyn nodes::samplescanstate_carrier::SampleScanStateLive<'mcx> + 'mcx),
+            ptr as *mut (dyn ::nodes::samplescanstate_carrier::SampleScanStateLive<'mcx> + 'mcx),
             alloc,
         )
     }

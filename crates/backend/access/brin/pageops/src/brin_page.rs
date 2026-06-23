@@ -217,7 +217,7 @@ pub fn brin_metapage_init(
 /// `PageSetLSN(page, recptr)` against the page bytes.
 pub fn page_set_lsn(page: &mut [u8], recptr: types_core::XLogRecPtr) -> PgResult<()> {
     let mut pmut = PageMut::new(page)?;
-    page::PageSetLSN(&mut pmut, recptr);
+    ::page::PageSetLSN(&mut pmut, recptr);
     Ok(())
 }
 

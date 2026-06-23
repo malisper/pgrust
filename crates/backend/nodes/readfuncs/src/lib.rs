@@ -35,7 +35,7 @@
 //! MATCH chain (`readfuncs.switch.c`) and the per-node `_read<Type>` readers
 //! (`readfuncs.funcs.c` + the hand-written custom readers) are ported
 //! field-for-field for the common primitive-expression family carried as
-//! [`nodes::primnodes::Expr`] — `VAR`/`PARAM`/`OPEXPR`/`DISTINCTEXPR`/
+//! [`::nodes::primnodes::Expr`] — `VAR`/`PARAM`/`OPEXPR`/`DISTINCTEXPR`/
 //! `NULLIFEXPR`/`FUNCEXPR`/`BOOLEXPR` — plus `TARGETENTRY`. Each reads its
 //! fields in the exact order the OUT side wrote them (`READ_*_FIELD`), keeping
 //! the byte-stable round-trip property: `args` lists recurse through
@@ -71,8 +71,8 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgString};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::nodes::Node;
-use nodes::primnodes::{
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{
     BoolExpr, BoolExprType, CoercionForm, Const, Expr, ExprRelids, FuncExpr, OpExpr, Param,
     ParamKind, TargetEntry, Var, VarReturningType,
 };
@@ -299,7 +299,7 @@ pub(crate) fn read_char_field() -> PgResult<u8> {
 /// empty set is the NULL `Bitmapset *`, i.e. `None`).
 pub(crate) fn read_bitmapset_opt_field<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>> {
     let er = read_bitmapset_field()?;
     if er.words.iter().all(|w| *w == 0) {
         return Ok(None);
@@ -313,7 +313,7 @@ pub(crate) fn read_bitmapset_opt_field<'mcx>(
     }
     Ok(Some(mcx::alloc_in(
         mcx,
-        nodes::bitmapset::Bitmapset { words },
+        ::nodes::bitmapset::Bitmapset { words },
     )?))
 }
 
@@ -828,7 +828,7 @@ mod tests {
     use nodes_core::read::string_to_node;
     use outfuncs::nodeToString;
     use mcx::MemoryContext;
-    use nodes::value::{BitString, Boolean, Float, Integer, StringNode};
+    use ::nodes::value::{BitString, Boolean, Float, Integer, StringNode};
 
     /// OUT a node, READ it back, and assert the reparse re-serializes to
     /// byte-identical text (a strong idempotence check across the value/list
@@ -930,7 +930,7 @@ mod tests {
     // primitive-expression / target-entry families.
     // -----------------------------------------------------------------------
 
-    use nodes::primnodes::{
+    use ::nodes::primnodes::{
         BoolExprType, CoercionForm, Const, Expr, FuncExpr, OpExpr, Param, ParamKind, TargetEntry,
         Var, VarReturningType,
     };
@@ -1036,7 +1036,7 @@ mod tests {
 
     #[test]
     fn boolexpr_round_trips() {
-        use nodes::primnodes::BoolExpr;
+        use ::nodes::primnodes::BoolExpr;
         let b = BoolExpr {
             boolop: BoolExprType::OR_EXPR,
             args: std::vec![Expr::Var(mk_var()?)],

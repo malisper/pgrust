@@ -50,16 +50,16 @@ use sortsupport_seams as sortsupport;
 
 use mcx::{alloc_in, PgBox};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
-use nodes::jointype::{
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+use ::nodes::jointype::{
     JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_SEMI,
 };
-use nodes::nodemergejoin::{
+use ::nodes::nodemergejoin::{
     EXEC_MJ_ENDINNER, EXEC_MJ_ENDOUTER, EXEC_MJ_INITIALIZE_INNER, EXEC_MJ_INITIALIZE_OUTER,
     EXEC_MJ_JOINTUPLES, EXEC_MJ_NEXTINNER, EXEC_MJ_NEXTOUTER, EXEC_MJ_SKIPINNER_ADVANCE,
     EXEC_MJ_SKIPOUTER_ADVANCE, EXEC_MJ_SKIP_TEST, EXEC_MJ_TESTOUTER,
 };
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use nodes::{
     EStateData, EcxtId, MergeJoin, MergeJoinClauseData, MergeJoinStateData, PlanStateNode,
     SlotId, TupleSlotKind,
@@ -520,7 +520,7 @@ fn MJFillInner<'mcx>(
 /// always-true.
 #[inline]
 fn exec_qual_or_true<'mcx>(
-    state: Option<&mut nodes::execexpr::ExprState<'mcx>>,
+    state: Option<&mut ::nodes::execexpr::ExprState<'mcx>>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
@@ -534,7 +534,7 @@ fn exec_qual_or_true<'mcx>(
 /// result slot.
 #[inline]
 fn exec_project_into_result<'mcx>(
-    ps: &mut nodes::execnodes::PlanStateData<'mcx>,
+    ps: &mut ::nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<SlotId> {
     execExpr::exec_project::call(ps, estate)
@@ -1166,7 +1166,7 @@ fn exec_mergejoin_node<'mcx>(
 /// `ExecInitMergeJoin(node, estate, eflags)` — create and initialize the
 /// merge-join run-time state.
 pub fn ExecInitMergeJoin<'mcx>(
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, MergeJoinStateData<'mcx>>> {

@@ -6,8 +6,8 @@
 //! installs all of them from its `init_seams()`.
 
 use types_error::PgResult;
-use nodes::parsestmt::DestReceiverHandle;
-use nodes::portalcmds::{DeclareCursorStmt, FetchStmt, ParamListInfo, ParseState};
+use ::nodes::parsestmt::DestReceiverHandle;
+use ::nodes::portalcmds::{DeclareCursorStmt, FetchStmt, ParamListInfo, ParseState};
 use portal::{Portal, QueryCompletion};
 
 seam_core::seam!(

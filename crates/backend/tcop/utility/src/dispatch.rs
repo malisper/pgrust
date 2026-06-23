@@ -4,7 +4,7 @@
 //!
 //! This is the giant `switch (nodeTag(parsetree))` that hands every utility
 //! command to its owning handler. The dispatch's *control flow* is ported here
-//! 1:1 over the owned [`nodes::nodes::Node`] tree:
+//! 1:1 over the owned [`::nodes::nodes::Node`] tree:
 //!
 //!   * the `readOnlyTree` deep-copy ([`PlannedStmt::clone_in`] into the
 //!     per-utility `mcx`), the recursion guard, and the read-only / parallel-
@@ -49,20 +49,20 @@ use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR,
 };
 use types_core::init::BackendType;
-use nodes::ddlnodes::TransactionStmtKind;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::Node;
-use nodes::nodes as ntag;
-use nodes::parsenodes::{
+use ::nodes::ddlnodes::TransactionStmtKind;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::Node;
+use ::nodes::nodes as ntag;
+use ::nodes::parsenodes::{
     ObjectType, OBJECT_DATABASE, OBJECT_EVENT_TRIGGER, OBJECT_FOREIGN_TABLE, OBJECT_INDEX,
     OBJECT_MATVIEW, OBJECT_PARAMETER_ACL, OBJECT_ROLE, OBJECT_SEQUENCE, OBJECT_TABLE,
     OBJECT_TABLESPACE, OBJECT_VIEW,
 };
-use nodes::parsestmt::{
+use ::nodes::parsestmt::{
     DestReceiverHandle, ParseState, ProcessUtilityContext, PROCESS_UTILITY_QUERY_NONATOMIC,
     PROCESS_UTILITY_TOPLEVEL,
 };
-use nodes::portalcmds::ParamListInfo;
+use ::nodes::portalcmds::ParamListInfo;
 use portal::QueryCompletion;
 
 use utility_out_seams as rt;
@@ -745,7 +745,7 @@ pub fn process_utility_wrapper<'mcx, 'a>(
     // invariant `Node` would otherwise force `'a == 'mcx`).
     let utility_stmt = mcx::alloc_in(mcx, stmt.clone_in(mcx)?)?;
     let wrapper = PlannedStmt {
-        commandType: nodes::nodes::CmdType::CMD_UTILITY,
+        commandType: ::nodes::nodes::CmdType::CMD_UTILITY,
         queryId: 0,
         utilityStmt: Some(utility_stmt),
         resultRelations: None,
@@ -779,7 +779,7 @@ pub fn process_utility_wrapper<'mcx, 'a>(
         &wrapper,
         query_string,
         false,
-        nodes::parsestmt::PROCESS_UTILITY_SUBCOMMAND,
+        ::nodes::parsestmt::PROCESS_UTILITY_SUBCOMMAND,
         None,
         tcop_dest::none_receiver(),
         &mut qc,

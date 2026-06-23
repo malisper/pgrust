@@ -27,9 +27,9 @@ extern crate alloc;
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::nodes::Node;
-use nodes::primnodes::{Expr, PlaceHolderVar};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{Expr, PlaceHolderVar};
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, Relids};
 
@@ -198,7 +198,7 @@ seam_core::seam!(
     /// owned `SubPlan`/`Plan` model. Mutates `subplan` in place.
     pub fn cost_subplan<'a, 'mcx>(
         root: &PlannerInfo,
-        subplan: &mut nodes::primnodes::SubPlan<'a>,
+        subplan: &mut ::nodes::primnodes::SubPlan<'a>,
         plan: &Node<'mcx>,
     ) -> PgResult<()>
 );
@@ -223,7 +223,7 @@ seam_core::seam!(
     /// node type already materializes its output (so `build_subplan` need not
     /// add a `Material`). Pure node-tag classification; owner execAmi.c is
     /// unported.
-    pub fn exec_materializes_output(tag: nodes::nodes::NodeTag) -> bool
+    pub fn exec_materializes_output(tag: ::nodes::nodes::NodeTag) -> bool
 );
 
 seam_core::seam!(
@@ -253,7 +253,7 @@ seam_core::seam!(
     /// Used by `finalize_primnode`'s Aggref arm. Owner planagg.c is unported.
     pub fn find_minmax_agg_replacement_param<'mcx>(
         root: &PlannerInfo,
-        aggref: &nodes::primnodes::Aggref<'mcx>,
+        aggref: &::nodes::primnodes::Aggref<'mcx>,
     ) -> Option<i32>
 );
 

@@ -36,9 +36,9 @@
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, InvalidOid, Oid, OidIsValid};
 use types_error::{PgError, PgResult};
-use nodes::bitmapset::Bitmapset;
-use nodes::parsenodes::RTEKind;
-use nodes::primnodes::{Expr, Var};
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::parsenodes::RTEKind;
+use ::nodes::primnodes::{Expr, Var};
 use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{NodeId, PlanId, PlannerInfo, RelId, Relids, SpecialJoinInfo};
 use types_selfuncs::{StatsTuple, StatsTupleFreeFunc, VariableStatData};
@@ -997,8 +997,8 @@ fn getrte_perminfo_checkasuser<'run>(
 /// `List *` of `SortGroupClause` directly; here each entry is a
 /// `Node::SortGroupClause`.
 fn sort_group_list(
-    nodes: &[mcx::PgBox<'_, nodes::nodes::Node<'_>>],
-) -> alloc::vec::Vec<nodes::rawnodes::SortGroupClause> {
+    nodes: &[mcx::PgBox<'_, ::nodes::nodes::Node<'_>>],
+) -> alloc::vec::Vec<::nodes::rawnodes::SortGroupClause> {
     nodes
         .iter()
         .map(|n| match n.as_sortgroupclause() {

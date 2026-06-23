@@ -19,7 +19,7 @@
 //!   ([`ExecutorState`]); `FreeExecutorState` consumes it (the C
 //!   `MemoryContextDelete(es_query_cxt)` is the drop).
 //! - `ExprContext *` / `ResultRelInfo *` are pool ids ([`EcxtId`]/[`RriId`])
-//!   into EState-owned pools — see `types-nodes::execnodes` for why.
+//!   into EState-owned pools — see `types-::nodes::execnodes` for why.
 //! - `Relation` crosses as a [`rel::Relation`] handle: `es_relations`
 //!   owns the opens (released at EState teardown or abort-path drop);
 //!   `ri_RelationDesc` and returned relations are aliases of those handles.
@@ -72,14 +72,14 @@ use types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, InvalidOid, Oi
 // `ExprContext_CB.arg` callback argument carry.
 use types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
-use nodes::bitmapset::Bitmapset;
-use nodes::execnodes::{
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::execnodes::{
     EStateData, EcxtId, ExprContext, ExprContextCallbackFunction, ExprContext_CB, RriId,
 };
-use nodes::nodes::CMD_UPDATE;
+use ::nodes::nodes::CMD_UPDATE;
 use rel::Relation;
-use nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo, RTE_RELATION};
-use nodes::primnodes::{Expr, TargetEntry};
+use ::nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo, RTE_RELATION};
+use ::nodes::primnodes::{Expr, TargetEntry};
 use nodes::{PlanStateData, ScanStateData, SlotId, TupleSlotKind};
 use types_storage::lock::{AccessShareLock, NoLock};
 use types_tuple::heaptuple::{DeformedColumn, FormedTuple};
@@ -93,7 +93,7 @@ use types_tuple::heaptuple::{
 // Constants (executor.h / memutils.h / pg_bitutils.h)
 // ===========================================================================
 
-use nodes::executor::{EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_WITH_NO_DATA};
+use ::nodes::executor::{EXEC_FLAG_EXPLAIN_ONLY, EXEC_FLAG_WITH_NO_DATA};
 
 /// `ALLOCSET_DEFAULT_MINSIZE` (memutils.h).
 pub const ALLOCSET_DEFAULT_MINSIZE: usize = 0;
@@ -394,7 +394,7 @@ pub fn FreeExecutorState(mut estate: ExecutorState) -> PgResult<()> {
 ///
 /// In C the tuple table is a `List *` of `TupleTableSlot *` passed by value;
 /// the owned model addresses the pool through the EState (`es_tupleTable`),
-/// where each slot is the payload-bearing [`nodes::tuptable::SlotData`].
+/// where each slot is the payload-bearing [`::nodes::tuptable::SlotData`].
 /// The per-slot processing (clear, release, descriptor release) flows through
 /// the execTuples-owned `exec_reset_one_slot` seam; the `should_free` memory
 /// release of the slot itself and its value arrays is, in the owned model, the
@@ -891,11 +891,11 @@ pub fn ExecAssignScanProjectionInfo<'mcx>(
 /// `((Scan *) node->ps.plan)->scanrelid` — the range-table index of the scanned
 /// relation, read off whichever `Scan`-derived plan node the `PlanState` holds.
 /// Mirrors the C unconditional `(Scan *)` cast (a non-Scan plan is a loud
-/// panic). The `BitmapHeapScan` plan node is not a `nodes::Node` variant,
+/// panic). The `BitmapHeapScan` plan node is not a `::nodes::Node` variant,
 /// so its callers pass the varno explicitly via
 /// [`ExecAssignScanProjectionInfoWithVarno`] instead.
 fn scan_scanrelid(ps: &PlanStateData<'_>) -> u32 {
-    use nodes::nodes::ntag;
+    use ::nodes::nodes::ntag;
     let node = ps
         .plan
         .as_ref()

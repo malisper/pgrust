@@ -11,7 +11,7 @@ extern crate alloc;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{NodeId, PlannerInfo};
 
 seam_core::seam!(

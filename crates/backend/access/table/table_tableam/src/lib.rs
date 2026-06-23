@@ -27,8 +27,8 @@ use types_core::primitive::{
 use rel::Relation;
 use types_core::xact::TransactionIdIsValid;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
-use nodes::TupleSlotKind;
-use nodes::tuptable::SlotData;
+use ::nodes::TupleSlotKind;
+use ::nodes::tuptable::SlotData;
 use snapshot::snapshot::IsMVCCSnapshot;
 use types_tableam::relscan::{
     ParallelBlockTableScanDescData, ParallelBlockTableScanWorkerData, ParallelTableScanDesc,
@@ -435,7 +435,7 @@ pub fn table_slot_callbacks(relation: &Relation<'_>) -> TupleSlotKind {
 pub fn table_slot_create<'mcx>(
     mcx: Mcx<'mcx>,
     relation: &Relation<'_>,
-) -> PgResult<nodes::tuptable::SlotData<'mcx>> {
+) -> PgResult<::nodes::tuptable::SlotData<'mcx>> {
     let tts_cb = table_slot_callbacks(relation);
     let tupdesc = Some(mcx::alloc_in(mcx, relation.rd_att.clone_in(mcx)?)?);
     execTuples_seams::make_single_tuple_table_slot::call(mcx, tupdesc, tts_cb)

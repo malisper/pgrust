@@ -42,7 +42,7 @@ use mcx::Mcx;
 use types_tuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use nodes_core::nodefuncs::{expr_typmod, relabel_to_typmod};
 use clauses::estimate_expression_value;
 

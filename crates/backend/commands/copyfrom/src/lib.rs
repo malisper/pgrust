@@ -470,9 +470,9 @@ pub struct CopyFromStateData<'mcx> {
     /// The parse-relevant cstate the parser drives.
     pub cstate: CopyParseState<'mcx>,
     /// `List *range_table` (== `pstate->p_rtable`).
-    pub range_table: mcx::PgVec<'mcx, nodes::RangeTblEntry<'mcx>>,
+    pub range_table: mcx::PgVec<'mcx, ::nodes::RangeTblEntry<'mcx>>,
     /// `List *rteperminfos` (== `pstate->p_rteperminfos`).
-    pub rteperminfos: mcx::PgVec<'mcx, nodes::RTEPermissionInfo<'mcx>>,
+    pub rteperminfos: mcx::PgVec<'mcx, ::nodes::RTEPermissionInfo<'mcx>>,
     /// `bool volatile_defexprs`.
     pub volatile_defexprs: bool,
     /// `cstate->opts.freeze` (CopyFormatOptions). Carried so `CopyFrom` can fire
@@ -494,7 +494,7 @@ pub struct CopyFromStateData<'mcx> {
     /// and compile them into `cstate.defexprs` (+ build `defmap`/`num_defaults`)
     /// in `CopyFrom`, before the row loop. This is a faithful split of the same
     /// C steps — no behavior change, only the allocation context differs.
-    pub raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, nodes::Expr<'mcx>>>>,
+    pub raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ::nodes::Expr<'mcx>>>>,
 }
 
 /* ===========================================================================
@@ -516,13 +516,13 @@ pub fn BeginCopyFrom<'mcx>(
     opts: CopyParseOptions,
     file_encoding_opt: i32,
     attnumlist: mcx::PgVec<'mcx, AttrNumber>,
-    range_table: mcx::PgVec<'mcx, nodes::RangeTblEntry<'mcx>>,
-    rteperminfos: mcx::PgVec<'mcx, nodes::RTEPermissionInfo<'mcx>>,
+    range_table: mcx::PgVec<'mcx, ::nodes::RangeTblEntry<'mcx>>,
+    rteperminfos: mcx::PgVec<'mcx, ::nodes::RTEPermissionInfo<'mcx>>,
     freeze: bool,
     filename: Option<&str>,
     is_program: bool,
     data_source_cb: Option<CopyDataSourceCb>,
-    where_clause: mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>>,
+    where_clause: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>,
     force_notnull_flags: mcx::PgVec<'mcx, bool>,
     force_null_flags: mcx::PgVec<'mcx, bool>,
     convert_select_flags: Option<mcx::PgVec<'mcx, bool>>,
@@ -541,10 +541,10 @@ pub fn BeginCopyFrom<'mcx>(
     let mut in_functions: mcx::PgVec<'mcx, fmgr::FmgrInfo> =
         mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
     let mut typioparams: mcx::PgVec<'mcx, Oid> = mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
-    let mut defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> =
+    let mut defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> =
         mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
     // Raw (unplanned) default Exprs carried to CopyFrom (see CopyFromStateData).
-    let mut raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, nodes::Expr>>> =
+    let mut raw_defexprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ::nodes::Expr>>> =
         mcx::vec_with_capacity_in(mcx, num_phys_attrs)?;
 
     for attnum in 1..=num_phys_attrs {
@@ -1039,7 +1039,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
     // EState *estate = CreateExecutorState();
     let mut estate_owned = execUtils::create_executor_state_in(mcx)?;
     let processed = {
-        let estate: &mut nodes::EStateData<'mcx> = &mut estate_owned;
+        let estate: &mut ::nodes::EStateData<'mcx> = &mut estate_owned;
 
         // ExecInitRangeTable(estate, cstate->range_table, cstate->rteperminfos,
         //                    bms_make_singleton(1));
@@ -1054,15 +1054,15 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         )?;
 
         // resultRelInfo = makeNode(ResultRelInfo); ExecInitResultRelation(estate, rri, 1);
-        let rri: RriId = estate.add_result_rel(nodes::ResultRelInfo::default())?;
+        let rri: RriId = estate.add_result_rel(::nodes::ResultRelInfo::default())?;
         execUtils::ExecInitResultRelation(estate, rri, 1, false)?;
 
         // CheckValidResultRel(resultRelInfo, CMD_INSERT, ONCONFLICT_NONE, NIL);
         execMain_seams::check_valid_result_rel::call(
             estate,
             rri,
-            nodes::nodes::CmdType::CMD_INSERT,
-            nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
+            ::nodes::nodes::CmdType::CMD_INSERT,
+            ::nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
             &[], /* mergeActions: COPY is INSERT-only */
         )?;
 
@@ -1090,17 +1090,17 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         //   mtstate->rootResultRelInfo = resultRelInfo;
         let mut mtstate_rels: mcx::PgVec<'mcx, RriId> = mcx::PgVec::new_in(mcx);
         mtstate_rels.push(rri);
-        let mut mtstate: nodes::ModifyTableState<'mcx> =
-            nodes::ModifyTableState {
-                ps: nodes::execnodes::PlanStateData::default(),
+        let mut mtstate: ::nodes::ModifyTableState<'mcx> =
+            ::nodes::ModifyTableState {
+                ps: ::nodes::execnodes::PlanStateData::default(),
                 plan_node: None,
-                operation: nodes::nodes::CmdType::CMD_INSERT,
-                onConflictAction: nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
+                operation: ::nodes::nodes::CmdType::CMD_INSERT,
+                onConflictAction: ::nodes::nodes::OnConflictAction::ONCONFLICT_NONE,
                 canSetTag: false,
                 mt_done: false,
                 resultRelInfo: mtstate_rels,
                 rootResultRelInfo: Some(rri),
-                mt_epqstate: nodes::execnodes::EPQState::default(),
+                mt_epqstate: ::nodes::execnodes::EPQState::default(),
                 fireBSTriggers: true,
                 mt_resultOidAttno: 0,
                 mt_lastResultOid: types_core::primitive::InvalidOid,
@@ -1168,7 +1168,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         // when `num_defaults > 0` (i.e. a real default exists); the common COPY
         // with a full column list never touches them.
         state.cstate.econtext = Some(econtext);
-        state.cstate.estate = Some(nodes::execnodes::EStateLink::from_ref(estate));
+        state.cstate.estate = Some(::nodes::execnodes::EStateLink::from_ref(estate));
 
         // if (cstate->whereClause)
         //     cstate->qualexpr = ExecInitQual(castNode(List, cstate->whereClause),
@@ -1180,7 +1180,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
         // the owned ExecInitQual ignores `parent` anyway (it threads only the
         // EState back-link).
         if !state.cstate.where_clause.is_empty() {
-            let qual: mcx::PgVec<'mcx, nodes::primnodes::Expr> =
+            let qual: mcx::PgVec<'mcx, ::nodes::primnodes::Expr> =
                 core::mem::replace(&mut state.cstate.where_clause, mcx::PgVec::new_in(mcx));
             state.cstate.qualexpr =
                 execExpr_seams::exec_init_qual_no_parent::call(
@@ -1209,14 +1209,14 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
             mcx,
             estate,
             rri,
-            nodes::nodes::CmdType::CMD_INSERT,
+            ::nodes::nodes::CmdType::CMD_INSERT,
         )?;
 
         // If the named relation is a partitioned table, initialize state for
         // CopyFrom tuple routing (copyfrom.c:978-981).
         //   if (cstate->rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
         //       proute = ExecSetupPartitionTupleRouting(estate, cstate->rel);
-        let mut proute: Option<mcx::PgBox<'mcx, nodes::PartitionTupleRouting<'mcx>>> =
+        let mut proute: Option<mcx::PgBox<'mcx, ::nodes::PartitionTupleRouting<'mcx>>> =
             if relkind == RELKIND_PARTITIONED_TABLE {
                 let rel = relation_alias(estate, rri);
                 Some(
@@ -1458,7 +1458,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
                             estate,
                             result_rel_info,
                             myslot,
-                            nodes::nodes::CmdType::CMD_INSERT,
+                            ::nodes::nodes::CmdType::CMD_INSERT,
                         )?;
                     }
                 }
@@ -1623,7 +1623,7 @@ pub fn CopyFrom<'mcx>(mcx: Mcx<'mcx>, state: &mut CopyFromStateData<'mcx>) -> Pg
 /// then `ExecStoreVirtualTuple`. Mirrors the C "directly store the values/nulls
 /// array in the slot" + `ExecStoreVirtualTuple`.
 fn store_row_into_slot<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     slot: SlotId,
     row: &[AttrValue<'mcx>],
 ) -> PgResult<()> {
@@ -1844,7 +1844,7 @@ fn copy_from_error_context(cstate: &CopyParseState<'_>) -> String {
 
 /// `ResultRelInfo.ri_RelationDesc` as a fresh alias (the open relation the
 /// EState owns).
-fn relation_alias<'mcx>(estate: &nodes::EStateData<'mcx>, rri: RriId) -> Relation<'mcx> {
+fn relation_alias<'mcx>(estate: &::nodes::EStateData<'mcx>, rri: RriId) -> Relation<'mcx> {
     estate
         .result_rel(rri)
         .ri_RelationDesc

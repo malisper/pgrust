@@ -15,8 +15,8 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::primnodes::{Expr, TargetEntry};
-use nodes::tuptable::{AttInMetadata, SlotData, TupOutputState};
+use ::nodes::primnodes::{Expr, TargetEntry};
+use ::nodes::tuptable::{AttInMetadata, SlotData, TupOutputState};
 // The canonical value enum; `Datum` is its transitional alias.
 use types_tuple::heaptuple::{Datum, FormedTuple};
 use types_tuple::heaptuple::{HeapTuple, TupleDesc, TupleDescData, RECORDOID};
@@ -77,14 +77,14 @@ pub fn ExecCleanTypeFromTL<'mcx>(
 /// The descriptor is allocated in the executor's per-query context
 /// (`estate.es_query_cxt`, the C `CurrentMemoryContext` during plan init).
 pub fn ExecInitResultTypeTL<'mcx>(
-    planstate: &mut nodes::execnodes::PlanStateData<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
+    planstate: &mut ::nodes::execnodes::PlanStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
     // `planstate->plan->targetlist` — the plan node lives in the per-query
     // arena (`&'mcx Node`), so reading the tlist reference releases the
     // `&mut planstate` borrow before the store below.
-    let plan: &'mcx nodes::nodes::Node<'mcx> = planstate
+    let plan: &'mcx ::nodes::nodes::Node<'mcx> = planstate
         .plan
         .expect("ExecInitResultTypeTL: PlanState has no plan");
     let targetlist: &'mcx [TargetEntry<'mcx>] = plan
@@ -329,9 +329,9 @@ pub fn HeapTupleHeaderGetDatum<'mcx>(
 /// `TupOutputState` for sending rows of `tupdesc` to `dest`.
 pub fn begin_tup_output_tupdesc<'mcx>(
     mcx: Mcx<'mcx>,
-    dest: nodes::parsestmt::DestReceiverHandle,
+    dest: ::nodes::parsestmt::DestReceiverHandle,
     tupdesc: TupleDesc<'mcx>,
-    tts_ops: nodes::TupleSlotKind,
+    tts_ops: ::nodes::TupleSlotKind,
 ) -> PgResult<TupOutputState<'mcx>> {
     // tstate->slot = MakeSingleTupleTableSlot(tupdesc, tts_ops);
     // C shares the `tupdesc` pointer between the slot and the rStartup call; the
@@ -348,7 +348,7 @@ pub fn begin_tup_output_tupdesc<'mcx>(
         dest_seams::dest_rstartup::call(
             mcx,
             dest,
-            nodes::nodes::CmdType::CMD_SELECT,
+            ::nodes::nodes::CmdType::CMD_SELECT,
             td,
         )?;
     }
@@ -473,7 +473,7 @@ pub fn install_guc_funcs_show_seams() {
 
     // begin_tup_output_tupdesc(dest, tupdesc, &TTSOpsVirtual).
     gseams::begin_tup_output_tupdesc::set(|mcx, dest, tupdesc| {
-        begin_tup_output_tupdesc(mcx, dest, tupdesc, nodes::TupleSlotKind::Virtual)
+        begin_tup_output_tupdesc(mcx, dest, tupdesc, ::nodes::TupleSlotKind::Virtual)
     });
 
     // do_text_output_oneline(tstate, value).

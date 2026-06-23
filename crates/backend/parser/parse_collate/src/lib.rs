@@ -68,8 +68,8 @@ use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERROR, ERRCODE_COLLATION_MISMATCH, ERRCODE_OUT_OF_MEMORY};
 use parsenodes::{AGGKIND_HYPOTHETICAL, AGGKIND_NORMAL, AGGKIND_ORDERED_SET};
 use types_cluster::ParseState;
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::{Aggref, CoercionForm, Expr};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::{Aggref, CoercionForm, Expr};
 
 use utils_error::ereport;
 use nodes_core::makefuncs::make_relabel_type;
@@ -211,7 +211,7 @@ impl<'p, 'mcx> AssignCollationsContext<'p, 'mcx> {
 /// (the two branches of `assign_query_collations_walker`).
 pub fn assign_query_collations<'mcx>(
     pstate: Option<&ParseState<'mcx>>,
-    query: &mut nodes::copy_query::Query<'mcx>,
+    query: &mut ::nodes::copy_query::Query<'mcx>,
 ) -> PgResult<()> {
     // targetList / returningList are `Vec<TargetEntry>` (typed); each member's
     // `expr` is the independent subexpression the C `T_List` branch of
@@ -274,7 +274,7 @@ pub fn assign_query_collations<'mcx>(
 /// `WHERE`), each processed independently by `assign_query_collations_walker`.
 fn assign_onconflict_collations<'mcx>(
     pstate: Option<&ParseState<'mcx>>,
-    oce: &mut nodes::rawnodes::OnConflictExpr<'mcx>,
+    oce: &mut ::nodes::rawnodes::OnConflictExpr<'mcx>,
 ) -> PgResult<()> {
     for e in oce.arbiterElems.iter_mut() {
         assign_query_collations_walker_node(pstate, e)?;
@@ -298,7 +298,7 @@ fn assign_onconflict_collations<'mcx>(
 /// quals, processed independently.
 fn assign_fromexpr_collations<'mcx>(
     pstate: Option<&ParseState<'mcx>>,
-    from: &mut nodes::rawnodes::FromExpr<'mcx>,
+    from: &mut ::nodes::rawnodes::FromExpr<'mcx>,
 ) -> PgResult<()> {
     for e in from.fromlist.iter_mut() {
         assign_query_collations_walker_node(pstate, e)?;
@@ -348,7 +348,7 @@ fn assign_query_collations_walker_expr<'mcx>(
 /// only `te.expr` would skip the eager throw entirely.
 fn assign_targetentry_collations<'p, 'mcx>(
     pstate: Option<&'p ParseState<'mcx>>,
-    te: &mut nodes::primnodes::TargetEntry<'mcx>,
+    te: &mut ::nodes::primnodes::TargetEntry<'mcx>,
 ) -> PgResult<()> {
     // Fresh top-level context, matching `assign_expr_collations(pstate, tle)`.
     let mut loccontext = AssignCollationsContext::fresh(pstate);
@@ -941,7 +941,7 @@ fn recurse_expr_children<'mcx>(
     // pstate) so the Node-level in-place walker enumerates its children. The
     // wrapper is written back so any in-place mutation is preserved.
     let mcx: mcx::Mcx<'mcx> = loccontext.walker_mcx();
-    let placeholder = Expr::Var(nodes::primnodes::Var::default());
+    let placeholder = Expr::Var(::nodes::primnodes::Var::default());
     let mut wrapped = Node::mk_expr(mcx, core::mem::replace(expr, placeholder))?;
     let res = recurse_children(&mut wrapped, loccontext);
     if let Some(e) = wrapped.into_expr() {
@@ -1188,7 +1188,7 @@ fn assign_hypothetical_collations<'mcx>(
                 // paircontext.collation, COERCE_IMPLICIT_CAST). Take the old expr
                 // out of the box (leaving a placeholder), build the RelabelType
                 // around it, and write it back into the same box (no realloc).
-                let placeholder = Expr::Var(nodes::primnodes::Var::default());
+                let placeholder = Expr::Var(::nodes::primnodes::Var::default());
                 let old = core::mem::replace(slot, placeholder);
                 let rtype = match expr_type(Some(&old)) {
                     Ok(t) => t,

@@ -19,16 +19,16 @@ use utils_error::ereport;
 use types_acl::acl::ACL_SELECT;
 use types_tuple::heaptuple::{INT8OID, UNKNOWNOID};
 
-use nodes::nodes::{ntag, Node, NodePtr, ONCONFLICT_UPDATE};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::{Expr, InferenceElem, TargetEntry};
-use nodes::ddlnodes::IndexElem;
-use nodes::rawnodes::{
+use ::nodes::nodes::{ntag, Node, NodePtr, ONCONFLICT_UPDATE};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::{Expr, InferenceElem, TargetEntry};
+use ::nodes::ddlnodes::IndexElem;
+use ::nodes::rawnodes::{
     ColumnRef, InferClause, OnConflictClause, SortByDir, SortByNulls, SortGroupClause,
     WindowClause, WindowDef,
 };
-use nodes::value::StringNode;
-use nodes::nodewindowagg::{
+use ::nodes::value::StringNode;
+use ::nodes::nodewindowagg::{
     FRAMEOPTION_DEFAULTS, FRAMEOPTION_END_OFFSET, FRAMEOPTION_GROUPS, FRAMEOPTION_RANGE,
     FRAMEOPTION_ROWS, FRAMEOPTION_START_OFFSET,
 };
@@ -780,7 +780,7 @@ fn sortgroupclauses_to_node_vec<'mcx>(
 fn node_vec_as_sortby<'mcx>(
     mcx: Mcx<'mcx>,
     list: &mcx::PgVec<'mcx, NodePtr<'mcx>>,
-) -> PgResult<Vec<nodes::rawnodes::SortBy<'mcx>>> {
+) -> PgResult<Vec<::nodes::rawnodes::SortBy<'mcx>>> {
     let mut out = Vec::with_capacity(list.len());
     for n in list.iter() {
         match n.node_tag() {

@@ -32,8 +32,8 @@
 
 use types_error::PgResult;
 use fmgr::FunctionCallInfoBaseData;
-use nodes::nodeagg::Aggref;
-use nodes::execnodes::{EcxtId, ExprContextCallbackFunction};
+use ::nodes::nodeagg::Aggref;
+use ::nodes::execnodes::{EcxtId, ExprContextCallbackFunction};
 
 /// `AggGetAggref(fcinfo)` — return a copy (in `mcx`) of the `Aggref` being
 /// evaluated, or `None` if not called as an aggregate support function. C

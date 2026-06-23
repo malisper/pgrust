@@ -1379,8 +1379,8 @@ fn build_plpgsql_parse_state(
     estate: &mut PLpgSQL_execstate,
     expr: &plpgsql::PLpgSQL_expr,
     input_collation: Oid,
-) -> types_error::PgResult<nodes::parsestmt::PlpgsqlExprParseState> {
-    use nodes::parsestmt::{PlpgsqlExprParseState, PlpgsqlParamInfo};
+) -> types_error::PgResult<::nodes::parsestmt::PlpgsqlExprParseState> {
+    use ::nodes::parsestmt::{PlpgsqlExprParseState, PlpgsqlParamInfo};
 
     let mut names: std::collections::BTreeMap<std::string::String, PlpgsqlParamInfo> =
         std::collections::BTreeMap::new();
@@ -1558,13 +1558,13 @@ fn build_plpgsql_parse_state(
     // can apply variable-vs-column precedence and raise the ambiguity error.
     let resolve_option = match estate.resolve_option {
         plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_ERROR => {
-            nodes::parsestmt::PlpgsqlResolveOption::Error
+            ::nodes::parsestmt::PlpgsqlResolveOption::Error
         }
         plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_VARIABLE => {
-            nodes::parsestmt::PlpgsqlResolveOption::Variable
+            ::nodes::parsestmt::PlpgsqlResolveOption::Variable
         }
         plpgsql::PLpgSQL_resolve_option::PLPGSQL_RESOLVE_COLUMN => {
-            nodes::parsestmt::PlpgsqlResolveOption::Column
+            ::nodes::parsestmt::PlpgsqlResolveOption::Column
         }
     };
 
@@ -2414,7 +2414,7 @@ fn exec_run_select_rows(
     estate: &mut PLpgSQL_execstate,
     query: &str,
     parse_mode: plpgsql::RawParseMode,
-    parse_state: nodes::parsestmt::PlpgsqlExprParseState,
+    parse_state: ::nodes::parsestmt::PlpgsqlExprParseState,
 ) -> types_error::PgResult<Vec<Vec<exec_seams::ExecsqlColumn>>> {
     let snapshot = build_datum_snapshot(estate)?;
     let result = exec_seams::exec_run_select_via_spi::call(

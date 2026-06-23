@@ -8,7 +8,7 @@
 //! `elements_worker` / `json_object_keys_worker` parse walks) is ported in
 //! `backend-utils-adt-jsonfuncs::{elements,keys}`.
 //!
-//! Here those cores are assembled into [`nodes::execexpr::PGFunction`]s (the
+//! Here those cores are assembled into [`::nodes::execexpr::PGFunction`]s (the
 //! executor-frame ABI whose call frame carries the LIVE `ReturnSetInfo`) and
 //! registered in this unit's executor-frame SRF table from [`register_json_srfs`]
 //! (called by `init_seams`) — the executor-frame `fmgrtab.c` analogue for these
@@ -27,11 +27,11 @@ use core::any::Any;
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::execexpr::ExprDoneCond;
-use nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
+use ::nodes::execexpr::ExprDoneCond;
+use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::heaptuple::Datum;
 
-use funcapi::srf_support::{
+use ::funcapi::srf_support::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall,
 };
 

@@ -16,10 +16,10 @@
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::ddlnodes::PartitionBoundSpec;
-use nodes::nodes::Node;
-use nodes::nodes::NodePtr;
-use nodes::partition::{
+use ::nodes::ddlnodes::PartitionBoundSpec;
+use ::nodes::nodes::Node;
+use ::nodes::nodes::NodePtr;
+use ::nodes::partition::{
     PartitionBoundInfo, PartitionBoundInfoData, PartitionDescData, PartitionKeyData,
     PartitionRangeDatumKind,
 };
@@ -172,7 +172,7 @@ seam_core::seam!(
         key: &PartitionKeyData<'_>,
         partdesc: &PartitionDescData<'_>,
         spec: &PartitionBoundSpec<'_>,
-        pstate: Option<&nodes::parsestmt::ParseState<'_>>,
+        pstate: Option<&::nodes::parsestmt::ParseState<'_>>,
     ) -> PgResult<()>
 );
 
@@ -228,7 +228,7 @@ seam_core::seam!(
  * (joinrels.c:compute_partition_bounds) drives over the planner's `RelOptInfo`
  * boundinfo. These read the planner-side `pathnodes::PartitionBoundInfoData`
  * (the `RelOptInfo.boundinfo` carrier), distinct from the
- * `nodes::partition::PartitionBoundInfoData` used by the routing seams
+ * `::nodes::partition::PartitionBoundInfoData` used by the routing seams
  * above. (Additive — appended for joinrels.)
  * ======================================================================== */
 

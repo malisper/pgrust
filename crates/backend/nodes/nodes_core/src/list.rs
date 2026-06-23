@@ -8,7 +8,7 @@
 //! exactly:
 //!
 //! * `NIL` is Rust `None` (`Option<&List>` / `Option<PgBox<List>>`);
-//! * a non-empty list is `nodes::list::List { type, elements }` whose
+//! * a non-empty list is `::nodes::list::List { type, elements }` whose
 //!   [`PgVec`] of [`ListCell`] is guaranteed non-empty (`length >= 1`).
 //!
 //! The C header's `length` / `max_length` / `elements` / `initial_elements[]`
@@ -36,8 +36,8 @@ use core::ffi::c_void;
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::{Oid, TransactionId};
 use types_error::PgResult;
-use nodes::list::{List, ListCell};
-use nodes::nodes::{NodeTag, T_IntList, T_List, T_OidList, T_XidList};
+use ::nodes::list::{List, ListCell};
+use ::nodes::nodes::{NodeTag, T_IntList, T_List, T_OidList, T_XidList};
 
 // ---------------------------------------------------------------------------
 // Cross-unit seams (genuinely unported owners — mirror-pg-and-panic).
@@ -89,7 +89,7 @@ fn cell_xid(lc: &ListCell) -> TransactionId {
 /// `list_length(l)` (pg_list.h): `l ? l->length : 0`.
 #[inline]
 pub fn list_length(l: Option<&List<'_>>) -> i32 {
-    nodes::list::list_length(l)
+    ::nodes::list::list_length(l)
 }
 
 // ---------------------------------------------------------------------------

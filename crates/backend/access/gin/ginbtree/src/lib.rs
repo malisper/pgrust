@@ -1246,7 +1246,7 @@ fn encode_ginxlog_split(
 /// (header + opaque), via the `ginutil.c` byte logic re-implemented here for the
 /// root-split temp page (the only `GinInitPage` call in `ginbtree.c`).
 fn gin_init_page(page: &mut [u8], flags: u32, page_size: usize) -> PgResult<()> {
-    page::PageInit(
+    ::page::PageInit(
         page,
         page_size,
         core::mem::size_of::<gin::GinPageOpaqueData>(),
@@ -1312,7 +1312,7 @@ fn copy_page_into_buffer(buffer: Buffer, src: &[u8]) -> PgResult<()> {
 /// split, then re-initializes it via [`gin_init_page`].
 fn page_get_temp_page(src: &[u8]) -> PgResult<Vec<u8>> {
     let pr = PageRef::new(src)?;
-    let tmp = page::PageGetTempPage(&pr)?;
+    let tmp = ::page::PageGetTempPage(&pr)?;
     Ok(tmp.into_bytes())
 }
 

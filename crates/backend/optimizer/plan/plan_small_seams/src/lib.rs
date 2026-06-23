@@ -19,7 +19,7 @@
 
 extern crate alloc;
 
-use nodes::rawnodes::FromExpr;
+use ::nodes::rawnodes::FromExpr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{JoinlistNode, PlannerInfo};
 

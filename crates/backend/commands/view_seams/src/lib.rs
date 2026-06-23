@@ -22,8 +22,8 @@
 use mcx::Mcx;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::ddlnodes::ViewStmt;
+use ::nodes::copy_query::Query;
+use ::nodes::ddlnodes::ViewStmt;
 
 seam_core::seam!(
     /// `DefineView(stmt, queryString, stmt_location, stmt_len)` (view.c) —

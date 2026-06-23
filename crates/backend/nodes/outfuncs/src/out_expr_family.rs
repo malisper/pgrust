@@ -1,7 +1,7 @@
 //! `_out<Type>` writers for the `primnodes.h` expression family — both the
-//! post-analysis [`nodes::primnodes::Expr`] arms (carried by
+//! post-analysis [`::nodes::primnodes::Expr`] arms (carried by
 //! `Node::Expr`) and the raw-grammar `Expr`-deriving nodes carried as their own
-//! `Node` arms ([`nodes::rawexprnodes`]). Each writer mirrors its
+//! `Node` arms ([`::nodes::rawexprnodes`]). Each writer mirrors its
 //! `outfuncs.funcs.c` / `outfuncs.c` body field-for-field with EXACT C
 //! token-name + field-order parity.
 //!
@@ -19,8 +19,8 @@
 
 use alloc::string::String;
 
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::Expr;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::Expr;
 
 use crate::{
     out_expr, out_node_inner, write_bool_field, write_enum_field, write_expr_list_field,
@@ -98,7 +98,7 @@ fn write_string_list_field(buf: &mut String, name: &str, list: &[String], _wl: b
 fn write_targetentry_list_field(
     buf: &mut String,
     name: &str,
-    list: &[nodes::primnodes::TargetEntry<'_>],
+    list: &[::nodes::primnodes::TargetEntry<'_>],
     wl: bool,
 ) {
     use core::fmt::Write as _;
@@ -121,7 +121,7 @@ fn write_targetentry_list_field(
 fn write_sortgroupclause_list_field(
     buf: &mut String,
     name: &str,
-    list: &[nodes::rawnodes::SortGroupClause],
+    list: &[::nodes::rawnodes::SortGroupClause],
     wl: bool,
 ) {
     use core::fmt::Write as _;
@@ -149,7 +149,7 @@ fn write_sortgroupclause_list_field(
 /// READ side: `read_expr_family::read_aggref` reconstructs every field in this
 /// order; `Aggref.args` reads framed `TargetEntry` children into `mcx` and erases
 /// `'mcx` → `'static` (the same lifetime-only transmute `clone_aggref` uses).
-fn out_aggref(buf: &mut String, n: &nodes::primnodes::Aggref, wl: bool) {
+fn out_aggref(buf: &mut String, n: &::nodes::primnodes::Aggref, wl: bool) {
     buf.push_str("AGGREF");
     write_oid_field(buf, "aggfnoid", n.aggfnoid);
     write_oid_field(buf, "aggtype", n.aggtype);
@@ -176,7 +176,7 @@ fn out_aggref(buf: &mut String, n: &nodes::primnodes::Aggref, wl: bool) {
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_grouping_func(buf: &mut String, n: &nodes::primnodes::GroupingFunc, wl: bool) {
+fn out_grouping_func(buf: &mut String, n: &::nodes::primnodes::GroupingFunc, wl: bool) {
     buf.push_str("GROUPINGFUNC");
     write_expr_list_field(buf, "args", &n.args, wl);
     crate::write_int_list_field(buf, "refs", Some(&n.refs));
@@ -185,7 +185,7 @@ fn out_grouping_func(buf: &mut String, n: &nodes::primnodes::GroupingFunc, wl: b
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_window_func(buf: &mut String, n: &nodes::primnodes::WindowFunc, wl: bool) {
+fn out_window_func(buf: &mut String, n: &::nodes::primnodes::WindowFunc, wl: bool) {
     buf.push_str("WINDOWFUNC");
     write_oid_field(buf, "winfnoid", n.winfnoid);
     write_oid_field(buf, "wintype", n.wintype);
@@ -202,7 +202,7 @@ fn out_window_func(buf: &mut String, n: &nodes::primnodes::WindowFunc, wl: bool)
 
 fn out_window_func_run_condition(
     buf: &mut String,
-    n: &nodes::primnodes::WindowFuncRunCondition,
+    n: &::nodes::primnodes::WindowFuncRunCondition,
     wl: bool,
 ) {
     buf.push_str("WINDOWFUNCRUNCONDITION");
@@ -212,14 +212,14 @@ fn out_window_func_run_condition(
     write_opt_box_expr(buf, "arg", &n.arg, wl);
 }
 
-fn out_merge_support_func(buf: &mut String, n: &nodes::primnodes::MergeSupportFunc, wl: bool) {
+fn out_merge_support_func(buf: &mut String, n: &::nodes::primnodes::MergeSupportFunc, wl: bool) {
     buf.push_str("MERGESUPPORTFUNC");
     write_oid_field(buf, "msftype", n.msftype);
     write_oid_field(buf, "msfcollid", n.msfcollid);
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_subscripting_ref(buf: &mut String, n: &nodes::primnodes::SubscriptingRef, wl: bool) {
+fn out_subscripting_ref(buf: &mut String, n: &::nodes::primnodes::SubscriptingRef, wl: bool) {
     buf.push_str("SUBSCRIPTINGREF");
     write_oid_field(buf, "refcontainertype", n.refcontainertype);
     write_oid_field(buf, "refelemtype", n.refelemtype);
@@ -232,7 +232,7 @@ fn out_subscripting_ref(buf: &mut String, n: &nodes::primnodes::SubscriptingRef,
     write_opt_box_expr(buf, "refassgnexpr", &n.refassgnexpr, wl);
 }
 
-fn out_named_arg_expr(buf: &mut String, n: &nodes::primnodes::NamedArgExpr, wl: bool) {
+fn out_named_arg_expr(buf: &mut String, n: &::nodes::primnodes::NamedArgExpr, wl: bool) {
     buf.push_str("NAMEDARGEXPR");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_string_field(buf, "name", n.name.as_deref());
@@ -242,7 +242,7 @@ fn out_named_arg_expr(buf: &mut String, n: &nodes::primnodes::NamedArgExpr, wl: 
 
 fn out_scalar_array_op_expr(
     buf: &mut String,
-    n: &nodes::primnodes::ScalarArrayOpExpr,
+    n: &::nodes::primnodes::ScalarArrayOpExpr,
     wl: bool,
 ) {
     buf.push_str("SCALARARRAYOPEXPR");
@@ -256,7 +256,7 @@ fn out_scalar_array_op_expr(
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_sublink(buf: &mut String, n: &nodes::primnodes::SubLink, wl: bool) {
+fn out_sublink(buf: &mut String, n: &::nodes::primnodes::SubLink, wl: bool) {
     buf.push_str("SUBLINK");
     write_enum_field(buf, "subLinkType", n.subLinkType as i32);
     write_int_field(buf, "subLinkId", n.subLinkId);
@@ -283,7 +283,7 @@ fn out_sublink(buf: &mut String, n: &nodes::primnodes::SubLink, wl: bool) {
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_field_select(buf: &mut String, n: &nodes::primnodes::FieldSelect, wl: bool) {
+fn out_field_select(buf: &mut String, n: &::nodes::primnodes::FieldSelect, wl: bool) {
     buf.push_str("FIELDSELECT");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_int_field(buf, "fieldnum", n.fieldnum as i32);
@@ -292,7 +292,7 @@ fn out_field_select(buf: &mut String, n: &nodes::primnodes::FieldSelect, wl: boo
     write_oid_field(buf, "resultcollid", n.resultcollid);
 }
 
-fn out_field_store(buf: &mut String, n: &nodes::primnodes::FieldStore, wl: bool) {
+fn out_field_store(buf: &mut String, n: &::nodes::primnodes::FieldStore, wl: bool) {
     buf.push_str("FIELDSTORE");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_expr_list_field(buf, "newvals", &n.newvals, wl);
@@ -302,7 +302,7 @@ fn out_field_store(buf: &mut String, n: &nodes::primnodes::FieldStore, wl: bool)
     write_oid_field(buf, "resulttype", n.resulttype);
 }
 
-fn out_relabel_type(buf: &mut String, n: &nodes::primnodes::RelabelType, wl: bool) {
+fn out_relabel_type(buf: &mut String, n: &::nodes::primnodes::RelabelType, wl: bool) {
     buf.push_str("RELABELTYPE");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_oid_field(buf, "resulttype", n.resulttype);
@@ -312,7 +312,7 @@ fn out_relabel_type(buf: &mut String, n: &nodes::primnodes::RelabelType, wl: boo
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_coerce_via_io(buf: &mut String, n: &nodes::primnodes::CoerceViaIO, wl: bool) {
+fn out_coerce_via_io(buf: &mut String, n: &::nodes::primnodes::CoerceViaIO, wl: bool) {
     buf.push_str("COERCEVIAIO");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_oid_field(buf, "resulttype", n.resulttype);
@@ -321,7 +321,7 @@ fn out_coerce_via_io(buf: &mut String, n: &nodes::primnodes::CoerceViaIO, wl: bo
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_array_coerce_expr(buf: &mut String, n: &nodes::primnodes::ArrayCoerceExpr, wl: bool) {
+fn out_array_coerce_expr(buf: &mut String, n: &::nodes::primnodes::ArrayCoerceExpr, wl: bool) {
     buf.push_str("ARRAYCOERCEEXPR");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_opt_box_expr(buf, "elemexpr", &n.elemexpr, wl);
@@ -334,7 +334,7 @@ fn out_array_coerce_expr(buf: &mut String, n: &nodes::primnodes::ArrayCoerceExpr
 
 fn out_convert_rowtype_expr(
     buf: &mut String,
-    n: &nodes::primnodes::ConvertRowtypeExpr,
+    n: &::nodes::primnodes::ConvertRowtypeExpr,
     wl: bool,
 ) {
     buf.push_str("CONVERTROWTYPEEXPR");
@@ -344,14 +344,14 @@ fn out_convert_rowtype_expr(
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_collate_expr(buf: &mut String, n: &nodes::primnodes::CollateExpr, wl: bool) {
+fn out_collate_expr(buf: &mut String, n: &::nodes::primnodes::CollateExpr, wl: bool) {
     buf.push_str("COLLATEEXPR");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_oid_field(buf, "collOid", n.collOid);
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_case_expr(buf: &mut String, n: &nodes::primnodes::CaseExpr, wl: bool) {
+fn out_case_expr(buf: &mut String, n: &::nodes::primnodes::CaseExpr, wl: bool) {
     buf.push_str("CASEEXPR");
     write_oid_field(buf, "casetype", n.casetype);
     write_oid_field(buf, "casecollid", n.casecollid);
@@ -364,21 +364,21 @@ fn out_case_expr(buf: &mut String, n: &nodes::primnodes::CaseExpr, wl: bool) {
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_case_when(buf: &mut String, n: &nodes::primnodes::CaseWhen, wl: bool) {
+fn out_case_when(buf: &mut String, n: &::nodes::primnodes::CaseWhen, wl: bool) {
     buf.push_str("CASEWHEN");
     write_opt_box_expr(buf, "expr", &n.expr, wl);
     write_opt_box_expr(buf, "result", &n.result, wl);
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_case_test_expr(buf: &mut String, n: &nodes::primnodes::CaseTestExpr, _wl: bool) {
+fn out_case_test_expr(buf: &mut String, n: &::nodes::primnodes::CaseTestExpr, _wl: bool) {
     buf.push_str("CASETESTEXPR");
     write_oid_field(buf, "typeId", n.typeId);
     write_int_field(buf, "typeMod", n.typeMod);
     write_oid_field(buf, "collation", n.collation);
 }
 
-fn out_array_expr(buf: &mut String, n: &nodes::primnodes::ArrayExpr, wl: bool) {
+fn out_array_expr(buf: &mut String, n: &::nodes::primnodes::ArrayExpr, wl: bool) {
     buf.push_str("ARRAYEXPR");
     write_oid_field(buf, "array_typeid", n.array_typeid);
     write_oid_field(buf, "array_collid", n.array_collid);
@@ -396,7 +396,7 @@ fn out_array_expr(buf: &mut String, n: &nodes::primnodes::ArrayExpr, wl: bool) {
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_row_expr(buf: &mut String, n: &nodes::primnodes::RowExpr, wl: bool) {
+fn out_row_expr(buf: &mut String, n: &::nodes::primnodes::RowExpr, wl: bool) {
     buf.push_str("ROWEXPR");
     write_expr_list_field(buf, "args", &n.args, wl);
     write_oid_field(buf, "row_typeid", n.row_typeid);
@@ -405,7 +405,7 @@ fn out_row_expr(buf: &mut String, n: &nodes::primnodes::RowExpr, wl: bool) {
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_row_compare_expr(buf: &mut String, n: &nodes::primnodes::RowCompareExpr, wl: bool) {
+fn out_row_compare_expr(buf: &mut String, n: &::nodes::primnodes::RowCompareExpr, wl: bool) {
     buf.push_str("ROWCOMPAREEXPR");
     write_enum_field(buf, "cmptype", n.cmptype as i32);
     crate::write_oid_list_field(buf, "opnos", Some(&n.opnos));
@@ -415,7 +415,7 @@ fn out_row_compare_expr(buf: &mut String, n: &nodes::primnodes::RowCompareExpr, 
     write_expr_list_field(buf, "rargs", &n.rargs, wl);
 }
 
-fn out_coalesce_expr(buf: &mut String, n: &nodes::primnodes::CoalesceExpr, wl: bool) {
+fn out_coalesce_expr(buf: &mut String, n: &::nodes::primnodes::CoalesceExpr, wl: bool) {
     buf.push_str("COALESCEEXPR");
     write_oid_field(buf, "coalescetype", n.coalescetype);
     write_oid_field(buf, "coalescecollid", n.coalescecollid);
@@ -423,7 +423,7 @@ fn out_coalesce_expr(buf: &mut String, n: &nodes::primnodes::CoalesceExpr, wl: b
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_minmax_expr(buf: &mut String, n: &nodes::primnodes::MinMaxExpr, wl: bool) {
+fn out_minmax_expr(buf: &mut String, n: &::nodes::primnodes::MinMaxExpr, wl: bool) {
     buf.push_str("MINMAXEXPR");
     write_oid_field(buf, "minmaxtype", n.minmaxtype);
     write_oid_field(buf, "minmaxcollid", n.minmaxcollid);
@@ -433,7 +433,7 @@ fn out_minmax_expr(buf: &mut String, n: &nodes::primnodes::MinMaxExpr, wl: bool)
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_sqlvalue_function(buf: &mut String, n: &nodes::primnodes::SQLValueFunction, wl: bool) {
+fn out_sqlvalue_function(buf: &mut String, n: &::nodes::primnodes::SQLValueFunction, wl: bool) {
     buf.push_str("SQLVALUEFUNCTION");
     write_enum_field(buf, "op", n.op as i32);
     write_oid_field(buf, "type", n.r#type);
@@ -441,7 +441,7 @@ fn out_sqlvalue_function(buf: &mut String, n: &nodes::primnodes::SQLValueFunctio
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_xml_expr(buf: &mut String, n: &nodes::primnodes::XmlExpr, wl: bool) {
+fn out_xml_expr(buf: &mut String, n: &::nodes::primnodes::XmlExpr, wl: bool) {
     buf.push_str("XMLEXPR");
     write_enum_field(buf, "op", n.op as i32);
     write_string_field(buf, "name", n.name.as_deref());
@@ -457,7 +457,7 @@ fn out_xml_expr(buf: &mut String, n: &nodes::primnodes::XmlExpr, wl: bool) {
 
 // JSON support nodes (carried inline, not Expr-dispatched but referenced).
 
-fn out_json_format(buf: &mut String, n: &nodes::primnodes::JsonFormat, wl: bool) {
+fn out_json_format(buf: &mut String, n: &::nodes::primnodes::JsonFormat, wl: bool) {
     buf.push_str("JSONFORMAT");
     write_enum_field(buf, "format_type", n.format_type as i32);
     write_enum_field(buf, "encoding", n.encoding as i32);
@@ -469,7 +469,7 @@ fn out_json_format(buf: &mut String, n: &nodes::primnodes::JsonFormat, wl: bool)
 fn write_opt_json_format(
     buf: &mut String,
     name: &str,
-    f: &Option<nodes::primnodes::JsonFormat>,
+    f: &Option<::nodes::primnodes::JsonFormat>,
     wl: bool,
 ) {
     use core::fmt::Write as _;
@@ -480,7 +480,7 @@ fn write_opt_json_format(
     }
 }
 
-fn out_json_returning(buf: &mut String, n: &nodes::primnodes::JsonReturning, wl: bool) {
+fn out_json_returning(buf: &mut String, n: &::nodes::primnodes::JsonReturning, wl: bool) {
     buf.push_str("JSONRETURNING");
     write_opt_json_format(buf, "format", &n.format, wl);
     write_oid_field(buf, "typid", n.typid);
@@ -490,7 +490,7 @@ fn out_json_returning(buf: &mut String, n: &nodes::primnodes::JsonReturning, wl:
 fn write_opt_json_returning(
     buf: &mut String,
     name: &str,
-    r: &Option<nodes::primnodes::JsonReturning>,
+    r: &Option<::nodes::primnodes::JsonReturning>,
     wl: bool,
 ) {
     use core::fmt::Write as _;
@@ -501,7 +501,7 @@ fn write_opt_json_returning(
     }
 }
 
-fn out_json_value_expr(buf: &mut String, n: &nodes::primnodes::JsonValueExpr, wl: bool) {
+fn out_json_value_expr(buf: &mut String, n: &::nodes::primnodes::JsonValueExpr, wl: bool) {
     buf.push_str("JSONVALUEEXPR");
     write_opt_box_expr(buf, "raw_expr", &n.raw_expr, wl);
     write_opt_box_expr(buf, "formatted_expr", &n.formatted_expr, wl);
@@ -510,7 +510,7 @@ fn out_json_value_expr(buf: &mut String, n: &nodes::primnodes::JsonValueExpr, wl
 
 fn out_json_constructor_expr(
     buf: &mut String,
-    n: &nodes::primnodes::JsonConstructorExpr,
+    n: &::nodes::primnodes::JsonConstructorExpr,
     wl: bool,
 ) {
     buf.push_str("JSONCONSTRUCTOREXPR");
@@ -524,7 +524,7 @@ fn out_json_constructor_expr(
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_json_is_predicate(buf: &mut String, n: &nodes::primnodes::JsonIsPredicate, wl: bool) {
+fn out_json_is_predicate(buf: &mut String, n: &::nodes::primnodes::JsonIsPredicate, wl: bool) {
     buf.push_str("JSONISPREDICATE");
     write_opt_box_expr(buf, "expr", &n.expr, wl);
     write_opt_json_format(buf, "format", &n.format, wl);
@@ -533,7 +533,7 @@ fn out_json_is_predicate(buf: &mut String, n: &nodes::primnodes::JsonIsPredicate
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_json_behavior(buf: &mut String, n: &nodes::primnodes::JsonBehavior, wl: bool) {
+fn out_json_behavior(buf: &mut String, n: &::nodes::primnodes::JsonBehavior, wl: bool) {
     buf.push_str("JSONBEHAVIOR");
     write_enum_field(buf, "btype", n.btype as i32);
     write_opt_box_expr(buf, "expr", &n.expr, wl);
@@ -544,7 +544,7 @@ fn out_json_behavior(buf: &mut String, n: &nodes::primnodes::JsonBehavior, wl: b
 fn write_opt_json_behavior(
     buf: &mut String,
     name: &str,
-    b: &Option<alloc::boxed::Box<nodes::primnodes::JsonBehavior>>,
+    b: &Option<alloc::boxed::Box<::nodes::primnodes::JsonBehavior>>,
     wl: bool,
 ) {
     use core::fmt::Write as _;
@@ -555,7 +555,7 @@ fn write_opt_json_behavior(
     }
 }
 
-fn out_json_expr(buf: &mut String, n: &nodes::primnodes::JsonExpr, wl: bool) {
+fn out_json_expr(buf: &mut String, n: &::nodes::primnodes::JsonExpr, wl: bool) {
     buf.push_str("JSONEXPR");
     write_enum_field(buf, "op", n.op as i32);
     write_string_field(buf, "column_name", n.column_name.as_deref());
@@ -575,7 +575,7 @@ fn out_json_expr(buf: &mut String, n: &nodes::primnodes::JsonExpr, wl: bool) {
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_null_test(buf: &mut String, n: &nodes::primnodes::NullTest, wl: bool) {
+fn out_null_test(buf: &mut String, n: &::nodes::primnodes::NullTest, wl: bool) {
     buf.push_str("NULLTEST");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_enum_field(buf, "nulltesttype", n.nulltesttype as i32);
@@ -583,14 +583,14 @@ fn out_null_test(buf: &mut String, n: &nodes::primnodes::NullTest, wl: bool) {
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_boolean_test(buf: &mut String, n: &nodes::primnodes::BooleanTest, wl: bool) {
+fn out_boolean_test(buf: &mut String, n: &::nodes::primnodes::BooleanTest, wl: bool) {
     buf.push_str("BOOLEANTEST");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_enum_field(buf, "booltesttype", n.booltesttype as i32);
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_coerce_to_domain(buf: &mut String, n: &nodes::primnodes::CoerceToDomain, wl: bool) {
+fn out_coerce_to_domain(buf: &mut String, n: &::nodes::primnodes::CoerceToDomain, wl: bool) {
     buf.push_str("COERCETODOMAIN");
     write_opt_box_expr(buf, "arg", &n.arg, wl);
     write_oid_field(buf, "resulttype", n.resulttype);
@@ -602,7 +602,7 @@ fn out_coerce_to_domain(buf: &mut String, n: &nodes::primnodes::CoerceToDomain, 
 
 fn out_coerce_to_domain_value(
     buf: &mut String,
-    n: &nodes::primnodes::CoerceToDomainValue,
+    n: &::nodes::primnodes::CoerceToDomainValue,
     wl: bool,
 ) {
     buf.push_str("COERCETODOMAINVALUE");
@@ -612,7 +612,7 @@ fn out_coerce_to_domain_value(
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_set_to_default(buf: &mut String, n: &nodes::primnodes::SetToDefault, wl: bool) {
+fn out_set_to_default(buf: &mut String, n: &::nodes::primnodes::SetToDefault, wl: bool) {
     buf.push_str("SETTODEFAULT");
     write_oid_field(buf, "typeId", n.typeId);
     write_int_field(buf, "typeMod", n.typeMod);
@@ -620,27 +620,27 @@ fn out_set_to_default(buf: &mut String, n: &nodes::primnodes::SetToDefault, wl: 
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_current_of_expr(buf: &mut String, n: &nodes::primnodes::CurrentOfExpr, _wl: bool) {
+fn out_current_of_expr(buf: &mut String, n: &::nodes::primnodes::CurrentOfExpr, _wl: bool) {
     buf.push_str("CURRENTOFEXPR");
     write_uint_field(buf, "cvarno", n.cvarno);
     write_string_field(buf, "cursor_name", n.cursor_name.as_deref());
     write_int_field(buf, "cursor_param", n.cursor_param);
 }
 
-fn out_next_value_expr(buf: &mut String, n: &nodes::primnodes::NextValueExpr, _wl: bool) {
+fn out_next_value_expr(buf: &mut String, n: &::nodes::primnodes::NextValueExpr, _wl: bool) {
     buf.push_str("NEXTVALUEEXPR");
     write_oid_field(buf, "seqid", n.seqid);
     write_oid_field(buf, "typeId", n.typeId);
 }
 
-fn out_inference_elem(buf: &mut String, n: &nodes::primnodes::InferenceElem, wl: bool) {
+fn out_inference_elem(buf: &mut String, n: &::nodes::primnodes::InferenceElem, wl: bool) {
     buf.push_str("INFERENCEELEM");
     write_opt_box_expr(buf, "expr", &n.expr, wl);
     write_oid_field(buf, "infercollid", n.infercollid);
     write_oid_field(buf, "inferopclass", n.inferopclass);
 }
 
-fn out_returning_expr(buf: &mut String, n: &nodes::primnodes::ReturningExpr, wl: bool) {
+fn out_returning_expr(buf: &mut String, n: &::nodes::primnodes::ReturningExpr, wl: bool) {
     buf.push_str("RETURNINGEXPR");
     write_int_field(buf, "retlevelsup", n.retlevelsup);
     write_bool_field(buf, "retold", n.retold);
@@ -675,7 +675,7 @@ fn write_pgbox_expr_list_field(
 /// `_outSubPlan` (outfuncs.funcs.c). `testexpr` is a single `Node *` child (an
 /// `OpExpr`/`RowCompareExpr`); `paramIds`/`setParam`/`parParam` are `IntList`s;
 /// `args` is a `List *` of `Expr`.
-pub(crate) fn out_subplan(buf: &mut String, n: &nodes::primnodes::SubPlan<'_>, wl: bool) {
+pub(crate) fn out_subplan(buf: &mut String, n: &::nodes::primnodes::SubPlan<'_>, wl: bool) {
     buf.push_str("SUBPLAN");
     write_enum_field(buf, "subLinkType", n.subLinkType as i32);
     // testexpr: Option<PgBox<Expr>> — single Node child.
@@ -707,7 +707,7 @@ pub(crate) fn out_subplan(buf: &mut String, n: &nodes::primnodes::SubPlan<'_>, w
 /// of `SubPlan`s.
 fn out_alternative_subplan(
     buf: &mut String,
-    n: &nodes::primnodes::AlternativeSubPlan<'_>,
+    n: &::nodes::primnodes::AlternativeSubPlan<'_>,
     wl: bool,
 ) {
     buf.push_str("ALTERNATIVESUBPLAN");
@@ -735,7 +735,7 @@ fn out_alternative_subplan(
 
 /// `WRITE_NODE_FIELD` over a raw `Option<NodePtr>` child (C `outNode`; `<>` for
 /// NULL).
-fn write_raw_node(buf: &mut String, name: &str, child: &Option<nodes::nodes::NodePtr<'_>>, wl: bool) {
+fn write_raw_node(buf: &mut String, name: &str, child: &Option<::nodes::nodes::NodePtr<'_>>, wl: bool) {
     use core::fmt::Write as _;
     let _ = write!(buf, " :{} ", name);
     match child {
@@ -746,7 +746,7 @@ fn write_raw_node(buf: &mut String, name: &str, child: &Option<nodes::nodes::Nod
 
 /// `WRITE_NODE_FIELD` over a raw `List *` of `NodePtr` (the bare `(child ...)`
 /// list form; empty Vec → `()`).
-fn write_raw_node_list(buf: &mut String, name: &str, list: &[nodes::nodes::NodePtr<'_>], wl: bool) {
+fn write_raw_node_list(buf: &mut String, name: &str, list: &[::nodes::nodes::NodePtr<'_>], wl: bool) {
     use core::fmt::Write as _;
     let _ = write!(buf, " :{} ", name);
     buf.push('(');
@@ -761,13 +761,13 @@ fn write_raw_node_list(buf: &mut String, name: &str, list: &[nodes::nodes::NodeP
     buf.push(')');
 }
 
-fn out_raw_bool_expr(buf: &mut String, n: &nodes::rawexprnodes::BoolExpr<'_>, wl: bool) {
+fn out_raw_bool_expr(buf: &mut String, n: &::nodes::rawexprnodes::BoolExpr<'_>, wl: bool) {
     // `_outBoolExpr` (outfuncs.c, custom): the do-it-yourself `:boolop` string.
     buf.push_str("BOOLEXPR");
     let opstr = match n.boolop {
-        nodes::primnodes::BoolExprType::AND_EXPR => "and",
-        nodes::primnodes::BoolExprType::OR_EXPR => "or",
-        nodes::primnodes::BoolExprType::NOT_EXPR => "not",
+        ::nodes::primnodes::BoolExprType::AND_EXPR => "and",
+        ::nodes::primnodes::BoolExprType::OR_EXPR => "or",
+        ::nodes::primnodes::BoolExprType::NOT_EXPR => "not",
     };
     buf.push_str(" :boolop ");
     crate::out_token(buf, opstr);
@@ -775,7 +775,7 @@ fn out_raw_bool_expr(buf: &mut String, n: &nodes::rawexprnodes::BoolExpr<'_>, wl
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_case_expr(buf: &mut String, n: &nodes::rawexprnodes::CaseExpr<'_>, wl: bool) {
+fn out_raw_case_expr(buf: &mut String, n: &::nodes::rawexprnodes::CaseExpr<'_>, wl: bool) {
     buf.push_str("CASEEXPR");
     write_oid_field(buf, "casetype", n.casetype);
     write_oid_field(buf, "casecollid", n.casecollid);
@@ -785,14 +785,14 @@ fn out_raw_case_expr(buf: &mut String, n: &nodes::rawexprnodes::CaseExpr<'_>, wl
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_case_when(buf: &mut String, n: &nodes::rawexprnodes::CaseWhen<'_>, wl: bool) {
+fn out_raw_case_when(buf: &mut String, n: &::nodes::rawexprnodes::CaseWhen<'_>, wl: bool) {
     buf.push_str("CASEWHEN");
     write_raw_node(buf, "expr", &n.expr, wl);
     write_raw_node(buf, "result", &n.result, wl);
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_coalesce_expr(buf: &mut String, n: &nodes::rawexprnodes::CoalesceExpr<'_>, wl: bool) {
+fn out_raw_coalesce_expr(buf: &mut String, n: &::nodes::rawexprnodes::CoalesceExpr<'_>, wl: bool) {
     buf.push_str("COALESCEEXPR");
     write_oid_field(buf, "coalescetype", n.coalescetype);
     write_oid_field(buf, "coalescecollid", n.coalescecollid);
@@ -800,7 +800,7 @@ fn out_raw_coalesce_expr(buf: &mut String, n: &nodes::rawexprnodes::CoalesceExpr
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_minmax_expr(buf: &mut String, n: &nodes::rawexprnodes::MinMaxExpr<'_>, wl: bool) {
+fn out_raw_minmax_expr(buf: &mut String, n: &::nodes::rawexprnodes::MinMaxExpr<'_>, wl: bool) {
     buf.push_str("MINMAXEXPR");
     write_oid_field(buf, "minmaxtype", n.minmaxtype);
     write_oid_field(buf, "minmaxcollid", n.minmaxcollid);
@@ -810,7 +810,7 @@ fn out_raw_minmax_expr(buf: &mut String, n: &nodes::rawexprnodes::MinMaxExpr<'_>
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_sublink(buf: &mut String, n: &nodes::rawexprnodes::SubLink<'_>, wl: bool) {
+fn out_raw_sublink(buf: &mut String, n: &::nodes::rawexprnodes::SubLink<'_>, wl: bool) {
     buf.push_str("SUBLINK");
     write_enum_field(buf, "subLinkType", n.sub_link_type as i32);
     write_int_field(buf, "subLinkId", n.sub_link_id);
@@ -820,7 +820,7 @@ fn out_raw_sublink(buf: &mut String, n: &nodes::rawexprnodes::SubLink<'_>, wl: b
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_null_test(buf: &mut String, n: &nodes::rawexprnodes::NullTest<'_>, wl: bool) {
+fn out_raw_null_test(buf: &mut String, n: &::nodes::rawexprnodes::NullTest<'_>, wl: bool) {
     buf.push_str("NULLTEST");
     write_raw_node(buf, "arg", &n.arg, wl);
     write_enum_field(buf, "nulltesttype", n.nulltesttype as i32);
@@ -828,14 +828,14 @@ fn out_raw_null_test(buf: &mut String, n: &nodes::rawexprnodes::NullTest<'_>, wl
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_boolean_test(buf: &mut String, n: &nodes::rawexprnodes::BooleanTest<'_>, wl: bool) {
+fn out_raw_boolean_test(buf: &mut String, n: &::nodes::rawexprnodes::BooleanTest<'_>, wl: bool) {
     buf.push_str("BOOLEANTEST");
     write_raw_node(buf, "arg", &n.arg, wl);
     write_enum_field(buf, "booltesttype", n.booltesttype as i32);
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_row_expr(buf: &mut String, n: &nodes::rawexprnodes::RowExpr<'_>, wl: bool) {
+fn out_raw_row_expr(buf: &mut String, n: &::nodes::rawexprnodes::RowExpr<'_>, wl: bool) {
     buf.push_str("ROWEXPR");
     write_raw_node_list(buf, "args", n.args.as_slice(), wl);
     write_oid_field(buf, "row_typeid", n.row_typeid);
@@ -844,7 +844,7 @@ fn out_raw_row_expr(buf: &mut String, n: &nodes::rawexprnodes::RowExpr<'_>, wl: 
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_grouping_func(buf: &mut String, n: &nodes::rawexprnodes::GroupingFunc<'_>, wl: bool) {
+fn out_raw_grouping_func(buf: &mut String, n: &::nodes::rawexprnodes::GroupingFunc<'_>, wl: bool) {
     buf.push_str("GROUPINGFUNC");
     write_raw_node_list(buf, "args", n.args.as_slice(), wl);
     let refs: alloc::vec::Vec<i32> = n.refs.iter().copied().collect();
@@ -855,14 +855,14 @@ fn out_raw_grouping_func(buf: &mut String, n: &nodes::rawexprnodes::GroupingFunc
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_collate_expr(buf: &mut String, n: &nodes::rawexprnodes::CollateExpr<'_>, wl: bool) {
+fn out_raw_collate_expr(buf: &mut String, n: &::nodes::rawexprnodes::CollateExpr<'_>, wl: bool) {
     buf.push_str("COLLATEEXPR");
     write_raw_node(buf, "arg", &n.arg, wl);
     write_oid_field(buf, "collOid", n.coll_oid);
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_set_to_default(buf: &mut String, n: &nodes::rawexprnodes::SetToDefault, wl: bool) {
+fn out_raw_set_to_default(buf: &mut String, n: &::nodes::rawexprnodes::SetToDefault, wl: bool) {
     buf.push_str("SETTODEFAULT");
     write_oid_field(buf, "typeId", n.type_id);
     write_int_field(buf, "typeMod", n.type_mod);
@@ -870,14 +870,14 @@ fn out_raw_set_to_default(buf: &mut String, n: &nodes::rawexprnodes::SetToDefaul
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_current_of_expr(buf: &mut String, n: &nodes::rawexprnodes::CurrentOfExpr<'_>, _wl: bool) {
+fn out_raw_current_of_expr(buf: &mut String, n: &::nodes::rawexprnodes::CurrentOfExpr<'_>, _wl: bool) {
     buf.push_str("CURRENTOFEXPR");
     write_uint_field(buf, "cvarno", n.cvarno);
     write_string_field(buf, "cursor_name", n.cursor_name.as_ref().map(|s| s.as_str()));
     write_int_field(buf, "cursor_param", n.cursor_param);
 }
 
-fn out_raw_named_arg_expr(buf: &mut String, n: &nodes::rawexprnodes::NamedArgExpr<'_>, wl: bool) {
+fn out_raw_named_arg_expr(buf: &mut String, n: &::nodes::rawexprnodes::NamedArgExpr<'_>, wl: bool) {
     buf.push_str("NAMEDARGEXPR");
     write_raw_node(buf, "arg", &n.arg, wl);
     write_string_field(buf, "name", n.name.as_ref().map(|s| s.as_str()));
@@ -885,7 +885,7 @@ fn out_raw_named_arg_expr(buf: &mut String, n: &nodes::rawexprnodes::NamedArgExp
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_sqlvalue_function(buf: &mut String, n: &nodes::rawexprnodes::SQLValueFunction, wl: bool) {
+fn out_raw_sqlvalue_function(buf: &mut String, n: &::nodes::rawexprnodes::SQLValueFunction, wl: bool) {
     buf.push_str("SQLVALUEFUNCTION");
     write_enum_field(buf, "op", n.op as i32);
     write_oid_field(buf, "type", n.type_);
@@ -893,7 +893,7 @@ fn out_raw_sqlvalue_function(buf: &mut String, n: &nodes::rawexprnodes::SQLValue
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_raw_xml_expr(buf: &mut String, n: &nodes::rawexprnodes::XmlExpr<'_>, wl: bool) {
+fn out_raw_xml_expr(buf: &mut String, n: &::nodes::rawexprnodes::XmlExpr<'_>, wl: bool) {
     buf.push_str("XMLEXPR");
     write_enum_field(buf, "op", n.op as i32);
     write_string_field(buf, "name", n.name.as_ref().map(|s| s.as_str()));

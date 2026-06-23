@@ -44,7 +44,7 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 use pathnodes::{NodeId, PlannerInfo, RelId, RTEKind};
 use pathnodes::planner_run::PlannerRun;
 
@@ -381,7 +381,7 @@ fn debug_parallel_query() -> i32 {
 fn jointree_of<'a, 'mcx>(
     run: &'a PlannerRun<'mcx>,
     root: &PlannerInfo,
-) -> &'a nodes::rawnodes::FromExpr<'mcx> {
+) -> &'a ::nodes::rawnodes::FromExpr<'mcx> {
     run.jointree(root.parse)
         .expect("query_planner: root->parse->jointree != NULL")
 }
@@ -517,7 +517,7 @@ fn is_jointree_quals_parallel_safe(
 /// Returns `Some(rtindex)` when the jointree's single `fromlist` entry is a
 /// `RangeTblRef` (the only case that can reach the `RTE_RESULT` fast path), and
 /// `None` otherwise. Panics if `fromlist` is empty (the C `Assert`).
-fn trivial_path_varno(jointree: &nodes::rawnodes::FromExpr) -> Option<i32> {
+fn trivial_path_varno(jointree: &::nodes::rawnodes::FromExpr) -> Option<i32> {
     let fromlist = &jointree.fromlist;
     assert!(!fromlist.is_empty(), "parse->jointree->fromlist != NIL");
 

@@ -6,12 +6,12 @@
 use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use nodes::executor::EXEC_FLAG_EXPLAIN_GENERIC;
-use nodes::partition::{
+use ::nodes::executor::EXEC_FLAG_EXPLAIN_GENERIC;
+use ::nodes::partition::{
     PartitionDescData, PartitionKeyData, PartitionPruneContext, PartitionPruneState,
     PartitionPruningData, PartitionedRelPruningData,
 };
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use nodes::{Bitmapset, EStateData, EcxtId, Opaque, PlanStateData};
 
 use execUtils::{CreateExprContext, ExecGetRangeTableRelation};
@@ -30,12 +30,12 @@ use stack_depth_seams as stack_depth_seams;
  * as the type-erased payload of the `Opaque` handles in
  * `EState.es_part_prune_infos` and the
  * `PartitionedRelPruningData.{initial,exec}_pruning_steps` fields. The real
- * types live in `nodes::partprune_carrier` (shared with the producing
+ * types live in `::nodes::partprune_carrier` (shared with the producing
  * crate); we re-export them and downcast the `Opaque` payload with a loud panic
  * on mismatch — exactly the C `lfirst_node()` cast.
  * ------------------------------------------------------------------------- */
 
-pub use nodes::partprune_carrier::{
+pub use ::nodes::partprune_carrier::{
     PartitionPruneInfo, PartitionPruneStep, PartitionPruneStepCombine, PartitionPruneStepOp,
     PartitionedRelPruneInfo, RawBms,
 };
@@ -634,7 +634,7 @@ pub(crate) fn InitPartitionPruneContext<'mcx>(
     context.exprcontext = Some(econtext);
 
     // context->exprstates = palloc0(sizeof(ExprState *) * n_steps * partnatts);
-    let mut exprstates: PgVec<'mcx, Option<PgBox<'mcx, nodes::execexpr::ExprState>>> =
+    let mut exprstates: PgVec<'mcx, Option<PgBox<'mcx, ::nodes::execexpr::ExprState>>> =
         vec_with_capacity_in(mcx, cmp_len)?;
     for _ in 0..cmp_len {
         exprstates.push(None);
@@ -1224,7 +1224,7 @@ fn downcast_steps<'mcx>(
 /// `InitPartitionPruneContext`).
 fn empty_prune_context<'mcx>(mcx: Mcx<'mcx>) -> PartitionPruneContext<'mcx> {
     PartitionPruneContext {
-        strategy: nodes::partition::PartitionStrategy::List,
+        strategy: ::nodes::partition::PartitionStrategy::List,
         partnatts: 0,
         nparts: 0,
         boundinfo: None,

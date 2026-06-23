@@ -54,8 +54,8 @@ use types_jsonfuncs::{
     ArrayIOData, CachedFmgrInfo, ColumnIOData, ColumnIOUnion, CompositeIOData, DomainIOData,
     JsValue, JsonHashEntry, RecordIOData, ScalarIOData, TypeCat, NAMEDATALEN,
 };
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::TypeFuncClass;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::TypeFuncClass;
 use types_tuple::heaptuple::{
     HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, TupleDescData, RECORDOID,
 };
@@ -1724,7 +1724,7 @@ pub(crate) fn get_record_type_from_query<'mcx>(
     cache: &mut PopulateRecordCacheLocal<'mcx>,
 ) -> PgResult<()> {
     // if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE) ereport;
-    let resolved = funcapi::result_type::get_call_result_type(mcx, fcinfo)?;
+    let resolved = ::funcapi::result_type::get_call_result_type(mcx, fcinfo)?;
     if resolved.class != Some(TypeFuncClass::Composite) {
         return Err(ereport(ERROR)
             .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)

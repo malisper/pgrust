@@ -25,10 +25,10 @@
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::Index;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::execnodes::EStateData;
-use nodes::nodeindexscan::TidScan;
-use nodes::primnodes::Expr;
-use nodes::SlotId;
+use ::nodes::execnodes::EStateData;
+use ::nodes::nodeindexscan::TidScan;
+use ::nodes::primnodes::Expr;
+use ::nodes::SlotId;
 use types_tuple::heaptuple::{ItemPointerData, SelfItemPointerAttributeNumber};
 
 use table_tableam as tableam;
@@ -77,7 +77,7 @@ fn array_datum_bytes<'a>(d: &'a types_tuple::Datum<'_>) -> PgResult<&'a [u8]> {
 // `nodeTidscan::{TidExpr, TidScanState}` paths unchanged.
 // ===========================================================================
 
-pub use nodes::nodetidscan::{TidExpr, TidScanState};
+pub use ::nodes::nodetidscan::{TidExpr, TidScanState};
 
 // ===========================================================================
 // `IsCTIDVar` / `is_opclause` / `get_leftop` / `get_rightop` — node tests over
@@ -784,11 +784,11 @@ pub fn ExecReScanTidScan<'mcx>(node: &mut TidScanState<'mcx>, estate: &mut EStat
 /// tuple's slot id (the C `return slot`) or `None`. C wires this via
 /// `tidstate->ss.ps.ExecProcNode = ExecTidScan`.
 fn exec_tid_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::PlanStateNode::TidScan(node) => node,
+        ::nodes::PlanStateNode::TidScan(node) => node,
         other => panic!("castNode(TidScanState, pstate) failed: tag {}", other.tag()),
     };
     ExecTidScan(node, estate)
@@ -807,7 +807,7 @@ pub fn ExecEndTidScan(node: &mut TidScanState) -> PgResult<()> {
 /// information, create scan keys, and open the base relation.
 pub fn ExecInitTidScan<'mcx>(
     node: &TidScan<'mcx>,
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     eflags: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, TidScanState<'mcx>>> {

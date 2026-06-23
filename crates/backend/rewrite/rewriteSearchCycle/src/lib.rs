@@ -45,15 +45,15 @@ use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_tuple::heaptuple::Datum;
 use types_tuple::heaptuple::{BOOLOID, INT8OID, RECORDARRAYOID, RECORDOID};
 
-use nodes::copy_query::Query;
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsenodes::{RTEKind, RangeTblEntry};
-use nodes::primnodes::{
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
+use ::nodes::primnodes::{
     ArrayExpr, CaseExpr, CaseWhen, CoercionForm, Expr, FieldSelect, RowExpr, ScalarArrayOpExpr,
     TargetEntry,
 };
-use nodes::rawnodes::{Alias, FromExpr, RangeTblRef, SetOperation, SetOperationStmt};
-use nodes::value::StringNode;
+use ::nodes::rawnodes::{Alias, FromExpr, RangeTblRef, SetOperation, SetOperationStmt};
+use ::nodes::value::StringNode;
 
 use nodes_core::makefuncs::{make_const, make_func_expr, make_opclause, make_var};
 use parser_analyze::makeSortGroupClauseForSetOp;
@@ -118,7 +118,7 @@ fn make_tle<'mcx>(
 
 /// `make_path_rowexpr(cte, col_list)` (rewriteSearchCycle.c:116) — a `RowExpr`
 /// over the named columns, which must be among the CTE's output columns.
-fn make_path_rowexpr<'mcx>(cte: &nodes::rawnodes::CommonTableExpr<'_>, col_list: &PgVec<'_, NodePtr<'_>>) -> RowExpr<'mcx> {
+fn make_path_rowexpr<'mcx>(cte: &::nodes::rawnodes::CommonTableExpr<'_>, col_list: &PgVec<'_, NodePtr<'_>>) -> RowExpr<'mcx> {
     let mut args: Vec<Expr<'mcx>> = Vec::new();
     let mut colnames: Vec<String> = Vec::new();
 
@@ -202,8 +202,8 @@ fn make_path_cat_expr<'mcx>(rowexpr: RowExpr<'mcx>, path_varattno: AttrNumber) -
 /// clone) and the rewritten one returned.
 pub fn rewriteSearchAndCycle<'mcx>(
     mcx: Mcx<'mcx>,
-    mut cte: nodes::rawnodes::CommonTableExpr<'mcx>,
-) -> PgResult<nodes::rawnodes::CommonTableExpr<'mcx>> {
+    mut cte: ::nodes::rawnodes::CommonTableExpr<'mcx>,
+) -> PgResult<::nodes::rawnodes::CommonTableExpr<'mcx>> {
     debug_assert!(cte.search_clause.is_some() || cte.cycle_clause.is_some());
 
     // ctequery = castNode(Query, cte->ctequery)
@@ -862,7 +862,7 @@ fn rte_subquery_tlist_resorig(rte: &RangeTblEntry<'_>) -> Vec<(Oid, AttrNumber)>
 mod tests {
     use super::*;
     use mcx::MemoryContext;
-    use nodes::rawnodes::CommonTableExpr;
+    use ::nodes::rawnodes::CommonTableExpr;
 
     /// Build a CTE shell with three output columns (a int4, b int4, c text) so
     /// make_path_rowexpr can resolve column names. typmod/coll left default.

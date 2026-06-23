@@ -17,7 +17,7 @@
 //!
 //! ## What this port covers
 //!
-//! The live serialization `Node` here is [`nodes::nodes::Node`] — the
+//! The live serialization `Node` here is [`::nodes::nodes::Node`] — the
 //! hand-written executor/parse-node enum the `node_to_string_with_locations`
 //! seam carries. Its CONVERTED value/list leaf families (`Integer`/`Float`/
 //! `Boolean`/`String`/`BitString`/`List`) get their faithful bare-token writers
@@ -26,7 +26,7 @@
 //! The framed `{LABEL ...}` per-node `_out<Type>` routines (the generated
 //! `outfuncs.funcs.c` + the hand-written custom writers) are ported
 //! field-for-field for the common primitive-expression family carried as
-//! [`nodes::primnodes::Expr`] — `Var`, `Param`, `OpExpr`/`DistinctExpr`/
+//! [`::nodes::primnodes::Expr`] — `Var`, `Param`, `OpExpr`/`DistinctExpr`/
 //! `NullIfExpr`, `FuncExpr`, `BoolExpr` — plus `TargetEntry`, with full
 //! `WRITE_*_FIELD` macros (`out_var`/`out_param`/…). `args: Vec<Expr>` is
 //! emitted as the bare `(child …)` node-list form via [`out_expr`], and
@@ -69,8 +69,8 @@ use core::fmt::Write as _;
 
 use mcx::{Mcx, PgString};
 use types_error::PgResult;
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::{
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::{
     BoolExpr, BoolExprType, Const, Expr, FuncExpr, OpExpr, Param, TargetEntry, Var,
 };
 use types_tuple::heaptuple::Datum;
@@ -124,7 +124,7 @@ pub(crate) fn out_token(buf: &mut String, s: &str) {
 }
 
 /// `_outInteger` (outfuncs.c:660-664): `appendStringInfo(str, "%d", node->ival)`.
-fn out_integer(buf: &mut String, n: &nodes::value::Integer) {
+fn out_integer(buf: &mut String, n: &::nodes::value::Integer) {
     use core::fmt::Write;
     let _ = write!(buf, "{}", n.ival);
 }
@@ -132,12 +132,12 @@ fn out_integer(buf: &mut String, n: &nodes::value::Integer) {
 /// `_outFloat` (outfuncs.c:666-674): the numeric literal is emitted verbatim
 /// (`appendStringInfoString(str, node->fval)`) — assumed a valid numeric literal
 /// needing no quoting.
-fn out_float(buf: &mut String, n: &nodes::value::Float<'_>) {
+fn out_float(buf: &mut String, n: &::nodes::value::Float<'_>) {
     buf.push_str(n.fval.as_str());
 }
 
 /// `_outBoolean` (outfuncs.c:676-680): `"true"` / `"false"`.
-fn out_boolean(buf: &mut String, n: &nodes::value::Boolean) {
+fn out_boolean(buf: &mut String, n: &::nodes::value::Boolean) {
     buf.push_str(if n.boolval { "true" } else { "false" });
 }
 
@@ -145,7 +145,7 @@ fn out_boolean(buf: &mut String, n: &nodes::value::Boolean) {
 /// non-empty value, escape the inner contents through `outToken` (the outer
 /// quotes are added by hand, so an empty value is just `""`, NOT `outToken`'s
 /// `""`).
-fn out_string(buf: &mut String, n: &nodes::value::StringNode<'_>) {
+fn out_string(buf: &mut String, n: &::nodes::value::StringNode<'_>) {
     buf.push('"');
     let s = n.sval.as_str();
     if !s.is_empty() {
@@ -157,7 +157,7 @@ fn out_string(buf: &mut String, n: &nodes::value::StringNode<'_>) {
 /// `_outBitString` (outfuncs.c:698-707): the lexer always produces a string
 /// starting `b`/`x`; `outToken` will not escape that prefix (relied on by
 /// `nodeTokenType`), so the whole value goes through `outToken`.
-fn out_bit_string(buf: &mut String, n: &nodes::value::BitString<'_>) {
+fn out_bit_string(buf: &mut String, n: &::nodes::value::BitString<'_>) {
     debug_assert!(matches!(n.bsval.as_str().as_bytes().first(), Some(b'b') | Some(b'x')));
     out_token(buf, n.bsval.as_str());
 }
@@ -238,7 +238,7 @@ pub(crate) fn write_bitmapset_field(buf: &mut String, name: &str, words: &[u64])
 pub(crate) fn write_bitmapset_opt_field(
     buf: &mut String,
     name: &str,
-    bms: Option<&nodes::bitmapset::Bitmapset<'_>>,
+    bms: Option<&::nodes::bitmapset::Bitmapset<'_>>,
 ) {
     let _ = write!(buf, " :{} ", name);
     out_bitmapset(buf, bms);
@@ -246,7 +246,7 @@ pub(crate) fn write_bitmapset_opt_field(
 
 /// `outBitmapset(str, bms)` (bitmapset.c) over an optional `Bitmapset *`:
 /// `(b m1 m2 ...)`, members ascending; the NULL set is `(b)`.
-pub(crate) fn out_bitmapset(buf: &mut String, bms: Option<&nodes::bitmapset::Bitmapset<'_>>) {
+pub(crate) fn out_bitmapset(buf: &mut String, bms: Option<&::nodes::bitmapset::Bitmapset<'_>>) {
     match bms {
         None => buf.push_str("(b)"),
         Some(b) => out_bitmapset_words(buf, &b.words),
@@ -627,7 +627,7 @@ pub(crate) fn out_expr(buf: &mut String, e: &Expr, write_loc: bool) {
 /// `_outList` (outfuncs.c:281-318) for a `T_List` (a list of node pointers).
 ///
 /// `outNode` only routes a `List`/`IntList`/`OidList`/`XidList` here; the live
-/// [`nodes::nodes::Node::List`] arm is always a `T_List` (a
+/// [`::nodes::nodes::Node::List`] arm is always a `T_List` (a
 /// `PgVec<NodePtr>`), so this writes the `(` opener (no type char for `T_List`),
 /// each child through `out_node` separated by a single space, then `)`.
 fn out_list(buf: &mut String, elements: &[mcx::PgBox<'_, Node<'_>>]) {

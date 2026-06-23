@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use nodes_core::makefuncs::{make_ands_explicit, make_orclause};
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use types_core::primitive::Index;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, RelId, RinfoId, JOIN_INNER};
@@ -17,7 +17,7 @@ use crate::restrictinfo::{
 };
 use path_small_seams as small_seam;
 
-use nodes::primnodes::{AND_EXPR, OR_EXPR};
+use ::nodes::primnodes::{AND_EXPR, OR_EXPR};
 
 #[inline]
 fn is_orclause(node: &Expr) -> bool {

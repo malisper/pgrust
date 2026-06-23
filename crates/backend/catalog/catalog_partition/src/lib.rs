@@ -45,8 +45,8 @@ use types_catalog::pg_inherits::{
 use types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERROR};
-use nodes::nodes::Node;
-use nodes::primnodes::Expr;
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::Expr;
 use pathnodes::Bitmapset;
 use rel::{Relation, RelationData};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};

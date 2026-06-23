@@ -29,11 +29,11 @@ use crate::dispatch;
 use arrayfuncs_seams as arrayfuncs_seam;
 use lsyscache_seams as lsyscache_seam;
 use types_error::PgResult;
-use nodes::execexpr::{
+use ::nodes::execexpr::{
     ExprEvalStepData, ExprState, ResultCell, ResultCellId, STATE_RESULT_CELL,
 };
-use nodes::execnodes::EcxtId;
-use nodes::EStateData;
+use ::nodes::execnodes::EcxtId;
+use ::nodes::EStateData;
 use types_tuple::heaptuple::Datum;
 
 /// `ExecEvalArrayExpr(ExprState *state, ExprEvalStep *op)` — build an array

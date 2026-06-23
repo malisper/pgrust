@@ -44,10 +44,10 @@ use types_core::primitive::{Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_TABLE, ERROR,
 };
-use nodes::ddlnodes::{Constraint, ConstrType, PartitionCmd};
-use nodes::nodes::Node;
-use nodes::partition::PartitionStrategy;
-use nodes::primnodes::Expr;
+use ::nodes::ddlnodes::{Constraint, ConstrType, PartitionCmd};
+use ::nodes::nodes::Node;
+use ::nodes::partition::PartitionStrategy;
+use ::nodes::primnodes::Expr;
 use types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
 use common_relation::{relation_open, try_relation_open};
@@ -67,7 +67,7 @@ use crate::at_phase::AlteredTableInfo;
 
 /// Convert a rich parse-node `RangeVar` to the trimmed `types_tuple::access`
 /// shape `table_openrv` consumes (mirrors `at_attach::to_access_range_var`).
-fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
     types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),
@@ -448,7 +448,7 @@ fn DetachAddConstraintIfNeeded<'mcx>(
 pub(crate) fn ATExecDropInherit<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &Relation<'mcx>,
-    parent: &nodes::rawnodes::RangeVar<'mcx>,
+    parent: &::nodes::rawnodes::RangeVar<'mcx>,
     _lockmode: types_storage::lock::LOCKMODE,
 ) -> PgResult<ObjectAddress> {
     if rel.rd_rel.relispartition {
@@ -810,7 +810,7 @@ fn DetachPartitionFinalize<'mcx>(
             constraint.classId,
             constraint.objectId,
             constraint.objectSubId,
-            nodes::parsenodes::DROP_RESTRICT,
+            ::nodes::parsenodes::DROP_RESTRICT,
             0,
         )?;
     }
@@ -1026,7 +1026,7 @@ fn DropClonedTriggersFromPartition<'mcx>(
     transam_xact::CommandCounterIncrement()?;
     dependency_seams::perform_multiple_deletions::call(
         &objects.refs,
-        nodes::parsenodes::DROP_RESTRICT,
+        ::nodes::parsenodes::DROP_RESTRICT,
         dependency_seams::PERFORM_DELETION_INTERNAL,
     )?;
 

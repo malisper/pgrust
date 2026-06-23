@@ -46,7 +46,7 @@ fn bsearch_finds_present_and_misses_absent() {
 
 #[test]
 fn is_ctid_var_recognizes_self_item_pointer() {
-    use nodes::primnodes::{Expr, Var};
+    use ::nodes::primnodes::{Expr, Var};
     let ctid = Expr::Var(Var {
         varattno: SelfItemPointerAttributeNumber,
         ..Var::default()

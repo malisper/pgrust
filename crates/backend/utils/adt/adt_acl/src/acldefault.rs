@@ -12,7 +12,7 @@ use types_acl::{
 };
 use types_core::Oid;
 use types_error::{PgError, PgResult};
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 
 // `ACL_ALL_RIGHTS_*` (utils/acl.h) — the full set of grantable privileges for
 // each object class.

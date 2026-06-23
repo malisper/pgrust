@@ -8,7 +8,7 @@
 //! glob scan and the `build_regexp_split_result` substring extraction) is ported
 //! in `backend-utils-adt-regexp::{regexp_split_to_table,build_regexp_split_result}`.
 //!
-//! Here that core is assembled into a [`nodes::execexpr::PGFunction`] (the
+//! Here that core is assembled into a [`::nodes::execexpr::PGFunction`] (the
 //! executor-frame ABI whose call frame carries the LIVE `ReturnSetInfo`) and
 //! registered in this unit's executor-frame SRF table from
 //! [`register_regexp_split`] (called by `init_seams`) — the executor-frame
@@ -29,11 +29,11 @@ use core::any::Any;
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::execexpr::ExprDoneCond;
-use nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
+use ::nodes::execexpr::ExprDoneCond;
+use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::heaptuple::Datum;
 
-use funcapi::srf_support::{
+use ::funcapi::srf_support::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall,
 };
 

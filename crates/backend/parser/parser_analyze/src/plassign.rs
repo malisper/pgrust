@@ -22,13 +22,13 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
-use nodes::copy_query::Query;
-use nodes::ddlnodes::{CoercionContext, PLAssignStmt};
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::CoercionForm;
-use nodes::rawnodes::{ColumnRef, SelectStmt};
-use nodes::value::StringNode;
+use ::nodes::copy_query::Query;
+use ::nodes::ddlnodes::{CoercionContext, PLAssignStmt};
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::CoercionForm;
+use ::nodes::rawnodes::{ColumnRef, SelectStmt};
+use ::nodes::value::StringNode;
 
 use nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
 use utils_error::ereport;
@@ -148,7 +148,7 @@ pub fn transformPLAssignStmt<'mcx>(
     // read its type/typmod/collation/location here, and (only on the indirection
     // path) re-wrap it as a `Node` for `transformAssignmentIndirection`'s
     // basenode argument.
-    let target: nodes::primnodes::Expr<'static> = parse_expr::transformExpr(
+    let target: ::nodes::primnodes::Expr<'static> = parse_expr::transformExpr(
         pstate,
         Some(cref),
         ParseExprKind::EXPR_KIND_UPDATE_TARGET,
@@ -204,7 +204,7 @@ pub fn transformPLAssignStmt<'mcx>(
         }
         tl
     };
-    let mut tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> =
+    let mut tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> =
         parse_target::transformTargetList(
             mcx,
             pstate,
@@ -353,7 +353,7 @@ pub fn transformPLAssignStmt<'mcx>(
     pstate.p_expr_kind = ParseExprKind::EXPR_KIND_NONE;
 
     // qry->targetList = list_make1(tle);
-    let mut tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+    let mut tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
     tlist.push(tle);
 
     /* transform WHERE */
@@ -489,7 +489,7 @@ pub fn transformPLAssignStmt<'mcx>(
     let qual_node = opt_expr_to_node(mcx, qual)?;
     qry.jointree = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::FromExpr {
+        ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
             quals: qual_node,
         },

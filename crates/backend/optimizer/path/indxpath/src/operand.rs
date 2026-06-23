@@ -4,7 +4,7 @@
 use mcx::Mcx;
 use types_core::primitive::Index;
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, PlannerInfo};
 
 use nodes_core::bitmapset::bms_is_member as nodes_bms_is_member;

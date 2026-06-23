@@ -83,7 +83,7 @@ use indexing_seams::{
 };
 use utils_error::ereport;
 use miscinit_seams::get_user_id;
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 use types_storage::lock::{AccessShareLock, RowExclusiveLock};
 
 /* ===========================================================================

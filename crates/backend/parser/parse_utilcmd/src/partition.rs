@@ -14,8 +14,8 @@ use alloc::string::ToString;
 use types_core::Oid;
 use types_error::{PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR};
 
-use nodes::nodes::{ntag, Node};
-use nodes::parsestmt::ParseState;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsestmt::ParseState;
 
 use types_tuple::access::{
     RELKIND_INDEX, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,

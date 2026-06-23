@@ -10,14 +10,14 @@ use utils_error::ereport;
 use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 
 use types_core::Oid;
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableStmt, ConstrType, AT_AddConstraint, CONSTR_ATTR_DEFERRABLE,
     CONSTR_ATTR_DEFERRED, CONSTR_ATTR_ENFORCED, CONSTR_ATTR_IMMEDIATE, CONSTR_ATTR_NOT_DEFERRABLE,
     CONSTR_ATTR_NOT_ENFORCED, CONSTR_CHECK, CONSTR_EXCLUSION, CONSTR_FOREIGN, CONSTR_PRIMARY,
     CONSTR_UNIQUE,
 };
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::{DROP_RESTRICT, OBJECT_TABLE};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::{DROP_RESTRICT, OBJECT_TABLE};
 
 use crate::core::{CreateStmtContext, NodePtr};
 use crate::errpos::parser_errposition;

@@ -5,7 +5,7 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::nodes::CmdType;
+use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tuple::heaptuple::FormedTuple;
 use types_tuple::heaptuple::ItemPointerData;
@@ -86,7 +86,7 @@ pub fn ExecMergeNotMatched<'mcx>(
     result_rel_info: RriId,
     can_set_tag: bool,
 ) -> PgResult<Option<SlotId>> {
-    use nodes::modifytable::MERGE_WHEN_NOT_MATCHED_BY_TARGET;
+    use ::nodes::modifytable::MERGE_WHEN_NOT_MATCHED_BY_TARGET;
 
     // ExprContext *econtext = mtstate->ps.ps_ExprContext;
     let econtext = mtstate
@@ -208,11 +208,11 @@ pub fn ExecMergeNotMatched<'mcx>(
                 // ExecInitMerge builds the pooled state.
                 mtstate.mt_merge_action = Some(mcx::alloc_in(
                     mcx,
-                    nodes::modifytable::MergeActionState {
-                        type_: nodes::nodes::T_MergeActionState,
+                    ::nodes::modifytable::MergeActionState {
+                        type_: ::nodes::nodes::T_MergeActionState,
                         mas_action: Some(mcx::alloc_in(
                             mcx,
-                            nodes::modifytable::MergeAction {
+                            ::nodes::modifytable::MergeAction {
                                 matchKind: action_match_kind,
                                 commandType: command_type,
                                 overriding: action_overriding,
@@ -268,7 +268,7 @@ pub fn ExecMergeNotMatched<'mcx>(
 /// merge action list.
 pub fn ExecInitMerge<'mcx>(
     mcx: Mcx<'mcx>,
-    node: &'mcx nodes::ModifyTable<'mcx>,
+    node: &'mcx ::nodes::ModifyTable<'mcx>,
     mtstate: &mut ModifyTableState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -279,7 +279,7 @@ pub fn ExecInitMerge<'mcx>(
     //
     // Snapshot the per-rel `&'mcx` action-list borrows so the loop can re-borrow
     // mtstate mutably between iterations (the referents live in the plan tree).
-    let action_lists: alloc::vec::Vec<&'mcx mcx::PgVec<'mcx, nodes::modifytable::MergeAction<'mcx>>> =
+    let action_lists: alloc::vec::Vec<&'mcx mcx::PgVec<'mcx, ::nodes::modifytable::MergeAction<'mcx>>> =
         match mtstate.mt_mergeActionLists.as_ref() {
             None => return Ok(()),
             Some(lists) => lists.iter().copied().collect(),
@@ -310,7 +310,7 @@ pub fn ExecInitMerge<'mcx>(
     for (i, merge_action_list) in action_lists.iter().enumerate() {
         // joinCondition = (Node *) list_nth(mergeJoinConditions, i);
         // Modeled as the implicit-AND `List` of `Expr` ExecInitQual consumes.
-        let join_condition: Option<&'mcx [nodes::primnodes::Expr]> = mtstate
+        let join_condition: Option<&'mcx [::nodes::primnodes::Expr]> = mtstate
             .mt_mergeJoinConditions
             .as_ref()
             .and_then(|jc| jc.get(i).copied().flatten())
@@ -356,9 +356,9 @@ pub fn ExecInitMerge<'mcx>(
             let action = &merge_action_list[ai];
             let match_kind = action.matchKind;
             let command_type = action.commandType;
-            let qual: Option<&'mcx [nodes::primnodes::Expr]> =
+            let qual: Option<&'mcx [::nodes::primnodes::Expr]> =
                 action.qual.as_ref().map(|q| q.as_slice());
-            let target_list: &'mcx [nodes::TargetEntry<'mcx>] = action
+            let target_list: &'mcx [::nodes::TargetEntry<'mcx>] = action
                 .targetList
                 .as_ref()
                 .map(|t| t.as_slice())
@@ -380,7 +380,7 @@ pub fn ExecInitMerge<'mcx>(
             // We create three lists - one for each MergeMatchKind - and stick
             // the MergeActionState into the appropriate list. The projection is
             // filled in by the switch below before the state is appended.
-            let mas_proj: Option<mcx::PgBox<'mcx, nodes::execexpr::ProjectionInfo>>;
+            let mas_proj: Option<mcx::PgBox<'mcx, ::nodes::execexpr::ProjectionInfo>>;
 
             match command_type {
                 CmdType::CMD_INSERT => {
@@ -406,7 +406,7 @@ pub fn ExecInitMerge<'mcx>(
                         .as_ref()
                         .map(|r| r.rd_rel.relkind)
                         .unwrap_or(0);
-                    let tgt_slot: nodes::SlotId;
+                    let tgt_slot: ::nodes::SlotId;
                     if root_relkind == types_tuple::access::RELKIND_PARTITIONED_TABLE {
                         if mtstate.mt_partition_tuple_routing.is_none() {
                             // mtstate->mt_root_tuple_slot =
@@ -537,7 +537,7 @@ pub fn ExecInitMerge<'mcx>(
             // (ExecMergeMatched reads only `commandType`/`matchKind`).
             let mas_action = mcx::alloc_in(
                 mcx,
-                nodes::modifytable::MergeAction {
+                ::nodes::modifytable::MergeAction {
                     matchKind: match_kind,
                     commandType: command_type,
                     overriding: action.overriding,
@@ -548,8 +548,8 @@ pub fn ExecInitMerge<'mcx>(
             )?;
             let action_state = mcx::alloc_in(
                 mcx,
-                nodes::modifytable::MergeActionState {
-                    type_: nodes::nodes::T_MergeActionState,
+                ::nodes::modifytable::MergeActionState {
+                    type_: ::nodes::nodes::T_MergeActionState,
                     mas_action: Some(mas_action),
                     mas_proj,
                     mas_whenqual,
@@ -683,7 +683,7 @@ fn ExecInitMergeInheritedRoot<'mcx>(
             // Clone each WithCheckOption out of the plan node so its qual can be
             // remapped without mutating the shared plan (mirrors
             // ExecInitPartitionWithCheckOptions).
-            let mut remapped_wco_nodes: mcx::PgVec<'mcx, nodes::nodes::Node<'mcx>> =
+            let mut remapped_wco_nodes: mcx::PgVec<'mcx, ::nodes::nodes::Node<'mcx>> =
                 mcx::vec_with_capacity_in(mcx, ref_wco_list.len())?;
             for wco_node in ref_wco_list {
                 let wco = wco_node.as_withcheckoption().ok_or_else(|| {
@@ -710,7 +710,7 @@ fn ExecInitMergeInheritedRoot<'mcx>(
                     }
                 }
                 remapped_wco_nodes
-                    .push(nodes::nodes::Node::mk_with_check_option(mcx, wco)?);
+                    .push(::nodes::nodes::Node::mk_with_check_option(mcx, wco)?);
             }
             // foreach(lc, wcoList) ExecInitQual ... ; rootRelInfo->ri_WithCheckOptions
             // = wcoList; ri_WithCheckOptionExprs = wcoExprs;
@@ -728,7 +728,7 @@ fn ExecInitMergeInheritedRoot<'mcx>(
         if !lists.is_empty() {
             // returningList = linitial(node->returningLists);
             let ref_returning_list = lists[0].as_slice();
-            let mut returning_list: mcx::PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+            let mut returning_list: mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
                 mcx::vec_with_capacity_in(mcx, ref_returning_list.len())?;
             for tle in ref_returning_list {
                 returning_list.push(tle.clone_in(mcx)?);

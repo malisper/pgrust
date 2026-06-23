@@ -22,10 +22,10 @@
 use alloc::string::String;
 use core::fmt::Write as _;
 
-use nodes::jointype::Join;
-use nodes::nodeindexscan::{Plan, Scan};
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::{Expr, TargetEntry};
+use ::nodes::jointype::Join;
+use ::nodes::nodeindexscan::{Plan, Scan};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::{Expr, TargetEntry};
 
 use crate::{
     out_expr, out_node_inner, write_bitmapset_opt_field, write_bool_field, write_enum_field,
@@ -280,7 +280,7 @@ fn out_join_fields(buf: &mut String, join: &Join<'_>, prefix: &str, write_loc: b
 // Per-node `_out<Type>` bodies.
 // ---------------------------------------------------------------------------
 
-fn out_seqscan(buf: &mut String, n: &nodes::nodeseqscan::SeqScan<'_>, wl: bool) {
+fn out_seqscan(buf: &mut String, n: &::nodes::nodeseqscan::SeqScan<'_>, wl: bool) {
     buf.push_str("SEQSCAN");
     out_scan_fields(buf, &n.scan, "scan.", wl);
 }
@@ -289,7 +289,7 @@ fn out_seqscan(buf: &mut String, n: &nodes::nodeseqscan::SeqScan<'_>, wl: bool) 
 /// `WRITE_NODE_FIELD(tablesample)` over the `TableSampleClause *` (its framed
 /// `{TABLESAMPLECLAUSE ...}` writer lives in the parse family). A `NULL`
 /// `tablesample` renders `<>` (`outNode(NULL)`).
-fn out_samplescan(buf: &mut String, n: &nodes::nodesamplescan::SampleScan<'_>, wl: bool) {
+fn out_samplescan(buf: &mut String, n: &::nodes::nodesamplescan::SampleScan<'_>, wl: bool) {
     buf.push_str("SAMPLESCAN");
     out_scan_fields(buf, &n.scan, "scan.", wl);
     buf.push_str(" :tablesample ");
@@ -308,7 +308,7 @@ fn out_samplescan(buf: &mut String, n: &nodes::nodesamplescan::SampleScan<'_>, w
 fn write_rtf_list_field(
     buf: &mut String,
     name: &str,
-    list: Option<&[nodes::rawnodes::RangeTblFunction<'_>]>,
+    list: Option<&[::nodes::rawnodes::RangeTblFunction<'_>]>,
     wl: bool,
 ) {
     let _ = write!(buf, " :{} ", name);
@@ -331,7 +331,7 @@ fn write_rtf_list_field(
 
 /// `_outFunctionScan` (outfuncs.funcs.c): `WRITE_SCAN_FIELDS()`, then the
 /// `functions` node list and the `funcordinality` flag.
-fn out_functionscan(buf: &mut String, n: &nodes::nodefunctionscan::FunctionScan<'_>, wl: bool) {
+fn out_functionscan(buf: &mut String, n: &::nodes::nodefunctionscan::FunctionScan<'_>, wl: bool) {
     buf.push_str("FUNCTIONSCAN");
     out_scan_fields(buf, &n.scan, "scan.", wl);
     write_rtf_list_field(buf, "functions", n.functions.as_deref(), wl);
@@ -342,7 +342,7 @@ fn out_functionscan(buf: &mut String, n: &nodes::nodefunctionscan::FunctionScan<
 /// `tablefunc` child is a `TableFunc` node framed by the out_parse_family writer.
 fn out_tablefuncscan(
     buf: &mut String,
-    n: &nodes::nodetablefuncscan::TableFuncScan<'_>,
+    n: &::nodes::nodetablefuncscan::TableFuncScan<'_>,
     wl: bool,
 ) {
     buf.push_str("TABLEFUNCSCAN");
@@ -353,23 +353,23 @@ fn out_tablefuncscan(
     });
 }
 
-fn out_material(buf: &mut String, n: &nodes::nodeforeigncustom::Material<'_>, wl: bool) {
+fn out_material(buf: &mut String, n: &::nodes::nodeforeigncustom::Material<'_>, wl: bool) {
     buf.push_str("MATERIAL");
     out_plan_fields(buf, &n.plan, "plan.", wl);
 }
 
-fn out_projectset(buf: &mut String, n: &nodes::nodeprojectset::ProjectSet<'_>, wl: bool) {
+fn out_projectset(buf: &mut String, n: &::nodes::nodeprojectset::ProjectSet<'_>, wl: bool) {
     buf.push_str("PROJECTSET");
     out_plan_fields(buf, &n.plan, "plan.", wl);
 }
 
-fn out_result(buf: &mut String, n: &nodes::noderesult::Result<'_>, wl: bool) {
+fn out_result(buf: &mut String, n: &::nodes::noderesult::Result<'_>, wl: bool) {
     buf.push_str("RESULT");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_expr_opt_list(buf, "resconstantqual", n.resconstantqual.as_deref(), wl);
 }
 
-fn out_append(buf: &mut String, n: &nodes::nodeappend::Append<'_>, wl: bool) {
+fn out_append(buf: &mut String, n: &::nodes::nodeappend::Append<'_>, wl: bool) {
     buf.push_str("APPEND");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_bitmapset_opt_field(buf, "apprelids", n.apprelids.as_deref());
@@ -379,13 +379,13 @@ fn out_append(buf: &mut String, n: &nodes::nodeappend::Append<'_>, wl: bool) {
     write_int_field(buf, "part_prune_index", n.part_prune_index);
 }
 
-fn out_bitmapand(buf: &mut String, n: &nodes::nodebitmapand::BitmapAnd<'_>, wl: bool) {
+fn out_bitmapand(buf: &mut String, n: &::nodes::nodebitmapand::BitmapAnd<'_>, wl: bool) {
     buf.push_str("BITMAPAND");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_node_vec(buf, "bitmapplans", &n.bitmapplans, wl);
 }
 
-fn out_gather(buf: &mut String, n: &nodes::nodegather::Gather<'_>, wl: bool) {
+fn out_gather(buf: &mut String, n: &::nodes::nodegather::Gather<'_>, wl: bool) {
     buf.push_str("GATHER");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_int_field(buf, "num_workers", n.num_workers);
@@ -395,7 +395,7 @@ fn out_gather(buf: &mut String, n: &nodes::nodegather::Gather<'_>, wl: bool) {
     write_bitmapset_opt_field(buf, "initParam", n.initParam.as_deref());
 }
 
-fn out_gathermerge(buf: &mut String, n: &nodes::nodegathermerge::GatherMerge<'_>, wl: bool) {
+fn out_gathermerge(buf: &mut String, n: &::nodes::nodegathermerge::GatherMerge<'_>, wl: bool) {
     buf.push_str("GATHERMERGE");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_int_field(buf, "num_workers", n.num_workers);
@@ -408,7 +408,7 @@ fn out_gathermerge(buf: &mut String, n: &nodes::nodegathermerge::GatherMerge<'_>
     write_bitmapset_opt_field(buf, "initParam", n.initParam.as_deref());
 }
 
-fn out_mergeappend(buf: &mut String, n: &nodes::nodemergeappend::MergeAppend<'_>, wl: bool) {
+fn out_mergeappend(buf: &mut String, n: &::nodes::nodemergeappend::MergeAppend<'_>, wl: bool) {
     buf.push_str("MERGEAPPEND");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_bitmapset_opt_field(buf, "apprelids", n.apprelids.as_deref());
@@ -423,7 +423,7 @@ fn out_mergeappend(buf: &mut String, n: &nodes::nodemergeappend::MergeAppend<'_>
 
 fn out_recursiveunion(
     buf: &mut String,
-    n: &nodes::noderecursiveunion::RecursiveUnion<'_>,
+    n: &::nodes::noderecursiveunion::RecursiveUnion<'_>,
     wl: bool,
 ) {
     buf.push_str("RECURSIVEUNION");
@@ -436,7 +436,7 @@ fn out_recursiveunion(
     write_long_field(buf, "numGroups", n.numGroups);
 }
 
-fn out_group(buf: &mut String, n: &nodes::nodegroup::Group<'_>, wl: bool) {
+fn out_group(buf: &mut String, n: &::nodes::nodegroup::Group<'_>, wl: bool) {
     buf.push_str("GROUP");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_int_field(buf, "numCols", n.numCols);
@@ -445,7 +445,7 @@ fn out_group(buf: &mut String, n: &nodes::nodegroup::Group<'_>, wl: bool) {
     write_oid_array(buf, "grpCollations", &n.grpCollations);
 }
 
-fn out_setop(buf: &mut String, n: &nodes::nodesetop::SetOp<'_>, wl: bool) {
+fn out_setop(buf: &mut String, n: &::nodes::nodesetop::SetOp<'_>, wl: bool) {
     buf.push_str("SETOP");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_enum_field(buf, "cmd", n.cmd as i32);
@@ -458,7 +458,7 @@ fn out_setop(buf: &mut String, n: &nodes::nodesetop::SetOp<'_>, wl: bool) {
     write_long_field(buf, "numGroups", n.numGroups);
 }
 
-fn out_unique(buf: &mut String, n: &nodes::nodeunique::Unique<'_>, wl: bool) {
+fn out_unique(buf: &mut String, n: &::nodes::nodeunique::Unique<'_>, wl: bool) {
     buf.push_str("UNIQUE");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_int_field(buf, "numCols", n.numCols);
@@ -467,7 +467,7 @@ fn out_unique(buf: &mut String, n: &nodes::nodeunique::Unique<'_>, wl: bool) {
     write_oid_array(buf, "uniqCollations", opt_slice(&n.uniqCollations));
 }
 
-fn out_sort(buf: &mut String, n: &nodes::nodesort::Sort<'_>, wl: bool) {
+fn out_sort(buf: &mut String, n: &::nodes::nodesort::Sort<'_>, wl: bool) {
     buf.push_str("SORT");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_int_field(buf, "numCols", n.numCols);
@@ -479,7 +479,7 @@ fn out_sort(buf: &mut String, n: &nodes::nodesort::Sort<'_>, wl: bool) {
 
 fn out_incrementalsort(
     buf: &mut String,
-    n: &nodes::nodeincrementalsort::IncrementalSort<'_>,
+    n: &::nodes::nodeincrementalsort::IncrementalSort<'_>,
     wl: bool,
 ) {
     buf.push_str("INCREMENTALSORT");
@@ -494,7 +494,7 @@ fn out_incrementalsort(
     write_int_field(buf, "nPresortedCols", n.nPresortedCols);
 }
 
-fn out_limit(buf: &mut String, n: &nodes::nodelimit::Limit<'_>, wl: bool) {
+fn out_limit(buf: &mut String, n: &::nodes::nodelimit::Limit<'_>, wl: bool) {
     buf.push_str("LIMIT");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     let _ = write!(buf, " :limitOffset ");
@@ -514,7 +514,7 @@ fn out_limit(buf: &mut String, n: &nodes::nodelimit::Limit<'_>, wl: bool) {
     write_oid_array(buf, "uniqCollations", opt_slice(&n.uniqCollations));
 }
 
-fn out_agg(buf: &mut String, n: &nodes::nodeagg::Agg<'_>, wl: bool) {
+fn out_agg(buf: &mut String, n: &::nodes::nodeagg::Agg<'_>, wl: bool) {
     buf.push_str("AGG");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_enum_field(buf, "aggstrategy", n.aggstrategy as i32);
@@ -575,7 +575,7 @@ fn out_agg(buf: &mut String, n: &nodes::nodeagg::Agg<'_>, wl: bool) {
 /// the parent `_outNestLoop` emits the `:nestParams (...)` list of these framed
 /// forms by hand, which is byte-identical to C's `WRITE_NODE_FIELD(nestParams)`
 /// (`outNode` of the `List` → `({NESTLOOPPARAM ...} ...)`).
-fn out_nestloopparam(buf: &mut String, p: &nodes::nodenestloop::NestLoopParam, wl: bool) {
+fn out_nestloopparam(buf: &mut String, p: &::nodes::nodenestloop::NestLoopParam, wl: bool) {
     buf.push_str("NESTLOOPPARAM");
     write_int_field(buf, "paramno", p.paramno);
     // WRITE_NODE_FIELD(paramval): typed `Var *` but may transiently hold a
@@ -584,7 +584,7 @@ fn out_nestloopparam(buf: &mut String, p: &nodes::nodenestloop::NestLoopParam, w
     crate::out_expr(buf, &p.paramval, wl);
 }
 
-fn out_nestloop(buf: &mut String, n: &nodes::nodenestloop::NestLoop<'_>, wl: bool) {
+fn out_nestloop(buf: &mut String, n: &::nodes::nodenestloop::NestLoop<'_>, wl: bool) {
     buf.push_str("NESTLOOP");
     out_join_fields(buf, &n.join, "join.", wl);
     // WRITE_NODE_FIELD(nestParams): `List *` of `NestLoopParam` nodes. NIL (the
@@ -609,7 +609,7 @@ fn out_nestloop(buf: &mut String, n: &nodes::nodenestloop::NestLoop<'_>, wl: boo
     }
 }
 
-fn out_mergejoin(buf: &mut String, n: &nodes::nodemergejoin::MergeJoin<'_>, wl: bool) {
+fn out_mergejoin(buf: &mut String, n: &::nodes::nodemergejoin::MergeJoin<'_>, wl: bool) {
     buf.push_str("MERGEJOIN");
     out_join_fields(buf, &n.join, "join.", wl);
     write_bool_field(buf, "skip_mark_restore", n.skip_mark_restore);
@@ -620,7 +620,7 @@ fn out_mergejoin(buf: &mut String, n: &nodes::nodemergejoin::MergeJoin<'_>, wl: 
     write_bool_array(buf, "mergeNullsFirst", &n.mergeNullsFirst);
 }
 
-fn out_hashjoin(buf: &mut String, n: &nodes::nodehashjoin::HashJoin<'_>, wl: bool) {
+fn out_hashjoin(buf: &mut String, n: &::nodes::nodehashjoin::HashJoin<'_>, wl: bool) {
     buf.push_str("HASHJOIN");
     out_join_fields(buf, &n.join, "join.", wl);
     write_node_opt_list(buf, "hashclauses", n.hashclauses.as_deref(), wl);
@@ -631,7 +631,7 @@ fn out_hashjoin(buf: &mut String, n: &nodes::nodehashjoin::HashJoin<'_>, wl: boo
     write_node_opt_list(buf, "hashkeys", n.hashkeys.as_deref(), wl);
 }
 
-fn out_hash(buf: &mut String, n: &nodes::nodehashjoin::Hash<'_>, wl: bool) {
+fn out_hash(buf: &mut String, n: &::nodes::nodehashjoin::Hash<'_>, wl: bool) {
     buf.push_str("HASH");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_node_opt_list(buf, "hashkeys", n.hashkeys.as_deref(), wl);
@@ -641,7 +641,7 @@ fn out_hash(buf: &mut String, n: &nodes::nodehashjoin::Hash<'_>, wl: bool) {
     write_float_field(buf, "rows_total", n.rows_total);
 }
 
-fn out_memoize(buf: &mut String, n: &nodes::nodememoize::Memoize<'_>, wl: bool) {
+fn out_memoize(buf: &mut String, n: &::nodes::nodememoize::Memoize<'_>, wl: bool) {
     buf.push_str("MEMOIZE");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_int_field(buf, "numKeys", n.numKeys);
@@ -654,7 +654,7 @@ fn out_memoize(buf: &mut String, n: &nodes::nodememoize::Memoize<'_>, wl: bool) 
     write_bitmapset_opt_field(buf, "keyparamids", n.keyparamids.as_deref());
 }
 
-fn out_indexscan(buf: &mut String, n: &nodes::nodeindexscan::IndexScan<'_>, wl: bool) {
+fn out_indexscan(buf: &mut String, n: &::nodes::nodeindexscan::IndexScan<'_>, wl: bool) {
     buf.push_str("INDEXSCAN");
     out_scan_fields(buf, &n.scan, "scan.", wl);
     write_oid_field(buf, "indexid", n.indexid);
@@ -681,7 +681,7 @@ fn out_indexscan(buf: &mut String, n: &nodes::nodeindexscan::IndexScan<'_>, wl: 
 
 fn out_indexonlyscan(
     buf: &mut String,
-    n: &nodes::nodeindexonlyscan::IndexOnlyScan<'_>,
+    n: &::nodes::nodeindexonlyscan::IndexOnlyScan<'_>,
     wl: bool,
 ) {
     buf.push_str("INDEXONLYSCAN");
@@ -696,7 +696,7 @@ fn out_indexonlyscan(
 
 fn out_bitmapindexscan(
     buf: &mut String,
-    n: &nodes::nodebitmapindexscan::BitmapIndexScan<'_>,
+    n: &::nodes::nodebitmapindexscan::BitmapIndexScan<'_>,
     wl: bool,
 ) {
     buf.push_str("BITMAPINDEXSCAN");
@@ -709,7 +709,7 @@ fn out_bitmapindexscan(
 
 fn out_bitmapheapscan(
     buf: &mut String,
-    n: &nodes::nodebitmapheapscan::BitmapHeapScan<'_>,
+    n: &::nodes::nodebitmapheapscan::BitmapHeapScan<'_>,
     wl: bool,
 ) {
     buf.push_str("BITMAPHEAPSCAN");
@@ -723,7 +723,7 @@ fn out_bitmapheapscan(
     write_expr_opt_list(buf, "bitmapqualorig", bqo, wl);
 }
 
-fn out_tidscan(buf: &mut String, n: &nodes::nodeindexscan::TidScan<'_>, wl: bool) {
+fn out_tidscan(buf: &mut String, n: &::nodes::nodeindexscan::TidScan<'_>, wl: bool) {
     buf.push_str("TIDSCAN");
     out_scan_fields(buf, &n.scan, "scan.", wl);
     write_expr_opt_list(buf, "tidquals", n.tidquals.as_deref(), wl);
@@ -731,7 +731,7 @@ fn out_tidscan(buf: &mut String, n: &nodes::nodeindexscan::TidScan<'_>, wl: bool
 
 fn out_tidrangescan(
     buf: &mut String,
-    n: &nodes::nodetidrangescan::TidRangeScan<'_>,
+    n: &::nodes::nodetidrangescan::TidRangeScan<'_>,
     wl: bool,
 ) {
     buf.push_str("TIDRANGESCAN");
@@ -741,7 +741,7 @@ fn out_tidrangescan(
 
 fn out_subqueryscan(
     buf: &mut String,
-    n: &nodes::nodeindexscan::SubqueryScan<'_>,
+    n: &::nodes::nodeindexscan::SubqueryScan<'_>,
     wl: bool,
 ) {
     buf.push_str("SUBQUERYSCAN");
@@ -756,7 +756,7 @@ fn out_subqueryscan(
 
 fn out_worktablescan(
     buf: &mut String,
-    n: &nodes::nodeworktablescan::WorkTableScan<'_>,
+    n: &::nodes::nodeworktablescan::WorkTableScan<'_>,
     wl: bool,
 ) {
     buf.push_str("WORKTABLESCAN");
@@ -764,7 +764,7 @@ fn out_worktablescan(
     write_int_field(buf, "wtParam", n.wtParam);
 }
 
-fn out_ctescan(buf: &mut String, n: &nodes::nodectescan::CteScan<'_>, wl: bool) {
+fn out_ctescan(buf: &mut String, n: &::nodes::nodectescan::CteScan<'_>, wl: bool) {
     buf.push_str("CTESCAN");
     out_scan_fields(buf, &n.scan, "scan.", wl);
     write_int_field(buf, "ctePlanId", n.ctePlanId);
@@ -773,7 +773,7 @@ fn out_ctescan(buf: &mut String, n: &nodes::nodectescan::CteScan<'_>, wl: bool) 
 
 fn out_namedtuplestorescan(
     buf: &mut String,
-    n: &nodes::nodenamedtuplestorescan::NamedTuplestoreScan<'_>,
+    n: &::nodes::nodenamedtuplestorescan::NamedTuplestoreScan<'_>,
     wl: bool,
 ) {
     buf.push_str("NAMEDTUPLESTORESCAN");
@@ -781,7 +781,7 @@ fn out_namedtuplestorescan(
     write_string_field(buf, "enrname", n.enrname.as_ref().map(|s| s.as_str()));
 }
 
-fn out_valuesscan(buf: &mut String, n: &nodes::nodevaluesscan::ValuesScan<'_>, wl: bool) {
+fn out_valuesscan(buf: &mut String, n: &::nodes::nodevaluesscan::ValuesScan<'_>, wl: bool) {
     buf.push_str("VALUESSCAN");
     out_scan_fields(buf, &n.scan, "scan.", wl);
     // values_lists: `List *` of (`List *` of Expr). C `WRITE_NODE_FIELD` →
@@ -812,7 +812,7 @@ fn out_valuesscan(buf: &mut String, n: &nodes::nodevaluesscan::ValuesScan<'_>, w
 
 fn out_foreignscan(
     buf: &mut String,
-    n: &nodes::nodeforeigncustom::ForeignScan<'_>,
+    n: &::nodes::nodeforeigncustom::ForeignScan<'_>,
     wl: bool,
 ) {
     buf.push_str("FOREIGNSCAN");
@@ -847,7 +847,7 @@ fn out_foreignscan(
 }
 
 /// `_outWindowAgg` (outfuncs.funcs.c) — writes every field in struct order.
-fn out_windowagg(buf: &mut String, n: &nodes::nodewindowagg::WindowAgg<'_>, wl: bool) {
+fn out_windowagg(buf: &mut String, n: &::nodes::nodewindowagg::WindowAgg<'_>, wl: bool) {
     buf.push_str("WINDOWAGG");
     out_plan_fields(buf, &n.plan, "plan.", wl);
     write_string_field(buf, "winname", n.winname.as_ref().map(|s| s.as_str()));

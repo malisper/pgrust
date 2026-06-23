@@ -41,7 +41,7 @@ use mcx::{Mcx, MemoryContext};
 use cache::typcache::{DomainCtxHandle, DomainLevelScan};
 use types_core::Oid;
 use types_error::{PgError, PgResult};
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use types_tuple::heaptuple::Datum;
 
 /// `TYPTYPE_DOMAIN` (`pg_type.h`).

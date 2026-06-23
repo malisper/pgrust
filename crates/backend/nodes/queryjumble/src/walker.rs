@@ -1,5 +1,5 @@
 //! The `_jumbleNode` tag-dispatch walker over the canonical owned
-//! [`nodes::copy_query::Query`] tree.
+//! [`::nodes::copy_query::Query`] tree.
 //!
 //! Faithful to `queryjumblefuncs.c`'s generated walker shape: for every node we
 //! emit its `NodeTag` first (`_jumbleNode`'s top `JUMBLE_FIELD(type)`), then the
@@ -11,10 +11,10 @@
 //! (not jumbled), which is what makes constant-only-differing queries normalize
 //! to the same id.
 
-use nodes::copy_query::Query;
-use nodes::nodes::{Node, NodePtr, NodeTag};
-use nodes::parsenodes::{RTEKind, RangeTblEntry};
-use nodes::primnodes::{Expr, TargetEntry};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{Node, NodePtr, NodeTag};
+use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
+use ::nodes::primnodes::{Expr, TargetEntry};
 
 use crate::state::JumbleState;
 use crate::{_jumble_param, _jumble_tag, _record_const_location};
@@ -316,7 +316,7 @@ fn jumble_expr_fields(jstate: &mut JumbleState, expr: &Expr) {
 }
 
 /// `_jumbleCaseExpr` — recurse arg, the when/then clauses, and the default.
-fn jumble_case_expr(jstate: &mut JumbleState, c: &nodes::primnodes::CaseExpr) {
+fn jumble_case_expr(jstate: &mut JumbleState, c: &::nodes::primnodes::CaseExpr) {
     jumble_opt_expr(jstate, c.arg.as_deref());
     for w in c.args.iter() {
         // CaseWhen: expr + result.

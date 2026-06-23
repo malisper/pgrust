@@ -54,10 +54,10 @@ use sort_storage_seams as tuplestore;
 use mcx::{alloc_in, vec_with_capacity_in, PgVec};
 use types_core::primitive::AttrNumber;
 use types_error::PgResult;
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
-use nodes::funcapi::TypeFuncClass;
-use nodes::nodes::Node;
-use nodes::nodefunctionscan::FunctionScan;
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::nodes::funcapi::TypeFuncClass;
+use ::nodes::nodes::Node;
+use ::nodes::nodefunctionscan::FunctionScan;
 use nodes::{
     EStateData, FunctionScanPerFuncState, FunctionScanState, ScanDirectionIsForward, SlotId,
     TupleSlotKind,
@@ -340,7 +340,7 @@ fn FunctionRecheck<'mcx>(
 /// The `PlanState.ExecProcNode` callback installed by [`ExecInitFunctionScan`]:
 /// `castNode(FunctionScanState, pstate)` then run [`ExecFunctionScan`].
 fn exec_function_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate.as_function_scan_state_mut() {
@@ -377,12 +377,12 @@ pub fn ExecInitFunctionScan<'mcx>(
     let mcx = estate.es_query_cxt;
 
     let plan: &'mcx FunctionScan<'mcx> = match node.node_tag() {
-        nodes::nodes::ntag::T_FunctionScan => node.expect_functionscan(),
+        ::nodes::nodes::ntag::T_FunctionScan => node.expect_functionscan(),
         other => panic!("castNode(FunctionScan, node) failed: {other:?}"),
     };
 
     //   int nfuncs = list_length(node->functions);
-    let functions: &[nodes::rawnodes::RangeTblFunction<'mcx>] = match &plan.functions {
+    let functions: &[::nodes::rawnodes::RangeTblFunction<'mcx>] = match &plan.functions {
         Some(v) => v.as_slice(),
         None => &[],
     };
@@ -481,7 +481,7 @@ pub fn ExecInitFunctionScan<'mcx>(
                 vec_with_capacity_in(mcx, rtfunc.funccolnames.len())?;
             for n in rtfunc.funccolnames.iter() {
                 let s = match n.node_tag() {
-                    nodes::nodes::ntag::T_String => n.expect_string().sval.clone_in(mcx)?,
+                    ::nodes::nodes::ntag::T_String => n.expect_string().sval.clone_in(mcx)?,
                     other => panic!("FunctionScan funccolnames entry is not a String: {other:?}"),
                 };
                 names.push(s);

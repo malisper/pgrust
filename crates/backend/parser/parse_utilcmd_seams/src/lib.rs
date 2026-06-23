@@ -8,10 +8,10 @@
 
 use mcx::{Mcx, PgBox, PgVec};
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::ddlnodes::{IndexStmt, RuleStmt};
-use nodes::nodes::Node;
-use nodes::rawnodes::RangeVar;
+use ::nodes::copy_query::Query;
+use ::nodes::ddlnodes::{IndexStmt, RuleStmt};
+use ::nodes::nodes::Node;
+use ::nodes::rawnodes::RangeVar;
 use rel::Relation;
 use types_tuple::attmap::AttrMap;
 

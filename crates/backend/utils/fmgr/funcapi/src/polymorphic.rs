@@ -10,8 +10,8 @@ use types_core::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use nodes::funcapi::{PolymorphicActuals, TypeFuncClass};
-use nodes::nodes::Node;
+use ::nodes::funcapi::{PolymorphicActuals, TypeFuncClass};
+use ::nodes::nodes::Node;
 use types_tuple::heaptuple::{
     TupleDesc, ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLENONARRAYOID,
     ANYCOMPATIBLEOID, ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID,
@@ -63,8 +63,8 @@ impl CallExpr {
         let tag = node.tag().0;
         let erased = match node.as_expr() {
             Some(e) => Some(types_core::fmgr::FnExprErased::from_node_erased::<
-                nodes::primnodes::Expr,
-                nodes::primnodes::Expr,
+                ::nodes::primnodes::Expr,
+                ::nodes::primnodes::Expr,
             >(e.clone_in(mcx)?)),
             None => None,
         };
@@ -74,11 +74,11 @@ impl CallExpr {
     }
 
     /// The erased owned `Expr` behind this call expression, if any.
-    fn expr(&self) -> Option<&nodes::primnodes::Expr<'static>> {
+    fn expr(&self) -> Option<&::nodes::primnodes::Expr<'static>> {
         self.external
             .node
             .as_ref()
-            .and_then(|n| n.downcast_ref::<nodes::primnodes::Expr>())
+            .and_then(|n| n.downcast_ref::<::nodes::primnodes::Expr>())
     }
 
     /// `get_call_expr_argtype(call_expr, argnum)` (fmgr.c:1929) — the actual type

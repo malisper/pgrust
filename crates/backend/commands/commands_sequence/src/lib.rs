@@ -61,11 +61,11 @@ use types_error::{
     ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_WRONG_OBJECT_TYPE, ERRCODE_DUPLICATE_TABLE,
 };
-use nodes::ddlnodes::{AlterSeqStmt, CreateSeqStmt, DefElem};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::nodes::{ntag, Node};
-use nodes::parsestmt::ParseState;
-use nodes::rawnodes::RangeVar;
+use ::nodes::ddlnodes::{AlterSeqStmt, CreateSeqStmt, DefElem};
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsestmt::ParseState;
+use ::nodes::rawnodes::RangeVar;
 use rel::Relation;
 
 use fmgr_seams::pg_call_mcx;
@@ -212,7 +212,7 @@ fn encode_seq_data(userdata: &mut [u8], seq: &FormData_pg_sequence_data) {
 // ===========================================================================
 
 /// Borrow the `RangeVar` carried by `seq->sequence` (a non-NULL `RangeVar *`).
-fn sequence_rangevar<'a, 'mcx>(seq: &'a Option<nodes::nodes::NodePtr<'mcx>>) -> &'a RangeVar<'mcx> {
+fn sequence_rangevar<'a, 'mcx>(seq: &'a Option<::nodes::nodes::NodePtr<'mcx>>) -> &'a RangeVar<'mcx> {
     match seq.as_deref().and_then(|n| n.as_rangevar()) {
         Some(rv) => rv,
         _ => panic!("sequence.c: CreateSeqStmt/AlterSeqStmt.sequence is not a RangeVar node"),
@@ -1454,7 +1454,7 @@ fn read_seq_tuple<'mcx>(
 /// `init_params(...)` — process the options list of CREATE or ALTER SEQUENCE.
 fn init_params(
     pstate: &ParseState<'_>,
-    options: &[nodes::nodes::NodePtr<'_>],
+    options: &[::nodes::nodes::NodePtr<'_>],
     for_identity: bool,
     is_init: bool,
     seqform: &mut FormData_pg_sequence,
@@ -2066,7 +2066,7 @@ fn process_owned_by<'mcx>(
 pub fn sequence_options<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
-) -> PgResult<mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>> {
+) -> PgResult<mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
     let pgsform = match syscache_seams::search_seqrelid::call(relid)? {
         Some(p) => p,
         None => {
@@ -2090,19 +2090,19 @@ pub fn sequence_options<'mcx>(
 
 fn push_def_float<'mcx>(
     mcx: Mcx<'mcx>,
-    options: &mut mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
+    options: &mut mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
     name: &str,
     val: i64,
 ) -> PgResult<()> {
     // makeDefElem(name, (Node *) makeFloat(psprintf(INT64_FORMAT, val)), -1)
-    let float = Node::mk_float(mcx, nodes::value::Float {
+    let float = Node::mk_float(mcx, ::nodes::value::Float {
         fval: mcx::PgString::from_str_in(&val.to_string(), mcx)?,
     })?;
     let de = DefElem {
         defnamespace: None,
         defname: Some(mcx::PgString::from_str_in(name, mcx)?),
         arg: Some(mcx::alloc_in(mcx, float)?),
-        defaction: nodes::ddlnodes::DefElemAction::DEFELEM_UNSPEC,
+        defaction: ::nodes::ddlnodes::DefElemAction::DEFELEM_UNSPEC,
         location: -1,
     };
     let node = mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de)?)?;
@@ -2112,17 +2112,17 @@ fn push_def_float<'mcx>(
 
 fn push_def_bool<'mcx>(
     mcx: Mcx<'mcx>,
-    options: &mut mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
+    options: &mut mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
     name: &str,
     val: bool,
 ) -> PgResult<()> {
     // makeDefElem(name, (Node *) makeBoolean(val), -1)
-    let b = Node::mk_boolean(mcx, nodes::value::Boolean { boolval: val })?;
+    let b = Node::mk_boolean(mcx, ::nodes::value::Boolean { boolval: val })?;
     let de = DefElem {
         defnamespace: None,
         defname: Some(mcx::PgString::from_str_in(name, mcx)?),
         arg: Some(mcx::alloc_in(mcx, b)?),
-        defaction: nodes::ddlnodes::DefElemAction::DEFELEM_UNSPEC,
+        defaction: ::nodes::ddlnodes::DefElemAction::DEFELEM_UNSPEC,
         location: -1,
     };
     let node = mcx::alloc_in(mcx, Node::mk_def_elem(mcx, de)?)?;

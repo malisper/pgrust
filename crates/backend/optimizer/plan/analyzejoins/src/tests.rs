@@ -10,7 +10,7 @@ use crate::change_relids::{
 };
 use crate::relids as r;
 
-use nodes::primnodes::{Expr, Var};
+use ::nodes::primnodes::{Expr, Var};
 use pathnodes::{
     Bitmapset, EquivalenceMember, PlannerInfo, RestrictInfo, RinfoId, VOLATILITY_UNKNOWN,
 };

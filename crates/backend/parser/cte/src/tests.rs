@@ -10,8 +10,8 @@ use super::*;
 use mcx::MemoryContext;
 use std::sync::Once;
 
-use nodes::primnodes::Const;
-use nodes::rawnodes::{CTEMaterialize, RangeVar, RangeTblRef, SetOperationStmt};
+use ::nodes::primnodes::Const;
+use ::nodes::rawnodes::{CTEMaterialize, RangeVar, RangeTblRef, SetOperationStmt};
 use types_tuple::heaptuple::Datum;
 use types_tuple::heaptuple::INT4OID;
 

@@ -14,7 +14,7 @@ use seam_core::seam;
 
 use types_core::Oid;
 use types_funccache::ProcCompileInfo;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 
 /* ---- syscache.c (pg_proc projection) --------------------------------------- */
 

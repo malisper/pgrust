@@ -10,7 +10,7 @@
 //! fmgr entry point returns SQL NULL. The full bodies live in
 //! [`adt_jsonfuncs::{elements,keys}`]; this unit only adapts the
 //! owned `(mcx, fcinfo, ...)` worker signature to the executor-frame
-//! [`nodes::execexpr::PGFunction`] ABI (`fn(&mut FunctionCallInfoBaseData)
+//! [`::nodes::execexpr::PGFunction`] ABI (`fn(&mut FunctionCallInfoBaseData)
 //! -> Datum`) and registers each under its `pg_proc` OID, exactly as
 //! `fmgr_builtins[]` would add an ordinary row.
 //!
@@ -23,7 +23,7 @@
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 use crate::register_srf;
@@ -154,14 +154,14 @@ fn put_jsonb_path_rows<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
     images: Vec<Vec<u8>>,
 ) -> types_error::PgResult<()> {
-    use funcapi::srf_support::{
+    use ::funcapi::srf_support::{
         materialized_srf_putvalues, InitMaterializedSRF,
     };
 
     // InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC | MAT_SRF_BLESS);
     InitMaterializedSRF(
         fcinfo,
-        nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | nodes::funcapi::MAT_SRF_BLESS,
+        ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | ::nodes::funcapi::MAT_SRF_BLESS,
     )?;
 
     for image in images {

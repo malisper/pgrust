@@ -28,11 +28,11 @@ use mcx::{slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::{Oid, OidIsValid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION};
 use hash::HASHEXTENDED_PROC;
-use nodes::nodes::Node;
-use nodes::partition::{
+use ::nodes::nodes::Node;
+use ::nodes::partition::{
     PartitionKeyData as NodesPartitionKeyData, PartitionStrategy as NodesPartitionStrategy,
 };
-use nodes::Expr;
+use ::nodes::Expr;
 use types_partition::{
     PartKeyTypeInfo, PartitionKeyData, PartitionStrategy, BTORDER_PROC,
     PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
@@ -489,7 +489,7 @@ fn clone_node_list<'mcx>(
 /// The two surfaces also carry distinct `PartitionKeyData` definitions: the
 /// build algorithm uses `types_partition::PartitionKeyData` (its `strategy` is
 /// the on-disk `char`/`i8`), while the seam contract and its executor consumers
-/// use `nodes::partition::PartitionKeyData` (its `strategy` is the
+/// use `::nodes::partition::PartitionKeyData` (its `strategy` is the
 /// `PartitionStrategy` enum). Every other field is the same type, so the shim
 /// moves them across and decodes the strategy `char` into the enum via
 /// `PartitionStrategy::from_char` (the same `'l'`/`'r'`/`'h'` validation the

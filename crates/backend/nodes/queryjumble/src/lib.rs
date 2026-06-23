@@ -14,7 +14,7 @@
 //! `InitJumble`/`AppendJumble`/`RecordConstLocation`/`EnableQueryId`).
 //!
 //! This crate ports BOTH halves onto the canonical owned
-//! [`nodes::copy_query::Query`] flat node tree. Half (1) is the
+//! [`::nodes::copy_query::Query`] flat node tree. Half (1) is the
 //! hand-written tag-dispatch walker (`jumble_node` / the per-`Expr`-arm jumble),
 //! faithful to `_jumbleNode`'s "emit the node tag, then the significant fields,
 //! then recurse" shape; half (2) is the [`JumbleState`] working state + the
@@ -40,9 +40,9 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use nodes::copy_query::Query;
-use nodes::nodes::NodeTag;
-use nodes::primnodes::ParamKind;
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::NodeTag;
+use ::nodes::primnodes::ParamKind;
 
 mod state;
 mod walker;
@@ -213,11 +213,11 @@ pub fn init_seams() {
 }
 
 /// Build the seams-facing opaque `JumbleState` token (the portalcmds view).
-fn seams_jumble_state() -> nodes::portalcmds::JumbleState {
+fn seams_jumble_state() -> ::nodes::portalcmds::JumbleState {
     // The portalcmds `JumbleState` is an opaque `{ _private: () }` placeholder
     // (it is only threaded as the third arg of `post_parse_analyze_hook`, which
     // is NULL by default). Construct it via its public surface.
-    nodes::portalcmds::JumbleState::opaque()
+    ::nodes::portalcmds::JumbleState::opaque()
 }
 
 #[cfg(test)]

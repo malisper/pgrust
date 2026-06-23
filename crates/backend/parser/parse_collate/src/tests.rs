@@ -8,7 +8,7 @@
 use super::*;
 use std::sync::Once;
 use mcx::{Mcx, PgString};
-use nodes::primnodes::{
+use ::nodes::primnodes::{
     BoolExpr, BoolExprType, CollateExpr, Const, Expr, OpExpr, Var,
 };
 

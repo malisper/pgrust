@@ -3,7 +3,7 @@
 //! these cover the in-crate pure logic).
 
 use super::*;
-use nodes::nodeagg::{
+use ::nodes::nodeagg::{
     AGGSPLIT_FINAL_DESERIAL, AGGSPLIT_INITIAL_SERIAL, AGGSPLIT_SIMPLE,
 };
 

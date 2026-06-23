@@ -9,13 +9,13 @@ use alloc::format;
 use utils_error::ereport;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     CONSTR_ATTR_DEFERRABLE, CONSTR_ATTR_DEFERRED, CONSTR_ATTR_ENFORCED, CONSTR_ATTR_IMMEDIATE,
     CONSTR_ATTR_NOT_DEFERRABLE, CONSTR_ATTR_NOT_ENFORCED, CONSTR_CHECK, CONSTR_DEFAULT,
     CONSTR_EXCLUSION, CONSTR_FOREIGN, CONSTR_GENERATED, CONSTR_IDENTITY, CONSTR_NOTNULL,
     CONSTR_NULL, CONSTR_PRIMARY, CONSTR_UNIQUE,
 };
-use nodes::nodes::ntag;
+use ::nodes::nodes::ntag;
 
 use crate::core::{CreateStmtContext, NodePtr};
 use crate::errpos::parser_errposition;

@@ -44,7 +44,7 @@ use alloc::vec::Vec;
 use types_error::PgResult;
 
 use types_core::primitive::{AttrNumber, Index, Oid};
-use nodes::primnodes::{Expr, NullTestType, Var, AND_EXPR, NOT_EXPR, OR_EXPR};
+use ::nodes::primnodes::{Expr, NullTestType, Var, AND_EXPR, NOT_EXPR, OR_EXPR};
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     EcId, EmId, JoinType, NodeId, RelId, Relids, RestrictInfo, RinfoId, PlannerInfo,

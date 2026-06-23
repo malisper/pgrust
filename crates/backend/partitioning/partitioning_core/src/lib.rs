@@ -19,7 +19,7 @@
 //!
 //! Run-time pruning planner leg (this lane): `make_partition_pruneinfo` /
 //! `make_partitionedrel_pruneinfo` build the `PartitionPruneInfo` plan-data
-//! carrier (`nodes::partprune_carrier`) for Append/MergeAppend, generating
+//! carrier (`::nodes::partprune_carrier`) for Append/MergeAppend, generating
 //! INITIAL/EXEC pruning steps (`gen_partprune_steps` now honors all three
 //! `PartClauseTarget` values, with `pull_exec_paramids` /
 //! `get_partkey_exec_paramids`). The carrier is appended to
@@ -39,8 +39,8 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use nodes::partition::{PartitionBoundInfoData, PartitionKeyData, PartitionRangeDatumKind};
-use nodes::primnodes::{
+use ::nodes::partition::{PartitionBoundInfoData, PartitionKeyData, PartitionRangeDatumKind};
+use ::nodes::primnodes::{
     BoolExpr, BoolExprType, BoolTestType, Const, Expr, NullTest, NullTestType, ScalarArrayOpExpr,
 };
 use pathnodes::planner_run::PlannerRun;
@@ -248,7 +248,7 @@ fn bms_add_range(set: &mut Bitmapset, lo: i32, hi: i32) {
 /// as var.c's `pull_varnos`).
 fn pull_exec_paramids(expr: &Expr) -> Bitmapset {
     use nodes_core::node_walker::{expression_tree_walker, node_expr_wrapper};
-    use nodes::nodes::Node;
+    use ::nodes::nodes::Node;
 
     let scratch = mcx::MemoryContext::new("pull_exec_paramids");
     let mut result = Bitmapset::new();
@@ -259,7 +259,7 @@ fn pull_exec_paramids(expr: &Expr) -> Bitmapset {
     /// `pull_exec_paramids_walker` (partprune.c:2633).
     fn pull_exec_paramids_walker(node: &Node, context: &mut Bitmapset) -> bool {
         if let Some(Expr::Param(param)) = node.as_expr() {
-            if param.paramkind == nodes::primnodes::PARAM_EXEC {
+            if param.paramkind == ::nodes::primnodes::PARAM_EXEC {
                 context.insert(param.paramid);
             }
             return false;
@@ -272,7 +272,7 @@ fn pull_exec_paramids(expr: &Expr) -> Bitmapset {
 // make_partition_pruneinfo / make_partitionedrel_pruneinfo (partprune.c:224)
 // =============================================================================
 
-use nodes::partprune_carrier::{
+use ::nodes::partprune_carrier::{
     PartitionPruneCombineOp as CarrierCombineOp, PartitionPruneInfo as CarrierPruneInfo,
     PartitionPruneStep as CarrierStep, PartitionPruneStepCombine as CarrierStepCombine,
     PartitionPruneStepOp as CarrierStepOp, PartitionedRelPruneInfo as CarrierRelPruneInfo, RawBms,
@@ -329,13 +329,13 @@ fn ints_to_rawbms(ints: &[i32]) -> RawBms {
         return None;
     }
     let maxbit = *ints.iter().max().unwrap();
-    let bits_per_word = (core::mem::size_of::<nodes::bitmapset::bitmapword>() * 8) as i32;
+    let bits_per_word = (core::mem::size_of::<::nodes::bitmapset::bitmapword>() * 8) as i32;
     let nwords = (maxbit / bits_per_word + 1) as usize;
-    let mut words = alloc::vec![0 as nodes::bitmapset::bitmapword; nwords];
+    let mut words = alloc::vec![0 as ::nodes::bitmapset::bitmapword; nwords];
     for &i in ints {
         let w = (i / bits_per_word) as usize;
         let b = i % bits_per_word;
-        words[w] |= (1 as nodes::bitmapset::bitmapword) << b;
+        words[w] |= (1 as ::nodes::bitmapset::bitmapword) << b;
     }
     Some(words)
 }
@@ -484,7 +484,7 @@ fn make_partition_pruneinfo<'mcx>(
     // Interned into the planner's backend-lifetime `partPruneInfos` list; erase
     // to the arena's notional 'static at this sanctioned intern boundary.
     root.partPruneInfos
-        .push(nodes::partprune_carrier::partpruneinfo_into_static(pruneinfo));
+        .push(::nodes::partprune_carrier::partpruneinfo_into_static(pruneinfo));
     Ok(root.partPruneInfos.len() as i32 - 1)
 }
 
@@ -760,10 +760,10 @@ pub fn init_seams() {
 /// — the run-time (executor) pruning kernel entry.
 fn get_matching_partitions_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    context: &mut nodes::partition::PartitionPruneContext<'mcx>,
-    pruning_steps: &[nodes::partprune_carrier::PartitionPruneStep<'mcx>],
-    estate: &mut nodes::EStateData<'mcx>,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
+    context: &mut ::nodes::partition::PartitionPruneContext<'mcx>,
+    pruning_steps: &[::nodes::partprune_carrier::PartitionPruneStep<'mcx>],
+    estate: &mut ::nodes::EStateData<'mcx>,
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     get_matching_partitions_exec(mcx, context, pruning_steps, estate)
 }
 
@@ -1895,7 +1895,7 @@ fn match_clause_to_partition_key<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn match_opexpr_to_partition_key<'mcx>(
     context: &mut GeneratePruningStepsContext<'_, 'mcx>,
-    opclause: &nodes::primnodes::OpExpr<'mcx>,
+    opclause: &::nodes::primnodes::OpExpr<'mcx>,
     partkey: &Expr<'mcx>,
     partkeyidx: i32,
     partopfamily: Oid,
@@ -2408,8 +2408,8 @@ fn partkey_datum_from_expr<'mcx>(expr: &Expr<'mcx>) -> PgResult<(Datum<'mcx>, bo
 /// (`ExecEvalExprSwitchContext`). The context must carry a valid `exprcontext`
 /// whenever a non-Const expression is reached (C: `Assert(exprcontext != NULL)`).
 fn partkey_datum_from_expr_exec<'mcx>(
-    context: &mut nodes::partition::PartitionPruneContext<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
+    context: &mut ::nodes::partition::PartitionPruneContext<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     expr: &Expr<'mcx>,
     stateidx: usize,
 ) -> PgResult<(Datum<'mcx>, bool)> {
@@ -2446,10 +2446,10 @@ fn partkey_datum_from_expr_exec<'mcx>(
 /// `Bitmapset` (`None` is the C NULL/empty set).
 fn get_matching_partitions_exec<'mcx>(
     mcx: Mcx<'mcx>,
-    context: &mut nodes::partition::PartitionPruneContext<'mcx>,
-    pruning_steps: &[nodes::partprune_carrier::PartitionPruneStep<'mcx>],
-    estate: &mut nodes::EStateData<'mcx>,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
+    context: &mut ::nodes::partition::PartitionPruneContext<'mcx>,
+    pruning_steps: &[::nodes::partprune_carrier::PartitionPruneStep<'mcx>],
+    estate: &mut ::nodes::EStateData<'mcx>,
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     let num_steps = pruning_steps.len();
     let nparts = context.nparts;
 
@@ -2466,11 +2466,11 @@ fn get_matching_partitions_exec<'mcx>(
     let mut results: Vec<Option<PruneStepResult>> = alloc::vec![None; num_steps];
     for step in pruning_steps {
         match step {
-            nodes::partprune_carrier::PartitionPruneStep::Op(op) => {
+            ::nodes::partprune_carrier::PartitionPruneStep::Op(op) => {
                 let r = perform_pruning_base_step_exec(mcx, context, estate, op)?;
                 results[op.step_id as usize] = Some(r);
             }
-            nodes::partprune_carrier::PartitionPruneStep::Combine(c) => {
+            ::nodes::partprune_carrier::PartitionPruneStep::Combine(c) => {
                 let r = perform_pruning_combine_step_exec(mcx, context, c, &results)?;
                 results[c.step_id as usize] = Some(r);
             }
@@ -2506,7 +2506,7 @@ fn get_matching_partitions_exec<'mcx>(
 /// `&context->boundinfo` (the executor context aliases the relcache PartitionDesc
 /// boundinfo, moved into the owned context). All bound-math reads go through here.
 fn exec_boundinfo<'a, 'mcx>(
-    context: &'a nodes::partition::PartitionPruneContext<'mcx>,
+    context: &'a ::nodes::partition::PartitionPruneContext<'mcx>,
 ) -> &'a PartitionBoundInfoData<'mcx> {
     context
         .boundinfo
@@ -2521,7 +2521,7 @@ fn exec_boundinfo<'a, 'mcx>(
 /// `partcollation`).
 fn exec_build_hash_key<'mcx>(
     mcx: Mcx<'mcx>,
-    context: &nodes::partition::PartitionPruneContext<'mcx>,
+    context: &::nodes::partition::PartitionPruneContext<'mcx>,
 ) -> PgResult<PartitionKeyData<'mcx>> {
     let partnatts = context.partnatts;
     let supfuncs: &Vec<types_core::fmgr::FmgrInfo> = context
@@ -2562,9 +2562,9 @@ fn exec_build_hash_key<'mcx>(
 /// `get_matching_{hash,list,range}_bounds`.
 fn perform_pruning_base_step_exec<'mcx>(
     mcx: Mcx<'mcx>,
-    context: &mut nodes::partition::PartitionPruneContext<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
-    opstep: &nodes::partprune_carrier::PartitionPruneStepOp<'mcx>,
+    context: &mut ::nodes::partition::PartitionPruneContext<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    opstep: &::nodes::partprune_carrier::PartitionPruneStepOp<'mcx>,
 ) -> PgResult<PruneStepResult> {
     let partnatts = context.partnatts;
     let strategy = context.strategy as i8;
@@ -2686,17 +2686,17 @@ fn perform_pruning_base_step_exec<'mcx>(
 /// reading the boundinfo through the executor context).
 fn perform_pruning_combine_step_exec<'mcx>(
     _mcx: Mcx<'mcx>,
-    context: &nodes::partition::PartitionPruneContext<'mcx>,
-    cstep: &nodes::partprune_carrier::PartitionPruneStepCombine,
+    context: &::nodes::partition::PartitionPruneContext<'mcx>,
+    cstep: &::nodes::partprune_carrier::PartitionPruneStepCombine,
     step_results: &[Option<PruneStepResult>],
 ) -> PgResult<PruneStepResult> {
     let mut result = PruneStepResult::default();
     // Map the carrier combine op onto the crate-local one used in the match below.
     let combine_op = match cstep.combine_op {
-        nodes::partprune_carrier::PartitionPruneCombineOp::Union => {
+        ::nodes::partprune_carrier::PartitionPruneCombineOp::Union => {
             PartitionPruneCombineOp::Union
         }
-        nodes::partprune_carrier::PartitionPruneCombineOp::Intersect => {
+        ::nodes::partprune_carrier::PartitionPruneCombineOp::Intersect => {
             PartitionPruneCombineOp::Intersect
         }
     };
@@ -2764,7 +2764,7 @@ fn perform_pruning_combine_step_exec<'mcx>(
 }
 
 /// `bms_to_vec` over a `RawBms` carrier (the carrier step's `nullkeys`).
-fn raw_bms_to_vec(raw: &nodes::partprune_carrier::RawBms) -> Vec<i32> {
+fn raw_bms_to_vec(raw: &::nodes::partprune_carrier::RawBms) -> Vec<i32> {
     match raw {
         Some(words) => {
             let mut out = Vec::new();
@@ -2786,13 +2786,13 @@ fn raw_bms_to_vec(raw: &nodes::partprune_carrier::RawBms) -> Vec<i32> {
 }
 
 /// Convert a crate-internal `Bitmapset` (BTreeSet of partition indexes) into the
-/// executor's `nodes::Bitmapset` allocated in `mcx`. `None` for the empty
+/// executor's `::nodes::Bitmapset` allocated in `mcx`. `None` for the empty
 /// set (the C NULL).
 fn owned_bms_to_exec<'mcx>(
     mcx: Mcx<'mcx>,
     set: &Bitmapset,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
-    let mut result: Option<mcx::PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
+    let mut result: Option<mcx::PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
     for &member in set.iter() {
         let cur = result.take();
         result = Some(nodes_core_seams::bms_add_member::call(
@@ -2806,7 +2806,7 @@ fn owned_bms_to_exec<'mcx>(
 /// the hash kernel uses `compute_partition_hash_value`).
 fn empty_partkey<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PartitionKeyData<'mcx>> {
     Ok(PartitionKeyData {
-        strategy: nodes::partition::PartitionStrategy::List,
+        strategy: ::nodes::partition::PartitionStrategy::List,
         partnatts: 0,
         partattrs: mcx::slice_in(mcx, &[])?,
         partexprs: mcx::slice_in(mcx, &[])?,

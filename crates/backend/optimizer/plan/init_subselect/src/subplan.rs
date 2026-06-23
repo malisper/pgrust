@@ -23,8 +23,8 @@
 use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use nodes::nodes::Node;
-use nodes::primnodes::{
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{
     Expr, OpExpr, Param, ParamKind, SubLinkType, SubPlan, SubPlanExpr,
 };
 use pathnodes::planner_run::PlannerRun;
@@ -126,7 +126,7 @@ pub fn make_subplan<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     run: &mut PlannerRun<'mcx>,
-    orig_subquery: Option<PgBox<'mcx, nodes::copy_query::Query<'mcx>>>,
+    orig_subquery: Option<PgBox<'mcx, ::nodes::copy_query::Query<'mcx>>>,
     sub_link_type: SubLinkType,
     sub_link_id: i32,
     testexpr: Option<Expr<'mcx>>,
@@ -267,9 +267,9 @@ pub fn make_subplan<'mcx>(
                 // build the `AlternativeSubPlan` at `'mcx` and keep `result` at
                 // `'mcx` — no lifetime erasure needed (the prior forged-'static
                 // transmute is removed by the Expr-'mcx campaign).
-                let alt = nodes::primnodes::AlternativeSubPlan { subplans };
+                let alt = ::nodes::primnodes::AlternativeSubPlan { subplans };
                 result = Expr::AlternativeSubPlan(
-                    nodes::primnodes::AlternativeSubPlanExpr(alloc::boxed::Box::new(alt)),
+                    ::nodes::primnodes::AlternativeSubPlanExpr(alloc::boxed::Box::new(alt)),
                 );
                 root.hasAlternativeSubPlans = true;
             }
@@ -594,7 +594,7 @@ fn generate_subquery_params<'mcx>(
 /// family (out of scope here), but kept for completeness of the module API.
 #[allow(dead_code)]
 fn generate_subquery_vars<'mcx>(
-    tlist: &[nodes::primnodes::TargetEntry<'mcx>],
+    tlist: &[::nodes::primnodes::TargetEntry<'mcx>],
     varno: types_core::primitive::Index,
 ) -> PgResult<Vec<Expr<'mcx>>> {
     let mut result: Vec<Expr<'mcx>> = Vec::new();
@@ -682,7 +682,7 @@ fn testexpr_is_hashable(testexpr: Option<&Expr>, param_ids: &[i32]) -> PgResult<
             }
         }
         Some(Expr::BoolExpr(b))
-            if b.boolop == nodes::primnodes::BoolExprType::AND_EXPR =>
+            if b.boolop == ::nodes::primnodes::BoolExprType::AND_EXPR =>
         {
             for andarg in b.args.iter() {
                 match andarg {
@@ -810,7 +810,7 @@ pub fn SS_process_ctes<'mcx>(
         };
 
         // Ignore SELECT CTEs that are not actually referenced anywhere.
-        if cterefcount == 0 && cmd_type == nodes::nodes::CmdType::CMD_SELECT {
+        if cterefcount == 0 && cmd_type == ::nodes::nodes::CmdType::CMD_SELECT {
             root.cte_plan_ids.push(-1);
             continue;
         }
@@ -819,11 +819,11 @@ pub fn SS_process_ctes<'mcx>(
         // (the volatile-functions / DML / outer-selfref checks read the
         // ctequery; clone it as a Node for the read-only walks).
         let may_inline = (ctematerialized
-            == nodes::rawnodes::CTEMaterializeNever
-            || (ctematerialized == nodes::rawnodes::CTEMaterializeDefault
+            == ::nodes::rawnodes::CTEMaterializeNever
+            || (ctematerialized == ::nodes::rawnodes::CTEMaterializeDefault
                 && cterefcount == 1))
             && !cterecursive
-            && cmd_type == nodes::nodes::CmdType::CMD_SELECT;
+            && cmd_type == ::nodes::nodes::CmdType::CMD_SELECT;
 
         let do_inline = if may_inline {
             // contain_dml / contain_outer_selfref / contain_volatile_functions
@@ -1020,7 +1020,7 @@ fn contain_dml(node: &Node<'_>) -> bool {
 /// `contain_dml_walker(node, context)` (subselect.c).
 fn contain_dml_walker(node: &Node<'_>) -> bool {
     if let Some(query) = node.as_query() {
-        if query.commandType != nodes::nodes::CmdType::CMD_SELECT
+        if query.commandType != ::nodes::nodes::CmdType::CMD_SELECT
             || !query.rowMarks.is_empty()
         {
             return true;
@@ -1076,7 +1076,7 @@ fn contain_dml_walker(node: &Node<'_>) -> bool {
 /// `contain_outer_selfref(node)` (subselect.c): is there an external recursive
 /// self-reference?
 fn contain_outer_selfref(node: &Node<'_>) -> bool {
-    debug_assert!(node.node_tag() == nodes::nodes::ntag::T_Query);
+    debug_assert!(node.node_tag() == ::nodes::nodes::ntag::T_Query);
     let mut depth: u32 = 0;
     contain_outer_selfref_walker(node, &mut depth)
 }
@@ -1085,7 +1085,7 @@ fn contain_outer_selfref(node: &Node<'_>) -> bool {
 fn contain_outer_selfref_walker(node: &Node<'_>, depth: &mut u32) -> bool {
     if let Some(rte) = node.as_rangetblentry() {
         // Check for a self-reference to a CTE above the search start.
-        if rte.rtekind == nodes::parsenodes::RTEKind::RTE_CTE
+        if rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_CTE
             && rte.self_reference
             && rte.ctelevelsup >= *depth
         {
@@ -1104,7 +1104,7 @@ fn contain_outer_selfref_walker(node: &Node<'_>, depth: &mut u32) -> bool {
             // inspects rtekind / self_reference / ctelevelsup on an RTE_CTE, so
             // check those scalars inline (no Node wrapping needed).
             for rte in query.rtable.iter() {
-                if rte.rtekind == nodes::parsenodes::RTEKind::RTE_CTE
+                if rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_CTE
                     && rte.self_reference
                     && rte.ctelevelsup >= *depth
                 {
@@ -1164,7 +1164,7 @@ fn contain_outer_selfref_walker(node: &Node<'_>, depth: &mut u32) -> bool {
 struct InlineCteCtx<'mcx> {
     ctename: alloc::string::String,
     levelsup: i64,
-    ctequery: nodes::copy_query::Query<'mcx>,
+    ctequery: ::nodes::copy_query::Query<'mcx>,
 }
 
 /// `inline_cte(root, cte)` (subselect.c): convert RTE_CTE references to the
@@ -1216,7 +1216,7 @@ fn inline_cte<'mcx>(
 /// descend into the newly inlined CTE query.
 fn inline_cte_walker_query<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &mut nodes::copy_query::Query<'mcx>,
+    query: &mut ::nodes::copy_query::Query<'mcx>,
     ctx: &mut InlineCteCtx<'mcx>,
 ) -> PgResult<()> {
     ctx.levelsup += 1;
@@ -1227,7 +1227,7 @@ fn inline_cte_walker_query<'mcx>(
     //
     // Descend into sub-queries reachable from this query's RTEs.
     for i in 0..query.rtable.len() {
-        if query.rtable[i].rtekind == nodes::parsenodes::RTEKind::RTE_SUBQUERY {
+        if query.rtable[i].rtekind == ::nodes::parsenodes::RTEKind::RTE_SUBQUERY {
             if let Some(sub) = query.rtable[i].subquery.as_deref_mut() {
                 inline_cte_walker_query(mcx, sub, ctx)?;
             }
@@ -1244,7 +1244,7 @@ fn inline_cte_walker_query<'mcx>(
     // being inlined that appears inside a *sibling* CTE's query gets rewritten
     // too (the `cterefcount==1` default-materialize inline path depends on it).
     for i in 0..query.cteList.len() {
-        let cq_opt: Option<&mut nodes::copy_query::Query<'mcx>> = query.cteList[i]
+        let cq_opt: Option<&mut ::nodes::copy_query::Query<'mcx>> = query.cteList[i]
             .as_commontableexpr_mut()
             .and_then(|c| c.ctequery.as_deref_mut())
             .and_then(|n| n.as_query_mut());
@@ -1256,7 +1256,7 @@ fn inline_cte_walker_query<'mcx>(
     // Now rewrite this level's RTE_CTE references that match.
     for i in 0..query.rtable.len() {
         let rte = &mut query.rtable[i];
-        if rte.rtekind == nodes::parsenodes::RTEKind::RTE_CTE
+        if rte.rtekind == ::nodes::parsenodes::RTEKind::RTE_CTE
             && rte
                 .ctename
                 .as_ref()
@@ -1278,7 +1278,7 @@ fn inline_cte_walker_query<'mcx>(
                 newquery = nq_node.into_query().expect("expected Query node");
             }
             // Convert the RTE_CTE RTE into an RTE_SUBQUERY.
-            rte.rtekind = nodes::parsenodes::RTEKind::RTE_SUBQUERY;
+            rte.rtekind = ::nodes::parsenodes::RTEKind::RTE_SUBQUERY;
             rte.subquery = Some(alloc_in(mcx, newquery)?);
             rte.security_barrier = false;
             // Zero out CTE-specific fields.
@@ -1301,7 +1301,7 @@ fn inline_cte_walker_query<'mcx>(
 /// SubLink children.
 fn inline_cte_walk_query_exprs<'mcx>(
     mcx: Mcx<'mcx>,
-    query: &mut nodes::copy_query::Query<'mcx>,
+    query: &mut ::nodes::copy_query::Query<'mcx>,
     ctx: &mut InlineCteCtx<'mcx>,
 ) -> PgResult<()> {
     // Walk this query's expression trees mutably. C's `inline_cte_walker` is a
@@ -1332,7 +1332,7 @@ fn inline_cte_walk_query_exprs<'mcx>(
             let saved = sl.subselect.take();
             if let Some(mut sub_box) = saved {
                 {
-                    let subq: &mut nodes::copy_query::Query<'mcx> =
+                    let subq: &mut ::nodes::copy_query::Query<'mcx> =
                         unsafe { core::mem::transmute(&mut *sub_box) };
                     if let Err(e2) = inline_cte_walker_query(mcx, subq, ctx) {
                         // restore before aborting
@@ -1383,7 +1383,7 @@ fn inline_cte_walk_query_exprs<'mcx>(
     if err.is_none() {
         for i in 0..query.rtable.len() {
             match query.rtable[i].rtekind {
-                nodes::parsenodes::RTEKind::RTE_VALUES => {
+                ::nodes::parsenodes::RTEKind::RTE_VALUES => {
                     for j in 0..query.rtable[i].values_lists.len() {
                         if err.is_some() {
                             break;
@@ -1392,7 +1392,7 @@ fn inline_cte_walk_query_exprs<'mcx>(
                         visit_node(n, ctx, &mut err, mcx);
                     }
                 }
-                nodes::parsenodes::RTEKind::RTE_FUNCTION => {
+                ::nodes::parsenodes::RTEKind::RTE_FUNCTION => {
                     for j in 0..query.rtable[i].functions.len() {
                         if err.is_some() {
                             break;
@@ -1401,7 +1401,7 @@ fn inline_cte_walk_query_exprs<'mcx>(
                         visit_node(n, ctx, &mut err, mcx);
                     }
                 }
-                nodes::parsenodes::RTEKind::RTE_TABLEFUNC => {
+                ::nodes::parsenodes::RTEKind::RTE_TABLEFUNC => {
                     if let Some(tf) = query.rtable[i].tablefunc.as_mut() {
                         let n: &mut Node<'mcx> = &mut *tf;
                         visit_node(n, ctx, &mut err, mcx);
@@ -1427,9 +1427,9 @@ fn inline_cte_walk_query_exprs<'mcx>(
 fn simplify_EXISTS_query<'mcx>(
     root: &mut PlannerInfo,
     mcx: Mcx<'mcx>,
-    query: &mut nodes::copy_query::Query<'mcx>,
+    query: &mut ::nodes::copy_query::Query<'mcx>,
 ) -> PgResult<bool> {
-    if query.commandType != nodes::nodes::CmdType::CMD_SELECT
+    if query.commandType != ::nodes::nodes::CmdType::CMD_SELECT
         || query.setOperations.is_some()
         || query.hasAggs
         || !query.groupingSets.is_empty()
@@ -1477,7 +1477,7 @@ fn simplify_EXISTS_query<'mcx>(
 
     // Remove the RTE_GROUP RTE and clear hasGroupRTE.
     for i in 0..query.rtable.len() {
-        if query.rtable[i].rtekind == nodes::parsenodes::RTEKind::RTE_GROUP {
+        if query.rtable[i].rtekind == ::nodes::parsenodes::RTEKind::RTE_GROUP {
             debug_assert!(query.hasGroupRTE);
             query.rtable.remove(i);
             query.hasGroupRTE = false;
@@ -1532,8 +1532,8 @@ fn convert_EXISTS_to_ANY<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
     mcx: Mcx<'mcx>,
-    mut subselect: nodes::copy_query::Query<'mcx>,
-) -> PgResult<Option<(nodes::copy_query::Query<'mcx>, Expr<'mcx>, PgVec<'mcx, i32>)>> {
+    mut subselect: ::nodes::copy_query::Query<'mcx>,
+) -> PgResult<Option<(::nodes::copy_query::Query<'mcx>, Expr<'mcx>, PgVec<'mcx, i32>)>> {
     // Query must not require a targetlist (caller already dealt with it).
     debug_assert!(subselect.targetList.is_empty());
 
@@ -1696,7 +1696,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
     }
 
     // Build a new targetlist for the child + a testexpr for the parent.
-    let mut tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+    let mut tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
     let mut testlist: Vec<Expr> = Vec::new();
     let mut paramids: PgVec<'mcx, i32> = PgVec::new_in(mcx);
     let mut resno: i32 = 1;
@@ -1728,7 +1728,7 @@ fn convert_EXISTS_to_ANY<'mcx>(
     }
 
     // Put everything where it should go.
-    let mut tlist_pg: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+    let mut tlist_pg: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
         PgVec::new_in(mcx);
     for te in tlist {
         tlist_pg.push(te);
@@ -1895,7 +1895,7 @@ pub fn resolve_cte_subplan<'mcx>(
 ) -> PgResult<(i32, i32)> {
     debug_assert!(scan_relid > 0);
     let rte = pathnodes::planner_run::planner_rt_fetch(run, root, scan_relid);
-    debug_assert_eq!(rte.rtekind, nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_CTE);
     debug_assert!(!rte.self_reference);
 
     let ctename = rte
@@ -1980,7 +1980,7 @@ pub fn resolve_worktable_param(
 ) -> PgResult<i32> {
     debug_assert!(scan_relid > 0);
     let rte = pathnodes::planner_run::planner_rt_fetch(_run, root, scan_relid);
-    debug_assert_eq!(rte.rtekind, nodes::parsenodes::RTEKind::RTE_CTE);
+    debug_assert_eq!(rte.rtekind, ::nodes::parsenodes::RTEKind::RTE_CTE);
     debug_assert!(rte.self_reference);
 
     let ctename = rte

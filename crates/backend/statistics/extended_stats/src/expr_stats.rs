@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use rel::Relation;
 use statistics::{
     AnalyzeAttrFetchFunc, VacAttrStats, STATISTIC_NUM_SLOTS,

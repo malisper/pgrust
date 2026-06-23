@@ -17,15 +17,15 @@
 use mcx::{PgBox, PgVec};
 use types_core::primitive::{uint16, uint32, BlockNumber, OffsetNumber, Oid};
 use datum::datum::Datum;
-use nodes::execexpr::ExprState;
-use nodes::execnodes::Opaque;
-use nodes::nodes::NodeTag;
+use ::nodes::execexpr::ExprState;
+use ::nodes::execnodes::Opaque;
+use ::nodes::nodes::NodeTag;
 use pathnodes::{PlannerInfo, RelOptInfo};
 use rel::Relation;
 use types_tableam::relscan::TableScanDesc;
 
-pub use nodes::execnodes::ScanStateData;
-pub use nodes::nodesamplescan::{SampleScan, TableSampleClause};
+pub use ::nodes::execnodes::ScanStateData;
+pub use ::nodes::nodesamplescan::{SampleScan, TableSampleClause};
 
 // ===========================================================================
 // access/tsmapi.h — tablesample method callback signatures.
@@ -45,7 +45,7 @@ pub type SampleScanGetSampleSizeFunction = Option<
     for<'mcx> fn(
         root: Option<Box<PlannerInfo>>,
         baserel: Option<Box<RelOptInfo>>,
-        paramexprs: Vec<nodes::nodes::Node<'static>>,
+        paramexprs: Vec<::nodes::nodes::Node<'static>>,
         pages: &mut BlockNumber,
         tuples: &mut f64,
     ),
@@ -157,7 +157,7 @@ impl core::fmt::Debug for SampleScanState<'_> {
 
 // ===========================================================================
 // SampleScanStateLive carrier impl — `SampleScanState *` rides the central
-// `nodes::PlanStateNode::SampleScan` variant as a tag-checked erased
+// `::nodes::PlanStateNode::SampleScan` variant as a tag-checked erased
 // trait object (this crate sits ABOVE `types-nodes`, so the dispatch crate
 // cannot name `SampleScanState` directly). The impl lives here to satisfy the
 // orphan rule (the concrete type is local to this crate). Mirrors the
@@ -167,26 +167,26 @@ impl core::fmt::Debug for SampleScanState<'_> {
 /// `T_SampleScanState = 404` (nodes/nodetags.h).
 const T_SampleScanState: NodeTag = NodeTag(404);
 
-impl<'mcx> nodes::samplescanstate_carrier::SampleScanStateLive<'mcx>
+impl<'mcx> ::nodes::samplescanstate_carrier::SampleScanStateLive<'mcx>
     for SampleScanState<'mcx>
 {
     fn sample_scan_state_tag(&self) -> u64 {
-        nodes::samplescanstate_carrier::SAMPLE_SCAN_STATE_TAG
+        ::nodes::samplescanstate_carrier::SAMPLE_SCAN_STATE_TAG
     }
 
     fn live_type_name(&self) -> &'static str {
-        nodes::samplescanstate_carrier::live_type_name_of::<SampleScanState<'mcx>>()
+        ::nodes::samplescanstate_carrier::live_type_name_of::<SampleScanState<'mcx>>()
     }
 
     fn tag(&self) -> NodeTag {
         T_SampleScanState
     }
 
-    fn ps(&self) -> &nodes::execnodes::PlanStateData<'mcx> {
+    fn ps(&self) -> &::nodes::execnodes::PlanStateData<'mcx> {
         &self.ss.ps
     }
 
-    fn ps_mut(&mut self) -> &mut nodes::execnodes::PlanStateData<'mcx> {
+    fn ps_mut(&mut self) -> &mut ::nodes::execnodes::PlanStateData<'mcx> {
         &mut self.ss.ps
     }
 
@@ -195,10 +195,10 @@ impl<'mcx> nodes::samplescanstate_carrier::SampleScanStateLive<'mcx>
     }
 }
 
-impl<'mcx> nodes::samplescanstate_carrier::SampleScanStateTagged<'mcx>
+impl<'mcx> ::nodes::samplescanstate_carrier::SampleScanStateTagged<'mcx>
     for SampleScanState<'mcx>
 {
-    const TAG: u64 = nodes::samplescanstate_carrier::SAMPLE_SCAN_STATE_TAG;
+    const TAG: u64 = ::nodes::samplescanstate_carrier::SAMPLE_SCAN_STATE_TAG;
 }
 
 // ===========================================================================

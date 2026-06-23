@@ -9,7 +9,7 @@
 //! An SRF dispatched through it can never see a LIVE `ReturnSetInfo`.
 //!
 //! This table is the executor-frame counterpart of `fmgr_builtins[]`: it maps a
-//! function OID to a [`nodes::execexpr::PGFunction`] (`for<'mcx> fn(&mut
+//! function OID to a [`::nodes::execexpr::PGFunction`] (`for<'mcx> fn(&mut
 //! FunctionCallInfoBaseData<'mcx>) -> Datum<'mcx>`), the frame that DOES carry
 //! the live `ReturnSetInfo`. `ExecMakeTableFunctionResult` /
 //! `ExecMakeFunctionResultSet` dispatch through it — exactly C's `fn_addr` over
@@ -28,8 +28,8 @@ use utils_error::ereport;
 use types_core::Oid;
 use types_error::error::ERRCODE_UNDEFINED_FUNCTION;
 use types_error::{PgResult, ERROR};
-use nodes::execexpr::SrfFunction;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::execexpr::SrfFunction;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 /// Process-global, matching the seam registry's `OnceLock` model (NOT
@@ -197,10 +197,10 @@ fn dispatch_user_setof<'mcx>(
             continue;
         }
         match fcinfo.ref_arg(i) {
-            Some(nodes::fmgr::FmgrArgRef::Varlena(b)) => {
+            Some(::nodes::fmgr::FmgrArgRef::Varlena(b)) => {
                 args.push(CanonDatum::ByRef(mcx::slice_in(mcx, b.as_slice())?));
             }
-            Some(nodes::fmgr::FmgrArgRef::Cstring(s)) => {
+            Some(::nodes::fmgr::FmgrArgRef::Cstring(s)) => {
                 args.push(CanonDatum::Cstring(s.clone()));
             }
             None => {

@@ -5,7 +5,7 @@
 //! STAGE F1 (this crate, in-memory engine):
 //!  - the concrete owned engine state [`TuplesortStateImpl`] (`struct
 //!    Tuplesortstate` + its embedded `TuplesortPublic base`), stored type-erased
-//!    behind the [`nodes::Tuplesortstate`] carrier the seams + consumers
+//!    behind the [`::nodes::Tuplesortstate`] carrier the seams + consumers
 //!    already use;
 //!  - the closed [`SortVariantKind`] enum that replaces the C function-pointer
 //!    method table (`base.comparetup/writetup/readtup/removeabbrev`);
@@ -373,7 +373,7 @@ pub struct TuplesortClusterArg<'mcx> {
     /// `TupleDesc tupDesc` — the heap relation's tuple descriptor.
     pub tupDesc: TupleDescData<'mcx>,
     /// `IndexInfo *indexInfo` — `BuildIndexInfo(indexRel)`.
-    pub indexInfo: nodes::execnodes::IndexInfo<'mcx>,
+    pub indexInfo: ::nodes::execnodes::IndexInfo<'mcx>,
     /// `arg->estate != NULL` — true iff the index has expressions (the
     /// `FormIndexDatum` comparison leg is reachable).
     pub has_expressions: bool,
@@ -421,7 +421,7 @@ pub(crate) struct SlabSlot {
 // ===========================================================================
 
 /// `struct Tuplesortstate` (tuplesort.c, private) — the concrete owned engine
-/// state. Stored type-erased behind the [`nodes::Tuplesortstate`] carrier
+/// state. Stored type-erased behind the [`::nodes::Tuplesortstate`] carrier
 /// (`Tuplesortstate::begin` / `payload_mut().downcast`).
 ///
 /// Field-for-field with the C struct (parallel `Sharedsort` fields kept so the
@@ -2067,7 +2067,7 @@ fn comparetup_cluster_tiebreak<'mcx>(
 /// mirroring the C result exactly.
 fn cluster_form_index_values<'mcx>(
     mcx: Mcx<'mcx>,
-    index_info: &nodes::execnodes::IndexInfo<'mcx>,
+    index_info: &::nodes::execnodes::IndexInfo<'mcx>,
     tup: &types_tuple::heaptuple::FormedTuple<'mcx>,
     tup_desc: &TupleDescData<'mcx>,
 ) -> PgResult<PgVec<'mcx, (Datum<'mcx>, bool)>> {
@@ -2078,7 +2078,7 @@ fn cluster_form_index_values<'mcx>(
     let slot_data = exectuples_seam::make_single_tuple_table_slot::call(
         mcx,
         Some(mcx::alloc_in(mcx, tup_desc.clone_in(mcx)?)?),
-        nodes::TupleSlotKind::HeapTuple,
+        ::nodes::TupleSlotKind::HeapTuple,
     )?;
     let slot = estate.push_slot_data(slot_data)?;
     estate.ecxt_mut(econtext).ecxt_scantuple = Some(slot);
@@ -3688,7 +3688,7 @@ fn leader_takeover_tapes<'mcx>(_state: &mut TuplesortStateImpl<'mcx>) -> PgResul
 
 // ===========================================================================
 // Carrier helpers: store/retrieve the concrete engine through the type-erased
-// `nodes::Tuplesortstate`.
+// `::nodes::Tuplesortstate`.
 //
 // The engine state borrows its own bundle context (`memtuples` etc. are
 // allocated in it), which is a self-referential struct safe Rust rejects. The
@@ -3701,7 +3701,7 @@ fn leader_takeover_tapes<'mcx>(_state: &mut TuplesortStateImpl<'mcx>) -> PgResul
 mcx::bind!(pub TuplesortStateImplBind => TuplesortStateImpl<'mcx>);
 
 /// The self-owned engine bundle (context + state); stored type-erased in the
-/// [`nodes::Tuplesortstate`] carrier.
+/// [`::nodes::Tuplesortstate`] carrier.
 pub type OwnedSort = McxOwned<TuplesortStateImplBind>;
 
 /// The C `sortcontext` (`AllocSetContextCreate(CurrentMemoryContext,

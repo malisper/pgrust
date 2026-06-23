@@ -26,7 +26,7 @@
 //! ## Split-model boundary
 //!
 //! `nodeRead`'s `LEFT_BRACE` case yields a concrete plan/expr node, which is
-//! the [`nodes::nodes::Node`] the `string_to_node` seam hands back; that
+//! the [`::nodes::nodes::Node`] the `string_to_node` seam hands back; that
 //! body is read by `parseNodeString` (readfuncs). The integer/OID/XID/bitmapset
 //! `(...)` lists and bare value tokens that `nodeRead` also recognises are
 //! reached only as *sub-fields* during that readfuncs recursion — they carry
@@ -42,7 +42,7 @@ use std::cell::Cell;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 
 /// `elog(ERROR, msg)` — an internal-error `PgError` carrying `msg`
 /// (`ERRCODE_INTERNAL_ERROR`), the shape the C reader's `elog(ERROR, ...)`
@@ -314,7 +314,7 @@ pub fn node_token_type(token: &[u8]) -> TokenType {
 /// The `LEFT_BRACE` case yields a `{LABEL ...}`-framed node via `parseNodeString`
 /// (readfuncs). The bare value-node tokens (`Integer`/`Float`/`Boolean`/`String`/
 /// `BitString`) and a `(node node ...)` node list ARE arms of the unified
-/// `nodes::nodes::Node` enum, so they are reconstructed here directly,
+/// `::nodes::nodes::Node` enum, so they are reconstructed here directly,
 /// faithfully mirroring C's `makeInteger`/`makeFloat`/.../`lappend` cases. The
 /// `(i ...)`/`(o ...)`/`(x ...)` scalar lists and the `(b ...)` Bitmapset carry
 /// `IntList`/`OidList`/`XidList`/`Bitmapset` types that the split enum does not
@@ -370,7 +370,7 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             //
             // The scalar `(i ...)`/`(o ...)`/`(x ...)` lists and the `(b ...)`
             // Bitmapset carry the `IntList`/`OidList`/`XidList`/`Bitmapset`
-            // types, which the split `nodes::nodes::Node` enum does not
+            // types, which the split `::nodes::nodes::Node` enum does not
             // model as variants (they are reached only as typed sub-fields read
             // by the readfuncs recursion, still unported) — so they cannot be
             // reconstructed as a top-level `Node` here. A `(node node ...)` list,
@@ -445,7 +445,7 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             let s = String::from_utf8_lossy(tok.bytes);
             let ival = atoi_i32(&s);
             let node =
-                mcx::alloc_in(mcx, Node::mk_integer(mcx, nodes::value::Integer { ival })?)?;
+                mcx::alloc_in(mcx, Node::mk_integer(mcx, ::nodes::value::Integer { ival })?)?;
             Ok(Some(node))
         }
         TokenType::Float => {
@@ -453,14 +453,14 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             // The numeric literal is kept verbatim as its source string.
             let s = String::from_utf8_lossy(tok.bytes);
             let fval = PgString::from_str_in(&s, mcx)?;
-            let node = mcx::alloc_in(mcx, Node::mk_float(mcx, nodes::value::Float { fval })?)?;
+            let node = mcx::alloc_in(mcx, Node::mk_float(mcx, ::nodes::value::Float { fval })?)?;
             Ok(Some(node))
         }
         TokenType::Boolean => {
             // C: result = makeBoolean(token[0] == 't');
             let boolval = tok.bytes[0] == b't';
             let node =
-                mcx::alloc_in(mcx, Node::mk_boolean(mcx, nodes::value::Boolean { boolval })?)?;
+                mcx::alloc_in(mcx, Node::mk_boolean(mcx, ::nodes::value::Boolean { boolval })?)?;
             Ok(Some(node))
         }
         TokenType::String => {
@@ -472,7 +472,7 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             let sval_s = debackslash(inner);
             let sval = PgString::from_str_in(&sval_s, mcx)?;
             let node =
-                mcx::alloc_in(mcx, Node::mk_string(mcx, nodes::value::StringNode { sval })?)?;
+                mcx::alloc_in(mcx, Node::mk_string(mcx, ::nodes::value::StringNode { sval })?)?;
             Ok(Some(node))
         }
         TokenType::BitString => {
@@ -481,7 +481,7 @@ pub fn node_read<'mcx>(mcx: Mcx<'mcx>, pre_read: Option<Token<'_>>) -> PgResult<
             let bsval_s = debackslash(tok.bytes);
             let bsval = PgString::from_str_in(&bsval_s, mcx)?;
             let node =
-                mcx::alloc_in(mcx, Node::mk_bit_string(mcx, nodes::value::BitString { bsval })?)?;
+                mcx::alloc_in(mcx, Node::mk_bit_string(mcx, ::nodes::value::BitString { bsval })?)?;
             Ok(Some(node))
         }
     }

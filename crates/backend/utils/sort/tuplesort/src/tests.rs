@@ -149,7 +149,7 @@ fn bounded_top_n_heapsort() {
     // bound = 3 keeps the smallest 3. The bounded heap kicks in once the input
     // count exceeds 2*bound (or fills workMem with > bound tuples). With 10
     // inputs and bound 3 the engine switches to TSS_BOUNDED.
-    let sortopt = nodes::TUPLESORT_ALLOWBOUNDED;
+    let sortopt = ::nodes::TUPLESORT_ALLOWBOUNDED;
     let out = sort_datums(&[5, 1, 4, 2, 8, 3, 7, 6, 0, 9], sortopt, Some(3), false);
     assert_eq!(out, vec![0, 1, 2]);
     // The bounded path was used.
@@ -157,7 +157,7 @@ fn bounded_top_n_heapsort() {
 
 #[test]
 fn bounded_reports_top_n_method() {
-    let sortopt = nodes::TUPLESORT_ALLOWBOUNDED;
+    let sortopt = ::nodes::TUPLESORT_ALLOWBOUNDED;
     install_test_comparator();
     let mut owned = begin_state(4096, sortopt, SortVariantKind::Datum).unwrap();
     owned.with_mut(|state| {
@@ -259,7 +259,7 @@ fn install_fake_buffile() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         use buffile_seams as bf;
-        use nodes::nodehashjoin::BufFile;
+        use ::nodes::nodehashjoin::BufFile;
         use types_storage::file::PGAlignedBlock;
 
         bf::buf_file_create_temp::set(|mcx: Mcx<'_>, _inter_xact: bool| {

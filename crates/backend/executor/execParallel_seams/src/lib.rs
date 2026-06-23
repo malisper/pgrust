@@ -13,7 +13,7 @@
 use mcx::Mcx;
 use types_error::PgResult;
 use execparallel::{DsmSegmentHandle, ParallelExecutorInfo, ShmTocHandle, TuplesNeeded};
-use nodes::bitmapset::Bitmapset;
+use ::nodes::bitmapset::Bitmapset;
 
 /// `ExecParallelCreateReaders(pei)`.
 seam_core::seam!(pub fn ExecParallelCreateReaders<'mcx>(
@@ -31,7 +31,7 @@ seam_core::seam!(pub fn ExecParallelFinish<'mcx>(pei: &mut ParallelExecutorInfo<
 seam_core::seam!(pub fn ExecParallelCleanup<'mcx>(
     mcx: Mcx<'mcx>,
     pei: &mut ParallelExecutorInfo<'mcx>,
-    planstate: &mut nodes::PlanStateNode<'mcx>,
+    planstate: &mut ::nodes::PlanStateNode<'mcx>,
 ) -> PgResult<()>);
 
 /// `ParallelQueryMain(seg, toc)` — the worker entry point.
@@ -48,8 +48,8 @@ seam_core::seam!(pub fn ParallelQueryMain<'mcx>(
 /// `ereport(ERROR)`.
 seam_core::seam!(pub fn exec_init_parallel_plan_owned<'mcx>(
     mcx: Mcx<'mcx>,
-    planstate: &mut nodes::PlanStateNode<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
+    planstate: &mut ::nodes::PlanStateNode<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     send_params: Option<&Bitmapset<'mcx>>,
     nworkers: i32,
     tuples_needed: TuplesNeeded,
@@ -60,8 +60,8 @@ seam_core::seam!(pub fn exec_init_parallel_plan_owned<'mcx>(
 /// `planstate->state`) is threaded in by the caller.
 seam_core::seam!(pub fn exec_parallel_reinitialize_owned<'mcx>(
     mcx: Mcx<'mcx>,
-    planstate: &mut nodes::PlanStateNode<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
+    planstate: &mut ::nodes::PlanStateNode<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     pei: &mut ParallelExecutorInfo<'mcx>,
     send_params: Option<&Bitmapset<'mcx>>,
 ) -> PgResult<()>);

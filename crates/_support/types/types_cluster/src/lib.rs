@@ -138,12 +138,12 @@ pub struct ClusterStmt {
  * ---------------------------------------------------------------- */
 
 /// `ParseState` (`parser/parse_node.h`). Unified (K1 phase 4) onto the single
-/// canonical full struct in [`nodes::parsestmt`]. CLUSTER (and the other
+/// canonical full struct in [`::nodes::parsestmt`]. CLUSTER (and the other
 /// DDL consumers re-exporting through here) only forward the pointer to
 /// `parser_errposition(pstate, location)`; the parser (its owner) fills the
 /// rest. Re-exported for type identity — the struct now carries the full
 /// ~36-field set and an `'mcx` lifetime.
-pub use nodes::parsestmt::ParseState;
+pub use ::nodes::parsestmt::ParseState;
 
 /* ----------------------------------------------------------------
  * commands/vacuum.h: struct VacuumCutoffs
@@ -313,5 +313,5 @@ pub struct CatalogIndexState<'mcx> {
     pub index_descs: Vec<rel::Relation<'mcx>>,
     /// `indstate->ri_IndexRelationInfo` — the per-index `IndexInfo`, parallel
     /// to [`Self::index_descs`].
-    pub index_infos: Vec<nodes::execnodes::IndexInfo<'mcx>>,
+    pub index_infos: Vec<::nodes::execnodes::IndexInfo<'mcx>>,
 }

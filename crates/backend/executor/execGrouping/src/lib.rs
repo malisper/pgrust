@@ -7,7 +7,7 @@
 //! and the `tuplehash` simplehash specialization (see [`tuplehash`]).
 //!
 //! The `TupleHashTable` / `TupleHashEntryData` / `TuplehashHash` types are the
-//! real owned structs in [`nodes::nodeagg`] (opacity-inherited: execnodes.h
+//! real owned structs in [`::nodes::nodeagg`] (opacity-inherited: execnodes.h
 //! exposes them). The hash/equality dispatch is the caller's compiled execExpr
 //! `ExprState`s, evaluated through the execExpr/execTuples seams; the catalog /
 //! fmgr lookups go through the lsyscache / fmgr seams.
@@ -37,12 +37,12 @@ use tuplehash::{Iter, TuplehashOps};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
-use nodes::execexpr::ExprState;
-use nodes::execnodes::{EcxtId, SlotId};
-use nodes::planstate::PlanStateNode;
-use nodes::nodeagg::{TupleHashEntryData, TupleHashIterator, TupleHashTable, TuplehashHash};
-use nodes::tuptable::TupleSlotKind;
-use nodes::EStateData;
+use ::nodes::execexpr::ExprState;
+use ::nodes::execnodes::{EcxtId, SlotId};
+use ::nodes::planstate::PlanStateNode;
+use ::nodes::nodeagg::{TupleHashEntryData, TupleHashIterator, TupleHashTable, TuplehashHash};
+use ::nodes::tuptable::TupleSlotKind;
+use ::nodes::EStateData;
 use types_tuple::heaptuple::TupleDesc;
 
 use execExpr_seams as execExpr;
@@ -191,7 +191,7 @@ pub fn exec_tuples_match_prepare<'mcx>(
     key_col_idx: &[AttrNumber],
     eq_operators: &[Oid],
     collations: &[Oid],
-    _parent: &mut nodes::execnodes::PlanStateData<'mcx>,
+    _parent: &mut ::nodes::execnodes::PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<PgBox<'mcx, ExprState<'mcx>>>> {
     if num_cols == 0 {

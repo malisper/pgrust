@@ -182,7 +182,7 @@ pub fn cost_index<'mcx>(
             .expect("cost_index: indexinfo must be set");
         (
             index.rel.expect("cost_index: index.rel must be set"),
-            ip.path.pathtype == nodes::nodes::T_IndexOnlyScan,
+            ip.path.pathtype == ::nodes::nodes::T_IndexOnlyScan,
             index.pages,
             index.indrestrictinfo.clone(),
         )
@@ -1095,7 +1095,7 @@ enum NodeKind {
     Other,
 }
 fn node_kind(root: &PlannerInfo, node: NodeId) -> NodeKind {
-    use nodes::primnodes::Expr;
+    use ::nodes::primnodes::Expr;
     match root.node(node) {
         // ScalarArrayOpExpr: each array element yields 1 tuple. C calls
         // `estimate_array_length(root, lsecond(saop->args))`; the SAOP arg is an

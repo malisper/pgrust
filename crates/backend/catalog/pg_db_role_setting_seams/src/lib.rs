@@ -12,7 +12,7 @@
 use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 
 seam_core::seam!(
     /// `AlterSetting(databaseid, roleid, setstmt)` (pg_db_role_setting.c),

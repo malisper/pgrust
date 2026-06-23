@@ -7,7 +7,7 @@
 use types_acl::{AclMaskHow, AclMode, AclResult};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 
 seam_core::seam!(
     /// `object_aclcheck(classid, objectid, roleid, mode)` (aclchk.c): check

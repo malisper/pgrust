@@ -8,7 +8,7 @@
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::Bitmapset;
+use ::nodes::Bitmapset;
 
 /// `EventTriggerEvent` (evtcache.h) — which event a trigger fires on.
 ///

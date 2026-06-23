@@ -11,8 +11,8 @@ use alloc::vec::Vec;
 use mcx::{Mcx, PgBox};
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
-use nodes::bitmapset::Bitmapset;
-use nodes::primnodes::{
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::primnodes::{
     etag, BoolExprType, BoolTestType, Expr, NullTestType, OpExpr, ParamKind, ScalarArrayOpExpr,
     SubLinkType,
 };
@@ -349,7 +349,7 @@ fn contain_mutable_functions_walker(node: Option<&Expr>) -> PgResult<bool> {
         let is_jsonb = match &ctor.returning {
             Some(r) => match &r.format {
                 Some(f) => {
-                    f.format_type == nodes::primnodes::JsonFormatType::JS_FORMAT_JSONB
+                    f.format_type == ::nodes::primnodes::JsonFormatType::JS_FORMAT_JSONB
                 }
                 None => false,
             },
@@ -465,7 +465,7 @@ fn contain_volatile_functions_walker(node: Option<&Expr>) -> PgResult<bool> {
 /// each reached `Node` back to the Expr-level walker (and re-recursing on any
 /// nested sub-Query).
 fn contain_volatile_functions_in_query(
-    query: &nodes::copy_query::Query,
+    query: &::nodes::copy_query::Query,
 ) -> PgResult<bool> {
     let mut err: Option<PgError> = None;
     let aborted = nodes_core::node_walker::query_tree_walker(
@@ -489,7 +489,7 @@ fn contain_volatile_functions_in_query(
 /// [`contain_volatile_functions_in_query`]; every other Node is an `Expr` and
 /// runs the per-node Expr walker.
 fn contain_volatile_functions_node(
-    node: &nodes::nodes::Node,
+    node: &::nodes::nodes::Node,
 ) -> PgResult<bool> {
     if node.is_query() {
         return contain_volatile_functions_in_query(node.expect_query());
@@ -717,7 +717,7 @@ fn max_parallel_hazard_walker(
 /// NextValueExpr / WindowFunc / SubLink / SubPlan / Param arms + `Expr`
 /// recursion), and the `IsA(node, Query)` arm (rowMarks → unsafe, else recurse
 /// via `query_tree_walker`) is added here.
-pub fn max_parallel_hazard(parse: &nodes::copy_query::Query) -> PgResult<u8> {
+pub fn max_parallel_hazard(parse: &::nodes::copy_query::Query) -> PgResult<u8> {
     let mut context = MaxParallelHazardContext {
         max_hazard: PROPARALLEL_SAFE,
         max_interesting: PROPARALLEL_UNSAFE,
@@ -736,7 +736,7 @@ pub fn max_parallel_hazard(parse: &nodes::copy_query::Query) -> PgResult<u8> {
 /// scanned `Node` is either a `Query` (handled here) or an `Expr` (delegated to
 /// the `Expr`-level [`max_parallel_hazard_walker`]). Returns `true` to abort.
 fn max_parallel_hazard_walker_node(
-    node: &nodes::nodes::Node,
+    node: &::nodes::nodes::Node,
     context: &mut MaxParallelHazardContext,
     err: &mut Option<PgError>,
 ) -> bool {
@@ -756,7 +756,7 @@ fn max_parallel_hazard_walker_node(
 
 /// The `IsA(node, Query)` arm of `max_parallel_hazard_walker` (clauses.c:945).
 fn max_parallel_hazard_walker_query(
-    query: &nodes::copy_query::Query,
+    query: &::nodes::copy_query::Query,
     context: &mut MaxParallelHazardContext,
     err: &mut Option<PgError>,
 ) -> bool {
@@ -1200,7 +1200,7 @@ fn nonnullable_rels_intersect<'mcx>(
 /// empty word vector is the empty set (`None`).
 fn exprrelids_to_bms<'mcx>(
     mcx: Mcx<'mcx>,
-    relids: &nodes::primnodes::ExprRelids,
+    relids: &::nodes::primnodes::ExprRelids,
 ) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>> {
     let mut result: Option<PgBox<'mcx, Bitmapset<'mcx>>> = None;
     // Words are 64-bit; bit i of word w is member (w*64 + i).
@@ -1552,7 +1552,7 @@ pub fn CommuteOpExpr(clause: &mut OpExpr) -> PgResult<()> {
 pub fn convert_saop_to_hashed_saop<'mcx>(mcx: Mcx<'mcx>, node: &mut Expr<'mcx>) -> PgResult<()> {
     // The Expr model exposes only the consume/rebuild `expression_tree_mutator`
     // for in-place rewrites; take the node out, transform it, and put it back.
-    let taken = core::mem::replace(node, Expr::Const(nodes::primnodes::Const::default()));
+    let taken = core::mem::replace(node, Expr::Const(::nodes::primnodes::Const::default()));
     let mut err: Option<PgError> = None;
     *node = convert_saop_to_hashed_saop_walker(mcx, taken, &mut err);
     match err {

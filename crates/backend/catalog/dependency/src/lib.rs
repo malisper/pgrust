@@ -93,7 +93,7 @@ use types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::{
     PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, DEBUG2, ERROR, NOTICE,
 };
-use nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT};
+use ::nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT};
 use rel::{Relation, RelationData};
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{
@@ -1471,13 +1471,13 @@ pub fn sort_object_addresses(addrs: &mut ObjectAddresses) {
 /// recordDependencyOnExpr — find and record an expression's object references.
 pub fn recordDependencyOnExpr(
     depender: &ObjectAddress,
-    expr: &nodes::nodes::Node<'_>,
-    rtable: &[nodes::parsenodes::RangeTblEntry<'_>],
+    expr: &::nodes::nodes::Node<'_>,
+    rtable: &[::nodes::parsenodes::RangeTblEntry<'_>],
     behavior: DependencyType,
 ) -> PgResult<()> {
     let ctx = MemoryContext::new("recordDependencyOnExpr");
     let mut context = FindExprReferencesContext::new(ctx.mcx());
-    let mut owned_rtable: Vec<nodes::parsenodes::RangeTblEntry<'_>> =
+    let mut owned_rtable: Vec<::nodes::parsenodes::RangeTblEntry<'_>> =
         Vec::with_capacity(rtable.len());
     for rte in rtable.iter() {
         owned_rtable.push(rte.clone_in(ctx.mcx())?);
@@ -1503,7 +1503,7 @@ pub fn recordDependencyOnExpr(
 /// recordDependencyOnSingleRelExpr — as above but for one relation (varno=1).
 pub fn recordDependencyOnSingleRelExpr(
     depender: &ObjectAddress,
-    expr: &nodes::nodes::Node<'_>,
+    expr: &::nodes::nodes::Node<'_>,
     rel_id: Oid,
     behavior: DependencyType,
     self_behavior: DependencyType,

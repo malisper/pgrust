@@ -48,10 +48,10 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERRCODE_WARNING_PRIVILEGE_NOT_GRANTED,
     ERRCODE_WARNING_PRIVILEGE_NOT_REVOKED, ERROR, WARNING,
 };
-use nodes::ddlnodes::{AccessPriv, RoleSpec as DdlRoleSpec};
-use nodes::nodes::Node;
-use nodes::ddlnodes::{ACL_TARGET_ALL_IN_SCHEMA, ACL_TARGET_OBJECT};
-use nodes::parsenodes::{
+use ::nodes::ddlnodes::{AccessPriv, RoleSpec as DdlRoleSpec};
+use ::nodes::nodes::Node;
+use ::nodes::ddlnodes::{ACL_TARGET_ALL_IN_SCHEMA, ACL_TARGET_OBJECT};
+use ::nodes::parsenodes::{
     DropBehavior, ObjectType, RoleSpec as ParseRoleSpec, RoleSpecType, OBJECT_SCHEMA,
 };
 use types_tuple::access::{
@@ -1118,7 +1118,7 @@ fn exec_grant_largeobject(mcx: Mcx<'_>, istmt: &mut InternalGrant<'_>) -> PgResu
 /// per-column array entries for the named columns.
 fn expand_col_privileges(
     mcx: Mcx<'_>,
-    colnames: &PgVec<'_, nodes::nodes::NodePtr<'_>>,
+    colnames: &PgVec<'_, ::nodes::nodes::NodePtr<'_>>,
     table_oid: Oid,
     this_privileges: AclMode,
     col_privileges: &mut [AclMode],
@@ -1540,8 +1540,8 @@ pub fn exec_alter_default_privileges_stmt<'mcx>(
     // Each DefElem's `arg` holds the `List *` (a Vec of String/RoleSpec nodes).
     let mut have_nspnames = false;
     let mut have_rolespecs = false;
-    let mut rolespecs: &[nodes::nodes::NodePtr<'_>] = &[];
-    let mut nspnames: &[nodes::nodes::NodePtr<'_>] = &[];
+    let mut rolespecs: &[::nodes::nodes::NodePtr<'_>] = &[];
+    let mut nspnames: &[::nodes::nodes::NodePtr<'_>] = &[];
 
     for opt in stmt.options.iter() {
         let Some(defel) = (**opt).as_defelem() else {
@@ -1690,8 +1690,8 @@ pub fn exec_alter_default_privileges_stmt<'mcx>(
 /// parser stores the FOR ROLE / IN SCHEMA lists as a `List` node in
 /// `defel->arg`.
 fn defel_list<'a, 'mcx>(
-    defel: &'a nodes::ddlnodes::DefElem<'mcx>,
-) -> PgResult<&'a [nodes::nodes::NodePtr<'mcx>]> {
+    defel: &'a ::nodes::ddlnodes::DefElem<'mcx>,
+) -> PgResult<&'a [::nodes::nodes::NodePtr<'mcx>]> {
     match &defel.arg {
         None => Ok(&[]),
         Some(arg) => match (**arg).as_list() {
@@ -1709,7 +1709,7 @@ fn defel_list<'a, 'mcx>(
 fn set_default_acls_in_schemas<'mcx>(
     mcx: Mcx<'mcx>,
     iacls: &mut InternalDefaultACL<'mcx>,
-    nspnames: &[nodes::nodes::NodePtr<'_>],
+    nspnames: &[::nodes::nodes::NodePtr<'_>],
 ) -> PgResult<()> {
     if nspnames.is_empty() {
         // Set the database-wide permissions.
@@ -2274,7 +2274,7 @@ pub fn execute_grant_stmt(mcx: Mcx<'_>, stmt: &Node<'_>) -> PgResult<()> {
 fn object_names_to_oids<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
-    objnames: &PgVec<'_, nodes::nodes::NodePtr<'_>>,
+    objnames: &PgVec<'_, ::nodes::nodes::NodePtr<'_>>,
     _is_grant: bool,
 ) -> PgResult<PgVec<'mcx, Oid>> {
     // const LOCKMODE lockmode = AccessShareLock;  (taken inside
@@ -2381,7 +2381,7 @@ fn object_names_to_oids<'mcx>(
 fn objects_in_schema_to_oids<'mcx>(
     mcx: Mcx<'mcx>,
     objtype: ObjectType,
-    nspnames: &PgVec<'_, nodes::nodes::NodePtr<'_>>,
+    nspnames: &PgVec<'_, ::nodes::nodes::NodePtr<'_>>,
 ) -> PgResult<PgVec<'mcx, Oid>> {
     use types_catalog::catalog::{
         RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
@@ -2617,7 +2617,7 @@ fn objtype_all_privileges(objtype: ObjectType) -> PgResult<(AclMode, &'static st
 /// Convert an owned-tree `rawnodes::RangeVar` to a resolved
 /// `types_tuple::access::RangeVar` (precedent: policy/lockcmds
 /// `to_access_range_var`).
-fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> AccessRangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> AccessRangeVar {
     AccessRangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),

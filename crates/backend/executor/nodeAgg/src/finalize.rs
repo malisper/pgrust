@@ -4,9 +4,9 @@
 use types_core::primitive::{Oid, OidIsValid};
 use types_tuple::heaptuple::Datum;
 use types_error::PgResult;
-use nodes::execexpr::ExprState;
-use nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
-use nodes::nodeagg::do_aggsplit_skipfinal;
+use ::nodes::execexpr::ExprState;
+use ::nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
+use ::nodes::nodeagg::do_aggsplit_skipfinal;
 use crate::aggstate::{
     AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerTransData,
 };
@@ -189,8 +189,8 @@ pub fn finalize_aggregate<'mcx>(
             // `curperagg` is set so an `AggGetAggref`-calling finalfn sees the
             // right Aggref (the peragg array is borrowed out during finalize, so
             // the read uses the still-live `pertrans` arm via curperagg→transno).
-            let agg_link = nodes::aggstate_carrier::AggStateContextLink::from_ref(
-                aggstate as &(dyn nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+            let agg_link = ::nodes::aggstate_carrier::AggStateContextLink::from_ref(
+                aggstate as &(dyn ::nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
             );
             let (data, vtable) = agg_link.to_raw();
             let _agg_ctx_guard = fmgr::fmgr::AggCallContextGuard::install(
@@ -369,7 +369,7 @@ fn pertrans_for<'a, 'mcx>(
 /// is the execExpr owner's; no seam carries it into this path yet.
 fn exec_eval_expr_direct_arg<'mcx>(
     expr: &mut ExprState<'mcx>,
-    econtext_id: nodes::EcxtId,
+    econtext_id: ::nodes::EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     // ExecEvalExpr(expr, aggstate->ss.ps.ps_ExprContext, &isnull) —

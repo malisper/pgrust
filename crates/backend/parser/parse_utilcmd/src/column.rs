@@ -17,17 +17,17 @@ use utils_error::ereport;
 use types_core::Oid;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR};
 
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableStmt, Constraint, ConstrType, AT_AlterColumnGenericOptions,
     CONSTR_ATTR_DEFERRABLE, CONSTR_ATTR_DEFERRED, CONSTR_ATTR_ENFORCED, CONSTR_ATTR_IMMEDIATE,
     CONSTR_ATTR_NOT_DEFERRABLE, CONSTR_ATTR_NOT_ENFORCED, CONSTR_CHECK, CONSTR_DEFAULT,
     CONSTR_EXCLUSION, CONSTR_FOREIGN, CONSTR_GENERATED, CONSTR_IDENTITY, CONSTR_NOTNULL,
     CONSTR_NULL, CONSTR_PRIMARY, CONSTR_UNIQUE,
 };
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::{DROP_RESTRICT, OBJECT_FOREIGN_TABLE};
-use nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL;
-use nodes::rawnodes::{A_Const, FuncCall, TypeCast, TypeName};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::{DROP_RESTRICT, OBJECT_FOREIGN_TABLE};
+use ::nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL;
+use ::nodes::rawnodes::{A_Const, FuncCall, TypeCast, TypeName};
 
 /// `INT2OID` / `INT4OID` / `INT8OID` (`catalog/pg_type_d.h`) — fixed catalog
 /// OIDs for the SERIAL pseudo-type rewrites.
@@ -132,7 +132,7 @@ pub fn transformColumnDefinition<'mcx>(
             // snamenode->val.node.type = T_String; snamenode->val.sval.sval = qstring;
             val: Some(mcx::alloc_in(
                 mcx,
-                Node::mk_string(mcx, nodes::value::StringNode { sval: qstring })?,
+                Node::mk_string(mcx, ::nodes::value::StringNode { sval: qstring })?,
             )?),
             isnull: false,
             location: -1,
@@ -591,7 +591,7 @@ fn strval_of<'a>(n: &'a Node<'_>) -> Option<&'a str> {
 
 fn clone_colname<'mcx>(
     _mcx: Mcx<'mcx>,
-    column: &nodes::rawnodes::ColumnDef<'mcx>,
+    column: &::nodes::rawnodes::ColumnDef<'mcx>,
 ) -> PgResult<alloc::string::String> {
     Ok(column
         .colname

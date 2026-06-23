@@ -655,7 +655,7 @@ pub fn RelationBuildPublicationDesc(relation: Oid) -> PgResult<()> {
 /// `qsort` the rules by `ruleId` (`RewriteRuleCompare`) and store the
 /// [`RuleLock`] on the entry. An empty scan stores `None` (C `rd_rules = NULL`).
 pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
-    use nodes::nodes::{ntag, CmdType, Node};
+    use ::nodes::nodes::{ntag, CmdType, Node};
 
     let cache_mcx = cache_memory_context();
 
@@ -707,7 +707,7 @@ pub fn RelationBuildRuleLock(relation: &mut RelationData) -> PgResult<()> {
         // `Query` trees. Reconstruct the `List` node, then move each element's
         // `Query` payload into the rule's `actions` (each lives in the cache
         // arena). C keeps a `List *`; the owned model keeps the `Query` values.
-        let mut actions: mcx::PgVec<'static, nodes::copy_query::Query<'static>> =
+        let mut actions: mcx::PgVec<'static, ::nodes::copy_query::Query<'static>> =
             mcx::PgVec::new_in(cache_mcx);
         // `ev_action` deserializes to a `List` of `Query` (the C `List
         // *actions`). An empty action list (INSTEAD NOTHING) renders as `<>`,
@@ -1548,8 +1548,8 @@ mod cache_ownership_keystone_tests {
 
     use super::cache_memory_context;
     use crate::core_entry_store::entry::{RewriteRule, RuleLock};
-    use nodes::copy_query::Query;
-    use nodes::nodes::CmdType;
+    use ::nodes::copy_query::Query;
+    use ::nodes::nodes::CmdType;
 
     /// The cache arena hands out an `Mcx<'static>`: a `Query` built in it is
     /// `Query<'static>` and can be returned out of the building scope (it does

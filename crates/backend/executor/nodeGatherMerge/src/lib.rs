@@ -68,10 +68,10 @@ use types_core::primitive::AttrNumber;
 /// heap entry is a `ByVal` slot index here.
 use types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::nodegathermerge::{
+use ::nodes::nodegathermerge::{
     GMReaderTupleBuffer, GatherMerge, GatherMergeStateData, MAX_TUPLE_STORE,
 };
-use nodes::nodemergeappend::BinaryHeap;
+use ::nodes::nodemergeappend::BinaryHeap;
 use nodes::{
     Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind,
 };
@@ -131,7 +131,7 @@ fn exec_gather_merge_node<'mcx>(
 /// `ExecInitGatherMerge(node, estate, eflags)` — initialize the GatherMerge
 /// node.
 pub fn ExecInitGatherMerge<'mcx>(
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, GatherMergeStateData<'mcx>>> {
@@ -1432,7 +1432,7 @@ fn clear_slot<'mcx>(
 
 /// `econtext->ecxt_outertuple = slot` — install the leading participant slot as
 /// the projection's outer tuple before `ExecProject`.
-fn set_outer_tuple(estate: &mut EStateData<'_>, econtext: nodes::EcxtId, slot: SlotId) {
+fn set_outer_tuple(estate: &mut EStateData<'_>, econtext: ::nodes::EcxtId, slot: SlotId) {
     estate.ecxt_mut(econtext).ecxt_outertuple = Some(slot);
 }
 

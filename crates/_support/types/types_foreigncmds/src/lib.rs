@@ -150,9 +150,9 @@ impl<'mcx> DefElemArg<'mcx> {
 }
 
 // `RoleSpec` / `RoleSpecType` (`nodes/parsenodes.h`) are general parse-node
-// vocabulary and live in `nodes::parsenodes`; re-exported here for the
+// vocabulary and live in `::nodes::parsenodes`; re-exported here for the
 // USER MAPPING statements that carry one.
-pub use nodes::parsenodes::{RoleSpec, RoleSpecType, ROLESPEC_PUBLIC};
+pub use ::nodes::parsenodes::{RoleSpec, RoleSpecType, ROLESPEC_PUBLIC};
 
 /* ---------------------------------------------------------------------------
  * Statement nodes (`nodes/parsenodes.h`), trimmed to the fields foreigncmds

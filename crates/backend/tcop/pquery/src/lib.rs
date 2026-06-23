@@ -30,18 +30,18 @@ use types_error::{
 };
 
 use types_dest::CommandDest;
-use nodes::copy_query::Query;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::{
+use ::nodes::copy_query::Query;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::{
     Node, NodeTag, CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UPDATE, CMD_UTILITY,
     T_CheckPointStmt, T_ConstraintsSetStmt, T_FetchStmt, T_ListenStmt, T_LockStmt, T_NotifyStmt,
     T_TransactionStmt, T_UnlistenStmt, T_VariableSetStmt, T_VariableShowStmt,
 };
-use nodes::parsestmt::{
+use ::nodes::parsestmt::{
     DestReceiverHandle, ProcessUtilityContext, PROCESS_UTILITY_QUERY, PROCESS_UTILITY_TOPLEVEL,
 };
-use nodes::portalcmds::ParamListInfo;
-use nodes::querydesc::QueryDesc;
+use ::nodes::portalcmds::ParamListInfo;
+use ::nodes::querydesc::QueryDesc;
 use portal::{
     CommandTag, FetchDirection, Portal, PortalStrategy, QueryCompletion, CMDTAG_DELETE,
     CMDTAG_INSERT, CMDTAG_MERGE, CMDTAG_SELECT, CMDTAG_UNKNOWN, CMDTAG_UPDATE, CURSOR_OPT_NO_SCROLL,
@@ -242,7 +242,7 @@ fn process_query(
 fn run_ctas_executor<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     query: Query<'mcx>,
-    into: nodes::ddlnodes::IntoClause<'mcx>,
+    into: ::nodes::ddlnodes::IntoClause<'mcx>,
     query_string: &str,
     params: ParamListInfo,
     dest: DestReceiverHandle,
@@ -280,7 +280,7 @@ fn run_ctas_executor<'mcx>(
         mcx,
         &query,
         query_string,
-        nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
+        ::nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
     )?;
     let _ = params; // bound params are not threaded through the planner seam (COPY/CTAS-SELECT path has none)
 
@@ -308,7 +308,7 @@ fn run_ctas_executor<'mcx>(
     /* call ExecutorStart to prepare the plan for execution
      *   ExecutorStart(queryDesc, GetIntoRelEFlags(into)); */
     let eflags: i32 = if into.skipData {
-        nodes::executor::EXEC_FLAG_WITH_NO_DATA
+        ::nodes::executor::EXEC_FLAG_WITH_NO_DATA
     } else {
         0
     };
@@ -391,7 +391,7 @@ fn run_matview_datafill<'mcx>(
         mcx,
         &query,
         query_string,
-        nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
+        ::nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
     )?;
 
     /*
@@ -1625,7 +1625,7 @@ fn portal_run_multi(
                 portal: &'p Portal,
                 portal_context: Option<alloc::boxed::Box<mcx::MemoryContext>>,
                 stmts: Option<
-                    alloc::vec::Vec<nodes::nodeindexscan::PlannedStmt<'static>>,
+                    alloc::vec::Vec<::nodes::nodeindexscan::PlannedStmt<'static>>,
                 >,
             }
             impl<'p> Drop for PortalFieldsGuard<'p> {

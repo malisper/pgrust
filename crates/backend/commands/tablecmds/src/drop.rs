@@ -11,9 +11,9 @@ use mcx::Mcx;
 use types_acl::ACLCHECK_NOT_OWNER;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use nodes::ddlnodes::DropStmt;
-use nodes::nodes::Node;
-use nodes::parsenodes::{
+use ::nodes::ddlnodes::DropStmt;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::{
     DROP_CASCADE, OBJECT_FOREIGN_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_SEQUENCE, OBJECT_TABLE,
     OBJECT_VIEW,
 };

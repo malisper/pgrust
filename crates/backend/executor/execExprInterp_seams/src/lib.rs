@@ -11,8 +11,8 @@
 
 #![allow(non_snake_case)]
 
-use nodes::execexpr::ExprState;
-use nodes::EStateData;
+use ::nodes::execexpr::ExprState;
+use ::nodes::EStateData;
 
 seam_core::seam!(
     /// `ExecReadyInterpretedExpr(state)` (execExprInterp.c): finalize a freshly
@@ -33,7 +33,7 @@ seam_core::seam!(
     /// understands the `ExprEvalStep` opcodes. Can `ereport(ERROR)`.
     pub fn exec_eval_expr_switch_context<'mcx>(
         state: &mut ExprState<'mcx>,
-        econtext: nodes::EcxtId,
+        econtext: ::nodes::EcxtId,
         estate: &mut EStateData<'mcx>,
     ) -> types_error::PgResult<(
         types_tuple::heaptuple::Datum<'mcx>,
@@ -50,7 +50,7 @@ seam_core::seam!(
     /// invokes after `ExecClearTuple(slot)`. Can `ereport(ERROR)`.
     pub fn exec_eval_expr_no_return<'mcx>(
         state: &mut ExprState<'mcx>,
-        econtext: nodes::EcxtId,
+        econtext: ::nodes::EcxtId,
         estate: &mut EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );

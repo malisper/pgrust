@@ -33,8 +33,8 @@
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
-use nodes::nodes::CmdType;
-use nodes::primnodes::{CoercionForm, CollateExpr, Const, Expr, ParamKind};
+use ::nodes::nodes::CmdType;
+use ::nodes::primnodes::{CoercionForm, CollateExpr, Const, Expr, ParamKind};
 use parsenodes::{CoercionContext, RawParseMode};
 
 use nodes_core::nodefuncs::{expr_collation, expr_type, expression_tree_mutator};
@@ -84,7 +84,7 @@ pub fn inline_sql_function<'mcx>(
     };
 
     // If we have prosqlbody, pay attention to that not prosrc.
-    let querytree: nodes::copy_query::Query<'mcx> = if let Some(body) = prosqlbody {
+    let querytree: ::nodes::copy_query::Query<'mcx> = if let Some(body) = prosqlbody {
         // n = stringToNode(prosqlbody); if (IsA(n, List)) query_list =
         // linitial_node(List, n); else query_list = list_make1(n);
         let n = nodes_core::read::string_to_node(mcx, body)?;
@@ -142,7 +142,7 @@ pub fn inline_sql_function<'mcx>(
             Some(names) if names.len() >= nargs && nargs > 0 => Some(names.clone()),
             _ => None,
         };
-        let pinfo = nodes::parsestmt::SqlFnParseInfo::new(
+        let pinfo = ::nodes::parsestmt::SqlFnParseInfo::new(
             form.proname.clone(),
             input_collid,
             argtypes,
@@ -363,10 +363,10 @@ pub fn inline_sql_function<'mcx>(
 /// `Ok(None)` for `list_length(query_list) != 1`.
 fn extract_single_body_query<'a, 'mcx>(
     mcx: Mcx<'mcx>,
-    n: &'a nodes::nodes::Node<'mcx>,
-) -> PgResult<Option<nodes::copy_query::Query<'mcx>>> {
-    use nodes::nodes::ntag;
-    let query_list: &[nodes::nodes::NodePtr<'mcx>] = match n.node_tag() {
+    n: &'a ::nodes::nodes::Node<'mcx>,
+) -> PgResult<Option<::nodes::copy_query::Query<'mcx>>> {
+    use ::nodes::nodes::ntag;
+    let query_list: &[::nodes::nodes::NodePtr<'mcx>] = match n.node_tag() {
         ntag::T_List => {
             let outer = n.expect_list();
             // query_list = linitial_node(List, n): the first element is itself a
@@ -398,8 +398,8 @@ fn extract_single_body_query<'a, 'mcx>(
 /// nodes; we read its `Query`).
 fn query_clone_from_node<'mcx>(
     mcx: Mcx<'mcx>,
-    n: &nodes::nodes::Node<'mcx>,
-) -> PgResult<nodes::copy_query::Query<'mcx>> {
+    n: &::nodes::nodes::Node<'mcx>,
+) -> PgResult<::nodes::copy_query::Query<'mcx>> {
     match n.as_query() {
         Some(q) => q.clone_in(mcx),
         None => Err(PgError::error(

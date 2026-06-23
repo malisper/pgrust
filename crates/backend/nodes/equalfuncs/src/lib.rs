@@ -13,9 +13,9 @@
 //!
 //! In C, `equal()` switches on `nodeTag()` and dispatches to a `_equalXxx`
 //! comparator that compares fields with the `COMPARE_*_FIELD` macros. This
-//! repo carries expression nodes as the owned [`nodes::primnodes::Expr`]
+//! repo carries expression nodes as the owned [`::nodes::primnodes::Expr`]
 //! enum (the `Expr *` discriminated union) and the wider node universe as
-//! [`nodes::nodes::Node`]; the `nodeTag` switch becomes a `match` over the
+//! [`::nodes::nodes::Node`]; the `nodeTag` switch becomes a `match` over the
 //! enum variant. `COMPARE_NODE_FIELD` over a child `Expr`/`Node` recurses;
 //! `COMPARE_SCALAR_FIELD` is `==`; `COMPARE_BITMAPSET_FIELD` is `==` over the
 //! relids word storage; `COMPARE_STRING_FIELD` is the NULL-aware string compare.
@@ -28,9 +28,9 @@
 #![allow(non_snake_case)]
 
 use node_support::PgNodeEqual;
-use nodes::nodes::ntag;
-use nodes::nodes::Node;
-use nodes::primnodes::{
+use ::nodes::nodes::ntag;
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{
     Aggref, AlternativeSubPlan, ArrayCoerceExpr, ArrayExpr, BoolExpr, BooleanTest, CaseExpr,
     CaseTestExpr, CaseWhen, CoalesceExpr, CoerceToDomain, CoerceToDomainValue, CoerceViaIO,
     CollateExpr, Const, ConvertRowtypeExpr, CurrentOfExpr, Expr, FieldSelect, FieldStore, FuncExpr,
@@ -40,7 +40,7 @@ use nodes::primnodes::{
     ScalarArrayOpExpr, SetToDefault, SubLink, SubPlan, SubscriptingRef, TargetEntry, Var,
     WindowFunc, XmlExpr,
 };
-use nodes::rawnodes::SortGroupClause;
+use ::nodes::rawnodes::SortGroupClause;
 
 // ===========================================================================
 // COMPARE_*_FIELD helpers
@@ -201,8 +201,8 @@ fn equal_window_func<'a, 'b>(a: &WindowFunc<'a>, b: &WindowFunc<'b>) -> bool {
 }
 
 fn equal_window_func_run_condition<'a, 'b>(
-    a: &nodes::primnodes::WindowFuncRunCondition<'a>,
-    b: &nodes::primnodes::WindowFuncRunCondition<'b>,
+    a: &::nodes::primnodes::WindowFuncRunCondition<'a>,
+    b: &::nodes::primnodes::WindowFuncRunCondition<'b>,
 ) -> bool {
     a.opno == b.opno
         && a.inputcollid == b.inputcollid
@@ -296,8 +296,8 @@ fn equal_sub_link<'a, 'b>(a: &SubLink<'a>, b: &SubLink<'b>) -> bool {
 /// equal; both `Some` defers to the per-node `Query` comparator [`equal_query`]
 /// (`_equalQuery`).
 fn equal_opt_subselect<'a, 'b>(
-    a: Option<&nodes::copy_query::Query<'a>>,
-    b: Option<&nodes::copy_query::Query<'b>>,
+    a: Option<&::nodes::copy_query::Query<'a>>,
+    b: Option<&::nodes::copy_query::Query<'b>>,
 ) -> bool {
     (match (a, b) {
         (None, None) => true,
@@ -428,14 +428,14 @@ fn equal_xml_expr<'a, 'b>(a: &XmlExpr<'a>, b: &XmlExpr<'b>) -> bool {
 }
 
 /// `_equalJsonFormat`.
-fn equal_json_format(a: &nodes::primnodes::JsonFormat, b: &nodes::primnodes::JsonFormat) -> bool {
+fn equal_json_format(a: &::nodes::primnodes::JsonFormat, b: &::nodes::primnodes::JsonFormat) -> bool {
     a.format_type == b.format_type && a.encoding == b.encoding
 }
 
 #[inline]
 fn equal_opt_json_format(
-    a: Option<&nodes::primnodes::JsonFormat>,
-    b: Option<&nodes::primnodes::JsonFormat>,
+    a: Option<&::nodes::primnodes::JsonFormat>,
+    b: Option<&::nodes::primnodes::JsonFormat>,
 ) -> bool {
     (match (a, b) {
         (None, None) => true,
@@ -446,8 +446,8 @@ fn equal_opt_json_format(
 
 /// `_equalJsonReturning`.
 fn equal_json_returning(
-    a: &nodes::primnodes::JsonReturning,
-    b: &nodes::primnodes::JsonReturning,
+    a: &::nodes::primnodes::JsonReturning,
+    b: &::nodes::primnodes::JsonReturning,
 ) -> bool {
     equal_opt_json_format(a.format.as_ref(), b.format.as_ref())
         && a.typid == b.typid
@@ -456,8 +456,8 @@ fn equal_json_returning(
 
 #[inline]
 fn equal_opt_json_returning(
-    a: Option<&nodes::primnodes::JsonReturning>,
-    b: Option<&nodes::primnodes::JsonReturning>,
+    a: Option<&::nodes::primnodes::JsonReturning>,
+    b: Option<&::nodes::primnodes::JsonReturning>,
 ) -> bool {
     (match (a, b) {
         (None, None) => true,
@@ -468,8 +468,8 @@ fn equal_opt_json_returning(
 
 /// `_equalJsonBehavior`.
 fn equal_json_behavior<'a, 'b>(
-    a: &nodes::primnodes::JsonBehavior<'a>,
-    b: &nodes::primnodes::JsonBehavior<'b>,
+    a: &::nodes::primnodes::JsonBehavior<'a>,
+    b: &::nodes::primnodes::JsonBehavior<'b>,
 ) -> bool {
     a.btype == b.btype
         && equal_opt_expr(a.expr.as_deref(), b.expr.as_deref())
@@ -478,8 +478,8 @@ fn equal_json_behavior<'a, 'b>(
 
 #[inline]
 fn equal_opt_json_behavior<'a, 'b>(
-    a: Option<&nodes::primnodes::JsonBehavior<'a>>,
-    b: Option<&nodes::primnodes::JsonBehavior<'b>>,
+    a: Option<&::nodes::primnodes::JsonBehavior<'a>>,
+    b: Option<&::nodes::primnodes::JsonBehavior<'b>>,
 ) -> bool {
     (match (a, b) {
         (None, None) => true,
@@ -497,8 +497,8 @@ fn equal_json_value_expr<'a, 'b>(a: &JsonValueExpr<'a>, b: &JsonValueExpr<'b>) -
 /// `_equalJsonValueExpr` over the RAW-grammar `rawexprnodes::JsonValueExpr`
 /// (its `raw_expr`/`formatted_expr` are `Node *` children, not `Expr *`).
 fn equal_json_value_expr_raw<'a, 'b>(
-    a: &nodes::rawexprnodes::JsonValueExpr<'a>,
-    b: &nodes::rawexprnodes::JsonValueExpr<'b>,
+    a: &::nodes::rawexprnodes::JsonValueExpr<'a>,
+    b: &::nodes::rawexprnodes::JsonValueExpr<'b>,
 ) -> bool {
     equal_opt_node(a.raw_expr.as_ref(), b.raw_expr.as_ref())
         && equal_opt_node(a.formatted_expr.as_ref(), b.formatted_expr.as_ref())
@@ -618,7 +618,7 @@ fn equal_sort_group_clause(a: &SortGroupClause, b: &SortGroupClause) -> bool {
 // sub-nodes (compared element-wise by [`equal_node`]).
 // ===========================================================================
 
-use nodes::nodes::NodePtr;
+use ::nodes::nodes::NodePtr;
 
 /// `COMPARE_NODE_FIELD` over a child `Node *` carried as a [`NodePtr`]
 /// (`PgBox<Node>`): both NULL is equal; one NULL is unequal; else recurse into
@@ -644,8 +644,8 @@ fn equal_node_list<'a, 'b>(a: &[NodePtr<'a>], b: &[NodePtr<'b>]) -> bool {
 /// `backend-nodes-core::bitmapset::bms_equal`.
 #[inline]
 fn equal_bms<'a, 'b>(
-    a: Option<&nodes::bitmapset::Bitmapset<'a>>,
-    b: Option<&nodes::bitmapset::Bitmapset<'b>>,
+    a: Option<&::nodes::bitmapset::Bitmapset<'a>>,
+    b: Option<&::nodes::bitmapset::Bitmapset<'b>>,
 ) -> bool {
     (match (a, b) {
         (None, None) => true,
@@ -655,7 +655,7 @@ fn equal_bms<'a, 'b>(
 }
 
 /// `_equalAlias` (equalfuncs.funcs.c).
-fn equal_alias<'a, 'b>(a: &nodes::rawnodes::Alias<'a>, b: &nodes::rawnodes::Alias<'b>) -> bool {
+fn equal_alias<'a, 'b>(a: &::nodes::rawnodes::Alias<'a>, b: &::nodes::rawnodes::Alias<'b>) -> bool {
     equalstr(a.aliasname.as_deref(), b.aliasname.as_deref())
         && equal_node_list(&a.colnames, &b.colnames)
 }
@@ -663,8 +663,8 @@ fn equal_alias<'a, 'b>(a: &nodes::rawnodes::Alias<'a>, b: &nodes::rawnodes::Alia
 /// `COMPARE_NODE_FIELD` over an optional `Alias *`.
 #[inline]
 fn equal_opt_alias<'a, 'b>(
-    a: Option<&nodes::rawnodes::Alias<'a>>,
-    b: Option<&nodes::rawnodes::Alias<'b>>,
+    a: Option<&::nodes::rawnodes::Alias<'a>>,
+    b: Option<&::nodes::rawnodes::Alias<'b>>,
 ) -> bool {
     (match (a, b) {
         (None, None) => true,
@@ -678,8 +678,8 @@ fn equal_opt_alias<'a, 'b>(
 /// Integer/Oid value nodes; this repo holds them as scalar `PgVec`s, so the
 /// node-list compare reduces to slice equality (same semantics).
 fn equal_range_tbl_entry<'a, 'b>(
-    a: &nodes::parsenodes::RangeTblEntry<'a>,
-    b: &nodes::parsenodes::RangeTblEntry<'b>,
+    a: &::nodes::parsenodes::RangeTblEntry<'a>,
+    b: &::nodes::parsenodes::RangeTblEntry<'b>,
 ) -> bool {
     equal_opt_alias(a.alias.as_deref(), b.alias.as_deref())
         && equal_opt_alias(a.eref.as_deref(), b.eref.as_deref())
@@ -718,8 +718,8 @@ fn equal_range_tbl_entry<'a, 'b>(
 
 /// `_equalRTEPermissionInfo` (equalfuncs.funcs.c).
 fn equal_rte_permission_info<'a, 'b>(
-    a: &nodes::parsenodes::RTEPermissionInfo<'a>,
-    b: &nodes::parsenodes::RTEPermissionInfo<'b>,
+    a: &::nodes::parsenodes::RTEPermissionInfo<'a>,
+    b: &::nodes::parsenodes::RTEPermissionInfo<'b>,
 ) -> bool {
     a.relid == b.relid
         && a.inh == b.inh
@@ -732,8 +732,8 @@ fn equal_rte_permission_info<'a, 'b>(
 
 /// `_equalRangeTblFunction` (equalfuncs.funcs.c).
 fn equal_range_tbl_function<'a, 'b>(
-    a: &nodes::rawnodes::RangeTblFunction<'a>,
-    b: &nodes::rawnodes::RangeTblFunction<'b>,
+    a: &::nodes::rawnodes::RangeTblFunction<'a>,
+    b: &::nodes::rawnodes::RangeTblFunction<'b>,
 ) -> bool {
     equal_opt_node(a.funcexpr.as_ref(), b.funcexpr.as_ref())
         && a.funccolcount == b.funccolcount
@@ -746,16 +746,16 @@ fn equal_range_tbl_function<'a, 'b>(
 
 /// `_equalFromExpr` (equalfuncs.funcs.c).
 fn equal_from_expr<'a, 'b>(
-    a: &nodes::rawnodes::FromExpr<'a>,
-    b: &nodes::rawnodes::FromExpr<'b>,
+    a: &::nodes::rawnodes::FromExpr<'a>,
+    b: &::nodes::rawnodes::FromExpr<'b>,
 ) -> bool {
     equal_node_list(&a.fromlist, &b.fromlist) && equal_opt_node(a.quals.as_ref(), b.quals.as_ref())
 }
 
 /// `_equalJoinExpr` (equalfuncs.funcs.c).
 fn equal_join_expr<'a, 'b>(
-    a: &nodes::rawnodes::JoinExpr<'a>,
-    b: &nodes::rawnodes::JoinExpr<'b>,
+    a: &::nodes::rawnodes::JoinExpr<'a>,
+    b: &::nodes::rawnodes::JoinExpr<'b>,
 ) -> bool {
     a.jointype == b.jointype
         && a.isNatural == b.isNatural
@@ -770,16 +770,16 @@ fn equal_join_expr<'a, 'b>(
 
 /// `_equalRangeTblRef` (equalfuncs.funcs.c).
 fn equal_range_tbl_ref(
-    a: &nodes::rawnodes::RangeTblRef,
-    b: &nodes::rawnodes::RangeTblRef,
+    a: &::nodes::rawnodes::RangeTblRef,
+    b: &::nodes::rawnodes::RangeTblRef,
 ) -> bool {
     a.rtindex == b.rtindex
 }
 
 /// `_equalOnConflictExpr` (equalfuncs.funcs.c).
 fn equal_on_conflict_expr<'a, 'b>(
-    a: &nodes::rawnodes::OnConflictExpr<'a>,
-    b: &nodes::rawnodes::OnConflictExpr<'b>,
+    a: &::nodes::rawnodes::OnConflictExpr<'a>,
+    b: &::nodes::rawnodes::OnConflictExpr<'b>,
 ) -> bool {
     a.action == b.action
         && equal_node_list(&a.arbiterElems, &b.arbiterElems)
@@ -793,8 +793,8 @@ fn equal_on_conflict_expr<'a, 'b>(
 
 /// `_equalMergeAction` (equalfuncs.funcs.c) — the parse-tree `MergeAction`.
 fn equal_merge_action<'a, 'b>(
-    a: &nodes::rawnodes::MergeAction<'a>,
-    b: &nodes::rawnodes::MergeAction<'b>,
+    a: &::nodes::rawnodes::MergeAction<'a>,
+    b: &::nodes::rawnodes::MergeAction<'b>,
 ) -> bool {
     a.matchKind == b.matchKind
         && a.commandType == b.commandType
@@ -806,8 +806,8 @@ fn equal_merge_action<'a, 'b>(
 
 /// `_equalWithCheckOption` (equalfuncs.funcs.c).
 fn equal_with_check_option<'a, 'b>(
-    a: &nodes::rawnodes::WithCheckOption<'a>,
-    b: &nodes::rawnodes::WithCheckOption<'b>,
+    a: &::nodes::rawnodes::WithCheckOption<'a>,
+    b: &::nodes::rawnodes::WithCheckOption<'b>,
 ) -> bool {
     a.kind == b.kind
         && equalstr(a.relname.as_deref(), b.relname.as_deref())
@@ -818,8 +818,8 @@ fn equal_with_check_option<'a, 'b>(
 
 /// `_equalGroupingSet` (equalfuncs.funcs.c).
 fn equal_grouping_set<'a, 'b>(
-    a: &nodes::rawnodes::GroupingSet<'a>,
-    b: &nodes::rawnodes::GroupingSet<'b>,
+    a: &::nodes::rawnodes::GroupingSet<'a>,
+    b: &::nodes::rawnodes::GroupingSet<'b>,
 ) -> bool {
     a.kind == b.kind && equal_node_list(&a.content, &b.content)
     // location is COMPARE_LOCATION_FIELD (no-op).
@@ -827,8 +827,8 @@ fn equal_grouping_set<'a, 'b>(
 
 /// `_equalWindowClause` (equalfuncs.funcs.c).
 fn equal_window_clause<'a, 'b>(
-    a: &nodes::rawnodes::WindowClause<'a>,
-    b: &nodes::rawnodes::WindowClause<'b>,
+    a: &::nodes::rawnodes::WindowClause<'a>,
+    b: &::nodes::rawnodes::WindowClause<'b>,
 ) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equalstr(a.refname.as_deref(), b.refname.as_deref())
@@ -848,8 +848,8 @@ fn equal_window_clause<'a, 'b>(
 
 /// `_equalRowMarkClause` (equalfuncs.funcs.c).
 fn equal_row_mark_clause(
-    a: &nodes::rawnodes::RowMarkClause,
-    b: &nodes::rawnodes::RowMarkClause,
+    a: &::nodes::rawnodes::RowMarkClause,
+    b: &::nodes::rawnodes::RowMarkClause,
 ) -> bool {
     a.rti == b.rti
         && a.strength == b.strength
@@ -859,8 +859,8 @@ fn equal_row_mark_clause(
 
 /// `_equalCTESearchClause` (equalfuncs.funcs.c).
 fn equal_cte_search_clause<'a, 'b>(
-    a: &nodes::rawnodes::CTESearchClause<'a>,
-    b: &nodes::rawnodes::CTESearchClause<'b>,
+    a: &::nodes::rawnodes::CTESearchClause<'a>,
+    b: &::nodes::rawnodes::CTESearchClause<'b>,
 ) -> bool {
     equal_node_list(&a.search_col_list, &b.search_col_list)
         && a.search_breadth_first == b.search_breadth_first
@@ -870,8 +870,8 @@ fn equal_cte_search_clause<'a, 'b>(
 
 /// `_equalCTECycleClause` (equalfuncs.funcs.c).
 fn equal_cte_cycle_clause<'a, 'b>(
-    a: &nodes::rawnodes::CTECycleClause<'a>,
-    b: &nodes::rawnodes::CTECycleClause<'b>,
+    a: &::nodes::rawnodes::CTECycleClause<'a>,
+    b: &::nodes::rawnodes::CTECycleClause<'b>,
 ) -> bool {
     equal_node_list(&a.cycle_col_list, &b.cycle_col_list)
         && equalstr(a.cycle_mark_column.as_deref(), b.cycle_mark_column.as_deref())
@@ -905,8 +905,8 @@ fn equal_opt_list<T, U>(
 /// `_equalTableFunc` (equalfuncs.funcs.c, gen_node_support). Compares every
 /// `COMPARE_*` field; `location` is `COMPARE_LOCATION_FIELD` (no-op).
 fn equal_table_func<'a, 'b>(
-    a: &nodes::primnodes::TableFunc<'a>,
-    b: &nodes::primnodes::TableFunc<'b>,
+    a: &::nodes::primnodes::TableFunc<'a>,
+    b: &::nodes::primnodes::TableFunc<'b>,
 ) -> bool {
     a.functype == b.functype
         && equal_opt_list(&a.ns_uris, &b.ns_uris, |p, q| equal_expr(p, q))
@@ -941,8 +941,8 @@ fn equal_table_func<'a, 'b>(
 
 /// `_equalCommonTableExpr` (equalfuncs.funcs.c).
 fn equal_common_table_expr<'a, 'b>(
-    a: &nodes::rawnodes::CommonTableExpr<'a>,
-    b: &nodes::rawnodes::CommonTableExpr<'b>,
+    a: &::nodes::rawnodes::CommonTableExpr<'a>,
+    b: &::nodes::rawnodes::CommonTableExpr<'b>,
 ) -> bool {
     equalstr(a.ctename.as_deref(), b.ctename.as_deref())
         && equal_node_list(&a.aliascolnames, &b.aliascolnames)
@@ -965,8 +965,8 @@ fn equal_common_table_expr<'a, 'b>(
 
 /// `_equalSetOperationStmt` (equalfuncs.funcs.c).
 fn equal_set_operation_stmt<'a, 'b>(
-    a: &nodes::rawnodes::SetOperationStmt<'a>,
-    b: &nodes::rawnodes::SetOperationStmt<'b>,
+    a: &::nodes::rawnodes::SetOperationStmt<'a>,
+    b: &::nodes::rawnodes::SetOperationStmt<'b>,
 ) -> bool {
     a.op == b.op
         && a.all == b.all
@@ -984,8 +984,8 @@ fn equal_set_operation_stmt<'a, 'b>(
 /// generated comparator lists — it follows the field set verbatim below.
 /// `COMPARE_LOCATION_FIELD(stmt_location)`/`(stmt_len)` are no-ops.
 fn equal_query<'a, 'b>(
-    a: &nodes::copy_query::Query<'a>,
-    b: &nodes::copy_query::Query<'b>,
+    a: &::nodes::copy_query::Query<'a>,
+    b: &::nodes::copy_query::Query<'b>,
 ) -> bool {
     a.commandType == b.commandType
         && a.querySource == b.querySource
@@ -1184,8 +1184,8 @@ pub fn equal_expr<'a, 'b>(a: &Expr<'a>, b: &Expr<'b>) -> bool {
 
 /// `_equalColumnRef` (equalfuncs.funcs.c).
 fn equal_column_ref<'a, 'b>(
-    a: &nodes::rawnodes::ColumnRef<'a>,
-    b: &nodes::rawnodes::ColumnRef<'b>,
+    a: &::nodes::rawnodes::ColumnRef<'a>,
+    b: &::nodes::rawnodes::ColumnRef<'b>,
 ) -> bool {
     equal_node_list(&a.fields, &b.fields)
     // location is COMPARE_LOCATION_FIELD (no-op).
@@ -1193,8 +1193,8 @@ fn equal_column_ref<'a, 'b>(
 
 /// `_equalParamRef` (equalfuncs.funcs.c).
 fn equal_param_ref(
-    a: &nodes::rawnodes::ParamRef,
-    b: &nodes::rawnodes::ParamRef,
+    a: &::nodes::rawnodes::ParamRef,
+    b: &::nodes::rawnodes::ParamRef,
 ) -> bool {
     a.number == b.number
     // location is COMPARE_LOCATION_FIELD (no-op).
@@ -1202,8 +1202,8 @@ fn equal_param_ref(
 
 /// `_equalA_Expr` (equalfuncs.funcs.c).
 fn equal_a_expr<'a, 'b>(
-    a: &nodes::rawnodes::A_Expr<'a>,
-    b: &nodes::rawnodes::A_Expr<'b>,
+    a: &::nodes::rawnodes::A_Expr<'a>,
+    b: &::nodes::rawnodes::A_Expr<'b>,
 ) -> bool {
     a.kind == b.kind
         && equal_node_list(&a.name, &b.name)
@@ -1215,8 +1215,8 @@ fn equal_a_expr<'a, 'b>(
 /// `_equalA_Const` (equalfuncs.c). `val` is the in-line value node, valid only
 /// when `!isnull`.
 fn equal_a_const<'a, 'b>(
-    a: &nodes::rawnodes::A_Const<'a>,
-    b: &nodes::rawnodes::A_Const<'b>,
+    a: &::nodes::rawnodes::A_Const<'a>,
+    b: &::nodes::rawnodes::A_Const<'b>,
 ) -> bool {
     if a.isnull != b.isnull {
         return false;
@@ -1230,8 +1230,8 @@ fn equal_a_const<'a, 'b>(
 
 /// `_equalFuncCall` (equalfuncs.funcs.c).
 fn equal_func_call<'a, 'b>(
-    a: &nodes::rawnodes::FuncCall<'a>,
-    b: &nodes::rawnodes::FuncCall<'b>,
+    a: &::nodes::rawnodes::FuncCall<'a>,
+    b: &::nodes::rawnodes::FuncCall<'b>,
 ) -> bool {
     equal_node_list(&a.funcname, &b.funcname)
         && equal_node_list(&a.args, &b.args)
@@ -1251,16 +1251,16 @@ fn equal_func_call<'a, 'b>(
 
 /// `_equalA_Star` (equalfuncs.funcs.c) — no fields.
 fn equal_a_star(
-    _a: &nodes::rawnodes::A_Star,
-    _b: &nodes::rawnodes::A_Star,
+    _a: &::nodes::rawnodes::A_Star,
+    _b: &::nodes::rawnodes::A_Star,
 ) -> bool {
     true
 }
 
 /// `_equalA_Indices` (equalfuncs.funcs.c).
 fn equal_a_indices<'a, 'b>(
-    a: &nodes::rawnodes::A_Indices<'a>,
-    b: &nodes::rawnodes::A_Indices<'b>,
+    a: &::nodes::rawnodes::A_Indices<'a>,
+    b: &::nodes::rawnodes::A_Indices<'b>,
 ) -> bool {
     a.is_slice == b.is_slice
         && equal_opt_node(a.lidx.as_ref(), b.lidx.as_ref())
@@ -1269,8 +1269,8 @@ fn equal_a_indices<'a, 'b>(
 
 /// `_equalA_Indirection` (equalfuncs.funcs.c).
 fn equal_a_indirection<'a, 'b>(
-    a: &nodes::rawnodes::A_Indirection<'a>,
-    b: &nodes::rawnodes::A_Indirection<'b>,
+    a: &::nodes::rawnodes::A_Indirection<'a>,
+    b: &::nodes::rawnodes::A_Indirection<'b>,
 ) -> bool {
     equal_opt_node(a.arg.as_ref(), b.arg.as_ref())
         && equal_node_list(&a.indirection, &b.indirection)
@@ -1278,8 +1278,8 @@ fn equal_a_indirection<'a, 'b>(
 
 /// `_equalA_ArrayExpr` (equalfuncs.funcs.c).
 fn equal_a_array_expr<'a, 'b>(
-    a: &nodes::rawnodes::A_ArrayExpr<'a>,
-    b: &nodes::rawnodes::A_ArrayExpr<'b>,
+    a: &::nodes::rawnodes::A_ArrayExpr<'a>,
+    b: &::nodes::rawnodes::A_ArrayExpr<'b>,
 ) -> bool {
     equal_node_list(&a.elements, &b.elements)
     // list_start/list_end/location are COMPARE_LOCATION_FIELD (no-op).
@@ -1287,8 +1287,8 @@ fn equal_a_array_expr<'a, 'b>(
 
 /// `_equalTypeName` (equalfuncs.funcs.c).
 fn equal_type_name<'a, 'b>(
-    a: &nodes::rawnodes::TypeName<'a>,
-    b: &nodes::rawnodes::TypeName<'b>,
+    a: &::nodes::rawnodes::TypeName<'a>,
+    b: &::nodes::rawnodes::TypeName<'b>,
 ) -> bool {
     equal_node_list(&a.names, &b.names)
         && a.typeOid == b.typeOid
@@ -1302,8 +1302,8 @@ fn equal_type_name<'a, 'b>(
 
 /// `_equalTypeCast` (equalfuncs.funcs.c).
 fn equal_type_cast<'a, 'b>(
-    a: &nodes::rawnodes::TypeCast<'a>,
-    b: &nodes::rawnodes::TypeCast<'b>,
+    a: &::nodes::rawnodes::TypeCast<'a>,
+    b: &::nodes::rawnodes::TypeCast<'b>,
 ) -> bool {
     equal_opt_node(a.arg.as_ref(), b.arg.as_ref())
         && match (a.typeName.as_ref(), b.typeName.as_ref()) {
@@ -1316,8 +1316,8 @@ fn equal_type_cast<'a, 'b>(
 
 /// `_equalCollateClause` (equalfuncs.funcs.c).
 fn equal_collate_clause<'a, 'b>(
-    a: &nodes::rawnodes::CollateClause<'a>,
-    b: &nodes::rawnodes::CollateClause<'b>,
+    a: &::nodes::rawnodes::CollateClause<'a>,
+    b: &::nodes::rawnodes::CollateClause<'b>,
 ) -> bool {
     equal_opt_node(a.arg.as_ref(), b.arg.as_ref())
         && equal_node_list(&a.collname, &b.collname)
@@ -1326,8 +1326,8 @@ fn equal_collate_clause<'a, 'b>(
 
 /// `_equalResTarget` (equalfuncs.funcs.c).
 fn equal_res_target<'a, 'b>(
-    a: &nodes::rawnodes::ResTarget<'a>,
-    b: &nodes::rawnodes::ResTarget<'b>,
+    a: &::nodes::rawnodes::ResTarget<'a>,
+    b: &::nodes::rawnodes::ResTarget<'b>,
 ) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equal_node_list(&a.indirection, &b.indirection)
@@ -1337,8 +1337,8 @@ fn equal_res_target<'a, 'b>(
 
 /// `_equalMultiAssignRef` (equalfuncs.funcs.c).
 fn equal_multi_assign_ref<'a, 'b>(
-    a: &nodes::rawnodes::MultiAssignRef<'a>,
-    b: &nodes::rawnodes::MultiAssignRef<'b>,
+    a: &::nodes::rawnodes::MultiAssignRef<'a>,
+    b: &::nodes::rawnodes::MultiAssignRef<'b>,
 ) -> bool {
     equal_opt_node(a.source.as_ref(), b.source.as_ref())
         && a.colno == b.colno
@@ -1347,8 +1347,8 @@ fn equal_multi_assign_ref<'a, 'b>(
 
 /// `_equalIndexElem` (equalfuncs.funcs.c).
 fn equal_index_elem<'a, 'b>(
-    a: &nodes::ddlnodes::IndexElem<'a>,
-    b: &nodes::ddlnodes::IndexElem<'b>,
+    a: &::nodes::ddlnodes::IndexElem<'a>,
+    b: &::nodes::ddlnodes::IndexElem<'b>,
 ) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equal_opt_node(a.expr.as_ref(), b.expr.as_ref())
@@ -1362,8 +1362,8 @@ fn equal_index_elem<'a, 'b>(
 
 /// `_equalSortBy` (equalfuncs.funcs.c).
 fn equal_sort_by<'a, 'b>(
-    a: &nodes::rawnodes::SortBy<'a>,
-    b: &nodes::rawnodes::SortBy<'b>,
+    a: &::nodes::rawnodes::SortBy<'a>,
+    b: &::nodes::rawnodes::SortBy<'b>,
 ) -> bool {
     equal_opt_node(a.node.as_ref(), b.node.as_ref())
         && a.sortby_dir == b.sortby_dir
@@ -1374,8 +1374,8 @@ fn equal_sort_by<'a, 'b>(
 
 /// `_equalWindowDef` (equalfuncs.funcs.c).
 fn equal_window_def<'a, 'b>(
-    a: &nodes::rawnodes::WindowDef<'a>,
-    b: &nodes::rawnodes::WindowDef<'b>,
+    a: &::nodes::rawnodes::WindowDef<'a>,
+    b: &::nodes::rawnodes::WindowDef<'b>,
 ) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equalstr(a.refname.as_deref(), b.refname.as_deref())
@@ -1394,41 +1394,41 @@ fn equal_window_def<'a, 'b>(
 // ===========================================================================
 
 /// `_equalAccessPriv` (equalfuncs.funcs.c).
-fn equal_access_priv<'a, 'b>(a: &nodes::ddlnodes::AccessPriv<'a>, b: &nodes::ddlnodes::AccessPriv<'b>) -> bool {
+fn equal_access_priv<'a, 'b>(a: &::nodes::ddlnodes::AccessPriv<'a>, b: &::nodes::ddlnodes::AccessPriv<'b>) -> bool {
     equalstr(a.priv_name.as_deref(), b.priv_name.as_deref())
         && equal_node_list(&a.cols, &b.cols)
 }
 
 /// `_equalAlterCollationStmt` (equalfuncs.funcs.c).
-fn equal_alter_collation_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterCollationStmt<'a>, b: &nodes::ddlnodes::AlterCollationStmt<'b>) -> bool {
+fn equal_alter_collation_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterCollationStmt<'a>, b: &::nodes::ddlnodes::AlterCollationStmt<'b>) -> bool {
     equal_node_list(&a.collname, &b.collname)
 }
 
 /// `_equalAlterDatabaseRefreshCollStmt` (equalfuncs.funcs.c).
-fn equal_alter_database_refresh_coll_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterDatabaseRefreshCollStmt<'a>, b: &nodes::ddlnodes::AlterDatabaseRefreshCollStmt<'b>) -> bool {
+fn equal_alter_database_refresh_coll_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterDatabaseRefreshCollStmt<'a>, b: &::nodes::ddlnodes::AlterDatabaseRefreshCollStmt<'b>) -> bool {
     equalstr(a.dbname.as_deref(), b.dbname.as_deref())
 }
 
 /// `_equalAlterDatabaseSetStmt` (equalfuncs.funcs.c).
-fn equal_alter_database_set_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterDatabaseSetStmt<'a>, b: &nodes::ddlnodes::AlterDatabaseSetStmt<'b>) -> bool {
+fn equal_alter_database_set_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterDatabaseSetStmt<'a>, b: &::nodes::ddlnodes::AlterDatabaseSetStmt<'b>) -> bool {
     equalstr(a.dbname.as_deref(), b.dbname.as_deref())
         && equal_opt_node(a.setstmt.as_ref(), b.setstmt.as_ref())
 }
 
 /// `_equalAlterDatabaseStmt` (equalfuncs.funcs.c).
-fn equal_alter_database_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterDatabaseStmt<'a>, b: &nodes::ddlnodes::AlterDatabaseStmt<'b>) -> bool {
+fn equal_alter_database_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterDatabaseStmt<'a>, b: &::nodes::ddlnodes::AlterDatabaseStmt<'b>) -> bool {
     equalstr(a.dbname.as_deref(), b.dbname.as_deref())
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalAlterDefaultPrivilegesStmt` (equalfuncs.funcs.c).
-fn equal_alter_default_privileges_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterDefaultPrivilegesStmt<'a>, b: &nodes::ddlnodes::AlterDefaultPrivilegesStmt<'b>) -> bool {
+fn equal_alter_default_privileges_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterDefaultPrivilegesStmt<'a>, b: &::nodes::ddlnodes::AlterDefaultPrivilegesStmt<'b>) -> bool {
     equal_node_list(&a.options, &b.options)
         && equal_opt_node(a.action.as_ref(), b.action.as_ref())
 }
 
 /// `_equalAlterDomainStmt` (equalfuncs.funcs.c).
-fn equal_alter_domain_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterDomainStmt<'a>, b: &nodes::ddlnodes::AlterDomainStmt<'b>) -> bool {
+fn equal_alter_domain_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterDomainStmt<'a>, b: &::nodes::ddlnodes::AlterDomainStmt<'b>) -> bool {
     a.subtype == b.subtype
         && equal_node_list(&a.typeName, &b.typeName)
         && equalstr(a.name.as_deref(), b.name.as_deref())
@@ -1438,7 +1438,7 @@ fn equal_alter_domain_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterDomainStmt<'a>, b: 
 }
 
 /// `_equalAlterEnumStmt` (equalfuncs.funcs.c).
-fn equal_alter_enum_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterEnumStmt<'a>, b: &nodes::ddlnodes::AlterEnumStmt<'b>) -> bool {
+fn equal_alter_enum_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterEnumStmt<'a>, b: &::nodes::ddlnodes::AlterEnumStmt<'b>) -> bool {
     equal_node_list(&a.typeName, &b.typeName)
         && equalstr(a.oldVal.as_deref(), b.oldVal.as_deref())
         && equalstr(a.newVal.as_deref(), b.newVal.as_deref())
@@ -1448,13 +1448,13 @@ fn equal_alter_enum_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterEnumStmt<'a>, b: &nod
 }
 
 /// `_equalAlterEventTrigStmt` (equalfuncs.funcs.c).
-fn equal_alter_event_trig_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterEventTrigStmt<'a>, b: &nodes::ddlnodes::AlterEventTrigStmt<'b>) -> bool {
+fn equal_alter_event_trig_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterEventTrigStmt<'a>, b: &::nodes::ddlnodes::AlterEventTrigStmt<'b>) -> bool {
     equalstr(a.trigname.as_deref(), b.trigname.as_deref())
         && a.tgenabled == b.tgenabled
 }
 
 /// `_equalAlterExtensionContentsStmt` (equalfuncs.funcs.c).
-fn equal_alter_extension_contents_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterExtensionContentsStmt<'a>, b: &nodes::ddlnodes::AlterExtensionContentsStmt<'b>) -> bool {
+fn equal_alter_extension_contents_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterExtensionContentsStmt<'a>, b: &::nodes::ddlnodes::AlterExtensionContentsStmt<'b>) -> bool {
     equalstr(a.extname.as_deref(), b.extname.as_deref())
         && a.action == b.action
         && a.objtype == b.objtype
@@ -1462,20 +1462,20 @@ fn equal_alter_extension_contents_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterExtensi
 }
 
 /// `_equalAlterExtensionStmt` (equalfuncs.funcs.c).
-fn equal_alter_extension_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterExtensionStmt<'a>, b: &nodes::ddlnodes::AlterExtensionStmt<'b>) -> bool {
+fn equal_alter_extension_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterExtensionStmt<'a>, b: &::nodes::ddlnodes::AlterExtensionStmt<'b>) -> bool {
     equalstr(a.extname.as_deref(), b.extname.as_deref())
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalAlterFdwStmt` (equalfuncs.funcs.c).
-fn equal_alter_fdw_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterFdwStmt<'a>, b: &nodes::ddlnodes::AlterFdwStmt<'b>) -> bool {
+fn equal_alter_fdw_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterFdwStmt<'a>, b: &::nodes::ddlnodes::AlterFdwStmt<'b>) -> bool {
     equalstr(a.fdwname.as_deref(), b.fdwname.as_deref())
         && equal_node_list(&a.func_options, &b.func_options)
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalAlterForeignServerStmt` (equalfuncs.funcs.c).
-fn equal_alter_foreign_server_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterForeignServerStmt<'a>, b: &nodes::ddlnodes::AlterForeignServerStmt<'b>) -> bool {
+fn equal_alter_foreign_server_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterForeignServerStmt<'a>, b: &::nodes::ddlnodes::AlterForeignServerStmt<'b>) -> bool {
     equalstr(a.servername.as_deref(), b.servername.as_deref())
         && equalstr(a.version.as_deref(), b.version.as_deref())
         && equal_node_list(&a.options, &b.options)
@@ -1483,14 +1483,14 @@ fn equal_alter_foreign_server_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterForeignServ
 }
 
 /// `_equalAlterFunctionStmt` (equalfuncs.funcs.c).
-fn equal_alter_function_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterFunctionStmt<'a>, b: &nodes::ddlnodes::AlterFunctionStmt<'b>) -> bool {
+fn equal_alter_function_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterFunctionStmt<'a>, b: &::nodes::ddlnodes::AlterFunctionStmt<'b>) -> bool {
     a.objtype == b.objtype
         && equal_opt_node(a.func.as_ref(), b.func.as_ref())
         && equal_node_list(&a.actions, &b.actions)
 }
 
 /// `_equalAlterObjectDependsStmt` (equalfuncs.funcs.c).
-fn equal_alter_object_depends_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterObjectDependsStmt<'a>, b: &nodes::ddlnodes::AlterObjectDependsStmt<'b>) -> bool {
+fn equal_alter_object_depends_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterObjectDependsStmt<'a>, b: &::nodes::ddlnodes::AlterObjectDependsStmt<'b>) -> bool {
     a.objectType == b.objectType
         && equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equal_opt_node(a.object.as_ref(), b.object.as_ref())
@@ -1499,7 +1499,7 @@ fn equal_alter_object_depends_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterObjectDepen
 }
 
 /// `_equalAlterObjectSchemaStmt` (equalfuncs.funcs.c).
-fn equal_alter_object_schema_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterObjectSchemaStmt<'a>, b: &nodes::ddlnodes::AlterObjectSchemaStmt<'b>) -> bool {
+fn equal_alter_object_schema_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterObjectSchemaStmt<'a>, b: &::nodes::ddlnodes::AlterObjectSchemaStmt<'b>) -> bool {
     a.objectType == b.objectType
         && equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equal_opt_node(a.object.as_ref(), b.object.as_ref())
@@ -1508,13 +1508,13 @@ fn equal_alter_object_schema_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterObjectSchema
 }
 
 /// `_equalAlterOperatorStmt` (equalfuncs.funcs.c).
-fn equal_alter_operator_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterOperatorStmt<'a>, b: &nodes::ddlnodes::AlterOperatorStmt<'b>) -> bool {
+fn equal_alter_operator_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterOperatorStmt<'a>, b: &::nodes::ddlnodes::AlterOperatorStmt<'b>) -> bool {
     equal_opt_node(a.opername.as_ref(), b.opername.as_ref())
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalAlterOpFamilyStmt` (equalfuncs.funcs.c).
-fn equal_alter_op_family_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterOpFamilyStmt<'a>, b: &nodes::ddlnodes::AlterOpFamilyStmt<'b>) -> bool {
+fn equal_alter_op_family_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterOpFamilyStmt<'a>, b: &::nodes::ddlnodes::AlterOpFamilyStmt<'b>) -> bool {
     equal_node_list(&a.opfamilyname, &b.opfamilyname)
         && equalstr(a.amname.as_deref(), b.amname.as_deref())
         && a.isDrop == b.isDrop
@@ -1522,7 +1522,7 @@ fn equal_alter_op_family_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterOpFamilyStmt<'a>
 }
 
 /// `_equalAlterOwnerStmt` (equalfuncs.funcs.c).
-fn equal_alter_owner_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterOwnerStmt<'a>, b: &nodes::ddlnodes::AlterOwnerStmt<'b>) -> bool {
+fn equal_alter_owner_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterOwnerStmt<'a>, b: &::nodes::ddlnodes::AlterOwnerStmt<'b>) -> bool {
     a.objectType == b.objectType
         && equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equal_opt_node(a.object.as_ref(), b.object.as_ref())
@@ -1530,7 +1530,7 @@ fn equal_alter_owner_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterOwnerStmt<'a>, b: &n
 }
 
 /// `_equalAlterPolicyStmt` (equalfuncs.funcs.c).
-fn equal_alter_policy_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterPolicyStmt<'a>, b: &nodes::ddlnodes::AlterPolicyStmt<'b>) -> bool {
+fn equal_alter_policy_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterPolicyStmt<'a>, b: &::nodes::ddlnodes::AlterPolicyStmt<'b>) -> bool {
     equalstr(a.policy_name.as_deref(), b.policy_name.as_deref())
         && equal_opt_node(a.table.as_ref(), b.table.as_ref())
         && equal_node_list(&a.roles, &b.roles)
@@ -1539,7 +1539,7 @@ fn equal_alter_policy_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterPolicyStmt<'a>, b: 
 }
 
 /// `_equalAlterPublicationStmt` (equalfuncs.funcs.c).
-fn equal_alter_publication_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterPublicationStmt<'a>, b: &nodes::ddlnodes::AlterPublicationStmt<'b>) -> bool {
+fn equal_alter_publication_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterPublicationStmt<'a>, b: &::nodes::ddlnodes::AlterPublicationStmt<'b>) -> bool {
     equalstr(a.pubname.as_deref(), b.pubname.as_deref())
         && equal_node_list(&a.options, &b.options)
         && equal_node_list(&a.pubobjects, &b.pubobjects)
@@ -1548,21 +1548,21 @@ fn equal_alter_publication_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterPublicationStm
 }
 
 /// `_equalAlterRoleSetStmt` (equalfuncs.funcs.c).
-fn equal_alter_role_set_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterRoleSetStmt<'a>, b: &nodes::ddlnodes::AlterRoleSetStmt<'b>) -> bool {
+fn equal_alter_role_set_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterRoleSetStmt<'a>, b: &::nodes::ddlnodes::AlterRoleSetStmt<'b>) -> bool {
     equal_opt_node(a.role.as_ref(), b.role.as_ref())
         && equalstr(a.database.as_deref(), b.database.as_deref())
         && equal_opt_node(a.setstmt.as_ref(), b.setstmt.as_ref())
 }
 
 /// `_equalAlterRoleStmt` (equalfuncs.funcs.c).
-fn equal_alter_role_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterRoleStmt<'a>, b: &nodes::ddlnodes::AlterRoleStmt<'b>) -> bool {
+fn equal_alter_role_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterRoleStmt<'a>, b: &::nodes::ddlnodes::AlterRoleStmt<'b>) -> bool {
     equal_opt_node(a.role.as_ref(), b.role.as_ref())
         && equal_node_list(&a.options, &b.options)
         && a.action == b.action
 }
 
 /// `_equalAlterSeqStmt` (equalfuncs.funcs.c).
-fn equal_alter_seq_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterSeqStmt<'a>, b: &nodes::ddlnodes::AlterSeqStmt<'b>) -> bool {
+fn equal_alter_seq_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterSeqStmt<'a>, b: &::nodes::ddlnodes::AlterSeqStmt<'b>) -> bool {
     equal_opt_node(a.sequence.as_ref(), b.sequence.as_ref())
         && equal_node_list(&a.options, &b.options)
         && a.for_identity == b.for_identity
@@ -1570,14 +1570,14 @@ fn equal_alter_seq_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterSeqStmt<'a>, b: &nodes
 }
 
 /// `_equalAlterStatsStmt` (equalfuncs.funcs.c).
-fn equal_alter_stats_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterStatsStmt<'a>, b: &nodes::ddlnodes::AlterStatsStmt<'b>) -> bool {
+fn equal_alter_stats_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterStatsStmt<'a>, b: &::nodes::ddlnodes::AlterStatsStmt<'b>) -> bool {
     equal_node_list(&a.defnames, &b.defnames)
         && equal_opt_node(a.stxstattarget.as_ref(), b.stxstattarget.as_ref())
         && a.missing_ok == b.missing_ok
 }
 
 /// `_equalAlterSubscriptionStmt` (equalfuncs.funcs.c).
-fn equal_alter_subscription_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterSubscriptionStmt<'a>, b: &nodes::ddlnodes::AlterSubscriptionStmt<'b>) -> bool {
+fn equal_alter_subscription_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterSubscriptionStmt<'a>, b: &::nodes::ddlnodes::AlterSubscriptionStmt<'b>) -> bool {
     a.kind == b.kind
         && equalstr(a.subname.as_deref(), b.subname.as_deref())
         && equalstr(a.conninfo.as_deref(), b.conninfo.as_deref())
@@ -1586,12 +1586,12 @@ fn equal_alter_subscription_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterSubscriptionS
 }
 
 /// `_equalAlterSystemStmt` (equalfuncs.funcs.c).
-fn equal_alter_system_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterSystemStmt<'a>, b: &nodes::ddlnodes::AlterSystemStmt<'b>) -> bool {
+fn equal_alter_system_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterSystemStmt<'a>, b: &::nodes::ddlnodes::AlterSystemStmt<'b>) -> bool {
     equal_opt_node(a.setstmt.as_ref(), b.setstmt.as_ref())
 }
 
 /// `_equalAlterTableCmd` (equalfuncs.funcs.c).
-fn equal_alter_table_cmd<'a, 'b>(a: &nodes::ddlnodes::AlterTableCmd<'a>, b: &nodes::ddlnodes::AlterTableCmd<'b>) -> bool {
+fn equal_alter_table_cmd<'a, 'b>(a: &::nodes::ddlnodes::AlterTableCmd<'a>, b: &::nodes::ddlnodes::AlterTableCmd<'b>) -> bool {
     a.subtype == b.subtype
         && equalstr(a.name.as_deref(), b.name.as_deref())
         && a.num == b.num
@@ -1603,7 +1603,7 @@ fn equal_alter_table_cmd<'a, 'b>(a: &nodes::ddlnodes::AlterTableCmd<'a>, b: &nod
 }
 
 /// `_equalAlterTableMoveAllStmt` (equalfuncs.funcs.c).
-fn equal_alter_table_move_all_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterTableMoveAllStmt<'a>, b: &nodes::ddlnodes::AlterTableMoveAllStmt<'b>) -> bool {
+fn equal_alter_table_move_all_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterTableMoveAllStmt<'a>, b: &::nodes::ddlnodes::AlterTableMoveAllStmt<'b>) -> bool {
     equalstr(a.orig_tablespacename.as_deref(), b.orig_tablespacename.as_deref())
         && a.objtype == b.objtype
         && equal_node_list(&a.roles, &b.roles)
@@ -1612,14 +1612,14 @@ fn equal_alter_table_move_all_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterTableMoveAl
 }
 
 /// `_equalAlterTableSpaceOptionsStmt` (equalfuncs.funcs.c).
-fn equal_alter_table_space_options_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterTableSpaceOptionsStmt<'a>, b: &nodes::ddlnodes::AlterTableSpaceOptionsStmt<'b>) -> bool {
+fn equal_alter_table_space_options_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterTableSpaceOptionsStmt<'a>, b: &::nodes::ddlnodes::AlterTableSpaceOptionsStmt<'b>) -> bool {
     equalstr(a.tablespacename.as_deref(), b.tablespacename.as_deref())
         && equal_node_list(&a.options, &b.options)
         && a.isReset == b.isReset
 }
 
 /// `_equalAlterTableStmt` (equalfuncs.funcs.c).
-fn equal_alter_table_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterTableStmt<'a>, b: &nodes::ddlnodes::AlterTableStmt<'b>) -> bool {
+fn equal_alter_table_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterTableStmt<'a>, b: &::nodes::ddlnodes::AlterTableStmt<'b>) -> bool {
     equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equal_node_list(&a.cmds, &b.cmds)
         && a.objtype == b.objtype
@@ -1627,7 +1627,7 @@ fn equal_alter_table_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterTableStmt<'a>, b: &n
 }
 
 /// `_equalAlterTSConfigurationStmt` (equalfuncs.funcs.c).
-fn equal_alter_ts_configuration_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterTSConfigurationStmt<'a>, b: &nodes::ddlnodes::AlterTSConfigurationStmt<'b>) -> bool {
+fn equal_alter_ts_configuration_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterTSConfigurationStmt<'a>, b: &::nodes::ddlnodes::AlterTSConfigurationStmt<'b>) -> bool {
     a.kind == b.kind
         && equal_node_list(&a.cfgname, &b.cfgname)
         && equal_node_list(&a.tokentype, &b.tokentype)
@@ -1638,26 +1638,26 @@ fn equal_alter_ts_configuration_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterTSConfigu
 }
 
 /// `_equalAlterTSDictionaryStmt` (equalfuncs.funcs.c).
-fn equal_alter_ts_dictionary_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterTSDictionaryStmt<'a>, b: &nodes::ddlnodes::AlterTSDictionaryStmt<'b>) -> bool {
+fn equal_alter_ts_dictionary_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterTSDictionaryStmt<'a>, b: &::nodes::ddlnodes::AlterTSDictionaryStmt<'b>) -> bool {
     equal_node_list(&a.dictname, &b.dictname)
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalAlterTypeStmt` (equalfuncs.funcs.c).
-fn equal_alter_type_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterTypeStmt<'a>, b: &nodes::ddlnodes::AlterTypeStmt<'b>) -> bool {
+fn equal_alter_type_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterTypeStmt<'a>, b: &::nodes::ddlnodes::AlterTypeStmt<'b>) -> bool {
     equal_node_list(&a.typeName, &b.typeName)
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalAlterUserMappingStmt` (equalfuncs.funcs.c).
-fn equal_alter_user_mapping_stmt<'a, 'b>(a: &nodes::ddlnodes::AlterUserMappingStmt<'a>, b: &nodes::ddlnodes::AlterUserMappingStmt<'b>) -> bool {
+fn equal_alter_user_mapping_stmt<'a, 'b>(a: &::nodes::ddlnodes::AlterUserMappingStmt<'a>, b: &::nodes::ddlnodes::AlterUserMappingStmt<'b>) -> bool {
     equal_opt_node(a.user.as_ref(), b.user.as_ref())
         && equalstr(a.servername.as_deref(), b.servername.as_deref())
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalATAlterConstraint` (equalfuncs.funcs.c).
-fn equal_at_alter_constraint<'a, 'b>(a: &nodes::ddlnodes::ATAlterConstraint<'a>, b: &nodes::ddlnodes::ATAlterConstraint<'b>) -> bool {
+fn equal_at_alter_constraint<'a, 'b>(a: &::nodes::ddlnodes::ATAlterConstraint<'a>, b: &::nodes::ddlnodes::ATAlterConstraint<'b>) -> bool {
     equalstr(a.conname.as_deref(), b.conname.as_deref())
         && a.alterEnforceability == b.alterEnforceability
         && a.is_enforced == b.is_enforced
@@ -1669,13 +1669,13 @@ fn equal_at_alter_constraint<'a, 'b>(a: &nodes::ddlnodes::ATAlterConstraint<'a>,
 }
 
 /// `_equalCompositeTypeStmt` (equalfuncs.funcs.c).
-fn equal_composite_type_stmt<'a, 'b>(a: &nodes::ddlnodes::CompositeTypeStmt<'a>, b: &nodes::ddlnodes::CompositeTypeStmt<'b>) -> bool {
+fn equal_composite_type_stmt<'a, 'b>(a: &::nodes::ddlnodes::CompositeTypeStmt<'a>, b: &::nodes::ddlnodes::CompositeTypeStmt<'b>) -> bool {
     equal_opt_node(a.typevar.as_ref(), b.typevar.as_ref())
         && equal_node_list(&a.coldeflist, &b.coldeflist)
 }
 
 /// `_equalCreateCastStmt` (equalfuncs.funcs.c).
-fn equal_create_cast_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateCastStmt<'a>, b: &nodes::ddlnodes::CreateCastStmt<'b>) -> bool {
+fn equal_create_cast_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateCastStmt<'a>, b: &::nodes::ddlnodes::CreateCastStmt<'b>) -> bool {
     equal_opt_node(a.sourcetype.as_ref(), b.sourcetype.as_ref())
         && equal_opt_node(a.targettype.as_ref(), b.targettype.as_ref())
         && equal_opt_node(a.func.as_ref(), b.func.as_ref())
@@ -1684,13 +1684,13 @@ fn equal_create_cast_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateCastStmt<'a>, b: &n
 }
 
 /// `_equalCreatedbStmt` (equalfuncs.funcs.c).
-fn equal_createdb_stmt<'a, 'b>(a: &nodes::ddlnodes::CreatedbStmt<'a>, b: &nodes::ddlnodes::CreatedbStmt<'b>) -> bool {
+fn equal_createdb_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreatedbStmt<'a>, b: &::nodes::ddlnodes::CreatedbStmt<'b>) -> bool {
     equalstr(a.dbname.as_deref(), b.dbname.as_deref())
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalCreateDomainStmt` (equalfuncs.funcs.c).
-fn equal_create_domain_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateDomainStmt<'a>, b: &nodes::ddlnodes::CreateDomainStmt<'b>) -> bool {
+fn equal_create_domain_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateDomainStmt<'a>, b: &::nodes::ddlnodes::CreateDomainStmt<'b>) -> bool {
     equal_node_list(&a.domainname, &b.domainname)
         && equal_opt_node(a.typeName.as_ref(), b.typeName.as_ref())
         && equal_opt_node(a.collClause.as_ref(), b.collClause.as_ref())
@@ -1698,13 +1698,13 @@ fn equal_create_domain_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateDomainStmt<'a>, b
 }
 
 /// `_equalCreateEnumStmt` (equalfuncs.funcs.c).
-fn equal_create_enum_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateEnumStmt<'a>, b: &nodes::ddlnodes::CreateEnumStmt<'b>) -> bool {
+fn equal_create_enum_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateEnumStmt<'a>, b: &::nodes::ddlnodes::CreateEnumStmt<'b>) -> bool {
     equal_node_list(&a.typeName, &b.typeName)
         && equal_node_list(&a.vals, &b.vals)
 }
 
 /// `_equalCreateEventTrigStmt` (equalfuncs.funcs.c).
-fn equal_create_event_trig_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateEventTrigStmt<'a>, b: &nodes::ddlnodes::CreateEventTrigStmt<'b>) -> bool {
+fn equal_create_event_trig_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateEventTrigStmt<'a>, b: &::nodes::ddlnodes::CreateEventTrigStmt<'b>) -> bool {
     equalstr(a.trigname.as_deref(), b.trigname.as_deref())
         && equalstr(a.eventname.as_deref(), b.eventname.as_deref())
         && equal_node_list(&a.whenclause, &b.whenclause)
@@ -1712,21 +1712,21 @@ fn equal_create_event_trig_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateEventTrigStmt
 }
 
 /// `_equalCreateExtensionStmt` (equalfuncs.funcs.c).
-fn equal_create_extension_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateExtensionStmt<'a>, b: &nodes::ddlnodes::CreateExtensionStmt<'b>) -> bool {
+fn equal_create_extension_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateExtensionStmt<'a>, b: &::nodes::ddlnodes::CreateExtensionStmt<'b>) -> bool {
     equalstr(a.extname.as_deref(), b.extname.as_deref())
         && a.if_not_exists == b.if_not_exists
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalCreateFdwStmt` (equalfuncs.funcs.c).
-fn equal_create_fdw_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateFdwStmt<'a>, b: &nodes::ddlnodes::CreateFdwStmt<'b>) -> bool {
+fn equal_create_fdw_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateFdwStmt<'a>, b: &::nodes::ddlnodes::CreateFdwStmt<'b>) -> bool {
     equalstr(a.fdwname.as_deref(), b.fdwname.as_deref())
         && equal_node_list(&a.func_options, &b.func_options)
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalCreateForeignServerStmt` (equalfuncs.funcs.c).
-fn equal_create_foreign_server_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateForeignServerStmt<'a>, b: &nodes::ddlnodes::CreateForeignServerStmt<'b>) -> bool {
+fn equal_create_foreign_server_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateForeignServerStmt<'a>, b: &::nodes::ddlnodes::CreateForeignServerStmt<'b>) -> bool {
     equalstr(a.servername.as_deref(), b.servername.as_deref())
         && equalstr(a.servertype.as_deref(), b.servertype.as_deref())
         && equalstr(a.version.as_deref(), b.version.as_deref())
@@ -1736,7 +1736,7 @@ fn equal_create_foreign_server_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateForeignSe
 }
 
 /// `_equalCreateForeignTableStmt` (equalfuncs.funcs.c).
-fn equal_create_foreign_table_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateForeignTableStmt<'a>, b: &nodes::ddlnodes::CreateForeignTableStmt<'b>) -> bool {
+fn equal_create_foreign_table_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateForeignTableStmt<'a>, b: &::nodes::ddlnodes::CreateForeignTableStmt<'b>) -> bool {
     equal_opt_node(a.base.relation.as_ref(), b.base.relation.as_ref())
         && equal_node_list(&a.base.tableElts, &b.base.tableElts)
         && equal_node_list(&a.base.inhRelations, &b.base.inhRelations)
@@ -1755,7 +1755,7 @@ fn equal_create_foreign_table_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateForeignTab
 }
 
 /// `_equalCreateFunctionStmt` (equalfuncs.funcs.c).
-fn equal_create_function_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateFunctionStmt<'a>, b: &nodes::ddlnodes::CreateFunctionStmt<'b>) -> bool {
+fn equal_create_function_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateFunctionStmt<'a>, b: &::nodes::ddlnodes::CreateFunctionStmt<'b>) -> bool {
     a.is_procedure == b.is_procedure
         && a.replace == b.replace
         && equal_node_list(&a.funcname, &b.funcname)
@@ -1766,7 +1766,7 @@ fn equal_create_function_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateFunctionStmt<'a
 }
 
 /// `_equalCreateOpClassItem` (equalfuncs.funcs.c).
-fn equal_create_op_class_item<'a, 'b>(a: &nodes::ddlnodes::CreateOpClassItem<'a>, b: &nodes::ddlnodes::CreateOpClassItem<'b>) -> bool {
+fn equal_create_op_class_item<'a, 'b>(a: &::nodes::ddlnodes::CreateOpClassItem<'a>, b: &::nodes::ddlnodes::CreateOpClassItem<'b>) -> bool {
     a.itemtype == b.itemtype
         && equal_opt_node(a.name.as_ref(), b.name.as_ref())
         && a.number == b.number
@@ -1776,7 +1776,7 @@ fn equal_create_op_class_item<'a, 'b>(a: &nodes::ddlnodes::CreateOpClassItem<'a>
 }
 
 /// `_equalCreateOpClassStmt` (equalfuncs.funcs.c).
-fn equal_create_op_class_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateOpClassStmt<'a>, b: &nodes::ddlnodes::CreateOpClassStmt<'b>) -> bool {
+fn equal_create_op_class_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateOpClassStmt<'a>, b: &::nodes::ddlnodes::CreateOpClassStmt<'b>) -> bool {
     equal_node_list(&a.opclassname, &b.opclassname)
         && equal_node_list(&a.opfamilyname, &b.opfamilyname)
         && equalstr(a.amname.as_deref(), b.amname.as_deref())
@@ -1786,13 +1786,13 @@ fn equal_create_op_class_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateOpClassStmt<'a>
 }
 
 /// `_equalCreateOpFamilyStmt` (equalfuncs.funcs.c).
-fn equal_create_op_family_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateOpFamilyStmt<'a>, b: &nodes::ddlnodes::CreateOpFamilyStmt<'b>) -> bool {
+fn equal_create_op_family_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateOpFamilyStmt<'a>, b: &::nodes::ddlnodes::CreateOpFamilyStmt<'b>) -> bool {
     equal_node_list(&a.opfamilyname, &b.opfamilyname)
         && equalstr(a.amname.as_deref(), b.amname.as_deref())
 }
 
 /// `_equalCreatePLangStmt` (equalfuncs.funcs.c).
-fn equal_create_plang_stmt<'a, 'b>(a: &nodes::ddlnodes::CreatePLangStmt<'a>, b: &nodes::ddlnodes::CreatePLangStmt<'b>) -> bool {
+fn equal_create_plang_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreatePLangStmt<'a>, b: &::nodes::ddlnodes::CreatePLangStmt<'b>) -> bool {
     a.replace == b.replace
         && equalstr(a.plname.as_deref(), b.plname.as_deref())
         && equal_node_list(&a.plhandler, &b.plhandler)
@@ -1802,7 +1802,7 @@ fn equal_create_plang_stmt<'a, 'b>(a: &nodes::ddlnodes::CreatePLangStmt<'a>, b: 
 }
 
 /// `_equalCreatePolicyStmt` (equalfuncs.funcs.c).
-fn equal_create_policy_stmt<'a, 'b>(a: &nodes::ddlnodes::CreatePolicyStmt<'a>, b: &nodes::ddlnodes::CreatePolicyStmt<'b>) -> bool {
+fn equal_create_policy_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreatePolicyStmt<'a>, b: &::nodes::ddlnodes::CreatePolicyStmt<'b>) -> bool {
     equalstr(a.policy_name.as_deref(), b.policy_name.as_deref())
         && equal_opt_node(a.table.as_ref(), b.table.as_ref())
         && equalstr(a.cmd_name.as_deref(), b.cmd_name.as_deref())
@@ -1813,7 +1813,7 @@ fn equal_create_policy_stmt<'a, 'b>(a: &nodes::ddlnodes::CreatePolicyStmt<'a>, b
 }
 
 /// `_equalCreatePublicationStmt` (equalfuncs.funcs.c).
-fn equal_create_publication_stmt<'a, 'b>(a: &nodes::ddlnodes::CreatePublicationStmt<'a>, b: &nodes::ddlnodes::CreatePublicationStmt<'b>) -> bool {
+fn equal_create_publication_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreatePublicationStmt<'a>, b: &::nodes::ddlnodes::CreatePublicationStmt<'b>) -> bool {
     equalstr(a.pubname.as_deref(), b.pubname.as_deref())
         && equal_node_list(&a.options, &b.options)
         && equal_node_list(&a.pubobjects, &b.pubobjects)
@@ -1821,20 +1821,20 @@ fn equal_create_publication_stmt<'a, 'b>(a: &nodes::ddlnodes::CreatePublicationS
 }
 
 /// `_equalCreateRangeStmt` (equalfuncs.funcs.c).
-fn equal_create_range_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateRangeStmt<'a>, b: &nodes::ddlnodes::CreateRangeStmt<'b>) -> bool {
+fn equal_create_range_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateRangeStmt<'a>, b: &::nodes::ddlnodes::CreateRangeStmt<'b>) -> bool {
     equal_node_list(&a.typeName, &b.typeName)
         && equal_node_list(&a.params, &b.params)
 }
 
 /// `_equalCreateRoleStmt` (equalfuncs.funcs.c).
-fn equal_create_role_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateRoleStmt<'a>, b: &nodes::ddlnodes::CreateRoleStmt<'b>) -> bool {
+fn equal_create_role_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateRoleStmt<'a>, b: &::nodes::ddlnodes::CreateRoleStmt<'b>) -> bool {
     a.stmt_type == b.stmt_type
         && equalstr(a.role.as_deref(), b.role.as_deref())
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalCreateSchemaStmt` (equalfuncs.funcs.c).
-fn equal_create_schema_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateSchemaStmt<'a>, b: &nodes::ddlnodes::CreateSchemaStmt<'b>) -> bool {
+fn equal_create_schema_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateSchemaStmt<'a>, b: &::nodes::ddlnodes::CreateSchemaStmt<'b>) -> bool {
     equalstr(a.schemaname.as_deref(), b.schemaname.as_deref())
         && equal_opt_node(a.authrole.as_ref(), b.authrole.as_ref())
         && equal_node_list(&a.schemaElts, &b.schemaElts)
@@ -1842,7 +1842,7 @@ fn equal_create_schema_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateSchemaStmt<'a>, b
 }
 
 /// `_equalCreateSeqStmt` (equalfuncs.funcs.c).
-fn equal_create_seq_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateSeqStmt<'a>, b: &nodes::ddlnodes::CreateSeqStmt<'b>) -> bool {
+fn equal_create_seq_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateSeqStmt<'a>, b: &::nodes::ddlnodes::CreateSeqStmt<'b>) -> bool {
     equal_opt_node(a.sequence.as_ref(), b.sequence.as_ref())
         && equal_node_list(&a.options, &b.options)
         && a.ownerId == b.ownerId
@@ -1851,7 +1851,7 @@ fn equal_create_seq_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateSeqStmt<'a>, b: &nod
 }
 
 /// `_equalCreateStatsStmt` (equalfuncs.funcs.c).
-fn equal_create_stats_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateStatsStmt<'a>, b: &nodes::ddlnodes::CreateStatsStmt<'b>) -> bool {
+fn equal_create_stats_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateStatsStmt<'a>, b: &::nodes::ddlnodes::CreateStatsStmt<'b>) -> bool {
     equal_node_list(&a.defnames, &b.defnames)
         && equal_node_list(&a.stat_types, &b.stat_types)
         && equal_node_list(&a.exprs, &b.exprs)
@@ -1862,7 +1862,7 @@ fn equal_create_stats_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateStatsStmt<'a>, b: 
 }
 
 /// `_equalCreateStmt` (equalfuncs.funcs.c).
-fn equal_create_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateStmt<'a>, b: &nodes::ddlnodes::CreateStmt<'b>) -> bool {
+fn equal_create_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateStmt<'a>, b: &::nodes::ddlnodes::CreateStmt<'b>) -> bool {
     equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equal_node_list(&a.tableElts, &b.tableElts)
         && equal_node_list(&a.inhRelations, &b.inhRelations)
@@ -1879,7 +1879,7 @@ fn equal_create_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateStmt<'a>, b: &nodes::ddl
 }
 
 /// `_equalCreateSubscriptionStmt` (equalfuncs.funcs.c).
-fn equal_create_subscription_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateSubscriptionStmt<'a>, b: &nodes::ddlnodes::CreateSubscriptionStmt<'b>) -> bool {
+fn equal_create_subscription_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateSubscriptionStmt<'a>, b: &::nodes::ddlnodes::CreateSubscriptionStmt<'b>) -> bool {
     equalstr(a.subname.as_deref(), b.subname.as_deref())
         && equalstr(a.conninfo.as_deref(), b.conninfo.as_deref())
         && equal_node_list(&a.publication, &b.publication)
@@ -1887,7 +1887,7 @@ fn equal_create_subscription_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateSubscriptio
 }
 
 /// `_equalCreateTableAsStmt` (equalfuncs.funcs.c).
-fn equal_create_table_as_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateTableAsStmt<'a>, b: &nodes::ddlnodes::CreateTableAsStmt<'b>) -> bool {
+fn equal_create_table_as_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateTableAsStmt<'a>, b: &::nodes::ddlnodes::CreateTableAsStmt<'b>) -> bool {
     equal_opt_node(a.query.as_ref(), b.query.as_ref())
         && equal_opt_node(a.into.as_ref(), b.into.as_ref())
         && a.objtype == b.objtype
@@ -1896,7 +1896,7 @@ fn equal_create_table_as_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateTableAsStmt<'a>
 }
 
 /// `_equalCreateTableSpaceStmt` (equalfuncs.funcs.c).
-fn equal_create_table_space_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateTableSpaceStmt<'a>, b: &nodes::ddlnodes::CreateTableSpaceStmt<'b>) -> bool {
+fn equal_create_table_space_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateTableSpaceStmt<'a>, b: &::nodes::ddlnodes::CreateTableSpaceStmt<'b>) -> bool {
     equalstr(a.tablespacename.as_deref(), b.tablespacename.as_deref())
         && equal_opt_node(a.owner.as_ref(), b.owner.as_ref())
         && equalstr(a.location.as_deref(), b.location.as_deref())
@@ -1904,7 +1904,7 @@ fn equal_create_table_space_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateTableSpaceSt
 }
 
 /// `_equalCreateTransformStmt` (equalfuncs.funcs.c).
-fn equal_create_transform_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateTransformStmt<'a>, b: &nodes::ddlnodes::CreateTransformStmt<'b>) -> bool {
+fn equal_create_transform_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateTransformStmt<'a>, b: &::nodes::ddlnodes::CreateTransformStmt<'b>) -> bool {
     a.replace == b.replace
         && equal_opt_node(a.type_name.as_ref(), b.type_name.as_ref())
         && equalstr(a.lang.as_deref(), b.lang.as_deref())
@@ -1913,7 +1913,7 @@ fn equal_create_transform_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateTransformStmt<
 }
 
 /// `_equalCreateTrigStmt` (equalfuncs.funcs.c).
-fn equal_create_trig_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateTrigStmt<'a>, b: &nodes::ddlnodes::CreateTrigStmt<'b>) -> bool {
+fn equal_create_trig_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateTrigStmt<'a>, b: &::nodes::ddlnodes::CreateTrigStmt<'b>) -> bool {
     a.replace == b.replace
         && a.isconstraint == b.isconstraint
         && equalstr(a.trigname.as_deref(), b.trigname.as_deref())
@@ -1932,7 +1932,7 @@ fn equal_create_trig_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateTrigStmt<'a>, b: &n
 }
 
 /// `_equalCreateUserMappingStmt` (equalfuncs.funcs.c).
-fn equal_create_user_mapping_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateUserMappingStmt<'a>, b: &nodes::ddlnodes::CreateUserMappingStmt<'b>) -> bool {
+fn equal_create_user_mapping_stmt<'a, 'b>(a: &::nodes::ddlnodes::CreateUserMappingStmt<'a>, b: &::nodes::ddlnodes::CreateUserMappingStmt<'b>) -> bool {
     equal_opt_node(a.user.as_ref(), b.user.as_ref())
         && equalstr(a.servername.as_deref(), b.servername.as_deref())
         && a.if_not_exists == b.if_not_exists
@@ -1940,44 +1940,44 @@ fn equal_create_user_mapping_stmt<'a, 'b>(a: &nodes::ddlnodes::CreateUserMapping
 }
 
 /// `_equalCallStmt` (equalfuncs.funcs.c).
-fn equal_call_stmt<'a, 'b>(a: &nodes::ddlnodes::CallStmt<'a>, b: &nodes::ddlnodes::CallStmt<'b>) -> bool {
+fn equal_call_stmt<'a, 'b>(a: &::nodes::ddlnodes::CallStmt<'a>, b: &::nodes::ddlnodes::CallStmt<'b>) -> bool {
     equal_opt_node(a.funccall.as_ref(), b.funccall.as_ref())
         && equal_opt_node(a.funcexpr.as_ref(), b.funcexpr.as_ref())
         && equal_node_list(&a.outargs, &b.outargs)
 }
 
 /// `_equalCheckPointStmt` (equalfuncs.funcs.c).
-fn equal_check_point_stmt(_a: &nodes::ddlnodes::CheckPointStmt, _b: &nodes::ddlnodes::CheckPointStmt) -> bool {
+fn equal_check_point_stmt(_a: &::nodes::ddlnodes::CheckPointStmt, _b: &::nodes::ddlnodes::CheckPointStmt) -> bool {
     true
 }
 
 /// `_equalClosePortalStmt` (equalfuncs.funcs.c).
-fn equal_close_portal_stmt<'a, 'b>(a: &nodes::ddlnodes::ClosePortalStmt<'a>, b: &nodes::ddlnodes::ClosePortalStmt<'b>) -> bool {
+fn equal_close_portal_stmt<'a, 'b>(a: &::nodes::ddlnodes::ClosePortalStmt<'a>, b: &::nodes::ddlnodes::ClosePortalStmt<'b>) -> bool {
     equalstr(a.portalname.as_deref(), b.portalname.as_deref())
 }
 
 /// `_equalClusterStmt` (equalfuncs.funcs.c).
-fn equal_cluster_stmt<'a, 'b>(a: &nodes::ddlnodes::ClusterStmt<'a>, b: &nodes::ddlnodes::ClusterStmt<'b>) -> bool {
+fn equal_cluster_stmt<'a, 'b>(a: &::nodes::ddlnodes::ClusterStmt<'a>, b: &::nodes::ddlnodes::ClusterStmt<'b>) -> bool {
     equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equalstr(a.indexname.as_deref(), b.indexname.as_deref())
         && equal_node_list(&a.params, &b.params)
 }
 
 /// `_equalCommentStmt` (equalfuncs.funcs.c).
-fn equal_comment_stmt<'a, 'b>(a: &nodes::ddlnodes::CommentStmt<'a>, b: &nodes::ddlnodes::CommentStmt<'b>) -> bool {
+fn equal_comment_stmt<'a, 'b>(a: &::nodes::ddlnodes::CommentStmt<'a>, b: &::nodes::ddlnodes::CommentStmt<'b>) -> bool {
     a.objtype == b.objtype
         && equal_opt_node(a.object.as_ref(), b.object.as_ref())
         && equalstr(a.comment.as_deref(), b.comment.as_deref())
 }
 
 /// `_equalConstraintsSetStmt` (equalfuncs.funcs.c).
-fn equal_constraints_set_stmt<'a, 'b>(a: &nodes::ddlnodes::ConstraintsSetStmt<'a>, b: &nodes::ddlnodes::ConstraintsSetStmt<'b>) -> bool {
+fn equal_constraints_set_stmt<'a, 'b>(a: &::nodes::ddlnodes::ConstraintsSetStmt<'a>, b: &::nodes::ddlnodes::ConstraintsSetStmt<'b>) -> bool {
     equal_node_list(&a.constraints, &b.constraints)
         && a.deferred == b.deferred
 }
 
 /// `_equalCopyStmt` (equalfuncs.funcs.c).
-fn equal_copy_stmt<'a, 'b>(a: &nodes::ddlnodes::CopyStmt<'a>, b: &nodes::ddlnodes::CopyStmt<'b>) -> bool {
+fn equal_copy_stmt<'a, 'b>(a: &::nodes::ddlnodes::CopyStmt<'a>, b: &::nodes::ddlnodes::CopyStmt<'b>) -> bool {
     equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equal_opt_node(a.query.as_ref(), b.query.as_ref())
         && equal_node_list(&a.attlist, &b.attlist)
@@ -1989,7 +1989,7 @@ fn equal_copy_stmt<'a, 'b>(a: &nodes::ddlnodes::CopyStmt<'a>, b: &nodes::ddlnode
 }
 
 /// `_equalConstraint` (equalfuncs.funcs.c).
-fn equal_constraint<'a, 'b>(a: &nodes::ddlnodes::Constraint<'a>, b: &nodes::ddlnodes::Constraint<'b>) -> bool {
+fn equal_constraint<'a, 'b>(a: &::nodes::ddlnodes::Constraint<'a>, b: &::nodes::ddlnodes::Constraint<'b>) -> bool {
     a.contype == b.contype
         && equalstr(a.conname.as_deref(), b.conname.as_deref())
         && a.deferrable == b.deferrable
@@ -2028,14 +2028,14 @@ fn equal_constraint<'a, 'b>(a: &nodes::ddlnodes::Constraint<'a>, b: &nodes::ddln
 }
 
 /// `_equalDeclareCursorStmt` (equalfuncs.funcs.c).
-fn equal_declare_cursor_stmt<'a, 'b>(a: &nodes::ddlnodes::DeclareCursorStmt<'a>, b: &nodes::ddlnodes::DeclareCursorStmt<'b>) -> bool {
+fn equal_declare_cursor_stmt<'a, 'b>(a: &::nodes::ddlnodes::DeclareCursorStmt<'a>, b: &::nodes::ddlnodes::DeclareCursorStmt<'b>) -> bool {
     equalstr(a.portalname.as_deref(), b.portalname.as_deref())
         && a.options == b.options
         && equal_opt_node(a.query.as_ref(), b.query.as_ref())
 }
 
 /// `_equalDefElem` (equalfuncs.funcs.c).
-fn equal_def_elem<'a, 'b>(a: &nodes::ddlnodes::DefElem<'a>, b: &nodes::ddlnodes::DefElem<'b>) -> bool {
+fn equal_def_elem<'a, 'b>(a: &::nodes::ddlnodes::DefElem<'a>, b: &::nodes::ddlnodes::DefElem<'b>) -> bool {
     equalstr(a.defnamespace.as_deref(), b.defnamespace.as_deref())
         && equalstr(a.defname.as_deref(), b.defname.as_deref())
         && equal_opt_node(a.arg.as_ref(), b.arg.as_ref())
@@ -2044,7 +2044,7 @@ fn equal_def_elem<'a, 'b>(a: &nodes::ddlnodes::DefElem<'a>, b: &nodes::ddlnodes:
 }
 
 /// `_equalDefineStmt` (equalfuncs.funcs.c).
-fn equal_define_stmt<'a, 'b>(a: &nodes::ddlnodes::DefineStmt<'a>, b: &nodes::ddlnodes::DefineStmt<'b>) -> bool {
+fn equal_define_stmt<'a, 'b>(a: &::nodes::ddlnodes::DefineStmt<'a>, b: &::nodes::ddlnodes::DefineStmt<'b>) -> bool {
     a.kind == b.kind
         && a.oldstyle == b.oldstyle
         && equal_node_list(&a.defnames, &b.defnames)
@@ -2055,36 +2055,36 @@ fn equal_define_stmt<'a, 'b>(a: &nodes::ddlnodes::DefineStmt<'a>, b: &nodes::ddl
 }
 
 /// `_equalDiscardStmt` (equalfuncs.funcs.c).
-fn equal_discard_stmt(a: &nodes::ddlnodes::DiscardStmt, b: &nodes::ddlnodes::DiscardStmt) -> bool {
+fn equal_discard_stmt(a: &::nodes::ddlnodes::DiscardStmt, b: &::nodes::ddlnodes::DiscardStmt) -> bool {
     a.target == b.target
 }
 
 /// `_equalDoStmt` (equalfuncs.funcs.c).
-fn equal_do_stmt<'a, 'b>(a: &nodes::ddlnodes::DoStmt<'a>, b: &nodes::ddlnodes::DoStmt<'b>) -> bool {
+fn equal_do_stmt<'a, 'b>(a: &::nodes::ddlnodes::DoStmt<'a>, b: &::nodes::ddlnodes::DoStmt<'b>) -> bool {
     equal_node_list(&a.args, &b.args)
 }
 
 /// `_equalDropdbStmt` (equalfuncs.funcs.c).
-fn equal_dropdb_stmt<'a, 'b>(a: &nodes::ddlnodes::DropdbStmt<'a>, b: &nodes::ddlnodes::DropdbStmt<'b>) -> bool {
+fn equal_dropdb_stmt<'a, 'b>(a: &::nodes::ddlnodes::DropdbStmt<'a>, b: &::nodes::ddlnodes::DropdbStmt<'b>) -> bool {
     equalstr(a.dbname.as_deref(), b.dbname.as_deref())
         && a.missing_ok == b.missing_ok
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalDropOwnedStmt` (equalfuncs.funcs.c).
-fn equal_drop_owned_stmt<'a, 'b>(a: &nodes::ddlnodes::DropOwnedStmt<'a>, b: &nodes::ddlnodes::DropOwnedStmt<'b>) -> bool {
+fn equal_drop_owned_stmt<'a, 'b>(a: &::nodes::ddlnodes::DropOwnedStmt<'a>, b: &::nodes::ddlnodes::DropOwnedStmt<'b>) -> bool {
     equal_node_list(&a.roles, &b.roles)
         && a.behavior == b.behavior
 }
 
 /// `_equalDropRoleStmt` (equalfuncs.funcs.c).
-fn equal_drop_role_stmt<'a, 'b>(a: &nodes::ddlnodes::DropRoleStmt<'a>, b: &nodes::ddlnodes::DropRoleStmt<'b>) -> bool {
+fn equal_drop_role_stmt<'a, 'b>(a: &::nodes::ddlnodes::DropRoleStmt<'a>, b: &::nodes::ddlnodes::DropRoleStmt<'b>) -> bool {
     equal_node_list(&a.roles, &b.roles)
         && a.missing_ok == b.missing_ok
 }
 
 /// `_equalDropStmt` (equalfuncs.funcs.c).
-fn equal_drop_stmt<'a, 'b>(a: &nodes::ddlnodes::DropStmt<'a>, b: &nodes::ddlnodes::DropStmt<'b>) -> bool {
+fn equal_drop_stmt<'a, 'b>(a: &::nodes::ddlnodes::DropStmt<'a>, b: &::nodes::ddlnodes::DropStmt<'b>) -> bool {
     equal_node_list(&a.objects, &b.objects)
         && a.removeType == b.removeType
         && a.behavior == b.behavior
@@ -2093,39 +2093,39 @@ fn equal_drop_stmt<'a, 'b>(a: &nodes::ddlnodes::DropStmt<'a>, b: &nodes::ddlnode
 }
 
 /// `_equalDropSubscriptionStmt` (equalfuncs.funcs.c).
-fn equal_drop_subscription_stmt<'a, 'b>(a: &nodes::ddlnodes::DropSubscriptionStmt<'a>, b: &nodes::ddlnodes::DropSubscriptionStmt<'b>) -> bool {
+fn equal_drop_subscription_stmt<'a, 'b>(a: &::nodes::ddlnodes::DropSubscriptionStmt<'a>, b: &::nodes::ddlnodes::DropSubscriptionStmt<'b>) -> bool {
     equalstr(a.subname.as_deref(), b.subname.as_deref())
         && a.missing_ok == b.missing_ok
         && a.behavior == b.behavior
 }
 
 /// `_equalDropTableSpaceStmt` (equalfuncs.funcs.c).
-fn equal_drop_table_space_stmt<'a, 'b>(a: &nodes::ddlnodes::DropTableSpaceStmt<'a>, b: &nodes::ddlnodes::DropTableSpaceStmt<'b>) -> bool {
+fn equal_drop_table_space_stmt<'a, 'b>(a: &::nodes::ddlnodes::DropTableSpaceStmt<'a>, b: &::nodes::ddlnodes::DropTableSpaceStmt<'b>) -> bool {
     equalstr(a.tablespacename.as_deref(), b.tablespacename.as_deref())
         && a.missing_ok == b.missing_ok
 }
 
 /// `_equalDropUserMappingStmt` (equalfuncs.funcs.c).
-fn equal_drop_user_mapping_stmt<'a, 'b>(a: &nodes::ddlnodes::DropUserMappingStmt<'a>, b: &nodes::ddlnodes::DropUserMappingStmt<'b>) -> bool {
+fn equal_drop_user_mapping_stmt<'a, 'b>(a: &::nodes::ddlnodes::DropUserMappingStmt<'a>, b: &::nodes::ddlnodes::DropUserMappingStmt<'b>) -> bool {
     equal_opt_node(a.user.as_ref(), b.user.as_ref())
         && equalstr(a.servername.as_deref(), b.servername.as_deref())
         && a.missing_ok == b.missing_ok
 }
 
 /// `_equalExecuteStmt` (equalfuncs.funcs.c).
-fn equal_execute_stmt<'a, 'b>(a: &nodes::ddlnodes::ExecuteStmt<'a>, b: &nodes::ddlnodes::ExecuteStmt<'b>) -> bool {
+fn equal_execute_stmt<'a, 'b>(a: &::nodes::ddlnodes::ExecuteStmt<'a>, b: &::nodes::ddlnodes::ExecuteStmt<'b>) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equal_node_list(&a.params, &b.params)
 }
 
 /// `_equalExplainStmt` (equalfuncs.funcs.c).
-fn equal_explain_stmt<'a, 'b>(a: &nodes::ddlnodes::ExplainStmt<'a>, b: &nodes::ddlnodes::ExplainStmt<'b>) -> bool {
+fn equal_explain_stmt<'a, 'b>(a: &::nodes::ddlnodes::ExplainStmt<'a>, b: &::nodes::ddlnodes::ExplainStmt<'b>) -> bool {
     equal_opt_node(a.query.as_ref(), b.query.as_ref())
         && equal_node_list(&a.options, &b.options)
 }
 
 /// `_equalFunctionParameter` (equalfuncs.funcs.c).
-fn equal_function_parameter<'a, 'b>(a: &nodes::ddlnodes::FunctionParameter<'a>, b: &nodes::ddlnodes::FunctionParameter<'b>) -> bool {
+fn equal_function_parameter<'a, 'b>(a: &::nodes::ddlnodes::FunctionParameter<'a>, b: &::nodes::ddlnodes::FunctionParameter<'b>) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equal_opt_node(a.argType.as_ref(), b.argType.as_ref())
         && a.mode == b.mode
@@ -2134,7 +2134,7 @@ fn equal_function_parameter<'a, 'b>(a: &nodes::ddlnodes::FunctionParameter<'a>, 
 }
 
 /// `_equalGrantRoleStmt` (equalfuncs.funcs.c).
-fn equal_grant_role_stmt<'a, 'b>(a: &nodes::ddlnodes::GrantRoleStmt<'a>, b: &nodes::ddlnodes::GrantRoleStmt<'b>) -> bool {
+fn equal_grant_role_stmt<'a, 'b>(a: &::nodes::ddlnodes::GrantRoleStmt<'a>, b: &::nodes::ddlnodes::GrantRoleStmt<'b>) -> bool {
     equal_node_list(&a.granted_roles, &b.granted_roles)
         && equal_node_list(&a.grantee_roles, &b.grantee_roles)
         && a.is_grant == b.is_grant
@@ -2144,7 +2144,7 @@ fn equal_grant_role_stmt<'a, 'b>(a: &nodes::ddlnodes::GrantRoleStmt<'a>, b: &nod
 }
 
 /// `_equalGrantStmt` (equalfuncs.funcs.c).
-fn equal_grant_stmt<'a, 'b>(a: &nodes::ddlnodes::GrantStmt<'a>, b: &nodes::ddlnodes::GrantStmt<'b>) -> bool {
+fn equal_grant_stmt<'a, 'b>(a: &::nodes::ddlnodes::GrantStmt<'a>, b: &::nodes::ddlnodes::GrantStmt<'b>) -> bool {
     a.is_grant == b.is_grant
         && a.targtype == b.targtype
         && a.objtype == b.objtype
@@ -2157,7 +2157,7 @@ fn equal_grant_stmt<'a, 'b>(a: &nodes::ddlnodes::GrantStmt<'a>, b: &nodes::ddlno
 }
 
 /// `_equalImportForeignSchemaStmt` (equalfuncs.funcs.c).
-fn equal_import_foreign_schema_stmt<'a, 'b>(a: &nodes::ddlnodes::ImportForeignSchemaStmt<'a>, b: &nodes::ddlnodes::ImportForeignSchemaStmt<'b>) -> bool {
+fn equal_import_foreign_schema_stmt<'a, 'b>(a: &::nodes::ddlnodes::ImportForeignSchemaStmt<'a>, b: &::nodes::ddlnodes::ImportForeignSchemaStmt<'b>) -> bool {
     equalstr(a.server_name.as_deref(), b.server_name.as_deref())
         && equalstr(a.remote_schema.as_deref(), b.remote_schema.as_deref())
         && equalstr(a.local_schema.as_deref(), b.local_schema.as_deref())
@@ -2167,7 +2167,7 @@ fn equal_import_foreign_schema_stmt<'a, 'b>(a: &nodes::ddlnodes::ImportForeignSc
 }
 
 /// `_equalIndexStmt` (equalfuncs.funcs.c).
-fn equal_index_stmt<'a, 'b>(a: &nodes::ddlnodes::IndexStmt<'a>, b: &nodes::ddlnodes::IndexStmt<'b>) -> bool {
+fn equal_index_stmt<'a, 'b>(a: &::nodes::ddlnodes::IndexStmt<'a>, b: &::nodes::ddlnodes::IndexStmt<'b>) -> bool {
     equalstr(a.idxname.as_deref(), b.idxname.as_deref())
         && equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equalstr(a.accessMethod.as_deref(), b.accessMethod.as_deref())
@@ -2196,7 +2196,7 @@ fn equal_index_stmt<'a, 'b>(a: &nodes::ddlnodes::IndexStmt<'a>, b: &nodes::ddlno
 }
 
 /// `_equalIntoClause` (equalfuncs.funcs.c).
-fn equal_into_clause<'a, 'b>(a: &nodes::ddlnodes::IntoClause<'a>, b: &nodes::ddlnodes::IntoClause<'b>) -> bool {
+fn equal_into_clause<'a, 'b>(a: &::nodes::ddlnodes::IntoClause<'a>, b: &::nodes::ddlnodes::IntoClause<'b>) -> bool {
     equal_opt_node(a.rel.as_ref(), b.rel.as_ref())
         && equal_node_list(&a.colNames, &b.colNames)
         && equalstr(a.accessMethod.as_deref(), b.accessMethod.as_deref())
@@ -2208,30 +2208,30 @@ fn equal_into_clause<'a, 'b>(a: &nodes::ddlnodes::IntoClause<'a>, b: &nodes::ddl
 }
 
 /// `_equalListenStmt` (equalfuncs.funcs.c).
-fn equal_listen_stmt<'a, 'b>(a: &nodes::ddlnodes::ListenStmt<'a>, b: &nodes::ddlnodes::ListenStmt<'b>) -> bool {
+fn equal_listen_stmt<'a, 'b>(a: &::nodes::ddlnodes::ListenStmt<'a>, b: &::nodes::ddlnodes::ListenStmt<'b>) -> bool {
     equalstr(a.conditionname.as_deref(), b.conditionname.as_deref())
 }
 
 /// `_equalLoadStmt` (equalfuncs.funcs.c).
-fn equal_load_stmt<'a, 'b>(a: &nodes::ddlnodes::LoadStmt<'a>, b: &nodes::ddlnodes::LoadStmt<'b>) -> bool {
+fn equal_load_stmt<'a, 'b>(a: &::nodes::ddlnodes::LoadStmt<'a>, b: &::nodes::ddlnodes::LoadStmt<'b>) -> bool {
     equalstr(a.filename.as_deref(), b.filename.as_deref())
 }
 
 /// `_equalLockStmt` (equalfuncs.funcs.c).
-fn equal_lock_stmt<'a, 'b>(a: &nodes::ddlnodes::LockStmt<'a>, b: &nodes::ddlnodes::LockStmt<'b>) -> bool {
+fn equal_lock_stmt<'a, 'b>(a: &::nodes::ddlnodes::LockStmt<'a>, b: &::nodes::ddlnodes::LockStmt<'b>) -> bool {
     equal_node_list(&a.relations, &b.relations)
         && a.mode == b.mode
         && a.nowait == b.nowait
 }
 
 /// `_equalNotifyStmt` (equalfuncs.funcs.c).
-fn equal_notify_stmt<'a, 'b>(a: &nodes::ddlnodes::NotifyStmt<'a>, b: &nodes::ddlnodes::NotifyStmt<'b>) -> bool {
+fn equal_notify_stmt<'a, 'b>(a: &::nodes::ddlnodes::NotifyStmt<'a>, b: &::nodes::ddlnodes::NotifyStmt<'b>) -> bool {
     equalstr(a.conditionname.as_deref(), b.conditionname.as_deref())
         && equalstr(a.payload.as_deref(), b.payload.as_deref())
 }
 
 /// `_equalObjectWithArgs` (equalfuncs.funcs.c).
-fn equal_object_with_args<'a, 'b>(a: &nodes::ddlnodes::ObjectWithArgs<'a>, b: &nodes::ddlnodes::ObjectWithArgs<'b>) -> bool {
+fn equal_object_with_args<'a, 'b>(a: &::nodes::ddlnodes::ObjectWithArgs<'a>, b: &::nodes::ddlnodes::ObjectWithArgs<'b>) -> bool {
     equal_node_list(&a.objname, &b.objname)
         && equal_node_list(&a.objargs, &b.objargs)
         && equal_node_list(&a.objfuncargs, &b.objfuncargs)
@@ -2239,7 +2239,7 @@ fn equal_object_with_args<'a, 'b>(a: &nodes::ddlnodes::ObjectWithArgs<'a>, b: &n
 }
 
 /// `_equalPartitionBoundSpec` (equalfuncs.funcs.c).
-fn equal_partition_bound_spec<'a, 'b>(a: &nodes::ddlnodes::PartitionBoundSpec<'a>, b: &nodes::ddlnodes::PartitionBoundSpec<'b>) -> bool {
+fn equal_partition_bound_spec<'a, 'b>(a: &::nodes::ddlnodes::PartitionBoundSpec<'a>, b: &::nodes::ddlnodes::PartitionBoundSpec<'b>) -> bool {
     a.strategy == b.strategy
         && a.is_default == b.is_default
         && a.modulus == b.modulus
@@ -2251,14 +2251,14 @@ fn equal_partition_bound_spec<'a, 'b>(a: &nodes::ddlnodes::PartitionBoundSpec<'a
 }
 
 /// `_equalPartitionCmd` (equalfuncs.funcs.c).
-fn equal_partition_cmd<'a, 'b>(a: &nodes::ddlnodes::PartitionCmd<'a>, b: &nodes::ddlnodes::PartitionCmd<'b>) -> bool {
+fn equal_partition_cmd<'a, 'b>(a: &::nodes::ddlnodes::PartitionCmd<'a>, b: &::nodes::ddlnodes::PartitionCmd<'b>) -> bool {
     equal_opt_node(a.name.as_ref(), b.name.as_ref())
         && equal_opt_node(a.bound.as_ref(), b.bound.as_ref())
         && a.concurrent == b.concurrent
 }
 
 /// `_equalPartitionElem` (equalfuncs.funcs.c).
-fn equal_partition_elem<'a, 'b>(a: &nodes::ddlnodes::PartitionElem<'a>, b: &nodes::ddlnodes::PartitionElem<'b>) -> bool {
+fn equal_partition_elem<'a, 'b>(a: &::nodes::ddlnodes::PartitionElem<'a>, b: &::nodes::ddlnodes::PartitionElem<'b>) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equal_opt_node(a.expr.as_ref(), b.expr.as_ref())
         && equal_node_list(&a.collation, &b.collation)
@@ -2267,21 +2267,21 @@ fn equal_partition_elem<'a, 'b>(a: &nodes::ddlnodes::PartitionElem<'a>, b: &node
 }
 
 /// `_equalPartitionRangeDatum` (equalfuncs.funcs.c).
-fn equal_partition_range_datum<'a, 'b>(a: &nodes::ddlnodes::PartitionRangeDatum<'a>, b: &nodes::ddlnodes::PartitionRangeDatum<'b>) -> bool {
+fn equal_partition_range_datum<'a, 'b>(a: &::nodes::ddlnodes::PartitionRangeDatum<'a>, b: &::nodes::ddlnodes::PartitionRangeDatum<'b>) -> bool {
     a.kind == b.kind
         && equal_opt_node(a.value.as_ref(), b.value.as_ref())
     // location no-op
 }
 
 /// `_equalPartitionSpec` (equalfuncs.funcs.c).
-fn equal_partition_spec<'a, 'b>(a: &nodes::ddlnodes::PartitionSpec<'a>, b: &nodes::ddlnodes::PartitionSpec<'b>) -> bool {
+fn equal_partition_spec<'a, 'b>(a: &::nodes::ddlnodes::PartitionSpec<'a>, b: &::nodes::ddlnodes::PartitionSpec<'b>) -> bool {
     a.strategy == b.strategy
         && equal_node_list(&a.partParams, &b.partParams)
     // location no-op
 }
 
 /// `_equalPLAssignStmt` (equalfuncs.funcs.c).
-fn equal_pl_assign_stmt<'a, 'b>(a: &nodes::ddlnodes::PLAssignStmt<'a>, b: &nodes::ddlnodes::PLAssignStmt<'b>) -> bool {
+fn equal_pl_assign_stmt<'a, 'b>(a: &::nodes::ddlnodes::PLAssignStmt<'a>, b: &::nodes::ddlnodes::PLAssignStmt<'b>) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equal_node_list(&a.indirection, &b.indirection)
         && a.nnames == b.nnames
@@ -2290,14 +2290,14 @@ fn equal_pl_assign_stmt<'a, 'b>(a: &nodes::ddlnodes::PLAssignStmt<'a>, b: &nodes
 }
 
 /// `_equalPublicationTable` (equalfuncs.funcs.c).
-fn equal_publication_table<'a, 'b>(a: &nodes::ddlnodes::PublicationTable<'a>, b: &nodes::ddlnodes::PublicationTable<'b>) -> bool {
+fn equal_publication_table<'a, 'b>(a: &::nodes::ddlnodes::PublicationTable<'a>, b: &::nodes::ddlnodes::PublicationTable<'b>) -> bool {
     equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equal_opt_node(a.where_clause.as_ref(), b.where_clause.as_ref())
         && equal_node_list(&a.columns, &b.columns)
 }
 
 /// `_equalPublicationObjSpec` (equalfuncs.funcs.c).
-fn equal_publication_obj_spec<'a, 'b>(a: &nodes::ddlnodes::PublicationObjSpec<'a>, b: &nodes::ddlnodes::PublicationObjSpec<'b>) -> bool {
+fn equal_publication_obj_spec<'a, 'b>(a: &::nodes::ddlnodes::PublicationObjSpec<'a>, b: &::nodes::ddlnodes::PublicationObjSpec<'b>) -> bool {
     a.pubobjtype == b.pubobjtype
         && equalstr(a.name.as_deref(), b.name.as_deref())
         && match (a.pubtable.as_deref(), b.pubtable.as_deref()) {
@@ -2309,20 +2309,20 @@ fn equal_publication_obj_spec<'a, 'b>(a: &nodes::ddlnodes::PublicationObjSpec<'a
 }
 
 /// `_equalReassignOwnedStmt` (equalfuncs.funcs.c).
-fn equal_reassign_owned_stmt<'a, 'b>(a: &nodes::ddlnodes::ReassignOwnedStmt<'a>, b: &nodes::ddlnodes::ReassignOwnedStmt<'b>) -> bool {
+fn equal_reassign_owned_stmt<'a, 'b>(a: &::nodes::ddlnodes::ReassignOwnedStmt<'a>, b: &::nodes::ddlnodes::ReassignOwnedStmt<'b>) -> bool {
     equal_node_list(&a.roles, &b.roles)
         && equal_opt_node(a.newrole.as_ref(), b.newrole.as_ref())
 }
 
 /// `_equalRefreshMatViewStmt` (equalfuncs.funcs.c).
-fn equal_refresh_mat_view_stmt<'a, 'b>(a: &nodes::ddlnodes::RefreshMatViewStmt<'a>, b: &nodes::ddlnodes::RefreshMatViewStmt<'b>) -> bool {
+fn equal_refresh_mat_view_stmt<'a, 'b>(a: &::nodes::ddlnodes::RefreshMatViewStmt<'a>, b: &::nodes::ddlnodes::RefreshMatViewStmt<'b>) -> bool {
     a.concurrent == b.concurrent
         && a.skip_data == b.skip_data
         && equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
 }
 
 /// `_equalReindexStmt` (equalfuncs.funcs.c).
-fn equal_reindex_stmt<'a, 'b>(a: &nodes::ddlnodes::ReindexStmt<'a>, b: &nodes::ddlnodes::ReindexStmt<'b>) -> bool {
+fn equal_reindex_stmt<'a, 'b>(a: &::nodes::ddlnodes::ReindexStmt<'a>, b: &::nodes::ddlnodes::ReindexStmt<'b>) -> bool {
     a.kind == b.kind
         && equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equalstr(a.name.as_deref(), b.name.as_deref())
@@ -2330,7 +2330,7 @@ fn equal_reindex_stmt<'a, 'b>(a: &nodes::ddlnodes::ReindexStmt<'a>, b: &nodes::d
 }
 
 /// `_equalRenameStmt` (equalfuncs.funcs.c).
-fn equal_rename_stmt<'a, 'b>(a: &nodes::ddlnodes::RenameStmt<'a>, b: &nodes::ddlnodes::RenameStmt<'b>) -> bool {
+fn equal_rename_stmt<'a, 'b>(a: &::nodes::ddlnodes::RenameStmt<'a>, b: &::nodes::ddlnodes::RenameStmt<'b>) -> bool {
     a.renameType == b.renameType
         && a.relationType == b.relationType
         && equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
@@ -2342,18 +2342,18 @@ fn equal_rename_stmt<'a, 'b>(a: &nodes::ddlnodes::RenameStmt<'a>, b: &nodes::ddl
 }
 
 /// `_equalReplicaIdentityStmt` (equalfuncs.funcs.c).
-fn equal_replica_identity_stmt<'a, 'b>(a: &nodes::ddlnodes::ReplicaIdentityStmt<'a>, b: &nodes::ddlnodes::ReplicaIdentityStmt<'b>) -> bool {
+fn equal_replica_identity_stmt<'a, 'b>(a: &::nodes::ddlnodes::ReplicaIdentityStmt<'a>, b: &::nodes::ddlnodes::ReplicaIdentityStmt<'b>) -> bool {
     a.identity_type == b.identity_type
         && equalstr(a.name.as_deref(), b.name.as_deref())
 }
 
 /// `_equalReturnStmt` (equalfuncs.funcs.c).
-fn equal_return_stmt<'a, 'b>(a: &nodes::ddlnodes::ReturnStmt<'a>, b: &nodes::ddlnodes::ReturnStmt<'b>) -> bool {
+fn equal_return_stmt<'a, 'b>(a: &::nodes::ddlnodes::ReturnStmt<'a>, b: &::nodes::ddlnodes::ReturnStmt<'b>) -> bool {
     equal_opt_node(a.returnval.as_ref(), b.returnval.as_ref())
 }
 
 /// `_equalRuleStmt` (equalfuncs.funcs.c).
-fn equal_rule_stmt<'a, 'b>(a: &nodes::ddlnodes::RuleStmt<'a>, b: &nodes::ddlnodes::RuleStmt<'b>) -> bool {
+fn equal_rule_stmt<'a, 'b>(a: &::nodes::ddlnodes::RuleStmt<'a>, b: &::nodes::ddlnodes::RuleStmt<'b>) -> bool {
     equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equalstr(a.rulename.as_deref(), b.rulename.as_deref())
         && equal_opt_node(a.where_clause.as_ref(), b.where_clause.as_ref())
@@ -2364,7 +2364,7 @@ fn equal_rule_stmt<'a, 'b>(a: &nodes::ddlnodes::RuleStmt<'a>, b: &nodes::ddlnode
 }
 
 /// `_equalSecLabelStmt` (equalfuncs.funcs.c).
-fn equal_sec_label_stmt<'a, 'b>(a: &nodes::ddlnodes::SecLabelStmt<'a>, b: &nodes::ddlnodes::SecLabelStmt<'b>) -> bool {
+fn equal_sec_label_stmt<'a, 'b>(a: &::nodes::ddlnodes::SecLabelStmt<'a>, b: &::nodes::ddlnodes::SecLabelStmt<'b>) -> bool {
     a.objtype == b.objtype
         && equal_opt_node(a.object.as_ref(), b.object.as_ref())
         && equalstr(a.provider.as_deref(), b.provider.as_deref())
@@ -2372,20 +2372,20 @@ fn equal_sec_label_stmt<'a, 'b>(a: &nodes::ddlnodes::SecLabelStmt<'a>, b: &nodes
 }
 
 /// `_equalStatsElem` (equalfuncs.funcs.c).
-fn equal_stats_elem<'a, 'b>(a: &nodes::ddlnodes::StatsElem<'a>, b: &nodes::ddlnodes::StatsElem<'b>) -> bool {
+fn equal_stats_elem<'a, 'b>(a: &::nodes::ddlnodes::StatsElem<'a>, b: &::nodes::ddlnodes::StatsElem<'b>) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equal_opt_node(a.expr.as_ref(), b.expr.as_ref())
 }
 
 /// `_equalTableLikeClause` (equalfuncs.funcs.c).
-fn equal_table_like_clause<'a, 'b>(a: &nodes::ddlnodes::TableLikeClause<'a>, b: &nodes::ddlnodes::TableLikeClause<'b>) -> bool {
+fn equal_table_like_clause<'a, 'b>(a: &::nodes::ddlnodes::TableLikeClause<'a>, b: &::nodes::ddlnodes::TableLikeClause<'b>) -> bool {
     equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && a.options == b.options
         && a.relationOid == b.relationOid
 }
 
 /// `_equalTransactionStmt` (equalfuncs.funcs.c).
-fn equal_transaction_stmt<'a, 'b>(a: &nodes::ddlnodes::TransactionStmt<'a>, b: &nodes::ddlnodes::TransactionStmt<'b>) -> bool {
+fn equal_transaction_stmt<'a, 'b>(a: &::nodes::ddlnodes::TransactionStmt<'a>, b: &::nodes::ddlnodes::TransactionStmt<'b>) -> bool {
     a.kind == b.kind
         && equal_node_list(&a.options, &b.options)
         && equalstr(a.savepoint_name.as_deref(), b.savepoint_name.as_deref())
@@ -2395,33 +2395,33 @@ fn equal_transaction_stmt<'a, 'b>(a: &nodes::ddlnodes::TransactionStmt<'a>, b: &
 }
 
 /// `_equalTruncateStmt` (equalfuncs.funcs.c).
-fn equal_truncate_stmt<'a, 'b>(a: &nodes::ddlnodes::TruncateStmt<'a>, b: &nodes::ddlnodes::TruncateStmt<'b>) -> bool {
+fn equal_truncate_stmt<'a, 'b>(a: &::nodes::ddlnodes::TruncateStmt<'a>, b: &::nodes::ddlnodes::TruncateStmt<'b>) -> bool {
     equal_node_list(&a.relations, &b.relations)
         && a.restart_seqs == b.restart_seqs
         && a.behavior == b.behavior
 }
 
 /// `_equalUnlistenStmt` (equalfuncs.funcs.c).
-fn equal_unlisten_stmt<'a, 'b>(a: &nodes::ddlnodes::UnlistenStmt<'a>, b: &nodes::ddlnodes::UnlistenStmt<'b>) -> bool {
+fn equal_unlisten_stmt<'a, 'b>(a: &::nodes::ddlnodes::UnlistenStmt<'a>, b: &::nodes::ddlnodes::UnlistenStmt<'b>) -> bool {
     equalstr(a.conditionname.as_deref(), b.conditionname.as_deref())
 }
 
 /// `_equalVacuumRelation` (equalfuncs.funcs.c).
-fn equal_vacuum_relation<'a, 'b>(a: &nodes::ddlnodes::VacuumRelation<'a>, b: &nodes::ddlnodes::VacuumRelation<'b>) -> bool {
+fn equal_vacuum_relation<'a, 'b>(a: &::nodes::ddlnodes::VacuumRelation<'a>, b: &::nodes::ddlnodes::VacuumRelation<'b>) -> bool {
     equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && a.oid == b.oid
         && equal_node_list(&a.va_cols, &b.va_cols)
 }
 
 /// `_equalVacuumStmt` (equalfuncs.funcs.c).
-fn equal_vacuum_stmt<'a, 'b>(a: &nodes::ddlnodes::VacuumStmt<'a>, b: &nodes::ddlnodes::VacuumStmt<'b>) -> bool {
+fn equal_vacuum_stmt<'a, 'b>(a: &::nodes::ddlnodes::VacuumStmt<'a>, b: &::nodes::ddlnodes::VacuumStmt<'b>) -> bool {
     equal_node_list(&a.options, &b.options)
         && equal_node_list(&a.rels, &b.rels)
         && a.is_vacuumcmd == b.is_vacuumcmd
 }
 
 /// `_equalVariableSetStmt` (equalfuncs.funcs.c).
-fn equal_variable_set_stmt<'a, 'b>(a: &nodes::ddlnodes::VariableSetStmt<'a>, b: &nodes::ddlnodes::VariableSetStmt<'b>) -> bool {
+fn equal_variable_set_stmt<'a, 'b>(a: &::nodes::ddlnodes::VariableSetStmt<'a>, b: &::nodes::ddlnodes::VariableSetStmt<'b>) -> bool {
     a.kind == b.kind
         && equalstr(a.name.as_deref(), b.name.as_deref())
         && equal_node_list(&a.args, &b.args)
@@ -2431,12 +2431,12 @@ fn equal_variable_set_stmt<'a, 'b>(a: &nodes::ddlnodes::VariableSetStmt<'a>, b: 
 }
 
 /// `_equalVariableShowStmt` (equalfuncs.funcs.c).
-fn equal_variable_show_stmt<'a, 'b>(a: &nodes::ddlnodes::VariableShowStmt<'a>, b: &nodes::ddlnodes::VariableShowStmt<'b>) -> bool {
+fn equal_variable_show_stmt<'a, 'b>(a: &::nodes::ddlnodes::VariableShowStmt<'a>, b: &::nodes::ddlnodes::VariableShowStmt<'b>) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
 }
 
 /// `_equalViewStmt` (equalfuncs.funcs.c).
-fn equal_view_stmt<'a, 'b>(a: &nodes::ddlnodes::ViewStmt<'a>, b: &nodes::ddlnodes::ViewStmt<'b>) -> bool {
+fn equal_view_stmt<'a, 'b>(a: &::nodes::ddlnodes::ViewStmt<'a>, b: &::nodes::ddlnodes::ViewStmt<'b>) -> bool {
     equal_opt_node(a.view.as_ref(), b.view.as_ref())
         && equal_node_list(&a.aliases, &b.aliases)
         && equal_opt_node(a.query.as_ref(), b.query.as_ref())
@@ -2446,7 +2446,7 @@ fn equal_view_stmt<'a, 'b>(a: &nodes::ddlnodes::ViewStmt<'a>, b: &nodes::ddlnode
 }
 
 /// `_equalRangeVar` (equalfuncs.funcs.c).
-fn equal_range_var<'a, 'b>(a: &nodes::rawnodes::RangeVar<'a>, b: &nodes::rawnodes::RangeVar<'b>) -> bool {
+fn equal_range_var<'a, 'b>(a: &::nodes::rawnodes::RangeVar<'a>, b: &::nodes::rawnodes::RangeVar<'b>) -> bool {
     equalstr(a.catalogname.as_deref(), b.catalogname.as_deref())
         && equalstr(a.schemaname.as_deref(), b.schemaname.as_deref())
         && equalstr(a.relname.as_deref(), b.relname.as_deref())
@@ -2457,7 +2457,7 @@ fn equal_range_var<'a, 'b>(a: &nodes::rawnodes::RangeVar<'a>, b: &nodes::rawnode
 }
 
 /// `_equalColumnDef` (equalfuncs.funcs.c).
-fn equal_column_def<'a, 'b>(a: &nodes::rawnodes::ColumnDef<'a>, b: &nodes::rawnodes::ColumnDef<'b>) -> bool {
+fn equal_column_def<'a, 'b>(a: &::nodes::rawnodes::ColumnDef<'a>, b: &::nodes::rawnodes::ColumnDef<'b>) -> bool {
     equalstr(a.colname.as_deref(), b.colname.as_deref())
         && match (a.typeName.as_deref(), b.typeName.as_deref()) {
             (None, None) => true,
@@ -2492,7 +2492,7 @@ fn equal_column_def<'a, 'b>(a: &nodes::rawnodes::ColumnDef<'a>, b: &nodes::rawno
 }
 
 /// `_equalSelectStmt` (equalfuncs.funcs.c).
-fn equal_select_stmt<'a, 'b>(a: &nodes::rawnodes::SelectStmt<'a>, b: &nodes::rawnodes::SelectStmt<'b>) -> bool {
+fn equal_select_stmt<'a, 'b>(a: &::nodes::rawnodes::SelectStmt<'a>, b: &::nodes::rawnodes::SelectStmt<'b>) -> bool {
     equal_node_list(&a.distinctClause, &b.distinctClause)
         && equal_opt_node(a.intoClause.as_ref(), b.intoClause.as_ref())
         && equal_node_list(&a.targetList, &b.targetList)
@@ -2528,7 +2528,7 @@ fn equal_select_stmt<'a, 'b>(a: &nodes::rawnodes::SelectStmt<'a>, b: &nodes::raw
 }
 
 /// `_equalInsertStmt` (equalfuncs.funcs.c).
-fn equal_insert_stmt<'a, 'b>(a: &nodes::rawnodes::InsertStmt<'a>, b: &nodes::rawnodes::InsertStmt<'b>) -> bool {
+fn equal_insert_stmt<'a, 'b>(a: &::nodes::rawnodes::InsertStmt<'a>, b: &::nodes::rawnodes::InsertStmt<'b>) -> bool {
     (match (a.relation.as_deref(), b.relation.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_range_var(x, y),
@@ -2555,7 +2555,7 @@ fn equal_insert_stmt<'a, 'b>(a: &nodes::rawnodes::InsertStmt<'a>, b: &nodes::raw
 }
 
 /// `_equalUpdateStmt` (equalfuncs.funcs.c).
-fn equal_update_stmt<'a, 'b>(a: &nodes::rawnodes::UpdateStmt<'a>, b: &nodes::rawnodes::UpdateStmt<'b>) -> bool {
+fn equal_update_stmt<'a, 'b>(a: &::nodes::rawnodes::UpdateStmt<'a>, b: &::nodes::rawnodes::UpdateStmt<'b>) -> bool {
     (match (a.relation.as_deref(), b.relation.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_range_var(x, y),
@@ -2577,7 +2577,7 @@ fn equal_update_stmt<'a, 'b>(a: &nodes::rawnodes::UpdateStmt<'a>, b: &nodes::raw
 }
 
 /// `_equalDeleteStmt` (equalfuncs.funcs.c).
-fn equal_delete_stmt<'a, 'b>(a: &nodes::rawnodes::DeleteStmt<'a>, b: &nodes::rawnodes::DeleteStmt<'b>) -> bool {
+fn equal_delete_stmt<'a, 'b>(a: &::nodes::rawnodes::DeleteStmt<'a>, b: &::nodes::rawnodes::DeleteStmt<'b>) -> bool {
     (match (a.relation.as_deref(), b.relation.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_range_var(x, y),
@@ -2598,7 +2598,7 @@ fn equal_delete_stmt<'a, 'b>(a: &nodes::rawnodes::DeleteStmt<'a>, b: &nodes::raw
 }
 
 /// `_equalMergeStmt` (equalfuncs.funcs.c).
-fn equal_merge_stmt<'a, 'b>(a: &nodes::rawnodes::MergeStmt<'a>, b: &nodes::rawnodes::MergeStmt<'b>) -> bool {
+fn equal_merge_stmt<'a, 'b>(a: &::nodes::rawnodes::MergeStmt<'a>, b: &::nodes::rawnodes::MergeStmt<'b>) -> bool {
     (match (a.relation.as_deref(), b.relation.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_range_var(x, y),
@@ -2620,7 +2620,7 @@ fn equal_merge_stmt<'a, 'b>(a: &nodes::rawnodes::MergeStmt<'a>, b: &nodes::rawno
 }
 
 /// `_equalMergeWhenClause` (equalfuncs.funcs.c).
-fn equal_merge_when_clause<'a, 'b>(a: &nodes::rawnodes::MergeWhenClause<'a>, b: &nodes::rawnodes::MergeWhenClause<'b>) -> bool {
+fn equal_merge_when_clause<'a, 'b>(a: &::nodes::rawnodes::MergeWhenClause<'a>, b: &::nodes::rawnodes::MergeWhenClause<'b>) -> bool {
     a.matchKind == b.matchKind
         && a.commandType == b.commandType
         && a.r#override == b.r#override
@@ -2630,7 +2630,7 @@ fn equal_merge_when_clause<'a, 'b>(a: &nodes::rawnodes::MergeWhenClause<'a>, b: 
 }
 
 /// `_equalRangeFunction` (equalfuncs.funcs.c).
-fn equal_range_function<'a, 'b>(a: &nodes::rawnodes::RangeFunction<'a>, b: &nodes::rawnodes::RangeFunction<'b>) -> bool {
+fn equal_range_function<'a, 'b>(a: &::nodes::rawnodes::RangeFunction<'a>, b: &::nodes::rawnodes::RangeFunction<'b>) -> bool {
     a.lateral == b.lateral
         && a.ordinality == b.ordinality
         && a.is_rowsfrom == b.is_rowsfrom
@@ -2640,14 +2640,14 @@ fn equal_range_function<'a, 'b>(a: &nodes::rawnodes::RangeFunction<'a>, b: &node
 }
 
 /// `_equalRangeSubselect` (equalfuncs.funcs.c).
-fn equal_range_subselect<'a, 'b>(a: &nodes::rawnodes::RangeSubselect<'a>, b: &nodes::rawnodes::RangeSubselect<'b>) -> bool {
+fn equal_range_subselect<'a, 'b>(a: &::nodes::rawnodes::RangeSubselect<'a>, b: &::nodes::rawnodes::RangeSubselect<'b>) -> bool {
     a.lateral == b.lateral
         && equal_opt_node(a.subquery.as_ref(), b.subquery.as_ref())
         && equal_opt_alias(a.alias.as_deref(), b.alias.as_deref())
 }
 
 /// `_equalRangeTableFunc` (equalfuncs.funcs.c).
-fn equal_range_table_func<'a, 'b>(a: &nodes::rawnodes::RangeTableFunc<'a>, b: &nodes::rawnodes::RangeTableFunc<'b>) -> bool {
+fn equal_range_table_func<'a, 'b>(a: &::nodes::rawnodes::RangeTableFunc<'a>, b: &::nodes::rawnodes::RangeTableFunc<'b>) -> bool {
     a.lateral == b.lateral
         && equal_opt_node(a.docexpr.as_ref(), b.docexpr.as_ref())
         && equal_opt_node(a.rowexpr.as_ref(), b.rowexpr.as_ref())
@@ -2658,7 +2658,7 @@ fn equal_range_table_func<'a, 'b>(a: &nodes::rawnodes::RangeTableFunc<'a>, b: &n
 }
 
 /// `_equalRangeTableFuncCol` (equalfuncs.funcs.c).
-fn equal_range_table_func_col<'a, 'b>(a: &nodes::rawnodes::RangeTableFuncCol<'a>, b: &nodes::rawnodes::RangeTableFuncCol<'b>) -> bool {
+fn equal_range_table_func_col<'a, 'b>(a: &::nodes::rawnodes::RangeTableFuncCol<'a>, b: &::nodes::rawnodes::RangeTableFuncCol<'b>) -> bool {
     equalstr(a.colname.as_deref(), b.colname.as_deref())
         && match (a.typeName.as_deref(), b.typeName.as_deref()) {
             (None, None) => true,
@@ -2673,7 +2673,7 @@ fn equal_range_table_func_col<'a, 'b>(a: &nodes::rawnodes::RangeTableFuncCol<'a>
 }
 
 /// `_equalRangeTableSample` (equalfuncs.funcs.c).
-fn equal_range_table_sample<'a, 'b>(a: &nodes::rawnodes::RangeTableSample<'a>, b: &nodes::rawnodes::RangeTableSample<'b>) -> bool {
+fn equal_range_table_sample<'a, 'b>(a: &::nodes::rawnodes::RangeTableSample<'a>, b: &::nodes::rawnodes::RangeTableSample<'b>) -> bool {
     equal_opt_node(a.relation.as_ref(), b.relation.as_ref())
         && equal_node_list(&a.method, &b.method)
         && equal_node_list(&a.args, &b.args)
@@ -2682,7 +2682,7 @@ fn equal_range_table_sample<'a, 'b>(a: &nodes::rawnodes::RangeTableSample<'a>, b
 }
 
 /// `_equalInferClause` (equalfuncs.funcs.c).
-fn equal_infer_clause<'a, 'b>(a: &nodes::rawnodes::InferClause<'a>, b: &nodes::rawnodes::InferClause<'b>) -> bool {
+fn equal_infer_clause<'a, 'b>(a: &::nodes::rawnodes::InferClause<'a>, b: &::nodes::rawnodes::InferClause<'b>) -> bool {
     equal_node_list(&a.indexElems, &b.indexElems)
         && equal_opt_node(a.whereClause.as_ref(), b.whereClause.as_ref())
         && equalstr(a.conname.as_deref(), b.conname.as_deref())
@@ -2690,7 +2690,7 @@ fn equal_infer_clause<'a, 'b>(a: &nodes::rawnodes::InferClause<'a>, b: &nodes::r
 }
 
 /// `_equalOnConflictClause` (equalfuncs.funcs.c).
-fn equal_on_conflict_clause<'a, 'b>(a: &nodes::rawnodes::OnConflictClause<'a>, b: &nodes::rawnodes::OnConflictClause<'b>) -> bool {
+fn equal_on_conflict_clause<'a, 'b>(a: &::nodes::rawnodes::OnConflictClause<'a>, b: &::nodes::rawnodes::OnConflictClause<'b>) -> bool {
     a.action == b.action
         && match (a.infer.as_deref(), b.infer.as_deref()) {
             (None, None) => true,
@@ -2703,21 +2703,21 @@ fn equal_on_conflict_clause<'a, 'b>(a: &nodes::rawnodes::OnConflictClause<'a>, b
 }
 
 /// `_equalLockingClause` (equalfuncs.funcs.c).
-fn equal_locking_clause<'a, 'b>(a: &nodes::rawnodes::LockingClause<'a>, b: &nodes::rawnodes::LockingClause<'b>) -> bool {
+fn equal_locking_clause<'a, 'b>(a: &::nodes::rawnodes::LockingClause<'a>, b: &::nodes::rawnodes::LockingClause<'b>) -> bool {
     equal_node_list(&a.lockedRels, &b.lockedRels)
         && a.strength == b.strength
         && a.waitPolicy == b.waitPolicy
 }
 
 /// `_equalWithClause` (equalfuncs.funcs.c).
-fn equal_with_clause<'a, 'b>(a: &nodes::rawnodes::WithClause<'a>, b: &nodes::rawnodes::WithClause<'b>) -> bool {
+fn equal_with_clause<'a, 'b>(a: &::nodes::rawnodes::WithClause<'a>, b: &::nodes::rawnodes::WithClause<'b>) -> bool {
     equal_node_list(&a.ctes, &b.ctes)
         && a.recursive == b.recursive
     // location no-op
 }
 
 /// `_equalTableSampleClause` (equalfuncs.funcs.c).
-fn equal_table_sample_clause<'a, 'b>(a: &nodes::nodesamplescan::TableSampleClause<'a>, b: &nodes::nodesamplescan::TableSampleClause<'b>) -> bool {
+fn equal_table_sample_clause<'a, 'b>(a: &::nodes::nodesamplescan::TableSampleClause<'a>, b: &::nodes::nodesamplescan::TableSampleClause<'b>) -> bool {
     a.tsmhandler == b.tsmhandler
         && match (a.args.as_ref(), b.args.as_ref()) {
             (None, None) => true,
@@ -2728,20 +2728,20 @@ fn equal_table_sample_clause<'a, 'b>(a: &nodes::nodesamplescan::TableSampleClaus
 }
 
 /// `_equalReturningClause` (equalfuncs.funcs.c).
-fn equal_returning_clause<'a, 'b>(a: &nodes::rawnodes::ReturningClause<'a>, b: &nodes::rawnodes::ReturningClause<'b>) -> bool {
+fn equal_returning_clause<'a, 'b>(a: &::nodes::rawnodes::ReturningClause<'a>, b: &::nodes::rawnodes::ReturningClause<'b>) -> bool {
     equal_node_list(&a.options, &b.options)
         && equal_node_list(&a.exprs, &b.exprs)
 }
 
 /// `_equalReturningOption` (equalfuncs.funcs.c).
-fn equal_returning_option<'a, 'b>(a: &nodes::rawnodes::ReturningOption<'a>, b: &nodes::rawnodes::ReturningOption<'b>) -> bool {
+fn equal_returning_option<'a, 'b>(a: &::nodes::rawnodes::ReturningOption<'a>, b: &::nodes::rawnodes::ReturningOption<'b>) -> bool {
     a.option == b.option
         && equalstr(a.value.as_deref(), b.value.as_deref())
     // location no-op
 }
 
 /// `_equalJsonBehavior` (equalfuncs.funcs.c) — RAW parse node (`rawexprnodes::JsonBehavior`).
-fn equal_json_behavior_raw<'a, 'b>(a: &nodes::rawexprnodes::JsonBehavior<'a>, b: &nodes::rawexprnodes::JsonBehavior<'b>) -> bool {
+fn equal_json_behavior_raw<'a, 'b>(a: &::nodes::rawexprnodes::JsonBehavior<'a>, b: &::nodes::rawexprnodes::JsonBehavior<'b>) -> bool {
     a.btype == b.btype
         && equal_opt_node(a.expr.as_ref(), b.expr.as_ref())
         && a.coerce == b.coerce
@@ -2749,7 +2749,7 @@ fn equal_json_behavior_raw<'a, 'b>(a: &nodes::rawexprnodes::JsonBehavior<'a>, b:
 }
 
 /// `_equalJsonOutput` (equalfuncs.funcs.c).
-fn equal_json_output<'a, 'b>(a: &nodes::rawexprnodes::JsonOutput<'a>, b: &nodes::rawexprnodes::JsonOutput<'b>) -> bool {
+fn equal_json_output<'a, 'b>(a: &::nodes::rawexprnodes::JsonOutput<'a>, b: &::nodes::rawexprnodes::JsonOutput<'b>) -> bool {
     (match (a.type_name.as_deref(), b.type_name.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_type_name(x, y),
@@ -2759,7 +2759,7 @@ fn equal_json_output<'a, 'b>(a: &nodes::rawexprnodes::JsonOutput<'a>, b: &nodes:
 }
 
 /// `_equalJsonArgument` (equalfuncs.funcs.c).
-fn equal_json_argument<'a, 'b>(a: &nodes::rawexprnodes::JsonArgument<'a>, b: &nodes::rawexprnodes::JsonArgument<'b>) -> bool {
+fn equal_json_argument<'a, 'b>(a: &::nodes::rawexprnodes::JsonArgument<'a>, b: &::nodes::rawexprnodes::JsonArgument<'b>) -> bool {
     (match (a.val.as_deref(), b.val.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_json_value_expr_raw(x, y),
@@ -2769,7 +2769,7 @@ fn equal_json_argument<'a, 'b>(a: &nodes::rawexprnodes::JsonArgument<'a>, b: &no
 }
 
 /// `_equalJsonFuncExpr` (equalfuncs.funcs.c).
-fn equal_json_func_expr<'a, 'b>(a: &nodes::rawexprnodes::JsonFuncExpr<'a>, b: &nodes::rawexprnodes::JsonFuncExpr<'b>) -> bool {
+fn equal_json_func_expr<'a, 'b>(a: &::nodes::rawexprnodes::JsonFuncExpr<'a>, b: &::nodes::rawexprnodes::JsonFuncExpr<'b>) -> bool {
     a.op == b.op
         && equalstr(a.column_name.as_deref(), b.column_name.as_deref())
         && match (a.context_item.as_deref(), b.context_item.as_deref()) {
@@ -2792,14 +2792,14 @@ fn equal_json_func_expr<'a, 'b>(a: &nodes::rawexprnodes::JsonFuncExpr<'a>, b: &n
 }
 
 /// `_equalJsonTablePathSpec` (equalfuncs.funcs.c).
-fn equal_json_table_path_spec<'a, 'b>(a: &nodes::rawexprnodes::JsonTablePathSpec<'a>, b: &nodes::rawexprnodes::JsonTablePathSpec<'b>) -> bool {
+fn equal_json_table_path_spec<'a, 'b>(a: &::nodes::rawexprnodes::JsonTablePathSpec<'a>, b: &::nodes::rawexprnodes::JsonTablePathSpec<'b>) -> bool {
     equal_opt_node(a.string.as_ref(), b.string.as_ref())
         && equalstr(a.name.as_deref(), b.name.as_deref())
     // name_location / location no-op
 }
 
 /// `_equalJsonTable` (equalfuncs.funcs.c).
-fn equal_json_table<'a, 'b>(a: &nodes::rawexprnodes::JsonTable<'a>, b: &nodes::rawexprnodes::JsonTable<'b>) -> bool {
+fn equal_json_table<'a, 'b>(a: &::nodes::rawexprnodes::JsonTable<'a>, b: &::nodes::rawexprnodes::JsonTable<'b>) -> bool {
     (match (a.context_item.as_deref(), b.context_item.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_json_value_expr_raw(x, y),
@@ -2819,7 +2819,7 @@ fn equal_json_table<'a, 'b>(a: &nodes::rawexprnodes::JsonTable<'a>, b: &nodes::r
 }
 
 /// `_equalJsonTableColumn` (equalfuncs.funcs.c).
-fn equal_json_table_column<'a, 'b>(a: &nodes::rawexprnodes::JsonTableColumn<'a>, b: &nodes::rawexprnodes::JsonTableColumn<'b>) -> bool {
+fn equal_json_table_column<'a, 'b>(a: &::nodes::rawexprnodes::JsonTableColumn<'a>, b: &::nodes::rawexprnodes::JsonTableColumn<'b>) -> bool {
     a.coltype == b.coltype
         && equalstr(a.name.as_deref(), b.name.as_deref())
         && match (a.type_name.as_deref(), b.type_name.as_deref()) {
@@ -2842,7 +2842,7 @@ fn equal_json_table_column<'a, 'b>(a: &nodes::rawexprnodes::JsonTableColumn<'a>,
 }
 
 /// `_equalJsonKeyValue` (equalfuncs.funcs.c).
-fn equal_json_key_value<'a, 'b>(a: &nodes::rawexprnodes::JsonKeyValue<'a>, b: &nodes::rawexprnodes::JsonKeyValue<'b>) -> bool {
+fn equal_json_key_value<'a, 'b>(a: &::nodes::rawexprnodes::JsonKeyValue<'a>, b: &::nodes::rawexprnodes::JsonKeyValue<'b>) -> bool {
     equal_opt_node(a.key.as_ref(), b.key.as_ref())
         && match (a.value.as_deref(), b.value.as_deref()) {
             (None, None) => true,
@@ -2852,7 +2852,7 @@ fn equal_json_key_value<'a, 'b>(a: &nodes::rawexprnodes::JsonKeyValue<'a>, b: &n
 }
 
 /// `_equalJsonParseExpr` (equalfuncs.funcs.c).
-fn equal_json_parse_expr<'a, 'b>(a: &nodes::rawexprnodes::JsonParseExpr<'a>, b: &nodes::rawexprnodes::JsonParseExpr<'b>) -> bool {
+fn equal_json_parse_expr<'a, 'b>(a: &::nodes::rawexprnodes::JsonParseExpr<'a>, b: &::nodes::rawexprnodes::JsonParseExpr<'b>) -> bool {
     (match (a.expr.as_deref(), b.expr.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_json_value_expr_raw(x, y),
@@ -2868,7 +2868,7 @@ fn equal_json_parse_expr<'a, 'b>(a: &nodes::rawexprnodes::JsonParseExpr<'a>, b: 
 }
 
 /// `_equalJsonScalarExpr` (equalfuncs.funcs.c).
-fn equal_json_scalar_expr<'a, 'b>(a: &nodes::rawexprnodes::JsonScalarExpr<'a>, b: &nodes::rawexprnodes::JsonScalarExpr<'b>) -> bool {
+fn equal_json_scalar_expr<'a, 'b>(a: &::nodes::rawexprnodes::JsonScalarExpr<'a>, b: &::nodes::rawexprnodes::JsonScalarExpr<'b>) -> bool {
     equal_opt_node(a.expr.as_ref(), b.expr.as_ref())
         && match (a.output.as_deref(), b.output.as_deref()) {
             (None, None) => true,
@@ -2879,7 +2879,7 @@ fn equal_json_scalar_expr<'a, 'b>(a: &nodes::rawexprnodes::JsonScalarExpr<'a>, b
 }
 
 /// `_equalJsonSerializeExpr` (equalfuncs.funcs.c).
-fn equal_json_serialize_expr<'a, 'b>(a: &nodes::rawexprnodes::JsonSerializeExpr<'a>, b: &nodes::rawexprnodes::JsonSerializeExpr<'b>) -> bool {
+fn equal_json_serialize_expr<'a, 'b>(a: &::nodes::rawexprnodes::JsonSerializeExpr<'a>, b: &::nodes::rawexprnodes::JsonSerializeExpr<'b>) -> bool {
     (match (a.expr.as_deref(), b.expr.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_json_value_expr_raw(x, y),
@@ -2894,7 +2894,7 @@ fn equal_json_serialize_expr<'a, 'b>(a: &nodes::rawexprnodes::JsonSerializeExpr<
 }
 
 /// `_equalJsonObjectConstructor` (equalfuncs.funcs.c).
-fn equal_json_object_constructor<'a, 'b>(a: &nodes::rawexprnodes::JsonObjectConstructor<'a>, b: &nodes::rawexprnodes::JsonObjectConstructor<'b>) -> bool {
+fn equal_json_object_constructor<'a, 'b>(a: &::nodes::rawexprnodes::JsonObjectConstructor<'a>, b: &::nodes::rawexprnodes::JsonObjectConstructor<'b>) -> bool {
     equal_node_list(&a.exprs, &b.exprs)
         && match (a.output.as_deref(), b.output.as_deref()) {
             (None, None) => true,
@@ -2907,7 +2907,7 @@ fn equal_json_object_constructor<'a, 'b>(a: &nodes::rawexprnodes::JsonObjectCons
 }
 
 /// `_equalJsonArrayConstructor` (equalfuncs.funcs.c).
-fn equal_json_array_constructor<'a, 'b>(a: &nodes::rawexprnodes::JsonArrayConstructor<'a>, b: &nodes::rawexprnodes::JsonArrayConstructor<'b>) -> bool {
+fn equal_json_array_constructor<'a, 'b>(a: &::nodes::rawexprnodes::JsonArrayConstructor<'a>, b: &::nodes::rawexprnodes::JsonArrayConstructor<'b>) -> bool {
     equal_node_list(&a.exprs, &b.exprs)
         && match (a.output.as_deref(), b.output.as_deref()) {
             (None, None) => true,
@@ -2919,7 +2919,7 @@ fn equal_json_array_constructor<'a, 'b>(a: &nodes::rawexprnodes::JsonArrayConstr
 }
 
 /// `_equalJsonArrayQueryConstructor` (equalfuncs.funcs.c).
-fn equal_json_array_query_constructor<'a, 'b>(a: &nodes::rawexprnodes::JsonArrayQueryConstructor<'a>, b: &nodes::rawexprnodes::JsonArrayQueryConstructor<'b>) -> bool {
+fn equal_json_array_query_constructor<'a, 'b>(a: &::nodes::rawexprnodes::JsonArrayQueryConstructor<'a>, b: &::nodes::rawexprnodes::JsonArrayQueryConstructor<'b>) -> bool {
     equal_opt_node(a.query.as_ref(), b.query.as_ref())
         && match (a.output.as_deref(), b.output.as_deref()) {
             (None, None) => true,
@@ -2932,7 +2932,7 @@ fn equal_json_array_query_constructor<'a, 'b>(a: &nodes::rawexprnodes::JsonArray
 }
 
 /// `_equalJsonAggConstructor` (equalfuncs.funcs.c).
-fn equal_json_agg_constructor<'a, 'b>(a: &nodes::rawexprnodes::JsonAggConstructor<'a>, b: &nodes::rawexprnodes::JsonAggConstructor<'b>) -> bool {
+fn equal_json_agg_constructor<'a, 'b>(a: &::nodes::rawexprnodes::JsonAggConstructor<'a>, b: &::nodes::rawexprnodes::JsonAggConstructor<'b>) -> bool {
     (match (a.output.as_deref(), b.output.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_json_output(x, y),
@@ -2949,7 +2949,7 @@ fn equal_json_agg_constructor<'a, 'b>(a: &nodes::rawexprnodes::JsonAggConstructo
 }
 
 /// `_equalJsonObjectAgg` (equalfuncs.funcs.c).
-fn equal_json_object_agg<'a, 'b>(a: &nodes::rawexprnodes::JsonObjectAgg<'a>, b: &nodes::rawexprnodes::JsonObjectAgg<'b>) -> bool {
+fn equal_json_object_agg<'a, 'b>(a: &::nodes::rawexprnodes::JsonObjectAgg<'a>, b: &::nodes::rawexprnodes::JsonObjectAgg<'b>) -> bool {
     (match (a.constructor.as_deref(), b.constructor.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_json_agg_constructor(x, y),
@@ -2965,7 +2965,7 @@ fn equal_json_object_agg<'a, 'b>(a: &nodes::rawexprnodes::JsonObjectAgg<'a>, b: 
 }
 
 /// `_equalJsonArrayAgg` (equalfuncs.funcs.c).
-fn equal_json_array_agg<'a, 'b>(a: &nodes::rawexprnodes::JsonArrayAgg<'a>, b: &nodes::rawexprnodes::JsonArrayAgg<'b>) -> bool {
+fn equal_json_array_agg<'a, 'b>(a: &::nodes::rawexprnodes::JsonArrayAgg<'a>, b: &::nodes::rawexprnodes::JsonArrayAgg<'b>) -> bool {
     (match (a.constructor.as_deref(), b.constructor.as_deref()) {
         (None, None) => true,
         (Some(x), Some(y)) => equal_json_agg_constructor(x, y),
@@ -2981,8 +2981,8 @@ fn equal_json_array_agg<'a, 'b>(a: &nodes::rawexprnodes::JsonArrayAgg<'a>, b: &n
 
 /// `_equalCreateAmStmt` (equalfuncs.funcs.c).
 fn equal_create_am_stmt<'a, 'b>(
-    a: &nodes::ddlnodes::CreateAmStmt<'a>,
-    b: &nodes::ddlnodes::CreateAmStmt<'b>,
+    a: &::nodes::ddlnodes::CreateAmStmt<'a>,
+    b: &::nodes::ddlnodes::CreateAmStmt<'b>,
 ) -> bool {
     equalstr(a.amname.as_deref(), b.amname.as_deref())
         && equal_node_list(&a.handler_name, &b.handler_name)
@@ -2991,8 +2991,8 @@ fn equal_create_am_stmt<'a, 'b>(
 
 /// `_equalCreateConversionStmt` (equalfuncs.funcs.c).
 fn equal_create_conversion_stmt<'a, 'b>(
-    a: &nodes::ddlnodes::CreateConversionStmt<'a>,
-    b: &nodes::ddlnodes::CreateConversionStmt<'b>,
+    a: &::nodes::ddlnodes::CreateConversionStmt<'a>,
+    b: &::nodes::ddlnodes::CreateConversionStmt<'b>,
 ) -> bool {
     equal_node_list(&a.conversion_name, &b.conversion_name)
         && equalstr(a.for_encoding_name.as_deref(), b.for_encoding_name.as_deref())
@@ -3003,8 +3003,8 @@ fn equal_create_conversion_stmt<'a, 'b>(
 
 /// `_equalDeallocateStmt` (equalfuncs.funcs.c).
 fn equal_deallocate_stmt<'a, 'b>(
-    a: &nodes::ddlnodes::DeallocateStmt<'a>,
-    b: &nodes::ddlnodes::DeallocateStmt<'b>,
+    a: &::nodes::ddlnodes::DeallocateStmt<'a>,
+    b: &::nodes::ddlnodes::DeallocateStmt<'b>,
 ) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && a.isall == b.isall
@@ -3013,8 +3013,8 @@ fn equal_deallocate_stmt<'a, 'b>(
 
 /// `_equalPrepareStmt` (equalfuncs.funcs.c).
 fn equal_prepare_stmt<'a, 'b>(
-    a: &nodes::ddlnodes::PrepareStmt<'a>,
-    b: &nodes::ddlnodes::PrepareStmt<'b>,
+    a: &::nodes::ddlnodes::PrepareStmt<'a>,
+    b: &::nodes::ddlnodes::PrepareStmt<'b>,
 ) -> bool {
     equalstr(a.name.as_deref(), b.name.as_deref())
         && equal_node_list(&a.argtypes, &b.argtypes)
@@ -3023,8 +3023,8 @@ fn equal_prepare_stmt<'a, 'b>(
 
 /// `_equalFetchStmt` (equalfuncs.funcs.c).
 fn equal_fetch_stmt<'a, 'b>(
-    a: &nodes::ddlnodes::FetchStmt<'a>,
-    b: &nodes::ddlnodes::FetchStmt<'b>,
+    a: &::nodes::ddlnodes::FetchStmt<'a>,
+    b: &::nodes::ddlnodes::FetchStmt<'b>,
 ) -> bool {
     a.direction == b.direction
         && a.how_many == b.how_many
@@ -3034,8 +3034,8 @@ fn equal_fetch_stmt<'a, 'b>(
 
 /// `_equalRoleSpec` (equalfuncs.funcs.c).
 fn equal_role_spec<'a, 'b>(
-    a: &nodes::ddlnodes::RoleSpec<'a>,
-    b: &nodes::ddlnodes::RoleSpec<'b>,
+    a: &::nodes::ddlnodes::RoleSpec<'a>,
+    b: &::nodes::ddlnodes::RoleSpec<'b>,
 ) -> bool {
     a.roletype == b.roletype
         && equalstr(a.rolename.as_deref(), b.rolename.as_deref())
@@ -3367,7 +3367,7 @@ pub fn equal_node<'a, 'b>(a: &Node<'a>, b: &Node<'b>) -> bool {
 
 /// Install the central `equal()` seams owned by this unit. Called once at
 /// single-threaded startup from `seams-init`.
-/// Node-opaque flip seam (`nodes::opaque_node::node_equal_seam`): the
+/// Node-opaque flip seam (`::nodes::opaque_node::node_equal_seam`): the
 /// installable per-payload equality comparator that the *gated* generated
 /// `NodePayload::equal_dyn` bodies route through (node-opaque P3 codegen, behind
 /// the off-by-default `node_payload_codegen` feature). The generated `equal_dyn`
@@ -3393,11 +3393,11 @@ pub fn equal_node<'a, 'b>(a: &Node<'a>, b: &Node<'b>) -> bool {
 /// enum. It NEVER fabricates an answer — an un-ported same-tag family panics
 /// exactly as `equal_node`'s tail arm does.
 fn node_equal_seam_adapter(
-    tag: nodes::nodes::NodeTag,
+    tag: ::nodes::nodes::NodeTag,
     a: *const (),
     b: *const (),
 ) -> bool {
-    use nodes::rawnodes;
+    use ::nodes::rawnodes;
     // Helper: reborrow a payload pointer as `&T` (single shared erased lifetime).
     // SAFETY (per call site): the gated caller passes a `__payload_ptr()` to a
     // live `T`-shaped payload selected by `tag`.
@@ -3460,17 +3460,17 @@ fn node_equal_seam_adapter(
         | ntag::T_ReturningExpr => equal_expr(p!(a, Expr), p!(b, Expr)),
 
         // Value leaves (`#[derive(PgNode)]` per-struct comparator).
-        ntag::T_Integer => p!(a, nodes::value::Integer)
-            .equal_node(p!(b, nodes::value::Integer)),
+        ntag::T_Integer => p!(a, ::nodes::value::Integer)
+            .equal_node(p!(b, ::nodes::value::Integer)),
         ntag::T_Float => {
-            p!(a, nodes::value::Float).equal_node(p!(b, nodes::value::Float))
+            p!(a, ::nodes::value::Float).equal_node(p!(b, ::nodes::value::Float))
         }
-        ntag::T_Boolean => p!(a, nodes::value::Boolean)
-            .equal_node(p!(b, nodes::value::Boolean)),
-        ntag::T_String => p!(a, nodes::value::StringNode)
-            .equal_node(p!(b, nodes::value::StringNode)),
-        ntag::T_BitString => p!(a, nodes::value::BitString)
-            .equal_node(p!(b, nodes::value::BitString)),
+        ntag::T_Boolean => p!(a, ::nodes::value::Boolean)
+            .equal_node(p!(b, ::nodes::value::Boolean)),
+        ntag::T_String => p!(a, ::nodes::value::StringNode)
+            .equal_node(p!(b, ::nodes::value::StringNode)),
+        ntag::T_BitString => p!(a, ::nodes::value::BitString)
+            .equal_node(p!(b, ::nodes::value::BitString)),
 
         // Query-tree / parse / rewrite node family — the exact comparators
         // `equal_node`'s switch calls, reached here by typed payload ref.
@@ -3478,8 +3478,8 @@ fn node_equal_seam_adapter(
             equal_target_entry(p!(a, TargetEntry), p!(b, TargetEntry))
         }
         ntag::T_TableFunc => equal_table_func(
-            p!(a, nodes::primnodes::TableFunc),
-            p!(b, nodes::primnodes::TableFunc),
+            p!(a, ::nodes::primnodes::TableFunc),
+            p!(b, ::nodes::primnodes::TableFunc),
         ),
         ntag::T_CTECycleClause => equal_cte_cycle_clause(
             p!(a, rawnodes::CTECycleClause),
@@ -3489,16 +3489,16 @@ fn node_equal_seam_adapter(
             equal_sort_group_clause(p!(a, SortGroupClause), p!(b, SortGroupClause))
         }
         ntag::T_Query => equal_query(
-            p!(a, nodes::copy_query::Query),
-            p!(b, nodes::copy_query::Query),
+            p!(a, ::nodes::copy_query::Query),
+            p!(b, ::nodes::copy_query::Query),
         ),
         ntag::T_RangeTblEntry => equal_range_tbl_entry(
-            p!(a, nodes::parsenodes::RangeTblEntry),
-            p!(b, nodes::parsenodes::RangeTblEntry),
+            p!(a, ::nodes::parsenodes::RangeTblEntry),
+            p!(b, ::nodes::parsenodes::RangeTblEntry),
         ),
         ntag::T_RTEPermissionInfo => equal_rte_permission_info(
-            p!(a, nodes::parsenodes::RTEPermissionInfo),
-            p!(b, nodes::parsenodes::RTEPermissionInfo),
+            p!(a, ::nodes::parsenodes::RTEPermissionInfo),
+            p!(b, ::nodes::parsenodes::RTEPermissionInfo),
         ),
         ntag::T_RangeTblFunction => equal_range_tbl_function(
             p!(a, rawnodes::RangeTblFunction),
@@ -3606,7 +3606,7 @@ pub fn init_seams() {
     // (consumed only under the off-by-default `node_payload_codegen` feature).
     // Installing it now is an additive, verified no-op for the live `Node` enum
     // (nothing in the normal build calls `node_equal_seam`).
-    nodes::opaque_node::install_node_equal_seam(node_equal_seam_adapter);
+    ::nodes::opaque_node::install_node_equal_seam(node_equal_seam_adapter);
     equalfuncs_seams::equal_query::set(equal_query);
     equalfuncs_seams::equal_expr_list::set(equal_expr_list_impl);
     equalfuncs_seams::equal_targetentry_list::set(equal_targetentry_list_impl);
@@ -3628,7 +3628,7 @@ pub fn init_seams() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodes::primnodes::{Const, OpExpr, Var};
+    use ::nodes::primnodes::{Const, OpExpr, Var};
     use types_tuple::heaptuple::Datum;
 
     fn var(varno: i32, varattno: i16) -> Expr {
@@ -3748,7 +3748,7 @@ mod tests {
 
     #[test]
     fn place_holder_var_compares_id_levelsup_nullingrels() {
-        use nodes::primnodes::PlaceHolderVar;
+        use ::nodes::primnodes::PlaceHolderVar;
         let mk = |phid: u32, phlevelsup: u32| {
             Expr::PlaceHolderVar(PlaceHolderVar {
                 phexpr: None,
@@ -3767,7 +3767,7 @@ mod tests {
     fn place_holder_var_ignores_phexpr_and_phrels() {
         // phexpr and phrels are equal_ignore in equalfuncs.c; differing values
         // must not make two PHVs unequal.
-        use nodes::primnodes::PlaceHolderVar;
+        use ::nodes::primnodes::PlaceHolderVar;
         let a = Expr::PlaceHolderVar(PlaceHolderVar {
             phexpr: Some(Box::new(var(1, 1))),
             phrels: Default::default(),

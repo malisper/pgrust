@@ -15,7 +15,7 @@
 
 use mcx::{Mcx, PgString};
 use types_error::PgResult;
-use nodes::funcapi::ReturnSetInfo;
+use ::nodes::funcapi::ReturnSetInfo;
 
 seam_core::seam!(
     /// `fill_hba_view(rsi->setResult, rsi->setDesc)` (hbafuncs.c): read

@@ -497,8 +497,8 @@ pub fn import_pathkey_eclasses(
 mod tests {
     use super::*;
     use types_core::primitive::Cost;
-    use nodes::nodes::NodeTag;
-    use nodes::primnodes::{Const, Var};
+    use ::nodes::nodes::NodeTag;
+    use ::nodes::primnodes::{Const, Var};
     use pathnodes::{
         Path, PathTarget, Relids, SubqueryScanPath, VolatileFunctionStatus,
     };
@@ -534,7 +534,7 @@ mod tests {
 
         // Leaf rel with a reltarget Var(varno=3) and a baserestrictinfo whose
         // clause is a Const.
-        let var_node = sub.alloc_node(nodes::primnodes::Expr::Var(Var {
+        let var_node = sub.alloc_node(::nodes::primnodes::Expr::Var(Var {
             varno: 3,
             varattno: 1,
             vartype: 23,
@@ -544,7 +544,7 @@ mod tests {
             location: -1,
             ..Default::default()
         }));
-        let clause_node = sub.alloc_node(nodes::primnodes::Expr::Const(Const {
+        let clause_node = sub.alloc_node(::nodes::primnodes::Expr::Const(Const {
             consttype: 16,
             consttypmod: -1,
             constcollid: 0,
@@ -652,14 +652,14 @@ mod tests {
         let tgt = rel.reltarget.as_ref().unwrap();
         assert_eq!(tgt.exprs.len(), 1);
         match root.node(tgt.exprs[0]) {
-            nodes::primnodes::Expr::Var(v) => assert_eq!(v.varno, 3),
+            ::nodes::primnodes::Expr::Var(v) => assert_eq!(v.varno, 3),
             _ => panic!("reltarget expr not a Var"),
         }
         assert_eq!(rel.baserestrictinfo.len(), 1);
         let imported_ri = rel.baserestrictinfo[0];
         assert!(imported_ri.index() < root.rinfo_arena.len());
         match root.node(root.rinfo(imported_ri).clause) {
-            nodes::primnodes::Expr::Const(_) => {}
+            ::nodes::primnodes::Expr::Const(_) => {}
             _ => panic!("clause not a Const"),
         }
 

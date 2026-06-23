@@ -35,13 +35,13 @@ use nodeTidrangescan_seams as seam;
 use mcx::vec_with_capacity_in;
 use types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
-use nodes::execnodes::{EStateData, ScanStateData};
-use nodes::executor::TTS_FLAG_EMPTY;
-use nodes::nodetidrangescan::TidRangeScan;
-use nodes::primnodes::Expr;
+use ::nodes::execnodes::{EStateData, ScanStateData};
+use ::nodes::executor::TTS_FLAG_EMPTY;
+use ::nodes::nodetidrangescan::TidRangeScan;
+use ::nodes::primnodes::Expr;
 use types_tuple::heaptuple::{ItemPointerData, SelfItemPointerAttributeNumber};
 use mcx::PgBox;
-use nodes::execexpr::ExprState;
+use ::nodes::execexpr::ExprState;
 use tidrange::{OperandSide, TidExprType, TidOpExpr, TidRangeScanState};
 
 // ===========================================================================
@@ -690,7 +690,7 @@ pub fn ExecEndTidRangeScan<'mcx>(
 /// build the owned [`TidRangeScanState`] and return it by value.
 pub fn ExecInitTidRangeScan<'mcx>(
     node: &TidRangeScan<'mcx>,
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<TidRangeScanState<'mcx>> {

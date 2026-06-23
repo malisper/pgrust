@@ -38,10 +38,10 @@ use rewrite_core::relids as expr_relids;
 use rewrite_core::walkers::checkExprHasSubLink;
 use mcx::Mcx;
 use types_error::{PgError, PgResult};
-use nodes::copy_query::Query;
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::RTEKind;
-use nodes::primnodes::{CoercionForm, Expr, ExprRelids, RowExpr, Var};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::RTEKind;
+use ::nodes::primnodes::{CoercionForm, Expr, ExprRelids, RowExpr, Var};
 use pathnodes::PlannerInfo;
 
 const INVALID_ATTR_NUMBER: i16 = 0;
@@ -139,7 +139,7 @@ fn flatten_join_alias_vars_mutator<'mcx>(
                         .unwrap_or(0)
                 );
 
-                let eref_colnames: &[nodes::nodes::NodePtr<'mcx>] = match rte.eref.as_deref()
+                let eref_colnames: &[::nodes::nodes::NodePtr<'mcx>] = match rte.eref.as_deref()
                 {
                     Some(a) => &a.colnames,
                     None => &[],
@@ -356,7 +356,7 @@ fn is_dropped_alias_var(node: &Node) -> bool {
 fn rt_fetch<'a, 'mcx>(
     query: &'a Query<'mcx>,
     varno: i32,
-) -> PgResult<&'a nodes::parsenodes::RangeTblEntry<'mcx>> {
+) -> PgResult<&'a ::nodes::parsenodes::RangeTblEntry<'mcx>> {
     query
         .rtable
         .get((varno - 1) as usize)

@@ -7,7 +7,7 @@
 //!    drives the F2 allocate-or-evict ([`crate::mgr::BufferManager::buffer_alloc`]),
 //!    starts the buffer I/O, then performs the transfer DIRECTLY through the smgr
 //!    vectored read ([`smgr::smgrreadv`], a landed direct
-//!    dep), verifies the page ([`page::PageIsVerified`]), and
+//!    dep), verifies the page ([`::page::PageIsVerified`]), and
 //!    marks the buffer valid. This is what `ReadBuffer` / `ReadBufferExtended` /
 //!    `ReadBufferWithoutRelcache` / `ReadRecentBuffer` reach — it is fully live
 //!    (smgr is ported), so it unblocks read_stream → heap scan → the table-AM
@@ -715,7 +715,7 @@ impl BufferManager {
         // and raises ERROR (bufmgr.c:7338).
         let verified = self.with_block(buf_id, |bytes| {
             let p = page::PageRef::new(bytes)?;
-            page::PageIsVerified(&p, block_num, types_storage::bufpage::PIV_LOG_LOG)
+            ::page::PageIsVerified(&p, block_num, types_storage::bufpage::PIV_LOG_LOG)
         })?;
         if !verified.0 {
             let path = relpath_str(rlocator, fork_num);
@@ -801,7 +801,7 @@ impl BufferManager {
         let mut verified = (true, false);
         lb::local_buffer_with_page::call(buffer, &mut |bytes: &mut [u8]| {
             let p = page::PageRef::new(bytes)?;
-            verified = page::PageIsVerified(&p, block_num, types_storage::bufpage::PIV_LOG_LOG)?;
+            verified = ::page::PageIsVerified(&p, block_num, types_storage::bufpage::PIV_LOG_LOG)?;
             Ok(())
         })?;
         if !verified.0 {

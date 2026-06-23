@@ -27,7 +27,7 @@ use types_numeric::{
 };
 
 use hyperloglog as hll;
-use nodes::nodeagg::HyperLogLog;
+use ::nodes::nodeagg::HyperLogLog;
 
 use crate::{convert, kernel_transcendental, kernel_var, ops_sql};
 

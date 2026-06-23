@@ -7,4 +7,4 @@
 //! nameable from that layer, so it relocated cleanly. This module re-exports
 //! them unchanged so this crate's executor logic compiles as before.
 
-pub use nodes::nodebitmapor::{BitmapOr, BitmapOrState};
+pub use ::nodes::nodebitmapor::{BitmapOr, BitmapOrState};

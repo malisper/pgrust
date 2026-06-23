@@ -29,7 +29,7 @@
 //! (`PrepareQuery`) reads the resolved types back after analysis.
 //!
 //! The owned model keeps that caller-aliasing semantics safely with a
-//! [`nodes::parsestmt::VarParamState`] carrier — a single
+//! [`::nodes::parsestmt::VarParamState`] carrier — a single
 //! `Rc<RefCell<Vec<Oid>>>` the caller constructs, hands to
 //! `setup_parse_variable_parameters` (stored in `pstate.p_ref_hook_state`), and
 //! reads back afterward; the `Vec`'s length is C's `*numParams`.
@@ -56,13 +56,13 @@ use types_error::error::{
 use types_error::{ErrorLocation, PgError, PgResult, SoftErrorContext, ERROR, NOTICE};
 use types_tuple::Datum;
 
-use nodes::nodes::{ntag, Node};
-use nodes::params::ParamRef;
-use nodes::parsestmt::{ParseExprKind, ParseRefHookState, ParseState, VarParamState};
-use nodes::primnodes::{Const, Expr, Param, SubscriptingRef, PARAM_EXTERN};
-use nodes::rawnodes::{A_Const, A_Indices};
-use nodes::queryenvironment::{EphemeralNamedRelationMetadataData, QueryEnvironment};
-use nodes::copy_query::Query;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::params::ParamRef;
+use ::nodes::parsestmt::{ParseExprKind, ParseRefHookState, ParseState, VarParamState};
+use ::nodes::primnodes::{Const, Expr, Param, SubscriptingRef, PARAM_EXTERN};
+use ::nodes::rawnodes::{A_Const, A_Indices};
+use ::nodes::queryenvironment::{EphemeralNamedRelationMetadataData, QueryEnvironment};
+use ::nodes::copy_query::Query;
 
 use types_tuple::heaptuple::{
     BITOID, BOOLOID, INT2ARRAYOID, INT2VECTOROID, INT4OID, INT8OID, MaxTupleAttributeNumber,
@@ -655,7 +655,7 @@ fn pg_strtoint64_safe(s: &str) -> Option<i64> {
 // parse_param.c (F2: fixed parameters + read-only post-analysis checks)
 // ===========================================================================
 
-pub use nodes::parsestmt::FixedParamState;
+pub use ::nodes::parsestmt::FixedParamState;
 
 /// `setup_parse_fixed_parameters(pstate, paramTypes, numParams)` (parse_param.c)
 /// — set up to process a query referencing a fixed list of parameter types.
@@ -688,19 +688,19 @@ pub fn setup_parse_fixed_parameters(pstate: &mut ParseState<'_>, param_types: &[
 /// `pstate->p_{post_columnref,paramref}_hook = sql_fn_{post_column_ref,param_ref}`
 /// — the function pointer and the ref-hook state are set in lockstep).
 ///
-/// [`SqlFnParseInfo`]: nodes::parsestmt::SqlFnParseInfo
+/// [`SqlFnParseInfo`]: ::nodes::parsestmt::SqlFnParseInfo
 pub fn setup_parse_sql_function(
     pstate: &mut ParseState<'_>,
-    pinfo: nodes::parsestmt::SqlFnParseInfo,
+    pinfo: ::nodes::parsestmt::SqlFnParseInfo,
 ) {
     // pstate->p_pre_columnref_hook = NULL;
     pstate.p_pre_columnref_hook = None;
     // pstate->p_post_columnref_hook = sql_fn_post_column_ref;
     pstate.p_post_columnref_hook =
-        Some(sql_fn_post_column_ref_marker as nodes::parsestmt::PostParseColumnRefHook<'_>);
+        Some(sql_fn_post_column_ref_marker as ::nodes::parsestmt::PostParseColumnRefHook<'_>);
     // pstate->p_paramref_hook = sql_fn_param_ref;
     pstate.p_paramref_hook =
-        Some(sql_fn_param_ref_marker as nodes::parsestmt::ParseParamRefHook<'_>);
+        Some(sql_fn_param_ref_marker as ::nodes::parsestmt::ParseParamRefHook<'_>);
     // /* no need to use p_coerce_param_hook */
     // pstate->p_ref_hook_state = pinfo;
     pstate.p_ref_hook_state = ParseRefHookState::SqlFunction(pinfo);
@@ -711,9 +711,9 @@ pub fn setup_parse_sql_function(
 /// (parse_expr); this value only makes the hook gate fire.
 fn sql_fn_post_column_ref_marker<'mcx>(
     _pstate: &mut ParseState<'mcx>,
-    _cref: &nodes::rawnodes::ColumnRef<'mcx>,
-    var: Option<nodes::nodes::NodePtr<'mcx>>,
-) -> PgResult<Option<nodes::nodes::NodePtr<'mcx>>> {
+    _cref: &::nodes::rawnodes::ColumnRef<'mcx>,
+    var: Option<::nodes::nodes::NodePtr<'mcx>>,
+) -> PgResult<Option<::nodes::nodes::NodePtr<'mcx>>> {
     // Unreachable: the dispatch is by ref-hook arm, not by this function pointer.
     Ok(var)
 }
@@ -722,8 +722,8 @@ fn sql_fn_post_column_ref_marker<'mcx>(
 /// dispatch reads the `SqlFunction` ref-hook arm in `transformParamRef`.
 fn sql_fn_param_ref_marker<'mcx>(
     _pstate: &mut ParseState<'mcx>,
-    _pref: &nodes::rawnodes::ParamRef,
-) -> PgResult<Option<nodes::nodes::NodePtr<'mcx>>> {
+    _pref: &::nodes::rawnodes::ParamRef,
+) -> PgResult<Option<::nodes::nodes::NodePtr<'mcx>>> {
     Ok(None)
 }
 
@@ -1139,12 +1139,12 @@ pub fn init_seams() {
 /// p_coerce_param_hook"), so they return `None` to fall through to normal
 /// coercion — exactly what a NULL `p_coerce_param_hook` does.
 fn coerce_param_hook_seam(
-    pstate: &nodes::parsestmt::ParseState<'_>,
-    param: &nodes::primnodes::Param,
+    pstate: &::nodes::parsestmt::ParseState<'_>,
+    param: &::nodes::primnodes::Param,
     target_type_id: Oid,
     target_type_mod: i32,
     location: i32,
-) -> PgResult<Option<nodes::primnodes::Param>> {
+) -> PgResult<Option<::nodes::primnodes::Param>> {
     match pstate.p_ref_hook_state.as_var_params() {
         Some(parstate) => {
             // VarParamState is an `Rc` carrier; clone it out so the call doesn't

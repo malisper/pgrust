@@ -416,7 +416,7 @@ fn index_tuple_box<'mcx>(
 /// failure). `item` is the tuple bytes; `size` must be the (MAXALIGN'd) item
 /// length the caller wants recorded (we pass `&item[..size]`).
 fn PageAddItem(page: &mut [u8], item: &[u8], size: usize, off: OffsetNumber) -> OffsetNumber {
-    let mut pm = match page::PageMut::new(page) {
+    let mut pm = match ::page::PageMut::new(page) {
         Ok(p) => p,
         Err(_) => return InvalidOffsetNumber,
     };

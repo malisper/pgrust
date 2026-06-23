@@ -7,9 +7,9 @@
 use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::Node;
-use nodes::planstate::PlanStateNode;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::Node;
+use ::nodes::planstate::PlanStateNode;
 
 /// One element of a deparse context `List *` (`deparse_context_for_plan_tree`
 /// result), a ruleutils-private `deparse_namespace`. Carried as the generic C
@@ -123,8 +123,8 @@ seam_core::seam!(
     /// would instead suppress all names — the bug this `Option` prevents.
     pub fn select_rtable_names_for_explain<'mcx>(
         mcx: Mcx<'mcx>,
-        rtable: &PgVec<'mcx, nodes::parsenodes::RangeTblEntry<'mcx>>,
-        rels_used: Option<&nodes::bitmapset::Bitmapset<'mcx>>,
+        rtable: &PgVec<'mcx, ::nodes::parsenodes::RangeTblEntry<'mcx>>,
+        rels_used: Option<&::nodes::bitmapset::Bitmapset<'mcx>>,
     ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
 );
 
@@ -262,7 +262,7 @@ seam_core::seam!(
     /// (`expandRTE`), not the deparse engine.
     pub fn ruleutils_expand_function_rte_colnames<'mcx>(
         mcx: Mcx<'mcx>,
-        rte: &nodes::parsenodes::RangeTblEntry<'mcx>,
+        rte: &::nodes::parsenodes::RangeTblEntry<'mcx>,
     ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>>
 );
 
@@ -316,7 +316,7 @@ seam_core::seam!(
     /// through a seam. Allocated in `mcx`; can `ereport(ERROR)`.
     pub fn get_rte_attribute_name<'mcx>(
         mcx: Mcx<'mcx>,
-        rte: &nodes::parsenodes::RangeTblEntry<'mcx>,
+        rte: &::nodes::parsenodes::RangeTblEntry<'mcx>,
         attnum: i16,
     ) -> PgResult<PgString<'mcx>>
 );
@@ -351,7 +351,7 @@ seam_core::seam!(
     /// takes locks, so it can `ereport(ERROR)`. Owner: rewriteHandler.c.
     pub fn acquire_rewrite_locks<'mcx>(
         mcx: Mcx<'mcx>,
-        query: &mut nodes::copy_query::Query<'mcx>,
+        query: &mut ::nodes::copy_query::Query<'mcx>,
         forexecute: bool,
         forupdatepusheddown: bool,
     ) -> PgResult<()>
@@ -367,7 +367,7 @@ seam_core::seam!(
     /// the query's grouping clauses; can `ereport(ERROR)`. Owner: optimizer var.c.
     pub fn flatten_group_exprs<'mcx>(
         mcx: Mcx<'mcx>,
-        query: &nodes::copy_query::Query<'mcx>,
+        query: &::nodes::copy_query::Query<'mcx>,
         node: &Node<'mcx>,
     ) -> PgResult<PgBox<'mcx, Node<'mcx>>>
 );

@@ -22,7 +22,7 @@
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo};
 use types_tuple::heaptuple::Datum as DatumV;

@@ -20,10 +20,10 @@ use nodes_core::node_walker::{
 };
 use utils_error::ereport;
 use types_error::{PgError, PgResult, ERROR};
-use nodes::copy_query::Query;
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::{RangeTblEntry, RTEKind};
-use nodes::primnodes::{Expr, VarReturningType};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
+use ::nodes::primnodes::{Expr, VarReturningType};
 
 /// `elog(ERROR, ...)` shorthand.
 fn elog_error(msg: &str) -> PgError {

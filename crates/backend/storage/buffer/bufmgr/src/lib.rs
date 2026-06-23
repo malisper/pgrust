@@ -725,9 +725,9 @@ fn smgr_extend_page(
 ) -> types_error::PgResult<()> {
     // PageSetChecksumInplace(page, blkno).
     {
-        let mut p = page::PageMut::new(page)
+        let mut p = ::page::PageMut::new(page)
             .expect("smgr_extend_page: page is BLCKSZ");
-        page::PageSetChecksumInplace(&mut p, blkno);
+        ::page::PageSetChecksumInplace(&mut p, blkno);
     }
     // smgrextend(RelationGetSmgr(rel), forkNum, blkno, page, skipFsync). The
     // page write is keyed by the unbacked RelFileLocatorBackend; the hash AM

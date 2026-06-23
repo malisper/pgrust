@@ -8,7 +8,7 @@
 use stack_depth_seams as stack_depth;
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
 use types_error::{PgError, PgResult};
-use nodes::nodes::{ntag, Node};
+use ::nodes::nodes::{ntag, Node};
 use nodes::{EStateData, ExecProcNodeMtd, PlanStateNode, SubPlanState};
 
 use crate::execProcnode_run_end::exec_proc_node_first;
@@ -260,7 +260,7 @@ pub fn exec_init_node<'mcx>(
                 // to 'mcx for this single init. The node only takes a non-owning
                 // raw `reldata` alias from it, which the home keeps live for the
                 // scan's duration.
-                let env: &mut nodes::queryenvironment::QueryEnvironment<'mcx> =
+                let env: &mut ::nodes::queryenvironment::QueryEnvironment<'mcx> =
                     unsafe { core::mem::transmute(env) };
                 let s = nodeNamedtuplestorescan::ExecInitNamedTuplestoreScan(
                     node, estate, eflags, env,
@@ -483,8 +483,8 @@ fn exec_init_node_finish<'mcx>(
     // here, once the `PlanStateNode::ModifyTable` enum is address-stable, so
     // `EEOP_MERGE_SUPPORT_FUNC` can recover the `ModifyTableState` through
     // `parent.as_modify_table_state()`.
-    if let nodes::PlanStateNode::ModifyTable(m) = &*result {
-        let mut result_rel_ids: Vec<nodes::execnodes::RriId> =
+    if let ::nodes::PlanStateNode::ModifyTable(m) = &*result {
+        let mut result_rel_ids: Vec<::nodes::execnodes::RriId> =
             m.resultRelInfo.iter().copied().collect();
         // An inherited-table MERGE INSERT uses rootResultRelInfo (not in
         // resultRelInfo[]); its ri_projectReturning (built by
@@ -500,8 +500,8 @@ fn exec_init_node_finish<'mcx>(
         // (after this up-front stamp pass) can be stamped with the same
         // ModifyTableState identity. C passes `&mtstate->ps` as the expression
         // parent at every build site, including the lazy partition init.
-        let link = nodes::planstate::PlanStateLink::from_ref(&*result);
-        if let nodes::PlanStateNode::ModifyTable(m) = &mut *result {
+        let link = ::nodes::planstate::PlanStateLink::from_ref(&*result);
+        if let ::nodes::PlanStateNode::ModifyTable(m) = &mut *result {
             m.mt_self_link = Some(link);
         }
         result.stamp_modifytable_expr_parents(estate, &result_rel_ids);
@@ -564,7 +564,7 @@ fn exec_init_node_finish<'mcx>(
             let subplan = &init[i];
             debug_assert!(subplan.args.is_empty());
             let plan_id = subplan.plan_id;
-            let owned: PgBox<'mcx, nodes::primnodes::SubPlan<'mcx>> =
+            let owned: PgBox<'mcx, ::nodes::primnodes::SubPlan<'mcx>> =
                 alloc_in(mcx, subplan.clone_in(mcx)?)?;
             let sstate = nodeSubplan::ExecInitSubPlan(owned, estate)?;
             // The InitPlan SubPlanState is reached lazily by `plan_id` from the
@@ -632,7 +632,7 @@ fn exec_init_node_finish<'mcx>(
 fn stamp_agg_evaltrans_parents<'mcx>(result: &mut PlanStateNode<'mcx>) {
     // Compute the back-link to the boxed node first (Copy; releases the &self
     // borrow) before taking the &mut downcast, mirroring stamp_expr_parents.
-    let link = nodes::planstate::PlanStateLink::from_ref(&*result);
+    let link = ::nodes::planstate::PlanStateLink::from_ref(&*result);
     let Some(agg) =
         result.as_agg_state_mut_typed::<nodeAgg::AggStateData<'mcx>>()
     else {
@@ -666,7 +666,7 @@ fn exec_init_subqueryscan_wholerow_junk<'mcx>(
     result: &mut PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    use nodes::execexpr::{ExprEvalOp, ExprEvalStepData};
+    use ::nodes::execexpr::{ExprEvalOp, ExprEvalStepData};
 
     // C: switch (nodeTag(parent)) { case T_SubqueryScanState: subplan = ...->subplan;
     //                               case T_CteScanState: subplan = ...->cteplanstate; }
@@ -696,7 +696,7 @@ fn exec_init_subqueryscan_wholerow_junk<'mcx>(
     // SubqueryScan that has no whole-row reference.
     let has_wholerow = {
         let head = result.ps_head();
-        let in_state = |st: Option<&nodes::execexpr::ExprState<'mcx>>| {
+        let in_state = |st: Option<&::nodes::execexpr::ExprState<'mcx>>| {
             st.and_then(|s| s.steps.as_ref())
                 .map(|steps| {
                     steps
@@ -731,7 +731,7 @@ fn exec_init_subqueryscan_wholerow_junk<'mcx>(
     // queue while installing (needs &mut result), avoiding overlapping borrows.
     let n_wholerow = {
         let head = result.ps_head();
-        let count = |st: Option<&nodes::execexpr::ExprState<'mcx>>| -> usize {
+        let count = |st: Option<&::nodes::execexpr::ExprState<'mcx>>| -> usize {
             st.and_then(|s| s.steps.as_ref())
                 .map(|steps| {
                     steps
@@ -752,7 +752,7 @@ fn exec_init_subqueryscan_wholerow_junk<'mcx>(
             + count(head.qual.as_deref())
     };
 
-    let mut filters: Vec<PgBox<'mcx, nodes::execnodes::JunkFilter<'mcx>>> =
+    let mut filters: Vec<PgBox<'mcx, ::nodes::execnodes::JunkFilter<'mcx>>> =
         Vec::with_capacity(n_wholerow);
     for _ in 0..n_wholerow {
         let mut tlist = mcx::vec_with_capacity_in(mcx, src_tlist_snap.len())?;
@@ -765,7 +765,7 @@ fn exec_init_subqueryscan_wholerow_junk<'mcx>(
 
     let head = result.ps_head_mut();
     let mut filters = filters.into_iter();
-    let mut install = |st: Option<&mut nodes::execexpr::ExprState<'mcx>>| {
+    let mut install = |st: Option<&mut ::nodes::execexpr::ExprState<'mcx>>| {
         if let Some(steps) = st.and_then(|s| s.steps.as_mut()) {
             for step in steps.iter_mut() {
                 if step.opcode == ExprEvalOp::EEOP_WHOLEROW {

@@ -16,7 +16,7 @@
 
 #![allow(non_snake_case)]
 
-use nodes::execexpr::ExprState;
+use ::nodes::execexpr::ExprState;
 
 seam_core::seam!(
     /// `load_external_function(path, "_PG_jit_provider_init", true, NULL)`

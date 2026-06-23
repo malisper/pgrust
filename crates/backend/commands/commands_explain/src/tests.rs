@@ -2,11 +2,11 @@
 
 use mcx::{alloc_in, MemoryContext, PgBox, PgVec};
 use types_explain::{ExplainFormat, ExplainState};
-use nodes::execnodes::PlanStateData;
-use nodes::nodeindexscan::Plan;
-use nodes::noderesult::{Result as ResultPlan, ResultState};
-use nodes::nodes::Node;
-use nodes::planstate::PlanStateNode;
+use ::nodes::execnodes::PlanStateData;
+use ::nodes::nodeindexscan::Plan;
+use ::nodes::noderesult::{Result as ResultPlan, ResultState};
+use ::nodes::nodes::Node;
+use ::nodes::planstate::PlanStateNode;
 
 fn empty_plan<'mcx>() -> Plan<'mcx> {
     Plan {
@@ -148,10 +148,10 @@ fn nested_result_recursion_text() {
 /// port (`ExplainScanTarget` -> `ExplainTargetRel`) without a live catalog.
 #[test]
 fn target_rel_valuesscan_alias_text() {
-    use nodes::nodevaluesscan::ValuesScan;
-    use nodes::nodeindexscan::Scan;
-    use nodes::parsenodes::{RTEKind, RangeTblEntry};
-    use nodes::rawnodes::Alias;
+    use ::nodes::nodevaluesscan::ValuesScan;
+    use ::nodes::nodeindexscan::Scan;
+    use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
+    use ::nodes::rawnodes::Alias;
 
     let ctx = MemoryContext::new("explain-test");
     let mcx = ctx.mcx();
@@ -222,7 +222,7 @@ fn parse_option_list_costs_off_format_json() {
     options.push(mk_defelem(mcx, "costs", "off"));
     options.push(mk_defelem(mcx, "format", "json"));
 
-    let mut pstate = nodes::parsestmt::ParseState::new(mcx).unwrap();
+    let mut pstate = ::nodes::parsestmt::ParseState::new(mcx).unwrap();
     let mut es = explain_state::NewExplainState(mcx);
     es.costs = true;
 
@@ -237,18 +237,18 @@ fn parse_option_list_costs_off_format_json() {
 fn mk_defelem<'mcx>(mcx: mcx::Mcx<'mcx>, name: &str, val: &str) -> PgBox<'mcx, Node<'mcx>> {
     let arg = alloc_in(
         mcx,
-        Node::mk_string(mcx, nodes::value::StringNode {
+        Node::mk_string(mcx, ::nodes::value::StringNode {
             sval: mcx::PgString::from_str_in(val, mcx).unwrap(),
         }),
     )
     .unwrap();
     alloc_in(
         mcx,
-        Node::mk_def_elem(mcx, nodes::ddlnodes::DefElem {
+        Node::mk_def_elem(mcx, ::nodes::ddlnodes::DefElem {
             defnamespace: None,
             defname: Some(mcx::PgString::from_str_in(name, mcx).unwrap()),
             arg: Some(arg),
-            defaction: nodes::ddlnodes::DEFELEM_UNSPEC,
+            defaction: ::nodes::ddlnodes::DEFELEM_UNSPEC,
             location: -1,
         }),
     )

@@ -41,7 +41,7 @@ use postgres_seams as tcop_postgres;
 
 use mcx::{alloc_in, PgBox};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 use nodes::{
     CustomScan, CustomScanState, EStateData, ParallelContext, ParallelWorkerContext, SlotId,
     TupleSlotKind,
@@ -68,11 +68,11 @@ pub fn init_seams() {}
 /// The `PlanState.ExecProcNode` callback installed by [`ExecInitCustomScan`]:
 /// `castNode(CustomScanState, pstate)` then run [`ExecCustomScan`].
 fn exec_custom_scan_node<'mcx>(
-    pstate: &mut nodes::planstate::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::planstate::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::planstate::PlanStateNode::CustomScan(node) => node,
+        ::nodes::planstate::PlanStateNode::CustomScan(node) => node,
         other => panic!("castNode(CustomScanState, pstate) failed: {other:?}"),
     };
     ExecCustomScan(node, estate)
@@ -157,7 +157,7 @@ pub fn ExecInitCustomScan<'mcx>(
         .unwrap_or(true);
     let tlistvarno: i32 = if !custom_scan_tlist_is_nil || !scan_rel_is_some {
         // scan_tupdesc = ExecTypeFromTL(cscan->custom_scan_tlist);
-        let custom_scan_tlist: &[nodes::primnodes::TargetEntry<'mcx>] =
+        let custom_scan_tlist: &[::nodes::primnodes::TargetEntry<'mcx>] =
             cscan.custom_scan_tlist.as_deref().unwrap_or(&[]);
         let scan_tupdesc = execTuples::exec_type_from_tl::call(mcx, custom_scan_tlist)?;
         // ExecInitScanTupleSlot(estate, &css->ss, scan_tupdesc, slotOps);

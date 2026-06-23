@@ -46,13 +46,13 @@ use types_error::{
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERROR, NOTICE,
 };
-use nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::nodes::{ntag, Node, NodePtr};
 use define_seams::DefElemArg;
-use nodes::value::{Boolean, Float, Integer, StringNode};
-use nodes::ddlnodes::{
+use ::nodes::value::{Boolean, Float, Integer, StringNode};
+use ::nodes::ddlnodes::{
     AlterTSConfigurationStmt, AlterTSDictionaryStmt, DefElem, DEFELEM_UNSPEC,
 };
-use nodes::parsenodes::{OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY};
+use ::nodes::parsenodes::{OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY};
 use types_tuple::heaptuple::{INT4OID, INTERNALOID, TSQUERYOID, VOIDOID};
 
 use tsearchcmds_seams as seam;
@@ -1471,7 +1471,7 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, defel: &DefElem<'mcx>) -> PgResult<Strin
 /// always carries `names` (it is a parsed identifier, never an internal
 /// `typeOid`-only node), so the `format_type_be` fallback branch is unreachable
 /// here and guarded loudly rather than reaching the unported renderer.
-fn type_name_to_string(tn: &nodes::rawnodes::TypeName) -> PgResult<String> {
+fn type_name_to_string(tn: &::nodes::rawnodes::TypeName) -> PgResult<String> {
     let mut out = String::new();
     if !tn.names.is_empty() {
         /* Emit possibly-qualified name as-is. */
@@ -1642,7 +1642,7 @@ fn namespace_create_aclcheck<'mcx>(mcx: Mcx<'mcx>, namespaceoid: Oid) -> PgResul
         let nspname = lsyscache_seams::get_namespace_name::call(mcx, namespaceoid)?;
         aclchk_seams::aclcheck_error::call(
             aclresult,
-            nodes::parsenodes::OBJECT_SCHEMA,
+            ::nodes::parsenodes::OBJECT_SCHEMA,
             nspname.map(|s| s.as_str().to_string()),
         )?;
     }

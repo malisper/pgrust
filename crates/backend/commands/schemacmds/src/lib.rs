@@ -27,9 +27,9 @@ use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_core::init::SECURITY_LOCAL_USERID_CHANGE;
 use types_error::pg_error::{ErrorLocation, PgError};
 use types_error::{PgResult, ERRCODE_DUPLICATE_SCHEMA, ERRCODE_RESERVED_NAME, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE};
-use nodes::nodes::Node;
-use nodes::ddlnodes::CreateSchemaStmt;
-use nodes::parsenodes::{OBJECT_DATABASE, OBJECT_SCHEMA};
+use ::nodes::nodes::Node;
+use ::nodes::ddlnodes::CreateSchemaStmt;
+use ::nodes::parsenodes::{OBJECT_DATABASE, OBJECT_SCHEMA};
 
 use catalog_catalog::IsReservedName;
 use catalog_namespace::get_namespace_oid;
@@ -514,11 +514,11 @@ fn AlterSchemaOwner_internal(
 fn stmt_authrole<'mcx>(
     mcx: Mcx<'mcx>,
     stmt: &CreateSchemaStmt<'_>,
-) -> PgResult<Option<nodes::parsenodes::RoleSpec<'mcx>>> {
+) -> PgResult<Option<::nodes::parsenodes::RoleSpec<'mcx>>> {
     match stmt.authrole.as_ref() {
         None => Ok(None),
         Some(node) => match node.as_rolespec() {
-            Some(rs) => Ok(Some(nodes::parsenodes::RoleSpec {
+            Some(rs) => Ok(Some(::nodes::parsenodes::RoleSpec {
                 roletype: rs.roletype,
                 rolename: match &rs.rolename {
                     Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),

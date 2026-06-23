@@ -10,7 +10,7 @@
 
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::Expr;
+use ::nodes::Expr;
 
 /// The `(typid, typmod, collation)` triple `exprType`/`exprTypmod`/
 /// `exprCollation` report for one expression node.
@@ -122,7 +122,7 @@ seam_core::seam!(
     /// `ScalarArrayOpExpr` element-type hack all live in nodeFuncs. Returns
     /// `InvalidOid` out of range / for an unhandled kind, as C falls through.
     pub fn get_call_expr_argtype_node<'mcx>(
-        call_expr: &nodes::nodes::Node<'mcx>,
+        call_expr: &::nodes::nodes::Node<'mcx>,
         argnum: i32,
     ) -> Oid
 );
@@ -135,7 +135,7 @@ seam_core::seam!(
     /// nodes are not yet modelled by the plan-tree `Node` enum, so this stays
     /// nodeFuncs-owned. Returns `InvalidOid` for an unhandled node kind.
     pub fn expr_input_collation_node<'mcx>(
-        node: &nodes::nodes::Node<'mcx>,
+        node: &::nodes::nodes::Node<'mcx>,
     ) -> Oid
 );
 

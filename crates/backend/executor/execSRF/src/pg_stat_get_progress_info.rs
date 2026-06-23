@@ -17,14 +17,14 @@ use types_core::Oid;
 use datum::varlena::VARHDRSZ;
 use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
 use types_error::{PgError, PgResult};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_pgstat::backend_progress::{ProgressCommandType, PGSTAT_NUM_PROGRESS_PARAM};
 use types_tuple::heaptuple::Datum;
 
 use status as status;
 use status::{LocalBackendStatusFields, LocalPgBackendStatus};
-use funcapi::srf_support::{materialized_srf_putvalues, InitMaterializedSRF};
+use ::funcapi::srf_support::{materialized_srf_putvalues, InitMaterializedSRF};
 
 use crate::register_srf;
 

@@ -99,11 +99,11 @@ fn varchar_support<'mcx>(
     _result_type: types_core::primitive::Oid,
     _result_collid: types_core::primitive::Oid,
     _input_collid: types_core::primitive::Oid,
-    args: &[nodes::primnodes::Expr<'mcx>],
+    args: &[::nodes::primnodes::Expr<'mcx>],
     _funcvariadic: bool,
     _estimate: bool,
-) -> PgResult<Option<nodes::primnodes::Expr<'mcx>>> {
-    use nodes::primnodes::Expr;
+) -> PgResult<Option<::nodes::primnodes::Expr<'mcx>>> {
+    use ::nodes::primnodes::Expr;
 
     // FuncExpr *expr = req->fcall; Assert(list_length(expr->args) >= 2);
     debug_assert!(args.len() >= 2);

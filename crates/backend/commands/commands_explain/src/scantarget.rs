@@ -18,8 +18,8 @@ use types_core::primitive::Index;
 use types_core::Oid;
 use types_error::{PgError, PgResult};
 use types_explain::{ExplainFormat, ExplainState};
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::{RTEKind, RangeTblEntry};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
 use types_scan::sdir::{ScanDirection, BackwardScanDirection, ForwardScanDirection};
 
 use explain_format as fmt;
@@ -219,7 +219,7 @@ pub fn ExplainTargetRel<'mcx>(
             //   TableFuncScan plan.
             let tfs = plan_node.expect_tablefuncscan();
             objectname = Some(mcx::PgString::from_str_in(
-                if tfs.tablefunc.functype == nodes::primnodes::TFT_XMLTABLE {
+                if tfs.tablefunc.functype == ::nodes::primnodes::TFT_XMLTABLE {
                     "xmltable"
                 } else {
                     "json_table"

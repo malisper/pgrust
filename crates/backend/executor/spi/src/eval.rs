@@ -26,10 +26,10 @@
 use mcx::{MemoryContext, Mcx, PgVec};
 use types_core::Oid;
 use types_error::{PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::CmdType;
-use nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
-use nodes::parsestmt::{CachedPlanHandle, PlpgsqlExprParseState};
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::CmdType;
+use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
+use ::nodes::parsestmt::{CachedPlanHandle, PlpgsqlExprParseState};
 use parsenodes::RawParseMode;
 use types_resowner::ResourceOwner;
 use types_tuple::Datum as RichDatum;
@@ -312,8 +312,8 @@ fn prepare_expr_plan<'mcx>(
         &[],   // param_types
         0,     // num_params
         true,  // has_parser_setup
-        nodes::copy_query::CURSOR_OPT_PARALLEL_OK
-            | nodes::portalcmds::CURSOR_OPT_GENERIC_PLAN,
+        ::nodes::copy_query::CURSOR_OPT_PARALLEL_OK
+            | ::nodes::portalcmds::CURSOR_OPT_GENERIC_PLAN,
         false, // fixed_result
     )?;
 

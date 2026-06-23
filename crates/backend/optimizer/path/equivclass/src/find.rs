@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_core::primitive::Oid;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{
     EcId, EmId, EquivalenceMember, ForeignKeyOptInfo, PlannerInfo,
     RelId, Relids,

@@ -59,10 +59,10 @@ use sort_storage_seams as tuplestore;
 
 use mcx::PgBox;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::execnodes::RecursiveUnionSharedState;
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
-use nodes::noderecursiveunion::{RecursiveUnion, RecursiveUnionStateData};
-use nodes::nodes::Node;
+use ::nodes::execnodes::RecursiveUnionSharedState;
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::nodes::noderecursiveunion::{RecursiveUnion, RecursiveUnionStateData};
+use ::nodes::nodes::Node;
 use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 
 /// Install this crate's seam implementations. nodeRecursiveunion owns no

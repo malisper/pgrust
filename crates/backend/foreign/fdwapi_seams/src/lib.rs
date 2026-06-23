@@ -8,7 +8,7 @@
 //! pointers cannot cross the owned-tree boundary), so the fmgr dispatch plus
 //! the `IsA` node check collapse into this one seam, owned by the FDW-provider
 //! layer. It returns the trimmed callback-presence table
-//! ([`nodes::FdwRoutine`]); `None` is the C "did not return an
+//! ([`::nodes::FdwRoutine`]); `None` is the C "did not return an
 //! FdwRoutine" failure (`routine == NULL || !IsA(...)`), which the caller turns
 //! into its `elog(ERROR, ...)`.
 //!
@@ -17,7 +17,7 @@
 
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::FdwRoutine;
+use ::nodes::FdwRoutine;
 
 seam_core::seam!(
     /// `OidFunctionCall0(fdwhandler)` + `IsA(routine, FdwRoutine)` validation

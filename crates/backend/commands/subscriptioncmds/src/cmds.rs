@@ -55,13 +55,13 @@ use types_catalog::pg_subscription::{
     LOGICALREP_TWOPHASE_STATE_PENDING, SUBREL_STATE_INIT, SUBREL_STATE_READY,
 };
 use types_core::primitive::{InvalidOid, Oid};
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     AlterSubscriptionStmt, AlterSubscriptionType, CreateSubscriptionStmt,
     DropSubscriptionStmt,
 };
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::ObjectType;
-use nodes::parsestmt::ParseState;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::ObjectType;
+use ::nodes::parsestmt::ParseState;
 use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
 use types_tuple::heaptuple::{Datum, FormedTuple};
 use types_tuple::heaptuple::TEXTOID;
@@ -192,7 +192,7 @@ fn defel_arg(arg: Option<&Node<'_>>) -> PgResult<Option<DefElemArg>> {
 }
 
 /// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case.
-fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+fn defel_type_name_to_string(tn: &::nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
     if tn.names.is_empty() {
         return Err(ereport(ERROR)
             .errmsg_internal("DefElem TypeName carries no name")
@@ -223,7 +223,7 @@ fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<Str
 }
 
 /// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case.
-fn defel_name_list_to_string(names: &[nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
+fn defel_name_list_to_string(names: &[::nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
     let mut out = String::new();
     for (i, name) in names.iter().enumerate() {
         if i != 0 {

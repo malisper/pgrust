@@ -9,7 +9,7 @@
 
 use super::*;
 
-use nodes::primnodes::{Const, CurrentOfExpr, OpExpr, Var};
+use ::nodes::primnodes::{Const, CurrentOfExpr, OpExpr, Var};
 use pathnodes::{Bitmapset, RelOptInfo};
 use types_tuple::heaptuple::Datum;
 

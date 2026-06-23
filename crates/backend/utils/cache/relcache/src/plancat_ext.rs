@@ -230,7 +230,7 @@ fn infer_collation_opclass_match(
     elem: &px::InferenceElemInfo,
     idx_exprs: &[pathnodes::NodeId],
 ) -> PgResult<bool> {
-    use nodes::primnodes::Expr;
+    use ::nodes::primnodes::Expr;
 
     // No collation/opclass specified -> no exact match needed.
     if elem.infercollid == types_core::InvalidOid && elem.inferopclass == types_core::InvalidOid {

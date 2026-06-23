@@ -34,10 +34,10 @@ use types_acl::acl::{
 use types_core::primitive::OidIsValid;
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERROR};
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
-use nodes::primnodes::{BoolExprType, Expr};
-use nodes::rawnodes::{WCOKind, WithCheckOption};
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+use ::nodes::primnodes::{BoolExprType, Expr};
+use ::nodes::rawnodes::{WCOKind, WithCheckOption};
 
 use nodes_core::makefuncs::{make_bool_const, make_bool_expr};
 use equalfuncs::equal_node;

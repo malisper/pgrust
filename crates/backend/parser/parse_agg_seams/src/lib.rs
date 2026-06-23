@@ -9,10 +9,10 @@
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::nodes::Node;
-use nodes::parsestmt::ParseState;
-use nodes::primnodes::{Aggref, Expr};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::ParseState;
+use ::nodes::primnodes::{Aggref, Expr};
 
 seam_core::seam!(
     /// `transformAggregateCall(pstate, agg, args, aggorder, agg_distinct)`
@@ -26,12 +26,12 @@ seam_core::seam!(
     /// finished `Aggref`. `Err` carries the aggregate-placement `ereport(ERROR)`
     /// surface.
     pub fn transform_aggregate_call<'mcx>(
-        pstate: &mut nodes::parsestmt::ParseState<'mcx>,
-        agg: nodes::primnodes::Aggref<'static>,
-        args: std::vec::Vec<nodes::primnodes::Expr<'static>>,
-        aggorder: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
+        pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
+        agg: ::nodes::primnodes::Aggref<'static>,
+        args: std::vec::Vec<::nodes::primnodes::Expr<'static>>,
+        aggorder: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
         agg_distinct: bool,
-    ) -> types_error::PgResult<nodes::primnodes::Aggref<'static>>
+    ) -> types_error::PgResult<::nodes::primnodes::Aggref<'static>>
 );
 
 seam_core::seam!(
@@ -44,10 +44,10 @@ seam_core::seam!(
     /// `WindowFunc`. `Err` carries the window-placement `ereport(ERROR)`
     /// surface.
     pub fn transform_window_func_call<'mcx>(
-        pstate: &mut nodes::parsestmt::ParseState<'mcx>,
-        wfunc: nodes::primnodes::WindowFunc<'static>,
-        windef: nodes::rawnodes::WindowDef<'mcx>,
-    ) -> types_error::PgResult<nodes::primnodes::WindowFunc<'static>>
+        pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
+        wfunc: ::nodes::primnodes::WindowFunc<'static>,
+        windef: ::nodes::rawnodes::WindowDef<'mcx>,
+    ) -> types_error::PgResult<::nodes::primnodes::WindowFunc<'static>>
 );
 
 seam_core::seam!(

@@ -23,11 +23,11 @@ use mcx::Mcx;
 use types_core::instrument::{instr_time, BufferUsage};
 use types_error::{PgError, PgResult};
 use types_explain::{ExplainFormat, ExplainState};
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::{ntag, Node};
-use nodes::params::ParamListInfo;
-use nodes::parsestmt::IntoClause;
-use nodes::queryenvironment::QueryEnvironment;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::params::ParamListInfo;
+use ::nodes::parsestmt::IntoClause;
+use ::nodes::queryenvironment::QueryEnvironment;
 use types_scan::sdir::{ForwardScanDirection, NoMovementScanDirection};
 
 use createas_seams as createas_s;
@@ -409,7 +409,7 @@ fn explain_one_plan<'mcx>(
         // `create_into_rel_dest_receiver`, this is what lets `intorel_startup`
         // recover `into` when the EXPLAIN executor drives the run itself — without
         // it, the receiver is unbound and the startup callback errors.
-        Some(into) => nodes::parsestmt::DestReceiverHandle(
+        Some(into) => ::nodes::parsestmt::DestReceiverHandle(
             createas_s::create_into_rel_dest_receiver_setup::call(es.str.allocator(), into)?,
         ),
         None if serialize => {
@@ -422,7 +422,7 @@ fn explain_one_plan<'mcx>(
                 };
             printtup_s::create_explain_serialize_dest_receiver::call(fmt, es.timing, es.buffers)
         }
-        None => nodes::parsestmt::DestReceiverHandle::NULL,
+        None => ::nodes::parsestmt::DestReceiverHandle::NULL,
     };
 
     // EXEC flags: es->analyze ? 0 : EXEC_FLAG_EXPLAIN_ONLY; |= EXPLAIN_GENERIC;
@@ -578,7 +578,7 @@ fn elapsed_time(starttime: &mut instr_time) -> f64 {
 /// `report_triggers`.
 fn explain_print_triggers<'es>(
     es: &mut ExplainState<'es>,
-    query_desc: &mut nodes::querydesc::QueryDesc,
+    query_desc: &mut ::nodes::querydesc::QueryDesc,
 ) -> PgResult<()> {
     // resultrels = queryDesc->estate->es_opened_result_relations;
     // routerels  = queryDesc->estate->es_tuple_routing_result_relations;
@@ -688,7 +688,7 @@ fn explain_print_serialize(
 /// formatting-lifetime `es` (`'es`). Applies the invisible-Gather skip.
 fn explain_print_plan<'es>(
     es: &mut ExplainState<'es>,
-    query_desc: &mut nodes::querydesc::QueryDesc,
+    query_desc: &mut ::nodes::querydesc::QueryDesc,
 ) -> PgResult<()> {
     let es_mcx: Mcx<'es> = es.str.allocator();
     query_desc.work.with(|w| {

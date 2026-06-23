@@ -59,7 +59,7 @@ use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, ERRCODE_UNDEFINED_OBJECT,
 };
-use nodes::parsenodes::DropBehavior;
+use ::nodes::parsenodes::DropBehavior;
 use rel::{Relation, RelationData};
 use types_storage::lock::{AccessExclusiveLock, AccessShareLock, RowExclusiveLock, LOCKMODE};
 use types_tuple::heaptuple::Datum;

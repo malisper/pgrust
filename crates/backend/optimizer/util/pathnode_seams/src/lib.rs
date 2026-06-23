@@ -823,7 +823,7 @@ pub enum PathKeysComparison {
 }
 
 /// `BMS_Comparison` (bitmapset.h) — `bms_subset_compare` result.
-pub use nodes::bitmapset::BMS_Comparison;
+pub use ::nodes::bitmapset::BMS_Comparison;
 
 /* --- miscadmin.c --------------------------------------------------------- */
 seam_core::seam!(

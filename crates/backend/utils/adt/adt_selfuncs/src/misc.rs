@@ -5,7 +5,7 @@
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{NodeId, PlannerInfo, RelId, Relids};
 use types_selfuncs::{ConstNodeInfo, EstimationInfo, VariableStatData, SELFLAG_USED_DEFAULT};
@@ -344,7 +344,7 @@ fn op_inner_operand<'mcx>(
     clause: NodeId,
     outer_is_left: bool,
 ) -> PgResult<Expr<'mcx>> {
-    use nodes::primnodes::Expr as PExpr;
+    use ::nodes::primnodes::Expr as PExpr;
     // outer_is_left => inner is the RIGHT operand (index 1); else LEFT (index 0).
     let idx = if outer_is_left { 1usize } else { 0usize };
     match root.node(clause) {

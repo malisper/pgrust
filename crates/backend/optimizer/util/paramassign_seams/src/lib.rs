@@ -22,7 +22,7 @@
 extern crate alloc;
 
 use mcx::Mcx;
-use nodes::primnodes::{Param, PlaceHolderVar, Var};
+use ::nodes::primnodes::{Param, PlaceHolderVar, Var};
 use pathnodes::{NodeId, PlannerInfo, Relids};
 
 seam_core::seam!(

@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 
 use mcx::MemoryContext;
-use nodes::primnodes::{
+use ::nodes::primnodes::{
     BoolExpr, BoolExprType, BoolTestType, BooleanTest, Const, Expr, NullTest, NullTestType,
 };
 
@@ -108,8 +108,8 @@ fn contain_subplans_finds_sublink() {
     assert!(!contain_subplans_slice(&exprs));
 
     // A SubLink does.
-    let sublink = Expr::SubLink(nodes::primnodes::SubLink {
-        subLinkType: nodes::primnodes::SubLinkType::Exists,
+    let sublink = Expr::SubLink(::nodes::primnodes::SubLink {
+        subLinkType: ::nodes::primnodes::SubLinkType::Exists,
         subLinkId: 0,
         testexpr: None,
         subselect: None,

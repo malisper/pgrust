@@ -26,7 +26,7 @@ use types_jsonb::jsonb_util::JsonbValue;
 use types_jsonb::jsonb::{
     jbvType, json_container_is_array, json_container_is_scalar, JsonbIteratorToken,
 };
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::Datum;
 
 use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb};
@@ -153,7 +153,7 @@ fn jsonb_array_elements_impl<'mcx>(
     // `expectedDesc` (the 1-column `value` descriptor) instead.
     funcapi::InitMaterializedSRF::call(
         fcinfo,
-        nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | nodes::funcapi::MAT_SRF_BLESS,
+        ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | ::nodes::funcapi::MAT_SRF_BLESS,
     )?;
 
     put_element_rows(mcx, fcinfo, &rows, as_text)?;
@@ -357,7 +357,7 @@ fn json_array_elements_impl<'mcx>(
     // (a `SETOF json`/`text` SCALAR result type is not a row type).
     funcapi::InitMaterializedSRF::call(
         fcinfo,
-        nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | nodes::funcapi::MAT_SRF_BLESS,
+        ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC | ::nodes::funcapi::MAT_SRF_BLESS,
     )?;
 
     let rows = elements_worker(json, funcname, as_text)?;

@@ -29,8 +29,8 @@ use types_error::error::{
 use types_error::PgResult;
 
 use types_core::primitive::{AttrNumber, Oid, RegProcedure};
-use nodes::execnodes::{EPQState, EStateData, RriId, SlotId};
-use nodes::nodes::CmdType;
+use ::nodes::execnodes::{EPQState, EStateData, RriId, SlotId};
+use ::nodes::nodes::CmdType;
 use rel::Relation;
 use types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNULL};
 use types_scan::sdir::ScanDirection;
@@ -1380,7 +1380,7 @@ fn take_index_info<'mcx>(
     estate: &mut EStateData<'mcx>,
     rri: RriId,
     i: usize,
-) -> nodes::execnodes::IndexInfo<'mcx> {
+) -> ::nodes::execnodes::IndexInfo<'mcx> {
     let arr = estate
         .result_rel_mut(rri)
         .ri_IndexRelationInfo
@@ -1394,7 +1394,7 @@ fn put_index_info<'mcx>(
     estate: &mut EStateData<'mcx>,
     rri: RriId,
     i: usize,
-    ii: nodes::execnodes::IndexInfo<'mcx>,
+    ii: ::nodes::execnodes::IndexInfo<'mcx>,
 ) {
     let arr = estate
         .result_rel_mut(rri)

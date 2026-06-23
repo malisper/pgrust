@@ -23,10 +23,10 @@ use types_copy::{CopyFormatOptions, CopyHeaderChoice};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_NAME};
-use nodes::copy_query::{ParseState, QuerySource, T_CreateTableAsStmt};
-use nodes::querydesc::QueryDesc;
-use nodes::parsestmt::RawStmt;
-use nodes::nodes::{CmdType, CMD_SELECT};
+use ::nodes::copy_query::{ParseState, QuerySource, T_CreateTableAsStmt};
+use ::nodes::querydesc::QueryDesc;
+use ::nodes::parsestmt::RawStmt;
+use ::nodes::nodes::{CmdType, CMD_SELECT};
 use types_pgstat::backend_progress::ProgressCommandType;
 use rel::Relation;
 use stringinfo::StringInfo;
@@ -633,8 +633,8 @@ pub fn BeginCopyTo<'mcx>(
     filename: Option<&str>,
     is_program: bool,
     data_dest_cb: Option<CopyDataDestCb>,
-    attnamelist: Option<&[nodes::nodes::NodePtr<'mcx>]>,
-    options: Option<&[nodes::nodes::NodePtr<'mcx>]>,
+    attnamelist: Option<&[::nodes::nodes::NodePtr<'mcx>]>,
+    options: Option<&[::nodes::nodes::NodePtr<'mcx>]>,
 ) -> PgResult<CopyToStateData<'mcx>> {
     let pipe = filename.is_none() && data_dest_cb.is_none();
 
@@ -799,7 +799,7 @@ pub fn BeginCopyTo<'mcx>(
             mcx,
             query,
             source_text,
-            nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
+            ::nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
         )?;
 
         // queryRelId double-check (RLS): the original relation must be present.
@@ -1083,7 +1083,7 @@ pub fn DoCopyTo(cstate: &mut CopyToStateData<'_>) -> PgResult<u64> {
 /// `CopyOneRowTo(cstate, slot)` (copyto.c:1122).
 fn copy_one_row_to<'mcx>(
     cstate: &mut CopyToStateData<'mcx>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
 ) -> PgResult<()> {
     // MemoryContextReset(cstate->rowcontext); switch to rowcontext: the owned
     // model recovers per-row output allocations by dropping them as locals.
@@ -1098,7 +1098,7 @@ fn copy_one_row_to<'mcx>(
 /// `copy_dest_receive(slot, self)` (copyto.c:1398) — the inward seam impl: the
 /// executor's COPY-OUT receiver re-enters here with the receiver handle that
 /// carries the live cstate.
-fn copy_dest_receive(receiver: u64, slot: &mut nodes::tuptable::SlotData<'_>) -> PgResult<bool> {
+fn copy_dest_receive(receiver: u64, slot: &mut ::nodes::tuptable::SlotData<'_>) -> PgResult<bool> {
     // CopyToState cstate = ((DR_copy *) self)->cstate;
     let ptr = RECEIVERS.with(|r| {
         let reg = r.borrow();
@@ -1152,14 +1152,14 @@ fn copy_dest_shutdown(_mcx: mcx::Mcx<'_>, _state: u64) -> PgResult<()> {
 /// slot);` then bumps the processed counter and reports progress. The router
 /// hands this callback the per-receiver `state` token (the `RECEIVERS` index,
 /// copyto's `DR_copy` stand-in) and the live payload-bearing
-/// [`nodes::tuptable::SlotData`]; the slot-unification keystone landed the
+/// [`::nodes::tuptable::SlotData`]; the slot-unification keystone landed the
 /// single deform path (`slot_getallattrs` over `&mut SlotData`), so this now does
 /// the real `CopyOneRowTo`. This is the unified `DestReceiver` identity for
 /// `DestCopyOut`; the [`copy_dest_receive`] inward seam delegates here.
 fn copy_dest_receive_slot(
     _mcx: mcx::Mcx<'_>,
     state: u64,
-    slot: &mut nodes::tuptable::SlotData<'_>,
+    slot: &mut ::nodes::tuptable::SlotData<'_>,
 ) -> PgResult<bool> {
     // COPY-TO writes the tuple out as bytes; it never needs the per-query arena
     // (no `'mcx`-bound sink), so the threaded `mcx` is unused here — unlike an
@@ -1177,7 +1177,7 @@ fn copy_dest_receive_slot(
 /// callbacks. The `RECEIVERS` index is the router's `state` token — the
 /// owned-model stand-in for C's `(DR_copy *) self`. dest.c's `CreateDestReceiver`
 /// switch reaches this through the `create_copy_dest_receiver` seam.
-pub fn CreateCopyDestReceiver() -> nodes::parsestmt::DestReceiverHandle {
+pub fn CreateCopyDestReceiver() -> ::nodes::parsestmt::DestReceiverHandle {
     // self->cstate = NULL (set later); self->processed = 0.
     let state = receiver_register();
     tcop_dest::register_dest_receiver(

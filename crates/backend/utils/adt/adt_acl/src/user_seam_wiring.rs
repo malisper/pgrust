@@ -3,7 +3,7 @@
 //!
 //! The seam vocabulary uses the owned `parsenodes::RoleSpec` (the
 //! command driver's parse-node model); acl.c's resolvers take the canonical
-//! arena `nodes::parsenodes::RoleSpec`. The two meet here: a `RoleSpec`
+//! arena `::nodes::parsenodes::RoleSpec`. The two meet here: a `RoleSpec`
 //! converter (allocating `rolename` into the target context) bridges them, and
 //! thin adapters wrap the bare-value / `String` results to the seam surface.
 
@@ -15,8 +15,8 @@ use types_error::PgResult;
 
 use crate::role_membership;
 
-use nodes::parsenodes::RoleSpec as NRoleSpec;
-use nodes::parsenodes::RoleSpecType as NRoleSpecType;
+use ::nodes::parsenodes::RoleSpec as NRoleSpec;
+use ::nodes::parsenodes::RoleSpecType as NRoleSpecType;
 use parsenodes::RoleSpec as PRoleSpec;
 use parsenodes::RoleSpecType as PRoleSpecType;
 
@@ -103,7 +103,7 @@ fn authmem_list_by_role_seam<'mcx>(mcx: Mcx<'mcx>, roleid: Oid) -> PgResult<Vec<
 }
 
 /// Convert an owned `parsenodes::RoleSpec` into the canonical arena
-/// `nodes::parsenodes::RoleSpec`, allocating `rolename` in `mcx`.
+/// `::nodes::parsenodes::RoleSpec`, allocating `rolename` in `mcx`.
 fn role_spec_to_arena<'mcx>(mcx: Mcx<'mcx>, role: &PRoleSpec) -> PgResult<NRoleSpec<'mcx>> {
     let roletype = match role.roletype {
         PRoleSpecType::ROLESPEC_CSTRING => NRoleSpecType::Cstring,

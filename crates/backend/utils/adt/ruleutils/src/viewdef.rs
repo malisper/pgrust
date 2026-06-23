@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use nodes::nodes::{ntag, CmdType, Node};
+use ::nodes::nodes::{ntag, CmdType, Node};
 use types_storage::lock::AccessShareLock;
 
 use crate::{PRETTYFLAG_INDENT, PRETTYFLAG_SCHEMA, WRAP_COLUMN_DEFAULT};
@@ -345,7 +345,7 @@ fn make_ruledef<'mcx>(
 fn single_action_query<'mcx>(
     mcx: Mcx<'mcx>,
     action_node: Option<PgBox<'mcx, Node<'mcx>>>,
-) -> PgResult<Option<nodes::copy_query::Query<'mcx>>> {
+) -> PgResult<Option<::nodes::copy_query::Query<'mcx>>> {
     let mut actions = action_list_queries(mcx, action_node)?;
     if actions.len() != 1 {
         return Ok(None);
@@ -358,8 +358,8 @@ fn single_action_query<'mcx>(
 fn action_list_queries<'mcx>(
     mcx: Mcx<'mcx>,
     action_node: Option<PgBox<'mcx, Node<'mcx>>>,
-) -> PgResult<Vec<nodes::copy_query::Query<'mcx>>> {
-    let mut out: Vec<nodes::copy_query::Query<'mcx>> = Vec::new();
+) -> PgResult<Vec<::nodes::copy_query::Query<'mcx>>> {
+    let mut out: Vec<::nodes::copy_query::Query<'mcx>> = Vec::new();
     let Some(action_node) = action_node else {
         return Ok(out);
     };

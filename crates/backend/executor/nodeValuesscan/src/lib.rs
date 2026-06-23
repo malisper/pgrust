@@ -44,8 +44,8 @@ use misc2_seams as expandeddatum;
 use mcx::alloc_in;
 use types_error::PgResult;
 use execparallel::PGJIT_NONE;
-use nodes::nodes::Node;
-use nodes::nodevaluesscan::{ValuesScan, ValuesScanState};
+use ::nodes::nodes::Node;
+use ::nodes::nodevaluesscan::{ValuesScan, ValuesScanState};
 use nodes::{EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
 
 /// Access-method "function pointer" (C `ExecScanAccessMtd`): the next-tuple
@@ -142,7 +142,7 @@ fn ValuesNext<'mcx>(
                 // only for the seam call. The compiled states are allocated in
                 // the per-query context by the seam.
                 let exprs = &node.exprlists[row];
-                let mut refs: mcx::PgVec<'mcx, Option<&nodes::primnodes::Expr<'mcx>>> =
+                let mut refs: mcx::PgVec<'mcx, Option<&::nodes::primnodes::Expr<'mcx>>> =
                     mcx::vec_with_capacity_in(mcx, exprs.len())?;
                 for e in exprs.iter() {
                     refs.push(Some(e));
@@ -280,11 +280,11 @@ fn MakeExpandedObjectReadOnly<'mcx>(
 /// The `PlanState.ExecProcNode` callback installed by [`ExecInitValuesScan`]:
 /// `castNode(ValuesScanState, pstate)` then run [`ExecValuesScan`].
 fn exec_values_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::PlanStateNode::ValuesScan(node) => node,
+        ::nodes::PlanStateNode::ValuesScan(node) => node,
         other => panic!("castNode(ValuesScanState, pstate) failed: {other:?}"),
     };
     ExecValuesScan(node, estate)
@@ -351,7 +351,7 @@ pub fn ExecInitValuesScan<'mcx>(
     //   tupdesc = ExecTypeFromExprList((List *) linitial(node->values_lists));
     //   ExecInitScanTupleSlot(estate, &scanstate->ss, tupdesc, &TTSOpsVirtual);
     let tupdesc = {
-        let first: &[nodes::primnodes::Expr<'mcx>] = plan
+        let first: &[::nodes::primnodes::Expr<'mcx>] = plan
             .values_lists
             .first()
             .map(|l| l.as_slice())
@@ -400,7 +400,7 @@ pub fn ExecInitValuesScan<'mcx>(
             // owned by the node in the per-query context — the plan tree is
             // read-only)
             let src = &plan.values_lists[i];
-            let mut row: mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>> =
+            let mut row: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
                 mcx::vec_with_capacity_in(mcx, src.len())?;
             for e in src.iter() {
                 // C aliases the plan's expr list (`exprlists[i] = exprs`); here
@@ -448,7 +448,7 @@ pub fn ExecInitValuesScan<'mcx>(
                 ..
             } = &mut *scanstate;
             let exprs = &exprlists[i];
-            let mut refs: mcx::PgVec<'mcx, Option<&nodes::primnodes::Expr<'mcx>>> =
+            let mut refs: mcx::PgVec<'mcx, Option<&::nodes::primnodes::Expr<'mcx>>> =
                 mcx::vec_with_capacity_in(mcx, exprs.len())?;
             for e in exprs.iter() {
                 refs.push(Some(e));

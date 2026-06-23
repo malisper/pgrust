@@ -1,7 +1,7 @@
 //! Family: **nodefuncs** — `nodes/nodeFuncs.c` (4838 lines).
 //!
 //! General-purpose manipulations of the expression-`Node` tree, keyed on the
-//! split layered `nodes::Expr` vocabulary (the F0-expanded Expr enum that
+//! split layered `::nodes::Expr` vocabulary (the F0-expanded Expr enum that
 //! landed with `assemble/expr-eval-keystone`). This family owns
 //! `backend-nodes-nodeFuncs-seams` and installs the expression-inspection seams
 //! from [`init_seams`].
@@ -29,7 +29,7 @@
 //!
 //! # Split-model coverage and the trimmed surface
 //!
-//! `nodes::Expr` carries the ~48 execution-time expression variants. The
+//! `::nodes::Expr` carries the ~48 execution-time expression variants. The
 //! C switches also have arms for node types the layered model does not yet
 //! carry as `Expr` variants (`PlaceHolderVar`, `JsonBehavior`) or that belong
 //! to the not-yet-ported parser/planner node universes (`A_Expr`, `ColumnRef`,
@@ -63,11 +63,11 @@
 #![allow(non_snake_case)]
 
 use types_core::{Oid, InvalidOid};
-use nodes::primnodes::{
+use ::nodes::primnodes::{
     self, etag, ArrayExpr, CaseExpr, CaseWhen, Const, Expr, JsonConstructorExpr, JsonExpr, OpExpr,
     RelabelType, ScalarArrayOpExpr, SubLink,
 };
-use nodes::primnodes::{CoercionForm, SubLinkType, XmlExprOp};
+use ::nodes::primnodes::{CoercionForm, SubLinkType, XmlExprOp};
 use lsyscache_seams as lsyscache;
 use format_type_seams as format_type;
 use types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT};
@@ -1873,7 +1873,7 @@ fn expr_variant_name(expr: &Expr) -> &'static str {
 /// `exprCollation` (nodeFuncs.c, this crate), so relnode reaches it through the
 /// relnode-ext seam; this crate owns it.
 pub fn make_coalesce_expr<'mcx>(larg: &Expr<'mcx>, rarg: &Expr<'mcx>) -> Expr<'mcx> {
-    Expr::CoalesceExpr(nodes::primnodes::CoalesceExpr {
+    Expr::CoalesceExpr(::nodes::primnodes::CoalesceExpr {
         coalescetype: expr_type(Some(larg)).expect("exprType"),
         coalescecollid: expr_collation(Some(larg)).expect("exprCollation"),
         args: vec![larg.clone(), rarg.clone()],
@@ -2232,7 +2232,7 @@ fn seam_expr_variadic_expr(expr: &Expr) -> bool {
 /// then true iff the argument is a `Const` or an external (`PARAM_EXTERN`)
 /// `Param`.
 fn seam_call_expr_arg_stable_expr(expr: &Expr, argnum: i32) -> bool {
-    use nodes::primnodes::PARAM_EXTERN;
+    use ::nodes::primnodes::PARAM_EXTERN;
     // DistinctExpr / NullIfExpr are OpExpr-shaped here, so their `.args` is read
     // the same way (mirrors seam_get_call_expr_argtype_expr).
     let args: &[Expr] = match expr {
@@ -2258,7 +2258,7 @@ fn seam_call_expr_arg_stable_expr(expr: &Expr, argnum: i32) -> bool {
 /// (it carries only plan nodes), so this always falls through to `InvalidOid`,
 /// matching the C fall-through for an unhandled kind.
 fn seam_get_call_expr_argtype_node(
-    _call_expr: &nodes::nodes::Node<'_>,
+    _call_expr: &::nodes::nodes::Node<'_>,
     _argnum: i32,
 ) -> Oid {
     InvalidOid
@@ -2268,7 +2268,7 @@ fn seam_get_call_expr_argtype_node(
 /// nodes that carry an input collation are not modeled by the plan-tree `Node`
 /// enum, so this returns `InvalidOid` (the C fall-through for an unhandled node
 /// kind).
-fn seam_expr_input_collation_node(_node: &nodes::nodes::Node<'_>) -> Oid {
+fn seam_expr_input_collation_node(_node: &::nodes::nodes::Node<'_>) -> Oid {
     InvalidOid
 }
 

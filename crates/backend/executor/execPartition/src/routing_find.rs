@@ -6,8 +6,8 @@ use types_acl::{ACL_SELECT, ACLCHECK_OK, RLS_ENABLED};
 use types_core::primitive::{InvalidOid, OidIsValid};
 use types_tuple::heaptuple::Datum;
 use types_error::{PgResult, ERRCODE_CHECK_VIOLATION};
-use nodes::nodes::CmdType;
-use nodes::partition::PartitionStrategy;
+use ::nodes::nodes::CmdType;
+use ::nodes::partition::PartitionStrategy;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use rel::Relation;
 
@@ -390,7 +390,7 @@ pub(crate) fn FormPartitionKeyDatum<'mcx>(
     if has_partexprs && proute.partition_dispatch_info[dispatch].keystate.is_empty() {
         // First time through, set up expression evaluation state.
         // pd->keystate = ExecPrepareExprList(pd->key->partexprs, estate);
-        let partexprs: &[nodes::primnodes::Expr] = {
+        let partexprs: &[::nodes::primnodes::Expr] = {
             let pd = &proute.partition_dispatch_info[dispatch];
             pd.key.as_ref().unwrap().partexprs.as_slice()
         };
@@ -680,7 +680,7 @@ fn range_bound_at<'mcx>(
     off: usize,
 ) -> (
     alloc_vec::Vec<Datum<'mcx>>,
-    alloc_vec::Vec<nodes::partition::PartitionRangeDatumKind>,
+    alloc_vec::Vec<::nodes::partition::PartitionRangeDatumKind>,
 ) {
     let boundinfo = dispatch
         .partdesc
@@ -691,7 +691,7 @@ fn range_bound_at<'mcx>(
         .unwrap();
     let datums: alloc_vec::Vec<Datum<'mcx>> =
         boundinfo.datums[off].iter().map(key_word).collect();
-    let kind: alloc_vec::Vec<nodes::partition::PartitionRangeDatumKind> = boundinfo
+    let kind: alloc_vec::Vec<::nodes::partition::PartitionRangeDatumKind> = boundinfo
         .kind
         .as_ref()
         .expect("RANGE boundinfo has no kind array")[off]

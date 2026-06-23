@@ -66,9 +66,9 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use nodes::ddlnodes::{AlterTableCmd, AlterTableType, CoercionContext};
-use nodes::nodes::Node;
-use nodes::primnodes::{CoercionForm, Expr};
+use ::nodes::ddlnodes::{AlterTableCmd, AlterTableType, CoercionContext};
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{CoercionForm, Expr};
 use rel::Relation;
 use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
 use types_tuple::access::{
@@ -969,7 +969,7 @@ fn RememberConstraintForRebuilding<'mcx>(
         ruleutils::constraintdef::pg_get_constraintdef_command(mcx, conoid)?;
     let defnode = mcx::alloc_in(
         mcx,
-        Node::mk_string(mcx, nodes::value::StringNode { sval: defstring })?,
+        Node::mk_string(mcx, ::nodes::value::StringNode { sval: defstring })?,
     )?;
 
     // Create not-null constraints ahead of primary key indexes; otherwise the
@@ -1020,7 +1020,7 @@ fn RememberIndexForRebuilding<'mcx>(
         ruleutils::indexdef::pg_get_indexdef_string(mcx, indoid)?;
     let defnode = mcx::alloc_in(
         mcx,
-        Node::mk_string(mcx, nodes::value::StringNode { sval: defstring })?,
+        Node::mk_string(mcx, ::nodes::value::StringNode { sval: defstring })?,
     )?;
     tab.changedIndexOids.push(indoid);
     tab.changedIndexDefs.push(defnode);
@@ -1045,7 +1045,7 @@ fn RememberStatisticsForRebuilding<'mcx>(
     )?;
     let defnode = mcx::alloc_in(
         mcx,
-        Node::mk_string(mcx, nodes::value::StringNode { sval: defstring })?,
+        Node::mk_string(mcx, ::nodes::value::StringNode { sval: defstring })?,
     )?;
     tab.changedStatisticsOids.push(stxoid);
     tab.changedStatisticsDefs.push(defnode);
@@ -1225,7 +1225,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
     // Queue up a command to restore replica identity index marking.
     if let Some(rep_idx) = wqueue[ti].replicaIdentityIndex.as_ref() {
         let rep_idx = rep_idx.clone_in(mcx)?;
-        let subcmd = nodes::ddlnodes::ReplicaIdentityStmt {
+        let subcmd = ::nodes::ddlnodes::ReplicaIdentityStmt {
             identity_type: b'i' as i8, // REPLICA_IDENTITY_INDEX
             name: Some(rep_idx),
         };
@@ -1236,7 +1236,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
             num: 0,
             newowner: None,
             def: Some(subnode),
-            behavior: nodes::parsenodes::DropBehavior::Restrict,
+            behavior: ::nodes::parsenodes::DropBehavior::Restrict,
             missing_ok: false,
             recurse: false,
         };
@@ -1254,7 +1254,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
             num: 0,
             newowner: None,
             def: None,
-            behavior: nodes::parsenodes::DropBehavior::Restrict,
+            behavior: ::nodes::parsenodes::DropBehavior::Restrict,
             missing_ok: false,
             recurse: false,
         };
@@ -1266,7 +1266,7 @@ pub(crate) fn ATPostAlterTypeCleanup<'mcx>(
     // objects get recreated during the subsequent work-queue passes.
     dep_seam::perform_multiple_deletions::call(
         &objects.refs,
-        nodes::parsenodes::DROP_RESTRICT,
+        ::nodes::parsenodes::DROP_RESTRICT,
         dep_seam::PERFORM_DELETION_INTERNAL,
     )?;
     dep_seam::free_object_addresses::call(objects)?;
@@ -1292,7 +1292,7 @@ fn ATPostAlterTypeParse<'mcx>(
     _lockmode: LOCKMODE,
     rewrite: i32,
 ) -> PgResult<()> {
-    use nodes::nodes::ntag;
+    use ::nodes::nodes::ntag;
 
     // We expect only ALTER TABLE / CREATE INDEX / CREATE STATISTICS statements;
     // pass them through parse_utilcmd.c (no parse_analyze / rewriter needed).
@@ -1307,7 +1307,7 @@ fn ATPostAlterTypeParse<'mcx>(
     )?;
 
     // querytree_list: the transformed statements, in execution order.
-    let mut querytree_list: PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+    let mut querytree_list: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
     for rs in raw_parsetree_list.iter() {
         let stmt: &Node<'mcx> = &rs.stmt;
         let stmt_tag = stmt.node_tag();
@@ -1389,7 +1389,7 @@ fn ATPostAlterTypeParse<'mcx>(
                 num: 0,
                 newowner: None,
                 def: Some(mcx::alloc_in(mcx, Node::mk_index_stmt(mcx, istmt)?)?),
-                behavior: nodes::parsenodes::DropBehavior::Restrict,
+                behavior: ::nodes::parsenodes::DropBehavior::Restrict,
                 missing_ok: false,
                 recurse: false,
             };
@@ -1480,7 +1480,7 @@ fn ATPostAlterTypeParse<'mcx>(
                         // stash the old constraint's conpfeqop operator OIDs (as
                         // an Integer-node list) so the FK re-add can skip
                         // revalidation when the equality operators are unchanged.
-                        if con.contype == nodes::ddlnodes::ConstrType::CONSTR_FOREIGN
+                        if con.contype == ::nodes::ddlnodes::ConstrType::CONSTR_FOREIGN
                             && rewrite == 0
                             && wqueue[tab_idx].rewrite == 0
                         {
@@ -1491,7 +1491,7 @@ fn ATPostAlterTypeParse<'mcx>(
                                     mcx,
                                     Node::mk_integer(
                                         mcx,
-                                        nodes::value::Integer { ival: op as i32 },
+                                        ::nodes::value::Integer { ival: op as i32 },
                                     )?,
                                 )?;
                                 con.old_conpfeqop.push(node);
@@ -1572,7 +1572,7 @@ fn ATPostAlterTypeParse<'mcx>(
                     num: 0,
                     newowner: None,
                     def: Some(stmt_clone),
-                    behavior: nodes::parsenodes::DropBehavior::Restrict,
+                    behavior: ::nodes::parsenodes::DropBehavior::Restrict,
                     missing_ok: false,
                     recurse: false,
                 };
@@ -1623,7 +1623,7 @@ fn ATPostAlterTypeParse<'mcx>(
                 num: 0,
                 newowner: None,
                 def: Some(mcx::alloc_in(mcx, Node::mk_create_stats_stmt(mcx, stmt)?)?),
-                behavior: nodes::parsenodes::DropBehavior::Restrict,
+                behavior: ::nodes::parsenodes::DropBehavior::Restrict,
                 missing_ok: false,
                 recurse: false,
             };
@@ -1651,7 +1651,7 @@ fn ATPostAlterTypeParse<'mcx>(
 fn TryReuseIndex<'mcx>(
     mcx: Mcx<'mcx>,
     old_id: Oid,
-    stmt: &mut nodes::ddlnodes::IndexStmt<'mcx>,
+    stmt: &mut ::nodes::ddlnodes::IndexStmt<'mcx>,
 ) -> PgResult<()> {
     let compatible =
         indexcmds_seams::check_index_compatible::call(mcx, old_id, stmt)?;
@@ -1705,8 +1705,8 @@ fn RebuildConstraintComment<'mcx>(
     };
 
     // Helper: build a String value node holding `s` in the arena.
-    let mk_str = |s: &str| -> PgResult<nodes::nodes::NodePtr<'mcx>> {
-        let sn = nodes::value::StringNode {
+    let mk_str = |s: &str| -> PgResult<::nodes::nodes::NodePtr<'mcx>> {
+        let sn = ::nodes::value::StringNode {
             sval: mcx::PgString::from_str_in(s, mcx)?,
         };
         mcx::alloc_in(mcx, Node::mk_string(mcx, sn)?)
@@ -1722,7 +1722,7 @@ fn RebuildConstraintComment<'mcx>(
         .ok_or_else(|| {
             types_error::PgError::error("RebuildConstraintComment: namespace not found")
         })?;
-        let mut list: PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        let mut list: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
         list.push(mk_str(nsp.as_str())?);
         list.push(mk_str(rel.name())?);
         list.push(mk_str(conname)?);
@@ -1731,12 +1731,12 @@ fn RebuildConstraintComment<'mcx>(
         // OBJECT_DOMCONSTRAINT: list_make2(makeTypeNameFromNameList(domname), conname)
         let domname =
             domname.expect("RebuildConstraintComment: domname required for domain constraint");
-        let mut tn_names: PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        let mut tn_names: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
         for s in domname.iter() {
             tn_names.push(mk_str(s.as_str())?);
         }
         // makeTypeNameFromNameList(names): names + location -1, typemod -1.
-        let typename = nodes::rawnodes::TypeName {
+        let typename = ::nodes::rawnodes::TypeName {
             names: tn_names,
             typeOid: InvalidOid,
             setof: false,
@@ -1746,18 +1746,18 @@ fn RebuildConstraintComment<'mcx>(
             arrayBounds: PgVec::new_in(mcx),
             location: -1,
         };
-        let mut list: PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        let mut list: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
         list.push(mcx::alloc_in(mcx, Node::mk_type_name(mcx, typename)?)?);
         list.push(mk_str(conname)?);
         Node::mk_list(mcx, list)?
     };
 
     let objtype = if rel.is_some() {
-        nodes::parsenodes::ObjectType::Tabconstraint
+        ::nodes::parsenodes::ObjectType::Tabconstraint
     } else {
-        nodes::parsenodes::ObjectType::Domconstraint
+        ::nodes::parsenodes::ObjectType::Domconstraint
     };
-    let cmt = nodes::ddlnodes::CommentStmt {
+    let cmt = ::nodes::ddlnodes::CommentStmt {
         objtype,
         object: Some(mcx::alloc_in(mcx, object)?),
         comment: Some(mcx::PgString::from_str_in(&comment_str, mcx)?),
@@ -1769,7 +1769,7 @@ fn RebuildConstraintComment<'mcx>(
         num: 0,
         newowner: None,
         def: Some(mcx::alloc_in(mcx, Node::mk_comment_stmt(mcx, cmt)?)?),
-        behavior: nodes::parsenodes::DropBehavior::Restrict,
+        behavior: ::nodes::parsenodes::DropBehavior::Restrict,
         missing_ok: false,
         recurse: false,
     };
@@ -1949,7 +1949,7 @@ pub fn ATExecSetExpression<'mcx>(
     //   rawEnt->generated = attgenerated;
     //   AddRelationNewConstraints(rel, list_make1(rawEnt), NIL, false, true, false, NULL);
     let raw_default_ptr = mcx::alloc_in(mcx, new_expr.clone_in(mcx)?)?;
-    let raw_defaults: [(AttrNumber, nodes::nodes::NodePtr<'mcx>, i8); 1] =
+    let raw_defaults: [(AttrNumber, ::nodes::nodes::NodePtr<'mcx>, i8); 1] =
         [(attnum, raw_default_ptr, attgenerated)];
     seam::add_relation_new_constraints::call(
         mcx,
@@ -2333,7 +2333,7 @@ pub fn ATExecAlterColumnType<'mcx>(
 // ---------------------------------------------------------------------------
 
 /// `DROP_RESTRICT` (parsenodes.h).
-use nodes::parsenodes::DROP_RESTRICT;
+use ::nodes::parsenodes::DROP_RESTRICT;
 
 /// `ACL_USAGE` (parsenodes.h).
 const ACL_USAGE: types_acl::AclMode = types_acl::ACL_USAGE;

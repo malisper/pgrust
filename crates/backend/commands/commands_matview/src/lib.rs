@@ -39,10 +39,10 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR,
 };
 use types_matview::{CommandTag, IndexUsabilityInfo, QueryCompletion, RefreshMatViewStmt};
-use nodes::copy_query::Query;
-use nodes::nodes::CmdType;
-use nodes::parsestmt::DestReceiverHandle;
-use nodes::tuptable::SlotData;
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::CmdType;
+use ::nodes::parsestmt::DestReceiverHandle;
+use ::nodes::tuptable::SlotData;
 use rel::Relation;
 use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, ExclusiveLock, NoLock, RowExclusiveLock,
@@ -1340,7 +1340,7 @@ pub fn init_seams() {
 /// consumes, then marshal the `QueryCompletion` in/out.
 fn exec_refresh_mat_view_utility<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
     query_string: &str,
     qc: Option<&mut portal::QueryCompletion>,
 ) -> PgResult<ObjectAddress> {
@@ -1349,7 +1349,7 @@ fn exec_refresh_mat_view_utility<'mcx>(
         None => panic!("exec_refresh_mat_view: utilityStmt is not a RefreshMatViewStmt"),
     };
     // stmt->relation is a RangeVar (never NULL in a well-formed parse).
-    let rel_node = match rmv.relation.as_deref().and_then(nodes::nodes::Node::as_rangevar) {
+    let rel_node = match rmv.relation.as_deref().and_then(::nodes::nodes::Node::as_rangevar) {
         Some(rv) => rv,
         None => panic!("exec_refresh_mat_view: stmt->relation is not a RangeVar"),
     };

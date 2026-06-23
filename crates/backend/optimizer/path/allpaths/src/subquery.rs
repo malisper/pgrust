@@ -217,7 +217,7 @@ pub fn set_subquery_pathlist<'mcx>(
 
     // Mark rel with estimated output rows, width, etc. — must precede outer-path
     // generation so cost_subqueryscan is happy (C:2684).
-    costsize::sizeest::set_subquery_size_estimates(run, root, rel);
+    ::costsize::sizeest::set_subquery_size_estimates(run, root, rel);
 
     // Detect whether the reltarget is trivial (fetches all subplan output
     // columns in order), to pass to cost_subqueryscan (C:2691-2715).
@@ -543,7 +543,7 @@ pub fn set_cte_pathlist<'mcx>(
     }
 
     // Mark rel with estimated output rows, width, etc.
-    costsize::sizeest::set_cte_size_estimates(run, root, rel, cte_plan_rows);
+    ::costsize::sizeest::set_cte_size_estimates(run, root, rel, cte_plan_rows);
 
     // Convert the ctepath's pathkeys to the outer query's representation.
     let pathkeys = pathkeys::convert_subquery_pathkeys(
@@ -623,7 +623,7 @@ pub fn set_worktable_pathlist<'mcx>(
     };
 
     // Mark rel with estimated output rows, width, etc.
-    costsize::sizeest::set_cte_size_estimates(run, root, rel, cte_rows);
+    ::costsize::sizeest::set_cte_size_estimates(run, root, rel, cte_rows);
 
     // We don't support pushing join clauses into a worktable scan's quals, but
     // it could still have required parameterization due to LATERAL refs.

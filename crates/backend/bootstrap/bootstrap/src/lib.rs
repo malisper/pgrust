@@ -28,7 +28,7 @@ use types_error::{ErrorLocation, PgError, PgResult};
 use types_error::{DEBUG4, ERROR, WARNING};
 use types_error::ERRCODE_SYNTAX_ERROR;
 use types_guc::guc::{PGC_INTERNAL, PGC_POSTMASTER, PGC_S_ARGV, PGC_S_DYNAMIC_DEFAULT};
-use nodes::execnodes::IndexInfo;
+use ::nodes::execnodes::IndexInfo;
 use rel::{Relation, RelationData};
 use signal::SigHandler;
 use types_startup::DispatchOption;

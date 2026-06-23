@@ -47,17 +47,17 @@ use alloc::string::String;
 use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use nodes::copy_query::Query;
-use nodes::nodes::{CmdType, Node};
-use nodes::parsenodes::{
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::parsenodes::{
     RangeTblEntry, RTE_CTE, RTE_FUNCTION, RTE_RELATION, RTE_SUBQUERY, RTE_TABLEFUNC, RTE_VALUES,
 };
-use nodes::primnodes::Expr;
-use nodes::rawnodes::{
+use ::nodes::primnodes::Expr;
+use ::nodes::rawnodes::{
     CTEMaterialize, GroupingSet, GroupingSetKind, RangeTblFunction,
     SetOperationStmt, SetOperation, SortGroupClause, WindowClause,
 };
-use nodes::rawnodes::LockClauseStrength;
+use ::nodes::rawnodes::LockClauseStrength;
 
 use crate::expr_deparse::{
     ch_pub as ch_, get_const_expr, get_rule_expr, get_rule_expr_funccall, get_rule_expr_toplevel,
@@ -83,7 +83,7 @@ const PRETTYFLAG_PAREN: i32 = 0x0001;
 const PRETTYFLAG_INDENT: i32 = 0x0002;
 
 /// `LimitOption` LIMIT_OPTION_WITH_TIES.
-use nodes::nodelimit::LimitOption;
+use ::nodes::nodelimit::LimitOption;
 
 /// `BOOLOID` (`catalog/pg_type_d.h`).
 const BOOLOID: u32 = 16;
@@ -95,9 +95,9 @@ const INTERNALOID: u32 = 2281;
 const F_UNNEST_ANYARRAY: u32 = 2331;
 
 /// `OnConflictAction` (`nodes/primnodes.h`).
-use nodes::nodes::OnConflictAction;
+use ::nodes::nodes::OnConflictAction;
 /// `OverridingKind` (`nodes/primnodes.h`).
-use nodes::modifytable::{MergeMatchKind, OverridingKind};
+use ::nodes::modifytable::{MergeMatchKind, OverridingKind};
 
 /// Window-frame option bits (`nodes/parsenodes.h`).
 const FRAMEOPTION_NONDEFAULT: i32 = 0x00001;
@@ -585,7 +585,7 @@ fn get_with_clause<'mcx>(
         // recurse into the CTE's Query
         let ctequery = cte.ctequery.as_deref().ok_or_else(|| missing_field("CommonTableExpr.ctequery"))?;
         let subq = match ctequery.node_tag() {
-            nodes::nodes::ntag::T_Query => ctequery.expect_query(),
+            ::nodes::nodes::ntag::T_Query => ctequery.expect_query(),
             _ => {
                 return Err(elog_error(format!(
                     "CTE query is not a Query (tag {})",
@@ -772,9 +772,9 @@ fn get_select_query_def<'mcx>(
             let name = crate::get_rtable_name_pub(rc.rti as i32, context)?;
             let q = quote_identifier(mcx, name.unwrap_or(""))?;
             str_(context, q.as_str())?;
-            if rc.waitPolicy == nodes::rawnodes::LockWaitError {
+            if rc.waitPolicy == ::nodes::rawnodes::LockWaitError {
                 str_(context, " NOWAIT")?;
-            } else if rc.waitPolicy == nodes::rawnodes::LockWaitSkip {
+            } else if rc.waitPolicy == ::nodes::rawnodes::LockWaitSkip {
                 str_(context, " SKIP LOCKED")?;
             }
         }
@@ -943,7 +943,7 @@ fn get_basic_select_query<'mcx>(
 /// (`wrapColumn < 0` / no INDENT) just appends each field.
 fn get_target_list<'mcx>(
     mcx: Mcx<'mcx>,
-    target_list: &PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
+    target_list: &PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
     let mut last_was_multiline = false;
@@ -1079,7 +1079,7 @@ fn get_setop_query<'mcx>(
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
     match set_op.node_tag() {
-        nodes::nodes::ntag::T_RangeTblRef => {
+        ::nodes::nodes::ntag::T_RangeTblRef => {
             let rtr = set_op.expect_rangetblref();
             let rte = rt_fetch(rtr.rtindex, &query.rtable)?;
             let subquery = rte.subquery.as_deref().ok_or_else(|| missing_field("setop leaf subquery"))?;
@@ -1099,7 +1099,7 @@ fn get_setop_query<'mcx>(
             }
             Ok(())
         }
-        nodes::nodes::ntag::T_SetOperationStmt => {
+        ::nodes::nodes::ntag::T_SetOperationStmt => {
             get_setop_stmt(mcx, set_op.expect_setoperationstmt(), query, context)
         }
         _ => Err(elog_error(format!("unrecognized node type: {}", set_op.tag().0))),
@@ -1186,7 +1186,7 @@ fn get_setop_stmt<'mcx>(
 fn get_rule_sortgroupclause<'mcx>(
     mcx: Mcx<'mcx>,
     sortref: u32,
-    tlist: &[nodes::primnodes::TargetEntry<'mcx>],
+    tlist: &[::nodes::primnodes::TargetEntry<'mcx>],
     force_colno: bool,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<Option<Expr<'mcx>>> {
@@ -1236,7 +1236,7 @@ fn get_rule_sortgroupclause<'mcx>(
 fn get_rule_groupingset<'mcx>(
     mcx: Mcx<'mcx>,
     gset: &GroupingSet<'mcx>,
-    targetlist: &[nodes::primnodes::TargetEntry<'mcx>],
+    targetlist: &[::nodes::primnodes::TargetEntry<'mcx>],
     omit_parens: bool,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
@@ -1287,7 +1287,7 @@ fn get_rule_groupingset<'mcx>(
 pub fn get_rule_orderby<'mcx>(
     mcx: Mcx<'mcx>,
     order_list: &[SortGroupClause],
-    target_list: &[nodes::primnodes::TargetEntry<'mcx>],
+    target_list: &[::nodes::primnodes::TargetEntry<'mcx>],
     force_colno: bool,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
@@ -1357,7 +1357,7 @@ fn get_rule_windowclause<'mcx>(
 pub fn get_rule_windowspec<'mcx>(
     mcx: Mcx<'mcx>,
     wc: &WindowClause<'mcx>,
-    target_list: &[nodes::primnodes::TargetEntry<'mcx>],
+    target_list: &[::nodes::primnodes::TargetEntry<'mcx>],
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
     ch_(context, b'(')?;
@@ -1710,7 +1710,7 @@ fn get_update_query_targetlist_def<'mcx>(
             let tle = as_targetentry(l)?;
             if tle.resjunk {
                 if let Some(e @ Expr::SubLink(sl)) = tle.expr.as_deref() {
-                    if sl.subLinkType == nodes::primnodes::SubLinkType::MultiExpr {
+                    if sl.subLinkType == ::nodes::primnodes::SubLinkType::MultiExpr {
                         ma_sublinks.try_reserve(1).map_err(|_| mcx.oom(0))?;
                         ma_sublinks.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
                     }
@@ -1927,7 +1927,7 @@ fn get_utility_query_def<'mcx>(
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
     match query.utilityStmt.as_deref().map(|n| (n.node_tag(), n)) {
-        Some((nodes::nodes::ntag::T_NotifyStmt, n)) => {
+        Some((::nodes::nodes::ntag::T_NotifyStmt, n)) => {
             let stmt = n.expect_notifystmt();
             append_context_keyword(context, "", 0, PRETTYINDENT_STD, 1)?;
             str_(context, "NOTIFY ")?;
@@ -2001,7 +2001,7 @@ fn get_from_clause_item<'mcx>(
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
     match jtnode.node_tag() {
-        nodes::nodes::ntag::T_RangeTblRef => {
+        ::nodes::nodes::ntag::T_RangeTblRef => {
             let rtr = jtnode.expect_rangetblref();
             let varno = rtr.rtindex;
             let rte = rt_fetch(varno, &query.rtable)?.clone_in(mcx)?;
@@ -2080,7 +2080,7 @@ fn get_from_clause_item<'mcx>(
             }
             Ok(())
         }
-        nodes::nodes::ntag::T_JoinExpr => {
+        ::nodes::nodes::ntag::T_JoinExpr => {
             let j = jtnode.expect_joinexpr();
             let colinfo = deparse_columns_fetch(j.rtindex, &context.namespaces[0]).clone_columns(mcx)?;
 
@@ -2097,20 +2097,20 @@ fn get_from_clause_item<'mcx>(
             get_from_clause_item(mcx, &larg, query, context)?;
 
             match j.jointype {
-                nodes::jointype::JoinType::JOIN_INNER => {
+                ::nodes::jointype::JoinType::JOIN_INNER => {
                     if j.quals.is_some() {
                         append_context_keyword(context, " JOIN ", -PRETTYINDENT_STD, PRETTYINDENT_STD, PRETTYINDENT_JOIN)?;
                     } else {
                         append_context_keyword(context, " CROSS JOIN ", -PRETTYINDENT_STD, PRETTYINDENT_STD, PRETTYINDENT_JOIN)?;
                     }
                 }
-                nodes::jointype::JoinType::JOIN_LEFT => {
+                ::nodes::jointype::JoinType::JOIN_LEFT => {
                     append_context_keyword(context, " LEFT JOIN ", -PRETTYINDENT_STD, PRETTYINDENT_STD, PRETTYINDENT_JOIN)?;
                 }
-                nodes::jointype::JoinType::JOIN_FULL => {
+                ::nodes::jointype::JoinType::JOIN_FULL => {
                     append_context_keyword(context, " FULL JOIN ", -PRETTYINDENT_STD, PRETTYINDENT_STD, PRETTYINDENT_JOIN)?;
                 }
-                nodes::jointype::JoinType::JOIN_RIGHT => {
+                ::nodes::jointype::JoinType::JOIN_RIGHT => {
                     append_context_keyword(context, " RIGHT JOIN ", -PRETTYINDENT_STD, PRETTYINDENT_STD, PRETTYINDENT_JOIN)?;
                 }
                 other => {
@@ -2155,7 +2155,7 @@ fn get_from_clause_item<'mcx>(
                 if !pretty_paren(context) {
                     ch_(context, b')')?;
                 }
-            } else if j.jointype != nodes::jointype::JoinType::JOIN_INNER {
+            } else if j.jointype != ::nodes::jointype::JoinType::JOIN_INNER {
                 str_(context, " ON TRUE")?;
             }
 
@@ -2357,7 +2357,7 @@ fn get_from_clause_coldeflist<'mcx>(
 /// `get_tablesample_def(tablesample, context)` (ruleutils.c 12816-12849).
 fn get_tablesample_def<'mcx>(
     mcx: Mcx<'mcx>,
-    tablesample: &nodes::nodesamplescan::TableSampleClause<'mcx>,
+    tablesample: &::nodes::nodesamplescan::TableSampleClause<'mcx>,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
     let mut argtypes: PgVec<'mcx, Oid> = PgVec::new_in(mcx);
@@ -2415,7 +2415,7 @@ pub(crate) fn process_indirection<'mcx>(
     node: &Node<'mcx>,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
-    use nodes::primnodes::{CoerceToDomain, CoercionForm};
+    use ::nodes::primnodes::{CoerceToDomain, CoercionForm};
 
     // CoerceToDomain *cdomain = NULL;  — tracks whether we tentatively descended
     // past an implicit CoerceToDomain (so we can back up if its arg was not an
@@ -2518,8 +2518,8 @@ pub(crate) fn process_indirection<'mcx>(
 /// 349-368): the TargetEntry whose `ressortgroupref == sortref`.
 fn get_sortgroupref_tle<'a, 'mcx>(
     sortref: u32,
-    target_list: &'a [nodes::primnodes::TargetEntry<'mcx>],
-) -> PgResult<&'a nodes::primnodes::TargetEntry<'mcx>> {
+    target_list: &'a [::nodes::primnodes::TargetEntry<'mcx>],
+) -> PgResult<&'a ::nodes::primnodes::TargetEntry<'mcx>> {
     for tle in target_list.iter() {
         if tle.ressortgroupref == sortref {
             return Ok(tle);
@@ -2557,14 +2557,14 @@ fn as_windowclause<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a WindowClause<
         .ok_or_else(|| elog_error(format!("expected WindowClause, got tag {}", node.tag().0)))
 }
 
-fn as_targetentry<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a nodes::primnodes::TargetEntry<'mcx>> {
+fn as_targetentry<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a ::nodes::primnodes::TargetEntry<'mcx>> {
     match node.node_tag() {
-        nodes::nodes::ntag::T_TargetEntry => Ok(node.expect_targetentry()),
+        ::nodes::nodes::ntag::T_TargetEntry => Ok(node.expect_targetentry()),
         _ => Err(elog_error(format!("expected TargetEntry, got tag {}", node.tag().0))),
     }
 }
 
-fn as_mergeaction<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a nodes::rawnodes::MergeAction<'mcx>> {
+fn as_mergeaction<'a, 'mcx>(node: &'a Node<'mcx>) -> PgResult<&'a ::nodes::rawnodes::MergeAction<'mcx>> {
     node.as_mergeaction()
         .ok_or_else(|| elog_error(format!("expected MergeAction, got tag {}", node.tag().0)))
 }
@@ -2598,8 +2598,8 @@ fn tupdesc_attname(
 
 fn clone_targetlist<'mcx>(
     mcx: Mcx<'mcx>,
-    tl: &PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
+    tl: &PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(tl.len()).map_err(|_| mcx.oom(0))?;
     for t in tl.iter() {
@@ -2622,7 +2622,7 @@ fn clone_window_clauses<'mcx>(
 
 fn clone_node_list_from_tles<'mcx>(
     mcx: Mcx<'mcx>,
-    tl: &PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
+    tl: &PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
 ) -> PgResult<PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>> {
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(tl.len()).map_err(|_| mcx.oom(0))?;
@@ -2725,7 +2725,7 @@ fn trailing_line_len(data: &[u8]) -> usize {
 /// coercions anyway, we don't need to be as careful as `processIndirection()`
 /// is about descending past implicit CoerceToDomains.
 fn expr_is_multiexpr_param(expr: Option<&Expr>) -> bool {
-    use nodes::primnodes::{CoercionForm, ParamKind};
+    use ::nodes::primnodes::{CoercionForm, ParamKind};
 
     let mut cur = match expr {
         Some(e) => e,

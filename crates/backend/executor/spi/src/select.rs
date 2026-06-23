@@ -30,8 +30,8 @@
 use utils_error::ereport;
 use mcx::{MemoryContext, Mcx, PgVec};
 use types_error::{PgResult, ERROR};
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::parsestmt::CachedPlanHandle;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::parsestmt::CachedPlanHandle;
 use types_resowner::ResourceOwner;
 use types_xml::{SpiColumn, SpiResult};
 
@@ -96,7 +96,7 @@ fn prepare_oneshot_select<'mcx>(
     // _SPI_execute_plan). No parserSetup, no parameters.
     let query_node =
         parser_analyze::parse_analyze_fixedparams(mcx, parsetree, query, &[])?;
-    let mut querytree_list: PgVec<'mcx, nodes::copy_query::Query<'mcx>> = PgVec::new_in(mcx);
+    let mut querytree_list: PgVec<'mcx, ::nodes::copy_query::Query<'mcx>> = PgVec::new_in(mcx);
     querytree_list.push(query_node);
 
     // CompleteCachedPlan(plansource, stmt_list, NULL, argtypes, nargs,
@@ -107,7 +107,7 @@ fn prepare_oneshot_select<'mcx>(
         &[],   // param_types
         0,     // num_params
         false, // has_parser_setup
-        nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
+        ::nodes::copy_query::CURSOR_OPT_PARALLEL_OK,
         false, // fixed_result
     )?;
 
@@ -220,7 +220,7 @@ fn run_query_tupdesc(query: &str) -> PgResult<Vec<SpiColumn>> {
     snapmgr::push_active_snapshot_transaction::call()?;
     let desc = plancache_seams::plansource_result_desc::call(
         mcx,
-        nodes::parsestmt::CachedPlanSourceHandle(plansource),
+        ::nodes::parsestmt::CachedPlanSourceHandle(plansource),
     );
     let _ = snapmgr::pop_active_snapshot::call();
     let _ = plancache::DropCachedPlan(plansource);

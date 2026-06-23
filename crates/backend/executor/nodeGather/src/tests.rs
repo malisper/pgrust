@@ -5,7 +5,7 @@
 //! plan-node vocabulary and the seam-free constants.
 use super::*;
 use mcx::MemoryContext;
-use nodes::nodegather::{Gather, T_Gather, T_GatherState};
+use ::nodes::nodegather::{Gather, T_Gather, T_GatherState};
 
 #[test]
 fn outer_var_matches_c() {

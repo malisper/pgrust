@@ -44,13 +44,13 @@ use sort_storage_seams as sts;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::{Oid, OidIsValid};
 use types_error::{PgError, PgResult};
-use nodes::nodehashjoin::{
+use ::nodes::nodehashjoin::{
     BufFile, HashJoin, HashJoinState, HashJoinTableData, JoinType, ParallelHashJoinState,
     INVALID_SKEW_BUCKET_NO,
     PHJ_BATCH_ALLOCATE, PHJ_BATCH_ELECT, PHJ_BATCH_FREE, PHJ_BATCH_LOAD, PHJ_BATCH_PROBE,
     PHJ_BATCH_SCAN, PHJ_BUILD_FREE, PHJ_BUILD_HASH_OUTER, PHJ_BUILD_RUN,
 };
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 use types_tuple::heaptuple::FormedMinimalTuple;
 
@@ -640,7 +640,7 @@ fn exec_parallel_hash_join_node<'mcx>(
 
 /// `ExecInitHashJoin(node, estate, eflags)`.
 pub fn ExecInitHashJoin<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, HashJoinState<'mcx>>> {
@@ -791,7 +791,7 @@ pub fn ExecInitHashJoin<'mcx>(
 /// (`Node::Expr`); anything else is a planner invariant violation.
 fn node_list_to_exprs<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    nodes: Option<&[nodes::nodes::Node<'mcx>]>,
+    nodes: Option<&[::nodes::nodes::Node<'mcx>]>,
 ) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
     let nodes = nodes.unwrap_or(&[]);
     let mut out: PgVec<'mcx, Expr<'mcx>> = vec_with_capacity_in(mcx, nodes.len())?;
@@ -1754,7 +1754,7 @@ fn hashjoin_plan_node_id(node: &HashJoinState) -> i32 {
 #[inline]
 fn inner_hash_state<'a, 'mcx>(
     node: &'a mut HashJoinState<'mcx>,
-) -> &'a mut nodes::nodehash::HashState<'mcx> {
+) -> &'a mut ::nodes::nodehash::HashState<'mcx> {
     match node.js.ps.righttree.as_deref_mut() {
         Some(PlanStateNode::Hash(h)) => h,
         Some(other) => panic!("innerPlanState(HashJoin) is not a Hash node: {other:?}"),
@@ -1857,7 +1857,7 @@ pub fn ExecHashJoinInitializeDSM(
             pstate.batches = execparallel::INVALID_DSA_POINTER;
             pstate.old_batches = execparallel::INVALID_DSA_POINTER;
             pstate.nbuckets = 0;
-            pstate.growth = nodes::nodehash::ParallelHashGrowth::PHJ_GROWTH_OK;
+            pstate.growth = ::nodes::nodehash::ParallelHashGrowth::PHJ_GROWTH_OK;
             pstate.chunk_work_queue = execparallel::INVALID_DSA_POINTER;
             // pg_atomic_init_u32(&pstate->distributor, 0);
             pstate.distributor =

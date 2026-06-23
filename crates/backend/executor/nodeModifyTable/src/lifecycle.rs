@@ -11,9 +11,9 @@ extern crate alloc;
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
-use nodes::execexpr::ExprState;
-use nodes::nodes::CmdType;
-use nodes::primnodes::Expr;
+use ::nodes::execexpr::ExprState;
+use ::nodes::nodes::CmdType;
+use ::nodes::primnodes::Expr;
 use nodes::{
     EStateData, ModifyTableState, PartitionTupleRouting, RriId, SlotId, TargetEntry,
 };
@@ -154,7 +154,7 @@ pub fn ExecProcessReturning<'mcx>(
     new_slot: Option<SlotId>,
     plan_slot: Option<SlotId>,
 ) -> PgResult<SlotId> {
-    use nodes::execexpr::{EEO_FLAG_HAS_NEW, EEO_FLAG_HAS_OLD, EEO_FLAG_NEW_IS_NULL, EEO_FLAG_OLD_IS_NULL};
+    use ::nodes::execexpr::{EEO_FLAG_HAS_NEW, EEO_FLAG_HAS_OLD, EEO_FLAG_NEW_IS_NULL, EEO_FLAG_OLD_IS_NULL};
 
     // ProjectionInfo *projectReturning = resultRelInfo->ri_projectReturning;
     // ExprContext *econtext = projectReturning->pi_exprContext;
@@ -610,7 +610,7 @@ pub fn ExecSetupTransitionCaptureState<'mcx>(
     //                                    CMD_UPDATE);
     if mtstate.operation == CmdType::CMD_INSERT
         && mtstate.onConflictAction
-            == nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
+            == ::nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
     {
         mtstate.mt_oc_transition_capture =
             trigger_seams::make_transition_capture_state::call(
@@ -786,7 +786,7 @@ pub fn ExecLookupResultRelByOid<'mcx>(
 /// cleans up tuple routing (`ExecCleanupTupleRouting` + drop of
 /// `mt_root_tuple_slot`), terminates EPQ (`EvalPlanQualEnd`), and shuts down the
 /// subplan (`ExecEndNode`). The FDW routine / batch-slot fields are not carried
-/// on the trimmed [`nodes::ResultRelInfo`] (`ri_NumSlotsInitialized == 0`
+/// on the trimmed [`::nodes::ResultRelInfo`] (`ri_NumSlotsInitialized == 0`
 /// and `ri_FdwRoutine == NULL` for every modeled rel, so that loop body is a
 /// no-op); the tuple-routing cleanup, slot drops, and subplan shutdown go
 /// through their owners' seam crates.
@@ -875,7 +875,7 @@ pub fn fireBSTriggers<'mcx>(
         CmdType::CMD_INSERT => {
             trigger_seams::exec_bs_insert_triggers::call(estate, result_rel_info)?;
             if node.onConflictAction
-                == nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
+                == ::nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
             {
                 trigger_seams::exec_bs_update_triggers::call(
                     estate,
@@ -938,7 +938,7 @@ pub fn fireASTriggers<'mcx>(
     match node.operation {
         CmdType::CMD_INSERT => {
             if node.onConflictAction
-                == nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
+                == ::nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
             {
                 // ExecASUpdateTriggers(..., node->mt_oc_transition_capture)
                 let tc = node.mt_oc_transition_capture.as_deref_mut();

@@ -18,7 +18,7 @@
 use mcx::Mcx;
 use types_core::xact::CommandId;
 use types_error::PgResult;
-use nodes::tuptable::SlotData;
+use ::nodes::tuptable::SlotData;
 use rel::Relation;
 use types_tableam::tableam::{
     BulkInsertStateData, LockTupleMode, LockWaitPolicy, Snapshot, TM_FailureData, TM_Result,

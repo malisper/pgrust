@@ -14,8 +14,8 @@
 use nodes_core::node_walker::{
     expression_tree_walker_mut, query_or_expression_tree_mutator, query_tree_mutator,
 };
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::ExprRelids;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::ExprRelids;
 
 use crate::relids;
 
@@ -199,7 +199,7 @@ pub fn remove_nulling_relids<'mcx>(
 /// `Node::Query(q)` arm is exactly `query_tree_mutator(q, mutator, flags)` (it
 /// does NOT bump `sublevels_up` — the top query is level 0).
 pub fn remove_nulling_relids_in_query<'mcx>(
-    query: &mut nodes::copy_query::Query<'mcx>,
+    query: &mut ::nodes::copy_query::Query<'mcx>,
     removable_relids: &ExprRelids,
     except_relids: &ExprRelids,
     mcx: mcx::Mcx<'mcx>,

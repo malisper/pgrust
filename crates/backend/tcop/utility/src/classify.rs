@@ -7,9 +7,9 @@ use types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TRANSACTION_STATE,
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERROR, WARNING,
 };
-use nodes::nodes::Node;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::{CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UPDATE, CMD_UTILITY};
+use ::nodes::nodes::Node;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::{CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UPDATE, CMD_UTILITY};
 
 use crate::consts::*;
 
@@ -48,8 +48,8 @@ pub fn CommandIsReadOnly(pstmt: &PlannedStmt) -> PgResult<bool> {
 /// `ClassifyUtilityCommandAsReadOnly` (utility.c:127-395, static) — classify a
 /// utility parse tree's read-only status (`COMMAND_*` flags).
 pub fn ClassifyUtilityCommandAsReadOnly(parsetree: &Node) -> PgResult<i32> {
-    use nodes::nodes as ntag;
-    use nodes::ddlnodes::TransactionStmtKind::*;
+    use ::nodes::nodes as ntag;
+    use ::nodes::ddlnodes::TransactionStmtKind::*;
 
     let flags = match parsetree.node_tag() {
         // DDL is not read-only, and neither is TRUNCATE.

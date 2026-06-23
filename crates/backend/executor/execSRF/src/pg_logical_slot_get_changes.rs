@@ -37,11 +37,11 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::heaptuple::Datum;
 
-use funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
+use ::funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
 
 use logical_seams as logical_seams;
 use replication_slot as slot;

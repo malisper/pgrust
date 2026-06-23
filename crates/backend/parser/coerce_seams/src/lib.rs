@@ -6,8 +6,8 @@
 
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::parsestmt::ParseState;
-use nodes::primnodes::{CoercionForm, Expr};
+use ::nodes::parsestmt::ParseState;
+use ::nodes::primnodes::{CoercionForm, Expr};
 use parsenodes::CoercionContext;
 
 /// `CoercionPathType` (parser/parse_coerce.h): the kind of coercion pathway
@@ -275,5 +275,5 @@ seam_core::seam!(
         collation: Oid,
         typlen: i32,
         typbyval: bool,
-    ) -> PgResult<nodes::primnodes::Expr<'static>>
+    ) -> PgResult<::nodes::primnodes::Expr<'static>>
 );

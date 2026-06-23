@@ -29,9 +29,9 @@ use utils_error::ereport;
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::parsenodes::RangeTblEntry;
-use nodes::primnodes::{
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::parsenodes::RangeTblEntry;
+use ::nodes::primnodes::{
     CoercionForm, ConvertRowtypeExpr, Expr, ReturningExpr, RowExpr, Var, VarReturningType,
 };
 
@@ -525,12 +525,12 @@ pub fn map_variable_attnos_expr_list_varno<'mcx>(
 /// vector is consumed and returned mutated.
 pub fn map_variable_attnos_targetentry_list<'mcx>(
     mcx: Mcx<'mcx>,
-    tlist: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
+    tlist: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
     target_varno: i32,
     attmap: &[i16],
     to_rowtype: Oid,
-) -> PgResult<(PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>, bool)> {
-    let mut out: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+) -> PgResult<(PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>, bool)> {
+    let mut out: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
         mcx::vec_with_capacity_in(mcx, tlist.len())?;
     let mut found_whole_row = false;
     for mut tle in tlist.into_iter() {
@@ -587,7 +587,7 @@ pub enum ReplaceVarsNoMatchOption {
 pub fn ReplaceVarFromTargetList<'mcx>(
     var: &Var,
     target_rte: &RangeTblEntry<'mcx>,
-    targetlist: &[nodes::primnodes::TargetEntry<'mcx>],
+    targetlist: &[::nodes::primnodes::TargetEntry<'mcx>],
     result_relation: i32,
     nomatch_option: ReplaceVarsNoMatchOption,
     nomatch_varno: i32,
@@ -777,7 +777,7 @@ pub fn ReplaceVarsFromTargetList<'mcx>(
     target_varno: i32,
     sublevels_up: i32,
     target_rte: &RangeTblEntry<'mcx>,
-    targetlist: &[nodes::primnodes::TargetEntry<'mcx>],
+    targetlist: &[::nodes::primnodes::TargetEntry<'mcx>],
     result_relation: i32,
     nomatch_option: ReplaceVarsNoMatchOption,
     nomatch_varno: i32,

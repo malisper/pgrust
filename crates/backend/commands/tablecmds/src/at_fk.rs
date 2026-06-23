@@ -40,9 +40,9 @@ use types_error::{
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
 };
-use nodes::ddlnodes::{Constraint, ConstrType, CoercionContext, CreateTrigStmt};
-use nodes::rawnodes::RangeVar as DdlRangeVar;
-use nodes::nodes::{Node, NodePtr};
+use ::nodes::ddlnodes::{Constraint, ConstrType, CoercionContext, CreateTrigStmt};
+use ::nodes::rawnodes::RangeVar as DdlRangeVar;
+use ::nodes::nodes::{Node, NodePtr};
 use rel::Relation;
 use types_storage::lock::LOCKMODE;
 use types_tuple::access::{
@@ -2023,7 +2023,7 @@ pub(crate) fn DropForeignKeyConstraintTriggers<'mcx>(
             TriggerRelationId,
             row.tgoid,
             0,
-            nodes::parsenodes::DROP_RESTRICT,
+            ::nodes::parsenodes::DROP_RESTRICT,
             0,
         )?;
         // Make trigger drop visible, in case the loop iterates.
@@ -2353,7 +2353,7 @@ fn RemoveInheritedConstraint<'mcx>(
     CommandCounterIncrement()?;
     dependency_seams::perform_multiple_deletions::call(
         &objs,
-        nodes::parsenodes::DROP_RESTRICT,
+        ::nodes::parsenodes::DROP_RESTRICT,
         0,
     )?;
 
@@ -2872,7 +2872,7 @@ use types_catalog::pg_trigger::{
 /// `makeString(s)` as a `Node*`.
 fn make_string<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgResult<NodePtr<'mcx>> {
     let sval = PgString::from_str_in(s, mcx)?;
-    mcx::alloc_in(mcx, Node::mk_string(mcx, nodes::value::StringNode { sval })?)
+    mcx::alloc_in(mcx, Node::mk_string(mcx, ::nodes::value::StringNode { sval })?)
 }
 
 /// `SystemFuncName(name)` — a `pg_catalog`-qualified function-name list.

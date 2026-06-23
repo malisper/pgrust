@@ -54,7 +54,7 @@ use postgres_seams as tcop_postgres;
 
 use mcx::{alloc_in, Mcx, PgBox};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::nodegather::{Gather, GatherStateData};
+use ::nodes::nodegather::{Gather, GatherStateData};
 use nodes::{Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind};
 use types_pgstat::wait_event::WAIT_EVENT_EXECUTE_GATHER;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
@@ -107,7 +107,7 @@ fn exec_gather_node<'mcx>(
 
 /// `ExecInitGather(node, estate, eflags)` — initialize the Gather node.
 pub fn ExecInitGather<'mcx>(
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, GatherStateData<'mcx>>> {
@@ -771,7 +771,7 @@ fn tup_is_null(slot: Option<SlotId>, estate: &EStateData<'_>) -> bool {
 
 /// `econtext->ecxt_outertuple = slot` — install the produced slot as the
 /// projection's outer tuple before `ExecProject`.
-fn set_outer_tuple(estate: &mut EStateData<'_>, econtext: nodes::EcxtId, slot: SlotId) {
+fn set_outer_tuple(estate: &mut EStateData<'_>, econtext: ::nodes::EcxtId, slot: SlotId) {
     estate.ecxt_mut(econtext).ecxt_outertuple = Some(slot);
 }
 

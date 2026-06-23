@@ -19,8 +19,8 @@ use types_core::Oid;
 use types_tuple::heaptuple::Datum as DatumV;
 use types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED;
 use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::{
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::{
     FuncCallContext, ReturnSetInfo, SetFunctionReturnMode, TypeFuncClass, MAT_SRF_BLESS,
     MAT_SRF_USE_EXPECTED_DESC, SFRM_Materialize, SFRM_Materialize_Random,
 };
@@ -520,7 +520,7 @@ pub fn srf_arg_varlena_bytes<'mcx>(
     fcinfo: &FunctionCallInfoBaseData<'mcx>,
     n: usize,
 ) -> PgResult<mcx::PgVec<'mcx, u8>> {
-    use nodes::fmgr::FmgrArgRef;
+    use ::nodes::fmgr::FmgrArgRef;
 
     // C: PG_GETARG_TEXT_PP / PG_GETARG_JSONB_P detoast the by-reference arg via
     // `pg_detoast_datum_packed`. Unlike the regular function-call dispatch
@@ -588,7 +588,7 @@ pub fn srf_arg_record<'mcx>(
     fcinfo: &FunctionCallInfoBaseData<'mcx>,
     n: usize,
 ) -> PgResult<types_tuple::heaptuple::FormedTuple<'mcx>> {
-    use nodes::fmgr::FmgrArgRef;
+    use ::nodes::fmgr::FmgrArgRef;
     use types_tuple::heaptuple::FormedTuple;
 
     // C: rec = PG_GETARG_HEAPTUPLEHEADER(n) — detoast the by-reference composite
@@ -662,8 +662,8 @@ mod srf_protocol_tests {
     use core::any::Any;
     use mcx::{MemoryContext, PgBox};
     use datum::NullableDatum;
-    use nodes::execexpr::ExprDoneCond;
-    use nodes::funcapi::{ReturnSetInfo, SFRM_ValuePerCall};
+    use ::nodes::execexpr::ExprDoneCond;
+    use ::nodes::funcapi::{ReturnSetInfo, SFRM_ValuePerCall};
 
     /// `generate_series_fctx` (int.c:47) — the cross-call state. A plain
     /// `'static` struct, exactly as the C SRF's `user_fctx` payload (`void *`).

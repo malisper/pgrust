@@ -34,7 +34,7 @@ use types_catalog::pg_language::{LanguageRelationId, PgLanguageInsertRow};
 use types_core::{InvalidOid, Oid, OidIsValid, INTERNALOID, OIDOID, PROCEDURE_RELATION_ID};
 use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
-use nodes::ddlnodes::CreatePLangStmt;
+use ::nodes::ddlnodes::CreatePLangStmt;
 use types_storage::lock::RowExclusiveLock;
 
 /// `LANGUAGE_HANDLEROID` — OID of the `language_handler` pseudotype
@@ -59,7 +59,7 @@ fn namestrcpy(src: &str) -> [u8; NAMEDATALEN] {
 /// components, as `LookupFuncName` and `NameListToString` consume it.
 fn name_list_strings<'mcx>(
     mcx: Mcx<'mcx>,
-    names: &[nodes::nodes::NodePtr<'_>],
+    names: &[::nodes::nodes::NodePtr<'_>],
 ) -> PgResult<mcx::PgVec<'mcx, mcx::PgString<'mcx>>> {
     let mut out = mcx::vec_with_capacity_in(mcx, names.len())?;
     for n in names.iter() {
@@ -76,7 +76,7 @@ fn name_list_strings<'mcx>(
 /// for error messages. (proclang only needs the un-quoted join; this is the
 /// faithful image of utils-side `NameListToString` for a list of `String`
 /// nodes.)
-fn name_list_to_string(names: &[nodes::nodes::NodePtr<'_>]) -> String {
+fn name_list_to_string(names: &[::nodes::nodes::NodePtr<'_>]) -> String {
     let mut string = String::new();
     for (i, n) in names.iter().enumerate() {
         if i != 0 {
@@ -339,10 +339,10 @@ pub fn get_language_oid(langname: &str, missing_ok: bool) -> PgResult<Oid> {
 /// `case T_CreatePLangStmt: CreateProceduralLanguage(stmt)` (utility.c).
 fn create_procedural_language_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     match stmt.node_tag() {
-        nodes::nodes::ntag::T_CreatePLangStmt => {
+        ::nodes::nodes::ntag::T_CreatePLangStmt => {
             CreateProceduralLanguage(mcx, stmt.expect_createplangstmt())
         }
         _ => panic!("create_procedural_language: parse tree is not a CreatePLangStmt"),

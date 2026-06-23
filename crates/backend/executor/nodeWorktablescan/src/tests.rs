@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use mcx::MemoryContext;
-use nodes::execnodes::{RecursiveUnionSharedState, ScanStateData};
-use nodes::executor::{TupleTableSlot, TTS_FLAG_EMPTY};
-use nodes::nodeworktablescan::WorkTableScan;
-use nodes::Tuplestorestate;
+use ::nodes::execnodes::{RecursiveUnionSharedState, ScanStateData};
+use ::nodes::executor::{TupleTableSlot, TTS_FLAG_EMPTY};
+use ::nodes::nodeworktablescan::WorkTableScan;
+use ::nodes::Tuplestorestate;
 
 thread_local! {
     /// Verdict the mocked `tuplestore_gettupleslot` returns.
@@ -158,7 +158,7 @@ fn resolve_records_wtparam_index() {
     let plan = WorkTableScan { wtParam: 3, ..Default::default() };
     let node = alloc_in(
         estate.es_query_cxt,
-        nodes::nodes::Node::mk_work_table_scan(estate.es_query_cxt, plan).unwrap(),
+        ::nodes::nodes::Node::mk_work_table_scan(estate.es_query_cxt, plan).unwrap(),
     )
     .unwrap();
     // SAFETY: the Node lives in the per-query context for the test duration.
@@ -177,7 +177,7 @@ fn resolve_errors_when_shared_state_absent() {
     let plan = WorkTableScan { wtParam: 0, ..Default::default() };
     let node = alloc_in(
         estate.es_query_cxt,
-        nodes::nodes::Node::mk_work_table_scan(estate.es_query_cxt, plan).unwrap(),
+        ::nodes::nodes::Node::mk_work_table_scan(estate.es_query_cxt, plan).unwrap(),
     )
     .unwrap();
     st.ss.ps.plan = Some(unsafe { &*(node.as_ref() as *const _) });
@@ -195,7 +195,7 @@ fn publish_hoists_tuplestores_into_side_table() {
     let mut estate = EStateData::new_in(ctx.mcx());
     let qcxt = estate.es_query_cxt;
     let mut rustate =
-        nodes::noderecursiveunion::RecursiveUnionStateData::new_in(qcxt);
+        ::nodes::noderecursiveunion::RecursiveUnionStateData::new_in(qcxt);
     rustate.working_table = Some(alloc_in(qcxt, Tuplestorestate::default()).unwrap());
     rustate.intermediate_table = Some(alloc_in(qcxt, Tuplestorestate::default()).unwrap());
     rustate.recursing = false;
@@ -219,14 +219,14 @@ fn publish_rejects_double_claim() {
     let mut estate = EStateData::new_in(ctx.mcx());
     let qcxt = estate.es_query_cxt;
     let mut rustate =
-        nodes::noderecursiveunion::RecursiveUnionStateData::new_in(qcxt);
+        ::nodes::noderecursiveunion::RecursiveUnionStateData::new_in(qcxt);
     rustate.working_table = Some(alloc_in(qcxt, Tuplestorestate::default()).unwrap());
     publish_wtparam_slot(&mut rustate, &mut estate, 0).unwrap();
 
     // A second publish for the same wtParam is the C `Assert(prmdata->execPlan
     // == NULL)` violation.
     let mut rustate2 =
-        nodes::noderecursiveunion::RecursiveUnionStateData::new_in(qcxt);
+        ::nodes::noderecursiveunion::RecursiveUnionStateData::new_in(qcxt);
     rustate2.working_table = Some(alloc_in(qcxt, Tuplestorestate::default()).unwrap());
     assert!(publish_wtparam_slot(&mut rustate2, &mut estate, 0).is_err());
 }

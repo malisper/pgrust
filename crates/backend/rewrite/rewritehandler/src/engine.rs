@@ -36,16 +36,16 @@ use types_error::{
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_SYNTAX_ERROR, ERROR,
 };
-use nodes::copy_query::{Query, QuerySource};
-use nodes::modifytable::{OnConflictAction, OverridingKind};
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsenodes::{RTEKind, RangeTblEntry};
-use nodes::primnodes::{CoerceToDomain, Expr, FieldStore, SetToDefault, SubscriptingRef, Var};
-use nodes::rawnodes::{CommonTableExpr, LockClauseStrength, LockWaitPolicy};
+use ::nodes::copy_query::{Query, QuerySource};
+use ::nodes::modifytable::{OnConflictAction, OverridingKind};
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
+use ::nodes::primnodes::{CoerceToDomain, Expr, FieldStore, SetToDefault, SubscriptingRef, Var};
+use ::nodes::rawnodes::{CommonTableExpr, LockClauseStrength, LockWaitPolicy};
 use types_acl::acl::ACL_SELECT_FOR_UPDATE;
 use parser_analyze::applyLockingClause;
 use parser_relation::getRTEPermissionInfo;
-use nodes::value::StringNode;
+use ::nodes::value::StringNode;
 
 use table::table_open;
 use nodes_core::makefuncs::{flat_copy_target_entry, make_null_const, make_target_entry};
@@ -76,8 +76,8 @@ fn get_generated_columns<'mcx>(
     rel: &Relation<'mcx>,
     rt_index: i32,
     include_stored: bool,
-) -> PgResult<Vec<nodes::primnodes::TargetEntry<'mcx>>> {
-    let mut gen_cols: Vec<nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+) -> PgResult<Vec<::nodes::primnodes::TargetEntry<'mcx>>> {
+    let mut gen_cols: Vec<::nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
     let tupdesc = &rel.rd_att;
 
     let has_gen = tupdesc.constr.as_ref().is_some_and(|c| {
@@ -162,10 +162,10 @@ fn attname_of(att: &FormData_pg_attribute) -> String {
 /// FieldStore/SubscriptingRef assignment.
 fn process_matched_tle<'mcx>(
     mcx: Mcx<'mcx>,
-    src_tle: &nodes::primnodes::TargetEntry<'mcx>,
-    prior_tle: Option<&nodes::primnodes::TargetEntry<'mcx>>,
+    src_tle: &::nodes::primnodes::TargetEntry<'mcx>,
+    prior_tle: Option<&::nodes::primnodes::TargetEntry<'mcx>>,
     attr_name: &str,
-) -> PgResult<nodes::primnodes::TargetEntry<'mcx>> {
+) -> PgResult<::nodes::primnodes::TargetEntry<'mcx>> {
     // Normal case: first assignment to the attribute.
     let Some(prior_tle) = prior_tle else {
         return flat_copy_target_entry(mcx, src_tle);
@@ -352,9 +352,9 @@ fn searchForDefault(rte: &RangeTblEntry<'_>) -> bool {
 fn findDefaultOnlyColumns<'mcx>(
     mcx: Mcx<'mcx>,
     rte: &RangeTblEntry<'_>,
-) -> PgResult<Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>> {
     use nodes_core::bitmapset::{bms_add_member, bms_del_member, bms_is_empty};
-    let mut default_only_cols: Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> = None;
+    let mut default_only_cols: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
     let mut initialized = false;
 
     for sublist_node in rte.values_lists.iter() {
@@ -398,25 +398,25 @@ fn findDefaultOnlyColumns<'mcx>(
 #[allow(clippy::too_many_arguments)]
 pub fn rewriteTargetListIU<'mcx>(
     mcx: Mcx<'mcx>,
-    target_list: &[nodes::primnodes::TargetEntry<'mcx>],
+    target_list: &[::nodes::primnodes::TargetEntry<'mcx>],
     command_type: CmdType,
     override_kind: OverridingKind,
     target_relation: &Relation<'mcx>,
     values_rte: Option<&RangeTblEntry<'mcx>>,
     values_rte_index: i32,
-    unused_values_attrnos: &mut Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
+    unused_values_attrnos: &mut Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>,
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     use nodes_core::bitmapset::{bms_add_member, bms_is_member};
 
     let rd_att = &target_relation.rd_att;
     let numattrs = rd_att.natts as usize;
 
     // new_tles[attrno-1] : the merged TLE for each real attribute.
-    let mut new_tles: Vec<Option<nodes::primnodes::TargetEntry<'mcx>>> =
+    let mut new_tles: Vec<Option<::nodes::primnodes::TargetEntry<'mcx>>> =
         (0..numattrs).map(|_| None).collect();
-    let mut junk_tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+    let mut junk_tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
     let mut next_junk_attrno = (numattrs + 1) as i16;
-    let mut default_only_cols: Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> = None;
+    let mut default_only_cols: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
 
     for old_tle in target_list.iter() {
         if !old_tle.resjunk {
@@ -448,7 +448,7 @@ pub fn rewriteTargetListIU<'mcx>(
         }
     }
 
-    let mut new_tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+    let mut new_tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
 
     for attrno in 1..=numattrs as i32 {
         let mut new_tle = new_tles[(attrno - 1) as usize].take();
@@ -631,7 +631,7 @@ pub fn rewriteTargetListIU<'mcx>(
     }
 
     // list_concat(new_tlist, junk_tlist)
-    let mut result: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    let mut result: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     for t in new_tlist {
         result.push(t);
     }
@@ -649,7 +649,7 @@ pub fn rewriteValuesRTE<'mcx>(
     parsetree: &mut Query<'mcx>,
     rti: i32,
     target_relation: &Relation<'mcx>,
-    unused_cols: Option<&nodes::bitmapset::Bitmapset<'mcx>>,
+    unused_cols: Option<&::nodes::bitmapset::Bitmapset<'mcx>>,
 ) -> PgResult<bool> {
     use nodes_core::bitmapset::bms_is_member;
 
@@ -1166,7 +1166,7 @@ pub fn rewriteRuleAction<'mcx>(
     {
         let rtable_tail: PgVec<'mcx, RangeTblEntry<'mcx>> =
             core_take_vec(&mut sub_action.rtable);
-        let perminfos_tail: PgVec<'mcx, nodes::parsenodes::RTEPermissionInfo<'mcx>> =
+        let perminfos_tail: PgVec<'mcx, ::nodes::parsenodes::RTEPermissionInfo<'mcx>> =
             core_take_vec(&mut sub_action.rteperminfos);
 
         // sub_action->rtable = copyObject(parsetree->rtable)
@@ -1174,7 +1174,7 @@ pub fn rewriteRuleAction<'mcx>(
         for rte in parsetree.rtable.iter() {
             new_rtable.push(rte.clone_in(mcx)?);
         }
-        let mut new_perminfos: PgVec<'mcx, nodes::parsenodes::RTEPermissionInfo<'mcx>> =
+        let mut new_perminfos: PgVec<'mcx, ::nodes::parsenodes::RTEPermissionInfo<'mcx>> =
             PgVec::new_in(mcx);
         for pi in parsetree.rteperminfos.iter() {
             new_perminfos.push(pi.clone_in(mcx)?);
@@ -1352,7 +1352,7 @@ pub fn rewriteRuleAction<'mcx>(
         && sub_action.commandType != CmdType::CMD_UTILITY
     {
         let new_rte = sub_action.rtable[(new_varno - 1) as usize].clone_in(mcx)?;
-        let tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = parsetree
+        let tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = parsetree
             .targetList
             .iter()
             .map(|t| t.clone_in(mcx))
@@ -1395,7 +1395,7 @@ pub fn rewriteRuleAction<'mcx>(
         *returning_flag = true;
 
         let result_rte = parsetree.rtable[(parsetree.resultRelation - 1) as usize].clone_in(mcx)?;
-        let action_tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = rule_action
+        let action_tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = rule_action
             .returningList
             .iter()
             .map(|t| t.clone_in(mcx))
@@ -1404,7 +1404,7 @@ pub fn rewriteRuleAction<'mcx>(
 
         // ReplaceVarsFromTargetList over parsetree->returningList, stored back
         // into rule_action->returningList.
-        let mut ret_list: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+        let mut ret_list: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
             PgVec::new_in(mcx);
         let mut had_sublink = rule_action.hasSubLinks;
         for tle in parsetree.returningList.iter() {
@@ -1499,7 +1499,7 @@ fn CopyAndAddInvertedQual<'mcx>(
     // Fix references to NEW.
     if event == CmdType::CMD_INSERT || event == CmdType::CMD_UPDATE {
         let rte = parsetree.rtable[(rt_index - 1) as usize].clone_in(mcx)?;
-        let tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = parsetree
+        let tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = parsetree
             .targetList
             .iter()
             .map(|t| t.clone_in(mcx))
@@ -1661,7 +1661,7 @@ fn ApplyRetrieveRule<'mcx>(
                 // Since ChangeVarNodes scribbles on the tree in-place, copy the
                 // RETURNING list first for safety.
                 let new_result_relation = parsetree.resultRelation;
-                let mut new_returning: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+                let mut new_returning: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
                     PgVec::new_in(mcx);
                 for tle in parsetree.returningList.iter() {
                     let mut node = Node::mk_target_entry(mcx, tle.clone_in(mcx)?)?;
@@ -2459,7 +2459,7 @@ fn rewriteTargetView<'mcx>(
     // Adjust the view targetlist Vars to reference the new target RTE, making
     // their varnos new_rt_index instead of base_rt_index. We keep our own owned
     // copy of the (re-pointed) view targetlist for the replacements below.
-    let mut view_targetlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = viewquery
+    let mut view_targetlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = viewquery
         .targetList
         .iter()
         .map(|t| t.clone_in(mcx))
@@ -2664,7 +2664,7 @@ fn rewriteTargetView<'mcx>(
         // pseudo-relation rather than the new target RTE. "EXCLUDED.*" will be
         // expanded using the view's rowtype, which is correct.
         // (rewriteHandler.c:3719)
-        let mut tmp_tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = view_targetlist
+        let mut tmp_tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = view_targetlist
             .iter()
             .map(|t| t.clone_in(mcx))
             .collect::<PgResult<_>>()?;
@@ -2754,8 +2754,8 @@ fn rewriteTargetView<'mcx>(
         }
 
         if has_wco && (cascaded || view_quals_present) {
-            let mut wco = nodes::rawnodes::WithCheckOption {
-                kind: nodes::rawnodes::WCOKind::WCO_VIEW_CHECK,
+            let mut wco = ::nodes::rawnodes::WithCheckOption {
+                kind: ::nodes::rawnodes::WCOKind::WCO_VIEW_CHECK,
                 relname: Some(PgString::from_str_in(view.name(), mcx)?),
                 polname: None,
                 qual: None,
@@ -2796,7 +2796,7 @@ fn rewriteTargetView<'mcx>(
 /// `rewriteTargetView`). Errors exactly as the C `elog` if the entry is missing,
 /// junk, or not a plain Var.
 fn view_tle_base_attno<'mcx>(
-    view_targetlist: &[nodes::primnodes::TargetEntry<'mcx>],
+    view_targetlist: &[::nodes::primnodes::TargetEntry<'mcx>],
     resno: i16,
 ) -> PgResult<i16> {
     use parser_relation::get_tle_by_resno;
@@ -2958,7 +2958,7 @@ fn RewriteQuery<'mcx>(
                 }
 
                 if let Some(vidx) = values_rte_found {
-                    let mut unused: Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> =
+                    let mut unused: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> =
                         None;
                     let values_rte = parsetree.rtable[(vidx - 1) as usize].clone_in(mcx)?;
                     let new_tlist = rewriteTargetListIU(
@@ -3018,7 +3018,7 @@ fn RewriteQuery<'mcx>(
                     // (the stored form is the raw-node list, mirroring C's
                     // `List *onConflictSet` of TargetEntry).
                     let oc = parsetree.onConflict.as_deref().unwrap();
-                    let mut old_set: Vec<nodes::primnodes::TargetEntry<'mcx>> =
+                    let mut old_set: Vec<::nodes::primnodes::TargetEntry<'mcx>> =
                         Vec::with_capacity(oc.onConflictSet.len());
                     for tle_node in oc.onConflictSet.iter() {
                         let Some(tle) = (**tle_node).as_targetentry() else {
@@ -3083,7 +3083,7 @@ fn RewriteQuery<'mcx>(
                             // Downcast the raw-node SET list to `TargetEntry`s
                             // (the stored form mirrors C's `List *targetList`).
                             let mut old_tlist: Vec<
-                                nodes::primnodes::TargetEntry<'mcx>,
+                                ::nodes::primnodes::TargetEntry<'mcx>,
                             > = Vec::with_capacity(action.targetList.len());
                             for tle_node in action.targetList.iter() {
                                 let Some(tle) = (**tle_node).as_targetentry() else {

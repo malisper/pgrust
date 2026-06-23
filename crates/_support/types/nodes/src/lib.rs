@@ -22,7 +22,7 @@ pub mod execstate_tags;
 /// `executor.h` / `tuptable.h` slot vocabulary (`TupleTableSlot`,
 /// `TupleSlotKind`, `TTS_FLAG_*`, `EXEC_FLAG_*`) was relocated into the leaf
 /// `types-slot` crate to break the `types-tableam` → `types-nodes` cycle. This
-/// re-export preserves every existing `nodes::executor::…` and
+/// re-export preserves every existing `::nodes::executor::…` and
 /// `crate::executor::…` import path unchanged.
 pub use types_slot as executor;
 pub mod fmgr;

@@ -5,9 +5,9 @@
 //!
 //! # Owned model
 //!
-//! The raw-grammar `Node *` input is a [`nodes::nodes::Node`] (the
+//! The raw-grammar `Node *` input is a [`::nodes::nodes::Node`] (the
 //! `ResTarget`/`ColumnRef`/`A_Indirection`/… vocabulary); transformed
-//! expressions are [`nodes::primnodes::Expr`]; a `List *` is a `PgVec` on
+//! expressions are [`::nodes::primnodes::Expr`]; a `List *` is a `PgVec` on
 //! the raw side and a `Vec`/`PgVec` on the typed side; a `NULL` is `None`. There
 //! is no `extern "C"` and no raw pointers.
 //!
@@ -41,19 +41,19 @@ use types_error::{
 };
 use types_tuple::heaptuple::{RECORDOID, TEXTOID, UNKNOWNOID};
 
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::parsenodes::{
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::parsenodes::{
     RangeTblEntry, RTE_CTE, RTE_FUNCTION, RTE_GROUP, RTE_JOIN, RTE_NAMEDTUPLESTORE, RTE_RELATION,
     RTE_RESULT, RTE_SUBQUERY, RTE_TABLEFUNC, RTE_VALUES,
 };
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::{
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::{
     CaseTestExpr, CoercionForm, Expr, FieldSelect, FieldStore, MinMaxOp, SQLValueFunctionOp,
     SetToDefault, SubLinkType, SubscriptingRef, Var,
 };
-use nodes::primnodes::XmlExprOp;
-use nodes::primnodes::JsonExprOp;
-use nodes::rawnodes::{A_Indirection, ColumnRef, ResTarget};
+use ::nodes::primnodes::XmlExprOp;
+use ::nodes::primnodes::JsonExprOp;
+use ::nodes::rawnodes::{A_Indirection, ColumnRef, ResTarget};
 use parsenodes::CoercionContext;
 
 use types_acl::acl::ACL_SELECT;
@@ -91,7 +91,7 @@ fn is_string(node: &Node<'_>) -> bool {
 /// Convert a raw-grammar `SetToDefault` node into the typed primnode form (the
 /// C uses one struct; the split model keeps the raw node's `location` only on
 /// the raw side, which the typed `Expr::SetToDefault` does not carry).
-fn raw_settodefault_to_prim(d: &nodes::rawexprnodes::SetToDefault) -> SetToDefault {
+fn raw_settodefault_to_prim(d: &::nodes::rawexprnodes::SetToDefault) -> SetToDefault {
     SetToDefault {
         typeId: d.type_id,
         typeMod: d.type_mod,
@@ -126,14 +126,14 @@ fn rel_name<'a>(rd: &'a rel::RelationData<'_>) -> &'a str {
 /// `GetCTETargetList(cte)` (parsenodes.h macro) — the CTE's output target list:
 /// the `Query`'s `targetList` for SELECT, else its `returningList`.
 fn get_cte_target_list<'a, 'mcx>(
-    cte: &'a nodes::rawnodes::CommonTableExpr<'mcx>,
-) -> &'a [nodes::primnodes::TargetEntry<'mcx>] {
+    cte: &'a ::nodes::rawnodes::CommonTableExpr<'mcx>,
+) -> &'a [::nodes::primnodes::TargetEntry<'mcx>] {
     let q = cte
         .ctequery
         .as_deref()
         .and_then(|n| n.as_query())
         .unwrap_or_else(|| panic!("GetCTETargetList: cte->ctequery is not a Query"));
-    if q.commandType == nodes::nodes::CmdType::CMD_SELECT {
+    if q.commandType == ::nodes::nodes::CmdType::CMD_SELECT {
         &q.targetList
     } else {
         &q.returningList
@@ -154,7 +154,7 @@ pub fn transformTargetEntry<'mcx>(
     expr_kind: ParseExprKind,
     colname: Option<String>,
     resjunk: bool,
-) -> PgResult<nodes::primnodes::TargetEntry<'mcx>> {
+) -> PgResult<::nodes::primnodes::TargetEntry<'mcx>> {
     // Transform the node if caller didn't do it already.
     let expr = match expr {
         Some(e) => Some(e),
@@ -226,14 +226,14 @@ pub fn transformTargetList<'mcx>(
     pstate: &mut ParseState<'mcx>,
     targetlist: PgVec<'mcx, ResTarget<'mcx>>,
     expr_kind: ParseExprKind,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     // Shouldn't have any leftover multiassign items at start.
     debug_assert!(pstate.p_multiassign_exprs.is_empty());
 
     // Expand "something.*" in SELECT and RETURNING, but not UPDATE.
     let expand_star = expr_kind != ParseExprKind::EXPR_KIND_UPDATE_SOURCE;
 
-    let mut p_target: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    let mut p_target: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
 
     for res in targetlist.into_iter() {
         // Check for "something.*".
@@ -281,8 +281,8 @@ pub fn transformTargetList<'mcx>(
 /// Append one `TargetEntry` to a `PgVec` (fallible reserve, infallible push).
 fn push_te<'mcx>(
     mcx: Mcx<'mcx>,
-    list: &mut PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
-    te: nodes::primnodes::TargetEntry<'mcx>,
+    list: &mut PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
+    te: ::nodes::primnodes::TargetEntry<'mcx>,
 ) -> PgResult<()> {
     list.try_reserve(1).map_err(|_| mcx.oom(1))?;
     list.push(te);
@@ -292,8 +292,8 @@ fn push_te<'mcx>(
 /// `list_concat(list, more)` over a `TargetEntry` list.
 fn push_te_list<'mcx>(
     mcx: Mcx<'mcx>,
-    list: &mut PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
-    more: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
+    list: &mut PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
+    more: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
 ) -> PgResult<()> {
     list.try_reserve(more.len()).map_err(|_| mcx.oom(more.len()))?;
     for te in more.into_iter() {
@@ -382,12 +382,12 @@ pub fn transformExpressionList<'mcx>(
 /// VALUES(), `make_target_entry == false`), mirroring C's `make_target_entry`
 /// flag.  The producer always returns the variant matching the flag.
 pub enum ExpandResult<'mcx> {
-    Targets(PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>),
+    Targets(PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>),
     Exprs(PgVec<'mcx, Expr<'static>>),
 }
 
 impl<'mcx> ExpandResult<'mcx> {
-    fn into_targets(self) -> PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> {
+    fn into_targets(self) -> PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> {
         match self {
             ExpandResult::Targets(v) => v,
             ExpandResult::Exprs(_) => panic!("ExpandResult: expected TargetEntry list"),
@@ -411,7 +411,7 @@ impl<'mcx> ExpandResult<'mcx> {
 pub fn resolveTargetListUnknowns<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    targetlist: &mut [nodes::primnodes::TargetEntry<'mcx>],
+    targetlist: &mut [::nodes::primnodes::TargetEntry<'mcx>],
 ) -> PgResult<()> {
     for tle in targetlist.iter_mut() {
         let restype = expr_type(tle.expr.as_deref())?;
@@ -452,7 +452,7 @@ pub fn resolveTargetListUnknowns<'mcx>(
 pub fn markTargetListOrigins<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
-    targetlist: &mut [nodes::primnodes::TargetEntry<'mcx>],
+    targetlist: &mut [::nodes::primnodes::TargetEntry<'mcx>],
 ) -> PgResult<()> {
     for tle in targetlist.iter_mut() {
         // markTargetListOrigin(pstate, tle, (Var *) tle->expr, 0).
@@ -467,7 +467,7 @@ pub fn markTargetListOrigins<'mcx>(
 fn markTargetListOrigin<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &ParseState<'mcx>,
-    tle: &mut nodes::primnodes::TargetEntry<'mcx>,
+    tle: &mut ::nodes::primnodes::TargetEntry<'mcx>,
     var: Option<&Var>,
     levelsup: i32,
 ) -> PgResult<()> {
@@ -736,7 +736,7 @@ pub fn transformAssignedExpr<'mcx>(
 pub fn updateTargetListEntry<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    tle: &mut nodes::primnodes::TargetEntry<'mcx>,
+    tle: &mut ::nodes::primnodes::TargetEntry<'mcx>,
     colname: String,
     attrno: i32,
     indirection: &PgVec<'mcx, NodePtr<'mcx>>,
@@ -1041,7 +1041,7 @@ fn transformAssignmentSubscripts<'mcx>(
 
     // Convert the accumulated A_Indices subscript nodes into the slice the
     // transformContainerSubscripts owner consumes.
-    let mut indices: alloc::vec::Vec<nodes::rawnodes::A_Indices<'mcx>> =
+    let mut indices: alloc::vec::Vec<::nodes::rawnodes::A_Indices<'mcx>> =
         alloc::vec::Vec::with_capacity(subscripts.len());
     for n in subscripts.into_iter() {
         match PgBox::into_inner(n).into_a_indices() {
@@ -1179,8 +1179,8 @@ pub fn checkInsertTargets<'mcx>(
         Ok((out, attrnos))
     } else {
         // Validate user-supplied INSERT column list.
-        let mut wholecols: Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> = None;
-        let mut partialcols: Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> = None;
+        let mut wholecols: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
+        let mut partialcols: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
 
         for col in cols.iter() {
             let name = col.name.as_deref().unwrap_or("");
@@ -1402,8 +1402,8 @@ fn make_range_var_node<'mcx>(
     schemaname: Option<&str>,
     relname: Option<&str>,
     location: i32,
-) -> PgResult<nodes::rawnodes::RangeVar<'mcx>> {
-    Ok(nodes::rawnodes::RangeVar {
+) -> PgResult<::nodes::rawnodes::RangeVar<'mcx>> {
+    Ok(::nodes::rawnodes::RangeVar {
         catalogname: None,
         schemaname: match schemaname {
             Some(s) => Some(PgString::from_str_in(s, mcx)?),
@@ -1455,8 +1455,8 @@ fn ExpandAllTables<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
     location: i32,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
-    let mut target: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
+    let mut target: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     let mut found_table = false;
 
     // Snapshot the indices of cols-visible nsitems so we can call the
@@ -1636,7 +1636,7 @@ fn ExpandRowReference<'mcx>(
 
     // Generate a list of references to the individual fields.
     let num_attrs = tuple_desc.attrs.len();
-    let mut targets: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    let mut targets: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     let mut exprs: PgVec<'mcx, Expr<'static>> = PgVec::new_in(mcx);
 
     for i in 0..num_attrs {
@@ -1938,7 +1938,7 @@ fn clone_pstate_chain<'mcx>(
     let mut out = ParseState::new(mcx)?;
     out.p_rtable = clone_rtable(&src.p_rtable, mcx)?;
     out.p_ctenamespace = {
-        let mut ns: PgVec<'mcx, nodes::rawnodes::CommonTableExpr<'mcx>> = PgVec::new_in(mcx);
+        let mut ns: PgVec<'mcx, ::nodes::rawnodes::CommonTableExpr<'mcx>> = PgVec::new_in(mcx);
         ns.try_reserve(src.p_ctenamespace.len())
             .map_err(|_| mcx.oom(src.p_ctenamespace.len()))?;
         for cte in src.p_ctenamespace.iter() {
@@ -2097,7 +2097,7 @@ fn FigureColnameInternal(node: Option<&Node<'_>>, name: &mut Option<String>) -> 
         }
         ntag::T_A_Expr => {
             let ae = node.expect_a_expr();
-            if ae.kind == nodes::rawnodes::A_Expr_Kind::AEXPR_NULLIF {
+            if ae.kind == ::nodes::rawnodes::A_Expr_Kind::AEXPR_NULLIF {
                 // make nullif() act like a regular function.
                 *name = Some(String::from("nullif"));
                 return 2;
@@ -2400,7 +2400,7 @@ fn transform_target_entry_seam<'mcx>(
     expr_kind: ParseExprKind,
     colname: Option<&str>,
     resjunk: bool,
-) -> PgResult<nodes::primnodes::TargetEntry<'mcx>> {
+) -> PgResult<::nodes::primnodes::TargetEntry<'mcx>> {
     transformTargetEntry(
         mcx,
         pstate,

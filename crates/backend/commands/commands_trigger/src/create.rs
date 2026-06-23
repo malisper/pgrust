@@ -38,9 +38,9 @@ use types_error::{
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
 };
-use nodes::ddlnodes::CreateTrigStmt;
-use nodes::nodes::Node;
-use nodes::parsenodes::OBJECT_FUNCTION;
+use ::nodes::ddlnodes::CreateTrigStmt;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::OBJECT_FUNCTION;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_tuple::access::{
     RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW,
@@ -695,7 +695,7 @@ struct WhenTransform<'mcx> {
     when_clause: Option<Node<'mcx>>,
     /// `pstate->p_rtable` (the OLD/NEW RTEs) — needed by
     /// `recordDependencyOnExpr`. Empty when there is no WHEN clause.
-    when_rtable: mcx::PgVec<'mcx, nodes::parsenodes::RangeTblEntry<'mcx>>,
+    when_rtable: mcx::PgVec<'mcx, ::nodes::parsenodes::RangeTblEntry<'mcx>>,
 }
 
 /// `make_old_new_alias(name)` — an `Alias` with just `aliasname` set, for the
@@ -703,8 +703,8 @@ struct WhenTransform<'mcx> {
 fn make_old_new_alias<'mcx>(
     mcx: Mcx<'mcx>,
     name: &str,
-) -> PgResult<nodes::rawnodes::Alias<'mcx>> {
-    Ok(nodes::rawnodes::Alias {
+) -> PgResult<::nodes::rawnodes::Alias<'mcx>> {
+    Ok(::nodes::rawnodes::Alias {
         aliasname: Some(mcx::PgString::from_str_in(name, mcx)?),
         colnames: mcx::PgVec::new_in(mcx),
     })
@@ -970,7 +970,7 @@ fn transform_trigger_when<'mcx>(
         mcx,
         &mut pstate,
         Some(clause_copy),
-        nodes::parsestmt::ParseExprKind::EXPR_KIND_TRIGGER_WHEN,
+        ::nodes::parsestmt::ParseExprKind::EXPR_KIND_TRIGGER_WHEN,
         "WHEN",
     )? {
         Some(e) => Some(e.clone_in(mcx)?),
@@ -1102,7 +1102,7 @@ fn transform_trigger_when<'mcx>(
 
 fn when_obj_def_err<'a>(
     msg: &str,
-    pstate: &nodes::parsestmt::ParseState<'_>,
+    pstate: &::nodes::parsestmt::ParseState<'_>,
     location: i32,
 ) -> PgResult<WhenTransform<'a>> {
     Err(ereport(ERROR)
@@ -1138,7 +1138,7 @@ fn feature_err(msg: &str) -> PgResult<ObjectAddress> {
 /// Convert an owned-tree `rawnodes::RangeVar` to the resolved
 /// `types_tuple::access::RangeVar` that `RangeVarGetRelid` consumes (precedent:
 /// policy.c's `to_access_range_var`).
-fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
     types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),

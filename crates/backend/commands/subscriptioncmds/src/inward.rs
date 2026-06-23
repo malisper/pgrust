@@ -9,7 +9,7 @@
 //! `backend-commands-publicationcmds::init_seams`).
 
 use utils_error::PgError;
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 
 use subscriptioncmds_seams as s;
 use utility_out_seams as rt;
@@ -36,7 +36,7 @@ pub fn init_seams() {
 /// `T_CreateSubscriptionStmt`).
 fn create_subscription_seam<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &Node<'mcx>,
     is_top_level: bool,
 ) -> utils_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {
@@ -50,7 +50,7 @@ fn create_subscription_seam<'mcx>(
 /// `T_AlterSubscriptionStmt`).
 fn alter_subscription_seam<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &Node<'mcx>,
     is_top_level: bool,
 ) -> utils_error::PgResult<types_catalog::catalog_dependency::ObjectAddress> {

@@ -4,8 +4,8 @@
 
 use alloc::string::String;
 
-use nodes::nodes::{ntag, Node};
-use nodes::ddlnodes as dn;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::ddlnodes as dn;
 
 use crate::{
     framed, out_node_inner, write_bool_field, write_char_field, write_enum_field,
@@ -15,7 +15,7 @@ use crate::{
 
 /// Write a `List *` of `Node *` (`WRITE_NODE_FIELD` of a `List`): `(child ...)`,
 /// `<>` when NIL/empty (C `outNode(NULL)`).
-fn write_node_list(buf: &mut String, name: &str, list: &[nodes::nodes::NodePtr<'_>], wl: bool) {
+fn write_node_list(buf: &mut String, name: &str, list: &[::nodes::nodes::NodePtr<'_>], wl: bool) {
     use core::fmt::Write as _;
     let _ = write!(buf, " :{} ", name);
     if list.is_empty() {

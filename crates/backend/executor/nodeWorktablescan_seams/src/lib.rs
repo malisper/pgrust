@@ -13,9 +13,9 @@
 #![allow(non_snake_case)]
 
 use types_error::PgResult;
-use nodes::execnodes::EStateData;
-use nodes::noderecursiveunion::RecursiveUnionStateData;
-use nodes::nodeworktablescan::{WorkTableScan, WorkTableScanStateData};
+use ::nodes::execnodes::EStateData;
+use ::nodes::noderecursiveunion::RecursiveUnionStateData;
+use ::nodes::nodeworktablescan::{WorkTableScan, WorkTableScanStateData};
 
 // --- node factory / plan-state links ---
 

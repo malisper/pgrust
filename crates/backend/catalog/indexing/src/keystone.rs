@@ -33,8 +33,8 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::execnodes::IndexInfo;
-use nodes::TupleSlotKind;
+use ::nodes::execnodes::IndexInfo;
+use ::nodes::TupleSlotKind;
 use rel::Relation;
 use types_storage::lock::{NoLock, RowExclusiveLock};
 use types_tableam::amapi::IndexUniqueCheck;
@@ -311,7 +311,7 @@ fn CatalogIndexInsert<'mcx>(
 /// `bool isnull[INDEX_MAX_KEYS]`; the port returns the populated `Vec`/array.
 fn form_index_datum<'mcx>(
     index_info: &IndexInfo<'mcx>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<(
     Vec<types_tuple::heaptuple::Datum<'mcx>>,

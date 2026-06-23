@@ -78,7 +78,7 @@ pub mod partition_init;
 pub mod update;
 
 use types_tableam::tableam::{LockTupleMode, TM_FailureData, TU_UpdateIndexes};
-use nodes::SlotId;
+use ::nodes::SlotId;
 
 /// `ModifyTableContext` (executor/nodeModifyTable.c) — per-operation working
 /// state threaded through the insert/update/delete/merge helpers.
@@ -531,7 +531,7 @@ pub fn init_seams() {
             .result_rel(rri)
             .ri_projectReturning
             .as_ref()
-            .map(|p| (p.pi_state.flags & nodes::execexpr::EEO_FLAG_HAS_OLD) != 0)
+            .map(|p| (p.pi_state.flags & ::nodes::execexpr::EEO_FLAG_HAS_OLD) != 0)
             .unwrap_or(false)
     });
 
@@ -571,7 +571,7 @@ fn install_delete_seams() {
             .ri_projectReturning
             .as_ref()
             .map(|p| {
-                (p.pi_state.flags & nodes::execexpr::EEO_FLAG_HAS_OLD) != 0
+                (p.pi_state.flags & ::nodes::execexpr::EEO_FLAG_HAS_OLD) != 0
             })
             .unwrap_or(false)
     });

@@ -16,7 +16,7 @@ use mcx::{Mcx, MemoryContext};
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
 use fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
-use nodes::partition::{PartitionKeyData, PartitionStrategy};
+use ::nodes::partition::{PartitionKeyData, PartitionStrategy};
 use types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::Datum;
 

@@ -44,9 +44,9 @@ use types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use nodes::ddlnodes::{AlterTableType, PartitionBoundSpec, PartitionCmd};
-use nodes::nodes::Node;
-use nodes::primnodes::{Expr, NullTest, NullTestType, Var};
+use ::nodes::ddlnodes::{AlterTableType, PartitionBoundSpec, PartitionCmd};
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{Expr, NullTest, NullTestType, Var};
 use rel::{Relation, RelationData};
 use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock,
@@ -73,7 +73,7 @@ use crate::at_phase::{
 };
 
 /// `AT_AttachPartition` subtype (for the `ATSimplePermissions` call).
-use nodes::ddlnodes::AlterTableType::AT_AttachPartition;
+use ::nodes::ddlnodes::AlterTableType::AT_AttachPartition;
 
 fn elog(msg: impl Into<String>) -> PgError {
     ereport(ERROR)
@@ -96,7 +96,7 @@ fn enode<'mcx>(mcx: mcx::Mcx<'mcx>, e: Expr<'mcx>) -> PgResult<Node<'mcx>> {
 
 /// Convert a rich parse-node `RangeVar` to the trimmed `types_tuple::access`
 /// shape `table_openrv` consumes (mirrors `at_fk::to_access_range_var`).
-fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
     types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_deref().map(|s| s.into()),
         schemaname: rv.schemaname.as_deref().map(|s| s.into()),
@@ -744,7 +744,7 @@ pub(crate) fn CloneRowTriggersToPartition<'mcx>(
 
         // If there is a column list, transform it to a list of column names.
         // Note we don't need to map this list in any way ...
-        let mut cols: PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        let mut cols: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
         for &attnum in &trig.tgattr {
             // col = TupleDescAttr(parent->rd_att, tgattr.values[i] - 1);
             let att = parent.rd_att.attr((attnum - 1) as usize);
@@ -754,7 +754,7 @@ pub(crate) fn CloneRowTriggersToPartition<'mcx>(
         }
 
         // Reconstruct trigger arguments list (already split by the decode).
-        let mut trigargs: PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+        let mut trigargs: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
         if trig.tgnargs > 0 {
             if trig.tgargs.is_empty() {
                 return Err(elog(format!(
@@ -770,7 +770,7 @@ pub(crate) fn CloneRowTriggersToPartition<'mcx>(
 
         // trigStmt = makeNode(CreateTrigStmt); ... (funcname/whenClause/constrrel
         // passed separately).
-        let trig_stmt = nodes::ddlnodes::CreateTrigStmt {
+        let trig_stmt = ::nodes::ddlnodes::CreateTrigStmt {
             replace: false,
             isconstraint: OidIsValid(trig.tgconstraint),
             trigname: Some(mcx::PgString::from_str_in(&trig.tgname, mcx)?),
@@ -824,12 +824,12 @@ fn trigger_for_after(tgtype: i16) -> bool {
 fn make_string_node<'mcx>(
     mcx: Mcx<'mcx>,
     s: &str,
-) -> PgResult<nodes::nodes::NodePtr<'mcx>> {
+) -> PgResult<::nodes::nodes::NodePtr<'mcx>> {
     mcx::alloc_in(
         mcx,
         Node::mk_string(
             mcx,
-            nodes::value::StringNode {
+            ::nodes::value::StringNode {
                 sval: mcx::PgString::from_str_in(s, mcx)?,
             },
         )?,
@@ -880,7 +880,7 @@ fn FindTriggerIncompatibleWithInheritance<'mcx>(
 pub(crate) fn ATExecAddInherit<'mcx>(
     mcx: Mcx<'mcx>,
     child_rel: &Relation<'mcx>,
-    parent: &nodes::rawnodes::RangeVar<'mcx>,
+    parent: &::nodes::rawnodes::RangeVar<'mcx>,
     _lockmode: types_storage::lock::LOCKMODE,
 ) -> PgResult<ObjectAddress> {
     // A self-exclusive lock is needed here. See the similar case in

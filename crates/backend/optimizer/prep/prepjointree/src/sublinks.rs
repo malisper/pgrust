@@ -42,11 +42,11 @@ use alloc::boxed::Box;
 
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::jointype::JoinType;
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::primnodes::{Expr, SubLinkType};
-use nodes::rawnodes::FromExpr;
+use ::nodes::copy_query::Query;
+use ::nodes::jointype::JoinType;
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::primnodes::{Expr, SubLinkType};
+use ::nodes::rawnodes::FromExpr;
 use pathnodes::{Bitmapset, PlannerInfo, Relids};
 
 use nodes_core::makefuncs::make_andclause;
@@ -583,7 +583,7 @@ fn pull_up_sublinks_qual_recurse<'mcx>(
     // is_andclause(node)?
     let is_and = matches!(
         node.as_expr(),
-        Some(Expr::BoolExpr(b)) if b.boolop == nodes::primnodes::BoolExprType::AND_EXPR
+        Some(Expr::BoolExpr(b)) if b.boolop == ::nodes::primnodes::BoolExprType::AND_EXPR
     );
     if is_and {
         // Recurse into AND clause.
@@ -653,7 +653,7 @@ fn splice_join_and_recurse<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
-    mut j: nodes::rawnodes::JoinExpr<'mcx>,
+    mut j: ::nodes::rawnodes::JoinExpr<'mcx>,
     jtlink: &mut Option<NodePtr<'mcx>>,
     available_rels: &Relids,
     _unused: Option<()>,
@@ -706,7 +706,7 @@ fn splice_join_and_recurse_under_not<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
     parse: &mut Query<'mcx>,
-    mut j: nodes::rawnodes::JoinExpr<'mcx>,
+    mut j: ::nodes::rawnodes::JoinExpr<'mcx>,
     jtlink: &mut Option<NodePtr<'mcx>>,
 ) -> PgResult<()> {
     j.larg = jtlink.take();

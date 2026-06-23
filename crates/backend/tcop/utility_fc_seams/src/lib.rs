@@ -9,7 +9,7 @@
 
 use types_error::PgResult;
 use types_foreigncmds::ImportPlannedStmt;
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 
 seam_core::seam!(
     /// `ProcessUtility(pstmt, queryString, false, PROCESS_UTILITY_SUBCOMMAND,

@@ -65,16 +65,16 @@ use types_error::{
 use utils_error::ereport;
 use types_tuple::heaptuple::{INT8OID, TEXTOID, UNKNOWNOID};
 
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::nodelimit::{LimitOption, LIMIT_OPTION_WITH_TIES};
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::nodelimit::{LimitOption, LIMIT_OPTION_WITH_TIES};
 
 use ParseExprKind::{EXPR_KIND_DISTINCT_ON, EXPR_KIND_GROUP_BY, EXPR_KIND_LIMIT};
-use nodes::primnodes::{CoercionForm, Expr, TargetEntry};
-use nodes::rawnodes::{
+use ::nodes::primnodes::{CoercionForm, Expr, TargetEntry};
+use ::nodes::rawnodes::{
     GroupingSet, GroupingSetKind, SortBy, SortByDir, SortByNulls, SortGroupClause,
 };
-use nodes::value::Integer;
+use ::nodes::value::Integer;
 
 use parsenodes::CoercionContext;
 

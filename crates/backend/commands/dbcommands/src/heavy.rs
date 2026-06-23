@@ -30,13 +30,13 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_DATABASE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, FATAL, NOTICE, WARNING,
 };
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     AlterDatabaseRefreshCollStmt, AlterDatabaseSetStmt, AlterDatabaseStmt, CreatedbStmt, DefElem,
     DropdbStmt,
 };
-use nodes::nodes::Node;
-use nodes::parsenodes::{OBJECT_DATABASE, OBJECT_TABLESPACE};
-use nodes::parsestmt::ParseState;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::{OBJECT_DATABASE, OBJECT_TABLESPACE};
+use ::nodes::parsestmt::ParseState;
 use types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, LockRelId, RowExclusiveLock, ShareLock, NoLock,
 };

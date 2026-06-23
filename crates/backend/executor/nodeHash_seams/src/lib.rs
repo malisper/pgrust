@@ -10,9 +10,9 @@
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::primnodes::Expr;
-use nodes::nodehashjoin::{ExprState, HashJoinState};
-use nodes::EStateData;
+use ::nodes::primnodes::Expr;
+use ::nodes::nodehashjoin::{ExprState, HashJoinState};
+use ::nodes::EStateData;
 
 seam_core::seam!(
     /// `ExecHashTableCreate(node)` (nodeHash.c): build the empty hash table for
@@ -57,7 +57,7 @@ seam_core::seam!(
     /// trigger an nbatch increase). The slot is identified by its EState id.
     pub fn exec_hash_table_insert<'mcx>(
         node: &mut HashJoinState<'mcx>,
-        slot: nodes::SlotId,
+        slot: ::nodes::SlotId,
         hashvalue: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
@@ -220,7 +220,7 @@ seam_core::seam!(
     /// (nodeHash.c).
     pub fn exec_parallel_hash_table_insert_current_batch<'mcx>(
         node: &mut HashJoinState<'mcx>,
-        slot: nodes::SlotId,
+        slot: ::nodes::SlotId,
         hashvalue: u32,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>
@@ -244,7 +244,7 @@ seam_core::seam!(
     /// returning the slot id. The which-slot choice mirrors the call site
     /// (outer vs hash tuple slot).
     pub fn force_store_minimal_into_slot<'mcx>(
-        slot: nodes::SlotId,
+        slot: ::nodes::SlotId,
         tuple: types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<()>

@@ -935,7 +935,7 @@ pub fn init_seams() {
 /// `parsenodes::TypeName`.
 fn seam_tc_typename_type_id_and_mod(
     mcx: Mcx<'_>,
-    type_name: &nodes::rawnodes::TypeName<'_>,
+    type_name: &::nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<(Oid, i32)> {
     let tn = raw_typename_to_parse(type_name)?;
     typenameTypeIdAndMod(mcx, None, &tn)
@@ -946,7 +946,7 @@ fn seam_tc_typename_type_id_and_mod(
 /// `parsenodes::TypeName`, discarding the typmod like the C entry point.
 fn seam_tc_typename_type_id(
     mcx: Mcx<'_>,
-    type_name: &nodes::rawnodes::TypeName<'_>,
+    type_name: &::nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<Oid> {
     let tn = raw_typename_to_parse(type_name)?;
     typenameTypeId(mcx, None, &tn)
@@ -956,10 +956,10 @@ fn seam_tc_typename_type_id(
 /// owned `rawnodes::ColumnDef` into the trimmed `ColumnDefInput` the owner reads.
 fn seam_tc_get_column_def_collation(
     mcx: Mcx<'_>,
-    coldef: &nodes::rawnodes::ColumnDef<'_>,
+    coldef: &::nodes::rawnodes::ColumnDef<'_>,
     type_oid: Oid,
 ) -> PgResult<Oid> {
-    use nodes::nodes::ntag;
+    use ::nodes::nodes::ntag;
 
     let collClause_collname = match &coldef.collClause {
         Some(cc) => {
@@ -996,7 +996,7 @@ fn seam_tc_get_column_def_collation(
     GetColumnDefCollation(mcx, None, &input, type_oid)
 }
 
-/// Bridge the K1 owned-tree `nodes::rawnodes::TypeName<'mcx>` (carried in
+/// Bridge the K1 owned-tree `::nodes::rawnodes::TypeName<'mcx>` (carried in
 /// a `DefElem`'s `arg`) into the resolver-facing `parsenodes::TypeName`
 /// the owner's `typenameTypeId`/`LookupTypeName` operate on. Mirrors
 /// parse_expr's `typename_type_id_and_mod` converter: the qualified `names` are
@@ -1005,9 +1005,9 @@ fn seam_tc_get_column_def_collation(
 /// raises the C "must be simple constants or identifiers" error); `arrayBounds`
 /// only need to be non-empty for `LookupTypeName` to resolve the array type.
 pub fn raw_typename_to_parse(
-    tn: &nodes::rawnodes::TypeName<'_>,
+    tn: &::nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<parsenodes::TypeName> {
-    use nodes::nodes::ntag;
+    use ::nodes::nodes::ntag;
 
     let mut names: Vec<parsenodes::Node> = Vec::with_capacity(tn.names.len());
     for n in tn.names.iter() {
@@ -1109,7 +1109,7 @@ pub fn raw_typename_to_parse(
     })
 }
 
-/// Convert one rich owned [`nodes::nodes::Node`] into the flat
+/// Convert one rich owned [`::nodes::nodes::Node`] into the flat
 /// [`parsenodes::Node`] the command bodies (`DefineType`,
 /// `CreateFunction`, `CreateCast`, `RemoveObjects`) consume. Handles the leaf /
 /// value / DDL-vocabulary node kinds that appear inside DEFINE / CREATE
@@ -1120,9 +1120,9 @@ pub fn raw_typename_to_parse(
 /// `DefElem.arg`) are NOT yet expressible as a flat `parsenodes::Node`; those
 /// raise loudly — they do not occur in the base-type / C-language DDL paths.
 pub fn rich_node_to_parse(
-    n: &nodes::nodes::Node<'_>,
+    n: &::nodes::nodes::Node<'_>,
 ) -> PgResult<parsenodes::Node> {
-    use nodes::nodes::ntag;
+    use ::nodes::nodes::ntag;
 
     let out = match n.node_tag() {
         ntag::T_Integer => {
@@ -1193,7 +1193,7 @@ pub fn rich_node_to_parse(
 
 /// `DefElem` (rich → flat). `arg` (when present) is recursively converted.
 pub fn rich_defelem_to_parse(
-    de: &nodes::ddlnodes::DefElem<'_>,
+    de: &::nodes::ddlnodes::DefElem<'_>,
 ) -> PgResult<parsenodes::DefElem> {
     let arg = match de.arg.as_deref() {
         Some(a) => Some(Box::new(rich_node_to_parse(a)?)),
@@ -1214,9 +1214,9 @@ pub fn rich_defelem_to_parse(
 /// statement (e.g. `CREATE FUNCTION ... SET x = y`, whose proconfig items are
 /// `VariableSetStmt` nodes) round-trip through `rich_node_to_parse`.
 pub fn rich_variablesetstmt_to_parse(
-    vss: &nodes::ddlnodes::VariableSetStmt<'_>,
+    vss: &::nodes::ddlnodes::VariableSetStmt<'_>,
 ) -> PgResult<parsenodes::VariableSetStmt> {
-    use nodes::ddlnodes::VariableSetKind as RichKind;
+    use ::nodes::ddlnodes::VariableSetKind as RichKind;
     use parsenodes::VariableSetKind as FlatKind;
 
     let kind = match vss.kind {
@@ -1233,7 +1233,7 @@ pub fn rich_variablesetstmt_to_parse(
     // owner's `set_arg_from_nodes` flattener). Unwrap A_Const to its `val`.
     let mut args: Vec<parsenodes::Node> = Vec::with_capacity(vss.args.len());
     for n in vss.args.iter() {
-        if n.node_tag() == nodes::nodes::ntag::T_A_Const {
+        if n.node_tag() == ::nodes::nodes::ntag::T_A_Const {
             let c = n.expect_a_const();
             match c.val.as_deref() {
                 Some(v) => args.push(rich_node_to_parse(v)?),
@@ -1259,7 +1259,7 @@ pub fn rich_variablesetstmt_to_parse(
 /// `ObjectWithArgs` (rich → flat). `objname` is a `List` of `String`s flattened
 /// to `Vec<String>`; `objargs` / `objfuncargs` are node lists.
 pub fn rich_objectwithargs_to_parse(
-    owa: &nodes::ddlnodes::ObjectWithArgs<'_>,
+    owa: &::nodes::ddlnodes::ObjectWithArgs<'_>,
 ) -> PgResult<parsenodes::ObjectWithArgs> {
     let mut objname: Vec<String> = Vec::with_capacity(owa.objname.len());
     for n in owa.objname.iter() {
@@ -1291,7 +1291,7 @@ pub fn rich_objectwithargs_to_parse(
 /// `FunctionParameter` (rich → flat). `argType` is a `TypeName`; `defexpr` (a
 /// `DEFAULT` expression) is not yet expressible as a flat node and raises.
 pub fn rich_functionparameter_to_parse(
-    fp: &nodes::ddlnodes::FunctionParameter<'_>,
+    fp: &::nodes::ddlnodes::FunctionParameter<'_>,
 ) -> PgResult<parsenodes::FunctionParameter> {
     let argType = match fp.argType.as_deref() {
         Some(a) => Some(Box::new(rich_node_to_parse(a)?)),
@@ -1323,7 +1323,7 @@ pub fn rich_functionparameter_to_parse(
 /// `TypeName` node; anything else raises (the C `elog`). The resolved
 /// `TypeName` is looked up to a type OID, erroring if absent or shell-only.
 fn seam_typename_type_id_from_defelem(
-    def: &nodes::ddlnodes::DefElem<'_>,
+    def: &::nodes::ddlnodes::DefElem<'_>,
 ) -> PgResult<Oid> {
     // defGetTypeName: the value must be an IsA(arg, TypeName) node.
     let tn = match def.arg.as_deref().and_then(|n| n.as_typename()) {
@@ -1469,7 +1469,7 @@ fn seam_typename_type_id_node(type_name: &TypeName) -> PgResult<Oid> {
 
 /// `typenameTypeId(NULL, typeName)` over the owned-tree `rawnodes::TypeName`
 /// (PREPARE's `argtypes`); bridges through `raw_typename_to_parse`.
-fn seam_typename_type_id_raw(type_name: &nodes::rawnodes::TypeName<'_>) -> PgResult<Oid> {
+fn seam_typename_type_id_raw(type_name: &::nodes::rawnodes::TypeName<'_>) -> PgResult<Oid> {
     let tn = raw_typename_to_parse(type_name)?;
     let scratch = mcx::MemoryContext::new("typenameTypeId");
     typenameTypeId(scratch.mcx(), None, &tn)
@@ -1480,7 +1480,7 @@ fn seam_typename_type_id_raw(type_name: &nodes::rawnodes::TypeName<'_>) -> PgRes
 /// position (`parser_errposition(pstate, typeName->location)`).
 fn seam_typename_type_id_raw_pstate(
     pstate: &types_cluster::ParseState<'_>,
-    type_name: &nodes::rawnodes::TypeName<'_>,
+    type_name: &::nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<Oid> {
     let tn = raw_typename_to_parse(type_name)?;
     let scratch = mcx::MemoryContext::new("typenameTypeId");

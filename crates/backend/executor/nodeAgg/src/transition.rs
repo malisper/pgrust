@@ -5,8 +5,8 @@
 use mcx::{alloc_in, Mcx};
 use types_error::PgResult;
 use crate::aggstate::{AggStateData, AggStatePerGroupData, AggStatePerTransData};
-use nodes::EStateData;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::EStateData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 
 use crate::node_lifecycle::select_current_set;
 
@@ -554,7 +554,7 @@ pub(crate) fn agg_call_context_guard(
     fcinfo: Option<&FunctionCallInfoBaseData<'_>>,
 ) -> Option<fmgr::fmgr::AggCallContextGuard> {
     let link = match fcinfo.and_then(|fc| fc.context.as_ref()) {
-        Some(nodes::fmgr::FmgrCallContext::Agg(link)) => *link,
+        Some(::nodes::fmgr::FmgrCallContext::Agg(link)) => *link,
         _ => return None,
     };
     let (data, vtable) = link.to_raw();
@@ -572,8 +572,8 @@ pub(crate) fn agg_call_context_guard(
 pub fn agg_call_context_guard_for(
     aggstate: &AggStateData<'_>,
 ) -> fmgr::fmgr::AggCallContextGuard {
-    let link = nodes::aggstate_carrier::AggStateContextLink::from_ref(
-        aggstate as &(dyn nodes::aggstate_carrier::AggStateLive<'_> + '_),
+    let link = ::nodes::aggstate_carrier::AggStateContextLink::from_ref(
+        aggstate as &(dyn ::nodes::aggstate_carrier::AggStateLive<'_> + '_),
     );
     let (data, vtable) = link.to_raw();
     fmgr::fmgr::AggCallContextGuard::install(fmgr::fmgr::RawAggContextLink {
@@ -590,7 +590,7 @@ pub fn ExecAggInitGroup<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     transno: usize,
     setoff: usize,
-    aggcontext: Option<nodes::execnodes::EcxtId>,
+    aggcontext: Option<::nodes::execnodes::EcxtId>,
     input_args: &[AggDatum<'mcx>],
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -621,7 +621,7 @@ pub fn ExecAggInitGroup<'mcx>(
 /// `setno` (the historical behavior for the non-hash path).
 fn curaggcontext_for(
     aggstate: &AggStateData<'_>,
-    aggcontext: Option<nodes::execnodes::EcxtId>,
+    aggcontext: Option<::nodes::execnodes::EcxtId>,
     setno: i32,
 ) -> i32 {
     match aggcontext {
@@ -638,7 +638,7 @@ pub fn ExecAggPlainTransByVal<'mcx>(
     transno: usize,
     setoff: usize,
     setno: i32,
-    aggcontext: Option<nodes::execnodes::EcxtId>,
+    aggcontext: Option<::nodes::execnodes::EcxtId>,
     input_args: Vec<AggDatum<'mcx>>,
     input_args_null: &[bool],
     estate: &mut EStateData<'mcx>,
@@ -688,7 +688,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
     transno: usize,
     setoff: usize,
     setno: i32,
-    aggcontext: Option<nodes::execnodes::EcxtId>,
+    aggcontext: Option<::nodes::execnodes::EcxtId>,
     input_args: Vec<AggDatum<'mcx>>,
     input_args_null: &[bool],
     estate: &mut EStateData<'mcx>,
@@ -791,7 +791,7 @@ pub fn ExecAggCopyTransValue<'mcx>(
     _old_value_is_null: bool,
     transtype_by_val: bool,
     transtype_len: i16,
-    aggcontext: Option<nodes::execnodes::EcxtId>,
+    aggcontext: Option<::nodes::execnodes::EcxtId>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<AggDatum<'mcx>> {
     if new_value_is_null {
@@ -1192,7 +1192,7 @@ fn datum_copy_into_ecxt<'mcx>(
     value: AggDatum<'mcx>,
     typ_by_val: bool,
     typ_len: i16,
-    aggcontext: Option<nodes::execnodes::EcxtId>,
+    aggcontext: Option<::nodes::execnodes::EcxtId>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<AggDatum<'mcx>> {
     if typ_by_val {
@@ -1239,7 +1239,7 @@ fn curaggcontext_assert_built(aggstate: &AggStateData<'_>) {
     // sentinel meaning "use the single hashcontext". Resolve the sentinel to the
     // hashcontext rather than indexing `aggcontexts[-1]`.
     if aggstate.curaggcontext == crate::node_lifecycle::CURAGGCONTEXT_HASH {
-        let _: nodes::execnodes::EcxtId = aggstate
+        let _: ::nodes::execnodes::EcxtId = aggstate
             .hashcontext
             .expect("curaggcontext: hashcontext not built (hashed path)");
         return;
@@ -1254,7 +1254,7 @@ fn curaggcontext_assert_built(aggstate: &AggStateData<'_>) {
     // present iff the id exists in the array, which is all we assert here (the
     // pass-by-value datumCopy needs no allocation, and the pass-by-ref copy is
     // the unported datum surface).
-    let _: nodes::EcxtId = aggcontexts[idx];
+    let _: ::nodes::EcxtId = aggcontexts[idx];
 }
 
 /// `aggstate->curaggcontext` resolved to its [`EcxtId`] (the per-grouping-set
@@ -1262,7 +1262,7 @@ fn curaggcontext_assert_built(aggstate: &AggStateData<'_>) {
 /// `curaggcontext->ecxt_per_tuple_memory` before reparenting a by-ref transition
 /// value; the owned by-ref copy targets this id (its lifetime resolution lives
 /// in `datum_copy_into_ecxt`).
-fn curaggcontext_ecxt(aggstate: &AggStateData<'_>) -> Option<nodes::execnodes::EcxtId> {
+fn curaggcontext_ecxt(aggstate: &AggStateData<'_>) -> Option<::nodes::execnodes::EcxtId> {
     if aggstate.curaggcontext == crate::node_lifecycle::CURAGGCONTEXT_HASH {
         return aggstate.hashcontext;
     }
@@ -1275,7 +1275,7 @@ fn curaggcontext_ecxt(aggstate: &AggStateData<'_>) -> Option<nodes::execnodes::E
 /// inline, but the evaltrans expression evaluates against the EState's pool, so
 /// the id is what the seam needs. The tmpcontext is registered in the EState
 /// pool at init; its id is the AggState's stored handle.
-fn tmpcontext_ecxt(aggstate: &AggStateData<'_>) -> nodes::EcxtId {
+fn tmpcontext_ecxt(aggstate: &AggStateData<'_>) -> ::nodes::EcxtId {
     aggstate
         .tmpcontext
         .expect("advance_aggregates: tmpcontext EcxtId not assigned by ExecInitAgg")
@@ -1507,7 +1507,7 @@ fn equalfn_multi_qual<'mcx>(
 /// the copy into the (also-unported) fcinfo args cannot run.
 fn load_transfn_args_from_slot<'mcx>(
     pertrans: &mut AggStatePerTransData<'mcx>,
-    slot: nodes::SlotId,
+    slot: ::nodes::SlotId,
     num_trans_inputs: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -1553,7 +1553,7 @@ fn tmpcontext_reset<'mcx>(
 fn tmpcontext_outertuple<'mcx>(
     aggstate: &AggStateData<'mcx>,
     estate: &EStateData<'mcx>,
-) -> Option<nodes::SlotId> {
+) -> Option<::nodes::SlotId> {
     let ecxt = aggstate
         .tmpcontext
         .expect("tmpcontext_outertuple: tmpcontext not built");
@@ -1564,7 +1564,7 @@ fn tmpcontext_outertuple<'mcx>(
 fn set_tmpcontext_outertuple<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-    slot: Option<nodes::SlotId>,
+    slot: Option<::nodes::SlotId>,
 ) {
     let ecxt = aggstate
         .tmpcontext
@@ -1576,8 +1576,8 @@ fn set_tmpcontext_outertuple<'mcx>(
 fn set_tmpcontext_outer_inner<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-    outer: Option<nodes::SlotId>,
-    inner: Option<nodes::SlotId>,
+    outer: Option<::nodes::SlotId>,
+    inner: Option<::nodes::SlotId>,
 ) {
     let ecxt = aggstate
         .tmpcontext

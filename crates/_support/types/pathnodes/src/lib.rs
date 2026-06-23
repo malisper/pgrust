@@ -19,7 +19,7 @@
 //! slot. The arenas only grow within a planner run (the C planner never frees
 //! mid-run), so a bare `u32` index never dangles.
 //!
-//! This is a distinct vocabulary from `nodes::pathnodes` (the executor's
+//! This is a distinct vocabulary from `::nodes::pathnodes` (the executor's
 //! owned capability tree consumed by execAmi): that one models a `Path *` as an
 //! owned `PathNode` tree for `ExecMaterializesOutput`-style recursion; this one
 //! models the planner's mutable shared graph. They are different views of
@@ -44,8 +44,8 @@ use types_core::primitive::{
 };
 pub use types_core::primitive::Oid;
 pub use types_core::fmgr::FmgrInfo;
-pub use nodes::nodes::NodeTag;
-pub use nodes::primnodes::Expr;
+pub use ::nodes::nodes::NodeTag;
+pub use ::nodes::primnodes::Expr;
 pub use hash::hsearch::HTAB;
 
 /* ==========================================================================
@@ -349,9 +349,9 @@ pub struct PartitionBoundInfoData {
 /// `struct FdwRoutine` (foreign/fdwapi.h) — the FDW callback hook table for a
 /// foreign table/join. This is the *same* C struct the executor/relcache model;
 /// rather than a parallel placeholder, the planner vocabulary re-exports the
-/// canonical [`nodes::FdwRoutine`] (the callback-presence table). Presence
+/// canonical [`::nodes::FdwRoutine`] (the callback-presence table). Presence
 /// in `RelOptInfo::fdwroutine` is what the planner tests.
-pub use nodes::FdwRoutine;
+pub use ::nodes::FdwRoutine;
 
 /* ==========================================================================
  * Arena handles for the four aliasing planner graph types.
@@ -461,16 +461,16 @@ impl RinfoId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
-    /// Embed this RestrictInfo handle as a [`nodes::primnodes::RinfoRef`]
+    /// Embed this RestrictInfo handle as a [`::nodes::primnodes::RinfoRef`]
     /// for placement inside an [`Expr`] tree (the C `(Expr *) restrictinfo`).
     #[inline]
-    pub fn as_expr_ref(self) -> nodes::primnodes::RinfoRef {
-        nodes::primnodes::RinfoRef(self.0)
+    pub fn as_expr_ref(self) -> ::nodes::primnodes::RinfoRef {
+        ::nodes::primnodes::RinfoRef(self.0)
     }
 }
-impl From<nodes::primnodes::RinfoRef> for RinfoId {
+impl From<::nodes::primnodes::RinfoRef> for RinfoId {
     #[inline]
-    fn from(r: nodes::primnodes::RinfoRef) -> Self {
+    fn from(r: ::nodes::primnodes::RinfoRef) -> Self {
         RinfoId(r.0)
     }
 }
@@ -635,11 +635,11 @@ pub struct PlannerGlobal {
     /// by `set_plan_references` (mirrors C's `glob->appendRelations`). Copied
     /// onto `PlannedStmt.appendRelations`; the deparser maps Append child Vars
     /// up to their inheritance parent from this list.
-    pub append_relations: Vec<nodes::appendrel_carrier::AppendRelInfoCarrier>,
+    pub append_relations: Vec<::nodes::appendrel_carrier::AppendRelInfoCarrier>,
     /// `List *partPruneInfos` — `PartitionPruneInfo` plan-data carriers
     /// registered by `set_plan_references`' `register_partpruneinfo`; the final
     /// list is copied onto `PlannedStmt.partPruneInfos`.
-    pub part_prune_infos: Vec<nodes::partprune_carrier::PartitionPruneInfo<'static>>,
+    pub part_prune_infos: Vec<::nodes::partprune_carrier::PartitionPruneInfo<'static>>,
     /// `List *relationOids`.
     pub relation_oids: Vec<Oid>,
     /// `List *invalItems` — `PlanInvalItem`s recorded by
@@ -647,7 +647,7 @@ pub struct PlannerGlobal {
     /// as concrete `(cacheId, hashValue)` pairs (the syscache hash is computed at
     /// record time via the `record_inval_item` seam), so `standard_planner` can
     /// read them straight into `PlannedStmt.invalItems`.
-    pub inval_items: Vec<nodes::nodeindexscan::PlanInvalItem>,
+    pub inval_items: Vec<::nodes::nodeindexscan::PlanInvalItem>,
     /// `List *paramExecTypes`.
     pub param_exec_types: Vec<Oid>,
     /// `Index lastPHId`.
@@ -665,12 +665,12 @@ pub struct PlannerGlobal {
     /// `PartitionDirectory partition_directory` — created on first need by
     /// `set_relation_partition_info` (plancat.c) to keep a consistent
     /// `PartitionDesc` for each partitioned relation across the planner run.
-    /// Carried as an [`nodes::Opaque`] handle (`None` = the C `NULL`):
+    /// Carried as an [`::nodes::Opaque`] handle (`None` = the C `NULL`):
     /// `types-pathnodes` cannot name the owner type
     /// (`backend-partitioning-partdesc::PartitionDirectory`) without a
     /// dependency cycle, so the owner downcasts the boxed value, exactly as
     /// `EState::es_partition_directory` does for the executor.
-    pub partition_directory: nodes::Opaque,
+    pub partition_directory: ::nodes::Opaque,
     /// `ParamListInfo boundParams` (pathnodes.h) — the bound external-parameter
     /// values made available to the planner for this run (set by
     /// `standard_planner` from its `boundParams` argument). `None` is the C
@@ -680,7 +680,7 @@ pub struct PlannerGlobal {
     /// (clauses.c:2452, read via `root->glob->boundParams`) can fold a
     /// PARAM_EXTERN `$n` into a `Const`. The owned `ParamListInfo` is a shared
     /// `Rc` value (cheap to clone), not an opaque handle.
-    pub bound_params: nodes::params::ParamListInfo,
+    pub bound_params: ::nodes::params::ParamListInfo,
 }
 
 /* ==========================================================================
@@ -751,7 +751,7 @@ pub struct AppendRelInfo {
 #[derive(Clone, Debug, Default)]
 pub struct RowIdentityVarInfo {
     /// `Var *rowidvar` — the Var to be evaluated, with `varno == ROWID_VAR`.
-    pub rowidvar: nodes::primnodes::Var,
+    pub rowidvar: ::nodes::primnodes::Var,
     /// `int32 rowidwidth` — estimated average width.
     pub rowidwidth: i32,
     /// `char *rowidname` — name of the resjunk column.
@@ -763,7 +763,7 @@ pub struct RowIdentityVarInfo {
 /* ==========================================================================
  * IndexOptInfo (pathnodes.h:1137-1239) — per-index planning state, built by
  * plancat.c. This is the FULL planner producer type (distinct from the
- * trimmed executor-side IndexOptInfo in nodes::pathnodes). The
+ * trimmed executor-side IndexOptInfo in ::nodes::pathnodes). The
  * `indexkeys[]`/`canreturn[]` arrays have `ncolumns` entries; the
  * `indexcollations[]`/`opfamily[]`/`opcintype[]`/`sortopfamily[]`/
  * `reverse_sort[]`/`nulls_first[]` arrays have `nkeycolumns` entries.
@@ -2088,7 +2088,7 @@ pub struct PlaceHolderInfo {
     /// into base/join rel targetlists. The full node is carried here; the
     /// `ph_var_phexpr`/`ph_var_phrels` handle/relids mirrors below are kept for
     /// the existing join-path consumers (additive).
-    pub ph_var: nodes::primnodes::PlaceHolderVar<'static>,
+    pub ph_var: ::nodes::primnodes::PlaceHolderVar<'static>,
     /// `ph_var->phexpr` — the represented expression (an expr `Node *`). The
     /// `ph_var` is a `PlaceHolderVar` tree; the join-path layer only reads its
     /// `phexpr`, so just that expr handle is carried.
@@ -2511,7 +2511,7 @@ pub struct PlannerInfo {
     /// indexes this list; `set_plan_references` moves the entries into
     /// `glob->part_prune_infos`.
     #[allow(non_snake_case)]
-    pub partPruneInfos: Vec<nodes::partprune_carrier::PartitionPruneInfo<'static>>,
+    pub partPruneInfos: Vec<::nodes::partprune_carrier::PartitionPruneInfo<'static>>,
 
     /* Arenas (owned-tree arena + handle model — not in the C struct). */
     /// Backing store for every [`RelOptInfo`]; a [`RelId`] indexes here.
@@ -2607,7 +2607,7 @@ pub enum ArenaNode {
     /// `root->processed_distinctClause`, and the sort-clause handle lists fed to
     /// `make_pathkeys_for_sortclauses` store these as `Node *` handles in the
     /// same id-space. The payload is the plain (`Copy`) parsenode value.
-    SortGroupClause(nodes::rawnodes::SortGroupClause),
+    SortGroupClause(::nodes::rawnodes::SortGroupClause),
     /// A `RowIdentityVarInfo` node — `PlannerInfo::row_identity_vars` stores
     /// these as `Node *` handles in the same id-space (appendinfo.c
     /// `add_row_identity_var`).
@@ -2619,20 +2619,20 @@ pub enum ArenaNode {
     MinMaxAggInfo(MinMaxAggInfo),
     /// A `WindowClause` node — `WindowAggPath::winclause` carries one as a
     /// `Node *` handle in the same id-space. The lifetime-bearing parse-tree
-    /// [`nodes::rawnodes::WindowClause`] cannot live in the arena, so the
+    /// [`::nodes::rawnodes::WindowClause`] cannot live in the arena, so the
     /// planner interns this lifetime-free [`WindowClauseNode`] (its
     /// partition/order `SortGroupClause` lists and start/end offset expressions
     /// re-interned as their own arena handles) when it builds a WindowAggPath.
     WindowClause(WindowClauseNode),
     /// A `WithCheckOption` node — `ModifyTablePath::withCheckOptionLists` stores
     /// these as `Node *` handles in the same id-space. The lifetime-bearing
-    /// parse-tree [`nodes::rawnodes::WithCheckOption`] cannot live in the
+    /// parse-tree [`::nodes::rawnodes::WithCheckOption`] cannot live in the
     /// arena, so the planner interns this lifetime-free [`WithCheckOptionNode`]
     /// (its `qual` re-interned as its own `Expr` arena handle) per result rel.
     WithCheckOption(WithCheckOptionNode),
     /// A `MergeAction` node — `ModifyTablePath::mergeActionLists` stores these as
     /// `Node *` handles in the same id-space. The lifetime-bearing parse-tree
-    /// [`nodes::rawnodes::MergeAction`] cannot live in the arena, so the
+    /// [`::nodes::rawnodes::MergeAction`] cannot live in the arena, so the
     /// planner interns this lifetime-free [`MergeActionNode`] (its `qual` and
     /// each `targetList` entry re-interned as their own arena handles) per
     /// result rel.
@@ -2643,7 +2643,7 @@ pub enum ArenaNode {
 /// — the lifetime-free planner-arena form. The PARTITION BY / ORDER BY clauses
 /// are interned `SortGroupClause` handles (`ArenaNode::SortGroupClause`); the
 /// frame start/end offsets are interned `Expr` handles (`ArenaNode::Expr`).
-/// Mirrors [`nodes::rawnodes::WindowClause`] field-for-field for the
+/// Mirrors [`::nodes::rawnodes::WindowClause`] field-for-field for the
 /// members the planner / createplan / costsize read.
 #[derive(Clone, Debug, Default)]
 pub struct WindowClauseNode {
@@ -2686,7 +2686,7 @@ pub struct WindowClauseNode {
 /// `WithCheckOption` (nodes/parsenodes.h) as carried per-result-rel in
 /// `ModifyTablePath::withCheckOptionLists` — the lifetime-free planner-arena
 /// form. The lifetime-bearing parse-tree
-/// [`nodes::rawnodes::WithCheckOption`] cannot live in the arena, so the
+/// [`::nodes::rawnodes::WithCheckOption`] cannot live in the arena, so the
 /// planner interns this form (its `qual` re-interned as its own `Expr` arena
 /// handle) when building the per-leaf WCO lists for an inherited/partitioned
 /// target. Mirrors the C `WithCheckOption` field-for-field for the members
@@ -2694,7 +2694,7 @@ pub struct WindowClauseNode {
 #[derive(Clone, Debug)]
 pub struct WithCheckOptionNode {
     /// `WCOKind kind` — kind of WCO.
-    pub kind: nodes::rawnodes::WCOKind,
+    pub kind: ::nodes::rawnodes::WCOKind,
     /// `char *relname` — name of relation that specified the WCO.
     pub relname: Option<alloc::string::String>,
     /// `char *polname` — name of RLS policy being checked.
@@ -2708,7 +2708,7 @@ pub struct WithCheckOptionNode {
 
 /// `MergeAction` (nodes/parsenodes.h) as carried per-result-rel in
 /// `ModifyTablePath::mergeActionLists` — the lifetime-free planner-arena form.
-/// The lifetime-bearing parse-tree [`nodes::rawnodes::MergeAction`] cannot
+/// The lifetime-bearing parse-tree [`::nodes::rawnodes::MergeAction`] cannot
 /// live in the arena, so the planner interns this form (its `qual` and each
 /// `targetList` entry re-interned as their own arena handles) when building the
 /// per-leaf MERGE action lists. Mirrors the C `MergeAction` for the members
@@ -2716,11 +2716,11 @@ pub struct WithCheckOptionNode {
 #[derive(Clone, Debug)]
 pub struct MergeActionNode {
     /// `MergeMatchKind matchKind`.
-    pub matchKind: nodes::modifytable::MergeMatchKind,
+    pub matchKind: ::nodes::modifytable::MergeMatchKind,
     /// `CmdType commandType`.
     pub commandType: CmdType,
     /// `OverridingKind override`.
-    pub overriding: nodes::modifytable::OverridingKind,
+    pub overriding: ::nodes::modifytable::OverridingKind,
     /// `Node *qual` — transformed WHEN condition (an `Expr` arena handle, or
     /// NULL marker `NodeId(0)`).
     pub qual: NodeId,
@@ -2746,16 +2746,16 @@ pub struct MergeActionNode {
 /// createplan code legitimately stores a `PlaceHolderVar *` there too (the two
 /// node kinds drive a NestLoop equivalently; `identify_current_nestloop_params`
 /// dispatches on `IsA(nlp->paramval, Var)` / `IsA(..., PlaceHolderVar)`). The
-/// executor-side [`nodes::nodenestloop::NestLoopParam`] keeps the strict
+/// executor-side [`::nodes::nodenestloop::NestLoopParam`] keeps the strict
 /// `Var` field; this planner-working carrier widens `paramval` to the
-/// [`nodes::primnodes::Expr`] union so a PHV survives in `curOuterParams`
+/// [`::nodes::primnodes::Expr`] union so a PHV survives in `curOuterParams`
 /// until `identify_current_nestloop_params` extracts it.
 #[derive(Clone, Debug)]
 pub struct NestLoopParamNode {
     /// `int paramno` — number of the PARAM_EXEC Param to set.
     pub paramno: i32,
     /// `Var *paramval` — outer-relation Var (or PlaceHolderVar) to assign.
-    pub paramval: nodes::primnodes::Expr<'static>,
+    pub paramval: ::nodes::primnodes::Expr<'static>,
 }
 
 /// `PlannerParamItem` (nodes/pathnodes.h):
@@ -2900,7 +2900,7 @@ pub struct AggClauseCosts {
 /// vs the C struct, with the child `Expr *expr` rendered as a [`NodeId`] arena
 /// handle (mirroring how `Expr` children already become `NodeId` in this arena)
 /// rather than a `&'mcx Expr`. Cross-checked against
-/// `nodes::primnodes::TargetEntry<'mcx>` and `nodes/primnodes.h`.
+/// `::nodes::primnodes::TargetEntry<'mcx>` and `nodes/primnodes.h`.
 #[derive(Debug, Default, Clone)]
 pub struct TargetEntryNode {
     /// `Expr *expr` — expression to evaluate, as an arena handle.
@@ -3104,13 +3104,13 @@ impl PlannerInfo {
         }
     }
 
-    /// Resolve a [`NodeId`] to its [`nodes::rawnodes::SortGroupClause`]
+    /// Resolve a [`NodeId`] to its [`::nodes::rawnodes::SortGroupClause`]
     /// (an element of a clause handle list, e.g. `processed_groupClause` /
     /// `processed_distinctClause` / a sort-clause list). Panics if the handle
     /// does not resolve to a `SortGroupClause` (mirrors C, where a `NodeId` used
     /// in a sort/group-clause context is always a `SortGroupClause`).
     #[inline]
-    pub fn sortgroupclause(&self, id: NodeId) -> &nodes::rawnodes::SortGroupClause {
+    pub fn sortgroupclause(&self, id: NodeId) -> &::nodes::rawnodes::SortGroupClause {
         match &self.node_arena[id.index()] {
             ArenaNode::SortGroupClause(sgc) => sgc,
             _ => panic!(
@@ -3125,7 +3125,7 @@ impl PlannerInfo {
     pub fn sortgroupclause_mut(
         &mut self,
         id: NodeId,
-    ) -> &mut nodes::rawnodes::SortGroupClause {
+    ) -> &mut ::nodes::rawnodes::SortGroupClause {
         match &mut self.node_arena[id.index()] {
             ArenaNode::SortGroupClause(sgc) => sgc,
             _ => panic!(
@@ -3414,7 +3414,7 @@ impl PlannerInfo {
         self.node_arena.push(ArenaNode::TargetEntry(te));
         id
     }
-    /// Intern a [`nodes::rawnodes::SortGroupClause`] into the node store,
+    /// Intern a [`::nodes::rawnodes::SortGroupClause`] into the node store,
     /// returning its [`NodeId`] handle. Producers: `grouping_planner` bridges
     /// `parse->sortClause` / `processed_groupClause` / `processed_distinctClause`
     /// (parse-tree `SortGroupClause` values) into the arena so the pathkeys
@@ -3423,7 +3423,7 @@ impl PlannerInfo {
     #[inline]
     pub fn alloc_sortgroupclause(
         &mut self,
-        sgc: nodes::rawnodes::SortGroupClause,
+        sgc: ::nodes::rawnodes::SortGroupClause,
     ) -> NodeId {
         let id = self.reserve_node_id();
         self.node_arena.push(ArenaNode::SortGroupClause(sgc));
@@ -3562,7 +3562,7 @@ mod agginfo_carrier_tests {
         // a stand-in for the interned Aggref node — the carrier model is the
         // NodeId, independent of the Expr variant; the producer interns the
         // real Aggref).
-        let aggref0 = root.alloc_node(Expr::Aggref(nodes::primnodes::Aggref {
+        let aggref0 = root.alloc_node(Expr::Aggref(::nodes::primnodes::Aggref {
             aggfnoid: 2147,
             aggtype: 20,
             aggcollid: 0,
@@ -3579,7 +3579,7 @@ mod agginfo_carrier_tests {
             aggkind: b'n' as i8,
             aggpresorted: false,
             agglevelsup: 0,
-            aggsplit: nodes::nodeagg::AGGSPLIT_SIMPLE,
+            aggsplit: ::nodes::nodeagg::AGGSPLIT_SIMPLE,
             aggno: -1,
             aggtransno: -1,
             location: -1,

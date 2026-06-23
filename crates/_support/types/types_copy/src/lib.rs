@@ -27,10 +27,10 @@ use types_core::primitive::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum as TupleDatum;
 use types_error::SoftErrorContext;
 use fmgr::FmgrInfo;
-use nodes::execexpr::ExprState;
-use nodes::primnodes::Expr;
-use nodes::execnodes::{EStateLink, EcxtId};
-use nodes::nodes::NodePtr;
+use ::nodes::execexpr::ExprState;
+use ::nodes::primnodes::Expr;
+use ::nodes::execnodes::{EStateLink, EcxtId};
+use ::nodes::nodes::NodePtr;
 use rel::Relation;
 
 /* ===========================================================================
@@ -287,7 +287,7 @@ pub struct CopyParseState<'mcx> {
     /// codec hands `&mut self.escontext` to the input-function seam so soft
     /// errors are trapped exactly as the C `InputFunctionCallSafe` path does.
     pub escontext: Option<SoftErrorContext>,
-    /// Back-link to the owning [`EStateData`](nodes::execnodes::EStateData)
+    /// Back-link to the owning [`EStateData`](::nodes::execnodes::EStateData)
     /// that `copyfrom.c` constructs (`CreateExecutorState`). The executor-state
     /// seams (`exec_eval_expr`) resolve the per-tuple `ExprContext`, the default
     /// `ExprState`s, and the per-query memory through this link. `None` until the

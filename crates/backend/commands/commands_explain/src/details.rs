@@ -21,11 +21,11 @@ use types_core::instrument::{Instrumentation, WalUsage};
 use types_error::PgResult;
 use types_explain::{ExplainFormat, ExplainState};
 
-use nodes::nodehash::HashState;
-use nodes::nodeincrementalsort::{
+use ::nodes::nodehash::HashState;
+use ::nodes::nodeincrementalsort::{
     IncrementalSortGroupInfo, IncrementalSortStateData, SharedIncrementalSortInfo,
 };
-use nodes::nodesort::{SharedSortInfo, SortStateData, TuplesortMethod, TuplesortSpaceType};
+use ::nodes::nodesort::{SharedSortInfo, SortStateData, TuplesortMethod, TuplesortSpaceType};
 
 use explain_format as fmt;
 use tuplesort::{tuplesort_method_name, tuplesort_space_type_name};
@@ -230,7 +230,7 @@ pub fn show_hash_info(
 /// name `AggStateData`); `None` means the strategy was not hashed/mixed and C
 /// returned early.
 pub fn show_hashagg_info(
-    info: &nodes::aggstate_carrier::HashAggExplainInfo,
+    info: &::nodes::aggstate_carrier::HashAggExplainInfo,
     es: &mut ExplainState<'_>,
 ) -> PgResult<()> {
     // int64 memPeakKb = BYTES_TO_KILOBYTES(aggstate->hash_mem_peak);

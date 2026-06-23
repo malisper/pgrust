@@ -51,14 +51,14 @@ use datum::Datum as BareDatum;
 use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED};
 use fmgr::boundary::RefPayload;
 use fmgr::FunctionCallInfoBaseData;
-use nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::parsestmt::RawStmt;
-use nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
+use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::parsestmt::RawStmt;
+use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
 use types_tuple::heaptuple::Datum as CanonDatum;
 use types_tuple::heaptuple::TupleDescData;
-use nodes::tuptable::SlotData;
+use ::nodes::tuptable::SlotData;
 use types_dest::CommandDest;
 use types_scan::sdir::ForwardScanDirection;
 
@@ -79,7 +79,7 @@ const PROVOLATILE_VOLATILE: u8 = b'v';
 /// `TYPTYPE_PSEUDO` (pg_type.h) — `'p'`.
 const TYPTYPE_PSEUDO: u8 = b'p';
 /// `CMD_UTILITY` discriminant (`nodes.h`).
-const CMD_UTILITY: nodes::nodes::CmdType = nodes::nodes::CmdType::CMD_UTILITY;
+const CMD_UTILITY: ::nodes::nodes::CmdType = ::nodes::nodes::CmdType::CMD_UTILITY;
 
 /// The body of a SQL function, in the form the execution loop consumes it.
 ///
@@ -99,7 +99,7 @@ enum BodyQueries<'mcx> {
     Raw {
         stmts: mcx::PgVec<'mcx, RawStmt<'mcx>>,
         prosrc_mcx: &'mcx str,
-        pinfo: nodes::parsestmt::SqlFnParseInfo,
+        pinfo: ::nodes::parsestmt::SqlFnParseInfo,
     },
 }
 
@@ -778,7 +778,7 @@ fn fn_expr_call_node<'mcx>(
             match ext
                 .node
                 .as_ref()
-                .and_then(|n| n.downcast_ref::<nodes::primnodes::Expr>())
+                .and_then(|n| n.downcast_ref::<::nodes::primnodes::Expr>())
             {
                 Some(e) => Ok(Some(Node::mk_expr(mcx, e.clone_in(mcx)?)?)),
                 None => Ok(None),
@@ -801,7 +801,7 @@ fn fn_expr_argtype(fcinfo: &FunctionCallInfoBaseData, argnum: i32) -> PgResult<O
             match ext
                 .node
                 .as_ref()
-                .and_then(|n| n.downcast_ref::<nodes::primnodes::Expr>())
+                .and_then(|n| n.downcast_ref::<::nodes::primnodes::Expr>())
             {
                 Some(e) => {
                     nodeFuncs_seams::get_call_expr_argtype_expr::call(e, argnum)
@@ -931,7 +931,7 @@ fn parse_body_queries<'mcx>(
     mcx: Mcx<'mcx>,
     prosrc: &str,
     prosqlbody: Option<&str>,
-    pinfo: &nodes::parsestmt::SqlFnParseInfo,
+    pinfo: &::nodes::parsestmt::SqlFnParseInfo,
 ) -> PgResult<mcx::PgVec<'mcx, Query<'mcx>>> {
     let mut out: mcx::PgVec<'mcx, Query<'mcx>> = mcx::PgVec::new_in(mcx);
 
@@ -977,7 +977,7 @@ fn build_body_queries<'mcx>(
     mcx: Mcx<'mcx>,
     prosrc: &str,
     prosqlbody: Option<&str>,
-    pinfo: &nodes::parsestmt::SqlFnParseInfo,
+    pinfo: &::nodes::parsestmt::SqlFnParseInfo,
 ) -> PgResult<BodyQueries<'mcx>> {
     if let Some(body) = prosqlbody {
         let n = nodes_core::read::string_to_node(mcx, body)?;
@@ -1016,13 +1016,13 @@ fn prepare_sql_fn_parse_info(
     proargnames: Option<&[Option<alloc::string::String>]>,
     argtypes: &[Oid],
     collation: Oid,
-) -> nodes::parsestmt::SqlFnParseInfo {
+) -> ::nodes::parsestmt::SqlFnParseInfo {
     let nargs = argtypes.len();
     let argnames = match proargnames {
         Some(names) if names.len() >= nargs && nargs > 0 => Some(names.to_vec()),
         _ => None,
     };
-    nodes::parsestmt::SqlFnParseInfo::new(
+    ::nodes::parsestmt::SqlFnParseInfo::new(
         proname.to_owned(),
         collation,
         argtypes.to_vec(),
@@ -1463,7 +1463,7 @@ fn run_one_query<'mcx>(
                 plan,
                 source_text,
                 true, // readOnlyTree: protect the function cache's parsetree
-                nodes::parsestmt::PROCESS_UTILITY_QUERY,
+                ::nodes::parsestmt::PROCESS_UTILITY_QUERY,
                 params,
                 dest,
                 &mut qc,
@@ -1666,7 +1666,7 @@ fn run_one_query_setof<'mcx>(
             plan,
             source_text,
             true,
-            nodes::parsestmt::PROCESS_UTILITY_QUERY,
+            ::nodes::parsestmt::PROCESS_UTILITY_QUERY,
             params,
             dest,
             &mut qc,

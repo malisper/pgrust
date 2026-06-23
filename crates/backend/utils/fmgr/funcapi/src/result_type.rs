@@ -9,10 +9,10 @@ use mcx::Mcx;
 use types_core::primitive::{AttrNumber, InvalidOid};
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERROR};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::{ResolvedResultType, TypeFuncClass};
-use nodes::nodes::Node;
-use nodes::funcapi::ReturnSetInfo;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::{ResolvedResultType, TypeFuncClass};
+use ::nodes::nodes::Node;
+use ::nodes::funcapi::ReturnSetInfo;
 use types_tuple::heaptuple::{TupleDesc, RECORDOID};
 
 use utils_error::ereport;
@@ -111,7 +111,7 @@ pub fn get_expr_result_type<'mcx>(
     mcx: Mcx<'mcx>,
     expr: Option<&Node<'mcx>>,
 ) -> PgResult<ResolvedResultType<'mcx>> {
-    use nodes::primnodes::Expr;
+    use ::nodes::primnodes::Expr;
 
     // C dispatches on the expression node's tag:
     //   IsA(expr, FuncExpr) -> internal_get_result_type(funcid, expr, NULL, ...)

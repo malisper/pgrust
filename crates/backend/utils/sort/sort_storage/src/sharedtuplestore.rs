@@ -40,7 +40,7 @@ use types_error::{PgError, PgResult};
 use execparallel::{
     FileSetHandle, SharedFileSetHandle, SharedTuplestoreAccessorHandle, SharedTuplestoreHandle,
 };
-use nodes::nodehashjoin::BufFile;
+use ::nodes::nodehashjoin::BufFile;
 use types_storage::{LWLock, LWLockMode, LWTRANCHE_SHARED_TUPLESTORE};
 
 /// `STS_CHUNK_PAGES` (sharedtuplestore.c:37) — chunk size in BLCKSZ pages.
@@ -771,7 +771,7 @@ pub fn init_seams() {
 /// Recover the 1-based accessor handle from the `Opaque` payload of a
 /// `SharedTuplestoreAccessor` (the token box nodeHash put there in `box_accessor`).
 fn accessor_handle(
-    accessor: &nodes::nodehash::SharedTuplestoreAccessor,
+    accessor: &::nodes::nodehash::SharedTuplestoreAccessor,
 ) -> SharedTuplestoreAccessorHandle {
     *accessor
         .0

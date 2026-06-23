@@ -7,19 +7,19 @@
 use utils_error::PgResult;
 use types_error::WARNING;
 use types_core::cmdtag::CommandTag;
-use nodes::nodes::Node;
-use nodes::parsenodes::*;
-use nodes::rawnodes::{
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::*;
+use ::nodes::rawnodes::{
     LockClauseStrength, LCS_FORKEYSHARE, LCS_FORNOKEYUPDATE, LCS_FORSHARE, LCS_FORUPDATE,
 };
-use nodes::ddlnodes::DiscardMode::*;
-use nodes::ddlnodes::TransactionStmtKind::*;
-use nodes::ddlnodes::VariableSetKind::*;
-use nodes::nodes::{
+use ::nodes::ddlnodes::DiscardMode::*;
+use ::nodes::ddlnodes::TransactionStmtKind::*;
+use ::nodes::ddlnodes::VariableSetKind::*;
+use ::nodes::nodes::{
     CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UPDATE, CMD_UTILITY,
 };
-use nodes::nodes::NodePtr;
-use nodes::nodes as ntag;
+use ::nodes::nodes::NodePtr;
+use ::nodes::nodes as ntag;
 
 use crate::consts::*;
 
@@ -434,7 +434,7 @@ pub fn CreateCommandTag(parsetree: &Node) -> PgResult<CommandTag> {
 /// is useful for read-only complaints (rendering the `SELECT FOR …` variant
 /// from the first row mark's strength).
 pub fn CreateCommandTagForPlannedStmt(
-    stmt: &nodes::nodeindexscan::PlannedStmt<'_>,
+    stmt: &::nodes::nodeindexscan::PlannedStmt<'_>,
 ) -> PgResult<CommandTag> {
     let tag = match stmt.commandType {
         CMD_SELECT => {

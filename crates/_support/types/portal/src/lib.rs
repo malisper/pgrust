@@ -27,7 +27,7 @@ use core::cell::RefCell;
 use mcx::MemoryContext;
 use types_core::primitive::TimestampTz;
 use types_core::xact::SubTransactionId;
-use nodes::funcapi::Tuplestorestate;
+use ::nodes::funcapi::Tuplestorestate;
 use snapshot::SnapshotData;
 use types_tuple::heaptuple::TupleDescData;
 
@@ -272,12 +272,12 @@ pub struct PortalData {
     pub qc: QueryCompletion,
     /// `List *stmts` — list of PlannedStmts. Owned by the cached plan; the
     /// real planned-statement nodes (the `canSetTag` walk reads `PlannedStmt`).
-    pub stmts: Option<alloc::vec::Vec<nodes::nodeindexscan::PlannedStmt<'static>>>,
+    pub stmts: Option<alloc::vec::Vec<::nodes::nodeindexscan::PlannedStmt<'static>>>,
     /// `CachedPlan *cplan` — CachedPlan, if stmts are from one (`NULL` = none).
     pub cplan: CachedPlanHandle,
 
     /// `ParamListInfo portalParams` — params to pass to query.
-    pub portalParams: nodes::portalcmds::ParamListInfo,
+    pub portalParams: ::nodes::portalcmds::ParamListInfo,
     /// `QueryEnvironment *queryEnv` — environment for query.
     pub queryEnv: Option<Rc<()>>,
 
@@ -295,11 +295,11 @@ pub struct PortalData {
 
     /// `QueryDesc *queryDesc` — info needed for executor invocation
     /// (`None` = C NULL). The canonical owned executor invocation handle
-    /// (`nodes::querydesc::QueryDesc`): lifetime-free, storable by value
+    /// (`::nodes::querydesc::QueryDesc`): lifetime-free, storable by value
     /// (its `'mcx` lives inside the `McxOwned<QueryWorkState>` bundle), so it
     /// does not infect `PortalData`. portalcmds reads `snapshot`/`dest` off it
     /// and hands it to the execMain driver seams — QueryDesc de-handle F1b.
-    pub queryDesc: Option<nodes::querydesc::QueryDesc>,
+    pub queryDesc: Option<::nodes::querydesc::QueryDesc>,
 
     /// `TupleDesc tupDesc` — descriptor for result tuples (`None` = C NULL).
     pub tupDesc: Option<TupleDescData<'static>>,

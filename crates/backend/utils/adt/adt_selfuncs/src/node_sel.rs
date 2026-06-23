@@ -20,7 +20,7 @@
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid};
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{JoinType, NodeId, PlannerInfo, SpecialJoinInfo};
 
@@ -31,7 +31,7 @@ use arrayfuncs_seams as arr;
 use lsyscache_seams as lsc;
 use typcache_seams as tc;
 
-use nodes::primnodes::CaseTestExpr;
+use ::nodes::primnodes::CaseTestExpr;
 
 use crate::examine::{examine_variable, release_variable_stats};
 use crate::scalar::{stats_tuple_stanullfrac, var_eq_const};

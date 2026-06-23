@@ -19,15 +19,15 @@ use alloc::string::String;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::nodes::CmdType;
-use nodes::EStateData;
+use ::nodes::nodes::CmdType;
+use ::nodes::EStateData;
 
 use crate::{
     framed, write_bitmapset_field, write_bitmapset_opt_field, write_bool_field, write_enum_field,
     write_int64_field, write_int_field, write_int_list_field, write_location_field,
     write_node_field, write_node_list_field, write_oid_list_field, write_uint_field,
 };
-use nodes::partprune_carrier::{
+use ::nodes::partprune_carrier::{
     PartitionPruneCombineOp, PartitionPruneInfo, PartitionPruneStep, PartitionedRelPruneInfo,
     RawBms,
 };
@@ -40,7 +40,7 @@ use nodes::partprune_carrier::{
 /// against `mcx` (the executor's query context).
 pub fn serialize_plan_for_workers(
     mcx: Mcx<'_>,
-    plan_src: &nodes::nodes::Node<'_>,
+    plan_src: &::nodes::nodes::Node<'_>,
     estate: &mut EStateData<'_>,
 ) -> PgResult<String> {
     // We can't scribble on the original plan, so make a copy.
@@ -83,7 +83,7 @@ pub fn serialize_plan_for_workers(
 fn out_dummy_plannedstmt(
     buf: &mut String,
     estate: &EStateData<'_>,
-    plan: &nodes::nodes::Node<'_>,
+    plan: &::nodes::nodes::Node<'_>,
 ) {
     // WRITE_NODE_TYPE("PLANNEDSTMT")
     buf.push_str("PLANNEDSTMT");
@@ -417,7 +417,7 @@ fn out_partition_prune_step(buf: &mut String, step: &PartitionPruneStep<'_>) {
 
 /// `write_node_list_field` callback that emits a single `Expr` as a framed node
 /// body (the `exprs` list members are bare `{...}` node dumps, no `:fld` label).
-fn write_expr_field_bare(buf: &mut String, e: &nodes::primnodes::Expr<'_>, wl: bool) {
+fn write_expr_field_bare(buf: &mut String, e: &::nodes::primnodes::Expr<'_>, wl: bool) {
     let _ = wl;
     crate::out_expr(buf, e, false);
 }

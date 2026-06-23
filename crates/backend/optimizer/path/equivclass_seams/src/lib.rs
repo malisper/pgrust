@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{Index, Oid};
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{EcId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 

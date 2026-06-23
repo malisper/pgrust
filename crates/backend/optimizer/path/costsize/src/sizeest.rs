@@ -179,7 +179,7 @@ pub fn set_subquery_size_estimates<'mcx>(
             let mut item_width: i32 = 0;
             if !sub_has_setops {
                 if let Some(texpr) = te.expr.as_deref() {
-                    if let nodes::primnodes::Expr::Var(var) = texpr {
+                    if let ::nodes::primnodes::Expr::Var(var) = texpr {
                         let subrel = relnode_seams::find_base_rel::call(
                             &subroot,
                             var.varno,
@@ -207,7 +207,7 @@ pub fn set_subquery_size_estimates<'mcx>(
 
 /// `get_expr_width` (costsize.c:6404).
 pub fn get_expr_width(root: &PlannerInfo, expr: NodeId) -> i32 {
-    use nodes::primnodes::Expr;
+    use ::nodes::primnodes::Expr;
     if let Expr::Var(var) = root.node(expr) {
         debug_assert!(var.varlevelsup == 0);
 
@@ -384,16 +384,16 @@ pub fn set_rel_width<'mcx>(run: &PlannerRun<'mcx>, root: &mut PlannerInfo, rel: 
  * ------------------------------------------------------------------------ */
 
 fn is_var(root: &PlannerInfo, node: NodeId) -> bool {
-    matches!(root.node(node), nodes::primnodes::Expr::Var(_))
+    matches!(root.node(node), ::nodes::primnodes::Expr::Var(_))
 }
 
 fn var_belongs(root: &PlannerInfo, node: NodeId, relid_idx: u32) -> bool {
-    matches!(root.node(node), nodes::primnodes::Expr::Var(v) if v.varno as u32 == relid_idx)
+    matches!(root.node(node), ::nodes::primnodes::Expr::Var(v) if v.varno as u32 == relid_idx)
 }
 
 fn var_fields(root: &PlannerInfo, node: NodeId) -> (i16, Oid, i32) {
     match root.node(node) {
-        nodes::primnodes::Expr::Var(v) => (v.varattno, v.vartype, v.vartypmod),
+        ::nodes::primnodes::Expr::Var(v) => (v.varattno, v.vartype, v.vartypmod),
         _ => panic!("set_rel_width: expected Var"),
     }
 }
@@ -401,7 +401,7 @@ fn var_fields(root: &PlannerInfo, node: NodeId) -> (i16, Oid, i32) {
 fn is_placeholdervar(root: &PlannerInfo, node: NodeId) -> bool {
     matches!(
         root.node(node),
-        nodes::primnodes::Expr::PlaceHolderVar(_)
+        ::nodes::primnodes::Expr::PlaceHolderVar(_)
     )
 }
 

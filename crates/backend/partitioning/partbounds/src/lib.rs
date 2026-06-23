@@ -30,9 +30,9 @@ use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use nodes::ddlnodes::PartitionBoundSpec;
-use nodes::nodes::Node;
-use nodes::partition::{
+use ::nodes::ddlnodes::PartitionBoundSpec;
+use ::nodes::nodes::Node;
+use ::nodes::partition::{
     PartitionBoundInfo, PartitionBoundInfoData, PartitionDescData, PartitionKeyData,
     PartitionRangeDatumKind, PartitionStrategy,
 };
@@ -139,7 +139,7 @@ struct PartitionListValue<'mcx> {
 }
 
 /// `PartitionRangeBound` (partbounds.c) — one bound of a range partition,
-/// expanded from a list of [`nodes::ddlnodes::PartitionRangeDatum`].
+/// expanded from a list of [`::nodes::ddlnodes::PartitionRangeDatum`].
 #[derive(Clone, Debug)]
 struct PartitionRangeBound<'mcx> {
     /// `int index` — partition's position in the original list.
@@ -304,7 +304,7 @@ fn partition_hbound_cmp(modulus1: i32, remainder1: i32, modulus2: i32, remainder
 /// asserts the node is a `Const`; a mismatch is a caller/parser bug.
 fn const_from_node<'a, 'b>(
     node: &'a Node<'b>,
-) -> PgResult<&'a nodes::primnodes::Const<'b>> {
+) -> PgResult<&'a ::nodes::primnodes::Const<'b>> {
     node.as_const()
         .ok_or_else(|| elog_error("partition list bound spec datum is not a Const"))
 }
@@ -487,7 +487,7 @@ fn create_list_bounds<'mcx>(
 /// x)` over the node-field [`Bitmapset`].
 fn add_interleaved<'mcx>(
     mcx: Mcx<'mcx>,
-    set: &mut Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>,
+    set: &mut Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>,
     x: i32,
 ) -> PgResult<()> {
     let updated = nodes_core_seams::bms_add_member::call(mcx, set.take(), x)?;
@@ -1149,7 +1149,7 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
     key: &PartitionKeyData<'k>,
     partdesc: &PartitionDescData<'d>,
     spec: &PartitionBoundSpec<'s>,
-    pstate: Option<&nodes::parsestmt::ParseState<'_>>,
+    pstate: Option<&::nodes::parsestmt::ParseState<'_>>,
 ) -> PgResult<()> {
     // Attach `parser_errposition(pstate, location)` as the cursor position,
     // matching the C ereport's trailing `parser_errposition(...)` (no-op when
@@ -1387,7 +1387,7 @@ pub fn check_new_partition_bound<'mcx, 'k, 'd, 's>(
 /// `((PartitionRangeDatum *) list_nth(datums, idx))->location`, or -1 when the
 /// index is out of range or the node is not a `PartitionRangeDatum`.
 fn range_datum_location(
-    datums: &PgVec<'_, nodes::nodes::NodePtr<'_>>,
+    datums: &PgVec<'_, ::nodes::nodes::NodePtr<'_>>,
     idx: i32,
 ) -> i32 {
     if idx < 0 {
@@ -1583,8 +1583,8 @@ mod tests {
     use super::*;
     use mcx::PgVec;
     use types_core::primitive::ParseLoc;
-    use nodes::ddlnodes::PartitionBoundSpec;
-    use nodes::partition::PartitionStrategy;
+    use ::nodes::ddlnodes::PartitionBoundSpec;
+    use ::nodes::partition::PartitionStrategy;
 
     /// A minimal `PartitionKeyData` for tests that only read `strategy` and the
     /// per-attribute typlen/typbyval/coll (hash needs none of the latter).

@@ -2,7 +2,7 @@
 //! (execnodes.h / plannodes.h).
 //!
 //! The node-state / plan-node / shared-DSM structs relocated DOWN into
-//! `types-nodes` (module [`nodes::nodebitmapheapscan`]) so the central
+//! `types-nodes` (module [`::nodes::nodebitmapheapscan`]) so the central
 //! `PlanStateNode` dispatch enum can name `BitmapHeapScanState` as a variant.
 //! That relocation became acyclic with the slot-vocab F0 keystone: "Edge A"
 //! added the `types-nodes -> types-tableam` edge (for `TableScanDesc`) and
@@ -19,7 +19,7 @@
 
 use types_storage::Spinlock;
 
-pub use nodes::nodebitmapheapscan::{
+pub use ::nodes::nodebitmapheapscan::{
     BitmapHeapScan, BitmapHeapScanInstrumentation, BitmapHeapScanState, NodeSinstrument,
     ParallelBitmapHeapState, Plan, Scan, SharedBitmapHeapInstrumentation,
     SharedBitmapHeapScanInstr, SharedBitmapState, BM_FINISHED, BM_INITIAL, BM_INPROGRESS,

@@ -33,7 +33,7 @@ use types_foreigncmds::{
     ForeignDataWrapper, ForeignServer, ForeignTable, ImportForeignSchemaStmt, UserMapping,
     FDW_IMPORT_SCHEMA_ALL, FDW_IMPORT_SCHEMA_EXCEPT, FDW_IMPORT_SCHEMA_LIMIT_TO,
 };
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use nodes::{FdwRoutine, ForeignScanState};
 
 use fdwapi_seams as fdwapi;
@@ -741,9 +741,9 @@ pub fn GetExistingLocalJoinPath(
     root: &mut pathnodes::PlannerInfo,
     joinrel: pathnodes::RelId,
 ) -> Option<pathnodes::PathId> {
-    use nodes::nodehashjoin::T_HashJoin;
-    use nodes::nodemergejoin::T_MergeJoin;
-    use nodes::nodenestloop::T_NestLoop;
+    use ::nodes::nodehashjoin::T_HashJoin;
+    use ::nodes::nodemergejoin::T_MergeJoin;
+    use ::nodes::nodenestloop::T_NestLoop;
     use pathnodes::PathNode;
 
     // Assert(IS_JOIN_REL(joinrel));

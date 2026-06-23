@@ -15,12 +15,12 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::heaptuple::Datum;
 
 use pgstat_slru as slru;
-use funcapi::srf_support::{materialized_srf_putvalues, InitMaterializedSRF};
+use ::funcapi::srf_support::{materialized_srf_putvalues, InitMaterializedSRF};
 
 use crate::register_srf;
 

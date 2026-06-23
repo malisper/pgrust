@@ -620,7 +620,7 @@ fn relation_rules(
                 None => None,
             };
             // `actions = copyObject(rule->actions)` — re-home each action Query.
-            let mut actions: PgVec<nodes::copy_query::Query<'_>> =
+            let mut actions: PgVec<::nodes::copy_query::Query<'_>> =
                 mcx::vec_with_capacity_in(mcx, r.actions.len())?;
             for a in r.actions.iter() {
                 actions.push(a.clone_in(mcx)?);
@@ -692,7 +692,7 @@ fn relation_row_security(
 /// reads: `relhasrules`, `numLocks` (`< 0` when `rd_rules == NULL`), and for the
 /// first rule `event == CMD_SELECT`, `isInstead`, and `list_length(actions)`.
 fn matview_rule_info(rel: Oid) -> PgResult<types_matview::MatViewRuleInfo> {
-    use nodes::nodes::CmdType;
+    use ::nodes::nodes::CmdType;
     crate::core_entry_store::with_relation(rel, |rd| {
         let relhasrules = rd.rd_rel.relhasrules;
         match &rd.rd_rules {
@@ -741,7 +741,7 @@ fn matview_rule_info(rel: Oid) -> PgResult<types_matview::MatViewRuleInfo> {
 fn matview_data_query<'mcx>(
     mcx: Mcx<'mcx>,
     rel: Oid,
-) -> PgResult<nodes::copy_query::Query<'mcx>> {
+) -> PgResult<::nodes::copy_query::Query<'mcx>> {
     crate::core_entry_store::with_relation(rel, |rd| {
         let internal = |msg: &str| {
             utils_error::ereport(types_error::ERROR)
@@ -778,8 +778,8 @@ mod relation_rules_tests {
     use std::cell::RefCell;
     use std::rc::Rc;
     use types_core::primitive::Oid;
-    use nodes::copy_query::Query;
-    use nodes::nodes::CmdType;
+    use ::nodes::copy_query::Query;
+    use ::nodes::nodes::CmdType;
 
     /// Install a relcache entry (OID `reloid`) whose `rd_rules` holds one rule
     /// with one action `Query` of `command`, allocated in the cache arena — the
@@ -886,7 +886,7 @@ fn critical_shared_relcaches_built() -> bool {
 fn relation_get_index_expressions<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &rel::Relation<'mcx>,
-) -> PgResult<Option<PgVec<'mcx, nodes::Expr<'mcx>>>> {
+) -> PgResult<Option<PgVec<'mcx, ::nodes::Expr<'mcx>>>> {
     let has_expression_col = crate::core_entry_store::with_relation(rel.rd_id, |rd| {
         match &rd.rd_index {
             None => false,
@@ -912,7 +912,7 @@ fn relation_get_index_expressions<'mcx>(
     match relcache_nodexform_seams::index_expressions::call(mcx, rel.rd_id)? {
         None => Ok(None),
         Some(exprs) => {
-            let mut out: PgVec<'mcx, nodes::Expr<'mcx>> =
+            let mut out: PgVec<'mcx, ::nodes::Expr<'mcx>> =
                 mcx::vec_with_capacity_in(mcx, exprs.len())?;
             for e in exprs.iter() {
                 out.push(e.clone_in(mcx)?);
@@ -939,7 +939,7 @@ fn relation_get_index_expressions<'mcx>(
 fn relation_get_index_predicate<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &rel::Relation<'mcx>,
-) -> PgResult<Option<PgVec<'mcx, nodes::Expr<'mcx>>>> {
+) -> PgResult<Option<PgVec<'mcx, ::nodes::Expr<'mcx>>>> {
     // Quick exit when the relation is not an index (C `rd_indextuple == NULL`).
     let is_index = crate::core_entry_store::with_relation(rel.rd_id, |rd| rd.rd_index.is_some())?;
     if !is_index {
@@ -967,7 +967,7 @@ fn relation_get_index_predicate<'mcx>(
     match relcache_nodexform_seams::index_predicate::call(mcx, rel.rd_id)? {
         None => Ok(None),
         Some(clauses) => {
-            let mut out: PgVec<'mcx, nodes::Expr<'mcx>> =
+            let mut out: PgVec<'mcx, ::nodes::Expr<'mcx>> =
                 mcx::vec_with_capacity_in(mcx, clauses.len())?;
             for e in clauses.iter() {
                 out.push(e.clone_in(mcx)?);
@@ -997,7 +997,7 @@ fn relation_get_index_predicate<'mcx>(
 fn relation_get_dummy_index_expressions<'mcx>(
     mcx: Mcx<'mcx>,
     index: &rel::Relation<'mcx>,
-) -> PgResult<Option<PgVec<'mcx, nodes::primnodes::Expr<'mcx>>>> {
+) -> PgResult<Option<PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>>> {
     let has_expression_col = crate::core_entry_store::with_relation(index.rd_id, |rd| {
         match &rd.rd_index {
             None => false,
@@ -1025,7 +1025,7 @@ fn relation_get_dummy_index_expressions<'mcx>(
     )? {
         None => Ok(None),
         Some(exprs) => {
-            let mut out: PgVec<'mcx, nodes::primnodes::Expr<'mcx>> =
+            let mut out: PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
                 mcx::vec_with_capacity_in(mcx, exprs.len())?;
             for e in exprs.iter() {
                 out.push(e.clone_in(mcx)?);
@@ -1469,7 +1469,7 @@ fn relation_cache_invalidate_entry(relation_id: Oid) -> PgResult<()> {
 fn relation_get_identity_key_bitmap<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &rel::RelationData<'_>,
-) -> PgResult<Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     // Resolve the owned entry and run the derived-family build (own logic over
     // the store); it yields the replica-identity key columns as offset members.
     let rd = match crate::core_entry_store::cache_lookup(rel.rd_id) {
@@ -1485,7 +1485,7 @@ fn relation_get_identity_key_bitmap<'mcx>(
     // owner's `bms_add_member` (the C `idindexattrs = bms_add_member(...,
     // attrnum - FirstLowInvalidHeapAttributeNumber)` already applied the offset
     // in the derived build). A run that adds no members yields the C NULL set.
-    let mut bms: Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+    let mut bms: Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
     for x in members {
         bms = Some(nodes_core_seams::bms_add_member::call(mcx, bms, x)?);
     }
@@ -1496,7 +1496,7 @@ fn relation_get_index_attr_bitmap<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &rel::RelationData<'_>,
     attr_kind: sx::IndexAttrBitmapKind,
-) -> PgResult<Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
     // The seam-public kind and the owner's `derived` kind are now the same
     // canonical `relcache_entry::IndexAttrBitmapKind`, so it passes
     // straight through.
@@ -1505,7 +1505,7 @@ fn relation_get_index_attr_bitmap<'mcx>(
     let members = crate::derived::RelationGetIndexAttrBitmap(rel.rd_id, attr_kind)?;
     // Encode into a node `Bitmapset` via the bitmapset owner's `bms_add_member`.
     // An empty member list yields the C NULL set (`None`).
-    let mut bms: Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+    let mut bms: Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
     for x in members {
         bms = Some(nodes_core_seams::bms_add_member::call(mcx, bms, x)?);
     }
@@ -1555,7 +1555,7 @@ fn relation_set_partkey<'mcx>(
 fn relation_get_partcheck<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
-) -> PgResult<(bool, PgVec<'mcx, nodes::nodes::Node<'mcx>>)> {
+) -> PgResult<(bool, PgVec<'mcx, ::nodes::nodes::Node<'mcx>>)> {
     // `(rd_partcheckvalid, copyObject(rd_partcheck))` — re-project the
     // cache-owned qual list into `mcx`.
     crate::core_entry_store::get_partcheck(mcx, relid)
@@ -1563,7 +1563,7 @@ fn relation_get_partcheck<'mcx>(
 
 fn relation_set_partcheck<'mcx>(
     relid: Oid,
-    partcheck: PgVec<'mcx, nodes::nodes::Node<'mcx>>,
+    partcheck: PgVec<'mcx, ::nodes::nodes::Node<'mcx>>,
 ) -> PgResult<()> {
     // `rd_partcheck = copyObject(result); rd_partcheckvalid = true` — copy the
     // partcache-built qual list into the cache-owned long-lived store.
@@ -2148,7 +2148,7 @@ fn set_rd_amcache_spgist(index_oid: Oid, cache: spgist::SpGistCache) -> PgResult
 /// or `None` (the C `rd_fdwroutine == NULL`) before it has been resolved. The
 /// relation is held open by the caller, so a missing entry is a contract
 /// violation (errors, mirroring the C dereference of a live `Relation`).
-fn relation_fdwroutine(relation_id: Oid) -> PgResult<Option<nodes::FdwRoutine>> {
+fn relation_fdwroutine(relation_id: Oid) -> PgResult<Option<::nodes::FdwRoutine>> {
     crate::core_entry_store::with_relation(relation_id, |rd| rd.rd_fdwroutine)
 }
 
@@ -2160,7 +2160,7 @@ fn relation_fdwroutine(relation_id: Oid) -> PgResult<Option<nodes::FdwRoutine>> 
 /// cleared on relcache invalidation / rebuild.
 fn set_relation_fdwroutine(
     relation_id: Oid,
-    fdwroutine: nodes::FdwRoutine,
+    fdwroutine: ::nodes::FdwRoutine,
 ) -> PgResult<()> {
     crate::core_entry_store::with_relation_mut(relation_id, |rd| {
         rd.rd_fdwroutine = Some(fdwroutine);

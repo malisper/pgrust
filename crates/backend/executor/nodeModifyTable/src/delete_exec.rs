@@ -7,7 +7,7 @@ use types_core::xact::CommandId;
 use types_error::{
     PgError, PgResult, ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
-use nodes::nodes::CmdType;
+use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tableam::tableam::{
     LockTupleExclusive, LockTupleMode, Snapshot, TM_FailureData, TM_Result,

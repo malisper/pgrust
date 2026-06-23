@@ -22,7 +22,7 @@ use authid::{
 };
 use types_core::primitive::{Oid, TimestampTz};
 use types_error::PgResult;
-use nodes::parsenodes::DropBehavior;
+use ::nodes::parsenodes::DropBehavior;
 use parsenodes::{DefElem, Node, ParseState, RoleSpec};
 
 /* --- user-id / superuser substrate (miscinit.c, superuser.c) --- */

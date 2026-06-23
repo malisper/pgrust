@@ -21,7 +21,7 @@
 //! (`nodeToString` / `SerializeParamList` and their restore counterparts),
 //! parameter/datum (de)serialization, snapshot management, and `pgstat`
 //! reporting. The executor driver (`ExecutorStart`/`Run`/`Finish`/`End`) and the
-//! `QueryDesc` lifecycle are owned (`execMain` / `nodes::QueryDesc`) and
+//! `QueryDesc` lifecycle are owned (`execMain` / `::nodes::QueryDesc`) and
 //! called directly.
 //!
 //! Parallel-DSM-carrier residual (sanctioned mirror-and-panic): the per-node
@@ -47,11 +47,11 @@ use execparallel::{
     ParallelExecutorInfo, SerializeCursor, SharedExecutorInstrumentation, ShmTocHandle, Size,
     TuplesNeeded, DsaPointer, INVALID_DSA_POINTER, PGJIT_NONE,
 };
-use nodes::bitmapset::Bitmapset;
-use nodes::querydesc::QueryDesc;
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::querydesc::QueryDesc;
 use nodes::{EStateData, PlanStateNode};
 use types_core::instrument::{BufferUsage, WalUsage};
-use nodes::instrument::Instrumentation;
+use ::nodes::instrument::Instrumentation;
 
 use transam_parallel as parallel;
 use execParallel_support_seams as sup;
@@ -83,9 +83,9 @@ use nodeSort as nodeSort;
 /// `AggStateData` ever rides as a `dyn AggStateLive`.
 #[inline]
 fn agg_state_mut<'a, 'mcx>(
-    live: &'a mut (dyn nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+    live: &'a mut (dyn ::nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
 ) -> &'a mut nodeAgg::aggstate::AggStateData<'mcx> {
-    nodes::aggstate_carrier::downcast_agg_state_mut::<nodeAgg::aggstate::AggStateData<'mcx>>(
+    ::nodes::aggstate_carrier::downcast_agg_state_mut::<nodeAgg::aggstate::AggStateData<'mcx>>(
         live,
     )
     .expect("PlanStateNode::Agg carries the canonical AggStateData")
@@ -187,7 +187,7 @@ pub fn init_seams() {
 /// outfuncs; reached over the support seam.
 fn ExecSerializePlan(
     mcx: Mcx<'_>,
-    plan: &nodes::nodes::Node<'_>,
+    plan: &::nodes::nodes::Node<'_>,
     estate: &mut EStateData<'_>,
 ) -> PgResult<String> {
     sup::serialize_plan_for_workers::call(mcx, plan, estate)
@@ -577,7 +577,7 @@ pub fn ExecInitParallelPlan<'mcx>(
     //   pstmt_data = ExecSerializePlan(planstate->plan, estate);
     // `planstate->plan` is a back-pointer into the plan tree (`&'mcx Node`), so
     // copy out the reference before re-borrowing `estate` mutably.
-    let leader_plan: &nodes::nodes::Node<'mcx> = planstate
+    let leader_plan: &::nodes::nodes::Node<'mcx> = planstate
         .ps_head()
         .plan
         .ok_or_else(|| PgError::error("ExecInitParallelPlan: planstate->plan is NULL"))?;
@@ -1459,7 +1459,7 @@ pub fn ParallelQueryMain<'mcx>(
 
 fn foreignscan_no_owned_pcxt(
     which: &str,
-    _node: &mut mcx::PgBox<'_, nodes::nodeforeigncustom::ForeignScanState<'_>>,
+    _node: &mut mcx::PgBox<'_, ::nodes::nodeforeigncustom::ForeignScanState<'_>>,
 ) -> ! {
     panic!(
         "{which}: the owned per-node ForeignScan parallel method takes &mut ParallelContext, \
@@ -1471,7 +1471,7 @@ fn foreignscan_no_owned_pcxt(
 
 fn customscan_no_owned_pcxt(
     which: &str,
-    _node: &mut mcx::PgBox<'_, nodes::nodeforeigncustom::CustomScanState<'_>>,
+    _node: &mut mcx::PgBox<'_, ::nodes::nodeforeigncustom::CustomScanState<'_>>,
 ) -> ! {
     panic!(
         "{which}: the owned per-node CustomScan parallel method takes &mut ParallelContext, \

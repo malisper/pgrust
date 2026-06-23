@@ -16,7 +16,7 @@ use types_core::fmgr::F_OIDEQ;
 use types_core::primitive::Oid;
 use types_core::{InvalidOid, OidIsValid};
 use types_error::{PgError, PgResult};
-use nodes::nodes::NodePtr;
+use ::nodes::nodes::NodePtr;
 use types_scan::scankey::{BTEqualStrategyNumber, InvalidStrategy, ScanKeyData, StrategyNumber};
 use types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::Datum;

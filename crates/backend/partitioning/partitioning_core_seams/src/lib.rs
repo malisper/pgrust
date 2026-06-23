@@ -6,8 +6,8 @@
 
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
-use nodes::partition::PartitionDescData;
-use nodes::Opaque;
+use ::nodes::partition::PartitionDescData;
+use ::nodes::Opaque;
 use rel::Relation;
 
 seam_core::seam!(

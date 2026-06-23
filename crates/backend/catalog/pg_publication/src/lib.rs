@@ -64,8 +64,8 @@ use types_error::{
     ERROR, PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_COLUMN,
 };
-use nodes::bitmapset::Bitmapset;
-use nodes::nodes::{ntag, Node};
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::nodes::{ntag, Node};
 use rel::Relation;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};

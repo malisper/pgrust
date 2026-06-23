@@ -23,7 +23,7 @@
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::primnodes::Const;
+use ::nodes::primnodes::Const;
 
 seam_core::seam!(
     /// The executor-backed constant test of `operator_predicate_proof`

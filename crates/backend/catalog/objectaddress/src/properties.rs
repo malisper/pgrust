@@ -6,12 +6,12 @@
 
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 
 use crate::tables::{ObjectPropertyType, OBJECT_PROPERTY};
 
 use types_error::PgError;
-use nodes::parsenodes::OBJECT_TABLE;
+use ::nodes::parsenodes::OBJECT_TABLE;
 
 /// `get_object_property_data(Oid class_id)` (objectaddress.c 2755): find the
 /// [`ObjectPropertyType`] row whose `class_oid == class_id`; `elog(ERROR,

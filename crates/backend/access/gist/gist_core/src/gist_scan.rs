@@ -233,7 +233,7 @@ fn gistkillitems(scan: &mut IndexScanDescData<'_>) -> PgResult<()> {
             };
             ItemIdMarkDead(&mut iid);
             let mut pmut = PageMut::new(bytes)?;
-            page::PageSetItemId(&mut pmut, offnum, iid)?;
+            ::page::PageSetItemId(&mut pmut, offnum, iid)?;
             killedsomething = true;
         }
         if killedsomething {

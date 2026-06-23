@@ -31,13 +31,13 @@ use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
 use types_error::{PgError, PgResult};
-use nodes::execexpr::ExprDoneCond;
-use nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
+use ::nodes::execexpr::ExprDoneCond;
+use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_numeric::var::{NumericSign, NumericVar};
 use types_numeric::{numeric_is_nan, numeric_is_special};
 use types_tuple::heaptuple::Datum;
 
-use funcapi::srf_support::{
+use ::funcapi::srf_support::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall,
 };
 

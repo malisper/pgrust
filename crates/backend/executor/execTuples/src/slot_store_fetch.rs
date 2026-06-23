@@ -12,8 +12,8 @@
 use mcx::Mcx;
 use types_core::primitive::Size;
 use types_error::{PgError, PgResult};
-use nodes::tuptable::{SlotData, TTS_FLAG_SHOULDFREE};
-use nodes::TupleSlotKind;
+use ::nodes::tuptable::{SlotData, TTS_FLAG_SHOULDFREE};
+use ::nodes::TupleSlotKind;
 use types_storage::buf::{Buffer, BufferIsValid};
 // The canonical value enum.
 use types_tuple::heaptuple::{Datum, FormedMinimalTuple, FormedTuple};
@@ -576,12 +576,12 @@ pub fn ExecCopySlotMinimalTupleExtra<'mcx>(
 /// pinned page). The buffer pin management is the load-bearing logic and routes
 /// through the real `ReleaseBuffer`/`IncrBufferRefCount` bufmgr seams.
 pub(crate) fn tts_buffer_heap_store_tuple<'mcx>(
-    slot: &mut nodes::tuptable::BufferHeapTupleTableSlot<'mcx>,
+    slot: &mut ::nodes::tuptable::BufferHeapTupleTableSlot<'mcx>,
     tuple: FormedTuple<'mcx>,
     buffer: Buffer,
     transfer_pin: bool,
 ) {
-    use nodes::tuptable::TTS_FLAG_SHOULDFREE;
+    use ::nodes::tuptable::TTS_FLAG_SHOULDFREE;
 
     // if (TTS_SHOULDFREE(slot)) {
     //     /* materialized slot shouldn't have a buffer to release */

@@ -18,7 +18,7 @@
 use mcx::{Mcx, PgBox, PgString};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use types_storage::lock::NoLock;
 
 use crate::{
@@ -135,10 +135,10 @@ fn seam_relation_has_cascaded_check_option(view: &rel::Relation<'_>) -> bool {
 /// updates it, and returns it.
 fn seam_acquire_rewrite_locks<'mcx>(
     mcx: Mcx<'mcx>,
-    mut parsetree: nodes::copy_query::Query<'mcx>,
+    mut parsetree: ::nodes::copy_query::Query<'mcx>,
     for_execute: bool,
     for_update_pushed_down: bool,
-) -> PgResult<nodes::copy_query::Query<'mcx>> {
+) -> PgResult<::nodes::copy_query::Query<'mcx>> {
     crate::AcquireRewriteLocks(mcx, &mut parsetree, for_execute, for_update_pushed_down)?;
     Ok(parsetree)
 }
@@ -149,7 +149,7 @@ fn seam_acquire_rewrite_locks<'mcx>(
 /// matching the ruleutils seam's `&mut Query -> ()` shape.
 fn seam_acquire_rewrite_locks_inplace<'mcx>(
     mcx: Mcx<'mcx>,
-    parsetree: &mut nodes::copy_query::Query<'mcx>,
+    parsetree: &mut ::nodes::copy_query::Query<'mcx>,
     for_execute: bool,
     for_update_pushed_down: bool,
 ) -> PgResult<()> {
@@ -160,12 +160,12 @@ fn seam_acquire_rewrite_locks_inplace<'mcx>(
 /// canonical value-typed `Query` belongs to K1 query unification, not this port.
 fn seam_query_rewrite_legacy<'mcx>(
     _mcx: Mcx<'mcx>,
-    _query: nodes::portalcmds::Query,
-) -> PgResult<mcx::PgVec<'mcx, nodes::portalcmds::Query>> {
+    _query: ::nodes::portalcmds::Query,
+) -> PgResult<mcx::PgVec<'mcx, ::nodes::portalcmds::Query>> {
     panic!(
         "rewriteHandler legacy query_rewrite over portalcmds::Query reached: \
          blocked on K1 Query-unification debt; use query_rewrite_canonical once \
-         parser/planner callers carry nodes::copy_query::Query"
+         parser/planner callers carry ::nodes::copy_query::Query"
     )
 }
 
@@ -173,8 +173,8 @@ fn seam_query_rewrite_legacy<'mcx>(
 /// rule-rewriter entry over the value-typed `Query`.
 fn seam_query_rewrite_canonical<'mcx>(
     mcx: Mcx<'mcx>,
-    parsetree: nodes::copy_query::Query<'mcx>,
-) -> PgResult<mcx::PgVec<'mcx, nodes::copy_query::Query<'mcx>>> {
+    parsetree: ::nodes::copy_query::Query<'mcx>,
+) -> PgResult<mcx::PgVec<'mcx, ::nodes::copy_query::Query<'mcx>>> {
     let results = crate::QueryRewrite(mcx, parsetree)?;
     let mut out = mcx::PgVec::new_in(mcx);
     for q in results {
@@ -186,7 +186,7 @@ fn seam_query_rewrite_canonical<'mcx>(
 fn seam_get_view_query<'mcx>(
     mcx: Mcx<'mcx>,
     view: &rel::Relation<'mcx>,
-) -> PgResult<nodes::copy_query::Query<'mcx>> {
+) -> PgResult<::nodes::copy_query::Query<'mcx>> {
     get_view_query(mcx, view)
 }
 
@@ -250,7 +250,7 @@ fn seam_expand_generated_columns_in_expr_arena(
 
 fn seam_view_query_is_auto_updatable<'mcx>(
     mcx: Mcx<'mcx>,
-    view_query: &nodes::copy_query::Query<'mcx>,
+    view_query: &::nodes::copy_query::Query<'mcx>,
 ) -> PgResult<Option<PgString<'mcx>>> {
     // DefineView calls view_query_is_auto_updatable(viewParse, true).
     let detail = view_query_is_auto_updatable(view_query, true)?;

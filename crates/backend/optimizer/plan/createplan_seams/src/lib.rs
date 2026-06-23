@@ -30,7 +30,7 @@
 //! best_path, flags)`: a `Path *` is a [`PathId`](pathnodes::PathId) into
 //! `PlannerInfo::path_arena` (the owner recovers the subtype from the
 //! [`PathNode`] variant), plus the `mcx` the produced
-//! [`Node`](nodes::nodes::Node) plan tree is allocated in and `run:
+//! [`Node`](::nodes::nodes::Node) plan tree is allocated in and `run:
 //! &PlannerRun<'mcx>` (the `'mcx`-scoped planner-run store the lifetime-free
 //! [`PlannerInfo`] cannot hold). The scan converters also receive the
 //! already-decided `tlist` and resolved `scan_clauses` that `create_scan_plan`
@@ -42,8 +42,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use nodes::nodes::Node;
-use nodes::primnodes::TargetEntry;
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::TargetEntry;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{PathId, PlannerInfo, RinfoId};
 

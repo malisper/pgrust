@@ -10,7 +10,7 @@ extern crate alloc;
 
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
-use nodes::partition::PartitionPruneContext;
+use ::nodes::partition::PartitionPruneContext;
 use nodes::{Bitmapset, EStateData};
 
 seam_core::seam!(
@@ -72,7 +72,7 @@ seam_core::seam!(
     pub fn get_matching_partitions<'mcx>(
         mcx: Mcx<'mcx>,
         context: &mut PartitionPruneContext<'mcx>,
-        pruning_steps: &[nodes::partprune_carrier::PartitionPruneStep<'mcx>],
+        pruning_steps: &[::nodes::partprune_carrier::PartitionPruneStep<'mcx>],
         estate: &mut EStateData<'mcx>,
     ) -> PgResult<Option<PgBox<'mcx, Bitmapset<'mcx>>>>
 );

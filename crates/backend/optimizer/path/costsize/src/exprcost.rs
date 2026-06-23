@@ -282,12 +282,12 @@ pub fn cost_rescan<'mcx>(
     root: &mut PlannerInfo,
     path_id: PathId,
 ) -> PgResult<(Cost, Cost)> {
-    use nodes::nodes;
+    use ::nodes::nodes;
     let node = root.path(path_id);
     let base = node.base();
     let result = match base.pathtype {
         x if x == nodes::T_FunctionScan => (0.0, base.total_cost - base.startup_cost),
-        x if x == nodes::nodehashjoin::T_HashJoin => {
+        x if x == ::nodes::nodehashjoin::T_HashJoin => {
             let num_batches = match node {
                 PathNode::HashPath(hp) => hp.num_batches,
                 _ => 1,
@@ -298,7 +298,7 @@ pub fn cost_rescan<'mcx>(
                 (base.startup_cost, base.total_cost)
             }
         }
-        x if x == nodes::nodectescan::T_CteScan || x == nodes::T_WorkTableScan => {
+        x if x == ::nodes::nodectescan::T_CteScan || x == nodes::T_WorkTableScan => {
             let pt_width = base
                 .pathtarget
                 .as_ref()
@@ -328,7 +328,7 @@ pub fn cost_rescan<'mcx>(
             }
             (0.0, run_cost)
         }
-        x if x == nodes::nodememoize::T_Memoize => {
+        x if x == ::nodes::nodememoize::T_Memoize => {
             return cost_memoize_rescan(run, root, path_id)
         }
         _ => (base.startup_cost, base.total_cost),
@@ -487,7 +487,7 @@ pub fn cost_subplan_owned(
     subplan: &mut nodes::primnodes::SubPlan<'_>,
     plan: &nodes::nodes::Node<'_>,
 ) -> PgResult<()> {
-    use nodes::primnodes::SubLinkType;
+    use ::nodes::primnodes::SubLinkType;
 
     let head = plan.plan_head();
     let plan_startup = head.startup_cost;

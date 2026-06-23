@@ -1363,7 +1363,7 @@ fn apply_delitems_to_page(
             let updatedoffset = updatedoffsets[i];
             let hdr = index_tuple_header(itup);
             let itemsz = maxalign(IndexTupleSize(&hdr));
-            if !page::PageIndexTupleOverwrite(
+            if !::page::PageIndexTupleOverwrite(
                 &mut pm,
                 updatedoffset,
                 &itup[..itemsz],
@@ -1375,7 +1375,7 @@ fn apply_delitems_to_page(
 
         /* Now handle simple deletes of entire tuples */
         if !deletable.is_empty() {
-            page::PageIndexMultiDelete(&mut pm, deletable)?;
+            ::page::PageIndexMultiDelete(&mut pm, deletable)?;
         }
     }
 
@@ -1906,7 +1906,7 @@ fn _bt_mark_page_halfdead<'mcx>(
         set_downlink_at_offset(page, poffset, topparentrightsib)?;
         let nextoffset = OffsetNumberNext(poffset);
         let mut pm = PageMut::new(page)?;
-        page::PageIndexTupleDelete(&mut pm, nextoffset)?;
+        ::page::PageIndexTupleDelete(&mut pm, nextoffset)?;
         Ok(())
     })?;
 
@@ -1937,7 +1937,7 @@ fn _bt_mark_page_halfdead<'mcx>(
         write_index_tuple_header(&mut trunctuple, &hdr);
 
         let mut pm = PageMut::new(page)?;
-        if !page::PageIndexTupleOverwrite(&mut pm, P_HIKEY, &trunctuple)? {
+        if !::page::PageIndexTupleOverwrite(&mut pm, P_HIKEY, &trunctuple)? {
             return Err(PgError::error("could not overwrite high key in half-dead page"));
         }
         Ok(())

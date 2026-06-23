@@ -14,7 +14,7 @@ use types_catalog::catalog_dependency::ObjectAddress;
 use types_catalog::catalog_shdepend::SharedDependencyType;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::parsenodes::DropBehavior;
+use ::nodes::parsenodes::DropBehavior;
 
 seam_core::seam!(
     /// `recordSharedDependencyOn(depender, referenced, deptype)`.

@@ -36,8 +36,8 @@ use equalfuncs_seams::equal_expr;
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Index, Oid};
 use types_error::{PgError, PgResult};
-use nodes::primnodes::{Expr, TargetEntry, Var};
-use nodes::rawnodes::SortGroupClause;
+use ::nodes::primnodes::{Expr, TargetEntry, Var};
+use ::nodes::rawnodes::SortGroupClause;
 use pathnodes::{NodeId, PathTarget, PlannerInfo, VOLATILITY_NOVOLATILE, VOLATILITY_UNKNOWN};
 
 // ===========================================================================

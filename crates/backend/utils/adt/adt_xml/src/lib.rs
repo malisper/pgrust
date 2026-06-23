@@ -64,7 +64,7 @@ use types_core::{InvalidOid, Oid};
 use types_tuple::heaptuple::Datum as TDatum;
 
 pub use types_error::ERRCODE_NOT_AN_XML_DOCUMENT;
-pub use nodes::primnodes::{XmlExprOp, XmlOptionType};
+pub use ::nodes::primnodes::{XmlExprOp, XmlOptionType};
 pub use types_xml::{PgXmlStrictness, XmlBinaryType, XmlStandaloneType};
 
 use adt_datetime::{

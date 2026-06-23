@@ -68,15 +68,15 @@ use nodeWindowAgg as nodeWindowAgg;
 use syscache_seams as syscache;
 use utils_error::elog;
 use types_core::Oid;
-use nodes::nodes::NodeTag;
+use ::nodes::nodes::NodeTag;
 use types_error::{PgError, PgResult, DEBUG2};
-use nodes::nodeindexscan::CUSTOMPATH_SUPPORT_MARK_RESTORE;
-use nodes::nodes::{
+use ::nodes::nodeindexscan::CUSTOMPATH_SUPPORT_MARK_RESTORE;
+use ::nodes::nodes::{
     ntag, Node, T_CteScan, T_FunctionScan, T_IndexOnlyScan, T_IndexScan, T_Material, T_MergeAppend,
     T_NamedTuplestoreScan, T_Result, T_Sort, T_TableFuncScan, T_WorkTableScan, T_Append,
     T_CustomScan,
 };
-use nodes::pathnodes::PathNode;
+use ::nodes::pathnodes::PathNode;
 use nodes::{EStateData, PlanStateNode};
 
 /// Install this crate's implementations into its seam slots.
@@ -274,7 +274,7 @@ pub fn exec_re_scan<'mcx>(
     // the concrete `BitmapAndState` internally), so dispatch it before the
     // borrowing `match` below; the C `chgParam` free at the tail still applies.
     let mcx = estate.es_query_cxt;
-    if node.tag() == nodes::execstate_tags::T_BitmapAndState {
+    if node.tag() == ::nodes::execstate_tags::T_BitmapAndState {
         nodeBitmapAnd::ExecReScanBitmapAnd(node, estate)?;
     } else {
         match node {
@@ -324,7 +324,7 @@ pub fn exec_re_scan<'mcx>(
             // so the carrier is downcast to the concrete state (tag-checked)
             // before the node crate's `ExecReScanSampleScan` runs.
             PlanStateNode::SampleScan(s) => {
-                let sample = nodes::samplescanstate_carrier::downcast_sample_scan_state_mut::<
+                let sample = ::nodes::samplescanstate_carrier::downcast_sample_scan_state_mut::<
                     samplescan::SampleScanState<'_>,
                 >(&mut **s)
                 .expect("castNode(SampleScanState, node) failed");
@@ -380,7 +380,7 @@ pub fn exec_re_scan<'mcx>(
             PlanStateNode::Group(m) => nodeGroup::ExecReScanGroup(m, estate)?,
             // case T_AggState: ExecReScanAgg((AggState *) node);
             PlanStateNode::Agg(a) => {
-                let agg = nodes::aggstate_carrier::downcast_agg_state_mut::<
+                let agg = ::nodes::aggstate_carrier::downcast_agg_state_mut::<
                     nodeAgg::AggStateData<'_>,
                 >(&mut **a)
                 .expect("castNode(AggState, node) failed");
@@ -640,7 +640,7 @@ pub fn exec_supports_backward_scan(node: Option<&Node<'_>>) -> PgResult<bool> {
         //   return false;
         ntag::T_CustomScan => Ok(
             (node.expect_customscan().flags
-                & nodes::nodeindexscan::CUSTOMPATH_SUPPORT_BACKWARD_SCAN)
+                & ::nodes::nodeindexscan::CUSTOMPATH_SUPPORT_BACKWARD_SCAN)
                 != 0,
         ),
 

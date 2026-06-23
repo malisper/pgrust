@@ -15,7 +15,7 @@ extern crate alloc;
 
 use mcx::{Mcx, PgVec};
 use types_error::PgResult;
-use nodes::parsestmt::RawStmt;
+use ::nodes::parsestmt::RawStmt;
 use parsenodes::RawParseMode;
 
 seam_core::seam!(

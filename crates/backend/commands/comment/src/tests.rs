@@ -8,8 +8,8 @@
 //! empty-string -> NULL reduction and the `stmt.comment` borrow.
 
 use super::*;
-use nodes::parsenodes::OBJECT_TABLE;
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::OBJECT_TABLE;
+use ::nodes::parsenodes::ObjectType;
 use parsenodes::{Node, StringNode};
 
 /// A `String` value node naming the object (`strVal(stmt->object)`).

@@ -40,7 +40,7 @@ use types_core::{
 // (`SysCacheKey::Value`) is an audited bare word (C: `Datum key1..key4`).
 use datum::Datum as ScalarWord;
 use types_error::{PgError, PgResult};
-use nodes::Bitmapset;
+use ::nodes::Bitmapset;
 use rel::RelationData;
 use stringinfo::StringInfo;
 // The canonical per-attribute value model (C's per-column `Datum`): a by-value
@@ -801,7 +801,7 @@ pub fn logicalrep_write_insert<'mcx>(
     out: &mut StringInfo<'mcx>,
     xid: TransactionId,
     rel: &RelationData<'_>,
-    newslot: &mut nodes::tuptable::SlotData<'mcx>,
+    newslot: &mut ::nodes::tuptable::SlotData<'mcx>,
     binary: bool,
     columns: Option<&Bitmapset<'_>>,
     include_gencols_type: PublishGencolsType,
@@ -844,8 +844,8 @@ pub fn logicalrep_write_update<'mcx>(
     out: &mut StringInfo<'mcx>,
     xid: TransactionId,
     rel: &RelationData<'_>,
-    oldslot: Option<&mut nodes::tuptable::SlotData<'mcx>>,
-    newslot: &mut nodes::tuptable::SlotData<'mcx>,
+    oldslot: Option<&mut ::nodes::tuptable::SlotData<'mcx>>,
+    newslot: &mut ::nodes::tuptable::SlotData<'mcx>,
     binary: bool,
     columns: Option<&Bitmapset<'_>>,
     include_gencols_type: PublishGencolsType,
@@ -927,7 +927,7 @@ pub fn logicalrep_write_delete<'mcx>(
     out: &mut StringInfo<'mcx>,
     xid: TransactionId,
     rel: &RelationData<'_>,
-    oldslot: &mut nodes::tuptable::SlotData<'mcx>,
+    oldslot: &mut ::nodes::tuptable::SlotData<'mcx>,
     binary: bool,
     columns: Option<&Bitmapset<'_>>,
     include_gencols_type: PublishGencolsType,
@@ -1189,7 +1189,7 @@ pub fn logicalrep_read_typ<'mcx>(
 fn logicalrep_write_tuple<'mcx>(
     out: &mut StringInfo<'mcx>,
     rel: &RelationData<'_>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     binary: bool,
     columns: Option<&Bitmapset<'_>>,
     include_gencols_type: PublishGencolsType,

@@ -3,11 +3,11 @@
 
 use crate::relids;
 use mcx::{MemoryContext, PgBox, PgVec};
-use nodes::copy_query::Query;
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsenodes::{RTEPermissionInfo, RangeTblEntry};
-use nodes::primnodes::{BoolTestType, Expr, ExprRelids, Var};
-use nodes::rawnodes::{FromExpr, RangeTblRef};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsenodes::{RTEPermissionInfo, RangeTblEntry};
+use ::nodes::primnodes::{BoolTestType, Expr, ExprRelids, Var};
+use ::nodes::rawnodes::{FromExpr, RangeTblRef};
 
 fn rel(members: &[i32]) -> ExprRelids {
     let mut r = ExprRelids::default();

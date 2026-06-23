@@ -31,7 +31,7 @@ use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_COLLATION,
 };
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo};
 use types_tuple::heaptuple::Datum;

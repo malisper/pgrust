@@ -2,8 +2,8 @@
 
 use utility_out_seams as rt;
 use types_error::{PgResult, WARNING};
-use nodes::nodes::Node;
-use nodes::nodes::{CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UPDATE, CMD_UTILITY};
+use ::nodes::nodes::Node;
+use ::nodes::nodes::{CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UPDATE, CMD_UTILITY};
 
 use crate::consts::*;
 
@@ -15,7 +15,7 @@ use crate::consts::*;
 /// rest of this crate); arms that inspect a payload field rebind through the
 /// `Node` enum.
 pub fn GetCommandLogLevel(parsetree: &Node) -> PgResult<LogStmtLevel> {
-    use nodes::nodes as ntag;
+    use ::nodes::nodes as ntag;
 
     let lev: LogStmtLevel = match parsetree.node_tag() {
         // NOTE: the C `case T_RawStmt:` arm (recurse into `((RawStmt *)
@@ -215,7 +215,7 @@ pub fn GetCommandLogLevel(parsetree: &Node) -> PgResult<LogStmtLevel> {
 
         // NOTE: the C `case T_PlannedStmt:` arm (switch on
         // `((PlannedStmt *) parsetree)->commandType`) cannot be reached in this
-        // repo's node model: `PlannedStmt` (nodes::nodeindexscan) is not a
+        // repo's node model: `PlannedStmt` (::nodes::nodeindexscan) is not a
         // `Node` enum variant and has no `T_PlannedStmt` tag, so a `&Node` can
         // never carry one. (The src-idiomatic reference reaches it via
         // `parsetree.expect_plannedstmt()`.) An already-planned statement would

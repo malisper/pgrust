@@ -26,13 +26,13 @@ use mcx::{Mcx, PgString, PgVec};
 use types_core::primitive::InvalidOid;
 use types_core::Oid;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CommentStmt, ConstrType, CreateStatsStmt,
     StatsElem,
 };
-use nodes::parsenodes::DROP_RESTRICT;
-use nodes::nodes::Node;
-use nodes::parsenodes::{OBJECT_TABCONSTRAINT, OBJECT_TABLE};
+use ::nodes::parsenodes::DROP_RESTRICT;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::{OBJECT_TABCONSTRAINT, OBJECT_TABLE};
 use types_storage::lock::{AccessShareLock, NoLock};
 
 use next::attmap::build_attrmap_by_name;

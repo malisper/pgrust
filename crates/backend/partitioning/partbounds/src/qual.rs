@@ -28,18 +28,18 @@ use types_core::primitive::{Oid, OidIsValid};
 /// `RECORDOID` (pg_type.h) — the pseudo-type for an anonymous record.
 const RECORDOID: Oid = 2249;
 use types_error::{PgError, PgResult};
-use nodes::ddlnodes::{PartitionBoundSpec, PartitionRangeDatum};
-use nodes::nodes::Node;
-use nodes::partition::{
+use ::nodes::ddlnodes::{PartitionBoundSpec, PartitionRangeDatum};
+use ::nodes::nodes::Node;
+use ::nodes::partition::{
     PartitionDescData, PartitionKeyData, PartitionRangeDatumKind, PartitionStrategy,
 };
-use nodes::primnodes::{Const, Expr};
+use ::nodes::primnodes::{Const, Expr};
 
 use nodes_core::makefuncs::{
     make_ands_explicit, make_bool_const, make_bool_expr, make_const, make_is_not_null,
     make_opclause, make_relabel_type, make_var,
 };
-use nodes::primnodes::{ArrayExpr, BoolExprType, CoercionForm, NullTest, NullTestType, ScalarArrayOpExpr};
+use ::nodes::primnodes::{ArrayExpr, BoolExprType, CoercionForm, NullTest, NullTestType, ScalarArrayOpExpr};
 
 use lsyscache_seams as lsyscache;
 

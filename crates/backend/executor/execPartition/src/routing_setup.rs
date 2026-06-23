@@ -7,8 +7,8 @@
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::executor::TupleSlotKind;
-use nodes::partition::PartitionDescData;
+use ::nodes::executor::TupleSlotKind;
+use ::nodes::partition::PartitionDescData;
 use nodes::{EStateData, ModifyTableState, Opaque, ResultRelInfo, RriId};
 use rel::Relation;
 use types_storage::lock::{NoLock, RowExclusiveLock};

@@ -1957,7 +1957,7 @@ fn relation_get_relation_name<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> a
 /// first `BlockNumber` (u32) field.
 fn gin_page_get_meta_head(page: &[u8]) -> BlockNumber {
     let pr = PageRef::new(page).expect("valid GIN metapage image");
-    let contents = page::PageGetContents(&pr).expect("metapage contents");
+    let contents = ::page::PageGetContents(&pr).expect("metapage contents");
     BlockNumber::from_ne_bytes([contents[0], contents[1], contents[2], contents[3]])
 }
 

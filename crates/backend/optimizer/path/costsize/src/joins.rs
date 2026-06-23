@@ -44,7 +44,7 @@ fn is_outer_join(jointype: JoinType) -> bool {
 /// resolved through `root.path(..)`. We examine the `pathtype` (the Plan node
 /// type the Path would produce), not the `PathNode` tag, exactly like C.
 pub fn exec_supports_mark_restore(root: &PlannerInfo, path: PathId) -> bool {
-    use nodes::nodes;
+    use ::nodes::nodes;
     let pathnode = root.path(path);
     let pathtype = pathnode.base().pathtype;
 
@@ -1062,7 +1062,7 @@ fn op_arg(
     clause: pathnodes::NodeId,
     i: usize,
 ) -> pathnodes::NodeId {
-    use nodes::primnodes::Expr;
+    use ::nodes::primnodes::Expr;
     // Deep-copy the operand into the node arena via clone_in (the derived
     // `Expr::clone` panics on an owned-subtree child — a hash clause operand may
     // carry a SubPlan, e.g. a correlated scalar subquery in the join condition).

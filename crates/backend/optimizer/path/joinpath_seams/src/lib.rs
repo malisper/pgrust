@@ -31,7 +31,7 @@ extern crate alloc;
 use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::nodes::NodeTag;
+use ::nodes::nodes::NodeTag;
 use pathnodes::optimizer_plan::{
     CostSelector, JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors,
 };

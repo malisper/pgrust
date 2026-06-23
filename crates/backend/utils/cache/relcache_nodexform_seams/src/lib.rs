@@ -24,7 +24,7 @@
 use mcx::{Mcx, PgVec};
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 
 /// One index's attribute contributions for `RelationGetIndexAttrBitmap`,
 /// produced by the owner's `index_open` (relation/indexam) + `pull_varattnos`

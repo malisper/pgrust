@@ -19,7 +19,7 @@
 
 use mcx::{Mcx, PgVec};
 use types_error::PgResult;
-use nodes::nodehash::{
+use ::nodes::nodehash::{
     HashInstrumentSlot, HashInstrumentation, HashJoinTableData, HashState, SharedHashInfo,
     SharedHashInfoHeader,
 };

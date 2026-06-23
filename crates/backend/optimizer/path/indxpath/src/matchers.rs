@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::PgResult;
-use nodes::primnodes::{CompareType, Expr, RowCompareExpr};
+use ::nodes::primnodes::{CompareType, Expr, RowCompareExpr};
 use pathnodes::{IndexClause, IndexOptInfo, PlannerInfo, RinfoId};
 
 use nodes_core::makefuncs::{make_bool_const, make_opclause};
@@ -269,7 +269,7 @@ pub fn match_boolean_index_clause(
         }
         // indexkey IS TRUE / IS FALSE
         else if let Some(btest) = clause.as_booleantest() {
-            use nodes::primnodes::BoolTestType;
+            use ::nodes::primnodes::BoolTestType;
             let arg: &Expr = btest.arg.as_deref().expect("BooleanTest without arg");
             if btest.booltesttype == BoolTestType::IS_TRUE
                 && match_index_to_operand(root, arg, indexcol, index)

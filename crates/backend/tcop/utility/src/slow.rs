@@ -23,11 +23,11 @@
 use mcx::Mcx;
 use types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use types_error::PgResult;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::Node;
-use nodes::nodes as ntag;
-use nodes::parsestmt::{ParseState, ProcessUtilityContext, PROCESS_UTILITY_SUBCOMMAND};
-use nodes::portalcmds::ParamListInfo;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::Node;
+use ::nodes::nodes as ntag;
+use ::nodes::parsestmt::{ParseState, ProcessUtilityContext, PROCESS_UTILITY_SUBCOMMAND};
+use ::nodes::portalcmds::ParamListInfo;
 use portal::QueryCompletion;
 use types_storage::lock::{ShareLock, ShareUpdateExclusiveLock};
 use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_RELATION};
@@ -46,7 +46,7 @@ pub fn process_utility_slow<'mcx>(
     query_string: &str,
     context: ProcessUtilityContext,
     params: ParamListInfo,
-    _dest: nodes::parsestmt::DestReceiverHandle,
+    _dest: ::nodes::parsestmt::DestReceiverHandle,
     is_top_level: bool,
     mut qc: Option<&mut QueryCompletion>,
 ) -> PgResult<()> {
@@ -148,10 +148,10 @@ fn process_utility_slow_body<'mcx>(
             // ... and do it.  We can't use foreach() because we may modify the
             // list midway through, so pick off the elements one at a time, the
             // hard way: front-delete from `stmts`, possibly prepend more.
-            let mut table_rv: Option<nodes::nodes::NodePtr<'mcx>> = None;
+            let mut table_rv: Option<::nodes::nodes::NodePtr<'mcx>> = None;
             while !stmts.is_empty() {
                 // list_delete_first: take the head, keeping ownership.
-                let stmt: nodes::nodes::NodePtr<'mcx> = stmts.remove(0);
+                let stmt: ::nodes::nodes::NodePtr<'mcx> = stmts.remove(0);
 
                 match (&*stmt).node_tag() {
                     t if t == ntag::T_CreateStmt => {

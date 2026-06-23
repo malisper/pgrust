@@ -51,9 +51,9 @@ use sortsupport_seams as sortsupport;
 
 use mcx::{Mcx, MemoryContext, PgBox};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
-use nodes::nodeagg::TupleHashEntryData;
-use nodes::nodesetop::{
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+use ::nodes::nodeagg::TupleHashEntryData;
+use ::nodes::nodesetop::{
     SetOp, SetOpStateData, SetOpStatePerGroupData, SetOpStatePerInput, SETOPCMD_EXCEPT,
     SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL, SETOP_HASHED,
 };
@@ -727,7 +727,7 @@ fn setop_retrieve_hash_table<'mcx>(
 /// state node wrapped in the dispatch enum for the executor's `PlanStateNode`
 /// tree.
 pub fn ExecInitSetOp<'mcx>(
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     mut eflags: i32,
 ) -> PgResult<PgBox<'mcx, SetOpStateData<'mcx>>> {

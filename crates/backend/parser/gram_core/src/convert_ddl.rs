@@ -2,10 +2,10 @@
 //
 // c2rust DDL statement/helper structs live in `cd`
 // (backend_nodes_types::parsenodes_ddl); the owned targets in `tdn`
-// (nodes::ddlnodes). The uniform 5-rule mapping applies (see convert.rs).
+// (::nodes::ddlnodes). The uniform 5-rule mapping applies (see convert.rs).
 
 use backend_nodes_types::parsenodes_ddl as cd;
-use nodes::ddlnodes as tdn;
+use ::nodes::ddlnodes as tdn;
 
 // ---------------------------------------------------------------------------
 // Small enum converters (raw c2rust c_uint/c_int typedef -> owned #[repr] enum)

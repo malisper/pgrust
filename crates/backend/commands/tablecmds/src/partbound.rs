@@ -24,13 +24,13 @@ use types_error::PgResult;
 use types_error::{
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
 };
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     CoercionContext, PartitionBoundSpec, PartitionRangeDatum,
 };
-use nodes::nodes::{Node, NodePtr};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::partition::PartitionRangeDatumKind;
-use nodes::primnodes::{CoercionForm, Const, Expr};
+use ::nodes::nodes::{Node, NodePtr};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::partition::PartitionRangeDatumKind;
+use ::nodes::primnodes::{CoercionForm, Const, Expr};
 use types_partition::{
     PartitionKeyData, PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
 };

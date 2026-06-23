@@ -8,9 +8,9 @@
 //! the methods this unit installs into `backend-executor-nodeAgg-pq-seams`.
 
 use types_error::PgResult;
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::nodeagg::Aggref;
-use nodes::EcxtId;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::nodeagg::Aggref;
+use ::nodes::EcxtId;
 use crate::aggstate::{AggStateData, AggregateInstrumentation, SharedAggInfo, SharedAggInfoHeader};
 use execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
@@ -32,7 +32,7 @@ pub const AGG_CONTEXT_WINDOW: i32 = 2;
 /// not-an-`AggState` fall-through).
 ///
 /// The back-reference is carried as the tag-checked
-/// [`AggStateContextLink`](nodes::aggstate_carrier::AggStateContextLink)
+/// [`AggStateContextLink`](::nodes::aggstate_carrier::AggStateContextLink)
 /// inside [`FmgrCallContext::Agg`] (the `PlanStateLink` discipline); the
 /// downcast to the concrete `AggStateData` is C's `(AggState *)` cast.
 #[inline]
@@ -42,7 +42,7 @@ fn agg_context<'a, 'mcx>(
     // if (fcinfo->context && IsA(fcinfo->context, AggState)) {
     //     AggState *aggstate = (AggState *) fcinfo->context; ... }
     let live = fcinfo.context.as_ref()?.as_agg_state()?;
-    nodes::aggstate_carrier::downcast_agg_state_ref::<AggStateData<'mcx>>(live)
+    ::nodes::aggstate_carrier::downcast_agg_state_ref::<AggStateData<'mcx>>(live)
 }
 
 /// `AggCheckCallContext(fcinfo, &aggcontext)` — report whether the function is
@@ -179,7 +179,7 @@ pub fn AggStateIsShared<'mcx>(fcinfo: &FunctionCallInfoBaseData<'mcx>) -> bool {
 /// internal state needing cleanup).
 pub fn AggRegisterCallback<'mcx>(
     fcinfo: &mut FunctionCallInfoBaseData<'mcx>,
-    func: nodes::ExprContextCallbackFunction,
+    func: ::nodes::ExprContextCallbackFunction,
     arg: types_tuple::heaptuple::Datum<'mcx>,
 ) -> PgResult<()> {
     // RegisterExprContextCallback(aggstate->curaggcontext, func, arg);
@@ -220,12 +220,12 @@ pub fn AggRegisterCallback<'mcx>(
     // for this call; the dispatch released its `&mut estate` borrow first, so this
     // momentary re-derived `&mut` does not alias.
     #[allow(unsafe_code)]
-    let estate: &mut nodes::execnodes::EStateData<'mcx> =
-        unsafe { &mut *(link.data as *mut nodes::execnodes::EStateData<'mcx>) };
+    let estate: &mut ::nodes::execnodes::EStateData<'mcx> =
+        unsafe { &mut *(link.data as *mut ::nodes::execnodes::EStateData<'mcx>) };
     let econtext = estate.ecxt_mut(ecxt_id);
     let mut ecxt_callback = mcx::alloc_in(
         econtext.ecxt_per_query_memory,
-        nodes::execnodes::ExprContext_CB {
+        ::nodes::execnodes::ExprContext_CB {
             next: None,
             function: func,
             arg,
@@ -540,9 +540,9 @@ fn agg_context_from_raw_frame<'a, 'mcx>(
     fcinfo: &fmgr::FunctionCallInfoBaseData,
 ) -> Option<&'a AggStateData<'mcx>> {
     let raw = fcinfo.agg_context_link()?;
-    let link = nodes::aggstate_carrier::AggStateContextLink::from_raw(raw.data, raw.vtable);
-    let live: &(dyn nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx) = link.get();
-    nodes::aggstate_carrier::downcast_agg_state_ref::<AggStateData<'mcx>>(live)
+    let link = ::nodes::aggstate_carrier::AggStateContextLink::from_raw(raw.data, raw.vtable);
+    let live: &(dyn ::nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx) = link.get();
+    ::nodes::aggstate_carrier::downcast_agg_state_ref::<AggStateData<'mcx>>(live)
 }
 
 /// Seam body for `agg_get_aggref` (C `AggGetAggref`). Recovers the `Aggref`
@@ -638,7 +638,7 @@ fn agg_state_is_shared_shim(fcinfo: &fmgr::FunctionCallInfoBaseData) -> bool {
 /// `ordered_set_shutdown`).
 fn agg_register_callback_shim<'mcx>(
     fcinfo: &mut fmgr::FunctionCallInfoBaseData,
-    func: nodes::ExprContextCallbackFunction,
+    func: ::nodes::ExprContextCallbackFunction,
     arg: types_tuple::heaptuple::Datum<'mcx>,
 ) -> PgResult<()> {
     // C `AggRegisterCallback`:
@@ -690,15 +690,15 @@ fn agg_register_callback_shim<'mcx>(
     // guard, so this momentary re-derived `&mut` does not alias — the same audited
     // raw-back-pointer discipline as `EStateLink::get_mut` / `RawAggContextLink`.
     #[allow(unsafe_code)]
-    let estate: &mut nodes::execnodes::EStateData<'mcx> =
-        unsafe { &mut *(link.data as *mut nodes::execnodes::EStateData<'mcx>) };
+    let estate: &mut ::nodes::execnodes::EStateData<'mcx> =
+        unsafe { &mut *(link.data as *mut ::nodes::execnodes::EStateData<'mcx>) };
     // RegisterExprContextCallback(cxt, func, arg): allocate the callback node in
     // the ExprContext's per-query memory and prepend it to the list (reverse
     // execution order), faithful to execUtils.c:RegisterExprContextCallback.
     let econtext = estate.ecxt_mut(ecxt_id);
     let mut ecxt_callback = mcx::alloc_in(
         econtext.ecxt_per_query_memory,
-        nodes::execnodes::ExprContext_CB {
+        ::nodes::execnodes::ExprContext_CB {
             next: None,
             function: func,
             arg,
@@ -762,8 +762,8 @@ mod k1_context_channel_tests {
     //! `IsA(fcinfo->context, AggState)` + `(AggState *) fcinfo->context`.
     use super::*;
     use mcx::{MemoryContext, PgVec};
-    use nodes::aggstate_carrier::AggStateContextLink;
-    use nodes::fmgr::FmgrCallContext;
+    use ::nodes::aggstate_carrier::AggStateContextLink;
+    use ::nodes::fmgr::FmgrCallContext;
 
     /// A frame whose `context` is the live AggState resolves as an aggregate
     /// call: `AggCheckCallContext` => AGG_CONTEXT_AGGREGATE + the curaggcontext
@@ -789,7 +789,7 @@ mod k1_context_channel_tests {
 
         // fcinfo->context = (Node *) aggstate;
         let link = AggStateContextLink::from_ref(
-            &aggstate as &(dyn nodes::aggstate_carrier::AggStateLive<'_> + '_),
+            &aggstate as &(dyn ::nodes::aggstate_carrier::AggStateLive<'_> + '_),
         );
         let mut fcinfo = FunctionCallInfoBaseData::default();
         fcinfo.context = Some(FmgrCallContext::Agg(link));

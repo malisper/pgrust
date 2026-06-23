@@ -4,20 +4,20 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly. The `CachedPlanSource` / `CachedPlan` live
 //! structs are owned by the plancache unit; consumers thread the handles
-//! ([`nodes::parsestmt`]) and reach individual fields through the
+//! ([`::nodes::parsestmt`]) and reach individual fields through the
 //! accessor seams below.
 
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::nodes::Node;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::params::ParamListInfo;
-use nodes::parsestmt::{
+use ::nodes::nodes::Node;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::params::ParamListInfo;
+use ::nodes::parsestmt::{
     CachedPlanHandle, CachedPlanSourceHandle, CommandTag, RawStmt,
     ResourceOwnerHandle,
 };
-use nodes::queryenvironment::QueryEnvironment;
+use ::nodes::queryenvironment::QueryEnvironment;
 use types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(

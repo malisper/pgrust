@@ -16,10 +16,10 @@ use types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
-use nodes::ddlnodes::{ConstrType, CreateStmt};
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::primnodes::OnCommitAction;
-use nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
+use ::nodes::ddlnodes::{ConstrType, CreateStmt};
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::primnodes::OnCommitAction;
+use ::nodes::rawnodes::{ColumnDef, RangeVar, TypeName};
 use types_tuple::access::{
     RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW, RELPERSISTENCE_TEMP,
     RELPERSISTENCE_UNLOGGED,
@@ -89,7 +89,7 @@ const HEAP_RELOPT_NAMESPACES: &[&str] = &["toast"];
 /// dispatch on — the same projection every DDL caller uses (cf.
 /// `backend-commands-vacuum::defel_arg`). `None` mirrors `def->arg == NULL`.
 pub(crate) fn defel_arg(
-    def: &nodes::ddlnodes::DefElem<'_>,
+    def: &::nodes::ddlnodes::DefElem<'_>,
 ) -> PgResult<Option<define_seams::DefElemArg>> {
     use define_seams::DefElemArg;
     let Some(node) = def.arg.as_deref() else {
@@ -597,7 +597,7 @@ pub fn define_relation<'mcx>(
             let tsname = ts_seam::get_tablespace_name::call(mcx, tablespace_id)?;
             aclchk_seam::aclcheck_error::call(
                 aclresult,
-                nodes::parsenodes::OBJECT_TABLESPACE,
+                ::nodes::parsenodes::OBJECT_TABLESPACE,
                 tsname.as_ref().map(|s| s.as_str().to_string()),
             )?;
         }
@@ -894,7 +894,7 @@ pub fn define_relation<'mcx>(
 /// catalog with no createas-observable intermediate state.
 pub fn create_ctas_relation<'mcx>(
     mcx: Mcx<'mcx>,
-    into: nodes::ddlnodes::IntoClause<'mcx>,
+    into: ::nodes::ddlnodes::IntoClause<'mcx>,
     attr_list: PgVec<'mcx, NodePtr<'mcx>>,
     relkind: u8,
     is_matview: bool,

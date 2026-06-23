@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use mcx::MemoryContext;
-use nodes::executor::TupleTableSlot;
-use nodes::primnodes::{OpExpr, Var};
+use ::nodes::executor::TupleTableSlot;
+use ::nodes::primnodes::{OpExpr, Var};
 
 thread_local! {
     /// Queue of (block, offset, isnull) yielded in order by
@@ -165,9 +165,9 @@ fn set_bounds<'mcx>(
 }
 
 /// A minimal `ExprContext` charged to `mcx` (mirrors `ExecAssignExprContext`).
-fn make_expr_context<'mcx>(mcx: mcx::Mcx<'mcx>) -> nodes::execnodes::ExprContext<'mcx> {
+fn make_expr_context<'mcx>(mcx: mcx::Mcx<'mcx>) -> ::nodes::execnodes::ExprContext<'mcx> {
     use types_tuple::heaptuple::Datum;
-    nodes::execnodes::ExprContext {
+    ::nodes::execnodes::ExprContext {
         ecxt_scantuple: None,
         ecxt_innertuple: None,
         ecxt_outertuple: None,
@@ -213,7 +213,7 @@ fn ctid_geq_qual() -> Expr {
                 varattno: SelfItemPointerAttributeNumber,
                 ..Default::default()
             }),
-            Expr::Const(nodes::primnodes::Const::default()),
+            Expr::Const(::nodes::primnodes::Const::default()),
         ],
         ..Default::default()
     })
@@ -226,8 +226,8 @@ fn make_tid_range_scan<'mcx>(estate: &EStateData<'mcx>, nquals: usize) -> TidRan
         quals.push(ctid_geq_qual());
     }
     TidRangeScan {
-        scan: nodes::nodeindexscan::Scan {
-            plan: nodes::nodeindexscan::Plan::default(),
+        scan: ::nodes::nodeindexscan::Scan {
+            plan: ::nodes::nodeindexscan::Plan::default(),
             scanrelid: 1,
         },
         tidrangequals: Some(quals),
@@ -496,7 +496,7 @@ fn init_builds_bounds_from_quals() {
     let node = make_tid_range_scan(&estate, 2);
     let mcx = estate.es_query_cxt;
     let plan_node = mcx::leak_in(
-        mcx::alloc_in(mcx, nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
+        mcx::alloc_in(mcx, ::nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
     );
     let st = ExecInitTidRangeScan(&node, plan_node, &mut estate, 0).unwrap();
     assert_eq!(st.trss_tidexprs.len(), 2);
@@ -517,14 +517,14 @@ fn init_errors_on_non_opexpr_qual() {
     // A bare Var cell is not an OpExpr -> "could not identify CTID expression".
     quals.push(Expr::Var(Var::default()));
     let node = TidRangeScan {
-        scan: nodes::nodeindexscan::Scan {
-            plan: nodes::nodeindexscan::Plan::default(),
+        scan: ::nodes::nodeindexscan::Scan {
+            plan: ::nodes::nodeindexscan::Plan::default(),
             scanrelid: 1,
         },
         tidrangequals: Some(quals),
     };
     let plan_node = mcx::leak_in(
-        mcx::alloc_in(mcx, nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
+        mcx::alloc_in(mcx, ::nodes::nodes::Node::mk_tid_range_scan(mcx, node.clone_in(mcx).unwrap()).unwrap()).unwrap(),
     );
     assert!(ExecInitTidRangeScan(&node, plan_node, &mut estate, 0).is_err());
 }

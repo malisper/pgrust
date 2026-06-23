@@ -1,10 +1,10 @@
 // Raw expression/grammar nodes, range/join nodes, clauses, value nodes, and
 // the small-enum discriminant mappers (included into convert.rs).
 
-use nodes::jointype::JoinType;
-use nodes::modifytable::{MergeMatchKind, OverridingKind};
-use nodes::nodelimit::LimitOption;
-use nodes::nodes::{CmdType, OnConflictAction};
+use ::nodes::jointype::JoinType;
+use ::nodes::modifytable::{MergeMatchKind, OverridingKind};
+use ::nodes::nodelimit::LimitOption;
+use ::nodes::nodes::{CmdType, OnConflictAction};
 
 // ---------------------------------------------------------------------------
 // Raw expression nodes
@@ -369,7 +369,7 @@ fn conv_cte<'mcx>(
             let cc = conv_cte_cycle(mcx, c.cycle_clause)?;
             Some(mcx::alloc_in(
                 mcx,
-                nodes::nodes::Node::mk_cte_cycle_clause(mcx, cc)?,
+                ::nodes::nodes::Node::mk_cte_cycle_clause(mcx, cc)?,
             )?)
         },
         location: c.location,
@@ -705,7 +705,7 @@ fn on_conflict_action(v: cp::OnConflictAction) -> OnConflictAction {
 }
 
 fn cmd_type(v: cpr::CmdType) -> CmdType {
-    use nodes::nodes::CmdType::*;
+    use ::nodes::nodes::CmdType::*;
     match v {
         cpr::CMD_UNKNOWN => CMD_UNKNOWN,
         cpr::CMD_SELECT => CMD_SELECT,
@@ -733,7 +733,7 @@ fn merge_match_kind(v: cp::MergeMatchKind) -> MergeMatchKind {
 }
 
 fn join_type(v: cpr::JoinType) -> JoinType {
-    use nodes::jointype::JoinType::*;
+    use ::nodes::jointype::JoinType::*;
     match v {
         cpr::JOIN_INNER => JOIN_INNER,
         cpr::JOIN_LEFT => JOIN_LEFT,
@@ -803,8 +803,8 @@ fn cte_materialize(v: cp::CTEMaterialize) -> tn::CTEMaterialize {
     }
 }
 
-fn lock_clause_strength(v: cp::LockClauseStrength) -> nodes::rawnodes::LockClauseStrength {
-    use nodes::rawnodes::LockClauseStrength::*;
+fn lock_clause_strength(v: cp::LockClauseStrength) -> ::nodes::rawnodes::LockClauseStrength {
+    use ::nodes::rawnodes::LockClauseStrength::*;
     match v {
         cp::LCS_NONE => LCS_NONE,
         cp::LCS_FORKEYSHARE => LCS_FORKEYSHARE,
@@ -815,8 +815,8 @@ fn lock_clause_strength(v: cp::LockClauseStrength) -> nodes::rawnodes::LockClaus
     }
 }
 
-fn lock_wait_policy(v: cp::LockWaitPolicy) -> nodes::rawnodes::LockWaitPolicy {
-    use nodes::rawnodes::LockWaitPolicy::*;
+fn lock_wait_policy(v: cp::LockWaitPolicy) -> ::nodes::rawnodes::LockWaitPolicy {
+    use ::nodes::rawnodes::LockWaitPolicy::*;
     match v {
         cp::LOCK_WAIT_BLOCK => LockWaitBlock,
         cp::LOCK_WAIT_SKIP => LockWaitSkip,

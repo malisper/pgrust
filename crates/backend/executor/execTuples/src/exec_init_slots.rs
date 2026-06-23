@@ -10,7 +10,7 @@
 //! # Slot model
 //!
 //! `EState::es_tupleTable` is the `SlotId`-addressed pool of the unified
-//! payload-bearing [`nodes::tuptable::SlotData`] (one `TupleTableSlot`
+//! payload-bearing [`::nodes::tuptable::SlotData`] (one `TupleTableSlot`
 //! carrying `tts_flags`/`tts_ops`/`tts_tid`/`tts_tableOid` AND the per-attribute
 //! `tts_values`/`tts_isnull`/`tts_nvalid`/`tts_tupleDescriptor` payload). The
 //! standalone (non-pool) creation routines (`MakeSingleTupleTableSlot`) build
@@ -20,8 +20,8 @@
 use mcx::Mcx;
 use types_core::primitive::AttrNumber;
 use types_error::PgResult;
-use nodes::execnodes::{EStateData, PlanStateData, ScanStateData};
-use nodes::tuptable::SlotData;
+use ::nodes::execnodes::{EStateData, PlanStateData, ScanStateData};
+use ::nodes::tuptable::SlotData;
 use nodes::{SlotId, TupleSlotKind};
 use types_tuple::heaptuple::DeformedColumn;
 use types_tuple::heaptuple::{TupleDesc, TupleDescData};
@@ -433,7 +433,7 @@ fn seam_exec_store_minimal_tuple<'mcx>(
 /// to the owner body, which performs the buffer-pin management.
 fn seam_exec_store_buffer_heap_tuple<'mcx>(
     tuple: types_tuple::heaptuple::FormedTuple<'mcx>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     buffer: types_storage::buf::Buffer,
 ) -> PgResult<()> {
     crate::slot_store_fetch::ExecStoreBufferHeapTuple(tuple, slot, buffer)
@@ -441,7 +441,7 @@ fn seam_exec_store_buffer_heap_tuple<'mcx>(
 
 fn seam_exec_store_heap_tuple<'mcx>(
     tuple: types_tuple::heaptuple::FormedTuple<'mcx>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
     crate::slot_store_fetch::ExecStoreHeapTuple(tuple, slot, should_free)
@@ -450,7 +450,7 @@ fn seam_exec_store_heap_tuple<'mcx>(
 fn seam_exec_force_store_heap_tuple_payload<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     tuple: types_tuple::heaptuple::FormedTuple<'mcx>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
     crate::slot_store_fetch::ExecForceStoreHeapTuple(mcx, tuple, slot, should_free)
@@ -461,7 +461,7 @@ fn seam_exec_force_store_heap_tuple_payload<'mcx>(
 /// `userbuf` in `heapam_fetch_row_version`). Forwards to the owner body.
 fn seam_exec_store_pinned_buffer_heap_tuple<'mcx>(
     tuple: types_tuple::heaptuple::FormedTuple<'mcx>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     buffer: types_storage::buf::Buffer,
 ) -> PgResult<()> {
     crate::slot_store_fetch::ExecStorePinnedBufferHeapTuple(tuple, slot, buffer)
@@ -470,7 +470,7 @@ fn seam_exec_store_pinned_buffer_heap_tuple<'mcx>(
 /// Seam `exec_clear_tuple_payload` — `ExecClearTuple(slot)` over the
 /// payload-bearing `&mut SlotData` the heap-scan vtable holds directly.
 fn seam_exec_clear_tuple_payload<'mcx>(
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
 ) -> PgResult<()> {
     crate::slot_store_fetch::ExecClearTuple(slot)
 }
@@ -481,7 +481,7 @@ fn seam_exec_clear_tuple_payload<'mcx>(
 fn seam_exec_store_minimal_tuple_payload<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     mtup: types_tuple::heaptuple::FormedMinimalTuple<'mcx>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     should_free: bool,
 ) -> PgResult<()> {
     crate::slot_store_fetch::ExecStoreMinimalTuple(mcx, mtup, slot, should_free)
@@ -493,7 +493,7 @@ fn seam_exec_store_minimal_tuple_payload<'mcx>(
 /// `PORTAL_ONE_MOD_WITH` legs use it.
 fn seam_exec_clean_type_from_tl<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    target_list: &[nodes::primnodes::TargetEntry<'mcx>],
+    target_list: &[::nodes::primnodes::TargetEntry<'mcx>],
 ) -> PgResult<types_tuple::heaptuple::TupleDesc<'mcx>> {
     crate::exectype_tupoutput::ExecCleanTypeFromTL(mcx, target_list)
 }
@@ -504,7 +504,7 @@ fn seam_exec_clean_type_from_tl<'mcx>(
 /// which dispatches on the slot kind.
 fn seam_exec_fetch_slot_heap_tuple<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    slot: &mut nodes::tuptable::SlotData<'mcx>,
+    slot: &mut ::nodes::tuptable::SlotData<'mcx>,
     materialize: bool,
 ) -> PgResult<(
     types_tuple::heaptuple::FormedTuple<'mcx>,
@@ -589,7 +589,7 @@ fn seam_exec_fetch_slot_minimal_tuple_copy<'mcx>(
 /// carries no `EState` — used by the parallel-worker tuple-queue `DestReceiver`).
 fn seam_exec_fetch_slot_minimal_tuple_copy_standalone<'mcx>(
     mcx: Mcx<'mcx>,
-    slot: &mut nodes::SlotData<'mcx>,
+    slot: &mut ::nodes::SlotData<'mcx>,
 ) -> PgResult<mcx::PgVec<'mcx, u8>> {
     let (mtup, _should_free) = crate::slot_store_fetch::ExecFetchSlotMinimalTuple(mcx, slot)?;
     use heaptuple::flat::MinimalTupleFlatError;
@@ -738,7 +738,7 @@ fn seam_exec_force_store_formed_heap_tuple<'mcx>(
 /// (`heap_freetuple` = drop in the owned model). The copy is made in the
 /// per-query context by `ExecCopySlotHeapTuple`.
 fn seam_replace_cur_tuple_from_slot<'mcx>(
-    node: &mut nodes::execexpr::SubPlanState<'mcx>,
+    node: &mut ::nodes::execexpr::SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     slot: SlotId,
 ) -> PgResult<()> {
@@ -756,7 +756,7 @@ fn seam_replace_cur_tuple_from_slot<'mcx>(
 /// the node's owned `curTuple` ([`FormedTuple`]), deforming against the slot's
 /// `tts_tupleDescriptor` (the descriptor of the slot the tuple was copied from).
 fn seam_cur_tuple_getattr<'mcx>(
-    node: &nodes::execexpr::SubPlanState<'mcx>,
+    node: &::nodes::execexpr::SubPlanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     slot: SlotId,
     attnum: AttrNumber,
@@ -870,7 +870,7 @@ fn seam_exec_scan_slot_descriptor<'mcx>(
 fn seam_exec_slot_descriptor<'mcx>(
     mcx: Mcx<'mcx>,
     estate: &EStateData<'mcx>,
-    slot: nodes::SlotId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<TupleDesc<'mcx>> {
     match estate.slot_data(slot).base().tts_tupleDescriptor.as_deref() {
         Some(d) => Ok(Some(mcx::alloc_in(mcx, d.clone_in(mcx)?)?)),
@@ -954,7 +954,7 @@ fn seam_execute_attr_map_slot_explicit<'mcx>(
 /// map from the pooled `ResultRelInfo` before applying it.
 fn seam_execute_attr_map_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
+    result_rel_info: ::nodes::RriId,
     in_slot: SlotId,
     out_slot: SlotId,
 ) -> PgResult<SlotId> {
@@ -989,7 +989,7 @@ fn seam_execute_attr_map_slot<'mcx>(
 fn seam_pad_name_cstring_columns<'mcx>(
     estate: &mut EStateData<'mcx>,
     slot: SlotId,
-    _per_tuple_ecxt: nodes::EcxtId,
+    _per_tuple_ecxt: ::nodes::EcxtId,
     attnums: &[AttrNumber],
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;

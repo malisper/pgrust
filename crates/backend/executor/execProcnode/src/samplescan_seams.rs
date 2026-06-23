@@ -20,7 +20,7 @@
 #![allow(non_snake_case)]
 
 use types_error::{PgError, PgResult};
-use nodes::execnodes::{EPQState, EStateData};
+use ::nodes::execnodes::{EPQState, EStateData};
 use nodes::{PlanStateNode, SlotId};
 use samplescan::SampleScanState;
 
@@ -40,7 +40,7 @@ fn exec_sample_scan_node<'mcx>(
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
         PlanStateNode::SampleScan(s) => {
-            nodes::samplescanstate_carrier::downcast_sample_scan_state_mut::<
+            ::nodes::samplescanstate_carrier::downcast_sample_scan_state_mut::<
                 SampleScanState<'mcx>,
             >(&mut **s)
             .expect("castNode(SampleScanState, pstate) failed")
@@ -152,7 +152,7 @@ pub fn init_seams() {
     // collect into the node's `args` list.
     seam::exec_init_expr_list::set(|samplestate, node, estate| {
         let mcx = estate.es_query_cxt;
-        let nodes: Vec<Option<&nodes::primnodes::Expr>> = node
+        let nodes: Vec<Option<&::nodes::primnodes::Expr>> = node
             .tablesample
             .as_deref()
             .and_then(|tsc| tsc.args.as_ref())

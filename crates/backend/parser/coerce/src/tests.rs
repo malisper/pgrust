@@ -1,7 +1,7 @@
 //! Unit tests over the pure (non-catalog) coercion logic.
 
 use super::*;
-use nodes::primnodes::Const;
+use ::nodes::primnodes::Const;
 
 #[test]
 fn polymorphic_predicates() {

@@ -5,7 +5,7 @@
 use mcx::Mcx;
 use types_core::xact::CommandId;
 use types_error::{PgError, PgResult};
-use nodes::nodes::CmdType;
+use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tuple::heaptuple::ItemPointerData;
 
@@ -170,7 +170,7 @@ pub fn ExecInsert<'mcx>(
         execIndexing_seams::exec_open_indices::call(
             estate,
             result_rel_info,
-            onconflict != nodes::modifytable::ONCONFLICT_NONE,
+            onconflict != ::nodes::modifytable::ONCONFLICT_NONE,
         )?;
     }
 
@@ -321,7 +321,7 @@ pub fn ExecInsert<'mcx>(
             )?;
         }
 
-        if onconflict != nodes::modifytable::ONCONFLICT_NONE
+        if onconflict != ::nodes::modifytable::ONCONFLICT_NONE
             && estate.result_rel(result_rel_info).ri_NumIndices > 0
         {
             // Perform a speculative insertion.
@@ -361,7 +361,7 @@ pub fn ExecInsert<'mcx>(
                     &arbiter_indexes,
                 )? {
                     // committed conflict tuple found
-                    if onconflict == nodes::modifytable::ONCONFLICT_UPDATE {
+                    if onconflict == ::nodes::modifytable::ONCONFLICT_UPDATE {
                         // In case of ON CONFLICT DO UPDATE, execute the UPDATE
                         // part. Be prepared to retry if the UPDATE fails because
                         // of another concurrent UPDATE/DELETE to the conflict
@@ -389,7 +389,7 @@ pub fn ExecInsert<'mcx>(
                         // In case of ON CONFLICT DO NOTHING, do nothing. However,
                         // verify that the tuple is visible to the executor's MVCC
                         // snapshot at higher isolation levels.
-                        debug_assert!(onconflict == nodes::modifytable::ONCONFLICT_NOTHING);
+                        debug_assert!(onconflict == ::nodes::modifytable::ONCONFLICT_NOTHING);
                         let temp_slot = execMain_seams::exec_get_returning_slot::call(
                             estate,
                             result_rel_info,

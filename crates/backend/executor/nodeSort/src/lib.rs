@@ -45,9 +45,9 @@ use types_error::PgResult;
 use execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
-use nodes::execnodes::{ForwardScanDirection, ScanDirectionIsForward};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
-use nodes::nodesort::{
+use ::nodes::execnodes::{ForwardScanDirection, ScanDirectionIsForward};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+use ::nodes::nodesort::{
     SharedSortInfo, SharedSortInfoHeader, Sort, SortStateData, TuplesortInstrumentation,
     TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE, TUPLESORT_RANDOMACCESS,
 };
@@ -339,7 +339,7 @@ fn exec_sort_node<'mcx>(
 /// Allocated in `estate.es_query_cxt` (C: `makeNode` in the per-query context),
 /// so fallible on OOM. Panics if `node` is not a `Sort` (the C `castNode`).
 pub fn ExecInitSort<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     mut eflags: i32,
 ) -> PgResult<PgBox<'mcx, SortStateData<'mcx>>> {

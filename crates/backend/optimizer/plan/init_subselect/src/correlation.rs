@@ -26,7 +26,7 @@ extern crate alloc;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::PlannerInfo;
 
@@ -40,7 +40,7 @@ use crate::subplan::make_subplan;
 fn is_andclause(node: &Expr) -> bool {
     matches!(
         node,
-        Expr::BoolExpr(b) if b.boolop == nodes::primnodes::BoolExprType::AND_EXPR
+        Expr::BoolExpr(b) if b.boolop == ::nodes::primnodes::BoolExprType::AND_EXPR
     )
 }
 
@@ -48,7 +48,7 @@ fn is_andclause(node: &Expr) -> bool {
 fn is_orclause(node: &Expr) -> bool {
     matches!(
         node,
-        Expr::BoolExpr(b) if b.boolop == nodes::primnodes::BoolExprType::OR_EXPR
+        Expr::BoolExpr(b) if b.boolop == ::nodes::primnodes::BoolExprType::OR_EXPR
     )
 }
 
@@ -105,7 +105,7 @@ fn replace_correlation_vars_mutator<'mcx>(
     }
     if let Expr::MergeSupportFunc(msf) = &node {
         // C: if (root->parse->commandType != CMD_MERGE)
-        if run.resolve(root.parse).commandType != nodes::nodes::CmdType::CMD_MERGE {
+        if run.resolve(root.parse).commandType != ::nodes::nodes::CmdType::CMD_MERGE {
             let prm = paramassign::replace_outer_merge_support(
                 mcx, root, run, msf,
             )?;

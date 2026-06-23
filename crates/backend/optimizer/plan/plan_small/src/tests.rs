@@ -11,8 +11,8 @@
 use super::*;
 
 use mcx::{MemoryContext, PgBox, PgVec};
-use nodes::nodes::Node;
-use nodes::rawnodes::{FromExpr, RangeTblRef};
+use ::nodes::nodes::Node;
+use ::nodes::rawnodes::{FromExpr, RangeTblRef};
 
 fn rtr<'mcx>(mcx: Mcx<'mcx>, rtindex: i32) -> PgBox<'mcx, Node<'mcx>> {
     PgBox::new_in(Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex }), mcx)

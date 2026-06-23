@@ -1692,8 +1692,8 @@ pub fn jspIsMutable(
 /// `Const` of type `JSONPATHOID`; we re-check defensively and treat any other
 /// shape as non-mutable-by-this-path (the C `Assert(cnst->consttype ==
 /// JSONPATHOID)` plus the `constisnull` guard).
-fn jsp_is_mutable_seam(jsonexpr: &nodes::primnodes::Expr) -> PgResult<bool> {
-    use nodes::primnodes::Expr;
+fn jsp_is_mutable_seam(jsonexpr: &::nodes::primnodes::Expr) -> PgResult<bool> {
+    use ::nodes::primnodes::Expr;
 
     let Expr::JsonExpr(jexpr) = jsonexpr else {
         return Ok(false);
@@ -1742,8 +1742,8 @@ fn jsp_is_mutable_seam(jsonexpr: &nodes::primnodes::Expr) -> PgResult<bool> {
             // carrier via the sanctioned from_node_erased boundary (the value is
             // only read back transiently by exprType during the walk).
             node: Some(types_core::fmgr::FnExprErased::from_node_erased::<
-                nodes::primnodes::Expr<'_>,
-                nodes::primnodes::Expr<'static>,
+                ::nodes::primnodes::Expr<'_>,
+                ::nodes::primnodes::Expr<'static>,
             >(e.clone())),
         })
         .collect();

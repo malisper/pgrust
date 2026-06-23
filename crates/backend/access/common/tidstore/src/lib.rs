@@ -50,11 +50,11 @@ use radixtree_seams::{
     radixtree_get_handle, radixtree_iterate_next, radixtree_lock, radixtree_memory_usage,
     radixtree_set,
 };
-use page::ItemPointerGetBlockNumber;
+use ::page::ItemPointerGetBlockNumber;
 use types_core::{BlockNumber, OffsetNumber};
 use types_dsa::{DsaHandle, DsaPointer};
 use types_error::{PgError, PgResult};
-use nodes::bitmapset::{bitmapword, BITS_PER_BITMAPWORD};
+use ::nodes::bitmapset::{bitmapword, BITS_PER_BITMAPWORD};
 use types_storage::bufpage::MaxOffsetNumber;
 use types_tuple::heaptuple::{ItemPointerData, INVALID_OFFSET_NUMBER as InvalidOffsetNumber};
 pub use types_vacuum::vacuumlazy::{ReapBlockInfo, TidStore, TidStoreIterHandle};

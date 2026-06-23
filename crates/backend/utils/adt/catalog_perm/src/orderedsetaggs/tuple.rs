@@ -29,7 +29,7 @@ use datum::Datum as Word;
 use types_error::PgError;
 use fmgr::boundary::RefPayload;
 use fmgr::FunctionCallInfoBaseData;
-use nodes::tuptable::SlotData;
+use ::nodes::tuptable::SlotData;
 use types_tuple::heaptuple::Datum as CDatum;
 
 use execTuples_seams as slots;
@@ -228,7 +228,7 @@ fn new_group_state_tuples(
     let slot = ok(slots::make_single_tuple_table_slot::call(
         gmcx,
         slot_tupdesc,
-        nodes::tuptable::TupleSlotKind::MinimalTuple,
+        ::nodes::tuptable::TupleSlotKind::MinimalTuple,
     ));
 
     // AggRegisterCallback(fcinfo, ordered_set_shutdown, PointerGetDatum(osastate)).
@@ -464,7 +464,7 @@ fn check_argtypes(fcinfo: &FunctionCallInfoBaseData, nargs: usize, osastate: &OS
     //
     // C additionally compares each direct arg's `get_fn_expr_argtype(flinfo,
     // i+1)` against the i'th tupdesc column type. That accessor takes the
-    // executor-side `FunctionCallInfoBaseData` (`nodes::fmgr`), a distinct
+    // executor-side `FunctionCallInfoBaseData` (`::nodes::fmgr`), a distinct
     // type from the fmgr-ABI `FunctionCallInfoBaseData` (`fmgr`) this entry
     // point carries, so the per-arg cross-check is not expressible at this seam
     // boundary; the structural check above covers the security-relevant cases

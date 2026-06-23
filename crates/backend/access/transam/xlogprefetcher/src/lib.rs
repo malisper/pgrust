@@ -61,7 +61,7 @@ use types_core::{
 };
 use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
 use types_tuple::heaptuple::Datum;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use wal::rmgr::XLogReaderState;
 use wal::{
     xl_dbase_create_file_copy_rec, xl_smgr_create, xl_smgr_truncate, ReadAheadRecordInfo,

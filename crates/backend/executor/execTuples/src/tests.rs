@@ -12,8 +12,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use mcx::{alloc_in, slice_in, Mcx, MemoryContext, PgVec};
-use nodes::tuptable::SlotData;
-use nodes::TupleSlotKind;
+use ::nodes::tuptable::SlotData;
+use ::nodes::TupleSlotKind;
 // The canonical value enum; `Datum` is its transitional alias.
 use types_tuple::heaptuple::{Datum};
 use types_tuple::heaptuple::{CompactAttribute, TupleDesc, TupleDescData};

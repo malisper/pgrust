@@ -12,7 +12,7 @@ extern crate alloc;
 use mcx::{slice_in, vec_with_capacity_in, Mcx};
 use types_core::primitive::AttrNumber;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
-use nodes::tuptable::{
+use ::nodes::tuptable::{
     BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotData,
     VirtualTupleTableSlot, TTS_FLAG_SHOULDFREE,
 };
@@ -150,7 +150,7 @@ pub fn tts_virtual_clear(slot: &mut VirtualTupleTableSlot) {
     // slot->tts_nvalid = 0;
     slot.base.tts_nvalid = 0;
     // slot->tts_flags |= TTS_FLAG_EMPTY;
-    slot.base.tts_flags |= nodes::executor::TTS_FLAG_EMPTY;
+    slot.base.tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
     slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
 }
@@ -588,7 +588,7 @@ pub fn tts_heap_clear(slot: &mut HeapTupleTableSlot) {
     // slot->tts_nvalid = 0;
     slot.base.tts_nvalid = 0;
     // slot->tts_flags |= TTS_FLAG_EMPTY;
-    slot.base.tts_flags |= nodes::executor::TTS_FLAG_EMPTY;
+    slot.base.tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
     slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
     // hslot->off = 0;
@@ -901,7 +901,7 @@ pub fn tts_minimal_clear(slot: &mut MinimalTupleTableSlot) {
     // slot->tts_nvalid = 0;
     slot.base.tts_nvalid = 0;
     // slot->tts_flags |= TTS_FLAG_EMPTY;
-    slot.base.tts_flags |= nodes::executor::TTS_FLAG_EMPTY;
+    slot.base.tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
     slot.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
     // mslot->off = 0;
@@ -1353,7 +1353,7 @@ pub fn tts_buffer_heap_clear(slot: &mut BufferHeapTupleTableSlot) {
     // slot->tts_nvalid = 0;
     slot.base.base.tts_nvalid = 0;
     // slot->tts_flags |= TTS_FLAG_EMPTY;
-    slot.base.base.tts_flags |= nodes::executor::TTS_FLAG_EMPTY;
+    slot.base.base.tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     // ItemPointerSetInvalid(&slot->tts_tid);
     slot.base.base.tts_tid = types_tuple::heaptuple::ItemPointerData::invalid();
     // bslot->base.tuple = NULL;
@@ -1844,9 +1844,9 @@ pub fn slot_copyslot<'mcx>(
     //   TTSOpsMinimalTuple.copyslot = tts_minimal_copyslot
     //   TTSOpsBufferHeap.copyslot   = tts_buffer_heap_copyslot
     match dst.kind() {
-        nodes::TupleSlotKind::Virtual => tts_virtual_copyslot(mcx, dst, src),
-        nodes::TupleSlotKind::HeapTuple => tts_heap_copyslot(mcx, dst, src),
-        nodes::TupleSlotKind::MinimalTuple => tts_minimal_copyslot(mcx, dst, src),
-        nodes::TupleSlotKind::BufferHeapTuple => tts_buffer_heap_copyslot(mcx, dst, src),
+        ::nodes::TupleSlotKind::Virtual => tts_virtual_copyslot(mcx, dst, src),
+        ::nodes::TupleSlotKind::HeapTuple => tts_heap_copyslot(mcx, dst, src),
+        ::nodes::TupleSlotKind::MinimalTuple => tts_minimal_copyslot(mcx, dst, src),
+        ::nodes::TupleSlotKind::BufferHeapTuple => tts_buffer_heap_copyslot(mcx, dst, src),
     }
 }

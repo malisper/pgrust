@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::{PgError, PgResult};
-use nodes::primnodes::{Const, Expr, NullTestType, AND_EXPR, NOT_EXPR, OR_EXPR};
+use ::nodes::primnodes::{Const, Expr, NullTestType, AND_EXPR, NOT_EXPR, OR_EXPR};
 use pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
 use pathnodes::{
     JoinType, NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, StatisticExtInfo,

@@ -10,8 +10,8 @@ extern crate alloc;
 use mcx::{Mcx, PgVec};
 use types_cluster::ParseState;
 use types_error::PgResult;
-use nodes::primnodes::SubscriptingRef;
-use nodes::rawnodes::A_Indices;
+use ::nodes::primnodes::SubscriptingRef;
+use ::nodes::rawnodes::A_Indices;
 
 seam_core::seam!(
     /// `parser_errposition(pstate, location)` (parse_node.c): cursor position
@@ -32,11 +32,11 @@ seam_core::seam!(
     /// no-hook cases are an installed no-op returning `None`.
     pub fn coerce_param_hook(
         pstate: &ParseState<'_>,
-        param: &nodes::primnodes::Param,
+        param: &::nodes::primnodes::Param,
         target_type_id: types_core::primitive::Oid,
         target_type_mod: i32,
         location: i32,
-    ) -> PgResult<Option<nodes::primnodes::Param>>
+    ) -> PgResult<Option<::nodes::primnodes::Param>>
 );
 
 seam_core::seam!(

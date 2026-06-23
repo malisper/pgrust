@@ -38,7 +38,7 @@ use types_error::{
     PgResult, ERRCODE_DUPLICATE_CURSOR, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_CURSOR_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING,
 };
-use nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodeindexscan::PlannedStmt;
 use types_tuple::heaptuple::Datum;
 use portal::{
     CachedPlanHandle, CommandTag, PgCursorRow, Portal, PortalCleanupHook, PortalData,
@@ -350,9 +350,9 @@ pub fn GetPortalByName(name: Option<&str>) -> Option<Portal> {
 pub fn with_running_cursor(
     name: &str,
     f: &mut dyn FnMut(
-        Option<nodes::RunningCursorState>,
-    ) -> PgResult<nodes::CurrentOfTid>,
-) -> PgResult<nodes::CurrentOfTid> {
+        Option<::nodes::RunningCursorState>,
+    ) -> PgResult<::nodes::CurrentOfTid>,
+) -> PgResult<::nodes::CurrentOfTid> {
     let portal = match GetPortalByName(Some(name)) {
         Some(p) => p,
         // !PortalIsValid(portal) — let the consumer raise ERRCODE_UNDEFINED_CURSOR.
@@ -369,7 +369,7 @@ pub fn with_running_cursor(
         // working bundle for the callback's duration. The bundle's `with`
         // keeps `'mcx` internal, so no borrow escapes.
         Some(query_desc) => query_desc.work.with(|w| {
-            let cursor = nodes::RunningCursorState {
+            let cursor = ::nodes::RunningCursorState {
                 strategy,
                 // queryDesc->estate is always present once the bundle exists
                 // (CreateExecutorState ran in ExecutorStart); a held cursor has
@@ -384,7 +384,7 @@ pub fn with_running_cursor(
         }),
         // queryDesc == NULL: a held cursor or a non-SELECT — no live query.
         None => {
-            let cursor = nodes::RunningCursorState {
+            let cursor = ::nodes::RunningCursorState {
                 strategy,
                 has_live_query: false,
                 at_start,
@@ -642,14 +642,14 @@ fn portal_define_query_list(
 
 /// `params = copyParamList(params)` after switching to the portal context
 /// (`copy_param_list_into_portal` seam body). The portal-facing
-/// `ParamListInfo` payload (`nodes::portalcmds::ParamListInfoData`) is an
+/// `ParamListInfo` payload (`::nodes::portalcmds::ParamListInfoData`) is an
 /// `Rc`-shared, not-yet-modeled opaque value; copying it into the portal
 /// context is modeled by cloning the refcounted handle (the payload is owned
 /// behind the `Rc`, not arena-bound). `None` in → `None` out (the C NULL).
 fn copy_param_list_into_portal(
     _portal: &Portal,
-    params: nodes::portalcmds::ParamListInfo,
-) -> PgResult<nodes::portalcmds::ParamListInfo> {
+    params: ::nodes::portalcmds::ParamListInfo,
+) -> PgResult<::nodes::portalcmds::ParamListInfo> {
     Ok(params)
 }
 
@@ -811,7 +811,7 @@ pub fn set_result_tup_desc_with(
     portal: &Portal,
     build: &mut dyn for<'m> FnMut(
         mcx::Mcx<'m>,
-        &[nodes::nodeindexscan::PlannedStmt<'m>],
+        &[::nodes::nodeindexscan::PlannedStmt<'m>],
     ) -> PgResult<types_tuple::heaptuple::TupleDesc<'m>>,
 ) -> PgResult<()> {
     let mut p = portal.borrow_mut();
@@ -828,7 +828,7 @@ pub fn set_result_tup_desc_with(
     // `'static` marker is sound, exactly as `portal_set_tup_desc` argues.
     let ctx_ptr: *const mcx::MemoryContext = &**ctx;
     let mcx = unsafe { (*ctx_ptr).mcx() };
-    let stmts: &[nodes::nodeindexscan::PlannedStmt<'static>] =
+    let stmts: &[::nodes::nodeindexscan::PlannedStmt<'static>] =
         p.stmts.as_deref().unwrap_or(&[]);
     let built = build(mcx, stmts)?;
     let copy: Option<types_tuple::heaptuple::TupleDescData<'static>> = match built {
@@ -1504,7 +1504,7 @@ const PG_CURSOR_COLS: usize = 6;
 /// `values[6]`/`nulls[6]` per portal and appends; mirrored faithfully here.
 pub fn pg_cursor<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<Datum<'mcx>> {
     // C:
     //   ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;

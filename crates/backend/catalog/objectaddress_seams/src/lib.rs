@@ -10,7 +10,7 @@ use mcx::{Mcx, PgString};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 use parsenodes::Node;
 use rel::Relation;
 use types_storage::lock::LOCKMODE;

@@ -41,7 +41,7 @@
 //!   and the matching `RangeTblEntry.jointype` in place.
 //! * Relids working sets (`state1.relids`, `nonnullable_rels`,
 //!   `inner_reduced`, `unreduced_side`) are the `'mcx`-arena
-//!   [`Bitmapset`](nodes::Bitmapset), matching what
+//!   [`Bitmapset`](::nodes::Bitmapset), matching what
 //!   `find_nonnullable_rels` returns and what `bms_overlap` consumes. Forced-null
 //!   Var sets are [`MultiBitmapset`](nodes_core::multibitmapset).
 //! * `remove_nulling_relids((Node *) root->parse, …)` becomes
@@ -52,7 +52,7 @@
 //!   running the expression-tree `remove_nulling_relids` over it, and writing it
 //!   back (the faithful analogue of the C list-of-`Node*` walk; an
 //!   `AppendRelInfo`'s only relid-bearing children are its `translated_vars`).
-//!   The relids fed to these become [`ExprRelids`](nodes::primnodes::ExprRelids)
+//!   The relids fed to these become [`ExprRelids`](::nodes::primnodes::ExprRelids)
 //!   (the lifetime-free word-vector the nulling rewriter consumes).
 
 #![no_std]
@@ -101,12 +101,12 @@ use clauses::grounded::{
 };
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
-use nodes::bitmapset::Bitmapset;
-use nodes::copy_query::Query;
-use nodes::jointype::JoinType;
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::RTEKind;
-use nodes::primnodes::ExprRelids;
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::copy_query::Query;
+use ::nodes::jointype::JoinType;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::RTEKind;
+use ::nodes::primnodes::ExprRelids;
 use pathnodes::PlannerInfo;
 
 /// C `Relids` = `Bitmapset *`: the `'mcx`-arena relid set (NULL/empty = `None`).
@@ -190,8 +190,8 @@ fn relids_to_expr_relids(a: Option<&Bitmapset>) -> ExprRelids {
 /// expression node in a qual position).
 #[inline]
 fn qual_as_expr<'a, 'mcx>(
-    quals: &'a Option<nodes::nodes::NodePtr<'mcx>>,
-) -> Option<&'a nodes::primnodes::Expr<'mcx>> {
+    quals: &'a Option<::nodes::nodes::NodePtr<'mcx>>,
+) -> Option<&'a ::nodes::primnodes::Expr<'mcx>> {
     quals.as_deref().and_then(|n| n.as_expr())
 }
 
@@ -209,15 +209,15 @@ fn qual_as_expr<'a, 'mcx>(
 /// condition, actions, and RETURNING list (and target Vars in the targetlist
 /// for RIGHT/FULL) are marked nullable by the new join via `add_nulling_relids`.
 pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) -> PgResult<()> {
-    use nodes::modifytable::MergeMatchKind;
-    use nodes::nodes::{CmdType, Node, NodePtr};
+    use ::nodes::modifytable::MergeMatchKind;
+    use ::nodes::nodes::{CmdType, Node, NodePtr};
 
     if parse.commandType != CmdType::CMD_MERGE {
         return Ok(());
     }
 
     // Work out what kind of join is required.
-    let mut have_action = [false; nodes::modifytable::NUM_MERGE_MATCH_KINDS];
+    let mut have_action = [false; ::nodes::modifytable::NUM_MERGE_MATCH_KINDS];
     for node in parse.mergeActionList.iter() {
         if let Some(action) = (**node).as_mergeaction() {
             if action.commandType != CmdType::CMD_NOTHING {
@@ -239,7 +239,7 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
     };
 
     // Manufacture a join RTE to use.
-    let mut joinrte = nodes::parsenodes::RangeTblEntry::new_in(mcx);
+    let mut joinrte = ::nodes::parsenodes::RangeTblEntry::new_in(mcx);
     joinrte.rtekind = RTEKind::RTE_JOIN;
     joinrte.jointype = jointype;
     joinrte.joinmergedcols = 0;
@@ -271,7 +271,7 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
     let mut target_fromlist: mcx::PgVec<'_, NodePtr<'_>> = mcx::PgVec::new_in(mcx);
     target_fromlist.push(mcx::alloc_in(
         mcx,
-        Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef {
+        Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef {
             rtindex: parse.mergeTargetRelation,
         })?,
     )?);
@@ -306,7 +306,7 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
         Some(expr) => Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?),
         None => None,
     };
-    let joinexpr = nodes::rawnodes::JoinExpr {
+    let joinexpr = ::nodes::rawnodes::JoinExpr {
         jointype,
         isNatural: false,
         larg: Some(mcx::alloc_in(mcx, Node::mk_from_expr(mcx, target)?)?),
@@ -409,9 +409,9 @@ pub fn transform_MERGE_to_join<'mcx>(mcx: Mcx<'mcx>, parse: &mut Query<'mcx>) ->
         var.varnullingrels =
             rewrite_core::relids::add_member(ExprRelids::default(), joinrti);
 
-        let ntest = nodes::primnodes::Expr::NullTest(nodes::primnodes::NullTest {
-            arg: Some(alloc::boxed::Box::new(nodes::primnodes::Expr::Var(var))),
-            nulltesttype: nodes::primnodes::NullTestType::IS_NOT_NULL,
+        let ntest = ::nodes::primnodes::Expr::NullTest(::nodes::primnodes::NullTest {
+            arg: Some(alloc::boxed::Box::new(::nodes::primnodes::Expr::Var(var))),
+            nulltesttype: ::nodes::primnodes::NullTestType::IS_NOT_NULL,
             argisrow: false,
             location: -1,
         });
@@ -473,7 +473,7 @@ pub fn reduce_outer_joins<'mcx>(
         // The top node is a FromExpr; wrap it in a Node to walk uniformly.
         let mut jt_node = Node::mk_from_expr(mcx, core::mem::replace(
             &mut *jt,
-            nodes::rawnodes::FromExpr {
+            ::nodes::rawnodes::FromExpr {
                 fromlist: mcx::PgVec::new_in(mcx),
                 quals: None,
             },
@@ -582,7 +582,7 @@ fn reduce_outer_joins_pass1_empty<'mcx>() -> ReduceOuterJoinsPass1State<'mcx> {
 /// `Node`).
 fn reduce_outer_joins_pass1_fromexpr<'mcx>(
     mcx: Mcx<'mcx>,
-    f: &nodes::rawnodes::FromExpr<'mcx>,
+    f: &::nodes::rawnodes::FromExpr<'mcx>,
 ) -> PgResult<ReduceOuterJoinsPass1State<'mcx>> {
     let mut result = reduce_outer_joins_pass1_empty();
     for l in f.fromlist.iter() {

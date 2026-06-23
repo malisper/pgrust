@@ -54,7 +54,7 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     WARNING,
 };
-use nodes::parsenodes::{OBJECT_COLUMN, OBJECT_DATABASE, OBJECT_ROLE, OBJECT_TABLESPACE};
+use ::nodes::parsenodes::{OBJECT_COLUMN, OBJECT_DATABASE, OBJECT_ROLE, OBJECT_TABLESPACE};
 use parsenodes::CommentStmt;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
@@ -597,14 +597,14 @@ fn reduce_empty(comment: Option<&str>) -> Option<&str> {
     }
 }
 
-/// Decode an arena [`nodes::nodes::Node`] `CommentStmt` into the flat
+/// Decode an arena [`::nodes::nodes::Node`] `CommentStmt` into the flat
 /// [`parsenodes::CommentStmt`] that [`CommentObject`] consumes, then run
 /// it. This is the bridge from the utility dispatcher's arena parse tree to the
 /// old-model command body, mirroring the `RemoveObjects`/`DefineDomain` seam
 /// adapters. The arena `object` node is lowered through
 /// `rich_node_to_parse` (the project-wide arena→parsenodes lowering).
 fn arena_commentstmt_to_owned(
-    stmt: &nodes::ddlnodes::CommentStmt<'_>,
+    stmt: &::nodes::ddlnodes::CommentStmt<'_>,
 ) -> PgResult<CommentStmt> {
     let object = match stmt.object.as_deref() {
         Some(n) => Some(Box::new(parse_type::rich_node_to_parse(n)?)),
@@ -623,7 +623,7 @@ fn arena_commentstmt_to_owned(
 /// resolved address is discarded by the dispatcher).
 fn comment_object_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<()> {
     let cs = match stmt.as_commentstmt() {
         Some(c) => c,
@@ -640,7 +640,7 @@ fn comment_object_seam<'mcx>(
 /// can reach the commented object.
 fn comment_object_slow_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
     let cs = match stmt.as_commentstmt() {
         Some(c) => c,
@@ -705,7 +705,7 @@ pub fn init_seams() {
 /// no node decode/owning conversion is needed.
 fn re_add_comment_object_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::ddlnodes::CommentStmt<'mcx>,
+    stmt: &::nodes::ddlnodes::CommentStmt<'mcx>,
 ) -> PgResult<types_catalog::catalog_dependency::ObjectAddress> {
     let owned = arena_commentstmt_to_owned(stmt)?;
     CommentObject(mcx, &owned)

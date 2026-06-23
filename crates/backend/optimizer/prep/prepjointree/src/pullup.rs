@@ -52,12 +52,12 @@ use alloc::vec::Vec;
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
 use types_core::primitive::AttrNumber;
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::jointype::JoinType;
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::parsenodes::{RTEKind, RangeTblEntry};
-use nodes::primnodes::{Expr, ExprRelids, Var};
-use nodes::rawnodes::FromExpr;
+use ::nodes::copy_query::Query;
+use ::nodes::jointype::JoinType;
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
+use ::nodes::primnodes::{Expr, ExprRelids, Var};
+use ::nodes::rawnodes::FromExpr;
 use pathnodes::{NodeId, PlannerInfo};
 use types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
 
@@ -77,7 +77,7 @@ use subselect_pullup as subselect;
 use placeholder_seams as placeholder;
 use rewritemanip_seams as rewritemanip;
 
-use nodes::bitmapset::Bitmapset;
+use ::nodes::bitmapset::Bitmapset;
 
 use crate::result_rtes;
 use crate::sublinks::pull_up_sublinks;
@@ -114,7 +114,7 @@ enum ReplaceWrapOption {
 /// engine cannot store a self-referential `&mut dyn FnMut` in the context.
 struct PullupReplaceVarsContext<'mcx> {
     /// `List *targetlist` — the subquery's targetlist, owned `TargetEntry`s.
-    targetlist: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
+    targetlist: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
     /// `RangeTblEntry *target_rte` — the RTE being pulled up.
     target_rte: PgBox<'mcx, RangeTblEntry<'mcx>>,
     /// `int result_relation`.
@@ -399,7 +399,7 @@ fn jt_fromexpr_at<'a, 'mcx>(
 fn jt_joinexpr_at<'a, 'mcx>(
     parse: &'a mut Query<'mcx>,
     path: &JtPath<'_, 'mcx>,
-) -> &'a mut nodes::rawnodes::JoinExpr<'mcx> {
+) -> &'a mut ::nodes::rawnodes::JoinExpr<'mcx> {
     jt_node_at(parse, path)
         .as_joinexpr_mut()
         .unwrap_or_else(|| unreachable!("jt_joinexpr_at: node is not a JoinExpr"))
@@ -443,7 +443,7 @@ fn jt_fromexpr_ref<'a, 'mcx>(parse: &'a Query<'mcx>, path: &JtPath<'_, 'mcx>) ->
 fn jt_joinexpr_ref<'a, 'mcx>(
     parse: &'a Query<'mcx>,
     path: &JtPath<'_, 'mcx>,
-) -> &'a nodes::rawnodes::JoinExpr<'mcx> {
+) -> &'a ::nodes::rawnodes::JoinExpr<'mcx> {
     jt_node_ref(parse, path)
         .as_joinexpr()
         .unwrap_or_else(|| unreachable!("jt_joinexpr_ref: node is not a JoinExpr"))
@@ -530,7 +530,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                         mcx,
                         root,
                         parse,
-                        Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef { rtindex: varno })?,
+                        Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef { rtindex: varno })?,
                         varno,
                         lowest_outer_join,
                         containing_appendrel,
@@ -551,7 +551,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                         mcx,
                         root,
                         parse,
-                        Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef { rtindex: varno })?,
+                        Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef { rtindex: varno })?,
                         varno,
                     )?;
                     jt_store(parse, path, new);
@@ -568,7 +568,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                         mcx,
                         root,
                         parse,
-                        Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef { rtindex: varno })?,
+                        Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef { rtindex: varno })?,
                         varno,
                     )?;
                     jt_store(parse, path, new);
@@ -580,7 +580,7 @@ fn pull_up_subqueries_recurse<'mcx>(
                     mcx,
                     root,
                     parse,
-                    Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef { rtindex: varno })?,
+                    Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef { rtindex: varno })?,
                     varno,
                     containing_appendrel,
                 )?;
@@ -681,8 +681,8 @@ impl<'p, 'mcx> LowestOuterJoin<'p, 'mcx> {
 /// are not needed for `get_relids_in_jointree`.
 fn clone_joinexpr_shape<'mcx>(
     mcx: Mcx<'mcx>,
-    j: &nodes::rawnodes::JoinExpr<'mcx>,
-) -> PgResult<nodes::rawnodes::JoinExpr<'mcx>> {
+    j: &::nodes::rawnodes::JoinExpr<'mcx>,
+) -> PgResult<::nodes::rawnodes::JoinExpr<'mcx>> {
     let larg = match j.larg.as_deref() {
         Some(n) => Some(alloc_in(mcx, clone_jointree_shape(mcx, n)?)?),
         None => None,
@@ -691,7 +691,7 @@ fn clone_joinexpr_shape<'mcx>(
         Some(n) => Some(alloc_in(mcx, clone_jointree_shape(mcx, n)?)?),
         None => None,
     };
-    Ok(nodes::rawnodes::JoinExpr {
+    Ok(::nodes::rawnodes::JoinExpr {
         jointype: j.jointype,
         isNatural: j.isNatural,
         larg,
@@ -708,7 +708,7 @@ fn clone_joinexpr_shape<'mcx>(
 /// JoinExpr), enough for `get_relids_in_jointree`.
 fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'mcx>> {
     match n.node_tag() {
-        ntag::T_RangeTblRef => Ok(Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef {
+        ntag::T_RangeTblRef => Ok(Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef {
             rtindex: n.expect_rangetblref().rtindex,
         })?),
         ntag::T_JoinExpr => Ok(Node::mk_join_expr(mcx, clone_joinexpr_shape(mcx, n.expect_joinexpr())?)?),
@@ -734,8 +734,8 @@ fn clone_jointree_shape<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'
 /// upper lateral references.
 fn clone_joinexpr_with_quals<'mcx>(
     mcx: Mcx<'mcx>,
-    j: &nodes::rawnodes::JoinExpr<'mcx>,
-) -> PgResult<nodes::rawnodes::JoinExpr<'mcx>> {
+    j: &::nodes::rawnodes::JoinExpr<'mcx>,
+) -> PgResult<::nodes::rawnodes::JoinExpr<'mcx>> {
     let larg = match j.larg.as_deref() {
         Some(n) => Some(alloc_in(mcx, clone_jointree_with_quals(mcx, n)?)?),
         None => None,
@@ -748,7 +748,7 @@ fn clone_joinexpr_with_quals<'mcx>(
         Some(q) => Some(alloc_in(mcx, q.clone_in(mcx)?)?),
         None => None,
     };
-    Ok(nodes::rawnodes::JoinExpr {
+    Ok(::nodes::rawnodes::JoinExpr {
         jointype: j.jointype,
         isNatural: j.isNatural,
         larg,
@@ -765,7 +765,7 @@ fn clone_joinexpr_with_quals<'mcx>(
 /// see [`clone_joinexpr_with_quals`].
 fn clone_jointree_with_quals<'mcx>(mcx: Mcx<'mcx>, n: &Node<'mcx>) -> PgResult<Node<'mcx>> {
     match n.node_tag() {
-        ntag::T_RangeTblRef => Ok(Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef {
+        ntag::T_RangeTblRef => Ok(Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef {
             rtindex: n.expect_rangetblref().rtindex,
         })?),
         ntag::T_JoinExpr => Ok(Node::mk_join_expr(
@@ -801,7 +801,7 @@ fn clone_fromexpr_with_quals<'mcx>(
 /// slot (the slot is always overwritten before being read again).
 #[inline]
 fn dummy_node<'mcx>(mcx: Mcx<'mcx>) -> PgResult<Node<'mcx>> {
-    Ok(Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef { rtindex: 0 })?)
+    Ok(Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef { rtindex: 0 })?)
 }
 
 // ===========================================================================
@@ -1130,9 +1130,9 @@ fn rte_shallow_clone<'mcx>(
 /// Deep-clone a targetlist (owned `TargetEntry` values) into `mcx`.
 fn clone_targetlist<'mcx>(
     mcx: Mcx<'mcx>,
-    tlist: &PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
-    let mut out: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    tlist: &PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
+    let mut out: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     out.try_reserve(tlist.len()).map_err(|_| mcx.oom(tlist.len()))?;
     for te in tlist.iter() {
         out.push(te.clone_in(mcx)?);
@@ -1311,7 +1311,7 @@ fn pull_up_union_leaf_queries<'mcx>(
             // child relid in the AppendRelInfo node.
             let rtr = core::cell::RefCell::new(Node::mk_range_tbl_ref(
                 mcx,
-                nodes::rawnodes::RangeTblRef {
+                ::nodes::rawnodes::RangeTblRef {
                     rtindex: child_rt_index,
                 },
             )?);
@@ -1401,7 +1401,7 @@ fn make_setop_translation_list<'mcx>(
 fn is_simple_union_all(subquery: &Query) -> PgResult<bool> {
     // Let's just make sure it's a valid subselect. (commandType is the only
     // check we can make on the owned Query; the IsA(Query) is structural.)
-    if subquery.commandType != nodes::nodes::CmdType::CMD_SELECT {
+    if subquery.commandType != ::nodes::nodes::CmdType::CMD_SELECT {
         return Err(types_error::PgError::error("subquery is bogus"));
     }
 
@@ -1460,7 +1460,7 @@ fn is_simple_union_all_recurse(
         ntag::T_SetOperationStmt => {
             let op = set_op.expect_setoperationstmt();
             // Must be UNION ALL.
-            if op.op != nodes::rawnodes::SetOperation::SETOP_UNION || !op.all {
+            if op.op != ::nodes::rawnodes::SetOperation::SETOP_UNION || !op.all {
                 return Ok(false);
             }
             // Recurse to check inputs.
@@ -1574,7 +1574,7 @@ pub fn flatten_simple_union_all<'mcx>(
 
     // Form a RangeTblRef for the appendrel, and insert it into FROM. The top
     // Query of a setops tree should have had an empty FromClause initially.
-    let rtr_node = Node::mk_range_tbl_ref(mcx, nodes::rawnodes::RangeTblRef {
+    let rtr_node = Node::mk_range_tbl_ref(mcx, ::nodes::rawnodes::RangeTblRef {
         rtindex: leftmost_rti,
     })?;
     {
@@ -1823,7 +1823,7 @@ pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
     _root: &mut PlannerInfo,
     relid: types_core::primitive::Oid,
     rt_index: i32,
-) -> PgResult<Option<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>>> {
+) -> PgResult<Option<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>>> {
     // rel = table_open(rte->relid, NoLock);
     let rel = relcache_seams::relation_id_get_relation::call(mcx, relid)?
         .expect("expand_virtual_generated_columns: rangetable relation must exist in relcache");
@@ -1866,7 +1866,7 @@ pub(crate) fn build_virtual_generated_columns_tlist<'mcx>(
     let natts = rel.rd_att.natts as usize;
     let relation = rel::Relation::open(rel, None);
 
-    let mut tlist: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    let mut tlist: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     tlist.try_reserve(natts).map_err(|_| mcx.oom(natts))?;
 
     for i in 0..natts {
@@ -1953,7 +1953,7 @@ fn pull_up_simple_values<'mcx>(
 
     // Set up required context data for pullup_replace_vars. In particular, we
     // have to make the VALUES list look like a subquery targetlist.
-    let mut tlist: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    let mut tlist: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     tlist.try_reserve(values_list.len()).map_err(|_| mcx.oom(values_list.len()))?;
     let mut attrno: i32 = 1;
     for item in values_list.iter() {
@@ -2125,12 +2125,12 @@ fn pull_up_constant_function<'mcx>(
         mcx,
         Some(&Node::mk_expr(mcx, funcexpr.clone_in(mcx)?)?),
     )?;
-    if resolved.class != Some(nodes::funcapi::TypeFuncClass::Scalar) {
+    if resolved.class != Some(::nodes::funcapi::TypeFuncClass::Scalar) {
         return Ok(jtnode); // must be a one-column composite type
     }
 
     // Create context for applying pullup_replace_vars.
-    let mut tlist: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    let mut tlist: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     tlist.push(make_target_entry(
         mcx,
         funcexpr,
@@ -2200,8 +2200,8 @@ fn make_target_entry<'mcx>(
     resno: AttrNumber,
     resname: Option<&str>,
     resjunk: bool,
-) -> PgResult<nodes::primnodes::TargetEntry<'mcx>> {
-    Ok(nodes::primnodes::TargetEntry {
+) -> PgResult<::nodes::primnodes::TargetEntry<'mcx>> {
+    Ok(::nodes::primnodes::TargetEntry {
         expr: Some(alloc_in(mcx, expr)?),
         resno,
         resname: match resname {
@@ -2217,8 +2217,8 @@ fn make_target_entry<'mcx>(
 
 /// `makeAlias(aliasname, NIL)` (makefuncs.c) — an `Alias` with the given name and
 /// no column aliases.
-fn make_alias<'mcx>(mcx: Mcx<'mcx>, aliasname: &str) -> PgResult<nodes::rawnodes::Alias<'mcx>> {
-    Ok(nodes::rawnodes::Alias {
+fn make_alias<'mcx>(mcx: Mcx<'mcx>, aliasname: &str) -> PgResult<::nodes::rawnodes::Alias<'mcx>> {
+    Ok(::nodes::rawnodes::Alias {
         aliasname: Some(mcx::PgString::from_str_in(aliasname, mcx)?),
         colnames: PgVec::new_in(mcx),
     })
@@ -2299,7 +2299,7 @@ fn is_simple_subquery<'mcx>(
     lowest_outer_join: Option<&LowestOuterJoin<'_, 'mcx>>,
 ) -> PgResult<bool> {
     // Let's just make sure it's a valid subselect.
-    if subquery.commandType != nodes::nodes::CmdType::CMD_SELECT {
+    if subquery.commandType != ::nodes::nodes::CmdType::CMD_SELECT {
         return Err(types_error::PgError::error("subquery is bogus"));
     }
 
@@ -2397,7 +2397,7 @@ fn is_simple_subquery<'mcx>(
 /// for the var.c walkers that take `(Node *) subquery->targetList`.
 fn targetlist_as_node<'mcx>(
     mcx: Mcx<'mcx>,
-    tlist: &PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
+    tlist: &PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
 ) -> PgResult<Node<'mcx>> {
     let mut items: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     items.try_reserve(tlist.len()).map_err(|_| mcx.oom(tlist.len()))?;
@@ -2725,7 +2725,7 @@ fn perform_pullup_replace_vars<'mcx>(
 fn pullup_replace_vars_targetlist<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    tlist: &mut PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
+    tlist: &mut PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
     rvcontext: &mut PullupReplaceVarsContext<'mcx>,
     outer_has_sublinks: &mut Option<bool>,
 ) -> PgResult<()> {
@@ -2787,10 +2787,10 @@ fn pullup_replace_vars_opt<'mcx>(
 fn pullup_replace_vars_opt_expr<'mcx>(
     mcx: Mcx<'mcx>,
     root: &mut PlannerInfo,
-    node: Option<mcx::PgBox<'mcx, nodes::primnodes::Expr<'mcx>>>,
+    node: Option<mcx::PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>,
     rvcontext: &mut PullupReplaceVarsContext<'mcx>,
     outer_has_sublinks: &mut Option<bool>,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::primnodes::Expr<'mcx>>>> {
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>> {
     match node {
         None => Ok(None),
         Some(n) => {

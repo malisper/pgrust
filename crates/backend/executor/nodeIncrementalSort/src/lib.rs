@@ -53,15 +53,15 @@ use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
-use nodes::execnodes::{ForwardScanDirection, ScanDirectionIsForward};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
-use nodes::nodeincrementalsort::{
+use ::nodes::execnodes::{ForwardScanDirection, ScanDirectionIsForward};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::nodes::nodeincrementalsort::{
     IncrementalSort, IncrementalSortGroupInfo, IncrementalSortInfo, IncrementalSortStateData,
     PresortedKeyData, SharedIncrementalSortInfo, SharedIncrementalSortInfoHeader,
     INCSORT_LOADFULLSORT, INCSORT_LOADPREFIXSORT, INCSORT_READFULLSORT, INCSORT_READPREFIXSORT,
 };
 use types_parallel::shared_dsm_object;
-use nodes::nodesort::{
+use ::nodes::nodesort::{
     TuplesortInstrumentation, TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,
 };
 use nodes::{EStateData, PlanStateNode, SlotData, SlotId, TupleSlotKind};
@@ -881,7 +881,7 @@ fn exec_incremental_sort_node<'mcx>(
 /// `ExecInitIncrementalSort(node, estate, eflags)` — create the run-time state
 /// for the incremental-sort plan node and initialize its outer subtree.
 pub fn ExecInitIncrementalSort<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, IncrementalSortStateData<'mcx>>> {
@@ -1531,7 +1531,7 @@ fn clear_standalone<'mcx>(
 fn sort_state_mut<'a, 'mcx>(
     node: &'a mut IncrementalSortStateData<'mcx>,
     state: SortState,
-) -> PgResult<&'a mut nodes::Tuplesortstate<'mcx>> {
+) -> PgResult<&'a mut ::nodes::Tuplesortstate<'mcx>> {
     match state {
         SortState::Full => node
             .fullsort_state
@@ -1574,7 +1574,7 @@ fn incremental_sort_plan<'a, 'mcx>(
 
 /// `castNode(IncrementalSort, node)`.
 fn incremental_sort_plan_of<'a, 'mcx>(
-    node: &'a nodes::nodes::Node<'mcx>,
+    node: &'a ::nodes::nodes::Node<'mcx>,
 ) -> PgResult<&'a IncrementalSort<'mcx>> {
     Ok(node.expect_incrementalsort())
 }

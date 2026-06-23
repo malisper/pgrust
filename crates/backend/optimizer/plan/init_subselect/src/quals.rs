@@ -39,7 +39,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::{Index, Oid};
 use types_error::{PgError, PgResult};
-use nodes::primnodes::{Const, Expr, NullTest, NullTestType, OR_EXPR};
+use ::nodes::primnodes::{Const, Expr, NullTest, NullTestType, OR_EXPR};
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     OuterJoinClauseInfo, PlannerInfo, Relids, RestrictInfo, RinfoId, SpecialJoinInfo, JOIN_ANTI,
@@ -906,7 +906,7 @@ fn del_member(a: Relids, x: i32) -> Relids {
 /// `bms_is_member(x, varnullingrels)` over an [`ExprRelids`] bit storage.
 /// Bit `x` lives in `words[x / 64]` at offset `x % 64` (the planner
 /// `bitmapword` layout, `BITS_PER_WORD = 64`).
-fn expr_relids_is_member(x: i32, set: &nodes::primnodes::ExprRelids) -> bool {
+fn expr_relids_is_member(x: i32, set: &::nodes::primnodes::ExprRelids) -> bool {
     if x < 0 {
         return false;
     }

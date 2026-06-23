@@ -38,7 +38,7 @@ extern crate alloc;
 use mcx::{Mcx, PgVec};
 use types_core::PgWChar;
 use types_error::PgResult;
-use nodes::parsestmt::RawStmt;
+use ::nodes::parsestmt::RawStmt;
 use parsenodes::RawParseMode;
 
 use gram_seams as gram;
@@ -427,7 +427,7 @@ pub fn mode_seed(mcx: Mcx<'_>, mode: RawParseMode) -> Option<CoreToken<'_>> {
 /// The seam contract is `String -> PgResult<parsenodes::TypeName>` (owned,
 /// no arena lifetime). The grammar drive needs an arena, so a private
 /// `MemoryContext` is created for the parse; the decoded arena
-/// `nodes::rawnodes::TypeName<'mcx>` is bridged into the owned
+/// `::nodes::rawnodes::TypeName<'mcx>` is bridged into the owned
 /// `parsenodes::TypeName` before the context drops (the owned node carries
 /// no `'mcx`, so it outlives the arena soundly). A grammar/syntax error is
 /// raised inside `raw_parser` (with the parser's error position) and propagates
@@ -452,17 +452,17 @@ fn raw_parse_type_name(
     raw_typename_to_parse(tn)
 }
 
-/// Bridge the arena raw-grammar `nodes::rawnodes::TypeName<'mcx>` into the
+/// Bridge the arena raw-grammar `::nodes::rawnodes::TypeName<'mcx>` into the
 /// owned resolver-facing `parsenodes::TypeName`. Mirrors parse_type.c's
 /// `raw_typename_to_parse`: the qualified `names` are `String` nodes; `typmods`
 /// carry the simple `A_Const`/identifier values through (else `A_Star`, so the
 /// resolver raises the C "must be simple constants or identifiers" error);
 /// `arrayBounds` carry the integer bounds through.
 fn raw_typename_to_parse(
-    tn: &nodes::rawnodes::TypeName<'_>,
+    tn: &::nodes::rawnodes::TypeName<'_>,
 ) -> PgResult<parsenodes::TypeName> {
     use alloc::string::ToString;
-    use nodes::nodes::{ntag, Node as RawNode};
+    use ::nodes::nodes::{ntag, Node as RawNode};
 
     let mut names: alloc::vec::Vec<parsenodes::Node> =
         alloc::vec::Vec::with_capacity(tn.names.len());

@@ -24,8 +24,8 @@
 
 use mcx::{MemoryContext, Mcx};
 use types_error::{PgError, PgResult, ERROR};
-use nodes::nodes::CmdType;
-use nodes::parsestmt::{CachedPlanHandle as SeamCachedPlanHandle, PlpgsqlExprParseState};
+use ::nodes::nodes::CmdType;
+use ::nodes::parsestmt::{CachedPlanHandle as SeamCachedPlanHandle, PlpgsqlExprParseState};
 use parsenodes::RawParseMode;
 use portal::{CachedPlanHandle as PortalCachedPlanHandle, FetchDirection, Portal};
 use types_resowner::ResourceOwner;
@@ -46,7 +46,7 @@ use portalmem_seams as portalmem;
 use snapmgr_seams as snapmgr;
 
 // CURSOR_OPT_* (parsenodes.h): the scroll / no-scroll decision bits.
-use nodes::portalcmds::{CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL};
+use ::nodes::portalcmds::{CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL};
 
 type SourceHandle = u64;
 
@@ -123,11 +123,11 @@ fn open_internal(
     source: SourceHandle,
     cursor_options: i32,
     read_only: bool,
-    param_li: nodes::params::ParamListInfo,
+    param_li: ::nodes::params::ParamListInfo,
 ) -> PgResult<String> {
     // SPI_is_cursor_plan(plan): the plan must return tuples (plansource->
     // resultDesc != NULL). A SELECT INTO / DML / utility cannot be a cursor.
-    let source_h = nodes::parsestmt::CachedPlanSourceHandle(source);
+    let source_h = ::nodes::parsestmt::CachedPlanSourceHandle(source);
     if !plancache_seams::plansource_has_result_desc::call(source_h)? {
         // C gives a tag-specific message ("cannot open %s query as cursor",
         // GetCommandTagName(...)). The cmdtag name table is not a dependency
@@ -163,7 +163,7 @@ fn open_internal(
     // check before handing it off — copyObject preserves rowMarks/planTree, so
     // reading them off the working-context plan now matches C reading them off
     // the portal copy.
-    let stmts: &[nodes::nodeindexscan::PlannedStmt] = &stmt_list;
+    let stmts: &[::nodes::nodeindexscan::PlannedStmt] = &stmt_list;
     let single_select = stmts.len() == 1
         && stmts[0].commandType != CmdType::CMD_UTILITY;
     let row_marks_nil = single_select && stmts[0].rowMarks.is_none();

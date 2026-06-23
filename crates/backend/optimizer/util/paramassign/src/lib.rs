@@ -34,8 +34,8 @@ use rewrite_core::increment::IncrementVarSublevelsUp;
 use mcx::Mcx;
 use types_core::{primitive::InvalidOid, Index, Oid};
 use types_error::{PgError, PgResult};
-use nodes::nodes::{CmdType, Node};
-use nodes::primnodes::{
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::primnodes::{
     Aggref, Expr, ExprRelids, GroupingFunc, MergeSupportFunc, Param, ParamKind, PlaceHolderVar,
     ReturningExpr, Var,
 };

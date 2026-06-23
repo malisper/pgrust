@@ -41,7 +41,7 @@ use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::{Oid, OidIsValid};
 use types_core::catalog::NAMESPACE_RELATION_ID;
 use types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
-use nodes::parsenodes::{
+use ::nodes::parsenodes::{
     ObjectType, OBJECT_ACCESS_METHOD, OBJECT_AGGREGATE, OBJECT_AMOP, OBJECT_AMPROC,
     OBJECT_ATTRIBUTE, OBJECT_CAST, OBJECT_COLLATION, OBJECT_COLUMN, OBJECT_CONVERSION,
     OBJECT_DATABASE, OBJECT_DEFACL, OBJECT_DEFAULT, OBJECT_DOMAIN, OBJECT_DOMCONSTRAINT,
@@ -107,10 +107,10 @@ pub fn init_seams() {
 }
 
 /// Outward-seam adapter for `RemoveObjects(stmt)` (utility.c `ExecDropStmt`
-/// default leg): decode the rich [`nodes::nodes::Node`] `DropStmt` into the
+/// default leg): decode the rich [`::nodes::nodes::Node`] `DropStmt` into the
 /// flat [`parsenodes::DropStmt`] the ported body consumes, then run it.
 /// `mcx` is threaded for parity but `remove_objects` runs in its own context.
-fn remove_objects_seam(_mcx: Mcx<'_>, stmt: &nodes::nodes::Node<'_>) -> PgResult<()> {
+fn remove_objects_seam(_mcx: Mcx<'_>, stmt: &::nodes::nodes::Node<'_>) -> PgResult<()> {
     let ds = match stmt.as_dropstmt() {
         Some(d) => d,
         None => return Err(PgError::error("remove_objects_seam: statement is not a DropStmt")),

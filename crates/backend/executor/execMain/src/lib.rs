@@ -63,15 +63,15 @@ use mcx::MemoryContext;
 use types_acl::acl::{
     AclMaskHow, AclMode, AclResult, ACL_INSERT, ACL_SELECT, ACL_UPDATE,
 };
-use nodes::bitmapset::{Bitmapset, BITS_PER_BITMAPWORD};
-use nodes::parsenodes::RTEPermissionInfo;
+use ::nodes::bitmapset::{Bitmapset, BITS_PER_BITMAPWORD};
+use ::nodes::parsenodes::RTEPermissionInfo;
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::CmdType;
-use nodes::params::ParamListInfo;
-use nodes::parsestmt::DestReceiverHandle;
-use nodes::querydesc::QueryDesc;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::CmdType;
+use ::nodes::params::ParamListInfo;
+use ::nodes::parsestmt::DestReceiverHandle;
+use ::nodes::querydesc::QueryDesc;
 use types_scan::sdir::{ScanDirection, ScanDirectionIsNoMovement};
 
 use aclchk_seams as aclchk;
@@ -262,7 +262,7 @@ pub fn standard_ExecutorStart(query_desc: &mut QueryDesc, mut eflags: i32) -> Pg
             let mcx = w.estate.es_query_cxt;
             let mut vals = mcx::vec_with_capacity_in(mcx, n_param_exec)?;
             for _ in 0..n_param_exec {
-                vals.push(nodes::ParamExecData::default());
+                vals.push(::nodes::ParamExecData::default());
             }
             w.estate.es_param_exec_vals = vals;
         }
@@ -341,10 +341,10 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
             // arena `'static` the type-erased `Opaque(Box<dyn Any>)` payload requires
             // (the sanctioned partprune arena-intern boundary).
             let owned =
-                nodes::partprune_carrier::partpruneinfo_into_static(pinfo.clone_in(mcx)?);
+                ::nodes::partprune_carrier::partpruneinfo_into_static(pinfo.clone_in(mcx)?);
             estate
                 .es_part_prune_infos
-                .push(nodes::Opaque(Some(alloc::boxed::Box::new(owned))));
+                .push(::nodes::Opaque(Some(alloc::boxed::Box::new(owned))));
         }
 
         // ExecDoInitialPruning(estate) — perform executor-startup pruning. The
@@ -401,8 +401,8 @@ fn InitPlan(query_desc: &mut QueryDesc, eflags: i32) -> PgResult<()> {
                 // owning box into an honest `&'mcx Node` (it lives until the
                 // per-query context drops, faithful to C's "plan freed with its
                 // context"), exactly like the main planTree.
-                let subnode: Option<&nodes::nodes::Node<'_>> = {
-                    let subplan_box: Option<mcx::PgBox<'_, nodes::nodes::Node<'_>>> =
+                let subnode: Option<&::nodes::nodes::Node<'_>> = {
+                    let subplan_box: Option<mcx::PgBox<'_, ::nodes::nodes::Node<'_>>> =
                         match plannedstmt.subplans.as_ref().and_then(|s| s[idx].as_ref()) {
                             Some(b) => Some(mcx::alloc_in(mcx, b.clone_in(mcx)?)?),
                             None => None,
@@ -799,7 +799,7 @@ pub fn standard_ExecutorEnd(query_desc: &mut QueryDesc) -> PgResult<()> {
 /// `SubPlanState` reaches its child plan state by the subplan's 1-based
 /// `plan_id` index into `es_subplanstates`; this verifies that slot exists.
 fn link_subplan_planstate(
-    estate: &nodes::EStateData<'_>,
+    estate: &::nodes::EStateData<'_>,
     plan_id: i32,
 ) -> PgResult<()> {
     let idx = (plan_id as usize)
@@ -877,7 +877,7 @@ pub fn ExecutorEnd(query_desc: &mut QueryDesc) -> PgResult<()> {
 /// plan-state box out of its `es_subplanstates` slot (so it can run with a live
 /// `&mut estate`, no self-alias — the `take_subplanstate`/`put_subplanstate` pattern
 /// `nodeSubplan` uses), drive `ExecProcNode` to end-of-scan, then put it back.
-fn ExecPostprocessPlan(estate: &mut nodes::execnodes::EStateData<'_>) -> PgResult<()> {
+fn ExecPostprocessPlan(estate: &mut ::nodes::execnodes::EStateData<'_>) -> PgResult<()> {
     // Make sure nodes run forward.
     //   estate->es_direction = ForwardScanDirection;
     estate.es_direction = ScanDirection::ForwardScanDirection;
@@ -987,7 +987,7 @@ pub fn CreateQueryDescAndStartExplain(
     params: ParamListInfo,
     instrument_option: i32,
     eflags: i32,
-    dest: nodes::parsestmt::DestReceiverHandle,
+    dest: ::nodes::parsestmt::DestReceiverHandle,
 ) -> PgResult<QueryDesc> {
     // queryDesc = CreateQueryDesc(plannedstmt, queryString, GetActiveSnapshot(),
     //     InvalidSnapshot, dest, params, queryEnv, instrument_option);
@@ -1001,7 +1001,7 @@ pub fn CreateQueryDescAndStartExplain(
     // receiver; a NULL handle would fault the router's lookup, so obtain the
     // genuine `DestNone` receiver (`CreateDestReceiver(DestNone)` → the static
     // `donothingDR`) when the caller passed NULL.
-    let dest = if dest == nodes::parsestmt::DestReceiverHandle::NULL {
+    let dest = if dest == ::nodes::parsestmt::DestReceiverHandle::NULL {
         dest::create_dest_receiver::call(types_dest::CommandDest::None)
     } else {
         dest
@@ -1073,8 +1073,8 @@ pub fn EndCopyQuery(mut query_desc: QueryDesc) -> PgResult<()> {
 /// the top plan node's result tupdesc, or the junk filter's cleaned tupdesc
 /// when a junk filter is present. Returns a borrow tied to the EState/planstate.
 fn result_tupdesc<'a, 'mcx>(
-    estate: &'a nodes::EStateData<'mcx>,
-    planstate: Option<&'a nodes::PlanStateNode<'mcx>>,
+    estate: &'a ::nodes::EStateData<'mcx>,
+    planstate: Option<&'a ::nodes::PlanStateNode<'mcx>>,
 ) -> Option<&'a types_tuple::heaptuple::TupleDescData<'mcx>> {
     if let Some(jf) = estate.es_junkFilter.as_deref() {
         return jf.jf_cleanTupType.as_deref();
@@ -1434,7 +1434,7 @@ fn exec_check_one_rel_perms_view(perminfo: &RTEPermissionInfo<'_>) -> PgResult<(
         let name = lsyscache_get_rel_name(perminfo.relid)?;
         aclchk::aclcheck_error::call(
             AclResult::AclcheckNoPriv,
-            nodes::parsenodes::ObjectType::View,
+            ::nodes::parsenodes::ObjectType::View,
             name,
         )?;
     }
@@ -1554,8 +1554,8 @@ fn install_get_tuple_for_trigger_seams() {
 /// acquire on a conflicting tuple before updating. If no key column has been
 /// modified a weaker lock is sufficient (better concurrency).
 pub fn ExecUpdateLockMode<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
 ) -> PgResult<types_tableam::tableam::LockTupleMode> {
     // updatedCols = ExecGetAllUpdatedCols(relinfo, estate);
     // keyCols = RelationGetIndexAttrBitmap(relinfo->ri_RelationDesc,
@@ -1592,9 +1592,9 @@ pub fn ExecUpdateLockMode<'mcx>(
 /// the per-relation slot used to hold a tuple for RETURNING. Delegates to
 /// execUtils.
 fn exec_get_returning_slot<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
-) -> PgResult<nodes::SlotId> {
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
+) -> PgResult<::nodes::SlotId> {
     execUtils::ExecGetReturningSlot(estate, result_rel_info)
 }
 
@@ -1603,8 +1603,8 @@ fn exec_get_returning_slot<'mcx>(
 /// needed (the map is `NULL` when the rowtypes already match); the map itself
 /// lives on the pooled `ResultRelInfo`. Delegates to execUtils.
 fn exec_get_child_to_root_map<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
 ) -> PgResult<bool> {
     Ok(execUtils::ExecGetChildToRootMap(estate, result_rel_info)?.is_some())
 }
@@ -1615,8 +1615,8 @@ fn exec_get_child_to_root_map<'mcx>(
 /// `None` is the C `NULL` map.  Delegates to execUtils.
 fn exec_get_child_to_root_map_full<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
 ) -> PgResult<
     Option<(
         mcx::PgBox<'mcx, types_tuple::attmap::AttrMap<'mcx>>,
@@ -1681,10 +1681,10 @@ fn unported(what: &str) -> types_error::PgError {
 #[allow(non_snake_case)]
 fn InitResultRelInfo<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    result_rel_info: &mut nodes::ResultRelInfo<'mcx>,
+    result_rel_info: &mut ::nodes::ResultRelInfo<'mcx>,
     relation: rel::Relation<'mcx>,
     result_relation_index: types_core::primitive::Index,
-    partition_root_rri: Option<nodes::RriId>,
+    partition_root_rri: Option<::nodes::RriId>,
     instrument_options: i32,
 ) -> PgResult<()> {
     let _ = instrument_options;
@@ -1692,7 +1692,7 @@ fn InitResultRelInfo<'mcx>(
 
     // MemSet(resultRelInfo, 0, sizeof(ResultRelInfo)); — start from the
     // zero-initialized shape, then set the fields below.
-    *result_rel_info = nodes::ResultRelInfo::default();
+    *result_rel_info = ::nodes::ResultRelInfo::default();
 
     // resultRelInfo->ri_RangeTableIndex = resultRelationIndex;
     result_rel_info.ri_RangeTableIndex = result_relation_index;
@@ -1717,7 +1717,7 @@ fn InitResultRelInfo<'mcx>(
         // only the WHEN-clause ExprState array is carried, palloc0'd to numtriggers
         // (all None = "not yet compiled"), lazily filled by TriggerEnabled.
         let n = copied.numtriggers as usize;
-        let mut when_exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> =
+        let mut when_exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> =
             mcx::PgVec::new_in(qcx);
         when_exprs.try_reserve(n).map_err(|_| qcx.oom(n))?;
         for _ in 0..n {
@@ -1769,9 +1769,9 @@ fn InitResultRelInfo<'mcx>(
 #[allow(non_snake_case)]
 fn ExecGetAncestorResultRels<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
-) -> PgResult<mcx::PgVec<'mcx, nodes::RriId>> {
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
+) -> PgResult<mcx::PgVec<'mcx, ::nodes::RriId>> {
     const NoLock: i32 = 0;
 
     let root_rel_info = estate
@@ -1812,7 +1812,7 @@ fn ExecGetAncestorResultRels<'mcx>(
         let oids =
             partition_seams::get_partition_ancestors::call(mcx, part_relid)?;
 
-        let mut anc_result_rels: mcx::PgVec<'mcx, nodes::RriId> = mcx::PgVec::new_in(mcx);
+        let mut anc_result_rels: mcx::PgVec<'mcx, ::nodes::RriId> = mcx::PgVec::new_in(mcx);
 
         for anc_oid in oids.iter().copied() {
             // Ignore the root ancestor here (ri_RootResultRelInfo is appended
@@ -1827,21 +1827,21 @@ fn ExecGetAncestorResultRels<'mcx>(
 
             // rInfo = makeNode(ResultRelInfo);
             // InitResultRelInfo(rInfo, ancRel, 0 /*dummy RTI*/, NULL, es_instrument);
-            let mut r_info = nodes::ResultRelInfo::default();
+            let mut r_info = ::nodes::ResultRelInfo::default();
             let instrument = estate.es_instrument;
             InitResultRelInfo(mcx, &mut r_info, anc_rel, 0, None, instrument)?;
             let id = estate.add_result_rel(r_info)?;
 
             anc_result_rels
                 .try_reserve(1)
-                .map_err(|_| mcx.oom(core::mem::size_of::<nodes::RriId>()))?;
+                .map_err(|_| mcx.oom(core::mem::size_of::<::nodes::RriId>()))?;
             anc_result_rels.push(id);
         }
 
         // ancResultRels = lappend(ancResultRels, rootRelInfo);
         anc_result_rels
             .try_reserve(1)
-            .map_err(|_| mcx.oom(core::mem::size_of::<nodes::RriId>()))?;
+            .map_err(|_| mcx.oom(core::mem::size_of::<::nodes::RriId>()))?;
         anc_result_rels.push(root_rel_info);
 
         estate.result_rel_mut(result_rel_info).ri_ancestorResultRels = Some(anc_result_rels);
@@ -1855,9 +1855,9 @@ fn ExecGetAncestorResultRels<'mcx>(
         .expect("ExecGetAncestorResultRels: ancestor chain not set");
     debug_assert!(!cached.is_empty());
 
-    let mut out: mcx::PgVec<'mcx, nodes::RriId> = mcx::PgVec::new_in(mcx);
+    let mut out: mcx::PgVec<'mcx, ::nodes::RriId> = mcx::PgVec::new_in(mcx);
     out.try_reserve(cached.len())
-        .map_err(|_| mcx.oom(cached.len() * core::mem::size_of::<nodes::RriId>()))?;
+        .map_err(|_| mcx.oom(cached.len() * core::mem::size_of::<::nodes::RriId>()))?;
     for id in cached.iter().copied() {
         out.push(id);
     }
@@ -1876,11 +1876,11 @@ fn ExecGetAncestorResultRels<'mcx>(
 #[allow(non_snake_case)]
 fn ScanNodeExtractTid<'mcx, 'a>(
     mcx: mcx::Mcx<'a>,
-    estate: &nodes::EStateData<'mcx>,
-    scan_tuple_slot: Option<nodes::SlotId>,
+    estate: &::nodes::EStateData<'mcx>,
+    scan_tuple_slot: Option<::nodes::SlotId>,
     index_only_tid: Option<types_tuple::heaptuple::ItemPointerData>,
-) -> PgResult<nodes::ScanTidOutcome> {
-    use nodes::ScanTidOutcome;
+) -> PgResult<::nodes::ScanTidOutcome> {
+    use ::nodes::ScanTidOutcome;
 
     // IndexOnlyScan: the TID was read off ioss_ScanDesc->xs_heaptid by the
     // caller (which holds the concrete scan node).
@@ -1930,10 +1930,10 @@ fn ScanNodeExtractTid<'mcx, 'a>(
 /// OID-invalid/NULL).
 fn FetchCursorParam<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    econtext: &nodes::ExprContext<'mcx>,
+    econtext: &::nodes::ExprContext<'mcx>,
     param_id: i32,
-) -> PgResult<Option<nodes::FetchedCursorParam<'mcx>>> {
-    use nodes::FetchedCursorParam;
+) -> PgResult<Option<::nodes::FetchedCursorParam<'mcx>>> {
+    use ::nodes::FetchedCursorParam;
 
     // paramInfo && paramId > 0 && paramId <= paramInfo->numParams. The caller
     // (fetch_cursor_param_value) has already checked param_id > 0.
@@ -2023,10 +2023,10 @@ fn FetchCursorParam<'mcx>(
 /// INSERT-into-table path).
 #[allow(non_snake_case)]
 fn CheckValidResultRel<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
     operation: CmdType,
-    on_conflict_action: nodes::nodes::OnConflictAction,
+    on_conflict_action: ::nodes::nodes::OnConflictAction,
     merge_action_cmds: &[CmdType],
 ) -> PgResult<()> {
     use types_tuple::access::{
@@ -2069,7 +2069,7 @@ fn CheckValidResultRel<'mcx>(
         }
 
         // INSERT ON CONFLICT DO UPDATE additionally requires UPDATE support.
-        if on_conflict_action == nodes::nodes::ONCONFLICT_UPDATE {
+        if on_conflict_action == ::nodes::nodes::ONCONFLICT_UPDATE {
             execReplication_seams::check_cmd_replica_identity::call(
                 mcx,
                 &result_rel,
@@ -2258,8 +2258,8 @@ fn error_view_not_updatable_exec(
 /// lock) the marked relation if its rowmark needs a real row, validate it with
 /// `CheckValidRowMarkRel`, build an `ExecRowMark`, and store it in
 /// `estate->es_rowmarks[rti-1]`.
-fn init_plan_rowmarks<'mcx>(estate: &mut nodes::EStateData<'mcx>) -> PgResult<()> {
-    use nodes::nodelockrows::{
+fn init_plan_rowmarks<'mcx>(estate: &mut ::nodes::EStateData<'mcx>) -> PgResult<()> {
+    use ::nodes::nodelockrows::{
         ExecRowMark, ROW_MARK_COPY, ROW_MARK_EXCLUSIVE, ROW_MARK_KEYSHARE, ROW_MARK_NOKEYEXCLUSIVE,
         ROW_MARK_REFERENCE, ROW_MARK_SHARE,
     };
@@ -2277,7 +2277,7 @@ fn init_plan_rowmarks<'mcx>(estate: &mut nodes::EStateData<'mcx>) -> PgResult<()
 
     // Snapshot the PlanRowMark scalars out of es_plannedstmt so we can take
     // `&mut estate` for ExecGetRangeTableRelation without aliasing the borrow.
-    let planned: alloc::vec::Vec<nodes::nodelockrows::PlanRowMark> = estate
+    let planned: alloc::vec::Vec<::nodes::nodelockrows::PlanRowMark> = estate
         .es_plannedstmt
         .as_ref()
         .and_then(|p| p.rowMarks.as_ref())
@@ -2297,7 +2297,7 @@ fn init_plan_rowmarks<'mcx>(estate: &mut nodes::EStateData<'mcx>) -> PgResult<()
         // and must NOT be skipped (C guards the bms test with
         // `rte->rtekind == RTE_RELATION`).
         if execUtils::exec_rt_fetch(rc.rti, estate).rtekind
-            == nodes::parsenodes::RTE_RELATION
+            == ::nodes::parsenodes::RTE_RELATION
             && !nodes_core_seams::bms_is_member::call(
                 rc.rti as i32,
                 estate.es_unpruned_relids.as_deref(),
@@ -2362,9 +2362,9 @@ fn init_plan_rowmarks<'mcx>(estate: &mut nodes::EStateData<'mcx>) -> PgResult<()
 #[allow(non_snake_case)]
 fn CheckValidRowMarkRel<'mcx>(
     rel: &rel::Relation<'mcx>,
-    mark_type: nodes::nodelockrows::RowMarkType,
+    mark_type: ::nodes::nodelockrows::RowMarkType,
 ) -> PgResult<()> {
-    use nodes::nodelockrows::ROW_MARK_REFERENCE;
+    use ::nodes::nodelockrows::ROW_MARK_REFERENCE;
     use types_tuple::access::{
         RELKIND_FOREIGN_TABLE, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
         RELKIND_SEQUENCE, RELKIND_TOASTVALUE, RELKIND_VIEW,
@@ -2429,8 +2429,8 @@ fn CheckValidRowMarkRel<'mcx>(
 #[allow(non_snake_case)]
 fn EvalPlanQualInit<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
-    parentestate: &mut nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+    parentestate: &mut ::nodes::EStateData<'mcx>,
     epq_param: i32,
     result_relations: &[types_core::primitive::Index],
 ) -> PgResult<()> {
@@ -2485,10 +2485,10 @@ fn EvalPlanQualInit<'mcx>(
 #[allow(non_snake_case)]
 fn eval_plan_qual_set_plan_with_row_marks<'mcx>(
     _mcx: mcx::Mcx<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
-    _estate: &mut nodes::EStateData<'mcx>,
-    row_marks: &[mcx::PgBox<'mcx, nodes::nodes::Node<'mcx>>],
-    subplan: Option<&'mcx nodes::nodes::Node<'mcx>>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+    _estate: &mut ::nodes::EStateData<'mcx>,
+    row_marks: &[mcx::PgBox<'mcx, ::nodes::nodes::Node<'mcx>>],
+    subplan: Option<&'mcx ::nodes::nodes::Node<'mcx>>,
 ) -> PgResult<()> {
     // foreach(l, node->rowMarks) { ...ExecFindRowMark / ExecBuildAuxRowMark... }
     if !row_marks.is_empty() {
@@ -2534,8 +2534,8 @@ fn eval_plan_qual_set_plan_with_row_marks<'mcx>(
 /// Alias the open `Relation` for a result-rel pool id (C: `resultRelInfo->
 /// ri_RelationDesc`).
 fn epq_relation_alias<'mcx>(
-    estate: &nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
+    estate: &::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
 ) -> rel::Relation<'mcx> {
     estate
         .result_rel(result_rel_info)
@@ -2554,11 +2554,11 @@ fn epq_relation_alias<'mcx>(
 /// estate threaded). `EvalPlanQual()` then copies the locked tuple into the
 /// recheck-estate test slot.
 fn EvalPlanQualSlot<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
-    result_rel_info: nodes::RriId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+    result_rel_info: ::nodes::RriId,
     rti: types_core::primitive::Index,
-) -> PgResult<nodes::SlotId> {
+) -> PgResult<::nodes::SlotId> {
     debug_assert!(rti > 0 && rti as usize <= estate.es_range_table_size);
     let idx = (rti - 1) as usize;
 
@@ -2593,12 +2593,12 @@ fn EvalPlanQualSlot<'mcx>(
 /// recheck for a concurrently-updated tuple. Returns the surviving (re-projected)
 /// slot, or `Ok(None)` when the row no longer qualifies.
 fn EvalPlanQual<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
-    result_rel_info: nodes::RriId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+    result_rel_info: ::nodes::RriId,
     rti: types_core::primitive::Index,
-    inputslot: nodes::SlotId,
-) -> PgResult<Option<nodes::SlotId>> {
+    inputslot: ::nodes::SlotId,
+) -> PgResult<Option<::nodes::SlotId>> {
     debug_assert!(rti > 0);
     let idx = (rti - 1) as usize;
 
@@ -2676,7 +2676,7 @@ fn EvalPlanQual<'mcx>(
     // recheck output's tuple into a parent-estate result slot (created lazily
     // with the recheck output's descriptor) and return that parent slot id. C
     // returns the recheck slot directly (valid by pointer across estates).
-    let result: Option<nodes::SlotId> = match slot {
+    let result: Option<::nodes::SlotId> = match slot {
         None => None,
         Some(s) => {
             let empty = epqstate
@@ -2723,7 +2723,7 @@ fn EvalPlanQual<'mcx>(
                         let ps = execTuples_seams::exec_alloc_table_slot::call(
                             estate,
                             desc_owned,
-                            nodes::TupleSlotKind::HeapTuple,
+                            ::nodes::TupleSlotKind::HeapTuple,
                         )?;
                         epqstate.epq_parent_result_slot = Some(ps);
                         ps
@@ -2758,7 +2758,7 @@ fn EvalPlanQual<'mcx>(
 /// Helper: write `relsubs_done[idx]` / `relsubs_blocked[idx]` on the live marker
 /// (in `recheckestate.es_epq_active`, populated by EvalPlanQualBegin/Start).
 fn epq_set_marker<'mcx>(
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
     idx: usize,
     done: bool,
     blocked: bool,
@@ -2783,7 +2783,7 @@ fn epq_set_marker<'mcx>(
 
 /// Helper: set only `relsubs_blocked[idx]` on the live marker.
 fn epq_set_blocked<'mcx>(
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
     idx: usize,
     blocked: bool,
 ) {
@@ -2803,11 +2803,11 @@ fn epq_set_blocked<'mcx>(
 /// Helper: ensure a recheck-estate test slot exists for `rti` and record it in
 /// the live marker's `relsubs_slot[rti-1]`; returns that recheck-estate SlotId.
 fn epq_ensure_recheck_test_slot<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
-    result_rel_info: nodes::RriId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+    result_rel_info: ::nodes::RriId,
     rti: types_core::primitive::Index,
-) -> PgResult<nodes::SlotId> {
+) -> PgResult<::nodes::SlotId> {
     let idx = (rti - 1) as usize;
     // Already created on the marker?
     if let Some(s) = epqstate
@@ -2841,8 +2841,8 @@ fn epq_ensure_recheck_test_slot<'mcx>(
 /// `EvalPlanQualNext(epqstate)` (execMain.c): fetch the next row (if any) from
 /// EPQ testing by running the recheck plan-state tree under the recheck estate.
 fn EvalPlanQualNext<'mcx>(
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
-) -> PgResult<Option<nodes::SlotId>> {
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+) -> PgResult<Option<::nodes::SlotId>> {
     // slot = ExecProcNode(epqstate->recheckplanstate); — run with the recheck
     // estate threaded so leaf scans read recheckestate.es_epq_active.
     //
@@ -2889,12 +2889,12 @@ fn EvalPlanQualNext<'mcx>(
 /// shape). Returns the recheck-estate SlotId. If the parent slot is empty, the
 /// recheck slot is left cleared.
 fn epq_bridge_parent_slot_to_recheck<'mcx>(
-    parentestate: &mut nodes::EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
+    parentestate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
     rel: &rel::Relation<'mcx>,
     idx: usize,
-    src: nodes::SlotId,
-) -> PgResult<nodes::SlotId> {
+    src: ::nodes::SlotId,
+) -> PgResult<::nodes::SlotId> {
     // Reuse the marker's existing recheck slot for this rel if present (the EPQ
     // state can be reused across outer tuples without leaking slots).
     let existing = epqstate
@@ -2952,8 +2952,8 @@ fn epq_bridge_parent_slot_to_recheck<'mcx>(
 /// (`lr_epqstate.relsubs_slot[i]`) into the recheck estate's marker so the
 /// recheck scans return them.
 fn eval_plan_qual_begin_lockrows<'mcx>(
-    parentestate: &mut nodes::EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
+    parentestate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
 ) -> PgResult<()> {
     // Build / reset the recheck estate + plan + marker.
     EvalPlanQualBegin(parentestate, epqstate)?;
@@ -2961,7 +2961,7 @@ fn eval_plan_qual_begin_lockrows<'mcx>(
     // Bridge the locked source tuples into the recheck marker. Snapshot the
     // (idx, parent slot, relation) triples for every non-empty parent
     // relsubs_slot entry first.
-    let mut to_bridge: alloc::vec::Vec<(usize, nodes::SlotId, rel::Relation<'mcx>)> =
+    let mut to_bridge: alloc::vec::Vec<(usize, ::nodes::SlotId, rel::Relation<'mcx>)> =
         alloc::vec::Vec::new();
     if let Some(pslots) = epqstate.relsubs_slot.as_ref() {
         for (i, entry) in pslots.iter().enumerate() {
@@ -3008,9 +3008,9 @@ fn eval_plan_qual_begin_lockrows<'mcx>(
 /// wholerow) from a recheck-addressable slot. `slot` is the LockRows node's
 /// current working "outer" slot (a PARENT-estate slot).
 fn eval_plan_qual_set_slot_lockrows<'mcx>(
-    parentestate: &mut nodes::EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
-    slot: nodes::SlotId,
+    parentestate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+    slot: ::nodes::SlotId,
 ) -> PgResult<()> {
     // EvalPlanQualSetSlot(epqstate, slot) == epqstate->origslot = slot.
     epqstate.origslot = Some(slot);
@@ -3059,7 +3059,7 @@ fn eval_plan_qual_set_slot_lockrows<'mcx>(
             let s = execTuples_seams::exec_alloc_table_slot::call(
                 rc,
                 desc_owned,
-                nodes::TupleSlotKind::HeapTuple,
+                ::nodes::TupleSlotKind::HeapTuple,
             )?;
             if let Some(m) = rc.es_epq_active.as_deref_mut() {
                 m.epq_marker_origslot = Some(s);
@@ -3078,8 +3078,8 @@ fn eval_plan_qual_set_slot_lockrows<'mcx>(
 /// a subsequent call resets the relsubs_done flags and re-copies parent params,
 /// then marks the recheck plan for rescan at the epqParam.
 fn EvalPlanQualBegin<'mcx>(
-    parentestate: &mut nodes::EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
+    parentestate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
 ) -> PgResult<()> {
     if epqstate.recheckestate.is_none() {
         // First time through: create a child EState + recheck plan tree.
@@ -3147,8 +3147,8 @@ fn EvalPlanQualBegin<'mcx>(
 /// `relsubs_*` marker in `recheckestate.es_epq_active`, then `ExecInitNode`s the
 /// recheck plan tree.
 fn EvalPlanQualStart<'mcx>(
-    parentestate: &mut nodes::EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
+    parentestate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
 ) -> PgResult<()> {
     let qcx = parentestate.es_query_cxt;
     let rtsize = parentestate.es_range_table_size;
@@ -3193,7 +3193,7 @@ fn EvalPlanQualStart<'mcx>(
 
     // recheckestate = CreateExecutorState(); — a child EState in the parent's
     // per-query context (same 'mcx; the box is freed at EvalPlanQualEnd).
-    let mut rc_box: mcx::PgBox<'mcx, nodes::EStateData<'mcx>> =
+    let mut rc_box: mcx::PgBox<'mcx, ::nodes::EStateData<'mcx>> =
         execUtils::create_executor_state_in(qcx)?;
 
     // Copy unchanging state from the parent (cut-down ExecutorStart). The owned
@@ -3255,10 +3255,10 @@ fn EvalPlanQualStart<'mcx>(
             if !ps.partPruneInfos.is_empty() {
                 let mut infos = mcx::vec_with_capacity_in(qcx, ps.partPruneInfos.len())?;
                 for pinfo in ps.partPruneInfos.iter() {
-                    let owned = nodes::partprune_carrier::partpruneinfo_into_static(
+                    let owned = ::nodes::partprune_carrier::partpruneinfo_into_static(
                         pinfo.clone_in(qcx)?,
                     );
-                    infos.push(nodes::Opaque(Some(alloc::boxed::Box::new(owned))));
+                    infos.push(::nodes::Opaque(Some(alloc::boxed::Box::new(owned))));
                 }
                 rc.es_part_prune_infos = infos;
             }
@@ -3289,7 +3289,7 @@ fn EvalPlanQualStart<'mcx>(
         if !parentestate.es_param_exec_vals.is_empty() {
             let mut pev = mcx::vec_with_capacity_in(qcx, parentestate.es_param_exec_vals.len())?;
             for p in parentestate.es_param_exec_vals.iter() {
-                pev.push(nodes::execnodes::ParamExecData {
+                pev.push(::nodes::execnodes::ParamExecData {
                     execPlan: None,
                     value: p.value.clone_in(qcx)?,
                     isnull: p.isnull,
@@ -3339,7 +3339,7 @@ fn EvalPlanQualStart<'mcx>(
         // column numbers. (C indexes relsubs_rowmark[rti-1] directly to the
         // ExecAuxRowMark *; the owned marker carries an rti-indexed array.)
         let mut relsubs_rowmark = relsubs_rowmark;
-        let mut marker_rowmarks: mcx::PgVec<'mcx, Option<nodes::nodelockrows::ExecAuxRowMarkData<'mcx>>> =
+        let mut marker_rowmarks: mcx::PgVec<'mcx, Option<::nodes::nodelockrows::ExecAuxRowMarkData<'mcx>>> =
             mcx::vec_with_capacity_in(qcx, rtsize)?;
         marker_rowmarks.resize_with(rtsize, || None);
         if let Some(arms) = epqstate.arowMarks.as_ref() {
@@ -3353,7 +3353,7 @@ fn EvalPlanQualStart<'mcx>(
                 }
             }
         }
-        let marker = nodes::modifytable::EPQState {
+        let marker = ::nodes::modifytable::EPQState {
             epqParam: epqstate.epqParam,
             relsubs_slot: Some(relsubs_slot),
             relsubs_rowmark: Some(relsubs_rowmark),
@@ -3383,8 +3383,8 @@ fn EvalPlanQualStart<'mcx>(
             .and_then(|p| p.subplans.as_ref().map(|s| s.len()))
             .unwrap_or(0);
         for sidx in 0..n_subplans {
-            let subnode: Option<&nodes::nodes::Node<'_>> = {
-                let subplan_box: Option<mcx::PgBox<'_, nodes::nodes::Node<'_>>> = match rc
+            let subnode: Option<&::nodes::nodes::Node<'_>> = {
+                let subplan_box: Option<mcx::PgBox<'_, ::nodes::nodes::Node<'_>>> = match rc
                     .es_plannedstmt
                     .as_deref()
                     .and_then(|p| p.subplans.as_ref())
@@ -3412,8 +3412,8 @@ fn EvalPlanQualStart<'mcx>(
 /// table, close any result/trigger relations it opened, and free the recheck
 /// estate. Mark the EPQState idle. A no-op if EPQ was never started.
 fn EvalPlanQualEnd<'mcx>(
-    _parentestate: &mut nodes::EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
+    _parentestate: &mut ::nodes::EStateData<'mcx>,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
 ) -> PgResult<()> {
     // EPQ was never started? nothing further to do (relsubs_slot on the parent
     // is reclaimed with the parent context).
@@ -3472,11 +3472,11 @@ fn EvalPlanQualEnd<'mcx>(
 /// `EvalPlanQualStart` + the EPQ driver), so we read both off the marker rather
 /// than the C `epqstate->relsubs_rowmark[rti-1]` / `epqstate->origslot`.
 fn EvalPlanQualFetchRowMark<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     rti: types_core::primitive::Index,
-    slot: nodes::SlotId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<bool> {
-    use nodes::nodelockrows::{
+    use ::nodes::nodelockrows::{
         RowMarkRequiresRowShareLock, ROW_MARK_COPY, ROW_MARK_REFERENCE,
     };
     const RELKIND_FOREIGN_TABLE: u8 = b'f';
@@ -3617,7 +3617,7 @@ fn EvalPlanQualFetchRowMark<'mcx>(
 fn ExecBuildSlotValueDescription<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     reloid: Oid,
-    slot: &nodes::TupleTableSlot,
+    slot: &::nodes::TupleTableSlot,
     tupdesc: &types_tuple::heaptuple::TupleDescData<'_>,
     modified_cols: Option<&Bitmapset<'_>>,
     maxfieldlen: i32,
@@ -3770,9 +3770,9 @@ use types_tuple::heaptuple::TupleDescData;
 /// relation's CHECK constraints against `slot`. Returns the name of the first
 /// failing constraint, or `None` (the C `NULL`) when all pass.
 fn ExecRelCheck<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<Option<mcx::PgString<'mcx>>> {
     let mcx = estate.es_query_cxt;
 
@@ -3844,7 +3844,7 @@ fn ExecRelCheck<'mcx>(
             .as_ref()
             .expect("ExecRelCheck: ri_RelationDesc is NULL")
             .alias();
-        let mut exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> =
+        let mut exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> =
             mcx::vec_with_capacity_in(mcx, ncheck as usize)?;
         for ci in checks.iter() {
             // Skip not-enforced constraints (leaving a None placeholder so the
@@ -3913,10 +3913,10 @@ fn ExecRelCheck<'mcx>(
 /// the given `kind` against the tuple in `slot`, `ereport(ERROR)`ing on the
 /// first violation. WCOs of other kinds are skipped.
 pub fn ExecWithCheckOptions<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     kind: i32,
-    result_rel_info: nodes::RriId,
-    slot: nodes::SlotId,
+    result_rel_info: ::nodes::RriId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
 
@@ -3998,7 +3998,7 @@ pub fn ExecWithCheckOptions<'mcx>(
         };
 
         match wco_kind {
-            nodes::rawnodes::WCO_VIEW_CHECK => {
+            ::nodes::rawnodes::WCO_VIEW_CHECK => {
                 // For a view WCO we can show the failing row when the user could
                 // view the relation directly. convert_routed_slot_for_error maps
                 // a routed slot back to the root tupdesc (the C
@@ -4021,8 +4021,8 @@ pub fn ExecWithCheckOptions<'mcx>(
                 }
                 return Err(err.into_error());
             }
-            nodes::rawnodes::WCO_RLS_INSERT_CHECK
-            | nodes::rawnodes::WCO_RLS_UPDATE_CHECK => {
+            ::nodes::rawnodes::WCO_RLS_INSERT_CHECK
+            | ::nodes::rawnodes::WCO_RLS_UPDATE_CHECK => {
                 return Err(rls_with_check_violation(
                     polname.as_deref(),
                     &relname,
@@ -4030,8 +4030,8 @@ pub fn ExecWithCheckOptions<'mcx>(
                     "new row violates row-level security policy for table \"{t}\"",
                 ));
             }
-            nodes::rawnodes::WCO_RLS_MERGE_UPDATE_CHECK
-            | nodes::rawnodes::WCO_RLS_MERGE_DELETE_CHECK => {
+            ::nodes::rawnodes::WCO_RLS_MERGE_UPDATE_CHECK
+            | ::nodes::rawnodes::WCO_RLS_MERGE_DELETE_CHECK => {
                 return Err(rls_with_check_violation(
                     polname.as_deref(),
                     &relname,
@@ -4039,7 +4039,7 @@ pub fn ExecWithCheckOptions<'mcx>(
                     "target row violates row-level security policy (USING expression) for table \"{t}\"",
                 ));
             }
-            nodes::rawnodes::WCO_RLS_CONFLICT_CHECK => {
+            ::nodes::rawnodes::WCO_RLS_CONFLICT_CHECK => {
                 return Err(rls_with_check_violation(
                     polname.as_deref(),
                     &relname,
@@ -4080,9 +4080,9 @@ fn rls_with_check_violation(
 /// `ExecPartitionCheck(resultRelInfo, slot, estate, emitError)` (execMain.c):
 /// check that the tuple in `slot` meets the relation's partition constraint.
 pub fn ExecPartitionCheck<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
+    slot: ::nodes::SlotId,
     emit_error: bool,
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
@@ -4103,7 +4103,7 @@ pub fn ExecPartitionCheck<'mcx>(
         // qual = RelationGetPartitionQual(rel);
         let qual = partcache::RelationGetPartitionQual(mcx, &rel_alias)?;
         // ExecPrepareCheck takes an implicit-AND Expr list.
-        let mut exprs: alloc::vec::Vec<nodes::primnodes::Expr> = alloc::vec::Vec::new();
+        let mut exprs: alloc::vec::Vec<::nodes::primnodes::Expr> = alloc::vec::Vec::new();
         for n in qual.iter() {
             match n.as_expr() {
                 Some(e) => exprs.push(e.clone()),
@@ -4152,9 +4152,9 @@ pub fn ExecPartitionCheck<'mcx>(
 /// `ExecPartitionCheckEmitError(resultRelInfo, slot, estate)` (execMain.c):
 /// form and emit the error after a failed partition-constraint check.
 pub fn ExecPartitionCheckEmitError<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<()> {
     let mcx = estate.es_query_cxt;
 
@@ -4204,7 +4204,7 @@ pub fn ExecPartitionCheckEmitError<'mcx>(
 pub fn validate_partition_constraint_scan<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     relid: types_core::primitive::Oid,
-    part_constraint: &[nodes::primnodes::Expr],
+    part_constraint: &[::nodes::primnodes::Expr],
 ) -> PgResult<()> {
     // NoLock == 0 (lmgr.h LOCKMODE); types-storage is not a dep of this crate.
     const NoLock: i32 = 0;
@@ -4223,7 +4223,7 @@ pub fn validate_partition_constraint_scan<'mcx>(
     estate.es_direction = ScanDirection::ForwardScanDirection;
 
     // partqualstate = ExecPrepareCheck(partConstraint, estate).
-    let mut owned: alloc::vec::Vec<nodes::primnodes::Expr> =
+    let mut owned: alloc::vec::Vec<::nodes::primnodes::Expr> =
         alloc::vec::Vec::with_capacity(part_constraint.len());
     for e in part_constraint {
         owned.push(e.clone_in(mcx)?);
@@ -4316,7 +4316,7 @@ pub fn validate_default_partition_contents_scan<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     default_relname: &str,
     part_relid: types_core::primitive::Oid,
-    part_constraint: &[nodes::primnodes::Expr],
+    part_constraint: &[::nodes::primnodes::Expr],
 ) -> PgResult<()> {
     // NoLock == 0 (lmgr.h LOCKMODE); types-storage is not a dep of this crate.
     const NoLock: i32 = 0;
@@ -4335,7 +4335,7 @@ pub fn validate_default_partition_contents_scan<'mcx>(
     estate.es_direction = ScanDirection::ForwardScanDirection;
 
     // partqualstate = ExecPrepareCheck(partition_constraint, estate).
-    let mut owned: alloc::vec::Vec<nodes::primnodes::Expr> =
+    let mut owned: alloc::vec::Vec<::nodes::primnodes::Expr> =
         alloc::vec::Vec::with_capacity(part_constraint.len());
     for e in part_constraint {
         owned.push(e.clone_in(mcx)?);
@@ -4424,10 +4424,10 @@ pub fn at_rewrite_table_scan<'mcx>(
     oid_new_heap: Oid,
     old_desc: &types_tuple::heaptuple::TupleDescData<'mcx>,
     rewrite: i32,
-    newvals: &[(i16, nodes::primnodes::Expr, bool)],
-    check_constraints: &[(&str, nodes::primnodes::Expr)],
+    newvals: &[(i16, ::nodes::primnodes::Expr, bool)],
+    check_constraints: &[(&str, ::nodes::primnodes::Expr)],
     verify_new_notnull: bool,
-    partition_constraint: &[nodes::primnodes::Expr],
+    partition_constraint: &[::nodes::primnodes::Expr],
     validate_default: bool,
 ) -> PgResult<()> {
     use execTuples::exec_init_slots::{
@@ -4476,7 +4476,7 @@ pub fn at_rewrite_table_scan<'mcx>(
 
     // Build CHECK constraint ExprStates (con->qualstate =
     // ExecPrepareExpr(expand_generated_columns_in_expr(con->qual, oldrel, 1))).
-    let mut check_states: alloc::vec::Vec<(alloc::string::String, mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>)> =
+    let mut check_states: alloc::vec::Vec<(alloc::string::String, mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>)> =
         alloc::vec::Vec::with_capacity(check_constraints.len());
     for (name, qual) in check_constraints.iter() {
         needscan = true;
@@ -4496,7 +4496,7 @@ pub fn at_rewrite_table_scan<'mcx>(
     }
 
     // Build partition-check ExprState (partqualstate = ExecPrepareExpr(tab->partition_constraint)).
-    let mut partqualstate: Option<mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>> = None;
+    let mut partqualstate: Option<mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>> = None;
     if !partition_constraint.is_empty() {
         needscan = true;
         // tab->partition_constraint is the single ANDed Expr; ExecPrepareExpr it.
@@ -4507,7 +4507,7 @@ pub fn at_rewrite_table_scan<'mcx>(
         let expr = if partition_constraint.len() == 1 {
             partition_constraint[0].clone_in(mcx)?
         } else {
-            let mut planned: alloc::vec::Vec<nodes::primnodes::Expr> =
+            let mut planned: alloc::vec::Vec<::nodes::primnodes::Expr> =
                 alloc::vec::Vec::with_capacity(partition_constraint.len());
             for e in partition_constraint {
                 planned.push(e.clone_in(mcx)?);
@@ -4519,7 +4519,7 @@ pub fn at_rewrite_table_scan<'mcx>(
 
     // Build newvals ExprStates (ex->exprstate = ExecInitExpr(ex->expr, NULL)).
     // attnum and is_generated travel alongside.
-    let mut newval_states: alloc::vec::Vec<(i16, bool, mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>)> =
+    let mut newval_states: alloc::vec::Vec<(i16, bool, mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>)> =
         alloc::vec::Vec::with_capacity(newvals.len());
     for (attnum, expr, is_generated) in newvals.iter() {
         let state = execExpr::exec_init_expr_no_parent(&expr.clone_in(mcx)?, &mut estate)?;
@@ -4566,8 +4566,8 @@ pub fn at_rewrite_table_scan<'mcx>(
     // constraint, we need to evaluate whether the generation expression is null.
     // For that, we borrow ExecRelGenVirtualNotNull(). Here, we prepare a dummy
     // ResultRelInfo (dummy rangetable index 0, no partition root).
-    let virtual_notnull_rri: Option<nodes::RriId> = if !notnull_virtual_attrs.is_empty() {
-        let mut r_info = nodes::ResultRelInfo::default();
+    let virtual_notnull_rri: Option<::nodes::RriId> = if !notnull_virtual_attrs.is_empty() {
+        let mut r_info = ::nodes::ResultRelInfo::default();
         let instrument = estate.es_instrument;
         InitResultRelInfo(mcx, &mut r_info, oldrel.alias(), 0, None, instrument)?;
         Some(estate.add_result_rel(r_info)?)
@@ -4601,7 +4601,7 @@ pub fn at_rewrite_table_scan<'mcx>(
         // two slots are needed (old over oldTupDesc, new over newTupDesc);
         // otherwise one slot over newTupDesc suffices.
         let old_callbacks = table_tableam::table_slot_callbacks(&rel_alias);
-        let (oldslot_id, newslot_id): (nodes::SlotId, Option<nodes::SlotId>) =
+        let (oldslot_id, newslot_id): (::nodes::SlotId, Option<::nodes::SlotId>) =
             if rewriting {
                 let newrel_alias = newrel
                     .as_ref()
@@ -4665,7 +4665,7 @@ pub fn at_rewrite_table_scan<'mcx>(
                 break;
             }
 
-            let insertslot: nodes::SlotId = if rewrite > 0 {
+            let insertslot: ::nodes::SlotId = if rewrite > 0 {
                 let newslot_id = newslot_id.expect("rewrite>0 but no new slot");
 
                 // slot_getallattrs(oldslot); ExecClearTuple(newslot).
@@ -4882,9 +4882,9 @@ pub fn at_rewrite_table_scan<'mcx>(
 /// relation's NOT NULL and CHECK constraints against `slot`. The partition
 /// constraint is *not* checked here.
 fn ExecConstraints<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<()> {
     // Snapshot the not-null / has-not-null / relchecks shape and per-attribute
     // (attnotnull, attgenerated) flags.
@@ -4984,9 +4984,9 @@ fn ExecConstraints<'mcx>(
 /// (execMain.c): verify not-null constraints on virtual generated columns.
 /// Returns `InvalidAttrNumber` (0) when all satisfied, else the violating attnum.
 fn ExecRelGenVirtualNotNull<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
+    slot: ::nodes::SlotId,
     notnull_virtual_attrs: &[i32],
 ) -> PgResult<i32> {
     let mcx = estate.es_query_cxt;
@@ -5005,20 +5005,20 @@ fn ExecRelGenVirtualNotNull<'mcx>(
             .as_ref()
             .expect("ExecRelGenVirtualNotNull: ri_RelationDesc is NULL")
             .alias();
-        let mut exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> =
+        let mut exprs: mcx::PgVec<'mcx, Option<mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> =
             mcx::vec_with_capacity_in(mcx, notnull_virtual_attrs.len())?;
         for &attnum in notnull_virtual_attrs {
             // "generated_expression IS NOT NULL".
             let arg = rewritehandler::build_generation_expression(
                 mcx, &rel_alias, attnum,
             )?;
-            let nnulltest = nodes::primnodes::NullTest {
+            let nnulltest = ::nodes::primnodes::NullTest {
                 arg: Some(alloc::boxed::Box::new(arg)),
-                nulltesttype: nodes::primnodes::NullTestType::IS_NOT_NULL,
+                nulltesttype: ::nodes::primnodes::NullTestType::IS_NOT_NULL,
                 argisrow: false,
                 location: -1,
             };
-            let expr = nodes::primnodes::Expr::NullTest(nnulltest);
+            let expr = ::nodes::primnodes::Expr::NullTest(nnulltest);
             exprs.push(Some(execExpr::exec_prepare_expr(&expr, estate)?));
         }
         estate
@@ -5056,9 +5056,9 @@ fn ExecRelGenVirtualNotNull<'mcx>(
 /// `ReportNotNullViolationError(resultRelInfo, slot, estate, attnum)`
 /// (execMain.c): report an already-detected not-null violation for `attnum`.
 fn ReportNotNullViolationError<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
+    slot: ::nodes::SlotId,
     attnum: i32,
 ) -> PgResult<()> {
     debug_assert!(attnum > 0);
@@ -5097,14 +5097,14 @@ fn ReportNotNullViolationError<'mcx>(
 
 // --- constraint-cluster helpers -------------------------------------------
 
-fn unported_node(msg: &str, node: &nodes::nodes::Node<'_>) -> types_error::PgError {
+fn unported_node(msg: &str, node: &::nodes::nodes::Node<'_>) -> types_error::PgError {
     unported(&alloc::format!("{msg}: {:?}", node.node_tag()))
 }
 
 /// Deform `slot` and return its per-attribute null flags (`slot_attisnull`).
 fn slot_isnulls<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    slot: ::nodes::SlotId,
     natts: usize,
 ) -> PgResult<alloc::vec::Vec<bool>> {
     let deformed = execTuples_seams::slot_getallattrs_by_id::call(estate, slot)?;
@@ -5122,8 +5122,8 @@ fn slot_isnulls<'mcx>(
 /// `bms_union(ExecGetInsertedCols(rri, estate), ExecGetUpdatedCols(rri, estate))`
 /// over the (root, when routed) result relation for the error `val_desc`.
 fn constraint_modified_cols<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
 ) -> PgResult<Option<mcx::PgBox<'mcx, Bitmapset<'mcx>>>> {
     let mcx = estate.es_query_cxt;
     // C unions over the root RRI when the tuple was routed; otherwise the RRI.
@@ -5140,9 +5140,9 @@ fn constraint_modified_cols<'mcx>(
 /// [`ExecBuildSlotValueDescription`] against the (root, when routed) relation's
 /// descriptor.
 fn build_slot_value_desc<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     reloid: Oid,
-    slot: nodes::SlotId,
+    slot: ::nodes::SlotId,
     modified_cols: Option<&Bitmapset<'_>>,
 ) -> PgResult<Option<mcx::PgString<'mcx>>> {
     let mcx = estate.es_query_cxt;
@@ -5165,10 +5165,10 @@ fn build_slot_value_desc<'mcx>(
 /// root table's rowtype so the error `val_desc` matches the input tuple.
 /// Returns `(reloid_for_val_desc, slot_to_describe, relname_of_root_or_self)`.
 fn convert_routed_slot_for_error<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    result_rel_info: nodes::RriId,
-    slot: nodes::SlotId,
-) -> PgResult<(Oid, nodes::SlotId, alloc::string::String)> {
+    estate: &mut ::nodes::EStateData<'mcx>,
+    result_rel_info: ::nodes::RriId,
+    slot: ::nodes::SlotId,
+) -> PgResult<(Oid, ::nodes::SlotId, alloc::string::String)> {
     let mcx = estate.es_query_cxt;
     let root = estate.result_rel(result_rel_info).ri_RootResultRelInfo;
     let Some(root) = root else {
@@ -5214,7 +5214,7 @@ fn convert_routed_slot_for_error<'mcx>(
         let new_slot = execTuples::slot_payload_model::MakeTupleTableSlot(
             mcx,
             Some(mcx::alloc_in(mcx, root_tupdesc.clone_in(mcx)?)?),
-            nodes::TupleSlotKind::Virtual,
+            ::nodes::TupleSlotKind::Virtual,
         )?;
         let out = estate.push_slot_data(new_slot)?;
         next::tupconvert::execute_attr_map_slot(estate, &map, slot, out)?
@@ -5327,7 +5327,7 @@ fn create_parallel_query_desc<'mcx>(
     let snapshot = snapmgr_seams::get_active_snapshot::call()?;
 
     // The parallel-executor `DestReceiverHandle` (execparallel) and the
-    // executor's `dest.h` `DestReceiverHandle` (nodes::parsestmt) are the
+    // executor's `dest.h` `DestReceiverHandle` (::nodes::parsestmt) are the
     // same live `DestReceiver *` token under two homes; carry the value across.
     let dest = DestReceiverHandle(receiver.0 as u64);
 
@@ -5352,9 +5352,9 @@ fn create_parallel_query_desc<'mcx>(
 /// the executor's internal error rather than panicking.
 #[inline]
 fn exec_param_mut<'a, 'mcx>(
-    estate: &'a mut nodes::EStateData<'mcx>,
+    estate: &'a mut ::nodes::EStateData<'mcx>,
     paramid: i32,
-) -> PgResult<&'a mut nodes::ParamExecData<'mcx>> {
+) -> PgResult<&'a mut ::nodes::ParamExecData<'mcx>> {
     estate
         .es_param_exec_vals
         .get_mut(paramid as usize)
@@ -5366,18 +5366,18 @@ fn exec_param_mut<'a, 'mcx>(
 /// stable identity is `plan_id` (the 1-based index into `es_subplanstates`).
 /// Mirrors nodeSubplan.c `ExecInitSubPlan` / `ExecReScanSetParamPlan`.
 fn mark_param_execplan_pending<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     paramid: i32,
     plan_id: i32,
 ) -> PgResult<()> {
     let prm = exec_param_mut(estate, paramid)?;
-    prm.execPlan = Some(nodes::ExecPlanLink { plan_id });
+    prm.execPlan = Some(::nodes::ExecPlanLink { plan_id });
     Ok(())
 }
 
 /// `prm->execPlan = NULL;` — clear the PARAM_EXEC `execPlan` link after the
 /// initplan output has been set (nodeSubplan.c `ExecSetParamPlan`).
-fn clear_param_execplan<'mcx>(estate: &mut nodes::EStateData<'mcx>, paramid: i32) -> PgResult<()> {
+fn clear_param_execplan<'mcx>(estate: &mut ::nodes::EStateData<'mcx>, paramid: i32) -> PgResult<()> {
     let prm = exec_param_mut(estate, paramid)?;
     prm.execPlan = None;
     Ok(())
@@ -5387,7 +5387,7 @@ fn clear_param_execplan<'mcx>(estate: &mut nodes::EStateData<'mcx>, paramid: i32
 /// not yet evaluated? (`ExecSetParamPlanMulti`). Reads the `execPlan` link. The C
 /// indexes unconditionally; out of range maps to "not pending" (the C would
 /// dereference, but the planner never produces an out-of-range PARAM_EXEC id).
-fn param_execplan_pending(estate: &nodes::EStateData<'_>, paramid: i32) -> bool {
+fn param_execplan_pending(estate: &::nodes::EStateData<'_>, paramid: i32) -> bool {
     estate
         .es_param_exec_vals
         .get(paramid as usize)
@@ -5405,9 +5405,9 @@ fn param_execplan_pending(estate: &nodes::EStateData<'_>, paramid: i32) -> bool 
 /// resolution `ExecEvalParamExec` performs for the lazy single-param read; here
 /// it is driven by the leader's parallel initplan-forcing pass.
 fn exec_set_param_plan_for_pending<'mcx>(
-    econtext: nodes::EcxtId,
+    econtext: ::nodes::EcxtId,
     paramid: i32,
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
 ) -> PgResult<()> {
     let plan_id = estate
         .es_param_exec_vals
@@ -5474,7 +5474,7 @@ fn param_exec_top_mcx() -> mcx::Mcx<'static> {
 /// type OID, C assumes by-value (`typLen = sizeof(Datum)`, `typByVal = true`),
 /// like `copyParamList`.
 fn param_exec_value_owned(
-    estate: &mut nodes::EStateData<'_>,
+    estate: &mut ::nodes::EStateData<'_>,
     paramid: i32,
 ) -> execparallel::ParamExecValue<'static> {
     let prm = estate
@@ -5514,7 +5514,7 @@ fn param_exec_value_owned(
 /// `prm = &es_param_exec_vals[paramid]; prm->value = ...; prm->isnull = ...;
 /// prm->execPlan = NULL;` (execParallel.c `RestoreParamExecParams`).
 fn set_param_exec_value_owned<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     paramid: i32,
     restored: execparallel::RestoredParam<'mcx>,
 ) {

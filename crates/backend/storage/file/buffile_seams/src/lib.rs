@@ -10,7 +10,7 @@
 use mcx::Mcx;
 use types_error::PgResult;
 use execparallel::FileSetHandle;
-use nodes::nodehashjoin::BufFile;
+use ::nodes::nodehashjoin::BufFile;
 
 seam_core::seam!(
     /// `BufFileCreateFileSet(fileset, name)` (buffile.c:266): create a `BufFile`

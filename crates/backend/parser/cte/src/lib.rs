@@ -30,7 +30,7 @@
 //! # The owned node tree
 //!
 //! This repo carries the parse tree as owned `mcx`-allocated values
-//! (`nodes::nodes::Node`, `PgBox`/`PgVec`/`PgString`), not raw `*mut`
+//! (`::nodes::nodes::Node`, `PgBox`/`PgVec`/`PgString`), not raw `*mut`
 //! pointers. So the C in-place pointer mutation of the CTE objects via the
 //! `ctenamespace` (which aliases the very `CommonTableExpr`s `analyzeCTE`
 //! mutates) is modelled here with an owned working collection ([`CteState`])
@@ -92,15 +92,15 @@ use types_error::{
 };
 use types_tuple::heaptuple::{DEFAULT_COLLATION_OID, TEXTOID, UNKNOWNOID};
 
-use nodes::copy_query::Query;
-use nodes::jointype::JoinType;
-use nodes::nodes::{ntag, CmdType, Node};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::{Expr, TargetEntry};
-use nodes::rawnodes::{
+use ::nodes::copy_query::Query;
+use ::nodes::jointype::JoinType;
+use ::nodes::nodes::{ntag, CmdType, Node};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::{Expr, TargetEntry};
+use ::nodes::rawnodes::{
     CTECycleClause, CommonTableExpr, SelectStmt, SetOperation, WithClause,
 };
-use nodes::value::StringNode;
+use ::nodes::value::StringNode;
 
 use nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typmod};
 use nodes_core::node_walker::raw_expression_tree_walker;
@@ -822,7 +822,7 @@ fn analyzeCTE<'mcx>(
 
         cte.cycle_clause = Some(mcx::alloc_in(
             mcx,
-            nodes::nodes::Node::mk_cte_cycle_clause(mcx, cycle_clause)?,
+            ::nodes::nodes::Node::mk_cte_cycle_clause(mcx, cycle_clause)?,
         )?);
 
         // In C the p_ctenamespace holds a pointer to this very CTE, so the

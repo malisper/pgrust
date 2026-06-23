@@ -8,7 +8,7 @@
 //! ## Value-typed `ParamListInfo`
 //!
 //! A live `ParamListInfo` is a real value: `Option<Rc<ParamListInfoData>>`
-//! ([`nodes::params::ParamListInfo`]), shared by reference count exactly
+//! ([`::nodes::params::ParamListInfo`]), shared by reference count exactly
 //! as C shares its `ParamListInfoData *` by pointer. `makeParamList` allocates a
 //! new struct and returns it; the other operations read/derive from a borrowed
 //! `&ParamListInfoData`. C's `palloc`'d flexible-array `params[]` is the
@@ -45,11 +45,11 @@ use std::rc::Rc;
 
 use mcx::{Mcx, MemoryContext};
 use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
-use nodes::params::{
+use ::nodes::params::{
     ParamExternData, ParamListInfo, ParamListInfoData, ParamRef, ParamsErrorCbData,
     PARAM_FLAG_CONST, T_Param,
 };
-use nodes::primnodes::{Param, PARAM_EXTERN};
+use ::nodes::primnodes::{Param, PARAM_EXTERN};
 
 use transam_xact_seams as xact_seam;
 use datum_seams as datum_seam;

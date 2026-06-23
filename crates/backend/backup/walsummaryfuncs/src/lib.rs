@@ -62,7 +62,7 @@ use common_blkreftable as blkreftable;
 use types_core::{TimeLineID, XLogRecPtr};
 use types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
 use types_error::{PgError, PgResult};
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::Datum;
 use types_walsummarizer::WalSummaryFile;
 

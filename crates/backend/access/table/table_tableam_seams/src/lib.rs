@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::tuptable::SlotData;
+use ::nodes::tuptable::SlotData;
 use rel::Relation;
 use snapshot::SnapshotData;
 use types_tableam::relscan::{TableScanDesc, TableScanDescData};
@@ -50,7 +50,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         table_rel: &rel::Relation<'mcx>,
         index_rel: &rel::Relation<'mcx>,
-        index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
+        index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
         allow_sync: bool,
         progress: bool,
         callback: &mut dyn FnMut(
@@ -84,7 +84,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         table_rel: &rel::Relation<'mcx>,
         index_rel: &rel::Relation<'mcx>,
-        index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
+        index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
         allow_sync: bool,
         anyvisible: bool,
         progress: bool,
@@ -131,7 +131,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         table_rel: &rel::Relation<'mcx>,
         index_rel: &rel::Relation<'mcx>,
-        index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
+        index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
         snapshot: types_tableam::tableam::Snapshot,
         counters: &mut ValidateScanCounters,
         get_next_index_tid: &mut dyn FnMut() -> PgResult<Option<i64>>,

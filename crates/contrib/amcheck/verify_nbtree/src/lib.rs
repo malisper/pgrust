@@ -44,7 +44,7 @@ use mcx::{MemoryContext, Mcx, PgVec};
 /// [`BtreeCheckState`] field.
 pub type MemoryContextHandle<'mcx> = Mcx<'mcx>;
 use types_core::primitive::{BlockNumber, OffsetNumber, XLogRecPtr};
-use nodes::execnodes::IndexInfo;
+use ::nodes::execnodes::IndexInfo;
 use rel::Relation;
 use types_storage::buf::BufferAccessStrategy;
 use types_tableam::tableam::Snapshot;

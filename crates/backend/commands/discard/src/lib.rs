@@ -29,12 +29,12 @@ use portalmem::PortalHashTableDeleteAll;
 
 use transam_xact_seams::prevent_in_transaction_block;
 use types_error::PgResult;
-// The canonical CALL/DISCARD parse node lives in `nodes::ddlnodes` (the
+// The canonical CALL/DISCARD parse node lives in `::nodes::ddlnodes` (the
 // node-opaque payload the dispatcher downcasts to). `parsenodes::DiscardMode`
 // is a re-export of this same enum, so the two `DiscardStmt` shapes are
 // field-identical; we consume the canonical node form directly so the
 // ProcessUtility dispatch can hand us the downcast payload with no conversion.
-use nodes::ddlnodes::{DiscardMode, DiscardStmt};
+use ::nodes::ddlnodes::{DiscardMode, DiscardStmt};
 
 /// `DISCARD { ALL | SEQUENCES | TEMP | PLANS }`.
 ///

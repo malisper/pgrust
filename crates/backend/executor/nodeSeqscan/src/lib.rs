@@ -50,7 +50,7 @@ use execparallel::{
     DsmSegmentHandle, ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
     SerializeCursor,
 };
-use nodes::execnodes::ScanDirection;
+use ::nodes::execnodes::ScanDirection;
 use nodes::{EStateData, SeqScan, SeqScanState, SlotId, TupleTableSlot};
 use types_tableam::relscan::{ParallelBlockTableScanDescData, ParallelTableScanDesc};
 
@@ -612,11 +612,11 @@ pub fn ExecSeqScanEPQ<'mcx>(
 /// `castNode(SeqScanState, pstate)` then run the installed variant, returning
 /// the produced tuple's slot id (the C `return slot`) or `None`.
 fn exec_seq_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::PlanStateNode::SeqScan(node) => node,
+        ::nodes::PlanStateNode::SeqScan(node) => node,
         other => panic!("castNode(SeqScanState, pstate) failed: tag {}", other.tag()),
     };
 
@@ -645,7 +645,7 @@ fn exec_seq_scan_node<'mcx>(
 /// fallible on OOM.
 pub fn ExecInitSeqScan<'mcx>(
     node: &'mcx SeqScan<'mcx>,
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<mcx::PgBox<'mcx, SeqScanState<'mcx>>> {

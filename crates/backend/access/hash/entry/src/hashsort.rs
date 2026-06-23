@@ -11,7 +11,7 @@
 
 use mcx::{alloc_in, Mcx, PgBox};
 use types_error::PgResult;
-use nodes::Tuplesortstate;
+use ::nodes::Tuplesortstate;
 use rel::Relation;
 use types_tuple::heaptuple::Datum;
 use types_tuple::heaptuple::ItemPointerData;

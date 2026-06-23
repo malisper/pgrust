@@ -9,10 +9,10 @@ use std::collections::VecDeque;
 use std::sync::Once;
 
 use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
-use nodes::execnodes::{ExprContext, PlanStateData};
-use nodes::executor::TupleSlotKind;
-use nodes::nodes::Node;
-use nodes::TupleTableSlot;
+use ::nodes::execnodes::{ExprContext, PlanStateData};
+use ::nodes::executor::TupleSlotKind;
+use ::nodes::nodes::Node;
+use ::nodes::TupleTableSlot;
 
 use super::*;
 
@@ -146,7 +146,7 @@ fn mock_assign_expr_context<'mcx>(
 
 fn mock_create_scan_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
-    scanstate: &mut nodes::execnodes::ScanStateData<'mcx>,
+    scanstate: &mut ::nodes::execnodes::ScanStateData<'mcx>,
     _tts_ops: TupleSlotKind,
 ) -> PgResult<()> {
     // The C builds the scan slot empty (TTS_EMPTY set).
@@ -176,14 +176,14 @@ fn mock_assign_projection_info<'mcx>(
 }
 
 fn mock_init_qual<'mcx>(
-    qual: Option<&[nodes::primnodes::Expr]>,
+    qual: Option<&[::nodes::primnodes::Expr]>,
     _parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     match qual {
         Some(q) if !q.is_empty() => Ok(Some(alloc_in(
             estate.es_query_cxt,
-            nodes::execexpr::ExprState::default(),
+            ::nodes::execexpr::ExprState::default(),
         )?)),
         _ => Ok(None),
     }
@@ -191,8 +191,8 @@ fn mock_init_qual<'mcx>(
 
 /// `ExecQual`: the HAVING verdict, popped from the QUAL queue (default true).
 fn mock_qual<'mcx>(
-    _state: &mut nodes::execexpr::ExprState<'mcx>,
-    _econtext: nodes::EcxtId,
+    _state: &mut ::nodes::execexpr::ExprState<'mcx>,
+    _econtext: ::nodes::EcxtId,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     Ok(QUAL.with(|c| c.borrow_mut().pop_front()).unwrap_or(true))
@@ -201,8 +201,8 @@ fn mock_qual<'mcx>(
 /// `ExecQualAndReset`: the group-boundary verdict, popped from the EQRESET
 /// queue (default false => boundary).
 fn mock_qual_and_reset<'mcx>(
-    _state: &mut nodes::execexpr::ExprState<'mcx>,
-    _econtext: nodes::EcxtId,
+    _state: &mut ::nodes::execexpr::ExprState<'mcx>,
+    _econtext: ::nodes::EcxtId,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     Ok(EQRESET.with(|c| c.borrow_mut().pop_front()).unwrap_or(false))
@@ -222,20 +222,20 @@ fn mock_project<'mcx>(
 /// `ExecCopySlot(dst, src)`: faithful to the C — the destination scan slot now
 /// holds a tuple, so it is no longer empty.
 fn mock_copy_slot<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    dstslot: nodes::SlotId,
-    _srcslot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    dstslot: ::nodes::SlotId,
+    _srcslot: ::nodes::SlotId,
 ) -> PgResult<()> {
-    estate.slot_mut(dstslot).tts_flags &= !nodes::executor::TTS_FLAG_EMPTY;
+    estate.slot_mut(dstslot).tts_flags &= !::nodes::executor::TTS_FLAG_EMPTY;
     Ok(())
 }
 
 /// `ExecClearTuple(slot)`: mark the slot empty (TTS_EMPTY).
 fn mock_clear_tuple<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    slot: ::nodes::SlotId,
 ) -> PgResult<()> {
-    estate.slot_mut(slot).tts_flags |= nodes::executor::TTS_FLAG_EMPTY;
+    estate.slot_mut(slot).tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     Ok(())
 }
 
@@ -262,13 +262,13 @@ fn mock_tuples_match_prepare<'mcx>(
     _collations: &[types_core::primitive::Oid],
     _parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     if num_cols == 0 {
         return Ok(None);
     }
     Ok(Some(alloc_in(
         estate.es_query_cxt,
-        nodes::execexpr::ExprState::default(),
+        ::nodes::execexpr::ExprState::default(),
     )?))
 }
 
@@ -313,8 +313,8 @@ fn make_group_plan<'mcx>(mcx: Mcx<'mcx>, with_having: bool) -> PgResult<Node<'mc
     g.grpCollations.push(0);
     if with_having {
         let mut list = mcx::vec_with_capacity_in(mcx, 1)?;
-        list.push(nodes::primnodes::Expr::Const(
-            nodes::primnodes::Const::default(),
+        list.push(::nodes::primnodes::Expr::Const(
+            ::nodes::primnodes::Const::default(),
         ));
         g.plan.qual = Some(list);
     }
@@ -457,7 +457,7 @@ fn rescan_skips_outer_rescan_when_child_has_chgparam() {
     {
         let outer = st.ss.ps.lefttree.as_deref_mut().unwrap();
         outer.ps_head_mut().chgParam =
-            Some(alloc_in(mcx, nodes::bitmapset::Bitmapset { words: PgVec::new_in(mcx) }).unwrap());
+            Some(alloc_in(mcx, ::nodes::bitmapset::Bitmapset { words: PgVec::new_in(mcx) }).unwrap());
     }
     ExecReScanGroup(&mut st, &mut estate).unwrap();
     assert_eq!(CHILD_RESCANS.with(|c| c.get()), 0);

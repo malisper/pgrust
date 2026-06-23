@@ -1,5 +1,5 @@
 //! Resolve the `'mcx` parse-node statements that `ProcessUtilitySlow`
-//! (`utility.c`) dispatches — `nodes::ddlnodes::{CreateOpClassStmt,
+//! (`utility.c`) dispatches — `::nodes::ddlnodes::{CreateOpClassStmt,
 //! CreateOpFamilyStmt, AlterOpFamilyStmt}` — into the flattened
 //! `opclass` images the in-crate command logic consumes.
 //!
@@ -11,9 +11,9 @@
 
 use utils_error::ereport;
 use types_error::{PgResult, ERROR};
-use nodes::ddlnodes as pnode;
-use nodes::nodes::Node;
-use nodes::rawnodes::TypeName as PTypeName;
+use ::nodes::ddlnodes as pnode;
+use ::nodes::nodes::Node;
+use ::nodes::rawnodes::TypeName as PTypeName;
 use opclass::{
     AlterOpFamilyStmt, CreateOpClassItem, CreateOpClassStmt, CreateOpFamilyStmt, ObjectWithArgs,
     StringNode, TypeName,
@@ -32,7 +32,7 @@ fn string_node(node: &Node<'_>, ctx: &str) -> PgResult<StringNode> {
 
 /// Resolve a `List *` of `String` value nodes into `Vec<StringNode>`
 /// (a qualified name).
-fn string_list(nodes: &[nodes::nodes::NodePtr<'_>], ctx: &str) -> PgResult<Vec<StringNode>> {
+fn string_list(nodes: &[::nodes::nodes::NodePtr<'_>], ctx: &str) -> PgResult<Vec<StringNode>> {
     nodes.iter().map(|n| string_node(n, ctx)).collect()
 }
 
@@ -75,7 +75,7 @@ fn node_type_name(node: &Node<'_>, ctx: &str) -> PgResult<TypeName> {
 
 /// Resolve a `List *` of `TypeName` nodes (`class_args` / `objargs`).
 fn type_name_list(
-    nodes: &[nodes::nodes::NodePtr<'_>],
+    nodes: &[::nodes::nodes::NodePtr<'_>],
     ctx: &str,
 ) -> PgResult<Vec<TypeName>> {
     nodes.iter().map(|n| node_type_name(n, ctx)).collect()

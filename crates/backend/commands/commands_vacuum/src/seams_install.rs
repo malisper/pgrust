@@ -459,8 +459,8 @@ fn install_autovacuum_ext_cost_seams() {
 }
 
 use mcx::Mcx;
-use nodes::nodes::Node;
-use nodes::parsestmt::ParseState;
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::ParseState;
 
 /// `case T_VacuumStmt: ExecVacuum(pstate, stmt, isTopLevel)` (utility.c). The
 /// dispatch carries the parse tree as `&Node`; extract the `VacuumStmt` variant

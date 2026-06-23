@@ -32,10 +32,10 @@ use mcx::{Mcx, PgVec};
 use types_core::cmdtag::CommandTag;
 use types_dest::dest::CommandDest;
 use types_error::{PgResult, ERROR, LOG};
-use nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::{CmdType, Node};
-use nodes::parsestmt::RawStmt;
+use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::parsestmt::RawStmt;
 use parsenodes::RawParseMode;
 
 use utils_error::{ereport, errcode, errfinish, errhidestmt, errmsg, errstart};
@@ -258,7 +258,7 @@ pub fn pg_plan_query<'mcx>(
     querytree: &Query<'mcx>,
     query_string: &str,
     cursor_options: i32,
-    bound_params: nodes::params::ParamListInfo,
+    bound_params: ::nodes::params::ParamListInfo,
 ) -> PgResult<Option<PlannedStmt<'mcx>>> {
     // Utility commands have no plans.
     if querytree.commandType == CmdType::CMD_UTILITY {
@@ -300,7 +300,7 @@ pub fn pg_plan_queries<'mcx>(
     querytrees: PgVec<'mcx, Query<'mcx>>,
     query_string: &str,
     cursor_options: i32,
-    bound_params: nodes::params::ParamListInfo,
+    bound_params: ::nodes::params::ParamListInfo,
 ) -> PgResult<PgVec<'mcx, PlannedStmt<'mcx>>> {
     let mut stmt_list: PgVec<'mcx, PlannedStmt<'mcx>> = PgVec::new_in(mcx);
 
@@ -505,7 +505,7 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
                         portalmem::get_portal_by_name::call(name.as_str())?
                     {
                         if (fportal.borrow().cursorOptions
-                            & nodes::portalcmds::CURSOR_OPT_BINARY)
+                            & ::nodes::portalcmds::CURSOR_OPT_BINARY)
                             != 0
                         {
                             format = 1; // BINARY
@@ -683,7 +683,7 @@ pub fn finish_xact_command() -> PgResult<()> {
 /// COMMIT/PREPARE/ROLLBACK/ROLLBACK-TO statement (the ones allowed in
 /// transaction-aborted state)?
 pub fn is_transaction_exit_stmt(parsetree: &Node<'_>) -> bool {
-    use nodes::ddlnodes::TransactionStmtKind;
+    use ::nodes::ddlnodes::TransactionStmtKind;
     if let Some(stmt) = parsetree.as_transactionstmt() {
         matches!(
             stmt.kind,
@@ -731,7 +731,7 @@ pub fn check_log_statement(stmt_list: &PgVec<'_, RawStmt<'_>>) -> PgResult<bool>
 /// a `CMD_SELECT` plan is `LOGSTMT_ALL`, a modifying plan is `LOGSTMT_MOD`, a
 /// utility plan defers to `GetCommandLogLevel(stmt->utilityStmt)`.
 pub fn check_log_statement_planned(
-    stmt_list: &[nodes::nodeindexscan::PlannedStmt<'_>],
+    stmt_list: &[::nodes::nodeindexscan::PlannedStmt<'_>],
 ) -> PgResult<bool> {
     use guc_tables::consts::{LOGSTMT_ALL, LOGSTMT_MOD, LOGSTMT_NONE};
     let log_statement = log_statement_guc();
@@ -777,9 +777,9 @@ pub fn check_log_statement_planned(
 pub fn drop_unnamed_stmt() -> PgResult<()> {
     // paranoia to avoid a dangling pointer in case of error
     let psrc = globals::unnamed_stmt_psrc();
-    if psrc != nodes::parsestmt::CachedPlanSourceHandle::NULL {
+    if psrc != ::nodes::parsestmt::CachedPlanSourceHandle::NULL {
         // Clear the global FIRST (C: unnamed_stmt_psrc = NULL; before the drop).
-        globals::set_unnamed_stmt_psrc(nodes::parsestmt::CachedPlanSourceHandle::NULL);
+        globals::set_unnamed_stmt_psrc(::nodes::parsestmt::CachedPlanSourceHandle::NULL);
         plancache_seams::drop_cached_plan::call(psrc)?;
     }
     Ok(())

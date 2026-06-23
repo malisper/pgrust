@@ -18,7 +18,7 @@
 //! other backends can discover ([`BufFileCreateFileSet`] /
 //! [`BufFileOpenFileSet`]).
 //!
-//! The canonical [`BufFile`] struct lives in `nodes::nodehash` (so the
+//! The canonical [`BufFile`] struct lives in `::nodes::nodehash` (so the
 //! `utils/sort` + executor seams can be typed over it); this crate owns the
 //! buffered-I/O behaviour, exposed as free functions taking `&mut BufFile`
 //! (an inherent `impl` would violate the orphan rule). `BufFileClose` /
@@ -34,7 +34,7 @@ use utils_error::{ereport, errno};
 use mcx::{Mcx, PgBox};
 use types_error::{ErrorLocation, PgError, PgResult, ERROR};
 use execparallel::FileSetHandle;
-use nodes::nodehash::BufFile;
+use ::nodes::nodehash::BufFile;
 use types_storage::file::{File, PGAlignedBlock};
 
 use instrument::with_pgBufferUsage;

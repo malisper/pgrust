@@ -59,13 +59,13 @@ use nodes_core::nodefuncs::expression_tree_mutator;
 use mcx::{alloc_in, Mcx, PgBox, PgVec};
 use types_core::primitive::Index;
 use types_error::{PgError, PgResult};
-use nodes::copy_query::Query;
-use nodes::jointype::JoinType;
-use nodes::nodes::Node;
-use nodes::nodes::CmdType;
-use nodes::parsenodes::{RangeTblEntry, RTEKind};
-use nodes::primnodes::{Expr, ParamKind, SubLink, SubLinkType};
-use nodes::rawnodes::{JoinExpr, RangeTblRef};
+use ::nodes::copy_query::Query;
+use ::nodes::jointype::JoinType;
+use ::nodes::nodes::Node;
+use ::nodes::nodes::CmdType;
+use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
+use ::nodes::primnodes::{Expr, ParamKind, SubLink, SubLinkType};
+use ::nodes::rawnodes::{JoinExpr, RangeTblRef};
 use pathnodes::{Bitmapset, PlannerInfo, Relids};
 
 // ===========================================================================
@@ -315,7 +315,7 @@ fn convert_testexpr_mutator<'mcx>(
 /// `expression_tree_mutator` signature when a child mutation has already failed;
 /// the error is propagated immediately after, so this value is never observed.
 fn child_placeholder<'mcx>() -> Expr<'mcx> {
-    Expr::CaseTestExpr(nodes::primnodes::CaseTestExpr {
+    Expr::CaseTestExpr(::nodes::primnodes::CaseTestExpr {
         typeId: types_core::primitive::InvalidOid,
         typeMod: -1,
         collation: types_core::primitive::InvalidOid,
@@ -330,7 +330,7 @@ fn child_placeholder<'mcx>() -> Expr<'mcx> {
 /// Vars representing the output columns of a sublink's sub-select, given the
 /// sub-select's targetlist. The Vars have the specified varno (RTE index).
 fn generate_subquery_vars<'mcx>(
-    tlist: &[nodes::primnodes::TargetEntry<'mcx>],
+    tlist: &[::nodes::primnodes::TargetEntry<'mcx>],
     varno: Index,
 ) -> PgResult<alloc::vec::Vec<Expr<'mcx>>> {
     let mut result = alloc::vec::Vec::new();
@@ -912,6 +912,6 @@ fn datum_get_int64(d: &types_tuple::heaptuple::Datum<'_>) -> i64 {
 
 /// Allocate a `Node` into `mcx` as a boxed pointer.
 #[inline]
-fn alloc_box<'mcx>(mcx: Mcx<'mcx>, n: Node<'mcx>) -> nodes::nodes::NodePtr<'mcx> {
+fn alloc_box<'mcx>(mcx: Mcx<'mcx>, n: Node<'mcx>) -> ::nodes::nodes::NodePtr<'mcx> {
     alloc_in(mcx, n).expect("alloc_box: out of context memory")
 }

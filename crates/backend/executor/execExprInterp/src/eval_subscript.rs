@@ -22,11 +22,11 @@
 //! `SubscriptingRefState`).
 
 use types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED};
-use nodes::execexpr::{
+use ::nodes::execexpr::{
     ExprEvalStepData, ExprState, ResultCellId, SubscriptMethod, SubscriptWorkspace,
 };
-use nodes::execnodes::EcxtId;
-use nodes::EStateData;
+use ::nodes::execnodes::EcxtId;
+use ::nodes::EStateData;
 use types_tuple::heaptuple::Datum;
 
 use crate::interp_loop::{read_cell, write_cell};
@@ -371,11 +371,11 @@ fn write_prev<'mcx>(state: &mut ExprState<'mcx>, inputs: &SbsInputs, val: Datum<
 mod jsonb {
     use super::{read_cell, write_cell};
     use types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED};
-    use nodes::execexpr::{
+    use ::nodes::execexpr::{
         ExprEvalStepData, ExprState, ResultCellId, SubscriptMethod, SubscriptWorkspace,
     };
-    use nodes::execnodes::EcxtId;
-    use nodes::EStateData;
+    use ::nodes::execnodes::EcxtId;
+    use ::nodes::EStateData;
 
     /// `INT4OID` (`catalog/pg_type.dat`).
     const INT4OID: types_core::Oid = 23;

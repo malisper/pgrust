@@ -95,7 +95,7 @@ fn portal_lifecycle() {
         // PortalGetPrimaryStmt walks the (real) stmt list in-crate.
         assert_eq!(PortalGetPrimaryStmt(&p2), None);
         {
-            use nodes::nodeindexscan::PlannedStmt;
+            use ::nodes::nodeindexscan::PlannedStmt;
             let mut not_primary = PlannedStmt::default();
             not_primary.canSetTag = false;
             let mut primary = PlannedStmt::default();

@@ -13,15 +13,15 @@ use alloc::vec::Vec;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_error::PgResult;
-use nodes::copy_query::{Query, QuerySource};
-use nodes::jointype::JoinType;
-use nodes::modifytable::{MergeMatchKind, OverridingKind};
-use nodes::nodelimit::LimitOption;
-use nodes::nodes::{CmdType, Node, OnConflictAction};
-use nodes::nodesamplescan::TableSampleClause;
-use nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
-use nodes::primnodes::Expr;
-use nodes::rawnodes::{
+use ::nodes::copy_query::{Query, QuerySource};
+use ::nodes::jointype::JoinType;
+use ::nodes::modifytable::{MergeMatchKind, OverridingKind};
+use ::nodes::nodelimit::LimitOption;
+use ::nodes::nodes::{CmdType, Node, OnConflictAction};
+use ::nodes::nodesamplescan::TableSampleClause;
+use ::nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
+use ::nodes::primnodes::Expr;
+use ::nodes::rawnodes::{
     A_ArrayExpr, A_Const, A_Expr, A_Expr_Kind, A_Indices, A_Indirection, A_Star, Alias,
     CTECycleClause, CTEMaterialize, CTESearchClause, CommonTableExpr, CollateClause, ColumnDef,
     ColumnRef, DeleteStmt, FromExpr,
@@ -460,7 +460,7 @@ fn read_rteperminfo_vec<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PgVec<'mcx, RTEPermiss
 
 fn read_te_vec<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     let items = read_node_list_field(mcx)?;
     let mut v = mcx::vec_with_capacity_in(mcx, items.len())?;
     for it in items {
@@ -619,8 +619,8 @@ fn merge_match_kind_from(c: i32) -> MergeMatchKind {
     }
 }
 
-fn coercion_form_from(c: i32) -> nodes::primnodes::CoercionForm {
-    use nodes::primnodes::CoercionForm;
+fn coercion_form_from(c: i32) -> ::nodes::primnodes::CoercionForm {
+    use ::nodes::primnodes::CoercionForm;
     match c {
         0 => CoercionForm::COERCE_EXPLICIT_CALL,
         1 => CoercionForm::COERCE_EXPLICIT_CAST,
@@ -1791,8 +1791,8 @@ fn read_a_const<'mcx>(mcx: Mcx<'mcx>) -> PgResult<A_Const<'mcx>> {
 /// `_readTableFunc` — reads the fields `out_table_func` wrote, in order.
 pub(crate) fn read_table_func<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::primnodes::TableFunc<'mcx>> {
-    use nodes::primnodes::TableFuncType;
+) -> PgResult<::nodes::primnodes::TableFunc<'mcx>> {
+    use ::nodes::primnodes::TableFuncType;
     let functype = match read_enum_field()? {
         0 => TableFuncType::TFT_XMLTABLE,
         _ => TableFuncType::TFT_JSON_TABLE,
@@ -1813,7 +1813,7 @@ pub(crate) fn read_table_func<'mcx>(
     let plan = read_opt_node(mcx)?;
     let ordinalitycol = read_int_field()?;
     let location = read_location_field()?;
-    Ok(nodes::primnodes::TableFunc {
+    Ok(::nodes::primnodes::TableFunc {
         functype,
         ns_uris,
         ns_names,
@@ -1844,7 +1844,7 @@ pub(crate) fn read_table_func<'mcx>(
 /// same order they were written.
 pub(crate) fn read_json_table_path_scan<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::primnodes::JsonTablePathScan<'mcx>> {
+) -> PgResult<::nodes::primnodes::JsonTablePathScan<'mcx>> {
     let path = read_node_field(mcx)?
         .ok_or_else(|| elog_error("JsonTablePathScan.path must not be NULL"))?;
     let name = read_string_field(mcx)?;
@@ -1852,7 +1852,7 @@ pub(crate) fn read_json_table_path_scan<'mcx>(
     let child = read_opt_node(mcx)?;
     let colMin = crate::read_int_field()?;
     let colMax = crate::read_int_field()?;
-    Ok(nodes::primnodes::JsonTablePathScan {
+    Ok(::nodes::primnodes::JsonTablePathScan {
         path,
         name,
         errorOnError,
@@ -1866,12 +1866,12 @@ pub(crate) fn read_json_table_path_scan<'mcx>(
 /// `out_json_table_sibling_join`: `lplan` (node), `rplan` (node).
 pub(crate) fn read_json_table_sibling_join<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<nodes::primnodes::JsonTableSiblingJoin<'mcx>> {
+) -> PgResult<::nodes::primnodes::JsonTableSiblingJoin<'mcx>> {
     let lplan = read_node_field(mcx)?
         .ok_or_else(|| elog_error("JsonTableSiblingJoin.lplan must not be NULL"))?;
     let rplan = read_node_field(mcx)?
         .ok_or_else(|| elog_error("JsonTableSiblingJoin.rplan must not be NULL"))?;
-    Ok(nodes::primnodes::JsonTableSiblingJoin { lplan, rplan })
+    Ok(::nodes::primnodes::JsonTableSiblingJoin { lplan, rplan })
 }
 
 // ===========================================================================
@@ -1955,7 +1955,7 @@ mod tests {
     use nodes_core::read::string_to_node;
     use outfuncs::nodeToString;
     use mcx::MemoryContext;
-    use nodes::primnodes::VarReturningType;
+    use ::nodes::primnodes::VarReturningType;
 
     fn assert_framed_round_trip(node: &Node<'_>) -> String {
         ensure_seams();

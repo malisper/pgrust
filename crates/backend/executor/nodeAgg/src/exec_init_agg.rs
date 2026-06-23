@@ -8,8 +8,8 @@
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::execnodes::PlanStateData;
-use nodes::nodeagg::{
+use ::nodes::execnodes::PlanStateData;
+use ::nodes::nodeagg::{
     do_aggsplit_combine, do_aggsplit_deserialize, do_aggsplit_serialize, do_aggsplit_skipfinal,
     Agg, AGG_HASHED, AGG_MIXED, AGG_PLAIN, AGG_SORTED,
 };
@@ -61,13 +61,13 @@ fn aggkind_is_ordered_set(aggkind: i8) -> bool {
 /// `downcast_agg_state_*` helpers.
 pub fn erase_agg_state<'mcx>(
     boxed: PgBox<'mcx, AggStateData<'mcx>>,
-) -> PgBox<'mcx, dyn nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx> {
+) -> PgBox<'mcx, dyn ::nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx> {
     let (ptr, alloc) = PgBox::into_raw_with_allocator(boxed);
     // SAFETY: `ptr`/`alloc` came from `into_raw_with_allocator`; the cast only
     // attaches the `dyn AggStateLive` vtable (the established erase pattern).
     unsafe {
         PgBox::from_raw_in(
-            ptr as *mut (dyn nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+            ptr as *mut (dyn ::nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
             alloc,
         )
     }
@@ -78,7 +78,7 @@ pub fn erase_agg_state<'mcx>(
 /// phase and grouping-set layout, hash-table and context creation.
 pub fn ExecInitAgg<'mcx>(
     node: &'mcx Agg<'mcx>,
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     mut eflags: i32,
     mcx: Mcx<'mcx>,
@@ -156,7 +156,7 @@ pub fn ExecInitAgg<'mcx>(
     // The per-grouping-set ExprContexts are created by ExecAssignExprContext /
     // CreateExprContext below; in the owned model each is an EcxtId into the
     // EState ExprContext pool (matching ps_ExprContext / AggStateData.aggcontexts).
-    let mut aggcontexts: PgVec<'mcx, nodes::EcxtId> =
+    let mut aggcontexts: PgVec<'mcx, ::nodes::EcxtId> =
         vec_with_capacity_in(mcx, num_grouping_sets as usize)?;
     let _ = &mut aggcontexts;
 
@@ -285,7 +285,7 @@ pub fn ExecInitAgg<'mcx>(
             // checker needs the list moved out first).
             let found = proj.pi_state.found_aggs.take();
             if let Some(found) = found {
-                let mut tmp = nodes::execexpr::ExprState::default();
+                let mut tmp = ::nodes::execexpr::ExprState::default();
                 tmp.found_aggs = Some(found);
                 drain_found_aggs(&mut aggstate, &mut tmp, mcx)?;
             }
@@ -339,7 +339,7 @@ pub fn ExecInitAgg<'mcx>(
             }
             phases[0].gset_lengths = Some(gl);
             // grouped_cols = palloc(numHashes * sizeof(Bitmapset *));
-            let gc: PgVec<'mcx, PgBox<'mcx, nodes::Bitmapset<'mcx>>> =
+            let gc: PgVec<'mcx, PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> =
                 vec_with_capacity_in(mcx, num_hashes as usize)?;
             phases[0].grouped_cols = Some(gc);
         }
@@ -348,7 +348,7 @@ pub fn ExecInitAgg<'mcx>(
         // accumulation into all_grouped_cols + the execTuplesMatchPrepare
         // eqfunction builds reach the bitmapset / execGrouping seams). The C
         // local `Bitmapset *all_grouped_cols` is threaded explicitly here.
-        let mut all_grouped_cols: Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+        let mut all_grouped_cols: Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
         build_phases(&mut aggstate, node, mcx, estate, &mut all_grouped_cols)?;
 
         // Convert all_grouped_cols to a descending-order list (bms_next_member +
@@ -560,10 +560,10 @@ pub(crate) fn scan_tuple_desc<'mcx>(
 /// `aggstate->aggs = lappend(aggstate->aggs, astate)` inside `ExecInitExprRec`;
 /// the owned model collects on the `ExprState` and drains here (the
 /// planner-set `aggno`/`aggtransno` make the order divergence inert). See
-/// [`nodes::execexpr::ExprState::found_aggs`].
+/// [`::nodes::execexpr::ExprState::found_aggs`].
 fn drain_found_aggs<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
-    state: &mut nodes::execexpr::ExprState<'mcx>,
+    state: &mut ::nodes::execexpr::ExprState<'mcx>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     let found = match state.found_aggs.take() {
@@ -575,7 +575,7 @@ fn drain_found_aggs<'mcx>(
         aggstate.aggs_prim = Some(vec_with_capacity_in(mcx, found.len())?);
     }
     for prim in found.into_iter() {
-        let exec = nodes::nodeagg::Aggref::from_primnode(&prim, mcx)?;
+        let exec = ::nodes::nodeagg::Aggref::from_primnode(&prim, mcx)?;
         aggstate
             .aggs
             .as_mut()
@@ -599,10 +599,10 @@ fn exec_init_qual_for_agg<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
     node: &Agg<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     let mcx = estate.es_query_cxt;
     // node->plan.qual is the implicitly-ANDed qual list.
-    let qual_slice: Option<PgVec<'mcx, nodes::primnodes::Expr>> =
+    let qual_slice: Option<PgVec<'mcx, ::nodes::primnodes::Expr>> =
         match node.plan.qual.as_ref() {
             Some(q) => {
                 let mut v = vec_with_capacity_in(mcx, q.len())?;
@@ -634,7 +634,7 @@ fn build_phases<'mcx>(
     node: &Agg<'mcx>,
     mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
-    all_grouped_cols: &mut Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>>,
+    all_grouped_cols: &mut Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>,
 ) -> PgResult<()> {
     let chain_len = list_length(&node.chain) as i32;
 
@@ -709,7 +709,7 @@ fn build_phases<'mcx>(
                         gl.push(0);
                     }
                     phases[p].gset_lengths = Some(gl);
-                    let gc: PgVec<'mcx, PgBox<'mcx, nodes::Bitmapset<'mcx>>> =
+                    let gc: PgVec<'mcx, PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> =
                         vec_with_capacity_in(mcx, num_sets as usize)?;
                     phases[p].grouped_cols = Some(gc);
                 }
@@ -730,7 +730,7 @@ fn build_phases<'mcx>(
                     let phases = aggstate.phases.as_mut().unwrap();
                     let mut eqf: PgVec<
                         'mcx,
-                        Option<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>,
+                        Option<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>,
                     > = vec_with_capacity_in(mcx, num_cols as usize)?;
                     for _ in 0..num_cols {
                         eqf.push(None);
@@ -837,7 +837,7 @@ fn clone_phase_sortnode<'mcx>(
         None => return Ok(None),
     };
     let sort: &Sort<'mcx> = match outer.node_tag() {
-        nodes::nodes::ntag::T_Sort => outer.expect_sort(),
+        ::nodes::nodes::ntag::T_Sort => outer.expect_sort(),
         other => panic!("castNode(Sort, outerPlan(aggnode)) failed: {other:?}"),
     };
     Ok(Some(alloc_in(mcx, sort.clone_in(mcx)?)?))
@@ -848,8 +848,8 @@ fn grouped_cols_bms<'mcx>(
     grp_col_idx: Option<&PgVec<'mcx, types_core::primitive::AttrNumber>>,
     num_cols: i32,
     mcx: Mcx<'mcx>,
-) -> PgResult<Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>>> {
-    let mut cols: Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+) -> PgResult<Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>> {
+    let mut cols: Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
     if let Some(idx) = grp_col_idx {
         for j in 0..num_cols as usize {
             cols = Some(nodes_core_seams::bms_add_member::call(
@@ -870,7 +870,7 @@ fn set_phase_grouped_cols_for_hash<'mcx>(
     node: &Agg<'mcx>,
     phaseidx: i32,
     mcx: Mcx<'mcx>,
-    all_grouped_cols: &mut Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>>,
+    all_grouped_cols: &mut Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>,
 ) -> PgResult<()> {
     let aggnode: &Agg<'mcx> = if phaseidx > 0 {
         &node.chain.as_ref().expect("chain present")[(phaseidx - 1) as usize]
@@ -891,7 +891,7 @@ fn set_phase_grouped_cols_for_hash<'mcx>(
         if let Some(gc) = phases[0].grouped_cols.as_mut() {
             // grouped_cols is parallel to the hash index `i`; extend then set.
             while (gc.len() as i32) <= i {
-                gc.push(alloc_in(mcx, nodes::Bitmapset::empty(mcx)?)?);
+                gc.push(alloc_in(mcx, ::nodes::Bitmapset::empty(mcx)?)?);
             }
             gc[i as usize] = cols;
         }
@@ -908,7 +908,7 @@ fn set_phase_grouped_cols_for_sets<'mcx>(
     node: &Agg<'mcx>,
     phaseidx: i32,
     mcx: Mcx<'mcx>,
-    all_grouped_cols: &mut Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>>,
+    all_grouped_cols: &mut Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>>,
 ) -> PgResult<()> {
     let aggnode: &Agg<'mcx> = if phaseidx > 0 {
         &node.chain.as_ref().expect("chain present")[(phaseidx - 1) as usize]
@@ -923,7 +923,7 @@ fn set_phase_grouped_cols_for_sets<'mcx>(
     // the computed length back into gset_lengths[k] (C: gset_lengths[i] =
     // current_length), since the retrieve path reads gset_lengths directly.
     let numsets = aggstate.phases.as_ref().unwrap()[p].numsets;
-    let mut first_cols: Option<PgBox<'mcx, nodes::Bitmapset<'mcx>>> = None;
+    let mut first_cols: Option<PgBox<'mcx, ::nodes::Bitmapset<'mcx>>> = None;
     for k in 0..numsets as usize {
         // current_length = list_length(lfirst(l)) over aggnode->groupingSets[k].
         let length = aggnode
@@ -942,7 +942,7 @@ fn set_phase_grouped_cols_for_sets<'mcx>(
             }
         }
         let cols = grouped_cols_bms(aggnode.grp_col_idx.as_ref(), length, mcx)?;
-        let cols = match cols { Some(c) => c, None => alloc_in(mcx, nodes::Bitmapset::empty(mcx)?)? };
+        let cols = match cols { Some(c) => c, None => alloc_in(mcx, ::nodes::Bitmapset::empty(mcx)?)? };
         if k == 0 {
             // Snapshot grouped_cols[0] for the all_grouped_cols union below.
             first_cols = Some(alloc_in(mcx, cols.clone_in(mcx)?)?);
@@ -950,7 +950,7 @@ fn set_phase_grouped_cols_for_sets<'mcx>(
         let phases = aggstate.phases.as_mut().unwrap();
         if let Some(gc) = phases[p].grouped_cols.as_mut() {
             while gc.len() <= k {
-                gc.push(alloc_in(mcx, nodes::Bitmapset::empty(mcx)?)?);
+                gc.push(alloc_in(mcx, ::nodes::Bitmapset::empty(mcx)?)?);
             }
             gc[k] = cols;
         }
@@ -1032,7 +1032,7 @@ fn build_phase_eqfunction<'mcx>(
 /// build the descending-order grouped-column list.
 fn convert_all_grouped_cols<'mcx>(
     aggstate: &mut AggStateData<'mcx>,
-    all_grouped_cols: Option<&nodes::Bitmapset<'mcx>>,
+    all_grouped_cols: Option<&::nodes::Bitmapset<'mcx>>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<()> {
     // lcons_int prepends, so iterating ascending yields a descending-order list.
@@ -1487,7 +1487,7 @@ fn check_aggregate_acl<'mcx>(mcx: Mcx<'mcx>, aggfnoid: Oid) -> PgResult<()> {
             .map(|s| s.as_str().into());
         aclchk_seams::aclcheck_error::call(
             aclresult,
-            nodes::parsenodes::ObjectType::Aggregate,
+            ::nodes::parsenodes::ObjectType::Aggregate,
             name,
         )?;
     }
@@ -1525,7 +1525,7 @@ fn check_component_fn_acl<'mcx>(mcx: Mcx<'mcx>, fnoid: Oid, agg_owner: Oid) -> P
             .map(|s| s.as_str().into());
         aclchk_seams::aclcheck_error::call(
             aclresult,
-            nodes::parsenodes::ObjectType::Function,
+            ::nodes::parsenodes::ObjectType::Function,
             name,
         )?;
     }
@@ -1565,7 +1565,7 @@ fn exec_init_direct_args<'mcx>(
     // ExecInitExprList(aggref->aggdirectargs, parent): clone the direct-arg
     // exprs into owned Exprs first (so the `aggs_prim` borrow ends before the
     // mutable `aggstate` calls below), then build the Option<&Expr> list.
-    let owned_args: PgVec<'mcx, nodes::primnodes::Expr<'mcx>> = {
+    let owned_args: PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> = {
         let prim = &aggstate
             .aggs_prim
             .as_ref()
@@ -1576,7 +1576,7 @@ fn exec_init_direct_args<'mcx>(
         }
         v
     };
-    let nodes: PgVec<'mcx, Option<&nodes::primnodes::Expr<'mcx>>> = {
+    let nodes: PgVec<'mcx, Option<&::nodes::primnodes::Expr<'mcx>>> = {
         let mut v = vec_with_capacity_in(mcx, owned_args.len())?;
         for e in owned_args.iter() {
             v.push(Some(e));
@@ -1598,7 +1598,7 @@ fn exec_init_direct_args<'mcx>(
         }
     }
     // peragg->aggdirectargs = states;  (Option<&Expr> Nones can't occur here)
-    let mut boxed: PgVec<'mcx, PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>> =
+    let mut boxed: PgVec<'mcx, PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>> =
         vec_with_capacity_in(mcx, states.len())?;
     for st in states.into_iter().flatten() {
         boxed.push(alloc_in(mcx, st)?);
@@ -1680,7 +1680,7 @@ fn set_peragg_aggref<'mcx>(
             .aggs_prim
             .as_ref()
             .expect("set_peragg_aggref: aggs_prim is NULL")[idx];
-        nodes::nodeagg::Aggref::from_primnode(prim, mcx)?
+        ::nodes::nodeagg::Aggref::from_primnode(prim, mcx)?
     };
     if let Some(p) = aggstate.peragg.as_mut() {
         p[aggno as usize].aggref = Some(alloc_in(mcx, copy)?);
@@ -1724,7 +1724,7 @@ fn build_pertrans_call<'mcx>(
             .aggs_prim
             .as_ref()
             .expect("build_pertrans_call: aggs_prim is NULL")[idx];
-        nodes::nodeagg::Aggref::from_primnode(prim, mcx)?
+        ::nodes::nodeagg::Aggref::from_primnode(prim, mcx)?
     };
     let result = build_pertrans_for_aggref(
         &mut pertrans,

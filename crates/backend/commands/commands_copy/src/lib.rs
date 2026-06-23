@@ -38,12 +38,12 @@ use types_copy::{
 };
 use types_core::primitive::{AttrNumber, Oid};
 use types_error::{PgError, PgResult};
-use nodes::ddlnodes::{CopyStmt, DefElem};
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::nodelimit::LimitOption;
-use nodes::parsestmt::{ParseState, RawStmt};
-use nodes::rawnodes::{ColumnRef, ResTarget, SelectStmt, SetOperation};
-use nodes::Expr;
+use ::nodes::ddlnodes::{CopyStmt, DefElem};
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::nodelimit::LimitOption;
+use ::nodes::parsestmt::{ParseState, RawStmt};
+use ::nodes::rawnodes::{ColumnRef, ResTarget, SelectStmt, SetOperation};
+use ::nodes::Expr;
 use types_tuple::access::RELPERSISTENCE_TEMP;
 use types_tuple::heaptuple::{TupleDesc, FirstLowInvalidHeapAttributeNumber};
 
@@ -94,7 +94,7 @@ fn defel_arg(defel: &DefElem) -> PgResult<Option<DefElemArg>> {
 }
 
 /// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case.
-fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+fn defel_type_name_to_string(tn: &::nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
     if tn.names.is_empty() {
         return Err(PgError::error("DefElem TypeName carries no name")
             .with_sqlstate(ERRCODE_SYNTAX_ERROR));
@@ -1144,11 +1144,11 @@ fn relation_is_local_temp(rel: &rel::Relation<'_>) -> bool {
 fn analyze_copy_where<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    nsitem: nodes::parsestmt::ParseNamespaceItem<'mcx>,
+    nsitem: ::nodes::parsestmt::ParseNamespaceItem<'mcx>,
     rel: &rel::Relation<'mcx>,
     stmt: &CopyStmt<'mcx>,
 ) -> PgResult<PgVec<'mcx, Expr<'mcx>>> {
-    use nodes::parsestmt::ParseExprKind::EXPR_KIND_COPY_WHERE;
+    use ::nodes::parsestmt::ParseExprKind::EXPR_KIND_COPY_WHERE;
 
     // add nsitem to query namespace
     parser_relation::addNSItemToQuery(mcx, pstate, nsitem, false, true, true)?;
@@ -1317,12 +1317,12 @@ fn copy_from_driver<'mcx>(
 
     // range_table / rteperminfos: a fresh owned copy of pstate's (the driver's
     // EState takes ownership via ExecInitRangeTable).
-    let mut range_table: PgVec<'mcx, nodes::RangeTblEntry<'mcx>> =
+    let mut range_table: PgVec<'mcx, ::nodes::RangeTblEntry<'mcx>> =
         PgVec::new_in(mcx);
     for rte in pstate.p_rtable.iter() {
         range_table.push(rte.clone_in(mcx)?);
     }
-    let mut rteperminfos: PgVec<'mcx, nodes::RTEPermissionInfo<'mcx>> =
+    let mut rteperminfos: PgVec<'mcx, ::nodes::RTEPermissionInfo<'mcx>> =
         PgVec::new_in(mcx);
     for pi in pstate.p_rteperminfos.iter() {
         rteperminfos.push(pi.clone_in(mcx)?);
@@ -1369,7 +1369,7 @@ fn build_rls_select_query<'mcx>(
         let cr = ColumnRef {
             fields: {
                 let mut v = PgVec::new_in(mcx);
-                v.push(mcx::alloc_in(mcx, Node::mk_a_star(mcx, nodes::rawnodes::A_Star)?)?);
+                v.push(mcx::alloc_in(mcx, Node::mk_a_star(mcx, ::nodes::rawnodes::A_Star)?)?);
                 v
             },
             location: -1,
@@ -1394,7 +1394,7 @@ fn build_rls_select_query<'mcx>(
         mcx,
         rel.rd_rel.relnamespace,
     )?;
-    let from = nodes::rawnodes::RangeVar {
+    let from = ::nodes::rawnodes::RangeVar {
         catalogname: None,
         schemaname: match nspname {
             Some(s) => Some(s.clone_in(mcx)?),
@@ -1498,7 +1498,7 @@ fn cannot_be_used_with(
 
 /// Bridge the owned grammar `RangeVar` node into the lifetime-free
 /// `access::RangeVar` the table-open machinery consumes.
-fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
     types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.to_string()),
         schemaname: rv.schemaname.as_ref().map(|s| s.to_string()),

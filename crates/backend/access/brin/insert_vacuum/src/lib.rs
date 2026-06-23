@@ -97,7 +97,7 @@ use types_error::error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_error::SqlState;
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 
 /// `ereport(ERROR, (errcode(code), errmsg(msg)))` — build a `PgError`.
 fn err(code: SqlState, msg: alloc::string::String) -> PgError {
@@ -739,7 +739,7 @@ fn terminate_brin_buildstate<'mcx>(
 /// insert/update concurrency dance around it is fully ported.
 fn summarize_range<'mcx>(
     mcx: Mcx<'mcx>,
-    index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
+    index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
     state: &mut BrinBuildState<'mcx>,
     heap_rel: &Relation<'mcx>,
     heap_blk: BlockNumber,
@@ -906,7 +906,7 @@ fn brinsummarize<'mcx>(
     // Scan the revmap to find unsummarized items.
     let mut buf = InvalidBuffer;
     let mut state: Option<BrinBuildState<'mcx>> = None;
-    let mut index_info: Option<nodes::execnodes::IndexInfo<'mcx>> = None;
+    let mut index_info: Option<::nodes::execnodes::IndexInfo<'mcx>> = None;
 
     while start_blk < heap_num_blocks {
         // Unless requested to summarize even a partial range, stop if the next
@@ -1155,7 +1155,7 @@ pub fn brinbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
+    index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     // We expect to be called exactly once for any index relation.
     if relation_get_number_of_blocks::call(index)? != 0 {
@@ -1616,7 +1616,7 @@ pub fn init_seams() {
         // carrier; recover the concrete struct (tag-checked downcast — a
         // NULL/wrong-type carrier is the C NULL-pointer programming error).
         let info = carrier
-            .downcast_mut::<nodes::execnodes::IndexInfo<'_>>()
+            .downcast_mut::<::nodes::execnodes::IndexInfo<'_>>()
             .unwrap_or_else(|| {
                 panic!("brinbuild: IndexInfoCarrier did not carry the expected IndexInfo")
             });

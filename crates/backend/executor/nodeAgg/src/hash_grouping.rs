@@ -5,7 +5,7 @@
 use nodeHash_seams as nodeHash_seams;
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::nodeagg::{do_aggsplit_skipfinal, AggStrategy};
+use ::nodes::nodeagg::{do_aggsplit_skipfinal, AggStrategy};
 use crate::aggstate::{AggStateData, AggStatePerGroupData};
 use nodes::{EStateData, SlotId};
 
@@ -249,7 +249,7 @@ pub fn build_hash_table<'mcx>(
             mcx,
             None,
             hash_desc,
-            nodes::TupleSlotKind::MinimalTuple,
+            ::nodes::TupleSlotKind::MinimalTuple,
             num_cols,
             idx_hash.as_slice(),
             eqfuncoids.as_slice(),
@@ -280,7 +280,7 @@ pub fn build_hash_table<'mcx>(
 /// the back-links), in which case execProcnode's init stamp covers it.
 fn existing_evaltrans_parent<'mcx>(
     aggstate: &AggStateData<'mcx>,
-) -> Option<nodes::planstate::PlanStateLink> {
+) -> Option<::nodes::planstate::PlanStateLink> {
     let phases = aggstate.phases.as_ref()?;
     for phase in phases.iter() {
         if let Some(es) = phase.evaltrans.as_ref() {

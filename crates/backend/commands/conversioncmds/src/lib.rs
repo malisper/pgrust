@@ -30,7 +30,7 @@ use types_acl::acl::{ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE};
 use types_catalog::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::Oid;
-use nodes::parsenodes::{CreateConversionStmt, ObjectType};
+use ::nodes::parsenodes::{CreateConversionStmt, ObjectType};
 use types_tuple::heaptuple::{BOOLOID, CSTRINGOID, INT4OID, INTERNALOID};
 use types_wchar::encoding::PG_SQL_ASCII;
 
@@ -192,12 +192,12 @@ pub fn CreateConversionCommand(mcx: Mcx<'_>, stmt: &CreateConversionStmt) -> PgR
 }
 
 /// `ProcessUtilitySlow`'s `T_CreateConversionStmt` arm (utility.c:1718): decode
-/// the arena [`nodes::nodes::Node`] into the owned
-/// [`nodes::parsenodes::CreateConversionStmt`] (the `List *` of `String`
+/// the arena [`::nodes::nodes::Node`] into the owned
+/// [`::nodes::parsenodes::CreateConversionStmt`] (the `List *` of `String`
 /// name components flattened to `Vec<String>`) and run `CreateConversionCommand`.
 fn create_conversion_command_seam<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let ccs = match stmt.as_createconversionstmt() {
         Some(s) => s,
@@ -210,7 +210,7 @@ fn create_conversion_command_seam<'mcx>(
 
     // `conversion_name` / `func_name`: `List *` of `String` nodes -> Vec<String>.
     fn name_components(
-        list: &[nodes::nodes::NodePtr<'_>],
+        list: &[::nodes::nodes::NodePtr<'_>],
         what: &str,
     ) -> PgResult<Vec<String>> {
         let mut out = Vec::with_capacity(list.len());

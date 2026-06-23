@@ -57,12 +57,12 @@ use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use execparallel::{
     DsmSegmentHandle, ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
-use nodes::executor::EXEC_FLAG_MARK;
-use nodes::nodeappend::{
+use ::nodes::executor::EXEC_FLAG_MARK;
+use ::nodes::nodeappend::{
     pa_finished_offset, Append, AppendChooseStrategy, AppendStateData, AsyncRequestData,
     PaFinished, ParallelAppendState, ParallelAppendStateHandle,
 };
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 use nodes::{Bitmapset, EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
 use types_pgstat::wait_event::WAIT_EVENT_APPEND_READY;
 use types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_SOCKET_READABLE};
@@ -399,12 +399,12 @@ pub fn ExecInitAppend<'mcx>(
 /// `AppendStateData` from the `PlanStateNode` enum and dispatch to [`ExecAppend`]
 /// (mirrors the C function-pointer call through `node->ExecProcNode`).
 fn exec_append_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let mcx = estate.es_query_cxt;
     let node = match pstate {
-        nodes::PlanStateNode::Append(node) => node,
+        ::nodes::PlanStateNode::Append(node) => node,
         other => panic!("castNode(AppendState, pstate) failed: tag {}", other.tag()),
     };
     ExecAppend(mcx, node, estate)
@@ -1366,12 +1366,12 @@ fn tuples_for_result(areq: &AsyncRequestData) -> f64 {
 /// default). `dispatch` selects which of the three `ExecAsyncForeignScan*`
 /// entry points runs.
 fn dispatch_requestee<'mcx>(
-    requestee: &mut nodes::PlanStateNode<'mcx>,
+    requestee: &mut ::nodes::PlanStateNode<'mcx>,
     areq: &mut AsyncRequestData,
     which: AsyncDispatch,
 ) -> PgResult<()> {
     match requestee {
-        nodes::PlanStateNode::ForeignScan(fss) => match which {
+        ::nodes::PlanStateNode::ForeignScan(fss) => match which {
             AsyncDispatch::Request => {
                 nodeForeignscan::exec_async_foreignscan_request::call(fss, areq)
             }

@@ -30,8 +30,8 @@
 
 use alloc::vec::Vec;
 
-use nodes::nodes::Node;
-use nodes::primnodes::Expr;
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::Expr;
 use pathnodes::{EmId, NodeId, PlannerInfo, RinfoId};
 
 use rewrite_core::change::ChangeVarNodes;
@@ -257,9 +257,9 @@ fn try_selfjoin_nulltest_rewrite(root: &mut PlannerInfo, id: RinfoId) {
     // equal(leftOp, rightOp) — the nodeFuncs equality predicate.
     if equivclass_ext_seams::equal::call(&leftop, &rightop) {
         // Build `leftOp IS NOT NULL`.
-        let ntest = Expr::NullTest(nodes::primnodes::NullTest {
+        let ntest = Expr::NullTest(::nodes::primnodes::NullTest {
             arg: Some(alloc::boxed::Box::new(leftop)),
-            nulltesttype: nodes::primnodes::NullTestType::IS_NOT_NULL,
+            nulltesttype: ::nodes::primnodes::NullTestType::IS_NOT_NULL,
             argisrow: false,
             location: -1,
         });
@@ -306,7 +306,7 @@ pub fn change_relids_in_query(
     use rewrite_core::change::{
         ChangeVarNodesContext, ChangeVarNodesExtended,
     };
-    use nodes::nodes::ntag;
+    use ::nodes::nodes::ntag;
 
     // Move the Query out into a Node::Query, walk it standalone (the walker
     // mutates in place, mirroring C's cast-to-Node + in-place mutation), and
@@ -315,7 +315,7 @@ pub fn change_relids_in_query(
     let mcx = run.mcx();
     let query = core::mem::replace(
         run.resolve_mut(parse),
-        nodes::copy_query::Query::new(mcx),
+        ::nodes::copy_query::Query::new(mcx),
     );
     let mut node = Node::mk_query(mcx, query)?;
 
@@ -380,7 +380,7 @@ pub fn change_relids_in_simple_rte_array<'mcx>(
         // dispatches per rtekind to the lateral-bearing subfields), write it back.
         let mut rte = core::mem::replace(
             run.resolve_rte_mut(rte_id),
-            nodes::parsenodes::RangeTblEntry::new_in(mcx),
+            ::nodes::parsenodes::RangeTblEntry::new_in(mcx),
         );
         let mut context = ChangeVarNodesContext {
             rt_index: ctx.rt_index,

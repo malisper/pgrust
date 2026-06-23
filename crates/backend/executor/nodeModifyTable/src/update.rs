@@ -4,7 +4,7 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::nodes::CmdType;
+use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use snapshot::{SnapshotData, SnapshotType};
 use types_tableam::tableam::{
@@ -1022,5 +1022,5 @@ fn relation_has_generated_stored(estate: &EStateData<'_>, rri: RriId) -> bool {
 
 /// `((ModifyTable *) mtstate->ps.plan)->onConflictAction == ONCONFLICT_UPDATE`.
 fn mtstate_on_conflict_is_update(mtstate: &ModifyTableState<'_>) -> bool {
-    mtstate.onConflictAction == nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
+    mtstate.onConflictAction == ::nodes::modifytable::OnConflictAction::ONCONFLICT_UPDATE
 }

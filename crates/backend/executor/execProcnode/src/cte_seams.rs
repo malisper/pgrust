@@ -12,9 +12,9 @@
 //!
 //! The owned model cannot hold a live `&mut` alias to another node, nor stash a
 //! node pointer in a `Datum`. So — exactly as `ParamExecData.execPlan`'s C
-//! `void *` became the [`ExecPlanLink`](nodes::ExecPlanLink) index — the
+//! `void *` became the [`ExecPlanLink`](::nodes::ExecPlanLink) index — the
 //! leader's *shared-per-CTE* state is hoisted out of the leader node into
-//! [`EState.es_cte_shared[cteParam]`](nodes::execnodes::EStateData::es_cte_shared)
+//! [`EState.es_cte_shared[cteParam]`](::nodes::execnodes::EStateData::es_cte_shared)
 //! ([`CteSharedState`]). "Leader" is whoever first creates that entry; leader
 //! and followers alike reach the shared `(cte_table, eof_cte)` by `cteParam`
 //! index, and the CTE subplan by `ctePlanId` index into `es_subplanstates` (the
@@ -30,8 +30,8 @@
 
 use mcx::PgBox;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::execnodes::CteSharedState;
-use nodes::nodectescan::{CteScan, CteScanState};
+use ::nodes::execnodes::CteSharedState;
+use ::nodes::nodectescan::{CteScan, CteScanState};
 use nodes::{EStateData, PlanStateNode, SlotId, Tuplestorestate};
 
 use execMain_seams as seams;

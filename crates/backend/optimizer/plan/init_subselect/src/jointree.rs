@@ -37,14 +37,14 @@
 //!     - `right_rels: Relids`
 //!     - `nonnullable_rels: Relids`
 //!     - `sjinfo: Option<alloc::boxed::Box<pathnodes::SpecialJoinInfo>>`
-//!     - `oj_joinclauses: alloc::vec::Vec<nodes::primnodes::Expr>`
-//!     - `lateral_clauses: alloc::vec::Vec<nodes::primnodes::Expr>`
+//!     - `oj_joinclauses: alloc::vec::Vec<::nodes::primnodes::Expr>`
+//!     - `lateral_clauses: alloc::vec::Vec<::nodes::primnodes::Expr>`
 //!   plus `#[derive(Clone, Debug, Default)]`.
 //! - `pub enum JtNodeKind` (lifetime-free, `#[derive(Clone, Debug)]` + `Default`):
 //!     - `RangeTblRef { rtindex: i32 }`
-//!     - `FromExpr { quals: alloc::vec::Vec<nodes::primnodes::Expr> }`
+//!     - `FromExpr { quals: alloc::vec::Vec<::nodes::primnodes::Expr> }`
 //!     - `JoinExpr { jointype: pathnodes::JoinType, rtindex: i32,
-//!                   quals: alloc::vec::Vec<nodes::primnodes::Expr> }`
+//!                   quals: alloc::vec::Vec<::nodes::primnodes::Expr> }`
 //! - consts/helpers: `from_collapse_limit() -> i32`, `join_collapse_limit() -> i32`.
 //! - `pub fn new_join_domain(root: &mut pathnodes::PlannerInfo) -> usize`
 //!   is provided HERE (below); lib.rs need not supply it.
@@ -57,13 +57,13 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     JoinDomain, JoinlistNode, PlannerInfo, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL,
     JOIN_INNER, JOIN_LEFT, JOIN_SEMI,
 };
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 
 use relnode_seams as bms;
 use equivclass_ext_seams as eqext;
@@ -264,7 +264,7 @@ pub fn new_join_domain(root: &mut PlannerInfo) -> usize {
 fn deconstruct_recurse_fromexpr<'mcx>(
     root: &mut PlannerInfo,
     run: &PlannerRun<'mcx>,
-    f: &nodes::rawnodes::FromExpr<'_>,
+    f: &::nodes::rawnodes::FromExpr<'_>,
     parent_domain: usize,
     parent_jtitem: Option<JtId>,
     item_list: &mut Vec<JoinTreeItem<'mcx>>,
@@ -417,7 +417,7 @@ fn deconstruct_recurse<'mcx>(
         jtitem.kind = JtNodeKind::JoinExpr {
             // C `JoinType` discriminant — store the lifetime-free
             // `pathnodes::JoinType` (u32) the planner uses, converted from
-            // the `nodes::jointype::JoinType` enum the raw node carries.
+            // the `::nodes::jointype::JoinType` enum the raw node carries.
             jointype: j.jointype as pathnodes::JoinType,
             rtindex: j.rtindex,
             quals: quals_implicit_and(run.mcx(), j.quals.as_deref()),

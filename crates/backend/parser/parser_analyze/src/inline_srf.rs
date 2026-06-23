@@ -32,12 +32,12 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
-use nodes::copy_query::Query;
-use nodes::funcapi::TypeFuncClass;
-use nodes::nodes::{ntag, CmdType, Node};
-use nodes::parsenodes::{RangeTblEntry, RTEKind};
-use nodes::primnodes::{CoercionForm, Expr, FuncExpr, ParamKind, TargetEntry};
-use nodes::rawnodes::RangeTblRef;
+use ::nodes::copy_query::Query;
+use ::nodes::funcapi::TypeFuncClass;
+use ::nodes::nodes::{ntag, CmdType, Node};
+use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
+use ::nodes::primnodes::{CoercionForm, Expr, FuncExpr, ParamKind, TargetEntry};
+use ::nodes::rawnodes::RangeTblRef;
 use parsenodes::{CoercionContext, RawParseMode};
 
 use nodes_core::nodefuncs::expr_type;
@@ -159,7 +159,7 @@ pub fn inline_set_returning_function_sql_body<'mcx>(
             Some(names) if names.len() >= nargs && nargs > 0 => Some(names.clone()),
             _ => None,
         };
-        let pinfo = nodes::parsestmt::SqlFnParseInfo::new(
+        let pinfo = ::nodes::parsestmt::SqlFnParseInfo::new(
             form.proname.clone(),
             fexpr.inputcollid,
             argtypes,
@@ -256,7 +256,7 @@ fn extract_single_body_query<'a, 'mcx>(
     mcx: Mcx<'mcx>,
     n: &'a Node<'mcx>,
 ) -> PgResult<Option<Query<'mcx>>> {
-    let query_list: &[nodes::nodes::NodePtr<'mcx>] = match n.node_tag() {
+    let query_list: &[::nodes::nodes::NodePtr<'mcx>] = match n.node_tag() {
         ntag::T_List => {
             let outer = n.expect_list();
             let first = match outer.first() {
@@ -616,12 +616,12 @@ fn finish_tlist_coercion<'mcx>(
         .filter(|tle| !tle.resjunk)
         .map(|tle| tle.resname.as_deref().unwrap_or(""))
         .collect();
-    let make_colnames = |mcx: Mcx<'mcx>| -> PgResult<mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>> {
-        let mut colnames: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+    let make_colnames = |mcx: Mcx<'mcx>| -> PgResult<mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
+        let mut colnames: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
             mcx::vec_with_capacity_in(mcx, names.len())?;
         for name in &names {
             let sval = mcx::PgString::from_str_in(name, mcx)?;
-            let node = Node::mk_string(mcx, nodes::value::StringNode { sval })?;
+            let node = Node::mk_string(mcx, ::nodes::value::StringNode { sval })?;
             colnames.push(mcx::alloc_in(mcx, node)?);
         }
         Ok(colnames)
@@ -658,7 +658,7 @@ fn finish_tlist_coercion<'mcx>(
     // jointree = makeFromExpr(list_make1(makeNode(RangeTblRef){rtindex=1}), NULL).
     let rtr = RangeTblRef { rtindex: 1 };
     let rtr_node = Node::mk_range_tbl_ref(mcx, rtr)?;
-    let mut fromlist: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+    let mut fromlist: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
         mcx::vec_with_capacity_in(mcx, 1)?;
     fromlist.push(mcx::alloc_in(mcx, rtr_node)?);
     let fromexpr = nodes_core::makefuncs::make_from_expr(fromlist, None);
@@ -769,7 +769,7 @@ fn push_null_column<'mcx>(
     // The NULL value's content is irrelevant (constisnull = true), so build the
     // Const directly with a zero by-value Datum (no detoast/alloc can occur for
     // a fixed-length by-value type).
-    let null_const = nodes::primnodes::Const {
+    let null_const = ::nodes::primnodes::Const {
         consttype: INT4OID,
         consttypmod: -1,
         constcollid: InvalidOid,

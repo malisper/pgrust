@@ -18,7 +18,7 @@ use hash::hashpage::{
 };
 use types_tuple::heaptuple::{BlockIdData, ItemPointerData};
 
-use page::PageInit;
+use ::page::PageInit;
 
 use crate::hashutil::{_hash_get_totalbuckets, _hash_spareindex, pg_leftmost_one_pos32, pg_nextpower2_32};
 

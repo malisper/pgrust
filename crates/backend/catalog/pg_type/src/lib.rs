@@ -90,7 +90,7 @@ use syscache_seams::{get_type_oid, pg_type_form, type_exists};
 use miscinit_seams::is_bootstrap_processing_mode;
 
 use types_acl::acl::ACLCHECK_NOT_OWNER;
-use nodes::parsenodes::OBJECT_TYPE;
+use ::nodes::parsenodes::OBJECT_TYPE;
 
 /// `RELKIND_COMPOSITE_TYPE` (`catalog/pg_class.h`) — `pg_class.relkind` for a
 /// stand-alone composite type.

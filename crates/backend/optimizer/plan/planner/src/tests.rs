@@ -9,9 +9,9 @@ extern crate alloc;
 use alloc::vec;
 
 use mcx::{MemoryContext, PgBox, PgVec};
-use nodes::nodes::Node;
-use nodes::primnodes::{Expr, Var};
-use nodes::rawnodes::{FromExpr, RangeTblRef};
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{Expr, Var};
+use ::nodes::rawnodes::{FromExpr, RangeTblRef};
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     NodeTag, Path, PathNode, PathTarget, PlannerInfo, RelId, RelOptInfo, VOLATILITY_UNKNOWN,

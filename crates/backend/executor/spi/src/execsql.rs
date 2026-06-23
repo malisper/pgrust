@@ -20,10 +20,10 @@
 use mcx::{MemoryContext, Mcx, PgVec};
 use types_core::Oid;
 use types_error::{PgError, PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::CmdType;
-use nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
-use nodes::parsestmt::{CachedPlanHandle, PlpgsqlExprParseState};
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::CmdType;
+use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
+use ::nodes::parsestmt::{CachedPlanHandle, PlpgsqlExprParseState};
 use parsenodes::RawParseMode;
 use types_resowner::ResourceOwner;
 use types_tuple::Datum as RichDatum;
@@ -269,8 +269,8 @@ pub(crate) fn prepare_dynexecute_plan<'mcx>(
         param_types,
         param_types.len() as i32,
         false, // has_parser_setup (fixed param types, not a parser hook)
-        nodes::copy_query::CURSOR_OPT_PARALLEL_OK
-            | nodes::portalcmds::CURSOR_OPT_GENERIC_PLAN,
+        ::nodes::copy_query::CURSOR_OPT_PARALLEL_OK
+            | ::nodes::portalcmds::CURSOR_OPT_GENERIC_PLAN,
         false, // fixed_result
     )?;
 
@@ -427,7 +427,7 @@ fn spi_execsql_inner(
 /// result tuple descriptor. The command-tag display name gives a good message —
 /// a SELECT without a resultDesc is a `SELECT INTO`.
 fn check_must_return_tuples(source: SourceHandle) -> PgResult<()> {
-    let handle = nodes::parsestmt::CachedPlanSourceHandle(source);
+    let handle = ::nodes::parsestmt::CachedPlanSourceHandle(source);
     if plancache_seams::plansource_has_result_desc::call(handle)? {
         return Ok(());
     }
@@ -475,8 +475,8 @@ pub(crate) fn prepare_execsql_plan<'mcx>(
         &[],   // param_types
         0,     // num_params
         true,  // has_parser_setup
-        nodes::copy_query::CURSOR_OPT_PARALLEL_OK
-            | nodes::portalcmds::CURSOR_OPT_GENERIC_PLAN,
+        ::nodes::copy_query::CURSOR_OPT_PARALLEL_OK
+            | ::nodes::portalcmds::CURSOR_OPT_GENERIC_PLAN,
         false, // fixed_result
     )?;
 
@@ -679,7 +679,7 @@ fn run_one_execsql_stmt<'mcx>(
             &pstmt,
             "",
             true, // readOnlyTree: protect the plancache's node tree (C true)
-            nodes::parsestmt::ProcessUtilityContext::PROCESS_UTILITY_QUERY,
+            ::nodes::parsestmt::ProcessUtilityContext::PROCESS_UTILITY_QUERY,
             param_li.clone(),
             receiver,
             &mut qc,

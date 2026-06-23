@@ -15,9 +15,9 @@
 use mcx::Mcx;
 use types_dest::dest::CommandDest;
 use types_error::{PgError, PgResult};
-use nodes::nodes::CmdType;
-use nodes::parsestmt::DestReceiverHandle;
-use nodes::tuptable::SlotData;
+use ::nodes::nodes::CmdType;
+use ::nodes::parsestmt::DestReceiverHandle;
+use ::nodes::tuptable::SlotData;
 use stringinfo::StringInfo;
 use types_tuple::heaptuple::TupleDescData;
 

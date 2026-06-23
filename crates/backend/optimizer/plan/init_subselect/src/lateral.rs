@@ -34,8 +34,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use nodes::parsenodes::RTEKind;
-use nodes::primnodes::Expr;
+use ::nodes::parsenodes::RTEKind;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerInfo, Relids, RELOPT_BASEREL};
 

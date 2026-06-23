@@ -47,8 +47,8 @@ fn hash_one_datum<'mcx>(
     let (result, _isnull) = function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &[], None)?;
     Ok(result.as_u32())
 }
-use nodes::execexpr::{ExprEvalStepData, ExprState};
-use nodes::execnodes::EcxtId;
+use ::nodes::execexpr::{ExprEvalStepData, ExprState};
+use ::nodes::execnodes::EcxtId;
 use nodes::{EStateData, SlotId};
 use types_tuple::heaptuple::DeformedColumn;
 

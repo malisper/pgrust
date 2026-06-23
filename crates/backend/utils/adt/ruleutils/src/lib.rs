@@ -55,11 +55,11 @@ use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::fmgr::NAMEDATALEN;
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use nodes::nodes::Node;
-use nodes::parsenodes::{
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::{
     RangeTblEntry, RTE_FUNCTION, RTE_JOIN, RTE_RELATION, RTE_TABLEFUNC,
 };
-use nodes::rawnodes::{Alias, FromExpr, JoinExpr};
+use ::nodes::rawnodes::{Alias, FromExpr, JoinExpr};
 
 /// `quote_identifier(ident)` (ruleutils.c 13028-13104) — quote an identifier
 /// only if needed for re-parse safety. Faithful port: an identifier is "safe"
@@ -678,10 +678,10 @@ pub struct DeparseContext<'mcx> {
     pub resultDesc: Option<PgBox<'mcx, types_tuple::heaptuple::TupleDescData<'mcx>>>,
     /// `List *targetList` — current query level's SELECT targetlist. Read by
     /// [`get_variable`]'s `varInOrderBy` path; set by the F2 query deparsers.
-    pub targetList: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
+    pub targetList: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
     /// `List *windowClause` — current query level's WINDOW clause (list of
     /// `WindowClause`). Read by the `WindowFunc` `OVER` query-decompilation path.
-    pub windowClause: PgVec<'mcx, nodes::rawnodes::WindowClause<'mcx>>,
+    pub windowClause: PgVec<'mcx, ::nodes::rawnodes::WindowClause<'mcx>>,
     /// `int prettyFlags` — enabling of pretty-print functions.
     pub prettyFlags: i32,
     /// `int wrapColumn` — max line length, or -1 for no limit.
@@ -698,7 +698,7 @@ pub struct DeparseContext<'mcx> {
     pub varInOrderBy: bool,
     /// `Bitmapset *appendparents` — if not null, map child Vars of these relids
     /// back to the parent rel.
-    pub appendparents: Option<nodes::bitmapset::Bitmapset<'mcx>>,
+    pub appendparents: Option<::nodes::bitmapset::Bitmapset<'mcx>>,
 }
 
 /// `typedef struct { ... } deparse_namespace` (`ruleutils.c` 159-186).
@@ -725,7 +725,7 @@ pub struct DeparseNamespace<'mcx> {
     /// `AppendRelInfo **appendrels` — array indexed by child relid, or empty.
     /// Plan-only (PlannedStmt case); holds the trimmed plan-data carrier the
     /// child->parent Var mapping reads.
-    pub appendrels: PgVec<'mcx, Option<nodes::appendrel_carrier::AppendRelInfoCarrier>>,
+    pub appendrels: PgVec<'mcx, Option<::nodes::appendrel_carrier::AppendRelInfoCarrier>>,
     /// `char *ret_old_alias` — alias for OLD in RETURNING list.
     pub ret_old_alias: Option<PgString<'mcx>>,
     /// `char *ret_new_alias` — alias for NEW in RETURNING list.
@@ -1002,7 +1002,7 @@ pub fn set_rtable_names<'mcx>(
     mcx: Mcx<'mcx>,
     dpns: &mut DeparseNamespace<'mcx>,
     parent_namespaces: &[DeparseNamespace<'mcx>],
-    rels_used: Option<&nodes::bitmapset::Bitmapset<'mcx>>,
+    rels_used: Option<&::nodes::bitmapset::Bitmapset<'mcx>>,
 ) -> PgResult<()> {
     dpns.rtable_names = PgVec::new_in(mcx);
     // nothing more to do if empty rtable
@@ -1118,7 +1118,7 @@ pub fn set_rtable_names<'mcx>(
 pub fn select_rtable_names_for_explain<'mcx>(
     mcx: Mcx<'mcx>,
     rtable: &PgVec<'mcx, RangeTblEntry<'mcx>>,
-    rels_used: Option<&nodes::bitmapset::Bitmapset<'mcx>>,
+    rels_used: Option<&::nodes::bitmapset::Bitmapset<'mcx>>,
 ) -> PgResult<PgVec<'mcx, Option<PgString<'mcx>>>> {
     let mut dpns = DeparseNamespace::zeroed(mcx);
 
@@ -1260,7 +1260,7 @@ pub(crate) fn deparse_context_for_old_new<'mcx>(
 pub fn set_deparse_for_query<'mcx>(
     mcx: Mcx<'mcx>,
     dpns: &mut DeparseNamespace<'mcx>,
-    query: &nodes::copy_query::Query<'mcx>,
+    query: &::nodes::copy_query::Query<'mcx>,
     parent_namespaces: &[DeparseNamespace<'mcx>],
 ) -> PgResult<()> {
     // Initialize *dpns and fill rtable/ctes links.
@@ -1367,11 +1367,11 @@ pub fn has_dangerous_join_using<'mcx>(
     jtnode: &Node<'mcx>,
 ) -> PgResult<bool> {
     match jtnode.node_tag() {
-        nodes::nodes::ntag::T_RangeTblRef => {
+        ::nodes::nodes::ntag::T_RangeTblRef => {
             // nothing to do here
             Ok(false)
         }
-        nodes::nodes::ntag::T_FromExpr => {
+        ::nodes::nodes::ntag::T_FromExpr => {
             let f = jtnode.expect_fromexpr();
             for child in f.fromlist.iter() {
                 if has_dangerous_join_using(mcx, dpns, child)? {
@@ -1380,7 +1380,7 @@ pub fn has_dangerous_join_using<'mcx>(
             }
             Ok(false)
         }
-        nodes::nodes::ntag::T_JoinExpr => {
+        ::nodes::nodes::ntag::T_JoinExpr => {
             let j = jtnode.expect_joinexpr();
             // Is it an unnamed JOIN with USING?
             if j.alias.is_none() && !j.usingClause.is_empty() {
@@ -1427,18 +1427,18 @@ pub fn set_using_names<'mcx>(
     parent_using: &PgVec<'mcx, PgString<'mcx>>,
 ) -> PgResult<()> {
     match jtnode.node_tag() {
-        nodes::nodes::ntag::T_RangeTblRef => {
+        ::nodes::nodes::ntag::T_RangeTblRef => {
             // nothing to do now
             Ok(())
         }
-        nodes::nodes::ntag::T_FromExpr => {
+        ::nodes::nodes::ntag::T_FromExpr => {
             let f = jtnode.expect_fromexpr();
             for child in f.fromlist.iter() {
                 set_using_names(mcx, dpns, child, parent_using)?;
             }
             Ok(())
         }
-        nodes::nodes::ntag::T_JoinExpr => {
+        ::nodes::nodes::ntag::T_JoinExpr => {
             let j = jtnode.expect_joinexpr();
             let rtindex = j.rtindex;
             let rte = rt_fetch(rtindex, &dpns.rtable)?.clone_in(mcx)?;
@@ -1856,10 +1856,10 @@ pub fn set_join_column_names<'mcx>(
     // Generate the new_colnames array. Must match the parser column ordering:
     // merged columns first (USING order), then non-merged left (attnum order),
     // then non-merged right.
-    let mut leftmerged: nodes::bitmapset::Bitmapset<'mcx> =
-        nodes::bitmapset::Bitmapset { words: PgVec::new_in(mcx) };
-    let mut rightmerged: nodes::bitmapset::Bitmapset<'mcx> =
-        nodes::bitmapset::Bitmapset { words: PgVec::new_in(mcx) };
+    let mut leftmerged: ::nodes::bitmapset::Bitmapset<'mcx> =
+        ::nodes::bitmapset::Bitmapset { words: PgVec::new_in(mcx) };
+    let mut rightmerged: ::nodes::bitmapset::Bitmapset<'mcx> =
+        ::nodes::bitmapset::Bitmapset { words: PgVec::new_in(mcx) };
 
     // Handle merged columns; they are first and can't be new.
     let mut i: usize = 0;
@@ -2189,8 +2189,8 @@ fn identify_join_columns<'mcx>(
     // Extract left/right child RT indexes.
     colinfo.leftrti = match j.larg.as_ref().map(|n| &**n) {
         Some(n) => match n.node_tag() {
-            nodes::nodes::ntag::T_RangeTblRef => n.expect_rangetblref().rtindex,
-            nodes::nodes::ntag::T_JoinExpr => n.expect_joinexpr().rtindex,
+            ::nodes::nodes::ntag::T_RangeTblRef => n.expect_rangetblref().rtindex,
+            ::nodes::nodes::ntag::T_JoinExpr => n.expect_joinexpr().rtindex,
             _ => {
                 return Err(elog_error(format!(
                     "unrecognized node type in jointree: {}",
@@ -2202,8 +2202,8 @@ fn identify_join_columns<'mcx>(
     };
     colinfo.rightrti = match j.rarg.as_ref().map(|n| &**n) {
         Some(n) => match n.node_tag() {
-            nodes::nodes::ntag::T_RangeTblRef => n.expect_rangetblref().rtindex,
-            nodes::nodes::ntag::T_JoinExpr => n.expect_joinexpr().rtindex,
+            ::nodes::nodes::ntag::T_RangeTblRef => n.expect_rangetblref().rtindex,
+            ::nodes::nodes::ntag::T_JoinExpr => n.expect_joinexpr().rtindex,
             _ => {
                 return Err(elog_error(format!(
                     "unrecognized node type in jointree: {}",
@@ -2303,7 +2303,7 @@ fn clone_subplan<'mcx>(
 /// clones each TargetEntry into the deparse arena.
 fn tlist_as_node_vec<'mcx>(
     mcx: Mcx<'mcx>,
-    tlist: &Option<PgVec<'_, nodes::primnodes::TargetEntry<'_>>>,
+    tlist: &Option<PgVec<'_, ::nodes::primnodes::TargetEntry<'_>>>,
 ) -> PgResult<PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>> {
     let mut out = PgVec::new_in(mcx);
     if let Some(tl) = tlist {
@@ -2325,7 +2325,7 @@ pub fn set_deparse_plan<'mcx, 'p>(
     dpns: &mut DeparseNamespace<'mcx>,
     plan: &Node<'p>,
 ) -> PgResult<()> {
-    use nodes::nodes::ntag;
+    use ::nodes::nodes::ntag;
     let tag = plan.node_tag();
     let header = plan.plan_head();
 
@@ -2381,7 +2381,7 @@ pub fn set_deparse_plan<'mcx, 'p>(
         },
         ntag::T_ModifyTable => match plan.as_modifytable() {
             Some(m) => {
-                if m.operation == nodes::nodes::CmdType::CMD_MERGE {
+                if m.operation == ::nodes::nodes::CmdType::CMD_MERGE {
                     clone_subplan(mcx, &header.lefttree)?
                 } else {
                     // dpns->inner_plan = plan
@@ -2398,7 +2398,7 @@ pub fn set_deparse_plan<'mcx, 'p>(
         ntag::T_ModifyTable
             if plan
                 .as_modifytable()
-                .is_some_and(|m| m.operation == nodes::nodes::CmdType::CMD_INSERT) =>
+                .is_some_and(|m| m.operation == ::nodes::nodes::CmdType::CMD_INSERT) =>
         {
             match plan.as_modifytable() {
                 Some(m) => tlist_as_node_vec(mcx, &m.exclRelTlist)?,
@@ -2433,7 +2433,7 @@ pub fn find_recursive_union<'mcx>(
     wt_param: i32,
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
     for ancestor in dpns.ancestors.iter() {
-        if ancestor.node_tag() == nodes::nodes::ntag::T_RecursiveUnion {
+        if ancestor.node_tag() == ::nodes::nodes::ntag::T_RecursiveUnion {
             if let Some(ru) = ancestor.as_recursiveunion() {
                 if ru.wtParam == wt_param {
                     return mcx::alloc_in(mcx, ancestor.clone_in(mcx)?);
@@ -2542,7 +2542,7 @@ pub fn pop_ancestor_plan<'mcx>(
 /// set here; per-node attention is set later by [`set_deparse_context_plan`].
 pub fn deparse_context_for_plan_tree<'mcx, 'p>(
     mcx: Mcx<'mcx>,
-    pstmt: &nodes::nodeindexscan::PlannedStmt<'p>,
+    pstmt: &::nodes::nodeindexscan::PlannedStmt<'p>,
     rtable_names: &PgVec<'mcx, Option<PgString<'mcx>>>,
 ) -> PgResult<PgVec<'mcx, DeparseNamespace<'mcx>>> {
     let mut dpns = DeparseNamespace::zeroed(mcx);
@@ -2606,7 +2606,7 @@ pub fn deparse_context_for_plan_tree<'mcx, 'p>(
     // its inheritance parent for EXPLAIN display.
     if !pstmt.appendRelations.is_empty() {
         let nrels = dpns.rtable.len();
-        let mut appendrels: PgVec<Option<nodes::appendrel_carrier::AppendRelInfoCarrier>> =
+        let mut appendrels: PgVec<Option<::nodes::appendrel_carrier::AppendRelInfoCarrier>> =
             PgVec::new_in(mcx);
         appendrels.try_reserve(nrels + 1).map_err(|_| mcx.oom(0))?;
         for _ in 0..(nrels + 1) {
@@ -2738,7 +2738,7 @@ pub fn set_deparse_context_plan<'mcx, 'p>(
 /// Installs the `deparse_expr_for_plan` seam.
 pub fn deparse_expr_for_plan<'mcx, 'p>(
     mcx: Mcx<'mcx>,
-    pstmt: &nodes::nodeindexscan::PlannedStmt<'p>,
+    pstmt: &::nodes::nodeindexscan::PlannedStmt<'p>,
     rtable_names: &PgVec<'mcx, Option<PgString<'mcx>>>,
     plan: &Node<'p>,
     ancestors: &PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
@@ -2764,7 +2764,7 @@ pub fn deparse_expr_for_plan<'mcx, 'p>(
 /// useprefix)`. Installs the `deparse_window_frame_for_plan` seam.
 pub fn deparse_window_frame_for_plan<'mcx, 'p>(
     mcx: Mcx<'mcx>,
-    pstmt: &nodes::nodeindexscan::PlannedStmt<'p>,
+    pstmt: &::nodes::nodeindexscan::PlannedStmt<'p>,
     rtable_names: &PgVec<'mcx, Option<PgString<'mcx>>>,
     plan: &Node<'p>,
     ancestors: &PgVec<'mcx, PgBox<'mcx, Node<'mcx>>>,
@@ -2935,7 +2935,7 @@ fn clone_fromexpr<'mcx>(
 /// (set_join_column_names' leftmerged/rightmerged are transient workspace).
 fn bms_add_member<'mcx>(
     mcx: Mcx<'mcx>,
-    a: &mut nodes::bitmapset::Bitmapset<'mcx>,
+    a: &mut ::nodes::bitmapset::Bitmapset<'mcx>,
     x: i32,
 ) -> PgResult<()> {
     debug_assert!(x > 0);
@@ -2955,7 +2955,7 @@ fn bms_add_member<'mcx>(
 }
 
 /// `bms_is_member(x, a)` over our local Bitmapset image.
-fn bms_is_member_local(a: &nodes::bitmapset::Bitmapset<'_>, x: i32) -> bool {
+fn bms_is_member_local(a: &::nodes::bitmapset::Bitmapset<'_>, x: i32) -> bool {
     if x < 0 {
         return false;
     }
@@ -3083,7 +3083,7 @@ fn drill_past_lists<'a, 'mcx>(node: &'a Node<'mcx>) -> Option<&'a Node<'mcx>> {
 /// `pull_varnos`: true iff every member is relid 1 (or the set is empty). The
 /// owned Bitmapset stores 64-bit words; a subset of `{1}` has all words zero
 /// except possibly word 0, which may contain only bit 1.
-fn relids_subset_of_one(relids: &nodes::bitmapset::Bitmapset<'_>) -> bool {
+fn relids_subset_of_one(relids: &::nodes::bitmapset::Bitmapset<'_>) -> bool {
     for (i, &w) in relids.words.iter().enumerate() {
         if i == 0 {
             if w & !(1u64 << 1) != 0 {
@@ -3097,7 +3097,7 @@ fn relids_subset_of_one(relids: &nodes::bitmapset::Bitmapset<'_>) -> bool {
 }
 
 /// `bms_is_empty(relids)` for the owned Bitmapset image.
-fn relids_is_empty(relids: &nodes::bitmapset::Bitmapset<'_>) -> bool {
+fn relids_is_empty(relids: &::nodes::bitmapset::Bitmapset<'_>) -> bool {
     relids.words.iter().all(|&w| w == 0)
 }
 
@@ -3109,7 +3109,7 @@ fn relids_is_empty(relids: &nodes::bitmapset::Bitmapset<'_>) -> bool {
 fn pull_varnos_node<'mcx>(
     mcx: Mcx<'mcx>,
     node: &Node<'mcx>,
-    acc: &mut Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>,
+    acc: &mut Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>,
 ) -> PgResult<()> {
     if let Some(items) = node.as_list() {
         for it in items.iter() {
@@ -3169,14 +3169,14 @@ pub fn pg_get_expr_worker<'mcx>(
     // Throw error if the input is a querytree rather than an expression tree.
     // Drill past surrounding Lists, then check for a Query.
     if let Some(tst) = drill_past_lists(&node) {
-        if tst.node_tag() == nodes::nodes::ntag::T_Query {
+        if tst.node_tag() == ::nodes::nodes::ntag::T_Query {
             return Err(PgError::error("input is a query, not an expression")
                 .with_sqlstate(types_error::ERRCODE_INVALID_PARAMETER_VALUE));
         }
     }
 
     // Throw error if the expression contains Vars we won't be able to deparse.
-    let mut relids: Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>> = None;
+    let mut relids: Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>> = None;
     pull_varnos_node(mcx, &node, &mut relids)?;
     if oid_is_valid(relid) {
         // !bms_is_subset(relids, bms_make_singleton(1))
@@ -3232,11 +3232,11 @@ pub fn pg_get_expr_worker<'mcx>(
 mod tests {
     use super::*;
     use mcx::MemoryContext;
-    use nodes::nodes::Node;
-    use nodes::parsenodes::{RangeTblEntry, RTE_JOIN, RTE_SUBQUERY};
-    use nodes::primnodes::{Expr, Var};
-    use nodes::rawnodes::{Alias, FromExpr, JoinExpr, RangeTblRef};
-    use nodes::value::StringNode;
+    use ::nodes::nodes::Node;
+    use ::nodes::parsenodes::{RangeTblEntry, RTE_JOIN, RTE_SUBQUERY};
+    use ::nodes::primnodes::{Expr, Var};
+    use ::nodes::rawnodes::{Alias, FromExpr, JoinExpr, RangeTblRef};
+    use ::nodes::value::StringNode;
 
     /// `makeString(s)` as a boxed `Node`.
     fn make_string<'mcx>(mcx: Mcx<'mcx>, s: &str) -> PgBox<'mcx, Node<'mcx>> {
@@ -3352,8 +3352,8 @@ mod tests {
         // as an unnamed join RTE with merged column k.
         let ctx = MemoryContext::new("join_using");
         let mcx = ctx.mcx();
-        let mut q = nodes::copy_query::Query::new(mcx);
-        q.commandType = nodes::nodes::CmdType::CMD_SELECT;
+        let mut q = ::nodes::copy_query::Query::new(mcx);
+        q.commandType = ::nodes::nodes::CmdType::CMD_SELECT;
 
         // RTE 1: subquery a(k,x). RTE 2: subquery b(k,y). RTE 3: the join.
         let a = subquery_rte(mcx, "a", &["k", "x"]);
@@ -3361,7 +3361,7 @@ mod tests {
         // join RTE: output cols k (merged), x, y. eref colnames + joinaliasvars.
         let mut jrte = RangeTblEntry::new_in(mcx);
         jrte.rtekind = RTE_JOIN;
-        jrte.jointype = nodes::jointype::JoinType::JOIN_INNER;
+        jrte.jointype = ::nodes::jointype::JoinType::JOIN_INNER;
         jrte.joinmergedcols = 1;
         // joinaliasvars: k (Var to left.k), x (Var left.x), y (Var right.y).
         let mut jav = PgVec::new_in(mcx);
@@ -3400,7 +3400,7 @@ mod tests {
         // jointree: FromExpr { fromlist: [ JoinExpr(larg=RTR 1, rarg=RTR 2,
         // usingClause=[k], rtindex=3) ] }
         let join = JoinExpr {
-            jointype: nodes::jointype::JoinType::JOIN_INNER,
+            jointype: ::nodes::jointype::JoinType::JOIN_INNER,
             isNatural: false,
             larg: Some(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 1 })?).unwrap()),
             rarg: Some(mcx::alloc_in(mcx, Node::mk_range_tbl_ref(mcx, RangeTblRef { rtindex: 2 })?).unwrap()),

@@ -4,7 +4,7 @@ extern crate std;
 
 use super::*;
 use mcx::MemoryContext;
-use nodes::value::StringNode;
+use ::nodes::value::StringNode;
 
 /// Build a `Node::String` value node.
 fn string_node<'mcx>(mcx: Mcx<'mcx>, s: &str) -> NodePtr<'mcx> {
@@ -47,8 +47,8 @@ fn figure_index_colname_returns_none_without_name() {
 fn figure_colname_nullif() {
     let root = MemoryContext::new("t");
     let mcx = root.mcx();
-    let ae = Node::A_Expr(nodes::rawnodes::A_Expr {
-        kind: nodes::rawnodes::A_Expr_Kind::AEXPR_NULLIF,
+    let ae = Node::A_Expr(::nodes::rawnodes::A_Expr {
+        kind: ::nodes::rawnodes::A_Expr_Kind::AEXPR_NULLIF,
         name: PgVec::new_in(mcx),
         lexpr: None,
         rexpr: None,
@@ -63,7 +63,7 @@ fn figure_colname_nullif() {
 fn figure_colname_grouping() {
     let root = MemoryContext::new("t");
     let mcx = root.mcx();
-    let gf = Node::mk_grouping_func(mcx, nodes::rawexprnodes::GroupingFunc {
+    let gf = Node::mk_grouping_func(mcx, ::nodes::rawexprnodes::GroupingFunc {
         args: PgVec::new_in(mcx),
         refs: PgVec::new_in(mcx),
         cols: PgVec::new_in(mcx),

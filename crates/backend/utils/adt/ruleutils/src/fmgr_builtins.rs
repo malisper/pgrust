@@ -699,8 +699,8 @@ mod tests {
     use alloc::vec;
     use mcx::PgBox;
     use datum::NullableDatum;
-    use nodes::nodes::Node;
-    use nodes::primnodes::{Expr, SQLValueFunction, SQLValueFunctionOp};
+    use ::nodes::nodes::Node;
+    use ::nodes::primnodes::{Expr, SQLValueFunction, SQLValueFunctionOp};
 
     /// Install lightweight, faithful test bodies for the two owner seams
     /// `pg_get_expr_worker` reaches on the relid=0 (no-Var) path: `stringToNode`
@@ -733,7 +733,7 @@ mod tests {
     fn test_pull_varnos<'mcx>(
         _mcx: mcx::Mcx<'mcx>,
         _node: &Expr,
-    ) -> types_error::PgResult<Option<PgBox<'mcx, nodes::bitmapset::Bitmapset<'mcx>>>> {
+    ) -> types_error::PgResult<Option<PgBox<'mcx, ::nodes::bitmapset::Bitmapset<'mcx>>>> {
         Ok(None)
     }
 

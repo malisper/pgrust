@@ -10,12 +10,12 @@ use std::sync::Once;
 use execTuples_seams as execTuples;
 use nodes_core_seams as bms_seams;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
-use nodes::bitmapset::Bitmapset;
-use nodes::execexpr::SubPlanState;
-use nodes::execnodes::ExprContext;
-use nodes::instrument::Instrumentation;
-use nodes::nodeindexscan::CUSTOMPATH_SUPPORT_BACKWARD_SCAN;
-use nodes::pathnodes::{
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::execexpr::SubPlanState;
+use ::nodes::execnodes::ExprContext;
+use ::nodes::instrument::Instrumentation;
+use ::nodes::nodeindexscan::CUSTOMPATH_SUPPORT_BACKWARD_SCAN;
+use ::nodes::pathnodes::{
     AppendPath, CustomPath, GroupResultPath, IndexOptInfo, IndexPath, MergeAppendPath,
     MinMaxAggPath, PathData, ProjectionPath,
 };
@@ -63,8 +63,8 @@ fn mock_exec_re_scan_set_param_plan<'mcx>(
 }
 
 fn mock_exec_clear_tuple<'mcx>(
-    _estate: &mut nodes::EStateData<'mcx>,
-    _slot: nodes::SlotId,
+    _estate: &mut ::nodes::EStateData<'mcx>,
+    _slot: ::nodes::SlotId,
 ) -> PgResult<()> {
     Ok(())
 }
@@ -120,8 +120,8 @@ fn exec_re_scan_walks_params_and_dispatches() {
     // non-NULL to drive UpdateChangedParamSet.
     let mut splan_plan = Material::default();
     splan_plan.plan.extParam = Some(empty_bms(mcx).unwrap());
-    let splan_plan = nodes::nodes::Node::mk_material(mcx, splan_plan);
-    let child_plan = nodes::nodes::Node::mk_material(mcx, Material::default());
+    let splan_plan = ::nodes::nodes::Node::mk_material(mcx, splan_plan);
+    let child_plan = ::nodes::nodes::Node::mk_material(mcx, Material::default());
 
     let mut estate = EStateData::new_in(mcx);
     let slot = estate.make_slot(TupleTableSlot::new_in(estate.es_query_cxt)).unwrap();
@@ -319,7 +319,7 @@ fn supports_mark_restore_matches_c_table() {
 
     // default: false.
     assert!(!exec_supports_mark_restore(&PathNode::Path(PathData {
-        pathtype: nodes::nodes::NodeTag(9999)
+        pathtype: ::nodes::nodes::NodeTag(9999)
     })));
 }
 
@@ -336,13 +336,13 @@ fn supports_backward_scan() {
     assert!(!exec_supports_backward_scan(None).unwrap());
 
     // Material: in the "don't evaluate tlist" group.
-    let mat = nodes::nodes::Node::mk_material(mcx, Material::default());
+    let mat = ::nodes::nodes::Node::mk_material(mcx, Material::default());
     assert!(exec_supports_backward_scan(Some(&mat)).unwrap());
 
     // Parallel-aware nodes can't back up.
     let mut parallel = Material::default();
     parallel.plan.parallel_aware = true;
-    let parallel = nodes::nodes::Node::mk_material(mcx, parallel);
+    let parallel = ::nodes::nodes::Node::mk_material(mcx, parallel);
     assert!(!exec_supports_backward_scan(Some(&parallel)).unwrap());
 
     let _ = mcx;
@@ -362,7 +362,7 @@ fn index_backward_scan_consults_the_am() {
 
 #[test]
 fn materializes_output_matches_c_table() {
-    use nodes::nodes::{
+    use ::nodes::nodes::{
         T_CteScan, T_FunctionScan, T_NamedTuplestoreScan, T_TableFuncScan, T_WorkTableScan,
     };
     for tag in [

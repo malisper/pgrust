@@ -55,14 +55,14 @@ use types_error::{
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use utils_error::ereport;
-use nodes::trigger::{
+use ::nodes::trigger::{
     TriggerData, T_TriggerData, TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW, AFTER_TRIGGER_2CTID,
     AFTER_TRIGGER_CP_UPDATE, AFTER_TRIGGER_DONE, AFTER_TRIGGER_FDW_FETCH, AFTER_TRIGGER_FDW_REUSE,
     AFTER_TRIGGER_IN_PROGRESS, AFTER_TRIGGER_OFFSET, AFTER_TRIGGER_TUP_BITS,
     TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_DELETE, TRIGGER_EVENT_INSERT, TRIGGER_EVENT_INSTEAD,
     TRIGGER_EVENT_UPDATE,
 };
-use nodes::EStateData;
+use ::nodes::EStateData;
 use types_tuple::heaptuple::{HeapTuple, HeapTupleData, ItemPointerData};
 use types_trigger::Trigger;
 
@@ -501,7 +501,7 @@ pub fn exec_call_trigger_func(trigdata: TriggerData<'static>) -> PgResult<Datum>
     // rich payload is the CURRENT_TRIGGER_DATA side-channel installed just above
     // (read by the tg_* accessors); only the demux tag crosses through fmgr.
     let _ctx_guard =
-        fmgr::fmgr::CallContextTagGuard::install(nodes::trigger::T_TriggerData.0 as u32);
+        fmgr::fmgr::CallContextTagGuard::install(::nodes::trigger::T_TriggerData.0 as u32);
     MY_TRIGGER_DEPTH.with(|d| *d.borrow_mut() += 1);
     let result = fmgr_seams::function_call_invoke::call(
         tgfoid,
@@ -593,7 +593,7 @@ fn trigger_result_rel_open(mcx: Mcx<'_>, relid: Oid) -> PgResult<TriggerResultRe
 pub fn after_trigger_execute<'mcx>(
     mcx: Mcx<'mcx>,
     rel: &mut TriggerResultRel,
-    event: &nodes::trigger::AfterTriggerEventData,
+    event: &::nodes::trigger::AfterTriggerEventData,
     evtshared: &SharedRecord,
 ) -> PgResult<()> {
     let tgoid = evtshared.ats_tgoid;
@@ -796,10 +796,10 @@ pub fn after_trigger_execute<'mcx>(
     };
     let tg_trigslot = trig_formed
         .as_ref()
-        .map(|_| nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32));
+        .map(|_| ::nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32));
     let tg_newslot = new_formed
         .as_ref()
-        .map(|_| nodes::SlotId(crate::ri_accessors::SLOT_NEW as u32));
+        .map(|_| ::nodes::SlotId(crate::ri_accessors::SLOT_NEW as u32));
 
     // Build the TriggerData and call the trigger; an AFTER trigger's return is
     // ignored.
@@ -1158,7 +1158,7 @@ pub fn validate_foreign_key_constraint<'mcx>(
                 tg_trigtuple,
                 tg_newtuple: None,
                 tg_trigger: Some(row_trigger),
-                tg_trigslot: Some(nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
+                tg_trigslot: Some(::nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
                 tg_newslot: None,
                 tg_oldtable: None,
                 tg_newtable: None,
@@ -1567,7 +1567,7 @@ fn deferred_ddl(c_func: &str, c_line: u32) -> ! {
 /// `ResultRelInfo` carries the per-statement trigger flags.
 fn bs_trigger_flag(
     estate: &EStateData<'_>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     pick: fn(&types_trigger::TriggerDesc<'_>) -> bool,
 ) -> bool {
     estate
@@ -1577,7 +1577,7 @@ fn bs_trigger_flag(
         .is_some_and(|td| pick(td))
 }
 
-fn exec_bs_insert_triggers_impl(estate: &mut EStateData<'_>, relinfo: nodes::RriId) -> PgResult<()> {
+fn exec_bs_insert_triggers_impl(estate: &mut EStateData<'_>, relinfo: ::nodes::RriId) -> PgResult<()> {
     // if (trigdesc == NULL) return; if (!trig_insert_before_statement) return;
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_insert_before_statement) {
         return Ok(());
@@ -1590,7 +1590,7 @@ fn exec_bs_insert_triggers_impl(estate: &mut EStateData<'_>, relinfo: nodes::Rri
         TRIGGER_EVENT_INSERT,
     )
 }
-fn exec_bs_update_triggers_impl(estate: &mut EStateData<'_>, relinfo: nodes::RriId) -> PgResult<()> {
+fn exec_bs_update_triggers_impl(estate: &mut EStateData<'_>, relinfo: ::nodes::RriId) -> PgResult<()> {
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_update_before_statement) {
         return Ok(());
     }
@@ -1602,7 +1602,7 @@ fn exec_bs_update_triggers_impl(estate: &mut EStateData<'_>, relinfo: nodes::Rri
         TRIGGER_EVENT_UPDATE,
     )
 }
-fn exec_bs_delete_triggers_impl(estate: &mut EStateData<'_>, relinfo: nodes::RriId) -> PgResult<()> {
+fn exec_bs_delete_triggers_impl(estate: &mut EStateData<'_>, relinfo: ::nodes::RriId) -> PgResult<()> {
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_delete_before_statement) {
         return Ok(());
     }
@@ -1626,7 +1626,7 @@ fn exec_bs_delete_triggers_impl(estate: &mut EStateData<'_>, relinfo: nodes::Rri
 /// `TRIGGER_EVENT_ROW`) into `LocTriggerData.tg_event`.
 fn exec_before_statement_triggers(
     estate: &mut EStateData<'_>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     cmd_type: crate::queue::CmdType,
     tg_event_op: i16,
     tg_event_bit: u32,
@@ -1705,7 +1705,7 @@ fn exec_before_statement_triggers(
 /// violation for a statement trigger).
 fn fire_statement_trigger(
     estate: &mut EStateData<'_>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     tgindx: usize,
     tg_event: u32,
 ) -> PgResult<bool> {
@@ -1779,8 +1779,8 @@ fn fire_statement_trigger(
 
 fn exec_as_insert_triggers_impl(
     estate: &mut EStateData<'_>,
-    relinfo: nodes::RriId,
-    tc: Option<&mut nodes::modifytable::TransitionCaptureState>,
+    relinfo: ::nodes::RriId,
+    tc: Option<&mut ::nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     // if (trigdesc && trig_insert_after_statement) AfterTriggerSaveEvent(...);
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_insert_after_statement) {
@@ -1799,8 +1799,8 @@ fn exec_as_insert_triggers_impl(
 }
 fn exec_as_update_triggers_impl(
     estate: &mut EStateData<'_>,
-    relinfo: nodes::RriId,
-    tc: Option<&mut nodes::modifytable::TransitionCaptureState>,
+    relinfo: ::nodes::RriId,
+    tc: Option<&mut ::nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_update_after_statement) {
         return Ok(());
@@ -1821,8 +1821,8 @@ fn exec_as_update_triggers_impl(
 }
 fn exec_as_delete_triggers_impl(
     estate: &mut EStateData<'_>,
-    relinfo: nodes::RriId,
-    tc: Option<&mut nodes::modifytable::TransitionCaptureState>,
+    relinfo: ::nodes::RriId,
+    tc: Option<&mut ::nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     if !bs_trigger_flag(estate, relinfo, |td| td.trig_delete_after_statement) {
         return Ok(());
@@ -1852,7 +1852,7 @@ struct TruncateTriggerState {
     estate: mcx::PgBox<'static, EStateData<'static>>,
     /// The per-rel `ResultRelInfo` ids, in `rels` order (also held in
     /// `estate.es_opened_result_relations`).
-    rri_ids: Vec<nodes::RriId>,
+    rri_ids: Vec<::nodes::RriId>,
     /// The relations re-opened for the firing block; closed `NoLock` (keeping
     /// the caller's AccessExclusiveLock) once the AFTER triggers are queued.
     rels: Vec<rel::Relation<'static>>,
@@ -1891,7 +1891,7 @@ fn exec_truncate_fire_before_triggers_impl(
     let mut estate: mcx::PgBox<'_, EStateData<'_>> =
         execUtils_seams::create_executor_state::call(mcx)?;
 
-    let mut rri_ids: Vec<nodes::RriId> = Vec::new();
+    let mut rri_ids: Vec<::nodes::RriId> = Vec::new();
     let mut rels: Vec<rel::Relation<'_>> = Vec::new();
 
     // foreach rel: InitResultRelInfo(...); es_opened_result_relations =
@@ -1900,7 +1900,7 @@ fn exec_truncate_fire_before_triggers_impl(
         let rel =
             table_seams::table_open::call(mcx, relid, AccessExclusiveLock)?;
 
-        let mut rri = nodes::ResultRelInfo::default();
+        let mut rri = ::nodes::ResultRelInfo::default();
         execMain_seams::init_result_rel_info::call(
             mcx,
             &mut rri,
@@ -1913,7 +1913,7 @@ fn exec_truncate_fire_before_triggers_impl(
         estate
             .es_opened_result_relations
             .try_reserve(1)
-            .map_err(|_| mcx.oom(core::mem::size_of::<nodes::RriId>()))?;
+            .map_err(|_| mcx.oom(core::mem::size_of::<::nodes::RriId>()))?;
         estate.es_opened_result_relations.push(id);
         rri_ids.push(id);
         rels.push(rel);
@@ -1982,12 +1982,12 @@ fn exec_truncate_fire_after_triggers_impl(
 /// STATEMENT TRUNCATE triggers for one relation.
 fn exec_bs_truncate_triggers(
     estate: &mut EStateData<'_>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
 ) -> PgResult<()> {
     use types_catalog::pg_trigger::{
         TRIGGER_TYPE_BEFORE, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TRUNCATE,
     };
-    use nodes::trigger::TRIGGER_EVENT_TRUNCATE;
+    use ::nodes::trigger::TRIGGER_EVENT_TRUNCATE;
 
     // if (trigdesc == NULL) return;
     // if (!trigdesc->trig_truncate_before_statement) return;
@@ -2051,9 +2051,9 @@ fn exec_bs_truncate_triggers(
 /// STATEMENT TRUNCATE event for one relation, if it has a matching trigger.
 fn exec_as_truncate_triggers(
     estate: &mut EStateData<'_>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
 ) -> PgResult<()> {
-    use nodes::trigger::TRIGGER_EVENT_TRUNCATE;
+    use ::nodes::trigger::TRIGGER_EVENT_TRUNCATE;
 
     // if (trigdesc && trigdesc->trig_truncate_after_statement)
     //   AfterTriggerSaveEvent(estate, relinfo, NULL, NULL, TRIGGER_EVENT_TRUNCATE,
@@ -2088,8 +2088,8 @@ fn exec_as_truncate_triggers(
 /// modified) NEW tuple.
 fn exec_br_insert_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
-    slot: nodes::SlotId,
+    relinfo: ::nodes::RriId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<bool> {
     exec_br_ir_insert_triggers(estate, relinfo, slot, /* instead */ false)
 }
@@ -2097,8 +2097,8 @@ fn exec_br_insert_triggers_impl<'mcx>(
 /// INSTEAD OF INSERT FOR EACH ROW triggers (on a view).
 fn exec_ir_insert_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
-    slot: nodes::SlotId,
+    relinfo: ::nodes::RriId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<bool> {
     exec_br_ir_insert_triggers(estate, relinfo, slot, /* instead */ true)
 }
@@ -2110,8 +2110,8 @@ fn exec_ir_insert_triggers_impl<'mcx>(
 /// thread the NEW tuple through each trigger and apply a returned tuple.
 fn exec_br_ir_insert_triggers<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
-    slot: nodes::SlotId,
+    relinfo: ::nodes::RriId,
+    slot: ::nodes::SlotId,
     instead: bool,
 ) -> PgResult<bool> {
     use types_catalog::pg_trigger::{
@@ -2254,7 +2254,7 @@ fn exec_br_ir_insert_triggers<'mcx>(
 fn partition_move_in_before_trigger_error<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     estate: &EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     tgname: &str,
 ) -> PgResult<PgError> {
     let rel = estate
@@ -2352,7 +2352,7 @@ fn formed_tuple_same(
 /// `FormedTuple`.
 fn fire_row_insert_trigger<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     tgindx: usize,
     _tgoid: Oid,
     tg_event: u32,
@@ -2416,7 +2416,7 @@ fn fire_row_insert_trigger<'mcx>(
         tg_newtuple: None,
         tg_trigger: Some(trigger_box),
         // tg_trigslot = the NEW slot; resolves to the SLOT_TRIG payload below.
-        tg_trigslot: Some(nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
+        tg_trigslot: Some(::nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
         tg_newslot: None,
         tg_oldtable: None,
         tg_newtable: None,
@@ -2448,27 +2448,27 @@ fn fire_row_insert_trigger<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn fire_row_modify_trigger<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     tgindx: usize,
     _tgoid: Oid,
     tg_event: u32,
-    _oldslot: nodes::SlotId,
+    _oldslot: ::nodes::SlotId,
     trigtuple: &types_tuple::heaptuple::FormedTuple<'mcx>,
     new: Option<(
-        nodes::SlotId,
+        ::nodes::SlotId,
         &types_tuple::heaptuple::FormedTuple<'mcx>,
     )>,
     // `LocTriggerData.tg_updatedcols` — the UPDATE's modified-column set
     // (`ExecGetAllUpdatedCols`), `None` for DELETE. Read by the
     // `tsvector_update_trigger` `updated_col` carrier seam (and any
     // column-specific WHEN-qual the trigger function inspects).
-    updated_cols: Option<&nodes::Bitmapset<'_>>,
+    updated_cols: Option<&::nodes::Bitmapset<'_>>,
 ) -> PgResult<Option<types_tuple::heaptuple::FormedTuple<'static>>> {
     let mcx = estate.es_query_cxt;
 
     // tg_updatedcols = updatedCols — cloned into the query context and
     // `'static`-extended for the side-channel window.
-    let tg_updatedcols: Option<mcx::PgBox<'static, nodes::Bitmapset<'static>>> =
+    let tg_updatedcols: Option<mcx::PgBox<'static, ::nodes::Bitmapset<'static>>> =
         match nodes_core::bitmapset::bms_copy(mcx, updated_cols)? {
             // SAFETY: allocated in mcx (= es_query_cxt); the TriggerData that
             // borrows it is installed/dropped within this call.
@@ -2539,7 +2539,7 @@ fn fire_row_modify_trigger<'mcx>(
             (
                 Some(nf),
                 ntv,
-                Some(nodes::SlotId(crate::ri_accessors::SLOT_NEW as u32)),
+                Some(::nodes::SlotId(crate::ri_accessors::SLOT_NEW as u32)),
             )
         }
         None => (None, None, None),
@@ -2553,7 +2553,7 @@ fn fire_row_modify_trigger<'mcx>(
         tg_newtuple,
         tg_trigger: Some(trigger_box),
         // tg_trigslot = the OLD slot; resolves to the SLOT_TRIG payload below.
-        tg_trigslot: Some(nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
+        tg_trigslot: Some(::nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
         tg_newslot,
         tg_oldtable: None,
         tg_newtable: None,
@@ -2718,7 +2718,7 @@ use tsvector_ext_seams::{
 /// `TRIGGER_FIRED_*` predicates over `trigdata->tg_event` for the top-of-function
 /// checks in `tsvector_update_trigger`.
 pub fn tsv_trigger_event_impl(_trigdata: types_ri_triggers::TriggerDataRef) -> TsvTriggerEvent {
-    use nodes::trigger::{
+    use ::nodes::trigger::{
         TRIGGER_EVENT_BEFORE, TRIGGER_EVENT_INSERT, TRIGGER_EVENT_OPMASK, TRIGGER_EVENT_ROW,
         TRIGGER_EVENT_TIMINGMASK, TRIGGER_EVENT_UPDATE,
     };
@@ -2966,7 +2966,7 @@ fn trigger_fired_by_update(event: u32) -> bool {
 /// the queue's `SharedRecord.ats_modifiedcols` holds (C copies the bitmapset into
 /// the after-trigger context as `new_shared.ats_modifiedcols = modifiedCols`).
 /// `None` (the C NULL set) maps to `None`.
-fn bms_to_sorted_vec(modified_cols: Option<&nodes::Bitmapset<'_>>) -> Option<Vec<i32>> {
+fn bms_to_sorted_vec(modified_cols: Option<&::nodes::Bitmapset<'_>>) -> Option<Vec<i32>> {
     modified_cols?;
     let mut out = Vec::new();
     let mut x = -1;
@@ -2987,15 +2987,15 @@ fn bms_to_sorted_vec(modified_cols: Option<&nodes::Bitmapset<'_>>) -> Option<Vec
 #[allow(clippy::too_many_arguments)]
 fn trigger_enabled<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     tgindx: usize,
     tgenabled: i8,
     tgnattr: i16,
     has_qual: bool,
     event: u32,
-    modified_cols: Option<&nodes::Bitmapset<'_>>,
-    oldslot: Option<nodes::SlotId>,
-    newslot: Option<nodes::SlotId>,
+    modified_cols: Option<&::nodes::Bitmapset<'_>>,
+    oldslot: Option<::nodes::SlotId>,
+    newslot: Option<::nodes::SlotId>,
 ) -> PgResult<bool> {
     // Replication-role-dependent enable state.
     if !trigger_enabled_no_qual(tgenabled) {
@@ -3102,9 +3102,9 @@ fn trigger_enabled<'mcx>(
 /// (`ExecPrepareQual` returned NULL).
 fn build_trigger_when_predicate<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     tgindx: usize,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>> {
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>> {
     const PRS2_OLD_VARNO: i32 = 1;
     const PRS2_NEW_VARNO: i32 = 2;
     const INNER_VAR: i32 = -1;
@@ -3135,7 +3135,7 @@ fn build_trigger_when_predicate<'mcx>(
     // The qual flows through the `expand_generated_columns_in_expr` /
     // `change_var_nodes` pipeline, all typed over the rewrite arena's notional
     // `'static`; intern the decoded node there.
-    let mut expr: nodes::primnodes::Expr<'static> = node
+    let mut expr: ::nodes::primnodes::Expr<'static> = node
         .as_expr()
         .ok_or_else(|| {
             PgError::error("trigger WHEN clause tgqual did not parse to an expression node".to_string())
@@ -3166,7 +3166,7 @@ fn build_trigger_when_predicate<'mcx>(
     expr = change_var_nodes_expr(expr, PRS2_NEW_VARNO, OUTER_VAR);
 
     // tgqual = (Node *) make_ands_implicit((Expr *) tgqual);
-    let quals: Vec<nodes::primnodes::Expr<'static>> =
+    let quals: Vec<::nodes::primnodes::Expr<'static>> =
         nodes_core::makefuncs::make_ands_implicit(Some(expr));
 
     // *predicate = ExecPrepareQual((List *) tgqual, estate);
@@ -3182,11 +3182,11 @@ fn build_trigger_when_predicate<'mcx>(
 /// `expression_tree_mutator`, re-stamping every top-level `Var` whose `varno`
 /// equals `rt_index` (and `varlevelsup == 0`) to `new_index`.
 fn change_var_nodes_expr(
-    expr: nodes::primnodes::Expr,
+    expr: ::nodes::primnodes::Expr,
     rt_index: i32,
     new_index: i32,
-) -> nodes::primnodes::Expr {
-    use nodes::primnodes::Expr;
+) -> ::nodes::primnodes::Expr {
+    use ::nodes::primnodes::Expr;
     fn walk(node: Expr, rt_index: i32, new_index: i32) -> Expr {
         match node {
             Expr::Var(mut v) => {
@@ -3208,10 +3208,10 @@ fn change_var_nodes_expr(
 
 fn exec_ar_insert_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
-    slot: nodes::SlotId,
+    relinfo: ::nodes::RriId,
+    slot: ::nodes::SlotId,
     recheck_indexes: &[Oid],
-    tc: Option<&mut nodes::modifytable::TransitionCaptureState>,
+    tc: Option<&mut ::nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     // The FDW + transition-capture guard reads ri_FdwRoutine (not carried on the
     // trimmed ResultRelInfo; ri_has_fdw_routine == false here) — skip.
@@ -3229,7 +3229,7 @@ fn exec_ar_insert_triggers_impl<'mcx>(
     }
     // Capture the NEW tuple into the INSERT transition table (the head of
     // AfterTriggerSaveEvent), then queue the event(s).  `tc` reborrowed shared.
-    let tc_ref: Option<&nodes::modifytable::TransitionCaptureState> = tc.as_deref();
+    let tc_ref: Option<&::nodes::modifytable::TransitionCaptureState> = tc.as_deref();
     if let Some(tcs) = tc_ref {
         capture_transition_tuples(estate, relinfo, TRIGGER_EVENT_INSERT, None, Some(slot), tcs)?;
     }
@@ -3278,7 +3278,7 @@ fn get_after_triggers_transition_table(
     event: u32,
     has_old: bool,
     has_new: bool,
-    tc: &nodes::modifytable::TransitionCaptureState,
+    tc: &::nodes::modifytable::TransitionCaptureState,
 ) -> Option<TransitionTarget> {
     const TRIGGER_EVENT_DELETE: u32 = 1;
     const TRIGGER_EVENT_UPDATE: u32 = 2;
@@ -3334,9 +3334,9 @@ fn table_ref(index: usize) -> crate::queue::TableRef {
 /// loud-guarded because the map-returning seam is not yet widened.
 fn transition_table_add_tuple<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
-    slot: nodes::SlotId,
-    original_insert_tuple: Option<nodes::SlotId>,
+    relinfo: ::nodes::RriId,
+    slot: ::nodes::SlotId,
+    original_insert_tuple: Option<::nodes::SlotId>,
     target: Option<TransitionTarget>,
 ) -> PgResult<()> {
     let target = match target {
@@ -3388,7 +3388,7 @@ fn get_after_triggers_store_slot<'mcx>(
     estate: &mut EStateData<'mcx>,
     target: TransitionTarget,
     tupdesc: types_tuple::heaptuple::TupleDesc<'mcx>,
-) -> PgResult<nodes::SlotId> {
+) -> PgResult<::nodes::SlotId> {
     // Already created?  (cached on the table-data)
     let existing = crate::queue::with_after_triggers(|at| {
         let qd = target.table.query_depth as usize;
@@ -3403,7 +3403,7 @@ fn get_after_triggers_store_slot<'mcx>(
     let slot = execTuples_seams::make_single_tuple_table_slot::call(
         estate.es_query_cxt,
         tupdesc,
-        nodes::TupleSlotKind::Virtual,
+        ::nodes::TupleSlotKind::Virtual,
     )?;
     let id = estate.push_slot_data(slot)?;
     crate::queue::with_after_triggers(|at| {
@@ -3420,7 +3420,7 @@ fn get_after_triggers_store_slot<'mcx>(
 fn put_into_transition_store<'mcx>(
     estate: &mut EStateData<'mcx>,
     target: TransitionTarget,
-    slot: nodes::SlotId,
+    slot: ::nodes::SlotId,
 ) -> PgResult<()> {
     // Form the minimal tuple from the slot in the query context first (an
     // immutable view of the store is not needed for that); then move the flat
@@ -3443,7 +3443,7 @@ fn put_into_transition_store<'mcx>(
     // does not outlive the call; nothing `'mcx`-borrowed is stored into the
     // `'static` carrier.
     let result = {
-        let store_ref: &mut nodes::Tuplestorestate<'mcx> =
+        let store_ref: &mut ::nodes::Tuplestorestate<'mcx> =
             unsafe { core::mem::transmute(&mut store) };
         sort_storage::tuplestore::tuplestore_puttupleslot(store_ref, slot, estate)
     };
@@ -3456,7 +3456,7 @@ fn put_into_transition_store<'mcx>(
 /// `afterTriggers` `RefCell` across the spool.
 fn take_transition_store(
     target: TransitionTarget,
-) -> Option<nodes::Tuplestorestate<'static>> {
+) -> Option<::nodes::Tuplestorestate<'static>> {
     crate::queue::with_after_triggers(|at| {
         let qd = target.table.query_depth as usize;
         let td = &mut at.query_stack[qd].tables[target.table.index];
@@ -3470,7 +3470,7 @@ fn take_transition_store(
 
 /// Put the `Tuplestorestate` (moved out by [`take_transition_store`]) back into
 /// its table-data slot after spooling.
-fn restore_transition_store(target: TransitionTarget, store: nodes::Tuplestorestate<'static>) {
+fn restore_transition_store(target: TransitionTarget, store: ::nodes::Tuplestorestate<'static>) {
     crate::queue::with_after_triggers(|at| {
         let qd = target.table.query_depth as usize;
         let td = &mut at.query_stack[qd].tables[target.table.index];
@@ -3591,7 +3591,7 @@ impl Drop for TransitionEnvGuard {
 /// tuplestore_tuple_count`.
 fn register_transition_enr(
     mcx: mcx::Mcx<'static>,
-    env: &mut nodes::queryenvironment::QueryEnvironment<'static>,
+    env: &mut ::nodes::queryenvironment::QueryEnvironment<'static>,
     relid: Oid,
     name: String,
     target: TransitionTarget,
@@ -3604,16 +3604,16 @@ fn register_transition_enr(
         None => return Ok(()),
     };
     let enrtuples = sort_storage::tuplestore::tuplestore_tuple_count(&mut store) as f64;
-    let boxed: mcx::PgBox<'static, nodes::Tuplestorestate<'static>> =
+    let boxed: mcx::PgBox<'static, ::nodes::Tuplestorestate<'static>> =
         mcx::PgBox::try_new_in(store, mcx).map_err(|_| mcx.oom(0))?;
-    let md = nodes::queryenvironment::EphemeralNamedRelationMetadataData {
+    let md = ::nodes::queryenvironment::EphemeralNamedRelationMetadataData {
         name: Some(mcx::PgString::from_str_in(&name, mcx)?),
         reliddesc: relid,
         tupdesc: None,
-        enrtype: nodes::queryenvironment::ENR_NAMED_TUPLESTORE,
+        enrtype: ::nodes::queryenvironment::ENR_NAMED_TUPLESTORE,
         enrtuples,
     };
-    let enr = nodes::queryenvironment::EphemeralNamedRelationData {
+    let enr = ::nodes::queryenvironment::EphemeralNamedRelationData {
         md,
         reldata: Some(boxed),
     };
@@ -3625,11 +3625,11 @@ fn register_transition_enr(
 /// `oldslot`/`newslot` are real EState slots (or `None`).
 fn capture_transition_tuples<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     event: u32,
-    oldslot: Option<nodes::SlotId>,
-    newslot: Option<nodes::SlotId>,
-    tc: &nodes::modifytable::TransitionCaptureState,
+    oldslot: Option<::nodes::SlotId>,
+    newslot: Option<::nodes::SlotId>,
+    tc: &::nodes::modifytable::TransitionCaptureState,
 ) -> PgResult<()> {
     let original_insert_tuple = tc.tcs_original_insert_tuple;
 
@@ -3675,13 +3675,13 @@ fn capture_transition_tuples<'mcx>(
 /// duration.
 fn ri_fk_enforcement_skip<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     trig_index: usize,
     tgfoid: Oid,
     relkind: u8,
     fired_by_update: bool,
-    oldslot: Option<nodes::SlotId>,
-    newslot: Option<nodes::SlotId>,
+    oldslot: Option<::nodes::SlotId>,
+    newslot: Option<::nodes::SlotId>,
 ) -> PgResult<bool> {
     use ri_triggers_seams as ri;
     // RI_TRIGGER_NONE classification: nothing to do on the reachable
@@ -3764,8 +3764,8 @@ fn ri_fk_enforcement_skip<'mcx>(
         tg_trigtuple: None,
         tg_newtuple: None,
         tg_trigger: Some(trigger_box),
-        tg_trigslot: oldslot.map(|_| nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
-        tg_newslot: newslot.map(|_| nodes::SlotId(crate::ri_accessors::SLOT_NEW as u32)),
+        tg_trigslot: oldslot.map(|_| ::nodes::SlotId(crate::ri_accessors::SLOT_TRIG as u32)),
+        tg_newslot: newslot.map(|_| ::nodes::SlotId(crate::ri_accessors::SLOT_NEW as u32)),
         tg_oldtable: None,
         tg_newtable: None,
         tg_updatedcols: None,
@@ -3806,24 +3806,24 @@ fn ri_fk_enforcement_skip<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn after_trigger_save_event<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     src_part_oid: Oid,
     dst_part_oid: Oid,
     event: u32,
     row_trigger: bool,
     old_ctid: Option<ItemPointerData>,
-    oldslot: Option<nodes::SlotId>,
-    newslot: Option<nodes::SlotId>,
+    oldslot: Option<::nodes::SlotId>,
+    newslot: Option<::nodes::SlotId>,
     recheck_indexes: &[Oid],
-    modified_cols: Option<&nodes::Bitmapset<'_>>,
-    tc: Option<&nodes::modifytable::TransitionCaptureState>,
+    modified_cols: Option<&::nodes::Bitmapset<'_>>,
+    tc: Option<&::nodes::modifytable::TransitionCaptureState>,
     is_crosspart_update: bool,
 ) -> PgResult<()> {
     use types_catalog::pg_trigger::{
         TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES,
         TRIGGER_TYPE_ROW, TRIGGER_TYPE_UPDATE,
     };
-    use nodes::trigger::{
+    use ::nodes::trigger::{
         AFTER_TRIGGER_1CTID, AFTER_TRIGGER_2CTID, AFTER_TRIGGER_DEFERRABLE,
         AFTER_TRIGGER_INITDEFERRED,
     };
@@ -3933,7 +3933,7 @@ fn after_trigger_save_event<'mcx>(
                 old_ctid.expect("AfterTriggerSaveEvent: UPDATE row event needs the old ctid");
             let ns = newslot.expect("AfterTriggerSaveEvent: UPDATE row event needs a newslot");
             let upd_flag = if is_partitioned_root {
-                nodes::trigger::AFTER_TRIGGER_CP_UPDATE
+                ::nodes::trigger::AFTER_TRIGGER_CP_UPDATE
             } else {
                 AFTER_TRIGGER_2CTID
             };
@@ -3945,7 +3945,7 @@ fn after_trigger_save_event<'mcx>(
             )));
         }
     };
-    let mut new_event = nodes::trigger::AfterTriggerEventData {
+    let mut new_event = ::nodes::trigger::AfterTriggerEventData {
         ate_flags: tup_flag,
         ate_ctid1: ctid1,
         ate_ctid2: ctid2,
@@ -4158,11 +4158,11 @@ fn after_trigger_save_event<'mcx>(
 }
 
 /// The private [`AfterTriggersTableData`](crate::queue::TableData) index for an
-/// event, picked from the [`TransitionCaptureState`](nodes::modifytable::TransitionCaptureState)
+/// event, picked from the [`TransitionCaptureState`](::nodes::modifytable::TransitionCaptureState)
 /// (trigger.c:6540-6555: `ats_table = tcs_{insert,update,delete}_private`).
 fn private_table_for_event(
     event: u32,
-    tc: &nodes::modifytable::TransitionCaptureState,
+    tc: &::nodes::modifytable::TransitionCaptureState,
 ) -> Option<usize> {
     const TRIGGER_EVENT_DELETE: u32 = 1;
     const TRIGGER_EVENT_UPDATE: u32 = 2;
@@ -4184,17 +4184,17 @@ fn private_table_for_event(
 /// clause, so the WHEN-qual leg is unreachable here.
 fn after_trigger_save_event_stmt(
     estate: &mut EStateData<'_>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     event: u32,
     cmd_type: crate::queue::CmdType,
-    modified_cols: Option<&nodes::Bitmapset<'_>>,
-    tc: Option<&nodes::modifytable::TransitionCaptureState>,
+    modified_cols: Option<&::nodes::Bitmapset<'_>>,
+    tc: Option<&::nodes::modifytable::TransitionCaptureState>,
 ) -> PgResult<()> {
     use types_catalog::pg_trigger::{
         TRIGGER_TYPE_AFTER, TRIGGER_TYPE_DELETE, TRIGGER_TYPE_INSERT, TRIGGER_TYPE_MATCHES,
         TRIGGER_TYPE_STATEMENT, TRIGGER_TYPE_TRUNCATE, TRIGGER_TYPE_UPDATE,
     };
-    use nodes::trigger::{
+    use ::nodes::trigger::{
         AFTER_TRIGGER_1CTID, AFTER_TRIGGER_DEFERRABLE, AFTER_TRIGGER_INITDEFERRED,
         TRIGGER_EVENT_TRUNCATE,
     };
@@ -4237,7 +4237,7 @@ fn after_trigger_save_event_stmt(
         crate::queue::cancel_prior_stmt_triggers(rel_oid, cmd_type, event & TRIGGER_EVENT_OPMASK);
     }
 
-    let new_event = nodes::trigger::AfterTriggerEventData {
+    let new_event = ::nodes::trigger::AfterTriggerEventData {
         ate_flags: AFTER_TRIGGER_1CTID,
         ate_ctid1: ItemPointerData::default(),
         ate_ctid2: ItemPointerData::default(),
@@ -4356,11 +4356,11 @@ fn trigger_enabled_no_qual(tgenabled: i8) -> bool {
 
 fn exec_br_delete_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    epqstate: &mut nodes::EPQState<'mcx>,
-    relinfo: nodes::RriId,
+    epqstate: &mut ::nodes::EPQState<'mcx>,
+    relinfo: ::nodes::RriId,
     tupleid: Option<&ItemPointerData>,
     fdw_trigtuple: Option<&types_tuple::heaptuple::FormedTuple<'mcx>>,
-    epqslot: Option<&mut Option<nodes::SlotId>>,
+    epqslot: Option<&mut Option<::nodes::SlotId>>,
     tmresult: Option<&mut types_tableam::tableam::TM_Result>,
     tmfd: &mut types_tableam::tableam::TM_FailureData,
     is_merge_delete: bool,
@@ -4391,7 +4391,7 @@ fn exec_br_delete_triggers_impl<'mcx>(
             // Get + lock a copy of the on-disk tuple we are planning to delete,
             // into the OLD slot (GetTupleForTrigger).
             // `do_epq_recheck = !is_merge_delete`.
-            let mut epqslot_candidate: Option<nodes::SlotId> = None;
+            let mut epqslot_candidate: Option<::nodes::SlotId> = None;
             let tid = tupleid.expect("ExecBRDeleteTriggers: a non-FDW delete needs a tupleid");
             if !get_tuple_for_trigger(
                 estate,
@@ -4482,10 +4482,10 @@ fn exec_br_delete_triggers_impl<'mcx>(
 }
 fn exec_ar_delete_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     tupleid: Option<&ItemPointerData>,
     fdw_trigtuple: Option<&types_tuple::heaptuple::FormedTuple<'mcx>>,
-    tc: Option<&nodes::TransitionCaptureState>,
+    tc: Option<&::nodes::TransitionCaptureState>,
     is_crosspart_update: bool,
 ) -> PgResult<()> {
     // TriggerDesc *trigdesc = relinfo->ri_TrigDesc;
@@ -4602,7 +4602,7 @@ fn exec_ar_delete_triggers_impl<'mcx>(
 /// is ignored (C frees it; the owned model drops it).
 fn exec_ir_delete_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     trigtuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
 ) -> PgResult<bool> {
     use types_catalog::pg_trigger::{
@@ -4693,11 +4693,11 @@ fn exec_ir_delete_triggers_impl<'mcx>(
 
 fn exec_br_update_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    epqstate: &mut nodes::modifytable::EPQState<'mcx>,
-    relinfo: nodes::RriId,
+    epqstate: &mut ::nodes::modifytable::EPQState<'mcx>,
+    relinfo: ::nodes::RriId,
     tupleid: Option<&ItemPointerData>,
     fdw_trigtuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
-    newslot: nodes::SlotId,
+    newslot: ::nodes::SlotId,
     tmresult: Option<&mut types_tableam::tableam::TM_Result>,
     tmfd: &mut types_tableam::tableam::TM_FailureData,
     is_merge_update: bool,
@@ -4731,7 +4731,7 @@ fn exec_br_update_triggers_impl<'mcx>(
             // Get + lock a copy of the on-disk tuple we are planning to update,
             // into the OLD slot (GetTupleForTrigger).
             // `do_epq_recheck = !is_merge_update`.
-            let mut epqslot_candidate: Option<nodes::SlotId> = None;
+            let mut epqslot_candidate: Option<::nodes::SlotId> = None;
             let tid = tupleid.expect("ExecBRUpdateTriggers: a non-FDW update needs a tupleid");
             if !get_tuple_for_trigger(
                 estate,
@@ -4892,13 +4892,13 @@ fn exec_br_update_triggers_impl<'mcx>(
 #[allow(clippy::too_many_arguments)]
 fn get_tuple_for_trigger<'mcx>(
     estate: &mut EStateData<'mcx>,
-    _epqstate: &mut nodes::EPQState<'mcx>,
-    relinfo: nodes::RriId,
+    _epqstate: &mut ::nodes::EPQState<'mcx>,
+    relinfo: ::nodes::RriId,
     tid: &ItemPointerData,
     lockmode: types_tableam::tableam::LockTupleMode,
-    oldslot: nodes::SlotId,
+    oldslot: ::nodes::SlotId,
     do_epq_recheck: bool,
-    epqslot: Option<&mut Option<nodes::SlotId>>,
+    epqslot: Option<&mut Option<::nodes::SlotId>>,
     mut tmresultp: Option<&mut types_tableam::tableam::TM_Result>,
     tmfdp: &mut types_tableam::tableam::TM_FailureData,
 ) -> PgResult<bool> {
@@ -5031,9 +5031,9 @@ fn epq_recheck_unported() -> PgError {
 /// "do nothing" (`Ok(false)`).
 fn exec_ir_update_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
     trigtuple: Option<types_tuple::heaptuple::FormedTuple<'mcx>>,
-    newslot: nodes::SlotId,
+    newslot: ::nodes::SlotId,
 ) -> PgResult<bool> {
     use types_catalog::pg_trigger::{
         TRIGGER_TYPE_INSTEAD, TRIGGER_TYPE_MATCHES, TRIGGER_TYPE_ROW, TRIGGER_TYPE_UPDATE,
@@ -5151,14 +5151,14 @@ fn exec_ir_update_triggers_impl<'mcx>(
 }
 fn exec_ar_update_triggers_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
-    src_partinfo: Option<nodes::RriId>,
-    _dst_partinfo: Option<nodes::RriId>,
+    relinfo: ::nodes::RriId,
+    src_partinfo: Option<::nodes::RriId>,
+    _dst_partinfo: Option<::nodes::RriId>,
     tupleid: Option<&ItemPointerData>,
     fdw_trigtuple: Option<&types_tuple::heaptuple::FormedTuple<'mcx>>,
-    newslot: Option<nodes::SlotId>,
+    newslot: Option<::nodes::SlotId>,
     recheck_indexes: &[Oid],
-    tc: Option<&mut nodes::modifytable::TransitionCaptureState>,
+    tc: Option<&mut ::nodes::modifytable::TransitionCaptureState>,
     is_crosspart_update: bool,
 ) -> PgResult<()> {
     let rri = estate.result_rel(relinfo);
@@ -5398,10 +5398,10 @@ fn exec_ar_update_triggers_impl<'mcx>(
 fn make_transition_capture_state_impl<'mcx>(
     _mcx: Mcx<'mcx>,
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
-    cmd_type: nodes::nodes::CmdType,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::modifytable::TransitionCaptureState>>> {
-    use nodes::nodes::CmdType;
+    relinfo: ::nodes::RriId,
+    cmd_type: ::nodes::nodes::CmdType,
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::modifytable::TransitionCaptureState>>> {
+    use ::nodes::nodes::CmdType;
 
     // if (trigdesc == NULL) return NULL;
     let trigdesc = match estate.result_rel(relinfo).ri_TrigDesc.as_ref() {
@@ -5500,7 +5500,7 @@ fn make_transition_capture_state_impl<'mcx>(
 
         // Now create required tuplestore(s), if we don't have them already.
         let qd = at.query_depth as usize;
-        let make = || -> PgResult<nodes::Tuplestorestate<'static>> {
+        let make = || -> PgResult<::nodes::Tuplestorestate<'static>> {
             sort_storage::tuplestore::tuplestore_begin_heap_hold(false)
         };
         if let Some(i) = upd_idx {
@@ -5526,7 +5526,7 @@ fn make_transition_capture_state_impl<'mcx>(
     })?;
 
     // Now build the TransitionCaptureState struct, in caller's context.
-    let state = nodes::modifytable::TransitionCaptureState {
+    let state = ::nodes::modifytable::TransitionCaptureState {
         tcs_delete_old_table: need_old_del,
         tcs_update_old_table: need_old_upd,
         tcs_update_new_table: need_new_upd,
@@ -5541,7 +5541,7 @@ fn make_transition_capture_state_impl<'mcx>(
 
 fn has_noncloned_pk_fkey_trigger_impl<'mcx>(
     estate: &mut EStateData<'mcx>,
-    relinfo: nodes::RriId,
+    relinfo: ::nodes::RriId,
 ) -> PgResult<bool> {
     // ExecCrossPartitionUpdateForeignKey's inner walk over
     // `rInfo->ri_TrigDesc->triggers` (nodeModifyTable.c:2400-2411): return true
@@ -5888,7 +5888,7 @@ impl Drop for RoleRestoreGuard {
 /// IMMEDIATE }`. The dispatcher hands the rich `ConstraintsSetStmt` node; this
 /// allocates the catalog-scan scratch in a private context (the bare seam
 /// carries no `mcx`, cf. `get_trigger_oid_impl`).
-fn after_trigger_set_state_seam<'mcx>(stmt: &nodes::nodes::Node<'mcx>) -> PgResult<()> {
+fn after_trigger_set_state_seam<'mcx>(stmt: &::nodes::nodes::Node<'mcx>) -> PgResult<()> {
     let css = match stmt.as_constraintssetstmt() {
         Some(s) => s,
         None => {
@@ -5904,7 +5904,7 @@ fn after_trigger_set_state_seam<'mcx>(stmt: &nodes::nodes::Node<'mcx>) -> PgResu
 /// `AfterTriggerSetState(ConstraintsSetStmt *stmt)` (trigger.c:5767).
 fn after_trigger_set_state<'mcx, 'n>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::ddlnodes::ConstraintsSetStmt<'n>,
+    stmt: &::nodes::ddlnodes::ConstraintsSetStmt<'n>,
 ) -> PgResult<()> {
     use crate::queue::{
         set_constraint_state_add_item, set_constraint_state_copy, set_constraint_state_create,
@@ -5994,7 +5994,7 @@ fn after_trigger_set_state<'mcx, 'n>(
 /// constraints in partitions. Returns the `tgoidlist`.
 fn resolve_constraint_trigger_oids<'mcx, 'n>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::ddlnodes::ConstraintsSetStmt<'n>,
+    stmt: &::nodes::ddlnodes::ConstraintsSetStmt<'n>,
 ) -> PgResult<Vec<Oid>> {
     use scankey::ScanKeyInit;
     use genam_seams as genam_seams;

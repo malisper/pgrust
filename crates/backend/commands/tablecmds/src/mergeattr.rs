@@ -20,9 +20,9 @@ use types_error::{PgError, PgResult, ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYP
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE};
-use nodes::ddlnodes::{Constraint, ConstrType};
-use nodes::nodes::{Node, NodePtr};
-use nodes::rawnodes::ColumnDef;
+use ::nodes::ddlnodes::{Constraint, ConstrType};
+use ::nodes::nodes::{Node, NodePtr};
+use ::nodes::rawnodes::ColumnDef;
 use types_tuple::access::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
     RELPERSISTENCE_TEMP};
 use types_tuple::heaptuple::MaxHeapAttributeNumber;
@@ -38,7 +38,7 @@ use equalfuncs_seams::equal_node;
 use rewritemanip_seams::map_variable_attnos_node;
 use adt_format_type::format_type_with_typemod;
 use lsyscache::collation_constraint_language_cast::get_collation_name;
-use nodes::bitmapset::Bitmapset;
+use ::nodes::bitmapset::Bitmapset;
 use types_storage::lock::NoLock;
 
 use tupdesc::TupleDescGetDefault;

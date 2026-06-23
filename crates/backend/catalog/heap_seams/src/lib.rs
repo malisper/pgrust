@@ -9,8 +9,8 @@ use mcx::{Mcx, PgVec};
 use types_cluster::RelOptionsToken;
 use types_core::primitive::{Oid, RelFileNumber, TransactionId};
 use types_error::PgResult;
-use nodes::nodes::NodePtr;
-use nodes::primnodes::OnCommitAction;
+use ::nodes::nodes::NodePtr;
+use ::nodes::primnodes::OnCommitAction;
 use rel::Relation;
 use types_tuple::heaptuple::TupleDescData;
 

@@ -47,7 +47,7 @@ use postgres_seams as tcop_postgres;
 use mcx::Mcx;
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
-use nodes::nodeindexonlyscan::{
+use ::nodes::nodeindexonlyscan::{
     IndexOnlyScan, IndexOnlyScanState, ParallelIndexScanDescHandle,
 };
 use nodes::{EStateData, InvalidBuffer, SlotId, TupleSlotKind};
@@ -73,7 +73,7 @@ fn feature(message: &'static str) -> PgError {
 // --- EvalPlanQual per-relation array reads (owned EPQState in es_epq_active) -
 // C: `epqstate->relsubs_slot[idx] != NULL`.
 #[inline]
-fn epq_relsubs_slot_present(epqstate: &nodes::EPQState<'_>, idx: usize) -> bool {
+fn epq_relsubs_slot_present(epqstate: &::nodes::EPQState<'_>, idx: usize) -> bool {
     epqstate
         .relsubs_slot
         .as_ref()
@@ -84,7 +84,7 @@ fn epq_relsubs_slot_present(epqstate: &nodes::EPQState<'_>, idx: usize) -> bool 
 
 // C: `epqstate->relsubs_rowmark[idx] != NULL`.
 #[inline]
-fn epq_relsubs_rowmark_present(epqstate: &nodes::EPQState<'_>, idx: usize) -> bool {
+fn epq_relsubs_rowmark_present(epqstate: &::nodes::EPQState<'_>, idx: usize) -> bool {
     epqstate
         .relsubs_rowmark
         .as_ref()
@@ -94,7 +94,7 @@ fn epq_relsubs_rowmark_present(epqstate: &nodes::EPQState<'_>, idx: usize) -> bo
 
 // C: `epqstate->relsubs_done[idx]`.
 #[inline]
-fn epq_relsubs_done(epqstate: &nodes::EPQState<'_>, idx: usize) -> bool {
+fn epq_relsubs_done(epqstate: &::nodes::EPQState<'_>, idx: usize) -> bool {
     epqstate
         .relsubs_done
         .as_ref()
@@ -117,7 +117,7 @@ fn IndexOnlyNext<'mcx>(
     // direction = ScanDirectionCombine(estate->es_direction, indexorderdir);
     let plan_dir = match node.ss.ps.plan {
         // The node's plan is always an IndexOnlyScan.
-        Some(p) if p.node_tag() == nodes::nodes::ntag::T_IndexOnlyScan => p.expect_indexonlyscan().indexorderdir,
+        Some(p) if p.node_tag() == ::nodes::nodes::ntag::T_IndexOnlyScan => p.expect_indexonlyscan().indexorderdir,
         _ => return Err(elog("IndexOnlyScan node has wrong plan type")),
     };
     let direction = scan_direction_combine(estate.es_direction, plan_dir);
@@ -337,7 +337,7 @@ fn StoreIndexTuple<'mcx>(
     node: &mut IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     slot: SlotId,
-    econtext: nodes::EcxtId,
+    econtext: ::nodes::EcxtId,
 ) -> PgResult<()> {
     // ExecClearTuple(slot);
     // index_deform_tuple(itup, itupdesc, slot->tts_values, slot->tts_isnull);
@@ -413,14 +413,14 @@ fn IndexOnlyRecheck<'mcx>(
 /// `chgParam` propagation, and `ReScanExprContext` before the node-specific
 /// rescan, none of which `ExecReScanIndexOnlyScan` does on its own.
 pub fn ExecIndexOnlyScan<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // If we have runtime keys and they've not already been set up, do it now.
     //   if (node->ioss_NumRuntimeKeys != 0 && !node->ioss_RuntimeKeysReady)
     //       ExecReScan((PlanState *) node);
     let (num_runtime_keys, ready) = match pstate {
-        nodes::PlanStateNode::IndexOnlyScan(n) => {
+        ::nodes::PlanStateNode::IndexOnlyScan(n) => {
             (n.ioss_NumRuntimeKeys, n.ioss_RuntimeKeysReady)
         }
         _ => return Err(elog("ExecIndexOnlyScan dispatched to wrong node type")),
@@ -433,7 +433,7 @@ pub fn ExecIndexOnlyScan<'mcx>(
     }
 
     let node = match pstate {
-        nodes::PlanStateNode::IndexOnlyScan(n) => &mut **n,
+        ::nodes::PlanStateNode::IndexOnlyScan(n) => &mut **n,
         _ => return Err(elog("ExecIndexOnlyScan dispatched to wrong node type")),
     };
 
@@ -595,7 +595,7 @@ pub fn ExecIndexOnlyRestrPos<'mcx>(
 /// `ExecInitIndexOnlyScan(node, estate, eflags)` — initialize the index scan's
 /// state, create scan keys, and open the base and index relations.
 pub fn ExecInitIndexOnlyScan<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<mcx::PgBox<'mcx, IndexOnlyScanState<'mcx>>> {
@@ -989,7 +989,7 @@ pub fn ExecIndexOnlyScanRetrieveInstrumentation<'mcx>(
 
     // Create a backend-local copy of SharedInfo (C: palloc + memcpy of
     // offsetof(winstrument) + num_workers * sizeof(IndexScanInstrumentation)).
-    let copy = nodes::SharedIndexScanInstrumentation {
+    let copy = ::nodes::SharedIndexScanInstrumentation {
         num_workers: shared.num_workers,
         winstrument: {
             let mut v = mcx::vec_with_capacity_in(mcx, shared.winstrument.len())?;
@@ -1039,7 +1039,7 @@ fn instr_count_filtered2(node: &mut IndexOnlyScanState<'_>, delta: u64) {
 /// `((Scan *) node->ss.ps.plan)->scanrelid`.
 fn scan_scanrelid(node: &IndexOnlyScanState<'_>) -> PgResult<u32> {
     match node.ss.ps.plan {
-        Some(p) if p.node_tag() == nodes::nodes::ntag::T_IndexOnlyScan => Ok(p.expect_indexonlyscan().scan.scanrelid),
+        Some(p) if p.node_tag() == ::nodes::nodes::ntag::T_IndexOnlyScan => Ok(p.expect_indexonlyscan().scan.scanrelid),
         _ => Err(elog("IndexOnlyScan node has wrong plan type")),
     }
 }
@@ -1108,13 +1108,13 @@ fn index_attr_is_namecstring(node: &IndexOnlyScanState<'_>, attnum: i32) -> PgRe
 
 /// The `ExecProcNode` callback trampoline installed into `ps.ExecProcNode`.
 fn exec_proc_node_trampoline<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let have = ExecIndexOnlyScan(pstate, estate)?;
     if have {
         let node = match pstate {
-            nodes::PlanStateNode::IndexOnlyScan(n) => &mut **n,
+            ::nodes::PlanStateNode::IndexOnlyScan(n) => &mut **n,
             _ => return Err(elog("ExecProcNode dispatched to wrong node type")),
         };
         // The result tuple is in the projection result slot (or the scan slot

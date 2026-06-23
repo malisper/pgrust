@@ -43,7 +43,7 @@ use types_error::{
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA,
     ERRCODE_UNDEFINED_TABLE, ERROR,
 };
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 use snapshot::SnapshotData;
 
 use utils_error::ereport;
@@ -1633,7 +1633,7 @@ pub fn init_seams() {
     collationcmds_seams::aclcheck_error_not_owner_collation::set(|collname| {
         aclcheck_error(
             ACLCHECK_NOT_OWNER,
-            nodes::parsenodes::ObjectType::Collation,
+            ::nodes::parsenodes::ObjectType::Collation,
             Some(collname),
         )
     });

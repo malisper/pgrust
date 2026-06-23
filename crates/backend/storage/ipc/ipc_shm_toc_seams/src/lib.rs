@@ -12,7 +12,7 @@
 #![allow(clippy::result_large_err)]
 
 use types_error::PgResult;
-use nodes::ParallelContext;
+use ::nodes::ParallelContext;
 
 seam_core::seam!(
     /// `shm_toc_estimate_chunk(&pcxt->estimator, nbytes)`: reserve space for a

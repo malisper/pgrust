@@ -21,10 +21,10 @@ use alloc::vec::Vec;
 
 use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::{CmdType, Node};
-use nodes::parsenodes::{RTEPermissionInfo, RangeTblEntry};
-use nodes::partprune_carrier::{
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::parsenodes::{RTEPermissionInfo, RangeTblEntry};
+use ::nodes::partprune_carrier::{
     PartitionPruneCombineOp, PartitionPruneInfo, PartitionPruneStep, PartitionPruneStepCombine,
     PartitionPruneStepOp, PartitionedRelPruneInfo, RawBms,
 };
@@ -601,7 +601,7 @@ fn read_partition_prune_step_body<'mcx>(
 /// and unwrapped from the `Node::Expr` cast. `<>`/NIL is empty.
 fn read_expr_list_field<'mcx>(
     mcx: Mcx<'mcx>,
-) -> PgResult<Vec<nodes::primnodes::Expr<'mcx>>> {
+) -> PgResult<Vec<::nodes::primnodes::Expr<'mcx>>> {
     let items = read_node_list_field(mcx)?;
     let mut out = Vec::with_capacity(items.len());
     for it in items {

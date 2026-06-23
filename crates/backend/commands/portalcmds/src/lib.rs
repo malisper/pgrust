@@ -17,13 +17,13 @@ use types_error::{
     ERRCODE_UNDEFINED_CURSOR, ERROR,
 };
 
-use nodes::nodes::CMD_SELECT;
-use nodes::portalcmds::{
+use ::nodes::nodes::CMD_SELECT;
+use ::nodes::portalcmds::{
     DeclareCursorStmt, FetchStmt, ParamListInfo, ParseState, Query, CURSOR_OPT_HOLD,
     CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
 };
-use nodes::nodes::{CmdType, Node};
-use nodes::parsestmt::{DestReceiverHandle, ParseState as CanonParseState};
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::parsestmt::{DestReceiverHandle, ParseState as CanonParseState};
 use portal::{
     CommandTag, FetchDirection, Portal, QueryCompletion, CMDTAG_FETCH, CMDTAG_MOVE, PORTAL_FAILED,
     PORTAL_ONE_SELECT, PORTAL_READY,
@@ -75,7 +75,7 @@ pub fn init_seams() {
 }
 
 /// `UtilityReturnsTuples` FETCH leg — `GetPortalByName(name)->tupDesc != NULL`.
-fn fetch_stmt_portal_tupdesc_arm(parsetree: &nodes::nodes::Node) -> bool {
+fn fetch_stmt_portal_tupdesc_arm(parsetree: &::nodes::nodes::Node) -> bool {
     let Some(stmt) = parsetree.as_fetchstmt() else {
         panic!("fetch_stmt_portal_tupdesc: parse tree is not a FetchStmt");
     };
@@ -95,7 +95,7 @@ fn fetch_stmt_portal_tupdesc_arm(parsetree: &nodes::nodes::Node) -> bool {
 /// has no result descriptor (`None`); an invalid portal folds to `None`.
 fn fetch_stmt_result_desc_arm<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> types_tuple::heaptuple::TupleDesc<'mcx> {
     let Some(fstmt) = stmt.as_fetchstmt() else {
         panic!("fetch_stmt_result_desc: parse tree is not a FetchStmt");
@@ -204,8 +204,8 @@ fn perform_portal_fetch_canon_arm<'mcx>(
 /// modules), so this is the identity — written explicitly to document the
 /// crossing.
 fn map_canon_fetch_direction(
-    d: nodes::ddlnodes::FetchDirection,
-) -> nodes::portalcmds::FetchDirection {
+    d: ::nodes::ddlnodes::FetchDirection,
+) -> ::nodes::portalcmds::FetchDirection {
     d
 }
 
@@ -216,7 +216,7 @@ fn map_canon_fetch_direction(
 pub fn PerformCursorOpenCanonical<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     pstate: &CanonParseState<'mcx>,
-    cstmt: &nodes::ddlnodes::DeclareCursorStmt<'mcx>,
+    cstmt: &::nodes::ddlnodes::DeclareCursorStmt<'mcx>,
     params: ParamListInfo,
     is_top_level: bool,
 ) -> PgResult<()> {
@@ -551,8 +551,8 @@ fn set_query_completion(qc: &mut QueryCompletion, command_tag: CommandTag, nproc
 
 /// Map the parser's `FetchDirection` (types-nodes) onto the portal-runtime
 /// `FetchDirection` (types-portal); the enum is identical (parsenodes.h).
-fn map_fetch_direction(d: nodes::portalcmds::FetchDirection) -> FetchDirection {
-    use nodes::portalcmds::FetchDirection as N;
+fn map_fetch_direction(d: ::nodes::portalcmds::FetchDirection) -> FetchDirection {
+    use ::nodes::portalcmds::FetchDirection as N;
     match d {
         N::FETCH_FORWARD => FetchDirection::FETCH_FORWARD,
         N::FETCH_BACKWARD => FetchDirection::FETCH_BACKWARD,
@@ -781,7 +781,7 @@ fn persist_holdable_portal_try(portal: &Portal) -> PgResult<()> {
     {
         struct Restore<'p> {
             portal: &'p Portal,
-            qd: Option<nodes::querydesc::QueryDesc>,
+            qd: Option<::nodes::querydesc::QueryDesc>,
         }
         impl Drop for Restore<'_> {
             fn drop(&mut self) {

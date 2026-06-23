@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use types_core::BlockNumber;
 use types_dsa::{DsaHandle, DsaPointer};
 use types_error::PgResult;
-use nodes::bitmapset::bitmapword;
+use ::nodes::bitmapset::bitmapword;
 use types_vacuum::vacuumlazy::{TidStore, TidStoreIterHandle};
 
 // ---- creation / teardown ----------------------------------------------------

@@ -91,8 +91,8 @@ use types_core::primitive::{
 };
 use datum::datum::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INVALID_TABLESAMPLE_ARGUMENT};
-use nodes::nodes::{Node, NodeTag};
-use nodes::primnodes::Expr;
+use ::nodes::nodes::{Node, NodeTag};
+use ::nodes::primnodes::Expr;
 use pathnodes::{PlannerInfo, RelOptInfo};
 use samplescan::{SampleScanState, TsmRoutine};
 
@@ -299,7 +299,7 @@ pub fn system_samplescangetsamplesize<'mcx>(
 /// `system_initsamplescan(node, eflags)` — initialize during executor setup.
 /// C: `node->tsm_state = palloc0(sizeof(SystemSamplerData));`. `eflags` unused.
 fn system_initsamplescan<'mcx>(node: &mut SampleScanState<'mcx>, _eflags: i32) {
-    node.tsm_state = Some(nodes::execnodes::Opaque(Some(Box::new(
+    node.tsm_state = Some(::nodes::execnodes::Opaque(Some(Box::new(
         SystemSamplerData::default(),
     ))));
 }
@@ -476,7 +476,7 @@ pub fn bernoulli_samplescangetsamplesize<'mcx>(
 /// C: `node->tsm_state = palloc0(sizeof(BernoulliSamplerData));`. `eflags`
 /// unused.
 fn bernoulli_initsamplescan<'mcx>(node: &mut SampleScanState<'mcx>, _eflags: i32) {
-    node.tsm_state = Some(nodes::execnodes::Opaque(Some(Box::new(
+    node.tsm_state = Some(::nodes::execnodes::Opaque(Some(Box::new(
         BernoulliSamplerData::default(),
     ))));
 }

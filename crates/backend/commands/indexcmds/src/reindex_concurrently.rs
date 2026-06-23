@@ -29,8 +29,8 @@ use types_storage::lock::LOCKTAG;
 
 use types_catalog::catalog::RELATION_RELATION_ID;
 use types_catalog::catalog_dependency::ObjectAddress;
-use nodes::ddlnodes::ReindexStmt;
-use nodes::parsenodes::DropBehavior;
+use ::nodes::ddlnodes::ReindexStmt;
+use ::nodes::parsenodes::DropBehavior;
 
 use types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_TOASTVALUE,

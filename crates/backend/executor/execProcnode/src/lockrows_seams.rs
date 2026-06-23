@@ -24,8 +24,8 @@
 use mcx::PgBox;
 use types_core::primitive::{AttrNumber, Index};
 use types_error::{PgError, PgResult};
-use nodes::execnodes::EStateData;
-use nodes::nodelockrows::{
+use ::nodes::execnodes::EStateData;
+use ::nodes::nodelockrows::{
     ExecAuxRowMarkData, ExecRowMark, LockRows, LockRowsStateData, LockWaitError, LockWaitSkip,
     ROW_MARK_COPY,
 };
@@ -151,7 +151,7 @@ fn bridge_recheck_slot_to_parent<'mcx>(
             let ps = execTuples::exec_alloc_table_slot::call(
                 estate,
                 desc_owned,
-                nodes::TupleSlotKind::HeapTuple,
+                ::nodes::TupleSlotKind::HeapTuple,
             )?;
             node.lr_epqstate.epq_parent_result_slot = Some(ps);
             ps
@@ -258,7 +258,7 @@ fn ExecBuildAuxRowMark<'mcx>(
 /// of the resjunk `TargetEntry` whose `resname` matches, or 0
 /// (`InvalidAttrNumber`) if none.
 fn find_junk_in_tlist<'mcx>(
-    targetlist: Option<&mcx::PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>>,
+    targetlist: Option<&mcx::PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>>,
     attr_name: &str,
 ) -> AttrNumber {
     let Some(tlist) = targetlist else {

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use mcx::{vec_with_capacity_in, MemoryContext};
-use nodes::executor::TupleTableSlot;
+use ::nodes::executor::TupleTableSlot;
 use samplescan::TsmRoutine;
 
 thread_local! {
@@ -49,7 +49,7 @@ fn static_mcx() -> mcx::Mcx<'static> {
 
 fn zeroed_tsm_routine() -> TsmRoutine {
     TsmRoutine {
-        type_: nodes::nodes::NodeTag(0),
+        type_: ::nodes::nodes::NodeTag(0),
         parameterTypes: Vec::new(),
         repeatable_across_queries: false,
         repeatable_across_scans: false,
@@ -205,12 +205,12 @@ fn make_sample_scan<'mcx>(repeatable: bool) -> SampleScan<'mcx> {
     let mut tsc = TableSampleClause::default();
     tsc.tsmhandler = 0;
     if repeatable {
-        tsc.repeatable = Some(Box::new(nodes::primnodes::Expr::Const(
-            nodes::primnodes::Const::default(),
+        tsc.repeatable = Some(Box::new(::nodes::primnodes::Expr::Const(
+            ::nodes::primnodes::Const::default(),
         )));
     }
     SampleScan {
-        scan: nodes::nodeindexscan::Scan::default(),
+        scan: ::nodes::nodeindexscan::Scan::default(),
         tablesample: Some(Box::new(tsc)),
     }
 }

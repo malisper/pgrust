@@ -44,7 +44,7 @@ use alloc::vec::Vec;
 
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::primnodes::{Expr, ExprRelids};
+use ::nodes::primnodes::{Expr, ExprRelids};
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     Bitmapset, PlannerInfo, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT,
@@ -618,8 +618,8 @@ fn expr_relids_to_relids(er: &ExprRelids) -> Relids {
 /// lock-clause strength as its SQL spelling for the error message. Inlined here
 /// (the analyze.c owner is a downstream crate — depending on it would be a
 /// cycle); a trivial, faithful mapping.
-fn lcs_as_string(strength: nodes::rawnodes::LockClauseStrength) -> &'static str {
-    use nodes::rawnodes::LockClauseStrength::*;
+fn lcs_as_string(strength: ::nodes::rawnodes::LockClauseStrength) -> &'static str {
+    use ::nodes::rawnodes::LockClauseStrength::*;
     match strength {
         LCS_NONE => "FOR NO KEY UPDATE", // should not happen here
         LCS_FORKEYSHARE => "FOR KEY SHARE",

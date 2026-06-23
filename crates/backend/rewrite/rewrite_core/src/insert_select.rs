@@ -4,9 +4,9 @@
 //! subquery for an INSERT/SELECT action).
 
 use types_error::{PgError, PgResult};
-use nodes::copy_query::Query;
-use nodes::nodes::CmdType;
-use nodes::parsenodes::RTEKind;
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::CmdType;
+use ::nodes::parsenodes::RTEKind;
 
 /// `PRS2_OLD_VARNO` / `PRS2_NEW_VARNO` (primnodes.h) — the rangetable indexes
 /// (1-based) of the OLD and NEW placeholder entries in a rule-action query.

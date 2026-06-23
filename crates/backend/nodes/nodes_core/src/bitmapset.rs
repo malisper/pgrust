@@ -2,7 +2,7 @@
 //!
 //! This is the shared ABI/lifetime foundation the rest of the
 //! `backend-nodes-core` unit (and a wall of already-merged executor/optimizer
-//! units) compiles against: the owned `nodes::Bitmapset<'mcx>` and the
+//! units) compiles against: the owned `::nodes::Bitmapset<'mcx>` and the
 //! `bms_*` operations over it. It owns and installs `backend-nodes-core-seams`.
 //!
 //! ## Owned model
@@ -24,7 +24,7 @@
 use hashfn::hash_bytes;
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
-use nodes::bitmapset::{bitmapword, Bitmapset};
+use ::nodes::bitmapset::{bitmapword, Bitmapset};
 
 /// `BITS_PER_BITMAPWORD` (nodes/bitmapset.h): 64 on LP64.
 const BITS_PER_BITMAPWORD: i32 = 64;
@@ -67,7 +67,7 @@ fn has_multiple_ones(w: bitmapword) -> bool {
     w & w.wrapping_neg() != w
 }
 
-pub use nodes::bitmapset::BMS_Comparison;
+pub use ::nodes::bitmapset::BMS_Comparison;
 
 /// `BMS_Membership` (nodes/bitmapset.h) — result of [`bms_membership`].
 #[allow(non_camel_case_types)]

@@ -9,7 +9,7 @@
 //! create/destroy round trip.
 
 use super::*;
-use nodes::partition::{PartitionBoundInfoData, PartitionStrategy};
+use ::nodes::partition::{PartitionBoundInfoData, PartitionStrategy};
 
 fn empty_partdesc<'mcx>(mcx: Mcx<'mcx>) -> PgResult<PartitionDescData<'mcx>> {
     Ok(PartitionDescData {

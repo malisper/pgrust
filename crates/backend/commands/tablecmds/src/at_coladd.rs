@@ -34,8 +34,8 @@ use types_error::{
     PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_TOO_MANY_COLUMNS, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     NOTICE,
 };
-use nodes::ddlnodes::AlterTableCmd;
-use nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::ddlnodes::AlterTableCmd;
+use ::nodes::nodes::{ntag, Node, NodePtr};
 use rel::Relation;
 use types_storage::lock::{NoLock, LOCKMODE};
 use types_tuple::access::{
@@ -87,7 +87,7 @@ pub fn ATParseTransformCmd<'mcx>(
         mcx,
         rel.rd_rel.relnamespace,
     )?;
-    let rangevar = nodes::rawnodes::RangeVar {
+    let rangevar = ::nodes::rawnodes::RangeVar {
         catalogname: None,
         schemaname: match nspname {
             Some(s) => Some(mcx::PgString::from_str_in(s.as_str(), mcx)?),
@@ -105,10 +105,10 @@ pub fn ATParseTransformCmd<'mcx>(
     let mut cmds: PgVec<'mcx, NodePtr<'mcx>> = PgVec::new_in(mcx);
     cmds.push(cmd_node);
 
-    let atstmt = nodes::ddlnodes::AlterTableStmt {
+    let atstmt = ::nodes::ddlnodes::AlterTableStmt {
         relation: Some(relation_node),
         cmds,
-        objtype: nodes::parsenodes::OBJECT_TABLE,
+        objtype: ::nodes::parsenodes::OBJECT_TABLE,
         missing_ok: false,
     };
     let atstmt_node = mcx::alloc_in(mcx, Node::mk_alter_table_stmt(mcx, atstmt)?)?;
@@ -153,11 +153,11 @@ pub fn ATParseTransformCmd<'mcx>(
         // be added by parse_utilcmd.c; otherwise the default executes the
         // subcommand immediately as a substitute for the original.
         let pass: AlterTablePass = match cmd2.subtype {
-            nodes::ddlnodes::AlterTableType::AT_AddIndex => crate::at_phase::AT_PASS_ADD_INDEX,
-            nodes::ddlnodes::AlterTableType::AT_AddIndexConstraint => {
+            ::nodes::ddlnodes::AlterTableType::AT_AddIndex => crate::at_phase::AT_PASS_ADD_INDEX,
+            ::nodes::ddlnodes::AlterTableType::AT_AddIndexConstraint => {
                 crate::at_phase::AT_PASS_ADD_INDEXCONSTR
             }
-            nodes::ddlnodes::AlterTableType::AT_AddConstraint => {
+            ::nodes::ddlnodes::AlterTableType::AT_AddConstraint => {
                 // Recursion occurs during execution phase.
                 if recurse {
                     cmd2.recurse = true;
@@ -168,7 +168,7 @@ pub fn ATParseTransformCmd<'mcx>(
                     .expect("AT_AddConstraint: cmd.def is NULL")
                     .expect_constraint()
                     .contype;
-                use nodes::ddlnodes::ConstrType::*;
+                use ::nodes::ddlnodes::ConstrType::*;
                 match contype {
                     CONSTR_NOTNULL => crate::at_phase::AT_PASS_COL_ATTRS,
                     CONSTR_PRIMARY | CONSTR_UNIQUE | CONSTR_EXCLUSION => {
@@ -177,7 +177,7 @@ pub fn ATParseTransformCmd<'mcx>(
                     _ => crate::at_phase::AT_PASS_ADD_OTHERCONSTR,
                 }
             }
-            nodes::ddlnodes::AlterTableType::AT_AlterColumnGenericOptions => {
+            ::nodes::ddlnodes::AlterTableType::AT_AlterColumnGenericOptions => {
                 crate::at_phase::AT_PASS_MISC
             }
             _ => cur_pass,
@@ -567,8 +567,8 @@ pub fn ATExecAddColumn<'mcx>(
                 NoLock,
                 false,
             )?;
-            let nve = nodes::primnodes::Expr::NextValueExpr(
-                nodes::primnodes::NextValueExpr {
+            let nve = ::nodes::primnodes::Expr::NextValueExpr(
+                ::nodes::primnodes::NextValueExpr {
                     seqid,
                     typeId: attribute_typid,
                 },
@@ -621,12 +621,12 @@ pub fn ATExecAddColumn<'mcx>(
             let coerced = coerce::coerce_to_target_type(
                 mcx,
                 None,
-                nodes::primnodes::Expr::Const(null_const).erase_lifetime(),
+                ::nodes::primnodes::Expr::Const(null_const).erase_lifetime(),
                 base_type_id,
                 attribute_typid,
                 attribute_typmod,
-                nodes::ddlnodes::CoercionContext::COERCION_ASSIGNMENT,
-                nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
+                ::nodes::ddlnodes::CoercionContext::COERCION_ASSIGNMENT,
+                ::nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST,
                 -1,
             )?;
             // if (defval == NULL) /* should not happen */
@@ -636,7 +636,7 @@ pub fn ATExecAddColumn<'mcx>(
             })?;
             // Bring the parser-arena `'static` coercion result into `mcx`
             // (Expr is invariant over its lifetime).
-            let coerced: nodes::primnodes::Expr<'mcx> = coerced.clone_in(mcx)?;
+            let coerced: ::nodes::primnodes::Expr<'mcx> = coerced.clone_in(mcx)?;
             defval = Some(mcx::alloc_in(mcx, coerced)?);
         }
 
@@ -855,7 +855,7 @@ fn att_i16(mcx: Mcx<'_>, tup: &FormedTuple<'_>, anum: i16) -> PgResult<i16> {
 fn clone_columndef<'mcx>(
     mcx: Mcx<'mcx>,
     cmd: &AlterTableCmd<'mcx>,
-) -> PgResult<nodes::rawnodes::ColumnDef<'mcx>> {
+) -> PgResult<::nodes::rawnodes::ColumnDef<'mcx>> {
     let def = cmd.def.as_deref().expect("ADD COLUMN: cmd.def is NULL");
     if def.node_tag() != ntag::T_ColumnDef {
         unreachable!("ADD COLUMN: cmd.def is not a ColumnDef");
@@ -863,7 +863,7 @@ fn clone_columndef<'mcx>(
     def.expect_columndef().clone_in(mcx)
 }
 
-fn columndef_colname<'a>(col_def: &'a nodes::rawnodes::ColumnDef<'_>) -> &'a str {
+fn columndef_colname<'a>(col_def: &'a ::nodes::rawnodes::ColumnDef<'_>) -> &'a str {
     col_def
         .colname
         .as_ref()

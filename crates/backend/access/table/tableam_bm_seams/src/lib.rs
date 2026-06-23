@@ -10,7 +10,7 @@
 #![allow(non_snake_case)]
 
 use types_error::PgResult;
-use nodes::tuptable::SlotData;
+use ::nodes::tuptable::SlotData;
 use rel::Relation;
 use types_tableam::relscan::{TableScanDesc, TableScanDescData};
 

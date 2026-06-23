@@ -46,8 +46,8 @@ use execExpr_seams as execExpr;
 
 use mcx::PgBox;
 use types_error::PgResult;
-use nodes::executor::{TupleSlotKind, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
-use nodes::nodectescan::{CteScan, CteScanState};
+use ::nodes::executor::{TupleSlotKind, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
+use ::nodes::nodectescan::{CteScan, CteScanState};
 use nodes::{EStateData, ScanDirectionIsForward, SlotId};
 
 /// Install this crate's seam implementations.
@@ -206,11 +206,11 @@ pub fn ExecCteScan<'mcx>(
 /// The `PlanState.ExecProcNode` callback installed by [`ExecInitCteScan`]:
 /// `castNode(CteScanState, pstate)` then run [`ExecCteScan`].
 fn exec_cte_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::PlanStateNode::CteScan(node) => node,
+        ::nodes::PlanStateNode::CteScan(node) => node,
         other => panic!("castNode(CteScanState, pstate) failed: {other:?}"),
     };
     ExecCteScan(node, estate)
@@ -219,12 +219,12 @@ fn exec_cte_scan_node<'mcx>(
 /// `ExecInitCteScan(node, estate, eflags)` — create and initialize a CteScan
 /// node.
 ///
-/// Takes the enclosing plan-tree [`Node`](nodes::nodes::Node); the
+/// Takes the enclosing plan-tree [`Node`](::nodes::nodes::Node); the
 /// state's `ps.plan` back-link aliases the shared, read-only plan tree exactly
 /// as C's `scanstate->ss.ps.plan = (Plan *) node`. Panics if the node is not a
 /// `CteScan` (the C `castNode`).
 pub fn ExecInitCteScan<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     mut eflags: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, CteScanState<'mcx>>> {

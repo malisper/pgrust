@@ -27,8 +27,8 @@ use types_error::{
     ErrorLevel, ErrorLocation, PgResult, SqlState, ERRCODE_T_R_SERIALIZATION_FAILURE,
     ERRCODE_UNIQUE_VIOLATION,
 };
-use nodes::execnodes::{EStateData, RriId, SlotId};
-use nodes::TupleSlotKind;
+use ::nodes::execnodes::{EStateData, RriId, SlotId};
+use ::nodes::TupleSlotKind;
 use rel::Relation;
 use types_storage::lock::NoLock;
 
@@ -96,7 +96,7 @@ pub fn init_seams() {}
 /// `track_commit_timestamp` is the commit_ts.c GUC global, passed explicitly.
 pub fn GetTupleTransactionInfo<'mcx>(
     mcx: Mcx<'mcx>,
-    localslot: &mut nodes::tuptable::SlotData<'mcx>,
+    localslot: &mut ::nodes::tuptable::SlotData<'mcx>,
     track_commit_timestamp: bool,
     xmin: &mut TransactionId,
     localorigin: &mut RepOriginId,

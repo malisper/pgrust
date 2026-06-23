@@ -4,7 +4,7 @@ extern crate std;
 
 use super::*;
 use mcx::MemoryContext;
-use nodes::primnodes::{Const, Expr};
+use ::nodes::primnodes::{Const, Expr};
 
 /// A `TargetEntry` carrying a trivial non-NULL `Const` expr leaf.
 fn tle<'mcx>(mcx: Mcx<'mcx>, ressortgroupref: Index) -> TargetEntry<'mcx> {

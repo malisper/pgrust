@@ -20,8 +20,8 @@ use types_core::{InvalidOid, OidIsValid, PG_TOAST_NAMESPACE, RELATION_RELATION_I
 // `Datum::null()` for the toast index.
 use types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult};
-use nodes::execnodes::IndexInfo;
-use nodes::primnodes::OnCommitAction;
+use ::nodes::execnodes::IndexInfo;
+use ::nodes::primnodes::OnCommitAction;
 use types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
 use rel::Relation;
 use types_storage::lock::{

@@ -16,17 +16,17 @@ use types_core::{AttrNumber, Oid};
 // `ExprEvalStepData::HashDatumInitValue { init_value }` carries.
 use types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::execexpr::{
+use ::nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, LastAttnumInfo, ResultCell,
     ResultCellId, VarReturningType, EEO_FLAG_IS_QUAL, STATE_RESULT_CELL,
 };
-use nodes::execexpr::SubPlanState;
-use nodes::executor::TupleSlotKind;
-use nodes::nodeagg::{do_aggsplit_combine, AggStrategy, Aggref};
+use ::nodes::execexpr::SubPlanState;
+use ::nodes::executor::TupleSlotKind;
+use ::nodes::nodeagg::{do_aggsplit_combine, AggStrategy, Aggref};
 use nodeAgg::AggStateData;
-use nodes::parsenodes::OBJECT_FUNCTION;
-use nodes::primnodes::{etag, Expr, OpExpr, AND_EXPR};
-use nodes::EStateData;
+use ::nodes::parsenodes::OBJECT_FUNCTION;
+use ::nodes::primnodes::{etag, Expr, OpExpr, AND_EXPR};
+use ::nodes::EStateData;
 use types_tuple::heaptuple::TupleDescData;
 
 /// `#define INNER_VAR (-1)` (primnodes.h special varnos) — local mirror (the
@@ -364,14 +364,14 @@ pub fn exec_init_coerce_to_domain<'mcx>(
 /// the seam carries the AggState type-erased, this adapter downcasts it.)
 pub fn seam_exec_build_agg_trans<'mcx>(
     mcx: Mcx<'mcx>,
-    aggstate: &mut (dyn nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
+    aggstate: &mut (dyn ::nodes::aggstate_carrier::AggStateLive<'mcx> + 'mcx),
     phase: i32,
     do_sort: bool,
     do_hash: bool,
     nullcheck: bool,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, ExprState<'mcx>>> {
-    let concrete = nodes::aggstate_carrier::downcast_agg_state_mut::<AggStateData<'mcx>>(
+    let concrete = ::nodes::aggstate_carrier::downcast_agg_state_mut::<AggStateData<'mcx>>(
         aggstate,
     )
     .expect(
@@ -402,7 +402,7 @@ pub fn exec_build_agg_trans<'mcx>(
     // reaches the EState through `ExprState.es_link`, so stamp it from the
     // EState the caller passed (the owned-model equivalent of `parent->state`).
     let mut state = make_expr_state(mcx)?;
-    state.es_link = Some(nodes::execnodes::EStateLink::from_ref(estate));
+    state.es_link = Some(::nodes::execnodes::EStateLink::from_ref(estate));
     let is_combine = do_aggsplit_combine(aggstate.aggsplit);
 
     // The C reusable `scratch` step lives on the stack and is byte-copied into
@@ -894,7 +894,7 @@ pub fn exec_build_agg_trans_call<'mcx>(
     // ExecInitAgg before ExecBuildAggTrans runs). Resolve and store the real
     // id — the C `op->d.agg_trans.aggcontext` — so the transition step's by-ref
     // `datumCopy` target is the correct per-grouping-set (or hash) context.
-    let aggcontext: Option<nodes::execnodes::EcxtId> = if ishash {
+    let aggcontext: Option<::nodes::execnodes::EcxtId> = if ishash {
         aggstate.hashcontext
     } else {
         aggstate
@@ -1187,7 +1187,7 @@ pub fn exec_build_hash32_from_attrs<'mcx>(
 #[allow(clippy::too_many_arguments)]
 pub fn exec_build_hash32_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    es_link: nodes::execnodes::EStateLink,
+    es_link: ::nodes::execnodes::EStateLink,
     desc: &TupleDescData<'mcx>,
     ops: TupleSlotKind,
     hashfunc_oids: &[Oid],
@@ -1765,10 +1765,10 @@ fn clone_step<'mcx>(s: &ExprEvalStep<'mcx>) -> ExprEvalStep<'mcx> {
 fn init_fcinfo<'mcx>(
     mcx: Mcx<'mcx>,
     inputcollid: Oid,
-) -> PgResult<PgBox<'mcx, nodes::fmgr::FunctionCallInfoBaseData<'mcx>>> {
+) -> PgResult<PgBox<'mcx, ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>>> {
     mcx::alloc_in(
         mcx,
-        nodes::fmgr::FunctionCallInfoBaseData {
+        ::nodes::fmgr::FunctionCallInfoBaseData {
             fncollation: inputcollid,
             ..Default::default()
         },
@@ -2054,9 +2054,9 @@ pub fn build_hash_projections_and_exprs<'mcx>(
         .expect("build_hash_projections_and_exprs: hashable subplan->testexpr is NULL")
         .clone_in(mcx)?;
 
-    let mut lefttlist: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+    let mut lefttlist: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
         vec_with_capacity_in(mcx, ncols as usize)?;
-    let mut righttlist: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> =
+    let mut righttlist: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> =
         vec_with_capacity_in(mcx, ncols as usize)?;
 
     for i in 1..=ncols {

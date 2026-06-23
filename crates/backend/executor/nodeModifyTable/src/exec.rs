@@ -4,7 +4,7 @@
 
 use mcx::Mcx;
 use types_error::{PgError, PgResult};
-use nodes::nodes::CmdType;
+use ::nodes::nodes::CmdType;
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tuple::access::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
@@ -98,12 +98,12 @@ seam_core::seam!(
 /// signature (which carries no `mcx`) by sourcing the per-query context from the
 /// EState.
 pub fn exec_modify_table_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let mcx = estate.es_query_cxt;
     let node = match pstate {
-        nodes::PlanStateNode::ModifyTable(node) => node,
+        ::nodes::PlanStateNode::ModifyTable(node) => node,
         other => panic!("castNode(ModifyTableState, pstate) failed: {other:?}"),
     };
     ExecModifyTable(mcx, node, estate)
@@ -606,7 +606,7 @@ fn reset_per_tuple_expr_context(estate: &mut EStateData<'_>) {
 /// `ExprContext` carries no per-tuple memory yet, so this is a no-op until that
 /// owner lands.
 #[inline]
-fn reset_expr_context(estate: &mut EStateData<'_>, ecxt: nodes::EcxtId) {
+fn reset_expr_context(estate: &mut EStateData<'_>, ecxt: ::nodes::EcxtId) {
     let _ = (estate, ecxt);
 }
 
@@ -615,13 +615,13 @@ fn reset_expr_context(estate: &mut EStateData<'_>, ecxt: nodes::EcxtId) {
 /// = slot;`).
 ///
 /// `origslot` is one of the EvalPlanQual-machinery fields trimmed from the
-/// canonical owned [`nodes::EPQState`] (it lands with the execMain
+/// canonical owned [`::nodes::EPQState`] (it lands with the execMain
 /// EvalPlanQual port, which both writes and consumes it via `es_epq_active`).
 /// In the owned model the modifytable port never reads `origslot` back — the
 /// EPQ recheck that consumes it is itself an execMain seam — so the faithful
 /// residue of this setter is a no-op until execMain owns the field.
 #[inline]
-fn eval_plan_qual_set_slot(epqstate: &mut nodes::EPQState<'_>, slot: SlotId) {
+fn eval_plan_qual_set_slot(epqstate: &mut ::nodes::EPQState<'_>, slot: SlotId) {
     // C: epqstate->origslot = slot; — origslot is trimmed from the canonical
     // EPQState (owned by execMain's EvalPlanQual machinery); no-op residue.
     let _ = (epqstate, slot);

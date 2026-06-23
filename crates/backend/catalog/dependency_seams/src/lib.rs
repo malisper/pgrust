@@ -7,7 +7,7 @@
 use types_catalog::catalog_dependency::{ObjectAddress, ObjectAddresses};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::parsenodes::DropBehavior;
+use ::nodes::parsenodes::DropBehavior;
 
 /// `PERFORM_DELETION_INTERNAL` (`catalog/dependency.h`) — internal action.
 pub const PERFORM_DELETION_INTERNAL: i32 = 0x0001;
@@ -126,7 +126,7 @@ seam_core::seam!(
     /// the dependencies. `Err` carries the `ereport(ERROR)`s.
     pub fn record_dependency_on_single_rel_expr<'mcx>(
         depender: ObjectAddress,
-        expr: &nodes::nodes::Node<'mcx>,
+        expr: &::nodes::nodes::Node<'mcx>,
         rel_id: Oid,
         behavior: types_catalog::catalog_dependency::DependencyType,
         self_behavior: types_catalog::catalog_dependency::DependencyType,
@@ -142,8 +142,8 @@ seam_core::seam!(
     /// given behavior. `Err` carries the `ereport(ERROR)`s.
     pub fn record_dependency_on_expr<'mcx>(
         depender: ObjectAddress,
-        expr: &nodes::nodes::Node<'mcx>,
-        rtable: &[nodes::parsenodes::RangeTblEntry<'mcx>],
+        expr: &::nodes::nodes::Node<'mcx>,
+        rtable: &[::nodes::parsenodes::RangeTblEntry<'mcx>],
         behavior: types_catalog::catalog_dependency::DependencyType,
     ) -> PgResult<()>
 );

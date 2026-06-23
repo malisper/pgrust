@@ -10,10 +10,10 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_CURSOR_DEFINITION, ERROR};
-use nodes::copy_query::Query;
-use nodes::nodes::{CmdType, Node};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::portalcmds::{
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::portalcmds::{
     CURSOR_OPT_ASENSITIVE, CURSOR_OPT_HOLD, CURSOR_OPT_INSENSITIVE, CURSOR_OPT_NO_SCROLL,
     CURSOR_OPT_SCROLL,
 };
@@ -33,7 +33,7 @@ use crate::transformStmt;
 pub fn transformDeclareCursorStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    stmt: &nodes::ddlnodes::DeclareCursorStmt<'mcx>,
+    stmt: &::nodes::ddlnodes::DeclareCursorStmt<'mcx>,
 ) -> PgResult<Query<'mcx>> {
     if (stmt.options & CURSOR_OPT_SCROLL) != 0 && (stmt.options & CURSOR_OPT_NO_SCROLL) != 0 {
         return Err(ereport(ERROR)
@@ -145,9 +145,9 @@ fn first_rowmark_strength<'mcx>(query: &Query<'mcx>) -> PgResult<&'static str> {
 pub fn transformCallStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    stmt: &nodes::ddlnodes::CallStmt<'mcx>,
+    stmt: &::nodes::ddlnodes::CallStmt<'mcx>,
 ) -> PgResult<Query<'mcx>> {
-    use nodes::primnodes::Expr;
+    use ::nodes::primnodes::Expr;
 
     let funccall_node = stmt
         .funccall

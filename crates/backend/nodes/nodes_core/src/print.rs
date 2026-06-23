@@ -35,7 +35,7 @@
 use utils_error::{ereport, ErrorLevel};
 use mcx::{Mcx, PgString, PgVec};
 use types_error::{ErrorLocation, PgResult};
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 
 use nodes_core_seams as seams;
 use ruleutils_seams as seams_ruleutils;
@@ -273,8 +273,8 @@ const INDEX_VAR: i32 = -3;
 /// `print_rt(rtable)` — print the contents of a range table to stdout
 /// (`nodes/print.c`). Faithful field-for-field port: one row per RTE with its
 /// `rtekind`-specific second column, then the `inh`/`inFromCl` flags.
-pub fn print_rt(mcx: Mcx<'_>, rtable: &[nodes::parsenodes::RangeTblEntry<'_>]) -> PgResult<()> {
-    use nodes::parsenodes::RTEKind;
+pub fn print_rt(mcx: Mcx<'_>, rtable: &[::nodes::parsenodes::RangeTblEntry<'_>]) -> PgResult<()> {
+    use ::nodes::parsenodes::RTEKind;
 
     let _ = mcx; // C uses no allocation here; kept for the seam signature.
     print!("resno\trefname  \trelid\tinFromCl\n");
@@ -321,7 +321,7 @@ pub fn print_rt(mcx: Mcx<'_>, rtable: &[nodes::parsenodes::RangeTblEntry<'_>]) -
 pub fn print_expr<'a>(
     mcx: Mcx<'a>,
     expr: Option<&Node<'_>>,
-    rtable: &[nodes::parsenodes::RangeTblEntry<'a>],
+    rtable: &[::nodes::parsenodes::RangeTblEntry<'a>],
 ) -> PgResult<()> {
     // C: `if (expr == NULL) { printf("<>"); return; }`.
     let node = match expr {
@@ -350,10 +350,10 @@ pub fn print_expr<'a>(
 /// level (no `Node` allocation/clone). `None` mirrors a NULL child (`"<>"`).
 fn print_expr_inner<'a>(
     mcx: Mcx<'a>,
-    expr: Option<&nodes::primnodes::Expr>,
-    rtable: &[nodes::parsenodes::RangeTblEntry<'a>],
+    expr: Option<&::nodes::primnodes::Expr>,
+    rtable: &[::nodes::parsenodes::RangeTblEntry<'a>],
 ) -> PgResult<()> {
-    use nodes::primnodes::Expr;
+    use ::nodes::primnodes::Expr;
 
     let e = match expr {
         None => {
@@ -452,7 +452,7 @@ fn print_expr_inner<'a>(
 /// until it lands.
 pub fn print_pathkeys(
     pathkeys: &[pathnodes::PathKey],
-    rtable: &[nodes::parsenodes::RangeTblEntry<'_>],
+    rtable: &[::nodes::parsenodes::RangeTblEntry<'_>],
 ) -> PgResult<()> {
     seams::print_pathkeys::call(pathkeys, rtable)
 }
@@ -463,8 +463,8 @@ pub fn print_pathkeys(
 /// [`print_expr`].
 pub fn print_tl<'a>(
     mcx: Mcx<'a>,
-    tlist: &[nodes::primnodes::TargetEntry<'_>],
-    rtable: &[nodes::parsenodes::RangeTblEntry<'a>],
+    tlist: &[::nodes::primnodes::TargetEntry<'_>],
+    rtable: &[::nodes::parsenodes::RangeTblEntry<'a>],
 ) -> PgResult<()> {
     print!("(\n");
     for tle in tlist {
@@ -494,7 +494,7 @@ pub fn print_tl<'a>(
 /// runs over the `TupleTableSlot` execution runtime (`PrinttupRuntime` /
 /// `slot_getattr`), which the execTuples slot model does not yet expose here.
 /// Seam-and-panic until that runtime lands.
-pub fn print_slot(slot: &nodes::tuptable::SlotBase<'_>) -> PgResult<()> {
+pub fn print_slot(slot: &::nodes::tuptable::SlotBase<'_>) -> PgResult<()> {
     seams::print_slot::call(slot)
 }
 

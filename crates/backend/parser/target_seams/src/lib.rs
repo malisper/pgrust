@@ -9,9 +9,9 @@
 
 use mcx::{Mcx, PgString};
 use types_error::PgResult;
-use nodes::nodes::Node;
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::{Expr, TargetEntry};
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::{Expr, TargetEntry};
 
 seam_core::seam!(
     /// `transformTargetEntry(pstate, node, expr, exprKind, colname, resjunk)`

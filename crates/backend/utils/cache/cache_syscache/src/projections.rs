@@ -83,8 +83,8 @@ use types_catalog::pg_aggregate::{
     Anum_pg_aggregate_aggtransfn, Anum_pg_aggregate_aggtransspace, Anum_pg_aggregate_aggtranstype,
 };
 use types_catalog::pg_language::FormData_pg_language;
-use nodes::nodes::NodePtr;
-use nodes::primnodes::Expr;
+use ::nodes::nodes::NodePtr;
+use ::nodes::primnodes::Expr;
 
 /// `Anum_pg_class_relam` (`catalog/pg_class.h`).
 const Anum_pg_class_relam: i32 = 7;
@@ -1033,7 +1033,7 @@ pub(crate) fn open_partrel_tuple<'mcx>(
     // partexprs is a nullable pg_node_tree; NIL ⇒ empty (the column-only case).
     let (partexprs_val, partexprs_isnull) =
         SysCacheGetAttr(mcx, PARTRELID, &tup, ANUM_PARTEXPRS)?;
-    let mut partexprs: PgVec<'mcx, nodes::primnodes::Expr> = vec_with_capacity_in(mcx, 0)?;
+    let mut partexprs: PgVec<'mcx, ::nodes::primnodes::Expr> = vec_with_capacity_in(mcx, 0)?;
     if !partexprs_isnull {
         // expr = stringToNode(TextDatumGetCString(partexprs)); castNode(List, ...).
         let s = varlena_seams::text_to_cstring_v::call(mcx, &partexprs_val)?;

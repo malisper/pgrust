@@ -70,7 +70,7 @@ use types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
 };
-use nodes::parsenodes::{
+use ::nodes::parsenodes::{
     ObjectType, OBJECT_ACCESS_METHOD, OBJECT_AGGREGATE, OBJECT_AMOP, OBJECT_AMPROC,
     OBJECT_ATTRIBUTE, OBJECT_CAST, OBJECT_COLLATION, OBJECT_COLUMN, OBJECT_CONVERSION,
     OBJECT_DATABASE, OBJECT_DEFACL, OBJECT_DEFAULT, OBJECT_DOMAIN, OBJECT_DOMCONSTRAINT,
@@ -719,14 +719,14 @@ fn object_node(stmt: &SecLabelStmt) -> &Node {
         .expect("SecLabelStmt::object must be a valid parser node")
 }
 
-/// Decode an arena [`nodes::ddlnodes::SecLabelStmt`] into the flat
+/// Decode an arena [`::nodes::ddlnodes::SecLabelStmt`] into the flat
 /// [`parsenodes::SecLabelStmt`] that [`ExecSecLabelStmt`] consumes, then
 /// run it. This is the bridge from the utility dispatcher's arena parse tree to
 /// the old-model command body, mirroring the COMMENT seam adapter
 /// (`arena_commentstmt_to_owned`). The arena `object` node is lowered through
 /// `rich_node_to_parse` (the project-wide arena→parsenodes lowering).
 fn arena_seclabelstmt_to_owned(
-    stmt: &nodes::ddlnodes::SecLabelStmt<'_>,
+    stmt: &::nodes::ddlnodes::SecLabelStmt<'_>,
 ) -> PgResult<SecLabelStmt> {
     let object = match stmt.object.as_deref() {
         Some(n) => Some(Box::new(parse_type::rich_node_to_parse(n)?)),
@@ -746,7 +746,7 @@ fn arena_seclabelstmt_to_owned(
 /// leg). Returns `()` (the resolved address is discarded by the dispatcher).
 fn exec_sec_label_stmt_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<()> {
     let sls = match stmt.as_seclabelstmt() {
         Some(s) => s,
@@ -767,7 +767,7 @@ fn exec_sec_label_stmt_seam<'mcx>(
 /// `ddl_command_end` event triggers can reach the labeled object.
 fn exec_sec_label_stmt_slow_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let sls = match stmt.as_seclabelstmt() {
         Some(s) => s,

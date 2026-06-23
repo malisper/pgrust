@@ -2,7 +2,7 @@
 //! machinery the AGG_* opcodes call (`ExecInterpExpr` dispatches to these),
 //! plus the presorted-distinct filters. These operate on the nodeAgg-owned
 //! `AggState` / per-trans / per-group state (boundary slice in
-//! [`nodes::nodeagg`]).
+//! [`::nodes::nodeagg`]).
 //!
 //! `op` is the step index into `state.steps`; the helpers also receive the
 //! `AggState` they transition. Returns `PgResult<()>` (transition functions
@@ -14,7 +14,7 @@
 //! strict-init path (`ExecAggInitGroup`) read and write
 //! `pertrans->transfn_fcinfo->args[]` and invoke the transition function via
 //! `FunctionCallInvoke(fcinfo)`. The transfn call frame is the nodeAgg-parked
-//! [`nodes::fmgr::FunctionCallInfoBaseData`], which now carries the real
+//! [`::nodes::fmgr::FunctionCallInfoBaseData`], which now carries the real
 //! `args: Vec<NullableDatum>` / `isnull` / `flinfo` payload (#296 widened the
 //! frame). The OID-keyed shared fmgr dispatch
 //! [`fmgr_seams::function_call_invoke`] runs the function by
@@ -55,11 +55,11 @@ use types_error::PgResult;
 fn word_of(v: &DatumV<'_>) -> Datum {
     Datum::from_usize(v.as_usize())
 }
-use nodes::execexpr::{ExprEvalStepData, ExprState};
+use ::nodes::execexpr::{ExprEvalStepData, ExprState};
 use nodeAgg::{
     AggStateData as AggState, AggStatePerGroupData, AggStatePerTransData,
 };
-use nodes::EStateData;
+use ::nodes::EStateData;
 
 // ---------------------------------------------------------------------------
 // transfn call frame (nodeAgg-parked fmgr frame; Lane 1 — by-value invoke)
@@ -527,7 +527,7 @@ pub fn ExecEvalPreOrderedDistinctMulti<'mcx>(
 fn aggstate_tmpcontext<'mcx>(
     aggstate: &AggState<'mcx>,
     _estate: &EStateData<'mcx>,
-) -> nodes::execnodes::EcxtId {
+) -> ::nodes::execnodes::EcxtId {
     aggstate
         .tmpcontext
         .expect("eval_agg: aggstate->tmpcontext EcxtId not assigned by ExecInitAgg")
@@ -539,7 +539,7 @@ fn aggstate_tmpcontext<'mcx>(
 pub fn ExecEvalAggOrderedTransDatum<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
-    econtext: nodes::execnodes::EcxtId,
+    econtext: ::nodes::execnodes::EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let _ = (econtext, &estate);
@@ -573,7 +573,7 @@ pub fn ExecEvalAggOrderedTransDatum<'mcx>(
 pub fn ExecEvalAggOrderedTransTuple<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
-    econtext: nodes::execnodes::EcxtId,
+    econtext: ::nodes::execnodes::EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     let _ = econtext;
@@ -669,7 +669,7 @@ fn ordered_sortstate<'a, 'mcx>(
     state: &'a mut ExprState<'mcx>,
     pertrans: usize,
     setno: i32,
-) -> PgResult<&'a mut nodes::Tuplesortstate<'mcx>> {
+) -> PgResult<&'a mut ::nodes::Tuplesortstate<'mcx>> {
     let aggstate = crate::interp_loop::agg_parent_mut(state);
     let pt = &mut aggstate
         .pertrans
@@ -692,7 +692,7 @@ pub fn ExecAggPlainTransByVal<'mcx>(
     aggstate: &mut AggState<'mcx>,
     pertrans: usize,
     pergroup: &mut AggStatePerGroupData,
-    aggcontext: nodes::execnodes::EcxtId,
+    aggcontext: ::nodes::execnodes::EcxtId,
     setno: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -730,7 +730,7 @@ pub fn ExecAggPlainTransByRef<'mcx>(
     aggstate: &mut AggState<'mcx>,
     pertrans: usize,
     pergroup: &mut AggStatePerGroupData,
-    aggcontext: nodes::execnodes::EcxtId,
+    aggcontext: ::nodes::execnodes::EcxtId,
     setno: i32,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
@@ -796,7 +796,7 @@ fn datum_get_pointer(d: Datum) -> usize {
 /// in `aggcontexts`.
 fn ecxt_id_to_aggcontext_index<'mcx>(
     aggstate: &AggState<'mcx>,
-    aggcontext: nodes::execnodes::EcxtId,
+    aggcontext: ::nodes::execnodes::EcxtId,
 ) -> i32 {
     aggstate
         .aggcontexts
@@ -849,7 +849,7 @@ mod tests {
         pt.agg_collation = 0; // InvalidOid
         pt.transtype_by_val = true;
 
-        let mut fcinfo = nodes::fmgr::FunctionCallInfoBaseData::default();
+        let mut fcinfo = ::nodes::fmgr::FunctionCallInfoBaseData::default();
         // One argument cell (transfn nargs = 1: arg0 is the running state).
         fcinfo.nargs = 1;
         fcinfo.args = vec![datum::NullableDatum::null()];

@@ -50,9 +50,9 @@ use types_error::{
     ERROR, NOTICE,
 };
 use types_error::pg_error::ErrorLocation;
-use nodes::bitmapset::Bitmapset;
-use nodes::parsenodes::DropBehavior;
-use nodes::nodes::{Node, NodePtr};
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::parsenodes::DropBehavior;
+use ::nodes::nodes::{Node, NodePtr};
 use rel::RelationData;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock};
@@ -1486,9 +1486,9 @@ pub fn MergeWithExistingConstraint(
 #[derive(Debug)]
 pub enum NotNullConstraint<'mcx> {
     /// `cooked == false`: a `makeNode(Constraint)` of type `CONSTR_NOTNULL`.
-    Raw(nodes::ddlnodes::Constraint<'mcx>),
+    Raw(::nodes::ddlnodes::Constraint<'mcx>),
     /// `cooked == true`: a `palloc(sizeof(CookedConstraint))`.
-    Cooked(nodes::ddlnodes::CookedConstraint<'mcx>),
+    Cooked(::nodes::ddlnodes::CookedConstraint<'mcx>),
 }
 
 /// RelationGetNotNullConstraints — return the list of not-null constraints for
@@ -1500,8 +1500,8 @@ pub fn RelationGetNotNullConstraints(
     cooked: bool,
     include_noinh: bool,
 ) -> PgResult<Vec<NotNullConstraint<'_>>> {
-    use nodes::ddlnodes::ConstrType::CONSTR_NOTNULL as CONSTR_NOTNULL_TYPE;
-    use nodes::ddlnodes::{Constraint, CookedConstraint};
+    use ::nodes::ddlnodes::ConstrType::CONSTR_NOTNULL as CONSTR_NOTNULL_TYPE;
+    use ::nodes::ddlnodes::{Constraint, CookedConstraint};
 
     let mut notnulls: Vec<NotNullConstraint<'_>> = Vec::new(); // NIL
 
@@ -1570,7 +1570,7 @@ pub fn RelationGetNotNullConstraints(
             let mut keys: PgVec<'_, NodePtr<'_>> = PgVec::new_in(mcx);
             keys.push(alloc_in(
                 mcx,
-                Node::mk_string(mcx, nodes::value::StringNode { sval: attname })?,
+                Node::mk_string(mcx, ::nodes::value::StringNode { sval: attname })?,
             )?);
 
             let constr = Constraint {

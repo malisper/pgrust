@@ -30,12 +30,12 @@ use mcx::{Mcx, PgBox, PgVec};
 use seam::{ForeignRefetch, TupleLockRequest};
 use types_core::xact::XACT_REPEATABLE_READ;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_T_R_SERIALIZATION_FAILURE};
-use nodes::execnodes::EStateData;
-use nodes::nodelockrows::{
+use ::nodes::execnodes::EStateData;
+use ::nodes::nodelockrows::{
     ExecAuxRowMarkData, ExecRowMark, LockRows, LockRowsStateData, RowMarkRequiresRowShareLock,
     ROW_MARK_EXCLUSIVE, ROW_MARK_KEYSHARE, ROW_MARK_NOKEYEXCLUSIVE, ROW_MARK_SHARE,
 };
-use nodes::parsenodes::RTE_RELATION;
+use ::nodes::parsenodes::RTE_RELATION;
 use types_tuple::heaptuple::ItemPointerData;
 use types_tableam::{
     LockTupleExclusive, LockTupleKeyShare, LockTupleMode, LockTupleNoKeyExclusive, LockTupleShare,

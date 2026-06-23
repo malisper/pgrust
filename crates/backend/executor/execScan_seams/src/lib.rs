@@ -48,8 +48,8 @@ seam_core::seam!(
     /// building a `ProjectionInfo` (or leaving `ps_ProjInfo` NULL for the
     /// physical-tlist no-op case). Fallible on OOM / build errors.
     pub fn exec_assign_scan_projection_info<'mcx>(
-        scanstate: &mut nodes::execnodes::ScanStateData<'mcx>,
-        estate: &mut nodes::EStateData<'mcx>,
+        scanstate: &mut ::nodes::execnodes::ScanStateData<'mcx>,
+        estate: &mut ::nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -106,7 +106,7 @@ seam_core::seam!(
 // execScan.c lands it installs one generic implementation; each per-node entry
 // point marshals to it.
 
-use nodes::nodeindexonlyscan::IndexOnlyScanState;
+use ::nodes::nodeindexonlyscan::IndexOnlyScanState;
 
 /// `ExecScanAccessMtd`, specialized to an index-only scan node — returns
 /// `true` when a tuple sits in the node's scan slot, `false` at end-of-scan.
@@ -119,11 +119,11 @@ pub type IndexOnlyScanRecheckMtd =
 
 /// `ExecScanAccessMtd`, specialized to a plain index scan node.
 pub type IndexScanAccessMtd =
-    for<'mcx> fn(&mut nodes::IndexScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+    for<'mcx> fn(&mut ::nodes::IndexScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
 
 /// `ExecScanRecheckMtd`, specialized to a plain index scan node.
 pub type IndexScanRecheckMtd =
-    for<'mcx> fn(&mut nodes::IndexScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
+    for<'mcx> fn(&mut ::nodes::IndexScanState<'mcx>, &mut EStateData<'mcx>) -> PgResult<bool>;
 
 seam_core::seam!(
     /// `ExecScan(&node->ss, accessMtd, recheckMtd)` (execScan.c): run the
@@ -147,7 +147,7 @@ seam_core::seam!(
     /// passes its `IndexNext`/`IndexNextWithReorder` access method and
     /// `IndexRecheck`.
     pub fn exec_scan_index<'mcx>(
-        node: &mut nodes::IndexScanState<'mcx>,
+        node: &mut ::nodes::IndexScanState<'mcx>,
         estate: &mut EStateData<'mcx>,
         access: IndexScanAccessMtd,
         recheck: IndexScanRecheckMtd,
@@ -160,8 +160,8 @@ seam_core::seam!(
     /// scan/result tuple slots and reset the EPQ `relsubs_done` flags for the
     /// node's scan relation. Fallible on the slot-clear `ereport(ERROR)` paths.
     pub fn exec_scan_rescan_ss<'mcx>(
-        node: &mut nodes::execnodes::ScanStateData<'mcx>,
-        estate: &mut nodes::EStateData<'mcx>,
+        node: &mut ::nodes::execnodes::ScanStateData<'mcx>,
+        estate: &mut ::nodes::EStateData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -174,7 +174,7 @@ seam_core::seam!(
 // `ss_ScanTupleSlot` is used only for EvalPlanQual rechecks), so the access
 // method yields the produced `SlotId` rather than a `bool`-into-scan-slot.
 
-use nodes::SubqueryScanState;
+use ::nodes::SubqueryScanState;
 
 /// `ExecScanAccessMtd`, specialized to a subquery scan node — returns the
 /// produced tuple's `SlotId` (the subplan's result slot), `None` at
@@ -206,7 +206,7 @@ seam_core::seam!(
 // lands it installs one generic implementation; each per-node entry point
 // marshals to it.
 
-use nodes::nodectescan::CteScanState;
+use ::nodes::nodectescan::CteScanState;
 
 /// `ExecScanAccessMtd`, specialized to a CTE scan node — returns `true` when a
 /// tuple sits in the node's scan slot, `false` at end-of-scan.
@@ -254,7 +254,7 @@ seam_core::seam!(
 // execScan.c lands it installs one generic implementation; this per-node entry
 // point marshals to it.
 
-use nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;
+use ::nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;
 
 /// `ExecScanAccessMtd`, specialized to a named-tuplestore-scan node — returns
 /// `true` when a tuple sits in the node's scan slot, `false` at end-of-scan.
@@ -287,7 +287,7 @@ seam_core::seam!(
 // in-crate `WorkTableScanNext`/`WorkTableScanRecheck`). When execScan.c lands it
 // installs one generic implementation; this per-node entry point marshals to it.
 
-use nodes::nodeworktablescan::WorkTableScanStateData;
+use ::nodes::nodeworktablescan::WorkTableScanStateData;
 
 /// `ExecScanAccessMtd`, specialized to a work-table-scan node — returns `true`
 /// when a tuple sits in the node's scan slot, `false` at end-of-scan.

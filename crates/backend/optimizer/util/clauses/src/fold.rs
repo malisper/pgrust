@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::{InvalidOid, Oid};
 use types_error::{PgError, PgResult};
-use nodes::primnodes::{
+use ::nodes::primnodes::{
     etag, ArrayExpr, BoolExprType, CaseWhen, CoercionForm, Const, Expr, FuncExpr, NullTest,
     NullTestType, ScalarArrayOpExpr,
 };
@@ -107,11 +107,11 @@ struct EceContext<'mcx> {
     /// `boundParams` (clauses.c:63) — the bound external-parameter values; the
     /// `T_Param` arm folds a PARAM_EXTERN `$n` whose slot has a matching type
     /// and (outside estimate mode) the `PARAM_FLAG_CONST` flag into a `Const`.
-    /// Carried as the shared owned [`ParamListInfo`](nodes::params::ParamListInfo)
+    /// Carried as the shared owned [`ParamListInfo`](::nodes::params::ParamListInfo)
     /// (`Rc`, cheap to clone, `'static`); `make_const` copies any by-ref slot
     /// image into its own backend-lifetime context, so the values need only be
     /// readable during the fold.
-    bound_params: nodes::params::ParamListInfo,
+    bound_params: ::nodes::params::ParamListInfo,
     /// Recursion depth (C: `check_stack_depth()`).
     depth: u32,
     /// `active_fns` (clauses.c:64) — funcids currently being inlined, the
@@ -143,7 +143,7 @@ pub fn eval_const_expressions<'mcx>(mcx: Mcx<'mcx>, node: Expr<'mcx>) -> PgResul
 pub fn eval_const_expressions_with_params<'mcx>(
     mcx: Mcx<'mcx>,
     node: Expr<'mcx>,
-    bound_params: nodes::params::ParamListInfo,
+    bound_params: ::nodes::params::ParamListInfo,
 ) -> PgResult<Expr<'mcx>> {
     let mut ctx = EceContext {
         mcx,
@@ -261,7 +261,7 @@ fn arm_param<'mcx>(node: Expr<'mcx>, ctx: &EceContext<'mcx>) -> PgResult<Expr<'m
     };
 
     // Look to see if we've been given a value for this Param (C:2456-2462).
-    if param.paramkind == nodes::primnodes::PARAM_EXTERN {
+    if param.paramkind == ::nodes::primnodes::PARAM_EXTERN {
         if let Some(param_li) = ctx.bound_params.as_deref() {
             if param.paramid > 0 && param.paramid <= param_li.num_params {
                 // The dynamic paramFetch hook path (C:2469-2471) is not reached
@@ -277,7 +277,7 @@ fn arm_param<'mcx>(node: Expr<'mcx>, ctx: &EceContext<'mcx>) -> PgResult<Expr<'m
                 if prm.ptype != InvalidOid && prm.ptype == param.paramtype {
                     // OK to substitute? (C:2484-2485)
                     if ctx.estimate
-                        || (prm.pflags & nodes::params::PARAM_FLAG_CONST) != 0
+                        || (prm.pflags & ::nodes::params::PARAM_FLAG_CONST) != 0
                     {
                         // Return a Const representing the param value. The
                         // pass-by-ref copy (C's `datumCopy`, C:2503-2506) is done
@@ -1156,7 +1156,7 @@ fn arm_nulltest<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<
 
 /// T_BooleanTest arm (clauses.c:3547).
 fn arm_booleantest<'mcx>(node: Expr<'mcx>, ctx: &mut EceContext<'mcx>) -> PgResult<Expr<'mcx>> {
-    use nodes::primnodes::BoolTestType::*;
+    use ::nodes::primnodes::BoolTestType::*;
     let mut btest = node.expect_into_booleantest();
     let arg = mutate(req(btest.arg.take(), "BooleanTest.arg")?, ctx)?;
     if let Some(carg) = arg.as_const() {
@@ -1868,7 +1868,7 @@ fn fmgr_fold<'mcx>(
         let name = lsyscache::get_func_name::call(mcx, funcid)?.map(|s| s.as_str().to_string());
         aclchk_seams::aclcheck_error::call(
             aclresult,
-            nodes::parsenodes::OBJECT_FUNCTION,
+            ::nodes::parsenodes::OBJECT_FUNCTION,
             name,
         )?;
     }

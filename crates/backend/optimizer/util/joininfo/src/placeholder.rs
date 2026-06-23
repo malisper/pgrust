@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 
 use types_error::{PgError, PgResult};
-use nodes::primnodes::{Expr, ExprRelids, PlaceHolderVar};
+use ::nodes::primnodes::{Expr, ExprRelids, PlaceHolderVar};
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     NodeId, PhInfoId, PlaceHolderInfo, PlannerInfo, Relids, SpecialJoinInfo,
@@ -104,7 +104,7 @@ pub fn find_placeholder_info<'a>(
     // `phexpr` carries an owned-subtree variant, e.g. a SubPlan from an
     // `(SELECT ...)` SubLink in a pulled-up subquery), then erase the clone to the
     // planner-run arena's notional 'static at this sanctioned intern boundary.
-    let mut ph_var = nodes::primnodes::placeholdervar_into_static(
+    let mut ph_var = ::nodes::primnodes::placeholdervar_into_static(
         phv.clone_in(mcx)
             .map_err(|e| PgError::error(alloc::format!("find_placeholder_info: clone_in: {e:?}")))?,
     );
@@ -112,7 +112,7 @@ pub fn find_placeholder_info<'a>(
 
     // Deep-copy the (already-arena-owned) phexpr subtree via `clone_in` — the
     // derived `Expr::clone` panics if it carries a SubPlan.
-    let phexpr: Expr<'static> = nodes::primnodes::Expr::erase_lifetime(
+    let phexpr: Expr<'static> = ::nodes::primnodes::Expr::erase_lifetime(
         ph_var
             .phexpr
             .as_ref()
@@ -140,7 +140,7 @@ pub fn find_placeholder_info<'a>(
     let ph_width = lsyscache_seams::get_typavgwidth::call(typid, typmod)?;
 
     // Intern phexpr into the node arena for the consumer-facing handle mirror.
-    let phexpr_for_arena: Expr<'static> = nodes::primnodes::Expr::erase_lifetime(
+    let phexpr_for_arena: Expr<'static> = ::nodes::primnodes::Expr::erase_lifetime(
         phexpr
             .clone_in(mcx)
             .map_err(|e| PgError::error(alloc::format!("find_placeholder_info: clone_in: {e:?}")))?,
@@ -231,7 +231,7 @@ pub fn find_placeholders_in_jointree<'mcx>(
 fn find_placeholders_in_from_expr<'mcx>(
     mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
-    f: &nodes::rawnodes::FromExpr<'mcx>,
+    f: &::nodes::rawnodes::FromExpr<'mcx>,
 ) -> PgResult<()> {
     // First, recurse to handle child joins.
     for item in f.fromlist.iter() {
@@ -247,9 +247,9 @@ fn find_placeholders_in_from_expr<'mcx>(
 fn find_placeholders_recurse<'mcx>(
     mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
-    jtnode: &nodes::nodes::Node<'mcx>,
+    jtnode: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<()> {
-    use nodes::nodes::ntag;
+    use ::nodes::nodes::ntag;
     match jtnode.node_tag() {
         // No quals to deal with here.
         ntag::T_RangeTblRef => {}
@@ -306,7 +306,7 @@ fn find_placeholders_recurse<'mcx>(
 fn find_placeholders_in_quals(
     mcx: mcx::Mcx<'_>,
     root: &mut PlannerInfo,
-    quals: Option<&nodes::nodes::Node<'_>>,
+    quals: Option<&::nodes::nodes::Node<'_>>,
 ) -> PgResult<()> {
     match quals {
         None => Ok(()),
@@ -370,7 +370,7 @@ fn clone_phinfo_phexpr<'mcx>(
 pub fn fix_placeholder_input_needed_levels(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) -> PgResult<()> {
     let list = root.placeholder_list.clone();
     for phid in list {
-        let phexpr = nodes::primnodes::Expr::erase_lifetime(clone_phinfo_phexpr(
+        let phexpr = ::nodes::primnodes::Expr::erase_lifetime(clone_phinfo_phexpr(
             mcx,
             root,
             phid,
@@ -391,7 +391,7 @@ pub fn fix_placeholder_input_needed_levels(mcx: mcx::Mcx<'_>, root: &mut Planner
 pub fn rebuild_placeholder_attr_needed(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) -> PgResult<()> {
     let list = root.placeholder_list.clone();
     for phid in list {
-        let phexpr = nodes::primnodes::Expr::erase_lifetime(clone_phinfo_phexpr(
+        let phexpr = ::nodes::primnodes::Expr::erase_lifetime(clone_phinfo_phexpr(
             mcx,
             root,
             phid,
@@ -426,7 +426,7 @@ pub fn add_placeholders_to_base_rels(mcx: mcx::Mcx<'_>, root: &mut PlannerInfo) 
                 // Copy the PHV (deep-clone via `clone_in`; the derived `Clone`
                 // panics on a SubPlan-bearing phexpr) and append to the rel's
                 // reltarget exprs.
-                let phv = nodes::primnodes::placeholdervar_into_static(
+                let phv = ::nodes::primnodes::placeholdervar_into_static(
                     root.phinfo(phid)
                         .ph_var
                         .clone_in(mcx)
@@ -487,7 +487,7 @@ pub fn add_placeholders_to_joinrel(
                 {
                     // Deep-clone via `clone_in` (derived `Clone` panics on a
                     // SubPlan-bearing phexpr).
-                    let phv = nodes::primnodes::placeholdervar_into_static(
+                    let phv = ::nodes::primnodes::placeholdervar_into_static(
                         root.phinfo(phid)
                             .ph_var
                             .clone_in(mcx)
@@ -495,7 +495,7 @@ pub fn add_placeholders_to_joinrel(
                     );
                     // It'll start out not nulled by anything.
                     debug_assert!(phv.phnullingrels.words.is_empty());
-                    let phexpr: Expr<'static> = nodes::primnodes::Expr::erase_lifetime(
+                    let phexpr: Expr<'static> = ::nodes::primnodes::Expr::erase_lifetime(
                         phv.phexpr
                             .as_ref()
                             .expect("add_placeholders_to_joinrel: PHV has no phexpr")

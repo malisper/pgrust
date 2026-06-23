@@ -49,7 +49,7 @@ use path_small_seams as small_seam;
 use placeholder_seams as placeholder_seam;
 use restrictinfo_seams as rinfo_seam;
 pub(crate) use joininfo_ext_seams as ext_seam;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 
 /// Install the inward seams owned by restrictinfo.c / joininfo.c / placeholder.c.
 /// Called once at single-threaded startup from `seams-init::init_all()`. Each of

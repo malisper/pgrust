@@ -22,7 +22,7 @@ use types_core::primitive::Oid;
 use datum::datum::Datum;
 use types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
 use types_selfuncs::{ConstNodeInfo, EstimationInfo, StatsTuple, VariableStatData};

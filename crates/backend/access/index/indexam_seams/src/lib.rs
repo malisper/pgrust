@@ -6,10 +6,10 @@
 
 #![allow(non_snake_case)]
 
-use nodes::nodeindexonlyscan::{
+use ::nodes::nodeindexonlyscan::{
     IndexScanDesc, IndexScanInstrumentation, ParallelIndexScanDesc,
 };
-use nodes::IndexOnlyScanState;
+use ::nodes::IndexOnlyScanState;
 use types_scan::sdir::ScanDirection;
 use types_tuple::heaptuple::ItemPointerData;
 
@@ -169,7 +169,7 @@ seam_core::seam!(
     /// `ereport(ERROR)`.
     pub fn index_rescan_is<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        node: &mut nodes::IndexScanState<'mcx>,
+        node: &mut ::nodes::IndexScanState<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -195,7 +195,7 @@ seam_core::seam!(
     /// `int64` from the AM). Fallible on `ereport(ERROR)`.
     pub fn index_getbitmap<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        scan: &mut nodes::IndexScanDescData<'mcx>,
+        scan: &mut ::nodes::IndexScanDescData<'mcx>,
         bitmap: &mut tidbitmap::TIDBitmap,
     ) -> types_error::PgResult<i64>
 );
@@ -208,7 +208,7 @@ seam_core::seam!(
     /// `biss_ScanKeys` array and `biss_ScanDesc`. Fallible on `ereport(ERROR)`.
     pub fn index_rescan_bis<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        node: &mut nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
+        node: &mut ::nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -219,7 +219,7 @@ seam_core::seam!(
     /// Fallible on `ereport(ERROR)`.
     pub fn index_getnext_tid<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        scan: &mut nodes::IndexScanDescData<'mcx>,
+        scan: &mut ::nodes::IndexScanDescData<'mcx>,
         direction: ScanDirection,
     ) -> types_error::PgResult<Option<ItemPointerData>>
 );
@@ -232,10 +232,10 @@ seam_core::seam!(
     /// internally, walking HOT chains. Fallible on `ereport(ERROR)`; pins a
     /// heap buffer recorded in the scan descriptor on success.
     pub fn index_getnext_slot<'mcx>(
-        scan: &mut nodes::IndexScanDescData<'mcx>,
+        scan: &mut ::nodes::IndexScanDescData<'mcx>,
         direction: ScanDirection,
-        estate: &mut nodes::EStateData<'mcx>,
-        slot: nodes::SlotId,
+        estate: &mut ::nodes::EStateData<'mcx>,
+        slot: ::nodes::SlotId,
     ) -> types_error::PgResult<bool>
 );
 
@@ -245,9 +245,9 @@ seam_core::seam!(
     /// pool), returning whether a visible tuple was found. Fallible on
     /// `ereport(ERROR)`; pins a heap buffer recorded in the scan descriptor.
     pub fn index_fetch_heap<'mcx>(
-        scan: &mut nodes::IndexScanDescData<'mcx>,
-        estate: &mut nodes::EStateData<'mcx>,
-        slot: nodes::SlotId,
+        scan: &mut ::nodes::IndexScanDescData<'mcx>,
+        estate: &mut ::nodes::EStateData<'mcx>,
+        slot: ::nodes::SlotId,
     ) -> types_error::PgResult<bool>
 );
 
@@ -256,7 +256,7 @@ seam_core::seam!(
     /// resources (pins, AM scan state). Fallible on `ereport(ERROR)`.
     pub fn index_endscan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        scan: nodes::IndexScanDesc<'mcx>,
+        scan: ::nodes::IndexScanDesc<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -264,7 +264,7 @@ seam_core::seam!(
     /// `index_markpos(scan)` (indexam.c): mark the current scan position.
     pub fn index_markpos<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        scan: &mut nodes::IndexScanDescData<'mcx>,
+        scan: &mut ::nodes::IndexScanDescData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -272,7 +272,7 @@ seam_core::seam!(
     /// `index_restrpos(scan)` (indexam.c): restore the marked scan position.
     pub fn index_restrpos<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        scan: &mut nodes::IndexScanDescData<'mcx>,
+        scan: &mut ::nodes::IndexScanDescData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -321,7 +321,7 @@ seam_core::seam!(
     /// state before beginning a fresh scan. Fallible on `ereport(ERROR)`.
     pub fn index_parallelrescan<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        scan: &mut nodes::IndexScanDescData<'mcx>,
+        scan: &mut ::nodes::IndexScanDescData<'mcx>,
     ) -> types_error::PgResult<()>
 );
 
@@ -386,6 +386,6 @@ seam_core::seam!(
     /// `num_workers` + the `IndexScanInstrumentation[]` tail back out of DSM into
     /// an owned struct the worker node holds. Fallible on `ereport(ERROR)`.
     pub fn index_scan_resolve_shared_info<'mcx>(
-        piscan: nodes::ParallelIndexScanDescHandle,
-    ) -> types_error::PgResult<nodes::SharedIndexScanInstrumentation>
+        piscan: ::nodes::ParallelIndexScanDescHandle,
+    ) -> types_error::PgResult<::nodes::SharedIndexScanInstrumentation>
 );

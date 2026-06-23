@@ -42,10 +42,10 @@ use types_error::{
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
     ERROR,
 };
-use nodes::ddlnodes::{CoercionContext, ConstrType, Constraint};
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::parsestmt::ParseExprKind;
-use nodes::primnodes::{CoercionForm, Expr};
+use ::nodes::ddlnodes::{CoercionContext, ConstrType, Constraint};
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::parsestmt::ParseExprKind;
+use ::nodes::primnodes::{CoercionForm, Expr};
 use rel::Relation;
 use types_storage::lock::AccessShareLock;
 use types_tuple::access::{ATTRIBUTE_GENERATED_VIRTUAL, RELKIND_PARTITIONED_TABLE};
@@ -76,7 +76,7 @@ fn expr_to_nodeptr<'mcx>(mcx: Mcx<'mcx>, expr: Expr<'mcx>) -> PgResult<NodePtr<'
 /// NULL expression (the C `expr == NULL` case the caller checks).
 pub fn cookDefault<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     raw_default: NodePtr<'mcx>,
     atttypid: Oid,
     atttypmod: i32,
@@ -191,7 +191,7 @@ pub fn cookDefault<'mcx>(
 /// convert it to a cooked boolean `Expr` ready for storage.
 fn cookConstraint<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     raw_constraint: NodePtr<'mcx>,
     relname: &str,
 ) -> PgResult<Expr<'mcx>> {
@@ -243,7 +243,7 @@ fn cookConstraint<'mcx>(
 fn check_nested_generated_walker(
     mcx: Mcx<'_>,
     node: &Node,
-    pstate: &nodes::parsestmt::ParseState<'_>,
+    pstate: &::nodes::parsestmt::ParseState<'_>,
     err: &RefCell<Option<PgError>>,
 ) -> bool {
     match node.node_tag() {
@@ -328,7 +328,7 @@ fn check_nested_generated_walker(
 /// `check_nested_generated` (heap.c).
 fn check_nested_generated<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &nodes::parsestmt::ParseState<'mcx>,
+    pstate: &::nodes::parsestmt::ParseState<'mcx>,
     node: &Node,
 ) -> PgResult<()> {
     let err: RefCell<Option<PgError>> = RefCell::new(None);
@@ -348,7 +348,7 @@ fn contains_user_functions_checker(func_id: Oid) -> bool {
 fn check_virtual_generated_security_walker(
     mcx: Mcx<'_>,
     node: &Node,
-    pstate: &nodes::parsestmt::ParseState<'_>,
+    pstate: &::nodes::parsestmt::ParseState<'_>,
     err: &RefCell<Option<PgError>>,
 ) -> bool {
     if !node.is_list() {
@@ -416,7 +416,7 @@ fn check_virtual_generated_security_walker(
 /// `check_virtual_generated_security` (heap.c).
 fn check_virtual_generated_security<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &nodes::parsestmt::ParseState<'mcx>,
+    pstate: &::nodes::parsestmt::ParseState<'mcx>,
     node: &Node,
 ) -> PgResult<()> {
     let err: RefCell<Option<PgError>> = RefCell::new(None);

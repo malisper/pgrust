@@ -29,8 +29,8 @@ use types_error::PgResult;
 use types_json::{JsonLexContext, JsonParseErrorType, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use types_jsonb::jsonb::{jbvType, json_container_is_object, JsonbIteratorToken};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::MAT_SRF_BLESS;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::MAT_SRF_BLESS;
 use types_tuple::Datum;
 
 use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb};

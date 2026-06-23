@@ -29,11 +29,11 @@ use types_error::error::{
 };
 use types_error::{PgError, PgResult};
 
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::parsenodes::{RangeTblEntry, RTEKind};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::{Aggref, Expr, GroupingFunc, Param, ParamKind, Var};
-use nodes::rawnodes::{GroupingSet, GroupingSetKind, SortGroupClause, WindowDef};
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::{Aggref, Expr, GroupingFunc, Param, ParamKind, Var};
+use ::nodes::rawnodes::{GroupingSet, GroupingSetKind, SortGroupClause, WindowDef};
 
 use nodes_core::makefuncs::{make_func_expr, make_target_entry, make_var};
 use nodes_core::nodefuncs::{expr_location, expr_type};
@@ -63,8 +63,8 @@ const FRAMEOPTION_DEFAULTS: i32 =
     FRAMEOPTION_RANGE | FRAMEOPTION_START_UNBOUNDED_PRECEDING | FRAMEOPTION_END_CURRENT_ROW;
 
 /// `primnodes.h` `CoercionForm` value `COERCE_EXPLICIT_CALL == 0`.
-const COERCE_EXPLICIT_CALL: nodes::primnodes::CoercionForm =
-    nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL;
+const COERCE_EXPLICIT_CALL: ::nodes::primnodes::CoercionForm =
+    ::nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL;
 
 /// `query_tree_walker` flag (`QTW_EXAMINE_RTES_BEFORE`, nodeFuncs.h).
 const QTW_EXAMINE_RTES_BEFORE: i32 = 0x10;
@@ -163,7 +163,7 @@ pub fn transformAggregateCall<'mcx>(
 ) -> PgResult<Aggref<'static>> {
     let mcx = pstate_mcx(pstate);
     let mut agg = agg;
-    let mut tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+    let mut tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
     let mut torder: Vec<SortGroupClause> = Vec::new();
     let mut tdistinct: Vec<SortGroupClause> = Vec::new();
     let mut attno: AttrNumber = 1;
@@ -235,7 +235,7 @@ pub fn transformAggregateCall<'mcx>(
 
         // The owner takes the ORDER BY as `&[SortBy]`; aggorder is the raw
         // `List *` of SortBy nodes. Unwrap each NodePtr into an owned SortBy.
-        let mut orderlist: Vec<nodes::rawnodes::SortBy<'mcx>> =
+        let mut orderlist: Vec<::nodes::rawnodes::SortBy<'mcx>> =
             Vec::with_capacity(aggorder.len());
         for sortby_node in aggorder.into_iter() {
             match PgBox::into_inner(sortby_node).into_sortby() {
@@ -323,9 +323,9 @@ pub fn transformAggregateCall<'mcx>(
 /// boxes/strings), so they may be reinterpreted as `'static`. This is a
 /// transmute of the lifetime parameter only; the data is unchanged.
 fn tlist_into_static<'mcx>(
-    tlist: Vec<nodes::primnodes::TargetEntry<'mcx>>,
-) -> PgResult<Vec<nodes::primnodes::TargetEntry<'static>>> {
-    let mut out: Vec<nodes::primnodes::TargetEntry<'static>> = Vec::new();
+    tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>>,
+) -> PgResult<Vec<::nodes::primnodes::TargetEntry<'static>>> {
+    let mut out: Vec<::nodes::primnodes::TargetEntry<'static>> = Vec::new();
     out.reserve(tlist.len());
     for te in tlist.into_iter() {
         // SAFETY: primnodes::Aggref is in the lifetime-free Expr tree (cf.
@@ -335,7 +335,7 @@ fn tlist_into_static<'mcx>(
         // 'mcx lifetime to 'static to match the Expr-tree convention — a known
         // model gap (the Aggref-lifetime keystone is unbuilt; the arena
         // outlives parse analysis in practice).
-        let te_static: nodes::primnodes::TargetEntry<'static> =
+        let te_static: ::nodes::primnodes::TargetEntry<'static> =
             unsafe { core::mem::transmute(te) };
         out.push(te_static);
     }
@@ -367,7 +367,7 @@ pub fn transformGroupingFunc<'mcx>(
 ) -> PgResult<Expr<'static>> {
     // C: GroupingFunc *p = (GroupingFunc *) gf; the grammar produces the *raw*
     // `Node::GroupingFunc` (rawexprnodes), whose `args` are raw `NodePtr`s.
-    let Some(p): Option<nodes::rawexprnodes::GroupingFunc<'mcx>> =
+    let Some(p): Option<::nodes::rawexprnodes::GroupingFunc<'mcx>> =
         p_node.into_groupingfunc()
     else {
         return Err(PgError::error(
@@ -443,7 +443,7 @@ fn pstate_mcx<'mcx>(pstate: &ParseState<'mcx>) -> Mcx<'mcx> {
 /// The two node kinds `check_agglevels_and_constraints` is invoked on.
 enum AggOrGrouping<'a, 'mcx> {
     Agg(&'a mut Aggref<'mcx>),
-    Grouping(&'a mut nodes::primnodes::GroupingFunc<'mcx>),
+    Grouping(&'a mut ::nodes::primnodes::GroupingFunc<'mcx>),
 }
 
 fn check_agglevels_and_constraints<'mcx, 'n>(
@@ -1003,9 +1003,9 @@ fn rte_eref_aliasname<'a>(rte: &'a RangeTblEntry) -> &'a str {
 /// Finish initial transformation of a window function call.
 pub fn transformWindowFuncCall<'mcx>(
     pstate: &mut ParseState<'mcx>,
-    wfunc: nodes::primnodes::WindowFunc<'static>,
+    wfunc: ::nodes::primnodes::WindowFunc<'static>,
     windef: WindowDef<'mcx>,
-) -> PgResult<nodes::primnodes::WindowFunc<'static>> {
+) -> PgResult<::nodes::primnodes::WindowFunc<'static>> {
     let mut wfunc = wfunc;
     // A window function call can't contain another one (but aggs are OK).
     if pstate.p_hasWindowFuncs && contain_windowfuncs_exprs(pstate_mcx(pstate), &wfunc.args)? {
@@ -1260,11 +1260,11 @@ fn eq_opt_nodes(a: &Option<NodePtr>, b: &Option<NodePtr>) -> bool {
 pub fn parseCheckAggregates<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    qry: &mut nodes::copy_query::Query<'mcx>,
+    qry: &mut ::nodes::copy_query::Query<'mcx>,
 ) -> PgResult<()> {
     let mut gset_common: Vec<i32> = Vec::new();
     // groupClauses is a list of TargetEntry; carried as owned TargetEntry.
-    let mut group_clauses: Vec<nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+    let mut group_clauses: Vec<::nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
     let mut group_clause_common_vars: Vec<Expr<'mcx>> = Vec::new();
     let mut func_grouped_rels: Vec<i32> = Vec::new();
     let has_join_rtes;
@@ -1456,7 +1456,7 @@ pub fn parseCheckAggregates<'mcx>(
         &mut func_grouped_rels,
         &mut constraint_deps,
     )?;
-    let mut new_tl: PgVec<nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    let mut new_tl: PgVec<::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     for n in new_tlist {
         match n.into_targetentry() {
             Some(te) => new_tl.push(te),
@@ -1539,9 +1539,9 @@ pub fn parseCheckAggregates<'mcx>(
 fn flatten_group_clauses<'mcx>(
     mcx: Mcx<'mcx>,
     qry_node: &Node<'mcx>,
-    group_clauses: Vec<nodes::primnodes::TargetEntry<'mcx>>,
-) -> PgResult<Vec<nodes::primnodes::TargetEntry<'mcx>>> {
-    let mut out: Vec<nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
+    group_clauses: Vec<::nodes::primnodes::TargetEntry<'mcx>>,
+) -> PgResult<Vec<::nodes::primnodes::TargetEntry<'mcx>>> {
+    let mut out: Vec<::nodes::primnodes::TargetEntry<'mcx>> = Vec::new();
     out.reserve(group_clauses.len());
     for tle in group_clauses {
         let flat = rewritemanip_seams::flatten_join_alias_vars::call(
@@ -1585,7 +1585,7 @@ fn flatten_node_list<'mcx>(
 struct SubstituteContext<'a, 'mcx> {
     mcx: Mcx<'mcx>,
     pstate: &'a ParseState<'mcx>,
-    group_clauses: &'a [nodes::primnodes::TargetEntry<'mcx>],
+    group_clauses: &'a [::nodes::primnodes::TargetEntry<'mcx>],
     group_clause_common_vars: &'a [Expr<'mcx>],
     gset_common: &'a [i32],
     have_groupingsets: bool,
@@ -1601,7 +1601,7 @@ fn substitute_grouped_columns<'mcx>(
     mcx: Mcx<'mcx>,
     node: Node<'mcx>,
     pstate: &ParseState<'mcx>,
-    group_clauses: &[nodes::primnodes::TargetEntry<'mcx>],
+    group_clauses: &[::nodes::primnodes::TargetEntry<'mcx>],
     group_clause_common_vars: &[Expr<'mcx>],
     gset_common: &[i32],
     have_groupingsets: bool,
@@ -1635,7 +1635,7 @@ fn substitute_grouped_columns_list<'mcx>(
     mcx: Mcx<'mcx>,
     nodes: Vec<Node<'mcx>>,
     pstate: &ParseState<'mcx>,
-    group_clauses: &[nodes::primnodes::TargetEntry<'mcx>],
+    group_clauses: &[::nodes::primnodes::TargetEntry<'mcx>],
     group_clause_common_vars: &[Expr<'mcx>],
     gset_common: &[i32],
     have_groupingsets: bool,
@@ -1925,14 +1925,14 @@ fn mutate_generic<'mcx>(node: &mut Node<'mcx>, context: &mut SubstituteContext<'
 /// (`Const` default) behind. Used to move a child into a `Node` for in-place
 /// mutation, then write the result back.
 fn replace_expr_dummy<'mcx>(slot: &mut Expr<'mcx>) -> Expr<'mcx> {
-    core::mem::replace(slot, Expr::Const(nodes::primnodes::Const::default()))
+    core::mem::replace(slot, Expr::Const(::nodes::primnodes::Const::default()))
 }
 
 /// Unwrap a `Node::Expr` back into its `Expr`.
 fn unwrap_node_expr<'mcx>(n: Node<'mcx>) -> Expr<'mcx> {
     match n.into_expr() {
         Some(e) => e,
-        None => Expr::Const(nodes::primnodes::Const::default()),
+        None => Expr::Const(::nodes::primnodes::Const::default()),
     }
 }
 
@@ -1979,9 +1979,9 @@ fn build_grouped_var(
 /// `bms_add_member(set, x)` operating on the `ExprRelids` word storage that
 /// `Var.varnullingrels` carries (mirrors bitmapset.c word math).
 fn exprrelids_add_member(
-    er: &nodes::primnodes::ExprRelids,
+    er: &::nodes::primnodes::ExprRelids,
     x: i32,
-) -> nodes::primnodes::ExprRelids {
+) -> ::nodes::primnodes::ExprRelids {
     debug_assert!(x >= 0);
     let x = x as u32;
     const BITS_PER_WORD: u32 = 64;
@@ -1992,7 +1992,7 @@ fn exprrelids_add_member(
         words.resize(wordnum + 1, 0);
     }
     words[wordnum] |= 1u64 << bitnum;
-    nodes::primnodes::ExprRelids { words }
+    ::nodes::primnodes::ExprRelids { words }
 }
 
 // ===========================================================================
@@ -2003,7 +2003,7 @@ struct FinalizeContext<'a, 'mcx> {
     mcx: Mcx<'mcx>,
     pstate: &'a ParseState<'mcx>,
     qry: &'a Node<'mcx>,
-    group_clauses: &'a [nodes::primnodes::TargetEntry<'mcx>],
+    group_clauses: &'a [::nodes::primnodes::TargetEntry<'mcx>],
     has_join_rtes: bool,
     have_non_var_grouping: bool,
     sublevels_up: i32,
@@ -2015,7 +2015,7 @@ fn finalize_grouping_exprs_list<'mcx>(
     nodes: &mut [Node<'mcx>],
     pstate: &ParseState<'mcx>,
     qry: &Node<'mcx>,
-    group_clauses: &[nodes::primnodes::TargetEntry<'mcx>],
+    group_clauses: &[::nodes::primnodes::TargetEntry<'mcx>],
     has_join_rtes: bool,
     have_non_var_grouping: bool,
 ) -> PgResult<()> {
@@ -2046,7 +2046,7 @@ fn finalize_grouping_exprs<'mcx>(
     mut node: Node<'mcx>,
     pstate: &ParseState<'mcx>,
     qry: &Node<'mcx>,
-    group_clauses: &[nodes::primnodes::TargetEntry<'mcx>],
+    group_clauses: &[::nodes::primnodes::TargetEntry<'mcx>],
     has_join_rtes: bool,
     have_non_var_grouping: bool,
 ) -> PgResult<Node<'mcx>> {
@@ -2164,7 +2164,7 @@ fn finalize_grouping_exprs_walker<'mcx>(
 /// The inner loop of `finalize_grouping_exprs_walker` for a level-matching
 /// `GroupingFunc` (fills `ref_list`).
 fn compute_grouping_refs(
-    grp: &nodes::primnodes::GroupingFunc,
+    grp: &::nodes::primnodes::GroupingFunc,
     context: &mut FinalizeContext,
 ) -> PgResult<Vec<i32>> {
     let mut ref_list: Vec<i32> = Vec::new();
@@ -2648,7 +2648,7 @@ fn make_func_expr_variadic<'mcx>(
     args: Vec<Expr<'mcx>>,
     funccollid: Oid,
     inputcollid: Oid,
-    fformat: nodes::primnodes::CoercionForm,
+    fformat: ::nodes::primnodes::CoercionForm,
 ) -> Expr<'mcx> {
     make_func_expr(funcid, rettype, args, funccollid, inputcollid, fformat)
 }

@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use types_core::primitive::Oid;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, NodeId, PlannerInfo};
 
 /// A decomposed `SupportRequestIndexCondition` kernel. The parameters mirror the

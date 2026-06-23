@@ -12,8 +12,8 @@
 use mcx::{Mcx, PgBox};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::nodes::Node;
-use nodes::partition::PartitionKeyData;
+use ::nodes::nodes::Node;
+use ::nodes::partition::PartitionKeyData;
 use rel::Relation;
 
 seam_core::seam!(

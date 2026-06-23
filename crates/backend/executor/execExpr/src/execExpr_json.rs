@@ -8,11 +8,11 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::execexpr::{
+use ::nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, JsonExprState, JsonExprStateId,
     JsonPathVariableState, ResultCellId,
 };
-use nodes::primnodes::{
+use ::nodes::primnodes::{
     etag, Expr, JsonBehaviorType, JsonExpr, JsonExprOp, JsonReturning, XmlExpr,
 };
 use types_tuple::heaptuple::Datum as DatumV;
@@ -213,7 +213,7 @@ pub(crate) fn exec_init_json_expr<'mcx>(
         // InitFunctionCallInfoData(*fcinfo, finfo, 3, InvalidOid, NULL, escontext);
         let fcinfo = mcx::alloc_in(
             mcx,
-            nodes::fmgr::FunctionCallInfoBaseData {
+            ::nodes::fmgr::FunctionCallInfoBaseData {
                 flinfo: Some(finfo),
                 context: None,
                 resultinfo: None,
@@ -412,16 +412,16 @@ fn exec_init_json_coercion<'mcx>(
 fn new_json_coercion_cache<'mcx>(
     mcx: Mcx<'mcx>,
     state: &mut ExprState<'mcx>,
-) -> PgResult<nodes::execexpr::JsonCoercionCacheId> {
+) -> PgResult<::nodes::execexpr::JsonCoercionCacheId> {
     if state.json_coercion_caches.caches.is_none() {
         state.json_coercion_caches.caches = Some(mcx::vec_with_capacity_in(mcx, 1)?);
     }
     let caches = state.json_coercion_caches.caches.as_mut().unwrap();
-    let id = nodes::execexpr::JsonCoercionCacheId(caches.len() as u32);
+    let id = ::nodes::execexpr::JsonCoercionCacheId(caches.len() as u32);
     caches
         .try_reserve(1)
-        .map_err(|_| mcx.oom(core::mem::size_of::<nodes::execexpr::JsonCoercionCache>()))?;
-    caches.push(nodes::execexpr::JsonCoercionCache::default());
+        .map_err(|_| mcx.oom(core::mem::size_of::<::nodes::execexpr::JsonCoercionCache>()))?;
+    caches.push(::nodes::execexpr::JsonCoercionCache::default());
     Ok(id)
 }
 
@@ -471,7 +471,7 @@ fn patch_jumps<'mcx>(state: &mut ExprState<'mcx>, targets: &[usize], dest: i32) 
 }
 
 /// C: `IsA(behavior->expr, Const) && ((Const *) behavior->expr)->constisnull`.
-fn on_behavior_is_null_const(behavior: &nodes::primnodes::JsonBehavior) -> bool {
+fn on_behavior_is_null_const(behavior: &::nodes::primnodes::JsonBehavior) -> bool {
     match behavior.expr.as_deref() {
         Some(e) if e.expr_tag() == etag::T_Const => e.expect_const().constisnull,
         _ => false,
@@ -554,7 +554,7 @@ pub(crate) fn exec_init_xml_expr<'mcx>(
 /// the one left in `resv`).
 pub(crate) fn exec_init_json_value_expr<'mcx>(
     mcx: Mcx<'mcx>,
-    jve: &nodes::primnodes::JsonValueExpr<'mcx>,
+    jve: &::nodes::primnodes::JsonValueExpr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {
@@ -579,12 +579,12 @@ pub(crate) fn exec_init_json_value_expr<'mcx>(
 /// innermost caseval pointed at `resv`).
 pub(crate) fn exec_init_json_constructor<'mcx>(
     mcx: Mcx<'mcx>,
-    ctor: &nodes::primnodes::JsonConstructorExpr<'mcx>,
+    ctor: &::nodes::primnodes::JsonConstructorExpr<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {
-    use nodes::execexpr::{JsonArgTypeCache, JsonConstructorExprState};
-    use nodes::primnodes::{JsonConstructorType, JsonFormatType};
+    use ::nodes::execexpr::{JsonArgTypeCache, JsonConstructorExprState};
+    use ::nodes::primnodes::{JsonConstructorType, JsonFormatType};
 
     if let Some(func) = ctor.func.as_deref() {
         // The whole constructor is a plain function call (e.g. an aggregate's
@@ -698,7 +698,7 @@ pub(crate) fn exec_init_json_constructor<'mcx>(
 /// `exprType(pred->expr)`).
 pub(crate) fn exec_init_json_is_predicate<'mcx>(
     mcx: Mcx<'mcx>,
-    pred: &nodes::primnodes::JsonIsPredicate<'mcx>,
+    pred: &::nodes::primnodes::JsonIsPredicate<'mcx>,
     state: &mut ExprState<'mcx>,
     resv: ResultCellId,
 ) -> PgResult<()> {

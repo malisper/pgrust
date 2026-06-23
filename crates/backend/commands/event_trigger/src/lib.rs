@@ -49,8 +49,8 @@ use types_error::{
     ERRCODE_UNDEFINED_OBJECT,
 };
 use types_evtcache::EventTriggerEvent;
-use nodes::nodes::Node;
-use nodes::parsenodes::{ObjectType, OBJECT_EVENT_TRIGGER};
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::{ObjectType, OBJECT_EVENT_TRIGGER};
 
 use event_trigger_fire_seams as fire_seams;
 use extension_seams as extension_seams;
@@ -69,7 +69,7 @@ use syscache_seams as syscache_seams;
 use utils_error::ereport;
 use funcapi_seams as funcapi_seams;
 
-use nodes::parsestmt::CommandTag;
+use ::nodes::parsestmt::CommandTag;
 
 /// `TRIGGER_FIRES_ON_ORIGIN` `'O'` (utils/rel.h) — the on-disk `evtenabled`
 /// firing-configuration byte set at creation.
@@ -573,7 +573,7 @@ pub fn pg_event_trigger_table_rewrite_reason() -> PgResult<i32> {
 /// `strlist_to_textarray` palloc in (the fmgr adapter passes `fcinfo->fn_mcxt`).
 pub fn pg_event_trigger_dropped_objects<'mcx>(
     mcx: Mcx<'mcx>,
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
     use types_tuple::heaptuple::Datum as DatumV;
 
@@ -706,7 +706,7 @@ struct DdlCommandSnapshot<'mcx> {
 /// by a `SELECT` that does not call a deparse function.
 pub fn pg_event_trigger_ddl_commands<'mcx>(
     mcx: Mcx<'mcx>,
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<types_tuple::heaptuple::Datum<'mcx>> {
     use types_tuple::heaptuple::Datum as DatumV;
 
@@ -1297,7 +1297,7 @@ pub fn event_trigger_collect_alter_def_privs(stmt: &Node) -> PgResult<()> {
 pub fn event_trigger_collect_simple_command_create_schema(
     address: ObjectAddress,
     secondary_object: ObjectAddress,
-    stmt: &nodes::ddlnodes::CreateSchemaStmt<'_>,
+    stmt: &::nodes::ddlnodes::CreateSchemaStmt<'_>,
 ) -> PgResult<()> {
     if !collecting() {
         return Ok(());
@@ -1348,7 +1348,7 @@ pub fn event_trigger_collect_simple_command_create_schema(
 pub fn event_trigger_collect_simple_command_reindex(
     address: ObjectAddress,
     secondary_object: ObjectAddress,
-    stmt: &nodes::ddlnodes::ReindexStmt<'_>,
+    stmt: &::nodes::ddlnodes::ReindexStmt<'_>,
 ) -> PgResult<()> {
     if !collecting() {
         return Ok(());
@@ -1402,7 +1402,7 @@ pub fn event_trigger_collect_simple_command_reindex(
 pub fn event_trigger_collect_simple_command_publication(
     address: ObjectAddress,
     secondary_object: ObjectAddress,
-    stmt: nodes::ddlnodes::AlterPublicationStmt<'_>,
+    stmt: ::nodes::ddlnodes::AlterPublicationStmt<'_>,
 ) -> PgResult<()> {
     if !collecting() {
         return Ok(());
@@ -1448,11 +1448,11 @@ pub fn event_trigger_collect_simple_command_publication(
 fn opclass_name_list<'mcx>(
     mcx: Mcx<'mcx>,
     names: &[opclass::StringNode],
-) -> PgResult<mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>> {
+) -> PgResult<mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>> {
     let mut out = mcx::vec_with_capacity_in(mcx, names.len())?;
     for n in names {
         let sval = mcx::PgString::from_str_in(n.sval.as_deref().unwrap_or(""), mcx)?;
-        let node = Node::mk_string(mcx, nodes::value::StringNode { sval })?;
+        let node = Node::mk_string(mcx, ::nodes::value::StringNode { sval })?;
         out.push(mcx::alloc_in(mcx, node)?);
     }
     Ok(out)
@@ -1486,7 +1486,7 @@ pub fn event_trigger_collect_simple_command_opfamily(
         };
 
         let mcx = st.cmd_cxt.mcx();
-        let ddl = nodes::ddlnodes::CreateOpFamilyStmt {
+        let ddl = ::nodes::ddlnodes::CreateOpFamilyStmt {
             opfamilyname: opclass_name_list(mcx, &stmt.opfamilyname)?,
             amname: match &stmt.amname {
                 Some(a) => Some(mcx::PgString::from_str_in(a, mcx)?),
@@ -1545,7 +1545,7 @@ pub fn event_trigger_collect_create_opclass(
         // The deparse-only fields (`datatype`/`items`) are not read by the
         // ddl_commands tag/type/identity reader; the SCT_CreateOpClass deparse
         // pointer (fed by `operators`/`procedures`) is left NULL by the reader.
-        let ddl = nodes::ddlnodes::CreateOpClassStmt {
+        let ddl = ::nodes::ddlnodes::CreateOpClassStmt {
             opclassname: opclass_name_list(mcx, &stmt.opclassname)?,
             opfamilyname: opclass_name_list(mcx, &stmt.opfamilyname)?,
             amname: match &stmt.amname {
@@ -1612,7 +1612,7 @@ pub fn event_trigger_collect_alter_opfam(
 
         let mcx = st.cmd_cxt.mcx();
         // `items` is a deparse-only field, not read by the ddl_commands reader.
-        let ddl = nodes::ddlnodes::AlterOpFamilyStmt {
+        let ddl = ::nodes::ddlnodes::AlterOpFamilyStmt {
             opfamilyname: opclass_name_list(mcx, &stmt.opfamilyname)?,
             amname: match &stmt.amname {
                 Some(a) => Some(mcx::PgString::from_str_in(a, mcx)?),
@@ -1747,7 +1747,7 @@ pub fn event_trigger_collect_alter_table_subcmd(
     }
 
     // Assert(IsA(subcmd, AlterTableCmd));
-    debug_assert_eq!(subcmd.node_tag(), nodes::nodes::T_AlterTableCmd);
+    debug_assert_eq!(subcmd.node_tag(), ::nodes::nodes::T_AlterTableCmd);
 
     CURRENT_STATE.with(|s| {
         let mut stack = s.borrow_mut();
@@ -1997,7 +1997,7 @@ fn alter_event_trigger_seam<'mcx>(stmt: &Node<'mcx>) -> PgResult<()> {
 /// `CreateEventTrigger` (event_trigger.c:123-210) — create an event trigger.
 pub fn CreateEventTrigger<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::ddlnodes::CreateEventTrigStmt<'mcx>,
+    stmt: &::nodes::ddlnodes::CreateEventTrigStmt<'mcx>,
 ) -> PgResult<Oid> {
     let evtowner: Oid = miscinit::GetUserId();
 
@@ -2154,7 +2154,7 @@ fn error_duplicate_filter_variable(defname: &str) -> PgResult<()> {
 
 /// Read a `DefElem`'s `arg` as a list of `String` node values — the
 /// `WHEN tag IN ('cmd1', 'cmd2')` parser representation (`(List *) def->arg`).
-fn def_string_list(def: &nodes::ddlnodes::DefElem<'_>) -> PgResult<Vec<String>> {
+fn def_string_list(def: &::nodes::ddlnodes::DefElem<'_>) -> PgResult<Vec<String>> {
     let arg = def
         .arg
         .as_ref()

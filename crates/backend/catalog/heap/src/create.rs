@@ -21,8 +21,8 @@ use types_error::{
     PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_DUPLICATE_TABLE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERROR,
 };
-use nodes::parsenodes::ObjectType;
-use nodes::primnodes::OnCommitAction;
+use ::nodes::parsenodes::ObjectType;
+use ::nodes::primnodes::OnCommitAction;
 use rel::Relation;
 use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
 use lsyscache::relation::get_relname_relid;
@@ -441,7 +441,7 @@ pub fn heap_create_with_catalog<'mcx>(
     allow_system_table_mods: bool,
     is_internal: bool,
     relrewrite: Oid,
-    cooked_constraints: &[nodes::nodes::NodePtr<'_>],
+    cooked_constraints: &[::nodes::nodes::NodePtr<'_>],
 ) -> PgResult<Oid> {
     /* By default set to InvalidOid unless overridden by binary-upgrade */
     let mut relfilenumber: RelFileNumber = InvalidOid;
@@ -816,7 +816,7 @@ pub fn heap_create_with_catalog<'mcx>(
      * before handing them to StoreConstraints.
      */
     if !cooked_constraints.is_empty() {
-        let mut cooked: alloc::vec::Vec<nodes::nodes::NodePtr<'mcx>> =
+        let mut cooked: alloc::vec::Vec<::nodes::nodes::NodePtr<'mcx>> =
             alloc::vec::Vec::with_capacity(cooked_constraints.len());
         for c in cooked_constraints.iter() {
             cooked.push(mcx::alloc_in(mcx, (**c).clone_in(mcx)?)?);

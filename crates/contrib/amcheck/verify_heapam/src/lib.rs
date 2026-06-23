@@ -34,7 +34,7 @@ use types_error::error::{
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERRCODE_WRONG_OBJECT_TYPE,
 };
 use types_error::{DEBUG1, PgError, PgResult};
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use rel::Relation;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use types_storage::buf::BufferAccessStrategyType;
@@ -613,7 +613,7 @@ fn get_xid_status(
 /// `(blkno, offnum, attnum, msg)` row to the materialized result set and mark
 /// the context corrupt.
 fn report_corruption<'mcx>(
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
     is_corrupt: &mut bool,
     mcx: Mcx<'mcx>,
     blkno: BlockNumber,
@@ -627,7 +627,7 @@ fn report_corruption<'mcx>(
 }
 
 fn report_corruption_internal<'mcx>(
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
     mcx: Mcx<'mcx>,
     blkno: BlockNumber,
     offnum: OffsetNumber,
@@ -650,7 +650,7 @@ fn report_corruption_internal<'mcx>(
 /// reads the current location off `ctx`, appends the row, and marks `ctx`
 /// corrupt. The `mcx` and the location fields are `Copy`, so this does not
 /// conflict with the `&mut ctx` callers also hold.
-fn report<'mcx>(ctx: &mut HeapCheckContext<'mcx>, rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>, msg: String) -> PgResult<()> {
+fn report<'mcx>(ctx: &mut HeapCheckContext<'mcx>, rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>, msg: String) -> PgResult<()> {
     let (mcx, blkno, offnum, attnum) = (ctx.mcx, ctx.blkno, ctx.offnum, ctx.attnum);
     report_corruption(rsinfo, &mut ctx.is_corrupt, mcx, blkno, offnum, attnum, msg)
 }
@@ -659,7 +659,7 @@ fn report<'mcx>(ctx: &mut HeapCheckContext<'mcx>, rsinfo: &mut nodes::funcapi::R
 /// location is the main-table site recorded in the [`ToastedAttribute`].
 fn report_toast<'mcx>(
     ctx: &mut HeapCheckContext<'mcx>,
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
     ta: &ToastedAttribute,
     msg: String,
 ) -> PgResult<()> {
@@ -675,7 +675,7 @@ fn report_toast<'mcx>(
 /// tuple is sufficiently sensible to undergo visibility and attribute checks.
 fn check_tuple_header<'mcx>(
     ctx: &mut HeapCheckContext<'mcx>,
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
 ) -> PgResult<bool> {
     let tuphdr = ctx.tuphdr.clone_in(ctx.mcx)?;
     let infomask = tuphdr.t_infomask;
@@ -735,7 +735,7 @@ fn check_tuple_header<'mcx>(
 /// returns `(checkable, xmin_status_ok, xmin_status)`.
 fn check_tuple_visibility<'mcx>(
     ctx: &mut HeapCheckContext<'mcx>,
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
 ) -> PgResult<(bool, bool, XidCommitStatus)> {
     let tuphdr = ctx.tuphdr.clone_in(ctx.mcx)?;
 
@@ -1125,7 +1125,7 @@ fn att_addlength_pointer(cur_offset: usize, attlen: i16, data: &[u8], off: usize
 /// attribute.
 fn check_tuple_attribute<'mcx>(
     ctx: &mut HeapCheckContext<'mcx>,
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
 ) -> PgResult<bool> {
     let tuphdr = ctx.tuphdr.clone_in(ctx.mcx)?;
     let infomask = tuphdr.t_infomask;
@@ -1288,7 +1288,7 @@ fn check_toast_tuple<'mcx>(
     chunk_seq_col: (Datum<'mcx>, bool),
     chunk_data_col: (Datum<'mcx>, bool),
     ctx: &mut HeapCheckContext<'mcx>,
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
     ta: &ToastedAttribute,
     expected_chunk_seq: i32,
     extsize: u32,
@@ -1382,7 +1382,7 @@ fn check_toast_tuple<'mcx>(
 /// vacuumed away during processing.
 fn check_toasted_attribute<'mcx>(
     ctx: &mut HeapCheckContext<'mcx>,
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
     ta: &ToastedAttribute,
     toast_rel: &Relation,
     valid_toast_index: &rel::RelationData,
@@ -1447,7 +1447,7 @@ fn check_toasted_attribute<'mcx>(
 /// per-tuple driver. Returns `(xmin_status_ok, xmin_status)`.
 fn check_tuple<'mcx>(
     ctx: &mut HeapCheckContext<'mcx>,
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
 ) -> PgResult<(bool, XidCommitStatus)> {
     // Header checks; bail if too corrupt.
     if !check_tuple_header(ctx, rsinfo)? {

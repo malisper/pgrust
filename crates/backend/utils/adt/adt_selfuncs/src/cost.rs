@@ -22,7 +22,7 @@ use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::PgResult;
 use types_error::PgError;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{
     IndexOptInfo, NodeId, PathId, PathNode, PlannerInfo, RinfoId, JOIN_INNER,
 };
@@ -582,7 +582,7 @@ pub(crate) fn btcostestimate<'mcx, 'run>(
                     }
                 }
                 Expr::NullTest(nt) => {
-                    if nt.nulltesttype == nodes::primnodes::NullTestType::IS_NULL {
+                    if nt.nulltesttype == ::nodes::primnodes::NullTestType::IS_NULL {
                         found_is_null_op = true;
                         // IS NULL is like = for selectivity/skip scan purposes.
                         eq_qual_here = true;
@@ -891,7 +891,7 @@ pub(crate) fn brincostestimate<'mcx, 'run>(
         let rte = planner_rt_fetch(run, root, root.rel(baserel).relid);
         debug_assert_eq!(
             rte.rtekind,
-            nodes::parsenodes::RTEKind::RTE_RELATION
+            ::nodes::parsenodes::RTEKind::RTE_RELATION
         );
     }
 
@@ -1186,7 +1186,7 @@ fn gincost_opexpr<'mcx>(
     root: &mut PlannerInfo,
     index: &IndexOptInfo,
     indexcol: usize,
-    clause: &nodes::primnodes::OpExpr,
+    clause: &::nodes::primnodes::OpExpr,
     counts: &mut GinQualCounts,
 ) -> PgResult<bool> {
     let clause_op = clause.opno;
@@ -1238,7 +1238,7 @@ fn gincost_scalararrayopexpr<'mcx>(
     root: &mut PlannerInfo,
     index: &IndexOptInfo,
     indexcol: usize,
-    clause: &nodes::primnodes::ScalarArrayOpExpr,
+    clause: &::nodes::primnodes::ScalarArrayOpExpr,
     num_index_entries: f64,
     counts: &mut GinQualCounts,
 ) -> PgResult<bool> {

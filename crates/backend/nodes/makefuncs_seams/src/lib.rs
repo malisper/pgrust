@@ -9,7 +9,7 @@ use mcx::{Mcx, PgBox, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
 use types_tuple::Datum;
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 use parsenodes::{Node as ParseNode, TypeName as ParseTypeName};
 
 seam_core::seam!(

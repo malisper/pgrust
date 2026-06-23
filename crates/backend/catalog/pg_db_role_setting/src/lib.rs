@@ -376,7 +376,7 @@ pub fn process_db_role_settings(mcx: Mcx<'_>, databaseid: Oid, roleid: Oid) -> P
  * alter_database_setting seam — the AlterDatabaseSet (dbcommands.c) boundary.
  *
  * `AlterDatabaseSet` hands the canonical `'mcx` arena `VariableSetStmt` (an arm
- * of `nodes::nodes::Node`); `AlterSetting` consumes the owner's
+ * of `::nodes::nodes::Node`); `AlterSetting` consumes the owner's
  * owned-`String` `parsenodes::VariableSetStmt`. The two parse-node models
  * meet only here. We convert the arena node into the owned form and run the
  * catalog read-modify-write.
@@ -391,10 +391,10 @@ pub fn process_db_role_settings(mcx: Mcx<'_>, databaseid: Oid, roleid: Oid) -> P
 /// `Boolean`/`BitString`). We unwrap `A_Const.val` to the bare value node and
 /// re-home it onto the owned `parsenodes::Node`.
 fn arena_arg_to_owned(
-    arg: &nodes::nodes::Node<'_>,
+    arg: &::nodes::nodes::Node<'_>,
 ) -> PgResult<parsenodes::Node> {
-    use nodes::nodes::ntag;
-    use nodes::nodes::Node as ANode;
+    use ::nodes::nodes::ntag;
+    use ::nodes::nodes::Node as ANode;
     use parsenodes as pn;
 
     // Unwrap an `A_Const` to its inner value node (a bare value node is taken
@@ -434,7 +434,7 @@ fn arena_arg_to_owned(
 
 /// C: `elog(ERROR, "unrecognized node type: %d", nodeTag(arg))` from
 /// `flatten_set_variable_args` for an arg shape the value-node model can't carry.
-fn unrecognized_arg(node: &nodes::nodes::Node<'_>) -> types_error::PgError {
+fn unrecognized_arg(node: &::nodes::nodes::Node<'_>) -> types_error::PgError {
     utils_error::ereport(types_error::ERROR)
         .errmsg_internal(format!("unrecognized node type: {}", node.node_tag().0))
         .into_error()
@@ -446,12 +446,12 @@ fn alter_database_setting<'mcx, 's>(
     mcx: Mcx<'mcx>,
     databaseid: Oid,
     roleid: Oid,
-    setstmt: &nodes::nodes::Node<'s>,
+    setstmt: &::nodes::nodes::Node<'s>,
 ) -> PgResult<()> {
-    use nodes::ddlnodes::VariableSetKind as AKind;
+    use ::nodes::ddlnodes::VariableSetKind as AKind;
 
     let v = match setstmt.node_tag() {
-        nodes::nodes::ntag::T_VariableSetStmt => setstmt.expect_variablesetstmt(),
+        ::nodes::nodes::ntag::T_VariableSetStmt => setstmt.expect_variablesetstmt(),
         _ => return Err(unrecognized_arg(setstmt)),
     };
 

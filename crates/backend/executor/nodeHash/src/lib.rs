@@ -83,7 +83,7 @@ pub(crate) const HASH_CHUNK_HEADER_SIZE: usize = MAXALIGN(8 * 3 + 8);
 pub(crate) const SKEW_BUCKET_OVERHEAD: usize = MAXALIGN(4 + 8);
 
 // Re-export the hashjoin vocabulary the bodies and callers use.
-pub use nodes::nodehash::{
+pub use ::nodes::nodehash::{
     BucketAndBatch, HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD, INVALID_SKEW_BUCKET_NO,
     SKEW_HASH_MEM_PERCENT, SKEW_MIN_OUTER_FRACTION,
 };
@@ -111,10 +111,10 @@ mod adapters {
     use execExpr_seams as execExpr;
     use mcx::PgBox;
     use types_error::{PgError, PgResult};
-    use nodes::execnodes::{EStateData, SlotId};
-    use nodes::execexpr::ExprState;
-    use nodes::planstate::PlanStateNode;
-    use nodes::nodehash::{
+    use ::nodes::execnodes::{EStateData, SlotId};
+    use ::nodes::execexpr::ExprState;
+    use ::nodes::planstate::PlanStateNode;
+    use ::nodes::nodehash::{
         HashJoinState, HashJoinTableData, HashJoinTupleLink, HashState,
     };
     use types_tuple::heaptuple::HEAP_TUPLE_HAS_MATCH;
@@ -269,7 +269,7 @@ mod adapters {
     }
 
     pub fn cur_tuple_has_match<'mcx>(node: &HashJoinState<'mcx>) -> bool {
-        use nodes::nodehash::HashTupleRef;
+        use ::nodes::nodehash::HashTupleRef;
         // HeapTupleHeaderHasMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple)).
         let table = ht_ref(node);
         match node.hj_CurTuple {
@@ -293,7 +293,7 @@ mod adapters {
     }
 
     pub fn cur_tuple_set_match<'mcx>(node: &mut HashJoinState<'mcx>) -> PgResult<()> {
-        use nodes::nodehash::HashTupleRef;
+        use ::nodes::nodehash::HashTupleRef;
         // HeapTupleHeaderSetMatch(HJTUPLE_MINTUPLE(node->hj_CurTuple)).
         let cur = node.hj_CurTuple;
         let table = ht(node);
@@ -328,9 +328,9 @@ mod adapters {
             let state = inner_hash_state(node);
             if state.hinstrument.is_none() {
                 state.hinstrument =
-                    Some(nodes::nodehash::HashInstrumentSlot::Local(mcx::alloc_in(
+                    Some(::nodes::nodehash::HashInstrumentSlot::Local(mcx::alloc_in(
                         table.spillCxt,
-                        nodes::nodehash::HashInstrumentation::default(),
+                        ::nodes::nodehash::HashInstrumentation::default(),
                     )?));
             }
             let slot = state.hinstrument.as_mut().unwrap();
@@ -347,7 +347,7 @@ mod adapters {
         is_outer: bool,
         hashfuncids: &[types_core::primitive::Oid],
         collations: &[types_core::primitive::Oid],
-        hash_exprs: &[nodes::primnodes::Expr<'mcx>],
+        hash_exprs: &[::nodes::primnodes::Expr<'mcx>],
         opstrict: &[bool],
         keep_nulls: bool,
         estate: &mut EStateData<'mcx>,
@@ -402,7 +402,7 @@ mod adapters {
         // HashJoin's hashclauses qual re-lists them. The owned spine carries this
         // attribution via each ExprState's `found_subplan_ids` discovery channel,
         // drained into the correct node head below.
-        let es_link = nodes::execnodes::EStateLink::from_ref(estate);
+        let es_link = ::nodes::execnodes::EStateLink::from_ref(estate);
         let mut state = execExpr::exec_build_hash32_expr::call(
             mcx, es_link, desc, ops, hashfuncids, collations, hash_exprs, opstrict, init_value,
             keep_nulls,

@@ -12,7 +12,7 @@
 //! counterpart of a `fmgr_builtins[]` row).
 
 use types_core::Oid;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 use crate::register_srf;

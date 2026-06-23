@@ -4,7 +4,7 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
+use ::nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
 use nodes::{EStateData, SlotId};
 
 use crate::aggstate::{AggStateData, HashAggBatch, HashAggSpill};
@@ -408,7 +408,7 @@ pub fn hashagg_spill_init<'mcx>(
     // C: spill->hll_card = palloc0(sizeof(hyperLogLogState) * npartitions) — an
     // array of estimator state held by value, one per partition.
     let mut hll_card =
-        mcx::vec_with_capacity_in::<nodes::nodeagg::HyperLogLog<'mcx>>(mcx, npartitions as usize)?;
+        mcx::vec_with_capacity_in::<::nodes::nodeagg::HyperLogLog<'mcx>>(mcx, npartitions as usize)?;
     for _ in 0..npartitions {
         ntuples.push(0);
         partitions.push(None);

@@ -19,8 +19,8 @@
 #![allow(non_snake_case)]
 
 use types_error::{PgError, PgResult};
-use nodes::execnodes::{EPQState, EStateData};
-use nodes::primnodes::Expr;
+use ::nodes::execnodes::{EPQState, EStateData};
+use ::nodes::primnodes::Expr;
 use nodes::{PlanStateNode, SlotId};
 
 use nodeTidrangescan_seams as seam;
@@ -56,7 +56,7 @@ fn exec_tidrange_scan_node<'mcx>(
 
 /// Extract the `qual_index`-th qual's operand `Expr` on the requested side.
 fn operand_expr<'a, 'mcx>(
-    node: &'a nodes::nodetidrangescan::TidRangeScan<'mcx>,
+    node: &'a ::nodes::nodetidrangescan::TidRangeScan<'mcx>,
     qual_index: usize,
     side: tidrange::OperandSide,
 ) -> Option<&'a Expr<'mcx>> {

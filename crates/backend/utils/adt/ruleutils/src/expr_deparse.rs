@@ -53,12 +53,12 @@ use alloc::string::{String, ToString};
 use mcx::{Mcx, PgString, PgVec};
 use types_core::primitive::Oid;
 use types_error::{PgError, PgResult};
-use nodes::nodes::Node;
-use nodes::parsenodes::{
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::{
     RTE_CTE, RTE_FUNCTION, RTE_GROUP, RTE_JOIN, RTE_NAMEDTUPLESTORE, RTE_RELATION, RTE_RESULT,
     RTE_SUBQUERY, RTE_TABLEFUNC, RTE_VALUES,
 };
-use nodes::primnodes::{
+use ::nodes::primnodes::{
     Aggref, BoolExprType, BoolTestType, CaseExpr, Const, CurrentOfExpr, Expr, FuncExpr, MinMaxOp,
     NullTestType, OpExpr, ScalarArrayOpExpr, SQLValueFunction, SQLValueFunctionOp, SubLink,
     SubLinkType, SubscriptingRef, Var, VarReturningType, WindowFunc,
@@ -75,7 +75,7 @@ const PRETTYFLAG_PAREN: i32 = 0x0001;
 /// `PRETTYFLAG_INDENT` (ruleutils.c 89).
 const PRETTYFLAG_INDENT: i32 = 0x0002;
 
-use nodes::nodeagg::{AGGSPLITOP_COMBINE, AGGSPLITOP_SKIPFINAL};
+use ::nodes::nodeagg::{AGGSPLITOP_COMBINE, AGGSPLITOP_SKIPFINAL};
 
 /// `catalog/pg_aggregate_d.h` AGGKIND_NORMAL.
 const AGGKIND_NORMAL: i8 = b'n' as i8;
@@ -337,8 +337,8 @@ fn quote_identifier<'mcx>(mcx: Mcx<'mcx>, ident: &str) -> PgResult<PgString<'mcx
 /// the live `'mcx` lifetime so the F2 ORDER-BY renderer can consult it.
 fn clone_tle_vec<'mcx>(
     mcx: Mcx<'mcx>,
-    v: &[nodes::primnodes::TargetEntry<'_>],
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
+    v: &[::nodes::primnodes::TargetEntry<'_>],
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
     for t in v.iter() {
@@ -350,8 +350,8 @@ fn clone_tle_vec<'mcx>(
 /// Clone a `PgVec<TargetEntry<'mcx>>` (context.targetList) into a fresh `PgVec`.
 fn clone_tle_vec_mcx<'mcx>(
     mcx: Mcx<'mcx>,
-    v: &PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
+    v: &PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>,
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     let mut out = PgVec::new_in(mcx);
     out.try_reserve(v.len()).map_err(|_| mcx.oom(0))?;
     for t in v.iter() {
@@ -480,11 +480,11 @@ pub fn get_rule_expr(
 /// a table function. XMLTABLE and JSON_TABLE are the only implementations;
 /// JSON_TABLE (`get_json_table`) is deferred until that subsystem lands.
 pub(crate) fn get_tablefunc(
-    tf: &nodes::primnodes::TableFunc<'_>,
+    tf: &::nodes::primnodes::TableFunc<'_>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
-    use nodes::primnodes::{TFT_JSON_TABLE, TFT_XMLTABLE};
+    use ::nodes::primnodes::{TFT_JSON_TABLE, TFT_XMLTABLE};
     // XMLTABLE and JSON_TABLE are the only existing implementations.
     if tf.functype == TFT_XMLTABLE {
         get_xmltable(tf, context, showimplicit)
@@ -498,11 +498,11 @@ pub(crate) fn get_tablefunc(
 /// `get_json_behavior(behavior, context, on)` (ruleutils.c:9173) — render an ON
 /// ERROR / ON EMPTY behavior clause. 1:1 port.
 fn get_json_behavior(
-    behavior: &nodes::primnodes::JsonBehavior,
+    behavior: &::nodes::primnodes::JsonBehavior,
     context: &mut DeparseContext<'_>,
     on: &str,
 ) -> PgResult<()> {
-    use nodes::primnodes::JsonBehaviorType::*;
+    use ::nodes::primnodes::JsonBehaviorType::*;
     let mcx = context.buf.allocator();
 
     // The order of array elements must correspond to the order of
@@ -537,12 +537,12 @@ fn get_json_behavior(
 /// — parse back common options for JSON_QUERY, JSON_VALUE, JSON_EXISTS and
 /// JSON_TABLE columns. 1:1 port.
 fn get_json_expr_options(
-    jsexpr: &nodes::primnodes::JsonExpr,
+    jsexpr: &::nodes::primnodes::JsonExpr,
     context: &mut DeparseContext<'_>,
-    default_behavior: nodes::primnodes::JsonBehaviorType,
+    default_behavior: ::nodes::primnodes::JsonBehaviorType,
 ) -> PgResult<()> {
-    use nodes::primnodes::JsonExprOp::JSON_QUERY_OP;
-    use nodes::primnodes::JsonWrapper::*;
+    use ::nodes::primnodes::JsonExprOp::JSON_QUERY_OP;
+    use ::nodes::primnodes::JsonWrapper::*;
 
     if jsexpr.op == JSON_QUERY_OP {
         match jsexpr.wrapper {
@@ -591,9 +591,9 @@ fn get_json_path_spec(
 
 /// `get_json_format(format, buf)` (ruleutils.c:11627) — parse back a JsonFormat
 /// node into a plain text buffer. 1:1 port.
-fn get_json_format(format: &nodes::primnodes::JsonFormat, buf: &mut String) {
-    use nodes::primnodes::JsonEncoding::*;
-    use nodes::primnodes::JsonFormatType::*;
+fn get_json_format(format: &::nodes::primnodes::JsonFormat, buf: &mut String) {
+    use ::nodes::primnodes::JsonEncoding::*;
+    use ::nodes::primnodes::JsonFormatType::*;
 
     if format.format_type == JS_FORMAT_DEFAULT {
         return;
@@ -621,11 +621,11 @@ fn get_json_format(format: &nodes::primnodes::JsonFormat, buf: &mut String) {
 /// buffer. 1:1 port.
 fn get_json_returning(
     mcx: Mcx<'_>,
-    returning: &nodes::primnodes::JsonReturning,
+    returning: &::nodes::primnodes::JsonReturning,
     buf: &mut String,
     json_format_by_default: bool,
 ) -> PgResult<()> {
-    use nodes::primnodes::JsonFormatType::{JS_FORMAT_JSON, JS_FORMAT_JSONB};
+    use ::nodes::primnodes::JsonFormatType::{JS_FORMAT_JSON, JS_FORMAT_JSONB};
 
     if !oid_is_valid(returning.typid) {
         return Ok(());
@@ -655,11 +655,11 @@ fn get_json_returning(
 /// `get_json_constructor(ctor, context, showimplicit)` (ruleutils.c:11672) —
 /// parse back a JsonConstructorExpr node. 1:1 port.
 fn get_json_constructor(
-    ctor: &nodes::primnodes::JsonConstructorExpr,
+    ctor: &::nodes::primnodes::JsonConstructorExpr,
     context: &mut DeparseContext<'_>,
     _showimplicit: bool,
 ) -> PgResult<()> {
-    use nodes::primnodes::JsonConstructorType::*;
+    use ::nodes::primnodes::JsonConstructorType::*;
 
     if ctor.r#type == JSCTOR_JSON_OBJECTAGG {
         return get_json_agg_constructor(ctor, context, "JSON_OBJECTAGG", true);
@@ -706,10 +706,10 @@ fn get_json_constructor(
 /// into a plain text buffer. 1:1 port.
 fn get_json_constructor_options(
     mcx: Mcx<'_>,
-    ctor: &nodes::primnodes::JsonConstructorExpr,
+    ctor: &::nodes::primnodes::JsonConstructorExpr,
     buf: &mut String,
 ) -> PgResult<()> {
-    use nodes::primnodes::JsonConstructorType::*;
+    use ::nodes::primnodes::JsonConstructorType::*;
 
     if ctor.absent_on_null {
         if ctor.r#type == JSCTOR_JSON_OBJECT || ctor.r#type == JSCTOR_JSON_OBJECTAGG {
@@ -739,7 +739,7 @@ fn get_json_constructor_options(
 /// (ruleutils.c:11768) — parse back an aggregate JsonConstructorExpr node. 1:1
 /// port.
 fn get_json_agg_constructor(
-    ctor: &nodes::primnodes::JsonConstructorExpr,
+    ctor: &::nodes::primnodes::JsonConstructorExpr,
     context: &mut DeparseContext<'_>,
     funcname: &str,
     is_json_objectagg: bool,
@@ -774,7 +774,7 @@ fn get_json_agg_constructor(
 /// `get_json_table_nested_columns(tf, plan, context, showimplicit, needcomma)`
 /// (ruleutils.c:12043) — parse back nested JSON_TABLE columns. 1:1 port.
 fn get_json_table_nested_columns(
-    tf: &nodes::primnodes::TableFunc<'_>,
+    tf: &::nodes::primnodes::TableFunc<'_>,
     plan: &Node<'_>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
@@ -808,15 +808,15 @@ fn get_json_table_nested_columns(
 /// `get_json_table_columns(tf, scan, context, showimplicit)` (ruleutils.c:12075)
 /// — parse back JSON_TABLE columns. 1:1 port.
 fn get_json_table_columns(
-    tf: &nodes::primnodes::TableFunc<'_>,
-    scan: &nodes::primnodes::JsonTablePathScan<'_>,
+    tf: &::nodes::primnodes::TableFunc<'_>,
+    scan: &::nodes::primnodes::JsonTablePathScan<'_>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
     use crate::query_deparse::{append_context_keyword, PRETTYINDENT_VAR};
-    use nodes::primnodes::JsonBehaviorType::{JSON_BEHAVIOR_FALSE, JSON_BEHAVIOR_NULL};
-    use nodes::primnodes::JsonExprOp::{JSON_EXISTS_OP, JSON_QUERY_OP};
-    use nodes::primnodes::JsonFormatType::JS_FORMAT_JSONB;
+    use ::nodes::primnodes::JsonBehaviorType::{JSON_BEHAVIOR_FALSE, JSON_BEHAVIOR_NULL};
+    use ::nodes::primnodes::JsonExprOp::{JSON_EXISTS_OP, JSON_QUERY_OP};
+    use ::nodes::primnodes::JsonFormatType::JS_FORMAT_JSONB;
 
     // TYPCATEGORY_STRING ('S').
     const TYPCATEGORY_STRING: u8 = b'S';
@@ -843,7 +843,7 @@ fn get_json_table_columns(
         let typid = coltypes.and_then(|v| v.get(i)).copied().unwrap_or(0);
         let typmod = coltypmods.and_then(|v| v.get(i)).copied().unwrap_or(-1);
         // castNode(JsonExpr, lfirst(lc_colvalexpr)) — NULL for an ordinality col.
-        let colexpr: Option<&nodes::primnodes::JsonExpr> = colvalexprs
+        let colexpr: Option<&::nodes::primnodes::JsonExpr> = colvalexprs
             .and_then(|v| v.get(i))
             .and_then(|o| o.as_deref())
             .and_then(|e| match e {
@@ -940,7 +940,7 @@ fn get_json_table_columns(
 /// `get_json_table(tf, context, showimplicit)` (ruleutils.c:12182) — parse back
 /// a JSON_TABLE function. 1:1 port.
 fn get_json_table(
-    tf: &nodes::primnodes::TableFunc<'_>,
+    tf: &::nodes::primnodes::TableFunc<'_>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
@@ -1015,7 +1015,7 @@ fn get_json_table(
     get_json_table_columns(tf, root, context, showimplicit)?;
 
     if let Some(on_error) = jexpr.on_error.as_deref() {
-        if on_error.btype != nodes::primnodes::JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY {
+        if on_error.btype != ::nodes::primnodes::JsonBehaviorType::JSON_BEHAVIOR_EMPTY_ARRAY {
             get_json_behavior(on_error, context, "ERROR")?;
         }
     }
@@ -1031,7 +1031,7 @@ fn get_json_table(
 /// `get_xmltable(tf, context, showimplicit)` (ruleutils.c:11945) — parse back an
 /// XMLTABLE table function. 1:1 port.
 fn get_xmltable(
-    tf: &nodes::primnodes::TableFunc<'_>,
+    tf: &::nodes::primnodes::TableFunc<'_>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
@@ -1056,7 +1056,7 @@ fn get_xmltable(
                 .and_then(|o| o.as_ref().map(|s| s.as_str()));
             match name {
                 Some(n) => {
-                    let expr_node = nodes::nodes::Node::mk_expr(mcx, (**expr).clone_in(mcx)?)?;
+                    let expr_node = ::nodes::nodes::Node::mk_expr(mcx, (**expr).clone_in(mcx)?)?;
                     get_rule_expr(&expr_node, context, showimplicit)?;
                     let q = quote_identifier(mcx, n)?;
                     str_(context, " AS ")?;
@@ -1064,7 +1064,7 @@ fn get_xmltable(
                 }
                 None => {
                     str_(context, "DEFAULT ")?;
-                    let expr_node = nodes::nodes::Node::mk_expr(mcx, (**expr).clone_in(mcx)?)?;
+                    let expr_node = ::nodes::nodes::Node::mk_expr(mcx, (**expr).clone_in(mcx)?)?;
                     get_rule_expr(&expr_node, context, showimplicit)?;
                 }
             }
@@ -1074,12 +1074,12 @@ fn get_xmltable(
 
     ch_(context, b'(')?;
     if let Some(rowexpr) = tf.rowexpr.as_deref() {
-        let n = nodes::nodes::Node::mk_expr(mcx, rowexpr.clone_in(mcx)?)?;
+        let n = ::nodes::nodes::Node::mk_expr(mcx, rowexpr.clone_in(mcx)?)?;
         get_rule_expr(&n, context, showimplicit)?;
     }
     str_(context, ") PASSING (")?;
     if let Some(docexpr) = tf.docexpr.as_deref() {
-        let n = nodes::nodes::Node::mk_expr(mcx, docexpr.clone_in(mcx)?)?;
+        let n = ::nodes::nodes::Node::mk_expr(mcx, docexpr.clone_in(mcx)?)?;
         get_rule_expr(&n, context, showimplicit)?;
     }
     ch_(context, b')')?;
@@ -1125,13 +1125,13 @@ fn get_xmltable(
 
             if let Some(cde) = coldefexpr {
                 str_(context, " DEFAULT (")?;
-                let n = nodes::nodes::Node::mk_expr(mcx, cde.clone_in(mcx)?)?;
+                let n = ::nodes::nodes::Node::mk_expr(mcx, cde.clone_in(mcx)?)?;
                 get_rule_expr(&n, context, showimplicit)?;
                 ch_(context, b')')?;
             }
             if let Some(ce) = colexpr {
                 str_(context, " PATH (")?;
-                let n = nodes::nodes::Node::mk_expr(mcx, ce.clone_in(mcx)?)?;
+                let n = ::nodes::nodes::Node::mk_expr(mcx, ce.clone_in(mcx)?)?;
                 get_rule_expr(&n, context, showimplicit)?;
                 ch_(context, b')')?;
             }
@@ -1277,7 +1277,7 @@ fn get_rule_expr_e(
 
         Expr::RelabelType(r) => {
             let arg = r.arg.as_deref().ok_or_else(|| missing_field("RelabelType.arg"))?;
-            if r.relabelformat == nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
+            if r.relabelformat == ::nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
                 && !showimplicit
             {
                 get_rule_expr_paren_e(arg, context, false, enclosing)?;
@@ -1288,7 +1288,7 @@ fn get_rule_expr_e(
 
         Expr::CoerceViaIO(c) => {
             let arg = c.arg.as_deref().ok_or_else(|| missing_field("CoerceViaIO.arg"))?;
-            if c.coerceformat == nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
+            if c.coerceformat == ::nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
                 && !showimplicit
             {
                 get_rule_expr_paren_e(arg, context, false, enclosing)?;
@@ -1299,7 +1299,7 @@ fn get_rule_expr_e(
 
         Expr::ArrayCoerceExpr(c) => {
             let arg = c.arg.as_deref().ok_or_else(|| missing_field("ArrayCoerceExpr.arg"))?;
-            if c.coerceformat == nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
+            if c.coerceformat == ::nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
                 && !showimplicit
             {
                 get_rule_expr_paren_e(arg, context, false, enclosing)?;
@@ -1310,7 +1310,7 @@ fn get_rule_expr_e(
 
         Expr::ConvertRowtypeExpr(c) => {
             let arg = c.arg.as_deref().ok_or_else(|| missing_field("ConvertRowtypeExpr.arg"))?;
-            if c.convertformat == nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
+            if c.convertformat == ::nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
                 && !showimplicit
             {
                 get_rule_expr_paren_e(arg, context, false, enclosing)?;
@@ -1397,7 +1397,7 @@ fn get_rule_expr_e(
                 }
             }
             ch_(context, b')')?;
-            if rowexpr.row_format == nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CAST {
+            if rowexpr.row_format == ::nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CAST {
                 let ty = format_type_with_typemod(mcx, rowexpr.row_typeid, -1)?;
                 str_(context, "::")?;
                 str_(context, ty.as_str())?;
@@ -1489,7 +1489,7 @@ fn get_rule_expr_e(
 
         Expr::CoerceToDomain(c) => {
             let arg = c.arg.as_deref().ok_or_else(|| missing_field("CoerceToDomain.arg"))?;
-            if c.coercionformat == nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
+            if c.coercionformat == ::nodes::primnodes::CoercionForm::COERCE_IMPLICIT_CAST
                 && !showimplicit
             {
                 get_rule_expr_e(arg, context, false)?;
@@ -1615,8 +1615,8 @@ fn get_rule_expr_e(
 
         // `case T_XmlExpr:` (ruleutils.c:10063).
         Expr::XmlExpr(xexpr) => {
-            use nodes::primnodes::XmlExprOp::*;
-            use nodes::primnodes::XmlOptionType::XMLOPTION_DOCUMENT;
+            use ::nodes::primnodes::XmlExprOp::*;
+            use ::nodes::primnodes::XmlOptionType::XMLOPTION_DOCUMENT;
 
             let mcx = context.buf.allocator();
             let mut needcomma = false;
@@ -1775,7 +1775,7 @@ fn get_rule_expr_e(
             let inner = iexpr.expr.as_deref();
             let mut need_parens = !matches!(inner, Some(Expr::Var(_)));
             if let Some(Expr::FuncExpr(f)) = inner {
-                if f.funcformat == nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL {
+                if f.funcformat == ::nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL {
                     need_parens = false;
                 }
             }
@@ -1837,10 +1837,10 @@ fn get_rule_expr_e(
         }
         Expr::JsonExpr(jexpr) => {
             // C `case T_JsonExpr:` (ruleutils.c:10537).
-            use nodes::primnodes::JsonBehaviorType::{
+            use ::nodes::primnodes::JsonBehaviorType::{
                 JSON_BEHAVIOR_FALSE, JSON_BEHAVIOR_NULL,
             };
-            use nodes::primnodes::JsonExprOp::{
+            use ::nodes::primnodes::JsonExprOp::{
                 JSON_EXISTS_OP, JSON_QUERY_OP, JSON_VALUE_OP,
             };
 
@@ -2189,8 +2189,8 @@ fn looks_like_function(node: &Node<'_>) -> bool {
     match expr {
         Expr::FuncExpr(f) => {
             // OK, unless it's going to deparse as a cast.
-            f.funcformat == nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL
-                || f.funcformat == nodes::primnodes::CoercionForm::COERCE_SQL_SYNTAX
+            f.funcformat == ::nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL
+                || f.funcformat == ::nodes::primnodes::CoercionForm::COERCE_SQL_SYNTAX
         }
         // these are all accepted by func_expr_common_subexpr
         Expr::NullIfExpr(_)
@@ -2275,7 +2275,7 @@ fn get_func_expr_inner(
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
-    use nodes::primnodes::CoercionForm;
+    use ::nodes::primnodes::CoercionForm;
     let mcx = context.buf.allocator();
     let funcformat = f.funcformat;
     let args = &f.args;
@@ -3067,11 +3067,11 @@ fn get_currentof_expr(c: &CurrentOfExpr, context: &mut DeparseContext<'_>) -> Pg
 /// transfer attention. Returns `Ok(None)` when no referent is found.
 fn find_param_referent<'mcx>(
     mcx: Mcx<'mcx>,
-    param: &nodes::primnodes::Param,
+    param: &::nodes::primnodes::Param,
     context: &DeparseContext<'mcx>,
 ) -> PgResult<Option<(Expr<'mcx>, usize)>> {
-    use nodes::nodes::ntag;
-    use nodes::primnodes::PARAM_EXEC;
+    use ::nodes::nodes::ntag;
+    use ::nodes::primnodes::PARAM_EXEC;
 
     if param.paramkind != PARAM_EXEC {
         return Ok(None);
@@ -3151,11 +3151,11 @@ fn find_param_referent<'mcx>(
 /// `(<hashed >name).colN`. Returns `Ok(None)` when no generator is found.
 fn find_param_generator<'mcx>(
     mcx: Mcx<'mcx>,
-    param: &nodes::primnodes::Param,
+    param: &::nodes::primnodes::Param,
     context: &DeparseContext<'mcx>,
 ) -> PgResult<Option<(PgString<'mcx>, bool, i32)>> {
-    use nodes::nodes::ntag;
-    use nodes::primnodes::PARAM_EXEC;
+    use ::nodes::nodes::ntag;
+    use ::nodes::primnodes::PARAM_EXEC;
 
     if param.paramkind != PARAM_EXEC {
         return Ok(None);
@@ -3220,7 +3220,7 @@ fn find_param_generator<'mcx>(
 /// 8666-8682) — search one Plan node's initplans for one that sets the param.
 fn find_param_generator_initplan<'mcx>(
     mcx: Mcx<'mcx>,
-    param: &nodes::primnodes::Param,
+    param: &::nodes::primnodes::Param,
     plan: &Node<'mcx>,
 ) -> PgResult<Option<(PgString<'mcx>, bool, i32)>> {
     if let Some(initplans) = plan.plan_head().initPlan.as_ref() {
@@ -3240,7 +3240,7 @@ fn find_param_generator_initplan<'mcx>(
 /// NULL — `appendStringInfo("%s")` of a NULL would print nothing).
 fn subplan_name<'mcx>(
     mcx: Mcx<'mcx>,
-    subplan: &nodes::primnodes::SubPlan<'_>,
+    subplan: &::nodes::primnodes::SubPlan<'_>,
 ) -> PgResult<PgString<'mcx>> {
     match subplan.plan_name.as_ref() {
         Some(s) => PgString::from_str_in(s.as_str(), mcx),
@@ -3265,7 +3265,7 @@ fn nodes_struct_eq(a: &Node<'_>, b: &Node<'_>) -> bool {
 /// onto the head namespace's ancestors so PARAM_EXEC references to its paramIds
 /// resolve (`find_param_referent` / `find_param_generator`).
 fn get_subplan_expr(
-    subplan: &nodes::primnodes::SubPlan<'_>,
+    subplan: &::nodes::primnodes::SubPlan<'_>,
     context: &mut DeparseContext<'_>,
     showimplicit: bool,
 ) -> PgResult<()> {
@@ -3289,7 +3289,7 @@ fn get_subplan_expr(
             mcx,
             Node::mk_expr(
                 mcx,
-                Expr::SubPlan(nodes::primnodes::SubPlanExpr::from_subplan(mcx, subplan)?),
+                Expr::SubPlan(::nodes::primnodes::SubPlanExpr::from_subplan(mcx, subplan)?),
             )?,
         )?;
         let dpns = &mut context.namespaces[0];
@@ -3335,7 +3335,7 @@ fn get_subplan_expr(
 ///     render the (optionally qualified) argument name;
 /// (d) otherwise — `$N`.
 pub fn get_parameter<'mcx>(expr: &Expr<'_>, context: &mut DeparseContext<'mcx>) -> PgResult<()> {
-    use nodes::primnodes::PARAM_EXTERN;
+    use ::nodes::primnodes::PARAM_EXTERN;
 
     let param = match expr {
         Expr::Param(p) => p,
@@ -3350,7 +3350,7 @@ pub fn get_parameter<'mcx>(expr: &Expr<'_>, context: &mut DeparseContext<'mcx>) 
         // is dpns.ancestors[ancestor_index]; clone it out before mutating dpns.
         let target = {
             let dpns = &context.namespaces[0];
-            let cloned: nodes::nodes::Node<'mcx> =
+            let cloned: ::nodes::nodes::Node<'mcx> =
                 dpns.ancestors[ancestor_index].clone_in(mcx)?;
             mcx::alloc_in(mcx, cloned)?
         };
@@ -3511,7 +3511,7 @@ fn get_coercion_expr_e(
 /// render a partition's `FOR VALUES …` / `DEFAULT` bound clause for HASH, LIST
 /// and RANGE strategies (and the DEFAULT partition).
 fn get_rule_partition_bound_spec(
-    spec: &nodes::ddlnodes::PartitionBoundSpec<'_>,
+    spec: &::nodes::ddlnodes::PartitionBoundSpec<'_>,
     context: &mut DeparseContext<'_>,
 ) -> PgResult<()> {
     // if (spec->is_default) { appendStringInfoString(buf, "DEFAULT"); break; }
@@ -3581,9 +3581,9 @@ fn get_rule_partition_bound_spec(
 /// render as keywords, a VALUE renders its `Const` via `get_const_expr`.
 pub fn get_range_partbound_string<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    bound_datums: &[nodes::nodes::NodePtr<'_>],
+    bound_datums: &[::nodes::nodes::NodePtr<'_>],
 ) -> PgResult<alloc::string::String> {
-    use nodes::partition::PartitionRangeDatumKind;
+    use ::nodes::partition::PartitionRangeDatumKind;
 
     // memset(&context, 0, sizeof(deparse_context)); context.buf = makeStringInfo();
     let mut context = DeparseContext {
@@ -3916,7 +3916,7 @@ pub fn get_sublink_expr(sublink: &Expr, context: &mut DeparseContext<'_>) -> PgR
 /// StringInfo). `colNamesVisible` is `false` and `resultDesc` is `NULL`.
 fn recurse_subquery<'mcx>(
     mcx: Mcx<'mcx>,
-    subquery: &nodes::copy_query::Query<'mcx>,
+    subquery: &::nodes::copy_query::Query<'mcx>,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<()> {
     let buf = core::mem::replace(&mut context.buf, stringinfo::StringInfo::new_in(mcx));
@@ -4050,15 +4050,15 @@ fn resolve_special_varno<'mcx>(
             // update appendparents (bms_union with the node's apprelids). This
             // affects deparsing of all child Vars in the resolved subexpression
             // (ruleutils.c:7948-7956).
-            let apprelids: Option<nodes::bitmapset::Bitmapset<'mcx>> = {
+            let apprelids: Option<::nodes::bitmapset::Bitmapset<'mcx>> = {
                 let plan = context.namespaces[dpns_idx].plan.as_ref();
                 match plan {
-                    Some(p) if p.node_tag() == nodes::nodes::ntag::T_Append => p
+                    Some(p) if p.node_tag() == ::nodes::nodes::ntag::T_Append => p
                         .as_append()
                         .and_then(|a| a.apprelids.as_deref())
                         .map(|b| b.clone_in(mcx))
                         .transpose()?,
-                    Some(p) if p.node_tag() == nodes::nodes::ntag::T_MergeAppend => p
+                    Some(p) if p.node_tag() == ::nodes::nodes::ntag::T_MergeAppend => p
                         .as_mergeappend()
                         .and_then(|m| m.apprelids.as_deref())
                         .map(|b| b.clone_in(mcx))
@@ -4473,7 +4473,7 @@ fn get_name_for_var_field<'mcx>(
     levelsup: i32,
     context: &mut DeparseContext<'mcx>,
 ) -> PgResult<PgString<'mcx>> {
-    use nodes::nodes::CmdType;
+    use ::nodes::nodes::CmdType;
     /// `RECORDOID` (pg_type.dat) — the pseudo-type for anonymous record values.
     const RECORDOID: Oid = 2249;
 
@@ -5113,8 +5113,8 @@ fn isSimple_by_parent_tag(parent_expr: Option<&Expr>, _parent_node: Option<&Node
 }
 
 /// C: `type == COERCE_EXPLICIT_CAST || COERCE_IMPLICIT_CAST || COERCE_SQL_SYNTAX`.
-fn func_is_cast(format: nodes::primnodes::CoercionForm) -> bool {
-    use nodes::primnodes::CoercionForm;
+fn func_is_cast(format: ::nodes::primnodes::CoercionForm) -> bool {
+    use ::nodes::primnodes::CoercionForm;
     format == CoercionForm::COERCE_EXPLICIT_CAST
         || format == CoercionForm::COERCE_IMPLICIT_CAST
         || format == CoercionForm::COERCE_SQL_SYNTAX
@@ -5197,7 +5197,7 @@ fn deferred(what: &str) -> PgError {
 mod tests {
     use super::*;
     use mcx::MemoryContext;
-    use nodes::primnodes::{
+    use ::nodes::primnodes::{
         BoolExpr, BoolExprType, Expr, NullTest, NullTestType, OpExpr, SQLValueFunction,
         SQLValueFunctionOp, Var,
     };
@@ -5272,7 +5272,7 @@ mod tests {
 
     #[test]
     fn simple_node_nulltest_under_func_cast_parent() {
-        use nodes::primnodes::{CoercionForm, FuncExpr};
+        use ::nodes::primnodes::{CoercionForm, FuncExpr};
         let nt = Expr::NullTest(NullTest {
             arg: None,
             nulltesttype: NullTestType::IS_NULL,
@@ -5304,7 +5304,7 @@ mod tests {
     fn parameter_extern_renders_dollar_n() {
         // A PARAM_EXTERN with no function-arg namespace renders as `$N`
         // (get_parameter's fall-through case (d), ruleutils.c 8842-8848).
-        use nodes::primnodes::{Param, ParamKind};
+        use ::nodes::primnodes::{Param, ParamKind};
         let cx = MemoryContext::new("param");
         let mcx = cx.mcx();
         let mut c = ctx(mcx, 0);

@@ -189,7 +189,7 @@ use types_core::primitive::{Oid, Size};
 use types_error::{PgError, PgResult};
 
 use mcx::Mcx;
-use nodes::execnodes::IndexInfo;
+use ::nodes::execnodes::IndexInfo;
 use rel::Relation;
 use types_tableam::index_info_carrier::IndexInfoCarrier;
 
@@ -495,8 +495,8 @@ pub fn BuildIndexInfo<'mcx>(
 /// cache being populated by this call).
 fn FormIndexDatum<'mcx>(
     index_info: &IndexInfo<'_>,
-    slot: nodes::SlotId,
-    estate: &mut nodes::EStateData<'mcx>,
+    slot: ::nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
 ) -> PgResult<(
     [types_tuple::heaptuple::Datum<'mcx>; INDEX_MAX_KEYS as usize],
     [bool; INDEX_MAX_KEYS as usize],
@@ -518,9 +518,9 @@ fn FormIndexDatum<'mcx>(
     // expression-count check below; build the executable expression states up
     // front if any index expression columns exist.
     let mut expr_states: Option<
-        mcx::PgVec<'mcx, mcx::PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>>,
+        mcx::PgVec<'mcx, mcx::PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>>,
     > = None;
-    let mut econtext: Option<nodes::EcxtId> = None;
+    let mut econtext: Option<::nodes::EcxtId> = None;
     if let Some(exprs) = index_info.ii_Expressions.as_deref() {
         // First time through, set up expression evaluation state (transiently;
         // see the doc comment on caching).
@@ -555,7 +555,7 @@ fn FormIndexDatum<'mcx>(
                 return Err(PgError::error("wrong number of index expressions"));
             }
             let ecxt = econtext.expect("econtext set up alongside expr_states");
-            let state: &mut nodes::execexpr::ExprState<'mcx> =
+            let state: &mut ::nodes::execexpr::ExprState<'mcx> =
                 &mut states[indexpr_item];
             let (d, is_null) =
                 exec_expr::exec_eval_expr_switch_context::call(state, ecxt, estate)?;
@@ -796,7 +796,7 @@ fn UpdateIndexRelation<'mcx>(
     isvalid: bool,
     isready: bool,
 ) -> PgResult<()> {
-    use nodes::nodes::Node;
+    use ::nodes::nodes::Node;
 
     let numatts = index_info.ii_NumIndexAttrs as usize;
     let numkeyatts = index_info.ii_NumIndexKeyAttrs as usize;
@@ -1616,9 +1616,9 @@ fn reloptions_to_bytes(reloptions: &types_tuple::Datum<'_>) -> Option<alloc::vec
 /// to scan, descending into each element.
 fn exprs_to_list_node<'mcx>(
     mcx: Mcx<'mcx>,
-    exprs: &mcx::PgVec<'mcx, nodes::primnodes::Expr>,
-) -> PgResult<nodes::nodes::Node<'mcx>> {
-    use nodes::nodes::Node;
+    exprs: &mcx::PgVec<'mcx, ::nodes::primnodes::Expr>,
+) -> PgResult<::nodes::nodes::Node<'mcx>> {
+    use ::nodes::nodes::Node;
     let mut cells = mcx::vec_with_capacity_in(mcx, exprs.len())?;
     for e in exprs.iter() {
         cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e.clone_in(mcx)?)?)?);
@@ -2128,7 +2128,7 @@ pub fn validate_index<'mcx>(
         InvalidOid,
         false,
         guc::maintenance_work_mem::call(),
-        nodes::nodesort::TUPLESORT_NONE,
+        ::nodes::nodesort::TUPLESORT_NONE,
     )?;
 
     let mut tuplesort = tuplesort;
@@ -2154,7 +2154,7 @@ pub fn validate_index<'mcx>(
     };
 
     /* ambulkdelete updates progress metrics */
-    indexam::index_bulk_delete(mcx, &ivinfo, None, Some(handle))?;
+    ::indexam::index_bulk_delete(mcx, &ivinfo, None, Some(handle))?;
 
     // Done collecting: drop the closure and feed the gathered TIDs into the
     // sort (state.itups += 1 per TID, as in validate_index_callback).
@@ -2218,13 +2218,13 @@ pub fn validate_index<'mcx>(
     let tuplesort = sort_pull.into_inner();
 
     /* Done with tuplesort object */
-    let boxed: mcx::PgBox<'mcx, nodes::Tuplesortstate<'mcx>> = mcx::alloc_in(mcx, tuplesort)?;
+    let boxed: mcx::PgBox<'mcx, ::nodes::Tuplesortstate<'mcx>> = mcx::alloc_in(mcx, tuplesort)?;
     tuplesort_seam::tuplesort_end::call(boxed)?;
 
     /* Make sure to release resources cached in indexInfo (if needed). */
     {
         let mut carrier = IndexInfoCarrier::new(&mut index_info);
-        indexam::index_insert_cleanup(mcx, &index_relation, &mut carrier)?;
+        ::indexam::index_insert_cleanup(mcx, &index_relation, &mut carrier)?;
     }
 
     // elog(DEBUG2, "validate_index found %.0f heap tuples, %.0f index tuples;
@@ -2318,12 +2318,12 @@ pub fn index_concurrently_create_copy<'mcx>(
      */
     // The raw-decode seams return the trees in their query-lifetime result context
     // (`'static`); re-localize into the IndexInfo's `mcx` via `clone_in`.
-    let relocalize = |opt: Option<mcx::PgVec<'static, nodes::primnodes::Expr<'static>>>|
-     -> PgResult<Option<mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>>>> {
+    let relocalize = |opt: Option<mcx::PgVec<'static, ::nodes::primnodes::Expr<'static>>>|
+     -> PgResult<Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>>> {
         match opt {
             None => Ok(None),
             Some(v) => {
-                let mut out: mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>> =
+                let mut out: mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>> =
                     mcx::vec_with_capacity_in(mcx, v.len())?;
                 for e in v.iter() {
                     out.push(e.clone_in(mcx)?);
@@ -2332,13 +2332,13 @@ pub fn index_concurrently_create_copy<'mcx>(
             }
         }
     };
-    let index_exprs: Option<mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>>> =
+    let index_exprs: Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> =
         if old_info.ii_Expressions.is_some() {
             relocalize(nodexform::index_raw_expressions::call(mcx, old_index_id)?)?
         } else {
             None
         };
-    let index_preds: Option<mcx::PgVec<'mcx, nodes::primnodes::Expr<'mcx>>> =
+    let index_preds: Option<mcx::PgVec<'mcx, ::nodes::primnodes::Expr<'mcx>>> =
         if old_info.ii_Predicate.is_some() {
             relocalize(nodexform::index_raw_predicate::call(mcx, old_index_id)?)?
         } else {
@@ -3157,8 +3157,8 @@ fn ConstructTupleDescriptor<'mcx>(
     let mut index_tup_desc = tupdesc::CreateTemplateTupleDesc(mcx, numatts as i32)?;
 
     /* the expression list is walked in parallel with the columns */
-    let exprs_empty: alloc::vec::Vec<nodes::primnodes::Expr> = alloc::vec::Vec::new();
-    let exprs: &[nodes::primnodes::Expr] = match &index_info.ii_Expressions {
+    let exprs_empty: alloc::vec::Vec<::nodes::primnodes::Expr> = alloc::vec::Vec::new();
+    let exprs: &[::nodes::primnodes::Expr] = match &index_info.ii_Expressions {
         Some(v) => v.as_slice(),
         None => &exprs_empty,
     };
@@ -3898,7 +3898,7 @@ fn relation_is_other_temp(rel: &Relation<'_>) -> PgResult<bool> {
 #[allow(clippy::too_many_arguments)]
 fn reindex_index<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: Option<&nodes::ddlnodes::ReindexStmt<'mcx>>,
+    stmt: Option<&::nodes::ddlnodes::ReindexStmt<'mcx>>,
     index_id: Oid,
     skip_constraint_checks: bool,
     persistence: i8,
@@ -4216,7 +4216,7 @@ fn object_address_set(address: &mut ObjectAddress, class_id: Oid, object_id: Oid
 /// TRUNCATE pass `None` (C `NULL`).
 fn reindex_relation<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: Option<&nodes::ddlnodes::ReindexStmt<'mcx>>,
+    stmt: Option<&::nodes::ddlnodes::ReindexStmt<'mcx>>,
     relid: Oid,
     flags: i32,
     params: &types_cluster::ReindexParams,

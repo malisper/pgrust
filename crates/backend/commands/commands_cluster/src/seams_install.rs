@@ -55,8 +55,8 @@ pub fn init_seams() {
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::nodes::Node;
-use nodes::parsestmt::ParseState;
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::ParseState;
 
 /// `case T_ClusterStmt: cluster(pstate, (ClusterStmt *) parsetree, isTopLevel)`
 /// (utility.c). The dispatch carries the parse tree as `&Node`; extract the
@@ -82,7 +82,7 @@ fn cluster_arm<'mcx>(
 /// Project the node-tree `ClusterStmt` (NodePtr children) onto the command-view
 /// `types_cluster::ClusterStmt` the `cluster()` body reads.
 fn node_clusterstmt_to_view(
-    cs: &nodes::ddlnodes::ClusterStmt<'_>,
+    cs: &::nodes::ddlnodes::ClusterStmt<'_>,
 ) -> PgResult<types_cluster::ClusterStmt> {
     use alloc::string::ToString;
     use alloc::vec::Vec;
@@ -117,7 +117,7 @@ fn node_clusterstmt_to_view(
 /// `RangeVar` (node) → `types_tuple::access::RangeVar` (command view), mirroring
 /// the shared `to_access_range_var` projection used by the other command crates.
 fn node_rangevar_to_access(
-    rv: &nodes::rawnodes::RangeVar<'_>,
+    rv: &::nodes::rawnodes::RangeVar<'_>,
 ) -> types_tuple::access::RangeVar {
     use alloc::string::ToString;
     types_tuple::access::RangeVar {
@@ -137,7 +137,7 @@ fn node_rangevar_to_access(
 /// `DefElem` (node) → `types_cluster::DefElem`. The `arg` is one of the value
 /// nodes the CLUSTER option parse reads through `defGetBoolean`.
 fn node_defelem_to_view(
-    de: &nodes::ddlnodes::DefElem<'_>,
+    de: &::nodes::ddlnodes::DefElem<'_>,
 ) -> PgResult<types_cluster::DefElem> {
     use alloc::string::ToString;
     use types_cluster::DefElemArg;

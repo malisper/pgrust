@@ -47,16 +47,16 @@ use mcx::{Mcx, MemoryContext, PgVec};
 use types_core::primitive::{Oid, INVALID_OID};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_namespace::namespace::SearchPathMatcher;
-use nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::{ntag, CmdType, Node};
-use nodes::params::ParamListInfo;
-use nodes::parsestmt::{
+use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::{ntag, CmdType, Node};
+use ::nodes::params::ParamListInfo;
+use ::nodes::parsestmt::{
     CachedPlanHandle as SeamPlanHandle, CachedPlanSourceHandle as SeamSourceHandle, CommandTag,
     RawStmt, ResourceOwnerHandle,
 };
-use nodes::primnodes::Expr;
-use nodes::queryenvironment::QueryEnvironment;
+use ::nodes::primnodes::Expr;
+use ::nodes::queryenvironment::QueryEnvironment;
 use types_plancache::{
     InvalItemKey, SysCacheId, CACHEDEXPR_MAGIC, CACHEDPLANSOURCE_MAGIC,
     CACHEDPLAN_MAGIC, CURSOR_OPT_CUSTOM_PLAN, CURSOR_OPT_GENERIC_PLAN,
@@ -1550,14 +1550,14 @@ pub fn CachedPlanIsSimplyValid(
 
 /// `RTE_RELATION` as the model's `RTEKind`.
 #[inline]
-fn RTEKind_relation() -> nodes::parsenodes::RTEKind {
-    nodes::parsenodes::RTEKind::RTE_RELATION
+fn RTEKind_relation() -> ::nodes::parsenodes::RTEKind {
+    ::nodes::parsenodes::RTEKind::RTE_RELATION
 }
 
 /// `RTE_SUBQUERY` as the model's `RTEKind`.
 #[inline]
-fn RTEKind_subquery() -> nodes::parsenodes::RTEKind {
-    nodes::parsenodes::RTEKind::RTE_SUBQUERY
+fn RTEKind_subquery() -> ::nodes::parsenodes::RTEKind {
+    ::nodes::parsenodes::RTEKind::RTE_SUBQUERY
 }
 
 /* ==========================================================================
@@ -1686,7 +1686,7 @@ pub fn CachedPlanGetTargetList<'mcx>(
     mcx: Mcx<'mcx>,
     plansource: CachedPlanSourceHandle,
     query_env: Option<&QueryEnvironment<'_>>,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     let src = get_source(plansource);
 
     debug_assert_eq!(src.borrow().magic, CACHEDPLANSOURCE_MAGIC);
@@ -2028,8 +2028,8 @@ fn scan_query_walker(
 /// seam). `copyObject` shape per element.
 fn clone_targetentries_into<'mcx>(
     mcx: Mcx<'mcx>,
-    tl: &[nodes::primnodes::TargetEntry<'_>],
-) -> PgResult<std::vec::Vec<nodes::primnodes::TargetEntry<'mcx>>> {
+    tl: &[::nodes::primnodes::TargetEntry<'_>],
+) -> PgResult<std::vec::Vec<::nodes::primnodes::TargetEntry<'mcx>>> {
     let mut out = std::vec::Vec::with_capacity(tl.len());
     for te in tl {
         out.push(te.clone_in(mcx)?);
@@ -2540,7 +2540,7 @@ fn seam_create_cached_plan_empty<'mcx>(
 fn seam_plansource_raw_is_transaction_exit_stmt(
     plansource: SeamSourceHandle,
 ) -> PgResult<bool> {
-    use nodes::ddlnodes::TransactionStmtKind;
+    use ::nodes::ddlnodes::TransactionStmtKind;
     let src = get_source(plansource.0);
     let p = src.borrow();
     let raw = match p.raw_parse_tree.as_ref() {

@@ -43,7 +43,7 @@
 //! crate and panics loudly until that owner lands. The live `CachedPlanSource` /
 //! `CachedPlan` / `EState` / `Portal` / `ParamListInfo` / `ResourceOwner` /
 //! `DestReceiver` / `QueryCompletion` / `MemoryContext` values are carried as
-//! the opaque handle newtypes in `nodes::parsestmt`, owned by the
+//! the opaque handle newtypes in `::nodes::parsestmt`, owned by the
 //! not-yet-ported owners (inherited opacity, docs/types.md rule 6).
 
 #![allow(non_snake_case)]
@@ -65,13 +65,13 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE,
 };
 
-use nodes::nodes::{CmdType, Node};
-use nodes::primnodes::Expr;
-use nodes::EStateData;
-use nodes::executor::EXEC_FLAG_WITH_NO_DATA;
+use ::nodes::nodes::{CmdType, Node};
+use ::nodes::primnodes::Expr;
+use ::nodes::EStateData;
+use ::nodes::executor::EXEC_FLAG_WITH_NO_DATA;
 use types_explain::ExplainState;
-use nodes::params::ParamListInfo;
-use nodes::parsestmt::{
+use ::nodes::params::ParamListInfo;
+use ::nodes::parsestmt::{
     CachedPlanHandle, CachedPlanSourceHandle, CommandTag, DestReceiverHandle,
     IntoClause, ParseState,
     PreparedStatement, RawStmt,
@@ -80,8 +80,8 @@ use nodes::parsestmt::{
 // PREPARE/EXECUTE/DEALLOCATE statement nodes: the live raw-grammar shapes the
 // `Node` enum carries (raw `NodePtr` argtypes / params / query), which the
 // ProcessUtility dispatch hands us as `&Node`.
-use nodes::ddlnodes::{DeallocateStmt, ExecuteStmt, PrepareStmt};
-use nodes::queryenvironment::QueryEnvironment;
+use ::nodes::ddlnodes::{DeallocateStmt, ExecuteStmt, PrepareStmt};
+use ::nodes::queryenvironment::QueryEnvironment;
 
 use tupdesc_seams as tupdesc_seam;
 use transam_xact_seams as xact_seam;
@@ -967,7 +967,7 @@ pub fn ExplainExecuteQuery<'mcx>(
 /// custom_plans). Returns `(Datum) 0`.
 pub fn pg_prepared_statement<'mcx>(
     mcx: Mcx<'mcx>,
-    fcinfo: &mut nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
+    fcinfo: &mut ::nodes::fmgr::FunctionCallInfoBaseData<'mcx>,
 ) -> PgResult<Datum<'mcx>> {
     // We put all tuples into a tuplestore in one scan of the hashtable.
     //
@@ -1109,7 +1109,7 @@ fn make_raw_stmt<'mcx>(
 // / DEALLOCATE)
 // ===========================================================================
 
-use nodes::nodes::Node as DispatchNode;
+use ::nodes::nodes::Node as DispatchNode;
 use portal::QueryCompletion;
 
 /// `case T_PrepareStmt: PrepareQuery(pstate, stmt, stmt_location, stmt_len)`
@@ -1154,7 +1154,7 @@ fn execute_query_arm<'mcx>(
 fn execute_query_ctas_arm<'mcx>(
     mcx: Mcx<'mcx>,
     estmt: ExecuteStmt<'mcx>,
-    into: nodes::ddlnodes::IntoClause<'mcx>,
+    into: ::nodes::ddlnodes::IntoClause<'mcx>,
     _query_string: &str,
     params: ParamListInfo,
     dest: DestReceiverHandle,

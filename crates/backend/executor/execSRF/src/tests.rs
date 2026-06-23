@@ -4,7 +4,7 @@
 //!
 //! The SRF body is the canonical `generate_series_step_int4` value-per-call
 //! protocol (mirroring `funcapi::srf_support`'s proven proof-of-life), wrapped
-//! as a [`nodes::execexpr::PGFunction`] (the executor-frame ABI whose
+//! as a [`::nodes::execexpr::PGFunction`] (the executor-frame ABI whose
 //! frame carries the LIVE `ReturnSetInfo`) and registered in this unit's
 //! executor-frame SRF table. The tuplestore is a recording mock (the nodeMaterial
 //! test pattern) so the produced scalar series is observable without the slot /
@@ -15,10 +15,10 @@ use std::sync::Once;
 
 use mcx::{Mcx, MemoryContext, PgBox};
 use datum::NullableDatum;
-use nodes::execexpr::{ExprDoneCond, SetExprState};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::FuncCallContext;
-use nodes::primnodes::{Expr, FuncExpr};
+use ::nodes::execexpr::{ExprDoneCond, SetExprState};
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::FuncCallContext;
+use ::nodes::primnodes::{Expr, FuncExpr};
 use nodes::{EStateData, ExprContext};
 use types_tuple::heaptuple::Datum;
 
@@ -201,7 +201,7 @@ fn erase_user_fctx<'mcx, T: Any>(mcx: Mcx<'mcx>, v: T) -> PgBox<'mcx, dyn Any> {
 }
 
 /// Build the per-node ExprContext in the EState pool and return its id.
-fn push_econtext<'mcx>(estate: &mut EStateData<'mcx>) -> nodes::EcxtId {
+fn push_econtext<'mcx>(estate: &mut EStateData<'mcx>) -> ::nodes::EcxtId {
     let per_query = estate.es_query_cxt;
     let per_tuple = per_query.context().new_child("per-tuple");
     let ecxt = ExprContext {
@@ -467,7 +467,7 @@ fn install_materialize() {
     });
     // The funcResultSlot allocation: any SlotId is fine (the mocks ignore it).
     execTuples_seams::exec_init_extra_tuple_slot::set(
-        |_estate, _td, _ops| Ok(nodes::SlotId(99)),
+        |_estate, _td, _ops| Ok(::nodes::SlotId(99)),
     );
     // tuplestore_end: drop the carrier (no-op cleanup for the mock).
     sort_storage_seams::tuplestore_end::set(|_state| {});

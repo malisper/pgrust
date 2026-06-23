@@ -51,10 +51,10 @@ use types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_CURSOR_STATE,
     ERRCODE_UNDEFINED_CURSOR, ERRCODE_UNDEFINED_OBJECT,
 };
-use nodes::execnodes::{
+use ::nodes::execnodes::{
     CurrentOfTid, FetchedCursorParam, RunningCursorState, ScanStateData, ScanTidOutcome,
 };
-use nodes::nodes::{
+use ::nodes::nodes::{
     T_AppendState, T_BitmapHeapScanState, T_CustomScanState, T_ForeignScanState,
     T_IndexOnlyScanState, T_IndexScanState, T_LimitState, T_ResultState, T_SampleScanState,
     T_SeqScanState, T_SubqueryScanState, T_TidRangeScanState, T_TidScanState,
@@ -83,7 +83,7 @@ pub fn init_seams() {
 /// is the C `false`.
 fn exec_current_of_seam<'mcx>(
     cexpr: &CurrentOfExpr,
-    econtext: nodes::EcxtId,
+    econtext: ::nodes::EcxtId,
     table_oid: Oid,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<types_tuple::heaptuple::ItemPointerData>> {
@@ -208,7 +208,7 @@ fn resolve_rowmark_strategy(
             None => continue,
         };
         // ... || !RowMarkRequiresRowShareLock(thiserm->markType)
-        if !nodes::nodelockrows::RowMarkRequiresRowShareLock(thiserm.markType) {
+        if !::nodes::nodelockrows::RowMarkRequiresRowShareLock(thiserm.markType) {
             continue;
         }
         if thiserm.relid == table_oid {

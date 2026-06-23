@@ -6,7 +6,7 @@
 //! * **executable-expression nodes** (`makeVar`, `makeConst`, `makeBoolExpr`,
 //!   `makeRelabelType`, `makeFuncExpr`, `make_opclause`, the boolean-clause
 //!   helpers, `makeTargetEntry`, the JSON expression nodes) build a
-//!   [`nodes::primnodes::Expr`] subtree. The Expr tree is lifetime-free
+//!   [`::nodes::primnodes::Expr`] subtree. The Expr tree is lifetime-free
 //!   (owned `Box`/`Vec`), so these are total constructors. Where the C returns
 //!   the node through a `Node *`-typed API (`get_typdefault`, the partition-qual
 //!   list), the seam wraps the Expr as [`Node::Expr`] and allocates the box in
@@ -20,7 +20,7 @@
 //!   `makeColumnDef`, `makeAlias`, `makeGroupingSet`, `makeVarFromTargetEntry`,
 //!   `makeNullConst`, `makeDefElem`, `makeDefElemExtended`) — the K1-parsetree
 //!   raw vocabulary the parser's `parse_*` cluster needs. The list/child fields
-//!   are `nodes::NodePtr`/`PgVec` charged on `mcx` (exactly the C
+//!   are `::nodes::NodePtr`/`PgVec` charged on `mcx` (exactly the C
 //!   `makeNode` palloc in the current context); `makeNullConst` reads the type's
 //!   storage props via the lsyscache `get_typlenbyval` seam, and
 //!   `makeVarFromTargetEntry` reads the TLE's `Expr` type/typmod/collation via
@@ -29,9 +29,9 @@
 //! ## Not yet portable (model gaps; not stubbed)
 //!
 //! `makeSimpleA_Expr`/`makeStringConst` need a `String`/value node carried as a
-//! `nodes::NodePtr` (the operator-name `list_make1(makeString(name))` and
+//! `::nodes::NodePtr` (the operator-name `list_make1(makeString(name))` and
 //! `A_Const.val.sval`). The value-node arms (`Node::Integer`/`Float`/`Boolean`/
-//! `String`/`BitString`, nodes/value.h) now exist in `nodes::Node` (added
+//! `String`/`BitString`, nodes/value.h) now exist in `::nodes::Node` (added
 //! by the node-walker keystone), so these two constructors are unblocked and
 //! ready to fill by the parser cluster; only `makeWholeRowVar`'s
 //! function-RTE branches need a `Node`-level `exprType` over a
@@ -66,16 +66,16 @@ use datum::Datum as ScalarWord;
 use types_tuple::heaptuple::Datum;
 use types_error::PgResult;
 
-use nodes::nodes::Node;
-use nodes::primnodes::{
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{
     BoolExpr, BoolExprType, CoercionForm, Const, Expr, FuncExpr, JsonBehavior, JsonBehaviorType,
     JsonConstructorExpr, JsonConstructorType, JsonFormat, JsonFormatType, JsonEncoding,
     JsonIsPredicate, JsonReturning, JsonValueExpr, JsonValueType,
     NullTest, NullTestType, OpExpr, RelabelType, TargetEntry, Var, AND_EXPR, NOT_EXPR, OR_EXPR,
 };
-use nodes::execnodes::IndexInfo;
-use nodes::nodes::NodePtr;
-use nodes::rawnodes::{
+use ::nodes::execnodes::IndexInfo;
+use ::nodes::nodes::NodePtr;
+use ::nodes::rawnodes::{
     A_Expr, A_Expr_Kind, Alias, ColumnDef, FromExpr, FuncCall, GroupingSet, GroupingSetKind,
 };
 use types_tuple::access::{RangeVar, RELPERSISTENCE_PERMANENT};
@@ -127,12 +127,12 @@ pub fn make_var(
 /// `RangeTblFunction.funcexpr`, which is an expression node reached via
 /// `Node::as_expr()`.
 pub fn make_whole_row_var(
-    rte: &nodes::parsenodes::RangeTblEntry<'_>,
+    rte: &::nodes::parsenodes::RangeTblEntry<'_>,
     varno: i32,
     varlevelsup: Index,
     allow_scalar: bool,
 ) -> PgResult<Var> {
-    use nodes::parsenodes::RTEKind;
+    use ::nodes::parsenodes::RTEKind;
     const RECORDOID: Oid = 2249;
 
     let result = match rte.rtekind {
@@ -771,7 +771,7 @@ pub fn make_type_name_from_oid(type_oid: Oid, typmod: i32) -> TypeName {
 // Raw-grammar parse-node constructors (build owned `nodes` raw nodes).
 //
 // These build the K1-parsetree raw-grammar vocabulary the parser's `parse_*`
-// recursive cluster needs. Their list/child fields are `nodes::NodePtr`
+// recursive cluster needs. Their list/child fields are `::nodes::NodePtr`
 // (`PgBox<Node>`) / `PgVec`, charged on `mcx`, exactly like the C `palloc`s a
 // node in the current memory context. Field-for-field vs makefuncs.c.
 // ===========================================================================
@@ -844,10 +844,10 @@ pub fn make_column_def<'mcx>(
     coll_oid: Oid,
 ) -> PgResult<ColumnDef<'mcx>> {
     // makeTypeNameFromOid(typeOid, typmod) — the ColumnDef carries the
-    // raw-grammar `nodes::rawnodes::TypeName`, distinct from the
+    // raw-grammar `::nodes::rawnodes::TypeName`, distinct from the
     // `parsenodes::TypeName` the standalone `make_type_name_*` build. Its
     // list fields are `mcx`-charged.
-    let type_name = nodes::rawnodes::TypeName {
+    let type_name = ::nodes::rawnodes::TypeName {
         names: mcx::vec_with_capacity_in(mcx, 0)?,
         typeOid: type_oid,
         setof: false,

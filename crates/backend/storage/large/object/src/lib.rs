@@ -115,7 +115,7 @@ use types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use nodes::parsenodes::DropBehavior;
+use ::nodes::parsenodes::DropBehavior;
 use types_scan::scankey::{BTEqualStrategyNumber, BTGreaterEqualStrategyNumber, ScanKeyData};
 use types_scan::sdir::ScanDirection;
 use types_storage::large_object::{

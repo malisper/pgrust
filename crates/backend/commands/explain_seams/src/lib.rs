@@ -12,12 +12,12 @@
 use types_core::instrument::{instr_time, BufferUsage};
 use types_error::PgResult;
 use types_explain::ExplainState;
-use nodes::ddlnodes::ExecuteStmt;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::Node;
-use nodes::params::ParamListInfo;
-use nodes::parsestmt::IntoClause;
-use nodes::queryenvironment::QueryEnvironment;
+use ::nodes::ddlnodes::ExecuteStmt;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::Node;
+use ::nodes::params::ParamListInfo;
+use ::nodes::parsestmt::IntoClause;
+use ::nodes::queryenvironment::QueryEnvironment;
 
 /// The EXPLAIN-EXECUTE bookkeeping the C `ExplainExecuteQuery` keeps on its
 /// stack and threads through `ExplainOnePlan` (`instr_time planstart/

@@ -90,7 +90,7 @@ use heaptuple::{
 };
 use alter::AlterObjectNamespace_oid;
 use types_acl::acl::ACLCHECK_NOT_OWNER;
-use nodes::parsenodes::{OBJECT_EXTENSION, OBJECT_SCHEMA};
+use ::nodes::parsenodes::{OBJECT_EXTENSION, OBJECT_SCHEMA};
 use catalog_catalog::GetNewOidWithIndex;
 use indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
 use arrayfuncs::construct::build_name_array;
@@ -1840,7 +1840,7 @@ pub fn CreateExtensionInternal<'mcx>(
         if !OidIsValid(schema_oid) {
             // makeNode(CreateSchemaStmt): schemaname set, authrole NULL,
             // schemaElts NIL, if_not_exists false.
-            let csstmt = nodes::ddlnodes::CreateSchemaStmt {
+            let csstmt = ::nodes::ddlnodes::CreateSchemaStmt {
                 schemaname: Some(PgString::from_str_in(control_schema, mcx)?),
                 authrole: None,
                 schemaElts: mcx::vec_with_capacity_in(mcx, 0)?,
@@ -2282,8 +2282,8 @@ pub fn RemoveExtensionById(extId: Oid) -> PgResult<()> {
 /// executor/SPI-driven install body is out of F0 scope).
 pub fn CreateExtension<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &nodes::parsestmt::ParseState<'_>,
-    stmt: &nodes::ddlnodes::CreateExtensionStmt<'_>,
+    pstate: &::nodes::parsestmt::ParseState<'_>,
+    stmt: &::nodes::ddlnodes::CreateExtensionStmt<'_>,
 ) -> PgResult<ObjectAddress> {
     let extname = stmt
         .extname
@@ -2375,17 +2375,17 @@ pub fn CreateExtension<'mcx>(
 
 /// Borrow an option `Node` as its inner `DefElem` (`castNode(DefElem, lfirst)`).
 fn as_defelem<'a, 'mcx>(
-    node: &'a nodes::nodes::NodePtr<'mcx>,
-) -> &'a nodes::ddlnodes::DefElem<'mcx> {
+    node: &'a ::nodes::nodes::NodePtr<'mcx>,
+) -> &'a ::nodes::ddlnodes::DefElem<'mcx> {
     match (**node).node_tag() {
-        nodes::nodes::ntag::T_DefElem => (**node).expect_defelem(),
+        ::nodes::nodes::ntag::T_DefElem => (**node).expect_defelem(),
         _ => panic!("extension.c: CREATE EXTENSION option is not a DefElem node"),
     }
 }
 
 /// `defGetString(def)` (define.c:34-62) for the string-valued options CREATE
 /// EXTENSION accepts (schema / new_version are `T_String` value nodes).
-fn def_get_string(def: &nodes::ddlnodes::DefElem<'_>) -> PgResult<String> {
+fn def_get_string(def: &::nodes::ddlnodes::DefElem<'_>) -> PgResult<String> {
     let arg = def.arg.as_deref().ok_or_else(|| {
         ereport(ERROR)
             .errcode(ERRCODE_SYNTAX_ERROR)
@@ -2396,15 +2396,15 @@ fn def_get_string(def: &nodes::ddlnodes::DefElem<'_>) -> PgResult<String> {
             .into_error()
     })?;
     match arg.node_tag() {
-        nodes::nodes::ntag::T_Integer => {
+        ::nodes::nodes::ntag::T_Integer => {
             let i = arg.expect_integer();
             Ok(i.ival.to_string())
         }
-        nodes::nodes::ntag::T_Boolean => {
+        ::nodes::nodes::ntag::T_Boolean => {
             let b = arg.expect_boolean();
             Ok(if b.boolval { "true" } else { "false" }.to_string())
         }
-        nodes::nodes::ntag::T_String => {
+        ::nodes::nodes::ntag::T_String => {
             let s = arg.expect_string();
             Ok(s.sval.as_str().to_string())
         }
@@ -2416,19 +2416,19 @@ fn def_get_string(def: &nodes::ddlnodes::DefElem<'_>) -> PgResult<String> {
 }
 
 /// `defGetBoolean(def)` (define.c:93-143) for the `cascade` option.
-fn def_get_boolean(def: &nodes::ddlnodes::DefElem<'_>) -> PgResult<bool> {
+fn def_get_boolean(def: &::nodes::ddlnodes::DefElem<'_>) -> PgResult<bool> {
     // If no parameter value given, assume "true" is meant.
     let Some(arg) = def.arg.as_deref() else {
         return Ok(true);
     };
 
     match arg.node_tag() {
-        nodes::nodes::ntag::T_Integer => match arg.expect_integer().ival {
+        ::nodes::nodes::ntag::T_Integer => match arg.expect_integer().ival {
             0 => return Ok(false),
             1 => return Ok(true),
             _ => {}
         },
-        nodes::nodes::ntag::T_String => {
+        ::nodes::nodes::ntag::T_String => {
             let s = arg.expect_string();
             let sval = s.sval.as_str();
             if sval.eq_ignore_ascii_case("true") || sval.eq_ignore_ascii_case("on") {
@@ -2453,8 +2453,8 @@ fn def_get_boolean(def: &nodes::ddlnodes::DefElem<'_>) -> PgResult<bool> {
 /// `errorConflictingDefElem(defel, pstate)` (define.c) — "conflicting or
 /// redundant options" at the option's parse location.
 fn error_conflicting_def_elem(
-    def: &nodes::ddlnodes::DefElem<'_>,
-    _pstate: &nodes::parsestmt::ParseState<'_>,
+    def: &::nodes::ddlnodes::DefElem<'_>,
+    _pstate: &::nodes::parsestmt::ParseState<'_>,
 ) -> PgResult<ObjectAddress> {
     Err(ereport(ERROR)
         .errcode(ERRCODE_SYNTAX_ERROR)
@@ -2474,11 +2474,11 @@ fn error_conflicting_def_elem(
 /// `CreateExtensionStmt` and forward.
 fn create_extension_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     match stmt.node_tag() {
-        nodes::nodes::ntag::T_CreateExtensionStmt => {
+        ::nodes::nodes::ntag::T_CreateExtensionStmt => {
             CreateExtension(mcx, pstate, stmt.expect_createextensionstmt())
         }
         _ => panic!("create_extension: parse tree is not a CreateExtensionStmt"),

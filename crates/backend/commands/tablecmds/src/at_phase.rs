@@ -42,10 +42,10 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
 use types_acl::ACLCHECK_NOT_OWNER;
-use nodes::ddlnodes::{AlterTableCmd, AlterTableStmt, AlterTableType};
-use nodes::ddlnodes::AlterTableType::*;
-use nodes::nodes::{Node, NodePtr};
-use nodes::parsenodes::{
+use ::nodes::ddlnodes::{AlterTableCmd, AlterTableStmt, AlterTableType};
+use ::nodes::ddlnodes::AlterTableType::*;
+use ::nodes::nodes::{Node, NodePtr};
+use ::nodes::parsenodes::{
     ObjectType, OBJECT_FOREIGN_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_SEQUENCE, OBJECT_TYPE,
     OBJECT_VIEW,
 };
@@ -554,7 +554,7 @@ pub fn AlterTableGetLockLevel(cmds: &PgVec<'_, NodePtr<'_>>) -> PgResult<LOCKMOD
                 // if (IsA(cmd->def, Constraint))
                 if let Some(def) = &cmd.def {
                     if let Some(con) = def.as_constraint() {
-                        use nodes::ddlnodes::ConstrType::*;
+                        use ::nodes::ddlnodes::ConstrType::*;
                         cmd_lockmode = match con.contype {
                             CONSTR_EXCLUSION | CONSTR_PRIMARY | CONSTR_UNIQUE => AccessExclusiveLock,
                             CONSTR_FOREIGN => ShareRowExclusiveLock,
@@ -1449,7 +1449,7 @@ fn ATExecCmd<'mcx>(
                 Some(rs) => {
                     // The Node enum carries `ddlnodes::RoleSpec`; the acl seam
                     // consumes the structurally-identical `parsenodes::RoleSpec`.
-                    let role = nodes::parsenodes::RoleSpec {
+                    let role = ::nodes::parsenodes::RoleSpec {
                         roletype: rs.roletype,
                         rolename: match &rs.rolename {
                             Some(s) => Some(s.clone_in(mcx)?),
@@ -2481,7 +2481,7 @@ fn ATRewriteTables<'mcx>(
 
         for ci in 0..wqueue[ti].constraints.len() {
             if wqueue[ti].constraints[ci].contype
-                != nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32
+                != ::nodes::ddlnodes::ConstrType::CONSTR_FOREIGN as i32
             {
                 continue;
             }
@@ -2585,7 +2585,7 @@ fn run_at_rewrite_table_scan<'mcx>(
 ) -> PgResult<()> {
     // tab->newvals: each NewColumnValue carries an `Expr` (the planned
     // cast/USING/default), its attnum, and is_generated.
-    let mut newvals: Vec<(i16, nodes::primnodes::Expr, bool)> =
+    let mut newvals: Vec<(i16, ::nodes::primnodes::Expr, bool)> =
         Vec::with_capacity(tab.newvals.len());
     for nv in tab.newvals.iter() {
         let node = nv
@@ -2604,7 +2604,7 @@ fn run_at_rewrite_table_scan<'mcx>(
     // is the cooked CHECK Expr.
     const CONSTR_CHECK: i32 = 5; // ConstrType::CONSTR_CHECK
     let mut check_names: Vec<String> = Vec::new();
-    let mut check_exprs: Vec<nodes::primnodes::Expr> = Vec::new();
+    let mut check_exprs: Vec<::nodes::primnodes::Expr> = Vec::new();
     for con in tab.constraints.iter() {
         if con.contype != CONSTR_CHECK {
             continue;
@@ -2625,14 +2625,14 @@ fn run_at_rewrite_table_scan<'mcx>(
         check_names.push(name);
         check_exprs.push(expr);
     }
-    let check_constraints: Vec<(&str, nodes::primnodes::Expr)> = check_names
+    let check_constraints: Vec<(&str, ::nodes::primnodes::Expr)> = check_names
         .iter()
         .zip(check_exprs.iter())
         .map(|(n, e)| (n.as_str(), e.clone()))
         .collect();
 
     // tab->partition_constraint: the single ANDed Expr, if any.
-    let partition_constraint: Vec<nodes::primnodes::Expr> =
+    let partition_constraint: Vec<::nodes::primnodes::Expr> =
         match tab.partition_constraint.as_ref() {
             Some(node) => vec![node
                 .as_expr()
@@ -3025,13 +3025,13 @@ pub(crate) fn find_typed_table_dependencies<'mcx>(
     mcx: Mcx<'mcx>,
     type_oid: Oid,
     type_name: &str,
-    behavior: nodes::parsenodes::DropBehavior,
+    behavior: ::nodes::parsenodes::DropBehavior,
 ) -> PgResult<PgVec<'mcx, Oid>> {
     let oids = heapam_seam::scan_typed_table_dependencies::call(mcx, type_oid)?;
 
     // C errors out on the first match under DROP_RESTRICT; otherwise it returns
     // the whole list.
-    if !oids.is_empty() && behavior == nodes::parsenodes::DropBehavior::Restrict {
+    if !oids.is_empty() && behavior == ::nodes::parsenodes::DropBehavior::Restrict {
         return utils_error::ereport(ERROR)
             .errcode(types_error::ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST)
             .errmsg(format!(

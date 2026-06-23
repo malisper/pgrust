@@ -6,7 +6,7 @@
 //! `transformOptionalSelectInto`, `parse_sub_analyze`, `transformSelectStmt`,
 //! the FOR UPDATE/SHARE locking family, and the `*_requires_*` predicates.
 //! SQL text -> `raw_parser` -> `transformStmt` -> an owned, walkable
-//! `nodes::copy_query::Query<'mcx>`.
+//! `::nodes::copy_query::Query<'mcx>`.
 //!
 //! VALUES, set-operations, and the DML statements (INSERT/UPDATE/DELETE/MERGE,
 //! RETURN, PL/pgSQL assignment, DECLARE CURSOR, EXPLAIN, CREATE TABLE AS, CALL)
@@ -22,10 +22,10 @@ use alloc::vec::Vec;
 use utils_error::ereport;
 use mcx::{Mcx, PgBox, PgVec};
 use types_error::{PgResult, ERROR};
-use nodes::copy_query::{Query, QuerySource};
-use nodes::nodes::{ntag, CmdType, Node, NodePtr};
-use nodes::parsestmt::{ParseState, RawStmt};
-use nodes::rawnodes::SelectStmt;
+use ::nodes::copy_query::{Query, QuerySource};
+use ::nodes::nodes::{ntag, CmdType, Node, NodePtr};
+use ::nodes::parsestmt::{ParseState, RawStmt};
+use ::nodes::rawnodes::SelectStmt;
 
 mod inline_sql;
 mod inline_srf;
@@ -138,7 +138,7 @@ pub fn parse_analyze_sql_function<'mcx>(
     mcx: Mcx<'mcx>,
     parse_tree: &RawStmt<'mcx>,
     source_text: &str,
-    pinfo: nodes::parsestmt::SqlFnParseInfo,
+    pinfo: ::nodes::parsestmt::SqlFnParseInfo,
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = small1::make_parsestate(mcx, None)?;
 
@@ -165,7 +165,7 @@ pub fn parse_analyze_plpgsql_expr<'mcx>(
     mcx: Mcx<'mcx>,
     parse_tree: &RawStmt<'mcx>,
     source_text: &str,
-    state: nodes::parsestmt::PlpgsqlExprParseState,
+    state: ::nodes::parsestmt::PlpgsqlExprParseState,
 ) -> PgResult<Query<'mcx>> {
     let mut pstate = small1::make_parsestate(mcx, None)?;
 
@@ -202,7 +202,7 @@ pub fn parse_analyze_varparams<'mcx>(
     parse_tree: &RawStmt<'mcx>,
     source_text: &str,
     arg_types: &[types_core::primitive::Oid],
-) -> PgResult<(Query<'mcx>, nodes::parsestmt::VarParamState)> {
+) -> PgResult<(Query<'mcx>, ::nodes::parsestmt::VarParamState)> {
     let mut pstate = small1::make_parsestate(mcx, None)?;
 
     // Assert(sourceText != NULL); pstate->p_sourcetext = sourceText;
@@ -215,7 +215,7 @@ pub fn parse_analyze_varparams<'mcx>(
     // <Vec<Oid>>>`; seed it with the caller's fixed arg-type prefix (the PREPARE
     // driver's declared `$n` types), which the variable_paramref_hook then grows
     // and resolves in place.
-    let parstate = nodes::parsestmt::VarParamState::from_shared(
+    let parstate = ::nodes::parsestmt::VarParamState::from_shared(
         alloc::rc::Rc::new(core::cell::RefCell::new(arg_types.to_vec())),
     );
     small1::setup_parse_variable_parameters(&mut pstate, parstate.clone());
@@ -283,7 +283,7 @@ fn is_polymorphic_type(typid: types_core::primitive::Oid) -> bool {
 /// error for a `CMD_UTILITY` result.
 fn transform_one_body_stmt<'mcx>(
     mcx: Mcx<'mcx>,
-    pinfo: &nodes::parsestmt::SqlFnParseInfo,
+    pinfo: &::nodes::parsestmt::SqlFnParseInfo,
     query_string: Option<&str>,
     stmt: &Node<'mcx>,
 ) -> PgResult<Query<'mcx>> {
@@ -350,7 +350,7 @@ pub fn interpret_sql_body<'mcx>(
         }
     }
     let argnames_opt = if nargs > 0 { Some(argnames) } else { None };
-    let pinfo = nodes::parsestmt::SqlFnParseInfo::new(
+    let pinfo = ::nodes::parsestmt::SqlFnParseInfo::new(
         funcname,
         types_core::InvalidOid,
         parameter_types,
@@ -428,7 +428,7 @@ fn transform_parameter_default<'mcx>(
     location: i32,
     query_string: Option<String>,
 ) -> PgResult<Node<'mcx>> {
-    use nodes::parsestmt::ParseExprKind;
+    use ::nodes::parsestmt::ParseExprKind;
 
     let mut pstate = small1::make_parsestate(mcx, None)?;
     if let Some(s) = query_string.as_deref() {
@@ -456,7 +456,7 @@ fn transform_parameter_default<'mcx>(
     // assign_expr_collations(pstate, def);
     // Bring the parser-arena `'static` coerced default into `mcx` for the
     // in-place collation pass and the `'mcx` node wrap below (invariant `Expr`).
-    let mut def: nodes::primnodes::Expr<'mcx> = def.clone_in(mcx)?;
+    let mut def: ::nodes::primnodes::Expr<'mcx> = def.clone_in(mcx)?;
     parse_collate::assign_expr_collations(Some(&pstate), &mut def)?;
 
     // Wrap the cooked Expr as a Node for the var-clause check and serialization.
@@ -573,7 +573,7 @@ pub fn parse_sub_analyze<'mcx>(
     mcx: Mcx<'mcx>,
     parse_tree: &Node<'mcx>,
     parent_pstate: &mut ParseState<'mcx>,
-    parent_cte: Option<&nodes::rawnodes::CommonTableExpr<'mcx>>,
+    parent_cte: Option<&::nodes::rawnodes::CommonTableExpr<'mcx>>,
     locked_from_parent: bool,
     resolve_unknowns: bool,
 ) -> PgResult<PgBox<'mcx, Node<'mcx>>> {
@@ -758,7 +758,7 @@ fn transformOptionalSelectInto<'mcx>(
     if let Some(stmt) = parse_tree.as_selectstmt() {
         /* drill down to leftmost SelectStmt of a set-op tree */
         let mut leaf = stmt;
-        while leaf.op != nodes::rawnodes::SETOP_NONE {
+        while leaf.op != ::nodes::rawnodes::SETOP_NONE {
             match leaf.larg.as_deref() {
                 Some(l) => leaf = l,
                 None => break,
@@ -779,10 +779,10 @@ fn transformOptionalSelectInto<'mcx>(
                 None => None,
             };
 
-            let ctas = nodes::ddlnodes::CreateTableAsStmt {
+            let ctas = ::nodes::ddlnodes::CreateTableAsStmt {
                 query: Some(mcx::alloc_in(mcx, Node::mk_select_stmt(mcx, select_copy)?)?),
                 into,
-                objtype: nodes::parsenodes::OBJECT_TABLE,
+                objtype: ::nodes::parsenodes::OBJECT_TABLE,
                 is_select_into: true,
                 if_not_exists: false,
             };
@@ -817,7 +817,7 @@ fn def_elem_arg(node: &Node<'_>) -> define_seams::DefElemArg {
 fn transformExplainStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    stmt: &nodes::ddlnodes::ExplainStmt<'mcx>,
+    stmt: &::nodes::ddlnodes::ExplainStmt<'mcx>,
 ) -> PgResult<Query<'mcx>> {
     // If we have no external source of parameter definitions, and the
     // GENERIC_PLAN option is specified, then accept variable parameter
@@ -845,7 +845,7 @@ fn transformExplainStmt<'mcx>(
             // The owned VarParamState is a shared growable Oid Vec, seeded empty
             // (EXPLAIN supplies no fixed declared types); the
             // variable_paramref_hook grows and resolves it in place.
-            let parstate = nodes::parsestmt::VarParamState::from_shared(
+            let parstate = ::nodes::parsestmt::VarParamState::from_shared(
                 alloc::rc::Rc::new(core::cell::RefCell::new(alloc::vec::Vec::new())),
             );
             small1::setup_parse_variable_parameters(pstate, parstate);
@@ -884,7 +884,7 @@ fn transformExplainStmt<'mcx>(
 fn transformCreateTableAsStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    stmt: &nodes::ddlnodes::CreateTableAsStmt<'mcx>,
+    stmt: &::nodes::ddlnodes::CreateTableAsStmt<'mcx>,
 ) -> PgResult<Query<'mcx>> {
     use types_error::ERRCODE_FEATURE_NOT_SUPPORTED;
 
@@ -899,7 +899,7 @@ fn transformCreateTableAsStmt<'mcx>(
     let mut new_stmt = stmt.clone_in(mcx)?;
 
     /* additional work needed for CREATE MATERIALIZED VIEW */
-    if stmt.objtype == nodes::parsenodes::ObjectType::Matview {
+    if stmt.objtype == ::nodes::parsenodes::ObjectType::Matview {
         /*
          * Prohibit a data-modifying CTE in the query used to create a
          * materialized view.
@@ -979,7 +979,7 @@ fn transformCreateTableAsStmt<'mcx>(
 /// (possibly set-op) `SelectStmt`, matching the C `stmt->intoClause = NULL`.
 fn clear_leftmost_into(stmt: &mut SelectStmt<'_>) {
     let mut cur = stmt;
-    while cur.op != nodes::rawnodes::SETOP_NONE {
+    while cur.op != ::nodes::rawnodes::SETOP_NONE {
         match cur.larg.as_deref_mut() {
             Some(l) => cur = l,
             None => break,
@@ -1004,7 +1004,7 @@ pub fn transformStmt<'mcx>(
             let n = parse_tree.expect_selectstmt();
             if !n.valuesLists.is_empty() {
                 select::transformValuesClause(mcx, pstate, n)?
-            } else if n.op == nodes::rawnodes::SETOP_NONE {
+            } else if n.op == ::nodes::rawnodes::SETOP_NONE {
                 select::transformSelectStmt(mcx, pstate, n)?
             } else {
                 setop::transformSetOperationStmt(mcx, pstate, n)?
@@ -1189,9 +1189,9 @@ fn jumble_and_post_analyze_impl<'mcx>(
 /// dependency cycle). With no hook registered the guard falls through and this
 /// is a no-op, byte-identical to before.
 fn run_post_parse_analyze_hook_impl(
-    pstate: &nodes::portalcmds::ParseState,
-    query: &nodes::portalcmds::Query,
-    jstate: Option<&nodes::portalcmds::JumbleState>,
+    pstate: &::nodes::portalcmds::ParseState,
+    query: &::nodes::portalcmds::Query,
+    jstate: Option<&::nodes::portalcmds::JumbleState>,
 ) -> PgResult<()> {
     if parser_analyze_seams::post_parse_analyze_hook_present() {
         parser_analyze_seams::call_post_parse_analyze_hook(pstate, query, jstate)?;
@@ -1221,7 +1221,7 @@ fn query_requires_rewrite_plan_value_impl(query: &Query<'_>) -> PgResult<bool> {
 /// `Node`s the `Query` carries (`PgVec<NodePtr>`).
 pub(crate) fn sgc_vec_to_nodes<'mcx>(
     mcx: Mcx<'mcx>,
-    v: Vec<nodes::rawnodes::SortGroupClause>,
+    v: Vec<::nodes::rawnodes::SortGroupClause>,
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
     let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
     for sgc in v {
@@ -1246,7 +1246,7 @@ pub(crate) fn node_vec_to_pgvec<'mcx>(
 /// (`Option<NodePtr>`) a `Query` carries.
 pub(crate) fn opt_expr_to_node<'mcx>(
     mcx: Mcx<'mcx>,
-    e: Option<nodes::primnodes::Expr<'static>>,
+    e: Option<::nodes::primnodes::Expr<'static>>,
 ) -> PgResult<Option<NodePtr<'mcx>>> {
     match e {
         Some(expr) => Ok(Some(mcx::alloc_in(mcx, Node::mk_expr(mcx, expr.clone_in(mcx)?)?)?)),
@@ -1259,8 +1259,8 @@ pub(crate) fn opt_expr_to_node<'mcx>(
 /// (`havingQual`/`limitOffset`/`limitCount`/`mergeJoinCondition`) carries.
 pub(crate) fn opt_expr_to_box<'mcx>(
     mcx: Mcx<'mcx>,
-    e: Option<nodes::primnodes::Expr<'static>>,
-) -> PgResult<Option<PgBox<'mcx, nodes::primnodes::Expr<'mcx>>>> {
+    e: Option<::nodes::primnodes::Expr<'static>>,
+) -> PgResult<Option<PgBox<'mcx, ::nodes::primnodes::Expr<'mcx>>>> {
     match e {
         Some(expr) => Ok(Some(mcx::alloc_in(mcx, expr.clone_in(mcx)?)?)),
         None => Ok(None),
@@ -1271,7 +1271,7 @@ pub(crate) fn opt_expr_to_box<'mcx>(
 /// `cteList` (`PgVec<NodePtr>`).
 pub(crate) fn cte_vec_to_nodes<'mcx>(
     mcx: Mcx<'mcx>,
-    v: PgVec<'mcx, nodes::rawnodes::CommonTableExpr<'mcx>>,
+    v: PgVec<'mcx, ::nodes::rawnodes::CommonTableExpr<'mcx>>,
 ) -> PgResult<PgVec<'mcx, NodePtr<'mcx>>> {
     let mut out = mcx::vec_with_capacity_in(mcx, v.len())?;
     for cte in v {

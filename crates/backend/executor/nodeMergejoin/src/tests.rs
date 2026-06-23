@@ -2,7 +2,7 @@
 //! and the `INVERT_COMPARE_RESULT` arithmetic.
 
 use types_tuple::heaptuple::Datum;
-use nodes::primnodes::{Const, Expr, Var};
+use ::nodes::primnodes::{Const, Expr, Var};
 
 use super::{check_constant_qual, invert_compare_result};
 

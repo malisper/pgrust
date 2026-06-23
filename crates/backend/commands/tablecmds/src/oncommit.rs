@@ -13,8 +13,8 @@ use transam_xact::GetCurrentSubTransactionId;
 use types_core::primitive::Oid;
 use types_core::SubTransactionId;
 use types_error::PgResult;
-use nodes::primnodes::OnCommitAction;
-use nodes::primnodes::OnCommitAction::{
+use ::nodes::primnodes::OnCommitAction;
+use ::nodes::primnodes::OnCommitAction::{
     ONCOMMIT_DELETE_ROWS, ONCOMMIT_DROP, ONCOMMIT_NOOP, ONCOMMIT_PRESERVE_ROWS,
 };
 
@@ -155,7 +155,7 @@ pub fn pre_commit_on_commit_actions() -> PgResult<()> {
          */
         dep_seam::perform_multiple_deletions::call(
             &target_objects.refs,
-            nodes::parsenodes::DROP_CASCADE,
+            ::nodes::parsenodes::DROP_CASCADE,
             dep_seam::PERFORM_DELETION_INTERNAL | dep_seam::PERFORM_DELETION_QUIETLY,
         )?;
 

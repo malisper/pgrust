@@ -6,12 +6,12 @@
 //! # Model reconciliation (read before editing)
 //!
 //! `finalize_plan` recursively computes the `extParam`/`allParam`
-//! [`Bitmapset`](nodes::Bitmapset) of every `Plan` node, mutating the
+//! [`Bitmapset`](::nodes::Bitmapset) of every `Plan` node, mutating the
 //! owned plan tree (`&mut Node<'mcx>`). The `paramids` / `valid_params` /
-//! `scan_params` working sets are `nodes::Bitmapset<'mcx>` (the same type
+//! `scan_params` working sets are `::nodes::Bitmapset<'mcx>` (the same type
 //! the `Plan.extParam`/`allParam` fields hold), reached through the
 //! `backend-nodes-core` bms ops. The `root.outer_params` set
-//! (`pathnodes::Relids`) is converted to a `nodes::Bitmapset` at the
+//! (`pathnodes::Relids`) is converted to a `::nodes::Bitmapset` at the
 //! `SS_finalize_plan` boundary.
 //!
 //! Child SubPlans referenced by `plan->initPlan` / a `SubPlan` expr are read
@@ -25,9 +25,9 @@
 
 use mcx::{Mcx, PgBox};
 use types_error::{PgError, PgResult};
-use nodes::bitmapset::Bitmapset;
-use nodes::nodes::Node;
-use nodes::primnodes::{Expr, ParamKind};
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{Expr, ParamKind};
 use pathnodes::planner_run::{planner_subplan_get_plan, PlannerRun};
 use pathnodes::{PlannerInfo, RelId};
 
@@ -40,7 +40,7 @@ fn elog_error(msg: impl Into<alloc::string::String>) -> PgError {
 }
 
 /// Convert a planner `Relids` ([`pathnodes::Bitmapset`]) into a
-/// `nodes::Bitmapset<'mcx>` — both are word-vectors of param ids; the
+/// `::nodes::Bitmapset<'mcx>` — both are word-vectors of param ids; the
 /// boundary between the `outer_params` set (Relids) and the `Plan.extParam`
 /// model (nodes) needs this bridge.
 /// `find_base_rel(root, relid)` (relnode.c) — a base/otherrel entry that must
@@ -334,16 +334,16 @@ fn finalize_node_specific<'mcx>(
     }
 
     match plan.node_tag() {
-        nodes::nodes::ntag::T_Result => {
+        ::nodes::nodes::ntag::T_Result => {
             let r = plan.as_result_mut().unwrap();
             if let Some(rcq) = r.resconstantqual.as_ref() {
                 fin_exprs!(rcq);
             }
         }
-        nodes::nodes::ntag::T_SeqScan => {
+        ::nodes::nodes::ntag::T_SeqScan => {
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_SampleScan => {
+        ::nodes::nodes::ntag::T_SampleScan => {
             let s = plan.as_samplescan_mut().unwrap();
             if let Some(ts) = s.tablesample.as_ref() {
                 // finalize_primnode((Node *) sampleScan->tablesample): walk the
@@ -357,7 +357,7 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_IndexScan => {
+        ::nodes::nodes::ntag::T_IndexScan => {
             let s = plan.as_indexscan_mut().unwrap();
             if let Some(iq) = s.indexqual.as_ref() {
                 fin_exprs!(iq);
@@ -367,7 +367,7 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_IndexOnlyScan => {
+        ::nodes::nodes::ntag::T_IndexOnlyScan => {
             let s = plan.as_indexonlyscan_mut().unwrap();
             if let Some(iq) = s.indexqual.as_ref() {
                 fin_exprs!(iq);
@@ -380,32 +380,32 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_BitmapIndexScan => {
+        ::nodes::nodes::ntag::T_BitmapIndexScan => {
             let s = plan.as_bitmapindexscan_mut().unwrap();
             if let Some(iq) = s.indexqual.as_ref() {
                 fin_exprs!(iq);
             }
         }
-        nodes::nodes::ntag::T_BitmapHeapScan => {
+        ::nodes::nodes::ntag::T_BitmapHeapScan => {
             let s = plan.as_bitmapheapscan_mut().unwrap();
             fin_exprs!(s.bitmapqualorig);
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_TidScan => {
+        ::nodes::nodes::ntag::T_TidScan => {
             let s = plan.as_tidscan_mut().unwrap();
             if let Some(tq) = s.tidquals.as_ref() {
                 fin_exprs!(tq);
             }
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_TidRangeScan => {
+        ::nodes::nodes::ntag::T_TidRangeScan => {
             let s = plan.as_tidrangescan_mut().unwrap();
             if let Some(tq) = s.tidrangequals.as_ref() {
                 fin_exprs!(tq);
             }
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_SubqueryScan => {
+        ::nodes::nodes::ntag::T_SubqueryScan => {
             let sscan = plan.as_subqueryscan_mut().unwrap();
             // C (subselect.c finalize_plan):
             //   rel = find_base_rel(root, sscan->scan.scanrelid);
@@ -448,7 +448,7 @@ fn finalize_node_specific<'mcx>(
             context.paramids = bms::bms_add_members(mcx, context.paramids.take(), sub_ext)?;
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_FunctionScan => {
+        ::nodes::nodes::ntag::T_FunctionScan => {
             let fscan = plan.as_functionscan_mut().unwrap();
             if let Some(functions) = fscan.functions.as_mut() {
                 for rtfunc in functions.iter_mut() {
@@ -470,20 +470,20 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_TableFuncScan => {
+        ::nodes::nodes::ntag::T_TableFuncScan => {
             let tfs = plan.as_tablefuncscan_mut().unwrap();
             // tablefunc carries expression children; finalize them.
             finalize_tablefunc(mcx, root, run, &tfs.tablefunc, context)?;
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_ValuesScan => {
+        ::nodes::nodes::ntag::T_ValuesScan => {
             let vs = plan.as_valuesscan_mut().unwrap();
             for row in vs.values_lists.iter() {
                 fin_exprs!(row);
             }
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_CteScan => {
+        ::nodes::nodes::ntag::T_CteScan => {
             let cte = plan.as_ctescan_mut().unwrap();
             // Find the referenced CTE plan and incorporate its external paramids.
             let plan_id = cte.ctePlanId;
@@ -504,15 +504,15 @@ fn finalize_node_specific<'mcx>(
             context.paramids = bms::bms_add_members(mcx, context.paramids.take(), ext)?;
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_WorkTableScan => {
+        ::nodes::nodes::ntag::T_WorkTableScan => {
             let wts = plan.as_worktablescan_mut().unwrap();
             context.paramids = Some(bms::bms_add_member(mcx, context.paramids.take(), wts.wtParam)?);
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_NamedTuplestoreScan => {
+        ::nodes::nodes::ntag::T_NamedTuplestoreScan => {
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_ForeignScan => {
+        ::nodes::nodes::ntag::T_ForeignScan => {
             let fscan = plan.as_foreignscan_mut().unwrap();
             if let Some(fe) = fscan.fdw_exprs.as_ref() {
                 fin_exprs!(fe);
@@ -522,7 +522,7 @@ fn finalize_node_specific<'mcx>(
             }
             add_scan_params!();
         }
-        nodes::nodes::ntag::T_CustomScan => {
+        ::nodes::nodes::ntag::T_CustomScan => {
             let cscan = plan.as_customscan_mut().unwrap();
             if let Some(ce) = cscan.custom_exprs.as_ref() {
                 fin_exprs!(ce);
@@ -547,7 +547,7 @@ fn finalize_node_specific<'mcx>(
                 }
             }
         }
-        nodes::nodes::ntag::T_ModifyTable => {
+        ::nodes::nodes::ntag::T_ModifyTable => {
             let mt = plan.as_modifytable_mut().unwrap();
             *locally_added_param = mt.epqParam;
             *valid_params_owned =
@@ -574,7 +574,7 @@ fn finalize_node_specific<'mcx>(
                 fin_exprs!(ocw);
             }
         }
-        nodes::nodes::ntag::T_Append => {
+        ::nodes::nodes::ntag::T_Append => {
             let a = plan.as_append_mut().unwrap();
             for child in a.appendplans.iter_mut() {
                 let cp = finalize_plan(
@@ -590,7 +590,7 @@ fn finalize_node_specific<'mcx>(
                     bms::bms_add_members(mcx, context.paramids.take(), cp.as_deref())?;
             }
         }
-        nodes::nodes::ntag::T_MergeAppend => {
+        ::nodes::nodes::ntag::T_MergeAppend => {
             let ma = plan.as_mergeappend_mut().unwrap();
             for child in ma.mergeplans.iter_mut() {
                 let cp = finalize_plan(
@@ -606,7 +606,7 @@ fn finalize_node_specific<'mcx>(
                     bms::bms_add_members(mcx, context.paramids.take(), cp.as_deref())?;
             }
         }
-        nodes::nodes::ntag::T_BitmapAnd => {
+        ::nodes::nodes::ntag::T_BitmapAnd => {
             let ba = plan.as_bitmapand_mut().unwrap();
             for child in ba.bitmapplans.iter_mut() {
                 let cp = finalize_plan(
@@ -622,7 +622,7 @@ fn finalize_node_specific<'mcx>(
                     bms::bms_add_members(mcx, context.paramids.take(), cp.as_deref())?;
             }
         }
-        nodes::nodes::ntag::T_BitmapOr => {
+        ::nodes::nodes::ntag::T_BitmapOr => {
             let bo = plan.as_bitmapor_mut().unwrap();
             for child in bo.bitmapplans.iter_mut() {
                 let cp = finalize_plan(
@@ -638,7 +638,7 @@ fn finalize_node_specific<'mcx>(
                     bms::bms_add_members(mcx, context.paramids.take(), cp.as_deref())?;
             }
         }
-        nodes::nodes::ntag::T_NestLoop => {
+        ::nodes::nodes::ntag::T_NestLoop => {
             let nl = plan.as_nestloop_mut().unwrap();
             if let Some(jq) = nl.join.joinqual.as_ref() {
                 fin_exprs!(jq);
@@ -648,14 +648,14 @@ fn finalize_node_specific<'mcx>(
                     Some(bms::bms_add_member(mcx, nestloop_params.take(), nlp.paramno)?);
             }
         }
-        nodes::nodes::ntag::T_MergeJoin => {
+        ::nodes::nodes::ntag::T_MergeJoin => {
             let mj = plan.as_mergejoin_mut().unwrap();
             if let Some(jq) = mj.join.joinqual.as_ref() {
                 fin_exprs!(jq);
             }
             fin_exprs!(mj.mergeclauses);
         }
-        nodes::nodes::ntag::T_HashJoin => {
+        ::nodes::nodes::ntag::T_HashJoin => {
             let hj = plan.as_hashjoin_mut().unwrap();
             if let Some(jq) = hj.join.joinqual.as_ref() {
                 fin_exprs!(jq);
@@ -668,7 +668,7 @@ fn finalize_node_specific<'mcx>(
                 }
             }
         }
-        nodes::nodes::ntag::T_Hash => {
+        ::nodes::nodes::ntag::T_Hash => {
             let h = plan.as_hash_mut().unwrap();
             if let Some(hk) = h.hashkeys.as_ref() {
                 for n in hk.iter() {
@@ -678,7 +678,7 @@ fn finalize_node_specific<'mcx>(
                 }
             }
         }
-        nodes::nodes::ntag::T_Limit => {
+        ::nodes::nodes::ntag::T_Limit => {
             let l = plan.as_limit_mut().unwrap();
             if let Some(o) = l.limitOffset.as_deref() {
                 finalize_primnode(mcx, root, run, Some(o), context)?;
@@ -687,14 +687,14 @@ fn finalize_node_specific<'mcx>(
                 finalize_primnode(mcx, root, run, Some(c), context)?;
             }
         }
-        nodes::nodes::ntag::T_RecursiveUnion => {
+        ::nodes::nodes::ntag::T_RecursiveUnion => {
             let ru = plan.as_recursiveunion_mut().unwrap();
             *locally_added_param = ru.wtParam;
             *valid_params_owned =
                 Some(bms::bms_add_member(mcx, valid_params_owned.take(), *locally_added_param)?);
             // wtParam does *not* get added to scan_params.
         }
-        nodes::nodes::ntag::T_LockRows => {
+        ::nodes::nodes::ntag::T_LockRows => {
             // Force descendant scan nodes to reference epqParam.
             //   locally_added_param = ((LockRows *) plan)->epqParam;
             //   valid_params = bms_add_member(bms_copy(valid_params), locally_added_param);
@@ -712,11 +712,11 @@ fn finalize_node_specific<'mcx>(
             *scan_params_owned =
                 Some(bms::bms_add_member(mcx, scan_params_owned.take(), *locally_added_param)?);
         }
-        nodes::nodes::ntag::T_Agg => {
+        ::nodes::nodes::ntag::T_Agg => {
             let agg = plan.as_agg_mut().unwrap();
             // AGG_HASHED plans need to know which Params are referenced in
             // aggregate calls.
-            if agg.aggstrategy == nodes::nodeagg::AGG_HASHED {
+            if agg.aggstrategy == ::nodes::nodeagg::AGG_HASHED {
                 let mut aggcontext = FinalizeCtx { paramids: None };
                 if let Some(tlist) = agg.plan.targetlist.as_ref() {
                     for te in tlist.iter() {
@@ -733,7 +733,7 @@ fn finalize_node_specific<'mcx>(
                 agg.agg_params = aggcontext.paramids;
             }
         }
-        nodes::nodes::ntag::T_WindowAgg => {
+        ::nodes::nodes::ntag::T_WindowAgg => {
             let wa = plan.as_windowagg_mut().unwrap();
             if let Some(so) = wa.startOffset.as_deref() {
                 finalize_primnode(mcx, root, run, Some(so), context)?;
@@ -742,7 +742,7 @@ fn finalize_node_specific<'mcx>(
                 finalize_primnode(mcx, root, run, Some(eo), context)?;
             }
         }
-        nodes::nodes::ntag::T_Gather => {
+        ::nodes::nodes::ntag::T_Gather => {
             let g = plan.as_gather_mut().unwrap();
             *locally_added_param = g.rescan_param;
             if *locally_added_param >= 0 {
@@ -752,7 +752,7 @@ fn finalize_node_specific<'mcx>(
                 *gather_param = *locally_added_param;
             }
         }
-        nodes::nodes::ntag::T_GatherMerge => {
+        ::nodes::nodes::ntag::T_GatherMerge => {
             let gm = plan.as_gathermerge_mut().unwrap();
             *locally_added_param = gm.rescan_param;
             if *locally_added_param >= 0 {
@@ -762,18 +762,18 @@ fn finalize_node_specific<'mcx>(
                 *gather_param = *locally_added_param;
             }
         }
-        nodes::nodes::ntag::T_Memoize => {
+        ::nodes::nodes::ntag::T_Memoize => {
             let m = plan.as_memoize_mut().unwrap();
             fin_exprs!(m.param_exprs);
         }
         // No node-type-specific fields need fixing.
-        nodes::nodes::ntag::T_ProjectSet
-        | nodes::nodes::ntag::T_Material
-        | nodes::nodes::ntag::T_Sort
-        | nodes::nodes::ntag::T_IncrementalSort
-        | nodes::nodes::ntag::T_Unique
-        | nodes::nodes::ntag::T_SetOp
-        | nodes::nodes::ntag::T_Group => {}
+        ::nodes::nodes::ntag::T_ProjectSet
+        | ::nodes::nodes::ntag::T_Material
+        | ::nodes::nodes::ntag::T_Sort
+        | ::nodes::nodes::ntag::T_IncrementalSort
+        | ::nodes::nodes::ntag::T_Unique
+        | ::nodes::nodes::ntag::T_SetOp
+        | ::nodes::nodes::ntag::T_Group => {}
         _ => {
             return Err(elog_error(alloc::format!(
                 "unrecognized node type: {:?}",
@@ -798,7 +798,7 @@ fn finalize_subplan_node<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     run: &PlannerRun<'mcx>,
-    subplan: &nodes::primnodes::SubPlan<'mcx>,
+    subplan: &::nodes::primnodes::SubPlan<'mcx>,
     context: &mut FinalizeCtx<'mcx>,
 ) -> PgResult<()> {
     // Recurse into the testexpr, but not into the Plan.
@@ -938,7 +938,7 @@ fn finalize_tablefunc<'mcx>(
     mcx: Mcx<'mcx>,
     root: &PlannerInfo,
     run: &PlannerRun<'mcx>,
-    tf: &nodes::primnodes::TableFunc<'mcx>,
+    tf: &::nodes::primnodes::TableFunc<'mcx>,
     context: &mut FinalizeCtx<'mcx>,
 ) -> PgResult<()> {
     if let Some(ns) = tf.ns_uris.as_ref() {
@@ -1042,7 +1042,7 @@ pub fn SS_attach_initplans<'mcx>(
     root: &PlannerInfo,
     plan: &mut Node<'mcx>,
 ) -> PgResult<()> {
-    let mut list: mcx::PgVec<'mcx, nodes::primnodes::SubPlan<'mcx>> = mcx::PgVec::new_in(mcx);
+    let mut list: mcx::PgVec<'mcx, ::nodes::primnodes::SubPlan<'mcx>> = mcx::PgVec::new_in(mcx);
     for &ipl in &root.init_plans {
         if let Expr::SubPlan(splan) = root.node(ipl) {
             list.push(splan.0.clone_in(mcx)?);

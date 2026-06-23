@@ -11,7 +11,7 @@
 #![allow(non_camel_case_types)]
 #![forbid(unsafe_code)]
 
-use nodes::nodeagg::HyperLogLog;
+use ::nodes::nodeagg::HyperLogLog;
 
 /// `UUID_LEN` (utils/uuid.h): the number of bytes in a UUID.
 pub const UUID_LEN: usize = 16;

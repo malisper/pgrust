@@ -20,14 +20,14 @@ use types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERROR,
 };
 use types_explain::{ExplainFormat, ExplainSerializeOption, ExplainState};
-use nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
-use nodes::ddlnodes::DefElem;
-use nodes::parsenodes::{OBJECT_MATVIEW, OBJECT_TABLE};
-use nodes::nodes::{ntag, CmdType, Node};
-use nodes::parsestmt::{DestReceiverHandle, ParseState};
-use nodes::portalcmds::ParamListInfo;
-use nodes::parsestmt::IntoClause;
-use nodes::queryenvironment::QueryEnvironment;
+use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
+use ::nodes::ddlnodes::DefElem;
+use ::nodes::parsenodes::{OBJECT_MATVIEW, OBJECT_TABLE};
+use ::nodes::nodes::{ntag, CmdType, Node};
+use ::nodes::parsestmt::{DestReceiverHandle, ParseState};
+use ::nodes::portalcmds::ParamListInfo;
+use ::nodes::parsestmt::IntoClause;
+use ::nodes::queryenvironment::QueryEnvironment;
 use types_slot::TupleSlotKind;
 use types_tuple::heaptuple::TupleDesc;
 
@@ -85,7 +85,7 @@ fn def_get_string<'mcx>(mcx: Mcx<'mcx>, opt: &DefElem<'_>) -> PgResult<String> {
 /// carries. Updates `es` per the option list.
 pub(crate) fn ParseExplainOptionList<'mcx>(
     es: &mut ExplainState<'mcx>,
-    options: &[nodes::nodes::NodePtr<'mcx>],
+    options: &[::nodes::nodes::NodePtr<'mcx>],
     _pstate: &mut ParseState<'_>,
 ) -> PgResult<()> {
     let mcx = es.str.allocator();
@@ -572,7 +572,7 @@ pub fn ExplainQuery<'mcx>(
 /// of the value). Local mirror used by the structured-format path.
 fn do_text_output_oneline<'mcx>(
     mcx: Mcx<'mcx>,
-    tstate: &mut nodes::tuptable::TupOutputState<'mcx>,
+    tstate: &mut ::nodes::tuptable::TupOutputState<'mcx>,
     txt: &str,
 ) -> PgResult<()> {
     let datum = varlena_seams::cstring_to_text_v::call(mcx, txt)?;

@@ -37,9 +37,9 @@ extern crate alloc;
 use mcx::Mcx;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::{Aggref, Expr};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::{Aggref, Expr};
 use pathnodes::{MinMaxAggInfo, PlannerInfo};
 
 /// `preprocess_minmax_aggregates(root)` (planagg.c:73).
@@ -124,7 +124,7 @@ pub fn preprocess_minmax_aggregates<'mcx>(
 
     // rte = planner_rt_fetch(rtr->rtindex, root); (1-based RT index)
     let rte = &parse.rtable[(rtindex - 1) as usize];
-    use nodes::parsenodes::RTEKind;
+    use ::nodes::parsenodes::RTEKind;
     match rte.rtekind {
         RTEKind::RTE_RELATION => { /* ordinary relation, ok */ }
         RTEKind::RTE_SUBQUERY if rte.inh => { /* flattened UNION ALL subquery, ok */ }

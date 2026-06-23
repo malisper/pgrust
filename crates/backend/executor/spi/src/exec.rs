@@ -34,7 +34,7 @@ use cache_plancache as plancache;
 use plancache_seams as plancache_seams;
 use portalmem_seams as portalmem;
 use snapmgr_seams as snapmgr;
-use nodes::parsestmt::{CachedPlanHandle as NodeCachedPlanHandle, CachedPlanSourceHandle};
+use ::nodes::parsestmt::{CachedPlanHandle as NodeCachedPlanHandle, CachedPlanSourceHandle};
 
 /// The fixed batch size of `SPI_cursor_fetch(portal, true, 100)` in
 /// `tsquery_rewrite_query`.
@@ -337,7 +337,7 @@ fn spi_cursor_open(plan: types_ri_triggers::SpiPlanPtr) -> PgResult<Portal> {
     // safe default — matches PerformCursorOpen when backward scan is not needed).
     {
         let mut p = portal.borrow_mut();
-        p.cursorOptions = nodes::copy_query::CURSOR_OPT_PARALLEL_OK;
+        p.cursorOptions = ::nodes::copy_query::CURSOR_OPT_PARALLEL_OK;
         if (p.cursorOptions & (CURSOR_OPT_SCROLL | CURSOR_OPT_NO_SCROLL)) == 0 {
             p.cursorOptions |= CURSOR_OPT_NO_SCROLL;
         }

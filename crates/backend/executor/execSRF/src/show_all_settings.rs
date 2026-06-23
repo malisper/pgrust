@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 use funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
@@ -58,7 +58,7 @@ fn byref_image<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<Datum<'mcx>> {
 /// live materialized result.
 fn put_settings_row<'mcx>(
     mcx: Mcx<'mcx>,
-    rsinfo: &mut nodes::funcapi::ReturnSetInfo<'mcx>,
+    rsinfo: &mut ::nodes::funcapi::ReturnSetInfo<'mcx>,
     row: &PgSettingsRow,
 ) -> PgResult<()> {
     let mut values: [Datum<'mcx>; NUM_PG_SETTINGS_ATTS] =

@@ -87,8 +87,8 @@ use pqformat as pqformat;
 use parser_analyze as analyze;
 use pquery as pquery;
 
-use nodes::parsestmt::{CachedPlanHandle, CachedPlanSourceHandle};
-use nodes::params::{ParamListInfo, ParamListInfoData};
+use ::nodes::parsestmt::{CachedPlanHandle, CachedPlanSourceHandle};
+use ::nodes::params::{ParamListInfo, ParamListInfoData};
 
 // `__FILE__` / `__LINE__` / `__func__` for `errfinish`.
 macro_rules! here {
@@ -108,10 +108,10 @@ const PQMSG_PORTAL_SUSPENDED: u8 = b's';
 
 /// `IsTransactionStmtList(pstmts)` (postgres.c:2874): is this a one-element list
 /// whose single statement is a utility `TransactionStmt`?
-fn is_transaction_stmt_list(stmts: &[nodes::nodeindexscan::PlannedStmt<'_>]) -> bool {
+fn is_transaction_stmt_list(stmts: &[::nodes::nodeindexscan::PlannedStmt<'_>]) -> bool {
     if stmts.len() == 1 {
         let pstmt = &stmts[0];
-        if pstmt.commandType == nodes::nodes::CmdType::CMD_UTILITY {
+        if pstmt.commandType == ::nodes::nodes::CmdType::CMD_UTILITY {
             if let Some(u) = pstmt.utilityStmt.as_deref() {
                 return u.is_transactionstmt();
             }
@@ -123,10 +123,10 @@ fn is_transaction_stmt_list(stmts: &[nodes::nodeindexscan::PlannedStmt<'_>]) -> 
 /// `IsTransactionExitStmtList(pstmts)` (postgres.c:2890): is this a one-element
 /// list whose single statement is a transaction-exit utility command
 /// (COMMIT/PREPARE/ROLLBACK/ROLLBACK-TO)?
-fn is_transaction_exit_stmt_list(stmts: &[nodes::nodeindexscan::PlannedStmt<'_>]) -> bool {
+fn is_transaction_exit_stmt_list(stmts: &[::nodes::nodeindexscan::PlannedStmt<'_>]) -> bool {
     if stmts.len() == 1 {
         let pstmt = &stmts[0];
-        if pstmt.commandType == nodes::nodes::CmdType::CMD_UTILITY {
+        if pstmt.commandType == ::nodes::nodes::CmdType::CMD_UTILITY {
             if let Some(u) = pstmt.utilityStmt.as_deref() {
                 return is_transaction_exit_stmt(u);
             }
@@ -507,7 +507,7 @@ pub fn exec_bind_message<'mcx>(
     let cplan: CachedPlanHandle = plancache_seams::get_cached_plan::call(
         psrc,
         params.clone(),
-        nodes::parsestmt::ResourceOwnerHandle::NULL,
+        ::nodes::parsestmt::ResourceOwnerHandle::NULL,
         None,
     )?;
     let plan_list = plancache_seams::cached_plan_stmt_list::call(mcx, cplan)?;
@@ -598,7 +598,7 @@ pub fn exec_execute_message<'mcx>(
     let (source_text, is_xact_command, is_xact_exit, do_log_statement, portal_params) = {
         let p = portal.borrow();
         let source_text: String = p.sourceText.as_ref().cloned().unwrap_or_default();
-        let stmts: &[nodes::nodeindexscan::PlannedStmt<'_>] =
+        let stmts: &[::nodes::nodeindexscan::PlannedStmt<'_>] =
             p.stmts.as_deref().unwrap_or(&[]);
         let is_xact_command = is_transaction_stmt_list(stmts);
         let is_xact_exit = is_transaction_exit_stmt_list(stmts);

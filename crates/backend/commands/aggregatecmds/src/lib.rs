@@ -44,7 +44,7 @@ use types_catalog::catalog::NAMESPACE_RELATION_ID;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::{InvalidOid, Oid};
 use types_core::catalog::INTERNALOID;
-use nodes::parsenodes::OBJECT_SCHEMA;
+use ::nodes::parsenodes::OBJECT_SCHEMA;
 use parsenodes::{
     DefElem, Node, ParseState, TypeName, AGGKIND_HYPOTHETICAL, AGGKIND_NORMAL,
     AGGKIND_ORDERED_SET, AGGMODIFY_READ_ONLY, AGGMODIFY_READ_WRITE, AGGMODIFY_SHAREABLE,
@@ -56,7 +56,7 @@ use types_tuple::heaptuple::{
     ANYNONARRAYOID, ANYRANGEOID,
 };
 
-const OBJECT_AGGREGATE: i32 = nodes::parsenodes::ObjectType::Aggregate as i32;
+const OBJECT_AGGREGATE: i32 = ::nodes::parsenodes::ObjectType::Aggregate as i32;
 
 /// Convert the raw-parser `TypeName` (`parsenodes`, carried in a
 /// `DefElem` / returned by `defGetTypeName`) into the trimmed resolver-facing

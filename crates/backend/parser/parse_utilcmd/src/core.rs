@@ -16,9 +16,9 @@
 use mcx::{Mcx, PgBox, PgString, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::nodes::Node;
-use nodes::parsestmt::ParseState;
-use nodes::value::StringNode;
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::ParseState;
+use ::nodes::value::StringNode;
 
 /// `NodePtr<'mcx>` — a boxed `Node` (the C `Node *`).
 pub type NodePtr<'mcx> = PgBox<'mcx, Node<'mcx>>;

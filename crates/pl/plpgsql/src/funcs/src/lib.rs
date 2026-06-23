@@ -33,7 +33,7 @@ use mcxt_seams::MemoryContextDelete;
 use mcx::{Mcx, PgBox};
 use types_error::PgResult;
 use types_logical::MemoryContextHandle;
-use nodes::bitmapset::Bitmapset;
+use ::nodes::bitmapset::Bitmapset;
 use plpgsql::*;
 use types_ri_triggers::SpiPlanPtr;
 

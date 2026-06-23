@@ -47,7 +47,7 @@ use types_error::{
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
-use nodes::parsenodes::OBJECT_INDEX;
+use ::nodes::parsenodes::OBJECT_INDEX;
 use parsenodes::RenameStmt;
 use types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 use types_tuple::access::{
@@ -191,7 +191,7 @@ fn renameatt_internal<'mcx>(
     recurse: bool,
     recursing: bool,
     expected_parents: i32,
-    behavior: nodes::parsenodes::DropBehavior,
+    behavior: ::nodes::parsenodes::DropBehavior,
 ) -> PgResult<AttrNumber> {
     /*
      * Grab an exclusive lock on the target table, which we will NOT release

@@ -51,9 +51,9 @@ use types_error::{
     PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_NOT_NULL_VIOLATION,
 };
-use nodes::execexpr::{ExprEvalStepData, ExprState};
-use nodes::execnodes::EcxtId;
-use nodes::EStateData;
+use ::nodes::execexpr::{ExprEvalStepData, ExprState};
+use ::nodes::execnodes::EcxtId;
+use ::nodes::EStateData;
 
 /// Read the `(fn_oid, fncollation)` of an `EEOP_FUNCEXPR*` step's `Func`
 /// payload, then gather its per-argument result cells (`arg_cells`) into the
@@ -1156,7 +1156,7 @@ pub fn ExecEvalSQLValueFunction<'mcx>(
     op: usize,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
-    use nodes::primnodes::SQLValueFunctionOp::*;
+    use ::nodes::primnodes::SQLValueFunctionOp::*;
 
     let svf = match step_data(state, op) {
         ExprEvalStepData::SqlValueFunction { svf } => *svf,
@@ -1438,7 +1438,7 @@ pub fn ExecEvalSysVar<'mcx>(
     state: &mut ExprState<'mcx>,
     op: usize,
     econtext: EcxtId,
-    slot: nodes::SlotId,
+    slot: ::nodes::SlotId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // Datum d;
@@ -1464,7 +1464,7 @@ pub fn ExecEvalSysVar<'mcx>(
     // value/tuple storage, and execTuples-seams offers no slot_getsysattr).
     // Faithful for the short-circuit; the actual sysattr fetch is blocked on
     // execTuples.
-    use nodes::execexpr::{VarReturningType, EEO_FLAG_NEW_IS_NULL, EEO_FLAG_OLD_IS_NULL};
+    use ::nodes::execexpr::{VarReturningType, EEO_FLAG_NEW_IS_NULL, EEO_FLAG_OLD_IS_NULL};
 
     let (varreturningtype, attnum) = match &step_data(state, op) {
         ExprEvalStepData::Var { varreturningtype, attnum, .. } => (*varreturningtype, *attnum),
@@ -2019,8 +2019,8 @@ fn res_cells<'mcx>(
     state: &ExprState<'mcx>,
     op: usize,
 ) -> (
-    nodes::execexpr::ResultCellId,
-    nodes::execexpr::ResultCellId,
+    ::nodes::execexpr::ResultCellId,
+    ::nodes::execexpr::ResultCellId,
 ) {
     let step = &state
         .steps

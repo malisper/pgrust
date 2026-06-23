@@ -10,7 +10,7 @@
 //! it, and the fmgr entry point returns SQL NULL. The full bodies live in
 //! [`adt_jsonfuncs::recordset`]; this unit only adapts the owned
 //! `(mcx, fcinfo, ...)` worker signature to the executor-frame
-//! [`nodes::execexpr::PGFunction`] ABI and registers each under its
+//! [`::nodes::execexpr::PGFunction`] ABI and registers each under its
 //! `pg_proc` OID, exactly as `fmgr_builtins[]` would add an ordinary row.
 //!
 //! The sibling `json[b]_populate_recordset` variants are NOT registered here:
@@ -29,7 +29,7 @@
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
 use crate::register_srf;

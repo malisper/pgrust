@@ -13,7 +13,7 @@ use alloc::string::String;
 
 use types_core::fmgr::FmgrInfo;
 use types_core::primitive::Oid;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 
 /// `TypeCacheEntry` (`typcache.h`), trimmed. For a range type
 /// `rng_cmp_proc_finfo` / `rng_subdiff_finfo` are the subtype's `cmp` /

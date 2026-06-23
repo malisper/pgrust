@@ -36,7 +36,7 @@ use types_error::{
     PgError, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_storage::lock as lk;
 
 use varlena_seams as varlena;
@@ -313,7 +313,7 @@ pub fn pg_ls_dir<'mcx>(
     // from the executor's already-resolved `expectedDesc` (a plain
     // `get_call_result_type` would reject the non-composite type with "return
     // type must be a row type").
-    funcapi::InitMaterializedSRF::call(fcinfo, nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC)?;
+    funcapi::InitMaterializedSRF::call(fcinfo, ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC)?;
     let rsinfo = fcinfo
         .resultinfo
         .as_mut()

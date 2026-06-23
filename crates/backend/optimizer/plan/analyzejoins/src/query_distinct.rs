@@ -7,7 +7,7 @@
 //! subquery's own shape: a DISTINCT/GROUP BY/aggregate/HAVING/set-op output is
 //! certain to be distinct on the right columns. C reaches the sub-`Query`
 //! through `root->simple_rte_array[rel->relid]->subquery`; this repo carries the
-//! sub-`Query` inline on the [`RangeTblEntry`](nodes::parsenodes::RangeTblEntry)
+//! sub-`Query` inline on the [`RangeTblEntry`](::nodes::parsenodes::RangeTblEntry)
 //! (`subquery: Option<Box<Query<'mcx>>>`), resolved through the planner-run RTE
 //! store (`simple_rte_array[relid]` → `RangeTblEntryId` →
 //! [`PlannerRun::resolve_rte`]). The `groupClause`/`distinctClause` items are
@@ -15,9 +15,9 @@
 //! [`GroupingSet`]; `setOperations` is a `Node` wrapping [`SetOperationStmt`].
 
 use types_core::primitive::Oid;
-use nodes::nodes::{ntag, Node};
-use nodes::rawnodes::{GroupingSet, SetOperationStmt, SortGroupClause, GROUPING_SET_EMPTY};
-use nodes::copy_query::Query;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::rawnodes::{GroupingSet, SetOperationStmt, SortGroupClause, GROUPING_SET_EMPTY};
+use ::nodes::copy_query::Query;
 
 use vars::tlist::get_sortgroupclause_tle;
 use lsyscache::opfamily_operator::equality_ops_are_compatible;
@@ -182,7 +182,7 @@ pub fn query_is_distinct_for(query: &Query<'_>, colnos: &[i32], opids: &[Oid]) -
             ntag::T_SetOperationStmt => setop_n.expect_setoperationstmt(),
             _ => panic!("expected SetOperationStmt in setOperations, got {setop_n:?}"),
         };
-        debug_assert!(topop.op != nodes::rawnodes::SETOP_NONE);
+        debug_assert!(topop.op != ::nodes::rawnodes::SETOP_NONE);
 
         if !topop.all {
             /* We're good if all the nonjunk output columns are in colnos */

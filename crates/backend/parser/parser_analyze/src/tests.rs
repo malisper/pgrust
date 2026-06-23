@@ -4,7 +4,7 @@
 extern crate std;
 
 use mcx::MemoryContext;
-use nodes::nodes::{CmdType, Node};
+use ::nodes::nodes::{CmdType, Node};
 
 /// Install exactly the owner seams the analyze SELECT path traverses, once for
 /// the test process (every `#[test]` shares the global seam registry). The full
@@ -43,7 +43,7 @@ fn init_seams_once() {
 fn analyze_one<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     sql: &'mcx str,
-) -> types_error::PgResult<nodes::copy_query::Query<'mcx>> {
+) -> types_error::PgResult<::nodes::copy_query::Query<'mcx>> {
     let raw = driver::raw_parser(
         mcx,
         sql,
@@ -79,7 +79,7 @@ fn select_const_where_order_builds_owned_query() {
     assert!(query.canSetTag);
     assert_eq!(
         query.querySource,
-        nodes::copy_query::QuerySource::QSRC_ORIGINAL
+        ::nodes::copy_query::QuerySource::QSRC_ORIGINAL
     );
 
     // Two target entries (x, y), each a walkable owned Expr.
@@ -111,7 +111,7 @@ fn select_const_where_order_builds_owned_query() {
 
     // The Query wraps cleanly into the central Node enum and is walkable.
     let as_node = Node::Query(query);
-    assert_eq!(as_node.tag(), nodes::nodes::T_Query);
+    assert_eq!(as_node.tag(), ::nodes::nodes::T_Query);
 }
 
 /// `transformStmt` wraps a non-optimizable utility statement in a CMD_UTILITY

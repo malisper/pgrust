@@ -19,8 +19,8 @@ use types_error::{
     ERROR, NOTICE,
 };
 use mcx::Mcx;
-use nodes::nodes::Node;
-use nodes::parsenodes::DROP_RESTRICT;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::DROP_RESTRICT;
 use rel::Relation;
 use types_storage::lock::{NoLock, RowExclusiveLock, LOCKMODE};
 

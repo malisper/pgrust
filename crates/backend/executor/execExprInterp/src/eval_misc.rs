@@ -7,10 +7,10 @@
 // into the canonical by-value arm.
 use types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult};
-use nodes::execexpr::{ExprEvalStepData, ExprState};
-use nodes::execnodes::EcxtId;
-use nodes::nodes::CmdType;
-use nodes::EStateData;
+use ::nodes::execexpr::{ExprEvalStepData, ExprState};
+use ::nodes::execnodes::EcxtId;
+use ::nodes::nodes::CmdType;
+use ::nodes::EStateData;
 
 use nodeSubplan_seams as nodesubplan;
 use nodes_core_seams as bms;

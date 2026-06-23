@@ -42,8 +42,8 @@ use postgres_seams as tcop_postgres;
 
 use mcx::{alloc_in, PgBox};
 use types_error::PgResult;
-use nodes::executor::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
-use nodes::nodeunique::{Unique, UniqueStateData};
+use ::nodes::executor::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::nodes::nodeunique::{Unique, UniqueStateData};
 use nodes::{EStateData, PlanStateNode, SlotId};
 
 /// Install this crate's seam implementations.
@@ -275,7 +275,7 @@ fn fetch_outer_tuple<'mcx>(
 /// }
 /// ```
 pub fn ExecInitUnique<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, UniqueStateData<'mcx>>> {

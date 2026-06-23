@@ -9,13 +9,13 @@ use std::collections::VecDeque;
 use std::sync::Once;
 
 use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
-use nodes::execexpr::{ExprState, SetExprState};
-use nodes::execnodes::{ExprContext, PlanStateData};
-use nodes::executor::TupleSlotKind;
-use nodes::nodeprojectset::ProjectSet as ProjectSetPlan;
-use nodes::nodes::Node;
-use nodes::primnodes::{Const, Expr, FuncExpr, OpExpr, TargetEntry};
-use nodes::TupleTableSlot;
+use ::nodes::execexpr::{ExprState, SetExprState};
+use ::nodes::execnodes::{ExprContext, PlanStateData};
+use ::nodes::executor::TupleSlotKind;
+use ::nodes::nodeprojectset::ProjectSet as ProjectSetPlan;
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{Const, Expr, FuncExpr, OpExpr, TargetEntry};
+use ::nodes::TupleTableSlot;
 
 use super::*;
 // The owner's eval/SRF/store-virtual seams now carry the canonical unified
@@ -156,10 +156,10 @@ fn mock_init_result_slot<'mcx>(
 }
 
 fn mock_clear_tuple<'mcx>(
-    estate: &mut nodes::EStateData<'mcx>,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    slot: ::nodes::SlotId,
 ) -> PgResult<()> {
-    estate.slot_mut(slot).tts_flags |= nodes::executor::TTS_FLAG_EMPTY;
+    estate.slot_mut(slot).tts_flags |= ::nodes::executor::TTS_FLAG_EMPTY;
     Ok(())
 }
 
@@ -175,7 +175,7 @@ fn mock_init_expr<'mcx>(
 /// `ExecEvalExprSwitchContext`: pop a scripted `(datum, isnull)` result.
 fn mock_eval_expr<'mcx>(
     _state: &mut ExprState<'mcx>,
-    _econtext: nodes::EcxtId,
+    _econtext: ::nodes::EcxtId,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool)> {
     let (d, isnull) = EVAL_RESULTS
@@ -187,7 +187,7 @@ fn mock_eval_expr<'mcx>(
 /// `ExecInitFunctionResultSet`: a placeholder `SetExprState`.
 fn mock_init_srf<'mcx>(
     _expr: &Expr,
-    _econtext: nodes::EcxtId,
+    _econtext: ::nodes::EcxtId,
     _parent: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<PgBox<'mcx, SetExprState<'mcx>>> {
@@ -199,7 +199,7 @@ fn mock_init_srf<'mcx>(
 /// `ExecMakeFunctionResultSet`: pop a scripted `(value, isnull, isdone)`.
 fn mock_make_srf<'mcx>(
     _fcache: &mut SetExprState<'mcx>,
-    _econtext: nodes::EcxtId,
+    _econtext: ::nodes::EcxtId,
     _arg_context: &MemoryContext,
     _estate: &mut EStateData<'mcx>,
 ) -> PgResult<(Datum<'mcx>, bool, ExprDoneCond)> {
@@ -221,7 +221,7 @@ fn mock_store_virtual_values<'mcx>(
 ) -> PgResult<()> {
     let stored: Vec<Datum<'static>> = values.iter().map(|d| rebind(d.clone())).collect();
     STORED.with(|c| *c.borrow_mut() = Some((stored, isnull.to_vec())));
-    estate.slot_mut(slot).tts_flags &= !nodes::executor::TTS_FLAG_EMPTY;
+    estate.slot_mut(slot).tts_flags &= !::nodes::executor::TTS_FLAG_EMPTY;
     Ok(())
 }
 
@@ -252,7 +252,7 @@ fn funcexpr(funcretset: bool) -> FuncExpr {
         funcresulttype: 0,
         funcretset,
         funcvariadic: false,
-        funcformat: nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL,
+        funcformat: ::nodes::primnodes::CoercionForm::COERCE_EXPLICIT_CALL,
         funccollid: 0,
         inputcollid: 0,
         args: Vec::new(),
@@ -302,7 +302,7 @@ fn init_state<'mcx>(
 /// Splice a leaf child into an initialized ProjectSetState so the outer-plan
 /// path is exercised (init's mock returns None, modelling a leaf).
 fn attach_leaf_child<'mcx>(state: &mut ProjectSetState<'mcx>, mcx: Mcx<'mcx>) {
-    let mut leaf = nodes::noderesult::ResultState::default();
+    let mut leaf = ::nodes::noderesult::ResultState::default();
     leaf.ps.ExecProcNode = Some(supply_rows);
     state.ps.lefttree =
         Some(alloc_in(mcx, PlanStateNode::Result(alloc_in(mcx, leaf).unwrap())).unwrap());

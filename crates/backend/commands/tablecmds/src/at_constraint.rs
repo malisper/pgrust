@@ -31,10 +31,10 @@ use mcx::{Mcx, PgString, PgVec};
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERROR};
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableType, Constraint, ConstrType, IndexStmt,
 };
-use nodes::nodes::{Node, NodePtr};
+use ::nodes::nodes::{Node, NodePtr};
 use rel::Relation;
 use types_storage::lock::{AccessShareLock, LOCKMODE, NoLock};
 
@@ -185,7 +185,7 @@ fn make_not_null_constraint<'mcx>(mcx: Mcx<'mcx>, colname: &str) -> PgResult<Con
     let sval = PgString::from_str_in(colname, mcx)?;
     keys.push(mcx::alloc_in(
         mcx,
-        Node::mk_string(mcx, nodes::value::StringNode { sval })?,
+        Node::mk_string(mcx, ::nodes::value::StringNode { sval })?,
     )?);
     Ok(Constraint {
         contype: ConstrType::CONSTR_NOTNULL,

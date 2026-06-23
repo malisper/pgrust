@@ -1,7 +1,7 @@
 //! `AggState` runtime state and its per-aggregate satellites
 //! (`executor/nodeAgg.h`, `executor/execnodes.h`).
 //!
-//! These structs were relocated out of `types-nodes::nodeagg` into their real
+//! These structs were relocated out of `types-::nodes::nodeagg` into their real
 //! owner (`backend-executor-nodeAgg`, which sits ABOVE `utils/sort/logtape.c`)
 //! so that [`AggStateData::hash_tapeset`] can hold a REAL owned
 //! [`LogicalTapeSet`] value instead of an opaque handle into a side-table
@@ -20,14 +20,14 @@ use types_error::PgResult;
 use types_tuple::heaptuple::Datum;
 use types_tuple::heaptuple::TupleDescData;
 
-use nodes::bitmapset::Bitmapset;
-use nodes::execexpr::ExprState;
-use nodes::execnodes::{EcxtId, ScanStateData, SlotId};
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::nodeagg::{
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::execexpr::ExprState;
+use ::nodes::execnodes::{EcxtId, ScanStateData, SlotId};
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::nodeagg::{
     Agg, AggSplit, AggStrategy, Aggref, HyperLogLog, TupleHashIterator, TupleHashTable,
 };
-use nodes::nodesort::{Sort, Tuplesortstate};
+use ::nodes::nodesort::{Sort, Tuplesortstate};
 
 use sort_storage_seams::LogicalTapeSet;
 
@@ -429,7 +429,7 @@ pub struct AggStateData<'mcx> {
     pub ss: ScanStateData<'mcx>,
     /// `List *aggs` — all Aggref nodes in targetlist & quals.
     pub aggs: Option<PgVec<'mcx, PgBox<'mcx, Aggref<'mcx>>>>,
-    /// The expression-tree-shaped [`nodes::primnodes::Aggref`] originals
+    /// The expression-tree-shaped [`::nodes::primnodes::Aggref`] originals
     /// for each entry of [`Self::aggs`], parallel by index. In C there is one
     /// `Aggref` struct; the repo splits the expression-tree node
     /// (`primnodes::Aggref`) from the executor satellite (`nodeagg::Aggref`).
@@ -439,7 +439,7 @@ pub struct AggStateData<'mcx> {
     /// `build_aggregate_*fn_expr`) — which take `&primnodes::Aggref` — can be
     /// called. Compile-time-only bookkeeping (not in the C struct). `None` is
     /// the pre-discovery NIL.
-    pub aggs_prim: Option<PgVec<'mcx, nodes::primnodes::Aggref<'mcx>>>,
+    pub aggs_prim: Option<PgVec<'mcx, ::nodes::primnodes::Aggref<'mcx>>>,
     /// `int numaggs`.
     pub numaggs: i32,
     /// `int numtrans`.
@@ -625,43 +625,43 @@ impl<'mcx> AggStateData<'mcx> {
 
 // ---------------------------------------------------------------------------
 // PlanStateNode::Agg carrier — let an `AggStateData<'mcx>` ride through the
-// central `nodes::PlanStateNode` enum (and across the nodeAgg->execExpr
+// central `::nodes::PlanStateNode` enum (and across the nodeAgg->execExpr
 // `exec_build_agg_trans` seam edge) behind the tag-checked, owned
 // `AggStateLive` trait object. `AggStateData` lives in THIS crate, above
 // `types-nodes`, so the enum cannot name it directly; this is the faithful
 // rendering of C's `castNode(AggState, planstate)` across the crate boundary.
 // ---------------------------------------------------------------------------
 
-impl<'mcx> nodes::aggstate_carrier::AggStateLive<'mcx> for AggStateData<'mcx> {
+impl<'mcx> ::nodes::aggstate_carrier::AggStateLive<'mcx> for AggStateData<'mcx> {
     fn agg_state_tag(&self) -> u64 {
-        nodes::aggstate_carrier::AGG_STATE_TAG
+        ::nodes::aggstate_carrier::AGG_STATE_TAG
     }
 
     fn live_type_name(&self) -> &'static str {
-        nodes::aggstate_carrier::live_type_name_of::<Self>()
+        ::nodes::aggstate_carrier::live_type_name_of::<Self>()
     }
 
-    fn tag(&self) -> nodes::nodes::NodeTag {
-        nodes::execstate_tags::T_AggState
+    fn tag(&self) -> ::nodes::nodes::NodeTag {
+        ::nodes::execstate_tags::T_AggState
     }
 
-    fn ps(&self) -> &nodes::execnodes::PlanStateData<'mcx> {
+    fn ps(&self) -> &::nodes::execnodes::PlanStateData<'mcx> {
         &self.ss.ps
     }
 
-    fn ps_mut(&mut self) -> &mut nodes::execnodes::PlanStateData<'mcx> {
+    fn ps_mut(&mut self) -> &mut ::nodes::execnodes::PlanStateData<'mcx> {
         &mut self.ss.ps
     }
 
-    fn ss(&self) -> &nodes::execnodes::ScanStateData<'mcx> {
+    fn ss(&self) -> &::nodes::execnodes::ScanStateData<'mcx> {
         &self.ss
     }
 
     fn hashagg_explain_info(
         &self,
-    ) -> Option<nodes::aggstate_carrier::HashAggExplainInfo> {
-        use nodes::aggstate_carrier::{HashAggExplainInfo, HashAggInstrument};
-        use nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
+    ) -> Option<::nodes::aggstate_carrier::HashAggExplainInfo> {
+        use ::nodes::aggstate_carrier::{HashAggExplainInfo, HashAggInstrument};
+        use ::nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
 
         // C `show_hashagg_info`: returns early for non-hashed strategies.
         if self.aggstrategy != AGG_HASHED && self.aggstrategy != AGG_MIXED {
@@ -695,6 +695,6 @@ impl<'mcx> nodes::aggstate_carrier::AggStateLive<'mcx> for AggStateData<'mcx> {
     }
 }
 
-impl<'mcx> nodes::aggstate_carrier::AggStateTagged<'mcx> for AggStateData<'mcx> {
-    const TAG: u64 = nodes::aggstate_carrier::AGG_STATE_TAG;
+impl<'mcx> ::nodes::aggstate_carrier::AggStateTagged<'mcx> for AggStateData<'mcx> {
+    const TAG: u64 = ::nodes::aggstate_carrier::AGG_STATE_TAG;
 }

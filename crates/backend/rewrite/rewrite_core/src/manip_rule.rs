@@ -24,10 +24,10 @@ use mcx::{alloc_in, Mcx, PgBox, PgVec};
 use types_core::primitive::Index;
 use types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use types_error::{PgError, PgResult};
-use nodes::copy_query::Query;
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsenodes::{RTEPermissionInfo, RangeTblEntry};
-use nodes::primnodes::{BoolTestType, BooleanTest, Expr};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsenodes::{RTEPermissionInfo, RangeTblEntry};
+use ::nodes::primnodes::{BoolTestType, BooleanTest, Expr};
 
 use crate::walkers::checkExprHasSubLink;
 

@@ -43,9 +43,9 @@ use sort_storage_seams as tuplestore;
 
 use mcx::{alloc_in, PgBox};
 use types_error::{PgError, PgResult};
-use nodes::executor::EXEC_FLAG_REWIND;
-use nodes::nodenamedtuplestorescan::{NamedTuplestoreScan, NamedTuplestoreScanState};
-use nodes::queryenvironment::QueryEnvironment;
+use ::nodes::executor::EXEC_FLAG_REWIND;
+use ::nodes::nodenamedtuplestorescan::{NamedTuplestoreScan, NamedTuplestoreScanState};
+use ::nodes::queryenvironment::QueryEnvironment;
 use nodes::{EStateData, SlotId, TupleSlotKind};
 
 /// Install this crate's implementations into its seam slots.
@@ -130,11 +130,11 @@ pub fn ExecNamedTuplestoreScan<'mcx>(
 /// [`ExecInitNamedTuplestoreScan`]: `castNode(NamedTuplestoreScanState,
 /// pstate)` then run [`ExecNamedTuplestoreScan`].
 fn exec_named_tuplestore_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let node = match pstate {
-        nodes::PlanStateNode::NamedTuplestoreScan(node) => node,
+        ::nodes::PlanStateNode::NamedTuplestoreScan(node) => node,
         other => panic!("castNode(NamedTuplestoreScanState, pstate) failed: {other:?}"),
     };
     ExecNamedTuplestoreScan(node, estate)
@@ -153,7 +153,7 @@ fn exec_named_tuplestore_scan_node<'mcx>(
 /// field is trimmed off `EStateData` here, so the query environment is threaded
 /// in explicitly by the executor spine.
 pub fn ExecInitNamedTuplestoreScan<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
     query_env: &mut QueryEnvironment<'mcx>,
@@ -168,7 +168,7 @@ pub fn ExecInitNamedTuplestoreScan<'mcx>(
     //   Assert(!(eflags & (EXEC_FLAG_BACKWARD | EXEC_FLAG_MARK)));
     debug_assert!(
         eflags
-            & (nodes::executor::EXEC_FLAG_BACKWARD | nodes::executor::EXEC_FLAG_MARK)
+            & (::nodes::executor::EXEC_FLAG_BACKWARD | ::nodes::executor::EXEC_FLAG_MARK)
             == 0
     );
 
@@ -325,7 +325,7 @@ pub fn ExecReScanNamedTuplestoreScan<'mcx>(
 #[inline]
 fn relation_mut<'a, 'mcx>(
     node: &'a mut NamedTuplestoreScanState<'mcx>,
-) -> &'a mut nodes::Tuplestorestate<'mcx> {
+) -> &'a mut ::nodes::Tuplestorestate<'mcx> {
     // SAFETY: the pointer aliases the query-environment-owned ENR tuplestore,
     // which stays live for the scan; the executor drives one node at a time, so
     // no other live `&mut` to it exists during this call.

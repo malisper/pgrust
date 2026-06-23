@@ -16,10 +16,10 @@
 use mcx::{Mcx, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::copy_query::Query as CopyQuery;
-use nodes::nodes::Node;
-use nodes::parsestmt::RawStmt;
-use nodes::portalcmds::{JumbleState, ParseState as PortalcmdsParseState, Query};
+use ::nodes::copy_query::Query as CopyQuery;
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::RawStmt;
+use ::nodes::portalcmds::{JumbleState, ParseState as PortalcmdsParseState, Query};
 
 /// The result of `pg_analyze_and_rewrite_varparams`: the rewritten `List *` of
 /// `Query *` (owned nodes in `mcx`) plus the possibly grown/replaced parameter
@@ -179,8 +179,8 @@ seam_core::seam!(
     /// sets `p_sourcetext` itself. Allocates.
     pub fn make_parsestate<'mcx>(
         mcx: Mcx<'mcx>,
-        parent: Option<&nodes::parsestmt::ParseState<'mcx>>,
-    ) -> PgResult<mcx::PgBox<'mcx, nodes::parsestmt::ParseState<'mcx>>>
+        parent: Option<&::nodes::parsestmt::ParseState<'mcx>>,
+    ) -> PgResult<mcx::PgBox<'mcx, ::nodes::parsestmt::ParseState<'mcx>>>
 );
 
 seam_core::seam!(
@@ -196,8 +196,8 @@ seam_core::seam!(
     pub fn parse_sub_analyze<'mcx>(
         mcx: Mcx<'mcx>,
         parse_tree: &Node<'mcx>,
-        parent_pstate: &mut nodes::parsestmt::ParseState<'mcx>,
-        parent_cte: Option<&nodes::rawnodes::CommonTableExpr<'mcx>>,
+        parent_pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
+        parent_cte: Option<&::nodes::rawnodes::CommonTableExpr<'mcx>>,
         locked_from_parent: bool,
         resolve_unknowns: bool,
     ) -> PgResult<mcx::PgBox<'mcx, Node<'mcx>>>

@@ -35,8 +35,8 @@ use std::collections::HashMap;
 use mcx::{McxOwned, MemoryContext};
 use cache::typcache::{DomainCtxHandle, ExprStateHandle};
 use types_error::PgResult;
-use nodes::execexpr::ExprState;
-use nodes::primnodes::Expr;
+use ::nodes::execexpr::ExprState;
+use ::nodes::primnodes::Expr;
 use nodes::{EStateData, EcxtId};
 use types_tuple::heaptuple::Datum;
 

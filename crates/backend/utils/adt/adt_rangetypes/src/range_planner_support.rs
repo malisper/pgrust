@@ -50,7 +50,7 @@ use mcx::Mcx;
 use types_core::catalog::BOOLOID;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::PgResult;
-use nodes::primnodes::{Const, Expr, FuncExpr};
+use ::nodes::primnodes::{Const, Expr, FuncExpr};
 use pathnodes::PlannerInfo;
 // The canonical `Const.constvalue` carrier is the `types_tuple` `Datum<'mcx>`
 // enum (`ByVal(word)` / `ByRef(bytes)`), which `make_const` consumes. The range

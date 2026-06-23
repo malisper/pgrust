@@ -36,11 +36,11 @@ extern crate alloc;
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::heaptuple::Datum;
 
-use funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
+use ::funcapi::srf_support::{InitMaterializedSRF, materialized_srf_putvalues};
 
 use crate::register_srf;
 

@@ -3,8 +3,8 @@
 //!
 //! Every public function and static helper of `parse_func.c` is ported 1:1
 //! against the C source (branch order, error text, SQLSTATE, return values),
-//! keyed on the repo's owned [`nodes::primnodes::Expr`] expression tree
-//! and the trimmed [`nodes::parsestmt::ParseState`].
+//! keyed on the repo's owned [`::nodes::primnodes::Expr`] expression tree
+//! and the trimmed [`::nodes::parsestmt::ParseState`].
 //!
 //! The function name (`List *funcname` of `String` nodes in C) crosses as the
 //! `String`-component slice [`&[PgString]`], matching the inward-seam contract
@@ -35,14 +35,14 @@ use types_error::{
     ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use nodes::nodes::Node;
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::primnodes::{
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::primnodes::{
     Aggref, ArrayExpr, CoercionForm, Expr, FieldSelect, FuncExpr, WindowFunc,
 };
-use nodes::rawnodes::FuncCall;
+use ::nodes::rawnodes::FuncCall;
 use opclass::ObjectWithArgs;
-use nodes::parsenodes::{
+use ::nodes::parsenodes::{
     ObjectType, OBJECT_AGGREGATE, OBJECT_FUNCTION, OBJECT_PROCEDURE, OBJECT_ROUTINE,
 };
 use parsenodes::CoercionContext;
@@ -1346,8 +1346,8 @@ fn oid_slices_eq(a: &[Oid], b: &[Oid], n: usize) -> bool {
 /// A throwaway placeholder `Const` used only as a temporary while we move an
 /// `Expr` out of a `&mut [Expr]` slot during in-place coercion. It is always
 /// overwritten before the function returns.
-fn dummy_const() -> nodes::primnodes::Const<'static> {
-    nodes::primnodes::Const {
+fn dummy_const() -> ::nodes::primnodes::Const<'static> {
+    ::nodes::primnodes::Const {
         consttype: InvalidOid,
         consttypmod: -1,
         constcollid: InvalidOid,

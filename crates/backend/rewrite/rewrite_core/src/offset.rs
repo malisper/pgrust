@@ -11,9 +11,9 @@
 #![allow(non_snake_case)]
 
 use nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
-use nodes::copy_query::Query;
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::ExprRelids;
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::ExprRelids;
 
 use crate::relids;
 

@@ -118,7 +118,7 @@ seam_core::seam!(
     /// ```
     ///
     /// This computation is homed in the foreign owner because the repo's
-    /// [`nodes::FdwRoutine`] carrier is trimmed to the scan/parallel/async
+    /// [`::nodes::FdwRoutine`] carrier is trimmed to the scan/parallel/async
     /// callback-presence flags and does NOT model `IsForeignRelUpdatable` /
     /// `ExecForeignInsert` / `ExecForeignUpdate` / `ExecForeignDelete` — so the
     /// rewriteHandler caller cannot read them off the routine. The owning unit

@@ -35,7 +35,7 @@ use nodes_core::bitmapset::{
 };
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_error::PgResult;
-use nodes::bitmapset::Bitmapset;
+use ::nodes::bitmapset::Bitmapset;
 
 /// DiscreteKnapsack
 ///

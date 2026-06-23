@@ -10,9 +10,9 @@
 use mcx::Mcx;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::rawnodes::SetOperationStmt;
+use ::nodes::copy_query::Query;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::rawnodes::SetOperationStmt;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{PlannerGlobal, PlannerInfo, QueryId};
 
@@ -34,9 +34,9 @@ seam_core::seam!(
     /// per child (relkind may differ from the parent). Owner planner.c is
     /// ported; the cyclic edge from inherit.c routes through this seam.
     pub fn select_rowmark_type(
-        rte: &nodes::parsenodes::RangeTblEntry<'_>,
-        strength: nodes::rawnodes::LockClauseStrength,
-    ) -> PgResult<nodes::execnodes::RowMarkType>
+        rte: &::nodes::parsenodes::RangeTblEntry<'_>,
+        strength: ::nodes::rawnodes::LockClauseStrength,
+    ) -> PgResult<::nodes::execnodes::RowMarkType>
 );
 
 seam_core::seam!(
@@ -66,7 +66,7 @@ seam_core::seam!(
         querytree: &Query<'mcx>,
         query_string: &str,
         cursor_options: i32,
-        bound_params: nodes::params::ParamListInfo,
+        bound_params: ::nodes::params::ParamListInfo,
     ) -> PgResult<PlannedStmt<'mcx>>
 );
 
@@ -91,7 +91,7 @@ pub type PlannerHook = for<'mcx> fn(
     parse: &Query<'mcx>,
     query_string: &str,
     cursor_options: i32,
-    bound_params: nodes::params::ParamListInfo,
+    bound_params: ::nodes::params::ParamListInfo,
 ) -> PgResult<PlannedStmt<'mcx>>;
 
 thread_local! {
@@ -117,7 +117,7 @@ pub fn call_planner_hook<'mcx>(
     parse: &Query<'mcx>,
     query_string: &str,
     cursor_options: i32,
-    bound_params: nodes::params::ParamListInfo,
+    bound_params: ::nodes::params::ParamListInfo,
 ) -> PgResult<PlannedStmt<'mcx>> {
     match PLANNER_HOOK.with(std::cell::Cell::get) {
         Some(hook) => hook(mcx, parse, query_string, cursor_options, bound_params),

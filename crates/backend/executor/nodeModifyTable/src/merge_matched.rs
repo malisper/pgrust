@@ -8,8 +8,8 @@ use types_error::{
     PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
     ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
-use nodes::nodes::CmdType;
-use nodes::modifytable::{MergeMatchKind, MERGE_WHEN_MATCHED, MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
+use ::nodes::nodes::CmdType;
+use ::nodes::modifytable::{MergeMatchKind, MERGE_WHEN_MATCHED, MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
     MERGE_WHEN_NOT_MATCHED_BY_TARGET};
 use nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use types_tableam::tableam::{
@@ -56,7 +56,7 @@ fn item_pointer_indicates_moved_partitions(tid: &ItemPointerData) -> bool {
 // In-crate reads of the now-owned per-action MERGE exec state. The fields
 // `ResultRelInfo.ri_MergeActions[]`, `ri_MergeJoinCondition`, `ri_RowIdAttNo`,
 // `ri_projectReturning`, and `ri_WithCheckOptions` are carried on the shared
-// `nodes::ResultRelInfo` vocabulary (built by `ExecInitMerge` /
+// `::nodes::ResultRelInfo` vocabulary (built by `ExecInitMerge` /
 // `ExecInitPartitionInfo`), so this unit reads them directly — exactly as
 // `ExecMergeNotMatched` reads `ri_MergeActions[MERGE_WHEN_NOT_MATCHED_BY_TARGET]`.
 // Only the genuinely foreign action-loop primitives (`ExecQual`, `ExecProject`,
@@ -91,7 +91,7 @@ fn merge_actions_count(estate: &EStateData<'_>, rri: RriId, kind: MergeMatchKind
 fn eval_merge_join_condition<'mcx>(
     estate: &mut EStateData<'mcx>,
     rri: RriId,
-    econtext: nodes::EcxtId,
+    econtext: ::nodes::EcxtId,
 ) -> PgResult<bool> {
     // The compiled join condition `ExprState` lives on the pooled `ResultRelInfo`
     // and cannot be borrowed `&mut` while `estate` is also borrowed `&mut`, nor
@@ -361,11 +361,11 @@ pub fn ExecMergeMatched<'mcx>(
                     // ExecInitMerge builds the pooled state.
                     mtstate.mt_merge_action = Some(mcx::alloc_in(
                         mcx,
-                        nodes::modifytable::MergeActionState {
-                            type_: nodes::nodes::T_MergeActionState,
+                        ::nodes::modifytable::MergeActionState {
+                            type_: ::nodes::nodes::T_MergeActionState,
                             mas_action: Some(mcx::alloc_in(
                                 mcx,
-                                nodes::modifytable::MergeAction {
+                                ::nodes::modifytable::MergeAction {
                                     matchKind: action_match_kind,
                                     commandType: command_type,
                                     overriding: action_overriding,
@@ -467,11 +467,11 @@ pub fn ExecMergeMatched<'mcx>(
                     // action so consumers attribute the running WHEN clause.)
                     mtstate.mt_merge_action = Some(mcx::alloc_in(
                         mcx,
-                        nodes::modifytable::MergeActionState {
-                            type_: nodes::nodes::T_MergeActionState,
+                        ::nodes::modifytable::MergeActionState {
+                            type_: ::nodes::nodes::T_MergeActionState,
                             mas_action: Some(mcx::alloc_in(
                                 mcx,
-                                nodes::modifytable::MergeAction {
+                                ::nodes::modifytable::MergeAction {
                                     matchKind: action_match_kind,
                                     commandType: command_type,
                                     overriding: action_overriding,

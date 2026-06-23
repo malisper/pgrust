@@ -12,7 +12,7 @@
 //! `Bitmapset *` whose NULL/empty pointer is the empty set).
 
 use alloc::vec::Vec;
-use nodes::primnodes::ExprRelids;
+use ::nodes::primnodes::ExprRelids;
 
 const BITS_PER_WORD: i32 = 64;
 

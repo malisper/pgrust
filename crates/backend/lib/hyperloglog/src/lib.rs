@@ -33,7 +33,7 @@
 //! # Type/ops split (no handle, no registry)
 //!
 //! The estimator *state* — the C `hyperLogLogState` struct — lives in the
-//! foundational [`nodes::nodeagg::HyperLogLog`] crate as pure data, so
+//! foundational [`::nodes::nodeagg::HyperLogLog`] crate as pure data, so
 //! struct holders below this `backend-lib-*` layer (the `nodeAgg` spill path's
 //! `HashAggSpill.hll_card`, the varlena abbreviated-key sort state) can hold the
 //! counter *by value*, exactly as C holds `hyperLogLogState` inline. The
@@ -45,7 +45,7 @@
 use utils_error::elog;
 use mcx::{Mcx, PgVec};
 use types_error::{PgResult, ERROR};
-use nodes::nodeagg::HyperLogLog;
+use ::nodes::nodeagg::HyperLogLog;
 
 /// `BITS_PER_BYTE` from `c.h`.
 const BITS_PER_BYTE: usize = 8;

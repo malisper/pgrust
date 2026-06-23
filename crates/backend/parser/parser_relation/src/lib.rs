@@ -58,24 +58,24 @@ use types_tuple::heaptuple::{
 use types_tuple::access::RELKIND_COMPOSITE_TYPE;
 use types_tuple::access::RELPERSISTENCE_TEMP;
 
-use nodes::nodes::{ntag, Node, NodePtr};
-use nodes::nodes::CmdType::CMD_SELECT;
-use nodes::value::StringNode;
-use nodes::primnodes::{Var, VarReturningType};
-use nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT;
-use nodes::rawnodes::{Alias, RangeTblRef, RangeFunction, RangeVar, RowMarkClause};
-use nodes::rawnodes::CommonTableExpr;
-use nodes::primnodes::TableFunc;
-use nodes::parsenodes::{
+use ::nodes::nodes::{ntag, Node, NodePtr};
+use ::nodes::nodes::CmdType::CMD_SELECT;
+use ::nodes::value::StringNode;
+use ::nodes::primnodes::{Var, VarReturningType};
+use ::nodes::primnodes::VarReturningType::VAR_RETURNING_DEFAULT;
+use ::nodes::rawnodes::{Alias, RangeTblRef, RangeFunction, RangeVar, RowMarkClause};
+use ::nodes::rawnodes::CommonTableExpr;
+use ::nodes::primnodes::TableFunc;
+use ::nodes::parsenodes::{
     RangeTblEntry, RTEPermissionInfo, RTE_CTE, RTE_FUNCTION, RTE_GROUP, RTE_JOIN,
     RTE_NAMEDTUPLESTORE, RTE_RELATION, RTE_RESULT, RTE_SUBQUERY, RTE_TABLEFUNC, RTE_VALUES,
 };
-use nodes::parsestmt::{ParseNamespaceColumn, ParseNamespaceItem, ParseState};
-use nodes::parsestmt::ParseExprKind::{
+use ::nodes::parsestmt::{ParseNamespaceColumn, ParseNamespaceItem, ParseState};
+use ::nodes::parsestmt::ParseExprKind::{
     EXPR_KIND_CHECK_CONSTRAINT, EXPR_KIND_GENERATED_COLUMN, EXPR_KIND_MERGE_WHEN,
 };
-use nodes::copy_query::Query;
-use nodes::queryenvironment::ENR_NAMED_TUPLESTORE;
+use ::nodes::copy_query::Query;
+use ::nodes::queryenvironment::ENR_NAMED_TUPLESTORE;
 
 use types_error::error::{
     ERRCODE_AMBIGUOUS_ALIAS, ERRCODE_AMBIGUOUS_COLUMN, ERRCODE_DUPLICATE_ALIAS,
@@ -135,7 +135,7 @@ fn attname_str(attr: &types_tuple::heaptuple::FormData_pg_attribute) -> &str {
     core::str::from_utf8(&bytes[..end]).unwrap_or("")
 }
 
-/// Convert a parse-tree [`RangeVar`] (`nodes::rawnodes::RangeVar`) into the
+/// Convert a parse-tree [`RangeVar`] (`::nodes::rawnodes::RangeVar`) into the
 /// access-layer `types_tuple::access::RangeVar` that `table_openrv_extended` /
 /// `RangeVarGetRelid` consume. (The two RangeVar models are an inherited split;
 /// the access layer's variant carries no alias.)
@@ -1445,7 +1445,7 @@ fn chooseScalarFunctionAlias<'mcx>(
     // C: if (funcexpr && IsA(funcexpr, FuncExpr)) {
     //        pname = get_func_result_name(((FuncExpr *) funcexpr)->funcid);
     //        if (pname) return pname; }
-    if let Some(nodes::primnodes::Expr::FuncExpr(fe)) = funcexpr.and_then(|n| n.as_expr()) {
+    if let Some(::nodes::primnodes::Expr::FuncExpr(fe)) = funcexpr.and_then(|n| n.as_expr()) {
         if let Some(pname) =
             funcapi::proc_info::get_func_result_name(mcx, fe.funcid)?
         {
@@ -1827,8 +1827,8 @@ pub fn addRangeTableEntryForFunction<'mcx>(
     lateral: bool,
     in_from_cl: bool,
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
-    use nodes::funcapi::TypeFuncClass;
-    use nodes::primnodes::Expr;
+    use ::nodes::funcapi::TypeFuncClass;
+    use ::nodes::primnodes::Expr;
     use types_tuple::heaptuple::{INT8OID, MaxHeapAttributeNumber, MaxTupleAttributeNumber};
 
     let mut rte = RangeTblEntry::new_in(mcx);
@@ -1864,7 +1864,7 @@ pub fn addRangeTableEntryForFunction<'mcx>(
 
         // C: RangeTblFunction *rtfunc = makeNode(RangeTblFunction);
         //    rtfunc->funcexpr = funcexpr; (lists initialized NIL; funcparams NULL)
-        let mut rtfunc = nodes::rawnodes::RangeTblFunction {
+        let mut rtfunc = ::nodes::rawnodes::RangeTblFunction {
             funcexpr: Some(mcx::alloc_in(mcx, (**funcexpr_node).clone_in(mcx)?)?),
             funccolcount: 0,
             funccolnames: PgVec::new_in(mcx),
@@ -2191,7 +2191,7 @@ pub fn addRangeTableEntryForTableFunc<'mcx>(
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use types_error::error::ERRCODE_TOO_MANY_COLUMNS;
-    use nodes::primnodes::TFT_XMLTABLE;
+    use ::nodes::primnodes::TFT_XMLTABLE;
     use types_tuple::heaptuple::MaxTupleAttributeNumber;
 
     // The column lists are populated by the caller (transformRangeTableFunc /
@@ -2448,7 +2448,7 @@ pub fn addRangeTableEntryForJoin<'mcx>(
     pstate: &mut ParseState<'mcx>,
     colnames: &[NodePtr<'mcx>],
     nscolumns: PgVec<'mcx, ParseNamespaceColumn>,
-    jointype: nodes::jointype::JoinType,
+    jointype: ::nodes::jointype::JoinType,
     nummergedcols: i32,
     aliasvars: PgVec<'mcx, NodePtr<'mcx>>,
     leftcols: PgVec<'mcx, i32>,
@@ -2777,7 +2777,7 @@ pub fn addRangeTableEntryForENR<'mcx>(
 pub fn addRangeTableEntryForGroup<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    group_clauses: &[nodes::primnodes::TargetEntry<'mcx>],
+    group_clauses: &[::nodes::primnodes::TargetEntry<'mcx>],
 ) -> PgResult<ParseNamespaceItem<'mcx>> {
     let mut rte = RangeTblEntry::new_in(mcx);
     rte.rtekind = RTE_GROUP;
@@ -2964,7 +2964,7 @@ pub fn expandRTE<'mcx>(
         }
         RTE_FUNCTION => {
             // Function RTE (parse_relation.c:2825-2951).
-            use nodes::funcapi::TypeFuncClass;
+            use ::nodes::funcapi::TypeFuncClass;
             use types_tuple::heaptuple::INT8OID;
 
             let eref = rte.eref.as_deref().expect("eref set");
@@ -3396,7 +3396,7 @@ pub fn expandNSItemAttrs<'mcx>(
     sublevels_up: i32,
     require_col_privs: bool,
     location: i32,
-) -> PgResult<PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>>> {
+) -> PgResult<PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>>> {
     // Snapshot what we need (the nsitem) so we can mutate pstate below. For an
     // uplevel star (`sublevels_up > 0`, e.g. `WITH t AS (SELECT OLD.*)` where
     // OLD lives in an outer rule range table), `nsitem_index` is relative to the
@@ -3434,7 +3434,7 @@ pub fn expandNSItemAttrs<'mcx>(
         }
     }
 
-    let mut te_list: PgVec<'mcx, nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
+    let mut te_list: PgVec<'mcx, ::nodes::primnodes::TargetEntry<'mcx>> = PgVec::new_in(mcx);
     debug_assert!(names.len() == vars.len());
     for (name, varnode) in names.iter().zip(vars.iter()) {
         let label = str_val(name);
@@ -3446,7 +3446,7 @@ pub fn expandNSItemAttrs<'mcx>(
         pstate.p_next_resno += 1;
         let te = make_target_entry(
             mcx,
-            nodes::primnodes::Expr::Var(var.clone()),
+            ::nodes::primnodes::Expr::Var(var.clone()),
             resno,
             Some(label),
             false,
@@ -3560,7 +3560,7 @@ pub fn get_rte_attribute_is_dropped<'mcx>(
             result = rte.joinaliasvars[(attnum - 1) as usize]
                 .as_ref()
                 .as_expr()
-                .is_some_and(|e| matches!(e, nodes::primnodes::Expr::Const(_)))
+                .is_some_and(|e| matches!(e, ::nodes::primnodes::Expr::Const(_)))
                 && is_null_const(rte.joinaliasvars[(attnum - 1) as usize].as_ref());
         }
         RTE_FUNCTION => {
@@ -3655,14 +3655,14 @@ pub fn get_rte_attribute_is_dropped<'mcx>(
 /// Is this aliasvar an all-NULL Const (dropped join column placeholder)?
 fn is_null_const(node: &Node<'_>) -> bool {
     node.as_expr()
-        .is_some_and(|e| matches!(e, nodes::primnodes::Expr::Const(c) if c.constisnull))
+        .is_some_and(|e| matches!(e, ::nodes::primnodes::Expr::Const(c) if c.constisnull))
 }
 
 /// `get_tle_by_resno` — find the TargetEntry with the given resno (search).
 pub fn get_tle_by_resno<'a, 'mcx>(
-    tlist: &'a [nodes::primnodes::TargetEntry<'mcx>],
+    tlist: &'a [::nodes::primnodes::TargetEntry<'mcx>],
     resno: AttrNumber,
-) -> Option<&'a nodes::primnodes::TargetEntry<'mcx>> {
+) -> Option<&'a ::nodes::primnodes::TargetEntry<'mcx>> {
     tlist.iter().find(|tle| tle.resno == resno)
 }
 
@@ -4179,7 +4179,7 @@ fn scan_ns_item_for_column_by_posn<'mcx>(
     sublevels_up: i32,
     colname: &str,
     location: i32,
-) -> PgResult<Option<nodes::primnodes::Expr<'static>>> {
+) -> PgResult<Option<::nodes::primnodes::Expr<'static>>> {
     // Recover the ambient query Mcx from an existing mcx-allocated pstate field
     // (p_rtable's allocator is the query context), as parse_func.c's pstate_mcx.
     let mcx = *pstate.p_rtable.allocator();

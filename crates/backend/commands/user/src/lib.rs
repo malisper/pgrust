@@ -76,7 +76,7 @@ use types_error::{
     ERRCODE_INVALID_GRANT_OPERATION, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_IN_USE,
     ERRCODE_RESERVED_NAME, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
 };
-use nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT};
+use ::nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT};
 use parsenodes::{
     AccessPriv, AlterRoleSetStmt, AlterRoleStmt, CreateRoleStmt, DefElem, DropOwnedStmt,
     DropRoleStmt, GrantRoleStmt, Node, ParseState, ReassignOwnedStmt, RoleSpec, ROLESPEC_CSTRING,
@@ -2920,8 +2920,8 @@ pub fn init_seams() {
 
 mod convert;
 
-use nodes::nodes::Node as ANode;
-use nodes::parsestmt::ParseState as DispatchParseState;
+use ::nodes::nodes::Node as ANode;
+use ::nodes::parsestmt::ParseState as DispatchParseState;
 
 fn create_role_arm<'mcx>(
     mcx: Mcx<'mcx>,

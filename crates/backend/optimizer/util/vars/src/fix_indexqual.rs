@@ -19,7 +19,7 @@ use nodes_core::nodefuncs::{expr_collation, expr_type};
 use equalfuncs_seams::equal_expr;
 use indxpath::operand::strip_phvs_in_index_operand;
 use types_error::{PgError, PgResult};
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::{IndexOptInfo, PlannerInfo};
 
 /// `INDEX_VAR` (primnodes.h) — the special `varno` identifying a Var that

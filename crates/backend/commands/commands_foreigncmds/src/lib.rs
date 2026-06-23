@@ -31,7 +31,7 @@ use types_error::error::{
 };
 use types_error::pg_error::{ErrorLocation, PgError};
 use types_error::PgResult;
-use nodes::parsenodes::{
+use ::nodes::parsenodes::{
     RoleSpec, ROLESPEC_PUBLIC, DROP_CASCADE, OBJECT_FDW, OBJECT_FOREIGN_SERVER,
 };
 use types_foreigncmds::{
@@ -583,7 +583,7 @@ fn lookup_fdw_validator_func<'mcx>(validator: &DefElem<'mcx>) -> PgResult<Oid> {
 /// `parser_errposition(pstate, defel->location)` so psql renders the `LINE n:
 /// ...` source-context with a caret under the redundant option.
 fn error_conflicting_def_elem(
-    pstate: &nodes::parsestmt::ParseState<'_>,
+    pstate: &::nodes::parsestmt::ParseState<'_>,
     location: types_core::primitive::ParseLoc,
 ) -> PgResult<PgError> {
     let cursorpos = small1_seams::parser_errposition::call(pstate, location)?;
@@ -598,7 +598,7 @@ fn error_conflicting_def_elem(
 /// FDW.  Returns `(handler_given, fdwhandler, validator_given, fdwvalidator)`.
 fn parse_func_options<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &nodes::parsestmt::ParseState<'mcx>,
+    pstate: &::nodes::parsestmt::ParseState<'mcx>,
     func_options: &[DefElem<'mcx>],
 ) -> PgResult<(bool, Oid, bool, Oid)> {
     let mut handler_given = false;
@@ -639,7 +639,7 @@ fn parse_func_options<'mcx>(
 /// `CreateForeignDataWrapper` — CREATE FOREIGN DATA WRAPPER.
 pub fn CreateForeignDataWrapper<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &nodes::parsestmt::ParseState<'mcx>,
+    pstate: &::nodes::parsestmt::ParseState<'mcx>,
     stmt: &CreateFdwStmt<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let fdwname = stmt.fdwname.as_str();
@@ -729,7 +729,7 @@ pub fn CreateForeignDataWrapper<'mcx>(
 /// `AlterForeignDataWrapper` — ALTER FOREIGN DATA WRAPPER.
 pub fn AlterForeignDataWrapper<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &nodes::parsestmt::ParseState<'mcx>,
+    pstate: &::nodes::parsestmt::ParseState<'mcx>,
     stmt: &AlterFdwStmt<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let fdwname = stmt.fdwname.as_str();
@@ -1696,7 +1696,7 @@ fn rolespec_oid(role: &RoleSpec<'_>, missing_ok: bool) -> PgResult<Oid> {
  * working `mcx`.
  * ========================================================================= */
 
-use nodes::nodes::{ntag, Node as RichNode};
+use ::nodes::nodes::{ntag, Node as RichNode};
 
 /// Project one rich `DefElem`'s `arg` value node into the flat `DefElemArg`
 /// variant. Mirrors the C value-node switch (`nodeTag(arg)`): `Integer`,
@@ -1742,7 +1742,7 @@ fn rich_arg_to_flat<'mcx>(
 /// Project one rich `DefElem` node into the flat `types_foreigncmds::DefElem`.
 fn rich_defelem_to_flat<'mcx>(
     mcx: Mcx<'mcx>,
-    de: &nodes::ddlnodes::DefElem<'mcx>,
+    de: &::nodes::ddlnodes::DefElem<'mcx>,
 ) -> PgResult<DefElem<'mcx>> {
     let defname = match de.defname.as_ref() {
         Some(s) => mcx::PgString::from_str_in(s.as_str(), mcx)?,
@@ -1753,10 +1753,10 @@ fn rich_defelem_to_flat<'mcx>(
         Some(a) => Some(mcx::alloc_in(mcx, rich_arg_to_flat(mcx, a)?)?),
     };
     let defaction = match de.defaction {
-        nodes::ddlnodes::DEFELEM_UNSPEC => DefElemAction::Unspec,
-        nodes::ddlnodes::DEFELEM_SET => DefElemAction::Set,
-        nodes::ddlnodes::DEFELEM_ADD => DefElemAction::Add,
-        nodes::ddlnodes::DEFELEM_DROP => DefElemAction::Drop,
+        ::nodes::ddlnodes::DEFELEM_UNSPEC => DefElemAction::Unspec,
+        ::nodes::ddlnodes::DEFELEM_SET => DefElemAction::Set,
+        ::nodes::ddlnodes::DEFELEM_ADD => DefElemAction::Add,
+        ::nodes::ddlnodes::DEFELEM_DROP => DefElemAction::Drop,
     };
     Ok(DefElem { defname, arg, defaction, location: de.location })
 }
@@ -1764,7 +1764,7 @@ fn rich_defelem_to_flat<'mcx>(
 /// Project a rich `List *` of `DefElem` nodes into a flat `Vec<DefElem>`.
 fn rich_options_to_flat<'mcx>(
     mcx: Mcx<'mcx>,
-    options: &PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
+    options: &PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
 ) -> PgResult<PgVec<'mcx, DefElem<'mcx>>> {
     let mut out = mcx::vec_with_capacity_in(mcx, options.len())?;
     for n in options.iter() {
@@ -1803,7 +1803,7 @@ fn rich_rolespec_to_flat<'mcx>(
 /// Outward-seam adapter for `CreateForeignDataWrapper(pstate, stmt)`.
 fn create_fdw_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let s = match stmt.as_createfdwstmt() {
@@ -1825,7 +1825,7 @@ fn create_fdw_seam<'mcx>(
 /// Outward-seam adapter for `AlterForeignDataWrapper(pstate, stmt)`.
 fn alter_fdw_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &mut nodes::parsestmt::ParseState<'mcx>,
+    pstate: &mut ::nodes::parsestmt::ParseState<'mcx>,
     stmt: &RichNode<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let s = match stmt.as_alterfdwstmt() {
@@ -2031,13 +2031,13 @@ fn import_foreign_schema_seam<'mcx>(
         None => return Err(PgError::error("IMPORT FOREIGN SCHEMA: missing local schema")),
     };
     let list_type = match s.list_type {
-        nodes::ddlnodes::FDW_IMPORT_SCHEMA_ALL => {
+        ::nodes::ddlnodes::FDW_IMPORT_SCHEMA_ALL => {
             types_foreigncmds::FDW_IMPORT_SCHEMA_ALL
         }
-        nodes::ddlnodes::FDW_IMPORT_SCHEMA_LIMIT_TO => {
+        ::nodes::ddlnodes::FDW_IMPORT_SCHEMA_LIMIT_TO => {
             types_foreigncmds::FDW_IMPORT_SCHEMA_LIMIT_TO
         }
-        nodes::ddlnodes::FDW_IMPORT_SCHEMA_EXCEPT => {
+        ::nodes::ddlnodes::FDW_IMPORT_SCHEMA_EXCEPT => {
             types_foreigncmds::FDW_IMPORT_SCHEMA_EXCEPT
         }
     };

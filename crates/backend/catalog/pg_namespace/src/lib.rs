@@ -29,7 +29,7 @@ use types_catalog::catalog::NAMESPACE_RELATION_ID;
 use types_catalog::catalog_dependency::ObjectAddress;
 use types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use types_error::{PgResult, ERRCODE_DUPLICATE_SCHEMA, ERROR};
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 use types_storage::lock::RowExclusiveLock;
 
 use table::table_open;

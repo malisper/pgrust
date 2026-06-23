@@ -26,9 +26,9 @@ use types_error::{
     NOTICE,
 };
 
-use nodes::copy_query::Query;
-use nodes::ddlnodes::{CreateStmt, RuleStmt};
-use nodes::nodes::{ntag, Node};
+use ::nodes::copy_query::Query;
+use ::nodes::ddlnodes::{CreateStmt, RuleStmt};
+use ::nodes::nodes::{ntag, Node};
 
 use small1::{free_parsestate, make_parsestate, parser_errposition};
 use types_storage::lock::NoLock;
@@ -245,7 +245,7 @@ pub fn transformCreateStmt<'mcx>(
     // CreateForeignTable runs with the carried servername/options.
     let stmt_out = match foreign_extra {
         Some((servername, options)) => {
-            let cft = nodes::ddlnodes::CreateForeignTableStmt {
+            let cft = ::nodes::ddlnodes::CreateForeignTableStmt {
                 base: mcx::alloc_in(mcx, stmt)?,
                 servername,
                 options,
@@ -340,7 +340,7 @@ fn range_var_get_and_check_creation_namespace<'mcx>(
 
 /// Bridge a node `rawnodes::RangeVar` to the value-typed
 /// `types_tuple::access::RangeVar` the catalog-namespace API consumes.
-fn to_access_range_var(rv: &nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
+fn to_access_range_var(rv: &::nodes::rawnodes::RangeVar<'_>) -> types_tuple::access::RangeVar {
     types_tuple::access::RangeVar {
         catalogname: rv.catalogname.as_ref().map(|s| s.as_str().into()),
         schemaname: rv.schemaname.as_ref().map(|s| s.as_str().into()),
@@ -363,8 +363,8 @@ pub fn transformRuleStmt<'mcx>(
     stmt: &RuleStmt<'_>,
     query_string: &str,
 ) -> PgResult<(PgVec<'mcx, Query<'mcx>>, Option<Node<'mcx>>)> {
-    use nodes::nodes::CmdType;
-    use nodes::parsestmt::ParseExprKind::EXPR_KIND_WHERE;
+    use ::nodes::nodes::CmdType;
+    use ::nodes::parsestmt::ParseExprKind::EXPR_KIND_WHERE;
     use types_storage::lock::AccessShareLock;
     use types_tuple::access::{RangeVar as AccessRangeVar, RELKIND_MATVIEW};
 
@@ -473,7 +473,7 @@ pub fn transformRuleStmt<'mcx>(
         )?;
         // Bring the parser-arena `'static` qual into `mcx` for the in-place
         // collation pass and the `'mcx` Node wrap (`Expr` is invariant).
-        let mut e: Option<nodes::primnodes::Expr<'mcx>> = match e {
+        let mut e: Option<::nodes::primnodes::Expr<'mcx>> = match e {
             Some(expr) => Some(expr.clone_in(mcx)?),
             None => None,
         };
@@ -507,7 +507,7 @@ pub fn transformRuleStmt<'mcx>(
         nothing_qry.rteperminfos =
             core::mem::replace(&mut pstate.p_rteperminfos, PgVec::new_in(mcx));
         nothing_qry.jointree = Some(PgBox::new_in(
-            nodes::rawnodes::FromExpr {
+            ::nodes::rawnodes::FromExpr {
                 fromlist: PgVec::new_in(mcx),
                 quals: None,
             },
@@ -722,7 +722,7 @@ pub fn transformRuleStmt<'mcx>(
                 }
                 let rtr = Node::mk_range_tbl_ref(
                     mcx,
-                    nodes::rawnodes::RangeTblRef {
+                    ::nodes::rawnodes::RangeTblRef {
                         rtindex: s_old_rtindex,
                     },
                 )?;
@@ -754,8 +754,8 @@ pub fn transformRuleStmt<'mcx>(
 fn make_old_new_alias<'mcx>(
     mcx: Mcx<'mcx>,
     name: &str,
-) -> PgResult<nodes::rawnodes::Alias<'mcx>> {
-    Ok(nodes::rawnodes::Alias {
+) -> PgResult<::nodes::rawnodes::Alias<'mcx>> {
+    Ok(::nodes::rawnodes::Alias {
         aliasname: Some(PgString::from_str_in(name, mcx)?),
         colnames: PgVec::new_in(mcx),
     })

@@ -48,7 +48,7 @@ use common_wchar::pg_encoding_verifymbstr;
 use buffile::{
     BufFileClose, BufFileCreateTemp, BufFileReadExact, BufFileSeek, BufFileWrite,
 };
-use nodes::nodehash::BufFile;
+use ::nodes::nodehash::BufFile;
 
 use timeline::readTimeLineHistory;
 use localtime::pg_gmtime;

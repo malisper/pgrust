@@ -49,7 +49,7 @@ use types_error::{
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE, WARNING,
 };
 use locale::CollProvider;
-use nodes::parsenodes::OBJECT_SCHEMA;
+use ::nodes::parsenodes::OBJECT_SCHEMA;
 use parsenodes::{DefElem, Node};
 use types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 use types_wchar::encoding::{pg_valid_be_encoding, PG_SQL_ASCII};
@@ -1082,7 +1082,7 @@ pub fn pg_import_system_collations<'mcx>(mcx: Mcx<'mcx>, nspid: Oid) -> PgResult
 /// Project the `String` value nodes of a `collname` (`List *`) into the
 /// `NameList`-shaped `Vec<Option<String>>` the lookups expect. A non-`String`
 /// node maps to `None` (the deconstruct path then errors like the C `strVal`).
-fn rich_node_string_list(collname: &[nodes::nodes::NodePtr<'_>]) -> Vec<Option<String>> {
+fn rich_node_string_list(collname: &[::nodes::nodes::NodePtr<'_>]) -> Vec<Option<String>> {
     collname
         .iter()
         .map(|n| n.as_string().map(|s| s.sval.to_string()))
@@ -1094,10 +1094,10 @@ fn rich_node_string_list(collname: &[nodes::nodes::NodePtr<'_>]) -> Vec<Option<S
 /// `stmt->collname` into the `NameList` and run the ported body.
 fn alter_collation_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let acs = match stmt.node_tag() {
-        nodes::nodes::ntag::T_AlterCollationStmt => stmt.expect_altercollationstmt(),
+        ::nodes::nodes::ntag::T_AlterCollationStmt => stmt.expect_altercollationstmt(),
         _ => panic!("alter_collation: parse tree is not an AlterCollationStmt"),
     };
     let name_list = rich_node_string_list(&acs.collname);

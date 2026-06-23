@@ -239,8 +239,8 @@ pub fn init_seams() {
 use mcx::Mcx;
 use types_core::primitive::{Oid, OidIsValid};
 use types_error::PgResult;
-use nodes::ddlnodes::AlterTableType::AT_DetachPartition;
-use nodes::nodes::Node;
+use ::nodes::ddlnodes::AlterTableType::AT_DetachPartition;
+use ::nodes::nodes::Node;
 
 /// `case T_TruncateStmt: ExecuteTruncate(stmt)` (utility.c). The dispatch carries
 /// the parse tree as `&Node`; extract the `TruncateStmt` variant and forward.
@@ -270,10 +270,10 @@ fn remove_relations_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<()>
 /// context carries the portable `relid` + `queryString` subset.
 fn alter_table_slow_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    _pstmt: &nodes::nodeindexscan::PlannedStmt<'mcx>,
+    _pstmt: &::nodes::nodeindexscan::PlannedStmt<'mcx>,
     parsetree: &Node<'mcx>,
     query_string: &str,
-    _params: nodes::portalcmds::ParamListInfo,
+    _params: ::nodes::portalcmds::ParamListInfo,
     is_top_level: bool,
 ) -> PgResult<()> {
     let Some(atstmt) = parsetree.as_altertablestmt() else {

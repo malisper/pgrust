@@ -29,12 +29,12 @@ use utils_error::{ereport, elog};
 use types_catalog::catalog_dependency::ObjectAddresses;
 use types_core::primitive::{AttrNumber, InvalidAttrNumber, Oid};
 use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_COLUMN, ERROR};
-use nodes::copy_query::Query;
-use nodes::nodes::{ntag, Node, CMD_INSERT, CMD_UPDATE};
-use nodes::parsenodes::{
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{ntag, Node, CMD_INSERT, CMD_UPDATE};
+use ::nodes::parsenodes::{
     RangeTblEntry, RTE_FUNCTION, RTE_JOIN, RTE_NAMEDTUPLESTORE, RTE_RELATION,
 };
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use types_tuple::heaptuple::{DEFAULT_COLLATION_OID, RECORDOID};
 
 // Catalog class OIDs the walker references, aliased to the C `...RelationId`

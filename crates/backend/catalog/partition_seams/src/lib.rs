@@ -7,7 +7,7 @@
 use mcx::{Mcx, PgVec};
 use types_core::primitive::Oid;
 use types_error::PgResult;
-use nodes::nodes::Node;
+use ::nodes::nodes::Node;
 use pathnodes::Bitmapset;
 use rel::{Relation, RelationData};
 

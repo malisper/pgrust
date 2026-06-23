@@ -5,10 +5,10 @@ use alloc::vec::Vec;
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::copy_query::Query;
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsestmt::{ParseExprKind, ParseState};
-use nodes::rawnodes::{SelectStmt, SortBy};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsestmt::{ParseExprKind, ParseState};
+use ::nodes::rawnodes::{SelectStmt, SortBy};
 
 use crate::{
     cte_vec_to_nodes, elog_error, node_vec_to_pgvec, opt_expr_to_box, opt_expr_to_node,
@@ -115,7 +115,7 @@ pub fn transformSelectStmt<'mcx>(
     // The clause owners thread the target list as a `&mut Vec<TargetEntry>`, so
     // carry it as a std `Vec` from here and re-home into the Query's `PgVec`
     // once the clause passes are done.
-    let mut tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> =
+    let mut tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> =
         parse_target::transformTargetList(
             mcx,
             pstate,
@@ -276,7 +276,7 @@ pub fn transformSelectStmt<'mcx>(
     let qual_node = opt_expr_to_node(mcx, qual)?;
     qry.jointree = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::FromExpr {
+        ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
             quals: qual_node,
         },
@@ -320,7 +320,7 @@ pub fn transformSelectStmt<'mcx>(
 pub fn transformReturnStmt<'mcx>(
     mcx: Mcx<'mcx>,
     pstate: &mut ParseState<'mcx>,
-    stmt: &nodes::ddlnodes::ReturnStmt<'mcx>,
+    stmt: &::nodes::ddlnodes::ReturnStmt<'mcx>,
 ) -> PgResult<Query<'mcx>> {
     let mut qry = Query::new(mcx);
     qry.commandType = CmdType::CMD_SELECT;
@@ -350,7 +350,7 @@ pub fn transformReturnStmt<'mcx>(
 
     /* if (pstate->p_resolve_unknowns) resolveTargetListUnknowns(...) */
     if pstate.p_resolve_unknowns {
-        let mut tlist: Vec<nodes::primnodes::TargetEntry<'mcx>> =
+        let mut tlist: Vec<::nodes::primnodes::TargetEntry<'mcx>> =
             core::mem::replace(&mut qry.targetList, mcx::PgVec::new_in(mcx))
                 .into_iter()
                 .collect();
@@ -370,7 +370,7 @@ pub fn transformReturnStmt<'mcx>(
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, mcx::PgVec::new_in(mcx));
     qry.jointree = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::FromExpr {
+        ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
             quals: None,
         },
@@ -413,7 +413,7 @@ pub fn transformValuesClause<'mcx>(
      * For each row of VALUES, transform the raw expressions, building a
      * column-organized intermediate representation.
      */
-    let mut colexprs: Vec<Vec<nodes::primnodes::Expr<'mcx>>> = Vec::new();
+    let mut colexprs: Vec<Vec<::nodes::primnodes::Expr<'mcx>>> = Vec::new();
     let mut sublist_length: i32 = -1;
 
     for lc in stmt.valuesLists.iter() {
@@ -505,7 +505,7 @@ pub fn transformValuesClause<'mcx>(
     let nrows = stmt.valuesLists.len();
     let ncols = sublist_length.max(0) as usize;
     /* per-column draining iterators; rows within a column are in order 0..nrows */
-    let mut col_iters: Vec<std::vec::IntoIter<nodes::primnodes::Expr>> = Vec::new();
+    let mut col_iters: Vec<std::vec::IntoIter<::nodes::primnodes::Expr>> = Vec::new();
     col_iters.try_reserve(ncols).map_err(|_| mcx.oom(0))?;
     for i in 0..ncols {
         col_iters.push(core::mem::take(&mut colexprs[i]).into_iter());
@@ -619,7 +619,7 @@ pub fn transformValuesClause<'mcx>(
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, mcx::PgVec::new_in(mcx));
     qry.jointree = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::FromExpr {
+        ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
             quals: None,
         },

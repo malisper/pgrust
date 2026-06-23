@@ -41,7 +41,7 @@
 
 use mcx::Mcx;
 use types_error::{PgError, PgResult};
-use nodes::TUPLESORT_NONE;
+use ::nodes::TUPLESORT_NONE;
 use rel::Relation;
 use types_tableam::amapi::IndexBuildResult;
 use types_tuple::heaptuple::Datum;
@@ -89,7 +89,7 @@ pub fn btbuild<'mcx>(
     mcx: Mcx<'mcx>,
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
-    index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
+    index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
 ) -> PgResult<IndexBuildResult> {
     let isunique = index_info.ii_Unique;
     let nulls_not_distinct = index_info.ii_NullsNotDistinct;
@@ -146,7 +146,7 @@ fn _bt_spools_heapscan<'mcx>(
     heap: &Relation<'mcx>,
     index: &Relation<'mcx>,
     buildstate: &mut BTBuildState<'mcx>,
-    index_info: &mut nodes::execnodes::IndexInfo<'mcx>,
+    index_info: &mut ::nodes::execnodes::IndexInfo<'mcx>,
 ) -> PgResult<f64> {
     // We size the sort area as maintenance_work_mem rather than work_mem to
     // speed index creation.  This should be OK since a single backend can't

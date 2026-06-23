@@ -28,9 +28,9 @@ use alloc::string::String;
 use core::fmt::Write as _;
 
 use mcx::PgBox;
-use nodes::nodes::{ntag, Node};
-use nodes::primnodes::Expr;
-use nodes::rawnodes::A_Expr_Kind;
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::primnodes::Expr;
+use ::nodes::rawnodes::A_Expr_Kind;
 
 use crate::{
     framed, out_expr, out_node_inner, write_bool_field, write_bitmapset_opt_field,
@@ -255,7 +255,7 @@ fn write_opt_pgstring_list_field(
 /// `_outTableFunc` (outfuncs.funcs.c) — every field in struct order.
 pub(crate) fn out_table_func(
     buf: &mut String,
-    n: &nodes::primnodes::TableFunc<'_>,
+    n: &::nodes::primnodes::TableFunc<'_>,
     wl: bool,
 ) {
     buf.push_str("TABLEFUNC");
@@ -284,7 +284,7 @@ pub(crate) fn out_table_func(
 /// serialize those two directly in place of the wrapper.
 pub(crate) fn out_json_table_path_scan(
     buf: &mut String,
-    n: &nodes::primnodes::JsonTablePathScan<'_>,
+    n: &::nodes::primnodes::JsonTablePathScan<'_>,
     wl: bool,
 ) {
     buf.push_str("JSONTABLEPATHSCAN");
@@ -299,7 +299,7 @@ pub(crate) fn out_json_table_path_scan(
 /// `_outJsonTableSiblingJoin` (outfuncs.funcs.c) — the sibling-join plan.
 pub(crate) fn out_json_table_sibling_join(
     buf: &mut String,
-    n: &nodes::primnodes::JsonTableSiblingJoin<'_>,
+    n: &::nodes::primnodes::JsonTableSiblingJoin<'_>,
     wl: bool,
 ) {
     buf.push_str("JSONTABLESIBLINGJOIN");
@@ -311,7 +311,7 @@ pub(crate) fn out_json_table_sibling_join(
 // _outQuery
 // ===========================================================================
 
-pub(crate) fn out_query(buf: &mut String, n: &nodes::copy_query::Query<'_>, wl: bool) {
+pub(crate) fn out_query(buf: &mut String, n: &::nodes::copy_query::Query<'_>, wl: bool) {
     buf.push_str("QUERY");
     write_enum_field(buf, "commandType", n.commandType as i32);
     write_enum_field(buf, "querySource", n.querySource as i32);
@@ -363,7 +363,7 @@ pub(crate) fn out_query(buf: &mut String, n: &nodes::copy_query::Query<'_>, wl: 
 /// `_outTargetEntry` lives in the lib; reuse it by re-deriving the same body.
 /// (The lib's `out_targetentry` is private, so this delegates through the
 /// `Node::TargetEntry` arm of `out_node_inner` by framing it directly.)
-fn crate_out_targetentry(buf: &mut String, te: &nodes::primnodes::TargetEntry<'_>, wl: bool) {
+fn crate_out_targetentry(buf: &mut String, te: &::nodes::primnodes::TargetEntry<'_>, wl: bool) {
     // The lib owns _outTargetEntry; route a direct-value TargetEntry through
     // out_node_inner by constructing the framing here. out_node_inner frames
     // Node::TargetEntry itself, so we instead replicate the dispatch by calling
@@ -388,8 +388,8 @@ fn crate_out_targetentry(buf: &mut String, te: &nodes::primnodes::TargetEntry<'_
 // _outRangeTblEntry — custom, switch on rtekind.
 // ===========================================================================
 
-pub(crate) fn out_range_tbl_entry(buf: &mut String, n: &nodes::parsenodes::RangeTblEntry<'_>, wl: bool) {
-    use nodes::parsenodes::RTEKind;
+pub(crate) fn out_range_tbl_entry(buf: &mut String, n: &::nodes::parsenodes::RangeTblEntry<'_>, wl: bool) {
+    use ::nodes::parsenodes::RTEKind;
     buf.push_str("RANGETBLENTRY");
     write_opt_framed(buf, "alias", &n.alias, wl, out_alias);
     write_opt_framed(buf, "eref", &n.eref, wl, out_alias);
@@ -467,7 +467,7 @@ pub(crate) fn out_range_tbl_entry(buf: &mut String, n: &nodes::parsenodes::Range
 // _outRTEPermissionInfo
 // ===========================================================================
 
-pub(crate) fn out_rte_perm_info(buf: &mut String, n: &nodes::parsenodes::RTEPermissionInfo<'_>, _wl: bool) {
+pub(crate) fn out_rte_perm_info(buf: &mut String, n: &::nodes::parsenodes::RTEPermissionInfo<'_>, _wl: bool) {
     buf.push_str("RTEPERMISSIONINFO");
     write_oid_field(buf, "relid", n.relid);
     write_bool_field(buf, "inh", n.inh);
@@ -484,7 +484,7 @@ pub(crate) fn out_rte_perm_info(buf: &mut String, n: &nodes::parsenodes::RTEPerm
 
 pub(crate) fn out_range_tbl_function(
     buf: &mut String,
-    n: &nodes::rawnodes::RangeTblFunction<'_>,
+    n: &::nodes::rawnodes::RangeTblFunction<'_>,
     wl: bool,
 ) {
     buf.push_str("RANGETBLFUNCTION");
@@ -501,7 +501,7 @@ pub(crate) fn out_range_tbl_function(
 // _outTableSampleClause
 // ===========================================================================
 
-pub(crate) fn out_table_sample_clause(buf: &mut String, n: &nodes::nodesamplescan::TableSampleClause<'_>, wl: bool) {
+pub(crate) fn out_table_sample_clause(buf: &mut String, n: &::nodes::nodesamplescan::TableSampleClause<'_>, wl: bool) {
     buf.push_str("TABLESAMPLECLAUSE");
     write_oid_field(buf, "tsmhandler", n.tsmhandler);
     // args: Option<PgVec<Expr>>. C WRITE_NODE_FIELD of a List of Expr → bare
@@ -535,7 +535,7 @@ fn write_expr_list_tail(buf: &mut String, args: &[Expr], wl: bool) {
 
 pub(crate) fn out_sort_group_clause(
     buf: &mut String,
-    n: &nodes::rawnodes::SortGroupClause,
+    n: &::nodes::rawnodes::SortGroupClause,
     _wl: bool,
 ) {
     buf.push_str("SORTGROUPCLAUSE");
@@ -551,7 +551,7 @@ pub(crate) fn out_sort_group_clause(
 // _outGroupingSet
 // ===========================================================================
 
-fn out_grouping_set(buf: &mut String, n: &nodes::rawnodes::GroupingSet<'_>, wl: bool) {
+fn out_grouping_set(buf: &mut String, n: &::nodes::rawnodes::GroupingSet<'_>, wl: bool) {
     buf.push_str("GROUPINGSET");
     write_enum_field(buf, "kind", n.kind as i32);
     write_node_vec_field(buf, "content", &n.content, wl);
@@ -562,7 +562,7 @@ fn out_grouping_set(buf: &mut String, n: &nodes::rawnodes::GroupingSet<'_>, wl: 
 // _outWindowClause
 // ===========================================================================
 
-fn out_window_clause(buf: &mut String, n: &nodes::rawnodes::WindowClause<'_>, wl: bool) {
+fn out_window_clause(buf: &mut String, n: &::nodes::rawnodes::WindowClause<'_>, wl: bool) {
     buf.push_str("WINDOWCLAUSE");
     write_string_field(buf, "name", n.name.as_ref().map(|s| s.as_str()));
     write_string_field(buf, "refname", n.refname.as_ref().map(|s| s.as_str()));
@@ -584,7 +584,7 @@ fn out_window_clause(buf: &mut String, n: &nodes::rawnodes::WindowClause<'_>, wl
 // _outRowMarkClause
 // ===========================================================================
 
-fn out_row_mark_clause(buf: &mut String, n: &nodes::rawnodes::RowMarkClause, _wl: bool) {
+fn out_row_mark_clause(buf: &mut String, n: &::nodes::rawnodes::RowMarkClause, _wl: bool) {
     buf.push_str("ROWMARKCLAUSE");
     write_uint_field(buf, "rti", n.rti);
     write_enum_field(buf, "strength", n.strength as i32);
@@ -596,7 +596,7 @@ fn out_row_mark_clause(buf: &mut String, n: &nodes::rawnodes::RowMarkClause, _wl
 // _outWithCheckOption
 // ===========================================================================
 
-fn out_with_check_option(buf: &mut String, n: &nodes::rawnodes::WithCheckOption<'_>, wl: bool) {
+fn out_with_check_option(buf: &mut String, n: &::nodes::rawnodes::WithCheckOption<'_>, wl: bool) {
     buf.push_str("WITHCHECKOPTION");
     write_enum_field(buf, "kind", n.kind as i32);
     write_string_field(buf, "relname", n.relname.as_ref().map(|s| s.as_str()));
@@ -609,7 +609,7 @@ fn out_with_check_option(buf: &mut String, n: &nodes::rawnodes::WithCheckOption<
 // _outCTECycleClause
 // ===========================================================================
 
-fn out_cte_cycle_clause(buf: &mut String, n: &nodes::rawnodes::CTECycleClause<'_>, wl: bool) {
+fn out_cte_cycle_clause(buf: &mut String, n: &::nodes::rawnodes::CTECycleClause<'_>, wl: bool) {
     buf.push_str("CTECYCLECLAUSE");
     write_node_vec_field(buf, "cycle_col_list", &n.cycle_col_list, wl);
     write_string_field(buf, "cycle_mark_column", n.cycle_mark_column.as_ref().map(|s| s.as_str()));
@@ -628,7 +628,7 @@ fn out_cte_cycle_clause(buf: &mut String, n: &nodes::rawnodes::CTECycleClause<'_
 /// serialized directly here and emitted via [`write_opt_framed`] from the
 /// parent `_outCommonTableExpr`; this is byte-identical to C's
 /// `WRITE_NODE_FIELD(search_clause)`.
-fn out_cte_search_clause(buf: &mut String, n: &nodes::rawnodes::CTESearchClause<'_>, wl: bool) {
+fn out_cte_search_clause(buf: &mut String, n: &::nodes::rawnodes::CTESearchClause<'_>, wl: bool) {
     buf.push_str("CTESEARCHCLAUSE");
     write_node_vec_field(buf, "search_col_list", &n.search_col_list, wl);
     write_bool_field(buf, "search_breadth_first", n.search_breadth_first);
@@ -637,7 +637,7 @@ fn out_cte_search_clause(buf: &mut String, n: &nodes::rawnodes::CTESearchClause<
 }
 
 /// `_outCommonTableExpr` (outfuncs.funcs.c).
-fn out_common_table_expr(buf: &mut String, n: &nodes::rawnodes::CommonTableExpr<'_>, wl: bool) {
+fn out_common_table_expr(buf: &mut String, n: &::nodes::rawnodes::CommonTableExpr<'_>, wl: bool) {
     buf.push_str("COMMONTABLEEXPR");
     write_string_field(buf, "ctename", n.ctename.as_ref().map(|s| s.as_str()));
     write_node_vec_field(buf, "aliascolnames", &n.aliascolnames, wl);
@@ -660,7 +660,7 @@ fn out_common_table_expr(buf: &mut String, n: &nodes::rawnodes::CommonTableExpr<
 // _outSetOperationStmt
 // ===========================================================================
 
-fn out_set_operation_stmt(buf: &mut String, n: &nodes::rawnodes::SetOperationStmt<'_>, wl: bool) {
+fn out_set_operation_stmt(buf: &mut String, n: &::nodes::rawnodes::SetOperationStmt<'_>, wl: bool) {
     buf.push_str("SETOPERATIONSTMT");
     write_enum_field(buf, "op", n.op as i32);
     write_bool_field(buf, "all", n.all);
@@ -676,7 +676,7 @@ fn out_set_operation_stmt(buf: &mut String, n: &nodes::rawnodes::SetOperationStm
 // _outAlias
 // ===========================================================================
 
-fn out_alias(buf: &mut String, n: &nodes::rawnodes::Alias<'_>, wl: bool) {
+fn out_alias(buf: &mut String, n: &::nodes::rawnodes::Alias<'_>, wl: bool) {
     buf.push_str("ALIAS");
     write_string_field(buf, "aliasname", n.aliasname.as_ref().map(|s| s.as_str()));
     write_node_vec_field(buf, "colnames", &n.colnames, wl);
@@ -686,7 +686,7 @@ fn out_alias(buf: &mut String, n: &nodes::rawnodes::Alias<'_>, wl: bool) {
 // _outRangeVar
 // ===========================================================================
 
-fn out_range_var(buf: &mut String, n: &nodes::rawnodes::RangeVar<'_>, wl: bool) {
+fn out_range_var(buf: &mut String, n: &::nodes::rawnodes::RangeVar<'_>, wl: bool) {
     buf.push_str("RANGEVAR");
     write_string_field(buf, "catalogname", n.catalogname.as_ref().map(|s| s.as_str()));
     write_string_field(buf, "schemaname", n.schemaname.as_ref().map(|s| s.as_str()));
@@ -701,7 +701,7 @@ fn out_range_var(buf: &mut String, n: &nodes::rawnodes::RangeVar<'_>, wl: bool) 
 // _outTypeName
 // ===========================================================================
 
-fn out_type_name(buf: &mut String, n: &nodes::rawnodes::TypeName<'_>, wl: bool) {
+fn out_type_name(buf: &mut String, n: &::nodes::rawnodes::TypeName<'_>, wl: bool) {
     buf.push_str("TYPENAME");
     write_node_vec_field(buf, "names", &n.names, wl);
     write_oid_field(buf, "typeOid", n.typeOid);
@@ -717,7 +717,7 @@ fn out_type_name(buf: &mut String, n: &nodes::rawnodes::TypeName<'_>, wl: bool) 
 // _outColumnDef
 // ===========================================================================
 
-fn out_column_def(buf: &mut String, n: &nodes::rawnodes::ColumnDef<'_>, wl: bool) {
+fn out_column_def(buf: &mut String, n: &::nodes::rawnodes::ColumnDef<'_>, wl: bool) {
     buf.push_str("COLUMNDEF");
     write_string_field(buf, "colname", n.colname.as_ref().map(|s| s.as_str()));
     write_opt_framed(buf, "typeName", &n.typeName, wl, out_type_name);
@@ -744,7 +744,7 @@ fn out_column_def(buf: &mut String, n: &nodes::rawnodes::ColumnDef<'_>, wl: bool
 // _outRangeTblRef
 // ===========================================================================
 
-fn out_range_tbl_ref(buf: &mut String, n: &nodes::rawnodes::RangeTblRef, _wl: bool) {
+fn out_range_tbl_ref(buf: &mut String, n: &::nodes::rawnodes::RangeTblRef, _wl: bool) {
     buf.push_str("RANGETBLREF");
     write_int_field(buf, "rtindex", n.rtindex);
 }
@@ -753,7 +753,7 @@ fn out_range_tbl_ref(buf: &mut String, n: &nodes::rawnodes::RangeTblRef, _wl: bo
 // _outJoinExpr
 // ===========================================================================
 
-fn out_join_expr(buf: &mut String, n: &nodes::rawnodes::JoinExpr<'_>, wl: bool) {
+fn out_join_expr(buf: &mut String, n: &::nodes::rawnodes::JoinExpr<'_>, wl: bool) {
     buf.push_str("JOINEXPR");
     write_enum_field(buf, "jointype", n.jointype as i32);
     write_bool_field(buf, "isNatural", n.isNatural);
@@ -770,7 +770,7 @@ fn out_join_expr(buf: &mut String, n: &nodes::rawnodes::JoinExpr<'_>, wl: bool) 
 // _outFromExpr
 // ===========================================================================
 
-fn out_from_expr(buf: &mut String, n: &nodes::rawnodes::FromExpr<'_>, wl: bool) {
+fn out_from_expr(buf: &mut String, n: &::nodes::rawnodes::FromExpr<'_>, wl: bool) {
     buf.push_str("FROMEXPR");
     write_node_vec_field(buf, "fromlist", &n.fromlist, wl);
     write_opt_node_field(buf, "quals", &n.quals, wl);
@@ -780,7 +780,7 @@ fn out_from_expr(buf: &mut String, n: &nodes::rawnodes::FromExpr<'_>, wl: bool) 
 // _outOnConflictExpr
 // ===========================================================================
 
-fn out_on_conflict_expr(buf: &mut String, n: &nodes::rawnodes::OnConflictExpr<'_>, wl: bool) {
+fn out_on_conflict_expr(buf: &mut String, n: &::nodes::rawnodes::OnConflictExpr<'_>, wl: bool) {
     buf.push_str("ONCONFLICTEXPR");
     write_enum_field(buf, "action", n.action as i32);
     write_node_vec_field(buf, "arbiterElems", &n.arbiterElems, wl);
@@ -796,7 +796,7 @@ fn out_on_conflict_expr(buf: &mut String, n: &nodes::rawnodes::OnConflictExpr<'_
 // _outMergeAction
 // ===========================================================================
 
-fn out_merge_action(buf: &mut String, n: &nodes::rawnodes::MergeAction<'_>, wl: bool) {
+fn out_merge_action(buf: &mut String, n: &::nodes::rawnodes::MergeAction<'_>, wl: bool) {
     buf.push_str("MERGEACTION");
     write_enum_field(buf, "matchKind", n.matchKind as i32);
     write_enum_field(buf, "commandType", n.commandType as i32);
@@ -810,7 +810,7 @@ fn out_merge_action(buf: &mut String, n: &nodes::rawnodes::MergeAction<'_>, wl: 
 // _outLockingClause
 // ===========================================================================
 
-fn out_locking_clause(buf: &mut String, n: &nodes::rawnodes::LockingClause<'_>, wl: bool) {
+fn out_locking_clause(buf: &mut String, n: &::nodes::rawnodes::LockingClause<'_>, wl: bool) {
     buf.push_str("LOCKINGCLAUSE");
     write_node_vec_field(buf, "lockedRels", &n.lockedRels, wl);
     write_enum_field(buf, "strength", n.strength as i32);
@@ -821,7 +821,7 @@ fn out_locking_clause(buf: &mut String, n: &nodes::rawnodes::LockingClause<'_>, 
 // _outColumnRef
 // ===========================================================================
 
-fn out_column_ref(buf: &mut String, n: &nodes::rawnodes::ColumnRef<'_>, wl: bool) {
+fn out_column_ref(buf: &mut String, n: &::nodes::rawnodes::ColumnRef<'_>, wl: bool) {
     buf.push_str("COLUMNREF");
     write_node_vec_field(buf, "fields", &n.fields, wl);
     write_location_field(buf, "location", n.location, wl);
@@ -831,7 +831,7 @@ fn out_column_ref(buf: &mut String, n: &nodes::rawnodes::ColumnRef<'_>, wl: bool
 // _outParamRef
 // ===========================================================================
 
-fn out_param_ref(buf: &mut String, n: &nodes::rawnodes::ParamRef, wl: bool) {
+fn out_param_ref(buf: &mut String, n: &::nodes::rawnodes::ParamRef, wl: bool) {
     buf.push_str("PARAMREF");
     write_int_field(buf, "number", n.number);
     write_location_field(buf, "location", n.location, wl);
@@ -841,7 +841,7 @@ fn out_param_ref(buf: &mut String, n: &nodes::rawnodes::ParamRef, wl: bool) {
 // _outA_Expr — custom, switch on kind.
 // ===========================================================================
 
-fn out_a_expr(buf: &mut String, n: &nodes::rawnodes::A_Expr<'_>, wl: bool) {
+fn out_a_expr(buf: &mut String, n: &::nodes::rawnodes::A_Expr<'_>, wl: bool) {
     buf.push_str("A_EXPR");
     match n.kind {
         A_Expr_Kind::AEXPR_OP => {
@@ -911,7 +911,7 @@ fn out_a_expr(buf: &mut String, n: &nodes::rawnodes::A_Expr<'_>, wl: bool) {
 // _outFuncCall
 // ===========================================================================
 
-fn out_func_call(buf: &mut String, n: &nodes::rawnodes::FuncCall<'_>, wl: bool) {
+fn out_func_call(buf: &mut String, n: &::nodes::rawnodes::FuncCall<'_>, wl: bool) {
     buf.push_str("FUNCCALL");
     write_node_vec_field(buf, "funcname", &n.funcname, wl);
     write_node_vec_field(buf, "args", &n.args, wl);
@@ -930,24 +930,24 @@ fn out_func_call(buf: &mut String, n: &nodes::rawnodes::FuncCall<'_>, wl: bool) 
 // _outA_Star / _outA_Indices / _outA_Indirection / _outA_ArrayExpr
 // ===========================================================================
 
-fn out_a_star(buf: &mut String, _n: &nodes::rawnodes::A_Star, _wl: bool) {
+fn out_a_star(buf: &mut String, _n: &::nodes::rawnodes::A_Star, _wl: bool) {
     buf.push_str("A_STAR");
 }
 
-fn out_a_indices(buf: &mut String, n: &nodes::rawnodes::A_Indices<'_>, wl: bool) {
+fn out_a_indices(buf: &mut String, n: &::nodes::rawnodes::A_Indices<'_>, wl: bool) {
     buf.push_str("A_INDICES");
     write_bool_field(buf, "is_slice", n.is_slice);
     write_opt_node_field(buf, "lidx", &n.lidx, wl);
     write_opt_node_field(buf, "uidx", &n.uidx, wl);
 }
 
-fn out_a_indirection(buf: &mut String, n: &nodes::rawnodes::A_Indirection<'_>, wl: bool) {
+fn out_a_indirection(buf: &mut String, n: &::nodes::rawnodes::A_Indirection<'_>, wl: bool) {
     buf.push_str("A_INDIRECTION");
     write_opt_node_field(buf, "arg", &n.arg, wl);
     write_node_vec_field(buf, "indirection", &n.indirection, wl);
 }
 
-fn out_a_array_expr(buf: &mut String, n: &nodes::rawnodes::A_ArrayExpr<'_>, wl: bool) {
+fn out_a_array_expr(buf: &mut String, n: &::nodes::rawnodes::A_ArrayExpr<'_>, wl: bool) {
     buf.push_str("A_ARRAYEXPR");
     write_node_vec_field(buf, "elements", &n.elements, wl);
     write_location_field(buf, "list_start", n.list_start, wl);
@@ -959,7 +959,7 @@ fn out_a_array_expr(buf: &mut String, n: &nodes::rawnodes::A_ArrayExpr<'_>, wl: 
 // _outResTarget / _outMultiAssignRef / _outTypeCast / _outCollateClause
 // ===========================================================================
 
-fn out_res_target(buf: &mut String, n: &nodes::rawnodes::ResTarget<'_>, wl: bool) {
+fn out_res_target(buf: &mut String, n: &::nodes::rawnodes::ResTarget<'_>, wl: bool) {
     buf.push_str("RESTARGET");
     write_string_field(buf, "name", n.name.as_ref().map(|s| s.as_str()));
     write_node_vec_field(buf, "indirection", &n.indirection, wl);
@@ -967,21 +967,21 @@ fn out_res_target(buf: &mut String, n: &nodes::rawnodes::ResTarget<'_>, wl: bool
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_multi_assign_ref(buf: &mut String, n: &nodes::rawnodes::MultiAssignRef<'_>, wl: bool) {
+fn out_multi_assign_ref(buf: &mut String, n: &::nodes::rawnodes::MultiAssignRef<'_>, wl: bool) {
     buf.push_str("MULTIASSIGNREF");
     write_opt_node_field(buf, "source", &n.source, wl);
     write_int_field(buf, "colno", n.colno);
     write_int_field(buf, "ncolumns", n.ncolumns);
 }
 
-fn out_type_cast(buf: &mut String, n: &nodes::rawnodes::TypeCast<'_>, wl: bool) {
+fn out_type_cast(buf: &mut String, n: &::nodes::rawnodes::TypeCast<'_>, wl: bool) {
     buf.push_str("TYPECAST");
     write_opt_node_field(buf, "arg", &n.arg, wl);
     write_opt_framed(buf, "typeName", &n.typeName, wl, out_type_name);
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_collate_clause(buf: &mut String, n: &nodes::rawnodes::CollateClause<'_>, wl: bool) {
+fn out_collate_clause(buf: &mut String, n: &::nodes::rawnodes::CollateClause<'_>, wl: bool) {
     buf.push_str("COLLATECLAUSE");
     write_opt_node_field(buf, "arg", &n.arg, wl);
     write_node_vec_field(buf, "collname", &n.collname, wl);
@@ -992,7 +992,7 @@ fn out_collate_clause(buf: &mut String, n: &nodes::rawnodes::CollateClause<'_>, 
 // _outSortBy / _outWindowDef
 // ===========================================================================
 
-fn out_sort_by(buf: &mut String, n: &nodes::rawnodes::SortBy<'_>, wl: bool) {
+fn out_sort_by(buf: &mut String, n: &::nodes::rawnodes::SortBy<'_>, wl: bool) {
     buf.push_str("SORTBY");
     write_opt_node_field(buf, "node", &n.node, wl);
     write_enum_field(buf, "sortby_dir", n.sortby_dir as i32);
@@ -1001,7 +1001,7 @@ fn out_sort_by(buf: &mut String, n: &nodes::rawnodes::SortBy<'_>, wl: bool) {
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_window_def(buf: &mut String, n: &nodes::rawnodes::WindowDef<'_>, wl: bool) {
+fn out_window_def(buf: &mut String, n: &::nodes::rawnodes::WindowDef<'_>, wl: bool) {
     buf.push_str("WINDOWDEF");
     write_string_field(buf, "name", n.name.as_ref().map(|s| s.as_str()));
     write_string_field(buf, "refname", n.refname.as_ref().map(|s| s.as_str()));
@@ -1017,14 +1017,14 @@ fn out_window_def(buf: &mut String, n: &nodes::rawnodes::WindowDef<'_>, wl: bool
 // _outRangeSubselect / _outRangeFunction / _outRangeTableSample
 // ===========================================================================
 
-fn out_range_subselect(buf: &mut String, n: &nodes::rawnodes::RangeSubselect<'_>, wl: bool) {
+fn out_range_subselect(buf: &mut String, n: &::nodes::rawnodes::RangeSubselect<'_>, wl: bool) {
     buf.push_str("RANGESUBSELECT");
     write_bool_field(buf, "lateral", n.lateral);
     write_opt_node_field(buf, "subquery", &n.subquery, wl);
     write_opt_framed(buf, "alias", &n.alias, wl, out_alias);
 }
 
-fn out_range_function(buf: &mut String, n: &nodes::rawnodes::RangeFunction<'_>, wl: bool) {
+fn out_range_function(buf: &mut String, n: &::nodes::rawnodes::RangeFunction<'_>, wl: bool) {
     buf.push_str("RANGEFUNCTION");
     write_bool_field(buf, "lateral", n.lateral);
     write_bool_field(buf, "ordinality", n.ordinality);
@@ -1034,7 +1034,7 @@ fn out_range_function(buf: &mut String, n: &nodes::rawnodes::RangeFunction<'_>, 
     write_node_vec_field(buf, "coldeflist", &n.coldeflist, wl);
 }
 
-fn out_range_table_sample(buf: &mut String, n: &nodes::rawnodes::RangeTableSample<'_>, wl: bool) {
+fn out_range_table_sample(buf: &mut String, n: &::nodes::rawnodes::RangeTableSample<'_>, wl: bool) {
     buf.push_str("RANGETABLESAMPLE");
     write_opt_node_field(buf, "relation", &n.relation, wl);
     write_node_vec_field(buf, "method", &n.method, wl);
@@ -1047,14 +1047,14 @@ fn out_range_table_sample(buf: &mut String, n: &nodes::rawnodes::RangeTableSampl
 // _outWithClause / _outInferClause / _outOnConflictClause
 // ===========================================================================
 
-fn out_with_clause(buf: &mut String, n: &nodes::rawnodes::WithClause<'_>, wl: bool) {
+fn out_with_clause(buf: &mut String, n: &::nodes::rawnodes::WithClause<'_>, wl: bool) {
     buf.push_str("WITHCLAUSE");
     write_node_vec_field(buf, "ctes", &n.ctes, wl);
     write_bool_field(buf, "recursive", n.recursive);
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_infer_clause(buf: &mut String, n: &nodes::rawnodes::InferClause<'_>, wl: bool) {
+fn out_infer_clause(buf: &mut String, n: &::nodes::rawnodes::InferClause<'_>, wl: bool) {
     buf.push_str("INFERCLAUSE");
     write_node_vec_field(buf, "indexElems", &n.indexElems, wl);
     write_opt_node_field(buf, "whereClause", &n.whereClause, wl);
@@ -1062,7 +1062,7 @@ fn out_infer_clause(buf: &mut String, n: &nodes::rawnodes::InferClause<'_>, wl: 
     write_location_field(buf, "location", n.location, wl);
 }
 
-fn out_on_conflict_clause(buf: &mut String, n: &nodes::rawnodes::OnConflictClause<'_>, wl: bool) {
+fn out_on_conflict_clause(buf: &mut String, n: &::nodes::rawnodes::OnConflictClause<'_>, wl: bool) {
     buf.push_str("ONCONFLICTCLAUSE");
     write_enum_field(buf, "action", n.action as i32);
     write_opt_framed(buf, "infer", &n.infer, wl, out_infer_clause);
@@ -1075,7 +1075,7 @@ fn out_on_conflict_clause(buf: &mut String, n: &nodes::rawnodes::OnConflictClaus
 // _outMergeWhenClause / _outReturningClause
 // ===========================================================================
 
-fn out_merge_when_clause(buf: &mut String, n: &nodes::rawnodes::MergeWhenClause<'_>, wl: bool) {
+fn out_merge_when_clause(buf: &mut String, n: &::nodes::rawnodes::MergeWhenClause<'_>, wl: bool) {
     buf.push_str("MERGEWHENCLAUSE");
     write_enum_field(buf, "matchKind", n.matchKind as i32);
     write_enum_field(buf, "commandType", n.commandType as i32);
@@ -1085,7 +1085,7 @@ fn out_merge_when_clause(buf: &mut String, n: &nodes::rawnodes::MergeWhenClause<
     write_node_vec_field(buf, "values", &n.values, wl);
 }
 
-fn out_returning_clause(buf: &mut String, n: &nodes::rawnodes::ReturningClause<'_>, wl: bool) {
+fn out_returning_clause(buf: &mut String, n: &::nodes::rawnodes::ReturningClause<'_>, wl: bool) {
     buf.push_str("RETURNINGCLAUSE");
     write_node_vec_field(buf, "options", &n.options, wl);
     write_node_vec_field(buf, "exprs", &n.exprs, wl);
@@ -1095,7 +1095,7 @@ fn out_returning_clause(buf: &mut String, n: &nodes::rawnodes::ReturningClause<'
 // _outInsertStmt / _outDeleteStmt / _outUpdateStmt / _outMergeStmt
 // ===========================================================================
 
-fn out_insert_stmt(buf: &mut String, n: &nodes::rawnodes::InsertStmt<'_>, wl: bool) {
+fn out_insert_stmt(buf: &mut String, n: &::nodes::rawnodes::InsertStmt<'_>, wl: bool) {
     buf.push_str("INSERTSTMT");
     write_opt_framed(buf, "relation", &n.relation, wl, out_range_var);
     write_node_vec_field(buf, "cols", &n.cols, wl);
@@ -1106,7 +1106,7 @@ fn out_insert_stmt(buf: &mut String, n: &nodes::rawnodes::InsertStmt<'_>, wl: bo
     write_enum_field(buf, "override", n.r#override as i32);
 }
 
-fn out_delete_stmt(buf: &mut String, n: &nodes::rawnodes::DeleteStmt<'_>, wl: bool) {
+fn out_delete_stmt(buf: &mut String, n: &::nodes::rawnodes::DeleteStmt<'_>, wl: bool) {
     buf.push_str("DELETESTMT");
     write_opt_framed(buf, "relation", &n.relation, wl, out_range_var);
     write_node_vec_field(buf, "usingClause", &n.usingClause, wl);
@@ -1115,7 +1115,7 @@ fn out_delete_stmt(buf: &mut String, n: &nodes::rawnodes::DeleteStmt<'_>, wl: bo
     write_opt_framed(buf, "withClause", &n.withClause, wl, out_with_clause);
 }
 
-fn out_update_stmt(buf: &mut String, n: &nodes::rawnodes::UpdateStmt<'_>, wl: bool) {
+fn out_update_stmt(buf: &mut String, n: &::nodes::rawnodes::UpdateStmt<'_>, wl: bool) {
     buf.push_str("UPDATESTMT");
     write_opt_framed(buf, "relation", &n.relation, wl, out_range_var);
     write_node_vec_field(buf, "targetList", &n.targetList, wl);
@@ -1125,7 +1125,7 @@ fn out_update_stmt(buf: &mut String, n: &nodes::rawnodes::UpdateStmt<'_>, wl: bo
     write_opt_framed(buf, "withClause", &n.withClause, wl, out_with_clause);
 }
 
-fn out_merge_stmt(buf: &mut String, n: &nodes::rawnodes::MergeStmt<'_>, wl: bool) {
+fn out_merge_stmt(buf: &mut String, n: &::nodes::rawnodes::MergeStmt<'_>, wl: bool) {
     buf.push_str("MERGESTMT");
     write_opt_framed(buf, "relation", &n.relation, wl, out_range_var);
     write_opt_node_field(buf, "sourceRelation", &n.sourceRelation, wl);
@@ -1139,7 +1139,7 @@ fn out_merge_stmt(buf: &mut String, n: &nodes::rawnodes::MergeStmt<'_>, wl: bool
 // _outSelectStmt
 // ===========================================================================
 
-fn out_select_stmt(buf: &mut String, n: &nodes::rawnodes::SelectStmt<'_>, wl: bool) {
+fn out_select_stmt(buf: &mut String, n: &::nodes::rawnodes::SelectStmt<'_>, wl: bool) {
     buf.push_str("SELECTSTMT");
     write_node_vec_field(buf, "distinctClause", &n.distinctClause, wl);
     write_opt_node_field(buf, "intoClause", &n.intoClause, wl);
@@ -1167,7 +1167,7 @@ fn out_select_stmt(buf: &mut String, n: &nodes::rawnodes::SelectStmt<'_>, wl: bo
 // _outA_Const — custom.
 // ===========================================================================
 
-fn out_a_const(buf: &mut String, n: &nodes::rawnodes::A_Const<'_>, wl: bool) {
+fn out_a_const(buf: &mut String, n: &::nodes::rawnodes::A_Const<'_>, wl: bool) {
     buf.push_str("A_CONST");
     if n.isnull {
         buf.push_str(" NULL");

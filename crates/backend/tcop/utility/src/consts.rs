@@ -11,7 +11,7 @@
 //! newtype whose value is the 0-based list-position from `cmdtaglist.h` (the
 //! same numbering `backend-tcop-cmdtag`'s `TAG_BEHAVIOR` table indexes).
 
-pub use nodes::parsestmt::ProcessUtilityContext;
+pub use ::nodes::parsestmt::ProcessUtilityContext;
 use types_core::cmdtag::CommandTag;
 use types_core::Oid;
 

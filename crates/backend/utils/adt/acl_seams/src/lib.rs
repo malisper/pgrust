@@ -6,7 +6,7 @@
 
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::parsenodes::RoleSpec;
+use ::nodes::parsenodes::RoleSpec;
 
 seam_core::seam!(
     /// `member_can_set_role(member, role)` (acl.c): whether `member` is

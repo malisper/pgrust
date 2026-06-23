@@ -35,7 +35,7 @@ seam_core::seam!(
         state: &mut TableFuncScanState<'mcx>,
         kind: TableFuncRoutineKind,
         natts: i32,
-        estate: &mut nodes::EStateData<'mcx>,
+        estate: &mut ::nodes::EStateData<'mcx>,
     ) -> PgResult<()>
 );
 
@@ -111,7 +111,7 @@ seam_core::seam!(
         colnum: i32,
         typid: Oid,
         typmod: i32,
-        estate: &mut nodes::EStateData<'mcx>,
+        estate: &mut ::nodes::EStateData<'mcx>,
     ) -> PgResult<(Datum<'mcx>, bool)>
 );
 

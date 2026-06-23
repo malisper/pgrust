@@ -13,11 +13,11 @@
 use mcx::Mcx;
 use types_core::primitive::{AttrNumber, Oid, OidIsValid};
 use types_error::PgResult;
-use nodes::ddlnodes::{PartitionElem, PartitionSpec};
-use nodes::nodes::Node;
-use nodes::partition::PartitionStrategy;
-use nodes::primnodes::Expr;
-use nodes::parsestmt::ParseExprKind;
+use ::nodes::ddlnodes::{PartitionElem, PartitionSpec};
+use ::nodes::nodes::Node;
+use ::nodes::partition::PartitionStrategy;
+use ::nodes::primnodes::Expr;
+use ::nodes::parsestmt::ParseExprKind;
 
 use utils_error::ereport;
 use crate::helpers::here;
@@ -154,7 +154,7 @@ fn transformPartitionSpec<'mcx>(
     parser_relation::addNSItemToQuery(mcx, &mut pstate, nsitem, true, true, true)?;
 
     /* take care of any partition expressions */
-    let mut new_params: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+    let mut new_params: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
         mcx::vec_with_capacity_in(mcx, partspec.partParams.len())?;
     for l in partspec.partParams.iter() {
         let pelem = match l.as_partitionelem() {
@@ -199,9 +199,9 @@ fn transformPartitionSpec<'mcx>(
 #[allow(clippy::type_complexity)]
 fn ComputePartitionAttrs<'mcx>(
     mcx: Mcx<'mcx>,
-    pstate: &nodes::parsestmt::ParseState<'mcx>,
+    pstate: &::nodes::parsestmt::ParseState<'mcx>,
     rel: &rel::RelationData<'mcx>,
-    part_params: &[nodes::nodes::NodePtr<'mcx>],
+    part_params: &[::nodes::nodes::NodePtr<'mcx>],
     strategy: PartitionStrategy,
 ) -> PgResult<(
     Vec<AttrNumber>,
@@ -524,7 +524,7 @@ fn resolve_opclass<'mcx>(
 /// Flatten a `List` of `String` nodes (a qualified collation name) into the
 /// `&[Option<String>]` `NameList` `get_collation_oid` expects.
 fn nodelist_to_namelist<'mcx>(
-    nodes: &[nodes::nodes::NodePtr<'mcx>],
+    nodes: &[::nodes::nodes::NodePtr<'mcx>],
 ) -> Vec<Option<String>> {
     nodes
         .iter()
@@ -587,7 +587,7 @@ pub fn define_relation_partspec<'mcx>(
     let partexprs_node = if partexprs.is_empty() {
         None
     } else {
-        let mut cells: mcx::PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+        let mut cells: mcx::PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
             mcx::vec_with_capacity_in(mcx, partexprs.len())?;
         for e in partexprs.into_iter() {
             cells.push(mcx::alloc_in(mcx, Node::mk_expr(mcx, e)?)?);

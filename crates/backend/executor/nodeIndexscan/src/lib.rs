@@ -62,13 +62,13 @@ use mcx::{Mcx, PgBox, PgVec};
 use types_core::{AttrNumber, InvalidOid, Oid};
 use types_error::{PgError, PgResult};
 use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
-use nodes::nodeindexonlyscan::{
+use ::nodes::nodeindexonlyscan::{
     IndexRuntimeKeyInfo, IndexScanInstrumentation, IndexScanState, ParallelIndexScanDescHandle,
     SharedIndexScanInstrumentation,
 };
-use nodes::nodebitmapindexscan::IndexArrayKeyInfo;
-use nodes::nodeindexscan::IndexScan;
-use nodes::primnodes::Expr;
+use ::nodes::nodebitmapindexscan::IndexArrayKeyInfo;
+use ::nodes::nodeindexscan::IndexScan;
+use ::nodes::primnodes::Expr;
 use nodes::{EStateData, EcxtId, PlanStateData, SlotId};
 use types_scan::scankey::{
     ScanKeyData, StrategyNumber, InvalidStrategy, SK_ISNULL, SK_ORDER_BY, SK_ROW_END, SK_ROW_HEADER,
@@ -397,7 +397,7 @@ fn IndexRecheck<'mcx>(node: &mut IndexScanState<'mcx>, estate: &mut EStateData<'
 // Reorder queue (ReorderTuple pairing heap).
 // ===========================================================================
 
-use nodes::ReorderTuple;
+use ::nodes::ReorderTuple;
 
 fn reorder_queue_is_empty(node: &IndexScanState<'_>) -> bool {
     node.iss_ReorderQueue
@@ -573,7 +573,7 @@ fn reorderqueue_pop<'mcx>(
 /// `ExecIndexScan(pstate)` — scan the index, returning whether the next
 /// qualifying tuple is available (in the node's scan/result slot).
 pub fn ExecIndexScan<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     // If we have runtime keys and they've not already been set up, do it now.
@@ -591,7 +591,7 @@ pub fn ExecIndexScan<'mcx>(
     // classic Memoize-over-parameterized-IndexScan collapse). Dispatch through
     // the generic ExecReScan so it recomputes the keys *and* clears chgParam.
     let (num_runtime_keys, ready, num_orderby, chg_param_set) = match pstate {
-        nodes::PlanStateNode::IndexScan(n) => (
+        ::nodes::PlanStateNode::IndexScan(n) => (
             n.iss_NumRuntimeKeys,
             n.iss_RuntimeKeysReady,
             n.iss_NumOrderByKeys,
@@ -606,7 +606,7 @@ pub fn ExecIndexScan<'mcx>(
     }
 
     let node = match pstate {
-        nodes::PlanStateNode::IndexScan(n) => &mut **n,
+        ::nodes::PlanStateNode::IndexScan(n) => &mut **n,
         _ => return Err(elog("ExecIndexScan dispatched to wrong node type")),
     };
 
@@ -751,7 +751,7 @@ pub fn ExecIndexRestrPos<'mcx>(
 /// `ExecInitIndexScan(node, estate, eflags)` — initialize the index scan's
 /// state, create scan keys, and open the base and index relations.
 pub fn ExecInitIndexScan<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, IndexScanState<'mcx>>> {
@@ -759,7 +759,7 @@ pub fn ExecInitIndexScan<'mcx>(
 
     // IndexScan *node — castNode.
     let is: &'mcx IndexScan<'mcx> = match node.node_tag() {
-        nodes::nodes::ntag::T_IndexScan => node.expect_indexscan(),
+        ::nodes::nodes::ntag::T_IndexScan => node.expect_indexscan(),
         _ => panic!("castNode(IndexScan, node) failed: {node:?}"),
     };
 
@@ -1218,8 +1218,8 @@ fn exec_index_build_scan_keys_into<'mcx>(
                 let leftop = strip_relabel(ntest.arg.as_deref());
                 let varattno = require_index_var(leftop, "NullTest indexqual")?;
                 let flags = match ntest.nulltesttype {
-                    nodes::primnodes::NullTestType::IS_NULL => SK_ISNULL | SK_SEARCHNULL,
-                    nodes::primnodes::NullTestType::IS_NOT_NULL => {
+                    ::nodes::primnodes::NullTestType::IS_NULL => SK_ISNULL | SK_SEARCHNULL,
+                    ::nodes::primnodes::NullTestType::IS_NOT_NULL => {
                         SK_ISNULL | SK_SEARCHNOTNULL
                     }
                 };
@@ -1708,7 +1708,7 @@ pub fn ExecIndexScanRetrieveInstrumentation<'mcx>(
 
 // C: `epqstate->relsubs_slot[idx] != NULL`.
 #[inline]
-fn epq_relsubs_slot_present(epqstate: &nodes::EPQState<'_>, idx: usize) -> bool {
+fn epq_relsubs_slot_present(epqstate: &::nodes::EPQState<'_>, idx: usize) -> bool {
     epqstate
         .relsubs_slot
         .as_ref()
@@ -1719,7 +1719,7 @@ fn epq_relsubs_slot_present(epqstate: &nodes::EPQState<'_>, idx: usize) -> bool 
 
 // C: `epqstate->relsubs_rowmark[idx] != NULL`.
 #[inline]
-fn epq_relsubs_rowmark_present(epqstate: &nodes::EPQState<'_>, idx: usize) -> bool {
+fn epq_relsubs_rowmark_present(epqstate: &::nodes::EPQState<'_>, idx: usize) -> bool {
     epqstate
         .relsubs_rowmark
         .as_ref()
@@ -1729,7 +1729,7 @@ fn epq_relsubs_rowmark_present(epqstate: &nodes::EPQState<'_>, idx: usize) -> bo
 
 // C: `epqstate->relsubs_done[idx]`.
 #[inline]
-fn epq_relsubs_done(epqstate: &nodes::EPQState<'_>, idx: usize) -> bool {
+fn epq_relsubs_done(epqstate: &::nodes::EPQState<'_>, idx: usize) -> bool {
     epqstate
         .relsubs_done
         .as_ref()
@@ -1769,7 +1769,7 @@ fn begin_scan_serial<'mcx>(
 /// `ExecQualAndReset(qual, econtext)` (executor.h): evaluate the qual in the
 /// node's expr context, then reset it. A `None` qual is always-true.
 fn exec_qual_and_reset<'mcx>(
-    qual: Option<&mut nodes::execexpr::ExprState<'mcx>>,
+    qual: Option<&mut ::nodes::execexpr::ExprState<'mcx>>,
     econtext: EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
@@ -1844,8 +1844,8 @@ fn relation_get_descr<'mcx>(
 }
 
 /// `table_slot_callbacks(currentRelation)` — heap relations use buffer-heap slots.
-fn table_slot_callbacks() -> nodes::TupleSlotKind {
-    nodes::TupleSlotKind::BufferHeapTuple
+fn table_slot_callbacks() -> ::nodes::TupleSlotKind {
+    ::nodes::TupleSlotKind::BufferHeapTuple
 }
 
 /// `node->iss_RelationDesc` alias.
@@ -1953,7 +1953,7 @@ fn exec_init_expr_in<'mcx>(
     expr: &Expr,
     planstate: &mut PlanStateData<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<PgBox<'mcx, nodes::execexpr::ExprState<'mcx>>> {
+) -> PgResult<PgBox<'mcx, ::nodes::execexpr::ExprState<'mcx>>> {
     execExpr::exec_init_expr::call(expr, planstate, estate)
 }
 
@@ -2017,13 +2017,13 @@ fn target_scankey<'a, 'mcx>(
 
 /// The `ExecProcNode` callback trampoline installed into `ps.ExecProcNode`.
 fn exec_proc_node_trampoline<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<Option<SlotId>> {
     let have = ExecIndexScan(pstate, estate)?;
     if have {
         let node = match pstate {
-            nodes::PlanStateNode::IndexScan(n) => &mut **n,
+            ::nodes::PlanStateNode::IndexScan(n) => &mut **n,
             _ => return Err(elog("ExecProcNode dispatched to wrong node type")),
         };
         Ok(node.ss.ps.ps_ResultTupleSlot.or(node.ss.ss_ScanTupleSlot))
@@ -2075,14 +2075,14 @@ pub fn init_seams() {
 // --- shared scan-key seam adapters (IndexOnlyScanState) --------------------
 
 fn seam_build_scan_keys_ios<'mcx>(
-    node: &mut nodes::IndexOnlyScanState<'mcx>,
+    node: &mut ::nodes::IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     index: rel::Relation<'mcx>,
     quals: Option<&[Expr<'mcx>]>,
     is_orderby: bool,
 ) -> PgResult<()> {
     let mut dummy_num_array = 0i32;
-    let nodes::IndexOnlyScanState {
+    let ::nodes::IndexOnlyScanState {
         ss,
         ioss_ScanKeys,
         ioss_NumScanKeys,
@@ -2109,11 +2109,11 @@ fn seam_build_scan_keys_ios<'mcx>(
 }
 
 fn seam_eval_runtime_keys_ios<'mcx>(
-    node: &mut nodes::IndexOnlyScanState<'mcx>,
+    node: &mut ::nodes::IndexOnlyScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     econtext: EcxtId,
 ) -> PgResult<()> {
-    let nodes::IndexOnlyScanState {
+    let ::nodes::IndexOnlyScanState {
         ioss_ScanKeys,
         ioss_OrderByKeys,
         ioss_RuntimeKeys,
@@ -2134,12 +2134,12 @@ fn seam_eval_runtime_keys_ios<'mcx>(
 // --- shared scan-key seam adapters (BitmapIndexScanState) ------------------
 
 fn seam_build_scan_keys_bis<'mcx>(
-    node: &mut nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
+    node: &mut ::nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     index: rel::Relation<'mcx>,
     quals: Option<&[Expr<'mcx>]>,
 ) -> PgResult<()> {
-    let nodes::nodebitmapindexscan::BitmapIndexScanState {
+    let ::nodes::nodebitmapindexscan::BitmapIndexScanState {
         ss,
         biss_ScanKeys,
         biss_NumScanKeys,
@@ -2162,11 +2162,11 @@ fn seam_build_scan_keys_bis<'mcx>(
 }
 
 fn seam_eval_runtime_keys_bis<'mcx>(
-    node: &mut nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
+    node: &mut ::nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     econtext: EcxtId,
 ) -> PgResult<()> {
-    let nodes::nodebitmapindexscan::BitmapIndexScanState {
+    let ::nodes::nodebitmapindexscan::BitmapIndexScanState {
         biss_ScanKeys,
         biss_RuntimeKeys,
         biss_NumRuntimeKeys,
@@ -2178,11 +2178,11 @@ fn seam_eval_runtime_keys_bis<'mcx>(
 }
 
 fn seam_eval_array_keys_bis<'mcx>(
-    node: &mut nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
+    node: &mut ::nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
     econtext: EcxtId,
 ) -> PgResult<bool> {
-    let nodes::nodebitmapindexscan::BitmapIndexScanState {
+    let ::nodes::nodebitmapindexscan::BitmapIndexScanState {
         biss_ScanKeys,
         biss_ArrayKeys,
         biss_NumArrayKeys,
@@ -2193,11 +2193,11 @@ fn seam_eval_array_keys_bis<'mcx>(
 }
 
 fn seam_advance_array_keys_bis<'mcx>(
-    node: &mut nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
+    node: &mut ::nodes::nodebitmapindexscan::BitmapIndexScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let mcx: Mcx<'mcx> = estate.es_query_cxt;
-    let nodes::nodebitmapindexscan::BitmapIndexScanState {
+    let ::nodes::nodebitmapindexscan::BitmapIndexScanState {
         biss_ScanKeys,
         biss_ArrayKeys,
         biss_NumArrayKeys,

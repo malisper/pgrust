@@ -53,9 +53,9 @@ use types_catalog::pg_statistic_ext::{
     STATS_EXT_DEPENDENCIES, STATS_EXT_EXPRESSIONS, STATS_EXT_MCV, STATS_EXT_NDISTINCT,
 };
 use types_core::{AttrNumber, Oid};
-use nodes::nodes::{ntag, Node};
-use nodes::parsenodes::ObjectType;
-use nodes::ddlnodes::{AlterStatsStmt, CreateStatsStmt};
+use ::nodes::nodes::{ntag, Node};
+use ::nodes::parsenodes::ObjectType;
+use ::nodes::ddlnodes::{AlterStatsStmt, CreateStatsStmt};
 use types_storage::lock::{NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 use types_tuple::heaptuple::Datum;
 use types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
@@ -633,7 +633,7 @@ pub fn CreateStatistics<'mcx>(
      * `None` when there are no expressions (the C NIL list).
      */
     let stxexprs_list: Option<Node<'mcx>> = if !stxexprs.is_empty() {
-        let mut items: PgVec<'mcx, nodes::nodes::NodePtr<'mcx>> =
+        let mut items: PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>> =
             mcx::vec_with_capacity_in(mcx, stxexprs.len())?;
         for e in &stxexprs {
             items.push(mcx::alloc_in(mcx, e.clone_in(mcx)?)?);
@@ -1005,7 +1005,7 @@ fn ChooseExtendedStatisticName(
 
 /// `ChooseExtendedStatisticNameAddition` (statscmds.c:889-930): generate the
 /// "name2" component for a new statistics object from its column-name list.
-fn ChooseExtendedStatisticNameAddition(exprs: &[nodes::nodes::NodePtr<'_>]) -> String {
+fn ChooseExtendedStatisticNameAddition(exprs: &[::nodes::nodes::NodePtr<'_>]) -> String {
     /* char buf[NAMEDATALEN * 2]; */
     let mut buf: Vec<u8> = Vec::with_capacity(NAMEDATALEN * 2);
 
@@ -1075,7 +1075,7 @@ fn alter_statistics_arm<'mcx>(mcx: Mcx<'mcx>, stmt: &Node<'mcx>) -> PgResult<Obj
 /// The dispatch passes the already-`transformStatsStmt`'d node.
 fn create_statistics_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: nodes::nodes::NodePtr<'mcx>,
+    stmt: ::nodes::nodes::NodePtr<'mcx>,
 ) -> PgResult<ObjectAddress> {
     match (&*stmt).node_tag() {
         ntag::T_CreateStatsStmt => CreateStatistics(mcx, (&*stmt).expect_createstatsstmt(), true),
@@ -1088,7 +1088,7 @@ fn create_statistics_arm<'mcx>(
 /// `CreateStatistics` is called with `check_rights = !is_rebuild = false`.
 fn create_statistics_rebuild_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: nodes::nodes::NodePtr<'mcx>,
+    stmt: ::nodes::nodes::NodePtr<'mcx>,
 ) -> PgResult<ObjectAddress> {
     match (&*stmt).node_tag() {
         ntag::T_CreateStatsStmt => CreateStatistics(mcx, (&*stmt).expect_createstatsstmt(), false),
@@ -1102,7 +1102,7 @@ fn create_statistics_rebuild_arm<'mcx>(
 /// owned-String form and delegate to the namespace owner.
 fn range_var_get_relid_share_update_arm<'mcx>(
     mcx: Mcx<'mcx>,
-    rel: nodes::nodes::NodePtr<'mcx>,
+    rel: ::nodes::nodes::NodePtr<'mcx>,
 ) -> PgResult<Oid> {
     let rangevar = match (&*rel).node_tag() {
         ntag::T_RangeVar => (&*rel).expect_rangevar(),

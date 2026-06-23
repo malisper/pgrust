@@ -20,8 +20,8 @@ use types_error::{
     PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_INTERNAL_ERROR,
 };
-use nodes::primnodes::etag;
-use nodes::primnodes::{
+use ::nodes::primnodes::etag;
+use ::nodes::primnodes::{
     ArrayCoerceExpr, CaseTestExpr, CoerceToDomain, CoerceViaIO, CoercionForm, CollateExpr,
     Const, ConvertRowtypeExpr, Expr, RowExpr,
 };
@@ -42,7 +42,7 @@ use nodes_core::nodefuncs::{
     expr_typmod as exprTypmod, expression_returns_set,
 };
 
-use nodes::parsestmt::ParseState;
+use ::nodes::parsestmt::ParseState;
 
 // Sibling parser crate (no dependency cycle: parse_type doesn't dep coerce-seams).
 use parse_type as parse_type;

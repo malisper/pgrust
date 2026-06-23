@@ -47,7 +47,7 @@ use types_error::{
     PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_INVALID_NAME, ERROR,
 };
-use nodes::parsenodes::{OBJECT_OPERATOR, OBJECT_SCHEMA};
+use ::nodes::parsenodes::{OBJECT_OPERATOR, OBJECT_SCHEMA};
 
 use utils_error::ereport;
 use types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};

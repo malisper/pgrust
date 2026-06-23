@@ -9,7 +9,7 @@
 //! `array_iter_next` walk, NULL-bitmap handling, by-value vs by-ref element
 //! window) is ported in `backend-utils-adt-arrayfuncs::array_unnest`.
 //!
-//! Here that core is assembled into a [`nodes::execexpr::PGFunction`] (the
+//! Here that core is assembled into a [`::nodes::execexpr::PGFunction`] (the
 //! executor-frame ABI whose call frame carries the LIVE `ReturnSetInfo`) and
 //! registered in this unit's executor-frame SRF table from
 //! [`register_unnest`] (called by `init_seams`) — the executor-frame `fmgrtab.c`
@@ -32,11 +32,11 @@ use mcx::{Mcx, PgBox};
 use array::ArrayElementDatum;
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::execexpr::ExprDoneCond;
-use nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
+use ::nodes::execexpr::ExprDoneCond;
+use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::heaptuple::Datum;
 
-use funcapi::srf_support::{
+use ::funcapi::srf_support::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall,
 };
 

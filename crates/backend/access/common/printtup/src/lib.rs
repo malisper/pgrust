@@ -55,7 +55,7 @@ use mcx::Mcx;
 use types_core::{FmgrInfo, Oid};
 use types_dest::dest::CommandDest;
 use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, PgError};
-use nodes::tuptable::SlotData;
+use ::nodes::tuptable::SlotData;
 use stringinfo::StringInfo;
 use types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData};
 
@@ -572,8 +572,8 @@ pub fn debugtup_emit<'mcx>(
 // (no `'mcx` smuggled into the `'static` registry, no `unsafe`).
 
 use core::cell::RefCell;
-use nodes::nodes::CmdType;
-use nodes::parsestmt::DestReceiverHandle;
+use ::nodes::nodes::CmdType;
+use ::nodes::parsestmt::DestReceiverHandle;
 
 /// One printtup receiver's owned state: the `DR_printtup` bookkeeping plus the
 /// portal-supplied target-list projection and result formats. This is the
@@ -932,7 +932,7 @@ pub const PqMsg_ParameterDescription: u8 = b't';
 /// Project a `Node`-wrapped target-list (e.g. the `CachedPlanGetTargetList`
 /// result, whose elements are `TargetEntry` nodes) to the printtup-relevant
 /// `TargetEntryInfo` triples `SendRowDescriptionMessage` reads.
-fn targetlist_info_from_nodes(tlist: &[nodes::nodes::Node<'_>]) -> Vec<TargetEntryInfo> {
+fn targetlist_info_from_nodes(tlist: &[::nodes::nodes::Node<'_>]) -> Vec<TargetEntryInfo> {
     tlist
         .iter()
         .map(|node| {
@@ -992,7 +992,7 @@ pub fn send_describe_statement<'mcx>(
     mcx: Mcx<'mcx>,
     param_types: &[Oid],
     result_desc: Option<&TupleDescData<'mcx>>,
-    targetlist: &[nodes::nodes::Node<'mcx>],
+    targetlist: &[::nodes::nodes::Node<'mcx>],
 ) -> PgResult<()> {
     // First describe the parameters...
     //   pq_beginmessage_reuse(&row_description_buf, PqMsg_ParameterDescription);

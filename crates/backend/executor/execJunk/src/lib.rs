@@ -34,10 +34,10 @@ use execTuples_seams as execTuples;
 use mcx::{alloc_in, vec_with_capacity_in, Mcx};
 use types_core::primitive::{AttrNumber, InvalidAttrNumber};
 use types_error::{PgError, PgResult};
-use nodes::executor::TupleSlotKind;
-use nodes::execnodes::{EStateData, JunkFilter, SlotId};
-use nodes::nodes::T_JunkFilter;
-use nodes::primnodes::TargetEntry;
+use ::nodes::executor::TupleSlotKind;
+use ::nodes::execnodes::{EStateData, JunkFilter, SlotId};
+use ::nodes::nodes::T_JunkFilter;
+use ::nodes::primnodes::TargetEntry;
 use types_tuple::heaptuple::TupleDesc;
 
 /// `tupdesc->natts` with a NULL-descriptor guard (the C descriptor is always

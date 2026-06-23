@@ -7,7 +7,7 @@
 //! # Why a separate `Node`-level walker
 //!
 //! The existing [`crate::nodefuncs::expression_tree_walker`] recurses over the
-//! trimmed [`nodes::primnodes::Expr`] enum (callback `FnMut(&Expr)`). The
+//! trimmed [`::nodes::primnodes::Expr`] enum (callback `FnMut(&Expr)`). The
 //! parser recursive cluster (`parse_collate`/`expr`/`clause`/`target`/`func`/
 //! `agg`/`relation`) walks the *full* `Node` universe — `Query`,
 //! `RangeTblEntry`, the raw-grammar statement nodes, and the value/expression
@@ -18,7 +18,7 @@
 //!
 //! # The split Expr/Node model and child wrapping
 //!
-//! `nodes::Node` keeps the split model — every `Expr`-derived node is
+//! `::nodes::Node` keeps the split model — every `Expr`-derived node is
 //! carried as the single arm `Node::Expr(Expr)`, while the parse/raw/Query
 //! vocabulary occupies its own `Node` arms. A `Node`'s expression children come
 //! in two shapes:
@@ -57,16 +57,16 @@
 
 #![allow(non_snake_case)]
 
-use nodes::nodes::ntag;
-use nodes::nodes::Node;
-use nodes::primnodes::Expr;
+use ::nodes::nodes::ntag;
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::Expr;
 
 // ===========================================================================
 // expression_tree_walker (Node-level) — nodeFuncs.c:2088
 // ===========================================================================
 
 /// `expression_tree_walker(node, walker, context)` (nodeFuncs.c) over the full
-/// `nodes::Node` universe. `walker` returns `true` to abort the whole
+/// `::nodes::Node` universe. `walker` returns `true` to abort the whole
 /// walk; this function returns `true` iff some `walker` invocation did. Per the
 /// C contract the current `node` has already been visited by the caller; this
 /// only recurses into its immediate children.
@@ -362,7 +362,7 @@ pub fn node_expr_wrapper<'a, 'mcx>(e: &Expr<'a>, mcx: mcx::Mcx<'mcx>) -> Node<'m
 /// re-wrapped as a `Node::Expr` clone for the `FnMut(&Node)` walker (same
 /// clone-wrap as [`walk_expr_children`]).
 fn walk_table_func(
-    tf: &nodes::primnodes::TableFunc,
+    tf: &::nodes::primnodes::TableFunc,
     walker: &mut dyn FnMut(&Node) -> bool,
     mcx: mcx::Mcx<'_>,
 ) -> bool {
@@ -437,7 +437,7 @@ fn unrecognized_expression_node(node: &Node) -> bool {
 /// `clone_in`, which needs an allocator the walker does not have).
 #[inline]
 fn expr_walk_sentinel<'mcx>() -> Expr<'mcx> {
-    Expr::CaseTestExpr(nodes::primnodes::CaseTestExpr {
+    Expr::CaseTestExpr(::nodes::primnodes::CaseTestExpr {
         typeId: 0,
         typeMod: -1,
         collation: 0,
@@ -637,7 +637,7 @@ pub fn expression_tree_walker_mut<'mcx>(
 /// In-place analogue of [`walk_table_func`]: walk each `Expr` child as a wrapped
 /// `Node::Expr`, writing the (possibly mutated) child back into its field.
 fn walk_table_func_mut<'mcx>(
-    tf: &mut nodes::primnodes::TableFunc<'mcx>,
+    tf: &mut ::nodes::primnodes::TableFunc<'mcx>,
     walker: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     mcx: mcx::Mcx<'mcx>,
 ) -> bool {
@@ -749,7 +749,7 @@ fn walk_expr_children_mut<'mcx>(
             // The carrier slot is notionally `'static`; the data actually lives
             // in `mcx` (which outlives this walk). Re-tie the box to `'mcx` so
             // the mutating walk and the re-box stay within a single lifetime.
-            let sub_boxed: mcx::PgBox<'mcx, nodes::copy_query::Query<'mcx>> =
+            let sub_boxed: mcx::PgBox<'mcx, ::nodes::copy_query::Query<'mcx>> =
                 unsafe { core::mem::transmute(sub_boxed) };
             // Move the `Query` value out of the box WITHOUT running the box's
             // `deallocate`. `PgBox::into_inner` (and `box_read_payload`) would
@@ -1121,7 +1121,7 @@ pub fn raw_expression_tree_walker(node: &Node, walker: &mut dyn FnMut(&Node) -> 
 /// (the read-only walk only borrows; this preserves the C behavior of recursing
 /// into `stmt->larg`/`stmt->rarg`).
 fn raw_walk_selectstmt(
-    s: &nodes::rawnodes::SelectStmt,
+    s: &::nodes::rawnodes::SelectStmt,
     walker: &mut dyn FnMut(&Node) -> bool,
 ) -> bool {
     macro_rules! lw {
@@ -1171,7 +1171,7 @@ fn raw_walk_selectstmt(
         })
 }
 
-fn raw_walk_windowdef(wd: &nodes::rawnodes::WindowDef, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+fn raw_walk_windowdef(wd: &::nodes::rawnodes::WindowDef, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
     for e in wd.partitionClause.iter() {
         if walker(&**e) {
             return true;
@@ -1195,7 +1195,7 @@ fn raw_walk_windowdef(wd: &nodes::rawnodes::WindowDef, walker: &mut dyn FnMut(&N
     false
 }
 
-fn raw_walk_withclause(wc: &nodes::rawnodes::WithClause, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+fn raw_walk_withclause(wc: &::nodes::rawnodes::WithClause, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
     for e in wc.ctes.iter() {
         if walker(&**e) {
             return true;
@@ -1205,7 +1205,7 @@ fn raw_walk_withclause(wc: &nodes::rawnodes::WithClause, walker: &mut dyn FnMut(
 }
 
 fn raw_walk_onconflictclause(
-    occ: &nodes::rawnodes::OnConflictClause,
+    occ: &::nodes::rawnodes::OnConflictClause,
     walker: &mut dyn FnMut(&Node) -> bool,
 ) -> bool {
     if let Some(infer) = occ.infer.as_deref() {
@@ -1234,7 +1234,7 @@ fn raw_walk_onconflictclause(
 }
 
 fn raw_walk_returningclause(
-    rc: &nodes::rawnodes::ReturningClause,
+    rc: &::nodes::rawnodes::ReturningClause,
     walker: &mut dyn FnMut(&Node) -> bool,
 ) -> bool {
     for e in rc.exprs.iter() {
@@ -1245,7 +1245,7 @@ fn raw_walk_returningclause(
     false
 }
 
-fn raw_walk_typename(tn: &nodes::rawnodes::TypeName, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
+fn raw_walk_typename(tn: &::nodes::rawnodes::TypeName, walker: &mut dyn FnMut(&Node) -> bool) -> bool {
     for e in tn.typmods.iter() {
         if walker(&**e) {
             return true;
@@ -1286,7 +1286,7 @@ pub const QTW_IGNORE_GROUPEXPRS: i32 = 0x100;
 /// `walker` to all the expression trees hanging off a `Query`, then recurse into
 /// sub-queries via the range table per `flags`. Returns `true` on abort.
 pub fn query_tree_walker(
-    query: &nodes::copy_query::Query,
+    query: &::nodes::copy_query::Query,
     walker: &mut dyn FnMut(&Node) -> bool,
     flags: i32,
 ) -> bool {
@@ -1394,7 +1394,7 @@ pub fn query_tree_walker(
 
 /// `range_table_walker(rtable, walker, context, flags)` (nodeFuncs.c).
 pub fn range_table_walker(
-    rtable: &[nodes::parsenodes::RangeTblEntry],
+    rtable: &[::nodes::parsenodes::RangeTblEntry],
     walker: &mut dyn FnMut(&Node) -> bool,
     flags: i32,
 ) -> bool {
@@ -1410,11 +1410,11 @@ pub fn range_table_walker(
 /// the expression trees of a single RTE, descending into its subquery per
 /// `flags`.
 pub fn range_table_entry_walker(
-    rte: &nodes::parsenodes::RangeTblEntry,
+    rte: &::nodes::parsenodes::RangeTblEntry,
     walker: &mut dyn FnMut(&Node) -> bool,
     flags: i32,
 ) -> bool {
-    use nodes::parsenodes::RTEKind;
+    use ::nodes::parsenodes::RTEKind;
 
     macro_rules! list_walk {
         ($list:expr) => {{
@@ -1438,7 +1438,7 @@ pub fn range_table_entry_walker(
     // (parse_agg.c) detect a below-aggregate CTE reference (an RTE_CTE entry in a
     // sub-Query's range table).
     fn examine_rte(
-        rte: &nodes::parsenodes::RangeTblEntry,
+        rte: &::nodes::parsenodes::RangeTblEntry,
         walker: &mut dyn FnMut(&Node) -> bool,
     ) -> bool {
         let scratch = mcx::MemoryContext::new("range_table_entry_walker rte");
@@ -1558,7 +1558,7 @@ pub fn query_or_expression_tree_walker(
 /// copy" is realized as in-place mutation through `&mut Node` children, the
 /// owned-tree convention used across this repo's `*_mut` walkers.
 pub fn query_tree_mutator<'mcx>(
-    query: &mut nodes::copy_query::Query<'mcx>,
+    query: &mut ::nodes::copy_query::Query<'mcx>,
     mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     flags: i32,
     mcx: mcx::Mcx<'mcx>,
@@ -1681,12 +1681,12 @@ pub fn query_tree_mutator<'mcx>(
 /// `range_table_mutator(rtable, mutator, context, flags)` (nodeFuncs.c) —
 /// in-place owned-tree variant.
 pub fn range_table_mutator<'mcx>(
-    rtable: &mut [nodes::parsenodes::RangeTblEntry<'mcx>],
+    rtable: &mut [::nodes::parsenodes::RangeTblEntry<'mcx>],
     mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     flags: i32,
     mcx: mcx::Mcx<'mcx>,
 ) -> bool {
-    use nodes::parsenodes::RTEKind;
+    use ::nodes::parsenodes::RTEKind;
     macro_rules! list_walk {
         ($list:expr) => {{
             let mut aborted = false;
@@ -1802,7 +1802,7 @@ pub fn query_or_expression_tree_mutator<'mcx>(
 }
 
 fn mutate_targetentry_list<'mcx>(
-    list: &mut [nodes::primnodes::TargetEntry<'mcx>],
+    list: &mut [::nodes::primnodes::TargetEntry<'mcx>],
     mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
     mcx: mcx::Mcx<'mcx>,
 ) -> bool {
@@ -1826,7 +1826,7 @@ fn mutate_targetentry_list<'mcx>(
 }
 
 fn mutate_fromexpr<'mcx>(
-    from: &mut nodes::rawnodes::FromExpr<'mcx>,
+    from: &mut ::nodes::rawnodes::FromExpr<'mcx>,
     mutator: &mut dyn FnMut(&mut Node<'mcx>) -> bool,
 ) -> bool {
     for e in from.fromlist.iter_mut() {
@@ -1850,14 +1850,14 @@ fn mutate_fromexpr<'mcx>(
 /// into the child `PlanState` nodes of an executor state node (init/sub-plans
 /// via `planstate_walk_subplans`, outer/inner state, and the per-node member
 /// lists via `planstate_walk_members`). The child enumeration is owned by
-/// [`nodes::PlanStateNode::planstate_tree_walker_children_mut`] (the
+/// [`::nodes::PlanStateNode::planstate_tree_walker_children_mut`] (the
 /// single place that knows each variant's child layout); this driver invokes
 /// `walker` on each child in walk order. Threads `&mut` (the only child accessor
 /// the model exposes, matching the parallel-executor estimate/init walks).
 /// Returns `true` on abort.
 pub fn planstate_tree_walker(
-    planstate: &mut nodes::PlanStateNode,
-    walker: &mut dyn FnMut(&mut nodes::PlanStateNode) -> bool,
+    planstate: &mut ::nodes::PlanStateNode,
+    walker: &mut dyn FnMut(&mut ::nodes::PlanStateNode) -> bool,
 ) -> bool {
     for child in planstate.planstate_tree_walker_children_mut() {
         if walker(child) {
@@ -1870,9 +1870,9 @@ pub fn planstate_tree_walker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nodes::primnodes::{Expr, OpExpr, Var};
-    use nodes::rawnodes::{FromExpr, JoinExpr};
-    use nodes::jointype::JoinType;
+    use ::nodes::primnodes::{Expr, OpExpr, Var};
+    use ::nodes::rawnodes::{FromExpr, JoinExpr};
+    use ::nodes::jointype::JoinType;
 
     fn op_with_two_vars() -> Expr {
         Expr::OpExpr(OpExpr {
@@ -1909,8 +1909,8 @@ mod tests {
 
     #[test]
     fn value_node_tags_match_nodetags_h() {
-        use nodes::nodes::{T_BitString, T_Boolean, T_Float, T_Integer, T_String};
-        use nodes::value::{BitString, Boolean, Float, Integer, StringNode};
+        use ::nodes::nodes::{T_BitString, T_Boolean, T_Float, T_Integer, T_String};
+        use ::nodes::value::{BitString, Boolean, Float, Integer, StringNode};
         let ctx = mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
         assert_eq!(Node::mk_integer(mcx, Integer { ival: 7 }).tag(), T_Integer);
@@ -1982,8 +1982,8 @@ mod tests {
     /// via a bare `.clone()` aborts; this is the exact node the `count(*)`
     /// target list carries.
     fn count_star_aggref() -> Expr {
-        use nodes::nodeagg::AggSplit;
-        use nodes::primnodes::Aggref;
+        use ::nodes::nodeagg::AggSplit;
+        use ::nodes::primnodes::Aggref;
         Expr::Aggref(Aggref {
             aggfnoid: 2803, // count(*)
             aggtype: 20,
@@ -2019,8 +2019,8 @@ mod tests {
         let ctx = mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
 
-        let mut tlist: Vec<nodes::primnodes::TargetEntry> = Vec::new();
-        tlist.push(nodes::primnodes::TargetEntry {
+        let mut tlist: Vec<::nodes::primnodes::TargetEntry> = Vec::new();
+        tlist.push(::nodes::primnodes::TargetEntry {
             expr: Some(mcx::alloc_in(mcx, count_star_aggref()).unwrap()),
             resno: 1,
             ..Default::default()
@@ -2049,8 +2049,8 @@ mod tests {
         let ctx = mcx::MemoryContext::new("t");
         let mcx = ctx.mcx();
 
-        let mut query = nodes::copy_query::Query::new(mcx);
-        query.targetList.push(nodes::primnodes::TargetEntry {
+        let mut query = ::nodes::copy_query::Query::new(mcx);
+        query.targetList.push(::nodes::primnodes::TargetEntry {
             expr: Some(mcx::alloc_in(mcx, count_star_aggref()).unwrap()),
             resno: 1,
             ..Default::default()
@@ -2100,7 +2100,7 @@ mod tests {
 // --- typed-list / typed-child helpers for the statement walkers ------------
 
 fn walk_targetentry_list(
-    list: &[nodes::primnodes::TargetEntry],
+    list: &[::nodes::primnodes::TargetEntry],
     walker: &mut dyn FnMut(&Node) -> bool,
     mcx: mcx::Mcx<'_>,
 ) -> bool {
@@ -2122,7 +2122,7 @@ fn walk_targetentry_list(
 }
 
 fn walk_fromexpr(
-    from: &nodes::rawnodes::FromExpr,
+    from: &::nodes::rawnodes::FromExpr,
     walker: &mut dyn FnMut(&Node) -> bool,
 ) -> bool {
     for e in from.fromlist.iter() {
@@ -2139,7 +2139,7 @@ fn walk_fromexpr(
 }
 
 fn walk_onconflict_expr(
-    oce: &nodes::rawnodes::OnConflictExpr,
+    oce: &::nodes::rawnodes::OnConflictExpr,
     walker: &mut dyn FnMut(&Node) -> bool,
 ) -> bool {
     for e in oce.arbiterElems.iter() {

@@ -44,7 +44,7 @@ use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, WARNI
 use types_funccache::{
     CachedFunction, CachedFunctionHashKey, CachedFunctionKeyId, CachedFunctionRef, ProcCompileInfo,
 };
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLENONARRAYOID, ANYCOMPATIBLEOID,
     ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYNONARRAYOID, ANYRANGEOID,
@@ -55,8 +55,8 @@ use utils_error::ereport;
 use hashfn::{hash_bytes, hash_combine};
 
 use tupdesc::{equalRowTypes, hashRowType, CreateTupleDescCopy};
-use funcapi::polymorphic::{resolve_polymorphic_argtypes, CallExpr};
-use funcapi::result_type::get_call_result_type;
+use ::funcapi::polymorphic::{resolve_polymorphic_argtypes, CallExpr};
+use ::funcapi::result_type::get_call_result_type;
 
 /// `INT4ARRAYOID` (`pg_type_d.h`) — `_int4`.
 const INT4ARRAYOID: Oid = 1007;
@@ -78,7 +78,7 @@ const T_TriggerData: u32 = 442;
 const T_EventTriggerData: u32 = 441;
 
 /// `TYPEFUNC_COMPOSITE` (`funcapi.h`).
-use nodes::funcapi::TypeFuncClass;
+use ::nodes::funcapi::TypeFuncClass;
 
 // ===========================================================================
 // The hash table (`static HTAB *cfunc_hashtable`)

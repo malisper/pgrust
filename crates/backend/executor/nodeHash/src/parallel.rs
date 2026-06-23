@@ -19,7 +19,7 @@ use mcx::Mcx;
 use types_core::{Size, uint32};
 use types_error::PgResult;
 use execparallel::{dsa_pointer_is_valid, DsaPointer, INVALID_DSA_POINTER};
-use nodes::nodehash::{
+use ::nodes::nodehash::{
     HashChunkIdx, HashJoinState, HashJoinTableData, HashTupleIdx, HashTupleRef, ParallelHashGrowth,
     ParallelHashJoinBatch, ParallelHashJoinState, PHJ_BUILD_HASH_INNER, PHJ_GROW_BATCHES_DECIDE,
     PHJ_GROW_BATCHES_ELECT, PHJ_GROW_BATCHES_FINISH, PHJ_GROW_BATCHES_PHASE,
@@ -49,7 +49,7 @@ use sort_storage_seams as sts;
 use types_storage::{pg_atomic_uint64, LWLockMode};
 
 use crate::{HASH_CHUNK_HEADER_SIZE, HJTUPLE_OVERHEAD, MAXALIGN, MaxAllocSize};
-use nodes::nodehash::{HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD};
+use ::nodes::nodehash::{HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD};
 
 // ===========================================================================
 //   File-owned constants & arithmetic (hashjoin.h / pg_bitutils.h / wait_event.h)
@@ -624,10 +624,10 @@ pub fn ExecParallelHashIncreaseNumBuckets<'mcx>(
             &mut pstate.grow_buckets_barrier,
             WAIT_EVENT_HASH_GROW_BUCKETS_REALLOCATE,
         );
-        phase = nodes::nodehash::PHJ_GROW_BUCKETS_REINSERT; // fall through
+        phase = ::nodes::nodehash::PHJ_GROW_BUCKETS_REINSERT; // fall through
     }
 
-    if phase == nodes::nodehash::PHJ_GROW_BUCKETS_REINSERT {
+    if phase == ::nodes::nodehash::PHJ_GROW_BUCKETS_REINSERT {
         ExecParallelHashEnsureBatchAccessors(mcx, hashtable)?;
         ExecParallelHashTableSetCurrentBatch(hashtable, 0);
         while let Some((_chunk_idx, chunk_s)) = ExecParallelHashPopChunkQueue(hashtable) {
@@ -861,8 +861,8 @@ pub fn ExecParallelHashMergeCounters<'mcx>(hashtable: &mut HashJoinTableData<'mc
 pub fn ExecParallelHashTableInsert<'mcx>(
     mcx: Mcx<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    slot: ::nodes::SlotId,
     hashvalue: uint32,
 ) -> PgResult<()> {
     // bool shouldFree;
@@ -926,8 +926,8 @@ pub fn ExecParallelHashTableInsert<'mcx>(
 pub fn ExecParallelHashTableInsertCurrentBatch<'mcx>(
     mcx: Mcx<'mcx>,
     hashtable: &mut HashJoinTableData<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
-    slot: nodes::SlotId,
+    estate: &mut ::nodes::EStateData<'mcx>,
+    slot: ::nodes::SlotId,
     hashvalue: uint32,
 ) -> PgResult<()> {
     let image = execTuples_seams::exec_fetch_slot_minimal_tuple_copy::call(
@@ -963,7 +963,7 @@ pub fn ExecParallelHashTableInsertCurrentBatch<'mcx>(
 /// — scan a shared hash bucket for matches to the current outer tuple.
 pub fn ExecParallelScanHashBucket<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let hashvalue = hjstate.hj_CurHashValue;
@@ -980,7 +980,7 @@ pub fn ExecParallelScanHashBucket<'mcx>(
         .hashclauses
         .as_deref_mut()
         .expect("ExecParallelScanHashBucket: hashclauses must be compiled by init")
-        as *mut nodes::execexpr::ExprState;
+        as *mut ::nodes::execexpr::ExprState;
 
     let hashtable = hjstate
         .hj_HashTable
@@ -1054,7 +1054,7 @@ pub fn ExecParallelPrepHashTableForUnmatched<'mcx>(
         let batch = batch_shared_mut(hashtable, batch_dp);
         debug_assert_eq!(
             barrier::BarrierPhase::call(&batch.batch_barrier),
-            nodes::nodehash::PHJ_BATCH_PROBE
+            ::nodes::nodehash::PHJ_BATCH_PROBE
         );
     }
 
@@ -1095,7 +1095,7 @@ pub fn ExecParallelPrepHashTableForUnmatched<'mcx>(
         let batch = batch_shared_mut(hashtable, batch_dp);
         debug_assert_eq!(
             barrier::BarrierPhase::call(&batch.batch_barrier),
-            nodes::nodehash::PHJ_BATCH_SCAN
+            ::nodes::nodehash::PHJ_BATCH_SCAN
         );
     }
 
@@ -1121,7 +1121,7 @@ pub fn ExecParallelPrepHashTableForUnmatched<'mcx>(
 /// ExprContext *econtext)` — return the next unmatched inner tuple.
 pub fn ExecParallelScanHashTableForUnmatched<'mcx>(
     hjstate: &mut HashJoinState<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
 ) -> PgResult<bool> {
     let mcx = estate.es_query_cxt;
     let hash_tuple_slot = hjstate
@@ -1368,7 +1368,7 @@ pub fn ExecParallelHashJoinSetUpBatches<'mcx>(
             if i == 0 {
                 barrier::BarrierAttach::call(&mut shared.batch_barrier);
                 while barrier::BarrierPhase::call(&shared.batch_barrier)
-                    < nodes::nodehash::PHJ_BATCH_PROBE
+                    < ::nodes::nodehash::PHJ_BATCH_PROBE
                 {
                     barrier::BarrierArriveAndWait::call(&mut shared.batch_barrier, 0);
                 }
@@ -1541,17 +1541,17 @@ pub fn ExecHashTableDetachBatch<'mcx>(hashtable: &mut HashJoinTableData<'mcx>) -
             barrier::BarrierPhase::call(&batch.batch_barrier)
         };
         debug_assert!(
-            phase == nodes::nodehash::PHJ_BATCH_PROBE
-                || phase == nodes::nodehash::PHJ_BATCH_SCAN
+            phase == ::nodes::nodehash::PHJ_BATCH_PROBE
+                || phase == ::nodes::nodehash::PHJ_BATCH_SCAN
         );
 
-        if phase == nodes::nodehash::PHJ_BATCH_PROBE
+        if phase == ::nodes::nodehash::PHJ_BATCH_PROBE
             && !hashtable.batches[curbatch as usize].outer_eof
         {
             batch_shared_mut(hashtable, batch_dp).skip_unmatched = true;
         }
 
-        if phase == nodes::nodehash::PHJ_BATCH_PROBE {
+        if phase == ::nodes::nodehash::PHJ_BATCH_PROBE {
             let batch = batch_shared_mut(hashtable, batch_dp);
             attached = barrier::BarrierArriveAndDetachExceptLast::call(&mut batch.batch_barrier);
         }
@@ -1562,7 +1562,7 @@ pub fn ExecHashTableDetachBatch<'mcx>(hashtable: &mut HashJoinTableData<'mcx>) -
         if last {
             debug_assert_eq!(
                 barrier::BarrierPhase::call(&batch_shared_mut(hashtable, batch_dp).batch_barrier),
-                nodes::nodehash::PHJ_BATCH_FREE
+                ::nodes::nodehash::PHJ_BATCH_FREE
             );
             // Free shared chunks and buckets.
             loop {
@@ -1605,9 +1605,9 @@ pub fn ExecHashTableDetach<'mcx>(hashtable: &mut HashJoinTableData<'mcx>) -> PgR
 
         // Assert build_barrier >= PHJ_BUILD_RUN.
         let build_phase = barrier::BarrierPhase::call(&pstate_mut(hashtable).build_barrier);
-        debug_assert!(build_phase >= nodes::nodehash::PHJ_BUILD_RUN);
+        debug_assert!(build_phase >= ::nodes::nodehash::PHJ_BUILD_RUN);
 
-        if build_phase == nodes::nodehash::PHJ_BUILD_RUN {
+        if build_phase == ::nodes::nodehash::PHJ_BUILD_RUN {
             // Make sure any temporary files are closed.
             if !hashtable.batches.is_empty() {
                 let nbatch = hashtable.nbatch;
@@ -1638,7 +1638,7 @@ pub fn ExecHashTableDetach<'mcx>(hashtable: &mut HashJoinTableData<'mcx>) -> PgR
                 let pstate = pstate_mut(hashtable);
                 debug_assert_eq!(
                     barrier::BarrierPhase::call(&pstate.build_barrier),
-                    nodes::nodehash::PHJ_BUILD_FREE
+                    ::nodes::nodehash::PHJ_BUILD_FREE
                 );
                 if dsa_pointer_is_valid(pstate.batches) {
                     dsa::dsa_free::call(area, pstate.batches);
@@ -1936,7 +1936,7 @@ pub fn parallel_has_curbatch(node: &HashJoinState<'_>) -> bool {
 fn exec_hash_get_bucket_and_batch(
     hashtable: &HashJoinTableData<'_>,
     hashvalue: uint32,
-) -> nodes::nodehash::BucketAndBatch {
+) -> ::nodes::nodehash::BucketAndBatch {
     crate::hash_table::ExecHashGetBucketAndBatch(hashtable, hashvalue)
 }
 
@@ -1996,8 +1996,8 @@ fn new_accessor<'mcx>(
     shared: DsaPointer,
     inner: Option<execparallel::SharedTuplestoreAccessorHandle>,
     outer: Option<execparallel::SharedTuplestoreAccessorHandle>,
-) -> PgResult<nodes::nodehash::ParallelHashJoinBatchAccessor<'mcx>> {
-    Ok(nodes::nodehash::ParallelHashJoinBatchAccessor {
+) -> PgResult<::nodes::nodehash::ParallelHashJoinBatchAccessor<'mcx>> {
+    Ok(::nodes::nodehash::ParallelHashJoinBatchAccessor {
         shared,
         preallocated: 0,
         ntuples: 0,
@@ -2019,12 +2019,12 @@ fn new_accessor<'mcx>(
 fn box_accessor<'mcx>(
     mcx: Mcx<'mcx>,
     h: Option<execparallel::SharedTuplestoreAccessorHandle>,
-) -> PgResult<Option<mcx::PgBox<'mcx, nodes::nodehash::SharedTuplestoreAccessor>>> {
+) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::nodehash::SharedTuplestoreAccessor>>> {
     match h {
         None => Ok(None),
         Some(handle) => {
-            let acc = nodes::nodehash::SharedTuplestoreAccessor(
-                nodes::Opaque(Some(Box::new(handle))),
+            let acc = ::nodes::nodehash::SharedTuplestoreAccessor(
+                ::nodes::Opaque(Some(Box::new(handle))),
             );
             Ok(Some(mcx::alloc_in(mcx, acc)?))
         }
@@ -2035,7 +2035,7 @@ fn box_accessor<'mcx>(
 /// canonical accessor field (the inverse of [`box_accessor`]).
 #[inline]
 fn accessor_handle(
-    a: &Option<mcx::PgBox<'_, nodes::nodehash::SharedTuplestoreAccessor>>,
+    a: &Option<mcx::PgBox<'_, ::nodes::nodehash::SharedTuplestoreAccessor>>,
 ) -> Option<execparallel::SharedTuplestoreAccessorHandle> {
     a.as_ref().and_then(|b| {
         b.0 .0

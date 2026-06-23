@@ -26,10 +26,10 @@
 
 use mcx::Mcx;
 use types_error::PgResult;
-use nodes::nodeagg::{
+use ::nodes::nodeagg::{
     TupleHashEntryData, TuplehashHash, TUPLEHASH_STATUS_EMPTY, TUPLEHASH_STATUS_IN_USE,
 };
-use nodes::EStateData;
+use ::nodes::EStateData;
 
 /// `SH_MAX_SIZE` = `((uint64) PG_UINT32_MAX) + 1`.
 const SH_MAX_SIZE: u64 = (u32::MAX as u64) + 1;

@@ -56,9 +56,9 @@ use types_tuple::access::{
 use types_tuple::heaptuple::ItemPointerData;
 
 use types_cluster::{ClusterParams, ParseState, CLUOPT_VERBOSE};
-use nodes::ddlnodes::{VacuumRelation, VacuumStmt};
-use nodes::nodes::Node;
-use nodes::rawnodes::RangeVar;
+use ::nodes::ddlnodes::{VacuumRelation, VacuumStmt};
+use ::nodes::nodes::Node;
+use ::nodes::rawnodes::RangeVar;
 
 use types_vacuum::vacuum::VacOptValue::{
     VACOPTVALUE_AUTO, VACOPTVALUE_DISABLED, VACOPTVALUE_ENABLED, VACOPTVALUE_UNSPECIFIED,
@@ -249,8 +249,8 @@ fn pg_strcasecmp(a: &str, b: &str) -> i32 {
 
 /// Project a `DefElem`'s value node into the `DefElemArg` the define.c value
 /// accessors switch on (mirrors `nodeTag(def->arg)`); `None` for `arg == NULL`.
-fn defel_arg(opt: &nodes::ddlnodes::DefElem<'_>) -> PgResult<Option<DefElemArg>> {
-    use nodes::nodes::ntag;
+fn defel_arg(opt: &::nodes::ddlnodes::DefElem<'_>) -> PgResult<Option<DefElemArg>> {
+    use ::nodes::nodes::ntag;
     let Some(node) = opt.arg.as_deref() else {
         return Ok(None);
     };
@@ -286,8 +286,8 @@ fn defel_arg(opt: &nodes::ddlnodes::DefElem<'_>) -> PgResult<Option<DefElemArg>>
 }
 
 /// `TypeNameToString(typeName)` for the `defGetString` `T_TypeName` case.
-fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
-    use nodes::nodes::ntag;
+fn defel_type_name_to_string(tn: &::nodes::rawnodes::TypeName<'_>) -> PgResult<String> {
+    use ::nodes::nodes::ntag;
     if tn.names.is_empty() {
         return Err(ereport(ERROR)
             .errmsg_internal("DefElem TypeName carries no name")
@@ -318,8 +318,8 @@ fn defel_type_name_to_string(tn: &nodes::rawnodes::TypeName<'_>) -> PgResult<Str
 }
 
 /// `NameListToString(names)` (namespace.c) for the `defGetString` `T_List` case.
-fn defel_name_list_to_string(names: &[nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
-    use nodes::nodes::ntag;
+fn defel_name_list_to_string(names: &[::nodes::nodes::NodePtr<'_>]) -> PgResult<String> {
+    use ::nodes::nodes::ntag;
     let mut out = String::new();
     for (i, name) in names.iter().enumerate() {
         if i != 0 {
@@ -340,7 +340,7 @@ fn defel_name_list_to_string(names: &[nodes::nodes::NodePtr<'_>]) -> PgResult<St
 }
 
 /// `def->defname` of a parsed `DefElem`.
-fn def_name(opt: &nodes::ddlnodes::DefElem<'_>) -> String {
+fn def_name(opt: &::nodes::ddlnodes::DefElem<'_>) -> String {
     opt.defname
         .as_ref()
         .map(|s| s.as_str().to_string())
@@ -348,17 +348,17 @@ fn def_name(opt: &nodes::ddlnodes::DefElem<'_>) -> String {
 }
 
 /// `defGetBoolean(def)`.
-fn defGetBoolean(opt: &nodes::ddlnodes::DefElem<'_>) -> PgResult<bool> {
+fn defGetBoolean(opt: &::nodes::ddlnodes::DefElem<'_>) -> PgResult<bool> {
     define::def_get_boolean::call(def_name(opt), defel_arg(opt)?)
 }
 
 /// `defGetString(def)`.
-fn defGetString(opt: &nodes::ddlnodes::DefElem<'_>) -> PgResult<String> {
+fn defGetString(opt: &::nodes::ddlnodes::DefElem<'_>) -> PgResult<String> {
     rt::def_get_string_text::call(def_name(opt), defel_arg(opt)?)
 }
 
 /// `defGetInt32(def)`.
-fn defGetInt32(opt: &nodes::ddlnodes::DefElem<'_>) -> PgResult<i32> {
+fn defGetInt32(opt: &::nodes::ddlnodes::DefElem<'_>) -> PgResult<i32> {
     rt::def_get_int32::call(def_name(opt), defel_arg(opt)?)
 }
 
@@ -394,7 +394,7 @@ fn vacrel_range_var<'mcx>(
 fn make_vacuum_relation<'mcx>(
     relation: Option<&RangeVar<'mcx>>,
     oid: Oid,
-    va_cols: &PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
+    va_cols: &PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
     mcx: Mcx<'mcx>,
 ) -> PgResult<VacuumRelation<'mcx>> {
     // C builds this into vac_context via palloc; a plain arena alloc is
@@ -403,7 +403,7 @@ fn make_vacuum_relation<'mcx>(
         Some(rv) => Some(mcx::alloc_in(mcx, Node::mk_range_var(mcx, rv.clone_in(mcx)?)?)?),
         None => None,
     };
-    let mut cols: PgVec<nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+    let mut cols: PgVec<::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
     for c in va_cols.iter() {
         cols.push(mcx::alloc_in(mcx, c.clone_in(mcx)?)?);
     }
@@ -847,7 +847,7 @@ impl Drop for InVacuumGuard {
 /// empty list means "all vacuumable rels in the database" (unless
 /// ONLY_DATABASE_STATS), matching the C NIL convention.
 pub fn vacuum<'mcx>(
-    relations: &PgVec<'mcx, nodes::nodes::NodePtr<'mcx>>,
+    relations: &PgVec<'mcx, ::nodes::nodes::NodePtr<'mcx>>,
     params: &mut VacuumParams,
     bstrategy: BufferAccessStrategy,
     isTopLevel: bool,
@@ -1410,7 +1410,7 @@ fn get_all_vacuum_rels<'mcx>(
     mcx: Mcx<'mcx>,
 ) -> PgResult<Vec<VacuumRelation<'mcx>>> {
     let mut vacrels: Vec<VacuumRelation<'mcx>> = Vec::new();
-    let empty: PgVec<nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
+    let empty: PgVec<::nodes::nodes::NodePtr<'mcx>> = PgVec::new_in(mcx);
 
     let rows = rt::scan_all_pg_class::call(mcx)?;
 
@@ -2596,7 +2596,7 @@ fn compute_parallel_delay() -> PgResult<f64> {
 /// `get_vacoptval_from_boolean(def)` (vacuum.c:2640) — a wrapper around
 /// `defGetBoolean` returning VACOPTVALUE_ENABLED/VACOPTVALUE_DISABLED.
 pub fn get_vacoptval_from_boolean(
-    def: &nodes::ddlnodes::DefElem<'_>,
+    def: &::nodes::ddlnodes::DefElem<'_>,
 ) -> PgResult<VacOptValue> {
     Ok(if defGetBoolean(def)? {
         VACOPTVALUE_ENABLED

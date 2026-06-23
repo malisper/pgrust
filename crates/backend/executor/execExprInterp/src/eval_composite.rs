@@ -40,12 +40,12 @@
 use fmgr_seams::function_call_invoke_datum;
 use types_tuple::heaptuple::Datum;
 use types_error::PgResult;
-use nodes::execexpr::{
+use ::nodes::execexpr::{
     ExprEvalStepData, ExprState, MinMaxOp, ResultCell, ResultCellId, EEO_FLAG_NEW_IS_NULL,
     EEO_FLAG_OLD_IS_NULL, STATE_RESULT_CELL,
 };
-use nodes::execnodes::EcxtId;
-use nodes::primnodes::VarReturningType;
+use ::nodes::execnodes::EcxtId;
+use ::nodes::primnodes::VarReturningType;
 use nodes::{EStateData, SlotId};
 
 /// `INNER_VAR` / `OUTER_VAR` (primnodes.h) — the special `varno` sentinels for a

@@ -59,8 +59,8 @@ use types_core::primitive::AttrNumber;
 // by-reference value).
 use types_tuple::heaptuple::Datum;
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
-use nodes::nodemergeappend::{BinaryHeap, MergeAppend, MergeAppendStateData};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::nodes::nodemergeappend::{BinaryHeap, MergeAppend, MergeAppendStateData};
 use nodes::{
     Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind,
 };
@@ -101,7 +101,7 @@ fn exec_merge_append_node<'mcx>(
 /// `ExecInitMergeAppend(node, estate, eflags)` — begin all of the subscans of
 /// the MergeAppend node.
 pub fn ExecInitMergeAppend<'mcx>(
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, MergeAppendStateData<'mcx>>> {
@@ -123,7 +123,7 @@ pub fn ExecInitMergeAppend<'mcx>(
     ps.ExecProcNode = Some(exec_merge_append_node);
 
     let validsubplans: Option<PgBox<'mcx, Bitmapset<'mcx>>>;
-    let ms_prune_state: Option<PgBox<'mcx, nodes::PartitionPruneState<'mcx>>>;
+    let ms_prune_state: Option<PgBox<'mcx, ::nodes::PartitionPruneState<'mcx>>>;
     let mut ms_valid_subplans: Option<PgBox<'mcx, Bitmapset<'mcx>>> = None;
     let nplans: i32;
 
@@ -847,7 +847,7 @@ fn INVERT_COMPARE_RESULT(var: i32) -> i32 {
 /// `list_length(l)` (pg_list.h) — number of cells in `l`. `MergeAppend.mergeplans`
 /// is a `List *` of child `Plan` nodes, materialized as a vector; the cell count
 /// is the slice length (mirroring C's element-type-agnostic `list_length`).
-fn list_length(l: &[nodes::nodes::Node<'_>]) -> i32 {
+fn list_length(l: &[::nodes::nodes::Node<'_>]) -> i32 {
     i32::try_from(l.len()).unwrap_or(i32::MAX)
 }
 

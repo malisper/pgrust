@@ -1,8 +1,8 @@
 //! Unit tests for the var.c read-only walkers (no cross-crate seam needed).
 
 use crate::var::*;
-use nodes::nodes::Node;
-use nodes::primnodes::{Expr, OpExpr, Var};
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{Expr, OpExpr, Var};
 
 fn var_at(varno: i32, levelsup: u32) -> Var {
     Var {
@@ -51,7 +51,7 @@ fn contain_var_clause_detects_level0_var() {
     assert!(contain_var_clause(&with));
     let upper = Node::Expr(Expr::Var(var_at(1, 2)));
     assert!(!contain_var_clause(&upper));
-    let constish = Node::Expr(Expr::Const(nodes::primnodes::Const::default()));
+    let constish = Node::Expr(Expr::Const(::nodes::primnodes::Const::default()));
     assert!(!contain_var_clause(&constish));
 }
 

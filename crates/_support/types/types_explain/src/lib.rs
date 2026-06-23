@@ -16,10 +16,10 @@
 extern crate alloc;
 
 use mcx::{Mcx, PgBox, PgString, PgVec};
-use nodes::bitmapset::Bitmapset;
-use nodes::nodeindexscan::PlannedStmt;
-use nodes::nodes::Node;
-use nodes::parsenodes::RangeTblEntry;
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::nodeindexscan::PlannedStmt;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::RangeTblEntry;
 
 /// `typedef enum ExplainFormat` (commands/explain_state.h) — output format.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

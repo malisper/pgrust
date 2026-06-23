@@ -83,7 +83,7 @@ fn is_outer_join_classifies_join_types() {
 #[test]
 fn jointype_path_to_node_maps_enum_discriminants() {
     use crate::jointype_path_to_node;
-    use nodes::jointype::JoinType as N;
+    use ::nodes::jointype::JoinType as N;
     assert_eq!(jointype_path_to_node(0), N::JOIN_INNER);
     assert_eq!(jointype_path_to_node(1), N::JOIN_LEFT);
     assert_eq!(jointype_path_to_node(2), N::JOIN_FULL);
@@ -111,7 +111,7 @@ fn get_gating_quals_empty_without_pseudoconstants() {
 // ---------------------------------------------------------------------------
 
 use mcx::MemoryContext;
-use nodes::parsenodes::RTEKind;
+use ::nodes::parsenodes::RTEKind;
 use pathnodes::planner_run::PlannerRun;
 
 /// Build a base-rel `Path` whose parent `RelOptInfo` has `relid = 1`, plus a
@@ -120,7 +120,7 @@ use pathnodes::planner_run::PlannerRun;
 fn scan_setup<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     rtekind: RTEKind,
-    pathtype: nodes::nodes::NodeTag,
+    pathtype: ::nodes::nodes::NodeTag,
 ) -> (PlannerInfo, PlannerRun<'mcx>, pathnodes::PathId) {
     let mut root = PlannerInfo::default();
     let mut run = PlannerRun::new(mcx);
@@ -134,10 +134,10 @@ fn scan_setup<'mcx>(
     let rel_id: RelId = root.alloc_rel(rel);
 
     // simple_rte_array: slot 0 is the unused C placeholder, slot 1 = RT index 1.
-    let mut rte0 = nodes::parsenodes::RangeTblEntry::new_in(mcx);
+    let mut rte0 = ::nodes::parsenodes::RangeTblEntry::new_in(mcx);
     rte0.rtekind = RTEKind::RTE_RELATION;
     let id0 = run.intern_rte(rte0);
-    let mut rte1 = nodes::parsenodes::RangeTblEntry::new_in(mcx);
+    let mut rte1 = ::nodes::parsenodes::RangeTblEntry::new_in(mcx);
     rte1.rtekind = rtekind;
     let id1 = run.intern_rte(rte1);
     root.simple_rte_array = alloc::vec![id0, id1];

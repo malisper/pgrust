@@ -79,7 +79,7 @@ pub fn init_seams() {
 /// `Option<PgBox<…>>` the C `mt_partition_tuple_routing` pointer maps to.
 fn seam_exec_setup_partition_tuple_routing<'mcx>(
     mcx: Mcx<'mcx>,
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
     rel: rel::Relation<'mcx>,
 ) -> types_error::PgResult<mcx::PgBox<'mcx, PartitionTupleRouting<'mcx>>> {
     let proute = routing_setup::ExecSetupPartitionTupleRouting(mcx, estate, rel)?;
@@ -91,11 +91,11 @@ fn seam_exec_setup_partition_tuple_routing<'mcx>(
 /// estate)`).
 fn seam_exec_find_partition<'mcx>(
     mcx: Mcx<'mcx>,
-    mtstate: &mut nodes::ModifyTableState<'mcx>,
+    mtstate: &mut ::nodes::ModifyTableState<'mcx>,
     root_result_rel_info: RriId,
     proute: &mut PartitionTupleRouting<'mcx>,
     slot: SlotId,
-    estate: &mut nodes::EStateData<'mcx>,
+    estate: &mut ::nodes::EStateData<'mcx>,
 ) -> types_error::PgResult<RriId> {
     routing_find::ExecFindPartition(mcx, mtstate, root_result_rel_info, proute, slot, estate)
 }

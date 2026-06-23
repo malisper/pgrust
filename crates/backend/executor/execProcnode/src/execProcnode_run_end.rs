@@ -196,7 +196,7 @@ pub fn multi_exec_proc_node<'mcx>(
     // `MultiExecBitmapAnd` takes the whole `&mut PlanStateNode` (it re-derives
     // the concrete `BitmapAndState` internally), so dispatch it before the
     // borrowing `match` below.
-    if node.tag() == nodes::execstate_tags::T_BitmapAndState {
+    if node.tag() == ::nodes::execstate_tags::T_BitmapAndState {
         return nodeBitmapAnd::MultiExecBitmapAnd(node, estate);
     }
 
@@ -261,7 +261,7 @@ pub fn exec_end_node<'mcx>(
     // `ExecEndBitmapAnd` takes the whole `&mut PlanStateNode` (it re-derives the
     // concrete `BitmapAndState` internally), so dispatch it before the borrowing
     // `match node` below.
-    if node.tag() == nodes::execstate_tags::T_BitmapAndState {
+    if node.tag() == ::nodes::execstate_tags::T_BitmapAndState {
         return nodeBitmapAnd::ExecEndBitmapAnd(node, estate);
     }
 
@@ -394,7 +394,7 @@ pub fn exec_end_node<'mcx>(
         // node crate's `ExecEndSampleScan` runs (which closes its own table-AM
         // scan via seams and takes no `EState`).
         PlanStateNode::SampleScan(s) => {
-            let sample = nodes::samplescanstate_carrier::downcast_sample_scan_state_mut::<
+            let sample = ::nodes::samplescanstate_carrier::downcast_sample_scan_state_mut::<
                 samplescan::SampleScanState<'_>,
             >(&mut **s)
             .expect("castNode(SampleScanState, node) failed");
@@ -438,7 +438,7 @@ pub fn exec_end_node<'mcx>(
         }
         // case T_AggState: ExecEndAgg((AggState *) node);
         PlanStateNode::Agg(a) => {
-            let agg = nodes::aggstate_carrier::downcast_agg_state_mut::<
+            let agg = ::nodes::aggstate_carrier::downcast_agg_state_mut::<
                 nodeAgg::AggStateData<'_>,
             >(&mut **a)
             .expect("castNode(AggState, node) failed");

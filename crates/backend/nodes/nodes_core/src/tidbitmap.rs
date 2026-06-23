@@ -48,7 +48,7 @@ use hashfn::murmurhash32;
 use types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, BLCKSZ};
 use types_error::{PgError, PgResult};
 use execparallel::DsaAreaHandle;
-use nodes::bitmapset::bitmapword;
+use ::nodes::bitmapset::bitmapword;
 use types_storage::bufpage::MaxHeapTuplesPerPage;
 use types_tuple::heaptuple::ItemPointerData;
 

@@ -23,19 +23,19 @@ use types_error::PgResult;
 use backend_nodes_types::node_tags as tags;
 use pg_ffi_fgram::{List as RawList, Node as RawNode};
 
-use nodes::nodes::{Node, NodePtr};
-use nodes::parsestmt::RawStmt;
+use ::nodes::nodes::{Node, NodePtr};
+use ::nodes::parsestmt::RawStmt;
 
 use backend_nodes_types::parsenodes_stmts as cs; // c2rust statement/expr structs
 use backend_nodes_types::parsenodes as cp; // c2rust clause structs
 use backend_nodes_types::primnodes as cpr; // c2rust primnode structs
 
-use nodes::rawnodes as tn; // owned raw-grammar target types
-use nodes::rawexprnodes as tn_re; // owned raw-grammar Expr-deriving nodes
-use nodes::primnodes as tn_prim;
-use nodes::value as tn_val;
-use nodes::parsenodes as tn_pn; // owned ObjectType/RoleSpecType
-use nodes::partition as tn_part; // owned PartitionStrategy/RangeDatumKind
+use ::nodes::rawnodes as tn; // owned raw-grammar target types
+use ::nodes::rawexprnodes as tn_re; // owned raw-grammar Expr-deriving nodes
+use ::nodes::primnodes as tn_prim;
+use ::nodes::value as tn_val;
+use ::nodes::parsenodes as tn_pn; // owned ObjectType/RoleSpecType
+use ::nodes::partition as tn_part; // owned PartitionStrategy/RangeDatumKind
 
 // ===========================================================================
 // Uniform helpers.

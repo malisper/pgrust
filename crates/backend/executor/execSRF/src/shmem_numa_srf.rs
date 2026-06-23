@@ -17,7 +17,7 @@
 //! reaches the materialize protocol.
 
 use types_core::Oid;
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_storage::HugePagesStatus;
 use types_tuple::heaptuple::Datum;
 

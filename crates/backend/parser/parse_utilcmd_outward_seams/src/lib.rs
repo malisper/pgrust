@@ -21,8 +21,8 @@
 use mcx::{Mcx, PgBox, PgVec};
 use types_core::Oid;
 use types_error::PgResult;
-use nodes::nodes::Node;
-use nodes::parsestmt::ParseState;
+use ::nodes::nodes::Node;
+use ::nodes::parsestmt::ParseState;
 
 type NodeBox<'mcx> = PgBox<'mcx, Node<'mcx>>;
 

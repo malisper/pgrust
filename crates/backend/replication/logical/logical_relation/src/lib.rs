@@ -39,7 +39,7 @@ use types_core::primitive::{
 use types_storage::lock::LOCKMODE;
 use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 
-use nodes::Bitmapset;
+use ::nodes::Bitmapset;
 use rel::Relation;
 use types_tuple::attmap::AttrMap;
 

@@ -4,8 +4,8 @@
 extern crate alloc;
 
 use types_error::PgResult;
-use nodes::nodes::Node;
-use nodes::rawnodes::FromExpr;
+use ::nodes::nodes::Node;
+use ::nodes::rawnodes::FromExpr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::PlannerInfo;
 use pathnodes::{RELOPT_BASEREL, RelOptKind};
@@ -37,18 +37,18 @@ fn add_base_rels_to_query_node<'mcx>(
     jtnode: &Node<'_>,
 ) -> PgResult<()> {
     match jtnode.node_tag() {
-        nodes::nodes::ntag::T_RangeTblRef => {
+        ::nodes::nodes::ntag::T_RangeTblRef => {
             let rtr = jtnode.expect_rangetblref();
             let varno = rtr.rtindex;
             build_simple_rel(run, root, varno, None)?;
         }
-        nodes::nodes::ntag::T_FromExpr => {
+        ::nodes::nodes::ntag::T_FromExpr => {
             let f = jtnode.expect_fromexpr();
             for item in f.fromlist.iter() {
                 add_base_rels_to_query_node(root, run, item)?;
             }
         }
-        nodes::nodes::ntag::T_JoinExpr => {
+        ::nodes::nodes::ntag::T_JoinExpr => {
             let j = jtnode.expect_joinexpr();
             if let Some(larg) = j.larg.as_deref() {
                 add_base_rels_to_query_node(root, run, larg)?;

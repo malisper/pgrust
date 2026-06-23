@@ -22,7 +22,7 @@ use mcx::Mcx;
 use types_core::primitive::Oid;
 use types_core::OidIsValid;
 use types_error::PgResult;
-use nodes::ddlnodes::IndexElem;
+use ::nodes::ddlnodes::IndexElem;
 
 use utils_error::ereport;
 use types_error::ERROR;

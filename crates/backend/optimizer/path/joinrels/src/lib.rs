@@ -39,7 +39,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use types_error::{PgError, PgResult};
-use nodes::nodes::NodeTag;
+use ::nodes::nodes::NodeTag;
 
 use pathnodes::{
     PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL,
@@ -280,7 +280,7 @@ fn restriction_is_constant_false(
         // clause to be a pseudoconstant; see the C source. We still test the
         // Const-ness exactly as C does via IsA(rinfo->clause, Const).)
         let clause_id = root.rinfo(rinfo).clause;
-        if let nodes::primnodes::Expr::Const(con) = root.node(clause_id) {
+        if let ::nodes::primnodes::Expr::Const(con) = root.node(clause_id) {
             // constant NULL is as good as constant FALSE for our purposes.
             if con.constisnull {
                 return true;

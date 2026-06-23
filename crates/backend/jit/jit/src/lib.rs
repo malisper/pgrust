@@ -27,7 +27,7 @@ use mcx::Mcx;
 use datum::Datum;
 use types_error::{PgResult, DEBUG1};
 use execparallel::JitInstrumentation;
-use nodes::execexpr::ExprState;
+use ::nodes::execexpr::ExprState;
 
 use llvmjit_seams as provider;
 use fd_seams as fd;

@@ -21,7 +21,7 @@ use types_core::primitive::{
     uint16, BlockNumber, OffsetNumber, Oid, Size, XLogRecPtr,
 };
 use types_core::xact::FullTransactionId;
-use nodes::nodehash::BufFile;
+use ::nodes::nodehash::BufFile;
 use types_storage::storage::Buffer;
 use types_tableam::genam::IndexOrderByDistance;
 use types_tuple::heaptuple::Datum;

@@ -48,9 +48,9 @@
 use mcx::{Mcx, PgBox};
 use types_core::primitive::Index;
 use types_error::PgResult;
-use nodes::execexpr::{ExprState, ProjectionInfo};
-use nodes::nodes::Node;
-use nodes::primnodes::{Expr, TargetEntry};
+use ::nodes::execexpr::{ExprState, ProjectionInfo};
+use ::nodes::nodes::Node;
+use ::nodes::primnodes::{Expr, TargetEntry};
 use nodes::{EStateData, EcxtId, ModifyTableState, RriId, SlotId};
 
 use crate::execExpr_core;

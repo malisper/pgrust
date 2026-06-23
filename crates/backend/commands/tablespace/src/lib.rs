@@ -51,11 +51,11 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, LOG, NOTICE, PANIC, WARNING,
 };
 use types_guc::guc::{GucSource, PGC_S_INTERACTIVE, PGC_S_TEST};
-use nodes::ddlnodes::{
+use ::nodes::ddlnodes::{
     AlterTableSpaceOptionsStmt, CreateTableSpaceStmt, DefElem, DropTableSpaceStmt,
 };
-use nodes::nodes::Node;
-use nodes::parsenodes::OBJECT_TABLESPACE;
+use ::nodes::nodes::Node;
+use ::nodes::parsenodes::OBJECT_TABLESPACE;
 
 use guc_tables::{vars, GucVarAccessors};
 
@@ -212,7 +212,7 @@ pub fn CreateTableSpace<'mcx>(mcx: Mcx<'mcx>, stmt: &CreateTableSpaceStmt<'mcx>)
                     // The acl seam takes the analyze-side `parsenodes::RoleSpec`;
                     // the grammar DDL family carries `ddlnodes::RoleSpec` (same
                     // RoleSpecType + fields). Rebuild it field-for-field in `mcx`.
-                    let role = nodes::parsenodes::RoleSpec {
+                    let role = ::nodes::parsenodes::RoleSpec {
                         roletype: rs.roletype,
                         rolename: match &rs.rolename {
                             Some(s) => Some(s.clone_in(mcx)?),
@@ -1435,7 +1435,7 @@ fn record_get_info(record: &wal::rmgr::XLogReaderState<'_>) -> u8 {
 /// fills `options` with `Node::DefElem`).
 fn materialize_def_elems<'mcx>(
     _mcx: Mcx<'mcx>,
-    options: &[nodes::nodes::NodePtr<'mcx>],
+    options: &[::nodes::nodes::NodePtr<'mcx>],
 ) -> PgResult<Vec<DefElem<'mcx>>> {
     let mut out: Vec<DefElem<'mcx>> = Vec::new();
     out.try_reserve(options.len())

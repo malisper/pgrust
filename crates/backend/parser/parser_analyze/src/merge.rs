@@ -39,11 +39,11 @@ use types_acl::acl::{
 use types_error::{
     PgResult, ERRCODE_DUPLICATE_ALIAS, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR,
 };
-use nodes::copy_query::Query;
-use nodes::modifytable::{MergeMatchKind, NUM_MERGE_MATCH_KINDS};
-use nodes::nodes::{CmdType, Node, NodePtr};
-use nodes::parsestmt::{ParseExprKind, ParseNamespaceItem, ParseState};
-use nodes::rawnodes::{MergeAction, MergeStmt, MergeWhenClause};
+use ::nodes::copy_query::Query;
+use ::nodes::modifytable::{MergeMatchKind, NUM_MERGE_MATCH_KINDS};
+use ::nodes::nodes::{CmdType, Node, NodePtr};
+use ::nodes::parsestmt::{ParseExprKind, ParseNamespaceItem, ParseState};
+use ::nodes::rawnodes::{MergeAction, MergeStmt, MergeWhenClause};
 use types_tuple::access::{RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_VIEW};
 
 use utils_error::ereport;
@@ -263,7 +263,7 @@ pub fn transformMergeStmt<'mcx>(
     let joinlist = core::mem::replace(&mut pstate.p_joinlist, PgVec::new_in(mcx));
     qry.jointree = Some(mcx::alloc_in(
         mcx,
-        nodes::rawnodes::FromExpr {
+        ::nodes::rawnodes::FromExpr {
             fromlist: joinlist,
             quals: None,
         },
@@ -305,7 +305,7 @@ pub fn transformMergeStmt<'mcx>(
         let mut action = MergeAction {
             matchKind: when_match_kind,
             commandType: when_command_type,
-            r#override: nodes::modifytable::OverridingKind::OVERRIDING_NOT_SET,
+            r#override: ::nodes::modifytable::OverridingKind::OVERRIDING_NOT_SET,
             qual: None,
             targetList: PgVec::new_in(mcx),
             updateColnos: PgVec::new_in(mcx),
@@ -375,7 +375,7 @@ pub fn transformMergeStmt<'mcx>(
                     let c = as_merge_when_clause(l.as_ref())?;
                     c.values.is_empty()
                 };
-                let expr_list: PgVec<'mcx, nodes::primnodes::Expr> = if when_values_empty {
+                let expr_list: PgVec<'mcx, ::nodes::primnodes::Expr> = if when_values_empty {
                     /*
                      * We have INSERT ... DEFAULT VALUES.  We can handle this
                      * case by emitting an empty targetlist --- all columns will
@@ -633,8 +633,8 @@ fn nsitem_aliasname(nsitem: &ParseNamespaceItem<'_>) -> alloc::string::String {
 fn copy_restarget_list<'mcx>(
     mcx: Mcx<'mcx>,
     cols: &PgVec<'mcx, NodePtr<'mcx>>,
-) -> PgResult<PgVec<'mcx, nodes::rawnodes::ResTarget<'mcx>>> {
-    let mut out: PgVec<'mcx, nodes::rawnodes::ResTarget<'mcx>> =
+) -> PgResult<PgVec<'mcx, ::nodes::rawnodes::ResTarget<'mcx>>> {
+    let mut out: PgVec<'mcx, ::nodes::rawnodes::ResTarget<'mcx>> =
         mcx::vec_with_capacity_in(mcx, cols.len())?;
     for c in cols.iter() {
         match c.as_ref().as_restarget() {

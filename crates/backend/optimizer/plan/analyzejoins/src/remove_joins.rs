@@ -29,7 +29,7 @@
 use alloc::vec::Vec;
 
 use types_error::PgResult;
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 use pathnodes::planner_run::PlannerRun;
 use pathnodes::{
     JoinlistNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_INNER,
@@ -519,10 +519,10 @@ fn remove_rel_from_joinlist(
 /// (`{ words: Vec<u64> }`, the PHV's inline `phrels` storage). Mirrors
 /// [`crate::relids::adjust_relid_set`] but on the lifetime-free word vector.
 fn adjust_expr_relids(
-    set: &nodes::primnodes::ExprRelids,
+    set: &::nodes::primnodes::ExprRelids,
     oldrelid: i32,
     newrelid: i32,
-) -> nodes::primnodes::ExprRelids {
+) -> ::nodes::primnodes::ExprRelids {
     // IS_SPECIAL_VARNO(varno) == ((int) varno < 0): the special varnos
     // (INNER_VAR/OUTER_VAR/INDEX_VAR/ROWID_VAR == -1..-4) and the left-join
     // removal "delete only" sentinel are all negative; real RT indices are >= 1.
@@ -555,7 +555,7 @@ fn adjust_expr_relids(
             }
         }
     }
-    nodes::primnodes::ExprRelids { words }
+    ::nodes::primnodes::ExprRelids { words }
 }
 
 /// `remove_useless_self_joins(root, joinlist)` (analyzejoins.c:2488) — remove
@@ -947,7 +947,7 @@ fn change_expr_relids_standalone<'mcx>(
     to: i32,
 ) -> types_error::PgResult<()> {
     let owned = core::mem::replace(expr, dummy_expr());
-    let mut node = nodes::nodes::Node::mk_expr(mcx, owned)?;
+    let mut node = ::nodes::nodes::Node::mk_expr(mcx, owned)?;
     rewrite_core::change::ChangeVarNodes(&mut node, from, to, 0, mcx);
     *expr = node
         .into_expr()
@@ -958,7 +958,7 @@ fn change_expr_relids_standalone<'mcx>(
 /// A throwaway [`Expr`] used as the `mem::replace` placeholder; immediately
 /// overwritten and never observed.
 fn dummy_expr<'mcx>() -> Expr<'mcx> {
-    Expr::Const(nodes::primnodes::Const::default())
+    Expr::Const(::nodes::primnodes::Const::default())
 }
 
 /// `match_unique_clauses(root, outer, uclauses, relid)` (analyzejoins.c:2074) —

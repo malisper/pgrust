@@ -42,8 +42,8 @@ use postgres_seams as tcop_postgres;
 use utils_error::elog;
 use mcx::{alloc_in, PgBox};
 use types_error::{PgResult, DEBUG2, ERROR};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
-use nodes::noderesult::{Result as ResultPlan, ResultState};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
+use ::nodes::noderesult::{Result as ResultPlan, ResultState};
 use nodes::{EStateData, PlanStateNode, SlotId};
 
 /// Install this crate's implementations into its seam slots.
@@ -183,12 +183,12 @@ pub fn ExecResultRestrPos<'mcx>(
 /// allocated in `estate.es_query_cxt` (C: `makeNode` in the per-query context
 /// current during `ExecInitNode`), so initialization is fallible on OOM.
 ///
-/// Takes the enclosing plan-tree [`Node`](nodes::nodes::Node); the
+/// Takes the enclosing plan-tree [`Node`](::nodes::nodes::Node); the
 /// state's plan back-link aliases the shared, read-only plan tree exactly as
 /// C's `resstate->ps.plan = (Plan *) node` does. Panics if the node is not a
 /// `Result` (the C `castNode`).
 pub fn ExecInitResult<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, ResultState<'mcx>>> {

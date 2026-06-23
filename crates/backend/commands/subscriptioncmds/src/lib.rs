@@ -30,7 +30,7 @@ use types_catalog::pg_subscription::{
     Anum_pg_subscription_subpasswordrequired, Natts_pg_subscription, SubscriptionRelationId,
 };
 use types_core::primitive::{InvalidOid, Oid};
-use nodes::parsenodes::ObjectType;
+use ::nodes::parsenodes::ObjectType;
 use types_storage::lock::RowExclusiveLock;
 use types_syscache::syscache_ids::SUBSCRIPTIONOID;
 use types_tuple::heaptuple::{Datum, FormedTuple};

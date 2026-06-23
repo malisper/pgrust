@@ -22,9 +22,9 @@ extern crate alloc;
 
 use types_core::AttrNumber;
 use types_error::PgResult;
-use nodes::execexpr::{ExprState, ProjectionInfo, SubPlanState};
-use nodes::execnodes::Opaque;
-use nodes::primnodes::{etag, Expr};
+use ::nodes::execexpr::{ExprState, ProjectionInfo, SubPlanState};
+use ::nodes::execnodes::Opaque;
+use ::nodes::primnodes::{etag, Expr};
 use nodes::{EStateData, EcxtId, SlotId};
 
 use execExpr_seams::{ProjectionKind, SlotAttr};
@@ -251,7 +251,7 @@ pub fn sub_init_testexpr<'mcx>(
     // C `sstate->planstate` aliasing field is not materialized in the owned
     // model — the child plan state is owned by `es_subplanstates` and reached by
     // `plan_id` index at run time, never through `node.planstate`.)
-    let mut parent_head = nodes::execnodes::PlanStateData::default();
+    let mut parent_head = ::nodes::execnodes::PlanStateData::default();
 
     // `ExecInitExpr` is owned by execExpr-core; route through its seam.
     let state = crate::execExpr_core::exec_init_expr(testexpr, &mut parent_head, estate)?;
@@ -457,17 +457,17 @@ pub(crate) fn is_assignment_indirection_expr(expr: Option<&Expr>) -> bool {
 /// non-Const argument into its `fcinfo->args[i]` cell, then pick the
 /// `EEOP_FUNCEXPR*` opcode by strictness × pg_stat_function-tracking.
 ///
-/// [`Func`]: nodes::execexpr::ExprEvalStepData::Func
+/// [`Func`]: ::nodes::execexpr::ExprEvalStepData::Func
 pub(crate) fn exec_init_func<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    scratch: &mut nodes::execexpr::ExprEvalStep<'mcx>,
+    scratch: &mut ::nodes::execexpr::ExprEvalStep<'mcx>,
     node: &Expr<'mcx>,
     args: &[Expr<'mcx>],
     funcid: types_core::Oid,
     inputcollid: types_core::Oid,
     state: &mut ExprState<'mcx>,
 ) -> PgResult<()> {
-    use nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ResultCell};
+    use ::nodes::execexpr::{ExprEvalOp, ExprEvalStepData, ResultCell};
 
     // C: int nargs = list_length(args);
     let nargs = args.len() as i32;
@@ -493,7 +493,7 @@ pub(crate) fn exec_init_func<'mcx>(
             .map(|s| s.to_string());
         aclchk_seams::aclcheck_error::call(
             aclresult,
-            nodes::parsenodes::OBJECT_FUNCTION,
+            ::nodes::parsenodes::OBJECT_FUNCTION,
             funcname,
         )?;
     }
@@ -546,7 +546,7 @@ pub(crate) fn exec_init_func<'mcx>(
     // `inputcollid` as `fcinfo->fncollation`, surviving to call time.
     let fcinfo_data = mcx::alloc_in(
         mcx,
-        nodes::fmgr::FunctionCallInfoBaseData {
+        ::nodes::fmgr::FunctionCallInfoBaseData {
             // C: the frame points at the one `flinfo`; the owned frame carries
             // an `FmgrInfo` copy. `FmgrInfo` is no longer `Copy` (it carries the
             // erased `fn_expr`), so clone the lookup info into the frame and keep
@@ -672,12 +672,12 @@ pub(crate) fn exec_init_func<'mcx>(
 /// step.
 pub(crate) fn exec_init_scalar_array_op<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    scratch: &mut nodes::execexpr::ExprEvalStep<'mcx>,
-    opexpr: &nodes::primnodes::ScalarArrayOpExpr<'mcx>,
+    scratch: &mut ::nodes::execexpr::ExprEvalStep<'mcx>,
+    opexpr: &::nodes::primnodes::ScalarArrayOpExpr<'mcx>,
     state: &mut ExprState<'mcx>,
-    resv: nodes::execexpr::ResultCellId,
+    resv: ::nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
-    use nodes::execexpr::{ExprEvalOp, ExprEvalStepData};
+    use ::nodes::execexpr::{ExprEvalOp, ExprEvalStepData};
 
     // C: Select the correct comparison function. For hashed NOT IN the opfuncid
     //    is the inequality function and negfuncid is the equality function we
@@ -709,7 +709,7 @@ pub(crate) fn exec_init_scalar_array_op<'mcx>(
             .map(|s| s.to_string());
         aclchk_seams::aclcheck_error::call(
             aclresult,
-            nodes::parsenodes::OBJECT_FUNCTION,
+            ::nodes::parsenodes::OBJECT_FUNCTION,
             funcname,
         )?;
     }
@@ -729,7 +729,7 @@ pub(crate) fn exec_init_scalar_array_op<'mcx>(
                     .map(|s| s.to_string());
             aclchk_seams::aclcheck_error::call(
                 aclresult,
-                nodes::parsenodes::OBJECT_FUNCTION,
+                ::nodes::parsenodes::OBJECT_FUNCTION,
                 funcname,
             )?;
         }
@@ -743,7 +743,7 @@ pub(crate) fn exec_init_scalar_array_op<'mcx>(
     let flinfo = fmgr_seams::fmgr_info::call(mcx, cmpfuncid)?;
     let fcinfo_data = mcx::alloc_in(
         mcx,
-        nodes::fmgr::FunctionCallInfoBaseData {
+        ::nodes::fmgr::FunctionCallInfoBaseData {
             flinfo: Some(flinfo.clone()),
             context: None,
             resultinfo: None,
@@ -816,11 +816,11 @@ pub(crate) fn exec_init_scalar_array_op<'mcx>(
 /// `EEOP_SUBPLAN` step.
 pub(crate) fn exec_init_sub_plan_expr<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    subplan: &nodes::primnodes::SubPlan<'mcx>,
+    subplan: &::nodes::primnodes::SubPlan<'mcx>,
     state: &mut ExprState<'mcx>,
-    resv: nodes::execexpr::ResultCellId,
+    resv: ::nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
-    use nodes::execexpr::{ExprEvalOp, ExprEvalStepData};
+    use ::nodes::execexpr::{ExprEvalOp, ExprEvalStepData};
 
     // C: ExprEvalStep scratch = {0};
     // C: if (!state->parent)
@@ -866,7 +866,7 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
 
         crate::execExpr_core::exec_init_expr_rec(mcx, arg, state, resv)?;
 
-        let scratch = nodes::execexpr::ExprEvalStep {
+        let scratch = ::nodes::execexpr::ExprEvalStep {
             opcode: ExprEvalOp::EEOP_PARAM_SET,
             resvalue: resv,
             resnull: resv,
@@ -917,7 +917,7 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
     //       is never mistaken for an InitPlan during param eval / rescan). The
     //       child plan-state tree itself already lives in
     //       `es_subplanstates[plan_id-1]` (filled by InitPlan in execMain).
-    let owned_subplan: mcx::PgBox<'mcx, nodes::primnodes::SubPlan<'mcx>> =
+    let owned_subplan: mcx::PgBox<'mcx, ::nodes::primnodes::SubPlan<'mcx>> =
         mcx::alloc_in(mcx, subplan.clone_in(mcx)?)?;
 
     // sstate = ExecInitSubPlan(subplan, state->parent->state);
@@ -938,7 +938,7 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
     // (carrying the SubPlan node for EXPLAIN labeling). Grow the slot vector to
     // cover this 1-based plan_id.
     {
-        let display_sstate = nodes::execexpr::SubPlanState {
+        let display_sstate = ::nodes::execexpr::SubPlanState {
             subplan: Some(mcx::alloc_in(mcx, subplan.clone_in(mcx)?)?),
             ..Default::default()
         };
@@ -973,7 +973,7 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
     drain_subplan_found_channels(&mut sstate, state);
 
     // scratch.opcode = EEOP_SUBPLAN; scratch.d.subplan.sstate = sstate;
-    let scratch = nodes::execexpr::ExprEvalStep {
+    let scratch = ::nodes::execexpr::ExprEvalStep {
         opcode: ExprEvalOp::EEOP_SUBPLAN,
         resvalue: resv,
         resnull: resv,
@@ -992,14 +992,14 @@ pub(crate) fn exec_init_sub_plan_expr<'mcx>(
 /// parent whose subplan emits junk columns — attaches a `JunkFilter`.
 pub(crate) fn exec_init_whole_row_var<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    scratch: &mut nodes::execexpr::ExprEvalStep<'mcx>,
-    variable: &nodes::primnodes::Var,
+    scratch: &mut ::nodes::execexpr::ExprEvalStep<'mcx>,
+    variable: &::nodes::primnodes::Var,
     state: &mut ExprState<'mcx>,
 ) -> PgResult<()> {
-    use nodes::execexpr::{
+    use ::nodes::execexpr::{
         ExprEvalOp, ExprEvalStepData, EEO_FLAG_HAS_NEW, EEO_FLAG_HAS_OLD,
     };
-    use nodes::primnodes::VarReturningType;
+    use ::nodes::primnodes::VarReturningType;
 
     // C: scratch->opcode = EEOP_WHOLEROW;
     //    scratch->d.wholerow.var = variable;
@@ -1084,12 +1084,12 @@ pub(crate) fn exec_init_whole_row_var<'mcx>(
 /// and backpatch the null-jump targets.
 pub(crate) fn exec_init_subscripting_ref<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    scratch: &mut nodes::execexpr::ExprEvalStep<'mcx>,
-    sbsref: &nodes::primnodes::SubscriptingRef<'mcx>,
+    scratch: &mut ::nodes::execexpr::ExprEvalStep<'mcx>,
+    sbsref: &::nodes::primnodes::SubscriptingRef<'mcx>,
     state: &mut ExprState<'mcx>,
-    resv: nodes::execexpr::ResultCellId,
+    resv: ::nodes::execexpr::ResultCellId,
 ) -> PgResult<()> {
-    use nodes::execexpr::{
+    use ::nodes::execexpr::{
         ExprEvalOp, ExprEvalStepData, SubscriptExecSteps, SubscriptingRefState,
     };
 
@@ -1170,7 +1170,7 @@ pub(crate) fn exec_init_subscripting_ref<'mcx>(
     //        ExprEvalPushStep(state, scratch);
     //        adjust_jumps = lappend_int(adjust_jumps, state->steps_len - 1); }
     if !is_assignment && sbsroutines.fetch_strict {
-        let jump = nodes::execexpr::ExprEvalStep {
+        let jump = ::nodes::execexpr::ExprEvalStep {
             opcode: ExprEvalOp::EEOP_JUMP_IF_NULL,
             resvalue: resv,
             resnull: resv,
@@ -1239,7 +1239,7 @@ pub(crate) fn exec_init_subscripting_ref<'mcx>(
     //        ExprEvalPushStep(state, scratch);
     //        adjust_jumps = lappend_int(adjust_jumps, state->steps_len - 1); }
     if let Some(check) = methods.sbs_check_subscripts {
-        let step = nodes::execexpr::ExprEvalStep {
+        let step = ::nodes::execexpr::ExprEvalStep {
             opcode: ExprEvalOp::EEOP_SBSREF_SUBSCRIPTS,
             resvalue: resv,
             resnull: resv,
@@ -1280,7 +1280,7 @@ pub(crate) fn exec_init_subscripting_ref<'mcx>(
             // C: scratch->opcode = EEOP_SBSREF_OLD;
             //    scratch->d.sbsref.subscriptfunc = methods.sbs_fetch_old;
             //    scratch->d.sbsref.state = sbsrefstate; ExprEvalPushStep(state, scratch);
-            let step = nodes::execexpr::ExprEvalStep {
+            let step = ::nodes::execexpr::ExprEvalStep {
                 opcode: ExprEvalOp::EEOP_SBSREF_OLD,
                 resvalue: resv,
                 resnull: resv,
@@ -1319,7 +1319,7 @@ pub(crate) fn exec_init_subscripting_ref<'mcx>(
         // C: scratch->opcode = EEOP_SBSREF_ASSIGN;
         //    scratch->d.sbsref.subscriptfunc = methods.sbs_assign;
         //    scratch->d.sbsref.state = sbsrefstate; ExprEvalPushStep(state, scratch);
-        let step = nodes::execexpr::ExprEvalStep {
+        let step = ::nodes::execexpr::ExprEvalStep {
             opcode: ExprEvalOp::EEOP_SBSREF_ASSIGN,
             resvalue: resv,
             resnull: resv,
@@ -1340,7 +1340,7 @@ pub(crate) fn exec_init_subscripting_ref<'mcx>(
         //    scratch->opcode = EEOP_SBSREF_FETCH;
         //    scratch->d.sbsref.subscriptfunc = methods.sbs_fetch;
         //    scratch->d.sbsref.state = sbsrefstate; ExprEvalPushStep(state, scratch);
-        let step = nodes::execexpr::ExprEvalStep {
+        let step = ::nodes::execexpr::ExprEvalStep {
             opcode: ExprEvalOp::EEOP_SBSREF_FETCH,
             resvalue: resv,
             resnull: resv,
@@ -1401,7 +1401,7 @@ fn zeroed_datums<'mcx>(
 fn zeroed_cells<'mcx>(
     mcx: mcx::Mcx<'mcx>,
     n: i32,
-) -> PgResult<mcx::PgVec<'mcx, Option<nodes::execexpr::ResultCellId>>> {
+) -> PgResult<mcx::PgVec<'mcx, Option<::nodes::execexpr::ResultCellId>>> {
     let mut v = mcx::vec_with_capacity_in(mcx, n.max(0) as usize)?;
     for _ in 0..n.max(0) {
         v.push(None);
@@ -1417,17 +1417,17 @@ fn zeroed_cells<'mcx>(
 /// copies are behavior-preserving.
 fn clone_state<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    src: &mcx::PgBox<'mcx, nodes::execexpr::SubscriptingRefState<'mcx>>,
-) -> PgResult<mcx::PgBox<'mcx, nodes::execexpr::SubscriptingRefState<'mcx>>> {
+    src: &mcx::PgBox<'mcx, ::nodes::execexpr::SubscriptingRefState<'mcx>>,
+) -> PgResult<mcx::PgBox<'mcx, ::nodes::execexpr::SubscriptingRefState<'mcx>>> {
     clone_state_inner(mcx, src, None, None)
 }
 
 /// As [`clone_state`] but recording the `prev_cell` alias for an OLD step.
 fn clone_state_with_prev<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    src: &mcx::PgBox<'mcx, nodes::execexpr::SubscriptingRefState<'mcx>>,
-    prev_cell: nodes::execexpr::ResultCellId,
-) -> PgResult<mcx::PgBox<'mcx, nodes::execexpr::SubscriptingRefState<'mcx>>> {
+    src: &mcx::PgBox<'mcx, ::nodes::execexpr::SubscriptingRefState<'mcx>>,
+    prev_cell: ::nodes::execexpr::ResultCellId,
+) -> PgResult<mcx::PgBox<'mcx, ::nodes::execexpr::SubscriptingRefState<'mcx>>> {
     clone_state_inner(mcx, src, None, Some(prev_cell))
 }
 
@@ -1435,20 +1435,20 @@ fn clone_state_with_prev<'mcx>(
 /// `prev_cell`) for an ASSIGN step.
 fn clone_state_for_assign<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    src: &mcx::PgBox<'mcx, nodes::execexpr::SubscriptingRefState<'mcx>>,
-    replace_cell: nodes::execexpr::ResultCellId,
-    prev_cell: Option<nodes::execexpr::ResultCellId>,
-) -> PgResult<mcx::PgBox<'mcx, nodes::execexpr::SubscriptingRefState<'mcx>>> {
+    src: &mcx::PgBox<'mcx, ::nodes::execexpr::SubscriptingRefState<'mcx>>,
+    replace_cell: ::nodes::execexpr::ResultCellId,
+    prev_cell: Option<::nodes::execexpr::ResultCellId>,
+) -> PgResult<mcx::PgBox<'mcx, ::nodes::execexpr::SubscriptingRefState<'mcx>>> {
     clone_state_inner(mcx, src, Some(replace_cell), prev_cell)
 }
 
 fn clone_state_inner<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    src: &mcx::PgBox<'mcx, nodes::execexpr::SubscriptingRefState<'mcx>>,
-    replace_cell: Option<nodes::execexpr::ResultCellId>,
-    prev_cell: Option<nodes::execexpr::ResultCellId>,
-) -> PgResult<mcx::PgBox<'mcx, nodes::execexpr::SubscriptingRefState<'mcx>>> {
-    use nodes::execexpr::SubscriptingRefState;
+    src: &mcx::PgBox<'mcx, ::nodes::execexpr::SubscriptingRefState<'mcx>>,
+    replace_cell: Option<::nodes::execexpr::ResultCellId>,
+    prev_cell: Option<::nodes::execexpr::ResultCellId>,
+) -> PgResult<mcx::PgBox<'mcx, ::nodes::execexpr::SubscriptingRefState<'mcx>>> {
+    use ::nodes::execexpr::SubscriptingRefState;
     let s = &**src;
     let clone_bools = |v: &Option<mcx::PgVec<'mcx, bool>>| -> PgResult<Option<mcx::PgVec<'mcx, bool>>> {
         match v {
@@ -1462,8 +1462,8 @@ fn clone_state_inner<'mcx>(
             }
         }
     };
-    let clone_cells = |v: &Option<mcx::PgVec<'mcx, Option<nodes::execexpr::ResultCellId>>>|
-     -> PgResult<Option<mcx::PgVec<'mcx, Option<nodes::execexpr::ResultCellId>>>> {
+    let clone_cells = |v: &Option<mcx::PgVec<'mcx, Option<::nodes::execexpr::ResultCellId>>>|
+     -> PgResult<Option<mcx::PgVec<'mcx, Option<::nodes::execexpr::ResultCellId>>>> {
         match v {
             None => Ok(None),
             Some(b) => {
@@ -1504,12 +1504,12 @@ fn clone_state_inner<'mcx>(
 /// array family (`array_exec_setup`, arraysubs.c) lives here; other handlers
 /// would be reached at their owners.
 fn subscript_exec_setup<'mcx>(
-    routines: &nodes::execexpr::SubscriptRoutines,
-    sbsref: &nodes::primnodes::SubscriptingRef<'mcx>,
-    sbsrefstate: &mut nodes::execexpr::SubscriptingRefState<'mcx>,
-    methods: &mut nodes::execexpr::SubscriptExecSteps,
+    routines: &::nodes::execexpr::SubscriptRoutines,
+    sbsref: &::nodes::primnodes::SubscriptingRef<'mcx>,
+    sbsrefstate: &mut ::nodes::execexpr::SubscriptingRefState<'mcx>,
+    methods: &mut ::nodes::execexpr::SubscriptExecSteps,
 ) -> PgResult<()> {
-    use nodes::execexpr::SubscriptHandler;
+    use ::nodes::execexpr::SubscriptHandler;
     match routines.handler {
         SubscriptHandler::Array | SubscriptHandler::RawArray => {
             array_exec_setup(sbsref, sbsrefstate, methods)
@@ -1523,11 +1523,11 @@ fn subscript_exec_setup<'mcx>(
 /// no limit on the number of subscripts (jsonb has no nesting limit) and no
 /// slice support (the transform errored on slices).
 fn jsonb_exec_setup<'mcx>(
-    sbsref: &nodes::primnodes::SubscriptingRef<'mcx>,
-    sbsrefstate: &mut nodes::execexpr::SubscriptingRefState<'mcx>,
-    methods: &mut nodes::execexpr::SubscriptExecSteps,
+    sbsref: &::nodes::primnodes::SubscriptingRef<'mcx>,
+    sbsrefstate: &mut ::nodes::execexpr::SubscriptingRefState<'mcx>,
+    methods: &mut ::nodes::execexpr::SubscriptExecSteps,
 ) -> PgResult<()> {
-    use nodes::execexpr::{JsonbSubWorkspace, SubscriptMethod, SubscriptWorkspace};
+    use ::nodes::execexpr::{JsonbSubWorkspace, SubscriptMethod, SubscriptWorkspace};
 
     // C: int nupper = sbsref->refupperindexpr->length;
     //    workspace = palloc0(MAXALIGN(sizeof(JsonbSubWorkspace)) +
@@ -1571,11 +1571,11 @@ fn jsonb_exec_setup<'mcx>(
 /// `array_exec_setup(sbsref, sbsrefstate, methods)` (arraysubs.c) — set up the
 /// array subscript workspace and method discriminants.
 fn array_exec_setup<'mcx>(
-    sbsref: &nodes::primnodes::SubscriptingRef<'mcx>,
-    sbsrefstate: &mut nodes::execexpr::SubscriptingRefState<'mcx>,
-    methods: &mut nodes::execexpr::SubscriptExecSteps,
+    sbsref: &::nodes::primnodes::SubscriptingRef<'mcx>,
+    sbsrefstate: &mut ::nodes::execexpr::SubscriptingRefState<'mcx>,
+    methods: &mut ::nodes::execexpr::SubscriptExecSteps,
 ) -> PgResult<()> {
-    use nodes::execexpr::{
+    use ::nodes::execexpr::{
         ArraySubWorkspace, SubscriptMethod, SubscriptWorkspace, MAXDIM,
     };
 

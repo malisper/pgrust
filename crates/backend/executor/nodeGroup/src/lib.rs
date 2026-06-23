@@ -41,8 +41,8 @@ use execUtils_seams as execUtils;
 use postgres_seams as tcop_postgres;
 use mcx::{alloc_in, PgBox};
 use types_error::PgResult;
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
-use nodes::nodegroup::{Group, GroupStateData};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
+use ::nodes::nodegroup::{Group, GroupStateData};
 use nodes::{EStateData, PlanStateNode, SlotId};
 
 /// Install this crate's implementations into its seam slots.
@@ -224,7 +224,7 @@ pub fn ExecGroup<'mcx>(
 /// otherwise it goes through the execExpr seam.
 fn exec_qual_having<'mcx>(
     node: &mut GroupStateData<'mcx>,
-    econtext: nodes::EcxtId,
+    econtext: ::nodes::EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     match node.ss.ps.qual.as_deref_mut() {
@@ -263,7 +263,7 @@ fn exec_group_node<'mcx>(
 /// per-query context current during `ExecInitNode`), so initialization is
 /// fallible on OOM. Panics if the node is not a `Group` (the C `castNode`).
 pub fn ExecInitGroup<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, GroupStateData<'mcx>>> {

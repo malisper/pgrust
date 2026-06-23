@@ -10,9 +10,9 @@ extern crate alloc;
 use alloc::string::String;
 
 use mcx::{alloc_in, MemoryContext};
-use nodes::copy_query::Query;
-use nodes::nodes::CmdType;
-use nodes::primnodes::{Expr, TargetEntry, Var};
+use ::nodes::copy_query::Query;
+use ::nodes::nodes::CmdType;
+use ::nodes::primnodes::{Expr, TargetEntry, Var};
 use pathnodes::{PlannerInfo, TargetEntryNode};
 
 use crate::{extract_update_targetlist_colnos, get_plan_rowmark, preprocess_targetlist};
@@ -111,15 +111,15 @@ fn get_plan_rowmark_resolves_rti() {
 
     // A FOR-UPDATE/SHARE rowmark for rti=3 is interned as a handle in
     // root.rowMarks; the lookup resolves the handle to compare rc->rti.
-    let mk = |rti: u32| nodes::nodelockrows::PlanRowMark {
-        type_: nodes::nodelockrows::T_PlanRowMark,
+    let mk = |rti: u32| ::nodes::nodelockrows::PlanRowMark {
+        type_: ::nodes::nodelockrows::T_PlanRowMark,
         rti: rti as types_core::Index,
         prti: rti as types_core::Index,
         rowmarkId: rti,
-        markType: nodes::nodelockrows::ROW_MARK_REFERENCE,
-        allMarkTypes: 1 << nodes::nodelockrows::ROW_MARK_REFERENCE,
-        strength: nodes::rawnodes::LockClauseStrength::LCS_NONE as u32 as i32,
-        waitPolicy: nodes::rawnodes::LockWaitPolicy::LockWaitBlock as u32 as i32,
+        markType: ::nodes::nodelockrows::ROW_MARK_REFERENCE,
+        allMarkTypes: 1 << ::nodes::nodelockrows::ROW_MARK_REFERENCE,
+        strength: ::nodes::rawnodes::LockClauseStrength::LCS_NONE as u32 as i32,
+        waitPolicy: ::nodes::rawnodes::LockWaitPolicy::LockWaitBlock as u32 as i32,
         isParent: false,
     };
     let marks = alloc::vec![run.intern_rowmark(mk(3)), run.intern_rowmark(mk(5))];

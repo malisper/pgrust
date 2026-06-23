@@ -3,7 +3,7 @@
 //! analyzed cursor query.
 
 use types_error::PgResult;
-use nodes::portalcmds::Query;
+use ::nodes::portalcmds::Query;
 
 seam_core::seam!(
     /// `QueryRewrite(query)` (rewriteHandler.c) — apply the rule system to the
@@ -15,7 +15,7 @@ seam_core::seam!(
     /// (its sole consumer is `backend-commands-portalcmds`'s `PerformCursorOpen`).
     /// It is documented K1/planner debt (DESIGN_DEBT TD-REWRITEHANDLER-RULELOCK):
     /// the opaque-token contract collapse onto the canonical
-    /// [`nodes::copy_query::Query`] lands with the parser/planner value
+    /// [`::nodes::copy_query::Query`] lands with the parser/planner value
     /// producers. New callers use [`query_rewrite_canonical`] below.
     pub fn query_rewrite<'mcx>(
         mcx: mcx::Mcx<'mcx>,
@@ -26,7 +26,7 @@ seam_core::seam!(
 seam_core::seam!(
     /// `QueryRewrite(parsetree)` (rewriteHandler.c:4566) — the canonical top-level
     /// rule-rewriter entry over the value-typed
-    /// [`nodes::copy_query::Query`]: apply all non-SELECT rules, then the
+    /// [`::nodes::copy_query::Query`]: apply all non-SELECT rules, then the
     /// RIR (`ON SELECT`/view) rules, then assign the command tag, returning the
     /// list of rewritten queries (each allocated in `mcx`). For a plain `SELECT`
     /// with no rules this is exactly one element (the input). This is the
@@ -36,14 +36,14 @@ seam_core::seam!(
     /// rewriteHandler owner. Runs the rewriter engine; can `ereport(ERROR)`.
     pub fn query_rewrite_canonical<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        parsetree: nodes::copy_query::Query<'mcx>,
-    ) -> PgResult<mcx::PgVec<'mcx, nodes::copy_query::Query<'mcx>>>
+        parsetree: ::nodes::copy_query::Query<'mcx>,
+    ) -> PgResult<mcx::PgVec<'mcx, ::nodes::copy_query::Query<'mcx>>>
 );
 
 seam_core::seam!(
     /// `AcquireRewriteLocks(parsetree, forExecute, forUpdatePushedDown)`
     /// (rewriteHandler.c:148) over the value-typed
-    /// [`nodes::copy_query::Query`] — acquire the appropriate relation
+    /// [`::nodes::copy_query::Query`] — acquire the appropriate relation
     /// locks for every relation in the query, fix up dropped JOIN alias vars,
     /// and refresh RTE relkinds, recursing through subquery RTEs and CTEs. The
     /// `Query` is taken by value, mutated in place (locks taken, relkinds /
@@ -55,10 +55,10 @@ seam_core::seam!(
     /// (rare on the SELECT/DML spine).
     pub fn acquire_rewrite_locks<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        parsetree: nodes::copy_query::Query<'mcx>,
+        parsetree: ::nodes::copy_query::Query<'mcx>,
         for_execute: bool,
         for_update_pushed_down: bool,
-    ) -> PgResult<nodes::copy_query::Query<'mcx>>
+    ) -> PgResult<::nodes::copy_query::Query<'mcx>>
 );
 
 seam_core::seam!(
@@ -71,7 +71,7 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         rel: rel::Relation<'mcx>,
         attrno: i32,
-    ) -> PgResult<Option<mcx::PgBox<'mcx, nodes::Expr<'mcx>>>>
+    ) -> PgResult<Option<mcx::PgBox<'mcx, ::nodes::Expr<'mcx>>>>
 );
 
 seam_core::seam!(
@@ -89,14 +89,14 @@ seam_core::seam!(
         mcx: mcx::Mcx<'mcx>,
         rel: &rel::Relation<'mcx>,
         attrno: i32,
-    ) -> PgResult<mcx::PgBox<'mcx, nodes::Expr<'static>>>
+    ) -> PgResult<mcx::PgBox<'mcx, ::nodes::Expr<'static>>>
 );
 
 seam_core::seam!(
     /// `get_view_query(view)` (rewriteHandler.c): return the `Query` from a
     /// view's `_RETURN` rule (the `ON SELECT` rewrite action). The C returns a
     /// read-only pointer into the relcache's `rd_rules`; this seam returns the
-    /// canonical owned [`nodes::copy_query::Query`] image, allocated in
+    /// canonical owned [`::nodes::copy_query::Query`] image, allocated in
     /// `mcx`. The caller must have verified the relation is a view. C
     /// `elog(ERROR)`s on a missing/malformed `_RETURN` rule, carried on `Err`.
     ///
@@ -106,7 +106,7 @@ seam_core::seam!(
     pub fn get_view_query<'mcx>(
         mcx: mcx::Mcx<'mcx>,
         view: &rel::Relation<'mcx>,
-    ) -> PgResult<nodes::copy_query::Query<'mcx>>
+    ) -> PgResult<::nodes::copy_query::Query<'mcx>>
 );
 
 seam_core::seam!(
@@ -175,8 +175,8 @@ seam_core::seam!(
     /// is passed by OID (the seam re-opens / consults the relation).
     pub fn expand_generated_columns_in_expr<'mcx>(
         mcx: mcx::Mcx<'mcx>,
-        node: Option<nodes::primnodes::Expr<'static>>,
+        node: Option<::nodes::primnodes::Expr<'static>>,
         rel_oid: types_core::Oid,
         rt_index: i32,
-    ) -> PgResult<Option<nodes::primnodes::Expr<'static>>>
+    ) -> PgResult<Option<::nodes::primnodes::Expr<'static>>>
 );

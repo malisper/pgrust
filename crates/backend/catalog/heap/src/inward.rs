@@ -79,7 +79,7 @@ fn heap_create_with_catalog_transient_seam<'mcx>(
     old_heap_oid: types_core::Oid,
 ) -> PgResult<types_core::Oid> {
     use types_core::InvalidOid;
-    use nodes::primnodes::OnCommitAction;
+    use ::nodes::primnodes::OnCommitAction;
     use types_tuple::access::RELKIND_RELATION;
 
     let reloptions: Option<alloc::vec::Vec<u8>> = if reloptions.is_null {

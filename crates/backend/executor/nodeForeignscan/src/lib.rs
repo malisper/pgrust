@@ -47,8 +47,8 @@ use postgres_seams as tcop_postgres;
 
 use mcx::{alloc_in, PgBox};
 use types_error::{PgError, PgResult};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
-use nodes::nodes::{CmdType, Node};
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::nodes::nodes::{CmdType, Node};
 use nodes::{
     AsyncRequestData, EStateData, ForeignScan, ForeignScanState, ParallelContext,
     ParallelWorkerContext, PlanStateNode, SlotId, TupleSlotKind,
@@ -295,7 +295,7 @@ pub fn ExecInitForeignScan<'mcx>(
         .unwrap_or(true);
     let tlistvarno: i32 = if !fdw_scan_tlist_is_nil || !current_relation_is_some {
         // scan_tupdesc = ExecTypeFromTL(node->fdw_scan_tlist);
-        let fdw_scan_tlist: &[nodes::primnodes::TargetEntry<'mcx>] =
+        let fdw_scan_tlist: &[::nodes::primnodes::TargetEntry<'mcx>] =
             plan.fdw_scan_tlist.as_deref().unwrap_or(&[]);
         let scan_tupdesc = execTuples::exec_type_from_tl::call(mcx, fdw_scan_tlist)?;
         // ExecInitScanTupleSlot(estate, &scanstate->ss, scan_tupdesc, &TTSOpsHeapTuple);

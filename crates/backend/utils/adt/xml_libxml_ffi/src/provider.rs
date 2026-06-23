@@ -36,7 +36,7 @@ use types_error::{
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_ARGUMENT_FOR_XQUERY, ERRCODE_INVALID_XML_CONTENT,
     ERRCODE_INVALID_XML_DOCUMENT, ERRCODE_OUT_OF_MEMORY,
 };
-use nodes::primnodes::XmlOptionType;
+use ::nodes::primnodes::XmlOptionType;
 use types_xml::XmlBinaryType;
 
 use adt_xml as owner;

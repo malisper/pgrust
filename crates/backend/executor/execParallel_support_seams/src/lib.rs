@@ -32,9 +32,9 @@ use execparallel::{
     InstrumentationHandle, ParallelContextHandle, ParamExecValue, RestoredParam, SerializeCursor,
     Size,
 };
-use nodes::bitmapset::Bitmapset;
-use nodes::querydesc::QueryDesc;
-use nodes::EStateData;
+use ::nodes::bitmapset::Bitmapset;
+use ::nodes::querydesc::QueryDesc;
+use ::nodes::EStateData;
 
 // ===========================================================================
 // Worker plan-shipping (copyfuncs.c / outfuncs.c / readfuncs.c / makefuncs.c).
@@ -49,7 +49,7 @@ use nodes::EStateData;
 /// the copy allocates against `mcx`. Owned by outfuncs (the plan serializer).
 seam_core::seam!(pub fn serialize_plan_for_workers<'mcx>(
     mcx: mcx::Mcx<'mcx>,
-    plan: &nodes::nodes::Node<'_>,
+    plan: &::nodes::nodes::Node<'_>,
     estate: &mut EStateData<'_>,
 ) -> PgResult<String>);
 
@@ -64,7 +64,7 @@ seam_core::seam!(pub fn create_parallel_query_desc<'mcx>(
     pstmt_text: String,
     query_string: String,
     receiver: execparallel::DestReceiverHandle,
-    params: nodes::params::ParamListInfo,
+    params: ::nodes::params::ParamListInfo,
     instrument_options: i32,
 ) -> PgResult<QueryDesc>);
 
@@ -87,7 +87,7 @@ seam_core::seam!(pub fn query_desc_estate_has_jit_owned(query_desc: &QueryDesc) 
 /// per-output-tuple `ExprContext`, identified by its owned-model `EcxtId` into
 /// the `EState`'s `es_exprcontexts` pool (the real per-context identity the
 /// executor threads, not an opaque handle). Owned by execUtils.
-seam_core::seam!(pub fn get_per_tuple_expr_context_owned(estate: &mut EStateData<'_>) -> PgResult<nodes::execnodes::EcxtId>);
+seam_core::seam!(pub fn get_per_tuple_expr_context_owned(estate: &mut EStateData<'_>) -> PgResult<::nodes::execnodes::EcxtId>);
 
 // ===========================================================================
 // Init-plan forcing (nodeSubplan.c).
@@ -99,7 +99,7 @@ seam_core::seam!(pub fn get_per_tuple_expr_context_owned(estate: &mut EStateData
 /// per-tuple `ExprContext` by its `EcxtId`.
 seam_core::seam!(pub fn exec_set_param_plan_multi<'mcx>(
     params: &Bitmapset<'mcx>,
-    econtext: nodes::execnodes::EcxtId,
+    econtext: ::nodes::execnodes::EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()>);
 
@@ -108,13 +108,13 @@ seam_core::seam!(pub fn exec_set_param_plan_multi<'mcx>(
 // ===========================================================================
 
 /// `EstimateParamListSpace(paramLI)`.
-seam_core::seam!(pub fn estimate_param_list_space(param_li: nodes::params::ParamListInfo) -> Size);
+seam_core::seam!(pub fn estimate_param_list_space(param_li: ::nodes::params::ParamListInfo) -> Size);
 /// `SerializeParamList(paramLI, &start_address)` into the chunk. Its
 /// `get_typlenbyval` path can `ereport(ERROR)`, so the seam is fallible
 /// (returns the advanced cursor on success).
-seam_core::seam!(pub fn serialize_param_list(param_li: nodes::params::ParamListInfo, chunk: SerializeCursor) -> PgResult<SerializeCursor>);
+seam_core::seam!(pub fn serialize_param_list(param_li: ::nodes::params::ParamListInfo, chunk: SerializeCursor) -> PgResult<SerializeCursor>);
 /// `RestoreParamList(&start_address)`.
-seam_core::seam!(pub fn restore_param_list(chunk: SerializeCursor) -> nodes::params::ParamListInfo);
+seam_core::seam!(pub fn restore_param_list(chunk: SerializeCursor) -> ::nodes::params::ParamListInfo);
 /// `estate->es_param_exec_vals[paramid]` value/isnull + resolved type metadata.
 // The serialized param value is a machine-word `Datum` read out of
 // `es_param_exec_vals` and copied through the DSM chunk (params.c/datum.c);

@@ -42,9 +42,9 @@ use init_small_seams as globals;
 use mcx::{Mcx, PgBox};
 use types_error::{PgError, PgResult};
 use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
-use nodes::nodebitmapindexscan::{BitmapIndexScan, BitmapIndexScanState};
-use nodes::nodeindexonlyscan::{IndexScanInstrumentation, SharedIndexScanInstrumentation};
-use nodes::EStateData;
+use ::nodes::nodebitmapindexscan::{BitmapIndexScan, BitmapIndexScanState};
+use ::nodes::nodeindexonlyscan::{IndexScanInstrumentation, SharedIndexScanInstrumentation};
+use ::nodes::EStateData;
 use ::tidbitmap::TIDBitmap;
 
 /// `EXEC_FLAG_EXPLAIN_ONLY` (executor/executor.h) — "EXPLAIN, no ANALYZE".
@@ -321,7 +321,7 @@ pub fn ExecEndBitmapIndexScan<'mcx>(
 /// 1:1 with `BitmapIndexScanState *ExecInitBitmapIndexScan(BitmapIndexScan
 /// *node, EState *estate, int eflags)`.
 pub fn ExecInitBitmapIndexScan<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
 ) -> PgResult<PgBox<'mcx, BitmapIndexScanState<'mcx>>> {
@@ -602,7 +602,7 @@ pub fn ExecBitmapIndexScanRetrieveInstrumentation<'mcx>(
 /// `((BitmapIndexScan *) node->ss.ps.plan)->isshared`.
 fn plan_isshared(node: &BitmapIndexScanState<'_>) -> PgResult<bool> {
     match node.ss.ps.plan {
-        Some(p) if p.node_tag() == nodes::nodes::ntag::T_BitmapIndexScan => Ok(p.expect_bitmapindexscan().isshared),
+        Some(p) if p.node_tag() == ::nodes::nodes::ntag::T_BitmapIndexScan => Ok(p.expect_bitmapindexscan().isshared),
         _ => Err(elog("BitmapIndexScan node has wrong plan type")),
     }
 }
@@ -676,9 +676,9 @@ fn clone_shared_info<'mcx>(
 /// convention")` — a BitmapIndexScan is only ever driven through
 /// `MultiExecBitmapIndexScan`, so an ordinary per-tuple dispatch is a bug.
 fn exec_proc_node_trampoline<'mcx>(
-    _pstate: &mut nodes::PlanStateNode<'mcx>,
+    _pstate: &mut ::nodes::PlanStateNode<'mcx>,
     _estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<nodes::SlotId>> {
+) -> PgResult<Option<::nodes::SlotId>> {
     Err(elog(
         "BitmapIndexScan node does not support ExecProcNode call convention",
     ))
@@ -719,14 +719,14 @@ extern crate alloc;
 /// and relying on `MultiExecBitmapIndexScan` returning that same bitmap (the
 /// `subresult == result` identity check is therefore structurally guaranteed).
 fn bridge_multi_exec_bitmap_index_child<'mcx>(
-    subnode: &mut nodes::PlanStateNode<'mcx>,
+    subnode: &mut ::nodes::PlanStateNode<'mcx>,
     result: &mut TIDBitmap,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<()> {
     // ((BitmapIndexScanState *) subnode) — the C unconditionally downcasts
     // because the caller already gated on `IsA(subnode, BitmapIndexScanState)`.
     let node = match subnode {
-        nodes::PlanStateNode::BitmapIndexScan(node) => &mut **node,
+        ::nodes::PlanStateNode::BitmapIndexScan(node) => &mut **node,
         _ => {
             return Err(elog(
                 "multi_exec_bitmap_index_child: subnode is not a BitmapIndexScanState",

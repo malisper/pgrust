@@ -65,7 +65,7 @@ use analyze_rt_seams as rt;
 use utils_error::ereport;
 use types_error::{ErrorLocation, WARNING};
 
-use nodes::primnodes::Expr;
+use ::nodes::primnodes::Expr;
 
 mod expr_stats;
 

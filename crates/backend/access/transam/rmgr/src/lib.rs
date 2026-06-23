@@ -21,7 +21,7 @@ use mcx::Mcx;
 use pgstrcasecmp::pg_strcasecmp;
 use types_core::RmgrId;
 use types_error::{ErrorLocation, PgError, PgResult, ERROR, LOG};
-use nodes::fmgr::FunctionCallInfoBaseData;
+use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::Datum;
 use wal::rmgr::{
     RmgrData, RmgrIdIsBuiltin, RmgrIdIsCustom, RM_MAX_CUSTOM_ID, RM_MIN_CUSTOM_ID,

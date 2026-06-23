@@ -44,7 +44,7 @@ use types_catalog::catalog::{ACCESS_METHOD_RELATION_ID, PROCEDURE_RELATION_ID};
 use types_core::{
     InvalidOid, Oid, OidIsValid, INDEX_AM_HANDLEROID, INTERNALOID, TABLE_AM_HANDLEROID,
 };
-use nodes::parsenodes::CreateAmStmt;
+use ::nodes::parsenodes::CreateAmStmt;
 use types_storage::lock::RowExclusiveLock;
 
 use table::{table_close, table_open};
@@ -297,12 +297,12 @@ fn lookup_am_handler_func(mcx: Mcx<'_>, handler_name: &[String], amtype: u8) -> 
 }
 
 /// Outward-seam adapter for `CreateAccessMethod` (utility.c:1841,
-/// `T_CreateAmStmt`): decode the arena [`nodes::nodes::Node`]
+/// `T_CreateAmStmt`): decode the arena [`::nodes::nodes::Node`]
 /// `CreateAmStmt` into the flat [`CreateAmStmt`] the ported body consumes, then
 /// run it.
 fn create_access_method_seam<'mcx>(
     mcx: Mcx<'mcx>,
-    stmt: &nodes::nodes::Node<'mcx>,
+    stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
     let cas = match stmt.as_createamstmt() {
         Some(s) => s,

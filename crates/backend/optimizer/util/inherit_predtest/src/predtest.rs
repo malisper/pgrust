@@ -2,7 +2,7 @@
 //! proof engine.
 //!
 //! Faithful 1:1 port of PostgreSQL 18.3 `predtest.c`. The planner expression
-//! nodes are the owned [`Expr`](nodes::primnodes::Expr) enum, so
+//! nodes are the owned [`Expr`](::nodes::primnodes::Expr) enum, so
 //! `IsA(node, X)`/`nodeTag(node)` become `as_*`/`is_*` accessors, `equal()`
 //! becomes [`PgNodeEqual::equal_node`], `List *` becomes `&[Expr]`/`Vec<Expr>`,
 //! and the AND/OR component iterators (the C `PredIterInfo` startup/next/cleanup
@@ -28,7 +28,7 @@ use arrayfuncs_seams as arrayfuncs;
 use pathnode_seams as pathnode;
 
 use types_core::primitive::{InvalidOid, Oid};
-use nodes::primnodes::{
+use ::nodes::primnodes::{
     BoolExprType, BoolTestType, CompareType, Const, Expr, NullTestType, OpExpr,
 };
 use pathnodes::{NodeId, PlannerInfo};
@@ -310,7 +310,7 @@ fn make_dummy_const<'mcx, 'out>(
 /// Build the dummy `scalar saop_op elem` `OpExpr` (mirrors the reusable `OpExpr`
 /// the C SAOP iterators stamp `leftop`/`rightop` into).
 fn make_dummy_saop_opexpr<'mcx>(
-    s: &nodes::primnodes::ScalarArrayOpExpr<'_>,
+    s: &::nodes::primnodes::ScalarArrayOpExpr<'_>,
     leftop: Expr<'mcx>,
     rightop: Expr<'mcx>,
 ) -> Expr<'mcx> {
@@ -535,7 +535,7 @@ fn wrap_list<'mcx>(mcx: Mcx<'mcx>, items: &[Expr<'mcx>]) -> PgResult<Expr<'mcx>>
         // hoisted to an AlternativeSubPlan in a constraint-exclusion clause list).
         args.push(e.clone_in(mcx)?);
     }
-    Ok(Expr::BoolExpr(nodes::primnodes::BoolExpr {
+    Ok(Expr::BoolExpr(::nodes::primnodes::BoolExpr {
         boolop: BoolExprType::AND_EXPR,
         args,
         // make_andclause sets location = -1.

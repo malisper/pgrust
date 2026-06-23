@@ -4,7 +4,7 @@
 //! then a call panics loudly.
 
 use types_error::PgResult;
-use nodes::params::{ParamListInfo, ParamListInfoData};
+use ::nodes::params::{ParamListInfo, ParamListInfoData};
 
 seam_core::seam!(
     /// `makeParamList(numParams)` (params.c) — allocate a `ParamListInfo` with

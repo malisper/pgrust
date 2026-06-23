@@ -5,11 +5,11 @@
 use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use types_core::primitive::{Index, InvalidOid};
 use types_error::{PgError, PgResult};
-use nodes::modifytable::{
+use ::nodes::modifytable::{
     MergeAction, OnConflictAction, ResultRelHash, ONCONFLICT_NONE,
 };
-use nodes::nodes::CmdType;
-use nodes::primnodes::TargetEntry;
+use ::nodes::nodes::CmdType;
+use ::nodes::primnodes::TargetEntry;
 use nodes::{
     EPQState, EStateData, ModifyTable, ModifyTableState, PlanStateData, ResultRelInfo, RriId,
 };
@@ -30,7 +30,7 @@ const MT_NRELS_HASH: usize = 64;
 /// subplan. Returns the new `ModifyTableState`.
 pub fn ExecInitModifyTable<'mcx>(
     mcx: Mcx<'mcx>,
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     node: &'mcx ModifyTable<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
@@ -72,7 +72,7 @@ pub fn ExecInitModifyTable<'mcx>(
         vec_with_capacity_in(mcx, total_nrels)?;
     let mut merge_join_conditions: PgVec<
         'mcx,
-        Option<&'mcx PgVec<'mcx, nodes::primnodes::Expr>>,
+        Option<&'mcx PgVec<'mcx, ::nodes::primnodes::Expr>>,
     > = vec_with_capacity_in(mcx, total_nrels)?;
 
     {
@@ -135,7 +135,7 @@ pub fn ExecInitModifyTable<'mcx>(
                     if let Some(mjc) = node.mergeJoinConditions.as_ref() {
                         // mergeJoinCondition = list_nth(node->mergeJoinConditions, i);
                         // mergeJoinConditions = lappend(mergeJoinConditions, mergeJoinCondition);
-                        let cond: &'mcx Option<PgVec<'mcx, nodes::primnodes::Expr>> =
+                        let cond: &'mcx Option<PgVec<'mcx, ::nodes::primnodes::Expr>> =
                             list_nth_ref(mjc, i)?;
                         merge_join_conditions.try_reserve(1).map_err(|_| mcx.oom(8))?;
                         merge_join_conditions.push(cond.as_ref());
@@ -342,7 +342,7 @@ pub fn ExecInitModifyTable<'mcx>(
 
     // Now we may initialize the subplan.
     //   outerPlanState(mtstate) = ExecInitNode(subplan, estate, eflags);
-    let subplan_node: Option<&'mcx nodes::nodes::Node<'mcx>> = subplan;
+    let subplan_node: Option<&'mcx ::nodes::nodes::Node<'mcx>> = subplan;
     let child = execProcnode_seams::exec_init_node::call(
         mcx,
         subplan_node,
@@ -501,7 +501,7 @@ pub fn ExecInitModifyTable<'mcx>(
         execTuples_seams::exec_init_result_tuple_slot_tl::call(
             &mut mtstate.ps,
             estate,
-            nodes::TupleSlotKind::Virtual,
+            ::nodes::TupleSlotKind::Virtual,
         )?;
 
         // Need an econtext too.
@@ -637,7 +637,7 @@ pub fn ExecInitModifyTable<'mcx>(
         //   if (node->onConflictWhere)
         //       onconfl->oc_WhereClause =
         //           ExecInitQual((List *) node->onConflictWhere, &mtstate->ps);
-        let on_conflict_where: Option<&'mcx [nodes::primnodes::Expr]> =
+        let on_conflict_where: Option<&'mcx [::nodes::primnodes::Expr]> =
             node.onConflictWhere.as_ref().map(|w| w.as_slice());
         let oc_where_clause = if on_conflict_where.is_some() {
             execExpr_seams::exec_init_on_conflict_where::call(
@@ -653,8 +653,8 @@ pub fn ExecInitModifyTable<'mcx>(
         // resultRelInfo->ri_onConflict = onconfl;
         let onconfl = mcx::alloc_in(
             mcx,
-            nodes::modifytable::OnConflictSetState {
-                type_: nodes::nodes::T_OnConflictSetState,
+            ::nodes::modifytable::OnConflictSetState {
+                type_: ::nodes::nodes::T_OnConflictSetState,
                 oc_Existing: Some(oc_existing),
                 oc_ProjSlot: Some(oc_proj_slot),
                 oc_ProjInfo: Some(oc_proj_info),
@@ -684,8 +684,8 @@ pub fn ExecInitModifyTable<'mcx>(
     // empty/parent-only/pruned rowMarks list) and records it together with the
     // recheck plan on the canonical EPQState, mirroring the C
     // `EvalPlanQualSetPlan(epqstate, subplan, arowmarks)`.
-    let empty_row_marks: &[PgBox<'mcx, nodes::nodes::Node<'mcx>>] = &[];
-    let row_marks: &[PgBox<'mcx, nodes::nodes::Node<'mcx>>] = node
+    let empty_row_marks: &[PgBox<'mcx, ::nodes::nodes::Node<'mcx>>] = &[];
+    let row_marks: &[PgBox<'mcx, ::nodes::nodes::Node<'mcx>>] = node
         .rowMarks
         .as_ref()
         .map(|v| v.as_slice())
@@ -826,7 +826,7 @@ fn list_nth_ref<'a, T>(list: &'a PgVec<'_, T>, n: usize) -> PgResult<&'a T> {
 /// The subplan (outer plan) targetlist, mirroring `subplan->targetlist`. A
 /// missing subplan or NIL targetlist is the C `NIL` (empty slice).
 fn subplan_targetlist<'a, 'mcx>(
-    subplan: Option<&'a nodes::nodes::Node<'mcx>>,
+    subplan: Option<&'a ::nodes::nodes::Node<'mcx>>,
 ) -> PgResult<&'a [TargetEntry<'mcx>]> {
     match subplan {
         Some(node) => Ok(node
