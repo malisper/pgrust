@@ -3918,14 +3918,31 @@ fn after_trigger_save_event<'mcx>(
             if !enabled {
                 continue;
             }
+            // Cross-partition UPDATE row event queued on the root partitioned
+            // table (trigger.c:6502, the RI_TRIGGER_NONE case): a regular
+            // (non-FK) row trigger on the partitioned root is NOT queued here,
+            // because the same row trigger is cloned onto the affected leaf
+            // partition(s) and the DELETE/INSERT events fired there are queued
+            // instead. (FK PK/FK-side triggers go through their own RI branches
+            // in `ri_fk_enforcement_skip`.) Without this, the root's AFTER
+            // UPDATE row trigger fires a spurious extra time on a cross-part
+            // update.
+            if fired_by_upd_or_del && is_partitioned_root {
+                use backend_utils_adt_ri_triggers_seams as ri;
+                const RI_TRIGGER_PK: i32 = 1;
+                const RI_TRIGGER_FK: i32 = 2;
+                let kind = ri::ri_fkey_trigger_type::call(tgfoid);
+                if kind != RI_TRIGGER_PK && kind != RI_TRIGGER_FK {
+                    continue;
+                }
+            }
             // FK-enforcement-trigger skip (trigger.c:6442). On UPDATE/DELETE,
             // RI_FKey_trigger_type classifies the trigger function and the PK/FK
             // `*_check_required` predicate decides whether queueing can be
             // skipped because the constraint will still pass. Required for
             // correctness (SET DEFAULT / multi-FK CASCADE / self-referential
             // CASCADE), not an optimization. (The cross-partition PK
-            // component-delete skip and the partitioned NONE skip are not
-            // threaded on this regular-table leg.)
+            // component-delete skip is not threaded on this leg.)
             if fired_by_upd_or_del
                 && ri_fk_enforcement_skip(
                     estate,
