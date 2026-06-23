@@ -46,8 +46,8 @@ extern crate alloc;
 
 use mcx::PgBox;
 use types_error::PgResult;
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
-use nodes::EStateData;
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
+use ::nodes::EStateData;
 
 use transam_parallel::shared_dsm_object;
 use tableam_bm_seams as tableam_bm;
@@ -125,7 +125,7 @@ fn BitmapTableScanSetup<'mcx>(
     //     pstate ? pstate->tbmiterator : InvalidDsaPointer);
     let dsp = match &node.pstate {
         Some(p) => p.tbmiterator(),
-        None => tidbitmap::InvalidDsaPointer,
+        None => ::tidbitmap::InvalidDsaPointer,
     };
     // C passes `node->tbm` directly, which is NULL for a non-leader parallel
     // worker that did not observe BM_INITIAL (it never ran MultiExecProcNode);
@@ -256,8 +256,8 @@ fn BitmapHeapRecheck<'mcx>(
 /// `ResetExprContext(econtext)`. A `NULL` qual is always-true. The reset clears
 /// the per-tuple memory regardless of the qual result.
 fn exec_qual_and_reset<'mcx>(
-    qual: Option<&mut nodes::execexpr::ExprState<'mcx>>,
-    econtext: nodes::EcxtId,
+    qual: Option<&mut ::nodes::execexpr::ExprState<'mcx>>,
+    econtext: ::nodes::EcxtId,
     estate: &mut EStateData<'mcx>,
 ) -> PgResult<bool> {
     let res = match qual {
@@ -305,7 +305,7 @@ fn ExecScanFetch<'mcx>(
 fn ExecScan<'mcx>(
     node: &mut BitmapHeapScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<nodes::SlotId>> {
+) -> PgResult<Option<::nodes::SlotId>> {
     let econtext = node.ss.ps.ps_ExprContext.expect("ps_ExprContext");
     let scan_slot = node.ss.ss_ScanTupleSlot.expect("ss_ScanTupleSlot");
     let has_qual = node.ss.ps.qual.is_some();
@@ -401,7 +401,7 @@ fn InstrCountFiltered2(node: &mut BitmapHeapScanState, delta: u64) {
 pub fn ExecBitmapHeapScan<'mcx>(
     node: &mut BitmapHeapScanState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<nodes::SlotId>> {
+) -> PgResult<Option<::nodes::SlotId>> {
     // return ExecScan(&node->ss, (ExecScanAccessMtd) BitmapHeapNext,
     //                 (ExecScanRecheckMtd) BitmapHeapRecheck);
     ExecScan(node, estate)
@@ -411,11 +411,11 @@ pub fn ExecBitmapHeapScan<'mcx>(
 /// `castNode(BitmapHeapScanState, pstate)` then run `ExecBitmapHeapScan`,
 /// returning the produced tuple's slot id (the C `return slot`) or `None`.
 fn exec_bitmap_heap_scan_node<'mcx>(
-    pstate: &mut nodes::PlanStateNode<'mcx>,
+    pstate: &mut ::nodes::PlanStateNode<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<Option<nodes::SlotId>> {
+) -> PgResult<Option<::nodes::SlotId>> {
     let node = match pstate {
-        nodes::PlanStateNode::BitmapHeapScan(node) => &mut **node,
+        ::nodes::PlanStateNode::BitmapHeapScan(node) => &mut **node,
         other => panic!(
             "castNode(BitmapHeapScanState, pstate) failed: tag {}",
             other.tag()
@@ -564,7 +564,7 @@ pub fn ExecEndBitmapHeapScan<'mcx>(
 /// here we build the owned [`BitmapHeapScanState`] and return it boxed in the
 /// per-query context.
 pub fn ExecInitBitmapHeapScan<'mcx>(
-    node: &'mcx nodes::nodes::Node<'mcx>,
+    node: &'mcx ::nodes::nodes::Node<'mcx>,
     plan: &BitmapHeapScan<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
@@ -637,7 +637,7 @@ pub fn ExecInitBitmapHeapScan<'mcx>(
     execTuples::exec_init_result_type_tl::call(&mut scanstate.ss.ps, estate)?;
     // ExecAssignScanProjectionInfo(&scanstate->ss);
     //   == ExecConditionalAssignProjectionInfo(&node->ps, tupdesc, scan->scanrelid)
-    // The BitmapHeapScan plan node is not a `nodes::Node` variant (its plan
+    // The BitmapHeapScan plan node is not a `::nodes::Node` variant (its plan
     // type lives in this crate's `nodes` module), so we cannot route through the
     // varno-deriving `exec_assign_scan_projection_info` provider. Pass the scan's
     // `scanrelid` directly — exactly what the C plain wrapper forwards.
@@ -876,11 +876,11 @@ pub fn ExecBitmapHeapReInitializeDSM<'mcx>(
     // if (DsaPointerIsValid(pstate->tbmiterator))
     //     tbm_free_shared_area(dsa, pstate->tbmiterator);
     let it = pstate.tbmiterator();
-    if tidbitmap::dsa_pointer_is_valid(it) {
+    if ::tidbitmap::dsa_pointer_is_valid(it) {
         tidbitmap::tbm_free_shared_area::call(dsa, it);
     }
     // pstate->tbmiterator = InvalidDsaPointer;
-    pstate.set_tbmiterator(tidbitmap::InvalidDsaPointer);
+    pstate.set_tbmiterator(::tidbitmap::InvalidDsaPointer);
     Ok(())
 }
 

@@ -30,9 +30,9 @@
 
 use mcx::{Mcx, PgBox};
 use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
-use nodes::execstate_tags::T_BitmapIndexScanState;
-use nodes::EStateData;
+use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
+use ::nodes::execstate_tags::T_BitmapIndexScanState;
+use ::nodes::EStateData;
 
 use execAmi_seams as execAmi;
 use execProcnode_seams as execProcnode;
@@ -80,7 +80,7 @@ pub fn ExecBitmapOr() -> PgResult<()> {
 /// ```
 pub fn ExecInitBitmapOr<'mcx>(
     mcx: Mcx<'mcx>,
-    plan_node: &'mcx nodes::nodes::Node<'mcx>,
+    plan_node: &'mcx ::nodes::nodes::Node<'mcx>,
     node: &'mcx BitmapOr<'mcx>,
     estate: &mut EStateData<'mcx>,
     eflags: i32,
@@ -97,7 +97,7 @@ pub fn ExecInitBitmapOr<'mcx>(
     let nplans = node.bitmapplans.len();
 
     // bitmapplanstates = (PlanState **) palloc0(nplans * sizeof(PlanState *));
-    let mut bitmapplans: mcx::PgVec<'mcx, Option<PgBox<'mcx, nodes::PlanStateNode<'mcx>>>> =
+    let mut bitmapplans: mcx::PgVec<'mcx, Option<PgBox<'mcx, ::nodes::PlanStateNode<'mcx>>>> =
         mcx::PgVec::new_in(mcx);
     bitmapplans
         .try_reserve(nplans)
@@ -118,7 +118,7 @@ pub fn ExecInitBitmapOr<'mcx>(
     // through the tuple-at-a-time convention (a BitmapOr is always run through
     // `MultiExecProcNode`). The owned dispatch never calls a BitmapOr's
     // `ExecProcNode`, so the stub has no slot to occupy.
-    let mut ps = nodes::execnodes::PlanStateData::default();
+    let mut ps = ::nodes::execnodes::PlanStateData::default();
     //   bitmaporstate->ps.plan = (Plan *) node;
     ps.plan = Some(plan_node);
 
@@ -170,7 +170,7 @@ pub fn MultiExecBitmapOr<'mcx>(
     mcx: Mcx<'mcx>,
     node: &mut BitmapOrState<'mcx>,
     estate: &mut EStateData<'mcx>,
-) -> PgResult<PgBox<'mcx, tidbitmap::TIDBitmap>> {
+) -> PgResult<PgBox<'mcx, ::tidbitmap::TIDBitmap>> {
     // must provide our own instrumentation support
     //   if (node->ps.instrument) InstrStartNode(node->ps.instrument);
     if let Some(instr) = node.ps.instrument.as_deref_mut() {
@@ -184,7 +184,7 @@ pub fn MultiExecBitmapOr<'mcx>(
 
     // Scan all the subplans and OR their result bitmaps
     //   TIDBitmap *result = NULL;
-    let mut result: Option<PgBox<'mcx, tidbitmap::TIDBitmap>> = None;
+    let mut result: Option<PgBox<'mcx, ::tidbitmap::TIDBitmap>> = None;
 
     for i in 0..nplans {
         // PlanState *subnode = bitmapplans[i];

@@ -39,7 +39,7 @@ use nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use nodes::nodebitmapand::{BitmapAnd, BitmapAndState};
 use nodes::nodes::Node;
 use nodes::{EStateData, PlanStateNode, SlotId};
-use tidbitmap::TIDBitmap;
+use ::tidbitmap::TIDBitmap;
 
 /// Install this crate's interface routines into its seam slots so the executor
 /// dispatch crates (`execProcnode.c` / `execAmi.c`) can reach them across the

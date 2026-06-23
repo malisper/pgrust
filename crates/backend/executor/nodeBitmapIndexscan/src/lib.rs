@@ -45,7 +45,7 @@ use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanState
 use nodes::nodebitmapindexscan::{BitmapIndexScan, BitmapIndexScanState};
 use nodes::nodeindexonlyscan::{IndexScanInstrumentation, SharedIndexScanInstrumentation};
 use nodes::EStateData;
-use tidbitmap::TIDBitmap;
+use ::tidbitmap::TIDBitmap;
 
 /// `EXEC_FLAG_EXPLAIN_ONLY` (executor/executor.h) — "EXPLAIN, no ANALYZE".
 const EXEC_FLAG_EXPLAIN_ONLY: i32 = 0x0001;
