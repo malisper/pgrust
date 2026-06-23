@@ -4138,9 +4138,8 @@ pub fn validate_partition_constraint_scan<'mcx>(
     let oldrel = backend_access_common_relation::relation_open(mcx, relid, NoLock)?;
     let rel_alias = oldrel.alias();
 
-    // estate = CreateExecutorState(); estate->es_snapshot = GetActiveSnapshot();
+    // estate = CreateExecutorState().
     let mut estate = execUtils::create_executor_state_in(mcx)?;
-    estate.es_snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?;
     estate.es_direction = ScanDirection::ForwardScanDirection;
 
     // partqualstate = ExecPrepareCheck(partConstraint, estate).
@@ -4158,10 +4157,15 @@ pub fn validate_partition_constraint_scan<'mcx>(
         backend_executor_execTuples_seams::exec_init_extra_tuple_slot::call(&mut estate, tupdesc, callbacks)?;
     let econtext = execUtils::MakePerTupleExprContext(&mut estate)?;
 
-    let snapshot = estate
-        .es_snapshot
-        .clone()
-        .expect("validate_partition_constraint_scan: no active snapshot");
+    // snapshot = RegisterSnapshot(GetLatestSnapshot()) — scan with a FRESH
+    // snapshot reflecting all committed transactions as of now (a concurrent
+    // session may have committed rows into this relation since the ALTER's
+    // command snapshot was taken; the validation scan must see them).
+    let registered = backend_utils_time_snapmgr_seams::register_snapshot::call(
+        backend_utils_time_snapmgr_seams::get_latest_snapshot::call()?,
+    )?;
+    let snapshot = alloc::rc::Rc::new(registered.clone());
+    estate.es_snapshot = Some(snapshot.clone());
 
     let result: PgResult<()> = (|| {
         let mut scan =
@@ -4206,6 +4210,10 @@ pub fn validate_partition_constraint_scan<'mcx>(
         Ok(())
     })();
 
+    // UnregisterSnapshot(snapshot) — drop the registration taken above, run
+    // regardless of the scan's outcome.
+    backend_utils_time_snapmgr_seams::unregister_snapshot::call(registered);
+
     oldrel.close(NoLock)?;
     result
 }
@@ -4242,9 +4250,8 @@ pub fn validate_default_partition_contents_scan<'mcx>(
     let oldrel = backend_access_common_relation::relation_open(mcx, part_relid, NoLock)?;
     let rel_alias = oldrel.alias();
 
-    // estate = CreateExecutorState(); estate->es_snapshot = GetActiveSnapshot();
+    // estate = CreateExecutorState().
     let mut estate = execUtils::create_executor_state_in(mcx)?;
-    estate.es_snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?;
     estate.es_direction = ScanDirection::ForwardScanDirection;
 
     // partqualstate = ExecPrepareCheck(partition_constraint, estate).
@@ -4262,10 +4269,14 @@ pub fn validate_default_partition_contents_scan<'mcx>(
         backend_executor_execTuples_seams::exec_init_extra_tuple_slot::call(&mut estate, tupdesc, callbacks)?;
     let econtext = execUtils::MakePerTupleExprContext(&mut estate)?;
 
-    let snapshot = estate
-        .es_snapshot
-        .clone()
-        .expect("validate_default_partition_contents_scan: no active snapshot");
+    // snapshot = RegisterSnapshot(GetLatestSnapshot()) (partbounds.c:3370) — scan
+    // with a FRESH snapshot so rows committed concurrently into the default
+    // partition since the ALTER's command snapshot are seen by this validation.
+    let registered = backend_utils_time_snapmgr_seams::register_snapshot::call(
+        backend_utils_time_snapmgr_seams::get_latest_snapshot::call()?,
+    )?;
+    let snapshot = alloc::rc::Rc::new(registered.clone());
+    estate.es_snapshot = Some(snapshot.clone());
 
     let result: PgResult<()> = (|| {
         let mut scan =
@@ -4305,6 +4316,10 @@ pub fn validate_default_partition_contents_scan<'mcx>(
         backend_access_table_tableam::table_endscan(scan)?;
         Ok(())
     })();
+
+    // UnregisterSnapshot(snapshot) (partbounds.c:3397) — run regardless of the
+    // scan's outcome.
+    backend_utils_time_snapmgr_seams::unregister_snapshot::call(registered);
 
     oldrel.close(NoLock)?;
     result
@@ -4371,12 +4386,10 @@ pub fn at_rewrite_table_scan<'mcx>(
         (0, None, 0)
     };
 
-    // estate = CreateExecutorState(); reuse the active snapshot for the scan
-    // (the managed active snapshot is at least as new as the ALTER's own catalog
-    // mutations — same idiom as validate_partition_constraint_scan / the NOT NULL
-    // verify scan, avoiding a private RegisterSnapshot/UnregisterSnapshot pair).
+    // estate = CreateExecutorState(). The scan snapshot is registered below
+    // (RegisterSnapshot(GetLatestSnapshot()), tablecmds.c:6355) once the scan is
+    // known to be needed; es_snapshot stays None until then.
     let mut estate = execUtils::create_executor_state_in(mcx)?;
-    estate.es_snapshot = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?;
     estate.es_direction = ScanDirection::ForwardScanDirection;
 
     let mut needscan = false;
@@ -4490,6 +4503,11 @@ pub fn at_rewrite_table_scan<'mcx>(
         }
     }
 
+    // The scan's registered snapshot (RegisterSnapshot(GetLatestSnapshot()),
+    // tablecmds.c:6355). Taken inside the body once the scan is known to run, and
+    // unregistered after the body regardless of its outcome.
+    let mut registered_snapshot: Option<types_snapshot::SnapshotData> = None;
+
     // The scan body is wrapped so cleanup (table_endscan + drop slots) always
     // runs, including on the Err path.
     let body: PgResult<()> = (|| {
@@ -4539,10 +4557,18 @@ pub fn at_rewrite_table_scan<'mcx>(
 
         let econtext = execUtils::MakePerTupleExprContext(&mut estate)?;
 
-        let snapshot = estate
-            .es_snapshot
-            .clone()
-            .expect("at_rewrite_table_scan: no active snapshot");
+        // snapshot = RegisterSnapshot(GetLatestSnapshot()) (tablecmds.c:6355) —
+        // scan with a FRESH snapshot reflecting all committed transactions as of
+        // now. A concurrent session may have committed rows into this relation
+        // since the ALTER's command snapshot was taken (e.g. an ATTACH whose
+        // Phase-3 validation must see the default partition's just-committed
+        // rows); reusing the older active snapshot would miss them.
+        let registered = backend_utils_time_snapmgr_seams::register_snapshot::call(
+            backend_utils_time_snapmgr_seams::get_latest_snapshot::call()?,
+        )?;
+        let snapshot = alloc::rc::Rc::new(registered.clone());
+        estate.es_snapshot = Some(snapshot.clone());
+        registered_snapshot = Some(registered);
 
         let mut scan =
             backend_access_table_tableam_seams::table_beginscan::call(mcx, &rel_alias, snapshot)?;
@@ -4747,6 +4773,12 @@ pub fn at_rewrite_table_scan<'mcx>(
         }
         Ok(())
     })();
+
+    // UnregisterSnapshot(snapshot) (tablecmds.c:6534) — drop the registration
+    // taken inside the body (if the scan ran), regardless of its outcome.
+    if let Some(snap) = registered_snapshot.take() {
+        backend_utils_time_snapmgr_seams::unregister_snapshot::call(snap);
+    }
 
     // FreeExecutorState(estate).
     execUtils::free_executor_state_in(estate)?;
