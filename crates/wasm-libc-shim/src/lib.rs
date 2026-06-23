@@ -703,11 +703,17 @@ mod imp {
         // Single process; a stable nonzero pid is all callers need.
         1
     }
+    /// The single wasm "user" id. Deliberately NON-root (postgres refuses to
+    /// run as root in `check_root`, and a wasm sandbox has no privilege model).
+    /// `WasmMetadata::uid()` reports the same value so the `checkDataDir`
+    /// datadir-ownership interlock (`st_uid == geteuid()`) passes for the lone
+    /// user.
+    pub const WASM_UID: uid_t = 1000;
     pub unsafe fn geteuid() -> uid_t {
-        0
+        WASM_UID
     }
     pub unsafe fn getuid() -> uid_t {
-        0
+        WASM_UID
     }
     pub unsafe fn setenv(_n: *const c_char, _v: *const c_char, _o: c_int) -> c_int {
         0
@@ -2361,12 +2367,12 @@ pub mod osfile {
         // wasm has no real Unix owner/perm metadata; report neutral values so the
         // datadir-ownership interlock in `checkDataDir` passes for the lone user).
         pub fn uid(&self) -> u32 {
-            // Match the shim's `geteuid()` (0) so the datadir-ownership
+            // Match the shim's `geteuid()` (WASM_UID) so the datadir-ownership
             // interlock in `checkDataDir` passes for the lone wasm user.
-            0
+            super::imp::WASM_UID as u32
         }
         pub fn gid(&self) -> u32 {
-            0
+            super::imp::WASM_UID as u32
         }
         pub fn mode(&self) -> u32 {
             self.mode
