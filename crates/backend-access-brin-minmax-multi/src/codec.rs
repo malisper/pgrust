@@ -39,9 +39,9 @@ fn maxalign(len: usize) -> usize {
     (len + 7) & !7
 }
 
-/// `VARSIZE_ANY(ptr)`: the total varlena size from a 4-byte (uncompressed,
-/// non-toasted) header. The minmax-multi summary is always built with a 4-byte
-/// header (`SET_VARSIZE`), and only detoasted images reach this codec.
+/// `VARSIZE_4B(ptr)`: the total varlena size from a 4-byte (uncompressed,
+/// non-toasted) header. The minmax-multi summary blob itself is always built with
+/// a 4-byte header (`SET_VARSIZE`), so this reads its outer length word.
 #[inline]
 fn varsize_4b(bytes: &[u8]) -> usize {
     let word = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -52,6 +52,43 @@ fn varsize_4b(bytes: &[u8]) -> usize {
     #[cfg(target_endian = "big")]
     {
         (word & 0x3FFF_FFFF) as usize
+    }
+}
+
+/// `VARSIZE_ANY(ptr)`: the total on-disk varlena size regardless of header kind.
+///
+/// C's `brin_range_serialize`/`brin_range_deserialize` size the varlena boundary
+/// values with `VARSIZE_ANY(DatumGetPointer(value))` — header-agnostic — because a
+/// boundary value is an arbitrary heap datum that may carry a 1-byte ("short")
+/// header. This port stores varlenas header-ful while `SHORT_VARLENA_PACKING` is
+/// off, so a fixed 4-byte read is faithful there; but once the flag is on a small
+/// boundary value (e.g. a short `text`/`numeric`) arrives short-headed and a
+/// 4-byte read would mis-size it, corrupting every subsequent value in the blob.
+/// Mirror `VARSIZE_ANY`: short header (1B, low bit set, not the 0x01 external
+/// marker) is `VARSIZE_1B`, an external (`0x01`) pointer is `VARSIZE_EXTERNAL`,
+/// else `VARSIZE_4B`. No-op while the flag is off (every stored value is 4B).
+#[inline]
+fn varsize_any(bytes: &[u8]) -> usize {
+    match bytes.first() {
+        // VARATT_IS_1B_E: external TOAST pointer — VARHDRSZ_EXTERNAL (2) + the
+        // type-specific payload, recovered from the `va_tag` byte. Only an inline
+        // (already-detoasted) image reaches this codec, so this arm is defensive.
+        Some(&0x01) => {
+            const VARTAG_INDIRECT: u8 = 1;
+            const VARTAG_ONDISK: u8 = 18;
+            let tag = bytes[1];
+            let payload = if tag == VARTAG_INDIRECT || (tag & !1) == 2 {
+                core::mem::size_of::<usize>()
+            } else {
+                debug_assert_eq!(tag, VARTAG_ONDISK);
+                16
+            };
+            2 + payload
+        }
+        // VARATT_IS_1B: short 1-byte header — VARSIZE_1B == (va_header >> 1) & 0x7F.
+        Some(&h) if (h & 0x01) == 0x01 => ((h >> 1) & 0x7F) as usize,
+        // VARATT_IS_4B: plain 4-byte header.
+        _ => varsize_4b(bytes),
     }
 }
 
@@ -96,9 +133,9 @@ pub fn serialize_summary<'mcx>(
     // compute the data length (header + per-value bytes)
     let mut data_len: usize = 0;
     if typlen == -1 {
-        // varlena
+        // varlena: VARSIZE_ANY (a boundary value may be short-headed).
         for v in &s.values {
-            data_len += varsize_4b(v.as_ref_bytes());
+            data_len += varsize_any(v.as_ref_bytes());
         }
     } else if typlen == -2 {
         // cstring (+ NUL)
@@ -141,9 +178,10 @@ pub fn serialize_summary<'mcx>(
             buf[ptr..ptr + typlen as usize].copy_from_slice(&bytes[..typlen as usize]);
             ptr += typlen as usize;
         } else if typlen == -1 {
-            // varlena: copy VARSIZE_ANY bytes of the image.
+            // varlena: copy VARSIZE_ANY bytes of the image (the value may be
+            // short-headed; the memcpy preserves whatever header it carries).
             let bytes = v.as_ref_bytes();
-            let sz = varsize_4b(bytes);
+            let sz = varsize_any(bytes);
             buf[ptr..ptr + sz].copy_from_slice(&bytes[..sz]);
             ptr += sz;
         } else {
@@ -201,8 +239,10 @@ pub fn deserialize_summary<'mcx>(
             values.push(img);
             ptr += n;
         } else if typlen == -1 {
-            // varlena: copy VARSIZE_ANY bytes into an owned image.
-            let sz = varsize_4b(&bytes[ptr..]);
+            // varlena: copy VARSIZE_ANY bytes into an owned image (the stored
+            // value may be short-headed; advancing by VARSIZE_4B would mis-size
+            // it and corrupt every subsequent boundary value).
+            let sz = varsize_any(&bytes[ptr..]);
             let img = slice_to_byref(mcx, &bytes[ptr..ptr + sz])?;
             values.push(img);
             ptr += sz;
