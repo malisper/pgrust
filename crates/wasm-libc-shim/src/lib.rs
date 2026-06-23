@@ -1004,6 +1004,18 @@ mod imp {
         /// length (0 = end of stream) or -errno.
         fn host_readdir(handle: c_int, buf: *mut u8, n: usize) -> i64;
         fn host_closedir(handle: c_int) -> i64;
+        /// Terminate the guest with `code`. `std::process::exit`/`abort` trap
+        /// (`unreachable`) on `wasm64-unknown-unknown` since there is no exit
+        /// syscall, so the backend's process-exit paths route here; the harness
+        /// turns it into a clean store shutdown. Never returns.
+        fn host_proc_exit(code: i32) -> !;
+    }
+
+    /// Exit the process via the host (`std::process::exit` traps on
+    /// `wasm64-unknown-unknown`). Never returns.
+    pub fn proc_exit(code: i32) -> ! {
+        // SAFETY: host import; diverges (the host stops the guest).
+        unsafe { host_proc_exit(code) }
     }
 
     // Public thin wrappers over the raw host imports, used by the `osfile`
