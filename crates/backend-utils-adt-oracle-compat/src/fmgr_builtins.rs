@@ -26,16 +26,39 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `text`/`bytea` arg's by-ref payload bytes (the boundary strips the varlena
-/// header).
+/// A `text`/`bytea`/`bpchar` arg's by-ref payload bytes (the boundary hands back
+/// the verbatim on-disk varlena image; this strips its length header).
+///
+/// Header-form-agnostic (C `VARDATA_ANY`): a small stored value arrives with a
+/// 1-byte ("short") header once `SHORT_VARLENA_PACKING` is on (the by-ref fmgr
+/// boundary `detoast_ref_arg_if_toasted` normalizes only EXTERNAL/COMPRESSED, NOT
+/// short), so stripping a fixed `VARHDRSZ` would drop three payload bytes from the
+/// front (the `text(bpchar)` / `CAST(... AS text)` front-truncation). Skip ONE
+/// byte for a short (low-bit-set, non-external) header, else the 4-byte header.
+/// No-op while packing is off (every stored value is 4-byte) and correct once on.
 #[inline]
 fn arg_bytes<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("oracle_compat fn: by-ref arg missing from by-ref lane");
-    // VARDATA_ANY: skip the 4-byte varlena header on the header-ful image.
-    &image[types_datum::varlena::VARHDRSZ..]
+    vardata_any(image)
+}
+
+/// `VARDATA_ANY(ptr)` for an inline (non-compressed, non-external) varlena image:
+/// the payload bytes past the length header, handling both the 4-byte
+/// (`VARATT_IS_4B_U`) and 1-byte short (`VARATT_IS_1B`) header forms.
+#[inline]
+fn vardata_any(image: &[u8]) -> &[u8] {
+    match image.first() {
+        // VARATT_IS_1B && !VARATT_IS_1B_E: short 1-byte header (skip 1 byte).
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        // 4-byte uncompressed header (skip VARHDRSZ).
+        Some(_) if image.len() >= types_datum::varlena::VARHDRSZ => {
+            &image[types_datum::varlena::VARHDRSZ..]
+        }
+        _ => &[],
+    }
 }
 
 /// `PG_GETARG_INT32(i)`: the low 32 bits of arg `i`'s word.
