@@ -703,12 +703,26 @@ fn wait_on_lock(localtag: &LOCALLOCKTAG, owner: Option<ResourceOwnerHandle>) -> 
 
     // Lend &mut LOCALLOCK from the ambient table to proc.c's ProcSleep. The
     // entry's address is stable across the call (we hold no &mut to the table).
+    //
+    // NB: model C's PG_TRY/PG_CATCH precisely. On the error path (a cancel/die
+    // interrupt raised inside ProcSleep — e.g. statement_timeout / lock_timeout),
+    // `awaitedLock` must REMAIN SET so the error-handler `LockErrorCleanup` can
+    // `RemoveFromWaitQueue` and undo this backend's request-count increments. C
+    // only does `awaitedLock = NULL` on the normal return path; its PG_CATCH
+    // re-throws with awaitedLock still set. Clearing it unconditionally here left
+    // a phantom request count on the shared LOCK object after a cancelled wait
+    // (LockErrorCleanup saw awaitedLock==NULL and bailed), so a later conflicting
+    // acquire of the same object queued forever behind a holder that never existed.
     let result = with_locallock_mut(localtag, |ll| proc_owner::proc_waitqueue::ProcSleep(ll));
+    let result = result.unwrap_or(Ok(PROC_WAIT_STATUS_ERROR));
 
-    // No longer want LockErrorCleanup to act (success path).
-    state::AWAITED_LOCK.with(|c| *c.borrow_mut() = None);
+    // We no longer want LockErrorCleanup to do anything — but ONLY on the normal
+    // (non-error) return path. On the error path, leave AWAITED_LOCK set.
+    if result.is_ok() {
+        state::AWAITED_LOCK.with(|c| *c.borrow_mut() = None);
+    }
 
-    result.unwrap_or(Ok(PROC_WAIT_STATUS_ERROR))
+    result
 }
 
 /// `RemoveFromWaitQueue(proc, hashcode)` (lock.c) — pull `proc` off its lock's

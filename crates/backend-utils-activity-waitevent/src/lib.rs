@@ -630,13 +630,32 @@ impl WaitEventStorage {
     }
 }
 
+/// What `my_wait_event_info` currently points at. In C this is a bare
+/// `uint32 *`, redirected by `pgstat_set_wait_event_storage`. Two faithful
+/// realizations of the redirect target:
+///
+/// * [`WaitEventTarget::Local`] — the process-local default slot
+///   (`local_my_wait_event_info`), used before `InitProcess` and by callers that
+///   install a process-private [`WaitEventStorage`] (e.g. AIO workers).
+/// * [`WaitEventTarget::Proc`] — the genuinely-shared
+///   `GetPGProcByNumber(procno)->wait_event_info` word, the target
+///   `InitProcess`/`InitAuxiliaryProcess` install. Reads/writes route through the
+///   proc unit's seam so the live wait id is published into shared memory (and so
+///   `pg_stat_get_activity` sees a blocked backend cross-process). This mirrors C
+///   pointing `my_wait_event_info` at `&MyProc->wait_event_info` in shmem.
+#[derive(Clone)]
+enum WaitEventTarget {
+    Local(WaitEventStorage),
+    Proc(types_core::ProcNumber),
+}
+
 thread_local! {
     /// `local_my_wait_event_info` — the per-backend default slot used before
     /// (and after) shared storage is installed.
     static LOCAL_WAIT_EVENT_INFO: AtomicU32 = const { AtomicU32::new(0) };
-    /// The currently installed shared slot, if any (`my_wait_event_info`
-    /// pointing into shared memory).
-    static CURRENT_WAIT_EVENT_STORAGE: RefCell<Option<WaitEventStorage>> =
+    /// The currently installed redirect, if any (`my_wait_event_info` pointing
+    /// at a process-private slot or at the proc's shared word).
+    static CURRENT_WAIT_EVENT_STORAGE: RefCell<Option<WaitEventTarget>> =
         const { RefCell::new(None) };
 }
 
@@ -644,7 +663,7 @@ thread_local! {
 /// making the C "install during startup / reset during shutdown" lifetime safe
 /// in Rust: the redirect cannot outlive the guard.
 pub struct WaitEventStorageGuard {
-    previous: Option<WaitEventStorage>,
+    previous: Option<WaitEventTarget>,
 }
 
 impl Drop for WaitEventStorageGuard {
@@ -656,12 +675,12 @@ impl Drop for WaitEventStorageGuard {
 }
 
 /// `pgstat_set_wait_event_storage()` — redirect wait-event reporting to
-/// `storage` until the returned guard is dropped (or
+/// `storage` (a process-private slot) until the returned guard is dropped (or
 /// [`pgstat_reset_wait_event_storage`] is called).
 pub fn pgstat_set_wait_event_storage(storage: WaitEventStorage) -> WaitEventStorageGuard {
     let previous = CURRENT_WAIT_EVENT_STORAGE.with(|current| {
         let mut current = current.borrow_mut();
-        std::mem::replace(&mut *current, Some(storage))
+        std::mem::replace(&mut *current, Some(WaitEventTarget::Local(storage)))
     });
     WaitEventStorageGuard { previous }
 }
@@ -675,30 +694,20 @@ pub fn pgstat_reset_wait_event_storage() {
 }
 
 // ---------------------------------------------------------------------------
-// Per-PGPROC wait-event storage registry (the `&MyProc->wait_event_info`
-// redirect that `InitProcess` / `InitAuxiliaryProcess` install).
+// Per-PGPROC wait-event storage (the `&MyProc->wait_event_info` redirect that
+// `InitProcess` / `InitAuxiliaryProcess` install).
 //
 // C points `my_wait_event_info` directly at the `uint32` field inside the
 // backend's own PGPROC in shared memory, so other backends scanning the proc
-// array observe the live wait event. PGPROC is modelled (types-storage) with a
-// plain `uint32 wait_event_info`, which can't alias an `Arc<AtomicU32>`; we
-// instead keep a process-global registry of one shared [`WaitEventStorage`]
-// per ProcNumber. `pgstat_set_wait_event_storage_for_proc(procno)` installs
-// that proc's slot as the current redirect (any backend can later read the
-// same slot by procno), and reset points back at the process-local default.
+// array observe the live wait event. The faithful realization keeps that word in
+// genuine shared memory (the proc unit's `SHARED_PROC_WAIT_EVENT_INFO` array, the
+// same idiom as the other cross-process PGPROC words); this crate reaches it
+// through the proc unit's `set_proc_wait_event_info`/`proc_wait_event_info`
+// seams (a thin seam avoids a crate-dependency cycle on the proc unit).
+// `pgstat_set_wait_event_storage_for_proc(procno)` installs that proc's shared
+// slot as the current redirect, and reset points back at the process-local
+// default.
 // ---------------------------------------------------------------------------
-
-static PER_PROC_WAIT_EVENT_STORAGE: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<i32, WaitEventStorage>>,
-> = std::sync::OnceLock::new();
-
-fn per_proc_storage(procno: types_core::ProcNumber) -> WaitEventStorage {
-    let map = PER_PROC_WAIT_EVENT_STORAGE.get_or_init(|| std::sync::Mutex::new(Default::default()));
-    let mut map = map.lock().expect("wait-event storage registry poisoned");
-    map.entry(procno)
-        .or_insert_with(WaitEventStorage::new)
-        .clone()
-}
 
 /// `pgstat_set_wait_event_storage(&GetPGProcByNumber(procno)->wait_event_info)`
 /// — the seam-shaped install used by `InitProcess` / `InitAuxiliaryProcess`.
@@ -706,37 +715,51 @@ fn per_proc_storage(procno: types_core::ProcNumber) -> WaitEventStorage {
 /// `pgstat_reset_wait_event_storage` (the C contract: no scope guard, the
 /// redirect persists for the backend's working life).
 pub fn pgstat_set_wait_event_storage_for_proc(procno: types_core::ProcNumber) {
-    let storage = per_proc_storage(procno);
     CURRENT_WAIT_EVENT_STORAGE.with(|current| {
-        *current.borrow_mut() = Some(storage);
+        *current.borrow_mut() = Some(WaitEventTarget::Proc(procno));
     });
 }
 
 /// `pgstat_report_wait_start()` — record that the backend is now waiting on
 /// `wait_event_info`.
 pub fn pgstat_report_wait_start(wait_event_info: uint32) {
-    with_current_storage(|slot| slot.store(wait_event_info, Ordering::Relaxed));
+    store_current_wait_event(wait_event_info);
 }
 
 /// `pgstat_report_wait_end()` — record that the backend is no longer waiting.
 pub fn pgstat_report_wait_end() {
-    with_current_storage(|slot| slot.store(0, Ordering::Relaxed));
+    store_current_wait_event(0);
 }
 
 /// The `wait_event_info` currently stored for this backend. (Not a C export;
 /// exposed for callers/tests inspecting the slot `my_wait_event_info` targets.)
 pub fn pgstat_current_wait_event_info() -> uint32 {
-    with_current_storage(|slot| slot.load(Ordering::Relaxed))
+    // Snapshot the redirect (cloning the cheap target out of the RefCell) so the
+    // proc-seam read is not made while the thread-local borrow is held.
+    let target = CURRENT_WAIT_EVENT_STORAGE.with(|current| current.borrow().clone());
+    match target {
+        Some(WaitEventTarget::Local(storage)) => storage.value.load(Ordering::Relaxed),
+        Some(WaitEventTarget::Proc(procno)) => {
+            backend_storage_lmgr_proc_seams::proc_wait_event_info::call(procno)
+        }
+        None => LOCAL_WAIT_EVENT_INFO.with(|slot| slot.load(Ordering::Relaxed)),
+    }
 }
 
-fn with_current_storage<T>(f: impl FnOnce(&AtomicU32) -> T) -> T {
-    CURRENT_WAIT_EVENT_STORAGE.with(|current| {
-        if let Some(storage) = current.borrow().as_ref() {
-            f(&storage.value)
-        } else {
-            LOCAL_WAIT_EVENT_INFO.with(f)
+/// `*my_wait_event_info = wait_event_info` — store through the current redirect.
+fn store_current_wait_event(wait_event_info: uint32) {
+    // Snapshot the redirect out of the RefCell first so the proc-seam write is not
+    // made while the thread-local borrow is held.
+    let target = CURRENT_WAIT_EVENT_STORAGE.with(|current| current.borrow().clone());
+    match target {
+        Some(WaitEventTarget::Local(storage)) => {
+            storage.value.store(wait_event_info, Ordering::Relaxed)
         }
-    })
+        Some(WaitEventTarget::Proc(procno)) => {
+            backend_storage_lmgr_proc_seams::set_proc_wait_event_info::call(procno, wait_event_info)
+        }
+        None => LOCAL_WAIT_EVENT_INFO.with(|slot| slot.store(wait_event_info, Ordering::Relaxed)),
+    }
 }
 
 // ---------------------------------------------------------------------------

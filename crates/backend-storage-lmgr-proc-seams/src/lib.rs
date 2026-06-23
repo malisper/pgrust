@@ -513,6 +513,18 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `*my_wait_event_info = info` — store the encoded wait-event word into the
+    /// proc's shared `PGPROC.wait_event_info` slot. In C
+    /// `pgstat_set_wait_event_storage` points `my_wait_event_info` at
+    /// `&MyProc->wait_event_info` (in the shared PGPROC block), so
+    /// `pgstat_report_wait_start`/`_end` publish the live wait id cross-process.
+    /// wait_event.c calls this (rather than touching the PGPROC directly) to avoid
+    /// a crate-dependency cycle on the proc unit. Plain shared store; cannot
+    /// `ereport`.
+    pub fn set_proc_wait_event_info(procno: ProcNumber, info: u32)
+);
+
+seam_core::seam!(
     /// `GetPGProcByNumber(procno)->isRegularBackend` — true for a regular client
     /// backend (read by `CountDBConnections`/`CountUserBackends`).
     pub fn proc_is_regular_backend(procno: ProcNumber) -> bool

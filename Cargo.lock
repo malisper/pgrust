@@ -19677,6 +19677,7 @@ dependencies = [
  "backend-storage-ipc-shmem",
  "backend-storage-lmgr-lmgr-seams",
  "backend-storage-lmgr-lwlock-seams",
+ "backend-storage-lmgr-proc-seams",
  "backend-storage-lmgr-s-lock",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-activity-waitevent-seams",

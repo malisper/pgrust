@@ -130,10 +130,18 @@ fn transaction_timeout() -> i32 {
 // ---- MyProc scalar fields (own state) ----
 
 fn my_proc_wait_start() -> TimestampTz {
-    with_my_proc_ref(|p| p.waitStart.read() as TimestampTz)
+    // `pg_atomic_read_u64(&MyProc->waitStart)` — waitStart lives in the shared
+    // PGPROC block (read cross-process by GetLockStatusData), so its canonical
+    // store is the genuinely-shared word.
+    crate::proc_shmem::proc_wait_start_shared(crate::proc_shmem::my_proc_number()) as TimestampTz
 }
 
 fn set_my_proc_wait_start(value: TimestampTz) {
+    // `pg_atomic_write_u64(&MyProc->waitStart, value)` — write the canonical
+    // (shared) word, mirroring into the fork-private PGPROC field for same-process
+    // readers.
+    let procno = crate::proc_shmem::my_proc_number();
+    crate::proc_shmem::set_proc_wait_start_shared(procno, value as u64);
     with_my_proc(|p| p.waitStart.write(value as u64));
 }
 
@@ -640,12 +648,17 @@ fn set_proc_wait_fields(
 }
 
 fn set_proc_wait_start(procno: ProcNumber, value: u64) {
+    // `pg_atomic_write_u64(&GetPGProcByNumber(procno)->waitStart, value)`. waitStart
+    // is read cross-process by GetLockStatusData (pg_locks.waitstart), so its
+    // canonical store is the genuinely-shared word; mirror the fork-private field.
+    crate::proc_shmem::set_proc_wait_start_shared(procno, value);
     with_proc_by_number(procno, |p| p.waitStart.write(value));
 }
 
 fn proc_wait_start(procno: ProcNumber) -> TimestampTz {
-    // `pg_atomic_read_u64(&GetPGProcByNumber(procno)->waitStart)`.
-    with_proc_by_number(procno, |p| p.waitStart.read() as TimestampTz)
+    // `pg_atomic_read_u64(&GetPGProcByNumber(procno)->waitStart)` — read the
+    // canonical (shared) word (GetLockStatusData reads other backends' waitStart).
+    crate::proc_shmem::proc_wait_start_shared(procno) as TimestampTz
 }
 
 fn proc_wait_link_is_detached(procno: ProcNumber) -> bool {
@@ -665,6 +678,9 @@ fn wakeup_proc_clear_wait(procno: ProcNumber, status: ProcWaitStatus) {
     // waiter exits its loop.
     crate::proc_shmem::set_proc_wait_status_shared(procno, status);
     crate::proc_shmem::set_proc_wait_lock_shared(procno, None);
+    // waitStart is read cross-process (pg_locks.waitstart); clear the canonical
+    // shared word so the dequeued backend no longer advertises a wait start.
+    crate::proc_shmem::set_proc_wait_start_shared(procno, 0);
     with_proc_by_number(procno, |p| {
         p.waitLock = None;
         p.waitProcLock = None;
@@ -719,9 +735,22 @@ fn proc_pid(procno: ProcNumber) -> i32 {
 
 fn proc_wait_event_info(procno: ProcNumber) -> u32 {
     // `UINT32_ACCESS_ONCE(GetPGProcByNumber(procno)->wait_event_info)`
-    // (pgstatfuncs.c pg_stat_get_activity). The single-word read carries no
-    // lock; the volatile access-once is modeled by the plain field read.
-    with_proc_by_number(procno, |p| p.wait_event_info)
+    // (pgstatfuncs.c pg_stat_get_activity). In C `my_wait_event_info` is repointed
+    // at `&MyProc->wait_event_info` in the shared PGPROC block, so the live wait id
+    // is published into shmem and read here cross-process. Reading the fork-private
+    // PGPROC word rendered another backend's wait event as 0 (the heavyweight-lock
+    // waiter looked idle to an isolationtester `(*)` blocker poll). Read the
+    // canonical shared word; the volatile access-once is the atomic load.
+    crate::proc_shmem::proc_wait_event_info_shared(procno)
+}
+
+fn set_proc_wait_event_info(procno: ProcNumber, info: u32) {
+    // `*my_wait_event_info = info` where `my_wait_event_info ==
+    // &GetPGProcByNumber(procno)->wait_event_info`. Publish the wait id into the
+    // genuinely-shared word (visible to every backend's pg_stat_get_activity), and
+    // mirror the fork-private PGPROC field for same-process readers.
+    crate::proc_shmem::set_proc_wait_event_info_shared(procno, info);
+    with_proc_by_number(procno, |p| p.wait_event_info = info);
 }
 
 fn proc_is_regular_backend(procno: ProcNumber) -> bool {
@@ -1286,6 +1315,7 @@ pub(crate) fn install() {
     seams::proc_global_status_flags::set(proc_global_status_flags);
     seams::proc_pid::set(proc_pid);
     seams::proc_wait_event_info::set(proc_wait_event_info);
+    seams::set_proc_wait_event_info::set(set_proc_wait_event_info);
     // `GetPGProcByNumber(owner)->pid` (storage/proc.h), the AIO `pg_get_aios()`
     // SRF's owner-pid lookup; same PGPROC->pid mapping as `proc_pid`.
     backend_storage_aio_funcs_seams::proc_pid_by_number::set(|owner| Ok(proc_pid(owner)));

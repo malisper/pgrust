@@ -419,6 +419,47 @@ static SHARED_PROC_WAITING: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut()
 /// Length of [`SHARED_PROC_WAITING`] (`total_procs`), for bounds checks.
 static SHARED_PROC_WAITING_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Base of the genuinely-shared per-proc `PGPROC.wait_event_info` array (one
+/// `u32` per proc — the live wait-event id the backend is currently blocked on,
+/// or 0 when not waiting). Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `pgstat_set_wait_event_storage` points the backend-local
+/// `my_wait_event_info` pointer at `&MyProc->wait_event_info`, which lives in the
+/// shared PGPROC block. So `pgstat_report_wait_start/_end` publish the wait id
+/// into shared memory, and `pg_stat_get_activity` reads every OTHER backend's
+/// `GetPGProcByNumber(procno)->wait_event_info` (`UINT32_ACCESS_ONCE`) to render
+/// `pg_stat_activity.wait_event_type`/`wait_event`. With the field fork-COW
+/// private (the per-process `wait_event_info` PGPROC word / a process-local
+/// `Arc<AtomicU32>` registry), a backend blocked on a heavyweight lock published
+/// its wait id only in its own image — a remote reader (isolationtester's `(*)`
+/// blocker poll) saw 0 and never detected the step as waiting, hanging the
+/// `timeouts` isolation spec. So this word lives in genuine shmem, the same idiom
+/// as [`SHARED_PROC_PIDS`]. The single 4-byte word is read/written atomically,
+/// matching C's `volatile uint32` / `UINT32_ACCESS_ONCE`.
+static SHARED_PROC_WAIT_EVENT_INFO: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_WAIT_EVENT_INFO`] (`total_procs`), for bounds checks.
+static SHARED_PROC_WAIT_EVENT_INFO_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.waitStart` array (one `u64`
+/// [`TimestampTz`] per proc — the timestamp at which the backend began waiting on
+/// a heavyweight lock, or 0 when not waiting / not yet recorded). Set by
+/// [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.waitStart` is a `pg_atomic_uint64` in the shared PGPROC block.
+/// `ProcSleep` records the wait start (`pg_atomic_write_u64(&MyProc->waitStart,
+/// …)`) and `GetLockStatusData` reads every blocked backend's
+/// `pg_atomic_read_u64(&proc->waitStart)` cross-process to populate
+/// `pg_locks.waitstart`. With the field fork-COW private, the blocked backend
+/// stamped its wait start only in its own image, so a remote reader of
+/// `pg_locks` saw `waitstart` NULL. So this word lives in genuine shmem, the same
+/// idiom as [`SHARED_PROC_PIDS`]; the 8-byte word is read/written atomically,
+/// matching C's `pg_atomic_read_u64`/`pg_atomic_write_u64`.
+static SHARED_PROC_WAIT_START: AtomicPtr<u64> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_WAIT_START`] (`total_procs`), for bounds checks.
+static SHARED_PROC_WAIT_START_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Base of the genuinely-shared dense `ProcGlobal->xids[]` array (one
 /// `TransactionId` per `pgxactoff` slot — the cache-dense mirror of every live
 /// backend's `PGPROC.xid` that `GetSnapshotData` scans). Set by
@@ -1192,7 +1233,7 @@ fn shared_pid_slot(procno: ProcNumber) -> &'static AtomicI32 {
 }
 
 use core::sync::atomic::AtomicI32;
-use core::sync::atomic::{AtomicU32, AtomicU8};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8};
 
 /// `&ProcGlobal->allProcs[procno].pgxactoff` over the genuinely-shared pgxactoff
 /// array. Panics if `InitProcGlobal` has not run or `procno` is out of range
@@ -1619,6 +1660,73 @@ pub(crate) fn set_proc_wait_lock_shared(
     }
 }
 
+/// `&ProcGlobal->allProcs[procno].wait_event_info` over the genuinely-shared
+/// per-proc wait-event-info array (`u32`). Panics if `InitProcGlobal` has not run
+/// or `procno` is out of range.
+fn shared_wait_event_info_slot(procno: ProcNumber) -> &'static AtomicU32 {
+    let base = SHARED_PROC_WAIT_EVENT_INFO.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC wait_event_info array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_WAIT_EVENT_INFO_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC wait_event_info index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u32` words of genuine shared memory and
+    // `idx < count`. `u32`/`AtomicU32` share layout, so the word may be accessed
+    // atomically — the cross-process discipline mirrors C's `volatile uint32`
+    // (`pgstat_report_wait_start`) / `UINT32_ACCESS_ONCE` read of
+    // `proc->wait_event_info`, with atomics making the per-word access
+    // well-defined under the Rust memory model.
+    unsafe { AtomicU32::from_ptr(base.add(idx)) }
+}
+
+/// `GetPGProcByNumber(procno)->wait_event_info` — read the canonical (shared)
+/// word, visible to every backend's `pg_stat_get_activity` projection.
+pub(crate) fn proc_wait_event_info_shared(procno: ProcNumber) -> u32 {
+    shared_wait_event_info_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `GetPGProcByNumber(procno)->wait_event_info = info` — write the canonical
+/// (shared) word (`pgstat_report_wait_start`/`_end` via the
+/// `my_wait_event_info -> &MyProc->wait_event_info` redirect).
+pub(crate) fn set_proc_wait_event_info_shared(procno: ProcNumber, info: u32) {
+    shared_wait_event_info_slot(procno).store(info, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].waitStart` over the genuinely-shared per-proc
+/// waitStart array (`u64`/[`TimestampTz`]). Panics if `InitProcGlobal` has not
+/// run or `procno` is out of range.
+fn shared_wait_start_slot(procno: ProcNumber) -> &'static AtomicU64 {
+    let base = SHARED_PROC_WAIT_START.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC waitStart array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_WAIT_START_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC waitStart index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u64` words of genuine shared memory and
+    // `idx < count`. `u64`/`AtomicU64` share layout, so the word may be accessed
+    // atomically — the cross-process discipline mirrors C's `pg_atomic_read_u64`/
+    // `pg_atomic_write_u64` of `proc->waitStart`, with atomics making the per-word
+    // access well-defined under the Rust memory model.
+    unsafe { AtomicU64::from_ptr(base.add(idx)) }
+}
+
+/// `pg_atomic_read_u64(&GetPGProcByNumber(procno)->waitStart)` — read the
+/// canonical (shared) word, visible to `GetLockStatusData`'s `pg_locks` scan.
+pub(crate) fn proc_wait_start_shared(procno: ProcNumber) -> u64 {
+    shared_wait_start_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `pg_atomic_write_u64(&GetPGProcByNumber(procno)->waitStart, value)` — write
+/// the canonical (shared) word (the blocked backend recording its wait start in
+/// `ProcSleep`, or clearing it on wakeup).
+pub(crate) fn set_proc_wait_start_shared(procno: ProcNumber, value: u64) {
+    shared_wait_start_slot(procno).store(value, AtomicOrdering::Relaxed);
+}
+
 /// `&ProcGlobal->allProcs[procno].databaseId` over the genuinely-shared per-proc
 /// databaseId array (`Oid`/`u32`). Panics if `InitProcGlobal` has not run or
 /// `procno` is out of range.
@@ -1959,6 +2067,43 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     }
     SHARED_PROC_WAITING.store(wq_ptr, AtomicOrdering::Relaxed);
     SHARED_PROC_WAITING_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.wait_event_info array (the live wait-event id the backend is
+    // blocked on). In C `my_wait_event_info` is repointed at
+    // `&MyProc->wait_event_info` in the shared PGPROC block, so
+    // `pgstat_report_wait_start/_end` publish into shmem and every backend's
+    // `pg_stat_get_activity` reads other procs' `wait_event_info` cross-process.
+    // Fork-private storage made a heavyweight-lock waiter's wait id invisible to a
+    // remote `pg_stat_activity` poll (the isolationtester `(*)` blocker check),
+    // hanging the `timeouts` spec. MemSet(0): "not waiting", matching the C PGPROC
+    // block (and `init_my_proc_common`'s `wait_event_info = 0`).
+    let wei_size = mul_size(total_procs, size_of::<u32>());
+    let (wei_ptr, wei_found) =
+        shmem::shmem_init_struct::call("PGPROC wait_event_info words", wei_size)?;
+    let wei_ptr = wei_ptr as *mut u32;
+    if !wei_found {
+        // SAFETY: `wei_ptr` addresses `wei_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(wei_ptr as *mut u8, 0, wei_size) };
+    }
+    SHARED_PROC_WAIT_EVENT_INFO.store(wei_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_WAIT_EVENT_INFO_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.waitStart array (the timestamp the backend began waiting on
+    // a heavyweight lock). In C this is a `pg_atomic_uint64` in the shared PGPROC
+    // block; `ProcSleep` records it and `GetLockStatusData` reads every blocked
+    // backend's `waitStart` cross-process for `pg_locks.waitstart`. Fork-private
+    // storage left a remote `pg_locks` reader seeing `waitstart` NULL. MemSet(0):
+    // "no wait start recorded", matching the C PGPROC block.
+    let ws_size = mul_size(total_procs, size_of::<u64>());
+    let (ws_ptr, ws_found) =
+        shmem::shmem_init_struct::call("PGPROC waitStart words", ws_size)?;
+    let ws_ptr = ws_ptr as *mut u64;
+    if !ws_found {
+        // SAFETY: `ws_ptr` addresses `ws_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(ws_ptr as *mut u8, 0, ws_size) };
+    }
+    SHARED_PROC_WAIT_START.store(ws_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_WAIT_START_COUNT.store(total_procs, AtomicOrdering::Relaxed);
 
     // Dense ProcGlobal mirror arrays (xids[] / subxidStates[] / statusFlags[]),
     // one element per pgxactoff slot. In C these are part of the PGPROC
