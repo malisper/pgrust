@@ -1114,13 +1114,13 @@ pub fn compute_semi_anti_join_factors<'mcx>(
     } else {
         restrictlist.to_vec()
     };
-    let joinqual_nodes: Vec<types_pathnodes::NodeId> =
-        joinquals_ids.iter().map(|&id| root.rinfo(id).clause).collect();
-
-    let jselec = cz::clauselist_selectivity::call(
+    // Pass the RestrictInfo list (not bare clause NodeIds) so a pseudoconstant
+    // gating qual is estimated at selectivity 1.0, matching C's
+    // `clauselist_selectivity(root, joinquals, ...)` over the RestrictInfo list.
+    let jselec = cz::clauselist_selectivity_rinfos::call(
         run,
         root,
-        &joinqual_nodes,
+        &joinquals_ids,
         0,
         (if jointype == JOIN_ANTI { JOIN_ANTI } else { JOIN_SEMI }) as i32,
         Some(sjinfo),
@@ -1128,10 +1128,10 @@ pub fn compute_semi_anti_join_factors<'mcx>(
 
     let norm_sjinfo = cz::init_dummy_sjinfo::call(root, outerrel, innerrel);
 
-    let nselec = cz::clauselist_selectivity::call(
+    let nselec = cz::clauselist_selectivity_rinfos::call(
         run,
         root,
-        &joinqual_nodes,
+        &joinquals_ids,
         0,
         JOIN_INNER as i32,
         Some(&norm_sjinfo),
@@ -1166,14 +1166,14 @@ pub fn get_parameterized_baserel_size<'mcx>(
     let baserel_rows = root.rel(rel).rows;
     let baserestrictinfo = root.rel(rel).baserestrictinfo.clone();
 
-    let mut all_nodes: Vec<types_pathnodes::NodeId> =
-        param_clauses.iter().map(|&id| root.rinfo(id).clause).collect();
-    for &id in baserestrictinfo.iter() {
-        all_nodes.push(root.rinfo(id).clause);
-    }
+    // C: allclauses = list_concat_copy(param_clauses, rel->baserestrictinfo) —
+    // a RestrictInfo list. Keep the RestrictInfo wrapper (don't strip to bare
+    // clause NodeIds) so the pseudoconstant gate applies, matching C.
+    let mut all_rinfos: Vec<RinfoId> = param_clauses.to_vec();
+    all_rinfos.extend_from_slice(&baserestrictinfo);
 
     let mut nrows = baserel_tuples
-        * cz::clauselist_selectivity::call(run, root, &all_nodes, baserel_relid as i32, JOIN_INNER as i32, None);
+        * cz::clauselist_selectivity_rinfos::call(run, root, &all_rinfos, baserel_relid as i32, JOIN_INNER as i32, None);
     nrows = clamp_row_est(nrows);
     if nrows > baserel_rows {
         nrows = baserel_rows;
@@ -1421,24 +1421,29 @@ pub fn calc_joinrel_size_estimate<'mcx>(
         restrictlist,
     );
 
+    // C passes the RestrictInfo *list* to clauselist_selectivity, preserving the
+    // RestrictInfo superstructure (`pseudoconstant`, `clause_relids`); a
+    // pseudoconstant gating qual is then estimated at selectivity 1.0 by
+    // clause_selectivity_ext rather than contributing its raw operator
+    // selectivity. Stripping the RestrictInfo wrapper (passing the bare clause
+    // NodeId) bypasses that gate and undercounts join cardinality. Pass the
+    // RinfoIds through the `_rinfos` seam to match C.
     if is_outer_join(jointype) {
         let joinrel_relids = root.rel(joinrel).relids.clone();
-        let mut joinqual_nodes: Vec<types_pathnodes::NodeId> = Vec::new();
-        let mut pushedqual_nodes: Vec<types_pathnodes::NodeId> = Vec::new();
+        let mut joinquals: Vec<RinfoId> = Vec::new();
+        let mut pushedquals: Vec<RinfoId> = Vec::new();
         for &rid in &worklist {
             if rinfo_is_pushed_down(root, rid, &joinrel_relids) {
-                pushedqual_nodes.push(root.rinfo(rid).clause);
+                pushedquals.push(rid);
             } else {
-                joinqual_nodes.push(root.rinfo(rid).clause);
+                joinquals.push(rid);
             }
         }
 
-        jselec = cz::clauselist_selectivity::call(run, root, &joinqual_nodes, 0, jointype as i32, Some(sjinfo));
-        pselec = cz::clauselist_selectivity::call(run, root, &pushedqual_nodes, 0, jointype as i32, Some(sjinfo));
+        jselec = cz::clauselist_selectivity_rinfos::call(run, root, &joinquals, 0, jointype as i32, Some(sjinfo));
+        pselec = cz::clauselist_selectivity_rinfos::call(run, root, &pushedquals, 0, jointype as i32, Some(sjinfo));
     } else {
-        let quals: Vec<types_pathnodes::NodeId> =
-            worklist.iter().map(|&id| root.rinfo(id).clause).collect();
-        jselec = cz::clauselist_selectivity::call(run, root, &quals, 0, jointype as i32, Some(sjinfo));
+        jselec = cz::clauselist_selectivity_rinfos::call(run, root, &worklist, 0, jointype as i32, Some(sjinfo));
         pselec = 0.0;
     }
 

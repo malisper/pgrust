@@ -755,12 +755,15 @@ pub fn cost_subqueryscan<'mcx>(
     let param_info = path_param_info(root, path_id);
 
     // qpquals = ppi_clauses ++ baserestrictinfo (parameterized) else baserestrictinfo.
-    let mut qpqual_nodes: Vec<NodeId> = Vec::new();
+    // C: list_concat_copy(param_info->ppi_clauses, baserel->baserestrictinfo) — a
+    // RestrictInfo list. Keep the RestrictInfo wrapper (don't strip to bare clause
+    // NodeIds) so a pseudoconstant gating qual is estimated at selectivity 1.0.
+    let mut qpquals: Vec<RinfoId> = Vec::new();
     if let Some(pi) = &param_info {
-        qpqual_nodes.extend(rinfo_clause_nodes(root, &pi.ppi_clauses));
-        qpqual_nodes.extend(rinfo_clause_nodes(root, &baserestrictinfo));
+        qpquals.extend_from_slice(&pi.ppi_clauses);
+        qpquals.extend_from_slice(&baserestrictinfo);
     } else {
-        qpqual_nodes.extend(rinfo_clause_nodes(root, &baserestrictinfo));
+        qpquals.extend_from_slice(&baserestrictinfo);
     }
 
     let (sub_rows, sub_disabled, sub_startup, sub_total) = {
@@ -770,7 +773,7 @@ pub fn cost_subqueryscan<'mcx>(
 
     let new_rows = clamp_row_est(
         sub_rows
-            * cz::clauselist_selectivity::call(run, root, &qpqual_nodes, 0, super::JOIN_INNER as i32, None),
+            * cz::clauselist_selectivity_rinfos::call(run, root, &qpquals, 0, super::JOIN_INNER as i32, None),
     );
 
     {
@@ -781,7 +784,7 @@ pub fn cost_subqueryscan<'mcx>(
         p.total_cost = sub_total;
     }
 
-    if qpqual_nodes.is_empty() && trivial_pathtarget {
+    if qpquals.is_empty() && trivial_pathtarget {
         return;
     }
 
