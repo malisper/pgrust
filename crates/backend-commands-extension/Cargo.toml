@@ -64,3 +64,20 @@ backend-utils-adt-format-type-seams = { path = "../backend-utils-adt-format-type
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 common-path-seams = { path = "../common-path-seams" }
 common-extra-encnames-fgram = { path = "../common-extra-encnames-fgram" }
+
+# Extension install/update SCRIPT-EXECUTION pipeline (extension.c 870-1458 +
+# ApplyExtensionUpdates 3554-3702): parser/analyzer/planner/executor/utility
+# drive + the security-context/GUC switch + text substitutions.
+backend-tcop-postgres = { path = "../backend-tcop-postgres" }
+backend-executor-execMain = { path = "../backend-executor-execMain" }
+backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
+backend-tcop-utility-seams = { path = "../backend-tcop-utility-seams" }
+backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+backend-utils-misc-guc = { path = "../backend-utils-misc-guc" }
+backend-utils-misc-superuser-seams = { path = "../backend-utils-misc-superuser-seams" }
+backend-utils-adt-ruleutils = { path = "../backend-utils-adt-ruleutils" }
+backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
+types-guc = { path = "../types-guc" }
+types-regex = { path = "../types-regex" }
+types-dest = { path = "../types-dest" }
+types-portal = { path = "../types-portal" }

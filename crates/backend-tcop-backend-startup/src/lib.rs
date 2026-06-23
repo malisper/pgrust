@@ -1131,6 +1131,50 @@ pub fn assign_log_connections(extra: u32) {
     log_connections::set(extra);
 }
 
+// ---------------------------------------------------------------------------
+// GUC hook-slot adapters (the `GucStringCheckFn`/`GucStringAssignFn` shapes the
+// guc-tables hook slots expect). They wrap the owned-model helpers above,
+// threading the parsed `u32` flag mask through the `*extra` carrier exactly as C
+// passes `void *extra` from `check_log_connections` to `assign_log_connections`.
+// ---------------------------------------------------------------------------
+
+/// The `check_log_connections` GUC check-hook slot adapter
+/// (`GucStringCheckFn`). Parses `*newval` via [`check_log_connections`], records
+/// the resulting flag mask into `*extra`, and reports the C `false` (with the
+/// `GUC_check_errdetail` text) on a syntax/keyword error.
+fn check_log_connections_slot(
+    newval: &mut Option<String>,
+    extra: &mut Option<backend_utils_misc_guc_tables::GucHookExtra>,
+    _source: types_guc::GucSource,
+) -> PgResult<bool> {
+    let raw = newval.clone().unwrap_or_default();
+    let scratch = mcx::MemoryContext::new("check_log_connections");
+    match check_log_connections(scratch.mcx(), &raw)? {
+        Ok(flags) => {
+            // Save the flags in *extra, for use by the assign function.
+            *extra = Some(Box::new(flags));
+            Ok(true)
+        }
+        Err(detail) => {
+            backend_utils_misc_guc_seams::guc_check_errdetail::call(detail);
+            Ok(false)
+        }
+    }
+}
+
+/// The `assign_log_connections` GUC assign-hook slot adapter
+/// (`GucStringAssignFn`): `log_connections = *((int *) extra)`.
+fn assign_log_connections_slot(
+    _newval: Option<&str>,
+    extra: Option<&backend_utils_misc_guc_tables::GucHookExtra>,
+) {
+    if let Some(extra) = extra {
+        if let Some(flags) = extra.downcast_ref::<u32>() {
+            assign_log_connections(*flags);
+        }
+    }
+}
+
 // ===========================================================================
 //  init_seams
 // ===========================================================================
@@ -1154,7 +1198,7 @@ pub fn init_seams() {
     //   string the GUC machinery owns; `check_log_connections`/
     //   `assign_log_connections` parse it into the separate `log_connections`
     //   int flag mask (the latter is set by the assign hook, not a GUC slot).
-    use backend_utils_misc_guc_tables::{vars, GucVarAccessors};
+    use backend_utils_misc_guc_tables::{hooks, vars, GucVarAccessors};
     vars::Trace_connection_negotiation.install(GucVarAccessors {
         get: globals::trace_connection_negotiation::get,
         set: globals::trace_connection_negotiation::set,
@@ -1163,6 +1207,13 @@ pub fn init_seams() {
         get: globals::log_connections_string::get,
         set: globals::log_connections_string::set,
     });
+
+    // The `log_connections` GUC's check/assign hook slots (guc_tables.c:875).
+    // The GUC machinery fires these when `log_connections` is set (e.g. from
+    // postgresql.conf); without them the slot panics "used before its owning unit
+    // installed it" the moment a non-default `log_connections` value is applied.
+    hooks::check_log_connections.install(check_log_connections_slot);
+    hooks::assign_log_connections.install(assign_log_connections_slot);
 
     // `log_connections & LOG_CONNECTION_AUTHENTICATION` — auth.c reads this
     // bitmask to decide whether to emit the per-method "connection

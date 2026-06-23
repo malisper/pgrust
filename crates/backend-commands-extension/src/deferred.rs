@@ -35,17 +35,6 @@ pub fn ExecAlterExtensionStmt() -> ! {
     )
 }
 
-/// `ApplyExtensionUpdates` (C 3555-3702): apply the chain of update scripts after
-/// an install. Calls `execute_extension_script` (C 3690), so it is gated on the
-/// same parser/analyzer/planner/executor/utility script-execution pipeline.
-pub fn ApplyExtensionUpdates() -> ! {
-    deferred!(
-        "ApplyExtensionUpdates",
-        "the per-version pg_extension tuple edit, the dependency delete/recreate, \
-         and the extension-script execution pipeline (execute_extension_script)"
-    )
-}
-
 /// `ExecAlterExtensionContentsStmt` (C 3713-3789) + `…Recurse` (C 3799-3929):
 /// ALTER EXTENSION ... ADD/DROP member object.
 ///
@@ -62,26 +51,6 @@ pub fn ExecAlterExtensionContentsStmt() -> ! {
         "ExecAlterExtensionContentsStmt/…Recurse",
         "recordExtObjInitPriv/removeExtObjInitPriv (aclchk.c extension-membership \
          initial-ACL helpers), which have no port and no seam"
-    )
-}
-
-/// `execute_extension_script` (C 1196-1458) + `execute_sql_string` (C 1046-1165):
-/// run an extension install/update script.
-pub fn execute_extension_script() -> ! {
-    deferred!(
-        "execute_extension_script/execute_sql_string",
-        "the superuser/GUC security-context switch and the whole \
-         parser/analyzer/planner/executor/utility script-execution loop"
-    )
-}
-
-/// `read_extension_script_file` (C 871-898): read a script file and convert it to
-/// the database encoding.
-pub fn read_extension_script_file() -> ! {
-    deferred!(
-        "read_extension_script_file",
-        "read_whole_file filesystem IO and the pg_verify_mbstr/pg_any_to_server \
-         encoding conversion"
     )
 }
 

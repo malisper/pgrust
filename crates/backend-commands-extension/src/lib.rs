@@ -103,6 +103,7 @@ use backend_commands_schemacmds::CreateSchemaCommand;
 use backend_commands_comment::CreateComments;
 
 pub mod deferred;
+pub mod script_exec;
 
 /// The C `MAXPGPATH` (the max path length sizing `snprintf` buffers in the
 /// filename builders).
@@ -1918,22 +1919,37 @@ pub fn CreateExtensionInternal<'mcx>(
         CreateComments(mcx, extension_oid, cat::ExtensionRelationId, 0, Some(comment))?;
     }
 
+    // The target schema name must be resolved by now (the C `schemaName` is a
+    // non-NULL `char *` once we reach here: either the user-/author-specified
+    // name or the default-creation namespace name).
+    let schema_name_str = schema_name
+        .ok_or_else(|| PgError::error("CreateExtensionInternal: schema name unresolved"))?;
+
     // Execute the installation script file.
-    // (mirror-pg-and-panic into the gated script-execution pipeline.)
-    // These values are computed faithfully but are only consumed past the gated
-    // script run (execute_extension_script / ApplyExtensionUpdates), hence the
-    // explicit reads here to mark them used.
-    let _ = (&required_schemas, &schema_name, &update_versions);
-    deferred::execute_extension_script();
+    script_exec::execute_extension_script(
+        mcx,
+        extension_oid,
+        &control,
+        None,
+        &version_name,
+        &required_schemas,
+        &schema_name_str,
+    )?;
 
     // If additional update scripts have to be executed, apply the updates as
     // though a series of ALTER EXTENSION UPDATE commands were given.
-    // (unreachable: execute_extension_script panics; gated on the same pipeline.)
-    #[allow(unreachable_code)]
-    {
-        deferred::ApplyExtensionUpdates();
-        Ok(address)
-    }
+    script_exec::ApplyExtensionUpdates(
+        mcx,
+        extension_oid,
+        &pcontrol,
+        &version_name,
+        &update_versions,
+        orig_schema_name.as_deref(),
+        cascade,
+        is_create,
+    )?;
+
+    Ok(address)
 }
 
 // ===========================================================================
