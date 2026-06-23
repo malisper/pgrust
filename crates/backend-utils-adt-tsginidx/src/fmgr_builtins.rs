@@ -31,14 +31,27 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 /// `PG_GETARG_TEXT_PP(i)` → `VARDATA_ANY`: a `text` arg's detoasted,
 /// header-stripped payload on the by-ref lane (the boundary owns the varlena
 /// framing). `gin_cmp_tslexeme`'s core consumes exactly these header-less bytes.
+///
+/// `gin_cmp_tslexeme` is the `tsvector_ops` GIN compare proc, called during index
+/// build/probe to order the extracted lexeme `text` entry keys. A short lexeme
+/// (most are) is stored short-packed in the GIN entry tuple once
+/// `SHORT_VARLENA_PACKING` is on, so it reaches here with a 1-byte header; a fixed
+/// 4-byte strip would land 3 bytes into (or past) the payload — C's
+/// `PG_GETARG_TEXT_PP` is `VARDATA_ANY`, header-form-agnostic. Skip ONE byte for a
+/// genuine short header (low bit set, but not the lone `0x01` external tag), else
+/// `VARHDRSZ`. No-op while the flag is OFF (every stored key is 4B).
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("tsginidx fn: text arg missing from by-ref lane");
-    // VARDATA_ANY: skip the 4-byte varlena header on the now header-ful image.
-    &image[types_datum::varlena::VARHDRSZ..]
+    // VARDATA_ANY: a short (1-byte, low-bit-set) header skips ONE byte, an
+    // ordinary 4-byte header skips VARHDRSZ.
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        _ => &image[types_datum::varlena::VARHDRSZ..],
+    }
 }
 
 #[inline]

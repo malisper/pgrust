@@ -580,8 +580,19 @@ fn range_fast_cmp_inner(
     a: types_tuple::backend_access_common_heaptuple::Datum<'_>,
     b: types_tuple::backend_access_common_heaptuple::Datum<'_>,
 ) -> PgResult<i32> {
-    let range_a = datum_get_range_type_p_arg(&a);
-    let range_b = datum_get_range_type_p_arg(&b);
+    // C's `DatumGetRangeTypeP` is `PG_DETOAST_DATUM`, which un-packs a short
+    // (1-byte-header) on-disk image to the 4-byte form. Under
+    // `SHORT_VARLENA_PACKING`=ON the GiST sorted-build sort engine hands this
+    // comparator the verbatim short-packed leaf-key images; reading the
+    // `RangeType` struct (`rangetypid` at `sizeof(RangeType)`, bounds past it)
+    // directly off a short image lands every field 3 bytes off -> wrong rangetypid
+    // ("type with OID N does not exist"). Materialize each operand into a fresh
+    // 8-aligned 4-byte-header `mcx` image first (the buffers live for this call).
+    // While the flag is OFF every key is already 4B so this is a verbatim copy.
+    let ctx = mcx::MemoryContext::new("range_fast_cmp");
+    let mcx = ctx.mcx();
+    let range_a = materialize_range_arg(mcx, &a)?;
+    let range_b = materialize_range_arg(mcx, &b)?;
 
     // cache the range info between calls — Assert(RangeTypeGetOid(a) == ...(b)).
     let typcache = range_get_typcache(range_a.rangetypid())?;
@@ -1399,24 +1410,61 @@ fn datum_get_range_type_p<'mcx>(d: types_tuple::backend_access_common_heaptuple:
     }
 }
 
-/// `DatumGetRangeTypeP(arg)` at a fmgr-frame argument boundary — the operand may
-/// arrive either as a pass-by-reference varlena image (`ByRef`, the form the
-/// sort engine hands the SortSupport comparator) or as a pointer word (`ByVal`,
-/// a `RangeType *` address). A by-reference image's bytes live for the call, so
-/// reading the `RangeType` at the image's address is sound; a pointer word is
-/// the address directly.
-fn datum_get_range_type_p_arg<'mcx>(
+/// `DatumGetRangeTypeP(arg)` that un-packs a SHORT (1-byte-header) on-disk image
+/// into a fresh 8-aligned 4-byte-header `mcx` buffer (mirroring C's
+/// `PG_DETOAST_DATUM` short arm), so the `RangeType` struct's fixed-offset reads
+/// (`rangetypid` at `sizeof(RangeType)`, bounds past it) land correctly and the
+/// base is `MAXALIGN(8)`-aligned (the alignment `range_serialize` produces, which
+/// the relative-offset bound accounting assumes). A by-value pointer word is the
+/// `RangeType *` address directly. While `SHORT_VARLENA_PACKING` is OFF every key
+/// is already plain 4B, so the non-short path copies it verbatim into the aligned
+/// buffer — behavior-preserving.
+fn materialize_range_arg<'mcx>(
+    mcx: Mcx<'mcx>,
     d: &types_tuple::backend_access_common_heaptuple::Datum<'mcx>,
-) -> RangeTypeP<'mcx> {
+) -> PgResult<RangeTypeP<'mcx>> {
+    use core::alloc::Layout;
     use types_tuple::backend_access_common_heaptuple::Datum as TDatum;
-    let ptr = match d {
-        TDatum::ByVal(w) => *w as *const types_rangetypes::RangeType,
-        _ => d.as_ref_bytes().as_ptr() as *const types_rangetypes::RangeType,
-    };
-    RangeTypeP {
-        ptr,
-        _marker: core::marker::PhantomData,
+
+    // A by-value pointer word: the address is already a live `RangeType *`.
+    if let TDatum::ByVal(w) = d {
+        return Ok(RangeTypeP {
+            ptr: *w as *const types_rangetypes::RangeType,
+            _marker: core::marker::PhantomData,
+        });
     }
+
+    let image = d.as_ref_bytes();
+    // VARATT_IS_1B (short header) and not VARATT_IS_1B_E (0x01, external): the
+    // 1-byte-header payload un-packs into a fresh 4-byte-header image.
+    let short = matches!(image.first(), Some(&h) if h != 0x01 && (h & 0x01) == 0x01);
+    let (payload_off, payload_len) = if short {
+        let total_1b = ((image[0] >> 1) & 0x7F) as usize;
+        (1usize, total_1b.saturating_sub(1))
+    } else {
+        // Plain 4B image: copy it verbatim (header + body) into the aligned buffer.
+        (0usize, image.len())
+    };
+    let new_size = if short { payload_len + 4 } else { image.len() };
+    mcx::check_alloc_size(new_size)?;
+    let layout =
+        Layout::from_size_align(new_size.max(1), 8).expect("valid RangeType image layout");
+    let block = mcx.allocate(layout).map_err(|_| mcx.oom(new_size))?;
+    let dst = block.as_ptr() as *mut u8;
+    // SAFETY: `dst` heads a freshly allocated `new_size`-byte region.
+    unsafe {
+        if short {
+            let word = (new_size as u32) << 2; // low 2 bits 00 = plain 4B header
+            core::ptr::copy_nonoverlapping(word.to_ne_bytes().as_ptr(), dst, 4);
+            core::ptr::copy_nonoverlapping(image.as_ptr().add(payload_off), dst.add(4), payload_len);
+        } else {
+            core::ptr::copy_nonoverlapping(image.as_ptr(), dst, new_size);
+        }
+    }
+    Ok(RangeTypeP {
+        ptr: dst as *const types_rangetypes::RangeType,
+        _marker: core::marker::PhantomData,
+    })
 }
 
 /// `RangeTypePGetDatum(r)` — pack a `RangeTypeP` back into a GiST key `Datum`.
