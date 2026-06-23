@@ -27,6 +27,7 @@ pub use allocator_api2::alloc::Allocator;
 use allocator_api2::alloc::{AllocError, Global};
 use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
+mod aset;
 mod owned;
 mod string;
 pub use owned::{Bind, McxOwned};
@@ -46,7 +47,16 @@ pub type PgHashMap<'mcx, K, V> =
 /// implementation — same semantics, no block structure yet; upgrading them is
 /// internal to this enum and does not change the API.
 enum Backend {
-    /// `aset.c` / `generation.c` / `slab.c` semantics: individually freed chunks.
+    /// `aset.c`: block-pooling allocator with power-of-two size-class freelists.
+    /// `allocate` bump-carves a chunk from a pooled block (or pops a freed one);
+    /// `deallocate` returns the chunk to its freelist; `reset`/drop reclaims the
+    /// blocks wholesale. This is the default backend for [`MemoryContext::new`] /
+    /// [`MemoryContext::new_child`] — it amortizes `malloc` the way C does. See
+    /// [`aset`].
+    Aset(RefCell<aset::AllocSet>),
+    /// Plain `malloc`-per-chunk (`Global`). Kept as a fallback / comparison
+    /// backend; the default contexts use [`Aset`](Backend::Aset). `generation.c`
+    /// and `slab.c` semantics still share this until they get their own ports.
     Malloc,
     /// `bump.c` semantics via bumpalo: no per-chunk free; `reset` reclaims all.
     /// The `BumpBlocks` model tracks `bump.c`'s block structure
@@ -231,9 +241,10 @@ pub struct MemoryContext {
 }
 
 impl MemoryContext {
-    /// Malloc-backed root context (`AllocSetContextCreate` semantics).
+    /// AllocSet-backed root context (`AllocSetContextCreate` semantics): the
+    /// default block-pooling allocator (`aset.c`).
     pub fn new(name: &'static str) -> Self {
-        Self::with_backend(name, Backend::Malloc, None)
+        Self::with_backend(name, Backend::Aset(RefCell::new(aset::AllocSet::new())), None)
     }
 
     /// Bump-arena root context (`BumpContextCreate` semantics): per-chunk free
@@ -249,7 +260,11 @@ impl MemoryContext {
     /// independently owned value — *cleanup* nesting is expressed by storing
     /// it in the state struct that should own it, not by this link.
     pub fn new_child(&self, name: &'static str) -> MemoryContext {
-        Self::with_backend(name, Backend::Malloc, Some(self.acct.clone()))
+        Self::with_backend(
+            name,
+            Backend::Aset(RefCell::new(aset::AllocSet::new())),
+            Some(self.acct.clone()),
+        )
     }
 
     /// [`new_child`](Self::new_child) with a bump backend.
@@ -266,6 +281,10 @@ impl MemoryContext {
         // present even before any allocation — so an empty "Caller tuples"
         // already reports nblocks=1 and a positive footprint, as C does.
         let (is_bump, init_footprint, init_nblocks) = match &backend {
+            // Aset reports like the old malloc backend for stats (its real block
+            // footprint is tracked but not surfaced, keeping the stats SRF output
+            // unchanged); the lazy keeper means an empty context holds 0 blocks.
+            Backend::Aset(_) => (false, 0usize, 0usize),
             Backend::Malloc => (false, 0usize, 0usize),
             Backend::Bump(_, blocks) => {
                 let b = blocks.borrow();
@@ -374,6 +393,10 @@ impl MemoryContext {
             self.acct.name,
             self.acct.self_used.get(),
         );
+        if let Backend::Aset(set) = &mut self.backend {
+            // AllocSetReset: free every block but the keeper, empty freelists.
+            set.get_mut().reset();
+        }
         if let Backend::Bump(bump, blocks) = &mut self.backend {
             bump.reset();
             blocks.get_mut().reset();
@@ -404,7 +427,9 @@ impl MemoryContext {
             subtree_peak: self.acct.subtree_peak.get(),
             limit: self.acct.limit.get(),
             arena_footprint: match &self.backend {
-                Backend::Malloc => self.acct.self_used.get(),
+                // Aset mirrors the old malloc backend's stats (requested bytes),
+                // keeping pg_backend_memory_contexts output unchanged.
+                Backend::Aset(_) | Backend::Malloc => self.acct.self_used.get(),
                 Backend::Bump(_, blocks) => blocks.borrow().mem_allocated,
             },
         }
@@ -641,6 +666,7 @@ unsafe impl Allocator for Mcx<'_> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         self.0.charge(layout.size())?;
         let result = match &self.0.backend {
+            Backend::Aset(set) => set.borrow_mut().alloc(layout),
             Backend::Malloc => Global.allocate(layout),
             Backend::Bump(bump, blocks) => {
                 let r = bump.allocate(layout);
@@ -664,6 +690,10 @@ unsafe impl Allocator for Mcx<'_> {
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
         self.0.uncharge(layout.size());
         match &self.0.backend {
+            // AllocSetFree: pooled chunk -> its size-class freelist; dedicated
+            // chunk -> Global. The routing recomputes from `layout`, matching
+            // `alloc`.
+            Backend::Aset(set) => set.borrow_mut().dealloc(ptr, layout),
             Backend::Malloc => Global.deallocate(ptr, layout),
             // bump.c never frees individual chunks (reset reclaims wholesale), so
             // the block model is untouched on deallocate.
@@ -680,6 +710,7 @@ unsafe impl Allocator for Mcx<'_> {
         let delta = new_layout.size() - old_layout.size();
         self.0.charge(delta)?;
         let result = match &self.0.backend {
+            Backend::Aset(set) => set.borrow_mut().realloc(ptr, old_layout, new_layout),
             Backend::Malloc => Global.grow(ptr, old_layout, new_layout),
             Backend::Bump(bump, blocks) => {
                 let r = bump.grow(ptr, old_layout, new_layout);
@@ -710,6 +741,7 @@ unsafe impl Allocator for Mcx<'_> {
         new_layout: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         let result = match &self.0.backend {
+            Backend::Aset(set) => set.borrow_mut().realloc(ptr, old_layout, new_layout),
             Backend::Malloc => Global.shrink(ptr, old_layout, new_layout),
             Backend::Bump(bump, _) => bump.shrink(ptr, old_layout, new_layout),
         };

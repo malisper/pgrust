@@ -8,8 +8,18 @@ publish.workspace = true
 name = "mcx"
 path = "src/lib.rs"
 
+[features]
+# Debug instrumentation for the Aset backend, off by default. See aset.rs.
+#  * aset-guard: back each pooled (and dedicated) chunk with its own mmap'd
+#                region whose end abuts a PROT_NONE guard page, so any write
+#                past the requested size faults immediately at the offending
+#                call site. Wasteful (one chunk per >= 2 pages) — debugging only.
+#                Used to localize the boolean.sql heap-corruption SIGSEGV.
+aset-guard = ["dep:libc"]
+
 [dependencies]
 types_error = { path = "../types/types_error" }
+libc = { version = "0.2", optional = true }
 allocator-api2 = { version = "0.2", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.14", default-features = false, features = ["allocator-api2", "ahash", "inline-more"] }
 bumpalo = { version = "3", default-features = false, features = ["allocator-api2"] }

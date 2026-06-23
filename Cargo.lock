@@ -12393,6 +12393,7 @@ dependencies = [
  "allocator-api2",
  "bumpalo",
  "hashbrown",
+ "libc",
  "types_error",
 ]
 
