@@ -92,6 +92,55 @@ fn varsize_any(bytes: &[u8]) -> usize {
     }
 }
 
+/// `VARHDRSZ` / `VARHDRSZ_SHORT` (postgres.h / varatt.h): the 4-byte and 1-byte
+/// varlena header sizes.
+const VARHDRSZ: usize = 4;
+const VARHDRSZ_SHORT: usize = 1;
+
+/// Whether `bytes` carries a genuine SHORT (1-byte) varlena header (low bit set)
+/// that is NOT the external/expanded `0x01` marker (`VARATT_IS_1B_E`). A 4-byte
+/// header (low two bits `00`) and a TOAST pointer return `false`.
+#[inline]
+fn is_short_header(bytes: &[u8]) -> bool {
+    match bytes.first() {
+        Some(&0x01) => false,            // VARATT_IS_1B_E: external TOAST pointer
+        Some(&h) => (h & 0x01) == 0x01,  // VARATT_IS_1B (short) when the low bit is set
+        None => false,
+    }
+}
+
+/// `PG_DETOAST_DATUM`'s short→4B leg over the *outer* summary blob.
+///
+/// C reads the `SerializedRanges` struct out of `PG_DETOAST_DATUM(summary)`, so
+/// every field (`typid`/`nranges`/...) sits at a fixed offset past a 4-byte
+/// `vl_len_`. Here `serialize_summary` always writes a 4-byte header, but the blob
+/// is then stored into the BRIN index tuple by `index_form_tuple`, which under
+/// `SHORT_VARLENA_PACKING` re-packs a small (packable) summary into a 1-byte
+/// ("short") header — shifting the whole struct left by `VARHDRSZ - VARHDRSZ_SHORT`
+/// (3) bytes. The blob then arrives here short-headed, and the fixed-offset field
+/// reads below land 3 bytes into the struct, yielding a garbage `nvalues`/`nranges`
+/// and an out-of-bounds boundary unpack. Un-pack a short header back to the 4-byte
+/// form first (mirroring `detoast_attr`'s short arm:
+/// `SET_VARSIZE(new, datalen + VARHDRSZ); memcpy(VARDATA(new), VARDATA_SHORT(old))`),
+/// so the rest of the decode is header-form-agnostic. No-op while the flag is off
+/// (the stored summary keeps its 4-byte header) and for an already-4B blob (e.g.
+/// the `summary_out` path, whose input is detoasted upstream).
+fn unpack_short_outer<'mcx>(mcx: Mcx<'mcx>, bytes: &[u8]) -> PgResult<Option<PgVec<'mcx, u8>>> {
+    if !is_short_header(bytes) {
+        return Ok(None);
+    }
+    let data_size = (((bytes[0] >> 1) & 0x7F) as usize) - VARHDRSZ_SHORT;
+    let new_size = data_size + VARHDRSZ;
+    let mut out: PgVec<'mcx, u8> = vec_with_capacity_in(mcx, new_size)?;
+    for _ in 0..new_size {
+        out.push(0u8);
+    }
+    set_varsize(&mut out, new_size);
+    out[VARHDRSZ..VARHDRSZ + data_size]
+        .copy_from_slice(&bytes[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+    Ok(Some(out))
+}
+
 /// `SET_VARSIZE(ptr, len)` into the first 4 bytes (4-byte header, low 2 bits 00).
 #[inline]
 fn set_varsize(buf: &mut [u8], len: usize) {
@@ -206,7 +255,14 @@ pub fn deserialize_summary<'mcx>(
     mcx: Mcx<'mcx>,
     value: &Datum<'mcx>,
 ) -> PgResult<SerializedRanges<'mcx>> {
-    let bytes = value.as_ref_bytes();
+    // `PG_DETOAST_DATUM(summary)`: un-pack a short outer header (a small summary
+    // re-packed by `index_form_tuple` under SHORT_VARLENA_PACKING) back to the
+    // 4-byte form the fixed-offset field reads below assume. No-op for a 4B blob.
+    let unpacked = unpack_short_outer(mcx, value.as_ref_bytes())?;
+    let bytes: &[u8] = match &unpacked {
+        Some(v) => v,
+        None => value.as_ref_bytes(),
+    };
     debug_assert!(bytes.len() >= DATA_OFFSET);
 
     let typid = u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
