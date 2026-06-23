@@ -721,14 +721,28 @@ pub fn disable_all_timeouts(keep_indicators: bool) -> PgResult<()> {
 
 /// `get_timeout_active(id)` — true if the timeout is enabled and not yet
 /// fired. Subject to race conditions (it could fire right after we look).
+///
+/// C reads `all_timeouts[id]->active` (a single `bool`) directly, relying on
+/// the read being atomic w.r.t. the SIGALRM handler. In this port the timeout
+/// arrays live behind a `RefCell`; an interrupting `handle_sig_alarm` does
+/// `borrow_mut()`, so reading under a bare `borrow()` here risks a `RefCell
+/// already borrowed` panic — and because that panic surfaces inside the C
+/// `wrapper_handler` signal frame it is non-unwinding and aborts the backend.
+/// Block SIGALRM across the borrow (the same guard the mutating accessors use)
+/// so any pending interrupt runs after the borrow is released.
 pub fn get_timeout_active(id: TimeoutId) -> bool {
+    let _block = BlockSigAlarm::new();
     TIMEOUT_DATA.with(|d| d.borrow().all_timeouts[id.as_index()].active)
 }
 
 /// `get_timeout_indicator(id, reset_indicator)` — the I've-been-fired
 /// indicator. Resets it when returning true if `reset_indicator`; never resets
 /// when returning false (avoids missing a timeout due to races).
+///
+/// SIGALRM is blocked across the `borrow_mut()` for the same reentrancy reason
+/// documented on [`get_timeout_active`].
 pub fn get_timeout_indicator(id: TimeoutId, reset_indicator: bool) -> bool {
+    let _block = BlockSigAlarm::new();
     TIMEOUT_DATA.with(|d| {
         let mut data = d.borrow_mut();
         let idx = id.as_index();
@@ -744,13 +758,21 @@ pub fn get_timeout_indicator(id: TimeoutId, reset_indicator: bool) -> bool {
 
 /// `get_timeout_start_time(id)` — when the timeout was most recently
 /// activated; 0 if never activated in this process.
+///
+/// SIGALRM is blocked across the borrow for the same reentrancy reason
+/// documented on [`get_timeout_active`].
 pub fn get_timeout_start_time(id: TimeoutId) -> TimestampTz {
+    let _block = BlockSigAlarm::new();
     TIMEOUT_DATA.with(|d| d.borrow().all_timeouts[id.as_index()].start_time)
 }
 
 /// `get_timeout_finish_time(id)` — when the timeout is, or most recently was,
 /// due to fire; 0 if never activated in this process.
+///
+/// SIGALRM is blocked across the borrow for the same reentrancy reason
+/// documented on [`get_timeout_active`].
 pub fn get_timeout_finish_time(id: TimeoutId) -> TimestampTz {
+    let _block = BlockSigAlarm::new();
     TIMEOUT_DATA.with(|d| d.borrow().all_timeouts[id.as_index()].fin_time)
 }
 
