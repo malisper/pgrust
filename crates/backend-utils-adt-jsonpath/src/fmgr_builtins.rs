@@ -63,11 +63,40 @@ fn vardata_any(image: &[u8]) -> &[u8] {
 /// `JsonPath *->header` at offset `VARHDRSZ`, then `->data` at
 /// `JSONPATH_HDRSZ`). Unlike [`arg_jsonpath_payload`], the leading length word
 /// is kept so the header read lands on the version word, not the first node.
-fn arg_jsonpath_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+///
+/// A stored `jsonpath` column is packable, so under `SHORT_VARLENA_PACKING`=ON a
+/// small expression (`$.a`, `strict $`) arrives with a 1-byte SHORT header. The
+/// header-agnostic `varlena_data_off` reads the VERSION word correctly, but the
+/// node region (`js->data`) then begins at the non-4-aligned offset 5 instead of
+/// 8, and `jspInitByBuffer`'s `INTALIGN` of node offsets — which C performs
+/// relative to a region that is guaranteed 4-aligned because `DatumGetJsonPathP`
+/// (`PG_DETOAST_DATUM`) un-packs short -> 4-byte first — then mis-reads every node.
+/// Mirror C: un-pack a genuine short image (strict `VARSIZE_1B == len`) to the
+/// 4-byte `[VARSIZE_4B | version | nodes]` form so the node region is 4-aligned.
+/// With the flag OFF no stored value is short-packed, so the un-pack branch is
+/// dead and this is a behavior-preserving copy.
+fn arg_jsonpath_image(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("jsonpath fn: by-ref `jsonpath` arg missing from by-ref lane")
+        .expect("jsonpath fn: by-ref `jsonpath` arg missing from by-ref lane");
+    if !image.is_empty()
+        && image[0] != 0x01
+        && (image[0] & 0x01) == 0x01
+        && ((image[0] >> 1) as usize) == image.len()
+    {
+        // Un-pack short -> 4-byte header (mirror detoast_attr's short arm): the
+        // short payload is `[version | nodes]`; prepend a 4-byte length word so the
+        // version word lands at [4..8] and the node region is 4-aligned at [8..].
+        let payload = &image[1..];
+        let total = VARHDRSZ + payload.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&((total as u32) << 2).to_ne_bytes());
+        out.extend_from_slice(payload);
+        out
+    } else {
+        image.to_vec()
+    }
 }
 
 /// Set a by-reference varlena (`_in`) result on the by-ref lane: the cores
@@ -136,7 +165,7 @@ fn fc_jsonpath_out(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResu
     // header`); pass the full image instead.
     let jp = arg_jsonpath_image(fcinfo, 0);
     let m = scratch_mcx();
-    let bytes = crate::jsonpath_out(m.mcx(), jp)?;
+    let bytes = crate::jsonpath_out(m.mcx(), &jp)?;
     Ok(ret_cstring(fcinfo, String::from_utf8_lossy(bytes.as_slice()).into_owned()))
 }
 
