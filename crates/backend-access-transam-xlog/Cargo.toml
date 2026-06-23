@@ -36,7 +36,12 @@ port-pgstrcasecmp = { path = "../port-pgstrcasecmp" }
 types-guc = { path = "../types-guc" }
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-access-transam-xlogarchive = { path = "../backend-access-transam-xlogarchive" }
+backend-access-transam-xlogbackup = { path = "../backend-access-transam-xlogbackup" }
 backend-access-transam-xloginsert-seams = { path = "../backend-access-transam-xloginsert-seams" }
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+backend-storage-ipc-dsm-core-seams = { path = "../backend-storage-ipc-dsm-core-seams" }
+backend-backup-basebackup-seams = { path = "../backend-backup-basebackup-seams" }
+backend-backup-sink = { path = "../backend-backup-sink" }
 backend-executor-instrument-seams = { path = "../backend-executor-instrument-seams" }
 backend-postmaster-checkpointer-seams = { path = "../backend-postmaster-checkpointer-seams" }
 backend-storage-sync-seams = { path = "../backend-storage-sync-seams" }

@@ -698,6 +698,8 @@ pub fn init_seams() {
     seams::tli_in_history::set(tliInHistory);
     seams::tli_of_point_in_history::set(tliOfPointInHistory);
     seams::tli_switch_point::set(tliSwitchPoint);
+    seams::tl_history_file_name::set(TLHistoryFileName);
+    seams::tl_history_file_path::set(TLHistoryFilePath);
 }
 
 /* ---------------------------------------------------------------------------

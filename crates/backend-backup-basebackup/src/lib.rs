@@ -53,6 +53,8 @@
 
 use mcx::Mcx;
 
+mod leaf_seams;
+
 use backend_utils_error::ereport;
 use types_core::primitive::{
     BlockNumber, ForkNumber, Oid, RelFileNumber, Size, TimeLineID, XLogRecPtr, BLCKSZ,
@@ -2030,6 +2032,11 @@ fn last_dir_separator(path: &str) -> Option<usize> {
 /// Install the inward seam that walsender's `BASE_BACKUP` command dispatches to.
 pub fn init_seams() {
     backend_replication_basebackup_seams::send_base_backup::set(send_base_backup_entry);
+
+    // The base-backup file-walk leaf seams (lstat / tarCreateHeader /
+    // geteuid / getegid / time(NULL) / pg_file_create_mode / pg_dir_create_mode)
+    // whose only consumer is this driver. `read_link` is owned by the fd crate.
+    leaf_seams::init_leaf_seams();
 }
 
 /// Inward-seam entry. The seam contract carries only the `BaseBackupCmd`; the

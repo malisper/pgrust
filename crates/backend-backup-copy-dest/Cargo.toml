@@ -1,0 +1,21 @@
+[package]
+name = "backend-backup-copy-dest"
+version = "0.0.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+name = "backend_backup_copy_dest"
+path = "src/lib.rs"
+
+[dependencies]
+types-core = { path = "../types-core" }
+types-dest = { path = "../types-dest" }
+types-tuple = { path = "../types-tuple" }
+types-nodes = { path = "../types-nodes" }
+mcx = { path = "../mcx" }
+backend-backup-copy-seams = { path = "../backend-backup-copy-seams" }
+backend-tcop-dest-seams = { path = "../backend-tcop-dest-seams" }
+backend-executor-execTuples-seams = { path = "../backend-executor-execTuples-seams" }
+backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
+backend-utils-adt-varlena-seams = { path = "../backend-utils-adt-varlena-seams" }

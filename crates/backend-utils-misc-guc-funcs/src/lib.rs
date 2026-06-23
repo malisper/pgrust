@@ -693,10 +693,18 @@ fn ShowGUCConfigOption<'mcx>(
 
     // need a tuple descriptor representing a single TEXT column
     // tupdesc = CreateTemplateTupleDesc(1);
-    // TupleDescInitEntry(tupdesc, 1, varname, TEXTOID, -1, 0);
+    // TupleDescInitBuiltinEntry(tupdesc, 1, varname, TEXTOID, -1, 0);
+    //
+    // C uses TupleDescInitBuiltinEntry (not TupleDescInitEntry) here: the
+    // latter does a SearchSysCache1(TYPEOID) lookup, which a database-less
+    // physical walsender (no Phase-3 relcache; pg_class/pg_type not nailed)
+    // cannot satisfy without recursing into RelationBuildDesc(pg_class). The
+    // builtin variant uses hardcoded type info, so SHOW works without a
+    // database (this is what `pg_basebackup`'s `SHOW data_directory_mode` on a
+    // physical replication connection relies on).
     let mut tupdesc = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, 1)?;
-    backend_access_common_tupdesc::TupleDescInitEntry(
-        &mut tupdesc, 1, Some(&varname), TEXTOID, -1, 0,
+    backend_access_common_tupdesc::TupleDescInitBuiltinEntry(
+        &mut tupdesc, 1, &varname, TEXTOID, -1, 0,
     )?;
     let tupdesc = Some(mcx::alloc_in(mcx, tupdesc)?);
 
@@ -717,18 +725,21 @@ fn ShowAllGUCConfig<'mcx>(
 ) -> PgResult<()> {
     // need a tuple descriptor representing three TEXT columns
     // tupdesc = CreateTemplateTupleDesc(3);
-    // TupleDescInitEntry(tupdesc, 1, "name",        TEXTOID, -1, 0);
-    // TupleDescInitEntry(tupdesc, 2, "setting",     TEXTOID, -1, 0);
-    // TupleDescInitEntry(tupdesc, 3, "description", TEXTOID, -1, 0);
+    // TupleDescInitBuiltinEntry(tupdesc, 1, "name",        TEXTOID, -1, 0);
+    // TupleDescInitBuiltinEntry(tupdesc, 2, "setting",     TEXTOID, -1, 0);
+    // TupleDescInitBuiltinEntry(tupdesc, 3, "description", TEXTOID, -1, 0);
+    //
+    // C uses TupleDescInitBuiltinEntry (hardcoded type info, no syscache) so
+    // `SHOW ALL` runs on a database-less walsender. See ShowGUCConfigOption.
     let mut tupdesc = backend_access_common_tupdesc::CreateTemplateTupleDesc(mcx, 3)?;
-    backend_access_common_tupdesc::TupleDescInitEntry(
-        &mut tupdesc, 1, Some("name"), TEXTOID, -1, 0,
+    backend_access_common_tupdesc::TupleDescInitBuiltinEntry(
+        &mut tupdesc, 1, "name", TEXTOID, -1, 0,
     )?;
-    backend_access_common_tupdesc::TupleDescInitEntry(
-        &mut tupdesc, 2, Some("setting"), TEXTOID, -1, 0,
+    backend_access_common_tupdesc::TupleDescInitBuiltinEntry(
+        &mut tupdesc, 2, "setting", TEXTOID, -1, 0,
     )?;
-    backend_access_common_tupdesc::TupleDescInitEntry(
-        &mut tupdesc, 3, Some("description"), TEXTOID, -1, 0,
+    backend_access_common_tupdesc::TupleDescInitBuiltinEntry(
+        &mut tupdesc, 3, "description", TEXTOID, -1, 0,
     )?;
     let tupdesc = Some(mcx::alloc_in(mcx, tupdesc)?);
 

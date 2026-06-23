@@ -115,6 +115,8 @@ pub use startup::{
 pub mod guc_state;
 pub mod guc_vars;
 
+pub mod backup;
+
 pub mod driver;
 pub use driver::{
     CheckXLogRemoved, GetFakeLSNForUnloggedRel, GetFullPageWriteInfo, GetLastImportantRecPtr,
@@ -1061,6 +1063,11 @@ pub fn init_seams() {
     // shutdown checkpoint (CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN|IMMEDIATE)), or
     // during recovery flush + mark ShutdownedInRecovery.
     s::shutdown_xlog::set(do_checkpoint::ShutdownXLOG);
+
+    // Online base-backup control: do_pg_backup_start / do_pg_backup_stop /
+    // do_pg_abort_backup / register_persistent_abort_backup_handler /
+    // get_backup_status (xlog.c) + the basebackup-variant wrappers.
+    backup::init_seams();
 }
 
 #[cfg(test)]

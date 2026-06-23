@@ -473,6 +473,11 @@ seam_core::seam!(pub fn slot_is_logical(slot: ReplicationSlotHandle) -> bool);
 seam_core::seam!(pub fn slot_data_synced(slot: ReplicationSlotHandle) -> bool);
 seam_core::seam!(pub fn slot_data_name(slot: ReplicationSlotHandle) -> String);
 seam_core::seam!(pub fn slot_data_database(slot: ReplicationSlotHandle) -> Oid);
+seam_core::seam!(
+    /// `slot->data.restart_lsn` (by-handle). Caller holds ControlLock and/or the
+    /// slot's mutex per slot.c's locking model.
+    pub fn slot_data_restart_lsn(slot: ReplicationSlotHandle) -> XLogRecPtr
+);
 seam_core::seam!(pub fn slot_active_pid(slot: ReplicationSlotHandle) -> i32);
 seam_core::seam!(
     pub fn slot_data_invalidated(slot: ReplicationSlotHandle) -> ReplicationSlotInvalidationCause

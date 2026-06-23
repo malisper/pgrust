@@ -917,6 +917,26 @@ pub fn pg_ftruncate_transient(fd: i32, length: i64) -> i32 {
     }
 }
 
+/// `transient_lseek(fd, offset, whence)` — `lseek(2)` against a transient fd.
+/// Resolves the transient index to the kernel fd, then `lseek`s. Returns the
+/// resulting file offset (`>= 0`) or `-errno`. `whence` is the raw C constant
+/// (`SEEK_SET`/`SEEK_CUR`/`SEEK_END`). Mirrors `walsender.c`'s
+/// `SendTimeLineHistory`, which `lseek(fd, 0, SEEK_END)` to size the timeline
+/// history file then `lseek(fd, 0, SEEK_SET)` before reading it.
+pub fn transient_lseek(fd: i32, offset: i64, whence: i32) -> i64 {
+    let raw = match allocated_desc::TransientFileRawFd(fd) {
+        Ok(raw) => raw,
+        Err(_) => return -(libc::EBADF as i64),
+    };
+    // SAFETY: `raw` is a live kernel fd owned by the descriptor table.
+    let ret = unsafe { libc::lseek(raw, offset as libc::off_t, whence) };
+    if ret < 0 {
+        -(errno_now() as i64)
+    } else {
+        ret as i64
+    }
+}
+
 /// `transient_read` — `read(fd, buf, len)` against a transient fd. Bytes read
 /// (`>= 0`) or `-errno`.
 pub fn transient_read(fd: i32, buf: &mut [u8]) -> isize {

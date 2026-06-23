@@ -110,3 +110,15 @@ seam_core::seam!(
         history: &[TimeLineHistoryEntry],
     ) -> PgResult<(XLogRecPtr, TimeLineID)>
 );
+
+seam_core::seam!(
+    /// `TLHistoryFileName(fname, tli)` (xlog_internal.h) — the canonical
+    /// timeline-history file *name* (`"%08X.history"`).
+    pub fn tl_history_file_name(tli: TimeLineID) -> String
+);
+
+seam_core::seam!(
+    /// `TLHistoryFilePath(path, tli)` (xlog_internal.h) — the canonical
+    /// timeline-history file *path* (`XLOGDIR "/%08X.history"`).
+    pub fn tl_history_file_path(tli: TimeLineID) -> String
+);

@@ -928,6 +928,74 @@ impl BackupState {
     pub const fn stoptime(&self) -> pg_time_t {
         self.stoptime
     }
+
+    /// A zero-initialized `BackupState`, mirroring `palloc0(sizeof(BackupState))`
+    /// in `do_pg_backup_start()` (xlog.c) before its fields are filled.
+    pub const fn zeroed() -> Self {
+        Self {
+            name: [0u8; MAXPGPATH + 1],
+            startpoint: 0,
+            starttli: 0,
+            checkpointloc: 0,
+            starttime: 0,
+            started_in_recovery: false,
+            istartpoint: 0,
+            istarttli: 0,
+            stoppoint: 0,
+            stoptli: 0,
+            stoptime: 0,
+        }
+    }
+
+    /// `strlcpy(state->name, backupidstr, sizeof(state->name))` (xlog.c) — copy
+    /// up to `MAXPGPATH` bytes of the label, always NUL-terminating, zeroing the
+    /// remainder of the fixed buffer.
+    pub fn set_name(&mut self, backupidstr: &[u8]) {
+        self.name = [0u8; MAXPGPATH + 1];
+        let n = core::cmp::min(backupidstr.len(), MAXPGPATH);
+        self.name[..n].copy_from_slice(&backupidstr[..n]);
+        // self.name[n] is already 0 (NUL terminator).
+    }
+
+    /// Set `state->startpoint` (xlog.c `do_pg_backup_start`).
+    pub fn set_startpoint(&mut self, startpoint: XLogRecPtr) {
+        self.startpoint = startpoint;
+    }
+
+    /// Set `state->starttli` (xlog.c `do_pg_backup_start`).
+    pub fn set_starttli(&mut self, starttli: TimeLineID) {
+        self.starttli = starttli;
+    }
+
+    /// Set `state->checkpointloc` (xlog.c `do_pg_backup_start`).
+    pub fn set_checkpointloc(&mut self, checkpointloc: XLogRecPtr) {
+        self.checkpointloc = checkpointloc;
+    }
+
+    /// Set `state->starttime` (xlog.c `do_pg_backup_start`).
+    pub fn set_starttime(&mut self, starttime: pg_time_t) {
+        self.starttime = starttime;
+    }
+
+    /// Set `state->started_in_recovery` (xlog.c `do_pg_backup_start`).
+    pub fn set_started_in_recovery(&mut self, started_in_recovery: bool) {
+        self.started_in_recovery = started_in_recovery;
+    }
+
+    /// Set `state->stoppoint` (xlog.c `do_pg_backup_stop`).
+    pub fn set_stoppoint(&mut self, stoppoint: XLogRecPtr) {
+        self.stoppoint = stoppoint;
+    }
+
+    /// Set `state->stoptli` (xlog.c `do_pg_backup_stop`).
+    pub fn set_stoptli(&mut self, stoptli: TimeLineID) {
+        self.stoptli = stoptli;
+    }
+
+    /// Set `state->stoptime` (xlog.c `do_pg_backup_stop`).
+    pub fn set_stoptime(&mut self, stoptime: pg_time_t) {
+        self.stoptime = stoptime;
+    }
 }
 
 /// `SessionBackupState` (access/xlog.h:113-119) — the session-level state of a

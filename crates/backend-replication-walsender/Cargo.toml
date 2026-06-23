@@ -59,6 +59,7 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
+backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-storage-aio-aio-seams = { path = "../backend-storage-aio-aio-seams" }
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
 backend-utils-activity-pgstat-io-seams = { path = "../backend-utils-activity-pgstat-io-seams" }

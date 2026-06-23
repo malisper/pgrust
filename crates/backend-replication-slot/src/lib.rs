@@ -3194,6 +3194,9 @@ fn seam_slot_data_name(handle: ReplicationSlotHandle) -> String {
 fn seam_slot_data_database(handle: ReplicationSlotHandle) -> Oid {
     handle_ref(handle).data.database
 }
+fn seam_slot_data_restart_lsn(handle: ReplicationSlotHandle) -> XLogRecPtr {
+    handle_ref(handle).data.restart_lsn
+}
 fn seam_slot_active_pid(handle: ReplicationSlotHandle) -> i32 {
     handle_ref(handle).active_pid
 }
@@ -3296,6 +3299,7 @@ pub fn init_seams() {
     s::slot_data_synced::set(seam_slot_data_synced);
     s::slot_data_name::set(seam_slot_data_name);
     s::slot_data_database::set(seam_slot_data_database);
+    s::slot_data_restart_lsn::set(seam_slot_data_restart_lsn);
     s::slot_active_pid::set(seam_slot_active_pid);
     s::slot_data_invalidated::set(seam_slot_data_invalidated);
 

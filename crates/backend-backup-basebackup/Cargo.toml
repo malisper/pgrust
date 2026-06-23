@@ -9,6 +9,7 @@ name = "backend_backup_basebackup"
 path = "src/lib.rs"
 
 [dependencies]
+libc = "0.2"
 mcx = { path = "../mcx" }
 seam-core = { path = "../seam-core" }
 types-core = { path = "../types-core" }

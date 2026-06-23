@@ -106,6 +106,7 @@ pub fn init_all() {
     backend_access_transam_xlogstats::init_seams();
     backend_access_transam_xlogutils::init_seams();
     backend_backup_copy::init_seams();
+    backend_backup_copy_dest::init_seams();
     backend_backup_gzip::init_seams();
     backend_backup_lz4::init_seams();
     backend_backup_zstd::init_seams();

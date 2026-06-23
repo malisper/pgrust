@@ -3703,9 +3703,12 @@ dependencies = [
  "backend-access-transam-varsup-seams",
  "backend-access-transam-xlog-seams",
  "backend-access-transam-xlogarchive",
+ "backend-access-transam-xlogbackup",
  "backend-access-transam-xloginsert-seams",
  "backend-access-transam-xlogrecovery-seams",
  "backend-access-transam-xlogutils",
+ "backend-backup-basebackup-seams",
+ "backend-backup-sink",
  "backend-commands-vacuum-seams",
  "backend-executor-instrument-seams",
  "backend-postmaster-checkpointer-seams",
@@ -3720,6 +3723,8 @@ dependencies = [
  "backend-storage-buffer-bufmgr-seams",
  "backend-storage-file-fd-seams",
  "backend-storage-file-reinit",
+ "backend-storage-ipc-dsm-core-seams",
+ "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-shmem-seams",
  "backend-storage-lmgr-lwlock",
  "backend-storage-lmgr-lwlock-seams",
@@ -4122,6 +4127,7 @@ dependencies = [
  "backend-utils-misc-ps-status-seams",
  "common-checksum-helper",
  "common-compression-seams",
+ "libc",
  "mcx",
  "port-pgstrcasecmp",
  "seam-core",
@@ -4170,6 +4176,22 @@ dependencies = [
  "types-core",
  "types-error",
  "types-nodes",
+]
+
+[[package]]
+name = "backend-backup-copy-dest"
+version = "0.0.0"
+dependencies = [
+ "backend-access-common-tupdesc",
+ "backend-backup-copy-seams",
+ "backend-executor-execTuples-seams",
+ "backend-tcop-dest-seams",
+ "backend-utils-adt-varlena-seams",
+ "mcx",
+ "types-core",
+ "types-dest",
+ "types-nodes",
+ "types-tuple",
 ]
 
 [[package]]
@@ -16713,6 +16735,7 @@ dependencies = [
  "backend-replication-walreceiverfuncs-seams",
  "backend-replication-walsender-seams",
  "backend-storage-aio-aio-seams",
+ "backend-storage-file-fd-seams",
  "backend-storage-ipc-dsm-core-seams",
  "backend-storage-ipc-latch-seams",
  "backend-storage-ipc-procarray-seams",
@@ -25309,6 +25332,7 @@ dependencies = [
  "backend-backup-basebackup",
  "backend-backup-basebackup-target",
  "backend-backup-copy",
+ "backend-backup-copy-dest",
  "backend-backup-gzip",
  "backend-backup-incremental",
  "backend-backup-lz4",

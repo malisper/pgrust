@@ -431,6 +431,12 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `lseek(fd, offset, whence)` against a transient fd. Returns the resulting
+    /// file offset (>=0) or `-errno`. `whence` is the raw C `SEEK_*` constant.
+    pub fn transient_lseek(fd: i32, offset: i64, whence: i32) -> i64
+);
+
+seam_core::seam!(
     /// `pg_pread(fd, buf, count, offset)` — positioned read against a bare
     /// kernel fd (the `BasicOpenFile` return value, e.g. the WAL segment fd a
     /// reader holds in `state->seg.ws_file`). Returns bytes read (>=0) or

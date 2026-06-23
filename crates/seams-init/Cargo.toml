@@ -108,6 +108,7 @@ backend-access-transam-xlogrecovery = { path = "../backend-access-transam-xlogre
 backend-access-transam-xlogstats = { path = "../backend-access-transam-xlogstats" }
 backend-access-transam-xlogutils = { path = "../backend-access-transam-xlogutils" }
 backend-backup-copy = { path = "../backend-backup-copy" }
+backend-backup-copy-dest = { path = "../backend-backup-copy-dest" }
 backend-backup-gzip = { path = "../backend-backup-gzip" }
 backend-backup-lz4 = { path = "../backend-backup-lz4" }
 backend-backup-zstd = { path = "../backend-backup-zstd" }

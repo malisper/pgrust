@@ -39,6 +39,7 @@ extern crate alloc;
 extern crate std;
 
 // Owner-seam crate aliases (outward calls).
+use backend_access_transam_timeline_seams as timeline;
 use backend_access_transam_varsup_seams as varsup;
 use backend_access_transam_xact_seams as xact;
 use backend_access_transam_xlog_seams as xlog;
