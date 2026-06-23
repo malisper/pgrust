@@ -1019,3 +1019,26 @@ pub fn init_seams() {
         },
     );
 }
+
+#[cfg(test)]
+mod tests {
+    /// Functional checkpoint (i): after init_seams(), LoadOutputPlugin's Phase-0
+    /// registry resolves "test_decoding" to the builtin vtable, and the
+    /// callback-presence bitmask reports the required begin/change/commit cbs.
+    #[test]
+    fn test_decoding_builtin_resolves() {
+        super::init_seams();
+        let entry = backend_utils_fmgr_dfmgr_seams::resolve_builtin_output_plugin("test_decoding")
+            .expect("test_decoding builtin output plugin registered");
+        assert_eq!(entry.name, "test_decoding");
+        let bits = (entry.init)();
+        // All 21 callbacks present.
+        assert_eq!(bits, (1u32 << 21) - 1);
+        // begin_cb (bit 1), change_cb (bit 2), commit_cb (bit 4) — the required ones.
+        assert!(bits & (1 << 1) != 0, "begin_cb");
+        assert!(bits & (1 << 2) != 0, "change_cb");
+        assert!(bits & (1 << 4) != 0, "commit_cb");
+        // An unregistered plugin resolves to None.
+        assert!(backend_utils_fmgr_dfmgr_seams::resolve_builtin_output_plugin("nope").is_none());
+    }
+}
