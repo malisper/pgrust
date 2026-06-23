@@ -1001,6 +1001,8 @@ pub fn init_seams() {
         with_commit_ts_state(|state| ExtendCommitTs(state, newest_xact))
     });
 
+    seams::check_point_commit_ts::set(|| with_commit_ts_state(CheckPointCommitTs));
+
     seams::commit_ts_redo::set(|record| {
         let decoded = record
             .record

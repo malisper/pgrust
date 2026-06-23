@@ -259,3 +259,47 @@ seam_core::seam!(
         new_oldest_multi_db: types_core::Oid,
     ) -> types_error::PgResult<()>
 );
+
+seam_core::seam!(
+    /// `MultiXactGetCheckptMulti(is_shutdown, &nextMulti, &nextMultiOffset,
+    /// &oldestMulti, &oldestMultiDB)` (multixact.c:2352) — snapshot the MultiXact
+    /// state a checkpoint records (`CreateCheckPoint`, xlog.c:7176-7180). Returns
+    /// `(nextMulti, nextMultiOffset, oldestMulti, oldestMultiDB)`. Takes
+    /// `MultiXactGenLock`.
+    pub fn multi_xact_get_checkpt_multi(
+        is_shutdown: bool,
+    ) -> types_error::PgResult<(
+        types_core::primitive::MultiXactId,
+        types_core::primitive::MultiXactOffset,
+        types_core::primitive::MultiXactId,
+        types_core::Oid,
+    )>
+);
+
+seam_core::seam!(
+    /// `MultiXactAdvanceNextMXact(minMulti, minMultiOffset)` (multixact.c:2581) —
+    /// `XLOG_CHECKPOINT_ONLINE` redo (xlog.c:8465): treat the recorded
+    /// `nextMulti`/`nextMultiOffset` as minimums. Takes `MultiXactGenLock`.
+    pub fn multi_xact_advance_next_m_xact(
+        min_multi: types_core::primitive::MultiXactId,
+        min_multi_offset: types_core::primitive::MultiXactOffset,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `MultiXactAdvanceOldest(oldestMulti, oldestMultiDB)` (multixact.c:2606) —
+    /// `XLOG_CHECKPOINT_{ONLINE,SHUTDOWN}` redo (xlog.c:8350/8472): advance the
+    /// oldest tracked multixact, via `SetMultiXactIdLimit`. Fallible (may truncate
+    /// the multixact SLRUs).
+    pub fn multi_xact_advance_oldest(
+        oldest_multi: types_core::primitive::MultiXactId,
+        oldest_multi_db: types_core::Oid,
+    ) -> types_error::PgResult<()>
+);
+
+seam_core::seam!(
+    /// `CheckPointMultiXact()` (multixact.c:1777) — flush dirty MultiXact
+    /// offsets/members SLRU pages at a checkpoint (`CheckPointGuts`, xlog.c:7588).
+    /// The SLRU writes can `ereport(ERROR)`.
+    pub fn check_point_multi_xact() -> types_error::PgResult<()>
+);

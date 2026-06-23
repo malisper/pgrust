@@ -60,7 +60,7 @@ use types_core::xact::{
     FullTransactionId, InvalidTransactionId, MaxTransactionId, TransamVariablesData,
 };
 use types_error::{DEBUG1, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, WARNING};
-use types_storage::{LWLockMode, OID_GEN_LOCK, XACT_TRUNCATION_LOCK, XID_GEN_LOCK};
+use types_storage::{COMMIT_TS_LOCK, LWLockMode, OID_GEN_LOCK, XACT_TRUNCATION_LOCK, XID_GEN_LOCK};
 
 /// Number of OIDs to prefetch (preallocate) per XLOG write (`VAR_OID_PREFETCH`).
 const VAR_OID_PREFETCH: u32 = 8192;
@@ -917,6 +917,72 @@ pub fn init_seams() {
     // `TransamVariables` singleton + lock; the XLOG redo dispatcher reaches them
     // here.
     seams::redo_set_next_oid::set(|next_oid| {
+        let guard = acquire(OID_GEN_LOCK, true)?;
+        {
+            let mut tv = transam();
+            tv.nextOid = next_oid;
+            tv.oidCount = 0;
+        }
+        guard.release()?;
+        Ok(())
+    });
+
+    // The checkpoint XID/OID/CommitTs snapshots (`CreateCheckPoint`,
+    // xlog.c:7159-7174). varsup owns the `TransamVariables` singleton + the
+    // gen-locks; the checkpoint driver in xlog reaches the fields through these
+    // owner seams, each holding the same LWLock C holds (XidGenLock / CommitTsLock
+    // / OidGenLock in LW_SHARED).
+    seams::get_checkpoint_xid_snapshot::set(|| {
+        let guard = acquire(XID_GEN_LOCK, false)?;
+        let snap = {
+            let tv = transam();
+            (tv.nextXid, tv.oldestXid, tv.oldestXidDB)
+        };
+        guard.release()?;
+        Ok(snap)
+    });
+    seams::get_checkpoint_commit_ts_snapshot::set(|| {
+        let guard = acquire(COMMIT_TS_LOCK, false)?;
+        let snap = {
+            let tv = transam();
+            (tv.oldestCommitTsXid, tv.newestCommitTsXid)
+        };
+        guard.release()?;
+        Ok(snap)
+    });
+    seams::get_checkpoint_next_oid::set(|include_oidcount| {
+        let guard = acquire(OID_GEN_LOCK, false)?;
+        let next_oid = {
+            let tv = transam();
+            if include_oidcount {
+                tv.nextOid.wrapping_add(tv.oidCount)
+            } else {
+                tv.nextOid
+            }
+        };
+        guard.release()?;
+        Ok(next_oid)
+    });
+
+    // `XLOG_CHECKPOINT_ONLINE` redo (xlog.c:8446-8450): treat the recorded XID
+    // counter as a minimum.
+    seams::redo_advance_next_xid_min::set(|next_xid| {
+        let guard = acquire(XID_GEN_LOCK, true)?;
+        {
+            let mut tv = transam();
+            if FullTransactionIdPrecedes(tv.nextXid, next_xid) {
+                tv.nextXid = next_xid;
+            }
+        }
+        guard.release()?;
+        Ok(())
+    });
+    // `XLOG_CHECKPOINT_SHUTDOWN` redo (xlog.c:8340-8346): believe the recorded
+    // counters exactly.
+    seams::redo_set_next_xid_oid_exact::set(|next_xid, next_oid| {
+        let guard = acquire(XID_GEN_LOCK, true)?;
+        transam().nextXid = next_xid;
+        guard.release()?;
         let guard = acquire(OID_GEN_LOCK, true)?;
         {
             let mut tv = transam();

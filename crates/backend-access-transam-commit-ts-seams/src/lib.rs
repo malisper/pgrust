@@ -108,3 +108,10 @@ seam_core::seam!(
     /// `vac_truncate_clog` before truncation.
     pub fn advance_oldest_commit_ts_xid(oldest_xact: TransactionId) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `CheckPointCommitTs()` (commit_ts.c) — flush all dirty commitTS SLRU pages
+    /// to disk at a checkpoint (`CheckPointGuts`, xlog.c:7586). The SLRU writes
+    /// can `ereport(ERROR)`.
+    pub fn check_point_commit_ts() -> PgResult<()>
+);

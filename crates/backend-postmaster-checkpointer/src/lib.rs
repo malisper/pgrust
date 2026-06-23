@@ -1003,7 +1003,13 @@ pub fn ReqShutdownXLOG() {
     // touch the `RefCell<PrivateState>` (a `borrow_mut()` here would panic if the
     // interrupted main-loop code already holds the borrow).
     SHUTDOWN_XLOG_PENDING.with(|c| c.set(true));
-    // SetLatch(MyLatch) — done by the host signal-handler shim.
+    // `SetLatch(MyLatch)` (checkpointer.c:924) — wake the main loop out of its
+    // `WaitLatch` so it observes the pending flag immediately. Without this the
+    // checkpointer sleeps until its `checkpoint_timeout` timer fires, which is
+    // the pre-existing graceful-shutdown HANG (mirrors the other signal handlers,
+    // e.g. `SignalHandlerForShutdownRequest`, which already set the latch). The
+    // latch's owner-pid guard makes `SetLatch` async-signal-safe here.
+    latch::set_latch_my_latch::call();
 }
 
 // ===========================================================================

@@ -185,3 +185,55 @@ seam_core::seam!(
     /// Called from vacuum's `vac_update_datfrozenxid`.
     pub fn force_transaction_id_limit_update() -> PgResult<bool>
 );
+
+seam_core::seam!(
+    /// The XID snapshot a checkpoint records (`CreateCheckPoint`, xlog.c:7159-7163):
+    /// `LWLockAcquire(XidGenLock, LW_SHARED); checkPoint.nextXid =
+    /// TransamVariables->nextXid; checkPoint.oldestXid = TransamVariables->oldestXid;
+    /// checkPoint.oldestXidDB = TransamVariables->oldestXidDB;
+    /// LWLockRelease(XidGenLock);`. Returns `(nextXid, oldestXid, oldestXidDB)`.
+    /// varsup owns the `TransamVariables` singleton + `XidGenLock`.
+    pub fn get_checkpoint_xid_snapshot() -> PgResult<(FullTransactionId, TransactionId, Oid)>
+);
+
+seam_core::seam!(
+    /// The CommitTs XID snapshot a checkpoint records (`CreateCheckPoint`,
+    /// xlog.c:7165-7168): `LWLockAcquire(CommitTsLock, LW_SHARED);
+    /// checkPoint.oldestCommitTsXid = TransamVariables->oldestCommitTsXid;
+    /// checkPoint.newestCommitTsXid = TransamVariables->newestCommitTsXid;
+    /// LWLockRelease(CommitTsLock);`. Returns `(oldestCommitTsXid,
+    /// newestCommitTsXid)`. varsup owns the singleton + `CommitTsLock`.
+    pub fn get_checkpoint_commit_ts_snapshot() -> PgResult<(TransactionId, TransactionId)>
+);
+
+seam_core::seam!(
+    /// The nextOid a checkpoint records (`CreateCheckPoint`, xlog.c:7170-7174):
+    /// `LWLockAcquire(OidGenLock, LW_SHARED); checkPoint.nextOid =
+    /// TransamVariables->nextOid; if (!shutdown) checkPoint.nextOid +=
+    /// TransamVariables->oidCount; LWLockRelease(OidGenLock);`. On a non-shutdown
+    /// checkpoint the prefetch count is folded in. varsup owns the singleton +
+    /// `OidGenLock`.
+    pub fn get_checkpoint_next_oid(include_oidcount: bool) -> PgResult<Oid>
+);
+
+seam_core::seam!(
+    /// `XLOG_CHECKPOINT_ONLINE` redo (xlog.c:8446-8450): `LWLockAcquire(XidGenLock,
+    /// LW_EXCLUSIVE); if (FullTransactionIdPrecedes(TransamVariables->nextXid,
+    /// checkPoint.nextXid)) TransamVariables->nextXid = checkPoint.nextXid;
+    /// LWLockRelease(XidGenLock);` — in an ONLINE checkpoint treat the recorded XID
+    /// counter as a minimum. varsup owns the singleton + `XidGenLock`.
+    pub fn redo_advance_next_xid_min(next_xid: FullTransactionId) -> PgResult<()>
+);
+
+seam_core::seam!(
+    /// `XLOG_CHECKPOINT_SHUTDOWN` redo (xlog.c:8340-8346): `LWLockAcquire(XidGenLock,
+    /// LW_EXCLUSIVE); TransamVariables->nextXid = checkPoint.nextXid;
+    /// LWLockRelease(XidGenLock); LWLockAcquire(OidGenLock, LW_EXCLUSIVE);
+    /// TransamVariables->nextOid = checkPoint.nextOid; TransamVariables->oidCount =
+    /// 0; LWLockRelease(OidGenLock);` — in a SHUTDOWN checkpoint believe the
+    /// recorded counters exactly. varsup owns the singleton + both gen locks.
+    pub fn redo_set_next_xid_oid_exact(
+        next_xid: FullTransactionId,
+        next_oid: Oid,
+    ) -> PgResult<()>
+);

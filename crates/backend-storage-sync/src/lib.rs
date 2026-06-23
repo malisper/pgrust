@@ -357,11 +357,7 @@ fn sync_post_checkpoint(state: &mut SyncState) -> PgResult<()> {
 /// requests. Called during checkpoints (only in a process that created
 /// `pendingOps`). The `enableFsync` / `log_checkpoints` GUC values are passed
 /// in (read off the caller's GUC state, not an ambient getter).
-fn process_sync_requests(
-    state: &mut SyncState,
-    enable_fsync: bool,
-    log_checkpoints: bool,
-) -> PgResult<()> {
+fn process_sync_requests(enable_fsync: bool, log_checkpoints: bool) -> PgResult<()> {
     // Statistics on sync times.
     let mut processed: i32 = 0;
     let mut longest: u64 = 0;
@@ -369,14 +365,15 @@ fn process_sync_requests(
 
     // This is only called during checkpoints, which only occur in processes that
     // created a pendingOps.
-    if state.pending_ops.is_none() {
+    if with_state(|s| s.pending_ops.is_none()) {
         return ereport(ERROR)
             .errmsg_internal("cannot sync without a pendingOps table")
             .finish(sync_location("ProcessSyncRequests"));
     }
 
     // The checkpointer must absorb all fsync requests queued by backends up to
-    // this point (the BufferSync() race in the C comment).
+    // this point (the BufferSync() race in the C comment). NB: no `with_state`
+    // borrow may be held across this call — it re-enters `remember_sync_request`.
     backend_postmaster_checkpointer_seams::absorb_sync_requests::call()?;
 
     // To avoid excess fsync'ing, ignore fsync requests entered after this point;
@@ -385,22 +382,24 @@ fn process_sync_requests(
     //
     // Think not to merge this loop with the main loop, as the problem is exactly
     // that the main loop may fail before having visited all the entries.
-    if state.sync_in_progress {
-        let ctr = state.sync_cycle_ctr;
-        let ops = state
-            .pending_ops
-            .as_mut()
-            .ok_or_else(|| PgError::error("ProcessSyncRequests: pendingOps is NULL"))?;
-        for entry in ops.values_mut() {
-            entry.cycle_ctr = ctr;
+    //
+    // Then advance the counter so new hashtable entries are distinguishable, and
+    // set the flag to detect failure if we don't reach the end of the loop.
+    let sync_cycle_ctr = with_state(|state| -> PgResult<CycleCtr> {
+        if state.sync_in_progress {
+            let ctr = state.sync_cycle_ctr;
+            let ops = state
+                .pending_ops
+                .as_mut()
+                .ok_or_else(|| PgError::error("ProcessSyncRequests: pendingOps is NULL"))?;
+            for entry in ops.values_mut() {
+                entry.cycle_ctr = ctr;
+            }
         }
-    }
-
-    // Advance the counter so new hashtable entries are distinguishable, and set
-    // the flag to detect failure if we don't reach the end of the loop.
-    state.sync_cycle_ctr = state.sync_cycle_ctr.wrapping_add(1);
-    state.sync_in_progress = true;
-    let sync_cycle_ctr = state.sync_cycle_ctr;
+        state.sync_cycle_ctr = state.sync_cycle_ctr.wrapping_add(1);
+        state.sync_in_progress = true;
+        Ok(state.sync_cycle_ctr)
+    })?;
 
     // Now scan the hashtable for fsync requests to process.
     //
@@ -411,7 +410,7 @@ fn process_sync_requests(
     // pass, which is within the C contract. Each key is re-fetched live before
     // use (a concurrent cancel via Absorb sets `canceled`).
     let mut absorb_counter = FSYNCS_PER_ABSORB;
-    let keys: Vec<FileTag> = {
+    let keys: Vec<FileTag> = with_state(|state| -> PgResult<Vec<FileTag>> {
         let ops = state
             .pending_ops
             .as_ref()
@@ -419,19 +418,22 @@ fn process_sync_requests(
         let mut keys = Vec::new();
         keys.try_reserve(ops.len()).map_err(|_| oom())?;
         keys.extend(ops.keys().copied());
-        keys
-    };
+        Ok(keys)
+    })?;
 
     for tag in keys {
         // Re-fetch the current entry; an intervening absorb may have
         // removed/canceled it. ("continue" matches dynahash handing back nothing
         // for a vanished key.)
         let entry = {
-            let ops = state
-                .pending_ops
-                .as_ref()
-                .ok_or_else(|| PgError::error("ProcessSyncRequests: pendingOps is NULL"))?;
-            match ops.get(&tag).copied() {
+            let got = with_state(|state| -> PgResult<Option<PendingFsyncEntry>> {
+                let ops = state
+                    .pending_ops
+                    .as_ref()
+                    .ok_or_else(|| PgError::error("ProcessSyncRequests: pendingOps is NULL"))?;
+                Ok(ops.get(&tag).copied())
+            })?;
+            match got {
                 Some(e) => e,
                 None => continue,
             }
@@ -471,17 +473,17 @@ fn process_sync_requests(
             loop {
                 // Re-fetch the live canceled flag (an interleaved Absorb may
                 // have set it).
-                let canceled = {
+                let canceled = with_state(|state| -> PgResult<bool> {
                     let ops = state
                         .pending_ops
                         .as_ref()
                         .ok_or_else(|| PgError::error("ProcessSyncRequests: pendingOps is NULL"))?;
-                    match ops.get(&tag) {
+                    Ok(match ops.get(&tag) {
                         Some(e) => e.canceled,
                         // The entry vanished; treat as canceled (loop ends).
                         None => true,
-                    }
-                };
+                    })
+                })?;
                 if canceled {
                     break;
                 }
@@ -543,12 +545,15 @@ fn process_sync_requests(
         }
 
         // We are done with this entry, remove it.
-        let removed = state
-            .pending_ops
-            .as_mut()
-            .ok_or_else(|| PgError::error("ProcessSyncRequests: pendingOps is NULL"))?
-            .remove(&tag);
-        if removed.is_none() {
+        let removed = with_state(|state| -> PgResult<bool> {
+            Ok(state
+                .pending_ops
+                .as_mut()
+                .ok_or_else(|| PgError::error("ProcessSyncRequests: pendingOps is NULL"))?
+                .remove(&tag)
+                .is_some())
+        })?;
+        if !removed {
             return ereport(ERROR)
                 .errmsg_internal("pendingOps corrupted")
                 .finish(sync_location("ProcessSyncRequests"));
@@ -563,7 +568,7 @@ fn process_sync_requests(
     );
 
     // Flag successful completion.
-    state.sync_in_progress = false;
+    with_state(|state| state.sync_in_progress = false);
     Ok(())
 }
 
@@ -754,7 +759,14 @@ fn sync_post_checkpoint_seam() -> PgResult<()> {
 }
 
 fn process_sync_requests_seam(enable_fsync: bool, log_checkpoints: bool) -> PgResult<()> {
-    with_state(|s| process_sync_requests(s, enable_fsync, log_checkpoints))
+    // NB: `process_sync_requests` must NOT be called inside `with_state` — it
+    // calls back into `absorb_sync_requests` (the checkpointer's fsync-queue
+    // drain), which re-enters `remember_sync_request` → `with_state`. Holding the
+    // `RefCell` borrow across that callback double-borrows the cell (sync.c:137
+    // panic). C has no such hazard (a single global hashtable, no borrow check),
+    // so `process_sync_requests` grabs the state in narrow `with_state` scopes
+    // internally, releasing the borrow before every `absorb_sync_requests` call.
+    process_sync_requests(enable_fsync, log_checkpoints)
 }
 
 fn register_sync_request_seam(

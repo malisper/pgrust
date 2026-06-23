@@ -1674,7 +1674,20 @@ fn MaybeExtendOffsetSlru() -> PgResult<()> {
 
 /// `StartupMultiXact` — initialize the SLRUs' idea of their latest page number.
 pub fn StartupMultiXact() -> PgResult<()> {
-    let (multi, offset) = with_state(|st| (st.nextMXact, st.nextOffset));
+    let (multi, offset) = with_state(|st| {
+        // pgrust divergence (faithful to C's effect): C destroys + re-creates the
+        // shared-memory segment on every crash-recovery reinit, so `MultiXactState`
+        // (including `finishedStartup`) starts zeroed each time recovery begins. In
+        // this tree the postmaster keeps one shmem segment across a reinit (fork-COW;
+        // see `pm.shmem_created`), so a prior boot's `finishedStartup = true` (set by
+        // `TrimMultiXact` at the previous end-of-recovery) would survive into the new
+        // recovery's redo. `SetMultiXactIdLimit` then asserts `!InRecovery` and the
+        // `MultiXactAdvanceOldest` checkpoint-redo arm trips it. Reset it here, at the
+        // start of WAL recovery, to match C's freshly-zeroed shmem state — `TrimMultiXact`
+        // sets it back to `true` when recovery finishes.
+        st.finishedStartup = false;
+        (st.nextMXact, st.nextOffset)
+    });
 
     let pageno = MultiXactIdToOffsetPage(multi);
     with_offset_ctl(|ctl| ctl.shared.latest_page_number.write(pageno as u64));
@@ -2747,6 +2760,14 @@ pub fn init_seams() {
     mx_seams::startup_multixact::set(StartupMultiXact);
     mx_seams::trim_multixact::set(TrimMultiXact);
     mx_seams::set_multi_xact_id_limit::set(SetMultiXactIdLimit);
+
+    // Checkpoint snapshot (`CreateCheckPoint`, xlog.c:7176) + the checkpoint-record
+    // redo arms (`xlog_redo` ONLINE/SHUTDOWN, xlog.c:8350/8465/8472).
+    mx_seams::multi_xact_get_checkpt_multi::set(MultiXactGetCheckptMulti);
+    mx_seams::multi_xact_advance_next_m_xact::set(MultiXactAdvanceNextMXact);
+    mx_seams::multi_xact_advance_oldest::set(MultiXactAdvanceOldest);
+    // CheckPointGuts MultiXact SLRU flush (xlog.c:7588).
+    mx_seams::check_point_multi_xact::set(CheckPointMultiXact);
 
     // vacuum freeze-cutoff + `vac_truncate_clog` entry points.
     mx_seams::read_next_multixact_id::set(ReadNextMultiXactId);

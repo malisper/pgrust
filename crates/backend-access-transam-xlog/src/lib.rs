@@ -75,6 +75,8 @@ std::thread_local! {
         const { core::cell::Cell::new((0, 0, 0)) };
 }
 
+pub mod do_checkpoint;
+
 pub mod redo;
 pub use redo::xlog_redo;
 
@@ -984,63 +986,14 @@ pub fn init_seams() {
             c.set((ckpt_sync_rels, ckpt_longest_sync, ckpt_agg_sync_time))
         });
     });
-    s::create_checkpoint::set(|flags| {
-        // The WAL-record / XLogCtl-shmem half of a real checkpoint is still
-        // deferred (the #157 WAL-redo keystone), so the durable checkpoint
-        // *record* is NOT written here and we still return `false` ("no
-        // checkpoint performed"). But the data-flushing half of a checkpoint —
-        // `SyncPreCheckpoint()`, the `CheckPointGuts` buffer sweep
-        // (`CheckPointBuffers(flags)` → `ProcessSyncRequests()`), and
-        // `SyncPostCheckpoint()` — is fully ported and is independent of the
-        // WAL driver. The buffer pool lives in real anonymous-mmap shared
-        // memory (cross-process), so `BufferSync` scanning it for `BM_DIRTY`
-        // buffers and writing them through `FlushBuffer`/`smgrwrite` is
-        // well-defined here.
-        //
-        // C order (xlog.c:6951 `CreateCheckPoint` → xlog.c:7574
-        // `CheckPointGuts`):
-        //   SyncPreCheckpoint();                     // before CheckPointGuts
-        //   CheckPointGuts(redo, flags):
-        //       CheckPointBuffers(flags);            // BufferSync write pass
-        //       ProcessSyncRequests();               // fsync the writes
-        //   SyncPostCheckpoint();                    // unlink lingering files
-        //
-        // `SyncPreCheckpoint` absorbs the fsync/unlink requests backends
-        // forwarded over shmem; `CheckPointBuffers` writes every dirty shared
-        // buffer (firing the IOOP_WRITE pg_stat_io accounting from the flush
-        // path); `ProcessSyncRequests` fsyncs the segments that were written;
-        // `SyncPostCheckpoint` physically unlinks the 0-length files left by
-        // `mdunlink()` (DROP TABLE / ALTER ... SET TABLESPACE / REINDEX
-        // TABLESPACE register an `SYNC_UNLINK_REQUEST` deferred to "next
-        // checkpoint"). This makes `DROP TABLESPACE`'s
-        // `RequestCheckpoint(CHECKPOINT_IMMEDIATE|FORCE|WAIT)` clean out the
-        // tablespace dir, and makes `CHECKPOINT;` durably write the buffer pool.
-        // Faithful to the data-flushing portion of `CheckPointGuts`; only the
-        // WAL checkpoint-record durability remains honestly skipped (logged
-        // below), not faked.
-        backend_storage_sync_seams::sync_pre_checkpoint::call()?;
-
-        // CheckPointGuts: the buffer-pool write pass, then fsync the writes.
-        backend_storage_buffer_bufmgr_seams::check_point_buffers::call(flags)?;
-        backend_storage_sync_seams::process_sync_requests::call(
-            backend_utils_misc_guc_tables::vars::enableFsync.read(),
-            backend_utils_misc_guc_tables::vars::log_checkpoints.read(),
-        )?;
-
-        backend_storage_sync_seams::sync_post_checkpoint::call()?;
-        backend_utils_error::ereport(types_error::LOG)
-            .errmsg(
-                "checkpoint flushed dirty buffers + pending fsync/unlinks, but the \
-                 WAL checkpoint-record driver (XLogCtl shmem) is not yet ported, so \
-                 no durable checkpoint record was written",
-            )
-            .finish(types_error::ErrorLocation::new(
-                "xlog.c",
-                0,
-                "CreateCheckPoint",
-            ))?;
-        Ok(false)
-    });
+    // `CreateCheckPoint(flags)` (xlog.c:6951) — the real runtime checkpoint:
+    // SyncPreCheckpoint → (online) write XLOG_CHECKPOINT_REDO to fix the redo
+    // point → snapshot XID/CommitTs/Oid/MultiXact → CheckPointGuts buffer sweep +
+    // fsync → write XLOG_CHECKPOINT_{ONLINE,SHUTDOWN} + XLogFlush → update the
+    // control file (checkPoint/checkPointCopy + ckptFullXid) → SyncPostCheckpoint.
+    // The durable checkpoint record IS written here (the #157 keystone); its WAL
+    // bytes are then force-reported by the checkpointer's pgstat_report_wal(true).
+    s::create_checkpoint::set(do_checkpoint::CreateCheckPoint);
     s::create_restartpoint::set(|flags| {
         let _ = flags;
         backend_utils_error::ereport(types_error::LOG)
@@ -1055,15 +1008,10 @@ pub fn init_seams() {
             ))?;
         Ok(false)
     });
-    s::shutdown_xlog::set(|| {
-        backend_utils_error::ereport(types_error::LOG)
-            .errmsg(
-                "skipping shutdown checkpoint: the WAL checkpoint-record driver \
-                 (XLogCtl shmem) is not yet ported",
-            )
-            .finish(types_error::ErrorLocation::new("xlog.c", 0, "ShutdownXLOG"))?;
-        Ok(())
-    });
+    // `ShutdownXLOG(code, arg)` (xlog.c:6664) — the WAL-engine shutdown: write a
+    // shutdown checkpoint (CreateCheckPoint(CHECKPOINT_IS_SHUTDOWN|IMMEDIATE)), or
+    // during recovery flush + mark ShutdownedInRecovery.
+    s::shutdown_xlog::set(do_checkpoint::ShutdownXLOG);
 }
 
 #[cfg(test)]

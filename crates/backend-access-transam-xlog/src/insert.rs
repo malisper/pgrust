@@ -981,3 +981,16 @@ pub fn LocalSetXLogInsertAllowed() -> i32 {
     LOCAL_XLOG_INSERT_ALLOWED.with(|c| c.set(1));
     old
 }
+
+/// Restore `LocalXLogInsertAllowed` to a saved value (xlog.c:7292,
+/// `LocalXLogInsertAllowed = oldXLogAllowed;` after an end-of-recovery
+/// checkpoint).
+pub fn set_xlog_insert_allowed(value: i32) {
+    LOCAL_XLOG_INSERT_ALLOWED.with(|c| c.set(value));
+}
+
+/// `LocalXLogInsertAllowed = 0` (xlog.c:7294) — "never again write WAL" after a
+/// shutdown checkpoint.
+pub fn set_local_xlog_insert_disabled() {
+    LOCAL_XLOG_INSERT_ALLOWED.with(|c| c.set(0));
+}

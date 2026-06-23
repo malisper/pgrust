@@ -66,6 +66,7 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 backend-utils-init-small-seams = { path = "../backend-utils-init-small-seams" }
 backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams" }
 backend-postmaster-startup-seams = { path = "../backend-postmaster-startup-seams" }
+backend-storage-smgr-seams = { path = "../backend-storage-smgr-seams" }
 types-timeout = { path = "../types-timeout" }
 libc = "0.2"
 
