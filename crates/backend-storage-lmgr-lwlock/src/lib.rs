@@ -707,6 +707,29 @@ pub fn GetNamedLWLockTranche<'a>(
     }
 }
 
+/// The process's published `MainLWLockArray` table (`MAIN_LWLOCKS`), if
+/// `CreateLWLocks` has run. Extensions that registered a named LWLock tranche in
+/// their `shmem_request_hook` reach their tranche's locks via
+/// [`GetNamedLWLockTranche`] over this table — mirroring the C global
+/// `MainLWLockArray` being directly addressable. `None` before `CreateLWLocks`.
+pub fn published_lwlock_table() -> Option<&'static LWLockTable> {
+    MAIN_LWLOCKS.get()
+}
+
+/// `&(GetNamedLWLockTranche(tranche_name))->lock` — the first `LWLock` of a
+/// registered named tranche (the idiom an extension uses to obtain its
+/// shared-state lock, e.g. pg_stat_statements'
+/// `pgss->lock = &(GetNamedLWLockTranche("pg_stat_statements"))->lock`). Panics
+/// loudly if the main array has not been created (the named tranche cannot exist
+/// before `CreateLWLocks`), and `ereport(ERROR)`s if the tranche is unregistered.
+pub fn named_tranche_first_lock(tranche_name: &str) -> PgResult<&'static LWLock> {
+    let table = MAIN_LWLOCKS
+        .get()
+        .expect("MainLWLockArray not published (CreateLWLocks has not run)");
+    let slice = GetNamedLWLockTranche(table, tranche_name)?;
+    Ok(&slice[0].lock)
+}
+
 /// `LWLockNewTrancheId` (lwlock.c:625) — allocate a new tranche ID by
 /// incrementing the shared counter under the `ShmemLock` spinlock.
 pub fn LWLockNewTrancheId() -> i32 {

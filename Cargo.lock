@@ -24830,6 +24830,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "contrib-pg-stat-statements"
+version = "0.0.0"
+dependencies = [
+ "backend-executor-execMain",
+ "backend-executor-execMain-seams",
+ "backend-executor-instrument",
+ "backend-nodes-queryjumble",
+ "backend-parser-scan-fgram",
+ "backend-parser-small1-seams",
+ "backend-storage-file-fd",
+ "backend-storage-ipc",
+ "backend-storage-ipc-dsm-core",
+ "backend-storage-ipc-shmem",
+ "backend-storage-lmgr-lwlock",
+ "backend-utils-adt-acl-seams",
+ "backend-utils-adt-datetime",
+ "backend-utils-adt-varlena",
+ "backend-utils-adt-varlena-seams",
+ "backend-utils-error",
+ "backend-utils-fmgr-dfmgr-seams",
+ "backend-utils-fmgr-funcapi-seams",
+ "backend-utils-hash-dynahash",
+ "backend-utils-init-miscinit",
+ "backend-utils-init-small-seams",
+ "backend-utils-mb-fgram",
+ "backend-utils-misc-guc",
+ "backend-utils-misc-guc-tables",
+ "mcx",
+ "portability-instr-time",
+ "types-core",
+ "types-datum",
+ "types-error",
+ "types-fmgr",
+ "types-guc",
+ "types-hash",
+ "types-nodes",
+ "types-scan",
+ "types-storage",
+ "types-tuple",
+]
+
+[[package]]
 name = "contrib-test-decoding"
 version = "0.0.0"
 dependencies = [
@@ -25793,6 +25835,7 @@ dependencies = [
  "contrib-amcheck-verify-common",
  "contrib-amcheck-verify-nbtree",
  "contrib-pg-prewarm",
+ "contrib-pg-stat-statements",
  "contrib-test-decoding",
  "interfaces-libpq-fe",
  "interfaces-libpq-legacy-pqsignal",

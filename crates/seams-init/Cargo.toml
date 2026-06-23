@@ -25,6 +25,7 @@ common-extra-encnames-fgram = { path = "../common-extra-encnames-fgram" }
 contrib-amcheck-verify-nbtree = { path = "../contrib-amcheck-verify-nbtree" }
 contrib-amcheck-verify-common = { path = "../contrib-amcheck-verify-common" }
 contrib-pg-prewarm = { path = "../contrib-pg-prewarm" }
+contrib-pg-stat-statements = { path = "../contrib-pg-stat-statements" }
 backend-access-common-detoast = { path = "../backend-access-common-detoast" }
 backend-access-common-toast-compression = { path = "../backend-access-common-toast-compression" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }

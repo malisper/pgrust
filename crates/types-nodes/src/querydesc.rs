@@ -199,6 +199,42 @@ impl QueryDesc {
         self.work.with(|w| w.estate.es_processed)
     }
 
+    /// `queryDesc->plannedstmt->queryId` (execdesc.h) — the 64-bit query
+    /// identifier the planner copied from the analyzed `Query` (under
+    /// `compute_query_id`). Read by the `pg_stat_statements` ExecutorStart/End
+    /// hooks. `0` when query-id computation is disabled.
+    pub fn query_id(&self) -> i64 {
+        self.work.with(|w| w.plannedstmt.queryId)
+    }
+
+    /// `queryDesc->plannedstmt->stmt_location` (execdesc.h) — the start offset of
+    /// this statement in a (possibly multi-statement) source string.
+    pub fn stmt_location(&self) -> i32 {
+        self.work.with(|w| w.plannedstmt.stmt_location)
+    }
+
+    /// `queryDesc->plannedstmt->stmt_len` (execdesc.h) — the length in bytes of
+    /// this statement in the source string (0 = to end of string).
+    pub fn stmt_len(&self) -> i32 {
+        self.work.with(|w| w.plannedstmt.stmt_len)
+    }
+
+    /// `queryDesc->estate->es_total_processed` — total tuples across all
+    /// `ExecutorRun` firings (the value `pg_stat_statements` records as `rows`).
+    pub fn es_total_processed(&self) -> u64 {
+        self.work.with(|w| w.estate.es_total_processed)
+    }
+
+    /// `queryDesc->estate->es_parallel_workers_to_launch`.
+    pub fn es_parallel_workers_to_launch(&self) -> i32 {
+        self.work.with(|w| w.estate.es_parallel_workers_to_launch)
+    }
+
+    /// `queryDesc->estate->es_parallel_workers_launched`.
+    pub fn es_parallel_workers_launched(&self) -> i32 {
+        self.work.with(|w| w.estate.es_parallel_workers_launched)
+    }
+
     /// Mutable access to the owned `EState` (`queryDesc->estate`) through the
     /// bundle. `execParallel` reaches the `EState` interior this way
     /// (`ExecParallelCreateReaders` / `ExecInitParallelPlan` thread the live

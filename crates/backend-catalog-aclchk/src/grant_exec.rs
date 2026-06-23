@@ -386,18 +386,29 @@ pub fn acl_change_owner_datum<'mcx>(
 
 /// `recordExtensionInitPriv(objoid, classoid, objsubid, new_acl)` (aclchk.c) —
 /// the early-out half. Outside CREATE EXTENSION / binary upgrade this is a
-/// no-op; the `recordExtensionInitPrivWorker` body (the pg_init_privs writer)
-/// is the still-unported F3 keystone and panics if ever reached here.
+/// no-op.
+///
+/// The `recordExtensionInitPrivWorker` body (the `pg_init_privs` writer) is the
+/// still-unported F3 keystone. It records an EXTENSION object's *initial*
+/// privilege snapshot into `pg_init_privs`, a catalog read only by `pg_dump
+/// --create` to reproduce a non-default extension-object ACL on restore. The
+/// GRANT/REVOKE itself applies to the object's live ACL through the normal
+/// aclchk path *upstream* of this writer (the caller has already rebuilt and
+/// written the new ACL), so skipping the snapshot is a contained, documented
+/// divergence: it lets `CREATE EXTENSION` scripts containing GRANT/REVOKE (e.g.
+/// `pg_stat_statements`' `GRANT SELECT ON pg_stat_statements TO PUBLIC`)
+/// complete and the privileges take effect, at the cost of an absent
+/// `pg_init_privs` row (pg_dump fidelity only). DESIGN_DEBT: port the worker to
+/// restore full `pg_init_privs` tracking.
 fn record_extension_init_priv(_objoid: Oid, _classoid: Oid, _new_acl: &[AclItem]) -> PgResult<()> {
     // if (!creating_extension && !binary_upgrade_record_init_privs) return;
     let creating_extension = backend_commands_extension_seams::creating_extension::call();
     if !creating_extension {
         return Ok(());
     }
-    Err(PgError::error(
-        "recordExtensionInitPrivWorker (pg_init_privs writer) not ported — \
-         GRANT during CREATE EXTENSION is the F3 keystone",
-    ))
+    // recordExtensionInitPrivWorker: graceful skip (see fn doc — pg_init_privs
+    // snapshot only; the live ACL was already written by the caller).
+    Ok(())
 }
 
 /// `ExecGrant_common(istmt, classid, default_privs, object_check)` (aclchk.c),

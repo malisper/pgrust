@@ -15,6 +15,7 @@ pub fn init_all() {
     contrib_amcheck_verify_nbtree::init_seams();
     contrib_amcheck_verify_common::init_seams();
     contrib_pg_prewarm::init_seams();
+    contrib_pg_stat_statements::init_seams();
     backend_archive_shell_archive::init_seams();
     backend_commands_async::init_seams();
     backend_test_regress::init_seams();
