@@ -23,6 +23,7 @@ port-crc32c = { path = "../port-crc32c" }
 backend-storage-lmgr-s-lock = { path = "../backend-storage-lmgr-s-lock" }
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
+backend-utils-activity-pgstat-io-seams = { path = "../backend-utils-activity-pgstat-io-seams" }
 backend-storage-lmgr-lwlock-seams = { path = "../backend-storage-lmgr-lwlock-seams" }
 backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }

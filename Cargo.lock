@@ -3723,6 +3723,7 @@ dependencies = [
  "backend-storage-lmgr-s-lock",
  "backend-storage-sync-seams",
  "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-io-seams",
  "backend-utils-activity-pgstat-seams",
  "backend-utils-activity-waitevent-seams",
  "backend-utils-adt-timestamp-seams",

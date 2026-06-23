@@ -33,6 +33,7 @@ use types_storage::storage::{pg_atomic_uint64, LW_EXCLUSIVE, LW_SHARED};
 use types_wal::xlog_consts::{WalSyncMethod, CHECKPOINT_CAUSE_XLOG, XLOG_BLCKSZ};
 
 use backend_storage_file_fd_seams as fd;
+use backend_utils_activity_pgstat_io_seams as pgstat_io;
 use backend_storage_lmgr_lwlock as lwlock;
 use backend_utils_init_small::globals;
 
@@ -400,11 +401,25 @@ pub(crate) unsafe fn XLogWrite(
             let mut off = startoffset as i64;
             let mut bufpos = 0usize;
             while nleft > 0 {
+                // Measure I/O timing to write WAL data, for pg_stat_io
+                // (xlog.c:2455).
+                let io_start = pgstat_io::pgstat_prepare_io_time::call();
+
                 let written = fd::pg_pwrite::call(
                     OPEN_LOG_FILE.with(Cell::get),
                     &buf[bufpos..bufpos + nleft],
                     off,
                 );
+
+                // pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL,
+                // IOOP_WRITE, start, 1, written) (xlog.c:2461). The seam shape
+                // is pre-bound to WAL/NORMAL/WRITE; pass the bytes written
+                // (clamp a negative short-write/EINTR result to 0).
+                pgstat_io::pgstat_count_io_op_time::call(
+                    io_start,
+                    written.max(0) as u32,
+                );
+
                 if written <= 0 {
                     let errno = (-written) as i32;
                     if errno == libc::EINTR as i32 {
