@@ -233,20 +233,32 @@ fn unwired_vtable() -> ReceiverVtable {
 // the C NULL sentinel `DestReceiverHandle::NULL`).
 // ===========================================================================
 
+/// The router registry: a `Vec` of receiver slots plus a free-list of reclaimed
+/// slot indices.
+///
+/// A `DestReceiver` is created and destroyed *per statement* (printtup for every
+/// `SELECT`, plus the discarding `None_Receiver`s), so without slot reuse the
+/// registry would grow without bound for the life of the backend and every
+/// `insert` would do an O(n) `position(is_none)` scan of a table that is entirely
+/// `Some` — the dominant per-statement cost this lane removes. The free-list
+/// makes `insert` (free-list pop) and `remove` (free-list push) O(1), mirroring
+/// C where each `DestReceiver` is `palloc`/`pfree`'d and never accumulates.
 struct Registry {
     slots: alloc::vec::Vec<Option<Receiver>>,
+    free: alloc::vec::Vec<u32>,
 }
 
 impl Registry {
     const fn new() -> Self {
         Self {
             slots: alloc::vec::Vec::new(),
+            free: alloc::vec::Vec::new(),
         }
     }
 
     fn insert(&mut self, r: Receiver) -> DestReceiverHandle {
-        if let Some(i) = self.slots.iter().position(Option::is_none) {
-            self.slots[i] = Some(r);
+        if let Some(i) = self.free.pop() {
+            self.slots[i as usize] = Some(r);
             DestReceiverHandle((i + 1) as u64)
         } else {
             self.slots.push(Some(r));
@@ -257,6 +269,25 @@ impl Registry {
     fn get(&self, h: DestReceiverHandle) -> Receiver {
         debug_assert!(h.0 >= 1, "DestReceiverHandle 0 is the NULL sentinel");
         self.slots[(h.0 - 1) as usize].expect("live DestReceiver id")
+    }
+
+    /// Reclaim the slot named by `h`, returning the receiver it held (if any) and
+    /// pushing the slot index onto the free-list for reuse. Idempotent: removing
+    /// the NULL sentinel, an out-of-range, or an already-freed handle is a no-op
+    /// returning `None`.
+    fn remove(&mut self, h: DestReceiverHandle) -> Option<Receiver> {
+        if h.0 < 1 {
+            return None;
+        }
+        let i = (h.0 - 1) as usize;
+        match self.slots.get_mut(i) {
+            Some(slot) if slot.is_some() => {
+                let r = slot.take();
+                self.free.push(i as u32);
+                r
+            }
+            _ => None,
+        }
     }
 }
 
@@ -308,6 +339,40 @@ pub fn dest_receiver_state_token(dest: DestReceiverHandle) -> u64 {
     lookup(dest).state
 }
 
+/// `dest->rDestroy(dest)` (dest.c dispatch) for the receivers this crate owns
+/// the lifecycle of: reclaim the router slot named by `dest` so it can be reused,
+/// and release the owner's per-receiver state for the kinds whose state lives in
+/// printtup (`DestRemote` / `DestRemoteExecute` / `DestDebug`).
+///
+/// A receiver is created and torn down per statement, so the executor's
+/// per-statement teardown calls this where C does `receiver->rDestroy(receiver)`;
+/// without it both this router registry and printtup's state registry would grow
+/// for the life of the backend (the per-statement O(n) cost this lane removes).
+///
+/// The `DestNone` discarding receiver carries no owner state (only the router
+/// slot is reclaimed). Owners with their own `rDestroy` seam that already
+/// releases their state (`DestTuplestore`/`DestTransientRel`/`DestTupleQueue` via
+/// `dest_destroy`/`receiver_destroy`) run that path separately; this call still
+/// reclaims their router slot. Idempotent and safe on any handle, including the
+/// `DestReceiverHandle::NULL` sentinel.
+pub fn free_dest_receiver(dest: DestReceiverHandle) {
+    // The shared cached None_Receiver is C's static — never reclaimed.
+    if is_none_handle(dest) {
+        return;
+    }
+    // Recover the receiver (mydest + owner state token) before reclaiming the
+    // router slot, then route the owner-state free for the kinds printtup owns.
+    let removed = REGISTRY.with(|c| c.borrow_mut().remove(dest));
+    if let Some(r) = removed {
+        match r.mydest {
+            CommandDest::Remote | CommandDest::RemoteExecute | CommandDest::Debug => {
+                backend_access_common_printtup_seams::printtup_free_dr::call(r.state);
+            }
+            _ => {}
+        }
+    }
+}
+
 // ===========================================================================
 // CreateDestReceiver (dest.c) — return the appropriate receiver for `dest`.
 // ===========================================================================
@@ -326,7 +391,9 @@ pub fn dest_receiver_state_token(dest: DestReceiverHandle) -> u64 {
 /// enum, every arm is covered.
 pub fn CreateDestReceiver(dest: CommandDest) -> DestReceiverHandle {
     match dest {
-        CommandDest::None => register(DONOTHING_DR),
+        // C returns the shared static `&donothingDR`; the cached None handle is
+        // the owned-model equivalent (shared, never reclaimed).
+        CommandDest::None => none_receiver(),
 
         // DestCopyOut -> CreateCopyDestReceiver (copyto.c): the owner registers
         // its real vtable into this router and returns the resulting handle.
@@ -369,12 +436,41 @@ pub fn CreateDestReceiver(dest: CommandDest) -> DestReceiverHandle {
     }
 }
 
+thread_local! {
+    /// The single cached handle for the stateless donothing (`DestNone`)
+    /// receiver — the owned-model stand-in for C's shared static
+    /// `DestReceiver *None_Receiver` (`= unconstify(DestReceiver *,
+    /// &donothingDR)`). It is registered once and shared by every `none_receiver`
+    /// caller (the callbacks are no-ops carrying no per-receiver state, so sharing
+    /// is exactly C's model) and is never reclaimed by `free_dest_receiver`,
+    /// mirroring C's static.
+    static NONE_HANDLE: RefCell<Option<DestReceiverHandle>> = const { RefCell::new(None) };
+}
+
 /// `DestReceiver *None_Receiver` (dest.c) — the globally-available receiver for
-/// `DestNone`. Each call mints a fresh registry id for the static no-op
-/// receiver (the underlying callbacks are stateless, exactly like C's shared
-/// `&donothingDR`).
+/// `DestNone`. Returns one cached registry id for the stateless no-op receiver
+/// (registered on first use, shared thereafter — exactly like C's shared static
+/// `&donothingDR`/`None_Receiver`), so the many per-statement `None_Receiver`
+/// uses (`PortalRunMulti`'s `DestRemoteExecute`→`DestNone` swap, `DoPortalRunFetch`)
+/// cost no registration and accumulate no slots.
 pub fn none_receiver() -> DestReceiverHandle {
-    register(DONOTHING_DR)
+    NONE_HANDLE.with(|c| {
+        let mut cached = c.borrow_mut();
+        match *cached {
+            Some(h) => h,
+            None => {
+                let h = register(DONOTHING_DR);
+                *cached = Some(h);
+                h
+            }
+        }
+    })
+}
+
+/// Whether `dest` is the shared cached `None_Receiver` handle (which, like C's
+/// static, is never reclaimed).
+fn is_none_handle(dest: DestReceiverHandle) -> bool {
+    NONE_HANDLE.with(|c| *c.borrow() == Some(dest))
 }
 
 // ===========================================================================
@@ -551,6 +647,7 @@ pub fn init_seams() {
     backend_tcop_dest_seams::dest_rshutdown::set(dest_rshutdown_impl);
     backend_tcop_dest_seams::create_dest_receiver::set(CreateDestReceiver);
     backend_tcop_dest_seams::dest_get_mydest::set(dest_get_mydest_impl);
+    backend_tcop_dest_seams::free_dest_receiver::set(free_dest_receiver);
     // Command-completion / protocol helpers (dest.c).
     backend_tcop_dest_seams::begin_command::set(BeginCommand);
     backend_tcop_dest_seams::end_command::set(EndCommand);

@@ -539,10 +539,11 @@ pub fn exec_simple_query<'mcx>(mcx: Mcx<'mcx>, query_string: &'mcx str) -> PgRes
             Some(&mut qc),
         )?;
 
-        // receiver->rDestroy(receiver): in the registry-handle dest model the
-        // receiver has no separate destroy slot (the owner reclaims its state);
-        // dropping the handle is the equivalent.
-        let _ = receiver;
+        // receiver->rDestroy(receiver): reclaim the router slot (and the owner's
+        // per-receiver printtup state) so the per-statement create/destroy cycle
+        // reuses slots instead of growing the registry for the life of the
+        // backend.
+        dest_seams::free_dest_receiver::call(receiver);
 
         portalmem::portal_drop::call(&portal, false)?;
 

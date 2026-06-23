@@ -100,3 +100,14 @@ seam_core::seam!(
         dest: types_nodes::parsestmt::DestReceiverHandle,
     ) -> types_core::instrument::SerializeMetrics
 );
+
+seam_core::seam!(
+    /// `printtup_destroy(DestReceiver *self)` (printtup.c) — release the
+    /// per-receiver `DR_printtup` state owned by printtup's registry, named by
+    /// the router's `state` token. `tcop/dest.c`'s `free_dest_receiver` reaches
+    /// it through this seam when reclaiming a `DestRemote`/`DestRemoteExecute`/
+    /// `DestDebug` receiver's router slot (the owner cannot live in dest.c, so
+    /// dest delegates here; printtup installs the seam from its own
+    /// `init_seams()`). Idempotent: freeing an already-released token is a no-op.
+    pub fn printtup_free_dr(state: u64)
+);

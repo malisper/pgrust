@@ -591,13 +591,36 @@ struct ReceiverState {
     formats: Option<Vec<i16>>,
 }
 
+/// printtup's per-receiver state registry plus a free-list of reclaimed slot
+/// indices. A `DR_printtup` is created and destroyed per statement (every
+/// `SELECT` to a wire client), so the registry must reuse freed slots instead of
+/// growing without bound — otherwise `receiver_register`'s slot search becomes an
+/// O(n) scan of a monotonically-growing table on every statement (mirroring C,
+/// where each `DR_printtup` is `palloc`'d in the portal context and `pfree`'d on
+/// teardown, never accumulating). The free-list makes both register (pop) and
+/// unregister (push) O(1).
+struct Receivers {
+    slots: Vec<Option<ReceiverState>>,
+    free: Vec<u32>,
+}
+
+impl Receivers {
+    const fn new() -> Self {
+        Self {
+            slots: Vec::new(),
+            free: Vec::new(),
+        }
+    }
+}
+
 thread_local! {
-    static RECEIVERS: RefCell<Vec<Option<ReceiverState>>> = const { RefCell::new(Vec::new()) };
+    static RECEIVERS: RefCell<Receivers> = const { RefCell::new(Receivers::new()) };
 }
 
 /// Allocate a fresh receiver slot holding a new `DR_printtup` for `dest`,
 /// returning its 1-based registry index (the router `state` token; 0 is never
-/// handed out, matching copyto's convention and the C NULL sentinel).
+/// handed out, matching copyto's convention and the C NULL sentinel). Reuses a
+/// freed slot (O(1) free-list pop) before growing the table.
 fn receiver_register(dest: CommandDest) -> u64 {
     RECEIVERS.with(|r| {
         let mut reg = r.borrow_mut();
@@ -606,14 +629,33 @@ fn receiver_register(dest: CommandDest) -> u64 {
             targetlist: Vec::new(),
             formats: None,
         };
-        if let Some(i) = reg.iter().position(Option::is_none) {
-            reg[i] = Some(st);
+        if let Some(i) = reg.free.pop() {
+            reg.slots[i as usize] = Some(st);
             (i + 1) as u64
         } else {
-            reg.push(Some(st));
-            reg.len() as u64
+            reg.slots.push(Some(st));
+            reg.slots.len() as u64
         }
     })
+}
+
+/// Release the receiver state slot named by `state` (the router token; the C
+/// `pfree(self)` in `printtup_destroy`), returning its index to the free-list.
+/// Idempotent: freeing an already-released or out-of-range token is a no-op.
+fn receiver_unregister(state: u64) {
+    if state == 0 {
+        return;
+    }
+    RECEIVERS.with(|r| {
+        let mut reg = r.borrow_mut();
+        let i = (state - 1) as usize;
+        if let Some(slot) = reg.slots.get_mut(i) {
+            if slot.is_some() {
+                *slot = None;
+                reg.free.push(i as u32);
+            }
+        }
+    });
 }
 
 /// Run `f` against the live `ReceiverState` for `state` (the router token).
@@ -621,6 +663,7 @@ fn with_receiver<R>(state: u64, f: impl FnOnce(&mut ReceiverState) -> R) -> R {
     RECEIVERS.with(|r| {
         let mut reg = r.borrow_mut();
         let slot = reg
+            .slots
             .get_mut((state - 1) as usize)
             .and_then(Option::as_mut)
             .expect("backend-access-common-printtup: dispatch on an unregistered receiver");
@@ -1242,6 +1285,7 @@ pub fn init_seams() {
         get_serialization_metrics_routed,
     );
     backend_access_common_printtup_seams::printtup_create_dr::set(printtup_create_dr_routed);
+    backend_access_common_printtup_seams::printtup_free_dr::set(receiver_unregister);
     backend_access_common_printtup_seams::send_describe_portal::set(send_describe_portal);
     backend_access_common_printtup_seams::send_describe_statement::set(send_describe_statement);
     backend_access_common_printtup_seams::create_debug_dest_receiver::set(

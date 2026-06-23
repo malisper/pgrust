@@ -36,12 +36,48 @@ fn none_receiver_shutdown_is_noop() {
     assert_eq!(with_test_mcx(|mcx| dest_rshutdown_impl(mcx, h)), Ok(()));
 }
 
-/// Each `CreateDestReceiver` mints a distinct registry id.
+/// Distinct stateful receivers get distinct registry ids (each
+/// `register_dest_receiver` parks its own slot). `DestNone` is a separate case:
+/// it is the shared static `None_Receiver` (see `none_receiver_is_shared`).
 #[test]
 fn distinct_handles() {
-    let a = CreateDestReceiver(CommandDest::None);
-    let b = CreateDestReceiver(CommandDest::None);
+    let vtable = DONOTHING_DR.vtable;
+    let a = register_dest_receiver(CommandDest::CopyOut, vtable, 0);
+    let b = register_dest_receiver(CommandDest::CopyOut, vtable, 0);
     assert_ne!(a, b);
+}
+
+/// `CreateDestReceiver(DestNone)` / `none_receiver()` return the *same* cached
+/// handle — the owned-model stand-in for C's shared static `&donothingDR` /
+/// `None_Receiver`. Freeing it is a no-op (it is never reclaimed, like the C
+/// static), so it stays valid for dispatch afterward.
+#[test]
+fn none_receiver_is_shared() {
+    let a = CreateDestReceiver(CommandDest::None);
+    let b = none_receiver();
+    assert_eq!(a, b, "DestNone is the shared static receiver");
+    // Freeing the shared None handle must not reclaim it.
+    free_dest_receiver(a);
+    assert_eq!(with_test_mcx(|mcx| dest_rshutdown_impl(mcx, a)), Ok(()));
+    assert_eq!(none_receiver(), a, "None handle survives free");
+}
+
+/// A freed stateful receiver's slot is reused by the next registration (the
+/// free-list pop), so the registry does not grow per create/destroy cycle. Free
+/// is idempotent and safe on the NULL sentinel.
+#[test]
+fn free_list_reuses_slots() {
+    let vtable = DONOTHING_DR.vtable;
+    let h1 = register_dest_receiver(CommandDest::CopyOut, vtable, 11);
+    free_dest_receiver(h1);
+    // The just-freed slot is popped first by the next register.
+    let h2 = register_dest_receiver(CommandDest::CopyOut, vtable, 22);
+    assert_eq!(h1, h2, "freed slot is reused");
+    assert_eq!(dest_receiver_state_token(h2), 22, "slot now holds new receiver");
+    // Idempotent / NULL-safe.
+    free_dest_receiver(h2);
+    free_dest_receiver(h2);
+    free_dest_receiver(DestReceiverHandle::NULL);
 }
 
 /// An un-routed receiver kind dispatches to the honest mirror-and-panic vtable:

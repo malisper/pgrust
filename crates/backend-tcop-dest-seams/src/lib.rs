@@ -98,6 +98,19 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `receiver->rDestroy(receiver)` (tcop/dest.h dispatch) for receivers whose
+    /// lifecycle the dest router owns: reclaim the router slot named by `dest`
+    /// (returning it to the free-list for reuse) and release the owner's
+    /// per-receiver state for printtup-owned kinds (`DestRemote` /
+    /// `DestRemoteExecute` / `DestDebug`). A `DestReceiver` is created and
+    /// destroyed per statement, so the executor's per-statement teardown calls
+    /// this where C does `receiver->rDestroy(receiver)`; without it the router and
+    /// printtup registries grow for the life of the backend. Idempotent and safe
+    /// on any handle, including the NULL sentinel.
+    pub fn free_dest_receiver(dest: DestReceiverHandle)
+);
+
+seam_core::seam!(
     /// `EndReplicationCommand(const char *commandTag)` (tcop/dest.c) — send the
     /// CommandComplete ('C') message ending a replication command. Can
     /// `ereport` on a send error.

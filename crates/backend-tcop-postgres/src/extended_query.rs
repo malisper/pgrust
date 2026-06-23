@@ -676,8 +676,10 @@ pub fn exec_execute_message<'mcx>(
         Some(&mut qc),
     )?;
 
-    // receiver->rDestroy(receiver): handle-model — dropping is the equivalent.
-    let _ = receiver;
+    // receiver->rDestroy(receiver): reclaim the router slot (and the owner's
+    // per-receiver printtup state) so the per-statement create/destroy cycle
+    // reuses slots instead of growing the registry for the life of the backend.
+    dest_seams::free_dest_receiver::call(receiver);
 
     let mut report_params = portal_params;
     if completed {
