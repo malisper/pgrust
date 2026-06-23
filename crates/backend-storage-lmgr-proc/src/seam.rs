@@ -447,24 +447,38 @@ pub(crate) fn init_deadlock_checking() {
 }
 
 /// `DeadLockCheck(MyProc)` — run the deadlock check rooted at this backend's
-/// proc, returning the resulting state. The merged deadlock checker's
-/// `dead_lock_check` operates over a lock.c-built `LockSpace` arena (the lock
-/// and proc records); constructing that arena from the live shared lock table is
-/// a distinct, sizeable lock.c-integration keystone (the `LockSpace`-bridge)
-/// that is not yet wired.
+/// proc, returning the resulting state. Builds the detector's `LockSpace` arena
+/// from the live shared LOCK/PROCLOCK graph (lock.c's `build_dead_lock_space`,
+/// projecting under the all-partition LWLocks the caller already holds), runs the
+/// detector, and returns its verdict.
 ///
-/// Until that bridge lands we conservatively report `NoDeadlock` rather than
-/// abort. This is the safe, non-victimizing outcome: a backend that genuinely
-/// has to wait (e.g. on a 2PC dummy proc's lock) keeps sleeping until the lock
-/// is released and it is woken by `ProcLockWakeup` — exactly the C behaviour for
-/// a non-deadlocked wait. (The prior code aborted here, which — once the
-/// cross-process wait-state was made coherent so `CheckDeadLock` actually runs —
-/// would crash any backend that waited past `deadlock_timeout` on a held lock.)
-/// A genuine multi-backend deadlock would not be broken automatically yet; that
-/// is the residual gated by the unbuilt `LockSpace` bridge, NOT a regression
-/// (the detector was never reached before).
-pub(crate) fn deadlock_check(_procno: ProcNumber) -> DeadLockState {
-    DeadLockState::NoDeadLock
+/// The detector resolves SOFT deadlocks itself: it rewrites the projected wait
+/// queues and, per rearranged lock, calls back through the `proc_lock_wakeup`
+/// seam, which writes the new order into the real shared queue and wakes
+/// now-grantable waiters. For a HARD deadlock the detector records
+/// `deadlockDetails[]` (process-local), which `DeadLockReport` later renders; the
+/// caller (`CheckDeadLock`) removes this proc from the wait queue so `ProcSleep`
+/// returns `PROC_WAIT_STATUS_ERROR` and lock.c raises the deadlock error.
+pub(crate) fn deadlock_check(procno: ProcNumber) -> DeadLockState {
+    let (mut space, my_id) =
+        backend_storage_lmgr_lock_seams::build_dead_lock_space::call(procno);
+    // `DeadLockCheck(MyProc)` — `my_proc` is MyProc itself (used to detect a
+    // directly-blocking autovacuum worker). The FATAL consistency-check failures
+    // (`deadlock seems to have disappeared` / `inconsistent results`) abort the
+    // backend in C; surface the `Err` as a panic to match that.
+    let state =
+        backend_storage_lmgr_deadlock_seams::dead_lock_check::call(&mut space, my_id, Some(my_id))
+            .expect("DeadLockCheck consistency check (elog(FATAL))");
+    // The detector's `types_deadlock::DeadLockState` and proc.c's
+    // `types_storage::lock::DeadLockState` are the same `DS_*` vocabulary under two
+    // owners; map across.
+    match state {
+        types_deadlock::DeadLockState::NotYetChecked => DeadLockState::NotYetChecked,
+        types_deadlock::DeadLockState::NoDeadlock => DeadLockState::NoDeadLock,
+        types_deadlock::DeadLockState::SoftDeadlock => DeadLockState::SoftDeadLock,
+        types_deadlock::DeadLockState::HardDeadlock => DeadLockState::HardDeadLock,
+        types_deadlock::DeadLockState::BlockedByAutovacuum => DeadLockState::BlockedByAutoVacuum,
+    }
 }
 
 /// `GetBlockingAutoVacuumPgproc()` — the autovacuum worker found by the last
@@ -479,18 +493,47 @@ pub(crate) fn get_blocking_autovacuum_pgproc() -> ProcNumber {
 
 /// `RememberSimpleDeadLock(proc1, lockmode, lock, proc2)` — record an
 /// already-detected (non-search) two-way deadlock for the eventual report.
-/// Like [`deadlock_check`], the merged `remember_simple_dead_lock` records into
-/// the lock.c-built `LockSpace` arena that proc.c cannot construct yet; this is
-/// the lock.c-integration boundary, so it aborts loudly until lock.c lands.
+/// `JoinWaitQueue` calls this when it finds it would have to wait behind a waiter
+/// (`proc2`) that already conflicts with a lock `proc1` holds — a trivial cycle
+/// it short-circuits without running the full detector. We project the live lock
+/// graph (lock.c's `build_dead_lock_space`) so the detector can read `proc2`'s
+/// `waitLock`/`waitLockMode` (already set, since `proc2` is blocked) and record
+/// the two `deadlockDetails[]` entries `DeadLockReport` renders. The `lock`
+/// argument is the LOCKTAG `proc1` is trying to join; we resolve it to (or add)
+/// its `LockId` in the projected arena.
 pub(crate) fn remember_simple_deadlock(
-    _proc1: ProcNumber,
-    _lockmode: LOCKMODE,
-    _lock: LOCKTAG,
-    _proc2: ProcNumber,
+    proc1: ProcNumber,
+    lockmode: LOCKMODE,
+    lock: LOCKTAG,
+    proc2: ProcNumber,
 ) {
-    panic!(
-        "RememberSimpleDeadLock over the lock.c-built LockSpace arena: lock.c not yet ported"
-    )
+    use types_deadlock::{LockId, LockSlot, ProcId};
+
+    let (mut space, _my_id) =
+        backend_storage_lmgr_lock_seams::build_dead_lock_space::call(proc1);
+
+    // Resolve the LOCKTAG proc1 is joining to a LockId in the projection. The
+    // lock already exists (proc1 is about to enter its wait queue), but if a race
+    // left it absent in the snapshot, add a bare slot so the report's locktag is
+    // still correct.
+    let lock_id: LockId = {
+        let mut found = None;
+        for (i, l) in space.locks.iter().enumerate() {
+            if l.tag == lock {
+                found = Some(LockId(i));
+                break;
+            }
+        }
+        found.unwrap_or_else(|| space.add_lock(LockSlot::new(lock)))
+    };
+
+    backend_storage_lmgr_deadlock_seams::remember_simple_dead_lock::call(
+        &space,
+        ProcId(proc1 as usize),
+        lockmode,
+        lock_id,
+        ProcId(proc2 as usize),
+    );
 }
 
 // ---- condition variable ----

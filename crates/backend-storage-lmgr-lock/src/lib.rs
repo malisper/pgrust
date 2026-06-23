@@ -244,6 +244,130 @@ pub fn get_lockmode_name_deadlock(
 }
 
 // ===========================================================================
+// deadlock.c bridge: project the live shared LOCK/PROCLOCK graph into a
+// `types_deadlock::LockSpace` arena (the C `DeadLockCheck` read of shared
+// memory under all partition LWLocks).
+// ===========================================================================
+
+/// Build the `types_deadlock::LockSpace` arena from the live shared lock table,
+/// returning it plus the `ProcId` for `my_proc`. The caller (proc.c
+/// `CheckDeadLock`) holds all lock partition LWLocks, so the snapshot is a
+/// consistent picture of the wait-for graph.
+///
+/// Identity convention: `ProcId(n) == ProcNumber(n)` for every PGPROC slot
+/// (`0..total_procs`). Every such slot gets a `ProcSlot` (idle ones are simply
+/// not waiting / hold nothing), so the detector's `my_proc` parameter and the
+/// soft-deadlock writeback can map `ProcId` <-> `ProcNumber` directly. Locks are
+/// appended after the proc slots, addressed by their own `LockId`.
+///
+/// What is projected (exactly the fields the detector reads):
+///   * per proc: `pid`, `status_flags`, `lock_group_leader`/`lock_group_members`,
+///     and — derived from the shared wait queues — `wait_lock` / `wait_lock_mode`
+///     / `is_on_wait_queue`;
+///   * per lock: `tag`, the holder `PROCLOCK`s (`my_proc` + `hold_mask`), and the
+///     ordered `wait_procs` queue.
+pub fn build_dead_lock_space(
+    my_proc: types_core::ProcNumber,
+) -> (types_deadlock::LockSpace, types_deadlock::ProcId) {
+    use backend_storage_lmgr_proc_seams as proc;
+    use types_core::INVALID_PROC_NUMBER;
+    use types_deadlock::{LockId, LockSlot, LockSpace, ProcId, ProcLockSlot, ProcSlot};
+
+    let n_procs = total_procs();
+    let mut space = LockSpace::new();
+
+    // One ProcSlot per PGPROC slot so ProcId(n) == ProcNumber(n). The per-proc
+    // wait fields (wait_lock / wait_lock_mode / is_on_wait_queue) are filled in
+    // below from the shared wait queues; here we record the proc-private fields.
+    for n in 0..n_procs {
+        let procno = n as types_core::ProcNumber;
+        let mut slot = ProcSlot::new(proc::proc_pid::call(procno));
+        slot.status_flags = proc::proc_status_flags::call(procno);
+        slot.wait_lock_mode = proc::proc_wait_lock_mode::call(procno);
+        let leader = proc::proc_lock_group_leader::call(procno);
+        // C's lockGroupLeader points to self when in a group; a member's leader
+        // field is the leader proc, the leader's own field also points to itself.
+        // The detector treats `Some(leader)` (even == self) as "follow the leader",
+        // which is correct: group_leader(self) == self is the identity case. But to
+        // match the C `proc->lockGroupLeader ? ... : proc` we record None when the
+        // proc is its own leader / has no group, so idle non-group procs stay None.
+        slot.lock_group_leader = if leader == INVALID_PROC_NUMBER || leader == procno {
+            None
+        } else {
+            Some(ProcId(leader as usize))
+        };
+        // Only a leader has a non-empty member list; record members so the
+        // detector can follow group edges from a non-waiting leader.
+        slot.lock_group_members = proc::proc_lock_group_members::call(procno)
+            .into_iter()
+            .map(|m| ProcId(m as usize))
+            .collect();
+        space.add_proc(slot);
+    }
+
+    // Enumerate every live LOCK from a full PROCLOCK scan (each distinct tag is a
+    // LOCK), then for each LOCK record its holders (PROCLOCKs with a non-zero
+    // holdMask) and its ordered wait queue.
+    let all_proclocks = state::with_shared(|s| s.proclock_scan());
+
+    // Distinct lock tags, preserving first-seen order for deterministic ids.
+    let mut lock_id_of: alloc::vec::Vec<(LOCKTAG, LockId)> = alloc::vec::Vec::new();
+    let find_or_add_lock = |space: &mut LockSpace,
+                            lock_id_of: &mut alloc::vec::Vec<(LOCKTAG, LockId)>,
+                            tag: &LOCKTAG|
+     -> LockId {
+        if let Some((_, id)) = lock_id_of.iter().find(|(t, _)| t == tag) {
+            return *id;
+        }
+        let id = space.add_lock(LockSlot::new(*tag));
+        lock_id_of.push((*tag, id));
+        id
+    };
+
+    for (tag, holder, pl) in &all_proclocks {
+        let lock_id = find_or_add_lock(&mut space, &mut lock_id_of, tag);
+        // Record the holder PROCLOCK (the detector reads my_proc + hold_mask).
+        let pl_id = space.add_proc_lock(ProcLockSlot {
+            my_lock: lock_id,
+            my_proc: ProcId(*holder as usize),
+            hold_mask: pl.hold_mask,
+        });
+        space.lock_mut(lock_id).proc_locks.push(pl_id);
+    }
+
+    // Project each LOCK's ordered wait queue. A proc on a lock's wait queue gets
+    // wait_lock / is_on_wait_queue set; the queue order is preserved so the
+    // detector's soft-edge scan sees the true ordering. We iterate the distinct
+    // lock tags we discovered above.
+    let lock_tags: alloc::vec::Vec<(LOCKTAG, LockId)> = lock_id_of.clone();
+    for (tag, lock_id) in lock_tags {
+        let waiters = state::with_shared(|s| s.waiters(&tag));
+        for w in waiters {
+            let widx = w as usize;
+            if widx < n_procs {
+                let p = space.proc_mut(ProcId(widx));
+                p.wait_lock = Some(lock_id);
+                p.is_on_wait_queue = true;
+            }
+            space.lock_mut(lock_id).wait_procs.push(ProcId(widx));
+        }
+    }
+
+    (space, ProcId(my_proc as usize))
+}
+
+/// Write the deadlock detector's resolved soft-deadlock wait order for one lock
+/// back into the live shared wait queue, then wake any now-grantable waiters
+/// (the C `DeadLockCheck` queue rearrangement + `ProcLockWakeup`).
+pub fn apply_soft_deadlock_wait_order(
+    lock: LOCKTAG,
+    new_order: alloc::vec::Vec<types_core::ProcNumber>,
+) {
+    state::with_shared(|s| s.waitq_set_order(&lock, &new_order));
+    locking::proc_lock_wakeup_for_tag(&lock);
+}
+
+// ===========================================================================
 // Seam installation.
 // ===========================================================================
 
@@ -273,6 +397,8 @@ pub fn init_seams() {
     seams::conflict_tab::set(conflict_tab);
     seams::do_lock_modes_conflict::set(locking::DoLockModesConflict);
     seams::get_lock_method_table::set(get_lock_method_table);
+    seams::build_dead_lock_space::set(build_dead_lock_space);
+    seams::apply_soft_deadlock_wait_order::set(apply_soft_deadlock_wait_order);
 
     // F1 LockAcquire / LockRelease pair.
     seams::lock_acquire_impl::set(|tag, mode, session, dont_wait| {
@@ -349,6 +475,7 @@ pub fn init_seams() {
     seams::get_lock_conflicts::set(recovery::GetLockConflicts);
     seams::get_lock_status_data::set(recovery::GetLockStatusData);
     seams::proc_locks_hold_masks::set(recovery::proc_locks_hold_masks);
+    seams::blocking_pids::set(recovery::blocking_pids);
 
     // `describe_lock_tag` (proc.c's log path): delegate to lmgr.c's owner.
     seams::describe_lock_tag::set(|tag| {

@@ -550,6 +550,31 @@ seam_core::seam!(
     ) -> types_deadlock::LockMethodData
 );
 
+seam_core::seam!(
+    /// `DeadLockCheck`'s read of the shared `LOCK`/`PROCLOCK` graph (lock.c) —
+    /// project the live cross-process lock table into a `types_deadlock::LockSpace`
+    /// arena for the detector. The caller (proc.c `CheckDeadLock`) holds all lock
+    /// partition LWLocks (the C `DeadLockCheck` contract), so the snapshot is
+    /// consistent. `ProcId(n) == ProcNumber(n)` for every PGPROC slot, so the
+    /// detector's verdict and the soft-deadlock writeback can map identities both
+    /// ways. Returns the populated arena plus the `ProcId` for `my_proc`.
+    pub fn build_dead_lock_space(
+        my_proc: types_core::ProcNumber,
+    ) -> (types_deadlock::LockSpace, types_deadlock::ProcId)
+);
+
+seam_core::seam!(
+    /// Write a deadlock detector's resolved wait order for one lock back into the
+    /// live shared wait queue, then run `ProcLockWakeup` for that lock (lock.c).
+    /// `new_order` is the reordered `ProcNumber` sequence the detector produced
+    /// (`TopoSort`/`ExpandConstraints`); it must be a permutation of the current
+    /// queue. The caller holds all lock partition LWLocks.
+    pub fn apply_soft_deadlock_wait_order(
+        lock: types_storage::lock::LOCKTAG,
+        new_order: alloc::vec::Vec<types_core::ProcNumber>,
+    )
+);
+
 // --- backend-utils-init-postinit consumers (lock.c) ---
 
 seam_core::seam!(

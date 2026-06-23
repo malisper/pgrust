@@ -106,8 +106,15 @@ backend-common-path-seams = { path = "../backend-common-path-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 backend-storage-lmgr-lock-seams = { path = "../backend-storage-lmgr-lock-seams" }
 backend-storage-lmgr-predicate-seams = { path = "../backend-storage-lmgr-predicate-seams" }
+# pg_isolation_test_session_is_blocked: PID->proc (procarray), the proc's
+# wait_event_info (proc), and the wait-event-type taxonomy (waitevent).
+backend-storage-ipc-procarray-seams = { path = "../backend-storage-ipc-procarray-seams" }
+backend-storage-lmgr-proc-seams = { path = "../backend-storage-lmgr-proc-seams" }
+backend-utils-activity-waitevent = { path = "../backend-utils-activity-waitevent" }
 backend-utils-fmgr-funcapi-seams = { path = "../backend-utils-fmgr-funcapi-seams" }
 backend-utils-adt-arrayfuncs-seams = { path = "../backend-utils-adt-arrayfuncs-seams" }
+# pg_isolation_test_session_is_blocked: split the int4[] argument into elements.
+backend-utils-adt-arrayfuncs = { path = "../backend-utils-adt-arrayfuncs" }
 backend-catalog-partition-seams = { path = "../backend-catalog-partition-seams" }
 backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgrade-seams" }
 backend-libpq-hba-seams = { path = "../backend-libpq-hba-seams" }

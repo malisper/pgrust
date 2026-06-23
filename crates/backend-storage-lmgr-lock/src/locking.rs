@@ -528,6 +528,13 @@ fn clean_up_lock(locktag: &LOCKTAG, proc_no: ProcNumber, lockmethodid: u8, wakeu
     }
 }
 
+/// `ProcLockWakeup(GetLocksMethodTable(lock), lock)` for a lock identified by
+/// its tag — the form the deadlock detector's soft-deadlock writeback uses after
+/// re-threading the wait queue. Reached from `apply_soft_deadlock_wait_order`.
+pub(crate) fn proc_lock_wakeup_for_tag(locktag: &LOCKTAG) {
+    proc_lock_wakeup(locktag, locktag.locktag_lockmethodid);
+}
+
 /// `ProcLockWakeup(lockMethodTable, lock)` (proc.c) reached from lock.c's
 /// CleanUpLock. We lend `&mut LOCK` from the ambient table to proc.c's public
 /// `ProcLockWakeup`, which walks the wait queue through our seams.

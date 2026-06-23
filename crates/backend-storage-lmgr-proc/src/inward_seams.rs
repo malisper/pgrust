@@ -522,6 +522,15 @@ fn proc_lock_group_leader(procno: ProcNumber) -> ProcNumber {
         .unwrap_or(types_core::INVALID_PROC_NUMBER)
 }
 
+fn proc_lock_group_members(leader: ProcNumber) -> Vec<ProcNumber> {
+    // `dlist_foreach(&GetPGProcByNumber(leader)->lockGroupMembers)` — the
+    // members of `leader`'s lock group, in list order. Read from the
+    // genuinely-shared lockGroupMembers list (the same store every backend's
+    // BecomeLockGroupLeader/Member writes), so the deadlock detector's
+    // LockSpace projection sees a parallel leader's worker members.
+    crate::proc_lifecycle::lock_group_members_iter(leader)
+}
+
 fn set_proc_held_locks(procno: ProcNumber, mask: types_storage::lock::LOCKMASK) {
     // heldLocks is read cross-process by JoinWaitQueue's wait-queue walk, so the
     // canonical store is the genuinely-shared array (the fork-private PGPROC field
@@ -641,7 +650,14 @@ fn proc_global_status_flags(pgxactoff: i32) -> u8 {
 }
 
 fn proc_pid(procno: ProcNumber) -> i32 {
-    with_proc_by_number(procno, |p| p.pid)
+    // `GetPGProcByNumber(procno)->pid` is the genuinely-shared slot-occupancy
+    // word, read cross-process by consumers that inspect OTHER backends' procs:
+    // the lock-wait log holder/waiter lists, GetLockStatusData, the deadlock
+    // detector's LockSpace projection (the "blocked by process N" detail), and
+    // pg_stat_get_activity. The fork-COW-private `PGPROC.pid` field is 0 for a
+    // proc owned by a different backend, so reading it here rendered cross-proc
+    // PIDs as 0 (e.g. "blocked by process 0"). Read the canonical shared word.
+    crate::proc_shmem::shared_pid(procno)
 }
 
 fn proc_wait_event_info(procno: ProcNumber) -> u32 {
@@ -1076,23 +1092,23 @@ fn set_my_proc_database_id(dboid: Oid) {
     crate::proc_shmem::set_proc_database_id_shared(crate::proc_shmem::my_proc_number(), dboid);
 }
 
-fn proc_lock_wakeup(_space: &mut types_deadlock::LockSpace, _lock: types_deadlock::LockId) {
-    // The deadlock detector's `ProcLockWakeup(space, lock)` entry: re-wake the
-    // grantable waiters on `lock` after a soft-deadlock queue rearrangement.
-    // This view is over a lock.c-built `LockSpace` arena (lock/proc records),
-    // which proc.c cannot construct until lock.c lands — so the binding is a
-    // Class-B panic-through to that unported lock.c boundary, exactly like the
-    // deadlock-checker seams. (proc.c's own `ProcLockWakeup`, which operates on
-    // a `&mut LOCK` + the lock.c wait-queue seams, is the faithful body and is
-    // reached the other way, from `ProcSleep`/`LockReleaseAll` once lock.c
-    // supplies the LOCK.)
-    //
-    // This panic-through is the lock.c-integration boundary: lock.c, which owns
-    // the `LockSpace` arena, supplies the `&mut LOCK` adapter that lets the
-    // detector reach proc.c's real `ProcLockWakeup`. Until it lands, calling
-    // this aborts loudly (matching a not-yet-wired seam) rather than silently
-    // doing nothing.
-    panic!("ProcLockWakeup over the lock.c-built LockSpace arena: lock.c not yet ported")
+fn proc_lock_wakeup(space: &mut types_deadlock::LockSpace, lock: types_deadlock::LockId) {
+    // The deadlock detector's `ProcLockWakeup(space, lock)` entry: after a
+    // soft-deadlock queue rearrangement, write the detector's new wait order for
+    // `lock` back into the live shared wait queue and re-wake the now-grantable
+    // waiters. The detector has already rewritten `space.lock(lock).wait_procs`
+    // (in the projected arena) to the resolved order; here we map it back to the
+    // real shmem queue (ProcId(n) == ProcNumber(n) by the projection's identity
+    // convention) via lock.c's `apply_soft_deadlock_wait_order`, which calls
+    // proc.c's faithful `ProcLockWakeup(&mut LOCK)` body after re-threading.
+    let tag = space.lock(lock).tag;
+    let new_order: Vec<ProcNumber> = space
+        .lock(lock)
+        .wait_procs
+        .iter()
+        .map(|p| p.0 as ProcNumber)
+        .collect();
+    backend_storage_lmgr_lock_seams::apply_soft_deadlock_wait_order::call(tag, new_order);
 }
 
 /// `ProcGlobal->checkpointerProc` — the checkpointer's advertised proc number
@@ -1185,6 +1201,7 @@ pub(crate) fn install() {
     // wait-queue PGPROC accessors
     seams::pgproc_number::set(pgproc_number);
     seams::proc_lock_group_leader::set(proc_lock_group_leader);
+    seams::proc_lock_group_members::set(proc_lock_group_members);
     seams::set_proc_held_locks::set(set_proc_held_locks);
     seams::proc_held_locks::set(proc_held_locks);
     seams::proc_wait_lock_mode::set(proc_wait_lock_mode);

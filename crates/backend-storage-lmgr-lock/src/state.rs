@@ -1148,6 +1148,34 @@ impl SharedLockTable {
         }
     }
 
+    /// Re-thread the wait queue to the exact order in `order` (the deadlock
+    /// detector's soft-deadlock resolution rewrites `lock->waitProcs` in place).
+    /// `order` must be a permutation of the procs currently queued; any proc not
+    /// in `order` is left dequeued. Mirrors C's `dclist_init` +
+    /// `dclist_push_tail` over the intrusive queue.
+    pub(crate) fn waitq_set_order(&mut self, tag: &LOCKTAG, order: &[ProcNumber]) {
+        let lidx = self.find_lock(tag);
+        if lidx == NIL {
+            return;
+        }
+        // Detach the existing chain (clear every node's membership), then re-append
+        // in the requested order. Use the existing waitq_remove/append helpers so
+        // the per-node `on_wait_queue` / `wait_next` bookkeeping stays correct.
+        let current = self.waiters(tag);
+        for p in current {
+            let pidx = self.waitq_node_for(lidx, p);
+            if pidx != NIL {
+                self.waitq_remove_idx(lidx, pidx);
+            }
+        }
+        for &p in order {
+            let pidx = self.waitq_node_for(lidx, p);
+            if pidx != NIL {
+                self.waitq_append(lidx, pidx);
+            }
+        }
+    }
+
     /// Snapshot of the wait queue's `ProcNumber`s in order.
     pub(crate) fn waiters(&self, tag: &LOCKTAG) -> Vec<ProcNumber> {
         let mut out = Vec::new();

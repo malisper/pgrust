@@ -411,6 +411,14 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// `dlist_foreach(&GetPGProcByNumber(leader)->lockGroupMembers)` — the slot
+    /// numbers of every member of `leader`'s lock group, in list order (empty
+    /// unless `leader` is a group leader). Read by the deadlock-detector's
+    /// `LockSpace` projection to populate `ProcSlot::lock_group_members`.
+    pub fn proc_lock_group_members(leader: ProcNumber) -> Vec<ProcNumber>
+);
+
+seam_core::seam!(
     /// Set `GetPGProcByNumber(procno)->heldLocks`.
     pub fn set_proc_held_locks(procno: ProcNumber, mask: types_storage::lock::LOCKMASK)
 );

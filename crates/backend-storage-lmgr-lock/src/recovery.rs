@@ -585,3 +585,150 @@ pub(crate) fn proc_locks_hold_masks(holder: ProcNumber, partition: usize) -> Vec
             .collect()
     })
 }
+
+// ===========================================================================
+// GetBlockerStatusData / pg_blocking_pids (lockfuncs.c + lock.c).
+// ===========================================================================
+
+/// `pg_blocking_pids(blocked_pid)` = `GetBlockerStatusData(blocked_pid)` +
+/// lockfuncs.c's blocker-determination loop, fused. Returns the leader PIDs of
+/// the sessions whose heavyweight locks block `blocked_pid` (or any member of its
+/// lock group). Duplicates are kept exactly as the C builds them.
+///
+/// This is the lock-table half of `pg_isolation_test_session_is_blocked`. It
+/// holds all partition LWLocks for a self-consistent snapshot (the C
+/// `GetBlockerStatusData` contract; ProcArrayLock is not needed here because the
+/// PID→ProcNumber lookup goes through procarray's own seam), then for each
+/// waiting member of the blocked proc's lock group scans its awaited lock's
+/// PROCLOCKs: an entry hard-blocks if it holds a conflicting mode, soft-blocks if
+/// it requests a conflicting mode and sits ahead of the blocked proc in the wait
+/// queue. Matches C's logic in `pg_blocking_pids` over `GetBlockerStatusData`.
+pub(crate) fn blocking_pids<'mcx>(
+    mcx: mcx::Mcx<'mcx>,
+    blocked_pid: i32,
+) -> PgResult<mcx::PgVec<'mcx, i32>> {
+    let mut out = mcx::PgVec::new_in(mcx);
+
+    // proc = BackendPidGetProc(blocked_pid); nothing to do if it's gone.
+    let blocked_procno = match backend_storage_ipc_procarray_seams::backend_pid_get_proc_role::call(
+        blocked_pid,
+    ) {
+        Some((_role, procno)) => procno,
+        None => return Ok(out),
+    };
+
+    // Acquire all partition LWLocks in partition-number order (the C
+    // GetBlockerStatusData snapshot lock; a self-consistent instantaneous state).
+    let mut guards = Vec::with_capacity(NUM_LOCK_PARTITIONS as usize);
+    for i in 0..NUM_LOCK_PARTITIONS as i32 {
+        guards.push(lwlock::lwlock_acquire_main::call(
+            lock_partition_lock_offset_by_index(i),
+            LWLockMode::LW_SHARED,
+        )?);
+    }
+
+    // The set of procs to examine = the blocked proc itself, or — if it is a lock
+    // group member — every member of its leader's group (the leader points to
+    // itself when in a group; INVALID_PROC_NUMBER when not).
+    let group_procs: Vec<ProcNumber> = {
+        let leader = proc::proc_lock_group_leader::call(blocked_procno);
+        if leader == types_core::INVALID_PROC_NUMBER {
+            alloc::vec![blocked_procno]
+        } else {
+            proc::proc_lock_group_members::call(leader)
+        }
+    };
+
+    for member in group_procs {
+        // GetSingleProcBlockerStatusData: nothing to do if this member is not
+        // blocked (no waitLock).
+        if !proc::proc_is_waiting_on_lock::call(member) {
+            continue;
+        }
+        let the_lock: LOCKTAG = proc::proc_wait_lock_tag::call(member);
+        let blocked_wait_mode = proc::proc_wait_lock_mode::call(member);
+        let blocked_leader_pid = {
+            let leader = proc::proc_lock_group_leader::call(member);
+            let lp = if leader == types_core::INVALID_PROC_NUMBER {
+                member
+            } else {
+                leader
+            };
+            proc::proc_pid::call(lp)
+        };
+
+        let lockmethodid = the_lock.locktag_lockmethodid;
+        let conflict_mask = tables::conflict_tab_for(lockmethodid as u16, blocked_wait_mode);
+
+        // Snapshot the PROCLOCKs on theLock and the wait queue ahead of `member`.
+        let proclocks: Vec<(ProcNumber, LOCKMASK, ProcNumber)> = state::with_shared(|s| {
+            s.holders(&the_lock)
+                .into_iter()
+                .filter_map(|h| s.proclock_get(&the_lock, h).map(|pl| (h, pl.hold_mask, pl.group_leader)))
+                .collect()
+        });
+        // The PIDs ahead of `member` in theLock's wait queue (the C
+        // `preceding_waiters`): walk until we reach `member`.
+        let preceding_pids: Vec<i32> = {
+            let waiters = state::with_shared(|s| s.waiters(&the_lock));
+            let mut v = Vec::new();
+            for w in waiters {
+                if w == member {
+                    break;
+                }
+                v.push(proc::proc_pid::call(w));
+            }
+            v
+        };
+
+        for (holder, hold_mask, holder_leader) in proclocks {
+            // A proc never blocks itself.
+            if holder == member {
+                continue;
+            }
+            // Members of the same lock group never block each other. Compare by
+            // leader PID, as C does (instance->leaderPid == blocked->leaderPid).
+            let holder_leader_pid = proc::proc_pid::call(holder_leader);
+            if holder_leader_pid == blocked_leader_pid {
+                continue;
+            }
+
+            // waitLockMode for this holder is NoLock unless it is itself waiting on
+            // exactly theLock.
+            let holder_wait_mode = if proc::proc_is_waiting_on_lock::call(holder)
+                && proc::proc_wait_lock_tag::call(holder) == the_lock
+            {
+                proc::proc_wait_lock_mode::call(holder)
+            } else {
+                NoLock
+            };
+
+            let blocks = if (conflict_mask & hold_mask) != 0 {
+                // Hard block: blocked by a lock already held by this entry.
+                true
+            } else if holder_wait_mode != NoLock
+                && (conflict_mask & LOCKBIT_ON(holder_wait_mode)) != 0
+            {
+                // Conflict in lock requests; this entry blocks only if it is ahead
+                // of `member` in the wait queue.
+                let holder_pid = proc::proc_pid::call(holder);
+                preceding_pids.iter().any(|&p| p == holder_pid)
+            } else {
+                false
+            };
+
+            if blocks {
+                // Infallible push (mirrors C's palloc'd arrayelems[]; an alloc
+                // failure aborts via the allocator, like palloc's ereport).
+                out.push(holder_leader_pid);
+            }
+        }
+    }
+
+    // Release in reverse order.
+    while let Some(guard) = guards.pop() {
+        guard.release()?;
+    }
+
+    Ok(out)
+}

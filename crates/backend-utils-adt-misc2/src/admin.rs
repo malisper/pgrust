@@ -870,6 +870,55 @@ pub fn pg_safe_snapshot_blocking_pids<'mcx>(
     construct_int4_array(mcx, &pids[..])
 }
 
+/// `pg_isolation_test_session_is_blocked(blocked_pid int, interesting_pids
+/// int4[])` (waitfuncs.c) — support function for isolationtester. True if
+/// `blocked_pid` is blocked by any of `interesting_pids`, considering: being in
+/// an injection point, heavyweight-lock waits, or safe-snapshot waits. Blockage
+/// by PIDs outside the isolationtester's control (e.g. autovacuum) is ignored.
+///
+/// `interesting_pids` is the already-deconstructed int4[] (the fmgr wrapper
+/// splits the array and rejects nulls, matching C's `array must not contain
+/// nulls`).
+pub fn pg_isolation_test_session_is_blocked<'mcx>(
+    mcx: Mcx<'mcx>,
+    blocked_pid: i32,
+    interesting_pids: &[i32],
+) -> PgResult<bool> {
+    // proc = BackendPidGetProc(blocked_pid); session gone => definitely unblocked.
+    let blocked_procno = match backend_storage_ipc_procarray_seams::backend_pid_get_proc_role::call(
+        blocked_pid,
+    ) {
+        Some((_role, procno)) => procno,
+        None => return Ok(false),
+    };
+
+    // Check if blocked_pid is in an injection point.
+    let wait_event_info = backend_storage_lmgr_proc_seams::proc_wait_event_info::call(blocked_procno);
+    if let Some(t) = backend_utils_activity_waitevent::pgstat_get_wait_event_type(wait_event_info) {
+        if t == "InjectionPoint" {
+            return Ok(true);
+        }
+    }
+
+    // pg_blocking_pids(blocked_pid): the leader PIDs blocking it on heavyweight
+    // locks. True if any is an interesting PID.
+    let blocking = lock::blocking_pids::call(mcx, blocked_pid)?;
+    for &b in blocking.iter() {
+        if interesting_pids.iter().any(|&p| p == b) {
+            return Ok(true);
+        }
+    }
+
+    // Check if blocked_pid is waiting for a safe snapshot (SSI). A non-empty
+    // blocker list suffices (C uses a single-element buffer + nonzero count).
+    let safe_blockers = lock::safe_snapshot_blocking_pids::call(mcx, blocked_pid)?;
+    if !safe_blockers.is_empty() {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// `construct_array_builtin(datums, n, INT4OID)` for a list of PIDs.
 fn construct_int4_array<'mcx>(mcx: Mcx<'mcx>, pids: &[i32]) -> PgResult<Datum<'mcx>> {
     // The arrayfuncs owner hands back the bare scalar word (a pointer to the

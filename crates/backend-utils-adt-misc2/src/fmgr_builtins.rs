@@ -625,6 +625,75 @@ fn fc_pg_advisory_unlock_all(_f: &mut FunctionCallInfoBaseData) -> types_error::
 }
 
 // ===========================================================================
+// lockfuncs.c / waitfuncs.c — blocking-graph introspection.
+// ===========================================================================
+
+/// Return an `int4[]` result built from a PID list. The result is a full
+/// ARRAYTYPE varlena image carried on the by-ref lane.
+fn ret_int4_array(
+    fcinfo: &mut FunctionCallInfoBaseData,
+    pids: &[i32],
+) -> types_error::PgResult<Datum> {
+    let image = backend_utils_adt_arrayfuncs::construct::construct_int4_array_bytes(pids)?;
+    fcinfo.set_ref_result(RefPayload::Varlena(image));
+    Ok(Datum::from_usize(0))
+}
+
+/// `pg_blocking_pids(int4) -> int4[]`.
+fn fc_pg_blocking_pids(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
+    let blocked_pid = arg_i32(fcinfo, 0);
+    let m = scratch_mcx();
+    let pids = backend_storage_lmgr_lock_seams::blocking_pids::call(m.mcx(), blocked_pid)?;
+    let pids_vec: alloc::vec::Vec<i32> = pids.iter().copied().collect();
+    ret_int4_array(fcinfo, &pids_vec)
+}
+
+/// `pg_safe_snapshot_blocking_pids(int4) -> int4[]`.
+fn fc_pg_safe_snapshot_blocking_pids(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let blocked_pid = arg_i32(fcinfo, 0);
+    let m = scratch_mcx();
+    let pids =
+        backend_storage_lmgr_lock_seams::safe_snapshot_blocking_pids::call(m.mcx(), blocked_pid)?;
+    let pids_vec: alloc::vec::Vec<i32> = pids.iter().copied().collect();
+    ret_int4_array(fcinfo, &pids_vec)
+}
+
+/// `pg_isolation_test_session_is_blocked(int4, int4[]) -> bool`.
+fn fc_pg_isolation_test_session_is_blocked(
+    fcinfo: &mut FunctionCallInfoBaseData,
+) -> types_error::PgResult<Datum> {
+    let blocked_pid = arg_i32(fcinfo, 0);
+    // PG_GETARG_ARRAYTYPE_P(1): the header-ful int4[] varlena image.
+    let array = fcinfo
+        .ref_arg(1)
+        .and_then(|p| p.as_varlena())
+        .expect("pg_isolation_test_session_is_blocked: int4[] arg missing from by-ref lane")
+        .to_vec();
+    let m = scratch_mcx();
+
+    // deconstruct_array_builtin(interesting_pids, INT4OID): reject nulls, as C's
+    // `array_contains_nulls` check does (elog "array must not contain nulls").
+    let elems = backend_utils_adt_arrayfuncs::construct::deconstruct_array_builtin(
+        m.mcx(),
+        &array,
+        types_tuple::heaptuple::INT4OID,
+    )?;
+    let mut interesting: alloc::vec::Vec<i32> = alloc::vec::Vec::with_capacity(elems.len());
+    for (d, isnull) in elems.iter() {
+        if *isnull {
+            return Err(types_error::PgError::error("array must not contain nulls"));
+        }
+        interesting.push(d.as_i32());
+    }
+
+    let b =
+        crate::admin::pg_isolation_test_session_is_blocked(m.mcx(), blocked_pid, &interesting)?;
+    Ok(ret_bool(b))
+}
+
+// ===========================================================================
 // pg_upgrade_support.c — binary_upgrade_* setters (void / bool result).
 // ===========================================================================
 
@@ -1457,6 +1526,10 @@ pub fn register_misc2_builtins() {
         builtin(3095, "pg_try_advisory_xact_lock_int4", 2, true, false, fc_pg_try_advisory_xact_lock_int4),
         builtin(3096, "pg_try_advisory_xact_lock_shared_int4", 2, true, false, fc_pg_try_advisory_xact_lock_shared_int4),
         builtin(2892, "pg_advisory_unlock_all", 0, true, false, fc_pg_advisory_unlock_all),
+        // ---- lockfuncs.c / waitfuncs.c: blocking-graph introspection ----
+        builtin(2561, "pg_blocking_pids", 1, true, false, fc_pg_blocking_pids),
+        builtin(3376, "pg_safe_snapshot_blocking_pids", 1, true, false, fc_pg_safe_snapshot_blocking_pids),
+        builtin(3378, "pg_isolation_test_session_is_blocked", 2, true, false, fc_pg_isolation_test_session_is_blocked),
         // ---- pg_upgrade_support.c ----
         builtin(3582, "binary_upgrade_set_next_pg_type_oid", 1, true, false, fc_binary_upgrade_set_next_pg_type_oid),
         builtin(3584, "binary_upgrade_set_next_array_pg_type_oid", 1, true, false, fc_binary_upgrade_set_next_array_pg_type_oid),
