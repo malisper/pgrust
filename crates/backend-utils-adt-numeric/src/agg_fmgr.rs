@@ -82,7 +82,11 @@ fn arg_numeric(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
 /// it before the cores read the struct; the numeric byte-view accessors expect a
 /// header (4-byte OR short), so we normalise to 4-byte here. No-op while the flag
 /// is off (no stored value is short).
-fn unpack_short_to_4b(bytes: &[u8]) -> Option<Vec<u8>> {
+///
+/// Also reused by [`crate::fmgr_builtins`] for the `_int8` AVG/SUM transition
+/// array args (`int4_avg_accum` / `int8_avg` / ...), whose `ArrayType` header is
+/// likewise mis-read 3 bytes off when the stored varlena arrives short-packed.
+pub(crate) fn unpack_short_to_4b(bytes: &[u8]) -> Option<Vec<u8>> {
     // VARATT_IS_1B_E (0x01) is a 1-byte external TOAST pointer — never a packed
     // inline short header — so exclude it; any other low-bit-set first byte is a
     // short (VARATT_IS_SHORT) header whose length is the high 7 bits.

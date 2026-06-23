@@ -252,6 +252,23 @@ fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
         .expect("numeric fn: by-ref varlena arg missing from by-ref lane")
 }
 
+/// `PG_GETARG_ARRAYTYPE_P(i)` for an `_int8` transition array arg
+/// (`int4_avg_accum` / `int8_avg` / `int2int4_sum` / ...): the full `ArrayType`
+/// varlena image, un-packed to a canonical 4-byte header. C's
+/// `PG_GETARG_ARRAYTYPE_P` is `DatumGetArrayTypeP` == `PG_DETOAST_DATUM`, which
+/// un-packs a SHORT (1-byte) varlena header to 4-byte before `check_int8_trans_array`
+/// reads the fixed-offset `ARR_NDIM`/`ARR_DIMS`/`ARR_ELEMTYPE` header. Once
+/// `SHORT_VARLENA_PACKING` is on, a transition array round-tripped through the
+/// parallel-aggregate tuplestore (its `_int8` column is `attispackable`) arrives
+/// short-headed, so the whole `ArrayType` struct sits 3 bytes off and the header
+/// read sees garbage ("expected 2-element int8 array"). Un-pack here to mirror C.
+/// No-op while the flag is off (the image is already plain 4-byte).
+#[inline]
+fn arg_int8_trans_array(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Vec<u8> {
+    let bytes = arg_varlena(fcinfo, i);
+    crate::agg_fmgr::unpack_short_to_4b(bytes).unwrap_or_else(|| bytes.to_vec())
+}
+
 /// Set a `bytea` result (header-less payload) on the by-ref Varlena lane and
 /// return the dummy by-value word.
 #[inline]
@@ -585,7 +602,7 @@ fn fc_int8_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<D
 
 /// `int2_avg_accum(_int8, int2) -> _int8` (oid 1962).
 fn fc_int2_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let transarray = arg_int8_trans_array(fcinfo, 0);
     let newval = fcinfo.arg(1).expect("missing arg").value.as_i16();
     let m = scratch_mcx();
     let out = crate::aggregate::int2_avg_accum(m.mcx(), &transarray, newval)?;
@@ -594,7 +611,7 @@ fn fc_int2_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRe
 
 /// `int4_avg_accum(_int8, int4) -> _int8` (oid 1963).
 fn fc_int4_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let transarray = arg_int8_trans_array(fcinfo, 0);
     let newval = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let out = crate::aggregate::int4_avg_accum(m.mcx(), &transarray, newval)?;
@@ -604,8 +621,8 @@ fn fc_int4_avg_accum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgRe
 /// `int4_avg_combine(_int8, _int8) -> _int8` (oid 3324). Shared by
 /// avg(int2)/avg(int4).
 fn fc_int4_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let t1 = arg_varlena(fcinfo, 0).to_vec();
-    let t2 = arg_varlena(fcinfo, 1).to_vec();
+    let t1 = arg_int8_trans_array(fcinfo, 0);
+    let t2 = arg_int8_trans_array(fcinfo, 1);
     let m = scratch_mcx();
     let out = crate::aggregate::int4_avg_combine(m.mcx(), &t1, &t2)?;
     Ok(ret_varlena(fcinfo, out.as_slice().to_vec()))
@@ -613,7 +630,7 @@ fn fc_int4_avg_combine(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::Pg
 
 /// `int2_avg_accum_inv(_int8, int2) -> _int8` (oid 3570).
 fn fc_int2_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let transarray = arg_int8_trans_array(fcinfo, 0);
     let newval = fcinfo.arg(1).expect("missing arg").value.as_i16();
     let m = scratch_mcx();
     let out = crate::aggregate::int2_avg_accum_inv(m.mcx(), &transarray, newval)?;
@@ -622,7 +639,7 @@ fn fc_int2_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::
 
 /// `int4_avg_accum_inv(_int8, int4) -> _int8` (oid 3571).
 fn fc_int4_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let transarray = arg_int8_trans_array(fcinfo, 0);
     let newval = arg_int32(fcinfo, 1);
     let m = scratch_mcx();
     let out = crate::aggregate::int4_avg_accum_inv(m.mcx(), &transarray, newval)?;
@@ -631,7 +648,7 @@ fn fc_int4_avg_accum_inv(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::
 
 /// `int8_avg(_int8) -> numeric` (oid 1964): AVG(int2)/AVG(int4) final.
 fn fc_int8_avg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let transarray = arg_int8_trans_array(fcinfo, 0);
     let m = scratch_mcx();
     let image = crate::aggregate::int8_avg(m.mcx(), &transarray)?.map(|v| v.as_slice().to_vec());
     Ok(match image {
@@ -643,7 +660,7 @@ fn fc_int8_avg(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<D
 /// `int2int4_sum(_int8) -> int8` (oid 3572): SUM(int2)/SUM(int4) final in
 /// moving-aggregate mode (both return int8).
 fn fc_int2int4_sum(fcinfo: &mut FunctionCallInfoBaseData) -> types_error::PgResult<Datum> {
-    let transarray = arg_varlena(fcinfo, 0).to_vec();
+    let transarray = arg_int8_trans_array(fcinfo, 0);
     Ok(match crate::aggregate::int2int4_sum(&transarray)? {
         Some(sum) => ret_i64(sum),
         None => ret_null(fcinfo),
