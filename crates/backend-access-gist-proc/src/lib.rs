@@ -1486,13 +1486,50 @@ unsafe fn varsize_4b(ptr: *const u8) -> usize {
 }
 
 /// Materialize a by-reference varlena `image` (the GiST key bytes, header and
-/// all) into an 8-byte-aligned (`MAXALIGN`) `mcx` copy and return its address
-/// word. The range ADT's relative-offset payload accounting only matches
+/// all) into an 8-byte-aligned (`MAXALIGN`) `mcx` copy in canonical 4-byte-header
+/// form and return its address word. The range/multirange ADTs read `VARSIZE_4B`,
+/// the `rangetypid` at the fixed `sizeof(RangeType)` header offset, and the bound
+/// payload past it, and their relative-offset payload accounting only matches
 /// absolute-address reads when the base is `MAXALIGN(8)`-aligned (the alignment
 /// `range_serialize` produces).
+///
+/// C's `DatumGetRangeTypeP`/`DatumGetMultirangeTypeP` are `PG_DETOAST_DATUM`,
+/// which un-packs a short (1-byte) header to the 4-byte form. This port stores
+/// varlenas header-ful while `SHORT_VARLENA_PACKING` is off (every key is already
+/// 4B, so the copy is verbatim); but once the flag is on `index_form_tuple`
+/// short-packs a small key and `fetchatt` hands the support proc the verbatim
+/// short-headed on-disk image. Un-pack short -> 4B here so the ADT's fixed-offset
+/// reads land correctly. (Compressed/external images are detoasted upstream — the
+/// GiST decompress / `gistdentryinit` path — so only the short<->4B inline forms
+/// reach this boundary.)
 fn materialize_varlena<'mcx>(mcx: Mcx<'mcx>, image: &[u8]) -> PgResult<*const u8> {
     use allocator_api2::alloc::Allocator;
     use core::alloc::Layout;
+
+    // VARATT_IS_1B (short header) and not VARATT_IS_1B_E (0x01, external): un-pack
+    // the 1-byte-header payload into a fresh 4-byte-header image.
+    let short = matches!(image.first(), Some(&h) if h != 0x01 && (h & 0x01) == 0x01);
+    if short {
+        // VARSIZE_1B(image) = (va_header >> 1) & 0x7F covers the 1-byte header +
+        // payload; the payload is that minus VARHDRSZ_SHORT (1).
+        let total_1b = ((image[0] >> 1) & 0x7F) as usize;
+        let data_size = total_1b.saturating_sub(1);
+        let new_size = data_size + 4; // VARHDRSZ
+        mcx::check_alloc_size(new_size)?;
+        let layout = Layout::from_size_align(new_size.max(1), 8)
+            .expect("valid varlena image layout");
+        let block = mcx.allocate(layout).map_err(|_| mcx.oom(new_size))?;
+        let dst = block.as_ptr() as *mut u8;
+        // SAFETY: `dst` heads a freshly allocated new_size-byte region; write the
+        // 4-byte length word (SET_VARSIZE) then copy the short payload past it.
+        unsafe {
+            let word = (new_size as u32) << 2; // low 2 bits 00 = plain 4B header
+            core::ptr::copy_nonoverlapping(word.to_ne_bytes().as_ptr(), dst, 4);
+            core::ptr::copy_nonoverlapping(image.as_ptr().add(1), dst.add(4), data_size);
+        }
+        return Ok(dst as *const u8);
+    }
+
     mcx::check_alloc_size(image.len())?;
     let layout = Layout::from_size_align(image.len().max(1), 8)
         .expect("valid varlena image layout");
