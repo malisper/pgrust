@@ -29,6 +29,9 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use core::ffi::c_char;
 
 use backend_utils_error::errno::current_errno;

@@ -57,3 +57,6 @@ backend-utils-hash-dynahash-seams = { path = "../backend-utils-hash-dynahash-sea
 backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-waitevent-seams" }
 backend-utils-activity-pgstat-wal-seams = { path = "../backend-utils-activity-pgstat-wal-seams" }
 port-pgsleep-seams = { path = "../port-pgsleep-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

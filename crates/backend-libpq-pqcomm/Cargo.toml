@@ -32,3 +32,6 @@ types-error = { path = "../types-error" }
 types-net = { path = "../types-net" }
 types-storage = { path = "../types-storage" }
 types-stringinfo = { path = "../types-stringinfo" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

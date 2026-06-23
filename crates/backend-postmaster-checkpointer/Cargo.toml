@@ -72,3 +72,6 @@ backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-replication-syncrep-seams = { path = "../backend-replication-syncrep-seams" }
 port-pgsleep-seams = { path = "../port-pgsleep-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

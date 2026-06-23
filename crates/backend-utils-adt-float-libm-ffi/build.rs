@@ -9,6 +9,13 @@
 
 fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_family = std::env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
+    // wasm: no standalone libm to link; the math symbols are provided by the
+    // wasm runtime / compiler-builtins (and the single-user math paths that
+    // need erf/tgamma are not on the boot path). Emit no link directive.
+    if target_family == "wasm" {
+        return;
+    }
     // macOS: math is in libSystem (linked implicitly); nothing to do.
     // Linux/other glibc/musl: link the standalone math library.
     if target_os != "macos" && target_os != "ios" {

@@ -86,3 +86,6 @@ backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-s
 backend-utils-time-combocid-seams = { path = "../backend-utils-time-combocid-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
 backend-utils-time-snapmgr-pc-seams = { path = "../backend-utils-time-snapmgr-pc-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

@@ -82,3 +82,6 @@ backend-catalog-aclchk-seams = { path = "../backend-catalog-aclchk-seams" }
 # `ObjectType` (OBJECT_DATABASE / OBJECT_TABLESPACE) for the owner's signature.
 types-acl = { path = "../types-acl" }
 types-nodes = { path = "../types-nodes" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

@@ -12,6 +12,9 @@
 //! ident there; C heap-allocates an `int` in `TopMemoryContext`, which an
 //! inline enum variant replaces — dropping that allocation's OOM path).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::ffi::CString;
 
 use backend_utils_error::config;
@@ -142,6 +145,10 @@ fn errno_location() -> *mut libc::c_int {
     unsafe { libc::__error() }
 }
 #[cfg(target_os = "linux")]
+fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
+}
+#[cfg(target_family = "wasm")]
 fn errno_location() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }

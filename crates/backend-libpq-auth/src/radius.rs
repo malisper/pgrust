@@ -1,6 +1,9 @@
 //! `CheckRADIUSAuth` (`auth.c:2845`) + `radius_add_attribute` (`auth.c:2818`) +
 //! `PerformRadiusTransaction` (`auth.c:2939`) — RADIUS authentication.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_utils_error::{elog, ereport};
 use types_error::{PgResult, LOG, WARNING};
 use types_net::{AddrInfoHint, PgAddrInfo, Port};

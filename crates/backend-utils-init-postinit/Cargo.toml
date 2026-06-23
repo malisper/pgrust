@@ -87,3 +87,6 @@ backend-utils-misc-timeout-seams = { path = "../backend-utils-misc-timeout-seams
 backend-utils-mmgr-portalmem-seams = { path = "../backend-utils-mmgr-portalmem-seams" }
 backend-utils-resowner-resowner-seams = { path = "../backend-utils-resowner-resowner-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

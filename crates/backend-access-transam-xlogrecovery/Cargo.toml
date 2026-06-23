@@ -81,3 +81,6 @@ backend-replication-walsender-seams = { path = "../backend-replication-walsender
 backend-commands-variable-seams = { path = "../backend-commands-variable-seams" }
 backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
 backend-utils-misc-pg-rusage = { path = "../backend-utils-misc-pg-rusage" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

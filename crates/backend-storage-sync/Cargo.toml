@@ -29,3 +29,6 @@ backend-access-transam-multixact-seams = { path = "../backend-access-transam-mul
 [dev-dependencies]
 libc = { version = "0.2", default-features = false }
 types-core = { path = "../types-core" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

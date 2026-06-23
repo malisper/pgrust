@@ -51,3 +51,6 @@ backend-replication-walreceiver-seams = { path = "../backend-replication-walrece
 backend-replication-logical-origin-seams = { path = "../backend-replication-logical-origin-seams" }
 backend-replication-logical-worker-seams = { path = "../backend-replication-logical-worker-seams" }
 backend-replication-logical-applyparallelworker-seams = { path = "../backend-replication-logical-applyparallelworker-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

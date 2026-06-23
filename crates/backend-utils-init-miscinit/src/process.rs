@@ -7,6 +7,9 @@
 //! their owners' seams. `LocalLatchData` is `miscinit.c`'s own backend-private
 //! latch, owned here.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::Cell;
 
 use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
@@ -170,8 +173,12 @@ pub fn checkDataDir() -> PgResult<()> {
         .with_sqlstate(types_error::ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE));
     }
 
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::fs::MetadataExt;
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfs::{MetadataExt, PermissionsExt};
 
     // Check that the directory belongs to my userid; if not, reject. This is an
     // essential part of the interlock that prevents two postmasters from

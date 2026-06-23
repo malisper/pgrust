@@ -22,6 +22,9 @@
 //! `ResourceOwnerRememberDSM` is guard construction, `ResourceOwnerForgetDSM`
 //! is consuming it, and `ResOwnerReleaseDSM` is its `Drop`.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::{Cell, RefCell};
 
 use backend_storage_lmgr_lwlock::{LWLockAcquireMain, MainLWLockGuard};

@@ -19,6 +19,9 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::RefCell;
 
 use backend_utils_error::{elog, ereport, message_level_is_interesting};

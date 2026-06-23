@@ -68,3 +68,6 @@ backend-utils-activity-pgstat-wal-seams = { path = "../backend-utils-activity-pg
 backend-utils-adt-timestamp-seams = { path = "../backend-utils-adt-timestamp-seams" }
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 port-pgsleep-seams = { path = "../port-pgsleep-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

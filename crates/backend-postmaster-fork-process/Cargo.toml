@@ -15,3 +15,6 @@ backend-postmaster-fork-process-seams = { path = "../backend-postmaster-fork-pro
 backend-libpq-pqsignal = { path = "../backend-libpq-pqsignal" }
 backend-utils-init-small = { path = "../backend-utils-init-small" }
 port-pg-strong-random-seams = { path = "../port-pg-strong-random-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

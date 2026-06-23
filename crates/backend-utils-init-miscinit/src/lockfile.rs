@@ -12,7 +12,10 @@
 use std::cell::{Cell, RefCell};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfs::OpenOptionsExt;
 
 use types_error::{PgError, PgResult, FATAL};
 
@@ -491,7 +494,10 @@ pub fn AddToDataDirLockFile(target_line: i32, line: &str) -> PgResult<()> {
     }
 
     // Rewrite the data in a single pwrite at offset 0 (atomic to onlookers).
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::fs::FileExt;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfs::FileExt;
     match file.write_all_at(dest.as_bytes(), 0) {
         Ok(()) => {}
         Err(e) => {

@@ -22,3 +22,6 @@ backend-utils-error = { path = "../backend-utils-error" }
 backend-backup-walsummary-seams = { path = "../backend-backup-walsummary-seams" }
 backend-storage-file-fd-seams = { path = "../backend-storage-file-fd-seams" }
 common-blkreftable = { path = "../common-blkreftable" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

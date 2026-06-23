@@ -23,6 +23,9 @@
 //!   * the `base_yylex` bridge over the repo's tested scanner
 //!     (`backend-parser-scan::core_yylex` + `backend-parser-driver::BaseLexer`).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use core::ffi::{c_char, c_int, c_void};
 
 use backend_nodes_types::node_tags::*;

@@ -62,3 +62,6 @@ types-storage = { path = "../types-storage" }
 types-wal = { path = "../types-wal" }
 
 [dev-dependencies]
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

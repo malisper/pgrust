@@ -2335,6 +2335,7 @@ dependencies = [
  "types-tableam",
  "types-tuple",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -3294,6 +3295,7 @@ dependencies = [
  "types-signal",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -3404,6 +3406,7 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -3451,6 +3454,7 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -3528,6 +3532,7 @@ dependencies = [
  "types-logical",
  "types-tuple",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -3677,6 +3682,7 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -3755,6 +3761,7 @@ dependencies = [
  "types-timeout",
  "types-tuple",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -3794,6 +3801,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -3846,6 +3854,7 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -4003,6 +4012,7 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -4079,6 +4089,7 @@ dependencies = [
  "mcx",
  "types-error",
  "types-pgarch",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -4292,6 +4303,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -4358,6 +4370,7 @@ dependencies = [
  "types-pgstat",
  "types-storage",
  "types-walsummarizer",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -4495,6 +4508,7 @@ dependencies = [
  "types-startup",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -7001,6 +7015,7 @@ dependencies = [
  "types-tuple",
  "types-wal",
  "types-wchar",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -10115,6 +10130,7 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-walreceiver",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -12013,6 +12029,7 @@ dependencies = [
  "types-net",
  "types-network",
  "types-stringinfo",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -12083,6 +12100,7 @@ dependencies = [
  "types-fmgr",
  "types-snapshot",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -12128,6 +12146,7 @@ dependencies = [
  "types-error",
  "types-net",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -12144,6 +12163,7 @@ dependencies = [
  "libc",
  "mcx",
  "types-error",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -12181,6 +12201,7 @@ dependencies = [
  "libc",
  "mcx",
  "seam-core",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -12263,6 +12284,7 @@ dependencies = [
  "types-nodes",
  "types-regex",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -12319,6 +12341,7 @@ dependencies = [
  "types-storage",
  "types-stringinfo",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -12417,6 +12440,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-startup",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -14687,6 +14711,7 @@ dependencies = [
  "backend-utils-mmgr-fgram",
  "libc",
  "pgrust-pg-ffi-fgram",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -15243,6 +15268,7 @@ dependencies = [
  "types-startup",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -15295,6 +15321,7 @@ dependencies = [
  "types-signal",
  "types-startup",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -15355,6 +15382,7 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -15378,6 +15406,7 @@ dependencies = [
  "libc",
  "port-pg-strong-random-seams",
  "types-core",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -15502,6 +15531,7 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -15589,6 +15619,7 @@ dependencies = [
  "types-signal",
  "types-startup",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -15632,6 +15663,7 @@ dependencies = [
  "types-timeout",
  "types-tuple",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -15677,6 +15709,7 @@ dependencies = [
  "types-signal",
  "types-startup",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -15785,6 +15818,7 @@ dependencies = [
  "types-startup",
  "types-storage",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -16004,6 +16038,7 @@ dependencies = [
  "types-signal",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -16249,6 +16284,7 @@ dependencies = [
  "types-snapshot",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -16312,6 +16348,7 @@ dependencies = [
  "types-tuple",
  "types-wal",
  "types-walreceiver",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -16481,6 +16518,7 @@ dependencies = [
  "types-replication-slot",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -16643,6 +16681,7 @@ dependencies = [
  "types-tuple",
  "types-wal",
  "types-walreceiver",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -16674,6 +16713,7 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-walreceiver",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -16753,6 +16793,7 @@ dependencies = [
  "types-signal",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -17037,6 +17078,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-tsearch",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -17304,6 +17346,7 @@ dependencies = [
  "types-startup",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -17520,6 +17563,7 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -17738,6 +17782,7 @@ dependencies = [
  "types-guc",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -17867,6 +17912,7 @@ dependencies = [
  "types-signal",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -17921,6 +17967,7 @@ dependencies = [
  "types-tuple",
  "types-vacuum",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -17964,6 +18011,7 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -18072,6 +18120,7 @@ dependencies = [
  "types-nodes",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -18105,6 +18154,7 @@ dependencies = [
  "types-error",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -18523,6 +18573,7 @@ dependencies = [
  "types-timeout",
  "types-tuple",
  "types-wal",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -18632,6 +18683,7 @@ dependencies = [
  "types-error",
  "types-pgstat",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -18687,6 +18739,7 @@ dependencies = [
  "types-core",
  "types-error",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -18742,6 +18795,7 @@ dependencies = [
  "types-signal",
  "types-startup",
  "types-timeout",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -18923,6 +18977,7 @@ dependencies = [
  "types-stringinfo",
  "types-timeout",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -19087,6 +19142,7 @@ dependencies = [
  "types-storage",
  "types-tuple",
  "types-wchar",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -19230,6 +19286,7 @@ dependencies = [
  "mcx",
  "types-core",
  "types-error",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -20174,6 +20231,7 @@ dependencies = [
  "types-numeric",
  "types-rel",
  "types-storage",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -21265,6 +21323,7 @@ dependencies = [
  "types-locale",
  "types-tuple",
  "types-wchar",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -23322,6 +23381,7 @@ dependencies = [
  "types-misc-more2",
  "types-storage",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -23408,6 +23468,7 @@ dependencies = [
  "types-storage",
  "types-timeout",
  "types-tuple",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -23871,6 +23932,7 @@ dependencies = [
  "types-misc-more2",
  "types-signal",
  "types-timeout",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -23921,6 +23983,7 @@ dependencies = [
  "backend-utils-error-fgram",
  "libc",
  "pgrust-pg-ffi-fgram",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -24963,6 +25026,7 @@ dependencies = [
  "backend-parser-scan-fgram",
  "libc",
  "pgrust-pg-ffi-fgram",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -25005,6 +25069,7 @@ dependencies = [
  "types-error",
  "types-fmgr",
  "types-logical",
+ "wasm-libc-shim",
 ]
 
 [[package]]
@@ -26826,6 +26891,10 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "wasm-libc-shim"
+version = "0.0.0"
 
 [[package]]
 name = "zerocopy"

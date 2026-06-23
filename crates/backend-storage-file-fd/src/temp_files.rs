@@ -6,6 +6,9 @@
 //! (`SetTempTablespaces`/`TempTablespacesAreSet`/`GetTempTablespaces`/
 //! `GetNextTempTableSpace`), and the PRNG-based temp-name generation.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::path::Path;
 
 use backend_utils_error::ereport;

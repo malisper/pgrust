@@ -15,6 +15,9 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_utils_error::ereport;
 use mcx::{MemoryContext, Mcx};
 use types_core::{init::BackendType, ProtocolVersion, TimestampTz};

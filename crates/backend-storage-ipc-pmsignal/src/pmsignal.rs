@@ -1,6 +1,9 @@
 //! Port of `src/backend/storage/ipc/pmsignal.c`: signaling between the
 //! postmaster and its child processes.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::sync::atomic::Ordering::SeqCst;
 
 use backend_utils_error::elog;

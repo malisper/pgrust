@@ -17,3 +17,16 @@ fast-check = "check --profile fast-check"
 [env]
 CARGO_INCREMENTAL = "0"
 PGRUST_PGSHAREDIR = "/tmp/pgrust_share"
+
+# --- wasm64 single-user build (wasm-support) ---------------------------------
+# The wasm64 `postgres` binary links every crate including the TLS (OpenSSL),
+# XML (libxml2) and locale-aware-ctype (`*_l`) providers, whose `extern "C"`
+# blocks reference native C libraries that do not exist on wasm. Single-user
+# `postgres --single` never reaches the TLS listener / XML / locale-aware code
+# paths, so those symbols are never *called* — but they must still resolve at
+# link time. `--allow-undefined` tells wasm-ld to turn the unresolved C symbols
+# into module imports (left unsatisfied by the host; only an error if actually
+# invoked at runtime, which the single-user boot path never does). This is
+# scoped to the wasm64 target only, so native builds are completely unaffected.
+[target.wasm64-unknown-unknown]
+rustflags = ["-C", "link-arg=--allow-undefined"]

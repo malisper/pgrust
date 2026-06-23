@@ -56,3 +56,6 @@ backend-utils-misc-timeout = { path = "../backend-utils-misc-timeout" }
 # these subsystem crates depend only on bgworker's *-seams, not this crate).
 backend-replication-logical-launcher = { path = "../backend-replication-logical-launcher" }
 backend-replication-logical-applyparallelworker = { path = "../backend-replication-logical-applyparallelworker" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

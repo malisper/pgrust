@@ -56,3 +56,6 @@ backend-utils-adt-misc-seams = { path = "../backend-utils-adt-misc-seams" }
 # basebackup.c `readlink(pg_tblspc/<oid>)` — the fd-coupled OS readlink primitive
 # (always-erroring contract: PgResult<String>, no missing-ok).
 backend-backup-basebackup-seams = { path = "../backend-backup-basebackup-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

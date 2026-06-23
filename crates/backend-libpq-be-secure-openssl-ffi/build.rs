@@ -13,6 +13,13 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPENSSL_DIR");
     println!("cargo:rerun-if-env-changed=OPENSSL_LIB_DIR");
 
+    // wasm: no system OpenSSL to link, and the native libcrypto.a archive is
+    // not a wasm object. Single-user has no TLS listener, so emit no link
+    // directive (the SSL paths are cfg'd out / unreachable on the boot path).
+    if std::env::var("CARGO_CFG_TARGET_FAMILY").as_deref() == Ok("wasm") {
+        return;
+    }
+
     if std::env::var_os("CARGO_FEATURE_SSL_OPENSSL").is_none() {
         // Feature off ⇒ no binding, no link (faithful `#ifdef USE_SSL` off).
         return;

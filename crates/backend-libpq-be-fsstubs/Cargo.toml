@@ -28,3 +28,6 @@ backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
 backend-access-transam-xact-seams = { path = "../backend-access-transam-xact-seams" }
 backend-libpq-be-fsstubs-seams = { path = "../backend-libpq-be-fsstubs-seams" }
 backend-utils-time-snapmgr-seams = { path = "../backend-utils-time-snapmgr-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

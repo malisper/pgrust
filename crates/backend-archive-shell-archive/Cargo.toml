@@ -20,3 +20,6 @@ backend-utils-activity-waitevent-seams = { path = "../backend-utils-activity-wai
 backend-access-transam-xlog-seams = { path = "../backend-access-transam-xlog-seams" }
 backend-postmaster-pgarch = { path = "../backend-postmaster-pgarch" }
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

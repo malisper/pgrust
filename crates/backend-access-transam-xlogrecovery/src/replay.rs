@@ -640,7 +640,10 @@ fn check_tablespace_directory() -> Result<(), PgError> {
     // the libc handle mirrors the C loop (fd.c's AllocateDir/ReadDir add VFD
     // bookkeeping that has no observable effect on this scan).
     extern crate std;
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfs::OsStrBytesExt as OsStrExt;
 
     let entries = match std::fs::read_dir(PG_TBLSPC_DIR) {
         Ok(e) => e,

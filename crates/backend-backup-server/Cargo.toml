@@ -24,3 +24,6 @@ backend-utils-init-miscinit-seams = { path = "../backend-utils-init-miscinit-sea
 common-pgcheckdir-seams = { path = "../common-pgcheckdir-seams" }
 port-path-seams = { path = "../port-path-seams" }
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

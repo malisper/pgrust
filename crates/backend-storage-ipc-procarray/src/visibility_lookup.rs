@@ -8,6 +8,9 @@
 //! cancels, and `XidCacheRemoveRunningXids`. Builds on the F0 model; reuses F3
 //! GlobalVis for some removability checks.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::RefCell;
 
 use mcx::{Mcx, PgVec};

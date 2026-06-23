@@ -7,7 +7,13 @@
 //! `open_transient_file` and `close_transient_file` seam adapters
 //! (installed by `init_seams`).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
+#[cfg(not(target_family = "wasm"))]
 use std::os::fd::{AsRawFd, RawFd};
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfd::{AsRawFd, RawFd};
 use std::path::Path;
 
 use types_error::{

@@ -18,3 +18,6 @@ randomize-allocated-memory = []
 backend-utils-error = { package = "backend-utils-error-fgram", path = "../backend-utils-error-fgram" }
 libc = { version = "0.2", default-features = false }
 pgrust-pg-ffi = { package = "pgrust-pg-ffi-fgram", path = "../pgrust-pg-ffi-fgram" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

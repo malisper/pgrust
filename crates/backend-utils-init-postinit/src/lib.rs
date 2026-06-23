@@ -12,6 +12,9 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_utils_error::ereport;
 use mcx::{Mcx, MemoryContext, PgString};
 use types_catalog::pg_database::{FormPgDatabase, COLLPROVIDER_LIBC};

@@ -103,3 +103,6 @@ types-tuple = { path = "../types-tuple" }
 types-wal = { path = "../types-wal" }
 types-nodes = { path = "../types-nodes" }
 types-acl = { path = "../types-acl" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

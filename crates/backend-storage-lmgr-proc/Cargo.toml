@@ -66,3 +66,6 @@ backend-replication-syncrep-seams = { path = "../backend-replication-syncrep-sea
 backend-utils-activity-pgstat-seams = { path = "../backend-utils-activity-pgstat-seams" }
 backend-port-pg-sema-seams = { path = "../backend-port-pg-sema-seams" }
 backend-utils-misc-guc-tables = { path = "../backend-utils-misc-guc-tables" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

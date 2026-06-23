@@ -6,6 +6,9 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_libpq_pqcomm::{AcceptConnection, TouchSocketFiles};
 use backend_postmaster_launch_backend::postmaster_child_launch;
 use backend_postmaster_pmchild::{

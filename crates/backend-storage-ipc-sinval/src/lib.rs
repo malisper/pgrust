@@ -25,6 +25,9 @@
 //! another `ReceiveSharedInvalidMessages`) can consume messages the outer call
 //! already pulled out of the queue. We preserve that with `thread_local!` cells.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use core::cell::Cell;
 use core::ffi::c_int;
 use core::mem::{offset_of, size_of, MaybeUninit};

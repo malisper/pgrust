@@ -34,6 +34,9 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_libpq_pqcomm::ListenServerPort;
 use backend_utils_error::{ereport};
 use types_error::{FATAL, LOG};

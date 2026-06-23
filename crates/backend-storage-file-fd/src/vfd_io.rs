@@ -6,8 +6,15 @@
 //! `FilePrefetch`/`Writeback`/`Sync`/`Zero`/`Fallocate`/`Size`/`Truncate`
 //! operations plus `FilePathName`/`FileGetRawDesc`.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
+#[cfg(not(target_family = "wasm"))]
 use std::os::fd::{AsRawFd, RawFd};
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::io::FromRawFd;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfd::{AsRawFd, FromRawFd, RawFd};
 use std::path::Path;
 
 use backend_utils_error::ereport;

@@ -15,3 +15,6 @@ backend-utils-mmgr = { package = "backend-utils-mmgr-fgram", path = "../backend-
 backend-utils-mb = { package = "backend-utils-mb-fgram", path = "../backend-utils-mb-fgram" }
 pgrust-pg-ffi = { package = "pgrust-pg-ffi-fgram", path = "../pgrust-pg-ffi-fgram" }
 libc = { version = "0.2", default-features = false }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

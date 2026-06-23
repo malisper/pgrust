@@ -2,6 +2,9 @@
 //! sub), the durable Record* routines, the command/block state machines, and
 //! the parallel-worker serialize/restore path (xact.c:1315-5641).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use crate::*;
 
 use backend_access_transam_commit_ts_seams as commit_ts_seams;

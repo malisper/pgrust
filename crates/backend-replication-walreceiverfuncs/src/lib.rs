@@ -41,6 +41,9 @@
 //!  9. `GetReplicationApplyDelay`      — lines 364-388
 //! 10. `GetReplicationTransferLatency` — lines 394-408
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 

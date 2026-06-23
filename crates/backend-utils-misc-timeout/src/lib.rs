@@ -16,6 +16,9 @@
 
 // Sibling files of the `backend-utils-misc-more2` unit. `timeout.c` is this
 // crate's lib body below; these are the remaining manifest c_sources.
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 pub mod conffiles;
 pub mod injection_point;
 pub mod pg_config;

@@ -6,6 +6,9 @@
 //! module sets it via that crate's setter. `shmem_exit_inprogress` is owned
 //! here.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 

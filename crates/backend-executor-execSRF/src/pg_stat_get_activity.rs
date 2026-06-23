@@ -19,6 +19,9 @@
 //! `st_gss` is always reported `false`, so only the no-GSS arm is reachable;
 //! that arm is transcribed faithfully here.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;

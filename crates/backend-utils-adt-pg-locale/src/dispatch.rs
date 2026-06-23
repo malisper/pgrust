@@ -14,6 +14,9 @@
 //! builtin workers are in their (not-yet-ported) owner units, reached through
 //! their seams.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use mcx::{Mcx, PgVec};

@@ -1,5 +1,8 @@
 //! `auth_peer` (`auth.c:1855`) — peer authentication using `getpeereid`.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_utils_error::ereport;
 use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, LOG};
 use types_net::Port;

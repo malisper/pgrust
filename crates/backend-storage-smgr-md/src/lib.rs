@@ -28,6 +28,9 @@
 //! `thread_local!` backend cache (md's `SMgrRelationHash` is backend-local in C
 //! too — these are kernel fds held by one backend, never shared memory).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -89,6 +92,10 @@ fn errno_location() -> *mut libc::c_int {
     unsafe { libc::__error() }
 }
 #[cfg(target_os = "linux")]
+fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
+}
+#[cfg(target_family = "wasm")]
 fn errno_location() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }

@@ -14,6 +14,9 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use alloc::string::String;
@@ -2395,7 +2398,10 @@ fn seam_read_twophase_file(
     missing_ok: bool,
 ) -> PgResult<Option<Vec<u8>>> {
     use std::io::Read;
+    #[cfg(not(target_family = "wasm"))]
     use std::os::fd::FromRawFd;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfd::FromRawFd;
 
     let path = two_phase_file_path(xid);
 
@@ -2469,7 +2475,10 @@ fn seam_read_twophase_file(
 /// is computed in-crate by the caller (`recreate_two_phase_file`) and passed in.
 fn seam_recreate_twophase_file(xid: TransactionId, content: &[u8], crc: u32) -> PgResult<()> {
     use std::io::Write;
+    #[cfg(not(target_family = "wasm"))]
     use std::os::fd::FromRawFd;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfd::FromRawFd;
 
     let path = two_phase_file_path(xid);
 

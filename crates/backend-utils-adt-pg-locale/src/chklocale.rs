@@ -13,6 +13,9 @@
 //! three backend call sites all pass `write_message = true`, so the seam takes
 //! no flag and always emits the `ereport(WARNING)` form.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use alloc::format;

@@ -11,6 +11,9 @@
 //! `skip_drive` == identity, `make_native_path` == identity, no `.exe` suffix);
 //! the Windows-only arms reduce away exactly as documented in the C source.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::ffi::{CStr, CString};
 
 use types_error::{PgError, PgResult, ERROR, FATAL};

@@ -94,3 +94,6 @@ backend-utils-adt-acl-seams = { path = "../backend-utils-adt-acl-seams" }
 types-catalog = { path = "../types-catalog" }
 backend-commands-tablespace-globals-seams = { path = "../backend-commands-tablespace-globals-seams" }
 common-username-seams = { path = "../common-username-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

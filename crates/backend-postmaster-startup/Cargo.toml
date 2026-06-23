@@ -37,3 +37,6 @@ types-signal = { path = "../types-signal" }
 types-startup = { path = "../types-startup" }
 types-timeout = { path = "../types-timeout" }
 types-wal = { path = "../types-wal" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

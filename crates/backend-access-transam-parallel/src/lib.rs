@@ -42,6 +42,9 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::alloc::Layout;
 use std::cell::Cell;
 use std::cell::RefCell;

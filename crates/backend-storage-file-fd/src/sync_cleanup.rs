@@ -8,10 +8,16 @@
 //! `BeforeShmemExit_Files`/`CleanupTempFiles`. Owns the `at_eoxact_files`
 //! and `at_eosubxact_files` seam adapters (installed by `init_seams`).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::fs::File as StdFile;
 use std::io;
 use std::mem::ManuallyDrop;
+#[cfg(not(target_family = "wasm"))]
 use std::os::fd::FromRawFd;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfd::FromRawFd;
 use std::path::Path;
 
 use types_core::SubTransactionId;

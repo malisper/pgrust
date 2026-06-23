@@ -53,6 +53,9 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_libpq_pqsignal::signal_masks;
 use backend_utils_init_small::globals::SetMyProcPid;
 use types_core::pid_t;
@@ -172,7 +175,20 @@ fn adjust_oom_score() {
     // NUL-terminated string and open would simply fail, so mirror that by
     // bailing out (the equivalent of the open() failing with all errors
     // ignored).
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::ffi::OsStrExt;
+    // wasm64 has no `std::os::unix`; `OsStr::as_encoded_bytes` is the portable
+    // equivalent (single-user: this whole OOM-adjust path is inert anyway).
+    #[cfg(target_family = "wasm")]
+    trait OsStrExt {
+        fn as_bytes(&self) -> &[u8];
+    }
+    #[cfg(target_family = "wasm")]
+    impl OsStrExt for std::ffi::OsStr {
+        fn as_bytes(&self) -> &[u8] {
+            self.as_encoded_bytes()
+        }
+    }
     let bytes = oomfilename.as_os_str().as_bytes();
     if bytes.contains(&0) {
         return;

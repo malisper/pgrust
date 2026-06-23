@@ -16,6 +16,9 @@
 //! the latch substrate are reached through seams. `kill(2)` is the OS boundary
 //! (`libc`).
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_utils_error::ereport;
 use types_core::init::BackendType;
 use types_error::{

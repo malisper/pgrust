@@ -22,6 +22,9 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_utils_error::{ereport, ErrorLocation, PgResult, ERRCODE_NAME_TOO_LONG, NOTICE};
 use backend_utils_mb::{pg_database_encoding_max_length, pg_mbcliplen};
 use backend_utils_mmgr::{palloc, MemoryContextScope};

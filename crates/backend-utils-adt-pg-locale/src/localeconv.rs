@@ -12,6 +12,9 @@
 //! uses its built-in English names) and seam-and-panic the encoding step for a
 //! non-C `LC_TIME`.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use alloc::format;

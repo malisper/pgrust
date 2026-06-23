@@ -29,3 +29,6 @@ backend-storage-sync-seams = { path = "../backend-storage-sync-seams" }
 backend-access-transam-xlogrecovery-seams = { path = "../backend-access-transam-xlogrecovery-seams" }
 backend-catalog-binary-upgrade-seams = { path = "../backend-catalog-binary-upgrade-seams" }
 backend-commands-tablespace-seams = { path = "../backend-commands-tablespace-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

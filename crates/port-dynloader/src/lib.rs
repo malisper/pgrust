@@ -28,6 +28,9 @@
 //! therefore intentionally a PARTIAL port (it is not marked complete in
 //! `CATALOG.tsv`), exactly mirroring the `TD-DFMGR-DYNLOADER` design debt.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_utils_error::ereport;
 use types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen};
 use types_error::{PgResult, ERROR};

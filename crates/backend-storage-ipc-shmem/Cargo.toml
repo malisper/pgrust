@@ -31,3 +31,6 @@ types-hash = { path = "../types-hash" }
 types-nodes = { path = "../types-nodes" }
 types-storage = { path = "../types-storage" }
 types-tuple = { path = "../types-tuple" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

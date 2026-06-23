@@ -21,6 +21,9 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::Cell;
 
 use types_core::primitive::{Oid, Size, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};

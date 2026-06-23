@@ -38,6 +38,9 @@
 
 #![allow(clippy::result_large_err)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Instant;

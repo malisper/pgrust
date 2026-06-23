@@ -27,6 +27,9 @@
 //! loader + callback dispatch, and the error-recovery cleanup suite) goes
 //! through that owner's seam crate or a direct dependency.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use alloc::string::String;

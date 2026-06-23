@@ -27,6 +27,9 @@
 // non-USE_SSL build those are immediately reassigned, which rustc would flag.
 #![allow(unused_assignments)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use backend_utils_error::ereport;

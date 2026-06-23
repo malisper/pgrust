@@ -259,3 +259,6 @@ backend-utils-misc-backendstate-pc-seams = { path = "../backend-utils-misc-backe
 types-logical = { path = "../types-logical" }
 
 [dev-dependencies]
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

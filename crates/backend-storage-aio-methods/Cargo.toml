@@ -100,3 +100,6 @@ types-signal = { path = "../types-signal" }
 libc = "0.2"
 
 [dev-dependencies]
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

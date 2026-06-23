@@ -9,7 +9,13 @@
 //!
 //! All of these are installed by [`crate::init_seams`].
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
+#[cfg(not(target_family = "wasm"))]
 use std::os::fd::FromRawFd;
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfd::FromRawFd;
 use std::path::Path;
 
 use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};

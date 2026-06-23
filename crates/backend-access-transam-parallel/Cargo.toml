@@ -61,3 +61,6 @@ backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" 
 backend-postmaster-bgworker-seams = { path = "../backend-postmaster-bgworker-seams" }
 backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
 types-storage = { path = "../types-storage" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

@@ -19,3 +19,6 @@ types-core = { path = "../types-core" }
 backend-utils-mb-mbutils = { path = "../backend-utils-mb-mbutils" }
 backend-utils-adt-pg-locale = { path = "../backend-utils-adt-pg-locale" }
 libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

@@ -61,3 +61,6 @@ common-ip-seams = { path = "../common-ip-seams" }
 common-string-seams = { path = "../common-string-seams" }
 port-pgsleep-seams = { path = "../port-pgsleep-seams" }
 port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

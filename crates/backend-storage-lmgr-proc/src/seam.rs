@@ -25,6 +25,9 @@
 //! the scaffold stage panics through them so the control flow in
 //! `proc_lifecycle` is the real one, never a stub of proc.c's own logic.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use types_core::init::BackendType;
 use types_core::{LocalTransactionId, ProcNumber, TransactionId};
 use types_tuple::Datum;

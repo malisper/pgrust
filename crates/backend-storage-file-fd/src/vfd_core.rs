@@ -8,9 +8,15 @@
 //! reservation family, `count_usable_fds`/`set_max_safe_fds`, and
 //! `InitFileAccess`.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use std::cell::RefCell;
 use std::fs::File as StdFile;
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd};
+#[cfg(target_family = "wasm")]
+use wasm_libc_shim::osfd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::path::Path;
 
 use backend_storage_aio_seams as aio_seams;
@@ -1106,7 +1112,10 @@ fn set_errno(value: i32) {
 /// Render a filesystem path as a NUL-terminated C string for the libc calls
 /// that mirror fd.c's direct `open`/`mkdir`.
 fn path_to_cstring(path: &Path) -> std::ffi::CString {
+    #[cfg(not(target_family = "wasm"))]
     use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_family = "wasm")]
+    use wasm_libc_shim::osfd::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes())
         .unwrap_or_else(|_| std::ffi::CString::new("").unwrap())
 }

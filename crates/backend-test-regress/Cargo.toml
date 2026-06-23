@@ -44,3 +44,6 @@ backend-utils-cache-typcache-seams = { path = "../backend-utils-cache-typcache-s
 backend-optimizer-util-clauses = { path = "../backend-optimizer-util-clauses" }
 backend-optimizer-path-costsize-seams = { path = "../backend-optimizer-path-costsize-seams" }
 types-nodes = { path = "../types-nodes" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

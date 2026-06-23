@@ -44,6 +44,9 @@
 //! (output-plugin dispatch). Those stay seam-panic in [`crate::lib`]; this
 //! module lands only the codec that the spine reaches once a txn is serialized.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 extern crate alloc;
 
 use alloc::vec::Vec;

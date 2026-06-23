@@ -37,3 +37,6 @@ backend-utils-mb-mbutils-seams = { path = "../backend-utils-mb-mbutils-seams" }
 # ICU provider: merged (returns FEATURE_NOT_SUPPORTED in the ICU-disabled
 # profile). Called directly — acyclic (icu depends only on types-*).
 backend-utils-adt-pg-locale-icu = { path = "../backend-utils-adt-pg-locale-icu" }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-libc-shim = { path = "../wasm-libc-shim" }

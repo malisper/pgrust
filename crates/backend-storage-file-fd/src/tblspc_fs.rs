@@ -9,6 +9,9 @@
 //! reported as the C-style `errno` integer so the caller can reproduce
 //! tablespace.c's exact `errno == ENOENT`/`EEXIST` branching.
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_storage_file_tblspc_fs_seams::{StatKind, StatResult};
 use types_error::PgResult;
 

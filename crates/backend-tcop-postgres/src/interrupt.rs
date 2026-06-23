@@ -13,6 +13,9 @@
 
 #![allow(non_snake_case)]
 
+#[cfg(target_family = "wasm")]
+#[allow(unused_imports)]
+use wasm_libc_shim as libc;
 use backend_utils_error::{errcode, errdetail, errfinish, errhint, errmsg, errstart};
 use types_dest::dest::CommandDest;
 use types_error::{
