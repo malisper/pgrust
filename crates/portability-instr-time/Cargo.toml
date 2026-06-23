@@ -9,5 +9,12 @@ name = "portability_instr_time"
 path = "src/lib.rs"
 
 [dependencies]
-libc = "0.2"
 types-core = { path = "../types-core" }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# wasm64 clock: std's Instant/SystemTime panic on wasm64-unknown-unknown, so the
+# monotonic tick reads the host wall clock through the shim.
+wasm-libc-shim = { path = "../wasm-libc-shim" }

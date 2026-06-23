@@ -689,10 +689,8 @@ mod imp {
     /// # Safety
     /// `tloc` is null or a writable `*mut time_t`.
     pub unsafe fn time(tloc: *mut time_t) -> time_t {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as time_t)
-            .unwrap_or(0);
+        // std's SystemTime panics on wasm64-unknown-unknown; read the host clock.
+        let secs = (now_unix_nanos() / 1_000_000_000) as time_t;
         if !tloc.is_null() {
             unsafe { *tloc = secs };
         }
@@ -1049,6 +1047,10 @@ mod imp {
         /// syscall, so the backend's process-exit paths route here; the harness
         /// turns it into a clean store shutdown. Never returns.
         fn host_proc_exit(code: i32) -> !;
+        /// Wall-clock nanoseconds since the Unix epoch. `std::time::SystemTime`
+        /// is unsupported on `wasm64-unknown-unknown` (its `now()` panics), so
+        /// all clock reads route to the host.
+        fn host_now_ns() -> i64;
     }
 
     /// Exit the process via the host (`std::process::exit` traps on
@@ -1056,6 +1058,13 @@ mod imp {
     pub fn proc_exit(code: i32) -> ! {
         // SAFETY: host import; diverges (the host stops the guest).
         unsafe { host_proc_exit(code) }
+    }
+
+    /// Wall-clock nanoseconds since the Unix epoch, from the host (std's
+    /// `SystemTime::now()` panics on `wasm64-unknown-unknown`).
+    pub fn now_unix_nanos() -> i64 {
+        // SAFETY: host import.
+        unsafe { host_now_ns() }
     }
 
     // Public thin wrappers over the raw host imports, used by the `osfile`
@@ -1669,12 +1678,11 @@ mod imp {
     /// `tv` is null or a writable `*mut timeval`.
     pub unsafe fn gettimeofday(tv: *mut timeval, _tz: *mut c_void) -> c_int {
         if !tv.is_null() {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
+            // std's SystemTime panics on wasm64-unknown-unknown; use the host.
+            let ns = now_unix_nanos();
             unsafe {
-                (*tv).tv_sec = now.as_secs() as time_t;
-                (*tv).tv_usec = now.subsec_micros() as suseconds_t;
+                (*tv).tv_sec = (ns / 1_000_000_000) as time_t;
+                (*tv).tv_usec = ((ns % 1_000_000_000) / 1_000) as suseconds_t;
             }
         }
         0

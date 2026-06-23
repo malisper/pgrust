@@ -124,15 +124,11 @@ pub fn clock_realtime_ns() -> i64 {
     (tp.tv_sec as i64) * 1_000_000_000 + (tp.tv_nsec as i64)
 }
 
-/// wasm: no `clock_gettime`/`gettimeofday`. `std::time::SystemTime` resolves
-/// against the wasi wall clock (host-provided); fall back to 0 if unavailable.
+/// wasm: no `clock_gettime`/`gettimeofday`, and `std::time::SystemTime::now()`
+/// panics on `wasm64-unknown-unknown`. Read the host wall clock through the shim.
 #[cfg(target_family = "wasm")]
 pub fn clock_realtime_ns() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as i64)
-        .unwrap_or(0)
+    wasm_libc_shim::now_unix_nanos()
 }
 
 /// Install this crate's seam implementations.

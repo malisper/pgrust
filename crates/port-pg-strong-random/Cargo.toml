@@ -9,5 +9,12 @@ name = "port_pg_strong_random"
 path = "src/lib.rs"
 
 [dependencies]
-libc = "0.2"
 port-pg-strong-random-seams = { path = "../port-pg-strong-random-seams" }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# wasm64 clock: std's SystemTime panics on wasm64-unknown-unknown; the RNG seed's
+# realtime read routes to the host clock via the shim.
+wasm-libc-shim = { path = "../wasm-libc-shim" }

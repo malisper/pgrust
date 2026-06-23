@@ -680,11 +680,20 @@ pub fn AdjustTimestampForTypmod(time: &mut Timestamp, typmod: i32) -> DtResult<(
 /// The C original uses `gettimeofday()`; we use `SystemTime` since the Unix
 /// epoch, which is equivalent.  (`utils/adt/timestamp.c`)
 pub fn GetCurrentTimestamp() -> TimestampTz {
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let tv_sec = dur.as_secs() as i64;
-    let tv_usec = dur.subsec_micros() as i64;
+    // std's `SystemTime::now()` panics on wasm64-unknown-unknown (the platform
+    // has no clock), so read the wall clock from the host VFS/clock import there.
+    #[cfg(not(target_family = "wasm"))]
+    let (tv_sec, tv_usec) = {
+        let dur = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        (dur.as_secs() as i64, dur.subsec_micros() as i64)
+    };
+    #[cfg(target_family = "wasm")]
+    let (tv_sec, tv_usec) = {
+        let ns = wasm_libc_shim::now_unix_nanos();
+        (ns / 1_000_000_000, (ns % 1_000_000_000) / 1_000)
+    };
 
     let result = tv_sec - (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) as i64 * SECS_PER_DAY as i64;
     result * USECS_PER_SEC + tv_usec

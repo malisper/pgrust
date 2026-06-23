@@ -32,18 +32,22 @@ pub fn pg_clock_gettime_ns() -> instr_time {
     }
 }
 
-/// wasm: no `clock_gettime`/`clockid_t`. Use `std::time::Instant` against a
-/// process-start anchor for a monotonic nanosecond tick (single-user; the
-/// underlying wasi clock is monotonic). Faithful to the C contract: ticks are
-/// monotonic nanoseconds, nonzero after the first reading.
+/// wasm: no `clock_gettime`/`clockid_t`, and `std::time::Instant::now()` panics
+/// on `wasm64-unknown-unknown` (the platform's time backend is unsupported), so
+/// read the host wall clock and anchor it to process start for a monotonic
+/// nanosecond tick. Faithful to the C contract: ticks are monotonic
+/// nanoseconds, nonzero after the first reading.
 #[cfg(target_family = "wasm")]
 pub fn pg_clock_gettime_ns() -> instr_time {
     use std::sync::OnceLock;
-    use std::time::Instant;
-    static ANCHOR: OnceLock<Instant> = OnceLock::new();
+    static ANCHOR_NS: OnceLock<i64> = OnceLock::new();
+    let anchor = *ANCHOR_NS.get_or_init(wasm_libc_shim::now_unix_nanos);
     // +1 keeps the very first reading strictly positive (C's CLOCK_MONOTONIC
-    // is never 0 in practice; callers/tests assert ticks > 0).
-    let ns = ANCHOR.get_or_init(Instant::now).elapsed().as_nanos() as i64 + 1;
+    // is never 0 in practice; callers/tests assert ticks > 0). The host clock
+    // is wall-time; for single-user instrumentation a near-monotonic delta off a
+    // fixed anchor is sufficient (clamped to be non-decreasing).
+    let now = wasm_libc_shim::now_unix_nanos();
+    let ns = (now - anchor).max(0) + 1;
     instr_time { ticks: ns }
 }
 

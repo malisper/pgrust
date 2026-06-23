@@ -35,6 +35,11 @@ types-datum = { path = "../types-datum" }
 backend-utils-fmgr-core = { path = "../backend-utils-fmgr-core" }
 backend-utils-adt-arrayutils-seams = { path = "../backend-utils-adt-arrayutils-seams" }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+# wasm64 clock import: std's SystemTime panics on wasm64-unknown-unknown, so
+# GetCurrentTimestamp reads the host wall clock via the shim there.
+wasm-libc-shim = { path = "../wasm-libc-shim" }
+
 [dev-dependencies]
 backend-access-transam-parallel = { path = "../backend-access-transam-parallel" }
 # The `get_share_path` (`common/path.c`) seam, installed by the test harness
