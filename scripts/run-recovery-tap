@@ -1,0 +1,123 @@
+#!/bin/sh
+# Run PostgreSQL's recovery TAP suite (src/test/recovery/t/*.pl) against the
+# pgrust `postgres` binary.
+#
+# The recovery TAP tests drive a real `prove` + PostgreSQL::Test::Cluster
+# harness that spins up multiple postmasters (primary / standby / archive
+# recovery) using the *C* client tools (initdb / pg_ctl / pg_basebackup /
+# pg_archivecleanup / pg_waldump / psql) and the *pgrust* postgres server.
+# This script assembles a "fake install" directory whose bin/postgres is the
+# pgrust release binary and whose every other tool is the real C tool, then
+# points prove at it.
+#
+# Two harness facts are load-bearing and were the reason these tests appeared
+# to "time out" before:
+#
+#   * pgrust's default io_method is `worker` (matching C's DEFAULT_IO_METHOD),
+#     but the worker IO method is unported, so the postmaster panics at startup
+#     unless io_method=sync. The main regress harness passes `-c io_method=sync`
+#     on the postmaster command line; the TAP harness does not, so we inject it
+#     (plus a larger max_stack_depth) through $TEMP_CONFIG, which Cluster.pm
+#     appends to every node's postgresql.conf.
+#   * Cluster.pm's init() shells out to $PG_REGRESS --config-auth to set up
+#     pg_hba.conf; if PG_REGRESS is unset the node init bails ("No postmaster
+#     PID"). We point it at the C pg_regress.
+#
+# Usage:
+#   scripts/run-recovery-tap t/002_archiving.pl [t/003_recovery_targets.pl ...]
+#   scripts/run-recovery-tap              # runs the archive-recovery group
+#
+# Environment overrides:
+#   PG_SRC          path to the C postgres-18.3 source tree (default: sibling
+#                   ../pgrust/postgres-18.3 of the repo's parent)
+#   PG_INSTALL      a full C install dir (with bin/ lib/ share/) to borrow the
+#                   C tools + shared catalogs from (default: /tmp/pgrust_pginstall)
+#   PG_TEST_TIMEOUT_DEFAULT  poll_query_until timeout seconds (default: 90)
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# --- locate the pgrust release binary -----------------------------------
+PGRUST_BIN="${PGRUST_BIN:-$repo_root/target/release/postgres}"
+if [ ! -x "$PGRUST_BIN" ]; then
+    echo "pgrust postgres not found at $PGRUST_BIN; run: cargo build --release --bin postgres" >&2
+    exit 1
+fi
+
+# --- locate the C source tree + a full C install ------------------------
+PG_SRC="${PG_SRC:-$repo_root/../../pgrust/postgres-18.3}"
+if [ ! -d "$PG_SRC/src/test/recovery" ]; then
+    # try the common absolute layout
+    if [ -d "$HOME/workspace/work/pgrust/postgres-18.3/src/test/recovery" ]; then
+        PG_SRC="$HOME/workspace/work/pgrust/postgres-18.3"
+    fi
+fi
+if [ ! -d "$PG_SRC/src/test/recovery" ]; then
+    echo "C postgres source tree not found (set PG_SRC=...); looked at $PG_SRC" >&2
+    exit 1
+fi
+PG_SRC=$(CDPATH= cd -- "$PG_SRC" && pwd)
+
+PG_INSTALL="${PG_INSTALL:-/tmp/pgrust_pginstall}"
+if [ ! -x "$PG_INSTALL/bin/initdb" ] || [ ! -d "$PG_INSTALL/share/postgresql" ]; then
+    echo "full C install not found at PG_INSTALL=$PG_INSTALL (need bin/ + share/)" >&2
+    echo "build/install C postgres there, or set PG_INSTALL=..." >&2
+    exit 1
+fi
+
+# --- locate IPC::Run (the TAP harness needs it) -------------------------
+ipc_run=$(find "$HOME/perl5/lib/perl5" -name Run.pm -path '*IPC*' 2>/dev/null | head -1 || true)
+if [ -n "$ipc_run" ]; then
+    ipc_dir=${ipc_run%/IPC/Run.pm}
+else
+    ipc_dir=""
+fi
+
+# --- assemble the fake install dir --------------------------------------
+INST=/tmp/pgrust_recovery_tap_inst
+rm -rf "$INST"
+mkdir -p "$INST/bin"
+for f in "$PG_INSTALL"/bin/*; do
+    ln -sf "$f" "$INST/bin/$(basename "$f")"
+done
+ln -sf "$PGRUST_BIN" "$INST/bin/postgres"
+ln -sf "$PG_INSTALL/share" "$INST/share"
+ln -sf "$PG_INSTALL/lib" "$INST/lib"
+[ -d "$PG_INSTALL/include" ] && ln -sf "$PG_INSTALL/include" "$INST/include"
+
+# --- TEMP_CONFIG: force io_method=sync (worker unported) ----------------
+tmpconf=/tmp/pgrust_recovery_tap_tempconfig.conf
+cat > "$tmpconf" <<'EOF'
+# pgrust requires io_method=sync (worker io method unported); larger stack
+# depth matches the main regress harness (scripts equivalent of measure.sh's
+# `-c io_method=sync -c max_stack_depth=...`).
+io_method = sync
+max_stack_depth = 7000kB
+EOF
+
+# --- env + run ----------------------------------------------------------
+cd "$PG_SRC/src/test/recovery"
+PERL5LIB="$PG_SRC/src/test/perl"
+[ -n "$ipc_dir" ] && PERL5LIB="$PERL5LIB:$ipc_dir"
+export PERL5LIB
+export PATH="$INST/bin:$PATH"
+export DYLD_LIBRARY_PATH="$PG_INSTALL/lib:${DYLD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$PG_INSTALL/lib:${LD_LIBRARY_PATH:-}"
+export TEMP_CONFIG="$tmpconf"
+export PG_REGRESS="$PG_SRC/src/test/regress/pg_regress"
+export PG_TEST_TIMEOUT_DEFAULT="${PG_TEST_TIMEOUT_DEFAULT:-90}"
+
+rundir=/tmp/pgrust_recovery_tap_data
+rm -rf "$rundir" tmp_check log
+mkdir -p "$rundir"
+export TESTDATADIR="$rundir"
+
+if [ "$#" -eq 0 ]; then
+    set -- t/002_archiving.pl t/003_recovery_targets.pl t/020_archive_status.pl \
+        t/023_pitr_prepared_xact.pl t/024_archive_recovery.pl \
+        t/025_stuck_on_old_timeline.pl t/042_low_level_backup.pl \
+        t/045_archive_restartpoint.pl
+fi
+
+exec prove -v "$@"
