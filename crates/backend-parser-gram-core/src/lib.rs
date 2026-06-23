@@ -179,6 +179,44 @@ fn core_yylex<'mcx>(
             ));
     }
 
+    // scan.l also emits inline `ereport(WARNING)`s while scanning a string
+    // literal: `check_string_escape_warning`/`check_escape_warning` raise
+    // "nonstandard use of \\ / \' / escape in a string literal" (with
+    // `escape_string_warning` on and `standard_conforming_strings` off). The
+    // safe-Rust scanner defers them onto `scanner.warnings`; replay them here on
+    // the live path with the literal-start cursor (`lexer_errposition()` =
+    // `scanner_errposition`, a plain `errposition`). When this seam drives the
+    // PL/pgSQL scanner over a function body, an enclosing
+    // `plpgsql_compile_error_callback` (registered via
+    // `push_emit_context_callback`) transposes that body-relative position into
+    // the original CREATE FUNCTION / DO command text; for a top-level statement
+    // there is no such callback and the position already refers to the active
+    // query, exactly as C's `errposition` does. (The non-PL core parse runs
+    // through the C-FFI `base_yyparse`, which emits these natively, so this seam
+    // path is reached only for the PL/pgSQL scanner.)
+    //
+    // Gated on `plpgsql_body_warnings_armed`: C scans + warns on a function body
+    // exactly once (the cached `forValidator` compile), but this codebase has no
+    // PL/pgSQL function cache, so the body is re-parsed on every call. Arm the
+    // flag only for the validator compile (`parse_function_body`) so the WARNING
+    // is observed once, at CREATE FUNCTION, matching C.
+    if scan_seam::plpgsql_body_warnings_armed() {
+        for w in &scanner.warnings {
+            let cursor = scanner.scanner_errposition(w.location);
+            let mut builder = backend_utils_error::ereport(types_error::error::WARNING)
+                .errcode(SqlState(w.sqlstate.0))
+                .errmsg(w.message);
+            if !w.hint.is_empty() {
+                builder = builder.errhint(w.hint);
+            }
+            let _ = builder.errposition(cursor).finish(types_error::ErrorLocation::new(
+                "scan.l",
+                1424,
+                "check_string_escape_warning",
+            ));
+        }
+    }
+
     let mut str_value: PgVec<'mcx, u8> = PgVec::new_in(mcx);
     match &tok.value {
         CoreYYSTYPE::Str(bytes) => {

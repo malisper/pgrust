@@ -57,3 +57,38 @@ seam_core::seam!(
         pos: i32,
     ) -> PgResult<CoreToken<'mcx>>
 );
+
+// ===========================================================================
+// PL/pgSQL body-scan WARNING arming.
+// ===========================================================================
+
+use core::cell::Cell;
+
+std::thread_local! {
+    static PLPGSQL_BODY_WARNINGS_ARMED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the core lexer should replay its deferred string-literal WARNINGs
+/// (`check_string_escape_warning`/`check_escape_warning`, "nonstandard use of
+/// \\…").
+///
+/// scan.l emits these inline on *every* scan of the affected literal. C scans a
+/// PL/pgSQL function body once — at the `forValidator` compile (CREATE FUNCTION)
+/// — and caches the compiled function, so the WARNING is observed exactly once.
+/// This codebase has no PL/pgSQL function cache yet (the `funccache`/`fn_extra`
+/// bridge is unwired), so a PL/pgSQL function is re-parsed on *every* execution;
+/// replaying the WARNING unconditionally would re-emit it on every call. The
+/// `core_yylex` seam therefore replays the scanner WARNINGs only while this flag
+/// is armed, and `parse_function_body` arms it only for the validator compile —
+/// reproducing C's observable "once, at CREATE FUNCTION" behavior. (The regular
+/// SQL parse path uses the C-FFI `base_yyparse` and emits these WARNINGs
+/// natively, so it never consults this flag.)
+pub fn plpgsql_body_warnings_armed() -> bool {
+    PLPGSQL_BODY_WARNINGS_ARMED.with(Cell::get)
+}
+
+/// Set the arm flag, returning the previous value (so callers can restore it for
+/// safe nesting).
+pub fn set_plpgsql_body_warnings_armed(value: bool) -> bool {
+    PLPGSQL_BODY_WARNINGS_ARMED.with(|c| c.replace(value))
+}

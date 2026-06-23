@@ -2212,6 +2212,34 @@ fn parse_function_body(src: &str) -> PgResult<Box<PLpgSQL_stmt_block>> {
     // returns is on the builtin allocator, so the arena may drop at parse end.
     let ctx = mcx::MemoryContext::new("PL/pgSQL function parse");
     let scanner = backend_pl_plpgsql_scanner::plpgsql_scanner_init(ctx.mcx(), &scanbuf, src);
+    // `plpgsql_compile_error_callback` (pl_comp.c) is on `error_context_stack`
+    // for the WHOLE compile, so it also decorates non-error reports emitted
+    // inline during the body parse — notably the core scanner's
+    // `ereport(WARNING)` for a nonstandard backslash escape in a RAISE message
+    // literal or a SQL-statement string ("nonstandard use of \\ in a string
+    // literal"). Those WARNINGs do not propagate (no `map_err` reaches them), so
+    // register a scoped emit-time context callback that runs the same
+    // `function_parse_error_transpose` over the in-flight WARNING, relocating its
+    // body-relative `internalerrposition`/`internalerrquery` (set by the scanner
+    // seam's `lexer_errposition`, or by `check_sql_expr`'s inner callback) into a
+    // STATEMENT_POSITION in the original CREATE FUNCTION / DO text. This is the
+    // bottom (outermost) callback; `check_sql_expr` may push its
+    // `plpgsql_sql_error_callback` on top, which runs first.
+    let src_cb = src.to_string();
+    let compile_cb_id =
+        backend_utils_error::push_emit_context_callback(Box::new(move |err: &mut PgError| {
+            let taken = core::mem::replace(err, PgError::error(String::new()));
+            *err = comp_seams::function_parse_error_transpose::call(&src_cb, taken)
+                .unwrap_or_else(|fallback| fallback);
+        }));
+    // Arm the core-scanner string-literal WARNING replay (the "nonstandard use
+    // of \\…" warnings the body scan defers) only for the validator compile —
+    // the `plpgsql_check_syntax`/`forValidator` pass that runs at CREATE
+    // FUNCTION. C scans + warns once and caches; this codebase re-parses every
+    // call, so without this gate the warnings would re-fire on each execution
+    // (see `set_plpgsql_body_warnings_armed`).
+    let prev_armed =
+        backend_parser_scan_seams::set_plpgsql_body_warnings_armed(plpgsql_check_syntax());
     // In C the grammar errors via `ereport(ERROR)`, which longjmps out of the
     // compile through `plpgsql_compile_error_callback`.  That callback runs
     // `function_parse_error_transpose` to relocate the body-relative cursor
@@ -2219,7 +2247,10 @@ fn parse_function_body(src: &str) -> PgResult<Box<PLpgSQL_stmt_block>> {
     // drop the "internal query" framing on success).  `plpgsql_yyparse` returns
     // the same `PgError` it would have raised; run the transpose on it before
     // propagating, mirroring the C error-context callback.
-    backend_pl_plpgsql_gram::plpgsql_yyparse_with_lineno(scanner).map_err(|(e, latest_lineno)| {
+    let parse_result = backend_pl_plpgsql_gram::plpgsql_yyparse_with_lineno(scanner);
+    backend_parser_scan_seams::set_plpgsql_body_warnings_armed(prev_armed);
+    backend_utils_error::pop_emit_context_callback(compile_cb_id);
+    parse_result.map_err(|(e, latest_lineno)| {
         // Record the scanner's final line for any later compile error-context.
         set_latest_lineno(latest_lineno);
         // `plpgsql_compile_error_callback` (pl_comp.c): first try to relocate the

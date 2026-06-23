@@ -3776,6 +3776,13 @@ impl<'mcx> Parser<'mcx> {
     /// WARNING (emitted immediately; `errfinish` reports it to the client and
     /// returns).  `is_error=true` would promote to ERROR, but that path goes
     /// through [`Parser::shadowvar_error`] instead so the error propagates.
+    ///
+    /// The body-relative internal position is relocated into the original CREATE
+    /// FUNCTION / DO query text by the compile-wide `plpgsql_compile_error_callback`
+    /// (registered by `parse_function_body` as an emit-time error-context
+    /// callback), which fires for this WARNING in `errfinish` just as C's
+    /// `error_context_stack` walk does — so we emit the positioned WARNING here
+    /// WITHOUT pre-transposing it (doing so would double-transpose the position).
     fn emit_shadowvar(&self, name: &str, loc: i32, _is_error: bool) -> PgResult<()> {
         let msg = format!("variable \"{name}\" shadows a previously defined variable");
         let err = self.scanner.positioned_error(
@@ -3784,7 +3791,7 @@ impl<'mcx> Parser<'mcx> {
             &msg,
             loc,
         );
-        backend_utils_error::ThrowErrorData(self.transpose_compile_error(err))
+        backend_utils_error::ThrowErrorData(err)
     }
 
     /// The `extra_errors=shadowed_variables` ERROR variant of
@@ -3804,19 +3811,6 @@ impl<'mcx> Parser<'mcx> {
         )
     }
 
-    /// `function_parse_error_transpose(prosrc)` (the
-    /// `plpgsql_compile_error_callback` behavior): relocate a body-relative
-    /// cursor/internal position into the original CREATE FUNCTION / DO query
-    /// text.  In C this runs in the compile error-context callback so it fires
-    /// for *every* `ereport` raised during parsing — including the inline
-    /// shadowed-variables WARNING — but this codebase has retired
-    /// `error_context_stack`, so the direct-`ereport` grammar sites apply it
-    /// explicitly here, mirroring `parse_function_body`'s `map_err` for the
-    /// propagated-ERROR path.
-    fn transpose_compile_error(&self, err: PgError) -> PgError {
-        comp_seam::function_parse_error_transpose::call(self.scanner.scanorig(), err)
-            .unwrap_or_else(|fallback| fallback)
-    }
 
     /// `check_sql_expr(stmt, parseMode, location, yyscanner)` (pl_gram.y) wrapped
     /// with the `plpgsql_sql_error_callback` error-context behavior.  The seam
@@ -3843,14 +3837,51 @@ impl<'mcx> Parser<'mcx> {
         parse_mode: RawParseMode,
         location: i32,
     ) -> Result<(), PgError> {
-        comp_seam::check_sql_expr::call(stmt, parse_mode, location).map_err(|err| {
-            // plpgsql_sql_error_callback: parser_errposition(location) →
-            // internalerrposition(pos) + internalerrquery(scanorig).
-            let body_pos = self.scanner.plpgsql_scanner_errposition(location);
-            let mut err = err.with_internal_query(self.scanner.scanorig().to_string());
-            // Transpose the core parser's (plain) error position, if any, onto
-            // the body-relative internal position; otherwise keep the body
-            // position alone. Then clear the plain errposition either way.
+        // plpgsql_sql_error_callback: parser_errposition(location) →
+        // internalerrposition(pos) + internalerrquery(scanorig). `body_pos` is the
+        // 1-based character offset of this statement's start within the function
+        // body, the same for an error (handled in the `map_err` below) and for a
+        // WARNING raised inline by the core scanner (handled by the emit-context
+        // callback) during the inner raw-parse.
+        let body_pos = self.scanner.plpgsql_scanner_errposition(location);
+        let scanorig = self.scanner.scanorig().to_string();
+
+        // C installs `plpgsql_sql_error_callback` on `error_context_stack` for the
+        // WHOLE `raw_parser(stmt, parseMode)` call, so it fires for EVERY report
+        // raised during the parse — including the inline `ereport(WARNING)` the
+        // core scanner emits for a nonstandard backslash escape ("nonstandard use
+        // of \\ in a string literal"). That chain is retired here for errors (they
+        // attach context on propagation, see the `map_err` below), but warnings do
+        // not propagate, so we register a scoped emit-time context callback that
+        // applies the identical `plpgsql_sql_error_callback` transposition to the
+        // in-flight WARNING just before it is emitted: map the statement's body
+        // offset + the scanner's own (statement-relative) cursor to a body-relative
+        // `internalerrposition`, with `internalerrquery = scanorig`. The enclosing
+        // `plpgsql_compile_error_callback` (the compile-wide callback installed by
+        // `parse_function_body`) then relocates that body position into the original
+        // CREATE FUNCTION / DO query text, exactly as C's two-callback chain does
+        // (this callback is registered on TOP, so it runs first / innermost).
+        let scanorig_cb = scanorig.clone();
+        let cb_id = backend_utils_error::push_emit_context_callback(Box::new(move |err: &mut PgError| {
+            err.internal_query = Some(scanorig_cb.clone());
+            let errpos = err.cursor_position.unwrap_or(0);
+            let internal = if body_pos > 0 && errpos > 0 {
+                body_pos + errpos - 1
+            } else {
+                body_pos
+            };
+            err.internal_position = types_error::nonzero_position(internal);
+            err.cursor_position = None;
+        }));
+
+        let result = comp_seam::check_sql_expr::call(stmt, parse_mode, location);
+
+        // Restore `error_context_stack = syntax_errcontext.previous`.
+        backend_utils_error::pop_emit_context_callback(cb_id);
+
+        result.map_err(|err| {
+            // The propagated-error path: same transposition, applied on unwind.
+            let err = err.with_internal_query(scanorig);
             let errpos = err.cursor_position().unwrap_or(0);
             let internal = if body_pos > 0 && errpos > 0 {
                 body_pos + errpos - 1

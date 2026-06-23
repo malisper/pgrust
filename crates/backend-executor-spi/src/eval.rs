@@ -190,8 +190,32 @@ pub fn spi_eval_expr(
     // _SPI_prepare_plan: parse + analyze (with the PL/pgSQL parser hooks) +
     // rewrite + complete the cached plan. This records the referenced datum
     // numbers into `parse_state.paramnos`.
-    let (source, argtypes) = prepare_expr_plan(mcx, interned, parsemode, parse_state.clone())
-        .map_err(|e| spi_error_decorate(e, true))?;
+    //
+    // C installs `_SPI_error_callback` on `error_context_stack` for the whole
+    // prepare, so it also fires for a non-error report raised during the inner
+    // `raw_parser` — e.g. the core scanner's inline `ereport(WARNING)` for a
+    // nonstandard backslash escape ("nonstandard use of \\ in a string
+    // literal"). Errors are decorated on the propagation path below
+    // (`spi_error_decorate`), but warnings do not propagate, so register a
+    // scoped emit-time context callback applying the same syntax-position
+    // promotion to the in-flight WARNING (the `if` branch of `spi_error_decorate`):
+    // promote the cursor to an INTERNAL position + internal query = this embedded
+    // expression text, rendering `LINE n:`/the caret/`QUERY:` against the inner
+    // expression rather than the outer `select fn(...)` call.
+    let query_cb = query.to_string();
+    let prepare_cb_id =
+        backend_utils_error::push_emit_context_callback(Box::new(move |e: &mut types_error::PgError| {
+            if e.cursor_position.unwrap_or(0) > 0 {
+                let pos = e.cursor_position.unwrap();
+                e.cursor_position = None;
+                e.internal_position = types_error::nonzero_position(pos);
+                e.internal_query = Some(query_cb.clone());
+                e.plpgsql_context_attached = false;
+            }
+        }));
+    let prepared = prepare_expr_plan(mcx, interned, parsemode, parse_state.clone());
+    backend_utils_error::pop_emit_context_callback(prepare_cb_id);
+    let (source, argtypes) = prepared.map_err(|e| spi_error_decorate(e, true))?;
 
     // setup_param_list: build the value ParamListInfo from the referenced estate
     // datums. The referenced dnos drive which datums to bind; the param id is

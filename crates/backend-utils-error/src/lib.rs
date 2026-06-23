@@ -108,7 +108,8 @@ pub use stack::{
     errstart_cold, emit_error_report_for, ereport_msg, err_generic_string, geterrcode,
     geterrposition,
     getinternalerrposition, in_error_recursion_trouble, internalerrposition, internalerrquery,
-    pg_re_throw, reset_statement_suppressed, set_errcontext_domain, CopyErrorData, EmitErrorReport,
+    pg_re_throw, pop_emit_context_callback, push_emit_context_callback, reset_statement_suppressed,
+    set_errcontext_domain, CopyErrorData, EmitErrorReport,
     FlushErrorState, FreeErrorData, GetErrorContextStack, ReThrowError, ThrowErrorData,
     ERRORDATA_STACK_SIZE,
 };

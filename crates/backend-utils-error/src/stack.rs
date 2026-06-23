@@ -46,6 +46,91 @@ thread_local! {
     });
 }
 
+/// `error_context_stack` (elog.c): the chain of `ErrorContextCallback`s C walks
+/// in `errfinish` so a report raised deep inside a subsystem can be decorated by
+/// an enclosing frame. The general chain is retired here (errors attach context
+/// on propagation via `PgError::add_context`), but **warnings/notices do not
+/// propagate** — they are emitted inline by `errfinish`, so there is no
+/// propagation point at which to apply an enclosing frame's transform. This
+/// scoped stack restores exactly that one capability for the non-ERROR levels:
+/// a frame (e.g. plpgsql's `check_sql_expr` / SPI's `_SPI_error_callback`) can
+/// register a callback that `errfinish` runs over the in-flight non-ERROR report
+/// before it is emitted, so a WARNING raised by the core scanner during an
+/// embedded raw-parse gets the body-relative `internalerrposition` /
+/// `internalerrquery` it would in C. Innermost-first (`error_context_stack`
+/// order); the ERROR path is unaffected (it returns before emission and uses the
+/// propagation `map_err` already).
+thread_local! {
+    static EMIT_CONTEXT_CALLBACKS: RefCell<Vec<EmitContextCallback>> = const {
+        RefCell::new(Vec::new())
+    };
+}
+
+struct EmitContextCallback {
+    id: u64,
+    callback: Box<dyn FnMut(&mut PgError)>,
+}
+
+thread_local! { static EMIT_CONTEXT_NEXT_ID: Cell<u64> = const { Cell::new(1) }; }
+
+/// Register an emit-time error-context callback (the scoped analogue of pushing
+/// onto C's `error_context_stack`). Returns an opaque id to pass to
+/// [`pop_emit_context_callback`]. The callback is invoked by `errfinish` on the
+/// in-flight non-ERROR report (innermost-registered first), exactly like C's
+/// `error_context_stack` walk, and may mutate position/query/context fields.
+pub fn push_emit_context_callback(callback: Box<dyn FnMut(&mut PgError)>) -> u64 {
+    let id = EMIT_CONTEXT_NEXT_ID.with(|n| {
+        let id = n.get();
+        n.set(id + 1);
+        id
+    });
+    EMIT_CONTEXT_CALLBACKS.with(|s| s.borrow_mut().push(EmitContextCallback { id, callback }));
+    id
+}
+
+/// Unregister the emit-time error-context callback with the given id (the
+/// analogue of restoring `error_context_stack = syntax_errcontext.previous`).
+/// Removes that entry wherever it sits, so out-of-order teardown is safe.
+pub fn pop_emit_context_callback(id: u64) {
+    EMIT_CONTEXT_CALLBACKS.with(|s| {
+        let mut st = s.borrow_mut();
+        if let Some(pos) = st.iter().position(|c| c.id == id) {
+            st.remove(pos);
+        }
+    });
+}
+
+/// Run the registered emit-time context callbacks (innermost-first) over the
+/// in-flight top-of-stack report. Mirrors `errfinish`'s `error_context_stack`
+/// walk for the non-ERROR levels this codebase emits inline.
+fn run_emit_context_callbacks() {
+    // Nothing registered: avoid the clone-out/write-back entirely.
+    if EMIT_CONTEXT_CALLBACKS.with(|s| s.borrow().is_empty()) {
+        return;
+    }
+    // Clone the in-flight error out, run the callbacks over the clone, then
+    // write it back. Cloning (rather than holding the STACK borrow across the
+    // callbacks) keeps the borrow non-overlapping with any error-machinery the
+    // callback itself might touch.
+    let mut error = match STACK.with(|s| s.borrow().frames.last().map(|f| f.error.clone())) {
+        Some(e) => e,
+        None => return,
+    };
+    EMIT_CONTEXT_CALLBACKS.with(|s| {
+        let mut st = s.borrow_mut();
+        // innermost-registered first (top of the stack), as C walks
+        // error_context_stack from the head.
+        for entry in st.iter_mut().rev() {
+            (entry.callback)(&mut error);
+        }
+    });
+    STACK.with(|s| {
+        if let Some(f) = s.borrow_mut().frames.last_mut() {
+            f.error = error;
+        }
+    });
+}
+
 /// The recursion-trouble fallback `debug_query_string = NULL`: the query
 /// string is owned by tcop (behind the context provider), so suppression is
 /// recorded here and honored by `check_log_of_query`. tcop clears it when it
@@ -235,6 +320,11 @@ pub fn errfinish(filename: Option<&str>, lineno: i32, funcname: Option<&str>) ->
         let error = pop_top_frame();
         return Err(error);
     }
+
+    // Run any registered emit-time error-context callbacks over the in-flight
+    // non-ERROR report (C's `error_context_stack` walk in `errfinish`). The
+    // ERROR path returned above and attaches context on propagation instead.
+    run_emit_context_callbacks();
 
     // Emit the message to the right places.
     emit_top_frame();

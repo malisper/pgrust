@@ -13,6 +13,10 @@ mcx = { path = "../mcx" }
 types-core = { path = "../types-core" }
 backend-access-common-tupdesc = { path = "../backend-access-common-tupdesc" }
 types-error = { path = "../types-error" }
+# The live error path — scoped emit-time error-context callbacks
+# (push/pop_emit_context_callback) so the `plpgsql_compile_error_callback`
+# transposition reaches inline WARNINGs raised during the body parse.
+backend-utils-error = { path = "../backend-utils-error" }
 types-datum = { path = "../types-datum" }
 types-plpgsql = { path = "../types-plpgsql" }
 types-tuple = { path = "../types-tuple" }
@@ -26,6 +30,9 @@ backend-pl-plpgsql-funcs = { path = "../backend-pl-plpgsql-funcs" }
 # The grammar this compiler runs (plpgsql_yyparse) + the scanner it drives.
 backend-pl-plpgsql-gram = { path = "../backend-pl-plpgsql-gram" }
 backend-pl-plpgsql-scanner = { path = "../backend-pl-plpgsql-scanner" }
+# Arm the core-scanner string-literal WARNING replay for the validator compile
+# (plpgsql_body_warnings_armed) — see parse_function_body.
+backend-parser-scan-seams = { path = "../backend-parser-scan-seams" }
 
 # Namespace name resolution (catalog/namespace.c) — RangeVarGetRelid for
 # %TYPE/%ROWTYPE over a table (plpgsql_parse_{c,}word{type,rowtype}).
