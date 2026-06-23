@@ -31,14 +31,33 @@ const VARHDRSZ: usize = 4;
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `tsquery` arg's full header-ful varlena image on the by-ref lane (read
-/// verbatim — the value cores consume the `HDRSIZETQ`-headed image).
+/// A `tsquery` arg's full header-ful varlena image on the by-ref lane. The value
+/// cores read the size word at the FIXED offset 4 and `QueryItem`s at `HDRSIZETQ`
+/// (8), so a 4-byte-header base is required (`DatumGetTSQuery` ==
+/// `PG_DETOAST_DATUM` un-packs short->4B). Under `SHORT_VARLENA_PACKING` a small
+/// heap-stored tsquery can be short, so un-pack here before the fixed-offset
+/// struct decode. `arg_text_str` (the `text`-payload reader that also goes
+/// through this) then sees a 4-byte header and strips it correctly. With the flag
+/// OFF the un-pack branch is never taken (behavior-preserving). The short case
+/// leaks a `'static` un-packed buffer (see the tsquery-core note for the
+/// rationale; zero leak while OFF).
 #[inline]
 fn arg_tsquery<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("ts_rewrite fn: by-ref tsquery arg missing from by-ref lane")
+        .expect("ts_rewrite fn: by-ref tsquery arg missing from by-ref lane");
+    if image.first().is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01) {
+        const VARHDRSZ_SHORT: usize = 1;
+        let data_size = ((image[0] >> 1) & 0x7f) as usize - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let mut out = Vec::with_capacity(new_size);
+        out.extend_from_slice(&((new_size as u32) << 2).to_ne_bytes());
+        out.extend_from_slice(&image[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+        Vec::leak(out)
+    } else {
+        image
+    }
 }
 
 /// `VARDATA_ANY` of a header-ful `text` arg: the payload bytes after the

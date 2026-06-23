@@ -34,14 +34,43 @@ const VARHDRSZ: usize = 4;
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `tsquery` arg's full header-ful varlena image on the by-ref lane (read
-/// verbatim — the value cores consume the `HDRSIZETQ`-headed image).
+/// A `tsquery` arg's full header-ful varlena image on the by-ref lane. The value
+/// cores read the size word at the FIXED offset 4 and `QueryItem`s at `HDRSIZETQ`
+/// (8), so a 4-byte-header base is required. `DatumGetTSQuery` is
+/// `PG_DETOAST_DATUM`, which un-packs a short (1-byte) header to 4-byte form;
+/// under `SHORT_VARLENA_PACKING` a small heap-stored `tsquery` (toastable) can be
+/// short, so un-pack here before the fixed-offset decode. With the flag OFF no
+/// stored tsquery is short, so the un-pack branch is never taken
+/// (behavior-preserving). See `unpack_short_tsquery` re: the leak deviation.
 #[inline]
 fn arg_tsquery<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("tsquery fn: by-ref tsquery arg missing from by-ref lane")
+        .expect("tsquery fn: by-ref tsquery arg missing from by-ref lane");
+    unpack_short_tsquery(image)
+}
+
+/// Un-pack a short (1-byte header) tsquery varlena image to the canonical
+/// 4-byte-header form (`SET_VARSIZE` + payload), mirroring `detoast_attr`'s short
+/// arm. A 4-byte / external / compressed image passes through verbatim. The
+/// per-fn adapter must keep a `fcinfo`-tied borrow, so the (never-while-OFF)
+/// short case leaks a `'static` un-packed buffer (C's `PG_DETOAST_DATUM` palloc's
+/// into the fn context, reclaimed at reset; here at process exit). Zero leak with
+/// the flag OFF; bounded to one small alloc per short arg under the flip.
+#[inline]
+fn unpack_short_tsquery(image: &[u8]) -> &[u8] {
+    if image.first().is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01) {
+        const VARHDRSZ_SHORT: usize = 1;
+        let data_size = ((image[0] >> 1) & 0x7f) as usize - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let mut out = Vec::with_capacity(new_size);
+        out.extend_from_slice(&((new_size as u32) << 2).to_ne_bytes());
+        out.extend_from_slice(&image[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+        Vec::leak(out)
+    } else {
+        image
+    }
 }
 
 /// `PG_GETARG_CSTRING(i)`.

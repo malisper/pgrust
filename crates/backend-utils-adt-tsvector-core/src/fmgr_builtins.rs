@@ -46,15 +46,51 @@ use types_stringinfo::StringInfo;
 // Argument readers / result writers.
 // ---------------------------------------------------------------------------
 
-/// A `tsvector` arg's full header-ful varlena image on the by-ref lane (read
-/// verbatim — the value cores consume the `VARHDRSZ`-prefixed image, reading the
-/// size word at offset 4).
+/// A `tsvector` arg's full header-ful varlena image on the by-ref lane. The
+/// value cores consume a `VARHDRSZ`-prefixed (4-byte-header) image, reading the
+/// size word at the FIXED offset 4 and `WordEntry`s at `DATAHDRSIZE` (8); see
+/// `access.rs`. `DatumGetTSVector` is `PG_DETOAST_DATUM`, which un-packs a short
+/// (1-byte header) varlena to 4-byte form, so under `SHORT_VARLENA_PACKING` a
+/// small heap-stored `tsvector` (toastable: typlen == -1, typstorage == 'x')
+/// must be un-packed here before the fixed-offset struct decode. With the flag
+/// OFF no stored tsvector is short, so the un-pack branch is never taken
+/// (behavior-preserving).
 #[inline]
 fn arg_tsvector<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("tsvector fn: by-ref tsvector arg missing from by-ref lane")
+        .expect("tsvector fn: by-ref tsvector arg missing from by-ref lane");
+    unpack_short_tsvector(image)
+}
+
+/// Un-pack a short (1-byte header) tsvector/tsquery varlena image to the
+/// canonical 4-byte-header form (`SET_VARSIZE` + payload), mirroring
+/// `detoast_attr`'s short arm. A 4-byte / external / compressed image passes
+/// through borrowed verbatim (external/compressed args are detoasted upstream).
+///
+/// The struct cores need a 4-byte-header base (their data offsets bake in
+/// `VARHDRSZ == 4`), but the per-fn fmgr arg adapter must keep returning a
+/// borrow tied to `fcinfo`. The (only-under-the-flip, never-while-OFF) short
+/// case therefore leaks a `'static` un-packed buffer — the C analogue
+/// `PG_DETOAST_DATUM` palloc's into the fn's short-lived context (reclaimed at
+/// context reset); here the buffer is reclaimed at process exit. Acceptable for
+/// this flip-prep: the leak is zero while the flag is OFF and bounded to one
+/// small allocation per short tsvector arg under the flip.
+#[inline]
+fn unpack_short_tsvector(image: &[u8]) -> &[u8] {
+    // VARATT_IS_1B && !VARATT_IS_1B_E (short inline header).
+    if image.first().is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01) {
+        const VARHDRSZ_SHORT: usize = 1;
+        let data_size = ((image[0] >> 1) & 0x7f) as usize - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let mut out = Vec::with_capacity(new_size);
+        out.extend_from_slice(&((new_size as u32) << 2).to_ne_bytes());
+        out.extend_from_slice(&image[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+        Vec::leak(out)
+    } else {
+        image
+    }
 }
 
 /// `VARHDRSZ` — the uncompressed varlena length-word size, in bytes.
