@@ -922,7 +922,7 @@ impl<'mcx> Parser<'mcx> {
             self.read_sql_construct(';' as i32, 0, 0, ";", RawParseMode::RAW_PARSE_DEFAULT, false, false)?;
 
         comp_seam::perform_rewrite_query::call(&mut expr);
-        comp_seam::check_sql_expr::call(&expr.query, expr.parseMode, startloc + 1)?;
+        self.check_sql_expr(&expr.query, expr.parseMode, startloc + 1)?;
 
         let new = PLpgSQL_stmt_perform {
             cmd_type: PLpgSQL_stmt_type::PLPGSQL_STMT_PERFORM,
@@ -1476,7 +1476,7 @@ impl<'mcx> Parser<'mcx> {
         if endtok == DOT_DOT {
             // integer loop
             expr1.parseMode = RawParseMode::RAW_PARSE_PLPGSQL_EXPR;
-            comp_seam::check_sql_expr::call(&expr1.query, expr1.parseMode, expr1loc)?;
+            self.check_sql_expr(&expr1.query, expr1.parseMode, expr1loc)?;
 
             let (expr2, tok2) = self.read_sql_expression2(K_LOOP, K_BY, "LOOP")?;
 
@@ -1512,7 +1512,7 @@ impl<'mcx> Parser<'mcx> {
             if reverse {
                 return Err(self.syntax_at("cannot specify REVERSE in query FOR loop", tokloc));
             }
-            comp_seam::check_sql_expr::call(&expr1.query, expr1.parseMode, expr1loc)?;
+            self.check_sql_expr(&expr1.query, expr1.parseMode, expr1loc)?;
 
             let var = self.forvar_to_row_or_rec(&forvar, fv_loc)?;
 
@@ -2884,7 +2884,7 @@ impl<'mcx> Parser<'mcx> {
         let expr = make_plpgsql_expr(&ds, parsemode);
 
         if valid_sql {
-            comp_seam::check_sql_expr::call(&expr.query, expr.parseMode, startlocation)?;
+            self.check_sql_expr(&expr.query, expr.parseMode, startlocation)?;
         }
 
         Ok((expr, startloc_out, endtoken_out))
@@ -3176,7 +3176,7 @@ impl<'mcx> Parser<'mcx> {
 
         let expr = make_plpgsql_expr(&ds, RawParseMode::RAW_PARSE_DEFAULT);
 
-        comp_seam::check_sql_expr::call(&expr.query, expr.parseMode, location)?;
+        self.check_sql_expr(&expr.query, expr.parseMode, location)?;
 
         let lineno = self.loc_to_lineno(location);
         let stmtid = comp_seam::curr_compile_next_stmtid::call();
@@ -3791,13 +3791,17 @@ impl<'mcx> Parser<'mcx> {
     /// [`Parser::emit_shadowvar`].
     fn shadowvar_error(&self, name: &str, loc: i32) -> PgError {
         let msg = format!("variable \"{name}\" shadows a previously defined variable");
-        let err = self.scanner.positioned_error(
+        // The body-relative internal position is relocated into the original
+        // CREATE FUNCTION / DO query text by `parse_function_body`'s `map_err`
+        // (the `plpgsql_compile_error_callback` → `function_parse_error_transpose`
+        // step) once this error has unwound out of `plpgsql_yyparse`; do NOT
+        // transpose here, or the position is transposed twice.
+        self.scanner.positioned_error(
             types_error::ERROR,
             ERRCODE_DUPLICATE_ALIAS,
             &msg,
             loc,
-        );
-        self.transpose_compile_error(err)
+        )
     }
 
     /// `function_parse_error_transpose(prosrc)` (the
@@ -3812,6 +3816,49 @@ impl<'mcx> Parser<'mcx> {
     fn transpose_compile_error(&self, err: PgError) -> PgError {
         comp_seam::function_parse_error_transpose::call(self.scanner.scanorig(), err)
             .unwrap_or_else(|fallback| fallback)
+    }
+
+    /// `check_sql_expr(stmt, parseMode, location, yyscanner)` (pl_gram.y) wrapped
+    /// with the `plpgsql_sql_error_callback` error-context behavior.  The seam
+    /// raw-parses `stmt` for syntax only; a syntax error carries a cursor
+    /// position relative to `stmt` itself.  This codebase has retired
+    /// `error_context_stack`, so we apply the C callback explicitly here:
+    ///
+    ///  - `plpgsql_sql_error_callback`: `parser_errposition(location)` maps the
+    ///    statement's byte offset within the function body (`scanorig`) to a
+    ///    1-based character position and sets it as the *internal* position with
+    ///    `internalerrquery(scanorig)`; the core parser's own (1-based char)
+    ///    error position is then transposed onto it (`myerrpos + errpos - 1`) and
+    ///    the plain errposition is cleared.
+    ///
+    /// The body-relative internal position is then relocated into the original
+    /// CREATE FUNCTION / DO query text by the `plpgsql_compile_error_callback` →
+    /// `function_parse_error_transpose` step — but that runs in
+    /// `parse_function_body`'s `map_err` once the error has unwound out of
+    /// `plpgsql_yyparse`, so we must NOT transpose here (doing so would
+    /// double-transpose the position).
+    fn check_sql_expr(
+        &self,
+        stmt: &str,
+        parse_mode: RawParseMode,
+        location: i32,
+    ) -> Result<(), PgError> {
+        comp_seam::check_sql_expr::call(stmt, parse_mode, location).map_err(|err| {
+            // plpgsql_sql_error_callback: parser_errposition(location) →
+            // internalerrposition(pos) + internalerrquery(scanorig).
+            let body_pos = self.scanner.plpgsql_scanner_errposition(location);
+            let mut err = err.with_internal_query(self.scanner.scanorig().to_string());
+            // Transpose the core parser's (plain) error position, if any, onto
+            // the body-relative internal position; otherwise keep the body
+            // position alone. Then clear the plain errposition either way.
+            let errpos = err.cursor_position().unwrap_or(0);
+            let internal = if body_pos > 0 && errpos > 0 {
+                body_pos + errpos - 1
+            } else {
+                body_pos
+            };
+            err.with_internal_position(internal).with_cursor_position(0)
+        })
     }
 
     /// `errmsg("variable \"%s\" does not exist", name), parser_errposition(loc)`.
