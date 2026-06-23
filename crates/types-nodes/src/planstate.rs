@@ -532,6 +532,31 @@ impl<'mcx> PlanStateNode<'mcx> {
         }
     }
 
+    /// `castNode(MaterialState, node)` — the concrete `MaterialState` of a
+    /// `T_MaterialState` node, or `None` otherwise. Used by EXPLAIN ANALYZE's
+    /// `show_material_info` to reach the node's `tuplestorestate`.
+    pub fn as_material_state(
+        &self,
+    ) -> Option<&crate::nodeforeigncustom::MaterialState<'mcx>> {
+        match self {
+            PlanStateNode::Material(m) => Some(&**m),
+            _ => None,
+        }
+    }
+
+    /// `castNode(BitmapHeapScanState, node)` — the concrete
+    /// `BitmapHeapScanState` of a `T_BitmapHeapScanState` node, or `None`
+    /// otherwise. Used by EXPLAIN ANALYZE's `show_tidbitmap_info` to reach the
+    /// node's `stats` (exact/lossy heap pages).
+    pub fn as_bitmap_heap_scan_state(
+        &self,
+    ) -> Option<&crate::nodebitmapheapscan::BitmapHeapScanState<'mcx>> {
+        match self {
+            PlanStateNode::BitmapHeapScan(b) => Some(&**b),
+            _ => None,
+        }
+    }
+
     /// `castNode(ModifyTableState, node)` — the `ModifyTableState` a
     /// MERGE-owned `ExprState`'s `parent` points at (read by
     /// `EEOP_MERGE_SUPPORT_FUNC` for `mtstate->mt_merge_action`). `None` until

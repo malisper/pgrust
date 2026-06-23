@@ -1181,6 +1181,7 @@ pub fn ExplainNode<'es, 'p>(
                     planstate.ps_head().instrument.as_deref(),
                 )?;
             }
+            show_tidbitmap_info(es, planstate)?;
         }
         ntag::T_FunctionScan => {
             // explain.c:2067-2087: verbose-only show_expression over the list of
@@ -1554,6 +1555,12 @@ pub fn ExplainNode<'es, 'p>(
             // explain.c:2216: show_upper_qual(plan->qual, "Filter") AFTER Group Key.
             let q = clone_expr_qual(mcx, plan.qual.as_ref())?;
             show_upper_qual(es, mcx, plan_node, ancestors, q, "Filter")?;
+        }
+        ntag::T_Material => {
+            // show_material_info (explain.c:2249): under EXPLAIN ANALYZE emit the
+            // Materialize node's tuplestore storage method + peak space
+            // (`Storage: Memory  Maximum Storage: NkB`).
+            show_material_info(es, planstate)?;
         }
         ntag::T_Memoize => {
             // show_memoize_info (explain.c:2253): the "Cache Key" / "Cache Mode"
@@ -3111,6 +3118,64 @@ fn show_windowagg_info(es: &mut ExplainState<'_>, planstate: &PlanStateNode<'_>)
     let (max_storage_type, max_space_used) =
         backend_utils_sort_storage_seams::tuplestore_get_stats::call(buffer);
     crate::details::show_storage_info(es, max_storage_type, max_space_used)?;
+    Ok(())
+}
+
+/// `show_material_info(mstate, es)` (explain.c:3467) — under EXPLAIN ANALYZE,
+/// emit the Materialize node's tuplestore storage method + peak space
+/// (`Storage: Memory  Maximum Storage: NkB`). Nothing is shown if ANALYZE
+/// wasn't requested or execution never created the tuplestore.
+fn show_material_info(es: &mut ExplainState<'_>, planstate: &PlanStateNode<'_>) -> PgResult<()> {
+    if !es.analyze {
+        return Ok(());
+    }
+
+    // Tuplestorestate *tupstore = mstate->tuplestorestate; if (tupstore == NULL) return;
+    let mstate = match planstate.as_material_state() {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+    let Some(tupstore) = mstate.tuplestorestate.as_deref() else {
+        return Ok(());
+    };
+
+    let (max_storage_type, max_space_used) =
+        backend_utils_sort_storage_seams::tuplestore_get_stats::call(tupstore);
+    crate::details::show_storage_info(es, max_storage_type, max_space_used)?;
+    Ok(())
+}
+
+/// `show_tidbitmap_info(planstate, es)` (explain.c:3896) — under EXPLAIN
+/// ANALYZE, emit the Bitmap Heap Scan's `Heap Blocks:` line carrying the exact
+/// and/or lossy page counts. In TEXT format the line is only emitted when at
+/// least one of the counts is nonzero (matching C). Nothing is shown when
+/// ANALYZE wasn't requested.
+fn show_tidbitmap_info(es: &mut ExplainState<'_>, planstate: &PlanStateNode<'_>) -> PgResult<()> {
+    if !es.analyze {
+        return Ok(());
+    }
+
+    let bhs = match planstate.as_bitmap_heap_scan_state() {
+        Some(b) => b,
+        None => return Ok(()),
+    };
+    let exact_pages = bhs.stats.exact_pages;
+    let lossy_pages = bhs.stats.lossy_pages;
+
+    if es.format != ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        fmt::ExplainPropertyUInteger("Exact Heap Blocks", None, exact_pages, es)?;
+        fmt::ExplainPropertyUInteger("Lossy Heap Blocks", None, lossy_pages, es)?;
+    } else if exact_pages > 0 || lossy_pages > 0 {
+        fmt::ExplainIndentText(es)?;
+        es.str.try_push_str("Heap Blocks:")?;
+        if exact_pages > 0 {
+            es.str.try_push_str(&format!(" exact={exact_pages}"))?;
+        }
+        if lossy_pages > 0 {
+            es.str.try_push_str(&format!(" lossy={lossy_pages}"))?;
+        }
+        es.str.try_push_str("\n")?;
+    }
     Ok(())
 }
 
