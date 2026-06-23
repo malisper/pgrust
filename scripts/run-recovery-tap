@@ -75,16 +75,63 @@ else
 fi
 
 # --- assemble the fake install dir --------------------------------------
+#
+# THE LOAD-BEARING SUBTLETY (why prior runs measured C postgres, not pgrust):
+#
+# C `pg_ctl start` does NOT exec `$INST/bin/postgres` directly. It locates the
+# server via find_other_exec("postgres") (src/common/exec.c), which first
+# realpath(3)-canonicalizes pg_ctl's OWN path, then looks for `postgres` in the
+# resolved directory. If `$INST/bin/pg_ctl` is a symlink into the C install,
+# realpath escapes $INST/bin entirely, lands in $PG_INSTALL/bin, and finds the
+# *C* postgres there -- the `$INST/bin/postgres -> pgrust` symlink is ignored.
+# So every server the TAP harness booted was C postgres. (Confirmed via
+# `lsof -p <postmaster> | grep txt`: the executable was $PG_INSTALL/bin/postgres,
+# the 9MB C binary, not the 70MB pgrust binary.)
+#
+# The fix splits server-vs-bootstrap resolution by making two bin entries REAL
+# FILES (so their realpath stays inside $INST/bin) and leaving everything else
+# as symlinks (so they realpath-escape to the C install):
+#
+#   * pg_ctl     = a REAL COPY of the C pg_ctl. Its realpath is now
+#                  $INST/bin/pg_ctl, so it resolves `postgres` to
+#                  $INST/bin/postgres == pgrust. => the SERVER is pgrust.
+#   * postgres   = a REAL COPY of the pgrust binary (NOT a symlink: a symlink
+#                  here would let `cp` onto it clobber the shared C install).
+#   * initdb / pg_basebackup / psql / pg_archivecleanup / pg_waldump / ... =
+#                  symlinks -> $PG_INSTALL/bin/*. C initdb bootstraps a cluster
+#                  by running `postgres --boot`; via the realpath-escape it
+#                  finds the *C* postgres (pgrust's bootstrap path differs and
+#                  exits 101), so cluster init stays on C. Only the running
+#                  SERVER is pgrust -- exactly what we want.
 INST=/tmp/pgrust_recovery_tap_inst
 rm -rf "$INST"
 mkdir -p "$INST/bin"
 for f in "$PG_INSTALL"/bin/*; do
     ln -sf "$f" "$INST/bin/$(basename "$f")"
 done
-ln -sf "$PGRUST_BIN" "$INST/bin/postgres"
+# pg_ctl: real copy so realpath stays in $INST/bin -> resolves pgrust postgres.
+rm -f "$INST/bin/pg_ctl"
+cp -p "$PG_INSTALL/bin/pg_ctl" "$INST/bin/pg_ctl"
+# postgres: real pgrust copy (rm the symlink FIRST so cp can't follow it back
+# into and overwrite the shared C install's postgres).
+rm -f "$INST/bin/postgres"
+cp -p "$PGRUST_BIN" "$INST/bin/postgres"
 ln -sf "$PG_INSTALL/share" "$INST/share"
 ln -sf "$PG_INSTALL/lib" "$INST/lib"
 [ -d "$PG_INSTALL/include" ] && ln -sf "$PG_INSTALL/include" "$INST/include"
+
+# --- self-check: prove pg_ctl will launch the pgrust server -------------
+# (pgrust postgres embeds the unique marker string "PGRUST_TRACE"; the C
+# binary does not.) Resolve `postgres` the same way find_other_exec does and
+# assert it is pgrust, else the harness is silently measuring C postgres again.
+_pgctl_dir=$(cd -- "$(dirname -- "$(/usr/bin/python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$INST/bin/pg_ctl" 2>/dev/null || echo "$INST/bin/pg_ctl")")" && pwd)
+_resolved_postgres="$_pgctl_dir/postgres"
+if ! strings "$_resolved_postgres" 2>/dev/null | grep -q PGRUST_TRACE; then
+    echo "FATAL: pg_ctl would launch a NON-pgrust postgres at $_resolved_postgres" >&2
+    echo "       (no PGRUST_TRACE marker) -- the harness fix has regressed." >&2
+    exit 1
+fi
+echo "harness self-check OK: pg_ctl resolves pgrust server at $_resolved_postgres" >&2
 
 # --- TEMP_CONFIG: force io_method=sync (worker unported) ----------------
 tmpconf=/tmp/pgrust_recovery_tap_tempconfig.conf
