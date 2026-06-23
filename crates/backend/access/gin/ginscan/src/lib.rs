@@ -64,14 +64,14 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 
-use utils_error::{ereport, PgResult};
+use ::utils_error::{ereport, PgResult};
 use ::types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 
 use ::types_core::primitive::{OffsetNumber, Oid};
-use types_core::{InvalidOid, INDEX_MAX_KEYS};
-use gin::{
+use ::types_core::{InvalidOid, INDEX_MAX_KEYS};
+use ::gin::{
     GinNullCategory, GinScanEntryData, GinScanKey, GinScanOpaqueData, GinState, TBMIterateResult,
     TBM_MAX_TUPLES_PER_PAGE, GIN_CAT_EMPTY_ITEM, GIN_CAT_EMPTY_QUERY, GIN_CAT_NORM_KEY,
     GIN_CAT_NULL_KEY, GIN_SEARCH_MODE_ALL, GIN_SEARCH_MODE_DEFAULT, GIN_SEARCH_MODE_EVERYTHING,

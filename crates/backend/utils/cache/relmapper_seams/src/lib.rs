@@ -8,7 +8,7 @@
 
 #![allow(non_snake_case)]
 
-use types_core::{Oid, RelFileNumber};
+use ::types_core::{Oid, RelFileNumber};
 use ::types_error::PgResult;
 
 seam_core::seam!(

@@ -26,13 +26,13 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 use core::mem::{align_of, size_of};
 
-use utils_error::{PgError, PgResult};
+use ::utils_error::{PgError, PgResult};
 
-use control::{
+use ::control::{
     ControlFileData, CheckPoint, DBState, FLOATFORMAT_VALUE, MOCK_AUTH_NONCE_LEN,
     PG_CONTROL_FILE_SIZE, PG_CONTROL_VERSION,
 };
-use types_core::{pg_crc32c, pg_time_t, FullTransactionId, TimeLineID, XLogRecPtr, XLogSegNo};
+use ::types_core::{pg_crc32c, pg_time_t, FullTransactionId, TimeLineID, XLogRecPtr, XLogSegNo};
 use ::types_storage::storage::{pg_atomic_uint64, LWLock, Spinlock, LWTRANCHE_WAL_INSERT};
 use ::wal::xlog_consts::{
     RecoveryState, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD, XLOG_BLCKSZ,

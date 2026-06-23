@@ -7,7 +7,7 @@
 //! `check_ident_usermap` @2818).
 
 use acl_seams as acl;
-use types_error::{ErrorLevel, PgResult};
+use ::types_error::{ErrorLevel, PgResult};
 use ::net::AuthToken;
 
 use crate::matchers::check_role;

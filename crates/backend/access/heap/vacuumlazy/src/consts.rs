@@ -7,7 +7,7 @@
 //! file-scope to this crate so the algorithm modules can reference them by their
 //! canonical names.
 
-use types_core::{BlockNumber, Buffer, MultiXactId, OffsetNumber, TransactionId, XLogRecPtr};
+use ::types_core::{BlockNumber, Buffer, MultiXactId, OffsetNumber, TransactionId, XLogRecPtr};
 
 // ---- storage/block.h, storage/buf.h, storage/off.h ----
 

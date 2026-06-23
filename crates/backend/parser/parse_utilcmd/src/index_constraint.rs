@@ -10,11 +10,11 @@
 
 use alloc::string::ToString;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 use ::equalfuncs::equal_node;
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT,
@@ -30,8 +30,8 @@ use ::types_core::catalog::BTREE_AM_OID;
 use ::types_core::Oid;
 
 use ::types_storage::lock::{AccessShareLock, NoLock};
-use common_relation::{relation_open, relation_openrv};
-use types_tuple::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
+use ::common_relation::{relation_open, relation_openrv};
+use ::types_tuple::{RELKIND_FOREIGN_TABLE, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION};
 
 use plancat_ext_seams as plancat_ext;
 use parse_utilcmd_outward_seams as sx;

@@ -28,7 +28,7 @@
 
 use core::any::Any;
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::array::ArrayElementDatum;
 use ::types_core::Oid;
 use ::types_error::PgResult;

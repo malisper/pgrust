@@ -21,19 +21,19 @@
 
 use std::cell::RefCell;
 
-use utils_error::{elog, ereport, message_level_is_interesting};
-use types_error::{
+use ::utils_error::{elog, ereport, message_level_is_interesting};
+use ::types_error::{
     ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERRCODE_CONNECTION_FAILURE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG, PANIC,
 };
 
-use types_core::{pgsocket, TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
+use ::types_core::{pgsocket, TimeLineID, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
 use ::types_pgstat::wait_event::{
     WAIT_EVENT_WAL_RECEIVER_MAIN, WAIT_EVENT_WAL_RECEIVER_WAIT_START, WAIT_EVENT_WAL_WRITE,
 };
 use ::types_startup::StartupData;
 use ::wal::ArchiveMode;
-use types_walreceiver::{
+use ::types_walreceiver::{
     WalRcvData, WalRcvState, WalRcvStreamOptions, WalRcvWakeupReason, WalReceiverActivity,
     WalReceiverConn, MAXCONNINFO, NAMEDATALEN, NUM_WALRCV_WAKEUPS, TIMESTAMP_INFINITY,
 };
@@ -1776,7 +1776,7 @@ pub fn init_seams() {
     // the GUC slot — none come from the ControlFile) through the slot; install
     // the get/set over this unit's file-scope backing store.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::wal_receiver_status_interval.install(GucVarAccessors {
             get: wal_receiver_status_interval,
             set: set_wal_receiver_status_interval,

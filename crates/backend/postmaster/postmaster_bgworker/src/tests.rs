@@ -99,7 +99,7 @@ fn slot_size_matches_c_field_sum() {
 
 #[test]
 fn rw_accessors_and_keep_walk() {
-    use types_bgworker::{BackgroundWorker, RegisteredBgWorker};
+    use ::types_bgworker::{BackgroundWorker, RegisteredBgWorker};
 
     // Populate the process-local list directly (no shmem needed for the
     // Keep-only path or the rw_* get/set surface).

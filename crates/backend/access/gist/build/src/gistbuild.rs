@@ -47,7 +47,7 @@ use table_tableam_seams as tableam;
 use parallel_rt_seams as parallel_rt;
 use xloginsert_seams as xloginsert;
 use bufmgr_seams as bufmgr;
-use page::{
+use ::page::{
     PageAddItemExtended, PageGetFreeSpace, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
     PageMut, PageRef,
 };
@@ -58,8 +58,8 @@ use ::types_core::primitive::{
     AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, OffsetNumber, RegProcedure, Size,
     BLCKSZ,
 };
-use types_error::{PgError, PgResult};
-use gist::{
+use ::types_error::{PgError, PgResult};
+use ::gist::{
     GistSortedBuildLevelState, GISTSTATE, F_LEAF, GIST_DEFAULT_FILLFACTOR, GIST_ROOT_BLKNO,
     GIST_SORTED_BUILD_PAGE_NUM, GIST_SORTSUPPORT_PROC, GistBuildLSN, SplitPageLayout,
 };

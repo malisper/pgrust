@@ -26,11 +26,11 @@ use std::collections::HashMap;
 
 use ::utils_error::ereport;
 use ::guc_tables::vars;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, COMMERROR, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_PROTOCOL_VIOLATION,
     FATAL, LOG,
 };
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::net::Port;
 
 use be_secure_openssl_ffi_seams as ffi;

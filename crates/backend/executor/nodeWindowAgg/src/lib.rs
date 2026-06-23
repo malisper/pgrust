@@ -60,7 +60,7 @@ use fmgr_seams as fmgr;
 use init_small_seams as globals;
 use sort_storage_seams as tuplestore;
 
-use mcx::{alloc_in, PgBox, PgVec};
+use ::mcx::{alloc_in, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::types_tuple::heaptuple::Datum;
 
@@ -69,7 +69,7 @@ use ::types_core::primitive::{AttrNumber, Oid};
 use ::nodes::execnodes::{EcxtId, SlotId};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::nodes::nodewindowagg::*;
-use nodes::{EStateData, PlanStateNode};
+use ::nodes::{EStateData, PlanStateNode};
 
 const INVALID_OID: Oid = 0;
 

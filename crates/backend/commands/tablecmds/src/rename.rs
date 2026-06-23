@@ -42,7 +42,7 @@ use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attinhcount, Anum_pg_attribute_attnum, PgAttributeUpdateRow,
 };
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
@@ -62,16 +62,16 @@ use ::utils_error::ereport;
 
 use aclchk_seams as aclchk_seam;
 use indexing_seams as indexing_seam;
-use catalog_namespace::{RangeVarGetRelidExtended, RVR_MISSING_OK};
+use ::catalog_namespace::{RangeVarGetRelidExtended, RVR_MISSING_OK};
 use ::pg_constraint::RenameConstraintById;
 use ::lmgr::UnlockRelationOid;
 use pg_depend_seams as depend_seam;
-use pg_inherits::{find_all_inheritors, find_inheritance_children};
+use ::pg_inherits::{find_all_inheritors, find_inheritance_children};
 use pg_type_seams as pg_type_seam;
 use tablespace_globals_seams as ts_globals_seam;
 use lsyscache_seams as lsyscache_seam;
 use ::cache_syscache::cacheinfo::RELOID;
-use cache_syscache::{
+use ::cache_syscache::{
     SearchSysCacheCopyAttName, SysCacheGetAttrNotNull, ATTNAME,
 };
 use syscache_seams as syscache_seam;

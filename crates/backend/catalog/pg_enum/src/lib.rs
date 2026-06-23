@@ -24,7 +24,7 @@
 use core::cell::RefCell;
 use std::collections::HashSet;
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 
 use ::types_catalog::catalog::TYPE_RELATION_ID;
 use ::types_catalog::pg_enum::{
@@ -34,7 +34,7 @@ use ::types_catalog::pg_enum::{
 };
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use ::types_core::Size;
-use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_NAME,
+use ::types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_NAME,
     ERRCODE_INVALID_PARAMETER_VALUE, ERROR, NOTICE};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::{ExclusiveLock, RowExclusiveLock};

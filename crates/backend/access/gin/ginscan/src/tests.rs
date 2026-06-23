@@ -4,7 +4,7 @@
 //! unported substrate owners; those legs are covered by the regress suite once
 //! the GIN engine lands. These tests pin the parts reachable with no substrate.
 
-use gin::{
+use ::gin::{
     GIN_SEARCH_MODE_ALL, GIN_SEARCH_MODE_DEFAULT, GIN_SEARCH_MODE_EVERYTHING,
     GIN_SEARCH_MODE_INCLUDE_EMPTY,
 };

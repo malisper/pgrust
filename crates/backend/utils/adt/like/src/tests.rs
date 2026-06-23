@@ -17,7 +17,7 @@ use pg_locale_seams as locale_seam;
 use mbutils_seams as mb_seam;
 use ::mcx::Mcx;
 use ::types_core::Oid;
-use locale::{CollProvider, PgLocale, PgLocaleStruct};
+use ::locale::{CollProvider, PgLocale, PgLocaleStruct};
 
 static INIT: Once = Once::new();
 

@@ -7,7 +7,7 @@
 //! handle the hash join navigates (`HashJoinTableData`, owned by nodeHash but
 //! consumed here), and the parallel-hash barrier-phase constants.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 

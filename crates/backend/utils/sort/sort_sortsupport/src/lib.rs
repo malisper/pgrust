@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use ::mcx::Mcx;
 use ::types_core::primitive::AttrNumber;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 // Canonical value type (`::types_tuple::Datum<'mcx>`, the ByVal/ByRef enum) —
 // this crate's comparator API (`apply_sort_comparator` / `comparison_shim`)
 // threads canonical `Datum<'mcx>` end-to-end. It drops to the bare-word
@@ -27,13 +27,13 @@ use types_error::{PgError, PgResult};
 // (`function_call2_coll` / `oid_function_call1_coll` argument/return slots).
 use ::types_tuple::Datum;
 use ::rel::Relation;
-use types_sortsupport::{
+use ::types_sortsupport::{
     AbbrevAbortId, AbbrevConverterId, SkipSupportData, SkipSupportIncDecId, SortComparatorId,
     SortSupportData, BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_GT, GIST_AM_OID,
     GIST_SORTSUPPORT_PROC,
 };
 
-use fmgr_core::{
+use ::fmgr_core::{
     datum_to_ref_arg, fmgr_info_cxt, function_call_coll_ref_args,
 };
 use ::fmgr::ResolvedFmgrInfo;

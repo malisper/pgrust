@@ -29,7 +29,7 @@
 #![allow(clippy::result_large_err)]
 
 use ::utils_error::ereport;
-use types_copy::{
+use ::types_copy::{
     AttrValue, CopyHeaderChoice, CopyLogVerbosityChoice, CopyOnErrorChoice, CopyParseState,
     CopySource, EolType, FieldRange, BINARY_SIGNATURE, INPUT_BUF_SIZE, MAX_CONVERSION_INPUT_LENGTH,
     RAW_BUF_SIZE,
@@ -37,7 +37,7 @@ use types_copy::{
 #[allow(unused_imports)]
 use ::types_core::primitive::Oid;
 use types_tuple::heaptuple::Datum;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_BAD_COPY_FILE_FORMAT, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERROR,
 };

@@ -61,8 +61,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_error::{PgError, PgResult};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodeindexscan::{Plan, Scan};
 use ::nodes::noderesult::Result as ResultNode;
 use ::nodes::nodeforeigncustom::Material as MaterialNode;
@@ -103,7 +103,7 @@ use ::nodes::nodeincrementalsort::IncrementalSort as IncrementalSortNode;
 use ::nodes::rawnodes::RangeTblFunction;
 use ::mcx::PgString;
 use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use pathnodes::{
+use ::pathnodes::{
     EcId, IndexOptInfo, MaterialPath, NodeId, Path, PathId, PathKey, PathNode, PathTarget,
     PlannerInfo, RelId, Relids, RinfoId,
     RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION,
@@ -924,7 +924,7 @@ fn create_scan_plan<'mcx>(
 /// `IS_JOIN_REL(rel)` (pathnodes.h) — `rel->reloptkind == RELOPT_JOINREL ||
 /// rel->reloptkind == RELOPT_OTHER_JOINREL`.
 fn is_join_rel(root: &PlannerInfo, rel_id: ::pathnodes::RelId) -> bool {
-    use pathnodes::{RELOPT_JOINREL, RELOPT_OTHER_JOINREL};
+    use ::pathnodes::{RELOPT_JOINREL, RELOPT_OTHER_JOINREL};
     let k = root.rel(rel_id).reloptkind;
     k == RELOPT_JOINREL || k == RELOPT_OTHER_JOINREL
 }
@@ -934,7 +934,7 @@ fn is_join_rel(root: &PlannerInfo, rel_id: ::pathnodes::RelId) -> bool {
 /// deliberately EXCLUDES `RELOPT_UPPER_REL` (4), so a `>= OTHER_MEMBER_REL`
 /// comparison is wrong — it would wrongly include plain upper rels.
 fn is_other_rel(root: &PlannerInfo, rel_id: ::pathnodes::RelId) -> bool {
-    use pathnodes::{RELOPT_OTHER_JOINREL, RELOPT_OTHER_MEMBER_REL, RELOPT_OTHER_UPPER_REL};
+    use ::pathnodes::{RELOPT_OTHER_JOINREL, RELOPT_OTHER_MEMBER_REL, RELOPT_OTHER_UPPER_REL};
     let k = root.rel(rel_id).reloptkind;
     k == RELOPT_OTHER_MEMBER_REL || k == RELOPT_OTHER_JOINREL || k == RELOPT_OTHER_UPPER_REL
 }

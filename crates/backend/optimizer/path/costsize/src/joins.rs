@@ -7,7 +7,7 @@ use ::types_core::primitive::{Cost, Oid, Selectivity};
 use ::types_error::PgResult;
 use ::pathnodes::optimizer_plan::{JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     HashPath, JoinType, MergePath, NestPath, Path, PathId, PathKey, PathNode, PlannerInfo, RelId,
     Relids, RinfoId, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT,
     JOIN_RIGHT_ANTI, JOIN_SEMI,

@@ -51,14 +51,14 @@ use funcapi_seams as funcapi;
 use nodeFuncs_seams as nodeFuncs;
 use sort_storage_seams as tuplestore;
 
-use mcx::{alloc_in, vec_with_capacity_in, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, PgVec};
 use ::types_core::primitive::AttrNumber;
 use ::types_error::PgResult;
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::nodes::funcapi::TypeFuncClass;
 use ::nodes::nodes::Node;
 use ::nodes::nodefunctionscan::FunctionScan;
-use nodes::{
+use ::nodes::{
     EStateData, FunctionScanPerFuncState, FunctionScanState, ScanDirectionIsForward, SlotId,
     TupleSlotKind,
 };

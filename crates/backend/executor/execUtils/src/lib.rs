@@ -47,7 +47,7 @@
 // see DESIGN_DEBT.md (fn items can merge/duplicate across codegen units).
 #![allow(unpredictable_function_pointer_comparisons)]
 
-use heaptuple::{
+use ::heaptuple::{
     getmissingattr, heap_attisnull, heap_getsysattr, nocachegetattr,
 };
 use next_seams as tupconvert_seams;
@@ -65,13 +65,13 @@ use lmgr_seams as lmgr_seams;
 use typcache_seams as typcache_seams;
 use mbutils_seams as mbutils_seams;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, McxOwned, MemoryContext, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use ::types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, InvalidOid, Oid};
 // The canonical unified value type (Datum-unification keystone) — what
 // `ExprContext.caseValue_datum`/`domainValue_datum` and the
 // `ExprContext_CB.arg` callback argument carry.
 use ::types_tuple::heaptuple::Datum;
-use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
+use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::execnodes::{
     EStateData, EcxtId, ExprContext, ExprContextCallbackFunction, ExprContext_CB, RriId,
@@ -80,7 +80,7 @@ use ::nodes::nodes::CMD_UPDATE;
 use ::rel::Relation;
 use ::nodes::parsenodes::{RangeTblEntry, RTEPermissionInfo, RTE_RELATION};
 use ::nodes::primnodes::{Expr, TargetEntry};
-use nodes::{PlanStateData, ScanStateData, SlotId, TupleSlotKind};
+use ::nodes::{PlanStateData, ScanStateData, SlotId, TupleSlotKind};
 use ::types_storage::lock::{AccessShareLock, NoLock};
 use ::types_tuple::heaptuple::{DeformedColumn, FormedTuple};
 use ::types_tuple::heaptuple::{

@@ -67,14 +67,14 @@ pub use overflow::{
 };
 pub use series::{generate_series_int4_rows, GenerateSeriesInt4};
 
-use pqformat::{
+use ::pqformat::{
     pq_begintypsend, pq_endtypsend, pq_getmsgint, pq_sendint16, pq_sendint32,
 };
-use numutils::{pg_itoa, pg_ltoa, pg_strtoint16_safe, pg_strtoint32_safe};
-use utils_error::{ereport, PgError, PgResult, SoftErrorContext};
+use ::numutils::{pg_itoa, pg_ltoa, pg_strtoint16_safe, pg_strtoint32_safe};
+use ::utils_error::{ereport, PgError, PgResult, SoftErrorContext};
 use ::mcx::Mcx;
 use ::datum::Bytea;
-use types_error::{
+use ::types_error::{
     ERRCODE_DIVISION_BY_ZERO, ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERROR,
 };

@@ -39,8 +39,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ::mcx::oom_named;
-use types_core::{CommandId, Size, TransactionId};
-use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_core::{CommandId, Size, TransactionId};
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_tuple::heaptuple::{
     HeapTupleHeaderData, HeapTupleHeaderGetRawCommandId, HeapTupleHeaderGetRawXmin,
     HeapTupleHeaderXminCommitted, HEAP_COMBOCID, HEAP_MOVED, HEAP_XMIN_FROZEN,

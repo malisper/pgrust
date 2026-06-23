@@ -25,22 +25,22 @@ use std::collections::HashMap;
 
 use ::mcx::Mcx;
 
-use types_core::{
+use ::types_core::{
     ForkNumber, Oid, TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo, FSM_FORKNUM, INVALID_PROC_NUMBER,
     MAIN_FORKNUM, MAX_FORKNUM, MAXPGPATH, VISIBILITYMAP_FORKNUM,
 };
-use types_error::{
+use ::types_error::{
     DEBUG1, ERRCODE_INTERNAL_ERROR, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, PgError,
     PgResult, WARNING,
 };
 use ::types_error::ErrorLocation;
 use ::utils_error::ereport;
 use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
-use types_storage::{LWLockMode, RelFileLocator};
+use ::types_storage::{LWLockMode, RelFileLocator};
 use ::types_pgstat::wait_event::{WAIT_EVENT_WAL_SUMMARIZER_ERROR, WAIT_EVENT_WAL_SUMMARIZER_WAL};
 use ::types_startup::StartupData;
 use ::wal::RM_XACT_ID;
-use types_walsummarizer::{BlockTag, ReadRecordResult, WalSummarizerData, WalSummaryFile, XLogReaderHandle};
+use ::types_walsummarizer::{BlockTag, ReadRecordResult, WalSummarizerData, WalSummaryFile, XLogReaderHandle};
 
 use ::types_blkreftable::BlockRefTable;
 

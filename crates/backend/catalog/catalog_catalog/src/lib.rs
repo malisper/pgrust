@@ -22,7 +22,7 @@
 //! globals); each caller's own control flow is ported 1:1.
 
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_COLUMN, ERROR, LOG,
 };
@@ -62,7 +62,7 @@ use ::types_core::catalog::{
 // Datum-unification keystone flipped this edge); scan-key construction carries
 // the canonical value.
 use types_tuple::heaptuple::Datum;
-use rel::{FormData_pg_class, Relation, RelationData};
+use ::rel::{FormData_pg_class, Relation, RelationData};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::snapshot::snapshot::{SnapshotData, SnapshotType};
 use ::types_storage::lock::RowExclusiveLock;

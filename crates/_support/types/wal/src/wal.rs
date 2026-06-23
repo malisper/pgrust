@@ -1,7 +1,7 @@
 //! WAL record types and resource-manager constants.
 
 use ::mcx::PgVec;
-use types_core::{
+use ::types_core::{
     pg_crc32c, pg_time_t, uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber,
     RepOriginId, RmgrId, TimeLineID, TransactionId, XLogRecPtr, MAXPGPATH,
 };

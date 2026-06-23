@@ -20,17 +20,17 @@ use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, TransactionId,
 };
 use ::types_error::PgResult;
-use types_nbtree::{TmIndexDelete, TmIndexDeleteOp};
+use ::types_nbtree::{TmIndexDelete, TmIndexDeleteOp};
 use ::rel::Relation;
 use ::snapshot::snapshot::{SnapshotData, SnapshotType};
 use ::types_storage::buf::BUFFER_LOCK_SHARE;
-use types_storage::{Buffer, InvalidBuffer};
+use ::types_storage::{Buffer, InvalidBuffer};
 use ::types_tuple::heaptuple::{
     HeapTupleHeaderData, ItemPointerData, HEAP_HOT_UPDATED, HEAP_MOVED,
     HEAP_ONLY_TUPLE, HEAP_XMAX_INVALID, INVALID_OFFSET_NUMBER, FIRST_OFFSET_NUMBER,
 };
 
-use page::{
+use ::page::{
     ItemIdHasStorage, ItemIdIsNormal, ItemIdIsRedirected, ItemIdIsUsed,
     ItemIdGetRedirect, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber,
     PageGetItemId, PageGetMaxOffsetNumber, PageRef,
@@ -1101,7 +1101,7 @@ fn bottomup_sort_and_shrink(delstate: &mut TmIndexDeleteOp) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::{MemoryContext, PgVec};
+    use ::mcx::{MemoryContext, PgVec};
     use ::types_nbtree::TmIndexStatus;
 
     fn tid(blk: BlockNumber, off: OffsetNumber) -> ItemPointerData {

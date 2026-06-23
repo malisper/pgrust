@@ -4,8 +4,8 @@
 //! distances dispatch by OID through the canonical-`Datum` fmgr lane (`cmp` /
 //! `distance` are the resolved procedure OIDs from the caller's opaque cache).
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use brin::{BrinDesc, MinmaxMultiRanges};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::brin::{BrinDesc, MinmaxMultiRanges};
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;

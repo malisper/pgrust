@@ -2,7 +2,7 @@
 //! drives. The owner (the catalog/heapam transaction machinery) installs this
 //! from its `init_seams()` when it lands; until then a call panics loudly.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 use ::replication_launcher::Subscription;
 

@@ -47,10 +47,10 @@ use fmgr_seams as fmgr;
 use init_small_seams as globals;
 use tuplesort_seams as tuplesort;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::{AttrNumber, Oid};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use execparallel::{
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::types_core::{AttrNumber, Oid};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
 use ::nodes::execnodes::{ForwardScanDirection, ScanDirectionIsForward};
@@ -64,7 +64,7 @@ use ::types_parallel::shared_dsm_object;
 use ::nodes::nodesort::{
     TuplesortInstrumentation, TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE,
 };
-use nodes::{EStateData, PlanStateNode, SlotData, SlotId, TupleSlotKind};
+use ::nodes::{EStateData, PlanStateNode, SlotData, SlotId, TupleSlotKind};
 
 /// `offsetof(SharedIncrementalSortInfo, sinfo) + nworkers *
 /// sizeof(IncrementalSortInfo)` — the byte size of a `SharedIncrementalSortInfo`

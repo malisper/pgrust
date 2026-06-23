@@ -41,9 +41,9 @@
 use core::cmp::{max, min};
 
 use ::mcx::Mcx;
-use types_core::{InvalidOid, OidIsValid, XLogRecPtr, XLogSegNo};
+use ::types_core::{InvalidOid, OidIsValid, XLogRecPtr, XLogSegNo};
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
@@ -52,10 +52,10 @@ use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::types_tuple::heaptuple::NameData;
 use ::types_tuple::Datum;
 use ::wal::WALAvailability;
-use replication_slot_2::{ReplicationSlotInvalidationCause, ReplicationSlotPersistency};
+use ::replication_slot_2::{ReplicationSlotInvalidationCause, ReplicationSlotPersistency};
 
 use replication_slot as slot;
-use replication_slot::{CopiedSlotValues, SlotSnapshot};
+use ::replication_slot::{CopiedSlotValues, SlotSnapshot};
 
 use funcapi_seams as funcapi;
 use transam_xlog_seams as xlog;

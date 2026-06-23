@@ -21,7 +21,7 @@ pub use config::{
     assign_syslog_ident, check_backtrace_functions, check_log_destination, error_log_config,
     matches_backtrace_functions, BacktraceFunctionList, ErrorLogConfig, LogDestination,
 };
-pub use pg_ffi_fgram::{
+pub use ::pg_ffi_fgram::{
     errcode_is_category, errcode_to_category, make_sqlstate, unpack_sqlstate, ErrorField,
     ErrorLevel, PgrustErrorData, SqlState, COMMERROR, DEBUG1, DEBUG2, DEBUG3, DEBUG4, DEBUG5,
     ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_ADMIN_SHUTDOWN, ERRCODE_AMBIGUOUS_FUNCTION,

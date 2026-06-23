@@ -8,9 +8,9 @@
 //! `dispell_init` / `dispell_lexize`).
 
 use ::define_seams::DefElemArg;
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
-use tsearch::{DictISpell, TSLexeme};
+use ::tsearch::{DictISpell, TSLexeme};
 
 seam_core::seam!(
     /// `dispell_init(dictoptions)` (dict_ispell.c): parse the

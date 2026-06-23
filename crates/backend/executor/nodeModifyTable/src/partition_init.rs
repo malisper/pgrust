@@ -25,7 +25,7 @@ use ::types_error::PgResult;
 use ::types_core::primitive::Index;
 use ::nodes::modifytable::{ONCONFLICT_NONE, ONCONFLICT_UPDATE};
 use ::nodes::nodes::{CmdType, OnConflictAction};
-use nodes::{EStateData, ModifyTableState, RriId};
+use ::nodes::{EStateData, ModifyTableState, RriId};
 
 extern crate alloc;
 

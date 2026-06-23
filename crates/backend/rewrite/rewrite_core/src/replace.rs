@@ -23,12 +23,12 @@ use alloc::vec::Vec;
 
 use ::nodes_core::node_walker::{expression_tree_walker_mut, query_tree_mutator};
 use ::coerce::coerce_null_to_domain;
-use parser_relation::{expandRTE, get_tle_by_resno};
+use ::parser_relation::{expandRTE, get_tle_by_resno};
 use ::lsyscache::type_::get_typlenbyval as lsyscache_get_typlenbyval;
 use ::utils_error::ereport;
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::parsenodes::RangeTblEntry;
 use ::nodes::primnodes::{

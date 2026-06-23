@@ -13,7 +13,7 @@
 
 use std::ffi::{CStr, CString};
 
-use types_error::{PgError, PgResult, ERROR, FATAL};
+use ::types_error::{PgError, PgResult, ERROR, FATAL};
 
 /// PostgreSQL's `MAXPGPATH` (`pg_config_manual.h`).
 const MAXPGPATH: usize = 1024;

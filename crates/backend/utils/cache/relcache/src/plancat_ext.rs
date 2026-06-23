@@ -22,7 +22,7 @@
 use plancat_ext_seams as px;
 use relcache_seams as sx;
 use ::types_core::primitive::{BlockNumber, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use crate::core_entry_store::{self, RelationClose, RelationIdGetRelation, with_relation};
 

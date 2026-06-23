@@ -26,7 +26,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
 use ::types_tuple::heaptuple::ItemPointerData;
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_catalog::catalog::{
@@ -56,11 +56,11 @@ use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 // edge (types-scan's `sk_argument` is still a bare word; the scankey crate is
 // unmigrated), reached via the enum's `from_oid`/`from_i32` -> bare-word
 // conversion.
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, ERRCODE_UNDEFINED_OBJECT,
 };
 use ::nodes::parsenodes::DropBehavior;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, RowExclusiveLock, LOCKMODE};
 use ::types_tuple::heaptuple::Datum;
 

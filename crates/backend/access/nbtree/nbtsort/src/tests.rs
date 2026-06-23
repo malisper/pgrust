@@ -10,11 +10,11 @@
 
 use super::*;
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 use std::sync::Once;
 
 use ::types_core::primitive::{Oid, INVALID_PROC_NUMBER};
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_storage::RelFileLocator;
 
 const IDX_OID: Oid = 16384;

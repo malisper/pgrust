@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use parse::{parsetext, ParsedText};
+use ::parse::{parsetext, ParsedText};
 use ::adt_jsonfuncs::iterate::{iterate_json_values, iterate_jsonb_values};
 use ::adt_jsonfuncs::setops::parse_jsonb_index_flags;
 use ::ts_cache::getTSCurrentConfig;

@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use mcx::{vec_with_capacity_in, MemoryContext};
+use ::mcx::{vec_with_capacity_in, MemoryContext};
 use ::nodes::executor::TupleTableSlot;
 use ::samplescan::TsmRoutine;
 

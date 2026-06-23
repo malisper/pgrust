@@ -25,11 +25,11 @@ use ::int::series::GenerateSeriesInt4;
 use ::funcapi::srf_support::{
     end_MultiFuncCall, init_MultiFuncCall, per_MultiFuncCall,
 };
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::Oid;
 use ::types_datetime::Interval;
 use ::types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::execexpr::ExprDoneCond;
 use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use types_tuple::heaptuple::Datum;

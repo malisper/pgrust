@@ -110,7 +110,7 @@ mod _seam_deps {
 mod adapters {
     use execExpr_seams as execExpr;
     use ::mcx::PgBox;
-    use types_error::{PgError, PgResult};
+    use ::types_error::{PgError, PgResult};
     use ::nodes::execnodes::{EStateData, SlotId};
     use ::nodes::execexpr::ExprState;
     use ::nodes::planstate::PlanStateNode;

@@ -35,10 +35,10 @@ use ::nodes_core::nodefuncs::{expr_collation, expr_type};
 use ::equalfuncs_seams::equal_expr;
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, Index, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::{Expr, TargetEntry, Var};
 use ::nodes::rawnodes::SortGroupClause;
-use pathnodes::{NodeId, PathTarget, PlannerInfo, VOLATILITY_NOVOLATILE, VOLATILITY_UNKNOWN};
+use ::pathnodes::{NodeId, PathTarget, PlannerInfo, VOLATILITY_NOVOLATILE, VOLATILITY_UNKNOWN};
 
 // ===========================================================================
 // tlist_member / tlist_member_match_var (tlist.c:88-128)

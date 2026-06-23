@@ -7,22 +7,22 @@
 
 use core::cell::{Cell, RefCell};
 
-use slru::{
+use ::slru::{
     SimpleLruGetBankLock, SimpleLruInit, SimpleLruReadPage, SimpleLruReadPage_ReadOnly,
     SimpleLruTruncate, SimpleLruWriteAll, SimpleLruZeroPage, SlruCtlData, SlruPagePrecedesUnitTests,
 };
-use transam::{
+use ::transam::{
     TransactionIdFollows, TransactionIdIsValid, TransactionIdPrecedes,
 };
 use ::ipc_shmem::ShmemInitStruct;
-use lwlock::{LWLockAcquire, LWLockRelease};
-use types_storage::{LWLock, LW_EXCLUSIVE, LW_SHARED};
+use ::lwlock::{LWLockAcquire, LWLockRelease};
+use ::types_storage::{LWLock, LW_EXCLUSIVE, LW_SHARED};
 use ::types_core::primitive::BLCKSZ;
 use ::types_core::xact::{FirstNormalTransactionId, InvalidTransactionId, MaxTransactionId};
 use ::types_core::TransactionId;
 use ::types_error::PgResult;
 use ::types_storage::sync::SyncRequestHandler;
-use types_storage::{LWTRANCHE_SERIAL_BUFFER, LWTRANCHE_SERIAL_SLRU};
+use ::types_storage::{LWTRANCHE_SERIAL_BUFFER, LWTRANCHE_SERIAL_SLRU};
 
 use crate::globals::{my_proc_number, recovery_in_progress, serializable_buffers, SerialControlLock};
 use crate::internals::SerCommitSeqNo;

@@ -69,7 +69,7 @@ use syscache_seams as syscache;
 use ::utils_error::elog;
 use ::types_core::Oid;
 use ::nodes::nodes::NodeTag;
-use types_error::{PgError, PgResult, DEBUG2};
+use ::types_error::{PgError, PgResult, DEBUG2};
 use ::nodes::nodeindexscan::CUSTOMPATH_SUPPORT_MARK_RESTORE;
 use ::nodes::nodes::{
     ntag, Node, T_CteScan, T_FunctionScan, T_IndexOnlyScan, T_IndexScan, T_Material, T_MergeAppend,
@@ -77,7 +77,7 @@ use ::nodes::nodes::{
     T_CustomScan,
 };
 use ::nodes::pathnodes::PathNode;
-use nodes::{EStateData, PlanStateNode};
+use ::nodes::{EStateData, PlanStateNode};
 
 /// Install this crate's implementations into its seam slots.
 pub fn init_seams() {

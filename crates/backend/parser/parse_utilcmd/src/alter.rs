@@ -17,11 +17,11 @@
 
 use alloc::string::ToString;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 
 use ::utils_error::ereport;
-use types_core::{Oid, OidIsValid};
-use types_error::{PgResult, ERRCODE_UNDEFINED_COLUMN, ERROR};
+use ::types_core::{Oid, OidIsValid};
+use ::types_error::{PgResult, ERRCODE_UNDEFINED_COLUMN, ERROR};
 use ::types_storage::lock::{AccessShareLock, NoLock};
 
 use ::nodes::ddlnodes::{AlterSeqStmt, AlterTableCmd, AlterTableType::*, ConstrType, DEFELEM_UNSPEC};
@@ -35,8 +35,8 @@ use ::table::table_close;
 use ::pg_depend::getIdentitySequence;
 use ::parse_expr::transformExpr;
 use ::parse_type::typenameTypeId;
-use parser_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
-use small1::{free_parsestate, make_parsestate};
+use ::parser_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
+use ::small1::{free_parsestate, make_parsestate};
 use ::lsyscache::attribute::{get_attnum, get_atttype};
 use ::lsyscache::namespace_range_index_pubsub::get_namespace_name;
 use ::lsyscache::relation::{get_rel_name, get_rel_namespace};

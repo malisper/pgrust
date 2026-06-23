@@ -19,8 +19,8 @@
 
 use core::any::Any;
 
-use mcx::{Mcx, PgBox};
-use types_core::{FullTransactionId, Oid};
+use ::mcx::{Mcx, PgBox};
+use ::types_core::{FullTransactionId, Oid};
 use ::types_error::PgResult;
 use ::nodes::execexpr::ExprDoneCond;
 use ::nodes::fmgr::FunctionCallInfoBaseData;

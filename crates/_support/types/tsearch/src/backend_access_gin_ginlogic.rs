@@ -14,4 +14,4 @@
 //! `ginInitConsistentFunction` and dispatched by `callBoolConsistentFn` /
 //! `callTriConsistentFn`.
 
-pub use gin::{GinBoolConsistentKind, GinScanKey, GinTriConsistentKind};
+pub use ::gin::{GinBoolConsistentKind, GinScanKey, GinTriConsistentKind};

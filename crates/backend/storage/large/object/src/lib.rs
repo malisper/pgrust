@@ -110,8 +110,8 @@ use ::types_catalog::catalog::{
 use ::types_core::fmgr::{F_INT4GE, F_OIDEQ};
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_core::xact::InvalidSubTransactionId;
-use types_core::{int64, uint64};
-use types_error::{
+use ::types_core::{int64, uint64};
+use ::types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };

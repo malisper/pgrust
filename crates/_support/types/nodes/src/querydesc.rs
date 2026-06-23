@@ -35,7 +35,7 @@
 //! - the opaque `QueryDescHandle` newtypes in `types-matview` /
 //!   `types-execparallel`.
 
-use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgString, PgVec};
 
 use crate::execnodes::EStateData;
 use crate::nodeindexscan::PlannedStmt;

@@ -17,9 +17,9 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::{bits32, MultiXactId, Oid, TransactionId};
+use ::types_core::{bits32, MultiXactId, Oid, TransactionId};
 use ::types_error::PgResult;
-use rel::{FormData_pg_class, Relation};
+use ::rel::{FormData_pg_class, Relation};
 use ::types_tuple::heaptuple::ItemPointerData;
 use ::types_vacuum::vacuum::VacuumParams;
 use ::types_storage::buf::BufferAccessStrategy;

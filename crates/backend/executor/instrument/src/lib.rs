@@ -18,13 +18,13 @@
 
 use std::cell::RefCell;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use instr_time::{instr_time_set_current_lazy, pg_clock_gettime_ns};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::instr_time::{instr_time_set_current_lazy, pg_clock_gettime_ns};
 use ::types_core::instrument::{
     BufferUsage, Instrumentation, InstrumentOption, WalUsage, INSTRUMENT_BUFFERS,
     INSTRUMENT_TIMER, INSTRUMENT_WAL,
 };
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 thread_local! {
     /// `BufferUsage pgBufferUsage;` — running, never-reset buffer-access

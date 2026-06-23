@@ -9,8 +9,8 @@
 //! parse-node back-pointers are still parked and their xml.c / json.c workers
 //! have no executor-facing seam yet.
 
-use mcx::{Mcx, PgString};
-use types_error::{
+use ::mcx::{Mcx, PgString};
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_NO_SQL_JSON_ITEM,
 };
@@ -22,7 +22,7 @@ use ::nodes::EStateData;
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{JSONBOID, JSONOID, TEXTOID};
 
-use jsonpath_exec::{
+use ::jsonpath_exec::{
     JsonPathExists, JsonPathQuery, JsonPathValue, JsonPathVariable, JsonPathVars,
     JsonWrapper as PathJsonWrapper,
 };

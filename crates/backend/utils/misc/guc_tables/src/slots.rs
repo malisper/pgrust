@@ -12,7 +12,7 @@ use std::any::Any;
 use std::sync::OnceLock;
 
 use ::types_error::PgResult;
-use types_guc::{config_enum_entry, GucSource};
+use ::types_guc::{config_enum_entry, GucSource};
 
 /// The opaque payload a check hook hands to its paired assign hook — C's
 /// `void **extra` (`utils/guc.h`). Each hook defines its own private struct,

@@ -4,7 +4,7 @@
 use super::*;
 use ::mcx::Mcx;
 use std::sync::Once;
-use types_sortsupport::{SortComparatorId, SortSupportData};
+use ::types_sortsupport::{SortComparatorId, SortSupportData};
 
 const TUPLESORT_NONE: i32 = 0;
 

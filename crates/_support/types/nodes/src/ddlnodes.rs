@@ -19,7 +19,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_core::primitive::{AttrNumber, Oid, ParseLoc, RelFileNumber};
 use ::types_error::PgResult;
 

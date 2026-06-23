@@ -21,7 +21,7 @@ extern crate std;
 
 use core::cell::Cell;
 
-use guc_tables::{hooks, option_sets, vars, GucHookExtra, GucVarAccessors};
+use ::guc_tables::{hooks, option_sets, vars, GucHookExtra, GucVarAccessors};
 use ::types_guc::config_enum_entry;
 use ::types_error::PgResult;
 use ::types_guc::GucSource;
@@ -115,7 +115,7 @@ fn check_wal_consistency_checking(
     extra: &mut Option<GucHookExtra>,
     _source: GucSource,
 ) -> PgResult<bool> {
-    use rmgr::{GetRmgr, RmgrIdExists};
+    use ::rmgr::{GetRmgr, RmgrIdExists};
     use miscinit_seams as misc;
     use ::pgstrcasecmp::pg_strcasecmp;
 

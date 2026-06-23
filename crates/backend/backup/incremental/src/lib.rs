@@ -23,15 +23,15 @@ use ::hashfn::hash_bytes;
 use ::mcx::Mcx;
 use std::collections::HashMap;
 use ::types_blkreftable::BlockRefTable;
-use types_core::{
+use ::types_core::{
     BlockNumber, ForkNumber, InvalidBlockNumber, InvalidOid, Oid, RelFileNumber, TimeLineID,
     XLogRecPtr, BLCKSZ, FSM_FORKNUM, INVALID_PROC_NUMBER, MAIN_FORKNUM,
 };
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, DEBUG1, ERRCODE_INTERNAL_ERROR,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
-use parse_manifest::{
+use ::parse_manifest::{
     JsonManifestParseIncrementalStateHandle, ManifestFileRecord, ParsedManifestChunk,
 };
 use ::types_storage::smgr::RELSEG_SIZE;

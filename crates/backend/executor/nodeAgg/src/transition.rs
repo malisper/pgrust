@@ -2,7 +2,7 @@
 //! it. Covers the simple transfn driver and the ordered/distinct paths that
 //! feed sorted input through the transition function.
 
-use mcx::{alloc_in, Mcx};
+use ::mcx::{alloc_in, Mcx};
 use ::types_error::PgResult;
 use crate::aggstate::{AggStateData, AggStatePerGroupData, AggStatePerTransData};
 use ::nodes::EStateData;

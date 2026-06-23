@@ -18,9 +18,9 @@ use alloc::format;
 use core::cell::RefCell;
 use core::ffi::c_char;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_cash::CashLconv;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use pg_locale_env_seams as env;
 

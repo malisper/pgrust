@@ -13,11 +13,11 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::primitive::Index;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
-use types_explain::{ExplainFormat, ExplainState};
+use ::types_error::{PgError, PgResult};
+use ::types_explain::{ExplainFormat, ExplainState};
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
 use ::types_scan::sdir::{ScanDirection, BackwardScanDirection, ForwardScanDirection};

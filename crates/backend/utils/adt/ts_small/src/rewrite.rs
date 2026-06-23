@@ -3,9 +3,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::utils_error::ereport;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use ::tsearch::tsearch::{OP_AND, OP_NOT, OP_OR};
 use ::types_tuple::heaptuple::TSQUERYOID;
 

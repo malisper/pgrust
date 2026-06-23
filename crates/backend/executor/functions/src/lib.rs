@@ -45,10 +45,10 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use mcx::{Mcx, MemoryContext};
-use types_core::{InvalidOid, Oid};
+use ::mcx::{Mcx, MemoryContext};
+use ::types_core::{InvalidOid, Oid};
 use ::datum::Datum as BareDatum;
-use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::fmgr::boundary::RefPayload;
 use ::fmgr::FunctionCallInfoBaseData;
 use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};

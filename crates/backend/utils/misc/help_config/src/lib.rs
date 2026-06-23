@@ -28,12 +28,12 @@
 use std::fmt::Write as _;
 
 use ::utils_error::ereport;
-use guc_tables::{
+use ::guc_tables::{
     all_settings, config_group_names, GucContext_Names, GucDefaultValue, GucEnumSetting,
     GucSetting,
 };
-use types_error::{PgError, PgResult, ERROR};
-use types_guc::{GUC_DISALLOW_IN_FILE, GUC_NOT_IN_SAMPLE, GUC_NO_SHOW_ALL};
+use ::types_error::{PgError, PgResult, ERROR};
+use ::types_guc::{GUC_DISALLOW_IN_FILE, GUC_NOT_IN_SAMPLE, GUC_NO_SHOW_ALL};
 
 /// Flag bits that hide a GUC from the `--describe-config` listing
 /// (`displayStruct`).

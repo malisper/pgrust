@@ -10,10 +10,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
+use ::types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
 use ::types_core::uint8;
 use ::types_error::PgResult;
-use wal::{ArchiveMode, WalLevel, WalSyncMethod};
+use ::wal::{ArchiveMode, WalLevel, WalSyncMethod};
 
 seam_core::seam!(
     /// `xlog_redo(record)` (xlog.c) — WAL redo for this resource manager's

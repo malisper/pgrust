@@ -7,7 +7,7 @@
 //! `arrayfuncs.c` byte-walk helpers (`array_seek`, `array_bitmap_copy`,
 //! `array_copy`). Zero seams: this is pure arithmetic over `&[u8]`.
 
-use array::{ArrayType, ARRAYTYPE_HDRSZ, MAXDIM};
+use ::array::{ArrayType, ARRAYTYPE_HDRSZ, MAXDIM};
 use ::types_core::Oid;
 use ::datum::datum::Datum;
 

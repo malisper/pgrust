@@ -18,7 +18,7 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 
 /// One token produced by `core_yylex` (the `core_YYSTYPE`/`YYLTYPE` triple plus

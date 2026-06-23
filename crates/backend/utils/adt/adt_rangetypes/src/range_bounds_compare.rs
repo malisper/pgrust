@@ -13,8 +13,8 @@ use ::mcx::Mcx;
 use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::{Oid, OidIsValid};
 use ::datum::datum::Datum;
-use types_error::{PgError, PgResult};
-use types_rangetypes::{RangeBound, RangeTypeP, RANGE_EMPTY};
+use ::types_error::{PgError, PgResult};
+use ::types_rangetypes::{RangeBound, RangeTypeP, RANGE_EMPTY};
 
 use crate::range_repr_serialize::{make_range, range_deserialize, range_get_flags};
 

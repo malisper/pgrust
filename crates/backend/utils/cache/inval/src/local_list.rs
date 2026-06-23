@@ -4,9 +4,9 @@
 //! group's messages out before the seam may re-enter).
 
 use ::mcx::Mcx;
-use types_core::{InvalidOid, ProcNumber};
+use ::types_core::{InvalidOid, ProcNumber};
 use ::types_error::PgResult;
-use types_storage::{
+use ::types_storage::{
     RelFileLocatorBackend, SharedInvalidationMessage, SHAREDINVALCATALOG_ID,
     SHAREDINVALRELCACHE_ID, SHAREDINVALRELMAP_ID, SHAREDINVALRELSYNC_ID, SHAREDINVALSMGR_ID,
     SHAREDINVALSNAPSHOT_ID,

@@ -6,8 +6,8 @@
 //! `*mut DsaArea` pointer the C code holds — never dereferenced by consumers.
 
 #![allow(unused_doc_comments)]
-use execparallel::{DsaAreaHandle, DsmSegmentHandle, DsaPointer, SerializeCursor, Size};
-use types_storage::{dsa_handle, DsaArea};
+use ::execparallel::{DsaAreaHandle, DsmSegmentHandle, DsaPointer, SerializeCursor, Size};
+use ::types_storage::{dsa_handle, DsaArea};
 use ::types_error::PgResult;
 
 // --- Parallel-executor in-place DSA seams (consumer: backend-utils-mmgr-dsa parallel path) ---

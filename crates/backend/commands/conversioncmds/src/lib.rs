@@ -21,10 +21,10 @@
 //! (pg_conversion, which records its own catalog dependencies — so this file
 //! records none separately, exactly as the C does).
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 
-use utils_error::{ereport, PgResult};
-use types_error::{ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_UNDEFINED_OBJECT, ERROR};
+use ::utils_error::{ereport, PgResult};
+use ::types_error::{ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_UNDEFINED_OBJECT, ERROR};
 
 use ::types_acl::acl::{ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE};
 use ::types_catalog::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID};
@@ -34,11 +34,11 @@ use ::nodes::parsenodes::{CreateConversionStmt, ObjectType};
 use ::types_tuple::heaptuple::{BOOLOID, CSTRINGOID, INT4OID, INTERNALOID};
 use ::types_wchar::encoding::PG_SQL_ASCII;
 
-use catalog_namespace::{NameListToString, QualifiedNameGetCreationNamespace};
-use aclchk_seams::{aclcheck_error, object_aclcheck};
+use ::catalog_namespace::{NameListToString, QualifiedNameGetCreationNamespace};
+use ::aclchk_seams::{aclcheck_error, object_aclcheck};
 use ::pg_conversion_seams::conversion_create;
 use ::parse_func_seams::lookup_func_name;
-use lsyscache_seams::{get_func_rettype, get_namespace_name};
+use ::lsyscache_seams::{get_func_rettype, get_namespace_name};
 use ::fmgr_seams::conversion_proc_empty_input_test;
 use ::miscinit_seams::get_user_id;
 use ::encnames_seams::pg_char_to_encoding;

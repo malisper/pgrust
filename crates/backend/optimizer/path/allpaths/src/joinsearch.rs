@@ -4,9 +4,9 @@
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId};
+use ::pathnodes::{PlannerInfo, RelId};
 
 use ::joinrels::join_search_one_level;
 use pathnode_seams as pathnode;

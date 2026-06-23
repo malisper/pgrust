@@ -27,7 +27,7 @@ extern crate std;
 use alloc::vec;
 
 use ::utils_error::PgResult;
-use types_core::{Oid, TimeLineID, XLogRecPtr};
+use ::types_core::{Oid, TimeLineID, XLogRecPtr};
 use ::types_storage::storage::LW_EXCLUSIVE;
 use ::wal::wal::{RM_XLOG_ID, XLOG_MARK_UNIMPORTANT};
 use ::wal::xlog_consts::WalLevel;

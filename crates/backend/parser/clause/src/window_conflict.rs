@@ -7,10 +7,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, Mcx, PgString};
+use ::mcx::{alloc_in, Mcx, PgString};
 
-use types_core::{InvalidOid, Oid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WINDOWING_ERROR, ERROR,
 };
@@ -45,7 +45,7 @@ use ::nodes_core::nodefuncs::{expr_collation, expr_location, expr_type};
 
 use ::vars::tlist::get_sortgroupclause_expr;
 use ::parse_expr::transformExpr;
-use coerce::{can_coerce_type, coerce_to_specific_type};
+use ::coerce::{can_coerce_type, coerce_to_specific_type};
 
 use adt_format_type as format_type;
 use lsyscache_seams as lsyscache;

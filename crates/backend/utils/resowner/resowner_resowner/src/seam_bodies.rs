@@ -4,7 +4,7 @@
 
 use ::datum::Datum;
 use ::types_error::PgResult;
-use types_resowner::{
+use ::types_resowner::{
     ResourceOwner, RESOURCE_RELEASE_AFTER_LOCKS, RESOURCE_RELEASE_BEFORE_LOCKS,
     RESOURCE_RELEASE_LOCKS,
 };

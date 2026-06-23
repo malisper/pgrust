@@ -26,7 +26,7 @@ extern crate alloc;
 extern crate std;
 
 use core::cmp::min;
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_error::PgResult;
 
 /// 16-bit signed integer, matching PostgreSQL's `int16`.

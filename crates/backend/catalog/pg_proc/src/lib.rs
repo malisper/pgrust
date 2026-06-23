@@ -65,29 +65,29 @@ use ::types_tuple::heaptuple::{
 use ::types_catalog::pg_type::TYPTYPE_PSEUDO;
 
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 
 use ::table::table_open;
-use dependency::{
+use ::dependency::{
     add_exact_object_address, new_object_addresses, record_object_address_dependencies,
 };
 use ::objectaccess::invoke_object_post_create_hook;
 use ::pg_depend::deleteDependencyRecordsFor;
 use ::pg_shdepend::recordDependencyOnOwner;
-use coerce::{check_valid_internal_signature, check_valid_polymorphic_signature};
+use ::coerce::{check_valid_internal_signature, check_valid_polymorphic_signature};
 
 use transam_xact_seams as xact_seams;
 use aclchk_seams as aclchk_seams;
 use indexing_seams as indexing_seams;
 use ::pg_depend_seams::recordDependencyOnCurrentExtension;
 use pg_proc_seams as seam;
-use pg_proc_seams::{DefaultCompat, RecordTypeChange};
+use ::pg_proc_seams::{DefaultCompat, RecordTypeChange};
 use ::format_type_seams::format_type_be_str;
 use ::regproc_seams::format_procedure;
-use lsyscache_seams::{get_element_type, get_typtype};
+use ::lsyscache_seams::{get_element_type, get_typtype};
 use syscache_seams as seam_syscache;
 
 use ::types_acl::ACLCHECK_NOT_OWNER;

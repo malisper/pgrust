@@ -22,23 +22,23 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{Oid, PgWChar};
 use ::types_error::PgResult;
-use locale::{CollProvider, PgLocaleStruct};
+use ::locale::{CollProvider, PgLocaleStruct};
 use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 
-use unicode_case::{
+use ::unicode_case::{
     unicode_lowercase_simple, unicode_strfold, unicode_strlower, unicode_strtitle,
     unicode_strupper, unicode_uppercase_simple,
 };
-use unicode_category::{
+use ::unicode_category::{
     pg_u_isalnum, pg_u_isalpha, pg_u_isdigit, pg_u_isgraph, pg_u_islower, pg_u_isprint,
     pg_u_ispunct, pg_u_isspace, pg_u_isupper,
 };
 
 use collationcmds_seams as cc;
-use pg_locale_builtin_seams::{self as seams, PgLocaleBuiltinResult};
+use ::pg_locale_builtin_seams::{self as seams, PgLocaleBuiltinResult};
 use pg_locale_catalog_seams as catalog;
 use ::pg_locale_seams::RegexWcClass;
 use init_small_seams as init_small;

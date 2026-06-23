@@ -4,7 +4,7 @@
 use ::mcx::MemoryContext;
 use ::types_core::instrument::Instrumentation;
 use ::nodes::executor::{TupleTableSlot, TTS_FLAG_EMPTY};
-use nodes::{EStateData, NestLoopStateData, TupleSlotKind};
+use ::nodes::{EStateData, NestLoopStateData, TupleSlotKind};
 
 use super::{instr_count_filtered1, instr_count_filtered2, tup_is_null};
 

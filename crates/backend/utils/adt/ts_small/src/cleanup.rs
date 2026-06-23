@@ -3,9 +3,9 @@
 
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, Mcx, PgBox};
+use ::mcx::{alloc_in, Mcx, PgBox};
 use ::utils_error::ereport;
-use types_error::{PgError, PgResult, NOTICE};
+use ::types_error::{PgError, PgResult, NOTICE};
 use ::tsearch::tsearch::{
     QueryItem, QueryItemType, HDRSIZETQ, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_OPR, QI_VAL,
     QI_VALSTOP,

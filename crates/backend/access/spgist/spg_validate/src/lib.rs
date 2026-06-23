@@ -20,11 +20,11 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{Oid, OidIsValid};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{Oid, OidIsValid};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
 use ::opclass::AMOP_SEARCH;
-use spgist::{
+use ::spgist::{
     spgConfigIn, spgConfigOut, SPGISTNProc, SPGIST_CHOOSE_PROC, SPGIST_COMPRESS_PROC,
     SPGIST_CONFIG_PROC, SPGIST_INNER_CONSISTENT_PROC, SPGIST_LEAF_CONSISTENT_PROC,
     SPGIST_OPTIONS_PROC, SPGIST_PICKSPLIT_PROC,

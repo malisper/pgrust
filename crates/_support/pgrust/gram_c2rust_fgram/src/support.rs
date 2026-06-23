@@ -31,10 +31,10 @@ use backend_nodes_types::parsenodes_ddl::*;
 use backend_nodes_types::parsenodes_stmts::*;
 use backend_nodes_types::primnodes::*;
 use backend_nodes_types::Alias;
-use pg_ffi_fgram::{BitString, Boolean, Float, Integer, List, ListCell, Node, StringNode};
+use ::pg_ffi_fgram::{BitString, Boolean, Float, Integer, List, ListCell, Node, StringNode};
 
 use ::driver_fgram::BaseLexer;
-use scan_fgram::{tokens, CoreYYSTYPE, Scanner, ScannerSettings, Token, Utf8UnicodeSeam};
+use ::scan_fgram::{tokens, CoreYYSTYPE, Scanner, ScannerSettings, Token, Utf8UnicodeSeam};
 use ::pg_ffi_fgram::spi::RawParseMode;
 
 use crate::gram::{

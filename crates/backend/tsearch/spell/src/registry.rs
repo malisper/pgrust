@@ -16,8 +16,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use ::utils_error::ereport;
-use mcx::{McxOwned, MemoryContext};
-use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+use ::mcx::{McxOwned, MemoryContext};
+use ::types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 use ::tsearch::SpellHandle;
 
 use crate::IspellDict;

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId, Relids};
+use ::pathnodes::{PlannerInfo, RelId, Relids};
 
 use relnode_seams as bms;
 use equivclass_ext_seams as eqext;

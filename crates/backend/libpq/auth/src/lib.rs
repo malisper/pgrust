@@ -40,18 +40,18 @@ mod radius;
 #[cfg(test)]
 mod tests;
 
-use utils_error::{elog, ereport};
+use ::utils_error::{elog, ereport};
 use ::mcx::Mcx;
-use types_error::{ErrorLocation, PgResult, DEBUG5, ERROR, FATAL, LOG};
-use types_core::{
+use ::types_error::{ErrorLocation, PgResult, DEBUG5, ERROR, FATAL, LOG};
+use ::types_core::{
     uaBSD, uaCert, uaGSS, uaIdent, uaImplicitReject, uaLDAP, uaMD5, uaOAuth, uaPAM, uaPassword,
     uaPeer, uaRADIUS, uaReject, uaSCRAM, uaSSPI, uaTrust, UserAuth,
 };
-use types_error::{
+use ::types_error::{
     ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION,
     ERRCODE_INVALID_PASSWORD, ERRCODE_PROTOCOL_VIOLATION,
 };
-use net::{clientCertFull, clientCertOff, Port};
+use ::net::{clientCertFull, clientCertOff, Port};
 
 pub(crate) use user_seams as user_seams;
 pub(crate) use auth_seams as seams;
@@ -839,7 +839,7 @@ pub fn init_seams() {
     // Read directly by auth.c at runtime (none come from the ControlFile);
     // the GUC engine reads via `.read()` and writes assignments via `.write()`.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::pg_krb_caseins_users.install(GucVarAccessors {
             get: gucvars::krb_caseins_users,
             set: gucvars::set_krb_caseins_users,

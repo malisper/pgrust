@@ -28,9 +28,9 @@ use alloc::format;
 
 use ::utils_error::ereport;
 use ::mcx::MemoryContext;
-use types_error::{ErrorLocation, PgResult};
-use types_error::{DEBUG1, DEBUG3, FATAL, LOG};
-use types_pgarch::{ArchiveModuleCallbacks, ArchiveModuleState};
+use ::types_error::{ErrorLocation, PgResult};
+use ::types_error::{DEBUG1, DEBUG3, FATAL, LOG};
+use ::types_pgarch::{ArchiveModuleCallbacks, ArchiveModuleState};
 
 use transam_xlog_seams as xlog;
 use shell_archive_seams as inward;

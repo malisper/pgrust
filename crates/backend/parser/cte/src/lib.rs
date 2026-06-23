@@ -81,10 +81,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 
 use ::types_core::primitive::{InvalidOid, Oid};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_DUPLICATE_ALIAS, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_RECURSION, ERRCODE_OUT_OF_MEMORY,

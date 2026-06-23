@@ -114,12 +114,12 @@ pub use stack::{
     ERRORDATA_STACK_SIZE,
 };
 pub use syslog::write_syslog;
-pub use types_error::{ErrorLevel, PgError, PgResult, SoftErrorContext, SqlState};
+pub use ::types_error::{ErrorLevel, PgError, PgResult, SoftErrorContext, SqlState};
 
 /// Install this crate's implementations into its seam crate, plus its GUC
 /// storage variables and hooks into the GUC tables' typed slots.
 pub fn init_seams() {
-    use guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
+    use ::guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
     use ::types_error::PGErrorVerbosity;
 
     error_seams::ereport::set(stack::ThrowErrorData);

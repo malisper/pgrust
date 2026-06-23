@@ -8,7 +8,7 @@
 //! re-parse-as-float fallback in `parse_int`.
 
 use ::types_core::BLCKSZ;
-use types_guc::{
+use ::types_guc::{
     GUC_UNIT, GUC_UNIT_BLOCKS, GUC_UNIT_BYTE, GUC_UNIT_KB, GUC_UNIT_MB, GUC_UNIT_MEMORY,
     GUC_UNIT_MIN, GUC_UNIT_MS, GUC_UNIT_S, GUC_UNIT_XBLOCKS,
 };

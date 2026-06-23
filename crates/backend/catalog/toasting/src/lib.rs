@@ -12,14 +12,14 @@
 use ::mcx::Mcx;
 use ::types_cluster::RelOptionsToken;
 use ::types_core::primitive::{AttrNumber, Oid};
-use types_core::{InvalidOid, OidIsValid, PG_TOAST_NAMESPACE, RELATION_RELATION_ID};
+use ::types_core::{InvalidOid, OidIsValid, PG_TOAST_NAMESPACE, RELATION_RELATION_ID};
 // The toast-table `reloptions` parameter travels as the opaque
 // [`RelOptionsToken`] forwarded into the `heap_create_with_catalog` seam.
 // The separate `index_create` seam still takes the canonical unified
 // `Datum<'mcx>` for its own `reloptions` field, so this crate constructs
 // `Datum::null()` for the toast index.
 use ::types_tuple::heaptuple::Datum;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::execnodes::IndexInfo;
 use ::nodes::primnodes::OnCommitAction;
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};

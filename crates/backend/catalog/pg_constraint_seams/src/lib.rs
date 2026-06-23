@@ -12,7 +12,7 @@
 use ::mcx::Mcx;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use types_ri_triggers::{FkConstraintRow, PeriodOpers};
+use ::types_ri_triggers::{FkConstraintRow, PeriodOpers};
 
 seam_core::seam!(
     /// Register `InvalidateConstraintCacheCallBack` for `CONSTROID`

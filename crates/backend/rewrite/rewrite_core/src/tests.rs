@@ -2,7 +2,7 @@
 //! couple of the in-place Var mutators over a bare expression tree.
 
 use crate::relids;
-use mcx::{MemoryContext, PgBox, PgVec};
+use ::mcx::{MemoryContext, PgBox, PgVec};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{CmdType, Node, NodePtr};
 use ::nodes::parsenodes::{RTEPermissionInfo, RangeTblEntry};

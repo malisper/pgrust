@@ -43,12 +43,12 @@
 
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use utils_error::{elog, ereport};
+use ::utils_error::{elog, ereport};
 use ::prng_base64::base64::{pg_b64_dec_len, pg_b64_decode, pg_b64_enc_len, pg_b64_encode};
 use ::sha2::PG_SHA256_DIGEST_LENGTH;
 use ::control::MOCK_AUTH_NONCE_LEN;
 use ::crypto::pg_cryptohash_type;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERROR, LOG, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INTERNAL_ERROR, ERRCODE_PROTOCOL_VIOLATION,
 };
@@ -1597,7 +1597,7 @@ fn bytes_to_str_lossless(b: &[u8]) -> String {
 /// Install the inward seam this crate owns: `check_scram_sasl_auth`, the SCRAM
 /// arm of the `CheckSASLAuth` driver that `auth.c` consumes.
 pub fn init_seams() {
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     auth_seams::check_scram_sasl_auth::set(check_scram_sasl_auth_entry);
 

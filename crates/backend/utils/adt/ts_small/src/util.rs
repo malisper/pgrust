@@ -3,9 +3,9 @@
 
 use alloc::vec::Vec;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::utils_error::ereport;
-use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
 use ::tsearch::tsearch::{
     QueryItem, QueryOperand, QueryOperator, HDRSIZETQ, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_OPR,
     QI_VAL,

@@ -9,10 +9,10 @@
 //! the seam uses, deform, and assert the flip landed while the untouched
 //! columns round-trip unchanged.
 
-use heaptuple::{
+use ::heaptuple::{
     heap_deform_tuple, heap_form_tuple, heap_modify_tuple, Datum,
 };
-use mcx::{slice_in, Mcx, MemoryContext, PgVec};
+use ::mcx::{slice_in, Mcx, MemoryContext, PgVec};
 use ::types_tuple::heaptuple::{CompactAttribute, TupleDescData};
 
 /// A by-value `CompactAttribute` of the given `attlen`/alignment.

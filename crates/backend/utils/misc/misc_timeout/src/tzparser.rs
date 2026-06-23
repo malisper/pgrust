@@ -17,7 +17,7 @@
 
 use ::adt_datetime::seam_impls::convert_time_zone_abbrevs;
 use ::port_path_seams::read_tz_file;
-use misc_more2::{TimeZoneAbbrevTable, TzEntry, TzFileOpenError, TzFileResult, SECS_PER_HOUR, TOKMAXLEN};
+use ::misc_more2::{TimeZoneAbbrevTable, TzEntry, TzFileOpenError, TzFileResult, SECS_PER_HOUR, TOKMAXLEN};
 
 /// `#define WHITESPACE " \t\n\r"` (tzparser.c) — the `strtok_r` delimiters.
 const WHITESPACE: &[char] = &[' ', '\t', '\n', '\r'];

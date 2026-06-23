@@ -48,8 +48,8 @@ use postgres_seams as tcop_postgres;
 use lsyscache_seams as lsyscache;
 use sortsupport_seams as sortsupport;
 
-use mcx::{alloc_in, PgBox};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::mcx::{alloc_in, PgBox};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use ::nodes::jointype::{
     JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_SEMI,
@@ -60,11 +60,11 @@ use ::nodes::nodemergejoin::{
     EXEC_MJ_SKIPOUTER_ADVANCE, EXEC_MJ_SKIP_TEST, EXEC_MJ_TESTOUTER,
 };
 use ::nodes::primnodes::Expr;
-use nodes::{
+use ::nodes::{
     EStateData, EcxtId, MergeJoin, MergeJoinClauseData, MergeJoinStateData, PlanStateNode,
     SlotId, TupleSlotKind,
 };
-use types_sortsupport::{BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_EQ};
+use ::types_sortsupport::{BTORDER_PROC, BTSORTSUPPORT_PROC, COMPARE_EQ};
 
 /// `MJEvalResult` — result of [`MJEvalOuterValues`] / [`MJEvalInnerValues`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -18,7 +18,7 @@
 //! * `Drop` — the abort path: an error unwinding past the guard releases the
 //!   lock, which is what C's transaction-abort resowner sweep would do.
 
-use types_core::{Oid, TransactionId, VirtualTransactionId};
+use ::types_core::{Oid, TransactionId, VirtualTransactionId};
 use ::types_error::PgResult;
 use ::types_storage::lock::LOCKMODE;
 

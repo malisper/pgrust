@@ -38,9 +38,9 @@
 //! `lookup_rowtype_tupdesc` (typcache-seams) and the heaptuple form/deform/copy
 //! core.
 
-use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
+use ::types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 use ::types_tuple::heaptuple::{FormedTuple, Datum};
 use ::types_tuple::heaptuple::{TupleDescData, BITMAPLEN, RECORDOID};
 

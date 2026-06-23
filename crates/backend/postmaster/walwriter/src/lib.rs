@@ -47,7 +47,7 @@ use ::types_startup::StartupData;
 use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 use ::wal::xlog_consts::XLOG_BLCKSZ;
 
-use transam_xlog::{SetWalWriterSleeping, XLogBackgroundFlush};
+use ::transam_xlog::{SetWalWriterSleeping, XLogBackgroundFlush};
 use interrupt as interrupt;
 
 use aio_seams as aio;
@@ -398,7 +398,7 @@ pub fn init_seams() {
     // WalWriterFlushAfter). Neither comes from the ControlFile. Bridge the GUC
     // slots to this crate's process-wide cells.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::WalWriterDelay.install(GucVarAccessors {
             get: WalWriterDelay,
             set: set_WalWriterDelay,

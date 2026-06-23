@@ -14,10 +14,10 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_catalog::pg_constraint::{ConKeyArray, FormData_pg_constraint};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_tuple::heaptuple::INT2OID;
 
 use crate::{

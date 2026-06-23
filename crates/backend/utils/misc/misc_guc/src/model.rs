@@ -18,13 +18,13 @@
 //! records (the GUC value surface other crates use is the typed `vars` slots in
 //! guc_tables + the read-through accessors in [`crate::live`]).
 
-use guc_tables::{
+use ::guc_tables::{
     GucBoolAssignHook, GucBoolCheckHook, GucEnumAssignHook, GucEnumCheckHook, GucEnumOptions,
     GucHookExtra, GucIntAssignHook, GucIntCheckHook, GucRealAssignHook, GucRealCheckHook,
     GucShowHook, GucStringAssignHook, GucStringCheckHook,
 };
-use types_core::{Oid, BOOTSTRAP_SUPERUSERID};
-use types_guc::{
+use ::types_core::{Oid, BOOTSTRAP_SUPERUSERID};
+use ::types_guc::{
     config_enum_entry, config_group, config_type, GucContext, GucSource, PGC_INTERNAL,
     PGC_S_DEFAULT,
 };

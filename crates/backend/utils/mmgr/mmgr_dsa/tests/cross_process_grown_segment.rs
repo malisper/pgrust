@@ -29,7 +29,7 @@ use ::mmgr_dsa::runtime::{
     dsa_allocate_extended, dsa_attach, dsa_attach_in_place, dsa_create_in_place_ext,
     dsa_get_address, dsa_get_handle,
 };
-use mmgr_dsa::{
+use ::mmgr_dsa::{
     DsaPointer, DSA_DEFAULT_INIT_SEGMENT_SIZE, DSA_MAX_SEGMENT_SIZE, DSA_MIN_SEGMENT_SIZE,
     DSA_OFFSET_WIDTH,
 };

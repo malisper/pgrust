@@ -13,7 +13,7 @@
 //! `HyperLogLog` estimator stay in the foundational `types-nodes` crate; this
 //! module names them downward through `nodes::`.
 
-use mcx::{Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgBox, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;

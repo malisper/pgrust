@@ -28,8 +28,8 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, PgBox};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::mcx::{Mcx, PgBox};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::nodes::execstate_tags::T_BitmapIndexScanState;
 use ::nodes::EStateData;

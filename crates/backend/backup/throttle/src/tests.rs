@@ -16,7 +16,7 @@ use core::cell::RefCell;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, MutexGuard, Once};
 
-use sink::{
+use ::sink::{
     bbsink_archive_contents, bbsink_begin_archive, bbsink_begin_backup, bbsink_begin_manifest,
     bbsink_cleanup, bbsink_end_archive, bbsink_end_backup, bbsink_end_manifest,
     bbsink_manifest_contents,

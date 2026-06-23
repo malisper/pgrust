@@ -22,7 +22,7 @@
 //! owned model threads `&mut EStateData` explicitly through the executor entry
 //! points instead.
 
-use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
 use ::types_core::primitive::{AttrNumber, Index, Oid};
 use ::types_core::fmgr::INDEX_MAX_KEYS;
 use ::types_core::xact::CommandId;
@@ -33,7 +33,7 @@ use ::types_tuple::tupconvert::TupleConversionMap;
 
 use crate::bitmapset::Bitmapset;
 use crate::execexpr::{ExprState, ProjectionInfo, SubPlanState};
-use types_slot::{TupleSlotKind, TupleTableSlot};
+use ::types_slot::{TupleSlotKind, TupleTableSlot};
 use crate::tuptable::{SlotData, VirtualTupleTableSlot};
 use crate::instrument::Instrumentation;
 use crate::nodeindexscan::PlannedStmt;
@@ -517,7 +517,7 @@ impl<'mcx> types_tableam::IndexInfoTagged<'mcx> for IndexInfo<'mcx> {
 /// the leaf [`types_trigger`] crate so consumers keep the `execnodes::TriggerDesc`
 /// path. The relation builds it via `RelationBuildTriggers` (commands/trigger.c);
 /// the executor reads the row-level booleans before firing.
-pub use types_trigger::{Trigger, TriggerDesc};
+pub use ::types_trigger::{Trigger, TriggerDesc};
 
 /// `ResultRelInfo` (execnodes.h), trimmed to the fields ports consume. Lives
 /// in the EState's [`EStateData::es_result_rel_pool`], addressed by [`RriId`].

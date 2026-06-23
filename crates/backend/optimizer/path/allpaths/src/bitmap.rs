@@ -1,7 +1,7 @@
 //! `create_partial_bitmap_paths` (allpaths.c:4237).
 
 use ::types_error::PgResult;
-use pathnodes::{PathId, PlannerInfo, RelId};
+use ::pathnodes::{PathId, PlannerInfo, RelId};
 
 use pathnode_seams as pathnode;
 use relnode_seams as bms;

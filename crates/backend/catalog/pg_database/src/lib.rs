@@ -26,12 +26,12 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_catalog::pg_database as cat;
 use ::types_catalog::pg_database::{FormPgDatabase, NewDbRecord};
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ, NAMEDATALEN};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::rel::Relation;
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::{
@@ -40,7 +40,7 @@ use ::types_storage::lock::{
 use ::types_tuple::heaptuple::{Datum, DeformedColumn, FormedTuple};
 use ::types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple};
 use ::scankey::ScanKeyInit;
 use ::indexing::keystone::{
     CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate,

@@ -19,7 +19,7 @@ pub use localtime::{
     pg_tz_acceptable, state, tzload, tzparse, DstBoundary, KnownTimezoneAbbrev, NextDstBoundary,
     TimezoneAbbrev, TzLoadError, TZ_STRLEN_MAX,
 };
-pub use pgtime::{lsinfo, ttinfo};
+pub use ::pgtime::{lsinfo, ttinfo};
 
 /// This crate has no inward seam crate yet (it sits at the bottom of the
 /// timezone dependency chain; consumers depend on it directly).

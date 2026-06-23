@@ -46,11 +46,11 @@ use ::types_error::PgResult;
 use ::types_core::primitive::{AttrNumber, Index, Oid};
 use ::nodes::primnodes::{Expr, NullTestType, Var, AND_EXPR, NOT_EXPR, OR_EXPR};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     EcId, EmId, JoinType, NodeId, RelId, Relids, RestrictInfo, RinfoId, PlannerInfo,
     SpecialJoinInfo, JOIN_INNER, RTE_RELATION,
 };
-use types_selfuncs::{DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
+use ::types_selfuncs::{DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
 
 use path_small_seams as seam;
 use costsize_seams as cz_seam;
@@ -1230,7 +1230,7 @@ fn opexpr_inputcollid(clause: &Expr) -> Oid {
 /// num_base_rels, which is 0 here). This faithfully reproduces estimating a
 /// bare expression argument of an AND/OR.
 fn make_bare_restrictinfo(clause: NodeId) -> RestrictInfo {
-    use pathnodes::{QualCost, VOLATILITY_UNKNOWN};
+    use ::pathnodes::{QualCost, VOLATILITY_UNKNOWN};
     RestrictInfo {
         clause,
         is_pushed_down: false,

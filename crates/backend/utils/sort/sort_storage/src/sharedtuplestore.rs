@@ -33,15 +33,15 @@ use core::cell::RefCell;
 use buffile_seams as buffile;
 use lwlock_seams as lwlock;
 use sort_storage_seams as seams;
-use types_core::{Size, ProcNumber};
+use ::types_core::{Size, ProcNumber};
 use ::types_core::fmgr::NAMEDATALEN;
 use ::types_core::primitive::BLCKSZ;
-use types_error::{PgError, PgResult};
-use execparallel::{
+use ::types_error::{PgError, PgResult};
+use ::execparallel::{
     FileSetHandle, SharedFileSetHandle, SharedTuplestoreAccessorHandle, SharedTuplestoreHandle,
 };
 use ::nodes::nodehashjoin::BufFile;
-use types_storage::{LWLock, LWLockMode, LWTRANCHE_SHARED_TUPLESTORE};
+use ::types_storage::{LWLock, LWLockMode, LWTRANCHE_SHARED_TUPLESTORE};
 
 /// `STS_CHUNK_PAGES` (sharedtuplestore.c:37) — chunk size in BLCKSZ pages.
 const STS_CHUNK_PAGES: usize = 4;

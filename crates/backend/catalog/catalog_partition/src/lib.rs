@@ -36,7 +36,7 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 
 use ::types_catalog::pg_inherits::{
     Anum_pg_inherits_inhrelid, Anum_pg_inherits_inhseqno, FormData_pg_inherits,
@@ -44,11 +44,11 @@ use ::types_catalog::pg_inherits::{
 };
 use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::Bitmapset;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::Datum;

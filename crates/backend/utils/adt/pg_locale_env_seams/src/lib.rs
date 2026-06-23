@@ -18,7 +18,7 @@
 //! `setlocale`/`setenv`/`localeconv`/`newlocale` are bound directly in the owner
 //! crate as OS FFI, not seamed.)
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 
 seam_core::seam!(

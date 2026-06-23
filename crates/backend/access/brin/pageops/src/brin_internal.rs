@@ -8,11 +8,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::bufmgr_seams::with_buffer_page;
-use page::{
+use ::page::{
     ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid, ItemPointerSet,
     ItemPointerSetInvalid,
 };
-use utils_error::{ereport, PgError};
+use ::utils_error::{ereport, PgError};
 use ::types_error::error::ERROR;
 use ::types_core::primitive::{BlockNumber, OffsetNumber};
 use ::types_error::PgResult;

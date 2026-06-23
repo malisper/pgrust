@@ -30,7 +30,7 @@ use ::spi_seams::spi_freeplan;
 use ::nodes_core::bitmapset::{bms_add_member, bms_copy, bms_free, bms_is_member};
 use ::funccache_seams::cfunc_use_count;
 use ::mcxt_seams::MemoryContextDelete;
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 use ::types_logical::MemoryContextHandle;
 use ::nodes::bitmapset::Bitmapset;

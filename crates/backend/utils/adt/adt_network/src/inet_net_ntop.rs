@@ -10,7 +10,7 @@
 //! including the `sizeof`-based buffer-capacity checks so an undersized `dst`
 //! fails on the same boundaries the C does.
 
-use types_network::{PGSQL_AF_INET, PGSQL_AF_INET6};
+use ::types_network::{PGSQL_AF_INET, PGSQL_AF_INET6};
 
 /// `NS_IN6ADDRSZ` (16) / `NS_INT16SZ` (2).
 const NS_IN6ADDRSZ: usize = 16;

@@ -64,9 +64,9 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgResult, ERROR, ERRCODE_COLLATION_MISMATCH, ERRCODE_OUT_OF_MEMORY};
-use parsenodes::{AGGKIND_HYPOTHETICAL, AGGKIND_NORMAL, AGGKIND_ORDERED_SET};
+use ::types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_error::{PgResult, ERROR, ERRCODE_COLLATION_MISMATCH, ERRCODE_OUT_OF_MEMORY};
+use ::parsenodes::{AGGKIND_HYPOTHETICAL, AGGKIND_NORMAL, AGGKIND_ORDERED_SET};
 use ::types_cluster::ParseState;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::{Aggref, CoercionForm, Expr};

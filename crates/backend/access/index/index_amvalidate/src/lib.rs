@@ -9,13 +9,13 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use types_amvalidate::index_amvalidate::{
     AmopRow, AmprocRow, OpFamilyOpFuncGroup,
 };
 use ::types_core::primitive::OidIsValid;
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 
 use amvalidate_seams as sx;
 use coerce_seams as coerce;

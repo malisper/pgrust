@@ -82,7 +82,7 @@ use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
-use portal::{CommandTag, QueryCompletion};
+use ::portal::{CommandTag, QueryCompletion};
 use ::types_tuple::heaptuple::TupleDescData;
 
 // Protocol message-type bytes (`protocol.h` / `PqMsg_*`). Defined locally,

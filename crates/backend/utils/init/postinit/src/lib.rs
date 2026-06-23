@@ -13,16 +13,16 @@
 #![allow(non_snake_case)]
 
 use ::utils_error::ereport;
-use mcx::{Mcx, MemoryContext, PgString};
+use ::mcx::{Mcx, MemoryContext, PgString};
 use ::types_catalog::pg_database::{FormPgDatabase, COLLPROVIDER_LIBC};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, DEBUG3, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_TOO_MANY_CONNECTIONS,
     ERRCODE_UNDEFINED_DATABASE, ERRCODE_UNDEFINED_OBJECT, ERROR, FATAL, LOG, WARNING,
 };
-use types_guc::{GucContext, GucSource};
-use types_timeout::{TimeoutHandlerProc, TimeoutId};
+use ::types_guc::{GucContext, GucSource};
+use ::types_timeout::{TimeoutHandlerProc, TimeoutId};
 
 /// C `bits32` (`c.h`) — the `flags` word of `InitPostgres`.
 #[allow(non_camel_case_types)]

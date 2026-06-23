@@ -19,9 +19,9 @@
 
 #![allow(non_snake_case)]
 
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::execnodes::{EPQState, EStateData};
-use nodes::{PlanStateNode, SlotId};
+use ::nodes::{PlanStateNode, SlotId};
 use ::samplescan::SampleScanState;
 
 use nodeSamplescan_seams as seam;

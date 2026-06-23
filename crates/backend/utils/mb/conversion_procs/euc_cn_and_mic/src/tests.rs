@@ -1,5 +1,5 @@
 use super::*;
-use error_fgram::{ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_UNTRANSLATABLE_CHARACTER};
+use ::error_fgram::{ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_UNTRANSLATABLE_CHARACTER};
 use ::types_wchar::encoding::PG_UTF8;
 
 #[test]

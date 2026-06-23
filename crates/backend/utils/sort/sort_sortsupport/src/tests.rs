@@ -17,7 +17,7 @@ use ::mcx::MemoryContext;
 // `apply_sort_comparator` boundary. The fmgr-builtin lane (`cmp_builtin`'s
 // return) still speaks the transitional bare-word `::datum::Datum`.
 use ::datum::Datum as ShimDatum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
 use super::*;
 

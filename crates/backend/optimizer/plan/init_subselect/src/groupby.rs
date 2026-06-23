@@ -5,7 +5,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo, Relids};
+use ::pathnodes::{NodeId, PlannerInfo, Relids};
 
 use relnode_seams as bms;
 use backend_nodes_core_nodefuncs_seams_alias as nf;

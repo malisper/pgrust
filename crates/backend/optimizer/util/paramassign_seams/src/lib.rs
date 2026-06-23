@@ -23,7 +23,7 @@ extern crate alloc;
 
 use ::mcx::Mcx;
 use ::nodes::primnodes::{Param, PlaceHolderVar, Var};
-use pathnodes::{NodeId, PlannerInfo, Relids};
+use ::pathnodes::{NodeId, PlannerInfo, Relids};
 
 seam_core::seam!(
     /// `replace_nestloop_param_var(root, var)` (paramassign.c:413): generate a

@@ -22,7 +22,7 @@
 
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::nodes::primnodes::Expr;
-use pathnodes::{PlannerInfo, QualCost};
+use ::pathnodes::{PlannerInfo, QualCost};
 
 use costsize_seams as cz;
 use clauses as clauses;

@@ -28,10 +28,10 @@
 use ::types_datetime::Interval;
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use ::stringinfo::StringInfo;
-use types_uuid::{pg_uuid_t, UUID_LEN};
+use ::types_uuid::{pg_uuid_t, UUID_LEN};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

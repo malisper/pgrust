@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::{RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
-use types_logical::{ReorderBufferHandle, ReorderBufferStats, TxnHandle};
+use ::types_logical::{ReorderBufferHandle, ReorderBufferStats, TxnHandle};
 use ::types_storage::sinval::SharedInvalidationMessage;
 use ::types_storage::RelFileLocator;
 use ::types_tuple::ItemPointerData;

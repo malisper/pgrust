@@ -16,8 +16,8 @@
 //! `PgResult`.
 #![allow(non_camel_case_types)]
 
-use types_core::{uint8, Size};
-use crypto::{pg_cryptohash_ctx, pg_cryptohash_type};
+use ::types_core::{uint8, Size};
+use ::crypto::{pg_cryptohash_ctx, pg_cryptohash_type};
 
 seam_core::seam!(
     /// `pg_cryptohash_ctx *pg_cryptohash_create(pg_cryptohash_type type)` —

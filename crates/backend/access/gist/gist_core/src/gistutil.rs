@@ -13,28 +13,28 @@
 //! procedure, matching C's `fmgr_info_copy` vs `fn_oid = InvalidOid` legs).
 
 use alloc::vec::Vec;
-use heaptuple::{heap_form_tuple, FormedTuple};
-use indextuple_seams::{index_form_tuple_desc, nocache_index_getattr};
+use ::heaptuple::{heap_form_tuple, FormedTuple};
+use ::indextuple_seams::{index_form_tuple_desc, nocache_index_getattr};
 use ::tupdesc::CreateTupleDescTruncatedCopy;
-use dispatch_seams::{
+use ::dispatch_seams::{
     gist_compress, gist_decompress, gist_fetch, gist_penalty, gist_same, gist_union,
 };
-use indexam_seams::{index_getprocid, index_getprocinfo};
-use bufmgr_seams::{
+use ::indexam_seams::{index_getprocid, index_getprocinfo};
+use ::bufmgr_seams::{
     buffer_get_page, conditional_lock_buffer, extend_buffered_rel, lock_buffer, read_buffer,
     release_buffer,
 };
-use page::{
+use ::page::{
     PageGetFreeSpace, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageIsNew, PageRef,
 };
-use utils_error::{ereport, PgResult};
-use mcx::{alloc_in, Mcx, PgVec};
+use ::utils_error::{ereport, PgResult};
+use ::mcx::{alloc_in, Mcx, PgVec};
 use ::types_error::error::ERROR;
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{
     AttrNumber, BlockNumber, ForkNumber, InvalidBlockNumber, InvalidOid, OffsetNumber, Oid,
 };
-use gist::{
+use ::gist::{
     GistEntryVector, GISTENTRY, GISTSTATE, GIST_COMPRESS_PROC, GIST_CONSISTENT_PROC,
     GIST_DECOMPRESS_PROC, GIST_DISTANCE_PROC, GIST_EQUAL_PROC, GIST_FETCH_PROC, GIST_PENALTY_PROC,
     GIST_PICKSPLIT_PROC, GIST_UNION_PROC,

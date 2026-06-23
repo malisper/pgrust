@@ -22,8 +22,8 @@ use ::types_core::primitive::{InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo};
-use types_selfuncs::{STATISTIC_KIND_MCELEM, VariableStatData};
+use ::pathnodes::{NodeId, PlannerInfo};
+use ::types_selfuncs::{STATISTIC_KIND_MCELEM, VariableStatData};
 use ::tsearch::tsearch::{QueryItem, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_VAL};
 
 use ::ts_small::util::{get_operand, get_query, tsq_size};

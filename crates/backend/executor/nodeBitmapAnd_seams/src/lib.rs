@@ -9,11 +9,11 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 use ::nodes::nodebitmapand::BitmapAnd;
 use ::nodes::nodes::Node;
-use nodes::{EStateData, PlanStateNode};
+use ::nodes::{EStateData, PlanStateNode};
 use ::tidbitmap::TIDBitmap;
 
 seam_core::seam!(

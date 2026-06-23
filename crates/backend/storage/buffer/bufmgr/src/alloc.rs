@@ -25,9 +25,9 @@
 //! drop-relation path; the IO lifecycle the read/flush owners.)
 #![allow(dead_code)]
 
-use support::{BufferAccessStrategyRing, ClockSweep};
+use ::support::{BufferAccessStrategyRing, ClockSweep};
 use ::types_core::primitive::{BlockNumber, Buffer, ForkNumber};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::buf::{
     buftag, IOContext, PgAioWaitRef, BM_CHECKPOINT_NEEDED, BM_DIRTY, BM_IO_ERROR,
     BM_IO_IN_PROGRESS, BM_JUST_DIRTIED, BM_PERMANENT, BM_PIN_COUNT_WAITER, BM_TAG_VALID,
@@ -40,7 +40,7 @@ use ::types_tuple::access::RELPERSISTENCE_PERMANENT;
 use crate::mgr::BufferManager;
 
 use bufmgr_seams as sb;
-use support::{buf_table_hash_code, buf_table_hash_partition};
+use ::support::{buf_table_hash_code, buf_table_hash_partition};
 use lwlock as lwlock;
 
 // ---------------------------------------------------------------------------

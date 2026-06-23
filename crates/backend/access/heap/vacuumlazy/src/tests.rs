@@ -5,8 +5,8 @@
 //! save/restore of vacuum error state, the transaction-id wraparound compares,
 //! and the truncation-decision arithmetic.
 
-use mcx::{Mcx, MemoryContext, PgString, PgVec};
-use rel::{FormData_pg_class, Relation, RelationData};
+use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
+use ::rel::{FormData_pg_class, Relation, RelationData};
 use ::types_storage::RelFileLocator;
 use ::types_tuple::heaptuple::TupleDescData;
 

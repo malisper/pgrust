@@ -15,7 +15,7 @@
 #![no_std]
 extern crate alloc;
 
-use mcx::{PgString, PgVec};
+use ::mcx::{PgString, PgVec};
 use ::types_core::Oid;
 
 /// `TupleTableSlot *`: a slot the trigger manager / executor owns. RI only ever

@@ -12,7 +12,7 @@ use crate::restrictinfo::{
     restriction_is_or_clause,
 };
 
-use pathnodes::{
+use ::pathnodes::{
     Bitmapset, NodeId, PlannerInfo, RelId, RelOptInfo, RestrictInfo, RinfoId, VOLATILITY_UNKNOWN,
 };
 

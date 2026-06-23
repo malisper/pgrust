@@ -28,10 +28,10 @@
 //! [`::bulkwrite_seams::BulkWriteState`] carrier; the real
 //! engine state is [`BulkWriteEngine`], which this crate boxes into it.
 
-use page::{PageMut, PageSetChecksumInplace};
+use ::page::{PageMut, PageSetChecksumInplace};
 use smgr as smgr;
-use utils_error::{ereport, PgError, PgResult};
-use mcx::{Mcx, PgVec};
+use ::utils_error::{ereport, PgError, PgResult};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{BlockNumber, ForkNumber, XLogRecPtr};
 use ::types_core::BLCKSZ;
 use ::types_error::ERRCODE_OUT_OF_MEMORY;
@@ -41,7 +41,7 @@ use ::types_storage::RelFileLocatorBackend;
 use ::transam_xlog_seams::get_redo_rec_ptr as get_redo_rec_ptr_seam;
 use ::xloginsert_seams::log_newpages as log_newpages_seam;
 use ::lmgr_proc_seams::set_delay_chkpt_start as set_delay_chkpt_start_seam;
-use bulkwrite_seams::{self as seam, BulkWriteState};
+use ::bulkwrite_seams::{self as seam, BulkWriteState};
 
 /// `MAX_PENDING_WRITES` (bulk_write.c:47) == `XLR_MAX_BLOCK_ID` (32).
 const MAX_PENDING_WRITES: usize = 32;

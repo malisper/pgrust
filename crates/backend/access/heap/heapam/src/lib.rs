@@ -48,7 +48,7 @@ use ::types_core::XLogRecPtr;
 use ::types_error::PgResult;
 use ::rel::RelationData;
 use ::types_storage::buf::BufferAccessStrategyType;
-use types_storage::{Buffer, InvalidBuffer};
+use ::types_storage::{Buffer, InvalidBuffer};
 use ::types_tableam::tableam::LockTupleMode;
 use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleHeaderData, HEAP_COMBOCID, HEAP_KEYS_UPDATED,
@@ -66,7 +66,7 @@ use ::xlog_records::multixact::MultiXactStatus;
 use ::heapam_visibility::htup::HEAP_XMAX_IS_LOCKED_ONLY;
 use ::heapam_visibility::htup::HeapTupleHeaderGetRawXmax;
 use ::types_tuple::heaptuple::HEAP_XMAX_EXCL_LOCK;
-use heapam_visibility::{HeapTupleHeaderGetUpdateXid, HeapTupleSetHintBits};
+use ::heapam_visibility::{HeapTupleHeaderGetUpdateXid, HeapTupleSetHintBits};
 
 // XLHL_* infobits live with the heap rmgr-desc (access/heapam_xlog.h constants).
 use ::rmgrdesc_next::heapdesc::{

@@ -3,7 +3,7 @@
 //! `ValuesScan` scans a `VALUES (...), (...), ...` list appearing in the range
 //! table.
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_error::PgResult;
 
 use crate::execexpr::ExprState;

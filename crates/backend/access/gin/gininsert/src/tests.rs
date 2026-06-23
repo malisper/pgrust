@@ -10,7 +10,7 @@
 
 use super::*;
 
-use gindatapage::{GinGetDownlink, GinGetNPosting, GIN_TREE_POSTING};
+use ::gindatapage::{GinGetDownlink, GinGetNPosting, GIN_TREE_POSTING};
 
 /// `GinSetPostingTree` marks a tuple as a posting tree (`GinGetNPosting ==
 /// GIN_TREE_POSTING`) and stores the root block as the t_tid block number

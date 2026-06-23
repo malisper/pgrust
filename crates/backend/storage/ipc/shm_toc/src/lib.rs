@@ -33,11 +33,11 @@ use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
 use core::sync::atomic::{fence, Ordering};
 
-use ipc_shmem_seams::{add_size, mul_size};
-use s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
-use utils_error::{elog, ereport};
-use types_core::{uint64, Size};
-use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY, ERROR};
+use ::ipc_shmem_seams::{add_size, mul_size};
+use ::s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
+use ::utils_error::{elog, ereport};
+use ::types_core::{uint64, Size};
+use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY, ERROR};
 use ::types_storage::storage::shm_toc_estimator;
 
 /// `ALIGNOF_BUFFER` (`pg_config.h`) — buffer alignment used by `BUFFERALIGN`.

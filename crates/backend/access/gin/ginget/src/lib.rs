@@ -40,8 +40,8 @@ use alloc::vec::Vec;
 use std::rc::Rc;
 
 use bufmgr_seams as bufmgr;
-use page::{PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageRef};
-use utils_error::{ereport, PgResult};
+use ::page::{PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageRef};
+use ::utils_error::{ereport, PgResult};
 use ::types_error::error::{ERROR, ERRCODE_INTERNAL_ERROR};
 
 use ::mcx::Mcx;
@@ -52,27 +52,27 @@ use ::types_storage::storage::{Buffer, InvalidBuffer};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{BlockIdData, IndexTupleData, ItemPointerData};
 
-use gin::{
+use ::gin::{
     GinNullCategory, GinScanEntryData, GinScanOpaqueData, GinState,
     GIN_CAT_NORM_KEY, GIN_CAT_NULL_ITEM, GIN_CAT_EMPTY_QUERY, GIN_SEARCH_MODE_ALL,
     GIN_DELETED, GIN_LIST_FULLROW,
 };
-use gin::{GinBtreeData, GinBtreeStack};
+use ::gin::{GinBtreeData, GinBtreeStack};
 
 use ::types_tableam::relscan::IndexScanDescData;
 
 use ::tidbitmap::TIDBitmap;
 
-use ginbtree::{freeGinBtreeStack, ginFindLeafPage, ginStepRight};
-use gindatapage::{
+use ::ginbtree::{freeGinBtreeStack, ginFindLeafPage, ginStepRight};
+use ::gindatapage::{
     gin_data_page_get_right_bound, gin_page_get_rightlink, GinDataLeafPageGetItems,
     GinDataLeafPageGetItemsToTbm, ginScanBeginPostingTree, GinGetDownlink, GinGetNPosting,
     GinIsPostingTree,
 };
-use gindatapage::{gin_page_get_flags, GinPageIsLeaf, GinPageRightMost};
+use ::gindatapage::{gin_page_get_flags, GinPageIsLeaf, GinPageRightMost};
 use ::core_probe::ginpostinglist::ginCompareItemPointers;
-use ginentrypage::{ginPrepareEntryScan, ginReadTuple};
-use ginutil::{gintuple_get_attrnum, gintuple_get_key, ginCompareEntries};
+use ::ginentrypage::{ginPrepareEntryScan, ginReadTuple};
+use ::ginutil::{gintuple_get_attrnum, gintuple_get_key, ginCompareEntries};
 use ::core_probe::ginlogic::{callBoolConsistentFn, callTriConsistentFn};
 
 use ginutil_seams as sx;

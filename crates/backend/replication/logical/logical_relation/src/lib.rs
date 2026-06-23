@@ -32,24 +32,24 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::{
     AttrNumber, InvalidOid, Oid, OidIsValid, XLogRecPtr,
 };
 use ::types_storage::lock::LOCKMODE;
-use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
+use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 
 use ::nodes::Bitmapset;
 use ::rel::Relation;
 use ::types_tuple::attmap::AttrMap;
 
-use proto::{LogicalRepRelation, LogicalRepRelId};
+use ::proto::{LogicalRepRelation, LogicalRepRelId};
 
 // Merged dependencies (called directly).
 use ::nodes_core::bitmapset as bms;
 use ::nodes_core::makefuncs::make_range_var;
-use table::{table_close, table_open, try_table_open};
-use indexam::{index_close, index_open};
+use ::table::{table_close, table_open, try_table_open};
+use ::indexam::{index_close, index_open};
 use ::relcache::derived::{
     IndexAttrBitmapKind, RelationGetIndexAttrBitmap, RelationGetIndexList,
     RelationGetPrimaryKeyIndex, RelationGetReplicaIndex,

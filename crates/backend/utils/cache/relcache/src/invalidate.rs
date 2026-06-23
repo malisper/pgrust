@@ -18,7 +18,7 @@
 //! `RelationReloadNailed` are relcache's own logic, owned by the index family
 //! ([`crate::index`]); the build family owns `RelationBuildDesc`.
 
-use utils_error::{elog, PgResult};
+use ::utils_error::{elog, PgResult};
 use ::types_core::xact::{InvalidSubTransactionId, SubTransactionId};
 use ::types_core::primitive::Oid;
 use ::types_error::WARNING;

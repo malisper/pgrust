@@ -20,13 +20,13 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{alloc_in, Mcx};
+use ::mcx::{alloc_in, Mcx};
 
 use ::types_acl::ACLCHECK_NOT_OWNER;
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::catalog::{BOOLOID, INT8OID};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
+use ::types_error::{PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
 use ::nodes::ddlnodes::{CreateSeqStmt, CreateStmt};
 use ::nodes::nodes::{Node, NodePtr};
 use ::nodes::primnodes::OnCommitAction;

@@ -4,7 +4,7 @@
 use ::mcx::PgString;
 use ::types_core::uint8;
 use ::types_error::PgResult;
-use wal::{xl_logical_message, DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{xl_logical_message, DecodedXLogRecord, XLR_INFO_MASK};
 
 use crate::util::{append_lossy, appendf, record_truncated};
 

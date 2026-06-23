@@ -13,13 +13,13 @@
 use core::any::Any;
 use std::sync::Once;
 
-use mcx::{Mcx, MemoryContext, PgBox};
+use ::mcx::{Mcx, MemoryContext, PgBox};
 use ::datum::NullableDatum;
 use ::nodes::execexpr::{ExprDoneCond, SetExprState};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::FuncCallContext;
 use ::nodes::primnodes::{Expr, FuncExpr};
-use nodes::{EStateData, ExprContext};
+use ::nodes::{EStateData, ExprContext};
 use types_tuple::heaptuple::Datum;
 
 use super::*;

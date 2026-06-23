@@ -20,9 +20,9 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{Oid, OidIsValid};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{Oid, OidIsValid};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
 use ::opclass::AMOP_SEARCH;
 
 // The opclass-form / member-row mirror types carried across the syscache seams
@@ -36,7 +36,7 @@ use lsyscache_seams as lsyscache_seams;
 use syscache_seams as syscache_seams;
 use error_seams as error_seams;
 
-use gist::{
+use ::gist::{
     GISTNProcs, GIST_COMPRESS_PROC, GIST_CONSISTENT_PROC, GIST_DECOMPRESS_PROC, GIST_DISTANCE_PROC,
     GIST_EQUAL_PROC, GIST_FETCH_PROC, GIST_OPTIONS_PROC, GIST_PENALTY_PROC, GIST_PICKSPLIT_PROC,
     GIST_SORTSUPPORT_PROC, GIST_TRANSLATE_CMPTYPE_PROC, GIST_UNION_PROC,

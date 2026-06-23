@@ -34,7 +34,7 @@ pub use spgdesc::{spg_desc, spg_identify};
 pub use standbydesc::{standby_desc, standby_desc_invalidations, standby_identify};
 
 use ::mcx::PgString;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::wal::rmgr::XLogReaderState;
 
 /// Install all seams owned by this crate. Called once at startup from
@@ -236,8 +236,8 @@ impl core::fmt::Display for GFmt {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use mcx::{slice_in, Mcx};
-    use wal::{DecodedBkpBlock, DecodedXLogRecord, XLogRecord};
+    use ::mcx::{slice_in, Mcx};
+    use ::wal::{DecodedBkpBlock, DecodedXLogRecord, XLogRecord};
 
     /// Build a `DecodedXLogRecord` carrying just the pieces the desc
     /// routines read: `xl_info`, the main data, and the block references.

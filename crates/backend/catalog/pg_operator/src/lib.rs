@@ -27,7 +27,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 
 use ::types_acl::acl::{ACL_CREATE, ACLCHECK_NOT_OWNER, ACLCHECK_OK};
 use ::types_catalog::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID};
@@ -43,7 +43,7 @@ use ::types_catalog::pg_operator::{
 };
 use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
 use ::types_core::primitive::{InvalidOid, Oid, RegProcedure};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_INVALID_NAME, ERROR,
 };
@@ -54,7 +54,7 @@ use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
 use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
@@ -62,7 +62,7 @@ use ::catalog_catalog::GetNewOidWithIndex;
 use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 use objectaccess_seams as objectaccess_seams;
 
-use pg_operator_seams::{
+use ::pg_operator_seams::{
     OperatorAttrUpdate, OperatorCreateArgs, OperatorValidateParamsArgs,
 };
 

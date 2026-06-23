@@ -11,7 +11,7 @@
 use core::error::Error;
 use core::fmt;
 
-use types_network::{PGSQL_AF_INET, PGSQL_AF_INET6};
+use ::types_network::{PGSQL_AF_INET, PGSQL_AF_INET6};
 
 /// POSIX `errno` values mirrored by [`InetCidrNtopError::errno`] (build-target
 /// `libc` `E*` values, without depending on `libc`).

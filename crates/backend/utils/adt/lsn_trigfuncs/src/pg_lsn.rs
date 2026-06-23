@@ -14,9 +14,9 @@
 //! it is reproduced here 1:1 over that crate's public API (`set_var_from_num`,
 //! `numericvar_to_uint64`).
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::XLogRecPtr;
-use types_error::{
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
 };
@@ -25,7 +25,7 @@ use ::types_numeric::var::NumericSign;
 use ::adt_numeric::convert::{numericvar_to_uint64, set_var_from_num};
 use ::adt_numeric::io::numeric_in;
 use ::adt_numeric::ops_sql::{numeric_add, numeric_sub};
-use hashfn::{hash_bytes_uint32, hash_bytes_uint32_extended};
+use ::hashfn::{hash_bytes_uint32, hash_bytes_uint32_extended};
 
 /// `#define MAXPG_LSNLEN 17`
 pub const MAXPG_LSNLEN: usize = 17;

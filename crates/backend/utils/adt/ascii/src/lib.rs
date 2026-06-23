@@ -29,7 +29,7 @@
 
 pub mod fmgr_builtins;
 
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_UNDEFINED_OBJECT,
 };

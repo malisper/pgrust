@@ -69,12 +69,12 @@ use core::cmp::Ordering;
 use ::mcx::Mcx;
 
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     ErrorLevel, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TRANSACTION_STATE, ERROR,
 };
 
-use misc_guc::{
+use ::misc_guc::{
     guc_name_compare, live, registry::GucVariable, set_config_option_global,
     GUC_ACTION_LOCAL, GUC_ACTION_SET,
 };
@@ -84,13 +84,13 @@ use ::misc_guc::registry::{get_config_option_by_name, show_guc_option, GucRegist
 use ::types_acl::acl::ACL_SET;
 use ::types_catalog::catalog::PARAMETER_ACL_RELATION_ID as ParameterAclRelationId;
 use ::types_core::primitive::Oid;
-use types_guc::{
+use ::types_guc::{
     GucContext, GUC_EXPLAIN, GUC_LIST_INPUT, GUC_LIST_QUOTE, GUC_NO_SHOW_ALL,
     GUC_SUPERUSER_ONLY, PGC_SUSET, PGC_USERSET, PGC_S_DEFAULT, PGC_S_SESSION,
 };
 use ::types_tuple::heaptuple::{TupleDesc, TEXTOID};
 
-use parsenodes::{Node, VariableSetKind, VariableSetStmt};
+use ::parsenodes::{Node, VariableSetKind, VariableSetStmt};
 
 use guc_funcs_seams as seam;
 use snapmgr_seams as snapmgr_seam;
@@ -484,7 +484,7 @@ fn render_auto_conf_file(list: &[::guc_file::ConfigVariable]) -> String {
 /// left intact.
 pub fn AlterSystemSetConfigFile(stmt: &VariableSetStmt) -> PgResult<()> {
     use ::lwlock_seams::lwlock_acquire_main;
-    use guc_file::{FreeConfigVariables, ParseConfigFp};
+    use ::guc_file::{FreeConfigVariables, ParseConfigFp};
     use ::types_storage::LWLockMode::LW_EXCLUSIVE;
 
     // Extract statement arguments: name = altersysstmt->setstmt->name.
@@ -993,7 +993,7 @@ fn get_config_option_values(var: &GucVariable) -> PgSettingsRow {
     };
     use ::misc_guc::model::GUC_PENDING_RESTART;
     use ::misc_guc::units::{fmt_g, get_config_unit_name};
-    use guc_tables::{
+    use ::guc_tables::{
         config_group_names, config_type_names, GucContext_Names, GucSource_Names,
     };
     use ::types_guc::PGC_S_FILE;

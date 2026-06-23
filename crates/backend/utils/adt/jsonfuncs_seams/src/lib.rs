@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use types_json::{ArrayForJson, CompositeFieldForJson, JsonTypeCategory};
+use ::types_json::{ArrayForJson, CompositeFieldForJson, JsonTypeCategory};
 use ::types_tuple::Datum;
 
 seam_core::seam!(

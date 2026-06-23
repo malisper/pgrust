@@ -4,9 +4,9 @@
 
 use ::mcx::Mcx;
 use ::types_core::xact::CommandId;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
-use nodes::{EStateData, ModifyTableState, RriId, SlotId};
+use ::nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::lifecycle::{ExecComputeStoredGenerated, ExecPrepareTupleRouting, ExecProcessReturning};
@@ -31,7 +31,7 @@ const WCO_VIEW_CHECK: i32 = 0;
 // The BEFORE/INSTEAD-OF/AFTER ROW INSERT trigger entry points are declared in
 // `backend-commands-trigger-seams` (the trigger owner) and called via that path
 // below — they are no longer locally redeclared here.
-use trigger_seams::{
+use ::trigger_seams::{
     exec_ar_insert_triggers, exec_br_insert_triggers, exec_ir_insert_triggers,
 };
 

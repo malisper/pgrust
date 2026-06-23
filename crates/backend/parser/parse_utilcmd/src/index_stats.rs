@@ -7,11 +7,11 @@
 //! [`Relation<'mcx>`] carrier (RAII drop releases the relcache reference; the
 //! lock is the caller's responsibility, so we open with `NoLock`).
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 
 use ::utils_error::ereport;
 use ::types_core::Oid;
-use types_error::{PgResult, ERRCODE_INVALID_COLUMN_REFERENCE, ERROR};
+use ::types_error::{PgResult, ERRCODE_INVALID_COLUMN_REFERENCE, ERROR};
 use ::types_storage::lock::{AccessShareLock, NoLock};
 
 use ::nodes::ddlnodes::{IndexElem, StatsElem};
@@ -26,8 +26,8 @@ use ::clause::transformWhereClause;
 use ::parse_collate::assign_expr_collations;
 use ::parse_expr::transformExpr;
 use ::parse_target::FigureIndexColname;
-use parser_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
-use small1::{free_parsestate, make_parsestate};
+use ::parser_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
+use ::small1::{free_parsestate, make_parsestate};
 
 use crate::core::NodePtr;
 

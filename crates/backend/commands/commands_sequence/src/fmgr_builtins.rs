@@ -15,7 +15,7 @@
 //! scratch context to drive them — the same shape `namespace.c`'s builtins use.
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use ::types_core::Oid;
 

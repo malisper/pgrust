@@ -8,9 +8,9 @@
 //! `dsnowball_init` / `dsnowball_lexize`).
 
 use ::define_seams::DefElemArg;
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
-use tsearch::{DictSnowball, TSLexeme};
+use ::tsearch::{DictSnowball, TSLexeme};
 
 seam_core::seam!(
     /// `dsnowball_init(dictoptions)` (dict_snowball.c): parse the

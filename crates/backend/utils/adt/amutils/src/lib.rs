@@ -52,7 +52,7 @@ use ::types_core::primitive::{InvalidOid, Oid};
 use ::types_error::PgResult;
 
 use amutils_seams as seam;
-use amutils_seams::{AmPropertyRequest, IndexAmProperty};
+use ::amutils_seams::{AmPropertyRequest, IndexAmProperty};
 
 /// `pg_class.h`: `RELKIND_INDEX` — a secondary (non-partitioned) index.
 const RELKIND_INDEX: u8 = b'i';

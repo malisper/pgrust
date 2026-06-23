@@ -12,8 +12,8 @@
 //! `mcx` (C: the `byteain`/`byteaout` callers palloc the destination in the
 //! current memory context).
 
-use mcx::{Mcx, PgVec};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{PgError, PgResult};
 
 seam_core::seam!(
     /// `hex_encode(const char *src, size_t len, char *dst)` (encode.c:181) —

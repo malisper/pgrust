@@ -18,7 +18,7 @@
 
 #![allow(non_snake_case)]
 
-use types_network::{ResolvedName, SessionEndpoint};
+use ::types_network::{ResolvedName, SessionEndpoint};
 
 pub mod inet {
     use ::mcx::Mcx;

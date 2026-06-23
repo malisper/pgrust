@@ -19,7 +19,7 @@
 
 use core::cell::Cell;
 
-use guc_tables::{vars, GucVarAccessors};
+use ::guc_tables::{vars, GucVarAccessors};
 
 // guc_tables.c boot_vals.
 //   "geqo"                         -> true

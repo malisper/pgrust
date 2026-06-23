@@ -30,15 +30,15 @@
 
 use std::cell::Cell;
 
-use pqcomm::{
+use ::pqcomm::{
     set_pq_comm_methods, PQcommMethods, EOF, PQ_COMM_SOCKET_METHODS,
 };
 use ::dsm_core::dsm::{on_dsm_detach, DsmSegmentId};
-use utils_error::{PgError, ThrowErrorData};
-use types_core::{pid_t, ProcNumber, INVALID_PROC_NUMBER};
+use ::utils_error::{PgError, ThrowErrorData};
+use ::types_core::{pid_t, ProcNumber, INVALID_PROC_NUMBER};
 use ::datum::Datum;
 use ::types_dest::CommandDest;
-use types_error::{
+use ::types_error::{
     ErrorLevel, ErrorLocation, PgResult, SqlState, ERRCODE_PROTOCOL_VIOLATION, PANIC,
     PG_DIAG_COLUMN_NAME, PG_DIAG_CONSTRAINT_NAME, PG_DIAG_CONTEXT, PG_DIAG_DATATYPE_NAME,
     PG_DIAG_INTERNAL_POSITION, PG_DIAG_INTERNAL_QUERY, PG_DIAG_MESSAGE_DETAIL, PG_DIAG_MESSAGE_HINT,
@@ -48,7 +48,7 @@ use types_error::{
     WARNING,
 };
 use ::execparallel::ShmMqAttachHandle;
-use types_parallel::{DsmSegmentHandle, ShmMqHandleHandle};
+use ::types_parallel::{DsmSegmentHandle, ShmMqHandleHandle};
 use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
 use ::types_storage::ProcSignalReason;
 

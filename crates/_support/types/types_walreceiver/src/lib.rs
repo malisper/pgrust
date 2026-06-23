@@ -18,7 +18,7 @@ use std::string::String;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicU64};
 
-use types_core::{ProcNumber, TimeLineID, TimestampTz, XLogRecPtr};
+use ::types_core::{ProcNumber, TimeLineID, TimestampTz, XLogRecPtr};
 
 /// Opaque libpq connection handle (`WalReceiverConn *`).  The concrete struct
 /// lives in the (separately ported) libpqwalreceiver module; here it is the

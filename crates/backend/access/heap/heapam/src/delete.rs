@@ -29,14 +29,14 @@
 use ::mcx::Mcx;
 use ::types_core::primitive::{BlockNumber, MultiXactId, OffsetNumber, Oid, TransactionId};
 use ::types_core::xact::{CommandId, InvalidCommandId};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_INVALID_TRANSACTION_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
 use ::utils_error::ereport;
 use ::types_tuple::heaptuple::Datum;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_storage::lock::XLTW_Oper;
-use types_storage::{Buffer, InvalidBuffer};
+use ::types_storage::{Buffer, InvalidBuffer};
 use ::types_tableam::tableam::{LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result};
 use ::types_tuple::heaptuple::FormedTuple;
 use ::types_tuple::heaptuple::{
@@ -46,7 +46,7 @@ use ::types_tuple::heaptuple::{
 };
 use ::xlog_records::multixact::MultiXactStatus;
 
-use page::{
+use ::page::{
     ItemPointerEquals, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid,
     PageClearAllVisible, PageGetItem, PageGetItemId, PageIsAllVisible, PageMut, PageRef,
     PageSetPrunable,
@@ -55,7 +55,7 @@ use page::{
 use ::heapam_visibility::htup::{
     HeapTupleHeaderGetRawXmax, HEAP_LOCK_MASK, HEAP_XMAX_IS_LOCKED_ONLY,
 };
-use heapam_visibility::{
+use ::heapam_visibility::{
     HeapTupleHeaderGetUpdateXid as HtupGetUpdateXid, HeapTupleHeaderIsOnlyLocked,
     HeapTupleSatisfiesUpdate, HeapTupleSatisfiesVisibility,
 };

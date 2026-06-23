@@ -27,15 +27,15 @@
 #![forbid(unsafe_code)]
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::datum::Bytea;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_PROTOCOL_VIOLATION,
 };
 use ::stringinfo::StringInfo;
 
 use ::pqcomm_seams::pq_putmessage;
-use mbutils_seams::{pg_client_to_server, pg_server_to_client};
+use ::mbutils_seams::{pg_client_to_server, pg_server_to_client};
 
 /// `MaxAllocSize` (`utils/memutils.h`): `0x3fffffff` — the `enlargeStringInfo`
 /// growth cap.

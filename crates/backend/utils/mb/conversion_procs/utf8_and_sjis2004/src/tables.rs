@@ -11,7 +11,7 @@
 //! [`pg_utf_to_local_combined`] entries (one Unicode code point that maps to a
 //! pair of code points, for the SHIFT_JIS_2004 combining sequences).
 
-use types_wchar::{pg_local_to_utf_combined, pg_mb_radix_tree, pg_utf_to_local_combined};
+use ::types_wchar::{pg_local_to_utf_combined, pg_mb_radix_tree, pg_utf_to_local_combined};
 
 const SHIFT_JIS_2004_TO_UNICODE_TREE_TABLE: [u32; 11716] = [
     0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,

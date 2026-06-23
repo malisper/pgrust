@@ -29,10 +29,10 @@
 //! real tuplestore API.
 
 use ::mcx::PgBox;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execnodes::CteSharedState;
 use ::nodes::nodectescan::{CteScan, CteScanState};
-use nodes::{EStateData, PlanStateNode, SlotId, Tuplestorestate};
+use ::nodes::{EStateData, PlanStateNode, SlotId, Tuplestorestate};
 
 use execMain_seams as seams;
 use execTuples_seams as execTuples;

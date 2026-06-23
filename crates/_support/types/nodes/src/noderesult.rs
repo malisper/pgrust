@@ -5,7 +5,7 @@
 //! ("one-time") qualification above a controlled subplan. `ResultState` is the
 //! executor state.
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 
 use crate::execexpr::ExprState;

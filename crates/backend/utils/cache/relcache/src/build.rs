@@ -12,15 +12,15 @@
 //! (seam-and-panic until the owner lands).
 
 use ::tupdesc::CreateTupleDesc;
-use utils_error::{ereport, PgResult};
-use mcx::{Mcx, PgString, PgVec};
+use ::utils_error::{ereport, PgResult};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_catalog::catalog::GLOBALTABLESPACE_OID;
 use ::types_core::catalog::{
     PG_CATALOG_NAMESPACE, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
 use ::types_core::primitive::Oid;
 use ::types_core::xact::InvalidSubTransactionId;
-use types_core::{InvalidOid, INVALID_PROC_NUMBER};
+use ::types_core::{InvalidOid, INVALID_PROC_NUMBER};
 use ::types_error::ERROR;
 use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,

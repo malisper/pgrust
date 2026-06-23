@@ -22,7 +22,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::types_error::PgResult;
-use pathnodes::{
+use ::pathnodes::{
     AppendRelInfo, IndexClause, NodeId, PlannerInfo, RelId, Relids, RinfoId,
 };
 

@@ -35,16 +35,16 @@ use core::cell::{Cell, RefCell};
 use core::sync::atomic::Ordering;
 use std::sync::OnceLock;
 
-use utils_error::{ereport, PgResult};
-use types_error::{ErrorLocation, ERROR, LOG, WARNING};
-use types_core::{init::BackendType, INVALID_PROC_NUMBER};
+use ::utils_error::{ereport, PgResult};
+use ::types_error::{ErrorLocation, ERROR, LOG, WARNING};
+use ::types_core::{init::BackendType, INVALID_PROC_NUMBER};
 use ::types_error::ERRCODE_INVALID_PARAMETER_VALUE;
 use ::types_guc::PGC_SIGHUP;
-use types_pgarch::{ArchiveModuleCallbacks, ArchiveModuleState, PgArchData};
+use ::types_pgarch::{ArchiveModuleCallbacks, ArchiveModuleState, PgArchData};
 use ::types_pgstat::wait_event::WAIT_EVENT_ARCHIVER_MAIN;
 use ::signal::SigHandler;
 use ::types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_TIMEOUT};
-use wal::{MAXFNAMELEN, XLOGDIR};
+use ::wal::{MAXFNAMELEN, XLOGDIR};
 
 #[cfg(test)]
 mod tests;

@@ -33,13 +33,13 @@ pub mod planner;
 pub mod sortsupport;
 
 use ::network_seams::session;
-use mcx::{Mcx, PgVec};
-use types_error::{
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
-use types_network::{inet_struct, macaddr, macaddr8, ResolvedName, SessionEndpoint, PGSQL_AF_INET, PGSQL_AF_INET6};
+use ::types_network::{inet_struct, macaddr, macaddr8, ResolvedName, SessionEndpoint, PGSQL_AF_INET, PGSQL_AF_INET6};
 
 #[cfg(test)]
 mod tests;

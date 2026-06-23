@@ -40,7 +40,7 @@ use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::{Aggref, Expr};
-use pathnodes::{MinMaxAggInfo, PlannerInfo};
+use ::pathnodes::{MinMaxAggInfo, PlannerInfo};
 
 /// `preprocess_minmax_aggregates(root)` (planagg.c:73).
 ///

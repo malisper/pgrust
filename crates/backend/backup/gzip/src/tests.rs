@@ -13,8 +13,8 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use std::sync::Once;
 
-use gzip_seams::{DeflateOutcome, GzipStreamHandle};
-use sink::{
+use ::gzip_seams::{DeflateOutcome, GzipStreamHandle};
+use ::sink::{
     bbsink_begin_archive, bbsink_begin_backup, bbsink_end_archive, BbsinkState, TablespaceInfo,
 };
 use ::mcx::MemoryContext;

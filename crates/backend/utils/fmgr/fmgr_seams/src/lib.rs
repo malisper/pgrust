@@ -9,7 +9,7 @@
 //! lookup-failure surface of `fmgr_info` is preserved by [`fmgr_info_check`].
 
 use ::cache::DefElemString;
-use types_core::{AttrNumber, Oid};
+use ::types_core::{AttrNumber, Oid};
 use ::datum::varlena::Bytea;
 use ::types_error::PgResult;
 use ::array::ArrayElementDatum;

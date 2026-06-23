@@ -22,11 +22,11 @@
 mod tables;
 
 use ::utils_error::ereport;
-use conv_string_helpers::{
+use ::conv_string_helpers::{
     check_encoding_conversion_args, make_conversion_builtin, ConversionResult, LocalToUtf,
     UtfToLocal,
 };
-use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+use ::types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 use ::types_wchar::encoding::{
     pg_enc, PG_ISO_8859_5, PG_ISO_8859_6, PG_ISO_8859_7, PG_ISO_8859_8, PG_LATIN10, PG_LATIN2,
     PG_LATIN3, PG_LATIN4, PG_LATIN5, PG_LATIN6, PG_LATIN7, PG_LATIN8, PG_LATIN9, PG_UTF8,

@@ -23,7 +23,7 @@
 //! Idiomatic surface: plain integers, owned values.  No raw pointers,
 //! `extern "C"`, `c_int`, or `pg_ffi_fgram`.
 
-use hashfn::{hash_bytes_uint32, hash_bytes_uint32_extended};
+use ::hashfn::{hash_bytes_uint32, hash_bytes_uint32_extended};
 
 use crate::interval::interval_cmp_value;
 use crate::{DateADT, Interval, TimeADT, TimeTzADT, Timestamp, TimestampTz};
@@ -169,7 +169,7 @@ pub fn interval_hash_extended(key: &Interval, seed: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hashfn::{hash_bytes_uint32, hash_bytes_uint32_extended};
+    use ::hashfn::{hash_bytes_uint32, hash_bytes_uint32_extended};
 
     fn fold_int8(v: i64) -> u32 {
         let lohalf = v as u32;

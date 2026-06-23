@@ -23,10 +23,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use common_wchar::{pg_encoding_mblen_or_incomplete, pg_utf_mblen_private, PG_UTF8};
-use mcx::{Mcx, PgVec};
-use types_error::{PgError, PgResult};
-use types_json::{
+use ::common_wchar::{pg_encoding_mblen_or_incomplete, pg_utf_mblen_private, PG_UTF8};
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{PgError, PgResult};
+use ::types_json::{
     JsonLexContext as TjLexContext, JsonParseErrorType as TjErr, JsonSemAction as TjSem,
     JsonTokenType as TjTok,
 };

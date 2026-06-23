@@ -26,10 +26,10 @@ mod merge;
 mod qual;
 mod satisfies_hash_partition;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::ddlnodes::PartitionBoundSpec;
 use ::nodes::nodes::Node;
 use ::nodes::partition::{

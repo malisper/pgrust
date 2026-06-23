@@ -51,21 +51,21 @@ use ::dsm_core::dsm::{
     dsm_create, dsm_segment_address, dsm_segment_handle as dsm_seg_handle, DsmSegment, DsmSegmentId,
     DSM_CREATE_NULL_IF_MAXSEGMENTS,
 };
-use shm_toc::{shm_toc_estimate, ShmToc};
-use utils_error::{elog, ereport, PgResult};
-use mcx::{Allocator, Mcx};
-use types_core::{pid_t, ProcNumber, Size, SubTransactionId, XLogRecPtr, INVALID_PROC_NUMBER};
+use ::shm_toc::{shm_toc_estimate, ShmToc};
+use ::utils_error::{elog, ereport, PgResult};
+use ::mcx::{Allocator, Mcx};
+use ::types_core::{pid_t, ProcNumber, Size, SubTransactionId, XLogRecPtr, INVALID_PROC_NUMBER};
 use ::types_tuple::Datum;
-use types_error::{
+use ::types_error::{
     ERRCODE_ADMIN_SHUTDOWN, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, FATAL, WARNING,
 };
-use execparallel::{
+use ::execparallel::{
     BackgroundWorkerHandle, DsmSegmentHandle as ExecDsmSeg, FixedParallelExecutorState,
     FixedStateHandle, InstrumentationHandle, JitInstrumentationHandle, ParallelContextHandle,
     ParallelWorkerContextHandle, SerializeCursor, SharedExecutorInstrumentation,
     ShmMqAttachHandle, ShmTocEstimatorHandle, ShmTocHandle as ExecShmToc,
 };
-use types_parallel::{
+use ::types_parallel::{
     dsm_handle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState, ParallelWorkerMainFn,
     ShmMqHandleHandle, ShmMqResult,
 };
@@ -3012,7 +3012,7 @@ mod dsm_substrate_tests {
 
         // The spinlock guards a critical section across the shared mapping.
         {
-            use s_lock::{s_lock_macro, s_unlock};
+            use ::s_lock::{s_lock_macro, s_unlock};
             let lock = &worker_ref.get().mutex;
             s_lock_macro(lock, Some(file!()), line!() as i32, Some("test"));
             // ... critical section ...
@@ -3219,7 +3219,7 @@ mod dsm_substrate_tests {
         use ::dsm_core::dsm::{
             dsm_create, dsm_detach, dsm_pin_segment, dsm_segment_handle, dsm_unpin_segment,
         };
-        use shm_mq::{
+        use ::shm_mq::{
             shm_mq_attach as real_attach, shm_mq_create as real_create,
             shm_mq_receive as real_receive, shm_mq_send as real_send,
             shm_mq_set_receiver as real_set_receiver, ShmMq, SHM_MQ_SUCCESS,
@@ -3375,7 +3375,7 @@ mod dsm_substrate_tests {
     #[test]
     fn tuple_queue_roundtrip_over_real_dsm() -> PgResult<()> {
         use ::dsm_core::dsm::{dsm_create, dsm_detach};
-        use shm_mq::{
+        use ::shm_mq::{
             shm_mq_attach as real_attach, shm_mq_send as real_send, ShmMq, SHM_MQ_SUCCESS,
         };
 

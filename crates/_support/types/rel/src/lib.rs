@@ -25,7 +25,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mcx::{PgBox, PgString};
+use ::mcx::{PgBox, PgString};
 use ::types_core::primitive::{Oid, ProcNumber};
 use ::types_error::PgResult;
 use ::types_storage::lock::{LOCKMODE, NoLock};
@@ -155,7 +155,7 @@ pub struct FormData_pg_index {
 /// vocabulary. `None` on [`RelationData::rd_options`] is the C NULL
 /// `rd_options` (no reloptions set); when present, the parse filled every
 /// field (defaults included), as in C.
-pub use types_reloptions::{RdOptions, StdRdOptions};
+pub use ::types_reloptions::{RdOptions, StdRdOptions};
 
 /// `RelationData` (`utils/rel.h`), trimmed: the consumed slice of a relcache
 /// entry, copied into the opening caller's memory context. (`rd_tableam` is

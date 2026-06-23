@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 
 extern crate alloc;
 
-use types_core::{
+use ::types_core::{
     BlockNumber, Buffer, MultiXactId, OffsetNumber, Oid, TimestampTz, TransactionId,
 };
 use ::types_error::PgResult;

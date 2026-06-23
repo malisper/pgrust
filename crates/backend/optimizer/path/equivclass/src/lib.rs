@@ -69,7 +69,7 @@ use joinpath_seams as jp_seam;
 use path_small_seams as ps_seam;
 use relnode_ext_seams as relnode_ext;
 use ::types_error::PgResult;
-use pathnodes::{
+use ::pathnodes::{
     EcId, PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
 };
 

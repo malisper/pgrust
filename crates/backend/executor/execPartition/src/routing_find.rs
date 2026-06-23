@@ -1,14 +1,14 @@
 //! Per-tuple routing family: `ExecFindPartition`, `FormPartitionKeyDatum`,
 //! `get_partition_for_tuple`, `ExecBuildSlotPartitionKeyDescription`.
 
-use mcx::{Mcx, PgString};
-use types_acl::{ACL_SELECT, ACLCHECK_OK, RLS_ENABLED};
+use ::mcx::{Mcx, PgString};
+use ::types_acl::{ACL_SELECT, ACLCHECK_OK, RLS_ENABLED};
 use ::types_core::primitive::{InvalidOid, OidIsValid};
 use types_tuple::heaptuple::Datum;
-use types_error::{PgResult, ERRCODE_CHECK_VIOLATION};
+use ::types_error::{PgResult, ERRCODE_CHECK_VIOLATION};
 use ::nodes::nodes::CmdType;
 use ::nodes::partition::PartitionStrategy;
-use nodes::{EStateData, ModifyTableState, RriId, SlotId};
+use ::nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use ::rel::Relation;
 
 use crate::{

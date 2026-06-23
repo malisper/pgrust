@@ -14,11 +14,11 @@ use fmgr_seams as fmgr_seams;
 use ::mcx::Mcx;
 use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::Oid;
-use types_error::{
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION,
 };
-use types_rangetypes::{
+use ::types_rangetypes::{
     RangeBound, RangeTypeP, RANGE_EMPTY, RANGE_EMPTY_LITERAL, RANGE_LB_INC, RANGE_LB_INF,
     RANGE_LB_NULL, RANGE_UB_INC, RANGE_UB_INF, RANGE_UB_NULL,
 };

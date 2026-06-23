@@ -20,8 +20,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::utils_error::ereport;
-use mcx::{Mcx, PgBox, PgVec};
-use types_error::{PgResult, ERROR};
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::types_error::{PgResult, ERROR};
 use ::nodes::copy_query::{Query, QuerySource};
 use ::nodes::nodes::{ntag, CmdType, Node, NodePtr};
 use ::nodes::parsestmt::{ParseState, RawStmt};

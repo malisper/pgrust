@@ -39,7 +39,7 @@ use ::types_acl::acl::{AclResult, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
 use ::types_core::catalog::{NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID};
 use ::types_core::primitive::{InvalidOid, Oid, FUNC_MAX_ARGS};
 use types_tuple::heaptuple::Datum as CanonDatum;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_IN_FAILED_SQL_TRANSACTION, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_PROTOCOL_VIOLATION, ERRCODE_UNDEFINED_FUNCTION, ERROR, LOG,

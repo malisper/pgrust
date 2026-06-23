@@ -27,10 +27,10 @@
 
 extern crate std;
 
-use utils_error::{ereport, PgResult};
-use control::{CheckPoint, DBState};
-use types_core::{InvalidTransactionId, XLogRecPtr};
-use types_error::{ErrorLocation, DEBUG1, ERROR, LOG};
+use ::utils_error::{ereport, PgResult};
+use ::control::{CheckPoint, DBState};
+use ::types_core::{InvalidTransactionId, XLogRecPtr};
+use ::types_error::{ErrorLocation, DEBUG1, ERROR, LOG};
 use ::types_storage::storage::LW_EXCLUSIVE;
 use ::wal::wal::RM_XLOG_ID;
 use ::wal::xlog_consts::{

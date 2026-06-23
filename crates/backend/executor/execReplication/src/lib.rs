@@ -17,7 +17,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::ToString;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::utils_error::ereport;
 use ::types_error::ErrorLocation;

@@ -9,7 +9,7 @@ use core::marker::PhantomData;
 
 use ::mcx::Mcx;
 use ::cache::typcache::TypeCacheEntry;
-use types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
 use ::types_rangetypes::RangeTypeP;
 
 use crate::range_bounds_compare::{

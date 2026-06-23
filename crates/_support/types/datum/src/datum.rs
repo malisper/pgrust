@@ -7,7 +7,7 @@
 //! the raw word (`from_usize` / `as_usize`); owned payloads live in the typed
 //! node structs that reference them, not in the `Datum` itself.
 
-use types_core::{Oid, TransactionId};
+use ::types_core::{Oid, TransactionId};
 
 /// TRANSITIONAL COMPAT SHIM (Datum-unification keystone). The bare-word
 /// newtype is being unified into the canonical `types_tuple::Datum<'mcx>` enum

@@ -3,7 +3,7 @@
 
 use std::ffi::{c_int, c_void};
 
-pub use pg_ffi_fgram::{KeywordCategory, ScanKeywordHashFunc, ScanKeywordList};
+pub use ::pg_ffi_fgram::{KeywordCategory, ScanKeywordHashFunc, ScanKeywordList};
 
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/keywords.rs"));

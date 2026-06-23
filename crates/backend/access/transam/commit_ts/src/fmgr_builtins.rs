@@ -18,9 +18,9 @@
 //! and are left to their own registration.
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::{TimestampTz, TransactionId};
+use ::types_core::{TimestampTz, TransactionId};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

@@ -29,7 +29,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
 use fe_seams as s;
-use types_libpqwalreceiver::{
+use ::types_libpqwalreceiver::{
     ConnStatusType, ConninfoOption, ExecStatusType as SeamExecStatus, PgConnId, PgResultId,
     Pgsocket,
 };

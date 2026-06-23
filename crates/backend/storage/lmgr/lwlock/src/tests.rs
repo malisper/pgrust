@@ -6,7 +6,7 @@
 use super::*;
 use core::cell::{Cell, RefCell};
 use std::sync::{Mutex, Once};
-use types_storage::{pg_atomic_uint32, LWLockWaitList, LWLockWaitState};
+use ::types_storage::{pg_atomic_uint32, LWLockWaitList, LWLockWaitState};
 
 // The seam slots are process-wide and the held-lock table is thread-local;
 // serialize the tests that use them.

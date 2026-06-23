@@ -32,8 +32,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use utils_error::{elog, ereport};
-use types_error::{
+use ::utils_error::{elog, ereport};
+use ::types_error::{
     ErrorLocation, PgResult, DEBUG1, DEBUG3, ERRCODE_ADMIN_SHUTDOWN, LOG, WARNING,
 };
 use ::types_core::primitive::XLogRecPtr;
@@ -41,12 +41,12 @@ use ::types_core::xact::{
     InvalidXLogRecPtr, SYNCHRONOUS_COMMIT_LOCAL_FLUSH, SYNCHRONOUS_COMMIT_REMOTE_APPLY,
     SYNCHRONOUS_COMMIT_REMOTE_FLUSH, SYNCHRONOUS_COMMIT_REMOTE_WRITE,
 };
-use types_core::{ProcNumber, INVALID_PROC_NUMBER};
+use ::types_core::{ProcNumber, INVALID_PROC_NUMBER};
 use ::replication::walsender::{SyncRepStandbyData, WalSndState};
 use ::types_storage::storage::{proclist_node, LWLockMode, SYNC_REP_LOCK};
 use ::types_storage::waiteventset::{WL_LATCH_SET, WL_POSTMASTER_DEATH};
 
-use syncrep_gram::{syncrep_yyparse, SYNC_REP_PRIORITY};
+use ::syncrep_gram::{syncrep_yyparse, SYNC_REP_PRIORITY};
 use ::walsender::core as wsctl;
 
 use latch_seams as latch;
@@ -952,7 +952,7 @@ pub fn check_synchronous_standby_names(newval: Option<&str>) -> PgResult<CheckRe
             let parsed = match parse_outcome {
                 Ok(parsed) => parsed,
                 Err(err) => {
-                    use misc_guc::{GUC_check_errcode, GUC_check_errdetail};
+                    use ::misc_guc::{GUC_check_errcode, GUC_check_errdetail};
                     use ::types_error::ERRCODE_SYNTAX_ERROR;
                     GUC_check_errcode(ERRCODE_SYNTAX_ERROR);
                     let msg = err.message();

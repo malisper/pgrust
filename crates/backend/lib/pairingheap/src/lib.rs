@@ -84,7 +84,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
+use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
 /// The arena index standing in for C's `NULL` link.
 ///

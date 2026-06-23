@@ -48,7 +48,7 @@
 
 use core::ffi::{c_char, c_double, c_int};
 
-use pg_ffi_fgram::{AttrNumber, Bitmapset, CompareType, List, NodeTag, Oid, Size};
+use ::pg_ffi_fgram::{AttrNumber, Bitmapset, CompareType, List, NodeTag, Oid, Size};
 
 use crate::primnodes::{Cost, Expr, Index, JoinType};
 

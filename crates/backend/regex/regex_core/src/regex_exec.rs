@@ -51,7 +51,7 @@ use crate::regguts::{
     chr, color, Cnfa, ColorMap, Guts, NodeId, Subre, BACKR, CHR_MIN, CNFA_NOPROGRESS, COLORLESS,
     HASLACONS, MATCHALL, MAX_SIMPLE_CHR, PSEUDO, RAINBOW, SHORTER, WHITE,
 };
-use regex::{pg_regoff_t, RegMatch};
+use ::regex::{pg_regoff_t, RegMatch};
 
 /// Default recursion-depth cap for the `STACK_TOO_DEEP` analogue used by
 /// [`lacon`] and [`cdissect`]. C uses the backend's `max_stack_depth` GUC via

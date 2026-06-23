@@ -15,9 +15,9 @@ use crate::changecount::{
     pgstat_begin_changecount_write, pgstat_copy_changecounted_stats,
     pgstat_end_changecount_write,
 };
-use lwlock_seams::{lwlock_acquire, lwlock_initialize};
+use ::lwlock_seams::{lwlock_acquire, lwlock_initialize};
 use ::init_small_seams::my_proc_number;
-use pgstat_seams::{
+use ::pgstat_seams::{
     assert_is_up, shmem_is_shutdown, snapshot_fixed, with_shmem_bgwriter, with_snapshot_bgwriter,
 };
 use ::stat_seams::pgstat_flush_io;
@@ -27,7 +27,7 @@ use ::types_pgstat::backend_utils_activity_pgstat_bgwriter::{
     PgStatShared_BgWriter, PgStat_BgWriterStats,
 };
 use ::types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
-use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
+use ::types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
 pub use ::types_pgstat::activity_pgstat::PGSTAT_KIND_BGWRITER;
 

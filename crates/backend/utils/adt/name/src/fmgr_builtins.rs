@@ -18,10 +18,10 @@
 //! `btnamesortsupport` (an `internal` SortSupport arg) and `current_schemas`
 //! (needs the array carrier) are NOT registered.
 
-use types_core::{Oid, NAMEDATALEN};
+use ::types_core::{Oid, NAMEDATALEN};
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use ::stringinfo::StringInfo;
 use ::types_tuple::heaptuple::NameData;
 

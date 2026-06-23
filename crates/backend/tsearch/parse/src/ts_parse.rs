@@ -33,7 +33,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, NOTICE,
 };
 
@@ -65,7 +65,7 @@ fn limitpos(x: i32) -> u16 {
  * `DictSubState` with an `Option<Box<DictPrivateState>>` private state).
  * -------------------------------------------------------------------- */
 
-pub use parse_seams::{DictSubState, LexizeLexeme};
+pub use ::parse_seams::{DictSubState, LexizeLexeme};
 
 /* ---- ParsedText ---- */
 
@@ -564,7 +564,7 @@ const VARHDRSZ: usize = 4;
 // because the canonical `ts_type.h` / `ts_utils.h` shapes there differ (the
 // packed `len_dist` `QueryOperand`, the three-arm `QueryItem` union, and the
 // `WordEntryPos`-positioned `ExecPhraseData`).
-pub use parse_seams::{ExecPhraseData, QueryItem, QueryOperand, QueryOperator};
+pub use ::parse_seams::{ExecPhraseData, QueryItem, QueryOperand, QueryOperator};
 
 /// `TS_EXEC_EMPTY` (`ts_utils.h`): the default `TS_execute` flag the headline
 /// path passes (no special empty/phrase handling).

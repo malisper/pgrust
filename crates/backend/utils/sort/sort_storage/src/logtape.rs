@@ -50,16 +50,16 @@
 #![allow(non_upper_case_globals)]
 
 use ::utils_error::elog;
-use mcx::{Mcx, PgBox, PgVec};
-use types_core::{BLCKSZ, MAXPGPATH};
-use types_error::{PgError, PgResult, ERROR};
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::types_core::{BLCKSZ, MAXPGPATH};
+use ::types_error::{PgError, PgResult, ERROR};
 
 use buffile_seams as buffile;
 
 // The owned `LogicalTape` / `LogicalTapeSet` structs are the shared vocabulary,
 // defined in the seam crate so the consumer (nodeAgg) can name them and hold
 // the set by value. This owner crate fills the concrete bodies over them.
-use sort_storage_seams::{LogicalTape, LogicalTapeSet};
+use ::sort_storage_seams::{LogicalTape, LogicalTapeSet};
 
 /// `MaxAllocSize` (`memutils.h`).
 const MaxAllocSize: usize = ::mcx::MAX_ALLOC_SIZE;

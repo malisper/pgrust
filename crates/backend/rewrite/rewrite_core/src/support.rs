@@ -4,11 +4,11 @@
 use alloc::borrow::ToOwned;
 use alloc::format;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::cache::SysCacheKey;
-use types_core::{Oid, RELATION_RELATION_ID};
+use ::types_core::{Oid, RELATION_RELATION_ID};
 use ::datum::Datum as KeyDatum;
-use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
 
 use table as table;
 use lsyscache as lsyscache;

@@ -71,8 +71,8 @@ use alloc::vec::Vec;
 
 use ::mcx::MemoryContext;
 
-use utils_error::{elog, ereport};
-use types_error::{
+use ::utils_error::{elog, ereport};
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
@@ -90,25 +90,25 @@ use ::types_storage::lock::RowExclusiveLock;
 use ::types_tuple::heaptuple::{ANYOID, BYTEAOID, INTERNALOID};
 
 use ::table::table_open;
-use dependency::{
+use ::dependency::{
     add_exact_object_address, new_object_addresses, record_object_address_dependencies,
 };
 
-use aclchk_seams::{aclcheck_error_type, object_aclcheck};
+use ::aclchk_seams::{aclcheck_error_type, object_aclcheck};
 use indexing_seams as indexing_seams;
-use functioncmds_seams::{
+use ::functioncmds_seams::{
     aclcheck_error_function, func_signature_string, get_user_id, name_list_to_string,
     procedure_create, ProcedureCreateArgs,
 };
-use coerce_seams::{
+use ::coerce_seams::{
     check_valid_internal_signature, check_valid_polymorphic_signature,
     enforce_generic_type_consistency, is_binary_coercible,
 };
-use parse_func_seams::{func_get_detail, FuncDetailCode};
+use ::parse_func_seams::{func_get_detail, FuncDetailCode};
 use ::parse_oper_seams::lookup_oper_name;
 use ::format_type_seams::format_type_be;
-use lsyscache_seams::{func_strict, get_func_name};
-use syscache_seams::{aggregate_tuple_by_fnoid, pg_proc_form};
+use ::lsyscache_seams::{func_strict, get_func_name};
+use ::syscache_seams::{aggregate_tuple_by_fnoid, pg_proc_form};
 
 use ::pg_aggregate_seams::AggregateCreateArgs;
 

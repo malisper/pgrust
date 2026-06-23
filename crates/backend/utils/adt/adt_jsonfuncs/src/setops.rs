@@ -26,12 +26,12 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::error::{
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NULL_VALUE_NOT_ALLOWED,
 };
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use types_jsonb::jsonb_util::{
     JsonbIterator, JsonbParseState, JsonbValue, JsonbValueData,
@@ -42,7 +42,7 @@ use ::types_jsonb::jsonb::{
 };
 
 use ::adt_jsonb::JsonbToCStringIndent;
-use jsonb_util::{
+use ::jsonb_util::{
     JsonbIteratorInit, JsonbIteratorNext, JsonbToJsonbValue, JsonbValueToJsonb, pushJsonbValue,
 };
 use stack_depth_seams as stack_depth_seams;

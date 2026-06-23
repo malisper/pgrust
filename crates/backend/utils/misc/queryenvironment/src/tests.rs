@@ -5,7 +5,7 @@ extern crate std;
 use super::*;
 use alloc::string::String;
 use alloc::vec::Vec;
-use mcx::{PgString, PgVec};
+use ::mcx::{PgString, PgVec};
 use ::nodes::queryenvironment::ENR_NAMED_TUPLESTORE;
 use ::types_tuple::heaptuple::{TupleDesc, TupleDescData};
 

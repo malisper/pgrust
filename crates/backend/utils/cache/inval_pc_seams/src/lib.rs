@@ -4,7 +4,7 @@
 //! owning inval unit installs these; until then a call panics loudly.
 
 use ::types_error::PgResult;
-use types_plancache::{RelcacheCallbackFn, SyscacheCallbackFn};
+use ::types_plancache::{RelcacheCallbackFn, SyscacheCallbackFn};
 
 seam_core::seam!(
     /// `CacheRegisterRelcacheCallback(func, 0)`.

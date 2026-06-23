@@ -63,7 +63,7 @@ use alloc::vec::Vec;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     JoinType, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL,
     JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_SEMI, RELOPT_BASEREL, RTE_RELATION,
 };

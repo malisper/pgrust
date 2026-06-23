@@ -10,7 +10,7 @@
 //! offset, then two extra rounds of zeroes mix in the final value and the
 //! partial checksums are xor-folded into a single 32-bit result.
 
-pub use types_core::{BlockNumber, BLCKSZ};
+pub use ::types_core::{BlockNumber, BLCKSZ};
 
 /// This crate is a pure-computation leaf with no inward seam declarations;
 /// nothing to install.

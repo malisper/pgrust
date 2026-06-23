@@ -35,13 +35,13 @@
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, Index, InvalidOid, Oid, OidIsValid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::parsenodes::RTEKind;
 use ::nodes::primnodes::{Expr, Var};
 use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use pathnodes::{NodeId, PlanId, PlannerInfo, RelId, Relids, SpecialJoinInfo};
-use types_selfuncs::{StatsTuple, StatsTupleFreeFunc, VariableStatData};
+use ::pathnodes::{NodeId, PlanId, PlannerInfo, RelId, Relids, SpecialJoinInfo};
+use ::types_selfuncs::{StatsTuple, StatsTupleFreeFunc, VariableStatData};
 
 use aclchk_seams as aclchk;
 use ::nodes_core::bitmapset as colbms;

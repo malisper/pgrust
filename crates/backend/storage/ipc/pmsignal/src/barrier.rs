@@ -24,8 +24,8 @@
 //! interrupt/abort control transfer to the installed CV implementation, as in C.
 
 use condition_variable_seams as cv;
-use s_lock::{s_init_lock, s_lock_macro, s_unlock};
-use condvar::{Barrier, ConditionVariable};
+use ::s_lock::{s_init_lock, s_lock_macro, s_unlock};
+use ::condvar::{Barrier, ConditionVariable};
 use ::types_core::uint32;
 
 /// `SpinLockAcquire(&barrier->mutex)`: `s_lock` if the test-and-set fails. C's

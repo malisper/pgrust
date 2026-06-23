@@ -15,7 +15,7 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_core::primitive::{AttrNumber, Index, Oid, TimestampTz, INVALID_OID};
 use ::types_error::PgResult;
 use ::opclass::TypeName;

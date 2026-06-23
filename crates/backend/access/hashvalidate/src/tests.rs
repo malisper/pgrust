@@ -8,7 +8,7 @@
 //! exactly what a real owner crate would charge.
 
 use super::*;
-use mcx::{slice_in, MemoryContext, PgString};
+use ::mcx::{slice_in, MemoryContext, PgString};
 use std::string::ToString;
 use std::sync::Once;
 use ::types_error::make_sqlstate;

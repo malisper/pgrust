@@ -50,10 +50,10 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, Index, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     PathId, PlannerInfo, RelId, Relids, JOIN_ANTI, JOIN_SEMI, RELOPT_BASEREL, RTE_RELATION,
 };
 
@@ -69,7 +69,7 @@ const RTE_CTE: RTEKind = 6;
 const RTE_NAMEDTUPLESTORE: RTEKind = 7;
 const RTE_RESULT: RTEKind = 8;
 
-use joinrels::{is_dummy_rel, is_simple_rel, make_join_rel};
+use ::joinrels::{is_dummy_rel, is_simple_rel, make_join_rel};
 use pathnode_seams as pathnode;
 use relnode_seams as bms;
 use costsize_seams as costsize;

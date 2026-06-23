@@ -11,11 +11,11 @@ use ::datum::datum::Datum;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo};
-use types_rangetypes::{MultirangeTypeP, RangeBound};
-use types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_MULTIRANGE_INEQ_SEL};
+use ::pathnodes::{NodeId, PlannerInfo};
+use ::types_rangetypes::{MultirangeTypeP, RangeBound};
+use ::types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_MULTIRANGE_INEQ_SEL};
 
-use multirangetypes_seams::{
+use ::multirangetypes_seams::{
     datum_get_multirange_type_p_value, make_multirange, multirange_get_bounds,
     multirange_get_typcache,
 };

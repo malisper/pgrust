@@ -12,11 +12,11 @@
 //! external it needs and panics; a faithful C build would `ereport`/elog at
 //! exactly these points until those owners land.
 
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::fmgr::fmgr::FunctionCallInfoBaseData;
 use ::types_core::Oid;
 use ::parsenodes::InlineCodeBlock;
-use plpgsql::{int32, EventTriggerData, ResourceOwner, TriggerData};
+use ::plpgsql::{int32, EventTriggerData, ResourceOwner, TriggerData};
 
 /// `T_CallContext` (nodetags.h).
 const T_CALL_CONTEXT: u32 = 332;

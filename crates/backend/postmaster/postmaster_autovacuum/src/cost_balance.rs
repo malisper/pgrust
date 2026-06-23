@@ -8,8 +8,8 @@
 
 extern crate alloc;
 
-use utils_error::{elog, message_level_is_interesting, PgResult};
-use types_error::{DEBUG2, ERROR};
+use ::utils_error::{elog, message_level_is_interesting, PgResult};
+use ::types_error::{DEBUG2, ERROR};
 
 use crate::core;
 use autovacuum_ext_seams as seam;

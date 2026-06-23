@@ -43,8 +43,8 @@
 
 use std::rc::Rc;
 
-use mcx::{Mcx, MemoryContext};
-use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
+use ::mcx::{Mcx, MemoryContext};
+use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 use ::nodes::params::{
     ParamExternData, ParamListInfo, ParamListInfoData, ParamRef, ParamsErrorCbData,
     PARAM_FLAG_CONST, T_Param,

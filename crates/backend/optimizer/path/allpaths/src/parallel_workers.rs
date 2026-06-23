@@ -1,6 +1,6 @@
 //! `compute_parallel_worker` (allpaths.c:4273).
 
-use pathnodes::{PlannerInfo, RelId, RELOPT_BASEREL};
+use ::pathnodes::{PlannerInfo, RelId, RELOPT_BASEREL};
 
 use crate::{min_parallel_index_scan_size, min_parallel_table_scan_size};
 

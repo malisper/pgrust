@@ -11,8 +11,8 @@
 use std::cell::{Cell, RefCell};
 use std::sync::Once;
 
-use mcx::{Mcx, MemoryContext};
-use nodes::{ScanDirection, TupleTableSlot};
+use ::mcx::{Mcx, MemoryContext};
+use ::nodes::{ScanDirection, TupleTableSlot};
 
 use super::*;
 

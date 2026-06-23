@@ -3,7 +3,7 @@
 //! entries (the given query for ordinary actions, or the pushed-down SELECT
 //! subquery for an INSERT/SELECT action).
 
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::CmdType;
 use ::nodes::parsenodes::RTEKind;

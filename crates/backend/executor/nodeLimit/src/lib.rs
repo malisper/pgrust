@@ -33,10 +33,10 @@ use execTuples_seams as execTuples;
 use execUtils_seams as execUtils;
 use postgres_seams as tcop_postgres;
 
-use mcx::{alloc_in, PgBox};
+use ::mcx::{alloc_in, PgBox};
 use ::types_core::int64;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use types_error::{
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{
     ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE, ERRCODE_INVALID_ROW_COUNT_IN_RESULT_OFFSET_CLAUSE,
 };
 use ::nodes::execnodes::ScanDirectionIsForward;
@@ -44,7 +44,7 @@ use ::nodes::executor::EXEC_FLAG_MARK;
 use ::nodes::nodelimit::{
     Limit, LimitStateData, LimitStateCond, LIMIT_OPTION_COUNT, LIMIT_OPTION_WITH_TIES,
 };
-use nodes::{EStateData, PlanStateNode, SlotId};
+use ::nodes::{EStateData, PlanStateNode, SlotId};
 
 /// Install this crate's seam implementations.
 ///

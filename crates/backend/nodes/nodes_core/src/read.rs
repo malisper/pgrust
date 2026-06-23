@@ -40,8 +40,8 @@
 
 use std::cell::Cell;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::nodes::Node;
 
 /// `elog(ERROR, msg)` — an internal-error `PgError` carrying `msg`

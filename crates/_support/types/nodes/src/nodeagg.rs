@@ -19,7 +19,7 @@
 //! These collapse onto the owners' real types when those units land. `None`
 //! collections are the C `NIL`/NULL array.
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_core::primitive::{AttrNumber, Index, Oid};
 use ::types_error::PgResult;
 use types_tuple::heaptuple::FormedMinimalTuple;

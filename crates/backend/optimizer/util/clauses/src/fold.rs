@@ -30,8 +30,8 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::{
     etag, ArrayExpr, BoolExprType, CaseWhen, CoercionForm, Const, Expr, FuncExpr, NullTest,
     NullTestType, ScalarArrayOpExpr,

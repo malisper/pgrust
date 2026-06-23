@@ -32,8 +32,8 @@ use core::cell::RefCell;
 use ::utils_error::ereport;
 use ::mcx::Mcx;
 use ::types_core::primitive::{Oid, OidIsValid};
-use types_error::{ErrorLocation, PgError, PgResult, WARNING};
-use locale::{CollProvider, PgLocale, PgLocaleStruct};
+use ::types_error::{ErrorLocation, PgError, PgResult, WARNING};
+use ::locale::{CollProvider, PgLocale, PgLocaleStruct};
 use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 
 use pg_locale_catalog_seams as catalog;

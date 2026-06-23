@@ -20,7 +20,7 @@
 //! loud panic once it dispatches — but the entry shell itself is complete and
 //! compiles into a real `postgres` binary.
 
-use main_main::{pg_main, MainOutcome};
+use ::main_main::{pg_main, MainOutcome};
 
 fn main() {
     // Collect process arguments as owned strings, then borrow them as the

@@ -46,12 +46,12 @@ use ::transam_parallel::shared_dsm_object;
 use nodes_core_seams as bitmapset;
 
 use ::types_error::PgResult;
-use execparallel::{
+use ::execparallel::{
     DsmSegmentHandle, ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
     SerializeCursor,
 };
 use ::nodes::execnodes::ScanDirection;
-use nodes::{EStateData, SeqScan, SeqScanState, SlotId, TupleTableSlot};
+use ::nodes::{EStateData, SeqScan, SeqScanState, SlotId, TupleTableSlot};
 use ::types_tableam::relscan::{ParallelBlockTableScanDescData, ParallelTableScanDesc};
 
 // ===========================================================================

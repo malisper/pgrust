@@ -21,7 +21,7 @@ extern crate alloc;
 
 use ::nodes::rawnodes::FromExpr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{JoinlistNode, PlannerInfo};
+use ::pathnodes::{JoinlistNode, PlannerInfo};
 
 seam_core::seam!(
     /// `add_base_rels_to_query(root, jtnode)` (initsplan.c:158): construct

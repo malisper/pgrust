@@ -60,7 +60,7 @@
 #![allow(non_camel_case_types)]
 
 use ::utils_error::ereport;
-use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
 
 mod barrier;
 pub mod fmgr_builtins;

@@ -44,18 +44,18 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 
-use pmsignal::{PMSignalReason, SendPostmasterSignal};
-use condition_variable::{
+use ::pmsignal::{PMSignalReason, SendPostmasterSignal};
+use ::condition_variable::{
     ConditionVariableBroadcast, ConditionVariableCancelSleep, ConditionVariableInit,
     ConditionVariablePrepareToSleep, ConditionVariableSleep,
 };
 use ::condvar::ConditionVariable;
-use types_core::{
+use ::types_core::{
     pg_time_t, Size, TimeLineID, TimestampTz, XLogRecPtr, INVALID_PROC_NUMBER,
 };
 use ::types_error::PgResult;
 use ::types_pgstat::wait_event::WAIT_EVENT_WAL_RECEIVER_EXIT;
-use types_walreceiver::{WalRcvData, WalRcvShared, WalRcvState, MAXCONNINFO, NAMEDATALEN};
+use ::types_walreceiver::{WalRcvData, WalRcvShared, WalRcvState, MAXCONNINFO, NAMEDATALEN};
 
 use transam_xlog_seams as xlog;
 use xlogrecovery_seams as xlogrecovery;

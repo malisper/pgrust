@@ -11,9 +11,9 @@
 
 #![allow(non_snake_case)]
 
-use types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
-use types_error::{PgResult, SqlState};
-use replication_slot_2::{
+use ::types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo};
+use ::types_error::{PgResult, SqlState};
+use ::replication_slot_2::{
     ReplicationSlotHandle, ReplicationSlotInvalidationCause, ReplicationSlotPersistency,
 };
 use ::types_tuple::heaptuple::NameData;

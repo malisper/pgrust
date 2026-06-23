@@ -24,7 +24,7 @@ use ::types_core::primitive::{Oid, RelFileNumber, InvalidOid};
 use ::types_error::PgResult;
 use ::types_storage::storage::RelFileLocator;
 use ::types_catalog::catalog::RELKIND_INDEX;
-use types_acl::{ACLCHECK_OK, ACL_CREATE};
+use ::types_acl::{ACLCHECK_OK, ACL_CREATE};
 
 use ::common_relation::relation_open;
 use ::miscinit::GetUserId;
@@ -40,7 +40,7 @@ use tablespace_seams as tablespace_seam;
 use tablespace_globals_seams as tablespace_globals_seam;
 
 use ::utils_error::ereport;
-use types_error::{ERRCODE_SYNTAX_ERROR, ERROR};
+use ::types_error::{ERRCODE_SYNTAX_ERROR, ERROR};
 use ::types_storage::lock::{LOCKMODE, NoLock};
 use ::transam_xact::CommandCounterIncrement;
 

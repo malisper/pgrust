@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // `Timeval`/`PgRUsage` (`utils/pg_rusage.h`) are canonically defined in
 // `rusage` (the shared types layer cluster/clean-seams also consume);
 // re-exported here so existing paths keep working.
-pub use rusage::{PgRUsage, Timeval};
+pub use ::rusage::{PgRUsage, Timeval};
 
 /// Capture a fresh snapshot; constructor form of [`pg_rusage_init`]
 /// (C `pg_rusage_init`). Free function rather than an inherent method because

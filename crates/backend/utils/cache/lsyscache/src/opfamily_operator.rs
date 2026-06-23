@@ -19,11 +19,11 @@ use amapi_seams as amapi;
 use ::lsyscache_seams::OpIndexInterpretation;
 use syscache_seams as syscache;
 use typcache_seams as typcache;
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::hash::hash::{HASHSTANDARD_PROC, HTEqualStrategyNumber};
-use opclass::{AMOP_ORDER, AMOP_SEARCH};
+use ::opclass::{AMOP_ORDER, AMOP_SEARCH};
 
 /// `InvalidOid` (`postgres_ext.h`).
 const INVALID_OID: Oid = 0;

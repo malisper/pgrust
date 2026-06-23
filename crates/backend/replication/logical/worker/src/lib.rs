@@ -29,7 +29,7 @@
 extern crate alloc;
 use alloc::string::String;
 
-use types_core::{Oid, XLogRecPtr};
+use ::types_core::{Oid, XLogRecPtr};
 use ::types_error::PgResult;
 use ::replication_launcher::LogicalRepWorkerType;
 use ::types_storage::LWLockMode;

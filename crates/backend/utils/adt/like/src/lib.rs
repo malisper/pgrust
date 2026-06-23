@@ -40,11 +40,11 @@ extern crate alloc;
 
 use pg_locale_seams as locale_seam;
 use mbutils_seams as mb_seam;
-use mcx::{Mcx, PgVec};
-use pgstrcasecmp::{pg_ascii_tolower, pg_tolower};
-use types_core::{Oid, C_COLLATION_OID};
-use types_error::{make_sqlstate, PgError, PgResult, SqlState};
-use locale::{CollProvider, PgLocaleStruct};
+use ::mcx::{Mcx, PgVec};
+use ::pgstrcasecmp::{pg_ascii_tolower, pg_tolower};
+use ::types_core::{Oid, C_COLLATION_OID};
+use ::types_error::{make_sqlstate, PgError, PgResult, SqlState};
+use ::locale::{CollProvider, PgLocaleStruct};
 use ::types_wchar::encoding::PG_UTF8;
 
 /// `#define LIKE_TRUE 1` -- they match.

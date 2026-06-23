@@ -34,7 +34,7 @@ use core::cell::Cell;
 use ::utils_error::ereport;
 use ::authid::PasswordType;
 use ::types_core::primitive::TimestampTz;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_WARNING_DEPRECATED_FEATURE,
     ERROR, WARNING,
 };

@@ -19,7 +19,7 @@
 //! mirroring nodeAgg's decision to home `AggStatePerAgg`/`PerTrans`/`PerGroup`
 //! in [`crate::nodeagg`].
 
-use mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgBox, PgString, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, Index, Oid};
 use ::types_error::PgResult;

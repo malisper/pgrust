@@ -43,20 +43,20 @@
 
 use std::any::Any;
 
-use misc_guc::{
+use ::misc_guc::{
     GUC_check_errcode, GUC_check_errdetail, GUC_check_errhint, GUC_check_errmsg,
 };
 use ::mcx::MemoryContext;
-use types_core::{
+use ::types_core::{
     InvalidOid, Oid, OidIsValid, DATEORDER_DMY, DATEORDER_MDY, DATEORDER_YMD, USE_GERMAN_DATES,
     USE_ISO_DATES, USE_POSTGRES_DATES, USE_SQL_DATES,
 };
-use types_datetime::{SECS_PER_HOUR, USECS_PER_SEC};
-use types_error::{
+use ::types_datetime::{SECS_PER_HOUR, USECS_PER_SEC};
+use ::types_error::{
     PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TRANSACTION_STATE, ERRCODE_UNDEFINED_OBJECT,
 };
-use types_guc::{GucSource, PGC_S_DEFAULT, PGC_S_INTERACTIVE, PGC_S_TEST};
+use ::types_guc::{GucSource, PGC_S_DEFAULT, PGC_S_INTERACTIVE, PGC_S_TEST};
 
 use ::guc_tables::hooks;
 use ::guc_tables::GucHookExtra;
@@ -1227,7 +1227,7 @@ mod install {
             // install are fused: load_tzoffsets parses the file into the owned
             // TimeZoneAbbrevTable, then install_time_zone_abbrevs makes it the
             // active runtime abbreviation table.
-            use misc_guc::{
+            use ::misc_guc::{
                 GUC_check_errdetail, GUC_check_errhint, GUC_check_errmsg,
             };
             match misc_timeout::tzparser::load_tzoffsets(&filename) {

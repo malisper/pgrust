@@ -38,7 +38,7 @@ use ::types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{CmdType, NodeId, PlannerInfo, RelId, Relids};
+use ::pathnodes::{CmdType, NodeId, PlannerInfo, RelId, Relids};
 
 /* ==========================================================================
  * Per-index raw catalog descriptor (relcache index-info detoast).

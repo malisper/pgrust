@@ -4,7 +4,7 @@
 use ::mcx::PgString;
 use ::types_core::uint8;
 use ::types_error::PgResult;
-use wal::{xl_commit_ts_truncate, DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{xl_commit_ts_truncate, DecodedXLogRecord, XLR_INFO_MASK};
 
 use crate::util::{appendf, read_i64, record_truncated};
 

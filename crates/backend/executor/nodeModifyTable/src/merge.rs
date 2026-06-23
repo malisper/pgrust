@@ -6,7 +6,7 @@
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
-use nodes::{EStateData, ModifyTableState, RriId, SlotId};
+use ::nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use ::types_tuple::heaptuple::FormedTuple;
 use ::types_tuple::heaptuple::ItemPointerData;
 

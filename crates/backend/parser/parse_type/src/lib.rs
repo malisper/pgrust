@@ -26,14 +26,14 @@ use alloc::vec::Vec;
 
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use types_core::{AttrNumber, Oid};
+use ::types_core::{AttrNumber, Oid};
 use ::datum::Datum;
-use types_error::{
+use ::types_error::{
     ereturn, ErrorLevel, ErrorLocation, PgError, PgResult, SoftErrorContext,
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use parsenodes::{Node, TypeName};
+use ::parsenodes::{Node, TypeName};
 use ::types_tuple::access::RangeVar;
 use ::types_tuple::pg_type::FormData_pg_type;
 

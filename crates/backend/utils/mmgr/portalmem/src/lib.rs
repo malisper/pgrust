@@ -31,16 +31,16 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use utils_error::{elog, ereport};
-use mcx::{MemoryContext, PgString, PgVec};
+use ::utils_error::{elog, ereport};
+use ::mcx::{MemoryContext, PgString, PgVec};
 use ::types_core::SubTransactionId;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_CURSOR, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_CURSOR_STATE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING,
 };
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::types_tuple::heaptuple::Datum;
-use portal::{
+use ::portal::{
     CachedPlanHandle, CommandTag, PgCursorRow, Portal, PortalCleanupHook, PortalData,
     PortalStatus, PortalStrategy, QueryCompletion, ResourceOwner, CMDTAG_SELECT, CMDTAG_UNKNOWN,
     CURSOR_OPT_BINARY, CURSOR_OPT_HOLD, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL, MAX_PORTALNAME_LEN,

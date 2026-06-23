@@ -9,7 +9,7 @@
 #![allow(non_snake_case)]
 
 use ::types_core::xact::XidStatus;
-use types_core::{TransactionId, XLogRecPtr};
+use ::types_core::{TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
 
 seam_core::seam!(

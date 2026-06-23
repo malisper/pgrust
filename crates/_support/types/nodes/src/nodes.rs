@@ -4,7 +4,7 @@
 //! C's `Plan *` is a tagged pointer to any concrete plan node; the owned model
 //! is this enum. Variants are added as the nodes' executor units are ported.
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 
 /// `NodeTag` (nodes/nodes.h) — the generated node-type enumeration. Node

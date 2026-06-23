@@ -14,10 +14,10 @@ use crate::keystone::{charlen_to_bytelen, cstring_to_text_with_len};
 use regex_core_seams as regex_core;
 use regexp_seams as regexp;
 use mbutils_seams as mb;
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_REGULAR_EXPRESSION};
-use regex::{RegMatch, RegexecResult, REG_NOSUB};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_REGULAR_EXPRESSION};
+use ::regex::{RegMatch, RegexecResult, REG_NOSUB};
 
 /// C: `replace_text_regexp(src_text, pattern_text, replace_text, cflags,
 /// collation, search_start, n)` — owner seam body. `n = 0` replaces all,

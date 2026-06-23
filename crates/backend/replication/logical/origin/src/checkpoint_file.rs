@@ -24,8 +24,8 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use types_core::{RepOriginId, XLogRecPtr};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, PANIC};
+use ::types_core::{RepOriginId, XLogRecPtr};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, PANIC};
 
 use fd_seams as fd;
 use pg_crc32c_seams as crc32c;

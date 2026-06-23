@@ -5,7 +5,7 @@
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::nodes::nodeagg::{AGG_HASHED, AGG_MIXED};
-use nodes::{EStateData, SlotId};
+use ::nodes::{EStateData, SlotId};
 
 use crate::aggstate::{AggStateData, HashAggBatch, HashAggSpill};
 use ::sort_storage_seams::LogicalTapeSet;

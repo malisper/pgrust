@@ -15,7 +15,7 @@ use std::vec;
 use std::vec::Vec;
 
 use super::*;
-use jsonb_util::{JsonbPair, JsonbValueToJsonb};
+use ::jsonb_util::{JsonbPair, JsonbValueToJsonb};
 use ::mcx::MemoryContext;
 
 /// Install the sibling-crate seams the jsonb engine and our hashing reach when

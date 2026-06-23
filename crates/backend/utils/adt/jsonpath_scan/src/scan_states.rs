@@ -6,7 +6,7 @@
 //! (`Ok(None)`), mirroring the C `return TOK;` / fallthrough / `yyterminate()`
 //! control flow.
 
-use types_error::{PgResult, SoftErrorContext};
+use ::types_error::{PgResult, SoftErrorContext};
 
 use crate::{check_keyword, is_other, JsonPathLexer, Lexeme, ScanBuf, State, Token};
 

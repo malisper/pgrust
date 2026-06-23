@@ -8,9 +8,9 @@
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox};
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgBox};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::primnodes::{
     etag, BoolExprType, BoolTestType, Expr, NullTestType, OpExpr, ParamKind, ScalarArrayOpExpr,

@@ -24,10 +24,10 @@
 //! `pg_get_replication_slots` SRF stays off this scalar registry (it lives in
 //! the executor-frame SRF home).
 
-use types_core::{Oid, XLogRecPtr};
+use ::types_core::{Oid, XLogRecPtr};
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use ::types_tuple::heaptuple::{NameData, NAMEOID};
 use ::types_tuple::Datum as DatumV;
 

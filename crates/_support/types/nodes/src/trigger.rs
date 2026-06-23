@@ -11,7 +11,7 @@
 //! `RelationData.rd_trigdesc` can name them without a cycle; this module re-uses
 //! them for the firing context.
 
-use mcx::{MemoryContext, PgBox, PgVec};
+use ::mcx::{MemoryContext, PgBox, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_core::xact::CommandId;
 use ::types_tuple::heaptuple::{HeapTuple, ItemPointerData};

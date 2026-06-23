@@ -11,12 +11,12 @@
 
 use trigger_seams as trig;
 use ::misc2::expandedrecord as er;
-use mcx::{Mcx, MemoryContext};
-use plpgsql::{
+use ::mcx::{Mcx, MemoryContext};
+use ::plpgsql::{
     int32, Datum, ExpandedRecordHeader as ErhHandle, PLpgSQL_datum, PLpgSQL_execstate,
     PLpgSQL_function, PLpgSQL_promise_type, PLpgSQL_rc, PLpgSQL_var,
 };
-use types_ri_triggers::{TriggerDataRef, TupleTableSlotRef};
+use ::types_ri_triggers::{TriggerDataRef, TupleTableSlotRef};
 use ::types_tuple::heaptuple::{Datum as RichDatum, FormedTuple};
 
 /// The current-trigger marker handle (`TriggerData(0)`), the only value the

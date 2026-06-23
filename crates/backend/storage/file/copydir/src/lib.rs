@@ -41,9 +41,9 @@ use ::fd::allocated_desc::{AllocateDir, FreeDir, ReadDir};
 use ::fd::sync_cleanup::{fsync_fname, pg_flush_data};
 use ::fd_seams::make_pg_directory;
 use ::postgres_seams::check_for_interrupts;
-use utils_error::{ereport, errno::sqlstate_for_file_access};
+use ::utils_error::{ereport, errno::sqlstate_for_file_access};
 use ::types_core::BLCKSZ;
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::types_storage::file::{FileCopyMethod, FILE_COPY_METHOD_CLONE, FILE_COPY_METHOD_COPY};
 
 /// `COPY_BUF_SIZE` (copydir.c:143) — `(8 * BLCKSZ)`, the read/write buffer size.
@@ -96,7 +96,7 @@ pub fn set_file_copy_method(method: FileCopyMethod) -> PgResult<()> {
 /// `copydir`/`copy_file`/`clone_file` through a seam (the sibling `reinit`
 /// owner calls `copy_file` directly).
 pub fn init_seams() {
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     // The GUC enum machinery only ever assigns one of the canonicalized enum
     // values (it checks against `file_copy_method_options[]` before assigning),

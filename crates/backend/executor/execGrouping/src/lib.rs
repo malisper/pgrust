@@ -32,11 +32,11 @@
 pub mod tuplehash;
 
 use ::hashfn::murmurhash32;
-use mcx::{Mcx, MemoryContext, PgBox};
+use ::mcx::{Mcx, MemoryContext, PgBox};
 use tuplehash::{Iter, TuplehashOps};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::execexpr::ExprState;
 use ::nodes::execnodes::{EcxtId, SlotId};
 use ::nodes::planstate::PlanStateNode;

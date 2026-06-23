@@ -24,11 +24,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::fmgr::{PgAbiValues, FMGR_ABI_EXTRA};
-use types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen, LoadedModule, LoadedModuleDetails};
+use ::types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen, LoadedModule, LoadedModuleDetails};
 use ::types_dfmgr::Pg_magic_struct;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_NAME,
     ERRCODE_OUT_OF_MEMORY, ERRCODE_UNDEFINED_FUNCTION,
 };

@@ -29,12 +29,12 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use error_fgram::{PgError, PgResult};
-use pg_ffi_fgram::{
+use ::error_fgram::{PgError, PgResult};
+use ::pg_ffi_fgram::{
     instr_time, BufferUsage, FmgrInfo, Instrumentation, Size, TupleHashEntryData, WalUsage,
     WorkerInstrumentation,
 };
-pub use pg_ffi_fgram::{
+pub use ::pg_ffi_fgram::{
     MemoryContext, MemoryContextCallback, MemoryContextCounters, MemoryContextData,
     MemoryContextMethodID, ALLOCSET_DEFAULT_INITSIZE, ALLOCSET_DEFAULT_MAXSIZE,
     ALLOCSET_DEFAULT_MINSIZE, ALLOCSET_SEPARATE_THRESHOLD, ALLOCSET_SMALL_INITSIZE,

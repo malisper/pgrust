@@ -28,7 +28,7 @@ use alloc::string::{String, ToString};
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use ::types_core::Oid;
 

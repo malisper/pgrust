@@ -21,7 +21,7 @@
 //! entry behind the seam, so the consumer only needs the attribute
 //! contributions (for the bitmap build) and presence acknowledgements.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;

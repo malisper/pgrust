@@ -47,7 +47,7 @@ pub mod ops_sql;
 pub mod random;
 pub mod series_srf;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgError;
 use ::types_numeric::NumericDigit;
 

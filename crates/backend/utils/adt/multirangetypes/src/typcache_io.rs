@@ -11,9 +11,9 @@ use ::cache::typcache::TypeCacheEntry;
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::Oid;
 use ::datum::datum::Datum;
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 use ::types_error::error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_UNDEFINED_FUNCTION};
-use types_rangetypes::{MultirangeType, MultirangeTypeP, RANGE_EMPTY, RANGE_EMPTY_LITERAL};
+use ::types_rangetypes::{MultirangeType, MultirangeTypeP, RANGE_EMPTY, RANGE_EMPTY_LITERAL};
 
 use ::detoast::pg_detoast_datum;
 use format_type_seams as format_type_seams;

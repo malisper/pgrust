@@ -17,10 +17,10 @@
 //! `interval_sign()` exactly as the C operators do (and, for time/timetz, via
 //! the `offset->time < 0` test, since those disregard the month/day fields).
 
-use types_datetime::{Interval, TimeTzADT};
+use ::types_datetime::{Interval, TimeTzADT};
 use ::types_error::ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE;
-use types_datetime::{DateADT, TimeADT, Timestamp, TimestampTz};
-use types_error::{PgError};
+use ::types_datetime::{DateADT, TimeADT, Timestamp, TimestampTz};
+use ::types_error::{PgError};
 
 use crate::date::date2timestamp;
 use crate::interval::{

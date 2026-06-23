@@ -7,7 +7,7 @@
 use alloc::format;
 
 use ::utils_error::ereport;
-use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 
 use ::nodes::ddlnodes::{
     CONSTR_ATTR_DEFERRABLE, CONSTR_ATTR_DEFERRED, CONSTR_ATTR_ENFORCED, CONSTR_ATTR_IMMEDIATE,

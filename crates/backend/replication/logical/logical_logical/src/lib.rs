@@ -24,8 +24,8 @@
 //! `wal_level`, `wal_segment_size`, and `MyDatabaseId` are foreign per-backend
 //! globals, taken as explicit parameters (the no-ambient-global-seams rule).
 
-use utils_error::{ereport, PgError, PgResult};
-use types_error::{
+use ::utils_error::{ereport, PgError, PgResult};
+use ::types_error::{
     DEBUG1, DEBUG2, ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_OUT_OF_MEMORY, ERROR, LOG,
 };
@@ -35,7 +35,7 @@ use ::types_core::primitive::{
 };
 use ::types_core::xact::InvalidTransactionId;
 
-use types_logical::{
+use ::types_logical::{
     CallbackInvocation, ChangeHandle, GidHandle, MessageHandle,
     OutputPluginCallbackArgs, OutputPluginOptionsHandle, PrefixHandle, RelationHandle,
     RelationsHandle, ReorderBufferCallback, ReorderBufferHandle, ResourceOwnerHandle,
@@ -83,7 +83,7 @@ pub const SNAPBUILD_CONSISTENT: SnapBuildState = 2;
 // seam-boundary types crate) so that `decode.c`'s rmgr handlers and
 // `types-wal`'s `RmDecode` callback type can name the *same* rich context as
 // this owner. Re-exported here to preserve `logical.c`'s public surface.
-pub use types_logical::{
+pub use ::types_logical::{
     LogicalDecodingContext, OutputPluginCallbacks, OutputPluginOptions, OutputPluginOutputType,
     OUTPUT_PLUGIN_BINARY_OUTPUT, OUTPUT_PLUGIN_TEXTUAL_OUTPUT,
 };

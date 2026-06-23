@@ -3,7 +3,7 @@
 use ::mcx::PgString;
 use ::types_core::uint8;
 use ::types_error::PgResult;
-use wal::{
+use ::wal::{
     xl_dbase_create_file_copy_rec, xl_dbase_create_wal_log_rec, xl_dbase_drop_rec,
     DecodedXLogRecord, XLR_INFO_MASK,
 };

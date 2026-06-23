@@ -24,11 +24,11 @@ use core::cell::RefCell;
 use ::mcx::MemoryContext;
 use ::types_core::primitive::{BlockNumber, ForkNumber, Oid};
 use ::datum::Datum;
-use types_error::{
+use ::types_error::{
     PgError, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE,
 };
-use fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
+use ::fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
 use ::rel::Relation;
 use ::types_storage::lock::AccessShareLock;
 use ::types_storage::storage::InvalidBuffer;

@@ -38,7 +38,7 @@ use std::sync::Mutex;
 
 use ::utils_error::ereport;
 use ::types_core::init::{BackendType, BACKEND_NUM_TYPES};
-use types_error::{ErrorLocation, DEBUG2, ERROR};
+use ::types_error::{ErrorLocation, DEBUG2, ERROR};
 use ::types_storage::MAX_IO_WORKERS;
 
 const FILE: &str = "pmchild.c";

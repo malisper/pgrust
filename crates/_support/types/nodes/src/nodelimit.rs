@@ -3,7 +3,7 @@
 //! The `Limit` plan node, the `LimitState` executor state, and the
 //! `LimitOption` / `LimitStateCond` enums consumed by `nodeLimit.c`.
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::int64;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;

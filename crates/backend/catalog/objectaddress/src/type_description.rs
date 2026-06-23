@@ -14,10 +14,10 @@
 // `match` patterns here (cf. `consts.rs`'s `#![allow(non_upper_case_globals)]`).
 #![allow(non_upper_case_globals)]
 
-use mcx::{Mcx, PgString};
-use types_core::{InvalidOid, Oid};
+use ::mcx::{Mcx, PgString};
+use ::types_core::{InvalidOid, Oid};
 use ::types_catalog::catalog_dependency::ObjectAddress;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use crate::consts::{
     AccessMethodOperatorRelationId, AccessMethodProcedureRelationId, AccessMethodRelationId,

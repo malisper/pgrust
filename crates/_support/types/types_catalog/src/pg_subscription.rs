@@ -12,7 +12,7 @@
 
 #![allow(non_upper_case_globals)]
 
-use mcx::{PgString, PgVec};
+use ::mcx::{PgString, PgVec};
 use ::types_core::primitive::{Oid, XLogRecPtr};
 
 /* ==========================================================================

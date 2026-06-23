@@ -40,7 +40,7 @@ mod mem;
 mod seam;
 mod trigger;
 
-use plpgsql::{
+use ::plpgsql::{
     int32, Datum, EState, Oid, PLpgSQL_condition, PLpgSQL_datum, PLpgSQL_datum_type,
     PLpgSQL_execstate, PLpgSQL_function, PLpgSQL_promise_type, PLpgSQL_rc, PLpgSQL_stmt,
     PLpgSQL_stmt_assign, PLpgSQL_stmt_block, PLpgSQL_stmt_case, PLpgSQL_stmt_exit,

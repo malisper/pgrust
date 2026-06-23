@@ -17,11 +17,11 @@
 //! `effective_io_concurrency`) consulted when sizing a `BAS_BULKREAD` ring are
 //! read through the bufmgr seams.
 
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::buf::{
     BufferAccessStrategyData, BufferAccessStrategyType, IOContext, Victim,
 };
-use types_core::{Buffer, BLCKSZ};
+use ::types_core::{Buffer, BLCKSZ};
 use ::types_storage::InvalidBuffer;
 
 use crate::{buf_state_get_refcount, buf_state_get_usagecount};

@@ -23,10 +23,10 @@
 
 use alloc::vec::Vec;
 
-use utils_error::{PgError, PgResult};
+use ::utils_error::{PgError, PgResult};
 
-use control::{CheckPoint, ControlFileData, DBState};
-use types_core::{FullTransactionId, InvalidTransactionId, TimeLineID, TimestampTz, XLogRecPtr};
+use ::control::{CheckPoint, ControlFileData, DBState};
+use ::types_core::{FullTransactionId, InvalidTransactionId, TimeLineID, TimestampTz, XLogRecPtr};
 use ::wal::xlog_consts::{
     CHECKPOINT_END_OF_RECOVERY, CHECKPOINT_FORCE, CHECKPOINT_IS_SHUTDOWN, DELAY_CHKPT_COMPLETE,
     DELAY_CHKPT_START, SIZE_OF_XLOG_LONG_PHD, SIZE_OF_XLOG_SHORT_PHD,
@@ -518,7 +518,7 @@ fn wait_for_delaying_backends(delay_type: i32) {
 // ===========================================================================
 mod ext {
     use super::*;
-    use types_core::{MultiXactId, MultiXactOffset, Oid, TimeLineID, TransactionId};
+    use ::types_core::{MultiXactId, MultiXactOffset, Oid, TimeLineID, TransactionId};
 
     macro_rules! deferred {
         ($( $(#[$attr:meta])* pub fn $name:ident ( $($arg:ident : $argty:ty),* $(,)? ) $(-> $ret:ty)? ; )+) => {

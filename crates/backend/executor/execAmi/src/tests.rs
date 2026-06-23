@@ -9,7 +9,7 @@ use std::sync::Once;
 
 use execTuples_seams as execTuples;
 use nodes_core_seams as bms_seams;
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::execexpr::SubPlanState;
 use ::nodes::execnodes::ExprContext;
@@ -19,7 +19,7 @@ use ::nodes::pathnodes::{
     AppendPath, CustomPath, GroupResultPath, IndexOptInfo, IndexPath, MergeAppendPath,
     MinMaxAggPath, PathData, ProjectionPath,
 };
-use nodes::{Material, MaterialState, TupleTableSlot};
+use ::nodes::{Material, MaterialState, TupleTableSlot};
 
 use super::*;
 

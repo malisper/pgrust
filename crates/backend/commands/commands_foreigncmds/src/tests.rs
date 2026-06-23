@@ -8,8 +8,8 @@
 //! exercised by the integration harness once a runtime is wired.
 
 use super::*;
-use mcx::{MemoryContext, PgString, PgVec};
-use types_foreigncmds::{DEFELEM_ADD, DEFELEM_DROP, DEFELEM_SET, DEFELEM_UNSPEC};
+use ::mcx::{MemoryContext, PgString, PgVec};
+use ::types_foreigncmds::{DEFELEM_ADD, DEFELEM_DROP, DEFELEM_SET, DEFELEM_UNSPEC};
 
 fn ctx() -> MemoryContext {
     MemoryContext::new("foreigncmds-test")

@@ -9,7 +9,7 @@
 
 use ::mcx::Mcx;
 use ::datum::datum::Datum;
-use types_error::{
+use ::types_error::{
     ereturn, PgResult, SoftErrorContext, ERRCODE_ARRAY_ELEMENT_ERROR, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
     ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };

@@ -2,7 +2,7 @@
 //! (`access/transam/twophase.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::{Oid, RepOriginId, Size, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::{Oid, RepOriginId, Size, TimestampTz, TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
 pub use ::wal::xact_records::StartPrepareArgs;
 

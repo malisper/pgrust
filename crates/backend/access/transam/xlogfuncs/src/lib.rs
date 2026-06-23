@@ -67,15 +67,15 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERROR, WARNING, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_SYSTEM_ERROR,
 };
-use types_core::{TimeLineID, TimestampTz, XLogRecPtr};
-use wal::{RecoveryPauseState, SessionBackupState, WalLevel, MAXFNAMELEN};
+use ::types_core::{TimeLineID, TimestampTz, XLogRecPtr};
+use ::wal::{RecoveryPauseState, SessionBackupState, WalLevel, MAXFNAMELEN};
 
 use transam_xlog as xlog;
 use transam_xlog_seams as xlog_seams;

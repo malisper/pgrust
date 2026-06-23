@@ -12,7 +12,7 @@
 //! the equivalent message construction. The phase/blk/offnum bookkeeping the C
 //! threads is identical.
 
-use types_core::{BlockNumber, OffsetNumber};
+use ::types_core::{BlockNumber, OffsetNumber};
 
 use crate::consts::{InvalidBlockNumber, InvalidOffsetNumber, MaxOffsetNumber};
 use crate::core::{LVRelState, LVSavedErrInfo, VacErrPhase};

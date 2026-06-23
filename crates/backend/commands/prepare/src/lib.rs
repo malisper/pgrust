@@ -52,14 +52,14 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ::mcx::Mcx;
-use types_core::{Oid, TimestampTz};
+use ::types_core::{Oid, TimestampTz};
 // Canonical migration-target value type (the `Datum<'mcx>` enum). The SRF value
 // layer builds these via the `from_*` / `null` codec methods; they are lowered
 // to the still-shim-typed `datum::Datum` only at the audited seam edges
 // (`materialized_srf_putvalues` / `construct_array_builtin`), whose owning units
 // have not yet advanced their contract off the bare-word newtype.
 use ::types_tuple::heaptuple::Datum;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_PSTATEMENT,
     ERRCODE_INVALID_PSTATEMENT_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_PSTATEMENT,
     ERRCODE_WRONG_OBJECT_TYPE,

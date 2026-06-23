@@ -130,7 +130,7 @@ pub fn init_seams() {
     // All are plain runtime GUCs read through the GUC slot — none come from
     // the ControlFile.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         // `autovacuum` → `&autovacuum_start_daemon` (bool).
         vars::autovacuum_start_daemon.install(GucVarAccessors {
             get: core::autovacuum_start_daemon,

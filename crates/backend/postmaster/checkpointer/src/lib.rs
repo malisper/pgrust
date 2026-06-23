@@ -34,9 +34,9 @@
 use core::cell::Cell;
 use core::ptr::NonNull;
 
-use types_core::{Size, XLogRecPtr, INVALID_PROC_NUMBER};
+use ::types_core::{Size, XLogRecPtr, INVALID_PROC_NUMBER};
 use ::condvar::ConditionVariable;
-use types_error::{ErrorLocation, PgError, PgResult, DEBUG1, ERROR, LOG};
+use ::types_error::{ErrorLocation, PgError, PgResult, DEBUG1, ERROR, LOG};
 use ::types_pgstat::wait_event::{
     WAIT_EVENT_CHECKPOINTER_MAIN, WAIT_EVENT_CHECKPOINTER_SHUTDOWN, WAIT_EVENT_CHECKPOINT_DONE,
     WAIT_EVENT_CHECKPOINT_START, WAIT_EVENT_CHECKPOINT_WRITE_DELAY,
@@ -51,7 +51,7 @@ use ::wal::xlog_consts::{
 
 use ::utils_error::ereport;
 
-use s_lock::{s_lock, s_unlock, Spinlock};
+use ::s_lock::{s_lock, s_unlock, Spinlock};
 
 use interrupt as interrupt;
 

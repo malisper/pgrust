@@ -2,7 +2,7 @@
 //! ports consume so far.
 
 use crate::bytes::{bool_at, full_xid_at, locator_at, u16_at, u32_at};
-use types_core::{BlockNumber, FullTransactionId, OffsetNumber, TransactionId};
+use ::types_core::{BlockNumber, FullTransactionId, OffsetNumber, TransactionId};
 use ::types_storage::RelFileLocator;
 
 /// `gistxlogPageReuse`: `{RelFileLocator locator; BlockNumber block;

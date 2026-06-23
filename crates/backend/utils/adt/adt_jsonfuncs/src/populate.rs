@@ -42,15 +42,15 @@ use ::types_error::error::{
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERROR,
 };
-use types_error::{PgError, PgResult, SoftErrorContext};
+use ::types_error::{PgError, PgResult, SoftErrorContext};
 
-use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
+use ::types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use ::types_jsonb::jsonb::{
     is_a_jsonb_scalar, jbvType, json_container_is_array, json_container_is_object,
     json_container_is_scalar, json_container_size, JsonbIteratorToken, VARHDRSZ,
 };
-use types_jsonfuncs::{
+use ::types_jsonfuncs::{
     ArrayIOData, CachedFmgrInfo, ColumnIOData, ColumnIOUnion, CompositeIOData, DomainIOData,
     JsValue, JsonHashEntry, RecordIOData, ScalarIOData, TypeCat, NAMEDATALEN,
 };
@@ -64,19 +64,19 @@ use ::types_tuple::Datum;
 
 use ::fmgr::boundary::FmgrOut;
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple, HeapTupleGetDatum};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple, HeapTupleGetDatum};
 use ::arrayfuncs::construct::{
     accum_array_result, init_array_result, make_md_array_result,
 };
 use ::adt_json::escape_json_with_len;
-use adt_jsonb::{JsonbToCString, JsonbUnquote};
-use jsonb_util::{
+use ::adt_jsonb::{JsonbToCString, JsonbUnquote};
+use ::jsonb_util::{
     getKeyJsonValueFromContainer, JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb,
 };
 use ::adt_numeric::io::numeric_out;
 use ::lsyscache::type_ as lsyscache_type;
 use ::cache_typcache::lookup_rowtype_tupdesc;
-use fmgr_core::{fmgr_info, input_function_call_safe_typed};
+use ::fmgr_core::{fmgr_info, input_function_call_safe_typed};
 use funcapi_seams as funcapi;
 use ::datum::array_build::ArrayBuildState;
 

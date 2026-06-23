@@ -26,14 +26,14 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 use ::types_core::init::BackendType;
 use ::types_core::primitive::TimestampTz;
-use types_core::{Oid, OidIsValid};
+use ::types_core::{Oid, OidIsValid};
 use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
 use types_tuple::heaptuple::Datum;
 
 use status as status;
-use status::{
+use ::status::{
     BackendState, LocalBackendStatusFields, LocalPgBackendStatus, STATE_DISABLED, STATE_FASTPATH,
     STATE_IDLE, STATE_IDLEINTRANSACTION, STATE_IDLEINTRANSACTION_ABORTED, STATE_RUNNING,
     STATE_STARTING, STATE_UNDEFINED,

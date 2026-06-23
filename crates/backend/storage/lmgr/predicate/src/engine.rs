@@ -11,25 +11,25 @@
 use core::cell::Cell;
 use core::ptr;
 
-use transam::{
+use ::transam::{
     TransactionIdEquals, TransactionIdFollows, TransactionIdFollowsOrEquals, TransactionIdIsValid,
     TransactionIdPrecedes, TransactionIdPrecedesOrEquals,
 };
-use ipc_shmem::{
+use ::ipc_shmem::{
     add_size, mul_size, ShmemAddrIsValid, ShmemInitHash, ShmemInitStruct,
 };
-use lwlock::{
+use ::lwlock::{
     LWLockAcquire, LWLockHeldByMe, LWLockHeldByMeInMode, LWLockInitialize, LWLockRelease,
 };
-use types_storage::{LWLock, LW_EXCLUSIVE, LW_SHARED};
-use dynahash::{
+use ::types_storage::{LWLock, LW_EXCLUSIVE, LW_SHARED};
+use ::dynahash::{
     get_hash_value, hash_create, hash_destroy, hash_estimate_size, hash_get_num_entries,
     hash_search, hash_search_with_hash_value, hash_seq_init, hash_seq_search,
 };
 use ::types_core::primitive::{BlockNumber, Oid, Size};
 use ::types_core::xact::InvalidTransactionId;
 use ::types_core::TransactionId;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_OUT_OF_MEMORY, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
@@ -46,7 +46,7 @@ use crate::serial::{
     SerialAdd, SerialGetMinConflictCommitSeqNo, SerialInit, SerialSetActiveSerXmin,
     SERIAL_CONTROL_FOUND,
 };
-use ilist::{dlist_head, dlist_node};
+use ::ilist::{dlist_head, dlist_node};
 
 // ===========================================================================
 // File globals (predicate.c statics).

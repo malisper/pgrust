@@ -30,25 +30,25 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use am_seams::{
+use ::am_seams::{
     gistbuild, gistbuildempty, gistbulkdelete, gistinsert, gistvacuumcleanup,
 };
-use dispatch_seams::{gist_consistent, gist_distance};
+use ::dispatch_seams::{gist_consistent, gist_distance};
 use ::indexam_seams::index_getprocid;
-use bufmgr_seams::{
+use ::bufmgr_seams::{
     buffer_get_block_number, buffer_get_lsn_atomic, buffer_get_page, mark_buffer_dirty_hint,
     read_buffer, unlock_release_buffer, with_buffer_page,
 };
 use ::predicate_seams::predicate_lock_page;
-use page::{
+use ::page::{
     ItemIdIsDead, ItemIdMarkDead, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageMut,
     PageRef,
 };
 use ::pgstat_seams::pgstat_count_index_scan;
-use utils_error::{ereport, PgResult};
-use mcx::{Mcx, PgBox};
+use ::utils_error::{ereport, PgResult};
+use ::mcx::{Mcx, PgBox};
 
-use types_amapi::{
+use ::types_amapi::{
     AmCostEstimate, IndexAMProperty as AmIndexAMProperty, IndexAmRoutine, IndexBuildResult,
     IndexPath, OpFamilyMember, PlannerInfo, T_IndexAmRoutine,
 };
@@ -65,7 +65,7 @@ use ::types_tableam::genam::{IndexBulkDeleteResult, IndexOrderByDistance, IndexV
 use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{ItemPointerData, FIRST_OFFSET_NUMBER};
-use gist::{
+use ::gist::{
     GISTScanOpaqueData, GISTSearchHeapItem, GISTSearchItem, GISTSearchItemData,
     GISTSearchItemIsHeap, GISTSTATE, GIST_DISTANCE_PROC, GIST_ROOT_BLKNO,
 };
@@ -81,7 +81,7 @@ use crate::gistutil::{
 };
 
 // Re-export the GiST opclass amproc support-number used by gistcanreturn.
-use gist::{GIST_COMPRESS_PROC, GIST_FETCH_PROC};
+use ::gist::{GIST_COMPRESS_PROC, GIST_FETCH_PROC};
 
 /// `BUFFER_LOCK_SHARE` / `GIST_SHARE` (bufmgr.h / gist_private.h).
 const GIST_SHARE: i32 = 1;

@@ -27,7 +27,7 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use types_core::{BlockNumber, Buffer, OffsetNumber, Oid, Size};
+use ::types_core::{BlockNumber, Buffer, OffsetNumber, Oid, Size};
 use ::types_error::PgResult;
 use ::types_storage::buf::ExtendedRelation;
 use ::types_tuple::heaptuple::ItemPointerData;

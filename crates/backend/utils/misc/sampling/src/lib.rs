@@ -12,8 +12,8 @@
 
 use std::cell::RefCell;
 
-use prng::{global_prng, PgPrng};
-use types_core::{uint32, BlockNumber};
+use ::prng::{global_prng, PgPrng};
+use ::types_core::{uint32, BlockNumber};
 
 /// State for block-level sampling Algorithm S (Knuth 3.4.2)
 /// (`utils/sampling.h` `BlockSamplerData`).

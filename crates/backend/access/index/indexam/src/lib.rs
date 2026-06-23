@@ -30,7 +30,7 @@ use ::mcx::Mcx;
 // `IndexScanDesc.xs_orderbyvals` slots, and the opclass-options word forwarded
 // verbatim to the reloptions seam — all carry it.
 use ::types_tuple::heaptuple::Datum as DatumV;
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR,
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR,
     ERRCODE_WRONG_OBJECT_TYPE};
 use ::rel::Relation;
 use ::types_scan::sdir::ScanDirection;
@@ -1247,7 +1247,7 @@ pub fn get_actual_variable_endpoint<'mcx>(
 ) -> PgResult<Option<DatumV<'mcx>>> {
     use ::types_scan::scankey::{InvalidStrategy, ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL};
     use ::snapshot::snapshot::SnapshotType;
-    use types_storage::{Buffer, InvalidBuffer};
+    use ::types_storage::{Buffer, InvalidBuffer};
     use ::types_core::primitive::{BlockNumber, InvalidBlockNumber};
 
     const VISITED_PAGES_LIMIT: i32 = 100;

@@ -5,7 +5,7 @@
 use alloc::vec::Vec;
 
 use ::types_core::primitive::{Oid, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
-use types_storage::{RelFileLocator, SharedInvalidationMessage};
+use ::types_storage::{RelFileLocator, SharedInvalidationMessage};
 
 // --- record opcodes stored in xl_info, masked by XLOG_XACT_OPMASK ---
 pub const XLOG_XACT_COMMIT: u8 = 0x00;

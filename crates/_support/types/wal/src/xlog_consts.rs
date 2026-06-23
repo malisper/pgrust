@@ -3,7 +3,7 @@
 //! `catalog/pg_control.h`, `storage/proc.h`). Trimmed to what the xlog crate
 //! and its callers consume.
 
-use types_core::{TimeLineID, XLogRecPtr};
+use ::types_core::{TimeLineID, XLogRecPtr};
 
 // ===========================================================================
 // Segment / page geometry (access/xlog_internal.h, pg_config.h).

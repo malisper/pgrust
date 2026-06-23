@@ -14,10 +14,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 use ::core::cell::RefCell;
 
-use utils_error::{ereport, PgError, PgResult};
-use types_error::{ErrorLocation, WARNING};
+use ::utils_error::{ereport, PgError, PgResult};
+use ::types_error::{ErrorLocation, WARNING};
 
-use types_core::{InvalidOid, Oid, TimestampTz};
+use ::types_core::{InvalidOid, Oid, TimestampTz};
 
 use crate::core::{
     self, AvlDbase, AvwDbase, AutoVacForkFailed, AutoVacRebalance, FirstMultiXactId,

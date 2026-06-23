@@ -28,7 +28,7 @@
 #![allow(non_snake_case)]
 
 use ::types_error::PgResult;
-use execparallel::{
+use ::execparallel::{
     InstrumentationHandle, ParallelContextHandle, ParamExecValue, RestoredParam, SerializeCursor,
     Size,
 };

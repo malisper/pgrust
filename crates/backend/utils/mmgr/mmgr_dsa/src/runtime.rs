@@ -31,7 +31,7 @@ use ::types_core::Size;
 // the canonical `Datum<'mcx>`'s borrow. So these two hooks and their marshaling
 // helpers stay fully-qualified `datum::Datum` at the edge, rather than
 // constructing a canonical `Datum<'mcx>`.
-use types_dsa::{
+use ::types_dsa::{
     DsaHandle, DsaPointer, DsaSegmentIndex, DSA_ALLOC_NO_OOM, DSA_ALLOC_ZERO, DSA_FULLNESS_CLASSES,
     DSA_HANDLE_INVALID, DSA_MAX_SEGMENTS, DSA_MAX_SEGMENT_SIZE, DSA_MIN_SEGMENT_SIZE,
     DSA_NUM_SEGMENTS_AT_EACH_SIZE, DSA_NUM_SEGMENT_BINS, DSA_OFFSET_BITMASK, DSA_OFFSET_WIDTH,
@@ -39,9 +39,9 @@ use types_dsa::{
     DSA_SEGMENT_HEADER_MAGIC, DSA_SEGMENT_INDEX_NONE, DSA_SIZE_CLASSES, DSA_SPAN_NOTHING_FREE,
     INVALID_DSA_POINTER,
 };
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_freepage::FreePageManager;
-use types_storage::{dsm_handle, LWLock, LWLockMode, DSM_HANDLE_INVALID};
+use ::types_storage::{dsm_handle, LWLock, LWLockMode, DSM_HANDLE_INVALID};
 
 use crate::{
     contiguous_pages_to_segment_bin, dsa_size_class_index, fpm_size_to_pages, make_pointer,

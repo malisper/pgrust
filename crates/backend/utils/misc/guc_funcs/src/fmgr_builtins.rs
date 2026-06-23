@@ -35,10 +35,10 @@ use alloc::string::String;
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use ::utils_error::ereport;
-use types_error::{ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED};
+use ::types_error::{ERROR, ERRCODE_NULL_VALUE_NOT_ALLOWED};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.
@@ -184,7 +184,7 @@ fn fc_set_config_by_name(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datu
 /// false, true, ERROR); if (record == NULL) PG_RETURN_NULL();` then collect the
 /// six externally-visible flag names that are set into a `text[]` array.
 fn fc_pg_settings_get_flags(fcinfo: &mut FunctionCallInfoBaseData) -> PgResult<Datum> {
-    use types_guc::{
+    use ::types_guc::{
         GUC_EXPLAIN, GUC_NOT_IN_SAMPLE, GUC_NO_RESET, GUC_NO_RESET_ALL, GUC_NO_SHOW_ALL,
         GUC_RUNTIME_COMPUTED,
     };

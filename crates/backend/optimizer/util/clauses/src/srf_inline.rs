@@ -19,7 +19,7 @@
 //! reachable SQL SRF panics loudly there; no C-language SRF reaches it).
 
 use ::mcx::Mcx;
-use types_acl::{ACL_EXECUTE, ACLCHECK_OK};
+use ::types_acl::{ACL_EXECUTE, ACLCHECK_OK};
 use ::types_catalog::pg_proc::PROKIND_FUNCTION;
 use ::types_core::catalog::{PROCEDURE_RELATION_ID, VOIDOID};
 use ::types_core::Oid;

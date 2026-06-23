@@ -53,15 +53,15 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
-use page::{
+use ::page::{
     PageAddItemExtended, PageGetContents, PageGetItemId, PageGetMaxOffsetNumber,
     PageIndexTupleDelete, PageIsNew, PageMut, PageRef,
 };
-use utils_error::{ereport, PgResult};
+use ::utils_error::{ereport, PgResult};
 use ::types_error::error::ERROR;
 
 use ::core_probe::ginpostinglist::{ginCompressPostingList, ginPostingListDecode};
-use gindatapage::{
+use ::gindatapage::{
     gin_page_get_flags, gin_page_get_rightlink, gin_page_set_flags, gin_page_set_rightlink,
     ginVacuumPostingTreeLeaf, GinDataPageGetPostingItem,
     GinGetDownlink, GinGetNPosting, GinGetPosting, GinIsPostingTree, GinItupIsCompressed,
@@ -70,11 +70,11 @@ use gindatapage::{
     PostingItemGetBlockNumber,
 };
 use ::ginentrypage::GinFormTuple;
-use ginutil::{gintuple_get_attrnum, gintuple_get_key, initGinState, ginUpdateStats};
+use ::ginutil::{gintuple_get_attrnum, gintuple_get_key, initGinState, ginUpdateStats};
 
 use ::types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Oid, TransactionId};
-use types_core::{InvalidBlockNumber, XLogRecPtr};
-use gin::{
+use ::types_core::{InvalidBlockNumber, XLogRecPtr};
+use ::gin::{
     GinMaxItemSize, GinMetaPageData, GinState, GinStatsData, GIN_DELETED, GIN_EXCLUSIVE, GIN_LIST,
     GIN_METAPAGE_BLKNO, GIN_ROOT_BLKNO, GIN_SHARE, GIN_UNLOCK,
 };

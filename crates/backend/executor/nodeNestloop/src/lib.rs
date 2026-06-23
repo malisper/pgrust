@@ -38,12 +38,12 @@ use execUtils_seams as execUtils;
 use nodes_core_seams as nodes_core;
 use postgres_seams as tcop_postgres;
 
-use mcx::{alloc_in, PgBox};
-use types_error::{PgError, PgResult};
+use ::mcx::{alloc_in, PgBox};
+use ::types_error::{PgError, PgResult};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use ::nodes::jointype::{JOIN_ANTI, JOIN_INNER, JOIN_LEFT, JOIN_SEMI};
 use ::nodes::nodenestloop::{NestLoop, NestLoopStateData};
-use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
+use ::nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 
 /// Plain `elog(ERROR, ...)` for the "should not happen" internal diagnostics.
 fn elog(message: alloc::string::String) -> PgError {

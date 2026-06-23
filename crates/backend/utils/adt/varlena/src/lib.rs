@@ -71,7 +71,7 @@ pub mod split_format;
 pub mod string_agg;
 pub mod wire_io;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 // ---------------------------------------------------------------------------
 // `bytea_output` GUC backing store (varlena.c: `int bytea_output =
@@ -107,7 +107,7 @@ pub fn set_bytea_output(value: i32) {
 // not the Datum shim. All other internal value handling builds/reads the
 // canonical unified value `types_tuple::...::Datum<'mcx>` (aliased `DatumV`),
 // which the migrated `_v` seam variants take/return.
-use datum::{Datum as BareDatum, Varlena};
+use ::datum::{Datum as BareDatum, Varlena};
 use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
 

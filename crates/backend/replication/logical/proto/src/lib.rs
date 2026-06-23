@@ -14,7 +14,7 @@
 #![allow(non_upper_case_globals)]
 
 use execTuples_seams as exectuples_seams;
-use pqformat::{
+use ::pqformat::{
     pq_getmsgbyte, pq_getmsgbytes, pq_getmsgint, pq_getmsgint64, pq_getmsgstring, pq_sendbyte,
     pq_sendbytes, pq_sendcountedtext, pq_sendint, pq_sendint16, pq_sendint32, pq_sendint64,
     pq_sendint8, pq_sendstring, PqString,
@@ -22,15 +22,15 @@ use pqformat::{
 use nodes_core_seams as bms_seams;
 use lsyscache_seams as lsyscache_seams;
 use relcache_seams as relcache_seams;
-use cache_syscache::{
+use ::cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SysCacheGetAttrNotNull, TYPEOID,
 };
 use fmgr_seams as fmgr_seams;
-use mcx::{slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::cache::SysCacheKey;
 use ::types_catalog::catalog::PG_CATALOG_NAMESPACE;
 pub use ::types_catalog::pg_publication::PublishGencolsType;
-use types_core::{
+use ::types_core::{
     GIDSIZE, InvalidTransactionId, InvalidXLogRecPtr, Oid, OidIsValid, TimestampTz, TransactionId,
     TransactionIdIsValid, XLogRecPtr,
 };
@@ -39,7 +39,7 @@ use types_core::{
 // at the `SearchSysCache*` key edge, where the cache-key currency
 // (`SysCacheKey::Value`) is an audited bare word (C: `Datum key1..key4`).
 use ::datum::Datum as ScalarWord;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::Bitmapset;
 use ::rel::RelationData;
 use ::stringinfo::StringInfo;
@@ -47,7 +47,7 @@ use ::stringinfo::StringInfo;
 // scalar word (`ByVal`) or the verbatim by-reference bytes (`ByRef`).
 use ::types_tuple::heaptuple::{Datum, FormedTuple};
 use ::types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, FormData_pg_attribute};
-use types_tuple::{ATTRIBUTE_GENERATED_STORED, REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_FULL,
+use ::types_tuple::{ATTRIBUTE_GENERATED_STORED, REPLICA_IDENTITY_DEFAULT, REPLICA_IDENTITY_FULL,
     REPLICA_IDENTITY_INDEX};
 use ::wal::reorderbuffer::ReorderBufferTXN;
 

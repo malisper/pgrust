@@ -5,11 +5,11 @@
 
 use std::boxed::Box;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::xact::CommandId;
 use ::types_core::TransactionId;
 use ::types_error::PgResult;
-use types_slot::{SlotData, TupleSlotKind};
+use ::types_slot::{SlotData, TupleSlotKind};
 use ::rel::Relation;
 use ::types_scan::sdir::ScanDirection;
 use ::snapshot::SnapshotData;

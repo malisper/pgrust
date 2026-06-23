@@ -13,7 +13,7 @@
 //! dispatch point every builtin crosses (`invoke_pgfunction`'s `catch_unwind`).
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

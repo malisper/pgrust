@@ -6,7 +6,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 // The canonical unified value type (Datum-unification keystone). The seam
 // signature below takes it (`ByVal`/`ByRef`) with the call frame's `'mcx`
 // lifetime; the bare-word `datum::Datum` shim is retained only at the

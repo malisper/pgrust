@@ -20,11 +20,11 @@
 //! read as a 32-bit word and compared as a `TransactionId`, so they register the
 //! same adapters under their own OIDs.
 
-use types_core::{CommandId, FullTransactionId, TransactionId};
+use ::types_core::{CommandId, FullTransactionId, TransactionId};
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------

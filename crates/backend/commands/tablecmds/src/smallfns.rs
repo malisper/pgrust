@@ -7,7 +7,7 @@ use ::utils_error::ereport;
 use ::mcx::Mcx;
 
 use ::types_core::primitive::Oid;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_IN_USE,
     ERROR,
 };

@@ -24,8 +24,8 @@ extern crate std;
 
 use core::cell::Cell;
 
-use utils_error::{PgError, PgResult};
-use types_core::{TimeLineID, XLogRecPtr};
+use ::utils_error::{PgError, PgResult};
+use ::types_core::{TimeLineID, XLogRecPtr};
 use ::types_storage::storage::{LWLock, LW_EXCLUSIVE};
 use ::wal::xlog_consts::{
     SIZE_OF_XLOG_LONG_PHD as SizeOfXLogLongPHD, SIZE_OF_XLOG_SHORT_PHD as SizeOfXLogShortPHD,

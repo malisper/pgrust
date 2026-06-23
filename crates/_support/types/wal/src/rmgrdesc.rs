@@ -9,7 +9,7 @@
 //! their data-corruption error.
 
 use crate::wal::RelFileLocator;
-use types_core::{
+use ::types_core::{
     int64, MultiXactId, MultiXactOffset, Oid, RepOriginId, TimeLineID, TimestampTz, TransactionId,
     XLogRecPtr,
 };

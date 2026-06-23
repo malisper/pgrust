@@ -14,24 +14,24 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use utils_error::{elog, ereport};
-use mcx::{Mcx, PgString, PgVec};
+use ::utils_error::{elog, ereport};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_core::xact::{
     FullTransactionId, InvalidTransactionId, MaxTransactionId, TransactionIdIsNormal,
     TransactionIdIsValid,
 };
-use types_core::{InvalidOid, Oid, OidIsValid, TimestampTz, TransactionId, XLogRecPtr};
-use types_error::{
+use ::types_core::{InvalidOid, Oid, OidIsValid, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_error::{
     ErrorLocation, PgError, PgResult, DEBUG2, DEBUG4, ERRCODE_T_R_DEADLOCK_DETECTED, LOG, PANIC,
 };
-use types_storage::{
+use ::types_storage::{
     xl_standby_lock, AccessExclusiveLock, ProcSignalReason, RelFileLocator,
     RunningTransactionsData, SharedInvalidationMessage, VirtualTransactionId, DEFAULT_LOCKMETHOD,
     LOCKTAG, LOCKTAG_RELATION, SHARED_INVALIDATION_MESSAGE_SIZE, SUBXIDS_IN_ARRAY,
     SUBXIDS_MISSING,
 };
-use types_timeout::{EnableTimeoutParams, TimeoutId, TimeoutType};
-use wal::{
+use ::types_timeout::{EnableTimeoutParams, TimeoutId, TimeoutType};
+use ::wal::{
     RedoRecord, RM_STANDBY_ID, RS_INVAL_HORIZON, STANDBY_DISABLED, STANDBY_INITIALIZED,
     STANDBY_SNAPSHOT_PENDING, WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA, XLOG_MARK_UNIMPORTANT,
     XLR_INFO_MASK,
@@ -1590,7 +1590,7 @@ pub fn init_seams() {
     // Install the accessors so the GUC engine's read()/set() dispatch into this
     // crate's process-local backing storage.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::max_standby_archive_delay.install(GucVarAccessors {
             get: max_standby_archive_delay,
             set: set_max_standby_archive_delay,

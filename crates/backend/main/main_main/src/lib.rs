@@ -27,7 +27,7 @@ use std::cell::Cell;
 use ::common_exec_seams::set_pglocale_pgservice;
 use ::common_path_seams::get_progname;
 use ::postmaster_seams::postmaster_main;
-use postgres_seams::{postgres_single_user_main, set_stack_base};
+use ::postgres_seams::{postgres_single_user_main, set_stack_base};
 use ::pg_locale_seams::LcCategory;
 use ::mcxt_seams::memory_context_init;
 use ::username_seams::get_user_name_or_exit;

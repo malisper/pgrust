@@ -11,12 +11,12 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::primitive::uint32;
 use ::types_core::Oid;
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
-use samplescan::{SampleScanState, TsmRoutine};
+use ::samplescan::{SampleScanState, TsmRoutine};
 
 seam_core::seam!(
     /// `GetTsmRoutine(handlerOid)` (access/tablesample/tablesample.c) — resolve

@@ -28,14 +28,14 @@ mod fmgr_builtins;
 use regex_core_seams as engine;
 use varlena_seams as varlena_seams;
 use mbutils_seams as mb;
-use mcx::{slice_in, vec_with_capacity_in, Mcx, McxOwned, MemoryContext, PgVec, MAX_ALLOC_SIZE};
-use types_core::{Oid, PgWChar};
-use types_error::{
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx, McxOwned, MemoryContext, PgVec, MAX_ALLOC_SIZE};
+use ::types_core::{Oid, PgWChar};
+use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_ESCAPE_SEQUENCE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_REGULAR_EXPRESSION, ERRCODE_INVALID_USE_OF_ESCAPE_CHARACTER,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
-use regex::{
+use ::regex::{
     RegMatch, RegcompResult, RegexCompiled, RegexecResult, RegprefixResult, REG_ADVANCED,
     REG_EXPANDED, REG_EXTENDED, REG_ICASE, REG_NEWLINE, REG_NLANCH, REG_NLSTOP, REG_NOSUB,
     REG_QUOTE,

@@ -68,21 +68,21 @@ use core::cmp::Ordering;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::OidIsValid;
-use types_error::{PgError, PgResult, ERROR};
-use statistics::{
+use ::types_error::{PgError, PgResult, ERROR};
+use ::statistics::{
     AnalyzeAttrFetchFunc, ArrayAnalyzeExtraData, VacAttrStats, STATISTIC_NUM_SLOTS,
 };
 use ::types_tuple::Datum;
 
-use types_selfuncs::{STATISTIC_KIND_DECHIST, STATISTIC_KIND_MCELEM};
+use ::types_selfuncs::{STATISTIC_KIND_DECHIST, STATISTIC_KIND_MCELEM};
 
 use ::detoast_seams::toast_raw_datum_size;
 use ::vacuumlazy_seams::vacuum_delay_point;
-use commands_analyze_seams::{std_compute_stats, std_typanalyze};
+use ::commands_analyze_seams::{std_compute_stats, std_typanalyze};
 use ::vacuum_seams::check_for_interrupts;
 use ::arrayfuncs_seams::deconstruct_array_v;
 use ::lsyscache_seams::get_base_element_type;
-use typcache_seams::{
+use ::typcache_seams::{
     array_element_compare, array_element_hash, array_typanalyze_element_typcache,
 };
 

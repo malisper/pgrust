@@ -62,7 +62,7 @@ use ::mcx::MemoryContext;
 use ::types_storage::storage::ProcSignalReason;
 use ::types_storage::lock::AccessExclusiveLock;
 use ::types_storage::LWLockMode;
-use types_timeout::{DisableTimeoutParams, EnableTimeoutParams, TimeoutId, TimeoutType};
+use ::types_timeout::{DisableTimeoutParams, EnableTimeoutParams, TimeoutId, TimeoutType};
 use ::wal::xlogutils::in_hot_standby;
 
 /// `WL_LATCH_SET | WL_EXIT_ON_PM_DEATH` and `PG_WAIT_LOCK` (latch.h / wait_event.h).

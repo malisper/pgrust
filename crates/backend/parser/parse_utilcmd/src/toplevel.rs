@@ -17,11 +17,11 @@
 //! entry point and delegates the relcache OLD/NEW fake-RTE + analyze.c-driven
 //! action transform to the outward seam.
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 
 use ::utils_error::ereport;
 use ::types_core::Oid;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,
     NOTICE,
 };
@@ -30,7 +30,7 @@ use ::nodes::copy_query::Query;
 use ::nodes::ddlnodes::{CreateStmt, RuleStmt};
 use ::nodes::nodes::{ntag, Node};
 
-use small1::{free_parsestate, make_parsestate, parser_errposition};
+use ::small1::{free_parsestate, make_parsestate, parser_errposition};
 use ::types_storage::lock::NoLock;
 
 use crate::column::transformColumnDefinition;

@@ -12,9 +12,9 @@
 //! descriptors and documents that they must outlive the map; the owned map
 //! carries its own copies, satisfying that trivially).
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox};
-use types_error::{PgError, PgResult};
-use nodes::{Bitmapset, EStateData, SlotId};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox};
+use ::types_error::{PgError, PgResult};
+use ::nodes::{Bitmapset, EStateData, SlotId};
 use ::types_tuple::attmap::AttrMap;
 use ::types_tuple::heaptuple::{Datum, FormedTuple};
 use ::types_tuple::heaptuple::{
@@ -22,7 +22,7 @@ use ::types_tuple::heaptuple::{
 };
 use ::types_tuple::tupconvert::TupleConversionMap;
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple, HeapTupleError};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple, HeapTupleError};
 use ::nodes_core::bitmapset::{bms_add_member, bms_is_member};
 
 use crate::attmap::{build_attrmap_by_name_if_req, build_attrmap_by_position};

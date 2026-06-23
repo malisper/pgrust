@@ -31,7 +31,7 @@ use ::nodes::copy_query::Query;
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, PlaceHolderVar};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, Relids};
+use ::pathnodes::{PlannerInfo, Relids};
 
 seam_core::seam!(
     /// `lookup_type_cache(type, TYPECACHE_HASH_PROC | TYPECACHE_EQ_OPR)`

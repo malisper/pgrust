@@ -4,12 +4,12 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 use ::pathnodes::Bitmapset;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 
 seam_core::seam!(
     /// `has_partition_attrs(rel, attnums, &used_in_expr)` (catalog/partition.c):

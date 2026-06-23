@@ -3,12 +3,12 @@
 //! `renametrig_partition`, and the `RangeVarCallbackForRenameTrigger`
 //! lock-acquisition callback.
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_acl::acl::ACLCHECK_NOT_OWNER;
 use ::types_catalog::pg_trigger as pt;
 use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
 use ::types_core::Oid;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     NOTICE,
@@ -25,7 +25,7 @@ use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use aclchk_seams as aclchk;
 use indexing_seams as indexing;
-use utils_error::{elog, ereport};
+use ::utils_error::{elog, ereport};
 
 use ::heaptuple::FormedTuple;
 use ::types_catalog::catalog_dependency::ObjectAddress;

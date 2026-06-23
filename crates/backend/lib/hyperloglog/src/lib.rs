@@ -43,8 +43,8 @@
 //! real owned struct and calls these functions on it directly.
 
 use ::utils_error::elog;
-use mcx::{Mcx, PgVec};
-use types_error::{PgResult, ERROR};
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{PgResult, ERROR};
 use ::nodes::nodeagg::HyperLogLog;
 
 /// `BITS_PER_BYTE` from `c.h`.

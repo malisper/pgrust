@@ -60,24 +60,24 @@
 use user_seams as seam;
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use authid::{
+use ::authid::{
     AuthIdUpdate, AuthMemForm, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord, PasswordType,
     STATUS_OK,
 };
 use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid, TimestampTz};
-use types_core::{
+use ::types_core::{
     AUTH_ID_OID_INDEX_ID, AUTH_ID_RELATION_ID, AUTH_MEM_OID_INDEX_ID, AUTH_MEM_RELATION_ID,
     BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, ROLE_PG_DATABASE_OWNER,
 };
-use types_error::{
+use ::types_error::{
     ErrorLevel, ErrorLocation, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST,
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_GRANT_OPERATION, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_IN_USE,
     ERRCODE_RESERVED_NAME, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
 };
 use ::nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT};
-use parsenodes::{
+use ::parsenodes::{
     AccessPriv, AlterRoleSetStmt, AlterRoleStmt, CreateRoleStmt, DefElem, DropOwnedStmt,
     DropRoleStmt, GrantRoleStmt, Node, ParseState, ReassignOwnedStmt, RoleSpec, ROLESPEC_CSTRING,
     ROLESPEC_CURRENT_ROLE, ROLESTMT_GROUP, ROLESTMT_ROLE, ROLESTMT_USER,
@@ -2799,7 +2799,7 @@ fn assign_createrole_self_grant_hook(
 /// this crate's backing store, and the three read seams expose that store to
 /// consumers.
 pub fn init_seams() {
-    use guc_tables::{hooks, vars, GucVarAccessors};
+    use ::guc_tables::{hooks, vars, GucVarAccessors};
 
     /* `int Password_encryption` — the GUC slot's `conf->variable`. */
     vars::Password_encryption.install(GucVarAccessors {

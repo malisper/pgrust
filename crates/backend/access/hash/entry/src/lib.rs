@@ -24,7 +24,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_amapi::{
+use ::types_amapi::{
     CompareType, IndexAmRoutine, IndexBuildResult, COMPARE_EQ, COMPARE_INVALID, T_IndexAmRoutine,
 };
 // Vtable-facing types (F2/F3): unified descriptor + erased AM-opaque carrier (A0).
@@ -58,7 +58,7 @@ use ::types_tuple::heaptuple::ItemPointerData;
 use ::indextuple_seams::index_form_tuple;
 use hash_core as core;
 use bufmgr_seams as bufmgr;
-use page::{
+use ::page::{
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageIndexMultiDelete, PageMut, PageRef,
 };
 

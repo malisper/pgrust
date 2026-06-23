@@ -11,8 +11,8 @@
 //! slot the caller fills, returning its index — the owned analog of C's
 //! `char *` into the chunk buffer.
 
-use mcx::{Mcx, PgBox, PgVec};
-use types_core::{uint32, Size};
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::types_core::{uint32, Size};
 use ::types_error::PgResult;
 use ::nodes::nodehash::{
     BucketAndBatch, HashJoinBuckets, HashJoinTupleData, HashJoinTupleLink, HashMemoryChunkData,

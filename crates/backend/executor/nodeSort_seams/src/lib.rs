@@ -5,7 +5,7 @@
 #![allow(unused_doc_comments)]
 #![allow(non_snake_case)]
 
-use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
+use ::execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
 use ::types_error::PgResult;
 
 seam_core::seam!(pub fn exec_sort_estimate(node: PlanStateHandle, pcxt: ParallelContextHandle) -> PgResult<()>);

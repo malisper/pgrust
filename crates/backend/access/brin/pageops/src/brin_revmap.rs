@@ -10,11 +10,11 @@
 
 use ::mcx::Mcx;
 
-use bufmgr_seams::{
+use ::bufmgr_seams::{
     buffer_get_block_number, lock_buffer, mark_buffer_dirty, read_buffer, release_buffer,
     unlock_release_buffer,
 };
-use page::{
+use ::page::{
     ItemIdGetLength, ItemIdIsUsed, ItemPointerEquals, ItemPointerGetBlockNumber,
     ItemPointerGetOffsetNumber, ItemPointerIsValid, ItemPointerSetInvalid, PageGetItem,
     PageGetItemId, PageGetMaxOffsetNumber, PageIndexTupleDeleteNoCompact, PageIsNew, PageMut,

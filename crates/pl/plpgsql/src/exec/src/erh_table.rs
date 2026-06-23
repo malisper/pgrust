@@ -21,7 +21,7 @@
 use core::cell::RefCell;
 
 use ::misc2::expandedrecord::ExpandedRecordHeader;
-use mcx::{MemoryContext, Mcx};
+use ::mcx::{MemoryContext, Mcx};
 
 /// One live expanded record: its private memory context and the header allocated
 /// in it (with a `'static` marker — see the module note).

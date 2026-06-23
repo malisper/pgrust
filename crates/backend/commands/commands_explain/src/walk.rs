@@ -15,11 +15,11 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::instrument::Instrumentation;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;
-use types_explain::{ExplainFormat, ExplainState};
+use ::types_explain::{ExplainFormat, ExplainState};
 use ::nodes::nodeindexscan::{Plan, PlannedStmt};
 use ::nodes::nodes::{ntag, CmdType, Node};
 use ::nodes::parsenodes::RTEKind;

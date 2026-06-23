@@ -18,7 +18,7 @@
 //!
 //! This crate has no cyclic callers, so it declares no seams.
 
-use types_error::{
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
@@ -703,7 +703,7 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+    use ::types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
 
     #[test]
     fn signed_parsers_accept_postgres_bases_and_underscores() {

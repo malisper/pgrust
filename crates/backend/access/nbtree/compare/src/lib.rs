@@ -37,7 +37,7 @@
 
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::datum::Datum;
-use types_sortsupport::{SkipSupportData, SortSupportData};
+use ::types_sortsupport::{SkipSupportData, SortSupportData};
 
 use compare_seams as sort;
 

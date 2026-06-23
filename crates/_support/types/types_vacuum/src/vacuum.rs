@@ -2,7 +2,7 @@
 //! VACUUM parameter struct, the tri-state option enum, the computed cutoffs,
 //! and the per-page prune/freeze result.
 
-use types_core::{bits32, MultiXactId, OffsetNumber, Oid, TransactionId};
+use ::types_core::{bits32, MultiXactId, OffsetNumber, Oid, TransactionId};
 use ::types_storage::bufpage::MaxHeapTuplesPerPage;
 
 /// `typedef enum VacOptValue` (`commands/vacuum.h`) — tri-state for the

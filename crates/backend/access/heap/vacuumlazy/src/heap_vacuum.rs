@@ -14,8 +14,8 @@
 //! all-visible recheck control flow are ported 1:1 in-crate.
 
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, DEBUG2, ERROR};
-use types_core::{BlockNumber, Buffer, OffsetNumber, TransactionId};
+use ::types_error::{ErrorLocation, DEBUG2, ERROR};
+use ::types_core::{BlockNumber, Buffer, OffsetNumber, TransactionId};
 use ::types_error::PgResult;
 
 use crate::consts::{

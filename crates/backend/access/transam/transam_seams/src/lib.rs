@@ -2,7 +2,7 @@
 //! (`access/transam/transam.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::{TransactionId, XLogRecPtr};
+use ::types_core::{TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
 
 seam_core::seam!(

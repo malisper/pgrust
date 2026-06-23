@@ -1,5 +1,5 @@
-use mcx::{alloc_in, slice_in, Mcx, PgBox, PgString, PgVec};
-use types_core::{
+use ::mcx::{alloc_in, slice_in, Mcx, PgBox, PgString, PgVec};
+use ::types_core::{
     uint16, uint32, uint8, AttrNumber, BlockNumber, CommandId, OffsetNumber, Oid, Size,
     TransactionId,
 };

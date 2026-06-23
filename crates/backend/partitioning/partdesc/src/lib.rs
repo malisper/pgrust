@@ -49,14 +49,14 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
 
-use mcx::{Mcx, MemoryContext, PgBox};
+use ::mcx::{Mcx, MemoryContext, PgBox};
 use ::types_core::primitive::Oid;
-use types_core::{InvalidOid, TransactionId};
-use types_error::{PgError, PgResult};
+use ::types_core::{InvalidOid, TransactionId};
+use ::types_error::{PgError, PgResult};
 use ::nodes::ddlnodes::PartitionBoundSpec;
 use ::nodes::partition::{PartitionBoundInfo, PartitionDescData, PartitionKeyData};
 use ::nodes::Opaque;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 
 use partitioning_core_seams as core_seam;
 use partbounds_seams as partbounds_seam;

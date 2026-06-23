@@ -29,7 +29,7 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgHashMap, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgHashMap, PgVec};
 use ::types_catalog::pg_inherits::{
     Anum_pg_inherits_inhparent, Anum_pg_inherits_inhrelid, FormData_pg_inherits, Natts_pg_inherits,
     PgInheritsInsertRow, InheritsParentIndexId, InheritsRelationId, InheritsRelidSeqnoIndexId,
@@ -38,8 +38,8 @@ use ::types_core::fmgr::F_OIDEQ;
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use ::types_core::xact::InvalidTransactionId;
 use ::types_core::TransactionId;
-use types_error::{ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING};
-use rel::{Relation, RelationData};
+use ::types_error::{ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR, WARNING};
+use ::rel::{Relation, RelationData};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, LOCKMODE};
 use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;

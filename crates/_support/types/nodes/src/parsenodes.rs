@@ -3,7 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_acl::AclMode;
 use ::types_core::primitive::{Index, Oid};
 use ::types_error::PgResult;

@@ -33,9 +33,9 @@ use core::ffi::c_char;
 
 use ::utils_error::errno::current_errno;
 use ::utils_error::ereport;
-use mcx::{Mcx, PgString};
-use types_error::{ErrorLocation, PgResult};
-use types_error::{DEBUG1, DEBUG2, DEBUG3, ERROR, FATAL, LOG, WARNING};
+use ::mcx::{Mcx, PgString};
+use ::types_error::{ErrorLocation, PgResult};
+use ::types_error::{DEBUG1, DEBUG2, DEBUG3, ERROR, FATAL, LOG, WARNING};
 use ::types_core::primitive::{TimeLineID, XLogRecPtr, XLogSegNo};
 use ::wal::xlog_consts::{ArchiveMode, RecoveryState, XLOGDIR};
 

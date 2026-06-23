@@ -15,7 +15,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_catalog::catalog::{LANGUAGE_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID};
 use ::types_catalog::catalog_dependency::{DependencyType, ObjectAddress, DEPENDENCY_NORMAL};
@@ -29,7 +29,7 @@ use ::types_catalog::pg_transform::{
 };
 use ::types_core::fmgr::F_OIDEQ;
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::RowExclusiveLock;
 use ::types_tuple::heaptuple::Datum;

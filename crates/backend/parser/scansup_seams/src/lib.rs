@@ -12,7 +12,7 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 
 seam_core::seam!(

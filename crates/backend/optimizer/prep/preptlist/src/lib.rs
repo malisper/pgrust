@@ -69,12 +69,12 @@
 extern crate alloc;
 
 use ::types_core::primitive::AttrNumber;
-use types_core::{INT4OID, InvalidOid, Oid};
+use ::types_core::{INT4OID, InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::CmdType;
 use ::nodes::primnodes::Expr;
-use pathnodes::{NodeId, PlanRowMarkId, PlannerInfo, TargetEntryNode};
+use ::pathnodes::{NodeId, PlanRowMarkId, PlannerInfo, TargetEntryNode};
 use ::rel::Relation;
 use ::types_tuple::heaptuple::Datum;
 

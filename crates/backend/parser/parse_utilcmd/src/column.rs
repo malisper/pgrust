@@ -11,11 +11,11 @@
 //! ([`crate::serial::generateSerialExtraStmts`]); its ALTER leg opens the
 //! existing relation by OID through the relcache.
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 use ::utils_error::ereport;
 use ::types_core::Oid;
-use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR};
+use ::types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR};
 
 use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableStmt, Constraint, ConstrType, AT_AlterColumnGenericOptions,
@@ -41,7 +41,7 @@ use crate::fk_check_attrs::transformConstraintAttrs;
 
 use alloc::string::ToString;
 
-use parse_type::{typenameType, typeTypeCollation, typeTypeId, LookupCollation};
+use ::parse_type::{typenameType, typeTypeCollation, typeTypeId, LookupCollation};
 use ::types_core::OidIsValid;
 use ::types_error::ERRCODE_DATATYPE_MISMATCH;
 

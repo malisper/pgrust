@@ -38,7 +38,7 @@
 //! * `LockTableAclCheck`               — C 279-299 (static)
 
 use ::utils_error::ereport;
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_acl::acl::{
     AclMode, AclResult, ACLCHECK_OK, ACL_DELETE, ACL_INSERT, ACL_MAINTAIN, ACL_SELECT,
@@ -46,7 +46,7 @@ use ::types_acl::acl::{
 };
 use ::types_core::primitive::{Oid, OidIsValid};
 use ::types_core::catalog::RELPERSISTENCE_TEMP;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_LOCK_NOT_AVAILABLE, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
 };

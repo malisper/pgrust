@@ -58,9 +58,9 @@
 use ::mcx::Mcx;
 use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
-use types_rangetypes::{RangeBound, RangeTypeP, RANGE_EMPTY};
-use spgist::{
+use ::types_error::{PgError, PgResult};
+use ::types_rangetypes::{RangeBound, RangeTypeP, RANGE_EMPTY};
+use ::spgist::{
     spgChooseIn, spgChooseOut, spgChooseOutMatchNode, spgChooseOutResult, spgConfigIn,
     spgConfigOut, spgInnerConsistentIn, spgInnerConsistentOut, spgLeafConsistentIn,
     spgLeafConsistentOut, spgPickSplitIn, spgPickSplitOut,

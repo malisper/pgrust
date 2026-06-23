@@ -8,7 +8,7 @@
 
 use core::ptr::NonNull;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_error::PgResult;
 use ::types_tuple::heaptuple::TupleDesc;
 

@@ -14,7 +14,7 @@ use ::mcx::Mcx;
 
 use ::types_core::primitive::Oid;
 use ::types_core::InvalidOid;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 
 use ::types_storage::lock::{AccessShareLock, NoLock};
 

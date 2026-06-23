@@ -32,19 +32,19 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use std::thread_local;
 
-use bufmask_seams::{
+use ::bufmask_seams::{
     mask_lp_flags, mask_page_hint_bits, mask_page_lsn_and_checksum, mask_unused_space,
 };
-use xlogutils::{XLogInitBufferForRedo, XLogReadBufferForRedo};
-use bufmgr_seams::{
+use ::xlogutils::{XLogInitBufferForRedo, XLogReadBufferForRedo};
+use ::bufmgr_seams::{
     mark_buffer_dirty, unlock_release_buffer, with_buffer_page,
 };
-use page::{
+use ::page::{
     PageAddItemExtended, PageGetMaxOffsetNumber, PageIndexMultiDelete, PageIndexTupleDelete,
     PageIndexTupleOverwrite, PageIsEmpty, PageMut, PageRef, PageSetLSN,
 };
-use utils_error::{ereport, PgError, PgResult};
-use mcx::{Mcx, MemoryContext};
+use ::utils_error::{ereport, PgError, PgResult};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::primitive::{
     BlockNumber, OffsetNumber, RmgrId, TransactionId, XLogRecPtr,
 };

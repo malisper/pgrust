@@ -30,7 +30,7 @@
 pub mod fmgr_builtins;
 
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, PgResult, ERROR, NOTICE, PANIC};
+use ::types_error::{ErrorLocation, PgResult, ERROR, NOTICE, PANIC};
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -50,12 +50,12 @@ use ::types_tuple::heaptuple::{
     HEAP_XMIN_FROZEN, INT2OID, INT4OID, INT8OID, INVALID_OFFSET_NUMBER, OIDOID, ON_PAGE_HEADER_SIZE,
 };
 
-use types_acl::{ACL_SELECT, ACL_UPDATE, ACL_USAGE, ACLCHECK_OK};
+use ::types_acl::{ACL_SELECT, ACL_UPDATE, ACL_USAGE, ACLCHECK_OK};
 use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL,
 };
 use ::types_catalog::pg_sequence::FormData_pg_sequence;
-use types_error::{
+use ::types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_SEQUENCE_GENERATOR_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
@@ -540,7 +540,7 @@ fn build_seq_item<'mcx>(
     rel: &Relation<'mcx>,
     data: &FormData_pg_sequence_data,
 ) -> PgResult<Vec<u8>> {
-    use heaptuple::{heap_form_tuple, HeapTupleError};
+    use ::heaptuple::{heap_form_tuple, HeapTupleError};
 
     // heap_form_tuple(tupDesc, value, null) — three columns, none null.
     let values = [

@@ -16,7 +16,7 @@
 //! repo-faithful dispatch wrappers in `pg_locale.c` these are seam-and-panic
 //! pending that owner.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 

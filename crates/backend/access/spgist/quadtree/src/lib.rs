@@ -38,10 +38,10 @@
 #![allow(clippy::result_large_err)]
 
 use ::types_core::geo::{Point, SpgKey, BOX};
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 
 use ::spg_proc_seams::spg_key_orderbys_distances;
-use geo_ops_seams::{
+use ::geo_ops_seams::{
     box_contain_pt, point_above, point_below, point_eq, point_horiz, point_left, point_right,
     point_vert,
 };

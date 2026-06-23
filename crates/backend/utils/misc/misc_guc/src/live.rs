@@ -68,10 +68,10 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use guc_tables::{all_settings, GucDefaultValue, GucSetting};
-use types_core::{Oid, TimestampTz};
-use types_error::{ErrorLevel, PgResult};
-use types_guc::{config_type, GucContext, GucSource};
+use ::guc_tables::{all_settings, GucDefaultValue, GucSetting};
+use ::types_core::{Oid, TimestampTz};
+use ::types_error::{ErrorLevel, PgResult};
+use ::types_guc::{config_type, GucContext, GucSource};
 
 use crate::model::{config_bool, config_enum, config_generic, config_int, config_real, config_string};
 use crate::registry::{GucRegistry, GucVariable};

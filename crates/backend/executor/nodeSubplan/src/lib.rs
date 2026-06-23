@@ -53,9 +53,9 @@ use arrayfuncs_seams as arrayfuncs;
 use fmgr_seams as fmgr;
 
 use exec_expr::ProjectionKind;
-use mcx::{vec_with_capacity_in, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, PgBox, PgVec};
 use ::types_core::fmgr::FmgrInfo;
-use types_core::{AttrNumber, Oid};
+use ::types_core::{AttrNumber, Oid};
 // The fmgr-call ABI / array-seam contracts still hand and return the bare-word
 // `Datum` newtype at their (un-migrated owner) edges: `FunctionCall2Coll`
 // (fmgr), and `accum_array_result_any` / `make_array_result_any` /
@@ -69,10 +69,10 @@ use ::datum::Datum as Word;
 // `result` register, `ParamExecData.value`, `SubPlanState.curArray`, and the
 // migrated seam returns all carry.
 use types_tuple::heaptuple::Datum;
-use types_error::{PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execexpr::SubPlanState;
 use ::nodes::primnodes::SubLinkType;
-use nodes::{Bitmapset, EStateData, EcxtId};
+use ::nodes::{Bitmapset, EStateData, EcxtId};
 
 type Astate<'mcx> = arrayfuncs::ArrayBuildStateAnyHandle<'mcx>;
 type HashTable<'mcx> = ::nodes::nodeagg::TupleHashTable<'mcx>;

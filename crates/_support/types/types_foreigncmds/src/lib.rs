@@ -12,7 +12,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::types_plancache::UtilityStmtHandle;

@@ -22,7 +22,7 @@ use core::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_SYNTAX_ERROR, ERROR,
 };
 use ::tsearch::tsearch::{

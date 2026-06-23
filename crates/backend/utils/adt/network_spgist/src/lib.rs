@@ -54,12 +54,12 @@
 //! leaf_consistent 3799) to the bodies exported here, exactly as it routes the
 //! quad-tree / k-d-tree / text opclasses.
 
-use adt_network::{bitncmp, bitncommon, cidr_set_masklen_internal};
+use ::adt_network::{bitncmp, bitncommon, cidr_set_masklen_internal};
 use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
-use types_network::{inet_struct, PGSQL_AF_INET};
-use spgist::{
+use ::types_network::{inet_struct, PGSQL_AF_INET};
+use ::spgist::{
     spgChooseIn, spgChooseOut, spgChooseOutMatchNode, spgChooseOutResult, spgChooseOutSplitTuple,
     spgConfigIn, spgConfigOut, spgInnerConsistentIn, spgInnerConsistentOut, spgLeafConsistentIn,
     spgLeafConsistentOut, spgPickSplitIn, spgPickSplitOut,

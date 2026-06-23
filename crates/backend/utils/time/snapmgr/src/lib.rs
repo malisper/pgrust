@@ -22,7 +22,7 @@
 #![allow(clippy::result_large_err)]
 
 use subtrans_seams as subtrans_seams;
-use transam_xact::{
+use ::transam_xact::{
     GetCurrentCommandId, GetCurrentTransactionNestLevel, GetTopTransactionIdIfAny, IsInParallelMode,
     IsSubTransaction, IsolationIsSerializable, IsolationUsesXactSnapshot, XactIsoLevel,
     XactReadOnly, xactGetCommittedChildren,
@@ -31,19 +31,19 @@ use fd_seams as fd_seams;
 use procarray_seams as procarray_seams;
 use predicate_seams as predicate_seams;
 use lmgr_proc_seams as proc_seams;
-use cache_syscache::{RelationHasSysCache, RelationInvalidatesSnapshotsOnly};
+use ::cache_syscache::{RelationHasSysCache, RelationInvalidatesSnapshotsOnly};
 use ::utils_error::ereport;
 use init_small_seams as misc_seams;
-use types_core::{
+use ::types_core::{
     CommandId, FirstNormalTransactionId, InvalidOid, InvalidTransactionId, Oid, ProcNumber, Size,
     TransactionId, XACT_SERIALIZABLE,
 };
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_ACTIVE_SQL_TRANSACTION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERROR, LOG, WARNING,
 };
-use snapshot::{SnapshotData, SnapshotType};
+use ::snapshot::{SnapshotData, SnapshotType};
 use ::types_storage::VirtualTransactionId;
 
 mod state;
@@ -51,7 +51,7 @@ mod state;
 mod fmgr_builtins;
 
 pub use state::SnapHandle;
-pub use types_logical::{
+pub use ::types_logical::{
     ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash,
 };
 use state::{

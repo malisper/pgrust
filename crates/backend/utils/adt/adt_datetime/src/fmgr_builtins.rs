@@ -24,7 +24,7 @@
 
 use ::fmgr::FunctionCallInfoBaseData;
 use ::datum::Datum;
-use types_datetime::{Interval, TimeTzADT};
+use ::types_datetime::{Interval, TimeTzADT};
 
 use crate::binio::WireReader;
 

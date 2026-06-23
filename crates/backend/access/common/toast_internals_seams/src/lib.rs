@@ -9,7 +9,7 @@
 
 use ::mcx::PgVec;
 use ::types_error::PgResult;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_storage::lock::LOCKMODE;
 
 seam_core::seam!(

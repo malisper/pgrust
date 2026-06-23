@@ -5,7 +5,7 @@
 use std::cell::Cell;
 use std::sync::Once;
 
-use types_timeout::{
+use ::types_timeout::{
     DisableTimeoutParams, EnableTimeoutParams, TimeoutId, TimeoutType, MAX_TIMEOUTS,
 };
 

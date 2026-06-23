@@ -47,7 +47,7 @@ use snapmgr_seams as snapmgr;
 use vacuumlazy_seams as vacuumlazy;
 use hio_seams as hio;
 
-use page::{
+use ::page::{
     ItemPointerIsValid as item_pointer_is_valid_opt, ItemPointerSetInvalid, PageGetItemId,
     PageGetMaxOffsetNumber, PageIsEmpty, PageIsNew, PageRef,
 };
@@ -68,7 +68,7 @@ use ::xlog_records::spgxlog::{
     spgxlogVacuumLeaf, spgxlogVacuumRedirect, spgxlogVacuumRoot,
 };
 
-use spgist::{
+use ::spgist::{
     SpGistBlockIsRoot, SpGistState, SPGIST_DEAD, SPGIST_LAST_FIXED_BLKNO, SPGIST_LIVE,
     SPGIST_METAPAGE_BLKNO, SPGIST_PLACEHOLDER, SPGIST_REDIRECT,
 };

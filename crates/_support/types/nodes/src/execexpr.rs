@@ -15,7 +15,7 @@
 //! enumerator, in the same order (kept in sync with the interpreter dispatch
 //! table in `execExprInterp.c`).
 
-use mcx::{MemoryContext, PgBox, PgString, PgVec};
+use ::mcx::{MemoryContext, PgBox, PgString, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::datum::datum::NullableDatum;

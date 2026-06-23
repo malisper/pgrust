@@ -5,8 +5,8 @@
 use ::lsyscache::type_::{
     get_base_type, get_element_type, get_type_output_info, type_is_rowtype,
 };
-use coerce_seams::{find_coercion_pathway_explicit, CoercionPathType};
-use types_core::{Oid, OidIsValid};
+use ::coerce_seams::{find_coercion_pathway_explicit, CoercionPathType};
+use ::types_core::{Oid, OidIsValid};
 use ::types_error::PgResult;
 use ::types_json::JsonTypeCategory;
 use ::types_tuple::heaptuple::{

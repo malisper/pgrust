@@ -33,12 +33,12 @@ use execUtils_seams as execUtils;
 use instrument_seams as instrument;
 use nodeBitmapAnd_seams as self_seams;
 use core_tidbitmap_seams as tidbitmap;
-use mcx::{Mcx, PgBox};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::mcx::{Mcx, PgBox};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::nodes::nodebitmapand::{BitmapAnd, BitmapAndState};
 use ::nodes::nodes::Node;
-use nodes::{EStateData, PlanStateNode, SlotId};
+use ::nodes::{EStateData, PlanStateNode, SlotId};
 use ::tidbitmap::TIDBitmap;
 
 /// Install this crate's interface routines into its seam slots so the executor

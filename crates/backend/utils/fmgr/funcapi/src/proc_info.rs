@@ -15,7 +15,7 @@
 //! (mode filtering, column naming, the OUT-arg count rules) stay here, 1:1 with
 //! the C.
 
-use mcx::{Mcx, MemoryContext, PgString, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
 use ::types_core::primitive::AttrNumber;
 use ::types_core::Oid;
 // Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`.
@@ -28,7 +28,7 @@ use ::types_core::Oid;
 // column-input ABI edge until the arrayfuncs seams migrate.
 use ::datum::Datum as ScalarWord;
 use ::types_error::PgResult;
-use types_namespace::{
+use ::types_namespace::{
     CharArrayDatum, FuncArgInfo, FuncProcAttrs, OidArrayDatum, TextArrayDatum,
 };
 use ::types_tuple::heaptuple::{TupleDesc, OIDOID, RECORDOID, TEXTOID};

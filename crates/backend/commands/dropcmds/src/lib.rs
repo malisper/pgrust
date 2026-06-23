@@ -35,12 +35,12 @@
 //! * `does_not_exist_skipping`                — C 242-524 (static)
 
 use ::utils_error::ereport;
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::{Oid, OidIsValid};
 use ::types_core::catalog::NAMESPACE_RELATION_ID;
-use types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
+use ::types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 use ::nodes::parsenodes::{
     ObjectType, OBJECT_ACCESS_METHOD, OBJECT_AGGREGATE, OBJECT_AMOP, OBJECT_AMPROC,
     OBJECT_ATTRIBUTE, OBJECT_CAST, OBJECT_COLLATION, OBJECT_COLUMN, OBJECT_CONVERSION,
@@ -55,23 +55,23 @@ use ::nodes::parsenodes::{
     OBJECT_TSDICTIONARY, OBJECT_TSPARSER, OBJECT_TSTEMPLATE, OBJECT_TYPE, OBJECT_USER_MAPPING,
     OBJECT_VIEW,
 };
-use parsenodes::{DropStmt, Node, ObjectWithArgs, StringNode, TypeName};
+use ::parsenodes::{DropStmt, Node, ObjectWithArgs, StringNode, TypeName};
 use ::types_storage::lock::{AccessExclusiveLock, NoLock};
 
 use ::aclchk_seams::object_ownercheck;
 use ::dependency_seams::perform_multiple_deletions;
 use ::namespace_seams::is_temp_namespace;
-use objectaddress_seams::{
+use ::objectaddress_seams::{
     check_object_ownership, get_object_address, get_object_namespace, ResolvedObjectAddress,
 };
-use parse_type_seams::{
+use ::parse_type_seams::{
     lookup_type_name_oid, type_name_list_to_string, typename_to_string_node,
 };
 use ::lsyscache_seams::get_func_prokind;
 use ::miscinit_seams::get_user_id;
 use ::transam_xact_seams::set_xact_accessed_temp_namespace;
 
-use catalog_namespace::{
+use ::catalog_namespace::{
     makeRangeVarFromNameList, LookupNamespaceNoError, NameListToString, RangeVarGetRelid,
 };
 

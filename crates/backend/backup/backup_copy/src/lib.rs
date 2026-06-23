@@ -71,19 +71,19 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use sink::{Bbsink, BbsinkOps, BbsinkState};
-use pqcomm_seams::{pq_flush_if_writable, pq_putmessage};
-use pqformat::{
+use ::sink::{Bbsink, BbsinkOps, BbsinkState};
+use ::pqcomm_seams::{pq_flush_if_writable, pq_putmessage};
+use ::pqformat::{
     pq_beginmessage, pq_endmessage, pq_putemptymessage, pq_puttextmessage, pq_sendbyte,
     pq_sendint16, pq_sendint64, pq_sendstring,
 };
-use timestamp_seams::{get_current_timestamp, timestamp_difference_milliseconds};
+use ::timestamp_seams::{get_current_timestamp, timestamp_difference_milliseconds};
 use ::mcx::Mcx;
 use ::types_core::primitive::{Size, TimeLineID, TimestampTz, XLogRecPtr};
 use ::types_error::PgResult;
 
 use backup_copy_seams as seam;
-use backup_copy_seams::{ResultColumn, ResultColumnType, ResultValue};
+use ::backup_copy_seams::{ResultColumn, ResultColumnType, ResultValue};
 
 /// Builtin type OIDs (`catalog/pg_type_d.h`), used for the two result sets.
 const TEXTOID: ResultColumnType = ResultColumnType::Text;

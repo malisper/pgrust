@@ -35,8 +35,8 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{Mcx, PgString};
-use types_error::{
+use ::mcx::{Mcx, PgString};
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE,
 };
 
@@ -266,7 +266,7 @@ fn install_guc_hooks() {
 /// from the GUC slot in pg_locale.c — none come from ControlFile. The backing
 /// storage lives in [`crate::setup`].
 fn install_guc_var_accessors() {
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     vars::locale_messages.install(GucVarAccessors {
         get: || Some(setup::locale_messages()),

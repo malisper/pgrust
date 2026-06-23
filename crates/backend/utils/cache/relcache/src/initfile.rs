@@ -26,15 +26,15 @@
 //! the C call exactly and panics until the owner lands — never restructured
 //! around, never silently stubbed.
 
-use utils_error::{ereport, PgResult};
-use types_error::{ERROR, LOG, WARNING};
+use ::utils_error::{ereport, PgResult};
+use ::types_error::{ERROR, LOG, WARNING};
 use ::types_error::error::{ERRCODE_DATA_CORRUPTED, ERRCODE_INVALID_PARAMETER_VALUE};
 use ::types_core::catalog::{
     BOOTSTRAP_SUPERUSERID, RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
 use ::types_core::primitive::{InvalidRelFileNumber, Oid, ProcNumber, RegProcedure};
 use ::types_core::xact::InvalidSubTransactionId;
-use types_core::{InvalidOid, INVALID_PROC_NUMBER};
+use ::types_core::{InvalidOid, INVALID_PROC_NUMBER};
 use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_TOASTVALUE,

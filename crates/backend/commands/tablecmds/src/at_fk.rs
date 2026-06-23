@@ -26,14 +26,14 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_INTERNAL, DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
 };
 use ::types_catalog::pg_constraint::CONSTRAINT_FOREIGN;
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_FOREIGN_KEY, ERRCODE_INVALID_TABLE_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_COLUMNS,
@@ -59,7 +59,7 @@ use ::types_catalog::pg_trigger::{
     TRIGGER_FOR_UPDATE,
 };
 use ::adt_ri_triggers::checks::ri_fkey_trigger_type;
-use adt_ri_triggers::{RI_TRIGGER_FK, RI_TRIGGER_PK};
+use ::adt_ri_triggers::{RI_TRIGGER_FK, RI_TRIGGER_PK};
 use ::scankey::ScanKeyInit;
 use ::heaptuple::heap_deform_tuple;
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};

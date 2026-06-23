@@ -27,17 +27,17 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{Mcx, PgVec};
-use types_core::{AttrNumber, InvalidOid, Oid};
-use types_error::{
+use ::mcx::{Mcx, PgVec};
+use ::types_core::{AttrNumber, InvalidOid, Oid};
+use ::types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_INVALID_PARAMETER_VALUE,
 };
 use ::types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, UNKNOWNOID};
 
-pub use adt_misc::{CatalogForeignKeyRow, KeywordRow, TypeBaseStep};
+pub use ::adt_misc::{CatalogForeignKeyRow, KeywordRow, TypeBaseStep};
 
-use misc_seams::{
+use ::misc_seams::{
     catalog_foreign_keys as catalog_foreign_keys_seam, current_logfile as current_logfile_seam,
     tablespace_databases as tablespace_databases_seam,
     tablespace_location as tablespace_location_seam,
@@ -50,7 +50,7 @@ use ::lsyscache_seams::type_is_collatable as type_is_collatable_seam;
 use ::fmgr_seams::input_is_valid_by_type as input_is_valid_by_type_seam;
 use ::miscinit_seams::check_for_interrupts as check_for_interrupts_seam;
 use ::parse_type_seams::parse_type_string as parse_type_string_seam;
-use latch_seams::{
+use ::latch_seams::{
     reset_latch_my_latch as reset_latch_my_latch_seam, wait_latch_my_latch as wait_latch_my_latch_seam,
 };
 
@@ -280,7 +280,7 @@ pub fn pg_sleep(secs: f64) -> PgResult<()> {
 /// shim's job. The category-letter/description and bare-label rendering are
 /// ported 1:1 from the C `switch`.
 pub fn pg_get_keywords() -> Vec<KeywordRow> {
-    use keywords::{
+    use ::keywords::{
         GetScanKeyword, ScanKeywordBareLabel, ScanKeywordCategories, ScanKeywords,
     };
     use ::types_core::keywords::KeywordCategory;

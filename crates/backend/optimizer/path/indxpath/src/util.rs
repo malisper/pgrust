@@ -5,7 +5,7 @@
 
 use ::types_core::primitive::Oid;
 use ::nodes::primnodes::{BoolExprType, Expr};
-use pathnodes::{PlannerInfo, Relids, RinfoId};
+use ::pathnodes::{PlannerInfo, Relids, RinfoId};
 
 /// `InvalidOid`.
 pub const INVALID_OID: Oid = 0;

@@ -5,7 +5,7 @@
 //! `plan.lefttree`); cost/targetlist/qual fields arrive with the units that
 //! read them.
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 
 use crate::bitmapset::Bitmapset;

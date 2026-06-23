@@ -26,7 +26,7 @@ use ::types_core::primitive::{
 };
 use ::rel::Relation;
 use ::types_core::xact::TransactionIdIsValid;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use ::nodes::TupleSlotKind;
 use ::nodes::tuptable::SlotData;
 use ::snapshot::snapshot::IsMVCCSnapshot;

@@ -11,13 +11,13 @@
 //! The owning unit (`backend-utils-adt-array-more`) installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_core::Oid;
 use ::datum::array_build::ArrayBuildStateAny;
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
-use nodes::{EStateData, EcxtId};
-use types_namespace::{CharArrayDatum, OidArrayDatum, TextArrayDatum};
+use ::nodes::{EStateData, EcxtId};
+use ::types_namespace::{CharArrayDatum, OidArrayDatum, TextArrayDatum};
 use ::types_tuple::heaptuple::Datum as DatumV;
 
 /// The `ArrayBuildStateAny *` threaded between the array-accumulation seams.

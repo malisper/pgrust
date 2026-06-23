@@ -18,7 +18,7 @@ use alloc::string::ToString;
 
 use ::datum::Datum;
 use ::types_error::PgResult;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::gistutil;
 

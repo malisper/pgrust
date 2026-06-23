@@ -37,11 +37,11 @@
 //! driver hands back to the timezone provider to resolve the offset.
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult, SoftErrorContext};
-use types_datetime::{TzAbbrevMatch, TzHandle};
+use ::types_error::{PgError, PgResult, SoftErrorContext};
+use ::types_datetime::{TzAbbrevMatch, TzHandle};
 use ::types_datetime::MONTHS_PER_YEAR;
-use types_error::{ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_INVALID_DATETIME_FORMAT};
-use types_core::{InvalidOid, Oid};
+use ::types_error::{ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_INVALID_DATETIME_FORMAT};
+use ::types_core::{InvalidOid, Oid};
 
 use crate::fromchar::{
     adjust_partial_year_to_2020, from_char_parse_int, from_char_parse_int_len,

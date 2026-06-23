@@ -27,16 +27,16 @@
 
 use std::rc::Rc;
 
-use pgtime::{pg_tm, pg_tz};
+use ::pgtime::{pg_tm, pg_tz};
 use ::types_core::pg_time_t;
 use ::state_pgtz::session_timezone;
-use localtime::{pg_interpret_timezone_abbrev, pg_next_dst_boundary_tristate, pg_timezone_abbrev_is_known, NextDstBoundary};
-use timezone_pgtz::{pg_tzset, pg_tzset_offset};
+use ::localtime::{pg_interpret_timezone_abbrev, pg_next_dst_boundary_tristate, pg_timezone_abbrev_is_known, NextDstBoundary};
+use ::timezone_pgtz::{pg_tzset, pg_tzset_offset};
 
 use types_datetime::*;
-use types_error::{ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE};
-use types_datetime::{fsec_t, TimestampTz};
-use types_error::{PgError, PgResult};
+use ::types_error::{ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_datetime::{fsec_t, TimestampTz};
+use ::types_error::{PgError, PgResult};
 
 // Charged alloc-tracking collection types (see AGENTS.md HARD RULE): use the
 // MemoryContext-charged `Pg*` containers for crate-local growable allocations.

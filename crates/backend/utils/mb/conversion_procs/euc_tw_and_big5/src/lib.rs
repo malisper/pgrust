@@ -24,7 +24,7 @@
 mod tables;
 
 use ::error_fgram::PgResult;
-use mb_fgram::{
+use ::mb_fgram::{
     check_encoding_conversion_args, report_invalid_encoding, report_untranslatable_char,
 };
 use ::conv_string_helpers::ConversionResult;

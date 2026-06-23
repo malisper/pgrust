@@ -12,7 +12,7 @@
 //! `TransamVariables->{latestCompletedXid,xactCompletionCount}` are reached
 //! through the varsup seam crate (varsup owns that singleton).
 
-use types_core::{
+use ::types_core::{
     FirstNormalTransactionId, FullTransactionId, InvalidLocalTransactionId, InvalidTransactionId,
     ProcNumber, TransactionId, TransactionIdIsValid, INVALID_PROC_NUMBER,
 };

@@ -17,7 +17,7 @@
 use std::cell::RefCell;
 use std::cell::Cell;
 
-use be_secure_openssl::{PG_TLS1_2_VERSION, PG_TLS_ANY};
+use ::be_secure_openssl::{PG_TLS1_2_VERSION, PG_TLS_ANY};
 
 // String GUC backing cells. C `char *` globals; NULL stays distinguishable
 // from empty (`Option<String>`), matching the `GucStringVar` contract.

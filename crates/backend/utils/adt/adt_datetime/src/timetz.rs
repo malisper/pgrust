@@ -22,16 +22,16 @@ use std::rc::Rc;
 use ::pgtime::pg_tm;
 use ::mcx::Mcx;
 use ::types_numeric::var::NumericVar;
-use types_datetime::{
+use ::types_datetime::{
     Interval, TimeTzADT, MINS_PER_HOUR, SECS_PER_HOUR, SECS_PER_MINUTE, USECS_PER_DAY,
     USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
 };
-use types_error::{
+use ::types_error::{
     ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE,
 };
-use types_datetime::{fsec_t, TimeADT, TimeOffset};
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_datetime::{fsec_t, TimeADT, TimeOffset};
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use crate::decode::{DecodeTimeOnly, DecodeUnits, ParseDateTime};
 use crate::encode::EncodeTimeOnly;
@@ -351,7 +351,7 @@ pub fn timetz_izone(zone: &Interval, time: &TimeTzADT) -> PgResult<TimeTzADT> {
 /// `zone`, applying DST rules as of the transaction start time.
 pub fn timetz_zone(zone: &str, t: &TimeTzADT) -> PgResult<TimeTzADT> {
     use crate::decode::{DecodeTimezoneName, DetermineTimeZoneAbbrevOffsetTS};
-    use types_datetime::{TZNAME_DYNTZ, TZNAME_FIXED_OFFSET};
+    use ::types_datetime::{TZNAME_DYNTZ, TZNAME_FIXED_OFFSET};
 
     let mut val: i32 = 0;
     let mut tzp: Option<Rc<::pgtime::pg_tz>> = None;
@@ -425,7 +425,7 @@ pub fn timetz_part_common<'mcx>(
     time: &TimeTzADT,
     retnumeric: bool,
 ) -> PgResult<TimetzPartResult<'mcx>> {
-    use types_datetime::{
+    use ::types_datetime::{
         DTK_EPOCH, DTK_HOUR, DTK_MICROSEC, DTK_MILLISEC, DTK_MINUTE, DTK_SECOND, DTK_TZ,
         DTK_TZ_HOUR, DTK_TZ_MINUTE, RESERV, UNITS, UNKNOWN_FIELD,
     };
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn timetz_in_maps_dterr_to_specific_sqlstate() {
         crate::test_install_seams();
-        use types_error::{
+        use ::types_error::{
             ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_INVALID_DATETIME_FORMAT,
             ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
         };

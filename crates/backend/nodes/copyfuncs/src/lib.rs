@@ -84,7 +84,7 @@ mod tests {
 
     use std::sync::Mutex;
 
-    use mcx::{MemoryContext, PgString};
+    use ::mcx::{MemoryContext, PgString};
     use ::nodes::node_tree::Node;
     use ::nodes::value::Float;
 

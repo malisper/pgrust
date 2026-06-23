@@ -5,7 +5,7 @@
 //! functions in the targetlist; all SRFs are guaranteed to be directly at the
 //! top level of the targetlist. `ProjectSetState` is the executor state.
 
-use mcx::{MemoryContext, PgBox, PgVec};
+use ::mcx::{MemoryContext, PgBox, PgVec};
 
 use crate::execexpr::{ExprDoneCond, ExprState, SetExprState};
 use crate::execnodes::PlanStateData;

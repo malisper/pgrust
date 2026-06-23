@@ -20,9 +20,9 @@
 //! literally `escape_json(buf, str)`, so it routes through the `escape_json`
 //! seam rather than getting its own slot.
 
-use mcx::{PgString, PgVec};
+use ::mcx::{PgString, PgVec};
 use ::types_error::PgResult;
-use types_explain::{ExplainFormat, ExplainState};
+use ::types_explain::{ExplainFormat, ExplainState};
 
 use ::json_seams::escape_json;
 use ::xml_seams::escape_xml;

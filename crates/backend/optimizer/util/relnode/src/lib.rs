@@ -34,7 +34,7 @@ use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, ExprRelids};
 
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     AppendRelInfo, ParamPathInfo, PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
     UpperRelationKind, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_SEMI, NodeId,
     RELOPT_BASEREL, RELOPT_JOINREL, RELOPT_OTHER_JOINREL, RELOPT_OTHER_MEMBER_REL,

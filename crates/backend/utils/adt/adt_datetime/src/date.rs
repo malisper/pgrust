@@ -22,19 +22,19 @@
 //! `CStr`/`CString`, or `pg_ffi_fgram`.
 
 
-use pgtime::{pg_tm};
+use ::pgtime::{pg_tm};
 use ::state_pgtz::session_timezone;
-use types_datetime::{
+use ::types_datetime::{
     Interval, TimeTzADT, DTERR_BAD_FORMAT, DTK_DATE, DTK_EARLY, DTK_EPOCH, DTK_LATE, DT_NOBEGIN,
     DT_NOEND, MIN_TIMESTAMP, POSTGRES_EPOCH_JDATE, SECS_PER_DAY, TIMESTAMP_END_JULIAN,
     UNIX_EPOCH_JDATE, USECS_PER_DAY, USECS_PER_SEC,
 };
-use types_error::{
+use ::types_error::{
     ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE,
 };
-use types_datetime::{fsec_t, DateADT, TimeADT, Timestamp, TimestampTz};
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_datetime::{fsec_t, DateADT, TimeADT, Timestamp, TimestampTz};
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use crate::calendar::{date2j, j2date, j2day};
 use crate::consts::DTK_DATE_M;
@@ -413,7 +413,7 @@ pub enum ExtractDateResult {
 ///
 /// `lowunits` must be the already-lowercased unit name.
 pub fn extract_date(lowunits: &str, date: DateADT) -> PgResult<ExtractDateResult> {
-    use types_datetime::{
+    use ::types_datetime::{
         DTK_CENTURY, DTK_DAY, DTK_DECADE, DTK_DOW, DTK_DOY, DTK_ISODOW, DTK_ISOYEAR, DTK_JULIAN,
         DTK_MILLENNIUM, DTK_MONTH, DTK_QUARTER, DTK_WEEK, DTK_YEAR, RESERV, UNITS, UNKNOWN_FIELD,
     };
@@ -551,11 +551,11 @@ pub(crate) fn datetime_parse_error_for(
     datatype: &str,
     extra: &::types_datetime::DateTimeErrorExtra,
 ) -> PgError {
-    use types_datetime::{
+    use ::types_datetime::{
         DTERR_BAD_TIMEZONE, DTERR_BAD_ZONE_ABBREV, DTERR_FIELD_OVERFLOW, DTERR_INTERVAL_OVERFLOW,
         DTERR_MD_FIELD_OVERFLOW, DTERR_TZDISP_OVERFLOW,
     };
-    use types_error::{
+    use ::types_error::{
         ERRCODE_CONFIG_FILE_ERROR, ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_INTERVAL_FIELD_OVERFLOW,
         ERRCODE_INVALID_DATETIME_FORMAT, ERRCODE_INVALID_PARAMETER_VALUE,
         ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,

@@ -41,7 +41,7 @@ mod views;
 use std::cell::RefCell;
 
 pub(crate) use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, SqlState, DEBUG2, ERRCODE_CONFIG_FILE_ERROR,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_REGULAR_EXPRESSION, LOG,
 };

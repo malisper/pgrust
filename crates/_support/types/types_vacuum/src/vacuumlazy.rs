@@ -8,7 +8,7 @@
 
 use alloc::vec::Vec;
 
-use types_core::{BlockNumber, Buffer, MultiXactId, OffsetNumber, Oid, TransactionId, XLogRecPtr};
+use ::types_core::{BlockNumber, Buffer, MultiXactId, OffsetNumber, Oid, TransactionId, XLogRecPtr};
 use ::types_storage::buf::BufferAccessStrategy;
 
 use crate::vacuum::VacuumCutoffs;

@@ -42,20 +42,20 @@
 //! [`typecmds_seams`] outward seams that panic until those
 //! unported owners land.
 
-use catalog_namespace::{
+use ::catalog_namespace::{
     QualifiedNameGetCreationNamespace, RangeVarAdjustRelationPersistence,
     RangeVarGetAndCheckCreationNamespace,
 };
 use ::pg_cast::CastCreate;
-use pg_enum::{AddEnumLabel, EnumValuesCreate, RenameEnumLabel};
+use ::pg_enum::{AddEnumLabel, EnumValuesCreate, RenameEnumLabel};
 use ::pg_range::RangeCreate;
-use pg_type::{
+use ::pg_type::{
     makeArrayTypeName, makeMultirangeTypeName, moveArrayTypeName, TypeCreate, TypeShellMake,
 };
-use utils_error::{ereport, ThrowErrorData};
-use mcx::{Mcx, MemoryContext};
+use ::utils_error::{ereport, ThrowErrorData};
+use ::mcx::{Mcx, MemoryContext};
 
-use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE, ACL_USAGE};
+use ::types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE, ACL_USAGE};
 use ::types_catalog::catalog::TYPE_RELATION_ID;
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
 use ::types_catalog::pg_type::{
@@ -64,7 +64,7 @@ use ::types_catalog::pg_type::{
 use ::types_core::catalog::{BTREE_AM_OID, INT4OID, INTERNALOID, OIDOID, PROCEDURE_RELATION_ID};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use ::types_error::pg_error::ErrorLocation;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE,
@@ -72,7 +72,7 @@ use types_error::{
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE, WARNING,
 };
 use ::nodes::parsenodes::OBJECT_FUNCTION;
-use parsenodes::{
+use ::parsenodes::{
     DefElem, Node, TypeName, COERCION_CODE_EXPLICIT, COERCION_METHOD_FUNCTION,
     PROVOLATILE_IMMUTABLE, PROVOLATILE_VOLATILE,
 };
@@ -82,7 +82,7 @@ use ::types_tuple::heaptuple::{
     TYPSTORAGE_PLAIN,
 };
 use ::types_core::catalog::BOOTSTRAP_SUPERUSERID;
-use parsenodes::{FUNC_PARAM_VARIADIC, PROKIND_FUNCTION, PROPARALLEL_SAFE};
+use ::parsenodes::{FUNC_PARAM_VARIADIC, PROKIND_FUNCTION, PROPARALLEL_SAFE};
 
 /// `INTERNALlanguageId` (`catalog/pg_language_d.h`) — the OID of the `internal`
 /// language, used for the range/multirange constructor functions.
@@ -95,19 +95,19 @@ const F_FMGR_INTERNAL_VALIDATOR: Oid = 2246;
 
 use typecmds_seams as me;
 
-use aclchk_seams::{aclcheck_error, object_aclcheck};
+use ::aclchk_seams::{aclcheck_error, object_aclcheck};
 use ::define_seams::DefElemArg;
 use ::coerce_seams::is_binary_coercible;
 use ::format_type_seams::format_type_be_owned;
-use miscinit_seams::{get_user_id, superuser};
+use ::miscinit_seams::{get_user_id, superuser};
 
-use binary_upgrade_seams::{consume_next_pg_type_oid, is_binary_upgrade};
-use functioncmds_seams::{
+use ::binary_upgrade_seams::{consume_next_pg_type_oid, is_binary_upgrade};
+use ::functioncmds_seams::{
     aclcheck_error_schema, func_signature_string, get_func_name, lookup_func_name,
     name_list_to_string, namespace_aclcheck,
 };
 use ::opclasscmds_seams::get_opclass_oid;
-use lsyscache_seams::{
+use ::lsyscache_seams::{
     func_volatile, get_default_opclass, get_func_rettype, get_multirange_range,
     get_namespace_name, get_opclass_input_type, get_range_multirange, get_rel_relkind,
     get_typcollation, get_typisdefined, get_typlen, get_typlenbyvalalign, get_typtype,

@@ -7,7 +7,7 @@ use ::mcx::PgString;
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_storage::sinval::{SharedInvalMessages, SharedInvalidationMessage};
-use wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{DecodedXLogRecord, XLR_INFO_MASK};
 use ::xlog_records::standbydefs::{xl_invalidations, xl_running_xacts, xl_standby_locks};
 
 // storage/standbydefs.h

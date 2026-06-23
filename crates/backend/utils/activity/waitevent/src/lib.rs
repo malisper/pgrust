@@ -43,16 +43,16 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use ipc_shmem::{ShmemInitHash, ShmemInitStruct};
+use ::ipc_shmem::{ShmemInitHash, ShmemInitStruct};
 use ::lmgr_seams::get_lock_name_from_tag_type;
-use lwlock_seams::{get_lwlock_identifier, lwlock_acquire_main};
-use s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
-use utils_error::{elog, ereport};
-use dynahash_seams::{
+use ::lwlock_seams::{get_lwlock_identifier, lwlock_acquire_main};
+use ::s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
+use ::utils_error::{elog, ereport};
+use ::dynahash_seams::{
     hash_estimate_size, hash_get_num_entries, hash_search, hash_seq_init, hash_seq_search,
 };
-use types_core::{uint16, uint32, Size};
-use types_error::{
+use ::types_core::{uint16, uint32, Size};
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INTERNAL_ERROR,
     ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
@@ -65,7 +65,7 @@ use ::types_pgstat::wait_event::{
     WAIT_EVENT_CLASS_MASK, WAIT_EVENT_CUSTOM_HASH_INIT_SIZE, WAIT_EVENT_CUSTOM_HASH_MAX_SIZE,
     WAIT_EVENT_CUSTOM_INITIAL_ID, WAIT_EVENT_ID_MASK,
 };
-use types_storage::{LW_EXCLUSIVE, LW_SHARED, WAIT_EVENT_CUSTOM_LOCK};
+use ::types_storage::{LW_EXCLUSIVE, LW_SHARED, WAIT_EVENT_CUSTOM_LOCK};
 
 const SRCFILE: &str = "wait_event.c";
 

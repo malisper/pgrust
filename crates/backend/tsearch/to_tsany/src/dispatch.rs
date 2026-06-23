@@ -36,13 +36,13 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use ::define_seams::DefElemArg;
-use parse_seams::{DictSubState, LexizeLexeme};
+use ::parse_seams::{DictSubState, LexizeLexeme};
 use lsyscache_seams as lsyscache;
 use ts_cache as ts_cache;
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
-use tsearch::{OwnedTSLexeme, TSLexeme, ThesaurusSubState};
+use ::types_error::{PgError, PgResult};
+use ::tsearch::{OwnedTSLexeme, TSLexeme, ThesaurusSubState};
 
 /// `cfg->lenmap` (ts_parse.c): the length of configuration `cfg_id`'s
 /// token-type -> dictionary map.
@@ -276,7 +276,7 @@ mod thesaurus_cache {
     use core::cell::RefCell;
 
     use ::define_seams::DefElemArg;
-    use mcx::{Mcx, McxOwned, MemoryContext};
+    use ::mcx::{Mcx, McxOwned, MemoryContext};
     use ::types_error::PgResult;
     use ::tsearch::DictThesaurus;
 

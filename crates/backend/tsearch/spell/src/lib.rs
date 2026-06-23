@@ -48,13 +48,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::utils_error::ereport;
-use mcx::{Mcx, PgVec};
-use types_error::{
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{
     PgError, PgResult, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_REGULAR_EXPRESSION, ERROR,
 };
 
-pub use ispell_regis::{rs_compile, rs_execute, rs_is_regis, Regis, RegisNodeKind};
+pub use ::ispell_regis::{rs_compile, rs_execute, rs_is_regis, Regis, RegisNodeKind};
 
 mod build;
 mod normalize;

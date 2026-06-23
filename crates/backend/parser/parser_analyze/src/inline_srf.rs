@@ -30,15 +30,15 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::funcapi::TypeFuncClass;
 use ::nodes::nodes::{ntag, CmdType, Node};
 use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
 use ::nodes::primnodes::{CoercionForm, Expr, FuncExpr, ParamKind, TargetEntry};
 use ::nodes::rawnodes::RangeTblRef;
-use parsenodes::{CoercionContext, RawParseMode};
+use ::parsenodes::{CoercionContext, RawParseMode};
 
 use ::nodes_core::nodefuncs::expr_type;
 use clauses_seams as clauses_seam;

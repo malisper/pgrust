@@ -14,7 +14,7 @@
 //! `Vec<u8>`, `Mcx`/`PgString`, tuple returns) onto crypt's internal `&str` /
 //! `&mut Option<String>` API. The adapters are thin: no logic lives here.
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::authid::PasswordType;
 use ::types_error::PgResult;
 

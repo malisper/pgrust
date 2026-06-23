@@ -36,7 +36,7 @@ use ::pathnodes::optimizer_plan::{
     CostSelector, JoinCostWorkspace, JoinPathExtraData, SemiAntiJoinFactors,
 };
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     JoinType, NodeId, PathId, PathKey, PhInfoId, PlannerInfo, RelId, Relids, RinfoId,
     SpecialJoinInfo,
 };

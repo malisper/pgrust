@@ -1,7 +1,7 @@
 //! Hash executor-node lifecycle and the `MultiExec` build entry points.
 
-use mcx::{alloc_in, Mcx, PgBox};
-use types_error::{PgError, PgResult};
+use ::mcx::{alloc_in, Mcx, PgBox};
+use ::types_error::{PgError, PgResult};
 use ::nodes::execnodes::{EStateData, PlanStateData};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
 use ::nodes::nodehash::{

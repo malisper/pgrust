@@ -4,12 +4,12 @@
 //! Ported from `src/backend/libpq/hba.c` (lines 1327-2524).
 
 use ::ifaddr::AddressFamily;
-use types_error::{ErrorLevel, PgResult};
-use net::{
+use ::types_error::{ErrorLevel, PgResult};
+use ::net::{
     clientCertCA, clientCertCN, clientCertDN, clientCertFull, ctHost, ctHostGSS, ctHostNoGSS,
     ctHostNoSSL, ctHostSSL, ctLocal, ipCmpAll, ipCmpMask, ipCmpSameHost, ipCmpSameNet, HbaLine,
 };
-use types_core::{
+use ::types_core::{
     uaBSD, uaCert, uaGSS, uaIdent, uaLDAP, uaMD5, uaOAuth, uaPAM, uaPassword, uaPeer, uaRADIUS,
     uaReject, uaSCRAM, uaSSPI, uaTrust,
 };

@@ -12,7 +12,7 @@
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use opclass::{AlterOpFamilyStmt, CreateOpClassStmt, CreateOpFamilyStmt, OpFamilyMember};
+use ::opclass::{AlterOpFamilyStmt, CreateOpClassStmt, CreateOpFamilyStmt, OpFamilyMember};
 
 seam_core::seam!(
     /// `EventTriggerCollectSimpleCommand(address, secondaryObject, (Node *) stmt)`

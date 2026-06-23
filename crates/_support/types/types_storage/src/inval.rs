@@ -7,7 +7,7 @@
 //! `Form_pg_class` fields / catcache-invalidation callback arguments — not
 //! opaque handles.
 
-use types_core::{uint32, Oid};
+use ::types_core::{uint32, Oid};
 
 /// The two `Form_pg_class` fields `inval.c` reads via `GETSTRUCT` when a
 /// `pg_class` tuple drives a relcache invalidation: the relation's OID and

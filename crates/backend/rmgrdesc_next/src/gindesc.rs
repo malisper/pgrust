@@ -3,7 +3,7 @@
 use crate::{appendf, u16_at, u8_at};
 use ::mcx::PgString;
 use ::types_error::PgResult;
-use wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{DecodedXLogRecord, XLR_INFO_MASK};
 use ::xlog_records::ginxlog::{ginxlogDeleteListPages, ginxlogInsert,
                                   ginxlogInsertDataInternal, ginxlogInsertEntry,
                                   ginxlogRecompressDataLeaf, ginxlogSplit, GinPostingList,

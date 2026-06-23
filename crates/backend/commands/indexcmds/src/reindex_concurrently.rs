@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::utils_error::ereport;
 use ::types_storage::lock::LOCKTAG;
 
@@ -36,9 +36,9 @@ use ::types_tuple::access::{
     RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
 
-use misc_guc::{at_eoxact_guc, NewGUCNestLevel};
+use ::misc_guc::{at_eoxact_guc, NewGUCNestLevel};
 use ::guc_seams::restrict_search_path;
-use miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
+use ::miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
 
 use indexam_seams as indexam_seam;
 use table_seams as table_seam;
@@ -53,7 +53,7 @@ use relcache_seams as relcache_seam;
 use snapmgr_seams as snapmgr_seam;
 use transam_xact_seams as xact_seam;
 
-use types_cluster::{REINDEXOPT_MISSING_OK, REINDEXOPT_VERBOSE};
+use ::types_cluster::{REINDEXOPT_MISSING_OK, REINDEXOPT_VERBOSE};
 
 use crate::choosers::ChooseRelationName;
 use crate::{elog_error, here, ReindexParams, WaitForOlderSnapshots};

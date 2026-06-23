@@ -37,13 +37,13 @@ use lwlock_seams as lwlock;
 use ::init_small_seams::my_proc_number;
 use dsa_seams as dsa;
 use hashfn_seams as hashfn;
-use types_core::{ProcNumber, Size};
-use types_error::{PgError, PgResult};
-use execparallel::{
+use ::types_core::{ProcNumber, Size};
+use ::types_error::{PgError, PgResult};
+use ::execparallel::{
     DsaPointer, DSA_ALLOC_HUGE, DSA_ALLOC_NO_OOM, DSA_ALLOC_ZERO, INVALID_DSA_POINTER,
 };
 use ::types_error::ERRCODE_OUT_OF_MEMORY;
-use types_storage::{
+use ::types_storage::{
     dshash_table_handle, DsaArea, DshashKeyKind, DshashParameters, LWLock, LWLockMode, LW_EXCLUSIVE,
     LW_SHARED,
 };

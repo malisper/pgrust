@@ -26,13 +26,13 @@
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
-use types_core::{
+use ::types_core::{
     init::BackendType, pg_time_t, uint32, uint8, InvalidOid, Oid, ProcNumber, ProtocolVersion,
     TimestampTz, DATEORDER_MDY, INTSTYLE_POSTGRES, INVALID_PROC_NUMBER, MAXPGPATH,
     MAX_CANCEL_KEY_LENGTH, PG_DIR_MODE_OWNER, USE_ISO_DATES,
 };
 pub use ::types_core::pid_t;
-use net::{ClientSocket, Port};
+use ::net::{ClientSocket, Port};
 use ::types_storage::latch::Latch;
 
 /// One backend-private scalar global: a `thread_local!` `Cell` plus a getter

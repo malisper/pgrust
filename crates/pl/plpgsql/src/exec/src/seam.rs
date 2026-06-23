@@ -20,7 +20,7 @@
 use ::types_core::Oid;
 use ::datum::Datum;
 use ::types_error::PgResult;
-use plpgsql::{
+use ::plpgsql::{
     int32, ExprContext, PLpgSQL_datum, PLpgSQL_datum_type, PLpgSQL_execstate, PLpgSQL_expr,
     PLpgSQL_var,
 };

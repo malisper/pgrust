@@ -40,14 +40,14 @@
 
 use alloc::boxed::Box;
 
-use mcx::{alloc_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::jointype::JoinType;
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::primnodes::{Expr, SubLinkType};
 use ::nodes::rawnodes::FromExpr;
-use pathnodes::{Bitmapset, PlannerInfo, Relids};
+use ::pathnodes::{Bitmapset, PlannerInfo, Relids};
 
 use ::nodes_core::makefuncs::make_andclause;
 use nodeFuncs_seams as nodefuncs;

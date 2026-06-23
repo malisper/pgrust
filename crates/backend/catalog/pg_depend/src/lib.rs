@@ -23,7 +23,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
 use ::types_catalog::catalog::{
     CONSTRAINT_RELATION_ID, EXTENSION_RELATION_ID, RELATION_RELATION_ID, RELKIND_SEQUENCE,
     TYPE_RELATION_ID,
@@ -38,7 +38,7 @@ use ::types_catalog::catalog_dependency::{
 };
 use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use ::types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERROR,
 };

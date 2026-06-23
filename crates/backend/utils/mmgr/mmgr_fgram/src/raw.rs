@@ -3,8 +3,8 @@ use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CString};
 use std::ptr::{self, NonNull};
 
-use error_fgram::{PgError, PgResult};
-use pg_ffi_fgram::{
+use ::error_fgram::{PgError, PgResult};
+use ::pg_ffi_fgram::{
     MemoryChunk, MemoryContext, MemoryContextCallback, MemoryContextCounters, MemoryContextData,
     MemoryContextMethodID, MemoryContextMethods, NodeTag, Size, MAX_ALLOC_HUGE_SIZE,
     MAX_ALLOC_SIZE, MCTX_ALIGNED_REDIRECT_ID, MCTX_ASET_ID, MCTX_BUMP_ID, MCTX_GENERATION_ID,

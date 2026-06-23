@@ -13,7 +13,7 @@
 
 use std::sync::Once;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::adt_jsonb::jsonb_out;
 use ::jsonb_util::JsonbValueToJsonb;

@@ -58,23 +58,23 @@
 use std::cell::RefCell;
 use std::sync::atomic::AtomicU32;
 
-use mcx::{Mcx, MemoryContext, PgBox};
-use types_error::{PgResult, ERROR};
+use ::mcx::{Mcx, MemoryContext, PgBox};
+use ::types_error::{PgResult, ERROR};
 use ::utils_error::ereport;
 use ::types_storage::storage::{dsm_handle, shm_toc_estimator, DSM_HANDLE_INVALID};
-use types_storage::{
+use ::types_storage::{
     dshash_table_handle, DsaArea, DshashKeyKind, DshashParameters, DshashTable,
     LWTRANCHE_PER_SESSION_DSA, LWTRANCHE_PER_SESSION_RECORD_TYPE,
     LWTRANCHE_PER_SESSION_RECORD_TYPMOD,
 };
-use execparallel::{DsmSegmentHandle, SerializeCursor};
+use ::execparallel::{DsmSegmentHandle, SerializeCursor};
 use ::types_tuple::heaptuple::TupleDescData;
 
 use ::dsm_core::dsm::{
     self, dsm_segment_address, dsm_segment_handle, DsmSegment, DsmSegmentId,
     DSM_CREATE_NULL_IF_MAXSEGMENTS,
 };
-use shm_toc::{
+use ::shm_toc::{
     shm_toc_estimate, shm_toc_estimate_chunk, shm_toc_estimate_keys,
     shm_toc_initialize_estimator, ShmToc,
 };

@@ -46,7 +46,7 @@ use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, ExprRelids};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     Bitmapset, PlannerInfo, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT,
     JOIN_RIGHT, JOIN_SEMI,
 };

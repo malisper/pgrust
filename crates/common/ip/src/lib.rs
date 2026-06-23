@@ -18,7 +18,7 @@
 use std::mem::{size_of, MaybeUninit};
 use std::ptr;
 
-use net::{AddrInfoHint, PgAddrInfo, SockAddr};
+use ::net::{AddrInfoHint, PgAddrInfo, SockAddr};
 
 /// `pg_getaddrinfo_all` — get address info for Unix, IPv4 and IPv6 sockets.
 ///

@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use latch::{my_latch, ResetLatch, SetLatch};
+use ::latch::{my_latch, ResetLatch, SetLatch};
 
 /// `SetLatch(MyLatch)` — wake the postmaster's main loop. A `None` `MyLatch`
 /// (the latch not yet initialized) is a no-op, matching the C handler running

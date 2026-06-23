@@ -23,7 +23,7 @@ use ::types_error::PgResult;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;
 
-use funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
+use ::funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
 use ::guc_funcs::PgSettingsRow;
 
 use crate::register_srf;

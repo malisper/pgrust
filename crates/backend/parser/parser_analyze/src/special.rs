@@ -9,7 +9,7 @@
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_CURSOR_DEFINITION, ERROR};
+use ::types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_CURSOR_DEFINITION, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{CmdType, Node};
 use ::nodes::parsestmt::{ParseExprKind, ParseState};

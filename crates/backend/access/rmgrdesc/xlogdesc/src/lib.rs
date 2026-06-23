@@ -42,9 +42,9 @@
 extern crate alloc;
 
 use ::mcx::PgString;
-use types_core::{uint8, TimestampTz, XLogRecPtr};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
-use wal::{
+use ::types_core::{uint8, TimestampTz, XLogRecPtr};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use ::wal::{
     xl_end_of_recovery, xl_overwrite_contrecord, xl_parameter_change, xl_restore_point, CheckPoint,
     DecodedXLogRecord, XLR_INFO_MASK,
 };

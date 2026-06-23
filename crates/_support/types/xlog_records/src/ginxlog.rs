@@ -4,7 +4,7 @@
 
 use crate::bytes::{block_id_at, bool_at, i32_at, item_pointer_at, u16_at, u32_at};
 use ::types_core::OffsetNumber;
-use types_tuple::{BlockIdData, ItemPointerData};
+use ::types_tuple::{BlockIdData, ItemPointerData};
 
 /// `ginxlogInsert`: `{uint16 flags;}` — the common head of all GIN insertion
 /// records. If the target is not a leaf, `BlockIdData[2]` children follow;

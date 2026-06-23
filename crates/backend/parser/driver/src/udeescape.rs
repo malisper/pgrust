@@ -5,9 +5,9 @@
 //! genuine external — `pg_unicode_to_server` (the code-point → server-encoding
 //! conversion owned by `utils/mb/mbutils.c`) — crosses the mb seam.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::PgWChar;
-use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
 
 use mbutils_seams as mb;
 

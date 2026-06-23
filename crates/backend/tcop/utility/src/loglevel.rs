@@ -1,7 +1,7 @@
 //! Log-statement-level derivation (`GetCommandLogLevel`, utility.c:3249-3769).
 
 use utility_out_seams as rt;
-use types_error::{PgResult, WARNING};
+use ::types_error::{PgResult, WARNING};
 use ::nodes::nodes::Node;
 use ::nodes::nodes::{CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_SELECT, CMD_UPDATE, CMD_UTILITY};
 

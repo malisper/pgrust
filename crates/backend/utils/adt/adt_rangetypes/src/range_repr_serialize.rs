@@ -25,8 +25,8 @@ use ::mcx::Mcx;
 use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::OidIsValid;
 use ::datum::datum::Datum;
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATA_EXCEPTION};
-use types_rangetypes::{
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATA_EXCEPTION};
+use ::types_rangetypes::{
     RangeBound, RangeType, RangeTypeP, RANGE_EMPTY, RANGE_LB_INC, RANGE_LB_INF, RANGE_UB_INC,
     RANGE_UB_INF,
 };

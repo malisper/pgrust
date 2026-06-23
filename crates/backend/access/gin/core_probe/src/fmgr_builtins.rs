@@ -32,7 +32,7 @@
 //! (every row is `proisstrict => 't'` and not `proretset`).
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// The shared fmgr-frame entry point for every GIN `anyarray_ops` support proc.
 /// In the owned model the GIN access method invokes these procs through the

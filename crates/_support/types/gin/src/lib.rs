@@ -35,10 +35,10 @@ use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid};
-use types_core::{InvalidOid, INDEX_MAX_KEYS};
+use ::types_core::{InvalidOid, INDEX_MAX_KEYS};
 use ::types_scan::scankey::StrategyNumber;
 use ::types_storage::storage::Buffer;
-use tidbitmap::{TBMPrivateIterator, TIDBitmap};
+use ::tidbitmap::{TBMPrivateIterator, TIDBitmap};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{ItemPointerData, TupleDesc};
 

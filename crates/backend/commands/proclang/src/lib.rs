@@ -22,17 +22,17 @@
 //! recording goes through the already-ported `backend-catalog-dependency` /
 //! `-pg-depend` / `-pg-shdepend` crates directly.
 
-use dependency::{
+use ::dependency::{
     add_exact_object_address, new_object_addresses, record_object_address_dependencies,
 };
-use pg_depend::{deleteDependencyRecordsFor, recordDependencyOnCurrentExtension};
+use ::pg_depend::{deleteDependencyRecordsFor, recordDependencyOnCurrentExtension};
 use ::pg_shdepend::recordDependencyOnOwner;
 
 use ::mcx::Mcx;
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 use ::types_catalog::pg_language::{LanguageRelationId, PgLanguageInsertRow};
-use types_core::{InvalidOid, Oid, OidIsValid, INTERNALOID, OIDOID, PROCEDURE_RELATION_ID};
-use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
+use ::types_core::{InvalidOid, Oid, OidIsValid, INTERNALOID, OIDOID, PROCEDURE_RELATION_ID};
+use ::types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use ::nodes::ddlnodes::CreatePLangStmt;
 use ::types_storage::lock::RowExclusiveLock;

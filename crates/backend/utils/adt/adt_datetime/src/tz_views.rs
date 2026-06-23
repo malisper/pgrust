@@ -16,7 +16,7 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use types_datetime::{fsec_t, pg_itm_in, Interval, USECS_PER_SEC};
+use ::types_datetime::{fsec_t, pg_itm_in, Interval, USECS_PER_SEC};
 use ::types_error::PgResult;
 use ::pgtime::pg_tm;
 
@@ -25,10 +25,10 @@ use crate::interval::itmin2interval;
 use crate::timestamp::timestamp2tm;
 use ::transam_xact::GetCurrentTransactionStartTimestamp;
 
-use localtime::{
+use ::localtime::{
     pg_get_next_timezone_abbrev, pg_get_timezone_name, pg_interpret_timezone_abbrev,
 };
-use timezone_pgtz::{pg_tzenumerate_next, pg_tzenumerate_start};
+use ::timezone_pgtz::{pg_tzenumerate_next, pg_tzenumerate_start};
 use ::state_pgtz::session_timezone;
 
 /// One row of `pg_timezone_names`: `(name text, abbrev text, utc_offset

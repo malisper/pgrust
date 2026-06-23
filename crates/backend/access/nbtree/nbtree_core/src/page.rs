@@ -33,15 +33,15 @@
 //! * `smgr` bulk-write for `build_empty_metapage` is fully wired (the bulkwrite
 //!   seam crate exists).
 
-use mcx::{vec_with_capacity_in, MemoryContext, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, MemoryContext, Mcx, PgVec};
 use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, InvalidBuffer, OffsetNumber, RmgrId, Size, TransactionId,
     BLCKSZ,
 };
 use ::types_core::xact::{FirstNormalFullTransactionId, FullTransactionId};
 use ::types_error::error::{DEBUG1, LOG};
-use types_error::{PgError, PgResult};
-use types_nbtree::{
+use ::types_error::{PgError, PgResult};
+use ::types_nbtree::{
     xl_btree_delete, xl_btree_mark_page_halfdead, xl_btree_metadata, xl_btree_newroot,
     xl_btree_unlink_page, xl_btree_vacuum, BTMetaPageData, BTPageOpaqueData, BTPendingFSM, BTStack,
     BTVacState, BTVacuumPosting, BTP_DELETED, BTP_HALF_DEAD, BTP_HAS_FULLXID, BTP_HAS_GARBAGE,
@@ -57,7 +57,7 @@ use ::types_storage::storage::Buffer;
 use ::types_tuple::heaptuple::{BlockIdData, IndexTupleData, IndexTupleSize, ItemPointerData};
 use ::wal::xloginsert::{REGBUF_STANDARD, REGBUF_WILL_INIT};
 
-use page::{
+use ::page::{
     PageGetContents, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageGetSpecialPointer,
     PageGetSpecialSize, PageInit, PageIsNew, PageMut, PageRef,
 };

@@ -46,8 +46,8 @@ mod tests;
 
 pub mod sha1;
 
-use md5::{md5_ctxt, md5_init, md5_loop, md5_pad, md5_result, MD5_DIGEST_LENGTH};
-use sha2::{
+use ::md5::{md5_ctxt, md5_init, md5_loop, md5_pad, md5_result, MD5_DIGEST_LENGTH};
+use ::sha2::{
     pg_sha224_ctx, pg_sha224_final, pg_sha224_init, pg_sha224_update, pg_sha256_ctx,
     pg_sha256_final, pg_sha256_init, pg_sha256_update, pg_sha384_ctx, pg_sha384_final,
     pg_sha384_init, pg_sha384_update, pg_sha512_ctx, pg_sha512_final, pg_sha512_init,
@@ -55,7 +55,7 @@ use sha2::{
     PG_SHA512_DIGEST_LENGTH,
 };
 use sha1::{pg_sha1_ctx, pg_sha1_final, pg_sha1_init, pg_sha1_update, SHA1_DIGEST_LENGTH};
-use types_core::{uint8, Size};
+use ::types_core::{uint8, Size};
 use ::crypto::pg_cryptohash_type::{
     self, PG_MD5, PG_SHA1, PG_SHA224, PG_SHA256, PG_SHA384, PG_SHA512,
 };

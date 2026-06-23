@@ -5,7 +5,7 @@
 use ::types_error::PgResult;
 use ::types_timeout::EnableTimeoutParams;
 use ::types_core::TimestampTz;
-use types_timeout::{TimeoutHandlerProc, TimeoutId};
+use ::types_timeout::{TimeoutHandlerProc, TimeoutId};
 
 seam_core::seam!(
     /// `enable_timeouts(timeouts, count)` — arm multiple timeouts at once.

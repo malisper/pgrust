@@ -22,9 +22,9 @@
 //! `pg_regerror`-formatted message (`regerror.c` owns the message table).
 
 use ::mcx::Mcx;
-use types_core::{Oid, PgWChar};
+use ::types_core::{Oid, PgWChar};
 use ::types_error::PgResult;
-use regex::{RegMatch, RegcompResult, RegexCompiled, RegexecResult, RegprefixResult};
+use ::regex::{RegMatch, RegcompResult, RegexCompiled, RegexecResult, RegprefixResult};
 
 seam_core::seam!(
     /// `pg_regcomp(re, string, len, flags, collation)` (regcomp.c), with the

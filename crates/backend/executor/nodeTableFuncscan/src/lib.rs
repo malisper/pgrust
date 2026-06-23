@@ -47,12 +47,12 @@ use fmgr_seams as fmgr;
 use init_small_seams as globals;
 use sort_storage_seams as tuplestore;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_tuple::heaptuple::Datum;
 use ::types_error::error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED};
-use types_error::{PgError, PgResult};
-use nodes::{
+use ::types_error::{PgError, PgResult};
+use ::nodes::{
     EStateData, EcxtId, SlotId, TableFuncRoutineKind, TableFuncScan, TableFuncScanState,
 };
 

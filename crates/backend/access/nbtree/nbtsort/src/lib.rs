@@ -60,10 +60,10 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber, Size, BLCKSZ};
-use types_error::{PgError, PgResult};
-use types_nbtree::{
+use ::types_error::{PgError, PgResult};
+use ::types_nbtree::{
     BTMetaPageData, BTPageOpaqueData, BTScanInsert, BTMaxItemSize, BTP_LEAF, BTP_META, BTP_ROOT,
     BTREE_DEFAULT_FILLFACTOR, BTREE_MAGIC, BTREE_METAPAGE, BTREE_NONLEAF_FILLFACTOR, BTREE_VERSION,
     BT_IS_POSTING, BT_OFFSET_MASK, BT_PIVOT_HEAP_TID_ATTR, INDEX_ALT_TID_MASK, P_FIRSTKEY, P_HIKEY,
@@ -75,7 +75,7 @@ use ::types_tuple::heaptuple::{
     IndexTupleData, IndexTupleSize, ItemPointerData, INDEX_SIZE_MASK, INVALID_OFFSET_NUMBER,
 };
 
-use page::{
+use ::page::{
     PageAddItemExtended, PageGetFreeSpace, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
     PageGetSpecialPointer, PageIndexTupleOverwrite, PageInit, PageMut, PageRef,
 };

@@ -10,7 +10,7 @@
 //! install the production panic-stubs and double-install the slots).
 
 use super::*;
-use misc_guc::{guc_check_error, reset_guc_check_error};
+use ::misc_guc::{guc_check_error, reset_guc_check_error};
 use std::cell::Cell;
 use std::sync::{Mutex, MutexGuard, Once};
 

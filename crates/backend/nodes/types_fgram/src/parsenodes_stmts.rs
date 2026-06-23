@@ -21,7 +21,7 @@
 
 use core::ffi::{c_char, c_int};
 
-use pg_ffi_fgram::{BitString, Boolean, Float, Integer, List, Node, NodeTag, Oid, StringNode};
+use ::pg_ffi_fgram::{BitString, Boolean, Float, Integer, List, Node, NodeTag, Oid, StringNode};
 
 use crate::primnodes::{CoercionForm, IntoClause, OverridingKind, ParseLoc, RangeVar};
 use crate::{Alias, WithClause};

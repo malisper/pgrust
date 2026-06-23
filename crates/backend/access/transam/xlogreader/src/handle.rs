@@ -38,7 +38,7 @@ use core::cell::RefCell;
 
 use ::mcx::MemoryContext;
 use ::types_core::primitive::XLogRecPtr;
-use types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
+use ::types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
 use ::wal::rmgr::XLogReaderState;
 use ::wal::xlog_consts::XLOG_BLCKSZ;
 

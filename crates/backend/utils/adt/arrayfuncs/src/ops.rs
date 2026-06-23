@@ -14,7 +14,7 @@
 use ::array::ArrayElementDatum;
 use ::types_core::Oid;
 use ::datum::datum::Datum;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_error::error::{ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_FUNCTION};
 
 use crate::foundation::{

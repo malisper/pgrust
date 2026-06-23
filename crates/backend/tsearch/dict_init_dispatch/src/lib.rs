@@ -22,9 +22,9 @@ use alloc::string::String;
 
 use ::define_seams::DefElemArg;
 use tsearchcmds_seams as ts_seams;
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 /// Builtin text-search template `init` method OIDs (`pg_proc.dat` /
 /// `catalog/pg_proc_d.h`). These are the only templates present in the

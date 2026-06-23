@@ -3,7 +3,7 @@
 use ::mcx::PgString;
 use ::types_core::uint8;
 use ::types_error::PgResult;
-use wal::{xl_relmap_update, DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{xl_relmap_update, DecodedXLogRecord, XLR_INFO_MASK};
 
 use crate::util::{appendf, record_truncated};
 

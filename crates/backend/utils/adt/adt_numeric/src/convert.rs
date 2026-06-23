@@ -14,11 +14,11 @@
 use alloc::string::String;
 use core::mem::size_of;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::datum::VARHDRSZ;
-use types_error::{PgError, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+use ::types_error::{PgError, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
 use ::types_numeric::var::{NumericSign, NumericVar};
-use types_numeric::{
+use ::types_numeric::{
     is_valid_numeric_typmod, numeric_digit_at, numeric_digits, numeric_dscale,
     numeric_header_is_short, numeric_is_special, numeric_ndigits, numeric_sign,
     numeric_typmod_precision, numeric_typmod_scale, numeric_weight, NumericChoice, NumericData,

@@ -9,7 +9,7 @@
 
 #![allow(non_snake_case)]
 
-use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
+use ::execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
 
 seam_core::seam!(
     /// `pcxt->nworkers` (access/parallel.h): the number of workers this

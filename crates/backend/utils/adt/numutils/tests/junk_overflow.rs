@@ -1,5 +1,5 @@
 use ::numutils_fgram::pg_strtoint16;
-use types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+use ::types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
 
 // C numutils.c gives invalid_syntax for these (trailing junk seen after the
 // per-digit guard tmp > -(MIN/base) admits tmp up to 32769).

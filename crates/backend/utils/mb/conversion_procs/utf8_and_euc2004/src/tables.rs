@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 use ::types_wchar::pg_mb_radix_tree;
-use types_wchar::{pg_local_to_utf_combined, pg_utf_to_local_combined};
+use ::types_wchar::{pg_local_to_utf_combined, pg_utf_to_local_combined};
 
 
 // Generated from postgres-18.3/src/backend/utils/mb/Unicode/*.map.

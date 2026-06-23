@@ -3,9 +3,9 @@
 //! enough to body-port independently of the rest of the node lifecycle.
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
-use nodes::{EStateData, ModifyTableState, RriId, SlotId};
+use ::nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use ::types_tuple::access::{
     RELKIND_MATVIEW, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION,
 };

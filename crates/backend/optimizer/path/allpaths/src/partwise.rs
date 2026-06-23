@@ -5,9 +5,9 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId, RELOPT_JOINREL, RELOPT_OTHER_JOINREL};
+use ::pathnodes::{PlannerInfo, RelId, RELOPT_JOINREL, RELOPT_OTHER_JOINREL};
 
-use joinrels::{is_dummy_rel, mark_dummy_rel};
+use ::joinrels::{is_dummy_rel, mark_dummy_rel};
 use pathnode_seams as pathnode;
 use postgres_seams as tcop;
 

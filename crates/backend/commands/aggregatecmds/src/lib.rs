@@ -21,31 +21,31 @@ use ::mcx::Mcx;
 
 use ::utils_error::ereport;
 use ::types_error::pg_error::ErrorLocation;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_SYNTAX_ERROR, ERROR, WARNING,
 };
 
 use ::catalog_namespace::QualifiedNameGetCreationNamespace;
-use define::{
+use ::define::{
     defGetBoolean, defGetInt32, defGetQualifiedName, defGetString, defGetTypeName,
 };
 use ::functioncmds::interpret_function_parameter_list;
 
-use aclchk_seams::{aclcheck_error, object_aclcheck};
-use pg_aggregate_seams::{aggregate_create, AggregateCreateArgs};
-use parse_type_seams::{typename_to_string, typename_type_id_node};
+use ::aclchk_seams::{aclcheck_error, object_aclcheck};
+use ::pg_aggregate_seams::{aggregate_create, AggregateCreateArgs};
+use ::parse_type_seams::{typename_to_string, typename_type_id_node};
 use ::format_type_seams::format_type_be;
-use lsyscache_seams::{get_namespace_name, get_type_input_info, get_typtype};
+use ::lsyscache_seams::{get_namespace_name, get_type_input_info, get_typtype};
 use ::fmgr_seams::oid_input_function_call;
-use miscinit_seams::{get_user_id, superuser};
+use ::miscinit_seams::{get_user_id, superuser};
 
-use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE};
+use ::types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE};
 use ::types_catalog::catalog::NAMESPACE_RELATION_ID;
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::types_core::catalog::INTERNALOID;
 use ::nodes::parsenodes::OBJECT_SCHEMA;
-use parsenodes::{
+use ::parsenodes::{
     DefElem, Node, ParseState, TypeName, AGGKIND_HYPOTHETICAL, AGGKIND_NORMAL,
     AGGKIND_ORDERED_SET, AGGMODIFY_READ_ONLY, AGGMODIFY_READ_WRITE, AGGMODIFY_SHAREABLE,
     PROPARALLEL_RESTRICTED, PROPARALLEL_SAFE, PROPARALLEL_UNSAFE, TYPTYPE_PSEUDO,

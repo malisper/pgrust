@@ -52,13 +52,13 @@
 
 use core::cell::Cell;
 
-use types_core::{ProcNumber, TimestampTz, XLogRecPtr, InvalidXLogRecPtr, INVALID_PROC_NUMBER};
-use types_error::{PgError, PgResult};
+use ::types_core::{ProcNumber, TimestampTz, XLogRecPtr, InvalidXLogRecPtr, INVALID_PROC_NUMBER};
+use ::types_error::{PgError, PgResult};
 use ::types_pgstat::wait_event::{WAIT_EVENT_BGWRITER_HIBERNATE, WAIT_EVENT_BGWRITER_MAIN};
 use ::types_startup::StartupData;
 use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 
-use bufmgr::{
+use ::bufmgr::{
     writeback_context_init, BgBufferSyncState, BufferManager, WritebackContext,
 };
 
@@ -476,7 +476,7 @@ pub fn init_seams() {
     // SET / SIGHUP reload reaches it, and install the buffer-manager consumer
     // seam (`BgBufferSync` scan-pace math, buf_flush.rs) that reads the same.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::BgWriterDelay.install(GucVarAccessors {
             get: BgWriterDelay,
             set: set_BgWriterDelay,

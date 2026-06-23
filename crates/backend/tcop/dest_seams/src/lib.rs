@@ -16,7 +16,7 @@ use ::types_dest::CommandDest;
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
-use portal::{CommandTag, QueryCompletion};
+use ::portal::{CommandTag, QueryCompletion};
 use ::types_tuple::heaptuple::TupleDescData;
 
 seam_core::seam!(

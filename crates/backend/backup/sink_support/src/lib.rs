@@ -50,7 +50,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use sink::{
+use ::sink::{
     bbsink_forward_archive_contents, bbsink_forward_begin_archive, bbsink_forward_begin_backup,
     bbsink_forward_begin_manifest, bbsink_forward_cleanup, bbsink_forward_end_archive,
     bbsink_forward_end_backup, bbsink_forward_end_manifest, bbsink_forward_manifest_contents,

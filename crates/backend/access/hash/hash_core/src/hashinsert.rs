@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::OffsetNumber;
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::hash::hashpage::{
     H_BUCKET_BEING_SPLIT, H_HAS_DEAD_TUPLES, HASH_METAPAGE, HASH_NOLOCK, HASH_WRITE,
     LH_BUCKET_PAGE, LH_META_PAGE, LH_OVERFLOW_PAGE, LH_PAGE_HAS_DEAD_TUPLES, LH_PAGE_TYPE,
@@ -25,7 +25,7 @@ use xloginsert_seams as xloginsert;
 use bufmgr_seams as bufmgr;
 use predicate_seams as predicate;
 
-use page::{
+use ::page::{
     ItemIdIsDead, PageAddItemExtended, PageGetFreeSpace, PageGetItemId, PageGetMaxOffsetNumber,
     PageIndexMultiDelete, PageMut, PageRef,
 };

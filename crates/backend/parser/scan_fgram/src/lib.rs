@@ -34,10 +34,10 @@
 pub mod tokens;
 
 use ::scansup_fgram::scanner_isspace;
-use error_fgram::{PgError, PgResult};
-use mb_fgram::{pg_get_client_encoding, pg_verifymbstr};
+use ::error_fgram::{PgError, PgResult};
+use ::mb_fgram::{pg_get_client_encoding, pg_verifymbstr};
 use ::pg_ffi_fgram::error::make_sqlstate;
-use pg_ffi_fgram::{SqlState, ERRCODE_FEATURE_NOT_SUPPORTED, PG_ENCODING_IS_CLIENT_ONLY};
+use ::pg_ffi_fgram::{SqlState, ERRCODE_FEATURE_NOT_SUPPORTED, PG_ENCODING_IS_CLIENT_ONLY};
 
 /// `ERRCODE_INVALID_ESCAPE_SEQUENCE` (utils/errcodes.txt: `22025`). Not yet
 /// re-exported by the shared error crate.

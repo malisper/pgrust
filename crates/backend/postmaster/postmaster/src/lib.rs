@@ -218,7 +218,7 @@ pub fn init_seams() {
 /// `char *bonjour_name` (postmaster.c:246, boot_val `""`). Process-private
 /// backing cells; the GUC engine reads/writes them through these accessors.
 fn install_bonjour_gucs() {
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
     use std::cell::{Cell, RefCell};
 
     thread_local! {

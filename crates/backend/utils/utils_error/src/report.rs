@@ -8,7 +8,7 @@ use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ::types_dest::CommandDest;
-use types_error::{
+use ::types_error::{
     unpack_sqlstate, ErrorLevel, PGErrorVerbosity, PgError, PgResult, SqlState, DEBUG1, DEBUG2,
     DEBUG3, DEBUG4, DEBUG5, ERROR, FATAL, INFO, LOG, LOG_DESTINATION_CSVLOG,
     LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG, LOG_SERVER_ONLY,
@@ -803,7 +803,7 @@ fn send_field(buf: &mut Vec<u8>, code: ::types_error::ErrorField, value: &str) {
 /// `send_message_to_frontend` — write the error report to the client over the
 /// FE/BE protocol ('N' for nonfatal conditions, 'E' for errors).
 pub fn send_message_to_frontend(edata: &PgError) {
-    use types_error::{
+    use ::types_error::{
         PG_DIAG_COLUMN_NAME, PG_DIAG_CONSTRAINT_NAME, PG_DIAG_CONTEXT, PG_DIAG_DATATYPE_NAME,
         PG_DIAG_INTERNAL_POSITION, PG_DIAG_INTERNAL_QUERY, PG_DIAG_MESSAGE_DETAIL,
         PG_DIAG_MESSAGE_HINT, PG_DIAG_MESSAGE_PRIMARY, PG_DIAG_SCHEMA_NAME, PG_DIAG_SEVERITY,

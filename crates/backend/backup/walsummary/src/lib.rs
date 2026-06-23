@@ -55,13 +55,13 @@
 //! the caller to the matching `FileClose` ([`wal_summary_reader_file_close`]),
 //! so no side registry is needed.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::utils_error::ereport;
 use ::utils_error::errno::sqlstate_for_file_access;
 use ::types_blkreftable::BlockRefTableReader;
-use types_core::{InvalidXLogRecPtr, TimeLineID, XLogRecPtr};
-use types_error::{ErrorLocation, PgError, PgResult, DEBUG2};
+use ::types_core::{InvalidXLogRecPtr, TimeLineID, XLogRecPtr};
+use ::types_error::{ErrorLocation, PgError, PgResult, DEBUG2};
 use ::types_pgstat::wait_event::{WAIT_EVENT_WAL_SUMMARY_READ, WAIT_EVENT_WAL_SUMMARY_WRITE};
 use ::types_storage::file::File;
 use ::types_walsummarizer::WalSummaryFile;

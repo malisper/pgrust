@@ -19,7 +19,7 @@
 use core::cell::RefCell;
 use std::thread_local;
 
-use mcx::{McxOwned, MemoryContext, PgBox, PgVec};
+use ::mcx::{McxOwned, MemoryContext, PgBox, PgVec};
 use cache::catcache::CacheIdx;
 use ::types_core::Oid;
 use ::types_core::catalog::{C_COLLATION_OID, OIDOID};

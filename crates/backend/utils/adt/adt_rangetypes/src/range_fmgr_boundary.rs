@@ -18,12 +18,12 @@
 //! or — where no compatible seam exists yet — by a loud owner-named panic
 //! (`AggCheckCallContext`), the sanctioned seam-and-panic for an unported dep.
 
-use fmgr_core::{get_fn_expr_argtype, get_fn_expr_rettype};
+use ::fmgr_core::{get_fn_expr_argtype, get_fn_expr_rettype};
 use ::mcx::Mcx;
 use ::datum::Datum;
-use types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
 use ::fmgr::FunctionCallInfoBaseData;
-use types_rangetypes::{
+use ::types_rangetypes::{
     RangeBound, RangeType, RangeTypeP, RANGE_EMPTY, RANGE_LB_INC, RANGE_LB_INF, RANGE_UB_INC,
     RANGE_UB_INF,
 };

@@ -17,7 +17,7 @@
 //! primitive (`::types_parallel::shared_dsm_object::place_flex`/`attach_flex`), so
 //! `SharedHashInfo` lives DIRECTLY in the segment that every worker maps.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 use ::nodes::nodehash::{
     HashInstrumentSlot, HashInstrumentation, HashJoinTableData, HashState, SharedHashInfo,

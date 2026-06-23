@@ -7,9 +7,9 @@
 //! converter (allocating `rolename` into the target context) bridges them, and
 //! thin adapters wrap the bare-value / `String` results to the seam surface.
 
-use mcx::{Mcx, MemoryContext, PgString};
-use authid::{AuthIdForm, AuthMemForm};
-use cache::{AuthIdRow, AuthMembersFullRow};
+use ::mcx::{Mcx, MemoryContext, PgString};
+use ::authid::{AuthIdForm, AuthMemForm};
+use ::cache::{AuthIdRow, AuthMembersFullRow};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 

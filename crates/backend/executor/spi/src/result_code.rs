@@ -1,6 +1,6 @@
 //! SPI result codes (`spi.h`) and `SPI_result_code_string` (`spi.c`).
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_error::PgResult;
 
 // --- SPI result/error codes (`include/executor/spi.h`) ---

@@ -29,16 +29,16 @@
 #![allow(non_snake_case)]
 
 use ::utils_error::ereport;
-use hashfn::{hash_bytes, hash_bytes_extended, hash_bytes_uint32};
+use ::hashfn::{hash_bytes, hash_bytes_extended, hash_bytes_uint32};
 use ::mcx::Mcx;
-use types_datetime::{
+use ::types_datetime::{
     Interval, TimestampTz, POSTGRES_EPOCH_JDATE, SECS_PER_DAY, UNIX_EPOCH_JDATE, USECS_PER_SEC,
 };
 use ::datum::Bytea;
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INTERNAL_ERROR,
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERROR};
 use ::stringinfo::StringInfo;
-use types_uuid::{pg_uuid_t, uuid_sortsupport_state, UUID_LEN};
+use ::types_uuid::{pg_uuid_t, uuid_sortsupport_state, UUID_LEN};
 
 use timestamp_seams as timestamp_seam;
 use pg_strong_random_seams as port_seam;

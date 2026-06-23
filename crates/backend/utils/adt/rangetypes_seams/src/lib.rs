@@ -10,7 +10,7 @@ use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::Oid;
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
-use types_rangetypes::{RangeBound, RangeTypeP};
+use ::types_rangetypes::{RangeBound, RangeTypeP};
 // Canonical unified value (the Datum-unification keystone): a by-reference
 // `RangeType` array element rides the `Datum::ByRef` arm verbatim.
 use types_tuple::heaptuple::Datum as DatumV;

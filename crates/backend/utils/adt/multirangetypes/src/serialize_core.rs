@@ -19,14 +19,14 @@ use ::mcx::Mcx;
 use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::Oid;
 use ::datum::datum::Datum;
-use types_error::{PgError, PgResult};
-use types_rangetypes::{
+use ::types_error::{PgError, PgResult};
+use ::types_rangetypes::{
     MultirangeType, MultirangeTypeP, RangeBound, RangeType, RangeTypeP, RANGE_EMPTY, RANGE_LB_INC,
     RANGE_LB_INF, RANGE_LB_NULL, RANGE_UB_INC, RANGE_UB_INF, RANGE_UB_NULL,
 };
 
 use rangetypes_seams as range_seams;
-use rangetypes_seams::{
+use ::rangetypes_seams::{
     make_empty_range, make_range, range_adjacent_internal, range_before_internal, range_compare,
     range_union_internal,
 };

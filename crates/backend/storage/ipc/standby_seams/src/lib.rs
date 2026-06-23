@@ -8,7 +8,7 @@
 #![allow(non_snake_case)]
 
 use ::types_core::xact::FullTransactionId;
-use types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::{Oid, TimestampTz, TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
 use ::types_storage::SharedInvalidationMessage;
 use ::types_storage::lock::LOCKTAG;

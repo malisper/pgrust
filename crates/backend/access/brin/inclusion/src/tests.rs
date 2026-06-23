@@ -183,7 +183,7 @@ fn index_tupdesc<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> ::mcx::PgBox<'mcx, Tuple
 }
 
 fn make_index_rel<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> ::rel::Relation<'mcx> {
-    use rel::{FormData_pg_class, RelationData};
+    use ::rel::{FormData_pg_class, RelationData};
     use ::types_storage::RelFileLocator;
     let mut rd_opfamily = ::mcx::PgVec::new_in(mcx);
     for _ in 0..natts {

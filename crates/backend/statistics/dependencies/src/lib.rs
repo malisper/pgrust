@@ -41,8 +41,8 @@
 
 use ::mcx::Mcx;
 use ::types_core::AttrNumber;
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
-use statistics::{
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::statistics::{
     MVDependencies, MVDependency, StatsBuildData, STATS_DEPS_MAGIC, STATS_DEPS_TYPE_BASIC,
     STATS_MAX_DIMENSIONS,
 };

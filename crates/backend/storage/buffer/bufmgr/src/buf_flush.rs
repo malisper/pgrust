@@ -32,13 +32,13 @@
 use core::cmp::Ordering as CmpOrdering;
 
 use ::types_core::primitive::{BlockNumber, Buffer, ForkNumber, Oid, BLCKSZ};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::buf::{
     buftag, BM_CHECKPOINT_NEEDED, BM_DIRTY, BM_IO_IN_PROGRESS, BM_JUST_DIRTIED, BM_PERMANENT,
     BM_VALID,
 };
 use ::types_storage::storage::LWLockMode;
-use types_storage::{RelFileLocator, RelFileLocatorBackend};
+use ::types_storage::{RelFileLocator, RelFileLocatorBackend};
 
 use bufmgr_seams as sb;
 use lwlock as lwlock;

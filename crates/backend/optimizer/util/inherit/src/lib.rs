@@ -38,12 +38,12 @@ use ::mcx::Mcx;
 use ::types_core::primitive::{Index, InvalidAttrNumber};
 use ::types_core::catalog::OIDOID;
 use ::types_core::InvalidOid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodelockrows::{PlanRowMark, RowMarkType, ROW_MARK_COPY};
 use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use pathnodes::{
+use ::pathnodes::{
     AppendRelInfo, NodeId, PlanRowMarkId, PlannerInfo, RelId, Relids,
 };
 use ::rel::Relation;
@@ -54,8 +54,8 @@ use ::types_tuple::heaptuple::{
 };
 
 use ::nodes_core::makefuncs;
-use appendinfo::{adjust_appendrel_attrs_in, make_append_rel_info};
-use relnode::{build_simple_rel, expand_planner_arrays};
+use ::appendinfo::{adjust_appendrel_attrs_in, make_append_rel_info};
+use ::relnode::{build_simple_rel, expand_planner_arrays};
 use relnode_seams as bms;
 
 use table_seams as tbl;

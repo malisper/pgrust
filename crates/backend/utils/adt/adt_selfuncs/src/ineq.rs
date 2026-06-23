@@ -16,7 +16,7 @@ use ::datum::datum::Datum;
 use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
 use ::pathnodes::PlannerInfo;
-use types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES};
+use ::types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES};
 
 use lsyscache_seams as lsc;
 use fmgr_seams as fmgr;

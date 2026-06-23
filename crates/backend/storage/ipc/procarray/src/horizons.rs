@@ -16,7 +16,7 @@
 
 use std::cell::RefCell;
 
-use types_core::{
+use ::types_core::{
     FullTransactionId, GlobalVisStateHandle, InvalidOid, InvalidTransactionId, Oid, TransactionId,
     TransactionIdIsValid,
 };

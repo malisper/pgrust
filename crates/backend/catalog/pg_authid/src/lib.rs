@@ -17,8 +17,8 @@
 //! membership insert, `deleteSharedDependencyRecordsFor` before each silent
 //! membership removal).
 
-use mcx::{Mcx, MemoryContext};
-use authid::{AuthIdUpdate, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord};
+use ::mcx::{Mcx, MemoryContext};
+use ::authid::{AuthIdUpdate, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord};
 use ::types_catalog::pg_authid as pa;
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::types_error::PgResult;

@@ -27,8 +27,8 @@
 extern crate alloc;
 
 use scanner_seams as scanner;
-use mcx::{Mcx, PgString, PgVec};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_error::{PgError, PgResult};
 
 /// Bison token codes for the `synchronous_standby_names` grammar, declared by
 /// the `%token <str> NAME NUM JUNK ANY FIRST` line of `syncrep_gram.y` and

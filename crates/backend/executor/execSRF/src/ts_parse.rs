@@ -29,10 +29,10 @@
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_core::{Oid, OidIsValid};
+use ::types_core::{Oid, OidIsValid};
 use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use ::nodes::funcapi::MAT_SRF_USE_EXPECTED_DESC;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::utils_error::ereport;
 use types_tuple::heaptuple::Datum;
 

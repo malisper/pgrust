@@ -29,7 +29,7 @@
 // the workspace's vocabulary and from the C (which throws by value).
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_catalog::pg_parameter_acl as cat;
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use ::types_storage::lock::{NoLock, RowExclusiveLock};
@@ -37,17 +37,17 @@ use types_tuple::heaptuple::Datum;
 
 use ::utils_error::ereport;
 use ::types_error::pg_error::ErrorLocation;
-use types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
+use ::types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
 
 use ::heaptuple::heap_form_tuple;
 use ::catalog_catalog::GetNewOidWithIndex;
 use ::indexing::keystone::CatalogTupleInsert;
-use cache_syscache::{GetSysCacheOid, PARAMETERACLNAME};
+use ::cache_syscache::{GetSysCacheOid, PARAMETERACLNAME};
 use ::misc_guc::convert_guc_name_for_parameter_acl;
 use ::cache::syscache::SysCacheKey;
 
 use table_seams as table_seams;
-use pg_parameter_acl_seams::{parameter_acl_create, parameter_acl_lookup};
+use ::pg_parameter_acl_seams::{parameter_acl_create, parameter_acl_lookup};
 use varlena_seams as varlena_seams;
 use guc_seams as guc_seams;
 

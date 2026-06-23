@@ -12,7 +12,7 @@
 //! scanner's token stream) is a real ported function called directly, not a
 //! seam this crate must install.
 
-use types_error::{PgResult, SoftErrorContext};
+use ::types_error::{PgResult, SoftErrorContext};
 use ::types_jsonpath::parse::JsonPathParseResult;
 
 /// Adapter for the `parse` inward seam (C: `parsejsonpath`).

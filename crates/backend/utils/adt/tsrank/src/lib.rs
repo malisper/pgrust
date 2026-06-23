@@ -25,7 +25,7 @@ pub mod fmgr_builtins;
 use postgres_seams as tcop;
 use array_more_seams as array_seams;
 use tsvector_core_seams as tsop;
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 
 /// Register the `ts_rank` / `ts_rank_cd` fmgr builtins. This unit declares no
 /// inward seam crate (nothing calls back across a cycle), so the only install
@@ -33,7 +33,7 @@ use mcx::{vec_with_capacity_in, Mcx, PgVec};
 pub fn init_seams() {
     fmgr_builtins::register_tsrank_builtins();
 }
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
 };
 use ::tsearch::tsearch::{

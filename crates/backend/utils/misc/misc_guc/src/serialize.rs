@@ -15,8 +15,8 @@
 //! a slice at the install site (the audited DSM-pointer primitive), mirroring
 //! the sibling combocid/snapshot serializers.
 
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
-use types_guc::{
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+use ::types_guc::{
     GucContext, GucSource, PGC_BOOL, PGC_ENUM, PGC_INT, PGC_INTERNAL, PGC_POSTMASTER, PGC_REAL,
     PGC_STRING, PGC_S_DEFAULT,
 };

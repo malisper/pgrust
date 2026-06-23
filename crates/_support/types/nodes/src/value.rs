@@ -30,7 +30,7 @@
 //! `pg_node_attr` in C beyond `special_read_write`, which only affects the
 //! deferred OUT/READ stage — copy/equal copy/compare every field).
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_error::PgResult;
 
 use ::macros::PgNode;

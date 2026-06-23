@@ -14,10 +14,10 @@ use ::utils_error::ereport;
 use ::funcapi_seams::record_from_values;
 use ::init_small::globals::DataDir;
 use ::controldata_utils_seams::get_controlfile;
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::control::ControlFileData;
-use types_core::{Oid, TimeLineID, TimestampTz, XLogRecPtr};
-use types_error::{PgResult, ERROR};
+use ::types_core::{Oid, TimeLineID, TimestampTz, XLogRecPtr};
+use ::types_error::{PgResult, ERROR};
 use ::types_tuple::Datum as DatumV;
 
 // Column type OIDs (pg_type_d.h) for the `pg_control_*` OUT-parameter rowtypes,

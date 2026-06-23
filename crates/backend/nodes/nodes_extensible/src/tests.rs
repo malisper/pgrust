@@ -7,8 +7,8 @@
 //! This port keeps the registries in `thread_local!` state and depends on no
 //! seams (the owned `Vec` replaces dynahash), so no seam installation is needed.
 
-use types_error::{ERRCODE_DUPLICATE_OBJECT, ERRCODE_UNDEFINED_OBJECT};
-use types_extensible::{CustomScanMethods, ExtensibleNodeMethods};
+use ::types_error::{ERRCODE_DUPLICATE_OBJECT, ERRCODE_UNDEFINED_OBJECT};
+use ::types_extensible::{CustomScanMethods, ExtensibleNodeMethods};
 
 use super::*;
 

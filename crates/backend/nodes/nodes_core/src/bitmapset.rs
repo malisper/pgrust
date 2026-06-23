@@ -22,7 +22,7 @@
 //! is a caller bug and panics, matching the C surface.
 
 use ::hashfn::hash_bytes;
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 use ::nodes::bitmapset::{bitmapword, Bitmapset};
 

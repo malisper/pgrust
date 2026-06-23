@@ -28,10 +28,10 @@
 use ::mcx::Mcx;
 use ::types_core::primitive::{BlockNumber, OffsetNumber, Size, TransactionId};
 use ::types_core::xact::CommandId;
-use types_error::{PgResult, ERRCODE_INVALID_TRANSACTION_STATE, ERROR};
+use ::types_error::{PgResult, ERRCODE_INVALID_TRANSACTION_STATE, ERROR};
 use ::utils_error::ereport;
-use rel::{Relation, RelationData};
-use types_storage::{Buffer, InvalidBuffer};
+use ::rel::{Relation, RelationData};
+use ::types_storage::{Buffer, InvalidBuffer};
 use ::types_tuple::heaptuple::FormedTuple;
 use ::types_tuple::heaptuple::{
     HeapTupleField3, HeapTupleHeaderChoice, HeapTupleHeaderData, HEAP2_XACT_MASK, HEAP_COMBOCID,
@@ -39,7 +39,7 @@ use ::types_tuple::heaptuple::{
 };
 
 use ::heaptuple::heap_tuple_to_disk_image;
-use hio::{RelationGetBufferForTuple, RelationPutHeapTuple};
+use ::hio::{RelationGetBufferForTuple, RelationPutHeapTuple};
 use ::heaptoast::heap_toast_insert_or_update;
 
 use vacuumlazy_seams as page_seam;

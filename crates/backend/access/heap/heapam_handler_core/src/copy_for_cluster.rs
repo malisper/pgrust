@@ -21,7 +21,7 @@
 //! module can resolve update chains).
 
 use ::mcx::Mcx;
-use types_core::{MultiXactId, TransactionId};
+use ::types_core::{MultiXactId, TransactionId};
 use ::types_error::PgResult;
 use ::rel::Relation;
 use ::types_slot::SlotData;
@@ -46,7 +46,7 @@ use ::types_storage::Buffer;
 use ::snapshot::snapshot::HTSV_Result;
 
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, ERROR, WARNING};
+use ::types_error::{ErrorLocation, ERROR, WARNING};
 
 /// `heapam_relation_copy_for_cluster(OldHeap, NewHeap, OldIndex, use_sort,
 /// OldestXmin, *xid_cutoff, *multi_cutoff, *num_tuples, *tups_vacuumed,

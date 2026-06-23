@@ -21,8 +21,8 @@
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
-use types_network::{macaddr, macaddr8};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::types_network::{macaddr, macaddr8};
 
 /// A scratch context for the `_send` adapter to frame the `bytea` result, copied
 /// onto the by-ref lane before it is dropped (C: the palloc'd result lives in

@@ -35,7 +35,7 @@ use core::cell::Cell;
 use std::rc::Rc;
 
 use ::pgtime::pg_tz;
-use types_datetime::{DTZ, DYNTZ, TZ};
+use ::types_datetime::{DTZ, DYNTZ, TZ};
 
 /// The result of resolving a timezone abbreviation against the runtime
 /// abbreviation table (C: a `datetkn` row of `zoneabbrevtbl`).

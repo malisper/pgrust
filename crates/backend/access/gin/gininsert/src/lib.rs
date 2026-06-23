@@ -43,12 +43,12 @@ use alloc::vec::Vec;
 
 use bufmgr_seams as bufmgr;
 use predicate_seams as predicate;
-use page::{PageGetItem, PageGetItemId, PageRef};
+use ::page::{PageGetItem, PageGetItemId, PageRef};
 use ::utils_error::PgResult;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{BlockNumber, OffsetNumber};
-use gin::{GinNullCategory, GinState, GinStatsData, GinMaxItemSize, GIN_UNLOCK, GIN_EXCLUSIVE};
+use ::gin::{GinNullCategory, GinState, GinStatsData, GinMaxItemSize, GIN_UNLOCK, GIN_EXCLUSIVE};
 use ::rel::Relation;
 use ::types_storage::storage::Buffer;
 use ::types_tableam::amapi::IndexUniqueCheck;
@@ -61,17 +61,17 @@ use ::core_probe::ginpostinglist::{
     ginCompressPostingList, ginMergeItemPointers,
 };
 // gindatapage: posting-tree create + bulk-insert + the t_tid byte predicates.
-use gindatapage::{
+use ::gindatapage::{
     createPostingTree, ginInsertItemPointers, GinGetDownlink, GinIsPostingTree, GIN_TREE_POSTING,
 };
 // ginentrypage: leaf-tuple form/read + the entry-tree scan setup.
-use ginentrypage::{ginPrepareEntryScan, ginReadTuple, GinFormTuple};
+use ::ginentrypage::{ginPrepareEntryScan, ginReadTuple, GinFormTuple};
 // ginbtree: the entry-tree descent driver.
-use ginbtree::{freeGinBtreeStack, ginFindLeafPage, ginInsertValue};
+use ::ginbtree::{freeGinBtreeStack, ginFindLeafPage, ginInsertValue};
 // ginutil: key accessors + entry extraction.
-use ginutil::{gintuple_get_attrnum, gintuple_get_key, ginExtractEntries};
+use ::ginutil::{gintuple_get_attrnum, gintuple_get_key, ginExtractEntries};
 
-use gin::{GinBtreeData, GinBtreeEntryInsertData, GinInsertPayload};
+use ::gin::{GinBtreeData, GinBtreeEntryInsertData, GinInsertPayload};
 
 #[cfg(test)]
 mod tests;

@@ -20,7 +20,7 @@
 use core::cell::RefCell;
 use core::mem::size_of;
 
-use types_core::{Oid, ProcNumber, Size, TransactionId, INVALID_PROC_NUMBER};
+use ::types_core::{Oid, ProcNumber, Size, TransactionId, INVALID_PROC_NUMBER};
 use ::types_error::PgResult;
 use ::types_storage::latch::LatchHandle;
 use ::types_storage::storage::{

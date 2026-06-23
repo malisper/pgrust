@@ -51,9 +51,9 @@ use core::cell::RefCell;
 use core::ptr;
 use core::sync::atomic::AtomicI32;
 
-use utils_error::{elog, PgError, PgResult};
+use ::utils_error::{elog, PgError, PgResult};
 use ::types_core::Size;
-use types_error::{ERROR, FATAL, PANIC, WARNING};
+use ::types_error::{ERROR, FATAL, PANIC, WARNING};
 use ::hash::hsearch::{
     HashCompareFunc, HashCopyFunc, HashValueFunc, HASHACTION, HASHBUCKET, HASHCTL,
     HASHELEMENT, HASHHDR, HASHSEGMENT, HASH_ALLOC, HASH_ATTACH, HASH_BLOBS, HASH_COMPARE,

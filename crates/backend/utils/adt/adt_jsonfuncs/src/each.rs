@@ -26,14 +26,14 @@ use ::utils_error::ereport;
 use ::mcx::Mcx;
 use ::types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use ::types_error::PgResult;
-use types_json::{JsonLexContext, JsonParseErrorType, JsonTokenType};
+use ::types_json::{JsonLexContext, JsonParseErrorType, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use ::types_jsonb::jsonb::{jbvType, json_container_is_object, JsonbIteratorToken};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::MAT_SRF_BLESS;
 use ::types_tuple::Datum;
 
-use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb};
+use ::jsonb_util::{JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb};
 use funcapi_seams as funcapi;
 
 use crate::common::JsonbValueAsText;

@@ -27,8 +27,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use utils_error::{ereport, PgError, PgResult};
-use mcx::{Mcx, PgVec};
+use ::utils_error::{ereport, PgError, PgResult};
+use ::mcx::{Mcx, PgVec};
 use ::types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use ::types_core::primitive::{
     ForkNumber, ProcNumber, INVALID_PROC_NUMBER, MAX_FORKNUM as MAX_FORKNUM_ENUM,

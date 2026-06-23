@@ -15,7 +15,7 @@ use core::cell::RefCell;
 use std::sync::Once;
 
 use ::lz4_seams::Lz4CtxHandle;
-use sink::{
+use ::sink::{
     bbsink_begin_archive, bbsink_begin_backup, bbsink_cleanup, bbsink_end_archive, BbsinkState,
     TablespaceInfo,
 };

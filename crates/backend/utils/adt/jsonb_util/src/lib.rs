@@ -49,9 +49,9 @@ use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
-use utils_error::{PgError, PgResult};
-use mcx::{Mcx, PgVec};
-use types_error::{
+use ::utils_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{
     ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE, ERRCODE_INTERNAL_ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
 
@@ -1752,7 +1752,7 @@ fn numeric_digit_at_bytes(digit_bytes: &[u8], i: usize) -> i16 {
 /// C: `hash_numeric(NumericGetDatum(num))` (numeric.c) -- ported in-crate over
 /// the on-disk `numeric` bytes so equal numerics hash to equal codes.
 fn hash_numeric(num: &[u8]) -> u32 {
-    use types_numeric::{numeric_digits, numeric_is_special, numeric_ndigits, numeric_weight};
+    use ::types_numeric::{numeric_digits, numeric_is_special, numeric_ndigits, numeric_weight};
 
     // If it's NaN or infinity, don't hash the rest of the fields.
     if numeric_is_special(num) {
@@ -1801,7 +1801,7 @@ fn hash_numeric(num: &[u8]) -> u32 {
 
 /// C: `hash_numeric_extended(NumericGetDatum(num), seed)` (numeric.c).
 fn hash_numeric_extended(num: &[u8], seed: u64) -> u64 {
-    use types_numeric::{numeric_digits, numeric_is_special, numeric_ndigits, numeric_weight};
+    use ::types_numeric::{numeric_digits, numeric_is_special, numeric_ndigits, numeric_weight};
 
     if numeric_is_special(num) {
         return seed;

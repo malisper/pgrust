@@ -10,10 +10,10 @@
 use super::*;
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use mcx::{slice_in, MemoryContext, Mcx, PgString};
+use ::mcx::{slice_in, MemoryContext, Mcx, PgString};
 use ::types_core::primitive::ProcNumber;
 use ::wal::wal::{DecodedXLogRecord, XLogRecord};
-use wal::{
+use ::wal::{
     XACT_COMPLETION_APPLY_FEEDBACK, XACT_COMPLETION_FORCE_SYNC_COMMIT,
     XACT_COMPLETION_UPDATE_RELCACHE_FILE,
 };

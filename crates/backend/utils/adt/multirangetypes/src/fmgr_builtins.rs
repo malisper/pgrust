@@ -29,14 +29,14 @@
 use nodeAgg_aggapi_seams as aggapi;
 use rangetypes_seams as range_seams;
 use lsyscache_seams as lsyscache_seams;
-use fmgr_core::{get_fn_expr_argtype, get_fn_expr_rettype};
-use mcx::{Mcx, MemoryContext};
+use ::fmgr_core::{get_fn_expr_argtype, get_fn_expr_rettype};
+use ::mcx::{Mcx, MemoryContext};
 use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::Oid;
 use ::datum::Datum;
-use types_error::{PgError, PgResult};
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative, RefPayload};
-use types_rangetypes::{MultirangeTypeP, RangeTypeP};
+use ::types_error::{PgError, PgResult};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative, RefPayload};
+use ::types_rangetypes::{MultirangeTypeP, RangeTypeP};
 
 // ---------------------------------------------------------------------------
 // Marshalling helpers (mirror rangetypes/fmgr_builtins).

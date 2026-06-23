@@ -66,14 +66,14 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::format;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, BlockNumber, OffsetNumber, Oid, Size};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_error::error::{ERRCODE_PROGRAM_LIMIT_EXCEEDED, DEBUG1, ERROR};
 use ::utils_error::ereport;
 
-use types_nbtree::{
+use ::types_nbtree::{
     BTArrayKeyInfo, BTCycleId, BTReadPageState, BTScanInsert, BTScanInsertData, BTScanOpaqueData,
     BTScanPosIsPinned, BTScanPosIsValid, BTStack, BT_IS_POSTING, BT_OFFSET_MASK,
     BT_PIVOT_HEAP_TID_ATTR, BTMaxItemSize, BTORDER_PROC, BTP_DELETED,
@@ -94,7 +94,7 @@ use ::types_storage::storage::Buffer;
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{IndexTupleData, IndexTupleSize, ItemPointerData};
 
-use page::{
+use ::page::{
     ItemIdIsDead, ItemPointerCompare, ItemPointerEquals, ItemPointerGetBlockNumber,
     ItemPointerGetBlockNumberNoCheck, ItemPointerGetOffsetNumber,
     ItemPointerGetOffsetNumberNoCheck, ItemPointerSetOffsetNumber, PageGetItem, PageGetItemId,

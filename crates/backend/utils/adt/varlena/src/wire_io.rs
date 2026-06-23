@@ -10,7 +10,7 @@
 //! consult the client/server encoding converters (mbutils seam). Depends on
 //! the keystone carrier conventions and `text_length`/`text_catenate`.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::datum::Bytea;
 use ::types_error::PgResult;
 use ::stringinfo::StringInfo;

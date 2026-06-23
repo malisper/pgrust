@@ -48,12 +48,12 @@ use execTuples_seams as execTuples;
 use execUtils_seams as execUtils;
 use sort_storage_seams as tuplestore;
 
-use mcx::{alloc_in, PgBox};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::mcx::{alloc_in, PgBox};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execnodes::{EStateData, RecursiveUnionSharedState};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::nodes::nodeworktablescan::{WorkTableScan, WorkTableScanStateData};
-use nodes::{SlotId, Tuplestorestate, TupleSlotKind};
+use ::nodes::{SlotId, Tuplestorestate, TupleSlotKind};
 
 fn internal(msg: &str) -> PgError {
     PgError::error(alloc::string::String::from(msg)).with_sqlstate(ERRCODE_INTERNAL_ERROR)

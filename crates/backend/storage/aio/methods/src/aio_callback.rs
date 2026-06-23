@@ -13,7 +13,7 @@
 
 extern crate alloc;
 
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use miscinit_seams as misc;
 

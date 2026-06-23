@@ -16,7 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::{TransactionId, XLogRecPtr};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_error::error::{ERRCODE_DATA_CORRUPTED, ERROR};
 
 use crate::{crc32c, SnapBuild, SnapBuildState, SNAPBUILD_MAGIC, SNAPBUILD_VERSION};

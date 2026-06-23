@@ -42,11 +42,11 @@
 
 use std::cell::RefCell;
 
-use utils_error::{ereport, PgError, PgResult};
-use types_error::{
+use ::utils_error::{ereport, PgError, PgResult};
+use ::types_error::{
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_OUT_OF_MEMORY, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use types_extensible::{CustomScanMethods, ExtensibleNodeMethods, EXTNODENAME_MAX_LEN};
+use ::types_extensible::{CustomScanMethods, ExtensibleNodeMethods, EXTNODENAME_MAX_LEN};
 
 thread_local! {
     /// `static HTAB *extensible_node_methods` (extensible.c): the

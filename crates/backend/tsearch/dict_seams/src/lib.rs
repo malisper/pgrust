@@ -31,11 +31,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::define_seams::DefElemArg;
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
-use tsearch::{
+use ::tsearch::{
     DictSimple, DictSyn, DictThesaurus, OwnedTSLexeme, TSLexeme, ThesaurusSubState,
 };
 

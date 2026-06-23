@@ -7,10 +7,10 @@
 extern crate alloc;
 use alloc::format;
 
-use utils_error::{ereport, PgResult};
-use types_error::{ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, WARNING};
+use ::utils_error::{ereport, PgResult};
+use ::types_error::{ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, WARNING};
 
-use types_core::{BlockNumber, Oid};
+use ::types_core::{BlockNumber, Oid};
 
 use crate::core::{self, NUM_WORKITEMS};
 use autovacuum_ext_seams as seam;

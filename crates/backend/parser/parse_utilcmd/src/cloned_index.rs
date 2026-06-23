@@ -9,12 +9,12 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 use ::types_core::primitive::{AttrNumber, InvalidOid, OidIsValid};
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::nodes::ddlnodes::{DefElem, IndexElem, IndexStmt, DEFELEM_UNSPEC};
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::{RangeVar, SORTBY_DEFAULT, SORTBY_DESC, SORTBY_NULLS_DEFAULT, SORTBY_NULLS_FIRST, SORTBY_NULLS_LAST};

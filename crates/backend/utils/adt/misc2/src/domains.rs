@@ -37,10 +37,10 @@
 use syscache_seams as syscache_seams;
 use typcache_seams as typcache_seams;
 use fmgr_seams as fmgr_seams;
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::cache::typcache::{DomainCtxHandle, DomainLevelScan};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
 use types_tuple::heaptuple::Datum;
 

@@ -26,10 +26,10 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-use utils_error::{ereport, PgResult};
-use mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
-use types_core::{Oid, OidIsValid, InvalidOid};
-use types_error::{
+use ::utils_error::{ereport, PgResult};
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use ::types_core::{Oid, OidIsValid, InvalidOid};
+use ::types_error::{
     ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_UNTRANSLATABLE_CHARACTER, ERROR,
@@ -40,7 +40,7 @@ use ::types_wchar::encoding::{
 };
 use ::types_wchar::wchar::PgWChar;
 
-use common_wchar::{
+use ::common_wchar::{
     pg_encoding_max_length, pg_encoding_mblen_or_incomplete, pg_wchar_table,
 };
 
@@ -50,8 +50,8 @@ use ::types_tuple::heaptuple::NameData;
 use ::transam_xact_seams::is_transaction_state;
 use ::catalog_namespace::FindDefaultConversionProc;
 use ::name::namein;
-use fmgr_seams::{convert_via_proc, convert_via_proc_counted};
-use encnames_seams::{pg_char_to_encoding, pg_encoding_to_char};
+use ::fmgr_seams::{convert_via_proc, convert_via_proc_counted};
+use ::encnames_seams::{pg_char_to_encoding, pg_encoding_to_char};
 
 mod fmgr_builtins;
 mod tests;

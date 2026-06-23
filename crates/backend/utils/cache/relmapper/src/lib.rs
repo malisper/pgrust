@@ -29,8 +29,8 @@
 
 use std::cell::RefCell;
 
-use types_core::{InvalidOid, InvalidRelFileNumber, Oid, RelFileNumber};
-use types_error::{
+use ::types_core::{InvalidOid, InvalidRelFileNumber, Oid, RelFileNumber};
+use ::types_error::{
     ErrorLocation, PgError, PgResult, SqlState, ERRCODE_DATA_CORRUPTED,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, FATAL, PANIC,
 };
@@ -38,14 +38,14 @@ use ::types_pgstat::wait_event::{
     WAIT_EVENT_RELATION_MAP_READ, WAIT_EVENT_RELATION_MAP_REPLACE, WAIT_EVENT_RELATION_MAP_WRITE,
 };
 use ::types_storage::RelFileLocator;
-use wal::{RM_RELMAP_ID, XLR_INFO_MASK};
+use ::wal::{RM_RELMAP_ID, XLR_INFO_MASK};
 
 use transam_xact_seams as xact_seams;
 use transam_xlog_seams as xlog_seams;
 use xloginsert_seams as xloginsert_seams;
 use catalog_storage_seams as storage_seams;
 use common_relpath_seams as relpath_seams;
-use fd_seams::{self as fd_seams, RelmapReadOutcome, RelmapWriteOutcome};
+use ::fd_seams::{self as fd_seams, RelmapReadOutcome, RelmapWriteOutcome};
 use lwlock_seams as lwlock_seams;
 use inval_seams as inval_seams;
 use error_seams as error_seams;

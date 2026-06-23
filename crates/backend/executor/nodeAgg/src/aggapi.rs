@@ -12,7 +12,7 @@ use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::nodeagg::Aggref;
 use ::nodes::EcxtId;
 use crate::aggstate::{AggStateData, AggregateInstrumentation, SharedAggInfo, SharedAggInfoHeader};
-use execparallel::{
+use ::execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
 
@@ -761,7 +761,7 @@ mod k1_context_channel_tests {
     //! `Agg*` support functions reading it. Mirrors C's
     //! `IsA(fcinfo->context, AggState)` + `(AggState *) fcinfo->context`.
     use super::*;
-    use mcx::{MemoryContext, PgVec};
+    use ::mcx::{MemoryContext, PgVec};
     use ::nodes::aggstate_carrier::AggStateContextLink;
     use ::nodes::fmgr::FmgrCallContext;
 

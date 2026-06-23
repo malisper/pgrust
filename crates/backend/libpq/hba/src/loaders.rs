@@ -5,10 +5,10 @@
 //! Ported from `src/backend/libpq/hba.c` (lines 2530-3126).
 
 use acl_seams as acl;
-use mcx::{Mcx, PgString};
-use types_error::{PgResult, DEBUG3, LOG};
-use types_core::{uaImplicitReject, UserAuth};
-use net::{
+use ::mcx::{Mcx, PgString};
+use ::types_error::{PgResult, DEBUG3, LOG};
+use ::types_core::{uaImplicitReject, UserAuth};
+use ::net::{
     ctHostGSS, ctHostNoGSS, ctHostNoSSL, ctHostSSL, ctLocal, ipCmpAll, ipCmpMask, ipCmpSameHost,
     ipCmpSameNet, HbaLine, Port,
 };

@@ -11,7 +11,7 @@
 //! installs them from its `init_seams()` when it lands; until then a call
 //! panics loudly.
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_error::PgResult;
 
 /// Opaque token standing in for C's reentrant `yyscan_t` (a `void *`) while the

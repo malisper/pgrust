@@ -74,7 +74,7 @@ use ::nodes::nodeagg::{
     AggSplit, AGGSPLITOP_COMBINE, AGGSPLITOP_DESERIALIZE, AGGSPLITOP_SERIALIZE, AGGSPLITOP_SKIPFINAL,
 };
 use ::nodes::primnodes::{Aggref, Expr};
-use pathnodes::{
+use ::pathnodes::{
     AggClauseCosts, AggInfo, AggTransInfo, NodeId, PlannerInfo, QualCost,
 };
 

@@ -25,7 +25,7 @@ extern crate alloc;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROTOCOL_VIOLATION, ERROR,
 };
 
@@ -42,7 +42,7 @@ use ::nodes::parsestmt::{
 };
 use ::nodes::portalcmds::ParamListInfo;
 use ::nodes::querydesc::QueryDesc;
-use portal::{
+use ::portal::{
     CommandTag, FetchDirection, Portal, PortalStrategy, QueryCompletion, CMDTAG_DELETE,
     CMDTAG_INSERT, CMDTAG_MERGE, CMDTAG_SELECT, CMDTAG_UNKNOWN, CMDTAG_UPDATE, CURSOR_OPT_NO_SCROLL,
     CURSOR_OPT_SCROLL, FETCH_ABSOLUTE, FETCH_BACKWARD, FETCH_FORWARD, FETCH_RELATIVE,
@@ -53,7 +53,7 @@ use ::types_scan::sdir::{
     ScanDirection, ScanDirectionIsForward, ScanDirectionIsNoMovement, BackwardScanDirection,
     ForwardScanDirection, NoMovementScanDirection,
 };
-use types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_REWIND};
+use ::types_slot::{TupleSlotKind, EXEC_FLAG_BACKWARD, EXEC_FLAG_REWIND};
 use ::snapshot::SnapshotData;
 
 use execMain as execMain;

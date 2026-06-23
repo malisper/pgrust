@@ -15,7 +15,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::wal::RelFileLocator;
-use types_core::{BlockNumber, ForkNumber, TimeLineID, XLogRecPtr};
+use ::types_core::{BlockNumber, ForkNumber, TimeLineID, XLogRecPtr};
 
 /// What `FinishWalRecovery` returns: where recovery ended, and why.
 /// (`EndOfWalRecoveryInfo`, xlogrecovery.h:91) — owned form, hoisted here so the

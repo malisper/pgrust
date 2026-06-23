@@ -16,7 +16,7 @@
 //! [`crate::primnodes::Expr`] through [`crate::nodes::Node::Expr`] — NO handles
 //! (opacity-inherited-never-introduced; parse trees are owned, not aliased).
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_core::primitive::{Index, Oid};
 use ::types_error::PgResult;
 

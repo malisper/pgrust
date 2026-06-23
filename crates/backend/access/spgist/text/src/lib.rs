@@ -50,8 +50,8 @@
 
 use ::mcx::Mcx;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
-use spgist::{
+use ::types_error::{PgError, PgResult};
+use ::spgist::{
     spgChooseIn, spgChooseOut, spgChooseOutAddNode, spgChooseOutMatchNode,
     spgChooseOutResult, spgChooseOutSplitTuple, spgConfigOut, spgInnerConsistentIn,
     spgInnerConsistentOut, spgLeafConsistentIn, spgLeafConsistentOut, spgPickSplitIn,

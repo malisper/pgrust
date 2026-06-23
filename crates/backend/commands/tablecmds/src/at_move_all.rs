@@ -15,17 +15,17 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec, PgString};
+use ::mcx::{Mcx, PgVec, PgString};
 use ::types_core::primitive::{Oid, InvalidOid, OidIsValid};
 use ::types_error::PgResult;
-use types_error::{ERROR, NOTICE, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NO_DATA_FOUND};
+use ::types_error::{ERROR, NOTICE, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NO_DATA_FOUND};
 use ::nodes::nodes::{Node, NodePtr};
 use ::nodes::ddlnodes::{AlterTableCmd, AlterTableType};
 use ::nodes::parsenodes::{
     DropBehavior, OBJECT_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_TABLESPACE,
 };
 use types_tuple::heaptuple::Datum;
-use types_acl::{ACLCHECK_OK, ACL_CREATE, ACLCHECK_NOT_OWNER};
+use ::types_acl::{ACLCHECK_OK, ACL_CREATE, ACLCHECK_NOT_OWNER};
 use ::types_catalog::catalog::{
     RELKIND_RELATION, RELKIND_PARTITIONED_TABLE, RELKIND_INDEX, RELKIND_PARTITIONED_INDEX,
     RELKIND_MATVIEW, GLOBALTABLESPACE_OID,
@@ -39,7 +39,7 @@ use ::types_storage::lock::{AccessShareLock, AccessExclusiveLock};
 
 use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam;
-use table::{table_open, table_close};
+use ::table::{table_open, table_close};
 use ::miscinit::GetUserId;
 use ::utils_error::ereport;
 
@@ -50,7 +50,7 @@ use tablespace_seams as tablespace_seam;
 use tablespace_globals_seams as tablespace_globals_seam;
 use lsyscache_seams as lsyscache_seam;
 use acl_seams as acl_seam;
-use lmgr::{LockRelationOid, ConditionalLockRelationOid};
+use ::lmgr::{LockRelationOid, ConditionalLockRelationOid};
 
 use crate::helpers::{here, RelationRelationId, TableSpaceRelationId};
 

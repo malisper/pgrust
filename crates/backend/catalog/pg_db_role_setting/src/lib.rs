@@ -33,7 +33,7 @@
 //! NULL, keys)` forces the catalog heap scan (`table_beginscan_strat` with
 //! `allow_sync = false`), exactly what `table_beginscan_catalog` does.
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_catalog::catalog::{DB_ROLE_SETTING_DATID_ROLID_INDEX_ID, DB_ROLE_SETTING_RELATION_ID};
 use ::types_catalog::pg_db_role_setting::{
     Anum_pg_db_role_setting_setdatabase, Anum_pg_db_role_setting_setrole,
@@ -42,7 +42,7 @@ use ::types_core::fmgr::F_OIDEQ;
 use ::types_core::primitive::{AttrNumber, Oid, OidIsValid};
 use ::types_error::PgResult;
 use ::types_guc::guc::GucSource;
-use parsenodes::{VariableSetKind, VariableSetStmt};
+use ::parsenodes::{VariableSetKind, VariableSetStmt};
 use ::rel::Relation;
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::snapshot::SnapshotData;

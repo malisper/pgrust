@@ -39,7 +39,7 @@
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::{
     jsonb_path_exists, jsonb_path_exists_opr, jsonb_path_exists_tz, jsonb_path_match,

@@ -14,16 +14,16 @@
 //! function's failure surface (`PgResult<_>` where the C path can `ereport` at
 //! ERROR+).
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::seam_core::seam;
-use authid::{
+use ::authid::{
     AuthIdForm, AuthIdUpdate, AuthMemForm, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord,
     PasswordType,
 };
 use ::types_core::primitive::{Oid, TimestampTz};
 use ::types_error::PgResult;
 use ::nodes::parsenodes::DropBehavior;
-use parsenodes::{DefElem, Node, ParseState, RoleSpec};
+use ::parsenodes::{DefElem, Node, ParseState, RoleSpec};
 
 /* --- user-id / superuser substrate (miscinit.c, superuser.c) --- */
 

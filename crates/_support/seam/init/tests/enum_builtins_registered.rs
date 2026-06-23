@@ -6,7 +6,7 @@
 //! ENUM` walls on the unported `DefineEnum`/XLog driver path), so this asserts
 //! the registration wiring this crate's `init_seams` performs.
 
-use fmgr_core::{fmgr_isbuiltin, native_builtin};
+use ::fmgr_core::{fmgr_isbuiltin, native_builtin};
 
 /// (oid, name, nargs, strict) transcribed from `fmgrtab.c`.
 const ENUM_BUILTINS: &[(u32, &str, i16, bool)] = &[

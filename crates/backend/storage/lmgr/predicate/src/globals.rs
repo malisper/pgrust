@@ -9,7 +9,7 @@ use core::cell::Cell;
 use ::lwlock::main_lock_ref;
 use ::types_storage::LWLock;
 use ::types_core::primitive::ProcNumber;
-use types_storage::{
+use ::types_storage::{
     PREDICATELOCK_MANAGER_LWLOCK_OFFSET, SERIALIZABLE_FINISHED_LIST_LOCK,
     SERIALIZABLE_PREDICATE_LIST_LOCK, SERIALIZABLE_XACT_HASH_LOCK, SERIAL_CONTROL_LOCK,
     NUM_PREDICATELOCK_PARTITIONS,

@@ -31,12 +31,12 @@
 
 use std::ffi::CString;
 
-use transam::{TransactionIdFollowsOrEquals, TransactionIdPrecedes};
+use ::transam::{TransactionIdFollowsOrEquals, TransactionIdPrecedes};
 use transam_xlog_seams as xlog_seams;
 use xlogrecovery_seams as xlogrecovery_seams;
 use file_seams as file_seams;
 use ipc_shmem_seams as ipc_shmem;
-use lwlock::{
+use ::lwlock::{
     LWLockAcquire, LWLockConditionalAcquire, LWLockHeldByMe, LWLockHeldByMeInMode,
     LWLockInitialize, LWLockRelease,
 };
@@ -45,17 +45,17 @@ use ::activity_small::pgstat_checkpointer::with_pending_checkpointer_stats;
 use stat_seams as stat_seams;
 use waitevent_seams as waitevent_seams;
 use ::utils_error::errno::current_errno;
-use utils_error::{config, ereport, PgResult};
+use ::utils_error::{config, ereport, PgResult};
 use init_small_seams as globals;
-use types_core::{
+use ::types_core::{
     InvalidTransactionId, InvalidXLogRecPtr, Size, TransactionId, XLogRecPtr, BLCKSZ,
 };
-use types_error::{ErrorLocation, DEBUG2, ERROR, LOG};
+use ::types_error::{ErrorLocation, DEBUG2, ERROR, LOG};
 use ::types_pgstat::wait_event::{
     WAIT_EVENT_SLRU_FLUSH_SYNC, WAIT_EVENT_SLRU_READ, WAIT_EVENT_SLRU_SYNC, WAIT_EVENT_SLRU_WRITE,
 };
 use ::types_storage::sync::{FileTag, SyncRequestHandler, SyncRequestType};
-use types_storage::{
+use ::types_storage::{
     pg_atomic_uint64, LWLock, LWLockPadded, LW_EXCLUSIVE, LW_SHARED, LWLOCK_PADDED_SIZE,
 };
 

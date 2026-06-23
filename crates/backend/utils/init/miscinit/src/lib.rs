@@ -15,13 +15,13 @@
 
 use std::cell::{Cell, RefCell};
 
-use mcx::{Mcx, MemoryContext, PgString};
+use ::mcx::{Mcx, MemoryContext, PgString};
 use ::types_core::catalog::BOOTSTRAP_SUPERUSERID;
-use types_core::{
+use ::types_core::{
     BackendType, ProcessingMode, UserAuth, InvalidOid, Oid, SECURITY_LOCAL_USERID_CHANGE,
     SECURITY_NOFORCE_RLS, SECURITY_RESTRICTED_OPERATION, uaReject,
 };
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION, ERRCODE_TOO_MANY_CONNECTIONS,
     ERRCODE_UNDEFINED_OBJECT, ERROR, FATAL,
@@ -1205,7 +1205,7 @@ pub fn init_seams() {
     // and writes each through the slot's accessors; install them so the engine
     // reaches this crate's backing store. (None of these are ControlFile-derived
     // — they are plain GUC globals set from postgresql.conf / SetConfigOption.)
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
     vars::IgnoreSystemIndexes.install(GucVarAccessors {
         get: IgnoreSystemIndexes,
         set: SetIgnoreSystemIndexes,

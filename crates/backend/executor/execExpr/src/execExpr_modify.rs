@@ -45,13 +45,13 @@
 //! Each such wrapper names the genuine owner it is blocked on
 //! (mirror-PG-and-panic).
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::primitive::Index;
 use ::types_error::PgResult;
 use ::nodes::execexpr::{ExprState, ProjectionInfo};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, TargetEntry};
-use nodes::{EStateData, EcxtId, ModifyTableState, RriId, SlotId};
+use ::nodes::{EStateData, EcxtId, ModifyTableState, RriId, SlotId};
 
 use crate::execExpr_core;
 

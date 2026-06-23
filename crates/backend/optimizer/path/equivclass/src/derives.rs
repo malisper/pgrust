@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use pathnodes::{
+use ::pathnodes::{
     DerivesHash, ECDerivesEntry, ECDerivesKey, EcId, EmId, PlannerInfo, RinfoId,
 };
 

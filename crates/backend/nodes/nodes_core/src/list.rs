@@ -33,8 +33,8 @@
 
 use core::ffi::c_void;
 
-use mcx::{Mcx, PgBox, PgVec};
-use types_core::{Oid, TransactionId};
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::types_core::{Oid, TransactionId};
 use ::types_error::PgResult;
 use ::nodes::list::{List, ListCell};
 use ::nodes::nodes::{NodeTag, T_IntList, T_List, T_OidList, T_XidList};

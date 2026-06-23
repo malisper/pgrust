@@ -7,7 +7,7 @@ use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::nodes::nodeagg::{do_aggsplit_skipfinal, AggStrategy};
 use crate::aggstate::{AggStateData, AggStatePerGroupData};
-use nodes::{EStateData, SlotId};
+use ::nodes::{EStateData, SlotId};
 
 use crate::{
     CHUNKHDRSZ, HASHAGG_MAX_PARTITIONS, HASHAGG_MIN_PARTITIONS, HASHAGG_PARTITION_FACTOR,

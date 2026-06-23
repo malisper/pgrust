@@ -34,7 +34,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use utils_error::{elog, ereport, message_level_is_interesting};
+use ::utils_error::{elog, ereport, message_level_is_interesting};
 use ::types_error::error::{
     DEBUG1, DEBUG2, DEBUG3, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR, ERROR, PANIC, WARNING,
 };
@@ -46,13 +46,13 @@ use ::types_core::primitive::{
     INIT_FORKNUM, INVALID_PROC_NUMBER, InvalidBlockNumber,
 };
 use ::types_core::xact::InvalidXLogRecPtr;
-use types_storage::{ReadBufferMode, RelFileLocator};
+use ::types_storage::{ReadBufferMode, RelFileLocator};
 use ::wal::rmgr::XLogReaderState;
-use wal::{HotStandbyState, XLogRedoAction, BKPBLOCK_WILL_INIT, STANDBY_DISABLED, XLOG_BLCKSZ};
+use ::wal::{HotStandbyState, XLogRedoAction, BKPBLOCK_WILL_INIT, STANDBY_DISABLED, XLOG_BLCKSZ};
 
 use timeline_seams as timeline_seam;
 use transam_xlog_seams as xlog_seam;
-use transam_xlog_seams::{WalReadErrorInfo, WalReadOutcome};
+use ::transam_xlog_seams::{WalReadErrorInfo, WalReadOutcome};
 use xlogreader_seams as reader_seam;
 use ::xlogreader_seams::XLogBlockTag;
 use xlogrecovery_seams as recovery_seam;

@@ -16,23 +16,23 @@
 
 #![allow(non_snake_case)]
 
-use bufmask_seams::{mask_page_lsn_and_checksum, mask_unused_space};
-use xloginsert_seams::{
+use ::bufmask_seams::{mask_page_lsn_and_checksum, mask_unused_space};
+use ::xloginsert_seams::{
     xlog_begin_insert, xlog_insert_record, xlog_register_buf_data, xlog_register_buffer,
 };
 use ::xlogutils_seams::xlog_read_buffer_for_redo;
-use bufmgr_seams::{
+use ::bufmgr_seams::{
     mark_buffer_dirty, unlock_release_buffer, with_buffer_page,
 };
 use ::relcache_seams::relation_needs_wal;
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{BlockNumber, OffsetNumber, BLCKSZ};
-use types_error::{PgError, PgResult};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{BlockNumber, OffsetNumber, BLCKSZ};
+use ::types_error::{PgError, PgResult};
 use ::rel::RelationData;
 use ::types_storage::buf::{Buffer, BufferIsInvalid, BufferIsValid, InvalidBuffer};
 use ::wal::rmgr::XLogReaderState;
 use ::wal::xloginsert::{REGBUF_FORCE_IMAGE, REGBUF_STANDARD};
-use wal::{XLogRedoAction, RM_GENERIC_ID};
+use ::wal::{XLogRedoAction, RM_GENERIC_ID};
 
 // ---------------------------------------------------------------------------
 // generic_xlog.h / generic_xlog.c constants (owned by this unit).

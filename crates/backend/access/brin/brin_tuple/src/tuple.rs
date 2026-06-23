@@ -1,17 +1,17 @@
 //! The BRIN index-tuple codec: form / deform / placeholder / copy / equal /
 //! memtuple lifecycle — a port of `brin_tuple.c`'s body.
 
-use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
-use brin::{
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
+use ::brin::{
     BrinDesc, BrinMemTuple, BrinValues, BRIN_EMPTY_RANGE_MASK, BRIN_NULLS_MASK, BRIN_OFFSET_MASK,
     BRIN_PLACEHOLDER_MASK, SIZE_OF_BRIN_TUPLE,
 };
-use types_core::{BlockNumber, Size};
+use ::types_core::{BlockNumber, Size};
 use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;
-use types_typcache::{TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN};
+use ::types_typcache::{TYPSTORAGE_EXTENDED, TYPSTORAGE_MAIN};
 
-use heaptuple::{heap_compute_data_size, heap_fill_tuple};
+use ::heaptuple::{heap_compute_data_size, heap_fill_tuple};
 
 use crate::internal::{
     att_isnull, bitmaplen, brin_tuple_data_offset, brin_tuple_get_blkno, brin_tuple_has_nulls,

@@ -14,14 +14,14 @@
 
 use ::mcx::Mcx;
 use ::types_dest::dest::CommandDest;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
 use ::stringinfo::StringInfo;
 use ::types_tuple::heaptuple::TupleDescData;
 
-use pqformat::{
+use ::pqformat::{
     pq_beginmessage_reuse, pq_endmessage_reuse, pq_sendcountedtext, pq_sendint16, pq_sendint32,
 };
 

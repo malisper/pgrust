@@ -32,8 +32,8 @@
 //! used to size the `%.*s` snippet in the hex/base64 error messages; it crosses
 //! the `backend-utils-mb-mbutils-seams` boundary.
 
-use mcx::{Mcx, PgVec, MAX_ALLOC_SIZE};
-use types_error::{
+use ::mcx::{Mcx, PgVec, MAX_ALLOC_SIZE};
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, FATAL,
 };
@@ -240,7 +240,7 @@ pub fn init_seams() {
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARDATA_ANY` payload bytes of a by-ref varlena arg: skip the 1-byte (short)
 /// or 4-byte (long, uncompressed) header. Mirrors `vardata_any_slice` in

@@ -22,7 +22,7 @@
 use std::cell::Cell;
 use std::sync::atomic::Ordering;
 
-use support::{BufTable, BufferStrategyControl, StrategyShmemSize};
+use ::support::{BufTable, BufferStrategyControl, StrategyShmemSize};
 use ::condvar::ConditionVariable;
 use ::types_core::Size;
 use ::types_core::primitive::{Buffer, BLCKSZ, INVALID_PROC_NUMBER};

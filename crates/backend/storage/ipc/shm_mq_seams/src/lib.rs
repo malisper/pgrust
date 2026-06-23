@@ -18,7 +18,7 @@
 extern crate alloc;
 
 use ::types_error::PgResult;
-use execparallel::{
+use ::execparallel::{
     BackgroundWorkerHandle, DsmSegmentHandle, SerializeCursor, ShmMqAttachHandle, ShmMqHandle, Size,
 };
 use ::types_parallel::ShmMqResult;

@@ -23,30 +23,30 @@ use ::mcx::Mcx;
 
 use ::utils_error::ereport;
 use ::types_error::pg_error::ErrorLocation;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_FUNCTION, ERROR, WARNING,
 };
 
 use ::catalog_namespace::QualifiedNameGetCreationNamespace;
-use define::{defGetBoolean, defGetQualifiedName, defGetTypeName};
+use ::define::{defGetBoolean, defGetQualifiedName, defGetTypeName};
 use ::parse_oper::op_signature_string;
 
-use aclchk_seams::{aclcheck_error, object_aclcheck, object_ownercheck};
-use pg_operator_seams::{
+use ::aclchk_seams::{aclcheck_error, object_aclcheck, object_ownercheck};
+use ::pg_operator_seams::{
     alter_operator_apply, fetch_operator_form, invoke_object_post_alter_hook, operator_create,
     operator_lookup, operator_upd, operator_validate_params, remove_operator_tuple,
     OperatorAttrUpdate, OperatorCreateArgs, OperatorValidateParamsArgs,
 };
-use functioncmds_seams::{lookup_func_name, name_list_to_string};
+use ::functioncmds_seams::{lookup_func_name, name_list_to_string};
 use ::parse_type_seams::typename_type_id;
 use ::format_type_seams::format_type_be_owned;
-use lsyscache_seams::{get_element_type, get_func_rettype, get_namespace_name};
+use ::lsyscache_seams::{get_element_type, get_func_rettype, get_namespace_name};
 use ::miscinit_seams::get_user_id;
 use ::superuser_seams::superuser;
 
-use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE, ACL_USAGE};
+use ::types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, ACL_EXECUTE, ACL_USAGE};
 use ::types_catalog::catalog::{
     NAMESPACE_RELATION_ID, OPERATOR_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID,
 };
@@ -54,7 +54,7 @@ use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::catalog::{FirstGenbkiObjectId, INT4OID, INTERNALOID, OIDOID};
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::nodes::parsenodes::{OBJECT_FUNCTION, OBJECT_OPERATOR, OBJECT_SCHEMA, OBJECT_TYPE};
-use parsenodes::{AlterOperatorStmt, DefElem, Node, TypeName};
+use ::parsenodes::{AlterOperatorStmt, DefElem, Node, TypeName};
 
 /// `INT2OID` / `FLOAT8OID` (catalog/pg_type.h) — used in the estimator-function
 /// argument-type templates and the float8-return check.
@@ -792,7 +792,7 @@ fn alter_operator_seam<'mcx>(
     _mcx: Mcx<'mcx>,
     stmt: &::nodes::nodes::Node<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    use parse_type::{rich_node_to_parse, rich_objectwithargs_to_parse};
+    use ::parse_type::{rich_node_to_parse, rich_objectwithargs_to_parse};
 
     let aos = match stmt.as_alteroperatorstmt() {
         Some(s) => s,

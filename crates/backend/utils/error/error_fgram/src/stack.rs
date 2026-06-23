@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 
-use pg_ffi_fgram::{ErrorLevel, SqlState, ERRCODE_INTERNAL_ERROR, ERROR, LOG, PANIC};
+use ::pg_ffi_fgram::{ErrorLevel, SqlState, ERRCODE_INTERNAL_ERROR, ERROR, LOG, PANIC};
 
 use crate::{ErrorLocation, PgError, PgResult};
 

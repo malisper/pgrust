@@ -21,7 +21,7 @@
 use ::mcx::MemoryContext;
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use ::stringinfo::StringInfo;
 
 // ---------------------------------------------------------------------------

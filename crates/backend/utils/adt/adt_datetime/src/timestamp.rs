@@ -30,23 +30,23 @@ use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 
-use pgtime::{pg_tm, pg_tz};
+use ::pgtime::{pg_tm, pg_tz};
 use ::types_core::pg_time_t;
 use ::state_pgtz::session_timezone;
-use localtime::{pg_get_timezone_offset, pg_localtime};
-use types_datetime::{
+use ::localtime::{pg_get_timezone_offset, pg_localtime};
+use ::types_datetime::{
     DATETIME_MIN_JULIAN, DAYS_PER_WEEK, DT_NOBEGIN, DT_NOEND, END_TIMESTAMP, HOURS_PER_DAY,
     Interval, MAX_TIMESTAMP_PRECISION, MINS_PER_HOUR, MIN_TIMESTAMP, MONTHS_PER_YEAR,
     POSTGRES_EPOCH_JDATE, SECS_PER_DAY, SECS_PER_MINUTE, TIMESTAMP_END_JULIAN, UNIX_EPOCH_JDATE,
     USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
 };
-use types_error::{
+use ::types_error::{
     ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
-use types_datetime::{fsec_t, Timestamp, TimestampTz};
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_datetime::{fsec_t, Timestamp, TimestampTz};
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use crate::calendar::{date2j, isleap, j2date};
 
@@ -390,7 +390,7 @@ pub fn timestamp_in_safe(
     typmod: i32,
     mut escontext: Option<&mut SoftErrorContext>,
 ) -> DtResult<Timestamp> {
-    use types_datetime::{DTK_DATE, DTK_EARLY, DTK_EPOCH, DTK_LATE, MAXDATEFIELDS, MAXDATELEN};
+    use ::types_datetime::{DTK_DATE, DTK_EARLY, DTK_EPOCH, DTK_LATE, MAXDATEFIELDS, MAXDATELEN};
 
     let mut fsec: fsec_t = 0;
     let mut tm = pg_tm::default();
@@ -500,7 +500,7 @@ pub fn timestamptz_in_safe(
     typmod: i32,
     mut escontext: Option<&mut SoftErrorContext>,
 ) -> DtResult<TimestampTz> {
-    use types_datetime::{DTK_DATE, DTK_EARLY, DTK_EPOCH, DTK_LATE, MAXDATEFIELDS, MAXDATELEN};
+    use ::types_datetime::{DTK_DATE, DTK_EARLY, DTK_EPOCH, DTK_LATE, MAXDATEFIELDS, MAXDATELEN};
 
     let mut fsec: fsec_t = 0;
     let mut tm = pg_tm::default();
@@ -1349,7 +1349,7 @@ pub fn make_timestamptz(
 /// for the local time in `tm`, returning the GMT offset (seconds, internal
 /// `dt2local` sign convention).
 fn parse_sane_timezone(tm: &mut pg_tm, zone: &str) -> DtResult<i32> {
-    use types_datetime::{
+    use ::types_datetime::{
         DTERR_BAD_FORMAT, DTERR_TZDISP_OVERFLOW, TZNAME_DYNTZ, TZNAME_FIXED_OFFSET,
     };
 
@@ -1939,7 +1939,7 @@ pub fn timestamptz_trunc_internal(
     tzp: &pg_tz,
 ) -> DtResult<TimestampTz> {
     use crate::decode::{DecodeUnits, DetermineTimeZoneOffset};
-    use types_datetime::{
+    use ::types_datetime::{
         DTK_CENTURY, DTK_DAY, DTK_DECADE, DTK_HOUR, DTK_MICROSEC, DTK_MILLENNIUM, DTK_MILLISEC,
         DTK_MINUTE, DTK_MONTH, DTK_QUARTER, DTK_SECOND, DTK_WEEK, DTK_YEAR, UNITS,
     };
@@ -2092,7 +2092,7 @@ pub fn timestamp_zone(zone: &str, timestamp: Timestamp) -> DtResult<TimestampTz>
     use crate::decode::{
         DecodeTimezoneName, DetermineTimeZoneAbbrevOffset, DetermineTimeZoneOffset,
     };
-    use types_datetime::{TZNAME_DYNTZ, TZNAME_FIXED_OFFSET};
+    use ::types_datetime::{TZNAME_DYNTZ, TZNAME_FIXED_OFFSET};
 
     if TIMESTAMP_NOT_FINITE(timestamp) {
         return Ok(timestamp);
@@ -2144,7 +2144,7 @@ pub fn timestamp_zone(zone: &str, timestamp: Timestamp) -> DtResult<TimestampTz>
 /// the named zone `zone`, returning a local `Timestamp`.
 pub fn timestamptz_zone(zone: &str, timestamp: TimestampTz) -> DtResult<Timestamp> {
     use crate::decode::{DecodeTimezoneName, DetermineTimeZoneAbbrevOffsetTS};
-    use types_datetime::{TZNAME_DYNTZ, TZNAME_FIXED_OFFSET};
+    use ::types_datetime::{TZNAME_DYNTZ, TZNAME_FIXED_OFFSET};
 
     if TIMESTAMP_NOT_FINITE(timestamp) {
         return Ok(timestamp);
@@ -2765,11 +2765,11 @@ mod tests {
 
     #[test]
     fn parse_error_sqlstates_match_c() {
-        use types_datetime::{
+        use ::types_datetime::{
             DTERR_BAD_FORMAT, DTERR_FIELD_OVERFLOW, DTERR_INTERVAL_OVERFLOW,
             DTERR_MD_FIELD_OVERFLOW, DTERR_TZDISP_OVERFLOW,
         };
-        use types_error::{
+        use ::types_error::{
             ERRCODE_INTERVAL_FIELD_OVERFLOW, ERRCODE_INVALID_DATETIME_FORMAT,
             ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
         };
@@ -2872,7 +2872,7 @@ mod tests {
     #[ignore = "SetParallelStartTimestamps asserts is_parallel_worker; not unit-isolatable"]
     fn get_sql_current_and_local_timestamp() {
         crate::test_install_seams();
-        use transam_xact::{
+        use ::transam_xact::{
             GetCurrentTransactionStartTimestamp, SetParallelStartTimestamps,
         };
 

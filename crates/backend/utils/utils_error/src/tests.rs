@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use ::types_dest::CommandDest;
-use types_error::{
+use ::types_error::{
     make_sqlstate, ErrorLevel, ErrorLocation, PgError, DEBUG1, ERRCODE_CONNECTION_FAILURE,
     ERRCODE_DISK_FULL, ERRCODE_DUPLICATE_FILE, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_FILE, ERROR, FATAL, INFO, LOG, LOG_DESTINATION_CSVLOG,

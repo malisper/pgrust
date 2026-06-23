@@ -54,7 +54,7 @@ pub fn init_seams() {
     // 0, `log_lock_waits = false`); none come from the ControlFile. Install the
     // owner get/set so the GUC engine's `.read()`/`.set()` reach this storage.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::DeadlockTimeout.install(GucVarAccessors {
             get: globals::DeadlockTimeout,
             set: globals::set_DeadlockTimeout,

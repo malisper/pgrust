@@ -12,7 +12,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_catalog::catalog::{
     COLLATION_RELATION_ID, OPERATOR_CLASS_RELATION_ID, PROCEDURE_RELATION_ID, TYPE_RELATION_ID,

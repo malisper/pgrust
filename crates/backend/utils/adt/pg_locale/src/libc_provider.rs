@@ -19,10 +19,10 @@ extern crate alloc;
 use alloc::format;
 use core::ffi::c_char;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
-use locale::{CollProvider, PgLocaleStruct};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::locale::{CollProvider, PgLocaleStruct};
 use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 
 use pg_locale_catalog_seams as catalog;

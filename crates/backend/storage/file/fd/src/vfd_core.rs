@@ -15,14 +15,14 @@ use std::path::Path;
 
 use aio_seams_2 as aio_seams;
 use dsm_core_seams as ipc_seams;
-use utils_error::{elog, ereport};
-use types_core::{Oid, SubTransactionId};
+use ::utils_error::{elog, ereport};
+use ::types_core::{Oid, SubTransactionId};
 use ::types_tuple::Datum;
-use types_error::{
+use ::types_error::{
     ErrorLevel, ErrorLocation, PgResult, DEBUG2, ERRCODE_INSUFFICIENT_RESOURCES, FATAL, LOG, PANIC,
     WARNING,
 };
-use types_storage::{File, FD_MINFREE};
+use ::types_storage::{File, FD_MINFREE};
 
 // ---------------------------------------------------------------------------
 // fdstate bitflags (fd.c:195-197).
@@ -275,7 +275,7 @@ pub fn set_io_direct_flags(value: i32) {
 /// guards are compile-time false in the default block-size config (both 8192 >=
 /// 4096), so they are likewise absent from the build and omitted here.
 pub fn check_debug_io_direct(newval: &str, _source: types_guc::GucSource) -> Result<i32, String> {
-    use types_storage::{IO_DIRECT_DATA, IO_DIRECT_WAL, IO_DIRECT_WAL_INIT};
+    use ::types_storage::{IO_DIRECT_DATA, IO_DIRECT_WAL, IO_DIRECT_WAL_INIT};
 
     let mut flags = 0;
     // SplitGUCList on ',' for these simple unquoted identifiers is a

@@ -61,13 +61,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ptr::NonNull;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 use ::types_core::primitive::{
     uint16, uint32, uint8, BlockNumber, Buffer, ForkNumber, RelFileNumber, RepOriginId, RmgrId,
     TimeLineID, XLogRecPtr, XLogSegNo,
 };
-use types_core::{
+use ::types_core::{
     InvalidRepOriginId, InvalidTransactionId, InvalidXLogRecPtr, TransactionId,
 };
 use ::types_error::PgResult;

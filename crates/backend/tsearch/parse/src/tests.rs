@@ -18,7 +18,7 @@ use crate::wparser_def::{
     UNSIGNEDINT, WORD_T,
 };
 use ::utils_error::ereport;
-use types_error::{ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERROR};
+use ::types_error::{ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERROR};
 use std::cell::RefCell;
 use std::sync::{Mutex, Once};
 

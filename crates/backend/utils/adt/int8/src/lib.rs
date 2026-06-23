@@ -40,8 +40,8 @@
 //!   pure-int8 arithmetic they perform is the overflow-checked addition already
 //!   ported here.
 
-use numutils::{pg_lltoa, pg_strtoint64_safe, MAX_INT64_DIGITS};
-use types_error::{
+use ::numutils::{pg_lltoa, pg_strtoint64_safe, MAX_INT64_DIGITS};
+use ::types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_DIVISION_BY_ZERO,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_PRECEDING_OR_FOLLOWING_SIZE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,

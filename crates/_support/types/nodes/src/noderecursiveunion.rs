@@ -15,7 +15,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;

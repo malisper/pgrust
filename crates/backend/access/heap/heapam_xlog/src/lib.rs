@@ -54,9 +54,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use mcx::{MemoryContext, Mcx};
+use ::mcx::{MemoryContext, Mcx};
 use ::types_core::primitive::{BlockNumber, OffsetNumber, TransactionId, XLogRecPtr, Oid, BLCKSZ};
-use types_error::{PgError, PgResult, PANIC};
+use ::types_error::{PgError, PgResult, PANIC};
 use ::types_storage::storage::ReadBufferMode;
 use ::types_storage::RelFileLocator;
 use ::types_storage::buf::{Buffer, BufferIsValid, InvalidBuffer};
@@ -82,7 +82,7 @@ use ::xlog_records::heapam_xlog::{
     XLH_UPDATE_PREFIX_FROM_OLD, XLH_UPDATE_SUFFIX_FROM_OLD,
 };
 
-use page::{
+use ::page::{
     ItemIdGetLength, ItemIdGetOffset, ItemIdHasStorage, ItemIdIsNormal, PageAddItemExtended,
     PageClearAllVisible, PageGetFreeSpace, PageGetHeapFreeSpace, PageGetItem, PageGetItemId,
     PageGetMaxOffsetNumber, PageInit, PageIsNew, PageMut, PageRef, PageSetAllVisible, PageSetLSN,
@@ -90,7 +90,7 @@ use page::{
 };
 use ::types_storage::bufpage::{PAI_IS_HEAP, PAI_OVERWRITE};
 
-use xlogutils::{
+use ::xlogutils::{
     standby_state, XLogInitBufferForRedo, XLogReadBufferForRedo, XLogReadBufferForRedoExtended,
 };
 use ::wal::xlogutils::in_hot_standby;

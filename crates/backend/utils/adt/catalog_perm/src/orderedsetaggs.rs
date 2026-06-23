@@ -26,11 +26,11 @@ use alloc::string::ToString;
 use core::any::Any;
 use core::cell::RefCell;
 
-use mcx::{alloc_in, MemoryContext, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, MemoryContext, Mcx, PgBox, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 
 /// The fmgr-ABI bare word (`::datum::Datum`) — what `arg(i).value` carries
 /// and what a `PGFunction` returns.

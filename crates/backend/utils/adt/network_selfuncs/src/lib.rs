@@ -68,31 +68,31 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{InvalidOid, Selectivity};
 use ::types_core::Oid;
 // Canonical unified value (the Datum-unification keystone): the inet/cidr varlena
 // image (`Datum::ByRef`, header included) the detoast edge and the element
 // comparisons operate on.
 use types_tuple::heaptuple::Datum as DatumV;
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::types_network::inet_struct;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     NodeId, PlannerInfo, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_SEMI,
 };
-use types_selfuncs::{
+use ::types_selfuncs::{
     AttStatsSlot, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES,
 };
 
-use adt_network::{bitncmp, bitncommon};
+use ::adt_network::{bitncmp, bitncommon};
 use ::network_seams::inet::datum_get_inet_pp;
-use selfuncs_seams::{
+use ::selfuncs_seams::{
     get_join_variables, get_restriction_variable, mcv_selectivity, release_variable_stats,
     stats_tuple_stanullfrac,
 };
-use lsyscache_seams::{
+use ::lsyscache_seams::{
     get_attstatsslot, get_attstatsslot_value_datums, get_commutator, get_opcode,
 };
 use ::fmgr_seams::function_call2_coll_datum;

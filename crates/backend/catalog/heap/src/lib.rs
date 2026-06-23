@@ -109,9 +109,9 @@ use ::types_core::primitive::{
     AttrNumber, InvalidOid, InvalidRelFileNumber, Oid, OidIsValid, RelFileNumber, TransactionId,
 };
 use ::types_core::xact::{CommandId, InvalidTransactionId};
-use types_core::{FirstUnpinnedObjectId, NAMEDATALEN};
+use ::types_core::{FirstUnpinnedObjectId, NAMEDATALEN};
 use ::types_error::ERROR;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_TOO_MANY_COLUMNS,
 };
@@ -678,7 +678,7 @@ pub fn CheckAttributeType<'mcx>(
 /// `heap_create`'s frozen-xid / created-relation carriers. Defined in the
 /// seams crate (so the cross-unit `heap_create` seam can name them without an
 /// owner dependency); re-exported here for the owner-internal callers.
-pub use heap_seams::{HeapCreateResult, HeapCreateXids};
+pub use ::heap_seams::{HeapCreateResult, HeapCreateXids};
 
 /// `heap_create` — create an uncataloged heap relation.
 ///

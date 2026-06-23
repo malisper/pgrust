@@ -40,11 +40,11 @@ use execTuples_seams as execTuples;
 use execUtils_seams as execUtils;
 use postgres_seams as tcop_postgres;
 use ::utils_error::elog;
-use mcx::{alloc_in, PgBox};
-use types_error::{PgResult, DEBUG2, ERROR};
+use ::mcx::{alloc_in, PgBox};
+use ::types_error::{PgResult, DEBUG2, ERROR};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
 use ::nodes::noderesult::{Result as ResultPlan, ResultState};
-use nodes::{EStateData, PlanStateNode, SlotId};
+use ::nodes::{EStateData, PlanStateNode, SlotId};
 
 /// Install this crate's implementations into its seam slots.
 ///

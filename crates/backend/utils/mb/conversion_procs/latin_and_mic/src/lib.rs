@@ -23,7 +23,7 @@
 #![allow(clippy::result_large_err)]
 
 use ::utils_error::PgResult;
-use conv_string_helpers::{latin2mic, mic2latin, ConversionResult};
+use ::conv_string_helpers::{latin2mic, mic2latin, ConversionResult};
 use ::conv_string_helpers::make_conversion_builtin;
 use ::mbutils_seams::check_encoding_conversion_args;
 use ::types_wchar::encoding::{pg_enc, PG_LATIN1, PG_LATIN3, PG_LATIN4, PG_MULE_INTERNAL};

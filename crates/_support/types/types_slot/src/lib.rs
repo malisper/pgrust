@@ -11,7 +11,7 @@
 //! `TupleTableSlot` and the per-kind behaviour is selected by `tts_ops`.
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{AttrNumber, Oid, Size};
 use ::types_error::PgResult;
 use ::types_storage::buf::Buffer;

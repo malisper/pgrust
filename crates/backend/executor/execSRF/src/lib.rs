@@ -37,7 +37,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::utils_error::ereport;
-use mcx::{Mcx, MemoryContext, PgBox};
+use ::mcx::{Mcx, MemoryContext, PgBox};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::Oid;
 use ::datum::NullableDatum;
@@ -45,7 +45,7 @@ use ::types_error::error::{
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_E_R_I_E_SRF_PROTOCOL_VIOLATED, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INTERNAL_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
 };
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::nodes::execexpr::{ExprDoneCond, SetExprState};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::{
@@ -53,7 +53,7 @@ use ::nodes::funcapi::{
     SFRM_Materialize_Preferred, SFRM_Materialize_Random, SFRM_ValuePerCall,
 };
 use ::nodes::primnodes::Expr;
-use nodes::{EcxtId, EStateData, PlanStateData, SlotId, TupleSlotKind};
+use ::nodes::{EcxtId, EStateData, PlanStateData, SlotId, TupleSlotKind};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::TupleDescData;
 

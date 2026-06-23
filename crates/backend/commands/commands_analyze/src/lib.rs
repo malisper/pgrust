@@ -41,10 +41,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_LOCK_NOT_AVAILABLE,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_TABLE, DEBUG2, ERROR, INFO, LOG, WARNING,
 };
@@ -60,12 +60,12 @@ use ::types_tuple::access::{
 };
 use ::types_tuple::heaptuple::ItemPointerData;
 use ::types_tuple::pg_type::FormData_pg_type;
-use types_tuple::{Datum, FormedTuple, TupleDesc};
+use ::types_tuple::{Datum, FormedTuple, TupleDesc};
 
 use ::nodes::rawnodes::RangeVar;
 use ::rel::Relation;
 
-use statistics::{
+use ::statistics::{
     AnalyzeAttrComputeStatsFunc, AnalyzeAttrFetchFunc, VacAttrStats, Anum_pg_statistic_staattnum,
     Anum_pg_statistic_stacoll1, Anum_pg_statistic_stadistinct, Anum_pg_statistic_stainherit,
     Anum_pg_statistic_stakind1, Anum_pg_statistic_stanullfrac, Anum_pg_statistic_stanumbers1,
@@ -83,7 +83,7 @@ use ::types_sortsupport::SortSupportData;
 // owner seam crates (outward) + landed direct deps -------------------------
 use analyze_rt_seams as rt;
 
-use table::{table_close, table_open, try_table_open};
+use ::table::{table_close, table_open, try_table_open};
 use ::table_tableam::table_slot_create;
 use table_tableam_seams as tableam;
 
@@ -1217,7 +1217,7 @@ fn acquire_sample_rows<'mcx>(
     totaldeadrows: &mut f64,
     bstrategy: BufferAccessStrategy,
 ) -> PgResult<i32> {
-    use sampling::{
+    use ::sampling::{
         reservoir_get_next_S, reservoir_init_selection_state, sampler_random_fract,
         BlockSampler_HasMore, BlockSampler_Init, BlockSampler_Next, BlockSamplerData,
         ReservoirStateData,

@@ -14,9 +14,9 @@
 
 use alloc::format;
 use alloc::string::String;
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use crate::{
     deparse_context_for_old_new, deparse_expression_pretty, generate_function_name_catalog,

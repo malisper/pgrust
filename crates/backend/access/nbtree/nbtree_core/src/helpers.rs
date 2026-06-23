@@ -6,10 +6,10 @@
 //! / tuple byte image exactly as in C (mirroring the `nbtdedup` idiom — never a
 //! raw struct cast).
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::{BlockNumber, OffsetNumber};
 use ::types_error::PgResult;
-use types_nbtree::{
+use ::types_nbtree::{
     BTCycleId, BT_IS_POSTING, BT_OFFSET_MASK, BT_PIVOT_HEAP_TID_ATTR, INDEX_ALT_TID_MASK,
 };
 use ::types_storage::storage::Buffer;
@@ -17,7 +17,7 @@ use ::types_tuple::heaptuple::{
     BlockIdData, IndexTupleData, IndexTupleSize, ItemPointerData,
 };
 
-use page::{
+use ::page::{
     ItemPointerGetOffsetNumberNoCheck, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
     PageGetSpecialPointer, PageIsNew, PageRef,
 };

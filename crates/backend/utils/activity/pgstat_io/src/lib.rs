@@ -19,12 +19,12 @@
 use core::cell::{Cell, RefCell};
 
 use instrument as instrument;
-use lwlock_seams::{
+use ::lwlock_seams::{
     lwlock_acquire, lwlock_conditional_acquire, lwlock_initialize,
 };
 use ::activity_pgstat::kind_info::KindInfoBuilder;
 use ::activity_pgstat::registry;
-use init_small_seams::{my_backend_type, my_proc_number};
+use ::init_small_seams::{my_backend_type, my_proc_number};
 use ::instr_time::instr_time_set_current;
 use ::types_core::instrument::instr_time;
 use ::types_core::init::{BackendType, BACKEND_NUM_TYPES};
@@ -37,7 +37,7 @@ use ::types_pgstat::activity_pgstat::{
 use ::types_pgstat::pgstat_internal::{
     PgStat_KindInfo, PgStat_ShmemControl, PgStat_Snapshot,
 };
-use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
+use ::types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
 thread_local! {
     /// `static PgStat_PendingIO PendingIOStats;` — backend-local pending IO

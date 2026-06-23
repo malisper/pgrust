@@ -23,13 +23,13 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::{Const, Expr, NullTestType, AND_EXPR, NOT_EXPR, OR_EXPR};
 use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use pathnodes::{
+use ::pathnodes::{
     JoinType, NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, StatisticExtInfo,
 };
-use statistics::{MCVList, STATS_EXT_MCV, STATS_MAX_DIMENSIONS};
+use ::statistics::{MCVList, STATS_EXT_MCV, STATS_MAX_DIMENSIONS};
 use types_tuple::heaptuple::Datum;
 
 use nodeFuncs_seams as nodefuncs;

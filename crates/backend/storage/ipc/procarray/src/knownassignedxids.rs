@@ -9,11 +9,11 @@
 //! `RunningTransactionsData` input comes from standby and pg_subtrans is read
 //! via the subtrans seam.
 
-use types_core::{
+use ::types_core::{
     FirstNormalTransactionId, FullTransactionId, InvalidTransactionId, TransactionId,
     TransactionIdIsNormal, TransactionIdIsValid,
 };
-use types_error::{ErrorLevel, PgError, PgResult, DEBUG1, DEBUG3, DEBUG4, LOG};
+use ::types_error::{ErrorLevel, PgError, PgResult, DEBUG1, DEBUG3, DEBUG4, LOG};
 use ::types_storage::storage::{
     RunningTransactionsData, SUBXIDS_IN_ARRAY, SUBXIDS_IN_SUBTRANS, SUBXIDS_MISSING,
 };

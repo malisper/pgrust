@@ -14,7 +14,7 @@
 //! `pg_noreturn` in C: this never returns (it ends through `proc_exit` or runs
 //! `PostgresMain` forever), so the Rust signature is `-> !`.
 
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
 use ::types_guc::guc::GucContext;
 
 use postgres_seams as s;

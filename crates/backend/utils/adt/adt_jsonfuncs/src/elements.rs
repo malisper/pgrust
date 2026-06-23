@@ -21,7 +21,7 @@ use ::utils_error::ereport;
 use ::mcx::Mcx;
 use ::types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use ::types_error::PgResult;
-use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
+use ::types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::JsonbValue;
 use ::types_jsonb::jsonb::{
     jbvType, json_container_is_array, json_container_is_scalar, JsonbIteratorToken,
@@ -29,7 +29,7 @@ use ::types_jsonb::jsonb::{
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::types_tuple::Datum;
 
-use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb};
+use ::jsonb_util::{JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb};
 use funcapi_seams as funcapi;
 
 /// One emitted element row's column value: `None` is a SQL NULL, `Some(bytes)`

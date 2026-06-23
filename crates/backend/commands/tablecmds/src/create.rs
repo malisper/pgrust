@@ -6,13 +6,13 @@
 #![allow(clippy::too_many_arguments)]
 
 use ::utils_error::ereport;
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
 
-use types_acl::{ACLCHECK_OK, ACL_CREATE, ACL_USAGE};
+use ::types_acl::{ACLCHECK_OK, ACL_CREATE, ACL_USAGE};
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use ::types_core::AttrNumber;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
@@ -36,14 +36,14 @@ use ::common_relation::relation_open;
 use indexing_seams as indexing_seam;
 use relcache_seams as relcache_seam;
 use ::cache_syscache::SearchSysCacheAttNum;
-use tupdesc::{
+use ::tupdesc::{
     populate_compact_attribute, CreateTemplateTupleDesc, TupleDescInitEntry,
     TupleDescInitEntryCollation,
 };
 use ::transam_xact::CommandCounterIncrement;
 use aclchk_seams as aclchk_seam;
-use heap_seams::{heap_create_with_catalog, HeapCreateWithCatalogArgs};
-use catalog_namespace::{RangeVarGetAndCheckCreationNamespace, RangeVarGetRelid};
+use ::heap_seams::{heap_create_with_catalog, HeapCreateWithCatalogArgs};
+use ::catalog_namespace::{RangeVarGetAndCheckCreationNamespace, RangeVarGetRelid};
 use tablespace_globals_seams as ts_globals_seam;
 use tablespace_seams as ts_seam;
 use lsyscache_seams as lsyscache_seam;
@@ -1279,7 +1279,7 @@ pub(crate) fn get_attribute_compression(
     atttypid: Oid,
     compression: Option<&str>,
 ) -> PgResult<i8> {
-    use toast_compression::{
+    use ::toast_compression::{
         compression_name_to_method, INVALID_COMPRESSION_METHOD,
     };
 

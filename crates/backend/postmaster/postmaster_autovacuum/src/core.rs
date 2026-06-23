@@ -12,9 +12,9 @@
 
 use ::core::cell::Cell;
 
-use types_core::{InvalidBlockNumber, InvalidOid, MultiXactId, Oid, TransactionId};
+use ::types_core::{InvalidBlockNumber, InvalidOid, MultiXactId, Oid, TransactionId};
 
-pub use types_autovacuum::{AutovacTable, AvlDbase, AvRelation, AvwDbase};
+pub use ::types_autovacuum::{AutovacTable, AvlDbase, AvRelation, AvwDbase};
 
 /* =========================================================================
  * GUC parameters (`autovacuum.c` lines 118-136). Per-backend GUC knobs, set by

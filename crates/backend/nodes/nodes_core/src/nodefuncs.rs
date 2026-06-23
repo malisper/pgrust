@@ -62,7 +62,7 @@
 
 #![allow(non_snake_case)]
 
-use types_core::{Oid, InvalidOid};
+use ::types_core::{Oid, InvalidOid};
 use ::nodes::primnodes::{
     self, etag, ArrayExpr, CaseExpr, CaseWhen, Const, Expr, JsonConstructorExpr, JsonExpr, OpExpr,
     RelabelType, ScalarArrayOpExpr, SubLink,
@@ -70,7 +70,7 @@ use ::nodes::primnodes::{
 use ::nodes::primnodes::{CoercionForm, SubLinkType, XmlExprOp};
 use lsyscache_seams as lsyscache;
 use format_type_seams as format_type;
-use types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT};
+use ::types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT};
 
 // Well-known pg_type / pg_collation OIDs (pg_type.dat / pg_collation.dat).
 // types-core exports BOOLOID / INT4OID / C_COLLATION_OID; the rest are spelled

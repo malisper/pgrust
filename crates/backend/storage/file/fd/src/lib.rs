@@ -249,7 +249,7 @@ pub fn init_seams() {
     // per-backend `vfd_core` global; install accessors so the GUC engine
     // reads/writes the same storage this unit reads.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::max_files_per_process.install(GucVarAccessors {
             get: vfd_core::max_files_per_process,
             set: vfd_core::set_max_files_per_process,

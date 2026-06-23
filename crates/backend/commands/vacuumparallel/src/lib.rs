@@ -62,11 +62,11 @@ use std::collections::BTreeMap;
 use std::thread_local;
 
 use ::utils_error::ereport;
-use types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERROR};
+use ::types_error::{ErrorLevel, ErrorLocation, PgError, PgResult, DEBUG1, DEBUG2, ERROR};
 
 use ::types_core::instrument::{BufferUsage, WalUsage};
 use ::types_core::Oid;
-use types_dsa::{DsaHandle, DsaPointer};
+use ::types_dsa::{DsaHandle, DsaPointer};
 use ::execparallel::ParallelContextHandle;
 use ::types_storage::buf::BufferAccessStrategy;
 use ::types_storage::lock::{NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};

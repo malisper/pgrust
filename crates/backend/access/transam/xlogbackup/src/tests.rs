@@ -4,7 +4,7 @@
 //! the lastditch `tzparse`) so the `%Z` zone abbreviation is deterministic.
 
 use super::*;
-use localtime::{state, tzparse};
+use ::localtime::{state, tzparse};
 use ::types_core::MAXPGPATH;
 
 /// Substring search over the raw bytes, mirroring C `strstr` over the

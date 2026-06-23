@@ -31,7 +31,7 @@
 #![allow(non_upper_case_globals)]
 
 use ::types_core::primitive::Oid;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
 };
 use ::opclass::IndexAmInfo;

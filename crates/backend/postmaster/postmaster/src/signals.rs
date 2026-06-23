@@ -11,10 +11,10 @@
 
 #![allow(non_snake_case)]
 
-use pmsignal::{
+use ::pmsignal::{
     CheckPostmasterSignal, PMSignalReason, QuitSignalReason, SetQuitSignalReason,
 };
-use types_error::{DEBUG2, LOG};
+use ::types_error::{DEBUG2, LOG};
 
 use crate::core::{
     btmask, pm, pm_mut, PMState, FAST_SHUTDOWN, IMMEDIATE_SHUTDOWN, NO_SHUTDOWN, SIGINT, SIGQUIT,

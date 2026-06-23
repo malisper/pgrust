@@ -8,8 +8,8 @@
 //! `lazy_vacuum_heap_page` / `heap_page_is_all_visible`) live in
 //! [`crate::heap_vacuum`].
 
-use utils_error::{ereport};
-use types_error::{ErrorLocation, WARNING};
+use ::utils_error::{ereport};
+use ::types_error::{ErrorLocation, WARNING};
 use ::types_error::PgResult;
 
 use crate::consts::{

@@ -5,7 +5,7 @@
 //! then a call panics loudly. The reconstructed node tree is allocated in the
 //! caller's context (C: `stringToNode` palloc's in `CurrentMemoryContext`).
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 

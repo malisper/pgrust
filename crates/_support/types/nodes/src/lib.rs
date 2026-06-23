@@ -202,7 +202,7 @@ pub use nodenestloop::{NestLoop, NestLoopParam, NestLoopStateData};
 pub use nodeseqscan::{SeqScan, SeqScanState};
 pub use nodeindexscan::{Scan, SubqueryScan, SubqueryScanStatus};
 pub use pathnodes::PathNode;
-pub use types_slot::{TupleSlotKind, TupleTableSlot};
+pub use ::types_slot::{TupleSlotKind, TupleTableSlot};
 pub use tuptable::{
     AttInMetadata, BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotBase,
     SlotData, TupOutputState, TupleTableSlotOps, VirtualTupleTableSlot,

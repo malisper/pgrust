@@ -17,11 +17,11 @@
 //! field — the lock is the driver's concern) is the marshaled view the seam
 //! passes/returns; the shared layout below is the on-the-wire DSM record.
 
-use types_core::{pid_t, Oid, ProcNumber, TimestampTz, XLogRecPtr};
+use ::types_core::{pid_t, Oid, ProcNumber, TimestampTz, XLogRecPtr};
 use ::types_parallel::FixedParallelState;
 use ::types_storage::storage::Spinlock;
 
-use s_lock::{s_lock_macro, s_unlock};
+use ::s_lock::{s_lock_macro, s_unlock};
 
 /// The DSM-resident `FixedParallelState` record (`parallel.c:82`), field-for-
 /// field with the C struct including the `mutex` `slock_t` between

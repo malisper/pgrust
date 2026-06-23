@@ -1,8 +1,8 @@
 use super::*;
 
-use mcx::{slice_in, MemoryContext, PgString, PgVec};
+use ::mcx::{slice_in, MemoryContext, PgString, PgVec};
 use ::types_error::PgResult;
-use wal::{DecodedXLogRecord, XLogRecord, XLR_INFO_MASK};
+use ::wal::{DecodedXLogRecord, XLogRecord, XLR_INFO_MASK};
 
 /// Build a `DecodedXLogRecord` carrying `info` and `data` as its main data
 /// and render it with `f`.

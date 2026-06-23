@@ -24,15 +24,15 @@ pub mod fmgr_builtins;
 
 use alloc::format;
 
-use mcx::{Mcx, PgString, PgVec};
-use types_core::{Oid, C_COLLATION_OID, NAMEDATALEN};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_core::{Oid, C_COLLATION_OID, NAMEDATALEN};
 use ::datum::Bytea;
-use types_error::{PgResult, ERRCODE_NAME_TOO_LONG};
+use ::types_error::{PgResult, ERRCODE_NAME_TOO_LONG};
 use ::types_sortsupport::SortSupportData;
 use ::stringinfo::StringInfo;
 use ::types_tuple::heaptuple::{NameData, NAMEOID};
 
-use pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgtext, pq_sendtext};
+use ::pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgtext, pq_sendtext};
 use ::varlena::comparison::varstr_cmp;
 use ::varlena::sortsupport::{varstr_sortsupport, VarStrSortSupport};
 use ::types_error::PgError;

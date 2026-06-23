@@ -22,26 +22,26 @@
 
 use alloc::vec::Vec;
 use crate::gistxlog::{gist_get_fake_lsn, gist_xlog_delete, gist_xlog_split, gist_xlog_update};
-use bufmgr_seams::{
+use ::bufmgr_seams::{
     buffer_get_block_number, buffer_get_lsn_atomic, buffer_get_page, lock_buffer,
     mark_buffer_dirty, read_buffer, release_buffer, unlock_release_buffer, with_buffer_page,
 };
-use predicate_seams::{
+use ::predicate_seams::{
     check_for_serializable_conflict_in_page, predicate_lock_page_split,
 };
-use page::{
+use ::page::{
     PageAddItemExtended, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
     PageGetTempPageCopySpecial, PageIndexMultiDelete, PageIndexTupleDelete,
     PageIndexTupleOverwrite, PageMut, PageRef, PageRestoreTempPage,
 };
-use utils_error::{ereport, PgResult};
-use mcx::{Mcx, PgVec};
+use ::utils_error::{ereport, PgResult};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, Size, TransactionId, XLogRecPtr,
 };
 use ::types_core::xact::InvalidTransactionId;
 use ::types_error::error::{ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR};
-use gist::{
+use ::gist::{
     gistxlogPage, GISTInsertStack, GISTInsertState, GISTPageSplitInfo, GISTSTATE, GistBuildLSN,
     GistSplitVector, SplitPageLayout, F_LEAF, GIST_MAX_SPLIT_PAGES, GIST_ROOT_BLKNO,
 };

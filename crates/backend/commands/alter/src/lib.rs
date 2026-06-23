@@ -35,11 +35,11 @@
 
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR,
 };
 
-use types_acl::{ACLCHECK_OK, ACL_CREATE};
+use ::types_acl::{ACLCHECK_OK, ACL_CREATE};
 use ::types_catalog::catalog::{
     COLLATION_RELATION_ID as CollationRelationId, CONVERSION_RELATION_ID as ConversionRelationId,
     DATABASE_RELATION_ID as DatabaseRelationId, EVENT_TRIGGER_RELATION_ID as EventTriggerRelationId,
@@ -72,13 +72,13 @@ use ::nodes::parsenodes::{
     OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY, OBJECT_TSPARSER, OBJECT_TSTEMPLATE, OBJECT_TYPE,
     OBJECT_VIEW,
 };
-use parsenodes::{
+use ::parsenodes::{
     AlterObjectDependsStmt, AlterObjectSchemaStmt, AlterOwnerStmt, Node, RenameStmt,
 };
 use ::types_tuple::heaptuple::{Datum, FormedTuple};
 
 use ::heaptuple::heap_modify_tuple;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use objectaddress as oa;
 use ::types_storage::lock::{AccessExclusiveLock, NoLock, RowExclusiveLock};
 

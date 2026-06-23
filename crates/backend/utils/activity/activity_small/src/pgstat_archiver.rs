@@ -8,9 +8,9 @@ use crate::changecount::{
     pgstat_begin_changecount_write, pgstat_copy_changecounted_stats,
     pgstat_end_changecount_write,
 };
-use lwlock_seams::{lwlock_acquire, lwlock_initialize};
+use ::lwlock_seams::{lwlock_acquire, lwlock_initialize};
 use ::init_small_seams::my_proc_number;
-use pgstat_seams::{
+use ::pgstat_seams::{
     snapshot_fixed, with_shmem_archiver, with_snapshot_archiver,
 };
 use ::timestamp_seams::get_current_timestamp;
@@ -20,7 +20,7 @@ use ::types_pgstat::activity_pgstat::{
     PgStatShared_Archiver, PgStat_ArchiverStats, WAL_NAME_LEN,
 };
 use ::types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
-use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
+use ::types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
 pub use ::types_pgstat::activity_pgstat::PGSTAT_KIND_ARCHIVER;
 

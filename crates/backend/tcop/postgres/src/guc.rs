@@ -21,7 +21,7 @@
 use std::cell::Cell;
 
 use ::mcx::MemoryContext;
-use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, FATAL};
+use ::types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, FATAL};
 use ::types_guc::guc::{GucContext, GucSource};
 use ::types_startup::DispatchOption;
 
@@ -574,7 +574,7 @@ pub fn install_guc_hooks() {
     // `restrict_nonsystem_relation_kind_string` (postgres.c); install its slot
     // over the string backing cell. The check/assign hooks above turn the
     // string into the parsed `restrict_nonsystem_relation_kind` bitmask.
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
     vars::restrict_nonsystem_relation_kind_string.install(GucVarAccessors {
         get: restrict_nonsystem_relation_kind_string,
         set: set_restrict_nonsystem_relation_kind_string,

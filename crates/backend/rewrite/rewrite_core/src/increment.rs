@@ -19,7 +19,7 @@ use ::nodes_core::node_walker::{
     range_table_mutator,
 };
 use ::utils_error::ereport;
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::{RangeTblEntry, RTEKind};

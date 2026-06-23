@@ -16,7 +16,7 @@ extern crate alloc;
 use alloc::string::String;
 
 use ::types_error::PgResult;
-use parsenodes::{RawParseMode, TypeName};
+use ::parsenodes::{RawParseMode, TypeName};
 
 seam_core::seam!(
     /// `(void) raw_parser(stmt, parseMode)` (parser/parser.c) — raw-parse the SQL

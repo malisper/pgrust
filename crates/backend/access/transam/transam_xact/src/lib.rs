@@ -44,11 +44,11 @@
 
 use std::cell::RefCell;
 
-use utils_error::{elog, ereport, message_level_is_interesting};
+use ::utils_error::{elog, ereport, message_level_is_interesting};
 use ::mcx::MemoryContext;
 use ::types_core::xact::*;
-use types_core::{LocalTransactionId, TimestampTz, TransactionId, XLogRecPtr};
-use types_error::{
+use ::types_core::{LocalTransactionId, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_error::{
     ErrorLocation, PgError, PgResult, DEBUG5, ERRCODE_ACTIVE_SQL_TRANSACTION,
     ERRCODE_INVALID_TRANSACTION_STATE, ERRCODE_NO_ACTIVE_SQL_TRANSACTION,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_READ_ONLY_SQL_TRANSACTION,
@@ -1643,7 +1643,7 @@ fn convert_stats(stats: &[::types_core::xact::XlXactStatsItem]) -> Vec<::wal::Xl
 fn seam_xact_log_commit_record(
     args: &::wal::xact_records::XactLogCommitRecordArgs,
 ) -> PgResult<XLogRecPtr> {
-    use types_storage::{SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
+    use ::types_storage::{SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
 
     // C passes `SharedInvalidationMessage *invalmsgs`; the 2PC caller marshals
     // them as the on-the-wire bytes (their `to_wire_bytes` form, read from the
@@ -1747,7 +1747,7 @@ pub fn init_seams() {
     // the GUC engine reads/writes them. (XactIsoLevel/DefaultXactIsoLevel are
     // enum GUCs carried as i32; the rest are bools.)
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::XactIsoLevel.install(GucVarAccessors { get: XactIsoLevel, set: SetXactIsoLevel });
         vars::DefaultXactIsoLevel
             .install(GucVarAccessors { get: DefaultXactIsoLevel, set: SetDefaultXactIsoLevel });

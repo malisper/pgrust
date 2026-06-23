@@ -16,7 +16,7 @@
 
 use ::mcx::Mcx;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::Node;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::portalcmds::ParamListInfo;
@@ -26,7 +26,7 @@ use ::types_tuple::Datum;
 
 use ::types_acl::acl::ACLCHECK_OK;
 use ::types_acl::ACL_EXECUTE;
-use types_error::{ERRCODE_TOO_MANY_ARGUMENTS, ERROR};
+use ::types_error::{ERRCODE_TOO_MANY_ARGUMENTS, ERROR};
 use ::utils_error::ereport;
 
 /// `RECORDOID` (pg_type.h).

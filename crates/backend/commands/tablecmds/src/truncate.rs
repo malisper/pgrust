@@ -7,10 +7,10 @@
 use ::utils_error::ereport;
 use ::mcx::Mcx;
 
-use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_TRUNCATE};
+use ::types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_TRUNCATE};
 use ::types_core::primitive::{Oid, OidIsValid};
 use ::types_core::SubTransactionId;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };

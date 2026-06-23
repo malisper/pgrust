@@ -30,31 +30,31 @@
 //! and the post-create object-access hook (`InvokeObjectPostCreateHook` →
 //! objectaccess).
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 
-use utils_error::{ereport, PgResult};
-use types_error::{
+use ::utils_error::{ereport, PgResult};
+use ::types_error::{
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 
 use ::types_catalog::catalog::{ACCESS_METHOD_RELATION_ID, PROCEDURE_RELATION_ID};
-use types_core::{
+use ::types_core::{
     InvalidOid, Oid, OidIsValid, INDEX_AM_HANDLEROID, INTERNALOID, TABLE_AM_HANDLEROID,
 };
 use ::nodes::parsenodes::CreateAmStmt;
 use ::types_storage::lock::RowExclusiveLock;
 
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use ::indexing_seams::catalog_tuple_insert_pg_am;
 use ::objectaccess_seams::invoke_object_post_create_hook;
-use pg_depend_seams::{recordDependencyOn, recordDependencyOnCurrentExtension};
+use ::pg_depend_seams::{recordDependencyOn, recordDependencyOnCurrentExtension};
 use ::parse_func_seams::lookup_func_name;
 use ::format_type_seams::format_type_be;
-use lsyscache_seams::{get_func_name, get_func_rettype};
-use syscache_seams::{get_am_oid_by_name, search_am_by_name, search_am_name};
+use ::lsyscache_seams::{get_func_name, get_func_rettype};
+use ::syscache_seams::{get_am_oid_by_name, search_am_by_name, search_am_name};
 use ::miscinit_seams::superuser;
 
 /// `AMTYPE_INDEX` — index access method (`catalog/pg_am.h`).

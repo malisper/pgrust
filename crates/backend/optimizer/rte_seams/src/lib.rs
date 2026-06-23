@@ -70,7 +70,7 @@
 
 use ::types_core::primitive::Index;
 use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use pathnodes::{JoinType, PlannerInfo, QueryId, RTEKind};
+use ::pathnodes::{JoinType, PlannerInfo, QueryId, RTEKind};
 
 /* ======================================================================
  * RTE field projections — `root->simple_rte_array[rti]->field`.
@@ -711,7 +711,7 @@ fn parse_onconflict<'mcx>(
 ) -> types_error::PgResult<
     Option<::plancat_ext_seams::OnConflictInfo>,
 > {
-    use plancat_ext_seams::{InferenceElemInfo, OnConflictInfo};
+    use ::plancat_ext_seams::{InferenceElemInfo, OnConflictInfo};
     use ::nodes::primnodes::Expr;
 
     let mcx = run.mcx();

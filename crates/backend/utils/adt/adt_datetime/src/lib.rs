@@ -119,7 +119,7 @@ mod fmgr_builtins;
 // Re-exports of the shared ABI vocabulary (owned by `types::datetime`).
 // ---------------------------------------------------------------------------
 
-pub use types_datetime::{
+pub use ::types_datetime::{
     datetkn, fsec_t, pg_itm, pg_itm_in, DateADT, DateTimeErrorExtra, Interval, TimeADT, TimeOffset,
     TimeTzADT, Timestamp, TimestampTz,
 };

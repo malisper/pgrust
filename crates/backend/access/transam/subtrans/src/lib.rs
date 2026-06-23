@@ -31,25 +31,25 @@
 
 use std::cell::{Cell, RefCell};
 
-use slru::{
+use ::slru::{
     SimpleLruAutotuneBuffers, SimpleLruGetBankLock, SimpleLruInit, SimpleLruReadPage,
     SimpleLruReadPage_ReadOnly, SimpleLruShmemSize, SimpleLruTruncate, SimpleLruWriteAll,
     SimpleLruWritePage, SimpleLruZeroPage, SlruCtlData, SlruPagePrecedesUnitTests,
     SLRU_MAX_ALLOWED_BUFFERS,
 };
-use transam::{
+use ::transam::{
     TransactionIdFollows, TransactionIdFollowsOrEquals, TransactionIdPrecedes,
 };
-use lwlock::{LWLockAcquire, LWLockRelease};
-use utils_error::{ereport, PgError, PgResult};
+use ::lwlock::{LWLockAcquire, LWLockRelease};
+use ::utils_error::{ereport, PgError, PgResult};
 use init_small_seams as globals;
 
-use types_core::{
+use ::types_core::{
     FirstNormalTransactionId, InvalidTransactionId, MaxTransactionId, Size, TransactionId, BLCKSZ,
 };
-use types_error::{ErrorLocation, ERROR};
+use ::types_error::{ErrorLocation, ERROR};
 use ::types_storage::sync::SyncRequestHandler;
-use types_storage::{LWTRANCHE_SUBTRANS_BUFFER, LWTRANCHE_SUBTRANS_SLRU, LW_EXCLUSIVE};
+use ::types_storage::{LWTRANCHE_SUBTRANS_BUFFER, LWTRANCHE_SUBTRANS_SLRU, LW_EXCLUSIVE};
 
 /// `SUBTRANS_XACTS_PER_PAGE` — number of subtransaction parent slots per page:
 /// `BLCKSZ / sizeof(TransactionId)`. We need four bytes per xact.
@@ -577,7 +577,7 @@ fn with_ctl<R>(f: impl FnOnce(&mut SubTransState) -> R) -> R {
 /// Install this crate's inward seams and GUC slots.
 pub fn init_seams() {
     use subtrans_seams as seams;
-    use guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
+    use ::guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
     use ::types_guc::guc::GucSource;
 
     seams::sub_trans_get_parent::set(|xid| with_ctl(|st| SubTransGetParent(st, xid)));

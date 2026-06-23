@@ -59,8 +59,8 @@ use ::mcx::Mcx;
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::instrument::{instr_time, BufferUsage};
 use ::types_dest::dest::CommandDest;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
-use types_explain::{ExplainSerializeOption, ExplainState};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_explain::{ExplainSerializeOption, ExplainState};
 use ::nodes::tuptable::SlotData;
 use ::stringinfo::StringInfo;
 use ::types_tuple::heaptuple::TupleDescData;
@@ -69,7 +69,7 @@ use execTuples_seams as exectuples_s;
 use lsyscache_seams as lsyscache_s;
 use fmgr_seams as fmgr_s;
 
-use pqformat::{
+use ::pqformat::{
     pq_beginmessage_reuse, pq_sendbytes, pq_sendcountedtext, pq_sendint16, pq_sendint32,
 };
 

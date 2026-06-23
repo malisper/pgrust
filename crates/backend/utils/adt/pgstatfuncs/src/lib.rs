@@ -27,7 +27,7 @@
 
 use ::datum::Datum;
 use ::types_error::PgResult;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use ::types_pgstat::activity_pgstat::{
     PGSTAT_KIND_ARCHIVER, PGSTAT_KIND_BGWRITER, PGSTAT_KIND_CHECKPOINTER, PGSTAT_KIND_FUNCTION,

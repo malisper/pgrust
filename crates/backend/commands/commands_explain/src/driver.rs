@@ -16,10 +16,10 @@ use alloc::string::String;
 use ::mcx::Mcx;
 use ::types_core::Oid;
 use ::error_fgram::ereport;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERROR,
 };
-use types_explain::{ExplainFormat, ExplainSerializeOption, ExplainState};
+use ::types_explain::{ExplainFormat, ExplainSerializeOption, ExplainState};
 use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use ::nodes::ddlnodes::DefElem;
 use ::nodes::parsenodes::{OBJECT_MATVIEW, OBJECT_TABLE};

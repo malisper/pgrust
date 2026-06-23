@@ -7,7 +7,7 @@
 #![allow(dead_code)]
 
 use ::utils_error::ereport;
-use types_error::{ErrorLevel, ErrorLocation, DEBUG1};
+use ::types_error::{ErrorLevel, ErrorLocation, DEBUG1};
 
 use crate::core::{
     SIGABRT, SIGCHLD, SIGHUP, SIGINT, SIGKILL, SIGQUIT, SIGTERM, SIGUSR1, SIGUSR2,

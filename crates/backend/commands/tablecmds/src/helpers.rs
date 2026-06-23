@@ -7,7 +7,7 @@
 use ::utils_error::ereport;
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::Oid;
-use types_error::{ErrorLocation, PgResult, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE};
+use ::types_error::{ErrorLocation, PgResult, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE};
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::RangeVar;
 use ::types_tuple::access::RangeVar as AccessRangeVar;
@@ -108,7 +108,7 @@ use ::types_tuple::access::{
     RELKIND_VIEW,
 };
 
-use types_error::{ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_TABLE};
+use ::types_error::{ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_TABLE};
 const ERRCODE_UNDEFINED_TABLE_STR: ::types_error::SqlState = ERRCODE_UNDEFINED_TABLE;
 const ERRCODE_UNDEFINED_OBJECT_STR: ::types_error::SqlState = ERRCODE_UNDEFINED_OBJECT;
 

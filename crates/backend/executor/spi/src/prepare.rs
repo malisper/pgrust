@@ -32,15 +32,15 @@
 use core::cell::RefCell;
 
 use ::utils_error::ereport;
-use mcx::{MemoryContext, Mcx, PgVec};
+use ::mcx::{MemoryContext, Mcx, PgVec};
 use ::types_core::Oid;
-use types_error::{PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
+use ::types_error::{PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::CmdType;
 use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};
 use ::nodes::parsestmt::CachedPlanHandle;
 use ::types_resowner::ResourceOwner;
-use types_ri_triggers::{ResultColumn, SpiExecResult, SpiPlanPtr};
+use ::types_ri_triggers::{ResultColumn, SpiExecResult, SpiPlanPtr};
 use ::types_tuple::Datum;
 use ::types_xml::SpiResult;
 

@@ -22,8 +22,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
-use types_core::{InvalidTransactionId, InvalidXLogRecPtr};
+use ::types_core::{TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::{InvalidTransactionId, InvalidXLogRecPtr};
 use ::wal::wal::TimeLineHistoryEntry;
 use ::wal::xlog_consts::MAXFNAMELEN;
 

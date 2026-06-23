@@ -5,7 +5,7 @@
 //! [`crate::boxes`] / [`crate::io`].
 
 use ::types_core::geo::{Point, BOX, CIRCLE};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use crate::f8::{float8_div, float8_mi, float8_mul, float8_pl};
 use crate::poly::make_bound_box;

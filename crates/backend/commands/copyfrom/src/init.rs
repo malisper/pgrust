@@ -14,13 +14,13 @@
 //! panic; the no-transcoding text path the driver exercises end-to-end never
 //! reaches them.
 
-use mcx::{Mcx, MemoryContext};
-use types_copy::{
+use ::mcx::{Mcx, MemoryContext};
+use ::types_copy::{
     AttrInfo, AttrValue, CopyGetDataResult, CopyParseState, EncodingConversionResult,
 };
 use ::types_core::primitive::Oid;
 use types_tuple::heaptuple::Datum as RichDatum;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::rel::Relation;
 
 use copyfrom_seams as s;

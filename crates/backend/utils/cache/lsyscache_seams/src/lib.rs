@@ -4,8 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgString, PgVec};
-use types_core::{AttrNumber, Oid};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_core::{AttrNumber, Oid};
 // `::datum::Datum` (the bare machine word) is retained ONLY at this unit's
 // two genuine bare-word edges, each flagged `BARE-WORD EDGE` at its decl below:
 //   * `get_attstatsslot_mcv` — its MCV value array mirrors `AttStatsSlot.values`
@@ -24,8 +24,8 @@ use ::datum::Datum;
 // word; the owner already returns this canonical type.
 use types_tuple::heaptuple::Datum as DatumV;
 use ::types_error::PgResult;
-use types_selfuncs::{AttStatsSlot, StatsTuple};
-use array::{ArrayElementIoData, ArrayIoFuncSelector};
+use ::types_selfuncs::{AttStatsSlot, StatsTuple};
+use ::array::{ArrayElementIoData, ArrayIoFuncSelector};
 
 /// `OpIndexInterpretation` (`utils/lsyscache.h`): one entry of the list
 /// `get_op_index_interpretation` returns — an amcanorder opfamily the operator

@@ -6,9 +6,9 @@
 
 use std::sync::Once;
 
-use mcx::{Mcx, MemoryContext, PgString};
+use ::mcx::{Mcx, MemoryContext, PgString};
 use ::types_error::PgResult;
-use types_explain::{ExplainFormat, ExplainState};
+use ::types_explain::{ExplainFormat, ExplainState};
 
 use super::*;
 

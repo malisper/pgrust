@@ -14,13 +14,13 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{PgBox, PgVec};
+use ::mcx::{PgBox, PgVec};
 use ::types_core::primitive::{uint16, uint32, BlockNumber, OffsetNumber, Oid};
 use ::datum::datum::Datum;
 use ::nodes::execexpr::ExprState;
 use ::nodes::execnodes::Opaque;
 use ::nodes::nodes::NodeTag;
-use pathnodes::{PlannerInfo, RelOptInfo};
+use ::pathnodes::{PlannerInfo, RelOptInfo};
 use ::rel::Relation;
 use ::types_tableam::relscan::TableScanDesc;
 

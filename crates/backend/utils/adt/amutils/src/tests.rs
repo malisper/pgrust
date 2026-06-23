@@ -11,7 +11,7 @@ extern crate std;
 use super::*;
 use alloc::string::{String, ToString};
 use alloc::vec;
-use amutils_seams::{
+use ::amutils_seams::{
     AmPropertyRequest, IndexAmRoutineFlags, IndexFormInfo, IndexRelationInfo,
 };
 use ::mcx::MemoryContext;

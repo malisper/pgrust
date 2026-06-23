@@ -14,9 +14,9 @@
 //! caller's current context, so it takes the target `Mcx<'mcx>` and its output
 //! carries `'mcx`; `None` mirrors the C `NULL` return.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
-use tsearch::{SpellHandle, TSLexeme};
+use ::tsearch::{SpellHandle, TSLexeme};
 
 seam_core::seam!(
     /// `NIStartBuild(&d->obj)` — begin building a fresh ISpell dictionary.

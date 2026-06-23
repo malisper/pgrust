@@ -15,9 +15,9 @@
 //! lsyscache, regproc, amvalidate signature checks) is reached through the
 //! shared AM-validator seams, exactly as the sibling `hashvalidate` port.
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{Oid, OidIsValid};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{Oid, OidIsValid};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
 
 pub use ::hash::backend_access_hash_hashvalidate::{
     AmopRow, AmprocRow, OpFamilyMember, OpFamilyOpFuncGroup, OpclassForm,

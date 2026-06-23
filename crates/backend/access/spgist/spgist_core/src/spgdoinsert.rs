@@ -35,16 +35,16 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
-use page::{
+use ::page::{
     ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid, ItemPointerSet,
     PageAddItemExtended, PageGetExactFreeSpace, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
     PageIndexTupleDelete, PageMut, PageRef,
 };
 use ::utils_error::ereport;
 use ::types_error::error::{ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, Oid, RegProcedure, Size,
@@ -57,14 +57,14 @@ use ::types_tuple::heaptuple::{
     INVALID_OFFSET_NUMBER as InvalidOffsetNumber,
 };
 
-use spgist::{
+use ::spgist::{
     spgChooseIn, spgChooseOut, spgChooseOutResult, spgChooseResultType, spgPickSplitIn,
     spgPickSplitOut, SpGistState, SpGistTypeDesc, GBUF_INNER_PARITY, GBUF_LEAF, GBUF_NULLS,
     SPGIST_COMPRESS_PROC, SPGIST_DEAD, SPGIST_LEAF, SPGIST_LIVE, SPGIST_NULLS, SPGIST_PLACEHOLDER,
     SPGIST_REDIRECT, SpGistBlockIsRoot, SGITMAXNNODES, spgFirstIncludeColumn, spgKeyColumn,
     SPGIST_NULL_BLKNO, SPGIST_ROOT_BLKNO, SPGIST_METAPAGE_BLKNO,
 };
-use spgist::{SPGIST_CHOOSE_PROC, SPGIST_PICKSPLIT_PROC};
+use ::spgist::{SPGIST_CHOOSE_PROC, SPGIST_PICKSPLIT_PROC};
 
 use ::xlog_records::spgxlog::{
     spgxlogAddLeaf, spgxlogAddNode, spgxlogMoveLeafs, spgxlogPickSplit, spgxlogSplitTuple,

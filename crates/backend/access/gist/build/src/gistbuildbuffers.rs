@@ -28,7 +28,7 @@ use buffile_seams as buffile;
 
 use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, BLCKSZ};
 use ::types_error::PgResult;
-use gist::{GISTBuildBuffers, GISTNodeBuffer, GISTNodeBufferPage, SharedNodeBuffer};
+use ::gist::{GISTBuildBuffers, GISTNodeBuffer, GISTNodeBufferPage, SharedNodeBuffer};
 use ::rel::Relation;
 
 use alloc::rc::Rc;
@@ -550,7 +550,7 @@ pub fn gistFreeBuildBuffers(gfbb: &mut GISTBuildBuffers<'_>) -> PgResult<()> {
 // ===========================================================================
 
 use ::gist_core::gistutil::{gistDeCompressAtt, gistgetadjusted, gistpenalty};
-use gist::{GISTENTRY, GISTPageSplitInfo, GISTSTATE};
+use ::gist::{GISTENTRY, GISTPageSplitInfo, GISTSTATE};
 
 use bufmgr_seams as bufmgr;
 

@@ -28,7 +28,7 @@
 
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
-use spgist::{
+use ::spgist::{
     spgChooseIn, spgChooseOut, spgConfigIn, spgConfigOut, spgInnerConsistentIn,
     spgInnerConsistentOut, spgLeafConsistentIn, spgLeafConsistentOut, spgPickSplitIn,
     spgPickSplitOut,

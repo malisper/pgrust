@@ -19,12 +19,12 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, Index, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::Expr;
 use ::nodes::rawnodes::{SetOperation, SetOperationStmt, SortGroupClause};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     NodeId, PathId, PlannerInfo, RelId, Relids, TargetEntryNode, UPPERREL_FINAL, UPPERREL_SETOP,
 };
 

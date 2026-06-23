@@ -12,7 +12,7 @@
 //! that ipci.c consumes (`InjectionPointShmemSize`/`InjectionPointShmemInit`)
 //! and installs them from `init_seams`.
 
-use utils_error::{elog, PgResult};
+use ::utils_error::{elog, PgResult};
 use ::types_core::Size;
 use ::types_error::ERROR;
 

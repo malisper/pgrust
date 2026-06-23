@@ -36,7 +36,7 @@ use ::types_storage::storage::Spinlock;
 pub use ::types_core::primitive::{Size, TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
 pub use ::types_core::primitive::uint32;
 pub use ::types_core::Oid;
-pub use types_datetime::{Interval, TimeOffset};
+pub use ::types_datetime::{Interval, TimeOffset};
 
 pub use ::replication::replnodes::{
     AlterReplicationSlotCmd, BaseBackupCmd, CreateReplicationSlotCmd, DropReplicationSlotCmd,

@@ -12,7 +12,7 @@
 
 use alloc::vec::Vec;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::InvalidOid;
 use ::types_core::Oid;
 use cache::catcache::{CCFastKind, CacheIdx, CatKey};
@@ -28,7 +28,7 @@ use ::types_storage::PrepareToInvalidateCacheTuple;
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{HeapTupleData, HeapTupleHeaderGetNatts, TupleDescData};
 
-use heaptuple::{getmissingattr, heap_attisnull, nocachegetattr};
+use ::heaptuple::{getmissingattr, heap_attisnull, nocachegetattr};
 use init_small_seams as init_small_seams;
 
 use crate::core_compute::CatalogCacheComputeHashValue;

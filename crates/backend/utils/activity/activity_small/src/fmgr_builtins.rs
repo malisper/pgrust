@@ -19,7 +19,7 @@
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::resolution::BuiltinFunction;
-use fmgr::{FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{FunctionCallInfoBaseData, PgFnNative};
 
 use crate::pgstat_bgwriter::pgstat_fetch_stat_bgwriter;
 use crate::pgstat_checkpointer::pgstat_fetch_stat_checkpointer;

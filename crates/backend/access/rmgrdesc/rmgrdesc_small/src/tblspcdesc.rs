@@ -3,7 +3,7 @@
 use ::mcx::PgString;
 use ::types_core::uint8;
 use ::types_error::PgResult;
-use wal::{xl_tblspc_create_rec, xl_tblspc_drop_rec, DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{xl_tblspc_create_rec, xl_tblspc_drop_rec, DecodedXLogRecord, XLR_INFO_MASK};
 
 use crate::util::{append_lossy, appendf, record_truncated};
 

@@ -34,15 +34,15 @@ use std::collections::HashMap;
 use ::relpath::relpathbackend as relpath_backend_fn;
 use fd as fd;
 use ::fd::vfd_core;
-use utils_error::{ereport, PgError, PgResult};
-use types_error::{DEBUG1, ERROR, FATAL, WARNING};
+use ::utils_error::{ereport, PgError, PgResult};
+use ::types_error::{DEBUG1, ERROR, FATAL, WARNING};
 use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, MaxBlockNumber, ProcNumber, INVALID_PROC_NUMBER,
     MAX_FORKNUM,
 };
-use types_core::{Oid, BLCKSZ};
+use ::types_core::{Oid, BLCKSZ};
 use ::types_error::ErrorLevel;
-use types_error::{
+use ::types_error::{
     ERRCODE_DATA_CORRUPTED, ERRCODE_DISK_FULL, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
@@ -57,7 +57,7 @@ use ::types_storage::smgr::{
     EXTENSION_DONT_OPEN, EXTENSION_FAIL, EXTENSION_RETURN_NULL, RELSEG_SIZE,
 };
 use ::types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler, SyncRequestType};
-use types_storage::{RelFileLocator, RelFileLocatorBackend};
+use ::types_storage::{RelFileLocator, RelFileLocatorBackend};
 
 use ::xlogrecovery_seams::in_recovery as in_recovery_seam;
 use ::binary_upgrade_seams::is_binary_upgrade as is_binary_upgrade_seam;

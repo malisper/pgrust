@@ -64,7 +64,7 @@ use ::sink::Bbsink;
 use ::server::bbsink_server_new;
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR,
 };
 

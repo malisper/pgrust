@@ -2,7 +2,7 @@
 //! `tsearch/ts_utils.h`), trimmed to the items the index/rank ports consume.
 
 use alloc::vec::Vec;
-use types_core::{uint16, uint32};
+use ::types_core::{uint16, uint32};
 
 /// `WordEntry` (ts_type.h) — one entry per lexeme in a `tsvector`. C is a
 /// bitfield `uint32 haspos:1, len:11, pos:20`; stored as the raw word with

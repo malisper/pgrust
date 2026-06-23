@@ -16,7 +16,7 @@ use crate::random::geqo_set_seed;
 use crate::selection::geqo_selection;
 use crate::{GeqoPrivateData, Operator};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId};
+use ::pathnodes::{PlannerInfo, RelId};
 
 /* Configuration option bounds / defaults (geqo.h). */
 pub const DEFAULT_GEQO_EFFORT: i32 = 5;

@@ -9,7 +9,7 @@
 //! debug-only sorted-order assertion — is ported 1:1. `_hash_doinsert` is the
 //! sibling `hash-core` unit (called directly), interrupts/progress are seams.
 
-use mcx::{alloc_in, Mcx, PgBox};
+use ::mcx::{alloc_in, Mcx, PgBox};
 use ::types_error::PgResult;
 use ::nodes::Tuplesortstate;
 use ::rel::Relation;

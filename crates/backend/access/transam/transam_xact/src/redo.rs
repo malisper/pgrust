@@ -6,7 +6,7 @@
 use crate::*;
 use ::types_core::RepOriginId;
 use ::types_error::PANIC;
-use types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
+use ::types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
 use ::wal::{
     xact_completion_apply_feedback, xact_completion_force_sync_commit,
     xact_completion_relcache_init_file_inval, ParsedAbort, ParsedCommit, XlXactStatsItem,

@@ -17,7 +17,7 @@
 use ::mcx::Mcx;
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::Oid;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_WRONG_OBJECT_TYPE, ERROR,
@@ -36,7 +36,7 @@ use ::nodes::parsenodes::{
     OBJECT_TSDICTIONARY, OBJECT_TSPARSER, OBJECT_TSTEMPLATE, OBJECT_TYPE, OBJECT_USER_MAPPING,
     OBJECT_VIEW,
 };
-use parsenodes::{Node, StringNode};
+use ::parsenodes::{Node, StringNode};
 use ::rel::Relation;
 use ::types_storage::lock::LOCKMODE;
 use ::types_tuple::access::RangeVar;
@@ -944,8 +944,8 @@ pub fn get_object_address_opf_member(
     object: &Node,
     missing_ok: bool,
 ) -> PgResult<ObjectAddress> {
-    use cache_syscache::{SearchSysCache4, SysCacheGetAttrNotNull};
-    use cache_syscache::{AMOPSTRATEGY, AMPROCNUM};
+    use ::cache_syscache::{SearchSysCache4, SysCacheGetAttrNotNull};
+    use ::cache_syscache::{AMOPSTRATEGY, AMPROCNUM};
     use ::cache::SysCacheKey;
     use ::datum::Datum as KeyDatum;
 
@@ -1616,7 +1616,7 @@ pub fn object_ownercheck(classid: Oid, objectid: Oid, roleid: Oid) -> PgResult<b
 /// `get_object_namespace(const ObjectAddress *address)` (objectaddress.c
 /// 2573).
 pub fn get_object_namespace(address: &ObjectAddress) -> PgResult<Oid> {
-    use cache_syscache::{SearchSysCache1, SysCacheGetAttrNotNull};
+    use ::cache_syscache::{SearchSysCache1, SysCacheGetAttrNotNull};
     use ::cache::SysCacheKey;
     use ::datum::Datum;
 

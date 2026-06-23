@@ -40,8 +40,8 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{Mcx, PgVec};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{PgError, PgResult};
 use ::types_error::error::{make_sqlstate, SqlState};
 use ::nodes::parsestmt::RawStmt;
 use ::parsenodes::RawParseMode;

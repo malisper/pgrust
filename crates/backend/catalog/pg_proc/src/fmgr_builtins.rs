@@ -16,7 +16,7 @@
 //! `CheckFunctionValidatorAccess`).
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;

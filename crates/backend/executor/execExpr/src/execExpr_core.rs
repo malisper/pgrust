@@ -19,7 +19,7 @@
 //! test values, and bool-step NULL trackers each allocate their own cells, so
 //! `ExecInitExprRec` can thread distinct output targets exactly as C does.
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 // The canonical unified value type (Datum-unification keystone) — what
 // `ExprEvalStepData::ConstVal { value }` carries, and the value the interpreter
 // eval seam (`exec_eval_*_switch_context`) returns.
@@ -36,7 +36,7 @@ use ::nodes::primnodes::{
     etag, BoolExprType, Const, Expr, NullTestType, ParamKind, VarReturningType as VrtKind,
 };
 use ::nodes::execnodes::EStateLink;
-use nodes::{EStateData, EcxtId, SlotId};
+use ::nodes::{EStateData, EcxtId, SlotId};
 use ::types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 
 use ::execExpr_seams::HashJoinQualKind;

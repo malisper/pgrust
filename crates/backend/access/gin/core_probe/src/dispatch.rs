@@ -30,19 +30,19 @@
 //! support procs are all wired here; any other opclass support-proc OID bottoms
 //! out loudly (a user-defined opclass would need a `Datum::Internal` fmgr arm).
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use types_tuple::heaptuple::Datum;
 
-use core_probe_seams::{gin_consistent_call_bool, gin_consistent_call_tri};
-use ginutil_seams::{
+use ::core_probe_seams::{gin_consistent_call_bool, gin_consistent_call_tri};
+use ::ginutil_seams::{
     gin_compare_partial, gin_extract_query, gin_extract_value, GinExtractQueryResult,
 };
 use arrayfuncs_seams as arrayfuncs_seams;
 use lsyscache_seams as lsyscache_seams;
 
-use gin::{GinTernaryValue, GIN_CAT_NULL_KEY};
+use ::gin::{GinTernaryValue, GIN_CAT_NULL_KEY};
 
 use crate::ginarrayproc::{
     self, GinContainedStrategy, GinContainsStrategy, GinEqualStrategy, GinOverlapStrategy,

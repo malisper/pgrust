@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_error::PgResult;
 use ::regex::RegexecResult;
 use ::tsearch::TSLexeme;

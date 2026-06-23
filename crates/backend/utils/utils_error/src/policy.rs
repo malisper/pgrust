@@ -1,7 +1,7 @@
 //! Output-decision policy: is_log_level_output and friends.
 
 use ::types_dest::CommandDest;
-use types_error::{ErrorLevel, ERROR, FATAL, INFO, LOG, LOG_SERVER_ONLY, WARNING_CLIENT_ONLY};
+use ::types_error::{ErrorLevel, ERROR, FATAL, INFO, LOG, LOG_SERVER_ONLY, WARNING_CLIENT_ONLY};
 
 use crate::config;
 

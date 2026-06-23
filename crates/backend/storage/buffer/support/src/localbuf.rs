@@ -20,7 +20,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_RESOURCES, ERRCODE_INVALID_TRANSACTION_STATE,
     ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
@@ -31,7 +31,7 @@ use ::types_storage::buf::{
 };
 use ::types_storage::PrefetchBufferResult;
 use ::types_storage::RelFileLocator;
-use types_core::{
+use ::types_core::{
     BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, InvalidBuffer, BLCKSZ,
 };
 

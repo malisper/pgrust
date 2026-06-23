@@ -20,7 +20,7 @@
 
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
-use types_matview::{ObjectAddress, QueryCompletion, RefreshMatViewStmt};
+use ::types_matview::{ObjectAddress, QueryCompletion, RefreshMatViewStmt};
 
 seam_core::seam!(
     /// `ExecRefreshMatView(stmt, queryString, qc)` (matview.c 120-140) — the

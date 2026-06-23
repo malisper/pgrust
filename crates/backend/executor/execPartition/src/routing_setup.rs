@@ -4,12 +4,12 @@
 //! `ExecInitPartitionInfo` (the largest C function here, ~479 lines) lives in
 //! its own `routing_init_info` sub-module.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::executor::TupleSlotKind;
 use ::nodes::partition::PartitionDescData;
-use nodes::{EStateData, ModifyTableState, Opaque, ResultRelInfo, RriId};
+use ::nodes::{EStateData, ModifyTableState, Opaque, ResultRelInfo, RriId};
 use ::rel::Relation;
 use ::types_storage::lock::{NoLock, RowExclusiveLock};
 

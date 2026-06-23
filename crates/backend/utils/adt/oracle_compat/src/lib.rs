@@ -52,11 +52,11 @@ pub fn init_seams() {
     fmgr_builtins::register_oracle_compat_builtins();
 }
 
-use formatting::{str_casefold, str_initcap, str_tolower, str_toupper};
-use common_wchar::{pg_encoding_max_length, pg_utf8_islegal};
-use mcx::{Mcx, PgVec};
+use ::formatting::{str_casefold, str_initcap, str_tolower, str_toupper};
+use ::common_wchar::{pg_encoding_max_length, pg_utf8_islegal};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
 use ::types_wchar::encoding::PG_UTF8;

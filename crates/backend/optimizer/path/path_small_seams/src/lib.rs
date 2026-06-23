@@ -35,7 +35,7 @@ use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     EcId, EmId, JoinType, NodeId, RelId, Relids, RinfoId, PlannerInfo, SpecialJoinInfo,
 };
 

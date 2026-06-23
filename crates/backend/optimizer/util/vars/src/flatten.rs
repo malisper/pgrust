@@ -37,7 +37,7 @@ use ::rewrite_core::increment::IncrementVarSublevelsUp;
 use ::rewrite_core::relids as expr_relids;
 use ::rewrite_core::walkers::checkExprHasSubLink;
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::RTEKind;

@@ -19,12 +19,12 @@
 
 use ::mcx::Mcx;
 use ::types_core::primitive::AttrNumber;
-use nodes::{EcxtId, ResultRelInfo, RriId, SlotId};
+use ::nodes::{EcxtId, ResultRelInfo, RriId, SlotId};
 
 // Canonical carrier types homed in `types-nodes` (so the owner, the seam crate,
 // and the nodeModifyTable consumers share one definition); re-export at the
 // crate root so the family modules continue to reach them via `crate::`.
-pub use nodes::{PartitionDispatchData, PartitionDispatchId, PartitionTupleRouting};
+pub use ::nodes::{PartitionDispatchData, PartitionDispatchId, PartitionTupleRouting};
 
 pub mod colnos;
 pub mod pruning;

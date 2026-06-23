@@ -33,24 +33,24 @@ use ::types_core::xact::InvalidTransactionId;
 use ::types_error::PgResult;
 use ::rel::Relation;
 use ::snapshot::SnapshotData;
-use types_storage::{Buffer, InvalidBuffer};
+use ::types_storage::{Buffer, InvalidBuffer};
 use ::types_tuple::heaptuple::{
     HeapTupleHeaderData, ItemPointerData, FIRST_OFFSET_NUMBER as FirstOffsetNumber,
     HEAP_HOT_UPDATED, HEAP_ONLY_TUPLE, HEAP_XMAX_INVALID,
 };
 use ::types_tuple::heaptuple::FormedTuple;
 
-use page::{
+use ::page::{
     ItemIdGetLength, ItemIdGetRedirect, ItemIdIsNormal, ItemIdIsRedirected, ItemPointerGetBlockNumber,
     ItemPointerGetOffsetNumber, ItemPointerIndicatesMovedPartitions, PageGetItem, PageGetItemId,
     PageGetMaxOffsetNumber, PageRef,
 };
 
-use heapam_seams::{HeapDirtyFetchResult, HeapFetchResult, HotSearchResult};
+use ::heapam_seams::{HeapDirtyFetchResult, HeapFetchResult, HotSearchResult};
 use ::heapam_visibility::htup::{
     HeapTupleHeaderGetXmin, HeapTupleHeaderXminInvalid, ItemPointerEquals, ItemPointerIsValid,
 };
-use heapam_visibility::{
+use ::heapam_visibility::{
     HeapTupleHeaderGetUpdateXid, HeapTupleHeaderIsOnlyLocked, HeapTupleIsSurelyDead,
     HeapTupleSatisfiesVisibility,
 };

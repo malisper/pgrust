@@ -45,8 +45,8 @@ mod out_read_derive_tests {
     //! `special_read_write`/custom for now).
     use alloc::string::String;
     use ::macros::PgNode;
-    use node_support::{PgNodeOut, PgNodeRead, ReadCursor};
-    use mcx::{MemoryContext, PgString};
+    use ::node_support::{PgNodeOut, PgNodeRead, ReadCursor};
+    use ::mcx::{MemoryContext, PgString};
 
     // A node enum field type: serialized as `(int)` via WRITE_ENUM_FIELD.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

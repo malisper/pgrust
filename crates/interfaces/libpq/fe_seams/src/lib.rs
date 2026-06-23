@@ -16,9 +16,9 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-use types_core::{Oid, TransactionId, XLogRecPtr};
+use ::types_core::{Oid, TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
-use types_libpqwalreceiver::{
+use ::types_libpqwalreceiver::{
     AttInMetadataId, ConnStatusType, ConninfoOption, ExecStatusType, HeapTupleId, MemoryContextId,
     PgConnId, PgResultId, Pgsocket, TupleDescId, TuplestoreId,
 };

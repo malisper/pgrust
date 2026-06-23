@@ -29,8 +29,8 @@ mod grant_exec;
 
 use std::rc::Rc;
 
-use mcx::{Mcx, MemoryContext};
-use types_acl::{
+use ::mcx::{Mcx, MemoryContext};
+use ::types_acl::{
     AclItem, AclMaskHow, AclMode, AclResult, ACLCHECK_NO_PRIV, ACLCHECK_NOT_OWNER, ACLCHECK_OK,
     ACLMASK_ANY, ACL_ALTER_SYSTEM, ACL_CONNECT, ACL_CREATE, ACL_CREATE_TEMP, ACL_DELETE,
     ACL_EXECUTE, ACL_INSERT, ACL_MAINTAIN, ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT, ACL_SET,
@@ -38,7 +38,7 @@ use types_acl::{
 };
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use types_tuple::heaptuple::Datum as TupDatum;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA,
     ERRCODE_UNDEFINED_TABLE, ERROR,
@@ -59,7 +59,7 @@ use ::objectaddress::properties::{
     get_object_catcache_oid, get_object_class_descr, get_object_oid_index, get_object_type,
 };
 
-use user_seams::{has_privs_of_role, superuser_arg};
+use ::user_seams::{has_privs_of_role, superuser_arg};
 use ::adt_acl::acl_ops::aclmask;
 use ::adt_acl::acldefault::acldefault;
 
@@ -1095,7 +1095,7 @@ fn get_default_acl_internal<'mcx>(
     objtype: i8,
 ) -> PgResult<Option<&'mcx [AclItem]>> {
     use ::objectaddress::consts::Anum_pg_default_acl_defaclacl;
-    use cache_syscache::{
+    use ::cache_syscache::{
         ReleaseSysCache, SearchSysCache3, SysCacheGetAttr, DEFACLROLENSPOBJ,
     };
     use ::cache::SysCacheKey;

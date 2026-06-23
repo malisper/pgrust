@@ -11,12 +11,12 @@
 //! in `CacheMemoryContext`), so each lookup takes the caller's `Mcx` and the
 //! allocated outputs carry its lifetime; `Err` includes OOM from the copy.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use ::mcx::PgString;
-use types_namespace::{
+use ::types_namespace::{
     CatalogObjectName, FastpathProcRow, FuncProcAttrs, OperRow, ProcCompileRow, ProcRow,
 };
 use ::cache::AuthIdRow;

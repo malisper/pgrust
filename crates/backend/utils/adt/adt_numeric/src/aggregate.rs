@@ -17,10 +17,10 @@
 //! node is a genuine external reached via seam (the unported tuplesort
 //! abbreviation machinery).
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 use ::types_numeric::var::{NumericAggState, NumericSign, NumericSumAccum, NumericVar};
-use types_numeric::{
+use ::types_numeric::{
     numeric_digit_at, numeric_digits, numeric_is_ninf, numeric_is_pinf, numeric_is_special,
     numeric_ndigits, numeric_weight, Int128AggState, NumericDigit, NumericSortSupport, DEC_DIGITS,
     NBASE, NUMERIC_ABBREV_NAN, NUMERIC_ABBREV_NINF, NUMERIC_ABBREV_PINF,
@@ -1644,7 +1644,7 @@ pub fn hash_numeric_extended(num: &[u8], seed: u64) -> u64 {
 /// accumulator limb buffer; the C `palloc0`).  OOM-safe: validated bound +
 /// fallible reserve, surfacing OOM as the `numeric value out of range` error.
 fn alloc_zeroed_limbs<'mcx>(mcx: Mcx<'mcx>, n: usize) -> PgResult<PgVec<'mcx, i32>> {
-    use types_error::{PgError, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+    use ::types_error::{PgError, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
     let mut v = ::mcx::vec_with_capacity_in::<i32>(mcx, n).map_err(|_| {
         PgError::error("value overflows numeric format")
             .with_sqlstate(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE)

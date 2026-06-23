@@ -36,13 +36,13 @@ use ipc_shmem_seams as shmem;
 use lmgr_proc_seams as proc_s;
 use s_lock as s_lock;
 use waitevent_seams as waitevent;
-use utils_error::{elog, PgError, PgResult};
+use ::utils_error::{elog, PgError, PgResult};
 use ::mcx::Mcx;
-use types_error::{ERROR, FATAL, PANIC};
+use ::types_error::{ERROR, FATAL, PANIC};
 use init_small_seams as globals;
-use types_core::{uint16, uint32, ProcNumber, Size, INVALID_PROC_NUMBER, NAMEDATALEN};
+use ::types_core::{uint16, uint32, ProcNumber, Size, INVALID_PROC_NUMBER, NAMEDATALEN};
 use ::types_pgstat::wait_event::PG_WAIT_LWLOCK;
-use types_storage::{
+use ::types_storage::{
     pg_atomic_uint32, pg_atomic_uint64, proclist_head, proclist_node, LWLock, LWLockMode,
     LWLockPadded, BUFFER_MAPPING_LWLOCK_OFFSET, LOCK_MANAGER_LWLOCK_OFFSET, LW_EXCLUSIVE,
     LW_SHARED, LW_WAIT_UNTIL_FREE, LW_WS_NOT_WAITING, LW_WS_PENDING_WAKEUP, LW_WS_WAITING,

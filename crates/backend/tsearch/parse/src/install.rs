@@ -22,7 +22,7 @@
 use core::ffi::c_int;
 
 use ::tsearchcmds_seams::LexDescr;
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
 
 /// `F_PRSD_LEXTYPE` (`catalog/pg_proc.dat`): the default word parser's
@@ -162,7 +162,7 @@ fn pg_mb2wchar_with_len(from: alloc::vec::Vec<u8>) -> ::types_error::PgResult<al
 /// character for locale")` — the C `char2wchar` bad-sequence path.
 fn invalid_multibyte_error() -> ::types_error::PgError {
     use ::utils_error::ereport;
-    use types_error::{error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERROR};
+    use ::types_error::{error::ERRCODE_CHARACTER_NOT_IN_REPERTOIRE, ERROR};
     ereport(ERROR)
         .errcode(ERRCODE_CHARACTER_NOT_IN_REPERTOIRE)
         .errmsg("invalid multibyte character for locale")

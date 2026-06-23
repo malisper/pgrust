@@ -17,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 use ::types_storage::storage::{
     dsa_handle, dshash_table_handle, DSM_HANDLE_INVALID, INVALID_DSA_POINTER,
 };
-use replication_launcher::{LogicalRepWorker, LogicalRepWorkerType};
+use ::replication_launcher::{LogicalRepWorker, LogicalRepWorkerType};
 
 /// `DSA_HANDLE_INVALID` (`utils/dsa.h`, `(dsa_handle) DSM_HANDLE_INVALID`).
 const DSA_HANDLE_INVALID: dsa_handle = DSM_HANDLE_INVALID;

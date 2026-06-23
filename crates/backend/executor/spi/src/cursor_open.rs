@@ -22,12 +22,12 @@
 //! its own context, exactly like C's `!plan->saved` branch of
 //! `SPI_cursor_open_internal`.
 
-use mcx::{MemoryContext, Mcx};
-use types_error::{PgError, PgResult, ERROR};
+use ::mcx::{MemoryContext, Mcx};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::{CachedPlanHandle as SeamCachedPlanHandle, PlpgsqlExprParseState};
 use ::parsenodes::RawParseMode;
-use portal::{CachedPlanHandle as PortalCachedPlanHandle, FetchDirection, Portal};
+use ::portal::{CachedPlanHandle as PortalCachedPlanHandle, FetchDirection, Portal};
 use ::types_resowner::ResourceOwner;
 
 use crate::dest_spi::{create_spi_dest_receiver, take_spi_raw_result, RawCol};

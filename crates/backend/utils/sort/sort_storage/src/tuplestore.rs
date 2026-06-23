@@ -38,11 +38,11 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::collapsible_if)]
 
-use utils_error::{elog, ereport};
-use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
-use types_error::{PgError, PgResult, ERROR};
+use ::utils_error::{elog, ereport};
+use ::mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::nodes::nodehashjoin::BufFile;
-use nodes::{EStateData, SlotId};
+use ::nodes::{EStateData, SlotId};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::TupleDescData;
 

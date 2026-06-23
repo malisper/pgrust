@@ -11,14 +11,14 @@
 //! carriers ([`AttInMetadata`], [`TupOutputState`]) that reference
 //! `types-nodes`-local types and therefore cannot move down.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 
 // Re-export the unified base, the four superstructures, the SlotData enum, the
 // per-kind ops carrier, and the slot flag constants from their owning leaf
 // crate so the executor's slot ops keep importing them from `tuptable`.
-pub use types_slot::{
+pub use ::types_slot::{
     item_pointer_invalid, BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot,
     SlotBase, SlotData, TupleSlotKind, TupleTableSlot, TupleTableSlotOps, VirtualTupleTableSlot,
     TTS_FLAG_EMPTY, TTS_FLAG_FIXED, TTS_FLAG_SHOULDFREE, TTS_FLAG_SLOW,

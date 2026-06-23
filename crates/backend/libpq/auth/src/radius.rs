@@ -1,9 +1,9 @@
 //! `CheckRADIUSAuth` (`auth.c:2845`) + `radius_add_attribute` (`auth.c:2818`) +
 //! `PerformRadiusTransaction` (`auth.c:2939`) — RADIUS authentication.
 
-use utils_error::{elog, ereport};
-use types_error::{PgResult, LOG, WARNING};
-use net::{AddrInfoHint, PgAddrInfo, Port};
+use ::utils_error::{elog, ereport};
+use ::types_error::{PgResult, LOG, WARNING};
+use ::net::{AddrInfoHint, PgAddrInfo, Port};
 
 use crate::seams;
 use crate::{here, port_user_name, recv_password_packet, sendAuthRequest, set_authn_id};

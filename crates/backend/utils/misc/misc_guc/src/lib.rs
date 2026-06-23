@@ -62,7 +62,7 @@ pub mod units;
 mod tests;
 
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, SqlState, ERRCODE_INVALID_PARAMETER_VALUE, ERROR, WARNING,
 };
 
@@ -335,7 +335,7 @@ pub fn ParseLongOption<'mcx>(
 // ---------------------------------------------------------------------------
 
 use ::types_core::BOOTSTRAP_SUPERUSERID;
-use types_guc::{
+use ::types_guc::{
     GucContext, GucSource, PGC_BACKEND, PGC_INTERNAL, PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET,
     PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE,
 };
@@ -949,7 +949,7 @@ fn check_guc_name_for_parameter_acl(name: &str) -> PgResult<()> {
 /// validates the target. This is purely the GUC-engine half; the caller owns
 /// the superuser/ACL check, the file read/merge/write and the post-alter hook.
 pub fn validate_auto_config_value(name: &str, value: Option<&str>) -> PgResult<()> {
-    use types_guc::{config_type, PGC_S_FILE, GUC_DISALLOW_IN_AUTO_FILE, GUC_DISALLOW_IN_FILE};
+    use ::types_guc::{config_type, PGC_S_FILE, GUC_DISALLOW_IN_AUTO_FILE, GUC_DISALLOW_IN_FILE};
 
     // record = find_option(name, false, true, DEBUG5);  -- no placeholder.
     // The lookup, the flag/context check and the parse_and_validate_value call

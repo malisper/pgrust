@@ -25,7 +25,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::primitive::ForkNumber;
 use ::types_error::PgError;
 use ::wal::wal::XLR_INFO_MASK;

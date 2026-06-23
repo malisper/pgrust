@@ -47,11 +47,11 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::format;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, BlockNumber, OffsetNumber, Oid};
-use types_error::{PgError, PgResult};
-use types_nbtree::{
+use ::types_error::{PgError, PgResult};
+use ::types_nbtree::{
     BTScanInsert, BTScanInsertData, BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsPinned,
     BTScanPosIsValid, BTScanPosItem, BTStack, BTStackData, BT_IS_POSTING, BT_OFFSET_MASK,
     BT_PIVOT_HEAP_TID_ATTR, BTORDER_PROC, BTP_DELETED, BTP_HALF_DEAD, BTP_INCOMPLETE_SPLIT,
@@ -70,7 +70,7 @@ use ::types_storage::storage::Buffer;
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{IndexTupleData, IndexTupleSize, ItemPointerData};
 
-use page::{
+use ::page::{
     ItemIdIsDead, ItemPointerCompare, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
     PageGetSpecialPointer, PageRef,
 };

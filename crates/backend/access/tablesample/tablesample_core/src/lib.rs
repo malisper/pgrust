@@ -85,16 +85,16 @@ use tablesample_core_seams as seam;
 use ::costsize::clamp_row_est;
 use ::clauses::estimate_expression_value;
 use ::hashfn::hash_bytes;
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::primitive::{
     uint16, uint32, BlockNumber, Cardinality, OffsetNumber, Oid, InvalidBlockNumber,
 };
 use ::datum::datum::Datum;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_TABLESAMPLE_ARGUMENT};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_TABLESAMPLE_ARGUMENT};
 use ::nodes::nodes::{Node, NodeTag};
 use ::nodes::primnodes::Expr;
-use pathnodes::{PlannerInfo, RelOptInfo};
-use samplescan::{SampleScanState, TsmRoutine};
+use ::pathnodes::{PlannerInfo, RelOptInfo};
+use ::samplescan::{SampleScanState, TsmRoutine};
 
 // ===========================================================================
 // Constants mirroring C headers.

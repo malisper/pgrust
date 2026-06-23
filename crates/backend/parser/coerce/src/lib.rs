@@ -14,9 +14,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, MemoryContext};
-use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::mcx::{Mcx, MemoryContext};
+use ::types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_error::{
     PgResult, ERRCODE_CANNOT_COERCE, ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_INTERNAL_ERROR,
 };

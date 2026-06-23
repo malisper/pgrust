@@ -12,7 +12,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 
-use types_core::{Oid, TransactionId, XLogRecPtr, NAMEDATALEN};
+use ::types_core::{Oid, TransactionId, XLogRecPtr, NAMEDATALEN};
 use ::types_tuple::heaptuple::NameData;
 
 /// `PG_REPLSLOT_DIR` (slot.h) — directory to store replication slot data in.

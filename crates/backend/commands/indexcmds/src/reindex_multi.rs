@@ -17,7 +17,7 @@
 
 use alloc::format;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_core::primitive::Oid;
 use ::types_core::OidIsValid;
@@ -32,7 +32,7 @@ use ::types_tuple::access::{
 
 use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 
 use aclchk_seams as aclchk_seam;
 use pg_inherits_seams as inherits_seam;
@@ -59,7 +59,7 @@ use ::nodes::parsenodes::{OBJECT_DATABASE, OBJECT_SCHEMA};
 use ::tablespace::get_tablespace_name;
 
 use crate::{xact_seam, ReindexParams};
-use types_cluster::{
+use ::types_cluster::{
     REINDEXOPT_CONCURRENTLY, REINDEXOPT_MISSING_OK, REINDEXOPT_REPORT_PROGRESS,
     REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
 };

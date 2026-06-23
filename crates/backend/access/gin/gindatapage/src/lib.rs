@@ -20,7 +20,7 @@
 use ::utils_error::PgResult;
 use ::types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
 use ::types_core::InvalidBlockNumber;
-use gin::{
+use ::gin::{
     GinNullCategory, GinPageOpaqueData, GIN_COMPRESSED, GIN_DATA, GIN_DELETED, GIN_LEAF,
     SIZEOF_GIN_PAGE_OPAQUE_DATA, SIZEOF_POSTING_ITEM,
 };

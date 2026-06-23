@@ -13,19 +13,19 @@
 //! `backend-tsearch-ts-utils-seams`; `str_tolower` and `defGetString` cross to
 //! their owners too.
 
-use define_seams::{def_get_string, DefElemArg};
-use spell_seams::{
+use ::define_seams::{def_get_string, DefElemArg};
+use ::spell_seams::{
     spell_finish_build, spell_import_affixes, spell_import_dictionary, spell_normalize_word,
     spell_sort_affixes, spell_sort_dictionary, spell_start_build,
 };
-use ts_utils_seams::{get_tsearch_config_filename, readstoplist, searchstoplist};
+use ::ts_utils_seams::{get_tsearch_config_filename, readstoplist, searchstoplist};
 use ::formatting_seams::str_tolower;
 use alloc::string::String;
 
 use ::utils_error::ereport;
-use mcx::{Mcx, PgVec};
-use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use tsearch::{DictISpell, StopList, TSLexeme};
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::tsearch::{DictISpell, StopList, TSLexeme};
 
 /// `DEFAULT_COLLATION_OID` (`pg_collation_d.h`).
 const DEFAULT_COLLATION_OID: types_core::Oid = 100;

@@ -20,7 +20,7 @@ use ::types_core::primitive::{Oid, OidIsValid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo};
+use ::pathnodes::{NodeId, PlannerInfo};
 
 use lsyscache_seams as lsc;
 

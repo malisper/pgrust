@@ -60,7 +60,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::{Index, Oid};
-use pathnodes::{
+use ::pathnodes::{
     optimizer_plan::CostSelector, CompareType, EcId, GroupByOrdering, IndexOptInfo, NodeId, PathId,
     PathKey, PlannerInfo, RelId, RelOptInfo, Relids, RestrictInfo, RinfoId, ScanDirection,
     BackwardScanDirection, RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL,
@@ -121,7 +121,7 @@ const COMPARE_EQ: CompareType = 3;
 const COMPARE_GT: CompareType = 5;
 
 // JoinType constants used by build_join_pathkeys (pathnodes/nodes.h values).
-use pathnodes::{JoinType, JOIN_FULL, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI};
+use ::pathnodes::{JoinType, JOIN_FULL, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI};
 
 // ===========================================================================
 // Canonical-pathkey identity helpers (the arena analogue of C pointer ==).

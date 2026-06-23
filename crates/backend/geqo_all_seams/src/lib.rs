@@ -20,7 +20,7 @@
 #![forbid(unsafe_code)]
 
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PathnodesMemoryContext, PlannerInfo, RelId};
+use ::pathnodes::{PathnodesMemoryContext, PlannerInfo, RelId};
 
 seam_core::seam!(
     /// `make_join_rel(root, rel1, rel2)` followed (on success) by

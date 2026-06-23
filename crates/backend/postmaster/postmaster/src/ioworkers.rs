@@ -6,8 +6,8 @@
 #![allow(non_snake_case)]
 
 use ::pmchild::ReleasePostmasterChildSlot;
-use utils_error::{ereport};
-use types_error::{ERROR};
+use ::utils_error::{ereport};
+use ::types_error::{ERROR};
 use ::types_error::ErrorLocation;
 
 use crate::core::{pm, pm_mut, PMState, IMMEDIATE_SHUTDOWN, MAX_IO_WORKERS, SIGUSR2, B_IO_WORKER};

@@ -24,27 +24,27 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::cache::SysCacheKey;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::datum::Datum as ScalarWord;
-use types_error::{PgError, PgResult};
-use rel::{Relation, RelationData};
+use ::types_error::{PgError, PgResult};
+use ::rel::{Relation, RelationData};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::RowExclusiveLock;
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple};
 use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use ::catalog_catalog::GetNewOidWithIndex;
 use ::indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
 use indexing_seams as indexing_seams;
 use cache_syscache as syscache;
 
-use tsearchcmds_seams::{
+use ::tsearchcmds_seams::{
     ConfigMapEntry, NewTSParser, NewTSTemplate, TSConfigForm, TSDictForm, TSParserForm,
     TSTemplateForm,
 };

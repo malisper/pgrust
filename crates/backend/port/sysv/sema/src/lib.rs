@@ -48,8 +48,8 @@
 
 use std::sync::Mutex;
 
-use types_core::{ProcNumber, Size};
-use types_error::{PgError, PgResult, FATAL, PANIC};
+use ::types_core::{ProcNumber, Size};
+use ::types_error::{PgError, PgResult, FATAL, PANIC};
 use ::types_storage::storage::PGSemaphoreData;
 
 /// `SEMAS_PER_SET` — number of useful semaphores in each set we allocate. It

@@ -23,13 +23,13 @@
 
 use ::mcx::PgBox;
 use ::types_core::primitive::{AttrNumber, Index};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::execnodes::EStateData;
 use ::nodes::nodelockrows::{
     ExecAuxRowMarkData, ExecRowMark, LockRows, LockRowsStateData, LockWaitError, LockWaitSkip,
     ROW_MARK_COPY,
 };
-use nodes::{PlanStateNode, SlotId};
+use ::nodes::{PlanStateNode, SlotId};
 
 use nodeLockRows_seams as seam;
 use execProcnode_seams as procnode;

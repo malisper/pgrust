@@ -14,7 +14,7 @@ use std::sync::Once;
 
 use ::types_core::NAMEDATALEN;
 use ::types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
-use types_typcache::{TypeCacheEntry, TYPSTORAGE_PLAIN};
+use ::types_typcache::{TypeCacheEntry, TYPSTORAGE_PLAIN};
 
 // Synthetic function OIDs the get_opcode stub maps each B-tree operator to.
 const FN_INT4_LT: Oid = 9001;
@@ -149,7 +149,7 @@ fn index_tupdesc<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> ::mcx::PgBox<'mcx, Tuple
 }
 
 fn make_index_rel<'mcx>(mcx: Mcx<'mcx>, natts: usize) -> Relation<'mcx> {
-    use rel::{FormData_pg_class, RelationData};
+    use ::rel::{FormData_pg_class, RelationData};
     use ::types_storage::RelFileLocator;
     let mut rd_opfamily = ::mcx::PgVec::new_in(mcx);
     for _ in 0..natts {

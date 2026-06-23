@@ -3,7 +3,7 @@
 
 use std::ffi::CStr;
 
-use types_wchar::{PgWChar, PgWCharStr};
+use ::types_wchar::{PgWChar, PgWCharStr};
 
 /// Compares up to `n` PostgreSQL wide characters.
 pub fn pg_wchar_strncmp(s1: &PgWCharStr<'_>, s2: &PgWCharStr<'_>, n: usize) -> i32 {

@@ -16,7 +16,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use transam_xact::{
+use ::transam_xact::{
     GetCurrentStatementStartTimestamp, GetCurrentTransactionStartTimestamp,
 };
 use ::localtime::pg_localtime;
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn clock_timestamp_is_recent() {
-        use types_datetime::{POSTGRES_EPOCH_JDATE, SECS_PER_DAY, UNIX_EPOCH_JDATE};
+        use ::types_datetime::{POSTGRES_EPOCH_JDATE, SECS_PER_DAY, UNIX_EPOCH_JDATE};
 
         let now_unix_pg_usecs = || -> TimestampTz {
             let dur = SystemTime::now()

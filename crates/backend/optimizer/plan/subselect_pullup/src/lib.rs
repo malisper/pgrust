@@ -56,9 +56,9 @@ use alloc::boxed::Box;
 
 use ::nodes_core::makefuncs::{make_alias, make_var_from_target_entry};
 use ::nodes_core::nodefuncs::expression_tree_mutator;
-use mcx::{alloc_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::Index;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::jointype::JoinType;
 use ::nodes::nodes::Node;
@@ -66,7 +66,7 @@ use ::nodes::nodes::CmdType;
 use ::nodes::parsenodes::{RangeTblEntry, RTEKind};
 use ::nodes::primnodes::{Expr, ParamKind, SubLink, SubLinkType};
 use ::nodes::rawnodes::{JoinExpr, RangeTblRef};
-use pathnodes::{Bitmapset, PlannerInfo, Relids};
+use ::pathnodes::{Bitmapset, PlannerInfo, Relids};
 
 // ===========================================================================
 // init_seams — install the two prepjointree-facing conversions.

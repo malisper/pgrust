@@ -2,7 +2,7 @@
 //! ports consume so far.
 
 use crate::bytes::{bool_at, f64_at, u16_at, u32_at, u8_at};
-use types_core::{BlockNumber, OffsetNumber, RegProcedure, TransactionId};
+use ::types_core::{BlockNumber, OffsetNumber, RegProcedure, TransactionId};
 
 /// `xl_hash_init_meta_page`: `{double num_tuples; RegProcedure procid;
 /// uint16 ffactor;}`.

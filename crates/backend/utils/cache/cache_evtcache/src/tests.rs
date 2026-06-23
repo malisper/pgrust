@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::Mutex;
 
-use mcx::{vec_with_capacity_in, PgString};
+use ::mcx::{vec_with_capacity_in, PgString};
 
 // The seams and the cache are process-/thread-global state, so tests that
 // drive them run serially under one lock.

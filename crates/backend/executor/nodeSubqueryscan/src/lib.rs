@@ -32,7 +32,7 @@ use execTuples_seams as execTuples;
 use execUtils_seams as execUtils;
 
 use ::types_error::PgResult;
-use nodes::{EStateData, SlotId, SubqueryScan, SubqueryScanState};
+use ::nodes::{EStateData, SlotId, SubqueryScan, SubqueryScanState};
 
 // ===========================================================================
 // Executor flags (executor.h) consulted by the init path.

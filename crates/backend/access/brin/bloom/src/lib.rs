@@ -67,8 +67,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use brin::{BloomOpaque, BrinDesc, BrinOpcInfo, BrinValues, OpaqueOpcInfo, BLOOM_MAX_PROCNUMS};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::brin::{BloomOpaque, BrinDesc, BrinOpcInfo, BrinValues, OpaqueOpcInfo, BLOOM_MAX_PROCNUMS};
 use ::types_core::primitive::{AttrNumber, BlockNumber, InvalidBlockNumber, Oid};
 use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR,

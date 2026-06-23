@@ -35,7 +35,7 @@
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use ::arrayfuncs::construct::deconstruct_text_array_with_ndim_bytes;
 

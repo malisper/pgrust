@@ -17,9 +17,9 @@
 //! is the separate by-ref-Datum keystone (the rich `Datum` payload carries it,
 //! the bare-word channel does not).
 
-use mcx::{MemoryContext, Mcx, PgVec};
+use ::mcx::{MemoryContext, Mcx, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
+use ::types_error::{PgError, PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::CmdType;
 use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};

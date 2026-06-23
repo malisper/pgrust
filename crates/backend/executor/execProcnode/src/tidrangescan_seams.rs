@@ -18,10 +18,10 @@
 
 #![allow(non_snake_case)]
 
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::execnodes::{EPQState, EStateData};
 use ::nodes::primnodes::Expr;
-use nodes::{PlanStateNode, SlotId};
+use ::nodes::{PlanStateNode, SlotId};
 
 use nodeTidrangescan_seams as seam;
 use execExpr_seams as execExpr;

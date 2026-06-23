@@ -16,7 +16,7 @@ use ::mcx::MemoryContext;
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use detoast_seams as detoast_seam;
 

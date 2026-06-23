@@ -16,8 +16,8 @@
 //! logic is ported 1:1 in-crate over the owned [`LVRelState`].
 
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, ERROR, WARNING};
-use types_core::{BlockNumber, Buffer, BLCKSZ};
+use ::types_error::{ErrorLocation, ERROR, WARNING};
+use ::types_core::{BlockNumber, Buffer, BLCKSZ};
 use ::types_error::PgResult;
 
 use crate::consts::{

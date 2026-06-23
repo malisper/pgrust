@@ -10,7 +10,7 @@
 
 use super::*;
 
-use mcx::{MemoryContext, PgBox, PgVec};
+use ::mcx::{MemoryContext, PgBox, PgVec};
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::{FromExpr, RangeTblRef};
 

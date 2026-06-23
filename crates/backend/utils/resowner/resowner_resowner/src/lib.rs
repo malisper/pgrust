@@ -31,10 +31,10 @@
 use std::cell::RefCell;
 
 use ::utils_error::elog;
-use hashfn::{hash_combine64, murmurhash64};
+use ::hashfn::{hash_combine64, murmurhash64};
 use ::datum::Datum;
-use types_error::{PgError, PgResult, WARNING};
-use types_resowner::{
+use ::types_error::{PgError, PgResult, WARNING};
+use ::types_resowner::{
     ResourceOwner, ResourceOwnerDesc, ResourceReleasePhase, RESOURCE_RELEASE_AFTER_LOCKS,
     RESOURCE_RELEASE_BEFORE_LOCKS, RESOURCE_RELEASE_LOCKS,
 };
@@ -42,7 +42,7 @@ use ::types_storage::lock::LOCALLOCKTAG;
 
 mod seam_bodies;
 
-pub use types_resowner::{
+pub use ::types_resowner::{
     ResourceDebugPrintCallback, ResourceReleaseCallback, ResourceReleaseCallbackArg,
     ResourceReleaseResourceCallback, RELEASE_PRIO_BUFFER_IOS, RELEASE_PRIO_BUFFER_PINS,
     RELEASE_PRIO_CATCACHE_LIST_REFS, RELEASE_PRIO_CATCACHE_REFS, RELEASE_PRIO_CRYPTOHASH_CONTEXTS,

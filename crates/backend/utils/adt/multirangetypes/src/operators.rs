@@ -9,10 +9,10 @@
 use ::mcx::Mcx;
 use ::cache::typcache::TypeCacheEntry;
 use ::datum::datum::Datum;
-use types_error::{PgError, PgResult, ERROR};
-use types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP, RANGE_EMPTY};
+use ::types_error::{PgError, PgResult, ERROR};
+use ::types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP, RANGE_EMPTY};
 
-use rangetypes_seams::{
+use ::rangetypes_seams::{
     bounds_adjacent, range_cmp_bounds, range_cmp_elem_values, range_deserialize, range_get_flags,
 };
 

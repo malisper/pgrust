@@ -17,10 +17,10 @@
 //! (`loread`/`lo_get`/`lo_get_fragment`) are written back the same way.
 
 use ::utils_error::PgResult;
-use types_core::{int64, Oid};
+use ::types_core::{int64, Oid};
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

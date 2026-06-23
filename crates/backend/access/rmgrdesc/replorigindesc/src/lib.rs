@@ -20,8 +20,8 @@ extern crate alloc;
 
 use ::mcx::PgString;
 use ::types_core::uint8;
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
-use wal::{xl_replorigin_drop, xl_replorigin_set, DecodedXLogRecord, XLR_INFO_MASK};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use ::wal::{xl_replorigin_drop, xl_replorigin_set, DecodedXLogRecord, XLR_INFO_MASK};
 
 /// `XLOG_REPLORIGIN_SET` (replication/origin.h).
 pub const XLOG_REPLORIGIN_SET: uint8 = 0x00;

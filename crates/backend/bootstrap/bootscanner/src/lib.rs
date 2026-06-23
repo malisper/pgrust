@@ -15,7 +15,7 @@
 //! routine. The integer token codes match the Bison-generated `bootparse.h`
 //! token numbers and keep the C `int` type via [`core::ffi::c_int`].
 
-use utils_error::{PgError, PgResult};
+use ::utils_error::{PgError, PgResult};
 use ::guc_file::DeescapeQuotedString;
 use core::ffi::c_int;
 use ::types_error::ERROR;

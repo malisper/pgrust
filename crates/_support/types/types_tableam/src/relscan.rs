@@ -27,7 +27,7 @@ use ::types_core::primitive::BlockNumber;
 use ::rel::Relation;
 use ::snapshot::SnapshotData;
 use ::types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64};
-use types_storage::{RelFileLocator, Spinlock};
+use ::types_storage::{RelFileLocator, Spinlock};
 use ::types_tuple::heaptuple::FormedTuple;
 use ::types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 

@@ -3,7 +3,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::primitive::{ForkNumber, Oid, ProcNumber, RelFileNumber};
 use ::types_error::PgResult;
 

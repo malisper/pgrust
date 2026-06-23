@@ -15,7 +15,7 @@
 #![allow(non_snake_case)]
 
 use ::types_error::PgResult;
-use types_extensible::{CustomScanMethods, ExtensibleNodeMethods};
+use ::types_extensible::{CustomScanMethods, ExtensibleNodeMethods};
 
 seam_core::seam!(
     /// `RegisterExtensibleNodeMethods(const ExtensibleNodeMethods *methods)`
@@ -60,7 +60,7 @@ seam_core::seam!(
 // ===========================================================================
 
 use ::mcx::Mcx;
-use nodes::{
+use ::nodes::{
     CustomScan, CustomScanState, EStateData, ParallelContext, ParallelWorkerContext, SlotId,
 };
 

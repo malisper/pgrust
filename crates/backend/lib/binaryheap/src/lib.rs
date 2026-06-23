@@ -36,7 +36,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
+use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
 /// Build the OOM `PgError` raised when the node array cannot be reserved — the
 /// analogue of C's `palloc` failure (`ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), ...))`).

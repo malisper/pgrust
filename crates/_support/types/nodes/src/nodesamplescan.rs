@@ -4,7 +4,7 @@
 
 use alloc::boxed::Box;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 

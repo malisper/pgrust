@@ -22,7 +22,7 @@
 use ::dsm_core::dsm;
 use ::mcxt_seams::top_memory_context;
 use ::datum::Datum;
-use types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
+use ::types_error::{PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::execparallel::DsmSegmentHandle;
 use ::types_storage::fileset::SharedFileSet;
 

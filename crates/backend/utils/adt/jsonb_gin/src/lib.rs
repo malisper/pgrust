@@ -36,17 +36,17 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use jsonb_util::{
+use ::jsonb_util::{
     jbvType, json_container_size, JsonbHashScalarValue, JsonbIteratorInit, JsonbIteratorNext,
     JsonbIteratorToken, JsonbValue, JsonbValueData, VARHDRSZ,
 };
-use adt_jsonpath::{
+use ::adt_jsonpath::{
     jsonpath_is_lax, jspGetArg, jspGetBool, jspGetLeftArg, jspGetNext, jspGetNumeric,
     jspGetRightArg, jspGetString, jspInit, JsonPathItem,
 };
 use ::mcx::Mcx;
 use ::types_error::error::{ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_jsonb::jsonb::{
     GinTernaryValue, JsonbContainsStrategyNumber, JsonbExistsAllStrategyNumber,
     JsonbExistsAnyStrategyNumber, JsonbExistsStrategyNumber, JsonbJsonpathExistsStrategyNumber,

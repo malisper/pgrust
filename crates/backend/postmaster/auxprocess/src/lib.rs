@@ -43,7 +43,7 @@
 //! ("seam not initialized: …") until its owner installs a real provider at
 //! single-threaded startup. Nothing is silently stubbed.
 
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_tuple::Datum;
 
 use ::procsignal::ProcSignalInit;

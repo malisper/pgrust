@@ -40,9 +40,9 @@ use init_small_seams as globals;
 use tuplesort_seams as tuplesort;
 use ::types_parallel::shared_dsm_object;
 
-use mcx::{alloc_in, PgBox, PgVec};
+use ::mcx::{alloc_in, PgBox, PgVec};
 use ::types_error::PgResult;
-use execparallel::{
+use ::execparallel::{
     ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
 use ::nodes::execnodes::{ForwardScanDirection, ScanDirectionIsForward};
@@ -51,7 +51,7 @@ use ::nodes::nodesort::{
     SharedSortInfo, SharedSortInfoHeader, Sort, SortStateData, TuplesortInstrumentation,
     TUPLESORT_ALLOWBOUNDED, TUPLESORT_NONE, TUPLESORT_RANDOMACCESS,
 };
-use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
+use ::nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 
 /// `offsetof(SharedSortInfo, sinstrument) + nworkers * sizeof(TuplesortInstrumentation)`
 /// — the byte size of a `SharedSortInfo` carrying `nworkers` per-worker slots.

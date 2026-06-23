@@ -18,7 +18,7 @@ use ::types_core::Oid;
 // the canonical by-value arm here, with no shim type held by funcapi.
 use ::types_tuple::heaptuple::Datum as DatumV;
 use ::types_error::error::ERRCODE_FEATURE_NOT_SUPPORTED;
-use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+use ::types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::{
     FuncCallContext, ReturnSetInfo, SetFunctionReturnMode, TypeFuncClass, MAT_SRF_BLESS,
@@ -660,7 +660,7 @@ mod srf_protocol_tests {
 
     use super::*;
     use core::any::Any;
-    use mcx::{MemoryContext, PgBox};
+    use ::mcx::{MemoryContext, PgBox};
     use ::datum::NullableDatum;
     use ::nodes::execexpr::ExprDoneCond;
     use ::nodes::funcapi::{ReturnSetInfo, SFRM_ValuePerCall};

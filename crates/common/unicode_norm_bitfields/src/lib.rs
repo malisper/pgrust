@@ -28,8 +28,8 @@
 mod qc_tables;
 mod tables;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{uint16, uint32, uint8};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{uint16, uint32, uint8};
 use ::types_error::PgResult;
 use ::types_wchar::pg_wchar;
 

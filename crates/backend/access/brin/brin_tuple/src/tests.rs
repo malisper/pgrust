@@ -5,13 +5,13 @@
 extern crate std;
 
 use ::mcx::MemoryContext;
-use brin::{
+use ::brin::{
     BrinDesc, BrinOpcInfo, BRIN_EMPTY_RANGE_MASK, BRIN_NULLS_MASK, BRIN_PLACEHOLDER_MASK,
     SIZE_OF_BRIN_TUPLE,
 };
 use ::types_core::NAMEDATALEN;
 use ::types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
-use types_typcache::{TypeCacheEntry, TYPSTORAGE_PLAIN};
+use ::types_typcache::{TypeCacheEntry, TYPSTORAGE_PLAIN};
 
 use crate::internal::{bitmaplen, maxalign, BrinTupleImage};
 use crate::tuple::{brin_form_placeholder_tuple, brin_tuples_equal};
@@ -84,7 +84,7 @@ fn index_tupdesc<'mcx>(mcx: ::mcx::Mcx<'mcx>, natts: usize) -> ::mcx::PgBox<'mcx
 }
 
 fn make_index_rel<'mcx>(mcx: ::mcx::Mcx<'mcx>, natts: usize) -> ::rel::Relation<'mcx> {
-    use rel::{FormData_pg_class, RelationData};
+    use ::rel::{FormData_pg_class, RelationData};
     use ::types_storage::RelFileLocator;
     let rd = RelationData {
         rd_id: 1,

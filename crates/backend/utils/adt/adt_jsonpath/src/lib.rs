@@ -54,14 +54,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgString, PgVec, MAX_ALLOC_SIZE};
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
-use types_error::{
+use ::mcx::{Mcx, PgString, PgVec, MAX_ALLOC_SIZE};
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_OUT_OF_MEMORY,
     ERRCODE_SYNTAX_ERROR,
 };
 use ::fmgr::ExternalFnExpr;
-use types_tuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
+use ::types_tuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
 
 pub use ::types_jsonpath::jsonpath::{
     jsp_is_scalar, JsonPathItemType, JSONPATH_HDRSZ, JSONPATH_LAX, JSONPATH_VERSION,

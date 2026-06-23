@@ -28,7 +28,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 use ::types_core::primitive::{AttrNumber, Index, Oid, ParseLoc};
 use types_tuple::heaptuple::Datum;
 use ::types_error::PgResult;

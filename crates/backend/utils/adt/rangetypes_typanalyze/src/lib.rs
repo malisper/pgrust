@@ -41,12 +41,12 @@ extern crate std;
 
 use core::cmp::Ordering;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::types_error::PgResult;
-use types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP};
-use types_selfuncs::{STATISTIC_KIND_BOUNDS_HISTOGRAM, STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM};
+use ::types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP};
+use ::types_selfuncs::{STATISTIC_KIND_BOUNDS_HISTOGRAM, STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM};
 use ::statistics::VacAttrStats;
 use ::types_tuple::Datum;
 

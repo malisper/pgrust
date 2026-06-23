@@ -24,7 +24,7 @@
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 
-use varlena_seams::{cstring_to_text, cstring_to_text_v};
+use ::varlena_seams::{cstring_to_text, cstring_to_text_v};
 
 pub mod fmgr_builtins;
 

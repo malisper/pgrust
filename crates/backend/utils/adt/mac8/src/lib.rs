@@ -31,12 +31,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use hashfn::{hash_bytes, hash_bytes_extended};
-use types_error::{
+use ::hashfn::{hash_bytes, hash_bytes_extended};
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
-use types_network::{macaddr, macaddr8};
+use ::types_network::{macaddr, macaddr8};
 
 #[cfg(test)]
 mod tests;

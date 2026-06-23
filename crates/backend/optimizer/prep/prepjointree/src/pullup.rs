@@ -49,7 +49,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::AttrNumber;
 use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
@@ -58,7 +58,7 @@ use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::parsenodes::{RTEKind, RangeTblEntry};
 use ::nodes::primnodes::{Expr, ExprRelids, Var};
 use ::nodes::rawnodes::FromExpr;
-use pathnodes::{NodeId, PlannerInfo};
+use ::pathnodes::{NodeId, PlannerInfo};
 use ::types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
 
 use ::nodes_core::bitmapset::{bms_is_member, bms_is_subset};
@@ -66,7 +66,7 @@ use ::clauses::grounded::{
     contain_nonstrict_functions, contain_volatile_functions,
 };
 use ::vars::var::{contain_vars_of_level, pull_varnos, pull_varnos_of_level};
-use rewrite_core::{
+use ::rewrite_core::{
     add_nulling_relids, replace_rte_variables, IncrementVarSublevelsUp,
     IncrementVarSublevelsUp_rtable, OffsetVarNodes, ReplaceVarFromTargetList,
     ReplaceVarsNoMatchOption,

@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 use std::ptr;
 
-use pg_ffi_fgram::{ErrorLevel, PgrustErrorData, SqlState};
+use ::pg_ffi_fgram::{ErrorLevel, PgrustErrorData, SqlState};
 
 use crate::{value::nonzero_position, ErrorLocation, PgError};
 

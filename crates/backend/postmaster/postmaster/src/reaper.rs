@@ -5,12 +5,12 @@
 
 #![allow(non_snake_case)]
 
-use pmchild::{
+use ::pmchild::{
     FindPostmasterChildByPid, PMChild, ReleasePostmasterChildSlot,
 };
-use utils_error::{ereport};
-use types_error::{DEBUG1, DEBUG2, DEBUG4};
-use types_error::{ErrorLevel, LOG};
+use ::utils_error::{ereport};
+use ::types_error::{DEBUG1, DEBUG2, DEBUG4};
+use ::types_error::{ErrorLevel, LOG};
 
 use crate::core::{
     exit_status_0, exit_status_1, exit_status_3, pm, pm_mut, wexitstatus, wifexited, wifsignaled,

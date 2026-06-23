@@ -11,7 +11,7 @@
 extern crate alloc;
 use alloc::string::String;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 

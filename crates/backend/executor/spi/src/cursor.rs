@@ -17,9 +17,9 @@
 //! machinery but is not exercised by these consumers.
 
 use ::utils_error::ereport;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::portal::FetchDirection;
-use types_xml::{SpiColumn, SpiResult};
+use ::types_xml::{SpiColumn, SpiResult};
 
 use crate::backbone::{SPI_connect, SPI_finish};
 use crate::dest_spi::{create_spi_dest_receiver, spi_result_columns, take_spi_result};

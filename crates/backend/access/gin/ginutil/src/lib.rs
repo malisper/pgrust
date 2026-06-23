@@ -60,23 +60,23 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 
-use common_reloptions::{
+use ::common_reloptions::{
     build_reloptions, relopt_kind, RelOptParseElt, RELOPT_KIND_GIN, RELOPT_TYPE_BOOL,
     RELOPT_TYPE_INT,
 };
-use page::{PageGetPageSize, PageInit, PageRef};
+use ::page::{PageGetPageSize, PageInit, PageRef};
 use ::utils_error::ereport;
 use ::types_error::error::{ERRCODE_UNDEFINED_FUNCTION, ERROR};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use ginutil_seams as sx;
 use indexam_seams as indexam;
 use relcache_seams as relcache;
 
 use ::types_core::primitive::{AttrNumber, OffsetNumber, Oid};
-use types_core::{InvalidOid, OidIsValid, BLCKSZ};
+use ::types_core::{InvalidOid, OidIsValid, BLCKSZ};
 use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
-use gin::{
+use ::gin::{
     GinMetaPageData, GinNullCategory, GinOptions, GinPageOpaqueData, GinState, GinStatsData,
     GIN_CAT_EMPTY_ITEM, GIN_CAT_NORM_KEY, GIN_CAT_NULL_ITEM, GIN_CAT_NULL_KEY, GIN_COMPARE_PROC,
     GIN_COMPARE_PARTIAL_PROC, GIN_CONSISTENT_PROC, GIN_CURRENT_VERSION, GIN_EXTRACTQUERY_PROC,

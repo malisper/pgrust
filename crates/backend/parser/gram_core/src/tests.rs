@@ -1,6 +1,6 @@
 //! End-to-end: SQL text → `base_yyparse` → owned `RawStmt` (shape asserts).
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::parsenodes::RawParseMode;
 
 /// Run the converter (not the seam) directly over a query and return the owned

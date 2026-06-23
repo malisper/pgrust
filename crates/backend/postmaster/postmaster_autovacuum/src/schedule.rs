@@ -7,16 +7,16 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 
-use utils_error::{elog, PgResult};
-use types_error::{DEBUG3, WARNING};
+use ::utils_error::{elog, PgResult};
+use ::types_error::{DEBUG3, WARNING};
 
-use types_core::{bits32, MultiXactId, Oid, TransactionId};
+use ::types_core::{bits32, MultiXactId, Oid, TransactionId};
 use ::types_reloptions::AutoVacOpts;
 use ::types_vacuum::vacuum::{
     VacOptValue, VacuumParams, VACOPT_ANALYZE, VACOPT_PROCESS_MAIN, VACOPT_SKIP_DATABASE_STATS,
     VACOPT_SKIP_LOCKED, VACOPT_VACUUM,
 };
-use types_autovacuum::{AutovacTable, AvRelation, RecheckClassRow, TabStatEntry};
+use ::types_autovacuum::{AutovacTable, AvRelation, RecheckClassRow, TabStatEntry};
 
 use crate::core::{
     self, BlockNumberIsValid, FirstMultiXactId, FirstNormalTransactionId, MultiXactIdIsValid,

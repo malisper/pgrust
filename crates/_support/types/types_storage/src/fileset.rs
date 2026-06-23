@@ -5,7 +5,7 @@
 //! `sharedfileset.c`) is reached through that owner's seam crate.
 
 use crate::storage::Spinlock;
-use types_core::{uint32, Oid};
+use ::types_core::{uint32, Oid};
 
 /// `FileSet` (`storage/fileset.h`) — names a group of temporary files shared
 /// by a set of backends, keyed by the creating PID and a per-PID counter.

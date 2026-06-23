@@ -15,7 +15,7 @@
 #![no_std]
 extern crate alloc;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 

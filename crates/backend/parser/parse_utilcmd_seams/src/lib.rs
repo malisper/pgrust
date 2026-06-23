@@ -6,7 +6,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::ddlnodes::{IndexStmt, RuleStmt};

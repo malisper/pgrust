@@ -49,15 +49,15 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 
-use page::{
+use ::page::{
     ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid, ItemPointerSet,
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageRef,
 };
 use ::utils_error::ereport;
 use ::types_error::error::ERROR;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use ::types_core::primitive::{OffsetNumber, Oid, RegProcedure};
 use ::rel::Relation;
@@ -72,7 +72,7 @@ use ::types_tuple::heaptuple::{
     ItemPointerData, TupleDescData, FLOAT4OID, FLOAT8OID,
 };
 use ::types_scan::scankey::{ScanKeyData, SK_ISNULL, SK_SEARCHNOTNULL, SK_SEARCHNULL};
-use spgist::{
+use ::spgist::{
     spgInnerConsistentIn, spgInnerConsistentOut, spgKeyColumn, spgLeafConsistentIn,
     spgLeafConsistentOut, SpGistCache, SpGistState, SPGIST_DEAD, SPGIST_INNER_CONSISTENT_PROC,
     SPGIST_LEAF_CONSISTENT_PROC, SPGIST_LIVE, SPGIST_METAPAGE_BLKNO, SPGIST_NULL_BLKNO,

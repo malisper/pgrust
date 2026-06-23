@@ -34,10 +34,10 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::primitive::{uint16, Oid};
 use ::types_error::PgResult;
-use gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
+use ::gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
 use ::types_sortsupport::SortSupportData;
 use types_tuple::heaptuple::Datum;
 

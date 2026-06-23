@@ -17,7 +17,7 @@
 
 use ::mcx::MemoryContext;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::AccessShareLock;
 
 use crate::consts::{

@@ -18,10 +18,10 @@
 //! seams. The page-scan and dedup logic that *feeds* those boundaries is ported
 //! 1:1 in-crate.
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::{BlockNumber, OffsetNumber, RmgrId, Size, BLCKSZ};
-use types_error::{PgError, PgResult};
-use types_nbtree::{
+use ::types_error::{PgError, PgResult};
+use ::types_nbtree::{
     BTDedupInterval, BTPageOpaqueData, BTMaxItemSize, BTREE_SINGLEVAL_FILLFACTOR, BTP_HAS_GARBAGE,
     BT_IS_POSTING, BT_OFFSET_MASK, BT_PIVOT_HEAP_TID_ATTR, INDEX_ALT_TID_MASK, MaxIndexTuplesPerPage,
     MaxTIDsPerBTreePage, P_NONE, SizeOfBtreeDedup, TmIndexDelete, TmIndexDeleteOp, TmIndexStatus,
@@ -34,7 +34,7 @@ use ::types_tuple::heaptuple::{
 };
 use ::wal::xloginsert::REGBUF_STANDARD;
 
-use page::{
+use ::page::{
     ItemIdGetLength, ItemIdIsDead, ItemPointerCompare, ItemPointerCopy, ItemPointerGetBlockNumber,
     ItemPointerGetOffsetNumberNoCheck, ItemPointerIsValid, ItemPointerSetBlockNumber,
     ItemPointerSetOffsetNumber, PageAddItemExtended, PageGetExactFreeSpace, PageGetItem,

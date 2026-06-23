@@ -47,7 +47,7 @@ use nodes_core_seams as bitmapset;
 use postgres_seams as tcop_postgres;
 use sortsupport_seams as sortsupport;
 
-use mcx::{alloc_in, Mcx, PgBox};
+use ::mcx::{alloc_in, Mcx, PgBox};
 use ::types_core::primitive::AttrNumber;
 // This crate is fully on the canonical enum `Datum<'mcx>` from the keystone
 // tuple crate. The binary heap's `bh_nodes` storage (owned by `types-nodes`)
@@ -58,10 +58,10 @@ use ::types_core::primitive::AttrNumber;
 // shim conversion (no `as_usize()`/`from_usize` forge that would panic on a
 // by-reference value).
 use types_tuple::heaptuple::Datum;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::nodes::nodemergeappend::{BinaryHeap, MergeAppend, MergeAppendStateData};
-use nodes::{
+use ::nodes::{
     Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind,
 };
 use ::types_sortsupport::SortSupportData;

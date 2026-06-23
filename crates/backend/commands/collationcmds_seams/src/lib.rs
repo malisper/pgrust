@@ -22,7 +22,7 @@
 //! Reused directly (direct cargo dep, no cycle): `backend-catalog-namespace`'s
 //! `get_collation_oid` / `QualifiedNameGetCreationNamespace` / `NameListToString`.
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 

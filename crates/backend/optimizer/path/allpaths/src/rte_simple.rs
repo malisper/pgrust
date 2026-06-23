@@ -9,7 +9,7 @@
 use ::types_core::primitive::Index;
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId};
+use ::pathnodes::{PlannerInfo, RelId};
 
 use pathnode_seams as pathnode;
 use relnode_seams as bms;

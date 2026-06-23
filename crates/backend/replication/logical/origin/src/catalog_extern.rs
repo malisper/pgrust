@@ -11,10 +11,10 @@
 
 use alloc::string::String;
 
-use heaptuple::{heap_form_tuple, heap_getattr};
+use ::heaptuple::{heap_form_tuple, heap_getattr};
 use ::scankey::ScanKeyInit;
 use genam_seams as genam;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert};
 use ::cache_syscache::SearchSysCache1;
 use ::mcx::MemoryContext;
@@ -24,8 +24,8 @@ use ::types_catalog::catalog::{
     NATTS_PG_REPLICATION_ORIGIN, REPLICATION_ORIGIN_IDENT_INDEX, REPLICATION_ORIGIN_RELATION_ID,
 };
 use ::types_core::fmgr::F_OIDEQ;
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::{AccessShareLock, ExclusiveLock, NoLock, RowExclusiveLock};
 use types_tuple::heaptuple::Datum;

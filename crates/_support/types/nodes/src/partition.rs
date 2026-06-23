@@ -16,7 +16,7 @@
 //! The `PartitionDispatchData` / `PartitionTupleRouting` structs are private to
 //! `execPartition.c`, so they live in the owning crate, not here.
 
-use mcx::{Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgBox, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum;

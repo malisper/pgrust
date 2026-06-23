@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 use ::types_core::primitive::{Cost, Oid};
 use ::nodes::primnodes::Expr;
-use pathnodes::{NodeId, PathId, PathNode, PlannerInfo, RelId, Relids, RinfoId};
+use ::pathnodes::{NodeId, PathId, PathNode, PlannerInfo, RelId, Relids, RinfoId};
 
 use ::nodes_core::makefuncs::make_orclause;
 use ::equalfuncs_seams::equal_expr;

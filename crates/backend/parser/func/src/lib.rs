@@ -24,13 +24,13 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::needless_range_loop)]
 
-use utils_error::{ereport, PgError};
-use mcx::{Mcx, MemoryContext, PgString, PgVec};
+use ::utils_error::{ereport, PgError};
+use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
 
 use ::types_core::primitive::{
     AttrNumber, Oid, OidIsValid, FUNC_MAX_ARGS, InvalidAttrNumber, INVALID_OID as InvalidOid,
 };
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_FUNCTION_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_ARGUMENTS,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
@@ -53,26 +53,26 @@ use ::types_tuple::heaptuple::{RECORDOID, UNKNOWNOID, VOIDOID};
 // Outward seam aliases.
 use ::namespace_seams::funcname_get_candidates;
 use ::nodes_core::nodefuncs::{expr_location as exprLocation, expr_type as exprType};
-use coerce_seams::{
+use ::coerce_seams::{
     can_coerce_type, coerce_type, enforce_generic_type_consistency, find_coercion_pathway_explicit,
     select_common_type, CoercionPathType,
 };
-use parse_agg_seams::{transform_aggregate_call, transform_window_func_call};
+use ::parse_agg_seams::{transform_aggregate_call, transform_window_func_call};
 use ::parse_expr_seams::parse_expr_kind_name;
 use parse_func_seams as me;
-use parse_type_seams::{
+use ::parse_type_seams::{
     func_name_as_type, lookup_type_name_oid, lookup_type_name_oid_owa,
 };
-use parser_relation_seams::{expand_record_variable, scan_ns_item_for_column_by_posn};
+use ::parser_relation_seams::{expand_record_variable, scan_ns_item_for_column_by_posn};
 use ::format_type_seams::format_type_be_owned;
-use lsyscache_seams::{
+use ::lsyscache_seams::{
     get_array_type, get_base_element_type, get_base_type, get_func_prokind,
     get_type_category_preferred,
 };
-use syscache_seams::{agg_row_by_oid, proc_argdefaults, proc_row_by_oid};
+use ::syscache_seams::{agg_row_by_oid, proc_argdefaults, proc_row_by_oid};
 use ::funcapi_seams::get_expr_result_tupdesc;
 
-use types_namespace::{FuncCandidate, FuncCandidateList};
+use ::types_namespace::{FuncCandidate, FuncCandidateList};
 
 #[cfg(test)]
 mod tests;

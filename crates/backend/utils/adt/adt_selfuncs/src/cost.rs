@@ -23,11 +23,11 @@ use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use ::types_error::PgResult;
 use ::types_error::PgError;
 use ::nodes::primnodes::Expr;
-use pathnodes::{
+use ::pathnodes::{
     IndexOptInfo, NodeId, PathId, PathNode, PlannerInfo, RinfoId, JOIN_INNER,
 };
 use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS};
+use ::types_selfuncs::{VariableStatData, ATTSTATSSLOT_NUMBERS};
 use ::statistics::STATISTIC_KIND_CORRELATION;
 use ::types_scan::scankey::{BTEqualStrategyNumber, BTLessStrategyNumber};
 

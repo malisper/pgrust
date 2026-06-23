@@ -15,7 +15,7 @@
 //! `ereport(ERROR)` surface of the underlying catalog scan plus OOM from the
 //! copy; a cache miss (a negative entry) is `Ok(None)`.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::cache::SysCacheKey;
 use ::types_core::Oid;
 use ::types_error::PgResult;

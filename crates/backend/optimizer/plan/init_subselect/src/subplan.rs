@@ -20,15 +20,15 @@
 //! `splan.plan_id == glob.subplans.len()` after interning. `multiexpr_params`
 //! holds, per sublink-id, a `Vec<NodeId>` of the replacement `Param` nodes.
 
-use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{
     Expr, OpExpr, Param, ParamKind, SubLinkType, SubPlan, SubPlanExpr,
 };
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PathId, PlannerInfo};
+use ::pathnodes::{PathId, PlannerInfo};
 
 use ::nodes_core::makefuncs::{
     make_ands_explicit, make_ands_implicit, make_null_const, make_opclause, make_target_entry,

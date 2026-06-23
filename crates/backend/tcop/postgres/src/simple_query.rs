@@ -28,17 +28,17 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::cmdtag::CommandTag;
 use ::types_dest::dest::CommandDest;
-use types_error::{PgResult, ERROR, LOG};
+use ::types_error::{PgResult, ERROR, LOG};
 use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::{CmdType, Node};
 use ::nodes::parsestmt::RawStmt;
 use ::parsenodes::RawParseMode;
 
-use utils_error::{ereport, errcode, errfinish, errhidestmt, errmsg, errstart};
+use ::utils_error::{ereport, errcode, errfinish, errhidestmt, errmsg, errstart};
 
 use crate::globals;
 use crate::logging;

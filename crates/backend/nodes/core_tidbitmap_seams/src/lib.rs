@@ -8,10 +8,10 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 use ::execparallel::DsaAreaHandle;
-use tidbitmap::{dsa_pointer, TBMIterateOutcome, TBMIterator, TIDBitmap};
+use ::tidbitmap::{dsa_pointer, TBMIterateOutcome, TBMIterator, TIDBitmap};
 
 seam_core::seam!(
     /// `tbm_create(maxbytes, dsa)` (tidbitmap.c): create an initially-empty

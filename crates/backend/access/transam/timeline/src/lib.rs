@@ -38,9 +38,9 @@
 
 use ::utils_error::errno::current_errno;
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, PgResult, ERROR, FATAL};
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{TimeLineID, XLogRecPtr, InvalidXLogRecPtr};
+use ::types_error::{ErrorLocation, PgResult, ERROR, FATAL};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{TimeLineID, XLogRecPtr, InvalidXLogRecPtr};
 use ::wal::TimeLineHistoryEntry;
 use ::wal::xlog_consts::XLOGDIR;
 use ::types_pgstat::wait_event::{

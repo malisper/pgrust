@@ -52,12 +52,12 @@ use snapmgr_pc_seams as snapmgr_pc_seams;
 use snapmgr_seams as snapmgr_seams;
 
 use ::types_core::xact::{TransactionIdIsNormal, TransactionIdIsValid};
-use types_core::{FullTransactionId, InvalidFullTransactionId, TransactionId};
-use types_error::{
+use ::types_core::{FullTransactionId, InvalidFullTransactionId, TransactionId};
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
 };
-use types_storage::{LWLockMode, MAX_BACKENDS, XACT_TRUNCATION_LOCK};
+use ::types_storage::{LWLockMode, MAX_BACKENDS, XACT_TRUNCATION_LOCK};
 
 // ---------------------------------------------------------------------------
 // Constants and varlena layout matching the C file.

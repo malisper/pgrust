@@ -30,14 +30,14 @@
 
 pub mod fmgr_builtins;
 
-use sha2::{
+use ::sha2::{
     pg_sha224_ctx, pg_sha224_final, pg_sha224_init, pg_sha224_update, pg_sha256_ctx,
     pg_sha256_final, pg_sha256_init, pg_sha256_update, pg_sha384_ctx, pg_sha384_final,
     pg_sha384_init, pg_sha384_update, pg_sha512_ctx, pg_sha512_final, pg_sha512_init,
     pg_sha512_update, PG_SHA224_DIGEST_LENGTH, PG_SHA256_DIGEST_LENGTH, PG_SHA384_DIGEST_LENGTH,
     PG_SHA512_DIGEST_LENGTH,
 };
-use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
+use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
 /// `pg_cryptohash_type` selector (`common/cryptohash.h`) — only the SHA-2
 /// members are used here.

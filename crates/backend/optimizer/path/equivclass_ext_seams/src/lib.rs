@@ -26,7 +26,7 @@ use ::types_core::primitive::{Index, Oid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::{CoercionForm, Expr};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
+use ::pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
 
 /* ---- nodeFuncs.c / equalfuncs.c node operators -------------------- */

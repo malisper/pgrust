@@ -167,7 +167,7 @@ pub fn install_seams() {
     // crate's `thread_local` backing storage so the GUC engine's `.read()` /
     // `.write()` resolve to it.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::pgstat_track_counts.install(GucVarAccessors {
             get: crate::guc::track_counts,
             set: crate::guc::set_track_counts,

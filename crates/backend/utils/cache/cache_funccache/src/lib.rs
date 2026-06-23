@@ -38,10 +38,10 @@ extern crate alloc;
 use alloc::format;
 use core::cell::RefCell;
 
-use mcx::{Mcx, McxOwned, MemoryContext, PgHashMap, PgVec};
+use ::mcx::{Mcx, McxOwned, MemoryContext, PgHashMap, PgVec};
 use ::types_core::primitive::{InvalidOid, Oid, Size};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, WARNING};
-use types_funccache::{
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR, WARNING};
+use ::types_funccache::{
     CachedFunction, CachedFunctionHashKey, CachedFunctionKeyId, CachedFunctionRef, ProcCompileInfo,
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
@@ -52,9 +52,9 @@ use ::types_tuple::heaptuple::{
 };
 
 use ::utils_error::ereport;
-use hashfn::{hash_bytes, hash_combine};
+use ::hashfn::{hash_bytes, hash_combine};
 
-use tupdesc::{equalRowTypes, hashRowType, CreateTupleDescCopy};
+use ::tupdesc::{equalRowTypes, hashRowType, CreateTupleDescCopy};
 use ::funcapi::polymorphic::{resolve_polymorphic_argtypes, CallExpr};
 use ::funcapi::result_type::get_call_result_type;
 

@@ -9,9 +9,9 @@
 
 extern crate alloc;
 
-use mcx::{slice_in, vec_with_capacity_in, Mcx};
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx};
 use ::types_core::primitive::AttrNumber;
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::nodes::tuptable::{
     BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotData,
     VirtualTupleTableSlot, TTS_FLAG_SHOULDFREE,

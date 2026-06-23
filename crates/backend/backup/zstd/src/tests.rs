@@ -13,10 +13,10 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use std::sync::Once;
 
-use sink::{
+use ::sink::{
     bbsink_begin_archive, bbsink_begin_backup, bbsink_end_archive, BbsinkState, TablespaceInfo,
 };
-use zstd_seams::{ZstdCctxHandle, ZstdEndDirective, ZstdStreamOutcome};
+use ::zstd_seams::{ZstdCctxHandle, ZstdEndDirective, ZstdStreamOutcome};
 use ::mcx::MemoryContext;
 
 const FOOTER: &[u8] = b"ZE";

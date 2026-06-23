@@ -27,14 +27,14 @@ use core::any::Any;
 
 use ::adt_numeric::convert::{make_result, set_var_from_num};
 use ::adt_numeric::kernel_var::{add_var, cmp_var, const_one};
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::Oid;
 use ::types_error::error::ERRCODE_INVALID_PARAMETER_VALUE;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::execexpr::ExprDoneCond;
 use ::nodes::fmgr::{FmgrArgRef, FunctionCallInfoBaseData};
 use ::types_numeric::var::{NumericSign, NumericVar};
-use types_numeric::{numeric_is_nan, numeric_is_special};
+use ::types_numeric::{numeric_is_nan, numeric_is_special};
 use types_tuple::heaptuple::Datum;
 
 use ::funcapi::srf_support::{

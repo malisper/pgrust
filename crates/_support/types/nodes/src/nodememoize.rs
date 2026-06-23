@@ -24,7 +24,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
-use mcx::{PgBox, PgString, PgVec};
+use ::mcx::{PgBox, PgString, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_core::fmgr::FmgrInfo;
 use ::types_tuple::heaptuple::Datum;

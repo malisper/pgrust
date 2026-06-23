@@ -49,18 +49,18 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
-use types_blkreftable::{
+use ::mcx::{Mcx, PgVec};
+use ::types_blkreftable::{
     BlockRefTable, BlockRefTableEntry, BlockRefTableKey, BlockRefTableReader, ReadBuffer,
 };
 // Re-export the read-callback alias (defined in the carrier crate) as part of
 // this owner's public `create_block_ref_table_reader` API, so callers that only
 // depend on the owner can name it.
 pub use ::types_blkreftable::ReadCallback;
-use types_core::{
+use ::types_core::{
     uint16, uint32, BlockNumber, ForkNumber, InvalidBlockNumber, BITS_PER_BYTE,
 };
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::RelFileLocator;
 
 // ---------------------------------------------------------------------------

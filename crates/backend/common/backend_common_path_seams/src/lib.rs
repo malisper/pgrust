@@ -10,7 +10,7 @@
 //! piecemeal across four unported owners. The owning unit(s) install it from
 //! `init_seams()` when they land; until then a call panics loudly.
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 

@@ -17,7 +17,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use crate::bytes::{bool_at, i8_at, u16_at, u32_at};
-use types_core::{OffsetNumber, TransactionId};
+use ::types_core::{OffsetNumber, TransactionId};
 
 /// Read a [`spgxlogState`] from `rec` starting at byte `off` — `redirectXid`
 /// u32 @off, `isBuild` bool @off+4. WAL redo (`fillFakeState`) reads these via

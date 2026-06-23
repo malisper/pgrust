@@ -49,12 +49,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ::utils_error::ereport;
-use mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
-use types_acl::{
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
+use ::types_acl::{
     AclResult, ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, ACL_CREATE_TEMP, ACL_MAINTAIN,
     ACL_USAGE,
 };
-use types_core::{
+use ::types_core::{
     InvalidOid, InvalidSubTransactionId, Oid, OidIsValid, ProcNumber, SubTransactionId,
     BOOTSTRAP_SUPERUSERID, DATABASE_RELATION_ID, FUNC_MAX_ARGS, INVALID_PROC_NUMBER,
     NAMESPACE_RELATION_ID, OIDOID, PG_CATALOG_NAMESPACE, PG_TOAST_NAMESPACE,
@@ -72,25 +72,25 @@ use types_core::{
 // `types_tuple::heaptuple::Datum<'mcx>` enum; the token here
 // is `(Datum) 0` in C, i.e. `Datum::null()`.
 use ::datum::Datum;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, DEBUG1, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_LOCK_NOT_AVAILABLE,
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_UNDEFINED_SCHEMA, ERRCODE_UNDEFINED_TABLE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use types_namespace::{FuncArgInfo, FuncCandidate, ProcRow};
+use ::types_namespace::{FuncArgInfo, FuncCandidate, ProcRow};
 use ::nodes::parsenodes::{OBJECT_INDEX, OBJECT_SCHEMA};
 use ::types_tuple::access::{
     RangeVar, RELKIND_INDEX, RELKIND_MATVIEW, RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE,
     RELKIND_RELATION, RELKIND_TOASTVALUE,
 };
-use types_syscache::{AUTHMEMROLEMEM, AUTHOID, DATABASEOID, NAMESPACEOID};
+use ::types_syscache::{AUTHMEMROLEMEM, AUTHOID, DATABASEOID, NAMESPACEOID};
 use ::types_storage::lock::{
     AccessShareLock, ShareLock, ShareUpdateExclusiveLock, LOCKMODE, NoLock,
 };
 use index_seams as index_seams;
 
-pub use types_namespace::{
+pub use ::types_namespace::{
     FuncCandidateList, SearchPathMatcher, TempNamespaceStatus, RVR_MISSING_OK, RVR_NOWAIT,
     RVR_SKIP_LOCKED,
 };
@@ -103,7 +103,7 @@ use transam_xact_seams as xact_seams;
 use transam_xlog_seams as xlog_seams;
 use aclchk_seams as aclchk_seams;
 use dependency_seams as dependency_seams;
-use dependency_seams::{
+use ::dependency_seams::{
     PERFORM_DELETION_INTERNAL, PERFORM_DELETION_QUIETLY, PERFORM_DELETION_SKIP_EXTENSIONS,
     PERFORM_DELETION_SKIP_ORIGINAL,
 };

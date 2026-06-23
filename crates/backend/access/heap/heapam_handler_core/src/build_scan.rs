@@ -16,11 +16,11 @@
 //! FormIndexDatum body — `slot_getattr` / `slot_getsysattr` /
 //! `ExecEvalExprSwitchContext` — runs locally over the canonical slot).
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::utils_error::ereport;
 use ::types_core::primitive::{AttrNumber, BlockNumber};
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, WARNING};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERROR, WARNING};
 use ::rel::Relation;
 use ::types_scan::sdir::ForwardScanDirection;
 use ::snapshot::snapshot::{HTSV_Result, IsMVCCSnapshot};

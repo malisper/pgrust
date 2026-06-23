@@ -31,8 +31,8 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use mcx::{Mcx, PgVec, MAX_ALLOC_SIZE};
-use types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::mcx::{Mcx, PgVec, MAX_ALLOC_SIZE};
+use ::types_error::{PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 
 mod fmgr_builtins;
 mod seams;

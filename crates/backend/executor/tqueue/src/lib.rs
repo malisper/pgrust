@@ -31,8 +31,8 @@ use alloc::vec::Vec;
 
 use ::utils_error::ereport;
 use ::types_dest::CommandDest;
-use types_error::{ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
-use execparallel::{DestReceiverHandle, ShmMqAttachHandle, TupleQueueReaderHandle};
+use ::types_error::{ErrorLocation, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
+use ::execparallel::{DestReceiverHandle, ShmMqAttachHandle, TupleQueueReaderHandle};
 use ::types_parallel::ShmMqResult;
 
 use shm_mq_seams as shmmq;

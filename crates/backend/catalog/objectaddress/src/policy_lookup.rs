@@ -7,9 +7,9 @@
 //! `heap_getattr` on the fixed `polrelid` / `polname` columns. Mirrors
 //! [`crate::trigger_lookup`].
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::AccessShareLock;
 
 use crate::consts::{

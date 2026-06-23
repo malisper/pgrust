@@ -30,7 +30,7 @@
 //! `t_hoff` bounds, null-bitmap fit) and fails loudly on a corrupt blob —
 //! bytes are never fabricated.
 
-use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgVec};
 use ::types_error::PgError;
 
 use ::types_tuple::heaptuple::{

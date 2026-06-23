@@ -15,7 +15,7 @@
 //!    value-typed `QueryRewrite` entry. The legacy opaque `query_rewrite`
 //!    contract is installed as a precise K1 panic boundary.
 
-use mcx::{Mcx, PgBox, PgString};
+use ::mcx::{Mcx, PgBox, PgString};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;

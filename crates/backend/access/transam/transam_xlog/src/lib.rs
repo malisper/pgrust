@@ -43,9 +43,9 @@ extern crate std;
 use alloc::format;
 use alloc::string::String;
 
-use utils_error::{PgError, PgResult};
+use ::utils_error::{PgError, PgResult};
 
-use types_core::{
+use ::types_core::{
     FullTransactionId, MultiXactId, MultiXactOffset, Oid, TimeLineID,
     TransactionId, XLogRecPtr, XLogSegNo,
 };

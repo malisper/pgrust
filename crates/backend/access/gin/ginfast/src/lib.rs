@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 
 use bufmgr_seams as bufmgr;
 use freespace_seams as fsm;
-use page::{
+use ::page::{
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageIsEmpty, PageMut, PageRef,
 };
 use ::utils_error::PgResult;
@@ -43,7 +43,7 @@ use ::mcx::Mcx;
 use ::types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
 use ::types_core::Oid;
 use ::types_error::PgError;
-use gin::{
+use ::gin::{
     GinMetaPageData, GinNullCategory, GinState, GIN_EXCLUSIVE, GIN_LIST, GIN_LIST_FULLROW,
     GIN_METAPAGE_BLKNO, GIN_SHARE, GIN_UNLOCK,
 };
@@ -53,18 +53,18 @@ use ::types_storage::storage::{Buffer, InvalidBuffer};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use ginutil::{
+use ::ginutil::{
     ginExtractEntries, GinInitBuffer, GinNewBuffer, gintuple_get_attrnum, gintuple_get_key,
 };
 use ::ginentrypage::GinFormTuple;
 use ::gininsert::ginEntryInsert;
 
-use lmgr::{ConditionalLockPage, LockPage, UnlockPage};
+use ::lmgr::{ConditionalLockPage, LockPage, UnlockPage};
 
 mod fmgr_builtins;
 
 mod page;
-use page::{
+use self::page::{
     gin_opaque_from_page, index_tuple_size, meta_to_bytes, or_flags, read_meta, set_flags,
     set_maxoff, set_rightlink, write_meta, GinOpaque, SIZE_OF_GIN_META_PAGE_DATA,
 };
@@ -205,7 +205,7 @@ pub fn init_seams() {
     // ControlFile value — the GUC table entry points `variable` straight at this
     // global. Backing lives here in the owning crate.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::gin_pending_list_limit.install(GucVarAccessors {
             get: gin_pending_list_limit,
             set: set_gin_pending_list_limit,
@@ -1014,7 +1014,7 @@ pub fn ginInsertCleanup<'mcx>(
 /// with `full_clean = fill_fsm = force_cleanup = true`.
 pub fn gin_clean_pending_list<'mcx>(mcx: Mcx<'mcx>, indexoid: Oid) -> PgResult<u32> {
     use ::indexam_seams::index_open;
-    use aclchk_seams::{aclcheck_error, object_ownercheck};
+    use ::aclchk_seams::{aclcheck_error, object_ownercheck};
     use ::miscinit_seams::get_user_id;
     use ::types_acl::AclResult;
     use ::types_catalog::catalog::RELATION_RELATION_ID;

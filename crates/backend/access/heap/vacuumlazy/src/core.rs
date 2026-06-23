@@ -30,7 +30,7 @@
 
 use ::mcx::Mcx;
 use ::rel::Relation;
-use types_core::{
+use ::types_core::{
     BlockNumber, Buffer, MultiXactId, OffsetNumber, TransactionId, BLCKSZ,
 };
 use ::types_vacuum::vacuum::VacuumCutoffs;

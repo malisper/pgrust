@@ -13,8 +13,8 @@ use ::ts_small::util::{
     self, get_operand, get_query, operand_distance, operand_length, qt2qtn, qtn2qt, tsq_size,
     QTNode, QTNodeCompare, QTN_NEEDFREE,
 };
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use ::tsearch::tsearch::{
     QueryItem, QueryOperator, TSQuerySign, MAXENTRYPOS, OP_AND, OP_NOT, OP_OR, OP_PHRASE, QI_OPR,
     QI_VAL, TSQS_SIGLEN,

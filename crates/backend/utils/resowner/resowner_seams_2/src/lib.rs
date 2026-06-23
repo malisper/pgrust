@@ -6,7 +6,7 @@
 //! `portal->resowner` holds). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use portal::{ResourceOwner, ResourceReleasePhase};
+use ::portal::{ResourceOwner, ResourceReleasePhase};
 
 seam_core::seam!(
     /// `ResourceOwnerCreate(parent, name)` for a portal — returns the new

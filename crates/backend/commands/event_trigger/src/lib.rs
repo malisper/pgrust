@@ -32,7 +32,7 @@
 
 use core::cell::RefCell;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_catalog::catalog::{
     AUTH_ID_RELATION_ID, AUTH_MEM_RELATION_ID, DATABASE_RELATION_ID, EVENT_TRIGGER_RELATION_ID,
     OPERATOR_CLASS_RELATION_ID, OPERATOR_FAMILY_RELATION_ID, PARAMETER_ACL_RELATION_ID,
@@ -42,7 +42,7 @@ use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use ::types_catalog::pg_event_trigger::PgEventTriggerInsertRow;
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use objectaddress_seams as objectaddress_seams;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERROR, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_E_R_I_E_EVENT_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,

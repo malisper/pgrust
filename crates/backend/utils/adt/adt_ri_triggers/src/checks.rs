@@ -13,13 +13,13 @@ use ::mcx::Mcx;
 // still carry the bare-word shim (`datum::Datum`), so a by-value scalar
 // crosses that ABI edge via `byval_word()` / `Datum::ByVal`.
 use types_tuple::heaptuple::Datum;
-use types_core::{InvalidOid, Oid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{
     PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_FOREIGN_KEY_VIOLATION,
     ERRCODE_INTERNAL_ERROR, ERRCODE_RESTRICT_VIOLATION, PG_DIAG_CONSTRAINT_NAME, PG_DIAG_SCHEMA_NAME,
     PG_DIAG_TABLE_NAME,
 };
-use types_ri_triggers::{SpiPlanPtr, TriggerDataRef, TupleTableSlotRef};
+use ::types_ri_triggers::{SpiPlanPtr, TriggerDataRef, TupleTableSlotRef};
 
 use crate::cache::{ri_hash_compare_op, ri_hash_prepared_plan};
 use crate::querybuild::{append_quoted_relation, quote_one_name, ri_generate_qual, try_extend};
@@ -421,7 +421,7 @@ pub fn ri_report_violation(
 /// `pg_attribute_aclcheck(ACL_SELECT)` loop (any denied column → `false`). All
 /// checks use `GetUserId()`.
 fn report_has_perm(rel_oid: Oid, key_attnums: &[i16]) -> PgResult<bool> {
-    use types_acl::{ACLCHECK_OK, ACL_SELECT, RLS_ENABLED};
+    use ::types_acl::{ACLCHECK_OK, ACL_SELECT, RLS_ENABLED};
 
     if more_seams::check_enable_rls::call(rel_oid, InvalidOid, true)?
         != RLS_ENABLED

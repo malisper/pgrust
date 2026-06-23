@@ -19,9 +19,9 @@ use std::cell::RefCell;
 use reloptions_seams as reloptions_seams;
 use inval_seams as inval_seams;
 use cache_syscache as syscache;
-use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
+use ::mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
 use ::cache::SysCacheKey;
-use types_core::{InvalidOid, Oid};
+use ::types_core::{InvalidOid, Oid};
 // The canonical owned datum enum is the migration target.
 use types_tuple::heaptuple::Datum;
 // `::datum::Datum` (the bare-word shim) survives only at the two unmigrated
@@ -29,7 +29,7 @@ use types_tuple::heaptuple::Datum;
 // `SyscacheCallbackFunction` `arg` carried through the inval seam. Both are
 // audited ABI edges driven by still-unmigrated `types-cache` vocabulary.
 use ::datum::Datum as KeyDatum;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_reloptions::TableSpaceOpts;
 
 /// `Anum_pg_tablespace_spcoptions` (`catalog/pg_tablespace.h`).

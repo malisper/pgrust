@@ -44,7 +44,7 @@
 #![allow(dead_code)]
 
 use ::types_core::primitive::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::rel::Relation;
 use ::types_storage::buf::{
     buftag, IOContext, MAX_BLOCK_NUMBER, BM_DIRTY, BM_JUST_DIRTIED, BM_PERMANENT, BM_TAG_VALID,
@@ -57,7 +57,7 @@ use ::types_tuple::access::{RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP};
 use crate::mgr::BufferManager;
 
 use bufmgr_seams as sb;
-use support::{buf_table_hash_code, buf_table_hash_partition};
+use ::support::{buf_table_hash_code, buf_table_hash_partition};
 use lwlock as lwlock;
 use smgr as smgr;
 

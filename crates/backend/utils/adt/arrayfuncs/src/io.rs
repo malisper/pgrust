@@ -24,11 +24,11 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use array::{ArrayElementDatum, ArrayElementIoData, ArrayIoFuncSelector};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::array::{ArrayElementDatum, ArrayElementIoData, ArrayIoFuncSelector};
 use ::types_core::Oid;
 use ::datum::datum::Datum;
-use types_error::{
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION,

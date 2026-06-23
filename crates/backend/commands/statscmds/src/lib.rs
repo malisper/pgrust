@@ -33,11 +33,11 @@
 //! `stxkeys`, char[] `stxkind`, text `stxexprs`) are packed by the indexing
 //! owner behind `catalog_tuple_insert_pg_statistic_ext`.
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 
-use utils_error::{ereport, PgResult};
+use ::utils_error::{ereport, PgResult};
 use ::types_error::pg_error::ErrorLocation;
-use types_error::{
+use ::types_error::{
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_COLUMNS,
@@ -52,7 +52,7 @@ use ::types_catalog::pg_statistic_ext::{
     PgStatisticExtInsertRow, StatisticExtDataRelationId, StatisticExtRelationId,
     STATS_EXT_DEPENDENCIES, STATS_EXT_EXPRESSIONS, STATS_EXT_MCV, STATS_EXT_NDISTINCT,
 };
-use types_core::{AttrNumber, Oid};
+use ::types_core::{AttrNumber, Oid};
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::ObjectType;
 use ::nodes::ddlnodes::{AlterStatsStmt, CreateStatsStmt};
@@ -73,9 +73,9 @@ use ::nodes_core::nodefuncs::expr_type as node_expr_type;
 use ::comment::CreateComments;
 
 use ::common_relation_seams::relation_openrv;
-use aclchk_seams::{aclcheck_error, object_aclcheck, object_ownercheck};
+use ::aclchk_seams::{aclcheck_error, object_aclcheck, object_ownercheck};
 use ::indexing_seams::catalog_tuple_insert_pg_statistic_ext;
-use objectaccess_seams::{invoke_object_post_alter_hook, invoke_object_post_create_hook};
+use ::objectaccess_seams::{invoke_object_post_alter_hook, invoke_object_post_create_hook};
 use ::objectaddress_seams::get_relkind_objtype;
 use ::pg_depend_seams::recordDependencyOn;
 use ::pg_shdepend_seams::recordDependencyOnOwner;
@@ -84,8 +84,8 @@ use ::nodes_core_seams::bms_next_member;
 use ::nodeFuncs_seams::equal;
 use ::var_seams::pull_varattnos;
 use ::format_type_seams::format_type_be;
-use lsyscache_seams::{get_attgenerated, get_attname, get_namespace_name};
-use syscache_seams::{
+use ::lsyscache_seams::{get_attgenerated, get_attname, get_namespace_name};
+use ::syscache_seams::{
     get_statext_oid, search_syscache_attname, statext_data_search_tuple, statext_exists,
     statext_get_relid, statext_search_tuple,
 };

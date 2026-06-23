@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{EcId, EmId, PlannerInfo, RELOPT_BASEREL};
+use ::pathnodes::{EcId, EmId, PlannerInfo, RELOPT_BASEREL};
 
 use equivclass_ext_seams as ec_seam;
 use relnode_seams as bms;

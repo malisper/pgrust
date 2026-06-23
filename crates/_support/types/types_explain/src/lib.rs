@@ -15,7 +15,7 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::Node;

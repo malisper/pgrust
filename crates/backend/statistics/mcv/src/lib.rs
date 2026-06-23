@@ -50,13 +50,13 @@ use core::mem::size_of;
 
 mod fmgr_builtins;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
 // The canonical `'mcx` byte-lane value type — MCV statistic values may be
 // pass-by-reference (text/numeric/varchar/…), so they live in this safe lane.
 use ::types_tuple::Datum;
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
-use statistics::{
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::statistics::{
     DimensionInfo, MCVItem, MCVList, StatsBuildData, STATS_MAX_DIMENSIONS,
     STATS_MCVLIST_MAX_ITEMS, STATS_MCV_MAGIC, STATS_MCV_TYPE_BASIC,
 };

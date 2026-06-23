@@ -11,10 +11,10 @@
 //! per-worker tuple-queue readers reuse the execParallel vocabulary
 //! ([`ParallelExecutorInfo`] / [`TupleQueueReaderHandle`]).
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;
-use execparallel::{ParallelExecutorInfo, TupleQueueReaderHandle};
+use ::execparallel::{ParallelExecutorInfo, TupleQueueReaderHandle};
 use ::types_sortsupport::SortSupportData;
 use ::types_tuple::heaptuple::FormedMinimalTuple;
 use ::types_tuple::heaptuple::TupleDesc;

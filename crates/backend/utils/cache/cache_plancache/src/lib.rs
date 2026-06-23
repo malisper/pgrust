@@ -43,9 +43,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_core::primitive::{Oid, INVALID_OID};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::types_namespace::namespace::SearchPathMatcher;
 use ::nodes::copy_query::{Query, CURSOR_OPT_PARALLEL_OK};
 use ::nodes::nodeindexscan::PlannedStmt;
@@ -57,7 +57,7 @@ use ::nodes::parsestmt::{
 };
 use ::nodes::primnodes::Expr;
 use ::nodes::queryenvironment::QueryEnvironment;
-use types_plancache::{
+use ::types_plancache::{
     InvalItemKey, SysCacheId, CACHEDEXPR_MAGIC, CACHEDPLANSOURCE_MAGIC,
     CACHEDPLAN_MAGIC, CURSOR_OPT_CUSTOM_PLAN, CURSOR_OPT_GENERIC_PLAN,
     FIRST_NORMAL_TRANSACTION_ID, PLAN_CACHE_MODE_FORCE_CUSTOM_PLAN,

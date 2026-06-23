@@ -16,7 +16,7 @@ use std::thread_local;
 use std::vec;
 use std::vec::Vec;
 
-use sink::{BbsinkState, TablespaceInfo};
+use ::sink::{BbsinkState, TablespaceInfo};
 
 /// Captured libpq events, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]

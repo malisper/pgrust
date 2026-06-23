@@ -41,12 +41,12 @@ use execUtils_seams as execUtils;
 use queryenvironment as queryenv;
 use sort_storage_seams as tuplestore;
 
-use mcx::{alloc_in, PgBox};
-use types_error::{PgError, PgResult};
+use ::mcx::{alloc_in, PgBox};
+use ::types_error::{PgError, PgResult};
 use ::nodes::executor::EXEC_FLAG_REWIND;
 use ::nodes::nodenamedtuplestorescan::{NamedTuplestoreScan, NamedTuplestoreScanState};
 use ::nodes::queryenvironment::QueryEnvironment;
-use nodes::{EStateData, SlotId, TupleSlotKind};
+use ::nodes::{EStateData, SlotId, TupleSlotKind};
 
 /// Install this crate's implementations into its seam slots.
 ///

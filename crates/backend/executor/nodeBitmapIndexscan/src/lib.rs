@@ -39,9 +39,9 @@ use storage_shm_toc_seams as shm_toc;
 use postgres_seams as tcop_postgres;
 use init_small_seams as globals;
 
-use mcx::{Mcx, PgBox};
-use types_error::{PgError, PgResult};
-use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
+use ::mcx::{Mcx, PgBox};
+use ::types_error::{PgError, PgResult};
+use ::execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
 use ::nodes::nodebitmapindexscan::{BitmapIndexScan, BitmapIndexScanState};
 use ::nodes::nodeindexonlyscan::{IndexScanInstrumentation, SharedIndexScanInstrumentation};
 use ::nodes::EStateData;

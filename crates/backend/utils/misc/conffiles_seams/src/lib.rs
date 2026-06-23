@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use types_error::{ErrorLevel, PgResult};
+use ::types_error::{ErrorLevel, PgResult};
 
 /// Result of `GetConfFilesInDir`: the `*.conf` files found in a directory
 /// (sorted, absolute paths). `err_msg` mirrors the C `*err_msg` out-parameter

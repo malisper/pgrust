@@ -38,13 +38,13 @@ use execSRF_seams as execSRF;
 use execTuples_seams as execTuples;
 use execUtils_seams as execUtils;
 use postgres_seams as tcop_postgres;
-use mcx::{alloc_in, vec_with_capacity_in, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::nodes::execexpr::{ExprDoneCond, SetExprState};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, TupleSlotKind};
 use ::nodes::nodeprojectset::{ProjectSet as ProjectSetPlan, ProjectSetElem, ProjectSetState};
 use ::nodes::primnodes::Expr;
-use nodes::{EStateData, PlanStateNode, SlotId};
+use ::nodes::{EStateData, PlanStateNode, SlotId};
 
 /// Name passed to `AllocSetContextCreate` for the per-tSRF argument context
 /// (`"tSRF function arguments"` in nodeProjectSet.c).

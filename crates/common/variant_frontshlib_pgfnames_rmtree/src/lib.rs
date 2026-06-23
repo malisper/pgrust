@@ -37,7 +37,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 
-use mcx::{Mcx, MemoryContext, PgString, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
 use ::types_error::PgResult;
 
 /// The list of names returned by [`pgfnames`], charged to the caller's context.

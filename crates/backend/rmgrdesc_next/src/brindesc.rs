@@ -3,7 +3,7 @@
 use crate::appendf;
 use ::mcx::PgString;
 use ::types_error::PgResult;
-use wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{DecodedXLogRecord, XLR_INFO_MASK};
 use ::xlog_records::brin_xlog::{xl_brin_createidx, xl_brin_desummarize, xl_brin_insert,
                                     xl_brin_revmap_extend, xl_brin_samepage_update,
                                     xl_brin_update};

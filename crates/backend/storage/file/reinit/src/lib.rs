@@ -45,11 +45,11 @@ use std::collections::TryReserveError;
 use ::copydir::copy_file;
 use ::fd::allocated_desc::{AllocateDir, FreeDir, ReadDir};
 use ::fd::sync_cleanup::fsync_fname;
-use utils_error::{ereport, errno::sqlstate_for_file_access, elog};
+use ::utils_error::{ereport, errno::sqlstate_for_file_access, elog};
 use ::types_core::primitive::{
     ForkNumber, RelFileNumber, FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM,
 };
-use types_error::{PgError, PgResult, DEBUG2, ERRCODE_OUT_OF_MEMORY, ERROR, LOG};
+use ::types_error::{PgError, PgResult, DEBUG2, ERRCODE_OUT_OF_MEMORY, ERROR, LOG};
 use ::types_storage::file::{PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY};
 
 /// `ResetUnloggedRelationsOp` (reinit.h) — the bitmask of passes to run.

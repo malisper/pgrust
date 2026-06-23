@@ -21,13 +21,13 @@
 
 use std::path::{Path, PathBuf};
 
-use utils_error::{ereport, PgError, PgResult};
-use conffiles_seams::{absolute_config_location, get_conf_files_in_dir};
-use types_error::{
+use ::utils_error::{ereport, PgError, PgResult};
+use ::conffiles_seams::{absolute_config_location, get_conf_files_in_dir};
+use ::types_error::{
     ErrorLevel, DEBUG1, DEBUG2, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     ERRCODE_SYNTAX_ERROR, ERROR, LOG,
 };
-use types_guc::{GucContext, PGC_POSTMASTER, PGC_SIGHUP};
+use ::types_guc::{GucContext, PGC_POSTMASTER, PGC_SIGHUP};
 
 /// `CONF_FILE_START_DEPTH` (`utils/conffiles.h`).
 pub const CONF_FILE_START_DEPTH: i32 = 0;

@@ -5,7 +5,7 @@ use ::adt_jsonb::JsonbToCString;
 use ::adt_numeric::io::numeric_out;
 use ::utils_error::ereport;
 use ::types_error::error::ERROR;
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use ::types_jsonb::jsonb::jbvType;

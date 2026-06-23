@@ -20,7 +20,7 @@ use core::ffi::c_char;
 
 use ::utils_error::ereport;
 use ::pgstrcasecmp::pg_strcasecmp;
-use types_error::{ErrorLocation, PgResult, WARNING};
+use ::types_error::{ErrorLocation, PgResult, WARNING};
 use ::types_wchar::encoding::{
     pg_enc, PG_BIG5, PG_EUC_CN, PG_EUC_JP, PG_EUC_KR, PG_EUC_TW, PG_GB18030, PG_GBK, PG_ISO_8859_5,
     PG_ISO_8859_6, PG_ISO_8859_7, PG_ISO_8859_8, PG_JOHAB, PG_KOI8R, PG_KOI8U, PG_LATIN1,

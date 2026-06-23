@@ -8,7 +8,7 @@
 
 use ::datum::Datum;
 use ::types_error::PgResult;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `pg_event_trigger_table_rewrite_oid` (event_trigger.c) — C:
 /// `PG_RETURN_OID(currentEventTriggerState->table_rewrite_oid)`. Takes no

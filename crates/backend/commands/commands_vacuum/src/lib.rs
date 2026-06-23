@@ -34,10 +34,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_LOCK_NOT_AVAILABLE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_TABLE, ERROR, LOG, WARNING,
@@ -55,7 +55,7 @@ use ::types_tuple::access::{
 };
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use types_cluster::{ClusterParams, ParseState, CLUOPT_VERBOSE};
+use ::types_cluster::{ClusterParams, ParseState, CLUOPT_VERBOSE};
 use ::nodes::ddlnodes::{VacuumRelation, VacuumStmt};
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::RangeVar;

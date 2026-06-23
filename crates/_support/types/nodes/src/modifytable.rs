@@ -20,7 +20,7 @@
 //! `EPQState` (execMain.c's EvalPlanQual machinery) are re-exported from their
 //! canonical homes (`crate::nodes` / `crate::execnodes`) rather than redefined.
 
-use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::{Index, Oid};
 use ::types_error::PgResult;
 

@@ -29,7 +29,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::pg_attribute::{
@@ -39,7 +39,7 @@ use ::types_catalog::pg_attribute::{
     AttributeRelationId, PgAttributeUpdateRow,
 };
 use ::types_core::primitive::{Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_TABLE,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
@@ -47,7 +47,7 @@ use types_error::{
 use ::nodes::ddlnodes::{AlterTableType, PartitionBoundSpec, PartitionCmd};
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, NullTest, NullTestType, Var};
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock,
 };
@@ -61,7 +61,7 @@ use ::common_relation::relation_open;
 use ::table::table_openrv;
 use indexing_seams as indexing_seam;
 use ::nodes_core::makefuncs::{make_ands_explicit, make_ands_implicit, make_var};
-use cache_syscache::{
+use ::cache_syscache::{
     SearchSysCacheCopyAttName, SearchSysCacheExistsAttName, SysCacheGetAttrNotNull, ATTNAME,
 };
 use ::utils_error::ereport;

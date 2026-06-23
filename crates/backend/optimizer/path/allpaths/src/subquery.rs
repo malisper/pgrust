@@ -28,9 +28,9 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::Index;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::pathnodes::planner_run::{planner_subplan_get_plan, PlannerRun};
-use pathnodes::{PathId, PlannerInfo, RelId, TargetEntryNode, UPPERREL_FINAL};
+use ::pathnodes::{PathId, PlannerInfo, RelId, TargetEntryNode, UPPERREL_FINAL};
 
 use pathnode_seams as pathnode;
 use relnode_seams as bms;

@@ -39,7 +39,7 @@ use ::types_storage::buf::{
     BM_DIRTY, BM_JUST_DIRTIED, BM_PERMANENT, BM_PIN_COUNT_WAITER, BUFFER_LOCK_EXCLUSIVE,
     BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
 };
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::storage::{LWLockMode, RelFileLocator};
 
 use bufmgr_seams as sb;

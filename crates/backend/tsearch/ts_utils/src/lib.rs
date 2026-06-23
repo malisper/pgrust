@@ -18,9 +18,9 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_core::primitive::MAXPGPATH;
-use types_error::{PgResult, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::types_error::{PgResult, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use ::tsearch::StopList;
 
 use ::ts_locale_seams::readfile;

@@ -27,7 +27,7 @@
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use ::types_network::inet_struct;
 
 // ---------------------------------------------------------------------------

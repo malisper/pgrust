@@ -13,18 +13,18 @@ use ::mcx::Mcx;
 use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::OidIsValid;
 use ::datum::datum::Datum;
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext,
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext,
                   ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
-use types_rangetypes::{
+use ::types_rangetypes::{
     RangeTypeP, RANGE_EMPTY, RANGE_LB_INF, RANGE_LB_NULL, RANGE_UB_INF, RANGE_UB_NULL,
 };
 
 use ::numeric_seams::numeric_subdiff;
 use ::typcache_seams::lookup_range_elem_hash_proc;
-use fmgr_seams::{
+use ::fmgr_seams::{
     function_call1_coll_datum, function_call2_coll, function_call2_coll_datum,
 };
-use hashfn_seams::{hash_bytes_uint32, hash_bytes_uint32_extended};
+use ::hashfn_seams::{hash_bytes_uint32, hash_bytes_uint32_extended};
 
 use crate::range_bounds_compare::range_cmp_bounds;
 use crate::range_repr_serialize::{range_deserialize, range_get_flags, range_serialize_soft};

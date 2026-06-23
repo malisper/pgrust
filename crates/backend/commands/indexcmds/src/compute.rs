@@ -12,11 +12,11 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
-use types_amapi::{CompareType, COMPARE_EQ, COMPARE_OVERLAP};
+use ::types_amapi::{CompareType, COMPARE_EQ, COMPARE_OVERLAP};
 use ::types_core::primitive::Oid;
-use types_core::{InvalidOid, OidIsValid};
+use ::types_core::{InvalidOid, OidIsValid};
 use ::types_error::PgResult;
 use ::nodes::ddlnodes::IndexElem;
 use ::nodes::execnodes::IndexInfo;
@@ -32,8 +32,8 @@ use ::nodes_core::nodefuncs::{expr_collation, expr_type};
 use ::parse_oper::compatible_oper_opid;
 use ::clauses::contain_mutable_functions_after_planning;
 
-use miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
-use misc_guc::{at_eoxact_guc, NewGUCNestLevel};
+use ::miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
+use ::misc_guc::{at_eoxact_guc, NewGUCNestLevel};
 use ::guc_seams::restrict_search_path;
 
 use format_type_seams as formattype_seam;

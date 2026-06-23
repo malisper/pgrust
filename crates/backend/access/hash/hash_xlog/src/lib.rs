@@ -54,7 +54,7 @@ use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, OffsetNumber, RegProcedure, BLCKSZ,
 };
 use ::types_core::XLogRecPtr;
-use types_error::{PgError, PgResult, PANIC};
+use ::types_error::{PgError, PgResult, PANIC};
 use ::types_storage::storage::{Buffer, InvalidBuffer, ReadBufferMode};
 use ::types_storage::RelFileLocator;
 use ::wal::rmgr::XLogReaderState;
@@ -67,7 +67,7 @@ use ::xlog_records::hash_xlog::{
     xl_hash_vacuum_one_page,
 };
 
-use page::{PageAddItemExtended, PageIndexMultiDelete, PageInit, PageMut};
+use ::page::{PageAddItemExtended, PageIndexMultiDelete, PageInit, PageMut};
 
 use bufmask_seams as bufmask;
 use ::xlogreader_seams::xlog_rec_get_block_tag_extended;

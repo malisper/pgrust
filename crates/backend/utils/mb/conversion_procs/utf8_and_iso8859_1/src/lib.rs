@@ -17,11 +17,11 @@
 
 #![allow(clippy::result_large_err)]
 
-use conv_string_helpers::{
+use ::conv_string_helpers::{
     check_encoding_conversion_args, make_conversion_builtin, ConversionResult,
 };
-use mbutils_seams::{report_invalid_encoding, report_untranslatable_char};
-use common_wchar::{pg_utf8_islegal, pg_utf_mblen_private};
+use ::mbutils_seams::{report_invalid_encoding, report_untranslatable_char};
+use ::common_wchar::{pg_utf8_islegal, pg_utf_mblen_private};
 use ::types_error::PgResult;
 use ::types_wchar::encoding::{pg_enc, PG_LATIN1, PG_UTF8};
 

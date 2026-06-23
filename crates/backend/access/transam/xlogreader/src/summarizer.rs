@@ -37,13 +37,13 @@ use alloc::vec::Vec;
 
 use ::mcx::MemoryContext;
 
-use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
-use types_error::{PgError, PgResult};
+use ::types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::RelFileLocator;
 use ::wal::rmgr::{XLogReaderRoutine, XLogReaderState, XLREAD_FAIL};
 use ::wal::xlog_consts::{XLOGDIR, XLOG_BLCKSZ};
 
-use types_walsummarizer::{BlockTag, ReadRecordResult, XLogReaderHandle};
+use ::types_walsummarizer::{BlockTag, ReadRecordResult, XLogReaderHandle};
 
 use xlogreader_seams as seam;
 use ::xlogreader_seams::SummarizerPageReadCB;

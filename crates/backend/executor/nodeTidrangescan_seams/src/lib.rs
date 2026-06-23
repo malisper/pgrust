@@ -18,7 +18,7 @@ use ::mcx::PgBox;
 use ::types_error::PgResult;
 use ::nodes::execexpr::ExprState;
 use ::nodes::execnodes::{EStateData, EcxtId};
-use tidrange::{OperandSide, TidRangeScanState};
+use ::tidrange::{OperandSide, TidRangeScanState};
 use ::nodes::nodetidrangescan::TidRangeScan;
 use ::types_tuple::heaptuple::ItemPointerData;
 

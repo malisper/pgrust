@@ -66,7 +66,7 @@ pub mod flat;
 #[cfg(test)]
 mod tests;
 
-use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, PgVec};
 use ::types_tuple::heap::SizeofHeapTupleHeader;
 use ::types_tuple::heaptuple::{
     bits8, BlockIdData, CompactAttribute, DatumTupleFields, HeapTupleData, HeapTupleField3,
@@ -75,8 +75,8 @@ use ::types_tuple::heaptuple::{
     TupleConstr, TupleDescData, BITMAPLEN, HEAP_HASEXTERNAL, HEAP_HASNULL, HEAP_HASVARWIDTH, HIGHBIT,
     MaxTupleAttributeNumber,
 };
-use types_core::{Oid, Size};
-use types_error::{PgError, PgResult};
+use ::types_core::{Oid, Size};
+use ::types_error::{PgError, PgResult};
 
 // ---------------------------------------------------------------------------
 // Per-attribute value model (the faithful idiomatic `Datum` substitute).

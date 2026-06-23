@@ -58,10 +58,10 @@ use lsyscache_seams as lsyscache;
 use relcache_seams as relcache;
 use sortsupport_seams as sortsupport;
 
-use mcx::{Mcx, PgBox, PgVec};
-use types_core::{AttrNumber, InvalidOid, Oid};
-use types_error::{PgError, PgResult};
-use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::types_core::{AttrNumber, InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
+use ::execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
 use ::nodes::nodeindexonlyscan::{
     IndexRuntimeKeyInfo, IndexScanInstrumentation, IndexScanState, ParallelIndexScanDescHandle,
     SharedIndexScanInstrumentation,
@@ -69,7 +69,7 @@ use ::nodes::nodeindexonlyscan::{
 use ::nodes::nodebitmapindexscan::IndexArrayKeyInfo;
 use ::nodes::nodeindexscan::IndexScan;
 use ::nodes::primnodes::Expr;
-use nodes::{EStateData, EcxtId, PlanStateData, SlotId};
+use ::nodes::{EStateData, EcxtId, PlanStateData, SlotId};
 use ::types_scan::scankey::{
     ScanKeyData, StrategyNumber, InvalidStrategy, SK_ISNULL, SK_ORDER_BY, SK_ROW_END, SK_ROW_HEADER,
     SK_ROW_MEMBER, SK_SEARCHARRAY, SK_SEARCHNOTNULL, SK_SEARCHNULL,

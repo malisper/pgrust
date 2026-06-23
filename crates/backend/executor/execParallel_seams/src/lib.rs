@@ -12,7 +12,7 @@
 
 use ::mcx::Mcx;
 use ::types_error::PgResult;
-use execparallel::{DsmSegmentHandle, ParallelExecutorInfo, ShmTocHandle, TuplesNeeded};
+use ::execparallel::{DsmSegmentHandle, ParallelExecutorInfo, ShmTocHandle, TuplesNeeded};
 use ::nodes::bitmapset::Bitmapset;
 
 /// `ExecParallelCreateReaders(pei)`.

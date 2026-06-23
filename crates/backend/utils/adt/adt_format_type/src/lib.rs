@@ -21,10 +21,10 @@ extern crate alloc;
 
 use core::fmt::Write;
 
-use mcx::{Mcx, PgString};
-use types_core::{InvalidOid, OidIsValid, Oid, BITS_PER_BYTE};
+use ::mcx::{Mcx, PgString};
+use ::types_core::{InvalidOid, OidIsValid, Oid, BITS_PER_BYTE};
 use ::datum::VARHDRSZ;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::types_format_type::TypeFormInfo;
 use ::types_tuple::heaptuple::{
     BITOID, BOOLOID, BPCHAROID, FLOAT4OID, FLOAT8OID, INT2OID, INT4OID, INT8OID, INTERVALOID,

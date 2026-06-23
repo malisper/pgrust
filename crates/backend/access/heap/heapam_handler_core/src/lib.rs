@@ -21,14 +21,14 @@
 //! the relcache / catalog / nodeSeqscan consumers call — retiring their
 //! CONTRACT_RECONCILE_PENDING entries.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use std::boxed::Box;
 
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::rel::Relation;
 use ::types_scan::sdir::{ForwardScanDirection, ScanDirection};
-use types_slot::{SlotData, TupleSlotKind};
+use ::types_slot::{SlotData, TupleSlotKind};
 use ::types_tableam::amopaque::{tags, AmOpaque, AmOpaqueTag, AmOpaqueType};
 use ::types_tableam::relscan::{
     ParallelBlockTableScanDescData, ParallelTableScanDesc, TableScanDesc, TableScanDescData,

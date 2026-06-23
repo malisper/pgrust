@@ -34,10 +34,10 @@
 //! (`CStringGetTextDatum`/`TextDatumGetCString`) cross the
 //! [`comment_seams`] boundary.
 
-use heaptuple::{heap_form_tuple, heap_getattr, heap_modify_tuple};
+use ::heaptuple::{heap_form_tuple, heap_getattr, heap_modify_tuple};
 use ::scankey::ScanKeyInit;
 use genam_seams as genam;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
 use objectaddress_seams as oaddr;
 use comment_seams as seam;
@@ -49,8 +49,8 @@ use ::types_catalog::catalog::{
     SHARED_DESCRIPTION_OBJ_INDEX_ID, SHARED_DESCRIPTION_RELATION_ID,
 };
 use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
-use types_core::{Oid, OidIsValid};
-use types_error::{
+use ::types_core::{Oid, OidIsValid};
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_UNDEFINED_DATABASE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     WARNING,
 };

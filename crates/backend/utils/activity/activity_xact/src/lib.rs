@@ -39,10 +39,10 @@ use pgstat_seams as pgstat_seams;
 use activity_shmem_seams as shmem_seams;
 use stat_seams as stat_seams;
 use ::utils_error::ereport;
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_core::xact::XlXactStatsItem;
-use types_error::{ErrorLocation, PgError, PgResult, WARNING};
+use ::types_error::{ErrorLocation, PgError, PgResult, WARNING};
 pub use ::types_pgstat::activity_pgstat::{
     PgStat_Kind, PgStat_PendingDroppedStatsItem, PgStat_SubXactStatus,
 };

@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use types_core::{CommandId, TransactionId};
+use ::types_core::{CommandId, TransactionId};
 
 pub use ::types_core::GlobalVisStateHandle;
 

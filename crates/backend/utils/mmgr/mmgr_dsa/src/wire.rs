@@ -17,12 +17,12 @@ use std::cell::Cell;
 
 use ::dsm_core::dsm::DsmSegmentId;
 use dsa_seams as seam;
-use mcx::{Mcx, MemoryContext};
-use types_dsa::{DsaHandle, DSA_DEFAULT_INIT_SEGMENT_SIZE, DSA_MAX_SEGMENT_SIZE};
-use execparallel::{
+use ::mcx::{Mcx, MemoryContext};
+use ::types_dsa::{DsaHandle, DSA_DEFAULT_INIT_SEGMENT_SIZE, DSA_MAX_SEGMENT_SIZE};
+use ::execparallel::{
     DsaAreaHandle as XDsaAreaHandle, DsaPointer, DsmSegmentHandle, SerializeCursor, Size,
 };
-use types_storage::{dsa_handle, DsaArea};
+use ::types_storage::{dsa_handle, DsaArea};
 
 use crate::runtime::{self, DsaAreaHandle};
 

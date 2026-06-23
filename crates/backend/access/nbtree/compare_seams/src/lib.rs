@@ -22,7 +22,7 @@
 
 use ::types_core::Oid;
 use ::datum::Datum;
-use types_sortsupport::{SkipSupportData, SkipSupportIncDecId, SortSupportData};
+use ::types_sortsupport::{SkipSupportData, SkipSupportIncDecId, SortSupportData};
 
 /// A SortSupport fast comparator: C `int (*comparator)(Datum, Datum,
 /// SortSupport)` minus the third `ssup` argument the in-core fast comparators

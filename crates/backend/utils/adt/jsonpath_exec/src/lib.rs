@@ -42,21 +42,21 @@
 
 use ::mcx::Mcx;
 
-use adt_jsonb::{JsonbExtractScalar, JsonbTypeName};
-use jsonb_util::{
+use ::adt_jsonb::{JsonbExtractScalar, JsonbTypeName};
+use ::jsonb_util::{
     findJsonbValueFromContainer, getIthJsonbValueFromContainer, pushJsonbValue, JsonbIteratorInitAt,
     JsonbIteratorNext, JsonbToJsonbValue,
 };
-use adt_jsonpath::{
+use ::adt_jsonpath::{
     jspGetArg, jspGetArraySubscript, jspGetBool, jspGetLeftArg, jspGetNext, jspGetNumeric,
     jspGetRightArg, jspGetString, jspHasNext, jspInit, jspInitByBuffer, JsonPathItem,
     JsonPathItemType, JSONPATH_LAX,
 };
-use utils_error::{ereport, PgError, PgResult};
+use ::utils_error::{ereport, PgError, PgResult};
 use ::types_error::ERROR;
 use ::types_core::Oid;
 use ::datum::Datum;
-use types_error::{
+use ::types_error::{
     ERRCODE_INVALID_ARGUMENT_FOR_SQL_JSON_DATETIME_FUNCTION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_SQL_JSON_SUBSCRIPT, ERRCODE_MORE_THAN_ONE_SQL_JSON_ITEM,
     ERRCODE_NON_NUMERIC_SQL_JSON_ITEM, ERRCODE_SINGLETON_SQL_JSON_ITEM_REQUIRED,
@@ -4076,7 +4076,7 @@ fn numeric_out(mcx: Mcx<'_>, num: &[u8]) -> PgResult<String> {
 /// value (`22003`) — exactly the errors the int/float/numeric input functions
 /// raise on a bad input string. Any other error is hard and propagates.
 fn is_soft_input_error(e: &PgError) -> bool {
-    use types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+    use ::types_error::{ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
     let s = e.sqlstate();
     s == ERRCODE_INVALID_TEXT_REPRESENTATION || s == ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
 }

@@ -25,7 +25,7 @@
 //! /analyze-fill scalar fields (result `Oid`s, typmods, collations) keep their C
 //! types and ride as data — the grammar leaves them `InvalidOid`/`-1`.
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_core::primitive::{Index, Oid};
 use ::types_error::PgResult;
 

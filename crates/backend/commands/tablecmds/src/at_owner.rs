@@ -32,7 +32,7 @@
 
 use ::mcx::Mcx;
 
-use types_acl::{ACLCHECK_OK, ACL_CREATE};
+use ::types_acl::{ACLCHECK_OK, ACL_CREATE};
 use ::types_catalog::catalog::NAMESPACE_RELATION_ID;
 use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attacl, Anum_pg_attribute_attisdropped, AttributeRelationId,
@@ -40,7 +40,7 @@ use ::types_catalog::pg_attribute::{
 };
 use ::types_catalog::pg_class::{Anum_pg_class_relacl, RelationRelationId};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
 use ::types_acl::ACLCHECK_NOT_OWNER;
@@ -65,7 +65,7 @@ use tablecmds_seams as me;
 use lsyscache_seams as lsyscache_seam;
 use relcache_seams as relcache_seam;
 use ::cache_syscache::cacheinfo::RELOID;
-use cache_syscache::{
+use ::cache_syscache::{
     ReleaseSysCache, SearchSysCache1, SearchSysCacheAttNum, SysCacheGetAttr, ATTNUM,
 };
 use objectaddress_seams as objaddr_seam;

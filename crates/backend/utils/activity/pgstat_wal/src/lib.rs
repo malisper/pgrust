@@ -19,7 +19,7 @@
 use core::cell::RefCell;
 
 use instrument as instrument;
-use lwlock_seams::{
+use ::lwlock_seams::{
     lwlock_acquire, lwlock_conditional_acquire, lwlock_initialize,
 };
 use ::activity_pgstat::kind_info::KindInfoBuilder;
@@ -31,7 +31,7 @@ use ::types_core::TimestampTz;
 use ::types_error::PgResult;
 use ::types_pgstat::activity_pgstat::PGSTAT_KIND_WAL;
 use ::types_pgstat::pgstat_internal::{PgStat_KindInfo, PgStat_ShmemControl, PgStat_Snapshot};
-use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
+use ::types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
 thread_local! {
     /// `static WalUsage prevWalUsage;` — WAL usage counters saved at the

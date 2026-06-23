@@ -28,12 +28,12 @@
 //! special cases) is the non-SELECT leg and is not reached for these consumers.
 
 use ::utils_error::ereport;
-use mcx::{MemoryContext, Mcx, PgVec};
-use types_error::{PgResult, ERROR};
+use ::mcx::{MemoryContext, Mcx, PgVec};
+use ::types_error::{PgResult, ERROR};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::parsestmt::CachedPlanHandle;
 use ::types_resowner::ResourceOwner;
-use types_xml::{SpiColumn, SpiResult};
+use ::types_xml::{SpiColumn, SpiResult};
 
 // The plancache owner's pub fns operate on its bare `u64` source/plan handle
 // aliases; the plancache *seams* take the `nodes` newtype handles. We

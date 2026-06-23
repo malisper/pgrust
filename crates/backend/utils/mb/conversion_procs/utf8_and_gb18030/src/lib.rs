@@ -27,7 +27,7 @@
 
 mod tables;
 
-use conv_string_helpers::{
+use ::conv_string_helpers::{
     check_encoding_conversion_args, ConversionResult, LocalToUtf, UtfToLocal,
 };
 use ::conv_string_helpers::make_conversion_builtin;

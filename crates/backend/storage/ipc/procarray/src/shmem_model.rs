@@ -29,7 +29,7 @@
 
 use std::cell::RefCell;
 
-use types_core::{
+use ::types_core::{
     FirstNormalFullTransactionId, FirstNormalTransactionId, FullTransactionId, Size,
     TransactionId, TransactionIdIsValid,
 };

@@ -3,7 +3,7 @@
 //! `int8 id`; here it is the equivalent Rust enum, with wire-image
 //! conversions for the WAL/sinval-queue representation.
 
-use types_core::{uint16, uint32, Oid};
+use ::types_core::{uint16, uint32, Oid};
 
 use crate::storage::RelFileLocator;
 

@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::{
     uint16, BlockNumber, OffsetNumber, Oid, Size, XLogRecPtr,
 };

@@ -14,9 +14,9 @@
 //! current ports consume; the xlogreader and logical-decoding ports widen
 //! them as they land.
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 
-use types_core::{
+use ::types_core::{
     uint32, BlockNumber, TimeLineID, XLogRecPtr, XLogSegNo, MAXPGPATH,
 };
 use ::types_error::PgResult;

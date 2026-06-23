@@ -6,7 +6,7 @@ use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, OpExpr};
-use pathnodes::{EmId, IndexOptInfo, NodeId, PathKey, PlannerInfo};
+use ::pathnodes::{EmId, IndexOptInfo, NodeId, PathKey, PlannerInfo};
 
 use ::var_seams::contain_var_clause;
 use lsyscache_seams as lsyscache;

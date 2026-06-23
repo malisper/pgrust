@@ -20,16 +20,16 @@
 //! cyclic owners; they panic loudly until those owners land.
 
 use md as md;
-use utils_error::{ereport, PgError, PgResult};
+use ::utils_error::{ereport, PgError, PgResult};
 use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, ProcNumber,
 };
 use ::types_error::ERROR;
 use ::types_storage::smgr::{SMgrRelationData, RELSEG_SIZE, SMGR_NFORKS};
-use types_storage::{RelFileLocator, RelFileLocatorBackend};
+use ::types_storage::{RelFileLocator, RelFileLocatorBackend};
 
 use ::xlogutils_seams::xlog_drop_relation as xlog_drop_relation_seam;
-use bufmgr_seams::{
+use ::bufmgr_seams::{
     drop_relation_buffers as drop_relation_buffers_seam,
     drop_relations_all_buffers as drop_relations_all_buffers_seam,
     flush_relations_all_buffers as flush_relations_all_buffers_seam,

@@ -37,7 +37,7 @@ use ::fd::temp_files::{
     GetTempTablespaces, PathNameCreateTemporaryDir, PathNameCreateTemporaryFile,
     PathNameDeleteTemporaryFile, PathNameOpenTemporaryFile, TempTablespacePath,
 };
-use init_small_seams::{my_database_table_space, my_proc_pid};
+use ::init_small_seams::{my_database_table_space, my_proc_pid};
 use ::hashfn::hash_bytes;
 use ::types_core::Oid;
 use ::types_error::PgResult;

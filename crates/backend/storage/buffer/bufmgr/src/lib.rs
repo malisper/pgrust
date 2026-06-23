@@ -1011,7 +1011,7 @@ fn vac_prefetch_buffer<'mcx>(
 /// `thread_local` cell exposed through `GucVarAccessors`, mirroring C's
 /// `conf->variable` pointer into the global.
 mod guc_vars {
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
     use std::cell::Cell;
 
     macro_rules! int_guc {

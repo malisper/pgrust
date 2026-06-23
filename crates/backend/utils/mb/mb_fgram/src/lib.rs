@@ -4,17 +4,17 @@
 use core::ffi::c_int;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use error_fgram::{
+use ::error_fgram::{
     elog, ereport, errmsg_internal, PgError, PgResult, ERRCODE_CHARACTER_NOT_IN_REPERTOIRE,
     ERRCODE_UNTRANSLATABLE_CHARACTER, ERROR,
 };
 use ::extra_encnames_fgram::pg_encoding_to_char;
-use wchar_fgram::{
+use ::wchar_fgram::{
     pg_encoding_dsplen as wchar_encoding_dsplen, pg_encoding_max_length,
     pg_encoding_mblen as wchar_encoding_mblen, pg_encoding_mblen_or_incomplete,
     pg_encoding_verifymbchar, pg_encoding_verifymbstr, pg_wchar_table,
 };
-use pg_ffi_fgram::{
+use ::pg_ffi_fgram::{
     pg_enc, pg_valid_be_encoding, pg_valid_encoding, pg_wchar, PG_EUC_JP, PG_SQL_ASCII, PG_UTF8,
 };
 
@@ -641,7 +641,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use pg_ffi_fgram::{PG_EUC_CN, PG_LATIN1};
+    use ::pg_ffi_fgram::{PG_EUC_CN, PG_LATIN1};
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 

@@ -15,7 +15,7 @@
 
 use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::locale::PgLocale;
 
 /// `create_pg_locale_icu(collid, context)` (`pg_locale_icu.c:142`).

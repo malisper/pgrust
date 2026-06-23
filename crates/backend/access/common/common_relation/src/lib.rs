@@ -23,8 +23,8 @@
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{Oid, OidIsValid};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use rel::{Relation, RelationData};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::rel::{Relation, RelationData};
 use ::types_storage::lock::{AccessShareLock, NoLock, LOCKMODE, MAX_LOCKMODES};
 
 /// Install this unit's seam implementations (the `relation_open` family

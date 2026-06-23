@@ -22,7 +22,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use types_core::{TimeLineID, XLogRecPtr};
+use ::types_core::{TimeLineID, XLogRecPtr};
 
 /// Opaque handle to a `JsonManifestParseIncrementalState *`
 /// (`common/parse_manifest.h` — an incomplete type whose definition is private

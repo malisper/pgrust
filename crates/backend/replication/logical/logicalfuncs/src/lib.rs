@@ -40,7 +40,7 @@ extern crate alloc;
 
 use ::types_core::primitive::{TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
-use types_logical::{LogicalDecodingContext, OutputWriter};
+use ::types_logical::{LogicalDecodingContext, OutputWriter};
 
 use ::message::LogLogicalMessage;
 

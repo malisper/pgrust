@@ -19,10 +19,10 @@
 //! (`backend-access-gist-proc`) marshals the `Datum`s and routes the inet
 //! support-proc OIDs to these seams.
 
-use adt_network::{bitncmp, bitncommon};
+use ::adt_network::{bitncmp, bitncommon};
 use ::types_core::primitive::{uint16, OffsetNumber};
-use types_error::{PgError, PgResult};
-use types_network::{inet_struct, GistInetKey, GistInetSplitVec, PGSQL_AF_INET6};
+use ::types_error::{PgError, PgResult};
+use ::types_network::{inet_struct, GistInetKey, GistInetSplitVec, PGSQL_AF_INET6};
 
 /// `StrategyNumber` (access/stratnum.h) — the comparison strategy a scan key
 /// requests of a consistent support procedure.

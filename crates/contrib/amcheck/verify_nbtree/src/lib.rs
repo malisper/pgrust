@@ -38,7 +38,7 @@
 //! * **F3 — [`linkage`]**: parent/child downlink verification, sibling-link
 //!   recheck, root-descend re-find, and the downlink byte-math helpers.
 
-use mcx::{MemoryContext, Mcx, PgVec};
+use ::mcx::{MemoryContext, Mcx, PgVec};
 
 /// The verification arena handle (`Mcx<'mcx>`), an alias for clarity at the
 /// [`BtreeCheckState`] field.

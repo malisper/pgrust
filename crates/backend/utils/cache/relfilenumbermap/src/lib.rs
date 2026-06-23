@@ -7,14 +7,14 @@ use std::cell::RefCell;
 
 use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam_seams;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use inval_seams as inval_seams;
 use relmapper_seams as relmapper_seams;
 use fmgr_seams as fmgr_seams;
-use mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
+use ::mcx::{McxOwned, Mcx, MemoryContext, PgHashMap};
 use ::types_core::fmgr::F_OIDEQ;
-use types_core::{InvalidOid, Oid, RelFileNumber};
-use types_error::{PgError, PgResult};
+use ::types_core::{InvalidOid, Oid, RelFileNumber};
+use ::types_error::{PgError, PgResult};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::AccessShareLock;
 // The canonical value enum (`Datum<'mcx>`) is the migration target for the

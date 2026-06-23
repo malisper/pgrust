@@ -15,13 +15,13 @@
 //! `extern "C"`, `c_int`, `libc`, or `pg_ffi_fgram`.
 
 
-use types_datetime::{
+use ::types_datetime::{
     pg_itm, pg_itm_in, Interval, DAYS_PER_MONTH, INTERVAL_FULL_PRECISION, INTERVAL_FULL_RANGE,
     INTERVAL_MASK, MAX_INTERVAL_PRECISION, MONTHS_PER_YEAR, USECS_PER_DAY, USECS_PER_HOUR,
     USECS_PER_MINUTE, USECS_PER_SEC,
 };
-use types_datetime::{DAY, HOUR, MINUTE, MONTH, SECOND, YEAR};
-use types_error::{ereturn, PgError, SoftErrorContext};
+use ::types_datetime::{DAY, HOUR, MINUTE, MONTH, SECOND, YEAR};
+use ::types_error::{ereturn, PgError, SoftErrorContext};
 
 use crate::timestamp::{pg_add_s32_overflow, pg_add_s64_overflow, pg_sub_s64_overflow, DtResult};
 
@@ -191,7 +191,7 @@ pub fn interval_in_safe(
     typmod: i32,
     mut escontext: Option<&mut SoftErrorContext>,
 ) -> DtResult<Interval> {
-    use types_datetime::{
+    use ::types_datetime::{
         DTERR_BAD_FORMAT, DTERR_FIELD_OVERFLOW, DTERR_INTERVAL_OVERFLOW, DTK_DELTA, DTK_EARLY,
         DTK_LATE, INTERVAL_RANGE, MAXDATEFIELDS,
     };
@@ -376,7 +376,7 @@ pub fn intervaltypmodin(tl: &[i32]) -> DtResult<i32> {
 /// `intervaltypmodout(int4)` (timestamp.c) core — render an interval typmod as
 /// its printable suffix (e.g. `" day to second"`, `" hour(3)"`, or `""`).
 pub fn intervaltypmodout(typmod: i32) -> DtResult<String> {
-    use types_datetime::{INTERVAL_PRECISION, INTERVAL_RANGE};
+    use ::types_datetime::{INTERVAL_PRECISION, INTERVAL_RANGE};
 
     if typmod < 0 {
         return Ok(String::new());
@@ -453,7 +453,7 @@ const INTERVAL_OFFSETS: [i64; (MAX_INTERVAL_PRECISION + 1) as usize] =
 // keep the explicit cases and silence the lint locally.
 #[allow(clippy::if_same_then_else)]
 pub fn AdjustIntervalForTypmod(interval: &mut Interval, typmod: i32) -> DtResult<()> {
-    use types_datetime::{INTERVAL_PRECISION, INTERVAL_RANGE};
+    use ::types_datetime::{INTERVAL_PRECISION, INTERVAL_RANGE};
 
     /* Typmod has no effect on infinite intervals */
     if INTERVAL_NOT_FINITE(interval) {

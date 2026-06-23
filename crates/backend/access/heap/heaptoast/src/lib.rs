@@ -38,13 +38,13 @@ mod tests;
 
 use alloc::format;
 
-use heaptuple::{
+use ::heaptuple::{
     heap_compute_data_size, heap_deform_tuple, heap_form_tuple, nocachegetattr, FormedTuple,
     HeapTupleError,
 };
 use ::utils_error::ereport;
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{AttrNumber, Oid};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{AttrNumber, Oid};
 use ::rel::Relation;
 // The one canonical per-attribute value type (the unified enum). The old
 // `Datum` alias / bare-word `datum::Datum` newtype are gone from
@@ -52,7 +52,7 @@ use ::rel::Relation;
 // reads) is the canonical `Datum<'mcx>` enum, including `ScanKeyData.sk_argument`
 // and the args threaded into `ScanKeyInit`.
 use ::types_tuple::heaptuple::Datum;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
 use ::types_scan::scankey::{

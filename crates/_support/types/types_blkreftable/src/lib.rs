@@ -21,7 +21,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use hashbrown::HashMap;
-use types_core::{uint16, uint32, BlockNumber, ForkNumber};
+use ::types_core::{uint16, uint32, BlockNumber, ForkNumber};
 use ::types_storage::RelFileLocator;
 
 // ---------------------------------------------------------------------------

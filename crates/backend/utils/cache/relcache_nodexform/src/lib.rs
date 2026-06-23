@@ -26,10 +26,10 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 use ::types_catalog::pg_publication::{PublicationDesc, PublishGencolsType};
 use ::types_core::primitive::Oid;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::nodes::primnodes::Expr;
 use ::rel::Relation;
 

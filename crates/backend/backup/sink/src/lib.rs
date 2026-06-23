@@ -34,7 +34,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::{Oid, Size, TimeLineID, XLogRecPtr, BLCKSZ};
 use ::types_error::PgResult;
 

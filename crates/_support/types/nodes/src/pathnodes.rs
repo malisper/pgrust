@@ -7,7 +7,7 @@
 //! (e.g. `ExecSupportsMarkRestore`) needs no resolution seam. Variants and
 //! fields are added as their consuming units are ported.
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 
 use crate::nodes::NodeTag;

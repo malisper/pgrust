@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use ::types_core::primitive::Oid;
 use ::nodes::primnodes::Expr;
-use pathnodes::{
+use ::pathnodes::{
     EcId, EmId, EquivalenceMember, ForeignKeyOptInfo, PlannerInfo,
     RelId, Relids,
 };

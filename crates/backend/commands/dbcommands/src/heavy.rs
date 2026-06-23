@@ -22,8 +22,8 @@ use ::types_catalog::pg_database::{
     DatabaseRelationId, NewDbRecord, DATCONNLIMIT_UNLIMITED,
 };
 use ::types_core::catalog::FirstNormalObjectId;
-use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_DATABASE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_IN_USE,
@@ -44,7 +44,7 @@ use ::types_storage::storage::{ProcSignalBarrierType, RelFileLocator};
 use ::wal::xlog_consts::{
     CHECKPOINT_FLUSH_ALL, CHECKPOINT_FORCE, CHECKPOINT_IMMEDIATE, CHECKPOINT_WAIT,
 };
-use wal::{RM_DBASE_ID, XLR_SPECIAL_REL_UPDATE};
+use ::wal::{RM_DBASE_ID, XLR_SPECIAL_REL_UPDATE};
 use ::types_wchar::encoding::{pg_valid_be_encoding, PG_SQL_ASCII};
 
 use crate::{
@@ -53,7 +53,7 @@ use crate::{
 };
 
 // Owner crates / seams.
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use pg_database_seams as dbcat;
 use pg_tablespace_seams as tscat;
 use catalog_storage_seams as storage;
@@ -346,7 +346,7 @@ pub(crate) fn scan_source_database_pg_class<'mcx>(
     srcpath: &str,
 ) -> PgResult<::mcx::PgVec<'mcx, storage::CreateDBRelInfo>> {
     use bufmgr_seams as bufmgr;
-    use page::{
+    use ::page::{
         ItemIdGetLength, ItemIdIsDead, ItemIdIsRedirected, ItemIdIsUsed, PageGetItem, PageGetItemId,
         PageGetMaxOffsetNumber, PageIsEmpty, PageIsNew, PageRef,
     };

@@ -13,10 +13,10 @@
 //! generated-column conflicts) against the merged column list at the end.
 
 use ::utils_error::ereport;
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgString, PgVec};
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::types_core::AttrNumber;
-use types_error::{PgError, PgResult, ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYPE_MISMATCH,
+use ::types_error::{PgError, PgResult, ERRCODE_COLLATION_MISMATCH, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_DEFINITION, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE};
@@ -29,9 +29,9 @@ use ::types_tuple::heaptuple::MaxHeapAttributeNumber;
 
 use ::next::attmap::{free_attrmap, make_attrmap};
 use ::common_relation::relation_open;
-use toast_compression::{get_compression_method_name,
+use ::toast_compression::{get_compression_method_name,
     INVALID_COMPRESSION_METHOD};
-use pg_constraint::{NotNullConstraint, RelationGetNotNullConstraints};
+use ::pg_constraint::{NotNullConstraint, RelationGetNotNullConstraints};
 use ::nodes_core::bitmapset::{bms_add_member, bms_is_member};
 use ::nodes_core::makefuncs::make_column_def;
 use ::equalfuncs_seams::equal_node;
@@ -48,7 +48,7 @@ use ::nodes_core::read::string_to_node;
 use ::miscinit::GetUserId;
 use ::types_acl::ACLCHECK_NOT_OWNER;
 
-use tablecmds_seams::{self as seam, MergeAttributesResult};
+use ::tablecmds_seams::{self as seam, MergeAttributesResult};
 
 use crate::create::findAttrByName;
 use crate::helpers::{here, RelationRelationId};

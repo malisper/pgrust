@@ -10,9 +10,9 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use ::equivclass::match_eclasses_to_foreign_key_col;
-use types_core::{Oid, OidIsValid, InvalidOid};
+use ::types_core::{Oid, OidIsValid, InvalidOid};
 use ::nodes::primnodes::{Expr, Var};
-use pathnodes::{NodeId, PlannerInfo, RELOPT_BASEREL};
+use ::pathnodes::{NodeId, PlannerInfo, RELOPT_BASEREL};
 
 /// `match_foreign_keys_to_quals` (initsplan.c:3631).
 ///

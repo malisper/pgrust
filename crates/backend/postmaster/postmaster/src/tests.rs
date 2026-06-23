@@ -6,7 +6,7 @@
 
 use std::sync::{Mutex, Once};
 
-use pmchild::{
+use ::pmchild::{
     AssignPostmasterChildSlot, InitPostmasterChildSlots, MaxLivePostmasterChildren, PMChild,
     SetActiveChildPid,
 };

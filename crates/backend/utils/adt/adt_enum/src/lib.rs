@@ -29,10 +29,10 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use ::types_core::TransactionId;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNSAFE_NEW_ENUM_VALUE_USAGE, ERROR,

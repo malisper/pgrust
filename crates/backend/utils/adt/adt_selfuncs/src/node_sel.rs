@@ -22,7 +22,7 @@ use ::types_core::primitive::{InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{JoinType, NodeId, PlannerInfo, SpecialJoinInfo};
+use ::pathnodes::{JoinType, NodeId, PlannerInfo, SpecialJoinInfo};
 
 use joinpath_seams as jp;
 use path_small_seams as clausesel;
@@ -37,7 +37,7 @@ use crate::examine::{examine_variable, release_variable_stats};
 use crate::scalar::{stats_tuple_stanullfrac, var_eq_const};
 use crate::{clamp_probability, STATISTIC_KIND_MCV};
 
-use types_selfuncs::{ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES};
+use ::types_selfuncs::{ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES};
 
 /* ---------------------------------------------------------------------------
  * Constants the node estimators test directly (selfuncs.h / catalog OIDs /

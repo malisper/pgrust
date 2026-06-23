@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use ::types_core::primitive::{BlockNumber, Cardinality, Cost};
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     GatherMergePath, GatherPath, ParamPathInfo, Path, PathId, PathKey, PathNode,
     PlannerInfo, QualCost, RelId, RelOptInfo, RinfoId, JOIN_INNER,
 };

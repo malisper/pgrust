@@ -34,14 +34,14 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::{Expr, NOT_EXPR, OR_EXPR};
 use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use pathnodes::{
+use ::pathnodes::{
     Bitmapset, JoinType, NodeId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
 };
 
-use statistics::{MVDependencies, MVDependency, STATS_EXT_DEPENDENCIES};
+use ::statistics::{MVDependencies, MVDependency, STATS_EXT_DEPENDENCIES};
 
 use ::types_catalog::pg_statistic_ext::{
     Anum_pg_statistic_ext_data_stxddependencies, Anum_pg_statistic_ext_data_stxdinherit,

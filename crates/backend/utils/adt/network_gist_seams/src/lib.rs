@@ -15,7 +15,7 @@
 //! mirror-PG-and-panic contract.
 
 use ::types_error::PgResult;
-use types_network::{inet_struct, GistInetKey, GistInetSplitVec};
+use ::types_network::{inet_struct, GistInetKey, GistInetSplitVec};
 
 /// `StrategyNumber` (access/stratnum.h).
 pub type StrategyNumber = u16;

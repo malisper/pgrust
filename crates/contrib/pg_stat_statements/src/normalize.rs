@@ -12,7 +12,7 @@
 //! post-parse-analyze path (when the enriched hook threads the real jumble
 //! state).
 
-use scan_fgram::{Scanner, ScannerSettings, YY_NULL};
+use ::scan_fgram::{Scanner, ScannerSettings, YY_NULL};
 
 /// One constant location (`LocationLen`).
 #[derive(Clone, Copy)]

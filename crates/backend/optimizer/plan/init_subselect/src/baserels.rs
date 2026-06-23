@@ -8,7 +8,7 @@ use ::nodes::nodes::Node;
 use ::nodes::rawnodes::FromExpr;
 use ::pathnodes::planner_run::PlannerRun;
 use ::pathnodes::PlannerInfo;
-use pathnodes::{RELOPT_BASEREL, RelOptKind};
+use ::pathnodes::{RELOPT_BASEREL, RelOptKind};
 
 use ::relnode::build_simple_rel;
 use init_subselect_ext_seams as initext;

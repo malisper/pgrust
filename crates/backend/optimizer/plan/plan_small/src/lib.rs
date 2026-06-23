@@ -45,7 +45,7 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::nodes::nodes::Node;
-use pathnodes::{NodeId, PlannerInfo, RelId, RTEKind};
+use ::pathnodes::{NodeId, PlannerInfo, RelId, RTEKind};
 use ::pathnodes::planner_run::PlannerRun;
 
 use allpaths as allpaths;

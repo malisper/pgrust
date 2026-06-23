@@ -20,9 +20,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, PgError, PgResult, ERROR, PANIC, WARNING};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERROR, PANIC, WARNING};
 use ::types_core::xact::{InvalidTransactionId, InvalidXLogRecPtr, TransactionIdIsValid};
-use types_core::{Oid, ProcNumber, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::{Oid, ProcNumber, RepOriginId, TimestampTz, TransactionId, XLogRecPtr};
 use ::wal::wal::RelFileLocator;
 use ::wal::xact_records::{XactLogAbortRecordArgs, XactLogCommitRecordArgs, XlXactOrigin};
 

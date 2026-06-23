@@ -54,8 +54,8 @@ use std::collections::HashMap;
 use std::sync::atomic::fence;
 use std::sync::atomic::Ordering::SeqCst;
 
-use types_core::{pgsocket, PGINVALID_SOCKET};
-use types_error::{PgError, PgResult, ERROR};
+use ::types_core::{pgsocket, PGINVALID_SOCKET};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::types_storage::latch::LatchHandle;
 use ::types_storage::waiteventset::{
     WaitEvent, WaitEventSetHandle, WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_POSTMASTER_DEATH,

@@ -43,8 +43,8 @@
 use ::mcx::Mcx;
 use alloc::string::ToString;
 use ::types_tuple::heaptuple::Datum;
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
-use types_error::{
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_ARGUMENT_FOR_NTH_VALUE,
     ERRCODE_INVALID_ARGUMENT_FOR_NTILE, ERRCODE_INVALID_TEXT_REPRESENTATION,
 };

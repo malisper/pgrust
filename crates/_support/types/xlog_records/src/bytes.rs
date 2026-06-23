@@ -3,7 +3,7 @@
 
 use ::types_core::FullTransactionId;
 use ::types_storage::RelFileLocator;
-use types_tuple::{BlockIdData, ItemPointerData};
+use ::types_tuple::{BlockIdData, ItemPointerData};
 
 pub(crate) const SHORT_RECORD: &str = "WAL record data shorter than the C struct it must hold";
 

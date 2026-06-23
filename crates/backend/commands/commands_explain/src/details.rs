@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use ::types_core::instrument::{Instrumentation, WalUsage};
 use ::types_error::PgResult;
-use types_explain::{ExplainFormat, ExplainState};
+use ::types_explain::{ExplainFormat, ExplainState};
 
 use ::nodes::nodehash::HashState;
 use ::nodes::nodeincrementalsort::{
@@ -28,7 +28,7 @@ use ::nodes::nodeincrementalsort::{
 use ::nodes::nodesort::{SharedSortInfo, SortStateData, TuplesortMethod, TuplesortSpaceType};
 
 use explain_format as fmt;
-use tuplesort::{tuplesort_method_name, tuplesort_space_type_name};
+use ::tuplesort::{tuplesort_method_name, tuplesort_space_type_name};
 
 /// `BYTES_TO_KILOBYTES(b)` — `(b + 1023) / 1024` (memutils.h).
 fn bytes_to_kilobytes(b: i64) -> i64 {

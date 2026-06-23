@@ -25,7 +25,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{alloc_in, Mcx, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, PgString, PgVec};
 
 use ::types_acl::acl::{
     ACL_DELETE_CHR, ACL_ID_PUBLIC, ACL_INSERT_CHR, ACL_SELECT, ACL_SELECT_CHR, ACL_UPDATE,
@@ -33,7 +33,7 @@ use ::types_acl::acl::{
 };
 use ::types_core::primitive::OidIsValid;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::nodes::nodes::{CmdType, Node, NodePtr};
 use ::nodes::parsenodes::{RTEKind, RTEPermissionInfo, RangeTblEntry};
 use ::nodes::primnodes::{BoolExprType, Expr};
@@ -44,7 +44,7 @@ use ::equalfuncs::equal_node;
 use ::rewrite_core::change::ChangeVarNodes;
 use ::rewriteDefine::setRuleCheckAsUser;
 use ::adt_acl::role_membership::has_privs_of_role;
-use relcache_seams::{relation_row_security, RowSecurityPolicyImage};
+use ::relcache_seams::{relation_row_security, RowSecurityPolicyImage};
 use ::miscinit::GetUserId;
 use ::more::rls::check_enable_rls;
 

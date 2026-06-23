@@ -22,7 +22,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 
-use mcx::{PgBox, PgString, PgVec};
+use ::mcx::{PgBox, PgString, PgVec};
 use ::types_core::primitive::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum as TupleDatum;
 use ::types_error::SoftErrorContext;

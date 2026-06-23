@@ -26,7 +26,7 @@
 use std::cell::Cell;
 
 use ::utils_error::ereport;
-use types_error::{PgResult, ERRCODE_STATEMENT_TOO_COMPLEX, ERROR};
+use ::types_error::{PgResult, ERRCODE_STATEMENT_TOO_COMPLEX, ERROR};
 use ::types_guc::GucSource;
 
 /// `pg_stack_base_t` (miscadmin.h): an opaque stack reference point. C defines

@@ -24,13 +24,13 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::pg_collation::CollationRelationId;
 use ::types_catalog::pg_type::TypeRelationId;
 use ::types_core::primitive::{AttrNumber, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_TOO_MANY_COLUMNS, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     NOTICE,
 };
@@ -45,10 +45,10 @@ use ::types_tuple::heaptuple::{MaxHeapAttributeNumber, DEFAULT_COLLATION_OID};
 
 use ::common_relation::relation_open;
 use dependency_seams as dep_seam;
-use heap::{CheckAttributeType, InsertPgAttributeTuples, CHKATYPE_IS_VIRTUAL};
+use ::heap::{CheckAttributeType, InsertPgAttributeTuples, CHKATYPE_IS_VIRTUAL};
 use indexing_seams as indexing_seam;
 use ::pg_inherits::find_inheritance_children;
-use cache_syscache::{SearchSysCacheAttName, SysCacheGetAttrNotNull, ATTNAME};
+use ::cache_syscache::{SearchSysCacheAttName, SysCacheGetAttrNotNull, ATTNAME};
 
 use ::heaptuple::FormedTuple;
 use ::types_catalog::catalog_dependency::DEPENDENCY_NORMAL;

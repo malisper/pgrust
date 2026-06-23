@@ -14,7 +14,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
 
 use ::types_amapi::COMPARE_CONTAINED_BY;
 use ::types_catalog::catalog::{
@@ -43,7 +43,7 @@ use ::types_catalog::pg_constraint::{
 };
 use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ, INDEX_MAX_KEYS};
 use ::types_core::primitive::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,
@@ -2527,7 +2527,7 @@ pub fn check_functional_grouping(
  * Inward seam bodies (the 5 this crate owns + installs) + init_seams
  * ========================================================================= */
 
-use types_ri_triggers::{FkConstraintRow, PeriodOpers};
+use ::types_ri_triggers::{FkConstraintRow, PeriodOpers};
 
 /// `find_fk_period_opers(opclass)` — resolve the PERIOD opers from the PERIOD
 /// element's `opclass` (matching the C `FindFKPeriodOpers` signature).

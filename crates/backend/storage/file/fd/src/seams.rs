@@ -12,10 +12,10 @@
 use std::os::fd::FromRawFd;
 use std::path::Path;
 
-use types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};
+use ::types_error::{ErrorLevel, PgError, PgResult, ERROR, FATAL, LOG};
 use ::types_storage::file::File;
 
-use fd_seams::{
+use ::fd_seams::{
     CreateEmptyFileOutcome, DirEntryInfo, PgFileStream, PipeReadLine, RelmapReadOutcome,
     RelmapWriteOutcome, StatInfo,
 };

@@ -25,7 +25,7 @@ use core::ptr::NonNull;
 pub use allocator_api2::alloc::Allocator;
 
 use allocator_api2::alloc::{AllocError, Global};
-use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
+use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
 mod owned;
 mod string;

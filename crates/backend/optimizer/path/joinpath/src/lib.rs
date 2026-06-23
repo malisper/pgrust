@@ -36,7 +36,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 
 use joinpath_seams as jp;
@@ -45,7 +45,7 @@ use lsyscache_seams as lsc;
 
 use ::pathnodes::optimizer_plan::{CostSelector, JoinPathExtraData, SemiAntiJoinFactors};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     JoinType, NodeId, PathId, PathKey, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId,
     SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI,
     JOIN_RIGHT_SEMI, JOIN_SEMI, JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER, RELOPT_OTHER_JOINREL,

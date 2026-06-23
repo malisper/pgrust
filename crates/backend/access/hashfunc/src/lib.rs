@@ -22,17 +22,17 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use hashfn::{
+use ::hashfn::{
     hash_bytes as hash_any, hash_bytes_extended as hash_any_extended,
     hash_bytes_uint32 as hash_uint32, hash_bytes_uint32_extended as hash_uint32_extended,
 };
 use ::types_core::Oid;
 use ::datum::Datum;
-use types_error::{PgResult, ERRCODE_INDETERMINATE_COLLATION, ERROR};
-use fmgr::{FunctionCallInfoBaseData, PgFnNative};
+use ::types_error::{PgResult, ERRCODE_INDETERMINATE_COLLATION, ERROR};
+use ::fmgr::{FunctionCallInfoBaseData, PgFnNative};
 
 use ::oid_seams::check_valid_oidvector;
-use pg_locale_seams::{collation_is_deterministic, pg_strxfrm};
+use ::pg_locale_seams::{collation_is_deterministic, pg_strxfrm};
 use ::utils_error::ereport;
 
 /// `get_float8_nan()` (utils/float.h) — `f64::NAN`. Inlined as in the sibling

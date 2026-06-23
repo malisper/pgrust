@@ -21,11 +21,11 @@
 use alloc::format;
 use alloc::string::ToString;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 use ::types_core::primitive::InvalidOid;
 use ::types_core::Oid;
-use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableStmt, AlterTableType, CommentStmt, ConstrType, CreateStatsStmt,
     StatsElem,
@@ -38,7 +38,7 @@ use ::types_storage::lock::{AccessShareLock, NoLock};
 use ::next::attmap::build_attrmap_by_name;
 use ::common_relation::relation_open;
 use ::tupdesc::TupleDescGetDefault;
-use indexam::{index_close, index_open};
+use ::indexam::{index_close, index_open};
 use ::table::table_close;
 use ::comment::GetComment;
 use vacuum_seams as vacuum_seams;

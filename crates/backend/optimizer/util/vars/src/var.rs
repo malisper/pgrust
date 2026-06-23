@@ -39,7 +39,7 @@ use ::nodes_core::node_walker::{
 use ::types_error::PgResult;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::Expr;
-use pathnodes::{Bitmapset, NodeId, PlannerInfo, Relids};
+use ::pathnodes::{Bitmapset, NodeId, PlannerInfo, Relids};
 
 // `FirstLowInvalidHeapAttributeNumber` (access/sysattr.h) = -7. var.c offsets
 // attribute numbers by this so system attributes fit a bitmap; matches

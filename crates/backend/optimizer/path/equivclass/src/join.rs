@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     EcId, EmId, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo,
 };
 
@@ -886,4 +886,4 @@ fn em_expr_of_clause(root: &PlannerInfo, rinfo: RinfoId) -> &nodes::primnodes::E
 }
 
 #[allow(unused_imports)]
-use pathnodes::{RELOPT_BASEREL as _RB, RELOPT_JOINREL as _RJ};
+use ::pathnodes::{RELOPT_BASEREL as _RB, RELOPT_JOINREL as _RJ};

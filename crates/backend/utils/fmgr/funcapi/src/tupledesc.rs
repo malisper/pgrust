@@ -23,8 +23,8 @@
 //! ported `backend-access-common-tupdesc` crate.
 
 use ::utils_error::ereport;
-use mcx::{vec_with_capacity_in, Mcx, PgString};
-use types_core::{Oid, OidIsValid};
+use ::mcx::{vec_with_capacity_in, Mcx, PgString};
+use ::types_core::{Oid, OidIsValid};
 // The canonical unified value type (Datum-unification keystone) — what
 // `ExtractedVariadicArgs.values` carries (a `PgVec<Datum<'mcx>>` owned by
 // `types-nodes`). `extract_variadic_args` builds each element directly as this
@@ -33,7 +33,7 @@ use types_core::{Oid, OidIsValid};
 // edge) flow into its by-value arm, while `cstring_get_text_datum` already
 // returns the canonical value verbatim.
 use ::types_tuple::heaptuple::Datum as DatumV;
-use types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::types_error::{PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::{ExtractedVariadicArgs, TypeFuncClass};
 use ::types_storage::lock::AccessShareLock;

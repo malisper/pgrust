@@ -12,10 +12,10 @@
 use core::sync::atomic::{fence, AtomicU32, Ordering};
 
 use ::transam_parallel::is_parallel_worker;
-use pqformat::{pq_beginmessage, pq_endmessage, pq_sendint32, pq_sendint64};
-use status_seams::{my_be_entry_present, track_activities, with_my_beentry};
+use ::pqformat::{pq_beginmessage, pq_endmessage, pq_sendint32, pq_sendint64};
+use ::status_seams::{my_be_entry_present, track_activities, with_my_beentry};
 use ::mcx::Mcx;
-use types_core::{int64, InvalidOid, Oid};
+use ::types_core::{int64, InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::types_pgstat::backend_progress::ProgressCommandType;
 use ::types_pgstat::backend_status::PgBackendStatus;

@@ -14,7 +14,7 @@ use ::nodes::copy_query::Query;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::rawnodes::SetOperationStmt;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerGlobal, PlannerInfo, QueryId};
+use ::pathnodes::{PlannerGlobal, PlannerInfo, QueryId};
 
 seam_core::seam!(
     /// `IsParallelWorker()` (access/parallel.h:60) — `ParallelWorkerNumber >= 0`.

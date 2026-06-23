@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use pg_ffi_fgram::{unpack_sqlstate, ErrorLevel, SqlState};
+use ::pg_ffi_fgram::{unpack_sqlstate, ErrorLevel, SqlState};
 
 use crate::{
     backend_log_context, emit_error_report, errcode_for_file_access, severity, write_pipe_chunks,

@@ -27,8 +27,8 @@ use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::ReturnSetInfo;
 use types_tuple::heaptuple::Datum;
 
-use funcs_seams::{self as aio_seam, AioRow};
-use funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
+use ::funcs_seams::{self as aio_seam, AioRow};
+use ::funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
 
 use crate::register_srf;
 

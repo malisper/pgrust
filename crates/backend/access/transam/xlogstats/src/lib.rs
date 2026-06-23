@@ -8,8 +8,8 @@
 //! and read its decoded record (`record->record`); here they take the
 //! [`DecodedXLogRecord`] directly — exactly the data the C code reads.
 
-use types_core::{uint32, uint64, uint8, RmgrId, XLogRecPtr};
-use wal::{DecodedXLogRecord, MAX_XLINFO_TYPES, RM_MAX_ID, RM_XACT_ID};
+use ::types_core::{uint32, uint64, uint8, RmgrId, XLogRecPtr};
+use ::wal::{DecodedXLogRecord, MAX_XLINFO_TYPES, RM_MAX_ID, RM_XACT_ID};
 
 /// Per-rmgr / per-record byte and count accounting
 /// (C `struct XLogRecStats`, access/xlogstats.h).
@@ -167,8 +167,8 @@ pub fn init_seams() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::{slice_in, Mcx, MemoryContext};
-    use wal::{DecodedBkpBlock, XLogRecord};
+    use ::mcx::{slice_in, Mcx, MemoryContext};
+    use ::wal::{DecodedBkpBlock, XLogRecord};
 
     #[test]
     fn rec_stats_add_record_accumulates_count_and_lengths() {

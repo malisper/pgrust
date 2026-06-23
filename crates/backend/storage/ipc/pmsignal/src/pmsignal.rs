@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering::SeqCst;
 
 use ::utils_error::elog;
 use ::types_core::sig_atomic_t;
-use types_error::{ErrorLocation, PgResult, FATAL};
+use ::types_error::{ErrorLocation, PgResult, FATAL};
 
 use crate::{add_size, mul_size};
 

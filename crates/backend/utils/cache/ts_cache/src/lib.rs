@@ -26,7 +26,7 @@ use ::heaptuple::heap_deform_tuple;
 use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use indexam_seams as indexam_seams;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use transam_xact_seams as xact_seams;
 use namespace_seams as namespace_seams;
 use tsearchcmds_seams as tsearchcmds_seams;
@@ -38,10 +38,10 @@ use cache_syscache as syscache;
 use error_seams as error_seams;
 use fmgr_seams as fmgr_seams;
 use init_small_seams as init_small_seams;
-use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgHashMap, PgVec};
+use ::mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgHashMap, PgVec};
 use ::cache::SysCacheKey;
 use ::types_core::fmgr::F_OIDEQ;
-use types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_core::{InvalidOid, Oid, OidIsValid};
 // The migrated by-value tuple surface uses the canonical
 // `types_tuple::...::Datum<'mcx>` enum directly. The bare-word newtype
 // `::datum::Datum` (here aliased `ScalarWord`) survives only at the
@@ -51,8 +51,8 @@ use types_core::{InvalidOid, Oid, OidIsValid};
 // `arg` (`SyscacheCallbackFunction`), and the opaque per-template `dictData`
 // `void *` word returned by the dictionary-init fmgr seam.
 use ::datum::Datum as ScalarWord;
-use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, NOTICE};
-use types_guc::{GucSource, PGC_S_TEST};
+use ::types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, NOTICE};
+use ::types_guc::{GucSource, PGC_S_TEST};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_scan::sdir::ForwardScanDirection;
 use ::types_storage::lock::AccessShareLock;
@@ -1078,7 +1078,7 @@ pub fn assign_default_text_search_config(newval: Option<&str>) {
 /// Install this crate's GUC storage variable and hooks into the GUC tables'
 /// typed slots (it declares no inward seams of its own).
 pub fn init_seams() {
-    use guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
+    use ::guc_tables::{hooks, vars, GucHookExtra, GucVarAccessors};
 
     fn check_hook(
         newval: &mut Option<String>,

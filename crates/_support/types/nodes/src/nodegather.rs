@@ -9,9 +9,9 @@
 //! [`TupleQueueReaderHandle`]). Mirrors the sibling
 //! [`crate::nodegathermerge`].
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
-use execparallel::{ParallelExecutorInfo, TupleQueueReaderHandle};
+use ::execparallel::{ParallelExecutorInfo, TupleQueueReaderHandle};
 
 use crate::bitmapset::Bitmapset;
 use crate::execnodes::{PlanStateData, SlotId};

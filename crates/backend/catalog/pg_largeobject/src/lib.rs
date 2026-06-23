@@ -68,7 +68,7 @@ use ::types_catalog::catalog::{
 };
 use ::types_core::fmgr::F_OIDEQ;
 use ::types_core::primitive::{AttrNumber, Oid, OidIsValid};
-use types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
+use ::types_error::{PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::snapshot::SnapshotData;
 use types_tuple::heaptuple::Datum;
@@ -76,9 +76,9 @@ use types_tuple::heaptuple::Datum;
 use ::scankey::ScanKeyInit;
 use genam_seams as genam;
 use ::table::table_open;
-use aclchk_seams::{get_user_default_acl, record_dependency_on_new_acl};
+use ::aclchk_seams::{get_user_default_acl, record_dependency_on_new_acl};
 use ::catalog_catalog::GetNewOidWithIndex;
-use indexing_seams::{
+use ::indexing_seams::{
     catalog_tuple_delete, catalog_tuple_insert_pg_largeobject_metadata,
 };
 use ::utils_error::ereport;

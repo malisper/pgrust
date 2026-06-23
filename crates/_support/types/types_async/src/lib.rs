@@ -7,7 +7,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
 
-use types_core::{Oid, ProcNumber, TimestampTz, TransactionId, BLCKSZ};
+use ::types_core::{Oid, ProcNumber, TimestampTz, TransactionId, BLCKSZ};
 
 /// `NAMEDATALEN` — identical to `::types_core::fmgr::NAMEDATALEN`; re-stated here so
 /// the queue-entry layout is self-describing.

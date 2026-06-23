@@ -19,8 +19,8 @@ use alloc::string::ToString;
 
 use ::mcx::Mcx;
 
-use utils_error::{ereport, PgResult};
-use types_error::{PgError, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERROR};
+use ::utils_error::{ereport, PgResult};
+use ::types_error::{PgError, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERROR};
 
 use ::types_acl::acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_CREATE, AclResult};
 use ::types_catalog::catalog::DATABASE_RELATION_ID;
@@ -35,12 +35,12 @@ use ::types_storage::lock::RowExclusiveLock;
 use ::types_syscache::syscache_ids::SUBSCRIPTIONOID;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
-use heaptuple::{heap_deform_tuple, heap_modify_tuple};
-use aclchk::{object_aclcheck, object_ownercheck};
+use ::heaptuple::{heap_deform_tuple, heap_modify_tuple};
+use ::aclchk::{object_aclcheck, object_ownercheck};
 use ::indexing::keystone::CatalogTupleUpdate;
 use ::pg_shdepend::changeDependencyOnOwner;
 use ::cache_syscache::cacheinfo::SUBSCRIPTIONNAME;
-use cache_syscache::{ReleaseSysCache, SearchSysCache1, SearchSysCache2};
+use ::cache_syscache::{ReleaseSysCache, SearchSysCache1, SearchSysCache2};
 use ::miscinit::GetUserId;
 
 use ::cache::syscache::SysCacheKey;

@@ -33,8 +33,8 @@
 
 pub mod fmgr_builtins;
 
-use types_core::{Oid, OIDOID};
-use types_error::{PgError, PgResult, SoftErrorContext, ERRCODE_DATATYPE_MISMATCH};
+use ::types_core::{Oid, OIDOID};
+use ::types_error::{PgError, PgResult, SoftErrorContext, ERRCODE_DATATYPE_MISMATCH};
 use ::parsenodes::Node;
 
 // ===========================================================================

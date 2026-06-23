@@ -17,11 +17,11 @@ use std::collections::HashMap;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::OidIsValid;
-use types_core::{InvalidOid, Oid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_OBJECT_DEFINITION,
 };
-use types_ri_triggers::{SpiPlanPtr, TriggerRef};
+use ::types_ri_triggers::{SpiPlanPtr, TriggerRef};
 
 use ::coerce_seams::CoercionPathType;
 

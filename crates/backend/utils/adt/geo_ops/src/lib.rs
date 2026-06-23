@@ -31,7 +31,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::needless_range_loop)]
 
-use types_error::{
+use ::types_error::{
     make_sqlstate, PgError, PgResult, SqlState, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,

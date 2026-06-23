@@ -2,7 +2,7 @@
 
 use super::*;
 use ::types_core::primitive::BLCKSZ;
-use gin::{GIN_DATA, GIN_LEAF, GIN_META};
+use ::gin::{GIN_DATA, GIN_LEAF, GIN_META};
 use ::types_tuple::heaptuple::{BlockIdData, IndexTupleData, ItemPointerData};
 
 fn fresh_data_leaf_page() -> Vec<u8> {

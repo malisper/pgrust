@@ -7,8 +7,8 @@
 
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use types_core::{Oid, UserContext, SECURITY_RESTRICTED_OPERATION, USER_CONTEXT_NO_NEST_LEVEL};
-use types_error::{ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
+use ::types_core::{Oid, UserContext, SECURITY_RESTRICTED_OPERATION, USER_CONTEXT_NO_NEST_LEVEL};
+use ::types_error::{ErrorLocation, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
 
 /// `SwitchToUntrustedUser(Oid userid, UserContext *context)` — temporarily
 /// switch to a new user ID.

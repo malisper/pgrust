@@ -2,15 +2,15 @@
 //! `lifecycle` family because the C function (~579 lines) is large enough to
 //! body-port independently of the rest of the node lifecycle.
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::{Index, InvalidOid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::modifytable::{
     MergeAction, OnConflictAction, ResultRelHash, ONCONFLICT_NONE,
 };
 use ::nodes::nodes::CmdType;
 use ::nodes::primnodes::TargetEntry;
-use nodes::{
+use ::nodes::{
     EPQState, EStateData, ModifyTable, ModifyTableState, PlanStateData, ResultRelInfo, RriId,
 };
 use ::types_tuple::access::{

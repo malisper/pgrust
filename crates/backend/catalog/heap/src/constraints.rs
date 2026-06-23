@@ -33,10 +33,10 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use ::utils_error::ereport;
-use mcx::{alloc_in, Mcx, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, PgString, PgVec};
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use ::types_core::catalog::FirstUnpinnedObjectId;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,

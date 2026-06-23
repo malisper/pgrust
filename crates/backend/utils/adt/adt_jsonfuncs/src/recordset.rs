@@ -35,15 +35,15 @@ use ::mcx::Mcx;
 
 use ::utils_error::ereport;
 use ::types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
-use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
+use ::types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use ::types_jsonb::jsonb::{
     jbvType, json_container_is_array, json_container_is_object, json_container_is_scalar,
     JsonbIteratorToken,
 };
-use types_jsonfuncs::{
+use ::types_jsonfuncs::{
     ColumnIOUnion, JsonHashEntry, TypeCat, NAMEDATALEN,
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
@@ -51,8 +51,8 @@ use ::types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeI
 use ::types_tuple::heaptuple::FormedTuple;
 use ::types_tuple::Datum;
 
-use heaptuple::{heap_deform_tuple, HeapTupleGetDatum};
-use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext};
+use ::heaptuple::{heap_deform_tuple, HeapTupleGetDatum};
+use ::jsonb_util::{JsonbIteratorInit, JsonbIteratorNext};
 use funcapi_seams as funcapi;
 
 use crate::populate::{

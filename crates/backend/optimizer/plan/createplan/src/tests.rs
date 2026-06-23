@@ -7,7 +7,7 @@ extern crate std;
 
 use alloc::boxed::Box;
 
-use pathnodes::{
+use ::pathnodes::{
     Path, PathNode, PathTarget, PlannerInfo, RelId, RelOptInfo, RELOPT_BASEREL, RTE_RELATION,
 };
 

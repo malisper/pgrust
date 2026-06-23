@@ -42,9 +42,9 @@
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::{AttrNumber, Oid};
+use ::types_core::{AttrNumber, Oid};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

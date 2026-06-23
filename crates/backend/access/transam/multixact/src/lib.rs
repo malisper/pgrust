@@ -41,8 +41,8 @@ use std::collections::VecDeque;
 use ipc_shmem_seams as shmem;
 
 use ::utils_error::errno::current_errno;
-use utils_error::{elog, ereport, PgError, PgResult};
-use types_error::{
+use ::utils_error::{elog, ereport, PgError, PgResult};
+use ::types_error::{
     ErrorLocation, DEBUG1, ERRCODE_DATA_CORRUPTED, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, LOG, WARNING,
 };
@@ -58,13 +58,13 @@ fn dlog(level: ::types_error::ErrorLevel, message: String) {
     let _ = elog(level, message);
 }
 
-use slru::{
+use ::slru::{
     check_slru_buffers, SimpleLruDoesPhysicalPageExist, SimpleLruInit, SimpleLruReadPage,
     SimpleLruReadPage_ReadOnly, SimpleLruShmemSize, SimpleLruTruncate, SimpleLruWriteAll,
     SimpleLruWritePage, SimpleLruZeroPage, SlruCtlData, SlruDeleteSegment,
     SlruPagePrecedesUnitTests, SlruScanDirectory, SlruSyncFileTag, SLRU_PAGES_PER_SEGMENT,
 };
-use lwlock::{LWLockAcquire, LWLockAcquireMain, LWLockRelease, MainLWLockGuard};
+use ::lwlock::{LWLockAcquire, LWLockAcquireMain, LWLockRelease, MainLWLockGuard};
 
 use ::init_small::globals;
 
@@ -82,11 +82,11 @@ use miscinit_seams as miscinit_seams;
 use snapmgr_pc_seams as snapmgr_seams;
 use twophase_seams as twophase_seams;
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 
-use types_core::{MultiXactId, MultiXactOffset, Oid, Size, TransactionId, BLCKSZ as BLCKSZ_U32};
+use ::types_core::{MultiXactId, MultiXactOffset, Oid, Size, TransactionId, BLCKSZ as BLCKSZ_U32};
 use ::types_storage::storage::{LWLockMode, LW_EXCLUSIVE, MULTI_XACT_GEN_LOCK, MULTI_XACT_TRUNCATION_LOCK};
-use types_storage::{
+use ::types_storage::{
     LWTRANCHE_MULTIXACTMEMBER_BUFFER, LWTRANCHE_MULTIXACTMEMBER_SLRU,
     LWTRANCHE_MULTIXACTOFFSET_BUFFER, LWTRANCHE_MULTIXACTOFFSET_SLRU,
 };

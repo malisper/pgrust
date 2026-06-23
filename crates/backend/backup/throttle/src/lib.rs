@@ -47,17 +47,17 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 
-use sink::{
+use ::sink::{
     bbsink_forward_archive_contents, bbsink_forward_begin_archive, bbsink_forward_begin_backup,
     bbsink_forward_begin_manifest, bbsink_forward_cleanup, bbsink_forward_end_archive,
     bbsink_forward_end_backup, bbsink_forward_end_manifest, bbsink_forward_manifest_contents,
     Bbsink, BbsinkOps, BbsinkState,
 };
-use throttle_seams::{check_for_interrupts, get_current_timestamp};
-use latch_seams::{reset_latch_my_latch, wait_latch_my_latch};
+use ::throttle_seams::{check_for_interrupts, get_current_timestamp};
+use ::latch_seams::{reset_latch_my_latch, wait_latch_my_latch};
 use ::mcx::Mcx;
 use ::types_core::primitive::{Size, TimeLineID, TimestampTz, XLogRecPtr};
-use types_datetime::{TimeOffset, USECS_PER_SEC};
+use ::types_datetime::{TimeOffset, USECS_PER_SEC};
 use ::types_error::PgResult;
 use ::types_pgstat::wait_event::WAIT_EVENT_BASE_BACKUP_THROTTLE;
 use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};

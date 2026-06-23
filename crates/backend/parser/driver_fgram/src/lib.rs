@@ -28,7 +28,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use scan_fgram::{
+use ::scan_fgram::{
     tokens, CoreYYSTYPE, LexError, Scanner, ScannerSettings, Token, UnicodeToServerSeam,
     Utf8UnicodeSeam, YY_NULL,
 };

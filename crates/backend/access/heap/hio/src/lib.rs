@@ -31,9 +31,9 @@
 #![allow(clippy::too_many_arguments)]
 
 use ::utils_error::ereport;
-use types_error::{PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, PANIC};
+use ::types_error::{PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, PANIC};
 
-use types_core::{BlockNumber, Oid, OffsetNumber, Size};
+use ::types_core::{BlockNumber, Oid, OffsetNumber, Size};
 use ::rel::RelationData;
 use ::types_storage::buf::{
     BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK, RBM_NORMAL, RBM_ZERO_AND_CLEANUP_LOCK,
@@ -894,11 +894,11 @@ pub fn RelationGetBufferForTuple(
 
 mod wire {
     use bufmgr_seams as bufmgr_seam;
-    use page::{
+    use ::page::{
         ItemIdGetOffset, PageAddItemExtended, PageGetHeapFreeSpace, PageGetItemId,
         PageGetMaxOffsetNumber, PageIsAllVisible, PageMut, PageRef,
     };
-    use types_core::{BlockNumber, OffsetNumber, Size};
+    use ::types_core::{BlockNumber, OffsetNumber, Size};
     use ::types_storage::bufpage::PAI_IS_HEAP;
     use ::types_tuple::heaptuple::ItemPointerData;
     use ::types_error::PgResult;

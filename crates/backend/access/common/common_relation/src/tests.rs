@@ -19,7 +19,7 @@ use std::string::{String, ToString};
 use std::sync::{Mutex, Once};
 use std::vec::Vec;
 
-use mcx::{MemoryContext, PgString};
+use ::mcx::{MemoryContext, PgString};
 use ::types_core::primitive::InvalidOid;
 use ::types_storage::lock::AccessShareLock;
 use ::types_tuple::access::RangeVar;

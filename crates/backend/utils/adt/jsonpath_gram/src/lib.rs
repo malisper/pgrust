@@ -32,12 +32,12 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use jsonpath_scan::{
+use ::jsonpath_scan::{
     jsonpath_yyerror, jsonpath_yyerror_yytext, JsonPathLexer, Lexeme, Token,
 };
 use ::mcx::MemoryContext;
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
-use types_error::{ERRCODE_INVALID_REGULAR_EXPRESSION, ERRCODE_SYNTAX_ERROR};
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_error::{ERRCODE_INVALID_REGULAR_EXPRESSION, ERRCODE_SYNTAX_ERROR};
 use ::types_jsonpath::jsonpath::{
     JsonPathItemType, JSP_REGEX_DOTALL, JSP_REGEX_ICASE, JSP_REGEX_MLINE, JSP_REGEX_QUOTE,
     JSP_REGEX_WSPACE,

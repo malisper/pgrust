@@ -11,9 +11,9 @@
 
 use crate::backbone::set_spi_result;
 use crate::result_code::SPI_ERROR_NOATTRIBUTE;
-use heaptuple::{heap_getattr, Datum, FormedTuple};
+use ::heaptuple::{heap_getattr, Datum, FormedTuple};
 use ::mcx::Mcx;
-use types_core::{InvalidOid, Oid};
+use ::types_core::{InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, TupleDescData};
 

@@ -29,15 +29,15 @@ use core::cell::RefCell;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 
-use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
+use ::types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use ::types_jsonb::jsonb::{jbvType, JsonbIteratorToken};
 
-use adt_json::{escape_json, escape_json_with_len};
-use jsonb_util::{
+use ::adt_json::{escape_json, escape_json_with_len};
+use ::jsonb_util::{
     JsonbIteratorInit, JsonbIteratorNext, JsonbValueToJsonb, pushJsonbValue,
 };
 use ::adt_numeric::io::numeric_out;

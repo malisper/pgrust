@@ -6,7 +6,7 @@ use ::types_error::PgResult;
 use ::nodes::execexpr::ExprState;
 use ::nodes::nodeagg::{AGG_MIXED, AGG_PLAIN};
 use crate::aggstate::AggStateData;
-use nodes::{EStateData, SlotId};
+use ::nodes::{EStateData, SlotId};
 
 /// `TupIsNull(slot)` — true if `slot` is NULL or marked empty (`TTS_EMPTY`).
 /// The slot is an id into `estate.es_tupleTable`.

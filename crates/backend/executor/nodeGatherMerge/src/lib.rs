@@ -59,7 +59,7 @@ use nodes_core_seams as bitmapset;
 use postgres_seams as tcop_postgres;
 use sortsupport_seams as sortsupport;
 
-use mcx::{alloc_in, Mcx, PgBox};
+use ::mcx::{alloc_in, Mcx, PgBox};
 use ::types_core::primitive::AttrNumber;
 /// The one canonical value type. The binary heap's `bh_nodes` (owned by
 /// `types-nodes`) carries it, and the sort-key comparison edge
@@ -67,12 +67,12 @@ use ::types_core::primitive::AttrNumber;
 /// `binaryheap.c` packs an `int32` `SlotNumber` via `Int32GetDatum`, so every
 /// heap entry is a `ByVal` slot index here.
 use types_tuple::heaptuple::Datum;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::nodegathermerge::{
     GMReaderTupleBuffer, GatherMerge, GatherMergeStateData, MAX_TUPLE_STORE,
 };
 use ::nodes::nodemergeappend::BinaryHeap;
-use nodes::{
+use ::nodes::{
     Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind,
 };
 use ::types_sortsupport::SortSupportData;

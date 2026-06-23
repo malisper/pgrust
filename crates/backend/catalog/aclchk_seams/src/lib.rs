@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_acl::{AclMaskHow, AclMode, AclResult};
+use ::types_acl::{AclMaskHow, AclMode, AclResult};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::nodes::parsenodes::ObjectType;

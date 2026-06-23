@@ -23,7 +23,7 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{BlockNumber, Oid, OffsetNumber, TransactionId};
 use ::types_error::PgResult;
 use ::rel::Relation;
@@ -34,15 +34,15 @@ use ::types_tuple::heaptuple::{
     BlockIdData, FormData_pg_attribute, ItemPointerData, NameData,
 };
 use ::types_tuple::pg_type::FormData_pg_type;
-use types_nbtree::{TmIndexDelete, TmIndexDeleteOp, TmIndexStatus};
+use ::types_nbtree::{TmIndexDelete, TmIndexDeleteOp, TmIndexStatus};
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple};
 use ::tupdesc::CreateTupleDesc;
 use heapam_seams as heapam_seam;
 use table_seams as table_seam;
-use table_tableam::{table_beginscan_catalog, table_endscan};
+use ::table_tableam::{table_beginscan_catalog, table_endscan};
 use bufmgr_seams as bufmgr_seam;
-use page::{ItemIdIsDead, PageGetItem, PageGetItemId, PageRef};
+use ::page::{ItemIdIsDead, PageGetItem, PageGetItemId, PageRef};
 
 use crate::scan::heap_getnext;
 

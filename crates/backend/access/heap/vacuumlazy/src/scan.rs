@@ -11,9 +11,9 @@
 //! skip/eager-scan decision logic in-crate and seams only the actual buffer
 //! read/lock; the per-page processing is unchanged.
 
-use utils_error::{ereport};
-use types_error::{ErrorLocation, DEBUG2, INFO};
-use types_core::{BlockNumber, Buffer};
+use ::utils_error::{ereport};
+use ::types_error::{ErrorLocation, DEBUG2, INFO};
+use ::types_core::{BlockNumber, Buffer};
 use ::types_error::PgResult;
 
 use crate::consts::{

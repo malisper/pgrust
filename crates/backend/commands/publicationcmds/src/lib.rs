@@ -39,10 +39,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 
-use utils_error::{ereport, PgResult};
-use types_error::{
+use ::utils_error::{ereport, PgResult};
+use ::types_error::{
     PgError, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
@@ -81,14 +81,14 @@ use ::types_storage::lock::{
 use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
 use ::scankey::ScanKeyInit;
 use ::transam_xact::CommandCounterIncrement;
-use aclchk::{object_aclcheck, object_ownercheck};
+use ::aclchk::{object_aclcheck, object_ownercheck};
 use ::catalog_catalog::GetNewOidWithIndex;
 use ::dependency::performDeletion;
 use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
-use pg_shdepend::{changeDependencyOnOwner, recordDependencyOnOwner};
+use ::pg_shdepend::{changeDependencyOnOwner, recordDependencyOnOwner};
 use ::define_seams::DefElemArg;
 use ::nodes_core::nodefuncs::check_functions_in_node;
 use ::nodes_core::node_walker::expression_tree_walker;
@@ -98,7 +98,7 @@ use ::inval::cache_invalidate::{
     CacheInvalidateRelSync, CacheInvalidateRelSyncAll, CacheInvalidateRelcacheAll,
     CacheInvalidateRelcacheByRelid,
 };
-use cache_syscache::{ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr};
+use ::cache_syscache::{ReleaseSysCache, SearchSysCache1, SearchSysCache2, SysCacheGetAttr};
 use ::miscinit::GetUserId;
 use ::pgstrcasecmp::pg_strcasecmp;
 

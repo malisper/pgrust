@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 use ::nodes::parsenodes::RTEKind;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, Relids, RELOPT_BASEREL};
+use ::pathnodes::{PlannerInfo, Relids, RELOPT_BASEREL};
 
 use joininfo as joininfo;
 use joininfo_ext_seams as jiext;

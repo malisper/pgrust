@@ -7,7 +7,7 @@
 
 use core::cell::Cell;
 
-use types_datetime::{DATEORDER_MDY, INTSTYLE_POSTGRES, USE_ISO_DATES};
+use ::types_datetime::{DATEORDER_MDY, INTSTYLE_POSTGRES, USE_ISO_DATES};
 
 thread_local! {
     /// `DateStyle`: output format for dates/timestamps (USE_ISO_DATES, ...).

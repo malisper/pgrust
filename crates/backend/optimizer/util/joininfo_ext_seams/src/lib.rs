@@ -24,7 +24,7 @@ use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId, Relids};
+use ::pathnodes::{PlannerInfo, RelId, Relids};
 
 seam_core::seam!(
     /// `pull_varnos(root, (Node *) expr)` (var.c) over an arena `&Expr`. The

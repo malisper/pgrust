@@ -23,9 +23,9 @@
 //! crosses faithfully; a pass-by-reference result is the separate by-ref-Datum
 //! keystone.
 
-use mcx::{MemoryContext, Mcx, PgVec};
+use ::mcx::{MemoryContext, Mcx, PgVec};
 use ::types_core::Oid;
-use types_error::{PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
+use ::types_error::{PgResult, ERROR, ERRCODE_SYNTAX_ERROR};
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::CmdType;
 use ::nodes::params::{ParamExternData, ParamListInfo, ParamListInfoData, PARAM_FLAG_CONST};

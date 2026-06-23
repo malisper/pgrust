@@ -59,40 +59,40 @@ use ::utils_error::ereport;
 use ::types_core::primitive::{
     BlockNumber, ForkNumber, Oid, RelFileNumber, Size, TimeLineID, XLogRecPtr, BLCKSZ,
 };
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR,
     ERROR, WARNING,
 };
 
-use sink::{
+use ::sink::{
     bbsink_archive_contents, bbsink_begin_archive, bbsink_begin_backup, bbsink_cleanup,
     bbsink_end_archive, bbsink_end_backup, Bbsink, BbsinkState, TablespaceInfo,
 };
-use manifest::{
+use ::manifest::{
     AddFileToBackupManifest, AddWALInfoToBackupManifest, BackupManifestInfo, BackupManifestOption,
     FreeBackupManifest, InitializeBackupManifest, SendBackupManifest, MANIFEST_OPTION_FORCE_ENCODE,
     MANIFEST_OPTION_NO, MANIFEST_OPTION_YES,
 };
-use incremental::{
+use ::incremental::{
     FileBackupMethod, GetIncrementalFileSize, IncrementalBackupInfo, INCREMENTAL_MAGIC,
 };
 
-use transam_xlog::{
+use ::transam_xlog::{
     CheckXLogRemoved, IsTLHistoryFileName, IsXLogFileName, StatusFilePath, XLByteToPrevSeg,
     XLByteToSeg, XLogFileName, XLogFromFileName,
 };
 use ::xlogbackup::build_backup_content_default;
 use ::reinit::parse_filename_for_nontemp_relation;
 use ::fd::sync_cleanup::looks_like_temp_rel_name;
-use page::{PageGetLSN, PageIsNew, PageRef};
+use ::page::{PageGetLSN, PageIsNew, PageRef};
 use ::checksum::pg_checksum_page;
-use define::{defGetBoolean, defGetInt64, defGetString};
-use checksum_helper::{
+use ::define::{defGetBoolean, defGetInt64, defGetString};
+use ::checksum_helper::{
     pg_checksum_init, pg_checksum_parse_type, pg_checksum_type, pg_checksum_update,
     PgChecksumContext, CHECKSUM_TYPE_CRC32C, CHECKSUM_TYPE_NONE,
 };
-use compression::{PgCompressAlgorithm, PgCompressSpecification};
+use ::compression::{PgCompressAlgorithm, PgCompressSpecification};
 use ::replication::replnodes::BaseBackupCmd;
 use ::replication::walsender::WalSndState;
 

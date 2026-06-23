@@ -9,7 +9,7 @@ use std::cell::Cell;
 
 use ::utils_error::elog;
 use ::types_core::Size;
-use types_error::{PgResult, DEBUG3, FATAL};
+use ::types_error::{PgResult, DEBUG3, FATAL};
 use ::types_guc::guc::{PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT};
 
 use crate::ipci_seams_bgworker_repl_stats as bg;
@@ -30,7 +30,7 @@ use guc_seams as guc;
 
 // `SHMEM_INDEX_SIZE` / `sizeof(ShmemIndexEnt)` come from the shmem.c owner
 // (no dependency cycle: shmem.c does not call ipci.c).
-use ipc_shmem::{ShmemIndexEnt, SHMEM_INDEX_SIZE};
+use ::ipc_shmem::{ShmemIndexEnt, SHMEM_INDEX_SIZE};
 
 // ---------------------------------------------------------------------------
 // GUCs and process-global state (ipci.c file scope)

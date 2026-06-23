@@ -47,7 +47,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 use ::types_core::primitive::Size;
 use ::types_core::init::BackendType;
 use ::types_core::ProcNumber;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_pgstat::wait_event::PG_WAIT_ACTIVITY;
 use ::signal::SigHandler;
 use ::types_startup::StartupData;
@@ -55,7 +55,7 @@ use ::types_storage::storage::MAX_IO_WORKERS;
 use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
 use ::types_storage::LW_EXCLUSIVE;
 
-use lwlock::{main_lock_ref, LWLockAcquire, LWLockRelease};
+use ::lwlock::{main_lock_ref, LWLockAcquire, LWLockRelease};
 use ipc_shmem_seams as ipc_shmem;
 use latch_seams as latch;
 use interrupt as interrupt;

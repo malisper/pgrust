@@ -61,7 +61,7 @@ use ::types_core::fmgr::F_OIDEQ;
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_tuple::heaptuple::Datum as HeapDatum;
 use ::utils_error::ereport;
-use types_error::{PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_OBJECT_DEFINITION,
+use ::types_error::{PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use ::types_storage::lock::RowExclusiveLock;
 use ::types_tuple::heaptuple::{
@@ -72,21 +72,21 @@ use ::types_tuple::heaptuple::{
 use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use ::table::table_open;
-use dependency::{
+use ::dependency::{
     add_exact_object_address, new_object_addresses, record_object_address_dependencies,
     recordDependencyOnExpr,
 };
-use objectaccess::{invoke_object_post_alter_hook, invoke_object_post_create_hook};
-use pg_depend::{deleteDependencyRecordsFor, recordDependencyOn};
-use pg_shdepend::{deleteSharedDependencyRecordsFor, recordDependencyOnOwner};
+use ::objectaccess::{invoke_object_post_alter_hook, invoke_object_post_create_hook};
+use ::pg_depend::{deleteDependencyRecordsFor, recordDependencyOn};
+use ::pg_shdepend::{deleteSharedDependencyRecordsFor, recordDependencyOnOwner};
 
-use aclchk_seams::{aclcheck_error, get_user_default_acl, record_dependency_on_new_acl};
+use ::aclchk_seams::{aclcheck_error, get_user_default_acl, record_dependency_on_new_acl};
 use binary_upgrade_seams as binary_upgrade_seams;
 use indexing_seams as indexing_seams;
 use ::pg_depend_seams::recordDependencyOnCurrentExtension;
 use ::read_seams::string_to_node;
-use lsyscache_seams::{get_array_type, get_element_type, get_typisdefined};
-use syscache_seams::{get_type_oid, pg_type_form, type_exists};
+use ::lsyscache_seams::{get_array_type, get_element_type, get_typisdefined};
+use ::syscache_seams::{get_type_oid, pg_type_form, type_exists};
 use ::miscinit_seams::is_bootstrap_processing_mode;
 
 use ::types_acl::acl::ACLCHECK_NOT_OWNER;

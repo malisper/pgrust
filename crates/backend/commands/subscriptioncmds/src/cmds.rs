@@ -25,10 +25,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgString};
+use ::mcx::{Mcx, PgBox, PgString};
 
-use utils_error::{ereport, PgResult};
-use types_error::{
+use ::utils_error::{ereport, PgResult};
+use ::types_error::{
     PgError, ERRCODE_CONNECTION_FAILURE, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -66,20 +66,20 @@ use ::types_storage::lock::{AccessExclusiveLock, AccessShareLock, NoLock, RowExc
 use ::types_tuple::heaptuple::{Datum, FormedTuple};
 use ::types_tuple::heaptuple::TEXTOID;
 
-use heaptuple::{heap_form_tuple, heap_modify_tuple};
-use aclchk::{object_aclcheck, object_ownercheck};
+use ::heaptuple::{heap_form_tuple, heap_modify_tuple};
+use ::aclchk::{object_aclcheck, object_ownercheck};
 use ::catalog_catalog::GetNewOidWithIndex;
 use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert};
 use ::catalog_namespace::RangeVarGetRelid;
 use ::objectaccess::invoke_object_drop_hook;
-use pg_shdepend::{deleteSharedDependencyRecordsFor, recordDependencyOnOwner};
+use ::pg_shdepend::{deleteSharedDependencyRecordsFor, recordDependencyOnOwner};
 use ::replication_libpqwalreceiver::libpqrcv_check_conninfo;
-use origin::{
+use ::origin::{
     replorigin_by_name, replorigin_create, replorigin_drop_by_name, replorigin_get_progress,
 };
 use ::lmgr::LockSharedObject;
 use ::cache_syscache::cacheinfo::SUBSCRIPTIONNAME;
-use cache_syscache::{ReleaseSysCache, SearchSysCache2};
+use ::cache_syscache::{ReleaseSysCache, SearchSysCache2};
 use ::miscinit::GetUserId;
 
 use ::cache::syscache::SysCacheKey;

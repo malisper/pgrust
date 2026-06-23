@@ -18,7 +18,7 @@
 //! `CHECK_ENCODING_CONVERSION_ARGS` macro).
 
 use ::error_fgram::PgResult;
-use mb_fgram::{check_encoding_conversion_args, report_invalid_encoding};
+use ::mb_fgram::{check_encoding_conversion_args, report_invalid_encoding};
 use ::conv_string_helpers::ConversionResult;
 use ::conv_string_helpers::make_conversion_builtin;
 use ::common_wchar::pg_encoding_verifymbchar;

@@ -12,8 +12,8 @@
 //! sibling (same-unit) `role_membership::get_role_oid`, and the syscache
 //! `authid_rolname` projection of `SearchSysCache1(AUTHOID)`.
 
-use mcx::{Mcx, PgVec};
-use types_acl::{
+use ::mcx::{Mcx, PgVec};
+use ::types_acl::{
     aclitem_get_goptions, aclitem_get_privs, aclitem_set_privs_goptions, AclItem, AclMode,
     ACL_ALL_RIGHTS_STR, ACL_ALTER_SYSTEM, ACL_ALTER_SYSTEM_CHR, ACL_CONNECT, ACL_CONNECT_CHR,
     ACL_CREATE, ACL_CREATE_CHR, ACL_CREATE_TEMP, ACL_CREATE_TEMP_CHR, ACL_DELETE, ACL_DELETE_CHR,
@@ -22,8 +22,8 @@ use types_acl::{
     ACL_SELECT_CHR, ACL_SET, ACL_SET_CHR, ACL_TRIGGER, ACL_TRIGGER_CHR, ACL_TRUNCATE,
     ACL_TRUNCATE_CHR, ACL_UPDATE, ACL_UPDATE_CHR, ACL_USAGE, ACL_USAGE_CHR, N_ACL_RIGHTS,
 };
-use types_core::{OidIsValid, BOOTSTRAP_SUPERUSERID, NAMEDATALEN};
-use types_error::{
+use ::types_core::{OidIsValid, BOOTSTRAP_SUPERUSERID, NAMEDATALEN};
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_GRANTOR,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NAME_TOO_LONG, ERRCODE_UNDEFINED_OBJECT,
 };

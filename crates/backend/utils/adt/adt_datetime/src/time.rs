@@ -22,16 +22,16 @@
 
 use ::mcx::Mcx;
 use ::types_numeric::var::NumericVar;
-use types_datetime::{
+use ::types_datetime::{
     Interval, HOURS_PER_DAY, MAX_TIME_PRECISION, MINS_PER_HOUR, SECS_PER_MINUTE, USECS_PER_DAY,
     USECS_PER_SEC,
 };
-use types_error::{
+use ::types_error::{
     ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE,
 };
-use types_datetime::{fsec_t, TimeADT};
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_datetime::{fsec_t, TimeADT};
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
 use ::pgtime::pg_tm;
 
@@ -476,7 +476,7 @@ pub fn time_part_common<'mcx>(
     time: TimeADT,
     retnumeric: bool,
 ) -> PgResult<TimePartResult<'mcx>> {
-    use types_datetime::{
+    use ::types_datetime::{
         DTK_EPOCH, DTK_HOUR, DTK_MICROSEC, DTK_MILLISEC, DTK_MINUTE, DTK_SECOND, RESERV, UNITS,
         UNKNOWN_FIELD,
     };

@@ -20,20 +20,20 @@
 //! on-disk form of an `XLogRecPtr`, handled here exactly like `PageXLogRecPtrGet`
 //! / `PageXLogRecPtrSet` in bufpage.h.
 
-use page::{
+use ::page::{
     PageAddItemExtended, PageGetContents, PageGetMaxOffsetNumber, PageGetSpecialPointer,
     PageGetSpecialSize, PageInit, PageIsEmpty, PageIsNew, PageMut, PageRef,
 };
 use ::types_storage::bufpage::SizeOfPageHeaderData;
 use alloc::format;
 use alloc::vec::Vec;
-use bufmgr_seams::{buffer_get_block_number, with_buffer_page};
-use utils_error::{ereport, PgResult};
+use ::bufmgr_seams::{buffer_get_block_number, with_buffer_page};
+use ::utils_error::{ereport, PgResult};
 use ::types_error::error::ERROR;
 use ::types_core::primitive::{BlockNumber, OffsetNumber, Size, XLogRecPtr, BLCKSZ};
 use ::types_core::xact::{FirstNormalTransactionId, FullTransactionId};
 use ::types_error::error::ERRCODE_INDEX_CORRUPTED;
-use gist::{GistNSN, GIST_PAGE_ID};
+use ::gist::{GistNSN, GIST_PAGE_ID};
 use ::types_storage::Buffer;
 use ::types_tuple::heaptuple::{FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
 

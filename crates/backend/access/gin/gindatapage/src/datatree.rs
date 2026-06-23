@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
-use utils_error::{ereport, PgResult};
+use ::utils_error::{ereport, PgResult};
 use ::types_error::error::ERROR;
 
 use ::core_probe::ginpostinglist::{
@@ -43,7 +43,7 @@ use ::core_probe::ginpostinglist::{
 };
 use ::types_core::primitive::{BlockNumber, OffsetNumber, BLCKSZ};
 use ::types_core::InvalidBlockNumber;
-use gin::{
+use ::gin::{
     BeginPlaceToPageResult, GinBtreeData, GinBtreeDataLeafInsertData, GinBtreeStack,
     GinInsertPayload, GinPlaceToPageRC, GinStatsData, PostingItem, PtpWorkspace,
     GIN_SEGMENT_ADDITEMS, GIN_SEGMENT_DELETE, GIN_SEGMENT_INSERT, GIN_SEGMENT_REPLACE,
@@ -808,7 +808,7 @@ fn dataPlaceToPageLeafSplit(
     lpage: &mut [u8],
     rpage: &mut [u8],
 ) -> PgResult<()> {
-    use gin::{GIN_COMPRESSED, GIN_DATA, GIN_LEAF};
+    use ::gin::{GIN_COMPRESSED, GIN_DATA, GIN_LEAF};
 
     GinInitPage(lpage, (GIN_DATA | GIN_LEAF | GIN_COMPRESSED) as u32, BLCKSZ)?;
     GinInitPage(rpage, (GIN_DATA | GIN_LEAF | GIN_COMPRESSED) as u32, BLCKSZ)?;
@@ -1586,7 +1586,7 @@ pub fn createPostingTree<'mcx>(
     mut build_stats: Option<&mut GinStatsData>,
     entrybuffer: Buffer,
 ) -> PgResult<BlockNumber> {
-    use gin::{GIN_COMPRESSED, GIN_DATA, GIN_LEAF};
+    use ::gin::{GIN_COMPRESSED, GIN_DATA, GIN_LEAF};
 
     let nitems = items.len();
     let is_build = build_stats.is_some();

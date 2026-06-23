@@ -2,8 +2,8 @@
 //! Ident (RFC 1413) authentication.
 
 use ::utils_error::ereport;
-use types_error::{PgResult, LOG};
-use net::{AddrInfoHint, PgAddrInfo, Port, SockAddr};
+use ::types_error::{PgResult, LOG};
+use ::net::{AddrInfoHint, PgAddrInfo, Port, SockAddr};
 
 use crate::seams;
 use crate::{here, port_user_name, set_authn_id, STATUS_ERROR};

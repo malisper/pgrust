@@ -6,7 +6,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 
-use ilist::{dlist_head, dlist_node};
+use ::ilist::{dlist_head, dlist_node};
 use ::types_storage::LWLock;
 use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid, ProcNumber};
 use ::types_core::TransactionId;

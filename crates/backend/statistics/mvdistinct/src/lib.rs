@@ -43,9 +43,9 @@
 #![allow(clippy::needless_range_loop)]
 
 use ::mcx::Mcx;
-use types_core::{AttrNumber, Oid};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
-use statistics::{
+use ::types_core::{AttrNumber, Oid};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::statistics::{
     MVNDistinct, MVNDistinctItem, StatsBuildData, STATS_EXT_NDISTINCT,
     STATS_MAX_DIMENSIONS, STATS_NDISTINCT_MAGIC, STATS_NDISTINCT_TYPE_BASIC,
 };

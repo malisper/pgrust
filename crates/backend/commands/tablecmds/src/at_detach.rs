@@ -33,7 +33,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::pg_attribute::{
@@ -41,7 +41,7 @@ use ::types_catalog::pg_attribute::{
     PgAttributeUpdateRow,
 };
 use ::types_core::primitive::{Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_TABLE, ERROR,
 };
 use ::nodes::ddlnodes::{Constraint, ConstrType, PartitionCmd};
@@ -50,11 +50,11 @@ use ::nodes::partition::PartitionStrategy;
 use ::nodes::primnodes::Expr;
 use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
-use common_relation::{relation_open, try_relation_open};
+use ::common_relation::{relation_open, try_relation_open};
 use ::table::table_openrv;
 use indexing_seams as indexing_seam;
 use ::nodes_core::makefuncs::make_ands_explicit;
-use cache_syscache::{
+use ::cache_syscache::{
     SearchSysCacheCopyAttName, SearchSysCacheExistsAttName, SysCacheGetAttrNotNull, ATTNAME,
 };
 use ::utils_error::ereport;

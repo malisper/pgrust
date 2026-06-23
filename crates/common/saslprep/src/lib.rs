@@ -27,8 +27,8 @@
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
 
-use unicode_norm_bitfields::{unicode_normalize, UNICODE_NFKC};
-use common_wchar::{pg_utf8_islegal, pg_utf_mblen_private};
+use ::unicode_norm_bitfields::{unicode_normalize, UNICODE_NFKC};
+use ::common_wchar::{pg_utf8_islegal, pg_utf_mblen_private};
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::types_wchar::pg_wchar;

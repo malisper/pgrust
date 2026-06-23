@@ -14,9 +14,9 @@
 //! `get_index_isclustered`.
 
 use syscache_seams as syscache;
-use mcx::{Mcx, PgString};
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgString};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 
 /// `get_rel_name(relid)` (lsyscache.c).
 ///

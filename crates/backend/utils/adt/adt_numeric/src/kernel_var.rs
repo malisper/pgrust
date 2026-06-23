@@ -23,10 +23,10 @@
 
 use core::cmp::Ordering;
 
-use mcx::{Mcx, PgVec};
-use types_error::{PgResult, ERRCODE_DIVISION_BY_ZERO};
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{PgResult, ERRCODE_DIVISION_BY_ZERO};
 use ::types_numeric::var::{NumericSign, NumericVar};
-use types_numeric::{
+use ::types_numeric::{
     NumericDigit, DEC_DIGITS, DIV_GUARD_DIGITS, HALF_NBASE, MUL_GUARD_DIGITS, NBASE, NBASE_SQR,
     NUMERIC_MAX_DISPLAY_SCALE, NUMERIC_MIN_DISPLAY_SCALE, NUMERIC_MIN_SIG_DIGITS,
 };

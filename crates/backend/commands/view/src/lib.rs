@@ -40,7 +40,7 @@
 #![allow(non_upper_case_globals)]
 
 use ::utils_error::ereport;
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgString, PgVec};
 
 use ::common_relation::relation_open;
 use ::transam_xact::CommandCounterIncrement;
@@ -61,7 +61,7 @@ use view_seams as seam;
 
 use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_COLLATION,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_SYNTAX_ERROR, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
     NOTICE,

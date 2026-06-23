@@ -31,11 +31,11 @@
 //!     call, which then runs un-inlined (correct, just less aggressive).
 
 use ::mcx::Mcx;
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use ::nodes::primnodes::{CoercionForm, CollateExpr, Const, Expr, ParamKind};
-use parsenodes::{CoercionContext, RawParseMode};
+use ::parsenodes::{CoercionContext, RawParseMode};
 
 use ::nodes_core::nodefuncs::{expr_collation, expr_type, expression_tree_mutator};
 use ::clauses_seams::PgProcSimple;

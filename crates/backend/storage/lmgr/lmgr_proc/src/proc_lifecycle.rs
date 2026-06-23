@@ -27,7 +27,7 @@
 //! exactly where the C reaches into `ProcGlobal`.
 
 use ::mcx::Mcx;
-use types_core::{
+use ::types_core::{
     InvalidLocalTransactionId, InvalidOid, InvalidTransactionId, ProcNumber, XidStatus,
     INVALID_PROC_NUMBER,
 };

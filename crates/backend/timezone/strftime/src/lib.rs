@@ -7,7 +7,7 @@
 
 use std::ffi::CStr;
 
-use pgtime::{
+use ::pgtime::{
     pg_tm, DAYSPERLYEAR, DAYSPERNYEAR, DAYSPERWEEK, HOURSPERDAY, MINSPERHOUR, MONSPERYEAR,
     SECSPERMIN, TM_YEAR_BASE,
 };

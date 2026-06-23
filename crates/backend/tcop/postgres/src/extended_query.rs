@@ -55,10 +55,10 @@ use alloc::string::String;
 use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
 use ::types_dest::dest::CommandDest;
-use types_error::{PgResult, ERROR, LOG};
+use ::types_error::{PgResult, ERROR, LOG};
 use ::stringinfo::StringInfo;
 
-use utils_error::{ereport, errfinish, errhidestmt, errmsg, errstart};
+use ::utils_error::{ereport, errfinish, errhidestmt, errmsg, errstart};
 
 use crate::globals;
 use crate::logging;

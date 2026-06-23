@@ -26,14 +26,14 @@
 //! The remaining `SupportRequestSimplify`/`OptimizeWindowClause` legs of
 //! `like_regex_support` are not reached by this seam and are not ported.
 
-use mcx::{slice_in, Mcx};
+use ::mcx::{slice_in, Mcx};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INDETERMINATE_COLLATION,
 };
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo};
+use ::pathnodes::{NodeId, PlannerInfo};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::VARHDRSZ;
 

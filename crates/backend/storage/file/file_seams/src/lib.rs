@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::{ErrorLevel, PgResult};
+use ::types_error::{ErrorLevel, PgResult};
 
 seam_core::seam!(
     /// The `AllocateDir(dirname)` / `ReadDir(dir, dirname)` / `FreeDir(dir)`

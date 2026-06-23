@@ -21,7 +21,7 @@
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `StringInfo` transition state for `string_agg`. `data` is the accumulated
 /// buffer (`StringInfoData.data`); `cursor` is `StringInfoData.cursor`, reused

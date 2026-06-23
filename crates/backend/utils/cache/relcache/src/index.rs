@@ -14,15 +14,15 @@
 
 use std::cell::RefCell;
 
-use utils_error::{ereport, PgResult};
+use ::utils_error::{ereport, PgResult};
 use ::types_error::ERROR;
 
-use dynahash::{hash_create, hash_search};
+use ::dynahash::{hash_create, hash_search};
 use ::hash::hsearch::{HASHACTION, HASHCTL, HASH_BLOBS, HASH_ELEM, HTAB};
 
 use ::mcx::MemoryContext;
 use ::types_core::primitive::{Oid, RegProcedure};
-use types_core::{InvalidOid, InvalidSubTransactionId, TopSubTransactionId};
+use ::types_core::{InvalidOid, InvalidSubTransactionId, TopSubTransactionId};
 use ::wal::xlog_consts::{WAL_LEVEL_LOGICAL, WAL_LEVEL_REPLICA};
 
 use amapi_seams as amapi_seam;

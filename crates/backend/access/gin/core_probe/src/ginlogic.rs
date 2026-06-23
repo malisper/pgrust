@@ -30,7 +30,7 @@ pub use ::tsearch::backend_access_gin_ginlogic::{
     GinBoolConsistentKind, GinScanKey, GinTriConsistentKind,
 };
 
-use core_probe_seams::{gin_consistent_call_bool, gin_consistent_call_tri};
+use ::core_probe_seams::{gin_consistent_call_bool, gin_consistent_call_tri};
 
 /// `MAX_MAYBE_ENTRIES` (ginlogic.c:44): maximum number of MAYBE inputs that
 /// [`shimTriConsistentFn`] will resolve by enumerating all combinations.

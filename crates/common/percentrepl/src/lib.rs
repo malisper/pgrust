@@ -26,8 +26,8 @@ extern crate alloc;
 extern crate std;
 
 use alloc::format;
-use mcx::{Mcx, PgString};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::mcx::{Mcx, PgString};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
 /// `replace_percent_placeholders` — replace percent-letter placeholders in
 /// `instr` with the supplied values.

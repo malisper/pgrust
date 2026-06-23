@@ -4,7 +4,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands;
 //! until then a call panics loudly.
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_error::PgResult;
 // The canonical unified value type (Datum-unification keystone). The `*_v` seam
 // variants below take/return it and are the migration target for this unit's

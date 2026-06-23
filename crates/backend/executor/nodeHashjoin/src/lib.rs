@@ -41,9 +41,9 @@ use postgres_seams as tcop_postgres;
 use lsyscache_seams as lsyscache;
 use sort_storage_seams as sts;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::{Oid, OidIsValid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodehashjoin::{
     BufFile, HashJoin, HashJoinState, HashJoinTableData, JoinType, ParallelHashJoinState,
     INVALID_SKEW_BUCKET_NO,
@@ -51,7 +51,7 @@ use ::nodes::nodehashjoin::{
     PHJ_BATCH_SCAN, PHJ_BUILD_FREE, PHJ_BUILD_HASH_OUTER, PHJ_BUILD_RUN,
 };
 use ::nodes::primnodes::Expr;
-use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
+use ::nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 use ::types_tuple::heaptuple::FormedMinimalTuple;
 
 /// Serialize a [`FormedMinimalTuple`] to its contiguous C `MinimalTuple` byte

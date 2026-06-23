@@ -27,7 +27,7 @@
 
 #![allow(non_snake_case)]
 
-use types_copy::{
+use ::types_copy::{
     AttrInfo, AttrValue, CopyGetDataResult, CopyParseState, EncodingConversionResult,
 };
 use ::types_core::primitive::Oid;

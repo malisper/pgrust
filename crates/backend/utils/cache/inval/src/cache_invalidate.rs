@@ -9,9 +9,9 @@ use ::types_core::Oid;
 // (never deformed). See the crate-root note; the canonical `Datum<'mcx>` enum
 // is for deformed tuple values, not passthrough args.
 use ::datum::Datum as ScalarWord;
-use types_error::{PgError, PgResult, FATAL};
+use ::types_error::{PgError, PgResult, FATAL};
 use ::rel::RelationData;
-use types_storage::{
+use ::types_storage::{
     RelFileLocatorBackend, SharedInvalidationMessage, SharedInvalRelmapMsg, SharedInvalSmgrMsg,
 };
 use ::types_tuple::HeapTupleData;
@@ -26,7 +26,7 @@ use crate::{
     with_state, RelcacheCallbackItem, RelsyncCallbackItem, SyscacheCallbackItem,
     MAX_RELCACHE_CALLBACKS, MAX_RELSYNC_CALLBACKS, MAX_SYSCACHE_CALLBACKS, SYS_CACHE_SIZE,
 };
-use cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
+use ::cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
 
 use catalog_seams as catalog_seams;
 use sinval_seams as sinval_seams;

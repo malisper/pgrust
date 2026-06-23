@@ -7,7 +7,7 @@
 //! Ported 1:1, same branch order and error text/SQLSTATE as the C source.
 
 use ::utils_error::ereport;
-use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 
 use ::types_core::Oid;
 use ::nodes::ddlnodes::{

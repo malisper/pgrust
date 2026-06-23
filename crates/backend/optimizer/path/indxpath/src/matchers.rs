@@ -9,11 +9,11 @@ use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::{CompareType, Expr, RowCompareExpr};
-use pathnodes::{IndexClause, IndexOptInfo, PlannerInfo, RinfoId};
+use ::pathnodes::{IndexClause, IndexOptInfo, PlannerInfo, RinfoId};
 
 use ::nodes_core::makefuncs::{make_bool_const, make_opclause};
 use ::nodes_core::nodefuncs::expr_type;
-use clauses::{contain_volatile_functions, make_SAOP_expr};
+use ::clauses::{contain_volatile_functions, make_SAOP_expr};
 use lsyscache_seams as lsyscache;
 use fmgr_support_seams as fmgr_support;
 

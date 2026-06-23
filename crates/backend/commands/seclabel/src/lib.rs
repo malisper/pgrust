@@ -46,13 +46,13 @@
 
 use std::sync::Mutex;
 
-use heaptuple::{heap_form_tuple, heap_getattr, heap_modify_tuple};
+use ::heaptuple::{heap_form_tuple, heap_getattr, heap_modify_tuple};
 use ::scankey::ScanKeyInit;
 use genam_seams as genam;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use ::catalog_catalog::IsSharedRelation;
 use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
-use objectaddress_seams::{
+use ::objectaddress_seams::{
     check_object_ownership, get_object_address, ResolvedObjectAddress,
 };
 use seclabel_seams as seam;
@@ -66,7 +66,7 @@ use ::types_catalog::catalog::{
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ, F_TEXTEQ};
 use ::types_core::primitive::Oid;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
 };
@@ -83,7 +83,7 @@ use ::nodes::parsenodes::{
     OBJECT_TRIGGER, OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY, OBJECT_TSPARSER, OBJECT_TSTEMPLATE,
     OBJECT_TYPE, OBJECT_USER_MAPPING, OBJECT_VIEW,
 };
-use parsenodes::{Node, SecLabelStmt};
+use ::parsenodes::{Node, SecLabelStmt};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpdateExclusiveLock};
 use ::types_tuple::access::{

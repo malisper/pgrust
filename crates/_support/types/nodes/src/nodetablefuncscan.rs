@@ -4,7 +4,7 @@
 //! `TableFuncScan` scans a `RangeTableFunc` — the `XMLTABLE` / `JSON_TABLE`
 //! table-producer functions.
 
-use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;

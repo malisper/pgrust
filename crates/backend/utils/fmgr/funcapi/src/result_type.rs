@@ -8,7 +8,7 @@
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, InvalidOid};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERROR};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::{ResolvedResultType, TypeFuncClass};
 use ::nodes::nodes::Node;
@@ -195,7 +195,7 @@ pub fn get_expr_result_type<'mcx>(
             // (Datum::ByRef); both decode the same DatumTupleFields header
             // (datum_typeid / datum_typmod) that C reads off the
             // HeapTupleHeader.
-            use types_tuple::{
+            use ::types_tuple::{
                 FormedTuple, HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId,
             };
             let formed: FormedTuple<'mcx> = match &c.constvalue {

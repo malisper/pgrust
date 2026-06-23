@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::{BlockNumber, InvalidBlockNumber};
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::hash::hashpage::{
     Bucket, HashMetaPageData, HASH_MAX_BITMAPS, HASH_METAPAGE, HASH_READ, HASH_WRITE,
     InvalidBucket, LH_BITMAP_PAGE, LH_BUCKET_PAGE, LH_META_PAGE, LH_OVERFLOW_PAGE, LH_UNUSED_PAGE,
@@ -25,7 +25,7 @@ use transam_xlog_seams as xlog;
 use xloginsert_seams as xloginsert;
 use bufmgr_seams as bufmgr;
 
-use page::{
+use ::page::{
     ItemIdIsDead, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
     PageGetFreeSpaceForMultipleTuples, PageIndexMultiDelete, PageMut,
 };

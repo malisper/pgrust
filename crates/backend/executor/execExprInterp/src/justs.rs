@@ -49,7 +49,7 @@ fn hash_one_datum<'mcx>(
 }
 use ::nodes::execexpr::{ExprEvalStepData, ExprState};
 use ::nodes::execnodes::EcxtId;
-use nodes::{EStateData, SlotId};
+use ::nodes::{EStateData, SlotId};
 use types_tuple::heaptuple::DeformedColumn;
 
 use crate::dispatch::CheckOpSlotCompatibility;

@@ -51,10 +51,10 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::format;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_core::fmgr::NAMEDATALEN;
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{
     RangeTblEntry, RTE_FUNCTION, RTE_JOIN, RTE_RELATION, RTE_TABLEFUNC,

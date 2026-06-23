@@ -31,11 +31,11 @@ extern crate std;
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use gzip_seams::{
+use ::gzip_seams::{
     self as seam, DeflateOutcome, GzipStreamHandle, Z_DEFAULT_COMPRESSION, Z_DEFAULT_STRATEGY,
     Z_FINISH, Z_NO_FLUSH, Z_STREAM_ERROR,
 };
-use sink::{
+use ::sink::{
     bbsink_archive_contents, bbsink_begin_archive, bbsink_begin_backup,
     bbsink_forward_begin_manifest, bbsink_forward_cleanup, bbsink_forward_end_archive,
     bbsink_forward_end_backup, bbsink_forward_end_manifest, bbsink_manifest_contents, Bbsink,
@@ -44,7 +44,7 @@ use sink::{
 use ::mcx::Mcx;
 use ::compression::PgCompressSpecification;
 use ::types_core::primitive::{Size, TimeLineID, XLogRecPtr};
-use types_error::{ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+use ::types_error::{ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 use ::utils_error::ereport;
 
 /// The C source path used in `ereport`/`elog` error locations (`__FILE__`).

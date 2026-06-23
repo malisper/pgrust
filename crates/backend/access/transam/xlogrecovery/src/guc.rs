@@ -13,7 +13,7 @@
 use alloc::format;
 use alloc::string::ToString;
 
-use types_core::{TimeLineID, TransactionId, XLogRecPtr};
+use ::types_core::{TimeLineID, TransactionId, XLogRecPtr};
 use ::types_error::PgError;
 use ::wal::MAXFNAMELEN;
 

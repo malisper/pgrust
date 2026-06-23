@@ -294,7 +294,7 @@ fn cleanup_txn_removes_txn_and_subtxns() {
 
 #[test]
 fn queue_decoded_change_appends_tp_change_and_marks_streamable() {
-    use reorderbuffer_seams::{DecodedChangeKind, DecodedTuple};
+    use ::reorderbuffer_seams::{DecodedChangeKind, DecodedTuple};
     let mut rb = ReorderBuffer::allocate();
     let newt = DecodedTuple {
         t_len: 4,

@@ -13,7 +13,7 @@
 //! `Err`.
 
 use ::types_error::PgResult;
-use parse_manifest::{JsonManifestParseIncrementalStateHandle, ParsedManifestChunk};
+use ::parse_manifest::{JsonManifestParseIncrementalStateHandle, ParsedManifestChunk};
 
 seam_core::seam!(
     /// `json_parse_manifest_incremental_init(context)` (parse_manifest.c) —

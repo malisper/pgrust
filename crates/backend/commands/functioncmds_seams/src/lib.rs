@@ -13,11 +13,11 @@
 //! they belong to the not-yet-ported owners and reference the parse-tree
 //! vocabulary in `types-parsenodes`.
 
-use types_acl::{AclMode, AclResult};
+use ::types_acl::{AclMode, AclResult};
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use parsenodes::{DefElem, InlineCodeBlock, Node, TypeName};
+use ::parsenodes::{DefElem, InlineCodeBlock, Node, TypeName};
 
 // ---------------------------------------------------------------------------
 // Signature carriers

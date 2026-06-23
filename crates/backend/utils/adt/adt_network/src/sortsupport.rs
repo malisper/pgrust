@@ -17,7 +17,7 @@
 //! back to the ordinary `network_cmp` ordering proc).
 
 use ::network_seams::sortsupport;
-use types_network::{inet_struct, PGSQL_AF_INET};
+use ::types_network::{inet_struct, PGSQL_AF_INET};
 
 use crate::network_cmp_internal;
 

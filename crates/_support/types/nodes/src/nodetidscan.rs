@@ -15,7 +15,7 @@
 //! `BitmapOr` keystones (real types move down to break a cycle —
 //! opacity-inherited-never-introduced; no handles, no stand-ins).
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::Index;
 use ::types_tableam::relscan::TableScanDesc;
 use ::types_tuple::heaptuple::ItemPointerData;

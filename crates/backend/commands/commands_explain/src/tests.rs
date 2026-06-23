@@ -1,7 +1,7 @@
 //! Tests for the structural EXPLAIN slice.
 
-use mcx::{alloc_in, MemoryContext, PgBox, PgVec};
-use types_explain::{ExplainFormat, ExplainState};
+use ::mcx::{alloc_in, MemoryContext, PgBox, PgVec};
+use ::types_explain::{ExplainFormat, ExplainState};
 use ::nodes::execnodes::PlanStateData;
 use ::nodes::nodeindexscan::Plan;
 use ::nodes::noderesult::{Result as ResultPlan, ResultState};

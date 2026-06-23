@@ -12,7 +12,7 @@
 
 use alloc::boxed::Box;
 
-use pathnodes::{Bitmapset, Relids};
+use ::pathnodes::{Bitmapset, Relids};
 
 #[inline]
 fn words(a: &Relids) -> &[u64] {

@@ -5,7 +5,7 @@
 //! (`path_in`/`path_out`/`path_recv`/`path_send`) live in [`crate::io`].
 
 use ::types_core::geo::{Point, BOX};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use crate::f8::{float8_div, float8_lt, float8_max, float8_mi, float8_min, float8_mul, float8_pl};
 use crate::lseg::{lseg_interpt_lseg, statlseg_construct};

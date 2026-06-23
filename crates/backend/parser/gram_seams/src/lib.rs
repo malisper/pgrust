@@ -13,7 +13,7 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 use ::nodes::parsestmt::RawStmt;
 use ::parsenodes::RawParseMode;

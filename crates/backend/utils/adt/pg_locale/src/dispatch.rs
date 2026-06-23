@@ -16,10 +16,10 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
-use locale::{CollProvider, PgLocaleStruct};
+use ::types_error::{PgError, PgResult};
+use ::locale::{CollProvider, PgLocaleStruct};
 
 use crate::cache::{resolve, LocaleEntry, LocaleInfo};
 

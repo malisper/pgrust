@@ -5,9 +5,9 @@
 //!   * [`dead_items_reset`] (vacuumlazy.c:3560).
 //!   * [`dead_items_cleanup`] (vacuumlazy.c:3582).
 
-use utils_error::{ereport};
-use types_error::{ErrorLocation, DEBUG2, INFO, WARNING};
-use types_core::{BlockNumber, OffsetNumber};
+use ::utils_error::{ereport};
+use ::types_error::{ErrorLocation, DEBUG2, INFO, WARNING};
+use ::types_core::{BlockNumber, OffsetNumber};
 use ::types_error::PgResult;
 
 use crate::consts::{

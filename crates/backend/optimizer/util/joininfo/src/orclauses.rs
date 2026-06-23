@@ -9,7 +9,7 @@ use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::types_core::primitive::Index;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId, RinfoId, JOIN_INNER};
+use ::pathnodes::{PlannerInfo, RelId, RinfoId, JOIN_INNER};
 
 use crate::bms;
 use crate::restrictinfo::{

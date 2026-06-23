@@ -40,7 +40,7 @@
 //! loudly (sanctioned mirror-and-panic, never a placeholder stub-panic).
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::TUPLESORT_NONE;
 use ::rel::Relation;
 use ::types_tableam::amapi::IndexBuildResult;

@@ -18,8 +18,8 @@
 
 mod tables;
 
-use unicode_category::{pg_u_prop_case_ignorable, pg_u_prop_cased};
-use mcx::{Mcx, PgString, PgVec};
+use ::unicode_category::{pg_u_prop_case_ignorable, pg_u_prop_cased};
+use ::mcx::{Mcx, PgString, PgVec};
 use tables::*;
 use ::types_error::PgResult;
 

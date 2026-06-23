@@ -22,7 +22,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
@@ -30,7 +30,7 @@ use ::types_catalog::pg_constraint::{
     CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL,
 };
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
@@ -47,7 +47,7 @@ use ::transam_xact::CommandCounterIncrement;
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use indexing_seams as indexing_seam;
 use ::objectaddress::consts::ConstraintRelationId;
-use pg_inherits::{find_all_inheritors, find_inheritance_children};
+use ::pg_inherits::{find_all_inheritors, find_inheritance_children};
 use ::lsyscache_seams::get_attname;
 use ::relcache::derived::{IndexAttrBitmapKind, RelationGetIndexAttrBitmap};
 use ::stack_depth::check_stack_depth;

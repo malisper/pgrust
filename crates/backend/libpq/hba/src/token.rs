@@ -16,9 +16,9 @@
 //! line-at-a-time read, with no opaque stdio-stream handle.
 
 use fd_seams as fd;
-use types_error::{ErrorLevel, PgResult};
+use ::types_error::{ErrorLevel, PgResult};
 use ::net::AuthToken;
-use regex::{RegMatch, RegcompResult, RegexCompiled, RegexecResult};
+use ::regex::{RegMatch, RegcompResult, RegexCompiled, RegexecResult};
 
 use crate::{
     here, report_file_access, tok_str, token_has_regexp, C_COLLATION_OID, CONF_FILE_MAX_DEPTH,

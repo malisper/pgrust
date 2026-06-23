@@ -34,11 +34,11 @@
 use ::mcx::Mcx;
 use ::types_core::primitive::TransactionId;
 use ::types_core::xact::{CommandId, InvalidTransactionId};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_T_R_SERIALIZATION_FAILURE};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_T_R_SERIALIZATION_FAILURE};
 use ::rel::Relation;
 use ::types_slot::SlotData;
 use ::types_storage::lock::XLTW_Oper;
-use types_storage::{Buffer, RelFileLocator};
+use ::types_storage::{Buffer, RelFileLocator};
 use ::types_tableam::tableam::{
     BulkInsertStateData, LockTupleMode, LockWaitPolicy, Snapshot, TM_FailureData, TM_Result,
     TU_UpdateIndexes, TUPLE_LOCK_FLAG_FIND_LAST_VERSION, TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS,
@@ -57,7 +57,7 @@ use ::snapshot::SnapshotData;
 use ::types_storage::buf::{BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
 use execTuples_seams as slot_seam;
 use bufmgr_seams as bufmgr_seam;
-use page::{
+use ::page::{
     ItemIdGetLength, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber,
     ItemPointerIndicatesMovedPartitions, PageGetItem, PageGetItemId, PageRef,
 };

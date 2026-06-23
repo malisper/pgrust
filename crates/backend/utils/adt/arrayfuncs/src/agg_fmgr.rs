@@ -33,12 +33,12 @@
 //! the polymorphic `anynonarray` input resolves to the concrete element type.
 
 use ::mcx::MemoryContext;
-use types_core::{Oid, OidIsValid};
+use ::types_core::{Oid, OidIsValid};
 use ::datum::array_build::ArrayBuildState;
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::construct;
 

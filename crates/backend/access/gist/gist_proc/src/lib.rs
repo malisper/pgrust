@@ -39,11 +39,11 @@ use ::tsearch::tsearch::TSQuerySign;
 use ::tsearch::tsgistidx::SignTsVector;
 use ::types_network::GistInetKey;
 use dispatch::{GistConsistentResult, GistDistanceResult, StrategyNumber};
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::geo::{Point, CIRCLE, BOX};
 use ::types_core::primitive::{Oid, OffsetNumber};
-use types_error::{PgError, PgResult};
-use gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
+use ::types_error::{PgError, PgResult};
+use ::gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
 use ::types_sortsupport::SortSupportData;
 use types_tuple::heaptuple::Datum;
 

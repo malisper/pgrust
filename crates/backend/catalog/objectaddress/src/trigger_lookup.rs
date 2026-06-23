@@ -8,9 +8,9 @@
 //! oid-index lookup) followed by `heap_getattr` on the fixed `tgrelid` /
 //! `tgname` columns. Mirrors [`crate::rewrite_lookup`].
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::AccessShareLock;
 
 use crate::consts::{

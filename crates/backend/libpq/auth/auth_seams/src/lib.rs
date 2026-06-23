@@ -17,7 +17,7 @@
 //!     *consumed* by `backend-libpq-auth` and *installed by their own owners*
 //!     when those land; until then a call panics loudly, which is correct.
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::UserAuth;
 use ::types_error::PgResult;
 

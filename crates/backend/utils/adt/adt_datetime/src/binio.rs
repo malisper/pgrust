@@ -24,12 +24,12 @@
 //! `pg_ffi_fgram`.
 
 use ::pgtime::pg_tm;
-use types_datetime::{Interval, TimeTzADT, TZDISP_LIMIT, USECS_PER_DAY};
-use types_error::{
+use ::types_datetime::{Interval, TimeTzADT, TZDISP_LIMIT, USECS_PER_DAY};
+use ::types_error::{
     ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
 };
-use types_datetime::{fsec_t, DateADT, TimeADT, Timestamp, TimestampTz};
-use types_error::{PgError, PgResult};
+use ::types_datetime::{fsec_t, DateADT, TimeADT, Timestamp, TimestampTz};
+use ::types_error::{PgError, PgResult};
 
 use crate::date::{DATE_NOT_FINITE, IS_VALID_DATE};
 use crate::interval::AdjustIntervalForTypmod;
@@ -285,7 +285,7 @@ mod tests {
     use super::*;
     use crate::date::{DATEVAL_NOBEGIN, DATEVAL_NOEND};
     use crate::interval::{interval_nobegin, interval_noend};
-    use types_datetime::{DAY, INTERVAL_FULL_PRECISION, INTERVAL_MASK, INTERVAL_TYPMOD};
+    use ::types_datetime::{DAY, INTERVAL_FULL_PRECISION, INTERVAL_MASK, INTERVAL_TYPMOD};
 
     fn iso_lock() -> std::sync::MutexGuard<'static, ()> {
         let g = crate::settings::DATE_ORDER_TEST_LOCK

@@ -32,8 +32,8 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{BlockNumber, OffsetNumber, TransactionId};
-use types_error::{PgError, PgResult};
-use rel::{Relation, RelationData};
+use ::types_error::{PgError, PgResult};
+use ::rel::{Relation, RelationData};
 use ::snapshot::snapshot::{GlobalVisStateHandle, HTSV_Result};
 use ::types_storage::bufpage::MaxHeapTuplesPerPage;
 use ::types_storage::Buffer;
@@ -44,7 +44,7 @@ use ::types_tuple::heaptuple::{
 };
 use ::types_vacuum::vacuum::{HeapPageFreeze, HeapTupleFreeze, PruneFreezeResult, VacuumCutoffs};
 
-use page::{
+use ::page::{
     ItemIdGetRedirect, ItemIdIsDead, ItemIdIsNormal,
     ItemIdIsRedirected, ItemIdIsUsed, ItemIdSetDead, ItemIdSetRedirect, ItemIdSetUnused,
     ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerSet, PageClearFull,
@@ -57,7 +57,7 @@ use ::heapam::freeze::{
     HeapTupleHeaderAdvanceConflictHorizon,
 };
 use ::heapam_visibility::htup::HeapTupleHeaderGetXmin;
-use heapam_visibility::{
+use ::heapam_visibility::{
     HeapTupleHeaderGetUpdateXid, HeapTupleSatisfiesVacuumHorizon,
 };
 

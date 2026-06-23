@@ -17,10 +17,10 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::fmgr::{FmgrInfo, F_INT2GT, F_OIDEQ};
 use ::types_core::primitive::{AttrNumber, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_scan::scankey::{
     BTEqualStrategyNumber, BTGreaterStrategyNumber, ScanKeyData,
 };
@@ -29,7 +29,7 @@ use ::types_tuple::heaptuple::{Datum, DeformedColumn};
 
 use ::heaptuple::heap_deform_tuple;
 use genam_seams as seam;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use fmgr_seams as fmgr_seams;
 
 use ::types_catalog::catalog::CONSTRAINT_RELATION_ID;

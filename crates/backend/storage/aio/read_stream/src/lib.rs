@@ -36,13 +36,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::{BlockNumber, Buffer, ForkNumber, InvalidBlockNumber};
-use types_error::{PgError, PgResult};
-use support::{BufferAccessStrategyRing, LocalBufferManager};
+use ::types_error::{PgError, PgResult};
+use ::support::{BufferAccessStrategyRing, LocalBufferManager};
 use ::rel::Relation;
 use ::types_storage::buf::BufferAccessStrategy;
 use ::types_storage::storage::{BufferIsValid, InvalidBuffer};
 
-use bufmgr::{BufferManager, ReadOp};
+use ::bufmgr::{BufferManager, ReadOp};
 use bufmgr_seams as bufmgr_seams;
 
 /// The ambient process buffer manager (`BufferManager::global`), expected to be

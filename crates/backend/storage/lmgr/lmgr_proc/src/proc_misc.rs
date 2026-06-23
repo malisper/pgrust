@@ -15,7 +15,7 @@ use latch_seams as latch_seams;
 use lwlock_seams as lwlock_seams;
 use ::postgres_seams::check_for_interrupts;
 use ::types_core::ProcNumber;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::LOCKMASK;
 use ::types_storage::storage::{
     LOCK_MANAGER_LWLOCK_OFFSET, NUM_LOCK_PARTITIONS, PGPROC,

@@ -12,16 +12,16 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use define_seams::{def_get_string, DefElemArg};
-use dict_seams::{get_ts_dict_oid_from_name, subdict_lexize};
+use ::define_seams::{def_get_string, DefElemArg};
+use ::dict_seams::{get_ts_dict_oid_from_name, subdict_lexize};
 use ::ts_locale_seams::readfile;
 use ::ts_utils_seams::get_tsearch_config_filename;
 use ::mbutils_seams::pg_mblen_range;
 
-use mcx::{Mcx, PgString, PgVec};
-use types_core::{uint16, uint32};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_core::{uint16, uint32};
 use ::types_error::PgResult;
-use tsearch::{
+use ::tsearch::{
     DictThesaurus, LexemeInfo, OwnedTSLexeme, TSLexeme, TheLexeme, TheSubstitute, ThesaurusSubState,
     DT_USEASIS, TSL_ADDPOS,
 };

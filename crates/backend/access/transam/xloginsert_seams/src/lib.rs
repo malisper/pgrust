@@ -3,9 +3,9 @@
 //! `init_seams()` when it lands; until then a call panics loudly.
 
 use ::types_core::primitive::{BlockNumber, ForkNumber};
-use types_core::{RmgrId, XLogRecPtr};
+use ::types_core::{RmgrId, XLogRecPtr};
 use ::types_error::PgResult;
-use types_storage::{Buffer, RelFileLocator};
+use ::types_storage::{Buffer, RelFileLocator};
 
 seam_core::seam!(
     /// One whole-record insertion: C's `XLogBeginInsert()`, one

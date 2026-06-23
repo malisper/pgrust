@@ -271,7 +271,7 @@ pub fn build_dead_lock_space(
 ) -> (::types_deadlock::LockSpace, ::types_deadlock::ProcId) {
     use lmgr_proc_seams as proc;
     use ::types_core::INVALID_PROC_NUMBER;
-    use types_deadlock::{LockId, LockSlot, LockSpace, ProcId, ProcLockSlot, ProcSlot};
+    use ::types_deadlock::{LockId, LockSlot, LockSpace, ProcId, ProcLockSlot, ProcSlot};
 
     let n_procs = total_procs();
     let mut space = LockSpace::new();
@@ -375,7 +375,7 @@ pub fn apply_soft_deadlock_wait_order(
 /// `seams-init::init_all()`.
 pub fn init_seams() {
     use lock_seams as seams;
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     // GUC variable storage owned by lock.c.
     vars::max_locks_per_xact.install(GucVarAccessors {

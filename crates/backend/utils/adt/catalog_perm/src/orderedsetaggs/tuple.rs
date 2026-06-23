@@ -23,8 +23,8 @@
 
 use alloc::boxed::Box;
 
-use mcx::{alloc_in, Mcx};
-use types_core::{AttrNumber, Oid};
+use ::mcx::{alloc_in, Mcx};
+use ::types_core::{AttrNumber, Oid};
 use ::datum::Datum as Word;
 use ::types_error::PgError;
 use ::fmgr::boundary::RefPayload;

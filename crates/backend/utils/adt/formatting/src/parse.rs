@@ -6,8 +6,8 @@
 //! The only genuine external is `pg_mblen` (mbutils.c / wchar.c), routed through
 //! the `mbutils_seams::pg_mblen_range` slot.
 
-use types_error::{PgError, PgResult};
-use types_error::{ERRCODE_INVALID_DATETIME_FORMAT, ERRCODE_SYNTAX_ERROR};
+use ::types_error::{PgError, PgResult};
+use ::types_error::{ERRCODE_INVALID_DATETIME_FORMAT, ERRCODE_SYNTAX_ERROR};
 
 use crate::case::{index_seq_search, is_separator_char, suff_search};
 use crate::tables::*;

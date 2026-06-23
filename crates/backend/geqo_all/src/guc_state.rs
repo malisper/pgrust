@@ -87,7 +87,7 @@ fn set_geqo_seed(v: f64) {
 /// guc_tables slots (geqo_main.c owns the storage). Called once from
 /// [`crate::init_seams`] at single-threaded startup.
 pub fn install() {
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     vars::Geqo_effort.install(GucVarAccessors {
         get: get_geqo_effort,

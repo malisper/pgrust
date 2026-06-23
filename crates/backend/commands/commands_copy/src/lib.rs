@@ -28,16 +28,16 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_acl::acl::{CheckEnableRlsResult, ACL_INSERT, ACL_SELECT};
 use ::types_catalog::catalog::{
     ROLE_PG_EXECUTE_SERVER_PROGRAM, ROLE_PG_READ_SERVER_FILES, ROLE_PG_WRITE_SERVER_FILES,
 };
-use types_copy::{
+use ::types_copy::{
     CopyFormatOptions, CopyHeaderChoice, CopyLogVerbosityChoice, CopyOnErrorChoice,
 };
 use ::types_core::primitive::{AttrNumber, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::ddlnodes::{CopyStmt, DefElem};
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::nodelimit::LimitOption;
@@ -53,7 +53,7 @@ use ::define_seams::DefElemArg;
 use small1_seams as small1_s;
 
 // SQLSTATE constants.
-use types_error::{
+use ::types_error::{
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_COLUMN,

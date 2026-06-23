@@ -12,13 +12,13 @@
 //! the file has been parsed onward: the `head` list of `ConfigVariable`s is
 //! presented as a slice of [`ConfigItem`]s.
 
-use utils_error::{ereport, emit_error_report_for, message_level_is_interesting};
-use types_core::{TimestampTz, BOOTSTRAP_SUPERUSERID};
-use types_error::{
+use ::utils_error::{ereport, emit_error_report_for, message_level_is_interesting};
+use ::types_core::{TimestampTz, BOOTSTRAP_SUPERUSERID};
+use ::types_error::{
     ErrorLevel, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM, ERRCODE_CONFIG_FILE_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use types_guc::{
+use ::types_guc::{
     GucContext, PGC_BACKEND, PGC_POSTMASTER, PGC_SIGHUP, PGC_S_DEFAULT, PGC_S_DYNAMIC_DEFAULT,
     PGC_S_FILE,
 };
@@ -78,7 +78,7 @@ fn process_config_file_collect(
     elevel: ErrorLevel,
     mut out_items: Option<&mut Vec<ConfigItem>>,
 ) -> PgResult<bool> {
-    use guc_file::{ConfigVariable, ParseConfigFile};
+    use ::guc_file::{ConfigVariable, ParseConfigFile};
 
     // ConfigFileName (the `config_file` GUC string).
     let config_file_name = live::get_string("config_file").flatten().unwrap_or_default();

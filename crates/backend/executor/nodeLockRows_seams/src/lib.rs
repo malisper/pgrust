@@ -31,7 +31,7 @@ use ::types_error::PgResult;
 use ::nodes::execnodes::EStateData;
 use ::nodes::nodelockrows::{ExecAuxRowMarkData, ExecRowMark, LockRows, LockRowsStateData};
 use ::nodes::parsenodes::RTEKind;
-use types_tableam::{LockTupleMode, TM_FailureData, TM_Result};
+use ::types_tableam::{LockTupleMode, TM_FailureData, TM_Result};
 use ::types_tuple::heaptuple::ItemPointerData;
 
 /// The lock request `ExecLockRows` passes to `table_tuple_lock`, bundling the

@@ -17,17 +17,17 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 
 use ::utils_error::ereport;
 use ::types_error::ERROR;
-use types_core::{AttrNumber, Index, Oid};
+use ::types_core::{AttrNumber, Index, Oid};
 use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_GROUPING_ERROR, ERRCODE_INVALID_RECURSION,
     ERRCODE_STATEMENT_TOO_COMPLEX, ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_UNDEFINED_FUNCTION,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WINDOWING_ERROR,
 };
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::parsenodes::{RangeTblEntry, RTEKind};

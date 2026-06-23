@@ -6,7 +6,7 @@
 //! promotion, output decisions, context callbacks, and per-level recovery all
 //! behave exactly as a C ereport.
 
-use types_error::{ErrorField, ErrorLocation, ErrorLevel, PgError, PgResult, SqlState};
+use ::types_error::{ErrorField, ErrorLocation, ErrorLevel, PgError, PgResult, SqlState};
 
 use crate::errno;
 

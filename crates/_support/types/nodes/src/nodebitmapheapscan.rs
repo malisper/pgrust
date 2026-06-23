@@ -25,7 +25,7 @@
 
 use core::sync::atomic::Ordering;
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::condvar::ConditionVariable;
 use ::types_parallel::shared_dsm_object::{SharedRef, SharedSlice};
 use ::types_parallel::SharedDsmObject;
@@ -33,7 +33,7 @@ use ::rel::Relation;
 use ::types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64};
 use ::types_storage::Spinlock;
 use ::types_tableam::relscan::TableScanDesc;
-use tidbitmap::{dsa_pointer, TIDBitmap};
+use ::tidbitmap::{dsa_pointer, TIDBitmap};
 
 use crate::execexpr::ExprState;
 use crate::execnodes::ScanStateData;

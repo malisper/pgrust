@@ -13,7 +13,7 @@ extern crate alloc;
 use core::cell::RefCell;
 
 use ::types_core::primitive::{TransactionId, XLogRecPtr};
-use types_logical::{ReorderBufferHandle, SnapBuildHandle};
+use ::types_logical::{ReorderBufferHandle, SnapBuildHandle};
 
 use crate::{
     allocate_snapshot_builder, free_snapshot_builder, snap_build_commit_txn,

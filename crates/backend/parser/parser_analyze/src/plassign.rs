@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
-use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
+use ::types_error::{PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::ddlnodes::{CoercionContext, PLAssignStmt};
 use ::nodes::nodes::{CmdType, Node, NodePtr};

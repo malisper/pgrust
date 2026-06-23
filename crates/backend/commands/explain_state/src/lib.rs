@@ -45,15 +45,15 @@ use core::cell::RefCell;
 use ::utils_error::ereport;
 use ::mcx::Mcx;
 use ::types_cluster::ParseState;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERROR,
 };
-use types_explain::{ExplainFormat, ExplainSerializeOption, ExplainState, ExtensionStateHandle};
+use ::types_explain::{ExplainFormat, ExplainSerializeOption, ExplainState, ExtensionStateHandle};
 use ::parsenodes::DefElem;
 
-use define::{defGetBoolean, defGetString};
+use ::define::{defGetBoolean, defGetString};
 use explain_state_seams as seam;
-use explain_state_seams::{ExplainOptionHandler, ExplainValidateOptionsHook};
+use ::explain_state_seams::{ExplainOptionHandler, ExplainValidateOptionsHook};
 use ::small1_seams::parser_errposition;
 
 /// `pg_nextpower2_32(num)` (port/pg_bitutils.h) — round `num` up to the next

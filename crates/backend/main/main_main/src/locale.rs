@@ -1,8 +1,8 @@
 //! `init_locale` from `main.c`.
 
-use pg_locale_seams::{pg_perm_setlocale, LcCategory};
+use ::pg_locale_seams::{pg_perm_setlocale, LcCategory};
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult, FATAL};
+use ::types_error::{PgError, PgResult, FATAL};
 
 /// `init_locale(categoryname, category, locale)` (main.c): make the initial
 /// permanent setting for a locale category. If that fails (e.g. an invalid

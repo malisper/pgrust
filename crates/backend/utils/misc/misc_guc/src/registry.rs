@@ -14,15 +14,15 @@
 //! pointers); a hook installed by its owning subsystem is called through the
 //! slot, a hook the table leaves `None` is skipped, exactly as C does.
 
-use utils_error::{ereport, message_level_is_interesting};
-use types_error::{
+use ::utils_error::{ereport, message_level_is_interesting};
+use ::types_error::{
     ErrorLevel, PgError, PgResult, SqlState, DEBUG3, ERRCODE_CANT_CHANGE_RUNTIME_PARAM,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TRANSACTION_STATE, ERRCODE_UNDEFINED_OBJECT, ERROR, LOG, WARNING,
 };
-use types_acl::{AclResult, ACL_SET};
+use ::types_acl::{AclResult, ACL_SET};
 use ::types_core::Oid;
-use types_guc::{
+use ::types_guc::{
     GucContext, GucSource, GUC_ALLOW_IN_PARALLEL, GUC_IS_NAME, GUC_NO_RESET, GUC_UNIT, PGC_BACKEND,
     PGC_INTERNAL, PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET, PGC_SU_BACKEND, PGC_S_CLIENT,
     PGC_S_DATABASE, PGC_S_DATABASE_USER, PGC_S_DEFAULT, PGC_S_DYNAMIC_DEFAULT, PGC_S_FILE,
@@ -127,7 +127,7 @@ impl GucRegistry {
     /// `guc_malloc` failure as the project's OOM `PgError`.
     pub fn add_placeholder_variable(&mut self, name: &str) -> PgResult<usize> {
         use crate::model::{config_generic, config_string};
-        use types_guc::{config_group, config_type, GucContext};
+        use ::types_guc::{config_group, config_type, GucContext};
 
         // C sets gen->context = PGC_USERSET, group = CUSTOM_OPTIONS,
         // short_desc = "GUC placeholder variable",

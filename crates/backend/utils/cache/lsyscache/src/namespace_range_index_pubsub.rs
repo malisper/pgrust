@@ -18,9 +18,9 @@
 
 use namespace_seams as namespace_seams;
 use syscache_seams as syscache_seams;
-use mcx::{Mcx, PgString};
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT};
+use ::mcx::{Mcx, PgString};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT};
 
 /// `OidIsValid(oid)` (`c.h`).
 fn oid_is_valid(oid: Oid) -> bool {

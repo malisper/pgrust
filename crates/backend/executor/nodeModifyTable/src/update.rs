@@ -5,8 +5,8 @@
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
-use nodes::{EStateData, ModifyTableState, RriId, SlotId};
-use snapshot::{SnapshotData, SnapshotType};
+use ::nodes::{EStateData, ModifyTableState, RriId, SlotId};
+use ::snapshot::{SnapshotData, SnapshotType};
 use ::types_tableam::tableam::{
     LockWaitPolicy, TM_Result, TU_UpdateIndexes, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 };

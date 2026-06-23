@@ -32,22 +32,22 @@ extern crate std;
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use sink::{
+use ::sink::{
     bbsink_archive_contents, bbsink_begin_archive, bbsink_begin_backup,
     bbsink_forward_begin_manifest, bbsink_forward_end_archive, bbsink_forward_end_backup,
     bbsink_forward_end_manifest, bbsink_manifest_contents, Bbsink, BbsinkOps, BbsinkState,
 };
-use zstd_seams::{
+use ::zstd_seams::{
     self as seam, ZstdCParameter, ZstdCctxHandle, ZstdEndDirective, ZstdResetDirective,
     ZstdStreamOutcome,
 };
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use compression::{
+use ::compression::{
     PgCompressSpecification, PG_COMPRESSION_OPTION_LONG_DISTANCE, PG_COMPRESSION_OPTION_WORKERS,
 };
 use ::types_core::primitive::{Size, TimeLineID, XLogRecPtr, BLCKSZ};
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERROR,
 };
 

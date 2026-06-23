@@ -17,7 +17,7 @@
 //! `get_share_path(my_exec_path)` (`common/path.c`, already installed) exactly
 //! as `pg_tzdir` does for the tzdb, then read the file's lines.
 
-use misc_more2::{TzFileOpenError, TzFileResult};
+use ::misc_more2::{TzFileOpenError, TzFileResult};
 
 /// `MAXPGPATH` (`pg_config_manual.h`).
 const MAXPGPATH: usize = 1024;

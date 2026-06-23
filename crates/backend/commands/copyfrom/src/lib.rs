@@ -45,18 +45,18 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ::mcx::Mcx;
-use types_copy::{
+use ::types_copy::{
     AttrValue, CopyFileHandle, CopyGetDataResult, CopyLogVerbosityChoice, CopyOnErrorChoice,
     CopyParseOptions, CopyParseState, CopySource, EolType, INPUT_BUF_SIZE, RAW_BUF_SIZE,
 };
 use ::types_core::primitive::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum as RichDatum;
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
-use nodes::{RriId, SlotId};
+use ::nodes::{RriId, SlotId};
 use ::rel::Relation;
 
 use copyfromparse as parse;

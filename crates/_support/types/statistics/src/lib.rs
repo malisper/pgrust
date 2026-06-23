@@ -14,13 +14,13 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use ::mcx::Mcx;
-use types_core::{AttrNumber, Oid};
+use ::types_core::{AttrNumber, Oid};
 use ::types_tuple::pg_type::FormData_pg_type;
 // The canonical `'mcx` byte-lane value type (`ByVal(usize)` / `ByRef(PgVec<u8>)`).
 // Statistic values that may be pass-by-reference (text/numeric/varchar/…) must
 // live in this safe byte lane, NOT a bare `usize` word (which cannot carry the
 // referenced bytes and would dangle when copied into a temporary context).
-use types_tuple::{Datum, FormedTuple, TupleDesc};
+use ::types_tuple::{Datum, FormedTuple, TupleDesc};
 
 /// `STATISTIC_NUM_SLOTS` (`catalog/pg_statistic.h:127`): the number of
 /// statistic-kind slots in a `pg_statistic` row (and thus in [`VacAttrStats`]).

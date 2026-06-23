@@ -15,11 +15,11 @@
 //!
 //! The bare-word PGFunction registry (`fmgr_builtins[]` rows) is deferred.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::types_core::TransactionId;
 use ::types_tuple::Datum;
-use types_error::{PgResult, SoftErrorContext};
+use ::types_error::{PgResult, SoftErrorContext};
 use ::fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
 use ::stringinfo::StringInfo;
 

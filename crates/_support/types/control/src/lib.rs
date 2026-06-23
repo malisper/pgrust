@@ -8,7 +8,7 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use types_core::{
+use ::types_core::{
     pg_crc32c, pg_time_t, uint32, uint64, MultiXactId, MultiXactOffset, Oid, TimeLineID,
     TransactionId, XLogRecPtr,
 };

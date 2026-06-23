@@ -32,8 +32,8 @@
 use core::ffi::{c_char, c_int};
 
 use ::error_fgram::PgResult;
-use mmgr_fgram::{palloc0, MemoryContextScope, PgMemoryContext};
-use pg_ffi_fgram::{BitString, Boolean, Float, Integer, StringNode};
+use ::mmgr_fgram::{palloc0, MemoryContextScope, PgMemoryContext};
+use ::pg_ffi_fgram::{BitString, Boolean, Float, Integer, StringNode};
 
 /// A scope on the *current* PostgreSQL memory context, where `makeNode`
 /// allocates. The returned `'static` scope is sound here because every node it
@@ -99,8 +99,8 @@ pub fn makeBitString(str: *mut c_char) -> PgResult<*mut BitString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mmgr_fgram::{MemoryContextSwitchTo, OwnedMemoryContext, PgMemoryContext};
-    use pg_ffi_fgram::{T_BitString, T_Boolean, T_Float, T_Integer, T_String};
+    use ::mmgr_fgram::{MemoryContextSwitchTo, OwnedMemoryContext, PgMemoryContext};
+    use ::pg_ffi_fgram::{T_BitString, T_Boolean, T_Float, T_Integer, T_String};
 
     fn with_context<R>(f: impl FnOnce() -> R) -> R {
         let context = OwnedMemoryContext::alloc_set(

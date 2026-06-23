@@ -7,11 +7,11 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ptr::NonNull;
 
-use error_fgram::{PgError, PgResult};
-use mmgr_fgram::{
+use ::error_fgram::{PgError, PgResult};
+use ::mmgr_fgram::{
     palloc, pfree, GetMemoryChunkContext, MemoryContextAlloc, MemoryContextScope,
 };
-use pg_ffi_fgram::{
+use ::pg_ffi_fgram::{
     List, ListCell, NodeTag, Oid, Size, T_IntList, T_List, T_OidList, T_XidList, TransactionId,
 };
 
@@ -112,7 +112,7 @@ pub type XidList<'ctx> = PgList<'ctx, XidKind>;
 ///
 /// ```compile_fail
 /// use list_fgram::{lappend_int, IntList};
-/// use mmgr_fgram::{
+/// use ::mmgr_fgram::{
 ///     OwnedMemoryContext, PgMemoryContext, ALLOCSET_DEFAULT_INITSIZE,
 ///     ALLOCSET_DEFAULT_MAXSIZE, ALLOCSET_DEFAULT_MINSIZE,
 /// };
@@ -1059,7 +1059,7 @@ impl ListCellSliceExt for [ListCell] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mmgr_fgram::{
+    use ::mmgr_fgram::{
         OwnedMemoryContext, PgMemoryContext, ALLOCSET_DEFAULT_INITSIZE, ALLOCSET_DEFAULT_MAXSIZE,
         ALLOCSET_DEFAULT_MINSIZE,
     };

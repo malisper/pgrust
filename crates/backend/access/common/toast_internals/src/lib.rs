@@ -24,15 +24,15 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{vec_with_capacity_in, MemoryContext, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, MemoryContext, Mcx, PgVec};
 use ::types_core::primitive::{AttrNumber, OidIsValid};
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
-use rel::{Relation, RelationData};
-use snapshot::{SnapshotData, SnapshotType};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
+use ::rel::{Relation, RelationData};
+use ::snapshot::{SnapshotData, SnapshotType};
 use ::types_storage::lock::{AccessShareLock, LOCKMODE, NoLock, RowExclusiveLock};
 
-use heaptuple::{heap_form_tuple, Datum};
+use ::heaptuple::{heap_form_tuple, Datum};
 use ::scankey::ScanKeyInit;
 use ::indexam::index_insert;
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
@@ -60,7 +60,7 @@ const VARHDRSZ_EXTERNAL: usize = 2;
 /// sizeof(varatt_external)` (2 + 16).
 const TOAST_POINTER_SIZE: usize = VARHDRSZ_EXTERNAL + 16;
 
-use toast_compression::{
+use ::toast_compression::{
     lz4_compress_datum, pglz_compress_datum, TOAST_INVALID_COMPRESSION_ID,
     TOAST_LZ4_COMPRESSION, TOAST_LZ4_COMPRESSION_ID, TOAST_PGLZ_COMPRESSION,
     TOAST_PGLZ_COMPRESSION_ID, ToastCompressionId,

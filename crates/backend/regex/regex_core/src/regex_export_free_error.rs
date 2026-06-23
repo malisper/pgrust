@@ -22,10 +22,10 @@ use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 
-use mcx::{slice_in, Mcx, MemoryContext};
+use ::mcx::{slice_in, Mcx, MemoryContext};
 use ::types_core::PgWChar;
 use ::types_error::PgResult;
-use regex::{
+use ::regex::{
     RegMatch, RegcompResult, RegexCompiled, RegexFailure, RegexecResult, RegprefixResult,
 };
 

@@ -9,13 +9,13 @@
 //! `maplen` is `attnums.len()`. A C `NULL` return ("no runtime conversion
 //! needed") is `Ok(None)`.
 
-use mcx::{vec_with_capacity_in, alloc_in, Mcx, PgBox};
+use ::mcx::{vec_with_capacity_in, alloc_in, Mcx, PgBox};
 use ::types_core::primitive::AttrNumber;
-use types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
+use ::types_error::{PgError, PgResult, ERRCODE_DATATYPE_MISMATCH};
 use ::types_tuple::attmap::AttrMap;
 use ::types_tuple::heaptuple::{NameData, TupleDescData};
 
-use adt_format_type::{format_type_be, format_type_with_typemod};
+use ::adt_format_type::{format_type_be, format_type_with_typemod};
 
 /// `make_attrmap(maplen)` (attmap.c) — allocate an attribute map in `mcx`
 /// (C: `palloc0` of the struct + a `maplen`-element `AttrNumber[]`). The

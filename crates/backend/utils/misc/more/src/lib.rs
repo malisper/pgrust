@@ -26,7 +26,7 @@ pub use superuser::*;
 
 /// Install every seam this crate owns. One installer per seam; see AGENTS.md.
 pub fn init_seams() {
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     // Register this crate's SQL-callable fmgr builtins (rls.c) into the
     // fmgr-core builtin table (C: `fmgr_builtins[]`).

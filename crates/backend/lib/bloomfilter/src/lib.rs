@@ -61,7 +61,7 @@ use alloc::vec::Vec;
 
 use ::bloomfilter_seams::BloomFilter;
 use hashfn_seams as hashfn;
-use types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
+use ::types_error::{PgError, PgResult, ERRCODE_OUT_OF_MEMORY};
 
 /// `MAX_HASH_FUNCS` (bloomfilter.c).
 const MAX_HASH_FUNCS: usize = 10;

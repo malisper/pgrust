@@ -14,9 +14,9 @@ use alloc::string::String;
 use core::cell::Cell;
 use core::ffi::c_char;
 
-use utils_error::{elog, ereport};
-use mcx::{Mcx, PgString};
-use types_error::{
+use ::utils_error::{elog, ereport};
+use ::mcx::{Mcx, PgString};
+use ::types_error::{
     ErrorLocation, PgResult, DEBUG3, ERRCODE_INVALID_PARAMETER_VALUE, FATAL, WARNING,
 };
 

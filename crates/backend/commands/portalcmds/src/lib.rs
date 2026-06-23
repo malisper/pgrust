@@ -12,7 +12,7 @@
 
 #![allow(non_snake_case)]
 
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_CURSOR_NAME,
     ERRCODE_UNDEFINED_CURSOR, ERROR,
 };
@@ -24,7 +24,7 @@ use ::nodes::portalcmds::{
 };
 use ::nodes::nodes::{CmdType, Node};
 use ::nodes::parsestmt::{DestReceiverHandle, ParseState as CanonParseState};
-use portal::{
+use ::portal::{
     CommandTag, FetchDirection, Portal, QueryCompletion, CMDTAG_FETCH, CMDTAG_MOVE, PORTAL_FAILED,
     PORTAL_ONE_SELECT, PORTAL_READY,
 };

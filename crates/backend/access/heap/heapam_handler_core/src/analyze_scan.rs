@@ -29,7 +29,7 @@ use ::types_tuple::heaptuple::FormedTuple;
 
 use heapam as heapam;
 use heapam_visibility as visibility;
-use page::{
+use ::page::{
     ItemIdGetLength, ItemIdIsDead, ItemIdIsNormal, PageGetItem, PageGetItemId,
     PageGetMaxOffsetNumber, PageRef,
 };

@@ -13,19 +13,19 @@
 use std::cell::RefCell;
 use std::ptr;
 
-use bloomfilter_seams::{self as bloom_seams, BloomFilter};
+use ::bloomfilter_seams::{self as bloom_seams, BloomFilter};
 use inval_seams as inval_seams;
 use syscache_seams as syscache_seams;
-use miscinit::{GetSessionUserId, GetUserId, GetUserNameFromId};
+use ::miscinit::{GetSessionUserId, GetUserId, GetUserNameFromId};
 use miscinit_seams as miscinit_seams;
 use init_small_seams as globals_seams;
 use superuser_seams as superuser_seams;
-use mcx::{Mcx, MemoryContext};
-use types_acl::{
+use ::mcx::{Mcx, MemoryContext};
+use ::types_acl::{
     AclItem, AclMode, RoleRecurseType, ACL_GRANT_OPTION_FOR, ACL_ID_PUBLIC, ACL_NO_RIGHTS,
     ACLMASK_ALL, ROLERECURSE_MEMBERS, ROLERECURSE_PRIVS, ROLERECURSE_SETROLE,
 };
-use types_core::{InvalidOid, Oid, OidIsValid, ROLE_PG_DATABASE_OWNER};
+use ::types_core::{InvalidOid, Oid, OidIsValid, ROLE_PG_DATABASE_OWNER};
 // Datum-unification: the syscache invalidation callback `arg` is a plain
 // machine word that C passes as `(Datum) 0` and hands back to the callback
 // verbatim; it carries no deformed value. It therefore stays the audited
@@ -34,7 +34,7 @@ use types_core::{InvalidOid, Oid, OidIsValid, ROLE_PG_DATABASE_OWNER};
 // `cache_register_syscache_callback` seam `arg` type — NOT the canonical
 // `types_tuple::Datum<'mcx>` enum.
 use ::datum::Datum as ScalarWord;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_RESERVED_NAME,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
@@ -42,7 +42,7 @@ use ::nodes::parsenodes::{
     RoleSpec, ROLESPEC_CSTRING, ROLESPEC_CURRENT_ROLE, ROLESPEC_CURRENT_USER, ROLESPEC_PUBLIC,
     ROLESPEC_SESSION_USER,
 };
-use types_syscache::{AUTHMEMROLEMEM, AUTHOID, DATABASEOID};
+use ::types_syscache::{AUTHMEMROLEMEM, AUTHOID, DATABASEOID};
 
 use crate::acl_ops::aclmask_direct;
 

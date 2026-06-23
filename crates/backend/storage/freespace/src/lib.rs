@@ -41,8 +41,8 @@ use alloc::string::String;
 
 use ::utils_error::elog;
 
-use types_error::{PgResult, DEBUG1, ERROR};
-use fsm::{
+use ::types_error::{PgResult, DEBUG1, ERROR};
+use ::fsm::{
     FSMPageData, LeafNodesPerPage, NodesPerPage, NonLeafNodesPerPage, SlotsPerFSMPage,
 };
 use ::types_core::primitive::{
@@ -50,7 +50,7 @@ use ::types_core::primitive::{
 };
 use ::rel::Relation;
 use ::types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK};
-use types_storage::{Buffer, BufferIsValid, InvalidBuffer, RelFileLocator};
+use ::types_storage::{Buffer, BufferIsValid, InvalidBuffer, RelFileLocator};
 
 use bufmgr_seams as bufmgr;
 use smgr_seams as smgr;

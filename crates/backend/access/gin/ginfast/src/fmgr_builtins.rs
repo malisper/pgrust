@@ -15,7 +15,7 @@
 //! exactly from `pg_proc.dat` (`provolatile => 'v'`, strict, not retset).
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `gin_clean_pending_list(regclass)` (OID 3789) → int8.
 fn fc_gin_clean_pending_list(

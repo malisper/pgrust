@@ -13,7 +13,7 @@ use super::*;
 
 use std::sync::{Mutex, MutexGuard, Once};
 
-use parsenodes::{Integer, Float, StringNode};
+use ::parsenodes::{Integer, Float, StringNode};
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 

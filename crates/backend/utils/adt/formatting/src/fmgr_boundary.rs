@@ -15,17 +15,17 @@
 //! C `PG_RETURN_NULL()` arm (a genuine SQL NULL, not an error).
 
 use ::adt_numeric::convert::{make_result, set_var_from_num};
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
-use fmgr::{FmgrArg, RefPayload};
+use ::types_error::{PgError, PgResult};
+use ::fmgr::{FmgrArg, RefPayload};
 
 use crate::dch_entry::{interval_to_char, timestamp_to_char, timestamptz_to_char};
 use crate::num_entry::{
     float4_to_char, float8_to_char, int4_to_char, int8_to_char, numeric_to_char,
     numeric_to_number,
 };
-use types_datetime::{Interval, Timestamp};
+use ::types_datetime::{Interval, Timestamp};
 
 // ===========================================================================
 // Built-in function Oids (fmgroids.h; pg_proc.dat 1772-1777).

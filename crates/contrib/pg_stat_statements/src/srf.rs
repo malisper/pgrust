@@ -42,7 +42,7 @@ pub(crate) fn pg_stat_statements_internal(
     showtext: bool,
 ) -> PgResult<()> {
     use ::utils_error::ereport;
-    use types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
+    use ::types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
 
     let userid = miscinit::GetUserId();
     let is_allowed_role =
@@ -319,7 +319,7 @@ pub(crate) fn pg_stat_statements_info(
     _fcinfo: &mut FunctionCallInfoBaseData,
 ) -> PgResult<Vec<u8>> {
     use ::utils_error::ereport;
-    use types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
+    use ::types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
 
     if !shmem::is_initialized() {
         return Err(ereport(ERROR)

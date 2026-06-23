@@ -31,10 +31,10 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 
-use types_core::{AttrNumber, InvalidAttrNumber, Oid, OidIsValid};
-use types_error::{
+use ::types_core::{AttrNumber, InvalidAttrNumber, Oid, OidIsValid};
+use ::types_error::{
     PgResult, ERRCODE_AMBIGUOUS_COLUMN, ERRCODE_CANNOT_COERCE, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_COLUMN, ERROR,

@@ -16,7 +16,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::pg_publication::{
     Publication, PublicationPartOpt, PublicationTableRow, PublishGencolsType,

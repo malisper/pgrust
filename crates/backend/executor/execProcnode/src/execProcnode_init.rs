@@ -6,10 +6,10 @@
 //! `ExecSetExecProcNode` (installs the `ExecProcNode` callback wrapper).
 
 use stack_depth_seams as stack_depth;
-use mcx::{alloc_in, Mcx, PgBox, PgVec};
-use types_error::{PgError, PgResult};
+use ::mcx::{alloc_in, Mcx, PgBox, PgVec};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::{ntag, Node};
-use nodes::{EStateData, ExecProcNodeMtd, PlanStateNode, SubPlanState};
+use ::nodes::{EStateData, ExecProcNodeMtd, PlanStateNode, SubPlanState};
 
 use crate::execProcnode_run_end::exec_proc_node_first;
 

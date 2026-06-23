@@ -25,29 +25,29 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 
-use slru::{
+use ::slru::{
     check_slru_buffers, SimpleLruAutotuneBuffers, SimpleLruDoesPhysicalPageExist,
     SimpleLruGetBankLock, SimpleLruInit, SimpleLruReadPage, SimpleLruReadPage_ReadOnly,
     SimpleLruShmemSize, SimpleLruTruncate, SimpleLruWriteAll, SimpleLruWritePage,
     SimpleLruZeroPage, SlruCtlData, SlruPagePrecedesUnitTests, SlruScanDirCbDeleteAll,
     SlruScanDirCbReportPresence, SlruScanDirectory, SlruSyncFileTag, SLRU_MAX_ALLOWED_BUFFERS,
 };
-use transam::{
+use ::transam::{
     TransactionIdIsNormal, TransactionIdIsValid, TransactionIdPrecedes,
 };
-use lwlock::{LWLockAcquire, LWLockRelease};
-use types_storage::{LW_EXCLUSIVE, LW_SHARED};
+use ::lwlock::{LWLockAcquire, LWLockRelease};
+use ::types_storage::{LW_EXCLUSIVE, LW_SHARED};
 use ::utils_error::errno::current_errno;
-use utils_error::{ereport, PgError, PgResult};
+use ::utils_error::{ereport, PgError, PgResult};
 
-use types_core::{
+use ::types_core::{
     FirstNormalTransactionId, InvalidRepOriginId, InvalidTransactionId, ProcNumber, RepOriginId,
     Size, TimestampTz, TransactionId, BLCKSZ,
 };
-use types_error::{ERROR, PANIC};
-use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
+use ::types_error::{ERROR, PANIC};
+use ::types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 use ::types_storage::sync::SyncRequestHandler;
-use types_storage::{LWTRANCHE_COMMITTS_BUFFER, LWTRANCHE_COMMITTS_SLRU};
+use ::types_storage::{LWTRANCHE_COMMITTS_BUFFER, LWTRANCHE_COMMITTS_SLRU};
 
 use varsup_seams as varsup;
 use ::guc_tables::vars;
@@ -964,7 +964,7 @@ pub fn init_seams() {
 
     // GUC variable accessors (commit_ts.c owns these `conf->variable`
     // integers/bool; there is no separate global beyond the GUC value).
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
     vars::commit_timestamp_buffers.install(GucVarAccessors {
         get: || COMMIT_TIMESTAMP_BUFFERS.with(core::cell::Cell::get),
         set: |v| COMMIT_TIMESTAMP_BUFFERS.with(|c| c.set(v)),

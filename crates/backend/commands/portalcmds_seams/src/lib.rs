@@ -8,7 +8,7 @@
 use ::types_error::PgResult;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::portalcmds::{DeclareCursorStmt, FetchStmt, ParamListInfo, ParseState};
-use portal::{Portal, QueryCompletion};
+use ::portal::{Portal, QueryCompletion};
 
 seam_core::seam!(
     /// `PerformCursorOpen(pstate, cstmt, params, isTopLevel)` — execute SQL

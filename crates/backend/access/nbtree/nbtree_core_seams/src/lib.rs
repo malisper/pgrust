@@ -14,10 +14,10 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{BlockNumber, OffsetNumber};
 use ::types_error::PgResult;
-use types_nbtree::{
+use ::types_nbtree::{
     BTCycleId, BTScanInsert, BTScanOpaqueData, BTStack, BTVacState, BTVacuumPosting,
     IndexUniqueCheck, TmIndexDeleteOp,
 };

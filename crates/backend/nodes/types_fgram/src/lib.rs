@@ -66,7 +66,7 @@
 
 use core::ffi::{c_char, c_int};
 
-use pg_ffi_fgram::{Bitmapset, List, NodeTag};
+use ::pg_ffi_fgram::{Bitmapset, List, NodeTag};
 
 pub mod execnodes;
 pub mod node_tags;
@@ -79,7 +79,7 @@ pub mod primnodes;
 
 // Reuse the value nodes and shared containers from the FFI crate; never
 // redefine `NodeTag`, `List`, `Bitmapset`, or the value nodes here.
-pub use pg_ffi_fgram::{
+pub use ::pg_ffi_fgram::{
     BitString, Boolean, Float, Integer, Node, NodeTag as NodeTagType, StringNode,
 };
 

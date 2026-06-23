@@ -115,7 +115,7 @@ fn pull_var_clause_collects_vars() {
 #[test]
 fn make_pathtarget_from_tlist_carries_exprs_and_sortgrouprefs() {
     use crate::tlist::make_pathtarget_from_tlist;
-    use pathnodes::{PlannerInfo, TargetEntryNode};
+    use ::pathnodes::{PlannerInfo, TargetEntryNode};
 
     let mut root = PlannerInfo::default();
 

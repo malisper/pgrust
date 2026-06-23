@@ -12,9 +12,9 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
-use regex::{RegcompResult, REG_ADVANCED, REG_NOSUB};
+use ::regex::{RegcompResult, REG_ADVANCED, REG_NOSUB};
 
 use crate::{
     atoi, bcmp, bstrchr, bytes_lossy, config_file_error, elog_internal, findchar, findchar2,

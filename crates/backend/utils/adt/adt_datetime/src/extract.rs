@@ -20,15 +20,15 @@ use ::mcx::Mcx;
 use ::adt_numeric::kernel_transcendental::int64_to_numericvar;
 use ::adt_numeric::kernel_var::{add_var, div_var, round_var, select_div_scale, sub_var};
 use ::types_numeric::var::NumericVar;
-use types_datetime::{
+use ::types_datetime::{
     pg_itm, Interval, DAYS_PER_MONTH, DTK_CENTURY, DTK_DAY, DTK_DECADE, DTK_DOW, DTK_DOY, DTK_EPOCH,
     DTK_HOUR, DTK_ISODOW, DTK_ISOYEAR, DTK_JULIAN, DTK_MICROSEC, DTK_MILLENNIUM, DTK_MILLISEC,
     DTK_MINUTE, DTK_MONTH, DTK_QUARTER, DTK_SECOND, DTK_TZ, DTK_TZ_HOUR, DTK_TZ_MINUTE, DTK_WEEK,
     DTK_YEAR, MINS_PER_HOUR, MONTHS_PER_YEAR, RESERV, SECS_PER_DAY, SECS_PER_HOUR, SECS_PER_MINUTE,
     UNITS, UNKNOWN_FIELD,
 };
-use types_datetime::{fsec_t, Timestamp, TimestampTz};
-use types_error::{PgError, PgResult};
+use ::types_datetime::{fsec_t, Timestamp, TimestampTz};
+use ::types_error::{PgError, PgResult};
 
 use crate::calendar::{date2j, j2day};
 use crate::decode::{DecodeSpecial, DecodeUnits};
@@ -984,7 +984,7 @@ mod tests {
         assert_eq!(crate::interval::interval_out(&r), "1 day 04:00:00");
     }
 
-    use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE};
+    use ::types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE};
 
     fn inf_interval() -> Interval {
         Interval {

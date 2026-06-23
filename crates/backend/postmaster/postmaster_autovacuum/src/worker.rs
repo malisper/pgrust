@@ -5,10 +5,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use utils_error::{elog, PgResult};
-use types_error::{LOG, WARNING};
+use ::utils_error::{elog, PgResult};
+use ::types_error::{LOG, WARNING};
 
-use types_core::{InvalidOid, Oid};
+use ::types_core::{InvalidOid, Oid};
 use ::types_reloptions::AutoVacOpts;
 use ::types_vacuum::vacuum::VACOPT_VACUUM;
 

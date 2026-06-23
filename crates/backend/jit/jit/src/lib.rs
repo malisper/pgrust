@@ -25,7 +25,7 @@ use std::cell::{Cell, RefCell};
 
 use ::mcx::Mcx;
 use ::datum::Datum;
-use types_error::{PgResult, DEBUG1};
+use ::types_error::{PgResult, DEBUG1};
 use ::execparallel::JitInstrumentation;
 use ::nodes::execexpr::ExprState;
 
@@ -259,7 +259,7 @@ pub fn init_seams() {
 
     fmgr_builtins::register_jit_builtins();
 
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     vars::jit_enabled.install(GucVarAccessors {
         get: || JIT_ENABLED.with(Cell::get),

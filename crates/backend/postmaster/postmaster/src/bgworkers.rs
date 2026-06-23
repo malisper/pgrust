@@ -14,13 +14,13 @@
 #![allow(non_snake_case)]
 
 use ::launch_backend::postmaster_child_launch;
-use pmchild::{
+use ::pmchild::{
     AssignPostmasterChildSlot, ActiveChildListSnapshot, MarkActiveChildBgworkerNotify,
     ReleasePostmasterChildSlot, SetActiveChildBgworkerInfo, SetActiveChildBkendType,
     SetActiveChildPid,
 };
-use utils_error::{ereport};
-use types_error::{DEBUG1, LOG};
+use ::utils_error::{ereport};
+use ::types_error::{DEBUG1, LOG};
 use ::types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED;
 use ::types_startup::StartupData;
 

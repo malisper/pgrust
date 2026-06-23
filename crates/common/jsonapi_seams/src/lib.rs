@@ -7,8 +7,8 @@
 //! the parser through these. The owning unit installs them from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
-use types_error::{PgResult, SoftErrorContext};
+use ::types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
+use ::types_error::{PgResult, SoftErrorContext};
 
 extern crate alloc;
 use alloc::vec::Vec;

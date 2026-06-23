@@ -10,7 +10,7 @@ use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::Oid;
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
-use types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP};
+use ::types_rangetypes::{MultirangeTypeP, RangeBound, RangeTypeP};
 use types_tuple::heaptuple::Datum as DatumV;
 
 seam_core::seam!(

@@ -46,7 +46,7 @@ pub mod test_bringup;
 /// Install this crate's implementations into the seam crates it owns, plus
 /// its GUC option array and storage variables into the GUC tables' slots.
 pub fn init_seams() {
-    use guc_tables::{option_sets, vars, GucVarAccessors};
+    use ::guc_tables::{option_sets, vars, GucVarAccessors};
 
     dsm_core_seams::dsm_detach_all::set(|| {
         dsm::dsm_detach_all().expect("dsm_detach_all failed")

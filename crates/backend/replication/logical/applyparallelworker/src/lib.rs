@@ -35,15 +35,15 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 
-use utils_error::{ereport, PgError, PgResult};
-use applyparallel::{
+use ::utils_error::{ereport, PgError, PgResult};
+use ::applyparallel::{
     DsmSetupResult, FileSet, ParallelTransState, PartialFileSetState, ShmMqResult,
 };
-use types_core::{
+use ::types_core::{
     InvalidOid, InvalidTransactionId, InvalidXLogRecPtr, Oid, Size, TimestampTz, TransactionId,
     XLogRecPtr, INVALID_PROC_NUMBER,
 };
-use types_error::{ErrorLocation, DEBUG1, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, LOG};
+use ::types_error::{ErrorLocation, DEBUG1, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, LOG};
 use ::types_guc::PGC_SIGHUP;
 use ::types_pgstat::wait_event::{
     WAIT_EVENT_LOGICAL_APPLY_SEND_DATA, WAIT_EVENT_LOGICAL_PARALLEL_APPLY_MAIN,

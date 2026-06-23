@@ -21,9 +21,9 @@ use std::cell::Cell;
 use std::ptr::NonNull;
 
 use ::lwlock::LWLockAcquireMain;
-use s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
-use utils_error::{elog, ereport};
-use funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
+use ::s_lock::{s_init_lock, s_lock_macro, s_unlock, Spinlock};
+use ::utils_error::{elog, ereport};
+use ::funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
 use dynahash_seams as dynahash;
 use ::mcx::Mcx;
 use ::types_core::Size;
@@ -35,7 +35,7 @@ use ::types_core::Size;
 // canonical: `ByVal` ints (the by-value arm carries a plain `usize` word) and
 // `text` columns built via the by-reference `cstring_to_text_v` seam (a
 // `Datum::ByRef`). No bare-word `datum::Datum` survives here.
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, DEBUG1, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
 use ::hash::hsearch::{
@@ -43,7 +43,7 @@ use ::hash::hsearch::{
     HASH_STRINGS, HTAB,
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use types_storage::{
+use ::types_storage::{
     HugePagesStatus, PGShmemHeader, LW_EXCLUSIVE, LW_SHARED, SHMEM_INDEX_LOCK,
 };
 

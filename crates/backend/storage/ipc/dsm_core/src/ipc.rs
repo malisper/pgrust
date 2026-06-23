@@ -9,13 +9,13 @@
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use utils_error::{config, elog, ereport};
+use ::utils_error::{config, elog, ereport};
 // The exit-callback `arg` is the canonical unified `Datum` (Datum-unification);
 // the `on_proc_exit`/`on_shmem_exit`/`before_shmem_exit` seam contract carries
 // `::types_tuple::Datum<'static>`. It is the machine word the C `Datum arg`
 // holds, stored by value in the registration list for the process lifetime.
 use ::types_tuple::Datum;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, DEBUG3, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, FATAL, PANIC,
 };
 

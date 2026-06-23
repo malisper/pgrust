@@ -17,7 +17,7 @@
 use ::mcx::Mcx;
 use ::datum::Datum;
 use ::types_error::PgResult;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use ::types_ri_triggers::TriggerDataRef;
 
 use crate::triggers;

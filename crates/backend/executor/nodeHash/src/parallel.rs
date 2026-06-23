@@ -16,9 +16,9 @@
 //! resolved `pg_atomic_uint64` word, mirroring C.
 
 use ::mcx::Mcx;
-use types_core::{Size, uint32};
+use ::types_core::{Size, uint32};
 use ::types_error::PgResult;
-use execparallel::{dsa_pointer_is_valid, DsaPointer, INVALID_DSA_POINTER};
+use ::execparallel::{dsa_pointer_is_valid, DsaPointer, INVALID_DSA_POINTER};
 use ::nodes::nodehash::{
     HashChunkIdx, HashJoinState, HashJoinTableData, HashTupleIdx, HashTupleRef, ParallelHashGrowth,
     ParallelHashJoinBatch, ParallelHashJoinState, PHJ_BUILD_HASH_INNER, PHJ_GROW_BATCHES_DECIDE,
@@ -46,7 +46,7 @@ use barrier_seams as barrier;
 use lwlock_seams as lwlock;
 use dsa_seams as dsa;
 use sort_storage_seams as sts;
-use types_storage::{pg_atomic_uint64, LWLockMode};
+use ::types_storage::{pg_atomic_uint64, LWLockMode};
 
 use crate::{HASH_CHUNK_HEADER_SIZE, HJTUPLE_OVERHEAD, MAXALIGN, MaxAllocSize};
 use ::nodes::nodehash::{HASH_CHUNK_SIZE, HASH_CHUNK_THRESHOLD};

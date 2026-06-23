@@ -38,7 +38,7 @@
 
 use core::cell::Cell;
 use core::cell::RefCell;
-use mcx::{Mcx, MemoryContext, TreeStats};
+use ::mcx::{Mcx, MemoryContext, TreeStats};
 
 thread_local! {
     /// This process's `TopMemoryContext` (`mcxt.c`). Leaked so its handle is

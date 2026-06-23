@@ -6,7 +6,7 @@
 
 #![allow(non_snake_case)]
 
-use pmsignal::{QuitSignalReason, SetQuitSignalReason};
+use ::pmsignal::{QuitSignalReason, SetQuitSignalReason};
 use ::types_error::LOG;
 use ::types_startup::CacState;
 use ::types_core::init::BackendType;

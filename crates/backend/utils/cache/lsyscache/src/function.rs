@@ -11,9 +11,9 @@
 //! turns that miss into the C `elog(ERROR, "cache lookup failed for function
 //! %u")` and projects the field(s) the C function reads out of `GETSTRUCT(tp)`.
 
-use mcx::{Mcx, MemoryContext, PgString, PgVec};
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 
 use syscache_seams as syscache_seam;
 

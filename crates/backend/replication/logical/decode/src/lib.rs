@@ -44,12 +44,12 @@
 #![allow(clippy::too_many_arguments)]
 
 use ::types_core::primitive::{Oid, RepOriginId, TransactionId, XLogRecPtr};
-use utils_error::{ereport, PgError, PgResult};
-use types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
-use types_logical::{LogicalDecodingContext, XLogReaderHandle};
+use ::utils_error::{ereport, PgError, PgResult};
+use ::types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
+use ::types_logical::{LogicalDecodingContext, XLogReaderHandle};
 use ::types_storage::sinval::{SharedInvalidationMessage, SharedInvalMessages};
 use ::wal::rmgr::XLogRecordBuffer;
-use wal::{XLOG_LOGICAL_MESSAGE, XLR_INFO_MASK};
+use ::wal::{XLOG_LOGICAL_MESSAGE, XLR_INFO_MASK};
 use ::wal::rmgrdesc::{xl_logical_message, xl_parameter_change};
 use ::wal::xact::{
     XACT_XINFO_HAS_ORIGIN, XLOG_XACT_ABORT, XLOG_XACT_ABORT_PREPARED, XLOG_XACT_ASSIGNMENT,
@@ -67,7 +67,7 @@ use ::xlog_records::heapam_xlog::{
 };
 use ::xlog_records::standbydefs::xl_running_xacts;
 
-use xactdesc::{
+use ::xactdesc::{
     parse_abort_record, parse_commit_record, parse_prepare_record, ParsedCommitAbort, ParsedPrepare,
 };
 use ::rmgr::GetRmgr;
@@ -75,7 +75,7 @@ use ::rmgr::GetRmgr;
 use decode_seams as decode_seam;
 use logical_seams as logical_seam;
 use reorderbuffer_seams as reorder;
-use reorderbuffer_seams::{DecodedChangeKind, DecodedTuple};
+use ::reorderbuffer_seams::{DecodedChangeKind, DecodedTuple};
 use logical_snapbuild_seams as snapbuild;
 use xlogreader_seams as rt;
 

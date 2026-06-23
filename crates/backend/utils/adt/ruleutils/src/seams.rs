@@ -40,7 +40,7 @@ fn set_quote_all_identifiers(value: bool) {
 }
 
 pub fn init_seams() {
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     ruleutils_seams::select_rtable_names_for_explain::set(
         crate::select_rtable_names_for_explain,

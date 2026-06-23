@@ -12,7 +12,7 @@
 
 use core::ffi::{c_int, c_void};
 
-use pg_ffi_fgram::{AttrNumber, ExprState, List, MemoryContext, NodeTag, Oid};
+use ::pg_ffi_fgram::{AttrNumber, ExprState, List, MemoryContext, NodeTag, Oid};
 
 use crate::pathnodes::INDEX_MAX_KEYS;
 

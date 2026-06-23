@@ -27,7 +27,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{Mcx, MemoryContext, PgBox};
+use ::mcx::{Mcx, MemoryContext, PgBox};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;
@@ -35,7 +35,7 @@ use ::nodes::execexpr::ExprState;
 use ::nodes::execnodes::{PlanStateData, SlotId};
 use ::nodes::nodeagg::{TupleHashEntryData, TupleHashIterator, TupleHashTable};
 use ::nodes::planstate::PlanStateNode;
-use nodes::{EStateData, TupleSlotKind};
+use ::nodes::{EStateData, TupleSlotKind};
 
 seam_core::seam!(
     /// `TupleHashEntrySize()` (executor.h) — `sizeof(TupleHashEntryData)`, the

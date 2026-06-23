@@ -15,14 +15,14 @@ use lwlock_seams as lwlock;
 use lmgr_proc_seams as seams;
 use ::types_core::InvalidLocalTransactionId;
 use ::types_core::xact::XidStatus;
-use types_core::{LocalTransactionId, Oid, ProcNumber, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::{LocalTransactionId, Oid, ProcNumber, TimestampTz, TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
 use ::types_storage::latch::LatchHandle;
 use ::types_storage::storage::{
     LWLockWaitState, ProcWaitStatus, VirtualTransactionId, DELAY_CHKPT_COMPLETE, DELAY_CHKPT_START,
     PGPROC_MAX_CACHED_SUBXIDS,
 };
-use types_storage::{proclist_node, LWLockMode};
+use ::types_storage::{proclist_node, LWLockMode};
 
 use crate::proc_shmem::{with_my_proc, with_my_proc_ref, with_proc_by_number, with_proc_global};
 use ::types_storage::lock::VirtualXactExamineOutcome;

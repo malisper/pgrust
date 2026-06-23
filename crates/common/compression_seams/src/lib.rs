@@ -7,7 +7,7 @@
 //! `init_seams()` once it lands; until then a call panics loudly
 //! (mirror-PG-and-panic). The shared types live in `types-compression`.
 
-use compression::{PgCompressAlgorithm, PgCompressSpecification};
+use ::compression::{PgCompressAlgorithm, PgCompressSpecification};
 
 seam_core::seam!(
     /// `parse_compress_algorithm(name, &algorithm)` (compression.c) — map a

@@ -20,7 +20,7 @@
 
 use core::any::Any;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::{BlockNumber, ForkNumber};
 use ::types_error::PgResult;
 use ::rel::Relation;

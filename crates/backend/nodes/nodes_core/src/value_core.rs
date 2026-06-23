@@ -18,7 +18,7 @@
 
 #![allow(unused)]
 
-use parsenodes::{BitString, Boolean, Float, Integer, Node, StringNode};
+use ::parsenodes::{BitString, Boolean, Float, Integer, Node, StringNode};
 
 // makeInteger / makeFloat / makeBoolean / makeString / makeBitString and the
 // newNode core land here; signatures are total (no Mcx, no PgResult) per the

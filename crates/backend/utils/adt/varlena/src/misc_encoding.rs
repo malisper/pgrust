@@ -27,9 +27,9 @@
 //! arithmetic with no external state, so it is ported here 1:1 (per the
 //! DESIGN HINT) rather than routed through a seam.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::PgWChar;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR,
 };
 use ::types_wchar::encoding::PG_UTF8;

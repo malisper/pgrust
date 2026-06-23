@@ -17,7 +17,7 @@
 use std::cell::Cell;
 
 use ::types_core::PGINVALID_SOCKET;
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::types_storage::waiteventset::{
     WaitEvent, WaitEventSetHandle, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_CLOSED,
     WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE,

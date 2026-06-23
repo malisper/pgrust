@@ -115,7 +115,7 @@ use std::sync::Mutex;
 
 use ::condvar::ConditionVariable;
 use ::types_core::primitive::Size;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_resowner::ResourceOwner;
 use ::types_storage::storage::NUM_AUXILIARY_PROCS;
 
@@ -1155,7 +1155,7 @@ fn oom_error(where_: &str) -> PgError {
 /// entry points ipci.c/postinit reach) and the `io_method`/`io_max_concurrency`
 /// GUC variables + hooks this unit owns (mirroring aio.c).
 pub fn init_seams() {
-    use guc_tables::{hooks, option_sets, vars, GucVarAccessors};
+    use ::guc_tables::{hooks, option_sets, vars, GucVarAccessors};
 
     aio_seams_2::aio_shmem_size::set(AioShmemSize);
     aio_seams_2::aio_shmem_init::set(AioShmemInit);

@@ -37,7 +37,7 @@ use ::types_core::primitive::{AttrNumber, BlockNumber, Index, Oid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, NullTest, Var};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     ForeignKeyOptInfo, IndexOptInfo, NodeId, PlannerInfo, RelId, Relids, StatisticExtInfo,
     TargetEntryNode, CMD_DELETE, CMD_INSERT, CMD_MERGE, CMD_UPDATE,
 };
@@ -104,7 +104,7 @@ const MaxAllocSize: i64 = 0x3fffffff;
 const NoLock: i32 = 0;
 
 /// `RELOPT_BASEREL` (pathnodes.h `RelOptKind`).
-use pathnodes::{RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION};
+use ::pathnodes::{RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL, RTE_RELATION};
 
 /// constraint_exclusion GUC values (utils/guc.h).
 const CONSTRAINT_EXCLUSION_OFF: i32 = 0;
@@ -1704,7 +1704,7 @@ pub fn init_seams() {
     // at line 58), an enum int read directly from the GUC slot by
     // `relation_excluded_by_constraints` — never from the ControlFile.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::constraint_exclusion.install(GucVarAccessors {
             get: guc_backing::constraint_exclusion,
             set: guc_backing::set_constraint_exclusion,

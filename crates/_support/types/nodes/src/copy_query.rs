@@ -4,7 +4,7 @@
 //! these types are unported; copyto reaches their functions through seams and
 //! reads only these fields off the returned values.
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 

@@ -33,11 +33,11 @@
 // are still seam-and-panicked, so several read as dead code today.
 #![allow(dead_code)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };

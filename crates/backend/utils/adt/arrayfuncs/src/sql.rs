@@ -3,11 +3,11 @@
 //! `trim_array`, the array iterator (`array_create_iterator` /
 //! `array_iterate` / `array_free_iterator`), and `array_map`.
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::array::ArrayElementDatum;
 use ::types_core::Oid;
 use ::datum::datum::Datum;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_ARRAY_ELEMENT_ERROR, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_FUNCTION, ERROR,

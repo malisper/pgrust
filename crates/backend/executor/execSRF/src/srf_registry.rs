@@ -27,7 +27,7 @@ use std::sync::{Mutex, OnceLock};
 use ::utils_error::ereport;
 use ::types_core::Oid;
 use ::types_error::error::ERRCODE_UNDEFINED_FUNCTION;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::nodes::execexpr::SrfFunction;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use types_tuple::heaptuple::Datum;

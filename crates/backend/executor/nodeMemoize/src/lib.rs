@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{Oid, Size};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_OUT_OF_MEMORY};
 use ::nodes::execnodes::{EStateData, ScanStateData, SlotId};
 use ::nodes::nodememoize::{
     CacheEntry, CachedTuple, MemoStatus, Memoize, MemoizeCache, MemoizeInstrumentation,
@@ -50,7 +50,7 @@ use ::types_tuple::heaptuple::FormedMinimalTuple;
 use ::types_tuple::heaptuple::Datum as DatumV;
 
 use transam_parallel as parallel;
-use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
+use ::execparallel::{ParallelContextHandle, ParallelWorkerContextHandle};
 
 // Owner `-seams` crates this node calls outward through, with the node-side
 // marshaling living in this crate.

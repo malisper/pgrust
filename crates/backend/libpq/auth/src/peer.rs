@@ -1,7 +1,7 @@
 //! `auth_peer` (`auth.c:1855`) — peer authentication using `getpeereid`.
 
 use ::utils_error::ereport;
-use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, LOG};
+use ::types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, LOG};
 use ::net::Port;
 
 use crate::{here, port_user_name, set_authn_id, STATUS_ERROR};

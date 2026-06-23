@@ -6,7 +6,7 @@ use core::cmp::Ordering;
 use ::types_core::primitive::{Cost, Index};
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PathId, PlannerInfo, RelId, Relids, JOIN_SEMI};
+use ::pathnodes::{PathId, PlannerInfo, RelId, Relids, JOIN_SEMI};
 
 use costsize_seams as costsize;
 // joinrels.c is ported; is_dummy_rel is called directly on its owner.
@@ -176,7 +176,7 @@ pub fn bitmap_scan_cost_est<'mcx>(
     ipath: PathId,
 ) -> PgResult<Cost> {
     use ::nodes::nodes::NodeTag;
-    use pathnodes::{BitmapHeapPath, Path, PathNode};
+    use ::pathnodes::{BitmapHeapPath, Path, PathNode};
 
     // PATH_REQ_OUTER(ipath): the required-outer relids of the bitmapqual.
     let req_outer: Relids = root

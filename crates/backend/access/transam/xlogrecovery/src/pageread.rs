@@ -32,9 +32,9 @@ use core::cell::Cell;
 use alloc::format;
 use alloc::string::String;
 
-use types_core::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
+use ::types_core::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
 use ::types_core::InvalidXLogRecPtr;
-use types_error::{ErrorLevel, ErrorLocation, PgError, DEBUG1, DEBUG2, LOG, PANIC};
+use ::types_error::{ErrorLevel, ErrorLocation, PgError, DEBUG1, DEBUG2, LOG, PANIC};
 use ::wal::rmgr::{XLogReaderState, XLREAD_FAIL, XLREAD_WOULDBLOCK};
 use ::wal::xlog_consts::XLOG_BLCKSZ;
 use ::wal::xlogrecovery_carriers::{XLogPageReadResult, XLogSource};

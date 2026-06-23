@@ -30,9 +30,9 @@
 //! land. The `track_io_timing` GUC and the `pgBufferUsage` temp-block counters
 //! are reached by direct dependency (no cycle).
 
-use utils_error::{ereport, errno};
-use mcx::{Mcx, PgBox};
-use types_error::{ErrorLocation, PgError, PgResult, ERROR};
+use ::utils_error::{ereport, errno};
+use ::mcx::{Mcx, PgBox};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERROR};
 use ::execparallel::FileSetHandle;
 use ::nodes::nodehash::BufFile;
 use ::types_storage::file::{File, PGAlignedBlock};

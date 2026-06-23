@@ -48,8 +48,8 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use brin::{
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::brin::{
     BrinDesc, BrinOpcInfo, BrinValues, InclusionOpaque, OpaqueOpcInfo, INCLUSION_MAX_PROCNUMS,
     RT_MAX_STRATEGY_NUMBER,
 };

@@ -9,7 +9,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::catalog_shdepend::SharedDependencyType;
 use ::types_core::Oid;

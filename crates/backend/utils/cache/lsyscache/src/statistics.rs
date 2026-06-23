@@ -13,14 +13,14 @@
 //! lands. The slot-matching loop and the assembly of the `AttStatsSlot` are
 //! this unit's own logic.
 
-use mcx::{Mcx, PgVec};
-use types_core::{AttrNumber, InvalidOid, Oid};
+use ::mcx::{Mcx, PgVec};
+use ::types_core::{AttrNumber, InvalidOid, Oid};
 use ::datum::Datum;
 // Canonical unified value (the Datum-unification keystone) for the value-form
 // `get_attstatsslot_value_datums` path (by-reference stats elements by value).
 use types_tuple::heaptuple::Datum as DatumV;
 use ::types_error::PgResult;
-use types_selfuncs::{
+use ::types_selfuncs::{
     AttStatsSlot, StatsTuple, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES,
 };
 

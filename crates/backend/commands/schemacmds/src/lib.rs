@@ -26,7 +26,7 @@ use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use ::types_core::init::SECURITY_LOCAL_USERID_CHANGE;
 use ::types_error::pg_error::{ErrorLocation, PgError};
-use types_error::{PgResult, ERRCODE_DUPLICATE_SCHEMA, ERRCODE_RESERVED_NAME, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE};
+use ::types_error::{PgResult, ERRCODE_DUPLICATE_SCHEMA, ERRCODE_RESERVED_NAME, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE};
 use ::nodes::nodes::Node;
 use ::nodes::ddlnodes::CreateSchemaStmt;
 use ::nodes::parsenodes::{OBJECT_DATABASE, OBJECT_SCHEMA};

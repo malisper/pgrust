@@ -13,7 +13,7 @@ use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attnotnull, Anum_pg_attribute_attnum, PgAttributeUpdateRow,
 };
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERROR, NOTICE,
@@ -28,7 +28,7 @@ use ::common_relation::relation_open;
 use ::transam_xact::CommandCounterIncrement;
 use indexing_seams as indexing_seam;
 use ::pg_inherits::find_inheritance_children;
-use cache_syscache::{SearchSysCacheCopyAttName, SysCacheGetAttrNotNull, ATTNAME};
+use ::cache_syscache::{SearchSysCacheCopyAttName, SysCacheGetAttrNotNull, ATTNAME};
 
 use crate::helpers::{here, RelationRelationId};
 

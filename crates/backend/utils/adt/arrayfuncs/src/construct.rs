@@ -9,20 +9,20 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgString, PgVec};
-use array::{ArrayType, ARRAYTYPE_HDRSZ, MAXDIM};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::array::{ArrayType, ARRAYTYPE_HDRSZ, MAXDIM};
 use ::types_core::Oid;
 use ::datum::array_build::{ArrayBuildState, ArrayBuildStateArr};
 use ::datum::datum::Datum;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
-use nodes::{EStateData, EcxtId};
+use ::nodes::{EStateData, EcxtId};
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use arrayfuncs_seams::{ArrayBuildCtx, ArrayBuildStateAnyHandle};
+use ::arrayfuncs_seams::{ArrayBuildCtx, ArrayBuildStateAnyHandle};
 
 use crate::foundation::{self, MAX_ALLOC_SIZE};
 

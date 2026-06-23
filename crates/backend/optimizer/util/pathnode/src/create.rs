@@ -12,9 +12,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::{AttrNumber, Cost, Index, InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::pathnodes::optimizer_plan::{JoinCostWorkspace, JoinPathExtraData};
-use pathnodes::{
+use ::pathnodes::{
     AggPath, AggSplit, AggStrategy, AppendPath, BitmapAndPath, BitmapHeapPath, BitmapOrPath,
     CmdType, ForeignPath, GatherMergePath, GatherPath, GroupPath, GroupResultPath, GroupingSetsPath,
     HashPath, IncrementalSortPath, IndexClause, IndexOptInfo, IndexPath, JoinPath, JoinType,

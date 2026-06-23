@@ -39,11 +39,11 @@ use alloc::vec::Vec;
 
 use ::utils_error::ereport;
 use ::types_error::error::{ERROR, WARNING};
-use types_error::{ErrorLocation, PgResult};
+use ::types_error::{ErrorLocation, PgResult};
 
 use ::procsignal_seams::send_proc_signal;
 use mcxtfuncs_seams as seam;
-use mcxtfuncs_seams::{McxtRow, MemoryContextRef, MemoryContextType};
+use ::mcxtfuncs_seams::{McxtRow, MemoryContextRef, MemoryContextType};
 use ::mbutils_seams::pg_mbcliplen;
 use ::types_storage::ProcSignalReason;
 

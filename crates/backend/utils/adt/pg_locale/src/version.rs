@@ -5,7 +5,7 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_error::PgResult;
 
 const COLLPROVIDER_BUILTIN: i8 = b'b' as i8;

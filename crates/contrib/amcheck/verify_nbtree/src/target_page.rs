@@ -18,9 +18,9 @@
 //! `offset_is_negative_infinity` engine is implemented here.
 
 use ::types_core::primitive::{BlockNumber, OffsetNumber};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_error::error::ERRCODE_INDEX_CORRUPTED;
-use types_nbtree::{BTScanInsert, BTMaxItemSize, BTP_LEAF, P_FIRSTKEY, P_HIKEY, P_NONE};
+use ::types_nbtree::{BTScanInsert, BTMaxItemSize, BTP_LEAF, P_FIRSTKEY, P_HIKEY, P_NONE};
 use ::types_tuple::heaptuple::{
     item_pointer_is_valid, IndexTuple, IndexTupleData, ItemPointerData,
 };

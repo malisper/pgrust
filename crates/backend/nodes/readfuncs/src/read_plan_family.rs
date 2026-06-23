@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::nodes::jointype::{Join, JoinType};
 use ::nodes::nodeindexscan::{Plan, Scan};

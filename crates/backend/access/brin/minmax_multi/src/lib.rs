@@ -37,8 +37,8 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use brin::{
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::brin::{
     BrinDesc, BrinMemValue, BrinOpcInfo, BrinValues, MinmaxMultiOpaque, OpaqueOpcInfo,
 };
 use ::types_core::primitive::{AttrNumber, Oid};

@@ -26,11 +26,11 @@ use ::define_seams::DefElemArg;
 use ::parse_type_seams::typename_to_string_node;
 use ::small1_seams::parser_errposition;
 use ::utils_error::ereport;
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_cluster::ParseState;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
-use parsenodes::{Node, StringNode, TypeName};
+use ::types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
+use ::parsenodes::{Node, StringNode, TypeName};
 
 // ---------------------------------------------------------------------------
 // The raw-node value extractors (operating on `::parsenodes::DefElem`).

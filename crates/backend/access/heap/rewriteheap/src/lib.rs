@@ -34,11 +34,11 @@ use ::types_core::primitive::{
     BlockNumber, ForkNumber, MultiXactId, Oid, Size, XLogRecPtr, InvalidBlockNumber,
     InvalidOid,
 };
-use types_core::{FrozenTransactionId, InvalidTransactionId, TransactionId};
-use types_error::{
+use ::types_core::{FrozenTransactionId, InvalidTransactionId, TransactionId};
+use ::types_error::{
     PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_storage::RelFileLocator;
 use ::types_storage::bufpage::{MaxHeapTupleSize, MovedPartitionsOffsetNumber};
 use ::types_tuple::heaptuple::FormedTuple;
@@ -48,15 +48,15 @@ use ::types_tuple::heaptuple::{
     HEAP_XMAX_INVALID, ON_PAGE_HEADER_SIZE,
 };
 
-use utils_error::{ereport, PgError};
+use ::utils_error::{ereport, PgError};
 
 use bulkwrite as bulkwrite;
-use page::{
+use ::page::{
     PageAddItemExtended, PageGetHeapFreeSpace, PageGetItem, PageGetItemId, PageInit, PageMut,
     PageRef,
 };
 
-use heaptoast::{heap_toast_insert_or_update, TOAST_TUPLE_THRESHOLD};
+use ::heaptoast::{heap_toast_insert_or_update, TOAST_TUPLE_THRESHOLD};
 use ::heapam::freeze::heap_freeze_tuple;
 use ::heapam::insert::{HEAP_INSERT_NO_LOGICAL, HEAP_INSERT_SKIP_FSM};
 
@@ -1386,7 +1386,7 @@ fn HeapTupleHeaderGetRawXmin(hdr: &HeapTupleHeaderData<'_>) -> TransactionId {
 // The remaining header predicates (`HeapTupleHeaderIsOnlyLocked`,
 // `HeapTupleHeaderGetUpdateXid`, `HEAP_XMAX_IS_LOCKED_ONLY`) come from the
 // visibility crate (re-exported below).
-use heapam_visibility::{
+use ::heapam_visibility::{
     HeapTupleHeaderGetUpdateXid, HeapTupleHeaderIsOnlyLocked,
 };
 use ::heapam_visibility::htup::HEAP_XMAX_IS_LOCKED_ONLY;

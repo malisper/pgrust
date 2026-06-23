@@ -21,19 +21,19 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_core::primitive::{MultiXactId, Oid, TransactionId};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
 
 use ::types_tuple::heaptuple::Datum;
 
 use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 
-use vacuum_seams::{
+use ::vacuum_seams::{
     DatFrozenApplyResult, PgClassFrozenRow, PgClassScanRow, PgDatabaseFrozenRow,
     RelStatsApplyResult,
 };

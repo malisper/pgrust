@@ -16,7 +16,7 @@ use ::snapshot::SnapshotData;
 // (C `static HTAB *tuplecid_data`) — can name them without depending on this
 // crate (the dependency runs the other way). Re-exported here so existing
 // `crate::`/`pub use` consumers are unchanged.
-pub use types_logical::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash};
+pub use ::types_logical::{ReorderBufferTupleCidEnt, ReorderBufferTupleCidKey, TupleCidHash};
 
 use crate::{ReorderBuffer, ReorderBufferChangeData, ReorderBufferChangeType};
 

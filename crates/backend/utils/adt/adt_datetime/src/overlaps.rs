@@ -14,7 +14,7 @@
 use core::cmp::Ordering;
 
 use ::types_datetime::TimeTzADT;
-use types_datetime::{TimeADT, Timestamp};
+use ::types_datetime::{TimeADT, Timestamp};
 
 use crate::time::time_cmp;
 use crate::timestamp::timestamp_cmp_internal;

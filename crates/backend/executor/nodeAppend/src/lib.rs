@@ -51,10 +51,10 @@ use lwlock_seams as lwlock;
 use postgres_seams as tcop_postgres;
 use init_small_seams as globals;
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::PGINVALID_SOCKET;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
-use execparallel::{
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::execparallel::{
     DsmSegmentHandle, ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle,
 };
 use ::nodes::executor::EXEC_FLAG_MARK;
@@ -63,7 +63,7 @@ use ::nodes::nodeappend::{
     PaFinished, ParallelAppendState, ParallelAppendStateHandle,
 };
 use ::nodes::nodes::Node;
-use nodes::{Bitmapset, EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
+use ::nodes::{Bitmapset, EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
 use ::types_pgstat::wait_event::WAIT_EVENT_APPEND_READY;
 use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_SOCKET_READABLE};
 use ::types_storage::LWLockMode;

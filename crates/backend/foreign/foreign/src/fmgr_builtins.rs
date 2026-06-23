@@ -15,7 +15,7 @@ use ::mcx::MemoryContext;
 use ::types_core::primitive::Oid;
 use ::datum::Datum;
 use ::types_error::PgResult;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// A scratch `CurrentMemoryContext` for the workers that allocate through `Mcx`.
 fn scratch_mcx() -> MemoryContext {

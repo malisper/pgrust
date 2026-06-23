@@ -21,8 +21,8 @@
 use ::ts_locale_seams::t_isalpha as t_isalpha_seam;
 use ::utils_error::ereport;
 use ::mbutils_seams::pg_mblen_range;
-use mcx::{Mcx, PgVec};
-use types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 
 /// `RSF_ONEOF` — a character class the input character must be a member of.
 pub const RSF_ONEOF: u32 = 1;

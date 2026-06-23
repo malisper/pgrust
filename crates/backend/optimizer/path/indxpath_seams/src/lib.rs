@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
+use ::pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
 
 seam_core::seam!(
     /// `create_index_paths(root, rel)` (indxpath.c:241) — generate all index

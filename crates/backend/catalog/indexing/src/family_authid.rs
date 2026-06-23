@@ -9,18 +9,18 @@
 //! open transaction (the OID-keyed contract for the syscache-located rows the
 //! C holds directly).
 
-use mcx::{Mcx, MemoryContext};
-use authid::{AuthIdUpdate, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord};
+use ::mcx::{Mcx, MemoryContext};
+use ::authid::{AuthIdUpdate, AuthMemUpdate, NewAuthMemRecord, NewAuthRecord};
 use ::types_catalog::pg_authid as pa;
 use ::types_core::fmgr::F_OIDEQ;
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
-use rel::{Relation, RelationData};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
+use ::rel::{Relation, RelationData};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
 use ::scankey::ScanKeyInit;
 use genam_seams as genam;
 use ::table::table_open;

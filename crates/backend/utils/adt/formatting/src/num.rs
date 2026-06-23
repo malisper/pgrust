@@ -27,8 +27,8 @@
 //! `mul_var`, …), reached through seams.  The engine driver `num_processor`
 //! (which those entry points feed) is fully ported below.
 
-use types_error::{PgError, PgResult};
-use types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TEXT_REPRESENTATION};
+use ::types_error::{PgError, PgResult};
+use ::types_error::{ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TEXT_REPRESENTATION};
 use ::types_cash::CashLconv;
 use ::types_core::Oid;
 

@@ -2,8 +2,8 @@
 //! (`fmgr.c`): the facts read out of `pg_proc` / `pg_language` and the
 //! resolution `fmgr_info_cxt_security` computes.
 
-use mcx::{PgString, PgVec};
-use types_core::{Oid, TransactionId};
+use ::mcx::{PgString, PgVec};
+use ::types_core::{Oid, TransactionId};
 use ::types_tuple::heaptuple::ItemPointerData;
 
 use crate::fmgr::{FmgrInfo, PGFunction};

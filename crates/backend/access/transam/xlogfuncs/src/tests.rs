@@ -5,7 +5,7 @@
 //! integration harness, not here.
 
 use super::*;
-use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
+use ::types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE};
 
 #[test]
 fn recovery_in_progress_error_shape() {

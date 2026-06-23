@@ -69,7 +69,7 @@ use alloc::collections::TryReserveError;
 use alloc::vec::Vec;
 
 use ::mcx::MemoryContext;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 /*
  * Maximum number of integers that can be encoded in a single Simple-8b

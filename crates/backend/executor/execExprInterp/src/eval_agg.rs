@@ -33,11 +33,11 @@
 //! presorted-distinct comparisons, and the ordered-aggregate tuplesort feed —
 //! is the interpreter's own logic and is implemented faithfully here.
 
-use execTuples_seams::{
+use ::execTuples_seams::{
     exec_clear_tuple, exec_copy_slot, store_virtual_values,
 };
 use ::fmgr_seams::function_call2_coll_datum;
-use tuplesort_seams::{tuplesort_putdatum, tuplesort_puttupleslot};
+use ::tuplesort_seams::{tuplesort_putdatum, tuplesort_puttupleslot};
 
 // The bare-word newtype: the transition-value form the fmgr/tuplesort seams and
 // the nodeAgg-parked transfn frame operate on.
@@ -56,7 +56,7 @@ fn word_of(v: &DatumV<'_>) -> Datum {
     Datum::from_usize(v.as_usize())
 }
 use ::nodes::execexpr::{ExprEvalStepData, ExprState};
-use nodeAgg::{
+use ::nodeAgg::{
     AggStateData as AggState, AggStatePerGroupData, AggStatePerTransData,
 };
 use ::nodes::EStateData;

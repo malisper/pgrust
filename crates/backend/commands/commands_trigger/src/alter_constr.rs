@@ -1,7 +1,7 @@
 //! `AlterConstrTriggerDeferrability` (commands/tablecmds.c:12694): the
 //! pg_trigger leg of `ALTER TABLE ... ALTER CONSTRAINT ... [NOT] DEFERRABLE`.
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_catalog::pg_trigger as pt;
 use ::types_core::fmgr::F_OIDEQ;
 use ::types_core::Oid;

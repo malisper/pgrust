@@ -2,7 +2,7 @@
 //! Generated field-for-field from `readfuncs.funcs.c`; reads fields in the
 //! exact order the OUT side wrote them.
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_error::PgResult;
 use ::nodes::nodes::{Node, NodePtr};
 use ::nodes::ddlnodes as dn;

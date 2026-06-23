@@ -22,7 +22,7 @@
 
 use ::mcx::Mcx;
 use ::types_core::Oid;
-use types_error::{PgResult, SqlState};
+use ::types_error::{PgResult, SqlState};
 
 /* ---- datetime.c globals (DateStyle / DateOrder) ------------------------- */
 

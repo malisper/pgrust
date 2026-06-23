@@ -14,30 +14,30 @@ use crate::keystone::{
     SQL_LANGUAGE_ID,
 };
 use ::catalog_namespace::QualifiedNameGetCreationNamespace;
-use functioncmds_seams::{
+use ::functioncmds_seams::{
     self as seam, AlterFunctionChanges, ProcedureCreateArgs,
 };
 use lsyscache_seams as lsc;
 use guc_seams as guc_seam;
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use types_acl::{ACLCHECK_OK, ACL_CREATE, ACL_USAGE};
+use ::types_acl::{ACLCHECK_OK, ACL_CREATE, ACL_USAGE};
 use ::types_catalog::catalog_dependency::ObjectAddress;
-use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
-use parsenodes::{
+use ::parsenodes::{
     AlterFunctionStmt, CreateFunctionStmt, DefElem, FunctionParameter, Node, ProcedureRelationId,
     StringNode, TypeName, FUNC_PARAM_DEFAULT, FUNC_PARAM_IN, FUNC_PARAM_OUT, FUNC_PARAM_TABLE,
     FUNC_PARAM_VARIADIC, PROKIND_FUNCTION, PROKIND_PROCEDURE, PROKIND_WINDOW, PROPARALLEL_RESTRICTED,
     PROPARALLEL_SAFE, PROPARALLEL_UNSAFE, PROVOLATILE_IMMUTABLE, PROVOLATILE_STABLE,
     PROVOLATILE_VOLATILE, VariableSetKind,
 };
-use types_tuple::{ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYOID, INTERNALOID, RECORDOID, VOIDOID};
+use ::types_tuple::{ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYOID, INTERNALOID, RECORDOID, VOIDOID};
 
 // ===========================================================================
 // compute_return_type (functioncmds.c:87)

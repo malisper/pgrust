@@ -13,7 +13,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_error::PgResult;
 
 /// `pg_str_endswith` — whether `str` has the suffix `end`.

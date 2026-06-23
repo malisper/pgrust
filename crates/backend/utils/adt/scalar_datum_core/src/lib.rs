@@ -42,7 +42,7 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{slice_in, Mcx, PgVec};
+use ::mcx::{slice_in, Mcx, PgVec};
 use ::types_core::primitive::Size;
 // `ExpandedObjectRef` is the `&[u8]`-over-a-varlena-image handle (NOT the Datum
 // shim); the canonical value enum is `types_tuple::…::Datum`. The bare-word
@@ -51,11 +51,11 @@ use ::types_core::primitive::Size;
 // whose seam contract still carries a bare machine word for the not-yet-migrated
 // nbtree array (de)serialize and params.c restore callers; every value-model
 // operation uses the `Datum` enum and its `from_*`/`as_*` codec.
-use datum::{Datum as ScalarWord, ExpandedObjectRef};
-use types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
+use ::datum::{Datum as ScalarWord, ExpandedObjectRef};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_EXCEPTION};
 use types_tuple::heaptuple::Datum;
 
-use misc2_seams::{eoh_flatten_into, eoh_get_flat_size};
+use ::misc2_seams::{eoh_flatten_into, eoh_get_flat_size};
 
 // ===========================================================================
 // varatt.h helpers over verbatim datum bytes (little-endian model).

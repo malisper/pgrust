@@ -4,8 +4,8 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgVec};
-use cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
+use ::mcx::{Mcx, PgVec};
+use ::cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
 use ::types_core::Oid;
 // Datum-unification: the cache-invalidation callback `arg` is a plain machine
 // word that C passes as `(Datum) 0` and hands back to the callback verbatim; it

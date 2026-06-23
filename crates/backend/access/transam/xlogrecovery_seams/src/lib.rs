@@ -2,7 +2,7 @@
 //! (`access/transam/xlogrecovery.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use types_core::{TimeLineID, TimestampTz, XLogRecPtr};
+use ::types_core::{TimeLineID, TimestampTz, XLogRecPtr};
 
 // ---------------------------------------------------------------------------
 // WAL-recovery orchestrator entry seams (xlogrecovery.c). The recovery owner

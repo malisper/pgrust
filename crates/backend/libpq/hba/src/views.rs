@@ -9,10 +9,10 @@
 use ::arrayfuncs_seams::construct_text_array_bytes;
 use ::varlena_seams::cstring_to_text_v;
 use ::funcapi_seams::materialized_srf_putvalues;
-use mcx::{Mcx, PgString};
-use types_error::{PgResult, DEBUG3, ERROR};
-use types_core::{uaGSS, uaLDAP, uaOAuth, uaRADIUS, uaSSPI, UserAuth};
-use net::{
+use ::mcx::{Mcx, PgString};
+use ::types_error::{PgResult, DEBUG3, ERROR};
+use ::types_core::{uaGSS, uaLDAP, uaOAuth, uaRADIUS, uaSSPI, UserAuth};
+use ::net::{
     clientCertCA, clientCertOff, ctHost, ctHostGSS, ctHostNoGSS, ctHostNoSSL, ctHostSSL, ctLocal,
     ipCmpAll, ipCmpMask, ipCmpSameHost, ipCmpSameNet, HbaLine,
 };

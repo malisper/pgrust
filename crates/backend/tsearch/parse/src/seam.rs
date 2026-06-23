@@ -6,7 +6,7 @@
 //! subsystems (multibyte/locale/ts-config/tsvector-op) install them from their
 //! own `init_seams()`.
 
-pub use parse_seams::{
+pub use ::parse_seams::{
     char2wchar, config_dict_ids, config_lenmap, database_ctype_is_c, dict_lexize,
     get_database_encoding, isalnum, isalpha, isdigit, isspace, isxdigit, iswalnum, iswalpha,
     iswdigit, iswspace, iswxdigit, pg_database_encoding_max_length, pg_dsplen, pg_mb2wchar_with_len,

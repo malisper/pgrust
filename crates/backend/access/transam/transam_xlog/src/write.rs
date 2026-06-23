@@ -27,8 +27,8 @@ extern crate std;
 
 use core::cell::Cell;
 
-use utils_error::{PgError, PgResult};
-use types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
+use ::utils_error::{PgError, PgResult};
+use ::types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
 use ::types_storage::storage::{pg_atomic_uint64, LW_EXCLUSIVE, LW_SHARED};
 use ::wal::xlog_consts::{WalSyncMethod, CHECKPOINT_CAUSE_XLOG, XLOG_BLCKSZ};
 
@@ -1137,7 +1137,7 @@ pub fn wal_read(
     count: i32,
     tli: TimeLineID,
 ) -> ::transam_xlog_seams::WalReadOutcome {
-    use transam_xlog_seams::{WalReadErrorInfo, WalReadOutcome};
+    use ::transam_xlog_seams::{WalReadErrorInfo, WalReadOutcome};
 
     let seg = wal_segment_size();
     let mut out = std::vec![0u8; count.max(0) as usize];

@@ -6,7 +6,7 @@ use ::nodes_core::makefuncs::{make_andclause, make_orclause};
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::nodes::primnodes::{Expr, OpExpr};
-use pathnodes::{
+use ::pathnodes::{
     NodeId, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId, VOLATILITY_UNKNOWN,
 };
 

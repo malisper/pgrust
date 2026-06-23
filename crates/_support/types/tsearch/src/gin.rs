@@ -5,7 +5,7 @@
 //! the ternary / search-mode items from there. Re-exported here so the existing
 //! `tsearch::gin::*` paths keep resolving.
 
-pub use gin::{
+pub use ::gin::{
     GinTernaryValue, GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_ALL, GIN_SEARCH_MODE_DEFAULT,
     GIN_SEARCH_MODE_EVERYTHING, GIN_SEARCH_MODE_INCLUDE_EMPTY, GIN_TRUE,
 };

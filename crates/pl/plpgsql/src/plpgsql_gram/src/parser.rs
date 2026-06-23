@@ -3,7 +3,7 @@
 use crate::mem;
 use comp_seams as comp_seam;
 use funcs as funcs;
-use plpgsql_scanner::{
+use ::plpgsql_scanner::{
     self as scanner, PlpgsqlScanner, Yyltype, Yystype,
     GREATER_GREATER, LESS_LESS, T_CWORD, T_DATUM, T_WORD,
     K_ABSOLUTE, K_ALIAS, K_ALL, K_AND, K_ARRAY, K_ASSERT, K_BACKWARD, K_BEGIN, K_BY, K_CALL,
@@ -22,7 +22,7 @@ use plpgsql_scanner::{
 };
 use ::scan_fgram::tokens::{COLON_EQUALS, DOT_DOT, EQUALS_GREATER, ICONST, SCONST};
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_DUPLICATE_ALIAS,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_SYNTAX_ERROR,
     ERROR as ERROR_LEVEL,

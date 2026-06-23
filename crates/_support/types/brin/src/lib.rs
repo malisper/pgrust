@@ -11,8 +11,8 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgBox, PgVec};
-use types_core::{AttrNumber, BlockNumber};
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::types_core::{AttrNumber, BlockNumber};
 use ::types_error::PgResult;
 use ::rel::Relation;
 use ::types_tuple::heaptuple::Datum;

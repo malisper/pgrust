@@ -12,9 +12,9 @@
 
 #![allow(non_snake_case)]
 
-use types_core::{AttrNumber, Oid};
+use ::types_core::{AttrNumber, Oid};
 use ::types_error::PgResult;
-use nodes::{SlotData, TupleTableSlot, Tuplesortstate, TuplesortInstrumentation};
+use ::nodes::{SlotData, TupleTableSlot, Tuplesortstate, TuplesortInstrumentation};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{ItemPointerData, TupleDescData};
 

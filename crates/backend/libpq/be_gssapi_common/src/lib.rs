@@ -37,7 +37,7 @@ use core::cmp::min;
 
 use ::utils_error::ereport;
 use be_gssapi_common_seams as gss_seam;
-use types_error::{ErrorLocation, COMMERROR};
+use ::types_error::{ErrorLocation, COMMERROR};
 
 const FILENAME: &str = "be-gssapi-common.c";
 

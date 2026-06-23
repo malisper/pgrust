@@ -11,11 +11,11 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, MemoryContext, PgString};
+use ::mcx::{Mcx, MemoryContext, PgString};
 use ::types_core::primitive::Oid;
 use ::utils_error::ereport;
-use types_error::{ERROR, PgError, PgResult};
-use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR};
+use ::types_error::{ERROR, PgError, PgResult};
+use ::types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR};
 use ::types_catalog::catalog::TABLE_SPACE_RELATION_ID;
 use ::nodes::ddlnodes::DefElem;
 use ::nodes::nodes::ntag;
@@ -27,13 +27,13 @@ use ::types_tableam::relscan::TableScanDesc;
 use ::types_tuple::heaptuple::{Datum, FormedTuple};
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use pg_tablespace_seams::{self as cat, TablespaceTuple};
-use heaptuple::{
+use ::pg_tablespace_seams::{self as cat, TablespaceTuple};
+use ::heaptuple::{
     heap_copytuple, heap_form_tuple, heap_getattr, heap_modify_tuple,
 };
 use ::scankey::ScanKeyInit;
 use table_seams as table_seam;
-use table_tableam::{table_beginscan_catalog, table_endscan};
+use ::table_tableam::{table_beginscan_catalog, table_endscan};
 use ::heapam::scan::heap_getnext;
 use ::indexing::keystone::{
     CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate,

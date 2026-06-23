@@ -51,9 +51,9 @@ use std::sync::atomic::fence;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Arc, RwLock};
 
-use waiteventset_seams::{self as wes_seams, WaitEventSet};
-use types_core::{pgsocket, ProcNumber, PGINVALID_SOCKET};
-use types_error::{PgError, PgResult, PANIC};
+use ::waiteventset_seams::{self as wes_seams, WaitEventSet};
+use ::types_core::{pgsocket, ProcNumber, PGINVALID_SOCKET};
+use ::types_error::{PgError, PgResult, PANIC};
 use ::types_storage::latch::{Latch, LatchHandle, LatchKind};
 use ::types_storage::waiteventset::{
     WaitEvent, WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_MASK, WL_TIMEOUT,

@@ -28,7 +28,7 @@
 
 use ::types_tuple::heaptuple::Datum;
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_error::error::{ERRCODE_DATATYPE_MISMATCH, ERRCODE_UNDEFINED_COLUMN};
 use ::types_tuple::access::ATTRIBUTE_GENERATED_VIRTUAL;
 use ::nodes::execexpr::{

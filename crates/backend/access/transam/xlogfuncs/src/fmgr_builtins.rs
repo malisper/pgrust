@@ -23,10 +23,10 @@
 //! composite rows whose `Mcx`-built varlena/composite the fmgr boundary cannot
 //! yet carry for those shapes.
 
-use types_core::{TimestampTz, XLogRecPtr};
+use ::types_core::{TimestampTz, XLogRecPtr};
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

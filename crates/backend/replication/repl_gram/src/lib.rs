@@ -37,9 +37,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::utils_error::ereport;
-use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 
-use parsenodes::{Boolean, DefElem, Integer, Node, StringNode, DEFELEM_UNSPEC};
+use ::parsenodes::{Boolean, DefElem, Integer, Node, StringNode, DEFELEM_UNSPEC};
 use ::replication::repl_token::Token;
 use ::replication::replnodes::{
     AlterReplicationSlotCmd, BaseBackupCmd, CreateReplicationSlotCmd, DropReplicationSlotCmd,
@@ -47,7 +47,7 @@ use ::replication::replnodes::{
     VariableShowStmt,
 };
 
-use repl_scanner_seams::{
+use ::repl_scanner_seams::{
     replication_lex_all, replication_scanner_is_replication_command,
 };
 

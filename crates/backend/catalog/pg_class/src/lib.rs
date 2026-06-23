@@ -12,8 +12,8 @@
 //! `elog(ERROR, "unrecognized relkind: '%c'", relkind)` becomes a recoverable
 //! [`PgError`] carrying the exact message text and source location.
 
-use types_error::{PgError, PgResult};
-use types_tuple::{
+use ::types_error::{PgError, PgResult};
+use ::types_tuple::{
     RELKIND_COMPOSITE_TYPE, RELKIND_FOREIGN_TABLE, RELKIND_INDEX, RELKIND_MATVIEW,
     RELKIND_PARTITIONED_INDEX, RELKIND_PARTITIONED_TABLE, RELKIND_RELATION, RELKIND_SEQUENCE,
     RELKIND_TOASTVALUE, RELKIND_VIEW,

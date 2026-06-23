@@ -41,10 +41,10 @@ use alloc::string::{String, ToString};
 
 use ::scan_fgram::tokens;
 use scan_seams as scan_seam;
-use comp_seams::{self as comp_seam, CwordResolution, WordResolution};
+use ::comp_seams::{self as comp_seam, CwordResolution, WordResolution};
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
-use plpgsql::{IdentifierLookup, PLcword, PLwdatum, PLword};
+use ::types_error::{PgError, PgResult, ERRCODE_SYNTAX_ERROR};
+use ::plpgsql::{IdentifierLookup, PLcword, PLwdatum, PLword};
 
 // ===========================================================================
 // Token codes (pl_gram.h `enum yytokentype`).

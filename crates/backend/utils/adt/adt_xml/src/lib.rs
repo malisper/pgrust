@@ -45,7 +45,7 @@ pub mod dep_seams;
 pub mod fmgr_builtins;
 
 use ::datum::Datum;
-use types_error::{
+use ::types_error::{
     ERRCODE_DATA_EXCEPTION, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_ARGUMENT_FOR_XQUERY,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_XML_COMMENT,
@@ -57,7 +57,7 @@ use ::types_tuple::heaptuple::{
     NUMERICOID, TEXTOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID, VARCHAROID, VARHDRSZ,
     XMLOID,
 };
-use types_core::{InvalidOid, Oid};
+use ::types_core::{InvalidOid, Oid};
 /// The unified value carrier (`ByVal`/`ByRef`/`Cstring`) the executor and
 /// row-mapping callers hold column values in, distinct from the bare-word
 /// [`Datum`] (`::datum::Datum`) the in-crate scalar formatters use.
@@ -65,18 +65,18 @@ use ::types_tuple::heaptuple::Datum as TDatum;
 
 pub use ::types_error::ERRCODE_NOT_AN_XML_DOCUMENT;
 pub use ::nodes::primnodes::{XmlExprOp, XmlOptionType};
-pub use types_xml::{PgXmlStrictness, XmlBinaryType, XmlStandaloneType};
+pub use ::types_xml::{PgXmlStrictness, XmlBinaryType, XmlStandaloneType};
 
-use adt_datetime::{
+use ::adt_datetime::{
     j2date, timestamp2tm, EncodeDateOnly, EncodeDateTime, TIMESTAMP_NOT_FINITE,
 };
-use types_datetime::{fsec_t, DateADT, Timestamp, POSTGRES_EPOCH_JDATE, USE_XSD_DATES};
+use ::types_datetime::{fsec_t, DateADT, Timestamp, POSTGRES_EPOCH_JDATE, USE_XSD_DATES};
 use ::pgtime::pgtime::pg_tm;
 use ::types_wchar::encoding::PG_UTF8;
 
 use xml_libxml_seams as seam;
 use lsyscache_seams as lsc;
-use types_xml::{RelationColumn, SpiColumn, SpiResult};
+use ::types_xml::{RelationColumn, SpiColumn, SpiResult};
 
 // ---------------------------------------------------------------------------
 // `NO_XML_SUPPORT()` macro and inward seam adapter
@@ -171,7 +171,7 @@ pub fn init_seams() {
     // accessors (read directly from the GUC slot, never ControlFile) plus the
     // `xmlbinary()` / `xmloption()` reader seams that decode them to enums.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::xmlbinary.install(GucVarAccessors {
             get: xmlbinary_guc,
             set: set_xmlbinary_guc,

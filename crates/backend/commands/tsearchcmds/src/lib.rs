@@ -26,22 +26,22 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use catalog_namespace::{
+use ::catalog_namespace::{
     get_ts_config_oid, get_ts_dict_oid, get_ts_parser_oid, get_ts_template_oid, NameListToString,
     QualifiedNameGetCreationNamespace,
 };
 use ::utils_error::ereport;
 
-use mcx::{Mcx, MemoryContext, PgString};
+use ::mcx::{Mcx, MemoryContext, PgString};
 
-use types_acl::{AclResult, ACL_CREATE, ACLCHECK_NOT_OWNER, ACLCHECK_OK};
+use ::types_acl::{AclResult, ACL_CREATE, ACLCHECK_NOT_OWNER, ACLCHECK_OK};
 use ::types_catalog::catalog::{
     NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID, TS_CONFIG_RELATION_ID, TS_DICTIONARY_RELATION_ID,
     TS_PARSER_RELATION_ID, TS_TEMPLATE_RELATION_ID,
 };
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
-use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERROR, NOTICE,
@@ -56,7 +56,7 @@ use ::nodes::parsenodes::{OBJECT_TSCONFIGURATION, OBJECT_TSDICTIONARY};
 use ::types_tuple::heaptuple::{INT4OID, INTERNALOID, TSQUERYOID, VOIDOID};
 
 use tsearchcmds_seams as seam;
-use tsearchcmds_seams::{
+use ::tsearchcmds_seams::{
     ConfigMapEntry, LexDescr, NewTSParser, NewTSTemplate, TSConfigForm, TSDictForm, TSParserForm,
     TSTemplateForm,
 };

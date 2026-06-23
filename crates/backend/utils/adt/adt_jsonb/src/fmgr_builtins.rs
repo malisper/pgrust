@@ -39,7 +39,7 @@
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use ::jsonb_util::VARHDRSZ;
 use fmgr_core as fmgr_core;
@@ -766,7 +766,7 @@ pub fn register_jsonb_builtins() {
 mod tests {
     use super::*;
 
-    use jsonb_util::{
+    use ::jsonb_util::{
         self as jbu, jbvType, JsonbValue, JsonbValueData, JsonbIteratorToken::*,
     };
     use ::mcx::MemoryContext;

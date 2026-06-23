@@ -10,9 +10,9 @@
 //! / `bt_mkscankey_pivotsearch`).
 
 use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_error::error::ERRCODE_INDEX_CORRUPTED;
-use types_nbtree::{BTScanInsert, BTREE_METAPAGE, P_HIKEY, P_NONE};
+use ::types_nbtree::{BTScanInsert, BTREE_METAPAGE, P_HIKEY, P_NONE};
 use ::rel::Relation;
 use ::types_storage::bufpage::{ItemIdData, SizeOfPageHeaderData};
 use ::types_tuple::heaptuple::{

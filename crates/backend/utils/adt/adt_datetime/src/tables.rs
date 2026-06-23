@@ -11,7 +11,7 @@
 //! source pre-truncates via its initializer.
 
 use ::types_datetime::DateToken;
-use types_datetime::{
+use ::types_datetime::{
     AD, ADBC, AGO, AM, AMPM, BC, DOW, DTK_CENTURY, DTK_DAY, DTK_DECADE, DTK_DOW, DTK_DOY,
     DTK_EARLY, DTK_EPOCH, DTK_HOUR, DTK_ISODOW, DTK_ISOYEAR, DTK_JULIAN, DTK_LATE, DTK_MICROSEC,
     DTK_MILLENNIUM, DTK_MILLISEC, DTK_MINUTE, DTK_MONTH, DTK_NOW, DTK_QUARTER, DTK_SECOND, DTK_TIME,

@@ -3,7 +3,7 @@
 //! variable starts, and the numeric-literal family) and the [`next_token`]
 //! dispatcher that drives all five states to a finished token.
 
-use types_error::{PgResult, SoftErrorContext};
+use ::types_error::{PgResult, SoftErrorContext};
 
 use crate::scan_states::Step;
 use crate::{is_other, JsonPathLexer, Lexeme, ScanBuf, State, Token};

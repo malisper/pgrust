@@ -10,7 +10,7 @@
 //! defines the entry layout) reads and writes the entry through it while the
 //! returned [`DshashEntryGuard`] holds the partition lock.
 
-use types_storage::{dshash_table_handle, DsaArea, DshashParameters, DshashTable};
+use ::types_storage::{dshash_table_handle, DsaArea, DshashParameters, DshashTable};
 use ::types_error::PgResult;
 
 seam_core::seam!(

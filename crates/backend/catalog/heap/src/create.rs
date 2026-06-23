@@ -11,13 +11,13 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use utils_error::{elog, ereport};
+use ::utils_error::{elog, ereport};
 use ::mcx::Mcx;
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 use ::types_catalog::pg_attribute::PgAttributeInsertRow;
 use ::types_catalog::pg_class::PgClassInsertRow;
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid, RelFileNumber, TransactionId};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_DUPLICATE_TABLE, ERRCODE_INVALID_PARAMETER_VALUE,
     ERROR,
 };

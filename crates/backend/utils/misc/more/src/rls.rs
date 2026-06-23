@@ -10,14 +10,14 @@
 use ::acl_seams::has_bypassrls_privilege;
 use ::lsyscache_seams::get_rel_name;
 use ::syscache_seams::search_relation_rls_flags;
-use miscinit_seams::{get_user_id, in_no_force_rls_operation};
+use ::miscinit_seams::{get_user_id, in_no_force_rls_operation};
 use ::aclchk_seams::object_ownercheck;
 use ::namespace_seams::range_var_get_relid_from_text;
 use ::utils_error::ereport;
 use ::guc_tables::vars;
 use ::mcx::Mcx;
-use types_core::{FirstNormalObjectId, Oid, RELATION_RELATION_ID, INVALID_OID};
-use types_error::{PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
+use ::types_core::{FirstNormalObjectId, Oid, RELATION_RELATION_ID, INVALID_OID};
+use ::types_error::{PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR};
 use ::types_storage::lock::NoLock;
 
 /// `enum CheckEnableRlsResult` (`utils/rls.h`) — the result of

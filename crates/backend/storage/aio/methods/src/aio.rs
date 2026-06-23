@@ -25,7 +25,7 @@ extern crate alloc;
 use alloc::string::ToString;
 use core::sync::atomic::Ordering;
 
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use condition_variable as cv;
 use miscinit_seams as misc;

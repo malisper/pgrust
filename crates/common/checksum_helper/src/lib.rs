@@ -32,7 +32,7 @@
 //! (failure) maps to `Err`. A NULL/`NONE` checksum is fully supported and
 //! produces a zero-length digest.
 
-use crypto::{pg_cryptohash_ctx, pg_cryptohash_type};
+use ::crypto::{pg_cryptohash_ctx, pg_cryptohash_type};
 
 // ---------------------------------------------------------------------------
 // pg_checksum_type (common/checksum_helper.h)

@@ -24,14 +24,14 @@
 //! (loud panic until they land). `getInsertSelectQuery` is the rewriteManip.c
 //! owner's function, called directly via `backend-rewrite-core`.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_acl::acl::ACLCHECK_NOT_OWNER;
 use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL,
 };
 use ::types_catalog::pg_rewrite::{RewriteRelationId, ViewSelectRuleName};
-use types_core::{InvalidOid, Oid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,

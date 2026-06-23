@@ -7,7 +7,7 @@
 //! the `Mcx` the caller passes.
 
 use super::*;
-use mcx::{slice_in, MemoryContext, PgString};
+use ::mcx::{slice_in, MemoryContext, PgString};
 use std::string::ToString;
 use std::sync::Once;
 

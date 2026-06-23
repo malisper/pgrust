@@ -25,7 +25,7 @@ use ::mcx::Mcx;
 
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::{Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_TABLE_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };

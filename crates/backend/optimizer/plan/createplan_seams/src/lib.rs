@@ -45,7 +45,7 @@ use alloc::vec::Vec;
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::TargetEntry;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PathId, PlannerInfo, RinfoId};
+use ::pathnodes::{PathId, PlannerInfo, RinfoId};
 
 // ---------------------------------------------------------------------------
 // Per-scan-type converters reached from `create_scan_plan`'s second switch

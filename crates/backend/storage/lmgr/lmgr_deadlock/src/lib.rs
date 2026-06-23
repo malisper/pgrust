@@ -57,7 +57,7 @@ pub use detector::{
 pub use detector::print_lock_queue;
 
 // Re-export the vocabulary the detector returns/consumes (owned by types-deadlock).
-pub use types_deadlock::{
+pub use ::types_deadlock::{
     DeadLockState, DeadlockInfo, DeadlockReport, Edge, LockId, LockMethodData, LockSlot, LockSpace,
     ProcId, ProcLockId, ProcLockSlot, ProcSlot, WaitOrder,
 };

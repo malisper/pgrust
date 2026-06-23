@@ -40,14 +40,14 @@ extern crate alloc;
 
 use ::mcx::Mcx;
 use ::types_tuple::Datum;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
 use ::nodes::primnodes::Expr;
 use ::nodes_core::nodefuncs::{expr_typmod, relabel_to_typmod};
 use ::clauses::estimate_expression_value;
 
 use ::types_numeric::var::{GenerateSeriesNumericFctx, NumericSign};
-use types_numeric::{
+use ::types_numeric::{
     is_valid_numeric_typmod, numeric_is_nan, numeric_is_special, numeric_typmod_precision,
     numeric_typmod_scale,
 };

@@ -25,9 +25,9 @@ use replication_slot as slot;
 use ::activity_pgstat::kind_info::KindInfoBuilder;
 use ::activity_pgstat::registry;
 use ::activity_pgstat::shmem;
-use utils_error::{ereport, elog};
+use ::utils_error::{ereport, elog};
 use ::types_core::primitive::InvalidOid;
-use types_error::{PgResult, ErrorLocation, ERROR, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_error::{PgResult, ErrorLocation, ERROR, ERRCODE_INVALID_PARAMETER_VALUE};
 use ::types_logical::ReorderBufferStats;
 use ::types_pgstat::activity_pgstat::{PgStat_StatReplSlotEntry, PGSTAT_KIND_REPLSLOT};
 use ::types_pgstat::pgstat_internal::{

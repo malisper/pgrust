@@ -39,10 +39,10 @@ use extensible_seams as provider;
 use ipc_shm_toc_seams as shm_toc;
 use postgres_seams as tcop_postgres;
 
-use mcx::{alloc_in, PgBox};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::mcx::{alloc_in, PgBox};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::nodes::nodes::Node;
-use nodes::{
+use ::nodes::{
     CustomScan, CustomScanState, EStateData, ParallelContext, ParallelWorkerContext, SlotId,
     TupleSlotKind,
 };

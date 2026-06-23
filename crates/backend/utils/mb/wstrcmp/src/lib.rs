@@ -2,7 +2,7 @@
 
 use std::ffi::CStr;
 
-use types_wchar::{PgWChar, PgWCharStr};
+use ::types_wchar::{PgWChar, PgWCharStr};
 
 /// Compares a null-terminated byte string with a null-terminated `pg_wchar`
 /// string.

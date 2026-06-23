@@ -20,11 +20,11 @@ use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_READ_ONLY_SQL_TRANSACTION,
     ERRCODE_UNDEFINED_TABLE,
 };
-use types_error::{NOTICE, PgError, PgResult};
+use ::types_error::{NOTICE, PgError, PgResult};
 use ::rel::Relation;
 use ::types_storage::lock::{LOCKMODE, ShareLock};
 
-use verify_common_seams::{BTCallbackState, IndexDoCheckCallback};
+use ::verify_common_seams::{BTCallbackState, IndexDoCheckCallback};
 
 use indexam_seams as indexam;
 use table_seams as table;

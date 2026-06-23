@@ -13,7 +13,7 @@
 
 use core::any::Any;
 
-use mcx::{Mcx, MemoryContext, PgBox};
+use ::mcx::{Mcx, MemoryContext, PgBox};
 use ::types_error::PgResult;
 
 pub struct Tuplestorestate<'mcx> {

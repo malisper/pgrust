@@ -60,24 +60,24 @@
 
 extern crate alloc;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid, Selectivity};
 use ::datum::datum::Datum;
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo};
-use types_selfuncs::{
+use ::pathnodes::{NodeId, PlannerInfo};
+use ::types_selfuncs::{
     StatsTuple, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES, STATISTIC_KIND_DECHIST,
     STATISTIC_KIND_MCELEM,
 };
 use types_tuple::heaptuple::Datum as DatumV;
 
 use ::arrayfuncs_seams::deconstruct_array_values_bytes;
-use selfuncs_seams::{
+use ::selfuncs_seams::{
     examine_variable, get_restriction_variable, release_variable_stats,
     statistic_proc_security_check, stats_tuple_stanullfrac,
 };
-use lsyscache_seams::{
+use ::lsyscache_seams::{
     get_attstatsslot, get_attstatsslot_value_datums, get_base_element_type, get_typbyval,
     get_typcollation, get_typlenbyvalalign,
 };

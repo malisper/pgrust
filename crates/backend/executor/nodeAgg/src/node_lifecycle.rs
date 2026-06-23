@@ -3,7 +3,7 @@
 //! analysis that decides which outer-plan columns are needed, and the
 //! per-trans build that reads the catalog for each aggregate).
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::{Oid, OidIsValid, INVALID_OID};
 use ::types_tuple::heaptuple::Datum;
 use ::types_error::PgResult;
@@ -12,7 +12,7 @@ use ::nodes::nodeagg::{
 };
 use crate::aggstate::{AggStateData, AggStatePerTransData};
 use ::nodes::nodes::Node;
-use nodes::{Bitmapset, EStateData, SlotId};
+use ::nodes::{Bitmapset, EStateData, SlotId};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::types_core::fmgr::FmgrInfo;
 use ::types_tuple::heaptuple::TupleDescData;

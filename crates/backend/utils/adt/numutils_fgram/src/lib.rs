@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use error_fgram::{
+use ::error_fgram::{
     ereport, errsave, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERROR,
 };
@@ -338,7 +338,7 @@ impl WrappingWithin for u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use error_fgram::{
+    use ::error_fgram::{
         ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
     };
 

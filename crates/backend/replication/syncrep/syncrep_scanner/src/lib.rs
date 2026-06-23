@@ -21,7 +21,7 @@
 //! [`::types_error::PgError`] via [`PgResult`], exactly as the C `palloc`
 //! `ereport(ERROR)`s and unwinds without killing the backend.
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_error::PgResult;
 
 use scanner_seams as seams;
@@ -489,7 +489,7 @@ fn utf8_len(b: u8) -> usize {
 mod registry {
     extern crate std;
     use super::{seams, syncrep_scanner_init, SyncrepScanner};
-    use mcx::{Mcx, PgString};
+    use ::mcx::{Mcx, PgString};
     use std::cell::RefCell;
     use std::string::String;
     use std::vec::Vec;

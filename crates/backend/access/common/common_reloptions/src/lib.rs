@@ -49,13 +49,13 @@ mod tests;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::datum::datum::Datum;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERRCODE_WRONG_OBJECT_TYPE,
 };
-use types_reloptions::{
+use ::types_reloptions::{
     AttributeOpts, AutoVacOpts, StdRdOptIndexCleanup, StdRdOptions, TableSpaceOpts,
     ViewOptCheckOption, ViewOptions, STDRD_OPTION_VACUUM_INDEX_CLEANUP_AUTO,
     STDRD_OPTION_VACUUM_INDEX_CLEANUP_OFF, STDRD_OPTION_VACUUM_INDEX_CLEANUP_ON,
@@ -1908,7 +1908,7 @@ fn add_local_int_reloption_seam(
 /// `init_local_reloptions` / `add_local_*_reloption` seams operate on it); this
 /// reconstructs the typed-option list `build_local_reloptions` consumes.
 fn local_relopts_from_shared(shared: &::types_reloptions::local_relopts) -> LocalRelOpts {
-    use types_reloptions::{relopt_type as ST, relopt_typed};
+    use ::types_reloptions::{relopt_type as ST, relopt_typed};
     let mut out = LocalRelOpts {
         options: Vec::with_capacity(shared.options.len()),
         validators: Vec::new(),

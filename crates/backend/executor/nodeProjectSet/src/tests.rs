@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::sync::Once;
 
-use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::nodes::execexpr::{ExprState, SetExprState};
 use ::nodes::execnodes::{ExprContext, PlanStateData};
 use ::nodes::executor::TupleSlotKind;

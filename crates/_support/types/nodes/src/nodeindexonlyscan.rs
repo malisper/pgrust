@@ -11,7 +11,7 @@
 
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;
 use ::rel::Relation;
@@ -27,7 +27,7 @@ use crate::primnodes::{Expr, TargetEntry};
 
 pub use crate::execstate_tags::T_IndexOnlyScanState;
 pub use crate::nodes::T_IndexOnlyScan;
-pub use types_storage::{Buffer, InvalidBuffer};
+pub use ::types_storage::{Buffer, InvalidBuffer};
 
 // The index-scan descriptor family (`IndexScanDescData`/`IndexScanDesc`,
 // `ParallelIndexScanDescData`/`ParallelIndexScanDesc`, and the

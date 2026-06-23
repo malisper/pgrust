@@ -16,7 +16,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU16, AtomicU64};
 
 use ::condvar::ConditionVariable;
-use types_core::{Oid, RepOriginId, XLogRecPtr};
+use ::types_core::{Oid, RepOriginId, XLogRecPtr};
 use ::types_storage::LWLock;
 
 /// `#define PG_UINT16_MAX UINT16_MAX` (c.h) — `RepOriginId` is `uint16`.

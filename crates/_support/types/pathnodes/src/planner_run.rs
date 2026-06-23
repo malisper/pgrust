@@ -36,7 +36,7 @@
 //! [`PlannerInfo::parse`]: crate::PlannerInfo::parse
 //! [`QueryId`]: crate::QueryId
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Index;
 use ::nodes::copy_query::Query;
 use ::nodes::nodelockrows::PlanRowMark;

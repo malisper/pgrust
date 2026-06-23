@@ -41,8 +41,8 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use brin::{BrinDesc, BrinOpcInfo, BrinValues, MinmaxOpaque, OpaqueOpcInfo};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::brin::{BrinDesc, BrinOpcInfo, BrinValues, MinmaxOpaque, OpaqueOpcInfo};
 use ::types_core::primitive::{AttrNumber, BlockNumber, Oid};
 use ::types_error::error::{ERRCODE_INTERNAL_ERROR, ERROR};
 use ::types_error::PgResult;

@@ -14,7 +14,7 @@
 
 use std::ffi::CStr;
 
-use types_error::{PgError, PgResult, FATAL};
+use ::types_error::{PgError, PgResult, FATAL};
 
 /// `get_progname(argv0)` (`src/port/path.c`): strip the directory prefix from
 /// `argv[0]`, returning the bare program name as a fresh owned copy (the C

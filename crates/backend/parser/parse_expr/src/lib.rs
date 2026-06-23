@@ -57,8 +57,8 @@ use alloc::vec::Vec;
 
 use ::mcx::MemoryContext;
 
-use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_AMBIGUOUS_COLUMN, ERRCODE_CANNOT_COERCE,
     ERRCODE_COLLATION_MISMATCH,
     ERRCODE_DATATYPE_MISMATCH,
@@ -149,7 +149,7 @@ use lsyscache_seams as lsyscache;
 use typcache_seams as typcache;
 use ::types_tuple::Datum;
 
-use parser_relation::{
+use ::parser_relation::{
     colNameToVar, errorMissingColumn, errorMissingRTE, refnameNamespaceItem, scanNSItemForColumn,
 };
 use dbcommands_seams as dbcommands_seams;

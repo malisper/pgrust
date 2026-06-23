@@ -26,9 +26,9 @@
 //! ported `dsm.c`).
 
 use ::types_core::Size;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
-pub use types_dsa::{
+pub use ::types_dsa::{
     DsaHandle, DsaPointer, DsaSegmentIndex, DSA_ALLOC_HUGE, DSA_ALLOC_NO_OOM, DSA_ALLOC_ZERO,
     DSA_DEFAULT_INIT_SEGMENT_SIZE, DSA_FULLNESS_CLASSES, DSA_HANDLE_INVALID,
     DSA_MAX_SEGMENT_SIZE, DSA_MAX_SEGMENTS, DSA_MIN_SEGMENT_SIZE, DSA_NUM_SEGMENTS_AT_EACH_SIZE,

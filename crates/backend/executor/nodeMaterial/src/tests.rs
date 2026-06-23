@@ -8,7 +8,7 @@ use std::cell::Cell;
 use std::mem::size_of;
 use std::sync::Once;
 
-use mcx::{Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgBox, PgVec};
 use ::nodes::execnodes::{BackwardScanDirection, PlanStateData, ScanStateData};
 use ::nodes::executor::TTS_FLAG_EMPTY;
 use ::nodes::funcapi::Tuplestorestate;
@@ -18,7 +18,7 @@ use ::nodes::Bitmapset;
 use super::*;
 use ::nodes::TupleTableSlot;
 use ::nodes::tuptable::SlotData;
-use nodes::{EStateData, SlotId};
+use ::nodes::{EStateData, SlotId};
 
 /// The fake tuplestore engine behind the opaque carrier: a row count plus the
 /// two read-pointer positions nodeMaterial uses (0 = active, 1 = mark).

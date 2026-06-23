@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, slice_in, Mcx, MemoryContext, PgVec};
+use ::mcx::{alloc_in, slice_in, Mcx, MemoryContext, PgVec};
 use ::nodes::tuptable::SlotData;
 use ::nodes::TupleSlotKind;
 // The canonical value enum; `Datum` is its transitional alias.

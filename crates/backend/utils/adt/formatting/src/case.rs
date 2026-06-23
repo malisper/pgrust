@@ -12,13 +12,13 @@
 //! grow-and-retry buffer discipline stay in-crate, byte-for-byte with the C
 //! source.
 
-use mcx::{Mcx, PgVec};
-use types_error::{PgError, PgResult};
-use types_error::{
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{PgError, PgResult};
+use ::types_error::{
     ERRCODE_INDETERMINATE_COLLATION, ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR,
 };
 use ::locale::PgLocale;
-use types_core::{InvalidOid, Oid};
+use ::types_core::{InvalidOid, Oid};
 use ::types_wchar::encoding::PG_UTF8;
 
 use crate::tables::{

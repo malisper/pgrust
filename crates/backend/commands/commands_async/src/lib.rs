@@ -34,27 +34,27 @@ pub mod fmgr_builtins;
 
 use std::cell::{Cell, RefCell};
 
-use utils_error::{ereport, PgError};
-use types_error::{
+use ::utils_error::{ereport, PgError};
+use ::types_error::{
     ErrorLocation, PgResult, DEBUG1, DEBUG3, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, INFO, WARNING,
 };
 
-use slru::{
+use ::slru::{
     self as slru, SimpleLruGetBankLock, SimpleLruInit, SimpleLruReadPage, SimpleLruReadPage_ReadOnly,
     SimpleLruShmemSize, SimpleLruTruncate, SimpleLruZeroPage, SlruCtlData, SlruScanDirCbDeleteAll,
     SlruScanDirectory, SLRU_PAGES_PER_SEGMENT,
 };
-use lwlock::{main_lock_ref, LWLockAcquire, LWLockRelease};
+use ::lwlock::{main_lock_ref, LWLockAcquire, LWLockRelease};
 use ::init_small::globals;
 
-use types_async::{
+use ::types_async::{
     AsyncQueueControl, AsyncQueueEntry, AsyncQueueEntryEmptySize, InvalidPid, ListenActionKind,
     QueueBackendStatus, QueuePosition, ASYNC_QUEUE_CONTROL_HEADER_SIZE, MIN_HASHABLE_NOTIFIES,
     NAMEDATALEN, NOTIFY_PAYLOAD_MAX_LENGTH, QUEUEALIGN, QUEUE_CLEANUP_DELAY, QUEUE_FULL_WARN_INTERVAL,
     QUEUE_PAGESIZE,
 };
-use types_core::{
+use ::types_core::{
     InvalidOid, Oid, ProcNumber, Size, TransactionId, INVALID_PROC_NUMBER,
 };
 use ::types_storage::storage::{
@@ -2117,7 +2117,7 @@ pub fn init_seams() {
     // `conf->variable` slot — not the ControlFile. The GUC engine seeds them
     // from boot_val and reads/writes them through these accessors.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::Trace_notify.install(GucVarAccessors {
             get: trace_notify,
             set: set_trace_notify,

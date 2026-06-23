@@ -3,7 +3,7 @@
 use crate::{appendf, i64_at};
 use ::mcx::PgString;
 use ::types_error::PgResult;
-use wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{DecodedXLogRecord, XLR_INFO_MASK};
 use ::xlog_records::multixact::{MultiXactMember, MultiXactStatus, xl_multixact_create,
                                     xl_multixact_truncate};
 

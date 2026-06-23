@@ -17,12 +17,12 @@
 extern crate alloc;
 use alloc::string::String;
 
-use types_core::{pid_t, Oid, ProcNumber, Size, TimestampTz, XLogRecPtr};
+use ::types_core::{pid_t, Oid, ProcNumber, Size, TimestampTz, XLogRecPtr};
 use ::types_tuple::Datum;
 use ::snapshot::SnapshotData;
 use ::types_error::PgResult;
 use ::types_bgworker::BackgroundWorkerHandle;
-use types_parallel::{
+use ::types_parallel::{
     dsm_handle, BgwHandleStatus, DsmSegmentHandle, FixedParallelState,
     ParallelWorkerMainFn, ShmMqHandleHandle,
 };

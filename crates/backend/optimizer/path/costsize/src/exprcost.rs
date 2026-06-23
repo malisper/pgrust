@@ -6,7 +6,7 @@
 use ::types_core::primitive::Cost;
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     AggStrategy, NodeId, PathId, PathNode, PlannerInfo, AGG_HASHED, AGG_MIXED,
     AGG_PLAIN, AGG_SORTED,
 };
@@ -14,7 +14,7 @@ use pathnodes::{
 use costsize_seams as cz;
 use pathnode_seams as ps;
 use selfuncs_seams as selfuncs;
-use types_selfuncs::{EstimationInfo, SELFLAG_USED_DEFAULT};
+use ::types_selfuncs::{EstimationInfo, SELFLAG_USED_DEFAULT};
 
 use crate::{
     ceil, clamp_row_est, cost_qual_eval, cpu_operator_cost, cpu_tuple_cost,

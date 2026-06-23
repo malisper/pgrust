@@ -12,8 +12,8 @@ use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::Oid;
 use ::datum::datum::Datum;
 use ::types_error::error::ERRCODE_UNDEFINED_FUNCTION;
-use types_error::{PgError, PgResult};
-use types_rangetypes::{
+use ::types_error::{PgError, PgResult};
+use ::types_rangetypes::{
     MultirangeTypeP, RangeTypeP, RANGE_EMPTY, RANGE_LB_INF, RANGE_LB_NULL, RANGE_UB_INF,
     RANGE_UB_NULL,
 };

@@ -197,7 +197,7 @@ pub fn init_seams() {
     // `.read()` / `.write()` resolve. `recovery_target_time`'s `conf->variable`
     // is `char *recovery_target_time_string` (xlogrecovery.c:91), an
     // xlogrecovery.c global, so it is installed here too.
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
     vars::recoveryRestoreCommand.install(GucVarAccessors {
         get: gucvars::recovery_restore_command,
         set: gucvars::set_recovery_restore_command,

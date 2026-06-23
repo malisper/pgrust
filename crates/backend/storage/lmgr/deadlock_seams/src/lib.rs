@@ -5,8 +5,8 @@
 //! The owning unit installs these from its `init_seams()`; until proc.c lands and
 //! actually calls them, the slots are installed but simply unused.
 
-use types_deadlock::{DeadLockState, LockId, LockSpace, ProcId};
-use types_error::{PgError, PgResult};
+use ::types_deadlock::{DeadLockState, LockId, LockSpace, ProcId};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::LOCKMODE;
 
 seam_core::seam!(

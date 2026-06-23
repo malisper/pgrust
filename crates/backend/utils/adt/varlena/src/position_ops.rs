@@ -12,9 +12,9 @@
 //! the locale providers (`pg_newlocale_from_collation`, `pg_strncoll`) for
 //! nondeterministic-collation matching (genuinely external: pg_locale.c).
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_SUBSTRING_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_SUBSTRING_ERROR};
 
 use pg_locale_seams as locale;
 use mbutils_seams as mb;

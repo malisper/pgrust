@@ -18,11 +18,11 @@
 //!     for an all-null column (`spl_*isnull` is true then).
 
 use alloc::vec::Vec;
-use utils_error::{ereport, PgResult};
+use ::utils_error::{ereport, PgResult};
 use ::mcx::Mcx;
 use ::types_core::primitive::{InvalidBlockNumber, InvalidOid, OffsetNumber};
 use ::types_error::error::{DEBUG1, ERRCODE_INTERNAL_ERROR};
-use gist::{
+use ::gist::{
     GistEntryVector, GistSplitVector, GISTENTRY, GISTSTATE, GIST_SPLITVEC,
 };
 use ::rel::Relation;

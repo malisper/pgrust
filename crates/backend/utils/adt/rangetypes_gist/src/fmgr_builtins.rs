@@ -39,7 +39,7 @@
 
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// The shared fmgr-frame entry point for every range/multirange GiST opclass
 /// support proc. In the owned model the GiST access method invokes these procs

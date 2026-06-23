@@ -59,11 +59,11 @@
 //! `array_agg_deserialize` parallel-aggregation half and the `array_agg_array_*`
 //! (sub-array) variants are not yet ported.
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::array::ArrayElementDatum;
 use ::types_core::Oid;
 use ::datum::datum::Datum;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_UNDEFINED_FUNCTION,
     ERROR,

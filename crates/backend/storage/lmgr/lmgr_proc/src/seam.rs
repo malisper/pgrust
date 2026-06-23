@@ -26,7 +26,7 @@
 //! `proc_lifecycle` is the real one, never a stub of proc.c's own logic.
 
 use ::types_core::init::BackendType;
-use types_core::{LocalTransactionId, ProcNumber, TransactionId};
+use ::types_core::{LocalTransactionId, ProcNumber, TransactionId};
 use ::types_tuple::Datum;
 use ::types_error::PgResult;
 use ::types_storage::lock::{DeadLockState, LOCKMODE, LOCKTAG};
@@ -507,7 +507,7 @@ pub(crate) fn remember_simple_deadlock(
     lock: LOCKTAG,
     proc2: ProcNumber,
 ) {
-    use types_deadlock::{LockId, LockSlot, ProcId};
+    use ::types_deadlock::{LockId, LockSlot, ProcId};
 
     let (mut space, _my_id) =
         lock_seams::build_dead_lock_space::call(proc1);

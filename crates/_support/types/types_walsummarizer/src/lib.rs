@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::condvar::ConditionVariable;
-use types_core::{BlockNumber, ForkNumber, ProcNumber, TimeLineID, XLogRecPtr};
+use ::types_core::{BlockNumber, ForkNumber, ProcNumber, TimeLineID, XLogRecPtr};
 use ::types_storage::RelFileLocator;
 
 /// Data in shared memory related to WAL summarization (`WalSummarizerData`).

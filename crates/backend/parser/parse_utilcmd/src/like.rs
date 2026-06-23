@@ -14,34 +14,34 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 use ::utils_error::ereport;
 use ::types_core::Oid;
-use types_error::{PgResult, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
+use ::types_error::{PgResult, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use ::types_storage::lock::{AccessShareLock, NoLock};
 
-use types_acl::{ACLCHECK_OK, ACL_SELECT, ACL_USAGE};
+use ::types_acl::{ACLCHECK_OK, ACL_SELECT, ACL_USAGE};
 use ::nodes::ddlnodes::CommentStmt;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{OBJECT_COLUMN, OBJECT_TABCONSTRAINT, OBJECT_TYPE};
 use ::nodes::rawnodes::{ColumnDef, TypeName};
 use ::types_tuple::pg_type::FormData_pg_type;
 
-use common_relation::{relation_open, relation_openrv};
+use ::common_relation::{relation_open, relation_openrv};
 use ::toast_compression::get_compression_method_name;
 use ::table::table_close;
-use aclchk::{aclcheck_error, object_aclcheck, pg_class_aclcheck};
+use ::aclchk::{aclcheck_error, object_aclcheck, pg_class_aclcheck};
 use ::objectaddress::resolve::get_relkind_objtype;
 use ::pg_class::errdetail_relkind_not_supported;
-use pg_constraint::{
+use ::pg_constraint::{
     get_relation_constraint_oid, NotNullConstraint, RelationGetNotNullConstraints,
 };
 use ::pg_depend::getIdentitySequence;
 use ::comment::GetComment;
 use ::commands_sequence::sequence_options;
-use parse_type::{raw_typename_to_parse, typenameType};
-use small1::{
+use ::parse_type::{raw_typename_to_parse, typenameType};
+use ::small1::{
     cancel_parser_errposition_callback, parser_errposition, setup_parser_errposition_callback,
 };
 use ::adt_format_type::format_type_be;

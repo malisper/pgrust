@@ -21,7 +21,7 @@ use ::nodes::tuptable::{AttInMetadata, SlotData, TupOutputState};
 use ::types_tuple::heaptuple::{Datum, FormedTuple};
 use ::types_tuple::heaptuple::{HeapTuple, TupleDesc, TupleDescData, RECORDOID};
 
-use tupdesc::{
+use ::tupdesc::{
     CreateTemplateTupleDesc, TupleDescInitEntry, TupleDescInitEntryCollation,
 };
 

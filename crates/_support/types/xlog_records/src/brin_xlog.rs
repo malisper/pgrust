@@ -1,7 +1,7 @@
 //! BRIN rmgr WAL record bodies (`access/brin_xlog.h`).
 
 use crate::bytes::{u16_at, u32_at};
-use types_core::{BlockNumber, OffsetNumber};
+use ::types_core::{BlockNumber, OffsetNumber};
 
 /// `xl_brin_createidx`: `{BlockNumber pagesPerRange; uint16 version;}`.
 #[derive(Clone, Copy, Debug)]

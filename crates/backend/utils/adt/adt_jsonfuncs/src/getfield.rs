@@ -26,10 +26,10 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use ::utils_error::ereport;
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::error::ERROR;
 use ::types_error::PgResult;
-use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
+use ::types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use ::types_jsonb::jsonb::{
     is_a_jsonb_scalar, jbvType, json_container_is_array, json_container_is_object,
@@ -37,7 +37,7 @@ use ::types_jsonb::jsonb::{
 };
 
 use ::adt_jsonb::JsonbToCString;
-use jsonb_util::{
+use ::jsonb_util::{
     getIthJsonbValueFromContainer, getKeyJsonValueFromContainer, JsonbValueToJsonb,
 };
 

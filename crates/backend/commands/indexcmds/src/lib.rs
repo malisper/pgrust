@@ -50,10 +50,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::types_core::primitive::Oid;
-use types_core::{InvalidOid, OidIsValid};
+use ::types_core::{InvalidOid, OidIsValid};
 use ::types_error::PgResult;
 use ::nodes::ddlnodes::{IndexElem, IndexStmt};
 use ::nodes::nodes::{ntag, Node};
@@ -70,19 +70,19 @@ use ::nodes_core::bitmapset::{bms_is_member, bms_next_member, bms_union};
 use ::index::index_check_primary_key;
 use ::index_amapi::GetIndexAmRoutineByAmId;
 use ::clauses::contain_mutable_functions_after_planning;
-use tablespace::{get_tablespace_name, get_tablespace_oid, GetDefaultTablespace};
+use ::tablespace::{get_tablespace_name, get_tablespace_oid, GetDefaultTablespace};
 use ::comment::CreateComments;
-use misc_guc::{at_eoxact_guc, NewGUCNestLevel};
-use guc_seams::{restrict_search_path, set_config_option};
+use ::misc_guc::{at_eoxact_guc, NewGUCNestLevel};
+use ::guc_seams::{restrict_search_path, set_config_option};
 use ::table::table_close as owner_table_close;
-use miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
+use ::miscinit::{GetUserIdAndSecContext, SetUserIdAndSecContext};
 use ::activity_small::backend_progress::{
     pgstat_progress_end_command, pgstat_progress_incr_param, pgstat_progress_start_command,
     pgstat_progress_update_param,
 };
 
 // ---- seams consumed from other units ----
-use index_seams::{self as index_seam, IndexCreateArgs};
+use ::index_seams::{self as index_seam, IndexCreateArgs};
 use aclchk_seams as aclchk_seam;
 use lsyscache_seams as lsyscache;
 use syscache_seams as syscache;
@@ -1235,7 +1235,7 @@ pub fn WaitForOlderSnapshots<'mcx>(
 // ExecReindex / ReindexIndex / ReindexTable  (REINDEX command drivers)
 // ---------------------------------------------------------------------------
 
-use types_cluster::{
+use ::types_cluster::{
     ReindexParams, REINDEXOPT_CONCURRENTLY, REINDEXOPT_REPORT_PROGRESS, REINDEXOPT_VERBOSE,
     REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_PROCESS_TOAST,
 };

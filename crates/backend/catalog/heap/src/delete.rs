@@ -11,7 +11,7 @@ use ::utils_error::elog;
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_core::fmgr::F_OIDEQ;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::types_scan::scankey::{
     ScanKeyData, BTEqualStrategyNumber, BTLessEqualStrategyNumber,
 };

@@ -250,7 +250,7 @@ fn emit_node_payload_impls(
          // (proposal §4.2a).\n\
          use crate::nodes::{Node, NodeTag, NodePtr};\n\
          use crate::opaque_node::{NodePayload, node_equal_seam};\n\
-         use mcx::{Mcx, PgVec};\n\
+         use ::mcx::{Mcx, PgVec};\n\
          use ::types_error::PgResult;\n\n",
     );
 

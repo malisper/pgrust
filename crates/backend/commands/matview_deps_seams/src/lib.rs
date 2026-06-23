@@ -34,7 +34,7 @@
 use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
-use types_matview::{IndexUsabilityInfo, MatViewRuleInfo, MatchMergeQual};
+use ::types_matview::{IndexUsabilityInfo, MatViewRuleInfo, MatchMergeQual};
 use ::nodes::copy_query::Query;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::rel::Relation;

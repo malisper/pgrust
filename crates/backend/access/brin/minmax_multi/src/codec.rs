@@ -12,7 +12,7 @@
 //! Header layout (matches C `offsetof(SerializedRanges, data) == 20`):
 //!   vl_len_(4) typid(4) nranges(4) nvalues(4) maxvalues(4) | data...
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum;

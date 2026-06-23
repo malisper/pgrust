@@ -6,7 +6,7 @@
 //! formatting (which read only the descriptor).
 
 use super::*;
-use mcx::{MemoryContext, PgVec};
+use ::mcx::{MemoryContext, PgVec};
 use ::types_tuple::heaptuple::{CompactAttribute, FormData_pg_attribute, NameData, TupleDescData};
 
 fn name(s: &str) -> NameData {

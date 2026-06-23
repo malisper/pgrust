@@ -22,7 +22,7 @@ use ::types_core::Oid;
 //     stays on the shim `NullableDatum` here.
 // Every other (genuine-value) Datum use in this crate — the `FmgrArg`/`FmgrOut`
 // boundary value arms — has moved onto canonical `types_tuple::Datum<'mcx>`.
-use datum::{Datum, NullableDatum};
+use ::datum::{Datum, NullableDatum};
 use ::types_error::SoftErrorContext;
 
 use crate::boundary::RefPayload;

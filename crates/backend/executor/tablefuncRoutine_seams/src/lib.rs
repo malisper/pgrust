@@ -21,7 +21,7 @@
 
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
-use nodes::{TableFuncRoutineKind, TableFuncScanState};
+use ::nodes::{TableFuncRoutineKind, TableFuncScanState};
 use types_tuple::heaptuple::Datum;
 
 seam_core::seam!(

@@ -36,12 +36,12 @@ extern crate alloc;
 use core::cell::RefCell;
 
 use ::utils_error::ereport;
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::types_core::xact::CommandId;
 use ::types_dest::CommandDest;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INDETERMINATE_COLLATION, ERRCODE_SYNTAX_ERROR, ERROR, NOTICE,
 };

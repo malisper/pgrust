@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use std::sync::{Mutex, OnceLock};
 
-use types_core::{BlockNumber, InvalidBlockNumber, InvalidOid, Oid, TimestampTz};
+use ::types_core::{BlockNumber, InvalidBlockNumber, InvalidOid, Oid, TimestampTz};
 
 use crate::core::{AutoVacForkFailed, AutoVacRebalance, NUM_WORKITEMS};
 

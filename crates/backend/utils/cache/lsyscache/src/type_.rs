@@ -19,16 +19,16 @@ use makefuncs_seams as makefuncs;
 use read_seams as nodes_read;
 use format_type_seams as format_type;
 use miscinit_seams as miscinit;
-use lsyscache_seams::{IOFuncSelector, TypLenByValAlign, TypeIoData};
+use ::lsyscache_seams::{IOFuncSelector, TypLenByValAlign, TypeIoData};
 use syscache_seams as syscache;
 use fmgr_seams as fmgr;
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::nodes::execexpr::{SubscriptHandler, SubscriptRoutines};
 use ::nodes::nodes::Node;
-use array::{ArrayElementIoData, ArrayIoFuncSelector};
+use ::array::{ArrayElementIoData, ArrayIoFuncSelector};
 use ::cache::typcache::{PgRangeRow, PgTypeRow};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,
 };
 use ::types_tuple::pg_type::FormData_pg_type;

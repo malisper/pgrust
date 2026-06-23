@@ -28,7 +28,7 @@
 //! `commit_transaction_command`, `has_privs_of_role`, `get_user_id`,
 //! `pg_check_dir`, `is_absolute_path`), panicking until those owners land.
 
-use sink::{
+use ::sink::{
     bbsink_forward_archive_contents, bbsink_forward_begin_archive,
     bbsink_forward_begin_backup, bbsink_forward_begin_manifest, bbsink_forward_cleanup,
     bbsink_forward_end_archive, bbsink_forward_end_backup, bbsink_forward_end_manifest,
@@ -39,11 +39,11 @@ use ::fd::vfd_io::{
     FileClose, FilePathName, FileSync, FileWriteV, PathNameOpenFile,
 };
 use ::fd_seams::make_pg_directory;
-use utils_error::{ereport, errno};
+use ::utils_error::{ereport, errno};
 use ::mcx::Mcx;
 use ::types_catalog::catalog::ROLE_PG_WRITE_SERVER_FILES;
 use ::types_core::primitive::{Size, TimeLineID, XLogRecPtr};
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DISK_FULL, ERRCODE_DUPLICATE_FILE,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_NAME, ERROR,
 };

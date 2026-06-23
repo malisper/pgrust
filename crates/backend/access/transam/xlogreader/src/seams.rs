@@ -14,7 +14,7 @@ use alloc::string::String;
 use ::types_core::primitive::{Buffer, TimeLineID, XLogRecPtr, XLogSegNo};
 use ::types_error::PgResult;
 use ::wal::rmgr::XLogReaderState;
-use wal::{DecodedBkpBlock, ReadAheadRecordInfo};
+use ::wal::{DecodedBkpBlock, ReadAheadRecordInfo};
 
 use xlogreader_seams as seam;
 

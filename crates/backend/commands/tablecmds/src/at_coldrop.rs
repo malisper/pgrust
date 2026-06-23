@@ -13,7 +13,7 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::pg_attribute::{
@@ -21,7 +21,7 @@ use ::types_catalog::pg_attribute::{
     Anum_pg_attribute_attnum, PgAttributeUpdateRow,
 };
 use ::types_core::primitive::AttrNumber;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_UNDEFINED_COLUMN,
     ERROR, NOTICE,
 };
@@ -46,7 +46,7 @@ use crate::at_phase::{
 use crate::helpers::{here, RelationRelationId};
 
 use ::heaptuple::FormedTuple;
-use cache_syscache::{SysCacheGetAttrNotNull, ATTNAME};
+use ::cache_syscache::{SysCacheGetAttrNotNull, ATTNAME};
 
 const BITS_PER_BITMAPWORD: i32 = 64;
 

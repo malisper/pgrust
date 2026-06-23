@@ -13,7 +13,7 @@
 use core::ptr;
 use core::sync::atomic::AtomicI32;
 
-use types_core::{uint32, Size};
+use ::types_core::{uint32, Size};
 
 /// `HASHELEMENT` (hsearch.h) — header for a hash-table entry as stored in a
 /// bucket chain; the user's key+entry data follows at

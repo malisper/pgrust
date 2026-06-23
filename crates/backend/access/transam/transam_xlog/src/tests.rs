@@ -5,7 +5,7 @@
 //! `xlog-driver` core and loud-panics by design, so it is not exercised here.)
 
 use super::*;
-use control::{CheckPoint, ControlFileData, FullTransactionId};
+use ::control::{CheckPoint, ControlFileData, FullTransactionId};
 
 const SEG: i32 = DEFAULT_XLOG_SEG_SIZE; // 16 MiB
 

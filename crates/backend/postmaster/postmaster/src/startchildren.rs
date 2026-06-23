@@ -6,12 +6,12 @@
 #![allow(non_snake_case)]
 
 use ::launch_backend::postmaster_child_launch;
-use pmchild::{
+use ::pmchild::{
     AssignPostmasterChildSlot, PMChild, ReleasePostmasterChildSlot, SetActiveChildBgworkerInfo,
     SetActiveChildPid,
 };
-use utils_error::{ereport};
-use types_error::{LOG, PANIC};
+use ::utils_error::{ereport};
+use ::types_error::{LOG, PANIC};
 use ::types_error::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED;
 use ::types_core::init::BackendType;
 use ::types_startup::StartupData;

@@ -13,9 +13,9 @@
 #![allow(non_camel_case_types)]
 
 pub use ::types_core::primitive::pg_time_t;
-pub use pgtime::{lsinfo, pg_tm, pg_tz, state, ttinfo, TZ_STRLEN_MAX};
+pub use ::pgtime::{lsinfo, pg_tm, pg_tz, state, ttinfo, TZ_STRLEN_MAX};
 
-use pgtime::{CHARS_SIZE, TZ_MAX_CHARS, TZ_MAX_LEAPS, TZ_MAX_TIMES, TZ_MAX_TYPES};
+use ::pgtime::{CHARS_SIZE, TZ_MAX_CHARS, TZ_MAX_LEAPS, TZ_MAX_TIMES, TZ_MAX_TYPES};
 
 const SECSPERMIN: i64 = 60;
 const MINSPERHOUR: i64 = 60;

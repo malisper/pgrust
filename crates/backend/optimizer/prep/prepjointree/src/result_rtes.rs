@@ -40,7 +40,7 @@ use ::nodes_core::node_walker::{
     expression_tree_walker, expression_tree_walker_mut, query_tree_mutator, query_tree_walker,
     range_table_entry_walker,
 };
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::copy_query::Query;
@@ -48,7 +48,7 @@ use ::nodes::jointype::JoinType;
 use ::nodes::nodes::{ntag, Node, NodePtr};
 use ::nodes::parsenodes::RTEKind;
 use ::nodes::primnodes::ExprRelids;
-use pathnodes::{NodeId, PlannerInfo};
+use ::pathnodes::{NodeId, PlannerInfo};
 
 /// C `Relids` = `Bitmapset *`: the `'mcx`-arena relid set (NULL/empty = `None`).
 type Relids<'mcx> = Option<PgBox<'mcx, Bitmapset<'mcx>>>;

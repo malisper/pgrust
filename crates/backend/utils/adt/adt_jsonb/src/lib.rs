@@ -39,18 +39,18 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
 use ::types_error::error::{
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_PROTOCOL_VIOLATION,
 };
-use types_error::{PgError, PgResult, SoftErrorContext};
-use types_json::{JsonTokenType, JsonTypeCategory};
+use ::types_error::{PgError, PgResult, SoftErrorContext};
+use ::types_json::{JsonTokenType, JsonTypeCategory};
 use ::types_tuple::heaptuple::{DATEOID, TIMEOID, TIMESTAMPOID, TIMESTAMPTZOID, TIMETZOID};
 use ::types_tuple::Datum;
 
-use jsonb_util::{
+use ::jsonb_util::{
     json_container_is_array, json_container_is_object, json_container_is_scalar, jbvType,
     pushJsonbValue as jbu_pushJsonbValue, JsonbIteratorInit, JsonbIteratorNext, JsonbIteratorToken,
     JsonbParseState, JsonbValue, JsonbValueData, JsonbValueToJsonb, VARHDRSZ,

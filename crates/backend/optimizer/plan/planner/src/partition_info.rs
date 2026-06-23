@@ -18,9 +18,9 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
-use pathnodes::{NodeId, PartitionBoundInfoData, PartitionScheme, PartitionSchemeData, PlannerInfo, RelId};
+use ::pathnodes::{NodeId, PartitionBoundInfoData, PartitionScheme, PartitionSchemeData, PlannerInfo, RelId};
 use ::types_storage::lock::NoLock;
 use types_tuple::heaptuple::Datum;
 

@@ -12,9 +12,9 @@ use ::types_core::Oid;
 use ::types_core::ProcNumber;
 use ::types_core::TimestampTz;
 use ::types_core::TransactionId;
-use types_deadlock::{LockId, LockSpace};
+use ::types_deadlock::{LockId, LockSpace};
 use ::types_error::PgResult;
-use types_storage::{proclist_node, LWLockMode, LWLockWaitState, VirtualTransactionId};
+use ::types_storage::{proclist_node, LWLockMode, LWLockWaitState, VirtualTransactionId};
 
 seam_core::seam!(
     /// Read `MyProc->xmin` — this backend's advertised oldest-visible xmin in

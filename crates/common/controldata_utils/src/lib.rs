@@ -12,11 +12,11 @@
 
 use fd_seams as fd;
 use ::utils_error::ereport;
-use control::{
+use ::control::{
     CheckPoint, ControlFileData, DBState, MOCK_AUTH_NONCE_LEN, PG_CONTROL_VERSION,
 };
-use types_core::{pg_crc32c, FullTransactionId};
-use types_error::{PgResult, ERROR};
+use ::types_core::{pg_crc32c, FullTransactionId};
+use ::types_error::{PgResult, ERROR};
 
 /// `sizeof(ControlFileData)` on LP64 (`catalog/pg_control.h`), up to and
 /// including the trailing `crc` field.

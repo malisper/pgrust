@@ -9,11 +9,11 @@
 extern crate alloc;
 use alloc::string::String;
 
-use mcx::{alloc_in, MemoryContext};
+use ::mcx::{alloc_in, MemoryContext};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::CmdType;
 use ::nodes::primnodes::{Expr, TargetEntry, Var};
-use pathnodes::{PlannerInfo, TargetEntryNode};
+use ::pathnodes::{PlannerInfo, TargetEntryNode};
 
 use crate::{extract_update_targetlist_colnos, get_plan_rowmark, preprocess_targetlist};
 

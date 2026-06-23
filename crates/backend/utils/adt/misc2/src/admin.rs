@@ -32,7 +32,7 @@ use ::mcx::Mcx;
 // builtins return / assemble the unified `Datum<'mcx>`. The varlena owner still
 // hands back the bare scalar word, bridged at `text_datum`/`bytes_to_varlena`.
 use types_tuple::heaptuple::Datum;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_CANT_CHANGE_RUNTIME_PARAM, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };

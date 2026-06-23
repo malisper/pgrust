@@ -186,7 +186,7 @@ use alloc::vec::Vec;
 use ::types_core::fmgr::INDEX_MAX_KEYS;
 use ::types_core::primitive::{InvalidOid, OidIsValid};
 use ::types_core::primitive::{Oid, Size};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use ::mcx::Mcx;
 use ::nodes::execnodes::IndexInfo;

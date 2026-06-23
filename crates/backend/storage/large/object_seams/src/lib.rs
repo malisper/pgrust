@@ -12,7 +12,7 @@
 //! [`::types_storage::large_object::LargeObjectDesc`]; read/write buffers cross as
 //! owned slices (the C `char *buf` + `int nbytes`).
 
-use types_core::{int64, Oid};
+use ::types_core::{int64, Oid};
 use ::types_error::PgResult;
 use ::types_storage::large_object::LargeObjectDesc;
 

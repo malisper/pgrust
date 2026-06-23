@@ -24,7 +24,7 @@ use ::prepare::DropAllPreparedStatements;
 use ::sequence_seams_2::reset_sequence_caches;
 use ::lock_seams::lock_release_all_user;
 use ::cache_plancache::ResetPlanCache;
-use guc_seams::{reset_all_options, set_pg_variable_session_authorization_reset};
+use ::guc_seams::{reset_all_options, set_pg_variable_session_authorization_reset};
 use ::portalmem::PortalHashTableDeleteAll;
 
 use ::transam_xact_seams::prevent_in_transaction_block;

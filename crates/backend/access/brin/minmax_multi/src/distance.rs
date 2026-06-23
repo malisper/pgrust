@@ -12,7 +12,7 @@
 
 use ::datum::Datum as WordDatum;
 use ::types_error::PgResult;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use numeric_seams as numeric;
 

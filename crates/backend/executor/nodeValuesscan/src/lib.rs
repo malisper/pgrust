@@ -46,7 +46,7 @@ use ::types_error::PgResult;
 use ::execparallel::PGJIT_NONE;
 use ::nodes::nodes::Node;
 use ::nodes::nodevaluesscan::{ValuesScan, ValuesScanState};
-use nodes::{EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
+use ::nodes::{EStateData, ScanDirectionIsForward, SlotId, TupleSlotKind};
 
 /// Access-method "function pointer" (C `ExecScanAccessMtd`): the next-tuple
 /// routine `ExecScan` re-enters. Returns the scan slot id when a tuple is

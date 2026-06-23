@@ -30,7 +30,7 @@ use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
 use ::types_core::fmgr::FmgrInfo;
 use ::types_error::PgResult;
-use gin::{GinMetaPageData, GinNullCategory};
+use ::gin::{GinMetaPageData, GinNullCategory};
 use ::rel::Relation;
 use ::types_scan::scankey::ScanKeyData;
 use ::types_storage::storage::Buffer;

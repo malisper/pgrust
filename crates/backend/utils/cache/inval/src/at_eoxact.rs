@@ -6,7 +6,7 @@
 //! and `LogLogicalInvalidations`).
 
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::SharedInvalidationMessage;
 use ::wal::wal::RM_XACT_ID;
 use ::wal::xact::XLOG_XACT_INVALIDATIONS;

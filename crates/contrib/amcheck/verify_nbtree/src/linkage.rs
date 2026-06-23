@@ -10,9 +10,9 @@
 //! (`BTreeTupleGetDownLink` / `BTreeTupleGetTopParent`, nbtree.h inline).
 
 use ::types_core::primitive::{BlockNumber, OffsetNumber};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_error::error::ERRCODE_INDEX_CORRUPTED;
-use types_nbtree::{BTScanInsert, P_HIKEY, P_NONE};
+use ::types_nbtree::{BTScanInsert, P_HIKEY, P_NONE};
 use ::types_tuple::heaptuple::{IndexTuple, IndexTupleData, IndexTupleSize};
 
 use nbtree_core_seams as nbtcore;

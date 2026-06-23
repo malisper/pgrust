@@ -18,8 +18,8 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
-use types_amapi::{
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use ::types_amapi::{
     CompareType, IndexAmRoutine, COMPARE_EQ, COMPARE_GE, COMPARE_GT, COMPARE_INVALID, COMPARE_LE,
     COMPARE_LT, T_IndexAmRoutine,
 };
@@ -41,7 +41,7 @@ use ::snapshot::snapshot::IsMVCCSnapshot;
 use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid, Size};
 use ::types_core::InvalidOid;
 use ::types_error::PgResult;
-use types_nbtree::{
+use ::types_nbtree::{
     BTParallelScanDescData, BTPS_State, BTScanOpaqueData, BTScanPosInvalidate, BTScanPosIsPinned,
     BTScanPosIsValid, BTVacState, BTVacuumPosting, BTCycleId, IndexBulkDeleteResult,
     IndexUniqueCheck, BTMaxStrategyNumber, BTNProcs, BTOPTIONS_PROC, BTP_DELETED, BTP_HALF_DEAD,

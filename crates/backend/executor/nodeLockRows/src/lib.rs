@@ -26,10 +26,10 @@
 extern crate alloc;
 
 use nodeLockRows_seams as seam;
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use seam::{ForeignRefetch, TupleLockRequest};
 use ::types_core::xact::XACT_REPEATABLE_READ;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_T_R_SERIALIZATION_FAILURE};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_T_R_SERIALIZATION_FAILURE};
 use ::nodes::execnodes::EStateData;
 use ::nodes::nodelockrows::{
     ExecAuxRowMarkData, ExecRowMark, LockRows, LockRowsStateData, RowMarkRequiresRowShareLock,
@@ -37,7 +37,7 @@ use ::nodes::nodelockrows::{
 };
 use ::nodes::parsenodes::RTE_RELATION;
 use ::types_tuple::heaptuple::ItemPointerData;
-use types_tableam::{
+use ::types_tableam::{
     LockTupleExclusive, LockTupleKeyShare, LockTupleMode, LockTupleNoKeyExclusive, LockTupleShare,
     TM_FailureData, TM_Result, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
     TUPLE_LOCK_FLAG_LOCK_UPDATE_IN_PROGRESS,

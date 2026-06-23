@@ -47,7 +47,7 @@ use ::nodes::execnodes::ScanStateData;
 use ::nodes::nodectescan::CteScanState;
 use ::nodes::nodenamedtuplestorescan::NamedTuplestoreScanState;
 use ::nodes::nodes::ntag;
-use nodes::{
+use ::nodes::{
     EStateData, FunctionScanState, IndexOnlyScanState, SlotId, SubqueryScanState,
     TableFuncScanState,
 };

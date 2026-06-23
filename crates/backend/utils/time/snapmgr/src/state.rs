@@ -26,7 +26,7 @@ use std::rc::Rc;
 use ::types_core::FirstNormalTransactionId;
 use ::types_core::TransactionId;
 use ::types_logical::TupleCidHash;
-use snapshot::{SnapshotData, SnapshotType};
+use ::snapshot::{SnapshotData, SnapshotType};
 
 /// A shared, mutable, owned snapshot — the replacement for C's `Snapshot`
 /// (`*mut SnapshotData`). Cloning bumps the `Rc` refcount, mirroring how C

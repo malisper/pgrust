@@ -37,11 +37,11 @@
 //! evaluates each key against a fetched tuple via `FunctionCall2Coll`. Installed
 //! as the [`heapam_seam::heap_key_test`] seam from this crate's `init_seams()`.
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, Oid,
 };
-use types_error::{PgResult, ERROR, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::{PgResult, ERROR, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::utils_error::ereport;
 use ::rel::Relation;
 use ::types_scan::sdir::{
@@ -51,7 +51,7 @@ use ::snapshot::snapshot::IsMVCCSnapshot;
 use ::snapshot::SnapshotData;
 use ::types_storage::bufpage::{MaxHeapTuplesPerPage, MaxOffsetNumber};
 use ::types_storage::buf::{BufferAccessStrategy, BufferAccessStrategyType};
-use types_storage::{Buffer, InvalidBuffer};
+use ::types_storage::{Buffer, InvalidBuffer};
 use ::types_tableam::amopaque::{tags, AmOpaque, AmOpaqueTag, AmOpaqueType};
 use ::types_tableam::relscan::{
     ParallelBlockTableScanWorkerData, ParallelTableScanDesc, TableScanDescData,
@@ -62,7 +62,7 @@ use ::types_tableam::scankey::ScanKeyData;
 use ::types_tuple::heaptuple::FormedTuple;
 use ::types_tuple::heaptuple::{FIRST_OFFSET_NUMBER as FirstOffsetNumber, ItemPointerData};
 
-use page::{
+use ::page::{
     ItemPointerCompare, ItemPointerGetBlockNumberNoCheck,
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageIsAllVisible, PageRef,
     ItemIdIsNormal, ItemIdGetLength,

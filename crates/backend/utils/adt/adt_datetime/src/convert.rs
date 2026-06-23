@@ -19,12 +19,12 @@
 //! `extern "C"`, `c_int`, or `libc`.
 
 use ::types_core::pg_time_t;
-use types_datetime::{
+use ::types_datetime::{
     DATETIME_MIN_JULIAN, DATE_END_JULIAN, JULIAN_MAXMONTH, JULIAN_MAXYEAR, JULIAN_MINMONTH,
     JULIAN_MINYEAR, MINS_PER_HOUR, POSTGRES_EPOCH_JDATE, SECS_PER_DAY, SECS_PER_MINUTE,
     UNIX_EPOCH_JDATE, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
 };
-use types_datetime::{fsec_t, DateADT, Timestamp, TimestampTz};
+use ::types_datetime::{fsec_t, DateADT, Timestamp, TimestampTz};
 
 // ---------------------------------------------------------------------------
 // Range-check macros (datatype/timestamp.h, utils/date.h)

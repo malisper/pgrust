@@ -26,7 +26,7 @@
 
 use core::any::Any;
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::nodes::execexpr::ExprDoneCond;

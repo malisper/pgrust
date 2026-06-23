@@ -2,7 +2,7 @@
 
 use std::sync::Mutex;
 
-use pg_ffi_fgram::{
+use ::pg_ffi_fgram::{
     LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG, LOG_DESTINATION_STDERR, LOG_DESTINATION_SYSLOG,
 };
 

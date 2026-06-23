@@ -10,7 +10,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 use ::types_nbtree::BTScanInsert;
 use ::rel::Relation;

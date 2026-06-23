@@ -5,7 +5,7 @@
 //! string-token defaults from `utils/datetime.h` that only the decode / encode
 //! code paths need.
 
-use types_datetime::{DTK_M, HOUR, MICROSECOND, MILLISECOND, MINUTE, SECOND};
+use ::types_datetime::{DTK_M, HOUR, MICROSECOND, MILLISECOND, MINUTE, SECOND};
 
 // ---------------------------------------------------------------------------
 // Convenience bit-mask combinations. (utils/datetime.h)
@@ -55,7 +55,7 @@ pub const DTIMEZONE: &str = "timezone";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_datetime::{DAY, MONTH, YEAR};
+    use ::types_datetime::{DAY, MONTH, YEAR};
 
     #[test]
     fn date_mask_matches_field_bits() {

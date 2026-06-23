@@ -9,7 +9,7 @@
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
 use ::types_core::fmgr::F_OIDEQ;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::scankey::ScanKeyInit;
 use ::utils_error::elog;
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};

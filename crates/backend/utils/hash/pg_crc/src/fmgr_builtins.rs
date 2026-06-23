@@ -12,7 +12,7 @@
 //! `proretset 'f'`.
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARHDRSZ` — the 4-byte uncompressed varlena length word.
 const VARHDRSZ: usize = 4;

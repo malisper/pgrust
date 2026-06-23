@@ -39,13 +39,13 @@ use ::types_error::PgResult;
 use ::fmgr::fmgr::FunctionCallInfoBaseData;
 use ::fmgr::BuiltinFunction;
 use ::parsenodes::InlineCodeBlock;
-use plpgsql::{
+use ::plpgsql::{
     int32, PLpgSQL_resolve_option, PLPGSQL_XCHECK_ALL, PLPGSQL_XCHECK_NONE,
     PLPGSQL_XCHECK_SHADOWVAR, PLPGSQL_XCHECK_STRICTMULTIASSIGNMENT, PLPGSQL_XCHECK_TOOMANYROWS,
 };
 
-use spi::{SPI_connect_ext, SPI_finish, SPI_OK_FINISH, SPI_OPT_NONATOMIC};
-use exec::{FunctionCallArg, FunctionResult};
+use ::spi::{SPI_connect_ext, SPI_finish, SPI_OK_FINISH, SPI_OPT_NONATOMIC};
+use ::exec::{FunctionCallArg, FunctionResult};
 
 // ---------------------------------------------------------------------------
 // Custom GUC variables (pl_handler.c module globals).
@@ -370,7 +370,7 @@ static VARIABLE_CONFLICT_OPTIONS: &[::types_guc::config_enum_entry] = &[
 pub fn register_custom_gucs() {
     use ::misc_guc::custom;
     use ::guc_tables::GucVarAccessors;
-    use types_guc::{GUC_LIST_INPUT, PGC_SUSET, PGC_USERSET};
+    use ::types_guc::{GUC_LIST_INPUT, PGC_SUSET, PGC_USERSET};
 
     // DefineCustomEnumVariable("plpgsql.variable_conflict", …)
     let _ = custom::define_custom_enum_variable(
@@ -897,7 +897,7 @@ pub fn init_seams() {
     ::plpgsql_exec_seams::raise_ereport::set(
         |report: ::plpgsql_exec_seams::RaiseEreport| {
             use ::utils_error::ereport;
-            use types_error::{ErrorLocation, ErrorLevel, SqlState};
+            use ::types_error::{ErrorLocation, ErrorLevel, SqlState};
 
             let mut b = ereport(ErrorLevel(report.elog_level));
             if report.err_code != 0 {
@@ -1824,8 +1824,8 @@ fn foreach_iterate_via_array_impl(
     arrtypmod: i32,
     slice: i32,
 ) -> PgResult<::plpgsql_exec_seams::ForeachIterateResult> {
-    use plpgsql_exec_seams::{ForeachItem, ForeachIterateResult};
-    use arrayfuncs::{foundation, sql::ArrayIterateItem};
+    use ::plpgsql_exec_seams::{ForeachItem, ForeachIterateResult};
+    use ::arrayfuncs::{foundation, sql::ArrayIterateItem};
 
     let ctx = mcx::MemoryContext::new("plpgsql FOREACH array");
     let mcx = ctx.mcx();

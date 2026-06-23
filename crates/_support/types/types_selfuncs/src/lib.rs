@@ -23,7 +23,7 @@
 use ::mcx::PgVec;
 use ::types_core::primitive::{InvalidOid, Oid};
 use ::datum::datum::Datum;
-use pathnodes::{NodeId, RelId};
+use ::pathnodes::{NodeId, RelId};
 
 /// `DEFAULT_INEQ_SEL` (selfuncs.h) — `0.3333333333333333`.
 pub const DEFAULT_INEQ_SEL: f64 = 0.3333333333333333;

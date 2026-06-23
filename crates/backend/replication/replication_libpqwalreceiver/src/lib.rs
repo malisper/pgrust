@@ -31,14 +31,14 @@
 #![allow(clippy::result_large_err)]
 
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     make_sqlstate, ErrorLocation, PgError, PgResult, SqlState, ERROR, ERRCODE_CONNECTION_FAILURE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROTOCOL_VIOLATION,
     ERRCODE_S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED, ERRCODE_SYNTAX_ERROR,
 };
 
-use types_core::{InvalidOid, Oid, TimeLineID, XLogRecPtr};
-use types_libpqwalreceiver::{
+use ::types_core::{InvalidOid, Oid, TimeLineID, XLogRecPtr};
+use ::types_libpqwalreceiver::{
     ConnStatusType, ExecStatusType, PgConnId, PgResultId, Pgsocket, TupleDescId, TuplestoreId,
 };
 

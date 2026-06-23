@@ -17,7 +17,7 @@ use std::io::Write;
 use std::cell::Cell;
 
 use ::types_dest::CommandDest;
-use types_error::{
+use ::types_error::{
     ErrorField, ErrorLocation, ErrorLevel, PgError, PgResult, SqlState, ERROR, FATAL, PANIC,
 };
 

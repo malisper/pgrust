@@ -26,7 +26,7 @@
 //! allowed")` on a negative index is a caller bug and panics, matching the C
 //! failure surface (the keystone's `bms_*` panic identically).
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::nodes::bitmapset::Bitmapset;
 

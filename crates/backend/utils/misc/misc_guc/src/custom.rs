@@ -27,13 +27,13 @@
 //! the leaked slots and build the record from them.
 
 use ::types_core::BOOTSTRAP_SUPERUSERID;
-use types_error::{PgResult, WARNING};
-use types_guc::{
+use ::types_error::{PgResult, WARNING};
+use ::types_guc::{
     config_enum_entry, config_group, config_type, GucContext, GucSource, GUC_CUSTOM_PLACEHOLDER,
     GUC_LIST_QUOTE, PGC_POSTMASTER, PGC_SUSET, PGC_USERSET,
 };
 
-use guc_tables::{
+use ::guc_tables::{
     GucBoolAssignFn, GucBoolCheckFn, GucBoolVar, GucEnumAssignFn, GucEnumCheckFn, GucEnumOptions,
     GucEnumOptionsSlot, GucEnumVar, GucIntAssignFn, GucIntCheckFn, GucIntVar, GucRealAssignFn,
     GucRealCheckFn, GucRealVar, GucShowFn, GucStringAssignFn, GucStringCheckFn, GucStringVar,

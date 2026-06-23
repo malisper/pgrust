@@ -32,22 +32,22 @@ use ::joininfo::placeholder::{
 use ::rewrite_core::increment::IncrementVarSublevelsUp;
 
 use ::mcx::Mcx;
-use types_core::{primitive::InvalidOid, Index, Oid};
-use types_error::{PgError, PgResult};
+use ::types_core::{primitive::InvalidOid, Index, Oid};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::{CmdType, Node};
 use ::nodes::primnodes::{
     Aggref, Expr, ExprRelids, GroupingFunc, MergeSupportFunc, Param, ParamKind, PlaceHolderVar,
     ReturningExpr, Var,
 };
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     Bitmapset, NestLoopParamNode, NodeId, PlannerGlobal, PlannerInfo, PlannerParamItem, Relids,
 };
 
 // Seam modules (call via `::call(...)`).
 use ::equalfuncs_seams::equal_expr;
-use nodeFuncs_seams::{exprLocation, expr_type_info};
-use relnode_seams::{
+use ::nodeFuncs_seams::{exprLocation, expr_type_info};
+use ::relnode_seams::{
     relids_equal, relids_intersect, relids_is_member, relids_is_subset, relids_overlap,
     relids_union,
 };

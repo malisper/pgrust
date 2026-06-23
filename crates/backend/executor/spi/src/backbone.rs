@@ -34,8 +34,8 @@ use transam_xact_seams as xact_seam;
 use ::utils_error::ereport;
 use ::mcx::MemoryContext;
 use std::cell::RefCell;
-use types_core::{SubTransactionId, InvalidSubTransactionId};
-use types_error::{ErrorLocation, PgResult, WARNING};
+use ::types_core::{SubTransactionId, InvalidSubTransactionId};
+use ::types_error::{ErrorLocation, PgResult, WARNING};
 
 /// A tuple table created during a SPI op. The public part (`tupdesc` / `vals` /
 /// `numvals`) is what `SPI_tuptable` exposes; the private part mirrors

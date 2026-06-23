@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, RegProcedure, BLCKSZ,
 };
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::hash::hashpage::{
     Bucket, HashMetaPageData, H_BUCKET_BEING_SPLIT, H_NEEDS_SPLIT_CLEANUP, HASH_MAX_BITMAPS,
     HASH_METAPAGE, HASH_READ, HASH_WRITE, HASH_NOLOCK, INDEX_MOVED_BY_SPLIT_MASK,
@@ -46,7 +46,7 @@ use hash_entry_seams as hash_entry;
 
 use xloginsert_seams as xloginsert;
 
-use page::{
+use ::page::{
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageGetFreeSpaceForMultipleTuples,
     PageRef, ItemIdIsDead,
 };

@@ -34,10 +34,10 @@ use ::adt_numeric::convert::{int64_to_numeric, set_var_from_num};
 use ::adt_numeric::kernel_transcendental::numericvar_to_int64;
 use ::adt_numeric::ops_sql::{numeric_div, numeric_mul, numeric_round};
 use ::pg_locale_seams::pglc_localeconv as pglc_localeconv_seam;
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::pgstrcasecmp::pg_toupper as pg_toupper_full;
-use types_cash::{Cash, CashLconv};
-use types_error::{
+use ::types_cash::{Cash, CashLconv};
+use ::types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_DIVISION_BY_ZERO, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
     ERRCODE_PROTOCOL_VIOLATION,

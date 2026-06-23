@@ -59,7 +59,7 @@ extern crate alloc;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use pathnodes::{
+use ::pathnodes::{
     ArenaNode, EcId, EmId, EquivalenceClass, EquivalenceMember, NodeId, PathId, PathNode,
     PlannerInfo, RelId, RelOptInfo, RestrictInfo, RinfoId,
 };
@@ -499,7 +499,7 @@ mod tests {
     use ::types_core::primitive::Cost;
     use ::nodes::nodes::NodeTag;
     use ::nodes::primnodes::{Const, Var};
-    use pathnodes::{
+    use ::pathnodes::{
         Path, PathTarget, Relids, SubqueryScanPath, VolatileFunctionStatus,
     };
     use types_tuple::heaptuple::Datum;

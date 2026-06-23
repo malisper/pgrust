@@ -34,16 +34,16 @@ use core::sync::atomic::{compiler_fence, fence, AtomicBool, AtomicI32, AtomicU64
 
 use ::bgworker_seams::get_background_worker_pid;
 use ::dsm_core::dsm::{cancel_on_dsm_detach, on_dsm_detach, DsmSegmentId};
-use latch_seams::{reset_latch, set_latch, wait_latch};
+use ::latch_seams::{reset_latch, set_latch, wait_latch};
 use ::lmgr_proc_seams::proc_latch;
-use s_lock::{s_lock_macro, s_unlock, Spinlock};
+use ::s_lock::{s_lock_macro, s_unlock, Spinlock};
 use ::postgres_seams::check_for_interrupts;
 use ::utils_error::ereport;
-use mcx::{Mcx, PgBox, PgVec, MAX_ALLOC_SIZE};
-use types_bgworker::{BackgroundWorkerHandle, BgwHandleStatus};
-use types_core::{ProcNumber, Size, INVALID_PROC_NUMBER};
+use ::mcx::{Mcx, PgBox, PgVec, MAX_ALLOC_SIZE};
+use ::types_bgworker::{BackgroundWorkerHandle, BgwHandleStatus};
+use ::types_core::{ProcNumber, Size, INVALID_PROC_NUMBER};
 use ::datum::Datum;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR,
 };
 use ::types_pgstat::wait_event::{
@@ -1464,7 +1464,7 @@ mod seam_layer {
     use ::mcxt_seams::top_memory_context;
     use ::mcx::PgBox;
     use ::types_error::PgResult;
-    use execparallel::{
+    use ::execparallel::{
         BackgroundWorkerHandle as ExecBgwHandle, DsmSegmentHandle as ExecDsmSeg, SerializeCursor,
         ShmMqAttachHandle, ShmMqHandle as ExecShmMq, Size,
     };

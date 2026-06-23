@@ -11,9 +11,9 @@
 //! loudly until the syscache owner installs them.
 
 use syscache_seams as syscache_seam;
-use mcx::{Mcx, PgString};
-use types_core::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgString};
+use ::types_core::{AttrNumber, InvalidAttrNumber, InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 
 /// `elog(ERROR, ...)` — an internal error with the default
 /// `ERRCODE_INTERNAL_ERROR` SQLSTATE.

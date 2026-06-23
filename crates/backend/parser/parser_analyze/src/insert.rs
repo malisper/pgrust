@@ -11,9 +11,9 @@
 //! The multi-row VALUES, INSERT/SELECT, ON CONFLICT (DO NOTHING / DO UPDATE),
 //! and RETURNING branches are all transformed here.
 
-use mcx::{Mcx, PgVec};
-use types_core::{InvalidOid, Oid};
-use types_error::{PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
+use ::mcx::{Mcx, PgVec};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgResult, ERRCODE_SYNTAX_ERROR, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{CmdType, Node, NodePtr};
 use ::nodes::parsestmt::{ParseExprKind, ParseState};

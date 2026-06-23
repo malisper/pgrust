@@ -19,7 +19,7 @@
 //! `Err` carries the conversion `ereport(ERROR)`s (untranslatable characters,
 //! invalid byte sequences) and palloc out-of-memory.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::PgWChar;
 use ::types_error::PgResult;
 

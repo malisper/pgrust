@@ -23,7 +23,7 @@ pub mod querybuild;
 pub mod triggers;
 
 use ::mcx::Mcx;
-use types_core::{InvalidOid, Oid};
+use ::types_core::{InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::rel::Relation;
 use ::types_ri_triggers::TriggerDataRef;

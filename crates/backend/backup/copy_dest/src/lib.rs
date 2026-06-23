@@ -37,7 +37,7 @@ use ::types_core::catalog::OIDOID;
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{INT8OID, TEXTOID};
 
-use backup_copy_seams::{
+use ::backup_copy_seams::{
     ResultColumn, ResultColumnType, ResultValue, TupOutputState as SeamTupOutputState,
 };
 

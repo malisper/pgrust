@@ -17,7 +17,7 @@
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `version()` (version.c `pgsql_version`) — `PG_RETURN_TEXT_P(cstring_to_text(
 /// PG_VERSION_STR))`. No arguments; the `text` result rides the by-reference

@@ -66,10 +66,10 @@
 // struct across stages.
 #![allow(dead_code)]
 
-use mcx::{vec_with_capacity_in, McxOwned, MemoryContext, Mcx, PgBox, PgVec};
-use types_core::{AttrNumber, Oid};
-use types_error::{PgError, PgResult};
-use nodes::{
+use ::mcx::{vec_with_capacity_in, McxOwned, MemoryContext, Mcx, PgBox, PgVec};
+use ::types_core::{AttrNumber, Oid};
+use ::types_error::{PgError, PgResult};
+use ::nodes::{
     SlotData, TupleTableSlot, Tuplesortstate, TuplesortInstrumentation, TuplesortMethod,
     TuplesortSpaceType, TUPLESORT_ALLOWBOUNDED, TUPLESORT_RANDOMACCESS,
 };
@@ -4771,7 +4771,7 @@ pub fn init_seams() {
     // `trace_sort` has a `guc-tables` slot, so the GUC machinery reaches its
     // store through the installed `GucVarAccessors` (the get/set path the
     // boot/SET/SHOW machinery uses to read and write the variable).
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
     vars::trace_sort.install(GucVarAccessors {
         get: trace_sort_get,
         set: trace_sort_set,

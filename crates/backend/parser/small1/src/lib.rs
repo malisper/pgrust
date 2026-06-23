@@ -43,17 +43,17 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgVec, MAX_ALLOC_SIZE};
+use ::mcx::{Mcx, PgBox, PgVec, MAX_ALLOC_SIZE};
 
 use ::types_core::catalog::VOIDOID;
 use ::types_core::fmgr::FLOAT8PASSBYVAL;
-use types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_core::{InvalidOid, Oid, OidIsValid};
 use ::types_error::error::{
     ERRCODE_AMBIGUOUS_PARAMETER, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INTERNAL_ERROR,
     ERRCODE_NAME_TOO_LONG, ERRCODE_OUT_OF_MEMORY, ERRCODE_TOO_MANY_COLUMNS,
     ERRCODE_UNDEFINED_PARAMETER,
 };
-use types_error::{ErrorLocation, PgError, PgResult, SoftErrorContext, ERROR, NOTICE};
+use ::types_error::{ErrorLocation, PgError, PgResult, SoftErrorContext, ERROR, NOTICE};
 use ::types_tuple::Datum;
 
 use ::nodes::nodes::{ntag, Node};

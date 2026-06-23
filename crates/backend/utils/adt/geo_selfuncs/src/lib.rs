@@ -21,7 +21,7 @@
 
 use ::types_core::primitive::Selectivity;
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// Install this crate's contributions. The selectivity estimators are reached
 /// through the selfuncs fmgr dispatch by `pg_proc` OID (so there is no seam to

@@ -17,7 +17,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use geqo_all_seams as geqo_seams;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{MemoryContextData, PathnodesMemoryContext, PlannerInfo, RelId};
+use ::pathnodes::{MemoryContextData, PathnodesMemoryContext, PlannerInfo, RelId};
 use ::types_core::primitive::Cost;
 
 /// `DBL_MAX` (`<float.h>`) — fitness sentinel for an invalid join order.

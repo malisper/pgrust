@@ -11,7 +11,7 @@
 extern crate alloc;
 
 use ::types_error::PgResult;
-use pathnodes::{PathId as IxPathId, PlannerInfo as IxPlannerInfo, RelId as IxRelId};
+use ::pathnodes::{PathId as IxPathId, PlannerInfo as IxPlannerInfo, RelId as IxRelId};
 
 seam_core::seam!(
     /// `cost_bitmap_tree_node(path, &cost, &selec)` (costsize.c) — returned as a
@@ -65,7 +65,7 @@ seam_core::seam!(
  * ======================================================================== */
 
 use ::types_core::primitive::{Cost, Oid, Selectivity};
-use pathnodes::{NodeId, PathId, PlannerInfo, RelId, RinfoId, SpecialJoinInfo};
+use ::pathnodes::{NodeId, PathId, PlannerInfo, RelId, RinfoId, SpecialJoinInfo};
 
 /// `GetTablespacePageCosts` output (`utils/cache/spccache.c`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

@@ -14,7 +14,7 @@
 
 use core::ffi::{c_char, c_int};
 
-use pg_ffi_fgram::{AttrNumber, Bitmapset, List, Node, NodeTag, Oid};
+use ::pg_ffi_fgram::{AttrNumber, Bitmapset, List, Node, NodeTag, Oid};
 
 use crate::parsenodes_stmts::{TypeName, WindowDef};
 use crate::primnodes::{

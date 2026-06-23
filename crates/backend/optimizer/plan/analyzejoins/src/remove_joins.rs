@@ -31,7 +31,7 @@ use alloc::vec::Vec;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     JoinlistNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_INNER,
 };
 

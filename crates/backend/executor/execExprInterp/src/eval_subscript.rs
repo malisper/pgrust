@@ -21,7 +21,7 @@
 //! same arena cells, since in C all the SBSREF steps share one
 //! `SubscriptingRefState`).
 
-use types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED};
+use ::types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED};
 use ::nodes::execexpr::{
     ExprEvalStepData, ExprState, ResultCellId, SubscriptMethod, SubscriptWorkspace,
 };
@@ -370,7 +370,7 @@ fn write_prev<'mcx>(state: &mut ExprState<'mcx>, inputs: &SbsInputs, val: Datum<
 /// subscript), reached through `backend-utils-adt-jsonbsubs-seams`.
 mod jsonb {
     use super::{read_cell, write_cell};
-    use types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED};
+    use ::types_error::{PgError, PgResult, ERRCODE_NULL_VALUE_NOT_ALLOWED};
     use ::nodes::execexpr::{
         ExprEvalStepData, ExprState, ResultCellId, SubscriptMethod, SubscriptWorkspace,
     };

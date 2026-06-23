@@ -21,7 +21,7 @@
 #![allow(clippy::manual_range_contains)]
 #![allow(clippy::excessive_precision)]
 
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DIVISION_BY_ZERO, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
 };
 

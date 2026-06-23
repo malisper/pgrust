@@ -29,8 +29,8 @@
 
 use ::mcx::MemoryContext;
 use ::pgstrcasecmp::pg_strncasecmp;
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
-use types_error::{
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_error::{
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERRCODE_SYNTAX_ERROR, ERRCODE_UNTRANSLATABLE_CHARACTER,
 };
 use ::types_jsonpath::parse::JsonPathString;

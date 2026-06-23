@@ -43,7 +43,7 @@
 //! nightly Miri component.
 
 use crate::nodes::{Node, NodeTag};
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 
 /// Installable node-equality seam for the generated `NodePayload::equal_dyn`

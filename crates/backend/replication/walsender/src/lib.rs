@@ -112,7 +112,7 @@ pub fn init_seams() {
     // at shmem-sizing time by WalSndShmemSize (mul_size(max_wal_senders,
     // sizeof(WalSnd))); the GUC engine seeds it from boot_val.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::max_wal_senders.install(GucVarAccessors {
             get: || core::proc_get(|p| p.max_wal_senders),
             set: |v| core::with_proc(|p| p.max_wal_senders = v),

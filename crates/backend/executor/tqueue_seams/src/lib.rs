@@ -8,7 +8,7 @@
 extern crate alloc;
 
 use ::types_error::PgResult;
-use execparallel::{DestReceiverHandle, ShmMqAttachHandle, TupleQueueReaderHandle};
+use ::execparallel::{DestReceiverHandle, ShmMqAttachHandle, TupleQueueReaderHandle};
 
 /// `CreateTupleQueueReader(handle)`.
 seam_core::seam!(pub fn create_tuple_queue_reader(handle: ShmMqAttachHandle) -> TupleQueueReaderHandle);

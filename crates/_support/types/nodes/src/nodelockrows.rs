@@ -11,7 +11,7 @@
 //! which depends on this crate — naming them here would cycle), only in the
 //! node-crate logic and its seams.
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::{AttrNumber, Index, Oid};
 use ::types_error::PgResult;
 use ::types_tuple::heaptuple::ItemPointerData;

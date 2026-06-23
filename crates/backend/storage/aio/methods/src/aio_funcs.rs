@@ -22,7 +22,7 @@ use core::sync::atomic::Ordering;
 
 use ::types_error::PgResult;
 
-use funcs_seams::{self as seam, AioRow};
+use ::funcs_seams::{self as seam, AioRow};
 
 use crate::aio::{
     ioh, pgaio_io_get_id, pgaio_io_get_state_name, pgaio_result_status_string,

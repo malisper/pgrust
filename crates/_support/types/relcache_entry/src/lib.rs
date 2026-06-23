@@ -21,7 +21,7 @@
 
 use ::types_core::primitive::{AttrNumber, Oid, ProcNumber, RegProcedure};
 use ::types_core::xact::SubTransactionId;
-use types_core::{InvalidOid, INVALID_PROC_NUMBER};
+use ::types_core::{InvalidOid, INVALID_PROC_NUMBER};
 use ::types_error::PgResult;
 use ::types_storage::lock::LockRelId;
 use ::types_storage::RelFileLocator;

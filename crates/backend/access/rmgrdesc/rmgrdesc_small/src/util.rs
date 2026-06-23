@@ -5,7 +5,7 @@
 use core::fmt;
 
 use ::mcx::PgString;
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 
 /// `appendStringInfo(buf, fmt, ...)`: format into the caller's string,
 /// surfacing an allocation failure as the context's OOM `PgError` (C's

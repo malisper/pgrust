@@ -67,7 +67,7 @@ use alloc::string::String;
 
 use core::fmt::Write as _;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_error::PgResult;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::primnodes::{

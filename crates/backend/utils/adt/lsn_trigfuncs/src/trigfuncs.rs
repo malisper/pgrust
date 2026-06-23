@@ -20,7 +20,7 @@
 //! the owned logic, ported verbatim.
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED};
+use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED};
 use ::types_ri_triggers::TriggerDataRef;
 use ::types_tuple::heaptuple::FormedTuple;
 use ::types_tuple::heap::SizeofHeapTupleHeader;
@@ -267,7 +267,7 @@ fn reconstruct_tail(tuple: &FormedTuple, header: &HeapTupleHeaderData) -> Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::{slice_in, MemoryContext, PgBox};
+    use ::mcx::{slice_in, MemoryContext, PgBox};
     use std::sync::Once;
     use ::types_tuple::heaptuple::{
         bits8, HeapTupleFields, HeapTupleHeaderChoice, ItemPointerData, HEAP_NATTS_MASK,

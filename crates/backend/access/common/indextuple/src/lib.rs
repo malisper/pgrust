@@ -65,11 +65,11 @@ extern crate alloc;
 
 use alloc::format;
 
-use heaptuple::{heap_compute_data_size, heap_fill_tuple};
+use ::heaptuple::{heap_compute_data_size, heap_fill_tuple};
 use ::utils_error::ereport;
-use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
-use types_core::{Size, INDEX_MAX_KEYS};
-use types_error::{
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{Size, INDEX_MAX_KEYS};
+use ::types_error::{
     PgError, PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_TOO_MANY_COLUMNS, ERROR,
 };
 // The one canonical value type (Datum-unification keystone). The crate's own

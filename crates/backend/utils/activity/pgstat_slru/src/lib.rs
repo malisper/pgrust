@@ -19,7 +19,7 @@
 
 use core::cell::{Cell, RefCell};
 
-use lwlock_seams::{lwlock_acquire, lwlock_initialize};
+use ::lwlock_seams::{lwlock_acquire, lwlock_initialize};
 use ::activity_pgstat::kind_info::KindInfoBuilder;
 use ::activity_pgstat::registry;
 use ::init_small_seams::my_proc_number;
@@ -30,7 +30,7 @@ use ::types_pgstat::activity_pgstat::{PgStat_SLRUStats, PGSTAT_KIND_SLRU};
 use ::types_pgstat::pgstat_internal::{
     PgStat_KindInfo, PgStat_ShmemControl, PgStat_Snapshot, SLRU_NAMES, SLRU_NUM_ELEMENTS,
 };
-use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
+use ::types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
 thread_local! {
     /// `static PgStat_SLRUStats pending_SLRUStats[SLRU_NUM_ELEMENTS];` — SLRU

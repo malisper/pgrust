@@ -17,10 +17,10 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
 use ::rel::Relation;
-use statistics::{
+use ::statistics::{
     AnalyzeAttrFetchFunc, VacAttrStats, STATISTIC_NUM_SLOTS,
     Anum_pg_statistic_starelid, Anum_pg_statistic_staattnum, Anum_pg_statistic_stainherit,
     Anum_pg_statistic_stanullfrac, Anum_pg_statistic_stawidth, Anum_pg_statistic_stadistinct,
@@ -30,7 +30,7 @@ use statistics::{
 };
 use types_tuple::heaptuple::{Datum, FormedTuple};
 
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use ::table_tableam::table_slot_create;
 use execExpr_seams as expr_seam;
 use execTuples_seams as slot_seam;

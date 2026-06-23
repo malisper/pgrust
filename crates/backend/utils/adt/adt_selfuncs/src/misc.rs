@@ -7,8 +7,8 @@ use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::{planner_rt_fetch, PlannerRun};
-use pathnodes::{NodeId, PlannerInfo, RelId, Relids};
-use types_selfuncs::{ConstNodeInfo, EstimationInfo, VariableStatData, SELFLAG_USED_DEFAULT};
+use ::pathnodes::{NodeId, PlannerInfo, RelId, Relids};
+use ::types_selfuncs::{ConstNodeInfo, EstimationInfo, VariableStatData, SELFLAG_USED_DEFAULT};
 use ::statistics::STATS_EXT_NDISTINCT;
 
 use lsyscache_seams as lsc;

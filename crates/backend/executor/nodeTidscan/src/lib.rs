@@ -22,9 +22,9 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::Index;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execnodes::EStateData;
 use ::nodes::nodeindexscan::TidScan;
 use ::nodes::primnodes::Expr;

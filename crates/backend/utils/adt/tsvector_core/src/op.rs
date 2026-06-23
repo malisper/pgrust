@@ -17,7 +17,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_ZERO_LENGTH_CHARACTER_STRING, ERROR,
@@ -40,7 +40,7 @@ use ext::{ArrayElem, SrfRow, TupleSource};
 
 use ::types_ri_triggers::TriggerDataRef;
 
-use spi::{SPI_fnumber, SPI_getbinval, SPI_gettypeid, SPI_ERROR_NOATTRIBUTE};
+use ::spi::{SPI_fnumber, SPI_getbinval, SPI_gettypeid, SPI_ERROR_NOATTRIBUTE};
 use ::coerce::IsBinaryCoercible;
 use ::parse::ts_parse::{parsetext, ParsedText};
 use ::detoast::pg_detoast_datum_packed;
@@ -2497,7 +2497,7 @@ fn qualified_name_length(name: &[u8]) -> usize {
 // ABI `types-tsearch` shapes the engine consumes.
 // ===========================================================================
 
-use parse_seams::{
+use ::parse_seams::{
     ExecPhraseData as HlExecPhraseData, QueryItem as HlQueryItem, QueryOperand as HlQueryOperand,
     QueryOperator as HlQueryOperator,
 };

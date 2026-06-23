@@ -12,12 +12,12 @@
 //! structs carry their real `Barrier`/`LWLock`/`SharedFileSet`/atomic fields.
 
 use alloc::boxed::Box;
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 
 use ::condvar::Barrier;
-use types_core::{uint32, Oid, Size};
+use ::types_core::{uint32, Oid, Size};
 use ::types_core::FmgrInfo;
-use execparallel::{DsaAreaHandle, DsaPointer, FileSetHandle, SerializeCursor};
+use ::execparallel::{DsaAreaHandle, DsaPointer, FileSetHandle, SerializeCursor};
 use ::types_storage::storage::{pg_atomic_uint32, pg_atomic_uint64, LWLock};
 use ::types_storage::fileset::SharedFileSet;
 use ::types_storage::file::{File, PGAlignedBlock};

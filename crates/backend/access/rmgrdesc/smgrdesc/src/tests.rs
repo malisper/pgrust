@@ -8,7 +8,7 @@
 use super::*;
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use mcx::{slice_in, MemoryContext, PgString};
+use ::mcx::{slice_in, MemoryContext, PgString};
 use ::types_core::primitive::ProcNumber;
 use ::wal::wal::{DecodedXLogRecord, XLogRecord};
 use ::wal::rmgr::XLogReaderState;

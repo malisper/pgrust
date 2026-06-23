@@ -15,8 +15,8 @@ use std::os::fd::FromRawFd;
 use std::path::Path;
 
 use ::types_core::SubTransactionId;
-use types_error::{ErrorLevel, PgError, PgResult, DEBUG1, ERROR, LOG, WARNING};
-use types_storage::{
+use ::types_error::{ErrorLevel, PgError, PgResult, DEBUG1, ERROR, LOG, WARNING};
+use ::types_storage::{
     PG_TBLSPC_DIR, PG_TEMP_FILES_DIR, PG_TEMP_FILE_PREFIX, TABLESPACE_VERSION_DIRECTORY,
 };
 

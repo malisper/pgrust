@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use ::types_error::PgResult;
-use nodes::{AsyncRequestData, ForeignScanState};
+use ::nodes::{AsyncRequestData, ForeignScanState};
 
 // The parallel-scan methods (ExecForeignScanEstimate / InitializeDSM /
 // ReInitializeDSM / InitializeWorker) are NOT seamed here: `execParallel`

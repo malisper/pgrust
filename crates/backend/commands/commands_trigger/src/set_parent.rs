@@ -1,14 +1,14 @@
 //! `TriggerSetParentTrigger` (commands/trigger.c:1220): mark a partition's
 //! trigger as a child of its parent trigger (or remove the linkage).
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_catalog::catalog_dependency::{
     ObjectAddress, DEPENDENCY_PARTITION_PRI, DEPENDENCY_PARTITION_SEC,
 };
 use ::types_catalog::pg_trigger as pt;
 use ::types_core::fmgr::F_OIDEQ;
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;

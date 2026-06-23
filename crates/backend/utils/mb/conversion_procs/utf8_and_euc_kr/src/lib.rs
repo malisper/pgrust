@@ -23,7 +23,7 @@ mod fmgr_builtins;
 mod tables;
 
 use ::utils_error::PgResult;
-use conv_string_helpers::{ConversionResult, LocalToUtf, UtfToLocal};
+use ::conv_string_helpers::{ConversionResult, LocalToUtf, UtfToLocal};
 use ::mbutils_seams::check_encoding_conversion_args;
 use ::types_wchar::encoding::{pg_enc, PG_EUC_KR, PG_UTF8};
 

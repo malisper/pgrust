@@ -7,7 +7,7 @@
 //! calls cross here; until the builtin unit is ported these panic loudly. The
 //! owning crate installs the implementations from its `init_seams()`.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::{Oid, PgWChar};
 use ::types_error::PgResult;
 use ::locale::PgLocale;

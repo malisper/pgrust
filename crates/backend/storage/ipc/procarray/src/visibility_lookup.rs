@@ -10,14 +10,14 @@
 
 use std::cell::RefCell;
 
-use mcx::{Mcx, PgVec};
-use types_core::{
+use ::mcx::{Mcx, PgVec};
+use ::types_core::{
     InvalidLocalTransactionId, InvalidOid, InvalidTransactionId, Oid, ProcNumber, TransactionId,
 };
 use ::types_core::xact::TransactionIdIsValid;
-use types_error::{PgResult, WARNING};
+use ::types_error::{PgResult, WARNING};
 use ::types_storage::storage::PROC_IS_AUTOVACUUM;
-use types_storage::{LWLockMode, ProcSignalReason, VirtualTransactionId};
+use ::types_storage::{LWLockMode, ProcSignalReason, VirtualTransactionId};
 
 use subtrans_seams as subtrans;
 use transam_seams as transam;

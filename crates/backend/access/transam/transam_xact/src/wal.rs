@@ -7,8 +7,8 @@
 //! `xlog_set_record_flags(XLOG_INCLUDE_ORIGIN)` + `xlog_insert`.
 
 use crate::*;
-use types_core::{Oid, TransactionId};
-use types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
+use ::types_core::{Oid, TransactionId};
+use ::types_storage::{RelFileLocator, SharedInvalidationMessage, SHARED_INVALIDATION_MESSAGE_SIZE};
 use ::wal::{
     XlXactStatsItem, RM_XACT_ID, XACT_COMPLETION_APPLY_FEEDBACK,
     XACT_COMPLETION_FORCE_SYNC_COMMIT, XACT_COMPLETION_UPDATE_RELCACHE_FILE,

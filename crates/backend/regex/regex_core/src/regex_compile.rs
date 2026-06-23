@@ -23,7 +23,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_core::{Oid, PgWChar};
+use ::types_core::{Oid, PgWChar};
 
 use crate::regex_consts::*;
 use crate::regex_error::{RegError, RegResult};

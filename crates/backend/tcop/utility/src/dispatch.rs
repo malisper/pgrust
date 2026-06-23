@@ -45,7 +45,7 @@ use ::cmdtag::get_command_tag_name;
 use ::utils_error::ereport;
 use ::mcx::Mcx;
 use ::types_core::cmdtag::CommandTag;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE, ERROR,
 };
 use ::types_core::init::BackendType;

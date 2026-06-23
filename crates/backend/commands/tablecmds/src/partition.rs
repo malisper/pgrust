@@ -21,7 +21,7 @@ use ::nodes::parsestmt::ParseExprKind;
 
 use ::utils_error::ereport;
 use crate::helpers::here;
-use types_error::{
+use ::types_error::{
     ERRCODE_DATATYPE_MISMATCH, ERRCODE_INDETERMINATE_COLLATION, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_TOO_MANY_COLUMNS, ERRCODE_UNDEFINED_COLUMN, ERROR,
 };
@@ -36,7 +36,7 @@ const FirstLowInvalidHeapAttributeNumber: i32 = -7;
 /* BITS_PER_BITMAPWORD (nodes/bitmapset.h): 64 on LP64. */
 const BITS_PER_BITMAPWORD: i32 = 64;
 
-use pathnodes::{Bitmapset, Relids};
+use ::pathnodes::{Bitmapset, Relids};
 
 /// `bms_is_member(x, a)` over the `::pathnodes::Bitmapset` word storage
 /// `pull_varattnos` produces (distinct from the `nodes` planner-relids

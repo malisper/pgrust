@@ -16,7 +16,7 @@ use super::*;
 use std::sync::{Mutex, MutexGuard, Once};
 
 use ::mcx::MemoryContext;
-use types_network::{PGSQL_AF_INET, PGSQL_AF_INET6};
+use ::types_network::{PGSQL_AF_INET, PGSQL_AF_INET6};
 
 static SEAM_LOCK: Mutex<()> = Mutex::new(());
 

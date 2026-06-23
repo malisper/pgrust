@@ -52,10 +52,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, Mcx, PgVec};
+use ::mcx::{alloc_in, Mcx, PgVec};
 
-use types_core::{Index, InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_core::{Index, InvalidOid, Oid, OidIsValid};
+use ::types_error::{
     PgResult, ERRCODE_AMBIGUOUS_COLUMN, ERRCODE_DUPLICATE_COLUMN, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TABLESAMPLE_ARGUMENT, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_COLUMN,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
@@ -102,9 +102,9 @@ use ::nodes_core::nodefuncs::{expr_collation, expr_location, expr_type, expr_typ
 
 use ::vars::var::contain_vars_of_level;
 use ::parse_expr::transformExpr;
-use parse_collate::{assign_expr_collations, assign_list_collations};
-use coerce::{coerce_to_specific_type, coerce_type, select_common_type, select_common_typmod};
-use parser_relation::{
+use ::parse_collate::{assign_expr_collations, assign_list_collations};
+use ::coerce::{coerce_to_specific_type, coerce_type, select_common_type, select_common_typmod};
+use ::parser_relation::{
     addNSItemToQuery, addRangeTableEntryForCTE, addRangeTableEntryForENR,
     addRangeTableEntryForFunction, addRangeTableEntryForJoin, addRangeTableEntryForRelation,
     addRangeTableEntryForSubquery, addRangeTableEntryForTableFunc, addRangeTableEntry,
@@ -1061,7 +1061,7 @@ struct JsonTableParseContext {
 /// `isCompositeType(typid)` (parse_jsontable.c) — true for the types JSON_TABLE
 /// handles with `JSON_QUERY()` rather than `JSON_VALUE()`.
 fn isCompositeType(typid: Oid) -> PgResult<bool> {
-    use parsenodes::{TYPTYPE_COMPOSITE, TYPTYPE_DOMAIN};
+    use ::parsenodes::{TYPTYPE_COMPOSITE, TYPTYPE_DOMAIN};
     use ::types_tuple::heaptuple::{JSONBOID, JSONOID};
     use ::types_tuple::heaptuple::RECORDOID;
 

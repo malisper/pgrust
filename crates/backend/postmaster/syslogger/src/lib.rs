@@ -60,15 +60,15 @@ use std::ffi::CString;
 use std::io::Write as _;
 use std::ptr;
 
-use interrupt::{
+use ::interrupt::{
     ConfigReloadPending, SetConfigReloadPending, SignalHandlerForConfigReload,
 };
 use ::utils_error::config as elog_config;
-use utils_error::{ereport, errno};
+use ::utils_error::{ereport, errno};
 use ::waiteventset_seams::WaitEventSet;
 use ::types_core::init::BackendType;
-use types_core::{pg_time_t, MAXPGPATH, PGINVALID_SOCKET};
-use types_error::{
+use ::types_core::{pg_time_t, MAXPGPATH, PGINVALID_SOCKET};
+use ::types_error::{
     PgResult, DEBUG1, FATAL, LOG, LOG_DESTINATION_CSVLOG, LOG_DESTINATION_JSONLOG,
     LOG_DESTINATION_STDERR,
 };
@@ -1446,7 +1446,7 @@ fn sys_logger_main_entry(startup_data: &types_startup::StartupData) -> ! {
 /// Install this crate's implementations into its seam crate, plus its GUC
 /// storage variables into the GUC tables' slots.
 pub fn init_seams() {
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     syslogger_seams::write_syslogger_file::set(crate::write_syslogger_file);
     syslogger_seams::sys_logger_main::set(sys_logger_main_entry);

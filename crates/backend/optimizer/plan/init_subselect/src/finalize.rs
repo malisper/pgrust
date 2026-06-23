@@ -23,13 +23,13 @@
 //! ride outward seams (planagg.c / relnode.c subroot retrieval are unported over
 //! this model).
 
-use mcx::{Mcx, PgBox};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgBox};
+use ::types_error::{PgError, PgResult};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::{Expr, ParamKind};
 use ::pathnodes::planner_run::{planner_subplan_get_plan, PlannerRun};
-use pathnodes::{PlannerInfo, RelId};
+use ::pathnodes::{PlannerInfo, RelId};
 
 use ::nodes_core::bitmapset as bms;
 use init_subselect_ext_seams as initext;

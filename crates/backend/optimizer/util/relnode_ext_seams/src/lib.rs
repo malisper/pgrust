@@ -18,7 +18,7 @@ use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{AppendRelInfo, PathId, PathTarget, PlannerInfo, RelId, RinfoId};
+use ::pathnodes::{AppendRelInfo, PathId, PathTarget, PlannerInfo, RelId, RinfoId};
 
 /* ---- plancat.c / parse_relation.c (base-rel construction) -------------- */
 

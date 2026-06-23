@@ -9,7 +9,7 @@
 //! reported as the C-style `errno` integer so the caller can reproduce
 //! tablespace.c's exact `errno == ENOENT`/`EEXIST` branching.
 
-use tblspc_fs_seams::{StatKind, StatResult};
+use ::tblspc_fs_seams::{StatKind, StatResult};
 use ::types_error::PgResult;
 
 use crate::vfd_core;

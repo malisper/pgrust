@@ -13,9 +13,9 @@
 //! errors).
 
 use ::types_core::geo::{Point, BOX, CIRCLE, LINE, LSEG};
-use types_error::{ereturn, PgError, PgResult, SoftErrorContext};
+use ::types_error::{ereturn, PgError, PgResult, SoftErrorContext};
 
-use float_seams::{float8in_internal_endptr, float8out_internal};
+use ::float_seams::{float8in_internal_endptr, float8out_internal};
 
 use crate::boxes::box_construct;
 use crate::f8::float8_lt;

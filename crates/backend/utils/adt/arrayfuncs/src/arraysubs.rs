@@ -21,7 +21,7 @@
 //! by their pointer word, and a by-reference result is reconstructed by reading
 //! the element's bytes out of the (already-detoasted, flat) array buffer.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;

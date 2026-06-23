@@ -7,7 +7,7 @@
 use std::cell::Cell;
 use std::sync::Once;
 
-use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::nodes::execnodes::{ExprContext, PlanStateData};
 use ::nodes::executor::TupleSlotKind;
 use ::nodes::nodes::Node;

@@ -15,9 +15,9 @@
 //! plain (no pretty-printing) constraint text with the caller's alias, used by
 //! `ri_triggers.c` to build the partition-aware FK enforcement query.
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use crate::{deparse_context_for, deparse_expression, deparse_expression_pretty, PRETTYFLAG_INDENT};
 

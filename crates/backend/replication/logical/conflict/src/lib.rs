@@ -23,7 +23,7 @@ use ::mcx::Mcx;
 use ::types_core::primitive::{
     AttrNumber, InvalidRepOriginId, Oid, OidIsValid, RepOriginId, TimestampTz, TransactionId,
 };
-use types_error::{
+use ::types_error::{
     ErrorLevel, ErrorLocation, PgResult, SqlState, ERRCODE_T_R_SERIALIZATION_FAILURE,
     ERRCODE_UNIQUE_VIOLATION,
 };

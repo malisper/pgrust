@@ -5,7 +5,7 @@
 //! per-agg setup, phase and grouping-set layout, hash-table and context
 //! creation) is far larger than the rest of the lifecycle family combined.
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::execnodes::PlanStateData;
@@ -17,7 +17,7 @@ use crate::aggstate::{
     AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerHashData,
     AggStatePerPhaseData, AggStatePerTransData,
 };
-use nodes::{AggStrategy, EStateData, Sort, TupleSlotKind};
+use ::nodes::{AggStrategy, EStateData, Sort, TupleSlotKind};
 
 use crate::hash_grouping::{hash_agg_entry_size, hash_create_memory};
 use crate::node_lifecycle::{

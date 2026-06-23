@@ -2,7 +2,7 @@
 //! relation's MCVs, look up / insert into it, and shrink it on demand.
 
 use ::mcx::Mcx;
-use types_core::{uint32, Size};
+use ::types_core::{uint32, Size};
 // Datum-unification status (Wave 7): this crate's only canonical-Datum work is
 // already done — the `MultiExecPrivateHash` / `ExecHashTableInsert` hash path in
 // `exec_hash.rs` consumes the canonical `types_tuple::...heaptuple::Datum<'mcx>`

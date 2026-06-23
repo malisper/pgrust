@@ -24,20 +24,20 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::{Oid, OidIsValid};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION};
 use ::hash::HASHEXTENDED_PROC;
 use ::nodes::nodes::Node;
 use ::nodes::partition::{
     PartitionKeyData as NodesPartitionKeyData, PartitionStrategy as NodesPartitionStrategy,
 };
 use ::nodes::Expr;
-use types_partition::{
+use ::types_partition::{
     PartKeyTypeInfo, PartitionKeyData, PartitionStrategy, BTORDER_PROC,
     PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
 };
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_storage::lock::{AccessShareLock, NoLock};
 use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 

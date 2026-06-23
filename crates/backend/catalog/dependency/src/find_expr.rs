@@ -24,11 +24,11 @@ use ::nodes_core::node_walker::{
     self, QTW_EXAMINE_SORTGROUP, QTW_IGNORE_JOINALIASES,
 };
 use ::nodes_core::nodefuncs::expr_type;
-use utils_error::{ereport, elog};
+use ::utils_error::{ereport, elog};
 
 use ::types_catalog::catalog_dependency::ObjectAddresses;
 use ::types_core::primitive::{AttrNumber, InvalidAttrNumber, Oid};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_COLUMN, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_UNDEFINED_COLUMN, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node, CMD_INSERT, CMD_UPDATE};
 use ::nodes::parsenodes::{

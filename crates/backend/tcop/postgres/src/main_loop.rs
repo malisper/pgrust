@@ -41,9 +41,9 @@ extern crate alloc;
 
 use alloc::string::String;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_dest::dest::CommandDest;
-use types_error::{PgResult, ERROR, FATAL};
+use ::types_error::{PgResult, ERROR, FATAL};
 use ::stringinfo::StringInfo;
 use ::types_timeout::TimeoutId;
 

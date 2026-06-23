@@ -52,10 +52,10 @@ use nodes_core_seams as bitmapset;
 use latch_seams as latch;
 use postgres_seams as tcop_postgres;
 
-use mcx::{alloc_in, Mcx, PgBox};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::mcx::{alloc_in, Mcx, PgBox};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::nodegather::{Gather, GatherStateData};
-use nodes::{Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind};
+use ::nodes::{Bitmapset, EStateData, PlanStateData, PlanStateNode, SlotId, TupleSlotKind};
 use ::types_pgstat::wait_event::WAIT_EVENT_EXECUTE_GATHER;
 use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET};
 use types_tuple::heaptuple::FormedMinimalTuple;

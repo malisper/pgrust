@@ -50,7 +50,7 @@ use ::types_storage::lock::{AccessExclusiveLock, NoLock};
 use ::types_core::primitive::Oid;
 use ::types_core::xact::CommandId;
 use ::datum::Datum;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
@@ -2710,7 +2710,7 @@ pub fn set_before_trigger_result_do_nothing() {
 // channel. Installed by [`crate::ri_accessors::init_seams`].
 // ===========================================================================
 
-use tsvector_ext_seams::{
+use ::tsvector_ext_seams::{
     TriggerEvent as TsvTriggerEvent, TupleSource as TsvTupleSource,
 };
 

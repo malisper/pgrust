@@ -6,11 +6,11 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_tuple::heaptuple::Datum as TupleDatum;
 use ::types_error::PgResult;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_tuple::heaptuple::FormData_pg_attribute;
 use ::types_tuple::pg_type::FormData_pg_type;
 use ::types_core::primitive::{OffsetNumber, TransactionId};

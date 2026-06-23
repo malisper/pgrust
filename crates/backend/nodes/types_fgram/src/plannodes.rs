@@ -27,7 +27,7 @@
 
 use core::ffi::{c_char, c_int, c_long};
 
-use pg_ffi_fgram::{
+use ::pg_ffi_fgram::{
     uint32, uint64, AttrNumber, Bitmapset, List, Node, NodeTag, Oid, StrategyNumber,
 };
 

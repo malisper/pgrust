@@ -4,7 +4,7 @@
 //! thread so the `thread_local!` backend state starts fresh.
 
 use super::*;
-use types_core::{uaMD5, uaSCRAM, uaTrust};
+use ::types_core::{uaMD5, uaSCRAM, uaTrust};
 
 fn on_fresh_backend<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
     std::thread::spawn(f).join().unwrap()

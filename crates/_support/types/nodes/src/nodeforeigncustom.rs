@@ -5,7 +5,7 @@
 
 use alloc::string::String;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::{Index, Oid};
 use ::types_error::PgResult;
 

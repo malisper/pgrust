@@ -49,23 +49,23 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use dedup::{
+use ::dedup::{
     new_dedup_state, BTDedupState, _bt_dedup_finish_pending, _bt_dedup_save_htid,
     _bt_dedup_start_pending, _bt_swap_posting, _bt_update_posting,
 };
-use page::{
+use ::page::{
     ItemIdGetLength, ItemIdGetOffset, ItemPointerGetBlockNumberNoCheck, ItemPointerSetBlockNumber,
     ItemPointerSetOffsetNumber, PageAddItemExtended, PageGetItem, PageGetItemId,
     PageGetMaxOffsetNumber, PageGetSpecialPointer, PageGetTempPageCopySpecial, PageIndexMultiDelete,
     PageIndexTupleDelete, PageIndexTupleOverwrite, PageInit, PageMut, PageRef, PageRestoreTempPage,
 };
-use mcx::{MemoryContext, Mcx};
+use ::mcx::{MemoryContext, Mcx};
 use ::types_core::primitive::{
     BlockNumber, InvalidBlockNumber, OffsetNumber, TransactionId, XLogRecPtr,
 };
 use ::types_core::xact::FullTransactionId;
-use types_error::{PgError, PgResult, PANIC};
-use types_nbtree::{
+use ::types_error::{PgError, PgResult, PANIC};
+use ::types_nbtree::{
     xl_btree_dedup, xl_btree_delete, xl_btree_insert, xl_btree_mark_page_halfdead,
     xl_btree_metadata, xl_btree_newroot, xl_btree_reuse_page, xl_btree_split, xl_btree_unlink_page,
     BTDedupInterval, BTMetaPageData, BTPageOpaqueData, BTMaxItemSize, BTP_DELETED, BTP_HALF_DEAD,

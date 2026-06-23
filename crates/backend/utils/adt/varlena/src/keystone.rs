@@ -33,7 +33,7 @@
 //!   [`SplitTextOutputData`] as type definitions other families name.
 //! - [`NAMEDATALEN`] / [`VARHDRSZ`] / [`TEXTBUFLEN`] constants.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 
 use mbutils_seams as mb;

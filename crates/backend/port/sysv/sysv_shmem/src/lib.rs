@@ -46,7 +46,7 @@ use std::sync::Mutex;
 
 use ::guc_tables::consts::{HUGE_PAGES_ON, HUGE_PAGES_TRY, SHMEM_TYPE_MMAP};
 use ::types_core::Size;
-use types_error::{PgError, PgResult, ERROR, FATAL};
+use ::types_error::{PgError, PgResult, ERROR, FATAL};
 use ::types_storage::storage::{dsm_handle, PGShmemHeader, PGShmemMagic};
 
 /// `IPCProtection` (`port/sysv_shmem.c`) — access/modify by user only.
@@ -826,7 +826,7 @@ fn check_huge_page_size(
 /// Install the inward `PGSharedMemory*` / `GetHugePageSize` seams consumed by
 /// ipci/postmaster/miscinit/shmem.
 pub fn init_seams() {
-    use guc_tables::{hooks, vars, GucVarAccessors};
+    use ::guc_tables::{hooks, vars, GucVarAccessors};
 
     sysv_shmem_seams::pg_shared_memory_detach::set(PGSharedMemoryDetach);
     sysv_shmem_seams::pg_shared_memory_is_in_use::set(PGSharedMemoryIsInUse);

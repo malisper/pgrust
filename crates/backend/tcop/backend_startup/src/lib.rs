@@ -16,15 +16,15 @@
 #![allow(clippy::too_many_arguments)]
 
 use ::utils_error::ereport;
-use mcx::{MemoryContext, Mcx};
-use types_core::{init::BackendType, ProtocolVersion, TimestampTz};
-use types_error::{
+use ::mcx::{MemoryContext, Mcx};
+use ::types_core::{init::BackendType, ProtocolVersion, TimestampTz};
+use ::types_error::{
     ErrorLocation, PgResult, COMMERROR, ERRCODE_CANNOT_CONNECT_NOW, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_PROTOCOL_VIOLATION, ERRCODE_TOO_MANY_CONNECTIONS, FATAL, LOG, WARNING,
 };
-use net::{Port, SockError};
-use types_startup::{BackendStartupData, CacState, StartupData};
+use ::net::{Port, SockError};
+use ::types_startup::{BackendStartupData, CacState, StartupData};
 use ::types_timeout::TimeoutId;
 
 mod globals;
@@ -1198,7 +1198,7 @@ pub fn init_seams() {
     //   string the GUC machinery owns; `check_log_connections`/
     //   `assign_log_connections` parse it into the separate `log_connections`
     //   int flag mask (the latter is set by the assign hook, not a GUC slot).
-    use guc_tables::{hooks, vars, GucVarAccessors};
+    use ::guc_tables::{hooks, vars, GucVarAccessors};
     vars::Trace_connection_negotiation.install(GucVarAccessors {
         get: globals::trace_connection_negotiation::get,
         set: globals::trace_connection_negotiation::set,

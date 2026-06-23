@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use alloc::sync::Arc;
 
-use types_core::{Oid, Size};
+use ::types_core::{Oid, Size};
 
 /// The genuinely-shared vacuum cost-balance / active-worker counters that, in C,
 /// live in the parallel-vacuum DSM segment (`PVShared.cost_balance` /

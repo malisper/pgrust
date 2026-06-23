@@ -10,11 +10,11 @@
 //! `CreateOpClassItem`), so a mismatch is an internal error.
 
 use ::utils_error::ereport;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::nodes::ddlnodes as pnode;
 use ::nodes::nodes::Node;
 use ::nodes::rawnodes::TypeName as PTypeName;
-use opclass::{
+use ::opclass::{
     AlterOpFamilyStmt, CreateOpClassItem, CreateOpClassStmt, CreateOpFamilyStmt, ObjectWithArgs,
     StringNode, TypeName,
 };

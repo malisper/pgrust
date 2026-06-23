@@ -18,7 +18,7 @@ use ::types_pgstat::pgstat_internal::{
     PgStatShared_HashEntry,
 };
 use ::types_storage::ilist::{dlist_head, dlist_node};
-use types_storage::{DsaArea, DshashTable};
+use ::types_storage::{DsaArea, DshashTable};
 
 /// `PgStat_EntryRef` (`utils/pgstat_internal.h`) — a backend-local reference to
 /// a shared statistics entry, caching the resolved shared pointers and holding

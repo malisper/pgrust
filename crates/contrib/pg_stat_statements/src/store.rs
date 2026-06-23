@@ -457,7 +457,7 @@ pub(crate) fn entry_reset(
     minmax_only: bool,
 ) -> PgResult<i64> {
     use ::utils_error::ereport;
-    use types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
+    use ::types_error::{ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR};
 
     if !shmem::is_initialized() {
         return Err(ereport(ERROR)

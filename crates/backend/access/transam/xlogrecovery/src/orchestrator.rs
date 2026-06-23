@@ -33,9 +33,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use control::{CheckPoint as CtlCheckPoint, ControlFileData, DBState};
-use types_core::{InvalidXLogRecPtr, TimeLineID, XLogRecPtr};
-use types_error::{ErrorLocation, PgError, PgResult, DEBUG1, FATAL, LOG, PANIC, WARNING};
+use ::control::{CheckPoint as CtlCheckPoint, ControlFileData, DBState};
+use ::types_core::{InvalidXLogRecPtr, TimeLineID, XLogRecPtr};
+use ::types_error::{ErrorLocation, PgError, PgResult, DEBUG1, FATAL, LOG, PANIC, WARNING};
 use ::wal::xlog_consts::XLOG_BLCKSZ;
 
 use ::utils_error::ereport;

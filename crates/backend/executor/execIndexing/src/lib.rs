@@ -27,9 +27,9 @@ use ::types_error::error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
-use types_core::{fmgr::INDEX_MAX_KEYS, Oid};
+use ::types_core::{fmgr::INDEX_MAX_KEYS, Oid};
 use ::datum::Datum as DatumWord;
 use ::types_error::PgResult;
 use ::nodes::execnodes::{EStateData, IndexInfo, RriId, SlotId};

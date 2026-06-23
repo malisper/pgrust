@@ -10,11 +10,11 @@
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 
-use types_error::{
+use ::types_error::{
     ErrorLocation, ErrorLevel, PgError, PgResult, ERROR, LOG, ERRCODE_INSUFFICIENT_RESOURCES,
     ERRCODE_OUT_OF_MEMORY,
 };
-use types_storage::{Dir, DirEnt, FD_MINFREE};
+use ::types_storage::{Dir, DirEnt, FD_MINFREE};
 
 use crate::vfd_core::{
     self, with_fd, AllocateDesc, AllocatedHandle, DirHandle, PipeHandle,

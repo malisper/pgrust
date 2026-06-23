@@ -6,7 +6,7 @@
 //! `init_seams()` when it lands. Until then a call panics loudly.
 
 use ::mcx::Mcx;
-use types_error::{PgResult, SoftErrorContext};
+use ::types_error::{PgResult, SoftErrorContext};
 use ::tsearch::tsearch::{CheckCondition, QueryItem, TSTernaryValue, TsVectorParseStateHandle};
 
 // ===========================================================================

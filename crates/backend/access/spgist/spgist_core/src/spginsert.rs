@@ -33,7 +33,7 @@ use ::types_tableam::index_info_carrier::IndexInfoCarrier;
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use spgist::{
+use ::spgist::{
     SPGIST_LEAF, SPGIST_METAPAGE_BLKNO, SPGIST_NULLS, SPGIST_NULL_BLKNO, SPGIST_ROOT_BLKNO,
 };
 

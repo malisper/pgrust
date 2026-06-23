@@ -28,7 +28,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 /// The buffer. Fields are public, mirroring C's plain struct: the owning units
 /// (`stringinfo.c`, `pqformat.c`) manipulate them directly.

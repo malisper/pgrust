@@ -30,9 +30,9 @@
 
 pub mod fmgr_builtins;
 
-use types_core::{CommandId, FullTransactionId, MultiXactId, TransactionId};
+use ::types_core::{CommandId, FullTransactionId, MultiXactId, TransactionId};
 use ::datum::Bytea;
-use types_error::{PgResult, SoftErrorContext};
+use ::types_error::{PgResult, SoftErrorContext};
 
 // ---------------------------------------------------------------------------
 // Local constants matching the C headers.

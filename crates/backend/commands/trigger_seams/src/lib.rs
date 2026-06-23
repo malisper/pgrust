@@ -11,11 +11,11 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_tuple::heaptuple::Datum;
-use types_ri_triggers::{TriggerDataRef, TriggerRef, TupleTableSlotRef};
+use ::types_ri_triggers::{TriggerDataRef, TriggerRef, TupleTableSlotRef};
 
 seam_core::seam!(
     /// `get_trigger_oid(relid, trigname, missing_ok)` (trigger.c): the OID of

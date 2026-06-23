@@ -35,10 +35,10 @@
 //! `numeric` precedent does: `cstring`/`bytea` on the by-ref `Cstring`/`Varlena`
 //! lane (the kernels already read/set those), scalars in the by-value word.
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::datum::Datum;
 use ::types_error::PgResult;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 // ---------------------------------------------------------------------------
 // Argument / result marshalling between the by-ref bridge and the boundary
@@ -495,7 +495,7 @@ mod tests {
     use ::cache::typcache::TypeCacheEntry;
     use ::datum::NullableDatum;
     use ::fmgr::RefPayload;
-    use types_rangetypes::{RangeBound, RangeTypeP};
+    use ::types_rangetypes::{RangeBound, RangeTypeP};
 
     /// OID we use for the synthetic `int4range` type in the test typcache.
     const TEST_RANGE_OID: u32 = 3904; // pg_type int4range

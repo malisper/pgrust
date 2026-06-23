@@ -9,8 +9,8 @@
 
 use core::any::Any;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
-use types_core::{AttrNumber, Oid};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::types_core::{AttrNumber, Oid};
 use ::types_error::PgResult;
 use ::execparallel::SerializeCursor;
 

@@ -20,7 +20,7 @@ use ::types_core::primitive::{
     BlockNumber, OffsetNumber, Oid,
 };
 use ::types_core::InvalidOid;
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::hash::hashpage::{
     Bucket, HASH_MAGIC, HASH_VERSION, HASH_METAPAGE,
     HASH_SPLITPOINT_GROUPS_WITH_ONE_PHASE, HASH_SPLITPOINT_PHASE_BITS,
@@ -33,7 +33,7 @@ use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::ItemPointerData;
 
 use bufmgr_seams as bufmgr;
-use page::{
+use ::page::{
     ItemIdMarkDead, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageMut, PageRef,
 };
 use lsyscache_seams as lsyscache;

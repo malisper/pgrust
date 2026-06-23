@@ -8,7 +8,7 @@ use ::types_error::PgResult;
 use ::nodes::copy_query::Query;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::portalcmds::ParamListInfo;
-use portal::{FetchDirection, Portal, PortalStrategy, QueryCompletion};
+use ::portal::{FetchDirection, Portal, PortalStrategy, QueryCompletion};
 use ::snapshot::SnapshotData;
 
 seam_core::seam!(

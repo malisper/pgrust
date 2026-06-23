@@ -20,20 +20,20 @@
 #![allow(clippy::result_large_err)]
 
 use ::pqformat::enlarge_string_info;
-use utils_error::{elog, ereport, PgError, PgResult};
-use mbutils_seams::{
+use ::utils_error::{elog, ereport, PgError, PgResult};
+use ::mbutils_seams::{
     pg_mbcliplen, report_invalid_encoding, report_untranslatable_char,
 };
-use common_wchar::{
+use ::common_wchar::{
     pg_encoding_verifymbchar, pg_mule_mblen, pg_utf8_islegal, pg_utf_mblen_private,
 };
-use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OUT_OF_MEMORY, ERROR};
+use ::types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OUT_OF_MEMORY, ERROR};
 use ::stringinfo::StringInfo;
 use ::types_wchar::encoding::{pg_valid_encoding, pg_enc, PG_MULE_INTERNAL, PG_UTF8};
-use types_wchar::{pg_local_to_utf_combined, pg_mb_radix_tree, pg_utf_to_local_combined};
+use ::types_wchar::{pg_local_to_utf_combined, pg_mb_radix_tree, pg_utf_to_local_combined};
 
 pub use ::wstrcmp::pg_char_and_wchar_strcmp;
-pub use wstrncmp::{
+pub use ::wstrncmp::{
     pg_char_and_wchar_strncmp, pg_wchar_strlen, pg_wchar_strncmp,
 };
 

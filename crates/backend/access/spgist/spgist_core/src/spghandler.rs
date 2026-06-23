@@ -12,7 +12,7 @@
 
 use ::mcx::Mcx;
 
-use types_amapi::{
+use ::types_amapi::{
     AmCostEstimate, IndexAMProperty as AmIndexAMProperty, IndexAmRoutine, IndexBuildResult,
     IndexPath, OpFamilyMember, PlannerInfo, T_IndexAmRoutine,
 };
@@ -20,7 +20,7 @@ use ::types_core::primitive::{InvalidOid, Oid};
 use ::rel::Relation;
 use ::types_scan::scankey::ScanKeyData;
 use ::types_scan::sdir::ScanDirection;
-use spgist::{SPGISTNProc, SPGIST_OPTIONS_PROC};
+use ::spgist::{SPGISTNProc, SPGIST_OPTIONS_PROC};
 use ::types_tableam::amapi::{IndexUniqueCheck, TIDBitmap};
 use ::types_tableam::index_info_carrier::IndexInfoCarrier;
 use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};

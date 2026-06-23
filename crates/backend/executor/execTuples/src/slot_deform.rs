@@ -27,9 +27,9 @@
 extern crate alloc;
 use alloc::format;
 
-use mcx::{slice_in, Mcx};
+use ::mcx::{slice_in, Mcx};
 use ::types_core::primitive::AttrNumber;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::tuptable::{
     HeapTupleTableSlot, SlotData, TTS_FLAG_SLOW,
 };

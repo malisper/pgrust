@@ -46,12 +46,12 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use utils_error::{ereport, PgError, PgResult};
-use mcx::{Mcx, MemoryContext};
+use ::utils_error::{ereport, PgError, PgResult};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_core::fmgr::NAMEDATALEN;
 use ::types_core::primitive::{Oid, OidIsValid, INVALID_OID as InvalidOid};
-use types_error::{
+use ::types_error::{
     ERRCODE_AMBIGUOUS_FUNCTION, ERRCODE_INTERNAL_ERROR, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
@@ -64,17 +64,17 @@ use ::types_tuple::heaptuple::{
 };
 
 // Outward seam aliases.
-use namespace_seams::{
+use ::namespace_seams::{
     lookup_explicit_namespace, opername_get_candidates, opername_get_oprid,
 };
 use ::nodes_core::nodefuncs::expr_type as exprType;
-use coerce_seams::{enforce_generic_type_consistency, is_binary_coercible};
-use parse_func_seams::{
+use ::coerce_seams::{enforce_generic_type_consistency, is_binary_coercible};
+use ::parse_func_seams::{
     check_srf_call_placement, func_match_argtypes, func_select_candidate, make_fn_arguments,
     set_last_srf,
 };
-use parse_type_seams::{lookup_type_name_oid, typename_type_id};
-use lsyscache_seams::{
+use ::parse_type_seams::{lookup_type_name_oid, typename_type_id};
+use ::lsyscache_seams::{
     get_array_type, get_base_element_type, get_base_type, get_func_retset,
 };
 use ::syscache_seams::oper_row_by_oid;

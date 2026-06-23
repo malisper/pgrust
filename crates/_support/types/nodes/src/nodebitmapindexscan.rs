@@ -8,7 +8,7 @@
 //! `IndexScanInstrumentation`, `SharedIndexScanInstrumentation`) is shared with
 //! the index-only-scan node and reused from [`crate::nodeindexonlyscan`].
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::primitive::Oid;
 use types_tuple::heaptuple::Datum;
 use ::types_error::PgResult;

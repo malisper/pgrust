@@ -35,11 +35,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use utils_error::{ereport, emit_error_report_for, PgError, PgResult};
+use ::utils_error::{ereport, emit_error_report_for, PgError, PgResult};
 use ::types_core::primitive::{Oid, ProcNumber};
 use ::types_core::xact::SubTransactionId;
 use ::types_core::InvalidOid;
-use types_error::{ERROR, WARNING};
+use ::types_error::{ERROR, WARNING};
 
 use crate::MAX_EOXACT_LIST;
 pub use entry::RelationData;

@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::types_parallel::shared_dsm_object::SharedRef;
 use ::types_parallel::SharedDsmObject;

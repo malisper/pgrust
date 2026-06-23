@@ -6,7 +6,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::nodes::copy_query::Query;

@@ -47,9 +47,9 @@
 use std::cell::Cell;
 use std::sync::Once;
 
-use mcx::{Mcx, MemoryContext};
-use types_core::{uint32, ProcNumber};
-use types_storage::{PGShmemHeader, PGShmemMagic};
+use ::mcx::{Mcx, MemoryContext};
+use ::types_core::{uint32, ProcNumber};
+use ::types_storage::{PGShmemHeader, PGShmemMagic};
 
 use crate::dsm::dsm_postmaster_startup;
 

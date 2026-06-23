@@ -42,10 +42,10 @@
 use ::types_core::primitive::{
     BlockNumber, ForkNumber, InvalidBlockNumber, TransactionId, XLogRecPtr, BLCKSZ,
 };
-use types_error::{PgError, PgResult, ERROR};
-use rel::{Relation, RelationData};
+use ::types_error::{PgError, PgResult, ERROR};
+use ::rel::{Relation, RelationData};
 use ::types_storage::buf::{BUFFER_LOCK_EXCLUSIVE, BUFFER_LOCK_UNLOCK};
-use types_storage::{Buffer, BufferIsValid, InvalidBuffer, RelFileLocatorBackend};
+use ::types_storage::{Buffer, BufferIsValid, InvalidBuffer, RelFileLocatorBackend};
 
 use ::utils_error::ereport;
 

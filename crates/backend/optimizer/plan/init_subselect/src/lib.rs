@@ -25,7 +25,7 @@
 extern crate alloc;
 
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, Relids, SpecialJoinInfo};
+use ::pathnodes::{PlannerInfo, Relids, SpecialJoinInfo};
 
 pub mod baserels;
 pub mod fkeys;
@@ -183,7 +183,7 @@ pub fn init_seams() {
      * the owner-held storage from boot_val and assigns user/config changes
      * through these accessors. */
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::from_collapse_limit.install(GucVarAccessors {
             get: from_collapse_limit,
             set: |v| {

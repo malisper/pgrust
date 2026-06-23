@@ -18,9 +18,9 @@
 //! inside the deferred control-file external where xlogrecovery's
 //! `GetCurrentReplayRecPtr` will be consulted when that subsystem lands.
 
-use utils_error::{ereport, PgResult};
+use ::utils_error::{ereport, PgResult};
 use ::control::CheckPoint;
-use types_core::{Oid, TimeLineID, XLogRecPtr};
+use ::types_core::{Oid, TimeLineID, XLogRecPtr};
 use ::types_error::PANIC;
 use ::wal::rmgr::XLogReaderState;
 use ::wal::wal::XLR_INFO_MASK;

@@ -32,15 +32,15 @@ use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 
 use ::utils_error::ereport;
-use mcx::{McxOwned, Mcx, MemoryContext, PgString, PgVec};
-use types_core::{pgsocket, PGINVALID_SOCKET, STATUS_ERROR, STATUS_OK};
+use ::mcx::{McxOwned, Mcx, MemoryContext, PgString, PgVec};
+use ::types_core::{pgsocket, PGINVALID_SOCKET, STATUS_ERROR, STATUS_OK};
 use ::types_tuple::Datum;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, COMMERROR, ERRCODE_CONNECTION_DOES_NOT_EXIST,
     ERRCODE_PROTOCOL_VIOLATION, ERROR, FATAL, LOG,
 };
 use ::waiteventset_seams::WaitEventSet;
-use net::{AddrInfoHint, ClientSocket, PgAddrInfo, Port, SockAddr, SockError, SockResult};
+use ::net::{AddrInfoHint, ClientSocket, PgAddrInfo, Port, SockAddr, SockError, SockResult};
 use ::types_storage::latch::LatchHandle;
 use ::types_storage::waiteventset::{
     WaitEvent, WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_CLOSED, WL_SOCKET_WRITEABLE,
@@ -2127,7 +2127,7 @@ fn pq_buffer_remaining_data_seam() -> i64 {
 /// Install this crate's seams (declared in `backend-libpq-pqcomm-seams`),
 /// plus its GUC storage variables and hooks into the GUC tables' slots.
 pub fn init_seams() {
-    use guc_tables::{hooks, vars, GucVarAccessors};
+    use ::guc_tables::{hooks, vars, GucVarAccessors};
 
     pqcomm_seams::pq_putmessage::set(pq_putmessage);
     pqcomm_seams::pq_putmessage_v2::set(pq_putmessage_v2);

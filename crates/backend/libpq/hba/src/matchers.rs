@@ -12,13 +12,13 @@
 
 use std::net::IpAddr;
 
-use ifaddr::{self as ifaddr, AddressFamily};
+use ::ifaddr::{self as ifaddr, AddressFamily};
 use acl_seams as acl;
 use user_seams as user;
 use walsender_seams as walsender;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use net::{ipCmpSameHost, AuthToken, IPCompareMethod, Port, SockAddr};
+use ::net::{ipCmpSameHost, AuthToken, IPCompareMethod, Port, SockAddr};
 
 use crate::{
     pg_strcasecmp, report_plain, tok_str, token_has_regexp, token_is_keyword,

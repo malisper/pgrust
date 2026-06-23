@@ -20,7 +20,7 @@
 //! `init_seams()` when it lands; until then a call panics loudly
 //! (`mirror-pg-and-panic`).
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 use ::nodes::nodeindexscan::PlannedStmt;
 use ::nodes::nodes::Node;

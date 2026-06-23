@@ -50,7 +50,7 @@
 extern crate alloc;
 
 use alloc::string::String;
-use mcx::{PgBox, PgString, PgVec};
+use ::mcx::{PgBox, PgString, PgVec};
 
 // `Mcx` (the target context handle) and `PgResult` (the fallible-copy error
 // lane) are re-exported under this crate's path so the `#[derive(PgNode)]`-

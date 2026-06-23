@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::{PlannerInfo, RinfoId};
+use ::pathnodes::{PlannerInfo, RinfoId};
 
 use lsyscache_seams as lsc;
 use equivclass_ext_seams as eqext;

@@ -10,7 +10,7 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
-use mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{slice_in, vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, Oid};
 use ::types_error::PgResult;

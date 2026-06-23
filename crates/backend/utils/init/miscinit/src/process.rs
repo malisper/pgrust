@@ -9,7 +9,7 @@
 
 use std::cell::Cell;
 
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, FATAL};
 use ::types_storage::latch::LatchHandle;
 
 use crate::{SetMyBackendType, PG_VERSION};

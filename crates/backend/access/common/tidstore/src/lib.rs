@@ -44,16 +44,16 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use radixtree_seams::{
+use ::radixtree_seams::{
     radixtree_attach, radixtree_begin_iterate, radixtree_create_local, radixtree_create_shared,
     radixtree_detach, radixtree_end_iterate, radixtree_find, radixtree_free, radixtree_get_dsa,
     radixtree_get_handle, radixtree_iterate_next, radixtree_lock, radixtree_memory_usage,
     radixtree_set,
 };
 use ::page::ItemPointerGetBlockNumber;
-use types_core::{BlockNumber, OffsetNumber};
-use types_dsa::{DsaHandle, DsaPointer};
-use types_error::{PgError, PgResult};
+use ::types_core::{BlockNumber, OffsetNumber};
+use ::types_dsa::{DsaHandle, DsaPointer};
+use ::types_error::{PgError, PgResult};
 use ::nodes::bitmapset::{bitmapword, BITS_PER_BITMAPWORD};
 use ::types_storage::bufpage::MaxOffsetNumber;
 use ::types_tuple::heaptuple::{ItemPointerData, INVALID_OFFSET_NUMBER as InvalidOffsetNumber};

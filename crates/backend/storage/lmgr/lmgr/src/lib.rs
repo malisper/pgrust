@@ -32,9 +32,9 @@ extern crate alloc;
 
 use core::fmt;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid, TransactionId};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::{
     LockRelId, XLTW_Oper, DEFAULT_LOCKMETHOD, ExclusiveLock, LOCKACQUIRE_ALREADY_CLEAR,
     LOCKACQUIRE_NOT_AVAIL, LOCKMODE, LOCKTAG, LOCKTAG_ADVISORY, LOCKTAG_APPLY_TRANSACTION,

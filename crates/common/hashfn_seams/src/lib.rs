@@ -8,7 +8,7 @@
 //! read-only byte images, so they cross the seam as `&[u8]` (the C
 //! `const void *key` over the first `keysize` bytes).
 
-use types_core::{uint32, Size};
+use ::types_core::{uint32, Size};
 
 seam_core::seam!(
     /// `uint32 hash_bytes(const unsigned char *k, int keylen)`

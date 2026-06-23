@@ -5,7 +5,7 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::copy_query::Query;

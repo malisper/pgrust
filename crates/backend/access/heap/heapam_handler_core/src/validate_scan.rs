@@ -14,11 +14,11 @@
 //! reuse the same owned-model idioms as the sibling
 //! `heapam_index_build_range_scan` (see `build_scan.rs`).
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::utils_error::ereport;
 use ::types_core::primitive::BlockNumber;
-use types_error::{PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
+use ::types_error::{PgResult, ERRCODE_DATA_CORRUPTED, ERROR};
 use ::rel::Relation;
 use ::types_scan::sdir::ForwardScanDirection;
 use ::types_tuple::heaptuple::ItemPointerData;

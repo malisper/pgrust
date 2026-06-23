@@ -16,11 +16,11 @@ use ::datum::datum::Datum;
 use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     NodeId, PlannerInfo, RelId, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL, JOIN_INNER,
     JOIN_LEFT, JOIN_SEMI,
 };
-use types_selfuncs::{AttStatsSlot, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES};
+use ::types_selfuncs::{AttStatsSlot, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES};
 
 use crate::STATISTIC_KIND_MCV;
 

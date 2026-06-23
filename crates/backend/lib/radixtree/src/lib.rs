@@ -47,13 +47,13 @@ use lwlock_seams as lwlock;
 use ::lmgr_proc_seams::my_proc_number;
 use dsa_seams as dsa;
 
-use types_core::{BlockNumber, OffsetNumber, Size};
-use types_dsa::{
+use ::types_core::{BlockNumber, OffsetNumber, Size};
+use ::types_dsa::{
     DsaHandle, DsaPointer, DSA_ALLOC_ZERO, DSA_HANDLE_INVALID, INVALID_DSA_POINTER,
 };
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::bitmapset::{bitmapword, BITS_PER_BITMAPWORD};
-use types_storage::{DsaArea, LWLock, LWLockMode, LW_EXCLUSIVE, LW_SHARED};
+use ::types_storage::{DsaArea, LWLock, LWLockMode, LW_EXCLUSIVE, LW_SHARED};
 use ::types_vacuum::vacuumlazy::{TidStore, TidStoreIterHandle};
 
 // ===========================================================================

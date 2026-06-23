@@ -1717,7 +1717,7 @@ pub fn prsd_headline(
     query: &crate::ts_parse::TSQuery,
 ) -> PgResult<()> {
     use ::utils_error::ereport;
-    use types_error::{ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+    use ::types_error::{ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 
     // default option values:
     let mut min_words: i32 = 15;
@@ -1862,7 +1862,7 @@ fn pg_strcasecmp(a: &str, b: &str) -> bool {
 /// failure, matching the C error the option parser would surface.
 fn pg_strtoint32(val: &str) -> PgResult<i32> {
     use ::utils_error::ereport;
-    use types_error::{
+    use ::types_error::{
         ErrorLocation, ERRCODE_INVALID_TEXT_REPRESENTATION,
         ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERROR,
     };

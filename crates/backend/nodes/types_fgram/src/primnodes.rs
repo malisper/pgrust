@@ -15,7 +15,7 @@
 
 use core::ffi::{c_char, c_double, c_int, c_uint};
 
-use pg_ffi_fgram::{AttrNumber, Bitmapset, CompareType, Datum, List, Node, NodeTag, Oid};
+use ::pg_ffi_fgram::{AttrNumber, Bitmapset, CompareType, Datum, List, Node, NodeTag, Oid};
 
 /// `int32` as PostgreSQL spells it for typmods.
 pub type Int32 = i32;

@@ -46,7 +46,7 @@ use ::nodes::execexpr::{
 };
 use ::nodes::execnodes::EcxtId;
 use ::nodes::primnodes::VarReturningType;
-use nodes::{EStateData, SlotId};
+use ::nodes::{EStateData, SlotId};
 
 /// `INNER_VAR` / `OUTER_VAR` (primnodes.h) — the special `varno` sentinels for a
 /// Var referencing the inner/outer side of a join. Any other `varno` selects the

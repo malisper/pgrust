@@ -25,7 +25,7 @@ use ::types_core::primitive::ForkNumber::{
     FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM,
 };
 use ::types_core::primitive::InvalidBlockNumber;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_error::error::{
     ERRCODE_DATA_CORRUPTED, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, PANIC,
 };
@@ -1522,7 +1522,7 @@ pub fn init_seams() {
     // engine seeds it from boot_val and drives reads/writes through these
     // accessors backed by the owner-local storage above.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::wal_skip_threshold.install(GucVarAccessors {
             get: wal_skip_threshold,
             set: set_wal_skip_threshold,

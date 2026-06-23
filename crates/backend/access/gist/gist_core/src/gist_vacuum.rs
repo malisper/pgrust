@@ -29,11 +29,11 @@
 
 use alloc::vec::Vec;
 
-use integerset::{intset_create, IntegerSet};
+use ::integerset::{intset_create, IntegerSet};
 use ::mcx::Mcx;
 
 use bufmgr_seams as bufmgr;
-use page::{
+use ::page::{
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageIndexMultiDelete, PageIndexTupleDelete,
     PageIsNew, PageMut, PageRef,
 };
@@ -48,7 +48,7 @@ use ::types_storage::bufpage::MaxOffsetNumber;
 use ::types_storage::Buffer;
 use ::types_tableam::genam::{IndexBulkDeleteResult, IndexVacuumInfo};
 use ::types_tuple::heaptuple::{FIRST_OFFSET_NUMBER, INVALID_OFFSET_NUMBER};
-use gist::{GistNSN, GIST_ROOT_BLKNO};
+use ::gist::{GistNSN, GIST_ROOT_BLKNO};
 
 use crate::gist_page::{
     gist_page_get_nsn, gist_page_rightlink, GistFollowRight, GistMarkTuplesDeleted, GistPageIsDeleted,

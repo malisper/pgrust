@@ -86,7 +86,7 @@ fn recompute_checkpoint_segments() {
 /// Install the xlog-owned GUC variable accessors and assign hooks into the
 /// guc-tables slots. Called from [`crate::init_seams`].
 pub fn install() {
-    use guc_tables::{hooks, vars, GucVarAccessors};
+    use ::guc_tables::{hooks, vars, GucVarAccessors};
 
     vars::max_wal_size_mb.install(GucVarAccessors {
         get: get_max_wal_size_mb,

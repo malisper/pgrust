@@ -99,7 +99,7 @@ use ::nodes_core::multibitmapset::{mbms_add_members, mbms_overlap_sets, MultiBit
 use ::clauses::grounded::{
     find_forced_null_vars, find_nonnullable_rels, find_nonnullable_vars,
 };
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::copy_query::Query;

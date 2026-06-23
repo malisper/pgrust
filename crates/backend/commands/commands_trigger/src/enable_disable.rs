@@ -10,7 +10,7 @@ use ::types_catalog::pg_trigger as pt;
 use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
 use ::types_core::Oid;
-use types_error::{PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERROR};
+use ::types_error::{PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERROR};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;

@@ -45,7 +45,7 @@ use ::mcx::Mcx;
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::pg_attribute::{AttributeRelationId, PgAttributeUpdateRow};
 use ::types_core::primitive::{AttrNumber, InvalidAttrNumber};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TABLE_DEFINITION,
@@ -67,9 +67,9 @@ use types_tuple::heaptuple::Datum;
 
 use ::common_relation::relation_open;
 use indexing_seams as indexing_seam;
-use pg_attrdef::{RemoveAttrDefault, StoreAttrDefault};
+use ::pg_attrdef::{RemoveAttrDefault, StoreAttrDefault};
 use ::lsyscache::attribute::get_attnum;
-use cache_syscache::{SearchSysCacheAttName, ATTNAME, ATTNUM};
+use ::cache_syscache::{SearchSysCacheAttName, ATTNAME, ATTNUM};
 use objectaccess_seams as objaccess_seam;
 
 use tablecmds_seams as seam;

@@ -28,7 +28,7 @@ pub mod gin;
 pub mod backend_access_gin_ginlogic;
 pub mod tsgistidx;
 
-use mcx::{PgString, PgVec};
+use ::mcx::{PgString, PgVec};
 use ::types_core::Oid;
 
 /// `TSL_ADDPOS` (`ts_public.h`).

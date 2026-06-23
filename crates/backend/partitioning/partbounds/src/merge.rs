@@ -23,9 +23,9 @@
 //! `(root, rel1, rel2, jointype) -> Option<(merged_boundinfo, outer_parts,
 //! inner_parts)>` to match `compute_partition_bounds` (joinrels.c:1739).
 
-use types_error::{PgError, PgResult};
-use pathnodes::{DatumImage, JoinType, PartitionBoundInfoData, PlannerInfo, RelId};
-use pathnodes::{JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_SEMI};
+use ::types_error::{PgError, PgResult};
+use ::pathnodes::{DatumImage, JoinType, PartitionBoundInfoData, PlannerInfo, RelId};
+use ::pathnodes::{JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_SEMI};
 
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::Oid;

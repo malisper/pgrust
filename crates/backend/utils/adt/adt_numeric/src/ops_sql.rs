@@ -18,12 +18,12 @@ extern crate alloc;
 
 use core::cmp::Ordering;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_tuple::Datum;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use ::types_numeric::var::{NumericSign, NumericVar};
-use types_numeric::{
+use ::types_numeric::{
     numeric_is_inf, numeric_is_nan, numeric_is_ninf, numeric_is_pinf, numeric_is_special,
     numeric_sign as numeric_sign_word, NumericDigit, DEC_DIGITS, NUMERIC_DSCALE_MAX,
     NUMERIC_HDRSZ, NUMERIC_MAX_DISPLAY_SCALE, NUMERIC_MAX_PRECISION, NUMERIC_MAX_RESULT_SCALE,
@@ -468,7 +468,7 @@ fn division_by_zero() -> PgError {
 pub fn numeric_abs<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     // numeric_abs (numeric.c:1393): operate directly on the packed format.
     let mut res = duplicate_numeric(mcx, num)?;
-    use types_numeric::{numeric_is_short, NUMERIC_INF_SIGN_MASK, NUMERIC_SHORT_SIGN_MASK};
+    use ::types_numeric::{numeric_is_short, NUMERIC_INF_SIGN_MASK, NUMERIC_SHORT_SIGN_MASK};
     let hdr_word = read_header_word(&res);
     if numeric_is_short(num) {
         write_header_word(&mut res, hdr_word & !NUMERIC_SHORT_SIGN_MASK);
@@ -486,7 +486,7 @@ pub fn numeric_abs<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'mcx, u8>
 pub fn numeric_uminus<'mcx>(mcx: Mcx<'mcx>, num: &[u8]) -> PgResult<PgVec<'mcx, u8>> {
     // numeric_uminus (numeric.c:1420).
     let mut res = duplicate_numeric(mcx, num)?;
-    use types_numeric::{numeric_is_short, NUMERIC_INF_SIGN_MASK, NUMERIC_SHORT_SIGN_MASK};
+    use ::types_numeric::{numeric_is_short, NUMERIC_INF_SIGN_MASK, NUMERIC_SHORT_SIGN_MASK};
     let hdr_word = read_header_word(&res);
 
     if numeric_is_special(num) {
@@ -603,7 +603,7 @@ pub fn numeric_round<'mcx>(mcx: Mcx<'mcx>, num: &[u8], scale: i32) -> PgResult<P
 /// (typmod-application) cast — adjust `num` to the precision/scale of `typmod`,
 /// erroring if it overflows. Returns a fresh on-disk image.
 pub fn numeric<'mcx>(mcx: Mcx<'mcx>, num: &[u8], typmod: i32) -> PgResult<PgVec<'mcx, u8>> {
-    use types_numeric::{
+    use ::types_numeric::{
         is_valid_numeric_typmod, numeric_dscale, numeric_is_short, numeric_typmod_precision,
         numeric_typmod_scale, numeric_weight, NUMERIC_DSCALE_MASK, NUMERIC_SHORT_DSCALE_MASK,
         NUMERIC_SHORT_DSCALE_SHIFT,
@@ -1425,7 +1425,7 @@ fn precision_range_error(prec: i32) -> PgError {
 
 pub fn numerictypmodout<'mcx>(mcx: Mcx<'mcx>, typmod: i32) -> PgResult<PgVec<'mcx, u8>> {
     // numerictypmodout (numeric.c:1369): cstring "(prec,scale)" or "".
-    use types_numeric::{is_valid_numeric_typmod, numeric_typmod_precision, numeric_typmod_scale};
+    use ::types_numeric::{is_valid_numeric_typmod, numeric_typmod_precision, numeric_typmod_scale};
     let s = if is_valid_numeric_typmod(typmod) {
         alloc::format!(
             "({},{})",
@@ -1447,7 +1447,7 @@ pub fn numerictypmodout<'mcx>(mcx: Mcx<'mcx>, typmod: i32) -> PgResult<PgVec<'mc
 /// the given typmod, or -1 if indeterminate. Pure arithmetic; infallible.
 pub fn numeric_maximum_size(typmod: i32) -> i32 {
     // numeric_maximum_size (numeric.c:953).
-    use types_numeric::{is_valid_numeric_typmod, numeric_typmod_precision};
+    use ::types_numeric::{is_valid_numeric_typmod, numeric_typmod_precision};
     if !is_valid_numeric_typmod(typmod) {
         return -1;
     }

@@ -6,8 +6,8 @@
 //! subsystem through (xact, json, guc, timeout, ...). They marshal into the
 //! crate's value cores; `init_seams()` installs every one.
 
-use types_core::{Oid, TimestampTz};
-use types_datetime::{
+use ::types_core::{Oid, TimestampTz};
+use ::types_datetime::{
     fsec_t, DateADT, TimeADT, Timestamp, TimeTzADT, USE_ISO_DATES, USE_XSD_DATES,
     POSTGRES_EPOCH_JDATE, USECS_PER_SEC,
 };
@@ -126,7 +126,7 @@ pub fn timestamptz_to_str<'mcx>(
 pub fn parse_recovery_target_time(newval: String) -> bool {
     use crate::decode::{DecodeDateTime, ParseDateTime};
     use crate::timestamp::tm2timestamp;
-    use types_datetime::{DTK_DATE, MAXDATEFIELDS, MAXDATELEN};
+    use ::types_datetime::{DTK_DATE, MAXDATEFIELDS, MAXDATELEN};
 
     let mut field: Vec<String> = Vec::new();
     let mut ftype: Vec<i32> = Vec::new();
@@ -316,7 +316,7 @@ pub fn convert_time_zone_abbrevs(
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use types_datetime::{
+use ::types_datetime::{
     pg_itm, Interval, Timestamp2TmResult, TzAbbrevMatch, TzHandle, YmdDate,
 };
 use ::pgtime::pg_tz;

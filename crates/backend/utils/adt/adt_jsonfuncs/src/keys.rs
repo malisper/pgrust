@@ -23,7 +23,7 @@ use ::utils_error::ereport;
 use ::mcx::Mcx;
 use ::types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 use ::types_error::PgResult;
-use types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
+use ::types_json::{JsonLexContext, JsonParseErrorType, JsonSemAction, JsonTokenType};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use ::types_jsonb::jsonb::{
     json_container_is_array, json_container_is_scalar, json_container_size, JsonbIteratorToken,
@@ -31,7 +31,7 @@ use ::types_jsonb::jsonb::{
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::types_tuple::Datum;
 
-use jsonb_util::{JsonbIteratorInit, JsonbIteratorNext};
+use ::jsonb_util::{JsonbIteratorInit, JsonbIteratorNext};
 use funcapi_seams as funcapi;
 
 /// `OkeysState` (jsonfuncs.c:55): collects the top-level object keys for the

@@ -21,16 +21,16 @@
 #![allow(clippy::needless_range_loop)]
 
 use ::mcx::Mcx;
-use types_core::{AttrNumber, Oid};
-use types_error::{PgError, PgResult};
+use ::types_core::{AttrNumber, Oid};
+use ::types_error::{PgError, PgResult};
 use ::types_sortsupport::SortSupportData;
-use statistics::{SortItem, StatsBuildData};
+use ::statistics::{SortItem, StatsBuildData};
 use ::types_tuple::Datum;
 
 use ::parse_oper::get_sort_group_operators;
-use sortsupport_seams::{apply_sort_comparator, prepare_sort_support_from_ordering_op};
+use ::sortsupport_seams::{apply_sort_comparator, prepare_sort_support_from_ordering_op};
 use ::lsyscache_seams::get_typlen;
-use detoast_seams::{pg_detoast_datum_packed, toast_raw_datum_size};
+use ::detoast_seams::{pg_detoast_datum_packed, toast_raw_datum_size};
 
 use statistics_core_seams as seams;
 
@@ -640,7 +640,7 @@ fn statext_mcv_build<'mcx>(
     totalrows: f64,
     stattarget: i32,
 ) -> PgResult<Option<::statistics::MCVList<'mcx>>> {
-    use statistics::{MCVItem, MCVList, STATS_MCV_MAGIC, STATS_MCV_TYPE_BASIC};
+    use ::statistics::{MCVItem, MCVList, STATS_MCV_MAGIC, STATS_MCV_TYPE_BASIC};
 
     let mcx = data_mcx(data);
 

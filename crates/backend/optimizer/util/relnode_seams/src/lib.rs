@@ -10,7 +10,7 @@
 
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
+use ::pathnodes::{PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo};
 
 seam_core::seam!(
     /// `bms_copy(a)` — a fresh copy of set `a` (empty copies to empty).

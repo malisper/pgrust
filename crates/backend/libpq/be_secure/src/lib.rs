@@ -30,8 +30,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, PgResult, DEBUG2, ERRCODE_ADMIN_SHUTDOWN, FATAL, LOG};
-use net::{Port, SockError, SockResult};
+use ::types_error::{ErrorLocation, PgResult, DEBUG2, ERRCODE_ADMIN_SHUTDOWN, FATAL, LOG};
+use ::net::{Port, SockError, SockResult};
 use ::types_storage::waiteventset::{
     WL_LATCH_SET, WL_POSTMASTER_DEATH, WL_SOCKET_READABLE, WL_SOCKET_WRITEABLE,
 };
@@ -583,7 +583,7 @@ pub fn init_seams() {
     // that guc_tables.c points into this translation unit. Each reads from the
     // GUC slot (none come from the ControlFile); install the backend-local
     // get/set accessors backing each one.
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
 
     vars::ssl_library.install(GucVarAccessors {
         get: config::ssl_library,

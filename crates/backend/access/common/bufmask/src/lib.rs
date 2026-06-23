@@ -21,12 +21,12 @@ extern crate alloc;
 
 use alloc::format;
 
-use page::{
+use ::page::{
     PageClearAllVisible, PageClearFull, PageClearHasFreeLinePointers, PageClearPrunable,
     PageGetItemId, PageGetMaxOffsetNumber, PageMut, PageSetItemId, PageSetLSN,
 };
 use ::types_core::primitive::{OffsetNumber, BLCKSZ};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::bufpage::{ItemIdData, SizeOfPageHeaderData, LP_UNUSED};
 use ::types_tuple::heaptuple::FIRST_OFFSET_NUMBER;
 

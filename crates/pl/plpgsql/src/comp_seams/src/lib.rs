@@ -25,8 +25,8 @@
 //! exclusive) out-parameters are expressed by construction rather than by a
 //! `bool` plus two maybe-initialized slots.
 
-use types_error::{PgError, PgResult};
-use plpgsql::{
+use ::types_error::{PgError, PgResult};
+use ::plpgsql::{
     IdentifierLookup, Oid, PLcword, PLpgSQL_condition, PLpgSQL_datum_type, PLpgSQL_expr,
     PLpgSQL_resolve_option, PLpgSQL_type, PLpgSQL_var, PLpgSQL_variable, PLwdatum, PLword,
     RawParseMode,

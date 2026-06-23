@@ -3,7 +3,7 @@
 //! offsets match `ginutil`'s on-disk image (verified against the C struct
 //! layouts there).
 
-use page::{PageGetContents, PageGetSpecialPointer, PageRef};
+use ::page::{PageGetContents, PageGetSpecialPointer, PageRef};
 use ::utils_error::PgResult;
 use ::types_core::primitive::BlockNumber;
 use ::types_core::primitive::OffsetNumber;

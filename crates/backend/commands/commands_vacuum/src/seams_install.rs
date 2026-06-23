@@ -319,7 +319,7 @@ pub fn init_seams() {
     // GucVarAccessors over our own backing store, then install the vacuum-seams
     // getters that read the slot via `vars::<name>.read()`.
     {
-        use guc_tables::{hooks, vars, GucVarAccessors};
+        use ::guc_tables::{hooks, vars, GucVarAccessors};
         use crate::guc_globals as g;
 
         // vacuum.c's `vacuum_buffer_usage_limit` GUC carries a check_hook

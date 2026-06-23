@@ -24,7 +24,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::{Oid, RepOriginId, XLogRecPtr};
+use ::types_core::{Oid, RepOriginId, XLogRecPtr};
 use ::types_error::PgResult;
 use ::types_storage::LWLockMode;
 

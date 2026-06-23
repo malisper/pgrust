@@ -47,7 +47,7 @@ use alloc::format;
 use alloc::string::String;
 
 use ::prng_base64::base64::{pg_b64_enc_len, pg_b64_encode};
-use sha2::{
+use ::sha2::{
     pg_sha256_ctx, pg_sha256_final, pg_sha256_init, pg_sha256_update, PG_SHA256_BLOCK_LENGTH,
     PG_SHA256_DIGEST_LENGTH,
 };

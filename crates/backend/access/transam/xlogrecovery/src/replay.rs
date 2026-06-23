@@ -29,10 +29,10 @@ extern crate alloc;
 
 use alloc::format;
 
-use utils_error::{ereport, elog};
-use types_core::{TimeLineID, TimestampTz};
-use types_core::{InvalidXLogRecPtr, XLogRecPtr};
-use types_error::{ErrorLocation, PgError, DEBUG1, FATAL, LOG, PANIC};
+use ::utils_error::{ereport, elog};
+use ::types_core::{TimeLineID, TimestampTz};
+use ::types_core::{InvalidXLogRecPtr, XLogRecPtr};
+use ::types_error::{ErrorLocation, PgError, DEBUG1, FATAL, LOG, PANIC};
 use ::wal::wal::{XLR_CHECK_CONSISTENCY, XLR_INFO_MASK};
 use ::wal::wal::{RM_XACT_ID, RM_XLOG_ID};
 use ::wal::xact::{
@@ -827,7 +827,7 @@ pub(crate) fn verify_backup_page_consistency(
     _record: RecordRef,
 ) -> Result<(), PgError> {
     use ::types_storage::buf::BUFFER_LOCK_EXCLUSIVE;
-    use types_storage::{BufferIsValid, InvalidBuffer, ReadBufferMode};
+    use ::types_storage::{BufferIsValid, InvalidBuffer, ReadBufferMode};
 
     let rmid = xlogreader::XLogRecGetRmid(reader_state());
     let rmgr = GetRmgr(rmid)?;

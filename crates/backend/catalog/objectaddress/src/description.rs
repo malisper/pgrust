@@ -12,10 +12,10 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use mcx::{Mcx, PgString};
-use types_core::{Oid, OidIsValid, InvalidOid};
+use ::mcx::{Mcx, PgString};
+use ::types_core::{Oid, OidIsValid, InvalidOid};
 use ::types_catalog::catalog_dependency::ObjectAddress;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 
 use crate::consts::*;
 use ::types_tuple::access::{

@@ -10,7 +10,7 @@
 use super::*;
 
 use ::nodes::primnodes::{Const, CurrentOfExpr, OpExpr, Var};
-use pathnodes::{Bitmapset, RelOptInfo};
+use ::pathnodes::{Bitmapset, RelOptInfo};
 use types_tuple::heaptuple::Datum;
 
 /* ---- in-test relids algebra over the canonical bitmapword layout -------- */

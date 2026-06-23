@@ -14,7 +14,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 
-use types_error::{PgError, PgResult, FATAL};
+use ::types_error::{PgError, PgResult, FATAL};
 
 use crate::MISCINIT_C;
 

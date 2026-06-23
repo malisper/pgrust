@@ -22,11 +22,11 @@ use std::cell::RefCell;
 use std::io::Read;
 
 use ::utils_error::ereport;
-use mcx::{Mcx, PgString, PgVec};
-use types_error::{ErrorLocation, PgResult};
-use types_error::{DEBUG4, ERROR, FATAL};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_error::{ErrorLocation, PgResult};
+use ::types_error::{DEBUG4, ERROR, FATAL};
 
-use bootscanner::{self as scanner, BootScanner, BootToken, BootTokenKind};
+use ::bootscanner::{self as scanner, BootScanner, BootToken, BootTokenKind};
 
 const FILE: &str = "bootparse.y";
 

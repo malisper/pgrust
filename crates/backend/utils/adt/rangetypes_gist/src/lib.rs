@@ -52,9 +52,9 @@ use allocator_api2::alloc::Allocator;
 use ::mcx::Mcx;
 use ::types_core::primitive::{Oid, OidIsValid};
 use ::datum::datum::Datum;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
-use types_rangetypes::{
+use ::types_rangetypes::{
     MultirangeTypeP, RangeBound, RangeTypeP, RANGE_CONTAIN_EMPTY, RANGE_EMPTY, RANGE_LB_INF,
     RANGE_UB_INF,
 };
@@ -85,7 +85,7 @@ use ::multirangetypes::typcache_io::multirange_get_typcache;
 
 use ::float::get_float4_infinity;
 
-use gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
+use ::gist::{GistEntryVector, GISTENTRY, GIST_SPLITVEC};
 
 pub mod fmgr_builtins;
 

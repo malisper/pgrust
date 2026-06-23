@@ -12,7 +12,7 @@ use std::sync::{Mutex, Once};
 
 use super::*;
 use fe_seams as s;
-use types_libpqwalreceiver::{ConnStatusType, ConninfoOption, ExecStatusType};
+use ::types_libpqwalreceiver::{ConnStatusType, ConninfoOption, ExecStatusType};
 
 // ---------------------------------------------------------------------------
 // Mock libpq provider state, shared by the installed seam fn pointers.

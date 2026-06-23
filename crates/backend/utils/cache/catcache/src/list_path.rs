@@ -11,7 +11,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use cache::catcache::{
     ArenaCatCList, CacheIdx, ClIdx, CtIdx, FetchedCatalogTuple, ItemPointer, CATCACHE_MAXKEYS,
     CL_MAGIC,

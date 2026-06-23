@@ -45,9 +45,9 @@ use format_type_seams as format_type;
 use lsyscache_seams as lsyscache;
 use portalmem_seams as portalmem;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::Oid;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INVALID_CURSOR_STATE,
     ERRCODE_UNDEFINED_CURSOR, ERRCODE_UNDEFINED_OBJECT,
 };
@@ -59,7 +59,7 @@ use ::nodes::nodes::{
     T_IndexOnlyScanState, T_IndexScanState, T_LimitState, T_ResultState, T_SampleScanState,
     T_SeqScanState, T_SubqueryScanState, T_TidRangeScanState, T_TidScanState,
 };
-use nodes::{CurrentOfExpr, EStateData, ExprContext, PlanStateNode};
+use ::nodes::{CurrentOfExpr, EStateData, ExprContext, PlanStateNode};
 use ::types_tuple::heaptuple::{item_pointer_is_valid, REFCURSOROID};
 
 /// `PORTAL_ONE_SELECT` (`utils/portal.h`, the first `PortalStrategy`

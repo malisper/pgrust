@@ -12,7 +12,7 @@
 use alloc::string::ToString;
 
 use ::types_core::Oid;
-use types_error::{PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR};
+use ::types_error::{PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, ERROR};
 
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsestmt::ParseState;

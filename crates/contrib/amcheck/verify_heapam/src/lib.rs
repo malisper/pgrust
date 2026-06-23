@@ -33,7 +33,7 @@ use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERRCODE_WRONG_OBJECT_TYPE,
 };
-use types_error::{DEBUG1, PgError, PgResult};
+use ::types_error::{DEBUG1, PgError, PgResult};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::rel::Relation;
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};

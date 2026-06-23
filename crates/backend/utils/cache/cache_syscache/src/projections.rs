@@ -2,10 +2,10 @@
 //! `backend-utils-cache-syscache-seams`: catcache lookup + attribute
 //! extraction + field projection, copied into the caller's `mcx`.
 
-use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgString, PgVec};
 use ::cache::SysCacheKey;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::hash::backend_access_hash_hashvalidate::{AmopRow, AmprocRow, OpclassForm};
 use ::types_tuple::heaptuple::{Datum, FormedTuple};
 // `::datum::Datum` (the bare-word shim) survives only at the unmigrated
@@ -35,25 +35,25 @@ use crate::{
     TSTEMPLATENAMENSP, TSTEMPLATEOID, TYPENAMENSP, TYPEOID,
     USERMAPPINGOID, USERMAPPINGUSERSERVER,
 };
-use statistics::{
+use ::statistics::{
     Anum_pg_statistic_stacoll1, Anum_pg_statistic_stadistinct, Anum_pg_statistic_stakind1,
     Anum_pg_statistic_stanullfrac, Anum_pg_statistic_staop1,
 };
 use lsyscache_seams as lsyscache_seams;
 use clauses_seams as clauses_seams;
 use ::types_core::AttrNumber;
-use fmgr::{LangInfo, ProcInfo, ProcLanguage, ProcResultInfo};
+use ::fmgr::{LangInfo, ProcInfo, ProcLanguage, ProcResultInfo};
 use arrayfuncs_seams as arrayfuncs_seams;
 use amutils_seams as amutils_seams;
 use guc_seams as guc_seams;
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, WARNING};
+use ::types_error::{ErrorLocation, ERRCODE_SYNTAX_ERROR, WARNING};
 use ::types_core::primitive::OidIsValid;
 use ::types_tuple::heaptuple::{HeapTupleHeaderGetRawXmin, HeapTupleHeaderGetXmin,
     HeapTupleHeaderXminCommitted};
 use ::types_catalog::pg_enum::{Anum_pg_enum_enumlabel, Anum_pg_enum_enumtypid, Anum_pg_enum_oid,
     EnumTupleData};
-use syscache_seams::{
+use ::syscache_seams::{
     AmopOpidRow, PgClassExtra, PgClassFullForm, PgIndexFlags, PgOperatorForm, PgProcForm,
     PgRangeFields,
 };
@@ -64,7 +64,7 @@ use types_tuple::tupdesc::PgTypeInfo;
 use ::syscache_seams::CastRow;
 use ::cache::syscache::{ForeignDataWrapperFormRow, ForeignServerFormRow};
 use ::types_namespace::OperRow;
-use types_namespace::{
+use ::types_namespace::{
     CharArrayDatum, FuncProcAttrs, OidArrayDatum, ProcCompileRow, ProcRow, TextArrayDatum,
 };
 use read_seams as nodes_read_seams;
@@ -5171,7 +5171,7 @@ pub(crate) fn pg_statistic_stadistinct(stats_tuple: types_selfuncs::StatsTuple) 
 pub(crate) fn pg_statistic_slot_meta(
     stats_tuple: types_selfuncs::StatsTuple,
 ) -> PgResult<::syscache_seams::PgStatisticSlotMeta> {
-    use syscache_seams::{PgStatisticSlotMeta, STATISTIC_NUM_SLOTS};
+    use ::syscache_seams::{PgStatisticSlotMeta, STATISTIC_NUM_SLOTS};
     let holder = stats_holder(stats_tuple);
     let scratch = MemoryContext::new("pg_statistic slot meta");
     let mcx = scratch.mcx();

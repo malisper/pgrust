@@ -21,10 +21,10 @@
 //! installed.  A handle read outside a trigger call is the C `CALLED_AS_TRIGGER`
 //! being false — a trigger-protocol violation the RI procs reject up front.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED};
-use types_ri_triggers::{TriggerDataRef, TriggerRef, TupleTableSlotRef};
+use ::types_error::{PgError, PgResult, ERRCODE_E_R_I_E_TRIGGER_PROTOCOL_VIOLATED};
+use ::types_ri_triggers::{TriggerDataRef, TriggerRef, TupleTableSlotRef};
 use ::types_tuple::access::RELKIND_PARTITIONED_TABLE;
 
 use crate::firing::with_current_trigger_data;

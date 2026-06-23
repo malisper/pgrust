@@ -196,7 +196,7 @@ pub fn init_seams() {
     // GUC variable accessors (`conf->variable`) for the globals.c integers backed
     // by GUC settings. The GUC machinery seeds these from boot_val during
     // InitializeGUCOptions and the shmem-sizing path reads them.
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
     vars::NBuffers.install(GucVarAccessors {
         get: globals::NBuffers,
         set: globals::SetNBuffers,

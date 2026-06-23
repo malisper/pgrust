@@ -39,7 +39,7 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 use ::types_catalog::pg_attribute::{
@@ -60,7 +60,7 @@ use ::types_catalog::pg_trigger::TriggerRelationId;
 use ::types_catalog::pg_type::TypeRelationId;
 use ::types_core::catalog::CONSTRAINT_RELATION_ID as ConstraintRelationId;
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_COLUMN_DEFINITION, ERRCODE_INVALID_TABLE_DEFINITION,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
@@ -81,12 +81,12 @@ use ::types_tuple::heaptuple::{FirstLowInvalidHeapAttributeNumber, InvalidCompre
 use ::common_relation::relation_open;
 use ::transam_xact::CommandCounterIncrement;
 use aclchk_seams as aclchk_seam;
-use heap::{
+use ::heap::{
     CheckAttributeType, RelationClearMissing, RemoveStatistics, CHKATYPE_IS_VIRTUAL,
     RELKIND_HAS_PARTITIONS, RELKIND_HAS_STORAGE,
 };
 use indexing_seams as indexing_seam;
-use pg_attrdef::{RemoveAttrDefault, StoreAttrDefault};
+use ::pg_attrdef::{RemoveAttrDefault, StoreAttrDefault};
 use pg_depend_seams as pg_depend_seam;
 use ::pg_inherits::find_inheritance_children;
 use ::nodes_core::makefuncs::make_var;
@@ -94,7 +94,7 @@ use ::nodes_core::nodefuncs::{expr_type, strip_implicit_coercions};
 use ::parse_collate::assign_expr_collations_in;
 use rewritehandler_seams as rewrite_seam;
 use ::lsyscache::relation::get_rel_relkind;
-use cache_syscache::{
+use ::cache_syscache::{
     SearchSysCacheAttName, SearchSysCacheCopyAttName, SysCacheGetAttrNotNull, ATTNAME,
 };
 use ::miscinit::GetUserId;

@@ -3,7 +3,7 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use types_error::{PgError, PgResult, SqlState};
+use ::types_error::{PgError, PgResult, SqlState};
 
 seam_core::seam!(
     /// `ereport(level, (errcode(...), errmsg(...), ...))` — emit one report

@@ -17,11 +17,11 @@
 
 use core::ffi::c_char;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_error::PgResult;
 
 use backend_nodes_types::node_tags as tags;
-use pg_ffi_fgram::{List as RawList, Node as RawNode};
+use ::pg_ffi_fgram::{List as RawList, Node as RawNode};
 
 use ::nodes::nodes::{Node, NodePtr};
 use ::nodes::parsestmt::RawStmt;

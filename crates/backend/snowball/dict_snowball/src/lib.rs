@@ -26,19 +26,19 @@ use alloc::string::String;
 use core::cell::RefCell;
 use core::ffi::c_int;
 
-use define_seams::{def_get_string, DefElemArg};
-use runtime::{SN_env, SN_set_current, STEMMER_MODULES, PG_SQL_ASCII, PG_UTF8};
-use ts_utils_seams::{readstoplist, searchstoplist};
+use ::define_seams::{def_get_string, DefElemArg};
+use ::runtime::{SN_env, SN_set_current, STEMMER_MODULES, PG_SQL_ASCII, PG_UTF8};
+use ::ts_utils_seams::{readstoplist, searchstoplist};
 use ::formatting_seams::str_tolower;
 use ::utils_error::ereport;
-use mbutils_seams::{
+use ::mbutils_seams::{
     get_database_encoding, get_database_encoding_name, pg_any_to_server, pg_server_to_any,
 };
-use mcx::{Mcx, PgString, PgVec};
-use types_error::{
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
-use tsearch::{DictSnowball, SnowballEnvHandle, StopList, TSLexeme};
+use ::tsearch::{DictSnowball, SnowballEnvHandle, StopList, TSLexeme};
 
 pub mod mem_provider;
 

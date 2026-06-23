@@ -55,17 +55,17 @@ use ::core::sync::atomic::Ordering;
 use std::sync::OnceLock;
 
 use condition_variable_seams as cv;
-use lwlock::{LWLockAcquire, LWLockInitialize, LWLockRelease};
-use init_small_seams::{my_proc_number, my_proc_pid};
+use ::lwlock::{LWLockAcquire, LWLockInitialize, LWLockRelease};
+use ::init_small_seams::{my_proc_number, my_proc_pid};
 use origin_extern_seams as sx;
 
-use types_core::{InvalidOid, Oid, OidIsValid, RepOriginId, TimestampTz, XLogRecPtr};
-use types_error::{
+use ::types_core::{InvalidOid, Oid, OidIsValid, RepOriginId, TimestampTz, XLogRecPtr};
+use ::types_error::{
     PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, ERRCODE_OBJECT_IN_USE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERRCODE_RESERVED_NAME, ERRCODE_UNDEFINED_OBJECT, PANIC,
 };
-use types_storage::{LWTRANCHE_REPLICATION_ORIGIN_STATE, LW_EXCLUSIVE, LW_SHARED};
+use ::types_storage::{LWTRANCHE_REPLICATION_ORIGIN_STATE, LW_EXCLUSIVE, LW_SHARED};
 use ::wal::rmgr::XLogReaderState;
 
 pub mod catalog_extern;

@@ -33,24 +33,24 @@
 //! wrappers for the two SQL functions are the accepted project Datum/fmgr
 //! deferral; the bodies are ported here taking the concrete `Oid`.
 
-use catalog_namespace::{
+use ::catalog_namespace::{
     get_collation_oid, NameListToString, QualifiedNameGetCreationNamespace,
 };
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use types_acl::{ACLCHECK_OK, ACL_CREATE};
+use ::types_acl::{ACLCHECK_OK, ACL_CREATE};
 use ::types_catalog::catalog::COLLATION_RELATION_ID;
 use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress};
 use ::types_core::primitive::{Oid, OidIsValid};
 use ::types_core::NAMESPACE_RELATION_ID;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_UNDEFINED_SCHEMA, ERROR, NOTICE, WARNING,
 };
 use ::locale::CollProvider;
 use ::nodes::parsenodes::OBJECT_SCHEMA;
-use parsenodes::{DefElem, Node};
+use ::parsenodes::{DefElem, Node};
 use ::types_tuple::heaptuple::DEFAULT_COLLATION_OID;
 use ::types_wchar::encoding::{pg_valid_be_encoding, PG_SQL_ASCII};
 
@@ -59,12 +59,12 @@ use ::collationcmds_seams::CollationCreateArgs;
 use ::define_seams::DefElemArg;
 
 use ::transam_xact_seams::command_counter_increment;
-use aclchk_seams::{
+use ::aclchk_seams::{
     aclcheck_error, object_aclcheck,
 };
-use pg_locale_seams::{get_collation_actual_version, pg_newlocale_from_collation};
-use miscinit_seams::{get_user_id, is_binary_upgrade, superuser};
-use mbutils_seams::{get_database_encoding, get_database_encoding_name};
+use ::pg_locale_seams::{get_collation_actual_version, pg_newlocale_from_collation};
+use ::miscinit_seams::{get_user_id, is_binary_upgrade, superuser};
+use ::mbutils_seams::{get_database_encoding, get_database_encoding_name};
 
 pub use ::collationcmds_seams::CollationRow as PgCollationRow;
 
@@ -1178,7 +1178,7 @@ pub fn init_seams() {
 /// trailing newline (too long for the 128-byte buffer) are skipped with a
 /// `DEBUG1`. `Err(errcode_for_file_access)` if the pipe cannot be opened.
 fn enumerate_libc_locales() -> PgResult<Vec<String>> {
-    use fd_seams::{
+    use ::fd_seams::{
         close_pipe_stream, open_pipe_stream_read, pipe_read_line, PipeReadLine,
     };
 

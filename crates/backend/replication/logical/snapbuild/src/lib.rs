@@ -39,13 +39,13 @@ use ::types_core::xact::{
     CommandId, FirstCommandId, InvalidCommandId, InvalidTransactionId, InvalidXLogRecPtr,
     TransactionIdIsNormal, TransactionIdIsValid, XACT_REPEATABLE_READ,
 };
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_logical::ReorderBufferHandle;
 use ::snapshot::snapshot::{SnapshotData, SnapshotType};
 use ::xlog_records::heapam_xlog::xl_heap_new_cid;
 use ::xlog_records::standbydefs::xl_running_xacts;
 
-use transam::{
+use ::transam::{
     TransactionIdFollows, TransactionIdFollowsOrEquals, TransactionIdPrecedes,
     TransactionIdPrecedesOrEquals,
 };

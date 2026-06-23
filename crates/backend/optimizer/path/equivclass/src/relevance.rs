@@ -6,7 +6,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use pathnodes::{
+use ::pathnodes::{
     EcId, EmId, EquivalenceClass, EquivalenceMemberIterator, IndexClause, JoinDomain, PlannerInfo,
     RelId, Relids, RinfoId, RELOPT_OTHER_JOINREL, RELOPT_OTHER_MEMBER_REL, RELOPT_OTHER_UPPER_REL,
 };

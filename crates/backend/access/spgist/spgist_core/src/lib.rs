@@ -49,17 +49,17 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 
-use heaptuple::{heap_compute_data_size, heap_fill_tuple, varsize_any};
+use ::heaptuple::{heap_compute_data_size, heap_fill_tuple, varsize_any};
 use ::indextuple::index_deform_tuple_internal;
-use tupdesc::{populate_compact_attribute, CreateTupleDescCopy};
-use page::{
+use ::tupdesc::{populate_compact_attribute, CreateTupleDescCopy};
+use ::page::{
     ItemPointerSet, ItemPointerSetInvalid, PageAddItemExtended, PageGetExactFreeSpace, PageGetItem,
     PageGetItemId, PageGetMaxOffsetNumber, PageIndexTupleDelete, PageInit, PageIsEmpty, PageIsNew,
     PageMut, PageRef,
 };
-use utils_error::{ereport, PgError};
+use ::utils_error::{ereport, PgError};
 use ::types_error::error::{ERROR, PANIC};
 use ::types_error::error::{ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::types_error::PgResult;
@@ -77,7 +77,7 @@ use ::types_tuple::heaptuple::{
     FIRST_OFFSET_NUMBER as FirstOffsetNumber,
 };
 
-use spgist::{
+use ::spgist::{
     spgConfigIn, GBUF_INNER_PARITY, GBUF_LEAF, GBUF_NULLS, GBUF_PARITY_MASK, GBUF_REQ_LEAF,
     GBUF_REQ_NULLS, SpGistBlockIsFixed, SpGistCache, SpGistDeadTupleData, SpGistInnerTupleData,
     SpGistLastUsedPage, SpGistLeafTupleData, SpGistMetaPageData, SpGistNodeTupleData,

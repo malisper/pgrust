@@ -20,7 +20,7 @@ use std::cell::RefCell;
 use ::mcx::Mcx;
 use ::pgstrcasecmp::pg_strcasecmp;
 use ::types_core::RmgrId;
-use types_error::{ErrorLocation, PgError, PgResult, ERROR, LOG};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERROR, LOG};
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::types_tuple::Datum;
 use ::wal::rmgr::{

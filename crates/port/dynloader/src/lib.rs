@@ -29,8 +29,8 @@
 //! `CATALOG.tsv`), exactly mirroring the `TD-DFMGR-DYNLOADER` design debt.
 
 use ::utils_error::ereport;
-use types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen};
-use types_error::{PgResult, ERROR};
+use ::types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen};
+use ::types_error::{PgResult, ERROR};
 use ::fmgr::LoadedExternalFunc;
 use ::types_logical::CallbackInvocation;
 

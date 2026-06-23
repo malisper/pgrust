@@ -31,7 +31,7 @@ use core::mem::{offset_of, size_of, MaybeUninit};
 use core::ptr::NonNull;
 use std::cell::RefCell;
 
-use s_lock::{s_lock, s_unlock};
+use ::s_lock::{s_lock, s_unlock};
 use ::utils_error::elog;
 
 use transam_xact_seams as xact;
@@ -44,11 +44,11 @@ use inval_seams as inval;
 use init_small_seams as init_small;
 
 use ::types_tuple::Datum;
-use types_error::{PgError, PgResult, DEBUG4, PANIC};
+use ::types_error::{PgError, PgResult, DEBUG4, PANIC};
 use ::types_storage::sinval::{SharedInvalCatcacheMsg, SharedInvalidationMessage};
 use ::types_storage::storage::Spinlock;
 use ::types_core::ProcNumber;
-use types_storage::{
+use ::types_storage::{
     LWLockMode, ProcSignalReason, NUM_AUXILIARY_PROCS, SINVAL_READ_LOCK, SINVAL_WRITE_LOCK,
 };
 

@@ -30,7 +30,7 @@ use std::sync::{Mutex, OnceLock};
 
 use ::types_core::primitive::Oid;
 use ::nodes::primnodes::Expr;
-use pathnodes::{IndexOptInfo, NodeId, PlannerInfo};
+use ::pathnodes::{IndexOptInfo, NodeId, PlannerInfo};
 
 /// A decomposed `SupportRequestIndexCondition` kernel. The parameters mirror the
 /// `SupportRequestIndexCondition` request fields the C body reads (`req->node`

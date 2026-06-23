@@ -21,12 +21,12 @@
 #![allow(dead_code)]
 
 use ::types_core::primitive::{BlockNumber, ForkNumber, InvalidBlockNumber};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::buf::buftag;
 use ::types_storage::storage::LWLockMode;
-use types_storage::{RelFileLocator, RelFileLocatorBackend};
+use ::types_storage::{RelFileLocator, RelFileLocatorBackend};
 
-use support::{buf_table_hash_code, buf_table_hash_partition};
+use ::support::{buf_table_hash_code, buf_table_hash_partition};
 
 use crate::mgr::BufferManager;
 

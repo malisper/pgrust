@@ -27,26 +27,26 @@ use alloc::vec::Vec;
 
 use core::cell::RefCell;
 
-use bufmask_seams::{
+use ::bufmask_seams::{
     mask_page_hint_bits, mask_page_lsn_and_checksum, mask_unused_space,
 };
 use xlogreader_seams as reader_seam;
-use xlogutils::{XLogInitBufferForRedo, XLogReadBufferForRedo};
+use ::xlogutils::{XLogInitBufferForRedo, XLogReadBufferForRedo};
 use xlogutils_seams as xlogutils_seam;
 use bufmgr_seams as bufmgr;
-use bufmgr_seams::{mark_buffer_dirty, unlock_release_buffer, with_buffer_page};
+use ::bufmgr_seams::{mark_buffer_dirty, unlock_release_buffer, with_buffer_page};
 use standby_seams as standby;
-use page::{
+use ::page::{
     PageAddItemExtended, PageGetItemId, PageGetMaxOffsetNumber, PageIndexMultiDelete,
     PageIndexTupleDelete, PageMut, PageRef,
 };
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
 use ::types_storage::Buffer;
 use ::types_error::error::PANIC;
-use types_error::{PgError, PgResult};
-use spgist::{
+use ::types_error::{PgError, PgResult};
+use ::spgist::{
     SpGistState, SpGistTypeDesc, spgConfigOut, SPGIST_DEAD, SPGIST_LEAF, SPGIST_LIVE, SPGIST_NULLS,
     SPGIST_PLACEHOLDER, SPGIST_REDIRECT,
 };

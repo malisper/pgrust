@@ -3,7 +3,7 @@
 use crate::appendf;
 use ::mcx::PgString;
 use ::types_error::PgResult;
-use wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{DecodedXLogRecord, XLR_INFO_MASK};
 use ::xlog_records::gistxlog::{gistxlogDelete, gistxlogPageDelete, gistxlogPageReuse,
                                    gistxlogPageSplit};
 

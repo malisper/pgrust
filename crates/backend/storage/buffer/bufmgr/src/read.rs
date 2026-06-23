@@ -45,13 +45,13 @@
 use ::types_core::primitive::{
     BlockNumber, Buffer, ForkNumber, InvalidBlockNumber, INVALID_PROC_NUMBER, BLCKSZ,
 };
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::rel::Relation;
 use ::types_storage::buf::{
     buftag, IOContext, PgAioWaitRef, BM_TAG_VALID, BM_VALID, BUFFER_LOCK_EXCLUSIVE,
 };
 use ::types_storage::storage::{LWLockMode, ReadBufferMode};
-use types_storage::{PrefetchBufferResult, RelFileLocator, RelFileLocatorBackend};
+use ::types_storage::{PrefetchBufferResult, RelFileLocator, RelFileLocatorBackend};
 use ::types_tuple::access::{
     RELPERSISTENCE_PERMANENT, RELPERSISTENCE_TEMP, RELPERSISTENCE_UNLOGGED,
 };
@@ -59,7 +59,7 @@ use ::types_tuple::access::{
 use crate::mgr::BufferManager;
 
 use bufmgr_seams as sb;
-use support::{buf_table_hash_code, buf_table_hash_partition};
+use ::support::{buf_table_hash_code, buf_table_hash_partition};
 use lwlock as lwlock;
 use page as page;
 use smgr as smgr;

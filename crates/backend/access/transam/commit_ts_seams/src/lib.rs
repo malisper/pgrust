@@ -7,7 +7,7 @@
 
 #![allow(non_snake_case)]
 
-use types_core::{RepOriginId, TimestampTz, TransactionId};
+use ::types_core::{RepOriginId, TimestampTz, TransactionId};
 use ::types_error::PgResult;
 
 seam_core::seam!(

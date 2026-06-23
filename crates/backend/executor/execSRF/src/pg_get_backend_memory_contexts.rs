@@ -46,11 +46,11 @@ use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::nodes::funcapi::ReturnSetInfo;
 use types_tuple::heaptuple::Datum;
 
-use mcxtfuncs_seams::{
+use ::mcxtfuncs_seams::{
     self as mcxt_seam, McxtRow, MemoryContextCounters, MemoryContextNode, MemoryContextRef,
     MemoryContextType,
 };
-use funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
+use ::funcapi_seams::{materialized_srf_putvalues, InitMaterializedSRF};
 
 use crate::register_srf;
 

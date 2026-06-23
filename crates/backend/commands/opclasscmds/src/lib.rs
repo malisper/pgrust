@@ -16,44 +16,44 @@
 //! the orchestration (which rows, which dependencies, in which order) stays
 //! here.
 
-use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 use ::utils_error::ereport;
 
-use amapi_seams::{am_adjust_members, get_index_am_info};
+use ::amapi_seams::{am_adjust_members, get_index_am_info};
 use genam_seams as genam_seams;
-use aclchk_seams::{aclcheck_error, object_aclcheck};
+use ::aclchk_seams::{aclcheck_error, object_aclcheck};
 use ::catalog_seams::is_pinned_object;
 use ::dependency_seams::perform_deletion;
-use indexing_seams::{
+use ::indexing_seams::{
     catalog_tuple_insert_pg_amop, catalog_tuple_insert_pg_amproc,
     catalog_tuple_insert_pg_opclass, catalog_tuple_insert_pg_opfamily,
 };
-use catalog_namespace::{
+use ::catalog_namespace::{
     DeconstructQualifiedName, LookupExplicitNamespace, NameListToString, OpclassnameGetOpcid,
     OpfamilynameGetOpfid, QualifiedNameGetCreationNamespace,
 };
-use objectaccess_seams::{object_access_hook_present, run_object_post_create_hook};
-use pg_depend_seams::{recordDependencyOn, recordDependencyOnCurrentExtension};
+use ::objectaccess_seams::{object_access_hook_present, run_object_post_create_hook};
+use ::pg_depend_seams::{recordDependencyOn, recordDependencyOnCurrentExtension};
 use ::pg_shdepend_seams::recordDependencyOnOwner;
 use ::amcmds_seams::get_index_am_oid;
-use event_trigger_seams::{
+use ::event_trigger_seams::{
     event_trigger_collect_alter_opfam, event_trigger_collect_create_opclass,
     event_trigger_collect_simple_command,
 };
 use ::parse_func_seams::lookup_func_with_args;
-use parse_oper_seams::{lookup_oper_name, lookup_oper_with_args};
-use parse_type_seams::{typename_to_string, typename_type_id};
+use ::parse_oper_seams::{lookup_oper_name, lookup_oper_with_args};
+use ::parse_type_seams::{typename_to_string, typename_type_id};
 use ::format_type_seams::format_type_be;
-use lsyscache_seams::{
+use ::lsyscache_seams::{
     get_am_name, get_func_signature, op_input_types,
 };
-use syscache_seams::{
+use ::syscache_seams::{
     amop_oid, amproc_oid, get_opfamily_oid as syscache_opfamily_oid,
     opclass_exists, opfamily_exists, oper_row_by_oid, proc_row_by_oid,
 };
-use miscinit_seams::{get_user_id, superuser_arg};
+use ::miscinit_seams::{get_user_id, superuser_arg};
 
-use types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE};
+use ::types_acl::{AclMode, ACLCHECK_OK, ACL_CREATE};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_core::fmgr::F_OIDEQ;
 use ::scankey::ScanKeyInit;
@@ -83,14 +83,14 @@ use ::types_core::catalog::{
 };
 use ::types_error::PgResult;
 use ::nodes::parsenodes::OBJECT_SCHEMA;
-use opclass::{
+use ::opclass::{
     AlterOpFamilyStmt, CreateOpClassItem, CreateOpClassStmt, CreateOpFamilyStmt,
     ObjectWithArgs, OpFamilyMember, StringNode, TypeName, AMOP_ORDER, AMOP_SEARCH,
     OPCLASS_ITEM_FUNCTION, OPCLASS_ITEM_OPERATOR, OPCLASS_ITEM_STORAGETYPE,
 };
 use ::types_tuple::heaptuple::Datum;
 
-use types_error::{
+use ::types_error::{
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION,
     ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };

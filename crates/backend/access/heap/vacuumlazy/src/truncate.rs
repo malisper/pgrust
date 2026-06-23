@@ -6,8 +6,8 @@
 
 use std::time::Instant;
 
-use utils_error::{ereport};
-use types_error::{ErrorLocation, DEBUG2, INFO};
+use ::utils_error::{ereport};
+use ::types_error::{ErrorLocation, DEBUG2, INFO};
 use ::types_core::BlockNumber;
 use ::types_error::PgResult;
 

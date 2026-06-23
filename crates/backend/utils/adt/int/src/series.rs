@@ -13,8 +13,8 @@
 //!     nodes is the optimizer/`nodes` layer's job and is fed in as resolved
 //!     `Option<Option<f64>>`.
 
-use utils_error::{ereport, PgResult};
-use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::utils_error::{ereport, PgResult};
+use ::types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 
 use crate::overflow::pg_add_s32_overflow;
 

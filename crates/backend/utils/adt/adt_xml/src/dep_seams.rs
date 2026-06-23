@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 
 use ::mcx::MemoryContext;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT};
+use ::types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT};
 
 use xml_libxml_seams as seam;
 

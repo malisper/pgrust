@@ -7,7 +7,7 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_cluster::ParseState;
 use ::types_error::PgResult;
 use ::nodes::primnodes::SubscriptingRef;

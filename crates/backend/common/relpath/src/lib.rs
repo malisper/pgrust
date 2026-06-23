@@ -22,12 +22,12 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_catalog::catalog::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use ::types_core::primitive::{
     ForkNumber, Oid, ProcNumber, RelFileNumber, INVALID_PROC_NUMBER, MAIN_FORKNUM, MAX_FORKNUM,
 };
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use ::types_storage::file::{
     FORKNAMECHARS, OIDCHARS, PG_TBLSPC_DIR, TABLESPACE_VERSION_DIRECTORY,
 };

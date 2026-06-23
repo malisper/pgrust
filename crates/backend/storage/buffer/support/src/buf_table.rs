@@ -40,7 +40,7 @@
 //! requires.
 
 use ::types_core::Size;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::buf::buftag;
 use ::types_storage::NUM_BUFFER_PARTITIONS;
 

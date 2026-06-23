@@ -1,6 +1,6 @@
 //! Shared-buffer-pool handle vocabulary (`storage/buf.h`).
 
-use types_core::{uint32, BlockNumber, ForkNumber, Oid, RelFileNumber};
+use ::types_core::{uint32, BlockNumber, ForkNumber, Oid, RelFileNumber};
 
 use crate::storage::{pg_atomic_uint32, LWLock};
 

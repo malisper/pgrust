@@ -30,7 +30,7 @@ use alloc::vec::Vec;
 use ::types_core::primitive::{AttrNumber, Cost, Index, Oid};
 use ::types_error::PgResult;
 use ::pathnodes::optimizer_plan::CostSelector;
-use pathnodes::{
+use ::pathnodes::{
     AggSplit, AggStrategy, CmdType, IndexClause, IndexOptInfo, LimitOption, NodeId, PathId, PathKey,
     PathTarget, PlanRowMarkId, PlannerInfo, RelId, Relids, RinfoId, ScanDirection, SetOpCmd,
     SetOpStrategy, SpecialJoinInfo,

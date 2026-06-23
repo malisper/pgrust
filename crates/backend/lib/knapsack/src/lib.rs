@@ -33,7 +33,7 @@
 use ::nodes_core::bitmapset::{
     bms_add_member, bms_copy, bms_del_member, bms_make_singleton, bms_replace_members,
 };
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::nodes::bitmapset::Bitmapset;
 

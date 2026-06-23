@@ -10,7 +10,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use pathnodes::{IndexOptInfo, PathKey, PlannerInfo, RelId, ScanDirection};
+use ::pathnodes::{IndexOptInfo, PathKey, PlannerInfo, RelId, ScanDirection};
 
 seam_core::seam!(
     /// `has_useful_pathkeys(root, rel)` (pathkeys.c) — true if the query has any

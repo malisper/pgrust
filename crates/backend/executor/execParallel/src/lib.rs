@@ -40,16 +40,16 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, PgVec};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
-use execparallel::{
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::execparallel::{
     dsa_pointer_is_valid, DsaAreaHandle, DsmSegmentHandle, FixedParallelExecutorState,
     ParallelExecutorInfo, SerializeCursor, SharedExecutorInstrumentation, ShmTocHandle, Size,
     TuplesNeeded, DsaPointer, INVALID_DSA_POINTER, PGJIT_NONE,
 };
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::querydesc::QueryDesc;
-use nodes::{EStateData, PlanStateNode};
+use ::nodes::{EStateData, PlanStateNode};
 use ::types_core::instrument::{BufferUsage, WalUsage};
 use ::nodes::instrument::Instrumentation;
 

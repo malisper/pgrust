@@ -51,7 +51,7 @@
 //! (`PG_DETOAST_DATUM`) delegates to the `backend-access-common-detoast` owner's
 //! `detoast_attr` seam.
 
-use mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, MemoryContext, PgBox, PgString, PgVec};
 use ::types_core::primitive::{AttrNumber, Index, InvalidAttrNumber, Oid};
 use ::types_core::catalog::BOOLOID;
 use ::types_core::InvalidOid;
@@ -80,7 +80,7 @@ use ::nodes::rawnodes::{
 };
 use ::types_tuple::access::{RangeVar, RELPERSISTENCE_PERMANENT};
 
-use parsenodes::{
+use ::parsenodes::{
     DefElem, DefElemAction, Node as ParseNode, StringNode, TypeName, DEFELEM_UNSPEC,
 };
 

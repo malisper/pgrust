@@ -5,7 +5,7 @@
 //! so the owning `backend-utils-cache-evtcache` crate and its seam crate can
 //! both name them without a dependency cycle.
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::nodes::Bitmapset;

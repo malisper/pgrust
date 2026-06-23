@@ -4,7 +4,7 @@
 
 use std::ffi::{c_char, CStr};
 
-pub use pg_ffi_fgram::{
+pub use ::pg_ffi_fgram::{
     pg_enc, pg_valid_be_encoding, pg_valid_encoding, pg_valid_fe_encoding, PG_BIG5, PG_EUC_CN,
     PG_EUC_JIS_2004, PG_EUC_JP, PG_EUC_KR, PG_EUC_TW, PG_GB18030, PG_GBK, PG_ISO_8859_5,
     PG_ISO_8859_6, PG_ISO_8859_7, PG_ISO_8859_8, PG_JOHAB, PG_KOI8R, PG_KOI8U, PG_LATIN1,

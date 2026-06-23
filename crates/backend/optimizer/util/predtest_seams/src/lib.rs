@@ -12,7 +12,7 @@ extern crate alloc;
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
-use pathnodes::{NodeId, PlannerInfo};
+use ::pathnodes::{NodeId, PlannerInfo};
 
 seam_core::seam!(
     /// `predicate_implied_by(predicate_clauses, restriction_clauses, weak)`

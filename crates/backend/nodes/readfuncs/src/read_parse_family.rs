@@ -11,7 +11,7 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_error::PgResult;
 use ::nodes::copy_query::{Query, QuerySource};
 use ::nodes::jointype::JoinType;

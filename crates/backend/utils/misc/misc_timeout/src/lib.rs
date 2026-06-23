@@ -25,9 +25,9 @@ pub mod tzparser;
 use std::cell::{Cell, RefCell};
 
 use ::types_core::TimestampTz;
-use types_error::{PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, FATAL};
+use ::types_error::{PgError, PgResult, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, FATAL};
 use ::signal::SigHandler;
-use types_timeout::{
+use ::types_timeout::{
     DisableTimeoutParams, EnableTimeoutParams, TimeoutHandlerProc, TimeoutId, TimeoutType,
     MAX_TIMEOUTS,
 };

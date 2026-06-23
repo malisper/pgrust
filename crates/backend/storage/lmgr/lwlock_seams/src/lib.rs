@@ -15,7 +15,7 @@
 
 use ::types_core::ProcNumber;
 use ::types_error::PgResult;
-use types_storage::{LWLock, LWLockMode};
+use ::types_storage::{LWLock, LWLockMode};
 
 seam_core::seam!(
     /// `LWLockInitialize(LWLock *lock, int tranche_id)`.

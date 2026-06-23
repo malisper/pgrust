@@ -4,13 +4,13 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_error::PgError;
-use pathnodes::{
+use ::pathnodes::{
     EcId, IndexClause, IndexOptInfo, NodeId, PathId, PlannerInfo, RelId, Relids,
     BackwardScanDirection, ForwardScanDirection,
 };
 
 // pathkeys.c is ported (backend-optimizer-path-pathkeys); call it directly.
-use pathkeys::{
+use ::pathkeys::{
     build_index_pathkeys, has_useful_pathkeys, truncate_useless_pathkeys,
 };
 use pathnode_seams as pathnode;

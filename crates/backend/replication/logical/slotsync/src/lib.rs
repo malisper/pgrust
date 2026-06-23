@@ -27,7 +27,7 @@ use ::types_core::primitive::{Oid, Size, TimestampTz, TransactionId, XLogRecPtr,
 use ::types_core::catalog::DATABASE_RELATION_ID as DatabaseRelationId;
 use ::types_error::error::{DEBUG1, ERROR, LOG};
 use ::types_error::pg_error::{PgError, PgResult};
-use types_error::{
+use ::types_error::{
     ERRCODE_CONNECTION_FAILURE, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ErrorLevel, SqlState,
 };
@@ -36,11 +36,11 @@ use ::types_core::xact::{
 };
 use ::wal::xlog_consts::WalLevel;
 
-use replication_slot_2::{
+use ::replication_slot_2::{
     ReplicationSlotHandle, ReplicationSlotInvalidationCause, ReplicationSlotPersistency,
 };
 use ::replication_slot_2::ReplicationSlotInvalidationCause::RS_INVAL_NONE;
-use types_walreceiver::{WalRcvExecStatus, WalReceiverConn};
+use ::types_walreceiver::{WalRcvExecStatus, WalReceiverConn};
 use ::types_storage::lock::AccessShareLock;
 use ::types_storage::storage::{
     LWLockMode, LW_EXCLUSIVE, LW_SHARED, PROC_ARRAY_LOCK, REPLICATION_SLOT_ALLOCATION_LOCK,
@@ -1674,7 +1674,7 @@ pub fn init_seams() {
     // reads/writes it on SET/reload. Backed by the owner's per-backend
     // SYNC_REPLICATION_SLOTS thread-local (see `sync_replication_slots_guc`).
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::sync_replication_slots.install(GucVarAccessors {
             get: sync_replication_slots_guc,
             set: |v| SYNC_REPLICATION_SLOTS.with(|c| c.set(v)),

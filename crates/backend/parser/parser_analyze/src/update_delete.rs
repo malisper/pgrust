@@ -10,10 +10,10 @@
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_acl::acl::{ACL_DELETE, ACL_UPDATE};
 use ::utils_error::ereport;
-use types_error::{PgResult, ERRCODE_DUPLICATE_ALIAS, ERRCODE_SYNTAX_ERROR, ERROR};
+use ::types_error::{PgResult, ERRCODE_DUPLICATE_ALIAS, ERRCODE_SYNTAX_ERROR, ERROR};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::{ParseExprKind, ParseState};

@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     EcId, PlannerInfo, RelId, RELOPT_BASEREL, RELOPT_JOINREL, RELOPT_OTHER_JOINREL,
 };
 

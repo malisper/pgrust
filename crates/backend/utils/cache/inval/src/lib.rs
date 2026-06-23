@@ -44,8 +44,8 @@
 
 use std::cell::{Cell, RefCell};
 
-use mcx::{bind, Mcx, McxOwned, MemoryContext, PgVec};
-use cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
+use ::mcx::{bind, Mcx, McxOwned, MemoryContext, PgVec};
+use ::cache::{RelcacheCallbackFunction, SyscacheCallbackFunction};
 use ::types_core::Oid;
 // Bare-word machine-word `Datum` (`::datum::Datum`), aliased `ScalarWord`.
 // The callback `arg` is C's opaque `Datum arg` registration cookie: inval.c

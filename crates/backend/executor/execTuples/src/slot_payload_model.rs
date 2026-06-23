@@ -5,14 +5,14 @@
 //! The owned types live in [`::nodes::tuptable`]; this module owns the
 //! per-kind sizing and the make/empty helpers that operate on them.
 
-use mcx::{vec_with_capacity_in, Mcx};
+use ::mcx::{vec_with_capacity_in, Mcx};
 use ::types_core::primitive::Size;
 use ::types_error::PgResult;
 use ::nodes::tuptable::{
     BufferHeapTupleTableSlot, HeapTupleTableSlot, MinimalTupleTableSlot, SlotData,
     TupleTableSlotOps, VirtualTupleTableSlot, TTS_FLAG_FIXED,
 };
-use nodes::{TupleSlotKind, TupleTableSlot};
+use ::nodes::{TupleSlotKind, TupleTableSlot};
 // The canonical value enum; `Datum` is its transitional alias.
 use ::types_tuple::heaptuple::{Datum};
 use ::types_tuple::heaptuple::{HeapTupleData, ItemPointerData, TupleDesc};

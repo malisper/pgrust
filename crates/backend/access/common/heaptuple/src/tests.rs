@@ -8,7 +8,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::{slice_in, Mcx, MemoryContext, PgVec};
+use ::mcx::{slice_in, Mcx, MemoryContext, PgVec};
 use ::types_tuple::heaptuple::{
     CompactAttribute, TupleDescData, TYPALIGN_CHAR, TYPALIGN_DOUBLE, TYPALIGN_INT,
 };

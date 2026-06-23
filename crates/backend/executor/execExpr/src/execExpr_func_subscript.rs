@@ -25,9 +25,9 @@ use ::types_error::PgResult;
 use ::nodes::execexpr::{ExprState, ProjectionInfo, SubPlanState};
 use ::nodes::execnodes::Opaque;
 use ::nodes::primnodes::{etag, Expr};
-use nodes::{EStateData, EcxtId, SlotId};
+use ::nodes::{EStateData, EcxtId, SlotId};
 
-use execExpr_seams::{ProjectionKind, SlotAttr};
+use ::execExpr_seams::{ProjectionKind, SlotAttr};
 use nodeSubplan_seams as nodesubplan;
 
 // --- inherited-opaque carriers ------------------------------------------------

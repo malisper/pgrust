@@ -24,8 +24,8 @@ use ::types_error::PgResult;
 use types_tuple::heaptuple::Datum as DatumV;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
-use types_selfuncs::{ConstNodeInfo, EstimationInfo, StatsTuple, VariableStatData};
+use ::pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
+use ::types_selfuncs::{ConstNodeInfo, EstimationInfo, StatsTuple, VariableStatData};
 
 seam_core::seam!(
     /// `estimate_num_groups(root, groupExprs, input_rows, NULL, estinfo)`

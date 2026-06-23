@@ -43,7 +43,7 @@
 use core::ffi::c_void;
 
 use ::mcx::PgVec;
-use types_core::{Oid, TransactionId};
+use ::types_core::{Oid, TransactionId};
 
 use crate::nodes::NodeTag;
 

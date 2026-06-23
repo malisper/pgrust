@@ -27,7 +27,7 @@ use core::cell::Cell;
 use core::mem::size_of;
 
 use ::condvar::condition_variable::ConditionVariable;
-use types_core::{Size, TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
+use ::types_core::{Size, TimeLineID, TimestampTz, TransactionId, XLogRecPtr};
 use ::types_storage::latch::{Latch, LatchHandle};
 use ::types_storage::storage::Spinlock;
 use ::wal::wal::RecoveryPauseState;

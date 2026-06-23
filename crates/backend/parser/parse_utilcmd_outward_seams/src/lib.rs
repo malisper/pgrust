@@ -18,7 +18,7 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::nodes::nodes::Node;

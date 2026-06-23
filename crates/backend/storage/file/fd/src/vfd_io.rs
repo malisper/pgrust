@@ -11,7 +11,7 @@ use std::os::unix::io::FromRawFd;
 use std::path::Path;
 
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, PgResult, ERROR};
+use ::types_error::{ErrorLocation, PgResult, ERROR};
 use ::types_storage::File;
 
 use aio_seams as aio_seams;

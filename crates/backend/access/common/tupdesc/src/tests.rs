@@ -9,7 +9,7 @@ extern crate std;
 
 use std::sync::Once;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_error::PgResult;
 use types_tuple::tupdesc::PgTypeInfo;
 use ::types_tuple::heaptuple::{

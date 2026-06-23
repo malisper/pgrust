@@ -4,18 +4,18 @@
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{BlockNumber, InvalidBlockNumber, OffsetNumber};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_TRIGGERED_DATA_CHANGE_VIOLATION,
     ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
 use ::nodes::nodes::CmdType;
 use ::nodes::modifytable::{MergeMatchKind, MERGE_WHEN_MATCHED, MERGE_WHEN_NOT_MATCHED_BY_SOURCE,
     MERGE_WHEN_NOT_MATCHED_BY_TARGET};
-use nodes::{EStateData, ModifyTableState, RriId, SlotId};
+use ::nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use ::types_tableam::tableam::{
     LockWaitPolicy, Snapshot, TM_Result, TUPLE_LOCK_FLAG_FIND_LAST_VERSION,
 };
-use snapshot::{SnapshotData, SnapshotType};
+use ::snapshot::{SnapshotData, SnapshotType};
 use ::types_tuple::heaptuple::FormedTuple;
 use ::types_tuple::heaptuple::ItemPointerData;
 

@@ -342,7 +342,7 @@ pub struct BTDedupInterval {
 // `TM_IndexDelete` / `TM_IndexStatus` / `TM_IndexDeleteOp` (`access/tableam.h`)
 // live in `types-tableam` (their C home); re-exported here for the index-AM
 // callers that historically reached them through `types_nbtree`.
-pub use types_tableam::{TmIndexDelete, TmIndexDeleteOp, TmIndexStatus};
+pub use ::types_tableam::{TmIndexDelete, TmIndexDeleteOp, TmIndexStatus};
 
 /// `IndexUniqueCheck` (`access/genam.h`) — the uniqueness-check mode requested
 /// by the executor for an index insert.

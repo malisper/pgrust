@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::{TransactionId, XLogRecPtr};
-use types_logical::{ReorderBufferHandle, SnapBuildHandle};
+use ::types_logical::{ReorderBufferHandle, SnapBuildHandle};
 
 seam_core::seam!(
     /// `SnapBuildResetExportedSnapshotState()` — reset snapshot-export state

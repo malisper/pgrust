@@ -22,19 +22,19 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use mcx::{Mcx, MemoryContext, PgString, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
 
-use types_acl::{AclMode, AclResult, ACL_EXECUTE, ACL_USAGE};
+use ::types_acl::{AclMode, AclResult, ACL_EXECUTE, ACL_USAGE};
 use ::types_core::init::SECURITY_LOCAL_USERID_CHANGE;
-use types_core::{InvalidOid, Oid, TransactionId};
-use datum::{Datum, NullableDatum};
+use ::types_core::{InvalidOid, Oid, TransactionId};
+use ::datum::{Datum, NullableDatum};
 use ::types_tuple::heaptuple::ItemPointerData;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_FUNCTION,
 };
 use ::fmgr::boundary::{FmgrArg, FmgrOut, RefPayload};
-use fmgr::{
+use ::fmgr::{
     AclObjectType, BuiltinFunction, FmgrHookEventType, FmgrInfo, FmgrResolution, FnExpr,
     FunctionCallInfoBaseData, LangInfo, LoadedCFunc, PGFunction, PgFnNative, ProcInfo,
     ProcLanguage, ResolvedFmgrInfo, TRACK_FUNC_ALL, TRACK_FUNC_OFF, TRACK_FUNC_PL,

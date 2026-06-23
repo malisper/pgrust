@@ -76,7 +76,7 @@ use ::types_core::Size;
 // parallel-internal `types_parallel::DsmSegmentHandle` (both wrap the same real
 // `DsmSegmentId`); the primitive only uses it to tie the borrow's lifetime to
 // the segment mapping, never to dereference it.
-use execparallel::{DsmSegmentHandle, SerializeCursor};
+use ::execparallel::{DsmSegmentHandle, SerializeCursor};
 
 /// The [`SharedDsmObject`](crate::SharedDsmObject) marker trait, re-exported
 /// at the historical `shared_dsm_object::SharedDsmObject` path. It is defined

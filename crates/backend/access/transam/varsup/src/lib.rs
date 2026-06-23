@@ -46,11 +46,11 @@ use syscache_seams as syscache_seams;
 use miscinit_seams as miscinit_seams;
 use init_small_seams as init_small_seams;
 
-use lwlock::{LWLockAcquireMain, MainLWLockGuard};
-use utils_error::{ereport, PgError, PgResult};
+use ::lwlock::{LWLockAcquireMain, MainLWLockGuard};
+use ::utils_error::{ereport, PgError, PgResult};
 use ::types_error::ErrorLocation;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_core::catalog::{FirstGenbkiObjectId, FirstNormalObjectId, FirstUnpinnedObjectId};
 use ::types_core::init::BackendType;
@@ -59,8 +59,8 @@ use ::types_core::xact::{
     BootstrapTransactionId, FirstNormalFullTransactionId, FirstNormalTransactionId,
     FullTransactionId, InvalidTransactionId, MaxTransactionId, TransamVariablesData,
 };
-use types_error::{DEBUG1, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, WARNING};
-use types_storage::{COMMIT_TS_LOCK, LWLockMode, OID_GEN_LOCK, XACT_TRUNCATION_LOCK, XID_GEN_LOCK};
+use ::types_error::{DEBUG1, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERROR, WARNING};
+use ::types_storage::{COMMIT_TS_LOCK, LWLockMode, OID_GEN_LOCK, XACT_TRUNCATION_LOCK, XID_GEN_LOCK};
 
 /// Number of OIDs to prefetch (preallocate) per XLOG write (`VAR_OID_PREFETCH`).
 const VAR_OID_PREFETCH: u32 = 8192;

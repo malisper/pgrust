@@ -34,14 +34,14 @@ use ::nodes_core::nodefuncs;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, Index, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use ::nodes::primnodes::etag;
 use ::nodes::primnodes::{
     CoercionForm, Const, ConvertRowtypeExpr, Expr, Var, VarReturningType,
 };
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     AppendRelInfo, NodeId, PlannerInfo, RelId, Relids, RestrictInfo, RinfoId,
     RowIdentityVarInfo,
 };

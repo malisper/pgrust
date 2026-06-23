@@ -27,11 +27,11 @@
 //! spine (the view RTE in the range-table, recursing through `rte.subquery` /
 //! `cte.ctequery`, which ARE `'mcx`) does not hit them.
 
-use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 
 use ::types_core::primitive::Index;
-use types_core::{InvalidOid, Oid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_GENERATED_ALWAYS,
     ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_SYNTAX_ERROR, ERROR,
@@ -56,7 +56,7 @@ use ::rewrite_core::manip_rule::{AddInvertedQual, AddQual, CombineRangeTables};
 use ::rewrite_core::offset::OffsetVarNodes;
 use ::rewrite_core::replace::{ReplaceVarsFromTargetList, ReplaceVarsNoMatchOption};
 use ::rewrite_core::walkers::{checkExprHasSubLink, rangeTableEntry_used};
-use relcache_seams::{relation_rules, RewriteRuleImage};
+use ::relcache_seams::{relation_rules, RewriteRuleImage};
 use ::types_storage::lock::NoLock;
 use ::types_tuple::heaptuple::FormData_pg_attribute;
 
@@ -2230,7 +2230,7 @@ fn rewriteTargetView<'mcx>(
     view: &Relation<'mcx>,
 ) -> PgResult<Query<'mcx>> {
     use ::nodes_core::bitmapset::{bms_is_empty, bms_union};
-    use parser_relation::{addRTEPermissionInfo, getRTEPermissionInfo};
+    use ::parser_relation::{addRTEPermissionInfo, getRTEPermissionInfo};
     use ::types_storage::lock::RowExclusiveLock;
 
     // Get the Query from the view's ON SELECT rule. get_view_query already

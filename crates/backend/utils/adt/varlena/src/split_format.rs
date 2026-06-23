@@ -41,7 +41,7 @@
 //! Depends on the keystone for `cstring_to_text*`/`text_to_cstring` carrier
 //! building and the [`SplitTextOutputData`](crate::keystone) marker.
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 

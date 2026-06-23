@@ -12,8 +12,8 @@
 //! from `common-ryu` when `extra_float_digits > 0` (the default); otherwise they
 //! reproduce the legacy `pg_strfromd` (`snprintf("%.*g", ndig)`) path.
 
-use ryu::{double_to_shortest_decimal, float_to_shortest_decimal};
-use types_error::{
+use ::ryu::{double_to_shortest_decimal, float_to_shortest_decimal};
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROTOCOL_VIOLATION,
 };

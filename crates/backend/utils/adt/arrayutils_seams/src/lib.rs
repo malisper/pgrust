@@ -11,7 +11,7 @@
 //! out-of-range, so they return [`PgResult`]; `ArrayGetOffset` and the `mda_*`
 //! helpers are pure and infallible.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 
 seam_core::seam!(

@@ -5,11 +5,11 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgVec};
-use types_core::{FullTransactionId, Oid, ProcNumber, TransactionId, XLogRecPtr};
+use ::mcx::{Mcx, PgVec};
+use ::types_core::{FullTransactionId, Oid, ProcNumber, TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
 use ::snapshot::SnapshotData;
-use types_storage::{
+use ::types_storage::{
 
     ProcSignalReason, RunningTransactionLocksHeld, RunningTransactionsData, VirtualTransactionId,
 

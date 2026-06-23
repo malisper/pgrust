@@ -26,13 +26,13 @@ fn pg_ultostr(value: u32) -> String {
     String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
-use types_datetime::{
+use ::types_datetime::{
     pg_itm, DATEORDER_DMY, DT_NOBEGIN, DT_NOEND, INTSTYLE_ISO_8601, INTSTYLE_POSTGRES,
     INTSTYLE_SQL_STANDARD, MAX_INTERVAL_PRECISION, MAX_TIMESTAMP_PRECISION, MAX_TIME_PRECISION,
     MINS_PER_HOUR, MONTHS_PER_YEAR, SECS_PER_MINUTE, USE_GERMAN_DATES, USE_ISO_DATES,
     USE_SQL_DATES, USE_XSD_DATES,
 };
-use types_datetime::{fsec_t, DateADT, Timestamp};
+use ::types_datetime::{fsec_t, DateADT, Timestamp};
 
 use ::pgtime::pg_tm;
 
@@ -765,7 +765,7 @@ mod tests {
     /// settings-module tests (and each other) on the shared global.
     use crate::settings::DATE_ORDER_TEST_LOCK as DATE_ORDER_LOCK;
     use crate::settings::{date_order, set_date_order};
-    use types_datetime::{
+    use ::types_datetime::{
         DATEORDER_DMY, DATEORDER_MDY, INTSTYLE_POSTGRES_VERBOSE, USE_POSTGRES_DATES,
     };
 

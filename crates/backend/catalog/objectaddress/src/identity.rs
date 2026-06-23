@@ -9,10 +9,10 @@
 //! owners' `-seams` crates (mirror-and-panic until each owner lands). Builds on
 //! F0's class-id constants ([`crate::consts`]).
 
-use mcx::{Mcx, PgString};
-use types_core::{InvalidOid, Oid};
+use ::mcx::{Mcx, PgString};
+use ::types_core::{InvalidOid, Oid};
 use ::types_catalog::catalog_dependency::ObjectAddress;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 
 use ::utils_error::ereport;
 

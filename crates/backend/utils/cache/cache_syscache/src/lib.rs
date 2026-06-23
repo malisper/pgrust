@@ -25,17 +25,17 @@
 
 use std::cell::RefCell;
 
-use heaptuple::{
+use ::heaptuple::{
     getmissingattr, heap_attisnull, heap_copytuple, heap_getsysattr, nocachegetattr,
 };
 use lock_seams as lock_seams;
 use catcache_seams as catcache_seams;
 use inval_seams as inval_seams;
 use lsyscache_seams as lsyscache_seams;
-use mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgVec};
+use ::mcx::{vec_with_capacity_in, McxOwned, Mcx, MemoryContext, PgVec};
 use ::cache::SysCacheKey;
-use types_core::{AttrNumber, Oid, OidIsValid, InvalidOid};
-use types_error::{PgError, PgResult};
+use ::types_core::{AttrNumber, Oid, OidIsValid, InvalidOid};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::{
     InplaceUpdateTupleLock, DEFAULT_LOCKMETHOD, LOCKMODE, LOCKTAG, LOCKTAG_TUPLE,
 };

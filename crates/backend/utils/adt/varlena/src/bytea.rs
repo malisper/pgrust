@@ -28,8 +28,8 @@
 
 #![allow(unused_variables)]
 
-use mcx::{Mcx, PgVec};
-use types_error::{
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_ARRAY_SUBSCRIPT_ERROR,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SUBSTRING_ERROR,

@@ -15,7 +15,7 @@
 
 use ::mcx::Mcx;
 
-use utils_error::{ereport, PgError, PgResult};
+use ::utils_error::{ereport, PgError, PgResult};
 use ::types_error::ERROR;
 
 use crate::seam;

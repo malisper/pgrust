@@ -30,7 +30,7 @@
 use std::cell::Cell;
 
 use ::utils_error::ereport;
-use types_error::{DEBUG1, WARNING};
+use ::types_error::{DEBUG1, WARNING};
 
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid, Size, TimestampTz, XLogRecPtr};
 use ::types_core::xact::InvalidXLogRecPtr;
@@ -57,7 +57,7 @@ use ::types_storage::storage::{
     INVALID_DSA_POINTER as DSHASH_HANDLE_INVALID,
 };
 use ::types_storage::storage::LWTRANCHE_LAUNCHER_HASH;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_guc::PGC_SIGHUP;
 use ::nodes::fmgr::FunctionCallInfoBaseData;
 use ::types_pgstat::wait_event::{
@@ -67,12 +67,12 @@ use ::signal::SigHandler;
 use ::types_storage::waiteventset::{WL_EXIT_ON_PM_DEATH, WL_LATCH_SET, WL_TIMEOUT};
 use ::types_storage::LWLockMode;
 
-use types_bgworker::{
+use ::types_bgworker::{
     BackgroundWorker, BgWorkerStartTime, BgwHandleStatus, BGWORKER_BACKEND_DATABASE_CONNECTION,
     BGWORKER_SHMEM_ACCESS, BGW_NEVER_RESTART,
 };
 use ::replication_applyparallel::ParallelApplyWorkerInfo;
-use replication_launcher::{
+use ::replication_launcher::{
     LauncherLastStartTimesEntry, LogicalRepWorker, LogicalRepWorkerType, Subscription,
     DEFAULT_NAPTIME_PER_CYCLE, DSM_HANDLE_INVALID, SUBREL_STATE_UNKNOWN,
 };
@@ -1563,7 +1563,7 @@ pub fn init_seams() {
     // backing storage (the thread_local cells above), so it installs the
     // get/set accessors the GUC engine drives at boot/SIGHUP.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::max_logical_replication_workers.install(GucVarAccessors {
             get: max_logical_replication_workers,
             set: set_max_logical_replication_workers,

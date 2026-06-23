@@ -20,7 +20,7 @@ use ::nodes::primnodes::Var;
 use ::nodes::rawnodes::RangeTblFunction;
 use ::nodes::nodefunctionscan::FunctionScan;
 use ::nodes::value::StringNode;
-use nodes::{EcxtId, PlanStateNode};
+use ::nodes::{EcxtId, PlanStateNode};
 
 use super::*;
 

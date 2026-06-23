@@ -28,7 +28,7 @@ use ::types_core::Oid;
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `pg_proc.dat`: `euc_kr_to_utf8` OID.
 const F_EUC_KR_TO_UTF8: Oid = 4364;

@@ -25,17 +25,17 @@ extern crate alloc;
 use ::mcx::Mcx;
 use ::cache::typcache::TypeCacheEntry;
 use ::types_core::primitive::{OidIsValid, Selectivity};
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::types_rangetypes::RangeBound;
-use types_selfuncs::{
+use ::types_selfuncs::{
     AttStatsSlot, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES,
     STATISTIC_KIND_BOUNDS_HISTOGRAM, STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM,
 };
 
-use rangetypes_seams::{
+use ::rangetypes_seams::{
     datum_get_range_type_p_value, range_cmp_bounds, range_deserialize, range_subdiff,
 };
-use lsyscache_seams::{get_attstatsslot, get_attstatsslot_value_datums};
+use ::lsyscache_seams::{get_attstatsslot, get_attstatsslot_value_datums};
 
 pub mod multirange;
 pub mod range;

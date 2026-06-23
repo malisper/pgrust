@@ -28,12 +28,12 @@
 use std::cell::UnsafeCell;
 use std::sync::OnceLock;
 
-use utils_error::{ereport, elog};
+use ::utils_error::{ereport, elog};
 use ::types_core::init::BackendType;
-use types_core::{
+use ::types_core::{
     Oid, Size, TimestampTz, TransactionId, XLogRecPtr, XLogSegNo, InvalidOid, NAMEDATALEN,
 };
-use types_error::{
+use ::types_error::{
     ErrorLevel, PgResult, SqlState, DEBUG1, ERROR, FATAL, LOG, PANIC, WARNING,
     ERRCODE_CONFIGURATION_LIMIT_EXCEEDED, ERRCODE_DATA_CORRUPTED, ERRCODE_DUPLICATE_OBJECT,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_NAME,
@@ -41,19 +41,19 @@ use types_error::{
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT,
 };
 use ::types_error::ErrorLocation;
-use replication_slot_2::{
+use ::replication_slot_2::{
     slot_is_logical, slot_is_physical, ReplicationSlotHandle, ReplicationSlotInvalidationCause,
     ReplicationSlotOnDisk, ReplicationSlotPersistency, ReplicationSlotPersistentData,
     SlotInvalidationCauseMap, PG_REPLSLOT_DIR, RS_INVAL_MAX_CAUSES,
 };
-use types_storage::{
+use ::types_storage::{
     LWLockMode, REPLICATION_SLOT_ALLOCATION_LOCK, REPLICATION_SLOT_CONTROL_LOCK,
     ProcSignalReason,
 };
 use ::types_tuple::heaptuple::NameData;
 use ::condvar::ConditionVariable;
 
-use transam::{TransactionIdPrecedes, TransactionIdPrecedesOrEquals};
+use ::transam::{TransactionIdPrecedes, TransactionIdPrecedesOrEquals};
 use ::s_lock::Spinlock;
 
 // Foreign-subsystem seams.

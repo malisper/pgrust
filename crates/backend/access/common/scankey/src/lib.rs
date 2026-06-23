@@ -13,7 +13,7 @@
 use fmgr_seams as fmgr_seams;
 use ::types_core::catalog::C_COLLATION_OID;
 use ::types_core::fmgr::FmgrInfo;
-use types_core::{AttrNumber, InvalidOid, Oid, RegProcedure};
+use ::types_core::{AttrNumber, InvalidOid, Oid, RegProcedure};
 use ::types_error::PgResult;
 use ::types_scan::scankey::{ScanKeyData, StrategyNumber, SK_SEARCHNOTNULL, SK_SEARCHNULL};
 use types_tuple::heaptuple::Datum;

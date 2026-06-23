@@ -24,8 +24,8 @@ use alloc::boxed::Box as ABox;
 use alloc::format;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgVec};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::types_error::{PgError, PgResult};
 
 use ::nodes_core::nodefuncs::{
     expr_collation, expr_type, expr_typmod, expression_tree_mutator, resolved_opfuncid,
@@ -42,7 +42,7 @@ use ::nodes::nodes::ntag;
 use ::nodes::nodeagg::do_aggsplit_combine;
 use ::nodes::primnodes::{Const, Expr, Param, ParamKind, TargetEntry, Var, VarReturningType};
 use ::nodes::nodeindexscan::{Plan, Scan};
-use pathnodes::{PlannerGlobal, PlannerInfo, Relids};
+use ::pathnodes::{PlannerGlobal, PlannerInfo, Relids};
 
 use setrefs_seams as ext;
 

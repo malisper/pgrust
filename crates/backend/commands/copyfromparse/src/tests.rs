@@ -10,9 +10,9 @@
 //! never reads `rel` / `attnumlist` on these lower-level tokenizer paths.
 
 use super::*;
-use mcx::{Mcx, MemoryContext, PgString, PgVec};
-use types_copy::{CopyParseOptions, CopyParseState};
-use rel::{FormData_pg_class, Relation, RelationData};
+use ::mcx::{Mcx, MemoryContext, PgString, PgVec};
+use ::types_copy::{CopyParseOptions, CopyParseState};
+use ::rel::{FormData_pg_class, Relation, RelationData};
 use ::types_storage::storage::RelFileLocator;
 use ::types_tuple::heaptuple::TupleDescData;
 

@@ -3,7 +3,7 @@
 
 use super::*;
 
-use mcx::{slice_in, MemoryContext, PgString};
+use ::mcx::{slice_in, MemoryContext, PgString};
 use ::wal::rmgr::XLogReaderState;
 use ::wal::wal::{DecodedXLogRecord, XLogRecord};
 

@@ -31,13 +31,13 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
-use types_logical::{
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_logical::{
     CallbackInvocation, LogicalDecodingContext, OutputPluginCallbackArgs, OutputPluginOptions,
     OUTPUT_PLUGIN_BINARY_OUTPUT, OUTPUT_PLUGIN_TEXTUAL_OUTPUT,
 };
 
-use logical_logical::{OutputPluginPrepareWrite, OutputPluginWrite};
+use ::logical_logical::{OutputPluginPrepareWrite, OutputPluginWrite};
 
 use detoast_seams as detoast;
 use common_relation_seams as relation;

@@ -37,7 +37,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
+use ::mcx::{Mcx, McxOwned, MemoryContext, PgBox, PgVec};
 use std::collections::HashMap;
 
 use ::cache::typcache::{
@@ -46,7 +46,7 @@ use ::cache::typcache::{
 };
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{Oid, INVALID_OID};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, SqlState, ERRCODE_CHECK_VIOLATION, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_NOT_NULL_VIOLATION, ERRCODE_OUT_OF_MEMORY, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE,

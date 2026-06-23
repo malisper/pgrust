@@ -22,7 +22,7 @@ use ::types_core::primitive::AttrNumber;
 use ::types_error::PgResult;
 use ::nodes::execnodes::{EStateData, PlanStateData, ScanStateData};
 use ::nodes::tuptable::SlotData;
-use nodes::{SlotId, TupleSlotKind};
+use ::nodes::{SlotId, TupleSlotKind};
 use ::types_tuple::heaptuple::DeformedColumn;
 use ::types_tuple::heaptuple::{TupleDesc, TupleDescData};
 

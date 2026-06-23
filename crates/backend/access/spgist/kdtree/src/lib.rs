@@ -49,10 +49,10 @@
 #![allow(clippy::result_large_err)]
 
 use ::types_core::geo::{Point, SpgKey, BOX};
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 
 use ::spg_proc_seams::spg_key_orderbys_distances;
-use geo_ops_seams::{FPgt, FPlt};
+use ::geo_ops_seams::{FPgt, FPlt};
 
 const C_FILE: &str = "../src/backend/access/spgist/spgkdtreeproc.c";
 

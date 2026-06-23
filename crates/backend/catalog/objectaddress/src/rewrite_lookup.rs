@@ -9,9 +9,9 @@
 //! oid-index lookup) followed by `heap_getattr` on the fixed `ev_class` /
 //! `rulename` columns.
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::AccessShareLock;
 
 use crate::consts::{Anum_pg_rewrite_oid, Anum_pg_rewrite_rulename, RewriteRelationId};

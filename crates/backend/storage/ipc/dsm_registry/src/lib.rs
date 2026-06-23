@@ -32,9 +32,9 @@ use core::cell::Cell;
 
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 use ::types_core::Size;
-use types_storage::{
+use ::types_storage::{
     dsa_handle, dshash_table_handle, DshashKeyKind, DshashParameters, DSM_HANDLE_INVALID,
     DSM_REGISTRY_LOCK, INVALID_DSA_POINTER, LW_EXCLUSIVE, LWTRANCHE_DSM_REGISTRY_DSA,
     LWTRANCHE_DSM_REGISTRY_HASH,

@@ -13,7 +13,7 @@
 //! * interrupts (`check_for_interrupts`).
 
 use ::types_core::primitive::{InvalidBlockNumber, OffsetNumber};
-use types_error::{PgError, PgResult, ERROR};
+use ::types_error::{PgError, PgResult, ERROR};
 use ::hash::hashpage::{
     H_BUCKET_BEING_POPULATED, HASH_READ, HashScanPosInvalidate, HashScanPosItem, INDEX_MOVED_BY_SPLIT_MASK, LH_BUCKET_PAGE, LH_OVERFLOW_PAGE,
     MaxIndexTuplesPerPage,
@@ -27,7 +27,7 @@ use predicate_seams as predicate;
 use postgres_seams as postgres;
 use pgstat_seams as pgstat;
 
-use page::{
+use ::page::{
     ItemIdIsDead, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber,
 };
 

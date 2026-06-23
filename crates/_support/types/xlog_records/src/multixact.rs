@@ -2,7 +2,7 @@
 //! (`access/multixact.h`), trimmed to the fields ports consume so far.
 
 use crate::bytes::{i32_at, u32_at};
-use types_core::{MultiXactId, MultiXactOffset, Oid, TransactionId};
+use ::types_core::{MultiXactId, MultiXactOffset, Oid, TransactionId};
 
 /// `MultiXactStatus` (`access/multixact.h`) — the lock/update mode of one
 /// multixact member.

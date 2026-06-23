@@ -19,8 +19,8 @@
 #![allow(clippy::result_large_err)]
 
 use tsvector_core_seams as tsop;
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_error::{PgError, PgResult};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_error::{PgError, PgResult};
 use ::tsearch::gin::{
     GinTernaryValue, GIN_FALSE, GIN_MAYBE, GIN_SEARCH_MODE_ALL, GIN_SEARCH_MODE_DEFAULT, GIN_TRUE,
 };

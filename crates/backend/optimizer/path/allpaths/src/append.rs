@@ -10,7 +10,7 @@ use ::mcx::Mcx;
 use ::types_core::primitive::{Index, InvalidAttrNumber};
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     BackwardScanDirection, ForwardScanDirection, PathId, PathKey, PathNode, PlannerInfo, RelId,
     Relids, RELOPT_BASEREL,
 };
@@ -868,7 +868,7 @@ fn partitions_are_ordered(root: &PlannerInfo, rel: RelId) -> bool {
 /// seam (the C function lives in partbounds.c, but every input it touches is
 /// pure planner data, so allpaths owns the install).
 pub(crate) fn partitions_are_ordered_impl(root: &PlannerInfo, rel: RelId) -> bool {
-    use types_partition::{
+    use ::types_partition::{
         PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
     };
 

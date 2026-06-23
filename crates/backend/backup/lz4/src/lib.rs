@@ -32,8 +32,8 @@ extern crate std;
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use lz4_seams::{self as seam, Lz4CtxHandle, Lz4Preferences, LZ4F_MAX_256KB};
-use sink::{
+use ::lz4_seams::{self as seam, Lz4CtxHandle, Lz4Preferences, LZ4F_MAX_256KB};
+use ::sink::{
     bbsink_archive_contents, bbsink_begin_archive, bbsink_begin_backup,
     bbsink_forward_begin_manifest, bbsink_forward_end_archive, bbsink_forward_end_backup,
     bbsink_forward_end_manifest, bbsink_manifest_contents, Bbsink, BbsinkOps, BbsinkState,
@@ -42,7 +42,7 @@ use ::utils_error::ereport;
 use ::mcx::Mcx;
 use ::compression::PgCompressSpecification;
 use ::types_core::primitive::{Size, TimeLineID, XLogRecPtr, BLCKSZ};
-use types_error::{ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
+use ::types_error::{ErrorLocation, PgResult, ERRCODE_INTERNAL_ERROR, ERROR};
 
 /// The C source path used in `ereport`/`elog` error locations (`__FILE__`).
 const SRCFILE: &str = "src/backend/backup/basebackup_lz4.c";

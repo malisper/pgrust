@@ -20,8 +20,8 @@
 //! PRIVILEGES); the `pg_init_privs` writer for CREATE EXTENSION
 //! (`recordExtensionInitPrivWorker`) is the remaining F3 keystone.
 
-use mcx::{Mcx, PgString, PgVec};
-use types_acl::{
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_acl::{
     AclItem, AclMode, ACLCHECK_NO_PRIV, ACLMASK_ANY, ACL_CREATE, ACL_DELETE, ACL_GRANT_OPTION_FOR,
     ACL_ID_PUBLIC, ACL_INSERT, ACL_MAINTAIN, ACL_NO_RIGHTS, ACL_REFERENCES, ACL_SELECT,
     ACL_TRIGGER, ACL_TRUNCATE, ACL_UPDATE, ACL_USAGE,
@@ -43,7 +43,7 @@ use ::types_catalog::pg_proc::{
 };
 use ::types_tuple::heaptuple::FirstLowInvalidHeapAttributeNumber;
 use ::types_core::primitive::{InvalidOid, Oid};
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_GRANT_OPERATION,
     ERRCODE_WRONG_OBJECT_TYPE, ERRCODE_WARNING_PRIVILEGE_NOT_GRANTED,
     ERRCODE_WARNING_PRIVILEGE_NOT_REVOKED, ERROR, WARNING,
@@ -79,10 +79,10 @@ use ::adt_acl::acl_ops::{
 use ::adt_acl::acldefault::acldefault;
 use ::adt_acl::role_membership::{get_rolespec_oid, select_best_grantor};
 
-use table::{table_close, table_open};
-use heaptuple::{heap_form_tuple, heap_modify_tuple};
+use ::table::{table_close, table_open};
+use ::heaptuple::{heap_form_tuple, heap_modify_tuple};
 use ::indexing::keystone::{CatalogTupleInsert, CatalogTupleUpdate};
-use cache_syscache::{
+use ::cache_syscache::{
     SearchSysCache3, SearchSysCacheLocked1, SysCacheGetAttr, SysCacheGetAttrNotNull,
 };
 use ::cache::syscache::SysCacheKey;

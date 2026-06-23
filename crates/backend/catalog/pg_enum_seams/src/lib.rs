@@ -2,7 +2,7 @@
 //! (`catalog/pg_enum.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_catalog::pg_enum::EnumTupleData;
 use ::types_core::Oid;
 use ::types_error::PgResult;

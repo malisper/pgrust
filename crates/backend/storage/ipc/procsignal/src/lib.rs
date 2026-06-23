@@ -72,11 +72,11 @@ use std::sync::atomic::{
 
 use ::types_storage::storage::Spinlock;
 
-use utils_error::{elog, ereport};
+use ::utils_error::{elog, ereport};
 use ::condvar::ConditionVariable;
-use types_core::{ProcNumber, INVALID_PROC_NUMBER, MAX_CANCEL_KEY_LENGTH};
-use types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG2, ERROR, LOG};
-use types_storage::{
+use ::types_core::{ProcNumber, INVALID_PROC_NUMBER, MAX_CANCEL_KEY_LENGTH};
+use ::types_error::{ErrorLocation, PgResult, DEBUG1, DEBUG2, ERROR, LOG};
+use ::types_storage::{
     ProcSignalBarrierType, ProcSignalReason, NUM_AUXILIARY_PROCS, NUM_PROCSIGNALS,
 };
 

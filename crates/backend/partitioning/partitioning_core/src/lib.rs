@@ -38,13 +38,13 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::partition::{PartitionBoundInfoData, PartitionKeyData, PartitionRangeDatumKind};
 use ::nodes::primnodes::{
     BoolExpr, BoolExprType, BoolTestType, Const, Expr, NullTest, NullTestType, ScalarArrayOpExpr,
 };
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId, Relids};
+use ::pathnodes::{PlannerInfo, RelId, Relids};
 use types_tuple::heaptuple::Datum;
 
 use partprune_seams as partprune_seams;
@@ -53,7 +53,7 @@ use partprune_seams as partprune_seams;
 
 use ::types_core::catalog::{BOOLOID, BOOL_BTREE_FAM_OID, BOOL_HASH_FAM_OID};
 use ::hash::hash::HASHEXTENDED_PROC;
-use types_partition::{
+use ::types_partition::{
     BTORDER_PROC, PARTITION_STRATEGY_HASH, PARTITION_STRATEGY_LIST, PARTITION_STRATEGY_RANGE,
 };
 use ::types_scan::scankey::{

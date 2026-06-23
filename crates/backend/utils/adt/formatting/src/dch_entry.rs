@@ -21,26 +21,26 @@
 //! (the DTERR -> ereport/errsave mapper) is pure logic and is ported in-crate.
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult, SoftErrorContext};
+use ::types_error::{PgError, PgResult, SoftErrorContext};
 use ::pgtime::pg_tm;
-use types_datetime::{TzHandle, YmdDate};
-use types_datetime::{
+use ::types_datetime::{TzHandle, YmdDate};
+use ::types_datetime::{
     DateTimeErrorExtra, Interval, TimeTzADT, DAYS_PER_MONTH, DTERR_BAD_FORMAT, DTERR_BAD_TIMEZONE,
     DTERR_BAD_ZONE_ABBREV, DTERR_FIELD_OVERFLOW, DTERR_INTERVAL_OVERFLOW, DTERR_MD_FIELD_OVERFLOW,
     DTERR_TZDISP_OVERFLOW, HOURS_PER_DAY, MAX_TZDISP_HOUR, MINS_PER_HOUR, MONTHS_PER_YEAR,
     SECS_PER_HOUR, SECS_PER_MINUTE, USECS_PER_SEC,
 };
-use types_datetime::{
+use ::types_datetime::{
     DATETIME_MIN_JULIAN, DATE_END_JULIAN, JULIAN_MAXMONTH, JULIAN_MAXYEAR, JULIAN_MINMONTH,
     JULIAN_MINYEAR, POSTGRES_EPOCH_JDATE,
 };
-use types_datetime::{DAY, MONTH, YEAR};
-use types_error::{
+use ::types_datetime::{DAY, MONTH, YEAR};
+use ::types_error::{
     ERRCODE_CONFIG_FILE_ERROR, ERRCODE_DATETIME_FIELD_OVERFLOW, ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
     ERRCODE_INTERVAL_FIELD_OVERFLOW, ERRCODE_INVALID_DATETIME_FORMAT, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_INVALID_TIME_ZONE_DISPLACEMENT_VALUE,
 };
-use types_datetime::{fsec_t, DateADT, TimeADT, Timestamp};
+use ::types_datetime::{fsec_t, DateADT, TimeADT, Timestamp};
 use ::types_core::Oid;
 
 use crate::cache::dch_cache_fetch;

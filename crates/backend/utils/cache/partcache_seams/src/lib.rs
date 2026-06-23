@@ -9,7 +9,7 @@
 //! `PartitionKeyData`, not seams — the consumer computes them in-crate once it
 //! holds the key.
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::nodes::nodes::Node;

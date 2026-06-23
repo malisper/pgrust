@@ -55,7 +55,7 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_catalog::catalog::{AUTH_ID_RELATION_ID, RELATION_RELATION_ID};
 use ::types_catalog::catalog_dependency::{
@@ -70,7 +70,7 @@ use ::types_catalog::pg_policy::{
 };
 use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_SYNTAX_ERROR, ERRCODE_UNDEFINED_OBJECT,
     ERRCODE_WRONG_OBJECT_TYPE,
@@ -79,7 +79,7 @@ use ::nodes::ddlnodes::{AlterPolicyStmt, CreatePolicyStmt, RoleSpec};
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::RoleSpecType;
 use ::nodes::parsestmt::ParseExprKind;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::{
     AccessExclusiveLock, AccessShareLock, NoLock, RowExclusiveLock,
@@ -96,10 +96,10 @@ use table as table;
 use ::catalog_catalog::IsSystemRelation;
 use ::catalog_namespace::RangeVarGetRelidExtended;
 use ::transam_xact::CommandCounterIncrement;
-use pg_depend::{deleteDependencyRecordsFor, recordDependencyOn};
-use pg_shdepend::{deleteSharedDependencyRecordsFor, recordSharedDependencyOn};
+use ::pg_depend::{deleteDependencyRecordsFor, recordDependencyOn};
+use ::pg_shdepend::{deleteSharedDependencyRecordsFor, recordSharedDependencyOn};
 use ::dependency::recordDependencyOnExpr;
-use parser_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
+use ::parser_relation::{addNSItemToQuery, addRangeTableEntryForRelation};
 use ::adt_acl::role_membership::get_rolespec_oid;
 use ::utils_error::ereport;
 use ::types_error::ErrorLocation;
@@ -117,7 +117,7 @@ use lsyscache_seams as lsyscache_seams;
 use guc_seams as guc_seams;
 use syscache_seams as syscache_seams;
 
-use types_error::{ERROR, WARNING};
+use ::types_error::{ERROR, WARNING};
 
 /* ===========================================================================
  * ACL command-char constants (utils/acl.h)

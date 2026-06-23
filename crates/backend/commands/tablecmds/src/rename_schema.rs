@@ -39,7 +39,7 @@ use ::mcx::Mcx;
 
 use ::types_catalog::catalog_dependency::{InvalidObjectAddress, ObjectAddress, ObjectAddresses};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_TABLE, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_WRONG_OBJECT_TYPE, ERROR, NOTICE,
 };
@@ -47,7 +47,7 @@ use ::nodes::parsenodes::{
     OBJECT_DOMCONSTRAINT, OBJECT_FOREIGN_TABLE, OBJECT_INDEX, OBJECT_MATVIEW, OBJECT_SCHEMA,
     OBJECT_SEQUENCE, OBJECT_TYPE, OBJECT_VIEW,
 };
-use parsenodes::{AlterObjectSchemaStmt, Node, RenameStmt};
+use ::parsenodes::{AlterObjectSchemaStmt, Node, RenameStmt};
 use ::types_storage::lock::{LOCKMODE, AccessExclusiveLock, NoLock, RowExclusiveLock};
 use ::types_tuple::access::RangeVar as AccessRangeVar;
 use ::types_tuple::access::{
@@ -69,16 +69,16 @@ use inval_seams as inval_seam;
 use lsyscache_seams as lsyscache_seam;
 use syscache_seams as syscache_seam;
 
-use catalog_namespace::{
+use ::catalog_namespace::{
     CheckSetNamespace, RangeVarGetAndCheckCreationNamespace, RangeVarGetRelidExtended, RVR_MISSING_OK,
 };
-use pg_constraint::{AlterConstraintNamespaces, RenameConstraintById};
+use ::pg_constraint::{AlterConstraintNamespaces, RenameConstraintById};
 use ::relcache::derived::RelationGetIndexList;
 
 use tablecmds_seams as seam;
 
 use ::types_acl::acl::ACL_CREATE;
-use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK};
+use ::types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK};
 
 use crate::helpers::{
     here, object_address_set, NamespaceRelationId, RelationRelationId, TypeRelationId,

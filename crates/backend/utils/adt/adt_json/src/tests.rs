@@ -19,7 +19,7 @@ use std::sync::Once;
 // construct scalar by-value Datums via the canonical `from_*` codec API.
 use ::types_tuple::Datum;
 
-use types_json::{JsonParseErrorType as PErr, JsonTokenType as Tok, JsonTypeCategory as Cat};
+use ::types_json::{JsonParseErrorType as PErr, JsonTokenType as Tok, JsonTypeCategory as Cat};
 
 fn ctx() -> MemoryContext {
     MemoryContext::new("json-test")

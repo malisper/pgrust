@@ -31,18 +31,18 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_catalog::pg_subscription as cat;
 use ::types_core::fmgr::{F_CHARNE, F_OIDEQ};
 use ::types_core::primitive::{AttrNumber, Oid, XLogRecPtr};
 use ::types_core::xact::InvalidXLogRecPtr;
 use ::types_core::OidIsValid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock};
 use types_tuple::heaptuple::{Datum, DeformedColumn};
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
 use ::scankey::ScanKeyInit;
 use ::indexing::keystone::{
     CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate,
@@ -55,14 +55,14 @@ use lmgr_seams as lmgr_seams;
 use arrayfuncs_seams as array_seams;
 use varlena_seams as varlena_seams;
 use lsyscache_seams as lsyscache_seams;
-use cache_syscache::{SearchSysCache1, SearchSysCache2};
+use ::cache_syscache::{SearchSysCache1, SearchSysCache2};
 use ::utils_error::ereport;
 use superuser_seams as superuser_seams;
 
 use ::cache::SysCacheKey;
 use ::datum::Datum as KeyDatum;
-use types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
-use types_syscache::{SUBSCRIPTIONOID, SUBSCRIPTIONRELMAP};
+use ::types_error::{ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::types_syscache::{SUBSCRIPTIONOID, SUBSCRIPTIONRELMAP};
 
 // The launcher's trimmed `Subscription` summary (`replication/launcher.c`'s
 // `get_subscription_list` local struct), distinct from the full

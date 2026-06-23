@@ -18,11 +18,11 @@ extern crate alloc;
 
 use core::cell::RefCell;
 
-use mcx::{Mcx, PgString, PgVec};
-use types_copy::{CopyFormatOptions, CopyHeaderChoice};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_copy::{CopyFormatOptions, CopyHeaderChoice};
 use ::types_core::fmgr::FmgrInfo;
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_NAME};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_NAME};
 use ::nodes::copy_query::{ParseState, QuerySource, T_CreateTableAsStmt};
 use ::nodes::querydesc::QueryDesc;
 use ::nodes::parsestmt::RawStmt;

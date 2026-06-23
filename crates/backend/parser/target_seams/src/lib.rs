@@ -7,7 +7,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_error::PgResult;
 use ::nodes::nodes::Node;
 use ::nodes::parsestmt::{ParseExprKind, ParseState};

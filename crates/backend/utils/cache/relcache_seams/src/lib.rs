@@ -13,7 +13,7 @@
 /// shared-`Rc<RefCell<RelationData>>` seam (`relation_id_get_relation_shared`,
 /// promoted in a later wave). No seam consumes it yet — this is the naming
 /// enabler only.
-pub use relcache_entry::{
+pub use ::relcache_entry::{
     FormPgClass, FormPgIndex, LockInfoData, OwnedAttr, OwnedAttrDefault, OwnedConstrCheck,
     OwnedTupleConstr, OwnedTupleDesc, RelationData,
 };

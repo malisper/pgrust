@@ -48,12 +48,12 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::primitive::XLogRecPtr;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::replication::repl_token::Token;
 
-use scansup_seams::{downcase_truncate_identifier, truncate_identifier};
+use ::scansup_seams::{downcase_truncate_identifier, truncate_identifier};
 use repl_scanner_seams as seams;
 
 /// `replication_yyerror(..., message)` (`repl_scanner.l`): the WalSender scanner
@@ -63,7 +63,7 @@ use repl_scanner_seams as seams;
 /// helper.
 fn replication_yyerror(message: &str) -> PgError {
     use ::utils_error::ereport;
-    use types_error::{ERRCODE_SYNTAX_ERROR, ERROR};
+    use ::types_error::{ERRCODE_SYNTAX_ERROR, ERROR};
     ereport(ERROR)
         .errcode(ERRCODE_SYNTAX_ERROR)
         .errmsg_internal(message)

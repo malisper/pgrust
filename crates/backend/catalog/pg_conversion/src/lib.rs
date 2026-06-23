@@ -18,7 +18,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, MemoryContext, PgVec};
+use ::mcx::{Mcx, MemoryContext, PgVec};
 
 use ::types_catalog::catalog::{
     NAMESPACE_RELATION_ID, PROCEDURE_RELATION_ID,
@@ -31,7 +31,7 @@ use ::types_catalog::pg_conversion::{
 };
 use ::types_core::fmgr::{F_INT4EQ, F_NAMEEQ, F_OIDEQ};
 use ::types_core::primitive::{InvalidOid, Oid};
-use types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;

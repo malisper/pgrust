@@ -11,7 +11,7 @@
 //!   * `SampleScan` = `Scan`(112) + TableSampleClause*(8) = 120.
 
 use core::mem::{align_of, offset_of, size_of};
-use pg_ffi_fgram::{
+use ::pg_ffi_fgram::{
     PlanStateData, SampleScan, SampleScanState, ScanStateData, TableSampleClause, TsmRoutine,
 };
 

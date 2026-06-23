@@ -12,7 +12,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use ::types_core::primitive::{Oid, RepOriginId, TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
-use types_logical::{LogicalDecodingContext, ReorderBufferCallback};
+use ::types_logical::{LogicalDecodingContext, ReorderBufferCallback};
 
 // -------------------------------------------------------------------------
 // `rb->private_data` bridge.

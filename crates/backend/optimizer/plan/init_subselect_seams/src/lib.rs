@@ -18,7 +18,7 @@
 extern crate alloc;
 
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{JoinlistNode, PlannerInfo};
+use ::pathnodes::{JoinlistNode, PlannerInfo};
 
 seam_core::seam!(
     /// `remove_useless_joins(root, joinlist)` (analyzejoins.c:90): remove any

@@ -14,7 +14,7 @@
 use std::sync::atomic::Ordering;
 
 use ::types_core::primitive::{BlockNumber, Buffer, OffsetNumber, XLogRecPtr, BLCKSZ};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::buf::{BM_DIRTY, BM_JUST_DIRTIED, BM_LOCKED};
 use ::types_storage::RelFileLocator;
 

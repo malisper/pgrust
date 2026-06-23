@@ -33,7 +33,7 @@ use ::types_catalog::pg_trigger as pt;
 use ::types_core::fmgr::{F_NAMEEQ, F_OIDEQ};
 use ::types_core::Oid;
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_WRONG_OBJECT_TYPE,
     ERROR,
@@ -52,7 +52,7 @@ use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use aclchk_seams as aclchk;
 use indexing_seams as indexing;
-use pg_depend::{deleteDependencyRecordsFor, recordDependencyOn};
+use ::pg_depend::{deleteDependencyRecordsFor, recordDependencyOn};
 use ::types_tuple::heaptuple::Datum;
 
 const InvalidOid: Oid = 0;

@@ -5,10 +5,10 @@
 //! name on each element's target `RangeVar`. Ported 1:1, same ordering and
 //! error text/SQLSTATE as the C source.
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 use ::utils_error::ereport;
-use types_error::{PgResult, ERRCODE_INVALID_SCHEMA_DEFINITION, ERROR};
+use ::types_error::{PgResult, ERRCODE_INVALID_SCHEMA_DEFINITION, ERROR};
 
 use ::nodes::nodes::{ntag, Node};
 

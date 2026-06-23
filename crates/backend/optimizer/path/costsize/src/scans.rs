@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use ::types_core::primitive::{Cost, Selectivity};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     IndexPath, NodeId, ParamPathInfo, Path, PathId, PathNode, PlannerInfo, RelId, RinfoId,
 };
 

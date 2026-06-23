@@ -14,7 +14,7 @@ use ::types_core::primitive::{InvalidOid, Oid};
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
 use ::pathnodes::PlannerInfo;
-use types_selfuncs::{
+use ::types_selfuncs::{
     StatsTuple, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES,
 };
 

@@ -10,8 +10,8 @@
 //! case routines in [`crate::case`], which themselves seam into pg_locale.c.
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult, SoftErrorContext};
-use types_error::{ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_INVALID_DATETIME_FORMAT};
+use ::types_error::{PgError, PgResult, SoftErrorContext};
+use ::types_error::{ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, ERRCODE_INVALID_DATETIME_FORMAT};
 use ::types_core::Oid;
 
 use crate::case::{pg_ascii_tolower, str_tolower, str_toupper};

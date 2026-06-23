@@ -45,7 +45,7 @@ extern crate alloc;
 use alloc::string::String;
 
 use ::utils_error::ereport;
-use types_error::{PgError, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
+use ::types_error::{PgError, ERRCODE_CONFIG_FILE_ERROR, ERRCODE_INVALID_PARAMETER_VALUE, ERROR};
 
 pub mod dict;
 pub mod fmgr_builtins;

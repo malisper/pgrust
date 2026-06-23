@@ -2,10 +2,10 @@
 //! `InvalidationMsgsGroup`, and the `Add*InvalidationMessage` /
 //! `AppendInvalidationMessage*` / `ProcessMessageSubGroup*` family).
 
-use mcx::{Mcx, PgVec};
-use types_core::{InvalidOid, Oid};
+use ::mcx::{Mcx, PgVec};
+use ::types_core::{InvalidOid, Oid};
 use ::types_error::PgResult;
-use types_storage::{
+use ::types_storage::{
     SharedInvalCatalogMsg, SharedInvalCatcacheMsg, SharedInvalRelSyncMsg, SharedInvalRelcacheMsg,
     SharedInvalSnapshotMsg, SharedInvalidationMessage,
 };

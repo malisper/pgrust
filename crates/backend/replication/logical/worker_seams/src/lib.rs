@@ -17,8 +17,8 @@
 //! (`PgResult` where the C path can `ereport(ERROR)`; bare values otherwise).
 #![allow(non_snake_case)]
 
-use applyparallel::{DsmSetupResult, FileSet, ShmMqReceived, ShmMqResult};
-use types_core::{Oid, TransactionId, XLogRecPtr};
+use ::applyparallel::{DsmSetupResult, FileSet, ShmMqReceived, ShmMqResult};
+use ::types_core::{Oid, TransactionId, XLogRecPtr};
 use ::types_error::PgResult;
 
 // --- apply-worker / subscription identity + state -------------------------

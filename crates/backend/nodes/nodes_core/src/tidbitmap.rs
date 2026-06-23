@@ -45,8 +45,8 @@
 use core::sync::atomic::Ordering;
 
 use ::hashfn::murmurhash32;
-use types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, BLCKSZ};
-use types_error::{PgError, PgResult};
+use ::types_core::{BlockNumber, InvalidBlockNumber, OffsetNumber, BLCKSZ};
+use ::types_error::{PgError, PgResult};
 use ::execparallel::DsaAreaHandle;
 use ::nodes::bitmapset::bitmapword;
 use ::types_storage::bufpage::MaxHeapTuplesPerPage;
@@ -1852,7 +1852,7 @@ fn attach_shared_iterate(
 
 use lwlock_seams as lwlock;
 use dsa_seams as dsa_seam;
-use types_storage::{pg_atomic_uint32, LWLock, LW_EXCLUSIVE, LWTRANCHE_SHARED_TIDBITMAP};
+use ::types_storage::{pg_atomic_uint32, LWLock, LW_EXCLUSIVE, LWTRANCHE_SHARED_TIDBITMAP};
 
 /// The bitmap layout the in-crate code builds before marshaling it into the
 /// DSA: the dense `PagetableEntry` array (`PTEntryArray.ptentry`) plus the

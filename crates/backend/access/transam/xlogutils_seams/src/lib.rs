@@ -5,7 +5,7 @@
 
 use ::types_storage::Buffer;
 use ::wal::rmgr::XLogReaderState;
-use wal::{HotStandbyState, XLogRedoAction};
+use ::wal::{HotStandbyState, XLogRedoAction};
 
 seam_core::seam!(
     /// Read `standbyState` (xlogutils.c global).

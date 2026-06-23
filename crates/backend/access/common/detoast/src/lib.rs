@@ -40,10 +40,10 @@
 //! via the expanded-datum (`misc2`) seam; and the not-yet-ported PGLZ
 //! decompressor via the `common-pglz` seam. Each panics until its owner lands.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::datum::expandeddatum::{VARTAG_EXPANDED_RO, VARTAG_EXPANDED_RW};
-use datum::{ExpandedObjectRef, VARHDRSZ};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use ::datum::{ExpandedObjectRef, VARHDRSZ};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 
 use toast_compression_seams as lz4_seam;
 use toast_internals_seams as toast_seam;

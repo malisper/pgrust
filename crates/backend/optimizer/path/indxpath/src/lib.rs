@@ -108,7 +108,7 @@ pub fn init_seams() {
     use indxpath_seams as ix;
     use pathnode_seams as pn;
 
-    use pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
+    use ::pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId, RinfoId};
     use ::types_core::primitive::Oid;
     use ::nodes::primnodes::Expr;
     use ::types_error::PgResult;

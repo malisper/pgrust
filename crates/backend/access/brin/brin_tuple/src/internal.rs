@@ -3,18 +3,18 @@
 //! null-bit / alignment helpers, the `varatt.h` varlena macros, and the
 //! on-disk descriptor builder (`brtuple_disk_tupdesc`).
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
-use brin::{
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::brin::{
     BrinDesc, BRIN_EMPTY_RANGE_MASK, BRIN_NULLS_MASK, BRIN_OFFSET_MASK, BRIN_PLACEHOLDER_MASK,
     BT_INFO_OFFSET,
 };
-use types_core::{BlockNumber, Size};
+use ::types_core::{BlockNumber, Size};
 use ::types_error::PgResult;
 use ::types_tuple::heaptuple::{
     CompactAttribute, FormData_pg_attribute, NameData, TupleDescData, TYPALIGN_CHAR,
     TYPALIGN_DOUBLE, TYPALIGN_INT, TYPALIGN_SHORT,
 };
-use types_typcache::{TypeCacheEntry, TYPSTORAGE_PLAIN};
+use ::types_typcache::{TypeCacheEntry, TYPSTORAGE_PLAIN};
 
 /// `MAXIMUM_ALIGNOF` on a standard 64-bit build (`c.h`).
 pub const MAXIMUM_ALIGNOF: usize = 8;

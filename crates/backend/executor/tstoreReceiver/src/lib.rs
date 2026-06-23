@@ -60,7 +60,7 @@ use core::cell::RefCell;
 use ::tcop_dest::ReceiverVtable;
 use ::mcx::Mcx;
 use ::types_dest::CommandDest;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;

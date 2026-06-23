@@ -10,7 +10,7 @@ use ::nodes::nodeagg::do_aggsplit_skipfinal;
 use crate::aggstate::{
     AggStateData, AggStatePerAggData, AggStatePerGroupData, AggStatePerTransData,
 };
-use nodes::{EStateData, SlotId};
+use ::nodes::{EStateData, SlotId};
 
 use crate::transition::{process_ordered_aggregate_multi, process_ordered_aggregate_single};
 

@@ -28,13 +28,13 @@ use alloc::vec::Vec;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{AttrNumber, Index, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::{ntag, Node};
 use ::nodes::parsenodes::RangeTblEntry;
 use ::nodes::primnodes::{Expr, OpExpr};
 use ::nodes::rawnodes::{SortGroupClause, WindowClause, SETOP_EXCEPT};
-use pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId};
+use ::pathnodes::{NodeId, PlannerInfo, RelId, Relids, RinfoId};
 
 use ::nodes_core::makefuncs::make_and_qual;
 use ::nodes_core::nodefuncs::{

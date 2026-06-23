@@ -16,7 +16,7 @@ use cache::catcache::{
     ClIdx, CtIdx, FetchedCatalogTuple, CATCACHE_MAXKEYS, CT_MAGIC,
 };
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use crate::core_compute::HASH_INDEX;
 use crate::{find_cache_by_id, with_arena};

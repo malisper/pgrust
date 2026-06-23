@@ -54,7 +54,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use ::nodes::copy_query::Query;
 use ::nodes::nodeindexscan::PlannedStmt;
@@ -66,7 +66,7 @@ use ::nodes::parsenodes::RangeTblEntry;
 use ::nodes::rawnodes::LockClauseStrength;
 
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     JoinDomain, PathId, PathTarget, PlannerGlobal, PlannerInfo, RangeTblEntryId, RelId, Relids,
     UPPERREL_DISTINCT, UPPERREL_FINAL, UPPERREL_GROUP_AGG, UPPERREL_ORDERED,
     UPPERREL_PARTIAL_DISTINCT, UPPERREL_PARTIAL_GROUP_AGG, UPPERREL_WINDOW,
@@ -74,7 +74,7 @@ use pathnodes::{
 
 use ::types_core::Oid;
 
-use parsenodes::{PROPARALLEL_SAFE, PROPARALLEL_UNSAFE};
+use ::parsenodes::{PROPARALLEL_SAFE, PROPARALLEL_UNSAFE};
 
 use ::guc_tables::consts::{
     DEBUG_PARALLEL_OFF, DEBUG_PARALLEL_REGRESS, DEFAULT_CURSOR_TUPLE_FRACTION,
@@ -6196,7 +6196,7 @@ fn sortgrouplist_exprs_arena(
 use ::nodes_core::bitmapset as bms;
 use ::nodes::bitmapset::Bitmapset;
 use ::mcx::PgBox;
-use pathnodes::{GroupingSetData, RollupData};
+use ::pathnodes::{GroupingSetData, RollupData};
 
 /// `grouping_sets_data` (planner.c:99) — data specific to grouping sets, carried
 /// through grouping-path generation. `tleref_to_colnum_map` is the scratch array
@@ -11158,7 +11158,7 @@ fn plan_cluster_use_sort_impl<'mcx>(
     table_oid: Oid,
     index_oid: Oid,
 ) -> PgResult<bool> {
-    use pathnodes::{ForwardScanDirection, JoinDomain};
+    use ::pathnodes::{ForwardScanDirection, JoinDomain};
 
     /* We can short-circuit the cost comparison if indexscans are disabled */
     if !costsize::ENABLE_INDEXSCAN() {

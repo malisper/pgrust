@@ -57,11 +57,11 @@ use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec as StdVec;
 
-use mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::{BlockNumber, OffsetNumber, RmgrId, Size, TransactionId};
 use ::types_core::xact::TransactionIdIsValid;
-use types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
-use types_nbtree::{
+use ::types_error::{PgError, PgResult, ERRCODE_UNIQUE_VIOLATION};
+use ::types_nbtree::{
     xl_btree_insert, xl_btree_metadata, xl_btree_newroot, xl_btree_split, BTMetaPageData,
     BTPageOpaqueData, BTInsertStateData, BTScanInsert, BTStack, BTStackData,
     IndexUniqueCheck, TmIndexDelete, TmIndexDeleteOp, TmIndexStatus, BTMaxItemSize, BTP_HAS_GARBAGE,
@@ -80,7 +80,7 @@ use ::types_tuple::heaptuple::{
 };
 use ::wal::xloginsert::{REGBUF_STANDARD, REGBUF_WILL_INIT};
 
-use page::{
+use ::page::{
     ItemIdGetLength, ItemIdIsDead, ItemPointerCompare, PageAddItemExtended,
     PageGetFreeSpace, PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageGetPageSize,
     PageRef,

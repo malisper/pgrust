@@ -1,10 +1,10 @@
 //! `access/rmgrdesc/nbtdesc.c` — rmgr descriptor routines for btree indexes.
 
 use crate::appendf;
-use rmgrdesc_small_seams::{array_desc, offset_elem_desc};
+use ::rmgrdesc_small_seams::{array_desc, offset_elem_desc};
 use ::mcx::PgString;
 use ::types_error::PgResult;
-use wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{DecodedXLogRecord, XLR_INFO_MASK};
 use ::xlog_records::arrays::{OffsetNumbers, SIZEOF_OFFSET_NUMBER};
 use ::xlog_records::nbtxlog::{xl_btree_delete, xl_btree_dedup, xl_btree_insert,
                                   xl_btree_mark_page_halfdead, xl_btree_metadata,

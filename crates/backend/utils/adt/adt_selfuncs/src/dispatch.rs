@@ -18,7 +18,7 @@
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
+use ::pathnodes::{NodeId, PlannerInfo, SpecialJoinInfo};
 
 use plancat_ext_seams as ext;
 
@@ -261,7 +261,7 @@ pub fn call_func_selectivity_support<'mcx>(
 
 /// Map the wire `int16` jointype back to the planner [`JoinType`] enum.
 pub(crate) fn jointype_from_i16(jt: i16) -> ::pathnodes::JoinType {
-    use pathnodes::{
+    use ::pathnodes::{
         JOIN_ANTI, JOIN_FULL, JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_SEMI,
         JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER,
     };

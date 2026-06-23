@@ -50,12 +50,12 @@
 
 extern crate alloc;
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 
-use types_amapi::{
+use ::types_amapi::{
     AmCostEstimate, IndexAmRoutine, IndexBuildResult, IndexPath, PlannerInfo, T_IndexAmRoutine,
 };
-use brin::{BrinDesc, BrinMemTuple, BrinOpcInfo, BrinValues};
+use ::brin::{BrinDesc, BrinMemTuple, BrinOpcInfo, BrinValues};
 use ::types_core::primitive::{BlockNumber, OffsetNumber, Size};
 use ::types_core::InvalidOid;
 use ::rel::Relation;
@@ -71,11 +71,11 @@ use ::types_tableam::relscan::{IndexScanDesc, IndexScanDescData};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use pageops::{
+use ::pageops::{
     brinGetTupleForHeapBlock, brinRevmapInitialize, brinRevmapTerminate, read_found_tuple_bytes,
     BrinRevmap,
 };
-use brin_tuple::{brin_copy_tuple, brin_deform_tuple, brin_new_memtuple, BrinTupleImage};
+use ::brin_tuple::{brin_copy_tuple, brin_deform_tuple, brin_new_memtuple, BrinTupleImage};
 use brin_entry_seams as opclass;
 use ::index_seams::index_get_relation;
 use ::bufmgr_seams::lock_buffer;

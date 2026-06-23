@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::sync::Once;
 
 use ::types_error::PgResult;
-use net::{Port, SockError, SockResult};
+use ::net::{Port, SockError, SockResult};
 
 use crate::*;
 

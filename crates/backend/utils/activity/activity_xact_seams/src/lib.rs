@@ -2,7 +2,7 @@
 //! (`utils/activity/pgstat_xact.c`). The owning unit installs these from its
 //! `init_seams()` when it lands; until then a call panics loudly.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 use ::wal::XlXactStatsItem;
 

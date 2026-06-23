@@ -24,13 +24,13 @@
 
 #![allow(non_upper_case_globals)]
 
-use mcx::{Mcx, PgString, PgVec};
-use types_core::{ForkNumber, Oid, RelFileNumber, RepOriginId, TimestampTz, TransactionId, XLogRecPtr, INVALID_PROC_NUMBER, InvalidOid, InvalidRepOriginId, InvalidTransactionId};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_core::{ForkNumber, Oid, RelFileNumber, RepOriginId, TimestampTz, TransactionId, XLogRecPtr, INVALID_PROC_NUMBER, InvalidOid, InvalidRepOriginId, InvalidTransactionId};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::sinval::SharedInvalMessages;
 use ::types_storage::RelFileLocator;
 use ::wal::rmgr::XLogReaderState;
-use wal::{
+use ::wal::{
     xact_completion_apply_feedback, xact_completion_force_sync_commit,
     xact_completion_relcache_init_file_inval, XACT_XINFO_HAS_DBINFO, XACT_XINFO_HAS_DROPPED_STATS,
     XACT_XINFO_HAS_GID, XACT_XINFO_HAS_INVALS, XACT_XINFO_HAS_ORIGIN,

@@ -7,7 +7,7 @@
 //! (the C `data` pointer is the closure's captures).
 
 use ::mcx::PgString;
-use types_core::{Oid, OffsetNumber};
+use ::types_core::{Oid, OffsetNumber};
 use ::types_error::PgResult;
 
 use crate::util::appendf;

@@ -8,10 +8,10 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_error::PgResult;
 use ::nodes::partition::PartitionPruneContext;
-use nodes::{Bitmapset, EStateData};
+use ::nodes::{Bitmapset, EStateData};
 
 seam_core::seam!(
     /// `prune_append_rel_partitions(rel)` (partprune.c:723): perform

@@ -5,12 +5,12 @@
 //! then a call panics loudly. Allocating constructors take the target context
 //! handle (C: they palloc the node in `CurrentMemoryContext`).
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::types_tuple::Datum;
 use ::nodes::nodes::Node;
-use parsenodes::{Node as ParseNode, TypeName as ParseTypeName};
+use ::parsenodes::{Node as ParseNode, TypeName as ParseTypeName};
 
 seam_core::seam!(
     /// `makeConst(consttype, consttypmod, constcollid, constlen, constvalue,

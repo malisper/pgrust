@@ -12,10 +12,10 @@
 //! builtin as **non-strict** so the NULL-argument cases are handled here
 //! (returning `false`) rather than short-circuited by the strict wrapper.
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
+use ::types_error::{PgError, PgResult};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData};
 use ::nodes::partition::{PartitionKeyData, PartitionStrategy};
 use ::types_storage::lock::AccessShareLock;
 use types_tuple::heaptuple::Datum;

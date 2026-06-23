@@ -18,9 +18,9 @@
 //! the transform helpers and the `format_type_be` error-message rendering in
 //! `get_cast_oid` likewise route through their owners' seam crates.
 
-use mcx::{Mcx, PgString};
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
+use ::mcx::{Mcx, PgString};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult, ERRCODE_UNDEFINED_OBJECT, ERROR};
 
 use copyfuncs_pc_seams as node_seams;
 use format_type_seams as format_type;

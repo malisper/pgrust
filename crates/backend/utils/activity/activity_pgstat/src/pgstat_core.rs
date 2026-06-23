@@ -13,7 +13,7 @@
 
 use core::any::Any;
 
-use types_core::{Oid, TimestampTz};
+use ::types_core::{Oid, TimestampTz};
 use ::types_error::PgResult;
 use ::types_pgstat::activity_pgstat::{
     PgStat_FetchConsistency, PgStat_Kind, PGSTAT_KIND_BUILTIN_MAX, PGSTAT_KIND_BUILTIN_MIN,
@@ -31,7 +31,7 @@ use lwlock_seams as lwlock;
 use lmgr_proc_seams as proc_seams;
 use timestamp_seams as timestamp;
 use dsa_seams as dsa;
-use types_storage::{LW_EXCLUSIVE, LW_SHARED};
+use ::types_storage::{LW_EXCLUSIVE, LW_SHARED};
 
 /// `PGSTAT_MIN_INTERVAL` (`pgstat.c`) — minimum ms between stats reports.
 const PGSTAT_MIN_INTERVAL: i64 = 1000;

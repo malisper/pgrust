@@ -24,16 +24,16 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_core::primitive::{AttrNumber, BlockNumber, InvalidOid, Oid};
 use ::datum::Datum as KeyDatum;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, SoftErrorContext, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, WARNING,
 };
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use types_tuple::heaptuple::Datum;
 
 use ::types_acl::acl::{AclResult, ACL_MAINTAIN};
@@ -46,7 +46,7 @@ use ::types_catalog::pg_class::{
 use ::types_catalog::pg_database::DatabaseRelationId;
 use ::types_catalog::pg_type::{TYPTYPE_MULTIRANGE, TYPTYPE_RANGE};
 use ::types_tuple::access::RangeVar;
-use statistics::{
+use ::statistics::{
     Anum_pg_statistic_staattnum, Anum_pg_statistic_stacoll1, Anum_pg_statistic_stadistinct,
     Anum_pg_statistic_stainherit, Anum_pg_statistic_stakind1, Anum_pg_statistic_stanullfrac,
     Anum_pg_statistic_stanumbers1, Anum_pg_statistic_staop1, Anum_pg_statistic_starelid,
@@ -58,14 +58,14 @@ use ::types_storage::lock::{AccessShareLock, NoLock, RowExclusiveLock, ShareUpda
 
 use ::utils_error::ereport as ereport_builder;
 
-use heaptuple::{
+use ::heaptuple::{
     heap_deform_tuple, heap_form_tuple, heap_modify_tuple, heap_modify_tuple_by_cols,
 };
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use ::transam_xact::CommandCounterIncrement;
 use ::index::IndexGetRelation;
 use ::indexing::keystone::{CatalogTupleDelete, CatalogTupleInsert, CatalogTupleUpdate};
-use catalog_namespace::{RangeVarGetRelidExtended, RangeVarGetRelidCallback};
+use ::catalog_namespace::{RangeVarGetRelidExtended, RangeVarGetRelidCallback};
 use ::objectaddress::resolve::{get_relkind_objtype, object_ownercheck};
 use ::pg_class::errdetail_relkind_not_supported;
 use ::nodes_core::makefuncs::make_range_var;
@@ -79,7 +79,7 @@ use ::lsyscache::type_::{
 };
 use ::relcache_seams::relation_get_index_expressions;
 use cache_syscache as syscache;
-use cache_syscache::{ReleaseSysCache, SearchSysCacheExistsAttName};
+use ::cache_syscache::{ReleaseSysCache, SearchSysCacheExistsAttName};
 use ::miscinit::GetUserId;
 use ::common_relation_seams::relation_open;
 

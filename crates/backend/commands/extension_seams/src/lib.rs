@@ -6,7 +6,7 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 

@@ -15,19 +15,19 @@
 
 use core::cell::RefCell;
 
-use mcx::{MemoryContext, PgString};
+use ::mcx::{MemoryContext, PgString};
 
-use types_deadlock::{
+use ::types_deadlock::{
     DeadLockState, DeadlockInfo, DeadlockReport, Edge, LockId, LockSpace, ProcId, WaitOrder,
 };
-use types_error::{PgError, PgResult, ERRCODE_T_R_DEADLOCK_DETECTED, ERROR, FATAL};
+use ::types_error::{PgError, PgResult, ERRCODE_T_R_DEADLOCK_DETECTED, ERROR, FATAL};
 use ::types_storage::lock::{LOCKMODE, LOCKTAG, LOCKTAG_RELATION_EXTEND};
 use ::types_storage::storage::{MAX_BACKENDS_BITS, PROC_IS_AUTOVACUUM};
 
 use ::utils_error::ereport;
 
 use ::lmgr_seams::describe_lock_tag;
-use lock_seams::{get_lock_method_table, get_lockmode_name};
+use ::lock_seams::{get_lock_method_table, get_lockmode_name};
 use ::lmgr_proc_seams::proc_lock_wakeup;
 use ::stat_seams::report_deadlock;
 use ::status_seams::backend_current_activity;

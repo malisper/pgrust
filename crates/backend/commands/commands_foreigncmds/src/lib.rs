@@ -17,8 +17,8 @@
 //! IMPORT FDW-callback / parse-execute machinery) cross their owner's seam.
 
 use ::utils_error::ereport;
-use mcx::{Mcx, PgVec};
-use types_acl::{ACLCHECK_OK, ACL_USAGE};
+use ::mcx::{Mcx, PgVec};
+use ::types_acl::{ACLCHECK_OK, ACL_USAGE};
 use ::types_catalog::catalog_dependency::{
     InvalidObjectAddress, ObjectAddress, DEPENDENCY_NORMAL,
 };
@@ -34,7 +34,7 @@ use ::types_error::PgResult;
 use ::nodes::parsenodes::{
     RoleSpec, ROLESPEC_PUBLIC, DROP_CASCADE, OBJECT_FDW, OBJECT_FOREIGN_SERVER,
 };
-use types_foreigncmds::{
+use ::types_foreigncmds::{
     AlterFdwStmt, AlterForeignServerStmt, AlterUserMappingStmt, CreateFdwStmt,
     CreateForeignServerStmt, CreateForeignTableStmt, CreateUserMappingStmt, DefElem, DefElemArg,
     DefElemAction, DropUserMappingStmt, FdwOwnerRow, ImportForeignSchemaStmt, ImportPlannedStmt,

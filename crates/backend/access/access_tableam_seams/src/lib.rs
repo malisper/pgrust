@@ -7,7 +7,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use ::types_cluster::CopyForClusterResult;
-use types_core::{MultiXactId, TransactionId};
+use ::types_core::{MultiXactId, TransactionId};
 use ::types_error::PgResult;
 use ::rel::Relation;
 

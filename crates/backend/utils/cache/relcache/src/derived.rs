@@ -20,19 +20,19 @@
 use genam_seams as genam_seam;
 use indexam_seams as indexam_seam;
 use read_seams as read_seam;
-use rewriteDefine_seams::{
+use ::rewriteDefine_seams::{
     set_rule_check_as_user as set_rule_check_as_user_seam,
     set_rule_check_as_user_node as set_rule_check_as_user_node_seam,
 };
 use relcache_nodexform_seams as nodexform_seam;
-use utils_error::{ereport, PgResult};
-use mcx::{Mcx, MemoryContext};
+use ::utils_error::{ereport, PgResult};
+use ::mcx::{Mcx, MemoryContext};
 use ::rel::Relation;
 use ::types_tuple::Datum;
 use ::types_core::primitive::{AttrNumber, Oid, RegProcedure};
-use types_core::{InvalidOid, OidIsValid};
+use ::types_core::{InvalidOid, OidIsValid};
 use ::types_error::ERROR;
-use types_tuple::{
+use ::types_tuple::{
     FirstLowInvalidHeapAttributeNumber, RELKIND_PARTITIONED_TABLE, REPLICA_IDENTITY_DEFAULT,
     REPLICA_IDENTITY_INDEX,
 };

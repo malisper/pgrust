@@ -20,7 +20,7 @@ use ::types_core::primitive::uint32;
 use ::datum::datum::Datum;
 use ::types_error::PgResult;
 use ::nodes::execnodes::EStateData;
-use samplescan::{SampleScan, SampleScanState};
+use ::samplescan::{SampleScan, SampleScanState};
 
 // --- node factory / makeNode / plan-state links ---
 

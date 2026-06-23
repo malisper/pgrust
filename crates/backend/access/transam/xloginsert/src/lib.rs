@@ -37,14 +37,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use utils_error::{PgError, PgResult};
-use pglz::{pglz_compress, PGLZ_strategy_default, PglzError};
+use ::utils_error::{PgError, PgResult};
+use ::pglz::{pglz_compress, PGLZ_strategy_default, PglzError};
 use ::types_core::primitive::{
     BlockNumber, Buffer, ForkNumber, RmgrId, TransactionId, XLogRecPtr, BLCKSZ,
 };
 use ::types_storage::bufpage::SizeOfPageHeaderData;
 use ::types_storage::storage::{RelFileLocator, RelFileLocatorEquals};
-use wal::{
+use ::wal::{
     BKPBLOCK_HAS_DATA, BKPBLOCK_HAS_IMAGE, BKPBLOCK_SAME_REL, BKPBLOCK_WILL_INIT, BKPIMAGE_APPLY,
     BKPIMAGE_COMPRESS_LZ4, BKPIMAGE_COMPRESS_PGLZ, BKPIMAGE_COMPRESS_ZSTD, BKPIMAGE_HAS_HOLE,
     MAX_SIZE_OF_XLOG_RECORD_BLOCK_HEADER, REGBUF_FORCE_IMAGE, REGBUF_KEEP_DATA, REGBUF_NO_CHANGE,

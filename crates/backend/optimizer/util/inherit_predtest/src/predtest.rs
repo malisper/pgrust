@@ -31,8 +31,8 @@ use ::types_core::primitive::{InvalidOid, Oid};
 use ::nodes::primnodes::{
     BoolExprType, BoolTestType, CompareType, Const, Expr, NullTestType, OpExpr,
 };
-use pathnodes::{NodeId, PlannerInfo};
-use types_error::{PgError, PgResult};
+use ::pathnodes::{NodeId, PlannerInfo};
+use ::types_error::{PgError, PgResult};
 
 thread_local! {
     /// Backend-lifetime context backing the by-reference element values stamped

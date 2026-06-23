@@ -1,8 +1,8 @@
 use std::ffi::c_void;
 use std::ptr::{self, NonNull};
 
-use error_fgram::{PgError, PgResult};
-use pg_ffi_fgram::{
+use ::error_fgram::{PgError, PgResult};
+use ::pg_ffi_fgram::{
     MemoryChunk, MemoryContext, Size, MCTX_ALIGNED_REDIRECT_ID, MCXT_ALLOC_NO_OOM,
 };
 

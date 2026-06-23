@@ -17,7 +17,7 @@
 
 use ::utils_error::PgResult;
 
-use types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
+use ::types_core::{TimeLineID, XLogRecPtr, XLogSegNo};
 use ::wal::xlog_consts::WALAvailability;
 
 use crate::{

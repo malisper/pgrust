@@ -18,11 +18,11 @@
 //! builtin table. OIDs / nargs / strict are transcribed exactly from
 //! `pg_proc.dat` (all take one `oid` arg, all strict, none retset).
 
-use types_core::{Oid, TimestampTz};
+use ::types_core::{Oid, TimestampTz};
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::resolution::BuiltinFunction;
-use fmgr::{FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{FunctionCallInfoBaseData, PgFnNative};
 use ::types_pgstat::activity_pgstat::PgStat_StatDBEntry;
 
 /// `PG_GETARG_OID(0)` → `DatumGetObjectId`: the database OID argument.

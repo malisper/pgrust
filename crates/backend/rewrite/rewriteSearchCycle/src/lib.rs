@@ -36,12 +36,12 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
+use ::mcx::{alloc_in, Mcx, PgBox, PgString, PgVec};
 
 use ::types_core::primitive::{AttrNumber, InvalidAttrNumber, Oid};
 use ::types_core::InvalidOid;
 use ::datum::Datum as ScalarWord;
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::{BOOLOID, INT8OID, RECORDARRAYOID, RECORDOID};
 

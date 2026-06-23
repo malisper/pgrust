@@ -29,15 +29,15 @@
 
 use core::cell::{Cell, RefCell};
 
-use instrument::{pgWalUsage, WalUsageAccumDiff};
+use ::instrument::{pgWalUsage, WalUsageAccumDiff};
 use ::activity_pgstat::kind_info::KindInfoBuilder;
 use ::activity_pgstat::registry;
 use ::activity_pgstat::shmem;
 use ::pgstat_io::pgstat_tracks_io_op;
-use init_small_seams::{my_backend_type, my_proc_number};
+use ::init_small_seams::{my_backend_type, my_proc_number};
 use ::types_core::init::BackendType;
 use ::types_core::instrument::{instr_time, WalUsage};
-use types_core::{bits32, InvalidOid, ProcNumber, TimestampTz};
+use ::types_core::{bits32, InvalidOid, ProcNumber, TimestampTz};
 use ::types_error::PgResult;
 use ::types_pgstat::activity_pgstat::{
     IOContext, IOObject, IOOp, PgStat_Backend, PgStat_BackendPending, PgStat_Counter,

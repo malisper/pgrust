@@ -16,7 +16,7 @@
 #![allow(non_snake_case)]
 
 use ::types_error::PgResult;
-use nodes::{EStateData, FunctionScanState, SlotId, TableFuncScanState};
+use ::nodes::{EStateData, FunctionScanState, SlotId, TableFuncScanState};
 
 /// `ExecScanAccessMtd` — the access method `ExecScan` re-enters to get the
 /// next candidate tuple. Returns `true` when a tuple is in the node's scan

@@ -15,7 +15,7 @@ use alloc::string::ToString;
 use ::mcx::Mcx;
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::pg_event_trigger::SqlDropObjectInfo;
-use types_core::{Oid, OidIsValid};
+use ::types_core::{Oid, OidIsValid};
 use ::types_error::PgResult;
 use ::types_storage::lock::AccessShareLock;
 

@@ -9,7 +9,7 @@
 
 extern crate alloc;
 
-use pathnodes::{NodeId, PlannerInfo, Relids, RinfoId};
+use ::pathnodes::{NodeId, PlannerInfo, Relids, RinfoId};
 
 seam_core::seam!(
     /// `make_simple_restrictinfo(root, clause)` (restrictinfo.h macro over

@@ -3,7 +3,7 @@
 //! elements are decoded on access instead of reborrowed as `&[T]`.
 
 use crate::bytes::{u16_at, u32_at};
-use types_core::{Oid, OffsetNumber};
+use ::types_core::{Oid, OffsetNumber};
 
 /// `sizeof(OffsetNumber)`.
 pub const SIZEOF_OFFSET_NUMBER: usize = 2;

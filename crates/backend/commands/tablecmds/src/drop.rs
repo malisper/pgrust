@@ -10,7 +10,7 @@ use ::mcx::Mcx;
 
 use ::types_acl::ACLCHECK_NOT_OWNER;
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
+use ::types_error::{PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERROR};
 use ::nodes::ddlnodes::DropStmt;
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::{
@@ -28,12 +28,12 @@ use ::types_tuple::access::{
 
 use aclchk_seams as aclchk_seam;
 use dependency_seams as dep_seam;
-use catalog_namespace::{makeRangeVarFromNameList, RangeVarGetRelidExtended, RVR_MISSING_OK};
+use ::catalog_namespace::{makeRangeVarFromNameList, RangeVarGetRelidExtended, RVR_MISSING_OK};
 use objectaddress_seams as objaddr_seam;
 use partition_seams as partition_seam;
 use index_seams as index_seam;
 use pg_inherits_seams as inherits_seam;
-use lmgr::{LockRelationOid, UnlockRelationOid};
+use ::lmgr::{LockRelationOid, UnlockRelationOid};
 use inval_seams as inval_seam;
 use miscinit_seams as miscinit_seam;
 

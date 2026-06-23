@@ -18,7 +18,7 @@
 use ::mcx::Mcx;
 use ::types_core::primitive::{MultiXactId, TransactionId};
 use ::types_core::xact::{FrozenTransactionId, InvalidTransactionId};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::Buffer;
 use ::types_tuple::heaptuple::{
     HeapTupleField3, HeapTupleFields, HeapTupleHeaderChoice, HeapTupleHeaderData, HEAP_HOT_UPDATED,
@@ -34,7 +34,7 @@ use ::heapam_visibility::htup::{
 };
 use ::types_tuple::heaptuple::HeapTupleHeaderXminCommitted;
 use ::heapam_visibility::HeapTupleHeaderGetUpdateXid;
-use transam::{
+use ::transam::{
     TransactionIdFollows, TransactionIdIsNormal, TransactionIdIsValid, TransactionIdPrecedes,
     TransactionIdPrecedesOrEquals,
 };

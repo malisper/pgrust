@@ -39,7 +39,7 @@
 // the workspace's vocabulary and from the C (which throws by value).
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_catalog::catalog::NAMESPACE_RELATION_ID;
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_NORMAL};
 use ::types_catalog::pg_collation as cat;
@@ -49,22 +49,22 @@ use types_tuple::heaptuple::Datum;
 
 use ::utils_error::ereport;
 use ::types_error::pg_error::ErrorLocation;
-use types_error::{PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR, NOTICE};
+use ::types_error::{PgResult, ERRCODE_DUPLICATE_OBJECT, ERROR, NOTICE};
 
 use ::heaptuple::heap_form_tuple;
 use ::catalog_catalog::GetNewOidWithIndex;
 use ::indexing::keystone::CatalogTupleInsert;
-use pg_depend::{
+use ::pg_depend::{
     checkMembershipInCurrentExtension, recordDependencyOn, recordDependencyOnCurrentExtension,
 };
 use ::pg_shdepend::recordDependencyOnOwner;
-use cache_syscache::{GetSysCacheOid, COLLNAMEENCNSP};
+use ::cache_syscache::{GetSysCacheOid, COLLNAMEENCNSP};
 use ::cache::syscache::SysCacheKey;
 use ::datum::Datum as ScalarWord;
 
 use table_seams as table_seams;
 use objectaccess_seams as objectaccess_seams;
-use collationcmds_seams::{collation_create, CollationCreateArgs};
+use ::collationcmds_seams::{collation_create, CollationCreateArgs};
 use varlena_seams as varlena_seams;
 use mbutils_seams as mbutils_seams;
 use encnames_seams as encnames_seams;

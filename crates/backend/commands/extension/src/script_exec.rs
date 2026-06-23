@@ -10,10 +10,10 @@
 //! `MODULE_PATHNAME` text substitutions. Ported 1:1 with C in branch order /
 //! SQLSTATE / messages.
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::primitive::Oid;
 use ::types_core::InvalidOid;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_TEXT_REPRESENTATION, ERROR,
 };
@@ -633,7 +633,7 @@ pub fn ApplyExtensionUpdates(
     cascade: bool,
     is_create: bool,
 ) -> PgResult<()> {
-    use heaptuple::{heap_copytuple, heap_deform_tuple, heap_modify_tuple};
+    use ::heaptuple::{heap_copytuple, heap_deform_tuple, heap_modify_tuple};
     use ::scankey::ScanKeyInit;
     use dependency_seams as dependency_seams;
     use ::indexing::keystone::CatalogTupleUpdate;

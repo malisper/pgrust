@@ -36,7 +36,7 @@
 //! (every row is `proisstrict => 't'` — the default — and not retset).
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// The shared fmgr-frame entry point for every GiST opclass support proc. In
 /// the owned model the GiST access method invokes these procs through the typed

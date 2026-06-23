@@ -22,7 +22,7 @@
 
 use core::ffi::{c_char, c_int, c_long};
 
-use pg_ffi_fgram::{List, Node, NodeTag, Oid};
+use ::pg_ffi_fgram::{List, Node, NodeTag, Oid};
 
 use crate::primnodes::{
     CmdType, CoercionContext, FuncExpr, IntoClause, OnCommitAction, ParseLoc, RangeVar,

@@ -20,7 +20,7 @@ use crate::*;
 use alloc::string::String;
 use alloc::vec::Vec;
 use std::sync::OnceLock;
-use pathnodes::{QueryId, RangeTblEntryId};
+use ::pathnodes::{QueryId, RangeTblEntryId};
 
 /// One synthetic range-table entry: the projected fields the optimizer reads,
 /// mirroring `RangeTblEntry` field-for-field for the projection surface above.

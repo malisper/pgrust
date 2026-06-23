@@ -40,21 +40,21 @@
 use std::cell::Cell;
 use std::path::Path;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::primitive::Oid;
-use types_core::{AttrNumber, InvalidOid, OidIsValid};
-use types_error::{
+use ::types_core::{AttrNumber, InvalidOid, OidIsValid};
+use ::types_error::{
     PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_NAME,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERROR, NOTICE,
 };
-use types_error::{ERRCODE_INVALID_RECURSION, ERRCODE_UNDEFINED_SCHEMA};
+use ::types_error::{ERRCODE_INVALID_RECURSION, ERRCODE_UNDEFINED_SCHEMA};
 
 use ::utils_error::ereport;
 
 use ::scankey::ScanKeyInit;
 use ::indexing::keystone::CatalogTupleDelete;
-use cache_syscache::{
+use ::cache_syscache::{
     GetSysCacheOid, ReleaseSysCache, SearchSysCache1, SysCacheGetAttr, EXTENSIONNAME, EXTENSIONOID,
 };
 
@@ -85,7 +85,7 @@ use objectaddress_seams as objectaddress_seams;
 use lsyscache_seams as lsyscache_seams;
 use transam_xact_seams as xact_seams;
 
-use heaptuple::{
+use ::heaptuple::{
     heap_copytuple, heap_deform_tuple, heap_form_tuple, heap_modify_tuple,
 };
 use ::alter::AlterObjectNamespace_oid;
@@ -98,7 +98,7 @@ use ::name::namein;
 use ::types_tuple::heaptuple::NameData;
 use ::miscinit::GetUserId;
 use ::init_small::globals::MyDatabaseId;
-use catalog_namespace::{fetch_search_path, get_namespace_oid, isTempNamespace};
+use ::catalog_namespace::{fetch_search_path, get_namespace_oid, isTempNamespace};
 use ::schemacmds::CreateSchemaCommand;
 use ::comment::CreateComments;
 

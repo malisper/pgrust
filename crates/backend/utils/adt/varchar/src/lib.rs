@@ -142,10 +142,10 @@ use ::varlena::comparison::varstr_cmp;
 use ::varlena::keystone::{check_collation_set, cstring_to_text_with_len};
 use ::varlena::sortsupport::{bpchartruelen, varstr_sortsupport};
 use ::varlena::wire_io::textsend;
-use hashfn::{hash_bytes, hash_bytes_extended};
-use mcx::{Mcx, PgVec};
+use ::hashfn::{hash_bytes, hash_bytes_extended};
+use ::mcx::{Mcx, PgVec};
 use ::datum::Bytea;
-use types_error::{
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_INDETERMINATE_COLLATION,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_STRING_DATA_RIGHT_TRUNCATION,
 };

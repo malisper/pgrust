@@ -18,7 +18,7 @@
 
 use ::utils_error::ereport;
 use ::types_core::init::BackendType;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERROR, WARNING,
 };

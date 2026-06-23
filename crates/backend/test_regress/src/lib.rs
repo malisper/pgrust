@@ -19,8 +19,8 @@
 //! `fetch_finfo_record` would have produced.
 
 use ::datum::Datum;
-use types_error::{PgError, PgResult};
-use fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
+use ::types_error::{PgError, PgResult};
+use ::fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
 
 /// The simple (suffix-free, directory-free) name of the regression-test loadable
 /// module — `$libdir/regress` reduces to this for the registry.
@@ -545,7 +545,7 @@ fn fc_regress_setenv(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 const OID_MAX: types_core::Oid = u32::MAX;
 
 fn fc_test_relpath(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
-    use relpath::{
+    use ::relpath::{
         GetRelationPath, PROCNUMBER_CHARS, REL_PATH_STR_MAXLEN,
     };
 
@@ -1476,7 +1476,7 @@ fn fc_make_tuple_indirect(fcinfo: &mut FunctionCallInfoBaseData) -> Datum {
 fn make_tuple_indirect_impl(
     fcinfo: &mut FunctionCallInfoBaseData,
 ) -> Result<Datum, PgError> {
-    use heaptuple::{heap_deform_tuple, heap_form_tuple, Datum as HtDatum};
+    use ::heaptuple::{heap_deform_tuple, heap_form_tuple, Datum as HtDatum};
 
     // HeapTupleHeader rec = PG_GETARG_HEAPTUPLEHEADER(0);
     //

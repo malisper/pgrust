@@ -58,12 +58,12 @@ use init_small_seams as globals;
 use sort_storage_seams as tuplestore;
 
 use ::mcx::PgBox;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execnodes::RecursiveUnionSharedState;
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::nodes::noderecursiveunion::{RecursiveUnion, RecursiveUnionStateData};
 use ::nodes::nodes::Node;
-use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
+use ::nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 
 /// Install this crate's seam implementations. nodeRecursiveunion owns no
 /// inbound seams: it is reached through the executor dispatch (execProcnode),

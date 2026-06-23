@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr::{self, NonNull};
 
-use error_fgram::{PgError, PgResult};
-use pg_ffi_fgram::{
+use ::error_fgram::{PgError, PgResult};
+use ::pg_ffi_fgram::{
     MemoryChunk, MemoryContext, MemoryContextCounters, MemoryContextData, MemoryContextMethods,
     MemoryStatsPrintFunc, Size, ALLOCSET_DEFAULT_INITSIZE, ALLOCSET_DEFAULT_MINSIZE,
     ALLOCSET_SMALL_INITSIZE, ALLOCSET_SMALL_MINSIZE, MAX_ALLOC_HUGE_SIZE, MAX_ALLOC_SIZE,
@@ -1352,7 +1352,7 @@ unsafe fn validate_block(block: AllocBlock) -> PgResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pg_ffi_fgram::{ALLOCSET_SEPARATE_THRESHOLD, INVALID_ALLOC_SIZE};
+    use ::pg_ffi_fgram::{ALLOCSET_SEPARATE_THRESHOLD, INVALID_ALLOC_SIZE};
 
     #[test]
     fn allocset_freelist_index_matches_postgres_boundaries() {

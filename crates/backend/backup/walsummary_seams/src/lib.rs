@@ -4,9 +4,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_blkreftable::BlockRefTableReader;
-use types_core::{TimeLineID, XLogRecPtr};
+use ::types_core::{TimeLineID, XLogRecPtr};
 use ::types_error::PgResult;
 use ::types_storage::file::File;
 use ::types_walsummarizer::WalSummaryFile;

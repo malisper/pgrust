@@ -30,9 +30,9 @@
 
 use alloc::format;
 use alloc::vec::Vec;
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::{ntag, CmdType, Node};
 use ::types_storage::lock::AccessShareLock;
 

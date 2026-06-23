@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use types_json::{ArrayForJson, CompositeFieldForJson};
+use ::types_json::{ArrayForJson, CompositeFieldForJson};
 use ::types_tuple::heaptuple::{HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId};
 use ::types_tuple::Datum;
 

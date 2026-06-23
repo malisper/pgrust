@@ -15,9 +15,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 
 use ::types_catalog::pg_statistic_ext::{
     STATS_EXT_DEPENDENCIES, STATS_EXT_MCV, STATS_EXT_NDISTINCT,

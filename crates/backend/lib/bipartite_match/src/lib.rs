@@ -80,8 +80,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use mcx::{MemoryContext, PgVec};
-use types_error::{PgError, PgResult};
+use ::mcx::{MemoryContext, PgVec};
+use ::types_error::{PgError, PgResult};
 
 /// The distances computed in `hk_breadth_search` can easily be seen to never
 /// exceed `u_size`. Since we restrict `u_size` to be less than `SHRT_MAX`, we

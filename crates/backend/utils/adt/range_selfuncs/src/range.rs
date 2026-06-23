@@ -10,11 +10,11 @@ use ::datum::datum::Datum;
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo};
-use types_rangetypes::{RangeBound, RangeTypeP};
-use types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
+use ::pathnodes::{NodeId, PlannerInfo};
+use ::types_rangetypes::{RangeBound, RangeTypeP};
+use ::types_selfuncs::{VariableStatData, DEFAULT_INEQ_SEL, DEFAULT_RANGE_INEQ_SEL};
 
-use rangetypes_seams::{
+use ::rangetypes_seams::{
     datum_get_range_type_p_value, range_deserialize, range_get_typcache, range_serialize,
 };
 use ::selfuncs_seams::get_restriction_variable;

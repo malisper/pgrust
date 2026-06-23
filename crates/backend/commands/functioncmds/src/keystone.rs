@@ -14,15 +14,15 @@
 //! `backend-commands-functioncmds-seams` crate (NOT the monolithic
 //! src-idiomatic `seams`/`types` crates, which do not exist in this repo).
 
-use functioncmds_seams::{self as seam, LanguageForm};
+use ::functioncmds_seams::{self as seam, LanguageForm};
 use ::utils_error::ereport;
-use types_acl::{ACLCHECK_NO_PRIV, ACLCHECK_OK, ACL_USAGE};
+use ::types_acl::{ACLCHECK_NO_PRIV, ACLCHECK_OK, ACL_USAGE};
 use ::types_core::Oid;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_FUNCTION_DEFINITION,
     ERRCODE_SYNTAX_ERROR, ERROR,
 };
-use parsenodes::{Boolean, DefElem, Node, StringNode, TypeName};
+use ::parsenodes::{Boolean, DefElem, Node, StringNode, TypeName};
 
 // `ObjectType` discriminants (nodes/parsenodes.h) — passed to the
 // `lookup_func_with_args` seam as an `int`, matching the C `objtype` argument.

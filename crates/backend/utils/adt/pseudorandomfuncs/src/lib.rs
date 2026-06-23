@@ -65,9 +65,9 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::prng::PgPrng;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
 use ::adt_numeric::random::random_numeric;
 use ::timestamp_seams::get_current_timestamp;

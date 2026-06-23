@@ -48,9 +48,9 @@ pub mod fmgr_builtins;
 
 use ::mcx::Mcx;
 
-use brin::{BrinDesc, BrinMemTuple};
+use ::brin::{BrinDesc, BrinMemTuple};
 use ::types_core::primitive::{BlockNumber, OffsetNumber, Oid, Size};
-use types_core::{InvalidOid, MaxBlockNumber};
+use ::types_core::{InvalidOid, MaxBlockNumber};
 use ::rel::Relation;
 use ::types_storage::buf::{
     BufferIsValid, InvalidBuffer, BUFFER_LOCK_SHARE, BUFFER_LOCK_UNLOCK,
@@ -63,31 +63,31 @@ use ::types_tuple::access::RELKIND_INDEX;
 use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use pageops::{
+use ::pageops::{
     brin_can_do_samepage_update, brin_create_empty_metapage, brin_create_metapage, brin_doinsert,
     brin_doupdate, brin_page_cleanup, brinGetTupleForHeapBlock, brinRevmapDesummarizeRange,
     brinRevmapInitialize, brinRevmapTerminate, read_found_tuple_bytes, BrinRevmap,
 };
-use brin_tuple::{
+use ::brin_tuple::{
     brin_copy_tuple, brin_deform_tuple, brin_form_placeholder_tuple, brin_form_tuple,
     brin_memtuple_initialize, brin_new_memtuple, BrinTupleImage,
 };
-use brin_scan::{brin_build_desc, brin_free_desc};
+use ::brin_scan::{brin_build_desc, brin_free_desc};
 
 use brin_entry_seams as opclass;
 use ::indexam_seams::index_open;
 use ::table_seams::table_open;
-use table_tableam_seams::{table_index_build_range_scan, table_index_build_scan};
-use aclchk_seams::{aclcheck_error, object_ownercheck};
-use index_seams::{build_index_info, index_get_relation};
-use bufmgr_seams::{
+use ::table_tableam_seams::{table_index_build_range_scan, table_index_build_scan};
+use ::aclchk_seams::{aclcheck_error, object_ownercheck};
+use ::index_seams::{build_index_info, index_get_relation};
+use ::bufmgr_seams::{
     lock_buffer, read_buffer_extended, release_buffer,
 };
-use freespace_seams::{
+use ::freespace_seams::{
     free_space_map_vacuum, free_space_map_vacuum_range, record_page_with_free_space,
 };
 use ::relcache_seams::relation_get_number_of_blocks;
-use utils_error::{ereport, PgError, PgResult};
+use ::utils_error::{ereport, PgError, PgResult};
 use ::types_error::error::ERROR;
 
 use ::types_acl::AclResult;
@@ -487,8 +487,8 @@ pub fn brin_summarize_range<'mcx>(
     heap_blk64: i64,
 ) -> PgResult<i32> {
     use ::transam_xlog_seams::recovery_in_progress;
-    use miscinit_seams::{get_user_id_and_sec_context, set_user_id_and_sec_context};
-    use guc_seams::{at_eoxact_guc, new_guc_nest_level, restrict_search_path};
+    use ::miscinit_seams::{get_user_id_and_sec_context, set_user_id_and_sec_context};
+    use ::guc_seams::{at_eoxact_guc, new_guc_nest_level, restrict_search_path};
 
     if recovery_in_progress::call() {
         return Err(err(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, "recovery is in progress".into()));
@@ -1477,7 +1477,7 @@ pub use ::brin::BrinStatsData;
 /// `brinGetStats(index, stats)` (brin.c:1648): fetch the index's statistical
 /// data from the metapage.
 pub fn brinGetStats<'mcx>(mcx: Mcx<'mcx>, index: &Relation<'mcx>) -> PgResult<BrinStatsData> {
-    use bufmgr_seams::{read_buffer, unlock_release_buffer};
+    use ::bufmgr_seams::{read_buffer, unlock_release_buffer};
     let _ = mcx;
 
     let metabuffer = read_buffer::call(index, BRIN_METAPAGE_BLKNO)?;
@@ -1544,7 +1544,7 @@ fn check_for_interrupts() -> PgResult<()> {
 /// `PageGetFreeSpace(BufferGetPage(buf))` — read the page's free space.
 fn page_get_free_space<'mcx>(_mcx: Mcx<'mcx>, buf: ::types_storage::Buffer) -> PgResult<Size> {
     use ::bufmgr_seams::with_buffer_page;
-    use page::{PageGetFreeSpace, PageRef};
+    use ::page::{PageGetFreeSpace, PageRef};
     let mut out: Size = 0;
     with_buffer_page::call(buf, &mut |page: &mut [u8]| {
         out = match PageRef::new(page) {

@@ -49,15 +49,15 @@ use execUtils_seams as execUtils;
 use postgres_seams as tcop_postgres;
 use sortsupport_seams as sortsupport;
 
-use mcx::{Mcx, MemoryContext, PgBox};
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::mcx::{Mcx, MemoryContext, PgBox};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use ::nodes::nodeagg::TupleHashEntryData;
 use ::nodes::nodesetop::{
     SetOp, SetOpStateData, SetOpStatePerGroupData, SetOpStatePerInput, SETOPCMD_EXCEPT,
     SETOPCMD_EXCEPT_ALL, SETOPCMD_INTERSECT, SETOPCMD_INTERSECT_ALL, SETOP_HASHED,
 };
-use nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
+use ::nodes::{EStateData, PlanStateNode, SlotId, TupleSlotKind};
 use ::types_sortsupport::SortSupportData;
 use ::types_tuple::heaptuple::Datum;
 

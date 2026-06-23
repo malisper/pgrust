@@ -30,7 +30,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
 
-use utils_error::{ereport, PgError, PgResult};
+use ::utils_error::{ereport, PgError, PgResult};
 use ::types_core::primitive::{Size, XLogRecPtr};
 use ::types_error::error::PANIC;
 use ::wal::rmgr::XLogReaderState;

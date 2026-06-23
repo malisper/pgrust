@@ -6,10 +6,10 @@
 //!   * [`heap_vacuum_eager_scan_setup`] (vacuumlazy.c:488) — initialize the eager
 //!     scan management fields of the [`LVRelState`].
 
-use utils_error::{ereport};
-use types_error::{ErrorLocation, INFO, LOG};
+use ::utils_error::{ereport};
+use ::types_error::{ErrorLocation, INFO, LOG};
 use ::types_vacuum::vacuumparallel::IndexBulkDeleteResult;
-use types_core::{BlockNumber, BLCKSZ};
+use ::types_core::{BlockNumber, BLCKSZ};
 use ::types_error::PgResult;
 use ::types_vacuum::vacuum::{VacOptValue, VacuumParams};
 

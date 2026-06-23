@@ -6,11 +6,11 @@
 //! then a call panics loudly. SPI plans are the opaque `SPIPlanPtr`
 //! (`struct _SPI_plan *`); snapshots cross as owned `SnapshotData` values.
 
-use mcx::{Mcx, PgString, PgVec};
-use types_core::{Oid, SubTransactionId};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::types_core::{Oid, SubTransactionId};
 use ::types_error::PgResult;
 use ::types_tuple::Datum;
-use types_ri_triggers::{ResultColumn, SpiExecResult, SpiPlanPtr};
+use ::types_ri_triggers::{ResultColumn, SpiExecResult, SpiPlanPtr};
 
 /// One row of the `ts_rewrite(query, text)` SPI result: the `target`
 /// (column 1) and `substitute` (column 2) `tsquery` datums.

@@ -17,8 +17,8 @@ use ::ts_small::cleanup::{clean_NOT, cleanup_tsquery_stopwords};
 use ::ts_small::util::{
     self, encode_record, get_operand, get_query, operand_length, QI_SIZE,
 };
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_error::{
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_error::{
     ereturn, ErrorLocation, PgError, PgResult, SoftErrorContext, ERRCODE_INVALID_PARAMETER_VALUE,
     ERRCODE_PROGRAM_LIMIT_EXCEEDED, ERRCODE_SYNTAX_ERROR, ERROR, NOTICE,
 };

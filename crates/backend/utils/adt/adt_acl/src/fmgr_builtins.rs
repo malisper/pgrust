@@ -32,10 +32,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ::types_acl::AclItem;
-use types_core::{AttrNumber, Oid};
+use ::types_core::{AttrNumber, Oid};
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use crate::has_privilege as hp;
 

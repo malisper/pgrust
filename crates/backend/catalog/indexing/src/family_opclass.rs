@@ -9,11 +9,11 @@
 //! included). Mirrors the `family_authid` no-`mcx` insert precedent: the bodies
 //! own a private `MemoryContext` and re-open the relation in it.
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_catalog::opclasscmds_catalog as oc;
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_storage::lock::RowExclusiveLock;
 use types_tuple::heaptuple::Datum;
 

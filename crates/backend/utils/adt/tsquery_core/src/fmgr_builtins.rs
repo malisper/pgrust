@@ -25,7 +25,7 @@ use std::string::{String, ToString};
 use ::datum::Datum;
 use ::types_error::PgResult;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use ::stringinfo::StringInfo;
 
 const VARHDRSZ: usize = 4;

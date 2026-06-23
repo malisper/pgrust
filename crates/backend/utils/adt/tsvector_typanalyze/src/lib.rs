@@ -59,12 +59,12 @@ use core::cmp::Ordering;
 
 use ::mcx::Mcx;
 use ::types_error::PgResult;
-use statistics::{AnalyzeAttrFetchFunc, VacAttrStats, STATISTIC_NUM_SLOTS};
+use ::statistics::{AnalyzeAttrFetchFunc, VacAttrStats, STATISTIC_NUM_SLOTS};
 use ::types_tuple::Datum;
 
 use ::types_selfuncs::STATISTIC_KIND_MCELEM;
 
-use detoast_seams::{detoast_attr, pg_varsize_any};
+use ::detoast_seams::{detoast_attr, pg_varsize_any};
 use ::vacuumlazy_seams::vacuum_delay_point;
 use ::vacuum_seams::check_for_interrupts;
 use ::tsvector_core::access::{arrptr, lexeme, tsv_size};

@@ -1,7 +1,7 @@
 //! Join-type vocabulary (`nodes/nodes.h` `JoinType`) and the `Join` plan-node
 //! base (`nodes/plannodes.h`), trimmed to what the join executor nodes consume.
 
-use mcx::{Mcx, PgBox, PgVec, vec_with_capacity_in};
+use ::mcx::{Mcx, PgBox, PgVec, vec_with_capacity_in};
 use ::types_error::PgResult;
 
 use crate::nodeindexscan::Plan;

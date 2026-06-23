@@ -28,10 +28,10 @@ extern crate alloc;
 use alloc::string::String;
 
 use ::mcx::PgString;
-use types_core::{uint8, ForkNumber, INVALID_PROC_NUMBER};
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
+use ::types_core::{uint8, ForkNumber, INVALID_PROC_NUMBER};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED};
 use ::types_storage::RelFileLocator;
-use wal::{xl_smgr_create, xl_smgr_truncate, DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{xl_smgr_create, xl_smgr_truncate, DecodedXLogRecord, XLR_INFO_MASK};
 
 use common_relpath_seams as relpath_seams;
 

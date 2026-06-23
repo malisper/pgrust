@@ -30,17 +30,17 @@
 use std::cell::RefCell;
 
 use ::utils_error::errno::current_errno;
-use utils_error::{PgError, PgResult};
+use ::utils_error::{PgError, PgResult};
 use ::types_error::PANIC;
 
-use slru::{
+use ::slru::{
     SimpleLruAutotuneBuffers, SimpleLruInit, SimpleLruReadPage, SimpleLruReadPage_ReadOnly,
     SimpleLruShmemSize, SimpleLruTruncate, SimpleLruWriteAll, SimpleLruWritePage,
     SimpleLruZeroPage, SlruCtlData, SlruScanDirCbReportPresence, SlruScanDirectory, SlruSyncFileTag,
     SlruPagePrecedesUnitTests, SLRU_MAX_ALLOWED_BUFFERS,
 };
 use ::transam::TransactionIdPrecedes;
-use lwlock::{LWLockAcquire, LWLockConditionalAcquire, LWLockRelease};
+use ::lwlock::{LWLockAcquire, LWLockConditionalAcquire, LWLockRelease};
 
 use ::init_small::globals;
 
@@ -57,12 +57,12 @@ use ::types_core::xact::{
     TRANSACTION_STATUS_ABORTED, TRANSACTION_STATUS_COMMITTED, TRANSACTION_STATUS_IN_PROGRESS,
     TRANSACTION_STATUS_SUB_COMMITTED,
 };
-use types_core::{Oid, Size, TransactionId, XLogRecPtr, BLCKSZ, INVALID_PROC_NUMBER};
+use ::types_core::{Oid, Size, TransactionId, XLogRecPtr, BLCKSZ, INVALID_PROC_NUMBER};
 use ::types_guc::guc::{PGC_POSTMASTER, PGC_S_DYNAMIC_DEFAULT, PGC_S_OVERRIDE};
 use ::types_pgstat::wait_event::WAIT_EVENT_XACT_GROUP_UPDATE;
 use ::types_storage::storage::{LWLockMode, LW_EXCLUSIVE};
 use ::types_storage::sync::{FileTag, FileTagOpResult, SyncRequestHandler};
-use types_storage::{LWTRANCHE_XACT_BUFFER, LWTRANCHE_XACT_SLRU};
+use ::types_storage::{LWTRANCHE_XACT_BUFFER, LWTRANCHE_XACT_SLRU};
 use ::wal::rmgr::XLogReaderState;
 use ::wal::rmgrdesc::xl_clog_truncate;
 use ::wal::wal::{CLOG_TRUNCATE, CLOG_ZEROPAGE, RM_CLOG_ID};

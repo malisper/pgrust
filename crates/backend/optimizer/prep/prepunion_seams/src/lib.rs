@@ -13,7 +13,7 @@
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PlannerInfo, RelId};
+use ::pathnodes::{PlannerInfo, RelId};
 
 seam_core::seam!(
     /// `plan_set_operations(root)` (prepunion.c) — construct Paths for the

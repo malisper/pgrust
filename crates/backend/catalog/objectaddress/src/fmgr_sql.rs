@@ -47,11 +47,11 @@
 //!   (`heap_form_tuple`) stays with the fcinfo caller; the value boundary
 //!   returns the resolved `ObjectAddress`.
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::OidIsValid;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 use ::nodes::parsenodes::ObjectType;
 use ::nodes::parsenodes::{
     OBJECT_ACCESS_METHOD, OBJECT_AGGREGATE, OBJECT_AMOP, OBJECT_AMPROC, OBJECT_ATTRIBUTE,
@@ -143,7 +143,7 @@ pub fn pg_get_object_address<'mcx>(
     name_arr_bytes: &[u8],
     args_arr_bytes: &[u8],
 ) -> PgResult<ObjectAddress> {
-    use parsenodes::{Float, Node, ObjectWithArgs, StringNode, TypeName};
+    use ::parsenodes::{Float, Node, ObjectWithArgs, StringNode, TypeName};
 
     // char *ttype = TextDatumGetCString(PG_GETARG_DATUM(0));
     // ArrayType *namearr = PG_GETARG_ARRAYTYPE_P(1);

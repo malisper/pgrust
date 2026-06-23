@@ -47,9 +47,9 @@ extern crate alloc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use mcx::{vec_with_capacity_in, Mcx, PgString, PgVec};
-use types_core::{InvalidOid, Oid, OidIsValid, FUNC_MAX_ARGS};
-use types_error::{
+use ::mcx::{vec_with_capacity_in, Mcx, PgString, PgVec};
+use ::types_core::{InvalidOid, Oid, OidIsValid, FUNC_MAX_ARGS};
+use ::types_error::{
     PgError, PgResult, SoftErrorContext, ERRCODE_AMBIGUOUS_FUNCTION,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_NAME, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_TOO_MANY_ARGUMENTS, ERRCODE_UNDEFINED_FUNCTION, ERRCODE_UNDEFINED_OBJECT,

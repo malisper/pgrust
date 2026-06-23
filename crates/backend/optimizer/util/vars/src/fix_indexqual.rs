@@ -18,9 +18,9 @@ use ::nodes_core::makefuncs::make_var;
 use ::nodes_core::nodefuncs::{expr_collation, expr_type};
 use ::equalfuncs_seams::equal_expr;
 use ::indxpath::operand::strip_phvs_in_index_operand;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::Expr;
-use pathnodes::{IndexOptInfo, PlannerInfo};
+use ::pathnodes::{IndexOptInfo, PlannerInfo};
 
 /// `INDEX_VAR` (primnodes.h) — the special `varno` identifying a Var that
 /// references an index column rather than a heap column.

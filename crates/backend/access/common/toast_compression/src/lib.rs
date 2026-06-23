@@ -17,10 +17,10 @@
 //! header bit-twiddling helpers mirror `varatt.h` directly (see the local
 //! helper module), matching the convention used by `backend-access-common-detoast`.
 
-use pglz::{pglz_compress, pglz_decompress_to_slice, PGLZ_MAX_OUTPUT};
-use mcx::{Mcx, PgVec};
+use ::pglz::{pglz_compress, pglz_decompress_to_slice, PGLZ_MAX_OUTPUT};
+use ::mcx::{Mcx, PgVec};
 use ::datum::VARHDRSZ;
-use types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::types_error::{PgError, PgResult, ERRCODE_DATA_CORRUPTED, ERRCODE_FEATURE_NOT_SUPPORTED};
 
 use toast_compression_seams as seams;
 

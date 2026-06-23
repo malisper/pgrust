@@ -47,7 +47,7 @@ use alloc::vec::Vec;
 use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
 use ::datum::varlena::VARHDRSZ;
-use types_error::{
+use ::types_error::{
     ereturn, PgError, PgResult, SoftErrorContext, ERRCODE_DATATYPE_MISMATCH,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_BINARY_REPRESENTATION,
     ERRCODE_INVALID_TEXT_REPRESENTATION,
@@ -58,17 +58,17 @@ use ::types_tuple::heaptuple::{
     FormData_pg_attribute, HeapTupleHeaderGetTypMod, HeapTupleHeaderGetTypeId, TupleDescData,
 };
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple};
-use pqformat::{
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple};
+use ::pqformat::{
     pq_begintypsend, pq_endtypsend, pq_getmsgbytes, pq_getmsgint, pq_sendbytes, pq_sendint32,
 };
 use ::datum_seams::datum_image_eq_v;
 use ::format_type_seams::format_type_be;
-use typcache_seams::{
+use ::typcache_seams::{
     lookup_rowtype_tupdesc, record_column_cmp, record_column_eq, record_column_hash,
     record_column_hash_extended,
 };
-use fmgr_seams::{
+use ::fmgr_seams::{
     record_column_input, record_column_output, record_column_receive, record_column_send,
 };
 use ::stack_depth_seams::check_stack_depth;

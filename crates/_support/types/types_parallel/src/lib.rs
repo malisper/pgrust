@@ -11,7 +11,7 @@
 #![no_std]
 #![allow(non_camel_case_types)]
 
-use types_core::{pid_t, Oid, ProcNumber, TimestampTz, XLogRecPtr, INVALID_PROC_NUMBER};
+use ::types_core::{pid_t, Oid, ProcNumber, TimestampTz, XLogRecPtr, INVALID_PROC_NUMBER};
 
 // ===========================================================================
 // Opaque handles for the raw `*` objects parallel.c threads through other

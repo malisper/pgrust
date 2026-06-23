@@ -2,10 +2,10 @@
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::nodes::bitmapset::Bitmapset;
 use ::nodes::primnodes::Expr;
-use pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId};
+use ::pathnodes::{IndexOptInfo, NodeId, PlannerInfo, RelId};
 
 use ::nodes_core::bitmapset::{bms_add_member, bms_is_subset, bms_union};
 use ::costsize_seams::enable_indexonlyscan;

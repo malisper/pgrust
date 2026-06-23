@@ -8,7 +8,7 @@
 use ::mcx::Mcx;
 use ::types_error::PgResult;
 use ::nodes::nodes::CmdType;
-use nodes::{EStateData, ModifyTableState, ResultRelInfo, RriId};
+use ::nodes::{EStateData, ModifyTableState, ResultRelInfo, RriId};
 use ::types_storage::lock::RowExclusiveLock;
 
 use crate::{PartitionDispatchId, PartitionTupleRouting};

@@ -27,13 +27,13 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use ::types_core::primitive::{BlockNumber, ForkNumber, RepOriginId, TransactionId};
-use types_core::{Buffer, TimeLineID, XLogRecPtr, XLogSegNo};
+use ::types_core::{Buffer, TimeLineID, XLogRecPtr, XLogSegNo};
 use ::types_error::PgResult;
 use ::types_storage::RelFileLocator;
 use ::wal::rmgr::{XLogReaderRoutine, XLogReaderState};
-use wal::{DecodedBkpBlock, ReadAheadRecordInfo};
-use types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
-use types_walsummarizer::{BlockTag, ReadRecordResult};
+use ::wal::{DecodedBkpBlock, ReadAheadRecordInfo};
+use ::types_logical::{XLogReadResult, XLogReaderHandle, XLogReaderRoutineHandle};
+use ::types_walsummarizer::{BlockTag, ReadRecordResult};
 use ::types_walsummarizer::XLogReaderHandle as SummarizerXLogReaderHandle;
 
 seam_core::seam!(

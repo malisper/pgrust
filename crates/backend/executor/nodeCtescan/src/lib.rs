@@ -48,7 +48,7 @@ use ::mcx::PgBox;
 use ::types_error::PgResult;
 use ::nodes::executor::{TupleSlotKind, EXEC_FLAG_MARK, EXEC_FLAG_REWIND};
 use ::nodes::nodectescan::{CteScan, CteScanState};
-use nodes::{EStateData, ScanDirectionIsForward, SlotId};
+use ::nodes::{EStateData, ScanDirectionIsForward, SlotId};
 
 /// Install this crate's seam implementations.
 ///

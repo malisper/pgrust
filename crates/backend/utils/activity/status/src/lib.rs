@@ -51,13 +51,13 @@
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{fence, AtomicPtr, AtomicUsize, Ordering};
 
-use ipc_shmem::{add_size, mul_size, ShmemInitStruct};
+use ::ipc_shmem::{add_size, mul_size, ShmemInitStruct};
 use ::ascii::ascii_safe_strlcpy;
 use ::utils_error::PgResult;
 use ::mbutils::pg_mbcliplen;
 
 use ::types_core::init::BackendType;
-use types_core::{
+use ::types_core::{
     int64, InvalidOid, Oid, ProcNumber, Size, TimestampTz, TransactionId, INVALID_PROC_NUMBER,
 };
 use ::net::SockAddr;

@@ -71,13 +71,13 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
 use ::types_core::primitive::{AttrNumber, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::rel::Relation;
 use types_tuple::heaptuple::Datum;
 
-use types_nbtree::{BTArrayKeyInfo, BTScanOpaqueData, BTORDER_PROC, BTMaxStrategyNumber};
+use ::types_nbtree::{BTArrayKeyInfo, BTScanOpaqueData, BTORDER_PROC, BTMaxStrategyNumber};
 use ::types_scan::scankey::{
     ScanKeyData, StrategyNumber, BTEqualStrategyNumber, BTGreaterEqualStrategyNumber,
     BTGreaterStrategyNumber, BTLessEqualStrategyNumber, BTLessStrategyNumber, InvalidStrategy,
@@ -91,7 +91,7 @@ use ::arrayfuncs_seams::deconstruct_array_values_bytes;
 use indexam_seams as indexam;
 use compare_seams as nbtcompare;
 use skipsupport_seams as skipsupport;
-use lsyscache_seams::{
+use ::lsyscache_seams::{
     get_opcode, get_opfamily_member, get_opfamily_proc, get_typlenbyvalalign,
 };
 

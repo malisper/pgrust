@@ -39,12 +39,12 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use types_catalog as cat;
 use ::types_core::fmgr::F_OIDEQ;
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
-use rel::{Relation, RelationData};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
+use ::rel::{Relation, RelationData};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::RowExclusiveLock;
 use ::types_tuple::access::{
@@ -53,7 +53,7 @@ use ::types_tuple::access::{
 use ::types_tuple::heaptuple::{Datum, FormedTuple};
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
+use ::heaptuple::{heap_deform_tuple, heap_form_tuple, heap_modify_tuple};
 use ::scankey::ScanKeyInit;
 use genam_seams as genam;
 use ::table::table_open;

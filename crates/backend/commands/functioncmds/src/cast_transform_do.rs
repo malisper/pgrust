@@ -8,33 +8,33 @@ use crate::keystone::{
     as_type_name, cache_lookup_failed_function, check_language_permissions, def_arg_str_val,
     def_name, error_conflicting_def_elem, errloc, name_list_to_string, OBJECT_FUNCTION,
 };
-use functioncmds_seams::{self as seam, CastFuncForm, TransformFuncForm};
+use ::functioncmds_seams::{self as seam, CastFuncForm, TransformFuncForm};
 use lsyscache_seams as lsyscache;
 use ::utils_error::ereport;
 use ::mcx::Mcx;
-use types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
+use ::types_acl::{ACLCHECK_NOT_OWNER, ACLCHECK_OK, ACL_EXECUTE, ACL_USAGE};
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::cache::SysCacheKey;
-use types_core::{AttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::{AttrNumber, InvalidOid, Oid, OidIsValid};
 // The syscache search-key word (`SysCacheKey::Value`) is the bare C machine
 // word (`Datum key1..key4`) — the `ByVal` payload of the canonical
 // `::types_tuple::Datum`, not the rich value enum. We reference that bare word
 // directly (aliased `ScalarWord` to make the intent explicit), matching the
 // other syscache consumers (`ts-cache`, `attoptcache`, replication `proto`).
 use ::datum::Datum as ScalarWord;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_FUNCTION, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INTERNAL_ERROR, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR, WARNING,
 };
-use parsenodes::{
+use ::parsenodes::{
     CoercionContext, CreateCastStmt, CreateTransformStmt, DefElem, DoStmt, InlineCodeBlock, Node,
     COERCION_CODE_ASSIGNMENT, COERCION_CODE_EXPLICIT, COERCION_CODE_IMPLICIT, COERCION_METHOD_BINARY,
     COERCION_METHOD_FUNCTION, COERCION_METHOD_INOUT, PROKIND_FUNCTION, PROVOLATILE_VOLATILE,
     TYPTYPE_COMPOSITE, TYPTYPE_DOMAIN, TYPTYPE_ENUM, TYPTYPE_MULTIRANGE, TYPTYPE_PSEUDO,
     TYPTYPE_RANGE,
 };
-use types_tuple::{BOOLOID, INT4OID, INTERNALOID};
+use ::types_tuple::{BOOLOID, INT4OID, INTERNALOID};
 
 // ===========================================================================
 // CreateCast (functioncmds.c:1538)

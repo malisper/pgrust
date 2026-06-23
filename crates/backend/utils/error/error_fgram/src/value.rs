@@ -1,6 +1,6 @@
 use std::fmt;
 
-use pg_ffi_fgram::{
+use ::pg_ffi_fgram::{
     ErrorField, ErrorLevel, SqlState, ERROR, PG_DIAG_COLUMN_NAME, PG_DIAG_CONSTRAINT_NAME,
     PG_DIAG_DATATYPE_NAME, PG_DIAG_SCHEMA_NAME, PG_DIAG_TABLE_NAME,
 };

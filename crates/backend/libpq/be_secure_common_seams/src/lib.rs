@@ -5,7 +5,7 @@
 //! The owning unit installs these from its `init_seams()`; until then a call
 //! panics loudly.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_error::PgResult;
 
 seam_core::seam!(

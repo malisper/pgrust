@@ -53,10 +53,10 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use mcx::{alloc_in, Mcx};
+use ::mcx::{alloc_in, Mcx};
 
-use types_core::{Index, InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_core::{Index, InvalidOid, Oid, OidIsValid};
+use ::types_error::{
     PgError, PgResult, ERRCODE_AMBIGUOUS_COLUMN, ERRCODE_GROUPING_ERROR, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_INVALID_ROW_COUNT_IN_LIMIT_CLAUSE,
     ERRCODE_SYNTAX_ERROR, ERRCODE_TOO_MANY_COLUMNS, ERRCODE_WINDOWING_ERROR,
@@ -83,7 +83,7 @@ use ::nodes_core::nodefuncs::{expr_location, expr_type, strip_implicit_coercions
 
 use ::vars::var::{contain_vars_of_level, locate_var_of_level};
 use ::parse_expr::transformExpr;
-use parse_oper::{compatible_oper_opid, get_sort_group_operators};
+use ::parse_oper::{compatible_oper_opid, get_sort_group_operators};
 
 use equalfuncs_seams as equalfuncs;
 use small1_seams as parse_node;

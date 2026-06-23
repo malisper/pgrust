@@ -1,10 +1,10 @@
 //! UPDATE target-column remapping family: `adjust_partition_colnos`,
 //! `adjust_partition_colnos_using_map`.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::primitive::AttrNumber;
-use types_error::{PgError, PgResult};
-use nodes::{EStateData, RriId};
+use ::types_error::{PgError, PgResult};
+use ::nodes::{EStateData, RriId};
 use ::types_tuple::attmap::AttrMap;
 
 /// `adjust_partition_colnos(colnos, leaf_part_rri)` — adjust an UPDATE target

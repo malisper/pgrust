@@ -28,9 +28,9 @@
 //! and is left to its own (materialized-SRF) registration.
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
-use types_core::{Oid, TimestampTz, XLogRecPtr};
+use ::types_core::{Oid, TimestampTz, XLogRecPtr};
 
 // ---------------------------------------------------------------------------
 // Argument readers / result writers.

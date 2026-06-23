@@ -19,8 +19,8 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use mcx::{Mcx, PgVec};
-use types_cluster::{
+use ::mcx::{Mcx, PgVec};
+use ::types_cluster::{
     ClusterParams, ReindexParams, CLUOPT_RECHECK, CLUOPT_RECHECK_ISCLUSTERED,
     CLUOPT_VERBOSE, PROGRESS_CLUSTER_COMMAND, PROGRESS_CLUSTER_COMMAND_CLUSTER,
     PROGRESS_CLUSTER_COMMAND_VACUUM_FULL, PROGRESS_CLUSTER_PHASE,
@@ -29,7 +29,7 @@ use types_cluster::{
     REINDEX_REL_CHECK_CONSTRAINTS, REINDEX_REL_FORCE_INDEXES_PERMANENT,
     REINDEX_REL_FORCE_INDEXES_UNLOGGED, REINDEX_REL_SUPPRESS_INDEX_USE,
 };
-use types_core::{InvalidOid, MultiXactId, Oid, TransactionId};
+use ::types_core::{InvalidOid, MultiXactId, Oid, TransactionId};
 use ::types_error::PgResult;
 use ::rel::Relation;
 use ::types_storage::lock::{
@@ -42,7 +42,7 @@ use ::types_tuple::access::{
 use ::types_catalog::catalog_dependency::{ObjectAddress, DEPENDENCY_INTERNAL};
 
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, DEBUG2, ERROR, INFO, WARNING};
+use ::types_error::{ErrorLocation, DEBUG2, ERROR, INFO, WARNING};
 
 // Owner seam crates.
 use transam_xact_seams as xact;

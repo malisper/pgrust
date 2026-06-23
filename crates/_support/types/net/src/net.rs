@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::{pgsocket, ProtocolVersion, UserAuth, PGINVALID_SOCKET};
+use ::types_core::{pgsocket, ProtocolVersion, UserAuth, PGINVALID_SOCKET};
 
 /// `SockAddr` (`libpq/pqcomm.h`). `addr` mirrors the platform
 /// `struct sockaddr_storage`, a fixed-size socket-address buffer

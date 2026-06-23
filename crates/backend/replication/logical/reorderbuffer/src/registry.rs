@@ -15,7 +15,7 @@ use core::cell::RefCell;
 use ::types_core::primitive::{ForkNumber, TransactionId, XLogRecPtr};
 use ::types_core::xact::{CommandId, InvalidCommandId};
 use ::types_error::PgResult;
-use types_logical::{ReorderBufferHandle, ReorderBufferStats, TxnHandle};
+use ::types_logical::{ReorderBufferHandle, ReorderBufferStats, TxnHandle};
 use ::snapshot::snapshot::ResolveCminCmaxResult;
 use ::snapshot::SnapshotData;
 use ::types_storage::sinval::SharedInvalidationMessage;
@@ -119,7 +119,7 @@ pub(crate) fn txn_handle_for_xid(xid: TransactionId) -> TxnHandle {
 // ---------------------------------------------------------------------------
 
 use ::types_core::Oid;
-use types_logical::{ChangeHandle, MessageHandle, PrefixHandle, RelationHandle, RelationsHandle};
+use ::types_logical::{ChangeHandle, MessageHandle, PrefixHandle, RelationHandle, RelationsHandle};
 
 /// Live values published for the in-flight output-plugin callback.
 #[derive(Default)]
@@ -769,7 +769,7 @@ pub fn init_seams() {
     // globals (`logical_decoding_work_mem` / `debug_logical_replication_streaming`).
     // The GUC machinery seeds these from boot_val during InitializeGUCOptions and
     // the eviction / streaming-decision paths read the current value back.
-    use guc_tables::{vars, GucVarAccessors};
+    use ::guc_tables::{vars, GucVarAccessors};
     vars::logical_decoding_work_mem.install(GucVarAccessors {
         get: crate::logical_decoding_work_mem,
         set: crate::set_logical_decoding_work_mem,

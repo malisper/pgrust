@@ -167,7 +167,7 @@ pub mod tags {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcx::{MemoryContext, Mcx, PgBox};
+    use ::mcx::{MemoryContext, Mcx, PgBox};
 
     // A `'mcx`-bearing test type — the exact shape that defeats `dyn Any`: it
     // borrows from the `'mcx` arena and so is not `'static`.

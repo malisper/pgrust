@@ -22,7 +22,7 @@
 use ::types_core::primitive::{Index, Oid};
 use ::types_error::PgResult;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{PathId, PlannerInfo, RelId};
+use ::pathnodes::{PathId, PlannerInfo, RelId};
 
 seam_core::seam!(
     /// `relation_excluded_by_constraints(root, rel, rte)` (plancat.c). The RTE

@@ -3,7 +3,7 @@
 
 use ::types_core::primitive::{Cost, Oid};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PathTarget, PlannerInfo, RelId};
+use ::pathnodes::{NodeId, PathTarget, PlannerInfo, RelId};
 
 use costsize_seams as cz;
 

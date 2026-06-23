@@ -22,7 +22,7 @@ extern crate alloc;
 mod tables;
 
 use ::utils_error::PgResult;
-use conv_string_helpers::{
+use ::conv_string_helpers::{
     make_conversion_builtin, ConversionResult, LocalToUtf, UtfToLocal,
 };
 use ::mbutils_seams::check_encoding_conversion_args;

@@ -36,9 +36,9 @@ extern crate alloc;
 
 use alloc::format;
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
-use types_core::{AttrNumber, Index, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
+use ::types_core::{AttrNumber, Index, InvalidAttrNumber, InvalidOid, Oid, OidIsValid};
 use ::types_core::catalog::INT4OID;
 use ::types_tuple::heaptuple::RECORDOID;
 
@@ -82,7 +82,7 @@ use ::types_error::error::{
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_COLUMN_REFERENCE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_TABLE,
 };
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 
 use ::utils_error::ereport;
 

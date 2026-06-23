@@ -27,11 +27,11 @@ extern crate alloc;
 
 mod fmgr_builtins;
 
-use pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgbyte, pq_sendbyte};
+use ::pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgbyte, pq_sendbyte};
 use ::varlena_seams::cstring_to_text;
-use mcx::{Mcx, PgString};
-use datum::{Bytea, Datum};
-use types_error::{PgError, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
+use ::mcx::{Mcx, PgString};
+use ::datum::{Bytea, Datum};
+use ::types_error::{PgError, PgResult, ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE};
 use ::stringinfo::StringInfo;
 
 // `char.c` octal helpers (char.c:24-26).

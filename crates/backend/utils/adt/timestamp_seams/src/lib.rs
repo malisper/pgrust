@@ -5,7 +5,7 @@
 //! then a call panics loudly.
 
 use ::types_core::TimestampTz;
-use types_datetime::{fsec_t, pg_itm, Interval, TimeADT, TimeTzADT, Timestamp, Timestamp2TmResult};
+use ::types_datetime::{fsec_t, pg_itm, Interval, TimeADT, TimeTzADT, Timestamp, Timestamp2TmResult};
 use ::pgtime::pg_tm;
 
 seam_core::seam!(

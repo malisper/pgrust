@@ -22,14 +22,14 @@
 use ::mcx::Mcx;
 use ::types_core::primitive::{BlockNumber, MultiXactId, Oid, TransactionId};
 use ::types_core::xact::{CommandId, InvalidCommandId};
-use types_error::{PgResult, ERRCODE_LOCK_NOT_AVAILABLE, ERROR};
+use ::types_error::{PgResult, ERRCODE_LOCK_NOT_AVAILABLE, ERROR};
 use ::utils_error::ereport;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::snapshot::snapshot::{SnapshotData, SnapshotType};
 use ::types_storage::lock::{
     XLTW_Oper, AccessExclusiveLock, AccessShareLock, ExclusiveLock, RowShareLock, LOCKMODE,
 };
-use types_storage::{Buffer, InvalidBuffer};
+use ::types_storage::{Buffer, InvalidBuffer};
 use ::types_tableam::tableam::{
     LockTupleMode, LockWaitPolicy, TM_FailureData, TM_Result,
 };
@@ -41,7 +41,7 @@ use ::types_tuple::heaptuple::{
 };
 use ::xlog_records::multixact::MultiXactStatus;
 
-use page::{
+use ::page::{
     ItemPointerEquals, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber,
     ItemPointerIndicatesMovedPartitions, PageGetItem, PageGetItemId, PageRef,
 };
@@ -50,7 +50,7 @@ use ::heapam_visibility::htup::{
     HeapTupleHeaderGetRawXmax, HEAP_LOCKED_UPGRADED, HEAP_LOCK_MASK, HEAP_XMAX_IS_LOCKED_ONLY,
 };
 use ::heapam_visibility::htup::HeapTupleHeaderGetXmin;
-use heapam_visibility::{
+use ::heapam_visibility::{
     HeapTupleHeaderGetUpdateXid, HeapTupleHeaderIsOnlyLocked, HeapTupleSatisfiesUpdate,
 };
 use ::transam::TransactionIdEquals;

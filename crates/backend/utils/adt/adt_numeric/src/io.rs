@@ -10,13 +10,13 @@
 //! Text/wire decoders allocate digit buffers, so take an explicit `Mcx<'mcx>`
 //! and return [`PgResult`] where the C `ereport`s on malformed input/overflow.
 
-use mcx::{Mcx, PgVec};
-use types_error::{
+use ::mcx::{Mcx, PgVec};
+use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_BINARY_REPRESENTATION, ERRCODE_INVALID_TEXT_REPRESENTATION,
     ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_PROTOCOL_VIOLATION,
 };
 use ::types_numeric::var::{NumericSign, NumericVar};
-use types_numeric::{
+use ::types_numeric::{
     numeric_digit_at, numeric_digits, numeric_is_nan, numeric_is_ninf, numeric_is_pinf,
     numeric_is_special, numeric_ndigits, numeric_sign, numeric_weight, NumericDigit, DEC_DIGITS,
     NBASE, NUMERIC_DSCALE_MASK, NUMERIC_WEIGHT_MAX,

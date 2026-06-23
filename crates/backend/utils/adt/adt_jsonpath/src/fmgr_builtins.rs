@@ -19,7 +19,7 @@
 
 use ::datum::Datum;
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// `VARHDRSZ` — the uncompressed 4-byte varlena length-word size.
 const VARHDRSZ: usize = 4;

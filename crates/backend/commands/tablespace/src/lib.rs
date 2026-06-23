@@ -35,14 +35,14 @@ use alloc::vec::Vec;
 
 use ::catalog_catalog::IsReservedName;
 use ::utils_error::ereport;
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_acl::acl::ACL_CREATE;
 use ::types_acl::acl::{ACLCHECK_NOT_OWNER, ACLCHECK_NO_PRIV, ACLCHECK_OK};
 use ::types_catalog::catalog::{GLOBALTABLESPACE_OID, TABLE_SPACE_RELATION_ID};
 use ::types_tuple::access::RELPERSISTENCE_TEMP;
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::Oid;
-use types_error::{
+use ::types_error::{
     ErrorLevel, ErrorLocation, PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST,
     ERRCODE_DUPLICATE_OBJECT, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
     ERRCODE_INVALID_NAME, ERRCODE_INVALID_OBJECT_DEFINITION, ERRCODE_INVALID_PARAMETER_VALUE,
@@ -57,12 +57,12 @@ use ::nodes::ddlnodes::{
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::OBJECT_TABLESPACE;
 
-use guc_tables::{vars, GucVarAccessors};
+use ::guc_tables::{vars, GucVarAccessors};
 
 use pg_tablespace_seams as cat;
 use tablespace_globals_seams as glob;
 use tblspc_fs_seams as fs;
-use tblspc_fs_seams::{StatKind, StatResult, EEXIST, ENOENT};
+use ::tblspc_fs_seams::{StatKind, StatResult, EEXIST, ENOENT};
 
 /// `NAMEDATALEN` (`catalog/pg_attribute.h`) — used by `truncate_identifier`.
 const NAMEDATALEN: usize = 64;

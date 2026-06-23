@@ -17,9 +17,9 @@ use crate::changecount::{
     pgstat_begin_changecount_write, pgstat_copy_changecounted_stats,
     pgstat_end_changecount_write,
 };
-use lwlock_seams::{lwlock_acquire, lwlock_initialize};
+use ::lwlock_seams::{lwlock_acquire, lwlock_initialize};
 use ::init_small_seams::my_proc_number;
-use pgstat_seams::{
+use ::pgstat_seams::{
     assert_is_up, shmem_is_shutdown, snapshot_fixed, with_shmem_checkpointer,
     with_snapshot_checkpointer,
 };
@@ -30,7 +30,7 @@ use ::types_pgstat::activity_pgstat::{
     PgStatShared_Checkpointer, PgStat_CheckpointerStats,
 };
 use ::types_pgstat::pgstat_internal::{PgStat_ShmemControl, PgStat_Snapshot};
-use types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
+use ::types_storage::{LWTRANCHE_PGSTATS_DATA, LW_EXCLUSIVE, LW_SHARED};
 
 pub use ::types_pgstat::activity_pgstat::PGSTAT_KIND_CHECKPOINTER;
 

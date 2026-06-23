@@ -22,9 +22,9 @@
 #![allow(non_snake_case)]
 #![allow(clippy::result_large_err)]
 
-use error_fgram::{ereport, ErrorLocation, PgResult, ERRCODE_NAME_TOO_LONG, NOTICE};
-use mb_fgram::{pg_database_encoding_max_length, pg_mbcliplen};
-use mmgr_fgram::{palloc, MemoryContextScope};
+use ::error_fgram::{ereport, ErrorLocation, PgResult, ERRCODE_NAME_TOO_LONG, NOTICE};
+use ::mb_fgram::{pg_database_encoding_max_length, pg_mbcliplen};
+use ::mmgr_fgram::{palloc, MemoryContextScope};
 use core::ffi::c_int;
 use ::pg_ffi_fgram::NAMEDATALEN;
 
@@ -176,7 +176,7 @@ impl<'ctx> PgIdentifier<'ctx> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use error_fgram::{set_report_sink, unpack_sqlstate, PgError};
+    use ::error_fgram::{set_report_sink, unpack_sqlstate, PgError};
     use ::mb_fgram::SetDatabaseEncoding;
     use ::mmgr_fgram::OwnedMemoryContext;
     use std::sync::Mutex;

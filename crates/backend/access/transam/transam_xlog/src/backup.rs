@@ -22,9 +22,9 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use utils_error::{ereport, PgResult};
-use types_core::{TimeLineID, XLogRecPtr, MAXPGPATH};
-use types_error::{
+use ::utils_error::{ereport, PgResult};
+use ::types_core::{TimeLineID, XLogRecPtr, MAXPGPATH};
+use ::types_error::{
     ErrorLocation, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
     ERROR, LOG, NOTICE, WARNING,
 };

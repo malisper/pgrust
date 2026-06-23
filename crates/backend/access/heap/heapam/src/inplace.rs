@@ -18,13 +18,13 @@
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{Oid, TransactionId};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
 use ::utils_error::ereport;
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_storage::lock::{InplaceUpdateTupleLock, XLTW_Oper};
-use types_storage::{Buffer, RelFileLocator};
+use ::types_storage::{Buffer, RelFileLocator};
 use ::types_tableam::tableam::{LockTupleMode, TM_Result};
 use ::types_tuple::heaptuple::{
     HeapTupleData, HeapTupleField3, HeapTupleFields, HeapTupleHeaderChoice, HeapTupleHeaderData,
@@ -33,7 +33,7 @@ use ::types_tuple::heaptuple::{
 };
 use ::xlog_records::multixact::MultiXactStatus;
 
-use page::{
+use ::page::{
     ItemPointerEquals, ItemPointerGetBlockNumber, ItemPointerGetOffsetNumber, ItemPointerIsValid,
     PageGetItem, PageGetItemId, PageGetMaxOffsetNumber, PageIsAllVisible, PageMut, PageRef,
     PageSetPrunable,

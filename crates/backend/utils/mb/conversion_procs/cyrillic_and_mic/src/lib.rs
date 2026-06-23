@@ -31,7 +31,7 @@
 mod tables;
 
 use ::utils_error::PgResult;
-use conv_string_helpers::{
+use ::conv_string_helpers::{
     latin2mic, latin2mic_with_table, local2local, make_conversion_builtin, mic2latin,
     mic2latin_with_table, ConversionResult,
 };

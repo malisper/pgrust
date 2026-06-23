@@ -9,9 +9,9 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{Oid, OidIsValid, InvalidOid};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{Oid, OidIsValid, InvalidOid};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
 use ::hash::hash::{
     HASHEXTENDED_PROC, HASHOPTIONS_PROC, HASHSTANDARD_PROC, HTEqualStrategyNumber,
     HTMaxStrategyNumber,

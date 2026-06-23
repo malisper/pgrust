@@ -32,11 +32,11 @@
 
 use alloc::format;
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_acl::acl::{
     AclMode, ACL_DELETE, ACL_INSERT, ACL_NO_RIGHTS, ACL_SELECT, ACL_UPDATE,
 };
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DUPLICATE_ALIAS, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_SYNTAX_ERROR, ERROR,
 };
 use ::nodes::copy_query::Query;

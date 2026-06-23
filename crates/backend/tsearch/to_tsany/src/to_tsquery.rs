@@ -4,7 +4,7 @@
 
 use alloc::vec::Vec;
 
-use parse::{parsetext, ParsedText};
+use ::parse::{parsetext, ParsedText};
 use ::tsquery_core::tsquery::{parse_tsquery_with_pushval, QueryBuilder};
 use ::ts_cache::getTSCurrentConfig;
 use ::mcx::Mcx;

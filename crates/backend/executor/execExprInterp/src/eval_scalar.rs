@@ -31,7 +31,7 @@
 //! step-payload reads and control flow that the owned model can already express
 //! are written out faithfully.
 
-use fmgr_seams::{
+use ::fmgr_seams::{
     function_call_invoke_datum, function_call_invoke_datum_resolved, function_call_invoke_datum_soft,
 };
 // The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
@@ -47,7 +47,7 @@ use types_tuple::heaptuple::Datum as DatumV;
 fn word_of(v: &DatumV<'_>) -> Datum {
     Datum::from_usize(v.as_usize())
 }
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_NOT_NULL_VIOLATION,
 };

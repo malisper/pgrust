@@ -3,7 +3,7 @@
 use crate::appendf;
 use ::mcx::PgString;
 use ::types_error::PgResult;
-use wal::{DecodedXLogRecord, XLR_INFO_MASK};
+use ::wal::{DecodedXLogRecord, XLR_INFO_MASK};
 use ::xlog_records::spgxlog::{spgxlogAddLeaf, spgxlogAddNode, spgxlogMoveLeafs,
                                   spgxlogPickSplit, spgxlogSplitTuple, spgxlogVacuumLeaf,
                                   spgxlogVacuumRedirect, spgxlogVacuumRoot};

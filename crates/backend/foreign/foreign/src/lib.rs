@@ -22,19 +22,19 @@
 //! `UserMapping` carriers retain their `options` (`(name, value)` pairs decoded
 //! by `untransformRelOptions`), as the C structs do.
 
-use mcx::{Mcx, PgString};
-use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::mcx::{Mcx, PgString};
+use ::types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_error::{
     PgError, PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR,
     ERRCODE_UNDEFINED_OBJECT,
 };
 use types_tuple::heaptuple::Datum;
-use types_foreigncmds::{
+use ::types_foreigncmds::{
     ForeignDataWrapper, ForeignServer, ForeignTable, ImportForeignSchemaStmt, UserMapping,
     FDW_IMPORT_SCHEMA_ALL, FDW_IMPORT_SCHEMA_EXCEPT, FDW_IMPORT_SCHEMA_LIMIT_TO,
 };
 use ::nodes::fmgr::FunctionCallInfoBaseData;
-use nodes::{FdwRoutine, ForeignScanState};
+use ::nodes::{FdwRoutine, ForeignScanState};
 
 use fdwapi_seams as fdwapi;
 use foreign_seams as inward;
@@ -904,13 +904,13 @@ pub fn GetExistingLocalJoinPath(
  * ======================================================================== */
 
 use ::mcx::MemoryContext;
-use types_foreigncmds::{
+use ::types_foreigncmds::{
     DefElem, DefElemArg, ForeignDataWrapperRelationId as FdwRelationId,
     ForeignServerRelationId as SrvRelationId, ForeignTableRelationId as FtRelationId,
     UserMappingRelationId as UmRelationId, FdwOwnerRow, FdwUpdateRow, ImportRawStmt, RawStmtHandle,
     ServerOwnerRow, ServerUpdateRow,
 };
-use types_foreigncmds::{
+use ::types_foreigncmds::{
     Anum_pg_foreign_data_wrapper_oid, Anum_pg_foreign_server_oid, Anum_pg_user_mapping_oid,
     ForeignDataWrapperOidIndexId, ForeignServerOidIndexId, PgForeignDataWrapperInsertRow,
     PgForeignDataWrapperUpdateRow, PgForeignServerInsertRow, PgForeignServerUpdateRow,

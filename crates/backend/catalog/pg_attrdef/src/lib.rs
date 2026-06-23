@@ -17,7 +17,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(clippy::result_large_err)]
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
 use ::types_catalog::catalog::RELATION_RELATION_ID;
 use ::types_catalog::catalog_dependency::{
@@ -29,7 +29,7 @@ use ::types_catalog::pg_attrdef::{
 };
 use ::types_core::fmgr::{F_INT2EQ, F_OIDEQ};
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::Node;
 use ::nodes::parsenodes::DropBehavior;
 use ::rel::RelationData;

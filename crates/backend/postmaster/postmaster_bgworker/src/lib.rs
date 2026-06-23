@@ -36,14 +36,14 @@ use std::sync::Mutex;
 use ::utils_error::emit_error_report_for;
 use ::error_seams::ereport;
 use ::types_error::ErrorLocation;
-use types_bgworker::{
+use ::types_bgworker::{
     BackgroundWorker, BackgroundWorkerHandle, BgWorkerStartTime, BgwHandleStatus,
     RegisteredBgWorker, BGWORKER_BACKEND_DATABASE_CONNECTION, BGWORKER_BYPASS_ALLOWCONN,
     BGWORKER_BYPASS_ROLELOGINCHECK, BGWORKER_CLASS_PARALLEL, BGWORKER_SHMEM_ACCESS, BGW_EXTRALEN,
     BGW_MAXLEN, BGW_NEVER_RESTART, INVALID_PID,
 };
-use types_core::{pid_t, uint32, uint64, Size, MAXPGPATH};
-use types_error::{
+use ::types_core::{pid_t, uint32, uint64, Size, MAXPGPATH};
+use ::types_error::{
     PgError, PgResult, DEBUG1, ERROR, ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
     ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
     FATAL, LOG,

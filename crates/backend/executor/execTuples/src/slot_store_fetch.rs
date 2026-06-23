@@ -11,7 +11,7 @@
 
 use ::mcx::Mcx;
 use ::types_core::primitive::Size;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::tuptable::{SlotData, TTS_FLAG_SHOULDFREE};
 use ::nodes::TupleSlotKind;
 use ::types_storage::buf::{Buffer, BufferIsValid};

@@ -19,16 +19,16 @@
 
 use std::cell::RefCell;
 
-use mcx::{Mcx, McxOwned, MemoryContext, PgHashMap, PgVec};
+use ::mcx::{Mcx, McxOwned, MemoryContext, PgHashMap, PgVec};
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
-use types_evtcache::{EventTriggerCacheItem, EventTriggerEvent};
+use ::types_error::{PgError, PgResult};
+use ::types_evtcache::{EventTriggerCacheItem, EventTriggerEvent};
 use types_tuple::heaptuple::Datum;
 
 use ::heaptuple::heap_deform_tuple;
 use genam_seams as genam_seams;
 use indexam_seams as indexam_seams;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use nodes_core_seams as bms_seams;
 use ::cmdtag::get_command_tag_enum;
 use arrayfuncs_seams as array_seams;

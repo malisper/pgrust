@@ -13,7 +13,7 @@
 //! accumulators — so it is borrowed `&mut` across module boundaries. It carries
 //! the arena `Mcx` so subroutines can allocate new accumulator vectors / nodes.
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::nodes::nodes::Node;

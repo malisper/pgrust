@@ -2,13 +2,13 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Once;
 
-use mcx::{MemoryContext, PgString};
-use types_core::{
+use ::mcx::{MemoryContext, PgString};
+use ::types_core::{
     InvalidOid, Oid, UserContext, INVALID_PROC_NUMBER, MAX_CANCEL_KEY_LENGTH, PG_DIR_MODE_OWNER,
     SECURITY_LOCAL_USERID_CHANGE, SECURITY_RESTRICTED_OPERATION, USER_CONTEXT_NO_NEST_LEVEL,
     USE_ISO_DATES,
 };
-use types_error::{PgError, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERROR};
+use ::types_error::{PgError, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_UNDEFINED_OBJECT, ERROR};
 use ::types_storage::latch::Latch;
 
 use crate::globals;

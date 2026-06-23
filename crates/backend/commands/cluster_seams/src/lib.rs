@@ -10,7 +10,7 @@
 
 use ::mcx::Mcx;
 use ::types_cluster::ClusterParams;
-use types_core::{MultiXactId, Oid, TransactionId};
+use ::types_core::{MultiXactId, Oid, TransactionId};
 use ::types_error::PgResult;
 use ::rel::Relation;
 use ::types_storage::lock::LOCKMODE;

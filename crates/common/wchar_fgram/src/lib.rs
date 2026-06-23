@@ -15,7 +15,7 @@
 )]
 
 use libc::{memchr, strnlen};
-pub use pg_ffi_fgram::{
+pub use ::pg_ffi_fgram::{
     mb2wchar_with_len_converter, mbchar_verifier, mbdisplaylen_converter, mbinterval,
     mblen_converter, mbstr_verifier, pg_enc, pg_wchar, pg_wchar_tbl, wchar2mb_with_len_converter,
     PG_BIG5, PG_EUC_CN, PG_EUC_JIS_2004, PG_EUC_JP, PG_EUC_KR, PG_EUC_TW, PG_GB18030, PG_GBK,

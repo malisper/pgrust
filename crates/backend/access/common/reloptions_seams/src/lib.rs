@@ -11,7 +11,7 @@
 
 use ::types_core::Oid;
 use ::types_error::PgResult;
-use types_reloptions::{local_relopts, AttributeOpts, RdOptions, TableSpaceOpts};
+use ::types_reloptions::{local_relopts, AttributeOpts, RdOptions, TableSpaceOpts};
 
 seam_core::seam!(
     /// `extractRelOptions(tuple, GetPgClassDescriptor(), amoptsfn)` (reloptions.c),

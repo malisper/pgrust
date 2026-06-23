@@ -35,12 +35,12 @@
 use core::cmp::Ordering;
 
 use ::spg_proc_seams::spg_key_orderbys_distances;
-use geo_ops_seams::{
+use ::geo_ops_seams::{
     box_above, box_below, box_contain, box_contained, box_left, box_overabove, box_overbelow,
     box_overlap, box_overleft, box_overright, box_right, box_same, FPge, FPgt, FPle, FPlt, HYPOT,
 };
 use ::types_core::geo::{Point, SpgKey, BOX};
-use types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{ErrorLocation, PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 
 // ===========================================================================
 // Constants

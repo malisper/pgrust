@@ -21,10 +21,10 @@
 //! [`free_page_manager_initialize`], whose managed pages are not concurrently
 //! mutated (in Postgres, callers hold the segment's lock).
 
-use mcx::{Mcx, PgString};
+use ::mcx::{Mcx, PgString};
 use ::types_core::Size;
-use types_error::{PgError, PgResult, FATAL};
-use types_freepage::{FreePageManager, RelPtr, FPM_NUM_FREELISTS, FPM_PAGE_SIZE};
+use ::types_error::{PgError, PgResult, FATAL};
+use ::types_freepage::{FreePageManager, RelPtr, FPM_NUM_FREELISTS, FPM_PAGE_SIZE};
 
 /// Magic numbers to identify various page types.
 const FREE_PAGE_SPAN_LEADER_MAGIC: u32 = 0xea40_20f0;

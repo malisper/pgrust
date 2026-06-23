@@ -16,7 +16,7 @@
 //! disposition as [`SigDisposition`] (whose `Error` variant is C's `SIG_ERR`,
 //! excluded from the input by construction).
 
-pub use signal::{SigDisposition, SigHandler};
+pub use ::signal::{SigDisposition, SigHandler};
 
 /// Install this crate's seams. The unit is a leaf with no inward seam
 /// declarations, so there is nothing to `set()`.

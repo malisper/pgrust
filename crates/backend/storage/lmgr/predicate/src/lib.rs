@@ -29,7 +29,7 @@ pub use internals::{
 pub use serial::CheckPointPredicate;
 
 use ::types_core::primitive::{BlockNumber, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::snapshot::snapshot::SnapshotData;
 
 // ---------------------------------------------------------------------------
@@ -287,7 +287,7 @@ pub fn init_seams() {
     // directly and `max_predicate_locks_per_xact` via the NPREDICATELOCKTARGETENTS
     // macro.
     {
-        use guc_tables::{vars, GucVarAccessors};
+        use ::guc_tables::{vars, GucVarAccessors};
         vars::serializable_buffers.install(GucVarAccessors {
             get: globals::serializable_buffers,
             set: globals::set_serializable_buffers,

@@ -6,7 +6,7 @@
 //! `backend-access-brin-xlog`; both move to this crate's ownership once the
 //! redo crate is re-pointed.
 
-use page::{PageInit, PageMut};
+use ::page::{PageInit, PageMut};
 use ::utils_error::PgResult;
 use ::types_core::primitive::{BlockNumber, BLCKSZ};
 use ::types_storage::bufpage::SizeOfPageHeaderData;

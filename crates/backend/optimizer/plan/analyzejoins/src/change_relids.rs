@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 
 use ::nodes::nodes::Node;
 use ::nodes::primnodes::Expr;
-use pathnodes::{EmId, NodeId, PlannerInfo, RinfoId};
+use ::pathnodes::{EmId, NodeId, PlannerInfo, RinfoId};
 
 use ::rewrite_core::change::ChangeVarNodes;
 

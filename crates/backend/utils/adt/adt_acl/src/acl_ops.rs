@@ -17,8 +17,8 @@
 
 extern crate alloc;
 
-use mcx::{Mcx, PgVec};
-use types_acl::{
+use ::mcx::{Mcx, PgVec};
+use ::types_acl::{
     AclItem, AclMaskHow, AclMode, ACLITEM_ALL_GOPTION_BITS, ACL_ID_PUBLIC, ACL_INSERT,
     ACL_NO_RIGHTS, ACL_SELECT, ACL_UPDATE, ACL_DELETE, ACL_TRUNCATE, ACL_REFERENCES, ACL_TRIGGER,
     ACL_EXECUTE, ACL_USAGE, ACL_CREATE, ACL_CREATE_TEMP, ACL_CONNECT, ACL_SET, ACL_ALTER_SYSTEM,
@@ -26,7 +26,7 @@ use types_acl::{
 };
 use ::types_acl::AclMaskHow::{AclmaskAll as ACLMASK_ALL, AclmaskAny as ACLMASK_ANY};
 use ::types_core::Oid;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_INVALID_GRANT_OPERATION, ERRCODE_INVALID_PARAMETER_VALUE,
 };

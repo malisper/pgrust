@@ -33,10 +33,10 @@ extern crate alloc;
 /// + `panic_any` ereport dispatch), unlike the `no_std` value cores above.
 pub mod fmgr_builtins;
 
-use pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgtext};
-use mcx::{Mcx, PgString, PgVec};
-use datum::{Bytea, Datum};
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::pqformat::{pq_begintypsend, pq_endtypsend, pq_getmsgtext};
+use ::mcx::{Mcx, PgString, PgVec};
+use ::datum::{Bytea, Datum};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
 use ::types_rangetypes::RangeTypeP;
 use ::stringinfo::StringInfo;
 

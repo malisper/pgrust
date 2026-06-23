@@ -13,7 +13,7 @@
 //! the caller passes the owned `PartitionKeyData` / `PartitionBoundInfoData`
 //! views; the support functions dispatch by their stored lookup key.
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::Oid;
 use ::types_error::PgResult;
 use ::nodes::ddlnodes::PartitionBoundSpec;

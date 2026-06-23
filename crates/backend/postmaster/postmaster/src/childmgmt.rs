@@ -12,9 +12,9 @@
 
 #![allow(non_snake_case)]
 
-use pmchild::{PMChild, SetActiveChildBkendType, ActiveChildListSnapshot};
-use utils_error::{ereport};
-use types_error::{DEBUG3, DEBUG4};
+use ::pmchild::{PMChild, SetActiveChildBkendType, ActiveChildListSnapshot};
+use ::utils_error::{ereport};
+use ::types_error::{DEBUG3, DEBUG4};
 
 use crate::core::{
     btmask_contains, pm, pm_mut, BackendTypeMask, StartupStatusEnum, B_BACKEND, B_LOGGER,

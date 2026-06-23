@@ -59,7 +59,7 @@ use alloc::vec::Vec;
 
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     JoinDomain, JoinlistNode, PlannerInfo, Relids, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL,
     JOIN_INNER, JOIN_LEFT, JOIN_SEMI,
 };

@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::ptr::{self, NonNull};
 
-use error_fgram::{PgError, PgResult};
-use pg_ffi_fgram::{
+use ::error_fgram::{PgError, PgResult};
+use ::pg_ffi_fgram::{
     MemoryChunk, MemoryContext, MemoryContextCounters, MemoryContextData, MemoryContextMethods,
     MemoryStatsPrintFunc, Size, MAX_ALLOC_HUGE_SIZE, MAX_ALLOC_SIZE, MCTX_GENERATION_ID,
     MCXT_ALLOC_HUGE, MCXT_ALLOC_NO_OOM, MCXT_ALLOC_ZERO, MEMORYCHUNK_MAX_BLOCKOFFSET,

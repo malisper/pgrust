@@ -164,7 +164,7 @@ pub fn pg_timezone_abbrevs_abbrevs_rows() -> types_error::PgResult<Vec<ZoneAbbre
 #[cfg(test)]
 mod tests {
     use super::*;
-    use types_datetime::{DTZ, DYNTZ, TZ};
+    use ::types_datetime::{DTZ, DYNTZ, TZ};
     use ::misc_more2::TzEntry;
 
     fn entry(abbrev: &str, zone: Option<&str>, offset: i32, is_dst: bool) -> TzEntry {

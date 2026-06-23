@@ -5,8 +5,8 @@
 //! Incremental sort is an optimized variant of multikey sort for cases when the
 //! input is already sorted by a prefix of the sort keys.
 
-use mcx::{Mcx, PgBox, PgVec};
-use types_core::{AttrNumber, Oid};
+use ::mcx::{Mcx, PgBox, PgVec};
+use ::types_core::{AttrNumber, Oid};
 use ::types_error::PgResult;
 use ::execparallel::SerializeCursor;
 use ::types_slot::SlotData;

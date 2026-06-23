@@ -18,7 +18,7 @@
 
 use alloc::vec::Vec;
 
-use mcx::{PgBox, PgVec};
+use ::mcx::{PgBox, PgVec};
 
 use crate::execnodes::PlanStateData;
 use crate::nodeindexscan::Plan;

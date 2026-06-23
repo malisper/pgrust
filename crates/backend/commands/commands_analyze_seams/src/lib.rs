@@ -19,7 +19,7 @@ use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::nodes::rawnodes::RangeVar;
 use ::rel::Relation;
-use statistics::{AnalyzeAttrFetchFunc, VacAttrStats};
+use ::statistics::{AnalyzeAttrFetchFunc, VacAttrStats};
 use ::types_storage::buf::BufferAccessStrategy;
 use ::types_vacuum::vacuum::VacuumParams;
 

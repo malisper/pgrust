@@ -13,7 +13,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use types_core::{MultiXactId, Oid, RelFileNumber, TransactionId};
+use ::types_core::{MultiXactId, Oid, RelFileNumber, TransactionId};
 
 /* ----------------------------------------------------------------
  * catalog/pg_class.h: the writable pg_class row copy swap_relation_files

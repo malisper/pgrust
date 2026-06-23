@@ -38,10 +38,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::{Index, Oid};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::{Const, Expr, NullTest, NullTestType, OR_EXPR};
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{
+use ::pathnodes::{
     OuterJoinClauseInfo, PlannerInfo, Relids, RestrictInfo, RinfoId, SpecialJoinInfo, JOIN_ANTI,
     JOIN_FULL,
 };

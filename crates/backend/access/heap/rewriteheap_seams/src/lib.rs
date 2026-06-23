@@ -33,7 +33,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use std::collections::HashMap;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::{BlockNumber, MultiXactId, Oid, XLogRecPtr};
 use ::types_core::TransactionId;
 use ::types_error::PgResult;

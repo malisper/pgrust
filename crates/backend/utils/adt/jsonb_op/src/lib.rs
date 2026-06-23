@@ -25,13 +25,13 @@
 
 extern crate alloc;
 
-use jsonb_util::{
+use ::jsonb_util::{
     compareJsonbContainers, findJsonbValueFromContainer, jbvType, json_container_is_object,
     json_container_size, JsonbDeepContains, JsonbHashScalarValue, JsonbHashScalarValueExtended,
     JsonbIteratorInit, JsonbIteratorNext, JsonbIteratorToken, JsonbValue, JsonbValueData,
     JB_FARRAY, JB_FOBJECT,
 };
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 
 // ---------------------------------------------------------------------------
 // Root-container helpers (C: JB_ROOT_COUNT / JB_ROOT_IS_OBJECT).

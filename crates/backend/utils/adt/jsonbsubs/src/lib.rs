@@ -42,12 +42,12 @@
 //! `OidFunctionCall0(F_JSONB_SUBSCRIPT_HANDLER)`.
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use types_jsonb::jsonb_util::{JsonbValue, JsonbValueData};
 use ::types_jsonb::jsonb::jbvType;
 use types_tuple::heaptuple::Datum as DatumV;
 
-use jsonb_util::{JsonbToJsonbValue, JsonbValueToJsonb};
+use ::jsonb_util::{JsonbToJsonbValue, JsonbValueToJsonb};
 use ::adt_jsonfuncs::getfield::jsonb_get_element;
 use ::adt_jsonfuncs::setops::jsonb_set_element;
 

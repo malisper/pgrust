@@ -15,7 +15,7 @@ use std::sync::Once;
 use std::vec::Vec;
 
 use super::*;
-use jsonb_util::{JsonbValueToJsonb, VARHDRSZ};
+use ::jsonb_util::{JsonbValueToJsonb, VARHDRSZ};
 use ::tsvector_ext_seams::ArrayElem;
 
 static INSTALL: Once = Once::new();

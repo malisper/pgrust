@@ -24,16 +24,16 @@
 
 use std::cell::{Cell, RefCell};
 
-use lwlock::{LWLockAcquireMain, MainLWLockGuard};
-use utils_error::{elog, ereport};
-use mcx::{Mcx, PgVec};
+use ::lwlock::{LWLockAcquireMain, MainLWLockGuard};
+use ::utils_error::{elog, ereport};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Size;
 use ::datum::Datum;
-use types_error::{
+use ::types_error::{
     ErrorLocation, PgResult, DEBUG1, DEBUG2, ERRCODE_INSUFFICIENT_RESOURCES, ERROR, LOG, WARNING,
 };
-use types_freepage::{FreePageManager, FPM_PAGE_SIZE};
-use types_storage::{
+use ::types_freepage::{FreePageManager, FPM_PAGE_SIZE};
+use ::types_storage::{
     dsm_handle, PGShmemHeader, DSM_HANDLE_INVALID, DYNAMIC_SHARED_MEMORY_CONTROL_LOCK,
     LW_EXCLUSIVE,
 };
@@ -45,7 +45,7 @@ use crate::dsm_impl::{
 };
 use crate::ipc::on_shmem_exit;
 
-use freepage_seams::{
+use ::freepage_seams::{
     free_page_manager_get, free_page_manager_initialize, free_page_manager_put,
 };
 

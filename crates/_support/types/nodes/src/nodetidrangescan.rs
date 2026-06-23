@@ -1,6 +1,6 @@
 //! `TidRangeScan` plan-node vocabulary (nodes/plannodes.h), trimmed.
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 use ::rel::Relation;
 use ::types_tableam::relscan::TableScanDesc;

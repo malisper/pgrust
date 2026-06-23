@@ -39,9 +39,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ::types_core::primitive::Cost;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::pathnodes::optimizer_plan::CostSelector;
-use pathnodes::{Path, PathId, PathKey, PathNode, PlannerInfo, RelId, Relids};
+use ::pathnodes::{Path, PathId, PathKey, PathNode, PlannerInfo, RelId, Relids};
 
 use pathnode_seams as seam;
 use relnode_seams as bms;

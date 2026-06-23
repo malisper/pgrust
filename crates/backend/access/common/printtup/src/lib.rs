@@ -52,14 +52,14 @@
 #![allow(clippy::too_many_arguments)]
 
 use ::mcx::Mcx;
-use types_core::{FmgrInfo, Oid};
+use ::types_core::{FmgrInfo, Oid};
 use ::types_dest::dest::CommandDest;
-use types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, PgError};
+use ::types_error::{PgResult, ERRCODE_INVALID_PARAMETER_VALUE, PgError};
 use ::nodes::tuptable::SlotData;
 use ::stringinfo::StringInfo;
 use ::types_tuple::heaptuple::{FormData_pg_attribute, TupleDescData};
 
-use pqformat::{
+use ::pqformat::{
     pq_beginmessage_reuse, pq_endmessage_reuse, pq_sendbytes, pq_sendcountedtext, pq_sendint16,
     pq_sendint32, pq_sendstring,
 };

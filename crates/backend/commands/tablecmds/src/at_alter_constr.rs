@@ -12,11 +12,11 @@
 //! the inheritability path (NOT NULL `connoinherit` child propagation), and
 //! recursion into partition children faithfully seam-and-panic.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_catalog::pg_constraint::{CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL};
 use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_OBJECT, ERRCODE_WRONG_OBJECT_TYPE, ERROR};
 use ::nodes::ddlnodes::ATAlterConstraint;
 use ::rel::Relation;
 use ::types_storage::lock::{LOCKMODE, NoLock, RowExclusiveLock};
@@ -28,7 +28,7 @@ use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 
 use ::common_relation::relation_open;
 use ::objectaddress::consts::{ConstraintRelationId, TriggerRelationId};
-use pg_constraint::{AlterConstrFlags, AlterConstrUpdateConstraintEntry};
+use ::pg_constraint::{AlterConstrFlags, AlterConstrUpdateConstraintEntry};
 use lsyscache_seams as lsyscache_seams;
 use ::utils_error::ereport;
 

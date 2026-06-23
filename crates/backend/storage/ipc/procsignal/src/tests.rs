@@ -8,7 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::sync::{Mutex, MutexGuard, Once};
 
-use types_storage::{ProcSignalBarrierType, ProcSignalReason, NUM_AUXILIARY_PROCS};
+use ::types_storage::{ProcSignalBarrierType, ProcSignalReason, NUM_AUXILIARY_PROCS};
 
 use super::*;
 

@@ -12,10 +12,10 @@
 
 use relcache_seams as sx;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::{AttrNumber, Oid, RegProcedure};
-use types_core::{MultiXactId, SubTransactionId, TransactionId};
-use types_error::{PgError, PgResult};
+use ::types_core::{MultiXactId, SubTransactionId, TransactionId};
+use ::types_error::{PgError, PgResult};
 
 /// Install every relcache seam. Called once from `seams-init::init_all`.
 pub fn init_seams() {

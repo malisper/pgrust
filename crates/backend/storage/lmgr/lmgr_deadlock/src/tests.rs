@@ -3,7 +3,7 @@ use ::types_error::ERRCODE_T_R_DEADLOCK_DETECTED;
 use std::cell::Cell;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use types_deadlock::{LockMethodData, LockSlot, ProcLockSlot, ProcSlot};
+use ::types_deadlock::{LockMethodData, LockSlot, ProcLockSlot, ProcSlot};
 use ::types_storage::lock::{
     AccessExclusiveLock, ExclusiveLock, ShareLock, DEFAULT_LOCKMETHOD, LOCKMODE, LOCKTAG,
     LOCKTAG_RELATION, MAX_LOCKMODES,
@@ -11,7 +11,7 @@ use ::types_storage::lock::{
 use ::types_storage::storage::PROC_IS_AUTOVACUUM;
 
 use ::lmgr_seams::describe_lock_tag;
-use lock_seams::{get_lock_method_table, get_lockmode_name};
+use ::lock_seams::{get_lock_method_table, get_lockmode_name};
 use ::lmgr_proc_seams::proc_lock_wakeup;
 use ::stat_seams::report_deadlock;
 use ::status_seams::backend_current_activity;

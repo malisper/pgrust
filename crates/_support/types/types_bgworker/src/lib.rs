@@ -6,7 +6,7 @@
 
 #![no_std]
 
-use types_core::{pid_t, Oid, TimestampTz, MAXPGPATH};
+use ::types_core::{pid_t, Oid, TimestampTz, MAXPGPATH};
 
 /// `BGWORKER_SHMEM_ACCESS` — worker wants shared-memory access. Required of all
 /// workers (a worker without it is rejected by `SanityCheckBackgroundWorker`).

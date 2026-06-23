@@ -3,9 +3,9 @@
 //! The owning unit installs these from its `init_seams()` when it lands; until
 //! then a call panics loudly.
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 use ::types_cash::CashLconv;
-use types_core::{Oid, PgWChar};
+use ::types_core::{Oid, PgWChar};
 use ::types_error::PgResult;
 use ::locale::PgLocale;
 

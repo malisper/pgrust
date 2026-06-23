@@ -8,14 +8,14 @@
 //! `build_hash_projections_and_exprs`) is built on the grouping-equal + hash
 //! builders, so its seams land here.
 
-use mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, PgBox, PgVec};
 use ::types_core::catalog::PROCEDURE_RELATION_ID;
 use ::types_core::fmgr::FmgrInfo;
-use types_core::{AttrNumber, Oid};
+use ::types_core::{AttrNumber, Oid};
 // The canonical unified value type (Datum-unification keystone) — what
 // `ExprEvalStepData::HashDatumInitValue { init_value }` carries.
 use ::types_tuple::heaptuple::Datum;
-use types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
+use ::types_error::{PgError, PgResult, ERRCODE_INTERNAL_ERROR};
 use ::nodes::execexpr::{
     ExprEvalOp, ExprEvalStep, ExprEvalStepData, ExprState, LastAttnumInfo, ResultCell,
     ResultCellId, VarReturningType, EEO_FLAG_IS_QUAL, STATE_RESULT_CELL,
@@ -39,11 +39,11 @@ use crate::execExpr_core as core;
 use aclchk_seams as aclchk;
 use ::cache::typcache::{DOM_CONSTRAINT_CHECK, DOM_CONSTRAINT_NOTNULL};
 use objectaccess_seams as objectaccess;
-use execExpr_seams::{CombiningOpInfo, CombiningTestExpr};
+use ::execExpr_seams::{CombiningOpInfo, CombiningTestExpr};
 use lsyscache_seams as lsyscache;
 use fmgr_seams as fmgr_seam;
 use miscinit_seams as miscinit;
-use types_acl::{ACLCHECK_OK, ACL_EXECUTE};
+use ::types_acl::{ACLCHECK_OK, ACL_EXECUTE};
 
 // ===========================================================================
 // Spine primitives — local mirrors of the `execExpr_core` arena helpers.

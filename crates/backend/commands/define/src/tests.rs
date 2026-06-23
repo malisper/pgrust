@@ -7,7 +7,7 @@
 
 use super::*;
 use ::mcx::MemoryContext;
-use parsenodes::{Boolean, DefElem, Float, Integer};
+use ::parsenodes::{Boolean, DefElem, Float, Integer};
 
 fn defelem(arg: Option<Node>) -> DefElem {
     DefElem {

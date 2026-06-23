@@ -27,13 +27,13 @@ use tablesample_core_seams as tsm;
 use nodeSamplescan_seams as seam;
 use ::mcx::vec_with_capacity_in;
 use ::datum::datum::Datum;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INVALID_TABLESAMPLE_ARGUMENT, ERRCODE_INVALID_TABLESAMPLE_REPEAT,
     ERRCODE_OUT_OF_MEMORY,
 };
 use ::nodes::execnodes::{EStateData, ScanStateData};
 use ::nodes::executor::TTS_FLAG_EMPTY;
-use samplescan::{SampleScan, SampleScanState, TableSampleClause};
+use ::samplescan::{SampleScan, SampleScanState, TableSampleClause};
 
 // ===========================================================================
 // Internal access/recheck method types.

@@ -27,18 +27,18 @@
 use std::cell::{Cell, RefCell};
 
 use ::utils_error::ereport;
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 
 use matview_deps_seams as seam;
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::Oid;
 use ::types_core::xact::CommandId;
 use ::types_dest::CommandDest;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_FEATURE_NOT_SUPPORTED,
     ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_SYNTAX_ERROR, ERROR,
 };
-use types_matview::{CommandTag, IndexUsabilityInfo, QueryCompletion, RefreshMatViewStmt};
+use ::types_matview::{CommandTag, IndexUsabilityInfo, QueryCompletion, RefreshMatViewStmt};
 use ::nodes::copy_query::Query;
 use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
@@ -51,8 +51,8 @@ use ::types_tableam::tableam::BulkInsertStateData;
 use ::types_tuple::access::{RELKIND_MATVIEW, RELPERSISTENCE_TEMP};
 use ::types_tuple::heaptuple::{MaxHeapAttributeNumber, TupleDescData};
 
-use indexam::{index_close, index_open};
-use table::{table_close, table_open};
+use ::indexam::{index_close, index_open};
+use ::table::{table_close, table_open};
 
 /// `RelationRelationId` — `pg_class` OID (`catalog/pg_class.h`).
 const RelationRelationId: Oid = 1259;

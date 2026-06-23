@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use ilist::{dlist_head, dlist_node};
+use ::ilist::{dlist_head, dlist_node};
 
 /// `dlist_node_init(node)`.
 #[inline]

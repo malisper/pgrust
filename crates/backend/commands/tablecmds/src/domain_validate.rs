@@ -24,7 +24,7 @@
 use ::mcx::Mcx;
 
 use ::types_core::primitive::{AttrNumber, Oid, OidIsValid};
-use types_error::{PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_NOT_NULL_VIOLATION, ERROR};
+use ::types_error::{PgResult, ERRCODE_CHECK_VIOLATION, ERRCODE_NOT_NULL_VIOLATION, ERROR};
 use ::rel::Relation;
 use ::types_storage::lock::{LOCKMODE, NoLock, ShareLock};
 use ::types_tuple::access::{RELKIND_MATVIEW, RELKIND_RELATION};

@@ -5,10 +5,10 @@
 
 use ::mcx::Mcx;
 use ::types_core::xact::CommandId;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_CARDINALITY_VIOLATION, ERRCODE_T_R_SERIALIZATION_FAILURE,
 };
-use nodes::{EStateData, ModifyTableState, RriId, SlotId};
+use ::nodes::{EStateData, ModifyTableState, RriId, SlotId};
 use ::rel::Relation;
 use ::types_tableam::tableam::{
     LockTupleMode, Snapshot, TM_FailureData, TM_Result,

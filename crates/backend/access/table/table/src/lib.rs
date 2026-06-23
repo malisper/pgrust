@@ -18,7 +18,7 @@
 
 use ::mcx::Mcx;
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
+use ::types_error::{PgError, PgResult, ERRCODE_WRONG_OBJECT_TYPE};
 use ::rel::Relation;
 use ::types_storage::lock::{LOCKMODE, NoLock};
 use ::types_tuple::access::{

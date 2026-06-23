@@ -17,13 +17,13 @@
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use parse::{ParsedText, ParsedWord};
+use ::parse::{ParsedText, ParsedWord};
 use ::tsvector_core::access::{
     set_tsv_size, set_varsize, shortalign, strptr_off, SIZEOF_NPOS, SIZEOF_WEP, SIZEOF_WORDENTRY,
 };
 use ::tsearch::tsearch::DATAHDRSIZE;
 use ::utils_error::ereport;
-use types_error::{PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
+use ::types_error::{PgResult, ERRCODE_PROGRAM_LIMIT_EXCEEDED};
 use ::tsearch::tsearch::{WordEntry, WordEntryPos, LIMITPOS, MAXENTRYPOS, MAXNUMPOS, MAXSTRPOS};
 
 /// `compareWORD(a, b)` (to_tsany.c:57): order by `tsCompareString` over the

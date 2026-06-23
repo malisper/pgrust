@@ -45,11 +45,11 @@ use nodes_core_seams as bitmapset;
 use ipc_shm_toc_seams as shm_toc;
 use postgres_seams as tcop_postgres;
 
-use mcx::{alloc_in, PgBox};
-use types_error::{PgError, PgResult};
+use ::mcx::{alloc_in, PgBox};
+use ::types_error::{PgError, PgResult};
 use ::nodes::executor::{EXEC_FLAG_BACKWARD, EXEC_FLAG_MARK};
 use ::nodes::nodes::{CmdType, Node};
-use nodes::{
+use ::nodes::{
     AsyncRequestData, EStateData, ForeignScan, ForeignScanState, ParallelContext,
     ParallelWorkerContext, PlanStateNode, SlotId, TupleSlotKind,
 };

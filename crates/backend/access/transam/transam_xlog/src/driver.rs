@@ -21,7 +21,7 @@
 extern crate std;
 
 use ::utils_error::PgResult;
-use types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
+use ::types_core::{pg_time_t, TimeLineID, XLogRecPtr, XLogSegNo};
 use ::types_storage::storage::{LW_EXCLUSIVE, LW_SHARED};
 use ::wal::xlog_consts::{RecoveryState, XLOG_BLCKSZ};
 

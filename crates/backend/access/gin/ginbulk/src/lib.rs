@@ -31,14 +31,14 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::cmp::Ordering;
 
-use rbtree::{rbt_begin_iterate, rbt_create_with, rbt_insert, rbt_iterate, RBTOrderControl, RBTree};
+use ::rbtree::{rbt_begin_iterate, rbt_create_with, rbt_insert, rbt_iterate, RBTOrderControl, RBTree};
 use bufmgr_seams as bufmgr;
 use ::utils_error::PgResult;
 
 use ::mcx::Mcx;
 use ::types_core::primitive::{BlockNumber, ForkNumber, OffsetNumber};
 use ::types_error::PgError;
-use gin::{GinNullCategory, GinState, GinStatsData, GIN_CAT_NORM_KEY, GIN_LEAF};
+use ::gin::{GinNullCategory, GinState, GinStatsData, GIN_CAT_NORM_KEY, GIN_LEAF};
 use ::rel::Relation;
 use ::nodes::execnodes::IndexInfo;
 use ::types_tableam::amapi::IndexBuildResult;
@@ -46,7 +46,7 @@ use ::types_tuple::heaptuple::Datum;
 use ::types_tuple::heaptuple::ItemPointerData;
 
 use ::core_probe::ginpostinglist::ginCompareItemPointers;
-use ginutil::{
+use ::ginutil::{
     ginCompareAttEntries, ginExtractEntries, GinInitBuffer, GinInitMetabuffer, GinNewBuffer,
     ginUpdateStats, initGinState,
 };

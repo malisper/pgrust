@@ -3,18 +3,18 @@
 //! `InitPartitionPruneContext`, `InitExecPartitionPruneContexts`,
 //! `ExecFindMatchingSubPlans`, `find_matching_subplans_recurse`.
 
-use mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
+use ::mcx::{alloc_in, slice_in, vec_with_capacity_in, Mcx, MemoryContext, PgBox, PgVec};
 use ::types_core::primitive::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::executor::EXEC_FLAG_EXPLAIN_GENERIC;
 use ::nodes::partition::{
     PartitionDescData, PartitionKeyData, PartitionPruneContext, PartitionPruneState,
     PartitionPruningData, PartitionedRelPruningData,
 };
 use ::nodes::primnodes::Expr;
-use nodes::{Bitmapset, EStateData, EcxtId, Opaque, PlanStateData};
+use ::nodes::{Bitmapset, EStateData, EcxtId, Opaque, PlanStateData};
 
-use execUtils::{CreateExprContext, ExecGetRangeTableRelation};
+use ::execUtils::{CreateExprContext, ExecGetRangeTableRelation};
 use nodes_core_seams as bms;
 use partitioning_core_seams as partdesc_seams;
 use partprune_seams as partprune_seams;

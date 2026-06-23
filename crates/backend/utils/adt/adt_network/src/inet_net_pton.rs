@@ -18,7 +18,7 @@
 use core::error::Error;
 use core::fmt;
 
-use types_network::{PGSQL_AF_INET, PGSQL_AF_INET6};
+use ::types_network::{PGSQL_AF_INET, PGSQL_AF_INET6};
 
 /// `NS_IN6ADDRSZ` — size of an IPv6 address in bytes.
 pub const NS_IN6ADDRSZ: usize = 16;

@@ -31,7 +31,7 @@ use ::nodes::nodes::CmdType;
 use ::nodes::parsestmt::DestReceiverHandle;
 use ::nodes::tuptable::SlotData;
 use ::types_tuple::heaptuple::TupleDescData;
-use types_xml::{SpiColumn, SpiResult, SpiRow};
+use ::types_xml::{SpiColumn, SpiResult, SpiRow};
 
 /// One raw column value retained from a received row: the bare-word datum value
 /// (pass-by-value codec word; `0` for SQL NULL), the is-null flag, and — for a

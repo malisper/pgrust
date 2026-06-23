@@ -145,7 +145,7 @@ seam_core::seam!(
 // ---------------------------------------------------------------------------
 
 use core::cell::RefCell;
-use types_logical::{MemoryContextHandle, StringInfoHandle};
+use ::types_logical::{MemoryContextHandle, StringInfoHandle};
 
 struct LogicalMcxtStore {
     /// Live StringInfo buffers, keyed by handle id (handle.0). Index 0 is

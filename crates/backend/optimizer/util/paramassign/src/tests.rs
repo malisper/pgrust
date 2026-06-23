@@ -2,7 +2,7 @@
 
 use super::*;
 use alloc::boxed::Box;
-use pathnodes::{PlannerGlobal, PlannerInfo};
+use ::pathnodes::{PlannerGlobal, PlannerInfo};
 
 fn empty_root() -> PlannerInfo {
     let mut root = PlannerInfo::default();

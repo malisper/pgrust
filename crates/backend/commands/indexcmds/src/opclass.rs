@@ -9,13 +9,13 @@
 use alloc::format;
 use alloc::string::String;
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 
-use types_amapi::{CompareType, COMPARE_CONTAINED_BY, COMPARE_EQ, COMPARE_OVERLAP};
+use ::types_amapi::{CompareType, COMPARE_CONTAINED_BY, COMPARE_EQ, COMPARE_OVERLAP};
 use ::types_core::fmgr::F_OIDEQ;
 use ::types_core::primitive::Oid;
-use types_core::{InvalidOid, OidIsValid};
-use types_error::{PgError, PgResult};
+use ::types_core::{InvalidOid, OidIsValid};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::NodePtr;
 use ::types_scan::scankey::{BTEqualStrategyNumber, InvalidStrategy, ScanKeyData, StrategyNumber};
 use ::types_storage::lock::AccessShareLock;
@@ -30,11 +30,11 @@ use ::heaptuple::heap_deform_tuple;
 use ::scankey::ScanKeyInit;
 use ::index_amapi::IndexAmTranslateCompareType;
 use genam_seams as genam_seams;
-use table::{table_close, table_open};
-use catalog_namespace::{
+use ::table::{table_close, table_open};
+use ::catalog_namespace::{
     DeconstructQualifiedName, LookupExplicitNamespace, NameListToString, OpclassnameGetOpcid,
 };
-use coerce::{IsBinaryCoercible, IsPreferredType, TypeCategory};
+use ::coerce::{IsBinaryCoercible, IsPreferredType, TypeCategory};
 use ::types_catalog::opclasscmds_catalog::{
     Anum_pg_opclass_oid, Anum_pg_opclass_opcdefault, Anum_pg_opclass_opcintype,
     Anum_pg_opclass_opcmethod, OpclassAmNameNspIndexId, OperatorClassRelationId,

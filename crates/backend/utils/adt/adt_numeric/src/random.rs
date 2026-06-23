@@ -10,10 +10,10 @@
 
 use ::mcx::Mcx;
 use ::prng::PgPrng;
-use types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_PARAMETER_VALUE};
 
 use ::types_numeric::var::{NumericSign, NumericVar};
-use types_numeric::{
+use ::types_numeric::{
     numeric_is_nan, numeric_is_special, NumericDigit, DEC_DIGITS, NBASE,
 };
 

@@ -41,8 +41,8 @@ use ::nodes_core::makefuncs::{
     make_andclause, make_bool_const, make_notclause, make_orclause,
 };
 use ::mcx::Mcx;
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 use ::nodes::primnodes::{
     BoolTestType, BooleanTest, Expr, NullTest, NullTestType, AND_EXPR, NOT_EXPR, OR_EXPR,
 };

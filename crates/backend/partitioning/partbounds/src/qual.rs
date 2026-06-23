@@ -22,12 +22,12 @@
 //! `BTEqualStrategyNumber` operator the C evaluates, with no behavioral
 //! difference for the immutable Const bounds a range partition carries.
 
-use mcx::{Mcx, PgBox};
+use ::mcx::{Mcx, PgBox};
 use ::types_core::primitive::{Oid, OidIsValid};
 
 /// `RECORDOID` (pg_type.h) — the pseudo-type for an anonymous record.
 const RECORDOID: Oid = 2249;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::ddlnodes::{PartitionBoundSpec, PartitionRangeDatum};
 use ::nodes::nodes::Node;
 use ::nodes::partition::{

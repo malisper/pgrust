@@ -11,7 +11,7 @@
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_core::primitive::{AttrNumber, Oid};
 use types_tuple::heaptuple::Datum;
 use ::types_error::PgResult;

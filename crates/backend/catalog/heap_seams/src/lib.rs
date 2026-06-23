@@ -5,7 +5,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_cluster::RelOptionsToken;
 use ::types_core::primitive::{Oid, RelFileNumber, TransactionId};
 use ::types_error::PgResult;

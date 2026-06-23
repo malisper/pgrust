@@ -39,9 +39,9 @@
 //! naming the dispatch seam if a future `FunctionCallNColl` ever reaches it.
 
 use ::datum::Datum;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::fmgr::boundary::RefPayload;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 use ::tsearch::tsgistidx::SignTsVector;
 
 /// `VARHDRSZ` — the uncompressed varlena length-word size, in bytes.

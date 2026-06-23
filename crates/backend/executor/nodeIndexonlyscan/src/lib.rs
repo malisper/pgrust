@@ -45,12 +45,12 @@ use predicate_seams as predicate;
 use postgres_seams as tcop_postgres;
 
 use ::mcx::Mcx;
-use types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
-use execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
+use ::types_error::{PgError, PgResult, ERRCODE_FEATURE_NOT_SUPPORTED};
+use ::execparallel::{ParallelContextHandle, ParallelWorkerContextHandle, PlanStateHandle};
 use ::nodes::nodeindexonlyscan::{
     IndexOnlyScan, IndexOnlyScanState, ParallelIndexScanDescHandle,
 };
-use nodes::{EStateData, InvalidBuffer, SlotId, TupleSlotKind};
+use ::nodes::{EStateData, InvalidBuffer, SlotId, TupleSlotKind};
 use ::types_scan::sdir::ScanDirection;
 
 /// `EXEC_FLAG_EXPLAIN_ONLY` (`executor/executor.h`) — "EXPLAIN, no ANALYZE".

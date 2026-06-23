@@ -16,8 +16,8 @@
 use std::sync::atomic::Ordering;
 
 use ::utils_error::PgResult;
-use types_core::{pgsocket, Oid, TimeLineID};
-use types_walreceiver::{
+use ::types_core::{pgsocket, Oid, TimeLineID};
+use ::types_walreceiver::{
     WalRcvExecResult as ResHandle, WalRcvExecStatus, WalRcvResultTupslot as TupslotHandle,
     WalRcvStreamOptions as SeamStreamOptions, WalReceiverConn as ConnHandle,
 };

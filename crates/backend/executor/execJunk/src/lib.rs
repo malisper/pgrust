@@ -31,9 +31,9 @@ extern crate alloc;
 
 use ::execTuples::exectype_tupoutput::ExecCleanTypeFromTL;
 use execTuples_seams as execTuples;
-use mcx::{alloc_in, vec_with_capacity_in, Mcx};
+use ::mcx::{alloc_in, vec_with_capacity_in, Mcx};
 use ::types_core::primitive::{AttrNumber, InvalidAttrNumber};
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::executor::TupleSlotKind;
 use ::nodes::execnodes::{EStateData, JunkFilter, SlotId};
 use ::nodes::nodes::T_JunkFilter;

@@ -6,7 +6,7 @@
 // words; the still-shim `exec_sub_plan` seam hands back a bare word that crosses
 // into the canonical by-value arm.
 use types_tuple::heaptuple::Datum;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::execexpr::{ExprEvalStepData, ExprState};
 use ::nodes::execnodes::EcxtId;
 use ::nodes::nodes::CmdType;

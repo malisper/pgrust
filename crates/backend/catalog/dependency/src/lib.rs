@@ -42,7 +42,7 @@
 //! C's `ObjectAddresses *` pointer thread. Within this crate the engine uses
 //! owned `ObjectAddresses` values too.
 
-use mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
+use ::mcx::{vec_with_capacity_in, Mcx, MemoryContext, PgVec};
 
 use ::types_catalog::catalog::{
     ACCESS_METHOD_OPERATOR_RELATION_ID as AccessMethodOperatorRelationId,
@@ -90,11 +90,11 @@ use ::types_catalog::catalog_dependency::{
 };
 use ::types_core::fmgr::{F_INT4EQ, F_OIDEQ};
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid};
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_DEPENDENT_OBJECTS_STILL_EXIST, DEBUG2, ERROR, NOTICE,
 };
 use ::nodes::parsenodes::{DropBehavior, DROP_CASCADE, DROP_RESTRICT};
-use rel::{Relation, RelationData};
+use ::rel::{Relation, RelationData};
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
 use ::types_storage::lock::{
     AccessExclusiveLock, RowExclusiveLock, ShareUpdateExclusiveLock, LOCKMODE,
@@ -106,7 +106,7 @@ use ::heaptuple::heap_deform_tuple;
 use ::scankey::ScanKeyInit;
 use genam_seams as genam_seams;
 use table as table;
-use utils_error::{ereport, elog};
+use ::utils_error::{ereport, elog};
 use ::types_error::ErrorLocation;
 
 // Outward owner seams.

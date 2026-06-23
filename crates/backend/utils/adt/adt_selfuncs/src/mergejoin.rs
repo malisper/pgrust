@@ -24,9 +24,9 @@ use ::types_core::primitive::{InvalidOid, Oid, OidIsValid};
 use ::types_error::PgResult;
 use ::nodes::primnodes::Expr;
 use ::pathnodes::planner_run::PlannerRun;
-use pathnodes::{NodeId, PlannerInfo};
+use ::pathnodes::{NodeId, PlannerInfo};
 use types_tuple::heaptuple::Datum as DatumV;
-use types_selfuncs::{
+use ::types_selfuncs::{
     AttStatsSlot, VariableStatData, ATTSTATSSLOT_NUMBERS, ATTSTATSSLOT_VALUES,
 };
 

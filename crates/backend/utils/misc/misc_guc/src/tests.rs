@@ -10,8 +10,8 @@
 use std::sync::Mutex;
 
 use ::types_core::BOOTSTRAP_SUPERUSERID;
-use types_error::{ErrorLevel, ERROR};
-use types_guc::{PGC_POSTMASTER, PGC_SIGHUP, PGC_S_OVERRIDE, PGC_USERSET};
+use ::types_error::{ErrorLevel, ERROR};
+use ::types_guc::{PGC_POSTMASTER, PGC_SIGHUP, PGC_S_OVERRIDE, PGC_USERSET};
 
 use crate::live::{
     get_bool, get_int, get_real, get_enum, initialize_guc_options, is_initialized, set_config_option_global,
@@ -52,7 +52,7 @@ fn install_once() {
         // Hook slots the report test's `application_name` SET reaches: install
         // trivial accept-everything bodies (the real hooks live in their
         // owners). check accepts; assign is a no-op.
-        use guc_tables::{hooks, vars, GucVarAccessors};
+        use ::guc_tables::{hooks, vars, GucVarAccessors};
         use std::sync::atomic::Ordering;
         hooks::check_application_name.install(|_v, _e, _s| Ok(true));
         hooks::assign_application_name.install(|_v, _e| {});

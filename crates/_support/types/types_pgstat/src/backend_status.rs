@@ -4,7 +4,7 @@
 
 use core::sync::atomic::AtomicU32;
 
-use types_core::{int64, Oid};
+use ::types_core::{int64, Oid};
 
 use crate::backend_progress::{ProgressCommandType, PGSTAT_NUM_PROGRESS_PARAM};
 

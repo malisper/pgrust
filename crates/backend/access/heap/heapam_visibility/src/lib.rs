@@ -28,7 +28,7 @@ use ::types_core::primitive::{Size, TransactionId, XLogRecPtr};
 use ::types_core::xact::{
     FirstNormalTransactionId, InvalidCommandId, InvalidTransactionId,
 };
-use types_core::{CommandId, InvalidOid};
+use ::types_core::{CommandId, InvalidOid};
 use ::types_error::PgResult;
 use ::types_storage::buf::BufferIsValid;
 use ::types_storage::storage::Buffer;

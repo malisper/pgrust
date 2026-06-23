@@ -10,7 +10,7 @@
 use ::types_core::primitive::{
     BlockNumber, OffsetNumber, RegProcedure, BLCKSZ, InvalidBlockNumber,
 };
-use types_core::{uint16, uint32};
+use ::types_core::{uint16, uint32};
 use ::types_core::primitive::BufferIsValid;
 use ::types_storage::storage::{Buffer, InvalidBuffer};
 use ::types_tuple::heaptuple::ItemPointerData;

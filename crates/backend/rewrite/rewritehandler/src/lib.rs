@@ -37,10 +37,10 @@
 //! contract collapse is a separate hard STOP (see crate notes / DESIGN_DEBT
 //! TD-REWRITEHANDLER-RULELOCK).
 
-use mcx::{Mcx, PgBox, PgString};
+use ::mcx::{Mcx, PgBox, PgString};
 
 use ::types_core::InvalidOid;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERROR,
 };
 

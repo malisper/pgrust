@@ -10,8 +10,8 @@
 //! (owned by xlogrecovery / xlog); per AGENTS.md they are passed in as explicit
 //! parameters rather than read through an ambient getter seam.
 
-use mcx::{Mcx, PgVec};
-use types_core::{TimeLineID, XLogRecPtr};
+use ::mcx::{Mcx, PgVec};
+use ::types_core::{TimeLineID, XLogRecPtr};
 use ::types_error::PgResult;
 use ::wal::TimeLineHistoryEntry;
 

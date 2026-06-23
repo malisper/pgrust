@@ -19,9 +19,9 @@
 //! installs the `get_default_opclass` seam declared on this crate's seam unit.
 
 use syscache_seams as syscache_seams;
-use mcx::{Mcx, MemoryContext, PgString};
-use types_core::{InvalidOid, Oid};
-use types_error::{PgError, PgResult};
+use ::mcx::{Mcx, MemoryContext, PgString};
+use ::types_core::{InvalidOid, Oid};
+use ::types_error::{PgError, PgResult};
 
 /// `get_opclass_input_type(opclass)` (lsyscache.c): the opclass's `opcintype`.
 ///

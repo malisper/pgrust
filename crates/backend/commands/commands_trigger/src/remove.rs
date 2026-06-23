@@ -2,11 +2,11 @@
 //! the per-class `OCLASS_TRIGGER` drop handler `dependency.c`'s `doDeletion`
 //! invokes for a `pg_trigger` object.
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_catalog::pg_trigger as pt;
 use ::types_core::fmgr::F_OIDEQ;
 use ::types_core::Oid;
-use types_error::{
+use ::types_error::{
     PgError, PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_WRONG_OBJECT_TYPE, ERROR,
 };
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};

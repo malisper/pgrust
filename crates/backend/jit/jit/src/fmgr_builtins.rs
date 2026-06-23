@@ -8,7 +8,7 @@
 //! / strict / retset are transcribed exactly from `pg_proc.dat`.
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 /// A scratch context for cores that take an `Mcx`.
 fn scratch_mcx() -> mcx::MemoryContext {

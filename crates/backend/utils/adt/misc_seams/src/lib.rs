@@ -6,7 +6,7 @@
 //!
 //! Each defaults to a loud panic until the underlying substrate lands.
 
-use mcx::{Mcx, PgVec};
+use ::mcx::{Mcx, PgVec};
 use ::types_core::Oid;
 use ::types_error::PgResult;
 use ::adt_misc::CatalogForeignKeyRow;

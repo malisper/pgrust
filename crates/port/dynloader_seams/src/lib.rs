@@ -8,7 +8,7 @@
 //! crosses the idiomatic surface — the runtime maps it to/from an integer
 //! [`LibraryHandle`](::types_dfmgr::LibraryHandle) token.
 
-use types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen};
+use ::types_dfmgr::{FileIdentity, LibraryHandle, LibraryOpen};
 use ::types_error::PgResult;
 use ::fmgr::LoadedExternalFunc;
 use ::types_logical::CallbackInvocation;

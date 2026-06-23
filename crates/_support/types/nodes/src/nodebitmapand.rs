@@ -10,7 +10,7 @@
 
 use alloc::vec::Vec;
 
-use mcx::{Mcx, PgBox, PgVec};
+use ::mcx::{Mcx, PgBox, PgVec};
 use ::types_error::PgResult;
 
 use crate::execnodes::PlanStateData;

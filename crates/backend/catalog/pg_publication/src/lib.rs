@@ -37,7 +37,7 @@
 
 mod fmgr_builtins;
 
-use mcx::{Mcx, PgBox, PgString, PgVec};
+use ::mcx::{Mcx, PgBox, PgString, PgVec};
 
 use ::types_catalog::catalog_dependency::{
     DEPENDENCY_AUTO, DEPENDENCY_NORMAL, InvalidObjectAddress, ObjectAddress,
@@ -60,7 +60,7 @@ use ::types_catalog::pg_publication::{
 use ::types_core::catalog::FirstNormalObjectId;
 use ::types_core::fmgr::{F_BOOLEQ, F_CHAREQ, F_OIDEQ};
 use ::types_core::primitive::{AttrNumber, Oid};
-use types_error::{
+use ::types_error::{
     ERROR, PgError, PgResult, ERRCODE_DUPLICATE_OBJECT, ERRCODE_INVALID_COLUMN_REFERENCE,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_UNDEFINED_COLUMN,
 };
@@ -78,7 +78,7 @@ use types_tuple::heaptuple::{Datum, FormedTuple};
 use ::heaptuple::heap_form_tuple;
 use ::utils_error::ereport;
 use ::scankey::ScanKeyInit;
-use catalog_catalog::{GetNewOidWithIndex, IsCatalogNamespace, IsCatalogRelation,
+use ::catalog_catalog::{GetNewOidWithIndex, IsCatalogNamespace, IsCatalogRelation,
     IsCatalogRelationOid, IsToastNamespace};
 use ::dependency::recordDependencyOnSingleRelExpr;
 use ::indexing::keystone::CatalogTupleInsert;
@@ -93,7 +93,7 @@ use nodes_core_seams as bms;
 use ::outfuncs::nodeToString;
 use ::inval::cache_invalidate::CacheInvalidateRelcacheByRelid;
 use lsyscache_seams as lsyscache;
-use cache_syscache::{
+use ::cache_syscache::{
     SearchSysCache1, SearchSysCache2, SearchSysCacheExists, SearchSysCacheList1, SysCacheGetAttr,
 };
 use ::cache::syscache::SysCacheKey;

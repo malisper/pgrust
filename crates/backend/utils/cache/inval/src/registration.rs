@@ -3,8 +3,8 @@
 //! `Prepare[Inplace]InvalidationState`).
 
 use ::mcx::Mcx;
-use types_core::{primitive::OidIsValid, Oid};
-use types_error::{PgError, PgResult};
+use ::types_core::{primitive::OidIsValid, Oid};
+use ::types_error::{PgError, PgResult};
 
 use transam_xact_seams as xact_seams;
 use relcache_seams as relcache_seams;

@@ -17,13 +17,13 @@
 
 use ::utils_error::ereport;
 use ::mcx::MemoryContext;
-use types_error::{PgResult, ERROR};
-use portal::{
+use ::types_error::{PgResult, ERROR};
+use ::portal::{
     CommandTag, FetchDirection, Portal, CURSOR_OPT_NO_SCROLL, CURSOR_OPT_SCROLL,
 };
 use ::types_resowner::ResourceOwner;
 
-use spi_seams::{TsRewriteResult, TsRewriteRow};
+use ::spi_seams::{TsRewriteResult, TsRewriteRow};
 
 use crate::backbone::{SPI_connect, SPI_finish};
 use crate::dest_spi::{create_spi_dest_receiver, take_spi_raw_result};

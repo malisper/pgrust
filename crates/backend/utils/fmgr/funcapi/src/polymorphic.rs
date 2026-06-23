@@ -6,8 +6,8 @@
 //! `TupleDesc`, and classify a type OID into a [`TypeFuncClass`].
 
 use ::utils_error::ereport;
-use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{
+use ::types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_error::{
     PgResult, ERRCODE_DATATYPE_MISMATCH, ERRCODE_INTERNAL_ERROR, ERRCODE_UNDEFINED_OBJECT, ERROR,
 };
 use ::nodes::funcapi::{PolymorphicActuals, TypeFuncClass};

@@ -17,10 +17,10 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
-use mcx::{vec_with_capacity_in, Mcx, PgVec};
-use types_core::{InvalidOid, Oid, OidIsValid};
-use types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
-use types_nbtree::{BTMaxStrategyNumber, BTORDER_PROC, BTOPTIONS_PROC};
+use ::mcx::{vec_with_capacity_in, Mcx, PgVec};
+use ::types_core::{InvalidOid, Oid, OidIsValid};
+use ::types_error::{PgError, PgResult, ERRCODE_INVALID_OBJECT_DEFINITION, INFO};
+use ::types_nbtree::{BTMaxStrategyNumber, BTORDER_PROC, BTOPTIONS_PROC};
 
 // The opclass-form / member-row mirror types carried across the syscache seams
 // live in `types-hash` (shared by every AM validator); re-export so callers and

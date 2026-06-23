@@ -14,7 +14,7 @@
 //! the catalog mid-call); that maps onto `fcinfo->isnull` here.
 
 use ::datum::Datum;
-use fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
+use ::fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 
 use ::types_core::Oid;
 

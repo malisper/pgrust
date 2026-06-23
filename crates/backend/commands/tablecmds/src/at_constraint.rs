@@ -26,11 +26,11 @@
 #![allow(non_snake_case)]
 #![allow(clippy::too_many_arguments)]
 
-use mcx::{Mcx, PgString, PgVec};
+use ::mcx::{Mcx, PgString, PgVec};
 
 use ::types_catalog::catalog_dependency::ObjectAddress;
 use ::types_core::primitive::{AttrNumber, InvalidOid, Oid, OidIsValid};
-use types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERROR};
+use ::types_error::{PgResult, ERRCODE_INVALID_TABLE_DEFINITION, ERROR};
 use ::nodes::ddlnodes::{
     AlterTableCmd, AlterTableType, Constraint, ConstrType, IndexStmt,
 };
@@ -41,7 +41,7 @@ use ::types_storage::lock::{AccessShareLock, LOCKMODE, NoLock};
 use ::common_relation::relation_open;
 use ::transam_xact::CommandCounterIncrement;
 use ::objectaddress::consts::ConstraintRelationId;
-use pg_inherits::{find_all_inheritors, find_inheritance_children};
+use ::pg_inherits::{find_all_inheritors, find_inheritance_children};
 use ::stack_depth::check_stack_depth;
 
 use crate::at_phase::{

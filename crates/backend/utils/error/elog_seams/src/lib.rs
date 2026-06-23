@@ -5,7 +5,7 @@
 
 #![allow(non_snake_case)]
 
-use types_error::{ErrorLevel, PgResult};
+use ::types_error::{ErrorLevel, PgResult};
 
 seam_core::seam!(
     /// `ereport(elevel, (errmsg("..."), [errdetail("...")]))` for the

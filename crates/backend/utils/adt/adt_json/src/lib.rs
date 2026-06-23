@@ -43,7 +43,7 @@ pub mod fmgr_builtins;
 
 use alloc::string::String;
 
-use mcx::{Mcx, PgString, PgVec, MAX_ALLOC_SIZE};
+use ::mcx::{Mcx, PgString, PgVec, MAX_ALLOC_SIZE};
 use ::types_core::Oid;
 // The canonical unified value type (`::types_tuple::Datum<'mcx>`, the ByVal/ByRef
 // enum — the faithful idiomatic substitute for C's `Datum`).
@@ -69,15 +69,15 @@ use ::types_error::error::{
     ERRCODE_ARRAY_SUBSCRIPT_ERROR, ERRCODE_DUPLICATE_JSON_OBJECT_KEY_VALUE, ERRCODE_INTERNAL_ERROR,
     ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_NULL_VALUE_NOT_ALLOWED, ERRCODE_PROGRAM_LIMIT_EXCEEDED,
 };
-use types_error::{PgError, PgResult, SoftErrorContext};
-use types_json::{JsonParseErrorType, JsonTokenType, JsonTypeCategory};
+use ::types_error::{PgError, PgResult, SoftErrorContext};
+use ::types_json::{JsonParseErrorType, JsonTokenType, JsonTypeCategory};
 use ::types_tuple::heaptuple::{DATEOID, TIMESTAMPOID, TIMESTAMPTZOID};
 
 use jsonapi_seams as jsonapi;
 use hashfn_seams as hashfn;
 use jsonfuncs_seams as catalog_fmgr;
 
-pub use types_json::{
+pub use ::types_json::{
     ArrayForJson, CompositeFieldForJson, JsonParseErrorType as JsonParseError,
     JsonTokenType as JsonToken, JsonTypeCategory as JsonType,
 };

@@ -23,13 +23,13 @@
 
 use ::mcx::Mcx;
 use types_catalog as cat;
-use types_core::{InvalidOid, Oid};
+use ::types_core::{InvalidOid, Oid};
 use ::types_error::PgResult;
 use ::rel::Relation;
 use ::types_tuple::heaptuple::{Datum, FormedTuple};
 use ::types_tuple::heaptuple::ItemPointerData;
 
-use heaptuple::{heap_form_tuple, heap_modify_tuple};
+use ::heaptuple::{heap_form_tuple, heap_modify_tuple};
 use ::catalog_catalog::GetNewOidWithIndex;
 
 use crate::keystone::{

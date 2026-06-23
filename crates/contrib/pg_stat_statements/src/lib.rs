@@ -26,7 +26,7 @@ use core::cell::Cell;
 
 use ::datum::Datum;
 use ::types_error::PgError;
-use fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
+use ::fmgr::{FunctionCallInfoBaseData, LoadedExternalFunc, PGFunction};
 
 /// The simple (suffix-free, directory-free) module name.
 pub(crate) const LIBRARY: &str = "pg_stat_statements";
@@ -430,7 +430,7 @@ fn pg_init() -> ::types_error::PgResult<()> {
 fn register_custom_gucs() {
     use ::misc_guc::custom;
     use ::guc_tables::GucVarAccessors;
-    use types_guc::{PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET};
+    use ::types_guc::{PGC_POSTMASTER, PGC_SIGHUP, PGC_SUSET};
 
     fn get_max() -> i32 {
         PGSS_MAX.with(Cell::get)

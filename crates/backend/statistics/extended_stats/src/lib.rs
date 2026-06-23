@@ -33,12 +33,12 @@
 
 #![allow(non_snake_case)]
 
-use mcx::{Mcx, MemoryContext};
+use ::mcx::{Mcx, MemoryContext};
 use ::types_core::primitive::Oid;
 use ::types_core::AttrNumber;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::rel::Relation;
-use statistics::{StatsBuildData, VacAttrStats, MAX_STATISTICS_TARGET};
+use ::statistics::{StatsBuildData, VacAttrStats, MAX_STATISTICS_TARGET};
 
 use ::types_catalog::pg_statistic_ext::{
     Anum_pg_statistic_ext_oid, Anum_pg_statistic_ext_stxkeys, Anum_pg_statistic_ext_stxkind,
@@ -51,7 +51,7 @@ use ::types_catalog::pg_statistic_ext::{
     Anum_pg_statistic_ext_data_stxoid, Natts_pg_statistic_ext_data,
     StatisticExtDataRelationId, StatisticExtRelationId, StatisticExtRelidIndexId,
 };
-use statistics::{
+use ::statistics::{
     STATS_EXT_DEPENDENCIES, STATS_EXT_EXPRESSIONS, STATS_EXT_MCV, STATS_EXT_NDISTINCT,
 };
 use ::types_scan::scankey::{BTEqualStrategyNumber, ScanKeyData};
@@ -60,10 +60,10 @@ use types_tuple::heaptuple::{Datum, FormedTuple};
 
 use ::scankey::ScanKeyInit;
 use genam_seams as genam;
-use table::{table_close, table_open};
+use ::table::{table_close, table_open};
 use analyze_rt_seams as rt;
 use ::utils_error::ereport;
-use types_error::{ErrorLocation, WARNING};
+use ::types_error::{ErrorLocation, WARNING};
 
 use ::nodes::primnodes::Expr;
 

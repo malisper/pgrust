@@ -3,7 +3,7 @@
 
 use utility_out_seams as rt;
 use ::utils_error::ereport;
-use types_error::{
+use ::types_error::{
     PgResult, ERRCODE_INSUFFICIENT_PRIVILEGE, ERRCODE_INVALID_TRANSACTION_STATE,
     ERRCODE_READ_ONLY_SQL_TRANSACTION, ERROR, WARNING,
 };

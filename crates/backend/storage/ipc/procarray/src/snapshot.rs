@@ -6,7 +6,7 @@
 //! `types_storage`).
 
 use ::mcx::PgVec;
-use types_core::{
+use ::types_core::{
     FirstNormalTransactionId, InvalidLocalTransactionId, InvalidTransactionId, Oid, ProcNumber,
     TransactionId, TransactionIdIsNormal, TransactionIdIsValid, XLogRecPtr, INVALID_PROC_NUMBER,
 };
@@ -16,7 +16,7 @@ use ::types_storage::storage::{
     subxids_array_status, PROC_IN_LOGICAL_DECODING, PROC_IN_VACUUM, PROC_XMIN_FLAGS,
     SUBXIDS_IN_ARRAY, SUBXIDS_IN_SUBTRANS,
 };
-use types_storage::{
+use ::types_storage::{
     LWLockMode, RunningTransactionLocksHeld, RunningTransactionsData, VirtualTransactionId,
     PROC_ARRAY_LOCK,
 };

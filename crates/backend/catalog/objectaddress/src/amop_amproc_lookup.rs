@@ -9,10 +9,10 @@
 
 use ::mcx::MemoryContext;
 use ::types_core::Oid;
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::types_storage::lock::AccessShareLock;
 
-use syscache_seams::{AmopDescriptionRow, AmprocDescriptionRow};
+use ::syscache_seams::{AmopDescriptionRow, AmprocDescriptionRow};
 
 use crate::consts::{
     AccessMethodOperatorRelationId, AccessMethodProcedureRelationId, Anum_pg_amop_amopfamily,

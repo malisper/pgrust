@@ -80,7 +80,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 
 use ::utils_error::elog;
-use types_error::{PgResult, ERROR};
+use ::types_error::{PgResult, ERROR};
 
 /// Node color, mirroring C's `RBTColor` (`RBTBLACK = 0`, `RBTRED = 1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

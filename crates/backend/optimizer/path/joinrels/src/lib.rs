@@ -38,10 +38,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-use types_error::{PgError, PgResult};
+use ::types_error::{PgError, PgResult};
 use ::nodes::nodes::NodeTag;
 
-use pathnodes::{
+use ::pathnodes::{
     PathNode, PlannerInfo, RelId, Relids, RinfoId, SpecialJoinInfo, JOIN_ANTI, JOIN_FULL,
     JOIN_INNER, JOIN_LEFT, JOIN_RIGHT, JOIN_RIGHT_ANTI, JOIN_RIGHT_SEMI, JOIN_SEMI,
     JOIN_UNIQUE_INNER, JOIN_UNIQUE_OUTER, RELOPT_BASEREL, RELOPT_OTHER_MEMBER_REL,
@@ -51,7 +51,7 @@ use ::mcx::Mcx;
 use ::pathnodes::planner_run::PlannerRun;
 
 use geqo_all_seams as geqo;
-use joinpath::{add_paths_to_joinrel, JoinEnableFlags};
+use ::joinpath::{add_paths_to_joinrel, JoinEnableFlags};
 use appendinfo_seams as appendinfo;
 use pathnode_seams as pathnode;
 use relnode_seams as bms;

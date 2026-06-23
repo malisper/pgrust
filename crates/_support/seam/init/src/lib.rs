@@ -2311,7 +2311,7 @@ mod builtin_registry_completeness {
     //! are therefore tolerated here — the baseline is the maximum set of gaps we
     //! still accept, and is re-tightened toward empty separately, out of band.
 
-    use fmgr_core::{missing_builtins, BuiltinGap, BuiltinGapKind};
+    use ::fmgr_core::{missing_builtins, BuiltinGap, BuiltinGapKind};
     use std::collections::BTreeMap;
 
     fn kind_str(k: &BuiltinGapKind) -> String {

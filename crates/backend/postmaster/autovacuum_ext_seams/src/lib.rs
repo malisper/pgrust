@@ -25,11 +25,11 @@ extern crate alloc;
 
 use ::seam_core::seam;
 
-use types_core::{BlockNumber, MultiXactId, Oid, TimestampTz, TransactionId};
+use ::types_core::{BlockNumber, MultiXactId, Oid, TimestampTz, TransactionId};
 use ::types_error::PgResult;
 use ::types_storage::buf::BufferAccessStrategy;
 use ::types_vacuum::vacuum::VacuumParams;
-use types_autovacuum::{
+use ::types_autovacuum::{
     AvwDbase, DbStatEntry, OrphanClassRow, PgClassScanRow, RecheckClassRow, TabStatEntry,
 };
 
