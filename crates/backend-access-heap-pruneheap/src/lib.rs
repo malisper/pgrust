@@ -306,11 +306,10 @@ pub fn heap_page_prune_opt<'mcx>(
     }
 
     // First check whether there's any chance there's something to prune.
-    let prune_xid = {
-        let bytes = bufmgr_seam::buffer_get_page::call(mcx, buffer)?;
-        let page = PageRef::new(bytes.as_slice())?;
-        page.pd_prune_xid()
-    };
+    let prune_xid = bufmgr_seam::buffer_with_page(buffer, |bytes| {
+        let page = PageRef::new(bytes)?;
+        Ok(page.pd_prune_xid())
+    })?;
     if !TransactionIdIsValid(prune_xid) {
         return Ok(());
     }
@@ -330,11 +329,10 @@ pub fn heap_page_prune_opt<'mcx>(
         hio_seam::relation_get_target_page_free_space::call(relation.rd_id, HEAP_DEFAULT_FILLFACTOR)?;
     minfree = core::cmp::max(minfree, BLCKSZ / 10);
 
-    let (is_full, free) = {
-        let bytes = bufmgr_seam::buffer_get_page::call(mcx, buffer)?;
-        let page = PageRef::new(bytes.as_slice())?;
-        (PageIsFull(&page), backend_storage_page::PageGetHeapFreeSpace(&page))
-    };
+    let (is_full, free) = bufmgr_seam::buffer_with_page(buffer, |bytes| {
+        let page = PageRef::new(bytes)?;
+        Ok((PageIsFull(&page), backend_storage_page::PageGetHeapFreeSpace(&page)))
+    })?;
 
     if is_full || free < minfree {
         // OK, try to get exclusive buffer cleanup lock.
@@ -343,11 +341,10 @@ pub fn heap_page_prune_opt<'mcx>(
         }
 
         // Recheck the heuristic now that we have the lock and accurate info.
-        let (is_full, free) = {
-            let bytes = bufmgr_seam::buffer_get_page::call(mcx, buffer)?;
-            let page = PageRef::new(bytes.as_slice())?;
-            (PageIsFull(&page), backend_storage_page::PageGetHeapFreeSpace(&page))
-        };
+        let (is_full, free) = bufmgr_seam::buffer_with_page(buffer, |bytes| {
+            let page = PageRef::new(bytes)?;
+            Ok((PageIsFull(&page), backend_storage_page::PageGetHeapFreeSpace(&page)))
+        })?;
 
         if is_full || free < minfree {
             // For now, pass mark_unused_now as false regardless of whether or
@@ -1269,8 +1266,8 @@ pub fn heap_get_root_tuples<'mcx>(mcx: Mcx<'mcx>, buffer: Buffer) -> PgResult<Ve
     let mut root_offsets: Vec<OffsetNumber> =
         alloc::vec![InvalidOffsetNumber; MaxHeapTuplesPerPage];
 
-    let bytes = bufmgr_seam::buffer_get_page::call(mcx, buffer)?;
-    let page = PageRef::new(bytes.as_slice())?;
+    bufmgr_seam::buffer_with_page(buffer, |bytes| {
+    let page = PageRef::new(bytes)?;
     let maxoff = PageGetMaxOffsetNumber(&page);
 
     let mut offnum = FirstOffsetNumber;
@@ -1351,6 +1348,9 @@ pub fn heap_get_root_tuples<'mcx>(mcx: Mcx<'mcx>, buffer: Buffer) -> PgResult<Ve
 
         offnum += 1;
     }
+
+    Ok(())
+    })?;
 
     Ok(root_offsets)
 }
