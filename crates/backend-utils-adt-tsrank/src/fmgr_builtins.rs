@@ -18,13 +18,47 @@ use types_fmgr::{BuiltinFunction, FunctionCallInfoBaseData, PgFnNative};
 // ---------------------------------------------------------------------------
 
 /// A header-ful varlena arg (`tsvector` / `tsquery` / `float4[]`) on the by-ref
-/// lane, read verbatim.
+/// lane. The value cores walk it with the `ts_type.h` header-macros, reading the
+/// size word at the FIXED offset 4 and the `WordEntry`/`QueryItem` array at offset
+/// 8 (and `deconstruct_array` reads the array header at offset 0), so a
+/// 4-byte-header base is required. C's `PG_GETARG_TSVECTOR` / `PG_GETARG_TSQUERY`
+/// / `PG_GETARG_ARRAYTYPE_P` is `PG_DETOAST_DATUM`, which un-packs a short (1-byte
+/// header) stored value to 4-byte form; these operands are toastable, so under
+/// `SHORT_VARLENA_PACKING` a small stored value can arrive short — un-pack before
+/// the fixed-offset decode. With the flag OFF no stored value is short, so the
+/// un-pack branch is never taken (behavior-preserving).
 #[inline]
 fn arg_varlena<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("ts_rank fn: by-ref varlena arg missing from by-ref lane")
+        .expect("ts_rank fn: by-ref varlena arg missing from by-ref lane");
+    unpack_short_varlena(image)
+}
+
+/// Un-pack a short (1-byte header) varlena image to the canonical 4-byte-header
+/// form (`SET_VARSIZE` + payload), mirroring `detoast_attr`'s short arm. A 4-byte
+/// / external / compressed image passes through verbatim. The per-fn fmgr arg
+/// adapter keeps a borrow tied to `fcinfo`, so the (only-under-the-flip,
+/// never-while-OFF) short case leaks a `'static` un-packed buffer — the C analogue
+/// `PG_DETOAST_DATUM` palloc's into the fn context (reclaimed at reset); here
+/// reclaimed at process exit. Zero leak with the flag OFF, bounded to one small
+/// alloc per short arg under the flip.
+#[inline]
+fn unpack_short_varlena(image: &[u8]) -> &[u8] {
+    const VARHDRSZ: usize = 4;
+    // VARATT_IS_1B && !VARATT_IS_1B_E (a genuine short inline header).
+    if image.first().is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01) {
+        const VARHDRSZ_SHORT: usize = 1;
+        let data_size = ((image[0] >> 1) & 0x7f) as usize - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let mut out = std::vec::Vec::with_capacity(new_size);
+        out.extend_from_slice(&((new_size as u32) << 2).to_ne_bytes());
+        out.extend_from_slice(&image[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+        std::vec::Vec::leak(out)
+    } else {
+        image
+    }
 }
 
 /// `PG_GETARG_INT32(i)`: the `normalization` method.

@@ -36,17 +36,23 @@ fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Oid {
 }
 
 /// `VARDATA_ANY(PG_GETARG_TEXT_PP(i))`: the payload bytes of a header-ful `text`
-/// arg (after the 4-byte length word).
+/// arg. `PG_GETARG_TEXT_PP` is `VARDATA_ANY`, header-form-agnostic: a small stored
+/// `text` token arrives with a 1-byte ("short") header once
+/// `SHORT_VARLENA_PACKING` is on, so skip ONE byte for a genuine short header (low
+/// bit set, but not the lone `0x01` external tag), else the 4-byte `VARHDRSZ`. A
+/// fixed `VARHDRSZ` strip would land 3 bytes into (or past) a short value's
+/// payload — e.g. `ts_debug`'s lexize token `abc` came back empty. No-op while the
+/// flag is OFF (every stored value is 4-byte).
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("ts_lexize: by-ref text arg missing from by-ref lane");
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
     }
 }
 

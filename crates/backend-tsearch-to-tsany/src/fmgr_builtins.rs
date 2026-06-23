@@ -30,55 +30,93 @@ fn arg_oid(fcinfo: &FunctionCallInfoBaseData, i: usize) -> Oid {
         .as_oid()
 }
 
-/// `VARDATA_ANY(PG_GETARG_TEXT_PP(i))`: the payload bytes of a header-ful
-/// `text` arg (after the 4-byte length word).
+/// Un-pack a short (1-byte header) varlena image to the canonical 4-byte-header
+/// form, mirroring the short arm of `detoast_attr` — what C's `PG_DETOAST_DATUM`
+/// (`PG_GETARG_TSQUERY` / `PG_GETARG_JSONB_P`) does before a core reads the header
+/// at a FIXED offset (`tsq_size` at 4 / the jsonb root container after `VARHDRSZ`).
+/// The cores need a 4-byte-header base. A 4-byte / external / compressed image
+/// passes through verbatim. The fmgr arg adapter keeps a borrow tied to `fcinfo`,
+/// so the (only-under-the-flip, never-while-OFF) short case leaks a `'static`
+/// un-packed buffer — the C analogue palloc's into the fn context (reclaimed at
+/// reset); here reclaimed at process exit. Zero leak with the flag OFF, bounded to
+/// one small alloc per short arg under the flip.
+#[inline]
+fn unpack_short_varlena(image: &[u8]) -> &[u8] {
+    // VARATT_IS_1B && !VARATT_IS_1B_E (a genuine short inline header).
+    if image.first().is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01) {
+        const VARHDRSZ_SHORT: usize = 1;
+        let data_size = ((image[0] >> 1) & 0x7f) as usize - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let mut out = Vec::with_capacity(new_size);
+        out.extend_from_slice(&((new_size as u32) << 2).to_ne_bytes());
+        out.extend_from_slice(&image[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+        Vec::leak(out)
+    } else {
+        image
+    }
+}
+
+/// `VARDATA_ANY(PG_GETARG_TEXT_PP(i))`: the payload bytes of a header-ful `text`
+/// arg. `PG_GETARG_TEXT_PP` is `VARDATA_ANY`, header-form-agnostic: a small stored
+/// `text`/`json` value arrives short-headed once `SHORT_VARLENA_PACKING` is on, so
+/// skip ONE byte for a genuine short header (low bit set, not the lone `0x01`
+/// external tag), else the 4-byte `VARHDRSZ`. A fixed `VARHDRSZ` strip would land
+/// 3 bytes into a short value's payload. No-op while the flag is OFF.
 #[inline]
 fn arg_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
     let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("to_tsany fn: by-ref text arg missing from by-ref lane");
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
     }
 }
 
 /// `PG_GETARG_JSONB_P(i)`: the full jsonb varlena image (header included). The
 /// jsonb-iteration helpers (`iterate_jsonb_values`, `parse_jsonb_index_flags`)
-/// strip the `VARHDRSZ` header themselves to reach the root container.
+/// strip the `VARHDRSZ` header themselves to reach the root container, so a stored
+/// short-headed image must be un-packed to 4-byte form first (C's
+/// `PG_GETARG_JSONB_P` is `PG_DETOAST_DATUM`).
 #[inline]
 fn arg_jsonb_image<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("to_tsany fn: by-ref jsonb arg missing from by-ref lane")
+        .expect("to_tsany fn: by-ref jsonb arg missing from by-ref lane");
+    unpack_short_varlena(image)
 }
 
 /// `PG_GETARG_TSQUERY(i)` / `PG_GETARG_JSONB_P(i)`: the full varlena image of a
-/// by-ref arg (header included), passed verbatim to a core that reads the
-/// header itself.
+/// by-ref arg (header included), passed to a core that reads the header itself at
+/// a FIXED offset. C's `PG_DETOAST_DATUM` un-packs a short-headed stored image to
+/// 4-byte form first; mirror that here.
 #[inline]
 fn arg_varlena_full<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8] {
-    fcinfo
+    let image = fcinfo
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
-        .expect("to_tsany fn: by-ref arg missing from by-ref lane")
+        .expect("to_tsany fn: by-ref arg missing from by-ref lane");
+    unpack_short_varlena(image)
 }
 
 /// The optional options-`text` argument of a `ts_headline*_opt` variant:
 /// `(PG_NARGS() > 3 && PG_GETARG_POINTER(3)) ? PG_GETARG_TEXT_PP(3) : NULL`.
-/// Returns the FULL options `text` varlena image (header included) — the
-/// `deserialize_deflist` seam performs its own `TextDatumGetCString` detoast —
-/// or `None` when the argument is absent. (These functions are STRICT, so a
-/// present argument is never SQL NULL.)
+/// Returns the FULL options `text` varlena image (header included, un-packed to
+/// 4-byte form if stored short) — the `deserialize_deflist` seam performs its own
+/// `TextDatumGetCString` detoast — or `None` when the argument is absent. (These
+/// functions are STRICT, so a present argument is never SQL NULL.)
 #[inline]
 fn arg_opt_text<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> Option<&'a [u8]> {
     if fcinfo.nargs() <= i {
         return None;
     }
-    fcinfo.ref_arg(i).and_then(|p| p.as_varlena())
+    fcinfo
+        .ref_arg(i)
+        .and_then(|p| p.as_varlena())
+        .map(unpack_short_varlena)
 }
 
 /// Set a header-ful `tsvector`/`tsquery`/`jsonb` varlena result on the by-ref

@@ -40,6 +40,39 @@ use types_nodes::parsestmt::{CachedPlanHandle as NodeCachedPlanHandle, CachedPla
 /// `tsquery_rewrite_query`.
 const FETCH_COUNT: i64 = 100;
 
+/// `VARHDRSZ` — the 4-byte varlena length word.
+const VARHDRSZ: usize = 4;
+
+/// Un-pack a short (1-byte header) stored varlena image to the canonical 4-byte-
+/// header form, mirroring the short arm of `detoast_attr` — exactly what C's
+/// `DatumGetTSVector` / `DatumGetTSQuery` (`PG_DETOAST_DATUM`) does to the raw
+/// `SPI_getbinval` material before it reaches `ts_accum` / the `tsquery_rewrite`
+/// row loop. Those cores read the size word at the FIXED offset 4 and the
+/// `WordEntry`/`QueryItem` array at offset 8, so a 4-byte-header base is required.
+///
+/// A `tsvector`/`tsquery` column is toastable (typlen == -1, typstorage 'x'), so
+/// under `SHORT_VARLENA_PACKING` a small stored value arrives here with a 1-byte
+/// header and a fixed offset-4 read would land 3 bytes into the payload (or panic
+/// on a tiny image). A 4-byte / external / compressed image (external/compressed
+/// columns are already detoasted by the executor) passes through verbatim. With
+/// the flag OFF every stored varlena is 4-byte, so this is a no-op
+/// (behavior-preserving).
+fn detoast_short_spi_varlena(image: Vec<u8>) -> Vec<u8> {
+    // VARATT_IS_1B && !VARATT_IS_1B_E (a genuine short inline header: low bit set,
+    // but not the lone `0x01` external/expanded tag byte).
+    if image.first().is_some_and(|&b| b != 0x01 && (b & 0x01) == 0x01) {
+        const VARHDRSZ_SHORT: usize = 1;
+        let data_size = ((image[0] >> 1) & 0x7f) as usize - VARHDRSZ_SHORT;
+        let new_size = data_size + VARHDRSZ;
+        let mut out = Vec::with_capacity(new_size);
+        out.extend_from_slice(&((new_size as u32) << 2).to_ne_bytes());
+        out.extend_from_slice(&image[VARHDRSZ_SHORT..VARHDRSZ_SHORT + data_size]);
+        out
+    } else {
+        image
+    }
+}
+
 /// `tsquery_rewrite_run(command)` seam body — the `ts_rewrite(query, text)` SPI
 /// cursor driver (`tsquery_rewrite_query`, tsquery_rewrite.c). Runs `command`
 /// through an SPI cursor and returns the fetched `(target, substitute)` tsquery
@@ -149,8 +182,11 @@ fn stat_cursor_fetch_rows(portal: &Portal) -> PgResult<Vec<Option<Vec<u8>>>> {
 
     let mut rows: Vec<Option<Vec<u8>>> = Vec::with_capacity(raw_rows.len());
     for raw in &raw_rows {
+        // C: ts_accum(stat, DatumGetTSVector(SPI_getbinval(..., 1, &isnull))).
+        // DatumGetTSVector (PG_DETOAST_DATUM) un-packs a short-headed stored
+        // tsvector to 4-byte form before `ts_accum`'s offset-4 `tsv_size` read.
         let col = match raw.first() {
-            Some(c) if !c.isnull => c.byref.clone(),
+            Some(c) if !c.isnull => c.byref.clone().map(detoast_short_spi_varlena),
             _ => None,
         };
         rows.push(col);
@@ -375,7 +411,11 @@ fn cursor_fetch_rows(portal: &Portal) -> PgResult<Vec<TsRewriteRow>> {
 /// `DatumGetTSQuery(...)` varlena image the consumer re-parses with `QT2QTN`.
 fn raw_col_tsquery(col: Option<&crate::dest_spi::RawCol>) -> Option<Vec<u8>> {
     match col {
-        Some(c) if !c.isnull => c.byref.clone(),
+        // C: qtex = DatumGetTSQuery(SPI_getbinval(..., 1, &isnull)). DatumGetTSQuery
+        // (PG_DETOAST_DATUM) un-packs a short-headed stored tsquery to 4-byte form
+        // before tsquery_rewrite_query's offset-4 `tsq_size` / offset-8 GETQUERY
+        // reads.
+        Some(c) if !c.isnull => c.byref.clone().map(detoast_short_spi_varlena),
         _ => None,
     }
 }

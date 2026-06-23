@@ -64,7 +64,7 @@ use types_tuple::Datum;
 
 use types_selfuncs::STATISTIC_KIND_MCELEM;
 
-use backend_access_common_detoast_seams::{pg_detoast_datum_packed, pg_varsize_any};
+use backend_access_common_detoast_seams::{detoast_attr, pg_varsize_any};
 use backend_access_heap_vacuumlazy_seams::vacuum_delay_point;
 use backend_commands_vacuum_seams::check_for_interrupts;
 use backend_utils_adt_tsvector_core::access::{arrptr, lexeme, tsv_size};
@@ -285,9 +285,17 @@ pub fn compute_tsvector_stats(
         total_width += pg_varsize_any::call(value.as_ref_bytes())? as f64;
 
         /*
-         * Now detoast the tsvector if needed (C: DatumGetTSVector).
+         * Now detoast the tsvector if needed (C: DatumGetTSVector, i.e.
+         * PG_DETOAST_DATUM / detoast_attr — which un-packs a short (1-byte
+         * header) stored tsvector to the canonical 4-byte-header form). The
+         * `_packed` variant must NOT be used here: `tsv_size` / `arrptr` read the
+         * size word and WordEntry array at the FIXED post-VARHDRSZ offsets 4/8, so
+         * a short-headed image (a small stored tsvector under
+         * SHORT_VARLENA_PACKING) would be mis-decoded / panic. With the flag OFF
+         * no stored tsvector is short, so this is byte-identical to the prior
+         * `_packed` path (behavior-preserving).
          */
-        let vector = pg_detoast_datum_packed::call(mcx, value.as_ref_bytes())?;
+        let vector = detoast_attr::call(mcx, value.as_ref_bytes())?;
         let size = tsv_size(&vector);
 
         /*
