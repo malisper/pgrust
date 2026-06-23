@@ -492,6 +492,49 @@ impl FunctionCallInfoBaseData {
         }
     }
 
+    /// Reset every per-call field of a POOLED frame back to its post-`new`
+    /// state, **keeping the `args` / `ref_args` / `internal_args` Vec capacity**
+    /// (and the `flinfo` `Box` storage when one is supplied), so a hot
+    /// dispatch path can reuse one frame across calls with zero per-call
+    /// allocation — the mcx-pooling Phase-1 frame-reuse (C reuses
+    /// `op->d.func.fcinfo_data`/`flinfo` every `EEOP_FUNCEXPR` call;
+    /// execExprInterp.c:920). The `args`/`ref_args`/`internal_args` are CLEARED
+    /// (length 0, capacity retained); all side channels (`context`,
+    /// `agg_context`, `escontext`, `resultinfo`, `ref_result`) are dropped to
+    /// their NULL state. `flinfo`: when `flinfo_into` is `Some(f)` it is moved
+    /// into the existing `Box` (no reallocation — `*boxed = f`) if the frame
+    /// already has one, else a fresh `Box` is allocated once; `None` clears it.
+    pub fn reset_for_reuse(
+        &mut self,
+        flinfo_into: Option<FmgrInfo>,
+        nargs: i16,
+        fncollation: Oid,
+        context: Option<ContextNode>,
+        resultinfo: Option<ContextNode>,
+    ) {
+        match flinfo_into {
+            Some(f) => match self.flinfo.as_mut() {
+                // Reuse the existing allocation: overwrite the boxed value in
+                // place (drops the old `FmgrInfo`, keeps the heap slot).
+                Some(slot) => **slot = f,
+                None => self.flinfo = Some(Box::new(f)),
+            },
+            None => self.flinfo = None,
+        }
+        self.context = context;
+        self.agg_context = None;
+        self.escontext = None;
+        self.resultinfo = resultinfo;
+        self.fncollation = fncollation;
+        self.isnull = false;
+        self.nargs = nargs;
+        // Clear length but KEEP capacity (the whole point of pooling).
+        self.args.clear();
+        self.ref_args.clear();
+        self.internal_args.clear();
+        self.ref_result = None;
+    }
+
     /// The aggregate back-pointer image on this call frame (C's
     /// `(AggState *) fcinfo->context`), `None` when not an aggregate support
     /// call. The `nodeAgg-aggapi-seams` bodies reconstruct the live

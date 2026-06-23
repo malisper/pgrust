@@ -98,6 +98,10 @@ pub fn register_builtins(entries: impl IntoIterator<Item = BuiltinFunction>) {
 pub fn clear_builtins() {
     REGISTRY.with(|r| *r.borrow_mut() = BuiltinRegistry::default());
     NATIVE.with(|r| r.borrow_mut().clear());
+    // The resolved-built-in memo references the registry's built-ins; drop it
+    // too so a re-registration is observed (defined below).
+    RESOLVED_BUILTIN.with(|c| c.borrow_mut().clear());
+    FCINFO_POOL.with(|p| p.borrow_mut().clear());
 }
 
 // ===========================================================================
@@ -153,6 +157,149 @@ pub fn register_builtins_native(
 /// Look up the Result-native callable for `foid`, if this Oid has been migrated.
 pub fn native_builtin(foid: Oid) -> Option<PgFnNative> {
     NATIVE.with(|r| r.borrow().get(&foid).copied())
+}
+
+// ===========================================================================
+// RESOLVED built-in cache (mcx-pooling Phase 1 — the per-fmgr-call frame-churn
+// fix). C resolves a function's `FmgrInfo` ONCE at `ExecInitFunc`
+// (execExpr.c:2736) and reuses it on every `EEOP_FUNCEXPR` call; the owned
+// model cannot store the std/lifetime-bound `FmgrResolution` on the no_std
+// `Func` step (the #327 dual-fcinfo-home split), so it had to re-resolve the
+// OID — re-`fmgr_isbuiltin` (which CLONES the whole `BuiltinFunction`, a
+// `String` heap alloc) and rebuild the `FmgrInfo` — on every call, per tuple.
+//
+// This per-backend cache stands in for the on-the-step resolution: it memoizes
+// the `ResolvedFmgrInfo` for a BUILT-IN OID behind an `Rc` so the hot
+// `function_call_invoke_datum_resolved` seam recovers it with a refcount bump
+// (no `String` alloc, no registry clone). ONLY built-ins are cached — they are
+// compile-time-constant (C's `fmgr_builtins[]` never changes), so the entry is
+// permanently valid; catalog / security-definer / SQL functions are NOT cached
+// here (they keep the by-OID re-resolution path with its `CFuncHash` / secdef
+// re-derivation, so DDL invalidation and the secdef userid switch are
+// unaffected). A cache miss (non-built-in, or first call) falls through to the
+// ordinary by-OID path, so behavior is identical — only the per-call allocation
+// churn for the common built-in case is removed.
+// ===========================================================================
+
+thread_local! {
+    /// C: no direct analogue (it stores the resolution on the step). The
+    /// per-backend memo of a built-in OID's `ResolvedFmgrInfo` (behind an `Rc`
+    /// so the hot path clones a refcount, not the `String`-bearing
+    /// `BuiltinFunction`). Keyed by `fn_oid`.
+    static RESOLVED_BUILTIN: RefCell<HashMap<Oid, std::rc::Rc<ResolvedFmgrInfo>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Return the cached `ResolvedFmgrInfo` for built-in `fn_oid`, resolving and
+/// memoizing it on a miss; `None` when `fn_oid` is not a built-in (the caller
+/// then falls through to the ordinary by-OID resolution, preserving the catalog
+/// / secdef / SQL legs verbatim). The returned `Rc` shares the cached entry: the
+/// resolution is never moved out, so the cached copy survives across all rows.
+fn resolved_builtin_cached(mcx: Mcx<'_>, fn_oid: Oid) -> PgResult<Option<std::rc::Rc<ResolvedFmgrInfo>>> {
+    if let Some(hit) = RESOLVED_BUILTIN.with(|c| c.borrow().get(&fn_oid).cloned()) {
+        return Ok(Some(hit));
+    }
+    // Not yet cached. Resolve it; cache ONLY if the resolution is a built-in
+    // (the only kind that is compile-time-immutable and so safe to memoize
+    // without DDL invalidation).
+    let resolved = fmgr_info(mcx, fn_oid)?;
+    if matches!(resolved.resolution, FmgrResolution::Builtin(_)) {
+        let rc = std::rc::Rc::new(resolved);
+        RESOLVED_BUILTIN.with(|c| {
+            c.borrow_mut().insert(fn_oid, rc.clone());
+        });
+        Ok(Some(rc))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Clear the resolved-built-in cache (test/re-init support; no C analogue).
+/// Built-in registrations are immutable, but the cache is dropped alongside
+/// [`clear_builtins`] so a re-init starts clean.
+pub fn clear_resolved_builtin_cache() {
+    RESOLVED_BUILTIN.with(|c| c.borrow_mut().clear());
+}
+
+// ===========================================================================
+// fcinfo FRAME POOL (mcx-pooling Phase 1 — eliminate the per-call frame churn).
+//
+// Profiling the canary (`(a.unique1+b.unique2) % 7`, ~2M fmgr calls) showed the
+// dominant per-call cost is CONSTRUCTING and DROPPING a fresh ABI-carrier
+// `FunctionCallInfoBaseData` every call: its `args` / `ref_args` Vecs are
+// allocated and freed, and the `Box<FmgrInfo>` is allocated and freed — exactly
+// C's "zero per-call alloc" gap (C reuses `op->d.func.fcinfo_data`/`flinfo`
+// allocated once at `ExecInitFunc`, execExprInterp.c:920).
+//
+// This per-backend free-list reuses the whole frame across calls: pop one (or
+// allocate on an empty pool), `reset_for_reuse` it (clears the arg Vecs to
+// length 0 KEEPING capacity, reuses the `flinfo` `Box` storage), dispatch, then
+// clear and return it. Reentrancy is naturally safe: a nested fmgr call pops a
+// DIFFERENT frame (or allocates one), and returns it when done, so steady-state
+// recursion depth bounds the pool size. The dual-fcinfo-home (#327) is NOT
+// touched — this pools only the ABI carrier the seam already builds; the
+// executor `types_nodes` frame and every dispatch semantic (collation, secdef,
+// SQL, soft-error, detoast) are unchanged.
+// ===========================================================================
+
+thread_local! {
+    /// Per-backend free-list of reusable ABI-carrier call frames. Empty at
+    /// start; grows to the steady-state fmgr recursion depth then stops
+    /// allocating. No C analogue (C's frame is the per-step `fcinfo_data`).
+    static FCINFO_POOL: RefCell<Vec<FunctionCallInfoBaseData>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Borrow a reusable frame from the pool (or build a fresh one on an empty
+/// pool) and `reset_for_reuse` it with the call's lookup info — its `args` /
+/// `ref_args` are cleared to length 0 but KEEP their capacity, so the caller
+/// refills `frame.args` in place. The caller MUST hand it back via
+/// [`fcinfo_pool_return`] (an RAII-style pair) so its capacity is recycled.
+/// `nargs` is set to 0 here; the caller sets it after refilling `args`.
+fn fcinfo_pool_take(flinfo: Option<FmgrInfo>, collation: Oid) -> FunctionCallInfoBaseData {
+    // C: a trigger / CALL / aggregate dispatcher deposits the `fcinfo->context`
+    // node-tag / agg back-pointer on a thread-local; consume it onto THIS frame
+    // (per-frame discipline), exactly as `init_fcinfo` does.
+    let context = types_fmgr::fmgr::take_call_context_tag()
+        .map(|(tag, atomic)| types_fmgr::fmgr::ContextNode { tag, atomic });
+    let mut frame = FCINFO_POOL
+        .with(|p| p.borrow_mut().pop())
+        .unwrap_or_else(|| FunctionCallInfoBaseData::new(None, 0, 0, None, None));
+    frame.reset_for_reuse(flinfo, 0, collation, context, None);
+    if let Some(link) = types_fmgr::fmgr::take_agg_context_link() {
+        frame.set_agg_context_link(link);
+    }
+    frame
+}
+
+/// Return a frame to the pool after a call. Its `flinfo`/`args`/`ref_args`
+/// capacity is retained for the next call; the live payload is cleared so no
+/// caller-owned data (a returned `internal` box, a captured error) leaks across
+/// reuse.
+fn fcinfo_pool_return(mut frame: FunctionCallInfoBaseData) {
+    // Drop any live payload now (before the frame is parked) so an `internal`
+    // state box / soft-error sink does not survive into the next call's reuse.
+    frame.flinfo = None;
+    frame.context = None;
+    frame.agg_context = None;
+    frame.escontext = None;
+    frame.resultinfo = None;
+    frame.ref_result = None;
+    frame.args.clear();
+    frame.ref_args.clear();
+    frame.internal_args.clear();
+    // Cap the pool so a pathological deep-recursion burst does not retain an
+    // unbounded number of frames forever.
+    FCINFO_POOL.with(|p| {
+        let mut pool = p.borrow_mut();
+        if pool.len() < 64 {
+            pool.push(frame);
+        }
+    });
+}
+
+/// Clear the fcinfo frame pool (test/re-init support; no C analogue).
+pub fn clear_fcinfo_pool() {
+    FCINFO_POOL.with(|p| p.borrow_mut().clear());
 }
 
 /// C: `fmgr_last_builtin_oid`.
@@ -3627,24 +3774,70 @@ fn function_call_invoke_datum_core_soft<'mcx>(
         })));
     }
 
+    function_call_invoke_resolved_core_soft(mcx, &resolved, collation, nargs, ref_args, escontext)
+}
+
+/// Shared dispatch body of [`function_call_invoke_datum_core_soft`] **after** the
+/// `fmgr_info` resolution and `fn_expr` stamping (C: everything in
+/// `EEOP_FUNCEXPR*` from `InitFunctionCallInfoData`/the arg gather to
+/// `fn_addr(fcinfo)` — the per-call work, no OID lookup). Taking the
+/// already-`ResolvedFmgrInfo` by reference lets the mcx-pooling Phase-1 fast path
+/// (`function_call_invoke_datum_resolved_seam`) reuse the resolution
+/// `ExecInitFunc` cached once on the step instead of re-resolving the OID (which
+/// clones the whole `BuiltinFunction` — a `String` heap alloc — and boxes a fresh
+/// `FmgrInfo`) on every call, per tuple. The resolution is borrowed (never
+/// moved/freed) so the cached copy survives across all rows. C's `EEOP_FUNCEXPR`
+/// is exactly this: `fcinfo->isnull = false; d = op->d.func.fn_addr(fcinfo)` with
+/// the `FmgrInfo` resolved once at `ExecInitFunc`.
+fn function_call_invoke_resolved_core_soft<'mcx>(
+    mcx: Mcx<'mcx>,
+    resolved: &ResolvedFmgrInfo,
+    collation: Oid,
+    nargs: Vec<NullableDatum>,
+    ref_args: Vec<Option<RefPayload>>,
+    escontext: Option<&mut types_error::SoftErrorContext>,
+) -> PgResult<Option<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)>> {
+    // The freshly-allocated-frame path (the non-pooled callers). Build the frame
+    // via `init_fcinfo` (allocates), dispatch through the shared body, and let
+    // the frame drop at end of scope.
+    let mut fcinfo = init_fcinfo(Some(resolved.finfo.clone()), collation, nargs);
+    dispatch_resolved_into_frame(mcx, resolved, &mut fcinfo, ref_args, escontext)
+}
+
+/// The shared `EEOP_FUNCEXPR`-call body once the call frame `fcinfo` is filled
+/// with the `flinfo`/`fncollation`/`args` for this call (C: detoast the by-ref
+/// args, install the optional soft-error sink, `fcinfo->isnull = false; d =
+/// fn_addr(fcinfo)`, then read back the result). Operates on a `&mut` frame so
+/// the same body serves BOTH the freshly-allocated frame
+/// ([`function_call_invoke_resolved_core_soft`]) and the POOLED frame
+/// ([`function_call_invoke_datum_resolved_seam`]'s reuse path). No allocation of
+/// its own beyond the unavoidable detoast / result materialization into `mcx`.
+fn dispatch_resolved_into_frame<'mcx>(
+    mcx: Mcx<'mcx>,
+    resolved: &ResolvedFmgrInfo,
+    fcinfo: &mut FunctionCallInfoBaseData,
+    ref_args: Vec<Option<RefPayload>>,
+    escontext: Option<&mut types_error::SoftErrorContext>,
+) -> PgResult<Option<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)>> {
+    let fn_oid = resolved.finfo.fn_oid;
     // C: fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr (fmgr.c:658).
     let fn_expr = resolved.finfo.fn_expr.clone();
-    let mut fcinfo = init_fcinfo(Some(resolved.finfo), collation, nargs);
     // Enforce the `RefPayload::Varlena` carrier's "already-detoasted" contract at
     // the single fmgr dispatch chokepoint: a varlena arg read off a heap tuple
     // may be inline-compressed (4B-C) or out-of-line-external, and the raw-byte
     // adt readers (md5/LIKE/etc.) would corrupt it. Detoast each toasted varlena
     // arg here so EVERY builtin sees a flat image (C: `PG_DETOAST_DATUM_PACKED`).
+    // Detoast IN PLACE into the (pooled, capacity-retained) `fcinfo.ref_args`.
     let skip_detoast = fn_skips_arg_detoast(fn_oid);
-    let mut flat_ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(ref_args.len());
+    fcinfo.ref_args.clear();
+    fcinfo.ref_args.reserve(ref_args.len());
     for refp in ref_args {
-        flat_ref_args.push(if skip_detoast {
+        fcinfo.ref_args.push(if skip_detoast {
             refp
         } else {
             detoast_ref_arg_if_toasted(mcx, refp)?
         });
     }
-    fcinfo.ref_args = flat_ref_args;
     fcinfo.debug_assert_ref_null_consistency();
     // C: `InitFunctionCallInfoData(*fcinfo, ..., escontext, NULL)` — install the
     // soft-error sink so a callee's `ereturn` records into it instead of raising
@@ -3657,7 +3850,7 @@ fn function_call_invoke_datum_core_soft<'mcx>(
     // (NOT through `invoke_flinfo`/`null_check`): a function may legitimately
     // return NULL via `fcinfo->isnull`, which the caller stores.
     fcinfo.isnull = false;
-    let word = function_call_invoke_with_expr(mcx, &resolved.resolution, &mut fcinfo, fn_expr)?;
+    let word = function_call_invoke_with_expr(mcx, &resolved.resolution, fcinfo, fn_expr)?;
     // C: if (SOFT_ERROR_OCCURRED(escontext)) return NULL;
     if fcinfo.soft_error_occurred() {
         if let Some(caller) = escontext {
@@ -3679,6 +3872,94 @@ fn function_call_invoke_datum_core_soft<'mcx>(
     // Materialize the result into `mcx` (by-value or by-reference).
     let result = ref_out_to_datum(mcx, word, ref_result)?;
     Ok(Some((result, false)))
+}
+
+/// `FunctionCallInvoke(fcinfo)` over the canonical [`Datum`] lane using the
+/// resolution `ExecInitFunc` cached once for the step (mcx-pooling Phase 1). For
+/// a BUILT-IN `fn_oid` this skips the per-call `fmgr_info` OID re-resolution —
+/// the `fmgr_isbuiltin` `BuiltinFunction` clone (a `String` heap alloc) and the
+/// fresh `FmgrInfo`/`FmgrResolution` build — by recovering the memoized
+/// `ResolvedFmgrInfo` (an `Rc` refcount bump). Argument marshalling and dispatch
+/// are otherwise byte-identical to [`function_call_invoke_datum_seam`]: the
+/// canonical `Datum` args are marshalled to the ABI `(word, ref)` lanes, the
+/// step's `fn_expr` is re-stamped onto the (cached) `FmgrInfo`, and the call runs
+/// under `collation` (`fcinfo->fncollation`). A NON-built-in OID (catalog /
+/// security-definer / SQL) falls through to the ordinary by-OID
+/// [`function_call_invoke_datum_seam`], so DDL invalidation, the secdef userid
+/// switch, and SQL-function dispatch are unaffected.
+fn function_call_invoke_datum_resolved_seam<'mcx>(
+    mcx: Mcx<'mcx>,
+    fn_oid: Oid,
+    collation: Oid,
+    args: &[types_tuple::backend_access_common_heaptuple::Datum<'mcx>],
+    args_null: &[bool],
+    fn_expr: Option<types_core::fmgr::FnExprErased>,
+) -> PgResult<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> {
+    // Recover the cached built-in resolution; on a miss (non-built-in or any
+    // resolution error) fall through to the ordinary by-OID seam, which keeps
+    // the catalog / secdef / SQL legs exactly as before.
+    let cached = resolved_builtin_cached(mcx, fn_oid)?;
+    let Some(resolved) = cached else {
+        return function_call_invoke_datum_seam(mcx, fn_oid, collation, args, args_null, fn_expr);
+    };
+
+    // The cached `FmgrInfo` carries no `fn_expr` (the cache is keyed by OID and
+    // shared across every call site, while `fn_expr` is the per-call-site node
+    // `ExecInitFunc` stamped via `fmgr_info_set_expr`). A polymorphic built-in
+    // (e.g. `array_eq`, `record_eq`) reads it through `get_fn_expr_rettype/
+    // argtype`, so re-stamp the step's `fn_expr` onto a per-call `FmgrInfo` copy
+    // (a cheap clone — Copy-ish fields + an `Rc` bump for the existing
+    // `fn_expr`), leaving the shared cache entry untouched. The COMMON hot path
+    // (a non-polymorphic builtin like `int4pl`/`int4mod`) has `fn_expr == None`
+    // and borrows the shared entry with no clone at all. C's
+    // `fcache->flinfo.fn_expr = fcinfo->flinfo->fn_expr` (fmgr.c:658) likewise
+    // stamps the call-site node onto the per-call frame.
+    let resolved_for_call: std::borrow::Cow<'_, ResolvedFmgrInfo> = match fn_expr {
+        Some(node) => {
+            let mut owned = ResolvedFmgrInfo {
+                finfo: resolved.finfo.clone(),
+                resolution: resolved.resolution.clone(),
+            };
+            owned.finfo.fn_expr = Some(Box::new(FnExpr::External(types_fmgr::ExternalFnExpr {
+                tag: 0,
+                node: Some(node),
+            })));
+            std::borrow::Cow::Owned(owned)
+        }
+        None => std::borrow::Cow::Borrowed(&*resolved),
+    };
+
+    // Take a reusable call frame from the per-backend pool (no per-call frame
+    // construction / drop — the profiled hotspot). Marshal the canonical `Datum`
+    // args DIRECTLY into the frame's capacity-retained `args` Vec (the
+    // load-bearing dual-fcinfo-home re-marshal — #327; the executor frame and
+    // the ABI carrier never meet, so the value conversion stays, but it no longer
+    // allocates a throwaway Vec). The by-reference side channel is gathered into
+    // a local `ref_args` Vec that `dispatch_resolved_into_frame` moves into the
+    // frame's (also capacity-retained) `ref_args` in place.
+    let mut frame = fcinfo_pool_take(Some(resolved_for_call.finfo.clone()), collation);
+    // Refill the frame's `args` (cleared by `reset_for_reuse`, capacity kept).
+    let mut ref_args: Vec<Option<RefPayload>> = Vec::with_capacity(args.len());
+    for (i, val) in args.iter().enumerate() {
+        let is_null = args_null.get(i).copied().unwrap_or(false);
+        let (mut nd, refp) = datum_to_ref_arg(val);
+        if is_null {
+            nd.isnull = true;
+        }
+        frame.args.push(nd);
+        ref_args.push(if is_null { None } else { refp });
+    }
+    frame.nargs = args.len() as i16;
+
+    let out = dispatch_resolved_into_frame(mcx, &resolved_for_call, &mut frame, ref_args, None);
+    fcinfo_pool_return(frame);
+    match out? {
+        Some(pair) => Ok(pair),
+        // No escontext was installed, so a soft error never occurs.
+        None => unreachable!(
+            "function_call_invoke_datum_resolved with NULL escontext never soft-fails"
+        ),
+    }
 }
 
 fn function_call_invoke_datum_seam<'mcx>(
@@ -4682,6 +4963,9 @@ pub fn init_seams() {
         fastpath_function_call_invoke_seam,
     );
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum::set(function_call_invoke_datum_seam);
+    backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_resolved::set(
+        function_call_invoke_datum_resolved_seam,
+    );
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_soft::set(function_call_invoke_datum_soft_seam);
     backend_utils_fmgr_fmgr_seams::function_call_invoke_datum_owned::set(
         function_call_invoke_datum_owned_seam,

@@ -31,7 +31,9 @@
 //! step-payload reads and control flow that the owned model can already express
 //! are written out faithfully.
 
-use backend_utils_fmgr_fmgr_seams::{function_call_invoke_datum, function_call_invoke_datum_soft};
+use backend_utils_fmgr_fmgr_seams::{
+    function_call_invoke_datum, function_call_invoke_datum_resolved, function_call_invoke_datum_soft,
+};
 // The bare-word newtype: the scalar form the fmgr/arrayfuncs seams and the
 // step-payload eval helpers operate on.
 use types_datum::Datum;
@@ -191,7 +193,16 @@ pub fn exec_func_step<'mcx>(
                 mcx, fn_oid, collation, &args, &nulls, fn_expr,
             )?
         } else {
-            function_call_invoke_datum::call(mcx, fn_oid, collation, &args, &nulls, fn_expr)?
+            // mcx-pooling Phase 1: route the hot `EEOP_FUNCEXPR[_STRICT]` call
+            // through the resolution `ExecInitFunc` cached once for this step,
+            // instead of re-resolving `fn_oid` (the `fmgr_isbuiltin`
+            // `BuiltinFunction` String clone + a fresh `FmgrInfo`) on every
+            // tuple. A non-built-in falls through to the by-OID path inside the
+            // seam, so the catalog/secdef/SQL legs are unchanged. C reuses
+            // `op->d.func.fcinfo_data`/`flinfo` here (execExprInterp.c:920).
+            function_call_invoke_datum_resolved::call(
+                mcx, fn_oid, collation, &args, &nulls, fn_expr,
+            )?
         };
 
     // *op->resvalue = d;  *op->resnull = fcinfo->isnull;
