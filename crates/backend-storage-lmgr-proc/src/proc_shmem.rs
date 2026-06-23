@@ -244,6 +244,86 @@ static SHARED_PROC_DATABASE_ID: AtomicPtr<Oid> = AtomicPtr::new(core::ptr::null_
 /// Length of [`SHARED_PROC_DATABASE_ID`] (`total_procs`), for bounds checks.
 static SHARED_PROC_DATABASE_ID_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Base of the genuinely-shared per-proc `PGPROC.vxid.lxid` array (one
+/// `LocalTransactionId`/`u32` per proc — the backend's current virtual
+/// transaction's local xid). Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.vxid.lxid` lives in the shared PGPROC block. `GetLockConflicts`,
+/// `GetCurrentVirtualXIDs` and `GetLockStatusData` read every other backend's
+/// `proc->vxid.lxid` to learn the virtual transaction holding/awaiting a lock —
+/// the cross-backend probes `WaitForLockers`/`WaitForOlderSnapshots` (DETACH
+/// PARTITION CONCURRENTLY, REINDEX/DROP INDEX CONCURRENTLY) depend on. Fork-COW
+/// private storage makes the prober read the stale fork-time image (0) so it
+/// never sees the conflicting locker and never waits. So this word lives in
+/// genuine shmem, the same idiom as [`SHARED_PROC_PIDS`]. (`vxid.procNumber` is
+/// constant per slot — it equals the proc number — so it needs no array.)
+static SHARED_PROC_VXID_LXID: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_VXID_LXID`] (`total_procs`), for bounds checks.
+static SHARED_PROC_VXID_LXID_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.vxid.procNumber` array (one
+/// `i32`/[`ProcNumber`] per proc). Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.vxid.procNumber` lives in the shared PGPROC block. It equals the
+/// slot's own proc number for a regular backend, but is `INVALID_PROC_NUMBER`
+/// for a 2PC dummy / recovered-prepared proc; `GetLockConflicts`/
+/// `GetCurrentVirtualXIDs` read it (paired with the lxid) and `VirtualXactLock`
+/// resolves it back to a PGPROC. A backend's fork-COW-private image of *another*
+/// backend's slot holds the fork-time value (e.g. `0`), which is the wrong
+/// `procNumber` for a slot reused after this backend forked. So it lives in
+/// genuine shmem, set once at proc init alongside the lxid.
+static SHARED_PROC_VXID_PROCNO: AtomicPtr<i32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_VXID_PROCNO`] (`total_procs`), for bounds checks.
+static SHARED_PROC_VXID_PROCNO_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.xid` array (one
+/// `TransactionId`/`u32` per proc — the backend's top-level xid, or
+/// `InvalidTransactionId`). Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.xid` lives in the shared PGPROC block. `VirtualXactLock`'s
+/// examine step reads the target `proc->xid` to short-circuit the
+/// `TwoPhaseGetXidByVirtualXID()` search, and `GetRunningTransactionLocks` reads
+/// each holder's xid. Fork-COW private storage hides another backend's assigned
+/// xid. So this word lives in genuine shmem, the same idiom as
+/// [`SHARED_PROC_PIDS`].
+static SHARED_PROC_XID: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_XID`] (`total_procs`), for bounds checks.
+static SHARED_PROC_XID_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.fpLocalTransactionId` array
+/// (one `LocalTransactionId`/`u32` per proc — the lxid whose fast-path VXID lock
+/// the proc holds on itself). Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.fpLocalTransactionId` lives in the shared PGPROC block, guarded
+/// by `proc->fpInfoLock`. `VirtualXactLock(vxid, wait)` reads the target's
+/// `fpLocalTransactionId` (to confirm the VXID is still the one requested) and,
+/// when set, transfers the proc's fast-path VXID lock into the primary lock
+/// table so the waiter can sleep on it. Fork-COW private storage makes a waiting
+/// backend read the fork-time `Invalid` value, conclude the VXID already ended,
+/// and skip the wait entirely. So this word lives in genuine shmem.
+static SHARED_PROC_FP_LOCAL_XID: AtomicPtr<u32> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_FP_LOCAL_XID`] (`total_procs`), for bounds checks.
+static SHARED_PROC_FP_LOCAL_XID_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Base of the genuinely-shared per-proc `PGPROC.fpVXIDLock` flag array (one
+/// `u8` per proc — whether the proc holds the fast-path VXID lock on its own
+/// virtual transaction). Set by [`InitProcGlobal`], NULL until then.
+///
+/// In C `PGPROC.fpVXIDLock` lives in the shared PGPROC block under
+/// `fpInfoLock`. `VirtualXactLock` reads the target's `fpVXIDLock` to decide
+/// whether the fast-path lock must be migrated to the primary lock table before
+/// the waiter sleeps. Fork-COW private storage makes a waiter read a stale `0`
+/// so it skips the transfer and never blocks. So this flag lives in genuine
+/// shmem.
+static SHARED_PROC_FP_VXID_LOCK: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Length of [`SHARED_PROC_FP_VXID_LOCK`] (`total_procs`), for bounds checks.
+static SHARED_PROC_FP_VXID_LOCK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Base of the genuinely-shared per-proc `PGPROC.statusFlags` array (one `u8`
 /// per proc — the `PROC_*` status flag bits). Set by [`InitProcGlobal`], NULL
 /// until then.
@@ -1209,6 +1289,153 @@ pub(crate) fn set_proc_xmin_shared(procno: ProcNumber, xmin: TransactionId) {
     shared_xmin_slot(procno).store(xmin, AtomicOrdering::Relaxed);
 }
 
+/// `&ProcGlobal->allProcs[procno].vxid.lxid` over the genuinely-shared per-proc
+/// vxid-lxid array (`LocalTransactionId`/`u32`). Panics if `InitProcGlobal` has
+/// not run or `procno` is out of range.
+fn shared_vxid_lxid_slot(procno: ProcNumber) -> &'static AtomicU32 {
+    let base = SHARED_PROC_VXID_LXID.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC vxid.lxid array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_VXID_LXID_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC vxid.lxid index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u32` words of genuine shared memory and
+    // `idx < count`. The target backend sets/clears its own lxid under
+    // `fpInfoLock` (StartTransaction/CommitTransaction); atomics make the
+    // cross-process probe (GetLockConflicts/GetCurrentVirtualXIDs) well-defined.
+    unsafe { AtomicU32::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].vxid.lxid` — read the canonical (shared) word.
+pub(crate) fn proc_vxid_lxid_shared(procno: ProcNumber) -> u32 {
+    shared_vxid_lxid_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].vxid.lxid = lxid` — write the canonical
+/// (shared) word (the backend advertising its virtual transaction).
+pub(crate) fn set_proc_vxid_lxid_shared(procno: ProcNumber, lxid: u32) {
+    shared_vxid_lxid_slot(procno).store(lxid, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].vxid.procNumber` over the genuinely-shared
+/// per-proc array (`i32`/[`ProcNumber`]). Panics if `InitProcGlobal` has not run
+/// or `procno` is out of range.
+fn shared_vxid_procno_slot(procno: ProcNumber) -> &'static AtomicI32 {
+    let base = SHARED_PROC_VXID_PROCNO.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC vxid.procNumber array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_VXID_PROCNO_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC vxid.procNumber index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `i32` words of genuine shared memory and
+    // `idx < count`; the owning backend sets it once at proc init.
+    unsafe { AtomicI32::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].vxid.procNumber` — read the canonical (shared)
+/// word.
+pub(crate) fn proc_vxid_procno_shared(procno: ProcNumber) -> ProcNumber {
+    shared_vxid_procno_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].vxid.procNumber = value` — write the canonical
+/// (shared) word.
+pub(crate) fn set_proc_vxid_procno_shared(procno: ProcNumber, value: ProcNumber) {
+    shared_vxid_procno_slot(procno).store(value, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].xid` over the genuinely-shared per-proc xid
+/// array (`TransactionId`/`u32`). Panics if `InitProcGlobal` has not run or
+/// `procno` is out of range.
+fn shared_xid_slot(procno: ProcNumber) -> &'static AtomicU32 {
+    let base = SHARED_PROC_XID.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC xid array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_XID_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC xid index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u32` words of genuine shared memory and
+    // `idx < count`. The owning backend writes its own xid (xact assignment) and
+    // zeroes it on commit; atomics make the cross-process read well-defined.
+    unsafe { AtomicU32::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].xid` — read the canonical (shared) word.
+pub(crate) fn proc_xid_shared(procno: ProcNumber) -> TransactionId {
+    shared_xid_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].xid = xid` — write the canonical (shared) word.
+pub(crate) fn set_proc_xid_shared(procno: ProcNumber, xid: TransactionId) {
+    shared_xid_slot(procno).store(xid, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].fpLocalTransactionId` over the genuinely-shared
+/// per-proc array (`LocalTransactionId`/`u32`). Panics if `InitProcGlobal` has
+/// not run or `procno` is out of range.
+fn shared_fp_local_xid_slot(procno: ProcNumber) -> &'static AtomicU32 {
+    let base = SHARED_PROC_FP_LOCAL_XID.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC fpLocalTransactionId array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_FP_LOCAL_XID_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC fpLocalTransactionId index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u32` words of genuine shared memory and
+    // `idx < count`. The owning backend writes it under `fpInfoLock`
+    // (VirtualXactLockTableInsert/Cleanup); the waiter reads it under the same
+    // lock in VirtualXactLock; atomics make the per-word access well-defined.
+    unsafe { AtomicU32::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].fpLocalTransactionId` — read the canonical
+/// (shared) word.
+pub(crate) fn proc_fp_local_xid_shared(procno: ProcNumber) -> u32 {
+    shared_fp_local_xid_slot(procno).load(AtomicOrdering::Relaxed)
+}
+
+/// `ProcGlobal->allProcs[procno].fpLocalTransactionId = lxid` — write the
+/// canonical (shared) word (under `fpInfoLock` by the owner).
+pub(crate) fn set_proc_fp_local_xid_shared(procno: ProcNumber, lxid: u32) {
+    shared_fp_local_xid_slot(procno).store(lxid, AtomicOrdering::Relaxed);
+}
+
+/// `&ProcGlobal->allProcs[procno].fpVXIDLock` over the genuinely-shared per-proc
+/// flag array (`u8` bool). Panics if `InitProcGlobal` has not run or `procno`
+/// is out of range.
+fn shared_fp_vxid_lock_slot(procno: ProcNumber) -> &'static core::sync::atomic::AtomicU8 {
+    let base = SHARED_PROC_FP_VXID_LOCK.load(AtomicOrdering::Relaxed);
+    assert!(
+        !base.is_null(),
+        "shared PGPROC fpVXIDLock array uninitialized (InitProcGlobal not run)"
+    );
+    let count = SHARED_PROC_FP_VXID_LOCK_COUNT.load(AtomicOrdering::Relaxed);
+    let idx = procno as usize;
+    assert!(idx < count, "PGPROC fpVXIDLock index {idx} out of range (count {count})");
+    // SAFETY: `base` addresses `count` `u8` bytes of genuine shared memory and
+    // `idx < count`. Written/read under `fpInfoLock`; atomics make the per-byte
+    // access well-defined.
+    unsafe { core::sync::atomic::AtomicU8::from_ptr(base.add(idx)) }
+}
+
+/// `ProcGlobal->allProcs[procno].fpVXIDLock` — read the canonical (shared) flag.
+pub(crate) fn proc_fp_vxid_lock_shared(procno: ProcNumber) -> bool {
+    shared_fp_vxid_lock_slot(procno).load(AtomicOrdering::Relaxed) != 0
+}
+
+/// `ProcGlobal->allProcs[procno].fpVXIDLock = on` — write the canonical (shared)
+/// flag (under `fpInfoLock` by the owner).
+pub(crate) fn set_proc_fp_vxid_lock_shared(procno: ProcNumber, on: bool) {
+    shared_fp_vxid_lock_slot(procno).store(on as u8, AtomicOrdering::Relaxed);
+}
+
 /// `&ProcGlobal->allProcs[procno].waitLockMode` over the genuinely-shared
 /// per-proc waitLockMode array (`i32` LOCKMODE). Panics if `InitProcGlobal` has
 /// not run or `procno` is out of range.
@@ -1555,6 +1782,87 @@ fn init_shared_pid_block(total_procs: usize) -> PgResult<()> {
     }
     SHARED_PROC_DATABASE_ID.store(db_ptr, AtomicOrdering::Relaxed);
     SHARED_PROC_DATABASE_ID_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.vxid.lxid array (each backend's current virtual
+    // transaction's local xid). In C part of the shared PGPROC block; read
+    // cross-process by GetLockConflicts/GetCurrentVirtualXIDs/GetLockStatusData
+    // (the WaitForLockers/WaitForOlderSnapshots probes). Fork-private storage
+    // hides another backend's running virtual transaction so the prober never
+    // waits. MemSet(0) == InvalidLocalTransactionId, matching the C PGPROC block.
+    let vxl_size = mul_size(total_procs, size_of::<u32>());
+    let (vxl_ptr, vxl_found) =
+        shmem::shmem_init_struct::call("PGPROC vxid.lxid words", vxl_size)?;
+    let vxl_ptr = vxl_ptr as *mut u32;
+    if !vxl_found {
+        // SAFETY: `vxl_ptr` addresses `vxl_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(vxl_ptr as *mut u8, 0, vxl_size) };
+    }
+    SHARED_PROC_VXID_LXID.store(vxl_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_VXID_LXID_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.vxid.procNumber array. In C part of the shared PGPROC block;
+    // read cross-process by GetLockConflicts/GetCurrentVirtualXIDs (paired with
+    // the lxid) and resolved by VirtualXactLock. Stamp INVALID_PROC_NUMBER (-1)
+    // in every slot — a proc that has not joined holds no vxid; init_my_proc_common
+    // / proc_init_prepared write the real value when a slot is claimed. NOT a
+    // zero fill: proc number 0 is a valid proc.
+    let vxp_size = mul_size(total_procs, size_of::<i32>());
+    let (vxp_ptr, vxp_found) =
+        shmem::shmem_init_struct::call("PGPROC vxid.procNumber words", vxp_size)?;
+    let vxp_ptr = vxp_ptr as *mut i32;
+    if !vxp_found {
+        for k in 0..total_procs {
+            // SAFETY: `vxp_ptr` addresses `total_procs` writable `i32` shmem words.
+            unsafe { vxp_ptr.add(k).write(INVALID_PROC_NUMBER) };
+        }
+    }
+    SHARED_PROC_VXID_PROCNO.store(vxp_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_VXID_PROCNO_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.xid array (each backend's top-level xid). In C part of the
+    // shared PGPROC block; read cross-process by VirtualXactLock's examine step
+    // and GetRunningTransactionLocks. MemSet(0) == InvalidTransactionId.
+    let pxid_size = mul_size(total_procs, size_of::<TransactionId>());
+    let (pxid_ptr, pxid_found) =
+        shmem::shmem_init_struct::call("PGPROC xid words", pxid_size)?;
+    let pxid_ptr = pxid_ptr as *mut TransactionId;
+    if !pxid_found {
+        // SAFETY: `pxid_ptr` addresses `pxid_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(pxid_ptr as *mut u8, 0, pxid_size) };
+    }
+    SHARED_PROC_XID.store(pxid_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_XID_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.fpLocalTransactionId array (the lxid whose fast-path VXID
+    // lock the proc holds on itself, under fpInfoLock). In C part of the shared
+    // PGPROC block; read cross-process by VirtualXactLock to confirm the awaited
+    // VXID and to migrate the fast-path lock into the primary lock table. MemSet(0)
+    // == InvalidLocalTransactionId.
+    let fpl_size = mul_size(total_procs, size_of::<u32>());
+    let (fpl_ptr, fpl_found) =
+        shmem::shmem_init_struct::call("PGPROC fpLocalTransactionId words", fpl_size)?;
+    let fpl_ptr = fpl_ptr as *mut u32;
+    if !fpl_found {
+        // SAFETY: `fpl_ptr` addresses `fpl_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(fpl_ptr as *mut u8, 0, fpl_size) };
+    }
+    SHARED_PROC_FP_LOCAL_XID.store(fpl_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_FP_LOCAL_XID_COUNT.store(total_procs, AtomicOrdering::Relaxed);
+
+    // Per-proc PGPROC.fpVXIDLock flag array (whether the proc holds its own
+    // fast-path VXID lock, under fpInfoLock). In C part of the shared PGPROC
+    // block; read cross-process by VirtualXactLock to decide whether to transfer.
+    // MemSet(0) == false.
+    let fpv_size = mul_size(total_procs, size_of::<u8>());
+    let (fpv_ptr, fpv_found) =
+        shmem::shmem_init_struct::call("PGPROC fpVXIDLock flag words", fpv_size)?;
+    let fpv_ptr = fpv_ptr as *mut u8;
+    if !fpv_found {
+        // SAFETY: `fpv_ptr` addresses `fpv_size` writable shmem bytes.
+        unsafe { core::ptr::write_bytes(fpv_ptr, 0, fpv_size) };
+    }
+    SHARED_PROC_FP_VXID_LOCK.store(fpv_ptr, AtomicOrdering::Relaxed);
+    SHARED_PROC_FP_VXID_LOCK_COUNT.store(total_procs, AtomicOrdering::Relaxed);
 
     // Per-proc PGPROC.statusFlags array (the PROC_* status flag bits). Read+copied
     // by ProcArrayInstallRestoredXmin (leader's PROC_XMIN_FLAGS). This is the

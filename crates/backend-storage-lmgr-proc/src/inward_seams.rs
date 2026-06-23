@@ -151,6 +151,9 @@ fn my_proc_lxid() -> LocalTransactionId {
 
 fn set_my_proc_lxid(lxid: LocalTransactionId) {
     with_my_proc(|p| p.vxid.lxid = lxid);
+    // Mirror to the genuinely-shared per-proc vxid.lxid word so other backends'
+    // GetLockConflicts/GetCurrentVirtualXIDs probes see this virtual transaction.
+    crate::proc_shmem::set_proc_vxid_lxid_shared(crate::proc_shmem::my_proc_number(), lxid);
 }
 
 /// The fast-path VXID-lock critical section inside
@@ -186,6 +189,11 @@ fn vxid_lock_table_insert_my_proc(
 
         p.fpVXIDLock = true;
         p.fpLocalTransactionId = lxid;
+        // Mirror to the genuinely-shared per-proc words (under fpInfoLock) so a
+        // VirtualXactLock waiter in another backend sees this proc holds the
+        // fast-path VXID lock and migrates it to the primary lock table.
+        crate::proc_shmem::set_proc_fp_vxid_lock_shared(my_procno, true);
+        crate::proc_shmem::set_proc_fp_local_xid_shared(my_procno, lxid);
         Ok(())
     })
 }
@@ -207,10 +215,21 @@ fn vxid_lock_table_cleanup_my_proc() -> PgResult<(bool, LocalTransactionId)> {
             my_procno,
         )?;
 
-        let fastpath = p.fpVXIDLock;
-        let lxid = p.fpLocalTransactionId;
+        // Read the prior state from the genuinely-shared per-proc words, NOT the
+        // fork-COW-private fields: a cross-process VirtualXactLock that migrated
+        // this proc's fast-path VXID lock into the primary lock table cleared the
+        // SHARED `fpVXIDLock` (its write is invisible to this backend's COW image).
+        // Reading the COW `p.fpVXIDLock` here would see a stale `true`, skip the
+        // `LockRefindAndRelease`, and leave the transferred lock held forever — the
+        // detacher/CIC waiter never wakes. The shared words are authoritative.
+        let fastpath = crate::proc_shmem::proc_fp_vxid_lock_shared(my_procno);
+        let lxid = crate::proc_shmem::proc_fp_local_xid_shared(my_procno);
         p.fpVXIDLock = false;
         p.fpLocalTransactionId = InvalidLocalTransactionId;
+        // Mirror both clears to the genuinely-shared per-proc words (under
+        // fpInfoLock), exactly as C clears both fields.
+        crate::proc_shmem::set_proc_fp_vxid_lock_shared(my_procno, false);
+        crate::proc_shmem::set_proc_fp_local_xid_shared(my_procno, InvalidLocalTransactionId);
 
         Ok((fastpath, lxid))
     })
@@ -239,8 +258,17 @@ fn virtual_xact_examine_proc(
             my_procno,
         )?;
 
-        if p.vxid.procNumber != vxid.procNumber
-            || p.fpLocalTransactionId != vxid.localTransactionId
+        // The vxid (procNumber+lxid), the fast-path VXID fields
+        // (`fpLocalTransactionId`/`fpVXIDLock`) and the proc's `xid` are written by
+        // the *target* backend, so we must read them from the genuinely-shared
+        // per-proc words — the fork-COW-private image of another backend's slot is
+        // stale (e.g. `vxid.procNumber == 0` for a slot the target claimed after
+        // this backend forked), which spuriously trips the "VXID ended" guard and
+        // skips the wait entirely.
+        let target_vxid_procno = crate::proc_shmem::proc_vxid_procno_shared(target);
+        let target_fp_local_xid = crate::proc_shmem::proc_fp_local_xid_shared(target);
+        if target_vxid_procno != vxid.procNumber
+            || target_fp_local_xid != vxid.localTransactionId
         {
             // VXID ended.
             return Ok(VirtualXactExamineOutcome::Ended);
@@ -255,21 +283,23 @@ fn virtual_xact_examine_proc(
         // OK, we're going to need to sleep on the VXID. But first, we must set
         // up the primary lock table entry, if needed (ie, convert the proc's
         // fast-path lock on its VXID to a regular lock).
-        if p.fpVXIDLock {
+        if crate::proc_shmem::proc_fp_vxid_lock_shared(target) {
             // `transfer` runs lock.c's SetupLockInTable + GrantLock under the
             // partition lock (nested inside fpInfoLock, exactly as in C). On
             // out-of-shared-memory it returns Err with fpInfoLock released by
             // the guard drop.
             transfer()?;
             p.fpVXIDLock = false;
+            crate::proc_shmem::set_proc_fp_vxid_lock_shared(target, false);
         }
 
         // If the proc has an XID now, we'll avoid a TwoPhaseGetXidByVirtualXID()
         // search. The proc might have assigned this XID but not yet locked it,
         // in which case the proc will lock this XID before releasing the VXID.
         // The fpInfoLock critical section excludes VirtualXactLockTableCleanup(),
-        // so we won't save an XID of a different VXID.
-        let xid = p.xid;
+        // so we won't save an XID of a different VXID. Read the canonical shared
+        // xid word (the target backend writes it cross-process).
+        let xid = crate::proc_shmem::proc_xid_shared(target);
 
         Ok(VirtualXactExamineOutcome::Proceed { xid })
     })
@@ -279,12 +309,16 @@ fn virtual_xact_examine_proc(
 /// slot is a bounds-valid, in-use backend (`result->pid != 0`). Plain
 /// shared-memory read over the owned `allProcs` arena.
 fn proc_number_get_proc_is_present(procno: ProcNumber) -> bool {
-    with_proc_global(|pg| {
-        if procno < 0 || procno >= pg.allProcCount as ProcNumber {
-            return false;
-        }
-        pg.allProcs[procno as usize].pid != 0
-    })
+    let all_proc_count = with_proc_global(|pg| pg.allProcCount as ProcNumber);
+    if procno < 0 || procno >= all_proc_count {
+        return false;
+    }
+    // `result->pid != 0`: read the genuinely-shared slot-occupancy word. The
+    // fork-COW-private `PGPROC.pid` field is 0 for a proc owned by a *different*
+    // backend (it joined after this backend forked), so reading it here made
+    // VirtualXactLock conclude the target proc was absent and skip the wait
+    // entirely (the DETACH/CIC/REINDEX cross-backend wait never blocked).
+    crate::proc_shmem::shared_pid(procno) != 0
 }
 
 fn lock_error_cleanup() {
@@ -390,6 +424,21 @@ fn proc_init_prepared(
     crate::proc_shmem::set_proc_xmin_shared(pgprocno, types_core::InvalidTransactionId);
     crate::proc_shmem::set_proc_database_id_shared(pgprocno, databaseid);
     crate::proc_shmem::set_proc_status_flags_shared(pgprocno, 0);
+    // Mirror the dummy proc's xid + vxid.lxid into the genuinely-shared per-proc
+    // words so a cross-process VirtualXactLock/GetLockConflicts probe targeting
+    // this prepared transaction sees its xid/vxid. The fast-path VXID fields are
+    // zeroed (MemSet on the slot): a recovered/2PC dummy holds no fast-path VXID
+    // lock (its localTransactionId is a normal, locked XID).
+    let (dummy_lxid, dummy_procno) = if my_lxid != types_core::InvalidLocalTransactionId {
+        (my_lxid, my_procnumber)
+    } else {
+        (xid, types_core::INVALID_PROC_NUMBER)
+    };
+    crate::proc_shmem::set_proc_vxid_lxid_shared(pgprocno, dummy_lxid);
+    crate::proc_shmem::set_proc_vxid_procno_shared(pgprocno, dummy_procno);
+    crate::proc_shmem::set_proc_xid_shared(pgprocno, xid);
+    crate::proc_shmem::set_proc_fp_vxid_lock_shared(pgprocno, false);
+    crate::proc_shmem::set_proc_fp_local_xid_shared(pgprocno, types_core::InvalidLocalTransactionId);
 
     Ok(())
 }
@@ -425,11 +474,19 @@ fn proc_database_id(pgprocno: ProcNumber) -> Oid {
 }
 
 fn proc_xid(pgprocno: ProcNumber) -> TransactionId {
-    with_proc_by_number(pgprocno, |p| p.xid)
+    // Read the canonical (shared) xid word: another backend's assigned xid is
+    // invisible in the fork-COW-private PGPROC image.
+    crate::proc_shmem::proc_xid_shared(pgprocno)
 }
 
 fn proc_vxid(pgprocno: ProcNumber) -> (ProcNumber, u32) {
-    with_proc_by_number(pgprocno, |p| (p.vxid.procNumber, p.vxid.lxid))
+    // Both halves are written by the *target* backend, so read them from the
+    // genuinely-shared per-proc words. The fork-COW-private image of another
+    // backend's slot holds the fork-time value (e.g. procNumber 0 / lxid 0),
+    // which is wrong for a slot reused/initialized after this backend forked.
+    let proc_number = crate::proc_shmem::proc_vxid_procno_shared(pgprocno);
+    let lxid = crate::proc_shmem::proc_vxid_lxid_shared(pgprocno);
+    (proc_number, lxid)
 }
 
 fn proc_xmin(pgprocno: ProcNumber) -> TransactionId {
@@ -845,6 +902,10 @@ fn store_top_xid_in_proc(xid: TransactionId) {
     });
     let pgxactoff = crate::proc_shmem::my_proc_pgxactoff();
     crate::proc_shmem::set_proc_array_xid(pgxactoff, xid);
+    // Mirror to the genuinely-shared per-proc xid word so a cross-process
+    // VirtualXactLock examiner sees this backend's assigned xid (it short-circuits
+    // the 2PC-by-vxid search and waits on the xid lock too).
+    crate::proc_shmem::set_proc_xid_shared(crate::proc_shmem::my_proc_number(), xid);
 }
 
 /// `GetNewTransactionId`'s subxact leg (varsup.c): push a freshly allocated
@@ -897,6 +958,9 @@ fn set_proc_status_flags(procno: ProcNumber, flags: u8) {
 
 fn set_proc_xid(procno: ProcNumber, xid: TransactionId) {
     with_proc_by_number(procno, |p| p.xid = xid);
+    // Mirror to the genuinely-shared per-proc xid word (ProcArrayEndTransaction
+    // clears it cross-process; a VirtualXactLock examiner reads it).
+    crate::proc_shmem::set_proc_xid_shared(procno, xid);
 }
 
 fn set_proc_xmin(procno: ProcNumber, xmin: TransactionId) {
@@ -906,6 +970,10 @@ fn set_proc_xmin(procno: ProcNumber, xmin: TransactionId) {
 
 fn set_proc_lxid(procno: ProcNumber, lxid: LocalTransactionId) {
     with_proc_by_number(procno, |p| p.vxid.lxid = lxid);
+    // Mirror to the genuinely-shared per-proc vxid.lxid word (ProcArrayEnd-
+    // Transaction clears it cross-process; GetLockConflicts/GetCurrentVirtualXIDs
+    // read it).
+    crate::proc_shmem::set_proc_vxid_lxid_shared(procno, lxid);
 }
 
 fn proc_delay_chkpt_flags(procno: ProcNumber) -> i32 {

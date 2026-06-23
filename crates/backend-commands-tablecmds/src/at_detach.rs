@@ -42,8 +42,7 @@ use types_catalog::pg_attribute::{
 };
 use types_core::primitive::{Oid, OidIsValid};
 use types_error::{
-    PgResult, ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-    ERRCODE_UNDEFINED_TABLE, ERROR,
+    PgResult, ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, ERRCODE_UNDEFINED_TABLE, ERROR,
 };
 use types_nodes::ddlnodes::{Constraint, ConstrType, PartitionCmd};
 use types_nodes::nodes::Node;
@@ -1042,20 +1041,55 @@ fn DropClonedTriggersFromPartition<'mcx>(
 // ===========================================================================
 
 /// `ATExecDetachPartitionFinalize(rel, name)` (tablecmds.c:21429) — complete a
-/// previously-interrupted DETACH ... CONCURRENTLY. Unported (depends on the
-/// concurrent protocol and `WaitForOlderSnapshots`).
+/// previously-interrupted DETACH ... CONCURRENTLY.
+///
+/// C:
+/// ```c
+/// partRel = table_openrv(name, AccessExclusiveLock);
+/// // Wait until existing snapshots are gone.  This is important if the second
+/// // transaction of DETACH PARTITION CONCURRENTLY is canceled: the user could
+/// // immediately run DETACH FINALIZE without actually waiting for existing
+/// // transactions.  We must not complete the detach until all such queries are
+/// // complete (otherwise we present them an inconsistent view of catalogs).
+/// WaitForOlderSnapshots(snap->xmin, false);
+/// DetachPartitionFinalize(rel, partRel, true, InvalidOid);
+/// ObjectAddressSet(address, RelationRelationId, RelationGetRelid(partRel));
+/// table_close(partRel, NoLock);
+/// ```
 pub(crate) fn ATExecDetachPartitionFinalize<'mcx>(
-    _mcx: Mcx<'mcx>,
-    _rel: &Relation<'mcx>,
-    _cmd: &PartitionCmd<'mcx>,
+    mcx: Mcx<'mcx>,
+    rel: &Relation<'mcx>,
+    cmd: &PartitionCmd<'mcx>,
 ) -> PgResult<ObjectAddress> {
-    ereport(ERROR)
-        .errcode(ERRCODE_FEATURE_NOT_SUPPORTED)
-        .errmsg(
-            "DETACH PARTITION ... FINALIZE is not yet supported \
-             (it completes the unported two-transaction CONCURRENTLY protocol)"
-                .to_string(),
-        )
-        .finish(here("ATExecDetachPartitionFinalize"))
-        .map(|()| unreachable!())
+    // Snapshot snap = GetActiveSnapshot();
+    let snap_xmin = backend_utils_time_snapmgr_seams::get_active_snapshot::call()?
+        .map(|s| s.xmin)
+        .unwrap_or(types_core::xact::InvalidTransactionId);
+
+    // partRel = table_openrv(name, AccessExclusiveLock);
+    let name_node = cmd
+        .name
+        .as_deref()
+        .ok_or_else(|| elog("DETACH PARTITION FINALIZE: PartitionCmd has no relation name"))?;
+    let name = name_node
+        .as_rangevar()
+        .ok_or_else(|| elog("DETACH PARTITION FINALIZE: PartitionCmd name is not a RangeVar"))?;
+    let access_rv = to_access_range_var(name);
+    let partRel = table_openrv(mcx, &access_rv, AccessExclusiveLock)?;
+
+    // Wait until existing snapshots are gone. Cancel-then-FINALIZE must not
+    // complete the detach until all queries that could still see the partition
+    // as attached have ended.
+    backend_commands_indexcmds::WaitForOlderSnapshots(mcx, snap_xmin, false)?;
+
+    // DetachPartitionFinalize(rel, partRel, true, InvalidOid);
+    DetachPartitionFinalize(mcx, rel, &partRel, true, types_core::primitive::InvalidOid)?;
+
+    // ObjectAddressSet(address, RelationRelationId, RelationGetRelid(partRel));
+    let address = object_address_set(RelationRelationId, partRel.rd_id);
+
+    // table_close(partRel, NoLock);  -- keep our AccessExclusiveLock until commit.
+    partRel.close(NoLock)?;
+
+    Ok(address)
 }

@@ -45,8 +45,8 @@ use mcx::{Mcx, PgVec};
 
 use backend_utils_error::ereport;
 use types_error::{
-    ErrorLocation, PgError, PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_UNDEFINED_COLUMN, DEBUG2,
-    ERROR, INFO, LOG, WARNING,
+    ErrorLocation, PgError, PgResult, ERRCODE_DUPLICATE_COLUMN, ERRCODE_LOCK_NOT_AVAILABLE,
+    ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_TABLE, DEBUG2, ERROR, INFO, LOG, WARNING,
 };
 
 use types_core::primitive::{BlockNumber, InvalidOid, Oid};
@@ -74,7 +74,9 @@ use types_statistics::{
     STATISTIC_KIND_CORRELATION, STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, STATISTIC_NUM_SLOTS,
 };
 use types_storage::buf::BufferAccessStrategy;
-use types_vacuum::vacuum::{VacuumParams, VACOPT_VACUUM, VACOPT_VERBOSE};
+use types_vacuum::vacuum::{
+    VacuumParams, VACOPT_ANALYZE, VACOPT_SKIP_LOCKED, VACOPT_VACUUM, VACOPT_VERBOSE,
+};
 
 use types_sortsupport::SortSupportData;
 
@@ -2633,38 +2635,94 @@ fn form_index_datum<'mcx>(
     Ok((values, isnull))
 }
 
-/// `vacuum_open_relation(relid, relation, options, verbose, lmode)` ported inline
-/// to return the real `Relation<'mcx>` (vacuum.c's reachable form returns an
-/// Oid). Uses `table_open`/`try_table_open`; SKIP_LOCKED is not exercised by the
-/// ANALYZE caller (`analyze_rel` always passes the full lock).
+/// `vacuum_open_relation(relid, relation, options, verbose, lmode)`
+/// (vacuum.c:786) ported inline to return the real `Relation<'mcx>` (vacuum.c's
+/// reachable form returns an Oid). Open and lock a relation to be analyzed,
+/// emitting an appropriate log on failure. Returns `None` if the relation could
+/// not be opened/locked.
+///
+/// SKIP_LOCKED IS exercised by the ANALYZE caller: `ANALYZE (SKIP_LOCKED) ...`
+/// flows `params.options & VACOPT_SKIP_LOCKED` into `analyze_rel`, which must
+/// acquire the lock conditionally (non-blocking) and skip the relation with a
+/// WARNING ("lock not available") rather than wait. C acquires the lock in
+/// non-blocking mode via `ConditionalLockRelationOid` first, then opens with
+/// `NoLock`.
 fn vacuum_open_relation<'mcx>(
     mcx: Mcx<'mcx>,
     relid: Oid,
     relation: Option<&RangeVar<'mcx>>,
-    _options: types_core::primitive::bits32,
-    _verbose: bool,
+    options: types_core::primitive::bits32,
+    verbose: bool,
     lmode: LOCKMODE,
 ) -> PgResult<Option<Relation<'mcx>>> {
-    let rel = try_table_open(mcx, relid, lmode)?;
+    let mut rel_lock = true;
+
+    debug_assert!((options & (VACOPT_VACUUM | VACOPT_ANALYZE)) != 0);
+
+    // Open the relation and get the appropriate lock on it.
+    //
+    // If we've been asked not to wait for the relation lock, acquire it first
+    // in non-blocking mode, before calling try_relation_open().
+    let rel: Option<Relation<'mcx>> = if options & VACOPT_SKIP_LOCKED == 0 {
+        try_table_open(mcx, relid, lmode)?
+    } else if backend_commands_vacuum_seams::conditional_lock_relation_oid::call(relid, lmode)? {
+        try_table_open(mcx, relid, NoLock)?
+    } else {
+        rel_lock = false;
+        None
+    };
+
+    // if relation is opened, leave
     if rel.is_some() {
         return Ok(rel);
     }
-    // Relation could not be opened. Generate a log if a RangeVar name is known.
+
+    // Relation could not be opened, hence generate if possible a log informing
+    // on the situation. If the RangeVar is not defined, we do not have enough
+    // information to provide a meaningful log statement.
     let Some(relation) = relation else {
         return Ok(None);
     };
+
+    // Determine the log level. For manual ANALYZE, we emit a WARNING to match
+    // the log statements in the permission checks; otherwise, only log if the
+    // caller so requested.
+    let elevel = if !backend_commands_vacuum_seams::am_autovacuum_worker_process::call()? {
+        WARNING
+    } else if verbose {
+        LOG
+    } else {
+        return Ok(None);
+    };
+
     let relname = relation
         .relname
         .as_ref()
         .map(|s| s.as_str().to_string())
         .unwrap_or_default();
-    // Non-autovacuum: WARNING (the autovacuum elevel leg is not reachable here).
-    ereport(WARNING)
-        .errmsg(format!(
-            "skipping analyze of \"{}\" --- relation no longer exists",
-            relname
-        ))
-        .finish(here("vacuum_open_relation"))?;
+
+    // This inline form is only reached from the ANALYZE driver (analyze_rel),
+    // which always strips VACOPT_VACUUM, so only the ANALYZE legs apply.
+    if (options & VACOPT_ANALYZE) != 0 {
+        if !rel_lock {
+            ereport(elevel)
+                .errcode(ERRCODE_LOCK_NOT_AVAILABLE)
+                .errmsg(format!(
+                    "skipping analyze of \"{}\" --- lock not available",
+                    relname
+                ))
+                .finish(here("vacuum_open_relation"))?;
+        } else {
+            ereport(elevel)
+                .errcode(ERRCODE_UNDEFINED_TABLE)
+                .errmsg(format!(
+                    "skipping analyze of \"{}\" --- relation no longer exists",
+                    relname
+                ))
+                .finish(here("vacuum_open_relation"))?;
+        }
+    }
+
     Ok(None)
 }
 

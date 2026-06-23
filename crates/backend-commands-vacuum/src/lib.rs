@@ -118,8 +118,9 @@ const MAX_BAS_VAC_RING_SIZE_KB: i32 = 16 * 1024 * 1024;
 const MAX_PARALLEL_WORKER_LIMIT: i32 = 1024;
 /// `SECURITY_RESTRICTED_OPERATION` (miscadmin.h).
 const SECURITY_RESTRICTED_OPERATION: i32 = 0x0002;
-/// `RVR_SKIP_LOCKED` (catalog/namespace.h).
-const RVR_SKIP_LOCKED: i32 = 0x02;
+/// `RVR_SKIP_LOCKED` (catalog/namespace.h) — `1 << 2`. (`RVR_MISSING_OK = 1 <<
+/// 0`, `RVR_NOWAIT = 1 << 1`, `RVR_SKIP_LOCKED = 1 << 2`.)
+const RVR_SKIP_LOCKED: i32 = 1 << 2;
 /// `FirstMultiXactId` (access/multixact.h:25) — `((MultiXactId) 1)`.
 const FirstMultiXactId: MultiXactId = 1;
 /// `PARALLEL_VACUUM_DELAY_REPORT_INTERVAL_NS` (vacuum.c) — `NS_PER_S`.

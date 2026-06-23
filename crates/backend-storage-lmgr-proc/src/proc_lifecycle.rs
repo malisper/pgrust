@@ -129,6 +129,15 @@ fn init_my_proc_common(proc: &mut PGPROC, procno: ProcNumber, regular: bool) {
     crate::proc_shmem::set_proc_xmin_shared(procno, InvalidTransactionId);
     crate::proc_shmem::set_proc_database_id_shared(procno, InvalidOid);
     crate::proc_shmem::set_proc_status_flags_shared(procno, proc.statusFlags);
+    // Mirror the fresh xid / vxid.lxid / fast-path VXID fields into the
+    // genuinely-shared per-proc arrays so a reused slot never reports a stale
+    // running xid/vxid to a cross-process GetLockConflicts/VirtualXactLock probe.
+    crate::proc_shmem::set_proc_xid_shared(procno, InvalidTransactionId);
+    crate::proc_shmem::set_proc_vxid_lxid_shared(procno, InvalidLocalTransactionId);
+    // A regular backend's vxid.procNumber is its own proc number.
+    crate::proc_shmem::set_proc_vxid_procno_shared(procno, procno);
+    crate::proc_shmem::set_proc_fp_vxid_lock_shared(procno, false);
+    crate::proc_shmem::set_proc_fp_local_xid_shared(procno, InvalidLocalTransactionId);
 }
 
 /// `InitProcess(void)` — claim a `PGPROC` for a regular/background backend.
@@ -325,6 +334,13 @@ pub fn InitAuxiliaryProcess(_mcx: Mcx<'_>) -> PgResult<()> {
     crate::proc_shmem::set_proc_xmin_shared(aux_procno, InvalidTransactionId);
     crate::proc_shmem::set_proc_database_id_shared(aux_procno, InvalidOid);
     crate::proc_shmem::set_proc_status_flags_shared(aux_procno, 0);
+    // Mirror the fresh xid / vxid.lxid / fast-path VXID fields into shared.
+    crate::proc_shmem::set_proc_xid_shared(aux_procno, InvalidTransactionId);
+    crate::proc_shmem::set_proc_vxid_lxid_shared(aux_procno, InvalidLocalTransactionId);
+    // An aux proc uses INVALID_PROC_NUMBER for vxid.procNumber.
+    crate::proc_shmem::set_proc_vxid_procno_shared(aux_procno, INVALID_PROC_NUMBER);
+    crate::proc_shmem::set_proc_fp_vxid_lock_shared(aux_procno, false);
+    crate::proc_shmem::set_proc_fp_local_xid_shared(aux_procno, InvalidLocalTransactionId);
 
     // Acquire ownership of the PGPROC's latch and repoint the process latch.
     seam::own_latch(aux_procno);

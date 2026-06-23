@@ -1315,18 +1315,30 @@ fn scan_pg_constraint_nncheck_seam(relid: Oid) -> PgResult<Vec<ScannedConstraint
 }
 
 /// `RelationInitLockInfo(relation)` (relcache.c): fill `rd_lockInfo.lockRelId`
-/// from the relation's OID and database (`InvalidOid` for shared relations).
-/// **Own logic.**
+/// from the relation's OID and database (`InvalidOid` for shared relations,
+/// `MyDatabaseId` otherwise).
+///
+/// C:
+/// ```c
+/// relation->rd_lockInfo.lockRelId.relId = RelationGetRelid(relation);
+/// if (relation->rd_rel->relisshared)
+///     relation->rd_lockInfo.lockRelId.dbId = InvalidOid;
+/// else
+///     relation->rd_lockInfo.lockRelId.dbId = MyDatabaseId;
+/// ```
+///
+/// The non-shared `dbId` must be `MyDatabaseId`: `rd_lockInfo.lockRelId` is the
+/// value `WaitForLockersMultiple` (DETACH PARTITION CONCURRENTLY), `index_drop`
+/// (DROP INDEX CONCURRENTLY) and the vacuumlazy truncation interlock build their
+/// `SET_LOCKTAG_RELATION` tag from. Leaving it `InvalidOid` produces a tag whose
+/// `dbId` does not match the tag the ordinary `LockRelationOid` path builds
+/// (which resolves `dbid = MyDatabaseId` for non-shared relations), so the
+/// locker scan finds no conflicting holders and never waits.
 fn RelationInitLockInfo(relation: &mut RelationData) {
     relation.rd_lockInfo.lockRelId.relId = relation.rd_id;
-    // C: lockRelId.dbId = relisshared ? InvalidOid : MyDatabaseId. The
-    // MyDatabaseId backend-state read lands with the init/postinit owner; for a
-    // shared relation it is unconditionally InvalidOid.
     relation.rd_lockInfo.lockRelId.dbId = if relation.rd_rel.relisshared {
         InvalidOid
     } else {
-        // MyDatabaseId: filled by the owner; InvalidOid until then (a non-shared
-        // relation's dbId is a backend-state read, not catalog data).
-        InvalidOid
+        backend_utils_init_small_seams::my_database_id::call()
     };
 }
