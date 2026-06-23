@@ -22,6 +22,7 @@
 //! infallible like the C call sites expect (no palloc means OOM is not part
 //! of its failure surface, so no `PgResult`).
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::mem::MaybeUninit;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -51,6 +52,7 @@ fn os_gettimeofday() -> (i64, i64) {
 /// ru_stime.tv_sec, ru_stime.tv_usec)`. On failure (which `getrusage`
 /// essentially never returns for RUSAGE_SELF) reports zeros — the benign
 /// degradation C would get from an all-zero `struct rusage`.
+#[cfg(not(target_arch = "wasm32"))]
 fn os_getrusage_self() -> (i64, i64, i64, i64) {
     let mut ru: MaybeUninit<libc::rusage> = MaybeUninit::uninit();
     // SAFETY: `getrusage` fills `ru` for RUSAGE_SELF; read only on success.
@@ -65,6 +67,15 @@ fn os_getrusage_self() -> (i64, i64, i64, i64) {
         ru.ru_stime.tv_sec as i64,
         ru.ru_stime.tv_usec as i64,
     )
+}
+
+/// wasm32 (single-process) stub: `getrusage` is unavailable under
+/// wasm32-wasip1, so CPU-time accounting reports zero. Only affects the
+/// cosmetic "CPU: user/system" progress strings in VACUUM/ANALYZE/CLUSTER;
+/// wall-clock elapsed (via `gettimeofday`/`SystemTime`) is still accurate.
+#[cfg(target_arch = "wasm32")]
+fn os_getrusage_self() -> (i64, i64, i64, i64) {
+    (0, 0, 0, 0)
 }
 
 /// Initialize usage snapshot. As in C, OS-call failure status is ignored.
