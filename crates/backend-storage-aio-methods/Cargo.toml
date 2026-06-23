@@ -17,9 +17,13 @@ types-storage = { path = "../types-storage" }
 types-condvar = { path = "../types-condvar" }
 types-tuple = { path = "../types-tuple" }
 types-guc = { path = "../types-guc" }
+# StartupData (the io_worker_main entry-point arg).
+types-startup = { path = "../types-startup" }
 backend-utils-error = { path = "../backend-utils-error" }
 # Inward seams this crate installs (aio_shmem_size/aio_shmem_init/pgaio_init_backend).
 backend-storage-aio-seams = { path = "../backend-storage-aio-seams" }
+# The io_worker_main seam this crate installs (IoWorkerMain aux-process entry).
+backend-storage-aio-methods-seams = { path = "../backend-storage-aio-methods-seams" }
 backend-postmaster-postmaster-seams = { path = "../backend-postmaster-postmaster-seams" }
 # Size arithmetic (add_size/mul_size), faithfully overflow-checked.
 backend-storage-ipc-shmem-seams = { path = "../backend-storage-ipc-shmem-seams" }
@@ -59,5 +63,40 @@ backend-storage-aio-completion-seams = { path = "../backend-storage-aio-completi
 # wait_read_buffers / wref_check_done), which this engine installs over the
 # real PgAioHandle lifecycle (bufmgr.c AsyncReadBuffers / WaitReadBuffers).
 backend-storage-buffer-bufmgr-seams = { path = "../backend-storage-buffer-bufmgr-seams" }
+
+# --- method_worker.c (the worker IO method + IoWorkerMain aux process) ---
+# wait-event constants (WAIT_EVENT_IO_WORKER_MAIN) + PG_WAIT_* bases.
+types-pgstat = { path = "../types-pgstat" }
+# The AioWorkerSubmissionQueue built-in LWLock (real cross-process MainLWLockArray).
+backend-storage-lmgr-lwlock = { path = "../backend-storage-lmgr-lwlock" }
+# ShmemInitStruct (the AioWorkerSubmissionQueue + AioWorkerControl shmem).
+# (the seam crate `backend-storage-ipc-shmem-seams` is already a dependency.)
+# Latch wakeups: WaitLatch(MyLatch)/ResetLatch + SetLatch on a worker's procLatch
+# by procno (the C `worker->latch = MyLatch` is the aux proc's shared procLatch).
+backend-storage-ipc-latch-seams = { path = "../backend-storage-ipc-latch-seams" }
+# WL_LATCH_SET / WL_EXIT_ON_PM_DEATH flags + LWLockMode + MAX_IO_WORKERS sizing.
+# (types-storage is already a dependency.)
+# ShutdownRequestPending / ConfigReloadPending flags (the worker loop predicate).
+backend-postmaster-interrupt = { path = "../backend-postmaster-interrupt" }
+# AuxiliaryProcessMainCommon (the aux-process bootstrap IoWorkerMain runs first).
+backend-postmaster-auxprocess-seams = { path = "../backend-postmaster-auxprocess-seams" }
+# pqsignal(signo, handler) installer + UnBlockSig (the worker's signal setup).
+port-pqsignal-seams = { path = "../port-pqsignal-seams" }
+backend-libpq-pqsignal-seams = { path = "../backend-libpq-pqsignal-seams" }
+# procsignal_sigusr1_handler (SIGUSR1 disposition for ProcSignalBarriers).
+backend-storage-ipc-procsignal = { path = "../backend-storage-ipc-procsignal" }
+# die (SIGINT disposition — "to allow manually triggering worker restart").
+backend-tcop-postgres-seams = { path = "../backend-tcop-postgres-seams" }
+# SignalHandlerForConfigReload / SignalHandlerForShutdownRequest are in interrupt.
+# proc_exit / on_shmem_exit (worker registration + normal/error exit).
+# (backend-storage-ipc-dsm-core-seams is already a dependency.)
+# ProcessConfigFile(PGC_SIGHUP) on a config reload.
+# (backend-utils-misc-guc-seams is already a dependency.)
+# set_ps_display(cmd) (the "%d" worker-id display).
+backend-utils-misc-ps-status-seams = { path = "../backend-utils-misc-ps-status-seams" }
+# SigHandler enum for pqsignal dispositions.
+types-signal = { path = "../types-signal" }
+# libc (SIGHUP/SIGINT/... constants for pqsignal + ENOENT).
+libc = "0.2"
 
 [dev-dependencies]

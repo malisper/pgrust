@@ -90,14 +90,18 @@
 //! (`resource_owner_*_aio_handle`). They are reached only on the async /
 //! buffered-IO completion path, never on the `io_method = sync` boot path.
 //!
-//! The asynchronous IO *methods* (`method_worker.c`, `method_io_uring.c`)
-//! remain seam-and-panic: the worker method is postmaster-blocked (its shmem
-//! queue + IO-worker child process loop need the unported postmaster
-//! supervisor) and io_uring has no liburing FFI binding crate. The synchronous
-//! method (`method_sync.c`) makes every IO execute inline via
-//! `pgaio_io_perform_synchronously`; `pgaio_sync_submit` faithfully reproduces
-//! the C `elog(ERROR, "IO should have been executed synchronously")` (never
-//! reached, as `needs_synchronous_execution` returns true).
+//! The **worker IO method** (`method_worker.c`, PG 18's *default* `io_method =
+//! worker`) is now ported in [`method_worker`]: the `AioWorkerSubmissionQueue`
+//! ring + `AioWorkerControl` block in real cross-process `ShmemInitStruct`
+//! shmem, the `pgaio_worker_submit` enqueue-and-wake path, and the
+//! `IoWorkerMain` aux-process loop (the postmaster already spawns/reaps the
+//! `io_workers` children; this installs the loop they run via the
+//! `io_worker_main` seam). `method_io_uring.c` remains seam-and-panic (no
+//! liburing FFI binding crate). The synchronous method (`method_sync.c`) makes
+//! every IO execute inline via `pgaio_io_perform_synchronously`;
+//! `pgaio_sync_submit` faithfully reproduces the C `elog(ERROR, "IO should have
+//! been executed synchronously")` (never reached, as
+//! `needs_synchronous_execution` returns true).
 
 extern crate alloc;
 
@@ -522,8 +526,9 @@ pub struct IoMethodOps {
     pub init_backend: Option<fn() -> PgResult<()>>,
     /// `bool (*needs_synchronous_execution)(PgAioHandle *ioh)`.
     pub needs_synchronous_execution: Option<fn(&PgAioHandle) -> bool>,
-    /// `int (*submit)(uint16 num_staged_ios, PgAioHandle **staged_ios)`.
-    pub submit: Option<fn(num_staged_ios: u16) -> PgResult<i32>>,
+    /// `int (*submit)(uint16 num_staged_ios, PgAioHandle **staged_ios)` — the
+    /// staged io-handle indices (`pgaio_my_backend->staged_ios[0..num]`).
+    pub submit: Option<fn(staged_ios: &[usize]) -> PgResult<i32>>,
     /// `void (*wait_one)(PgAioHandle *ioh, uint64 ref_generation)`.
     pub wait_one: Option<fn(&PgAioHandle, u64)>,
 }
@@ -541,7 +546,7 @@ fn pgaio_sync_needs_synchronous_execution(_ioh: &PgAioHandle) -> bool {
 /// Never reached: `needs_synchronous_execution` returns true, so the engine
 /// executes the IO inline (`pgaio_io_perform_synchronously`) and never calls
 /// `submit`. Faithful to the C error nonetheless.
-fn pgaio_sync_submit(_num_staged_ios: u16) -> PgResult<i32> {
+fn pgaio_sync_submit(_staged_ios: &[usize]) -> PgResult<i32> {
     Err(PgError::error("IO should have been executed synchronously"))
 }
 
@@ -558,50 +563,21 @@ fn pgaio_sync_ops() -> IoMethodOps {
     }
 }
 
-/// `const IoMethodOps pgaio_worker_ops` (method_worker.c) — the worker IO method
-/// is unported (task #15, F4). Its `shmem_size`/`shmem_init`/`init_backend`/
-/// `submit`/`wait_one` all reach the worker-process queue machinery, so they
-/// panic with the C symbol until method_worker.c lands. A cluster running the
-/// default `io_method = worker` reaches these from `AioShmemSize`/`AioShmemInit`
-/// (the worker method reserves a shmem queue); that is the precise, correct
-/// "worker method unported" boundary. Under `io_method = sync` the boot path
-/// never selects this entry.
+/// `const IoMethodOps pgaio_worker_ops` (method_worker.c) — the worker IO
+/// method, now ported in [`method_worker`]. A cluster running the default
+/// `io_method = worker` reaches its `shmem_size`/`shmem_init` from
+/// `AioShmemSize`/`AioShmemInit` (the worker method reserves the shmem
+/// submission queue + control block) and its `submit` /
+/// `needs_synchronous_execution` from the engine staging path.
 fn pgaio_worker_ops() -> IoMethodOps {
-    IoMethodOps {
-        // method_worker.c: `.wait_on_fd_before_close = true`.
-        wait_on_fd_before_close: true,
-        shmem_size: Some(|| {
-            panic!(
-                "pgaio_worker_shmem_size: the worker IO method (method_worker.c) \
-                 is not yet ported (task #15 F4); run io_method = sync"
-            )
-        }),
-        shmem_init: Some(|_first_time| {
-            panic!(
-                "pgaio_worker_shmem_init: the worker IO method (method_worker.c) \
-                 is not yet ported (task #15 F4); run io_method = sync"
-            )
-        }),
-        init_backend: Some(|| {
-            panic!(
-                "pgaio_worker_init_backend: the worker IO method (method_worker.c) \
-                 is not yet ported (task #15 F4); run io_method = sync"
-            )
-        }),
-        needs_synchronous_execution: None,
-        submit: Some(|_n| {
-            panic!(
-                "pgaio_worker_submit: the worker IO method (method_worker.c) is \
-                 not yet ported (task #15 F4); run io_method = sync"
-            )
-        }),
-        wait_one: Some(|_ioh, _gen| {
-            panic!(
-                "pgaio_worker_wait_one: the worker IO method (method_worker.c) is \
-                 not yet ported (task #15 F4); run io_method = sync"
-            )
-        }),
-    }
+    method_worker::pgaio_worker_ops()
+}
+
+/// The `IoMethodOps.submit` trampoline for the worker method — the ops table
+/// holds a `fn` pointer, so this thin free function bridges to the module's
+/// `pgaio_worker_submit`.
+pub(crate) fn pgaio_worker_submit_bridge(staged_ios: &[usize]) -> PgResult<i32> {
+    method_worker::pgaio_worker_submit(staged_ios)
 }
 
 /// `static const IoMethodOps *const pgaio_method_ops_table[]` (aio.c) — indexed
@@ -660,10 +636,10 @@ fn io_max_combine_limit() -> i32 {
 /// Read `io_workers` from the live GUC store. In C this is the plain global
 /// `int io_workers = 3` (method_worker.c) which is *itself* the storage cell the
 /// `io_workers` GUC's `&io_workers` points at, so reading the GUC slot is reading
-/// the variable. The worker IO method (method_worker.c) that consumes it is
-/// unported (task #15 F4); this accessor still owns the variable so the GUC
-/// machinery (SIGHUP reload, SHOW) reads/writes the right cell. The boot value is
-/// `3` (`MAX_IO_WORKERS` upper bound).
+/// the variable. The worker IO method (method_worker.c) that consumes it is now
+/// ported ([`method_worker`]); this accessor owns the variable so the GUC
+/// machinery (SIGHUP reload, SHOW) and the postmaster's `maybe_adjust_io_workers`
+/// read/write the right cell. The boot value is `3`.
 fn io_workers() -> i32 {
     backend_utils_misc_guc::get_int("io_workers").unwrap_or(3)
 }
@@ -1193,6 +1169,12 @@ pub fn init_seams() {
         current_io_method() == IOMETHOD_WORKER
     });
 
+    // The IO-worker aux-process entry point the postmaster's
+    // `postmaster_child_launch` dispatches `B_IO_WORKER` children to
+    // (`IoWorkerMain` in method_worker.c). The postmaster already spawns/reaps
+    // io_workers; this installs the loop they run.
+    backend_storage_aio_methods_seams::io_worker_main::set(method_worker::io_worker_main);
+
     // The aio.c engine entry points the VFD / xact / resowner call sites reach.
     // The three per-consumer seam crates (`-seams` via vfd_core.rs, `-aio-seams`
     // via vfd_io.rs, `-core-seams` via allocated_desc.rs) each declare their own
@@ -1259,6 +1241,7 @@ pub mod aio_callback;
 pub mod aio_funcs;
 pub mod aio_io;
 pub mod aio_target;
+pub mod method_worker;
 
 #[cfg(test)]
 mod tests;

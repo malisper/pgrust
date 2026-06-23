@@ -847,10 +847,19 @@ pub fn pgaio_have_staged() -> bool {
 
 /// `void pgaio_submit_staged(void)` (aio.c).
 pub fn pgaio_submit_staged() -> PgResult<()> {
-    let num_staged_ios = mb().num_staged_ios;
-    if num_staged_ios == 0 {
-        return Ok(());
-    }
+    // Snapshot this backend's staged io-handle index list (C passes the engine
+    // method `(num_staged_ios, pgaio_my_backend->staged_ios)`).
+    let staged: alloc::vec::Vec<usize> = {
+        let mb = mb();
+        let num = mb.num_staged_ios as usize;
+        if num == 0 {
+            return Ok(());
+        }
+        mb.staged_ios[..num]
+            .iter()
+            .map(|s| s.expect("staged_ios slot is None within num_staged_ios"))
+            .collect()
+    };
 
     misc::start_crit_section::call();
 
@@ -858,7 +867,7 @@ pub fn pgaio_submit_staged() -> PgResult<()> {
     let submit = ops
         .submit
         .expect("io method has no submit callback (pgaio_submit_staged)");
-    let did_submit = submit(num_staged_ios)?;
+    let did_submit = submit(&staged)?;
 
     misc::end_crit_section::call();
 
