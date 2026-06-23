@@ -452,11 +452,12 @@ pub fn statext_ndistinct_deserialize(data: Option<&[u8]>) -> PgResult<Option<MVN
     // underflow) or larger than the buffer (so reads would over-run); validate
     // before deriving the exhdr length (Allocation-Safety HARD RULE).
     let total = varsize_any(bytes)?;
-    if total < VARHDRSZ || total > bytes.len() {
+    let hdrsz = varhdrsz_any(bytes); // 1 (short) or VARHDRSZ (long)
+    if total < hdrsz || total > bytes.len() {
         return Err(PgError::error("invalid ndistinct varlena length")
             .with_sqlstate(ERRCODE_DATA_CORRUPTED));
     }
-    let exhdr = total - VARHDRSZ; // VARSIZE_ANY_EXHDR(data)
+    let exhdr = total - hdrsz; // VARSIZE_ANY_EXHDR(data)
 
     // we expect at least the basic fields of MVNDistinct struct
     if exhdr < SIZE_OF_HEADER {
@@ -466,7 +467,7 @@ pub fn statext_ndistinct_deserialize(data: Option<&[u8]>) -> PgResult<Option<MVN
     }
 
     // initialize pointer to the data part (skip the varlena header)
-    let mut tmp = VARHDRSZ;
+    let mut tmp = hdrsz;
 
     // read the header fields and perform basic sanity checks
     let magic = read_u32(bytes, &mut tmp)?;
@@ -706,17 +707,39 @@ fn set_varsize(buf: &mut [u8], len: usize) {
     buf[0..4].copy_from_slice(&header.to_ne_bytes());
 }
 
-/// `VARSIZE_ANY(ptr)` — total varlena size in bytes, for the 4-byte (long)
-/// uncompressed format the serialized bytea always uses.
-fn varsize_any(bytes: &[u8]) -> PgResult<usize> {
-    if bytes.len() < VARHDRSZ {
-        return Err(PgError::error(format!(
-            "invalid MVNDistinct size {} (expected at least {SIZE_OF_HEADER})",
-            bytes.len()
-        )));
+/// `VARHDRSZ_SHORT` — the 1-byte short varlena header size.
+const VARHDRSZ_SHORT: usize = 1;
+
+/// `VARHDRSZ_ANY(ptr)` — the on-disk varlena length-header size: 1 byte for a
+/// short (low-bit-set) header, else `VARHDRSZ` (4). A stored `pg_ndistinct`
+/// value arrives short-headed once `SHORT_VARLENA_PACKING` is on; the
+/// deserializer must skip the real header, not a fixed 4. No-op while the flag
+/// is off (every stored value is 4B).
+#[inline]
+fn varhdrsz_any(bytes: &[u8]) -> usize {
+    match bytes.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => VARHDRSZ_SHORT,
+        _ => VARHDRSZ,
     }
-    let header = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
-    Ok((header >> 2) as usize)
+}
+
+/// `VARSIZE_ANY(ptr)` — total varlena size in bytes, handling both the 1-byte
+/// short and 4-byte long uncompressed header forms.
+fn varsize_any(bytes: &[u8]) -> PgResult<usize> {
+    match bytes.first() {
+        // Short (1-byte) header: bits 7..1 hold the total length (incl. header).
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => Ok((h >> 1) as usize),
+        _ => {
+            if bytes.len() < VARHDRSZ {
+                return Err(PgError::error(format!(
+                    "invalid MVNDistinct size {} (expected at least {SIZE_OF_HEADER})",
+                    bytes.len()
+                )));
+            }
+            let header = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
+            Ok((header >> 2) as usize)
+        }
+    }
 }
 
 /// Read a native `u32` at `*tmp`, advancing `*tmp`.

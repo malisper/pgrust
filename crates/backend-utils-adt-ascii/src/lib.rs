@@ -199,11 +199,15 @@ fn arg_text<'a>(arg: FmgrArg<'a, '_>) -> &'a [u8] {
     const VARHDRSZ: usize = 4;
     match arg {
         FmgrArg::Ref(RefPayload::Varlena(b)) => {
+            // VARDATA_ANY: a short (1-byte, low-bit-set) header skips ONE byte,
+            // an ordinary 4-byte header skips VARHDRSZ. A stored `text` arrives
+            // short-headed once SHORT_VARLENA_PACKING is on; a fixed 4-byte strip
+            // would drop three payload bytes. No-op while the flag is off.
             let image = b.as_slice();
-            if image.len() >= VARHDRSZ {
-                &image[VARHDRSZ..]
-            } else {
-                &[]
+            match image.first() {
+                Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+                Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+                _ => &[],
             }
         }
         FmgrArg::Ref(RefPayload::Cstring(s)) => s.as_bytes(),

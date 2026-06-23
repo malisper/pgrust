@@ -2467,8 +2467,15 @@ fn get_rel_name_or_qmarks<'mcx>(mcx: Mcx<'mcx>, relid: Oid) -> PgResult<String> 
 /// varlena header; `textToQualifiedNameList`'s input).
 fn text_to_str(t: &types_datum::varlena::Bytea<'_>) -> String {
     let bytes = t.as_bytes();
-    // VARDATA: skip the 4-byte varlena header.
-    let data = if bytes.len() >= 4 { &bytes[4..] } else { bytes };
+    // VARDATA_ANY: `pg_getarg_text_pp` is a packed-detoast, so a short
+    // (1-byte, low-bit-set) header survives once SHORT_VARLENA_PACKING is on;
+    // skip ONE byte for it, else the ordinary 4-byte VARHDRSZ. A fixed 4-byte
+    // strip would drop three payload bytes. No-op while the flag is off.
+    let data = match bytes.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &bytes[1..],
+        Some(_) if bytes.len() >= 4 => &bytes[4..],
+        _ => &bytes[..0],
+    };
     String::from_utf8_lossy(data).into_owned()
 }
 

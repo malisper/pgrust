@@ -26,10 +26,14 @@ fn arg_bytea_body<'a>(fcinfo: &'a FunctionCallInfoBaseData, i: usize) -> &'a [u8
         .ref_arg(i)
         .and_then(|p| p.as_varlena())
         .expect("pg_ndistinct fn: by-ref bytea arg missing from by-ref lane");
-    if image.len() >= VARHDRSZ {
-        &image[VARHDRSZ..]
-    } else {
-        &[]
+    // VARDATA_ANY: a degenerate (small) stored `pg_ndistinct` value arrives
+    // short-headed (1-byte, low-bit-set) once SHORT_VARLENA_PACKING is on; skip
+    // ONE byte for it, else the ordinary 4-byte VARHDRSZ. A fixed 4-byte strip
+    // would drop three payload bytes. No-op while the flag is off.
+    match image.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &image[1..],
+        Some(_) if image.len() >= VARHDRSZ => &image[VARHDRSZ..],
+        _ => &[],
     }
 }
 

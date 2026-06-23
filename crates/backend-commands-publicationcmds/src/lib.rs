@@ -2870,10 +2870,17 @@ fn bitmapset_members(bms: Option<&types_nodes::bitmapset::Bitmapset<'_>>) -> Vec
 /// (skipping the 4-byte length header).
 fn text_datum_str(datum: &Datum<'_>) -> String {
     let bytes = datum.as_ref_bytes();
-    if bytes.len() <= 4 {
-        return String::new();
-    }
-    String::from_utf8_lossy(&bytes[4..]).into_owned()
+    // VARDATA_ANY: the source is a stored catalog `text` attribute
+    // (SysCacheGetAttr on pg_publication_rel.prqual), which arrives short-headed
+    // (1-byte, low-bit-set) once SHORT_VARLENA_PACKING is on; skip ONE byte for
+    // it, else the ordinary 4-byte VARHDRSZ. A fixed 4-byte strip would drop
+    // three payload bytes. No-op while the flag is off.
+    let data = match bytes.first() {
+        Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => &bytes[1..],
+        Some(_) if bytes.len() >= 4 => &bytes[4..],
+        _ => return String::new(),
+    };
+    String::from_utf8_lossy(data).into_owned()
 }
 
 /// `aclcheck_error(aclerr, objtype, objectname)` (aclchk.c) — the C is

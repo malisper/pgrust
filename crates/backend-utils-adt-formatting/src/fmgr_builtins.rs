@@ -223,11 +223,15 @@ fn arg_text_body(fcinfo: &FunctionCallInfoBaseData, i: usize) -> PgResult<Vec<u8
         .expect("to_date/to_timestamp fn: text arg missing from by-ref lane");
     Ok(match payload {
         RefPayload::Varlena(b) => {
+            // VARDATA_ANY: a short (1-byte, low-bit-set) header skips ONE byte,
+            // an ordinary 4-byte header skips VARHDRSZ. A stored `text` arrives
+            // short-headed once SHORT_VARLENA_PACKING is on; a fixed 4-byte strip
+            // would drop three payload bytes. No-op while the flag is off.
             let img = b.as_slice();
-            if img.len() >= 4 {
-                img[4..].to_vec()
-            } else {
-                Vec::new()
+            match img.first() {
+                Some(&h) if h != 0x01 && (h & 0x01) == 0x01 => img[1..].to_vec(),
+                Some(_) if img.len() >= 4 => img[4..].to_vec(),
+                _ => Vec::new(),
             }
         }
         RefPayload::Cstring(s) => s.as_bytes().to_vec(),
