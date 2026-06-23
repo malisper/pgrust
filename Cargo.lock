@@ -9662,6 +9662,7 @@ dependencies = [
  "backend-rewrite-rewritehandler",
  "backend-tcop-dest-seams",
  "backend-tcop-postgres-seams",
+ "backend-utils-activity-pgstat-database-seams",
  "backend-utils-activity-status-seams",
  "backend-utils-cache-lsyscache-seams",
  "backend-utils-cache-partcache",

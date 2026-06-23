@@ -13,6 +13,9 @@ backend-access-transam-parallel-rt-seams = { path = "../backend-access-transam-p
 # pgstat_report_query_id (execMain.c:132): advertise the running query's queryId
 # into pg_stat_activity at ExecutorStart.
 backend-utils-activity-status-seams = { path = "../backend-utils-activity-status-seams" }
+# pgstat_update_parallel_workers_stats (execMain.c standard_ExecutorEnd): flush the
+# EState's per-plan parallel worker counts into the per-database stats.
+backend-utils-activity-pgstat-database-seams = { path = "../backend-utils-activity-pgstat-database-seams" }
 backend-access-common-relation = { path = "../backend-access-common-relation" }
 backend-access-common-heaptuple = { path = "../backend-access-common-heaptuple" }
 backend-access-common-detoast-seams = { path = "../backend-access-common-detoast-seams" }

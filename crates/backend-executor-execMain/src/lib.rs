@@ -720,6 +720,26 @@ pub fn ExecutorRewind(query_desc: &mut QueryDesc) -> PgResult<()> {
 /// [`QueryDesc`] afterward releases the per-query context (the owned model's
 /// `FreeExecutorState`).
 pub fn standard_ExecutorEnd(query_desc: &mut QueryDesc) -> PgResult<()> {
+    // execMain.c standard_ExecutorEnd:
+    //   if (estate->es_parallel_workers_to_launch > 0)
+    //       pgstat_update_parallel_workers_stats(es_parallel_workers_to_launch,
+    //                                            es_parallel_workers_launched);
+    // Flush the per-plan parallel worker counts (accumulated by nodeGather /
+    // nodeGatherMerge into the EState) into the per-database pgstat counters that
+    // surface via pg_stat_database.{parallel_workers_to_launch,_launched}.
+    let (workers_to_launch, workers_launched) = query_desc.with_estate_mut(|estate| {
+        (
+            estate.es_parallel_workers_to_launch,
+            estate.es_parallel_workers_launched,
+        )
+    });
+    if workers_to_launch > 0 {
+        backend_utils_activity_pgstat_database_seams::pgstat_update_parallel_workers_stats::call(
+            workers_to_launch as i64,
+            workers_launched as i64,
+        );
+    }
+
     // Assert(estate); Assert(es_finished || EXPLAIN_ONLY). ExecEndPlan(planstate, estate).
     ExecEndPlan(query_desc)?;
 

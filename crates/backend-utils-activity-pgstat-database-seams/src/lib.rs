@@ -18,3 +18,13 @@ seam_core::seam!(
     /// per-database stats.
     pub fn pgstat_count_conn_txn_idle_time(usecs: i64)
 );
+
+seam_core::seam!(
+    /// `pgstat_update_parallel_workers_stats(PgStat_Counter workers_to_launch,
+    /// PgStat_Counter workers_launched)` (pgstat_database.c): accumulate the
+    /// number of parallel workers planned-to-launch and actually-launched for a
+    /// finished plan into this backend's pending per-database stats. Called from
+    /// `standard_ExecutorEnd` (execMain.c) when the EState recorded any parallel
+    /// workers to launch.
+    pub fn pgstat_update_parallel_workers_stats(workers_to_launch: i64, workers_launched: i64)
+);

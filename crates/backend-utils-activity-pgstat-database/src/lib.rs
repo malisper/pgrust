@@ -643,6 +643,17 @@ pub fn init_seams() {
     backend_utils_activity_pgstat_database_seams::pgstat_count_conn_txn_idle_time::set(|usecs| {
         pgstat_count_conn_txn_idle_time(usecs as PgStat_Counter);
     });
+    // execMain.c standard_ExecutorEnd flushes the EState's per-plan parallel
+    // worker counts into the pending per-database stats.
+    backend_utils_activity_pgstat_database_seams::pgstat_update_parallel_workers_stats::set(
+        |to_launch, launched| {
+            pgstat_update_parallel_workers_stats(
+                to_launch as PgStat_Counter,
+                launched as PgStat_Counter,
+            )
+            .expect("pgstat_update_parallel_workers_stats failed");
+        },
+    );
     backend_utils_activity_stat_seams::at_eoxact_pgstat_database::set(AtEOXact_PgStat_Database);
     backend_utils_activity_stat_seams::pgstat_set_session_end_cause_fatal::set(|| {
         // elog.c FATAL path: only mark fatal if no other cause is known.
