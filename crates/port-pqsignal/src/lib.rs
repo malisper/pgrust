@@ -29,6 +29,52 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 use types_signal::SigHandler;
 
+// ---------------------------------------------------------------------------
+// wasm (single-process) stub.
+//
+// wasip1 has no POSIX signals (`sigaction`/`raise`/`getpid`/`SIG*` are absent
+// from `libc`). Single-user wasm never delivers a signal, so `pqsignal_be`
+// only records the requested handler in the process registry (so callers that
+// later inspect/replace dispositions still see a coherent table) and performs
+// no kernel install. `wrapper_handler` is never reached because nothing raises.
+// ---------------------------------------------------------------------------
+#[cfg(target_family = "wasm")]
+mod wasm_stub {
+    use super::*;
+
+    /// Mirror of the native registry so `pqsignal_be` is still stateful.
+    /// Sized generously (64) to cover any signal number callers pass.
+    const PG_NSIG: usize = 64;
+    static PQSIGNAL_HANDLERS: [AtomicUsize; PG_NSIG] =
+        [const { AtomicUsize::new(0) }; PG_NSIG];
+
+    /// No-op `pqsignal()` for wasm: record the handler, never call the kernel.
+    pub fn pqsignal_be(signo: i32, func: SigHandler) {
+        debug_assert!(signo > 0);
+        if (signo as usize) < PG_NSIG {
+            let slot = match func {
+                SigHandler::Handler(f) => f as usize,
+                _ => 0,
+            };
+            PQSIGNAL_HANDLERS[signo as usize].store(slot, Ordering::Relaxed);
+        }
+    }
+
+    pub fn init_seams() {
+        port_pqsignal_seams::pqsignal::set(pqsignal_be);
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub use wasm_stub::{init_seams, pqsignal_be};
+
+#[cfg(not(target_family = "wasm"))]
+pub use native::{init_seams, pqsignal_be};
+
+#[cfg(not(target_family = "wasm"))]
+mod native {
+use super::*;
+
 /// `PG_NSIG` — the bound on signal numbers. C uses `NSIG` (the platform's
 /// highest signal number plus one). The `StaticAssertDecl`s in the C file
 /// only require that the common signals (`SIGUSR2`, `SIGHUP`, `SIGTERM`,
@@ -165,6 +211,8 @@ unsafe fn errno_location() -> *mut i32 {
 pub fn init_seams() {
     port_pqsignal_seams::pqsignal::set(pqsignal_be);
 }
+
+} // mod native
 
 #[cfg(test)]
 mod tests {
