@@ -178,3 +178,19 @@ seam_core::seam!(
     /// buffer's spill/stream/total decoding stats to pgstat.
     pub fn UpdateDecodingStats(ctx: &mut LogicalDecodingContext) -> PgResult<()>
 );
+
+seam_core::seam!(
+    /// `LogicalOutputWrite(ctx, lsn, xid, last_write)` (logicalfuncs.c:61) — the
+    /// SQL-function (#351 `OutputWriter::SqlSrf`) write callback. Reads the
+    /// finished `ctx->out` bytes, builds an `(lsn pg_lsn, xid xid, data text)`
+    /// row, and `tuplestore_putvalues`es it into the `ctx.output_writer_private`
+    /// `DecodingOutputState` tuplestore. Owned by `logicalfuncs` (the tuplestore /
+    /// funcapi Datum boundary lives there); `OutputPluginWrite` routes here when
+    /// the context's writer is `SqlSrf`. `lsn`/`xid` are `ctx.write_location` /
+    /// `ctx.write_xid`.
+    pub fn sql_srf_output_write(
+        ctx: &mut LogicalDecodingContext,
+        lsn: XLogRecPtr,
+        xid: TransactionId,
+    ) -> PgResult<()>
+);

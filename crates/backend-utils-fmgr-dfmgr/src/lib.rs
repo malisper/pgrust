@@ -872,7 +872,20 @@ fn install_load_external_function(
 /// `load_file`-shaped library load of the plugin, then the plugin's
 /// `_PG_output_plugin_init` vtable hook (loader runtime), returning the
 /// callback-presence bitmask.
+///
+/// Phase 0: the in-process registry of ported BUILTIN output plugins is
+/// consulted BEFORE the OS loader. The Rust backend exposes no C ABI, so an
+/// output plugin whose C body is ported in-process (e.g. `test_decoding`) cannot
+/// be `dlopen`ed; instead it registers a `BuiltinOutputPlugin` vtable here. A
+/// builtin match runs its `_PG_output_plugin_init`-equivalent and returns the
+/// callback-presence bitmask, exactly as the OS path would after filling the
+/// real `OutputPluginCallbacks` vtable.
 fn install_load_output_plugin(plugin: String) -> PgResult<u32> {
+    if let Some(builtin) =
+        backend_utils_fmgr_dfmgr_seams::resolve_builtin_output_plugin(&plugin)
+    {
+        return Ok((builtin.init)());
+    }
     let ctx = mcx::MemoryContext::new("load_output_plugin");
     // C (LoadOutputPlugin): load_external_function(plugin, "_PG_output_plugin_init",
     //    false, NULL) loads the library; the symbol+vtable init is loader runtime.
@@ -886,6 +899,119 @@ fn install_invoke_output_plugin_callback(
     inv: types_logical::CallbackInvocation,
 ) -> PgResult<bool> {
     loader::invoke_output_plugin_callback::call(inv)
+}
+
+/// Installer for `backend_utils_fmgr_dfmgr_seams::invoke_builtin_output_plugin_callback`:
+/// dispatch one callback to the builtin output plugin keyed by `ctx.builtin_plugin`,
+/// passing the LIVE `ctx`. Falls back to the flattened OS-loader seam if the
+/// context is somehow not flagged as a builtin (unreachable in this build —
+/// there is no C ABI to load a real `.so`).
+fn install_invoke_builtin_output_plugin_callback(
+    ctx: &mut types_logical::LogicalDecodingContext,
+    inv: &types_logical::CallbackInvocation,
+) -> PgResult<bool> {
+    if let Some(plugin) = ctx.builtin_plugin {
+        if let Some(result) =
+            backend_utils_fmgr_dfmgr_seams::registry_invoke_builtin_output_plugin(plugin, ctx, inv)
+        {
+            return result;
+        }
+    }
+    // Not a registered builtin: route to the OS-loaded plugin (graceful ERROR in
+    // this build, since open_library always fails).
+    loader::invoke_output_plugin_callback::call(types_logical::CallbackInvocation {
+        callback_name: inv.callback_name,
+        report_location: inv.report_location,
+        accept_writes: inv.accept_writes,
+        write_xid: inv.write_xid,
+        write_location: inv.write_location,
+        end_xact: inv.end_xact,
+        args: clone_callback_args(&inv.args),
+    })
+}
+
+/// Clone the resolved callback args (the flattened OS-loader seam takes them by
+/// value). The args are small projected values; the heavy tuple data is resolved
+/// lazily by the plugin via the reorderbuffer resolver seams.
+fn clone_callback_args(
+    args: &types_logical::OutputPluginCallbackArgs,
+) -> types_logical::OutputPluginCallbackArgs {
+    use types_logical::OutputPluginCallbackArgs as A;
+    match args {
+        A::Startup { is_init } => A::Startup { is_init: *is_init },
+        A::Shutdown => A::Shutdown,
+        A::Begin { txn } => A::Begin { txn: *txn },
+        A::Commit { txn, commit_lsn } => A::Commit { txn: *txn, commit_lsn: *commit_lsn },
+        A::BeginPrepare { txn } => A::BeginPrepare { txn: *txn },
+        A::Prepare { txn, prepare_lsn } => A::Prepare { txn: *txn, prepare_lsn: *prepare_lsn },
+        A::CommitPrepared { txn, commit_lsn } => {
+            A::CommitPrepared { txn: *txn, commit_lsn: *commit_lsn }
+        }
+        A::RollbackPrepared { txn, prepare_end_lsn, prepare_time } => A::RollbackPrepared {
+            txn: *txn,
+            prepare_end_lsn: *prepare_end_lsn,
+            prepare_time: *prepare_time,
+        },
+        A::Change { txn, relation, change } => {
+            A::Change { txn: *txn, relation: *relation, change: *change }
+        }
+        A::Truncate { txn, nrelations, relations, change } => A::Truncate {
+            txn: *txn,
+            nrelations: *nrelations,
+            relations: *relations,
+            change: *change,
+        },
+        A::Message {
+            txn,
+            message_lsn,
+            transactional,
+            prefix,
+            message_size,
+            message,
+        } => A::Message {
+            txn: *txn,
+            message_lsn: *message_lsn,
+            transactional: *transactional,
+            prefix: *prefix,
+            message_size: *message_size,
+            message: *message,
+        },
+        A::FilterPrepare { xid, gid } => A::FilterPrepare { xid: *xid, gid: gid.clone() },
+        A::FilterByOrigin { origin_id } => A::FilterByOrigin { origin_id: *origin_id },
+        A::StreamStart { txn } => A::StreamStart { txn: *txn },
+        A::StreamStop { txn } => A::StreamStop { txn: *txn },
+        A::StreamAbort { txn, abort_lsn } => A::StreamAbort { txn: *txn, abort_lsn: *abort_lsn },
+        A::StreamPrepare { txn, prepare_lsn } => {
+            A::StreamPrepare { txn: *txn, prepare_lsn: *prepare_lsn }
+        }
+        A::StreamCommit { txn, commit_lsn } => {
+            A::StreamCommit { txn: *txn, commit_lsn: *commit_lsn }
+        }
+        A::StreamChange { txn, relation, change } => {
+            A::StreamChange { txn: *txn, relation: *relation, change: *change }
+        }
+        A::StreamMessage {
+            txn,
+            message_lsn,
+            transactional,
+            prefix,
+            message_size,
+            message,
+        } => A::StreamMessage {
+            txn: *txn,
+            message_lsn: *message_lsn,
+            transactional: *transactional,
+            prefix: *prefix,
+            message_size: *message_size,
+            message: *message,
+        },
+        A::StreamTruncate { txn, nrelations, relations, change } => A::StreamTruncate {
+            txn: *txn,
+            nrelations: *nrelations,
+            relations: *relations,
+            change: *change,
+        },
+    }
 }
 
 /// Installer for `backend_utils_fmgr_dfmgr_seams::load_file`: supply the
@@ -952,6 +1078,19 @@ pub fn init_seams() {
     backend_utils_fmgr_dfmgr_seams::load_output_plugin::set(install_load_output_plugin);
     backend_utils_fmgr_dfmgr_seams::invoke_output_plugin_callback::set(
         install_invoke_output_plugin_callback,
+    );
+
+    // Phase-0 builtin output-plugin dispatch: the name-resolver (so
+    // StartupDecodingContext can flag `ctx.builtin_plugin`) and the live-ctx
+    // dispatch (so the `*_cb_wrapper`s reach the ported plugin's vtable WITH the
+    // live `&mut ctx`). Both delegate to the registry the seams crate owns; each
+    // builtin plugin (e.g. `contrib-test-decoding`) registers itself there from
+    // its own init_seams via `register_builtin_output_plugin`.
+    backend_utils_fmgr_dfmgr_seams::builtin_output_plugin_name::set(|plugin| {
+        backend_utils_fmgr_dfmgr_seams::resolve_builtin_output_plugin(plugin).map(|e| e.name)
+    });
+    backend_utils_fmgr_dfmgr_seams::invoke_builtin_output_plugin_callback::set(
+        install_invoke_builtin_output_plugin_callback,
     );
 
     // Parallel-worker transfer of the loaded-library list. The bodies are owned

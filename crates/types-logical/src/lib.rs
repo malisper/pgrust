@@ -255,6 +255,46 @@ pub struct LogicalDecodingContext {
     pub output_plugin_private: Option<Box<dyn core::any::Any>>,
     /// `bool processing_required`.
     pub processing_required: bool,
+    /// The name of the BUILTIN (in-process ported) output plugin backing this
+    /// context, set by `LoadOutputPlugin` when the slot's plugin resolves to a
+    /// registered builtin (e.g. `"test_decoding"`). `None` means the plugin is a
+    /// genuine OS-loaded `.so` (unreachable in this build) — the dispatch path
+    /// then falls back to the flattened OS-loader seam. In C there is no analog:
+    /// `ctx->callbacks` are real function pointers; here the builtin vtable is
+    /// keyed by name in the dfmgr-seams registry, and this carries the key so the
+    /// per-change dispatch can reach the vtable WITH the live `&mut ctx`.
+    pub builtin_plugin: Option<&'static str>,
+    /// Per-context output writer (#351). C stores the
+    /// `prepare_write`/`write`/`update_progress` function pointers plus
+    /// `output_writer_private` directly on the context, so each
+    /// `CreateDecodingContext` caller routes output to its own sink. This repo
+    /// collapses the writer choice to a closed enum and a private payload.
+    pub writer: OutputWriter,
+    /// `void *output_writer_private` (#351) — the SQL-function decode path's
+    /// private `DecodingOutputState` (a tuplestore sink), type-erased. The
+    /// walsender path leaves this `None` (its writer needs no private state).
+    pub output_writer_private: Option<Box<dyn core::any::Any>>,
+}
+
+/// Per-context output-writer target (#351). Selects where
+/// `OutputPluginPrepareWrite`/`OutputPluginWrite`/`OutputPluginUpdateProgress`
+/// route the decoded output, replacing C's per-context `prepare_write`/`write`/
+/// `update_progress` function pointers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputWriter {
+    /// No writer installed (`fast_forward`, or before `CreateDecodingContext`
+    /// sets one). Writes are rejected, matching the C `accept_writes` guard.
+    #[default]
+    None,
+    /// `WalSndPrepareWrite`/`WalSndWriteData`/`WalSndUpdateProgress`
+    /// (walsender.c) — the streaming-replication path. Routes through the
+    /// single global `walsender::call_*` seams.
+    WalSnd,
+    /// `LogicalOutputPrepareWrite`/`LogicalOutputWrite` (logicalfuncs.c) — the
+    /// SQL-function path. `prepare` resets `ctx->out`; `write` reads `ctx->out`
+    /// and appends an `(lsn, xid, data text)` row into the
+    /// `output_writer_private` tuplestore sink.
+    SqlSrf,
 }
 
 /// One decoded record read by `XLogReadRecord`: whether a record was returned,

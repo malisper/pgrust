@@ -189,6 +189,7 @@ pub fn CheckLogicalDecodingRequirements(wal_level: WalLevel, my_database_id: Oid
 }
 
 /// `StartupDecodingContext` (logical.c:151).
+#[allow(clippy::too_many_arguments)]
 fn StartupDecodingContext(
     output_plugin_options: OutputPluginOptionsHandle,
     start_lsn: XLogRecPtr,
@@ -200,6 +201,7 @@ fn StartupDecodingContext(
     prepare_write: bool,
     do_write: bool,
     update_progress: bool,
+    writer: types_logical::OutputWriter,
     wal_segment_size: i32,
 ) -> PgResult<Box<LogicalDecodingContext>> {
     let _slot = slot::my_replication_slot_is_set::call();
@@ -233,6 +235,9 @@ fn StartupDecodingContext(
         end_xact: false,
         output_plugin_private: None,
         processing_required: false,
+        builtin_plugin: None,
+        writer: types_logical::OutputWriter::None,
+        output_writer_private: None,
     });
 
     ctx.context = context;
@@ -242,7 +247,13 @@ fn StartupDecodingContext(
      * now.
      */
     if !fast_forward {
-        ctx.callbacks = LoadOutputPlugin(&slot::slot_plugin::call())?;
+        let plugin = slot::slot_plugin::call();
+        ctx.callbacks = LoadOutputPlugin(&plugin)?;
+        // In C `ctx->callbacks` holds the plugin's real function pointers; here
+        // the loadable plugin's C body is ported in-process as a registered
+        // BUILTIN, keyed by name. Record that key so the per-change dispatch can
+        // reach the builtin vtable WITH the live `&mut ctx`.
+        ctx.builtin_plugin = dfmgr::builtin_output_plugin_name::call(&plugin);
     }
 
     /*
@@ -323,6 +334,10 @@ fn StartupDecodingContext(
     ctx.prepare_write = prepare_write;
     ctx.write = do_write;
     ctx.update_progress = update_progress;
+    // #351: the per-context output-writer target. In C the three function
+    // pointers above are the writer; here they collapse to this enum (the bools
+    // remain as the presence flags `OutputPluginUpdateProgress` reads).
+    ctx.writer = writer;
 
     ctx.output_plugin_options = output_plugin_options;
 
@@ -335,6 +350,7 @@ fn StartupDecodingContext(
 
 /// `CreateInitDecodingContext` (logical.c:331).
 #[allow(unused_assignments)]
+#[allow(clippy::too_many_arguments)]
 pub fn CreateInitDecodingContext(
     plugin: Option<&str>,
     output_plugin_options: OutputPluginOptionsHandle,
@@ -344,6 +360,7 @@ pub fn CreateInitDecodingContext(
     prepare_write: bool,
     do_write: bool,
     update_progress: bool,
+    writer: types_logical::OutputWriter,
     wal_level: WalLevel,
     wal_segment_size: i32,
     my_database_id: Oid,
@@ -458,6 +475,7 @@ pub fn CreateInitDecodingContext(
         prepare_write,
         do_write,
         update_progress,
+        writer,
         wal_segment_size,
     )?;
 
@@ -484,6 +502,7 @@ pub fn CreateInitDecodingContext(
 }
 
 /// `CreateDecodingContext` (logical.c:499).
+#[allow(clippy::too_many_arguments)]
 pub fn CreateDecodingContext(
     mut start_lsn: XLogRecPtr,
     output_plugin_options: OutputPluginOptionsHandle,
@@ -492,6 +511,7 @@ pub fn CreateDecodingContext(
     prepare_write: bool,
     do_write: bool,
     update_progress: bool,
+    writer: types_logical::OutputWriter,
     wal_segment_size: i32,
     my_database_id: Oid,
 ) -> PgResult<Box<LogicalDecodingContext>> {
@@ -586,6 +606,7 @@ pub fn CreateDecodingContext(
         prepare_write,
         do_write,
         update_progress,
+        writer,
         wal_segment_size,
     )?;
 
@@ -702,6 +723,12 @@ pub fn FreeDecodingContext(ctx: &mut LogicalDecodingContext) -> PgResult<()> {
 }
 
 /// `OutputPluginPrepareWrite` (logical.c:694).
+///
+/// In C this calls `ctx->prepare_write(ctx, write_location, write_xid,
+/// last_write)`, the per-context writer's prepare hook. #351 collapses the
+/// function pointer to the `ctx.writer` enum: the walsender path keeps the
+/// global `walsender::call_prepare_write` seam; the SQL-function path's
+/// `LogicalOutputPrepareWrite` is just `resetStringInfo(ctx->out)`.
 pub fn OutputPluginPrepareWrite(ctx: &mut LogicalDecodingContext, last_write: bool) -> PgResult<()> {
     if !ctx.accept_writes {
         return Err(elog_error(
@@ -709,12 +736,29 @@ pub fn OutputPluginPrepareWrite(ctx: &mut LogicalDecodingContext, last_write: bo
         ));
     }
 
-    walsender::call_prepare_write::call(ctx.write_location, ctx.write_xid, last_write)?;
+    match ctx.writer {
+        types_logical::OutputWriter::WalSnd => {
+            walsender::call_prepare_write::call(ctx.write_location, ctx.write_xid, last_write)?;
+        }
+        types_logical::OutputWriter::SqlSrf => {
+            // LogicalOutputPrepareWrite: resetStringInfo(ctx->out).
+            mcxt::store_reset_string_info(ctx.out);
+        }
+        types_logical::OutputWriter::None => {
+            return Err(elog_error("no output writer is installed on this context"));
+        }
+    }
     ctx.prepared_write = true;
     Ok(())
 }
 
 /// `OutputPluginWrite` (logical.c:707).
+///
+/// In C this calls `ctx->write(ctx, write_location, write_xid, last_write)`. The
+/// walsender path keeps the global `walsender::call_write` seam; the
+/// SQL-function path routes to `LogicalOutputWrite` (owned by logicalfuncs),
+/// which builds an `(lsn, xid, data text)` row from `ctx->out` and puts it into
+/// the SRF tuplestore.
 pub fn OutputPluginWrite(ctx: &mut LogicalDecodingContext, last_write: bool) -> PgResult<()> {
     if !ctx.prepared_write {
         return Err(elog_error(
@@ -722,7 +766,18 @@ pub fn OutputPluginWrite(ctx: &mut LogicalDecodingContext, last_write: bool) -> 
         ));
     }
 
-    walsender::call_write::call(ctx.write_location, ctx.write_xid, last_write)?;
+    match ctx.writer {
+        types_logical::OutputWriter::WalSnd => {
+            walsender::call_write::call(ctx.write_location, ctx.write_xid, last_write)?;
+        }
+        types_logical::OutputWriter::SqlSrf => {
+            let (lsn, xid) = (ctx.write_location, ctx.write_xid);
+            backend_replication_logical_logical_seams::sql_srf_output_write::call(ctx, lsn, xid)?;
+        }
+        types_logical::OutputWriter::None => {
+            return Err(elog_error("no output writer is installed on this context"));
+        }
+    }
     ctx.prepared_write = false;
     Ok(())
 }
@@ -736,7 +791,11 @@ pub fn OutputPluginUpdateProgress(
         return Ok(());
     }
 
-    walsender::call_update_progress::call(ctx.write_location, ctx.write_xid, skipped_xact)?;
+    // Only the walsender path has an update_progress callback; the SQL-function
+    // path passes NULL (`update_progress == false` keeps us out of here).
+    if ctx.writer == types_logical::OutputWriter::WalSnd {
+        walsender::call_update_progress::call(ctx.write_location, ctx.write_xid, skipped_xact)?;
+    }
     Ok(())
 }
 
@@ -807,6 +866,29 @@ fn invocation(
     }
 }
 
+/// Dispatch one output-plugin callback. In C the `*_cb_wrapper` calls the
+/// function pointer in `ctx->callbacks` directly with the live `ctx`. Here the
+/// loadable plugin's C body is ported in-process as a registered BUILTIN
+/// (`ctx.builtin_plugin` is set by `StartupDecodingContext`), so the dispatch
+/// routes through the builtin seam WITH the live `&mut ctx` (the plugin writes
+/// into `ctx->out` and reads/stows `ctx->output_plugin_private`). If no builtin
+/// is flagged (a genuine OS `.so`, unreachable in this build), it falls back to
+/// the flattened OS-loader seam.
+#[inline]
+fn dispatch_callback(
+    ctx: &mut LogicalDecodingContext,
+    callback_name: &'static str,
+    report_location: XLogRecPtr,
+    args: OutputPluginCallbackArgs,
+) -> PgResult<bool> {
+    let inv = invocation(ctx, callback_name, report_location, args);
+    if ctx.builtin_plugin.is_some() {
+        dfmgr::invoke_builtin_output_plugin_callback::call(ctx, &inv)
+    } else {
+        dfmgr::invoke_output_plugin_callback::call(inv)
+    }
+}
+
 /// `startup_cb_wrapper` (logical.c:776).
 fn startup_cb_wrapper(ctx: &mut LogicalDecodingContext, is_init: bool) -> PgResult<()> {
     debug_assert!(!ctx.fast_forward);
@@ -818,12 +900,12 @@ fn startup_cb_wrapper(ctx: &mut LogicalDecodingContext, is_init: bool) -> PgResu
     ctx.accept_writes = false;
     ctx.end_xact = false;
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::Startup { is_init },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -837,12 +919,12 @@ fn shutdown_cb_wrapper(ctx: &mut LogicalDecodingContext) -> PgResult<()> {
     ctx.accept_writes = false;
     ctx.end_xact = false;
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::Shutdown,
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -863,12 +945,12 @@ fn begin_cb_wrapper(
     ctx.write_location = first_lsn;
     ctx.end_xact = false;
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::Begin { txn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -891,12 +973,12 @@ fn commit_cb_wrapper(
     ctx.write_location = txn_end_lsn; /* points to the end of the record */
     ctx.end_xact = true;
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::Commit { txn, commit_lsn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -922,12 +1004,12 @@ fn begin_prepare_cb_wrapper(
         return Err(missing_prepare_callback("begin_prepare_cb"));
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::BeginPrepare { txn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -955,12 +1037,12 @@ fn prepare_cb_wrapper(
         return Err(missing_prepare_callback("prepare_cb"));
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::Prepare { txn, prepare_lsn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -988,12 +1070,12 @@ fn commit_prepared_cb_wrapper(
         return Err(missing_prepare_callback("commit_prepared_cb"));
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::CommitPrepared { txn, commit_lsn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1022,7 +1104,7 @@ fn rollback_prepared_cb_wrapper(
         return Err(missing_prepare_callback("rollback_prepared_cb"));
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
@@ -1031,7 +1113,7 @@ fn rollback_prepared_cb_wrapper(
             prepare_end_lsn,
             prepare_time,
         },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1054,7 +1136,7 @@ fn change_cb_wrapper(
     ctx.write_location = change_lsn;
     ctx.end_xact = false;
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
@@ -1063,7 +1145,7 @@ fn change_cb_wrapper(
             relation,
             change,
         },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1091,7 +1173,7 @@ fn truncate_cb_wrapper(
     ctx.write_location = change_lsn;
     ctx.end_xact = false;
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
@@ -1101,7 +1183,7 @@ fn truncate_cb_wrapper(
             relations,
             change,
         },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1119,12 +1201,12 @@ pub fn filter_prepare_cb_wrapper(
     ctx.accept_writes = false;
     ctx.end_xact = false;
 
-    let ret = dfmgr::invoke_output_plugin_callback::call(invocation(
+    let ret = dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::FilterPrepare { xid, gid },
-    ))?;
+    )?;
 
     Ok(ret)
 }
@@ -1142,12 +1224,12 @@ pub fn filter_by_origin_cb_wrapper(
     ctx.accept_writes = false;
     ctx.end_xact = false;
 
-    let ret = dfmgr::invoke_output_plugin_callback::call(invocation(
+    let ret = dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::FilterByOrigin { origin_id },
-    ))?;
+    )?;
 
     Ok(ret)
 }
@@ -1179,7 +1261,7 @@ fn message_cb_wrapper(
     ctx.write_location = message_lsn;
     ctx.end_xact = false;
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
@@ -1191,7 +1273,7 @@ fn message_cb_wrapper(
             message_size,
             message,
         },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1217,12 +1299,12 @@ fn stream_start_cb_wrapper(
         return Err(missing_streaming_callback("stream_start_cb"));
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::StreamStart { txn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1248,12 +1330,12 @@ fn stream_stop_cb_wrapper(
         return Err(missing_streaming_callback("stream_stop_cb"));
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::StreamStop { txn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1279,12 +1361,12 @@ fn stream_abort_cb_wrapper(
         return Err(missing_streaming_callback("stream_abort_cb"));
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::StreamAbort { txn, abort_lsn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1319,12 +1401,12 @@ fn stream_prepare_cb_wrapper(
             .into_error());
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::StreamPrepare { txn, prepare_lsn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1352,12 +1434,12 @@ fn stream_commit_cb_wrapper(
         return Err(missing_streaming_callback("stream_commit_cb"));
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
         OutputPluginCallbackArgs::StreamCommit { txn, commit_lsn },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1385,7 +1467,7 @@ fn stream_change_cb_wrapper(
         return Err(missing_streaming_callback("stream_change_cb"));
     }
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
@@ -1394,7 +1476,7 @@ fn stream_change_cb_wrapper(
             relation,
             change,
         },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1427,7 +1509,7 @@ fn stream_message_cb_wrapper(
     ctx.write_location = message_lsn;
     ctx.end_xact = false;
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
@@ -1439,7 +1521,7 @@ fn stream_message_cb_wrapper(
             message_size,
             message,
         },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1469,7 +1551,7 @@ fn stream_truncate_cb_wrapper(
     ctx.write_location = change_lsn;
     ctx.end_xact = false;
 
-    dfmgr::invoke_output_plugin_callback::call(invocation(
+    dispatch_callback(
         ctx,
         callback_name,
         report_location,
@@ -1479,7 +1561,7 @@ fn stream_truncate_cb_wrapper(
             relations,
             change,
         },
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -1791,6 +1873,7 @@ pub fn LogicalReplicationSlotHasPendingWal(
             false,
             false,
             false,
+            types_logical::OutputWriter::None,
             wal_segment_size,
             my_database_id,
         )?;
@@ -1879,6 +1962,7 @@ pub fn LogicalSlotAdvanceAndCheckSnapState(
             false,
             false,
             false,
+            types_logical::OutputWriter::None,
             wal_segment_size,
             my_database_id,
         )?;

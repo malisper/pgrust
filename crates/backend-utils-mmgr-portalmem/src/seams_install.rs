@@ -132,6 +132,35 @@ pub fn init_seams() {
     backend_utils_mmgr_mcxt_seams::process_log_memory_context_interrupt::set(
         crate::top_context::process_log_memory_context_interrupt,
     );
+
+    // Logical-decoding `ctx->out` StringInfo + memory-context handles
+    // (`makeStringInfo` / `create_logical_decoding_context_memcxt` /
+    // `MemoryContextSwitchTo` / `MemoryContextDelete` / `MemoryContextReset` /
+    // `create_archiver_memcxt`). Until this lane these were installed nowhere —
+    // a logical-decoding StartupDecodingContext panicked at `makeStringInfo()`.
+    // The mcxt-seams crate owns a per-backend backing store (a real StringInfo
+    // buffer; identity/liveness markers for the contexts, since the mcx world
+    // holds allocations in owned arenas). Homed here on the mmgr-family owner
+    // (portalmem) alongside `memory_context_init`/`top_memory_context`, because
+    // mcxt.c has no dedicated body crate in the mcx world.
+    backend_utils_mmgr_mcxt_seams::makeStringInfo::set(
+        backend_utils_mmgr_mcxt_seams::store_make_string_info,
+    );
+    backend_utils_mmgr_mcxt_seams::create_logical_decoding_context_memcxt::set(|| {
+        backend_utils_mmgr_mcxt_seams::store_create_context("Logical decoding context")
+    });
+    backend_utils_mmgr_mcxt_seams::create_archiver_memcxt::set(|| {
+        backend_utils_mmgr_mcxt_seams::store_create_context("archiver")
+    });
+    backend_utils_mmgr_mcxt_seams::MemoryContextSwitchTo::set(
+        backend_utils_mmgr_mcxt_seams::store_switch_to,
+    );
+    backend_utils_mmgr_mcxt_seams::MemoryContextDelete::set(
+        backend_utils_mmgr_mcxt_seams::store_delete_context,
+    );
+    backend_utils_mmgr_mcxt_seams::MemoryContextReset::set(
+        backend_utils_mmgr_mcxt_seams::store_reset_context,
+    );
 }
 
 /// `AtSubCommit_Portals(mySubid, parentSubid, parentLevel, parentXactOwner)`.

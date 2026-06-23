@@ -283,6 +283,7 @@ fn create_logical_replication_slot(
         false,              // prepare_write = NULL
         false,              // do_write = NULL
         false,              // update_progress = NULL
+        types_logical::OutputWriter::None, // no output writer (slot creation only runs startup_cb)
         wal_level_logical(),
         xlog::wal_segment_size::call(),
         smallinit::my_database_id::call(),

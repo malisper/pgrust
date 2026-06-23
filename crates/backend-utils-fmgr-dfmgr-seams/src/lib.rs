@@ -59,6 +59,30 @@ seam_core::seam!(
 );
 
 seam_core::seam!(
+    /// If `plugin` names a registered BUILTIN (in-process ported) output plugin,
+    /// return its static name (used to key the builtin vtable on the context);
+    /// else `None` (a genuine OS-loaded `.so`). Consulted by
+    /// `StartupDecodingContext` after `LoadOutputPlugin` so the per-change
+    /// dispatch can reach the builtin vtable WITH the live `&mut ctx`.
+    pub fn builtin_output_plugin_name(plugin: &str) -> Option<&'static str>
+);
+
+seam_core::seam!(
+    /// Dispatch one output-plugin callback to the builtin plugin named
+    /// `ctx.builtin_plugin`, passing the LIVE `ctx` (the plugin writes into
+    /// `ctx->out` and reads/stows `ctx->output_plugin_private`). Returns the bool
+    /// the two filter callbacks produce (ignored by the rest); the callback can
+    /// `ereport`. The `*_cb_wrapper`s in logical.c call this (instead of the
+    /// flattened `invoke_output_plugin_callback`) whenever `ctx.builtin_plugin`
+    /// is set — i.e. always, in this build, since every loadable plugin is a
+    /// builtin (no C ABI to dlopen a real `.so`).
+    pub fn invoke_builtin_output_plugin_callback(
+        ctx: &mut types_logical::LogicalDecodingContext,
+        inv: &CallbackInvocation,
+    ) -> types_error::PgResult<bool>
+);
+
+seam_core::seam!(
     /// `load_external_function(probin, prosrc, true, &libraryhandle)` then
     /// `fetch_finfo_record(libraryhandle, prosrc)` (dfmgr.c / fmgr.c) — load the
     /// extension symbol and its `Pg_finfo_record`. Returns the `(user_fn,
@@ -178,4 +202,91 @@ pub fn registry_pg_init(library: &str) -> Option<fn() -> types_error::PgResult<(
         .iter()
         .find(|e| e.name == library)
         .and_then(|e| e.pg_init)
+}
+
+// ===========================================================================
+// Builtin OUTPUT-PLUGIN registry (Phase 0 of the logical-decoding output
+// substrate).
+//
+// `LoadOutputPlugin(plugin)` (logical.c) `dlopen`s `$libdir/<plugin>` and
+// resolves `_PG_output_plugin_init`, which fills an `OutputPluginCallbacks`
+// vtable. The Rust backend exposes no C ABI, so the test_decoding output
+// plugin's C body is ported in-process (crate `contrib-test-decoding`) and
+// registered here, mirroring the ported shared-library registry above. The
+// dfmgr `load_output_plugin` installer consults this BEFORE the OS loader; when
+// a builtin matches, `install_load_output_plugin` returns the registered
+// callback-presence bitmask (the C "the symbol filled the vtable" result).
+//
+// Crucially, the per-change DISPATCH path also routes through here: the C
+// invokes the plugin's function pointers with the LIVE `LogicalDecodingContext`
+// (the plugin writes into `ctx->out`, reads `ctx->output_plugin_options`, stows
+// `ctx->output_plugin_private`). The flattened `invoke_output_plugin_callback`
+// seam can't carry `&mut ctx`, so the wrappers call
+// `invoke_builtin_output_plugin_callback` (below) which dispatches to the
+// registered vtable WITH the live context.
+// ===========================================================================
+
+/// The vtable a builtin output plugin registers — the in-process equivalent of
+/// the function pointers `_PG_output_plugin_init` fills in. `init` is the
+/// `_PG_output_plugin_init`-equivalent: it returns the callback-presence bitmask
+/// (one bit per `OutputPluginCallbacks` field, LSB = `startup_cb`) so
+/// `LoadOutputPlugin` can enforce the required-callback rules. `invoke` runs one
+/// callback against the live context (the resolved args ride on `inv.args`); it
+/// returns the bool the two filter callbacks produce (ignored by the rest).
+#[derive(Clone)]
+pub struct BuiltinOutputPlugin {
+    /// The plugin name (`pg_create_logical_replication_slot`'s `plugin` arg,
+    /// `slot->data.plugin`), e.g. `"test_decoding"`.
+    pub name: &'static str,
+    /// `_PG_output_plugin_init(cb)` → the callback-presence bitmask.
+    pub init: fn() -> u32,
+    /// Run one output-plugin callback against the live decoding context.
+    pub invoke: fn(
+        &mut types_logical::LogicalDecodingContext,
+        &types_logical::CallbackInvocation,
+    ) -> types_error::PgResult<bool>,
+}
+
+static BUILTIN_OUTPUT_PLUGINS: std::sync::Mutex<Vec<BuiltinOutputPlugin>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Register a builtin (in-process ported) output plugin. Called from the
+/// plugin crate's `init_seams()` (e.g. `contrib-test-decoding`). Idempotent per
+/// name: re-registering replaces the entry.
+pub fn register_builtin_output_plugin(entry: BuiltinOutputPlugin) {
+    let mut plugins = BUILTIN_OUTPUT_PLUGINS.lock().unwrap();
+    if let Some(existing) = plugins.iter_mut().find(|e| e.name == entry.name) {
+        *existing = entry;
+    } else {
+        plugins.push(entry);
+    }
+}
+
+/// Resolve `plugin` to its registered builtin output-plugin vtable, or `None`
+/// when no such builtin is registered (the dfmgr caller then falls through to
+/// the OS loader). Backs `install_load_output_plugin`'s Phase-0 path.
+pub fn resolve_builtin_output_plugin(plugin: &str) -> Option<BuiltinOutputPlugin> {
+    BUILTIN_OUTPUT_PLUGINS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e.name == plugin)
+        .cloned()
+}
+
+/// Dispatch one output-plugin callback to the registered builtin `plugin`,
+/// passing the LIVE `ctx`. Returns `Some(result)` when `plugin` is a registered
+/// builtin (the result is the callback's bool / propagated `ereport`), or `None`
+/// when it is not (the caller routes to the OS-loaded plugin instead). Backs the
+/// installed body of [`invoke_builtin_output_plugin_callback`].
+pub fn registry_invoke_builtin_output_plugin(
+    plugin: &str,
+    ctx: &mut types_logical::LogicalDecodingContext,
+    inv: &types_logical::CallbackInvocation,
+) -> Option<types_error::PgResult<bool>> {
+    let invoke = {
+        let plugins = BUILTIN_OUTPUT_PLUGINS.lock().unwrap();
+        plugins.iter().find(|e| e.name == plugin).map(|e| e.invoke)
+    };
+    invoke.map(|f| f(ctx, inv))
 }
