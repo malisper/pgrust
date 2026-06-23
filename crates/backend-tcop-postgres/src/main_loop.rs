@@ -1170,10 +1170,25 @@ fn postgres_main_inner(dbname: Option<&str>, username: Option<&str>) -> PgResult
     // if (am_walsender) InitWalSender(); — replication-only setup; the
     // simple-Query target is not a WAL sender. Not reached.
 
-    // Send BackendKeyData to the frontend (postgres.c:4328) — the cancel-key
-    // advertisement; the cancel-key storage owner is a separate unit. Skipped
-    // (the client tolerates its absence for query execution; not exercised by
-    // the in-process simple-Query path).
+    // Send this backend's cancellation info to the frontend (postgres.c:4328).
+    // `BackendKeyData` ('K') = int32 MyProcPid + the cancel key bytes. While the
+    // cancel key itself is not yet wired into a shared cancel-key registry (so
+    // query cancellation by key is a no-op), the PID it carries is load-bearing:
+    // libpq's `PQbackendPID` returns it, and tools that key off the backend PID —
+    // notably the isolation tester's `pg_isolation_test_session_is_blocked`
+    // blocked-session poll, which queries by `PQbackendPID(conn)` — get 0 (and
+    // silently never detect a lock wait, hanging every blocking permutation)
+    // without it. We send the classic protocol-3.0 form (a 4-byte key); the key
+    // value is a fixed placeholder since cancellation-by-key is not yet served.
+    if globals::where_to_send_output() == CommandDest::Remote {
+        let my_pid = backend_utils_init_small_seams::my_proc_pid::call();
+        let mut body = [0u8; 8];
+        body[0..4].copy_from_slice(&my_pid.to_be_bytes());
+        // 4-byte placeholder cancel key (protocol 3.0 length).
+        body[4..8].copy_from_slice(&0u32.to_be_bytes());
+        // PqMsg_BackendKeyData == 'K'. Need not flush; ReadyForQuery will.
+        pqcomm::pq_putmessage(b'K', &body)?;
+    }
 
     // Welcome banner for the standalone (DestDebug) case — single-user only.
 
