@@ -211,6 +211,32 @@ pub struct ExecRowMark<'mcx> {
     pub ermExtra: Option<PgBox<'mcx, ErmExtra>>,
 }
 
+impl<'mcx> ExecRowMark<'mcx> {
+    /// Same-context clone (the recheck EState shares the parent's per-query
+    /// `'mcx`). The `relation` handle is an alias (Rc-backed); `ermExtra`
+    /// re-allocates the (empty) opaque carrier. Used by `EvalPlanQualStart` to
+    /// share the parent's rowmarks into the recheck EState (C aliases the same
+    /// `ExecRowMark *`).
+    pub fn clone_in(&self, mcx: mcx::Mcx<'mcx>) -> PgResult<ExecRowMark<'mcx>> {
+        Ok(ExecRowMark {
+            relation: self.relation.as_ref().map(|r| r.alias()),
+            relid: self.relid,
+            rti: self.rti,
+            prti: self.prti,
+            rowmarkId: self.rowmarkId,
+            markType: self.markType,
+            strength: self.strength,
+            waitPolicy: self.waitPolicy,
+            ermActive: self.ermActive,
+            curCtid: self.curCtid,
+            ermExtra: match self.ermExtra.as_ref() {
+                Some(_) => Some(mcx::alloc_in(mcx, ErmExtra {})?),
+                None => None,
+            },
+        })
+    }
+}
+
 /// `ExecRowMark.ermExtra` is a bare `void *` with no PostgreSQL-defined type
 /// (relation-source private user-data), so it stays opaque.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

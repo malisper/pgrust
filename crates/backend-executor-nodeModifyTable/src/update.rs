@@ -200,6 +200,15 @@ pub fn ExecUpdate<'mcx>(
                     match r2 {
                         TM_Result::TM_Ok => {
                             // Assert(context->tmfd.traversed);
+                            // C's table_tuple_lock(rel, tupleid, …, FIND_LAST_VERSION)
+                            // updates *tupleid to the latest row version it locked
+                            // (heapam_handler.c: `*tid = tmfd->ctid`). The owned
+                            // table_tuple_lock takes the tid by shared ref and instead
+                            // leaves the latest version in the locked slot's tts_tid;
+                            // copy it back so `redo_act` retries on the new version
+                            // (otherwise the retry re-locks the old TID → TM_Updated
+                            // forever).
+                            cur_tid = estate.slot(inputslot).tts_tid;
                             let epqslot = backend_executor_execMain_seams::eval_plan_qual::call(
                                 estate,
                                 &mut mtstate.mt_epqstate,
@@ -731,35 +740,20 @@ pub fn ExecCrossPartitionUpdate<'mcx>(
         } else if epqslot.is_none() || estate.slot(epqslot.unwrap()).is_empty() {
             return Ok(true);
         } else {
-            let epqslot = epqslot.unwrap();
-            // Fetch the most recent version of old tuple.
-            // ... but first, make sure ri_oldTupleSlot is initialized.
-            if !estate.result_rel(result_rel_info).ri_projectNewInfoValid {
-                ExecInitUpdateProjection(mcx, mtstate, estate, result_rel_info)?;
-            }
-            let old_slot = estate.result_rel(result_rel_info).ri_oldTupleSlot.expect(
-                "ExecCrossPartitionUpdate: ri_oldTupleSlot not initialized",
-            );
-            let rel = relation_alias(estate, result_rel_info);
-            let any = snapshot_any();
-            let tid = *tupleid.expect("ExecCrossPartitionUpdate: needs tupleid");
-            let mcx = estate.es_query_cxt;
-            let oldslot_ref = estate.slot_data_mut(old_slot);
-            if !backend_access_table_tableam::table_tuple_fetch_row_version(
-                mcx, &rel, &tid, &any, oldslot_ref,
-            )? {
-                return Err(types_error::PgError::error(
-                    "failed to fetch tuple being updated",
-                ));
-            }
-            // and project the new tuple to retry the UPDATE with
-            *retry_slot = Some(ExecGetUpdateNewTuple(
-                estate,
-                result_rel_info,
-                epqslot,
-                Some(old_slot),
-            )?);
-            return Ok(false);
+            // The cross-partition DELETE leg traversed a concurrent update chain
+            // (EvalPlanQual produced a surviving tuple). Retrying the UPDATE on
+            // the new version requires re-fetching the OLD tuple by the *latest*
+            // row TID — but ExecDelete advanced that TID internally and the owned
+            // model does not yet thread it back here (C updates `*tupleid`), so a
+            // retry would re-fetch the stale original TID and loop. Until the
+            // cross-partition-key UPDATE EPQ tid-advance leg lands, raise a clean
+            // serialization error rather than spin. (Non-concurrent
+            // cross-partition UPDATE never reaches here — epqslot is None above.)
+            let _ = (epqslot, retry_slot);
+            return Err(types_error::PgError::error(
+                "could not serialize access due to concurrent update",
+            )
+            .with_sqlstate(types_error::ERRCODE_T_R_SERIALIZATION_FAILURE));
         }
     }
 

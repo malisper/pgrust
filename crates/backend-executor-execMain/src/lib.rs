@@ -2449,10 +2449,10 @@ fn EvalPlanQualInit<'mcx>(
 #[allow(non_snake_case)]
 fn eval_plan_qual_set_plan_with_row_marks<'mcx>(
     _mcx: mcx::Mcx<'mcx>,
-    _epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
     _estate: &mut types_nodes::EStateData<'mcx>,
     row_marks: &[mcx::PgBox<'mcx, types_nodes::nodes::Node<'mcx>>],
-    _subplan: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
+    subplan: Option<&'mcx types_nodes::nodes::Node<'mcx>>,
 ) -> PgResult<()> {
     // foreach(l, node->rowMarks) { ...ExecFindRowMark / ExecBuildAuxRowMark... }
     if !row_marks.is_empty() {
@@ -2463,10 +2463,672 @@ fn eval_plan_qual_set_plan_with_row_marks<'mcx>(
     }
 
     // EvalPlanQualSetPlan(epqstate, subplan, NIL):
-    //   EvalPlanQualEnd(epqstate);   — no-op on the trimmed EPQState
-    //   epqstate->plan = subplan;    — `plan` is trimmed
-    //   epqstate->arowMarks = NIL;   — `arowMarks` is trimmed
+    //   EvalPlanQualEnd(epqstate);   — no live EPQ query at ExecInitModifyTable
+    //   epqstate->plan = subplan;    — record the recheck plan tree
+    //   epqstate->arowMarks = NIL;   — no non-locking aux rowmarks (empty list)
+    epqstate.plan = subplan;
+    epqstate.arowMarks = None;
     Ok(())
+}
+
+// ===========================================================================
+// EvalPlanQual — the READ COMMITTED concurrent-update recheck machinery
+// (execMain.c). EvalPlanQual / EvalPlanQualSlot / EvalPlanQualFetchRowMark /
+// EvalPlanQualNext / EvalPlanQualBegin / EvalPlanQualStart / EvalPlanQualEnd.
+//
+// Owned-model shape (vs. the C, where the EPQState lives in the
+// ModifyTableState/LockRowsState by value and the child recheckestate carries a
+// back-pointer `recheckestate->es_epq_active = epqstate`):
+//
+//  * The canonical `EPQState` lives in `mtstate.mt_epqstate` / `lrstate
+//    .lr_epqstate` and is passed by `&mut` to every driver function. It owns
+//    the child `recheckestate` (a `PgBox<EStateData>` allocated in the parent's
+//    es_query_cxt) and the `recheckplanstate` (the recheck plan-state tree).
+//
+//  * The live `relsubs_*` marker arrays — read by the leaf scans' EPQ branch
+//    (`ExecScanFetch`, which reads `estate.es_epq_active`) — live in
+//    `recheckestate.es_epq_active` (a nested marker `EPQState` carrying only
+//    `epqParam` + the `relsubs_*` arrays). The driver functions reach them
+//    through `epqstate.recheckestate.es_epq_active`. Because `SlotId` is
+//    estate-local, the EPQ test slots and all recheck scan slots live in the
+//    recheckestate's tuple table, and `EvalPlanQual()` bridges a parent-estate
+//    inputslot into the recheck test slot with a heap-tuple copy.
+// ===========================================================================
+
+/// Alias the open `Relation` for a result-rel pool id (C: `resultRelInfo->
+/// ri_RelationDesc`).
+fn epq_relation_alias<'mcx>(
+    estate: &types_nodes::EStateData<'mcx>,
+    result_rel_info: types_nodes::RriId,
+) -> types_rel::Relation<'mcx> {
+    estate
+        .result_rel(result_rel_info)
+        .ri_RelationDesc
+        .as_ref()
+        .expect("EvalPlanQual: result relation has no open Relation")
+        .alias()
+}
+
+/// `EvalPlanQualSlot(epqstate, relation, rti)` (execMain.c): return (creating if
+/// necessary) the EPQ test slot for `rti`. Unlike C — which creates the slot in
+/// the parent estate so the same `TupleTableSlot *` is valid from the recheck
+/// estate's back-pointer — the owned model creates it in the PARENT estate's
+/// tuple table and returns that id, because the ModifyTable retry loop uses the
+/// returned slot as the `table_tuple_lock` target (the lock runs with the parent
+/// estate threaded). `EvalPlanQual()` then copies the locked tuple into the
+/// recheck-estate test slot.
+fn EvalPlanQualSlot<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    rti: types_core::primitive::Index,
+) -> PgResult<types_nodes::SlotId> {
+    debug_assert!(rti > 0 && rti as usize <= estate.es_range_table_size);
+    let idx = (rti - 1) as usize;
+
+    // relsubs_slot[] was preallocated (rtsize NULLs) by EvalPlanQualInit.
+    let already = epqstate
+        .relsubs_slot
+        .as_ref()
+        .and_then(|v| v.get(idx).copied())
+        .flatten();
+    if let Some(slot) = already {
+        return Ok(slot);
+    }
+
+    // *slot == NULL: create a table slot for this relation in the parent
+    // estate's tuple table (C creates it in epqstate->tuple_table /
+    // parentestate->es_query_cxt; the owned model anchors it on the parent so
+    // table_tuple_lock can fill it).
+    let rel = epq_relation_alias(estate, result_rel_info);
+    let mcx = estate.es_query_cxt;
+    let slot_data = backend_access_table_tableam::table_slot_create(mcx, &rel)?;
+    let slot = estate.push_slot_data(slot_data)?;
+
+    let v = epqstate
+        .relsubs_slot
+        .as_mut()
+        .expect("EvalPlanQualSlot: relsubs_slot must be allocated by EvalPlanQualInit");
+    v[idx] = Some(slot);
+    Ok(slot)
+}
+
+/// `EvalPlanQual(epqstate, relation, rti, inputslot)` (execMain.c): run the EPQ
+/// recheck for a concurrently-updated tuple. Returns the surviving (re-projected)
+/// slot, or `Ok(None)` when the row no longer qualifies.
+fn EvalPlanQual<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    rti: types_core::primitive::Index,
+    inputslot: types_nodes::SlotId,
+) -> PgResult<Option<types_nodes::SlotId>> {
+    debug_assert!(rti > 0);
+    let idx = (rti - 1) as usize;
+
+    // Need to run a recheck subquery. Initialize or reinitialize EPQ state.
+    //   EvalPlanQualBegin(epqstate);
+    EvalPlanQualBegin(estate, epqstate)?;
+
+    // Copy the locked input tuple (a PARENT-estate slot, filled by
+    // table_tuple_lock) into the recheck-estate test slot. C uses
+    //   testslot = EvalPlanQualSlot(...); if (testslot != inputslot) Copy;
+    // and there testslot == inputslot (same pointer), so no copy happens. In
+    // the owned model inputslot is a parent slot and the recheck test slot is a
+    // distinct recheck-estate slot, so we always bridge them: fetch the heap
+    // tuple from the parent slot and force-store it into the recheck slot.
+    let testslot = epq_ensure_recheck_test_slot(estate, epqstate, result_rel_info, rti)?;
+    {
+        let mcx = estate.es_query_cxt;
+        // Fetch the locked tuple out of the parent inputslot, then force-store a
+        // context-local clone into the recheck-estate test slot. (C aliases the
+        // same TupleTableSlot pointer; the owned model bridges the two distinct
+        // estate-local slots with a heap-tuple copy.)
+        let (tuple, _should_free) = {
+            let inslot = estate.slot_data_mut(inputslot);
+            backend_executor_execTuples::slot_store_fetch::ExecFetchSlotHeapTuple(
+                mcx, inslot, true,
+            )?
+        };
+        let rc = epqstate
+            .recheckestate
+            .as_deref_mut()
+            .expect("EvalPlanQual: recheckestate must exist after EvalPlanQualBegin");
+        let rcx = rc.es_query_cxt;
+        let tuple = tuple.clone_in(rcx)?;
+        let rcslot = rc.slot_data_mut(testslot);
+        backend_executor_execTuples::slot_store_fetch::ExecForceStoreHeapTuple(
+            rcx, tuple, rcslot, true,
+        )?;
+    }
+
+    // Mark that an EPQ tuple is available for this relation. (Others remain
+    // marked as having no tuple available.)
+    //   epqstate->relsubs_done[rti - 1] = false;
+    //   epqstate->relsubs_blocked[rti - 1] = false;
+    epq_set_marker(epqstate, idx, /*done=*/ false, /*blocked=*/ false);
+
+    // Run the EPQ query. We assume it returns at most one tuple.
+    //   slot = EvalPlanQualNext(epqstate);
+    let slot = EvalPlanQualNext(epqstate)?;
+
+    // If we got a tuple, force the slot to materialize the tuple so it is not
+    // dependent on local state in the EPQ query.
+    if let Some(s) = slot {
+        let rc = epqstate
+            .recheckestate
+            .as_deref_mut()
+            .expect("EvalPlanQual: recheckestate present");
+        if !rc.slot(s).is_empty() {
+            backend_executor_execTuples_seams::exec_materialize_slot::call(rc, s)?;
+        }
+    }
+
+    // Compute the result BEFORE clearing the test slot. The recheck output `s`
+    // is a RECHECK-estate slot; the caller (ModifyTable/LockRows, threaded with
+    // the PARENT estate) cannot address a recheck-estate `SlotId`. So copy the
+    // recheck output's tuple into a parent-estate result slot (created lazily
+    // with the recheck output's descriptor) and return that parent slot id. C
+    // returns the recheck slot directly (valid by pointer across estates).
+    let result: Option<types_nodes::SlotId> = match slot {
+        None => None,
+        Some(s) => {
+            let empty = epqstate
+                .recheckestate
+                .as_deref()
+                .expect("recheckestate present")
+                .slot(s)
+                .is_empty();
+            if empty {
+                None
+            } else {
+                // Materialize the recheck output as a heap tuple + capture its
+                // descriptor, then store it in a parent slot of the same shape.
+                let (tuple, desc) = {
+                    let rc = epqstate
+                        .recheckestate
+                        .as_deref_mut()
+                        .expect("recheckestate present");
+                    let rcx = rc.es_query_cxt;
+                    let (t, _) =
+                        backend_executor_execTuples::slot_store_fetch::ExecFetchSlotHeapTuple(
+                            rcx,
+                            rc.slot_data_mut(s),
+                            true,
+                        )?;
+                    let d = rc
+                        .slot(s)
+                        .tts_tupleDescriptor
+                        .as_deref()
+                        .map(|d| d.clone_in(estate.es_query_cxt))
+                        .transpose()?;
+                    (t.clone_in(estate.es_query_cxt)?, d)
+                };
+                // Lazily create the parent result slot (heap-tuple slot of the
+                // recheck output's descriptor).
+                let pslot = match epqstate.epq_parent_result_slot {
+                    Some(ps) => ps,
+                    None => {
+                        let pcx = estate.es_query_cxt;
+                        let desc_owned = match desc.as_ref() {
+                            Some(d) => Some(mcx::alloc_in(pcx, d.clone_in(pcx)?)?),
+                            None => None,
+                        };
+                        let ps = backend_executor_execTuples_seams::exec_alloc_table_slot::call(
+                            estate,
+                            desc_owned,
+                            types_nodes::TupleSlotKind::HeapTuple,
+                        )?;
+                        epqstate.epq_parent_result_slot = Some(ps);
+                        ps
+                    }
+                };
+                let pcx = estate.es_query_cxt;
+                backend_executor_execTuples::slot_store_fetch::ExecForceStoreHeapTuple(
+                    pcx,
+                    tuple,
+                    estate.slot_data_mut(pslot),
+                    true,
+                )?;
+                Some(pslot)
+            }
+        }
+    };
+
+    // Clear the test tuple, and mark that no tuple is available here. Needed in
+    // case the EPQ state is reused to test a tuple for a different relation.
+    {
+        let rc = epqstate
+            .recheckestate
+            .as_deref_mut()
+            .expect("EvalPlanQual: recheckestate present");
+        backend_executor_execTuples_seams::exec_clear_tuple::call(rc, testslot)?;
+    }
+    epq_set_blocked(epqstate, idx, true);
+
+    Ok(result)
+}
+
+/// Helper: write `relsubs_done[idx]` / `relsubs_blocked[idx]` on the live marker
+/// (in `recheckestate.es_epq_active`, populated by EvalPlanQualBegin/Start).
+fn epq_set_marker<'mcx>(
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    idx: usize,
+    done: bool,
+    blocked: bool,
+) {
+    if let Some(m) = epqstate
+        .recheckestate
+        .as_deref_mut()
+        .and_then(|rc| rc.es_epq_active.as_deref_mut())
+    {
+        if let Some(v) = m.relsubs_done.as_mut() {
+            if let Some(e) = v.get_mut(idx) {
+                *e = done;
+            }
+        }
+        if let Some(v) = m.relsubs_blocked.as_mut() {
+            if let Some(e) = v.get_mut(idx) {
+                *e = blocked;
+            }
+        }
+    }
+}
+
+/// Helper: set only `relsubs_blocked[idx]` on the live marker.
+fn epq_set_blocked<'mcx>(
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    idx: usize,
+    blocked: bool,
+) {
+    if let Some(m) = epqstate
+        .recheckestate
+        .as_deref_mut()
+        .and_then(|rc| rc.es_epq_active.as_deref_mut())
+    {
+        if let Some(v) = m.relsubs_blocked.as_mut() {
+            if let Some(e) = v.get_mut(idx) {
+                *e = blocked;
+            }
+        }
+    }
+}
+
+/// Helper: ensure a recheck-estate test slot exists for `rti` and record it in
+/// the live marker's `relsubs_slot[rti-1]`; returns that recheck-estate SlotId.
+fn epq_ensure_recheck_test_slot<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+    result_rel_info: types_nodes::RriId,
+    rti: types_core::primitive::Index,
+) -> PgResult<types_nodes::SlotId> {
+    let idx = (rti - 1) as usize;
+    // Already created on the marker?
+    if let Some(s) = epqstate
+        .recheckestate
+        .as_deref()
+        .and_then(|rc| rc.es_epq_active.as_deref())
+        .and_then(|m| m.relsubs_slot.as_ref())
+        .and_then(|v| v.get(idx).copied())
+        .flatten()
+    {
+        return Ok(s);
+    }
+    // Create a table slot for this relation in the RECHECK estate's tuple table.
+    let rel = epq_relation_alias(estate, result_rel_info);
+    let rc = epqstate
+        .recheckestate
+        .as_deref_mut()
+        .expect("epq_ensure_recheck_test_slot: recheckestate present");
+    let slot_data = backend_access_table_tableam::table_slot_create(rc.es_query_cxt, &rel)?;
+    let slot = rc.push_slot_data(slot_data)?;
+    let m = rc
+        .es_epq_active
+        .as_deref_mut()
+        .expect("epq_ensure_recheck_test_slot: es_epq_active marker present");
+    if let Some(v) = m.relsubs_slot.as_mut() {
+        v[idx] = Some(slot);
+    }
+    Ok(slot)
+}
+
+/// `EvalPlanQualNext(epqstate)` (execMain.c): fetch the next row (if any) from
+/// EPQ testing by running the recheck plan-state tree under the recheck estate.
+fn EvalPlanQualNext<'mcx>(
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+) -> PgResult<Option<types_nodes::SlotId>> {
+    // slot = ExecProcNode(epqstate->recheckplanstate); — run with the recheck
+    // estate threaded so leaf scans read recheckestate.es_epq_active.
+    //
+    // The owned model holds both the recheck estate and the recheck plan-state
+    // tree on the EPQState; temporarily take the plan-state box out so it and
+    // the recheck estate can be borrowed mutably at once (the C aliases freely).
+    let mut rcplan = epqstate
+        .recheckplanstate
+        .take()
+        .expect("EvalPlanQualNext: recheckplanstate must exist (EvalPlanQualBegin)");
+    let result = {
+        let rc = epqstate
+            .recheckestate
+            .as_deref_mut()
+            .expect("EvalPlanQualNext: recheckestate must exist");
+        procnode::exec_proc_node::call(&mut rcplan, rc)
+    };
+    epqstate.recheckplanstate = Some(rcplan);
+    result
+}
+
+/// `EvalPlanQualBegin(epqstate)` (execMain.c): initialize or reset the EPQ state
+/// tree. First call builds the recheck estate + plan via [`EvalPlanQualStart`];
+/// a subsequent call resets the relsubs_done flags and re-copies parent params,
+/// then marks the recheck plan for rescan at the epqParam.
+fn EvalPlanQualBegin<'mcx>(
+    parentestate: &mut types_nodes::EStateData<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+) -> PgResult<()> {
+    if epqstate.recheckestate.is_none() {
+        // First time through: create a child EState + recheck plan tree.
+        EvalPlanQualStart(parentestate, epqstate)?;
+        return Ok(());
+    }
+
+    // We already have a suitable child EPQ tree — reset it.
+    //
+    // Reset relsubs_done[] to equal relsubs_blocked[], so the EPQ run never
+    // tries to fetch tuples from blocked target relations.
+    //   memcpy(relsubs_done, relsubs_blocked, rtsize * sizeof(bool));
+    {
+        let rc = epqstate.recheckestate.as_deref_mut().expect("recheckestate present");
+        if let Some(m) = rc.es_epq_active.as_deref_mut() {
+            if let (Some(done), Some(blocked)) =
+                (m.relsubs_done.as_mut(), m.relsubs_blocked.as_ref())
+            {
+                for i in 0..done.len().min(blocked.len()) {
+                    done[i] = blocked[i];
+                }
+            }
+        }
+    }
+
+    // Recopy current values of parent parameters (es_param_exec_vals) into the
+    // recheck estate so InitPlan outputs the subplan may need are current. The
+    // owned model copies value+isnull (not the execPlan link), mirroring C.
+    {
+        let n = parentestate.es_param_exec_vals.len();
+        let qcx = parentestate.es_query_cxt;
+        // Snapshot the parent values first (immutable borrow), then write them.
+        let mut copied: alloc::vec::Vec<(types_tuple::backend_access_common_heaptuple::Datum<'mcx>, bool)> =
+            alloc::vec::Vec::with_capacity(n);
+        for p in parentestate.es_param_exec_vals.iter() {
+            copied.push((p.value.clone_in(qcx)?, p.isnull));
+        }
+        let rc = epqstate.recheckestate.as_deref_mut().expect("recheckestate present");
+        let m = rc.es_param_exec_vals.len().min(n);
+        for i in 0..m {
+            rc.es_param_exec_vals[i].value = copied[i].0.clone_in(qcx)?;
+            rc.es_param_exec_vals[i].isnull = copied[i].1;
+        }
+    }
+
+    // Mark child plan tree as needing rescan at all scan nodes (chgParam |=
+    // epqParam). The first ExecProcNode does the actual rescan.
+    {
+        let epq_param = epqstate.epqParam;
+        let qcx = parentestate.es_query_cxt;
+        if let Some(rcplan) = epqstate.recheckplanstate.as_deref_mut() {
+            let head = rcplan.ps_head_mut();
+            let chg = head.chgParam.take();
+            head.chgParam =
+                Some(bms_seams::bms_add_member::call(qcx, chg, epq_param)?);
+        }
+    }
+
+    Ok(())
+}
+
+/// `EvalPlanQualStart(epqstate, planTree)` (execMain.c): start execution of an
+/// EPQ plan tree — a cut-down `ExecutorStart`. Creates the child recheck EState
+/// sharing the parent's snapshot/range-table/plannedstmt, installs the live
+/// `relsubs_*` marker in `recheckestate.es_epq_active`, then `ExecInitNode`s the
+/// recheck plan tree.
+fn EvalPlanQualStart<'mcx>(
+    parentestate: &mut types_nodes::EStateData<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+) -> PgResult<()> {
+    let qcx = parentestate.es_query_cxt;
+    let rtsize = parentestate.es_range_table_size;
+
+    // recheckestate = CreateExecutorState(); — a child EState in the parent's
+    // per-query context (same 'mcx; the box is freed at EvalPlanQualEnd).
+    let mut rc_box: mcx::PgBox<'mcx, types_nodes::EStateData<'mcx>> =
+        execUtils::create_executor_state_in(qcx)?;
+
+    // Copy unchanging state from the parent (cut-down ExecutorStart). The owned
+    // model can't alias the parent's owned Vecs, so it clones the range table /
+    // perm infos / plannedstmt into the child (lazily re-opening relations under
+    // NoLock — the parent holds the locks), and shares the Rc-backed snapshots
+    // and param list info.
+    {
+        let rc = &mut *rc_box;
+        rc.es_direction = types_scan::sdir::ScanDirection::ForwardScanDirection;
+        rc.es_snapshot = parentestate.es_snapshot.clone();
+        rc.es_crosscheck_snapshot = parentestate.es_crosscheck_snapshot.clone();
+        rc.es_output_cid = parentestate.es_output_cid;
+        rc.es_top_eflags = parentestate.es_top_eflags;
+        rc.es_instrument = parentestate.es_instrument;
+
+        // es_range_table / es_rteperminfos / es_unpruned_relids (clone, parallel
+        // es_relations of NULLs) via ExecInitRangeTable.
+        let mut range_table = mcx::vec_with_capacity_in(qcx, parentestate.es_range_table.len())?;
+        for rte in parentestate.es_range_table.iter() {
+            range_table.push(rte.clone_in(qcx)?);
+        }
+        let mut perm_infos = mcx::vec_with_capacity_in(qcx, parentestate.es_rteperminfos.len())?;
+        for p in parentestate.es_rteperminfos.iter() {
+            perm_infos.push(p.clone_in(qcx)?);
+        }
+        let unpruned = match parentestate.es_unpruned_relids.as_deref() {
+            Some(b) => Some(mcx::alloc_in(qcx, b.clone_in(qcx)?)?),
+            None => None,
+        };
+        execUtils::ExecInitRangeTable(rc, range_table, perm_infos, unpruned)?;
+
+        // es_plannedstmt = parentestate->es_plannedstmt (clone).
+        if let Some(ps) = parentestate.es_plannedstmt.as_deref() {
+            rc.es_plannedstmt = Some(mcx::alloc_in(qcx, ps.clone_in(qcx)?)?);
+        }
+
+        // es_rowmarks: the parent's ExecRowMark array (C shares the pointer; the
+        // owned model clones each — the recheck EState shares the parent's `'mcx`,
+        // and the Relation handles are Rc-backed aliases). Sharing them alone is
+        // not sufficient for a correct recheck: the recheck scan over a
+        // non-locking rowmarked relation (FOR UPDATE/SHARE secondary relations /
+        // MERGE source rels) must re-fetch through `relsubs_rowmark` +
+        // `EvalPlanQualFetchRowMark`, which needs the aux-rowmark list built by
+        // `EvalPlanQualSetPlan` — the LockRows/aux-rowmark EPQ leg, not yet
+        // landed. Without it the recheck scan would re-scan the live heap and
+        // loop, so raise a clean ERROR here instead of hanging.
+        if !parentestate.es_rowmarks.is_empty() {
+            return Err(unported(
+                "EvalPlanQualStart: recheck over a non-locking rowmarked relation \
+                 (FOR UPDATE/SHARE secondary relations / MERGE source) needs the \
+                 aux-rowmark EPQ leg (EvalPlanQualSetPlan arowMarks + \
+                 EvalPlanQualFetchRowMark)",
+            ));
+        }
+
+        // es_param_list_info shared from parent. es_param_exec_vals: a local copy
+        // initialized from the parent's current values.
+        rc.es_param_list_info = parentestate.es_param_list_info.clone();
+        if !parentestate.es_param_exec_vals.is_empty() {
+            let mut pev = mcx::vec_with_capacity_in(qcx, parentestate.es_param_exec_vals.len())?;
+            for p in parentestate.es_param_exec_vals.iter() {
+                pev.push(types_nodes::execnodes::ParamExecData {
+                    execPlan: None,
+                    value: p.value.clone_in(qcx)?,
+                    isnull: p.isnull,
+                });
+            }
+            rc.es_param_exec_vals = pev;
+        }
+    }
+
+    // Build the live relsubs_* marker that the leaf scans read off
+    // recheckestate.es_epq_active. Result relations get marked blocked; others
+    // not-fetched. relsubs_done starts == relsubs_blocked.
+    {
+        let mut relsubs_slot = mcx::vec_with_capacity_in(qcx, rtsize)?;
+        relsubs_slot.resize(rtsize, None);
+        let mut relsubs_done = mcx::vec_with_capacity_in(qcx, rtsize)?;
+        relsubs_done.resize(rtsize, false);
+        let mut relsubs_blocked = mcx::vec_with_capacity_in(qcx, rtsize)?;
+        relsubs_blocked.resize(rtsize, false);
+        let relsubs_rowmark: mcx::PgVec<'mcx, bool> = {
+            let mut v = mcx::vec_with_capacity_in(qcx, rtsize)?;
+            v.resize(rtsize, false);
+            v
+        };
+        if let Some(rrs) = epqstate.resultRelations.as_ref() {
+            for &rtindex in rrs.iter() {
+                let i = (rtindex - 1) as usize;
+                if i < rtsize {
+                    relsubs_blocked[i] = true;
+                    relsubs_done[i] = true;
+                }
+            }
+        }
+        // Non-locking aux rowmarks (arowMarks): mark relsubs_rowmark[rti-1].
+        let mut relsubs_rowmark = relsubs_rowmark;
+        if let Some(arms) = epqstate.arowMarks.as_ref() {
+            for earm in arms.iter() {
+                if let Some(erm) = earm.rowmark.as_deref() {
+                    let i = (erm.rti - 1) as usize;
+                    if i < rtsize {
+                        relsubs_rowmark[i] = true;
+                    }
+                }
+            }
+        }
+        let marker = types_nodes::modifytable::EPQState {
+            epqParam: epqstate.epqParam,
+            relsubs_slot: Some(relsubs_slot),
+            relsubs_rowmark: Some(relsubs_rowmark),
+            relsubs_done: Some(relsubs_done),
+            relsubs_blocked: Some(relsubs_blocked),
+            ..Default::default()
+        };
+        rc_box.es_epq_active = Some(mcx::alloc_in(qcx, marker)?);
+    }
+
+    // Install the recheck estate on the EPQState, then ExecInitNode the recheck
+    // plan tree (it must see recheckestate via the EPQState during init: subplan
+    // states, scan slots, etc. all land in the recheck estate).
+    epqstate.recheckestate = Some(rc_box);
+
+    let plan_node = epqstate.plan;
+    let recheckplanstate = {
+        let rc = epqstate.recheckestate.as_deref_mut().expect("recheckestate present");
+
+        // Initialize the per-SubPlan state for all plannedstmt subplans, exactly
+        // as InitPlan does, so ExecInitSubPlan can find them.
+        debug_assert!(rc.es_subplanstates.is_empty());
+        let n_subplans = rc
+            .es_plannedstmt
+            .as_deref()
+            .and_then(|p| p.subplans.as_ref().map(|s| s.len()))
+            .unwrap_or(0);
+        for sidx in 0..n_subplans {
+            let subnode: Option<&types_nodes::nodes::Node<'_>> = {
+                let subplan_box: Option<mcx::PgBox<'_, types_nodes::nodes::Node<'_>>> = match rc
+                    .es_plannedstmt
+                    .as_deref()
+                    .and_then(|p| p.subplans.as_ref())
+                    .and_then(|s| s[sidx].as_ref())
+                {
+                    Some(b) => Some(mcx::alloc_in(qcx, b.clone_in(qcx)?)?),
+                    None => None,
+                };
+                subplan_box.map(|tree| &*mcx::leak_in(tree))
+            };
+            let subplanstate = procnode::exec_init_node::call(qcx, subnode, rc, 0)?;
+            rc.es_subplanstates.push(subplanstate);
+        }
+
+        // recheckplanstate = ExecInitNode(planTree, recheckestate, 0);
+        procnode::exec_init_node::call(qcx, plan_node, rc, 0)?
+            .expect("EvalPlanQualStart: recheck plan tree must initialize")
+    };
+    epqstate.recheckplanstate = Some(recheckplanstate);
+    Ok(())
+}
+
+/// `EvalPlanQualEnd(epqstate)` (execMain.c): shut down EPQ execution — end the
+/// recheck plan-state tree and its subplans, reset the recheck estate's tuple
+/// table, close any result/trigger relations it opened, and free the recheck
+/// estate. Mark the EPQState idle. A no-op if EPQ was never started.
+fn EvalPlanQualEnd<'mcx>(
+    _parentestate: &mut types_nodes::EStateData<'mcx>,
+    epqstate: &mut types_nodes::modifytable::EPQState<'mcx>,
+) -> PgResult<()> {
+    // EPQ was never started? nothing further to do (relsubs_slot on the parent
+    // is reclaimed with the parent context).
+    if epqstate.recheckestate.is_none() {
+        epqstate.origslot = None;
+        return Ok(());
+    }
+
+    // ExecEndNode(recheckplanstate); foreach subplanstate ExecEndNode(...).
+    let mut rcplan = epqstate.recheckplanstate.take();
+    let mut rc_box = epqstate.recheckestate.take().expect("recheckestate present");
+    {
+        let rc = &mut *rc_box;
+        if let Some(p) = rcplan.as_deref_mut() {
+            procnode::exec_end_node::call(p, rc)?;
+        }
+        // foreach(l, estate->es_subplanstates) ExecEndNode(subplanstate);
+        let n = rc.es_subplanstates.len();
+        for i in 0..n {
+            if let Some(mut sp) = rc.es_subplanstates[i].take() {
+                procnode::exec_end_node::call(&mut sp, rc)?;
+            }
+        }
+        // Throw away the per-estate tuple table.
+        execUtils::ExecResetTupleTable(rc, false)?;
+        // Close any result and trigger target relations attached to this EState.
+        execUtils::ExecCloseResultRelations(rc)?;
+    }
+    // Free the recheck estate (drops rc_box, reclaiming its working memory).
+    drop(rcplan);
+    execUtils::free_executor_state_in(rc_box)?;
+
+    // Mark EPQState idle.
+    epqstate.origslot = None;
+    Ok(())
+}
+
+/// `EvalPlanQualFetchRowMark(epqstate, rti, slot)` (execMain.c): fetch the
+/// current row value for a non-locked relation (`rti`) into `slot`, identified by
+/// the junk attributes carried on `origslot`. Returns whether a substitution
+/// tuple was found. Reached from the leaf-scan EPQ branch when
+/// `relsubs_rowmark[rti-1]` is set. `slot` is a RECHECK-estate slot.
+fn EvalPlanQualFetchRowMark<'mcx>(
+    estate: &mut types_nodes::EStateData<'mcx>,
+    rti: types_core::primitive::Index,
+    slot: types_nodes::SlotId,
+) -> PgResult<bool> {
+    // The threaded `estate` here is the RECHECK estate (the leaf scan runs under
+    // it). It carries the live marker in es_epq_active, but the aux-rowmark
+    // metadata + origslot live on the canonical EPQState held by the
+    // ModifyTable/LockRows node, which is not reachable from here in the owned
+    // model. Non-locking aux rowmarks (FOR UPDATE/SHARE secondary relations /
+    // MERGE source rels) are not yet exercised by the core UPDATE/DELETE EPQ
+    // path (es_rowmarks empty / relsubs_rowmark all false), so this only fires
+    // for the aux-rowmark feature, which lands with the LockRows EPQ leg.
+    let _ = (estate, rti, slot);
+    Err(unported(
+        "EvalPlanQualFetchRowMark: EPQ non-locking aux-rowmark refetch \
+         (ROW_MARK_REFERENCE / ROW_MARK_COPY) — lands with the LockRows EPQ leg",
+    ))
 }
 
 /// `ExecBuildSlotValueDescription(reloid, slot, tupdesc, modifiedCols,
@@ -4077,6 +4739,9 @@ pub fn init_seams() {
     seams::fetch_cursor_param::set(FetchCursorParam);
     seams::eval_plan_qual_init::set(EvalPlanQualInit);
     seams::eval_plan_qual_set_plan_with_row_marks::set(eval_plan_qual_set_plan_with_row_marks);
+    seams::eval_plan_qual::set(EvalPlanQual);
+    seams::eval_plan_qual_slot::set(EvalPlanQualSlot);
+    seams::eval_plan_qual_fetch_row_mark::set(EvalPlanQualFetchRowMark);
     seams::link_subplan_planstate::set(link_subplan_planstate);
     seams::executor_run::set(ExecutorRun);
     seams::executor_finish::set(ExecutorFinish);

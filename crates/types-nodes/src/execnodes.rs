@@ -135,7 +135,43 @@ pub struct EPQState<'mcx> {
     /// `bool *relsubs_blocked` — per-relation "no EPQ tuple this test".
     /// `None` = the C `NULL` array.
     pub relsubs_blocked: Option<PgVec<'mcx, bool>>,
-    // C: `PlanState *recheckplanstate` — EPQ-specific exec nodes. Trimmed.
+
+    // -----------------------------------------------------------------------
+    // The EvalPlanQual recheck-exec sub-tree (execMain.c's EvalPlanQualStart /
+    // EvalPlanQualBegin / EvalPlanQualNext / EvalPlanQualEnd). These were the
+    // "trimmed" fields; they land with the EPQ machinery port itself.
+    // -----------------------------------------------------------------------
+    /// `Plan *plan` — the recheck plan tree to be executed (the ModifyTable /
+    /// LockRows subplan). Recorded by `EvalPlanQualSetPlan`; `ExecInitNode`'d
+    /// into `recheckplanstate` by `EvalPlanQualStart`. A shared, read-only node
+    /// borrow off the plannedstmt (`None` = the C `NULL`, EPQ not configured).
+    pub plan: Option<&'mcx crate::nodes::Node<'mcx>>,
+    /// `List *arowMarks` — the non-locking `ExecAuxRowMark`s the recheck must
+    /// re-fetch through. Built by the ModifyTable/LockRows arowmarks loop and
+    /// recorded via `EvalPlanQualSetPlan`. `None` = NIL.
+    pub arowMarks: Option<PgVec<'mcx, crate::nodelockrows::ExecAuxRowMarkData<'mcx>>>,
+    /// `TupleTableSlot *origslot` — the original (top-level) output tuple slot
+    /// being rechecked; `EvalPlanQualFetchRowMark` reads junk attributes off
+    /// it. A `SlotId` into the PARENT estate's tuple table. `None` = the C
+    /// `NULL` (EPQ idle).
+    pub origslot: Option<SlotId>,
+    /// `EState *recheckestate` — the child EState for EPQ execution, created by
+    /// `EvalPlanQualStart` (a cut-down `CreateExecutorState` sharing the
+    /// parent's snapshot/range-table/plannedstmt). Owns the EPQ scan slots and
+    /// the recheck plan-state tree's per-node storage. Its `es_epq_active`
+    /// carries the live `relsubs_*` marker that the leaf scans read.
+    /// `None` = EPQ not started (the C `recheckestate == NULL`).
+    pub recheckestate: Option<PgBox<'mcx, EStateData<'mcx>>>,
+    /// `PlanState *recheckplanstate` — the recheck plan-state tree, built by
+    /// `EvalPlanQualStart`'s `ExecInitNode(planTree, recheckestate)` and run by
+    /// `EvalPlanQualNext`'s `ExecProcNode`. `None` = EPQ not started.
+    pub recheckplanstate: Option<PgBox<'mcx, PlanStateNode<'mcx>>>,
+    /// Owned-model only: a PARENT-estate slot into which `EvalPlanQual` copies
+    /// the recheck-plan output, so the slot it returns is addressable in the
+    /// caller's (parent) EState (C returns the recheck-estate slot directly,
+    /// valid by pointer; the owned `SlotId` is estate-local). `None` until first
+    /// use; created lazily with the recheck output's tuple descriptor.
+    pub epq_parent_result_slot: Option<SlotId>,
 }
 
 /// An opaque handle to a genuinely AM/extension-opaque object the executor

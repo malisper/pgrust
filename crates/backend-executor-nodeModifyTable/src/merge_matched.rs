@@ -605,11 +605,22 @@ pub fn ExecMergeMatched<'mcx>(
 
                 TM_Result::TM_Updated => {
                     // The target tuple was concurrently updated by some other
-                    // transaction. If we are currently processing a MATCHED
-                    // action, use EvalPlanQual() with the new version of the
-                    // tuple and recheck the join qual, to detect a change from
-                    // the MATCHED to the NOT MATCHED cases. If we are already
-                    // processing a NOT MATCHED BY SOURCE action, we skip this.
+                    // transaction. The full MERGE EvalPlanQual recheck (re-fetch
+                    // the latest version, recheck the join qual, possibly switch
+                    // MATCHED → NOT MATCHED BY SOURCE, then retry the action on
+                    // the *new* version) needs the target `tupleid` to advance to
+                    // the locked version through the whole `lmerge_matched` retry
+                    // — a threading the owned MERGE driver does not yet do, so the
+                    // retry would re-lock the old TID and loop forever. Until the
+                    // MERGE EPQ tid-advance leg lands, raise a clean serialization
+                    // error rather than spin (the plain UPDATE/DELETE EPQ paths
+                    // are complete; this only affects concurrent MERGE).
+                    if true {
+                        return Err(PgError::error(
+                            "could not serialize access due to concurrent update",
+                        )
+                        .with_sqlstate(ERRCODE_T_R_SERIALIZATION_FAILURE));
+                    }
                     //   was_matched = relaction->mas_action->matchKind == MERGE_WHEN_MATCHED;
                     let was_matched = action_match_kind == MERGE_WHEN_MATCHED;
                     let rti = estate.result_rel(result_rel_info).ri_RangeTableIndex;

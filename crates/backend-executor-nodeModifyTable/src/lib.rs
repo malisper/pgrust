@@ -445,6 +445,36 @@ pub fn init_seams() {
         )
     });
 
+    // `table_tuple_lock(rel, tid, snapshot, slot, cid, mode, wait, flags, tmfd)`
+    // for the DELETE EPQ recheck path (delete_exec).
+    delete_exec::table_tuple_lock::set(
+        |estate, rri, tid, snapshot, slot, cid, mode, wait, find_last_version, tmfd| {
+            let rel = crate::exec::relation_alias(estate, rri);
+            let mcx = estate.es_query_cxt;
+            let flags = if find_last_version {
+                types_tableam::tableam::TUPLE_LOCK_FLAG_FIND_LAST_VERSION
+            } else {
+                0
+            };
+            // delete_exec's local LockWaitPolicy mirror → the tableam enum.
+            let wait = match wait {
+                delete_exec::LockWaitPolicy::LockWaitBlock => {
+                    types_tableam::tableam::LockWaitPolicy::LockWaitBlock
+                }
+                delete_exec::LockWaitPolicy::LockWaitSkip => {
+                    types_tableam::tableam::LockWaitPolicy::LockWaitSkip
+                }
+                delete_exec::LockWaitPolicy::LockWaitError => {
+                    types_tableam::tableam::LockWaitPolicy::LockWaitError
+                }
+            };
+            let inslot = estate.slot_data_mut(slot);
+            backend_access_table_tableam::table_tuple_lock(
+                mcx, &rel, tid, &snapshot, inslot, cid, mode, wait, flags, tmfd,
+            )
+        },
+    );
+
     // Same fetch, used by the DELETE ... RETURNING path (delete_exec).
     delete_exec::table_tuple_fetch_row_version_any::set(|estate, rri, tid, slot| {
         let rel = crate::exec::relation_alias(estate, rri);
@@ -593,6 +623,32 @@ fn install_delete_seams() {
     // `ExecGetReturningSlot(estate, relinfo)` (execMain.c).
     de::exec_get_returning_slot::set(|estate, rri| {
         backend_executor_execMain_seams::exec_get_returning_slot::call(estate, rri)
+    });
+
+    // EvalPlanQual machinery (execMain.c), routed onto `mtstate.mt_epqstate`.
+    // `EvalPlanQualBegin` is a no-op here: `EvalPlanQual` (below) runs Begin
+    // internally, and `EvalPlanQualSlot` needs only `EvalPlanQualInit` (already
+    // done at ExecInitModifyTable), so the separate Begin call before the lock
+    // is redundant in the owned model (Begin also needs the parent estate, which
+    // this `(mtstate)`-only seam does not carry).
+    de::eval_plan_qual_begin::set(|_mtstate| Ok(()));
+    de::eval_plan_qual_slot::set(|estate, mtstate, rri, rti| {
+        backend_executor_execMain_seams::eval_plan_qual_slot::call(
+            estate,
+            &mut mtstate.mt_epqstate,
+            rri,
+            rti,
+        )
+    });
+    de::eval_plan_qual::set(|estate, mtstate, rri, inputslot| {
+        let rti = estate.result_rel(rri).ri_RangeTableIndex;
+        backend_executor_execMain_seams::eval_plan_qual::call(
+            estate,
+            &mut mtstate.mt_epqstate,
+            rri,
+            rti,
+            inputslot,
+        )
     });
 
     // `ExecLookupResultRelByOid` (nodeModifyTable.c) is homed in this crate

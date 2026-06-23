@@ -268,6 +268,12 @@ pub fn ExecDelete<'mcx>(
         return Ok(None);
     }
 
+    // The effective TID being deleted. The plain-table EPQ retry loop advances
+    // it to the latest row version (mirroring C's `*tupleid` writeback inside
+    // table_tuple_lock); the post-delete Epilogue + RETURNING fetch then use the
+    // version that was actually deleted.
+    let mut latest_tid: Option<ItemPointerData> = tupleid.copied();
+
     // INSTEAD OF ROW DELETE Triggers
     if ri_has_instead_delete_row::call(estate, result_rel_info) {
         // Assert(oldtuple != NULL);
@@ -320,11 +326,13 @@ pub fn ExecDelete<'mcx>(
         //
         // C label `ldelete:` is reached again only on the TM_Updated→TM_Ok
         // retry, so this is a loop.
-        let tupleid = tupleid.expect("ExecDelete: heap delete requires a TID");
+        // `tupleid` is updated to the latest row version on each EPQ retry (C
+        // updates `*tupleid` inside `table_tuple_lock` with FIND_LAST_VERSION).
+        let mut cur_tid = *tupleid.expect("ExecDelete: heap delete requires a TID");
         loop {
             // result = ExecDeleteAct(context, resultRelInfo, tupleid, changingPart);
             let result =
-                ExecDeleteAct(context, estate, result_rel_info, tupleid, changing_part)?;
+                ExecDeleteAct(context, estate, result_rel_info, &cur_tid, changing_part)?;
 
             // if (tmresult) *tmresult = result;
             if let Some(tr) = tmresult.as_deref_mut().map(|r| &mut *r) {
@@ -371,7 +379,7 @@ pub fn ExecDelete<'mcx>(
                     let lock_result = table_tuple_lock::call(
                         estate,
                         result_rel_info,
-                        tupleid,
+                        &cur_tid,
                         snapshot,
                         inputslot,
                         estate.es_output_cid,
@@ -385,6 +393,13 @@ pub fn ExecDelete<'mcx>(
                     match lock_result {
                         TM_Result::TM_Ok => {
                             debug_assert!(context.tmfd.traversed);
+                            // C's table_tuple_lock updates *tupleid to the latest
+                            // locked version; the owned lock leaves it in the
+                            // slot's tts_tid. Copy it back so the `ldelete` retry
+                            // deletes the new version (else it re-locks the old
+                            // TID → TM_Updated forever).
+                            cur_tid = estate.slot(inputslot).tts_tid;
+                            latest_tid = Some(cur_tid);
                             let epqslot = eval_plan_qual::call(
                                 estate,
                                 mtstate,
@@ -487,7 +502,7 @@ pub fn ExecDelete<'mcx>(
         mtstate,
         estate,
         result_rel_info,
-        tupleid,
+        latest_tid.as_ref().or(tupleid),
         oldtuple.clone(),
         changing_part,
     )?;
@@ -517,7 +532,10 @@ pub fn ExecDelete<'mcx>(
                     estate, rslot, formed, false,
                 )?;
             } else {
-                let tupleid = tupleid.expect("DELETE RETURNING fetch requires a TID");
+                let tupleid = latest_tid
+                    .as_ref()
+                    .or(tupleid)
+                    .expect("DELETE RETURNING fetch requires a TID");
                 if !table_tuple_fetch_row_version_any::call(
                     estate,
                     result_rel_info,
